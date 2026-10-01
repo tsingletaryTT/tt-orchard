@@ -19,10 +19,47 @@ ALLOW = [
     "rm {run}/out.txt",
     "echo hi > {run}/out.txt",
     "cd {run}/sub; rm -rf cache",
+    # ordinary agent commands: failing closed must not make the runner unusable
+    "git commit -m 'x'",
+    "git log --oneline -n 5",
+    "git diff HEAD~1",
+    "pytest -q tests/",
+    "python3 -m pytest tests/test_x.py -q",
+    "ls | grep x",
+    "cd {run}/sub && make",
+    'echo "a b" > {run}/f',
+    "grep '#' file",
+    "cmd 2>&1 | tail -5",
+    "ls # a comment",
+    "ls &>/dev/null",
+    "echo ${HOME}",
+    "false || echo no",
+    "sleep 1 &",
+    "printf 'a\\nb\\n' | wc -l",
+    "tt-smi -s > {run}/snap.json 2>&1",
+    "tt-smi -h",
+    "timeout 10 pytest -q",
+    "nice -n 5 make -j4",
+    "env FOO=1 pytest -q",
+    "sudo -n ls",
+    "gozer run --chips 1 --who x --reason y -- pytest -q",
+    "gozer status",
+    "bash -c 'echo hi'",
+    "rm -rf {run}/build",
+    "cd /; ls",
+    "cd / | cat; rm foo",
+    "echo a#; ls",
+    "ls # tt-smi -r and git push, inside a comment",
+    "ls # a comment\nls",
+    "ls # it's a comment with (parens), {braces} and more text",
+    "git \\\n  status",
 ]
 
 DENY = {
     "tt-model-push": [
+        'setsid tt-model push x',
+        'env -i tt-model push x',
+    
         "tt-model push episod/x",
         "/usr/local/bin/tt-model push .",
         "sudo tt-model push x",
@@ -38,6 +75,31 @@ DENY = {
     ],
     "tt-model-publish": ["tt-model publish episod/x"],
     "git-push": [
+        'ls # note\ngit push',
+        'echo a#; git push',
+        "bash -lc 'git push'",
+        "sh -ec 'git push'",
+        "bash --norc -c 'git push'",
+        'env -i A=1 git push',
+        'sudo -E git push',
+        'sudo --user bob git push',
+        'timeout --signal KILL 5 git push',
+        'nice --adjustment 5 git push',
+        'exec -a x git push',
+        'command -p git push',
+        'nohup git push &',
+        'setsid git push',
+        'g\\it push',
+        '"git" push',
+        'git "push"',
+        'git \\\npush',
+        'git -c alias.p=push p',
+        'git subtree push --prefix x origin main',
+        '/usr/lib/git-core/git-push origin',
+        'ls | xargs git push',
+        'git push # trailing comment',
+        "cd /; bash -c 'git push'",
+    
         "git push",
         "git -C /tmp/x push origin main",
         "git -c user.name=a push",
@@ -45,9 +107,31 @@ DENY = {
         "/usr/bin/git push --force",
     ],
     "gh-repo-create": ["gh repo create foo --public", "gh --hostname x repo create foo"],
-    "hf-upload": ["hf upload a b", "huggingface-cli upload a b"],
-    "tt-smi-reset": ["tt-smi -r", "tt-smi -r 0,1", "tt-smi --reset", "sudo tt-smi -r", "tt-smi -r0"],
+    "hf-upload": [
+        'hf upload-large-folder r d',
+        'huggingface-cli upload-large-folder r d',
+    "hf upload a b", "huggingface-cli upload a b"],
+    "tt-smi-reset": [
+        'gozer run --chips 1 -- tt-smi -r',
+        'tt-smi --res',
+        'tt-smi --r',
+        'tt-smi -sr',
+        'gozer run --chips 1 --who a -- sudo tt-smi --reset',
+    "tt-smi -r", "tt-smi -r 0,1", "tt-smi --reset", "sudo tt-smi -r", "tt-smi -r0"],
     "rm-outside-run-dir": [
+        "cd /; bash -c 'rm -rf home'",
+        'env -C / rm -rf home',
+        'sudo -D / rm -rf home',
+        'sudo --chdir=/ rm -rf home',
+        'cd /; pushd {run}; popd; rm -rf home',
+        'rm -rf -- /home',
+        'rm -r /x --no-preserve-root',
+        'cd {run}/missing; rm ../x',
+        'cd / || cd {run}; rm -rf home',
+        'cd {run}/sub && cd /; rm foo',
+        'cd {run}/sub; cd ..; cd ..; rm x',
+        'pushd {run}/sub; rm x',
+    
         "rm -rf /home/someone/.cache/x",
         "rm {run}/../escaped",
         "rm -rf $HOME/cache",
@@ -60,9 +144,62 @@ DENY = {
         "unlink /tmp/x",
     ],
     "rm-ledger": ["rm {run}/ledger.jsonl", "rm -f {run}/ledger*"],
-    "rm-xargs": ["find . -name x | xargs rm", "ls | xargs -n 1 rm -rf"],
+    "rm-xargs": [
+        'ls | xargs --max-args 1 rm -rf',
+        "find x | xargs sh -c 'rm -rf x'",
+    "find . -name x | xargs rm", "ls | xargs -n 1 rm -rf"],
+    "symlink-with-delete": [
+        "ln -s / {run}/l; rm -rf {run}/l/home",
+        "ln -sf / {run}/l && rm {run}/l/x",
+        "ln --symbolic / {run}/l; rm {run}/l/x",
+    ],
+    "unsupported-syntax": [
+        "eval 'git push'",
+        "echo 'git push' | bash",
+        "echo a | sh",
+        "bash <<< 'git push'",
+        "cat <<EOF\nx\nEOF",
+        "bash script.sh",
+        "bash script.sh -c 'ls'",
+        "sh",
+        "{ git push; }",
+        "function f { ls; }",
+        "if true; then git push; fi",
+        "for i in 1; do git push; done",
+        "while true; do :; done",
+        "case x in y) ls;; esac",
+        "[[ -f x ]]",
+        "! git push",
+        "env -S 'git push'",
+        "G=git; $G push",
+        "git $X push",
+        "tt-model p*",
+        "rm -rf {/home,x}",
+        "cd /tmp; (cd {run}); rm -rf foo",
+        "(git push)",
+        "find / -name x -exec rm -rf {} +",
+        "find . -delete",
+        "source x.sh",
+        ". x.sh",
+        "trap 'git push' EXIT",
+        "exec >log",
+        "coproc ls",
+        "echo $'\\x67it'",
+        "echo 'unterminated",
+        'echo "unterminated',
+        "sudo --wat git push",
+        "timeout --wat 5 ls",
+        "gozer run --chips 1 git push",
+        "GIT_CONFIG_COUNT=1 git status",
+    ],
     "substitution": ["echo $(date)", "echo `date`", "diff <(ls) <(ls)"],
 }
+
+
+def _fill(cmd, run_dir):
+    """Put the run directory in place of {run}. Not str.format, because several commands under test
+    contain literal braces (brace expansion, `find -exec ... {}`)."""
+    return cmd.replace("{run}", str(run_dir))
 
 
 @pytest.fixture
@@ -74,19 +211,31 @@ def run_dir(tmp_path):
 
 @pytest.mark.parametrize("cmd", ALLOW)
 def test_allowed_commands_pass(cmd, run_dir):
-    check_string(cmd.format(run=run_dir), run_dir)
+    check_string(_fill(cmd, run_dir), run_dir)
 
 
 @pytest.mark.parametrize(
     "rule,cmd", [(r, c) for r, cmds in DENY.items() for c in cmds])
 def test_denied_commands_name_their_rule(rule, cmd, run_dir):
     with pytest.raises(Denied) as exc:
-        check_string(cmd.format(run=run_dir), run_dir)
+        check_string(_fill(cmd, run_dir), run_dir)
     assert exc.value.rule == rule
 
 
 def test_every_rule_has_denied_examples():
-    assert {name for name, _ in RULES} | {"substitution"} == set(DENY)
+    assert {name for name, _ in RULES} | {
+        "substitution", "unsupported-syntax", "symlink-with-delete"} == set(DENY)
+
+
+def test_cd_follows_dotdot_textually_like_bash(run_dir):
+    """`cd link/..` leaves the link's parent (bash's logical rule), not the link target's parent.
+    With a link to a directory two levels down, the shell ends in run/, so `rm ../x` is outside."""
+    (run_dir / "sub" / "deep").mkdir()
+    (run_dir / "l").symlink_to(run_dir / "sub" / "deep")
+    check_string(f"cd {run_dir}/l/..; rm x", run_dir)
+    with pytest.raises(Denied) as exc:
+        check_string(f"cd {run_dir}/l/..; rm ../x", run_dir)
+    assert exc.value.rule == "rm-outside-run-dir"
 
 
 def test_run_argv_executes_allowed_and_refuses_denied(run_dir):
