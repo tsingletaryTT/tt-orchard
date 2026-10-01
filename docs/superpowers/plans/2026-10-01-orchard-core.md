@@ -800,8 +800,10 @@ RULES = [
     ("gh-repo-create", _gh_repo_create),
     ("hf-upload", _hf_upload),
     ("tt-smi-reset", _tt_smi_reset),
-    ("rm-outside-run-dir", _rm_outside_run_dir),
+    # rm-ledger comes before rm-outside-run-dir on purpose: a glob such as `{run}/ledger*` expands in
+    # the run directory itself, which the outside rule also refuses. The more specific name wins.
     ("rm-ledger", _rm_ledger),
+    ("rm-outside-run-dir", _rm_outside_run_dir),
     ("rm-xargs", _rm_xargs),
 ]
 
