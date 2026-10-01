@@ -6,7 +6,13 @@ successor, so a change to it alone cannot be detected. The chain covers every li
 
 A line only counts once its trailing newline is on disk. Opening the ledger sets aside any bytes
 after the last newline (a write cut off by a crash) in a `.torn-<time>` file next to the ledger.
-Nothing is deleted.
+Nothing is deleted: each recovery writes its own sidecar, created exclusively so it can never
+replace an earlier one.
+
+If an append fails partway (disk full, I/O error), the file is cut back to where it was before
+the attempt, so the next append cannot merge with a half-written line. If even that cut fails, the
+writer refuses all further appends. After close() the ledger refuses appends, because the lock
+is gone.
 
 The current state of a run is computed from the ledger by `replay_state`. No other state file
 exists, so nothing can disagree with the ledger.
@@ -60,9 +66,19 @@ class Ledger:
             raise LedgerLocked(f"another process holds {self.path}") from None
         self._seq = 0
         self._prev = GENESIS
-        self._recover()
+        self._closed = False
+        self._broken = False  # set if a failed append could not be undone
+        try:
+            self._recover()
+        except BaseException:
+            # __init__ is failing, so the caller never gets an object to close. Release the
+            # lock here, or a retry in the same process would report LedgerLocked.
+            self._lock_file.close()
+            raise
 
     def close(self) -> None:
+        # Safe to call twice. Appends after this point are refused (see append).
+        self._closed = True
         self._lock_file.close()
 
     def __enter__(self):
@@ -84,8 +100,19 @@ class Ledger:
             torn = raw[good_end:]
             if torn:
                 # Keep the cut-off bytes for a person to inspect, then drop them from the chain.
-                sidecar = self.path.with_name(f"{self.path.name}.torn-{int(time.time())}")
-                sidecar.write_bytes(torn)
+                # Nanosecond name plus exclusive create ("xb"): two recoveries in the same
+                # instant get different files, and an existing sidecar is never overwritten.
+                stamp = time.time_ns()
+                n = 0
+                while True:
+                    suffix = "" if n == 0 else f"-{n}"
+                    sidecar = self.path.with_name(f"{self.path.name}.torn-{stamp}{suffix}")
+                    try:
+                        with open(sidecar, "xb") as sf:
+                            sf.write(torn)
+                        break
+                    except FileExistsError:
+                        n += 1
                 with open(self.path, "r+b") as f:
                     f.truncate(good_end)
                     f.flush()
@@ -111,6 +138,10 @@ class Ledger:
         return entries
 
     def append(self, event: str, stage: int | None = None, **data) -> dict:
+        if self._closed:
+            raise ValueError("ledger is closed; the lock is released, so writing is not safe")
+        if self._broken:
+            raise ValueError("ledger writer is unusable after a failed append; reopen it")
         if event not in EVENTS:
             raise ValueError(f"unknown ledger event {event!r}")
         if event == "measurement" and data.get("label") not in LABELS:
@@ -125,9 +156,19 @@ class Ledger:
         }
         line = json.dumps(entry, sort_keys=True, separators=(",", ":"))
         with open(self.path, "ab") as f:
-            f.write(line.encode("utf-8") + b"\n")
-            f.flush()
-            os.fsync(f.fileno())  # the entry exists only once this returns
+            start = f.tell()  # append mode: tell() is the file size before this write
+            try:
+                f.write(line.encode("utf-8") + b"\n")
+                f.flush()
+                os.fsync(f.fileno())  # the entry exists only once this returns
+            except BaseException:
+                # Some or all of the line may be in the file while _seq and _prev still
+                # describe the old tail. Cut back so the next append starts clean.
+                try:
+                    f.truncate(start)
+                except OSError:
+                    self._broken = True
+                raise
         self._seq += 1
         self._prev = _digest(line)
         return entry

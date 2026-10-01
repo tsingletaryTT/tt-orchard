@@ -137,3 +137,59 @@ def test_file_evidence_hashes_content(tmp_path):
     ev = file_evidence(f)
     assert ev["sha256"] == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
     assert ev["path"] == str(f)
+
+
+# ---- fix round 1: lock hygiene, failed appends, use after close, sidecar names ----
+
+def test_failed_open_releases_the_lock(tmp_path):
+    path = tmp_path / "ledger.jsonl"
+    path.write_text("not json\n")
+    # Keep the first exception alive: its traceback holds the half-built Ledger, which would
+    # otherwise be garbage-collected and hide a leaked lock.
+    with pytest.raises(LedgerCorrupt) as first:
+        Ledger(path)
+    # A retry in the same process must see the corruption again, not a stale lock.
+    with pytest.raises(LedgerCorrupt):
+        Ledger(path)
+
+
+def test_failed_append_leaves_the_ledger_writable(tmp_path, monkeypatch):
+    import os
+    path = tmp_path / "ledger.jsonl"
+    real_fsync = os.fsync
+    calls = {"n": 0}
+
+    def flaky_fsync(fd):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("disk full")  # the line is already in the file when this fires
+        real_fsync(fd)
+
+    with Ledger(path) as led:
+        led.append("run_start")
+        monkeypatch.setattr(os, "fsync", flaky_fsync)
+        with pytest.raises(OSError):
+            led.append("stage_start", 0)
+        led.append("stage_start", 0)  # must not merge with the failed line
+        assert [e["seq"] for e in led.read()] == [1, 2]
+    Ledger(path).close()  # and the file still verifies on reopen
+
+
+def test_append_after_close_is_refused(tmp_path):
+    led = Ledger(tmp_path / "ledger.jsonl")
+    led.close()
+    led.close()  # closing twice is harmless
+    with pytest.raises(ValueError):
+        led.append("run_start")
+
+
+def test_two_recoveries_in_one_instant_keep_both_sidecars(tmp_path, monkeypatch):
+    import orchard.ledger as mod
+    monkeypatch.setattr(mod.time, "time_ns", lambda: 1234)
+    path = tmp_path / "ledger.jsonl"
+    for tail in (b"first-cut", b"second-cut"):
+        with open(path, "ab") as f:
+            f.write(tail)
+        Ledger(path).close()
+    contents = sorted(p.read_bytes() for p in tmp_path.glob("ledger.jsonl.torn-*"))
+    assert contents == [b"first-cut", b"second-cut"]
