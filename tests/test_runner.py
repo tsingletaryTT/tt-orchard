@@ -371,6 +371,21 @@ def test_redirect_at_end_of_text_is_refused_for_its_own_reason(cmd, run_dir):
     assert exc.value.rule == "unsupported-syntax"
 
 
+def test_rm_after_losing_the_directory_says_so_and_how_to_proceed(run_dir):
+    # `false && cd` may not have run, so the runner no longer knows where `rm ../x` points.
+    with pytest.raises(Denied, match="lost track of the current directory") as exc:
+        check_string(_fill("false && cd {run}/sub; rm ../x", run_dir), run_dir)
+    assert exc.value.rule == "rm-outside-run-dir"
+    assert "To proceed: use an absolute path inside the run directory" in str(exc.value)
+
+
+def test_rm_outside_with_a_known_directory_does_not_claim_a_lost_one(run_dir):
+    with pytest.raises(Denied) as exc:
+        check_string(_fill("cd {run}/sub; rm ../../x", run_dir), run_dir)
+    assert exc.value.rule == "rm-outside-run-dir"
+    assert "lost track" not in str(exc.value)
+
+
 def test_every_rule_has_denied_examples():
     assert {name for name, _ in RULES} | {
         "substitution", "unsupported-syntax", "symlink-with-delete", "redirect-ledger"} == set(DENY)

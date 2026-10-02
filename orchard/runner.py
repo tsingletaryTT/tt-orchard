@@ -645,6 +645,19 @@ def _rm_outside_run_dir(name, argv, ctx):
     return False
 
 
+LOST_DIRECTORY_DETAIL = (
+    "the runner lost track of the current directory (after &&, ||, | or &, a command that may "
+    "change directories, popd, or a cd target it could not resolve), so it cannot tell where a "
+    "relative path points. To proceed: use an absolute path inside the run directory")
+
+
+def _rm_has_unplaceable_relative_path(argv, ctx):
+    """True when the directory is unknown and an rm operand is relative, so the directory is why
+    the rule refused. An absolute or `$` operand is refused on its own account, not for this."""
+    return ctx.cwd is None and any(
+        "$" not in a and not os.path.isabs(os.path.expanduser(a)) for a in _operands(argv))
+
+
 def _rm_ledger(name, argv, ctx):
     return name in DELETERS and any(
         os.path.basename(a).startswith("ledger") for a in _operands(argv))
@@ -822,7 +835,10 @@ def _check_argv_inner(argv, run_dir, cwd, st, via_xargs_in, before):
               via_xargs=via_xargs)
     for rule_name, deny in RULES:
         if deny(name, unwrapped, ctx):
-            raise Denied(rule_name, " ".join(argv), RULE_DETAIL.get(rule_name, ""))
+            detail = RULE_DETAIL.get(rule_name, "")
+            if rule_name == "rm-outside-run-dir" and _rm_has_unplaceable_relative_path(unwrapped, ctx):
+                detail = LOST_DIRECTORY_DETAIL
+            raise Denied(rule_name, " ".join(argv), detail)
 
     stable_before = st.fs_stable
     if name not in BENIGN:
