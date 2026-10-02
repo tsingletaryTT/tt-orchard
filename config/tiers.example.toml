@@ -14,7 +14,10 @@ endpoint = "http://127.0.0.1:8001/v1"
 model = "CHANGE-ME"
 placement = "cpu"
 
-# Stage owner. "diagnose" is the tier that takes over when the run tier escalates.
+# Stage owner. "run" is the tier that does the work. "diagnose" is the tier that takes over
+# when the run tier escalates; stages 2, 3 and 4 need one. Stage 4 also needs "plan", the tier
+# that plans ("large plans, small runs", spec section 5); no other stage may have one.
+# Stage 7 builds the image with no model loaded, so it has none of these.
 [stages.0]
 run = "large"
 [stages.1]
@@ -27,6 +30,7 @@ run = "small"
 diagnose = "large"
 [stages.4]
 run = "small"
+plan = "large"
 diagnose = "large"
 [stages.5]
 run = "small"
@@ -36,3 +40,7 @@ run = "small"
 run = "none"
 [stages.8]
 run = "small"
+
+# The tier that takes over when a stage with no diagnose tier (0, 1, 5, 6, 8) escalates.
+[escalation]
+default = "large"

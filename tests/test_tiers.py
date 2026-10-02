@@ -29,6 +29,7 @@ run = "small"
 diagnose = "large"
 [stages.4]
 run = "small"
+plan = "large"
 diagnose = "large"
 [stages.5]
 run = "small"
@@ -38,6 +39,9 @@ run = "small"
 run = "none"
 [stages.8]
 run = "small"
+
+[escalation]
+default = "large"
 """
 
 EXAMPLE_PATH = Path(__file__).resolve().parent.parent / "config" / "tiers.example.toml"
@@ -100,7 +104,7 @@ def test_missing_required_tier_key(tmp_path, line, key):
 
 def test_stage_without_run_key_rejected(tmp_path):
     """A stage table with no run key gets the clear 'missing run' message."""
-    text = GOOD.replace('[stages.1]\nrun = "small"', '[stages.1]\nnote = "x"')
+    text = GOOD.replace('[stages.1]\nrun = "small"', '[stages.1]\ndiagnose = "large"')
     with pytest.raises(TierConfigError, match="stage 1 is missing run"):
         load(write(tmp_path, text))
 
@@ -123,6 +127,8 @@ def test_example_config_loads_when_edited(tmp_path):
     cfg = load(write(tmp_path, text))
     assert "large" in cfg.tiers
     assert "small" in cfg.tiers
+    assert cfg.stages[4]["plan"] == "large"
+    assert cfg.escalation == "large"
 
 
 # File access and parsing errors wrapped in TierConfigError
@@ -561,7 +567,7 @@ def test_stage_3_requires_diagnose(tmp_path):
 
 def test_stage_4_requires_diagnose(tmp_path):
     """Stage 4 must have diagnose (small runs, large diagnoses)."""
-    text = GOOD.replace('[stages.4]\nrun = "small"\ndiagnose = "large"', '[stages.4]\nrun = "small"')
+    text = GOOD.replace('[stages.4]\nrun = "small"\nplan = "large"\ndiagnose = "large"', '[stages.4]\nrun = "small"\nplan = "large"')
     with pytest.raises(TierConfigError, match="stage 4"):
         load(write(tmp_path, text))
 
@@ -579,3 +585,95 @@ def test_tier_cannot_be_named_none(tmp_path):
     text = GOOD.replace('[tiers.large]', '[tiers.none]')
     with pytest.raises(TierConfigError, match="none"):
         load(write(tmp_path, text))
+
+
+# ---- final review: unknown keys, stage 4 `plan`, and the [escalation] table ----
+
+def test_stage_4_requires_plan(tmp_path):
+    """Spec section 5: stage 4 is 'large plans, small runs', so it must name its planning tier."""
+    text = GOOD.replace('plan = "large"\n', '', 1)
+    with pytest.raises(TierConfigError, match="stage 4 must have a plan tier"):
+        load(write(tmp_path, text))
+
+
+def test_plan_is_allowed_only_on_stage_4(tmp_path):
+    text = GOOD.replace('[stages.3]\nrun = "small"', '[stages.3]\nrun = "small"\nplan = "large"')
+    with pytest.raises(TierConfigError, match="stage 3 must not have a plan tier"):
+        load(write(tmp_path, text))
+
+
+def test_stage_7_forbids_plan(tmp_path):
+    text = GOOD.replace('[stages.7]\nrun = "none"', '[stages.7]\nrun = "none"\nplan = "large"')
+    with pytest.raises(TierConfigError, match="stage 7 must not have a plan tier"):
+        load(write(tmp_path, text))
+
+
+def test_plan_must_name_a_defined_tier(tmp_path):
+    text = GOOD.replace('plan = "large"', 'plan = "nobody"')
+    with pytest.raises(TierConfigError, match="stage 4: plan tier 'nobody' is not defined"):
+        load(write(tmp_path, text))
+
+
+def test_plan_must_be_a_string(tmp_path):
+    text = GOOD.replace('plan = "large"', 'plan = 3')
+    with pytest.raises(TierConfigError, match="stage 4 plan must be a string"):
+        load(write(tmp_path, text))
+
+
+def test_escalation_table_is_required(tmp_path):
+    text = GOOD.replace('[escalation]\ndefault = "large"\n', '')
+    with pytest.raises(TierConfigError, match=r"\[escalation\] table is required"):
+        load(write(tmp_path, text))
+
+
+def test_escalation_default_must_name_a_defined_tier(tmp_path):
+    text = GOOD.replace('default = "large"', 'default = "nobody"')
+    with pytest.raises(TierConfigError, match=r"\[escalation\] default tier 'nobody' is not defined"):
+        load(write(tmp_path, text))
+
+
+def test_escalation_needs_a_default(tmp_path):
+    text = GOOD.replace('default = "large"\n', '')
+    with pytest.raises(TierConfigError, match=r"\[escalation\] is missing 'default'"):
+        load(write(tmp_path, text))
+
+
+def test_escalation_default_must_be_a_string(tmp_path):
+    text = GOOD.replace('default = "large"', 'default = 1')
+    with pytest.raises(TierConfigError, match=r"\[escalation\] default must be a string"):
+        load(write(tmp_path, text))
+
+
+def test_escalation_must_be_a_table(tmp_path):
+    text = GOOD.replace('[escalation]\ndefault = "large"\n', '')
+    with pytest.raises(TierConfigError, match=r"\[escalation\] must be a table"):
+        load(write(tmp_path, 'escalation = "large"\n' + text))
+
+
+def test_escalation_refuses_unknown_keys(tmp_path):
+    text = GOOD.replace('default = "large"', 'default = "large"\ndefualt = "small"')
+    with pytest.raises(TierConfigError, match=r"\[escalation\] has unknown key 'defualt'"):
+        load(write(tmp_path, text))
+
+
+@pytest.mark.parametrize("old,new,needle", [
+    ('role = "plan and diagnose"', 'role = "plan and diagnose"\ncontext_token = 1',
+     "tier 'large' has unknown key 'context_token'; did you mean 'context_tokens'"),
+    ('role = "plan and diagnose"', 'role = "plan and diagnose"\nzzz = 1',
+     "tier 'large' has unknown key 'zzz'; allowed keys are"),
+    ('[stages.2]\nrun = "small"\ndiagnose = "large"', '[stages.2]\nrun = "small"\ndiagnos = "large"',
+     "stage 2 has unknown key 'diagnos'; did you mean 'diagnose'"),
+    ('[stages.1]\nrun = "small"', '[stages.1]\nrun = "small"\nzzz = 1',
+     "stage 1 has unknown key 'zzz'; allowed keys are"),
+])
+def test_unknown_tier_and_stage_keys_are_refused(tmp_path, old, new, needle):
+    assert old in GOOD
+    with pytest.raises(TierConfigError, match=needle):
+        load(write(tmp_path, GOOD.replace(old, new, 1)))
+
+
+def test_unknown_top_level_table_is_refused(tmp_path):
+    with pytest.raises(TierConfigError, match="the config has unknown top-level key 'escalations'; did you mean 'escalation'"):
+        load(write(tmp_path, GOOD + '\n[escalations]\ndefault = "large"\n'))
+    with pytest.raises(TierConfigError, match="the config has unknown top-level key 'extra'; allowed keys are"):
+        load(write(tmp_path, GOOD + '\n[extra]\nx = 1\n'))

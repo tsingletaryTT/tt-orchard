@@ -6,6 +6,7 @@ somewhere unintended: a remote endpoint, an unedited example, or a stage nobody 
 """
 from __future__ import annotations
 
+import difflib
 import re
 import tomllib
 from dataclasses import dataclass
@@ -15,10 +16,14 @@ STAGES = range(9)                 # stages 0..8 in the spec
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}  # IPv6 loopback is ::1 only
 PLACEMENTS = {"chips", "cpu"}
 REQUIRED_TIER_KEYS = ("role", "endpoint", "model", "placement")
+TIER_KEYS = set(REQUIRED_TIER_KEYS) | {"context_tokens"}
+STAGE_KEYS = {"run", "diagnose", "plan"}
+TOP_LEVEL_KEYS = {"tiers", "stages", "escalation"}
 SENTINEL = "CHANGE-ME"            # example config values; a run must not start on them
 NO_MODEL_STAGE = 7                # image build: the supervisor waits and no model is loaded
-STAGES_REQUIRING_DIAGNOSE = {2, 3, 4}  # small runs, large diagnoses
-STAGE_FORBIDDING_DIAGNOSE = {7}   # no model is loaded
+STAGES_REQUIRING_DIAGNOSE = {2, 3, 4}  # a small tier runs them; a larger one takes over on escalation
+PLAN_STAGE = 4                    # "large plans, small runs" (spec section 5): only stage 4 plans
+NO_MODEL_STAGES = {7}             # no model is loaded, so neither diagnose nor plan applies
 
 
 class TierConfigError(ValueError):
@@ -31,6 +36,14 @@ class TierConfig:
     """Loaded tier config: tiers map to roles and models, stages map to tier assignments."""
     tiers: dict[str, dict]
     stages: dict[int, dict]
+    escalation: str   # tier that takes over when a stage with no diagnose tier escalates
+
+
+def _unknown_key_message(where: str, key, allowed, noun: str = "key") -> str:
+    """Say which key is not recognised and, when one is close, which key was probably meant."""
+    close = difflib.get_close_matches(str(key), sorted(allowed), n=1)
+    tail = f"did you mean {close[0]!r}?" if close else f"allowed keys are {sorted(allowed)}"
+    return f"{where} has unknown {noun} {key!r}; {tail}"
 
 
 def _contains_sentinel(value):
@@ -43,7 +56,10 @@ def load(path) -> TierConfig:
 
     Raises TierConfigError if the file cannot be read, parsed, or contains invalid values.
     All checks validate that runs stay local: endpoints must be on this machine, no sentinel
-    values remain in the config, and stages 2/3/4 have a diagnose tier for safe fallback.
+    values remain in the config, stages 2/3/4 have a diagnose tier, stage 4 names the tier that
+    plans, and the [escalation] table names the tier that takes over when any other stage
+    escalates. Keys the loader does not know are refused, so a typo cannot silently turn a
+    setting off.
     """
     # Read and parse the file, wrapping all errors in TierConfigError.
     try:
@@ -53,6 +69,11 @@ def load(path) -> TierConfig:
         raise TierConfigError(f"cannot read {path!r}: {e}") from e
     except tomllib.TOMLDecodeError as e:
         raise TierConfigError(f"cannot parse {path!r}: {e}") from e
+
+    # A misspelled top-level table would otherwise be ignored and its settings silently lost.
+    for key in raw:
+        if key not in TOP_LEVEL_KEYS:
+            raise TierConfigError(_unknown_key_message("the config", key, TOP_LEVEL_KEYS, "top-level key"))
 
     # Extract tiers and stages, validating their types.
     tiers_raw = raw.get("tiers", {})
@@ -88,6 +109,11 @@ def load(path) -> TierConfig:
         for key in REQUIRED_TIER_KEYS:
             if key not in tier:
                 raise TierConfigError(f"tier {name!r} is missing {key!r}")
+
+        # Refuse keys the loader does not read: `context_token = 1` would otherwise be ignored.
+        for key in tier:
+            if key not in TIER_KEYS:
+                raise TierConfigError(_unknown_key_message(f"tier {name!r}", key, TIER_KEYS))
 
         # Validate role: non-empty string, no sentinel.
         role = tier["role"]
@@ -159,6 +185,10 @@ def load(path) -> TierConfig:
         if not isinstance(stage, dict):
             raise TierConfigError(f"stage {n} must be a table, not {type(stage).__name__}")
 
+        for key in stage:
+            if key not in STAGE_KEYS:
+                raise TierConfigError(_unknown_key_message(f"stage {n}", key, STAGE_KEYS))
+
         # Validate run: string and either "none" (stage 7 only) or a defined tier.
         run = stage.get("run")
         if run is None:
@@ -176,22 +206,46 @@ def load(path) -> TierConfig:
             if run not in tiers:
                 raise TierConfigError(f"stage {n}: run tier {run!r} is not defined")
 
-        # Validate diagnose if present: string and a defined tier.
-        if "diagnose" in stage:
-            diagnose = stage["diagnose"]
-            if not isinstance(diagnose, str):
-                raise TierConfigError(f"stage {n} diagnose must be a string, not {type(diagnose).__name__}")
-            if diagnose not in tiers:
-                raise TierConfigError(f"stage {n}: diagnose tier {diagnose!r} is not defined")
+        # Validate diagnose and plan if present: a string naming a defined tier.
+        for key in ("diagnose", "plan"):
+            if key in stage:
+                value = stage[key]
+                if not isinstance(value, str):
+                    raise TierConfigError(f"stage {n} {key} must be a string, not {type(value).__name__}")
+                if value not in tiers:
+                    raise TierConfigError(f"stage {n}: {key} tier {value!r} is not defined")
 
-        # Enforce stage-specific diagnose rules.
-        if n in STAGES_REQUIRING_DIAGNOSE:
-            # Stages 2, 3, 4: must have diagnose (small runs, large diagnoses).
-            if "diagnose" not in stage:
-                raise TierConfigError(f"stage {n} must have a diagnose tier (small runs, large diagnoses)")
-        elif n in STAGE_FORBIDDING_DIAGNOSE:
-            # Stage 7: no model is loaded, so no diagnose.
-            if "diagnose" in stage:
-                raise TierConfigError(f"stage {n} must not have a diagnose tier (no model is loaded)")
+        # Enforce stage-specific rules.
+        if n in NO_MODEL_STAGES:
+            # Stage 7: no model is loaded, so it names no diagnose or plan tier.
+            for key in ("diagnose", "plan"):
+                if key in stage:
+                    raise TierConfigError(f"stage {n} must not have a {key} tier (no model is loaded)")
+        else:
+            if n in STAGES_REQUIRING_DIAGNOSE and "diagnose" not in stage:
+                raise TierConfigError(
+                    f"stage {n} must have a diagnose tier (the tier that takes over when it escalates)")
+            if n == PLAN_STAGE and "plan" not in stage:
+                raise TierConfigError(f"stage {n} must have a plan tier (large plans, small runs)")
+            if n != PLAN_STAGE and "plan" in stage:
+                raise TierConfigError(f"stage {n} must not have a plan tier (only stage {PLAN_STAGE} plans)")
 
-    return TierConfig(tiers=tiers, stages=stages)
+    # [escalation] names the tier that takes over when a stage with no diagnose tier escalates.
+    if "escalation" not in raw:
+        raise TierConfigError("the [escalation] table is required: it names the tier that takes over "
+                              "when a stage with no diagnose tier escalates")
+    escalation = raw["escalation"]
+    if not isinstance(escalation, dict):
+        raise TierConfigError(f"[escalation] must be a table, not {type(escalation).__name__}")
+    for key in escalation:
+        if key != "default":
+            raise TierConfigError(_unknown_key_message("[escalation]", key, {"default"}))
+    if "default" not in escalation:
+        raise TierConfigError("[escalation] is missing 'default'")
+    default = escalation["default"]
+    if not isinstance(default, str):
+        raise TierConfigError(f"[escalation] default must be a string, not {type(default).__name__}")
+    if default not in tiers:
+        raise TierConfigError(f"[escalation] default tier {default!r} is not defined")
+
+    return TierConfig(tiers=tiers, stages=stages, escalation=escalation["default"])
