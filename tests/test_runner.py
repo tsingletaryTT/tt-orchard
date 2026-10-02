@@ -226,6 +226,8 @@ DENY = {
         "ln --symbolic / {run}/l; rm {run}/l/x",
     ],
     "unsupported-syntax": [
+        "zsh -c 'ls'",
+        "zsh script.sh",
         "bash -zc 'ls'",
         "bash -c -z 'ls'",
         "git ${X} push",
@@ -380,7 +382,9 @@ def test_cd_follows_dotdot_textually_like_bash(run_dir):
     ("echo $'x'", "$'"),
     ("bash script.sh", "script"),
     ("echo a | bash", "-c"),
-    ("csh -c ls", "bash, sh, dash and zsh"),
+    ("csh -c ls", "only bash, sh and dash command strings"),
+    ("zsh -c ls", "shell zsh"),
+    ("zsh script.sh", "shell zsh"),
     ("echo $(date)", "command substitution"),
     ("$X push", "variable"),
 ])

@@ -16,11 +16,12 @@ refusal names the construct and says how to rewrite the command.
   chrt, flock and `gozer run ... --`, which are stripped before the rules look at the real
   command. A wrapper given an option it does not know is refused.
 
-  Shells: bash, sh, dash and zsh are accepted only with a command string (`-c`, alone or in a
+  Shells: bash, sh and dash are accepted only with a command string (`-c`, alone or in a
   cluster such as `-lc`, with bash's option grammar parsed so the string the runner checks is
   the string bash runs). The string, and flock's `-c`/`--command` string, are checked in turn in
   the current directory. A shell with no command string (stdin, a script path) is refused, so
-  piping into a shell is refused. csh, tcsh, fish and ksh are refused: they are not lexed here.
+  piping into a shell is refused. csh, tcsh, fish, ksh and zsh are refused: they are not lexed here, and zsh
+  has expansions that bash lacks.
 
   Refused as unsupported: shell keywords and builtins that run commands or change how later
   commands resolve (if, for, while, case, function, eval, source, `.`, trap, `!`, `[[`, coproc,
@@ -91,9 +92,11 @@ def _unsupported(command, construct: str, hint: str = DEFAULT_HINT) -> Denied:
 
 
 # Shells whose `-c` strings are lexed with the rules below. Other shells have different quoting and
-# grammar, so they are refused rather than misread.
-SHELLS = {"bash", "sh", "dash", "zsh"}
-REFUSED_SHELLS = {"csh", "tcsh", "fish", "ksh"}
+# grammar, so they are refused rather than misread. zsh is refused too: it has expansions bash lacks
+# (for example `=cmd`, `**/` and `(#q)` globs), so the words the lexer sees can differ from the
+# words zsh runs.
+SHELLS = {"bash", "sh", "dash"}
+REFUSED_SHELLS = {"csh", "tcsh", "fish", "ksh", "zsh"}
 
 # Words that, in command position, run other commands or change how the line is parsed or how later
 # commands resolve. Wrappers that are understood (time, command, exec, ...) are in WRAPPERS.
@@ -789,7 +792,7 @@ def _check_argv_inner(argv, run_dir, cwd, st, via_xargs_in, before):
 
     if name in REFUSED_SHELLS:
         raise _unsupported(argv, f"shell {name}",
-                           "only bash, sh, dash and zsh command strings are understood; use bash -c")
+                           "only bash, sh and dash command strings are understood; use bash -c")
     if name in SHELLS:
         string = _shell_command_string(unwrapped)
         # Recurse in the CURRENT directory; a cd inside it does not leak out to the caller.
