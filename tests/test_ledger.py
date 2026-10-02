@@ -209,7 +209,7 @@ def test_malformed_content_raises_ledger_corrupt_and_frees_the_lock(tmp_path, co
     path.write_bytes(content)
     with pytest.raises(LedgerCorrupt, match=needle) as first:  # held so a leaked lock is not hidden
         Ledger(path)
-    # A second open must fail for the same reason, not with LedgerLocked.
+    # A second open must fail with the same LedgerCorrupt; LedgerLocked would mean a leaked lock.
     with pytest.raises(LedgerCorrupt, match=needle):
         Ledger(path)
     path.write_bytes(b"")
