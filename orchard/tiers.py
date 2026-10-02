@@ -6,6 +6,7 @@ somewhere unintended: a remote endpoint, an unedited example, or a stage nobody 
 """
 from __future__ import annotations
 
+import re
 import tomllib
 from dataclasses import dataclass
 from urllib.parse import urlparse
@@ -36,7 +37,7 @@ def _contains_sentinel(value):
     """Check if value contains CHANGE-ME (case-insensitive, as substring)."""
     if not isinstance(value, str):
         return False
-    return "CHANGE-ME".lower() in value.lower()
+    return SENTINEL.lower() in value.lower()
 
 
 def load(path) -> TierConfig:
@@ -46,46 +47,36 @@ def load(path) -> TierConfig:
     All checks validate that runs stay local: endpoints must be on this machine, no sentinel
     values remain in the config, and stages 2/3/4 have a diagnose tier for safe fallback.
     """
-    # Read and parse the file, wrapping errors in TierConfigError.
+    # Read and parse the file, wrapping all errors in TierConfigError.
     try:
         with open(path, "rb") as f:
             raw = tomllib.load(f)
-    except FileNotFoundError as e:
+    except (OSError, UnicodeDecodeError) as e:
         raise TierConfigError(f"cannot read {path!r}: {e}") from e
     except tomllib.TOMLDecodeError as e:
         raise TierConfigError(f"cannot parse {path!r}: {e}") from e
 
     # Extract tiers and stages, validating their types.
-    try:
-        tiers_raw = raw.get("tiers", {})
-        if not isinstance(tiers_raw, dict):
-            raise TierConfigError(f"tiers must be a table, not {type(tiers_raw).__name__}")
-        tiers = tiers_raw
-    except (AttributeError, TypeError) as e:
-        raise TierConfigError(f"tiers must be a table: {e}") from e
+    tiers_raw = raw.get("tiers", {})
+    if not isinstance(tiers_raw, dict):
+        raise TierConfigError(f"tiers must be a table, not {type(tiers_raw).__name__}")
+    tiers = tiers_raw
 
-    try:
-        stages_raw = raw.get("stages", {})
-        if not isinstance(stages_raw, dict):
-            raise TierConfigError(f"stages must be a table, not {type(stages_raw).__name__}")
-        # Validate stage keys: must be valid stage numbers (decimal digits, no leading zeros).
-        stages = {}
-        seen_numbers = {}
-        for k, v in stages_raw.items():
-            # Check that the key is a valid decimal integer representation.
-            if not isinstance(k, str) or not k.isdigit() or (len(k) > 1 and k[0] == '0'):
-                raise TierConfigError(f"stage key {k!r} must be a decimal integer (0-8), no leading zeros")
-            try:
-                n = int(k)
-            except ValueError as e:
-                raise TierConfigError(f"stage key {k!r} is not a valid integer: {e}") from e
-            # Detect collisions: "+1" and "1" both become 1 after int().
-            if n in seen_numbers:
-                raise TierConfigError(f"stage {n} appears multiple times (as {k!r} and {seen_numbers[n]!r})")
-            seen_numbers[n] = k
-            stages[n] = v
-    except (AttributeError, TypeError) as e:
-        raise TierConfigError(f"stages must be a table: {e}") from e
+    stages_raw = raw.get("stages", {})
+    if not isinstance(stages_raw, dict):
+        raise TierConfigError(f"stages must be a table, not {type(stages_raw).__name__}")
+
+    # Validate stage keys: must be exactly decimal digits (0-8), no leading zeros unless "0".
+    stages = {}
+    for k, v in stages_raw.items():
+        # Check that the key matches the decimal format: "0" through "8" only, no "+1", " 1", "٨", etc.
+        if not isinstance(k, str) or not re.fullmatch(r"[0-9]+", k) or (len(k) > 1 and k[0] == '0'):
+            raise TierConfigError(f"stage key {k!r} must be a decimal integer (0-8), no leading zeros")
+        n = int(k)
+        # Check that stage number is in the valid range.
+        if n not in STAGES:
+            raise TierConfigError(f"stage {n} is outside the valid range 0-8")
+        stages[n] = v
 
     # Validate tier definitions.
     if "none" in tiers:
@@ -136,7 +127,7 @@ def load(path) -> TierConfig:
             if host not in LOCAL_HOSTS:
                 raise TierConfigError(
                     f"tier {name!r}: endpoint host {host!r} is not on this machine; runs use local models only")
-        except (AttributeError, TypeError) as e:
+        except (AttributeError, TypeError, ValueError) as e:
             raise TierConfigError(f"tier {name!r}: endpoint is not a valid URL: {e}") from e
 
         # Validate placement: string and in allowed set.

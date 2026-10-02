@@ -70,13 +70,25 @@ def test_good_config_loads(tmp_path):
 ])
 def test_bad_configs_are_refused(tmp_path, old, new, why):
     assert old in GOOD, why  # the edit must hit something, or the case proves nothing
-    with pytest.raises(TierConfigError):
+    match_patterns = {
+        "remote": "endpoint.*not on this machine",
+        "sentinel": "CHANGE-ME",
+        "placement": "placement",
+        "missing key": "missing",
+        "stage missing": "stage 8",
+        "stage 7 must be none": "stage 7.*none",
+        "only stage 7 may be none": "stage 5",
+        "unknown tier": "run tier.*not defined",
+        "unknown diagnose tier": "diagnose tier.*not defined",
+        "context must be positive": "context_tokens",
+    }
+    with pytest.raises(TierConfigError, match=match_patterns.get(why, why)):
         load(write(tmp_path, GOOD.replace(old, new, 1)))
 
 
 def test_a_cpu_tier_is_required(tmp_path):
     text = GOOD.replace('placement = "cpu"', 'placement = "chips"')
-    with pytest.raises(TierConfigError):
+    with pytest.raises(TierConfigError, match="placement 'cpu'"):
         load(write(tmp_path, text))
 
 
@@ -105,6 +117,44 @@ def test_invalid_toml_raises_tierconfigerror(tmp_path):
     p = write(tmp_path, "[tiers.bad\n")  # unclosed bracket
     with pytest.raises(TierConfigError, match="parse"):
         load(p)
+
+
+def test_non_utf8_file_raises_tierconfigerror(tmp_path):
+    """Non-UTF-8 file raises TierConfigError."""
+    p = tmp_path / "tiers.toml"
+    p.write_bytes(b"\xff\xfe")  # Invalid UTF-8
+    with pytest.raises(TierConfigError, match="cannot read"):
+        load(p)
+
+
+def test_directory_path_raises_tierconfigerror(tmp_path):
+    """Directory path raises TierConfigError (IsADirectoryError)."""
+    with pytest.raises(TierConfigError, match="cannot read"):
+        load(tmp_path)
+
+
+def test_invalid_ipv6_url_raises_tierconfigerror(tmp_path):
+    """Invalid IPv6 URL raises TierConfigError."""
+    text = GOOD.replace('endpoint = "http://127.0.0.1:8000/v1"', 'endpoint = "http://[::1/v1"')
+    with pytest.raises(TierConfigError, match="endpoint.*not a valid URL"):
+        load(write(tmp_path, text))
+
+
+def test_stage_key_non_ascii_digit_rejected(tmp_path):
+    """Non-ASCII digit in quoted stage key should be rejected."""
+    # Arabic-Indic digit eight (٨)
+    text = """
+[tiers.large]
+role = "r"
+endpoint = "http://127.0.0.1:8000"
+model = "m"
+placement = "cpu"
+
+[stages]
+"٨" = { run = "large" }
+"""
+    with pytest.raises(TierConfigError, match="decimal integer"):
+        load(write(tmp_path, text))
 
 
 # Type validation: tiers and stages must be tables
@@ -200,16 +250,16 @@ def test_stage_key_with_leading_zeros_rejected(tmp_path):
 
 
 def test_stage_key_with_plus_sign_rejected(tmp_path):
-    """Stage key like +1 should be rejected."""
-    text = GOOD.replace('[stages.0]', '[stages.+1]')
-    with pytest.raises(TierConfigError, match="stage"):
+    """Stage key like "+1" (quoted) should be rejected."""
+    text = GOOD.replace('[stages.0]', '[stages]\n"+1" = { run = "large" }')
+    with pytest.raises(TierConfigError, match="decimal integer"):
         load(write(tmp_path, text))
 
 
 def test_stage_key_with_space_rejected(tmp_path):
-    """Stage key like ' 1' should be rejected."""
-    text = GOOD.replace('[stages.0]', '[stages. 1]')
-    with pytest.raises(TierConfigError, match="stage"):
+    """Stage key like " 1" (quoted with leading space) should be rejected."""
+    text = GOOD.replace('[stages.0]', '[stages]\n" 1" = { run = "large" }')
+    with pytest.raises(TierConfigError, match="decimal integer"):
         load(write(tmp_path, text))
 
 
@@ -221,9 +271,24 @@ def test_stage_key_non_numeric_rejected(tmp_path):
 
 
 def test_stage_number_out_of_range_high(tmp_path):
-    """Stage 9 is out of range (0-8 only)."""
-    text = GOOD.replace('[stages.8]', '[stages.9]')
-    with pytest.raises(TierConfigError, match="stage"):
+    """Stage numbers outside 0-8 are out of range."""
+    # Add stages 9 and 99 in addition to GOOD (do not replace stage 8)
+    text = GOOD + '\n[stages.9]\nrun = "small"\n'
+    with pytest.raises(TierConfigError, match="stage 9.*0-8"):
+        load(write(tmp_path, text))
+
+
+def test_stage_number_99_out_of_range(tmp_path):
+    """Stage 99 is out of range (0-8 only)."""
+    text = GOOD + '\n[stages.99]\nrun = "small"\n'
+    with pytest.raises(TierConfigError, match="stage 99.*0-8"):
+        load(write(tmp_path, text))
+
+
+def test_stage_number_negative_quoted_rejected(tmp_path):
+    """Negative stage number "-1" (quoted) should be rejected."""
+    text = GOOD + '\n[stages]\n"-1" = { run = "small" }\n'
+    with pytest.raises(TierConfigError, match="decimal integer"):
         load(write(tmp_path, text))
 
 
@@ -434,20 +499,6 @@ def test_stage_7_forbids_diagnose(tmp_path):
         load(write(tmp_path, text))
 
 
-def test_stage_0_can_omit_diagnose(tmp_path):
-    """Stages other than 2/3/4 can omit diagnose."""
-    # Stage 0 in GOOD doesn't have diagnose, so GOOD should load
-    cfg = load(write(tmp_path, GOOD))
-    assert cfg.stages[0] == {"run": "large"}
-
-
-def test_stage_5_can_omit_diagnose(tmp_path):
-    """Stages other than 2/3/4 can omit diagnose."""
-    # Stage 5 in GOOD doesn't have diagnose, so GOOD should load
-    cfg = load(write(tmp_path, GOOD))
-    assert cfg.stages[5] == {"run": "small"}
-
-
 # Tier naming
 def test_tier_cannot_be_named_none(tmp_path):
     """A tier cannot be named 'none' (reserved word)."""
@@ -456,8 +507,8 @@ def test_tier_cannot_be_named_none(tmp_path):
         load(write(tmp_path, text))
 
 
-def test_run_can_be_none_for_stage_7_only(tmp_path):
-    """run = 'none' is valid but only for stage 7."""
-    # GOOD has run = "none" for stage 7, should load
+def test_stage_7_run_must_be_none_positive_test(tmp_path):
+    """Stage 7 run = 'none' is valid; GOOD proves the property."""
     cfg = load(write(tmp_path, GOOD))
     assert cfg.stages[7]["run"] == "none"
+    assert "diagnose" not in cfg.stages[7]
