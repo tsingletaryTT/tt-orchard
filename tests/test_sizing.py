@@ -26,6 +26,18 @@ class Fake(BaseHTTPRequestHandler):
 
     def do_POST(self):
         self.server.seen = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        if self.server.misbehave == "truncate":
+            # Promise 1000 bytes, send 4, close: the client's read raises IncompleteRead.
+            self.send_response(200)
+            self.send_header("Content-Length", "1000")
+            self.end_headers()
+            self.wfile.write(b'{"a"')
+            self.close_connection = True
+            return
+        if self.server.misbehave == "badstatus":
+            self.wfile.write(b"NOT HTTP AT ALL\r\n\r\n")  # a status line http.client rejects
+            self.close_connection = True
+            return
         if self.server.hang_up:
             self.close_connection = True  # no reply at all: the client sees the connection drop
             return
@@ -50,6 +62,7 @@ def fake():
     server.raw = None     # raw bytes to send instead of JSON
     server.delay = 0      # seconds to wait before answering /api/generate
     server.ps_delay = 0   # seconds to wait before answering /api/ps
+    server.misbehave = None  # "truncate" or "badstatus" for malformed /api/generate replies
     server.hang_up = False  # close the connection without answering /api/generate
     # A short poll interval keeps server.shutdown() from waiting half a second per test.
     threading.Thread(target=server.serve_forever, args=(0.01,), daemon=True).start()
@@ -128,11 +141,15 @@ def test_zero_durations_give_no_rate_instead_of_dividing_by_zero(fake):
     assert r["prefill_tok_s"] is None and r["decode_tok_s"] is None
 
 
-def test_zero_token_counts_give_no_rate(fake):
-    fake.generate_reply["prompt_eval_count"] = 0
+def test_zero_decode_count_with_a_duration_is_a_rate_of_zero(fake):
+    # Nothing was generated in a measured time: that is 0.0 tokens per second, not "unknown".
     fake.generate_reply["eval_count"] = 0
-    r = measure(host(fake), "m:1", "hello")
-    assert r["prefill_tok_s"] is None and r["decode_tok_s"] is None
+    assert measure(host(fake), "m:1", "hello")["decode_tok_s"] == 0.0
+
+
+def test_zero_prefill_count_gives_no_prefill_rate(fake):
+    fake.generate_reply["prompt_eval_count"] = 0
+    assert measure(host(fake), "m:1", "hello")["prefill_tok_s"] is None
 
 
 def test_missing_eval_fields_give_no_decode_rate(fake):
@@ -315,9 +332,10 @@ def test_cli_timeout_flag_reaches_the_request(fake, tmp_path, capsys):
     assert "did not answer within 0.2 seconds" in capsys.readouterr().err
 
 
-def test_cli_closes_the_ledger_when_a_measurement_fails(tmp_path, monkeypatch):
-    # Hold a reference to the Ledger main() opens: dropping the last reference would let the
-    # garbage collector close it, which would hide a missing close().
+def test_cli_closes_the_ledger_when_a_measurement_fails(fake, tmp_path, monkeypatch):
+    # Keep a reference to the Ledger main() opens: dropping the last reference would let the
+    # garbage collector close it and hide a missing close(). While main()'s Ledger stays alive,
+    # reopening the path only works if main() released the lock.
     opened = []
     real = Ledger
 
@@ -326,14 +344,23 @@ def test_cli_closes_the_ledger_when_a_measurement_fails(tmp_path, monkeypatch):
         opened.append(led)
         return led
 
+    orig = sizing.measure
+    calls = []
+
+    def flaky(h, model, *a, **k):
+        calls.append(model)
+        if len(calls) == 2:
+            raise sizing.SizingError("boom")
+        return orig(h, model, *a, **k)
+
     monkeypatch.setattr(sizing, "Ledger", tracking)
-    prompt = tmp_path / "p.txt"
-    prompt.write_text("hello")
-    rc = main(["--host", "http://127.0.0.1:1", "--model", "m:1", "--prompt-file", str(prompt),
-               "--ledger", str(tmp_path / "l.jsonl")])
-    assert rc == 1
-    (led,) = opened
-    assert led._closed is True
+    monkeypatch.setattr(sizing, "measure", flaky)
+    ledger = tmp_path / "l.jsonl"
+    assert run_cli(fake, tmp_path, "--ledger", str(ledger), models=("m:1", "m:2")) == 1
+    assert len(opened) == 1
+    with real(ledger) as led:  # raises LedgerLocked if main() left the lock held
+        (entry,) = led.read()
+    assert entry["data"]["model"] == "m:1"
 
 
 def test_cli_keeps_earlier_results_when_a_later_model_fails(fake, tmp_path, capsys, monkeypatch):
@@ -349,7 +376,8 @@ def test_cli_keeps_earlier_results_when_a_later_model_fails(fake, tmp_path, caps
         return orig(h, model, *a, **k)
 
     monkeypatch.setattr(sizing, "measure", flaky)
-    rc = run_cli(fake, tmp_path, "--ledger", str(ledger), models=("m:1", "m:2"))
+    rc = run_cli(fake, tmp_path, "--ledger", str(ledger), "--num-predict", "100",
+                 models=("m:1", "m:2"))
     assert rc == 1 and capsys.readouterr().err == "sizing: boom\n"
     with Ledger(ledger) as led:
         (entry,) = led.read()
@@ -387,3 +415,210 @@ def test_cli_does_not_open_a_ledger_when_none_is_asked_for(fake, tmp_path, monke
 
     monkeypatch.setattr(sizing, "Ledger", forbidden)
     assert run_cli(fake, tmp_path) == 0
+
+
+# ---- resident-size name matching ----
+
+def test_name_without_tag_matches_a_latest_entry(fake, capsys):
+    fake.ps_reply = {"models": [{"name": "qwen3:latest", "size": 5}]}
+    assert measure(host(fake), "qwen3", "hello", num_predict=100)["resident_bytes"] == 5
+    assert capsys.readouterr().err == ""
+
+
+def test_name_with_latest_matches_an_untagged_entry(fake):
+    fake.ps_reply = {"models": [{"name": "qwen3", "size": 6}]}
+    assert measure(host(fake), "qwen3:latest", "hello")["resident_bytes"] == 6
+
+
+def test_latest_normalisation_also_applies_to_the_model_field(fake):
+    fake.ps_reply = {"models": [{"name": "alias", "model": "qwen3:latest", "size": 8}]}
+    assert measure(host(fake), "qwen3", "hello")["resident_bytes"] == 8
+
+
+def test_absent_model_warns_naming_what_ollama_lists(fake, capsys):
+    fake.ps_reply = {"models": [{"name": "other:2", "size": 5}, {"model": "third:1", "size": 6}]}
+    r = measure(host(fake), "m:1", "hello", num_predict=100)
+    assert r["resident_bytes"] is None
+    assert capsys.readouterr().err == (
+        "sizing: warning: model m:1 is not in ollama's /api/ps list (lists: other:2, third:1); "
+        "resident_bytes recorded as null\n")
+
+
+def test_absent_model_with_an_empty_list_says_nothing_is_loaded(fake, capsys):
+    fake.ps_reply = {"models": []}
+    measure(host(fake), "m:1", "hello", num_predict=100)
+    assert "(lists: nothing)" in capsys.readouterr().err
+
+
+# ---- decode completeness ----
+
+def test_done_reason_length_marks_the_decode_complete(fake, capsys):
+    fake.generate_reply["done_reason"] = "length"  # 100 tokens < num_predict 128, but length-capped
+    r = measure(host(fake), "m:1", "hello", num_predict=128)
+    assert r["done_reason"] == "length" and r["decode_complete"] is True
+    assert capsys.readouterr().err == ""
+
+
+def test_stop_with_fewer_tokens_than_num_predict_is_a_short_decode(fake, capsys):
+    fake.generate_reply["done_reason"] = "stop"
+    r = measure(host(fake), "m:1", "hello", num_predict=128)
+    assert r["done_reason"] == "stop" and r["decode_complete"] is False
+    assert capsys.readouterr().err == (
+        "sizing: warning: decode rate came from a short run (100 of 128 tokens, done_reason stop); "
+        "the prompt may need to be longer\n")
+
+
+def test_token_count_reaching_num_predict_marks_the_decode_complete(fake):
+    r = measure(host(fake), "m:1", "hello", num_predict=100)
+    assert r["done_reason"] is None and r["decode_complete"] is True
+
+
+def test_missing_decode_count_is_not_a_complete_decode(fake):
+    del fake.generate_reply["eval_count"]
+    assert measure(host(fake), "m:1", "hello", num_predict=100)["decode_complete"] is False
+
+
+# ---- cold load and cached prefill labels ----
+
+def test_load_over_the_threshold_is_cold(fake):
+    assert measure(host(fake), "m:1", "hello")["load_cold"] is True
+
+
+def test_load_under_the_threshold_is_not_cold(fake):
+    fake.generate_reply["load_duration"] = 100_000_000  # 0.1 s: the model was already resident
+    r = measure(host(fake), "m:1", "hello")
+    assert r["load_cold"] is False and r["load_s"] == pytest.approx(0.1)
+
+
+def test_load_exactly_at_the_threshold_is_cold(fake):
+    assert sizing.COLD_LOAD_THRESHOLD_S == 0.5
+    fake.generate_reply["load_duration"] = 500_000_000
+    assert measure(host(fake), "m:1", "hello")["load_cold"] is True
+
+
+def test_unknown_load_time_leaves_load_cold_unknown(fake):
+    del fake.generate_reply["load_duration"]
+    assert measure(host(fake), "m:1", "hello")["load_cold"] is None
+
+
+def test_prompt_size_and_hash_are_recorded(fake):
+    import hashlib
+    r = measure(host(fake), "m:1", "hello")
+    assert r["prompt_chars"] == 5
+    assert r["prompt_sha256"] == hashlib.sha256(b"hello").hexdigest()
+
+
+def test_prompt_hash_counts_bytes_not_characters(fake):
+    import hashlib
+    r = measure(host(fake), "m:1", "h\u00e9")
+    assert r["prompt_chars"] == 2
+    assert r["prompt_sha256"] == hashlib.sha256("h\u00e9".encode("utf-8")).hexdigest()
+
+
+LONG_PROMPT = "x" * 400  # estimate: 400 / 4 = 100 tokens, so half is 50
+
+
+def test_prefill_count_near_the_estimate_is_a_real_prefill(fake):
+    fake.generate_reply["prompt_eval_count"] = 50  # exactly half of the estimate: still real
+    r = measure(host(fake), "m:1", LONG_PROMPT)
+    assert r["prefill_cached"] is False and r["prefill_tok_s"] == pytest.approx(100.0)
+
+
+def test_prefill_count_under_half_the_estimate_is_cached(fake):
+    fake.generate_reply["prompt_eval_count"] = 49
+    r = measure(host(fake), "m:1", LONG_PROMPT)
+    assert r["prefill_cached"] is True and r["prefill_tok_s"] is None
+    assert r["prompt_tokens"] == 49  # the count is still reported
+
+
+def test_missing_prefill_count_is_cached(fake):
+    del fake.generate_reply["prompt_eval_count"]
+    r = measure(host(fake), "m:1", LONG_PROMPT)
+    assert r["prefill_cached"] is True and r["prefill_tok_s"] is None
+
+
+# ---- MemAvailable ----
+
+def test_mem_available_is_read_in_bytes(tmp_path, monkeypatch):
+    meminfo = tmp_path / "meminfo"
+    meminfo.write_text("MemTotal:  100 kB\nMemAvailable:   2048 kB\nBuffers: 1 kB\n")
+    monkeypatch.setattr(sizing, "MEMINFO_PATH", str(meminfo))
+    assert sizing.mem_available_bytes() == 2048 * 1024
+
+
+def test_mem_available_is_none_when_the_file_is_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(sizing, "MEMINFO_PATH", str(tmp_path / "absent"))
+    assert sizing.mem_available_bytes() is None
+
+
+def test_mem_available_is_none_when_the_line_is_missing(tmp_path, monkeypatch):
+    meminfo = tmp_path / "meminfo"
+    meminfo.write_text("MemTotal:  100 kB\n")
+    monkeypatch.setattr(sizing, "MEMINFO_PATH", str(meminfo))
+    assert sizing.mem_available_bytes() is None
+
+
+def test_mem_available_is_none_when_the_value_is_malformed(tmp_path, monkeypatch):
+    meminfo = tmp_path / "meminfo"
+    meminfo.write_text("MemAvailable: lots kB\n")
+    monkeypatch.setattr(sizing, "MEMINFO_PATH", str(meminfo))
+    assert sizing.mem_available_bytes() is None
+
+
+def test_mem_available_is_none_when_the_value_is_missing(tmp_path, monkeypatch):
+    meminfo = tmp_path / "meminfo"
+    meminfo.write_text("MemAvailable:\n")
+    monkeypatch.setattr(sizing, "MEMINFO_PATH", str(meminfo))
+    assert sizing.mem_available_bytes() is None
+
+
+def test_measure_records_mem_available(fake, tmp_path, monkeypatch):
+    meminfo = tmp_path / "meminfo"
+    meminfo.write_text("MemAvailable: 10 kB\n")
+    monkeypatch.setattr(sizing, "MEMINFO_PATH", str(meminfo))
+    assert measure(host(fake), "m:1", "hello")["mem_available_bytes"] == 10 * 1024
+
+
+# ---- malformed replies (http.client exceptions) ----
+
+def test_truncated_body_raises_sizing_error(fake):
+    fake.misbehave = "truncate"
+    with pytest.raises(sizing.SizingError) as exc:
+        measure(host(fake), "m:1", "hello")
+    assert str(exc.value).endswith("/api/generate sent a malformed or truncated reply (IncompleteRead)")
+
+
+def test_malformed_status_line_raises_sizing_error(fake):
+    fake.misbehave = "badstatus"
+    with pytest.raises(sizing.SizingError) as exc:
+        measure(host(fake), "m:1", "hello")
+    assert str(exc.value).endswith("/api/generate sent a malformed or truncated reply (BadStatusLine)")
+
+
+def test_cli_truncated_reply_exits_1_without_a_traceback(fake, tmp_path, capsys):
+    fake.misbehave = "truncate"
+    assert run_cli(fake, tmp_path) == 1
+    err = capsys.readouterr().err
+    assert err.startswith("sizing: ") and err.count("\n") == 1 and "Traceback" not in err
+
+
+# ---- CLI: ledger fields and help text ----
+
+def test_cli_ledger_entry_records_prompt_identity_and_free_memory(fake, tmp_path):
+    import hashlib
+    ledger = tmp_path / "ledger.jsonl"
+    assert run_cli(fake, tmp_path, "--ledger", str(ledger)) == 0
+    with Ledger(ledger) as led:
+        (entry,) = led.read()
+    d = entry["data"]
+    assert d["prompt_chars"] == 5
+    assert d["prompt_sha256"] == hashlib.sha256(b"hello").hexdigest()
+    assert "mem_available_bytes" in d and d["load_cold"] is True and d["prefill_cached"] is False
+
+
+def test_help_says_load_time_needs_a_cold_run_and_timeout_is_per_request(capsys):
+    with pytest.raises(SystemExit):
+        main(["--help"])
+    text = " ".join(capsys.readouterr().out.split())
+    assert "load_s is only meaningful for a cold first run" in text
+    assert "applies to each request" in text and "longer in total" in text

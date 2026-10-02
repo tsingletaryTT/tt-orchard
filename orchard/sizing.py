@@ -9,18 +9,48 @@ cannot exceed memory bandwidth divided by the gigabytes read per token. A measur
 the ceiling points at compute or contention. The theoretical bandwidth is the DIMM rate times the bus
 width times the channels, and the real figure is lower.
 
-Failures a person can fix (server not running, HTTP error, bad JSON, timeout, unreadable prompt file,
-locked ledger) end the run with one line on stderr and exit code 1. They do not print a traceback.
+What a result means, so a number is not read as something it is not:
+  * load_s is only meaningful for a cold first run (the model was not already resident). load_cold
+    says whether the run looked cold. A warm run reports a tiny load time that says nothing about
+    how long a real cold start takes.
+  * prefill_tok_s needs a prompt ollama really processed. When ollama reused its prompt cache, the
+    token count is a small leftover and the rate is meaningless, so prefill_cached is True and
+    prefill_tok_s is None.
+  * decode_tok_s from a run that stopped early is a short sample. decode_complete says whether
+    generation reached num_predict (or ended on the length limit).
+  * prompt_chars and prompt_sha256 identify the prompt. Two measurements are comparable only when
+    these match.
+  * resident_bytes is None when ollama's /api/ps does not list the model. A warning on stderr
+    names what it does list.
+  * mem_available_bytes is the host's MemAvailable when the result was taken (spec section 12 asks
+    for free memory with the large model resident).
+
+Failures a person can fix (server not running, HTTP error, bad JSON or a truncated reply, timeout,
+unreadable prompt file, locked ledger) end the run with one line on stderr and exit code 1. They do not print a traceback.
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
+import http.client
 import json
 import sys
 import urllib.error
 import urllib.request
 
 from orchard.ledger import Ledger, LedgerCorrupt, LedgerLocked
+
+
+# A load under this many seconds means the model was already in memory, so load_s is not a cold
+# start. A real cold load from disk takes many seconds; a warm hit takes milliseconds.
+COLD_LOAD_THRESHOLD_S = 0.5
+
+# Rough characters per token for English text and code. Only used to notice a cached prompt:
+# if ollama counts fewer than half the tokens this estimate predicts, it did not process the prompt.
+CHARS_PER_TOKEN_ESTIMATE = 4
+
+# Where the host reports free memory. A module constant so tests can point it at a temp file.
+MEMINFO_PATH = "/proc/meminfo"
 
 
 class SizingError(Exception):
@@ -55,6 +85,10 @@ def _request(host: str, path: str, body: dict | None, timeout: float) -> dict:
         raise SizingError(f"{url} did not answer within {timeout} seconds") from exc
     except OSError as exc:
         raise SizingError(f"connection to {url} failed: {exc}") from exc
+    except http.client.HTTPException as exc:
+        # IncompleteRead (body shorter than Content-Length) and BadStatusLine are not OSError.
+        raise SizingError(
+            f"{url} sent a malformed or truncated reply ({type(exc).__name__})") from exc
     except ValueError as exc:  # json.JSONDecodeError and bad UTF-8 are both ValueError
         raise SizingError(f"{url} did not return valid JSON") from exc
     if not isinstance(reply, dict):
@@ -64,9 +98,26 @@ def _request(host: str, path: str, body: dict | None, timeout: float) -> dict:
 
 def _rate(count, duration_ns):
     """Tokens per second, or None when ollama did not report the pair."""
-    if not count or not duration_ns:
+    # A count of 0 with a duration is a real rate of 0.0 (nothing generated in a measured time).
+    if count is None or not duration_ns:
         return None
     return count / (duration_ns / 1e9)
+
+
+def mem_available_bytes() -> int | None:
+    """The host's MemAvailable in bytes, or None when it cannot be read."""
+    try:
+        with open(MEMINFO_PATH, encoding="ascii") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024  # the file reports kB
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def _warn(message: str) -> None:
+    print(f"sizing: warning: {message}", file=sys.stderr)
 
 
 def measure(host: str, model: str, prompt: str, num_predict: int = 128,
@@ -80,30 +131,62 @@ def measure(host: str, model: str, prompt: str, num_predict: int = 128,
     if "error" in reply:
         raise SizingError(f"ollama reported an error for {model}: {reply['error']}")
     running = _request(host, "/api/ps", None, timeout).get("models", [])
+    # ollama lists "qwen3:latest" even when asked for "qwen3", so accept either spelling.
+    wanted = {model, model[:-len(":latest")] if model.endswith(":latest") else model + ":latest"}
     resident = next((m.get("size") for m in running
-                     if model in (m.get("name"), m.get("model"))), None)
+                     if wanted & {m.get("name"), m.get("model")}), None)
+    if not any(wanted & {m.get("name"), m.get("model")} for m in running):
+        listed = ", ".join(m.get("name") or m.get("model") or "?" for m in running) or "nothing"
+        _warn(f"model {model} is not in ollama's /api/ps list (lists: {listed}); "
+              "resident_bytes recorded as null")
+
     load_ns = reply.get("load_duration")
+    load_s = None if load_ns is None else load_ns / 1e9  # None: ollama did not say
+    prompt_eval_count = reply.get("prompt_eval_count")
+    # A prompt ollama really processed has a token count near chars/4. Far fewer tokens, or no
+    # count at all, means it reused its prompt cache, and the rate would be a leftover divided by
+    # a leftover.
+    prefill_cached = (prompt_eval_count is None
+                      or prompt_eval_count < len(prompt) / CHARS_PER_TOKEN_ESTIMATE / 2)
+    decode_tokens = reply.get("eval_count")
+    done_reason = reply.get("done_reason")
+    decode_complete = done_reason == "length" or (
+        decode_tokens is not None and decode_tokens >= num_predict)
+    if not decode_complete:
+        _warn(f"decode rate came from a short run ({decode_tokens} of {num_predict} tokens, "
+              f"done_reason {done_reason}); the prompt may need to be longer")
     return {
         "model": model,
-        # None means ollama did not say. Reporting 0.0 would look like an instant load.
-        "load_s": None if load_ns is None else load_ns / 1e9,
-        "prompt_tokens": reply.get("prompt_eval_count"),
-        # ollama leaves the prompt fields out when it reused a cached prompt.
-        "prefill_tok_s": _rate(reply.get("prompt_eval_count"), reply.get("prompt_eval_duration")),
-        "decode_tokens": reply.get("eval_count"),
-        "decode_tok_s": _rate(reply.get("eval_count"), reply.get("eval_duration")),
+        "load_s": load_s,
+        "load_cold": None if load_s is None else load_s >= COLD_LOAD_THRESHOLD_S,
+        # Identify the prompt: two measurements are comparable only when these match.
+        "prompt_chars": len(prompt),
+        "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+        "prompt_tokens": prompt_eval_count,
+        "prefill_cached": prefill_cached,
+        "prefill_tok_s": None if prefill_cached else
+                         _rate(prompt_eval_count, reply.get("prompt_eval_duration")),
+        "decode_tokens": decode_tokens,
+        "decode_tok_s": _rate(decode_tokens, reply.get("eval_duration")),
+        "done_reason": done_reason,
+        "decode_complete": decode_complete,
         "resident_bytes": resident,
+        "mem_available_bytes": mem_available_bytes(),
     }
 
 
 def main(argv=None) -> int:
-    p = argparse.ArgumentParser(description="Measure a model served by a local ollama.")
+    p = argparse.ArgumentParser(
+        description="Measure a model served by a local ollama. Note: load_s is only meaningful "
+                    "for a cold first run (model not already resident); load_cold says whether "
+                    "this run looked cold.")
     p.add_argument("--host", default="http://127.0.0.1:11434")
     p.add_argument("--model", action="append", required=True, help="repeat for several models")
     p.add_argument("--prompt-file", required=True)
     p.add_argument("--num-predict", type=int, default=128)
     p.add_argument("--timeout", type=float, default=900,
-                   help="seconds to wait for each request; a cold CPU load can be slow")
+                   help="seconds to wait; applies to each request, so a multi-model run can take "
+                        "longer in total. A cold CPU load can be slow")
     p.add_argument("--mt-s", type=float, default=3600,
                    help="configured DIMM rate; the host reports 3600 (rated 5600)")
     p.add_argument("--gb-per-token", type=float,
