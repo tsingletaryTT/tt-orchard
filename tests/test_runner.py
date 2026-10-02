@@ -78,6 +78,7 @@ ALLOW = [
     "rm {run}/sub/*.log",
     "rm -rf {run}/sub/old*",
     "echo x > /tmp/not-judged.txt",
+    "echo x > 'a$b.txt'",
     "cd {run}/sub && make",
     "mkdir {run}/n && cd {run}/n",
     "echo a; cd {run}/sub; rm x",
@@ -310,6 +311,10 @@ DENY = {
         "echo x &> {run}/ledger.jsonl",
         "cd {run}; echo x > ledger.jsonl",
         "echo x >| {run}/ledger.jsonl",
+        # A target built from a variable or glob could be the ledger; the runner cannot tell.
+        "echo x > $F",
+        'echo x >> "$RUN/$NAME"',
+        "echo x > {run}/l*",
     ],
 }
 
@@ -338,6 +343,14 @@ def test_denied_commands_name_their_rule(rule, cmd, run_dir):
     with pytest.raises(Denied) as exc:
         check_string(_fill(cmd, run_dir), run_dir)
     assert exc.value.rule == rule
+
+
+@pytest.mark.parametrize("cmd", ["echo x > $F", 'echo x >> "$RUN/$NAME"', "echo x > {run}/l*"])
+def test_dynamic_redirect_target_says_why(cmd, run_dir):
+    with pytest.raises(Denied, match="built from a variable or glob, so the runner cannot tell "
+                                     "whether it is the ledger") as exc:
+        check_string(_fill(cmd, run_dir), run_dir)
+    assert exc.value.rule == "redirect-ledger"
 
 
 def test_every_rule_has_denied_examples():

@@ -35,8 +35,9 @@ refusal names the construct and says how to rewrite the command.
   `subtree push`, and `git-push`); gh repo create; hf/huggingface-cli upload* as the subcommand;
   any tt-smi reset spelling (long-option prefixes and clustered short flags included); and
   rm/rmdir/unlink outside the run directory, of a ledger file, with a glob directly in the run
-  directory root, or fed by xargs. A redirect whose target name starts with "ledger" is refused
-  (it would truncate the ledger). A string that makes a symbolic link and also deletes something
+  directory root, or fed by xargs. An output redirect whose target name starts with "ledger"
+  is refused (it would truncate the ledger), and so is one whose target has an unquoted glob or a
+  `$` outside single quotes (the runner cannot tell whether that name is the ledger). A string that makes a symbolic link and also deletes something
   is refused ("symlink-with-delete"), because the delete could go through the link. In the
   words of git, gh, hf, huggingface-cli, tt-model and tt-smi, an unquoted glob character or a `$`
   outside single quotes is refused, because it could change which subcommand runs.
@@ -244,20 +245,21 @@ def _lex(text: str):
     expect_target = False   # the previous token was a redirect, so the next word is its target
     target_is_output = False
     words: list[str] = []
-    redirs: list[str] = []
-    raw: list[tuple[list[str], str | None, list[str]]] = []
+    redirs: list[_Word] = []
+    raw: list[tuple[list[str], str | None, list[_Word]]] = []
 
     def end_word():
         nonlocal cur, in_word, quoted, dyn, expect_target
         if in_word:
-            word = "".join(cur)
+            w = _Word("".join(cur))
+            w.dynamic = dyn
             if expect_target:
                 expect_target = False   # a redirect target is a file name, not part of the command
                 if target_is_output:
-                    redirs.append(word)
+                    # Keep the _Word: the ledger check needs to know whether `$VAR` or a glob
+                    # could make this name something other than the text the runner sees.
+                    redirs.append(w)
             else:
-                w = _Word(word)
-                w.dynamic = dyn
                 words.append(w)
         cur, in_word, quoted, dyn = [], False, False, False
 
@@ -847,6 +849,11 @@ def _check_text(text, run_dir, cwd, st, via_xargs=False):
     commands = _lex(text)
     for _, _, _, redirs in commands:
         for target in redirs:
+            if target.dynamic:
+                # The rm rules refuse any `$` as an unknown path; a redirect needs the same care.
+                raise Denied("redirect-ledger", text,
+                             "the target is built from a variable or glob, so the runner cannot "
+                             "tell whether it is the ledger; write the file name out")
             if os.path.basename(target).startswith("ledger"):
                 raise Denied("redirect-ledger", text,
                              "a redirect to a ledger file would truncate it; "
