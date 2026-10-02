@@ -25,6 +25,8 @@ class Fake(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_POST(self):
+        # the raw request line: http.server rewrites a leading `//` in self.path
+        self.server.paths.append(self.requestline.split()[1])
         self.server.seen = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         if self.server.misbehave == "truncate":
             # Promise 1000 bytes, send 4, close: the client's read raises IncompleteRead.
@@ -45,6 +47,8 @@ class Fake(BaseHTTPRequestHandler):
         self._send(self.server.generate_reply, self.server.status, self.server.raw)
 
     def do_GET(self):
+        # the raw request line: http.server rewrites a leading `//` in self.path
+        self.server.paths.append(self.requestline.split()[1])
         time.sleep(self.server.ps_delay)
         self._send(self.server.ps_reply)
 
@@ -58,6 +62,7 @@ def fake():
         "eval_count": 100, "eval_duration": 2_000_000_000,
     }
     server.ps_reply = {"models": [{"name": "m:1", "size": 18_000_000_000}]}
+    server.paths = []     # request paths seen, in order
     server.status = 200   # HTTP status for /api/generate
     server.raw = None     # raw bytes to send instead of JSON
     server.delay = 0      # seconds to wait before answering /api/generate
@@ -622,3 +627,25 @@ def test_help_says_load_time_needs_a_cold_run_and_timeout_is_per_request(capsys)
     text = " ".join(capsys.readouterr().out.split())
     assert "load_s is only meaningful for a cold first run" in text
     assert "applies to each request" in text and "longer in total" in text
+
+
+# ---- final review: empty prompt, host slash, documented helpers ----
+
+@pytest.mark.parametrize("text", ["", "   \n\t\n"])
+def test_cli_refuses_an_empty_prompt_file_before_measuring(fake, tmp_path, capsys, text):
+    prompt = tmp_path / "p.txt"
+    prompt.write_text(text)
+    ledger = tmp_path / "ledger.jsonl"
+    rc = main(["--host", host(fake), "--model", "m:1", "--prompt-file", str(prompt),
+               "--ledger", str(ledger)])
+    captured = capsys.readouterr()
+    assert rc == 1 and captured.out == ""
+    assert captured.err == f"sizing: prompt file {prompt} is empty or only whitespace\n"
+    assert not ledger.exists()   # no ledger was opened, so there is no entry
+
+
+def test_trailing_slash_on_host_is_ignored(fake, tmp_path):
+    prompt = tmp_path / "p.txt"
+    prompt.write_text("hello")
+    assert main(["--host", host(fake) + "/", "--model", "m:1", "--prompt-file", str(prompt)]) == 0
+    assert fake.paths == ["/api/generate", "/api/ps"]   # not "//api/generate"

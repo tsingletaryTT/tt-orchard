@@ -22,8 +22,11 @@ What a result means, so a number is not read as something it is not:
     these match.
   * resident_bytes is None when ollama's /api/ps does not list the model. A warning on stderr
     names what it does list.
-  * mem_available_bytes is the host's MemAvailable when the result was taken (spec section 12 asks
-    for free memory with the large model resident).
+  * mem_available_bytes is the host's MemAvailable. It is read after /api/generate and /api/ps, so
+    it is the free memory with the measured model resident, and with any other model still
+    resident, for example the large model (which is what spec section 12 asks for). A keep_alive
+    of 0, or unloading a model, changes the number. In a multi-model run, an earlier model that is
+    still loaded lowers it for the later ones.
 
 Failures a person can fix (server not running, HTTP error, bad JSON or a truncated reply, timeout,
 unreadable prompt file, locked ledger) end the run with one line on stderr and exit code 1. They do not print a traceback.
@@ -58,10 +61,12 @@ class SizingError(Exception):
 
 
 def theoretical_gb_s(mt_s: float, channels: int = 2, bus_bytes: int = 8) -> float:
+    """Peak memory bandwidth in GB/s: the DIMM rate (MT/s) times bytes per transfer times channels."""
     return mt_s * bus_bytes * channels / 1000
 
 
 def ceiling_tok_s(bandwidth_gb_s: float, gb_per_token: float) -> float:
+    """Upper bound on decode tokens per second: each token reads every active weight once."""
     return bandwidth_gb_s / gb_per_token
 
 
@@ -105,7 +110,11 @@ def _rate(count, duration_ns):
 
 
 def mem_available_bytes() -> int | None:
-    """The host's MemAvailable in bytes, or None when it cannot be read."""
+    """The host's MemAvailable in bytes, or None when it cannot be read.
+
+    measure() calls this after /api/generate and /api/ps, so the model it measured is still
+    resident (and so is any other model ollama keeps loaded). A keep_alive of 0 or an unload
+    changes the number."""
     try:
         with open(MEMINFO_PATH, encoding="ascii") as f:
             for line in f:
@@ -195,14 +204,18 @@ def main(argv=None) -> int:
     p.add_argument("--ledger", help="append each result to this ledger as a measured entry")
     args = p.parse_args(argv)
 
+    host = args.host.rstrip("/")   # a trailing slash would give `//api/generate`
     ledger = None
     try:
         with open(args.prompt_file, encoding="utf-8") as f:
             prompt = f.read()
+        if not prompt.strip():
+            # Zero prompt tokens would give a meaningless prefill rate, so stop before measuring.
+            raise SizingError(f"prompt file {args.prompt_file} is empty or only whitespace")
         bandwidth = theoretical_gb_s(args.mt_s)
         ledger = Ledger(args.ledger) if args.ledger else None
         for model in args.model:
-            result = measure(args.host, model, prompt, args.num_predict, args.timeout)
+            result = measure(host, model, prompt, args.num_predict, args.timeout)
             result.update(note=args.note, theoretical_gb_s=bandwidth)
             if args.gb_per_token:
                 result["ceiling_tok_s"] = ceiling_tok_s(bandwidth, args.gb_per_token)
