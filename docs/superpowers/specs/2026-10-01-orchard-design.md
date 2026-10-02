@@ -1,7 +1,9 @@
 # tt-orchard: design
 
 Status: draft for operator review. Date: 2026-10-01. Author: Claude, with Taylor Singletary.
-Nothing in this document has been implemented. Every number below is either cited to a
+Plan 1 (the core library: ledger, command runner, tier config, sizing tool) is implemented through
+Task 4. Task 5 of plan 1 (running the sizing tool on this machine) and plans 2 to 4 are not
+implemented. Every number below is either cited to a
 measurement made on this machine or marked **unmeasured**.
 
 ## 1. Purpose
@@ -96,7 +98,7 @@ hands the stage to the large model.
 | 1 | Environment and CPU reference | small | reference reproduces the model card's published behavior |
 | 2 | Functional decoder on one chip | small runs, large diagnoses | PCC and argmax thresholds |
 | 3 | Full model | small runs, large diagnoses | end-to-end parity with the reference |
-| 4 | Multichip, then shrink to 2 and 1 chips | large plans, small runs | per-config evidence required by `mesh-shrink` |
+| 4 | Multichip, then shrink to 2 and 1 chips | large plans, small runs; large diagnoses | per-config evidence required by `mesh-shrink` |
 | 5 | Serving integration | small | black-box server checks pass |
 | 6 | Qualitative check and benchmark | small | measured numbers, each labeled measured or TODO |
 | 7 | Package and container build | none; supervisor waits, chips released | image boots and passes the stage 5 checks |
@@ -105,6 +107,14 @@ hands the stage to the large model.
 Tiers are named in a local config file (`config/tiers.toml`, not committed; TOML because the
 supervisor uses only the standard library). Model ids for each tier are chosen after the
 measurements in section 12.
+
+Each stage names the tier that runs it (`run`; `none` for stage 7, where no model is loaded).
+Stages 2, 3 and 4 also name a `diagnose` tier, which takes over when the stage escalates. Stage 4
+also names a `plan` tier (large plans, small runs); no other stage may have a `plan` key, and
+stage 7 has neither `plan` nor `diagnose`. The config has a required `[escalation]` table with
+`default = "<tier>"`. That tier takes over when any stage without a `diagnose` tier (0, 1, 5, 6 and
+8) escalates. It must name a defined tier. The loader refuses keys it does not know, so a typo such
+as `diagnos` is reported and not ignored.
 
 ### 5.1 Sizing the small and CPU tiers
 
@@ -219,13 +229,27 @@ One append-only `ledger.jsonl` per run, with an `evidence/` directory beside it.
 
 - Entry fields: sequence number, timestamp, stage, event, tier, model id, result, evidence paths with
   sha256.
-- Events: `stage_start`, `stage_end`, `park`, `restore`, `retry`, `escalate`, `notice`, `measurement`,
-  `decision`. Each number is labeled `measured` or `TODO`.
+- Events: `run_start`, `stage_start`, `stage_end`, `park`, `restore`, `retry`, `escalate`, `notice`,
+  `measurement`, `decision`. A `measurement` entry carries a `label` of `measured` or `TODO`.
+  The label applies to every field the tool reports in that entry. A `null` under `measured` means
+  the source did not report that field, and the sibling flags say why (`load_cold`,
+  `prefill_cached`, `decode_complete`, and the `resident_bytes` warning on stderr). `TODO`
+  entries are placeholders for a measurement not taken; the operator-bundle stage (stage 8)
+  writes them.
 - At run start the ledger records the resolved versions: tt-metal commit, vLLM, `tt-model`, firmware.
   They stay fixed across resumes. A new run re-resolves them.
 - Current state is computed by replaying the ledger. No separate state file exists.
 - Each line holds the hash of the previous line and is flushed to disk when written. On resume, a
-  torn last line is discarded.
+  torn last line is cut off the ledger and kept in a `.torn-<time>` file next to it (created
+  exclusively and synced before the cut, so nothing is lost or overwritten).
+- One process holds the ledger open at a time (an exclusive lock on a `.lock` file). A second
+  opener gets an error. The lock is released when the process dies, so a restarted supervisor can
+  reopen a crashed run.
+- If an append fails partway (disk full, I/O error), the file is cut back to its size before the
+  attempt. If that cut also fails, the writer refuses further appends until it is reopened.
+- A file that is not a valid chain (a line that is not a JSON object, a non-UTF-8 byte, a wrong
+  sequence number, a broken hash) is reported as corrupt and a person looks at it. The last line has
+  no successor, so a change to it alone is not detected.
 
 ## 10. Failure handling and denials
 
@@ -242,9 +266,35 @@ One append-only `ledger.jsonl` per run, with an `evidence/` directory beside it.
 
 Operator commands: `pause`, `resume`, `abort`. Abort releases the hardware and closes the ledger.
 
-Denials enforced by the command runner, which every stage agent's shell goes through: `tt-model push`,
-`gh repo create`, `git push`, `tt-smi -r`, and `rm` on any path outside the run directory. A prompt that
-is ignored cannot bypass these.
+Denials enforced by the command runner, which every stage agent's shell goes through:
+
+- `tt-model push` and `tt-model publish`; `git push` (including `subtree push`, `lfs push`, git
+  aliases set with `-c`, and the `git-push` helper); `gh repo create`; `hf upload` and
+  `huggingface-cli upload` (any `upload*` subcommand).
+- `tt-smi -r` in any spelling (long-option prefixes and clustered short flags included).
+- `rm`, `rmdir` and `unlink` on any path outside the run directory, on a ledger file, through
+  `xargs`, or with a glob directly in the run directory root (a glob there could match the ledger).
+- A redirect to a ledger file, or to a target built from a variable or glob (the runner cannot tell
+  whether it is the ledger). Other redirects are not judged.
+- `ln -s` combined with a delete in the same string (the delete could go through the link).
+
+The runner fails closed. Shell syntax it does not model is refused, and the message names the
+construct and says how to rewrite the command. That covers command and process substitution,
+heredocs, subshells, `eval`, `source`, shell keywords, shells that read stdin or a script, shells
+other than bash, sh and dash, wrappers it does not list, and options it does not know. A prompt
+that is ignored cannot bypass these, because the check sits where commands run.
+
+The runner is best effort. It is a hand-written lexer and not a shell parser, and it does not stop
+arbitrary code (`python3 -c`), tools it does not name (`mv`, `rsync --delete`, `tee`), or a script
+that runs a denied command inside it. Outer layers belong to plans 3 and 4: agent shells run
+without GitHub and Hugging Face tokens, and with read-only mounts everywhere outside the run
+directory. The runner is one layer among these.
+
+**OPEN DECISION.** No adversarial search for bypasses of the runner has been done. Reviews so far
+read the code and ran its tests. One reviewer that tried an adversarial search was stopped by a
+safety classifier, and the search was not re-run. The operator must decide, before plan 4 ships,
+between sanctioning an adversarial review of the runner and accepting best effort plus the outer
+layers.
 
 Bundle scrub check (stage 8): search the package and card for the machine hostname, tokens and
 absolute home paths. A hit blocks the bundle.
@@ -296,3 +346,5 @@ If the qwencode transcripts are gone, a synthetic loop is a weaker test and the 
    already logs enough.
 4. Remote repository name and owner. The working assumption is `tsingletaryTT/tt-orchard`. Nothing is
    created remotely until the operator asks.
+5. Bypass search of the command runner (section 10). Sanction an adversarial review, or accept best
+   effort plus the outer layers of plans 3 and 4. Decide before plan 4 ships.
