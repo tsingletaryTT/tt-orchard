@@ -115,6 +115,10 @@ class Ledger:
                     try:
                         with open(sidecar, "xb") as sf:
                             sf.write(torn)
+                            # The sidecar must be on disk before the ledger is cut, or a crash
+                            # between the two would lose the bytes this recovery promises to keep.
+                            sf.flush()
+                            os.fsync(sf.fileno())
                         break
                     except FileExistsError:
                         n += 1

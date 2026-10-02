@@ -250,3 +250,30 @@ def test_a_stage_that_passes_twice_is_completed_once():
     # A stage that failed and then passed on retry is completed once too.
     state = replay_state([end(2, "fail"), end(2, "pass")])
     assert state["completed"] == [2] and state["stage_status"] == "pass"
+
+
+def test_sidecar_is_on_disk_before_the_ledger_is_cut(tmp_path, monkeypatch):
+    """A crash between writing the sidecar and cutting the ledger must not lose the torn bytes.
+    So the sidecar has to be fsynced while the ledger still holds them."""
+    import os
+    path = tmp_path / "ledger.jsonl"
+    with Ledger(path) as led:
+        led.append("run_start")
+    full_size = path.stat().st_size
+    with open(path, "ab") as f:
+        f.write(b"cut-off")
+    size_with_tail = path.stat().st_size
+    assert size_with_tail > full_size
+
+    real_fsync = os.fsync
+    seen = []   # (name of the file being synced, ledger size at that moment)
+
+    def spy(fd):
+        seen.append((os.path.basename(os.readlink(f"/proc/self/fd/{fd}")), path.stat().st_size))
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", spy)
+    Ledger(path).close()
+    sidecar_syncs = [size for name, size in seen if ".torn-" in name]
+    assert sidecar_syncs == [size_with_tail]   # synced once, before the ledger was truncated
+    assert any(name == "ledger.jsonl" and size == full_size for name, size in seen)
