@@ -38,22 +38,28 @@ refusal names the construct and says how to rewrite the command.
   rm/rmdir/unlink outside the run directory, of a ledger file, with a glob directly in the run
   directory root, or fed by xargs. An output redirect whose target name starts with "ledger"
   is refused (it would truncate the ledger), and so is one whose target has an unquoted glob or a
-  `$` outside single quotes (the runner cannot tell whether that name is the ledger). A string that makes a symbolic link and also deletes something
-  is refused ("symlink-with-delete"), because the delete could go through the link. In the
+  `$` outside single quotes (the runner cannot tell whether that name is the ledger). A string that makes a link
+  with `ln -s` (or `--symbolic`) and also deletes something is refused ("symlink-with-delete"), because the delete could go
+  through the link. Only `ln` is recognised; other ways to make a link are not. In the
   words of git, gh, hf, huggingface-cli, tt-model and tt-smi, an unquoted glob character or a `$`
   outside single quotes is refused, because it could change which subcommand runs.
 
+  Timing: a string is judged when it is checked, and it runs later. Another process can change
+  the filesystem in between (create or remove a directory, repoint a link), and the judgement
+  does not see that.
+
   Directory tracking: `cd` is believed only when it is the first thing that moves the directory
   in its position: not after `&&`, `||`, `|` or `&`, not when its target is not a plain literal,
-  not when the directory does not exist at check time, and not when an earlier command in the
-  string is anything but a short list of read-only ones (echo, ls, ...), since an earlier command
-  could create or remove the directory. Otherwise the directory is unknown and relative
-  deletes are refused. A `cd` inside a pipeline or the background does not count.
+  not when the directory does not exist at check time (`isdir`, so a directory that exists
+  can still make `cd` fail, for example without permission), and not when an earlier command in the
+  string is anything but a short list of read-only ones (echo, ls, ...; matched on the command's
+  basename, so `/tmp/ls` counts as `ls`), since an earlier command could create or remove the
+  directory. Otherwise the directory is unknown and relative deletes are refused. A `cd` inside a pipeline or the background does not count.
 
 WHAT THIS DOES NOT COVER. Splitting a shell string by tokenizing is best effort. It is not a shell
-parser, and a way around it may exist. Redirects are not judged except for ledger targets: a
-redirect can write or truncate any other file, and stage agents need to write outside the run
-directory. The runner does not stop arbitrary code (for example `python3 -c 'shutil.rmtree(...)'`
+parser, and a way around it may exist. Redirects are not judged except for ledger targets and
+targets built from a variable or glob: a redirect can write or truncate any other file, and stage
+agents need to write outside the run directory. The runner does not stop arbitrary code (for example `python3 -c 'shutil.rmtree(...)'`
 or `perl -e`), deletion by tools it does not name (`mv`, `rsync --delete`, `truncate`), wrappers
 it does not list (`watch`, `su`, `doas`, `ssh host cmd`), scripts that run a denied command inside
 them, git aliases or hooks defined in config files, writes to the ledger by tools other than
