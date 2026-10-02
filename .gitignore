@@ -4,3 +4,4 @@ config/tiers.toml
 runs/
 *.torn-*
 *.lock
+.superpowers/
