@@ -91,7 +91,12 @@ class Ledger:
         if not self.path.exists():
             return []
         # After _recover the file is empty or ends in a newline, so the last split piece is "".
-        return self.path.read_text(encoding="utf-8").split("\n")[:-1]
+        try:
+            text = self.path.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            # Not a line the ledger wrote (it writes ASCII JSON), so a person has to look.
+            raise LedgerCorrupt(f"{self.path} is not valid UTF-8 ({exc.reason} at byte {exc.start})") from exc
+        return text.split("\n")[:-1]
 
     def _recover(self) -> None:
         if self.path.exists():
@@ -129,10 +134,21 @@ class Ledger:
                 entry = json.loads(line)
             except json.JSONDecodeError as exc:
                 raise LedgerCorrupt(f"line {i} is not JSON") from exc
-            if entry.get("seq") != i:
-                raise LedgerCorrupt(f"line {i}: expected sequence {i}, found {entry.get('seq')}")
+            # Valid JSON is not enough: replay_state indexes these fields, so a wrong shape must be
+            # reported here as corruption and not surface later as a KeyError or AttributeError.
+            if not isinstance(entry, dict):
+                raise LedgerCorrupt(f"line {i} is not a JSON object")
+            seq = entry.get("seq")
+            if type(seq) is not int or seq != i:   # `true` equals 1 in Python, so check the type
+                raise LedgerCorrupt(f"line {i}: expected sequence {i}, found {seq!r}")
             if entry.get("prev") != prev:
                 raise LedgerCorrupt(f"line {i}: hash chain broken")
+            if not isinstance(entry.get("event"), str):
+                raise LedgerCorrupt(f"line {i}: event must be a string")
+            if "stage" not in entry:
+                raise LedgerCorrupt(f"line {i} has no stage field")
+            if not isinstance(entry.get("data"), dict):
+                raise LedgerCorrupt(f"line {i}: data must be an object")
             entries.append(entry)
             prev = _digest(line)
         return entries

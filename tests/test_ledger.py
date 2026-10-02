@@ -193,3 +193,50 @@ def test_two_recoveries_in_one_instant_keep_both_sidecars(tmp_path, monkeypatch)
         Ledger(path).close()
     contents = sorted(p.read_bytes() for p in tmp_path.glob("ledger.jsonl.torn-*"))
     assert contents == [b"first-cut", b"second-cut"]
+
+
+# ---- final review: malformed content must raise LedgerCorrupt, never another exception ----
+
+@pytest.mark.parametrize("content,needle", [
+    (b'{"seq":1,"prev":"x","event":"run_start","data":"\xff"}\n', "not valid UTF-8"),
+    (b"[]\n", "line 1 is not a JSON object"),
+    (b"1\n", "line 1 is not a JSON object"),
+    (b'"x"\n', "line 1 is not a JSON object"),
+    (b"null\n", "line 1 is not a JSON object"),
+])
+def test_malformed_content_raises_ledger_corrupt_and_frees_the_lock(tmp_path, content, needle):
+    path = tmp_path / "ledger.jsonl"
+    path.write_bytes(content)
+    with pytest.raises(LedgerCorrupt, match=needle) as first:  # held so a leaked lock is not hidden
+        Ledger(path)
+    # A second open must fail for the same reason, not with LedgerLocked.
+    with pytest.raises(LedgerCorrupt, match=needle):
+        Ledger(path)
+    path.write_bytes(b"")
+    Ledger(path).close()
+
+
+def test_non_utf8_error_names_the_file(tmp_path):
+    path = tmp_path / "ledger.jsonl"
+    path.write_bytes(b"\xff\n")
+    with pytest.raises(LedgerCorrupt, match="ledger.jsonl"):
+        Ledger(path)
+
+
+@pytest.mark.parametrize("line,needle", [
+    ('{"seq":1,"prev":"%s","event":5,"stage":null,"data":{}}', "event must be a string"),
+    ('{"seq":1,"prev":"%s","event":"run_start","stage":null,"data":[]}', "data must be an object"),
+    ('{"seq":1,"prev":"%s","event":"run_start","data":{}}', "has no stage"),
+])
+def test_entry_fields_with_the_wrong_type_are_corrupt(tmp_path, line, needle):
+    path = tmp_path / "ledger.jsonl"
+    path.write_text((line % GENESIS) + "\n")
+    with pytest.raises(LedgerCorrupt, match=needle):
+        Ledger(path)
+
+
+def test_boolean_sequence_number_is_corrupt(tmp_path):
+    path = tmp_path / "ledger.jsonl"
+    path.write_text('{"seq":true,"prev":"%s","event":"run_start","stage":null,"data":{}}\n' % GENESIS)
+    with pytest.raises(LedgerCorrupt, match="expected sequence 1, found True"):
+        Ledger(path)
