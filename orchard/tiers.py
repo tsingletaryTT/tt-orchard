@@ -34,9 +34,7 @@ class TierConfig:
 
 
 def _contains_sentinel(value):
-    """Check if value contains CHANGE-ME (case-insensitive, as substring)."""
-    if not isinstance(value, str):
-        return False
+    """Check if a string contains CHANGE-ME (case-insensitive, as substring). Callers pass str only."""
     return SENTINEL.lower() in value.lower()
 
 
@@ -70,7 +68,7 @@ def load(path) -> TierConfig:
     stages = {}
     for k, v in stages_raw.items():
         # Check that the key matches the decimal format: "0" through "8" only, no "+1", " 1", "٨", etc.
-        if not isinstance(k, str) or not re.fullmatch(r"[0-9]+", k) or (len(k) > 1 and k[0] == '0'):
+        if not re.fullmatch(r"[0-9]+", k) or (len(k) > 1 and k[0] == '0'):
             raise TierConfigError(f"stage key {k!r} must be a decimal integer (0-8), no leading zeros")
         n = int(k)
         # Check that stage number is in the valid range.
@@ -173,7 +171,8 @@ def load(path) -> TierConfig:
             if run != "none":
                 raise TierConfigError(f"stage {n} must have run = 'none' (image build), not {run!r}")
         else:
-            # Other stages: run must be a defined tier (can be "none" but shouldn't be).
+            # Other stages: run must be a defined tier. "none" fails here too, because no tier
+            # can be named "none", so it is simply not a defined tier.
             if run not in tiers:
                 raise TierConfigError(f"stage {n}: run tier {run!r} is not defined")
 

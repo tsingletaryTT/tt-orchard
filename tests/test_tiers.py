@@ -86,6 +86,25 @@ def test_bad_configs_are_refused(tmp_path, old, new, why):
         load(write(tmp_path, GOOD.replace(old, new, 1)))
 
 
+@pytest.mark.parametrize("line,key", [
+    ('endpoint = "http://127.0.0.1:8000/v1"\n', "endpoint"),
+    ('model = "big-model"\n', "model"),
+    ('placement = "chips"\n', "placement"),
+])
+def test_missing_required_tier_key(tmp_path, line, key):
+    """Each required tier key is checked on its own."""
+    assert line in GOOD
+    with pytest.raises(TierConfigError, match=f"is missing '{key}'"):
+        load(write(tmp_path, GOOD.replace(line, '', 1)))
+
+
+def test_stage_without_run_key_rejected(tmp_path):
+    """A stage table with no run key gets the clear 'missing run' message."""
+    text = GOOD.replace('[stages.1]\nrun = "small"', '[stages.1]\nnote = "x"')
+    with pytest.raises(TierConfigError, match="stage 1 is missing run"):
+        load(write(tmp_path, text))
+
+
 def test_a_cpu_tier_is_required(tmp_path):
     text = GOOD.replace('placement = "cpu"', 'placement = "chips"')
     with pytest.raises(TierConfigError, match="placement 'cpu'"):
@@ -130,6 +149,15 @@ def test_non_utf8_file_raises_tierconfigerror(tmp_path):
         load(p)
 
 
+def test_read_error_message_names_the_path(tmp_path):
+    """The rule, not the OS error, must name the file: a UnicodeDecodeError has no path."""
+    p = tmp_path / "x.toml"
+    p.write_bytes(b"\xff\xfe")
+    with pytest.raises(TierConfigError) as excinfo:
+        load(p)
+    assert str(p) in str(excinfo.value)
+
+
 def test_directory_path_raises_tierconfigerror(tmp_path):
     """Directory path raises TierConfigError (IsADirectoryError)."""
     with pytest.raises(TierConfigError, match="cannot read"):
@@ -144,6 +172,7 @@ def test_invalid_ipv6_url_raises_tierconfigerror(tmp_path):
         load(write(tmp_path, text))
     # Verify the endpoint string appears in the error message
     assert bad_endpoint in str(excinfo.value)
+    assert "tier 'large'" in str(excinfo.value)
 
 
 def test_stage_key_non_ascii_digit_rejected(tmp_path):
@@ -253,6 +282,17 @@ def test_stage_key_with_leading_zeros_rejected(tmp_path):
     text = GOOD.replace('[stages.0]', '[stages.01]')
     with pytest.raises(TierConfigError, match="stage"):
         load(write(tmp_path, text))
+
+
+@pytest.mark.parametrize("old,new", [
+    ('[stages.1]', '[stages.01]'),
+    ('[stages.0]', '[stages.00]'),
+])
+def test_stage_key_leading_zeros_message(tmp_path, old, new):
+    """The leading-zero rule itself must fire, not a later 'stage has no entry' error."""
+    assert old in GOOD
+    with pytest.raises(TierConfigError, match="no leading zeros"):
+        load(write(tmp_path, GOOD.replace(old, new, 1)))
 
 
 def test_stage_key_with_plus_sign_rejected(tmp_path):
@@ -476,7 +516,15 @@ def test_endpoint_userinfo_trick_rejected(tmp_path):
 def test_endpoint_subdomain_trick_rejected(tmp_path):
     """Subdomain trick like localhost.evil.example should be rejected."""
     text = GOOD.replace('endpoint = "http://localhost:8001/v1"', 'endpoint = "http://localhost.evil.example/v1"')
-    with pytest.raises(TierConfigError, match="endpoint"):
+    with pytest.raises(TierConfigError, match="not on this machine"):
+        load(write(tmp_path, text))
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "192.168.1.5"])
+def test_endpoint_non_loopback_address_rejected(tmp_path, host):
+    """0.0.0.0 and LAN addresses are not loopback, so a loosened host list must be caught."""
+    text = GOOD.replace('http://127.0.0.1:8000/v1', f'http://{host}:8000/v1')
+    with pytest.raises(TierConfigError, match="not on this machine"):
         load(write(tmp_path, text))
 
 
