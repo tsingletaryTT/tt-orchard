@@ -240,3 +240,13 @@ def test_boolean_sequence_number_is_corrupt(tmp_path):
     path.write_text('{"seq":true,"prev":"%s","event":"run_start","stage":null,"data":{}}\n' % GENESIS)
     with pytest.raises(LedgerCorrupt, match="expected sequence 1, found True"):
         Ledger(path)
+
+
+def test_a_stage_that_passes_twice_is_completed_once():
+    def end(stage, result):
+        return {"event": "stage_end", "stage": stage, "data": {"result": result}}
+    state = replay_state([end(2, "pass"), end(3, "pass"), end(2, "pass")])
+    assert state["completed"] == [2, 3]
+    # A stage that failed and then passed on retry is completed once too.
+    state = replay_state([end(2, "fail"), end(2, "pass")])
+    assert state["completed"] == [2] and state["stage_status"] == "pass"

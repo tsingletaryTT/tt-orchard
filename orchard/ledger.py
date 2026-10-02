@@ -200,7 +200,8 @@ def replay_state(entries: list[dict]) -> dict:
         elif event == "stage_end":
             result = e["data"].get("result")
             state["stage_status"] = result
-            if result == "pass":
+            # A retried stage ends more than once; list it once, in the order it first passed.
+            if result == "pass" and stage not in state["completed"]:
                 state["completed"].append(stage)
         elif event == "park":
             state["parked"] = True
