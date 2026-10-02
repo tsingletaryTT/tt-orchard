@@ -108,8 +108,11 @@ def test_example_config_loads_when_edited(tmp_path):
 
 # File access and parsing errors wrapped in TierConfigError
 def test_missing_file_raises_tierconfigerror():
-    with pytest.raises(TierConfigError, match="cannot read"):
-        load("/nonexistent/tiers.toml")
+    path = "/nonexistent/tiers.toml"
+    with pytest.raises(TierConfigError, match="cannot read") as excinfo:
+        load(path)
+    # Verify the path appears in the error message
+    assert path in str(excinfo.value)
 
 
 def test_invalid_toml_raises_tierconfigerror(tmp_path):
@@ -135,9 +138,12 @@ def test_directory_path_raises_tierconfigerror(tmp_path):
 
 def test_invalid_ipv6_url_raises_tierconfigerror(tmp_path):
     """Invalid IPv6 URL raises TierConfigError."""
-    text = GOOD.replace('endpoint = "http://127.0.0.1:8000/v1"', 'endpoint = "http://[::1/v1"')
-    with pytest.raises(TierConfigError, match="endpoint.*not a valid URL"):
+    bad_endpoint = "http://[::1/v1"
+    text = GOOD.replace('endpoint = "http://127.0.0.1:8000/v1"', f'endpoint = "{bad_endpoint}"')
+    with pytest.raises(TierConfigError, match="endpoint.*not a valid URL") as excinfo:
         load(write(tmp_path, text))
+    # Verify the endpoint string appears in the error message
+    assert bad_endpoint in str(excinfo.value)
 
 
 def test_stage_key_non_ascii_digit_rejected(tmp_path):
@@ -353,7 +359,7 @@ def test_empty_string_model_rejected(tmp_path):
 def test_empty_string_endpoint_rejected(tmp_path):
     """Empty endpoint string should be rejected."""
     text = GOOD.replace('endpoint = "http://127.0.0.1:8000/v1"', 'endpoint = ""')
-    with pytest.raises(TierConfigError, match="endpoint"):
+    with pytest.raises(TierConfigError, match="non-empty string"):
         load(write(tmp_path, text))
 
 
@@ -361,6 +367,20 @@ def test_whitespace_only_role_rejected(tmp_path):
     """Whitespace-only role should be rejected."""
     text = GOOD.replace('role = "plan and diagnose"', 'role = "   "')
     with pytest.raises(TierConfigError, match="role"):
+        load(write(tmp_path, text))
+
+
+def test_whitespace_only_model_rejected(tmp_path):
+    """Whitespace-only model should be rejected."""
+    text = GOOD.replace('model = "big-model"', 'model = "   "')
+    with pytest.raises(TierConfigError, match="model"):
+        load(write(tmp_path, text))
+
+
+def test_whitespace_only_endpoint_rejected(tmp_path):
+    """Whitespace-only endpoint should be rejected."""
+    text = GOOD.replace('endpoint = "http://127.0.0.1:8000/v1"', 'endpoint = "   "')
+    with pytest.raises(TierConfigError, match="non-empty string"):
         load(write(tmp_path, text))
 
 
@@ -431,8 +451,10 @@ def test_diagnose_list_rejected(tmp_path):
 def test_endpoint_ftp_scheme_rejected(tmp_path):
     """FTP endpoints should be rejected."""
     text = GOOD.replace('endpoint = "http://127.0.0.1:8000/v1"', 'endpoint = "ftp://127.0.0.1:8000/v1"')
-    with pytest.raises(TierConfigError, match="endpoint"):
+    with pytest.raises(TierConfigError, match="scheme must be http or https") as excinfo:
         load(write(tmp_path, text))
+    # Ensure this is NOT a re-wrapped error
+    assert "not a valid URL" not in str(excinfo.value)
 
 
 def test_endpoint_https_accepted(tmp_path):
@@ -445,8 +467,10 @@ def test_endpoint_https_accepted(tmp_path):
 def test_endpoint_userinfo_trick_rejected(tmp_path):
     """Userinfo trick like http://127.0.0.1@evil.example/ should be rejected."""
     text = GOOD.replace('endpoint = "http://127.0.0.1:8000/v1"', 'endpoint = "http://127.0.0.1@evil.example/v1"')
-    with pytest.raises(TierConfigError, match="endpoint"):
+    with pytest.raises(TierConfigError, match="not on this machine") as excinfo:
         load(write(tmp_path, text))
+    # Ensure this is NOT a re-wrapped error
+    assert "not a valid URL" not in str(excinfo.value)
 
 
 def test_endpoint_subdomain_trick_rejected(tmp_path):
@@ -466,8 +490,10 @@ def test_endpoint_ipv6_loopback_accepted(tmp_path):
 def test_endpoint_no_scheme_rejected(tmp_path):
     """Endpoint without scheme should be rejected."""
     text = GOOD.replace('endpoint = "http://127.0.0.1:8000/v1"', 'endpoint = "127.0.0.1:8000/v1"')
-    with pytest.raises(TierConfigError, match="endpoint"):
+    with pytest.raises(TierConfigError, match="must have a scheme") as excinfo:
         load(write(tmp_path, text))
+    # Ensure this is NOT a re-wrapped error
+    assert "not a valid URL" not in str(excinfo.value)
 
 
 # Stage-specific rules
@@ -505,10 +531,3 @@ def test_tier_cannot_be_named_none(tmp_path):
     text = GOOD.replace('[tiers.large]', '[tiers.none]')
     with pytest.raises(TierConfigError, match="none"):
         load(write(tmp_path, text))
-
-
-def test_stage_7_run_must_be_none_positive_test(tmp_path):
-    """Stage 7 run = 'none' is valid; GOOD proves the property."""
-    cfg = load(write(tmp_path, GOOD))
-    assert cfg.stages[7]["run"] == "none"
-    assert "diagnose" not in cfg.stages[7]

@@ -117,18 +117,22 @@ def load(path) -> TierConfig:
             raise TierConfigError(f"tier {name!r} endpoint must be a non-empty string")
         if _contains_sentinel(endpoint):
             raise TierConfigError(f"tier {name!r} still has {SENTINEL} in endpoint")
+
+        # Parse URL; urlparse can raise ValueError for invalid IPv6 (e.g., "http://[::1/v1")
         try:
             parsed = urlparse(endpoint)
-            if not parsed.scheme:
-                raise TierConfigError(f"tier {name!r}: endpoint must have a scheme (http or https)")
-            if parsed.scheme not in ("http", "https"):
-                raise TierConfigError(f"tier {name!r}: endpoint scheme must be http or https, not {parsed.scheme!r}")
-            host = parsed.hostname
-            if host not in LOCAL_HOSTS:
-                raise TierConfigError(
-                    f"tier {name!r}: endpoint host {host!r} is not on this machine; runs use local models only")
-        except (AttributeError, TypeError, ValueError) as e:
-            raise TierConfigError(f"tier {name!r}: endpoint is not a valid URL: {e}") from e
+            host = parsed.hostname  # This can also raise ValueError for malformed IPv6
+        except ValueError as e:
+            raise TierConfigError(f"tier {name!r}: endpoint {endpoint!r} is not a valid URL: {e}") from e
+
+        # Check scheme and host (these are logic checks, not parsing errors)
+        if not parsed.scheme:
+            raise TierConfigError(f"tier {name!r}: endpoint must have a scheme (http or https)")
+        if parsed.scheme not in ("http", "https"):
+            raise TierConfigError(f"tier {name!r}: endpoint scheme must be http or https, not {parsed.scheme!r}")
+        if host not in LOCAL_HOSTS:
+            raise TierConfigError(
+                f"tier {name!r}: endpoint host {host!r} is not on this machine; runs use local models only")
 
         # Validate placement: string and in allowed set.
         placement = tier["placement"]
