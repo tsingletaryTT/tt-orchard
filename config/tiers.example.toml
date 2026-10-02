@@ -1,0 +1,38 @@
+# Copy to config/tiers.toml and edit. The loader refuses any value left as CHANGE-ME.
+# Choose models after running orchard/sizing.py (spec section 5.1); do not guess.
+
+[tiers.large]
+role = "plan and diagnose"
+endpoint = "http://127.0.0.1:8000/v1"
+model = "CHANGE-ME"
+placement = "chips"
+context_tokens = 262144
+
+[tiers.small]
+role = "routine steps while the large model is parked or busy"
+endpoint = "http://127.0.0.1:8001/v1"
+model = "CHANGE-ME"
+placement = "cpu"
+
+# Stage owner. "diagnose" is the tier that takes over when the run tier escalates.
+[stages.0]
+run = "large"
+[stages.1]
+run = "small"
+[stages.2]
+run = "small"
+diagnose = "large"
+[stages.3]
+run = "small"
+diagnose = "large"
+[stages.4]
+run = "small"
+diagnose = "large"
+[stages.5]
+run = "small"
+[stages.6]
+run = "small"
+[stages.7]
+run = "none"
+[stages.8]
+run = "small"
