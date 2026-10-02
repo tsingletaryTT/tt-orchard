@@ -98,7 +98,7 @@ def _unsupported(command, construct: str, hint: str = DEFAULT_HINT) -> Denied:
 
 
 # Shells whose `-c` strings are lexed with the rules below. Other shells have different quoting and
-# grammar, so they are refused rather than misread. zsh is refused too: it has expansions bash lacks
+# grammar, so they are refused. zsh is refused too: it has expansions bash lacks
 # (for example `=cmd`, `**/` and `(#q)` globs), so the words the lexer sees can differ from the
 # words zsh runs.
 SHELLS = {"bash", "sh", "dash"}
@@ -659,7 +659,7 @@ LOST_DIRECTORY_DETAIL = (
 
 def _rm_has_unplaceable_relative_path(argv, ctx):
     """True when the directory is unknown and an rm operand is relative, so the directory is why
-    the rule refused. An absolute or `$` operand is refused on its own account, not for this."""
+    the rule refused. An absolute or `$` operand is refused for its own reason."""
     return ctx.cwd is None and any(
         "$" not in a and not os.path.isabs(os.path.expanduser(a)) for a in _operands(argv))
 
