@@ -228,6 +228,8 @@ DENY = {
     "unsupported-syntax": [
         "zsh -c 'ls'",
         "zsh script.sh",
+        "git status\rgit push",
+        "echo x >",
         "bash -zc 'ls'",
         "bash -c -z 'ls'",
         "git ${X} push",
@@ -353,6 +355,20 @@ def test_dynamic_redirect_target_says_why(cmd, run_dir):
                                      "whether it is the ledger") as exc:
         check_string(_fill(cmd, run_dir), run_dir)
     assert exc.value.rule == "redirect-ledger"
+
+
+def test_carriage_return_is_refused_by_name(run_dir):
+    # bash treats \r as part of a word; the lexer would treat it as a space, so the two disagree.
+    with pytest.raises(Denied, match="a carriage return") as exc:
+        check_string("git status\rgit push", run_dir)
+    assert exc.value.rule == "unsupported-syntax"
+
+
+@pytest.mark.parametrize("cmd", ["echo x >", "echo x >>", "echo x &>", "cat <"])
+def test_redirect_at_end_of_text_is_refused_for_its_own_reason(cmd, run_dir):
+    with pytest.raises(Denied, match="redirect with no target") as exc:
+        check_string(cmd, run_dir)
+    assert exc.value.rule == "unsupported-syntax"
 
 
 def test_every_rule_has_denied_examples():

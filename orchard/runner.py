@@ -27,7 +27,7 @@ refusal names the construct and says how to rewrite the command.
   commands resolve (if, for, while, case, function, eval, source, `.`, trap, `!`, `[[`, coproc,
   alias, unalias, shopt, hash, enable, and export/declare/typeset/readonly/local of GIT_CONFIG*,
   BASH_ENV or ENV), `exec` with no command, subshell parentheses, braces, heredocs and
-  here-strings, `$'...'` quoting, unbalanced quotes, NUL bytes and invalid characters, a command
+  here-strings, `$'...'` quoting, unbalanced quotes, NUL bytes, carriage returns and invalid characters, a command
   name built from a variable or a glob or starting with `-`, `env -S`, `find -exec` and
   `find -delete`, and `GIT_CONFIG*` or `BASH_ENV` assignments. Command substitution and process
   substitution (`$(...)`, backticks, `<(...)`) are refused as "substitution".
@@ -290,7 +290,7 @@ def _lex(text: str):
                 cur.append("\\")
                 in_word = True
                 i += 1
-        elif c in " \t\r":
+        elif c in " \t":               # \r never gets here: _check_text refuses it
             end_word()
             i += 1
         elif c == "\n":
@@ -375,7 +375,7 @@ def _lex(text: str):
             if c == "<" and nxt == "<":
                 raise _unsupported(text, "heredoc or here-string",
                                    "write the text to a file and pass the path")
-            i += 2 if (nxt in "&|" or (c == ">" and nxt == ">") or (c == "<" and nxt == ">")) else 1
+            i += 2 if (nxt and nxt in "&|" or (c == ">" and nxt == ">") or (c == "<" and nxt == ">")) else 1
             expect_target = True
             target_is_output = c == ">" or nxt == ">"
         else:
@@ -845,6 +845,10 @@ def _check_text(text, run_dir, cwd, st, via_xargs=False):
     except UnicodeEncodeError:
         raise _unsupported(text, "an invalid character (lone surrogate)",
                            "remove it; commands must be plain text") from None
+    if "\r" in text:
+        # bash keeps \r inside a word, so `git status\rgit push` is one odd word to bash; the lexer
+        # would split it. Refuse it so the two cannot disagree.
+        raise _unsupported(text, "a carriage return (\\r)", "remove it; use plain newlines")
     if any(marker in text for marker in ("$(", "`", "<(", ">(")):
         raise Denied("substitution", text,
                      "command substitution or process substitution cannot be judged. To proceed: "
