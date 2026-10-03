@@ -47,6 +47,19 @@ def test_the_bundle_skill_keeps_publishing_with_the_operator():
     assert "You never run them." in text and "ready for operator review" in text
 
 
+def test_the_swap_skill_copies_the_templates_that_exist_in_this_repo():
+    # The skill names the main checkout's absolute path. The same relative path must exist here,
+    # so the skill and the templates merge together.
+    text = (SKILLS / "weights-swap-check.md").read_text()
+    main = "/home/ttuser/code/tt-orchard/orchard/skills/weights-swap-templates/"
+    for name in ("prepare_swap.py", "serve_and_compare.py"):
+        assert main + name in text
+        assert (SKILLS / "weights-swap-templates" / name).is_file()
+    assert '"command": "python3 stages/2/serve_and_compare.py", "deadline_s": 2400' in text
+    assert "swap_config.json` FIRST" in text
+    assert "`serves` false" in text and "Do not investigate firmware or cache directories" in text
+
+
 def test_the_weights_only_stage_2_skill_is_the_local_flat_file():
     assert spec_for(2, "weights-only").skill == "weights-swap-check"
     assert resolve_skill("weights-swap-check", [SKILLS]) == SKILLS / "weights-swap-check.md"
