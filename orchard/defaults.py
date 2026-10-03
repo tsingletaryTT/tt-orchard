@@ -61,3 +61,31 @@ NO_EVIDENCE_S = 3600.0          # choice; not measured: transcripts carry no evi
 LEASE_IDLE_S = 1800.0           # choice; not measured
 LEASE_POLL_S = 60.0             # choice: `gozer status` is read at most once a minute by the watchdog
 RUNG_CAPS = {"nudge": 1, "escalate": 1, "pause": 1}   # choice: each rung once per agent and stage
+
+# ---- plan 4: stages, agent steps and the run ---------------------------------------------------
+# Per-stage wall-clock budgets (spec section 10). Choices; none is measured. Stage 5 holds one 2-chip
+# cold boot (COLD_BOOT_S, about 30 min) plus its checks; stage 4 boots two configurations. Stage 7
+# is skipped in plan 4, so its budget is 0.
+STAGE_BUDGET_S = {0: 7200.0, 1: 14400.0, 2: 14400.0, 3: 21600.0, 4: 28800.0, 5: 10800.0,
+                  6: 14400.0, 7: 0.0, 8: 3600.0}
+# Free disk each stage needs on the run directory's filesystem before it starts (spec section 10).
+# 40 GB covers one converted 2-chip tensor cache: the base Qwen3.8-27B TP=2 cache measured 34 GB
+# (2026-09-30). Stage 4 converts a second (1-chip) cache. The other values are choices.
+STAGE_DISK_GB = {0: 1.0, 1: 5.0, 2: 40.0, 3: 40.0, 4: 80.0, 5: 40.0, 6: 40.0, 7: 0.0, 8: 1.0}
+LONG_STAGE_S = 3600.0           # spec section 10: a stage with a longer budget must declare a resume marker
+STAGE2_PCC_MIN = 0.995          # the functional-decoder skill's default acceptance bar (prefill and decode)
+AGENT_MAX_TURNS = 60            # choice: model turns in one agent step before the step counts as failed
+AGENT_MAX_TOKENS = 8192         # choice: max_tokens for one model response
+AGENT_REQUEST_TIMEOUT_S = 900.0 # choice: one non-streaming response; prefill alone measured 42 to 78 s
+                                # at 130K to 204K tokens (spec section 3), and contexts here stay short
+TOOL_TIMEOUT_S = 1800.0         # choice: one shell command run for an agent
+TOOL_OUTPUT_CHARS = 12000       # choice: the head and tail of a command's output that go back to the model
+CONTEXT_FILE_CHARS = 4000       # choice: how much of each earlier stage's result file a new context holds
+SKILL_CHARS = 40000             # choice: a skill longer than this is cut, and the context says so
+RUN_ESCALATION_CAP = 3          # choice: escalations since the last operator resume before the run pauses
+RUN_COLD_BOOT_CAP = 3           # choice: cold coder boots since the last resume before the run pauses
+COLD_START_S = 600.0            # choice: a coder start slower than this counts as a cold boot; it sits
+                                # between the 2-3 min warm restart and the ~30 min cold boot (spec section 3)
+RUN_WALL_CLOCK_S = 259200.0     # choice: 72 h from run start or the last resume, then the run pauses
+CONTROL_POLL_S = 10.0           # choice: how often a paused supervisor reads the control file
+RUN_CANARY_PROMPT = "What is 17 + 25? Answer with one number."   # choice: short, one greedy answer

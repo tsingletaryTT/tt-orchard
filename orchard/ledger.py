@@ -34,6 +34,8 @@ GENESIS = "0" * 64
 EVENTS = frozenset({
     "run_start", "stage_start", "stage_end", "park", "restore",
     "retry", "escalate", "notice", "measurement", "decision",
+    # An evidence file and its sha256 (plan 4: agent steps and hardware tests write them).
+    "evidence",
 })
 
 # Every number in a measurement entry says whether it was measured or is still to do.

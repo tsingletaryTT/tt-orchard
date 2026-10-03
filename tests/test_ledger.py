@@ -296,3 +296,9 @@ def test_an_abandoned_park_is_not_parked(tmp_path):
         assert replay_state(led.read())["parked"] is True
         led.append("park", 2, step="abandoned")
         assert replay_state(led.read())["parked"] is False
+
+
+def test_an_evidence_entry_is_accepted(tmp_path):
+    with Ledger(tmp_path / "ledger.jsonl") as led:
+        e = led.append("evidence", 0, path="stages/0/evidence/a.txt", sha256="0" * 64)
+    assert e["event"] == "evidence"
