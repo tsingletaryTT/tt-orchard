@@ -83,3 +83,13 @@ path, so packaging is the next piece to build after stages 0 to 6 are shown to w
   containers left. The ledger holds the pause, the abort, `stopping the coder`, and `hardware released`.
 - **Decision (operator, 2026-10-03):** required chip configurations for this model are 2 and 4.
   1 chip is optional. Stage 4's gate is being changed to take `--required-chips 2,4`.
+- **Fixes after run 1 (merged to main, suite 1173 passed, 1 skipped).**
+  (a) The canary now switches thinking off and, if a reply is still cut off during reasoning, says so.
+  (b) On a coder's first start in a run, the supervisor asks a known-answer question (7 times 6) and
+  blocks the run if the answer does not contain 42. Four new tests cover the noise case, and each
+  guard was mutated and seen to fail. (c) Stage 4's gate takes `--required-chips 2,4`; a required
+  configuration that is missing or fails still fails the stage, and a failed 1-chip attempt does not.
+- **13:18:40Z run 2 started** (pid 662891, run directory `hemmingway-1-run2`). The coder is the plain
+  4-chip package `changh95/qwen3.8-27b-p300x2` (profile batch32, 32 sequences, 262,144 context, no
+  speculative decoder), chosen because the Mando package returned noise. Same credentials acceptance
+  as run 1.
