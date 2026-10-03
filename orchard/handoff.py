@@ -33,6 +33,19 @@ from dataclasses import dataclass
 
 from orchard.adapters import ChipState, Lease, boards_of
 
+import dataclasses
+import json
+import time
+from pathlib import Path
+
+from orchard.adapters import (AdapterError, LeaseLost, Queued, Refused, ResetFailed,
+                              TicketGone)
+from orchard.canary import CanaryError, CanaryResult, compare
+from orchard.defaults import (COLD_BOOT_BUDGET_S, IDLE_RELEASE_S, MESH_RESET_EXTRA_S, POLL_S,
+                              QUEUE_POLL_S, QUIET_WAIT_S)
+from orchard.ledger import file_evidence
+from orchard.server import NotReady, ServerError, ServerStarting
+
 PARK_STEPS = ("note", "canary_before", "standin_started", "standin", "stop_sent", "stopped",
               "reset")
 ABANDONED = "abandoned"          # closes a park before the coder was told to stop
@@ -161,3 +174,290 @@ def progress(entries: list[dict]) -> Progress:
     return Progress(phase, cur["stage"], tuple(cur["park_done"]), tuple(cur["restore_done"]),
                     cur["lease"], cur["owner_pid"], cur["server"], cur["standin"],
                     cur["canary_before"], cur["mesh_reset"])
+
+
+@dataclass(frozen=True)
+class Budgets:
+    quiet_wait_s: float = QUIET_WAIT_S              # how long to wait for chips to go quiet
+    poll_s: float = POLL_S
+    cold_boot_s: float = COLD_BOOT_BUDGET_S         # the run's cold-boot budget (spec section 6)
+    mesh_reset_extra_s: float = MESH_RESET_EXTRA_S  # added when tt-model reset the mesh itself
+
+
+def wait_stopped(server, adapter, lease: Lease, *, quiet_wait_s: float, poll_s: float, clock,
+                 sleep, accept=("CLAIMED",)) -> dict:
+    """Poll until the server's own checks and the lease tool both show nothing running.
+
+    Both must agree. docker can show a container gone while a vLLM worker it started still holds
+    the device; the lease tool sees that holder. The lease tool can show a chip CLAIMED while
+    another user's container still holds it; docker sees that one. During another board's reset
+    our chips can look busy for about 42 s, so the wait lasts longer than that.
+    """
+    deadline = clock() + quiet_wait_s
+    while True:
+        check = server.confirm_stopped()
+        try:
+            quiet, states = chips_quiet(adapter.status(), lease, accept)
+        except AdapterError as exc:
+            quiet, states = False, {"error": str(exc)}
+        if check.stopped and quiet:
+            others = (check.evidence.get("docker_inspect") or {}).get("others_with_all_devices") or []
+            return {"ok": True, "checks": check.checks, "chip_states": states,
+                    "others_with_all_devices": others}
+        if clock() >= deadline:
+            return {"ok": False, "checks": check.checks, "chip_states": states,
+                    "server_evidence": check.evidence}
+        sleep(poll_s)
+
+
+class Handoff:
+    """One park and restore of the coder, step by step, each step recorded in the ledger."""
+
+    def __init__(self, *, ledger, stage, adapter, server, standin, lease: Lease, canary_prompt: str,
+                 note_path, evidence_dir, budgets: Budgets = Budgets(), clock=time.monotonic,
+                 sleep=time.sleep):
+        self.ledger, self.stage = ledger, stage
+        self.adapter, self.server, self.standin = adapter, server, standin
+        self.lease, self.canary_prompt = lease, canary_prompt
+        self.note_path = Path(note_path)
+        self.evidence_dir = Path(evidence_dir)
+        self.evidence_dir.mkdir(parents=True, exist_ok=True)
+        self.budgets, self.clock, self.sleep = budgets, clock, sleep
+
+    # ---- ledger and evidence helpers ----------------------------------------------------------
+
+    def _record(self, event: str, step: str, **data) -> None:
+        self.ledger.append(event, self.stage, step=step, lease=self.lease.record(),
+                           owner_pid=self.adapter.owner_pid, **data)
+
+    def _block(self, reason: str, **evidence):
+        self.ledger.append("notice", self.stage, blocked=True, reason=reason, evidence=evidence)
+        raise Blocked(reason, **evidence)
+
+    def _block_before_stop(self, reason: str, **evidence):
+        """Block a park that never told the coder to stop: close it, so the run is not parked."""
+        self.ledger.append("notice", self.stage, blocked=True, reason=reason, evidence=evidence)
+        stopped = None
+        if "standin_started" in progress(self.ledger.read()).park_done:
+            stopped = self._stop_standin()
+        self._record("park", ABANDONED, reason=reason, standin_stopped=stopped)
+        raise Blocked(reason, **evidence)
+
+    def _evidence_path(self, stem: str) -> Path:
+        """A new file for every attempt, named by the next ledger sequence number.
+
+        A ledger entry records each file's sha256, so a file is never written twice.
+        """
+        seq = len(self.ledger.read()) + 1
+        n = 0
+        while True:
+            path = self.evidence_dir / (f"{stem}-{seq:05d}.txt" if n == 0 else
+                                        f"{stem}-{seq:05d}-{n}.txt")
+            if not path.exists():
+                return path
+            n += 1
+
+    def _write_evidence(self, stem: str, text: str) -> Path:
+        path = self._evidence_path(stem)
+        with open(path, "x", encoding="utf-8") as f:       # "x": never overwrite
+            f.write(text)
+        return path
+
+    def _stop_standin(self) -> bool:
+        """Stop the stand-in and check it is gone. It is a process in its own session, so it
+        outlives a supervisor crash; a stand-in left running holds host memory and its port."""
+        try:
+            self.standin.stop()
+            check = self.standin.confirm_stopped()
+        except Exception as exc:          # cleanup: record it and carry on
+            self.ledger.append("notice", self.stage, what="stopping the stand-in failed",
+                               error=str(exc))
+            return False
+        if not check.stopped:
+            self.ledger.append("notice", self.stage, what="the stand-in is still running after "
+                               "its stop", checks=check.checks, standin=self.standin.record())
+        return check.stopped
+
+    # ---- shared checks ------------------------------------------------------------------------
+
+    def _wait_stopped(self, accept=("CLAIMED",), extra_s: float = 0.0) -> dict:
+        check = wait_stopped(self.server, self.adapter, self.lease,
+                             quiet_wait_s=self.budgets.quiet_wait_s + extra_s,
+                             poll_s=self.budgets.poll_s, clock=self.clock, sleep=self.sleep,
+                             accept=accept)
+        if check["ok"] and check["others_with_all_devices"]:
+            # Recorded for the operator; another agent's container does not block our stop.
+            self.ledger.append("notice", self.stage,
+                               what="other containers map the whole /dev/tenstorrent directory",
+                               containers=check["others_with_all_devices"])
+        return check
+
+    def _reset(self, event: str) -> None:
+        for attempt in (1, 2):
+            t0 = self.clock()
+            try:
+                self.adapter.reset(self.lease)
+            except LeaseLost as exc:
+                self._block(f"the lease is gone or another tenant holds its chips; no server is "
+                            f"started: {exc}")
+            except Refused as exc:
+                if exc.permanent:
+                    self._block(f"the lease adapter cannot reset these chips: {exc}")
+                # gozer's refusal ran nothing (spec section 8, item 1). The usual cause is a device
+                # still open, so look again before the one retry the retry rule allows.
+                if attempt == 2:
+                    self._block(f"gozer refused the reset twice: {exc}")
+                check = self._wait_stopped()
+                if not check["ok"]:
+                    self._block(f"the reset was refused and the chips are still in use: {exc}", **check)
+                self.ledger.append("retry", self.stage, what="reset", attempt=2, reason=str(exc))
+                continue
+            except ResetFailed as exc:
+                # The reset ran and failed, or is still running: the stage blocks (spec section 10).
+                self._block(f"the reset failed: {exc}", left_running=exc.left_running)
+            seconds = round(self.clock() - t0, 3)      # the successful call only
+            self._record(event, "reset", seconds=seconds, attempts=attempt)
+            self.ledger.append("measurement", self.stage, name=f"{event}_reset_seconds",
+                               value=seconds, unit="s", label="measured")
+            return
+
+    # ---- park (spec section 6, steps 1 to 3) --------------------------------------------------
+
+    def park(self) -> Lease:
+        p = progress(self.ledger.read())
+        if p.phase == "restoring":
+            raise ValueError("a restore is in progress; call restore() or recover first")
+        done = set(p.park_done) if p.phase in ("parking", "parked") else set()
+        if "note" not in done:
+            self._park_note()
+        if "canary_before" not in done:
+            self._park_canary()
+        # Stand-in first (spec section 6, step 2): the coder stops only after the stand-in answered.
+        if "standin" not in done:
+            self._park_standin(started="standin_started" in done)
+        mesh_reset = p.mesh_reset
+        if "stop_sent" not in done:
+            result = self.server.stop()
+            mesh_reset = bool(result.get("mesh_reset"))
+            self._record("park", "stop_sent", result=result)
+        if "stopped" not in done:
+            extra = self.budgets.mesh_reset_extra_s if mesh_reset else 0.0
+            check = self._wait_stopped(extra_s=extra)
+            if not check["ok"]:
+                self._block("the coder is not confirmed stopped; no reset was run", **check)
+            self._record("park", "stopped", **check)
+        if "reset" not in done:
+            self._reset("park")
+        return self.lease
+
+    def _park_note(self) -> None:
+        path = self.note_path
+        try:
+            note = json.loads(path.read_text())
+        except (OSError, ValueError) as exc:
+            self._block(f"the handoff note {path} is missing or is not JSON: {exc}")
+        if not isinstance(note, dict):
+            self._block(f"the handoff note {path} is not a JSON object")
+        missing = [k for k in NOTE_KEYS if note.get(k) in (None, "")]
+        if missing:
+            self._block(f"the handoff note {path} lacks {', '.join(missing)}", note=str(path))
+        self._record("park", "note", note=file_evidence(path), server=self.server.record())
+
+    def _park_canary(self) -> None:
+        try:
+            answer = self.server.ask(self.canary_prompt)
+        except (CanaryError, OSError) as exc:
+            self._block_before_stop(f"the coder did not answer the canary before the park: {exc}")
+        if not answer.strip():
+            self._block_before_stop("the coder gave an empty canary answer before the park")
+        path = self._write_evidence("canary-before", answer)
+        self._record("park", "canary_before", canary=file_evidence(path))
+
+    def _park_standin(self, started: bool) -> None:
+        if not started:
+            try:
+                self.standin.start()
+            except (ServerError, OSError) as exc:
+                self._record("park", "standin_started", standin=self.standin.record(), ok=False)
+                self._block_before_stop(f"the stand-in did not start; the coder stays up: {exc}")
+            # Recorded before the canary, so a crash from here on leaves the pid in the ledger.
+            self._record("park", "standin_started", standin=self.standin.record())
+        try:
+            answer = self.standin.ask(self.canary_prompt)
+        except (CanaryError, ServerError, OSError) as exc:
+            self._block_before_stop(f"the stand-in did not answer; the coder stays up: {exc}")
+        if not answer.strip():
+            self._block_before_stop("the stand-in gave an empty answer; the coder stays up")
+        path = self._write_evidence("standin-canary", answer)
+        self._record("park", "standin", canary=file_evidence(path))
+
+    # ---- restore (spec section 6, steps 4 to 6; the stage test itself is plan 4's) ------------
+
+    def restore(self) -> CanaryResult | None:
+        p = progress(self.ledger.read())
+        if p.phase not in ("parked", "restoring"):
+            raise ValueError(f"nothing to restore (phase {p.phase})")
+        done = set(p.restore_done)
+        if "reset" not in done:
+            check = self._wait_stopped()
+            if not check["ok"]:
+                self._block("the chips are still in use after the stage; no reset was run", **check)
+            self._reset("restore")
+        if "serve" not in done:
+            # Never start a second server while one may be up or coming up on the same port.
+            if not self.server.confirm_stopped().stopped:
+                self._block("a server is already up or coming up for the coder; not starting another")
+            try:
+                self.server.start(self.lease)
+            except ServerStarting as exc:
+                self._block(f"the coder start timed out while it was coming up; nothing else is "
+                            f"started: {exc}", may_be_running=True)
+            except ServerError as exc:
+                self._block(f"starting the coder failed; nothing is retried: {exc}")
+            self._record("restore", "serve", server=self.server.record())
+        if "ready" not in done:
+            try:
+                seconds = self.server.wait_ready(self.budgets.cold_boot_s)
+            except NotReady as exc:
+                self._block("the coder did not return within the cold-boot budget; the run is "
+                            "paused and nothing is retried", waited_s=exc.waited_s,
+                            budget_s=self.budgets.cold_boot_s)
+            except ServerError as exc:
+                self._block(f"the coder exited before it was ready; nothing is retried: {exc}")
+            self._record("restore", "ready", seconds=seconds)
+            # The wait for readiness only: `tt-model serve` itself is not inside this number.
+            self.ledger.append("measurement", self.stage, name="coder_ready_wait_seconds",
+                               value=seconds, unit="s", label="measured")
+        result = None
+        if "canary" not in done:
+            result = self._restore_canary(p.canary_before)
+        if "resumed" not in done:
+            stopped = self._stop_standin()
+            # Plan 4 hands the note and a summary of the stage test to the coder.
+            self._record("restore", "resumed", note=str(self.note_path), standin_stopped=stopped)
+        return result
+
+    def _restore_canary(self, before_ev: dict | None) -> CanaryResult | None:
+        try:
+            after = self.server.ask(self.canary_prompt)
+        except (CanaryError, OSError) as exc:
+            self._block(f"the coder did not answer the canary after the restore: {exc}")
+        after_path = self._write_evidence("canary-after", after)
+        if before_ev is None:
+            # Only possible after a restart that interrupted the park before its canary.
+            self.ledger.append("notice", self.stage,
+                               what="canary not compared: no answer was recorded before the park")
+            self._record("restore", "canary", compared=False, canary=file_evidence(after_path))
+            return None
+        try:
+            before = Path(before_ev["path"]).read_text()
+        except OSError as exc:
+            self._block(f"the pre-park canary answer cannot be read: {exc}", before_file=before_ev)
+        result = compare(before, after)
+        if not result.match:
+            self._block("the canary answer changed after the restore",
+                        whitespace_only=result.whitespace_only, before=before[:500],
+                        after=after[:500], before_file=before_ev,
+                        after_file=file_evidence(after_path))
+        self._record("restore", "canary", compared=True, match=True, canary=file_evidence(after_path))
+        return result
