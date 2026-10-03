@@ -127,3 +127,26 @@ def test_the_watchdog_tracks_the_stage_and_answers_once_per_agent(ledger):
     assert act.calls == [("nudge", "coder")]
     entries = [e for e in ledger.read() if e["data"].get("watchdog")]
     assert entries[0]["stage"] == 2
+
+
+def test_a_finding_with_its_own_nudge_text_sends_that_text(ledger):
+    act = Actuator()
+    ladder = Ladder(act, ledger, {"coder"})
+    f = Finding("no_file_written", "coder", 1.0, "20 model turns and no file written", {"turns": 20},
+                nudge="20 model turns have passed and no file was written. Write the files now.")
+    assert ladder.respond("coder", [f], 2) == "nudge"
+    msg = [e["data"]["message"] for e in ledger.read() if e["event"] == "retry"][0]
+    assert "no file was written" in msg and "repeating itself" not in msg
+    # Mixed with a repeat finding, both texts are sent.
+    both = nudge_message([f, finding()])
+    assert "no file was written" in both and "3 identical responses in a row" in both
+
+
+def test_twenty_writeless_turns_reach_the_ladder_as_a_nudge(ledger):
+    from orchard.watchdog import NoFileWritten
+    act = Actuator()
+    wd = Watchdog([NoFileWritten()], Ladder(act, ledger, {"coder"}))
+    found = [f for t in range(1, 21) for f in wd.feed(Event(ts=t, agent="coder", kind="response",
+                                                             input_tokens=t, output_tokens=5))]
+    assert [f.detector for f in found] == ["no_file_written"]
+    assert act.calls == [("nudge", "coder")]

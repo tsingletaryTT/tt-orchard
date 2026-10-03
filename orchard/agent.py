@@ -449,6 +449,8 @@ class AgentStep:
                 self._event("tool_call", tool=name, args_hash=sha(args))
                 result = self.tools.call(name, args)
                 messages.append({"role": "tool", "tool_call_id": str(call.get("id", "")), "content": result})
-                self._event("tool_result", tool=name, output_hash=sha(result))
+                # wrote: did this write_file call write its file? None for other tools.
+                self._event("tool_result", tool=name, output_hash=sha(result),
+                            wrote=result.startswith("wrote ") if name == "write_file" else None)
                 self._record_new_evidence()
         return self._end("turns", max_turns, detail=f"no final answer after {max_turns} turns")

@@ -62,6 +62,12 @@ NO_EVIDENCE_S = 3600.0          # choice; not measured: transcripts carry no evi
 LEASE_IDLE_S = 1800.0           # choice; not measured
 LEASE_POLL_S = 60.0             # choice: `gozer status` is read at most once a minute by the watchdog
 RUNG_CAPS = {"nudge": 1, "escalate": 1, "pause": 1}   # choice: each rung once per agent and stage
+WRITELESS_TURNS = 20            # choice: model turns in a row in which no file was written (no
+                                # successful write_file, no new evidence file) before the step is
+                                # nudged. A third of AGENT_MAX_TURNS. In the committed qwen transcript
+                                # signatures the longest such run is 18 turns (counting qwen-code's
+                                # write tools), so 20 stays quiet there. The live stage 2 run that
+                                # grepped vLLM source for 60 turns would have been nudged at turn 20.
 
 # ---- plan 4: stages, agent steps and the run ---------------------------------------------------
 # Per-stage wall-clock budgets (spec section 10). Choices; none is measured. Stage 5 holds one 2-chip

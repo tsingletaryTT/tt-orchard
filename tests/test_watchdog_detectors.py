@@ -2,8 +2,8 @@
 import pytest
 
 from orchard.adapters import AdapterError, ChipState
-from orchard.watchdog import (Event, IdenticalResponses, LeaseIdle, NoNewEvidence, RepeatedToolCall,
-                              StageOverBudget, ThinkingWithoutAction, replay)
+from orchard.watchdog import (Event, IdenticalResponses, LeaseIdle, NoFileWritten, NoNewEvidence,
+                              RepeatedToolCall, StageOverBudget, ThinkingWithoutAction, replay)
 
 
 def resp(ts, i=1000, o=100, think=50, text=None, tool=False, agent="a"):
@@ -175,3 +175,74 @@ def test_a_finished_stage_or_one_without_a_budget_never_fires():
     evs = [stage_event(0, "stage_start"), stage_event(50, "stage_end"), resp(500),
            stage_event(600, "stage_start", stage=5), resp(5000)]
     assert replay(evs, [d]) == []
+
+
+# ---- NoFileWritten -------------------------------------------------------------------------------
+
+def wrote(ts, ok=True, tool="write_file", agent="a"):
+    """The result of a file-writing tool call. ok=None is a transcript, which does not say."""
+    return Event(ts=ts, agent=agent, kind="tool_result", tool=tool, output_hash="2" * 64, wrote=ok)
+
+
+def test_writeless_turns_default_is_twenty():
+    from orchard.defaults import WRITELESS_TURNS
+    assert WRITELESS_TURNS == 20 and NoFileWritten().turns == 20
+
+
+def test_twenty_turns_without_a_write_fire_once():
+    found = replay([resp(t, i=t) for t in range(1, 51)], [NoFileWritten()])
+    assert times(found) == [20]
+    f = found[0]
+    assert f.detector == "no_file_written" and f.evidence["turns"] == 20
+    assert f.pause is False and f.notice_only is False          # nudge level
+    assert "20 model turns" in f.nudge and "no file was written" in f.nudge
+    assert "write the files the skill names now" in f.nudge and "blocks" in f.nudge
+
+
+def test_a_write_re_arms_the_detector():
+    evs = [resp(t, i=t) for t in range(1, 26)] + [wrote(26)] + [resp(t, i=t) for t in range(27, 47)]
+    assert times(replay(evs, [NoFileWritten()])) == [20, 46]
+
+
+def test_a_write_resets_the_count_before_it_fires():
+    evs = [resp(t, i=t) for t in range(1, 16)] + [wrote(16)] + [resp(t, i=t) for t in range(17, 36)]
+    assert replay(evs, [NoFileWritten()]) == []
+
+
+def test_a_new_evidence_file_counts_as_a_write():
+    evs = ([resp(t, i=t) for t in range(1, 16)]
+           + [Event(ts=16, agent="a", kind="evidence", name="stages/2/evidence/x.json")]
+           + [resp(t, i=t) for t in range(17, 36)])
+    assert replay(evs, [NoFileWritten()]) == []
+
+
+def test_a_refused_write_or_a_shell_result_is_not_a_write():
+    evs = []
+    for t in range(1, 21):
+        evs += [resp(t, i=t), wrote(t + 0.5, ok=False),
+                Event(ts=t + 0.6, agent="a", kind="tool_result", tool="shell", output_hash="3" * 64)]
+    assert times(replay(evs, [NoFileWritten()])) == [20]
+
+
+@pytest.mark.parametrize("tool", ["write_file", "edit", "replace"])
+def test_a_transcript_write_tool_counts_when_the_source_does_not_say(tool):
+    evs = [resp(t, i=t) for t in range(1, 16)] + [wrote(16, ok=None, tool=tool)] + \
+          [resp(t, i=t) for t in range(17, 36)]
+    assert replay(evs, [NoFileWritten()]) == []
+
+
+def test_writeless_turns_are_counted_per_agent():
+    evs = [resp(t, i=t, agent="a" if t % 2 else "b") for t in range(1, 39)]
+    assert replay(evs, [NoFileWritten()]) == []
+
+
+
+@pytest.mark.parametrize("name", ["qwen_quiet_signature.jsonl", "qwen_loop_signature.jsonl"])
+def test_no_file_written_stays_quiet_on_the_committed_signatures(name):
+    # The transcripts do not say whether a write succeeded, so a result from qwen-code's write
+    # tools counts. The longest run without one is 18 turns (loop chat) and 16 (quiet chat).
+    from pathlib import Path
+
+    from orchard.transcripts import load_signature
+    evs = load_signature(Path(__file__).resolve().parent / "fixtures" / name)
+    assert replay(evs, [NoFileWritten()]) == []

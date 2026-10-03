@@ -362,3 +362,15 @@ def test_a_step_that_never_ran_cannot_continue(run):
     s = step(run_dir, ledger, "http://unused/v1")[0]
     with pytest.raises(RuntimeError):
         s.continue_with("x", max_turns=1, log_path=run_dir / "c.jsonl")
+
+
+def test_a_write_file_result_says_whether_the_write_succeeded(run):
+    run_dir, ledger = run
+    script = [call("write_file", path="notes.txt", content="x"),
+              call("write_file", path="../../outside.txt", content="x"),
+              call("shell", command="echo hi"), final("done")]
+    with FakeModel(lambda r: script[turn(r)]) as fm:
+        s, events, _ = step(run_dir, ledger, fm.endpoint)
+        s.run("s", "u")
+    results = [(e.tool, e.wrote) for e in events if e.kind == "tool_result"]
+    assert results == [("write_file", True), ("write_file", False), ("shell", None)]
