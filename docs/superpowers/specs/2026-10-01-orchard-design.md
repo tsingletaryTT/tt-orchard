@@ -1,9 +1,9 @@
 # tt-orchard: design
 
 Status: draft for operator review. Date: 2026-10-01. Author: Claude, with Taylor Singletary.
-Plan 1 (the core library: ledger, command runner, tier config, sizing tool) is implemented through
-Task 4. Task 5 of plan 1 (running the sizing tool on this machine) and plans 2 to 4 are not
-implemented. Every number below is either cited to a
+Plans 1 to 4 are implemented. Not yet done: plan 1 Task 5 (the sizing tool on this machine), plan 3's
+park check on hardware, and plan 4's Hemmingway-1 run (docs/runbooks/hardware-validation.md). Every
+number below is either cited to a
 measurement made on this machine or marked **unmeasured**.
 
 ## 1. Purpose
@@ -84,6 +84,11 @@ tt-orchard/
     handoff.py              park and restore
     watchdog.py             loop detection and response ladder
     adapters/gozer.py, adapters/single_tenant.py
+    agent.py                agent steps: environment, tools, model calls (plan 4)
+    context.py              the fresh context for one agent step (plan 4)
+    supervisor.py           the run loop and its command line (plan 4)
+    scrub.py                the bundle scrub (plan 4)
+    skills/                 draft stage skills until they move to tt-model-bringup (plan 4)
   config/tiers.example.toml
   tests/
   docs/superpowers/specs/, docs/superpowers/plans/
@@ -291,7 +296,8 @@ One append-only `ledger.jsonl` per run, with an `evidence/` directory beside it.
 - Entry fields: sequence number, timestamp, stage, event, tier, model id, result, evidence paths with
   sha256.
 - Events: `run_start`, `stage_start`, `stage_end`, `park`, `restore`, `retry`, `escalate`, `notice`,
-  `measurement`, `decision`. A `measurement` entry carries a `label` of `measured` or `TODO`.
+  `measurement`, `decision`, `evidence` (an evidence file's run-relative path and sha256; plan 4).
+  A `measurement` entry carries a `label` of `measured` or `TODO`.
   The label applies to every field the tool reports in that entry. A `null` under `measured` means
   the source did not report that field, and the sibling flags say why (`load_cold`,
   `prefill_cached`, `decode_complete`, and the `resident_bytes` warning on stderr). `TODO`
@@ -349,7 +355,9 @@ The runner is best effort. It is a hand-written lexer and not a shell parser, an
 arbitrary code (`python3 -c`), tools it does not name (`mv`, `rsync --delete`, `tee`), or a script
 that runs a denied command inside it. Outer layers belong to plans 3 and 4: agent shells run
 without GitHub and Hugging Face tokens, and with read-only mounts everywhere outside the run
-directory. The runner is one layer among these.
+directory. The runner is one layer among these. Plan 4 built the first outer layer: agent shells get
+an allow-listed environment with no tokens and a HOME inside the run directory. Read-only mounts are
+not built, so files outside the run directory stay readable and writable by the run's user.
 
 **OPEN DECISION.** No adversarial search for bypasses of the runner has been done. Reviews so far
 read the code and ran its tests. One reviewer that tried an adversarial search was stopped by a

@@ -184,3 +184,84 @@ run `tt-smi -r` by hand.
 
 Record afterwards: the run directory, the exit code, the three reset times, and anything in the
 summary marked STOP.
+
+## Hemmingway-1 run (plan 4)
+
+Purpose: the first bring-up driven by the harness and not by Claude by hand. The supervisor takes
+`Altworld/Hemmingway-1` (a creative-writing fine-tune of Qwen3.8-27B with the same architecture)
+from stage 0 to the operator bundle. It parks the large coder for every hardware stage, records
+everything in a ledger, and stops at "ready for operator review". It publishes nothing. The run
+also checks stage 0 against the hand-written reference answer.
+
+Who runs it: the controller, with the operator's agreement. An implementer does not. It takes all
+four chips for hours.
+
+Before running:
+- The operator has answered the open decision about the command runner (spec section 10 and
+  section 14, item 5). Do not start without that answer.
+- The operator confirms which 4-chip package serves the large tier. `config/tiers.toml` names the
+  model (`Qwen/Qwen3.8-27B` on port 8000) and no package. The installed 4-chip candidate is
+  `mando2222/qwen3.8-27b-dflash2-p300x2-q4kv` (container, profile `batch8-dflash2`). The model id
+  that package serves must equal the large tier's `model`, because the supervisor checks
+  `/v1/models` for it. If it differs, the operator edits `config/tiers.toml`.
+- `gozer status` shows all four chips `FREE` and no other lease. No `GOZER_*` variable is set.
+- ollama serves the CPU tier: `curl -s http://127.0.0.1:11434/v1/models` lists `qwen3-coder:30b`.
+- Nothing listens on port 8000: `ss -ltn "( sport = :8000 )"` prints only its header.
+- The run directory is on `/mnt/bonus` (404 GB free on 2026-10-02). The root disk is 99% full,
+  and stages 2 to 6 each require 40 GB free (stage 4 requires 80 GB).
+- Do not give the harness the reference answer, and do not name the base model's tensor cache
+  as an input. Stage 0 must find both on its own.
+
+Run, from the repo root:
+
+    python3 -m orchard.supervisor run \
+      --model Altworld/Hemmingway-1 \
+      --run-dir /mnt/bonus/models/hemmingway-1/orchard-run-1 \
+      --tiers config/tiers.toml \
+      --coder-target mando2222/qwen3.8-27b-dflash2-p300x2-q4kv --coder-kind container \
+      --coder-profile batch8-dflash2 --coder-port 8000 --coder-chips 4 \
+      --skills-dir /home/ttuser/code/skills/plugins/tt-model-bringup/skills \
+      --input model=/mnt/bonus/models/hemmingway-1/hf/hub/models--Altworld--Hemmingway-1/snapshots/1a5f363a3dd2d1cc456c28b8abbb403b9555efaf \
+      --input base=/mnt/bonus/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0 \
+      --env HF_HOME=/mnt/bonus/models/hemmingway-1/hf --env HF_HUB_OFFLINE=1
+
+What happens: the supervisor records the run and the versions it can read (`tt-model --version`,
+the firmware from `tt-smi -s`; tt-metal and vLLM are recorded as TODO). It takes a 4-chip lease
+under its own pid and starts the coder (a cold boot is about 30 min, budget 45 min). Stages 0 and 1
+run on the large server; the small tier is not serving, and the ledger records each substitution.
+Each of stages 2 to 6 runs a prepare step, parks the coder (stand-in canary on ollama, stop, reset),
+runs the agent's test command on board 0's two chips, restores the coder (reset, start, canary
+compared with the pre-park answer) and runs a finish step. Each reset measured 41.7 s and a warm
+restart 2 to 3 min. The total run time is not measured. Stage 7 is recorded as skipped. Stage 8
+writes the bundle, the supervisor scrubs it, and then it stops the coder and releases the four
+chips. Restart the operator's own coder afterwards if it is wanted.
+
+Watch and steer, from another shell:
+
+    tail -n 5 /mnt/bonus/models/hemmingway-1/orchard-run-1/ledger.jsonl
+    python3 -m orchard.supervisor control --run-dir /mnt/bonus/models/hemmingway-1/orchard-run-1 pause
+    python3 -m orchard.supervisor control --run-dir /mnt/bonus/models/hemmingway-1/orchard-run-1 resume
+    python3 -m orchard.supervisor control --run-dir /mnt/bonus/models/hemmingway-1/orchard-run-1 abort
+
+A paused run holds its leases and waits. Read the last `notice` and `decision` entries before
+resuming. Abort stops the coder and releases the lease. If the supervisor dies, run the same
+`run` command again: it replays the ledger, re-leases the coder under its new pid, and resumes.
+
+Compare stage 0 with the reference answer once stage 0 has passed:
+
+    python3 -m orchard.stages compare-delta \
+      /mnt/bonus/models/hemmingway-1/orchard-run-1/stages/0/delta.json \
+      /mnt/bonus/models/hemmingway-1/work/stage0-reference.md
+
+Exit 0 means every difference area and hazard in the reference is covered and the path agrees
+(`weights-only`). The command compares areas only. Read each finding against the reference by hand,
+in particular the tokenizer's combining-mark difference and the tensor-cache hazard.
+
+Stop conditions: a pause whose reason you cannot explain, a `blocked` notice from a park or
+restore, a canary that changed, or any sign that something was published. Never use `--force`,
+never run `tt-smi -r` by hand, and never run the commands in `PUBLISH_COMMANDS.txt`; they are for
+the operator.
+
+Record afterwards: the run directory, the exit code, each stage's result, the compare-delta output
+and your reading of the findings, every number in stage 6 with its label, every pause with its
+reason, and the wall time.

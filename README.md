@@ -23,9 +23,11 @@ Early. The hold-through-swap pattern has been checked on this machine's two boar
 | Server control and canary (`orchard/server.py`, `orchard/canary.py`) | built, tested; stop checks also run against real ps, pgrep, ss and curl with a fake server |
 | Park and restore (`orchard/handoff.py`) | built, tested against a fake machine, including a crash after every ledger event; the park check ran once on real hardware on 2026-10-02 (see below) |
 | Watchdog (`orchard/watchdog.py`, `orchard/transcripts.py`) | built, tested; thresholds set from a replay of the recorded qwen-code loop and 30 quiet chats |
-| Supervisor loop, stage state machine, model proxy, new bring-up skills, operator bundle | designed, not started (plan 4) |
+| Stage machine, agent steps and supervisor loop (`orchard/stages.py`, `orchard/agent.py`, `orchard/context.py`, `orchard/supervisor.py`, `orchard/scrub.py`) | built, tested against a fake machine and fake model servers, including a kill after every ledger event; not yet run on hardware (Hemmingway-1 entry in `docs/runbooks/hardware-validation.md`) |
+| Stage skills (`orchard/skills/`: delta-triage, reference-gate, serving-check, operator-bundle) | local drafts; their home is the tt-model-bringup plugin |
+| Model proxy for agents the supervisor did not launch, stage 7 (package and image build) | designed; no code yet |
 
-The suite has 854 passing tests and 1 skipped, and runs without hardware or network. The skipped test is the opt-in replay of local qwen-code transcripts (`ORCHARD_REPLAY=1 python3 -m pytest tests/test_replay_local.py`). 607 of the tests predate plan 3. The driver's tests use fake gozer roots and a stub child.
+The suite has 962 passing tests and 1 skipped, and runs without hardware or network. 854 of them predate plan 4. The skipped test is the opt-in replay of local qwen-code transcripts (`ORCHARD_REPLAY=1 python3 -m pytest tests/test_replay_local.py`). 607 of the tests predate plan 3. The driver's tests use fake gozer roots and a stub child.
 
 The park check (`orchard/park_check.py`) ran on real hardware on 2026-10-02, on board 1 (chips `0000:03:00.0` and `0000:04:00.0`), with the default options and fake coder and stand-in servers. It exited 0. The park reset took 41.676 s and the restore reset took 41.657 s. The record is in `runs/park-check/20261003T011558Z-0000-03-00.0/`, which git ignores. It is one run on one board; it did not use a real model.
 
@@ -90,6 +92,7 @@ The full design is in `docs/superpowers/specs/2026-10-01-orchard-design.md`.
   guard. It acts through an injected actuator that plan 4 supplies. `orchard/transcripts.py` turns
   a qwen-code transcript into that stream, and the detector thresholds come from a replay of the
   recorded loop.
+- **Supervisor.** The supervisor (`python3 -m orchard.supervisor run ...`) runs stages 0 to 6 and 8 of a weights-only bring-up with local models, parks the coder for hardware stages, records every step in the ledger, and stops at ready for operator review. It never publishes.
 
 ## Try it
 

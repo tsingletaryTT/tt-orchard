@@ -50,6 +50,17 @@ using the skills, with open-source models only. The run ends at an operator revi
   matches the ledger.
 - The watchdog acts only through an injected actuator, which plan 4 supplies. Each ladder rung is
   written to the ledger before it is acted on, so a restart cannot repeat a rung.
+- Plan 4 (2026-10-02): the supervisor starts the coder itself under its own owner-pid lease, because a
+  lease cannot pass from the controller's pid to the supervisor's. It stops the coder and releases the
+  lease at the end of the run and on abort. The CPU tier (ollama) is an external stand-in that the
+  operator runs.
+- A hardware stage is three parts: a prepare step writes `hw_test.json` and `handoff.json`, the
+  supervisor runs that one command under the lease (parking the coder when no board is free), and a
+  finish step writes the result from the test output. `test-result.json` is the resume marker.
+- When the named tier is down, a chip tier with the same model serves the step, and the ledger says
+  so. On this box only the 4-chip large server runs, so it serves every step.
+- Agent shells get an allow-listed environment with HOME inside the run directory. Read-only mounts
+  are not built.
 
 ## Layout
 Spec: `docs/superpowers/specs/`. Plans: `docs/superpowers/plans/`. Code: `orchard/`. Tests: `tests/`.
@@ -57,7 +68,8 @@ Spec: `docs/superpowers/specs/`. Plans: `docs/superpowers/plans/`. Code: `orchar
 ## Status
 Plan 1 is implemented through Task 4 (ledger, runner, tiers, sizing). Task 5 (run the sizing tool
 against a real ollama, which downloads models and loads the host) was not run. It needs the
-operator. Plan 2 is merged to `main` in tt-gozer. Plan 3 (adapters, server control, park and restore, watchdog) is implemented on branch `plan3-supervisor-behavior`. Plan 4 is not started.
+operator. Plan 2 is merged to `main` in tt-gozer. Plan 3 (adapters, server control, park and restore, watchdog) is implemented on branch `plan3-supervisor-behavior`. Plan 4 (stage machine, agent steps, supervisor loop, draft stage skills) is implemented on branch
+`plan4-stage-machine`. The Hemmingway-1 run in the runbook has not been run.
 
 ## Open decision for the operator
 No adversarial search for bypasses of the command runner has been done. Decide before plan 4 ships:
@@ -91,6 +103,18 @@ two-process lock test.
   plus the minors. Key decisions: single-tenant tests get a `FakeRun` that fails on any call; the stand-in
   is spawned, recorded, then waited for; a recorded pid is signalled only if its start time and boot id
   still match; recovery and restore stop checks each got a test that fails without them.
+- 2026-10-02: plan 4 written. Prompt: the smallest loop that lets the harness bring up a model whose
+  architecture matches a supported one, stage 0 to 6 plus a minimal stage 8 bundle, first target
+  Altworld/Hemmingway-1. Every code block was run from the plan text in a scratch copy before hand-over.
+  Found while checking it: counting every coder start against a cap paused the run at stage 5, because
+  each park restarts the coder; the cap now counts cold boots (a start slower than 10 min). The run
+  also left the coder serving under a dead pid's lease after it finished, so the run now releases the
+  hardware at the end.
+- 2026-10-02: plan 4 implemented (tasks 9 to 11 in this batch). The suite has 962 passed and 1 skipped
+  (the opt-in replay). The supervisor was killed after every ledger event of a scripted bring-up:
+  162 kill points with the coder on four chips and 107 with the coder on two. Each resumed run
+  finished with the same stage results, bundle and stage 6 numbers, and no lease left behind. The
+  Hemmingway-1 hardware run has not been run.
 
 ## Notable moments
 - The `shlex` runner was shown to be bypassable (comments, keywords, `eval`, shells on stdin,
