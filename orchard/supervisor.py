@@ -563,6 +563,10 @@ class Supervisor:
                            server=self.coder.record())
         try:
             self.coder.start(lease)
+            # The boot takes up to 45 minutes and is the likeliest time for a kill. This entry
+            # gives the kill test a kill point while the container runs and has not answered.
+            self.ledger.append("decision", None, decision="coder container started",
+                               lease_id=lease.lease_id)
             seconds = self.coder.wait_ready(self.budgets.cold_boot_s)
             answer = self.coder.ask(RUN_CANARY_PROMPT)
         except (ServerError, CanaryError, OSError) as exc:

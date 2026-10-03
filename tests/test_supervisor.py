@@ -402,3 +402,31 @@ def test_a_mid_run_error_is_not_reported_as_a_refusal(tmp_path, capsys, monkeypa
                 home=tmp_path / "operator-home") == EXIT_ERROR
     err = capsys.readouterr().err
     assert "refused" not in err and "no free board" in err and "hardware released" in err
+
+
+# ---- a crash during the coder's boot -------------------------------------------------------------
+
+def test_a_crash_during_the_coder_boot_stops_that_container_and_re_leases(tmp_path):
+    """The supervisor dies after the container started and before it answered (the 30 minute
+    boot). The container outlives it on all four chips, under a lease whose pid is dead. The
+    restart must find both in the ledger, stop the container and take a new lease."""
+    rig = Rig(tmp_path, chips=4)
+    try:
+        class CrashesWhileBooting(MachineCoder):
+            def start(self, lease):
+                super().start(lease)
+                raise Crash("killed during the boot")
+        rig.coder_cls = CrashesWhileBooting
+        with pytest.raises(Crash):
+            rig.run()
+        assert rig.m.coder_running and set(rig.m.leases) == {"L1"}
+        rig.coder_cls = MachineCoder
+        assert rig.run(pid=200) == EXIT_READY
+        d = [x["decision"] for x in rig.decisions()]
+        relaunch = d.index("relaunch the coder under this supervisor's lease")
+        assert "stopping the coder" in d[relaunch:d.index("coder started")]
+        started = next(x for x in rig.decisions() if x["decision"] == "coder started")
+        assert started["lease"]["lease_id"] != "L1"            # a new lease, under the new pid
+        assert rig.m.leases == {} and not rig.m.coder_running
+    finally:
+        rig.close()

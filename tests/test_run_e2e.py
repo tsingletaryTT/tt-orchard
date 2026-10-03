@@ -106,3 +106,14 @@ def test_a_kill_after_any_ledger_event_reaches_the_same_final_state(tmp_path, se
         assert final_state(base) == want, k
         # The hardware is given back, including any lease the killed supervisor held.
         assert not m.coder_running and m.leases == {}, (k, m.leases)
+
+
+def test_the_kill_test_has_a_kill_point_inside_the_coder_boot(tmp_path, servers):
+    """A kill between the container start and its first answer is the likeliest Ctrl-C (a cold
+    boot takes about 30 minutes). The kill test kills only after ledger appends, so the boot needs
+    one append while the container runs and before "coder started"."""
+    m = Machine()
+    assert run(tmp_path, servers, m, chips=4, pid=FIRST) == EXIT_READY
+    names = [e["data"].get("decision") for e in entries(tmp_path)]
+    first, started = names.index("coder starting"), names.index("coder started")
+    assert "coder container started" in names[first + 1:started]
