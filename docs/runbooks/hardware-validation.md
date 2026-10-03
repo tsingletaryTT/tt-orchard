@@ -209,12 +209,24 @@ Before running:
 - Nothing listens on port 8000: `ss -ltn "( sport = :8000 )"` prints only its header.
 - The run directory is on `/mnt/bonus` (404 GB free on 2026-10-02). The root disk is 99% full,
   and stages 2 to 6 each require 40 GB free (stage 4 requires 80 GB).
-- Do not give the harness the reference answer, and do not name the base model's tensor cache
-  as an input. Stage 0 must find both on its own.
+- Do not give the harness the reference answer, the nearest supported model or the base model's
+  tensor cache. The nearest model (Qwen3.8-27B) and its revision are lines of the reference
+  answer, and every `--input` appears in every agent prompt, so the run command below has no
+  `--input base=`. Stage 0 must find the nearest model, its revision and the tensor cache on its
+  own. Record in the results that the nearest model was NOT given.
+- The run directory is `/mnt/bonus/models/orchard-runs/hemmingway-1-run1`, outside the
+  `/mnt/bonus/models/hemmingway-1/` tree. That tree holds `work/stage0-reference.md` and possibly
+  notes from the earlier hand bring-up, and agent shells start in the run directory. The model
+  input and `HF_HOME` are still inside that tree, so an agent that lists it can find `work/`.
+- Agents can still read any absolute path the user can read. The reference answer exists at
+  `/mnt/bonus/models/hemmingway-1/work/stage0-reference.md` and inside this repo at
+  `tests/fixtures/hemmingway_stage0_reference.md`, and all of `/mnt/bonus` is readable. Nothing in
+  the harness stops an agent from reading either file. The check comes after the run (below).
 - Credential files. The supervisor refuses to start (exit 2, naming each path) while any of these
   exist in the operator's home: `~/.cache/huggingface/token`, `~/.config/gh/hosts.yml`,
-  `~/.ssh/id_*` private keys, `~/.netrc` and `~/.docker/config.json`. On 2026-10-02 the first
-  four kinds existed on this box. Move them aside for the run and put them back afterwards, or
+  `~/.ssh/id_*` private keys, `~/.netrc` and `~/.docker/config.json`. On 2026-10-02 the
+  Hugging Face token, the gh hosts file, an ssh key and the docker config existed on this box
+  (the final review checked existence only). Move them aside for the run and put them back afterwards, or
   pass `--accept-credentials-visible`; the ledger then records that the operator accepted it.
   Agent shells run as the same user, so code an agent runs can read any file that stays. Agent
   shells get `GIT_SSH_COMMAND` set so git over ssh uses no key, and the runner refuses ssh, scp,
@@ -239,13 +251,12 @@ Run, from the repo root:
 
     python3 -m orchard.supervisor run \
       --model Altworld/Hemmingway-1 \
-      --run-dir /mnt/bonus/models/hemmingway-1/orchard-run-1 \
+      --run-dir /mnt/bonus/models/orchard-runs/hemmingway-1-run1 \
       --tiers config/tiers.toml \
       --coder-target mando2222/qwen3.8-27b-dflash2-p300x2-q4kv --coder-kind container \
       --coder-profile batch8-dflash2 --coder-port 8000 --coder-chips 4 \
       --skills-dir /home/ttuser/code/skills/plugins/tt-model-bringup/skills \
       --input model=/mnt/bonus/models/hemmingway-1/hf/hub/models--Altworld--Hemmingway-1/snapshots/1a5f363a3dd2d1cc456c28b8abbb403b9555efaf \
-      --input base=/mnt/bonus/models/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0 \
       --env HF_HOME=/mnt/bonus/models/hemmingway-1/hf --env HF_HUB_OFFLINE=1
 
 What happens: the supervisor records the run and the versions it can read (`tt-model --version`,
@@ -261,10 +272,10 @@ chips. Restart the operator's own coder afterwards if it is wanted.
 
 Watch and steer, from another shell:
 
-    tail -n 5 /mnt/bonus/models/hemmingway-1/orchard-run-1/ledger.jsonl
-    python3 -m orchard.supervisor control --run-dir /mnt/bonus/models/hemmingway-1/orchard-run-1 pause
-    python3 -m orchard.supervisor control --run-dir /mnt/bonus/models/hemmingway-1/orchard-run-1 resume
-    python3 -m orchard.supervisor control --run-dir /mnt/bonus/models/hemmingway-1/orchard-run-1 abort
+    tail -n 5 /mnt/bonus/models/orchard-runs/hemmingway-1-run1/ledger.jsonl
+    python3 -m orchard.supervisor control --run-dir /mnt/bonus/models/orchard-runs/hemmingway-1-run1 pause
+    python3 -m orchard.supervisor control --run-dir /mnt/bonus/models/orchard-runs/hemmingway-1-run1 resume
+    python3 -m orchard.supervisor control --run-dir /mnt/bonus/models/orchard-runs/hemmingway-1-run1 abort
 
 A paused run holds its leases and waits. Read the last `notice` and `decision` entries before
 resuming. `control abort` is the normal way to stop: it stops the coder, releases the lease and
@@ -286,12 +297,27 @@ the coder and releases the lease at its next check.
 Compare stage 0 with the reference answer once stage 0 has passed:
 
     python3 -m orchard.stages compare-delta \
-      /mnt/bonus/models/hemmingway-1/orchard-run-1/stages/0/delta.json \
+      /mnt/bonus/models/orchard-runs/hemmingway-1-run1/stages/0/delta.json \
       /mnt/bonus/models/hemmingway-1/work/stage0-reference.md
 
-Exit 0 means every difference area and hazard in the reference is covered and the path agrees
-(`weights-only`). The command compares areas only. Read each finding against the reference by hand,
-in particular the tokenizer's combining-mark difference and the tensor-cache hazard.
+Exit 0 means every difference area and hazard in the reference has an entry and the path agrees
+(`weights-only`). It shows that the shape of the answer is complete. It does not show that the
+findings are right: the delta-triage skill lists the same hazard areas and requires an entry for
+every area, so a run that follows the skill will nearly always exit 0. A person reads each finding
+against the reference, in particular the tokenizer's combining-mark difference and the
+tensor-cache hazard, and records the verdict.
+
+Check that no agent read the reference answer. After the run, search the ledger, the transcripts
+and the evidence for either name of the reference file:
+
+    grep -rn -e stage0-reference -e hemmingway_stage0_reference \
+      /mnt/bonus/models/orchard-runs/hemmingway-1-run1
+
+Report every hit with its file and line. A hit in an agent transcript or evidence file means the
+stage 0 result cannot count as found on its own. The compare-delta command above names the
+reference path, and its output is not saved in the run directory, so it does not cause a hit.
+On 2026-10-02 neither name appeared in `orchard/`, `config/` or the tt-model-bringup skills, so
+the prompts themselves do not cause a hit either.
 
 Stop conditions: a pause whose reason you cannot explain, a `blocked` notice from a park or
 restore, a canary that changed, or any sign that something was published. Never use `--force`,
@@ -299,5 +325,6 @@ never run `tt-smi -r` by hand, and never run the commands in `PUBLISH_COMMANDS.t
 the operator.
 
 Record afterwards: the run directory, the exit code, each stage's result, the compare-delta output
-and your reading of the findings, every number in stage 6 with its label, every pause with its
+and the person's reading of the findings, the reference grep and every hit, that the nearest
+model was not given, every number in stage 6 with its label, every pause with its
 reason, and the wall time.
