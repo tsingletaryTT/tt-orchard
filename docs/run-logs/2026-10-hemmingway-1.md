@@ -165,3 +165,17 @@ path, so packaging is the next piece to build after stages 0 to 6 are shown to w
   not occur with this bundle.
 - **14:10:47Z stage 1 started again** with the fixed agent loop (escalated attempt, partial directory
   `stages/1.partial-2` kept).
+- **14:10:47Z to 14:41:42Z run 3, stage 1 failed a third time (fixed agent loop).** The agent worked
+  49 turns over 30 minutes and wrote real evidence (CPU reference logits, a tokenizer round-trip, a
+  model-card check, a summary). The truncation fix fired twice as designed (turns 9 and 48, with a
+  watchdog notice each time). At turn 48 the agent had just found a bug in its own reference script
+  (an off-by-one in how it recorded the sequence). Its reply on turn 48 was cut off. After the nudge,
+  turn 49 returned an empty reply: 159 tokens of reasoning, no text, no tool call,
+  `finish_reason: stop`. The loop read that as "finished", the gate found no `reference.json`, and the
+  stage failed after escalation. Two more gaps found:
+  (1) an empty reply is not a final answer; (2) a failed gate restarts the stage with a fresh
+  context, which throws away 48 turns of work, and the escalation tier here is the same model.
+  Fix in progress: empty replies get a nudge like truncated ones; the reply budget goes from 8,192 to
+  16,384 tokens; and the agent gets one continuation in the same conversation, with the gate's reasons,
+  before the stage is escalated. The run is paused; the coder is idle on board 1.
+  Stage 1 is the point where the harness has spent the most effort without a pass.
