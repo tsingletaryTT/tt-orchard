@@ -67,7 +67,9 @@ so a crash resumes at the first configuration with no record. For each test:
   coder back to ready in about 120 s. The 4-chip coder's restart was not measured.
 After every test the supervisor stops and removes any container that still carries this run's test
 label (`run_label`); a container that survives that blocks the stage before any lease is released
-or reset.
+or reset. Before each test it checks the free disk again (TEST_DISK_GB), and it moves aside a
+tensor cache whose last test did not exit 0: a conversion that stopped part way leaves a cache
+that reads back without an error.
 """
 from __future__ import annotations
 
@@ -94,11 +96,11 @@ from orchard.commands import run_command
 from orchard.context import build_messages, facts_from
 from orchard.defaults import (AGENT_CONTINUATION_TURNS, CHIPS_PER_BOARD, CMD_TIMEOUT_S,
                               COLD_BOOT_BUDGET_S, CONTROL_POLL_S, FIRST_BOOT_EXPECTED,
-                              FIRST_BOOT_PROMPT, RUN_CANARY_PROMPT, STOP_TIMEOUT_S)
+                              FIRST_BOOT_PROMPT, RUN_CANARY_PROMPT, STOP_TIMEOUT_S, TEST_DISK_GB)
 from orchard.handoff import (NOTE_KEYS, Blocked, Budgets, Handoff, decide_park, progress, reacquire,
                              recover, wait_stopped)
-from orchard.hwtests import (load_plan, pending, read_plan, unrecorded, write_plan, write_record,
-                             write_summary)
+from orchard.hwtests import (load_plan, move_aside, pending, read_plan, suspect_caches, unrecorded,
+                             write_plan, write_record, write_summary)
 from orchard.ledger import Ledger, LedgerCorrupt, LedgerLocked
 from orchard.runner import Denied, check_string
 from orchard.server import ServerControl, ServerError, ServerSpec, StopCheck
@@ -1062,6 +1064,16 @@ class Supervisor:
 
     def _run_listed(self, spec, stage_dir: Path, test) -> None:
         n = spec.number
+        ok, free = check_disk(self.run_dir, TEST_DISK_GB, usage=self.disk_usage)
+        if not ok:
+            self._block(n, f"the {test.chips}-chip test needs {TEST_DISK_GB} GB free on the run "
+                           f"directory's disk; {free} GB is free", need_gb=TEST_DISK_GB, free_gb=free)
+        if test.cache in suspect_caches(self.ledger.read(), n):
+            aside = move_aside(test.cache)
+            if aside is not None:
+                self.ledger.append("decision", n, decision="moved a tensor cache aside",
+                                   reason="its last test did not exit 0, so it may be part-written",
+                                   cache=test.cache, aside=str(aside))
         chips = self.adapter.status()
         d = decide_park(self.coder_lease.units, chips, test.boards)
         self.ledger.append("decision", n, decision="hardware phase", config=test.chips,

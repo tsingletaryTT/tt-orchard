@@ -222,3 +222,129 @@ def test_a_test_record_the_agent_wrote_fails_the_gate(rig):
     first = next(e["data"] for e in rig.entries() if e["event"] == "escalate" and e["stage"] == 4)
     assert first["reasons"] == ["stages/4/tests/4/test-result.json was not written by the supervisor: "
                                 "its sha256 is not the one the ledger recorded"]
+
+
+# ---- resuming the list, free disk, and part-written caches -----------------------------------------
+
+def started(rig, config):
+    return [d for d in stage4(rig, "hardware test started") if d["config"] == config]
+
+
+def test_a_test_short_of_disk_blocks_and_the_resume_goes_on_at_that_test(rig):
+    from collections import namedtuple
+    from orchard.defaults import TEST_DISK_GB
+    U = namedtuple("U", "total used free")
+    first = rig.run_dir / "stages" / "4" / "tests" / "1" / "test-result.json"
+    state = {"short": True}
+
+    def usage(path):           # enough for the stage, too little once the 1-chip test is done
+        return U(0, 0, 30e9 if state["short"] and first.is_file() else 10 ** 15)
+    rig.usage = usage
+
+    def freed():
+        state["short"] = False
+        supervisor.Control(rig.run_dir).write("resume")
+    rig.on_sleep = freed
+    assert rig.run() == EXIT_READY
+    blocked = [e["data"]["reason"] for e in rig.entries() if e["event"] == "notice" and e["data"].get("blocked")]
+    assert blocked == [f"the 2-chip test needs {TEST_DISK_GB} GB free on the run directory's disk; 30.0 GB is free"]
+    assert [len(started(rig, c)) for c in (1, 2, 4)] == [1, 1, 1]      # the 1-chip test was not run again
+    assert [d["result"] for d in rig.ends(4)] == ["pass"]
+
+
+def kill_points(entries):
+    """Stage 4's ledger events after which a kill is most telling: each test's start and record, each
+    lease taken, and each reset of the park and the restore."""
+    out = []
+    for e in entries:
+        d = e["data"]
+        if e["stage"] != 4:
+            continue
+        if (e["event"] == "evidence" or d.get("decision") in ("hardware test started", "test lease taken")
+                or (e["event"] in ("park", "restore") and d.get("step") == "reset")):
+            out.append(e["seq"])
+    return out
+
+
+def fresh_rig(path, chips):
+    path.mkdir(parents=True)
+    return Rig(path, chips=chips)
+
+
+@pytest.mark.parametrize("chips", [2, 4])
+def test_a_kill_during_the_list_resumes_at_the_first_configuration_without_a_record(tmp_path, chips):
+    from fakes import Crash
+    ref = fresh_rig(tmp_path / "reference", chips)
+    try:
+        assert ref.run() == EXIT_READY
+        points = kill_points(ref.entries())
+    finally:
+        ref.close()
+    assert len(points) >= 9
+    for k in points:
+        r = fresh_rig(tmp_path / f"kill-{k}", chips)
+        try:
+            with pytest.raises(Crash):
+                r.run(crash_if=lambda e, k=k: e["seq"] == k)
+            recorded = {c for c in (1, 2, 4)
+                        if (r.run_dir / "stages" / "4" / "tests" / str(c) / "test-result.json").is_file()}
+            planned = (r.run_dir / "stages" / "4" / "tests" / "plan.json").is_file()
+            assert r.run(pid=200) == EXIT_READY, k
+            prepares = [d for d in stage4(r, "agent step") if d["phase"] == "prepare"]
+            assert len(prepares) == 1 if planned else 1 <= len(prepares) <= 2, (k, len(prepares))
+            for c in (1, 2, 4):
+                runs = len(started(r, c))
+                assert runs == 1 if c in recorded else 1 <= runs <= 2, (k, c, runs)
+            assert [d["result"] for d in r.ends(4)] == ["pass"], k
+            assert not r.m.coder_running and r.m.leases == {}, (k, r.m.leases)
+        finally:
+            r.close()
+
+
+def test_a_cache_whose_test_was_killed_is_moved_aside_before_the_test_runs_again(rig):
+    from fakes import Crash
+    cache = rig.tmp / "orchard-cache" / "4chip" / "tt_cache"
+    rig.script = lambda r: bringup(r, overrides={(4, "prepare"): swap_prepare(caches={4: str(cache)})})
+    cache.mkdir(parents=True)
+
+    def killed_in_test(e):
+        if e["data"].get("decision") == "hardware test started" and e["data"].get("config") == 4:
+            (cache / "layer0.bin").write_text("half converted")       # the conversion had begun
+            return True
+        return False
+    with pytest.raises(Crash):
+        rig.run(crash_if=killed_in_test)
+    assert rig.run(pid=200) == EXIT_READY
+    moved = stage4(rig, "moved a tensor cache aside")
+    assert [(d["cache"], d["aside"]) for d in moved] == [(str(cache), f"{cache}.interrupted-1")]
+    assert (rig.tmp / "orchard-cache" / "4chip" / "tt_cache.interrupted-1" / "layer0.bin").is_file()
+    seqs = [e["seq"] for e in rig.entries() if e["data"].get("decision") in ("moved a tensor cache aside",
+                                                                            "hardware test started")
+            and e["data"].get("config", 4) == 4 and e["stage"] == 4]
+    assert len(seqs) == 3                      # started (killed), moved aside, started again
+
+
+def test_a_timed_out_test_leaves_its_cache_to_be_moved_aside_by_the_next_attempt(rig):
+    rig.args.required_chips = (2, 4)
+    cache = rig.tmp / "orchard-cache" / "4chip" / "tt_cache"
+    cache.mkdir(parents=True)
+    (cache / "layer0.bin").write_text("converted by a test that ran out of time")
+    slow = swap_prepare(caches={4: str(cache)})
+    slow["configs/4/serve_and_compare_container.py"] = "import time\ntime.sleep(30)\n"
+    slow["hw_tests.json"]["tests"][2]["deadline_s"] = 1
+    good = swap_prepare(caches={4: str(cache)})
+    honest = {"result.json": {"configs": [swap_entry(1), swap_entry(2), swap_entry(4, ok=False)]}}
+    rig.script = escalation_aware(4, {(4, "prepare"): slow, (4, "finish"): honest})
+
+    def attempt_files(request):          # the escalated attempt writes the working files
+        if "tools" in request and where(request) == (4, "prepare") and \
+                "stage 4: escalate" in request["messages"][1]["content"]:
+            return bringup(request, overrides={(4, "prepare"): good})
+        return rig_script(request)
+    rig_script, rig.script = rig.script, attempt_files
+    assert rig.run() == EXIT_READY
+    recs = [e["data"] for e in rig.entries() if e["event"] == "evidence" and e["stage"] == 4
+            and e["data"].get("config") == 4]
+    assert [(d["returncode"], d["timed_out"]) for d in recs] == [(None, True), (0, False)]
+    moved = stage4(rig, "moved a tensor cache aside")
+    assert [d["aside"] for d in moved] == [f"{cache}.interrupted-1"]
