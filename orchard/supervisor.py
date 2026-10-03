@@ -88,7 +88,7 @@ from orchard.stages import (TierUnavailable, attempt_started_ts, budget_cap, che
 from orchard.tiers import TierConfigError, load
 from orchard.watchdog import (Event, IdenticalResponses, Ladder, NoFileWritten, NoNewEvidence,
                               RepeatedToolCall, RetryGuard, StageOverBudget, ThinkingWithoutAction,
-                              Watchdog)
+                              TurnRepeat, Watchdog)
 
 WHO = "orchard:supervisor"
 AGENT = "stage-agent"                 # the launched agent's name; the ladder counts its rungs per stage
@@ -694,7 +694,7 @@ class Supervisor:
 
     def _watchdog(self, spec) -> Watchdog:
         wd = Watchdog([IdenticalResponses(), ThinkingWithoutAction(), RepeatedToolCall(),
-                       NoNewEvidence(), NoFileWritten(),
+                       NoNewEvidence(), NoFileWritten(), TurnRepeat(),
                        StageOverBudget({spec.number: spec.budget_s})],
                       Ladder(self.actuator, self.ledger, {AGENT}))
         t0 = attempt_started_ts(self.ledger.read(), spec.number) or self.clock()

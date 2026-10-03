@@ -71,3 +71,16 @@ def test_the_stage_watchdog_runs_the_writeless_turn_detector(tmp_path):
         fake = SimpleNamespace(actuator=None, ledger=led, clock=lambda: 0.0)
         wd = Supervisor._watchdog(fake, spec_for(2, "weights-only"))
     assert any(isinstance(d, NoFileWritten) for d in wd.detectors)
+
+
+def test_the_stage_watchdog_runs_the_turn_repeat_detector(tmp_path):
+    from types import SimpleNamespace
+
+    from orchard.ledger import Ledger
+    from orchard.stages import spec_for
+    from orchard.supervisor import Supervisor
+    from orchard.watchdog import TurnRepeat
+    with Ledger(tmp_path / "ledger.jsonl") as led:
+        fake = SimpleNamespace(actuator=None, ledger=led, clock=lambda: 0.0)
+        wd = Supervisor._watchdog(fake, spec_for(2, "weights-only"))
+    assert any(isinstance(d, TurnRepeat) for d in wd.detectors)

@@ -62,6 +62,10 @@ NO_EVIDENCE_S = 3600.0          # choice; not measured: transcripts carry no evi
 LEASE_IDLE_S = 1800.0           # choice; not measured
 LEASE_POLL_S = 60.0             # choice: `gozer status` is read at most once a minute by the watchdog
 RUNG_CAPS = {"nudge": 1, "escalate": 1, "pause": 1}   # choice: each rung once per agent and stage
+TURN_REPEAT_N = 3               # choice: model turns in a row with the same set of tool calls. Same
+                                # value as REPEAT_TOOL_N. The live stage 2 run ran the same two grep
+                                # commands in each of 5 turns; REPEAT_TOOL_N saw them alternate and
+                                # never fired. The committed qwen transcript signatures stay quiet.
 WRITELESS_TURNS = 20            # choice: model turns in a row in which no file was written (no
                                 # successful write_file, no new evidence file) before the step is
                                 # nudged. A third of AGENT_MAX_TURNS. In the committed qwen transcript

@@ -374,3 +374,19 @@ def test_a_write_file_result_says_whether_the_write_succeeded(run):
         s.run("s", "u")
     results = [(e.tool, e.wrote) for e in events if e.kind == "tool_result"]
     assert results == [("write_file", True), ("write_file", False), ("shell", None)]
+
+
+def test_every_event_carries_its_turn_and_a_continuation_keeps_counting(run):
+    run_dir, ledger = run
+    script = by_request(call("write_file", path="evidence/a.txt", content="x"), final("first done"),
+                        call("shell", command="echo two"), final("fixed"))
+    with FakeModel(script) as fm:
+        s, events, _ = step(run_dir, ledger, fm.endpoint)
+        s.run("s", "u")
+        s.continue_with("fix the gate", max_turns=5,
+                        log_path=run_dir / "stages" / "0" / "log" / "run-1-continuation.jsonl")
+    assert [(e.kind, e.turn) for e in events] == [
+        ("response", 1), ("tool_call", 1), ("tool_result", 1), ("evidence", 1),
+        ("response", 2),
+        ("response", 3), ("tool_call", 3), ("tool_result", 3),
+        ("response", 4)]

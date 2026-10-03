@@ -20,7 +20,7 @@ from typing import Protocol
 
 from orchard.adapters import AdapterError
 from orchard.defaults import (IDENTICAL_N, LEASE_IDLE_S, LEASE_POLL_S, NO_EVIDENCE_S, REPEAT_TOOL_N,
-                              RUNG_CAPS, THINKING_CAP, WRITELESS_TURNS)
+                              RUNG_CAPS, THINKING_CAP, TURN_REPEAT_N, WRITELESS_TURNS)
 
 KINDS = frozenset({"response", "tool_call", "tool_result", "evidence", "ledger"})
 
@@ -45,6 +45,10 @@ class Event:
     # refused or failed, None when the source does not say (transcripts, or a tool that does not
     # write files). AgentStep sets it for its write_file tool.
     wrote: bool | None = None
+    # The agent step's model turn that produced this event: its response, the tool calls and
+    # results that follow, and any evidence file they wrote. It counts up through a step and its
+    # continuation. None when the source does not number turns (transcripts).
+    turn: int | None = None
 
     def __post_init__(self):
         if self.kind not in KINDS:
@@ -196,6 +200,69 @@ class RepeatedToolCall:
                            {"what": what, "tool": ev.tool, "count": self.n})
         self._count[slot] = count
         return None
+
+
+class TurnRepeat:
+    """The same set of tool calls in `n` model turns in a row.
+
+    A turn's signature is the sorted tuple of (tool, args_hash) of its calls, so a turn that runs
+    the same commands in another order still matches. RepeatedToolCall misses this loop: two
+    commands that alternate never repeat back to back. A turn with no tool calls breaks the
+    streak.
+
+    Turns are told apart by Event.turn. An event with no turn number (a transcript) starts a new
+    turn at each response, which comes before that turn's calls. A turn is complete when the next
+    one starts, so the finding comes at the response of the turn after the n-th repeat. The
+    detector re-arms after it fires.
+    """
+    name = "turn_repeat"
+
+    def __init__(self, n: int = TURN_REPEAT_N):
+        if n < 2:
+            raise ValueError("n must be at least 2")
+        self.n = n
+        self._turn: dict[str, object] = {}      # agent -> the current turn's key
+        self._calls: dict[str, list] = {}       # agent -> the current turn's (tool, args_hash)
+        self._last: dict[str, tuple] = {}       # agent -> the last complete turn's signature
+        self._count: dict[str, int] = {}        # agent -> turns in a row with that signature
+        self._seq: dict[str, int] = {}          # agent -> responses seen, for unnumbered turns
+
+    def _close(self, agent: str, ts: float) -> Finding | None:
+        calls = self._calls.pop(agent, [])
+        sig = tuple(sorted((str(t), str(a)) for t, a in calls))
+        if not sig:
+            self._last.pop(agent, None)
+            self._count[agent] = 0
+            return None
+        count = self._count.get(agent, 0) + 1 if self._last.get(agent) == sig else 1
+        self._last[agent] = sig
+        if count < self.n:
+            self._count[agent] = count
+            return None
+        self._count[agent] = 0                  # re-arm: the next n repeats fire again
+        tools = sorted({t for t, _ in sig})
+        return Finding(self.name, agent, ts,
+                       f"the same {len(sig)} tool call(s) ({', '.join(tools)}) in {self.n} turns "
+                       "in a row", {"turns": self.n, "calls": len(sig), "tools": tools})
+
+    def feed(self, ev: Event) -> Finding | None:
+        if ev.kind not in ("response", "tool_call"):
+            return None
+        if ev.turn is not None:
+            key = ("turn", ev.turn)
+        elif ev.kind == "response":
+            self._seq[ev.agent] = self._seq.get(ev.agent, 0) + 1
+            key = ("seq", self._seq[ev.agent])
+        else:
+            key = self._turn.get(ev.agent)
+        found = None
+        if key != self._turn.get(ev.agent):
+            if ev.agent in self._turn:
+                found = self._close(ev.agent, ev.ts)
+            self._turn[ev.agent] = key
+        if ev.kind == "tool_call":
+            self._calls.setdefault(ev.agent, []).append((ev.tool, ev.args_hash))
+        return found
 
 
 # Tool names that write a file, for sources that do not say whether a write succeeded (Event.wrote
