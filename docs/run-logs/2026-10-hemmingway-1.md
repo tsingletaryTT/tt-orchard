@@ -299,3 +299,19 @@ path, so packaging is the next piece to build after stages 0 to 6 are shown to w
   The same mistake is in the templates the implementer just built. Next: re-run the prototype with
   `MODEL_WEIGHTS_DIR` set to the model directory and a fresh cache, check the server log for the weights
   path, and compare the chip's output with the earlier base run. Then fix the templates.
+- **17:55Z to 18:20Z corrected prototype: the chip now serves Hemmingway-1 weights, measured.** I re-ran the
+  hand prototype on board 1 with `MODEL_WEIGHTS_DIR` set to the model directory and a fresh cache (the
+  base-weights cache was renamed aside, not deleted). Same prompt and the same 32 reference tokens.
+  Free-run text: "Let me work through this carefully. The user wants a text message to their landlord
+  about a broken boiler. This is a short, practical piece of writing". The CPU reference text is
+  "Let me work through this carefully. The user wants me to write a text message to their landlord about
+  a broken boiler. This is a practical, real-world". The earlier (base-weights) chip text was "We need
+  to respond to user: ...". **Teacher-forced top-1 agreement with the Hemmingway CPU reference: 30 of 32
+  (0.94), against 25 of 32 (0.78) with base weights.** The two misses are near-synonyms (" me"/" a",
+  " practical"/" short"). One prompt, 32 tokens: a thin margin, but both the text and the agreement moved the
+  way correct weights should. This is the first measurement that actually concerns Hemmingway-1 on the chip.
+  It also shows the gate's 0.6 floor was too low: the base model passed it. The floor is being raised to
+  0.85 (a choice from two measurements).
+  The lease was released with a reset afterwards. While my stale lease waited, a `tt-smi -r` started by the
+  systemd user manager reset the board (probably the gozer reconcile timer); `gozer release` refused to
+  run while it held the chip and I did not force it.
