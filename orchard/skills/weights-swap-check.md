@@ -97,8 +97,10 @@ puts that board's chips in `TT_VISIBLE_DEVICES`. The script must:
 5. `coherent` is true when the free-run text is non-empty and at least 80 percent of its characters
    are letters, digits, spaces or common punctuation, and the 6-word phrase that repeats most often
    appears at most 3 times.
-6. Always stop the server in a `finally`: `os.killpg(proc.pgid, signal.SIGTERM)`, wait up to 60 seconds,
-   then `SIGKILL` the group. Write `evidence/swap-check.json` with every number, the ids, the texts and
+6. Always stop the server in a `finally`. `Popen` has no `pgid`. With `start_new_session=True` the
+   child's pid is its process group id, so use `os.killpg(proc.pid, signal.SIGTERM)`, wait up to 60
+   seconds, then `os.killpg(proc.pid, signal.SIGKILL)`. Start the `try` block right after `Popen`, so
+   that a later error in your own script cannot leave the server running. Write `evidence/swap-check.json` with every number, the ids, the texts and
    the first 300 characters of each mismatch. Exit 0 when the script finished its measurements, whatever
    the numbers say. Exit non-zero only when it could not measure.
 
