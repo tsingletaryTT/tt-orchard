@@ -462,6 +462,49 @@ class Handoff:
         self._record("restore", "canary", compared=True, match=True, canary=file_evidence(after_path))
         return result
 
+    # ---- recovery after a restart (spec section 6, branch table; section 10) ----------------
+
+    def recover_and_restore(self, recovery: Recovery, *, chips: int, who: str, reason: str,
+                            wait_budget_s: float) -> CanaryResult | None:
+        """Finish an interrupted handoff: bring the coder back under a lease this process holds.
+
+        If the park never sent its stop and the coder is serving, the park is abandoned instead
+        (see `recover`). Otherwise: a lease is judged by its owner pid, so after a restart the old lease belongs to a dead
+        process. While the coder runs, its chips stay HELD-FOREIGN under that lease and nobody
+        can reset or re-lease them. So: stop the coder if it runs, take a new lease (gozer reaps
+        the orphan once no device is open, without a reset), and run the whole restore again from
+        its reset. The stage test, if it was interrupted, is re-run by plan 4's stage machine.
+        """
+        if recovery.action == "none":
+            return None
+        self.ledger.append("decision", self.stage, decision="recover after restart; the machine wins",
+                           **dataclasses.asdict(recovery))
+        if recovery.action == "abandon":
+            # The park never sent its stop and the coder is serving: close the park and leave the
+            # coder up (spec section 6, step 2). Its lease belongs to the dead supervisor;
+            # re-leasing a coder that serves outside a park is plan 4's job.
+            stopped = self._stop_standin() if "standin_started" in recovery.park_done else None
+            self._record("park", ABANDONED, recovered=True, standin_stopped=stopped)
+            return None
+        ours = recovery.lease_state == "ours"
+        continuing = ours and recovery.coder_running and "serve" in recovery.restore_done
+        if recovery.coder_running and not continuing:
+            self._record("park", "stop_sent", result=self.server.stop(), recovered=True)
+            check = self._wait_stopped(accept=("CLAIMED", "STALE", "FREE"))
+            if not check["ok"]:
+                self._block("after the restart the coder could not be confirmed stopped", **check)
+            self._record("park", "stopped", recovered=True, **check)
+        if not ours:
+            old = self.lease.lease_id
+            self.lease = reacquire(self.adapter, chips=chips, who=who, reason=reason,
+                                   ledger=self.ledger, stage=self.stage, wait_budget_s=wait_budget_s,
+                                   clock=self.clock, sleep=self.sleep)
+            self.ledger.append("decision", self.stage, decision="new lease after restart",
+                               old_lease_id=old, lease_id=self.lease.lease_id)
+        if not continuing:
+            self._record("restore", "restart", recovered=True)
+        return self.restore()
+
 
 def release_for_idle_phase(adapter, server, lease: Lease, *, ledger, stage,
                            expected_idle_s: float, budget_s: float = IDLE_RELEASE_S,
@@ -559,3 +602,64 @@ def reacquire(adapter, *, chips: int, who: str, reason: str, ledger, stage, wait
                 return lease
         except Refused as exc:
             block(f"the lease tool refused the claim: {exc}", ticket=ticket)
+
+
+@dataclass(frozen=True)
+class Recovery:
+    phase: str
+    park_done: tuple[str, ...]
+    restore_done: tuple[str, ...]
+    lease_id: str | None
+    lease_state: str           # "none", "ours", "orphaned", "gone" or "taken"
+    coder_running: bool
+    standin_running: bool
+    action: str                # "none", "abandon" or "restore"
+    disagreements: tuple[str, ...]
+
+
+def recover(entries: list[dict], *, adapter, server, standin=None) -> Recovery:
+    """After a supervisor restart, compare the ledger with the machine. The machine wins.
+
+    The coder's state comes from the server's own tooling (docker for a container, ps and pgrep
+    for a process), because a container server can hold chips that gozer shows as free or as
+    another holder (spec section 6, branch table). The lease's state comes from the lease tool:
+    "ours" when this process owns it, "orphaned" when the previous supervisor pid still owns it,
+    "gone" when its chips are free, "taken" otherwise. Every disagreement is listed.
+
+    The action: "abandon" when the coder is running and the park never sent its stop (the coder
+    never left, so it is not stopped; re-leasing a coder that serves outside a park is plan 4's
+    job), "restore" for any other interrupted handoff, "none" when no handoff was in progress.
+    The stand-in is a process in its own session, so it can outlive the crash; its recorded pid
+    is adopted and checked.
+    """
+    p = progress(entries)
+    if p.phase == "idle":
+        return Recovery("idle", (), (), None, "none", False, False, "none", ())
+    if p.server:
+        server.adopt(p.server)
+    if standin is not None and p.standin:
+        standin.adopt(p.standin)
+    running = not server.confirm_stopped().stopped
+    standin_running = bool(standin is not None and p.standin
+                           and not standin.confirm_stopped().stopped)
+    lease_id = (p.lease or {}).get("lease_id")
+    lease_chips = set((p.lease or {}).get("chips") or ())
+    mine = [c for c in adapter.status() if c.bdf in lease_chips]
+    if mine and all(c.lease_pid == adapter.owner_pid for c in mine):
+        state = "ours"
+    elif not mine or all(c.state == "FREE" for c in mine):
+        state = "gone"
+    elif p.owner_pid is not None and all(c.lease_pid == p.owner_pid for c in mine):
+        state = "orphaned"
+    else:
+        state = "taken"
+    disagreements = []
+    if "stopped" in p.park_done and "serve" not in p.restore_done and running:
+        disagreements.append("the ledger says the coder was stopped; the machine shows it running")
+    if "serve" in p.restore_done and not running:
+        disagreements.append("the ledger says the coder was started; the machine shows it stopped")
+    if state != "ours":
+        disagreements.append(f"the ledger holds lease {lease_id}; the lease tool shows it {state}")
+    action = "abandon" if running and "stop_sent" not in p.park_done else "restore"
+    return Recovery(p.phase, p.park_done, p.restore_done, lease_id, state, running,
+                    standin_running, action, tuple(disagreements))
