@@ -148,3 +148,39 @@ Write the results into the run ledger and into `docs/superpowers/specs/2026-10-0
 section 14, item 2. If H1, H2 or H3 failed, the fallback in section 8 (a reservation with `yield` and
 `redeem`) comes back into the plan. If everything passed, plan 3 can rely on hold-through-swap, and
 the measured stop, reset and boot times replace the estimates in sections 3 and 6.
+
+## Park check (plan 3)
+
+Purpose: run the park and restore code (`orchard/handoff.py`) through the gozer adapter on one
+real board, with fake servers in place of the coder and the CPU stand-in. It checks the adapter
+against the real gozer and a real board reset, the stop checks against a real process, and the
+ledger steps. It does not check a device held open (the hardware-check driver above does), a
+container server, a real stand-in model, or a real restart time.
+
+Who runs it: the controller. An implementer does not. It takes its own gozer lease under its own pid.
+
+Before running:
+- `gozer status` shows every chip of the target board `FREE`, and the other board is not
+  `BUSY-UNTRACKED` (another reset is running). The driver refuses otherwise (exit 2).
+- No `GOZER_*` variable is set.
+- Ports 20990 and 20991 are free (`ss -ltn "( sport = :20990 or sport = :20991 )"` prints only
+  its header), or pass `--port` and `--standin-port`.
+
+Run, from the repo root:
+
+    python3 -m orchard.park_check --board 0000:03:00.0
+
+Expected, measured on the hardware-check runs: three resets of the board, about 42 s each (the
+park reset, the restore reset, and the reset inside the release), about 2.5 min in all. The
+ledger under `runs/park-check/<UTC time>-<BDF>/` shows the park steps `note`, `canary_before`,
+`standin_started`, `standin`, `stop_sent`, `stopped`, `reset`, then the restore steps `reset`,
+`serve`, `ready`, `canary`, `resumed`, and three measurements (`park_reset_seconds`,
+`restore_reset_seconds`, `coder_ready_wait_seconds`). Exit 0. Afterwards `gozer status` shows the board `FREE`.
+
+Stop conditions: any exit other than 0. Read `summary.md` and the last `notice` in the ledger.
+If the summary says the release failed, wait until nothing holds the board, then run
+`gozer release <lease-id>` from the ledger's `lease taken` decision. Never use `--force`, never
+run `tt-smi -r` by hand.
+
+Record afterwards: the run directory, the exit code, the three reset times, and anything in the
+summary marked STOP.
