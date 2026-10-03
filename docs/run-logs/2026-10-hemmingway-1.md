@@ -108,3 +108,9 @@ path, so packaging is the next piece to build after stages 0 to 6 are shown to w
   `episod/qwen3.8-27b-dflash2-p300` as the coder, so the harness can be exercised while the 4-chip
   question is open. One board stays free for hardware stages, so no parking is needed. Its first-boot
   check will also show whether the chips still run correctly.
+- **13:25:49Z run 3: the coder is healthy and stage 0 has started.** The 2-chip bundle coder was ready in
+  120.1 s (warm cache). Its canary and first-boot answer was `42`, so the first-boot check passed. This
+  also shows the chips and base weights are fine, which supports the reading that the 4-chip noise is
+  specific to the 4-chip configuration. At 13:25:49Z the harness began stage 0 (delta triage): the
+  first agent step on the large tier, model Qwen/Qwen3.8-27B, skill `orchard/skills/delta-triage.md`.
+  This is the first stage the harness has started on a real model.
