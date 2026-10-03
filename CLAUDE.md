@@ -127,6 +127,12 @@ two-process lock test.
   use a stub PATH. The suite has 1141 passed and 1 skipped. Notable moment: a mutation that removed
   the signal handlers made SIGTERM kill pytest, so the mutation helper crashed before restoring the
   file; `git checkout` in the next run restored it, and that run was repeated.
+- **2026-10-03 canary and first-boot check** (branch `canary-sanity`). The first hardware run blocked at the
+  coder canary. The canary now sends `chat_template_kwargs: {enable_thinking: false}` and explains a null
+  `content` with `finish_reason: length` as a reply cut off mid-reasoning. A coder's first start in a run
+  (no baseline canary yet) is also asked "What is 7 times 6?" and must answer with text containing 42, or
+  the run blocks and does not retry. A restart with a baseline skips the question; a resume after a block
+  asks it again. Each guard was checked by mutation: remove it and a test goes red.
 
 ## Notable moments
 - The `shlex` runner was shown to be bypassable (comments, keywords, `eval`, shells on stdin,

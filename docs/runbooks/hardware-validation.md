@@ -270,6 +270,11 @@ under its own pid and starts the coder (a cold boot is about 30 min, budget 45 m
 run on the large server; the small tier is not serving, and the ledger records each substitution.
 An escalated step goes to the same large server with a different context, because it is the only
 chip tier serving.
+On its first start in a run the coder is asked "What is 7 times 6? Reply with only the number." and
+must answer with text containing 42. If it does not, the run pauses with a reason that quotes the
+answer and says the server answers wrongly, and the answer is saved under `evidence/coder-sanity-*.txt`.
+Nothing is retried. Fix the package or the server, then send `control resume`; the question is asked
+again. Later starts in the same run skip it, because they compare against the first canary answer.
 Each of stages 2 to 6 runs a prepare step, parks the coder (stand-in canary on ollama, stop, reset),
 runs the agent's test command on board 0's two chips, restores the coder (reset, start, canary
 compared with the pre-park answer) and runs a finish step. Each reset measured 41.7 s and a warm
