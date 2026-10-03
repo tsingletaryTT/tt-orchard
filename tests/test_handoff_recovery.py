@@ -6,7 +6,7 @@ import pytest
 from fakes import (CANARY, FakeProc, WHO, Crash, FakeAdapter, FakeServer, FakeStandIn, World, make_handoff,
                    steps)
 from orchard.adapters import Lease
-from orchard.handoff import Handoff, progress, recover
+from orchard.handoff import Blocked, Handoff, progress, recover
 from orchard.commands import CommandResult
 from orchard.ledger import Ledger, replay_state
 from orchard.server import ServerControl, ServerSpec, ServerStandIn
@@ -245,3 +245,28 @@ def test_recovery_does_not_signal_a_group_that_belongs_to_another_process(tmp_pa
             if e["event"] == "notice"]
     assert any("is not the process orchard started" in n for n in said)
     assert rec.notices and "5150" in rec.notices[0]
+
+
+def test_recovery_blocks_when_docker_still_lists_the_coder_after_its_stop(tmp_path):
+    # The supervisor died after tt-model stop was sent. On restart docker still lists the
+    # container, and gozer shows the chips CLAIMED or STALE because it cannot see that container.
+    # Only the server check can tell. No lease is taken and nothing is reset.
+    h, world, ledger = make_handoff(tmp_path, ledger_cls=CrashingLedger,
+                                    ledger_kw={"crash_after": 5})        # ... stop_sent
+    with pytest.raises(Crash):
+        h.park()
+    assert steps(ledger)[-1] == ("park", "stop_sent")
+    h.ledger.close()
+    world.owner_pid = NEW_PID
+    world.invisible_container = True
+    ledger2 = Ledger(tmp_path / "ledger.jsonl")
+    adapter, server, standin = FakeAdapter(world, NEW_PID), FakeServer(world), FakeStandIn(world)
+    rec = recover(ledger2.read(), adapter=adapter, server=server, standin=standin)
+    assert rec.coder_running and rec.action == "restore"
+    h2 = Handoff(ledger=ledger2, stage=2, adapter=adapter, server=server, standin=standin,
+                 lease=h.lease, canary_prompt=CANARY, note_path=h.note_path,
+                 evidence_dir=h.evidence_dir, clock=h.clock, sleep=h.sleep)
+    with pytest.raises(Blocked, match="after the restart the coder could not be confirmed stopped"):
+        h2.recover_and_restore(rec, chips=2, who=WHO, reason="coder", wait_budget_s=600)
+    assert world.resets == [] and not [c for c in adapter.calls if c[0] in ("acquire", "reset")]
+    assert world.coder_starts == 1

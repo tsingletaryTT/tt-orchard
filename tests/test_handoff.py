@@ -204,6 +204,19 @@ def test_one_refusal_then_success_records_two_attempts(tmp_path):
     assert reset[0]["data"]["attempts"] == 2
 
 
+def test_the_restore_checks_the_server_again_before_its_reset(tmp_path):
+    # After the stage a container that only docker sees is up. The chips are CLAIMED, so only the
+    # server check stands between the restore and a reset under it.
+    h, world, ledger = make_handoff(tmp_path)
+    h.park()
+    world.invisible_container = True
+    with pytest.raises(Blocked, match="still in use after the stage; no reset was run"):
+        h.restore()
+    assert world.resets == ["L1"]                      # the park's reset only
+    assert [c for c in h.adapter.calls if c[0] == "reset"] == [("reset", "L1")]
+    assert ("restore", "reset") not in steps(ledger)
+
+
 def test_a_reset_left_running_is_never_retried(tmp_path):
     world = World()
     world.reset_hangs = True
