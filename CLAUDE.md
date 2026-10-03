@@ -193,3 +193,13 @@ failed, and the escalation started a fresh context. Three changes, each test-fir
   conversation one continuation (`AGENT_CONTINUATION_TURNS` = 20, its own log file) with the gate's reasons word for word. It
   happens once per run of the stage body and never after another status. A kill during the continuation loses that
   conversation; the resumed stage starts fresh and may use its own continuation (the e2e kill test covers this case).
+
+## 2026-10-03: the stage machine follows the path stage 0 chose
+Prompt: make stages 2 and 3 path-aware for a weights-only delta, using the draft `weights-swap-check` skill (branch
+`weights-swap`, TDD, one commit per change). On `weights-only`, stage 2 uses that skill and the new `gate_weights_swap`
+(serves, coherent, `n_tokens` >= 16, `top1_agreement` >= `SWAP_TOP1_MIN` = 0.6, positive `server_ready_s`, evidence files);
+stage 3 is recorded as skipped the way stage 7 is, and the run goes on to stage 4. `full-port` and an unknown path keep the
+old table. Decision: stage 0's passing `stage_end` records the path, and `run_path` reads it from the ledger before each stage,
+so a resume makes the same choice even after an agent edits `delta.json`; older ledgers fall back to `delta.json`. No per-path
+budget was added: the stage 2 budget (14,400 s) already exceeds the skill's 2,400 s test deadline. Mutations (swap skill on every
+path, stage 3 skipped on every path, a low `top1_agreement` accepted, an unknown path read as weights-only) each turned tests red.

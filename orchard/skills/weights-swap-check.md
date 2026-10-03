@@ -28,7 +28,8 @@ Write `result.json` in your stage directory:
      "evidence": ["stages/2/evidence/swap-check.json", "stages/2/evidence/server.log"]}
 
 The gate needs `serves` true, `coherent` true, `n_tokens` of at least 16, `top1_agreement` of at
-least 0.6, and every evidence path to exist. Label each number measured or TODO.
+least 0.6, a positive `server_ready_s`, and every evidence path to exist. Label each number measured
+or TODO.
 
 ## What to find out first (a few commands, not a survey)
 

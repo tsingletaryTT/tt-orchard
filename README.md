@@ -97,7 +97,7 @@ The full design is in `docs/superpowers/specs/2026-10-01-orchard-design.md`.
   guard. It acts through an injected actuator that plan 4 supplies. `orchard/transcripts.py` turns
   a qwen-code transcript into that stream, and the detector thresholds come from a replay of the
   recorded loop.
-- **Supervisor.** The supervisor (`python3 -m orchard.supervisor run ...`) runs stages 0 to 6 and 8 of a weights-only bring-up with local models, parks the coder for hardware stages, records every step in the ledger, and stops at ready for operator review. It never publishes.
+- **Supervisor.** The supervisor (`python3 -m orchard.supervisor run ...`) runs stages 0 to 6 and 8 of a weights-only bring-up with local models, parks the coder for hardware stages, records every step in the ledger, and stops at ready for operator review. It never publishes. The path stage 0 writes in `delta.json` decides stages 2 and 3. On `weights-only`, stage 2 serves the new weights with the nearest model's existing TT implementation and compares the chip's tokens with the CPU reference (skill `weights-swap-check`, gate `gate_weights_swap`), and stage 3 is recorded as skipped. On `full-port`, or a path the supervisor cannot read, stage 2 runs `functional-decoder` and stage 3 runs as before.
 
 ## Try it
 
