@@ -286,3 +286,16 @@ path, so packaging is the next piece to build after stages 0 to 6 are shown to w
   turns in a row). The first attempt's script was reviewed and was nearly right: only my `pgid` error.
   So far, in this run, the model has shown a pattern: given a task with a clear path it works; given an
   open search it explores without writing. The skills need to be closer to scripts than to guidance.
+- **17:45Z CORRECTION: the hand prototype measured the base model, not Hemmingway-1.** The implementer of
+  the swap templates noted that the bundle's `run.sh` exports `HF_MODEL=Qwen/Qwen3.8-27B`. I read the TT
+  runtime (`tt/qwen36_vllm.py:227-235`): it resolves the weights directory as `MODEL_WEIGHTS_DIR`, then
+  `HF_MODEL`, then the config path, and a hub id is resolved to the local Hugging Face snapshot. So with
+  `HF_MODEL` left at the base model, my prototype (and the 34 GB tensor cache it built) used the **base**
+  Qwen3.8-27B weights. `--model` only gave vLLM the config and tokenizer. The earlier log entries that say
+  the chip served Hemmingway-1 weights, and the 25 of 32 (78%) teacher-forced agreement "with Hemmingway's
+  CPU reference", are **wrong as stated**: they show the base model on the chip agreeing 78% with
+  Hemmingway's CPU decode, which says only that the two models are close. The recipe's other findings
+  (architecture registration, the base-shaped model directory, the empty cache, no logprobs) stand.
+  The same mistake is in the templates the implementer just built. Next: re-run the prototype with
+  `MODEL_WEIGHTS_DIR` set to the model directory and a fresh cache, check the server log for the weights
+  path, and compare the chip's output with the earlier base run. Then fix the templates.
