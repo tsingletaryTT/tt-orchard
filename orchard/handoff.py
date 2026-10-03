@@ -7,10 +7,11 @@ ledger and say which step completed. A resumed `Handoff` skips the steps already
 `recover()` compares the ledger with the machine after a restart, and the machine wins.
 
 Park steps: note (the handoff note exists and parses), canary_before (the coder answers the
-canary), standin_started (the CPU stand-in process exists; its pid is recorded before anything
-else can fail), standin (the stand-in answers the canary), stop_sent (`tt-model stop`), stopped
-(the stop is confirmed by the server's tooling and by the lease tool), reset (the lease is reset
-in place and stays held). The stage test runs next; plan 4 owns it.
+canary), standin_started (the CPU stand-in process exists; its pid is recorded right after the
+spawn and before its readiness wait, so a crash during the model load leaves a pid to stop),
+standin (the stand-in answers the canary), stop_sent (`tt-model stop`), stopped (the stop is
+confirmed by the server's tooling and by the lease tool), reset (the lease is reset in place and
+stays held). The stage test runs next; plan 4 owns it.
 Restore steps: reset (the test is gone; the chips are reset again), serve, ready, canary (the
 answer must equal the pre-park answer exactly), resumed (the stand-in stops and is checked gone).
 A `restart` entry makes the restore start again from its reset.
@@ -375,13 +376,19 @@ class Handoff:
 
     def _park_standin(self, started: bool) -> None:
         if not started:
+            # Spawn, record, then wait. The wait is the longest step of a park (a CPU model load,
+            # up to STANDIN_READY_S), so the pid and pgid are in the ledger before it begins: a
+            # crash during the load leaves a stand-in that recovery can find and stop.
             try:
-                self.standin.start()
+                self.standin.spawn()
             except (ServerError, OSError) as exc:
                 self._record("park", "standin_started", standin=self.standin.record(), ok=False)
                 self._block_before_stop(f"the stand-in did not start; the coder stays up: {exc}")
-            # Recorded before the canary, so a crash from here on leaves the pid in the ledger.
             self._record("park", "standin_started", standin=self.standin.record())
+            try:
+                self.standin.wait_ready()
+            except (ServerError, OSError) as exc:
+                self._block_before_stop(f"the stand-in did not start; the coder stays up: {exc}")
         try:
             answer = self.standin.ask(self.canary_prompt)
         except (CanaryError, ServerError, OSError) as exc:

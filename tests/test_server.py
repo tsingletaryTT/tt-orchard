@@ -4,7 +4,8 @@ import signal
 import pytest
 
 from fakes import LEASE, FakeClock, FakeProc, FakeRun
-from orchard.server import NotReady, ServerControl, ServerError, ServerSpec, ServerStarting
+from orchard.server import (NotReady, ServerControl, ServerError, ServerSpec, ServerStandIn,
+                            ServerStarting)
 
 SS_HEADER = "State  Recv-Q Send-Q Local Address:Port  Peer Address:Port Process\n"
 SS_LISTEN = SS_HEADER + "LISTEN 0      4096   127.0.0.1:20000      0.0.0.0:*\n"
@@ -227,6 +228,17 @@ def test_process_stop_escalates_to_sigkill():
     ctl.start(None)
     assert ctl.stop()["how"] == "SIGKILL"
     assert killed == [(4321, signal.SIGTERM), (4321, signal.SIGKILL)]
+
+
+def test_the_standin_spawns_first_and_waits_for_readiness_separately():
+    # The handoff records the pid between the two calls, so spawn must not wait.
+    ctl, run, spawned, *_ = control(ServerSpec("p/standin", "process", 20000, "m", argv=("serve",)))
+    standin = ServerStandIn(ctl, ready_budget_s=5)
+    standin.spawn()
+    assert len(spawned) == 1 and run.calls == [] and standin.record()["pid"] == 4321
+    run.script["curl -sS"] = [(0, "200", "")]
+    standin.wait_ready()
+    assert run.argvs()[0][:2] == ["curl", "-sS"]
 
 
 def test_wait_ready_returns_after_health_answers_200():

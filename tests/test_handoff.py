@@ -1,9 +1,10 @@
 """Park and restore against a fake machine (tests/fakes.py)."""
 import pytest
 
-from fakes import World, make_handoff, steps
+from fakes import Crash, World, make_handoff, steps
 from orchard.handoff import Blocked, Handoff, progress
 from orchard.ledger import file_evidence, replay_state
+from orchard.server import NotReady
 
 PARK = [("park", s) for s in ("note", "canary_before", "standin_started", "standin", "stop_sent",
                               "stopped", "reset")]
@@ -88,6 +89,33 @@ def test_the_standin_pid_is_recorded_before_its_canary(tmp_path):
     started = [e["data"] for e in ledger.read()
                if e["event"] == "park" and e["data"]["step"] == "standin_started"]
     assert started[0]["standin"]["pid"] == 5150
+
+
+def test_the_standin_pid_is_recorded_before_its_readiness_wait(tmp_path):
+    # The readiness wait is the longest step of a park (a CPU model load, up to 600 s). The
+    # supervisor dies inside it: the ledger must already hold the pid and pgid to stop.
+    world = World()
+    world.standin_wait_raises = Crash("killed while the stand-in loads")
+    h, world, ledger = make_handoff(tmp_path, world)
+    with pytest.raises(Crash):
+        h.park()
+    assert world.standin_running                      # the orphan the ledger has to point at
+    started = [e["data"] for e in ledger.read()
+               if e["event"] == "park" and e["data"]["step"] == "standin_started"]
+    assert len(started) == 1
+    assert started[0]["standin"]["pid"] == 5150 and started[0]["standin"]["pgid"] == 5150
+    assert world.events.index("standin_start") < world.events.index("standin_wait_ready")
+
+
+def test_a_standin_that_never_becomes_ready_is_stopped_and_the_park_abandoned(tmp_path):
+    world = World()
+    world.standin_wait_raises = NotReady(600.0)
+    h, world, ledger = make_handoff(tmp_path, world)
+    with pytest.raises(Blocked, match="stand-in did not start"):
+        h.park()
+    assert world.coder_running and "coder_stop" not in world.events
+    assert not world.standin_running                  # it was stopped, so no orphan is left
+    assert steps(ledger)[-1] == ("park", "abandoned")
 
 
 def test_a_standin_that_survives_its_stop_is_reported(tmp_path):

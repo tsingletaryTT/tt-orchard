@@ -326,7 +326,12 @@ class ServerControl:
 
 
 class StandIn(Protocol):
-    def start(self) -> None: ...
+    """Starting is two calls, so the caller can record the pid between them: `spawn` returns as
+    soon as the process exists, and `wait_ready` can then take minutes (a CPU model load)."""
+
+    def spawn(self) -> None: ...
+
+    def wait_ready(self) -> None: ...
 
     def ask(self, prompt: str) -> str: ...
 
@@ -352,8 +357,10 @@ class ServerStandIn:
             raise ValueError("the CPU stand-in runs as a process or bundle, never a container")
         self.server, self.ready_budget_s = server, ready_budget_s
 
-    def start(self) -> None:
+    def spawn(self) -> None:
         self.server.start(None)
+
+    def wait_ready(self) -> None:
         self.server.wait_ready(self.ready_budget_s)
 
     def ask(self, prompt: str) -> str:

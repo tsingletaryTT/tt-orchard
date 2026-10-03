@@ -113,6 +113,7 @@ class World:
         self.standin_answer = "4"
         self.standin_fails = False
         self.standin_survives_stop = False  # the stand-in ignores its stop
+        self.standin_wait_raises = None     # raised by the stand-in's readiness wait, after its spawn
         self.stop_mesh_reset = False        # tt-model stop says it reset the mesh itself
         self.start_hangs_but_comes_up = False  # tt-model serve times out while the coder boots
         self.worker_left = False            # a vLLM worker that outlives the server
@@ -280,9 +281,14 @@ class FakeStandIn:
     def __init__(self, world):
         self.world = world
 
-    def start(self):
+    def spawn(self):
         self.world.events.append("standin_start")
         self.world.standin_running = True
+
+    def wait_ready(self):
+        self.world.events.append("standin_wait_ready")
+        if self.world.standin_wait_raises is not None:
+            raise self.world.standin_wait_raises
 
     def ask(self, prompt):
         self.world.events.append("standin_ask")
