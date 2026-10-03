@@ -1,0 +1,352 @@
+"""The two scripts the weights-swap-check skill copies: prepare_swap.py and serve_and_compare.py.
+
+Everything here runs on fakes in tmp directories. The bundle's run.sh is replaced by one that
+execs tests/fake_swap_server.py, a stdlib HTTP server that opens no device. Each test that starts
+a server kills its process group in a fixture finalizer, so a failing test leaves nothing behind.
+"""
+import importlib.util
+import json
+import os
+import re
+import shutil
+import signal
+import socket
+import stat
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import pytest
+
+if importlib.util.find_spec("tokenizers") is None:
+    pytest.skip("SKIPPED: the `tokenizers` package is not importable, so the weights-swap template "
+                "tests did not run. serve_and_compare.py needs it. These templates are untested "
+                "on this interpreter.", allow_module_level=True)
+
+from tokenizers import Tokenizer  # noqa: E402
+from tokenizers.models import WordLevel  # noqa: E402
+from tokenizers.pre_tokenizers import Whitespace  # noqa: E402
+
+REPO = Path(__file__).resolve().parent.parent
+TEMPLATES = REPO / "orchard" / "skills" / "weights-swap-templates"
+FAKE_SERVER = Path(__file__).resolve().parent / "fake_swap_server.py"
+NEAREST = "Qwen/Qwen3.8-27B"
+REV = "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+TOK_REV = "abcdef0123456789abcdef0123456789abcdef01"
+
+BUNDLE_RUN_SH = f"""#!/usr/bin/env bash
+# Serve this model on TT hardware.
+set -euo pipefail
+HERE="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
+VENV="${{VENV:-$HERE/venv}}"
+PYBIN="$VENV/bin/python"
+export HF_MODEL="${{HF_MODEL:-{NEAREST}}}"
+CMD=("$PYBIN" -m vllm.entrypoints.openai.api_server --model "{NEAREST}" --max_num_seqs 4 --revision {REV} --tokenizer-revision {TOK_REV} --max_model_len 262144 "$@")
+exec "${{CMD[@]}}"
+"""
+
+# ---- prepare_swap.py -----------------------------------------------------------------------------
+
+
+def make_snapshot(root: Path, files: dict) -> Path:
+    """An HF-cache-shaped snapshot: each file is a symlink into a blobs/ directory."""
+    blobs, snap = root / "blobs", root / "snapshots" / ("0" * 40)
+    blobs.mkdir(parents=True)
+    snap.mkdir(parents=True)
+    for name, content in files.items():
+        blob = blobs / f"blob-{name}"
+        blob.write_text(content)
+        (snap / name).symlink_to(os.path.relpath(blob, snap))
+    return snap
+
+
+LINKED = ["tokenizer.json", "tokenizer_config.json", "chat_template.jinja", "generation_config.json",
+          "model.safetensors.index.json", "model-00001-of-00002.safetensors",
+          "model-00002-of-00002.safetensors", "model-mtp.safetensors"]
+
+
+@pytest.fixture
+def prep(tmp_path):
+    """A stage dir with prepare_swap.py copied in, a fake bundle and two fake snapshots."""
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "run.sh").write_text(BUNDLE_RUN_SH)
+    base = make_snapshot(tmp_path / "base", {"config.json": '{"base": true}',
+                                             "preprocessor_config.json": '{"pre": 1}'})
+    new = make_snapshot(tmp_path / "new", {"config.json": '{"new": true}',
+                                           **{n: f"content of {n}" for n in LINKED}})
+    stage = tmp_path / "run" / "stages" / "2"
+    stage.mkdir(parents=True)
+    shutil.copy(TEMPLATES / "prepare_swap.py", stage)
+    cfg = {"run_dir": str(tmp_path / "run"), "bundle_dir": str(bundle), "nearest_model_id": NEAREST,
+           "base_snapshot": str(base), "new_snapshot": str(new), "new_model_id": "Altworld/Hemmingway-1",
+           "tt_cache": str(tmp_path / "cache"), "hf_home": str(tmp_path / "hf"), "port": 8100}
+    (stage / "swap_config.json").write_text(json.dumps(cfg))
+    return {"stage": stage, "bundle": bundle, "base": base, "new": new}
+
+
+def run_prepare(stage: Path):
+    return subprocess.run([sys.executable, str(stage / "prepare_swap.py")], capture_output=True,
+                          text=True, timeout=60)
+
+
+def test_prepare_builds_the_model_dir(prep):
+    r = run_prepare(prep["stage"])
+    assert r.returncode == 0, r.stdout + r.stderr
+    md = prep["stage"] / "model-dir"
+    # Copied from the nearest model: real files with the base content. The absent video config
+    # is skipped without an error.
+    for name in ("config.json", "preprocessor_config.json"):
+        assert (md / name).is_file() and not (md / name).is_symlink()
+        assert (md / name).read_text() == (prep["base"] / name).read_text()
+    assert not (md / "video_preprocessor_config.json").exists()
+    # Linked from the new model: absolute links to the resolved blob, not to the snapshot link.
+    for name in LINKED:
+        link = md / name
+        assert link.is_symlink(), name
+        target = os.readlink(link)
+        assert os.path.isabs(target) and target == os.path.realpath(prep["new"] / name)
+        assert "/blobs/" in target
+    assert sorted(p.name for p in md.iterdir()) == sorted(LINKED + ["config.json",
+                                                                    "preprocessor_config.json"])
+
+
+def test_prepare_edits_the_run_script(prep):
+    r = run_prepare(prep["stage"])
+    assert r.returncode == 0, r.stdout + r.stderr
+    out = prep["stage"] / "run.sh"
+    text = out.read_text()
+    md = str(prep["stage"] / "model-dir")
+    assert f'HERE="{prep["bundle"]}"\n' in text
+    assert "BASH_SOURCE" not in text
+    assert text.count("--model ") == 1 and f"--model {md} " in text
+    assert "--revision" not in text and "--tokenizer-revision" not in text
+    # The HF_MODEL default line also names the nearest model; it is left alone.
+    assert f'export HF_MODEL="${{HF_MODEL:-{NEAREST}}}"' in text
+    assert "--max_num_seqs 4 --max_model_len 262144" in text
+    assert out.stat().st_mode & stat.S_IXUSR
+    # Everything except the three edited spots is unchanged.
+    expect = (BUNDLE_RUN_SH
+              .replace('HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"', f'HERE="{prep["bundle"]}"')
+              .replace(f'--model "{NEAREST}"', f"--model {md}")
+              .replace(f" --revision {REV}", "").replace(f" --tokenizer-revision {TOK_REV}", ""))
+    assert text == expect
+
+
+def test_prepare_accepts_an_unquoted_model_and_reports_absent_revisions(prep):
+    src = (BUNDLE_RUN_SH.replace(f'--model "{NEAREST}"', f"--model {NEAREST}")
+           .replace(f" --revision {REV}", "").replace(f" --tokenizer-revision {TOK_REV}", ""))
+    (prep["bundle"] / "run.sh").write_text(src)
+    r = run_prepare(prep["stage"])
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert f"--model {prep['stage'] / 'model-dir'} " in (prep["stage"] / "run.sh").read_text()
+    assert "--revision" in r.stdout and "absent" in r.stdout
+    assert "--tokenizer-revision" in r.stdout
+
+
+def test_prepare_runs_twice(prep):
+    assert run_prepare(prep["stage"]).returncode == 0
+    r = run_prepare(prep["stage"])
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (prep["stage"] / "model-dir" / "tokenizer.json").is_symlink()
+
+
+@pytest.mark.parametrize("edit,named", [
+    (lambda s: s.replace('HERE="$(cd', 'WHERE="$(cd'), "HERE="),
+    (lambda s: s.replace(f'--model "{NEAREST}"', '--model "Other/Model"'), "--model"),
+    (lambda s: s.replace(f'--model "{NEAREST}"', f'--model "{NEAREST}" --model "{NEAREST}"'), "--model"),
+    (lambda s: s.replace(f"--revision {REV}", f"--revision {REV} --revision {REV}"), "--revision"),
+])
+def test_prepare_exits_2_when_an_edit_does_not_happen_exactly_once(prep, edit, named):
+    (prep["bundle"] / "run.sh").write_text(edit(BUNDLE_RUN_SH))
+    r = run_prepare(prep["stage"])
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert named in r.stdout + r.stderr
+    assert not (prep["stage"] / "run.sh").exists()
+
+
+# ---- serve_and_compare.py ------------------------------------------------------------------------
+
+VOCAB = [a + b for a in ("ba", "de", "ki", "lo", "mu", "ra", "so", "tu") for b in ("n", "l", "r", "s", "t")]
+PROMPT_IDS = [1, 2, 3, 4, 5]
+GENERATED = list(range(2, 34))          # 32 distinct words, so no 6-word phrase repeats
+
+
+def free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def group_alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+@pytest.fixture
+def swap(tmp_path):
+    """A run dir with a stage 1 reference, a stage 2 dir holding serve_and_compare.py, a model-dir
+    with a WordLevel tokenizer, and a run.sh that execs the fake server.
+
+    The finalizer kills the fake server's process group if it is still there, whatever the test
+    did, and reports it so a leak is visible."""
+    run = tmp_path / "run"
+    ref = run / "stages" / "1" / "evidence" / "reference"
+    ref.mkdir(parents=True)
+    (ref / "prompt-ids.json").write_text(json.dumps({"prompt_ids": PROMPT_IDS}))
+    (ref / "generated-ids.json").write_text(json.dumps(
+        {"generated_ids": GENERATED, "generated_text": " ".join(VOCAB[i] for i in GENERATED)}))
+    stage = run / "stages" / "2"
+    md = stage / "model-dir"
+    md.mkdir(parents=True)
+    tok = Tokenizer(WordLevel({w: i for i, w in enumerate(VOCAB)} | {"[UNK]": len(VOCAB)},
+                              unk_token="[UNK]"))
+    tok.pre_tokenizer = Whitespace()
+    tok.save(str(md / "tokenizer.json"))
+    shutil.copy(TEMPLATES / "serve_and_compare.py", stage)
+    pid_file = tmp_path / "server-pid.json"
+    server_cfg = tmp_path / "server.json"
+    (stage / "run.sh").write_text(
+        f'#!/usr/bin/env bash\nexec "{sys.executable}" "{FAKE_SERVER}" --config "{server_cfg}" "$@"\n')
+    cfg = {"run_dir": str(run), "bundle_dir": str(tmp_path / "bundle"), "nearest_model_id": NEAREST,
+           "base_snapshot": str(tmp_path / "base"), "new_snapshot": str(tmp_path / "new"),
+           "new_model_id": "Altworld/Hemmingway-1", "tt_cache": str(tmp_path / "cache" / "tt_cache"),
+           "hf_home": str(tmp_path / "hf"), "port": free_port(), "health_timeout_s": 30}
+
+    state = {"stage": stage, "run": run, "cfg": cfg, "pid_file": pid_file}
+
+    def start(mode="perfect", **overrides):
+        (stage / "swap_config.json").write_text(json.dumps(cfg | overrides))
+        server_cfg.write_text(json.dumps({"mode": mode, "vocab": VOCAB, "prompt_ids": PROMPT_IDS,
+                                          "generated_ids": GENERATED, "model": str(md),
+                                          "pid_file": str(pid_file)}))
+        return subprocess.run([sys.executable, str(stage / "serve_and_compare.py")],
+                              capture_output=True, text=True, timeout=180)
+
+    state["start"] = start
+    try:
+        yield state
+    finally:
+        if pid_file.exists():
+            pgid = json.loads(pid_file.read_text())["pgid"]
+            if group_alive(pgid):
+                os.killpg(pgid, signal.SIGKILL)
+                print(f"fixture killed a leaked fake server group {pgid}", file=sys.stderr)
+
+
+def server_pgid(state) -> int:
+    return json.loads(state["pid_file"].read_text())["pgid"]
+
+
+def wait_gone(pgid: int, within: float = 5.0) -> bool:
+    end = time.monotonic() + within
+    while time.monotonic() < end:
+        if not group_alive(pgid):
+            return True
+        time.sleep(0.1)
+    return not group_alive(pgid)
+
+
+def report(state) -> dict:
+    return json.loads((state["stage"] / "evidence" / "swap-check.json").read_text())
+
+
+def test_perfect_agreement(swap):
+    r = swap["start"]("perfect")
+    assert r.returncode == 0, r.stdout + r.stderr
+    rep = report(swap)
+    draft = rep["result_draft"]
+    assert set(draft) == {"serves", "server_ready_s", "coherent", "free_run_text", "top1_agreement",
+                          "n_tokens", "cache_dir", "evidence"}
+    assert draft["serves"] is True and draft["coherent"] is True
+    assert draft["top1_agreement"] == 1.0 and draft["n_tokens"] == 32
+    assert draft["server_ready_s"] > 0
+    assert draft["cache_dir"] == swap["cfg"]["tt_cache"]
+    assert draft["evidence"] == ["stages/2/evidence/swap-check.json", "stages/2/evidence/server.log"]
+    assert all((swap["run"] / p).is_file() for p in draft["evidence"])
+    assert draft["free_run_text"].split() == [VOCAB[i] for i in GENERATED][:len(draft["free_run_text"].split())]
+    assert rep["mismatches"] == []
+    assert json.loads(r.stdout[r.stdout.index("{"):]) == draft
+    # The server got the cache, HF home and offline flag; the cache was created with its marker.
+    env = json.loads(swap["pid_file"].read_text())["env"]
+    assert env == {"TT_CACHE_PATH": swap["cfg"]["tt_cache"], "TT_CACHE_HOME": swap["cfg"]["tt_cache"],
+                   "HF_HOME": swap["cfg"]["hf_home"], "HF_HUB_OFFLINE": "1"}
+    marker = Path(swap["cfg"]["tt_cache"]) / ".orchard-model"
+    assert marker.read_text() == "Altworld/Hemmingway-1"
+    assert wait_gone(server_pgid(swap))
+
+
+def test_every_fourth_token_wrong(swap):
+    r = swap["start"]("every4")
+    assert r.returncode == 0, r.stdout + r.stderr
+    rep = report(swap)
+    assert rep["result_draft"]["top1_agreement"] == 0.75
+    assert [m["position"] for m in rep["mismatches"]] == list(range(3, 32, 4))
+    m = rep["mismatches"][0]
+    assert m["expected_text"].strip() == VOCAB[GENERATED[3]]
+    assert m["got_text"].strip() == VOCAB[GENERATED[3] + 1]
+    assert rep["result_draft"]["coherent"] is True
+
+
+def test_an_http_error_exits_5_and_stops_the_server(swap):
+    r = swap["start"]("http500")
+    assert r.returncode == 5, r.stdout + r.stderr
+    assert "fake server failure" in r.stdout + r.stderr
+    assert wait_gone(server_pgid(swap)), "the server's process group is still running"
+
+
+def test_an_error_in_the_script_still_stops_the_server(swap):
+    r = swap["start"]("perfect", test_raise_after_ready=True)
+    assert r.returncode not in (0, 3, 4, 5), r.stdout + r.stderr
+    assert swap["pid_file"].exists()
+    assert wait_gone(server_pgid(swap)), "the server's process group is still running"
+
+
+def test_a_cache_without_the_marker_is_refused_and_no_server_starts(swap):
+    cache = Path(swap["cfg"]["tt_cache"])
+    cache.mkdir(parents=True)
+    (cache / "layer0.bin").write_text("weights of some other model")
+    r = swap["start"]("perfect")
+    assert r.returncode == 3, r.stdout + r.stderr
+    assert ".orchard-model" in r.stdout + r.stderr
+    assert not swap["pid_file"].exists()
+
+
+def test_a_cache_with_a_wrong_marker_is_refused(swap):
+    cache = Path(swap["cfg"]["tt_cache"])
+    cache.mkdir(parents=True)
+    (cache / ".orchard-model").write_text("Someone/Else")
+    (cache / "layer0.bin").write_text("x")
+    assert swap["start"]("perfect").returncode == 3
+    assert not swap["pid_file"].exists()
+
+
+def test_a_cache_with_the_matching_marker_is_reused(swap):
+    cache = Path(swap["cfg"]["tt_cache"])
+    cache.mkdir(parents=True)
+    (cache / ".orchard-model").write_text("Altworld/Hemmingway-1")
+    (cache / "layer0.bin").write_text("converted earlier by this run")
+    r = swap["start"]("perfect")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (cache / "layer0.bin").read_text() == "converted earlier by this run"
+
+
+def test_a_server_that_exits_before_it_is_healthy_exits_4(swap):
+    r = swap["start"]("die")
+    assert r.returncode == 4, r.stdout + r.stderr
+    out = r.stdout + r.stderr
+    assert "fake server log line 69" in out and "fake server log line 10" in out
+    assert "fake server log line 9\n" not in out          # only the last 60 lines
+    assert wait_gone(server_pgid(swap))
+
+
+def test_the_script_sends_only_the_fields_the_server_accepts():
+    text = (TEMPLATES / "serve_and_compare.py").read_text()
+    assert not re.search(r'["\']logprobs["\']\s*:', text)
+    assert not re.search(r'["\']top_p["\']\s*:', text)
