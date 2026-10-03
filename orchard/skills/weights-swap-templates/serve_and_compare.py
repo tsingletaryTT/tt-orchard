@@ -37,6 +37,10 @@ still stops the server.
 
 The server rejects logprobs and sampling parameters, so requests carry only model, prompt,
 max_tokens and temperature.
+
+serve_and_compare_container.py (stage 4) is copied next to this file and imports guard_cache,
+load_reference, measure, write_report and ServerHTTPError from it, so both templates measure the
+same way.
 """
 from __future__ import annotations
 
@@ -201,19 +205,56 @@ def measure(cfg: dict, proc, log_path: Path, tokenizer, prompt_ids, generated_id
             "matches": matches, "forced": forced, "mismatches": mismatches}
 
 
+def load_reference(run_dir: Path) -> tuple[list[int], list[int], str | None]:
+    """The stage 1 prompt ids, generated ids and generated text. Exits 2 when the reference holds
+    fewer than N_TOKENS generated ids."""
+    ref = run_dir / "stages" / "1" / "evidence" / "reference"
+    prompt_ids = json.loads((ref / "prompt-ids.json").read_text(encoding="utf-8"))["prompt_ids"]
+    gen = json.loads((ref / "generated-ids.json").read_text(encoding="utf-8"))
+    if len(gen["generated_ids"]) < N_TOKENS:
+        print(f"serve_and_compare: the reference has {len(gen['generated_ids'])} generated ids; "
+              f"{N_TOKENS} are needed", file=sys.stderr)
+        sys.exit(2)
+    return prompt_ids, gen["generated_ids"], gen.get("generated_text")
+
+
+def write_report(cfg: dict, run_dir: Path, cache: Path, weights_env: dict, m: dict, tokenizer,
+                 reference, log_path: Path, extra: dict | None = None) -> dict:
+    """Step (g). Writes swap-check.json next to log_path and prints the result draft. `extra` adds
+    keys to the report; serve_and_compare_container.py records its docker command there."""
+    prompt_ids, generated_ids, generated_text = reference
+    top1 = m["matches"] / N_TOKENS
+    coh = coherence(m["free_run_text"])
+    swap_json = log_path.parent / "swap-check.json"
+    draft = {"serves": True,
+             "server_ready_s": m["server_ready_s"],
+             "coherent": coh["coherent"],
+             "free_run_text": m["free_run_text"][:200],
+             "top1_agreement": top1,
+             "n_tokens": N_TOKENS,
+             "cache_dir": str(cache),
+             "evidence": [os.path.relpath(swap_json, run_dir), os.path.relpath(log_path, run_dir)]}
+    report = {"label": "measured", "new_model_id": cfg["new_model_id"],
+              "model_dir": weights_env["MODEL_WEIGHTS_DIR"], "port": cfg["port"],
+              "weights_dir_env": weights_env, "hf_model_env": weights_env["HF_MODEL"],
+              "server_ready_s": m["server_ready_s"], "n_tokens": N_TOKENS,
+              "matches": m["matches"], "top1_agreement": top1, **coh,
+              "prompt_ids": prompt_ids, "reference_generated_ids": generated_ids[:N_TOKENS],
+              "reference_generated_text": generated_text, "free_run_text": m["free_run_text"],
+              "free_run_ids": tokenizer.encode(m["free_run_text"], add_special_tokens=False).ids,
+              "teacher_forced": m["forced"], "mismatches": m["mismatches"], **(extra or {}),
+              "result_draft": draft}
+    swap_json.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+    print(json.dumps(draft, indent=2, ensure_ascii=False))
+    return draft
+
+
 def main() -> int:
     from tokenizers import Tokenizer      # imported here so a missing package fails before Popen
 
     cfg = load_config()
     run_dir = Path(cfg["run_dir"]).resolve()
-    ref = run_dir / "stages" / "1" / "evidence" / "reference"
-    prompt_ids = json.loads((ref / "prompt-ids.json").read_text(encoding="utf-8"))["prompt_ids"]
-    gen = json.loads((ref / "generated-ids.json").read_text(encoding="utf-8"))
-    generated_ids, generated_text = gen["generated_ids"], gen.get("generated_text")
-    if len(generated_ids) < N_TOKENS:
-        print(f"serve_and_compare: the reference has {len(generated_ids)} generated ids; "
-              f"{N_TOKENS} are needed", file=sys.stderr)
-        return 2
+    reference = load_reference(run_dir)
     tokenizer = Tokenizer.from_file(str(STAGE_DIR / "model-dir" / "tokenizer.json"))
     cache = Path(cfg["tt_cache"])
     guard_cache(cache, cfg["new_model_id"])
@@ -230,39 +271,15 @@ def main() -> int:
                             env=env, stdout=log, stderr=subprocess.STDOUT,
                             stdin=subprocess.DEVNULL, start_new_session=True)
     try:
-        m = measure(cfg, proc, log_path, tokenizer, prompt_ids, generated_ids)
+        m = measure(cfg, proc, log_path, tokenizer, reference[0], reference[1])
     except ServerHTTPError as exc:
         print(f"serve_and_compare: the server returned an error: {exc}")
         sys.exit(5)
     finally:
         stop_server(proc)
         log.close()
-
-    top1 = m["matches"] / N_TOKENS
-    coh = coherence(m["free_run_text"])
-    swap_json = evidence / "swap-check.json"
-    draft = {"serves": True,
-             "server_ready_s": m["server_ready_s"],
-             "coherent": coh["coherent"],
-             "free_run_text": m["free_run_text"][:200],
-             "top1_agreement": top1,
-             "n_tokens": N_TOKENS,
-             "cache_dir": str(cache),
-             "evidence": [os.path.relpath(swap_json, run_dir), os.path.relpath(log_path, run_dir)]}
-    report = {"label": "measured", "new_model_id": cfg["new_model_id"],
-              "model_dir": model_dir, "port": cfg["port"],
-              "weights_dir_env": weights_env, "hf_model_env": weights_env["HF_MODEL"],
-              "server_ready_s": m["server_ready_s"], "n_tokens": N_TOKENS,
-              "matches": m["matches"], "top1_agreement": top1, **coh,
-              "prompt_ids": prompt_ids, "reference_generated_ids": generated_ids[:N_TOKENS],
-              "reference_generated_text": generated_text, "free_run_text": m["free_run_text"],
-              "free_run_ids": tokenizer.encode(m["free_run_text"], add_special_tokens=False).ids,
-              "teacher_forced": m["forced"], "mismatches": m["mismatches"],
-              "result_draft": draft}
-    swap_json.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
-    print(json.dumps(draft, indent=2, ensure_ascii=False))
+    write_report(cfg, run_dir, cache, weights_env, m, tokenizer, reference, log_path)
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())

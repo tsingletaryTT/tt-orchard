@@ -3,6 +3,13 @@ container package. The argv edit is tested in-process; the whole script runs aga
 `tt-model` and a fake `docker` (tests/fake_tt_model.py, tests/fake_docker.py) that start
 tests/fake_swap_server.py, which opens no device."""
 import importlib.util
+import json
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -147,3 +154,206 @@ def test_blob_dirs_lists_the_directories_the_links_point_into(tmp_path):
         (md / name).symlink_to(blobs / f"b-{name}")
     (md / "config.json").write_text("{}")                 # a copied file is inside model-dir already
     assert sac.blob_dirs(md) == [str(blobs)]
+
+
+# ---- the whole script, against fake tt-model and docker -------------------------------------------
+
+TESTS = Path(__file__).resolve().parent
+FAKE_SERVER, FAKE_TT_MODEL, FAKE_DOCKER = (TESTS / "fake_swap_server.py", TESTS / "fake_tt_model.py",
+                                           TESTS / "fake_docker.py")
+
+
+@pytest.fixture
+def crig(tmp_path):
+    """An operator home with the package installed and both models in its HF cache, a run with a
+    stage 1 reference, one configuration directory prepared by prepare_swap.py, and fake tt-model
+    and docker first on PATH. The finalizer kills any fake server a test left running."""
+    pytest.importorskip("tokenizers")
+    from tokenizers import Tokenizer
+    from tokenizers.models import WordLevel
+    from tokenizers.pre_tokenizers import Whitespace
+    from test_weights_swap_templates import GENERATED, PROMPT_IDS, VOCAB, free_port, make_snapshot
+
+    home = tmp_path / "operator-home"
+    hf = home / ".cache" / "huggingface"
+    pkg_cache = home / ".cache" / "tt-model" / "qwen3.8-27b-p300x2"
+    for d in ("cache", "weights", "tensors"):
+        (pkg_cache / d).mkdir(parents=True)
+    (home / ".cache" / "tt-model" / "installed.json").write_text(json.dumps(
+        {PACKAGE: {"repo_id": PACKAGE, "container": True, "image": IMAGE, "profile": "batch32"}}))
+    tok = Tokenizer(WordLevel({w: i for i, w in enumerate(VOCAB)} | {"[UNK]": len(VOCAB)},
+                              unk_token="[UNK]"))
+    tok.pre_tokenizer = Whitespace()
+    tok.save(str(tmp_path / "tokenizer.json"))
+    base = make_snapshot(hf / "hub" / "models--Qwen--Qwen3.8-27B", {"config.json": '{"base": true}'})
+    new = make_snapshot(hf / "hub" / "models--Altworld--Hemmingway-1",
+                        {"tokenizer.json": (tmp_path / "tokenizer.json").read_text(),
+                         "model-00001-of-00001.safetensors": "new weights"})
+    run = tmp_path / "run"
+    ref = run / "stages" / "1" / "evidence" / "reference"
+    ref.mkdir(parents=True)
+    (ref / "prompt-ids.json").write_text(json.dumps({"prompt_ids": PROMPT_IDS}))
+    (ref / "generated-ids.json").write_text(json.dumps(
+        {"generated_ids": GENERATED, "generated_text": " ".join(VOCAB[i] for i in GENERATED)}))
+    cdir = run / "stages" / "4" / "configs" / "4"
+    cdir.mkdir(parents=True)
+    for name in ("prepare_swap.py", "serve_and_compare.py", "serve_and_compare_container.py"):
+        shutil.copy(TEMPLATES / name, cdir)
+    cfg = {"run_dir": str(run), "nearest_model_id": NEAREST, "base_snapshot": str(base),
+           "new_snapshot": str(new), "new_model_id": "Altworld/Hemmingway-1",
+           "tt_cache": str(tmp_path / "orchard-cache" / "hemmingway-1" / "4chip-p300x2" / "tt_cache"),
+           "hf_home": str(hf), "operator_home": str(home), "port": free_port(), "package": PACKAGE,
+           "profile": "batch32", "chips": 4, "health_timeout_s": 30}
+    (cdir / "swap_config.json").write_text(json.dumps(cfg))
+    prep = subprocess.run([sys.executable, str(cdir / "prepare_swap.py")], capture_output=True,
+                          text=True, timeout=60)
+    assert prep.returncode == 0, prep.stdout + prep.stderr
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name, script in (("tt-model", FAKE_TT_MODEL), ("docker", FAKE_DOCKER)):
+        (bin_dir / name).write_text(f'#!/bin/sh\nexec "{sys.executable}" "{script}" "$@"\n')
+        (bin_dir / name).chmod(0o755)
+    state = tmp_path / "docker-state"
+    state.mkdir()
+    pid_file, server_cfg = tmp_path / "server-pid.json", tmp_path / "server.json"
+    (state / "config.json").write_text(json.dumps({"image": IMAGE, "fake_server": str(FAKE_SERVER),
+                                                   "server_config": str(server_cfg)}))
+    tt_cfg, calls = tmp_path / "tt-model.json", tmp_path / "tt-model-calls.jsonl"
+    rig = {"cdir": cdir, "cfg": cfg, "home": home, "hf": hf, "pkg_cache": pkg_cache, "state": state,
+           "pid_file": pid_file, "calls": calls}
+
+    def start(mode="perfect", printed=None, env_change=None, **overrides):
+        (cdir / "swap_config.json").write_text(json.dumps(cfg | overrides))
+        server_cfg.write_text(json.dumps({"mode": mode, "vocab": VOCAB, "prompt_ids": PROMPT_IDS,
+                                          "generated_ids": GENERATED, "model": str(cdir / "model-dir"),
+                                          "pid_file": str(pid_file)}))
+        tt_cfg.write_text(json.dumps({"calls": str(calls), "pkg_cache": str(pkg_cache),
+                                      "printed": printed or {}}))
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("MODEL_WEIGHTS_DIR", "HF_MODEL", "HF_HUB_CACHE")}
+        env.update(PATH=f"{bin_dir}:{env['PATH']}", FAKE_DOCKER_STATE=str(state),
+                   FAKE_TT_MODEL_CONFIG=str(tt_cfg), ORCHARD_DEVICE_IDS="0,1,2,3",
+                   ORCHARD_TEST_LABEL=LABEL)
+        for k, v in (env_change or {}).items():
+            if v is None:
+                env.pop(k, None)
+            else:
+                env[k] = v
+        return subprocess.run([sys.executable, str(cdir / "serve_and_compare_container.py")],
+                              capture_output=True, text=True, timeout=180, env=env)
+
+    rig["start"] = start
+    try:
+        yield rig
+    finally:
+        for rec in (state / "containers").glob("*.json"):
+            pid = json.loads(rec.read_text())["pid"]
+            try:
+                os.killpg(pid, signal.SIGKILL)
+                print(f"fixture killed a leaked fake container group {pid}", file=sys.stderr)
+            except ProcessLookupError:
+                pass
+
+
+def docker_runs(rig) -> list[list[str]]:
+    path = rig["state"] / "runs.jsonl"
+    return [json.loads(ln) for ln in path.read_text().splitlines()] if path.exists() else []
+
+
+def leftover(rig) -> list[str]:
+    return sorted(p.stem for p in (rig["state"] / "containers").glob("*.json"))
+
+
+def server_gone(rig, within=5.0) -> bool:
+    pgid = json.loads(rig["pid_file"].read_text())["pgid"]
+    end = time.monotonic() + within
+    while time.monotonic() < end:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def test_the_container_serves_the_new_weights_and_is_removed_afterwards(crig):
+    r = crig["start"]()
+    assert r.returncode == 0, r.stdout + r.stderr
+    md = str(crig["cdir"] / "model-dir")
+    seen = json.loads(crig["pid_file"].read_text())
+    assert seen["model_arg"] == md
+    assert seen["env"]["MODEL_WEIGHTS_DIR"] == md and seen["env"]["HF_MODEL"] == md
+    assert seen["env"]["TT_CACHE_PATH"] == "/tensor-cache" and seen["env"]["HF_HOME"] == "/hf"
+    [argv] = docker_runs(crig)
+    vols = pairs(argv, "--volume")
+    assert f"{crig['cfg']['tt_cache']}:/tensor-cache" in vols
+    assert f"{crig['cdir'] / 'hf-isolated'}:/hf" in vols
+    assert not any(v.split(":")[0] == str(crig["hf"]) for v in vols)
+    assert pairs(argv, "--label") == [LABEL]
+    rep = json.loads((crig["cdir"] / "evidence" / "swap-check.json").read_text())
+    assert rep["result_draft"]["top1_agreement"] == 1.0 and rep["result_draft"]["coherent"] is True
+    assert rep["result_draft"]["evidence"] == ["stages/4/configs/4/evidence/swap-check.json",
+                                               "stages/4/configs/4/evidence/server.log"]
+    assert rep["kind"] == "container" and rep["container_stopped"] is True and rep["device_ids"] == [0, 1, 2, 3]
+    assert json.loads((crig["cdir"] / "evidence" / "docker-argv.json").read_text()) == ["docker", "run"] + argv
+    [call] = [json.loads(ln) for ln in crig["calls"].read_text().splitlines()]
+    assert call["HOME"] == str(crig["home"]) and call["HF_HOME"] == str(crig["hf"])
+    assert call["argv"][:2] == ["serve", PACKAGE] and call["argv"][-1] == "--print"
+    assert call["argv"][call["argv"].index("--device-id") + 1] == "0,1,2,3"
+    assert (Path(crig["cfg"]["tt_cache"]) / ".orchard-model").read_text() == "Altworld/Hemmingway-1"
+    assert leftover(crig) == [] and server_gone(crig)
+
+
+@pytest.mark.parametrize("mode,overrides,code", [("http500", {}, 5), ("die", {}, 4),
+                                                 ("perfect", {"test_raise_after_ready": True}, None)])
+def test_the_container_is_stopped_and_removed_on_every_exit_path(crig, mode, overrides, code):
+    r = crig["start"](mode, **overrides)
+    if code is None:
+        assert r.returncode not in (0, 2, 3, 4, 5), r.stdout + r.stderr
+    else:
+        assert r.returncode == code, r.stdout + r.stderr
+    assert leftover(crig) == [], "docker still lists the test container"
+    assert server_gone(crig), "the fake container's server is still running"
+
+
+def test_a_server_that_exits_shows_the_end_of_its_log(crig):
+    r = crig["start"]("die")
+    assert "fake server log line 69" in r.stdout and "exited with code 1" in r.stdout
+
+
+def test_a_cache_inside_the_package_caches_is_refused_before_anything_starts(crig):
+    r = crig["start"](tt_cache=str(crig["pkg_cache"] / "tensors"))
+    assert r.returncode == 3, r.stdout + r.stderr
+    assert "where the packages keep their own tensor caches" in r.stderr
+    assert docker_runs(crig) == [] and not crig["calls"].exists()
+
+
+def test_a_cache_marked_for_another_model_is_refused(crig):
+    cache = Path(crig["cfg"]["tt_cache"])
+    cache.mkdir(parents=True)
+    (cache / ".orchard-model").write_text("Qwen/Qwen3.8-27B")
+    (cache / "layer0.bin").write_text("base model tensors")
+    assert crig["start"]().returncode == 3
+    assert docker_runs(crig) == []
+
+
+def test_a_printed_command_that_maps_every_device_exits_2_and_starts_nothing(crig):
+    r = crig["start"](printed={"whole_dir": True})
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "not one /dev/tenstorrent/<N> node" in r.stderr
+    assert docker_runs(crig) == []
+
+
+@pytest.mark.parametrize("env_change", [{"ORCHARD_TEST_LABEL": None}, {"ORCHARD_DEVICE_IDS": "0,1"},
+                                        {"ORCHARD_DEVICE_IDS": None}])
+def test_without_the_supervisors_variables_it_exits_2(crig, env_change):
+    r = crig["start"](env_change=env_change)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "ORCHARD_TEST_LABEL and ORCHARD_DEVICE_IDS" in r.stderr
+    assert docker_runs(crig) == [] and not crig["calls"].exists()
+
+
+def test_a_package_that_is_not_installed_exits_2(crig):
+    r = crig["start"](package="someone/else-p300x2")
+    assert r.returncode == 2 and "is not installed" in r.stderr
+    assert docker_runs(crig) == []

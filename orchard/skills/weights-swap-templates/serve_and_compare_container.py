@@ -49,13 +49,43 @@ The edits (each must apply exactly once unless it says otherwise):
 
 Any option this script does not know exits 2. A new option in tt-model's output must be read by a
 person before a test trusts it.
+
+Steps when run: read swap_config.json (keys below) and the supervisor's two variables; refuse a
+tt_cache inside ~/.cache/tt-model and apply serve_and_compare.py's cache guard (exit 3); look up
+the package's image in ~/.cache/tt-model/installed.json; ask `tt-model serve ... --print` with
+HOME and HF_HOME set to the operator's (the shell this runs in has its own HOME); edit the argv and
+save it as evidence/docker-argv.json; create every volume source as this user (docker would
+create a missing one as root); `docker run`; then measure exactly as serve_and_compare.py does
+(its `measure`, with the container standing in for the process) and write evidence/swap-check.json
+through its `write_report`. The `try` starts on the line after `docker run` returns, and its
+`finally` runs `docker stop` (SIGTERM, then SIGKILL after STOP_GRACE_S), saves `docker logs` to
+evidence/server.log, runs `docker rm --force` and checks that docker no longer lists the
+container.
+
+Config keys: run_dir, nearest_model_id, new_model_id, tt_cache, hf_home, operator_home, port,
+package, profile, chips (and health_timeout_s, test_raise_after_ready for tests, as in
+serve_and_compare.py).
+
+Exit codes: 0 when the measurements completed, whatever they say. 2 the config, the supervisor's
+variables or the printed command could not be used; nothing was started. 3 the tensor cache was
+refused. 4 the container did not start, exited, or never became healthy. 5 the server answered a
+request with an HTTP error.
 """
 from __future__ import annotations
 
+import json
 import os
+import shlex
+import subprocess
+import sys
 from pathlib import Path
 
 STAGE_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(STAGE_DIR))       # serve_and_compare.py is copied next to this file
+DOCKER_TIMEOUT_S = 120.0
+STOP_GRACE_S = 60
+REQUIRED = ("run_dir", "nearest_model_id", "new_model_id", "tt_cache", "hf_home", "operator_home",
+            "port", "package", "profile", "chips")
 TT_DEVICE = "/dev/tenstorrent"
 VALUE_OPTIONS = {"--name", "--user", "--label", "--device", "--ipc", "--mount", "--volume", "--env",
                  "--publish"}
@@ -170,3 +200,154 @@ def edit_docker_argv(argv: list[str], *, image: str, nearest: str, model_dir, tt
     if ports != [str(port)]:
         raise EditError(f"the server's --port is {ports}; the config's port is {port}")
     return out + server
+
+
+# ---- running the test ----------------------------------------------------------------------------
+
+def fail(message: str, code: int = 2) -> None:
+    print(f"serve_and_compare_container: {message}", file=sys.stderr)
+    sys.exit(code)
+
+
+def docker(args: list[str], timeout: float = DOCKER_TIMEOUT_S) -> subprocess.CompletedProcess:
+    return subprocess.run(["docker", *args], capture_output=True, text=True, timeout=timeout)
+
+
+class Container:
+    """The started container, with what serve_and_compare.measure asks of a Popen: poll() and
+    returncode."""
+
+    def __init__(self, cid: str, log_path: Path):
+        self.cid, self.log_path, self.returncode = cid, log_path, None
+
+    def save_log(self) -> None:
+        r = docker(["logs", self.cid])
+        self.log_path.write_text(r.stdout + r.stderr, encoding="utf-8")
+
+    def poll(self):
+        r = docker(["inspect", "--format", "{{.State.Running}} {{.State.ExitCode}}", self.cid])
+        parts = r.stdout.split()
+        if r.returncode == 0 and parts[:1] == ["true"]:
+            return None
+        self.save_log()                 # measure prints the log's tail when the server is gone
+        self.returncode = int(parts[1]) if r.returncode == 0 and len(parts) == 2 else -1
+        return self.returncode
+
+    def stop(self) -> bool:
+        """Stop, save the log, remove. True when docker no longer lists the container."""
+        docker(["stop", "-t", str(STOP_GRACE_S), self.cid], timeout=STOP_GRACE_S + DOCKER_TIMEOUT_S)
+        self.save_log()
+        docker(["rm", "--force", self.cid])
+        left = docker(["ps", "--all", "--quiet", "--filter", f"id={self.cid}"])
+        return left.returncode == 0 and not left.stdout.strip()
+
+
+def inside(path: Path, root: Path) -> bool:
+    path, root = os.path.realpath(path), os.path.realpath(root)
+    return os.path.commonpath([path, root]) == root
+
+
+def package_image(cfg: dict) -> str:
+    path = Path(cfg["operator_home"]) / ".cache" / "tt-model" / "installed.json"
+    try:
+        entry = json.loads(path.read_text(encoding="utf-8"))[cfg["package"]]
+    except (OSError, ValueError, KeyError) as exc:
+        fail(f"{cfg['package']} is not installed according to {path}: {exc!r}")
+    if not entry.get("container") or not entry.get("image"):
+        fail(f"{cfg['package']} is not a container package in {path}")
+    return entry["image"]
+
+
+def printed_command(cfg: dict, ids: list[int]) -> list[str]:
+    env = dict(os.environ, HOME=str(cfg["operator_home"]), HF_HOME=str(cfg["hf_home"]))
+    for key in ("HF_HUB_CACHE", "HF_TOKEN"):
+        env.pop(key, None)
+    argv = ["tt-model", "serve", cfg["package"], "--local-only", "--no-update-check", "--port",
+            str(cfg["port"]), "--profile", cfg["profile"], "--device-id",
+            ",".join(str(i) for i in ids), "--print"]
+    r = subprocess.run(argv, capture_output=True, text=True, env=env, timeout=DOCKER_TIMEOUT_S)
+    if r.returncode != 0:
+        fail(f"{shlex.join(argv)} exited {r.returncode}: {(r.stderr or r.stdout)[-2000:]}")
+    lines = [ln for ln in r.stdout.splitlines() if ln.startswith("docker run ")]
+    if len(lines) != 1:
+        fail(f"expected one 'docker run' line from {shlex.join(argv)}, found {len(lines)}:\n"
+             f"{r.stdout[-2000:]}")
+    return shlex.split(lines[0])
+
+
+def main() -> int:
+    from tokenizers import Tokenizer      # imported here so a missing package fails before docker
+    from serve_and_compare import (ServerHTTPError, guard_cache, load_reference, measure,
+                                   write_report)
+
+    try:
+        cfg = json.loads((STAGE_DIR / "swap_config.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        fail(f"cannot read swap_config.json: {exc}")
+    missing = [k for k in REQUIRED if cfg.get(k) in (None, "")]
+    if missing:
+        fail(f"swap_config.json is missing {missing}")
+    label = os.environ.get("ORCHARD_TEST_LABEL", "")
+    try:
+        ids = [int(i) for i in os.environ.get("ORCHARD_DEVICE_IDS", "").split(",")]
+    except ValueError:
+        ids = []
+    if not label or len(ids) != int(cfg["chips"]):
+        fail(f"the supervisor sets ORCHARD_TEST_LABEL and ORCHARD_DEVICE_IDS ({cfg['chips']} ids) "
+             f"for a hardware test; got {label!r} and {os.environ.get('ORCHARD_DEVICE_IDS')!r}")
+    run_dir = Path(cfg["run_dir"]).resolve()
+    reference = load_reference(run_dir)
+    model_dir = STAGE_DIR / "model-dir"
+    if not (model_dir / "tokenizer.json").exists():
+        fail(f"{model_dir} has no tokenizer.json; run prepare_swap.py first")
+    tokenizer = Tokenizer.from_file(str(model_dir / "tokenizer.json"))
+    cache = Path(cfg["tt_cache"])
+    shared = Path(cfg["operator_home"]) / ".cache" / "tt-model"
+    if inside(cache, shared):
+        fail(f"tt_cache {cache} is inside {shared}, where the packages keep their own tensor "
+             "caches. Use a new directory for this model and this configuration.", 3)
+    guard_cache(cache, cfg["new_model_id"])
+    image = package_image(cfg)
+    hf_dir = STAGE_DIR / "hf-isolated"
+    hf_dir.mkdir(exist_ok=True)
+    try:
+        argv = edit_docker_argv(printed_command(cfg, ids), image=image,
+                                nearest=cfg["nearest_model_id"], model_dir=model_dir,
+                                tt_cache=cache, hf_dir=hf_dir,
+                                name=f"orchard-{cfg['chips']}chip-{cfg['port']}", label=label,
+                                device_ids=ids, port=int(cfg["port"]), blobs=blob_dirs(model_dir))
+    except EditError as exc:
+        fail(str(exc))
+    evidence = STAGE_DIR / "evidence"
+    evidence.mkdir(parents=True, exist_ok=True)
+    (evidence / "docker-argv.json").write_text(json.dumps(argv, indent=1), encoding="utf-8")
+    for flag, value in zip(argv, argv[1:]):
+        if flag == "--volume":
+            Path(value.split(":")[0]).mkdir(parents=True, exist_ok=True)
+    log_path = evidence / "server.log"
+    r = docker(argv[1:])
+    if r.returncode != 0:
+        print(f"serve_and_compare_container: docker run exited {r.returncode}: {r.stderr[-2000:]}")
+        return 4
+    container = Container(r.stdout.split()[-1], log_path)
+    stopped = False
+    try:
+        m = measure(cfg, container, log_path, tokenizer, reference[0], reference[1])
+    except ServerHTTPError as exc:
+        print(f"serve_and_compare_container: the server returned an error: {exc}")
+        sys.exit(5)
+    finally:
+        stopped = container.stop()
+        if not stopped:
+            print(f"serve_and_compare_container: docker still lists container {container.cid} "
+                  "after stop and rm; the supervisor looks for it by its label", file=sys.stderr)
+    weights_env = {"MODEL_WEIGHTS_DIR": str(model_dir), "HF_MODEL": str(model_dir)}
+    write_report(cfg, run_dir, cache, weights_env, m, tokenizer, reference, log_path,
+                 extra={"kind": "container", "package": cfg["package"], "profile": cfg["profile"],
+                        "chips": int(cfg["chips"]), "device_ids": ids, "docker_argv": argv,
+                        "hf_isolated": str(hf_dir), "container_stopped": stopped})
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
