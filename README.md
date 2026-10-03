@@ -27,7 +27,7 @@ Early. The hold-through-swap pattern has been checked on this machine's two boar
 | Stage skills (`orchard/skills/`: delta-triage, reference-gate, serving-check, operator-bundle) | local drafts; their home is the tt-model-bringup plugin |
 | Model proxy for agents the supervisor did not launch, stage 7 (package and image build) | designed; no code yet |
 
-The suite has 962 passing tests and 1 skipped, and runs without hardware or network. 854 of them predate plan 4. The skipped test is the opt-in replay of local qwen-code transcripts (`ORCHARD_REPLAY=1 python3 -m pytest tests/test_replay_local.py`). 607 of the tests predate plan 3. The driver's tests use fake gozer roots and a stub child.
+The suite has 1199 passing tests and 1 skipped, and runs without hardware or network. 854 of them predate plan 4. The skipped test is the opt-in replay of local qwen-code transcripts (`ORCHARD_REPLAY=1 python3 -m pytest tests/test_replay_local.py`). 607 of the tests predate plan 3. The driver's tests use fake gozer roots and a stub child.
 
 The park check (`orchard/park_check.py`) ran on real hardware on 2026-10-02, on board 1 (chips `0000:03:00.0` and `0000:04:00.0`), with the default options and fake coder and stand-in servers. It exited 0. The park reset took 41.676 s and the restore reset took 41.657 s. The record is in `runs/park-check/20261003T011558Z-0000-03-00.0/`, which git ignores. It is one run on one board; it did not use a real model.
 
@@ -36,7 +36,10 @@ Measured on this machine (one p300c board): an in-place `gozer reset` takes 41.7
 ## How a run is meant to work
 
 A run is a sequence of stages. Each stage has an owner skill, a model tier and an exit gate. The
-supervisor starts a stage with a fresh, short model context built from the run ledger.
+supervisor starts a stage with a fresh, short model context built from the run ledger. When an
+agent says it is finished and the stage's exit gate fails, the same conversation is told the gate's
+reasons and gets one short continuation (up to 20 turns) before the stage is escalated. A reply with
+no text and no command, or one cut off at max_tokens, does not count as finished.
 
 | # | Stage | Model tier |
 |---|---|---|

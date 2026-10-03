@@ -1,7 +1,7 @@
 """The agent step loop against a scripted fake model endpoint."""
 import pytest
 
-from fake_model import FakeModel, call, final, truncated, turn
+from fake_model import FakeModel, call, empty, final, truncated, turn
 from orchard.agent import AgentStep, Tools, agent_env, probe_model
 from orchard.ledger import Ledger
 from orchard.watchdog import Event, IdenticalResponses, Ladder, StageOverBudget, Watchdog
@@ -230,3 +230,119 @@ def test_a_reply_with_no_finish_reason_keeps_the_old_behaviour(run):
         return {"choices": [{"message": {"role": "assistant", "content": "x"}}], "usage": {}}
     out = step(run_dir, ledger, "http://unused/v1", http=http)[0].run("s", "u")
     assert (out.status, out.final_text) == ("done", "x")
+
+
+# ---- empty replies (no text and no tool call, any finish_reason) --------------------------------
+# The live Qwen3.8 run, stage 1, attempt 3, turn 49: 159 completion tokens of reasoning, content "",
+# no tool calls, finish_reason "stop". The loop took it as the final answer and the stage failed.
+
+EMPTY_NUDGE = ("Your last reply was empty: it had no text and no command. Say what you will do next, "
+               "then call a tool, or state that the stage is finished and name the output files you "
+               "wrote.")
+
+
+def test_an_empty_reply_is_nudged_not_treated_as_done(run):
+    run_dir, ledger = run
+    script = by_request(empty(), call("shell", command="echo hi"), final("all done"))
+    with FakeModel(script) as fm:
+        out = step(run_dir, ledger, fm.endpoint)[0].run("s", "u")
+    assert (out.status, out.turns, out.final_text) == ("done", 3, "all done")
+    second = fm.requests[1]["messages"]
+    assert [m["role"] for m in second] == ["system", "user", "user"]
+    assert second[-1]["content"] == EMPTY_NUDGE
+    notices = [e["data"] for e in ledger.read() if e["event"] == "notice" and e["data"].get("watchdog")]
+    assert len(notices) == 1 and notices[0]["what"] == "empty reply"
+    assert notices[0]["finish_reason"] == "stop" and notices[0]["completion_tokens"] == 159
+
+
+@pytest.mark.parametrize("content", ["", "   \n\t", None])
+def test_whitespace_or_null_content_counts_as_empty(run, content):
+    run_dir, ledger = run
+    with FakeModel(by_request(empty(content=content), final("ok"))) as fm:
+        out = step(run_dir, ledger, fm.endpoint)[0].run("s", "u")
+    assert (out.status, out.turns, out.final_text) == ("done", 2, "ok")
+    assert fm.requests[1]["messages"][-1]["content"] == EMPTY_NUDGE
+
+
+def test_two_empty_replies_in_a_row_end_the_step_with_an_error(run):
+    run_dir, ledger = run
+    with FakeModel(by_request(empty(), empty(), final("never"))) as fm:
+        out = step(run_dir, ledger, fm.endpoint)[0].run("s", "u")
+    assert out.status == "error" and out.turns == 2 and len(fm.requests) == 2
+    assert out.detail == ("the reply was empty (no text and no command) twice in a row; "
+                          "no action was taken")
+
+
+@pytest.mark.parametrize("first,second,detail", [
+    (truncated(8192), empty(), "two replies in a row ran no command: cut off at max_tokens, then "
+                               "empty (no text and no command); no action was taken"),
+    (empty(), truncated(8192), "two replies in a row ran no command: empty (no text and no command), "
+                               "then cut off at max_tokens; no action was taken"),
+])
+def test_empty_and_truncated_replies_count_toward_the_same_limit(run, first, second, detail):
+    run_dir, ledger = run
+    with FakeModel(by_request(first, second, final("never"))) as fm:
+        out = step(run_dir, ledger, fm.endpoint)[0].run("s", "u")
+    assert (out.status, out.turns, out.detail) == ("error", 2, detail)
+
+
+def test_a_tool_call_resets_the_empty_reply_count(run):
+    run_dir, ledger = run
+    script = by_request(empty(), call("shell", command="echo a"), empty(), final("fin"))
+    with FakeModel(script) as fm:
+        out = step(run_dir, ledger, fm.endpoint)[0].run("s", "u")
+    assert (out.status, out.turns, out.final_text) == ("done", 4, "fin")
+
+
+def test_a_request_asks_for_the_default_max_tokens(run):
+    run_dir, ledger = run
+    with FakeModel(lambda r: final()) as fm:
+        step(run_dir, ledger, fm.endpoint)[0].run("s", "u")
+    assert fm.requests[0]["max_tokens"] == 16384
+
+
+# ---- continuing the same conversation (gate feedback) -------------------------------------------
+
+def test_a_continuation_adds_one_user_message_to_the_same_conversation(run):
+    import json
+    run_dir, ledger = run
+    script = by_request(call("shell", command="echo one"), final("first done"),
+                        call("shell", command="echo two"), final("fixed"))
+    with FakeModel(script) as fm:
+        s = step(run_dir, ledger, fm.endpoint)[0]
+        first = s.run("s", "u")
+        log2 = run_dir / "stages" / "0" / "log" / "run-1-continuation.jsonl"
+        second = s.continue_with("fix the gate", max_turns=5, log_path=log2)
+    assert (first.status, first.turns) == ("done", 2)
+    assert (second.status, second.turns, second.final_text) == ("done", 2, "fixed")
+    sent = fm.requests[2]["messages"]
+    # The whole first conversation, then the feedback as one user message.
+    assert sent[:len(fm.requests[1]["messages"])] == fm.requests[1]["messages"]
+    assert sent[-2] == {"role": "assistant", "content": "first done"}
+    assert sent[-1] == {"role": "user", "content": "fix the gate"}
+    # The continuation has its own log; the first log keeps its two records.
+    log1 = run_dir / "stages" / "0" / "log" / "run-1.jsonl"
+    assert len(log1.read_text().splitlines()) == 2
+    records = [json.loads(l) for l in log2.read_text().splitlines()]
+    assert len(records) == 2 and records[0]["sent"] == [{"role": "user", "content": "fix the gate"}]
+    transcripts = [e["data"]["path"] for e in ledger.read()
+                   if e["event"] == "evidence" and e["data"].get("what") == "transcript"]
+    assert transcripts == ["stages/0/log/run-1.jsonl", "stages/0/log/run-1-continuation.jsonl"]
+
+
+def test_a_continuation_has_its_own_turn_cap(run):
+    run_dir, ledger = run
+    with FakeModel(repeating(50)) as fm:
+        s = step(run_dir, ledger, fm.endpoint, max_turns=3)[0]
+        out = s.run("s", "u")
+        assert out.status == "turns"
+        more = s.continue_with("go on", max_turns=2,
+                               log_path=run_dir / "stages" / "0" / "log" / "run-1-continuation.jsonl")
+    assert (more.status, more.turns) == ("turns", 2) and len(fm.requests) == 5
+
+
+def test_a_step_that_never_ran_cannot_continue(run):
+    run_dir, ledger = run
+    s = step(run_dir, ledger, "http://unused/v1")[0]
+    with pytest.raises(RuntimeError):
+        s.continue_with("x", max_turns=1, log_path=run_dir / "c.jsonl")

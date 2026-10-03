@@ -7,7 +7,7 @@ the same conversation gets the same answer, as from a greedy server.
 
 An answer dict may carry two extra keys that are not part of the message: `finish_reason`
 (default "stop") and `completion_tokens` (default 20). `truncated()` builds a reply that ran
-into max_tokens.
+into max_tokens. `empty()` builds a reply with no text and no tool calls that ended normally.
 """
 from __future__ import annotations
 
@@ -30,6 +30,13 @@ def final(text: str = "done") -> dict:
 def truncated(tokens: int = 8192, **extra) -> dict:
     """A reply cut off at max_tokens: empty content, no tool calls, finish_reason "length"."""
     return {"role": "assistant", "content": "", "finish_reason": "length",
+            "completion_tokens": tokens, **extra}
+
+
+def empty(tokens: int = 159, content="", **extra) -> dict:
+    """A reply with no text and no tool calls that still ended with finish_reason "stop". The live
+    Qwen3.8 run returned one: 159 completion tokens, all reasoning, and content ""."""
+    return {"role": "assistant", "content": content, "finish_reason": "stop",
             "completion_tokens": tokens, **extra}
 
 

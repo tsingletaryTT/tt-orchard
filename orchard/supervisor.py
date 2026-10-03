@@ -8,7 +8,21 @@ run-wide caps and the free disk, opens the stage directory (orchard/stages.py), 
 steps (orchard/agent.py) under the watchdog with a real actuator, runs the hardware test on a
 leased board, parking the coder when no board is free, and writes the stage's end with the exit
 gate's result. A failed stage is escalated once to its diagnose tier (or the [escalation]
-default); a second failure pauses the run. The first start of the coder in a run is also asked a
+default); a second failure pauses the run.
+
+Each attempt at a stage starts its agent steps from a fresh context built from the ledger
+(orchard/context.py), so a long run never carries a long conversation. There is one exception.
+When a step ends "done" and the exit gate fails, the same conversation gets one more turn budget
+(AGENT_CONTINUATION_TURNS): a user message lists the gate's reasons word for word and names the file
+the gate reads. The live Qwen3.8 run showed why. Stage 1's agent worked 48 turns and wrote real
+evidence, then ended without reference.json, and the escalation started a fresh context that had
+lost all of that work. The ledger records a "gate feedback" decision before the continuation runs,
+and the continuation writes its own log. It happens at most once per run of the stage body, and
+only after status "done". If the gate passes afterwards the stage passes; otherwise it is escalated
+or fails as before. A kill during the continuation loses the conversation: the resumed stage starts
+a fresh step, which may use its own one continuation.
+
+The first start of the coder in a run is also asked a
 known-answer question (7 times 6); a server that answers without 42 blocks the run, because the
 canary alone would accept noise. When stage 0 finds that the model needs new model code
 (a full port), the run pauses before stage 2 for the operator.
@@ -54,8 +68,9 @@ from orchard.canary import CanaryError, compare, post_json
 from orchard.canary import ask as canary_ask
 from orchard.commands import run_command
 from orchard.context import build_messages, facts_from
-from orchard.defaults import (CHIPS_PER_BOARD, CMD_TIMEOUT_S, COLD_BOOT_BUDGET_S, CONTROL_POLL_S,
-                              FIRST_BOOT_EXPECTED, FIRST_BOOT_PROMPT, RUN_CANARY_PROMPT)
+from orchard.defaults import (AGENT_CONTINUATION_TURNS, CHIPS_PER_BOARD, CMD_TIMEOUT_S,
+                              COLD_BOOT_BUDGET_S, CONTROL_POLL_S, FIRST_BOOT_EXPECTED,
+                              FIRST_BOOT_PROMPT, RUN_CANARY_PROMPT)
 from orchard.handoff import (NOTE_KEYS, Blocked, Budgets, Handoff, decide_park, progress, reacquire,
                              recover, wait_stopped)
 from orchard.ledger import Ledger, LedgerCorrupt, LedgerLocked
@@ -256,6 +271,22 @@ def boot_unfinished(entries: list[dict]) -> bool:
         if e["event"] == "decision" and e["data"].get("decision") in ("coder starting", "coder started"):
             last = e["data"]["decision"]
     return last == "coder starting"
+
+
+GATE_FEEDBACK_HEAD = "The supervisor checked your stage's output and it does not pass yet."
+
+
+def gate_feedback_text(spec, reasons) -> str:
+    """The user message a continuation starts from: the gate's reasons, word for word, and the
+    file the gate reads."""
+    n, name = spec.number, spec.gate_file
+    lines = [GATE_FEEDBACK_HEAD, f"The check reads stages/{n}/{name} and found these problems:"]
+    lines += [f"- {r}" for r in reasons]
+    lines += [f"Fix each problem. Write {name} in your stage directory (stages/{n}/{name}) as the "
+              f"skill describes, with the files that back it under stages/{n}/evidence/. When it is "
+              "done, reply with a short summary that names the output files you wrote, and no tool "
+              "call."]
+    return "\n".join(lines)
 
 
 def coder_tier(cfg, port: int) -> str:
@@ -688,27 +719,47 @@ class Supervisor:
 
     def _stage_body(self, spec, stage_dir: Path, escalated: bool, resumed: bool):
         if spec.boards == 0:
-            out = self._step(spec, "run", stage_dir, escalated, resumed)
+            out, step = self._step(spec, "run", stage_dir, escalated, resumed)
             if out.status != "done":
                 return out.status, [f"the agent step ended: {out.status} {out.detail}".strip()], None
         else:
             if not (resumed and (stage_dir / "test-result.json").is_file()):
-                out = self._step(spec, "prepare", stage_dir, escalated, resumed)
+                out, _ = self._step(spec, "prepare", stage_dir, escalated, resumed)
                 if out.status != "done":
                     return out.status, [f"the prepare step ended: {out.status} {out.detail}".strip()], None
                 test, problems = self._read_test(stage_dir)
                 if problems:
                     return "fail", problems, None
                 self._hardware_phase(spec, stage_dir, test)
-            out = self._step(spec, "finish", stage_dir, escalated, resumed)
+            out, step = self._step(spec, "finish", stage_dir, escalated, resumed)
             if out.status != "done":
                 return out.status, [f"the finish step ended: {out.status} {out.detail}".strip()], None
+        gate = self._check_gate(spec, stage_dir)
+        if not gate.ok:
+            # One continuation per run of the stage body; there is no loop here on purpose.
+            out = self._gate_feedback(spec, stage_dir, step, gate)
+            if out.status != "done":
+                return out.status, [f"the {step.phase} step's continuation ended: "
+                                    f"{out.status} {out.detail}".strip(), *gate.reasons], None
+            gate = self._check_gate(spec, stage_dir)
+        return ("pass", [], gate) if gate.ok else ("fail", list(gate.reasons), gate)
+
+    def _check_gate(self, spec, stage_dir: Path):
         if spec.number == 8:
             bundle = stage_dir / "bundle"
             bundle.mkdir(exist_ok=True)
             shutil.copyfile(self.ledger.path, bundle / "ledger.jsonl")
-        gate = self._gate(spec)(stage_dir, self.run_dir)
-        return ("pass", [], gate) if gate.ok else ("fail", list(gate.reasons), gate)
+        return self._gate(spec)(stage_dir, self.run_dir)
+
+    def _gate_feedback(self, spec, stage_dir: Path, step: AgentStep, gate):
+        """The step ended "done" and the exit gate failed. Tell the same conversation what the gate
+        found and run it once more, with its own turn cap and its own log."""
+        n = spec.number
+        entry = self.ledger.append("decision", n, decision="gate feedback", phase=step.phase,
+                                   reasons=list(gate.reasons), file=f"stages/{n}/{spec.gate_file}")
+        text = gate_feedback_text(spec, gate.reasons)
+        log = stage_dir / "log" / f"{step.phase}-continuation-{entry['seq']:05d}.jsonl"
+        return step.continue_with(text, max_turns=AGENT_CONTINUATION_TURNS, log_path=log)
 
     def _end_stage(self, spec, stage_dir: Path, status: str, reasons: list, gate, escalated: bool) -> str:
         n = spec.number
@@ -774,7 +825,7 @@ class Supervisor:
                          evidence_dir=stage_dir / "evidence",
                          log_path=stage_dir / "log" / f"{phase}-{len(entries) + 1:05d}.jsonl",
                          http=self.http, clock=self.clock, guard=self.guard)
-        return step.run(system, user)
+        return step.run(system, user), step
 
     # ---- the hardware test ----------------------------------------------------------------------
 

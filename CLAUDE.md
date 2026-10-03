@@ -178,3 +178,18 @@ escalated. `AgentStep.run` now reads finish_reason: a "length" reply without too
 (every log record has `finish_reason`; a `notice` ledger entry with `watchdog=True` is added), and answered with a user message
 asking for a short think and a tool call. A second one in a row ends the step with status "error". The supervisor treats "error"
 like any step that did not finish: the first time it escalates the stage, and a failure after escalation pauses the run.
+
+## 2026-10-03: empty replies, a larger token budget, and one gate-feedback continuation
+Prompt: the live Qwen3.8-27B run failed stage 1 three times with "reference.json is missing". On the third attempt the agent
+worked 48 turns and wrote real evidence. Turn 48 was cut off at max_tokens (already handled). Turn 49 came back empty: 159
+completion tokens of reasoning, content "", no tool calls, finish_reason "stop". The loop took that as the final answer, the gate
+failed, and the escalation started a fresh context. Three changes, each test-first with a mutation check (branch
+`agent-continuation`):
+- A reply with no tool calls and no text, whatever its finish_reason, is nudged like a cut-off reply. Both kinds share the
+  count of two in a row before the step ends with status "error".
+- `AGENT_MAX_TOKENS` is now 16,384. Thinking tokens count toward it, and 8,192 was used up by reasoning in 3 of the failed
+  replies. At about 80 tokens/s a full reply takes about 200 s.
+- When a step ends "done" and the exit gate fails, the supervisor records a "gate feedback" decision and gives the same
+  conversation one continuation (`AGENT_CONTINUATION_TURNS` = 20, its own log file) with the gate's reasons word for word. It
+  happens once per run of the stage body and never after another status. A kill during the continuation loses that
+  conversation; the resumed stage starts fresh and may use its own continuation (the e2e kill test covers this case).

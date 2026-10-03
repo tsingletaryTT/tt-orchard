@@ -13,7 +13,7 @@ from orchard.ledger import Ledger, replay_state
 from orchard.stages import run_progress
 from orchard.supervisor import EXIT_READY, build, parse
 from run_fakes import (BOARDS, CrashingLedger, Machine, MachineAdapter, MachineCoder, argv, bringup,
-                       clock, plenty, write_tiers)
+                       clock, feedback_aware, plenty, write_tiers)
 
 FIRST, SECOND = 100, 200          # supervisor pids before and after the kill
 
@@ -117,3 +117,46 @@ def test_the_kill_test_has_a_kill_point_inside_the_coder_boot(tmp_path, servers)
     names = [e["data"].get("decision") for e in entries(tmp_path)]
     first, started = names.index("coder starting"), names.index("coder started")
     assert "coder container started" in names[first + 1:started]
+
+
+@pytest.mark.parametrize("stage,phase,bad,chips", [
+    (1, "run", {"evidence/notes.txt": "work done, no reference.json"}, 2),
+    (2, "finish", {"result.json": {"pcc": 0.9, "argmax_match": True,
+                                   "evidence": ["stages/2/evidence/hw-test-output.txt"]}}, 4),
+])
+def test_a_kill_around_the_gate_feedback_continuation_resumes_to_the_same_final_state(
+        tmp_path, stage, phase, bad, chips):
+    """A stage whose first step ends without a passing gate and whose continuation fixes it. The
+    supervisor is killed after each ledger event of that stage, including between the "gate
+    feedback" decision and the continuation's result. A resumed stage starts a fresh step (the
+    killed conversation is gone), which may use its own one continuation."""
+    script = feedback_aware(stage, phase, bad)
+    with FakeModel(script, models=["qwen-27b"]) as chip, FakeModel(script, models=["cpu-model"]) as cpu:
+        ref = tmp_path / "reference"
+        assert run(ref, (chip, cpu), Machine(), chips=chips, pid=FIRST) == EXIT_READY
+        want = final_state(ref)
+        es = entries(ref)
+        assert want["last_result"][stage] == "pass" and not [e for e in es if e["event"] == "escalate"]
+        idx = [i for i, e in enumerate(es) if e["stage"] == stage]
+        fb = next(i for i, e in enumerate(es) if e["data"].get("decision") == "gate feedback")
+        assert idx[0] < fb < idx[-1]
+        for k in range(idx[0] + 1, idx[-1] + 2):            # kill after each of the stage's events
+            base = tmp_path / f"kill-{k:03d}"
+            m = Machine()
+            with pytest.raises(Crash):
+                run(base, (chip, cpu), m, chips=chips, pid=FIRST, crash_after=k)
+            assert run(base, (chip, cpu), m, chips=chips, pid=SECOND) == EXIT_READY, k
+            assert final_state(base) == want, k
+            assert not m.coder_running and m.leases == {}, (k, m.leases)
+            # Each run of the stage body (one per stage_start) has at most one continuation.
+            # The resumed stage still passed through its continuation, with no escalation.
+            assert not [e for e in entries(base) if e["event"] == "escalate"], k
+            per_start = []
+            for e in entries(base):
+                if e["stage"] != stage:
+                    continue
+                if e["event"] == "stage_start":
+                    per_start.append(0)
+                elif e["data"].get("decision") == "gate feedback":
+                    per_start[-1] += 1
+            assert per_start and max(per_start) <= 1, (k, per_start)

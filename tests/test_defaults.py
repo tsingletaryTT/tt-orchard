@@ -61,3 +61,8 @@ def test_run_caps_allow_one_escalation_and_one_relaunch():
 def test_a_cold_boot_is_told_apart_from_a_warm_restart():
     # Warm 2-chip restart 2-3 min, cold first boot about 30 min (spec section 3).
     assert d.WARM_RESTART_2CHIP_S < d.COLD_START_S < d.COLD_BOOT_S
+
+
+def test_an_agent_reply_has_room_for_reasoning_and_a_tool_call():
+    # The live Qwen3.8 run used up 8,192 max_tokens on reasoning in 3 of its failed replies.
+    assert d.AGENT_MAX_TOKENS == 16384

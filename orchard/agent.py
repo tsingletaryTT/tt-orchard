@@ -24,9 +24,18 @@ This module owns three things.
    reasoning model spent the whole budget thinking. The loop does not take it as a final answer.
    It leaves the empty reply out of the conversation, writes a `notice` ledger entry, adds a user
    message that asks for a short think and a tool call, and goes on; the attempt uses up a turn.
-   A second such reply in a row ends the step with status "error". A reply with finish_reason
-   "length" that holds tool calls runs as usual, and a missing finish_reason is treated like
-   "stop". Every record in the step's log carries the reply's finish_reason.
+   A reply with no tool calls and no text (empty or whitespace only, whatever its finish_reason)
+   is handled the same way, with its own `notice` ("empty reply") and its own user message. A
+   reasoning model can return one after it finishes thinking: the live Qwen3.8 run did, at turn
+   49 of stage 1. Cut-off and empty replies share one count. A second reply in a row of either
+   kind ends the step with status "error", and the detail names the kind of each. A reply with
+   finish_reason "length" that holds tool calls runs as usual, and a missing finish_reason is
+   treated like "stop". A reply with text and no tool calls is the final answer. Every record in
+   the step's log carries the reply's finish_reason.
+
+   The step keeps its conversation in `messages`. `continue_with` adds one user message and runs
+   the loop again with its own turn cap and its own log file. The supervisor calls it once, with
+   the exit gate's reasons, when a step ended "done" and the gate failed.
 
    The environment also sets TT_VISIBLE_DEVICES and TT_METAL_VISIBLE_DEVICES to NO_CHIP, a
    device mask that matches no chip. This is a request to the runtime. Nothing in orchard stops a
@@ -145,6 +154,13 @@ def clip(text: str, limit: int) -> str:
 
 TRUNCATION_NUDGE = ("Your last reply was cut off before you ran any command. "
                     "Think briefly, then call a tool.")
+EMPTY_NUDGE = ("Your last reply was empty: it had no text and no command. Say what you will do next, "
+               "then call a tool, or state that the stage is finished and name the output files you "
+               "wrote.")
+# How many replies in a row may run no command (cut off or empty) before the step ends as "error".
+BAD_REPLIES_IN_A_ROW = 2
+# The words each kind of bad reply gets in the ledger notice and in the error detail.
+BAD_KIND_TEXT = {"truncated": "cut off at max_tokens", "empty": "empty (no text and no command)"}
 
 # ---- tools --------------------------------------------------------------------------------------
 
@@ -270,6 +286,8 @@ class AgentStep:
         self.guard = guard if guard is not None else RetryGuard()
         self.max_turns, self.max_tokens, self.timeout = max_turns, max_tokens, timeout
         self._seen: dict[str, tuple[int, int]] = {}
+        # The conversation, kept on the step so `continue_with` can add to it. None until `run`.
+        self.messages: list[dict] | None = None
 
     # ---- helpers ----------------------------------------------------------------------------
 
@@ -321,14 +339,43 @@ class AgentStep:
                                status=status, turns=turns, **evidence_record(self.run_dir, self.log_path))
         return Outcome(status, turns, final_text, detail)
 
+    @staticmethod
+    def _bad_detail(kinds: list[str], tokens) -> str:
+        """The error detail when too many replies in a row ran no command. It names each kind."""
+        if kinds == ["truncated", "truncated"]:
+            return (f"the reply was cut off at max_tokens twice in a row ({tokens} tokens each); "
+                    "no action was taken")
+        if kinds == ["empty", "empty"]:
+            return "the reply was empty (no text and no command) twice in a row; no action was taken"
+        return ("two replies in a row ran no command: "
+                + ", then ".join(BAD_KIND_TEXT[k] for k in kinds) + "; no action was taken")
+
     # ---- the loop ---------------------------------------------------------------------------
 
     def run(self, system: str, user: str) -> Outcome:
-        messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
-        logged = 0
+        """Start the conversation and run it until a final answer, the turn limit or a stop."""
+        self.messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
         self._seen = self._snapshot()       # files already here (a resumed stage) are not new
-        cut_off = 0                         # truncated replies in a row; a normal turn resets it
-        for turn in range(1, self.max_turns + 1):
+        return self._loop(self.max_turns, logged=0)
+
+    def continue_with(self, text: str, *, max_turns: int, log_path) -> Outcome:
+        """Add one user message to this step's conversation and run the loop again.
+
+        The supervisor uses this once, when a step ended "done" and the stage's exit gate failed:
+        `text` is the gate feedback. The continuation has its own turn cap and writes its own log
+        at `log_path`, so the first run's log stays as it was.
+        """
+        if self.messages is None:
+            raise RuntimeError("continue_with needs a step that has run")
+        self.log_path = Path(log_path)
+        logged = len(self.messages)          # the continuation's log starts at the new message
+        self.messages.append({"role": "user", "content": text})
+        return self._loop(max_turns, logged=logged)
+
+    def _loop(self, max_turns: int, *, logged: int) -> Outcome:
+        messages = self.messages
+        bad_run: list[str] = []             # kinds of the replies in a row that ran no command
+        for turn in range(1, max_turns + 1):
             for text in self.control.take_nudges(self.agent):
                 messages.append({"role": "user", "content": text})
             reason = self.control.stop_reason()
@@ -353,31 +400,42 @@ class AgentStep:
             assistant = {"role": "assistant", "content": content}
             if calls:
                 assistant["tool_calls"] = calls
-            # A reply that hit max_tokens before it ran any tool (a reasoning model can spend the
-            # whole budget thinking) is not a final answer. It is not added to the conversation.
-            truncated = finish == "length" and not calls
-            if not truncated:
+            # Two kinds of reply ran no command and are not a final answer either. "truncated": it
+            # hit max_tokens before it ran any tool (a reasoning model can spend the whole budget
+            # thinking). "empty": it ended normally with no text and no tool call (a reasoning model
+            # can finish its thinking and then say nothing). Neither is added to the conversation.
+            if calls:
+                bad = None
+            elif finish == "length":
+                bad = "truncated"
+            elif not content.strip():
+                bad = "empty"
+            else:
+                bad = None
+            if bad is None:
                 messages.append(assistant)
-            self._log({"turn": turn, "sent": messages[logged:-1] if not truncated else messages[logged:],
+            self._log({"turn": turn, "sent": messages[logged:-1] if bad is None else messages[logged:],
                        "received": assistant, "finish_reason": finish, "usage": usage})
             logged = len(messages)
             self._event("response", input_tokens=usage.get("prompt_tokens"),
                         output_tokens=usage.get("completion_tokens"),
                         thinking_tokens=details.get("reasoning_tokens") if isinstance(details, dict) else None,
                         text_hash=sha(content) if content else None, had_tool_call=bool(calls))
-            if truncated:
-                cut_off += 1
-                tokens = usage.get("completion_tokens") or self.max_tokens
+            if bad:
+                bad_run.append(bad)
+                tokens = usage.get("completion_tokens")
+                if bad == "truncated":
+                    tokens = tokens or self.max_tokens
                 self.ledger.append("notice", self.stage, watchdog=True, agent=self.agent,
-                                   what="reply cut off at max_tokens", phase=self.phase, turn=turn,
-                                   finish_reason=finish, completion_tokens=tokens, in_a_row=cut_off)
-                if cut_off >= 2:
-                    return self._end("error", turn, detail=(
-                        f"the reply was cut off at max_tokens twice in a row ({tokens} tokens each); "
-                        "no action was taken"))
-                messages.append({"role": "user", "content": TRUNCATION_NUDGE})
+                                   what="reply cut off at max_tokens" if bad == "truncated" else "empty reply",
+                                   phase=self.phase, turn=turn, finish_reason=finish,
+                                   completion_tokens=tokens, in_a_row=len(bad_run))
+                if len(bad_run) >= BAD_REPLIES_IN_A_ROW:
+                    return self._end("error", turn, detail=self._bad_detail(bad_run, tokens))
+                messages.append({"role": "user",
+                                 "content": TRUNCATION_NUDGE if bad == "truncated" else EMPTY_NUDGE})
                 continue
-            cut_off = 0
+            bad_run = []
             if not calls:
                 return self._end(self.control.stop_reason() or "done", turn, final_text=content)
             for call in calls:
@@ -389,4 +447,4 @@ class AgentStep:
                 messages.append({"role": "tool", "tool_call_id": str(call.get("id", "")), "content": result})
                 self._event("tool_result", tool=name, output_hash=sha(result))
                 self._record_new_evidence()
-        return self._end("turns", self.max_turns, detail=f"no final answer after {self.max_turns} turns")
+        return self._end("turns", max_turns, detail=f"no final answer after {max_turns} turns")

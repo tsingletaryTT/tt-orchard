@@ -12,8 +12,8 @@ from orchard.adapters import AdapterError
 from orchard.ledger import Ledger, LedgerCorrupt
 from orchard.supervisor import (EXIT_ABORTED, EXIT_ERROR, EXIT_READY, EXIT_REFUSED, Control, build,
                                 main, parse)
-from run_fakes import (BOARDS, FILES, CrashingLedger, Machine, MachineAdapter, MachineCoder, argv,
-                       bringup, clock, plenty, where, write_tiers)
+from run_fakes import (BOARDS, FEEDBACK_HEAD, FILES, CrashingLedger, Machine, MachineAdapter,
+                       MachineCoder, argv, bringup, clock, feedback_aware, plenty, where, write_tiers)
 
 # The hardware test and agent shells run real bash here, so stub tools come first on PATH.
 pytestmark = pytest.mark.usefixtures("stub_tools")
@@ -617,3 +617,72 @@ def test_a_coder_restarted_before_any_boot_finished_is_asked_the_first_boot_ques
     assert sanity_asks(rig) == []               # the boot never got as far as asking
     assert rig.run(pid=200) == EXIT_READY
     assert len(sanity_asks(rig)) == 1
+
+
+# ---- gate feedback: one continuation of the same conversation -----------------------------------
+# The live Qwen3.8 run: stage 1's agent worked 48 turns, wrote real evidence, then ended without
+# reference.json. The gate failed and the stage was escalated to a fresh context, so the work was
+# lost. Now the same conversation is told what the gate found and gets one more chance.
+
+def feedback_decisions(rig, n):
+    return [e["data"] for e in rig.entries() if e["event"] == "decision" and e["stage"] == n
+            and e["data"]["decision"] == "gate feedback"]
+
+
+def test_a_failed_gate_gets_one_continuation_that_can_fix_the_stage(rig):
+    rig.script = feedback_aware(1, "run", {"evidence/notes.txt": "work done, no reference.json"})
+    assert rig.run() == EXIT_READY
+    assert [d["result"] for d in rig.ends(1)] == ["pass"]
+    assert not [e for e in rig.entries() if e["event"] == "escalate"]
+    [fb] = feedback_decisions(rig, 1)
+    assert fb["reasons"] == ["reference.json is missing"] and fb["phase"] == "run"
+    # The feedback went into the same conversation: the request after it holds the first run's turns.
+    sent = next(r["messages"] for r in rig.chip_server.requests if "tools" in r
+                and any((m.get("content") or "").startswith(FEEDBACK_HEAD) for m in r["messages"]))
+    text = next(m["content"] for m in sent if (m.get("content") or "").startswith(FEEDBACK_HEAD))
+    assert "- reference.json is missing" in text and "stages/1/reference.json" in text
+    assert [m["role"] for m in sent[:5]] == ["system", "user", "assistant", "tool", "assistant"]
+    # Both transcripts are kept and recorded.
+    paths = [e["data"]["path"] for e in rig.entries() if e["stage"] == 1 and e["event"] == "evidence"
+             and e["data"].get("what") == "transcript"]
+    assert len(paths) == 2 and "continuation" in paths[1] and "continuation" not in paths[0]
+    assert all((rig.run_dir / p).is_file() for p in paths)
+
+
+def test_a_hardware_stage_finish_step_gets_the_continuation_too(rig):
+    bad = {"result.json": {"pcc": 0.9, "argmax_match": True,
+                           "evidence": ["stages/2/evidence/hw-test-output.txt"]}}
+    rig.script = feedback_aware(2, "finish", bad)
+    assert rig.run() == EXIT_READY
+    assert [d["result"] for d in rig.ends(2)] == ["pass"]
+    [fb] = feedback_decisions(rig, 2)
+    assert fb["phase"] == "finish" and "pcc must be" in fb["reasons"][0]
+
+
+def test_a_continuation_that_still_fails_escalates_as_before(rig):
+    bad = {(2, "finish"): {"result.json": {"pcc": 0.9, "argmax_match": True,
+                                           "evidence": ["stages/2/evidence/hw-test-output.txt"]}}}
+    rig.script = escalation_aware(2, bad)
+    assert rig.run() == EXIT_READY
+    assert [d["result"] for d in rig.ends(2)] == ["escalate", "pass"]
+    es = [e for e in rig.entries() if e["stage"] == 2]
+    first_end = next(i for i, e in enumerate(es) if e["event"] == "stage_end")
+    fbs = [e for e in es[:first_end] if e["event"] == "decision" and e["data"]["decision"] == "gate feedback"]
+    assert len(fbs) == 1                                   # one continuation in the attempt, no more
+    esc = next(e["data"] for e in es if e["event"] == "escalate")
+    assert esc["by"] == "stage machine" and "pcc must be" in esc["reasons"][0]
+
+
+def test_no_continuation_after_a_step_that_ended_in_error(rig):
+    from fake_model import empty
+
+    def script(request):
+        if "tools" in request and where(request)[0] == 1:
+            if "stage 1: escalate" not in request["messages"][1]["content"]:
+                return empty()                             # two in a row end the step: error
+        return bringup(request)
+    rig.script = script
+    assert rig.run() == EXIT_READY
+    assert [d["result"] for d in rig.ends(1)] == ["escalate", "pass"]
+    assert feedback_decisions(rig, 1) == []
+    assert "empty" in rig.ends(1)[0]["reasons"][0]

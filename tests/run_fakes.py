@@ -242,6 +242,24 @@ def bringup(request, overrides=None):
     return turns[min(turn(request), len(turns) - 1)]
 
 
+FEEDBACK_HEAD = "The supervisor checked your stage's output and it does not pass yet."
+
+
+def feedback_aware(stage, phase, bad_files):
+    """A script that writes `bad_files` for (stage, phase) until the conversation holds the gate
+    feedback; after the feedback it writes the stage's real files, counting turns from there."""
+    def script(request):
+        if "tools" in request and where(request) == (stage, phase):
+            msgs = request["messages"]
+            fb = [i for i, m in enumerate(msgs) if m["role"] == "user"
+                  and (m.get("content") or "").startswith(FEEDBACK_HEAD)]
+            if not fb:
+                return bringup(request, overrides={(stage, phase): bad_files})
+            return bringup(dict(request, messages=msgs[:2] + msgs[fb[-1]:]))
+        return bringup(request)
+    return script
+
+
 def closed_port() -> int:
     """A local port with nothing listening on it."""
     with socket.socket() as sock:
