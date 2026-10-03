@@ -239,9 +239,10 @@ def test_full_model_gate_needs_parity_and_a_top1_fraction(tmp_path):
     assert not gate_full_model(*stage(tmp_path, 3, "result.json", {"parity": True, "top1": 97, "evidence": ev})).ok
 
 
-# The weights-swap-check skill's result.json, with the numbers of the one hand prototype.
+# The weights-swap-check skill's result.json, with the agreement of the corrected hand prototype
+# (Hemmingway-1 weights served through MODEL_WEIGHTS_DIR, 30 of 32).
 SWAP = {"serves": True, "server_ready_s": 280.5, "coherent": True, "free_run_text": "The sea was calm.",
-        "top1_agreement": 0.78, "n_tokens": 32, "cache_dir": "cache/hemmingway-1/tt_cache",
+        "top1_agreement": 0.94, "n_tokens": 32, "cache_dir": "cache/hemmingway-1/tt_cache",
         "evidence": ["stages/2/evidence/diff.txt"]}
 
 
@@ -257,12 +258,19 @@ def test_weights_swap_gate_passes_the_prototype_numbers_and_records_the_evidence
 
 
 def test_weights_swap_gate_minimum_is_the_default(tmp_path):
-    assert SWAP_TOP1_MIN == 0.6
+    assert SWAP_TOP1_MIN == 0.85
     assert swap_reasons(tmp_path, top1_agreement=SWAP_TOP1_MIN) == ()
 
 
+def test_weights_swap_gate_refuses_the_base_weights_standing_in(tmp_path):
+    # The first hand prototype served the base Qwen3.8-27B weights by mistake (HF_MODEL in the
+    # bundle's run.sh) and agreed with the Hemmingway-1 CPU reference on 25 of 32 tokens.
+    reasons = swap_reasons(tmp_path, top1_agreement=25 / 32)
+    assert len(reasons) == 1 and "below the minimum of 0.85" in reasons[0], reasons
+
+
 @pytest.mark.parametrize("change,word", [
-    ({"top1_agreement": 0.59}, "top1_agreement"),
+    ({"top1_agreement": 0.84}, "top1_agreement"),
     ({"top1_agreement": 0.0}, "top1_agreement"),
     ({"top1_agreement": 1.5}, "top1_agreement"),
     ({"top1_agreement": "0.78"}, "top1_agreement"),

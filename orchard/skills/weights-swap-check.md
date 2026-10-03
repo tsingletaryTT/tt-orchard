@@ -22,13 +22,13 @@ Write `result.json` in your stage directory:
      "server_ready_s": 280.5,
      "coherent": true,
      "free_run_text": "first 200 characters of the chip's greedy text",
-     "top1_agreement": 0.78,
+     "top1_agreement": 0.94,
      "n_tokens": 32,
      "cache_dir": "<the tensor cache directory used>",
      "evidence": ["stages/2/evidence/swap-check.json", "stages/2/evidence/server.log"]}
 
 The gate needs `serves` true, `coherent` true, `n_tokens` of at least 16, `top1_agreement` of at
-least 0.6, a positive `server_ready_s`, and every evidence path to exist. Label each number measured
+least 0.85, a positive `server_ready_s`, and every evidence path to exist. Label each number measured
 or TODO.
 
 ## How to work
@@ -104,8 +104,10 @@ It starts the server, waits for `/health` (up to 1500 s; the first boot converts
 about 5 minutes here), and asks for 32 greedy tokens from the stage 1 prompt. Then, for each of the
 32 reference positions, it asks for one token with the reference prefix and compares the first
 re-tokenized id with the reference id. Near-synonyms differ, because the chip runs quantized
-weights and the reference runs bf16. The prototype matched 25 of 32. Wrong weights would match
-close to 0. It writes `stages/2/evidence/swap-check.json`, whose `result_draft` holds the fields of
+weights and the reference runs bf16. With the correct weights the prototype matched 30 of 32
+(0.94). With the base model's weights standing in by mistake it matched 25 of 32 (0.78), because
+the two models are close. Agreement under 0.85 usually means the server is not running the new
+weights. It writes `stages/2/evidence/swap-check.json`, whose `result_draft` holds the fields of
 `result.json`. Exit codes: 0 measured, 3 cache refused, 4 the server did not become healthy, 5 the
 server answered with an HTTP error.
 

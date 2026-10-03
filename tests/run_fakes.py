@@ -209,7 +209,7 @@ FILES = {
     # The fake run's delta says weights-only, so stage 2 runs the weights-swap-check skill.
     (2, "finish"): {"result.json": {"serves": True, "server_ready_s": 280.5, "coherent": True,
                                     "free_run_text": "The sea was calm that morning.",
-                                    "top1_agreement": 0.78, "n_tokens": 32,
+                                    "top1_agreement": 0.94, "n_tokens": 32,
                                     "cache_dir": "cache/hemmingway-1/tt_cache", "evidence": done(2)}},
     (3, "prepare"): hw(3),
     (3, "finish"): {"result.json": {"parity": True, "top1": 0.97, "evidence": done(3)}},

@@ -63,3 +63,11 @@ def test_the_swap_skill_copies_the_templates_that_exist_in_this_repo():
 def test_the_weights_only_stage_2_skill_is_the_local_flat_file():
     assert spec_for(2, "weights-only").skill == "weights-swap-check"
     assert resolve_skill("weights-swap-check", [SKILLS]) == SKILLS / "weights-swap-check.md"
+
+
+def test_the_swap_skill_quotes_the_gate_bar_from_defaults():
+    from orchard.defaults import SWAP_TOP1_MIN
+    text = (SKILLS / "weights-swap-check.md").read_text()
+    assert f"`top1_agreement` of at\nleast {SWAP_TOP1_MIN}" in text or \
+        f"`top1_agreement` of at least {SWAP_TOP1_MIN}" in text
+    assert "0.6" not in text
