@@ -67,12 +67,12 @@ Four facts decide whether a swap works. Each was found by failing first.
 1. Find four facts with a few commands:
    - `bundle_dir`: the installed `tt-model` bundle that serves the nearest model. Read
      `delta.json` for `nearest_model` and its `architecture`. Run `tt-model list`, then read
-     `~/.cache/tt-model/models/<org>/<name>/vllm_models/*/vllm_metadata.json`. Pick the bundle whose
+     `{{TT_MODEL_ROOT}}/<org>/<name>/vllm_models/*/vllm_metadata.json`. Pick the bundle whose
      `arch` equals the nearest model's architecture and whose chip count is the smallest that fits
      (2 chips on this machine). On this machine that is
-     `~/.cache/tt-model/models/episod/qwen3.8-27b-dflash2-p300`. It has `run.sh` and `venv/`.
+     `{{TT_MODEL_ROOT}}/episod/qwen3.8-27b-dflash2-p300`. It has `run.sh` and `venv/`.
    - `base_snapshot`: the nearest model's snapshot directory,
-     `~/.cache/huggingface/hub/models--<org>--<name>/snapshots/<sha>/` (use `ls` to find it).
+     `{{HF_HOME}}/hub/models--<org>--<name>/snapshots/<sha>/` (use `ls` to find it).
    - `new_snapshot`: the new model's snapshot directory, found the same way.
    - `port`: a free port, for example 8100 (`ss -ltn` lists the ports in use).
 2. Write `swap_config.json` in your stage directory (absolute paths):
@@ -84,17 +84,17 @@ Four facts decide whether a swap works. Each was found by failing first.
         "new_snapshot": "<new model snapshot>",
         "new_model_id": "<new model id, for example Altworld/Hemmingway-1>",
         "tt_cache": "<a new directory whose name contains the model's slug>",
-        "hf_home": "/home/ttuser/.cache/huggingface",
+        "hf_home": "{{HF_HOME}}",
         "port": 8100}
 
-   `tt_cache` must be a new directory, for example
-   `/mnt/bonus/models/orchard-runs/cache/<slug>/tt_cache`, or one this run already used for this
-   model. Never point it at `~/.cache/qwen36-src-build/...`. `hf_home` is the operator's Hugging
-   Face cache on this machine. Your shell's HOME points somewhere else, so write the path out. It
+   `tt_cache` must be a new directory, for example `{{CACHE_ROOT}}/<slug>/tt_cache`, or one this
+   run already used for this model. Never point it at
+   `{{OPERATOR_HOME}}/.cache/qwen36-src-build/...`. `hf_home` is the operator's Hugging Face cache
+   on this machine. Your shell's HOME points somewhere else, so write the path out as shown. It
    holds the drafter the run script names in `DFLASH_WEIGHTS`.
 3. Copy the two templates into your stage directory:
 
-       cp /home/ttuser/code/tt-orchard/orchard/skills/weights-swap-templates/prepare_swap.py /home/ttuser/code/tt-orchard/orchard/skills/weights-swap-templates/serve_and_compare.py stages/2/
+       cp {{ORCHARD_DIR}}/orchard/skills/weights-swap-templates/prepare_swap.py {{ORCHARD_DIR}}/orchard/skills/weights-swap-templates/serve_and_compare.py stages/2/
 
 4. Run `python3 stages/2/prepare_swap.py`. It builds `stages/2/model-dir/` and `stages/2/run.sh` and
    prints a summary. Exit 2 means an edit of `run.sh` did not apply; its message names the edit.

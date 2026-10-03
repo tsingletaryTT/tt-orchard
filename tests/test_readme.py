@@ -128,6 +128,15 @@ def test_every_supervisor_flag_the_readme_shows_exists():
     assert not missing, f"README shows flags that orchard.supervisor does not have: {missing}"
 
 
+def test_every_run_flag_has_a_row_in_the_readme_flag_table():
+    # The reverse of the check above: a flag added to `run` must be explained to the reader.
+    top = _captured_parser(supervisor, lambda m: m.parse([]))
+    run = _option_strings(_subparsers(top)["run"]) - {"-h", "--help"}
+    rows = set(re.findall(r"^\|\s*`(--[a-z][a-z0-9-]*)`\s*\|", _text(), flags=re.M))
+    missing = sorted(run - rows)
+    assert not missing, f"README's run flag table has no row for: {missing}"
+
+
 def test_every_other_flag_in_the_readme_is_accounted_for():
     known = supervisor_flags() | other_repo_flags() | set(OTHER_TOOL_FLAGS)
     unknown = sorted(set(FLAG.findall(_text())) - known)

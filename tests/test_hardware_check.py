@@ -23,13 +23,16 @@ import pytest
 from orchard import hardware_check as hc
 from orchard.ledger import Ledger
 
-REAL_GOZER = Path("/home/ttuser/code/tt-gozer-orchard/bin/gozer")
+# The tt-gozer branch checkout these tests drive (the development machine's path by default).
+REAL_GOZER = Path(os.environ.get("ORCHARD_TEST_GOZER", "/home/ttuser/code/tt-gozer-orchard/bin/gozer"))
 pytestmark = pytest.mark.skipif(
     not REAL_GOZER.exists(), reason=f"{REAL_GOZER} (the gozer branch with `reset`) is not present")
 
 REPO = Path(__file__).resolve().parent.parent
 BOARD = "0000:03:00.0"          # first chip of the second board in QUIETBOX
 OTHER_BOARD = "0000:01:00.0"
+# The machine paths the driver needs when no --child-cmd is given. Nothing runs them.
+MINIMAL = ["--board", BOARD, "--gozer", "/g/gozer", "--env-script", "/e/env.sh", "--python", "/p/python"]
 
 QUIETBOX = [
     {"dev_index": 0, "bdf": "0000:01:00.0", "serial": "0000000000000002",
@@ -499,13 +502,13 @@ def test_reconcile_skipped_when_another_lease_is_present(env, tmp_path):
 
 
 def test_default_child_argv(tmp_path):
-    argv = hc.default_child_argv(BOARD, cache_dir="/x/cache", logs_dir="/x/logs")
+    argv = hc.default_child_argv(BOARD, "/e/env.sh", "/p/python", cache_dir="/x/cache", logs_dir="/x/logs")
     assert argv[:2] == ["bash", "-c"]
     script_text = argv[2]
     assert BOARD in script_text
-    assert f"source {hc.DEFAULT_ENV_SCRIPT}" in script_text
+    assert "source /e/env.sh" in script_text
     assert "exec " in script_text
-    assert f"exec {hc.DEFAULT_PYTHON} -c" in script_text
+    assert "exec /p/python -c" in script_text
     assert "open_mesh_device" in script_text and "OPENED" in script_text
     # the board is exported after the env script, which sets its own value
     assert script_text.index("source") < script_text.index(f"TT_VISIBLE_DEVICES={BOARD}")
@@ -513,7 +516,7 @@ def test_default_child_argv(tmp_path):
     assert script_text.index("source") < script_text.index("TT_METAL_CACHE=/x/cache")
     assert script_text.index("source") < script_text.index("TT_METAL_LOGS_PATH=/x/logs")
     # with no --child-cmd the driver builds exactly that argv, with its cache under the out dir
-    args = hc.parse_args(["--board", BOARD])
+    args = hc.parse_args(MINIMAL)
     d = hc.Driver(args, ledger=None, clock=None, sleep=None, hook=None, out_dir=tmp_path / "o")
     d.dev_index = 2
     built = d.child_argv()
@@ -653,7 +656,8 @@ def test_confirm_gone_needs_ps_to_show_no_row(env, tmp_path):
     # CLAIMED, and only `ps -p` can show that the child is still there.
     sleeper = subprocess.Popen(["sleep", "30"], start_new_session=True)
     try:
-        args = hc.parse_args(["--board", BOARD, "--gozer", str(env.gozer)])
+        args = hc.parse_args(["--board", BOARD, "--gozer", str(env.gozer), "--env-script", "/e/env.sh",
+                              "--python", "/p/python"])
         with Ledger(tmp_path / "ledger.jsonl") as led:
             d = hc.Driver(args, led, None, None, None)
             d.pid = os.getpid()
@@ -876,10 +880,56 @@ def test_preflight_refuses_a_gozer_without_reset(env, tmp_path):
     assert by_check(out, "P.gozer")[0]["ok"] is False
 
 
-def test_default_gozer_is_the_branch_binary_and_tt_smi_is_off():
+@pytest.fixture
+def no_machine_env(monkeypatch):
+    for name in ("ORCHARD_GOZER", "ORCHARD_ENV_SCRIPT", "ORCHARD_CHILD_PYTHON"):
+        monkeypatch.delenv(name, raising=False)
+    return monkeypatch
+
+
+def test_tt_smi_is_off_by_default():
+    assert hc.parse_args(MINIMAL).tt_smi == "none"
+
+
+def test_gozer_is_required_and_the_error_says_what_to_pass(no_machine_env, capsys):
+    with pytest.raises(SystemExit) as exc:
+        hc.parse_args(["--board", BOARD, "--child-cmd", "[]"])
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "--gozer" in err and "ORCHARD_GOZER" in err and "reset" in err
+
+
+def test_the_child_paths_are_required_without_a_child_cmd(no_machine_env, capsys):
+    with pytest.raises(SystemExit):
+        hc.parse_args(["--board", BOARD, "--gozer", "/g/gozer"])
+    err = capsys.readouterr().err
+    for name in ("--env-script", "ORCHARD_ENV_SCRIPT", "--python", "ORCHARD_CHILD_PYTHON", "--child-cmd"):
+        assert name in err, name
+    # With --child-cmd the driver never builds the default child, so they are not needed.
+    assert hc.parse_args(["--board", BOARD, "--gozer", "/g/gozer", "--child-cmd", "[]"]).python is None
+
+
+def test_the_machine_paths_can_come_from_the_environment(no_machine_env):
+    no_machine_env.setenv("ORCHARD_GOZER", "/env/gozer")
+    no_machine_env.setenv("ORCHARD_ENV_SCRIPT", "/env/dev_env.sh")
+    no_machine_env.setenv("ORCHARD_CHILD_PYTHON", "/env/python")
     args = hc.parse_args(["--board", BOARD])
-    assert args.gozer == "/home/ttuser/code/tt-gozer-orchard/bin/gozer"
-    assert args.tt_smi == "none"
+    assert (args.gozer, args.env_script, args.python) == ("/env/gozer", "/env/dev_env.sh", "/env/python")
+    # A flag wins over the environment.
+    assert hc.parse_args(["--board", BOARD, "--gozer", "/flag/gozer"]).gozer == "/flag/gozer"
+
+
+def test_help_says_what_to_pass_for_each_machine_path(capsys):
+    with pytest.raises(SystemExit):
+        hc.parse_args(["--help"])
+    out = " ".join(capsys.readouterr().out.split())
+    for needed in ("ORCHARD_GOZER", "ORCHARD_ENV_SCRIPT", "ORCHARD_CHILD_PYTHON", "`reset`"):
+        assert needed in out, needed
+
+
+def test_the_driver_holds_no_machine_path():
+    text = (REPO / "orchard" / "hardware_check.py").read_text()
+    assert "/home/" not in text and "/mnt/" not in text
 
 
 def test_tt_smi_is_not_run_unless_asked(env, tmp_path):
@@ -1256,7 +1306,7 @@ def test_clean_environment_passes_the_env_check(env, tmp_path, monkeypatch):
     for k in list(os.environ):
         if k.startswith("GOZER_"):
             monkeypatch.delenv(k)
-    d = hc.Driver(hc.parse_args(["--board", BOARD]), None, None, None, None)
+    d = hc.Driver(hc.parse_args(MINIMAL), None, None, None, None)
     assert d.gozer_env() == {}
 
 
@@ -1320,7 +1370,7 @@ def test_a_baseexception_while_waiting_does_not_kill_a_protected_call(env, tmp_p
         def __getattr__(self, name):
             return getattr(self.real, name)
     monkeypatch.setattr(hc.subprocess, "Popen", Wrapped)
-    d = hc.Driver(hc.parse_args(["--board", BOARD]), None, None, None, None)
+    d = hc.Driver(hc.parse_args(MINIMAL), None, None, None, None)
     try:
         with pytest.raises(KeyboardInterrupt):
             d.run_cmd(["sleep", "20"], 30, protect=True)
@@ -1355,4 +1405,4 @@ def test_pause_after_open_waits_before_the_probe_and_says_what_to_check(env, tmp
 
 
 def test_pause_after_open_defaults_to_zero():
-    assert hc.parse_args(["--board", BOARD]).pause_after_open == 0
+    assert hc.parse_args(MINIMAL).pause_after_open == 0

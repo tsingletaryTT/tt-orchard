@@ -12,6 +12,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from orchard.defaults import CONTEXT_FILE_CHARS, SKILL_CHARS
+from orchard.paths import RunPaths, render
 from orchard.stages import STAGES, StageSpec, evidence_record
 
 PHASE_TASKS = {
@@ -100,11 +101,16 @@ def ledger_excerpt(entries: list[dict], stage: int) -> list[str]:
 
 
 def build_messages(*, spec: StageSpec, phase: str, run_dir, stage_dir, skill_path: Path | None,
-                   refs: dict, facts: dict, entries: list[dict], resumed: bool) -> tuple[str, str]:
-    """(system, user) for one agent step."""
+                   refs: dict, facts: dict, entries: list[dict], resumed: bool,
+                   paths: RunPaths | None = None) -> tuple[str, str]:
+    """(system, user) for one agent step.
+
+    The skill's placeholders ({{CACHE_ROOT}} and the rest, orchard/paths.py) are replaced with
+    this run's paths. An unknown placeholder raises UnknownPlaceholder, as does any placeholder
+    when `paths` is None."""
     run_dir, stage_dir = Path(run_dir), Path(stage_dir)
     n = spec.number
-    skill = _read(skill_path) if skill_path else ""
+    skill = render(_read(skill_path), paths, source=str(skill_path)) if skill_path else ""
     system = [f"You are the agent for stage {n} ({spec.name}) of a model bring-up run by tt-orchard.",
               f"Phase: {phase}", "", RULES.format(run_dir=run_dir, n=n), "",
               f"## Skill: {spec.skill} ({skill_path})", clip(skill, SKILL_CHARS)]

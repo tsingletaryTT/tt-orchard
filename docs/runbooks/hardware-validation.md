@@ -124,8 +124,9 @@ full 960 second idle wait and two drivers at once come only after one clean run 
    `gozer status` and `gozer queue`, and start the driver when board 1 is `FREE` and the window has
    passed or the ticket holder has taken board 0. Never jump the queue.
 3. Run the driver from the tmux terminal on board 1 (chips 2 and 3, first chip `0000:03:00.0`),
-   with the branch gozer named explicitly:
-   `python3 -m orchard.hardware_check --board 0000:03:00.0 --gozer /home/ttuser/code/tt-gozer-orchard/bin/gozer --idle-seconds 60 --pause-after-open 20`.
+   with the branch gozer named explicitly. On the development machine the command was (the three
+   paths are that machine's; pass your own):
+   `python3 -m orchard.hardware_check --board 0000:03:00.0 --gozer /home/ttuser/code/tt-gozer-orchard/bin/gozer --env-script /home/ttuser/code/audio8-asr/dev_env.sh --python /home/ttuser/venvs/qwen36-p150x2/bin/python --idle-seconds 60 --pause-after-open 20`.
    `--tt-smi` stays off (its default). `tt-smi -s` opens every device on the box. The first open
    starts with an empty per-run JIT cache, so it can take longer than later opens; the driver
    waits up to 300 seconds for it.

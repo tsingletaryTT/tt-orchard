@@ -1,4 +1,5 @@
 """The local draft stage skills, and the skill names the stage table uses."""
+import re
 from pathlib import Path
 
 import pytest
@@ -50,10 +51,10 @@ def test_the_bundle_skill_keeps_publishing_with_the_operator():
 
 
 def test_the_swap_skill_copies_the_templates_that_exist_in_this_repo():
-    # The skill names the main checkout's absolute path. The same relative path must exist here,
-    # so the skill and the templates merge together.
+    # The skill names the checkout through {{ORCHARD_DIR}}, which the context fills in. The same
+    # relative path must exist here, so the skill and the templates merge together.
     text = (SKILLS / "weights-swap-check.md").read_text()
-    main = "/home/ttuser/code/tt-orchard/orchard/skills/weights-swap-templates/"
+    main = "{{ORCHARD_DIR}}/orchard/skills/weights-swap-templates/"
     for name in ("prepare_swap.py", "serve_and_compare.py"):
         assert main + name in text
         assert (SKILLS / "weights-swap-templates" / name).is_file()
@@ -93,7 +94,7 @@ def test_the_swap_skill_explains_the_weights_directory_fact():
 
 def test_the_configs_skill_copies_the_three_templates_that_exist_in_this_repo():
     text = (SKILLS / "weights-swap-configs.md").read_text()
-    main = "/home/ttuser/code/tt-orchard/orchard/skills/weights-swap-templates/"
+    main = "{{ORCHARD_DIR}}/orchard/skills/weights-swap-templates/"
     for name in ("prepare_swap.py", "serve_and_compare.py", "serve_and_compare_container.py"):
         assert main + name in text
         assert (SKILLS / "weights-swap-templates" / name).is_file()
@@ -119,3 +120,46 @@ def test_the_configs_skill_quotes_the_gate_bar_and_the_cache_rule():
     assert f"`top1_agreement` of at least {SWAP_TOP1_MIN}" in text
     assert "Every configuration gets its own new `tt_cache`" in text
     assert "A configuration whose test never ran cannot pass." in text
+
+
+# ---- machine paths ------------------------------------------------------------------------------
+# The agent reads every file under orchard/skills (the skills and the templates it copies) and
+# under orchard/package_templates (copied into the bundle). None of them may name a path on the
+# development machine. A path on the machine is written as a placeholder (orchard/paths.py).
+
+AGENT_FACING = [p for root in (SKILLS, SKILLS.parent / "package_templates")
+                for p in sorted(root.rglob("*")) if p.is_file() and "__pycache__" not in p.parts]
+MACHINE_PATH = re.compile(r"/home/|/mnt/|/Users/|/root/")
+
+
+def test_the_agent_facing_file_list_is_not_empty():
+    names = {p.name for p in AGENT_FACING}
+    assert {"weights-swap-check.md", "prepare_swap.py", "verify_bundle.py"} <= names
+
+
+@pytest.mark.parametrize("path", AGENT_FACING, ids=lambda p: str(p.relative_to(SKILLS.parent)))
+def test_no_agent_facing_file_names_a_machine_path(path):
+    lines = path.read_text(encoding="utf-8").splitlines()
+    hits = [f"{i}: {line.strip()}" for i, line in enumerate(lines, 1) if MACHINE_PATH.search(line)]
+    assert not hits, f"{path.name} holds absolute machine paths; use a placeholder: {hits}"
+
+
+@pytest.mark.parametrize("name", LOCAL)
+def test_every_placeholder_in_a_local_skill_renders(name):
+    from orchard.paths import RunPaths, render
+    p = RunPaths(orchard_dir="/o", hf_home="/hf", operator_home="/op", tt_model_root="/ttm",
+                 cache_root="/cache")
+    out = render((SKILLS / f"{name}.md").read_text(), p, source=name)
+    assert "{{" not in out
+
+
+def test_the_swap_skills_put_each_tensor_cache_under_the_cache_root():
+    check = (SKILLS / "weights-swap-check.md").read_text()
+    configs = (SKILLS / "weights-swap-configs.md").read_text()
+    assert "{{CACHE_ROOT}}/<slug>/tt_cache" in check
+    assert "{{CACHE_ROOT}}/<slug>/<N>chip-<package name>/tt_cache" in configs
+    assert "{{CACHE_ROOT}}/<slug>/4chip-qwen3.8-27b-p300x2/tt_cache" in configs
+    for text in (check, configs):
+        assert '"hf_home": "{{HF_HOME}}"' in text
+        assert "{{TT_MODEL_ROOT}}/episod/qwen3.8-27b-dflash2-p300" in text
+    assert '"operator_home": "{{OPERATOR_HOME}}"' in configs

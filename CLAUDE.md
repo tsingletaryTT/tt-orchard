@@ -61,6 +61,13 @@ using the skills, with open-source models only. The run ends at an operator revi
   so. On this box only the 4-chip large server runs, so it serves every step.
 - Agent shells get an allow-listed environment with HOME inside the run directory. Read-only mounts
   are not built.
+- Portable paths (2026-10-03, prompt: "Someone else cannot run the harness as written"). Skills
+  name machine paths as placeholders (`{{ORCHARD_DIR}}`, `{{HF_HOME}}`, `{{OPERATOR_HOME}}`,
+  `{{TT_MODEL_ROOT}}`, `{{CACHE_ROOT}}`, orchard/paths.py). The context fills them in and refuses
+  an unknown one. `run` gained `--cache-root`, `--hf-home` and `--operator-home`; run_start records
+  the values and a resume keeps them, as with `--required-chips`. A repo test fails on any `/home/`
+  or `/mnt/` path in orchard/skills or orchard/package_templates. hardware_check.py lost its
+  machine defaults: `--gozer` and the child paths come from flags or `ORCHARD_*` variables.
 
 ## Layout
 Spec: `docs/superpowers/specs/`. Plans: `docs/superpowers/plans/`. Code: `orchard/`. Tests: `tests/`.
