@@ -97,11 +97,12 @@ from orchard.defaults import (AGENT_CONTINUATION_TURNS, CHIPS_PER_BOARD, CMD_TIM
                               FIRST_BOOT_PROMPT, RUN_CANARY_PROMPT, STOP_TIMEOUT_S)
 from orchard.handoff import (NOTE_KEYS, Blocked, Budgets, Handoff, decide_park, progress, reacquire,
                              recover, wait_stopped)
-from orchard.hwtests import load_plan, pending, read_plan, write_plan, write_record, write_summary
+from orchard.hwtests import (load_plan, pending, read_plan, unrecorded, write_plan, write_record,
+                             write_summary)
 from orchard.ledger import Ledger, LedgerCorrupt, LedgerLocked
 from orchard.runner import Denied, check_string
 from orchard.server import ServerControl, ServerError, ServerSpec, StopCheck
-from orchard.stages import (TierUnavailable, attempt_started_ts, budget_cap, check_disk,
+from orchard.stages import (GateResult, TierUnavailable, attempt_started_ts, budget_cap, check_disk,
                             coder_state, delta_path, evidence_record, open_stage_dir,
                             resolve_endpoint, resolve_skill, run_path, run_progress, spec_for,
                             tier_for)
@@ -852,7 +853,14 @@ class Supervisor:
             bundle = stage_dir / "bundle"
             bundle.mkdir(exist_ok=True)
             shutil.copyfile(self.ledger.path, bundle / "ledger.jsonl")
-        return self._gate(spec)(stage_dir, self.run_dir)
+        gate = self._gate(spec)(stage_dir, self.run_dir)
+        if spec.tests:
+            # The gate reads the test records from the stage directory, where the agent can write
+            # too. The ledger holds the sha256 of each record the supervisor wrote.
+            forged = unrecorded(self.ledger.read(), stage_dir, self.run_dir, spec.number)
+            if forged:
+                return GateResult(False, gate.reasons + tuple(forged), gate.evidence)
+        return gate
 
     def _gate_feedback(self, spec, stage_dir: Path, step: AgentStep, gate):
         """The step ended "done" and the exit gate failed. Tell the same conversation what the gate

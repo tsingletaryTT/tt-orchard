@@ -21,6 +21,10 @@ test ends, so a supervisor that crashes during the list resumes at the first con
 record. When the list is done, `write_summary` writes the stage's `test-result.json` for the finish
 step.
 
+An agent's write_file can write anywhere in its stage directory, tests/ included. `unrecorded`
+compares every tests/<chips>/test-result.json with the sha256 the ledger recorded when the
+supervisor wrote it, so a record the agent wrote or changed fails the stage.
+
 A test that did not exit 0 may have stopped while it was converting weights into its tensor cache,
 and a part-written cache is read back without an error. `suspect_caches` finds those caches in the
 ledger, and the supervisor moves such a cache aside (`move_aside`, never a delete) before the next
@@ -36,7 +40,7 @@ from pathlib import Path
 
 from orchard.defaults import CHIPS_PER_BOARD
 from orchard.handoff import NOTE_KEYS
-from orchard.stages import hw_record_path
+from orchard.stages import evidence_record, hw_record_path
 
 SCRIPTS = {"serve_and_compare.py": "bundle", "serve_and_compare_container.py": "container"}
 # Tensor caches that belong to installed packages or to hand builds, relative to the operator's
@@ -205,3 +209,20 @@ def move_aside(cache) -> Path | None:
         k += 1
     os.rename(cache, aside)
     return aside
+
+
+def unrecorded(entries: list[dict], stage_dir, run_dir, stage: int) -> list[str]:
+    """A reason for every tests/<chips>/test-result.json whose sha256 is not the one the ledger
+    recorded for that path when the supervisor last wrote it."""
+    latest: dict[str, str] = {}
+    for e in entries:
+        d = e["data"]
+        if e["event"] == "evidence" and e["stage"] == stage and d.get("what") == "hardware test":
+            latest[d.get("path")] = d.get("sha256")
+    out = []
+    for path in sorted(Path(stage_dir).glob("tests/*/test-result.json")):
+        rec = evidence_record(run_dir, path)
+        if latest.get(rec["path"]) != rec["sha256"]:
+            out.append(f"{rec['path']} was not written by the supervisor: its sha256 is not the one "
+                       "the ledger recorded")
+    return out

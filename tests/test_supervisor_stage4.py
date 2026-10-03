@@ -208,3 +208,17 @@ def test_a_container_that_will_not_stop_blocks_before_any_lease_is_released_or_t
     assert not [e for e in es[test:] if e["event"] == "restore"]
     assert not [e for e in es[test:] if e["data"].get("decision") == "test lease released"]
     assert at_pause == {"leases": 2, "coder": False}       # the coder's lease and the further board's
+
+
+def test_a_test_record_the_agent_wrote_fails_the_gate(rig):
+    # The 4-chip test exits 4. The finish step claims a pass and rewrites the record to match.
+    forged = {"config": 4, "returncode": 0, "timed_out": False, "chips": ["a", "b", "c", "d"]}
+    bad = failing_4_chip_test()
+    bad[(4, "finish")] = {"tests/4/test-result.json": forged,
+                          "result.json": {"configs": [swap_entry(1), swap_entry(2), swap_entry(4)]}}
+    bad[(4, "prepare")]["configs/4/evidence/swap-check.json"] = {"result_draft": {"top1_agreement": 0.94}}
+    rig.script = escalation_aware(4, bad)
+    assert rig.run() == EXIT_READY
+    first = next(e["data"] for e in rig.entries() if e["event"] == "escalate" and e["stage"] == 4)
+    assert first["reasons"] == ["stages/4/tests/4/test-result.json was not written by the supervisor: "
+                                "its sha256 is not the one the ledger recorded"]

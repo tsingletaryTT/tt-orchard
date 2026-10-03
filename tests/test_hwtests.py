@@ -165,3 +165,18 @@ def test_move_aside_keeps_the_cache_under_a_new_name_and_leaves_an_empty_one(tmp
 
 def test_a_test_needs_whole_boards():
     assert [HwTest(n, "s", 1.0, "/c").boards for n in (1, 2, 3, 4)] == [1, 1, 2, 2]
+
+
+def test_a_record_counts_only_with_the_sha256_the_ledger_recorded(tmp_path):
+    from orchard.hwtests import unrecorded
+    from orchard.stages import evidence_record
+    run = tmp_path / "run"
+    sd = run / "stages" / "4"
+    path = write_record(sd, 2, {"returncode": 0, "timed_out": False, "chips": ["a", "b"]})
+    good = [{"event": "evidence", "stage": 4, "data": {"what": "hardware test", "config": 2,
+                                                       **evidence_record(run, path)}}]
+    assert unrecorded(good, sd, run, 4) == []
+    assert unrecorded([], sd, run, 4) == ["stages/4/tests/2/test-result.json was not written by the "
+                                          "supervisor: its sha256 is not the one the ledger recorded"]
+    path.write_text(path.read_text().replace('"returncode": 0', '"returncode": 0 '))
+    assert len(unrecorded(good, sd, run, 4)) == 1
