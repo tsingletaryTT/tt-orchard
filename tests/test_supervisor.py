@@ -430,3 +430,40 @@ def test_a_crash_during_the_coder_boot_stops_that_container_and_re_leases(tmp_pa
         assert rig.m.leases == {} and not rig.m.coder_running
     finally:
         rig.close()
+
+
+# ---- a boot that never finished is finished before any stage --------------------------------------
+
+def test_a_resume_after_a_failed_coder_boot_waits_for_ready_and_checks_the_canary(rig):
+    """The review's probe: the coder never becomes ready, the run pauses, readiness returns and
+    the operator resumes. The coder must answer its canary before any stage runs."""
+    rig.m.never_ready = True
+
+    def ready_and_resumed():
+        rig.m.never_ready = False
+        Control(rig.run_dir).write("resume")
+    rig.on_sleep = ready_and_resumed
+    assert rig.run() == EXIT_READY
+    d = [x["decision"] for x in rig.decisions()]
+    assert d.index("resume") < d.index("coder started") < d.index("agent step")
+    started = next(x for x in rig.decisions() if x["decision"] == "coder started")
+    assert started["canary_after"]["path"].startswith("evidence/coder-canary")
+
+
+def test_a_canary_mismatch_still_blocks_after_a_resume(rig):
+    with pytest.raises(Crash):
+        rig.run(crash_if=lambda e: e["event"] == "stage_end" and e["stage"] == 0)
+    rig.m.coder_answer = "41"                   # the relaunched coder answers differently
+    resumed = []
+
+    def resume_once_then_stop():
+        if resumed:
+            raise Stop()
+        resumed.append(True)
+        Control(rig.run_dir).write("resume")    # the operator resumes without fixing anything
+    rig.on_sleep = resume_once_then_stop
+    with pytest.raises(Stop):
+        rig.run(pid=200)
+    blocked = [e["data"]["reason"] for e in rig.entries() if e["event"] == "notice" and e["data"].get("blocked")]
+    assert blocked == ["the coder's canary answer changed after it was started again"] * 2
+    assert rig.ends(1) == []                    # no stage ran on the unchecked coder

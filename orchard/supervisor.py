@@ -246,6 +246,15 @@ def operator_home() -> Path:
     return Path(pwd.getpwuid(os.getuid()).pw_dir)
 
 
+def boot_unfinished(entries: list[dict]) -> bool:
+    """The last coder start has a "coder starting" entry and no "coder started" after it."""
+    last = None
+    for e in entries:
+        if e["event"] == "decision" and e["data"].get("decision") in ("coder starting", "coder started"):
+            last = e["data"]["decision"]
+    return last == "coder starting"
+
+
 def coder_tier(cfg, port: int) -> str:
     """The chip tier whose endpoint uses the coder's port."""
     names = [n for n, t in cfg.tiers.items()
@@ -550,6 +559,12 @@ class Supervisor:
         self.coder_lease = lease
         if self.coder.confirm_stopped().stopped:
             self._coder_died(lease, canary)
+        elif boot_unfinished(entries):
+            # The last start never reached "coder started": it did not become ready, or its
+            # canary did not match and the operator resumed. Check it again before any stage.
+            self.ledger.append("decision", None, decision="finishing an unfinished coder boot",
+                               lease_id=lease.lease_id)
+            self._finish_boot(lease, canary)
 
     def _start_coder(self, baseline: dict | None, lease: Lease | None = None) -> None:
         if lease is None:
@@ -563,10 +578,19 @@ class Supervisor:
                            server=self.coder.record())
         try:
             self.coder.start(lease)
-            # The boot takes up to 45 minutes and is the likeliest time for a kill. This entry
-            # gives the kill test a kill point while the container runs and has not answered.
-            self.ledger.append("decision", None, decision="coder container started",
-                               lease_id=lease.lease_id)
+        except (ServerError, OSError) as exc:
+            self._block(None, f"the coder did not start and answer; nothing is retried: {exc}")
+        # The boot takes up to 45 minutes and is the likeliest time for a kill. This entry gives
+        # the kill test a kill point while the container runs and has not answered.
+        self.ledger.append("decision", None, decision="coder container started",
+                           lease_id=lease.lease_id)
+        self._finish_boot(lease, baseline)
+
+    def _finish_boot(self, lease: Lease, baseline: dict | None) -> None:
+        """Wait for the coder to answer, compare its canary with `baseline` (the answer recorded
+        at an earlier start, if any) and record it as started. Until "coder started" is in the
+        ledger, a restart or a resume comes back here."""
+        try:
             seconds = self.coder.wait_ready(self.budgets.cold_boot_s)
             answer = self.coder.ask(RUN_CANARY_PROMPT)
         except (ServerError, CanaryError, OSError) as exc:
