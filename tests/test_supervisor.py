@@ -467,3 +467,89 @@ def test_a_canary_mismatch_still_blocks_after_a_resume(rig):
     blocked = [e["data"]["reason"] for e in rig.entries() if e["event"] == "notice" and e["data"].get("blocked")]
     assert blocked == ["the coder's canary answer changed after it was started again"] * 2
     assert rig.ends(1) == []                    # no stage ran on the unchecked coder
+
+
+# ---- required chip configurations (stage 4) -------------------------------------------------------
+
+def mesh_result(*configs):
+    """A stage 4 result.json override from (chips, pass) pairs."""
+    return {(4, "finish"): {"result.json": {"configs": [
+        {"chips": c, "pass": ok, "evidence": ["stages/4/evidence/hw-test-output.txt"],
+         **({} if ok else {"reason": "does not fit"})} for c, ok in configs]}}}
+
+
+def test_required_chips_parse_to_a_tuple_and_default_to_none(tmp_path, rig):
+    assert rig.args.required_chips is None
+    a = parse(argv(tmp_path, rig.tiers, rig.chip_server.endpoint) + ["--required-chips", "2,4"])
+    assert a.required_chips == (2, 4)
+
+
+@pytest.mark.parametrize("bad", ["0", "2,0", "-1", "2,2", "two", "2,,4", "", "2.5"])
+def test_required_chips_that_are_not_distinct_positive_integers_are_refused_with_exit_2(tmp_path, rig, bad, capsys):
+    with pytest.raises(SystemExit) as exc:
+        parse(argv(tmp_path, rig.tiers, rig.chip_server.endpoint) + ["--required-chips", bad])
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "--required-chips" in err and "unrecognized" not in err    # refused for its value, not as an unknown flag
+
+
+def test_the_run_start_records_the_required_chips(rig):
+    rig.args.required_chips = (2, 4)
+    rig.script = lambda r: bringup(r, overrides=mesh_result((2, True), (4, True), (1, False)))
+    assert rig.run() == EXIT_READY
+    start = next(e["data"] for e in rig.entries() if e["event"] == "run_start")
+    assert start["required_chips"] == [2, 4]
+
+
+def test_a_run_without_the_option_records_none(rig):
+    assert rig.run() == EXIT_READY
+    start = next(e["data"] for e in rig.entries() if e["event"] == "run_start")
+    assert start["required_chips"] is None
+
+
+def test_a_resumed_run_keeps_the_required_chips_it_started_with(rig):
+    rig.args.required_chips = (2, 4)
+    with pytest.raises(Crash):
+        rig.run(crash_if=lambda e: e["event"] == "stage_end" and e["stage"] == 0)
+    rig.args.required_chips = None                  # the operator resumes without repeating the option
+    with Ledger(rig.run_dir / "ledger.jsonl") as led:
+        sup = build(rig.args, led, adapter=rig.adapter_cls(rig.m, owner_pid=200), coder=rig.coder_cls(rig.m),
+                    versions={"tt_model": "test"}, home=rig.home)
+        assert sup.required_chips == (2, 4)
+
+
+def test_a_resume_that_names_different_required_chips_is_refused(rig):
+    rig.args.required_chips = (2, 4)
+    with pytest.raises(Crash):
+        rig.run(crash_if=lambda e: e["event"] == "stage_end" and e["stage"] == 0)
+    rig.args.required_chips = (2,)
+    with pytest.raises(ValueError, match="required chips"):
+        rig.run(pid=200)
+
+
+def test_stage_4_passes_when_an_optional_configuration_fails(rig):
+    rig.args.required_chips = (2, 4)
+    rig.script = lambda r: bringup(r, overrides=mesh_result((2, True), (4, True), (1, False)))
+    assert rig.run() == EXIT_READY
+    assert [d["result"] for d in rig.ends(4)] == ["pass"]
+
+
+def test_stage_4_fails_when_a_required_configuration_is_missing_from_the_result(rig):
+    rig.args.required_chips = (2, 4)
+    rig.script = lambda r: bringup(r, overrides=mesh_result((2, True), (1, True)))
+
+    def stop():
+        raise Stop()                                 # the run pauses after the escalated retry fails too
+    rig.on_sleep = stop
+    with pytest.raises(Stop):
+        rig.run()
+    assert [d["result"] for d in rig.ends(4)] == ["escalate", "fail"]
+    first = next(e["data"] for e in rig.entries() if e["event"] == "escalate")
+    assert first["reasons"] == ["the 4-chip configuration is required and has no entry"]
+
+
+def test_without_the_option_stage_4_still_needs_every_listed_configuration(rig):
+    rig.script = escalation_aware(4, mesh_result((2, True), (1, False)))
+    assert rig.run() == EXIT_READY
+    first = next(e["data"] for e in rig.entries() if e["event"] == "escalate")
+    assert first["reasons"] == ["the 1-chip configuration did not pass"]
