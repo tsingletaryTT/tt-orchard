@@ -406,3 +406,13 @@ path, so packaging is the next piece to build after stages 0 to 6 are shown to w
   cache is intact (34 GB); the 1-chip cache is a partial 27 GB from the interrupted test. My earlier
   suggestion that the bridge might be failing was wrong. The supervisor is restarted with the same flags to
   resume stage 4; the stage code moves an interrupted test's cache aside before reusing it.
+- **22:37Z to 23:00Z stage 4, recovery and the 1-chip configuration.** The restarted supervisor relaunched the
+  coder in 130 s (canary identical for the fifth time), resumed stage 4 from the recorded test plan
+  (it did not redo the prepare step), moved the interrupted 1-chip cache aside to
+  `tt_cache.interrupted-1` (27 GB, kept) and re-ran the 1-chip test from 22:39:19Z. **1-chip result
+  (config 1, the optional one): exit 0 in 1212 s; `serves` true; server ready in 1198 s on a cold cache;
+  `coherent` true; teacher-forced top-1 agreement 0.96875 (31 of 32); free-run text "Let me work through this
+  carefully. The user wants me to write a text message to their landlord about a broken boiler. This is a
+  short, practical piece of".** The evidence records `MODEL_WEIGHTS_DIR` and `HF_MODEL` both set to this
+  configuration's own model directory. The operator had called 1 chip a stretch; it worked.
+  The 2-chip test (config 2, required) started at 23:00:13Z on board 1 with its own fresh cache.
