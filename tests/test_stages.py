@@ -10,8 +10,9 @@ import pytest
 
 from orchard.stages import (STAGES, TierUnavailable, check_disk, compare_delta, gate_bundle,
                             gate_decoder, gate_delta, gate_full_model, gate_mesh, gate_numbers,
-                            gate_reference, gate_serving, main, reference_items, resolve_endpoint,
-                            resolve_skill, tier_for, validate_table)
+                            gate_reference, gate_serving, gate_weights_swap, main, reference_items,
+                            resolve_endpoint, resolve_skill, tier_for, validate_table)
+from orchard.defaults import SWAP_TOP1_MIN
 from orchard.tiers import TierConfig
 
 REFERENCE = Path(__file__).parent / "fixtures" / "hemmingway_stage0_reference.md"
@@ -159,6 +160,53 @@ def test_full_model_gate_needs_parity_and_a_top1_fraction(tmp_path):
     ev = ["stages/3/evidence/diff.txt"]
     assert gate_full_model(*stage(tmp_path, 3, "result.json", {"parity": True, "top1": 0.97, "evidence": ev})).ok
     assert not gate_full_model(*stage(tmp_path, 3, "result.json", {"parity": True, "top1": 97, "evidence": ev})).ok
+
+
+# The weights-swap-check skill's result.json, with the numbers of the one hand prototype.
+SWAP = {"serves": True, "server_ready_s": 280.5, "coherent": True, "free_run_text": "The sea was calm.",
+        "top1_agreement": 0.78, "n_tokens": 32, "cache_dir": "cache/hemmingway-1/tt_cache",
+        "evidence": ["stages/2/evidence/diff.txt"]}
+
+
+def swap_reasons(tmp_path, **change):
+    data = {k: v for k, v in {**SWAP, **change}.items() if v is not ...}
+    return gate_weights_swap(*stage(tmp_path, 2, "result.json", data)).reasons
+
+
+def test_weights_swap_gate_passes_the_prototype_numbers_and_records_the_evidence(tmp_path):
+    g = gate_weights_swap(*stage(tmp_path, 2, "result.json", SWAP))
+    assert g.ok, g.reasons
+    assert g.evidence == ("stages/2/evidence/diff.txt",)
+
+
+def test_weights_swap_gate_minimum_is_the_default(tmp_path):
+    assert SWAP_TOP1_MIN == 0.6
+    assert swap_reasons(tmp_path, top1_agreement=SWAP_TOP1_MIN) == ()
+
+
+@pytest.mark.parametrize("change,word", [
+    ({"top1_agreement": 0.59}, "top1_agreement"),
+    ({"top1_agreement": 0.0}, "top1_agreement"),
+    ({"top1_agreement": 1.5}, "top1_agreement"),
+    ({"top1_agreement": "0.78"}, "top1_agreement"),
+    ({"top1_agreement": True}, "top1_agreement"),
+    ({"top1_agreement": ...}, "top1_agreement"),
+    ({"serves": False}, "serves"),
+    ({"serves": "yes"}, "serves"),
+    ({"coherent": False}, "coherent"),
+    ({"coherent": ...}, "coherent"),
+    ({"n_tokens": 15}, "n_tokens"),
+    ({"n_tokens": 32.0}, "n_tokens"),
+    ({"n_tokens": True}, "n_tokens"),
+    ({"server_ready_s": 0}, "server_ready_s"),
+    ({"server_ready_s": -3}, "server_ready_s"),
+    ({"server_ready_s": "280"}, "server_ready_s"),
+    ({"evidence": ["stages/2/evidence/missing.txt"]}, "evidence"),
+    ({"evidence": []}, "evidence"),
+])
+def test_weights_swap_gate_names_the_field_that_fails(tmp_path, change, word):
+    reasons = swap_reasons(tmp_path, **change)
+    assert len(reasons) == 1 and word in reasons[0], reasons
 
 
 def test_mesh_gate_needs_every_configuration_to_pass(tmp_path):

@@ -75,6 +75,15 @@ STAGE_BUDGET_S = {0: 7200.0, 1: 14400.0, 2: 14400.0, 3: 21600.0, 4: 28800.0, 5: 
 STAGE_DISK_GB = {0: 1.0, 1: 5.0, 2: 40.0, 3: 40.0, 4: 80.0, 5: 40.0, 6: 40.0, 7: 0.0, 8: 1.0}
 LONG_STAGE_S = 3600.0           # spec section 10: a stage with a longer budget must declare a resume marker
 STAGE2_PCC_MIN = 0.995          # the functional-decoder skill's default acceptance bar (prefill and decode)
+SWAP_TOP1_MIN = 0.6             # choice: the weights-only stage 2 bar for top1_agreement (teacher-forced
+                                # next-token agreement between the chip and the stage 1 CPU reference).
+                                # The one hand prototype (Hemmingway-1 on the 2-chip Qwen3.8-27B bundle,
+                                # 2026-10-03) measured 0.78, 25 of 32. The chip runs quantized weights
+                                # and the reference runs bf16, so near-synonyms differ. Wrong or
+                                # scrambled weights would agree on close to 0 tokens. One measurement
+                                # only; revisit when more weights-only runs exist.
+SWAP_MIN_TOKENS = 16            # choice: the fewest compared tokens the weights-only gate accepts; the
+                                # skill's script compares 32
 AGENT_MAX_TURNS = 60            # choice: model turns in one agent step before the step counts as failed
 AGENT_CONTINUATION_TURNS = 20   # choice: model turns for a step's gate-feedback continuation (at most one).
                                 # It only has to fix what the gate named, so it gets a third of a step.

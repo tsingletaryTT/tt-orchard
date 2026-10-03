@@ -30,7 +30,8 @@ from pathlib import Path
 from typing import Callable
 
 from orchard.defaults import (COLD_START_S, LONG_STAGE_S, RUN_COLD_BOOT_CAP, RUN_ESCALATION_CAP,
-                              RUN_WALL_CLOCK_S, STAGE2_PCC_MIN, STAGE_BUDGET_S, STAGE_DISK_GB)
+                              RUN_WALL_CLOCK_S, STAGE2_PCC_MIN, STAGE_BUDGET_S, STAGE_DISK_GB,
+                              SWAP_MIN_TOKENS, SWAP_TOP1_MIN)
 from orchard.tiers import TierConfig
 
 
@@ -198,6 +199,36 @@ def gate_decoder(stage_dir, run_dir) -> GateResult:
         reasons.append(f"pcc must be a number at or above {STAGE2_PCC_MIN}, got {d.get('pcc')!r}")
     if d.get("argmax_match") is not True:
         reasons.append("argmax_match is not true")
+    _evidence(run_dir, d.get("evidence"), "result.json", reasons, seen)
+    return _done(reasons, seen)
+
+
+def gate_weights_swap(stage_dir, run_dir) -> GateResult:
+    """Stage 2 on the weights-only path: the existing TT implementation serves the new weights,
+    and its greedy tokens agree with the stage 1 CPU reference (the weights-swap-check skill).
+
+    It reads result.json as that skill describes. Each failing field gets its own reason, which
+    names the field.
+    """
+    d, err = _load(stage_dir, "result.json")
+    if err:
+        return GateResult(False, (err,))
+    reasons, seen = [], []
+    if d.get("serves") is not True:
+        reasons.append(f"serves must be true (the server started and answered), got {d.get('serves')!r}")
+    if d.get("coherent") is not True:
+        reasons.append(f"coherent must be true (the free-run text is readable), got {d.get('coherent')!r}")
+    n = d.get("n_tokens")
+    if isinstance(n, bool) or not isinstance(n, int) or n < SWAP_MIN_TOKENS:
+        reasons.append(f"n_tokens must be a whole number of at least {SWAP_MIN_TOKENS}, got {n!r}")
+    top1 = d.get("top1_agreement")
+    if not _number(top1) or not 0 <= top1 <= 1:
+        reasons.append(f"top1_agreement must be a fraction from 0 to 1, got {top1!r}")
+    elif top1 < SWAP_TOP1_MIN:
+        reasons.append(f"top1_agreement {top1} is below the minimum of {SWAP_TOP1_MIN}")
+    ready = d.get("server_ready_s")
+    if not _number(ready) or ready <= 0:
+        reasons.append(f"server_ready_s must be a positive number of seconds, got {ready!r}")
     _evidence(run_dir, d.get("evidence"), "result.json", reasons, seen)
     return _done(reasons, seen)
 
