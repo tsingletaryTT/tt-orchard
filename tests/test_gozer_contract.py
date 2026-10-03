@@ -4,10 +4,20 @@ gozer runs from ORCHARD_GOZER, or ~/code/tt-gozer/bin/gozer, with a fake sysfs, 
 fake history directory and a fake reset command. No device is opened and the real gozer state
 under /tmp/tt-gozer is never read. When gozer is not present the tests skip. A skip here is not
 evidence that the adapter matches gozer.
+
+Which gozer ran: the default is the working tree of ~/code/tt-gozer, which can hold uncommitted
+edits (on 2026-10-02 it did: gozer/cli.py and gozer/__init__.py, with a 0.3.3 version bump). A
+green run then checks those edits and not a committed release, which may differ from the 0.3.2
+that the adapter's docstring cites. To pin a release, make a clean checkout of it (for example
+`git worktree add /tmp/gozer-pin <commit>`) and run with ORCHARD_GOZER=/tmp/gozer-pin/bin/gozer.
+`gozer_identity()` names the commit and says whether the tree is dirty; tests/conftest.py adds it
+to the report of every failing test in this module.
 """
+
 import os
 import shutil
 import stat
+import subprocess
 import sys
 import textwrap
 from pathlib import Path
@@ -18,6 +28,23 @@ from orchard.adapters import Queued, Refused, TicketGone
 from orchard.adapters.gozer import GozerAdapter
 
 GOZER = Path(os.environ.get("ORCHARD_GOZER", str(Path.home() / "code/tt-gozer/bin/gozer")))
+
+
+def gozer_identity() -> str:
+    """The commit of the gozer under test, and whether its working tree has uncommitted edits."""
+    root = GOZER.resolve().parent.parent
+    try:
+        def git(*args):
+            return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True,
+                                  timeout=10, check=True).stdout.strip()
+        commit = git("rev-parse", "--short", "HEAD")
+        dirty = git("status", "--porcelain", "--untracked-files=no")
+    except (OSError, subprocess.SubprocessError):
+        return f"{GOZER}: not a git checkout, so the version is unknown"
+    state = "uncommitted edits in the working tree" if dirty else "clean"
+    return f"{GOZER} at commit {commit} ({state})"
+
+
 pytestmark = pytest.mark.skipif(
     not GOZER.exists(),
     reason=f"gozer not found at {GOZER}; set ORCHARD_GOZER. A skip is not evidence.")
@@ -163,3 +190,19 @@ def test_a_holder_outside_the_owners_tree_is_held_foreign_and_blocks_the_reset(f
     assert resets(marker) == []
     shutil.rmtree(holder)
     a.release(lease)
+
+
+def test_gozer_identity_names_the_commit_and_a_dirty_tree(tmp_path, monkeypatch):
+    repo = tmp_path / "gz"
+    (repo / "bin").mkdir(parents=True)
+    (repo / "bin" / "gozer").write_text("x\n")
+    env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="t",
+               GIT_COMMITTER_EMAIL="t@t")
+    for cmd in (["init", "-q"], ["add", "."], ["commit", "-q", "-m", "x"]):
+        subprocess.run(["git", "-C", str(repo), *cmd], check=True, env=env)
+    monkeypatch.setattr(sys.modules[__name__], "GOZER", repo / "bin" / "gozer")
+    assert "(clean)" in gozer_identity() and "at commit " in gozer_identity()
+    (repo / "bin" / "gozer").write_text("edited\n")
+    assert "uncommitted edits" in gozer_identity()
+    monkeypatch.setattr(sys.modules[__name__], "GOZER", tmp_path / "nowhere" / "bin" / "gozer")
+    assert "version is unknown" in gozer_identity()
