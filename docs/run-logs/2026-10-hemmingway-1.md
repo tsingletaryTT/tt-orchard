@@ -239,3 +239,17 @@ path, so packaging is the next piece to build after stages 0 to 6 are shown to w
      near-synonyms ("Let"/"We", "work"/"think", "wants"/"is", "practical"/"straightforward",
      "real"/"everyday"). One prompt and 32 tokens, so an indication and not a benchmark.
   The lease was released with a reset afterwards. Board 1 is free.
+- **16:20Z to 16:35Z the 4-chip noise: cause found, a stale tensor cache.** The operator suggested it could be
+  sharing weights or caches with other Qwen3.8-based models, which they had seen before. I checked: each
+  4-chip package has its own tensor cache under `~/.cache/tt-model/<package>/tensors`, and all read the
+  same single Hugging Face snapshot (`1d4bf0f`, the one the working 2-chip package uses). The September
+  caches (built 2026-09-15 and 2026-09-17) are older than that snapshot (rewritten 2026-09-23). The test:
+  I stopped the idle coder (supervisor killed with SIGKILL, coder stopped with `tt-model stop`, stale lease
+  released with a reset), moved `qwen3.8-27b-p300x2/tensors` aside (renamed to
+  `tensors.aside-20261003`, 31 GB, not deleted), and booted the plain 4-chip package with an empty cache
+  under a 4-chip lease. It answered `42` to "What is 7 times 6?" and "The capital of France is **Paris**.",
+  with no noise. The cache rebuilt to 31 GB. **So the two 4-chip packages' noise was a stale cache and not
+  the hardware or the fabric.** The operator's hypothesis was right. The Mando package's cache
+  (34 GB, 2026-09-17) was not rebuilt and is still suspect. My earlier statement that the fault "looks
+  specific to the 4-chip configuration on this machine" was wrong. The first-boot known-answer check is
+  what exposed it. Server stopped and lease released afterwards; all four chips FREE.
