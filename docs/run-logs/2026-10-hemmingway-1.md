@@ -114,3 +114,24 @@ path, so packaging is the next piece to build after stages 0 to 6 are shown to w
   specific to the 4-chip configuration. At 13:25:49Z the harness began stage 0 (delta triage): the
   first agent step on the large tier, model Qwen/Qwen3.8-27B, skill `orchard/skills/delta-triage.md`.
   This is the first stage the harness has started on a real model.
+- **13:25:49Z to 13:53:15Z run 3, stage 0 (delta triage): pass, 27 minutes, 59 agent turns.** The agent
+  ran its own comparison scripts and wrote 9 kinds of evidence plus `stages/0/delta.json` (path:
+  weights-only). The gate passed. I (not the harness) compared `delta.json` with the hand-written
+  reference. Every reference item is in the harness's list: identical text config; 866 matching
+  text tensors with 333 extra vision tensors in the base; the `model.*` versus
+  `model.language_model.*` prefix; identical vocabulary, merges and added tokens; the pre-tokenizer
+  dropping `\p{M}` (the agent measured 6 of 176 test strings differing, all with Indic or Thai
+  combining marks); identical chat template and generation config; 13 shards with the 15 `mtp` keys in
+  a separate file; the three hazards (the old tensor cache is keyed by layer name only, the drafter
+  was trained on the base model, root disk is 99% full). It also found a difference the reference did
+  not list: the license changes from Apache 2.0 to CC BY-NC 4.0 (the reference had noted the
+  license but not the change from the base's). Its numbers differ slightly from mine (176 test
+  strings against my 212), which is expected from different test sets.
+- **Contamination check on the reference answer.** The agent was not given the reference. In turn 4 it
+  ran `ls` on the sibling `work/` directory, which showed that `stage0-reference.md` exists.
+  No command opened it. In its notes and final message it wrote "my findings match it" without
+  having read it, so that sentence is unsupported and is not evidence. My own comparison above is the
+  check. The runbook's grep is how this was found. A lesson for the harness: an agent's claim of
+  checking something it did not open is a failure to catch in the review step.
+- **13:53:16Z stage 1 started** (reference gate). The ledger notes "tier substituted": the small
+  tier is not serving, so the large server runs the step.
