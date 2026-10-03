@@ -200,3 +200,503 @@ def coder_tier(cfg, port: int) -> str:
     if len(names) != 1:
         raise ValueError(f"exactly one chip tier must use port {port}; found {names}")
     return names[0]
+
+
+# ---- the supervisor -----------------------------------------------------------------------------
+
+class Supervisor:
+    def __init__(self, *, run_dir, ledger, cfg, model_id: str, adapter, coder, coder_chips: int,
+                 standin, skills_dirs, inputs: dict | None = None, extra_env: dict | None = None,
+                 versions: dict | None = None, http=post_json, probe=probe_model, clock=time.time,
+                 sleep=time.sleep, budgets: Budgets = Budgets(), disk_usage=shutil.disk_usage):
+        self.run_dir = Path(run_dir).resolve()
+        self.ledger, self.cfg, self.model_id = ledger, cfg, model_id
+        self.adapter, self.coder, self.coder_chips, self.standin = adapter, coder, coder_chips, standin
+        self.skills_dirs = [Path(d) for d in skills_dirs]
+        self.inputs, self.extra_env = dict(inputs or {}), dict(extra_env or {})
+        self.versions = dict(versions or {})
+        self.http, self.probe, self.clock, self.sleep = http, probe, clock, sleep
+        self.budgets, self.disk_usage = budgets, disk_usage
+        self.control = Control(self.run_dir)
+        self.actuator = RunActuator(self.control)
+        self.guard = RetryGuard()
+        self.coder_lease: Lease | None = None
+        self.watchdog: Watchdog | None = None
+        agent_env(self.run_dir, extra=self.extra_env)     # refuse a credential before anything runs
+
+    # ---- small helpers ----------------------------------------------------------------------
+
+    def _block(self, stage, reason: str, **evidence):
+        self.ledger.append("notice", stage, blocked=True, reason=reason, evidence=evidence)
+        raise Blocked(reason, **evidence)
+
+    def _evidence_file(self, stem: str, text: str) -> Path:
+        d = self.run_dir / "evidence"
+        d.mkdir(parents=True, exist_ok=True)
+        path = d / f"{stem}-{len(self.ledger.read()) + 1:05d}.txt"
+        with open(path, "x", encoding="utf-8") as f:           # one file per attempt
+            f.write(text)
+        return path
+
+    def _handoff(self, stage, lease: Lease) -> Handoff:
+        return Handoff(ledger=self.ledger, stage=stage, adapter=self.adapter, server=self.coder,
+                       standin=self.standin, lease=lease, canary_prompt=RUN_CANARY_PROMPT,
+                       note_path=self.run_dir / "stages" / str(stage) / "handoff.json",
+                       evidence_dir=self.run_dir / "handoff", budgets=self.budgets,
+                       clock=self.clock, sleep=self.sleep)
+
+    # ---- the run ----------------------------------------------------------------------------
+
+    def run(self) -> int:
+        p = run_progress(self.ledger.read())
+        if p.aborted or p.finished:
+            self._release_all()           # finishes a release a crash interrupted; else does nothing
+            return EXIT_ABORTED if p.aborted else EXIT_READY
+        if not p.started:
+            self.ledger.append("run_start", None, model=self.model_id, versions=self.versions,
+                               inputs=self.inputs, coder=self.coder.record(),
+                               tiers={k: dict(v) for k, v in self.cfg.tiers.items()})
+        while True:
+            p = run_progress(self.ledger.read())
+            if p.paused is not None:
+                if self._wait_for_operator() == "abort":
+                    return self._abort()
+                continue
+            if p.next_stage is None:
+                break
+            cap = budget_cap(p, self.clock())
+            if cap:
+                self.ledger.append("decision", p.next_stage, decision="pause", reason=cap)
+                continue
+            if p.next_stage == 2 and self._full_port_unacknowledged():
+                self.ledger.append("decision", 2, decision="pause", reason=FULL_PORT)
+                continue
+            try:
+                self._ensure_coder()
+                result = self._run_stage(STAGES[p.next_stage], resuming=p.open_stage == p.next_stage,
+                                         escalated=p.next_stage in p.escalated)
+            except Blocked as exc:
+                # The notice is already in the ledger. The run waits for the operator.
+                self.ledger.append("decision", p.next_stage, decision="pause",
+                                   reason=f"blocked: {exc.reason}")
+                continue
+            if result == "abort":
+                return self._abort()
+        self.ledger.append("decision", None, decision="ready for operator review",
+                           bundle="stages/8/bundle")
+        # Nothing owns the coder once this process exits, and a lease judged by a dead pid with a
+        # device still open would show as a lease that lies. So the run gives the hardware back.
+        self._release_all()
+        return EXIT_READY
+
+    def _full_port_unacknowledged(self) -> bool:
+        """Stage 0 chose a full port, and the run has not yet paused for it."""
+        try:
+            path = json.loads((self.run_dir / "stages" / "0" / "delta.json").read_text()).get("path")
+        except (OSError, ValueError, AttributeError):
+            return False
+        return path == "full-port" and not any(
+            e["event"] == "decision" and e["data"].get("reason") == FULL_PORT for e in self.ledger.read())
+
+    def _wait_for_operator(self) -> str:
+        while True:
+            cmd = self.control.take()
+            if cmd == "resume":
+                self.ledger.append("decision", None, decision="resume", by="operator")
+                self.actuator.clear()
+                return "resume"
+            if cmd == "abort":
+                return "abort"
+            self.sleep(CONTROL_POLL_S)
+
+    def _abort(self) -> int:
+        # Recorded first: a crash during the release still leaves an aborted run, and a restart
+        # finishes the release and refuses to go on.
+        self.ledger.append("decision", None, decision="abort", by="operator")
+        self._release_all()
+        return EXIT_ABORTED
+
+    def _release_all(self) -> None:
+        """Stop the coder and release its lease. Safe to call again: a released lease is skipped."""
+        entries = self.ledger.read()
+        lease_rec, server_rec, _ = coder_state(entries)
+        released = {e["data"].get("lease_id") for e in entries
+                    if e["event"] == "decision" and e["data"].get("decision") == "hardware released"}
+        if lease_rec is None or lease_rec["lease_id"] in released:
+            return
+        lease = Lease.from_record(lease_rec)
+        if server_rec:
+            self.coder.adopt(server_rec)
+        try:
+            if not self.coder.confirm_stopped().stopped:
+                self.ledger.append("decision", None, decision="stopping the coder",
+                                   result=self.coder.stop())
+            check = wait_stopped(self.coder, self.adapter, lease,
+                                 quiet_wait_s=self.budgets.quiet_wait_s, poll_s=self.budgets.poll_s,
+                                 clock=self.clock, sleep=self.sleep, accept=("CLAIMED", "STALE", "FREE"))
+            if not check["ok"]:
+                self.ledger.append("notice", None, blocked=True,
+                                   reason="the coder is not confirmed stopped; the lease was not "
+                                          "released", evidence=check)
+                return
+            self.adapter.release(lease)
+            self.ledger.append("decision", None, decision="hardware released", lease_id=lease.lease_id)
+        except (AdapterError, ServerError, OSError) as exc:
+            self.ledger.append("notice", None, what="releasing the hardware failed", error=str(exc))
+
+    # ---- the coder ----------------------------------------------------------------------------
+
+    def _ensure_coder(self) -> None:
+        """The coder serves under a lease this process owns, before any stage runs."""
+        entries = self.ledger.read()
+        hp = progress(entries)
+        if hp.phase != "idle":
+            # A park or restore was interrupted (a crash, or a block the operator resumed).
+            rec = recover(entries, adapter=self.adapter, server=self.coder, standin=self.standin)
+            h = self._handoff(hp.stage, Lease.from_record(hp.lease))
+            h.recover_and_restore(rec, chips=self.coder_chips, who=WHO, reason="coder",
+                                  wait_budget_s=COLD_BOOT_BUDGET_S)
+            if rec.action != "abandon":
+                self.coder_lease = h.lease
+                return
+            entries = self.ledger.read()      # abandoned: the coder serves under the old lease
+        lease_rec, server_rec, canary = coder_state(entries)
+        if lease_rec is None:
+            self._start_coder(None)
+            return
+        if server_rec:
+            self.coder.adopt(server_rec)
+        lease = Lease.from_record(lease_rec)
+        mine = [c for c in self.adapter.status() if c.bdf in lease.chips]
+        if not (mine and all(c.lease_pid == self.adapter.owner_pid for c in mine)):
+            self._relaunch_coder(lease, canary)
+            return
+        self.coder_lease = lease
+        if self.coder.confirm_stopped().stopped:
+            self._coder_died(lease, canary)
+
+    def _start_coder(self, baseline: dict | None, lease: Lease | None = None) -> None:
+        if lease is None:
+            lease = reacquire(self.adapter, chips=self.coder_chips, who=WHO, reason="coder",
+                              ledger=self.ledger, stage=None, wait_budget_s=COLD_BOOT_BUDGET_S,
+                              clock=self.clock, sleep=self.sleep)
+        # Recorded before the start: a crash during the boot leaves the lease and server in the
+        # ledger, so the restart can stop that server and re-lease.
+        self.ledger.append("decision", None, decision="coder starting", lease=lease.record(),
+                           server=self.coder.record())
+        try:
+            self.coder.start(lease)
+            seconds = self.coder.wait_ready(self.budgets.cold_boot_s)
+            answer = self.coder.ask(RUN_CANARY_PROMPT)
+        except (ServerError, CanaryError, OSError) as exc:
+            self._block(None, f"the coder did not start and answer; nothing is retried: {exc}")
+        after = evidence_record(self.run_dir, self._evidence_file("coder-canary", answer))
+        if baseline is not None:
+            before = (self.run_dir / baseline["path"]).read_text(encoding="utf-8")
+            result = compare(before, answer)
+            if not result.match:
+                self._block(None, "the coder's canary answer changed after it was started again",
+                            whitespace_only=result.whitespace_only, before=before[:500],
+                            after=answer[:500], before_file=baseline, after_file=after)
+        self.ledger.append("decision", None, decision="coder started", lease=lease.record(),
+                           server=self.coder.record(), canary=baseline or after, canary_after=after,
+                           ready_s=seconds)
+        self.coder_lease = lease
+
+    def _relaunch_coder(self, old: Lease, canary: dict | None) -> None:
+        """After a restart the coder's lease belongs to a dead pid, so nobody can reset it. Stop
+        the coder, let the lease tool reap the orphan, take a new lease and start again."""
+        self.ledger.append("decision", None, decision="relaunch the coder under this supervisor's lease",
+                           old_lease_id=old.lease_id)
+        if not self.coder.confirm_stopped().stopped:
+            self.ledger.append("decision", None, decision="stopping the coder", result=self.coder.stop())
+        check = wait_stopped(self.coder, self.adapter, old, quiet_wait_s=self.budgets.quiet_wait_s,
+                             poll_s=self.budgets.poll_s, clock=self.clock, sleep=self.sleep,
+                             accept=("CLAIMED", "STALE", "FREE"))
+        if not check["ok"]:
+            self._block(None, "the coder could not be confirmed stopped for the relaunch", **check)
+        self._start_coder(canary)
+
+    def _coder_died(self, lease: Lease, canary: dict | None) -> None:
+        """Spec section 10: one restart with the same config and a canary check; a second death
+        blocks."""
+        if run_progress(self.ledger.read()).coder_deaths >= 1:
+            self._block(None, "the coder died a second time since the last resume")
+        self.ledger.append("decision", None, decision="coder died; restarting it once")
+        try:
+            self.adapter.reset(lease)          # a dead server can leave the chips dirty
+        except AdapterError as exc:
+            self._block(None, f"resetting the coder's chips after it died failed: {exc}")
+        self._start_coder(canary, lease=lease)
+
+    # ---- one stage ----------------------------------------------------------------------------
+
+    def _watchdog(self, spec) -> Watchdog:
+        wd = Watchdog([IdenticalResponses(), ThinkingWithoutAction(), RepeatedToolCall(),
+                       NoNewEvidence(), StageOverBudget({spec.number: spec.budget_s})],
+                      Ladder(self.actuator, self.ledger, {AGENT}))
+        t0 = attempt_started_ts(self.ledger.read(), spec.number) or self.clock()
+        wd.feed(Event(ts=t0, agent="supervisor", kind="ledger", name="stage_start", stage=spec.number))
+        return wd
+
+    def _run_stage(self, spec, *, resuming: bool, escalated: bool) -> str:
+        n = spec.number
+        if spec.skip:
+            self.ledger.append("stage_start", n, skip=True)
+            self.ledger.append("stage_end", n, result="skipped", reason=spec.skip)
+            return "skipped"
+        ok, free = check_disk(self.run_dir, spec.disk_gb, usage=self.disk_usage)
+        if not ok:
+            self._block(n, f"stage {n} needs {spec.disk_gb} GB free on the run directory's disk; "
+                           f"{free} GB is free", need_gb=spec.disk_gb, free_gb=free)
+        stage_dir, resumed = open_stage_dir(self.run_dir, spec, resuming=resuming, ledger=self.ledger)
+        self.ledger.append("stage_start", n, escalated=escalated, resumed=resumed)
+        self.actuator.clear()
+        self.watchdog = self._watchdog(spec)
+        status, reasons, gate = self._stage_body(spec, stage_dir, escalated, resumed)
+        return self._end_stage(spec, stage_dir, status, reasons, gate, escalated)
+
+    def _stage_body(self, spec, stage_dir: Path, escalated: bool, resumed: bool):
+        if spec.boards == 0:
+            out = self._step(spec, "run", stage_dir, escalated, resumed)
+            if out.status != "done":
+                return out.status, [f"the agent step ended: {out.status} {out.detail}".strip()], None
+        else:
+            if not (resumed and (stage_dir / "test-result.json").is_file()):
+                out = self._step(spec, "prepare", stage_dir, escalated, resumed)
+                if out.status != "done":
+                    return out.status, [f"the prepare step ended: {out.status} {out.detail}".strip()], None
+                test, problems = self._read_test(stage_dir)
+                if problems:
+                    return "fail", problems, None
+                self._hardware_phase(spec, stage_dir, test)
+            out = self._step(spec, "finish", stage_dir, escalated, resumed)
+            if out.status != "done":
+                return out.status, [f"the finish step ended: {out.status} {out.detail}".strip()], None
+        if spec.number == 8:
+            bundle = stage_dir / "bundle"
+            bundle.mkdir(exist_ok=True)
+            shutil.copyfile(self.ledger.path, bundle / "ledger.jsonl")
+        gate = spec.gate(stage_dir, self.run_dir)
+        return ("pass", [], gate) if gate.ok else ("fail", list(gate.reasons), gate)
+
+    def _end_stage(self, spec, stage_dir: Path, status: str, reasons: list, gate, escalated: bool) -> str:
+        n = spec.number
+        if status == "pass":
+            ev = [evidence_record(self.run_dir, self.run_dir / rel) for rel in sorted(set(gate.evidence))]
+            ev.append(evidence_record(self.run_dir, stage_dir / spec.gate_file))
+            if n == 6:
+                self._record_numbers(stage_dir)
+            self.ledger.append("stage_end", n, result="pass", evidence=ev)
+            return "pass"
+        if status == "pause":
+            return "pause"              # the ladder already wrote the pause decision
+        if status == "operator-pause":
+            self.ledger.append("decision", n, decision="pause", reason="operator")
+            return "pause"
+        if status == "abort":
+            return "abort"
+        if status == "escalate":
+            # The watchdog's ladder escalated and wrote the escalate entry before acting.
+            self.ledger.append("stage_end", n, result="escalate", reasons=reasons)
+            return "escalate"
+        if not escalated:
+            # The escalate entry comes first: a crash between the two resumes the stage escalated.
+            self.ledger.append("escalate", n, by="stage machine", reasons=reasons)
+            self.ledger.append("stage_end", n, result="escalate", reasons=reasons)
+            return "escalate"
+        self.ledger.append("decision", n, decision="pause",
+                           reason=f"stage {n} failed after escalation: " + "; ".join(reasons)[:500])
+        self.ledger.append("stage_end", n, result="fail", reasons=reasons)
+        return "fail"
+
+    def _record_numbers(self, stage_dir: Path) -> None:
+        data = json.loads((stage_dir / "result.json").read_text(encoding="utf-8"))
+        for num in data["numbers"]:
+            self.ledger.append("measurement", 6, name=num["name"], value=num.get("value"),
+                               unit=num["unit"], label=num["label"], evidence=num.get("evidence"))
+
+    def _step(self, spec, phase: str, stage_dir: Path, escalated: bool, resumed: bool):
+        n = spec.number
+        tier = tier_for(self.cfg, n, phase=phase, escalated=escalated)
+        try:
+            used, endpoint, note = resolve_endpoint(self.cfg, tier, self.probe)
+        except TierUnavailable as exc:
+            self._block(n, str(exc))
+        if note:
+            self.ledger.append("decision", n, decision="tier substituted", note=note)
+        skill = resolve_skill(spec.skill, self.skills_dirs)
+        if skill is None:
+            self._block(n, f"the skill {spec.skill!r} is not in {[str(d) for d in self.skills_dirs]}")
+        refs = {r: resolve_skill(r, self.skills_dirs) for r in spec.refs}
+        entries = self.ledger.read()
+        system, user = build_messages(spec=spec, phase=phase, run_dir=self.run_dir,
+                                      stage_dir=stage_dir, skill_path=skill, refs=refs,
+                                      facts=facts_from(run_progress(entries).run_start, self.run_dir),
+                                      entries=entries, resumed=resumed)
+        model = self.cfg.tiers[used]["model"]
+        self.ledger.append("decision", n, decision="agent step", phase=phase, tier=used, model=model,
+                           escalated=escalated, skill=str(skill))
+        step = AgentStep(agent=AGENT, endpoint=endpoint, model=model,
+                         tools=Tools(self.run_dir, stage_dir, agent_env(self.run_dir, extra=self.extra_env)),
+                         ledger=self.ledger, stage=n, phase=phase, feed=self.watchdog.feed,
+                         control=self.actuator, run_dir=self.run_dir,
+                         evidence_dir=stage_dir / "evidence",
+                         log_path=stage_dir / "log" / f"{phase}-{len(entries) + 1:05d}.jsonl",
+                         http=self.http, clock=self.clock, guard=self.guard)
+        return step.run(system, user)
+
+    # ---- the hardware test ----------------------------------------------------------------------
+
+    def _read_test(self, stage_dir: Path) -> tuple[dict | None, list[str]]:
+        problems = []
+        try:
+            test = json.loads((stage_dir / "hw_test.json").read_text(encoding="utf-8"))
+            note = json.loads((stage_dir / "handoff.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            return None, [f"hw_test.json and handoff.json must exist and be JSON: {exc}"]
+        if not isinstance(test, dict) or not isinstance(test.get("command"), str) or not test["command"].strip():
+            return None, ["hw_test.json needs a command"]
+        d = test.get("deadline_s")
+        if isinstance(d, bool) or not isinstance(d, (int, float)) or d <= 0:
+            problems.append("hw_test.json needs a positive deadline_s")
+        if not isinstance(note, dict) or any(note.get(k) in (None, "") for k in NOTE_KEYS):
+            problems.append(f"handoff.json needs {', '.join(NOTE_KEYS)}")
+        try:
+            check_string(test["command"], self.run_dir)
+        except Denied as exc:
+            problems.append(f"the test command is refused: {exc}")
+        return test, problems
+
+    def _hardware_phase(self, spec, stage_dir: Path, test: dict) -> None:
+        n = spec.number
+        chips = self.adapter.status()
+        d = decide_park(self.coder_lease.units, chips, spec.boards)
+        self.ledger.append("decision", n, decision="hardware phase", action=d.action,
+                           free_boards=list(d.free_boards), server_boards=list(d.server_boards))
+        if d.park_needed:
+            h = self._handoff(n, self.coder_lease)
+            lease = h.park()
+            self._run_test(spec, stage_dir, test, lease)
+            h.restore()
+            self.coder_lease = h.lease
+            return
+        exact = None
+        if d.action == "use_free":
+            exact = next(c.bdf for c in chips if c.board == d.free_boards[0])
+        lease = reacquire(self.adapter, chips=spec.boards * CHIPS_PER_BOARD, who=WHO,
+                          reason=f"stage {n} hardware test", ledger=self.ledger, stage=n,
+                          wait_budget_s=spec.budget_s, clock=self.clock, sleep=self.sleep, exact=exact)
+        self.ledger.append("decision", n, decision="test lease taken", test_lease=lease.record())
+        self._run_test(spec, stage_dir, test, lease)
+        try:
+            self.adapter.release(lease)        # the lease tool resets the board as it releases
+        except AdapterError as exc:
+            self._block(n, f"releasing the test lease failed: {exc}", lease_id=lease.lease_id)
+        self.ledger.append("decision", n, decision="test lease released", lease_id=lease.lease_id)
+
+    def _run_test(self, spec, stage_dir: Path, test: dict, lease: Lease) -> dict:
+        n = spec.number
+        chips = list(lease.chips[:spec.boards * CHIPS_PER_BOARD])
+        env = agent_env(self.run_dir, extra=self.extra_env)
+        env["TT_VISIBLE_DEVICES"] = ",".join(chips)
+        deadline = min(float(test["deadline_s"]), spec.budget_s)
+        out_path = stage_dir / "evidence" / "hw-test-output.txt"
+        self.ledger.append("decision", n, decision="hardware test started", command=test["command"],
+                           deadline_s=deadline, chips=chips, lease_id=lease.lease_id)
+        t0 = self.clock()
+        with open(out_path, "wb") as out:
+            try:
+                code, timed_out = spawn_checked(test["command"], self.run_dir, env, deadline, out)
+            except Denied as exc:
+                code, timed_out = None, False
+                out.write(f"refused: {exc}\n".encode("utf-8"))
+        result = {"command": test["command"], "returncode": code, "timed_out": timed_out,
+                  "seconds": round(self.clock() - t0, 3), "chips": chips,
+                  "output": evidence_record(self.run_dir, out_path)}
+        marker = stage_dir / "test-result.json"
+        tmp = stage_dir / "test-result.json.tmp"
+        tmp.write_text(json.dumps(result, indent=2))
+        os.replace(tmp, marker)         # the resume marker appears whole or not at all
+        self.ledger.append("evidence", n, what="hardware test", returncode=code, timed_out=timed_out,
+                           **evidence_record(self.run_dir, marker))
+        return result
+
+
+# ---- the command line ---------------------------------------------------------------------------
+
+def parse(argv=None):
+    p = argparse.ArgumentParser(prog="python3 -m orchard.supervisor", description=__doc__.splitlines()[0])
+    sub = p.add_subparsers(dest="cmd", required=True)
+    r = sub.add_parser("run", help="start or resume a run")
+    r.add_argument("--model", required=True, help="Hugging Face model id")
+    r.add_argument("--run-dir", required=True)
+    r.add_argument("--tiers", required=True, help="tier config (config/tiers.toml)")
+    r.add_argument("--coder-target", required=True, help="tt-model package or bundle the coder serves")
+    r.add_argument("--coder-kind", choices=("container", "bundle"), default="container")
+    r.add_argument("--coder-profile", default="default")
+    r.add_argument("--coder-port", type=int, required=True,
+                   help="the port of the chip tier the coder serves (matches its endpoint in --tiers)")
+    r.add_argument("--coder-chips", type=int, required=True)
+    r.add_argument("--coder-image-id", default=None)
+    r.add_argument("--skills-dir", action="append", default=[],
+                   help="more skill directories, searched after orchard/skills")
+    r.add_argument("--input", action="append", default=[], metavar="NAME=PATH")
+    r.add_argument("--env", action="append", default=[], metavar="NAME=VALUE",
+                   help="a variable for agent shells (never a credential)")
+    r.add_argument("--gozer", default="gozer")
+    c = sub.add_parser("control", help="send pause, resume or abort to a running supervisor")
+    c.add_argument("--run-dir", required=True)
+    c.add_argument("command", choices=Control.COMMANDS)
+    return p.parse_args(argv)
+
+
+def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_json,
+          probe=probe_model, clock=time.time, sleep=time.sleep, budgets=Budgets(),
+          disk_usage=shutil.disk_usage) -> Supervisor:
+    """A Supervisor from parsed `run` arguments. Tests pass fakes for the machine."""
+    # Everything that can be refused is checked before any external command runs.
+    cfg = load(args.tiers)
+    tier = coder_tier(cfg, args.coder_port)
+    run_dir = Path(args.run_dir).resolve()
+    inputs, extra_env = pairs(args.input, "input"), pairs(args.env, "env")
+    agent_env(run_dir, extra=extra_env)
+    spec = ServerSpec(target=args.coder_target, kind=args.coder_kind, port=args.coder_port,
+                      model=cfg.tiers[tier]["model"], profile=args.coder_profile,
+                      image_id=args.coder_image_id)
+    if adapter is None:
+        from orchard.adapters.gozer import GozerAdapter
+        adapter = GozerAdapter(gozer=args.gozer)
+    if coder is None:
+        coder = ServerControl(spec, log_path=str(run_dir / "coder.log"))
+    cpu = next(t for t in cfg.tiers.values() if t["placement"] == "cpu")
+    entries = ledger.read()
+    if versions is None and not run_progress(entries).started:
+        versions = resolve_versions(spec)       # a resumed run keeps the versions it started with
+    return Supervisor(run_dir=run_dir, ledger=ledger, cfg=cfg, model_id=args.model, adapter=adapter,
+                      coder=coder, coder_chips=args.coder_chips,
+                      standin=ExternalStandIn(cpu["endpoint"], cpu["model"], http=http),
+                      skills_dirs=[SKILLS_DIR, *args.skills_dir], inputs=inputs,
+                      extra_env=extra_env, versions=versions, http=http, probe=probe,
+                      clock=clock, sleep=sleep, budgets=budgets, disk_usage=disk_usage)
+
+
+def main(argv=None) -> int:
+    args = parse(argv)
+    if args.cmd == "control":
+        Control(args.run_dir).write(args.command)
+        print(f"wrote {args.command!r} to {Path(args.run_dir) / 'control'}")
+        return 0
+    run_dir = Path(args.run_dir)
+    try:
+        with Ledger(run_dir / "ledger.jsonl") as ledger:
+            code = build(args, ledger).run()
+    except (TierConfigError, ValueError, LedgerLocked, LedgerCorrupt) as exc:
+        print(f"refused: {exc}", file=sys.stderr)
+        return EXIT_REFUSED
+    print({EXIT_READY: "ready for operator review", EXIT_ABORTED: "aborted"}.get(code, code))
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main())
