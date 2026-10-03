@@ -426,3 +426,14 @@ path, so packaging is the next piece to build after stages 0 to 6 are shown to w
   ways (health refused, port closed, process and group gone, chips CLAIMED), and the reset took **41.698 s**
   (earlier measurements 41.65 to 41.71 s). The 4-chip test (config 4, required) started at 23:06:17Z on all
   four chips with the 4-chip container template, its own empty cache and an empty Hugging Face mount.
+- **23:06Z to 23:08Z stage 4, 4-chip configuration (required): failed in 57 s, and the cause is the inter-chip
+  link, not the harness or the weights.** The container template started the 4-chip container with the
+  isolated model directory, an empty Hugging Face mount and its own cache; the container opened the mesh
+  (grid 1x4, FABRIC_1D, strict init) and failed with `Fabric Router Sync: Timeout after 10000 ms on Device 3`:
+  one router stuck at STARTED while the others reached REMOTE_HANDSHAKE_COMPLETE. The log's own hint: "Ethernet
+  handshake likely failed -- the link may not be healthy." The test exited 4 and the supervisor handled it as
+  designed: released the test lease, restored the coder (reset 41.689 s) and gave no gate feedback for a failed
+  required test. The same 4-chip package booted and answered correctly at about 16:30Z today. The operator
+  moved cables at about 22:27Z (the SSD incident). The likeliest cause is an inter-board Ethernet cable that was
+  disturbed; not yet verified. I paused the run at 23:08:47Z so it does not retry against an unhealthy link.
+  **Stage 4 so far: 1-chip pass (0.969), 2-chip pass (0.9375), 4-chip blocked by the link.**
