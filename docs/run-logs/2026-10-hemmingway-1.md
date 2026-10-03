@@ -93,3 +93,18 @@ path, so packaging is the next piece to build after stages 0 to 6 are shown to w
   4-chip package `changh95/qwen3.8-27b-p300x2` (profile batch32, 32 sequences, 262,144 context, no
   speculative decoder), chosen because the Mando package returned noise. Same credentials acceptance
   as run 1.
+- **13:18:40Z to 13:22:27Z run 2 blocked at the coder, again.** The plain 4-chip package
+  `changh95/qwen3.8-27b-p300x2` booted in 2 minutes and returned noise too (the same
+  `ignyikko` tokens as the Mando package). This time the first-boot known-answer check caught it:
+  asked "What is 7 times 6?", the coder returned noise, and the run paused with the answer saved as
+  evidence. This is the first fault the harness found by design. Abort worked again (coder stopped,
+  lease released, chips FREE, 4 of 4 verified).
+  Two different 4-chip packages, with different images and caches, give the same wrong output. The
+  2-chip `episod` package answered correctly on board 0 earlier on 2026-10-02. Firmware is the same on
+  all four chips (bundle 19.15.0.0, `tt-smi -s`). The cause is not known. It looks specific to the
+  4-chip configuration on this machine and not to either package. Not debugged yet; it is an open
+  hardware question.
+- **13:23:52Z run 3 started** (pid 669563, run directory `hemmingway-1-run3`) with the 2-chip bundle
+  `episod/qwen3.8-27b-dflash2-p300` as the coder, so the harness can be exercised while the 4-chip
+  question is open. One board stays free for hardware stages, so no parking is needed. Its first-boot
+  check will also show whether the chips still run correctly.
