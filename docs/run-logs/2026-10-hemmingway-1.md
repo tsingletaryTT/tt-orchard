@@ -272,3 +272,17 @@ path, so packaging is the next piece to build after stages 0 to 6 are shown to w
   with the corrected skill. This is the plan 3 watchdog working on real model behaviour, not a
   replay. The earlier failed script's lesson for the harness: a test script that starts a server must
   stop it on every exit path, which the skill now says first.
+- **17:14Z to 17:27Z run 3, stage 2 prepare failed after escalation: 60 turns, no file written.** The new
+  attempt spent 116 tool calls, 91 of them `grep`, on a side question (whether `VLLM_RPC_TIMEOUT` is set
+  in vLLM) and never called `write_file`. It alternated two commands each turn for the last five turns.
+  The watchdog did not fire, because its detector needs the same single call three times in a row and
+  these alternated. The run paused ("stage 2 failed after escalation").
+  Two causes. (1) The skill asked the model to write a 400-line script from a description, which is too
+  much for a local 27B model that was exploring instead of writing. (2) Two watchdog gaps: it does not see
+  a step that never writes a file, and it does not see a repeating pattern of calls. Two fixes are in
+  progress: tested template scripts the agent copies and configures with a small JSON file (with tests that
+  run the template against a fake server and check the server is gone after every failure, including the
+  `proc.pgid` bug), and two detectors (turns without any file written; the same per-turn call pattern three
+  turns in a row). The first attempt's script was reviewed and was nearly right: only my `pgid` error.
+  So far, in this run, the model has shown a pattern: given a task with a clear path it works; given an
+  open search it explores without writing. The skills need to be closer to scripts than to guidance.
