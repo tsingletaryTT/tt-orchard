@@ -386,3 +386,16 @@ path, so packaging is the next piece to build after stages 0 to 6 are shown to w
 - **22:07:13Z supervisor restarted on the merged code and resumed into stage 4** (pid 853031, same run 3
   flags, `--required-chips 2,4`). Stage 4's old attempt (generic `mesh-shrink` skill) is moved aside and
   the weights-only stage 4 starts with a fresh prepare step.
+- **22:26Z to 22:28Z the USB SSD behind `/mnt/bonus` dropped off the bus and the run died.** Stage 4's first test
+  (the optional 1-chip configuration, started 22:11:18Z) was running. At 22:26:58Z and again at 22:27:48Z the
+  SSD (OSCOO MD006, usb 6-1) disconnected and re-attached, each time as a new block device (`sdc`, partition
+  `sdc1`, 1.86 TiB), together with other USB devices on that controller. `/mnt/bonus` stayed bound to the old
+  `sdb1`, which went to `ext4 (rw,noatime,emergency_ro,shutdown)`; every read returns Input/output error.
+  The supervisor and the coder are gone, and all four chips are FREE with no stale lease. Affected, if the
+  filesystem cannot be recovered: the run directory with `ledger.jsonl`, the Hemmingway-1 weights (51 GB), the
+  tensor caches (31 to 34 GB each) and the model downloads. Not affected: this repository, the plans and the
+  run log (root disk), and the base model's Hugging Face cache (root disk). **Nothing was changed on the mount
+  or the disk.** Recovery needs root: lazy-unmount the stale mount, check the new device (`e2fsck -n` first),
+  and remount it. A second session manages that disk; its address was stale and my message did not arrive.
+  The first lesson for the harness: the run directory and the caches sit on a USB-bridged disk, which
+  the README should call out as a risk (a ledger on removable storage is a single point of failure).
