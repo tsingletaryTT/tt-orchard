@@ -276,3 +276,139 @@ def replay(events, detectors) -> list[Finding]:
             if f is not None:
                 found.append(f)
     return found
+
+
+RUNGS = ("nudge", "escalate", "pause")
+
+
+class Actuator(Protocol):
+    """What the ladder can do to a launched agent. Plan 4's proxy and stage machine provide it."""
+
+    def nudge(self, agent: str, message: str) -> None: ...
+
+    def escalate(self, agent: str, stage: int | None) -> None: ...
+
+    def pause(self, reason: str, evidence: dict) -> None: ...
+
+
+def nudge_message(findings: list[Finding]) -> str:
+    lines = ["The supervisor stopped this step because it is repeating itself:"]
+    lines += [f"- {f.summary}" for f in findings]
+    lines.append("The model server decodes greedily, so the same request returns the same answer. "
+                 "Do something different: run a tool to get new information, write down what you "
+                 "have found so far, or say what is blocking you.")
+    return "\n".join(lines)
+
+
+class Ladder:
+    """The response ladder (spec section 7): nudge, then escalate, then pause, each capped.
+
+    Rungs are counted per agent and stage, and the counts are read back from the ledger, so a
+    restarted supervisor does not repeat a rung. An agent the supervisor did not launch gets one
+    `notice` per finding with the evidence, and no action. A finding with pause=True (a budget
+    cap) goes straight to the pause rung, for any agent, because pausing the run is the
+    supervisor's own action.
+    """
+
+    def __init__(self, actuator: Actuator, ledger, launched, *, caps: dict | None = None):
+        self.actuator, self.ledger = actuator, ledger
+        self.launched = frozenset(launched)
+        self.caps = dict(RUNG_CAPS if caps is None else caps)
+        missing = set(RUNGS) - set(self.caps)
+        if missing:
+            raise ValueError(f"caps must name every rung; missing {sorted(missing)}")
+        self._taken: Counter = Counter()
+        for e in ledger.read():
+            d = e["data"]
+            if d.get("watchdog") and d.get("rung") in RUNGS:
+                self._taken[(d.get("agent"), e["stage"], d["rung"])] += 1
+
+    def _left(self, agent: str, stage, rung: str) -> bool:
+        return self._taken[(agent, stage, rung)] < self.caps[rung]
+
+    def _take(self, event: str, agent: str, stage, rung: str, records: list, **extra) -> None:
+        # The entry is written before the action. A crash between the two counts the rung as
+        # used, so a restart cannot take it twice.
+        self.ledger.append(event, stage, watchdog=True, rung=rung, agent=agent, findings=records,
+                           **extra)
+        self._taken[(agent, stage, rung)] += 1
+
+    def _pause(self, agent: str, stage, records: list) -> str:
+        reason = "watchdog: " + "; ".join(r["summary"] for r in records)
+        self._take("decision", agent, stage, "pause", records, decision="pause", reason=reason)
+        self.actuator.pause(reason, {"agent": agent, "findings": records})
+        return "pause"
+
+    def respond(self, agent: str, findings: list[Finding], stage) -> str:
+        quiet = [f for f in findings if f.notice_only]
+        if quiet:
+            # An idle lease and similar supervisor matters: one notice, never a nudge.
+            self.ledger.append("notice", stage, watchdog=True, agent=agent,
+                               findings=[f.record() for f in quiet])
+        findings = [f for f in findings if not f.notice_only]
+        if not findings:
+            return "notice"
+        records = [f.record() for f in findings]
+        if any(f.pause for f in findings):
+            return self._pause(agent, stage, records) if self._left(agent, stage, "pause") else "none"
+        if agent not in self.launched:
+            self.ledger.append("notice", stage, watchdog=True, report_only=True, agent=agent,
+                               findings=records)
+            return "notice"
+        if self._left(agent, stage, "nudge"):
+            message = nudge_message(findings)
+            self._take("retry", agent, stage, "nudge", records, message=message)
+            self.actuator.nudge(agent, message)
+            return "nudge"
+        if self._left(agent, stage, "escalate"):
+            self._take("escalate", agent, stage, "escalate", records)
+            self.actuator.escalate(agent, stage)
+            return "escalate"
+        if self._left(agent, stage, "pause"):
+            return self._pause(agent, stage, records)
+        return "none"                 # every rung used; the run is already paused
+
+
+class RetryGuard:
+    """Spec section 3: never retry the same call with the same inputs more than once.
+
+    Nothing in plan 3 calls it. Plan 4's proxy asks before it forwards a request, and plan 4 must
+    test that wiring. The counts live in memory: they are lost on a restart and never forgotten
+    while the process lives. An identical request is allowed twice
+    (the call and one retry). A nudged request has a different prompt, so it has a new key.
+    """
+    MAX_SENDS = 2
+
+    def __init__(self):
+        self._sends: Counter = Counter()
+
+    @staticmethod
+    def key(agent: str, request: dict) -> str:
+        blob = json.dumps([agent, request], sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+    def allow(self, agent: str, request: dict) -> bool:
+        k = self.key(agent, request)
+        if self._sends[k] >= self.MAX_SENDS:
+            return False
+        self._sends[k] += 1
+        return True
+
+
+class Watchdog:
+    """Feeds each event to every detector and answers the findings once per agent."""
+
+    def __init__(self, detectors, ladder: Ladder):
+        self.detectors, self.ladder = list(detectors), ladder
+        self.stage: int | None = None
+
+    def feed(self, ev: Event) -> list[Finding]:
+        if ev.kind == "ledger" and ev.name == "stage_start":
+            self.stage = ev.stage
+        findings = replay([ev], self.detectors)
+        by_agent: dict[str, list[Finding]] = {}
+        for f in findings:
+            by_agent.setdefault(f.agent, []).append(f)
+        for agent, fs in by_agent.items():
+            self.ladder.respond(agent, fs, self.stage)
+        return findings
