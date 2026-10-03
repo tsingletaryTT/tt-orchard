@@ -267,14 +267,29 @@ stage's tier is not serving and another chip tier with the same model id is, tha
 step and the ledger records the substitution. On that machine only one chip server ran at a time
 (the coder on port 8000), so it served every step.
 
-### 3.7 Edit the machine-specific paths in two skills
+### 3.7 Machine paths
 
-The skills `orchard/skills/weights-swap-check.md` and `orchard/skills/weights-swap-configs.md` were
-written on the development machine. They contain that machine's absolute paths: the tt-orchard
-checkout in the `cp` commands, the Hugging Face cache (`hf_home`), the operator's home
-(`operator_home`) and the tensor-cache disk (`tt_cache`). Replace them with your own before a run.
-The defaults of `orchard/hardware_check.py` (`--gozer`, `--env-script`, `--python`) also name that
-machine's paths; pass your own values if you run it.
+You do not edit any skill for your machine. Where a skill needs a path on the machine, it holds a
+placeholder, and the supervisor fills it in before the agent reads the skill:
+
+| Placeholder | Value | Override |
+|---|---|---|
+| `{{ORCHARD_DIR}}` | The tt-orchard checkout the supervisor runs from | none |
+| `{{HF_HOME}}` | `$HF_HOME`, else `<operator home>/.cache/huggingface` | `--hf-home` |
+| `{{OPERATOR_HOME}}` | Your home directory from the passwd entry | `--operator-home` |
+| `{{TT_MODEL_ROOT}}` | `<operator home>/.cache/tt-model/models`, where tt-model installs bundles | follows `--operator-home` |
+| `{{CACHE_ROOT}}` | `<parent of the run directory>/cache`. Each chip configuration's tensor cache goes in `<CACHE_ROOT>/<model slug>/<N>chip-<package>/tt_cache` | `--cache-root` |
+
+Put the run directory on a disk with room for the tensor caches (see [Disk](#disk)), or pass
+`--cache-root`. The ledger's `run_start` entry records all five values. A resumed run uses the
+recorded values, and a resume that passes a different `--cache-root`, `--hf-home` or
+`--operator-home` is refused. A skill that holds an unknown placeholder blocks its stage with a
+message that names the placeholder and the file. The free-space check looks only at the run directory's disk. A
+`--cache-root` on another disk is not checked, so check its free space yourself.
+
+`orchard/hardware_check.py` has no built-in machine paths. Pass `--gozer` (a gozer that has
+`reset`), and, unless you give `--child-cmd`, `--env-script` and `--python`. The environment
+variables `ORCHARD_GOZER`, `ORCHARD_ENV_SCRIPT` and `ORCHARD_CHILD_PYTHON` work in their place.
 
 ## 4. Run a bring-up
 
@@ -293,7 +308,8 @@ python3 -m orchard.supervisor run --model MODEL --run-dir RUN_DIR --tiers TIERS
     --coder-target CODER_TARGET [--coder-kind {container,bundle}] [--coder-profile CODER_PROFILE]
     --coder-port CODER_PORT --coder-chips CODER_CHIPS [--coder-image-id CODER_IMAGE_ID]
     [--skills-dir SKILLS_DIR] [--input NAME=PATH] [--env NAME=VALUE]
-    [--required-chips N,N] [--gozer GOZER] [--accept-credentials-visible]
+    [--required-chips N,N] [--cache-root DIR] [--hf-home DIR] [--operator-home DIR]
+    [--gozer GOZER] [--accept-credentials-visible]
 ```
 
 | Flag | Required | Meaning |
@@ -311,6 +327,9 @@ python3 -m orchard.supervisor run --model MODEL --run-dir RUN_DIR --tiers TIERS
 | `--input` | no, repeatable | `NAME=PATH` facts every agent prompt lists, for example `model=<MODEL_SNAPSHOT_DIR>`. Anything you pass here, every agent sees |
 | `--env` | no, repeatable | `NAME=VALUE` variables for agent shells, for example `HF_HOME` and `HF_HUB_OFFLINE=1`. Names that look like credentials are refused |
 | `--required-chips` | no | The chip counts stage 4 must pass, such as `2,4`. Other counts are optional. Without it, every configuration stage 4 lists must pass. The ledger records it, and a resume with a different value is refused |
+| `--cache-root` | no | Where the per-model tensor caches go (`{{CACHE_ROOT}}` in the skills). Default `<parent of --run-dir>/cache`. The ledger records it, and a resume with a different value is refused |
+| `--hf-home` | no | Your Hugging Face cache (`{{HF_HOME}}`). Default `$HF_HOME`, else `<operator home>/.cache/huggingface`. Recorded and kept like `--cache-root` |
+| `--operator-home` | no | Your home directory (`{{OPERATOR_HOME}}`), where tt-model keeps its packages. Default your home from the passwd entry. Recorded and kept like `--cache-root` |
 | `--gozer` | no | The gozer executable. Default `gozer` from `PATH` |
 | `--accept-credentials-visible` | no | Start even though credential files exist in your home directory. **Warning:** agent shells run as your user, so code an agent runs can read those files. The ledger records that you accepted this |
 
