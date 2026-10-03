@@ -208,9 +208,15 @@ def replay_state(entries: list[dict]) -> dict:
             if result == "pass" and stage not in state["completed"]:
                 state["completed"].append(stage)
         elif event == "park":
-            state["parked"] = True
+            # replay_state is the authority on "parked"; orchard/handoff.py progress() reads the
+            # same entries and agrees. A park closed before the coder was told to stop ends
+            # with step "abandoned": the coder never left.
+            state["parked"] = e["data"].get("step") != "abandoned"
         elif event == "restore":
-            state["parked"] = False
+            # A restore runs in several steps (orchard/handoff.py). The coder is back only after
+            # the last one. An entry with no step (the plan 1 form) still ends the park.
+            if e["data"].get("step") in (None, "resumed"):
+                state["parked"] = False
     return state
 
 

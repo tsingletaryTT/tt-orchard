@@ -277,3 +277,22 @@ def test_sidecar_is_on_disk_before_the_ledger_is_cut(tmp_path, monkeypatch):
     sidecar_syncs = [size for name, size in seen if ".torn-" in name]
     assert sidecar_syncs == [size_with_tail]   # synced once, before the ledger was truncated
     assert any(name == "ledger.jsonl" and size == full_size for name, size in seen)
+
+
+def test_a_restore_step_before_resumed_keeps_the_run_parked(tmp_path):
+    # A restore runs in several steps (orchard/handoff.py). The coder is back only after the last.
+    with Ledger(tmp_path / "l.jsonl") as led:
+        led.append("park", 2, step="reset")
+        led.append("restore", 2, step="serve")
+        assert replay_state(led.read())["parked"] is True
+        led.append("restore", 2, step="resumed")
+        assert replay_state(led.read())["parked"] is False
+
+
+def test_an_abandoned_park_is_not_parked(tmp_path):
+    # A park closed before the coder was told to stop: the coder never left.
+    with Ledger(tmp_path / "l.jsonl") as led:
+        led.append("park", 2, step="note")
+        assert replay_state(led.read())["parked"] is True
+        led.append("park", 2, step="abandoned")
+        assert replay_state(led.read())["parked"] is False
