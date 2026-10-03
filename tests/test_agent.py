@@ -301,6 +301,22 @@ def test_a_request_asks_for_the_default_max_tokens(run):
     assert fm.requests[0]["max_tokens"] == 16384
 
 
+def test_a_request_switches_thinking_off_by_default(run):
+    run_dir, ledger = run
+    with FakeModel(lambda r: final()) as fm:
+        step(run_dir, ledger, fm.endpoint)[0].run("s", "u")
+    assert fm.requests[0]["chat_template_kwargs"] == {"enable_thinking": False}
+
+
+def test_a_step_built_with_thinking_on_does_not_send_the_switch(run):
+    run_dir, ledger = run
+    with FakeModel(lambda r: final()) as fm:
+        s = step(run_dir, ledger, fm.endpoint)[0]
+        s.thinking = True
+        s.run("s", "u")
+    assert "chat_template_kwargs" not in fm.requests[0]
+
+
 # ---- continuing the same conversation (gate feedback) -------------------------------------------
 
 def test_a_continuation_adds_one_user_message_to_the_same_conversation(run):

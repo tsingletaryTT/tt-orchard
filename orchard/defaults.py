@@ -78,6 +78,11 @@ STAGE2_PCC_MIN = 0.995          # the functional-decoder skill's default accepta
 AGENT_MAX_TURNS = 60            # choice: model turns in one agent step before the step counts as failed
 AGENT_CONTINUATION_TURNS = 20   # choice: model turns for a step's gate-feedback continuation (at most one).
                                 # It only has to fix what the gate named, so it gets a third of a step.
+AGENT_THINKING = False          # choice: agent turns run with the model's thinking mode off. The 2-chip
+                                # DFlash2 server decodes greedily only. In thinking mode a greedy model
+                                # circles in its reasoning (6,000 tokens on one point, no command) and
+                                # the step fails. Replaying one failed turn with thinking off gave a
+                                # correct command in 437 tokens. Checked on 2026-10-03 on one turn only.
 AGENT_MAX_TOKENS = 16384        # choice: max_tokens for one model response. A reasoning model's
                                 # thinking tokens count toward it. On the live Qwen3.8 run, 8,192 was
                                 # used up by reasoning in 3 of the failed replies. At about 80 tokens/s

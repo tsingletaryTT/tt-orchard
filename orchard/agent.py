@@ -63,7 +63,7 @@ from pathlib import Path
 
 from orchard.canary import CanaryError, post_json
 from orchard.defaults import (AGENT_MAX_TOKENS, AGENT_MAX_TURNS, AGENT_REQUEST_TIMEOUT_S,
-                              TOOL_OUTPUT_CHARS, TOOL_TIMEOUT_S)
+                              AGENT_THINKING, TOOL_OUTPUT_CHARS, TOOL_TIMEOUT_S)
 from orchard.runner import Denied, check_string
 from orchard.stages import evidence_record
 from orchard.watchdog import Event, RetryGuard
@@ -277,7 +277,8 @@ class AgentStep:
     def __init__(self, *, agent: str, endpoint: str, model: str, tools: Tools, ledger, stage: int,
                  phase: str, feed, control, run_dir, evidence_dir, log_path, http=post_json,
                  clock=time.time, guard: RetryGuard | None = None, max_turns: int = AGENT_MAX_TURNS,
-                 max_tokens: int = AGENT_MAX_TOKENS, timeout: float = AGENT_REQUEST_TIMEOUT_S):
+                 max_tokens: int = AGENT_MAX_TOKENS, timeout: float = AGENT_REQUEST_TIMEOUT_S,
+                 thinking: bool = AGENT_THINKING):
         self.agent, self.endpoint, self.model, self.tools = agent, endpoint, model, tools
         self.ledger, self.stage, self.phase = ledger, stage, phase
         self.feed, self.control, self.http, self.clock = feed, control, http, clock
@@ -285,6 +286,7 @@ class AgentStep:
         self.log_path = Path(log_path)
         self.guard = guard if guard is not None else RetryGuard()
         self.max_turns, self.max_tokens, self.timeout = max_turns, max_tokens, timeout
+        self.thinking = thinking     # False sends enable_thinking=false (see defaults.AGENT_THINKING)
         self._seen: dict[str, tuple[int, int]] = {}
         # The conversation, kept on the step so `continue_with` can add to it. None until `run`.
         self.messages: list[dict] | None = None
@@ -383,6 +385,8 @@ class AgentStep:
                 return self._end(reason, turn - 1)
             request = {"model": self.model, "messages": messages, "tools": TOOL_SCHEMAS,
                        "temperature": 0, "max_tokens": self.max_tokens, "stream": False}
+            if not self.thinking:
+                request["chat_template_kwargs"] = {"enable_thinking": False}
             try:
                 data = self._send(request)
                 msg = data["choices"][0]["message"]
