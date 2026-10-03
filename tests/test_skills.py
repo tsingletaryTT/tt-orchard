@@ -1,0 +1,44 @@
+"""The local draft stage skills, and the skill names the stage table uses."""
+from pathlib import Path
+
+import pytest
+
+from orchard.stages import STAGES, resolve_skill
+
+SKILLS = Path(__file__).resolve().parent.parent / "orchard" / "skills"
+LOCAL = ("delta-triage", "reference-gate", "serving-check", "operator-bundle")
+# Spec section 11: existing skills the stages use, referenced by name only.
+SPEC_EXISTING = {"model-bringup", "functional-decoder", "full-model", "multichip", "mesh-shrink",
+                 "vllm-integration", "qualitative-check", "benchmark-model", "tt-device-usage",
+                 "stage-review", "tti-release"}
+GATE_FILES = {"delta-triage": "delta.json", "reference-gate": "reference.json",
+              "serving-check": "result.json", "operator-bundle": "PUBLISH_COMMANDS.txt"}
+
+
+@pytest.mark.parametrize("name", LOCAL)
+def test_each_local_skill_is_a_marked_draft_with_its_gate_file(name):
+    path = resolve_skill(name, [SKILLS])
+    assert path == SKILLS / f"{name}.md"
+    text = path.read_text()
+    front = text.split("---")[1]
+    assert f"\nname: {name}\n" in front and "\nstatus: draft." in front
+    assert GATE_FILES[name] in text
+
+
+@pytest.mark.parametrize("name", LOCAL)
+def test_no_stage_skill_names_a_lease_tool(name):
+    # Spec section 11: stage skills say "under whatever lease the machine provides".
+    assert "gozer" not in (SKILLS / f"{name}.md").read_text().lower()
+
+
+def test_every_skill_the_table_names_is_local_or_named_in_the_spec():
+    for s in STAGES:
+        if s.skip:
+            continue
+        assert s.skill in LOCAL or s.skill in SPEC_EXISTING, s.skill
+        assert set(s.refs) <= SPEC_EXISTING, s.refs
+
+
+def test_the_bundle_skill_keeps_publishing_with_the_operator():
+    text = (SKILLS / "operator-bundle.md").read_text()
+    assert "You never run them." in text and "ready for operator review" in text
