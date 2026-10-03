@@ -76,7 +76,10 @@ STAGE_DISK_GB = {0: 1.0, 1: 5.0, 2: 40.0, 3: 40.0, 4: 80.0, 5: 40.0, 6: 40.0, 7:
 LONG_STAGE_S = 3600.0           # spec section 10: a stage with a longer budget must declare a resume marker
 STAGE2_PCC_MIN = 0.995          # the functional-decoder skill's default acceptance bar (prefill and decode)
 AGENT_MAX_TURNS = 60            # choice: model turns in one agent step before the step counts as failed
-AGENT_MAX_TOKENS = 8192         # choice: max_tokens for one model response
+AGENT_MAX_TOKENS = 16384        # choice: max_tokens for one model response. A reasoning model's
+                                # thinking tokens count toward it. On the live Qwen3.8 run, 8,192 was
+                                # used up by reasoning in 3 of the failed replies. At about 80 tokens/s
+                                # a reply that uses all 16,384 takes about 200 s.
 AGENT_REQUEST_TIMEOUT_S = 900.0 # choice: one non-streaming response; prefill alone measured 42 to 78 s
                                 # at 130K to 204K tokens (spec section 3), and contexts here stay short
 TOOL_TIMEOUT_S = 1800.0         # choice: one shell command run for an agent

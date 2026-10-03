@@ -292,3 +292,10 @@ def test_a_tool_call_resets_the_empty_reply_count(run):
     with FakeModel(script) as fm:
         out = step(run_dir, ledger, fm.endpoint)[0].run("s", "u")
     assert (out.status, out.turns, out.final_text) == ("done", 4, "fin")
+
+
+def test_a_request_asks_for_the_default_max_tokens(run):
+    run_dir, ledger = run
+    with FakeModel(lambda r: final()) as fm:
+        step(run_dir, ledger, fm.endpoint)[0].run("s", "u")
+    assert fm.requests[0]["max_tokens"] == 16384
