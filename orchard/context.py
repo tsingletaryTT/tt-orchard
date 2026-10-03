@@ -26,9 +26,14 @@ PHASE_TASKS = {
                 "its output to evidence/hw-test-output.txt and writes test-result.json. Then reply "
                 "with a short summary and no tool call."),
     "finish": ("The supervisor ran your hardware test; its record and output are below and in "
-               "your stage directory. Write {gate} from that evidence. If the test failed, write "
-               "what failed; do not invent a result. Then reply with a short summary and no tool "
-               "call."),
+               "your stage directory. Write {gate} from that evidence. Do not invent a result. "
+               "If the test failed (returncode not 0, or timed_out true), write {gate} with the "
+               "failure recorded honestly: copy the failure text from "
+               "stages/{n}/evidence/hw-test-output.txt into a `failure` field, mark what did not "
+               "happen as false (for the weights swap, `serves` false), and set every number you "
+               "did not measure to null. Then stop. Do not investigate the failure and do not try "
+               "to make the result pass. The next attempt runs a fresh test. Reply with a short "
+               "summary and no tool call."),
 }
 
 RULES = """Rules of this run:

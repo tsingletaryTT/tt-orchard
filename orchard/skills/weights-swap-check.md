@@ -124,8 +124,12 @@ server answered with an HTTP error.
 Read `stages/2/evidence/hw-test-output.txt` and `stages/2/evidence/swap-check.json`. If the test
 measured, copy `result_draft` into `result.json`.
 
-If the test failed, write `result.json` with `serves` false and the failure text from
-`hw-test-output.txt`. Do not investigate firmware or cache directories. Do not invent a number.
+If the test failed (`test-result.json` shows a `returncode` other than 0, or `timed_out` true),
+write `result.json` with `serves` false, the failure text from `hw-test-output.txt` in a `failure`
+field, `coherent`, `n_tokens`, `top1_agreement` and `server_ready_s` null, and
+`stages/2/evidence/hw-test-output.txt` in `evidence`. Then stop.
+Do not investigate firmware or cache directories, and do not try to make the result pass. Do not
+invent a number. The gate fails this result on purpose, and the next attempt runs a fresh test.
 
 ## Do not
 

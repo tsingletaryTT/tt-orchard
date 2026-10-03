@@ -278,6 +278,46 @@ def feedback_aware(stage, phase, bad_files):
     return script
 
 
+# A hardware test that does not succeed. "exit" ends with code 4. "hang" sleeps past its one-second
+# deadline, so the supervisor kills it and records timed_out true with no exit code.
+FAILING_TEST_SCRIPTS = {"exit": "import sys\nprint('device init failed')\nsys.exit(4)\n",
+                        "hang": "import time\ntime.sleep(60)\n"}
+
+
+def hw_failing(n, mode):
+    return {"evidence/notes.txt": f"stage {n} plan", "fail_test.py": FAILING_TEST_SCRIPTS[mode],
+            "hw_test.json": {"command": f"python3 stages/{n}/fail_test.py",
+                             "deadline_s": 60 if mode == "exit" else 1},
+            "handoff.json": note(n)}
+
+
+# The honest weights-swap result after a failed hardware test: serves false, the failure text, and
+# no measured numbers. The gate refuses it, as it should.
+SWAP_FAILED = {"result.json": {"serves": False, "failure": "device init failed (exit code 4)",
+                               "coherent": None, "n_tokens": None, "top1_agreement": None,
+                               "server_ready_s": None,
+                               "evidence": ["stages/2/evidence/hw-test-output.txt"]}}
+
+
+def test_fails_until_escalated(stage, mode, finish=None):
+    """A script whose hardware test for `stage` fails (see FAILING_TEST_SCRIPTS) and whose finish
+    step writes `finish` (SWAP_FAILED by default), until the context shows the stage was escalated.
+    The escalated attempt runs the normal bring-up. An escalate entry shows in the context as
+    "stage N escalate" and a stage_end as "stage N: escalate"; either one counts, so an attempt
+    resumed after a kill between the two is also treated as escalated."""
+    def script(request):
+        if "tools" in request and where(request)[0] == stage:
+            ctx = request["messages"][1]["content"]
+            if f"stage {stage} escalate" not in ctx and f"stage {stage}: escalate" not in ctx:
+                return bringup(request, overrides={(stage, "prepare"): hw_failing(stage, mode),
+                                                   (stage, "finish"): finish or SWAP_FAILED})
+        return bringup(request)
+    return script
+
+
+test_fails_until_escalated.__test__ = False      # a helper whose name pytest would collect
+
+
 def closed_port() -> int:
     """A local port with nothing listening on it."""
     with socket.socket() as sock:

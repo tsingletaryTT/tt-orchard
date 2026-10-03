@@ -39,7 +39,9 @@ A run is a sequence of stages. Each stage has an owner skill, a model tier and a
 supervisor starts a stage with a fresh, short model context built from the run ledger. When an
 agent says it is finished and the stage's exit gate fails, the same conversation is told the gate's
 reasons and gets one short continuation (up to 20 turns) before the stage is escalated. A reply with
-no text and no command, or one cut off at max_tokens, does not count as finished.
+no text and no command, or one cut off at max_tokens, does not count as finished. A hardware stage
+whose test failed (exit code not 0, or timed out) gets no continuation: the finish step records the
+failure and stops, the stage ends, and the next attempt runs a fresh test.
 
 | # | Stage | Model tier |
 |---|---|---|

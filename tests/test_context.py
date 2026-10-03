@@ -48,6 +48,18 @@ def test_the_finish_step_sees_the_hardware_test_record(tmp_path):
     assert "Write result.json from that evidence" in user
 
 
+def test_the_finish_step_is_told_to_record_a_failed_test_and_stop(tmp_path):
+    # A live finish step was asked to make serves true after a failed test and explored for 20
+    # turns. The task now says to record the failure honestly and stop.
+    run, sp = setup(tmp_path)
+    _, user = msgs(run, sp, n=2, phase="finish")
+    text = " ".join(user.split())
+    assert "If the test failed (returncode not 0, or timed_out true)" in text
+    assert "evidence/hw-test-output.txt" in text and "`failure` field" in text
+    assert "Then stop. Do not investigate the failure" in text
+    assert "The next attempt runs a fresh test" in text
+
+
 def test_resume_notes_are_given_only_to_a_resumed_step(tmp_path):
     run, sp = setup(tmp_path)
     (run / "stages" / "0" / "RESUME.md").write_text("tensors compared; tokenizer next")
