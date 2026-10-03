@@ -332,3 +332,14 @@ path, so packaging is the next piece to build after stages 0 to 6 are shown to w
   mode on both servers, so the agents stay on thinking off and the 2-chip coder. One prompt and one replayed
   turn: an indication, not a rate. Server stopped; the lease ended with a reset (gozer status was unreadable
   for about a minute while all four chips reset); all four chips FREE.
+- **19:09Z to 19:41Z run 3, stage 2 with the tested templates: the prepare step took 3.5 minutes** (19:11:36Z to
+  19:15:04Z, against 12 to 30 minutes before), and the supervisor again picked the free board and started the
+  harness-written hardware test at 19:15:04Z on board 1 (chips 2 and 3). **The test ran 26 minutes and exited
+  with code 4: the server did not become healthy within the template's 1500 s.** The script stopped the
+  server cleanly (the new `finally` worked), the supervisor released the test lease at 19:41:47Z, and the
+  finish step started. Cause: the log shows the server still compiling kernels (SDPA and GDN warmups).
+  The harness test runs with the run's own home directory, so its kernel compile cache starts cold; my hand
+  prototypes booted in 5 minutes because their compile cache was already warm. The spec's "cold first boot
+  about 30 minutes" was right and my template's timeout was not. The weight conversion (34 GB tensor
+  cache, with the model marker) and part of the compile cache are now on disk, so the next attempt should
+  boot much faster. Timeouts raised to 3300 s (health) and 3600 s (deadline), pinned by tests.
