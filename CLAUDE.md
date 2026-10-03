@@ -43,8 +43,11 @@ using the skills, with open-source models only. The run ends at an operator revi
   from the boards the coder holds and the boards a stage needs.
 - Park and restore is a step-by-step state machine. Each step writes a ledger entry; a restart
   replays the ledger and then believes the machine (docker, ps, gozer status) where they differ.
-  After a crash the old lease belongs to a dead pid, so recovery stops the coder, takes a new
-  lease, resets it and restores.
+  After a crash the old lease belongs to a dead pid. If the park had sent its stop, recovery stops
+  the coder if it still runs, takes a new lease, resets it and restores. A park killed before
+  `stop_sent` is abandoned: the coder never left, so it stays up under the dead supervisor's lease
+  (plan 4 re-leases it). A recorded stand-in pid is signalled only if its process start time still
+  matches the ledger.
 - The watchdog acts only through an injected actuator, which plan 4 supplies. Each ladder rung is
   written to the ledger before it is acted on, so a restart cannot repeat a rung.
 
@@ -54,7 +57,7 @@ Spec: `docs/superpowers/specs/`. Plans: `docs/superpowers/plans/`. Code: `orchar
 ## Status
 Plan 1 is implemented through Task 4 (ledger, runner, tiers, sizing). Task 5 (run the sizing tool
 against a real ollama, which downloads models and loads the host) was not run. It needs the
-operator. Plan 2 is merged in tt-gozer. Plan 3 (adapters, server control, park and restore, watchdog) is implemented on branch `plan3-supervisor-behavior`. Plan 4 is not started.
+operator. Plan 2 is merged to `main` in tt-gozer. Plan 3 (adapters, server control, park and restore, watchdog) is implemented on branch `plan3-supervisor-behavior`. Plan 4 is not started.
 
 ## Open decision for the operator
 No adversarial search for bypasses of the command runner has been done. Decide before plan 4 ships:
@@ -76,12 +79,18 @@ two-process lock test.
   plan now uses 1500. Task 4: the five gozer contract tests ran against the real gozer with fake roots
   and none skipped. Task 7: the live server test ran and did not skip; one mutation first passed because
   of a stale `.pyc` (same file size, same second), so every mutation run now clears `__pycache__`. Task 15
-  wrote the park-check driver and its tests; the driver has not been run on hardware. The only skip in
+  wrote the park-check driver and its tests. The controller then ran the park check on real hardware
+  (2026-10-02, board 1, default options, fake servers): exit 0, resets of 41.676 s and 41.657 s. The only skip in
   the suite is the opt-in replay. The plan was revised before execution after a review
   (`.superpowers/plan3-review.md`, 1 critical and 10 important findings, all accepted): a tripwire gozer
   in the park-check tests, abandoning a park killed before its stop, recording the stand-in pid first,
   an explicit abandoned step, a single-tenant adapter that can be rebuilt after a crash and leases whole
   boards, salted fixture hashes, and per-attempt evidence files.
+- 2026-10-02: plan 3 fix pass after the final review (`.superpowers/plan3-final-review.md`; report in
+  `.superpowers/plan3-fixpass-report.md`). Prompt: fix C1 and I1 to I4 by test-first steps, one commit each,
+  plus the minors. Key decisions: single-tenant tests get a `FakeRun` that fails on any call; the stand-in
+  is spawned, recorded, then waited for; a recorded pid is signalled only if its start time and boot id
+  still match; recovery and restore stop checks each got a test that fails without them.
 
 ## Notable moments
 - The `shlex` runner was shown to be bypassable (comments, keywords, `eval`, shells on stdin,

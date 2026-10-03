@@ -17,16 +17,17 @@ Early. The hold-through-swap pattern has been checked on this machine's two boar
 | Command runner (`orchard/runner.py`) | built, tested; best effort, see "Safety" |
 | Tier config loader (`orchard/tiers.py`) | built, tested |
 | CPU model sizing tool (`orchard/sizing.py`) | built, tested against a fake server; not yet run against a real ollama |
-| tt-gozer changes (`gozer reset`, descendant ownership, `gozer-park` skill) | built, reviewed and checked on real hardware (both boards); on branch `orchard-hold-through-swap` in a worktree of `~/code/tt-gozer`; not merged |
+| tt-gozer changes (`gozer reset`, descendant ownership, `gozer-park` skill) | built, reviewed and checked on real hardware (both boards); merged to `main` in `~/code/tt-gozer` |
 | Hardware-check driver (`orchard/hardware_check.py`) | built, reviewed, run on both boards: 22 to 24 checks passed on each run, plus a container-server check (spec section 14, item 2) |
 | Lease adapters (`orchard/adapters/`: gozer, single tenant) | built, tested against fakes; the gozer adapter also against the real gozer CLI with fake roots |
 | Server control and canary (`orchard/server.py`, `orchard/canary.py`) | built, tested; stop checks also run against real ps, pgrep, ss and curl with a fake server |
-| Park and restore (`orchard/handoff.py`) | built, tested against a fake machine, including a crash after every ledger event; not yet run on hardware (`orchard/park_check.py` is written for the controller to run) |
+| Park and restore (`orchard/handoff.py`) | built, tested against a fake machine, including a crash after every ledger event; the park check ran once on real hardware on 2026-10-02 (see below) |
 | Watchdog (`orchard/watchdog.py`, `orchard/transcripts.py`) | built, tested; thresholds set from a replay of the recorded qwen-code loop and 30 quiet chats |
-| Supervisor loop, stage state machine, model proxy | designed, not started (plan 4) |
-| Stage state machine, new bring-up skills, operator bundle | designed, not started |
+| Supervisor loop, stage state machine, model proxy, new bring-up skills, operator bundle | designed, not started (plan 4) |
 
-The suite has 838 passing tests and 1 skipped, and runs without hardware or network. The skipped test is the opt-in replay of local qwen-code transcripts (`ORCHARD_REPLAY=1 python3 -m pytest tests/test_replay_local.py`). 607 of the tests predate plan 3. The driver's tests use fake gozer roots and a stub child.
+The suite has 854 passing tests and 1 skipped, and runs without hardware or network. The skipped test is the opt-in replay of local qwen-code transcripts (`ORCHARD_REPLAY=1 python3 -m pytest tests/test_replay_local.py`). 607 of the tests predate plan 3. The driver's tests use fake gozer roots and a stub child.
+
+The park check (`orchard/park_check.py`) ran on real hardware on 2026-10-02, on board 1 (chips `0000:03:00.0` and `0000:04:00.0`), with the default options and fake coder and stand-in servers. It exited 0. The park reset took 41.676 s and the restore reset took 41.657 s. The record is in `runs/park-check/20261003T011558Z-0000-03-00.0/`, which git ignores. It is one run on one board; it did not use a real model.
 
 Measured on this machine (one p300c board): an in-place `gozer reset` takes 41.7 s; `tt-model stop` takes 1.6 to 1.9 s; the Audio8 container reaches ready in about 20 s from a warm start; a lease owned by a live pid stays valid past gozer's 900 s detached window. During any reset the other board shows as busy for about 42 s, because `tt-smi -r` opens every device.
 
