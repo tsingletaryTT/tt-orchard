@@ -120,7 +120,9 @@ class ThinkingWithoutAction:
 
 # Ledger events that mean the work moved forward. Ladder entries (retry, escalate, notice,
 # decision), polls and anything else never count, so the watchdog's own writes cannot silence it.
-PROGRESS_LEDGER_EVENTS = frozenset({"measurement", "stage_end", "test_result"})
+# orchard/ledger.py has no `test_result` event today; plan 4 adds it with the stage test, and
+# should add it here at the same time.
+PROGRESS_LEDGER_EVENTS = frozenset({"measurement", "stage_end"})
 
 
 class NoNewEvidence:

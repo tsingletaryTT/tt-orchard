@@ -60,7 +60,7 @@ def test_no_new_evidence_fires_after_the_window_and_resets_on_evidence():
     assert times(replay(evs, [d])) == [100, 260]
 
 
-@pytest.mark.parametrize("name", ["measurement", "stage_end", "test_result"])
+@pytest.mark.parametrize("name", ["measurement", "stage_end"])
 def test_a_named_progress_event_from_the_supervisor_counts_for_every_agent(name):
     d = NoNewEvidence(window_s=100)
     evs = [resp(0, agent="a"), resp(0, agent="b"),
