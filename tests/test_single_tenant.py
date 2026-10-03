@@ -29,6 +29,10 @@ def adapter(tmp_path, holders=None, **kw):
     # No lease tool on this "machine": the tests never look at the real PATH or /tmp/tt-gozer.
     kw.setdefault("which", lambda name: None)
     kw.setdefault("gozer_state_dirs", ())
+    # No real command either: the default FakeRun has no script, so any call fails the test.
+    # A test that needs a reset call passes its own scripted FakeRun. Without this default, a
+    # regression in a guard would run the real reset command on a real board.
+    kw.setdefault("run", FakeRun())
     return SingleTenantAdapter(CHIPS, proc_root=fake_proc(tmp_path, holders or {}), **kw)
 
 
@@ -79,7 +83,7 @@ def test_exact_picks_the_board_of_the_named_chip(tmp_path):
 
 def test_a_chip_count_that_splits_a_board_is_a_config_error(tmp_path):
     with pytest.raises(ValueError, match="whole boards"):
-        SingleTenantAdapter(CHIPS[:3], proc_root=fake_proc(tmp_path, {}))
+        SingleTenantAdapter(CHIPS[:3], proc_root=fake_proc(tmp_path, {}), run=FakeRun())
 
 
 @pytest.mark.parametrize("which,dirs,needle", [
@@ -147,11 +151,13 @@ def test_failed_or_hung_reset_raises(tmp_path):
 
 
 def test_reset_of_an_unknown_lease_is_lost(tmp_path):
-    a = adapter(tmp_path, reset_argv=["tt-smi", "-r"])
+    run = FakeRun()          # any call fails the test
+    a = adapter(tmp_path, run=run, reset_argv=["tt-smi", "-r"])
     lease = a.acquire(2, "w", "r")
     a.release(lease)
     with pytest.raises(LeaseLost):
         a.reset(lease)
+    assert run.calls == []
 
 
 def test_status_reports_held_claimed_free_and_untracked(tmp_path):
