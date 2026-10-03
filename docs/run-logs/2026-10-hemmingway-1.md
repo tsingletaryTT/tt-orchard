@@ -416,3 +416,13 @@ path, so packaging is the next piece to build after stages 0 to 6 are shown to w
   short, practical piece of".** The evidence records `MODEL_WEIGHTS_DIR` and `HF_MODEL` both set to this
   configuration's own model directory. The operator had called 1 chip a stretch; it worked.
   The 2-chip test (config 2, required) started at 23:00:13Z on board 1 with its own fresh cache.
+- **23:00Z to 23:06Z stage 4, 2-chip configuration and the first real park.** The 2-chip test (config 2,
+  required) ran with its own fresh cache: exit 0 in 259 s, `serves` true, ready in 252 s (the kernel compile
+  cache was warm from earlier today), `coherent` true, top-1 agreement 0.9375 (30 of 32), the same as stage 2.
+  The supervisor then began the 4-chip configuration, which needs both boards while the coder holds board
+  0, so it **parked the coder for the first time on real hardware** (23:05:14Z to 23:06:17Z): handoff note,
+  pre-park canary (answer `42`, same hash), the CPU stand-in (`qwen3-coder:30b` on ollama) answered its own
+  canary with the same hash before the coder was stopped, `tt-model stop` ran, the stop was confirmed four
+  ways (health refused, port closed, process and group gone, chips CLAIMED), and the reset took **41.698 s**
+  (earlier measurements 41.65 to 41.71 s). The 4-chip test (config 4, required) started at 23:06:17Z on all
+  four chips with the 4-chip container template, its own empty cache and an empty Hugging Face mount.
