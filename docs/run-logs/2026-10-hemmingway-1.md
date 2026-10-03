@@ -399,3 +399,10 @@ path, so packaging is the next piece to build after stages 0 to 6 are shown to w
   and remount it. A second session manages that disk; its address was stale and my message did not arrive.
   The first lesson for the harness: the run directory and the caches sit on a USB-bridged disk, which
   the README should call out as a risk (a ledger on removable storage is a single point of failure).
+- **22:36Z the SSD is back; cause: the operator moved a cable.** With the operator's permission I lazy-unmounted
+  the stale `/mnt/bonus`, mounted the re-attached device (`/dev/sdc1`) and checked it. The kernel replayed the
+  journal (`recovery complete`). The ledger has all 224 entries and its hash chain verifies (last entry
+  22:11:18Z, the 1-chip test starting). The Hemmingway-1 weights are intact (21 files, 51 GB). The 2-chip tensor
+  cache is intact (34 GB); the 1-chip cache is a partial 27 GB from the interrupted test. My earlier
+  suggestion that the bridge might be failing was wrong. The supervisor is restarted with the same flags to
+  resume stage 4; the stage code moves an interrupted test's cache aside before reusing it.
