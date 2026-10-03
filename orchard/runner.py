@@ -45,8 +45,9 @@ refusal names the construct and says how to rewrite the command.
   (long-option prefixes and clustered short flags included); every gozer command except status,
   env, queue, history, --help and --version, and any gozer --force; tt/tt-cli with stop, serve,
   run, firmware or a reset word; docker with stop, kill, rm, run, start, restart, push, exec, cp
-  and similar verbs; tt-model stop, serve, run, rm, unpublish and login; kill, pkill, killall,
-  reboot, shutdown and systemctl/service stop or restart; ssh, scp and sftp, and rsync with a
+  and similar verbs; tt-model stop, serve, run, rm, unpublish, login, package and package-thin;
+  kill, pkill, killall, reboot, shutdown and systemctl/service stop or restart; ssh, scp and
+  sftp, and rsync with a
   `host:` or `rsync://` operand; curl with a request body, form, upload or a method other than
   GET or HEAD, and wget with --post-*, --body-* or such a --method; and rm/rmdir/unlink outside
   the run directory, of a ledger file, with a glob directly in the run directory root, or fed by
@@ -595,6 +596,15 @@ def _tt_model_publish(name, argv, ctx):
     return name == "tt-model" and "publish" in argv[1:]
 
 
+# `tt-model package` and `package-thin` upload when given a repo id, and stage 7 packages the model
+# as supervisor code (orchard/package.py), so an agent never needs either verb.
+TT_MODEL_PACKAGE = {"package", "package-thin"}
+
+
+def _tt_model_package(name, argv, ctx):
+    return name == "tt-model" and any(a in TT_MODEL_PACKAGE for a in argv[1:])
+
+
 def _git_push(name, argv, ctx):
     if name in {"git-push", "git-send-pack"}:      # the helper binary run directly
         return True
@@ -892,6 +902,7 @@ def _rm_xargs(name, argv, ctx):
 RULES = [
     ("tt-model-push", _tt_model_push),
     ("tt-model-publish", _tt_model_publish),
+    ("tt-model-package", _tt_model_package),
     ("git-push", _git_push),
     ("gh-repo-create", _gh_repo_create),
     ("hf-upload", _hf_upload),
@@ -924,6 +935,9 @@ RULE_DETAIL = {
     "docker-control": "containers on this box belong to the supervisor and to other users. To "
                       "proceed: read them with docker ps, docker logs or docker inspect; the "
                       "supervisor starts and stops the coder",
+    "tt-model-package": "stage 7 packages the model as supervisor code, and package or "
+                        "package-thin with a repo id uploads. To proceed: write what the package "
+                        "needs into your stage's result file; the supervisor stages the package",
     "tt-model-control": "the supervisor starts and stops model servers, and publishing is for the "
                         "operator. To proceed: read a server's state over its HTTP endpoint, for "
                         "example curl http://127.0.0.1:8000/v1/models",

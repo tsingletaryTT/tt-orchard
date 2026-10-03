@@ -124,6 +124,14 @@ DENY = {
     "tt-model-publish": [
         "tt-model publish episod/x",
     ],
+    "tt-model-package": [
+        "tt-model package-thin episod/hemmingway-1-p300 --model-py model.py --out x",
+        "tt-model package-thin --model-py model.py --out {run}/x",
+        "tt-model package episod/x --wheels-dir w",
+        "tt-model package --container tt-model.yaml",
+        "env A=1 tt-model package-thin --out x",
+        "bash -c 'tt-model package-thin --out x'",
+    ],
     "git-push": [
         "ls # note\ngit push",
         "echo a#; git push",
@@ -640,3 +648,11 @@ def test_run_shell_checks_before_running(run_dir):
     assert not marker.exists()  # nothing ran, including the harmless first command
     run_shell(f"touch {marker}", run_dir)
     assert marker.exists()
+
+
+def test_a_package_refusal_says_stage_7_packages_and_how_to_proceed(run_dir):
+    # `tt-model package` and `package-thin` push when given a repo id, so agents never run them.
+    with pytest.raises(Denied) as exc:
+        check_string("tt-model package-thin --model-py model.py --out x", run_dir)
+    assert exc.value.rule == "tt-model-package"
+    assert "stage 7" in str(exc.value) and "To proceed:" in str(exc.value)
