@@ -54,20 +54,20 @@ and a positive `server_ready_s`; and its evidence includes
 
 | chips | kind | package | context | template script |
 |---|---|---|---|---|
-| 1 | bundle | `episod/qwen3.8-27b-dflash2-p150` at `~/.cache/tt-model/models/episod/qwen3.8-27b-dflash2-p150` | 16K | `serve_and_compare.py` |
-| 2 | bundle | `episod/qwen3.8-27b-dflash2-p300` at `~/.cache/tt-model/models/episod/qwen3.8-27b-dflash2-p300` | 262K | `serve_and_compare.py` |
+| 1 | bundle | `episod/qwen3.8-27b-dflash2-p150` at `{{TT_MODEL_ROOT}}/episod/qwen3.8-27b-dflash2-p150` | 16K | `serve_and_compare.py` |
+| 2 | bundle | `episod/qwen3.8-27b-dflash2-p300` at `{{TT_MODEL_ROOT}}/episod/qwen3.8-27b-dflash2-p300` | 262K | `serve_and_compare.py` |
 | 4 | container | `changh95/qwen3.8-27b-p300x2`, profile `batch32` | 262K | `serve_and_compare_container.py` |
 
-To check a row, run `tt-model list` and read `~/.cache/tt-model/installed.json` (a container
-package has `"container": true` and an `"image"`). A bundle has `run.sh` and `venv/` in its
-directory. If a required package is missing, write that in `result.json` and stop.
+To check a row, run `tt-model list` and read `{{OPERATOR_HOME}}/.cache/tt-model/installed.json`
+(a container package has `"container": true` and an `"image"`). A bundle has `run.sh` and
+`venv/` in its directory. If a required package is missing, write that in `result.json` and stop.
 
 ## Prepare phase: the steps for one configuration with N chips
 
 1. Make the directory and copy the three templates into it:
 
        mkdir -p stages/4/configs/N
-       cp /home/ttuser/code/tt-orchard/orchard/skills/weights-swap-templates/prepare_swap.py /home/ttuser/code/tt-orchard/orchard/skills/weights-swap-templates/serve_and_compare.py /home/ttuser/code/tt-orchard/orchard/skills/weights-swap-templates/serve_and_compare_container.py stages/4/configs/N/
+       cp {{ORCHARD_DIR}}/orchard/skills/weights-swap-templates/prepare_swap.py {{ORCHARD_DIR}}/orchard/skills/weights-swap-templates/serve_and_compare.py {{ORCHARD_DIR}}/orchard/skills/weights-swap-templates/serve_and_compare_container.py stages/4/configs/N/
 
 2. Write `stages/4/configs/N/swap_config.json` (absolute paths). The snapshots, the model ids and
    `run_dir` are the same as in stage 2's `swap_config.json` (`stages/2/swap_config.json`); read it.
@@ -80,8 +80,8 @@ directory. If a required package is missing, write that in `result.json` and sto
         "base_snapshot": "<nearest model snapshot>",
         "new_snapshot": "<new model snapshot>",
         "new_model_id": "<new model id>",
-        "tt_cache": "/mnt/bonus/models/orchard-runs/cache/<slug>/<N>chip-<package name>/tt_cache",
-        "hf_home": "/home/ttuser/.cache/huggingface",
+        "tt_cache": "{{CACHE_ROOT}}/<slug>/<N>chip-<package name>/tt_cache",
+        "hf_home": "{{HF_HOME}}",
         "port": <8100 + N>}
 
    For the container package (4 chips): no `bundle_dir`; add the package, its profile, the chip
@@ -95,13 +95,14 @@ directory. If a required package is missing, write that in `result.json` and sto
         "base_snapshot": "<nearest model snapshot>",
         "new_snapshot": "<new model snapshot>",
         "new_model_id": "<new model id>",
-        "tt_cache": "/mnt/bonus/models/orchard-runs/cache/<slug>/4chip-qwen3.8-27b-p300x2/tt_cache",
-        "hf_home": "/home/ttuser/.cache/huggingface",
-        "operator_home": "/home/ttuser",
+        "tt_cache": "{{CACHE_ROOT}}/<slug>/4chip-qwen3.8-27b-p300x2/tt_cache",
+        "hf_home": "{{HF_HOME}}",
+        "operator_home": "{{OPERATOR_HOME}}",
         "port": 8104}
 
    Every configuration gets its own new `tt_cache`. Never reuse stage 2's cache, another
-   configuration's cache, or anything under `~/.cache/tt-model/` or `~/.cache/qwen36-src-build/`.
+   configuration's cache, or anything under `{{OPERATOR_HOME}}/.cache/tt-model/` or
+   `{{OPERATOR_HOME}}/.cache/qwen36-src-build/`.
    The tensor cache is keyed only by layer name and mesh, so a cache made by another model or
    another mesh is read without an error and serves the wrong tensors. The supervisor refuses a
    list in which two configurations share a cache.
