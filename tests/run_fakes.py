@@ -18,6 +18,7 @@ import time
 from fake_model import call, final, turn
 from fakes import Crash, FakeClock
 from orchard.adapters import ChipState, Lease, LeaseLost, Queued, Refused
+from orchard.defaults import FIRST_BOOT_PROMPT
 from orchard.ledger import Ledger
 from orchard.server import NotReady, StopCheck
 
@@ -50,6 +51,8 @@ class Machine:
         self.coder_chips: tuple[str, ...] = ()
         self.coder_starts = 0
         self.coder_answer = CANARY_ANSWER
+        self.sanity_answer = "42"           # what the coder says to the first-boot arithmetic question
+        self.asked: list[str] = []          # every prompt put to the coder, in order
         self.never_ready = False
         self.resets: list[tuple[str, str]] = []
         self.n = 0
@@ -154,6 +157,9 @@ class MachineCoder:
     def ask(self, prompt):
         if not self.m.coder_running:
             raise ConnectionRefusedError("the coder is down")
+        self.m.asked.append(prompt)
+        if prompt == FIRST_BOOT_PROMPT:
+            return self.m.sanity_answer
         return self.m.coder_answer
 
     def record(self):

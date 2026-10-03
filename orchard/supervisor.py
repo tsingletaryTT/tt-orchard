@@ -8,7 +8,9 @@ run-wide caps and the free disk, opens the stage directory (orchard/stages.py), 
 steps (orchard/agent.py) under the watchdog with a real actuator, runs the hardware test on a
 leased board, parking the coder when no board is free, and writes the stage's end with the exit
 gate's result. A failed stage is escalated once to its diagnose tier (or the [escalation]
-default); a second failure pauses the run. When stage 0 finds that the model needs new model code
+default); a second failure pauses the run. The first start of the coder in a run is also asked a
+known-answer question (7 times 6); a server that answers without 42 blocks the run, because the
+canary alone would accept noise. When stage 0 finds that the model needs new model code
 (a full port), the run pauses before stage 2 for the operator.
 
 Operator commands go through a one-word control file in the run directory: pause, resume, abort.
@@ -52,7 +54,7 @@ from orchard.canary import ask as canary_ask
 from orchard.commands import run_command
 from orchard.context import build_messages, facts_from
 from orchard.defaults import (CHIPS_PER_BOARD, CMD_TIMEOUT_S, COLD_BOOT_BUDGET_S, CONTROL_POLL_S,
-                              RUN_CANARY_PROMPT)
+                              FIRST_BOOT_EXPECTED, FIRST_BOOT_PROMPT, RUN_CANARY_PROMPT)
 from orchard.handoff import (NOTE_KEYS, Blocked, Budgets, Handoff, decide_park, progress, reacquire,
                              recover, wait_stopped)
 from orchard.ledger import Ledger, LedgerCorrupt, LedgerLocked
@@ -589,13 +591,24 @@ class Supervisor:
 
     def _finish_boot(self, lease: Lease, baseline: dict | None) -> None:
         """Wait for the coder to answer, compare its canary with `baseline` (the answer recorded
-        at an earlier start, if any) and record it as started. Until "coder started" is in the
+        at an earlier start, if any) and record it as started. With no baseline (the first start of
+        the run) it also asks FIRST_BOOT_PROMPT and blocks unless the answer contains
+        FIRST_BOOT_EXPECTED; a resume after that block asks it again. Until "coder started" is in the
         ledger, a restart or a resume comes back here."""
         try:
             seconds = self.coder.wait_ready(self.budgets.cold_boot_s)
             answer = self.coder.ask(RUN_CANARY_PROMPT)
+            # With no baseline this is the first start of the run. A server that answers with
+            # noise still passes the canary, because the canary only needs some answer.
+            sanity = self.coder.ask(FIRST_BOOT_PROMPT) if baseline is None else None
         except (ServerError, CanaryError, OSError) as exc:
             self._block(None, f"the coder did not start and answer; nothing is retried: {exc}")
+        if sanity is not None and FIRST_BOOT_EXPECTED not in sanity:
+            saved = evidence_record(self.run_dir, self._evidence_file("coder-sanity", sanity))
+            self._block(None, f"the coder's server answers wrongly: asked {FIRST_BOOT_PROMPT!r}, expected "
+                              f"text containing {FIRST_BOOT_EXPECTED!r}, got {sanity[:200]!r}. It was not "
+                              "retried; check the package and the server before resuming",
+                        question=FIRST_BOOT_PROMPT, answer=sanity[:500], answer_file=saved)
         after = evidence_record(self.run_dir, self._evidence_file("coder-canary", answer))
         if baseline is not None:
             before = (self.run_dir / baseline["path"]).read_text(encoding="utf-8")

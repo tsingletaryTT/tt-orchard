@@ -90,3 +90,5 @@ COLD_START_S = 600.0            # choice: a coder start slower than this counts 
 RUN_WALL_CLOCK_S = 259200.0     # choice: 72 h from run start or the last resume, then the run pauses
 CONTROL_POLL_S = 10.0           # choice: how often a paused supervisor reads the control file
 RUN_CANARY_PROMPT = "What is 17 + 25? Answer with one number."   # choice: short, one greedy answer
+FIRST_BOOT_PROMPT = "What is 7 times 6? Reply with only the number."   # choice: a known answer, asked once
+FIRST_BOOT_EXPECTED = "42"      # a first start must answer with text that contains this, or the run blocks
