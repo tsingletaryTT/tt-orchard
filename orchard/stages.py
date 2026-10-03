@@ -6,6 +6,10 @@ and its resume marker. It also owns the questions the supervisor asks the ledger
 runs next, whether the run is paused, how many escalations and coder starts it has used, and
 where the coder's lease is recorded. Nothing here starts a process or calls a model.
 
+The table holds one spec per stage. The path stage 0 chose can replace a spec: on the weights-only
+path stage 2 uses the weights-swap-check skill and `gate_weights_swap`, and stage 3 is skipped
+(`spec_for`, `run_path`).
+
 A gate checks the shape of a stage's result file and that every evidence path it lists is a file
 inside the run directory. A gate cannot tell whether a claim is true. The operator reviews the
 bundle; the spec's `stage-review` skill is not wired in by plan 4.
@@ -18,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import calendar
+import dataclasses
 import hashlib
 import json
 import os
@@ -30,7 +35,8 @@ from pathlib import Path
 from typing import Callable
 
 from orchard.defaults import (COLD_START_S, LONG_STAGE_S, RUN_COLD_BOOT_CAP, RUN_ESCALATION_CAP,
-                              RUN_WALL_CLOCK_S, STAGE2_PCC_MIN, STAGE_BUDGET_S, STAGE_DISK_GB)
+                              RUN_WALL_CLOCK_S, STAGE2_PCC_MIN, STAGE_BUDGET_S, STAGE_DISK_GB,
+                              SWAP_MIN_TOKENS, SWAP_TOP1_MIN)
 from orchard.tiers import TierConfig
 
 
@@ -202,6 +208,36 @@ def gate_decoder(stage_dir, run_dir) -> GateResult:
     return _done(reasons, seen)
 
 
+def gate_weights_swap(stage_dir, run_dir) -> GateResult:
+    """Stage 2 on the weights-only path: the existing TT implementation serves the new weights,
+    and its greedy tokens agree with the stage 1 CPU reference (the weights-swap-check skill).
+
+    It reads result.json as that skill describes. Each failing field gets its own reason, which
+    names the field.
+    """
+    d, err = _load(stage_dir, "result.json")
+    if err:
+        return GateResult(False, (err,))
+    reasons, seen = [], []
+    if d.get("serves") is not True:
+        reasons.append(f"serves must be true (the server started and answered), got {d.get('serves')!r}")
+    if d.get("coherent") is not True:
+        reasons.append(f"coherent must be true (the free-run text is readable), got {d.get('coherent')!r}")
+    n = d.get("n_tokens")
+    if isinstance(n, bool) or not isinstance(n, int) or n < SWAP_MIN_TOKENS:
+        reasons.append(f"n_tokens must be a whole number of at least {SWAP_MIN_TOKENS}, got {n!r}")
+    top1 = d.get("top1_agreement")
+    if not _number(top1) or not 0 <= top1 <= 1:
+        reasons.append(f"top1_agreement must be a fraction from 0 to 1, got {top1!r}")
+    elif top1 < SWAP_TOP1_MIN:
+        reasons.append(f"top1_agreement {top1} is below the minimum of {SWAP_TOP1_MIN}")
+    ready = d.get("server_ready_s")
+    if not _number(ready) or ready <= 0:
+        reasons.append(f"server_ready_s must be a positive number of seconds, got {ready!r}")
+    _evidence(run_dir, d.get("evidence"), "result.json", reasons, seen)
+    return _done(reasons, seen)
+
+
 def gate_full_model(stage_dir, run_dir) -> GateResult:
     """Stage 3: end-to-end parity with the reference, with the top-1 agreement recorded."""
     d, err = _load(stage_dir, "result.json")
@@ -364,6 +400,65 @@ def validate_table(stages=STAGES) -> None:
 
 
 validate_table()
+
+
+# ---- the path stage 0 chose ---------------------------------------------------------------------
+# Stage 0 writes "path" in delta.json: "weights-only" when the new model has the nearest model's
+# architecture and only the weights differ, "full-port" when it needs new model code. On the
+# weights-only path stage 2 serves the new weights with the existing TT implementation and compares
+# the chip's tokens with the stage 1 reference (the weights-swap-check skill). Any other path,
+# including one the supervisor cannot read, keeps the table above.
+
+WEIGHTS_ONLY_STAGE_2 = dataclasses.replace(
+    STAGES[2], name="weights swap check on one board", skill="weights-swap-check",
+    gate=gate_weights_swap)
+
+
+# Stage 3 builds and checks the full TT model. On the weights-only path that model already exists,
+# and stage 2 has served the new weights through it and compared every token with the reference.
+SKIP_3_WEIGHTS_ONLY = "weights-only path: the stage 2 serve-and-compare covers the full model"
+WEIGHTS_ONLY_STAGE_3 = dataclasses.replace(STAGES[3], skip=SKIP_3_WEIGHTS_ONLY)
+
+
+def delta_path(run_dir) -> str | None:
+    """The path in stages/0/delta.json, or None when the file is missing, unreadable or names
+    another value. The stage 0 gate validated the file; this only reads it."""
+    try:
+        data = json.loads((Path(run_dir) / "stages" / "0" / "delta.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    path = data.get("path") if isinstance(data, dict) else None
+    return path if path in PATHS else None
+
+
+def run_path(entries: list[dict], run_dir) -> str | None:
+    """The path this run follows: "weights-only", "full-port", or None when it is not known.
+
+    The supervisor records the path in stage 0's passing stage_end. That entry decides, so a
+    resumed run makes the same choice as the run that crashed, even if an agent has since edited
+    delta.json. A ledger written before the path was recorded there falls back to delta.json.
+    Before stage 0 passes there is no path.
+    """
+    end = None
+    for e in entries:
+        if e["event"] == "stage_end" and e["stage"] == 0 and e["data"].get("result") == "pass":
+            end = e["data"]
+    if end is None:
+        return None
+    if "path" in end:
+        return end["path"] if end["path"] in PATHS else None
+    return delta_path(run_dir)
+
+
+def spec_for(number: int, path: str | None) -> StageSpec:
+    """The stage spec for `number` on `path`. Only the weights-only path changes the table: stage 2
+    gets the swap skill and gate, and stage 3 is skipped (the supervisor records it as skipped,
+    as it does stage 7)."""
+    if path == "weights-only" and number == 2:
+        return WEIGHTS_ONLY_STAGE_2
+    if path == "weights-only" and number == 3:
+        return WEIGHTS_ONLY_STAGE_3
+    return STAGES[number]
 
 
 # ---- tiers, skills and disk ---------------------------------------------------------------------

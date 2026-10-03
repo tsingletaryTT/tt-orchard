@@ -66,3 +66,18 @@ def test_a_cold_boot_is_told_apart_from_a_warm_restart():
 def test_an_agent_reply_has_room_for_reasoning_and_a_tool_call():
     # The live Qwen3.8 run used up 8,192 max_tokens on reasoning in 3 of its failed replies.
     assert d.AGENT_MAX_TOKENS == 16384
+
+
+def test_the_weights_only_stage_2_budget_holds_the_skills_hardware_test():
+    # The weights-swap-check skill's script allows 1500 s for the server to be ready (a cold weight
+    # conversion and start) plus about 120 s of requests, and asks for a deadline_s of 2400. The
+    # supervisor runs the test for min(deadline_s, the stage budget), so the budget must not cut it.
+    import re
+    from pathlib import Path
+
+    from orchard.stages import spec_for
+    skill = (Path(d.__file__).with_name("skills") / "weights-swap-check.md").read_text()
+    deadline = int(re.search(r"`deadline_s` of (\d+)", skill).group(1))
+    assert deadline == 2400 and deadline >= 1500 + 120
+    assert min(deadline, spec_for(2, "weights-only").budget_s) == deadline
+    assert spec_for(2, "weights-only").disk_gb >= 34       # one converted 2-chip tensor cache

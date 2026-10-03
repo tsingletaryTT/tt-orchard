@@ -25,7 +25,11 @@ a fresh step, which may use its own one continuation.
 The first start of the coder in a run is also asked a
 known-answer question (7 times 6); a server that answers without 42 blocks the run, because the
 canary alone would accept noise. When stage 0 finds that the model needs new model code
-(a full port), the run pauses before stage 2 for the operator.
+(a full port), the run pauses before stage 2 for the operator. When stage 0 finds that only the
+weights differ (weights-only), stage 2 runs the weights-swap-check skill and its gate in place of
+the functional decoder, and stage 3 (full model) is recorded as skipped. Stage 0's passing
+stage_end records that path, and every later choice is
+read from there (orchard/stages.py, run_path). An unknown path keeps the plan 4 table.
 
 Operator commands go through a one-word control file in the run directory: pause, resume, abort.
 SIGINT (Ctrl-C) and SIGTERM take the same path as abort: the running command is killed, the coder
@@ -44,7 +48,8 @@ and a preflight refuses to start while known credential files exist in the opera
 unless the operator passes --accept-credentials-visible (the ledger records that). Agent shells
 run as the same user, so code an agent runs can still read any file that user can read.
 
-Plan 4 runs stages 0 to 6 and 8. Stage 7 (package and container build) is recorded as skipped.
+Plan 4 runs stages 0 to 6 and 8. Stage 7 (package and container build) is recorded as skipped,
+and so is stage 3 on the weights-only path.
 """
 from __future__ import annotations
 
@@ -76,9 +81,10 @@ from orchard.handoff import (NOTE_KEYS, Blocked, Budgets, Handoff, decide_park, 
 from orchard.ledger import Ledger, LedgerCorrupt, LedgerLocked
 from orchard.runner import Denied, check_string
 from orchard.server import ServerControl, ServerError, ServerSpec, StopCheck
-from orchard.stages import (STAGES, TierUnavailable, attempt_started_ts, budget_cap, check_disk,
-                            coder_state, evidence_record, open_stage_dir, resolve_endpoint,
-                            resolve_skill, run_progress, tier_for)
+from orchard.stages import (TierUnavailable, attempt_started_ts, budget_cap, check_disk,
+                            coder_state, delta_path, evidence_record, open_stage_dir,
+                            resolve_endpoint, resolve_skill, run_path, run_progress, spec_for,
+                            tier_for)
 from orchard.tiers import TierConfigError, load
 from orchard.watchdog import (Event, IdenticalResponses, Ladder, NoNewEvidence, RepeatedToolCall,
                               RetryGuard, StageOverBudget, ThinkingWithoutAction, Watchdog)
@@ -490,9 +496,12 @@ class Supervisor:
             if p.next_stage == 2 and self._full_port_unacknowledged():
                 self.ledger.append("decision", 2, decision="pause", reason=FULL_PORT)
                 continue
+            # The spec follows the path stage 0 chose, read from the ledger each time, so a
+            # resumed run picks the same skill and gate as the run that crashed.
+            spec = spec_for(p.next_stage, run_path(self.ledger.read(), self.run_dir))
             try:
                 self._ensure_coder()
-                result = self._run_stage(STAGES[p.next_stage], resuming=p.open_stage == p.next_stage,
+                result = self._run_stage(spec, resuming=p.open_stage == p.next_stage,
                                          escalated=p.next_stage in p.escalated)
             except Blocked as exc:
                 # The notice is already in the ledger. The run waits for the operator.
@@ -511,12 +520,9 @@ class Supervisor:
 
     def _full_port_unacknowledged(self) -> bool:
         """Stage 0 chose a full port, and the run has not yet paused for it."""
-        try:
-            path = json.loads((self.run_dir / "stages" / "0" / "delta.json").read_text()).get("path")
-        except (OSError, ValueError, AttributeError):
-            return False
-        return path == "full-port" and not any(
-            e["event"] == "decision" and e["data"].get("reason") == FULL_PORT for e in self.ledger.read())
+        entries = self.ledger.read()
+        return run_path(entries, self.run_dir) == "full-port" and not any(
+            e["event"] == "decision" and e["data"].get("reason") == FULL_PORT for e in entries)
 
     def _wait_for_operator(self) -> str:
         while True:
@@ -768,7 +774,10 @@ class Supervisor:
             ev.append(evidence_record(self.run_dir, stage_dir / spec.gate_file))
             if n == 6:
                 self._record_numbers(stage_dir)
-            self.ledger.append("stage_end", n, result="pass", evidence=ev)
+            # Stage 0's pass records the path it chose. Later stages read it from here
+            # (orchard/stages.py, run_path), so an edit to delta.json cannot change the run's path.
+            extra = {"path": delta_path(self.run_dir)} if n == 0 else {}
+            self.ledger.append("stage_end", n, result="pass", evidence=ev, **extra)
             return "pass"
         if status == "pause":
             return "pause"              # the ladder already wrote the pause decision

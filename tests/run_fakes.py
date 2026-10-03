@@ -5,7 +5,8 @@ coder container runs and on which chips. `MachineAdapter` behaves like gozer thr
 interface: a lease whose owner pid is dead is reaped at the next acquire once no device is open,
 reset and release refuse while a device is open, and a chip of a running container shows
 HELD-FOREIGN. `MachineCoder` behaves like a container coder. `bringup` is a model script that walks
-stages 0 to 8 by writing the files each gate reads; it answers from the request alone, as a greedy
+stages 0 to 8 by writing the files each gate reads (stage 2's result follows the skill the
+supervisor named); it answers from the request alone, as a greedy
 server would, so a restarted supervisor gets the same answers.
 """
 from __future__ import annotations
@@ -205,7 +206,11 @@ FILES = {
                      {"name": n, "pass": True, "evidence": ev(1)}
                      for n in ("loads", "tokenizer round trip", "decodes forward", "matches the card")]}},
     (2, "prepare"): hw(2),
-    (2, "finish"): {"result.json": {"pcc": 0.998, "argmax_match": True, "evidence": done(2)}},
+    # The fake run's delta says weights-only, so stage 2 runs the weights-swap-check skill.
+    (2, "finish"): {"result.json": {"serves": True, "server_ready_s": 280.5, "coherent": True,
+                                    "free_run_text": "The sea was calm that morning.",
+                                    "top1_agreement": 0.78, "n_tokens": 32,
+                                    "cache_dir": "cache/hemmingway-1/tt_cache", "evidence": done(2)}},
     (3, "prepare"): hw(3),
     (3, "finish"): {"result.json": {"parity": True, "top1": 0.97, "evidence": done(3)}},
     (4, "prepare"): hw(4),
@@ -224,6 +229,18 @@ FILES = {
                  "bundle/PUBLISH_COMMANDS.txt": "tt-model push example/hemmingway-1-p300\n"},
 }
 
+# A weights-only stage 2 result the gate refuses: the chip agrees with the reference on too few tokens.
+SWAP_LOW = {"result.json": {**FILES[(2, "finish")]["result.json"], "top1_agreement": 0.1,
+                            "evidence": ["stages/2/evidence/hw-test-output.txt"]}}
+
+# Stage 2's finish when the supervisor names the functional-decoder skill (a full port, or a path
+# the supervisor could not read).
+DECODER_FINISH = {"result.json": {"pcc": 0.998, "argmax_match": True, "evidence": done(2)}}
+
+
+def skill_named(request) -> str:
+    return re.search(r"^## Skill: (\S+) ", request["messages"][0]["content"], re.M).group(1)
+
 
 def where(request) -> tuple[int, str]:
     system = request["messages"][0]["content"]
@@ -236,7 +253,8 @@ def bringup(request, overrides=None):
     if "tools" not in request:
         return final(CANARY_ANSWER)
     key = where(request)
-    files = (overrides or {}).get(key, FILES[key])
+    default = DECODER_FINISH if key == (2, "finish") and skill_named(request) == "functional-decoder" else FILES[key]
+    files = (overrides or {}).get(key, default)
     turns = [call("write_file", path=p, content=c if isinstance(c, str) else json.dumps(c))
              for p, c in files.items()] + [final(f"stage {key[0]} {key[1]} done")]
     return turns[min(turn(request), len(turns) - 1)]

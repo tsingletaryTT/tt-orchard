@@ -3,16 +3,17 @@ from pathlib import Path
 
 import pytest
 
-from orchard.stages import STAGES, resolve_skill
+from orchard.stages import STAGES, resolve_skill, spec_for
 
 SKILLS = Path(__file__).resolve().parent.parent / "orchard" / "skills"
-LOCAL = ("delta-triage", "reference-gate", "serving-check", "operator-bundle")
+LOCAL = ("delta-triage", "reference-gate", "weights-swap-check", "serving-check", "operator-bundle")
 # Spec section 11: existing skills the stages use, referenced by name only.
 SPEC_EXISTING = {"model-bringup", "functional-decoder", "full-model", "multichip", "mesh-shrink",
                  "vllm-integration", "qualitative-check", "benchmark-model", "tt-device-usage",
                  "stage-review", "tti-release"}
 GATE_FILES = {"delta-triage": "delta.json", "reference-gate": "reference.json",
-              "serving-check": "result.json", "operator-bundle": "PUBLISH_COMMANDS.txt"}
+              "weights-swap-check": "result.json", "serving-check": "result.json",
+              "operator-bundle": "PUBLISH_COMMANDS.txt"}
 
 
 @pytest.mark.parametrize("name", LOCAL)
@@ -32,7 +33,9 @@ def test_no_stage_skill_names_a_lease_tool(name):
 
 
 def test_every_skill_the_table_names_is_local_or_named_in_the_spec():
-    for s in STAGES:
+    # Every path's table: stage 2 on the weights-only path names a different skill.
+    specs = {spec_for(s.number, path) for s in STAGES for path in ("weights-only", "full-port", None)}
+    for s in sorted(specs, key=lambda s: (s.number, s.skill)):
         if s.skip:
             continue
         assert s.skill in LOCAL or s.skill in SPEC_EXISTING, s.skill
@@ -42,3 +45,8 @@ def test_every_skill_the_table_names_is_local_or_named_in_the_spec():
 def test_the_bundle_skill_keeps_publishing_with_the_operator():
     text = (SKILLS / "operator-bundle.md").read_text()
     assert "You never run them." in text and "ready for operator review" in text
+
+
+def test_the_weights_only_stage_2_skill_is_the_local_flat_file():
+    assert spec_for(2, "weights-only").skill == "weights-swap-check"
+    assert resolve_skill("weights-swap-check", [SKILLS]) == SKILLS / "weights-swap-check.md"

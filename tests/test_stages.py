@@ -10,8 +10,10 @@ import pytest
 
 from orchard.stages import (STAGES, TierUnavailable, check_disk, compare_delta, gate_bundle,
                             gate_decoder, gate_delta, gate_full_model, gate_mesh, gate_numbers,
-                            gate_reference, gate_serving, main, reference_items, resolve_endpoint,
-                            resolve_skill, tier_for, validate_table)
+                            gate_reference, gate_serving, gate_weights_swap, main, reference_items,
+                            resolve_endpoint, resolve_skill, run_path, spec_for, tier_for,
+                            validate_table)
+from orchard.defaults import SWAP_TOP1_MIN
 from orchard.tiers import TierConfig
 
 REFERENCE = Path(__file__).parent / "fixtures" / "hemmingway_stage0_reference.md"
@@ -45,6 +47,82 @@ def test_the_table_names_the_owner_skills_and_hardware_stages():
                                          "serving-check", "", "operator-bundle"]
     assert [s.boards for s in STAGES] == [0, 0, 1, 1, 1, 1, 1, 0, 0]
     assert STAGES[7].skip and all(s.skip is None for s in STAGES if s.number != 7)
+
+
+# ---- the path stage 0 chose ---------------------------------------------------------------------
+
+def stage0_pass(**data):
+    """A ledger holding stage 0's passing end, with `data` in it (the supervisor adds "path")."""
+    return [{"seq": 1, "event": "stage_start", "stage": 0, "data": {}},
+            {"seq": 2, "event": "stage_end", "stage": 0, "data": {"result": "pass", **data}}]
+
+
+def delta_file(run, text):
+    p = Path(run) / "stages" / "0" / "delta.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(text if isinstance(text, str) else json.dumps(text))
+
+
+@pytest.mark.parametrize("path", ["weights-only", "full-port"])
+def test_the_path_is_read_from_stage_0s_passing_end(tmp_path, path):
+    assert run_path(stage0_pass(path=path), tmp_path) == path
+
+
+def test_the_ledger_path_wins_over_a_delta_json_edited_later(tmp_path):
+    # An agent in a later stage can rewrite stages/0/delta.json. The choice stays the one stage 0 made.
+    delta_file(tmp_path, {**GOOD_DELTA, "path": "full-port"})
+    assert run_path(stage0_pass(path="weights-only"), tmp_path) == "weights-only"
+
+
+@pytest.mark.parametrize("path", ["weights-only", "full-port"])
+def test_a_ledger_from_before_the_path_was_recorded_reads_delta_json(tmp_path, path):
+    delta_file(tmp_path, {**GOOD_DELTA, "path": path})
+    assert run_path(stage0_pass(), tmp_path) == path
+
+
+@pytest.mark.parametrize("text", [None, "{not json", '["weights-only"]', {"path": "maybe"},
+                                  {"path": None}, {"model": "x"}])
+def test_an_unknown_path_is_none_and_never_weights_only(tmp_path, text):
+    if text is not None:
+        delta_file(tmp_path, text)
+    assert run_path(stage0_pass(), tmp_path) is None
+
+
+@pytest.mark.parametrize("recorded", [None, "maybe", 3])
+def test_an_unknown_recorded_path_is_none(tmp_path, recorded):
+    delta_file(tmp_path, {**GOOD_DELTA, "path": "weights-only"})
+    assert run_path(stage0_pass(path=recorded), tmp_path) is None
+
+
+def test_before_stage_0_passes_there_is_no_path(tmp_path):
+    delta_file(tmp_path, GOOD_DELTA)              # written, but the gate has not passed it yet
+    failed = [{"seq": 1, "event": "stage_end", "stage": 0, "data": {"result": "escalate"}}]
+    assert run_path([], tmp_path) is None and run_path(failed, tmp_path) is None
+
+
+def test_the_weights_only_path_gives_stage_2_the_swap_skill_and_gate():
+    s = spec_for(2, "weights-only")
+    assert (s.number, s.skill, s.gate, s.gate_file, s.boards) == (
+        2, "weights-swap-check", gate_weights_swap, "result.json", 1)
+    assert s.marker == STAGES[2].marker and s.skip is None
+
+
+def test_the_weights_only_path_skips_stage_3_with_a_reason():
+    s = spec_for(3, "weights-only")
+    assert s.skip == ("weights-only path: the stage 2 serve-and-compare covers the full model")
+    assert s.number == 3 and STAGES[3].skip is None
+
+
+@pytest.mark.parametrize("path", ["full-port", None])
+def test_a_full_port_or_unknown_path_keeps_todays_stage_2_and_3(path):
+    assert spec_for(2, path) == STAGES[2] and spec_for(2, path).skill == "functional-decoder"
+    assert spec_for(3, path) == STAGES[3]
+
+
+@pytest.mark.parametrize("n", [0, 1, 4, 5, 6, 7, 8])
+def test_the_path_changes_no_other_stage(n):
+    for path in ("weights-only", "full-port", None):
+        assert spec_for(n, path) == STAGES[n]
 
 
 def test_a_long_stage_without_a_resume_marker_is_refused():
@@ -159,6 +237,53 @@ def test_full_model_gate_needs_parity_and_a_top1_fraction(tmp_path):
     ev = ["stages/3/evidence/diff.txt"]
     assert gate_full_model(*stage(tmp_path, 3, "result.json", {"parity": True, "top1": 0.97, "evidence": ev})).ok
     assert not gate_full_model(*stage(tmp_path, 3, "result.json", {"parity": True, "top1": 97, "evidence": ev})).ok
+
+
+# The weights-swap-check skill's result.json, with the numbers of the one hand prototype.
+SWAP = {"serves": True, "server_ready_s": 280.5, "coherent": True, "free_run_text": "The sea was calm.",
+        "top1_agreement": 0.78, "n_tokens": 32, "cache_dir": "cache/hemmingway-1/tt_cache",
+        "evidence": ["stages/2/evidence/diff.txt"]}
+
+
+def swap_reasons(tmp_path, **change):
+    data = {k: v for k, v in {**SWAP, **change}.items() if v is not ...}
+    return gate_weights_swap(*stage(tmp_path, 2, "result.json", data)).reasons
+
+
+def test_weights_swap_gate_passes_the_prototype_numbers_and_records_the_evidence(tmp_path):
+    g = gate_weights_swap(*stage(tmp_path, 2, "result.json", SWAP))
+    assert g.ok, g.reasons
+    assert g.evidence == ("stages/2/evidence/diff.txt",)
+
+
+def test_weights_swap_gate_minimum_is_the_default(tmp_path):
+    assert SWAP_TOP1_MIN == 0.6
+    assert swap_reasons(tmp_path, top1_agreement=SWAP_TOP1_MIN) == ()
+
+
+@pytest.mark.parametrize("change,word", [
+    ({"top1_agreement": 0.59}, "top1_agreement"),
+    ({"top1_agreement": 0.0}, "top1_agreement"),
+    ({"top1_agreement": 1.5}, "top1_agreement"),
+    ({"top1_agreement": "0.78"}, "top1_agreement"),
+    ({"top1_agreement": True}, "top1_agreement"),
+    ({"top1_agreement": ...}, "top1_agreement"),
+    ({"serves": False}, "serves"),
+    ({"serves": "yes"}, "serves"),
+    ({"coherent": False}, "coherent"),
+    ({"coherent": ...}, "coherent"),
+    ({"n_tokens": 15}, "n_tokens"),
+    ({"n_tokens": 32.0}, "n_tokens"),
+    ({"n_tokens": True}, "n_tokens"),
+    ({"server_ready_s": 0}, "server_ready_s"),
+    ({"server_ready_s": -3}, "server_ready_s"),
+    ({"server_ready_s": "280"}, "server_ready_s"),
+    ({"evidence": ["stages/2/evidence/missing.txt"]}, "evidence"),
+    ({"evidence": []}, "evidence"),
+])
+def test_weights_swap_gate_names_the_field_that_fails(tmp_path, change, word):
+    reasons = swap_reasons(tmp_path, **change)
+    assert len(reasons) == 1 and word in reasons[0], reasons
 
 
 def test_mesh_gate_needs_every_configuration_to_pass(tmp_path):

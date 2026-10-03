@@ -290,6 +290,25 @@ restart 2 to 3 min. The total run time is not measured. Stage 7 is recorded as s
 writes the bundle, the supervisor scrubs it, and then it stops the coder and releases the four
 chips. Restart the operator's own coder afterwards if it is wanted.
 
+The path stage 0 chooses changes stages 2 and 3. With `"path": "weights-only"` in
+`stages/0/delta.json` (the expected answer for Hemmingway-1), stage 2 runs the
+`weights-swap-check` skill (`orchard/skills/weights-swap-check.md`) in place of
+`functional-decoder`. Its hardware test converts the new weights into a fresh tensor cache, starts
+the nearest model's bundle on the new weights and compares the chip's greedy tokens with the
+stage 1 reference. The gate (`gate_weights_swap`) needs `serves` and `coherent` true, at least 16
+compared tokens, `top1_agreement` of at least 0.6 and every evidence file. Stage 3 is then recorded
+as skipped, with the reason "weights-only path: the stage 2 serve-and-compare covers the full
+model", and the run goes on to stage 4. A `full-port` path pauses before stage 2 as before and,
+after `control resume`, runs `functional-decoder` and stage 3. A path the supervisor cannot read
+keeps `functional-decoder` and stage 3; it never guesses weights-only.
+Stage 0's passing `stage_end` records the path, and the supervisor reads it from there before each
+stage, so an agent's later edit to `delta.json` does not change it. A run whose stage 0 passed under
+older code has no path in that entry; on resume the supervisor reads `delta.json` instead. The
+stage 2 budget (14,400 s) is longer than the skill's test deadline (2,400 s), so the test gets its
+full deadline. The skill's tensor cache goes under `/mnt/bonus/models/orchard-runs/cache/`, on the
+same disk as the run directory, and the 40 GB free-disk check covers one converted cache (34 GB
+measured for the base model).
+
 Watch and steer, from another shell:
 
     tail -n 5 /mnt/bonus/models/orchard-runs/hemmingway-1-run1/ledger.jsonl

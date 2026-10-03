@@ -1,5 +1,6 @@
 """End to end: a scripted Hemmingway-1 bring-up from stage 0 to the operator bundle, against a fake
 machine and fake model servers, with the supervisor killed after every ledger event (spec section 13).
+The scripted delta is weights-only, so stage 2 runs the weights swap check and stage 3 is skipped.
 
 The two machine layouts are the operator's: the coder on all four chips (every hardware stage
 parks it) and the coder on two chips (every hardware stage uses the free board).
@@ -12,8 +13,8 @@ from fakes import Crash
 from orchard.ledger import Ledger, replay_state
 from orchard.stages import run_progress
 from orchard.supervisor import EXIT_READY, build, parse
-from run_fakes import (BOARDS, CrashingLedger, Machine, MachineAdapter, MachineCoder, argv, bringup,
-                       clock, feedback_aware, plenty, write_tiers)
+from run_fakes import (BOARDS, SWAP_LOW, CrashingLedger, Machine, MachineAdapter, MachineCoder, argv,
+                       bringup, clock, feedback_aware, plenty, write_tiers)
 
 FIRST, SECOND = 100, 200          # supervisor pids before and after the kill
 
@@ -66,7 +67,7 @@ def test_with_the_coder_on_four_chips_every_hardware_stage_parks_it(tmp_path, se
     m = Machine()
     assert run(tmp_path, servers, m, chips=4, pid=FIRST) == EXIT_READY
     es = entries(tmp_path)
-    for n in (2, 3, 4, 5, 6):
+    for n in (2, 4, 5, 6):                  # stage 3 is skipped on the weights-only path
         seq = [(e["event"], e["data"].get("step") or e["data"].get("decision")) for e in es if e["stage"] == n]
         test = seq.index(("decision", "hardware test started"))
         assert seq.index(("park", "reset")) < test < seq.index(("restore", "reset")), n
@@ -75,7 +76,7 @@ def test_with_the_coder_on_four_chips_every_hardware_stage_parks_it(tmp_path, se
         assert f"TT_VISIBLE_DEVICES={','.join(BOARDS['B0'])}\n" in env       # one board of the four chips
     s = final_state(tmp_path)
     assert s["finished"] and s["done"] == (0, 1, 2, 3, 4, 5, 6, 7, 8) and not s["parked"]
-    assert s["last_result"][7] == "skipped"
+    assert s["last_result"][3] == "skipped" and s["last_result"][7] == "skipped"
     assert not m.coder_running and m.leases == {}           # the finished run gave the hardware back
 
 
@@ -85,10 +86,24 @@ def test_with_the_coder_on_two_chips_the_free_board_is_used_and_nothing_parks(tm
     es = entries(tmp_path)
     assert not [e for e in es if e["event"] in ("park", "restore")]
     taken = [e["data"]["test_lease"]["chips"] for e in es if e["data"].get("decision") == "test lease taken"]
-    assert taken == [list(BOARDS["B1"])] * 5
+    assert taken == [list(BOARDS["B1"])] * 4          # stages 2, 4, 5 and 6; stage 3 is skipped
     released = [e for e in es if e["data"].get("decision") == "test lease released"]
-    assert len(released) == 5 and m.leases == {}
+    assert len(released) == 4 and m.leases == {}
     assert final_state(tmp_path)["finished"]
+
+
+def test_a_weights_only_run_serves_and_compares_in_stage_2_skips_3_and_goes_on_to_4(tmp_path, servers):
+    m = Machine()
+    assert run(tmp_path, servers, m, chips=2, pid=FIRST) == EXIT_READY
+    es = entries(tmp_path)
+    assert next(e for e in es if e["event"] == "stage_end" and e["stage"] == 0)["data"]["path"] == "weights-only"
+    skills = [e["data"]["skill"] for e in es if e["stage"] == 2 and e["data"].get("decision") == "agent step"]
+    assert [s.rsplit("/", 1)[1] for s in skills] == ["weights-swap-check.md"] * 2     # prepare, finish
+    assert [e["stage"] for e in es if e["event"] == "stage_start"][:6] == [0, 1, 2, 3, 4, 5]
+    s3 = [(e["event"], e["data"].get("result")) for e in es if e["stage"] == 3]
+    assert s3 == [("stage_start", None), ("stage_end", "skipped")]
+    assert final_state(tmp_path)["last_result"] == {0: "pass", 1: "pass", 2: "pass", 3: "skipped",
+                                                    4: "pass", 5: "pass", 6: "pass", 7: "skipped", 8: "pass"}
 
 
 @pytest.mark.parametrize("chips", [4, 2])
@@ -96,6 +111,9 @@ def test_a_kill_after_any_ledger_event_reaches_the_same_final_state(tmp_path, se
     ref = tmp_path / "reference"
     assert run(ref, servers, Machine(), chips=chips, pid=FIRST) == EXIT_READY
     want = final_state(ref)
+    # The reference walks the weights-only path, so the kills below include one after stage 3's
+    # skip start and one after its skip end.
+    assert want["last_result"][3] == "skipped"
     total = len(entries(ref))
     for k in range(1, total + 1):
         base = tmp_path / f"kill-{k:03d}"
@@ -121,8 +139,7 @@ def test_the_kill_test_has_a_kill_point_inside_the_coder_boot(tmp_path, servers)
 
 @pytest.mark.parametrize("stage,phase,bad,chips", [
     (1, "run", {"evidence/notes.txt": "work done, no reference.json"}, 2),
-    (2, "finish", {"result.json": {"pcc": 0.9, "argmax_match": True,
-                                   "evidence": ["stages/2/evidence/hw-test-output.txt"]}}, 4),
+    (2, "finish", SWAP_LOW, 4),
 ])
 def test_a_kill_around_the_gate_feedback_continuation_resumes_to_the_same_final_state(
         tmp_path, stage, phase, bad, chips):
