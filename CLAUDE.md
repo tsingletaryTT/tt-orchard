@@ -230,3 +230,21 @@ was two grep commands repeated in each of 5 turns.
   lists this as its fourth fact. `SWAP_TOP1_MIN` went from 0.6 to 0.85, because the base weights passed 0.6. Both
   numbers come from one prompt of 32 tokens, so 0.85 is a choice with a thin margin. Mutations seen red: drop either
   variable, leave the `HF_MODEL` line at the nearest model id, set the bar back to 0.6.
+
+## 2026-10-03: no gate feedback after a failed hardware test
+Prompt: on a live run the stage 2 hardware test failed, the finish step honestly wrote `serves` false, and the
+gate-feedback continuation told the agent to make `serves` true. It could not do that honestly, wrote nothing
+for 20 turns, and `no_file_written` paused the run. Branch `no-feedback-after-failed-test`, TDD, one commit per
+change:
+- In a hardware stage, when `test-result.json` shows the test did not succeed (exit code other than exactly 0,
+  `timed_out` true, or an unreadable record), the supervisor records "no gate feedback: the hardware test
+  failed" with the exit code and timeout flag and ends the stage through the usual fail or escalate path.
+  After a test that succeeded, the one continuation works as before.
+- Found by the kill-around test: a kill between the escalate entry and the stage_end resumed the escalated
+  attempt from the failed test record, and the run paused. That attempt now moves the directory aside and
+  tests again ("not resuming from a failed hardware test").
+- The finish task and the weights-swap-check Finish section say: record the failure (a `failure` field with
+  the text from `hw-test-output.txt`, `serves` false, unmeasured numbers null), then stop. The swap gate
+  still fails that result, and its serves reason now quotes the failure text.
+- Mutations seen red: always continue, never continue, a missing exit code counted as success, no resume
+  guard, no failure text in the gate reason, the old finish text.
