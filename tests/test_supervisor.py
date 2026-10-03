@@ -553,3 +553,67 @@ def test_without_the_option_stage_4_still_needs_every_listed_configuration(rig):
     assert rig.run() == EXIT_READY
     first = next(e["data"] for e in rig.entries() if e["event"] == "escalate")
     assert first["reasons"] == ["the 1-chip configuration did not pass"]
+
+
+# ---- the first-boot sanity question -----------------------------------------------------------------
+
+NOISE = "zx!q ~~ the the the \u2603 {{{ ;;; wibble"
+
+
+def blocked_reasons(rig):
+    return [e["data"]["reason"] for e in rig.entries() if e["event"] == "notice" and e["data"].get("blocked")]
+
+
+def sanity_asks(rig):
+    from orchard.defaults import FIRST_BOOT_PROMPT
+    return [p for p in rig.m.asked if p == FIRST_BOOT_PROMPT]
+
+
+def test_a_coder_that_answers_the_first_boot_question_with_noise_blocks_the_run(rig):
+    rig.m.sanity_answer = NOISE
+    rig.on_sleep = lambda: Control(rig.run_dir).write("abort")
+    assert rig.run() == EXIT_ABORTED
+    [reason] = blocked_reasons(rig)
+    assert "answers wrongly" in reason and "not retried" in reason and NOISE in reason
+    assert "coder started" not in [d["decision"] for d in rig.decisions()]
+    assert not [e for e in rig.entries() if e["event"] == "stage_start"]      # no stage began
+    assert rig.ends(0) == []
+    assert not rig.m.coder_running and rig.m.leases == {}                  # the abort released it
+    d = [x["decision"] for x in rig.decisions()]
+    assert d[-3:] == ["abort", "stopping the coder", "hardware released"]
+    notice = next(e for e in rig.entries() if e["event"] == "notice" and e["data"].get("blocked"))
+    assert (rig.run_dir / notice["data"]["evidence"]["answer_file"]["path"]).read_text() == NOISE
+
+
+def test_a_coder_that_answers_the_first_boot_question_correctly_proceeds(rig):
+    rig.m.sanity_answer = "The answer is 42."
+    assert rig.run() == EXIT_READY
+    assert blocked_reasons(rig) == [] and len(sanity_asks(rig)) == 1
+
+
+def test_a_resume_after_a_first_boot_block_asks_the_question_again(rig):
+    rig.m.sanity_answer = NOISE
+
+    def fixed_and_resumed():
+        rig.m.sanity_answer = "42"
+        Control(rig.run_dir).write("resume")
+    rig.on_sleep = fixed_and_resumed
+    assert rig.run() == EXIT_READY
+    assert len(sanity_asks(rig)) == 2 and len(blocked_reasons(rig)) == 1
+
+
+def test_a_coder_started_again_with_a_baseline_is_not_asked_the_first_boot_question(rig):
+    with pytest.raises(Crash):
+        rig.run(crash_if=lambda e: e["event"] == "stage_end" and e["stage"] == 0)
+    assert len(sanity_asks(rig)) == 1
+    rig.m.sanity_answer = NOISE                 # would block if it were asked
+    assert rig.run(pid=200) == EXIT_READY
+    assert len(sanity_asks(rig)) == 1 and blocked_reasons(rig) == []
+
+
+def test_a_coder_restarted_before_any_boot_finished_is_asked_the_first_boot_question(rig):
+    with pytest.raises(Crash):
+        rig.run(crash_if=lambda e: e["event"] == "decision" and e["data"].get("decision") == "coder container started")
+    assert sanity_asks(rig) == []               # the boot never got as far as asking
+    assert rig.run(pid=200) == EXIT_READY
+    assert len(sanity_asks(rig)) == 1

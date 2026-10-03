@@ -82,7 +82,9 @@ The full design is in `docs/superpowers/specs/2026-10-01-orchard-design.md`.
   boards and can be rebuilt after a crash.
 - **Server control and canary.** Starts, stops and checks a model server, and confirms a stop only
   when the server's own checks and the lease tool agree. The canary asks a fixed question before a
-  park and after the restore and compares the two answers exactly. A fake OpenAI-shaped server
+  park and after the restore and compares the two answers exactly. It asks for no reasoning phase, so
+  a small token budget is enough. The supervisor also asks the coder one arithmetic question on its first
+  start in a run and blocks if the answer lacks 42. A fake OpenAI-shaped server
   (`orchard/fake_server.py`) opens no device and is used in tests and in the park check.
 - **Park and restore.** `orchard/handoff.py` stops the coder, resets the board in place, and brings
   the coder back. It writes one ledger entry per step. After a restart it replays the ledger and

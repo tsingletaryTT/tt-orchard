@@ -39,7 +39,8 @@ READY_POLL_S = 5.0              # choice: health poll interval while a server bo
 COLD_BOOT_BUDGET_S = 2700.0     # choice: 1.5 times COLD_BOOT_S; past this the stage blocks (spec section 6)
 STANDIN_READY_S = 600.0         # choice; not measured: CPU stand-in load time is open (spec section 12)
 CANARY_TIMEOUT_S = 300.0        # choice; not measured: one short greedy answer
-CANARY_MAX_TOKENS = 64          # choice: the canary needs a short answer only
+CANARY_MAX_TOKENS = 64          # choice: with thinking switched off the answer is a few tokens; 64 leaves room
+                                # for a short sentence. Not enough if a server ignores the switch.
 QUEUE_POLL_S = 10.0             # choice: well inside GOZER_CLAIM_WINDOW_S
 IDLE_RELEASE_S = 900.0          # choice: hold a lease through a phase with no hardware use up to
                                 # 15 min. A release costs one reset (42 s) plus a queue wait; an
@@ -89,3 +90,5 @@ COLD_START_S = 600.0            # choice: a coder start slower than this counts 
 RUN_WALL_CLOCK_S = 259200.0     # choice: 72 h from run start or the last resume, then the run pauses
 CONTROL_POLL_S = 10.0           # choice: how often a paused supervisor reads the control file
 RUN_CANARY_PROMPT = "What is 17 + 25? Answer with one number."   # choice: short, one greedy answer
+FIRST_BOOT_PROMPT = "What is 7 times 6? Reply with only the number."   # choice: a known answer, asked once
+FIRST_BOOT_EXPECTED = "42"      # a first start must answer with text that contains this, or the run blocks
