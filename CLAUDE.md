@@ -203,3 +203,21 @@ old table. Decision: stage 0's passing `stage_end` records the path, and `run_pa
 so a resume makes the same choice even after an agent edits `delta.json`; older ledgers fall back to `delta.json`. No per-path
 budget was added: the stage 2 budget (14,400 s) already exceeds the skill's 2,400 s test deadline. Mutations (swap skill on every
 path, stage 3 skipped on every path, a low `top1_agreement` accepted, an unknown path read as weights-only) each turned tests red.
+
+## 2026-10-03: swap templates and two watchdog detectors
+Prompt: replace "the model writes a 400-line script from a description" with tested templates it copies, and add two
+watchdog detectors for the loops a live stage 2 step fell into (branch `swap-templates`, worktree, tests first, a mutation
+per guard). On that run the agent spent 60 turns grepping vLLM source for an unrelated timeout and wrote nothing; part of it
+was two grep commands repeated in each of 5 turns.
+- `orchard/skills/weights-swap-templates/`: `prepare_swap.py` builds `model-dir/` and the edited `run.sh` from
+  `swap_config.json`, and exits 2 when an expected edit does not happen exactly once. `serve_and_compare.py` refuses a
+  non-empty tensor cache without a matching `.orchard-model` marker (exit 3), serves, measures coherence and teacher-forced
+  top-1 agreement, and stops the server's process group in a `finally`. Tests run both on a stdlib fake server and a
+  WordLevel tokenizer. Mutations seen red: `proc.pgid`, no `finally` stop, no marker check, any text counted as a match.
+- The skill now says: find four facts, write `swap_config.json` first, copy the templates from the main checkout, run
+  `prepare_swap.py`, write `hw_test.json` and `handoff.json`. The finish phase writes `serves` false with the failure text
+  when the test failed.
+- `NoFileWritten` (`WRITELESS_TURNS` = 20, a choice) nudges once when no file was written for 20 turns, and re-arms after
+  a write. `TurnRepeat` (`TURN_REPEAT_N` = 3) fires when one turn's set of calls repeats in 3 turns in a row. `Event`
+  gained `wrote` and `turn`, fed by `AgentStep`. Both stay quiet on the committed transcript signatures. They are not in
+  `transcript_detectors()`, so the opt-in replay of `~/.qwen` (not run here) is unchanged.
