@@ -120,7 +120,7 @@ two-process lock test.
   with a mutation per new guard; the operator's rulings fixed the scope. Key decisions: the runner now
   refuses gozer writes (gozer run included), tt CLI resets, docker and tt-model control, kill and
   systemctl stop, ssh/scp/rsync to a host, uploads and curl/wget writes; agent shells get a no-chip
-  device mask (`0000:ff:00.0`, UNVERIFIED on hardware); a preflight refuses to start while credential
+  device mask (`0000:ff:00.0`; checked on hardware 2026-10-02: a device open fails with a RuntimeError); a preflight refuses to start while credential
   files are visible unless the operator accepts it; SIGINT and SIGTERM take the abort path and other
   errors release the hardware (as `except` clauses, so the kill test's Crash still models SIGKILL);
   a coder boot that never reached "coder started" is finished before any stage. Shell-running tests

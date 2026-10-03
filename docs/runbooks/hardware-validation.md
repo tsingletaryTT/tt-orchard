@@ -244,8 +244,8 @@ except status, env, queue, history, --help and --version; the tt CLI's reset, fi
 serving verbs; docker and tt-model commands that start, stop, remove or push; kill, pkill,
 killall and systemctl stop; ssh, scp, sftp and rsync to a host; Hugging Face uploads; curl and
 wget requests that send data; and git push. Agent shells also get `TT_VISIBLE_DEVICES` and
-`TT_METAL_VISIBLE_DEVICES` set to `0000:ff:00.0`, which matches no chip. How UMD treats that mask
-is UNVERIFIED on hardware; check it before the run. These are NOT stopped: `python3 -c` and `perl
+`TT_METAL_VISIBLE_DEVICES` set to `0000:ff:00.0`, which matches no chip. Checked on hardware on
+2026-10-02: a device open with that mask fails with `RuntimeError: BDF pattern 0000:ff:00.0 did not match any devices`. These are NOT stopped: `python3 -c` and `perl
 -e` code, a script the agent writes, `mv`, `cp` and `tee` (which can overwrite any file the user
 can write, the ledger included), and a direct device open from Python. A script that opens a mesh
 from an agent shell opens chips the supervisor holds. The stage prompts tell the agent not to do

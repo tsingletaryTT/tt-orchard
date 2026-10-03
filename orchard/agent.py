@@ -23,7 +23,7 @@ This module owns three things.
    The environment also sets TT_VISIBLE_DEVICES and TT_METAL_VISIBLE_DEVICES to NO_CHIP, a
    device mask that matches no chip. This is a request to the runtime. Nothing in orchard stops a
    process from opening a device: the same user can open /dev/tenstorrent/* directly, and code
-   can clear the variables. How UMD treats the mask is UNVERIFIED on hardware.
+   can clear the variables. Checked on hardware 2026-10-02: a device open with this mask fails (UMD raises RuntimeError: BDF pattern 0000:ff:00.0 did not match any devices).
 
 What it does not do: streaming; a proxy in front of agents the supervisor did not launch (the
 watchdog only reads their transcripts); read-only mounts. The same user account runs the agent,
@@ -55,9 +55,9 @@ from orchard.watchdog import Event, RetryGuard
 
 ENV_ALLOW = ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "USER", "LOGNAME", "TERM")
 # The device mask for agent shells: a PCI address that matches no chip on this box, set in both
-# TT_VISIBLE_DEVICES and TT_METAL_VISIBLE_DEVICES. UNVERIFIED on hardware: how UMD treats a
-# mask that names no chip (it may open nothing, or fail, or ignore it). The controller checks this
-# before relying on it. The supervisor's hardware test replaces it with the leased chips.
+# TT_VISIBLE_DEVICES and TT_METAL_VISIBLE_DEVICES. Checked on hardware 2026-10-02: a device open
+# with this mask fails with a RuntimeError (the BDF matched no device). Code that clears the
+# variables still gets every chip. The supervisor's hardware test replaces it with the leased chips.
 NO_CHIP = "0000:ff:00.0"
 GIT_SSH_COMMAND = "ssh -F /dev/null -o IdentitiesOnly=yes -o IdentityFile=/dev/null -o BatchMode=yes"
 DEVICE_VARS = ("TT_VISIBLE_DEVICES", "TT_METAL_VISIBLE_DEVICES")
