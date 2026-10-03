@@ -20,6 +20,14 @@ This module owns three things.
    request as a user message. Transport failures are retried once, through the watchdog's
    RetryGuard (spec section 3).
 
+   A reply with finish_reason "length" and no tool calls ran into max_tokens, usually because a
+   reasoning model spent the whole budget thinking. The loop does not take it as a final answer.
+   It leaves the empty reply out of the conversation, writes a `notice` ledger entry, adds a user
+   message that asks for a short think and a tool call, and goes on; the attempt uses up a turn.
+   A second such reply in a row ends the step with status "error". A reply with finish_reason
+   "length" that holds tool calls runs as usual, and a missing finish_reason is treated like
+   "stop". Every record in the step's log carries the reply's finish_reason.
+
    The environment also sets TT_VISIBLE_DEVICES and TT_METAL_VISIBLE_DEVICES to NO_CHIP, a
    device mask that matches no chip. This is a request to the runtime. Nothing in orchard stops a
    process from opening a device: the same user can open /dev/tenstorrent/* directly, and code
@@ -134,6 +142,9 @@ def clip(text: str, limit: int) -> str:
     half = limit // 2
     return f"{text[:half]}\n[... {len(text) - limit} characters cut ...]\n{text[-half:]}"
 
+
+TRUNCATION_NUDGE = ("Your last reply was cut off before you ran any command. "
+                    "Think briefly, then call a tool.")
 
 # ---- tools --------------------------------------------------------------------------------------
 
@@ -316,6 +327,7 @@ class AgentStep:
         messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
         logged = 0
         self._seen = self._snapshot()       # files already here (a resumed stage) are not new
+        cut_off = 0                         # truncated replies in a row; a normal turn resets it
         for turn in range(1, self.max_turns + 1):
             for text in self.control.take_nudges(self.agent):
                 messages.append({"role": "user", "content": text})
@@ -327,6 +339,7 @@ class AgentStep:
             try:
                 data = self._send(request)
                 msg = data["choices"][0]["message"]
+                finish = data["choices"][0].get("finish_reason")
                 if not isinstance(msg, dict):
                     raise TypeError("message is not an object")
             except AgentError as exc:
@@ -340,13 +353,31 @@ class AgentStep:
             assistant = {"role": "assistant", "content": content}
             if calls:
                 assistant["tool_calls"] = calls
-            messages.append(assistant)
-            self._log({"turn": turn, "sent": messages[logged:-1], "received": assistant, "usage": usage})
+            # A reply that hit max_tokens before it ran any tool (a reasoning model can spend the
+            # whole budget thinking) is not a final answer. It is not added to the conversation.
+            truncated = finish == "length" and not calls
+            if not truncated:
+                messages.append(assistant)
+            self._log({"turn": turn, "sent": messages[logged:-1] if not truncated else messages[logged:],
+                       "received": assistant, "finish_reason": finish, "usage": usage})
             logged = len(messages)
             self._event("response", input_tokens=usage.get("prompt_tokens"),
                         output_tokens=usage.get("completion_tokens"),
                         thinking_tokens=details.get("reasoning_tokens") if isinstance(details, dict) else None,
                         text_hash=sha(content) if content else None, had_tool_call=bool(calls))
+            if truncated:
+                cut_off += 1
+                tokens = usage.get("completion_tokens") or self.max_tokens
+                self.ledger.append("notice", self.stage, watchdog=True, agent=self.agent,
+                                   what="reply cut off at max_tokens", phase=self.phase, turn=turn,
+                                   finish_reason=finish, completion_tokens=tokens, in_a_row=cut_off)
+                if cut_off >= 2:
+                    return self._end("error", turn, detail=(
+                        f"the reply was cut off at max_tokens twice in a row ({tokens} tokens each); "
+                        "no action was taken"))
+                messages.append({"role": "user", "content": TRUNCATION_NUDGE})
+                continue
+            cut_off = 0
             if not calls:
                 return self._end(self.control.stop_reason() or "done", turn, final_text=content)
             for call in calls:

@@ -1,7 +1,7 @@
 """The agent step loop against a scripted fake model endpoint."""
 import pytest
 
-from fake_model import FakeModel, call, final, turn
+from fake_model import FakeModel, call, final, truncated, turn
 from orchard.agent import AgentStep, Tools, agent_env, probe_model
 from orchard.ledger import Ledger
 from orchard.watchdog import Event, IdenticalResponses, Ladder, StageOverBudget, Watchdog
@@ -143,3 +143,90 @@ def test_probe_model_reads_the_model_list():
         assert probe_model(fm.endpoint, "Qwen/Qwen3.8-27B") is True
         assert probe_model(fm.endpoint, "other") is False
     assert probe_model("http://127.0.0.1:9/v1", "x", timeout=1) is False
+
+
+# ---- replies cut off at max_tokens (finish_reason "length") -------------------------------------
+
+NUDGE = "Your last reply was cut off before you ran any command. Think briefly, then call a tool."
+
+
+def by_request(*answers):
+    """One answer per request, in order, whatever the conversation holds."""
+    seen = []
+    def script(request):
+        seen.append(1)
+        return answers[len(seen) - 1]
+    return script
+
+
+def test_a_truncated_reply_is_nudged_not_treated_as_done(run):
+    run_dir, ledger = run
+    script = by_request(truncated(), call("shell", command="echo hi"), final("all done"))
+    with FakeModel(script) as fm:
+        s, events, _ = step(run_dir, ledger, fm.endpoint)
+        out = s.run("s", "u")
+    assert (out.status, out.turns, out.final_text) == ("done", 3, "all done")
+    # The empty reply is not added to the conversation; the nudge is.
+    second = fm.requests[1]["messages"]
+    assert [m["role"] for m in second] == ["system", "user", "user"]
+    assert second[-1]["content"] == NUDGE
+    assert all(m["role"] != "assistant" for m in second)
+    # Later requests keep the nudge in the conversation.
+    assert NUDGE in [m["content"] for m in fm.requests[2]["messages"] if m["role"] == "user"]
+
+
+def test_a_truncated_reply_is_logged_with_its_finish_reason(run):
+    import json
+    run_dir, ledger = run
+    with FakeModel(by_request(truncated(), final("ok"))) as fm:
+        step(run_dir, ledger, fm.endpoint)[0].run("s", "u")
+    records = [json.loads(l) for l in (run_dir / "stages" / "0" / "log" / "run-1.jsonl").read_text().splitlines()]
+    assert [r["finish_reason"] for r in records] == ["length", "stop"]
+    notices = [e["data"] for e in ledger.read() if e["event"] == "notice" and e["data"].get("watchdog")]
+    assert len(notices) == 1 and notices[0]["finish_reason"] == "length"
+
+
+def test_two_truncated_replies_in_a_row_end_the_step_with_an_error(run):
+    run_dir, ledger = run
+    with FakeModel(by_request(truncated(8192), truncated(8192), final("never"))) as fm:
+        out = step(run_dir, ledger, fm.endpoint)[0].run("s", "u")
+    assert out.status == "error" and out.turns == 2 and len(fm.requests) == 2
+    assert out.detail == ("the reply was cut off at max_tokens twice in a row (8192 tokens each); "
+                          "no action was taken")
+    assert [e["data"]["status"] for e in ledger.read()
+            if e["event"] == "evidence" and e["data"].get("what") == "transcript"] == ["error"]
+
+
+def test_a_successful_turn_resets_the_truncation_count(run):
+    run_dir, ledger = run
+    script = by_request(truncated(), call("shell", command="echo a"), truncated(),
+                        call("shell", command="echo b"), final("fin"))
+    with FakeModel(script) as fm:
+        out = step(run_dir, ledger, fm.endpoint)[0].run("s", "u")
+    assert (out.status, out.turns) == ("done", 5)
+
+
+def test_a_truncated_reply_with_complete_tool_calls_is_executed(run):
+    run_dir, ledger = run
+    cut = call("shell", command="echo ran")
+    cut["finish_reason"] = "length"
+    with FakeModel(by_request(cut, final("fin"))) as fm:
+        out = step(run_dir, ledger, fm.endpoint)[0].run("s", "u")
+    assert out.status == "done" and out.turns == 2
+    assert fm.requests[1]["messages"][-1]["content"] == "exit 0\nran\n"
+    assert not any(m.get("content") == NUDGE for m in fm.requests[1]["messages"])
+
+
+def test_a_stop_reply_without_tool_calls_is_still_done(run):
+    run_dir, ledger = run
+    with FakeModel(lambda r: final("all finished")) as fm:
+        out = step(run_dir, ledger, fm.endpoint)[0].run("s", "u")
+    assert (out.status, out.turns, len(fm.requests)) == ("done", 1, 1)
+
+
+def test_a_reply_with_no_finish_reason_keeps_the_old_behaviour(run):
+    run_dir, ledger = run
+    def http(url, request, timeout):
+        return {"choices": [{"message": {"role": "assistant", "content": "x"}}], "usage": {}}
+    out = step(run_dir, ledger, "http://unused/v1", http=http)[0].run("s", "u")
+    assert (out.status, out.final_text) == ("done", "x")
