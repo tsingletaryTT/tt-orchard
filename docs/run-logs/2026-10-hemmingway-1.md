@@ -443,3 +443,17 @@ path, so packaging is the next piece to build after stages 0 to 6 are shown to w
   `VLLM::EngineCore` (pid 1496030) that still held chips 0 and 1, released the stale lease with gozer
   (reset), and ran `tt-smi -r` with no device list under a 4-chip lease. Output: "Resetting all PCI devices:
   [0, 1, 2, 3]". Next: restart the supervisor and let stage 4 rerun; the 4-chip test is the check of the link.
+- **23:18Z to 23:43Z STAGE 4 PASSED with all three chip configurations.** After the full `tt-smi -r` (no board
+  labels) the supervisor recovered the coder (reset 41.7 s, ready 110 s, canary identical for the sixth time),
+  handled the recorded 4-chip failure by the book (no gate feedback, escalate, move the attempt aside) and
+  reran stage 4 from a fresh prepare. Tests, each with its own cache and model directory, ran in order of chip
+  count. **1 chip: exit 0 in 180 s, ready in 170 s, agreement 0.969. 2 chips: exit 0 in 161 s, ready in 154 s,
+  agreement 0.9375. 4 chips: parked the coder (stop confirmed four ways, reset 41.7 s), the container test
+  ran 624 s, ready in 617 s, `coherent` true, agreement 0.906 (29 of 32, bar 0.85); the coder was restored in
+  the same way and its canary compared identical.** The 4-chip evidence records `MODEL_WEIGHTS_DIR` and
+  `HF_MODEL` both set to its own isolated model directory, and no test container was left running. The
+  inter-chip link problem was fixed by the full reset: the cables were fine. **Stages passed by the
+  harness: 0, 1, 2, 4 (3 skipped by design).** Stage 5 started at 23:43:17Z with the generic serving-check skill;
+  I paused the run at 23:44Z, because that skill is open-ended and the earlier stages flailed on open-ended
+  skills until they got templates. Stages 5 and 6 (serving checks, qualitative check and benchmark) overlap with
+  stage 4's black-box test and with the operator's "benchmark later"; the next step is the packaging stage.
