@@ -55,7 +55,7 @@ def test_the_swap_skill_copies_the_templates_that_exist_in_this_repo():
     for name in ("prepare_swap.py", "serve_and_compare.py"):
         assert main + name in text
         assert (SKILLS / "weights-swap-templates" / name).is_file()
-    assert '"command": "python3 stages/2/serve_and_compare.py", "deadline_s": 2400' in text
+    assert '"command": "python3 stages/2/serve_and_compare.py", "deadline_s": 3600' in text
     assert "swap_config.json` FIRST" in text
     assert "`serves` false" in text and "Do not investigate firmware or cache directories" in text
 

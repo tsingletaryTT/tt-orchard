@@ -100,15 +100,16 @@ Four facts decide whether a swap works. Each was found by failing first.
    prints a summary. Exit 2 means an edit of `run.sh` did not apply; its message names the edit.
    Fix the fact in `swap_config.json` that it points to and run it again.
 5. Check that `stages/2/model-dir` and `stages/2/run.sh` exist (`ls -l`).
-6. Write `hw_test.json`: `{"command": "python3 stages/2/serve_and_compare.py", "deadline_s": 2400}`.
+6. Write `hw_test.json`: `{"command": "python3 stages/2/serve_and_compare.py", "deadline_s": 3600}`.
 7. Write `handoff.json` and reply with a short summary.
 
 Do not run `serve_and_compare.py` yourself. The supervisor runs it on a leased board.
 
 ## What serve_and_compare.py measures
 
-It starts the server, waits for `/health` (up to 1500 s; the first boot converts the weights,
-about 5 minutes here), and asks for 32 greedy tokens from the stage 1 prompt. Then, for each of the
+It starts the server, waits for `/health` (up to 3300 s). The first boot converts the weights
+(about 5 minutes) and compiles every kernel with a cold compile cache, which took more than 26 minutes
+on 2026-10-03; a boot with warm caches takes about 2 minutes, and asks for 32 greedy tokens from the stage 1 prompt. Then, for each of the
 32 reference positions, it asks for one token with the reference prefix and compares the first
 re-tokenized id with the reference id. Near-synonyms differ, because the chip runs quantized
 weights and the reference runs bf16. With the correct weights the prototype matched 30 of 32

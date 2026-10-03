@@ -69,9 +69,9 @@ def test_an_agent_reply_has_room_for_reasoning_and_a_tool_call():
 
 
 def test_the_weights_only_stage_2_budget_holds_the_skills_hardware_test():
-    # The weights-swap-check skill's template script allows HEALTH_TIMEOUT_S (1500 s) for the
-    # server to be ready (a cold weight conversion and start) plus about 120 s of requests, and the
-    # skill asks for a deadline_s of 2400. The supervisor runs the test for min(deadline_s, the
+    # The weights-swap-check skill's template script allows HEALTH_TIMEOUT_S (3300 s) for the
+    # server to be ready (a cold weight conversion, a cold kernel compile and the start) plus about
+    # 120 s of requests, and the skill asks for a deadline_s of 3600. The supervisor runs the test for min(deadline_s, the
     # stage budget), so the budget must not cut it.
     import re
     from pathlib import Path
@@ -82,6 +82,6 @@ def test_the_weights_only_stage_2_budget_holds_the_skills_hardware_test():
     deadline = int(re.search(r'"deadline_s": (\d+)', skill).group(1))
     script = (skills / "weights-swap-templates" / "serve_and_compare.py").read_text()
     health = float(re.search(r"^HEALTH_TIMEOUT_S = ([\d.]+)", script, re.MULTILINE).group(1))
-    assert deadline == 2400 and health == 1500 and deadline >= health + 120
+    assert deadline == 3600 and health == 3300 and deadline >= health + 120
     assert min(deadline, spec_for(2, "weights-only").budget_s) == deadline
     assert spec_for(2, "weights-only").disk_gb >= 34       # one converted 2-chip tensor cache

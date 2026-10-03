@@ -52,7 +52,8 @@ import urllib.request
 from collections import Counter
 from pathlib import Path
 
-HEALTH_TIMEOUT_S = 1500.0     # a cold first boot converts the weights (about 5 min for 27B here)
+HEALTH_TIMEOUT_S = 3300.0     # a first boot with cold caches: weight conversion (about 5 min for 27B here) plus a
+                              # cold kernel compile cache (more than 26 min, measured 2026-10-03). Warm: about 2 min.
 HEALTH_POLL_S = 2.0
 STOP_WAIT_S = 60.0
 REQUEST_TIMEOUT_S = 600.0
