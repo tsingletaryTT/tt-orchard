@@ -748,6 +748,9 @@ def test_a_failed_hardware_test_gets_no_continuation_and_the_next_attempt_tests_
     [d] = no_feedback_decisions(rig, 2)
     assert d["decision"] == "no gate feedback: the hardware test failed"
     assert (d["returncode"], d["timed_out"]) == first
+    # The escalation's reasons quote the failure the finish step recorded.
+    esc = next(e["data"] for e in rig.entries() if e["event"] == "escalate" and e["stage"] == 2)
+    assert "the recorded failure: device init failed (exit code 4)" in esc["reasons"][0]
     # The escalated attempt prepared and ran a fresh hardware test, which succeeded.
     assert hardware_results(rig, 2) == [first, (0, False)]
     assert not any((m.get("content") or "").startswith(FEEDBACK_HEAD)

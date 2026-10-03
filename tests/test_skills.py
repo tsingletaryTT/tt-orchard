@@ -60,6 +60,14 @@ def test_the_swap_skill_copies_the_templates_that_exist_in_this_repo():
     assert "`serves` false" in text and "Do not investigate firmware or cache directories" in text
 
 
+def test_the_swap_skill_finish_section_records_a_failed_test_and_stops():
+    text = " ".join((SKILLS / "weights-swap-check.md").read_text().split())
+    finish = text.split("## Finish phase", 1)[1].split("## Do not", 1)[0]
+    assert "`serves` false" in finish and "`failure` field" in finish
+    assert "`coherent`, `n_tokens`, `top1_agreement` and `server_ready_s` null" in finish
+    assert "Then stop." in finish and "Do not investigate" in finish
+
+
 def test_the_weights_only_stage_2_skill_is_the_local_flat_file():
     assert spec_for(2, "weights-only").skill == "weights-swap-check"
     assert resolve_skill("weights-swap-check", [SKILLS]) == SKILLS / "weights-swap-check.md"

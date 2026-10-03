@@ -294,6 +294,21 @@ def test_weights_swap_gate_names_the_field_that_fails(tmp_path, change, word):
     assert len(reasons) == 1 and word in reasons[0], reasons
 
 
+def test_weights_swap_gate_refuses_an_honest_failure_and_names_the_test_failure(tmp_path):
+    # The finish step's result after a failed hardware test: serves false, the failure text, and no
+    # measured numbers. The gate must fail it, and its serves reason must carry the failure text,
+    # so the escalation and the operator see why the test failed.
+    reasons = swap_reasons(tmp_path, serves=False, failure="device init failed (exit code 4)",
+                           coherent=None, n_tokens=None, top1_agreement=None, server_ready_s=None)
+    assert "serves" in reasons[0] and "device init failed (exit code 4)" in reasons[0], reasons
+    assert len(reasons) == 5                      # serves, coherent, n_tokens, top1, server_ready_s
+
+
+def test_weights_swap_gate_without_a_failure_field_keeps_its_plain_serves_reason(tmp_path):
+    [reason] = swap_reasons(tmp_path, serves=False)
+    assert reason == "serves must be true (the server started and answered), got False"
+
+
 def test_mesh_gate_needs_every_configuration_to_pass(tmp_path):
     ev = ["stages/4/evidence/diff.txt"]
     data = {"configs": [{"chips": 2, "pass": True, "evidence": ev}, {"chips": 1, "pass": False, "evidence": ev}]}

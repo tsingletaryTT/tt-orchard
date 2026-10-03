@@ -213,14 +213,21 @@ def gate_weights_swap(stage_dir, run_dir) -> GateResult:
     and its greedy tokens agree with the stage 1 CPU reference (the weights-swap-check skill).
 
     It reads result.json as that skill describes. Each failing field gets its own reason, which
-    names the field.
+    names the field. After a failed hardware test the skill writes `serves` false with a `failure`
+    field. The gate fails that result, and its serves reason quotes the failure text.
     """
     d, err = _load(stage_dir, "result.json")
     if err:
         return GateResult(False, (err,))
     reasons, seen = [], []
     if d.get("serves") is not True:
-        reasons.append(f"serves must be true (the server started and answered), got {d.get('serves')!r}")
+        reason = f"serves must be true (the server started and answered), got {d.get('serves')!r}"
+        failure = d.get("failure")
+        if isinstance(failure, str) and failure.strip():
+            # The finish step records a failed hardware test here. The reason carries it so the
+            # escalation and the operator see why the test failed.
+            reason += f"; the recorded failure: {failure.strip()[:500]}"
+        reasons.append(reason)
     if d.get("coherent") is not True:
         reasons.append(f"coherent must be true (the free-run text is readable), got {d.get('coherent')!r}")
     n = d.get("n_tokens")
