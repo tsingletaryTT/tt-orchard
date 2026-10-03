@@ -135,3 +135,11 @@ path, so packaging is the next piece to build after stages 0 to 6 are shown to w
   checking something it did not open is a failure to catch in the review step.
 - **13:53:16Z stage 1 started** (reference gate). The ledger notes "tier substituted": the small
   tier is not serving, so the large server runs the step.
+- **13:53:16Z to 13:56:22Z run 3, stage 1 (reference gate): first attempt failed in 3 minutes.** The
+  agent spent 7 turns surveying Python environments and the model README. On turn 8 the model used
+  its whole 8,192-token budget reasoning and returned `finish_reason: length` with no text and no
+  tool call. The agent loop reads "no tool call" as "finished" and never checks `finish_reason`, so
+  the stage ended without `reference.json`. The gate failed and the stage machine escalated, moved the
+  partial directory to `stages/1.partial-1` (kept, not deleted), and restarted stage 1 at 13:56:22Z with
+  the escalation tier (the same large server, since it is the only chip tier serving). Fix in
+  progress: a truncated reply gets one retry with a nudge; two in a row end the step as an error.
