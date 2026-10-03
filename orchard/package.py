@@ -434,3 +434,62 @@ def stage_profile(profile: Profile, facts: RunFacts, out: Path, *, env: dict | N
     return {"chips": profile.chips, "name": name, "required": profile.required, "source": src.name,
             "source_manifest_sha256": sha256(src.path / "tt_kernel_manifest.json"),
             "mesh": m["mesh"]["topology"]}
+
+
+# ---- the boot check: an installed copy, served on a leased board ---------------------------------
+
+AUX_REPO = re.compile(r"^([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)(?:@[0-9a-f]{40})?$")
+
+
+def aux_repos(env: dict, *, nearest_model: str) -> list[str]:
+    """Hugging Face repos the bundle's environment names (such as the drafter in DFLASH_WEIGHTS),
+    without the nearest model, whose weights the package must never load."""
+    found = {m.group(1) for v in env.values() if (m := AUX_REPO.match(str(v)))}
+    return sorted(found - {nearest_model})
+
+
+def free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def _repo_dir(hub: Path, repo: str) -> Path:
+    org, name = repo.split("/", 1)
+    return hub / f"models--{org}--{name}"
+
+
+def prepare_verify(staged: Path, verify_dir: Path, facts: RunFacts, *, env: dict | None = None) -> dict:
+    """Install a copy of a staged package and lay out its boot check. Returns hw_test.json's content
+    plus what was linked. The staged directory itself is never installed into or served."""
+    verify_dir = Path(verify_dir)
+    verify_dir.mkdir(parents=True)
+    bundle = verify_dir / "bundle"
+    shutil.copytree(staged, bundle, symlinks=True)
+    log = verify_dir / "install.log"
+    rc = run_logged(["bash", bundle / "install.sh"], log=log, timeout=PACKAGE_INSTALL_TIMEOUT_S,
+                    env=env)
+    if rc != 0:
+        raise PackageError(f"install.sh of the package copy exited {rc}; the end of install.log:\n"
+                           + _tail(log))
+    hub = verify_dir / "hf" / "hub"
+    hub.mkdir(parents=True)
+    _repo_dir(hub, facts.model_id).symlink_to(facts.new_snapshot.parents[1])
+    linked, missing = [facts.model_id], []
+    manifest = _json(bundle / "tt_kernel_manifest.json", "the staged manifest")
+    for repo in aux_repos(manifest.get("env") or {}, nearest_model=facts.nearest_model):
+        theirs = _repo_dir(facts.hf_home / "hub", repo)
+        if theirs.is_dir():
+            _repo_dir(hub, repo).symlink_to(theirs)
+            linked.append(repo)
+        else:
+            missing.append(repo)
+    (verify_dir / "verify_config.json").write_text(json.dumps({
+        "run_dir": str(facts.run_dir), "bundle": str(bundle), "port": free_port(),
+        "model_id": facts.model_id, "revision": facts.revision, "hf_home": str(hub.parent),
+        "health_timeout_s": PACKAGE_HEALTH_TIMEOUT_S}, indent=2))
+    shutil.copyfile(TEMPLATES / "verify_bundle.py", verify_dir / "verify_bundle.py")
+    shutil.copyfile(SWAP_TEMPLATES / "serve_and_compare.py", verify_dir / "serve_and_compare.py")
+    script = os.path.relpath(verify_dir / "verify_bundle.py", facts.run_dir)
+    return {"command": f"{shlex.quote(sys.executable)} {script}",
+            "deadline_s": PACKAGE_VERIFY_DEADLINE_S, "hf_linked": linked, "hf_missing": missing}
