@@ -2,6 +2,11 @@
 
 Date: 2026-10-02. Nothing here touched a real device, a real gozer lease, real tt-smi, ttnn or docker.
 
+Change on 2026-10-03: the driver no longer has built-in machine paths. `--gozer` is required (or
+set `ORCHARD_GOZER`). Without `--child-cmd`, `--env-script` and `--python` are required too (or set
+`ORCHARD_ENV_SCRIPT` and `ORCHARD_CHILD_PYTHON`). The `/home/ttuser/...` paths below are the
+development machine's values, kept as the record of the runs this report describes.
+
 ## What was built
 
 - `orchard/hardware_check.py`: the driver. Run as `python3 -m orchard.hardware_check --board <BDF> [options]`.

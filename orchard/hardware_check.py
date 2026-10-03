@@ -1,6 +1,14 @@
 """Hardware-check driver for the hold-through-swap runbook (docs/runbooks/hardware-validation.md).
 
-Run it as: python3 -m orchard.hardware_check --board <BDF of the board's first chip>
+Run it as:
+
+    python3 -m orchard.hardware_check --board <BDF of the board's first chip> \
+        --gozer <gozer with `reset`> --env-script <tt-metal env script> --python <python with ttnn>
+
+The three machine paths can also come from ORCHARD_GOZER, ORCHARD_ENV_SCRIPT and
+ORCHARD_CHILD_PYTHON. --env-script and --python are needed only when --child-cmd is not given.
+The driver has no built-in machine paths; a missing one stops it with a message that names the
+flag and the variable.
 
 One long-lived process (this one) owns one gozer lease for the whole session. Every model
 process it starts is its child. It runs the runbook's checks under that lease and writes each
@@ -67,10 +75,9 @@ from orchard.ledger import Ledger
 WHO = "orchard:hardware-check"
 REASON = "validate hold-through-swap"
 EVIDENCE_LIMIT = 2000          # characters of stdout or stderr kept per command
-DEFAULT_ENV_SCRIPT = "/home/ttuser/code/audio8-asr/dev_env.sh"
-DEFAULT_PYTHON = "/home/ttuser/venvs/qwen36-p150x2/bin/python"
-# The branch binary has `reset`. The gozer on PATH may not.
-DEFAULT_GOZER = "/home/ttuser/code/tt-gozer-orchard/bin/gozer"
+# The machine paths, when no flag gives them. The gozer must have `reset` (the tt-gozer branch
+# binary); the gozer on PATH may not, so there is no PATH default.
+GOZER_ENV, ENV_SCRIPT_ENV, PYTHON_ENV = "ORCHARD_GOZER", "ORCHARD_ENV_SCRIPT", "ORCHARD_CHILD_PYTHON"
 DEFAULT_STATE_ROOT = "/tmp/tt-gozer"     # gozer's own default; the driver only reads under it
 GUARDED_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 RELEASE_RETRIES = 3
@@ -101,8 +108,7 @@ class Interrupted(BaseException):
     """SIGINT or SIGTERM arrived. BaseException so no `except Exception` swallows it."""
 
 
-def default_child_argv(bdf: str, env_script: str = DEFAULT_ENV_SCRIPT,
-                       python: str = DEFAULT_PYTHON, cache_dir: str = "cache",
+def default_child_argv(bdf: str, env_script: str, python: str, cache_dir: str = "cache",
                        logs_dir: str = "logs") -> list[str]:
     """The argv of the real child.
 
@@ -1058,8 +1064,9 @@ def parse_args(argv):
     p.add_argument("--board", required=True, help="BDF of the board's first chip, e.g. 0000:03:00.0")
     p.add_argument("--out-dir", default=None,
                    help="default runs/hardware-check/<UTC timestamp>-<board BDF>/")
-    p.add_argument("--gozer", default=DEFAULT_GOZER,
-                   help="gozer with `reset` (the branch binary by default)")
+    p.add_argument("--gozer", default=os.environ.get(GOZER_ENV),
+                   help=f"path to a gozer that has `reset` (the tt-gozer branch binary). Required; "
+                        f"default ${GOZER_ENV}")
     p.add_argument("--tt-smi", default="none",
                    help="path to tt-smi to take a snapshot after the reset; default none. "
                         "tt-smi -s opens every device on the box. Do not use it while another "
@@ -1073,15 +1080,31 @@ def parse_args(argv):
     p.add_argument("--child-cmd", default=None,
                    help="JSON list: the child's argv. {bdf} and {dev} are filled in. "
                         "Default opens a 1x1 mesh with ttnn.")
-    p.add_argument("--env-script", default=DEFAULT_ENV_SCRIPT)
-    p.add_argument("--python", default=DEFAULT_PYTHON)
+    p.add_argument("--env-script", default=os.environ.get(ENV_SCRIPT_ENV),
+                   help=f"shell script the default child sources to set up tt-metal (it must "
+                        f"leave ttnn importable). Required without --child-cmd; default "
+                        f"${ENV_SCRIPT_ENV}")
+    p.add_argument("--python", default=os.environ.get(PYTHON_ENV),
+                   help=f"python that can import ttnn, run by the default child. Required without "
+                        f"--child-cmd; default ${PYTHON_ENV}")
     p.add_argument("--idle-seconds", type=float, default=960.0)
     p.add_argument("--opened-timeout", type=float, default=300.0)
     p.add_argument("--stop-timeout", type=float, default=30.0,
                    help="seconds to wait after quit, and again after SIGTERM")
     p.add_argument("--cmd-timeout", type=float, default=120.0, help="timeout for gozer, ps, docker")
     p.add_argument("--reset-timeout", type=float, default=600.0, help="timeout for reset and release")
-    return p.parse_args(argv)
+    args = p.parse_args(argv)
+    if not args.gozer:
+        p.error(f"--gozer is required: pass the path to a gozer that has `reset` (the tt-gozer "
+                f"branch binary), or set {GOZER_ENV}")
+    if not args.child_cmd:
+        missing = [f"{flag} (or {var})" for flag, var, value in
+                   (("--env-script", ENV_SCRIPT_ENV, args.env_script),
+                    ("--python", PYTHON_ENV, args.python)) if not value]
+        if missing:
+            p.error("the default child needs " + " and ".join(missing) + ": the tt-metal env "
+                    "script to source and a python that can import ttnn. Or pass --child-cmd")
+    return args
 
 
 def main(argv=None, *, clock=time.monotonic, sleep=time.sleep, hook=None) -> int:
