@@ -46,3 +46,31 @@ class FakeRun:
 
     def argvs(self) -> list[list[str]]:
         return [c["argv"] for c in self.calls]
+
+
+class FakeProc:
+    """A Popen stand-in. Set .returncode to make it 'exit'."""
+
+    def __init__(self, pid=4321):
+        self.pid, self.returncode, self.polls = pid, None, 0
+
+    def poll(self):
+        self.polls += 1
+        return self.returncode
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+
+class FakeClock:
+    """time.monotonic and time.sleep for tests: sleep advances the clock at once."""
+
+    def __init__(self, now=0.0):
+        self.now, self.sleeps = now, []
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, s):
+        self.sleeps.append(s)
+        self.now += s
