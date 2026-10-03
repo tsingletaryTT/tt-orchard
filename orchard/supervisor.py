@@ -31,6 +31,10 @@ the functional decoder, and stage 3 (full model) is recorded as skipped. Stage 0
 stage_end records that path, and every later choice is
 read from there (orchard/stages.py, run_path). An unknown path keeps the plan 4 table.
 
+Skills name machine paths through placeholders such as {{CACHE_ROOT}} (orchard/paths.py). The
+run_start entry records the values (from --cache-root, --hf-home, --operator-home and their
+defaults), the context fills them in, and a resumed run keeps them.
+
 Operator commands go through a one-word control file in the run directory: pause, resume, abort.
 SIGINT (Ctrl-C) and SIGTERM take the same path as abort: the running command is killed, the coder
 is stopped, every lease this process holds is released, the ledger records the abort and the
@@ -102,7 +106,8 @@ from orchard.handoff import (NOTE_KEYS, Blocked, Budgets, Handoff, decide_park, 
 from orchard.hwtests import (failed_tests, load_plan, move_aside, pending, read_plan, suspect_caches,
                              unrecorded, write_plan, write_record, write_summary)
 from orchard.ledger import Ledger, LedgerCorrupt, LedgerLocked
-from orchard.paths import RunPaths, UnknownPlaceholder
+from orchard.paths import (PATHS_RECORDED, RunPaths, UnknownPlaceholder, absolute_path,
+                           recorded_paths)
 from orchard.runner import Denied, check_string
 from orchard.server import ServerControl, ServerError, ServerSpec, StopCheck
 from orchard.stages import (GateResult, TierUnavailable, attempt_started_ts, budget_cap, check_disk,
@@ -555,8 +560,13 @@ class Supervisor:
         if not p.started:
             self.ledger.append("run_start", None, model=self.model_id, versions=self.versions,
                                inputs=self.inputs, required_chips=list(self.required_chips or ()) or None,
-                               coder=self.coder.record(),
+                               paths=self.paths.record(), coder=self.coder.record(),
                                tiers={k: dict(v) for k, v in self.cfg.tiers.items()})
+        elif recorded_paths(self.ledger.read()) is None:
+            # The run started under a supervisor that did not record paths. Record them once now,
+            # so every later resume is held to the same values.
+            self.ledger.append("decision", None, decision=PATHS_RECORDED, paths=self.paths.record(),
+                               note="the run_start entry predates the paths record")
         if self.credentials_visible:
             # Recorded at every start, because each start is a fresh acceptance by the operator.
             self.ledger.append("decision", None, decision="operator accepted visible credentials",
@@ -1218,6 +1228,18 @@ def parse(argv=None):
                    help="chip counts stage 4 must pass, such as 2,4. Any other count it records is "
                         "optional. Without this, every configuration stage 4 lists must pass. The "
                         "ledger records it, and a resumed run keeps it")
+    r.add_argument("--cache-root", default=None, metavar="DIR",
+                   help="where per-model tensor caches go; skills name it as {{CACHE_ROOT}}. "
+                        "Default: <parent of --run-dir>/cache. The ledger records it, and a "
+                        "resumed run keeps it")
+    r.add_argument("--hf-home", default=None, metavar="DIR",
+                   help="the operator's Hugging Face cache; skills name it as {{HF_HOME}}. "
+                        "Default: $HF_HOME, else <operator home>/.cache/huggingface. Recorded and "
+                        "kept like --cache-root")
+    r.add_argument("--operator-home", default=None, metavar="DIR",
+                   help="the operator's home, where tt-model keeps its packages; skills name it "
+                        "as {{OPERATOR_HOME}}. Default: this user's home from the passwd entry. "
+                        "Recorded and kept like --cache-root")
     r.add_argument("--gozer", default="gozer")
     r.add_argument("--accept-credentials-visible", action="store_true",
                    help="start even though credential files exist in the operator's home "
@@ -1230,8 +1252,9 @@ def parse(argv=None):
 
 def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_json,
           probe=probe_model, clock=time.time, sleep=time.sleep, budgets=Budgets(),
-          disk_usage=shutil.disk_usage, home=None, containers=None) -> Supervisor:
-    """A Supervisor from parsed `run` arguments. Tests pass fakes for the machine."""
+          disk_usage=shutil.disk_usage, home=None, containers=None, environ=None) -> Supervisor:
+    """A Supervisor from parsed `run` arguments. Tests pass fakes for the machine. `environ`
+    supplies $HF_HOME for the default --hf-home (default os.environ)."""
     # Everything that can be refused is checked before any external command runs.
     cfg = load(args.tiers)
     tier = coder_tier(cfg, args.coder_port)
@@ -1264,6 +1287,9 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
             raise ValueError(f"this run started with required chips {recorded}; --required-chips "
                              f"{required} differs. Leave the option out to resume with the recorded value")
         required = recorded
+    home = operator_home() if home is None else home
+    paths = run_paths(args, run_dir, recorded_paths(entries) if progress.started else None,
+                      home=home, environ=environ)
     return Supervisor(run_dir=run_dir, ledger=ledger, cfg=cfg, model_id=args.model, adapter=adapter,
                       coder=coder, coder_chips=args.coder_chips,
                       standin=ExternalStandIn(cpu["endpoint"], cpu["model"], http=http),
@@ -1271,7 +1297,26 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
                       extra_env=extra_env, versions=versions, http=http, probe=probe,
                       clock=clock, sleep=sleep, budgets=budgets, disk_usage=disk_usage,
                       credentials_visible=found, required_chips=required,
-                      home=operator_home() if home is None else home, containers=containers)
+                      home=home, containers=containers, paths=paths)
+
+
+PATH_FLAGS = {"--cache-root": "cache_root", "--hf-home": "hf_home", "--operator-home": "operator_home"}
+
+
+def run_paths(args, run_dir, recorded: dict | None, *, home, environ=None) -> RunPaths:
+    """The run's paths (orchard/paths.py). A new run resolves them from the flags and defaults.
+    A resumed run uses the recorded values, and a flag that names a different path is refused,
+    as --required-chips is."""
+    if recorded is None:
+        return RunPaths.resolve(run_dir, home=home, environ=environ, cache_root=args.cache_root,
+                                hf_home=args.hf_home, operator_home=args.operator_home)
+    paths = RunPaths.from_record(recorded)
+    for flag, field in PATH_FLAGS.items():
+        given, kept = getattr(args, field), getattr(paths, field)
+        if given is not None and absolute_path(given) != kept:
+            raise ValueError(f"this run started with {flag} {kept}; {flag} {given} differs. Leave "
+                             "the option out to resume with the recorded value")
+    return paths
 
 
 def main(argv=None, *, home=None) -> int:

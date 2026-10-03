@@ -288,6 +288,83 @@ def test_a_skill_with_an_unknown_placeholder_blocks_its_stage(rig, tmp_path, mon
     assert len(notes) == 1 and "{{NO_SUCH_PATH}}" in notes[0] and "delta-triage.md" in notes[0]
 
 
+def run_start(rig) -> dict:
+    return next(e["data"] for e in rig.entries() if e["event"] == "run_start")
+
+
+def crash_after_stage_0(rig):
+    with pytest.raises(Crash):
+        rig.run(crash_if=lambda e: e["event"] == "stage_end" and e["stage"] == 0)
+
+
+def test_the_run_start_entry_records_the_default_run_paths(rig):
+    from orchard.paths import ORCHARD_DIR
+    assert rig.run() == EXIT_READY
+    paths = run_start(rig)["paths"]
+    assert paths["cache_root"] == str(rig.run_dir.resolve().parent / "cache")
+    assert paths["operator_home"] == str(rig.home)
+    assert paths["tt_model_root"] == str(rig.home / ".cache" / "tt-model" / "models")
+    assert paths["orchard_dir"] == str(ORCHARD_DIR)
+
+
+def test_the_path_flags_are_recorded(rig, tmp_path):
+    rig.args.cache_root = str(tmp_path / "caches")
+    rig.args.hf_home = str(tmp_path / "hf")
+    rig.args.operator_home = str(tmp_path / "op")
+    assert rig.run() == EXIT_READY
+    paths = run_start(rig)["paths"]
+    assert paths["cache_root"] == str(tmp_path / "caches")
+    assert paths["hf_home"] == str(tmp_path / "hf")
+    assert paths["operator_home"] == str(tmp_path / "op")
+    assert paths["tt_model_root"] == str(tmp_path / "op" / ".cache" / "tt-model" / "models")
+
+
+def test_a_resumed_run_keeps_the_paths_it_started_with(rig, tmp_path):
+    rig.args.cache_root = str(tmp_path / "caches")
+    crash_after_stage_0(rig)
+    rig.args.cache_root = None                      # the operator resumes without repeating it
+    with Ledger(rig.run_dir / "ledger.jsonl") as led:
+        sup = build(rig.args, led, adapter=rig.adapter_cls(rig.m, owner_pid=200), coder=rig.coder_cls(rig.m),
+                    versions={"tt_model": "test"}, home=rig.home)
+        assert sup.paths.cache_root == str(tmp_path / "caches")
+
+
+def test_a_resume_that_repeats_the_same_path_flag_is_accepted(rig, tmp_path):
+    rig.args.cache_root = str(tmp_path / "caches")
+    crash_after_stage_0(rig)
+    assert rig.run(pid=200) == EXIT_READY
+
+
+@pytest.mark.parametrize("flag", ["cache_root", "hf_home", "operator_home"])
+def test_a_resume_that_names_a_different_path_is_refused(rig, tmp_path, flag):
+    crash_after_stage_0(rig)
+    setattr(rig.args, flag, str(tmp_path / "somewhere-else"))
+    with pytest.raises(ValueError, match="--" + flag.replace("_", "-")):
+        rig.run(pid=200)
+
+
+def test_a_run_that_started_before_paths_were_recorded_records_them_once(rig, tmp_path):
+    import json
+    crash_after_stage_0(rig)
+    # Rewrite the ledger as an older supervisor wrote it: run_start without "paths". The hash
+    # chain is rebuilt, so the ledger still reads.
+    path = rig.run_dir / "ledger.jsonl"
+    old = [json.loads(line) for line in path.read_text().splitlines()]
+    path.unlink()
+    with Ledger(path) as led:
+        for e in old:
+            data = {k: v for k, v in e["data"].items() if not (e["event"] == "run_start" and k == "paths")}
+            led.append(e["event"], e["stage"], **data)
+    rig.args.cache_root = str(tmp_path / "caches")
+    assert rig.run(pid=200) == EXIT_READY
+    recorded = [d for d in rig.decisions() if d["decision"] == "run paths recorded"]
+    assert len(recorded) == 1 and recorded[0]["paths"]["cache_root"] == str(tmp_path / "caches")
+    # From then on the recorded value holds, as for a run that recorded it at the start.
+    rig.args.cache_root = str(tmp_path / "other")
+    with pytest.raises(ValueError, match="--cache-root"):
+        rig.run(pid=300)
+
+
 def test_a_stage_short_of_disk_pauses_until_the_operator_resumes(rig):
     from collections import namedtuple
     rig.usage = lambda p: namedtuple("U", "total used free")(0, 0, 2e9)

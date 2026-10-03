@@ -16,7 +16,9 @@ The values:
                     tensor cache goes under it, as <CACHE_ROOT>/<slug>/<N>chip-<package>/tt_cache
 
 The supervisor records the values in the ledger's run_start entry. A resumed run uses the
-recorded values, so a skill names the same paths on every attempt.
+recorded values, so a skill names the same paths on every attempt, and a resume that passes a
+different --cache-root, --hf-home or --operator-home is refused. A run whose run_start predates
+this record gets one "run paths recorded" decision at its next start, which then holds.
 
 Rendering fails closed. Any `{{...}}` that is not one of the five names raises
 UnknownPlaceholder, which names the placeholder and the skill file. A typo in a skill therefore
@@ -49,7 +51,7 @@ class UnknownPlaceholder(ValueError):
     """A skill holds a `{{...}}` this module does not know, or no run paths were given."""
 
 
-def _absolute(path) -> str:
+def absolute_path(path) -> str:
     """`~` expanded and made absolute against the current directory. Symlinks are kept."""
     return os.path.abspath(os.path.expanduser(str(path)))
 
@@ -70,14 +72,14 @@ class RunPaths:
         """The values for a new run. `home` is the operator's home from the passwd entry; an
         explicit `operator_home` replaces it. `environ` supplies $HF_HOME (default os.environ)."""
         env = os.environ if environ is None else environ
-        op_home = _absolute(operator_home if operator_home is not None else home)
+        op_home = absolute_path(operator_home if operator_home is not None else home)
         if hf_home is None:
             hf_home = env.get("HF_HOME") or os.path.join(op_home, ".cache", "huggingface")
         if cache_root is None:
-            cache_root = Path(_absolute(run_dir)).parent / "cache"
-        return cls(orchard_dir=str(ORCHARD_DIR), hf_home=_absolute(hf_home), operator_home=op_home,
+            cache_root = Path(absolute_path(run_dir)).parent / "cache"
+        return cls(orchard_dir=str(ORCHARD_DIR), hf_home=absolute_path(hf_home), operator_home=op_home,
                    tt_model_root=os.path.join(op_home, ".cache", "tt-model", "models"),
-                   cache_root=_absolute(cache_root))
+                   cache_root=absolute_path(cache_root))
 
     def record(self) -> dict:
         """The form the ledger stores."""
@@ -90,6 +92,23 @@ class RunPaths:
     def placeholders(self) -> dict:
         """Placeholder name -> value."""
         return {name: getattr(self, field) for name, field in PLACEHOLDERS.items()}
+
+
+# The decision a resumed run writes when its run_start entry predates the "paths" field.
+PATHS_RECORDED = "run paths recorded"
+
+
+def recorded_paths(entries: list[dict]) -> dict | None:
+    """The paths this run recorded: run_start's "paths", else the latest "run paths recorded"
+    decision (written once for a run whose run_start predates the field), else None."""
+    found = None
+    for e in entries:
+        d = e.get("data") or {}
+        if e["event"] == "run_start" and d.get("paths"):
+            found = d["paths"]
+        elif e["event"] == "decision" and d.get("decision") == PATHS_RECORDED:
+            found = d["paths"]
+    return found
 
 
 def render(text: str, paths: RunPaths | None, *, source: str = "") -> str:
