@@ -343,3 +343,11 @@ path, so packaging is the next piece to build after stages 0 to 6 are shown to w
   about 30 minutes" was right and my template's timeout was not. The weight conversion (34 GB tensor
   cache, with the model marker) and part of the compile cache are now on disk, so the next attempt should
   boot much faster. Timeouts raised to 3300 s (health) and 3600 s (deadline), pinned by tests.
+- **19:44Z to 19:48Z the same-conversation gate feedback misfired after a failed hardware test.** The finish step
+  wrote `result.json` with `serves: false`, which is the honest record of the 26-minute timeout. The gate
+  failed on that, so the new continuation (added at 08:10 to help with malformed files) told the agent to make
+  `serves` true. It cannot do that honestly. It explored for 20 turns without writing a file and the new
+  `no_file_written` watchdog paused the run at 19:48:37Z, which is the watchdog doing its job. The
+  continuation should not fire when the hardware test itself failed: the stage should end and the next
+  attempt should run the test again. Fix in progress. The run is paused; the supervisor and the 2-chip coder
+  are idle.
