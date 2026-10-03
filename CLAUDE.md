@@ -248,3 +248,22 @@ change:
   still fails that result, and its serves reason now quotes the failure text.
 - Mutations seen red: always continue, never continue, a missing exit code counted as success, no resume
   guard, no failure text in the gate reason, the old finish text.
+
+## 2026-10-03: stage 4 tests each chip configuration on the weights-only path
+Prompt: stage 4 must show the new model working on the configurations the packages ship for: 2 and 4 chips required, 1
+optional (plan `docs/superpowers/plans/2026-10-03-multichip-stage-4.md`). Decisions:
+- One hardware test per configuration, listed by the prepare step in `hw_tests.json` and validated by
+  `orchard/hwtests.py`; the supervisor builds each command, runs the list in order of chip count, each under its own
+  lease, and records each test in `tests/<N>/test-result.json`. `tests/plan.json` is the resume marker. The gate
+  (`gate_mesh_swap`) counts a pass only with that record, and the supervisor refuses a record whose sha256 differs from
+  the sha256 the ledger holds.
+- The 4-chip test (`serve_and_compare_container.py`) runs the printed `docker run` itself with exact-count argv edits:
+  fresh tensor cache, empty `/hf`, model directory and blobs mounted read-only at their own paths, `MODEL_WEIGHTS_DIR`
+  and `HF_MODEL` set, only the leased device nodes, a run label. `tt-model serve` takes no extra docker arguments.
+- A test that needs the coder's boards leases any further board first, then parks; a failed test still restores the
+  coder. A container left by a test is stopped by label; one that survives blocks before any release. A cache whose last
+  test did not exit 0 is moved aside before its next test.
+- After a failed hardware test there is no gate feedback (main, `no-feedback-after-failed-test`). For a list, "failed"
+  means a test that must pass did not: a required configuration's, or any listed one when no counts are required. An
+  optional configuration that failed still gets gate feedback (one continuation) for a malformed `result.json`.
+Not measured: the 4-chip cold conversion time, the 4-chip coder's restart, the 1-chip cache size.

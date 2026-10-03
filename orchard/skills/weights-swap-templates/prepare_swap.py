@@ -29,8 +29,12 @@ The weights-swap-check skill copies this file into the stage directory and runs 
 An expected edit that does not happen exactly once exits 2 with a message that names it, and no
 run.sh is written. Everything else in the script, including its environment lines, stays as it is.
 
-Config keys read here: bundle_dir, nearest_model_id, base_snapshot, new_snapshot. The other keys
-in swap_config.json are for serve_and_compare.py.
+For a container package (stage 4's container configuration) swap_config.json names `package`
+and no `bundle_dir`. Then only model-dir/ is built: serve_and_compare_container.py edits the
+container's docker command and needs no run.sh.
+
+Config keys read here: nearest_model_id, base_snapshot, new_snapshot, and bundle_dir or package.
+The other keys in swap_config.json are for serve_and_compare.py and serve_and_compare_container.py.
 """
 from __future__ import annotations
 
@@ -60,8 +64,9 @@ def load_config() -> dict:
         cfg = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         fail(f"cannot read {path}: {exc}")
-    missing = [k for k in ("bundle_dir", "nearest_model_id", "base_snapshot", "new_snapshot")
-               if not cfg.get(k)]
+    missing = [k for k in ("nearest_model_id", "base_snapshot", "new_snapshot") if not cfg.get(k)]
+    if not cfg.get("bundle_dir") and not cfg.get("package"):
+        missing.append("bundle_dir (or package, for a container package)")
     if missing:
         fail(f"swap_config.json is missing {missing}")
     return cfg
@@ -127,33 +132,37 @@ def edit_run_script(text: str, bundle: Path, nearest: str, model_dir: Path) -> t
 
 def main() -> int:
     cfg = load_config()
-    bundle = Path(cfg["bundle_dir"]).resolve()
     base, new = Path(cfg["base_snapshot"]), Path(cfg["new_snapshot"])
+    bundle = Path(cfg["bundle_dir"]).resolve() if cfg.get("bundle_dir") else None
     for label, d in (("bundle_dir", bundle), ("base_snapshot", base), ("new_snapshot", new)):
-        if not d.is_dir():
+        if d is not None and not d.is_dir():
             fail(f"{label} {d} is not a directory")
-    src_run = bundle / "run.sh"
-    if not src_run.is_file():
-        fail(f"{src_run} does not exist")
-    run_out = HERE_DIR / "run.sh"
-    # Edit in memory first, so a failed edit leaves no run.sh and no half-built model-dir.
     model_dir = HERE_DIR / "model-dir"
-    text, notes = edit_run_script(src_run.read_text(encoding="utf-8"), bundle,
-                                  cfg["nearest_model_id"], model_dir)
+    if bundle is not None:
+        src_run = bundle / "run.sh"
+        if not src_run.is_file():
+            fail(f"{src_run} does not exist")
+        # Edit in memory first, so a failed edit leaves no run.sh and no half-built model-dir.
+        text, notes = edit_run_script(src_run.read_text(encoding="utf-8"), bundle,
+                                      cfg["nearest_model_id"], model_dir)
     model_dir, copied, linked, absent = build_model_dir(base, new)
-    run_out.write_text(text, encoding="utf-8")
-    run_out.chmod(run_out.stat().st_mode | 0o111)
     print(f"model-dir: {model_dir}")
     print(f"  copied from base_snapshot: {', '.join(copied) or 'nothing'}")
     print(f"  linked from new_snapshot: {len(linked)} files ({', '.join(linked)})")
     if absent:
         print(f"  absent in new_snapshot, not linked: {', '.join(absent)}")
+    if bundle is None:
+        print(f"run.sh: not built; {cfg['package']} is a container package, and "
+              "serve_and_compare_container.py starts it")
+        return 0
+    run_out = HERE_DIR / "run.sh"
+    run_out.write_text(text, encoding="utf-8")
+    run_out.chmod(run_out.stat().st_mode | 0o111)
     print(f"run.sh: {run_out}")
     print(f'  HERE="{bundle}"; --model {model_dir}')
     for note in notes:
         print(f"  {note}")
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())

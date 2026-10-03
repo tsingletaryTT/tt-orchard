@@ -208,7 +208,8 @@ Before running:
 - ollama serves the CPU tier: `curl -s http://127.0.0.1:11434/v1/models` lists `qwen3-coder:30b`.
 - Nothing listens on port 8000: `ss -ltn "( sport = :8000 )"` prints only its header.
 - The run directory is on `/mnt/bonus` (404 GB free on 2026-10-02). The root disk is 99% full,
-  and stages 2 to 6 each require 40 GB free (stage 4 requires 80 GB).
+  and stages 2 to 6 each require 40 GB free (stage 4 requires 80 GB, or 110 GB on the weights-only
+  path, plus 40 GB again before each of its tests).
 - Do not give the harness the reference answer, the nearest supported model or the base model's
   tensor cache. The nearest model (Qwen3.8-27B) and its revision are lines of the reference
   answer, and every `--input` appears in every agent prompt, so the run command below has no
@@ -234,9 +235,10 @@ Before running:
   `ssh-keygen -y -P '' -f ~/.ssh/id_ed25519` fails when it does. The preflight does not look in
   `HF_HOME`: check that `/mnt/bonus/models/hemmingway-1/hf` holds no `token` or `stored_tokens`
   file. `HF_TOKEN_PATH` keeps huggingface_hub away from a token there, and it does not stop `cat`.
-- Stage 4 needs the `mesh-shrink` skill, which is untracked in the skills repo
-  (`plugins/tt-model-bringup/skills/mesh-shrink/`). Do not switch branch or clean that tree
-  during the run, or stage 4 blocks with "skill not found".
+- On the full-port path stage 4 needs the `mesh-shrink` skill, which is untracked in the skills
+  repo (`plugins/tt-model-bringup/skills/mesh-shrink/`). Do not switch branch or clean that tree
+  during the run, or stage 4 blocks with "skill not found". On the weights-only path stage 4 uses
+  the local `weights-swap-configs` skill (see "Stage 4 on the weights-only path" below).
 
 What stops an agent and what does not. Agent shells run as the same user as the supervisor. The
 command runner (`orchard/runner.py`) refuses these spellings: tt-smi resets; every gozer command
@@ -369,3 +371,87 @@ Record afterwards: the run directory, the exit code, each stage's result, the co
 and the person's reading of the findings, the reference grep and every hit, that the nearest
 model was not given, every number in stage 6 with its label, every pause with its
 reason, and the wall time.
+
+## Stage 4 on the weights-only path (2 and 4 chips required, 1 chip optional)
+
+Purpose: show the new weights working on each chip configuration the packages will ship for. Run
+with `--required-chips 2,4`. The 1-chip configuration is optional and is recorded as supported or
+not. Nothing here was run on hardware when this was written; the first harness run is the test.
+
+Configurations on this box, each with its own tensor cache under
+`/mnt/bonus/models/orchard-runs/cache/<model slug>/<N>chip-<package>/tt_cache`:
+
+| chips | package | kind | context | template |
+|---|---|---|---|---|
+| 1 | `episod/qwen3.8-27b-dflash2-p150` | bundle | 16K | `serve_and_compare.py` |
+| 2 | `episod/qwen3.8-27b-dflash2-p300` | bundle | 262K | `serve_and_compare.py` |
+| 4 | `changh95/qwen3.8-27b-p300x2`, profile `batch32` | container | 262K | `serve_and_compare_container.py` |
+
+Before running:
+- `tt-model list` shows all three installed, and `docker image ls` lists
+  `tt-model/qwen3.8-27b-p300x2:0becf4834925`.
+- Optional, read-only check of what the image does with the weights directory (starts a container
+  with no device):
+
+      docker run --rm --entrypoint grep tt-model/qwen3.8-27b-p300x2:0becf4834925 \
+        -n -e MODEL_WEIGHTS_DIR -e HF_MODEL /opt/tt-metal/models/demos/blackhole/qwen36/tt/qwen36_vllm.py
+
+  The source build on this box resolves the weights directory as `MODEL_WEIGHTS_DIR`, then
+  `HF_MODEL`, then the config path. The image was built from another tt-metal commit, which is not
+  on this box. The template sets both variables, so either order serves the model directory.
+- `/mnt/bonus` has at least 110 GB free: three caches of about 34 GB (34 GB measured for 2 chips,
+  31 GB for 4 chips, 1 chip not measured).
+
+Starting this stage on a run that is paused in stage 4 under older code. A running supervisor keeps
+the code it loaded, so it must be stopped and started again from a tree with this stage's code:
+- Stop the paused supervisor with `kill -9 <pid>`. Ctrl-C, `kill <pid>` and `control abort` all end
+  the run, and an aborted run cannot be resumed. After the SIGKILL the coder keeps its board under
+  a dead pid's lease until the restart re-leases it (as on 2026-10-03 at 14:03Z, run log).
+- Run the same `run` command the run started with: the same `--run-dir`, coder flags,
+  `--skills-dir`, `--input` and `--env`. Leave `--required-chips` out, or give exactly the counts
+  in the ledger's `run_start` entry; a different value is refused. Check first:
+  `grep '"run_start"' <run-dir>/ledger.jsonl`. If that entry has no `required_chips`, every listed
+  configuration must pass, the optional 1-chip one included.
+- The restart stops the old coder, takes a new lease and starts the coder again. If the run was
+  paused by the operator, send `control resume`.
+- Stage 4's old directory has no `tests/plan.json`, so it is moved aside to `stages/4.partial-<k>`
+  and the new attempt starts with the prepare step.
+
+What happens: the prepare step writes one directory per configuration (`stages/4/configs/<N>/`)
+and `hw_tests.json`. The supervisor refuses the list before any lease if a required count has no
+test, two configurations share a cache, a cache is inside `~/.cache/tt-model` or
+`~/.cache/qwen36-src-build`, or the deadlines add up to more than the stage budget. It then runs
+the tests in order of chip count:
+- With the coder on 2 chips (board 0): the 1- and 2-chip tests lease board 1 and leave the coder
+  up. The 4-chip test first leases board 1, then parks the coder (stand-in canary, `tt-model stop`,
+  reset of board 0), runs on all four chips, releases board 1 and restores the coder. Measured:
+  `tt-model stop` 1 to 2 s, each reset 41.7 s, the 2-chip coder back to ready in about 120 s.
+- With the coder on 4 chips: every test parks the coder. Its restart time was not measured.
+
+The 4-chip test asks `tt-model serve changh95/qwen3.8-27b-p300x2 --print` for the docker command,
+edits it and runs it itself, because `tt-model serve` takes no extra docker arguments. The edited
+command is saved as `stages/4/configs/4/evidence/docker-argv.json`. The first boot converts the
+weights into the new cache. That took about 5 minutes for 2 chips here; for 4 chips it was not
+measured. A bundle with a cold kernel compile cache also compiles every kernel first (more than 26
+minutes on 2026-10-03): the 1-chip bundle compiles its own, the 2-chip bundle reuses stage 2's, and
+the container keeps the package's kernel cache. Each test's deadline is 3,600 s.
+
+Check after the stage, for the 4-chip configuration:
+- In `docker-argv.json`: the `/tensor-cache` volume's source is the configuration's own `tt_cache`;
+  the `/hf` volume's source is `stages/4/configs/4/hf-isolated`; `MODEL_WEIGHTS_DIR` and
+  `HF_MODEL` name `stages/4/configs/4/model-dir`; no volume source is `~/.cache/huggingface`; the
+  four `--device` entries match the four chips in `tests/4/test-result.json`.
+- `stages/4/configs/4/evidence/server.log` shows the weights loaded from the model directory.
+- `top1_agreement` in `stages/4/configs/4/evidence/swap-check.json` is at least 0.85. The base
+  weights standing in agreed 25 of 32 (0.78) on 2 chips.
+- `docker ps -a --filter label=orchard.test` lists nothing.
+
+If the 4-chip test exits 4 and `server.log` shows the runtime looking up `Qwen/Qwen3.8-27B` in
+an empty hub cache, the container needs something from the operator's Hugging Face cache that the
+template did not expect. Record it. Do not remove the `/hf` isolation to get a pass: without it a
+runtime that ignores the weights variables serves the base model with no error. Bring the log to
+the operator.
+
+Stop conditions for this stage, in addition to the run's: a `blocked` notice that names test
+containers still running, a cache moved aside that you did not expect, or a 4-chip
+`top1_agreement` under 0.85.

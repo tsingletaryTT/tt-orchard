@@ -13,8 +13,9 @@ from fakes import Crash
 from orchard.ledger import Ledger, replay_state
 from orchard.stages import run_progress
 from orchard.supervisor import EXIT_READY, build, parse
-from run_fakes import (BOARDS, SWAP_LOW, CrashingLedger, Machine, MachineAdapter, MachineCoder, argv,
-                       bringup, clock, feedback_aware, plenty, test_fails_until_escalated, write_tiers)
+from run_fakes import (BOARDS, SWAP_LOW, CrashingLedger, FakeContainers, Machine, MachineAdapter,
+                       MachineCoder, argv, bringup, clock, feedback_aware, plenty,
+                       test_fails_until_escalated, write_tiers)
 
 FIRST, SECOND = 100, 200          # supervisor pids before and after the kill
 
@@ -38,7 +39,8 @@ def run(base, servers, machine, *, chips, pid, crash_after=0):
     with (CrashingLedger(path, crash_after) if crash_after else Ledger(path)) as led:
         return build(args, led, adapter=MachineAdapter(machine, owner_pid=pid),
                      coder=MachineCoder(machine), versions={"tt_model": "test"}, clock=c,
-                     sleep=c.sleep, disk_usage=plenty, home=base / "operator-home").run()
+                     sleep=c.sleep, disk_usage=plenty, home=base / "operator-home",
+                     containers=FakeContainers()).run()
 
 
 def entries(base):
@@ -67,28 +69,46 @@ def test_with_the_coder_on_four_chips_every_hardware_stage_parks_it(tmp_path, se
     m = Machine()
     assert run(tmp_path, servers, m, chips=4, pid=FIRST) == EXIT_READY
     es = entries(tmp_path)
-    for n in (2, 4, 5, 6):                  # stage 3 is skipped on the weights-only path
+    for n in (2, 5, 6):                     # stage 3 is skipped on the weights-only path
         seq = [(e["event"], e["data"].get("step") or e["data"].get("decision")) for e in es if e["stage"] == n]
         test = seq.index(("decision", "hardware test started"))
         assert seq.index(("park", "reset")) < test < seq.index(("restore", "reset")), n
         assert ("restore", "resumed") in seq[test:], n
         env = (tmp_path / "run" / "stages" / str(n) / "evidence" / "devices.txt").read_text()
         assert f"TT_VISIBLE_DEVICES={','.join(BOARDS['B0'])}\n" in env       # one board of the four chips
+    # Stage 4 runs one test per configuration, each between its own park's reset and restore's reset.
+    marks = (("park", "reset"), ("decision", "hardware test started"), ("restore", "reset"))
+    seq = [(e["event"], e["data"].get("step") or e["data"].get("decision")) for e in es if e["stage"] == 4]
+    assert [x for x in seq if x in marks] == list(marks) * 3
+    for n, chips in ((1, BOARDS["B0"][:1]), (2, BOARDS["B0"]), (4, BOARDS["B0"] + BOARDS["B1"])):
+        env = (tmp_path / "run" / "stages" / "4" / "configs" / str(n) / "evidence" / "devices.txt").read_text()
+        assert f"TT_VISIBLE_DEVICES={','.join(chips)}\n" in env, n
+        assert f"ORCHARD_DEVICE_IDS={','.join(str(i) for i in range(n))}\n" in env, n
     s = final_state(tmp_path)
     assert s["finished"] and s["done"] == (0, 1, 2, 3, 4, 5, 6, 7, 8) and not s["parked"]
     assert s["last_result"][3] == "skipped" and s["last_result"][7] == "skipped"
     assert not m.coder_running and m.leases == {}           # the finished run gave the hardware back
 
 
-def test_with_the_coder_on_two_chips_the_free_board_is_used_and_nothing_parks(tmp_path, servers):
+def test_with_the_coder_on_two_chips_only_the_4_chip_test_parks_it(tmp_path, servers):
     m = Machine()
     assert run(tmp_path, servers, m, chips=2, pid=FIRST) == EXIT_READY
     es = entries(tmp_path)
-    assert not [e for e in es if e["event"] in ("park", "restore")]
-    taken = [e["data"]["test_lease"]["chips"] for e in es if e["data"].get("decision") == "test lease taken"]
-    assert taken == [list(BOARDS["B1"])] * 4          # stages 2, 4, 5 and 6; stage 3 is skipped
+    handoff = [(e["stage"], e["event"], e["data"]["step"]) for e in es if e["event"] in ("park", "restore")]
+    assert {s for s, _, _ in handoff} == {4}
+    assert [x for x in handoff if x[2] in ("note", "resumed")] == [(4, "park", "note"), (4, "restore", "resumed")]
+    taken = [(e["stage"], e["data"].get("config"), e["data"]["test_lease"]["chips"]) for e in es
+             if e["data"].get("decision") == "test lease taken"]
+    b1 = list(BOARDS["B1"])
+    # Stages 2, 5 and 6 and the 1- and 2-chip configurations use the free board; the 4-chip
+    # configuration takes the free board too, then parks the coder for its board.
+    assert taken == [(2, None, b1), (4, 1, b1), (4, 2, b1), (4, 4, b1), (5, None, b1), (6, None, b1)]
+    seq = [(e["data"].get("decision") or e["data"].get("step"), e["data"].get("config")) for e in es if e["stage"] == 4]
+    assert seq.index(("test lease taken", 4)) < seq.index(("note", None))      # the further board first
+    env = (tmp_path / "run" / "stages" / "4" / "configs" / "4" / "evidence" / "devices.txt").read_text()
+    assert f"TT_VISIBLE_DEVICES={','.join(BOARDS['B0'] + BOARDS['B1'])}\n" in env
     released = [e for e in es if e["data"].get("decision") == "test lease released"]
-    assert len(released) == 4 and m.leases == {}
+    assert len(released) == 6 and m.leases == {}
     assert final_state(tmp_path)["finished"]
 
 

@@ -85,3 +85,19 @@ def test_the_weights_only_stage_2_budget_holds_the_skills_hardware_test():
     assert deadline == 3600 and health == 3300 and deadline >= health + 120
     assert min(deadline, spec_for(2, "weights-only").budget_s) == deadline
     assert spec_for(2, "weights-only").disk_gb >= 34       # one converted 2-chip tensor cache
+
+
+def test_the_weights_only_stage_4_disk_holds_three_measured_caches():
+    # 34 GB (2-chip bundle) and 31 GB (4-chip container) measured; the 1-chip cache is assumed 34 GB.
+    assert d.STAGE4_SWAP_DISK_GB >= 34 + 34 + 31
+    assert d.TEST_DISK_GB >= 34
+
+
+def test_the_stage_4_budget_holds_three_tests_and_a_park():
+    # Three tests at the skill's 3600 s each (a first boot with cold caches took more than 26 min
+    # on 2026-10-03, and the 4-chip conversion is not measured), one park and restore with a coder
+    # boot within the cold-boot budget, and one agent step of TOOL_TIMEOUT_S each for prepare and
+    # finish.
+    need = (3 * 3600 + d.TT_MODEL_STOP_S + 2 * d.GOZER_RESET_S + d.COLD_BOOT_BUDGET_S
+            + 2 * d.TOOL_TIMEOUT_S)
+    assert d.STAGE_BUDGET_S[4] >= need

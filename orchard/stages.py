@@ -7,7 +7,8 @@ runs next, whether the run is paused, how many escalations and coder starts it h
 where the coder's lease is recorded. Nothing here starts a process or calls a model.
 
 The table holds one spec per stage. The path stage 0 chose can replace a spec: on the weights-only
-path stage 2 uses the weights-swap-check skill and `gate_weights_swap`, and stage 3 is skipped
+path stage 2 uses the weights-swap-check skill and `gate_weights_swap`, stage 3 is skipped, and
+stage 4 runs one hardware test per chip configuration (`WEIGHTS_ONLY_STAGE_4`, `gate_mesh_swap`)
 (`spec_for`, `run_path`).
 
 A gate checks the shape of a stage's result file and that every evidence path it lists is a file
@@ -35,8 +36,8 @@ from pathlib import Path
 from typing import Callable
 
 from orchard.defaults import (COLD_START_S, LONG_STAGE_S, RUN_COLD_BOOT_CAP, RUN_ESCALATION_CAP,
-                              RUN_WALL_CLOCK_S, STAGE2_PCC_MIN, STAGE_BUDGET_S, STAGE_DISK_GB,
-                              SWAP_MIN_TOKENS, SWAP_TOP1_MIN)
+                              RUN_WALL_CLOCK_S, STAGE2_PCC_MIN, STAGE4_SWAP_DISK_GB, STAGE_BUDGET_S,
+                              STAGE_DISK_GB, SWAP_MIN_TOKENS, SWAP_TOP1_MIN)
 from orchard.tiers import TierConfig
 
 
@@ -62,6 +63,9 @@ class StageSpec:
     gate: Callable[[Path, Path], GateResult] | None
     marker: str | None                  # resume marker: a file in the stage directory
     skip: str | None = None             # why plan 4 skips this stage
+    tests: bool = False                 # the hardware phase runs a list of tests (hw_tests.json,
+                                        # orchard/hwtests.py) in place of one hw_test.json
+    disk: float | None = None           # free disk the stage needs, when it differs from STAGE_DISK_GB
 
     @property
     def budget_s(self) -> float:
@@ -69,7 +73,7 @@ class StageSpec:
 
     @property
     def disk_gb(self) -> float:
-        return STAGE_DISK_GB[self.number]
+        return self.disk if self.disk is not None else STAGE_DISK_GB[self.number]
 
 
 # ---- evidence and gate helpers ------------------------------------------------------------------
@@ -219,9 +223,17 @@ def gate_weights_swap(stage_dir, run_dir) -> GateResult:
     d, err = _load(stage_dir, "result.json")
     if err:
         return GateResult(False, (err,))
-    reasons, seen = [], []
+    reasons, seen = _swap_reasons(d), []
+    _evidence(run_dir, d.get("evidence"), "result.json", reasons, seen)
+    return _done(reasons, seen)
+
+
+def _swap_reasons(d: dict, where: str = "") -> list[str]:
+    """The swap fields of one result (stage 2's result.json, or one stage 4 configuration), checked
+    against the stage 2 bar. Each failing field gets its own reason, which names the field."""
+    reasons = []
     if d.get("serves") is not True:
-        reason = f"serves must be true (the server started and answered), got {d.get('serves')!r}"
+        reason = f"{where}serves must be true (the server started and answered), got {d.get('serves')!r}"
         failure = d.get("failure")
         if isinstance(failure, str) and failure.strip():
             # The finish step records a failed hardware test here. The reason carries it so the
@@ -229,20 +241,19 @@ def gate_weights_swap(stage_dir, run_dir) -> GateResult:
             reason += f"; the recorded failure: {failure.strip()[:500]}"
         reasons.append(reason)
     if d.get("coherent") is not True:
-        reasons.append(f"coherent must be true (the free-run text is readable), got {d.get('coherent')!r}")
+        reasons.append(f"{where}coherent must be true (the free-run text is readable), got {d.get('coherent')!r}")
     n = d.get("n_tokens")
     if isinstance(n, bool) or not isinstance(n, int) or n < SWAP_MIN_TOKENS:
-        reasons.append(f"n_tokens must be a whole number of at least {SWAP_MIN_TOKENS}, got {n!r}")
+        reasons.append(f"{where}n_tokens must be a whole number of at least {SWAP_MIN_TOKENS}, got {n!r}")
     top1 = d.get("top1_agreement")
     if not _number(top1) or not 0 <= top1 <= 1:
-        reasons.append(f"top1_agreement must be a fraction from 0 to 1, got {top1!r}")
+        reasons.append(f"{where}top1_agreement must be a fraction from 0 to 1, got {top1!r}")
     elif top1 < SWAP_TOP1_MIN:
-        reasons.append(f"top1_agreement {top1} is below the minimum of {SWAP_TOP1_MIN}")
+        reasons.append(f"{where}top1_agreement {top1} is below the minimum of {SWAP_TOP1_MIN}")
     ready = d.get("server_ready_s")
     if not _number(ready) or ready <= 0:
-        reasons.append(f"server_ready_s must be a positive number of seconds, got {ready!r}")
-    _evidence(run_dir, d.get("evidence"), "result.json", reasons, seen)
-    return _done(reasons, seen)
+        reasons.append(f"{where}server_ready_s must be a positive number of seconds, got {ready!r}")
+    return reasons
 
 
 def gate_full_model(stage_dir, run_dir) -> GateResult:
@@ -293,6 +304,76 @@ def gate_mesh(stage_dir, run_dir, required=None) -> GateResult:
     for chips in required:
         if chips not in listed:
             reasons.append(f"the {chips}-chip configuration is required and has no entry")
+    return _done(reasons, seen)
+
+
+def hw_record_path(stage_dir, chips: int) -> Path:
+    """Where the supervisor records one configuration's hardware test (orchard/hwtests.py). Only
+    the supervisor writes this file."""
+    return Path(stage_dir) / "tests" / str(chips) / "test-result.json"
+
+
+def hw_record_problem(stage_dir, chips: int) -> str | None:
+    """Why the supervisor's record does not show a finished test on `chips` chips, or None."""
+    path = hw_record_path(stage_dir, chips)
+    try:
+        rec = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return f"the supervisor has no record of its test (tests/{chips}/test-result.json)"
+    except (OSError, ValueError) as exc:
+        return f"tests/{chips}/test-result.json is not readable JSON: {exc}"
+    if not isinstance(rec, dict):
+        return f"tests/{chips}/test-result.json is not a JSON object"
+    if rec.get("timed_out") is not False:
+        return f"its test did not finish before its deadline (timed_out {rec.get('timed_out')!r})"
+    if rec.get("returncode") != 0:
+        return f"its test exited {rec.get('returncode')!r}"
+    if not isinstance(rec.get("chips"), list) or len(rec["chips"]) != chips:
+        return f"its test ran on {rec.get('chips')!r}, which is not {chips} chips"
+    return None
+
+
+def gate_mesh_swap(stage_dir, run_dir, required=None) -> GateResult:
+    """Stage 4 on the weights-only path: `gate_mesh`, and for every configuration that claims a
+    pass, proof that the supervisor ran its test and that the test measured a passing swap.
+
+    For a passing entry with N chips:
+    - tests/N/test-result.json must show an exit code of 0, no timeout and N chips. Only the
+      supervisor writes it, so a configuration whose test never ran cannot pass.
+    - the entry must hold the stage 2 fields and meet the stage 2 bar (`_swap_reasons`).
+    - its evidence must include configs/N/evidence/swap-check.json, and that file's result_draft
+      must hold the same top1_agreement.
+    An entry that does not claim a pass is judged by `gate_mesh` alone.
+    """
+    base = gate_mesh(stage_dir, run_dir, required)
+    d, err = _load(stage_dir, "result.json")
+    if err:
+        return base
+    reasons, seen = list(base.reasons), list(base.evidence)
+    rel = os.path.relpath(os.path.realpath(stage_dir), os.path.realpath(run_dir))
+    for c in d.get("configs") if isinstance(d.get("configs"), list) else []:
+        if (not isinstance(c, dict) or c.get("pass") is not True or isinstance(c.get("chips"), bool)
+                or not isinstance(c.get("chips"), int)):
+            continue
+        n = c["chips"]
+        where = f"the {n}-chip configuration"
+        problem = hw_record_problem(stage_dir, n)
+        if problem:
+            reasons.append(f"{where} claims a pass, but {problem}")
+        else:
+            seen.append(f"{rel}/tests/{n}/test-result.json")
+        reasons += _swap_reasons(c, f"{where}: ")
+        swap = f"{rel}/configs/{n}/evidence/swap-check.json"
+        if swap not in (c.get("evidence") if isinstance(c.get("evidence"), list) else []):
+            reasons.append(f"{where}: evidence must include {swap}")
+            continue
+        try:
+            draft = json.loads(inside(run_dir, swap).read_text(encoding="utf-8"))["result_draft"]
+        except (AttributeError, OSError, ValueError, KeyError, TypeError):
+            draft = None
+        if not isinstance(draft, dict) or draft.get("top1_agreement") != c.get("top1_agreement"):
+            reasons.append(f"{where}: top1_agreement {c.get('top1_agreement')!r} is not the "
+                           f"result_draft's in {swap}")
     return _done(reasons, seen)
 
 
@@ -426,6 +507,18 @@ WEIGHTS_ONLY_STAGE_2 = dataclasses.replace(
 SKIP_3_WEIGHTS_ONLY = "weights-only path: the stage 2 serve-and-compare covers the full model"
 WEIGHTS_ONLY_STAGE_3 = dataclasses.replace(STAGES[3], skip=SKIP_3_WEIGHTS_ONLY)
 
+# Stage 4 shows the new weights working on each chip configuration the packages will ship for.
+# Nothing is parallelised or shrunk: an existing package or bundle serves each configuration, so the
+# stage runs one serve-and-compare test per configuration (the weights-swap-configs skill writes
+# hw_tests.json; orchard/hwtests.py reads it) and `gate_mesh_swap` checks the result. `boards` is
+# the most any one test needs (the 4-chip configuration needs both boards). The resume marker is
+# the supervisor's copy of the validated test list, so a resumed stage skips the prepare step and
+# goes on at the first configuration without a test record.
+WEIGHTS_ONLY_STAGE_4 = dataclasses.replace(
+    STAGES[4], name="weights swap on each chip configuration", skill="weights-swap-configs",
+    refs=("tt-device-usage",), boards=2, gate=gate_mesh_swap, marker="tests/plan.json", tests=True,
+    disk=STAGE4_SWAP_DISK_GB)
+
 
 def delta_path(run_dir) -> str | None:
     """The path in stages/0/delta.json, or None when the file is missing, unreadable or names
@@ -459,12 +552,14 @@ def run_path(entries: list[dict], run_dir) -> str | None:
 
 def spec_for(number: int, path: str | None) -> StageSpec:
     """The stage spec for `number` on `path`. Only the weights-only path changes the table: stage 2
-    gets the swap skill and gate, and stage 3 is skipped (the supervisor records it as skipped,
-    as it does stage 7)."""
+    gets the swap skill and gate, stage 3 is skipped (the supervisor records it as skipped, as it
+    does stage 7), and stage 4 runs one test per chip configuration."""
     if path == "weights-only" and number == 2:
         return WEIGHTS_ONLY_STAGE_2
     if path == "weights-only" and number == 3:
         return WEIGHTS_ONLY_STAGE_3
+    if path == "weights-only" and number == 4:
+        return WEIGHTS_ONLY_STAGE_4
     return STAGES[number]
 
 

@@ -12,9 +12,9 @@ from orchard.adapters import AdapterError
 from orchard.ledger import Ledger, LedgerCorrupt
 from orchard.supervisor import (EXIT_ABORTED, EXIT_ERROR, EXIT_READY, EXIT_REFUSED, Control, build,
                                 main, parse)
-from run_fakes import (BOARDS, DELTA, FEEDBACK_HEAD, FILES, SWAP_LOW, CrashingLedger, Machine,
-                       MachineAdapter, MachineCoder, argv, bringup, clock, feedback_aware, plenty,
-                       test_fails_until_escalated, where, write_tiers)
+from run_fakes import (BOARDS, DELTA, FEEDBACK_HEAD, FILES, SWAP_LOW, CrashingLedger, FakeContainers,
+                       Machine, MachineAdapter, MachineCoder, argv, bringup, clock, feedback_aware,
+                       plenty, swap_entry, test_fails_until_escalated, where, write_tiers)
 
 # The hardware test and agent shells run real bash here, so stub tools come first on PATH.
 pytestmark = pytest.mark.usefixtures("stub_tools")
@@ -40,6 +40,7 @@ class Rig:
         self.home = tmp_path / "operator-home"       # the preflight looks here, never in the real home
         self.clock, self.usage, self.on_sleep = clock(), plenty, None
         self.adapter_cls, self.coder_cls = MachineAdapter, MachineCoder
+        self.containers = FakeContainers()
 
     def sleep(self, s):
         self.clock.sleep(s)
@@ -52,7 +53,8 @@ class Rig:
         with (CrashingLedger(path, crash_if=crash_if) if crash_if else Ledger(path)) as led:
             sup = build(self.args, led, adapter=self.adapter_cls(self.m, owner_pid=pid),
                         coder=self.coder_cls(self.m), versions={"tt_model": "test"}, clock=self.clock,
-                        sleep=self.sleep, disk_usage=lambda p: self.usage(p), home=self.home)
+                        sleep=self.sleep, disk_usage=lambda p: self.usage(p), home=self.home,
+                        containers=self.containers)
             return sup.run()
 
     def entries(self):
@@ -340,7 +342,9 @@ def test_a_coder_that_dies_is_restarted_once_and_a_second_death_blocks(rig):
     def script(request):
         if "tools" in request:
             n, phase = where(request)
-            if n in (1, 4) and turn(request) == 0 and n not in killed:
+            # Stages 1 and 5: stage 4 on the weights-only path parks the coder for its 4-chip
+            # test, and a park asks the coder first, so a death there blocks the park instead.
+            if n in (1, 5) and turn(request) == 0 and n not in killed:
                 killed.add(n)
                 rig.m.coder_running = False         # the coder dies while the agent works
         return bringup(request)
@@ -527,9 +531,7 @@ def test_a_canary_mismatch_still_blocks_after_a_resume(rig):
 
 def mesh_result(*configs):
     """A stage 4 result.json override from (chips, pass) pairs."""
-    return {(4, "finish"): {"result.json": {"configs": [
-        {"chips": c, "pass": ok, "evidence": ["stages/4/evidence/hw-test-output.txt"],
-         **({} if ok else {"reason": "does not fit"})} for c, ok in configs]}}}
+    return {(4, "finish"): {"result.json": {"configs": [swap_entry(c, ok) for c, ok in configs]}}}
 
 
 def test_required_chips_parse_to_a_tuple_and_default_to_none(tmp_path, rig):

@@ -119,10 +119,16 @@ def test_a_full_port_or_unknown_path_keeps_todays_stage_2_and_3(path):
     assert spec_for(3, path) == STAGES[3]
 
 
-@pytest.mark.parametrize("n", [0, 1, 4, 5, 6, 7, 8])
+@pytest.mark.parametrize("n", [0, 1, 5, 6, 7, 8])
 def test_the_path_changes_no_other_stage(n):
     for path in ("weights-only", "full-port", None):
         assert spec_for(n, path) == STAGES[n]
+
+
+def test_only_the_weights_only_path_runs_stage_4_as_a_list_of_tests():
+    from orchard.stages import WEIGHTS_ONLY_STAGE_4
+    assert spec_for(4, "weights-only") is WEIGHTS_ONLY_STAGE_4
+    assert spec_for(4, "full-port") == STAGES[4] and spec_for(4, None) == STAGES[4]
 
 
 def test_a_long_stage_without_a_resume_marker_is_refused():
@@ -440,3 +446,104 @@ def test_compare_delta_command_line(tmp_path, capsys):
     assert json.loads(capsys.readouterr().out)["ok"] is True
     write(tmp_path, "delta.json", {**GOOD_DELTA, "path": "full-port"})
     assert main(["compare-delta", str(delta), str(REFERENCE)]) == 1
+
+
+# ---- stage 4 on the weights-only path -------------------------------------------------------------
+
+def swap_config(n, ok=True, **change):
+    """One stage 4 configuration entry as the weights-swap-configs skill writes it."""
+    if not ok:
+        return {"chips": n, "pass": False, "reason": "no package fits", **change}
+    swap = f"stages/4/configs/{n}/evidence/swap-check.json"
+    entry = {**{k: v for k, v in SWAP.items() if k != "evidence"}, "chips": n, "pass": True,
+             "evidence": [swap, f"stages/4/tests/{n}/output.txt"]}
+    entry.update(change)
+    return entry
+
+
+def mesh_stage(tmp_path, configs, records=None, drafts=None):
+    """A run with stage 4's result.json, the supervisor's test records and each test's
+    swap-check.json. `records` maps chips to a test-result override (None leaves it out)."""
+    run = tmp_path / "run"
+    sd = run / "stages" / "4"
+    write(run, "stages/4/result.json", {"configs": configs})
+    for c in configs:
+        n = c["chips"]
+        write(run, f"stages/4/tests/{n}/output.txt", "test output")
+        rec = {"returncode": 0, "timed_out": False, "chips": [f"chip{i}" for i in range(n)]}
+        override = (records or {}).get(n, {})
+        if override is not None:
+            write(run, f"stages/4/tests/{n}/test-result.json", {**rec, **override})
+        draft = (drafts or {}).get(n, {"top1_agreement": c.get("top1_agreement")})
+        write(run, f"stages/4/configs/{n}/evidence/swap-check.json", {"result_draft": draft})
+    return sd, run
+
+
+def test_weights_only_stage_4_is_a_list_of_tests_with_its_own_gate_marker_and_disk():
+    from orchard.defaults import STAGE4_SWAP_DISK_GB
+    from orchard.stages import WEIGHTS_ONLY_STAGE_4 as s4, gate_mesh_swap
+    assert s4.number == 4 and s4.tests and s4.boards == 2
+    assert s4.skill == "weights-swap-configs" and s4.gate is gate_mesh_swap
+    assert s4.marker == "tests/plan.json" and s4.disk_gb == STAGE4_SWAP_DISK_GB
+    assert s4.budget_s == STAGES[4].budget_s
+    assert STAGES[4].disk_gb == 80.0 and not STAGES[4].tests       # the plan 4 table is unchanged
+
+
+def test_the_swap_mesh_gate_passes_required_configurations_with_records_and_an_optional_failure(tmp_path):
+    from orchard.stages import gate_mesh_swap
+    g = gate_mesh_swap(*mesh_stage(tmp_path, [swap_config(2), swap_config(4), swap_config(1, ok=False)]),
+                       required=(2, 4))
+    assert g.ok, g.reasons
+    assert "stages/4/tests/4/test-result.json" in g.evidence
+
+
+def test_the_swap_mesh_gate_refuses_a_pass_for_a_configuration_whose_test_never_ran(tmp_path):
+    from orchard.stages import gate_mesh_swap
+    g = gate_mesh_swap(*mesh_stage(tmp_path, [swap_config(2), swap_config(4)], records={4: None}),
+                       required=(2, 4))
+    assert g.reasons == ("the 4-chip configuration claims a pass, but the supervisor has no record "
+                         "of its test (tests/4/test-result.json)",)
+
+
+@pytest.mark.parametrize("record,words", [
+    ({"returncode": 4}, "its test exited 4"),
+    ({"returncode": None, "timed_out": True}, "did not finish before its deadline"),
+    ({"chips": ["a", "b"]}, "which is not 4 chips"),
+])
+def test_the_swap_mesh_gate_refuses_a_pass_whose_test_did_not_finish_on_its_chips(tmp_path, record, words):
+    from orchard.stages import gate_mesh_swap
+    g = gate_mesh_swap(*mesh_stage(tmp_path, [swap_config(4)], records={4: record}), required=(4,))
+    assert len(g.reasons) == 1 and words in g.reasons[0], g.reasons
+
+
+def test_the_swap_mesh_gate_holds_each_configuration_to_the_stage_2_bar(tmp_path):
+    # The base weights standing in agreed 25 of 32 with the Hemmingway-1 reference.
+    from orchard.stages import gate_mesh_swap
+    g = gate_mesh_swap(*mesh_stage(tmp_path, [swap_config(4, top1_agreement=25 / 32)]), required=(4,))
+    assert g.reasons == ("the 4-chip configuration: top1_agreement 0.78125 is below the minimum of 0.85",)
+
+
+def test_the_swap_mesh_gate_checks_an_optional_configuration_that_claims_a_pass(tmp_path):
+    from orchard.stages import gate_mesh_swap
+    g = gate_mesh_swap(*mesh_stage(tmp_path, [swap_config(2), swap_config(1)], records={1: None}),
+                       required=(2,))
+    assert g.reasons == ("the 1-chip configuration claims a pass, but the supervisor has no record "
+                         "of its test (tests/1/test-result.json)",)
+
+
+def test_the_swap_mesh_gate_needs_the_tests_own_report_with_the_same_agreement(tmp_path):
+    from orchard.stages import gate_mesh_swap
+    missing = swap_config(4, evidence=["stages/4/tests/4/output.txt"])
+    g = gate_mesh_swap(*mesh_stage(tmp_path, [missing]), required=(4,))
+    assert g.reasons == ("the 4-chip configuration: evidence must include "
+                         "stages/4/configs/4/evidence/swap-check.json",)
+    g = gate_mesh_swap(*mesh_stage(tmp_path / "b", [swap_config(4)], drafts={4: {"top1_agreement": 0.5}}),
+                       required=(4,))
+    assert g.reasons == ("the 4-chip configuration: top1_agreement 0.94 is not the result_draft's in "
+                         "stages/4/configs/4/evidence/swap-check.json",)
+
+
+def test_the_swap_mesh_gate_keeps_the_mesh_gates_rules(tmp_path):
+    from orchard.stages import gate_mesh_swap
+    g = gate_mesh_swap(*mesh_stage(tmp_path, [swap_config(2)]), required=(2, 4))
+    assert g.reasons == ("the 4-chip configuration is required and has no entry",)

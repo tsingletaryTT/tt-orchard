@@ -123,3 +123,14 @@ CONTROL_POLL_S = 10.0           # choice: how often a paused supervisor reads th
 RUN_CANARY_PROMPT = "What is 17 + 25? Answer with one number."   # choice: short, one greedy answer
 FIRST_BOOT_PROMPT = "What is 7 times 6? Reply with only the number."   # choice: a known answer, asked once
 FIRST_BOOT_EXPECTED = "42"      # a first start must answer with text that contains this, or the run blocks
+
+# ---- stage 4 on the weights-only path: one hardware test per chip configuration -----------------
+# Each configuration converts the new weights into its own tensor cache. Measured sizes for a
+# Qwen3.8-27B-sized model: 34 GB for the 2-chip bundle (2026-09-30, and the Hemmingway-1 prototype
+# on 2026-10-03) and 31 GB for the 4-chip plain container (rebuilt 2026-10-03). The 1-chip cache was
+# not measured and is assumed to be the same size.
+STAGE4_SWAP_DISK_GB = 110.0     # choice: three caches of about 34 GB (1, 2 and 4 chips) plus margin,
+                                # checked on the run directory's disk before stage 4 starts
+TEST_DISK_GB = 40.0             # choice: one cache plus margin, checked again before each
+                                # configuration's test, so a resumed stage stops before a test that
+                                # cannot finish its conversion

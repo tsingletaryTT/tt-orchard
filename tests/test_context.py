@@ -103,3 +103,32 @@ def test_stage_4_is_told_which_configurations_are_required_and_to_record_optiona
     _, plain = build_messages(spec=STAGES[4], phase="run", run_dir=run, stage_dir=run / "stages" / "4",
                               skill_path=sp, refs={}, entries=[], facts={"model": "m"}, resumed=False)
     assert "Required chip counts" not in plain
+
+
+def test_a_stage_with_a_list_of_tests_prepares_hw_tests_json_and_finishes_from_the_list(tmp_path):
+    from orchard.stages import WEIGHTS_ONLY_STAGE_4
+    run, sp = setup(tmp_path)
+    sd = run / "stages" / "4"
+    sd.mkdir(parents=True)
+    common = dict(spec=WEIGHTS_ONLY_STAGE_4, run_dir=run, stage_dir=sd, skill_path=sp, refs={},
+                  entries=[], facts={"model": "m"}, resumed=False)
+    _, user = build_messages(phase="prepare", **common)
+    assert "write hw_tests.json in your stage directory" in user and "hw_test.json" not in user
+    assert "`python3 stages/4/configs/<chips>/<script>`" in user
+    (sd / "hw_tests.json").write_text('{"tests": [{"chips": 4}]}')
+    (sd / "test-result.json").write_text('{"tests": [{"returncode": 0}]}')
+    _, user = build_messages(phase="finish", **common)
+    assert "## stages/4/hw_tests.json" in user and "## stages/4/test-result.json" in user
+    _, single = build_messages(phase="prepare", **{**common, "spec": STAGES[4]})
+    assert "Write hw_test.json in" in single
+
+
+def test_the_finish_step_of_a_list_records_a_failed_configuration_and_stops(tmp_path):
+    from orchard.stages import WEIGHTS_ONLY_STAGE_4
+    run, sp = setup(tmp_path)
+    sd = run / "stages" / "4"
+    sd.mkdir(parents=True)
+    _, user = build_messages(spec=WEIGHTS_ONLY_STAGE_4, phase="finish", run_dir=run, stage_dir=sd,
+                             skill_path=sp, refs={}, entries=[], facts={"model": "m"}, resumed=False)
+    assert "stages/4/tests/<chips>/output.txt" in user and "pass false" in user
+    assert "evidence/hw-test-output.txt" not in user

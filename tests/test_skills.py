@@ -6,13 +6,15 @@ import pytest
 from orchard.stages import STAGES, resolve_skill, spec_for
 
 SKILLS = Path(__file__).resolve().parent.parent / "orchard" / "skills"
-LOCAL = ("delta-triage", "reference-gate", "weights-swap-check", "serving-check", "operator-bundle")
+LOCAL = ("delta-triage", "reference-gate", "weights-swap-check", "weights-swap-configs", "serving-check",
+         "operator-bundle")
 # Spec section 11: existing skills the stages use, referenced by name only.
 SPEC_EXISTING = {"model-bringup", "functional-decoder", "full-model", "multichip", "mesh-shrink",
                  "vllm-integration", "qualitative-check", "benchmark-model", "tt-device-usage",
                  "stage-review", "tti-release"}
 GATE_FILES = {"delta-triage": "delta.json", "reference-gate": "reference.json",
-              "weights-swap-check": "result.json", "serving-check": "result.json",
+              "weights-swap-check": "result.json", "weights-swap-configs": "result.json",
+              "serving-check": "result.json",
               "operator-bundle": "PUBLISH_COMMANDS.txt"}
 
 
@@ -87,3 +89,33 @@ def test_the_swap_skill_explains_the_weights_directory_fact():
     assert "4. The server must be told where the new weights are." in text
     for needed in ("MODEL_WEIGHTS_DIR", "HF_MODEL", "30 of 32", "25 of 32", "The template sets"):
         assert needed in text, needed
+
+
+def test_the_configs_skill_copies_the_three_templates_that_exist_in_this_repo():
+    text = (SKILLS / "weights-swap-configs.md").read_text()
+    main = "/home/ttuser/code/tt-orchard/orchard/skills/weights-swap-templates/"
+    for name in ("prepare_swap.py", "serve_and_compare.py", "serve_and_compare_container.py"):
+        assert main + name in text
+        assert (SKILLS / "weights-swap-templates" / name).is_file()
+
+
+def test_the_configs_skill_writes_the_list_the_supervisor_reads():
+    import json
+    import re
+
+    from orchard.hwtests import SCRIPTS
+    from orchard.stages import WEIGHTS_ONLY_STAGE_4
+    text = (SKILLS / "weights-swap-configs.md").read_text()
+    block = re.search(r'(\{"tests": \[.*?\]\})', text, re.S).group(1)
+    tests = json.loads(" ".join(block.split()))["tests"]
+    assert sorted(t["chips"] for t in tests) == [1, 2, 4]
+    assert all(t["script"] in SCRIPTS for t in tests)
+    assert sum(t["deadline_s"] for t in tests) <= WEIGHTS_ONLY_STAGE_4.budget_s
+
+
+def test_the_configs_skill_quotes_the_gate_bar_and_the_cache_rule():
+    from orchard.defaults import SWAP_TOP1_MIN
+    text = " ".join((SKILLS / "weights-swap-configs.md").read_text().split())
+    assert f"`top1_agreement` of at least {SWAP_TOP1_MIN}" in text
+    assert "Every configuration gets its own new `tt_cache`" in text
+    assert "A configuration whose test never ran cannot pass." in text
