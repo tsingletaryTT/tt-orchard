@@ -1,9 +1,15 @@
 """Recovery: kill the supervisor after every ledger event and check the final state (spec section 13)."""
-from fakes import (CANARY, WHO, Crash, FakeAdapter, FakeServer, FakeStandIn, World, make_handoff,
+import signal
+
+import pytest
+
+from fakes import (CANARY, FakeProc, WHO, Crash, FakeAdapter, FakeServer, FakeStandIn, World, make_handoff,
                    steps)
 from orchard.adapters import Lease
 from orchard.handoff import Handoff, progress, recover
+from orchard.commands import CommandResult
 from orchard.ledger import Ledger, replay_state
+from orchard.server import ServerControl, ServerSpec, ServerStandIn
 
 NEW_PID = 200
 
@@ -173,3 +179,69 @@ def test_recover_with_nothing_in_progress_does_nothing(tmp_path):
     with Ledger(tmp_path / "ledger.jsonl") as led:
         rec = recover(led.read(), adapter=FakeAdapter(world), server=FakeServer(world))
     assert rec.action == "none" and rec.lease_state == "none"
+
+
+# ---- the stand-in is adopted by its recorded identity (review I2) -----------------------------
+
+STANDIN_SPEC = ServerSpec("t/standin", "process", 20990, "fake", argv=("python3", "fake.py"))
+
+
+def real_standin(killed, identity):
+    """A ServerStandIn over a real ServerControl with fake commands and a fake signal."""
+    def run(argv, timeout, *, env=None, kill_on_timeout=True):
+        rc = 7 if argv[0] == "curl" else 1 if argv[0] in ("ps", "pgrep") else 0
+        header = "State Recv-Q\n"
+        return CommandResult(tuple(argv), rc, header if argv[0] == "ss" else "", "")
+
+    ctl = ServerControl(STANDIN_SPEC, run=run, spawn=lambda argv, env, log=None: FakeProc(5150),
+                        killpg=lambda pgid, sig: killed.append((pgid, sig)), identity=identity,
+                        sleep=lambda s: None)
+    return ServerStandIn(ctl, ready_budget_s=1)
+
+
+def crash_after_the_standin_spawned(tmp_path, killed, boot="boot-A", start=777):
+    h, world, ledger = make_handoff(tmp_path, ledger_cls=CrashingLedger,
+                                    ledger_kw={"crash_after": 3})   # note, canary, standin_started
+    h.standin = real_standin(killed, lambda pid: (boot, start))
+    with pytest.raises(Crash):
+        h.park()
+    assert steps(ledger)[-1] == ("park", "standin_started")
+    return h, world
+
+
+def recover_with(tmp_path, h, world, killed, identity):
+    h.ledger.close()
+    world.owner_pid = NEW_PID
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    adapter, server = FakeAdapter(world, NEW_PID), FakeServer(world)
+    standin = real_standin(killed, identity)
+    rec = recover(ledger.read(), adapter=adapter, server=server, standin=standin)
+    p = progress(ledger.read())
+    h2 = Handoff(ledger=ledger, stage=2, adapter=adapter, server=server, standin=standin,
+                 lease=Lease.from_record(p.lease), canary_prompt=CANARY, note_path=h.note_path,
+                 evidence_dir=h.evidence_dir, clock=h.clock, sleep=h.sleep)
+    h2.recover_and_restore(rec, chips=2, who=WHO, reason="coder", wait_budget_s=600)
+    return rec, ledger
+
+
+def test_recovery_adopts_the_standin_and_signals_its_recorded_group(tmp_path):
+    # Guards recover()'s adopt call: without it the new supervisor has no pgid and sends nothing.
+    killed = []
+    h, world = crash_after_the_standin_spawned(tmp_path, killed)
+    entry = [e["data"] for e in h.ledger.read() if e["data"].get("step") == "standin_started"][0]
+    assert entry["standin"]["pgid"] == 5150 and entry["standin"]["start_time"] == 777
+    recover_with(tmp_path, h, world, killed, lambda pid: ("boot-A", 777))
+    assert killed == [(5150, signal.SIGTERM)]
+
+
+def test_recovery_does_not_signal_a_group_that_belongs_to_another_process(tmp_path):
+    # While the supervisor was down the stand-in exited and its pid went to a stranger.
+    killed = []
+    h, world = crash_after_the_standin_spawned(tmp_path, killed)
+    rec, ledger = recover_with(tmp_path, h, world, killed, lambda pid: ("boot-A", 99999))
+    assert killed == []
+    assert not rec.standin_running                     # treated as gone
+    said = [e["data"].get("what") or e["data"].get("reason") or "" for e in ledger.read()
+            if e["event"] == "notice"]
+    assert any("is not the process orchard started" in n for n in said)
+    assert rec.notices and "5150" in rec.notices[0]

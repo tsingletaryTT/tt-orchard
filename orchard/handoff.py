@@ -484,6 +484,8 @@ class Handoff:
         """
         if recovery.action == "none":
             return None
+        for text in recovery.notices:
+            self.ledger.append("notice", self.stage, what=text)
         self.ledger.append("decision", self.stage, decision="recover after restart; the machine wins",
                            **dataclasses.asdict(recovery))
         if recovery.action == "abandon":
@@ -622,6 +624,7 @@ class Recovery:
     standin_running: bool
     action: str                # "none", "abandon" or "restore"
     disagreements: tuple[str, ...]
+    notices: tuple[str, ...] = ()   # recorded processes that could not be confirmed as ours
 
 
 def recover(entries: list[dict], *, adapter, server, standin=None) -> Recovery:
@@ -636,16 +639,21 @@ def recover(entries: list[dict], *, adapter, server, standin=None) -> Recovery:
     The action: "abandon" when the coder is running and the park never sent its stop (the coder
     never left, so it is not stopped; re-leasing a coder that serves outside a park is plan 4's
     job), "restore" for any other interrupted handoff, "none" when no handoff was in progress.
-    The stand-in is a process in its own session, so it can outlive the crash; its recorded pid
-    is adopted and checked.
+    The stand-in is a process in its own session, so it can outlive the crash. Its recorded pid is
+    adopted only if the pid still has the recorded start time (`ServerControl.adopt`); otherwise
+    it counts as gone, is never signalled, and the reason is in `Recovery.notices`.
     """
     p = progress(entries)
     if p.phase == "idle":
         return Recovery("idle", (), (), None, "none", False, False, "none", ())
-    if p.server:
-        server.adopt(p.server)
-    if standin is not None and p.standin:
-        standin.adopt(p.standin)
+    # adopt() says so when a recorded pid is no longer the process orchard started. Such a
+    # process counts as gone and is never signalled; the notice goes to the ledger.
+    notices = []
+    for target, record in ((server, p.server), (standin, p.standin)):
+        if target is not None and record:
+            note = target.adopt(record)
+            if note:
+                notices.append(note)
     running = not server.confirm_stopped().stopped
     standin_running = bool(standin is not None and p.standin
                            and not standin.confirm_stopped().stopped)
@@ -669,4 +677,4 @@ def recover(entries: list[dict], *, adapter, server, standin=None) -> Recovery:
         disagreements.append(f"the ledger holds lease {lease_id}; the lease tool shows it {state}")
     action = "abandon" if running and "stop_sent" not in p.park_done else "restore"
     return Recovery(p.phase, p.park_done, p.restore_done, lease_id, state, running,
-                    standin_running, action, tuple(disagreements))
+                    standin_running, action, tuple(disagreements), tuple(notices))

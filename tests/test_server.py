@@ -5,7 +5,7 @@ import pytest
 
 from fakes import LEASE, FakeClock, FakeProc, FakeRun
 from orchard.server import (NotReady, ServerControl, ServerError, ServerSpec, ServerStandIn,
-                            ServerStarting)
+                            ServerStarting, proc_identity)
 
 SS_HEADER = "State  Recv-Q Send-Q Local Address:Port  Peer Address:Port Process\n"
 SS_LISTEN = SS_HEADER + "LISTEN 0      4096   127.0.0.1:20000      0.0.0.0:*\n"
@@ -260,3 +260,89 @@ def test_wait_ready_stops_when_the_server_exits():
     proc.returncode = 1
     with pytest.raises(ServerError, match="exited"):
         ctl.wait_ready(600)
+
+
+# ---- adopting a process by its recorded identity (review I2) ---------------------------------
+
+PROC_SPEC = ServerSpec("t/standin", "process", 20990, "fake", argv=("python3", "fake.py"))
+
+
+def fake_proc_root(tmp_path, starts, boot_id="boot-A"):
+    """A /proc with a stat file per pid. starts maps pid to the start time (stat field 22).
+
+    The command name holds a ") " on purpose: the parser must count fields after the last ")".
+    """
+    root = tmp_path / "proc"
+    for pid, start in starts.items():
+        (root / str(pid)).mkdir(parents=True, exist_ok=True)
+        (root / str(pid) / "stat").write_text(
+            f"{pid} (odd) name) S 1 {pid} {pid} 0 -1 4194560 0 0 0 0 5 1 0 0 20 0 1 0 {start} "
+            "1000 100 18446744073709551615\n")
+    (root / "sys/kernel/random").mkdir(parents=True, exist_ok=True)
+    (root / "sys/kernel/random/boot_id").write_text(boot_id + "\n")
+    return str(root)
+
+
+def proc_control(tmp_path, starts):
+    ctl, run, spawned, killed, proc, clock = control(PROC_SPEC)
+    ctl.proc_root = fake_proc_root(tmp_path, starts)
+    return ctl, killed
+
+
+def test_the_start_time_is_read_from_stat_field_22(tmp_path):
+    assert proc_identity(4321, fake_proc_root(tmp_path, {4321: 987654})) == ("boot-A", 987654)
+    assert proc_identity(1, fake_proc_root(tmp_path, {4321: 1})) is None      # no such pid
+
+
+def test_a_started_process_records_its_start_time(tmp_path):
+    ctl, _ = proc_control(tmp_path, {4321: 555})
+    ctl.start(None)
+    assert ctl.record()["start_time"] == 555 and ctl.record()["boot_id"] == "boot-A"
+
+
+def test_a_recorded_pgid_with_no_start_time_is_never_signalled(tmp_path):
+    # An old ledger entry has a pid and pgid but no start time, so nothing says the group is still
+    # the one orchard started. Sending SIGTERM could hit an unrelated process.
+    ctl, killed = proc_control(tmp_path, {999: 1})
+    assert "no start time" in ctl.adopt({"pid": 999, "pgid": 999})
+    ctl.stop()
+    assert killed == []
+
+
+def test_a_pgid_that_belongs_to_a_different_process_is_not_signalled(tmp_path):
+    # The stand-in exited and the kernel reused its pid: the start time differs.
+    ctl, killed = proc_control(tmp_path, {999: 2000})
+    notice = ctl.adopt({"pid": 999, "pgid": 999, "start_time": 1000, "boot_id": "boot-A"})
+    assert "is not the process orchard started" in notice
+    assert "not signalled" in ctl.stop()["how"] and killed == []
+
+
+def test_a_pgid_from_before_a_reboot_is_not_signalled(tmp_path):
+    ctl, killed = proc_control(tmp_path, {999: 1000})
+    assert ctl.adopt({"pid": 999, "pgid": 999, "start_time": 1000, "boot_id": "boot-OLD"})
+    ctl.stop()
+    assert killed == []
+
+
+def test_a_process_that_is_gone_counts_as_stopped_and_is_not_signalled(tmp_path):
+    ctl, killed = proc_control(tmp_path, {})
+    assert ctl.adopt({"pid": 999, "pgid": 999, "start_time": 1000, "boot_id": "boot-A"})
+    ctl.stop()
+    check = ctl.confirm_stopped()
+    assert killed == [] and check.stopped
+    assert check.checks["process"] is True and check.checks["process_group"] is True
+
+
+def test_a_matching_start_time_is_adopted_and_signalled(tmp_path):
+    ctl, killed = proc_control(tmp_path, {999: 1000})
+    assert ctl.adopt({"pid": 999, "pgid": 999, "start_time": 1000, "boot_id": "boot-A"}) is None
+    ctl.stop()
+    assert killed == [(999, signal.SIGTERM)]
+
+
+def test_the_identity_is_checked_again_just_before_the_signal(tmp_path):
+    # It matched at adopt time; the process then exited and its pid was reused.
+    ctl, killed = proc_control(tmp_path, {999: 1000})
+    assert ctl.adopt({"pid": 999, "pgid": 999, "start_time": 1000, "boot_id": "boot-A"}) is None
+    fake_proc_root(tmp_path, {999: 3000})
+    assert "not signalled" in ctl.stop()["how"] and killed == []

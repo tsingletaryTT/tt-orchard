@@ -93,6 +93,29 @@ class StopCheck:
     evidence: dict[str, dict] = field(hash=False)
 
 
+def proc_identity(pid: int, proc_root: str = "/proc") -> tuple[str | None, int] | None:
+    """(boot id, start time) of a process, or None when it does not exist.
+
+    The start time is field 22 of /proc/<pid>/stat, in clock ticks since boot. A pid can be reused
+    by an unrelated process, but not with the same start time on the same boot, so the pair says
+    whether a recorded pid is still the process orchard started.
+    """
+    try:
+        with open(f"{proc_root}/{pid}/stat") as f:
+            stat = f.read()
+        # The command name is field 2, in parentheses, and may hold spaces and parentheses itself.
+        # Count fields from the last ")": field 3 is the first one after it.
+        start = int(stat[stat.rindex(")") + 1:].split()[19])
+    except (OSError, ValueError, IndexError):
+        return None
+    try:
+        with open(f"{proc_root}/sys/kernel/random/boot_id") as f:
+            boot = f.read().strip() or None
+    except OSError:
+        boot = None
+    return boot, start
+
+
 def spawn_session(argv, env, log_path=None) -> subprocess.Popen:
     out = open(log_path, "ab") if log_path else subprocess.DEVNULL
     try:
@@ -109,8 +132,11 @@ class ServerControl:
                  tt_model: str = "tt-model", docker: str = "docker",
                  timeout: float = CMD_TIMEOUT_S, stop_timeout: float = STOP_TIMEOUT_S,
                  start_timeout: float = START_TIMEOUT_S, ready_poll_s: float = READY_POLL_S,
-                 log_path: str | None = None):
+                 log_path: str | None = None, proc_root: str = "/proc", identity=None):
         self.spec = spec
+        self.proc_root = proc_root
+        # identity(pid) -> (boot id, start time) or None; tests replace it.
+        self.identity = identity or (lambda pid: proc_identity(pid, self.proc_root))
         self.run, self.spawn, self.killpg, self.http = run, spawn, killpg, http
         self.clock, self.sleep = clock, sleep
         self.tt_model, self.docker = tt_model, docker
@@ -121,20 +147,52 @@ class ServerControl:
         self.pid: int | None = None
         self.pgid: int | None = None
         self.dev_indices: tuple[int, ...] | None = None   # None: unknown, so any device counts
+        self.start_time: int | None = None                # of the process we started or adopted
+        self.boot_id: str | None = None
+        # What adopt() found out about a "process" server: "unknown" (we started it, or it is not
+        # a process server), "match", "unverified" (the record has no start time) or "gone".
+        self.adopted_identity = "unknown"
 
     # ---- ledger form --------------------------------------------------------------------------
 
     def record(self) -> dict:
         return {"kind": self.spec.kind, "target": self.spec.target, "port": self.spec.port,
                 "pid": self.pid, "pgid": self.pgid,
+                "start_time": self.start_time, "boot_id": self.boot_id,
                 "dev_indices": None if self.dev_indices is None else list(self.dev_indices)}
 
-    def adopt(self, record: dict) -> None:
-        """Take over a server a previous supervisor started, from its ledger record."""
+    def adopt(self, record: dict) -> str | None:
+        """Take over a server a previous supervisor started, from its ledger record.
+
+        Returns a notice for the ledger when the recorded process cannot be confirmed as the one
+        orchard started, and None otherwise. A "process" server is stopped with a signal to its
+        group, so it is signalled only when the pid still has the recorded start time on the same
+        boot. When it does not, the process counts as gone: the pid may belong to an unrelated
+        process now. The port checks still run. A group whose leader is gone but whose members
+        linger is not found by this; that is the price of never signalling a stranger.
+        """
         self.proc = None
         self.pid, self.pgid = record.get("pid"), record.get("pgid")
+        self.start_time, self.boot_id = record.get("start_time"), record.get("boot_id")
         devs = record.get("dev_indices")
         self.dev_indices = None if devs is None else tuple(int(i) for i in devs)
+        self.adopted_identity = "unknown"
+        if self.spec.kind != "process" or self.pid is None:
+            return None
+        if self.start_time is None:
+            self.adopted_identity = "unverified"
+            return (f"the recorded {self.spec.target} pid {self.pid} has no start time, so it is "
+                    "not signalled")
+        return None if self._identity_matches() else (
+            f"the recorded {self.spec.target} pid {self.pid} is not the process orchard started "
+            f"(start time {self.start_time}, now {self.identity(self.pid)}); treated as gone and "
+            "not signalled")
+
+    def _identity_matches(self) -> bool:
+        """Does the recorded pid still have the recorded start time? Sets adopted_identity."""
+        ok = self.identity(self.pid) == (self.boot_id, self.start_time)
+        self.adopted_identity = "match" if ok else "gone"
+        return ok
 
     # ---- start and stop -----------------------------------------------------------------------
 
@@ -177,6 +235,8 @@ class ServerControl:
             self.proc = self.spawn(argv, self._env(lease), self.log_path)
             # start_new_session made the child a process group leader: its pid is its group id.
             self.pid = self.pgid = self.proc.pid
+            ident = self.identity(self.pid)
+            self.boot_id, self.start_time = ident if ident else (None, None)
         self.dev_indices = tuple(lease.dev_indices) if lease is not None else ()
 
     def stop(self) -> dict:
@@ -194,6 +254,10 @@ class ServerControl:
     def _signal_group(self) -> dict:
         if self.pgid is None:
             return {"how": "not started"}
+        if self.proc is None:
+            # Adopted from the ledger: the pid may have been reused since. Check again now.
+            if self.start_time is None or not self._identity_matches():
+                return {"how": "not signalled: the recorded pid is not the process orchard started"}
         try:
             self.killpg(self.pgid, signal.SIGTERM)
         except ProcessLookupError:
@@ -285,6 +349,12 @@ class ServerControl:
             checks["process"] = False
             ev["process"] = {"error": "no pid recorded for this server"}
             return
+        if self.spec.kind == "process" and self.adopted_identity == "gone":
+            # The recorded process is not running any more (its pid is free or reused). ps and
+            # pgrep would describe a stranger, so they are not asked.
+            checks["process"] = checks["process_group"] = True
+            ev["process"] = {"note": "the recorded process is gone; its pid has another start time"}
+            return
         ps = self.run(["ps", "-p", str(self.pid), "-o", "pid="], self.timeout)
         checks["process"] = ps.returncode == 1 and not ps.stdout.strip()
         # pgrep -g matches process group ids, not command lines, so it cannot match itself.
@@ -339,7 +409,7 @@ class StandIn(Protocol):
 
     def record(self) -> dict: ...
 
-    def adopt(self, record: dict) -> None: ...
+    def adopt(self, record: dict) -> str | None: ...
 
     def confirm_stopped(self) -> StopCheck: ...
 
@@ -372,8 +442,8 @@ class ServerStandIn:
     def record(self) -> dict:
         return self.server.record()
 
-    def adopt(self, record: dict) -> None:
-        self.server.adopt(record)
+    def adopt(self, record: dict) -> str | None:
+        return self.server.adopt(record)
 
     def confirm_stopped(self) -> StopCheck:
         return self.server.confirm_stopped()
