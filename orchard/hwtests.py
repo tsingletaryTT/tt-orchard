@@ -25,6 +25,11 @@ An agent's write_file can write anywhere in its stage directory, tests/ included
 compares every tests/<chips>/test-result.json with the sha256 the ledger recorded when the
 supervisor wrote it, so a record the agent wrote or changed fails the stage.
 
+`failed_tests` says whether a test that must pass did not: every listed test when the run names
+no required chip counts (as `gate_mesh` reads them), else each required count's test. The
+supervisor gives no gate feedback after such a failure, and an escalated attempt that a kill
+interrupted does not resume from it (orchard/supervisor.py, `_test_failure`).
+
 A test that did not exit 0 may have stopped while it was converting weights into its tensor cache,
 and a part-written cache is read back without an error. `suspect_caches` finds those caches in the
 ledger, and the supervisor moves such a cache aside (`move_aside`, never a delete) before the next
@@ -40,7 +45,7 @@ from pathlib import Path
 
 from orchard.defaults import CHIPS_PER_BOARD
 from orchard.handoff import NOTE_KEYS
-from orchard.stages import evidence_record, hw_record_path
+from orchard.stages import evidence_record, hw_record_path, hw_record_problem
 
 SCRIPTS = {"serve_and_compare.py": "bundle", "serve_and_compare_container.py": "container"}
 # Tensor caches that belong to installed packages or to hand builds, relative to the operator's
@@ -226,3 +231,19 @@ def unrecorded(entries: list[dict], stage_dir, run_dir, stage: int) -> list[str]
             out.append(f"{rec['path']} was not written by the supervisor: its sha256 is not the one "
                        "the ledger recorded")
     return out
+
+
+def failed_tests(stage_dir, required) -> dict | None:
+    """None when every test that must pass has a record showing exit 0 on its chips with no
+    timeout. Otherwise {"configs": [chip counts], "problem": one sentence per failed test}. With
+    no required counts every listed test must pass. A missing plan counts as a failure."""
+    tests = load_plan(stage_dir)
+    if tests is None:
+        return {"configs": [], "problem": "tests/plan.json could not be read"}
+    bad = [(t.chips, hw_record_problem(stage_dir, t.chips)) for t in tests
+           if not required or t.chips in required]
+    bad = [(n, p) for n, p in bad if p]
+    if not bad:
+        return None
+    return {"configs": [n for n, _ in bad],
+            "problem": "; ".join(f"the {n}-chip configuration: {p}" for n, p in bad)}

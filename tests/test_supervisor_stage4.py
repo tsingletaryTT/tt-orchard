@@ -348,3 +348,71 @@ def test_a_timed_out_test_leaves_its_cache_to_be_moved_aside_by_the_next_attempt
     assert [(d["returncode"], d["timed_out"]) for d in recs] == [(None, True), (0, False)]
     moved = stage4(rig, "moved a tensor cache aside")
     assert [d["aside"] for d in moved] == [f"{cache}.interrupted-1"]
+
+
+# ---- a failed test in the list: no gate feedback when a required configuration failed --------------
+
+def feedback_then(stage_phase, before, after, base_overrides):
+    """A script that writes `before` for stage_phase until the conversation holds the gate
+    feedback, then `after` (turns counted from the feedback). Other steps use base_overrides."""
+    from run_fakes import FEEDBACK_HEAD
+
+    def script(request):
+        if "tools" in request and where(request) == stage_phase:
+            msgs = request["messages"]
+            fb = [i for i, m in enumerate(msgs) if m["role"] == "user"
+                  and (m.get("content") or "").startswith(FEEDBACK_HEAD)]
+            if not fb:
+                return bringup(request, overrides={stage_phase: before})
+            return bringup(dict(request, messages=msgs[:2] + msgs[fb[-1]:]), overrides={stage_phase: after})
+        return bringup(request, overrides=base_overrides)
+    return script
+
+
+def test_a_failed_required_configuration_ends_the_stage_without_gate_feedback(rig):
+    rig.args.required_chips = (2, 4)
+    rig.script = escalation_aware(4, failing_4_chip_test())      # the finish records 4 chips as failed
+    assert rig.run() == EXIT_READY
+    first = next(e["seq"] for e in rig.entries() if e["event"] == "escalate" and e["stage"] == 4)
+    early = [e["data"] for e in rig.entries() if e["stage"] == 4 and e["seq"] < first and e["event"] == "decision"]
+    assert not [d for d in early if d["decision"] == "gate feedback"]
+    [nofb] = [d for d in early if d["decision"] == "no gate feedback: the hardware test failed"]
+    assert nofb["configs"] == [4] and "its test exited 4" in nofb["problem"]
+    assert [d["result"] for d in rig.ends(4)] == ["escalate", "pass"]
+
+
+def test_a_failed_optional_configuration_still_gets_gate_feedback_for_a_malformed_result(rig):
+    rig.args.required_chips = (2, 4)
+    one_fails = swap_prepare()
+    one_fails["configs/1/serve_and_compare.py"] = "import sys\nsys.exit(4)\n"
+    honest = {"result.json": {"configs": [swap_entry(1, ok=False), swap_entry(2), swap_entry(4)]}}
+    rig.script = feedback_then((4, "finish"), {"result.json": {"configs": "two and four"}}, honest,
+                               {(4, "prepare"): one_fails})
+    assert rig.run() == EXIT_READY
+    decisions = [d["decision"] for d in stage4(rig, "gate feedback")]
+    assert decisions == ["gate feedback"]
+    assert [d["result"] for d in rig.ends(4)] == ["pass"]
+
+
+def until_escalated(stage, overrides):
+    """escalation_aware, also counting the escalate entry alone ("stage N escalate"), which is all
+    the context shows after a kill between the escalate entry and the stage_end."""
+    def script(request):
+        if "tools" in request and where(request)[0] == stage:
+            ctx = request["messages"][1]["content"]
+            if f"stage {stage} escalate" not in ctx and f"stage {stage}: escalate" not in ctx:
+                return bringup(request, overrides=overrides)
+        return bringup(request)
+    return script
+
+
+def test_a_kill_after_the_escalate_entry_tests_the_escalated_attempt_again(rig):
+    from fakes import Crash
+    rig.args.required_chips = (2, 4)
+    rig.script = until_escalated(4, failing_4_chip_test())
+    with pytest.raises(Crash):
+        rig.run(crash_if=lambda e: e["event"] == "escalate" and e["stage"] == 4)
+    assert rig.run(pid=200) == EXIT_READY
+    assert len(stage4(rig, "not resuming from a failed hardware test")) == 1
+    assert [d["result"] for d in rig.ends(4)] == ["pass"]
+    assert [d["config"] for d in stage4(rig, "hardware test started")] == [1, 2, 4, 1, 2, 4]

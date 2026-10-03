@@ -48,6 +48,15 @@ PHASE_TASKS = {
                "did not measure to null. Then stop. Do not investigate the failure and do not try "
                "to make the result pass. The next attempt runs a fresh test. Reply with a short "
                "summary and no tool call."),
+    # The finish step of a stage whose spec has `tests`.
+    "finish-tests": ("The supervisor ran your hardware tests, one per chip configuration. The list "
+                     "and every record are below, and each test's output is in "
+                     "stages/{n}/tests/<chips>/output.txt. Write {gate} from that evidence. Do not "
+                     "invent a result. For a configuration whose test failed (returncode not 0, or "
+                     "timed_out true), write its entry with pass false, copy the failure text from "
+                     "its output.txt into `reason`, and set every number you did not measure to "
+                     "null. Do not investigate a failure and do not try to make it pass. Reply with "
+                     "a short summary and no tool call."),
 }
 
 RULES = """Rules of this run:
@@ -103,7 +112,7 @@ def build_messages(*, spec: StageSpec, phase: str, run_dir, stage_dir, skill_pat
         system += ["", "## Related skills (read one with shell if you need it)"]
         system += [f"- {name}: {path or 'not installed on this machine'}" for name, path in refs.items()]
 
-    task = PHASE_TASKS["prepare-tests" if phase == "prepare" and spec.tests else phase]
+    task = PHASE_TASKS[f"{phase}-tests" if spec.tests and phase in ("prepare", "finish") else phase]
     user = ["## Task", task.format(gate=spec.gate_file, n=n), "", "## Run"]
     user += [f"- {k}: {v}" for k, v in facts.items()]
     user += [f"- stage directory: stages/{n}"]

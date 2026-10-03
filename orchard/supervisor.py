@@ -99,8 +99,8 @@ from orchard.defaults import (AGENT_CONTINUATION_TURNS, CHIPS_PER_BOARD, CMD_TIM
                               FIRST_BOOT_PROMPT, RUN_CANARY_PROMPT, STOP_TIMEOUT_S, TEST_DISK_GB)
 from orchard.handoff import (NOTE_KEYS, Blocked, Budgets, Handoff, decide_park, progress, reacquire,
                              recover, wait_stopped)
-from orchard.hwtests import (load_plan, move_aside, pending, read_plan, suspect_caches, unrecorded,
-                             write_plan, write_record, write_summary)
+from orchard.hwtests import (failed_tests, load_plan, move_aside, pending, read_plan, suspect_caches,
+                             unrecorded, write_plan, write_record, write_summary)
 from orchard.ledger import Ledger, LedgerCorrupt, LedgerLocked
 from orchard.runner import Denied, check_string
 from orchard.server import ServerControl, ServerError, ServerSpec, StopCheck
@@ -787,7 +787,7 @@ class Supervisor:
             self._block(n, f"stage {n} needs {spec.disk_gb} GB free on the run directory's disk; "
                            f"{free} GB is free", need_gb=spec.disk_gb, free_gb=free)
         marker = self.run_dir / "stages" / str(n) / "test-result.json"
-        if resuming and escalated and spec.boards and marker.is_file() and hardware_test_failure(marker.parent):
+        if resuming and escalated and spec.boards and marker.is_file() and self._test_failure(spec, marker.parent):
             # A kill came after the escalate entry and before the stage_end. The escalated attempt
             # must run a fresh prepare and hardware test: its finish step cannot pass on a test
             # that failed, and it gets no gate feedback for one. So the failed record is not a
@@ -831,7 +831,7 @@ class Supervisor:
             if out.status != "done":
                 return out.status, [f"the finish step ended: {out.status} {out.detail}".strip()], None
         gate = self._check_gate(spec, stage_dir)
-        if not gate.ok and spec.boards and (failed := hardware_test_failure(stage_dir)):
+        if not gate.ok and spec.boards and (failed := self._test_failure(spec, stage_dir)):
             # The finish step was told to record a failed test honestly. Its result cannot pass
             # the gate, and a continuation would ask the agent to make it pass. So the stage ends
             # here through the usual fail or escalate path, and the next attempt runs a fresh
@@ -849,6 +849,14 @@ class Supervisor:
                                     f"{out.status} {out.detail}".strip(), *gate.reasons], None
             gate = self._check_gate(spec, stage_dir)
         return ("pass", [], gate) if gate.ok else ("fail", list(gate.reasons), gate)
+
+    def _test_failure(self, spec, stage_dir: Path) -> dict | None:
+        """Why the stage's hardware testing failed, or None. One test: its test-result.json. A list
+        of tests: the records of the tests that must pass (`failed_tests`), so an optional
+        configuration that failed still leaves the gate feedback for a malformed result file."""
+        if spec.tests:
+            return failed_tests(stage_dir, self.required_chips)
+        return hardware_test_failure(stage_dir)
 
     def _check_gate(self, spec, stage_dir: Path):
         if spec.number == 8:

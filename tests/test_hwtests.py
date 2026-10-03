@@ -180,3 +180,19 @@ def test_a_record_counts_only_with_the_sha256_the_ledger_recorded(tmp_path):
                                           "supervisor: its sha256 is not the one the ledger recorded"]
     path.write_text(path.read_text().replace('"returncode": 0', '"returncode": 0 '))
     assert len(unrecorded(good, sd, run, 4)) == 1
+
+
+def test_failed_tests_names_each_test_that_must_pass_and_did_not(plan):
+    from orchard.hwtests import failed_tests
+    tests, _ = plan["read"]()
+    assert failed_tests(plan["sd"], (2, 4)) == {"configs": [], "problem": "tests/plan.json could not be read"}
+    write_plan(plan["sd"], tests)
+    ok = {"returncode": 0, "timed_out": False}
+    write_record(plan["sd"], 1, {**ok, "returncode": 4, "chips": ["a"]})
+    write_record(plan["sd"], 2, {**ok, "chips": ["a", "b"]})
+    write_record(plan["sd"], 4, {**ok, "chips": ["a", "b", "c", "d"]})
+    assert failed_tests(plan["sd"], (2, 4)) is None                  # only the optional test failed
+    assert failed_tests(plan["sd"], None) == {"configs": [1], "problem": "the 1-chip configuration: its test exited 4"}
+    write_record(plan["sd"], 4, {"returncode": None, "timed_out": True, "chips": ["a", "b", "c", "d"]})
+    got = failed_tests(plan["sd"], (2, 4))
+    assert got["configs"] == [4] and "did not finish before its deadline" in got["problem"]
