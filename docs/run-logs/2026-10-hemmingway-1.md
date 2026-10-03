@@ -196,3 +196,18 @@ path, so packaging is the next piece to build after stages 0 to 6 are shown to w
   understood.
 - **Change:** agent turns now send `enable_thinking: false` (`AGENT_THINKING = False`; a step can turn it
   back on). Two tests, each mutated and seen to fail. Suite 1201 passed, 1 skipped.
+- **15:29:59Z to 15:38:13Z run 3, stage 1 (reference gate): pass, 25 turns, 8 minutes, with agent thinking
+  off.** A third recovery also worked (supervisor restarted; coder back on board 0 in 120 s; canary again
+  identical, so three restarts with the same answer `42`). The agent wrote `reference.json` with four
+  checks. Three are solid: the weights load on CPU with 0 missing, 0 unexpected and 0 mismatched
+  keys (the 15 `mtp.*` keys are ignored by the model class, which it noticed and explained); 14 of 14
+  tokenizer round trips, including Devanagari and Thai; and a greedy decode of the card's landlord
+  prompt whose first token equals the argmax of the logits, with reference ids and top-5 logits saved
+  as evidence for later comparison with the chip. The fourth, "matches the card", is weak: the generated
+  text begins "Let me work through this carefully. The user wants me to write a text message...",
+  which is the model reasoning aloud, while the card says it "just gives you the text". The check
+  passed because the output was non-empty and had no preamble pattern; the agent wrote that caveat
+  into its own note, so it was honest about it. To follow up: why the model reasons first under the
+  default chat template, and whether the chip's output should be compared in that mode.
+- **15:38:13Z stage 2 (functional decoder on one chip) started,** prepare step on the large tier. This is
+  the first stage that will need a board.
