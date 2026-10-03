@@ -143,3 +143,25 @@ path, so packaging is the next piece to build after stages 0 to 6 are shown to w
   partial directory to `stages/1.partial-1` (kept, not deleted), and restarted stage 1 at 13:56:22Z with
   the escalation tier (the same large server, since it is the only chip tier serving). Fix in
   progress: a truncated reply gets one retry with a nudge; two in a row end the step as an error.
+- **13:56:22Z to 14:01:43Z run 3, stage 1 failed again after escalation** (second attempt: a model reply
+  of 8,192 tokens with no tool call and no text on turn 12). The run paused with
+  "stage 1 failed after escalation: reference.json is missing". The supervisor kept its lease and the
+  coder, as designed.
+- **14:02Z truncation fix merged** (`agent-truncation`; suite 1180 passed, 1 skipped): a reply cut off at
+  `max_tokens` with no tool call gets a nudge and one retry, and a second cut-off in a row ends the
+  step as an error. Tests were seen to fail before the fix and each guard was mutated. The commit
+  message and report came from an implementer whose hand-back text was a placeholder; the commit,
+  report file and suite result were checked directly.
+- **14:03Z crash recovery tried on real hardware.** To load the fixed code into a paused run, I sent
+  SIGKILL to the supervisor (pid 669576, which I started). The coder survived, still holding board 0
+  under a lease whose owner was dead (gozer showed HELD-FOREIGN). I restarted the supervisor on the same
+  run directory (pid 748699) and sent `resume` at 14:08:52Z. The supervisor wrote "relaunch the coder
+  under this supervisor's lease", stopped the old coder with `tt-model stop` (clean, 1.0 s), took a new
+  lease (it landed on board 1, chips 2 and 3, because board 0's old lease had not been reaped yet),
+  started the 2-chip bundle there, and had it ready in about 110 s. The canary answer after the
+  restart has the same sha256 as before it (answer `42`), so the greedy canary was identical across a
+  restart for this model. This is the first run of the crash-recovery path on hardware; the
+  tests had covered it only with fakes. The board-1 `IndexError` seen earlier with another build did
+  not occur with this bundle.
+- **14:10:47Z stage 1 started again** with the fixed agent loop (escalated attempt, partial directory
+  `stages/1.partial-2` kept).
