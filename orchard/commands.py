@@ -49,8 +49,12 @@ def run_command(argv, timeout: float, *, env: dict | None = None,
         out, err = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         if not kill_on_timeout:
-            # Left running on purpose. The Popen object is dropped: the process is never reaped
-            # and its pipes are never read. gozer prints little, so the pipes cannot fill.
+            # Left running on purpose. The Popen object is dropped and its pipes are never read.
+            # CPython's Popen.__del__ puts a child that is still running on subprocess._active,
+            # and the next Popen reaps it once it exits. gozer prints little, so its pipes cannot
+            # fill. `tt-model serve --detach` also uses this path, and nobody has measured how much
+            # it prints. If it writes more than the 64 KiB pipe buffer before the container is up,
+            # it blocks on the write and the start stalls.
             return CommandResult(argv, None, timed_out=True, left_running=True, pid=proc.pid)
         try:
             os.killpg(proc.pid, signal.SIGKILL)

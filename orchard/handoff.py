@@ -304,8 +304,10 @@ class Handoff:
             except Refused as exc:
                 if exc.permanent:
                     self._block(f"the lease adapter cannot reset these chips: {exc}")
-                # gozer's refusal ran nothing (spec section 8, item 1). The usual cause is a device
-                # still open, so look again before the one retry the retry rule allows.
+                # A refused reset ran nothing (spec section 8, item 1). Exit 15 from `gozer release`
+                # is different: release can run the reset and then return 15, but this method
+                # calls reset only. The usual cause is a device still open, so look again before
+                # the one retry the retry rule allows.
                 if attempt == 2:
                     self._block(f"gozer refused the reset twice: {exc}")
                 check = self._wait_stopped()

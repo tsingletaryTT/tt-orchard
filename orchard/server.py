@@ -306,8 +306,10 @@ class ServerControl:
 
     def _maps_our_device(self, paths: list[str], mine: bool) -> bool:
         # tt-model maps the whole directory in some cases. Another agent's container can do the
-        # same (common for inference-server style runs); that one does not hold our chips any more
-        # than the rest of the box, so only our own container's whole-directory mapping blocks.
+        # same (common for inference-server style runs). Such a container can open our chips, and
+        # if it runs as root gozer cannot see it. The check accepts that risk: only our own
+        # container's whole-directory mapping blocks. The notice that names the other container
+        # (handoff.py, _wait_stopped) is the only signal an operator gets.
         if "/dev/tenstorrent" in paths:
             return mine
         if self.dev_indices is None:               # unknown chips: any device counts

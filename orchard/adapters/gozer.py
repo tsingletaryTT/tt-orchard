@@ -31,7 +31,7 @@ EXIT_OK = 0
 EXIT_QUEUED = 10
 EXIT_UNAVAILABLE = 12          # acquire --no-queue found no chips; also a bad argument
 EXIT_NO_LEASE = 13             # no such lease or ticket
-EXIT_REFUSED = 15              # reset or release refused; nothing was done
+EXIT_REFUSED = 15              # reset refused, or release refused after it may have reset first
 EXIT_RESET_FAILED = 17         # reset ran tt-smi and it failed; the lease is untouched
 EXIT_RESET_CHANGED_HANDS = 18  # reset ran, and afterwards the lease was gone or taken
 
