@@ -43,7 +43,7 @@ write a script.
 
 ## Why the scripts do what they do
 
-Three facts decide whether a swap works. Each was found by failing first.
+Four facts decide whether a swap works. Each was found by failing first.
 
 1. The model directory must look like the nearest model's. The bundle's TT model class is
    registered for the nearest model's architecture, which is a vision-language model. So the
@@ -51,9 +51,16 @@ Three facts decide whether a swap works. Each was found by failing first.
 2. The tensor cache must be empty or belong to this model. The bundle reads a cache keyed only by
    layer name, so another model's cache serves that model's weights without any error. The
    script refuses a non-empty cache that lacks its `.orchard-model` marker.
-3. The bundle's `run.sh` is run from a copy with three edits: `HERE=` points at the bundle,
-   `--model` points at the model directory, and the `--revision` flags are removed (a local
-   directory has no revision).
+3. The bundle's `run.sh` is run from a copy with these edits: `HERE=` points at the bundle,
+   `--model` points at the model directory, the `--revision` flags are removed (a local
+   directory has no revision), and `HF_MODEL` is set to the model directory.
+4. The server must be told where the new weights are. The TT runtime takes its weights directory
+   from `MODEL_WEIGHTS_DIR`, then `HF_MODEL`, then the config path. The bundle's `run.sh` exports
+   `HF_MODEL` as the nearest model's id, so `--model` alone gives vLLM the new config and tokenizer
+   while the chip loads the nearest model's weights. The first hand prototype did exactly that: it
+   agreed with the Hemmingway-1 CPU reference on 25 of 32 tokens. With `MODEL_WEIGHTS_DIR` set to
+   the model directory it agreed on 30 of 32, and its free-run text matched the CPU text. The
+   template sets `MODEL_WEIGHTS_DIR` and `HF_MODEL` for you and records both in `swap-check.json`.
 
 ## Prepare phase: the steps
 

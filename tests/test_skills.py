@@ -71,3 +71,11 @@ def test_the_swap_skill_quotes_the_gate_bar_from_defaults():
     assert f"`top1_agreement` of at\nleast {SWAP_TOP1_MIN}" in text or \
         f"`top1_agreement` of at least {SWAP_TOP1_MIN}" in text
     assert "0.6" not in text
+
+
+def test_the_swap_skill_explains_the_weights_directory_fact():
+    text = " ".join((SKILLS / "weights-swap-check.md").read_text().split())   # line breaks as spaces
+    assert "Four facts decide whether a swap works." in text
+    assert "4. The server must be told where the new weights are." in text
+    for needed in ("MODEL_WEIGHTS_DIR", "HF_MODEL", "30 of 32", "25 of 32", "The template sets"):
+        assert needed in text, needed
