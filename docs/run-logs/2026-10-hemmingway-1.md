@@ -253,3 +253,22 @@ path, so packaging is the next piece to build after stages 0 to 6 are shown to w
   (34 GB, 2026-09-17) was not rebuilt and is still suspect. My earlier statement that the fault "looks
   specific to the 4-chip configuration on this machine" was wrong. The first-boot known-answer check is
   what exposed it. Server stopped and lease released afterwards; all four chips FREE.
+- **16:50Z to 17:14Z run 3, stage 2 with the new `weights-swap-check` skill (merged: weights-only path,
+  suite 1256 passed, 1 skipped).** A fourth recovery worked (coder ready in 121 s, canary identical again).
+  The prepare step took 12.5 minutes and produced `serve_and_compare.py`, a model directory, a run-script
+  copy and `hw_test.json` (deadline 2400 s), all following the skill: its own model-dir, a fresh tensor
+  cache under `orchard-runs/cache/hemmingway-1`, port 8100. **First hardware test run by the harness
+  itself, 17:05:03Z.** The supervisor found a free board (board 1) and did not park the coder, took a
+  test lease on chips 2 and 3, and started the test. The test crashed after 0.36 s:
+  `AttributeError: 'Popen' object has no attribute 'pgid'`. **That bug was in my skill text**, which said
+  `os.killpg(proc.pgid, ...)`. The agent copied it. The crash happened after the script had started the
+  server in its own session, so a vLLM server was left running on board 1 and holding the chips.
+  I stopped that process group by hand (the harness's own stray child), after which the supervisor released
+  the test lease (17:05:45Z). The skill is corrected (`proc.pid`, and start the `try` right after `Popen`).
+- **17:14:44Z the watchdog fired on a real agent for the first time.** The stage 2 finish step (36 turns)
+  had wandered into tt-metal firmware cache directories after the crash and then repeated the same
+  `ls` three times with identical output. The `repeated_tool_call` detector fired, the ladder sent a nudge
+  (`retry` entry) and then escalated, and the stage machine started a fresh prepare attempt at 17:14:45Z
+  with the corrected skill. This is the plan 3 watchdog working on real model behaviour, not a
+  replay. The earlier failed script's lesson for the harness: a test script that starts a server must
+  stop it on every exit path, which the skill now says first.
