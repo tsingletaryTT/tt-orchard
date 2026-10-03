@@ -120,6 +120,10 @@ class World:
         self.leave_worker_on_stop = False
         self.crash_in_stop = False          # die inside tt-model stop, after the coder stopped
         self.refuse_resets = 0              # the next n resets are refused (exit 15)
+        # A container only docker shows: gozer's status does not see it (it is root's, or it maps
+        # the device without opening it), so chips look CLAIMED while the server check fails.
+        self.invisible_container = False
+        self.container_appears_on_refusal = False   # the first refused reset sets the flag above
         self.lose_lease_on_reset = False    # the next reset finds the lease taken (exit 18)
         self.reset_fails = False            # tt-smi ran and failed (exit 17)
         self.reset_unavailable = False      # the adapter has no reset command (permanent refusal)
@@ -200,6 +204,8 @@ class FakeAdapter:
             raise ResetFailed("tt-smi -r failed")
         if w.refuse_resets > 0:
             w.refuse_resets -= 1
+            if w.container_appears_on_refusal:
+                w.invisible_container = True
             raise Refused("device still open (HELD-FOREIGN)")
         if self._holding():
             raise Refused("device still open")
@@ -254,7 +260,7 @@ class FakeServer:
 
     def confirm_stopped(self):
         # docker sees only the container; a leftover worker is invisible to it.
-        ok = not self.world.coder_running
+        ok = not self.world.coder_running and not self.world.invisible_container
         return StopCheck(ok, {"docker_ps": ok}, {})
 
     def wait_ready(self, budget_s):

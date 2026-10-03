@@ -181,6 +181,20 @@ def test_a_refused_reset_is_retried_once_then_blocks(tmp_path):
     assert world.resets == []
 
 
+def test_the_stop_is_checked_again_before_the_reset_is_retried(tmp_path):
+    # Spec Review Focus 2. After the refusal a container that only docker sees shows up. The
+    # chips still look CLAIMED, so only the server check can stop the retry.
+    world = World()
+    world.refuse_resets = 1
+    world.container_appears_on_refusal = True
+    h, world, ledger = make_handoff(tmp_path, world)
+    with pytest.raises(Blocked, match="reset was refused and the chips are still in use") as exc:
+        h.park()
+    assert [c for c in h.adapter.calls if c[0] == "reset"] == [("reset", "L1")]
+    assert world.resets == [] and exc.value.evidence["checks"] == {"docker_ps": False}
+    assert not [e for e in ledger.read() if e["event"] == "retry"]
+
+
 def test_one_refusal_then_success_records_two_attempts(tmp_path):
     world = World()
     world.refuse_resets = 1
