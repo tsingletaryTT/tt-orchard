@@ -115,6 +115,18 @@ two-process lock test.
   162 kill points with the coder on four chips and 107 with the coder on two. Each resumed run
   finished with the same stage results, bundle and stage 6 numbers, and no lease left behind. The
   Hemmingway-1 hardware run has not been run.
+- 2026-10-02: plan 4 fix pass after the final review (`.superpowers/plan4-final-review.md`; report in
+  `.superpowers/plan4-fixpass-report.md`). Prompt: fix C1, C2 and I1 to I5 test-first, one commit each,
+  with a mutation per new guard; the operator's rulings fixed the scope. Key decisions: the runner now
+  refuses gozer writes (gozer run included), tt CLI resets, docker and tt-model control, kill and
+  systemctl stop, ssh/scp/rsync to a host, uploads and curl/wget writes; agent shells get a no-chip
+  device mask (`0000:ff:00.0`, UNVERIFIED on hardware); a preflight refuses to start while credential
+  files are visible unless the operator accepts it; SIGINT and SIGTERM take the abort path and other
+  errors release the hardware (as `except` clauses, so the kill test's Crash still models SIGKILL);
+  a coder boot that never reached "coder started" is finished before any stage. Shell-running tests
+  use a stub PATH. The suite has 1141 passed and 1 skipped. Notable moment: a mutation that removed
+  the signal handlers made SIGTERM kill pytest, so the mutation helper crashed before restoring the
+  file; `git checkout` in the next run restored it, and that run was repeated.
 
 ## Notable moments
 - The `shlex` runner was shown to be bypassable (comments, keywords, `eval`, shells on stdin,
