@@ -1,10 +1,14 @@
 """The agent's environment and tools: no tokens, checked commands, writes only in the stage dir."""
 import os
+import shutil
 import time
 
 import pytest
 
 from orchard.agent import Tools, agent_env
+
+# Every test here may start real bash, so every one runs with stub tools first on PATH.
+pytestmark = pytest.mark.usefixtures("stub_tools")
 
 TOKENS = {"HF_TOKEN": "hf_supervisor_secret", "HUGGING_FACE_HUB_TOKEN": "hf_other_secret",
           "GH_TOKEN": "ghp_supervisor_secret", "GITHUB_TOKEN": "ghs_supervisor_secret",
@@ -50,12 +54,22 @@ def test_a_shell_command_finds_no_token_in_its_environment_or_home(run, tmp_path
     assert out.startswith("exit 1") and "hf_planted_secret" not in out
 
 
-def test_a_refused_command_never_starts(run):
+def test_agent_shells_in_these_tests_find_only_stub_tools(run, stub_tools):
+    # The tests below run real bash. If a runner rule regressed, a refused command would run, so
+    # every tool that could touch hardware, a remote or a lease must resolve to a stub here.
+    path = agent_env(run)["PATH"]
+    for name in stub_tools.NAMES:
+        found = shutil.which(name, path=path)
+        assert found == str(stub_tools.dir / name), (name, found)
+
+
+def test_a_refused_command_never_starts(run, stub_tools):
     t = tools(run)
     out = t.shell("touch started.txt && git push origin main")
     assert out.startswith("refused:") and "git push" in out
     assert not (run / "started.txt").exists()
     assert t.shell("rm -f /nonexistent-orchard-dir/x").startswith("refused:")
+    assert stub_tools.calls() == []          # no stub ran, so no real tool could have run either
 
 
 def test_shell_runs_in_the_run_directory(run):

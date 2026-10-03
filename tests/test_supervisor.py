@@ -1,4 +1,6 @@
 """The supervisor run: escalation, pause and resume, abort, disk, the hardware test, the coder."""
+import shutil
+
 import pytest
 
 from fake_model import FakeModel, turn
@@ -7,6 +9,9 @@ from orchard.ledger import Ledger
 from orchard.supervisor import EXIT_ABORTED, EXIT_READY, EXIT_REFUSED, Control, build, main, parse
 from run_fakes import (BOARDS, FILES, CrashingLedger, Machine, MachineAdapter, MachineCoder, argv,
                        bringup, clock, plenty, where, write_tiers)
+
+# The hardware test and agent shells run real bash here, so stub tools come first on PATH.
+pytestmark = pytest.mark.usefixtures("stub_tools")
 
 
 class Stop(Exception):
@@ -175,7 +180,9 @@ def test_a_stage_short_of_disk_pauses_until_the_operator_resumes(rig):
     assert notes == ["stage 1 needs 5.0 GB free on the run directory's disk; 2.0 GB is free"]
 
 
-def test_a_refused_test_command_fails_the_stage_before_any_hardware_is_used(rig):
+def test_a_refused_test_command_fails_the_stage_before_any_hardware_is_used(rig, stub_tools):
+    # If the runner's reset rule regressed, `tt-smi -r 0` would run. It must reach a stub.
+    assert shutil.which("tt-smi") == str(rig.tmp / "stub-bin" / "tt-smi")
     bad = {(2, "prepare"): {**FILES[(2, "prepare")],
                             "hw_test.json": {"command": "tt-smi -r 0", "deadline_s": 60}}}
     rig.script = escalation_aware(2, bad)
@@ -185,6 +192,7 @@ def test_a_refused_test_command_fails_the_stage_before_any_hardware_is_used(rig)
     started = [e for e in rig.entries() if e["event"] == "decision" and e["stage"] == 2
                and e["data"]["decision"] == "hardware test started"]
     assert len(started) == 1                    # only the escalated attempt ran a test
+    assert stub_tools.calls() == []             # tt-smi never ran, not even the stub
 
 
 def test_the_hardware_test_gets_the_leased_chips_and_no_token(rig, monkeypatch):
