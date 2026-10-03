@@ -177,3 +177,154 @@ class Tools:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
         return f"wrote {len(content)} characters to {os.path.relpath(p, os.path.realpath(self.run_dir))}"
+
+
+# ---- the model endpoint -------------------------------------------------------------------------
+
+class AgentError(Exception):
+    """The model endpoint did not give a usable answer."""
+
+
+def probe_model(endpoint: str, model: str, timeout: float = 5.0) -> bool:
+    """Does the OpenAI-compatible server at `endpoint` (ending in /v1) list `model`?"""
+    try:
+        with urllib.request.urlopen(endpoint.rstrip("/") + "/models", timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(data, dict) and any(isinstance(m, dict) and m.get("id") == model
+                                          for m in data.get("data") or [])
+
+
+def sha(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True)
+class Outcome:
+    status: str          # done, escalate, pause, operator-pause, abort, turns, error
+    turns: int
+    final_text: str = ""
+    detail: str = ""
+
+
+class AgentStep:
+    """One agent step: a fresh conversation for one stage phase, run until the model stops calling
+    tools, the turn limit is reached, or the supervisor says stop.
+
+    `control` is the supervisor's actuator: `take_nudges(agent) -> list[str]` and
+    `stop_reason() -> str | None`. `feed` is the watchdog's `feed(Event)`.
+    """
+
+    def __init__(self, *, agent: str, endpoint: str, model: str, tools: Tools, ledger, stage: int,
+                 phase: str, feed, control, run_dir, evidence_dir, log_path, http=post_json,
+                 clock=time.time, guard: RetryGuard | None = None, max_turns: int = AGENT_MAX_TURNS,
+                 max_tokens: int = AGENT_MAX_TOKENS, timeout: float = AGENT_REQUEST_TIMEOUT_S):
+        self.agent, self.endpoint, self.model, self.tools = agent, endpoint, model, tools
+        self.ledger, self.stage, self.phase = ledger, stage, phase
+        self.feed, self.control, self.http, self.clock = feed, control, http, clock
+        self.run_dir, self.evidence_dir = Path(run_dir), Path(evidence_dir)
+        self.log_path = Path(log_path)
+        self.guard = guard if guard is not None else RetryGuard()
+        self.max_turns, self.max_tokens, self.timeout = max_turns, max_tokens, timeout
+        self._seen: dict[str, tuple[int, int]] = {}
+
+    # ---- helpers ----------------------------------------------------------------------------
+
+    def _event(self, kind: str, **fields) -> None:
+        self.feed(Event(ts=self.clock(), agent=self.agent, kind=kind, stage=self.stage, **fields))
+
+    def _log(self, record: dict) -> None:
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    def _snapshot(self) -> dict[str, tuple[int, int]]:
+        out = {}
+        if self.evidence_dir.is_dir():
+            for f in sorted(self.evidence_dir.rglob("*")):
+                if f.is_file():
+                    st = f.stat()
+                    out[str(f)] = (st.st_size, st.st_mtime_ns)
+        return out
+
+    def _record_new_evidence(self) -> None:
+        now = self._snapshot()
+        for path, stamp in now.items():
+            if self._seen.get(path) != stamp:
+                rec = evidence_record(self.run_dir, path)
+                self.ledger.append("evidence", self.stage, what="evidence file", phase=self.phase, **rec)
+                self._event("evidence", name=rec["path"])
+        self._seen = now
+
+    def _send(self, request: dict) -> dict:
+        url = self.endpoint.rstrip("/") + "/chat/completions"
+        last = None
+        # The guard allows the call and one retry of the identical request (spec section 3). The
+        # range is only a backstop; the guard is what stops a third send.
+        for attempt in range(1, 4):
+            if not self.guard.allow(self.agent, request):
+                break
+            try:
+                return self.http(url, request, self.timeout)
+            except (OSError, ValueError, CanaryError) as exc:
+                last = exc
+                self.ledger.append("retry", self.stage, what="model request", phase=self.phase,
+                                   attempt=attempt, error=str(exc)[:300])
+        raise AgentError(f"the model request to {url} failed and was retried once: {last}")
+
+    def _end(self, status: str, turns: int, final_text: str = "", detail: str = "") -> Outcome:
+        if self.log_path.exists():
+            self.ledger.append("evidence", self.stage, what="transcript", phase=self.phase,
+                               status=status, turns=turns, **evidence_record(self.run_dir, self.log_path))
+        return Outcome(status, turns, final_text, detail)
+
+    # ---- the loop ---------------------------------------------------------------------------
+
+    def run(self, system: str, user: str) -> Outcome:
+        messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+        logged = 0
+        self._seen = self._snapshot()       # files already here (a resumed stage) are not new
+        for turn in range(1, self.max_turns + 1):
+            for text in self.control.take_nudges(self.agent):
+                messages.append({"role": "user", "content": text})
+            reason = self.control.stop_reason()
+            if reason:
+                return self._end(reason, turn - 1)
+            request = {"model": self.model, "messages": messages, "tools": TOOL_SCHEMAS,
+                       "temperature": 0, "max_tokens": self.max_tokens, "stream": False}
+            try:
+                data = self._send(request)
+                msg = data["choices"][0]["message"]
+                if not isinstance(msg, dict):
+                    raise TypeError("message is not an object")
+            except AgentError as exc:
+                return self._end("error", turn - 1, detail=str(exc))
+            except (KeyError, IndexError, TypeError) as exc:
+                return self._end("error", turn - 1, detail=f"no choices[0].message: {exc}")
+            content = msg.get("content") if isinstance(msg.get("content"), str) else ""
+            calls = [c for c in msg.get("tool_calls") or [] if isinstance(c, dict)]
+            usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+            details = usage.get("completion_tokens_details") or {}
+            assistant = {"role": "assistant", "content": content}
+            if calls:
+                assistant["tool_calls"] = calls
+            messages.append(assistant)
+            self._log({"turn": turn, "sent": messages[logged:-1], "received": assistant, "usage": usage})
+            logged = len(messages)
+            self._event("response", input_tokens=usage.get("prompt_tokens"),
+                        output_tokens=usage.get("completion_tokens"),
+                        thinking_tokens=details.get("reasoning_tokens") if isinstance(details, dict) else None,
+                        text_hash=sha(content) if content else None, had_tool_call=bool(calls))
+            if not calls:
+                return self._end(self.control.stop_reason() or "done", turn, final_text=content)
+            for call in calls:
+                fn = call.get("function") if isinstance(call.get("function"), dict) else {}
+                name, args = str(fn.get("name", "")), fn.get("arguments") or "{}"
+                args = args if isinstance(args, str) else json.dumps(args)
+                self._event("tool_call", tool=name, args_hash=sha(args))
+                result = self.tools.call(name, args)
+                messages.append({"role": "tool", "tool_call_id": str(call.get("id", "")), "content": result})
+                self._event("tool_result", tool=name, output_hash=sha(result))
+                self._record_new_evidence()
+        return self._end("turns", self.max_turns, detail=f"no final answer after {self.max_turns} turns")
