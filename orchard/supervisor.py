@@ -12,6 +12,14 @@ default); a second failure pauses the run. When stage 0 finds that the model nee
 (a full port), the run pauses before stage 2 for the operator.
 
 Operator commands go through a one-word control file in the run directory: pause, resume, abort.
+SIGINT (Ctrl-C) and SIGTERM take the same path as abort: the running command is killed, the coder
+is stopped, every lease this process holds is released, the ledger records the abort and the
+process exits 4. Any other error that ends the run (an adapter error, a corrupt ledger, a bug) also
+stops the coder and releases the leases before it is reported, with exit 3; that run is not
+aborted, so running the same command again resumes it. When the ledger cannot be read, the
+release works from what this process remembers. A SIGKILL, a power cut or a crash of Python
+itself runs no handler: the coder then keeps its chips under a dead pid's lease until the run is
+resumed (which re-leases it) or aborted.
 A paused supervisor keeps its leases and waits. Abort stops the coder, releases its lease and
 closes the ledger. The run ends at "ready for operator review". The supervisor never publishes.
 Agents are kept from publishing in three ways, none of them complete: the command runner refuses
@@ -25,11 +33,14 @@ Plan 4 runs stages 0 to 6 and 8. Stage 7 (package and container build) is record
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import pwd
 import shutil
+import signal
 import sys
+import threading
 import time
 from pathlib import Path
 from urllib.parse import urlparse
@@ -56,13 +67,29 @@ from orchard.watchdog import (Event, IdenticalResponses, Ladder, NoNewEvidence, 
 
 WHO = "orchard:supervisor"
 AGENT = "stage-agent"                 # the launched agent's name; the ladder counts its rungs per stage
-EXIT_READY, EXIT_REFUSED, EXIT_ABORTED = 0, 2, 4
+EXIT_READY, EXIT_REFUSED, EXIT_ERROR, EXIT_ABORTED = 0, 2, 3, 4
 FULL_PORT = ("stage 0 found a full port (new model code is needed); plan 4 runs weights-only "
              "bring-ups, so the operator decides whether to go on")
 SKILLS_DIR = Path(__file__).with_name("skills")
 
 
 # ---- operator control ---------------------------------------------------------------------------
+
+class Interrupted(BaseException):
+    """SIGINT or SIGTERM arrived. A BaseException, so an `except Exception` on the way does not
+    swallow it."""
+
+    def __init__(self, name: str):
+        super().__init__(name)
+        self.name = name
+
+
+def _raise_interrupted(signum, frame):
+    raise Interrupted(signal.Signals(signum).name)
+
+
+STOP_SIGNALS = (signal.SIGINT, signal.SIGTERM)
+
 
 class Control:
     """One word in `<run dir>/control`: pause, resume or abort.
@@ -249,7 +276,9 @@ class Supervisor:
         self.actuator = RunActuator(self.control)
         self.guard = RetryGuard()
         self.coder_lease: Lease | None = None
+        self.test_lease: Lease | None = None      # a stage's own test lease, while it is held
         self.watchdog: Watchdog | None = None
+        self.stop_message = ""                     # what the shutdown did, for main to print
         agent_env(self.run_dir, extra=self.extra_env)     # refuse a credential before anything runs
 
     # ---- small helpers ----------------------------------------------------------------------
@@ -276,6 +305,118 @@ class Supervisor:
     # ---- the run ----------------------------------------------------------------------------
 
     def run(self) -> int:
+        """Run until ready, aborted or stopped. Every way out of the loop that this process
+        survives releases the hardware first.
+
+        The release is wired as `except` clauses rather than a bare `finally`: the tests' Crash
+        stands for a SIGKILL, after which no code runs, and a `finally` would release on it too
+        and hide the crash recovery the kill test exists to check."""
+        with self._signals():
+            try:
+                return self._run()
+            except Interrupted as exc:
+                return self._stop_on_signal(exc.name)
+            except KeyboardInterrupt:              # SIGINT when the handler is not installed
+                return self._stop_on_signal("SIGINT")
+            except Exception as exc:
+                self._stop_on_error(exc)
+                raise
+
+    @contextlib.contextmanager
+    def _signals(self):
+        """SIGINT and SIGTERM raise Interrupted while the run is in progress. Handlers can only be
+        installed from the main thread; elsewhere the run keeps the process's handlers."""
+        if threading.current_thread() is not threading.main_thread():
+            yield
+            return
+        old = {s: signal.getsignal(s) for s in STOP_SIGNALS}
+        for s in STOP_SIGNALS:
+            signal.signal(s, _raise_interrupted)
+        try:
+            yield
+        finally:
+            for s, handler in old.items():
+                signal.signal(s, handler)
+
+    def _ignore_signals(self) -> None:
+        """A second Ctrl-C during the shutdown would leave the hardware half released, so the
+        shutdown ignores it. `_signals` puts the old handlers back when the run returns."""
+        if threading.current_thread() is threading.main_thread():
+            for s in STOP_SIGNALS:
+                signal.signal(s, signal.SIG_IGN)
+
+    def _stop_on_signal(self, name: str) -> int:
+        self._ignore_signals()
+        print(f"{name}: stopping the coder and releasing the hardware; this can take a few "
+              "minutes", file=sys.stderr)
+        try:
+            # Recorded first, as in _abort: a crash during the release still leaves an aborted
+            # run, and the next start finishes the release and refuses to go on.
+            self.ledger.append("decision", None, decision="abort", by=f"signal {name}")
+            ok = self._release_test_lease() and self._release_all()
+        except Exception:
+            ok = self._release_from_memory()
+        self.stop_message = f"Aborted by {name}. " + self._release_summary(ok)
+        return EXIT_ABORTED
+
+    def _stop_on_error(self, exc: Exception) -> None:
+        self._ignore_signals()
+        try:
+            self.ledger.append("notice", None, what="the supervisor stopped on an error",
+                               error=f"{type(exc).__name__}: {exc}"[:500])
+            ok = self._release_test_lease() and self._release_all()
+        except Exception:
+            ok = self._release_from_memory()
+        self.stop_message = self._release_summary(ok) + (
+            " Fix the cause, then run the same command again to resume." if ok else "")
+
+    @staticmethod
+    def _release_summary(ok: bool) -> str:
+        if ok:
+            return "The coder was stopped and every lease this run held was released."
+        return ("Releasing the hardware failed, so the chips may still be held. Read the last "
+                "notice in the ledger and `gozer status` before doing anything else.")
+
+    def _release_test_lease(self) -> bool:
+        """Release a stage's own test lease if one is held. The test command is already dead:
+        spawn_checked kills its session on the way out."""
+        lease = self.test_lease
+        if lease is None:
+            return True
+        try:
+            self.adapter.release(lease)
+        except AdapterError as exc:
+            self.ledger.append("notice", None, what="releasing the test lease failed",
+                               lease_id=lease.lease_id, error=str(exc))
+            return False
+        self.test_lease = None
+        self.ledger.append("decision", None, decision="test lease released", lease_id=lease.lease_id)
+        return True
+
+    def _release_from_memory(self) -> bool:
+        """The release when the ledger cannot be read or written: use the leases this process
+        remembers. Nothing is recorded, because the ledger is what failed."""
+        ok = True
+        for lease, is_coder in ((self.test_lease, False), (self.coder_lease, True)):
+            if lease is None:
+                continue
+            try:
+                if is_coder and not self.coder.confirm_stopped().stopped:
+                    self.coder.stop()
+                if is_coder:
+                    check = wait_stopped(self.coder, self.adapter, lease,
+                                         quiet_wait_s=self.budgets.quiet_wait_s,
+                                         poll_s=self.budgets.poll_s, clock=self.clock,
+                                         sleep=self.sleep, accept=("CLAIMED", "STALE", "FREE"))
+                    if not check["ok"]:
+                        ok = False
+                        continue
+                self.adapter.release(lease)
+            except (AdapterError, ServerError, OSError):
+                ok = False
+        return ok
+
+    def _run(self) -> int:
         p = run_progress(self.ledger.read())
         if p.aborted or p.finished:
             self._release_all()           # finishes a release a crash interrupted; else does nothing
@@ -348,14 +489,15 @@ class Supervisor:
         self._release_all()
         return EXIT_ABORTED
 
-    def _release_all(self) -> None:
-        """Stop the coder and release its lease. Safe to call again: a released lease is skipped."""
+    def _release_all(self) -> bool:
+        """Stop the coder and release its lease. Safe to call again: a released lease is skipped.
+        Returns False when the lease could not be released."""
         entries = self.ledger.read()
         lease_rec, server_rec, _ = coder_state(entries)
         released = {e["data"].get("lease_id") for e in entries
                     if e["event"] == "decision" and e["data"].get("decision") == "hardware released"}
         if lease_rec is None or lease_rec["lease_id"] in released:
-            return
+            return True
         lease = Lease.from_record(lease_rec)
         if server_rec:
             self.coder.adopt(server_rec)
@@ -370,11 +512,13 @@ class Supervisor:
                 self.ledger.append("notice", None, blocked=True,
                                    reason="the coder is not confirmed stopped; the lease was not "
                                           "released", evidence=check)
-                return
+                return False
             self.adapter.release(lease)
             self.ledger.append("decision", None, decision="hardware released", lease_id=lease.lease_id)
+            return True
         except (AdapterError, ServerError, OSError) as exc:
             self.ledger.append("notice", None, what="releasing the hardware failed", error=str(exc))
+            return False
 
     # ---- the coder ----------------------------------------------------------------------------
 
@@ -412,6 +556,7 @@ class Supervisor:
             lease = reacquire(self.adapter, chips=self.coder_chips, who=WHO, reason="coder",
                               ledger=self.ledger, stage=None, wait_budget_s=COLD_BOOT_BUDGET_S,
                               clock=self.clock, sleep=self.sleep)
+        self.coder_lease = lease          # known from here on, so a shutdown can release it
         # Recorded before the start: a crash during the boot leaves the lease and server in the
         # ledger, so the restart can stop that server and re-lease.
         self.ledger.append("decision", None, decision="coder starting", lease=lease.record(),
@@ -619,12 +764,14 @@ class Supervisor:
         lease = reacquire(self.adapter, chips=spec.boards * CHIPS_PER_BOARD, who=WHO,
                           reason=f"stage {n} hardware test", ledger=self.ledger, stage=n,
                           wait_budget_s=spec.budget_s, clock=self.clock, sleep=self.sleep, exact=exact)
+        self.test_lease = lease
         self.ledger.append("decision", n, decision="test lease taken", test_lease=lease.record())
         self._run_test(spec, stage_dir, test, lease)
         try:
             self.adapter.release(lease)        # the lease tool resets the board as it releases
         except AdapterError as exc:
             self._block(n, f"releasing the test lease failed: {exc}", lease_id=lease.lease_id)
+        self.test_lease = None
         self.ledger.append("decision", n, decision="test lease released", lease_id=lease.lease_id)
 
     def _run_test(self, spec, stage_dir: Path, test: dict, lease: Lease) -> dict:
@@ -736,10 +883,25 @@ def main(argv=None, *, home=None) -> int:
     run_dir = Path(args.run_dir)
     try:
         with Ledger(run_dir / "ledger.jsonl") as ledger:
-            code = build(args, ledger, home=home).run()
-    except (TierConfigError, ValueError, LedgerLocked, LedgerCorrupt) as exc:
+            # Refusals happen here, before anything is recorded or started.
+            try:
+                sup = build(args, ledger, home=home)
+            except (TierConfigError, ValueError, LedgerCorrupt) as exc:
+                print(f"refused: {exc}", file=sys.stderr)
+                return EXIT_REFUSED
+            # From here an error is not a refusal: the run had started, and run() has already
+            # tried to release the hardware.
+            try:
+                code = sup.run()
+            except Exception as exc:
+                print(f"error: the run stopped on {type(exc).__name__}: {exc}. {sup.stop_message}",
+                      file=sys.stderr)
+                return EXIT_ERROR
+    except (LedgerLocked, LedgerCorrupt) as exc:
         print(f"refused: {exc}", file=sys.stderr)
         return EXIT_REFUSED
+    if sup.stop_message:
+        print(sup.stop_message, file=sys.stderr)
     print({EXIT_READY: "ready for operator review", EXIT_ABORTED: "aborted"}.get(code, code))
     return code
 

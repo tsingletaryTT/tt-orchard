@@ -267,8 +267,21 @@ Watch and steer, from another shell:
     python3 -m orchard.supervisor control --run-dir /mnt/bonus/models/hemmingway-1/orchard-run-1 abort
 
 A paused run holds its leases and waits. Read the last `notice` and `decision` entries before
-resuming. Abort stops the coder and releases the lease. If the supervisor dies, run the same
-`run` command again: it replays the ledger, re-leases the coder under its new pid, and resumes.
+resuming. `control abort` is the normal way to stop: it stops the coder, releases the lease and
+ends the run, which then cannot be resumed.
+
+Ctrl-C (SIGINT) and `kill <pid>` (SIGTERM) on the supervisor take the same abort path. The
+supervisor kills the agent's running command or the hardware test, stops the coder, releases
+every lease it holds, records the abort and exits 4. This can take a few minutes, and a second
+Ctrl-C during it is ignored. Any other error that ends the run (exit 3, printed as `error:`) also
+stops the coder and releases the leases. That run is not aborted: fix the cause and run the same
+`run` command again to resume. Exit 2 (`refused:`) means nothing was started.
+
+Recovery after a SIGKILL, a reboot or a Python crash, where no handler runs: the coder keeps the
+four chips under a dead pid's lease. Run the same `run` command again. It replays the ledger,
+stops that coder, takes a new lease under its own pid, starts the coder again (a cold boot of up
+to 45 min) and resumes. To end the run instead, send `control abort` once it is running; it stops
+the coder and releases the lease at its next check.
 
 Compare stage 0 with the reference answer once stage 0 has passed:
 

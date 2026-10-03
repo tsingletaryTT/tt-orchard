@@ -101,7 +101,10 @@ def spawn_checked(command: str, run_dir, env: dict, timeout: float, stdout) -> t
     """Run one shell string after the runner's checks. Returns (exit code or None, timed out).
 
     Denied propagates: a refused string never starts. The command runs in its own session, so a
-    timeout kills everything it started.
+    timeout kills everything it started. So does anything that interrupts the wait (the
+    supervisor's SIGINT or SIGTERM handler, or an error): a terminal's Ctrl-C does not reach a
+    process in another session, so without this the command would keep running, possibly with a
+    device open, after the supervisor had released its lease.
     """
     check_string(command, run_dir)
     proc = subprocess.Popen(["bash", "-c", command], cwd=run_dir, env=env, stdin=subprocess.DEVNULL,
@@ -110,12 +113,19 @@ def spawn_checked(command: str, run_dir, env: dict, timeout: float, stdout) -> t
         proc.wait(timeout=timeout)
         return proc.returncode, False
     except subprocess.TimeoutExpired:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        proc.wait()
+        _kill_session(proc)
         return None, True
+    except BaseException:
+        _kill_session(proc)
+        raise
+
+
+def _kill_session(proc) -> None:
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    proc.wait()
 
 
 def clip(text: str, limit: int) -> str:

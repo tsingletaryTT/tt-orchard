@@ -1,12 +1,17 @@
 """The supervisor run: escalation, pause and resume, abort, disk, the hardware test, the coder."""
+import os
 import shutil
+import signal
 
 import pytest
 
 from fake_model import FakeModel, turn
 from fakes import Crash
-from orchard.ledger import Ledger
-from orchard.supervisor import EXIT_ABORTED, EXIT_READY, EXIT_REFUSED, Control, build, main, parse
+from orchard import supervisor
+from orchard.adapters import AdapterError
+from orchard.ledger import Ledger, LedgerCorrupt
+from orchard.supervisor import (EXIT_ABORTED, EXIT_ERROR, EXIT_READY, EXIT_REFUSED, Control, build,
+                                main, parse)
 from run_fakes import (BOARDS, FILES, CrashingLedger, Machine, MachineAdapter, MachineCoder, argv,
                        bringup, clock, plenty, where, write_tiers)
 
@@ -33,6 +38,7 @@ class Rig:
         self.run_dir = tmp_path / "run"
         self.home = tmp_path / "operator-home"       # the preflight looks here, never in the real home
         self.clock, self.usage, self.on_sleep = clock(), plenty, None
+        self.adapter_cls, self.coder_cls = MachineAdapter, MachineCoder
 
     def sleep(self, s):
         self.clock.sleep(s)
@@ -43,8 +49,8 @@ class Rig:
         self.m.owner_pid = pid
         path = self.run_dir / "ledger.jsonl"
         with (CrashingLedger(path, crash_if=crash_if) if crash_if else Ledger(path)) as led:
-            sup = build(self.args, led, adapter=MachineAdapter(self.m, owner_pid=pid),
-                        coder=MachineCoder(self.m), versions={"tt_model": "test"}, clock=self.clock,
+            sup = build(self.args, led, adapter=self.adapter_cls(self.m, owner_pid=pid),
+                        coder=self.coder_cls(self.m), versions={"tt_model": "test"}, clock=self.clock,
                         sleep=self.sleep, disk_usage=lambda p: self.usage(p), home=self.home)
             return sup.run()
 
@@ -296,3 +302,103 @@ def test_a_coder_that_dies_is_restarted_once_and_a_second_death_blocks(rig):
     blocked = [e["data"]["reason"] for e in rig.entries() if e["event"] == "notice" and e["data"].get("blocked")]
     assert blocked == ["the coder died a second time since the last resume"]
     assert ("reset", "L1") in rig.m.resets        # the chips were reset before the single restart
+
+
+# ---- signals and errors release the hardware ------------------------------------------------------
+
+@pytest.mark.parametrize("sig", [signal.SIGINT, signal.SIGTERM])
+def test_a_signal_mid_run_takes_the_abort_path(rig, sig):
+    def script(request):
+        if "tools" in request and where(request) == (1, "run") and turn(request) == 0:
+            os.kill(os.getpid(), sig)               # Ctrl-C or kill while the agent works
+        return bringup(request)
+    rig.script = script
+    before = signal.getsignal(signal.SIGINT)
+    assert rig.run() == EXIT_ABORTED
+    assert signal.getsignal(signal.SIGINT) is before          # the run's handlers are removed
+    assert not rig.m.coder_running and rig.m.leases == {}
+    decisions = rig.decisions()
+    assert {"decision": "abort", "by": f"signal {sig.name}"} in decisions
+    assert decisions[-1]["decision"] == "hardware released"
+    starts = rig.m.coder_starts
+    assert rig.run() == EXIT_ABORTED and rig.m.coder_starts == starts    # it stays aborted
+
+
+def test_a_signal_during_the_hardware_test_kills_the_test_and_releases_its_lease(rig):
+    pid_file = rig.run_dir / "stages" / "2" / "child.pid"
+    command = ("python3 -c 'import os, signal, time; "
+               f"open(\"{pid_file}\", \"w\").write(str(os.getpid())); "
+               f"os.kill({os.getpid()}, signal.SIGTERM); time.sleep(30)'")
+    rig.script = lambda r: bringup(r, overrides={(2, "prepare"): {
+        **FILES[(2, "prepare")], "hw_test.json": {"command": command, "deadline_s": 60}}})
+    assert rig.run() == EXIT_ABORTED
+    with pytest.raises(ProcessLookupError):
+        os.kill(int(pid_file.read_text()), 0)                 # the test process is gone
+    assert rig.m.leases == {} and not rig.m.coder_running      # test lease and coder lease
+    assert "test lease released" in [d["decision"] for d in rig.decisions()]
+
+
+class StatusFailsOnce(MachineAdapter):
+    """gozer status fails once, at the start of stage 2's hardware phase."""
+    armed = False
+
+    def status(self):
+        if StatusFailsOnce.armed:
+            StatusFailsOnce.armed = False
+            raise AdapterError("gozer status exited 1")
+        return super().status()
+
+
+def test_an_adapter_error_mid_run_stops_the_coder_and_releases_its_lease(rig):
+    def script(request):
+        if "tools" in request and where(request) == (2, "prepare") and turn(request) == 0:
+            StatusFailsOnce.armed = True
+        return bringup(request)
+    rig.script, rig.adapter_cls = script, StatusFailsOnce
+    with pytest.raises(AdapterError):
+        rig.run()
+    assert not rig.m.coder_running and rig.m.leases == {}
+    notes = [e["data"] for e in rig.entries() if e["event"] == "notice"]
+    assert any(n.get("what") == "the supervisor stopped on an error" for n in notes)
+    rig.script = bringup
+    assert rig.run(pid=200) == EXIT_READY                       # a re-run resumes, unlike an abort
+
+
+def test_a_corrupt_ledger_mid_run_still_releases_the_hardware(rig):
+    def script(request):
+        if "tools" in request and where(request) == (1, "run") and turn(request) == 0:
+            with open(rig.run_dir / "ledger.jsonl", "a") as f:
+                f.write("not json\n")             # an agent writing to the ledger with tee
+        return bringup(request)
+    rig.script = script
+    with pytest.raises(LedgerCorrupt):
+        rig.run()
+    assert not rig.m.coder_running and rig.m.leases == {}
+
+
+def test_a_ledger_broken_during_the_coder_boot_still_releases_the_coder(rig):
+    # Before "coder started" is written, only this process knows the coder's lease.
+    class BreaksTheLedger(MachineCoder):
+        def start(self, lease):
+            super().start(lease)
+            with open(rig.run_dir / "ledger.jsonl", "a") as f:
+                f.write("not json\n")
+
+    rig.coder_cls = BreaksTheLedger
+    with pytest.raises(LedgerCorrupt):
+        rig.run()
+    assert not rig.m.coder_running and rig.m.leases == {}
+
+
+def test_a_mid_run_error_is_not_reported_as_a_refusal(tmp_path, capsys, monkeypatch):
+    class Failing:
+        stop_message = "The coder was stopped and the hardware released."
+
+        def run(self):
+            raise ValueError("no free board")
+    monkeypatch.setattr(supervisor, "build", lambda args, ledger, home=None: Failing())
+    tiers = write_tiers(tmp_path / "t.toml", "http://127.0.0.1:8000/v1", "http://127.0.0.1:11434/v1")
+    assert main(argv(tmp_path, tiers, "http://127.0.0.1:8000/v1"),
+                home=tmp_path / "operator-home") == EXIT_ERROR
+    err = capsys.readouterr().err
+    assert "refused" not in err and "no free board" in err and "hardware released" in err
