@@ -32,7 +32,10 @@ def post_json(url: str, body: dict, timeout: float) -> dict:
 def ask(endpoint: str, model: str, prompt: str, *, http=post_json,
         timeout: float = CANARY_TIMEOUT_S, max_tokens: int = CANARY_MAX_TOKENS) -> str:
     body = {"model": model, "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0, "max_tokens": max_tokens, "stream": False}
+            "temperature": 0, "max_tokens": max_tokens, "stream": False,
+            # Ask for a short answer without a reasoning phase. A reasoning model given a small
+            # token budget can spend all of it thinking and return content null.
+            "chat_template_kwargs": {"enable_thinking": False}}
     url = endpoint.rstrip("/") + "/v1/chat/completions"
     try:
         data = http(url, body, timeout)
@@ -42,6 +45,18 @@ def ask(endpoint: str, model: str, prompt: str, *, http=post_json,
         text = data["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError) as exc:
         raise CanaryError(f"{url} gave no choices[0].message.content: {str(data)[:300]}") from exc
+    if text is None:
+        choice = data["choices"][0]
+        finish = choice.get("finish_reason") if isinstance(choice, dict) else None
+        message = choice["message"]
+        reasoning = message.get("reasoning_content") or message.get("reasoning") or ""
+        if finish == "length":
+            raise CanaryError(
+                f"{url}: the reply was cut off while the model was still reasoning "
+                f"(finish_reason=length, max_tokens={max_tokens}, reasoning chars={len(str(reasoning))}); "
+                "thinking may not be switchable on this server")
+        raise CanaryError(f"{url}: content was null (finish_reason={finish!r}, "
+                          f"reasoning chars={len(str(reasoning))})")
     if not isinstance(text, str):
         raise CanaryError(f"{url} gave content that is not text: {text!r}")
     return text
