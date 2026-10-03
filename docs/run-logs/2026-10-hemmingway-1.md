@@ -211,3 +211,31 @@ path, so packaging is the next piece to build after stages 0 to 6 are shown to w
   default chat template, and whether the chip's output should be compared in that mode.
 - **15:38:13Z stage 2 (functional decoder on one chip) started,** prepare step on the large tier. This is
   the first stage that will need a board.
+- **15:38Z to 16:08Z run 3, stage 2 prepare step: 60 turns, no hardware test written.** The agent spent the
+  whole step reading tt-metal source (94 `cd`/`ls`/`sed` calls, one real command) and never wrote
+  `hw_test.json`. The stage machine escalated and restarted it. This is a skill problem: the stage uses the
+  generic `functional-decoder` skill, written for porting a new architecture. For a weights-only delta no
+  decoder needs writing. The existing Qwen3.8 TT implementation only needs the new weights loaded.
+  I paused the run at 16:09:19Z and prototyped the weights swap by hand on board 1 to learn the real
+  recipe, so the skill I give the harness is true. **This was done by hand to write the skill; it is
+  not harness output.**
+- **Prototype findings (16:10Z to 16:20Z, board 1, 2 chips, existing episod bundle stack).**
+  1. The bundle registers the TT model class only for the architecture name
+     `Qwen3_5ForConditionalGeneration`; Hemmingway-1 says `Qwen3_5ForCausalLM`. Registering the second name
+     got past the lookup (the log shows the TT class selected) and then failed in vLLM's multimodal
+     setup: it expects the vision-language config type and got the text-only one.
+  2. What works: a model directory shaped like the base, with the base's `config.json`,
+     `preprocessor_config.json` and `video_preprocessor_config.json` copied in and Hemmingway-1's tokenizer
+     files, chat template, generation config, weight index and shards linked in. The runtime skips the vision
+     tower and accepts the flat `model.*` tensor names, so no vision weights are needed. The bundle's
+     `run.sh` is copied with `--model` pointed at that directory and the pinned revisions removed.
+  3. Weights are converted into a fresh, empty tensor cache (34 GB). The first server start, including that
+     conversion, took about 5 minutes (09:10:59 to about 09:16 local), not 30. The page cache was warm.
+  4. The server rejects `logprobs` ("owns its Gumbel sampling"), so comparisons use generated ids only.
+  5. Chip output is coherent Hemmingway-style text with no noise. Greedy free-run text differs from the CPU
+     reference from the first token ("We need to respond..." against "Let me work through this..."), as
+     expected for bfp4/bfp8 chip weights against bf16 CPU weights. Teacher-forced next-token agreement with
+     the stage 1 CPU reference, over the 32 reference tokens: **25 of 32 (78%)**. All seven differences are
+     near-synonyms ("Let"/"We", "work"/"think", "wants"/"is", "practical"/"straightforward",
+     "real"/"everyday"). One prompt and 32 tokens, so an indication and not a benchmark.
+  The lease was released with a reset afterwards. Board 1 is free.
