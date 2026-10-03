@@ -13,8 +13,12 @@ default); a second failure pauses the run. When stage 0 finds that the model nee
 
 Operator commands go through a one-word control file in the run directory: pause, resume, abort.
 A paused supervisor keeps its leases and waits. Abort stops the coder, releases its lease and
-closes the ledger. The run ends at "ready for operator review" and never publishes: the command
-runner refuses publish, push and upload commands, and agents have no credentials.
+closes the ledger. The run ends at "ready for operator review". The supervisor never publishes.
+Agents are kept from publishing in three ways, none of them complete: the command runner refuses
+the common publish, push and upload spellings; agent shells get no tokens in their environment;
+and a preflight refuses to start while known credential files exist in the operator's home,
+unless the operator passes --accept-credentials-visible (the ledger records that). Agent shells
+run as the same user, so code an agent runs can still read any file that user can read.
 
 Plan 4 runs stages 0 to 6 and 8. Stage 7 (package and container build) is recorded as skipped.
 """
@@ -23,6 +27,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import pwd
 import shutil
 import sys
 import time
@@ -193,6 +198,27 @@ def pairs(items: list[str], what: str) -> dict:
     return out
 
 
+# Files in the operator's home that hold credentials an agent could use, relative to that home.
+# SSH private keys (~/.ssh/id_*, without .pub) are found by name as well.
+CREDENTIAL_PATHS = (".cache/huggingface/token", ".config/gh/hosts.yml", ".netrc",
+                    ".docker/config.json")
+
+
+def visible_credentials(home) -> list[Path]:
+    """Credential files that exist under `home`. Only existence is checked; nothing is read."""
+    home = Path(home)
+    found = [home / rel for rel in CREDENTIAL_PATHS if (home / rel).exists()]
+    ssh = home / ".ssh"
+    if ssh.is_dir():
+        found += sorted(p for p in ssh.glob("id_*") if not p.name.endswith(".pub"))
+    return found
+
+
+def operator_home() -> Path:
+    """The home OpenSSH uses: the passwd entry's, which ignores HOME."""
+    return Path(pwd.getpwuid(os.getuid()).pw_dir)
+
+
 def coder_tier(cfg, port: int) -> str:
     """The chip tier whose endpoint uses the coder's port."""
     names = [n for n, t in cfg.tiers.items()
@@ -208,7 +234,8 @@ class Supervisor:
     def __init__(self, *, run_dir, ledger, cfg, model_id: str, adapter, coder, coder_chips: int,
                  standin, skills_dirs, inputs: dict | None = None, extra_env: dict | None = None,
                  versions: dict | None = None, http=post_json, probe=probe_model, clock=time.time,
-                 sleep=time.sleep, budgets: Budgets = Budgets(), disk_usage=shutil.disk_usage):
+                 sleep=time.sleep, budgets: Budgets = Budgets(), disk_usage=shutil.disk_usage,
+                 credentials_visible: list[str] | None = None):
         self.run_dir = Path(run_dir).resolve()
         self.ledger, self.cfg, self.model_id = ledger, cfg, model_id
         self.adapter, self.coder, self.coder_chips, self.standin = adapter, coder, coder_chips, standin
@@ -217,6 +244,7 @@ class Supervisor:
         self.versions = dict(versions or {})
         self.http, self.probe, self.clock, self.sleep = http, probe, clock, sleep
         self.budgets, self.disk_usage = budgets, disk_usage
+        self.credentials_visible = list(credentials_visible or [])
         self.control = Control(self.run_dir)
         self.actuator = RunActuator(self.control)
         self.guard = RetryGuard()
@@ -256,6 +284,10 @@ class Supervisor:
             self.ledger.append("run_start", None, model=self.model_id, versions=self.versions,
                                inputs=self.inputs, coder=self.coder.record(),
                                tiers={k: dict(v) for k, v in self.cfg.tiers.items()})
+        if self.credentials_visible:
+            # Recorded at every start, because each start is a fresh acceptance by the operator.
+            self.ledger.append("decision", None, decision="operator accepted visible credentials",
+                               paths=self.credentials_visible, by="--accept-credentials-visible")
         while True:
             p = run_progress(self.ledger.read())
             if p.paused is not None:
@@ -649,6 +681,9 @@ def parse(argv=None):
     r.add_argument("--env", action="append", default=[], metavar="NAME=VALUE",
                    help="a variable for agent shells (never a credential)")
     r.add_argument("--gozer", default="gozer")
+    r.add_argument("--accept-credentials-visible", action="store_true",
+                   help="start even though credential files exist in the operator's home "
+                        "(agent shells can read them); the ledger records this")
     c = sub.add_parser("control", help="send pause, resume or abort to a running supervisor")
     c.add_argument("--run-dir", required=True)
     c.add_argument("command", choices=Control.COMMANDS)
@@ -657,7 +692,7 @@ def parse(argv=None):
 
 def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_json,
           probe=probe_model, clock=time.time, sleep=time.sleep, budgets=Budgets(),
-          disk_usage=shutil.disk_usage) -> Supervisor:
+          disk_usage=shutil.disk_usage, home=None) -> Supervisor:
     """A Supervisor from parsed `run` arguments. Tests pass fakes for the machine."""
     # Everything that can be refused is checked before any external command runs.
     cfg = load(args.tiers)
@@ -665,6 +700,12 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
     run_dir = Path(args.run_dir).resolve()
     inputs, extra_env = pairs(args.input, "input"), pairs(args.env, "env")
     agent_env(run_dir, extra=extra_env)
+    found = [str(p) for p in visible_credentials(operator_home() if home is None else home)]
+    if found and not args.accept_credentials_visible:
+        raise ValueError(
+            "agent shells run as this user and could read these credential files: "
+            + ", ".join(found) + ". Move them aside for the run, or pass "
+            "--accept-credentials-visible to start anyway (the ledger records it)")
     spec = ServerSpec(target=args.coder_target, kind=args.coder_kind, port=args.coder_port,
                       model=cfg.tiers[tier]["model"], profile=args.coder_profile,
                       image_id=args.coder_image_id)
@@ -682,10 +723,11 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
                       standin=ExternalStandIn(cpu["endpoint"], cpu["model"], http=http),
                       skills_dirs=[SKILLS_DIR, *args.skills_dir], inputs=inputs,
                       extra_env=extra_env, versions=versions, http=http, probe=probe,
-                      clock=clock, sleep=sleep, budgets=budgets, disk_usage=disk_usage)
+                      clock=clock, sleep=sleep, budgets=budgets, disk_usage=disk_usage,
+                      credentials_visible=found)
 
 
-def main(argv=None) -> int:
+def main(argv=None, *, home=None) -> int:
     args = parse(argv)
     if args.cmd == "control":
         Control(args.run_dir).write(args.command)
@@ -694,7 +736,7 @@ def main(argv=None) -> int:
     run_dir = Path(args.run_dir)
     try:
         with Ledger(run_dir / "ledger.jsonl") as ledger:
-            code = build(args, ledger).run()
+            code = build(args, ledger, home=home).run()
     except (TierConfigError, ValueError, LedgerLocked, LedgerCorrupt) as exc:
         print(f"refused: {exc}", file=sys.stderr)
         return EXIT_REFUSED

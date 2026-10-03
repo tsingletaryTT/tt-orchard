@@ -39,7 +39,8 @@ RULES = """Rules of this run:
   and never stop or start a container, a model server or another process you did not start. The
   supervisor refuses the common spellings of these commands and says how to rewrite them. It
   cannot catch every spelling, so these rules apply to everything you run.
-  There are no GitHub or Hugging Face credentials in your environment.
+  Your environment holds no tokens. Do not read credential files anywhere on the machine, such
+  as SSH keys or token files.
 - Do not open Tenstorrent devices from your shell, and do not run code that does (ttnn, tt-metal,
   vLLM, a test that opens a mesh). Your shell's TT_VISIBLE_DEVICES names no chip. Nothing stops a
   device open from your shell, so this rule is yours to keep. Hardware work happens only in the

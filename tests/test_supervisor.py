@@ -31,6 +31,7 @@ class Rig:
         self.tiers = write_tiers(tmp_path / "tiers.toml", self.chip_server.endpoint, self.cpu_server.endpoint)
         self.args = parse(argv(tmp_path, self.tiers, self.chip_server.endpoint, chips=chips))
         self.run_dir = tmp_path / "run"
+        self.home = tmp_path / "operator-home"       # the preflight looks here, never in the real home
         self.clock, self.usage, self.on_sleep = clock(), plenty, None
 
     def sleep(self, s):
@@ -44,7 +45,7 @@ class Rig:
         with (CrashingLedger(path, crash_if=crash_if) if crash_if else Ledger(path)) as led:
             sup = build(self.args, led, adapter=MachineAdapter(self.m, owner_pid=pid),
                         coder=MachineCoder(self.m), versions={"tt_model": "test"}, clock=self.clock,
-                        sleep=self.sleep, disk_usage=lambda p: self.usage(p))
+                        sleep=self.sleep, disk_usage=lambda p: self.usage(p), home=self.home)
             return sup.run()
 
     def entries(self):
@@ -87,9 +88,53 @@ def test_main_writes_the_control_file(tmp_path, capsys):
 def test_main_refuses_a_credential_before_running_anything(tmp_path, capsys):
     tiers = write_tiers(tmp_path / "t.toml", "http://127.0.0.1:8000/v1", "http://127.0.0.1:11434/v1")
     a = argv(tmp_path, tiers, "http://127.0.0.1:8000/v1") + ["--env", "HF_TOKEN=hf_x", "--gozer", "/nonexistent"]
-    assert main(a) == EXIT_REFUSED
+    assert main(a, home=tmp_path / "operator-home") == EXIT_REFUSED
     assert "looks like a credential" in capsys.readouterr().err
     assert not (tmp_path / "run" / "ledger.jsonl").exists()      # nothing was recorded or run
+
+
+CREDENTIAL_FILES = (".cache/huggingface/token", ".config/gh/hosts.yml", ".ssh/id_ed25519",
+                    ".ssh/id_rsa", ".netrc", ".docker/config.json")
+
+
+def planted_home(root):
+    """A fake operator home with every credential file the preflight knows, plus a public key."""
+    for rel in CREDENTIAL_FILES + (".ssh/id_ed25519.pub",):
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text("planted")
+    return root
+
+
+def test_the_preflight_refuses_to_start_while_credential_files_are_visible(rig):
+    rig.home = planted_home(rig.tmp / "operator-home")
+    with pytest.raises(ValueError) as exc:
+        rig.run()
+    for rel in CREDENTIAL_FILES:
+        assert str(rig.home / rel) in str(exc.value)
+    assert "id_ed25519.pub" not in str(exc.value)          # a public key is not a credential
+    assert "--accept-credentials-visible" in str(exc.value)
+    assert rig.m.leases == {} and rig.m.coder_starts == 0
+    assert not (rig.run_dir / "ledger.jsonl").exists() or rig.entries() == []
+
+
+def test_main_names_each_visible_credential_file_and_exits_2(tmp_path, capsys, stub_tools):
+    home = planted_home(tmp_path / "operator-home")
+    tiers = write_tiers(tmp_path / "t.toml", "http://127.0.0.1:8000/v1", "http://127.0.0.1:11434/v1")
+    a = argv(tmp_path, tiers, "http://127.0.0.1:8000/v1") + ["--gozer", "/nonexistent"]
+    assert main(a, home=home) == EXIT_REFUSED
+    err = capsys.readouterr().err
+    assert err.startswith("refused:") and all(str(home / rel) in err for rel in CREDENTIAL_FILES)
+    assert stub_tools.calls() == []                 # refused before tt-model or tt-smi was asked
+    assert not (tmp_path / "run" / "ledger.jsonl").exists()
+
+
+def test_an_operator_who_accepts_visible_credentials_is_recorded(rig):
+    rig.home = planted_home(rig.tmp / "operator-home")
+    rig.args.accept_credentials_visible = True
+    assert rig.run() == EXIT_READY
+    accepted = [d for d in rig.decisions() if d["decision"] == "operator accepted visible credentials"]
+    assert len(accepted) == 1
+    assert sorted(accepted[0]["paths"]) == sorted(str(rig.home / rel) for rel in CREDENTIAL_FILES)
 
 
 # ---- the run --------------------------------------------------------------------------------------

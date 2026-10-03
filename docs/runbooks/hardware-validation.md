@@ -211,6 +211,15 @@ Before running:
   and stages 2 to 6 each require 40 GB free (stage 4 requires 80 GB).
 - Do not give the harness the reference answer, and do not name the base model's tensor cache
   as an input. Stage 0 must find both on its own.
+- Credential files. The supervisor refuses to start (exit 2, naming each path) while any of these
+  exist in the operator's home: `~/.cache/huggingface/token`, `~/.config/gh/hosts.yml`,
+  `~/.ssh/id_*` private keys, `~/.netrc` and `~/.docker/config.json`. On 2026-10-02 the first
+  four kinds existed on this box. Move them aside for the run and put them back afterwards, or
+  pass `--accept-credentials-visible`; the ledger then records that the operator accepted it.
+  Agent shells run as the same user, so code an agent runs can read any file that stays. Agent
+  shells get `GIT_SSH_COMMAND` set so git over ssh uses no key, and the runner refuses ssh, scp,
+  sftp and rsync to a host. If the ssh key stays in place, confirm it needs a passphrase:
+  `ssh-keygen -y -P '' -f ~/.ssh/id_ed25519` fails when it does.
 
 What stops an agent and what does not. Agent shells run as the same user as the supervisor. The
 command runner (`orchard/runner.py`) refuses these spellings: tt-smi resets; every gozer command

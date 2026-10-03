@@ -4,9 +4,12 @@ This module owns three things.
 
 1. The agent's environment (`agent_env`). It starts from an allow-list, so GitHub and Hugging
    Face tokens, SSH agent sockets and every other variable the supervisor happens to have are
-   absent. HOME points to an empty directory inside the run, so `gh`, `git` and `huggingface_hub`
-   find no stored credentials under the usual paths. Extra variables the operator passes are
-   refused when the name looks like a credential.
+   absent. HOME points to an empty directory inside the run, so `gh`, git's HTTPS helpers and
+   `huggingface_hub` do not look in the operator's home. OpenSSH ignores HOME and reads ~/.ssh
+   from the passwd entry, so GIT_SSH_COMMAND gives git's ssh no config and no key; plain ssh is
+   refused by the runner. Any process can still read a credential file by absolute path. The
+   supervisor's preflight refuses to start while known ones exist, unless the operator accepts
+   that. Extra variables the operator passes are refused when the name looks like a credential.
 2. The tools (`Tools`): `shell`, which runs every command through orchard/runner.py's checks with
    the run directory as its working directory, and `write_file`, which writes only inside the
    stage directory.
@@ -56,6 +59,7 @@ ENV_ALLOW = ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "USER", "LOGNAME", "TER
 # mask that names no chip (it may open nothing, or fail, or ignore it). The controller checks this
 # before relying on it. The supervisor's hardware test replaces it with the leased chips.
 NO_CHIP = "0000:ff:00.0"
+GIT_SSH_COMMAND = "ssh -F /dev/null -o IdentitiesOnly=yes -o IdentityFile=/dev/null -o BatchMode=yes"
 DEVICE_VARS = ("TT_VISIBLE_DEVICES", "TT_METAL_VISIBLE_DEVICES")
 SECRET_NAME = re.compile(r"TOKEN|SECRET|PASSW|CREDENTIAL|AUTH|_KEY$|^KEY$|COOKIE", re.IGNORECASE)
 
@@ -75,6 +79,9 @@ def agent_env(run_dir, *, extra: dict | None = None, source=None) -> dict:
         "GIT_CONFIG_GLOBAL": str(home / ".gitconfig"),
         "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_TERMINAL_PROMPT": "0",
+        # OpenSSH reads ~/.ssh from the passwd entry and ignores HOME, so git over ssh would find
+        # the operator's keys. This gives git's ssh no config file and no key.
+        "GIT_SSH_COMMAND": GIT_SSH_COMMAND,
         "HF_HUB_DISABLE_TELEMETRY": "1",
         "ORCHARD_RUN_DIR": str(Path(run_dir).resolve()),
     })

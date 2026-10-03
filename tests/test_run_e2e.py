@@ -37,7 +37,7 @@ def run(base, servers, machine, *, chips, pid, crash_after=0):
     with (CrashingLedger(path, crash_after) if crash_after else Ledger(path)) as led:
         return build(args, led, adapter=MachineAdapter(machine, owner_pid=pid),
                      coder=MachineCoder(machine), versions={"tt_model": "test"}, clock=c,
-                     sleep=c.sleep, disk_usage=plenty).run()
+                     sleep=c.sleep, disk_usage=plenty, home=base / "operator-home").run()
 
 
 def entries(base):

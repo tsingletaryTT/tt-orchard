@@ -45,6 +45,12 @@ def test_agent_shells_get_a_device_mask_that_matches_no_chip(run):
             agent_env(run, extra={name: "0000:01:00.0"})
 
 
+def test_git_over_ssh_uses_no_key_and_no_config(run):
+    # OpenSSH finds ~/.ssh from the passwd entry and ignores HOME, so HOME alone does not hide keys.
+    assert agent_env(run)["GIT_SSH_COMMAND"] == (
+        "ssh -F /dev/null -o IdentitiesOnly=yes -o IdentityFile=/dev/null -o BatchMode=yes")
+
+
 def test_extra_variables_that_look_like_credentials_are_refused(run):
     assert agent_env(run, extra={"HF_HOME": "/mnt/models/hf"})["HF_HOME"] == "/mnt/models/hf"
     for name in ("HF_TOKEN", "OPENAI_API_KEY", "GH_AUTH", "DB_PASSWORD"):
