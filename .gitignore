@@ -5,3 +5,4 @@ runs/
 *.torn-*
 *.lock
 .superpowers/
+generated/
