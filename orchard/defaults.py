@@ -76,6 +76,8 @@ STAGE_DISK_GB = {0: 1.0, 1: 5.0, 2: 40.0, 3: 40.0, 4: 80.0, 5: 40.0, 6: 40.0, 7:
 LONG_STAGE_S = 3600.0           # spec section 10: a stage with a longer budget must declare a resume marker
 STAGE2_PCC_MIN = 0.995          # the functional-decoder skill's default acceptance bar (prefill and decode)
 AGENT_MAX_TURNS = 60            # choice: model turns in one agent step before the step counts as failed
+AGENT_CONTINUATION_TURNS = 20   # choice: model turns for a step's gate-feedback continuation (at most one).
+                                # It only has to fix what the gate named, so it gets a third of a step.
 AGENT_MAX_TOKENS = 16384        # choice: max_tokens for one model response. A reasoning model's
                                 # thinking tokens count toward it. On the live Qwen3.8 run, 8,192 was
                                 # used up by reasoning in 3 of the failed replies. At about 80 tokens/s

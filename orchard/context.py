@@ -3,7 +3,9 @@
 A step gets only: the stage skill, the rules of the run, a ledger excerpt (how earlier stages
 ended and what happened to this stage so far), the result files of earlier stages, and, for a
 resumed or finishing step, the files this stage already wrote. Nothing from an earlier step's
-conversation is carried over, so a long run never pays for a long context.
+conversation is carried over, so a long run never pays for a long context. The supervisor's
+gate-feedback continuation is an exception: it adds a message to the step that just ended
+(orchard/supervisor.py, `gate_feedback_text`).
 """
 from __future__ import annotations
 

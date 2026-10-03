@@ -28,10 +28,14 @@ This module owns three things.
    is handled the same way, with its own `notice` ("empty reply") and its own user message. A
    reasoning model can return one after it finishes thinking: the live Qwen3.8 run did, at turn
    49 of stage 1. Cut-off and empty replies share one count. A second reply in a row of either
-   kind ends the step with status "error", and the detail names both kinds. A reply with
+   kind ends the step with status "error", and the detail names the kind of each. A reply with
    finish_reason "length" that holds tool calls runs as usual, and a missing finish_reason is
    treated like "stop". A reply with text and no tool calls is the final answer. Every record in
    the step's log carries the reply's finish_reason.
+
+   The step keeps its conversation in `messages`. `continue_with` adds one user message and runs
+   the loop again with its own turn cap and its own log file. The supervisor calls it once, with
+   the exit gate's reasons, when a step ended "done" and the gate failed.
 
    The environment also sets TT_VISIBLE_DEVICES and TT_METAL_VISIBLE_DEVICES to NO_CHIP, a
    device mask that matches no chip. This is a request to the runtime. Nothing in orchard stops a
@@ -282,6 +286,8 @@ class AgentStep:
         self.guard = guard if guard is not None else RetryGuard()
         self.max_turns, self.max_tokens, self.timeout = max_turns, max_tokens, timeout
         self._seen: dict[str, tuple[int, int]] = {}
+        # The conversation, kept on the step so `continue_with` can add to it. None until `run`.
+        self.messages: list[dict] | None = None
 
     # ---- helpers ----------------------------------------------------------------------------
 
@@ -347,11 +353,29 @@ class AgentStep:
     # ---- the loop ---------------------------------------------------------------------------
 
     def run(self, system: str, user: str) -> Outcome:
-        messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
-        logged = 0
+        """Start the conversation and run it until a final answer, the turn limit or a stop."""
+        self.messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
         self._seen = self._snapshot()       # files already here (a resumed stage) are not new
+        return self._loop(self.max_turns, logged=0)
+
+    def continue_with(self, text: str, *, max_turns: int, log_path) -> Outcome:
+        """Add one user message to this step's conversation and run the loop again.
+
+        The supervisor uses this once, when a step ended "done" and the stage's exit gate failed:
+        `text` is the gate feedback. The continuation has its own turn cap and writes its own log
+        at `log_path`, so the first run's log stays as it was.
+        """
+        if self.messages is None:
+            raise RuntimeError("continue_with needs a step that has run")
+        self.log_path = Path(log_path)
+        logged = len(self.messages)          # the continuation's log starts at the new message
+        self.messages.append({"role": "user", "content": text})
+        return self._loop(max_turns, logged=logged)
+
+    def _loop(self, max_turns: int, *, logged: int) -> Outcome:
+        messages = self.messages
         bad_run: list[str] = []             # kinds of the replies in a row that ran no command
-        for turn in range(1, self.max_turns + 1):
+        for turn in range(1, max_turns + 1):
             for text in self.control.take_nudges(self.agent):
                 messages.append({"role": "user", "content": text})
             reason = self.control.stop_reason()
@@ -423,4 +447,4 @@ class AgentStep:
                 messages.append({"role": "tool", "tool_call_id": str(call.get("id", "")), "content": result})
                 self._event("tool_result", tool=name, output_hash=sha(result))
                 self._record_new_evidence()
-        return self._end("turns", self.max_turns, detail=f"no final answer after {self.max_turns} turns")
+        return self._end("turns", max_turns, detail=f"no final answer after {max_turns} turns")

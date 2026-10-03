@@ -299,3 +299,50 @@ def test_a_request_asks_for_the_default_max_tokens(run):
     with FakeModel(lambda r: final()) as fm:
         step(run_dir, ledger, fm.endpoint)[0].run("s", "u")
     assert fm.requests[0]["max_tokens"] == 16384
+
+
+# ---- continuing the same conversation (gate feedback) -------------------------------------------
+
+def test_a_continuation_adds_one_user_message_to_the_same_conversation(run):
+    import json
+    run_dir, ledger = run
+    script = by_request(call("shell", command="echo one"), final("first done"),
+                        call("shell", command="echo two"), final("fixed"))
+    with FakeModel(script) as fm:
+        s = step(run_dir, ledger, fm.endpoint)[0]
+        first = s.run("s", "u")
+        log2 = run_dir / "stages" / "0" / "log" / "run-1-continuation.jsonl"
+        second = s.continue_with("fix the gate", max_turns=5, log_path=log2)
+    assert (first.status, first.turns) == ("done", 2)
+    assert (second.status, second.turns, second.final_text) == ("done", 2, "fixed")
+    sent = fm.requests[2]["messages"]
+    # The whole first conversation, then the feedback as one user message.
+    assert sent[:len(fm.requests[1]["messages"])] == fm.requests[1]["messages"]
+    assert sent[-2] == {"role": "assistant", "content": "first done"}
+    assert sent[-1] == {"role": "user", "content": "fix the gate"}
+    # The continuation has its own log; the first log keeps its two records.
+    log1 = run_dir / "stages" / "0" / "log" / "run-1.jsonl"
+    assert len(log1.read_text().splitlines()) == 2
+    records = [json.loads(l) for l in log2.read_text().splitlines()]
+    assert len(records) == 2 and records[0]["sent"] == [{"role": "user", "content": "fix the gate"}]
+    transcripts = [e["data"]["path"] for e in ledger.read()
+                   if e["event"] == "evidence" and e["data"].get("what") == "transcript"]
+    assert transcripts == ["stages/0/log/run-1.jsonl", "stages/0/log/run-1-continuation.jsonl"]
+
+
+def test_a_continuation_has_its_own_turn_cap(run):
+    run_dir, ledger = run
+    with FakeModel(repeating(50)) as fm:
+        s = step(run_dir, ledger, fm.endpoint, max_turns=3)[0]
+        out = s.run("s", "u")
+        assert out.status == "turns"
+        more = s.continue_with("go on", max_turns=2,
+                               log_path=run_dir / "stages" / "0" / "log" / "run-1-continuation.jsonl")
+    assert (more.status, more.turns) == ("turns", 2) and len(fm.requests) == 5
+
+
+def test_a_step_that_never_ran_cannot_continue(run):
+    run_dir, ledger = run
+    s = step(run_dir, ledger, "http://unused/v1")[0]
+    with pytest.raises(RuntimeError):
+        s.continue_with("x", max_turns=1, log_path=run_dir / "c.jsonl")
