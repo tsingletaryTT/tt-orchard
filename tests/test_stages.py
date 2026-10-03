@@ -107,6 +107,12 @@ def test_the_weights_only_path_gives_stage_2_the_swap_skill_and_gate():
     assert s.marker == STAGES[2].marker and s.skip is None
 
 
+def test_the_weights_only_path_skips_stage_3_with_a_reason():
+    s = spec_for(3, "weights-only")
+    assert s.skip == ("weights-only path: the stage 2 serve-and-compare covers the full model")
+    assert s.number == 3 and STAGES[3].skip is None
+
+
 @pytest.mark.parametrize("path", ["full-port", None])
 def test_a_full_port_or_unknown_path_keeps_todays_stage_2_and_3(path):
     assert spec_for(2, path) == STAGES[2] and spec_for(2, path).skill == "functional-decoder"

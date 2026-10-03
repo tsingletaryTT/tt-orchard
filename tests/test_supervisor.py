@@ -158,8 +158,7 @@ def test_a_failed_gate_escalates_once_to_the_diagnose_tier(rig):
 
 
 def test_a_second_failure_pauses_the_run_until_the_operator_resumes(rig):
-    bad = {(3, "finish"): {"result.json": {"parity": False, "top1": 0.2,
-                                           "evidence": ["stages/3/evidence/hw-test-output.txt"]}}}
+    bad = {(5, "finish"): {"result.json": {"checks": {}}}}
     rig.script = lambda r: bringup(r, overrides=bad)
 
     def fixed_and_resumed():
@@ -167,9 +166,9 @@ def test_a_second_failure_pauses_the_run_until_the_operator_resumes(rig):
         Control(rig.run_dir).write("resume")
     rig.on_sleep = fixed_and_resumed
     assert rig.run() == EXIT_READY
-    assert [d["result"] for d in rig.ends(3)] == ["escalate", "fail", "pass"]
+    assert [d["result"] for d in rig.ends(5)] == ["escalate", "fail", "pass"]
     pauses = [d for d in rig.decisions() if d["decision"] in ("pause", "resume")]
-    assert pauses[0]["reason"].startswith("stage 3 failed after escalation")
+    assert pauses[0]["reason"].startswith("stage 5 failed after escalation")
     assert pauses[1] == {"decision": "resume", "by": "operator"}
 
 
@@ -178,7 +177,7 @@ def test_the_escalation_cap_pauses_the_run(rig):
         return {(n, "finish"): {"result.json": {"broken": True}}}
 
     def script(request):
-        if "tools" in request and where(request)[0] in (2, 3, 4):
+        if "tools" in request and where(request)[0] in (2, 4, 5):       # stage 3 is skipped (weights-only)
             n = where(request)[0]
             return escalation_aware(n, bad(n))(request)
         return bringup(request)
@@ -187,7 +186,7 @@ def test_the_escalation_cap_pauses_the_run(rig):
     assert rig.run() == EXIT_READY
     pauses = [e for e in rig.entries() if e["event"] == "decision" and e["data"]["decision"] == "pause"]
     assert [(e["stage"], e["data"]["reason"]) for e in pauses] == [
-        (4, "3 escalations since the last resume (cap 3)")]   # before stage 4 runs again
+        (5, "3 escalations since the last resume (cap 3)")]   # before stage 5 runs again
 
 
 def test_a_full_port_pauses_before_stage_2(rig):
@@ -218,6 +217,18 @@ def test_a_weights_only_run_gives_stage_2_the_swap_skill_and_gate(rig):
     system = next(r["messages"][0]["content"] for r in rig.chip_server.requests
                   if "tools" in r and where(r) == (2, "prepare"))
     assert "## Skill: weights-swap-check " in system and "# Weights swap check" in system
+
+
+def test_a_weights_only_run_skips_stage_3_and_goes_on_to_stage_4(rig):
+    assert rig.run() == EXIT_READY
+    s3 = [e for e in rig.entries() if e["stage"] == 3]
+    assert [(e["event"], e["data"]) for e in s3] == [
+        ("stage_start", {"skip": True}),
+        ("stage_end", {"result": "skipped",
+                       "reason": "weights-only path: the stage 2 serve-and-compare covers the full model"})]
+    order = [e["stage"] for e in rig.entries() if e["event"] == "stage_end"]
+    assert order == [0, 1, 2, 3, 4, 5, 6, 7, 8]
+    assert not (rig.run_dir / "stages" / "3").exists()      # no agent step and no stage directory
 
 
 def test_a_full_port_run_keeps_the_functional_decoder_and_the_full_model(rig):
@@ -329,7 +340,7 @@ def test_a_coder_that_dies_is_restarted_once_and_a_second_death_blocks(rig):
     def script(request):
         if "tools" in request:
             n, phase = where(request)
-            if n in (1, 3) and turn(request) == 0 and n not in killed:
+            if n in (1, 4) and turn(request) == 0 and n not in killed:
                 killed.add(n)
                 rig.m.coder_running = False         # the coder dies while the agent works
         return bringup(request)

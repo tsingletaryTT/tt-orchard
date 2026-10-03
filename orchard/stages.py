@@ -7,7 +7,8 @@ runs next, whether the run is paused, how many escalations and coder starts it h
 where the coder's lease is recorded. Nothing here starts a process or calls a model.
 
 The table holds one spec per stage. The path stage 0 chose can replace a spec: on the weights-only
-path stage 2 uses the weights-swap-check skill and `gate_weights_swap` (`spec_for`, `run_path`).
+path stage 2 uses the weights-swap-check skill and `gate_weights_swap`, and stage 3 is skipped
+(`spec_for`, `run_path`).
 
 A gate checks the shape of a stage's result file and that every evidence path it lists is a file
 inside the run directory. A gate cannot tell whether a claim is true. The operator reviews the
@@ -413,6 +414,12 @@ WEIGHTS_ONLY_STAGE_2 = dataclasses.replace(
     gate=gate_weights_swap)
 
 
+# Stage 3 builds and checks the full TT model. On the weights-only path that model already exists,
+# and stage 2 has served the new weights through it and compared every token with the reference.
+SKIP_3_WEIGHTS_ONLY = "weights-only path: the stage 2 serve-and-compare covers the full model"
+WEIGHTS_ONLY_STAGE_3 = dataclasses.replace(STAGES[3], skip=SKIP_3_WEIGHTS_ONLY)
+
+
 def delta_path(run_dir) -> str | None:
     """The path in stages/0/delta.json, or None when the file is missing, unreadable or names
     another value. The stage 0 gate validated the file; this only reads it."""
@@ -444,9 +451,13 @@ def run_path(entries: list[dict], run_dir) -> str | None:
 
 
 def spec_for(number: int, path: str | None) -> StageSpec:
-    """The stage spec for `number` on `path`. Only the weights-only path changes the table."""
+    """The stage spec for `number` on `path`. Only the weights-only path changes the table: stage 2
+    gets the swap skill and gate, and stage 3 is skipped (the supervisor records it as skipped,
+    as it does stage 7)."""
     if path == "weights-only" and number == 2:
         return WEIGHTS_ONLY_STAGE_2
+    if path == "weights-only" and number == 3:
+        return WEIGHTS_ONLY_STAGE_3
     return STAGES[number]
 
 

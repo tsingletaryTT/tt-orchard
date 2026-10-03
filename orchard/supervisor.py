@@ -27,7 +27,8 @@ known-answer question (7 times 6); a server that answers without 42 blocks the r
 canary alone would accept noise. When stage 0 finds that the model needs new model code
 (a full port), the run pauses before stage 2 for the operator. When stage 0 finds that only the
 weights differ (weights-only), stage 2 runs the weights-swap-check skill and its gate in place of
-the functional decoder. Stage 0's passing stage_end records that path, and every later choice is
+the functional decoder, and stage 3 (full model) is recorded as skipped. Stage 0's passing
+stage_end records that path, and every later choice is
 read from there (orchard/stages.py, run_path). An unknown path keeps the plan 4 table.
 
 Operator commands go through a one-word control file in the run directory: pause, resume, abort.
@@ -47,7 +48,8 @@ and a preflight refuses to start while known credential files exist in the opera
 unless the operator passes --accept-credentials-visible (the ledger records that). Agent shells
 run as the same user, so code an agent runs can still read any file that user can read.
 
-Plan 4 runs stages 0 to 6 and 8. Stage 7 (package and container build) is recorded as skipped.
+Plan 4 runs stages 0 to 6 and 8. Stage 7 (package and container build) is recorded as skipped,
+and so is stage 3 on the weights-only path.
 """
 from __future__ import annotations
 
