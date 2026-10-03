@@ -437,3 +437,9 @@ path, so packaging is the next piece to build after stages 0 to 6 are shown to w
   moved cables at about 22:27Z (the SSD incident). The likeliest cause is an inter-board Ethernet cable that was
   disturbed; not yet verified. I paused the run at 23:08:47Z so it does not retry against an unhealthy link.
   **Stage 4 so far: 1-chip pass (0.969), 2-chip pass (0.9375), 4-chip blocked by the link.**
+- **23:09Z to 23:20Z full chip reset, as the operator suggested.** The operator checked the cables (fine) and
+  suggested a full `tt-smi -r` without board labels, and a reboot if that fails. I killed the paused supervisor
+  (its coder restore was in progress), stopped the coder with `tt-model stop`, found and stopped one orphaned
+  `VLLM::EngineCore` (pid 1496030) that still held chips 0 and 1, released the stale lease with gozer
+  (reset), and ran `tt-smi -r` with no device list under a 4-chip lease. Output: "Resetting all PCI devices:
+  [0, 1, 2, 3]". Next: restart the supervisor and let stage 4 rerun; the 4-chip test is the check of the link.
