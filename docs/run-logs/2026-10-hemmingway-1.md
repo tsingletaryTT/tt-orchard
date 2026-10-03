@@ -351,3 +351,16 @@ path, so packaging is the next piece to build after stages 0 to 6 are shown to w
   continuation should not fire when the hardware test itself failed: the stage should end and the next
   attempt should run the test again. Fix in progress. The run is paused; the supervisor and the 2-chip coder
   are idle.
+- **20:16Z to 20:35Z run 3, stage 2: the harness's own hardware test succeeded.** After merging the no-feedback
+  fix (suite 1326 passed, 1 skipped) I restarted the supervisor and resumed. It wrote "not resuming from a
+  failed hardware test", moved the failed attempt aside, and ran a fresh prepare (about 3 minutes) and a fresh
+  hardware test. The coder came back on board 1 this time; the test ran on board 0 (chips 0 and 1) from
+  20:22:01Z with a 3600 s deadline. **Result, from the test's own evidence:** exit code 0 in 739 s;
+  `serves: true`; server ready in 728 s; `coherent: true`; teacher-forced top-1 agreement with the stage 1
+  CPU reference **30 of 32 = 0.9375**; free-run text "Let me work through this carefully. The user wants a
+  text message to their landlord about a broken boiler. This is a short, practical piece of writing. The".
+  The two mismatches are at the same positions and tokens as my hand prototype (position 10 `me`/`a`,
+  position 27 `practical`/`short`), so the harness's independent run reproduced the hand measurement. The
+  evidence records `MODEL_WEIGHTS_DIR` and `HF_MODEL` both set to the stage's model directory, so these are
+  Hemmingway-1's weights. **This is the first time the harness itself has run Hemmingway-1 on TT hardware.**
+  It still needs the finish step to write `result.json` and the gate to pass.
