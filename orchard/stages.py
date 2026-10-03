@@ -448,6 +448,143 @@ def compare_delta(delta: dict, reference_md: str) -> dict:
             "reference_path": want_path, "path_matches": matches}
 
 
+# ---- replaying the ledger -----------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class RunProgress:
+    started: bool
+    run_start: dict | None
+    clock_start: float | None           # run start, and again at each operator resume
+    finished: bool                      # decision "ready for operator review"
+    aborted: bool
+    paused: str | None                  # the reason, while the latest pause has no resume after it
+    done: tuple[int, ...]               # stages that passed or were skipped
+    open_stage: int | None              # a stage_start with no stage_end after it
+    escalated: frozenset[int]           # stages with an escalate entry
+    escalations: int                    # since the last operator resume
+    cold_boots: int                     # coder starts slower than COLD_START_S, since the last resume
+    coder_deaths: int                   # since the last operator resume
+    next_stage: int | None
+
+
+def ledger_ts(entry: dict) -> float:
+    return float(calendar.timegm(time.strptime(entry["ts"], "%Y-%m-%dT%H:%M:%SZ")))
+
+
+def run_progress(entries: list[dict]) -> RunProgress:
+    run_start = clock_start = None
+    finished = aborted = False
+    paused = None
+    done: list[int] = []
+    open_stage = None
+    escalated: set[int] = set()
+    escalations = cold_boots = coder_deaths = 0
+    for e in entries:
+        ev, stage, d = e["event"], e["stage"], e["data"]
+        if ev == "run_start":
+            run_start, clock_start = d, ledger_ts(e)
+        elif ev == "stage_start":
+            open_stage = stage
+        elif ev == "stage_end":
+            if stage == open_stage:
+                open_stage = None
+            if d.get("result") in ("pass", "skipped") and stage not in done:
+                done.append(stage)
+        elif ev == "escalate":
+            escalated.add(stage)
+            escalations += 1
+        elif ev == "restore" and d.get("step") == "ready" and (d.get("seconds") or 0) >= COLD_START_S:
+            cold_boots += 1
+        elif ev == "decision":
+            what = d.get("decision")
+            if what == "pause":
+                paused = d.get("reason") or "paused"
+            elif what == "resume":
+                paused, escalations, cold_boots, coder_deaths = None, 0, 0, 0
+                clock_start = ledger_ts(e)
+            elif what == "abort":
+                aborted = True
+            elif what == "ready for operator review":
+                finished = True
+            elif what == "coder started" and (d.get("ready_s") or 0) >= COLD_START_S:
+                cold_boots += 1
+            elif what == "coder died; restarting it once":
+                coder_deaths += 1
+    next_stage = next((s.number for s in STAGES if s.number not in done), None)
+    return RunProgress(run_start is not None, run_start, clock_start, finished, aborted, paused,
+                       tuple(done), open_stage, frozenset(escalated), escalations, cold_boots,
+                       coder_deaths, next_stage)
+
+
+def attempt_started_ts(entries: list[dict], stage: int) -> float | None:
+    """When the current attempt at `stage` first started: the first stage_start after its last
+    stage_end. A restart keeps the attempt's clock, so a crash does not reset the budget."""
+    t = None
+    for e in entries:
+        if e["stage"] != stage:
+            continue
+        if e["event"] == "stage_end":
+            t = None
+        elif e["event"] == "stage_start" and t is None:
+            t = ledger_ts(e)
+    return t
+
+
+def budget_cap(p: RunProgress, now: float) -> str | None:
+    """Spec section 10: a run-wide cap that pauses the run, or None."""
+    if p.escalations >= RUN_ESCALATION_CAP:
+        return f"{p.escalations} escalations since the last resume (cap {RUN_ESCALATION_CAP})"
+    if p.cold_boots >= RUN_COLD_BOOT_CAP:
+        return f"{p.cold_boots} cold coder boots since the last resume (cap {RUN_COLD_BOOT_CAP})"
+    if p.clock_start is not None and now - p.clock_start >= RUN_WALL_CLOCK_S:
+        return (f"the run has lasted {int(now - p.clock_start)} s since it started or was last "
+                f"resumed (cap {int(RUN_WALL_CLOCK_S)} s)")
+    return None
+
+
+def coder_state(entries: list[dict]) -> tuple[dict | None, dict | None, dict | None]:
+    """The coder's latest lease record, server record and baseline canary, from the ledger.
+
+    Park and restore entries carry the lease (orchard/handoff.py). The supervisor's own
+    "coder starting" and "coder started" decisions carry it too.
+    """
+    lease = server = canary = None
+    for e in entries:
+        d = e["data"]
+        own = e["event"] == "decision" and d.get("decision") in ("coder starting", "coder started")
+        if e["event"] in ("park", "restore") or own:
+            if isinstance(d.get("lease"), dict):
+                lease = d["lease"]
+            if isinstance(d.get("server"), dict):
+                server = d["server"]
+            if own and isinstance(d.get("canary"), dict):
+                canary = d["canary"]
+    return lease, server, canary
+
+
+def open_stage_dir(run_dir, spec: StageSpec, *, resuming: bool, ledger) -> tuple[Path, bool]:
+    """The stage directory for this attempt, and whether it resumes from the stage's marker.
+
+    A resumed stage with its marker present keeps its directory. Otherwise an existing directory
+    is moved aside to `<n>.partial-<k>` (never deleted) and a fresh one is made (spec section 10).
+    """
+    d = Path(run_dir) / "stages" / str(spec.number)
+    if d.exists():
+        marker = d / spec.marker if spec.marker else None
+        if resuming and marker is not None and marker.is_file():
+            ledger.append("decision", spec.number, decision="resume from marker",
+                          marker=evidence_record(run_dir, marker))
+            return d, True
+        k = 1
+        while (aside := d.with_name(f"{spec.number}.partial-{k}")).exists():
+            k += 1
+        os.rename(d, aside)
+        ledger.append("decision", spec.number, decision="moved the partial stage directory aside",
+                      path=os.path.relpath(aside, run_dir))
+    (d / "evidence").mkdir(parents=True)
+    return d, False
+
+
 # ---- command line: compare a stage 0 delta with a reference answer ------------------------------
 
 def main(argv=None) -> int:
