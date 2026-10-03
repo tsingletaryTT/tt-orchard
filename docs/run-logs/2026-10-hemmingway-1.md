@@ -373,3 +373,16 @@ path, so packaging is the next piece to build after stages 0 to 6 are shown to w
   agent made 20 turns without writing a file by 20:39, and the `no_file_written` detector fired. I sent
   `pause` at 20:43:20Z. The multi-chip plan (12 tasks, 90 new tests, verified by its writer in a scratch
   clone) is ready; executing it next. The run stays paused, with the coder idle on board 1.
+- **21:00Z to 22:07Z the multi-chip and packaging plans built and merged.** Plan 6 (stage 4: a list of hardware
+  tests, one per chip configuration, each under its own lease; a 4-chip container template that mounts an
+  empty Hugging Face directory and an empty per-configuration cache; a pass counts only if the supervisor
+  wrote the record and the ledger's sha256 matches; resume at the first configuration without a record;
+  gate feedback that follows the required configurations) was implemented in three batches, 90 new tests,
+  every mutation red. Plan 5's modules (stage 7 packaging: scrub, card with license check, model-directory
+  wiring, `package-thin --out` only, boot check, publish commands as text) were built in parallel in
+  their own worktree, 105 new tests. The stage table and supervisor tasks of plan 5 (tasks 9 to 11) wait
+  for the stage 4 proof. Both merged into main with two expected conflicts in the defaults files, resolved
+  by keeping both sides. **Suite on the merged main: 1521 passed, 1 skipped.**
+- **22:07:13Z supervisor restarted on the merged code and resumed into stage 4** (pid 853031, same run 3
+  flags, `--required-chips 2,4`). Stage 4's old attempt (generic `mesh-shrink` skill) is moved aside and
+  the weights-only stage 4 starts with a fresh prepare step.
