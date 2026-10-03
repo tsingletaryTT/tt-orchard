@@ -413,3 +413,32 @@ def test_prepare_then_serve_through_a_fake_bundle(swap, tmp_path):
     assert seen["model_arg"] == md
     assert seen["env"]["MODEL_WEIGHTS_DIR"] == md and seen["env"]["HF_MODEL"] == md
     assert report(swap)["result_draft"]["top1_agreement"] == 1.0
+
+
+
+# ---- prepare_swap.py for a container package (stage 4) ------------------------------------------
+
+def container_config(prep, **change):
+    cfg = json.loads((prep["stage"] / "swap_config.json").read_text())
+    del cfg["bundle_dir"]
+    cfg.update(change)
+    (prep["stage"] / "swap_config.json").write_text(json.dumps(cfg))
+
+
+def test_prepare_for_a_container_package_builds_only_the_model_dir(prep):
+    container_config(prep, package="changh95/qwen3.8-27b-p300x2")
+    r = run_prepare(prep["stage"])
+    assert r.returncode == 0, r.stdout + r.stderr
+    md = prep["stage"] / "model-dir"
+    assert (md / "config.json").read_text() == (prep["base"] / "config.json").read_text()
+    assert os.readlink(md / "tokenizer.json") == os.path.realpath(prep["new"] / "tokenizer.json")
+    assert not (prep["stage"] / "run.sh").exists()
+    assert "changh95/qwen3.8-27b-p300x2 is a container package" in r.stdout
+
+
+def test_prepare_with_neither_a_bundle_nor_a_package_exits_2(prep):
+    container_config(prep)
+    r = run_prepare(prep["stage"])
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "bundle_dir (or package" in r.stderr
+    assert not (prep["stage"] / "model-dir").exists()
