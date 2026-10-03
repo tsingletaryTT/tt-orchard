@@ -152,3 +152,20 @@ def fake_bin(tmp: Path) -> tuple[Path, Path]:
 def calls(log: Path) -> list[list[str]]:
     return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
 
+
+def fake_boot_result(stage: Path, *, returncode=0, top1=0.94) -> None:
+    """What the supervisor and verify_bundle.py leave in stages/7 after the boot check: the test's
+    output and test-result.json, and with exit 0 the verify.json evidence."""
+    write(stage / "evidence/hw-test-output.txt", "verify_bundle: done\n")
+    write(stage / "test-result.json", {"returncode": returncode, "timed_out": False,
+                                       "output": {"path": "stages/7/evidence/hw-test-output.txt",
+                                                  "sha256": "0" * 64}})
+    if returncode == 0:
+        md = stage / "verify/bundle/model-dir"
+        write(stage / "verify/evidence/server.log", "ready\n")
+        write(stage / "verify/evidence/verify.json", {
+            "label": "measured", "top1_agreement": top1, "coherent": True, "n_tokens": 32,
+            "server_ready_s": 301.2, "served_model": str(md),
+            "server_weights_env": {"MODEL_WEIGHTS_DIR": str(md), "HF_MODEL": str(md)},
+            "evidence": ["stages/7/verify/evidence/verify.json",
+                         "stages/7/verify/evidence/server.log"]})

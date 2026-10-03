@@ -493,3 +493,177 @@ def prepare_verify(staged: Path, verify_dir: Path, facts: RunFacts, *, env: dict
     script = os.path.relpath(verify_dir / "verify_bundle.py", facts.run_dir)
     return {"command": f"{shlex.quote(sys.executable)} {script}",
             "deadline_s": PACKAGE_VERIFY_DEADLINE_S, "hf_linked": linked, "hf_missing": missing}
+
+
+# ---- cards, publish commands and the stage's record ----------------------------------------------
+
+PUBLISH_FILE = "PUBLISH_COMMANDS.txt"
+PUBLISH_LINE = re.compile(r"^hf upload --repo-type model --private [A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+ "
+                          r"stages/7/package/[A-Za-z0-9_.-]+ \.$")
+
+
+def publish_commands(profiles: list[dict], *, namespace: str, license_id: str) -> str:
+    """The operator's publish commands, as text. Only a boot-checked profile gets a live line."""
+    nc = " (non-commercial)" if non_commercial(license_id) else ""
+    lines = ["# Publish commands for the packages stage 7 staged. The run never ran them.",
+             "# Read RESULTS.md, RISKS.md and each package's README.md before running any of them.",
+             "# Run them from the run directory. `hf upload --private` creates each repo private.",
+             "# The card's front matter sets the repo's license and the tags `tt-model search` uses.",
+             f"# License: {license_id}{nc}. Keep the card's license section as it is.",
+             "# Making a repo public, or listing it in the tt-model catalog, is a separate decision.",
+             "# `tt-model package-thin <repo>` rebuilds the bundle without stage 7's run.sh edits,",
+             "# so it is not used to publish these packages.", ""]
+    for p in sorted(profiles, key=lambda p: p["chips"]):
+        line = (f"hf upload --repo-type model --private {namespace}/{p['name']} "
+                f"stages/7/package/{p['name']} .")
+        if p.get("verified"):
+            lines += [f"# {p['chips']} chips ({p['mesh']}), boot-checked in stage 7:", line, ""]
+        else:
+            lines += [f"# {p['chips']} chips ({p['mesh']}), NOT boot-checked. Boot it before "
+                      "publishing:", f"# {line}", ""]
+    return "\n".join(lines)
+
+
+def publish_problems(text: str) -> list[str]:
+    problems = []
+    live = [ln for ln in text.splitlines() if ln.strip() and not ln.startswith("#")]
+    if not live:
+        problems.append(f"{PUBLISH_FILE} has no command for a boot-checked package")
+    for ln in live:
+        if not PUBLISH_LINE.match(ln):
+            problems.append(f"{PUBLISH_FILE} line {ln!r} is not a private hf upload of a staged package")
+    for flag in ("--public", "--publish"):
+        if re.search(rf"(?<![\w-]){flag}\b", text):
+            problems.append(f"{PUBLISH_FILE} uses {flag}")
+    return problems
+
+
+def _rel(run_dir: Path, path: Path) -> str:
+    return os.path.relpath(path, run_dir)
+
+
+def card_numbers(facts: RunFacts, profile: dict, verify: dict | None) -> list[Number]:
+    """The numbers one package's card may show. Only the boot-checked profile shows the run's
+    measurements, because they were taken on that profile's chip count."""
+    run = facts.run_dir
+    if not profile["required"]:
+        return [Number("top1 agreement with the CPU reference, this package", None, "fraction",
+                       "TODO", ())]
+    s2 = _json(run / "stages/2/result.json", "stage 2's result")
+    ev2 = ("stages/2/result.json", *s2.get("evidence", []))
+    nums = [Number(f"top1 agreement with the CPU reference, stage 2 ({profile['chips']} chips, "
+                   f"bundle {profile['source']})", s2["top1_agreement"], "fraction", "measured", ev2),
+            Number("server ready after start, stage 2 (empty tensor cache)", s2["server_ready_s"],
+                   "s", "measured", ev2)]
+    s6_path = run / "stages/6/result.json"
+    if s6_path.is_file():
+        for n in _json(s6_path, "stage 6's result").get("numbers") or []:
+            measured = n.get("label") == "measured"
+            nums.append(Number(f"{n['name']} (stage 6)", n.get("value") if measured else None,
+                               n["unit"], "measured" if measured else "TODO",
+                               ("stages/6/result.json", *n.get("evidence", [])) if measured else ()))
+    if verify is None:
+        nums.append(Number("top1 agreement with the CPU reference, this package", None, "fraction",
+                           "TODO", ()))
+    else:
+        ev7 = tuple(verify["evidence"])
+        nums += [Number("top1 agreement with the CPU reference, this package (stage 7)",
+                        verify["top1_agreement"], "fraction", "measured", ev7),
+                 Number("server ready after start, this package (stage 7, fresh install, empty "
+                        "tensor cache)", verify["server_ready_s"], "s", "measured", ev7)]
+    return nums
+
+
+def write_card(out: Path, facts: RunFacts, profile: dict, *, namespace: str,
+               verify: dict | None) -> None:
+    m = _json(out / "tt_kernel_manifest.json", "the staged manifest")
+    drafters = aux_repos(m.get("env") or {}, nearest_model=facts.nearest_model)
+    not_measured = ["a download of the weights through `tt-model pull`, and a boot of the package "
+                    "from the Hub"]
+    if drafters:
+        not_measured.insert(0, "the drafter's acceptance rate on this model")
+    facts_card = CardFacts(
+        name=profile["name"], namespace=namespace, model_id=facts.model_id, revision=facts.revision,
+        nearest_model=facts.nearest_model, source_name=profile["source"],
+        license_id=facts.license_id, chips=profile["chips"], mesh=m["mesh"]["topology"],
+        arch=m["arch"], max_model_len=m["resources"]["max_model_len"],
+        max_num_seqs=m["resources"]["max_num_seqs"], drafter=drafters[0] if drafters else None,
+        verified=verify is not None and profile["required"],
+        numbers=tuple(card_numbers(facts, profile, verify)), not_measured=tuple(not_measured))
+    (out / "README.md").write_text(render_card(facts_card), encoding="utf-8")
+
+
+def _write_json(path: Path, data) -> None:
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def stage_all(run_dir, stage_dir, *, namespace: str, models_root, env: dict | None = None,
+              hostname: str | None = None) -> dict:
+    """Stage every profile, scrub each one (a hit stops the stage before anything is installed),
+    install a copy of the required profile and write hw_test.json, handoff.json and package.json."""
+    facts = read_run(run_dir)
+    stage_dir = Path(stage_dir)
+    others = find_sources(models_root, entry_cls=facts.source.entry_cls,
+                          nearest_model=facts.nearest_model)
+    profiles, skipped = plan_profiles(facts, others)
+    root = stage_dir / "package"
+    root.mkdir(parents=True)
+    records = []
+    for p in profiles:
+        out = root / bundle_name(facts.model_id, p.source.name)
+        rec = stage_profile(p, facts, out, env=env)
+        write_card(out, facts, rec, namespace=namespace, verify=None)
+        hits = scrub_package(out, hostname=hostname, namespace=namespace)
+        if hits:
+            raise PackageError(f"scrub of {rec['name']}: " + "; ".join(hits))
+        records.append({**rec, "dir": _rel(facts.run_dir, out), "verified": False})
+    req = next(r for r in records if r["required"])
+    test = prepare_verify(facts.run_dir / req["dir"], stage_dir / "verify", facts, env=env)
+    _write_json(stage_dir / "hw_test.json",
+                {"command": test["command"], "deadline_s": test["deadline_s"]})
+    _write_json(stage_dir / "handoff.json", {
+        "goal": f"package {facts.model_id} as a v6 thin bundle", "stage": 7,
+        "evidence": [_rel(facts.run_dir, stage_dir / "package.json")],
+        "next_action": f"boot the installed copy of {req['name']} and compare it with the reference",
+        "check_on_return": "stages/7/test-result.json and stages/7/verify/evidence/verify.json"})
+    package = {"format": "v6", "namespace": namespace, "model": facts.model_id,
+               "revision": facts.revision, "nearest_model": facts.nearest_model,
+               "license": facts.license_id, "non_commercial": non_commercial(facts.license_id),
+               "profiles": records, "skipped_profiles": skipped, "hf_linked": test["hf_linked"],
+               "hf_missing": test["hf_missing"], "publish_commands": f"stages/7/{PUBLISH_FILE}"}
+    _write_json(stage_dir / "package.json", package)
+    return package
+
+
+def finish(run_dir, stage_dir, *, hostname: str | None = None) -> dict:
+    """After the boot check: record its result, rewrite the cards with it, scrub again and write
+    the publish commands."""
+    facts = read_run(run_dir)
+    stage_dir = Path(stage_dir)
+    package = _json(stage_dir / "package.json", "stage 7's package.json")
+    test = _json(stage_dir / "test-result.json", "stage 7's test-result.json")
+    vpath = stage_dir / "verify" / "evidence" / "verify.json"
+    verify = None
+    if test.get("returncode") == 0 and vpath.is_file():
+        verify = _json(vpath, "the boot check's verify.json")
+    for rec in package["profiles"]:
+        out = facts.run_dir / rec["dir"]
+        rec["verified"] = bool(rec["required"] and verify is not None)
+        if rec["required"]:
+            if verify is None:
+                rec["verify"] = {"failed": f"the boot check exited {test.get('returncode')} "
+                                           f"(timed out: {test.get('timed_out')}); see "
+                                           f"{test.get('output', {}).get('path')}"}
+            else:
+                rec["verify"] = {k: verify[k] for k in ("top1_agreement", "coherent", "n_tokens",
+                                                        "server_ready_s", "evidence")}
+        write_card(out, facts, rec, namespace=package["namespace"],
+                   verify=verify if rec["required"] else None)
+        rec["scrub"] = scrub_package(out, hostname=hostname, namespace=package["namespace"])
+    (stage_dir / PUBLISH_FILE).write_text(
+        publish_commands(package["profiles"], namespace=package["namespace"],
+                         license_id=facts.license_id), encoding="utf-8")
+    _write_json(stage_dir / "package.json", package)
+    return package
