@@ -102,6 +102,7 @@ from orchard.handoff import (NOTE_KEYS, Blocked, Budgets, Handoff, decide_park, 
 from orchard.hwtests import (failed_tests, load_plan, move_aside, pending, read_plan, suspect_caches,
                              unrecorded, write_plan, write_record, write_summary)
 from orchard.ledger import Ledger, LedgerCorrupt, LedgerLocked
+from orchard.paths import RunPaths, UnknownPlaceholder
 from orchard.runner import Denied, check_string
 from orchard.server import ServerControl, ServerError, ServerSpec, StopCheck
 from orchard.stages import (GateResult, TierUnavailable, attempt_started_ts, budget_cap, check_disk,
@@ -384,7 +385,8 @@ class Supervisor:
                  versions: dict | None = None, http=post_json, probe=probe_model, clock=time.time,
                  sleep=time.sleep, budgets: Budgets = Budgets(), disk_usage=shutil.disk_usage,
                  credentials_visible: list[str] | None = None,
-                 required_chips: tuple[int, ...] | None = None, home=None, containers=None):
+                 required_chips: tuple[int, ...] | None = None, home=None, containers=None,
+                 paths: RunPaths | None = None):
         self.run_dir = Path(run_dir).resolve()
         self.ledger, self.cfg, self.model_id = ledger, cfg, model_id
         self.adapter, self.coder, self.coder_chips, self.standin = adapter, coder, coder_chips, standin
@@ -397,6 +399,8 @@ class Supervisor:
         self.required_chips = tuple(required_chips) if required_chips else None   # stage 4's required counts
         self.home = Path(home) if home is not None else operator_home()   # whose shared caches to refuse
         self.containers = containers if containers is not None else LabelledContainers()
+        # The machine paths the skills' placeholders name (orchard/paths.py).
+        self.paths = paths if paths is not None else RunPaths.resolve(self.run_dir, home=self.home)
         # The docker label every test container of this run carries (ORCHARD_TEST_LABEL).
         self.run_label = "orchard.test=" + hashlib.sha256(str(self.run_dir).encode()).hexdigest()[:12]
         self.control = Control(self.run_dir)
@@ -935,10 +939,13 @@ class Supervisor:
             self._block(n, f"the skill {spec.skill!r} is not in {[str(d) for d in self.skills_dirs]}")
         refs = {r: resolve_skill(r, self.skills_dirs) for r in spec.refs}
         entries = self.ledger.read()
-        system, user = build_messages(spec=spec, phase=phase, run_dir=self.run_dir,
-                                      stage_dir=stage_dir, skill_path=skill, refs=refs,
-                                      facts=facts_from(run_progress(entries).run_start, self.run_dir),
-                                      entries=entries, resumed=resumed)
+        try:
+            system, user = build_messages(spec=spec, phase=phase, run_dir=self.run_dir,
+                                          stage_dir=stage_dir, skill_path=skill, refs=refs,
+                                          facts=facts_from(run_progress(entries).run_start, self.run_dir),
+                                          entries=entries, resumed=resumed, paths=self.paths)
+        except UnknownPlaceholder as exc:     # a typo in a skill: the operator fixes the skill
+            self._block(n, str(exc))
         model = self.cfg.tiers[used]["model"]
         self.ledger.append("decision", n, decision="agent step", phase=phase, tier=used, model=model,
                            escalated=escalated, skill=str(skill))

@@ -274,6 +274,20 @@ def test_abort_stops_the_coder_releases_its_lease_and_stays_aborted(rig):
     assert rig.run() == EXIT_ABORTED and rig.m.coder_starts == starts
 
 
+def test_a_skill_with_an_unknown_placeholder_blocks_its_stage(rig, tmp_path, monkeypatch):
+    import shutil
+
+    import orchard.supervisor as sup_mod
+    skills = tmp_path / "skills"
+    shutil.copytree(sup_mod.SKILLS_DIR, skills)
+    (skills / "delta-triage.md").write_text("cp {{NO_SUCH_PATH}}/x\n")
+    monkeypatch.setattr(sup_mod, "SKILLS_DIR", skills)
+    rig.on_sleep = lambda: Control(rig.run_dir).write("abort")
+    assert rig.run() == EXIT_ABORTED
+    notes = [e["data"]["reason"] for e in rig.entries() if e["event"] == "notice" and e["data"].get("blocked")]
+    assert len(notes) == 1 and "{{NO_SUCH_PATH}}" in notes[0] and "delta-triage.md" in notes[0]
+
+
 def test_a_stage_short_of_disk_pauses_until_the_operator_resumes(rig):
     from collections import namedtuple
     rig.usage = lambda p: namedtuple("U", "total used free")(0, 0, 2e9)
