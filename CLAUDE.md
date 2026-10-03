@@ -170,3 +170,11 @@ fallback kernels (the 64-token figure measured disk paging and is not valid). Be
 stage needs park and restore. First target model: Altworld/Hemmingway-1 (spelled with two m's); the operator wants the harness, not
 Claude by hand, to do the bring-up. Hand-done stage 0 findings are a reference answer only, at
 `/mnt/bonus/models/hemmingway-1/work/stage0-reference.md`.
+
+## 2026-10-03: truncated replies no longer end a step as done
+On a real run the Qwen reasoning model spent all 8192 max_tokens thinking on turn 8 and returned finish_reason "length" with no
+content and no tool calls. The loop took "no tool calls" as the final answer, so the stage ended with no output files and was
+escalated. `AgentStep.run` now reads finish_reason: a "length" reply without tool calls is left out of the conversation, logged
+(every log record has `finish_reason`; a `notice` ledger entry with `watchdog=True` is added), and answered with a user message
+asking for a short think and a tool call. A second one in a row ends the step with status "error". The supervisor treats "error"
+like any step that did not finish: the first time it escalates the stage, and a failure after escalation pauses the run.

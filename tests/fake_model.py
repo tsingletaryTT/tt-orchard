@@ -4,6 +4,10 @@
 it calls `script(request)`, which returns an assistant message dict, or an int to answer with
 that HTTP status. The answer depends only on the request, so a restarted supervisor that sends
 the same conversation gets the same answer, as from a greedy server.
+
+An answer dict may carry two extra keys that are not part of the message: `finish_reason`
+(default "stop") and `completion_tokens` (default 20). `truncated()` builds a reply that ran
+into max_tokens.
 """
 from __future__ import annotations
 
@@ -21,6 +25,12 @@ def call(name: str, call_id: str = "c1", **arguments) -> dict:
 
 def final(text: str = "done") -> dict:
     return {"role": "assistant", "content": text}
+
+
+def truncated(tokens: int = 8192, **extra) -> dict:
+    """A reply cut off at max_tokens: empty content, no tool calls, finish_reason "length"."""
+    return {"role": "assistant", "content": "", "finish_reason": "length",
+            "completion_tokens": tokens, **extra}
 
 
 def turn(request: dict) -> int:
@@ -60,10 +70,13 @@ class FakeModel:
                 if isinstance(answer, int):
                     self._send(answer, {"error": "scripted failure"})
                     return
+                answer = dict(answer)
+                reason = answer.pop("finish_reason", "stop")
+                tokens = answer.pop("completion_tokens", 20)
                 self._send(200, {"choices": [{"index": 0, "message": answer,
-                                              "finish_reason": "stop"}],
+                                              "finish_reason": reason}],
                                  "usage": {"prompt_tokens": 100 + 10 * len(request["messages"]),
-                                           "completion_tokens": 20}})
+                                           "completion_tokens": tokens}})
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.endpoint = f"http://127.0.0.1:{self.server.server_address[1]}/v1"
