@@ -552,12 +552,14 @@ def run_path(entries: list[dict], run_dir) -> str | None:
 
 def spec_for(number: int, path: str | None) -> StageSpec:
     """The stage spec for `number` on `path`. Only the weights-only path changes the table: stage 2
-    gets the swap skill and gate, and stage 3 is skipped (the supervisor records it as skipped,
-    as it does stage 7)."""
+    gets the swap skill and gate, stage 3 is skipped (the supervisor records it as skipped, as it
+    does stage 7), and stage 4 runs one test per chip configuration."""
     if path == "weights-only" and number == 2:
         return WEIGHTS_ONLY_STAGE_2
     if path == "weights-only" and number == 3:
         return WEIGHTS_ONLY_STAGE_3
+    if path == "weights-only" and number == 4:
+        return WEIGHTS_ONLY_STAGE_4
     return STAGES[number]
 
 

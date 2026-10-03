@@ -50,12 +50,31 @@ run as the same user, so code an agent runs can still read any file that user ca
 
 Plan 4 runs stages 0 to 6 and 8. Stage 7 (package and container build) is recorded as skipped,
 and so is stage 3 on the weights-only path.
+
+On the weights-only path stage 4 runs a list of hardware tests, one per chip configuration
+(orchard/hwtests.py). The prepare step writes hw_tests.json; the supervisor validates it, writes
+tests/plan.json (the resume marker) and runs the tests in order of chip count, each under its own
+lease, then the finish step writes result.json. Each test's record is written as soon as it ends,
+so a crash resumes at the first configuration with no record. For each test:
+- enough free boards: lease them (one board: the free one, by its first chip) and leave the coder
+  loaded;
+- otherwise the coder's boards are needed: first lease any further boards the test needs (so a
+  board that cannot be had leaves the coder untouched), then park the coder, run the test on the
+  coder's chips plus the further boards, release the further boards and restore the coder. A
+  test that fails is recorded, and the coder is restored all the same. With the coder on two
+  chips, the 4-chip test is the only one that parks. Measured costs of one park and restore on
+  this box: `tt-model stop` 1 to 2 s, a gozer reset 41.7 s (twice: park and restore), the 2-chip
+  coder back to ready in about 120 s. The 4-chip coder's restart was not measured.
+After every test the supervisor stops and removes any container that still carries this run's test
+label (`run_label`); a container that survives that blocks the stage before any lease is released
+or reset.
 """
 from __future__ import annotations
 
 import argparse
 import contextlib
 import functools
+import hashlib
 import json
 import os
 import pwd
@@ -75,9 +94,10 @@ from orchard.commands import run_command
 from orchard.context import build_messages, facts_from
 from orchard.defaults import (AGENT_CONTINUATION_TURNS, CHIPS_PER_BOARD, CMD_TIMEOUT_S,
                               COLD_BOOT_BUDGET_S, CONTROL_POLL_S, FIRST_BOOT_EXPECTED,
-                              FIRST_BOOT_PROMPT, RUN_CANARY_PROMPT)
+                              FIRST_BOOT_PROMPT, RUN_CANARY_PROMPT, STOP_TIMEOUT_S)
 from orchard.handoff import (NOTE_KEYS, Blocked, Budgets, Handoff, decide_park, progress, reacquire,
                              recover, wait_stopped)
+from orchard.hwtests import load_plan, pending, read_plan, write_plan, write_record, write_summary
 from orchard.ledger import Ledger, LedgerCorrupt, LedgerLocked
 from orchard.runner import Denied, check_string
 from orchard.server import ServerControl, ServerError, ServerSpec, StopCheck
@@ -182,6 +202,27 @@ class RunActuator:
     def clear(self) -> None:
         self._stop = None
         self._nudges.clear()
+
+
+class LabelledContainers:
+    """Containers this run's hardware tests started, found by their docker label.
+
+    A test script stops its own container in a `finally`. A test killed at its deadline runs no
+    `finally`, and a container started with `docker run --detach` is not in the killed session, so
+    it keeps the chips. The supervisor looks for the label after every test of a list.
+    """
+
+    def __init__(self, run=run_command, docker: str = "docker"):
+        self.run, self.docker = run, docker
+
+    def list(self, label: str) -> list[str] | None:
+        """The ids of containers with `label`, or None when docker could not be asked."""
+        r = self.run([self.docker, "ps", "--all", "--quiet", "--filter", f"label={label}"], CMD_TIMEOUT_S)
+        return r.stdout.split() if r.returncode == 0 else None
+
+    def remove(self, cid: str) -> None:
+        self.run([self.docker, "stop", "-t", "60", cid], STOP_TIMEOUT_S)
+        self.run([self.docker, "rm", "--force", cid], CMD_TIMEOUT_S)
 
 
 class ExternalStandIn:
@@ -340,7 +381,7 @@ class Supervisor:
                  versions: dict | None = None, http=post_json, probe=probe_model, clock=time.time,
                  sleep=time.sleep, budgets: Budgets = Budgets(), disk_usage=shutil.disk_usage,
                  credentials_visible: list[str] | None = None,
-                 required_chips: tuple[int, ...] | None = None):
+                 required_chips: tuple[int, ...] | None = None, home=None, containers=None):
         self.run_dir = Path(run_dir).resolve()
         self.ledger, self.cfg, self.model_id = ledger, cfg, model_id
         self.adapter, self.coder, self.coder_chips, self.standin = adapter, coder, coder_chips, standin
@@ -351,6 +392,10 @@ class Supervisor:
         self.budgets, self.disk_usage = budgets, disk_usage
         self.credentials_visible = list(credentials_visible or [])
         self.required_chips = tuple(required_chips) if required_chips else None   # stage 4's required counts
+        self.home = Path(home) if home is not None else operator_home()   # whose shared caches to refuse
+        self.containers = containers if containers is not None else LabelledContainers()
+        # The docker label every test container of this run carries (ORCHARD_TEST_LABEL).
+        self.run_label = "orchard.test=" + hashlib.sha256(str(self.run_dir).encode()).hexdigest()[:12]
         self.control = Control(self.run_dir)
         self.actuator = RunActuator(self.control)
         self.guard = RetryGuard()
@@ -767,7 +812,11 @@ class Supervisor:
             if out.status != "done":
                 return out.status, [f"the agent step ended: {out.status} {out.detail}".strip()], None
         else:
-            if not (resumed and (stage_dir / "test-result.json").is_file()):
+            if spec.tests:
+                ended = self._run_test_list(spec, stage_dir, escalated, resumed)
+                if ended:
+                    return ended
+            elif not (resumed and (stage_dir / "test-result.json").is_file()):
                 out, _ = self._step(spec, "prepare", stage_dir, escalated, resumed)
                 if out.status != "done":
                     return out.status, [f"the prepare step ended: {out.status} {out.detail}".strip()], None
@@ -937,34 +986,163 @@ class Supervisor:
 
     def _run_test(self, spec, stage_dir: Path, test: dict, lease: Lease) -> dict:
         n = spec.number
-        chips = list(lease.chips[:spec.boards * CHIPS_PER_BOARD])
-        env = agent_env(self.run_dir, extra=self.extra_env)
-        # The leased chips replace the agent shells' no-chip mask. TT_METAL_VISIBLE_DEVICES takes
-        # device indices in another form, so the hardware test gets none and the runtime follows
-        # TT_VISIBLE_DEVICES.
-        env["TT_VISIBLE_DEVICES"] = ",".join(chips)
-        env.pop("TT_METAL_VISIBLE_DEVICES", None)
+        k = spec.boards * CHIPS_PER_BOARD
         deadline = min(float(test["deadline_s"]), spec.budget_s)
-        out_path = stage_dir / "evidence" / "hw-test-output.txt"
-        self.ledger.append("decision", n, decision="hardware test started", command=test["command"],
-                           deadline_s=deadline, chips=chips, lease_id=lease.lease_id)
-        t0 = self.clock()
-        with open(out_path, "wb") as out:
-            try:
-                code, timed_out = spawn_checked(test["command"], self.run_dir, env, deadline, out)
-            except Denied as exc:
-                code, timed_out = None, False
-                out.write(f"refused: {exc}\n".encode("utf-8"))
-        result = {"command": test["command"], "returncode": code, "timed_out": timed_out,
-                  "seconds": round(self.clock() - t0, 3), "chips": chips,
-                  "output": evidence_record(self.run_dir, out_path)}
+        result = self._spawn(n, test["command"], lease.chips[:k], lease.dev_indices[:k], deadline,
+                             stage_dir / "evidence" / "hw-test-output.txt", lease_id=lease.lease_id)
         marker = stage_dir / "test-result.json"
         tmp = stage_dir / "test-result.json.tmp"
         tmp.write_text(json.dumps(result, indent=2))
         os.replace(tmp, marker)         # the resume marker appears whole or not at all
-        self.ledger.append("evidence", n, what="hardware test", returncode=code, timed_out=timed_out,
-                           **evidence_record(self.run_dir, marker))
+        self.ledger.append("evidence", n, what="hardware test", returncode=result["returncode"],
+                           timed_out=result["timed_out"], **evidence_record(self.run_dir, marker))
         return result
+
+    def _spawn(self, n: int, command: str, chips, ids, deadline: float, out_path: Path,
+               **record) -> dict:
+        """Run one hardware test command on `chips` (device indices `ids`) and return its record.
+        `record` adds keys to the "hardware test started" decision."""
+        env = agent_env(self.run_dir, extra=self.extra_env)
+        # The leased chips replace the agent shells' no-chip mask. TT_METAL_VISIBLE_DEVICES takes
+        # device indices in another form, so the hardware test gets none and the runtime follows
+        # TT_VISIBLE_DEVICES. A container test needs the /dev/tenstorrent indices of the same
+        # chips (ORCHARD_DEVICE_IDS) and the label its containers carry (ORCHARD_TEST_LABEL).
+        env["TT_VISIBLE_DEVICES"] = ",".join(chips)
+        env.pop("TT_METAL_VISIBLE_DEVICES", None)
+        env["ORCHARD_DEVICE_IDS"] = ",".join(str(i) for i in ids)
+        env["ORCHARD_TEST_LABEL"] = self.run_label
+        self.ledger.append("decision", n, decision="hardware test started", command=command,
+                           deadline_s=deadline, chips=list(chips), **record)
+        t0 = self.clock()
+        with open(out_path, "wb") as out:
+            try:
+                code, timed_out = spawn_checked(command, self.run_dir, env, deadline, out)
+            except Denied as exc:
+                code, timed_out = None, False
+                out.write(f"refused: {exc}\n".encode("utf-8"))
+        return {"command": command, "returncode": code, "timed_out": timed_out,
+                "seconds": round(self.clock() - t0, 3), "chips": list(chips),
+                "output": evidence_record(self.run_dir, out_path)}
+
+    # ---- a list of hardware tests (stage 4 on the weights-only path) ---------------------------
+
+    def _run_test_list(self, spec, stage_dir: Path, escalated: bool, resumed: bool):
+        """Prepare the list (unless a resumed stage has its plan), then run every test that has
+        no record. Returns (status, reasons, gate) when the stage ends here, or None when the
+        finish step should run."""
+        n = spec.number
+        tests = load_plan(stage_dir) if resumed else None
+        if tests is None:
+            out, _ = self._step(spec, "prepare", stage_dir, escalated, resumed)
+            if out.status != "done":
+                return out.status, [f"the prepare step ended: {out.status} {out.detail}".strip()], None
+            tests, problems = read_plan(stage_dir, required=self.required_chips,
+                                        max_chips=spec.boards * CHIPS_PER_BOARD,
+                                        budget_s=spec.budget_s, home=self.home)
+            if problems:
+                return "fail", problems, None
+            plan = write_plan(stage_dir, tests)
+            self.ledger.append("evidence", n, what="hardware test list",
+                               configs=[t.chips for t in tests], **evidence_record(self.run_dir, plan))
+        # A test lease left from a block (a container that would not stop) goes back first.
+        if not self._release_test_lease():
+            self._block(n, "releasing a test lease left from an earlier test failed")
+        for test in pending(stage_dir, tests):
+            self._run_listed(spec, stage_dir, test)
+        write_summary(stage_dir, tests)
+        return None
+
+    def _run_listed(self, spec, stage_dir: Path, test) -> None:
+        n = spec.number
+        chips = self.adapter.status()
+        d = decide_park(self.coder_lease.units, chips, test.boards)
+        self.ledger.append("decision", n, decision="hardware phase", config=test.chips,
+                           action=d.action, free_boards=list(d.free_boards),
+                           server_boards=list(d.server_boards))
+        first_chip = {c.board: c.bdf for c in reversed(chips)}       # each board's first chip
+        if d.action == "use_free":
+            exact = first_chip[d.free_boards[0]] if test.boards == 1 else None
+            lease = self._take_test_lease(spec, test, test.boards, exact)
+            self._run_listed_test(spec, stage_dir, test, [lease])
+            self._sweep(n)
+            self._give_back_test_lease(n, lease)
+            return
+        # The coder's boards are needed. Further boards first: if one cannot be had, the coder
+        # has not been touched.
+        extra = None
+        more = test.boards - len(self.coder_lease.units)
+        if more > 0:
+            exact = first_chip[d.free_boards[0]] if d.free_boards else None
+            extra = self._take_test_lease(spec, test, more, exact)
+        h = self._handoff(n, self.coder_lease)
+        try:
+            lease = h.park()
+        except Blocked:
+            self._release_test_lease()
+            raise
+        self._run_listed_test(spec, stage_dir, test, [lease] + ([extra] if extra else []))
+        self._sweep(n)
+        if extra is not None:
+            self._give_back_test_lease(n, extra)
+        h.restore()
+        self.coder_lease = h.lease
+
+    def _take_test_lease(self, spec, test, boards: int, exact) -> Lease:
+        n = spec.number
+        lease = reacquire(self.adapter, chips=boards * CHIPS_PER_BOARD, who=WHO,
+                          reason=f"stage {n} {test.chips}-chip test", ledger=self.ledger, stage=n,
+                          wait_budget_s=spec.budget_s, clock=self.clock, sleep=self.sleep,
+                          exact=exact)
+        self.test_lease = lease
+        self.ledger.append("decision", n, decision="test lease taken", config=test.chips,
+                           test_lease=lease.record())
+        return lease
+
+    def _give_back_test_lease(self, n: int, lease: Lease) -> None:
+        try:
+            self.adapter.release(lease)        # the lease tool resets the board as it releases
+        except AdapterError as exc:
+            self._block(n, f"releasing the test lease failed: {exc}", lease_id=lease.lease_id)
+        self.test_lease = None
+        self.ledger.append("decision", n, decision="test lease released", lease_id=lease.lease_id)
+
+    def _run_listed_test(self, spec, stage_dir: Path, test, leases: list[Lease]) -> None:
+        """Run one configuration's test on the first `test.chips` chips of `leases`, in device
+        order, and write its record."""
+        n = spec.number
+        held = sorted((i, c) for lease in leases for c, i in zip(lease.chips, lease.dev_indices))
+        chosen = held[:test.chips]
+        out_dir = stage_dir / "tests" / str(test.chips)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        result = self._spawn(n, test.command(n), [c for _, c in chosen], [i for i, _ in chosen],
+                             min(test.deadline_s, spec.budget_s), out_dir / "output.txt",
+                             config=test.chips, cache=test.cache,
+                             lease_ids=[lease.lease_id for lease in leases])
+        path = write_record(stage_dir, test.chips, {"config": test.chips, **result,
+                                                    "device_ids": [i for i, _ in chosen]})
+        self.ledger.append("evidence", n, what="hardware test", config=test.chips, cache=test.cache,
+                           returncode=result["returncode"], timed_out=result["timed_out"],
+                           **evidence_record(self.run_dir, path))
+
+    def _sweep(self, n: int) -> None:
+        """Stop and remove any container this run's tests left running. A container that is
+        still listed afterwards blocks the stage: releasing or resetting chips under it is
+        refused, and the operator decides."""
+        found = self.containers.list(self.run_label)
+        if found is None:
+            self.ledger.append("notice", n, what="docker could not be asked for test containers",
+                               label=self.run_label)
+            return
+        if not found:
+            return
+        self.ledger.append("notice", n, what="a hardware test left containers running; stopping them",
+                           containers=found, label=self.run_label)
+        for cid in found:
+            self.containers.remove(cid)
+        left = self.containers.list(self.run_label)
+        if left:
+            self._block(n, "test containers are still running after docker stop and rm; no test "
+                           "lease was released and the coder was not restored", containers=left)
 
 
 # ---- the command line ---------------------------------------------------------------------------
@@ -1017,7 +1195,7 @@ def parse(argv=None):
 
 def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_json,
           probe=probe_model, clock=time.time, sleep=time.sleep, budgets=Budgets(),
-          disk_usage=shutil.disk_usage, home=None) -> Supervisor:
+          disk_usage=shutil.disk_usage, home=None, containers=None) -> Supervisor:
     """A Supervisor from parsed `run` arguments. Tests pass fakes for the machine."""
     # Everything that can be refused is checked before any external command runs.
     cfg = load(args.tiers)
@@ -1057,7 +1235,8 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
                       skills_dirs=[SKILLS_DIR, *args.skills_dir], inputs=inputs,
                       extra_env=extra_env, versions=versions, http=http, probe=probe,
                       clock=clock, sleep=sleep, budgets=budgets, disk_usage=disk_usage,
-                      credentials_visible=found, required_chips=required)
+                      credentials_visible=found, required_chips=required,
+                      home=operator_home() if home is None else home, containers=containers)
 
 
 def main(argv=None, *, home=None) -> int:

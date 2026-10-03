@@ -119,10 +119,16 @@ def test_a_full_port_or_unknown_path_keeps_todays_stage_2_and_3(path):
     assert spec_for(3, path) == STAGES[3]
 
 
-@pytest.mark.parametrize("n", [0, 1, 4, 5, 6, 7, 8])
+@pytest.mark.parametrize("n", [0, 1, 5, 6, 7, 8])
 def test_the_path_changes_no_other_stage(n):
     for path in ("weights-only", "full-port", None):
         assert spec_for(n, path) == STAGES[n]
+
+
+def test_only_the_weights_only_path_runs_stage_4_as_a_list_of_tests():
+    from orchard.stages import WEIGHTS_ONLY_STAGE_4
+    assert spec_for(4, "weights-only") is WEIGHTS_ONLY_STAGE_4
+    assert spec_for(4, "full-port") == STAGES[4] and spec_for(4, None) == STAGES[4]
 
 
 def test_a_long_stage_without_a_resume_marker_is_refused():

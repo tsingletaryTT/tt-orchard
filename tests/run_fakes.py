@@ -4,7 +4,8 @@
 coder container runs and on which chips. `MachineAdapter` behaves like gozer through the adapter
 interface: a lease whose owner pid is dead is reaped at the next acquire once no device is open,
 reset and release refuse while a device is open, and a chip of a running container shows
-HELD-FOREIGN. `MachineCoder` behaves like a container coder. `bringup` is a model script that walks
+HELD-FOREIGN. `MachineCoder` behaves like a container coder. `FakeContainers` stands in for the
+docker label search after each stage 4 test. `bringup` is a model script that walks
 stages 0 to 8 by writing the files each gate reads (stage 2's result follows the skill the
 supervisor named); it answers from the request alone, as a greedy
 server would, so a restarted supervisor gets the same answers.
@@ -170,6 +171,25 @@ class MachineCoder:
         return None
 
 
+class FakeContainers:
+    """The supervisor's docker label search (orchard/supervisor.py, LabelledContainers).
+
+    `listings` are the answers to successive list() calls; the last one repeats. The default finds
+    nothing. A test that wants a container left behind passes [["c1"], []] (found, then gone after
+    the stop) or [["c1"]] (it never goes away)."""
+
+    def __init__(self, listings=None):
+        self.listings = [list(x) if x is not None else None for x in (listings or [[]])]
+        self.calls: list[tuple] = []
+
+    def list(self, label):
+        self.calls.append(("list", label))
+        return self.listings.pop(0) if len(self.listings) > 1 else self.listings[0]
+
+    def remove(self, cid):
+        self.calls.append(("remove", cid))
+
+
 # ---- the scripted bring-up ------------------------------------------------------------------------
 
 def ev(n, *names):
@@ -199,6 +219,44 @@ def done(n):
     return ev(n, "hw-test-output.txt", "devices.txt")
 
 
+# Stage 4 on the weights-only path: one test per chip configuration, each a small Python script in
+# configs/<chips>/ that records the chips it was given and writes the swap report the gate reads.
+FAKE_SWAP_TEST = """import json, os, pathlib
+here = pathlib.Path(__file__).resolve().parent
+(here / "evidence").mkdir(exist_ok=True)
+keys = ("TT_VISIBLE_DEVICES", "ORCHARD_DEVICE_IDS", "ORCHARD_TEST_LABEL")
+(here / "evidence" / "devices.txt").write_text("".join(f"{k}={os.environ.get(k)}\\n" for k in keys))
+(here / "evidence" / "swap-check.json").write_text(json.dumps({"result_draft": {"top1_agreement": 0.94}}))
+"""
+SWAP_SCRIPTS = {1: "serve_and_compare.py", 2: "serve_and_compare.py", 4: "serve_and_compare_container.py"}
+
+
+def fake_cache(n):
+    """An absolute tensor cache path nothing creates (the fake tests never touch it)."""
+    return f"/nonexistent/orchard-fake-cache/hemmingway-1/{n}chip/tt_cache"
+
+
+def swap_prepare(caches=None, deadline=60):
+    files = {"evidence/notes.txt": "stage 4 plan", "handoff.json": note(4),
+             "hw_tests.json": {"tests": [{"chips": n, "script": s, "deadline_s": deadline}
+                                         for n, s in SWAP_SCRIPTS.items()]}}
+    for n, script in SWAP_SCRIPTS.items():
+        files[f"configs/{n}/{script}"] = FAKE_SWAP_TEST
+        files[f"configs/{n}/swap_config.json"] = {"tt_cache": (caches or {}).get(n, fake_cache(n))}
+    return files
+
+
+def swap_entry(n, ok=True):
+    """One configs entry of stage 4's result.json, as the weights-swap-configs skill writes it."""
+    if not ok:
+        return {"chips": n, "pass": False, "reason": "does not fit",
+                "evidence": [f"stages/4/tests/{n}/output.txt"]}
+    return {"chips": n, "pass": True, "kind": "container" if n == 4 else "bundle", "serves": True,
+            "server_ready_s": 120.0, "coherent": True, "free_run_text": "The sea was calm.",
+            "top1_agreement": 0.94, "n_tokens": 32, "cache_dir": fake_cache(n),
+            "evidence": [f"stages/4/configs/{n}/evidence/swap-check.json", f"stages/4/tests/{n}/output.txt"]}
+
+
 FILES = {
     (0, "run"): {"evidence/notes.txt": "configs, tensors and tokenizers compared", "delta.json": DELTA},
     (1, "run"): {"evidence/notes.txt": "greedy decode matches",
@@ -213,9 +271,9 @@ FILES = {
                                     "cache_dir": "cache/hemmingway-1/tt_cache", "evidence": done(2)}},
     (3, "prepare"): hw(3),
     (3, "finish"): {"result.json": {"parity": True, "top1": 0.97, "evidence": done(3)}},
-    (4, "prepare"): hw(4),
-    (4, "finish"): {"result.json": {"configs": [{"chips": 2, "pass": True, "evidence": done(4)},
-                                                {"chips": 1, "pass": True, "evidence": done(4)}]}},
+    # The fake run's delta says weights-only, so stage 4 runs one test per chip configuration.
+    (4, "prepare"): swap_prepare(),
+    (4, "finish"): {"result.json": {"configs": [swap_entry(n) for n in SWAP_SCRIPTS]}},
     (5, "prepare"): hw(5),
     (5, "finish"): {"result.json": {"checks": {k: {"pass": True, "evidence": done(5)}
                                                for k in ("boots", "passkey", "canary")}}},
@@ -237,6 +295,11 @@ SWAP_LOW = {"result.json": {**FILES[(2, "finish")]["result.json"], "top1_agreeme
 # the supervisor could not read).
 DECODER_FINISH = {"result.json": {"pcc": 0.998, "argmax_match": True, "evidence": done(2)}}
 
+# Stage 4's files when the supervisor names the mesh-shrink skill (a full port): one hw_test.json.
+MESH_SHRINK = {"prepare": hw(4),
+               "finish": {"result.json": {"configs": [{"chips": 2, "pass": True, "evidence": done(4)},
+                                                      {"chips": 1, "pass": True, "evidence": done(4)}]}}}
+
 
 def skill_named(request) -> str:
     return re.search(r"^## Skill: (\S+) ", request["messages"][0]["content"], re.M).group(1)
@@ -253,7 +316,11 @@ def bringup(request, overrides=None):
     if "tools" not in request:
         return final(CANARY_ANSWER)
     key = where(request)
-    default = DECODER_FINISH if key == (2, "finish") and skill_named(request) == "functional-decoder" else FILES[key]
+    default = FILES[key]
+    if key == (2, "finish") and skill_named(request) == "functional-decoder":
+        default = DECODER_FINISH
+    elif key[0] == 4 and skill_named(request) == "mesh-shrink":
+        default = MESH_SHRINK[key[1]]
     files = (overrides or {}).get(key, default)
     turns = [call("write_file", path=p, content=c if isinstance(c, str) else json.dumps(c))
              for p, c in files.items()] + [final(f"stage {key[0]} {key[1]} done")]
