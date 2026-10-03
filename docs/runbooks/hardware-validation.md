@@ -296,7 +296,9 @@ The path stage 0 chooses changes stages 2 and 3. With `"path": "weights-only"` i
 `functional-decoder`. Its hardware test converts the new weights into a fresh tensor cache, starts
 the nearest model's bundle on the new weights and compares the chip's greedy tokens with the
 stage 1 reference. The gate (`gate_weights_swap`) needs `serves` and `coherent` true, at least 16
-compared tokens, `top1_agreement` of at least 0.6 and every evidence file. Stage 3 is then recorded
+compared tokens, `top1_agreement` of at least 0.85 (`SWAP_TOP1_MIN`) and every evidence file. The
+test sets `MODEL_WEIGHTS_DIR` and `HF_MODEL` to the model directory; without them the bundle serves
+the nearest model's weights, which agreed on 25 of 32 tokens and passed the old bar of 0.6. Stage 3 is then recorded
 as skipped, with the reason "weights-only path: the stage 2 serve-and-compare covers the full
 model", and the run goes on to stage 4. A `full-port` path pauses before stage 2 as before and,
 after `control resume`, runs `functional-decoder` and stage 3. A path the supervisor cannot read
