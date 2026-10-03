@@ -243,7 +243,7 @@ def test_a_refused_test_command_fails_the_stage_before_any_hardware_is_used(rig,
     started = [e for e in rig.entries() if e["event"] == "decision" and e["stage"] == 2
                and e["data"]["decision"] == "hardware test started"]
     assert len(started) == 1                    # only the escalated attempt ran a test
-    assert stub_tools.calls() == []             # tt-smi never ran, not even the stub
+    assert stub_tools.calls() == []             # the stub log is empty, so tt-smi never ran
 
 
 def test_the_hardware_test_gets_the_leased_chips_and_no_token(rig, monkeypatch):

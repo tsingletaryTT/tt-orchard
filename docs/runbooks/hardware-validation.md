@@ -231,7 +231,12 @@ Before running:
   Agent shells run as the same user, so code an agent runs can read any file that stays. Agent
   shells get `GIT_SSH_COMMAND` set so git over ssh uses no key, and the runner refuses ssh, scp,
   sftp and rsync to a host. If the ssh key stays in place, confirm it needs a passphrase:
-  `ssh-keygen -y -P '' -f ~/.ssh/id_ed25519` fails when it does.
+  `ssh-keygen -y -P '' -f ~/.ssh/id_ed25519` fails when it does. The preflight does not look in
+  `HF_HOME`: check that `/mnt/bonus/models/hemmingway-1/hf` holds no `token` or `stored_tokens`
+  file. `HF_TOKEN_PATH` keeps huggingface_hub away from a token there, and it does not stop `cat`.
+- Stage 4 needs the `mesh-shrink` skill, which is untracked in the skills repo
+  (`plugins/tt-model-bringup/skills/mesh-shrink/`). Do not switch branch or clean that tree
+  during the run, or stage 4 blocks with "skill not found".
 
 What stops an agent and what does not. Agent shells run as the same user as the supervisor. The
 command runner (`orchard/runner.py`) refuses these spellings: tt-smi resets; every gozer command
@@ -263,6 +268,8 @@ What happens: the supervisor records the run and the versions it can read (`tt-m
 the firmware from `tt-smi -s`; tt-metal and vLLM are recorded as TODO). It takes a 4-chip lease
 under its own pid and starts the coder (a cold boot is about 30 min, budget 45 min). Stages 0 and 1
 run on the large server; the small tier is not serving, and the ledger records each substitution.
+An escalated step goes to the same large server with a different context, because it is the only
+chip tier serving.
 Each of stages 2 to 6 runs a prepare step, parks the coder (stand-in canary on ollama, stop, reset),
 runs the agent's test command on board 0's two chips, restores the coder (reset, start, canary
 compared with the pre-park answer) and runs a finish step. Each reset measured 41.7 s and a warm

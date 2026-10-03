@@ -54,8 +54,8 @@ from orchard.watchdog import Event, RetryGuard
 # ---- environment --------------------------------------------------------------------------------
 
 ENV_ALLOW = ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "USER", "LOGNAME", "TERM")
-# The device mask for agent shells: a PCI address that matches no chip on this box, in both the
-# variable gozer and UMD read and the one tt-metal reads. UNVERIFIED on hardware: how UMD treats a
+# The device mask for agent shells: a PCI address that matches no chip on this box, set in both
+# TT_VISIBLE_DEVICES and TT_METAL_VISIBLE_DEVICES. UNVERIFIED on hardware: how UMD treats a
 # mask that names no chip (it may open nothing, or fail, or ignore it). The controller checks this
 # before relying on it. The supervisor's hardware test replaces it with the leased chips.
 NO_CHIP = "0000:ff:00.0"

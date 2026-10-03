@@ -317,9 +317,9 @@ class Supervisor:
         """Run until ready, aborted or stopped. Every way out of the loop that this process
         survives releases the hardware first.
 
-        The release is wired as `except` clauses rather than a bare `finally`: the tests' Crash
-        stands for a SIGKILL, after which no code runs, and a `finally` would release on it too
-        and hide the crash recovery the kill test exists to check."""
+        The release sits in `except` clauses. A bare `finally` would also run on the tests'
+        Crash, which stands for a SIGKILL, after which no code runs. Releasing there would hide
+        the crash recovery that the kill test checks."""
         with self._signals():
             try:
                 return self._run()
@@ -466,8 +466,9 @@ class Supervisor:
                 return self._abort()
         self.ledger.append("decision", None, decision="ready for operator review",
                            bundle="stages/8/bundle")
-        # Nothing owns the coder once this process exits, and a lease judged by a dead pid with a
-        # device still open would show as a lease that lies. So the run gives the hardware back.
+        # Nothing owns the coder once this process exits. gozer would then show a lease whose owner
+        # pid is dead while the container still has the devices open. So the run gives the
+        # hardware back.
         self._release_all()
         return EXIT_READY
 
