@@ -33,6 +33,18 @@ def test_the_environment_is_an_allow_list_with_a_home_inside_the_run(run):
     assert env["HF_TOKEN_PATH"].startswith(env["HOME"])
 
 
+def test_agent_shells_get_a_device_mask_that_matches_no_chip(run):
+    # UNVERIFIED on hardware: how UMD treats a mask that names no chip.
+    env = agent_env(run, source={"PATH": "/usr/bin", "TT_VISIBLE_DEVICES": "0000:01:00.0",
+                                 "TT_METAL_VISIBLE_DEVICES": "0"})
+    assert env["TT_VISIBLE_DEVICES"] == "0000:ff:00.0"
+    assert env["TT_METAL_VISIBLE_DEVICES"] == "0000:ff:00.0"
+    assert tools(run).shell("printenv TT_VISIBLE_DEVICES").splitlines()[1] == "0000:ff:00.0"
+    for name in ("TT_VISIBLE_DEVICES", "TT_METAL_VISIBLE_DEVICES"):
+        with pytest.raises(ValueError, match="device mask"):
+            agent_env(run, extra={name: "0000:01:00.0"})
+
+
 def test_extra_variables_that_look_like_credentials_are_refused(run):
     assert agent_env(run, extra={"HF_HOME": "/mnt/models/hf"})["HF_HOME"] == "/mnt/models/hf"
     for name in ("HF_TOKEN", "OPENAI_API_KEY", "GH_AUTH", "DB_PASSWORD"):

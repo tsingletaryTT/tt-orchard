@@ -201,6 +201,8 @@ def test_the_hardware_test_gets_the_leased_chips_and_no_token(rig, monkeypatch):
     assert rig.run() == EXIT_READY
     env = (rig.run_dir / "stages" / "2" / "evidence" / "devices.txt").read_text()
     assert f"TT_VISIBLE_DEVICES={','.join(BOARDS['B1'])}" in env
+    # The agent shells' no-chip mask must not reach the hardware test in either variable.
+    assert "TT_METAL_VISIBLE_DEVICES" not in env and "0000:ff:00.0" not in env
     assert "secret" not in env
 
 

@@ -35,10 +35,15 @@ RULES = """Rules of this run:
 - Put every file that backs a claim under stages/{n}/evidence/. The supervisor records each one in the
   ledger with its sha256. Evidence paths you cite are relative to the run directory.
 - Label every number "measured" (you measured it and the evidence file shows it) or "TODO".
-- Never publish, push or upload anything, and never reset chips. The supervisor refuses those
-  commands. There are no GitHub or Hugging Face credentials in your environment.
-- Do not open Tenstorrent devices from your shell. Hardware work happens only in the hardware test
-  that the supervisor runs for you under a lease.
+- Never publish, push or upload anything. Never reset chips, never take, release or reset a lease,
+  and never stop or start a container, a model server or another process you did not start. The
+  supervisor refuses the common spellings of these commands and says how to rewrite them. It
+  cannot catch every spelling, so these rules apply to everything you run.
+  There are no GitHub or Hugging Face credentials in your environment.
+- Do not open Tenstorrent devices from your shell, and do not run code that does (ttnn, tt-metal,
+  vLLM, a test that opens a mesh). Your shell's TT_VISIBLE_DEVICES names no chip. Nothing stops a
+  device open from your shell, so this rule is yours to keep. Hardware work happens only in the
+  hardware test that the supervisor runs for you under a lease.
 - When you are finished, reply with a short summary and no tool call."""
 
 

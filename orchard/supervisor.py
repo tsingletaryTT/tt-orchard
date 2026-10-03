@@ -599,7 +599,11 @@ class Supervisor:
         n = spec.number
         chips = list(lease.chips[:spec.boards * CHIPS_PER_BOARD])
         env = agent_env(self.run_dir, extra=self.extra_env)
+        # The leased chips replace the agent shells' no-chip mask. TT_METAL_VISIBLE_DEVICES takes
+        # device indices in another form, so the hardware test gets none and the runtime follows
+        # TT_VISIBLE_DEVICES.
         env["TT_VISIBLE_DEVICES"] = ",".join(chips)
+        env.pop("TT_METAL_VISIBLE_DEVICES", None)
         deadline = min(float(test["deadline_s"]), spec.budget_s)
         out_path = stage_dir / "evidence" / "hw-test-output.txt"
         self.ledger.append("decision", n, decision="hardware test started", command=test["command"],

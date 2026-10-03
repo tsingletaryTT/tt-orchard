@@ -17,6 +17,11 @@ This module owns three things.
    request as a user message. Transport failures are retried once, through the watchdog's
    RetryGuard (spec section 3).
 
+   The environment also sets TT_VISIBLE_DEVICES and TT_METAL_VISIBLE_DEVICES to NO_CHIP, a
+   device mask that matches no chip. This is a request to the runtime. Nothing in orchard stops a
+   process from opening a device: the same user can open /dev/tenstorrent/* directly, and code
+   can clear the variables. How UMD treats the mask is UNVERIFIED on hardware.
+
 What it does not do: streaming; a proxy in front of agents the supervisor did not launch (the
 watchdog only reads their transcripts); read-only mounts. The same user account runs the agent,
 so a file outside the run directory that holds a token can still be read by absolute path, and a
@@ -46,6 +51,12 @@ from orchard.watchdog import Event, RetryGuard
 # ---- environment --------------------------------------------------------------------------------
 
 ENV_ALLOW = ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "USER", "LOGNAME", "TERM")
+# The device mask for agent shells: a PCI address that matches no chip on this box, in both the
+# variable gozer and UMD read and the one tt-metal reads. UNVERIFIED on hardware: how UMD treats a
+# mask that names no chip (it may open nothing, or fail, or ignore it). The controller checks this
+# before relying on it. The supervisor's hardware test replaces it with the leased chips.
+NO_CHIP = "0000:ff:00.0"
+DEVICE_VARS = ("TT_VISIBLE_DEVICES", "TT_METAL_VISIBLE_DEVICES")
 SECRET_NAME = re.compile(r"TOKEN|SECRET|PASSW|CREDENTIAL|AUTH|_KEY$|^KEY$|COOKIE", re.IGNORECASE)
 
 
@@ -67,7 +78,10 @@ def agent_env(run_dir, *, extra: dict | None = None, source=None) -> dict:
         "HF_HUB_DISABLE_TELEMETRY": "1",
         "ORCHARD_RUN_DIR": str(Path(run_dir).resolve()),
     })
+    env.update({k: NO_CHIP for k in DEVICE_VARS})
     for k, v in (extra or {}).items():
+        if k in DEVICE_VARS:
+            raise ValueError(f"{k} is the agent shells' device mask; the operator cannot set it")
         if SECRET_NAME.search(k):
             raise ValueError(f"{k} looks like a credential; agent shells never get one")
         env[k] = str(v)

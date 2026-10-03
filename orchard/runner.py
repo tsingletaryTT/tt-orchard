@@ -1,8 +1,12 @@
 """The command runner: the only way the supervisor runs commands for a stage agent.
 
-It refuses a fixed list of commands (see RULES): publishing, pushing, hand-run chip resets, and
-deletion outside the run directory. The block sits here, where commands execute, so an ignored
-prompt cannot bypass it.
+It refuses a fixed list of command spellings (see RULES): publishing, pushing and uploading;
+tt-smi resets; gozer commands that take, release or reset a lease; the tt CLI's reset, firmware
+and serving verbs; docker and tt-model commands that start, stop, remove or push; kill, pkill,
+killall and systemctl stop; ssh, scp, sftp and rsync to a host; curl and wget requests that send
+data; changes to the agent shells' device mask; and deletion outside the run directory. The check
+sits where commands execute, so a model that ignores its prompt still meets it. It stops only
+these spellings. It does not stop code that does the same thing (see WHAT THIS DOES NOT COVER).
 
 HOW IT DECIDES. The runner understands a small subset of shell and refuses everything outside it
 (rule name "unsupported-syntax"). A command it cannot read is refused. It does not guess. Each
@@ -13,8 +17,9 @@ refusal names the construct and says how to rewrite the command.
   backslash-newline continuations; simple redirects (`>`, `>>`, `<`, `2>&1`, `&>`); `cd`;
   leading `NAME=value` assignments; `${NAME}` inside a word; and the wrapper commands sudo, env,
   nohup, time, command, builtin, exec, nice, timeout, stdbuf, xargs, setsid, ionice, taskset,
-  chrt, flock and `gozer run ... --`, which are stripped before the rules look at the real
-  command. A wrapper given an option it does not know is refused.
+  chrt and flock, which are stripped before the rules look at the real command. A wrapper given
+  an option it does not know is refused. `gozer run` is refused by the gozer-write rule, because
+  it takes a lease.
 
   Shells: bash, sh and dash are accepted only with a command string (`-c`, alone or in a
   cluster such as `-lc`, with bash's option grammar parsed so the string the runner checks is
@@ -29,20 +34,30 @@ refusal names the construct and says how to rewrite the command.
   BASH_ENV or ENV), `exec` with no command, subshell parentheses, braces, heredocs and
   here-strings, `$'...'` quoting, unbalanced quotes, NUL bytes, carriage returns and invalid characters, a command
   name built from a variable or a glob or starting with `-`, `env -S`, `find -exec` and
-  `find -delete`, and `GIT_CONFIG*` or `BASH_ENV` assignments. Command substitution and process
+  `find -delete`, and `GIT_CONFIG*` or `BASH_ENV` assignments. Setting, exporting or unsetting
+  TT_VISIBLE_DEVICES or TT_METAL_VISIBLE_DEVICES, or `env -u` of them, is refused as
+  "device-mask". Command substitution and process
   substitution (`$(...)`, backticks, `<(...)`) are refused as "substitution".
 
   The rules then judge the real command: tt-model push/publish; git push (including `-c alias.*`,
-  `subtree push`, and `git-push`); gh repo create; hf/huggingface-cli upload* as the subcommand;
-  any tt-smi reset spelling (long-option prefixes and clustered short flags included); and
-  rm/rmdir/unlink outside the run directory, of a ledger file, with a glob directly in the run
-  directory root, or fed by xargs. An output redirect whose target name starts with "ledger"
+  `subtree push`, and `git-push`); gh repo create; an `upload` or `upload-*` word anywhere in an
+  hf or huggingface-cli command or in `python -m huggingface_hub...`; any tt-smi reset spelling
+  (long-option prefixes and clustered short flags included); every gozer command except status,
+  env, queue, history, --help and --version, and any gozer --force; tt/tt-cli with stop, serve,
+  run, firmware or a reset word; docker with stop, kill, rm, run, start, restart, push, exec, cp
+  and similar verbs; tt-model stop, serve, run, rm, unpublish and login; kill, pkill, killall,
+  reboot, shutdown and systemctl/service stop or restart; ssh, scp and sftp, and rsync with a
+  `host:` or `rsync://` operand; curl with a request body, form, upload or a method other than
+  GET or HEAD, and wget with --post-*, --body-* or such a --method; and rm/rmdir/unlink outside
+  the run directory, of a ledger file, with a glob directly in the run directory root, or fed by
+  xargs. An output redirect whose target name starts with "ledger"
   is refused (it would truncate the ledger), and so is one whose target has an unquoted glob or a
   `$` outside single quotes (the runner cannot tell whether that name is the ledger). A string that makes a link
   with `ln -s` (or `--symbolic`) and also deletes something is refused ("symlink-with-delete"), because the delete could go
   through the link. Only `ln` is recognised; other ways to make a link are not. In the
-  words of git, gh, hf, huggingface-cli, tt-model and tt-smi, an unquoted glob character or a `$`
-  outside single quotes is refused, because it could change which subcommand runs.
+  words of the tools in NAMED_TOOLS (git, gh, hf, tt-model, tt-smi, gozer, docker, curl and
+  others), an unquoted glob character or a `$` outside single quotes is refused, because it could
+  change which subcommand or option runs.
 
   Timing: a string is judged when it is checked, and it runs later. Another process can change
   the filesystem in between (create or remove a directory, repoint a link), and the judgement
@@ -56,22 +71,27 @@ refusal names the construct and says how to rewrite the command.
   basename, so `/tmp/ls` counts as `ls`), since an earlier command could create or remove the
   directory. Otherwise the directory is unknown and relative deletes are refused. A `cd` inside a pipeline or the background does not count.
 
-WHAT THIS DOES NOT COVER. Splitting a shell string by tokenizing is best effort. It is not a shell
-parser, and a way around it may exist. Redirects are not judged except for ledger targets and
+WHAT THIS DOES NOT COVER. These are NOT stopped: `python3 -c` and `perl -e` code (which can open
+a device, delete files, upload or signal a process), a script that does any of that, `mv`, `cp`
+and `tee` (which can overwrite any file, the ledger included), and a direct open of
+/dev/tenstorrent/* by any program. The device mask in agent shells is a request to the runtime,
+and `env -i` or code can drop it. Splitting a shell string by tokenizing is best effort. It is not
+a shell parser, and a way around it may exist. Redirects are not judged except for ledger targets and
 targets built from a variable or glob: a redirect can write or truncate any other file, and stage
 agents need to write outside the run directory. The runner does not stop arbitrary code (for example `python3 -c 'shutil.rmtree(...)'`
 or `perl -e`), deletion by tools it does not name (`mv`, `rsync --delete`, `truncate`), wrappers
-it does not list (`watch`, `su`, `doas`, `ssh host cmd`), scripts that run a denied command inside
+it does not list (`watch`, `su`, `doas`), scripts that run a denied command inside
 them, git aliases or hooks defined in config files, writes to the ledger by tools other than
-redirects and rm (`tee`, `cp`), or a `cd` that depends on CDPATH. hf and huggingface-cli are
-judged only at the subcommand position, so a value-taking option placed before the subcommand can
-hide it. The real limits are the user account the run uses, the lease tool (gozer), and not giving
-the agent credentials to publish or push in the first place. Treat this as a guard against the
-named mistakes, not as a sandbox.
+redirects and rm (`tee`, `cp`), or a `cd` that depends on CDPATH. The tt CLI and docker rules
+match verbs as any word, so a container or file named `stop` is refused too. The real limits are
+the user account the run uses, the lease tool (gozer), and not giving the agent credentials to
+publish or push in the first place. Treat this as a guard against the named mistakes. It is not a
+sandbox.
 """
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from dataclasses import dataclass
 
@@ -119,6 +139,21 @@ ENV_SETTERS = {"export", "declare", "typeset", "readonly", "local"}
 DANGEROUS_ENV = {"BASH_ENV", "ENV"}
 
 DELETERS = {"rm", "rmdir", "unlink"}
+
+# The device mask agent shells get (orchard/agent.py). A command that sets or clears these could
+# point a device open at real chips, so it is refused ("device-mask"). `env -i` and code inside a
+# script can still drop them; see WHAT THIS DOES NOT COVER.
+DEVICE_VARS = {"TT_VISIBLE_DEVICES", "TT_METAL_VISIBLE_DEVICES"}
+DEVICE_MASK_DETAIL = (
+    "agent shells carry a device mask that matches no chip, and hardware work runs only in the "
+    "supervisor's hardware test. To proceed: put the command in hw_test.json during a prepare "
+    "step; the supervisor runs it on leased chips with the right TT_VISIBLE_DEVICES")
+
+
+def _device_mask(command) -> Denied:
+    if not isinstance(command, str):
+        command = " ".join(command)
+    return Denied("device-mask", command, DEVICE_MASK_DETAIL)
 
 # Commands that cannot create, remove or relink a directory, so a `cd` that follows them can still
 # trust the filesystem as it was when the string was checked.
@@ -183,7 +218,8 @@ WRAPPERS = {
 # Tools the rules read by position. An unquoted glob or a `$` in their words could turn into a
 # different subcommand at run time (`git $X push`, or `tt-model p*` with a file named push), so such
 # words are refused rather than judged. Quoted globs are literal and are fine.
-NAMED_TOOLS = {"git", "gh", "hf", "huggingface-cli", "tt-model", "tt-smi"}
+NAMED_TOOLS = {"git", "gh", "hf", "huggingface-cli", "tt-model", "tt-smi", "gozer", "tt", "tt-cli",
+               "docker", "docker-compose", "systemctl", "service", "rsync", "curl", "wget"}
 
 # git's global options (checked against `man git`, git 2.43). Options that take a separate value:
 GIT_VALUE_OPTIONS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env",
@@ -471,6 +507,8 @@ def _unwrap(argv, cwd):
     while argv:
         if _is_assignment(argv[0]):
             var = argv[0].partition("=")[0]
+            if var in DEVICE_VARS:
+                raise _device_mask(original)
             if var.startswith("GIT_CONFIG") or var == "BASH_ENV":
                 raise _unsupported(argv, f"assignment of {var}",
                                    "set it in the tool's own config instead; it can hide a push "
@@ -478,14 +516,7 @@ def _unwrap(argv, cwd):
             argv.pop(0)
             continue
         name = os.path.basename(argv[0])
-        if name == "gozer" and len(argv) > 1 and argv[1] == "run":
-            # `gozer run <lease options> -- COMMAND`: everything before `--` is the lease's own.
-            if "--" not in argv:
-                raise _unsupported(argv, "gozer run without `--` before the command",
-                                   "write `gozer run <options> -- <command>`")
-            argv = argv[argv.index("--") + 1:]
-            used.append(name)
-            continue
+        # `gozer run` is not a wrapper here: it takes a lease, so the gozer-write rule refuses it.
         spec = WRAPPERS.get(name)
         if spec is None:
             break
@@ -498,6 +529,8 @@ def _unwrap(argv, cwd):
             if opt == "--":
                 break
             key, val = _consume_option(argv, spec, opt, name, original)
+            if name == "env" and key in ("-u", "--unset") and val in DEVICE_VARS:
+                raise _device_mask(original)
             if key in spec.chdir:
                 cwd = _chdir_value(cwd, val)
             if key in spec.shell_opts:
@@ -582,13 +615,47 @@ def _gh_repo_create(name, argv, ctx):
     return name == "gh" and "repo" in rest and "create" in rest[rest.index("repo"):]
 
 
+PYTHON_NAME = re.compile(r"python(\d+(\.\d+)*)?$")
+
+
+def _upload_word(a) -> bool:
+    """`upload`, `upload-large-folder` and any later `upload-*` subcommand. `uploads` (a folder
+    name) is not one."""
+    return a == "upload" or a.startswith("upload-")
+
+
+def _python_module(argv) -> str | None:
+    """The module `python -m MODULE` runs, or None for a script, `-c` code or stdin."""
+    i = 1
+    while i < len(argv):
+        a = argv[i]
+        if not a.startswith("-") or a in ("-", "--"):
+            return None
+        if not a.startswith("--"):
+            body = a[1:]
+            for k, ch in enumerate(body):
+                if ch == "c":
+                    return None
+                if ch == "m":
+                    return body[k + 1:] or (argv[i + 1] if i + 1 < len(argv) else "")
+                if ch in "XW":                   # these take a value: the rest, or the next word
+                    if not body[k + 1:]:
+                        i += 1
+                    break
+        i += 1
+    return None
+
+
 def _hf_upload(name, argv, ctx):
-    # upload, upload-large-folder, and any later upload-* subcommand; only at the subcommand
-    # position, so `hf download --local-dir uploads` is fine.
-    if name not in {"hf", "huggingface-cli"}:
-        return False
-    sub = _first_operand(argv)
-    return sub is not None and sub.startswith("upload")
+    # An upload word anywhere in the arguments, because an option such as `--token x` before the
+    # subcommand would otherwise hide it. `hf download --local-dir uploads` is fine.
+    if name in {"hf", "huggingface-cli"}:
+        return any(_upload_word(a) for a in argv[1:])
+    if PYTHON_NAME.match(name):
+        module = _python_module(argv)
+        return bool(module) and module.startswith("huggingface_hub") \
+            and any(_upload_word(a) for a in argv[1:])
+    return False
 
 
 def _tt_smi_reset(name, argv, ctx):
@@ -602,6 +669,155 @@ def _tt_smi_reset(name, argv, ctx):
                 return True
         elif a.startswith("-") and len(a) > 1 and "r" in a[1:]:
             return True   # -r, -r0, and clusters such as -sr
+    return False
+
+
+GOZER_READ_ONLY = {"status", "env", "queue", "history"}
+GOZER_INFO_FLAGS = {"--help", "-h", "--version"}
+
+
+def _gozer_write(name, argv, ctx):
+    """Every gozer command except the read-only ones. gozer checks no ownership on release or
+    reset, and lease ids are in the ledger the agent can read, so one stray command could take
+    the chips from under the supervisor or another user."""
+    if name != "gozer":
+        return False
+    rest = argv[1:]
+    if any(a == "--force" or a.startswith("--force=") for a in rest):
+        return True
+    if rest and all(a in GOZER_INFO_FLAGS for a in rest):
+        return False
+    return _first_operand(argv) not in GOZER_READ_ONLY
+
+
+TT_CLI = {"tt", "tt-cli"}
+TT_CLI_CONTROL = {"stop", "serve", "run", "firmware"}
+RESET_WORDS = {"reset", "reboot", "power-cycle", "flash"}
+
+
+def _tt_device_control(name, argv, ctx):
+    """The official tt CLI's reset, firmware and serving verbs, matched as any word because the
+    runner does not know that CLI's global options."""
+    if name not in TT_CLI:
+        return False
+    return any(a in TT_CLI_CONTROL or a in RESET_WORDS or (a.startswith("--") and "reset" in a)
+               for a in argv[1:])
+
+
+DOCKER = {"docker", "docker-compose"}
+DOCKER_CONTROL = {"stop", "kill", "rm", "run", "start", "restart", "push", "exec", "cp", "rmi",
+                  "pause", "unpause", "update", "down", "up", "prune"}
+
+
+def _docker_control(name, argv, ctx):
+    """docker verbs that change or publish containers and images, as any operand, so
+    `docker container stop` and `docker -H HOST stop` are caught too."""
+    return name in DOCKER and any(a in DOCKER_CONTROL for a in _operands(argv))
+
+
+TT_MODEL_CONTROL = {"stop", "serve", "run", "rm", "unpublish", "login"}
+
+
+def _tt_model_control(name, argv, ctx):
+    return name == "tt-model" and any(a in TT_MODEL_CONTROL for a in argv[1:])
+
+
+KILLERS = {"kill", "pkill", "killall", "reboot", "shutdown", "poweroff", "halt"}
+SYSTEMCTL_CONTROL = {"stop", "restart", "kill", "try-restart", "reload-or-restart",
+                     "try-reload-or-restart", "isolate", "poweroff", "reboot", "halt", "disable",
+                     "mask"}
+
+
+def _process_kill(name, argv, ctx):
+    if name in KILLERS:
+        return True
+    return name in {"systemctl", "service"} and any(a in SYSTEMCTL_CONTROL for a in _operands(argv))
+
+
+REMOTE_SHELLS = {"ssh", "scp", "sftp", "slogin"}
+
+
+def _names_a_host(a) -> bool:
+    """`host:path`, `user@host:path` or `rsync://host/...`: a colon before any slash."""
+    if a.startswith("rsync://"):
+        return True
+    head, colon, _ = a.partition(":")
+    return bool(colon) and bool(head) and "/" not in head
+
+
+def _remote_access(name, argv, ctx):
+    if name in REMOTE_SHELLS:
+        return True
+    return name == "rsync" and any(_names_a_host(a) for a in _operands(argv))
+
+
+SAFE_METHODS = {"GET", "HEAD"}
+CURL_BODY_SHORT = set("dFT")                       # -d DATA, -F FORM, -T FILE (upload)
+CURL_BODY_LONG = ("--data", "--json", "--form", "--upload-file")   # prefixes: --data-binary, ...
+CURL_SHORT_VALUES = set("AbcCdDeEFHKmoPQrTuUwxXyYz")  # short options that take a value
+
+
+def _curl_write(argv) -> bool:
+    i = 1
+    while i < len(argv):
+        a = argv[i]
+        if a == "--":
+            break
+        if a.startswith("--"):
+            key, eq, val = a.partition("=")
+            if key.startswith(CURL_BODY_LONG):
+                return True
+            if key == "--request":
+                if not eq:
+                    if i + 1 >= len(argv):
+                        return True               # no method given: cannot judge
+                    i += 1
+                    val = argv[i]
+                if val.upper() not in SAFE_METHODS:
+                    return True
+        elif a.startswith("-") and len(a) > 1:
+            body = a[1:]
+            for k, ch in enumerate(body):
+                if ch in CURL_BODY_SHORT:
+                    return True
+                if ch == "X":
+                    val = body[k + 1:]
+                    if not val:
+                        if i + 1 >= len(argv):
+                            return True
+                        i += 1
+                        val = argv[i]
+                    if val.upper() not in SAFE_METHODS:
+                        return True
+                    break
+                if ch in CURL_SHORT_VALUES:
+                    if not body[k + 1:]:
+                        i += 1                    # the value is the next word
+                    break
+        i += 1
+    return False
+
+
+def _wget_write(argv) -> bool:
+    for i, a in enumerate(argv[1:], 1):
+        key, eq, val = a.partition("=")
+        if key in ("--post-data", "--post-file", "--body-data", "--body-file"):
+            return True
+        if key == "--method":
+            if not eq:
+                val = argv[i + 1] if i + 1 < len(argv) else ""
+            if val.upper() not in SAFE_METHODS:
+                return True
+    return False
+
+
+def _http_write(name, argv, ctx):
+    """curl and wget requests that send a body, upload a file or use a method other than GET or
+    HEAD. Plain downloads stay allowed."""
+    if name == "curl":
+        return _curl_write(argv)
+    if name == "wget":
+        return _wget_write(argv)
     return False
 
 
@@ -680,6 +896,13 @@ RULES = [
     ("gh-repo-create", _gh_repo_create),
     ("hf-upload", _hf_upload),
     ("tt-smi-reset", _tt_smi_reset),
+    ("gozer-write", _gozer_write),
+    ("tt-device-control", _tt_device_control),
+    ("docker-control", _docker_control),
+    ("tt-model-control", _tt_model_control),
+    ("process-kill", _process_kill),
+    ("remote-access", _remote_access),
+    ("http-write", _http_write),
     # rm-ledger comes before the glob and outside rules on purpose: a glob such as `{run}/ledger*`
     # expands in the run directory itself, which they also refuse. The more specific name wins.
     ("rm-ledger", _rm_ledger),
@@ -692,6 +915,25 @@ RULES = [
 RULE_DETAIL = {
     "rm-glob-in-run-root": "a glob in the run directory root could match the ledger; "
                            "name the files, or glob inside a subdirectory",
+    "gozer-write": "only the supervisor takes, releases or resets leases. To proceed: read state "
+                   "with gozer status, env, queue or history, and put hardware work in "
+                   "hw_test.json so the supervisor runs it under its own lease",
+    "tt-device-control": "resets, firmware and model servers belong to the supervisor and the "
+                         "operator. To proceed: read device state with tt-smi -s, and put "
+                         "hardware work in hw_test.json",
+    "docker-control": "containers on this box belong to the supervisor and to other users. To "
+                      "proceed: read them with docker ps, docker logs or docker inspect; the "
+                      "supervisor starts and stops the coder",
+    "tt-model-control": "the supervisor starts and stops model servers, and publishing is for the "
+                        "operator. To proceed: read a server's state over its HTTP endpoint, for "
+                        "example curl http://127.0.0.1:8000/v1/models",
+    "process-kill": "the run does not signal processes or stop services. To proceed: the shell "
+                    "tool already kills a command that runs past its timeout; to look at a "
+                    "process, use ps -p PID",
+    "remote-access": "the run stays on this machine. To proceed: copy between local paths with "
+                     "cp or rsync, and read remote files over plain HTTP GET",
+    "http-write": "the run sends nothing out; GET and HEAD requests are allowed. To proceed: drop "
+                  "the request body, upload or method option",
 }
 
 
@@ -802,9 +1044,13 @@ def _check_argv_inner(argv, run_dir, cwd, st, via_xargs_in, before):
     if _dynamic(first, plain_default=any(ch in first for ch in "$*?[")):
         raise _unsupported(argv, "a command name built from a variable or glob",
                            "write the command name out, or quote it")
-    if name in ENV_SETTERS:
+    if name in ENV_SETTERS or name == "unset":
         for a in unwrapped[1:]:
             var = a.partition("=")[0]
+            if var in DEVICE_VARS:
+                raise _device_mask(argv)
+            if name == "unset":
+                continue
             if var.startswith("GIT_CONFIG") or var in DANGEROUS_ENV:
                 raise _unsupported(argv, f"{name} of {var}",
                                    "do not set it; it can hide a push alias or run a startup file")

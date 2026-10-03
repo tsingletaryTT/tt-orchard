@@ -212,6 +212,20 @@ Before running:
 - Do not give the harness the reference answer, and do not name the base model's tensor cache
   as an input. Stage 0 must find both on its own.
 
+What stops an agent and what does not. Agent shells run as the same user as the supervisor. The
+command runner (`orchard/runner.py`) refuses these spellings: tt-smi resets; every gozer command
+except status, env, queue, history, --help and --version; the tt CLI's reset, firmware and
+serving verbs; docker and tt-model commands that start, stop, remove or push; kill, pkill,
+killall and systemctl stop; ssh, scp, sftp and rsync to a host; Hugging Face uploads; curl and
+wget requests that send data; and git push. Agent shells also get `TT_VISIBLE_DEVICES` and
+`TT_METAL_VISIBLE_DEVICES` set to `0000:ff:00.0`, which matches no chip. How UMD treats that mask
+is UNVERIFIED on hardware; check it before the run. These are NOT stopped: `python3 -c` and `perl
+-e` code, a script the agent writes, `mv`, `cp` and `tee` (which can overwrite any file the user
+can write, the ledger included), and a direct device open from Python. A script that opens a mesh
+from an agent shell opens chips the supervisor holds. The stage prompts tell the agent not to do
+this, and that is a request only. The operator must accept this risk, in writing, before the run
+starts.
+
 Run, from the repo root:
 
     python3 -m orchard.supervisor run \
