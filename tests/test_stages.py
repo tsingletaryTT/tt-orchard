@@ -11,7 +11,8 @@ import pytest
 from orchard.stages import (STAGES, TierUnavailable, check_disk, compare_delta, gate_bundle,
                             gate_decoder, gate_delta, gate_full_model, gate_mesh, gate_numbers,
                             gate_reference, gate_serving, gate_weights_swap, main, reference_items,
-                            resolve_endpoint, resolve_skill, tier_for, validate_table)
+                            resolve_endpoint, resolve_skill, run_path, spec_for, tier_for,
+                            validate_table)
 from orchard.defaults import SWAP_TOP1_MIN
 from orchard.tiers import TierConfig
 
@@ -46,6 +47,76 @@ def test_the_table_names_the_owner_skills_and_hardware_stages():
                                          "serving-check", "", "operator-bundle"]
     assert [s.boards for s in STAGES] == [0, 0, 1, 1, 1, 1, 1, 0, 0]
     assert STAGES[7].skip and all(s.skip is None for s in STAGES if s.number != 7)
+
+
+# ---- the path stage 0 chose ---------------------------------------------------------------------
+
+def stage0_pass(**data):
+    """A ledger holding stage 0's passing end, with `data` in it (the supervisor adds "path")."""
+    return [{"seq": 1, "event": "stage_start", "stage": 0, "data": {}},
+            {"seq": 2, "event": "stage_end", "stage": 0, "data": {"result": "pass", **data}}]
+
+
+def delta_file(run, text):
+    p = Path(run) / "stages" / "0" / "delta.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(text if isinstance(text, str) else json.dumps(text))
+
+
+@pytest.mark.parametrize("path", ["weights-only", "full-port"])
+def test_the_path_is_read_from_stage_0s_passing_end(tmp_path, path):
+    assert run_path(stage0_pass(path=path), tmp_path) == path
+
+
+def test_the_ledger_path_wins_over_a_delta_json_edited_later(tmp_path):
+    # An agent in a later stage can rewrite stages/0/delta.json. The choice stays the one stage 0 made.
+    delta_file(tmp_path, {**GOOD_DELTA, "path": "full-port"})
+    assert run_path(stage0_pass(path="weights-only"), tmp_path) == "weights-only"
+
+
+@pytest.mark.parametrize("path", ["weights-only", "full-port"])
+def test_a_ledger_from_before_the_path_was_recorded_reads_delta_json(tmp_path, path):
+    delta_file(tmp_path, {**GOOD_DELTA, "path": path})
+    assert run_path(stage0_pass(), tmp_path) == path
+
+
+@pytest.mark.parametrize("text", [None, "{not json", '["weights-only"]', {"path": "maybe"},
+                                  {"path": None}, {"model": "x"}])
+def test_an_unknown_path_is_none_and_never_weights_only(tmp_path, text):
+    if text is not None:
+        delta_file(tmp_path, text)
+    assert run_path(stage0_pass(), tmp_path) is None
+
+
+@pytest.mark.parametrize("recorded", [None, "maybe", 3])
+def test_an_unknown_recorded_path_is_none(tmp_path, recorded):
+    delta_file(tmp_path, {**GOOD_DELTA, "path": "weights-only"})
+    assert run_path(stage0_pass(path=recorded), tmp_path) is None
+
+
+def test_before_stage_0_passes_there_is_no_path(tmp_path):
+    delta_file(tmp_path, GOOD_DELTA)              # written, but the gate has not passed it yet
+    failed = [{"seq": 1, "event": "stage_end", "stage": 0, "data": {"result": "escalate"}}]
+    assert run_path([], tmp_path) is None and run_path(failed, tmp_path) is None
+
+
+def test_the_weights_only_path_gives_stage_2_the_swap_skill_and_gate():
+    s = spec_for(2, "weights-only")
+    assert (s.number, s.skill, s.gate, s.gate_file, s.boards) == (
+        2, "weights-swap-check", gate_weights_swap, "result.json", 1)
+    assert s.marker == STAGES[2].marker and s.skip is None
+
+
+@pytest.mark.parametrize("path", ["full-port", None])
+def test_a_full_port_or_unknown_path_keeps_todays_stage_2_and_3(path):
+    assert spec_for(2, path) == STAGES[2] and spec_for(2, path).skill == "functional-decoder"
+    assert spec_for(3, path) == STAGES[3]
+
+
+@pytest.mark.parametrize("n", [0, 1, 4, 5, 6, 7, 8])
+def test_the_path_changes_no_other_stage(n):
+    for path in ("weights-only", "full-port", None):
+        assert spec_for(n, path) == STAGES[n]
 
 
 def test_a_long_stage_without_a_resume_marker_is_refused():

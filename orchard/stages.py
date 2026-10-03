@@ -6,6 +6,9 @@ and its resume marker. It also owns the questions the supervisor asks the ledger
 runs next, whether the run is paused, how many escalations and coder starts it has used, and
 where the coder's lease is recorded. Nothing here starts a process or calls a model.
 
+The table holds one spec per stage. The path stage 0 chose can replace a spec: on the weights-only
+path stage 2 uses the weights-swap-check skill and `gate_weights_swap` (`spec_for`, `run_path`).
+
 A gate checks the shape of a stage's result file and that every evidence path it lists is a file
 inside the run directory. A gate cannot tell whether a claim is true. The operator reviews the
 bundle; the spec's `stage-review` skill is not wired in by plan 4.
@@ -18,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import calendar
+import dataclasses
 import hashlib
 import json
 import os
@@ -395,6 +399,55 @@ def validate_table(stages=STAGES) -> None:
 
 
 validate_table()
+
+
+# ---- the path stage 0 chose ---------------------------------------------------------------------
+# Stage 0 writes "path" in delta.json: "weights-only" when the new model has the nearest model's
+# architecture and only the weights differ, "full-port" when it needs new model code. On the
+# weights-only path stage 2 serves the new weights with the existing TT implementation and compares
+# the chip's tokens with the stage 1 reference (the weights-swap-check skill). Any other path,
+# including one the supervisor cannot read, keeps the table above.
+
+WEIGHTS_ONLY_STAGE_2 = dataclasses.replace(
+    STAGES[2], name="weights swap check on one board", skill="weights-swap-check",
+    gate=gate_weights_swap)
+
+
+def delta_path(run_dir) -> str | None:
+    """The path in stages/0/delta.json, or None when the file is missing, unreadable or names
+    another value. The stage 0 gate validated the file; this only reads it."""
+    try:
+        data = json.loads((Path(run_dir) / "stages" / "0" / "delta.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    path = data.get("path") if isinstance(data, dict) else None
+    return path if path in PATHS else None
+
+
+def run_path(entries: list[dict], run_dir) -> str | None:
+    """The path this run follows: "weights-only", "full-port", or None when it is not known.
+
+    The supervisor records the path in stage 0's passing stage_end. That entry decides, so a
+    resumed run makes the same choice as the run that crashed, even if an agent has since edited
+    delta.json. A ledger written before the path was recorded there falls back to delta.json.
+    Before stage 0 passes there is no path.
+    """
+    end = None
+    for e in entries:
+        if e["event"] == "stage_end" and e["stage"] == 0 and e["data"].get("result") == "pass":
+            end = e["data"]
+    if end is None:
+        return None
+    if "path" in end:
+        return end["path"] if end["path"] in PATHS else None
+    return delta_path(run_dir)
+
+
+def spec_for(number: int, path: str | None) -> StageSpec:
+    """The stage spec for `number` on `path`. Only the weights-only path changes the table."""
+    if path == "weights-only" and number == 2:
+        return WEIGHTS_ONLY_STAGE_2
+    return STAGES[number]
 
 
 # ---- tiers, skills and disk ---------------------------------------------------------------------

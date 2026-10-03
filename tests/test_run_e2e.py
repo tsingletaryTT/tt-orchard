@@ -12,8 +12,8 @@ from fakes import Crash
 from orchard.ledger import Ledger, replay_state
 from orchard.stages import run_progress
 from orchard.supervisor import EXIT_READY, build, parse
-from run_fakes import (BOARDS, CrashingLedger, Machine, MachineAdapter, MachineCoder, argv, bringup,
-                       clock, feedback_aware, plenty, write_tiers)
+from run_fakes import (BOARDS, SWAP_LOW, CrashingLedger, Machine, MachineAdapter, MachineCoder, argv,
+                       bringup, clock, feedback_aware, plenty, write_tiers)
 
 FIRST, SECOND = 100, 200          # supervisor pids before and after the kill
 
@@ -121,8 +121,7 @@ def test_the_kill_test_has_a_kill_point_inside_the_coder_boot(tmp_path, servers)
 
 @pytest.mark.parametrize("stage,phase,bad,chips", [
     (1, "run", {"evidence/notes.txt": "work done, no reference.json"}, 2),
-    (2, "finish", {"result.json": {"pcc": 0.9, "argmax_match": True,
-                                   "evidence": ["stages/2/evidence/hw-test-output.txt"]}}, 4),
+    (2, "finish", SWAP_LOW, 4),
 ])
 def test_a_kill_around_the_gate_feedback_continuation_resumes_to_the_same_final_state(
         tmp_path, stage, phase, bad, chips):

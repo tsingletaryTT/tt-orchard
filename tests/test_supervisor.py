@@ -12,8 +12,9 @@ from orchard.adapters import AdapterError
 from orchard.ledger import Ledger, LedgerCorrupt
 from orchard.supervisor import (EXIT_ABORTED, EXIT_ERROR, EXIT_READY, EXIT_REFUSED, Control, build,
                                 main, parse)
-from run_fakes import (BOARDS, FEEDBACK_HEAD, FILES, CrashingLedger, Machine, MachineAdapter,
-                       MachineCoder, argv, bringup, clock, feedback_aware, plenty, where, write_tiers)
+from run_fakes import (BOARDS, DELTA, FEEDBACK_HEAD, FILES, SWAP_LOW, CrashingLedger, Machine,
+                       MachineAdapter, MachineCoder, argv, bringup, clock, feedback_aware, plenty,
+                       where, write_tiers)
 
 # The hardware test and agent shells run real bash here, so stub tools come first on PATH.
 pytestmark = pytest.mark.usefixtures("stub_tools")
@@ -146,13 +147,11 @@ def test_an_operator_who_accepts_visible_credentials_is_recorded(rig):
 # ---- the run --------------------------------------------------------------------------------------
 
 def test_a_failed_gate_escalates_once_to_the_diagnose_tier(rig):
-    bad = {(2, "finish"): {"result.json": {"pcc": 0.9, "argmax_match": True,
-                                           "evidence": ["stages/2/evidence/hw-test-output.txt"]}}}
-    rig.script = escalation_aware(2, bad)
+    rig.script = escalation_aware(2, {(2, "finish"): SWAP_LOW})
     assert rig.run() == EXIT_READY
     assert [d["result"] for d in rig.ends(2)] == ["escalate", "pass"]
     esc = [e["data"] for e in rig.entries() if e["event"] == "escalate"]
-    assert esc[0]["by"] == "stage machine" and "pcc must be" in esc[0]["reasons"][0]
+    assert esc[0]["by"] == "stage machine" and "top1_agreement 0.1 is below" in esc[0]["reasons"][0]
     steps = [d for d in rig.decisions() if d["decision"] == "agent step" and d["escalated"]]
     assert steps and all(d["tier"] == "large" for d in steps)
     assert (rig.run_dir / "stages" / "2.partial-1" / "result.json").exists()   # kept, never deleted
@@ -192,13 +191,57 @@ def test_the_escalation_cap_pauses_the_run(rig):
 
 
 def test_a_full_port_pauses_before_stage_2(rig):
-    from run_fakes import DELTA
     full = {(0, "run"): {**FILES[(0, "run")], "delta.json": {**DELTA, "path": "full-port"}}}
     rig.script = lambda r: bringup(r, overrides=full)
     rig.on_sleep = lambda: Control(rig.run_dir).write("abort")
     assert rig.run() == EXIT_ABORTED
     assert [d["result"] for d in rig.ends(0)] == ["pass"] and rig.ends(2) == []
     assert any(d.get("reason", "").startswith("stage 0 found a full port") for d in rig.decisions())
+
+
+# ---- the path stage 0 chose decides stage 2's skill and gate --------------------------------------
+
+FULL_PORT_DELTA = {(0, "run"): {**FILES[(0, "run")], "delta.json": {**DELTA, "path": "full-port"}}}
+
+
+def step_skills(rig, n):
+    return [e["data"]["skill"] for e in rig.entries() if e["event"] == "decision" and e["stage"] == n
+            and e["data"]["decision"] == "agent step"]
+
+
+def test_a_weights_only_run_gives_stage_2_the_swap_skill_and_gate(rig):
+    assert rig.run() == EXIT_READY
+    assert rig.ends(0)[0]["path"] == "weights-only"         # the choice is recorded with stage 0's pass
+    skills = step_skills(rig, 2)
+    assert len(skills) == 2 and all(s.endswith("orchard/skills/weights-swap-check.md") for s in skills)
+    assert [d["result"] for d in rig.ends(2)] == ["pass"]
+    system = next(r["messages"][0]["content"] for r in rig.chip_server.requests
+                  if "tools" in r and where(r) == (2, "prepare"))
+    assert "## Skill: weights-swap-check " in system and "# Weights swap check" in system
+
+
+def test_a_full_port_run_keeps_the_functional_decoder_and_the_full_model(rig):
+    rig.script = lambda r: bringup(r, overrides=FULL_PORT_DELTA)
+    rig.on_sleep = lambda: Control(rig.run_dir).write("resume")    # the operator goes on after the pause
+    assert rig.run() == EXIT_READY
+    assert rig.ends(0)[0]["path"] == "full-port"
+    assert all(s.endswith("functional-decoder/SKILL.md") for s in step_skills(rig, 2))
+    assert [d["result"] for d in rig.ends(2)] == ["pass"] and [d["result"] for d in rig.ends(3)] == ["pass"]
+    assert step_skills(rig, 3) and all(s.endswith("full-model/SKILL.md") for s in step_skills(rig, 3))
+
+
+def test_a_resume_keeps_the_path_stage_0_chose_even_if_delta_json_changed(rig):
+    with pytest.raises(Crash):
+        rig.run(crash_if=lambda e: e["event"] == "stage_end" and e["stage"] == 0)
+    delta = rig.run_dir / "stages" / "0" / "delta.json"
+    delta.write_text(delta.read_text().replace('"weights-only"', '"full-port"'))   # an agent's edit
+
+    def stop():
+        raise Stop()                                # a full-port pause would wait here
+    rig.on_sleep = stop
+    assert rig.run(pid=200) == EXIT_READY
+    assert all(s.endswith("weights-swap-check.md") for s in step_skills(rig, 2))
+    assert not any("full port" in (d.get("reason") or "") for d in rig.decisions())
 
 
 def test_an_operator_pause_waits_for_resume(rig):
@@ -650,19 +693,15 @@ def test_a_failed_gate_gets_one_continuation_that_can_fix_the_stage(rig):
 
 
 def test_a_hardware_stage_finish_step_gets_the_continuation_too(rig):
-    bad = {"result.json": {"pcc": 0.9, "argmax_match": True,
-                           "evidence": ["stages/2/evidence/hw-test-output.txt"]}}
-    rig.script = feedback_aware(2, "finish", bad)
+    rig.script = feedback_aware(2, "finish", SWAP_LOW)
     assert rig.run() == EXIT_READY
     assert [d["result"] for d in rig.ends(2)] == ["pass"]
     [fb] = feedback_decisions(rig, 2)
-    assert fb["phase"] == "finish" and "pcc must be" in fb["reasons"][0]
+    assert fb["phase"] == "finish" and "top1_agreement 0.1 is below" in fb["reasons"][0]
 
 
 def test_a_continuation_that_still_fails_escalates_as_before(rig):
-    bad = {(2, "finish"): {"result.json": {"pcc": 0.9, "argmax_match": True,
-                                           "evidence": ["stages/2/evidence/hw-test-output.txt"]}}}
-    rig.script = escalation_aware(2, bad)
+    rig.script = escalation_aware(2, {(2, "finish"): SWAP_LOW})
     assert rig.run() == EXIT_READY
     assert [d["result"] for d in rig.ends(2)] == ["escalate", "pass"]
     es = [e for e in rig.entries() if e["stage"] == 2]
@@ -670,7 +709,7 @@ def test_a_continuation_that_still_fails_escalates_as_before(rig):
     fbs = [e for e in es[:first_end] if e["event"] == "decision" and e["data"]["decision"] == "gate feedback"]
     assert len(fbs) == 1                                   # one continuation in the attempt, no more
     esc = next(e["data"] for e in es if e["event"] == "escalate")
-    assert esc["by"] == "stage machine" and "pcc must be" in esc["reasons"][0]
+    assert esc["by"] == "stage machine" and "top1_agreement 0.1 is below" in esc["reasons"][0]
 
 
 def test_no_continuation_after_a_step_that_ended_in_error(rig):
