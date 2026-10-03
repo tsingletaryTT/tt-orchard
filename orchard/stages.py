@@ -216,8 +216,16 @@ def gate_full_model(stage_dir, run_dir) -> GateResult:
     return _done(reasons, seen)
 
 
-def gate_mesh(stage_dir, run_dir) -> GateResult:
-    """Stage 4: evidence for each mesh configuration, as mesh-shrink requires."""
+def gate_mesh(stage_dir, run_dir, required=None) -> GateResult:
+    """Stage 4: evidence for each mesh configuration, as mesh-shrink requires.
+
+    `required` is the tuple of chip counts the operator named for this run. Without it, every
+    listed configuration must pass. With it:
+    - each required count needs at least one entry, and every entry for a required count must
+      pass, so a passing duplicate cannot hide a failing one;
+    - an entry for any other count must still be well formed, and one that claims a pass must
+      carry valid evidence, but an optional entry that did not pass adds no failure reason.
+    """
     d, err = _load(stage_dir, "result.json")
     if err:
         return GateResult(False, (err,))
@@ -226,13 +234,22 @@ def gate_mesh(stage_dir, run_dir) -> GateResult:
     if not isinstance(configs, list) or not configs:
         reasons.append("result.json configs must be a non-empty list")
         configs = []
+    required = tuple(required or ())
+    listed = set()
     for i, c in enumerate(configs):
         if not isinstance(c, dict) or isinstance(c.get("chips"), bool) or not isinstance(c.get("chips"), int):
             reasons.append(f"configs[{i}] needs an integer chips")
             continue
-        if c.get("pass") is not True:
+        listed.add(c["chips"])
+        optional = bool(required) and c["chips"] not in required
+        passed = c.get("pass") is True
+        if not passed and not optional:
             reasons.append(f"the {c['chips']}-chip configuration did not pass")
-        _evidence(run_dir, c.get("evidence"), f"configs[{i}]", reasons, seen)
+        if passed or not optional:
+            _evidence(run_dir, c.get("evidence"), f"configs[{i}]", reasons, seen)
+    for chips in required:
+        if chips not in listed:
+            reasons.append(f"the {chips}-chip configuration is required and has no entry")
     return _done(reasons, seen)
 
 

@@ -84,7 +84,10 @@ def build_messages(*, spec: StageSpec, phase: str, run_dir, stage_dir, skill_pat
 
     user = ["## Task", PHASE_TASKS[phase].format(gate=spec.gate_file, n=n), "", "## Run"]
     user += [f"- {k}: {v}" for k, v in facts.items()]
-    user += [f"- stage directory: stages/{n}", "", "## Ledger so far"]
+    user += [f"- stage directory: stages/{n}"]
+    if n == 4 and facts.get("required chip configurations"):
+        user += ["", "## Chip configurations", MESH_NOTE.format(counts=facts["required chip configurations"])]
+    user += ["", "## Ledger so far"]
     user += [f"- {line}" for line in ledger_excerpt(entries, n)] or ["- nothing yet"]
     user += ["", "## Results of earlier stages"]
     shown = False
@@ -111,9 +114,17 @@ def build_messages(*, spec: StageSpec, phase: str, run_dir, stage_dir, skill_pat
     return "\n".join(system), "\n".join(user)
 
 
+MESH_NOTE = ("Required chip counts for this run: {counts}. Each one needs an entry in configs with "
+             "pass true and evidence. Any other chip count is optional: try it, and if it does not "
+             "work, record it with pass false and a reason. Do not leave it out and do not mark it "
+             "as passing.")
+
+
 def facts_from(run_start: dict, run_dir) -> dict:
     """The run facts every context lists, from the run_start entry."""
     facts = {"model": run_start.get("model"), "run directory": str(run_dir)}
     for name, path in (run_start.get("inputs") or {}).items():
         facts[f"input {name}"] = path
+    if run_start.get("required_chips"):
+        facts["required chip configurations"] = ", ".join(str(c) for c in run_start["required_chips"])
     return facts

@@ -70,3 +70,24 @@ def test_a_long_skill_is_cut_and_says_so(tmp_path):
 def test_facts_list_the_model_and_the_inputs(tmp_path):
     facts = facts_from({"model": "m", "inputs": {"base": "/mnt/base"}}, tmp_path)
     assert facts == {"model": "m", "run directory": str(tmp_path), "input base": "/mnt/base"}
+
+
+def test_facts_list_the_required_chip_configurations_when_the_run_names_them(tmp_path):
+    facts = facts_from({"model": "m", "required_chips": [2, 4]}, tmp_path)
+    assert facts["required chip configurations"] == "2, 4"
+    assert "required chip configurations" not in facts_from({"model": "m"}, tmp_path)
+
+
+def test_stage_4_is_told_which_configurations_are_required_and_to_record_optional_failures(tmp_path):
+    run, sp = setup(tmp_path)
+    facts = {"model": "m", "required chip configurations": "2, 4"}
+    _, user = build_messages(spec=STAGES[4], phase="run", run_dir=run, stage_dir=run / "stages" / "4",
+                             skill_path=sp, refs={}, entries=[], facts=facts, resumed=False)
+    assert "Required chip counts for this run: 2, 4." in user
+    assert "pass false and a reason" in user
+    _, other = build_messages(spec=STAGES[3], phase="run", run_dir=run, stage_dir=run / "stages" / "3",
+                              skill_path=sp, refs={}, entries=[], facts=facts, resumed=False)
+    assert "Required chip counts" not in other
+    _, plain = build_messages(spec=STAGES[4], phase="run", run_dir=run, stage_dir=run / "stages" / "4",
+                              skill_path=sp, refs={}, entries=[], facts={"model": "m"}, resumed=False)
+    assert "Required chip counts" not in plain

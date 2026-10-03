@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import functools
 import json
 import os
 import pwd
@@ -271,7 +272,8 @@ class Supervisor:
                  standin, skills_dirs, inputs: dict | None = None, extra_env: dict | None = None,
                  versions: dict | None = None, http=post_json, probe=probe_model, clock=time.time,
                  sleep=time.sleep, budgets: Budgets = Budgets(), disk_usage=shutil.disk_usage,
-                 credentials_visible: list[str] | None = None):
+                 credentials_visible: list[str] | None = None,
+                 required_chips: tuple[int, ...] | None = None):
         self.run_dir = Path(run_dir).resolve()
         self.ledger, self.cfg, self.model_id = ledger, cfg, model_id
         self.adapter, self.coder, self.coder_chips, self.standin = adapter, coder, coder_chips, standin
@@ -281,6 +283,7 @@ class Supervisor:
         self.http, self.probe, self.clock, self.sleep = http, probe, clock, sleep
         self.budgets, self.disk_usage = budgets, disk_usage
         self.credentials_visible = list(credentials_visible or [])
+        self.required_chips = tuple(required_chips) if required_chips else None   # stage 4's required counts
         self.control = Control(self.run_dir)
         self.actuator = RunActuator(self.control)
         self.guard = RetryGuard()
@@ -432,7 +435,8 @@ class Supervisor:
             return EXIT_ABORTED if p.aborted else EXIT_READY
         if not p.started:
             self.ledger.append("run_start", None, model=self.model_id, versions=self.versions,
-                               inputs=self.inputs, coder=self.coder.record(),
+                               inputs=self.inputs, required_chips=list(self.required_chips or ()) or None,
+                               coder=self.coder.record(),
                                tiers={k: dict(v) for k, v in self.cfg.tiers.items()})
         if self.credentials_visible:
             # Recorded at every start, because each start is a fresh acceptance by the operator.
@@ -662,6 +666,13 @@ class Supervisor:
         status, reasons, gate = self._stage_body(spec, stage_dir, escalated, resumed)
         return self._end_stage(spec, stage_dir, status, reasons, gate, escalated)
 
+    def _gate(self, spec):
+        """The stage's gate. Stage 4's also gets the run's required chip counts; no other gate
+        changes its call."""
+        if spec.number == 4 and self.required_chips:
+            return functools.partial(spec.gate, required=self.required_chips)
+        return spec.gate
+
     def _stage_body(self, spec, stage_dir: Path, escalated: bool, resumed: bool):
         if spec.boards == 0:
             out = self._step(spec, "run", stage_dir, escalated, resumed)
@@ -683,7 +694,7 @@ class Supervisor:
             bundle = stage_dir / "bundle"
             bundle.mkdir(exist_ok=True)
             shutil.copyfile(self.ledger.path, bundle / "ledger.jsonl")
-        gate = spec.gate(stage_dir, self.run_dir)
+        gate = self._gate(spec)(stage_dir, self.run_dir)
         return ("pass", [], gate) if gate.ok else ("fail", list(gate.reasons), gate)
 
     def _end_stage(self, spec, stage_dir: Path, status: str, reasons: list, gate, escalated: bool) -> str:
@@ -837,6 +848,19 @@ class Supervisor:
 
 # ---- the command line ---------------------------------------------------------------------------
 
+def chip_counts(text: str) -> tuple[int, ...]:
+    """A `--required-chips` value: comma-separated positive integers with no repeats."""
+    try:
+        counts = tuple(int(part) for part in text.split(","))
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a comma-separated list of integers") from None
+    if any(c < 1 for c in counts):
+        raise argparse.ArgumentTypeError(f"{text!r} holds a chip count below 1")
+    if len(set(counts)) != len(counts):
+        raise argparse.ArgumentTypeError(f"{text!r} repeats a chip count")
+    return counts
+
+
 def parse(argv=None):
     p = argparse.ArgumentParser(prog="python3 -m orchard.supervisor", description=__doc__.splitlines()[0])
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -856,6 +880,10 @@ def parse(argv=None):
     r.add_argument("--input", action="append", default=[], metavar="NAME=PATH")
     r.add_argument("--env", action="append", default=[], metavar="NAME=VALUE",
                    help="a variable for agent shells (never a credential)")
+    r.add_argument("--required-chips", type=chip_counts, default=None, metavar="N,N",
+                   help="chip counts stage 4 must pass, such as 2,4. Any other count it records is "
+                        "optional. Without this, every configuration stage 4 lists must pass. The "
+                        "ledger records it, and a resumed run keeps it")
     r.add_argument("--gozer", default="gozer")
     r.add_argument("--accept-credentials-visible", action="store_true",
                    help="start even though credential files exist in the operator's home "
@@ -892,15 +920,23 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
         coder = ServerControl(spec, log_path=str(run_dir / "coder.log"))
     cpu = next(t for t in cfg.tiers.values() if t["placement"] == "cpu")
     entries = ledger.read()
-    if versions is None and not run_progress(entries).started:
+    progress = run_progress(entries)
+    if versions is None and not progress.started:
         versions = resolve_versions(spec)       # a resumed run keeps the versions it started with
+    required = args.required_chips
+    if progress.started:                        # a resumed run keeps the counts it started with
+        recorded = tuple((progress.run_start or {}).get("required_chips") or ()) or None
+        if required is not None and required != recorded:
+            raise ValueError(f"this run started with required chips {recorded}; --required-chips "
+                             f"{required} differs. Leave the option out to resume with the recorded value")
+        required = recorded
     return Supervisor(run_dir=run_dir, ledger=ledger, cfg=cfg, model_id=args.model, adapter=adapter,
                       coder=coder, coder_chips=args.coder_chips,
                       standin=ExternalStandIn(cpu["endpoint"], cpu["model"], http=http),
                       skills_dirs=[SKILLS_DIR, *args.skills_dir], inputs=inputs,
                       extra_env=extra_env, versions=versions, http=http, probe=probe,
                       clock=clock, sleep=sleep, budgets=budgets, disk_usage=disk_usage,
-                      credentials_visible=found)
+                      credentials_visible=found, required_chips=required)
 
 
 def main(argv=None, *, home=None) -> int:

@@ -168,6 +168,57 @@ def test_mesh_gate_needs_every_configuration_to_pass(tmp_path):
     assert not g.ok and g.reasons == ("the 1-chip configuration did not pass",)
 
 
+MESH_EV = ["stages/4/evidence/diff.txt"]
+
+
+def mesh(tmp_path, configs, required):
+    return gate_mesh(*stage(tmp_path, 4, "result.json", {"configs": configs}), required=required)
+
+
+def cfg_entry(chips, ok, evidence=MESH_EV, **more):
+    return {"chips": chips, "pass": ok, "evidence": evidence, **more}
+
+
+def test_mesh_gate_passes_when_the_required_configurations_pass_and_an_optional_one_fails(tmp_path):
+    g = mesh(tmp_path, [cfg_entry(2, True), cfg_entry(4, True),
+                        cfg_entry(1, False, reason="does not fit one chip")], (2, 4))
+    assert g.ok, g.reasons
+    assert g.reasons == ()
+
+
+def test_mesh_gate_names_a_required_configuration_that_is_missing(tmp_path):
+    g = mesh(tmp_path, [cfg_entry(2, True), cfg_entry(1, True)], (2, 4))
+    assert not g.ok
+    assert g.reasons == ("the 4-chip configuration is required and has no entry",)
+
+
+def test_mesh_gate_fails_a_required_configuration_that_did_not_pass(tmp_path):
+    g = mesh(tmp_path, [cfg_entry(2, True), cfg_entry(4, False)], (2, 4))
+    assert not g.ok and g.reasons == ("the 4-chip configuration did not pass",)
+
+
+def test_mesh_gate_does_not_let_a_passing_duplicate_hide_a_failing_required_entry(tmp_path):
+    g = mesh(tmp_path, [cfg_entry(2, True), cfg_entry(4, True), cfg_entry(4, False)], (2, 4))
+    assert not g.ok and g.reasons == ("the 4-chip configuration did not pass",)
+    g = mesh(tmp_path, [cfg_entry(2, True), cfg_entry(4, False), cfg_entry(4, True)], (2, 4))
+    assert not g.ok
+
+
+def test_mesh_gate_still_checks_the_shape_and_evidence_of_optional_entries(tmp_path):
+    g = mesh(tmp_path, [cfg_entry(2, True), cfg_entry(1, True, evidence=["stages/4/evidence/none.txt"])], (2,))
+    assert not g.ok                                  # an optional entry that claims a pass needs evidence
+    g = mesh(tmp_path, [cfg_entry(2, True), {"chips": "one", "pass": False}], (2,))
+    assert not g.ok and "configs[1] needs an integer chips" in g.reasons
+
+
+def test_mesh_gate_with_no_required_list_keeps_every_listed_configuration_required(tmp_path):
+    data = [cfg_entry(2, True), cfg_entry(1, False)]
+    g = mesh(tmp_path, data, None)
+    assert not g.ok and g.reasons == ("the 1-chip configuration did not pass",)
+    assert not mesh(tmp_path, data, ()).ok
+    assert not mesh(tmp_path, [], (2,)).ok           # a required list does not excuse an empty result
+
+
 def test_serving_gate_needs_boot_passkey_and_canary(tmp_path):
     ev = ["stages/5/evidence/diff.txt"]
     data = {"checks": {"boots": {"pass": True, "evidence": ev}, "canary": {"pass": True, "evidence": ev}}}

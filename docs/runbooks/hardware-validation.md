@@ -260,9 +260,17 @@ Run, from the repo root:
       --tiers config/tiers.toml \
       --coder-target mando2222/qwen3.8-27b-dflash2-p300x2-q4kv --coder-kind container \
       --coder-profile batch8-dflash2 --coder-port 8000 --coder-chips 4 \
+      --required-chips 2,4 \
       --skills-dir /home/ttuser/code/skills/plugins/tt-model-bringup/skills \
       --input model=/mnt/bonus/models/hemmingway-1/hf/hub/models--Altworld--Hemmingway-1/snapshots/1a5f363a3dd2d1cc456c28b8abbb403b9555efaf \
       --env HF_HOME=/mnt/bonus/models/hemmingway-1/hf --env HF_HUB_OFFLINE=1
+
+`--required-chips 2,4` names the chip counts stage 4 must pass for this model. The 1-chip
+configuration is optional: the agent should try it and record it with pass false and a reason if it
+does not work, and that does not fail the stage. A required count that is missing from stage 4's
+result.json or did not pass fails the gate. The ledger records the option in `run_start`, and a
+resumed run keeps it (a resume that names different counts is refused). Without the option, every
+configuration stage 4 lists must pass.
 
 What happens: the supervisor records the run and the versions it can read (`tt-model --version`,
 the firmware from `tt-smi -s`; tt-metal and vLLM are recorded as TODO). It takes a 4-chip lease
