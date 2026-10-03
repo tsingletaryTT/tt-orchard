@@ -315,3 +315,20 @@ path, so packaging is the next piece to build after stages 0 to 6 are shown to w
   The lease was released with a reset afterwards. While my stale lease waited, a `tt-smi -r` started by the
   systemd user manager reset the board (probably the gozer reconcile timer); `gozer release` refused to
   run while it held the chip and I did not force it.
+- **18:20Z to 19:00Z merged: swap templates, two watchdog detectors, weights path, gate 0.85 (suite 1308 passed,
+  1 skipped).** Details in the commits: `serve_and_compare.py` and `prepare_swap.py` are tested against a fake
+  server; the server's environment carries `MODEL_WEIGHTS_DIR` and `HF_MODEL` set to the model directory;
+  a cache directory that is not empty must hold a marker naming the model or the script refuses; the server
+  is stopped on every exit path (a test injects an error after the server is up). `NoFileWritten` (20 turns
+  without a written file) and `TurnRepeat` (the same set of calls in 3 turns in a row) are wired into the
+  supervisor. The gate floor for the chip-versus-CPU agreement is 0.85, from two single-prompt
+  measurements (0.78 base weights, 0.94 correct weights): a thin margin, flagged as a choice.
+- **18:45Z to 19:00Z agent model test on the 4-chip server.** The 4-chip plain package (now working after the
+  cache rebuild) was asked to continue the failing stage 1 turn in six modes (same 14 messages, 8,000-token
+  cap). Thinking on with sampling (temperature 0.6): 3 of 3 trials hit the cap with no tool call. Thinking on
+  greedy: hit the cap. **Thinking off, greedy: a correct tool call in 120 tokens (6 s).** Thinking off with
+  sampling: a tool call but 8,000 tokens. So thinking mode fails on this prompt with sampling too: my earlier
+  explanation (greedy decoding is the cause) was too narrow. Thinking off with greedy decoding is the best
+  mode on both servers, so the agents stay on thinking off and the 2-chip coder. One prompt and one replayed
+  turn: an indication, not a rate. Server stopped; the lease ended with a reset (gozer status was unreadable
+  for about a minute while all four chips reset); all four chips FREE.
