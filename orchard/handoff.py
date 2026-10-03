@@ -461,3 +461,101 @@ class Handoff:
                         after_file=file_evidence(after_path))
         self._record("restore", "canary", compared=True, match=True, canary=file_evidence(after_path))
         return result
+
+
+def release_for_idle_phase(adapter, server, lease: Lease, *, ledger, stage,
+                           expected_idle_s: float, budget_s: float = IDLE_RELEASE_S,
+                           quiet_wait_s: float = QUIET_WAIT_S, poll_s: float = POLL_S,
+                           clock=time.monotonic, sleep=time.sleep) -> bool:
+    """Spec section 6, first branch row: release the lease for a long phase with no hardware use.
+
+    A held board is unavailable to everyone else. Holding it costs nothing for a short phase;
+    for a long one (an image build of 1.5 to 2.5 h, a CPU-only reference run) the supervisor
+    releases it and takes a new lease, through `reacquire`, before the next hardware phase.
+    gozer's release resets the chips (about 42 s), and gozer cannot see a container owned by
+    another user, so the same two-sided stop check as a park runs first (`wait_stopped`). A
+    ResetFailed from the release propagates to the caller.
+    """
+    info = {"lease_id": lease.lease_id, "expected_idle_s": expected_idle_s, "budget_s": budget_s}
+    if expected_idle_s <= budget_s:
+        ledger.append("decision", stage,
+                      decision="hold the lease through a phase with no hardware use", **info)
+        return False
+    check = wait_stopped(server, adapter, lease, quiet_wait_s=quiet_wait_s, poll_s=poll_s,
+                         clock=clock, sleep=sleep)
+    if not check["ok"]:
+        reason = "the server is not confirmed stopped; the lease was not released"
+        ledger.append("notice", stage, blocked=True, reason=reason, evidence=check)
+        raise Blocked(reason, **check)
+    adapter.release(lease)
+    ledger.append("decision", stage,
+                  decision="released the lease for a phase with no hardware use", **info)
+    return True
+
+
+def reacquire(adapter, *, chips: int, who: str, reason: str, ledger, stage, wait_budget_s: float,
+              clock=time.monotonic, sleep=time.sleep, poll_s: float = QUEUE_POLL_S,
+              exact: str | None = None) -> Lease:
+    """Take a lease, waiting in the lease tool's queue if the box is busy (spec section 10).
+
+    The ticket is claimed by repeating the acquire with the ticket (the gozer-park skill); `gozer
+    wait` is never used, because it grants a lease with no owner pid. The poll interval stays well
+    inside gozer's 90 s claim window. gozer expires a ticket after one hour; the first expiry takes
+    a new ticket and records the lost place, and a second one blocks. Waiting past the budget
+    cancels the ticket and blocks. The ledger records the wait.
+    """
+    t0 = clock()
+
+    def waited() -> float:
+        return round(clock() - t0, 3)
+
+    def block(why: str, **ev):
+        ledger.append("notice", stage, blocked=True, reason=why, evidence=ev)
+        raise Blocked(why, **ev)
+
+    def granted(lease: Lease) -> Lease:
+        ledger.append("decision", stage, decision="lease granted", lease_id=lease.lease_id,
+                      chips=list(lease.chips), waited_s=waited())
+        ledger.append("measurement", stage, name="queue_wait_seconds", value=waited(), unit="s",
+                      label="measured")
+        return lease
+
+    def enqueue() -> tuple[Lease | None, str | None]:
+        try:
+            return granted(adapter.acquire(chips, who, reason, queue=True, exact=exact)), None
+        except Queued as q:
+            ledger.append("decision", stage, decision="queued for lease", ticket=q.ticket,
+                          position=q.position, chips=chips)
+            return None, q.ticket
+        except Refused as exc:
+            block(f"the lease tool refused the request: {exc}")
+
+    lease, ticket = enqueue()
+    if lease is not None:
+        return lease
+    replaced = False
+    while True:
+        if clock() - t0 >= wait_budget_s:
+            try:
+                adapter.cancel(ticket)
+            except AdapterError as exc:
+                ledger.append("notice", stage, what="cancelling the queue ticket failed",
+                              ticket=ticket, error=str(exc))
+            block("waited past the budget for a lease; the ticket was cancelled", ticket=ticket,
+                  waited_s=waited(), budget_s=wait_budget_s)
+        sleep(poll_s)
+        try:
+            return granted(adapter.claim(ticket, chips, who, reason))
+        except Queued:
+            continue
+        except TicketGone:
+            ledger.append("notice", stage, what="queue ticket expired; the place in the queue is lost",
+                          ticket=ticket, waited_s=waited())
+            if replaced:
+                block("a second queue ticket expired", ticket=ticket)
+            replaced = True
+            lease, ticket = enqueue()
+            if lease is not None:
+                return lease
+        except Refused as exc:
+            block(f"the lease tool refused the claim: {exc}", ticket=ticket)
