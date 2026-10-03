@@ -37,6 +37,16 @@ using the skills, with open-source models only. The run ends at an operator revi
   any other loaded model) resident. In a ledger entry, `label` covers every field the tool reports.
   A `null` under `measured` means the source did not report it. `TODO` entries are placeholders for
   a measurement not taken, written by the operator-bundle stage.
+- Tiers (operator, 2026-10-02): large = Qwen3.8-27B on all 4 chips (both boards); small =
+  Qwen3.8-27B on 2 chips (one board); a CPU tier chosen by measurement. While the large tier is
+  loaded no board is free, so every hardware stage parks it. `handoff.decide_park` makes that call
+  from the boards the coder holds and the boards a stage needs.
+- Park and restore is a step-by-step state machine. Each step writes a ledger entry; a restart
+  replays the ledger and then believes the machine (docker, ps, gozer status) where they differ.
+  After a crash the old lease belongs to a dead pid, so recovery stops the coder, takes a new
+  lease, resets it and restores.
+- The watchdog acts only through an injected actuator, which plan 4 supplies. Each ladder rung is
+  written to the ledger before it is acted on, so a restart cannot repeat a rung.
 
 ## Layout
 Spec: `docs/superpowers/specs/`. Plans: `docs/superpowers/plans/`. Code: `orchard/`. Tests: `tests/`.
@@ -44,7 +54,7 @@ Spec: `docs/superpowers/specs/`. Plans: `docs/superpowers/plans/`. Code: `orchar
 ## Status
 Plan 1 is implemented through Task 4 (ledger, runner, tiers, sizing). Task 5 (run the sizing tool
 against a real ollama, which downloads models and loads the host) was not run. It needs the
-operator. Plans 2 to 4 are not started.
+operator. Plan 2 is merged in tt-gozer. Plan 3 (adapters, server control, park and restore, watchdog) is implemented on branch `plan3-supervisor-behavior`. Plan 4 is not started.
 
 ## Open decision for the operator
 No adversarial search for bypasses of the command runner has been done. Decide before plan 4 ships:
@@ -57,6 +67,21 @@ two-process lock test.
 - 2026-10-01: spec approved; plan 1 (ledger, runner, tiers, sizing) written.
 - 2026-10-01: plan 1 executed with subagents. Tasks 1 and 2 by sonnet, Task 3 by haiku, Task 4 by
   sonnet, review by opus and sonnet, final review by fable.
+
+- 2026-10-02: plan 3 (supervisor behavior). Prompt: "write plan 3: supervisor behavior (adapters, park
+  and restore, watchdog)". Executed task by task. Notable moment in Task 14: the replay found a second
+  five-call repeat in the loop chat (03:40 to 03:53Z, 5281 thinking tokens), so the identical-response
+  detector fires twice there and the thinking cap fires five times. Task 14 mutation 3 as first written
+  (`THINKING_CAP = 16000`) could not fail, because the 16861-token response had a tool call; the
+  plan now uses 1500. Task 4: the five gozer contract tests ran against the real gozer with fake roots
+  and none skipped. Task 7: the live server test ran and did not skip; one mutation first passed because
+  of a stale `.pyc` (same file size, same second), so every mutation run now clears `__pycache__`. Task 15
+  wrote the park-check driver and its tests; the driver has not been run on hardware. The only skip in
+  the suite is the opt-in replay. The plan was revised before execution after a review
+  (`.superpowers/plan3-review.md`, 1 critical and 10 important findings, all accepted): a tripwire gozer
+  in the park-check tests, abandoning a park killed before its stop, recording the stand-in pid first,
+  an explicit abandoned step, a single-tenant adapter that can be rebuilt after a crash and leases whole
+  boards, salted fixture hashes, and per-attempt evidence files.
 
 ## Notable moments
 - The `shlex` runner was shown to be bypassable (comments, keywords, `eval`, shells on stdin,

@@ -274,7 +274,7 @@ is no gap to protect and no reservation state to add. Two small additions to goz
 5. **Open items found while building this.** `gozer wait` grants a lease without an owner pid, so
    the lease falls back to the 15 minute detached window; a supervisor re-runs
    `gozer acquire --owner-pid ... --ticket ...` itself, with a short sleep between tries
-   (about ten lines of gozer code would add `--owner-pid` to `wait`). `Keymaster.release` takes the
+   (about ten lines of gozer code would add `--owner-pid` to `wait`). The tt-orchard gozer adapter (plan 3) never calls `wait`; it claims a ticket by repeating `acquire --owner-pid ... --ticket ...` every 10 s. `Keymaster.release` takes the
    chips to reset from the lease record without checking them against the record's units, and
    does not catch a chip id that is not a PCI address; `reset` does both. These are existing
    behavior and were left unchanged on the branch.
@@ -403,7 +403,7 @@ If the qwencode transcripts are gone, a synthetic loop is a weaker test and the 
 
 ## 14. Open questions
 
-1. Which open-source models fill the large, small and CPU tiers. Decided after section 12.
+1. Which open-source models fill the large, small and CPU tiers. Decided after section 12. Partly answered on 2026-10-02 by the operator: large = Qwen3.8-27B on 4 chips, small = Qwen3.8-27B on 2 chips; the CPU tier is still chosen by measurement.
 2. Whether a lease owned by the supervisor's pid, with a descendant-aware ownership check, behaves on
    the real box as the code reading says (section 8). **Answered on 2026-10-02: yes, on both
    boards.** Three supervised driver runs (board 1 twice, board 0 once; 22 to 24 checks each, all
@@ -439,3 +439,9 @@ If the qwencode transcripts are gone, a synthetic loop is a weaker test and the 
    created remotely until the operator asks.
 5. Bypass search of the command runner (section 10). Sanction an adversarial review, or accept best
    effort plus the outer layers of plans 3 and 4. Decide before plan 4 ships.
+6. Watchdog thresholds. **Set on 2026-10-02 from a replay** of the recorded loop (qwen-code
+   0.24.7, chat 197354ac) and 30 quiet chats (582 main-agent responses): N = 3 identical responses,
+   thinking cap 20000 tokens. The replay found a second five-call repeat in the same chat
+   (03:40 to 03:53Z, input 198041, output 5895, thoughts 5281 tokens), which N = 3 also catches.
+   No quiet chat fires. T (no new evidence) and the lease-idle limit are not measured, because
+   transcripts carry no evidence or lease events.

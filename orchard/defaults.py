@@ -26,7 +26,7 @@ GOZER_TICKET_MAX_AGE_S = 3600.0 # TICKET_MAX_AGE_SECONDS: a ticket expires after
 
 # ---- budgets derived from the measurements (the multipliers are choices) -----------------------
 CMD_TIMEOUT_S = 120.0           # choice: gozer status/acquire, docker, ps, ss, curl; each takes < 2 s
-START_TIMEOUT_S = 900.0         # choice, not measured: `tt-model serve --detach` for a container. The
+START_TIMEOUT_S = 900.0         # choice; not measured: `tt-model serve --detach` for a container. The
                                 # 20 s warm boot includes the watch; a start that reloads an image is
                                 # unmeasured. On a timeout the start is left running and checked.
 RESET_TIMEOUT_S = 600.0         # choice: about 14 times the measured reset; same as hardware_check
@@ -37,8 +37,8 @@ MESH_RESET_EXTRA_S = 60.0       # choice: added to the quiet wait when `tt-model
 POLL_S = 2.0                    # choice: re-read interval while waiting for chips to go quiet
 READY_POLL_S = 5.0              # choice: health poll interval while a server boots
 COLD_BOOT_BUDGET_S = 2700.0     # choice: 1.5 times COLD_BOOT_S; past this the stage blocks (spec section 6)
-STANDIN_READY_S = 600.0         # choice, not measured: CPU stand-in load time is open (spec section 12)
-CANARY_TIMEOUT_S = 300.0        # choice, not measured: one short greedy answer
+STANDIN_READY_S = 600.0         # choice; not measured: CPU stand-in load time is open (spec section 12)
+CANARY_TIMEOUT_S = 300.0        # choice; not measured: one short greedy answer
 CANARY_MAX_TOKENS = 64          # choice: the canary needs a short answer only
 QUEUE_POLL_S = 10.0             # choice: well inside GOZER_CLAIM_WINDOW_S
 IDLE_RELEASE_S = 900.0          # choice: hold a lease through a phase with no hardware use up to
@@ -57,7 +57,7 @@ IDLE_RELEASE_S = 900.0          # choice: hold a lease through a phase with no h
 IDENTICAL_N = 3                 # measured: fires on the third call (about 33 min) of each 5-call repeat
 THINKING_CAP = 20000            # measured: above every quiet response, below the loop's 27939
 REPEAT_TOOL_N = 3               # measured: no transcript repeats a tool call; outputs repeat at most twice
-NO_EVIDENCE_S = 3600.0          # choice, not measured: transcripts carry no evidence events
-LEASE_IDLE_S = 1800.0           # choice, not measured
+NO_EVIDENCE_S = 3600.0          # choice; not measured: transcripts carry no evidence events
+LEASE_IDLE_S = 1800.0           # choice; not measured
 LEASE_POLL_S = 60.0             # choice: `gozer status` is read at most once a minute by the watchdog
 RUNG_CAPS = {"nudge": 1, "escalate": 1, "pause": 1}   # choice: each rung once per agent and stage

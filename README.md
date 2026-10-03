@@ -19,10 +19,14 @@ Early. The hold-through-swap pattern has been checked on this machine's two boar
 | CPU model sizing tool (`orchard/sizing.py`) | built, tested against a fake server; not yet run against a real ollama |
 | tt-gozer changes (`gozer reset`, descendant ownership, `gozer-park` skill) | built, reviewed and checked on real hardware (both boards); on branch `orchard-hold-through-swap` in a worktree of `~/code/tt-gozer`; not merged |
 | Hardware-check driver (`orchard/hardware_check.py`) | built, reviewed, run on both boards: 22 to 24 checks passed on each run, plus a container-server check (spec section 14, item 2) |
-| Supervisor loop, park and restore, watchdog | designed, not started |
+| Lease adapters (`orchard/adapters/`: gozer, single tenant) | built, tested against fakes; the gozer adapter also against the real gozer CLI with fake roots |
+| Server control and canary (`orchard/server.py`, `orchard/canary.py`) | built, tested; stop checks also run against real ps, pgrep, ss and curl with a fake server |
+| Park and restore (`orchard/handoff.py`) | built, tested against a fake machine, including a crash after every ledger event; not yet run on hardware (`orchard/park_check.py` is written for the controller to run) |
+| Watchdog (`orchard/watchdog.py`, `orchard/transcripts.py`) | built, tested; thresholds set from a replay of the recorded qwen-code loop and 30 quiet chats |
+| Supervisor loop, stage state machine, model proxy | designed, not started (plan 4) |
 | Stage state machine, new bring-up skills, operator bundle | designed, not started |
 
-The suite has 607 tests and runs without hardware or network. The driver's tests use fake gozer roots and a stub child.
+The suite has 838 passing tests and 1 skipped, and runs without hardware or network. The skipped test is the opt-in replay of local qwen-code transcripts (`ORCHARD_REPLAY=1 python3 -m pytest tests/test_replay_local.py`). 607 of the tests predate plan 3. The driver's tests use fake gozer roots and a stub child.
 
 Measured on this machine (one p300c board): an in-place `gozer reset` takes 41.7 s; `tt-model stop` takes 1.6 to 1.9 s; the Audio8 container reaches ready in about 20 s from a warm start; a lease owned by a live pid stays valid past gozer's 900 s detached window. During any reset the other board shows as busy for about 42 s, because `tt-smi -r` opens every device.
 
@@ -69,6 +73,22 @@ The full design is in `docs/superpowers/specs/2026-10-01-orchard-design.md`.
 - **Sizing tool.** Measures load time, prefill speed, decode speed, resident size and free host
   memory for a model served by a local ollama, and records each result in a ledger. It labels what
   it measures so a number from a cached prompt or a short decode is not mistaken for a normal one.
+- **Lease adapters.** One interface (`LeaseAdapter`) over the lease tool. The gozer adapter drives
+  the gozer CLI, never passes `--force`, never calls `gozer wait`, and claims a queue ticket by
+  polling `acquire`. The single-tenant adapter is for a machine with no lease tool; it leases whole
+  boards and can be rebuilt after a crash.
+- **Server control and canary.** Starts, stops and checks a model server, and confirms a stop only
+  when the server's own checks and the lease tool agree. The canary asks a fixed question before a
+  park and after the restore and compares the two answers exactly. A fake OpenAI-shaped server
+  (`orchard/fake_server.py`) opens no device and is used in tests and in the park check.
+- **Park and restore.** `orchard/handoff.py` stops the coder, resets the board in place, and brings
+  the coder back. It writes one ledger entry per step. After a restart it replays the ledger and
+  trusts the machine where the two differ. `orchard/park_check.py` runs it on one real board with
+  fake servers (runbook: "Park check").
+- **Watchdog.** A normalised event stream, six detectors, a capped response ladder and a retry
+  guard. It acts through an injected actuator that plan 4 supplies. `orchard/transcripts.py` turns
+  a qwen-code transcript into that stream, and the detector thresholds come from a replay of the
+  recorded loop.
 
 ## Try it
 
