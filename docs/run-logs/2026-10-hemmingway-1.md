@@ -179,3 +179,20 @@ path, so packaging is the next piece to build after stages 0 to 6 are shown to w
   16,384 tokens; and the agent gets one continuation in the same conversation, with the gate's reasons,
   before the stage is escalated. The run is paused; the coder is idle on board 1.
   Stage 1 is the point where the harness has spent the most effort without a pass.
+- **15:12Z to 15:20Z run 3, stage 1 failed a fourth time, within 6 turns.** With the empty-reply handling,
+  the 16,384-token budget and the same-conversation gate feedback all in place (merged, suite 1199
+  passed, 1 skipped), the agent's turn 5 used all 16,384 tokens and turn 6 was an empty reply.
+  A second recovery worked: the supervisor was restarted, stopped the idle coder, took board 0, and the
+  coder was ready in 130 s with the canary answer again identical to the first (two restarts, same
+  answer). The reply budget was not the limit.
+- **Why the agent fails: greedy decoding in thinking mode.** The operator's reading was that this
+  needs a stronger, 4-chip model. I replayed the failing turn-5 request against the idle coder.
+  With thinking on: 6,000 tokens of reasoning (20,175 characters), no command, circling the same
+  point. With thinking off: one correct tool call in 437 tokens, plus a correct diagnosis of the
+  earlier attempt's script bug. The 2-chip server decodes greedily only (temperature 0), and a
+  reasoning model without sampling loops in its thinking. This is one replayed turn, not a
+  measured rate. A model that can sample, such as the plain 4-chip package, would avoid the loop,
+  but both 4-chip packages return noise on this machine, so the 4-chip route is blocked until that is
+  understood.
+- **Change:** agent turns now send `enable_thinking: false` (`AGENT_THINKING = False`; a step can turn it
+  back on). Two tests, each mutated and seen to fail. Suite 1201 passed, 1 skipped.
