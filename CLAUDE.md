@@ -8,7 +8,12 @@ using the skills, with open-source models only. The run ends at an operator revi
 
 ## Key decisions
 - Supervisor is a state machine in code. Each stage starts a fresh short model context from the ledger.
-- Lease handling goes through an adapter. tt-gozer owns leases and gains `yield` and `redeem`.
+- Lease handling goes through an adapter. tt-gozer owns leases. The supervisor holds each board lease
+  under its own pid (`gozer acquire --owner-pid`) through a model swap and never releases it, so no
+  other agent can take the board mid-swap. gozer gains `reset <lease>` (reset in place) and an ownership
+  check that counts the owner's child processes. The earlier `yield`/`redeem` reservation design is the
+  documented fallback (spec section 8). Changed on 2026-10-02 after reading gozer's `keymaster.py`,
+  `gatekeeper.py` and `queue.py`.
 - The watchdog reports on agents it did not launch and acts only on agents it launched.
 - The supervisor never publishes. A command runner refuses push, publish and reset commands.
 - Config is TOML because the supervisor uses only the standard library.
@@ -67,3 +72,25 @@ two-process lock test.
   change before any operator config existed.
 - The final review also found ledger exceptions other than `LedgerCorrupt`, zsh lexed as bash, and
   redirect targets that lost their `$` flag. All three are fixed.
+- 2026-10-02: the hardware-check driver (`orchard/hardware_check.py`, built and reviewed with
+  subagents; a safety review found five Critical problems before any real run, and a narrow check
+  found two more) ran on board 1 with the tt-tnt agent's agreement: 22 checks passed. The 900 second
+  idle test, board 0, a container server and two drivers at once are not done. Details in the spec,
+  section 14, item 2.
+- 2026-10-02 (later): the full hardware validation is done on both boards. Board 1 passed with the full
+  960 s idle (the owner-pid lease survived a reconcile), board 0 passed, two drivers overlapped, and a
+  container-server check on board 0 passed (warm boot 20 s, stop 1.6 s, reset 41.7 s). Findings: a
+  reset opens every device on the box, so the other board looks busy for about 42 s; on this box a
+  `tt-model serve` container's server runs as the same user and shows as `HELD-FOREIGN`. The tt-tnt
+  agent yielded the four chips at a checkpoint and was told when the hardware was free again.
+  A lapse of mine: I stopped the H5 lease holder with `pkill -f "^sleep 3600$"`, which matches any
+  process of the same user with that command line; use the recorded pid instead.
+
+## 2026-10-02: tier models chosen
+Operator decisions: large = Qwen3.8-27B on all 4 chips; small = Qwen3.8-27B on 2 chips (one board); CPU = `qwen3-coder:30b`
+(ollama, models in `/mnt/bonus/models/ollama`). Measured with chips idle: qwen3-coder:30b decode 14.1 tok/s, prefill 93 tok/s
+(1,605-token prompt, short 92-token answer); dense 27B bf16 on CPU decode 0.70 tok/s, prefill 35 tok/s at 512 tokens with the slow
+fallback kernels (the 64-token figure measured disk paging and is not valid). Because the large tier holds both boards, every hardware
+stage needs park and restore. First target model: Altworld/Hemmingway-1 (spelled with two m's); the operator wants the harness, not
+Claude by hand, to do the bring-up. Hand-done stage 0 findings are a reference answer only, at
+`/mnt/bonus/models/hemmingway-1/work/stage0-reference.md`.

@@ -15,7 +15,7 @@
 This spec covers several independent subsystems, so it gets four plans, each producing working, testable software:
 
 1. **This plan.** Ledger, command runner, tier config, sizing tool.
-2. `tt-gozer` changes: `yield`, `redeem`, reservation expiry. Lives in `~/code/tt-gozer`. Needs a read of `gatekeeper.py` allocation first (spec section 8).
+2. `tt-gozer` changes: `reset <lease>` (reset in place) and an ownership check that counts the owner's child processes (spec section 8; the earlier `yield`/`redeem` design is the fallback). Lives in `~/code/tt-gozer`; built in a separate git worktree because the live checkout is the `gozer` other agents run.
 3. Supervisor behavior: gozer and single-tenant adapters, park and restore, watchdog.
 4. Stage state machine, the new skills (`delta-triage`, `reference-gate`, `operator-bundle`, `gozer-park`), operator bundle and scrub check.
 

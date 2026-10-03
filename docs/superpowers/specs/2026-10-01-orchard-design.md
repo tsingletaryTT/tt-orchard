@@ -41,11 +41,14 @@ cover, multi-box scheduling, and acting on agents the supervisor did not launch.
 | The same attempt built a CPU reference that decoded the wrong way and measured against it | same review | reference gate (stage 1) |
 | Without prefix caching, a 130K-token context costs about 42 s of prefill per turn and 204K costs about 78 s | measured, qwencode on the 2-chip Qwen config | fresh short contexts per stage |
 | `tt-model stop` clean shutdown 1.6-3.9 s; gozer release plus reset 20-40 s; 2-chip warm restart 2-3 min; 2-chip cold first boot about 30 min | measured, this machine | park/restore timing and budgets |
-| A start within about 20 s of a release was queued (exit 10) | observed, gozer | yield requirement |
+| `gozer reset` of one board in place 41.7 s, three runs within 0.02 s of each other (41.709, 41.694, 41.707, the last inside `gozer release`) | measured, board 1, 2026-10-02 | swap budgets: each reset costs about 42 s |
+| A start within about 20 s of a release was queued (exit 10) | observed, gozer | the board must stay leased through a swap (hold-through-swap, sections 6 and 8) |
 | gozer leases are board-granular; one board is two chips | gozer behavior, this machine | free-board check before parking |
 | Container image builds take 1.5-2.5 h cold | measured, Audio8 v5.1 build | stage 7 runs with no model loaded |
 | The first p150 repo exposed a hostname in an old revision | publishing history | scrub check in the bundle stage |
 | gozer: every command has `--json`; the queue is FIFO with a 90 s claim window; tickets expire after 1 h; `acquire` is non-blocking | read from `~/code/tt-gozer/gozer/cli.py` and `queue.py` | gozer changes (section 8) |
+| gozer `acquire --owner-pid PID` makes a non-detached lease that `reconcile` judges by that pid's liveness, with no 900 s grace window; a plain `acquire` lease with no open device is reaped 900 s after it was taken | read from `cli.py`, `keymaster.py` and `gatekeeper.py` (`reconcile`) | the supervisor holds each board lease under its own pid, so a swap with no device open cannot lose the lease |
+| gozer `release` deletes the lease; no command resets chips while keeping the lease; `reconcile` reports `HELD-FOREIGN` for any device holder that is not the owner pid or the owner's process-group leader | read from `keymaster.py` and `gatekeeper.py` | the two gozer changes in section 8 |
 
 Not measured, and required before the matching feature is trusted (section 12): CPU stand-in load
 time and decode speed for any candidate model; free host memory while the large model is resident;
@@ -57,13 +60,14 @@ Four layers. Each has one reason to change.
 
 | Layer | Owns | Home |
 |---|---|---|
-| Lease mechanism | Board-granular leases, FIFO queue, release and reset, history, and a new `yield` | `tt-gozer` |
-| Lease-aware skills | Park-and-restore guidance: when to yield, how to redeem, what to do on exit 10 or a stale ticket | `tt-gozer/skills/` |
+| Lease mechanism | Board-granular leases, FIFO queue, release and reset, history, and two additions: `reset` in place and an ownership check that counts the owner's child processes | `tt-gozer` |
+| Lease-aware skills | Park-and-restore guidance: hold the lease through a swap, reset in place, when to release instead, what to do on exit 10 or a stale ticket | `tt-gozer/skills/` |
 | Stage skills | Delta triage, reference gate, the existing bring-up stages, operator bundle. They say "run hardware work under whatever lease the machine provides" and never name gozer | `tenstorrent/skills`, `tt-model-bringup` plugin (new skills added there) |
 | Policy and loop | Supervisor: stage state machine, tier config, ledger, watchdog, command runner with denials | `tt-orchard` (this repo, local until the operator creates a remote) |
 
-`tt-orchard` talks to the lease mechanism through an adapter with three calls: `acquire`, `release`,
-`yield`. The gozer adapter ships in `tt-orchard`. A default adapter for machines without a lease
+`tt-orchard` talks to the lease mechanism through an adapter with three calls: `acquire` (the lease
+is owned by the supervisor's pid), `release`, and `reset` (chips reset while the lease stays held).
+The gozer adapter ships in `tt-orchard`. A default adapter for machines without a lease
 tool assumes a single tenant and refuses to start if another process holds a device node.
 
 Repo layout (planned):
@@ -153,13 +157,30 @@ the coder stays loaded and none of this runs.
    check on return. The supervisor confirms the file exists and parses.
 2. **Stand-in first.** The supervisor starts the CPU stand-in and sends it a canary prompt. It stops
    the coder only after the stand-in answers.
-3. **Yield.** `tt-model stop` shuts the coder down. `gozer yield` releases and resets the board and
-   records a reservation for the holder with an expiry.
-4. **Test.** The stand-in takes the board under a normal lease and runs the test with a deadline.
-   A hang goes to the triage skill. Release resets the chips.
-5. **Redeem.** The supervisor releases the test lease, redeems the reservation, starts the coder
-   with `tt-model serve`, waits for ready, and sends the pre-park canary prompt. It compares the
-   greedy answer with the pre-park answer.
+3. **Hold and reset.** `tt-model stop` shuts the coder down (SIGTERM first; if the grace period
+   expires and docker has to SIGKILL, `tt-model stop` resets the mesh itself and says so). The
+   board lease stays held either way. The lease
+   was taken with `gozer acquire --owner-pid <supervisor pid>`, so gozer judges it by that pid and
+   it cannot expire while no device is open. Before the reset, the supervisor confirms that the
+   coder is gone. tt-model has no command that lists running servers (its `list` shows installed
+   bundles). For a container package, `docker ps` no longer lists the container. For a bundle
+   server, which is a plain process, no server process remains and its port refuses connections.
+   Whether gozer can see a container server depends on how docker runs it. gozer reads
+   `/proc/<pid>/fd` as an unprivileged user, so it cannot see a container whose processes are
+   owned by another user. On this box (checked 2026-10-02) the Audio8 container's server runs as
+   the same user, under a root `containerd-shim`, so gozer sees it as a device holder that is not a
+   descendant of the supervisor: `gozer status` shows the chip `HELD-FOREIGN` and `gozer reset`
+   would refuse. That is the expected picture for a container started with `tt-model serve`; it is
+   not the alarm it is for a bundle server started as the supervisor's child. The supervisor does
+   not rely on either signal: it confirms the stop with docker. Then `gozer reset <lease>` resets the
+   board's chips in place. No other tenant can take the board during the swap, because the gate
+   is never released.
+4. **Test.** The test runs on the board under the same lease, with `TT_VISIBLE_DEVICES` from
+   `gozer env <lease>`, and a deadline. A hang goes to the triage skill. `gozer reset <lease>`
+   leaves the chips clean afterwards.
+5. **Restore.** The supervisor starts the coder with `tt-model serve` under the same lease, waits
+   for ready, and sends the pre-park canary prompt. It compares the greedy answer with the
+   pre-park answer.
 6. **Resume.** The coder reads the handoff note and a short summary of the test result. The
    stand-in stops.
 
@@ -170,9 +191,9 @@ Branches:
 
 | Condition | Action |
 |---|---|
-| Reservation expired | queue normally, ledger warning |
+| A phase with no hardware use that lasts longer than the budget (an image build, a CPU-only reference run) | release the lease and take a new one for the next hardware phase; the ledger records the release and the wait for the queue |
 | Coder does not return within the run's cold-boot budget | stage blocked, run paused for the operator, no blind retry |
-| Supervisor crash while parked | restart reads `parked` from the ledger, then checks `gozer status` and `tt-model ps`; the machine wins on disagreement |
+| Supervisor crash while parked | the lease is owned by the supervisor's pid, so gozer reaps it once that pid is dead and no device is open; the restart reads `parked` from the ledger, checks `gozer status` and `docker ps` (a container server is invisible to gozer, so the board can show free while the container still holds the chips), and takes a new lease; the machine wins on disagreement |
 | Canary answer differs after restore | stage blocked until the operator or the large tier explains the difference |
 
 ## 7. Watchdog
@@ -207,21 +228,61 @@ Each rung has a cap, so the ladder cannot loop.
 
 We are gozer's main consumer, so changes land in `tt-gozer` with tests, each in its own commit.
 
-1. **`gozer yield`.** Release a board's chips (resetting them as `release` does) and record a
-   reservation: board, holder, expiry. Allocation and `may_claim` refuse every other tenant for
-   that board until the reservation is redeemed or expires. This is separate from the existing
-   90 s claim window, which only entitles the head ticket for a short period after a release.
-2. **`gozer redeem`.** Turn a live reservation into a lease on the same board.
-3. **Expiry.** `gozer reconcile` (and the existing timer) clears an expired reservation. A crashed
-   supervisor cannot hold a board past the expiry.
-4. **JSON.** `--json` already exists on every command. The new commands support it. The adapter
-   consumes only JSON.
-5. **Known limit to account for.** Tickets expire after one hour regardless of polling, so a stage
-   that waits longer than that on the queue must re-enqueue and record the loss of place.
+The first version of this section proposed `gozer yield` and `gozer redeem`: release the board but
+keep a time-limited reservation for the holder. Reading `gatekeeper.py`, `keymaster.py` and
+`queue.py` showed a simpler route. The supervisor never releases the board during a swap, so there
+is no gap to protect and no reservation state to add. Two small additions to gozer remain.
 
-Open design point for the plan: how reservations interact with a queue that already has waiting
-tickets. `gatekeeper.py` allocation (750 lines) has not been read for this design. The plan must read
-it first and state the rule.
+1. **`gozer reset <lease>`.** Reset the chips of a held lease without releasing it. It follows the
+   pattern `release` already uses: refuse while a device is open (unless `--force`); re-read the
+   gate under the mutex and refuse if it now carries a different lease; run the reset through
+   `reset.reset_chips` (BDF only, never an index); log a `reset` history event; leave the lease,
+   the queue and the claim window untouched. It does not mark the unit clean, because the lease
+   continues and `release` resets again. Implemented as built on branch
+   `orchard-hold-through-swap`, `reset` exits 0 (reset ran), 13 (no such lease), 15 (refused,
+   nothing was done), 17 (the reset ran and failed) or 18 (the reset ran, and afterwards the lease
+   was gone or taken). Exit 15 covers every refusal: a device is open, the unit now belongs to
+   another lease, the unit is no longer locked by this lease, the lease record has no units or no
+   chips, the record's chips or device indices disagree with the chips of its units (or repeat a
+   chip or a device index), and a chip id that is not a PCI address. The supervisor's adapter must treat exit 15 as
+   "nothing happened; read `gozer status` and decide", because some of these refusals leave a
+   valid lease in place. `--force` skips only the open-device refusal.
+2. **Ownership that counts the owner's child processes.** `reconcile` calls a device holder
+   `HELD` only when its pid is the lease's owner pid or the owner's process-group leader, and
+   `HELD-FOREIGN` otherwise. The gatekeeper skill tells agents to investigate `HELD-FOREIGN` as a
+   lease that is lying. A supervisor that starts the coder server as its child would trigger that
+   alarm on every run. The check changes to count any live descendant of the owner pid as owned,
+   only when the owner pid is greater than 1 (every process descends from pid 1). A process that
+   is re-parented to init after its parent exits drops out of the chain and shows as
+   `HELD-FOREIGN`. The process tree is read from the `proc_root` that gozer already takes, so
+   tests use a fake tree.
+3. **JSON.** `--json` already exists on every command. `reset` supports it. The adapter consumes
+   only JSON.
+4. **Known limits to account for.** gozer's open-device check sees only the calling user's own
+   processes. A container whose processes are owned by another user is invisible to it, so `reset`
+   would not refuse for it and `status` would show `CLAIMED`. On this box a `tt-model serve`
+   container runs as the same user and is visible, as a foreign holder (section 6, step 3). The
+   supervisor's own check that the server has stopped covers both cases. During any
+   `gozer reset` or `gozer release`, `tt-smi -r <BDFs>` opens every device on the box, so for about
+   42 seconds the other board shows `BUSY-UNTRACKED` and a neighbor's preflight or acquire sees it
+   as busy (measured 2026-10-02). Two drivers must not overlap their resets. Tickets expire after one hour
+   regardless of polling, so a stage that waits longer than that on the queue must re-enqueue and
+   record the loss of place. A board held through a swap stays unavailable to other agents for the
+   whole swap. That is deliberate, and the supervisor releases the lease for any long phase that
+   needs no hardware (section 6).
+
+5. **Open items found while building this.** `gozer wait` grants a lease without an owner pid, so
+   the lease falls back to the 15 minute detached window; a supervisor re-runs
+   `gozer acquire --owner-pid ... --ticket ...` itself, with a short sleep between tries
+   (about ten lines of gozer code would add `--owner-pid` to `wait`). `Keymaster.release` takes the
+   chips to reset from the lease record without checking them against the record's units, and
+   does not catch a chip id that is not a PCI address; `reset` does both. These are existing
+   behavior and were left unchanged on the branch.
+
+Fallback, not planned: if tests on the real box show that holding the lease under the supervisor's
+pid does not behave as read from the code, the `yield`/`redeem` reservation design returns. It needs
+a reservation record, a rule for how allocation treats a reserved board when tickets are waiting,
+and an expiry in `reconcile`.
 
 ## 9. Ledger
 
@@ -304,7 +365,8 @@ absolute home paths. A hit blocks the bundle.
 New skills, each named for the plugin that owns it:
 
 - `tt-model-bringup`: `delta-triage`, `reference-gate`, `operator-bundle`. They never name a lease tool.
-- `tt-gozer/skills`: `gozer-park` (park and restore from the agent's side).
+- `tt-gozer/skills`: `gozer-park` (hold the lease through a swap, reset in place, and release
+  instead for a long phase with no hardware use).
 - Existing skills used by stages: `model-bringup`, `functional-decoder`, `full-model`, `multichip`,
   `mesh-shrink`, `vllm-integration`, `qualitative-check`, `benchmark-model`, `tt-device-usage`,
   `stage-review`, `tti-release`, plus `gozer-keymaster` and `gozer-gatekeeper`.
@@ -332,8 +394,9 @@ If the qwencode transcripts are gone, a synthetic loop is a weaker test and the 
   same final state.
 - Remove each guard (a denial, the stand-in-first order, the torn-line check) and watch the matching
   test fail before restoring it.
-- Gozer changes follow `tt-gozer`'s existing test layout (`tests/test_*.py`), with a concurrency test for
-  the reservation.
+- Gozer changes follow `tt-gozer`'s existing test layout (`tests/test_*.py`, fake sysfs and proc
+  trees, no hardware), with a concurrency test that a `reset` racing a `release` never resets a
+  board another tenant now holds.
 - A run against a model whose bring-up already succeeded (for example the Audio8 port) is the first
   end-to-end check, with hardware work under a lease. It compares the run's results with the known
   ones from `~/code/audio8-asr`.
@@ -341,7 +404,35 @@ If the qwencode transcripts are gone, a synthetic loop is a weaker test and the 
 ## 14. Open questions
 
 1. Which open-source models fill the large, small and CPU tiers. Decided after section 12.
-2. How reservations interact with a queue that has waiting tickets (section 8).
+2. Whether a lease owned by the supervisor's pid, with a descendant-aware ownership check, behaves on
+   the real box as the code reading says (section 8). **Answered on 2026-10-02: yes, on both
+   boards.** Three supervised driver runs (board 1 twice, board 0 once; 22 to 24 checks each, all
+   passed) and a container check (H5) on board 0. Evidence is under `runs/` in the tt-orchard
+   checkout (not committed): `hardware-check/20261002T192414Z-0000-03-00.0/` (board 1, short),
+   `hardware-check/20261002T195625Z-0000-03-00.0/` (board 1, full idle), `hardware-check/20261002T195814Z-0000-01-00.0/` (board 0, short), and `h5-20261002T201323Z/`.
+   - A child process of the driver that opened a device showed as `HELD` through the branch gozer,
+     and as `HELD-FOREIGN` through the live gozer, which lacks the descendant rule.
+   - `gozer reset` refused while the child held the device (exit 15, "device still open") and
+     reset the board in place once the child was gone, twice per run, in 41.6 to 41.7 s each. A
+     device opened normally after each reset (1.9 to 2.3 s to open; 3.5 to 4.3 s for the first
+     open with an empty cache). `gozer release` then reset the board a third time (41.6 to 41.7 s)
+     and left no lease record or unit lock.
+   - **The 900 s window:** on board 1 the lease was exactly 960 s old at the idle check and its chips
+     were still `CLAIMED`, and a `gozer reconcile` run with no other lease on the box spared it.
+   - **Two drivers at once:** a board 0 run overlapped board 1's run. Board 1's reset made board 0
+     look `BUSY-UNTRACKED` for the 42 s it ran, because `tt-smi -r` opens every device on the box.
+     Board 0's driver refused at preflight and acquired nothing; it ran cleanly in a gap.
+   - **A container server (H5, board 0, `episod/audio8-asr-infinite-p150`):** warm boot to ready 20.3 s;
+     `tt-model stop` clean shutdown 1.6 s with no mesh reset; in-place reset 41.7 s; second boot
+     after the reset ready in 19.6 s; a LibriSpeech clip transcribed correctly afterwards;
+     `tt-model stop` again 1.7 s; release 41.7 s. While the container ran, gozer showed the chip
+     `HELD-FOREIGN` (the server runs as the same user under a root `containerd-shim`), `docker ps`
+     listed the container with image id `f0ed6056d85f`, and `docker inspect` listed
+     `/dev/tenstorrent/0` as its only device with `privileged=false`. Every stop-confirmation check in
+     the `gozer-park` skill showed the container while it ran and nothing after the stop.
+   - Not shown: a container started with `--privileged` or a mounted `/dev` (the `docker inspect`
+     check may list no device); a container owned by another user; workers that leave their process
+     group; a multi-chip container.
 3. Whether the watchdog's per-request view needs a proxy in front of the model server or the server
    already logs enough.
 4. Remote repository name and owner. The working assumption is `tsingletaryTT/tt-orchard`. Nothing is
