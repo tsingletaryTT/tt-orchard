@@ -101,3 +101,29 @@ def test_the_stage_4_budget_holds_three_tests_and_a_park():
     need = (3 * 3600 + d.TT_MODEL_STOP_S + 2 * d.GOZER_RESET_S + d.COLD_BOOT_BUDGET_S
             + 2 * d.TOOL_TIMEOUT_S)
     assert d.STAGE_BUDGET_S[4] >= need
+
+
+def test_the_package_stage_budget_holds_the_install_and_the_boot_check():
+    assert (d.PACKAGE_INSTALL_TIMEOUT_S + d.PACKAGE_VERIFY_DEADLINE_S + d.PACKAGE_THIN_TIMEOUT_S
+            < d.STAGE_BUDGET_S[7])
+    assert d.PACKAGE_HEALTH_TIMEOUT_S + 120 <= d.PACKAGE_VERIFY_DEADLINE_S
+    assert d.PACKAGE_VERIFY_DEADLINE_S > d.COLD_BOOT_S
+
+
+def test_the_boot_check_waits_as_long_as_stage_2s_first_boot():
+    # The installed copy starts with cold caches, like stage 2's first boot, so its health wait is
+    # at least the swap template's (3300 s: weight conversion plus a cold kernel compile).
+    import re
+    from pathlib import Path
+    script = (Path(d.__file__).with_name("skills") / "weights-swap-templates" / "serve_and_compare.py").read_text()
+    health = float(re.search(r"^HEALTH_TIMEOUT_S = ([\d.]+)", script, re.MULTILINE).group(1))
+    assert d.PACKAGE_HEALTH_TIMEOUT_S >= health
+
+
+def test_the_package_stage_disk_need_covers_a_fresh_tensor_cache():
+    assert d.STAGE_DISK_GB[7] >= 34 + 40
+
+
+def test_every_deferred_package_format_is_a_known_format_and_v6_is_not_deferred():
+    assert set(d.PACKAGE_DEFERRED) <= set(d.PACKAGE_FORMATS)
+    assert "v6" in d.PACKAGE_FORMATS and "v6" not in d.PACKAGE_DEFERRED

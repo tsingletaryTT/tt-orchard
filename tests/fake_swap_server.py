@@ -17,7 +17,9 @@ Modes (config key "mode"):
 
 Like the real server, it answers 400 to a request that carries any key other than model, prompt,
 max_tokens and temperature (the real one rejects logprobs and sampling parameters), and to a
-request whose model is not the expected model directory.
+request whose model is not the expected model directory: the config's "model", or else the
+`--model` it was started with. GET /v1/models lists that one model, as vLLM does. Arguments it
+does not know (the rest of a vLLM command line) are ignored.
 
 On start it writes {"pid", "pgid", "env", "model_arg"} to the config's "pid_file", so the test can check the
 environment it was given and, afterwards, that its process group is gone.
@@ -50,6 +52,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/health":
             self._send(200, b"")
+        elif self.path == "/v1/models":
+            self._send(200, json.dumps({"data": [{"id": self.cfg["model"]}]}).encode())
         else:
             self._send(404, b'{"error": "not found"}')
 
@@ -87,9 +91,10 @@ def main() -> int:
     ap.add_argument("--config", required=True)
     ap.add_argument("--port", type=int, required=True)
     ap.add_argument("--model")            # passed when the test runs a prepare_swap-built run.sh
-    args = ap.parse_args()
+    args, _ = ap.parse_known_args()
     with open(args.config, encoding="utf-8") as f:
         cfg = json.load(f)
+    cfg.setdefault("model", args.model)
     with open(cfg["pid_file"], "w", encoding="utf-8") as f:
         json.dump({"pid": os.getpid(), "pgid": os.getpgid(0),
                    "env": {k: os.environ.get(k) for k in ENV_KEYS}, "model_arg": args.model}, f)

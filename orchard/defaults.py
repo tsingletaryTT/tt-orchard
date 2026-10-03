@@ -76,13 +76,16 @@ WRITELESS_TURNS = 20            # choice: model turns in a row in which no file 
 # ---- plan 4: stages, agent steps and the run ---------------------------------------------------
 # Per-stage wall-clock budgets (spec section 10). Choices; none is measured. Stage 5 holds one 2-chip
 # cold boot (COLD_BOOT_S, about 30 min) plus its checks; stage 4 boots two configurations. Stage 7
-# is skipped in plan 4, so its budget is 0.
+# (plan 5) holds the package install (PACKAGE_INSTALL_TIMEOUT_S), one boot check
+# (PACKAGE_VERIFY_DEADLINE_S) and a park and restore. When a run builds no package it is skipped.
 STAGE_BUDGET_S = {0: 7200.0, 1: 14400.0, 2: 14400.0, 3: 21600.0, 4: 28800.0, 5: 10800.0,
-                  6: 14400.0, 7: 0.0, 8: 3600.0}
+                  6: 14400.0, 7: 14400.0, 8: 3600.0}
 # Free disk each stage needs on the run directory's filesystem before it starts (spec section 10).
 # 40 GB covers one converted 2-chip tensor cache: the base Qwen3.8-27B TP=2 cache measured 34 GB
 # (2026-09-30). Stage 4 converts a second (1-chip) cache. The other values are choices.
-STAGE_DISK_GB = {0: 1.0, 1: 5.0, 2: 40.0, 3: 40.0, 4: 80.0, 5: 40.0, 6: 40.0, 7: 0.0, 8: 1.0}
+# Stage 7 (plan 5) installs a copy of the package (a venv and a uv cache, size not measured) and
+# converts a fresh tensor cache for its boot check (34 GB measured for the 2-chip cache).
+STAGE_DISK_GB = {0: 1.0, 1: 5.0, 2: 40.0, 3: 40.0, 4: 80.0, 5: 40.0, 6: 40.0, 7: 80.0, 8: 1.0}
 LONG_STAGE_S = 3600.0           # spec section 10: a stage with a longer budget must declare a resume marker
 STAGE2_PCC_MIN = 0.995          # the functional-decoder skill's default acceptance bar (prefill and decode)
 SWAP_TOP1_MIN = 0.85            # choice: the weights-only stage 2 bar for top1_agreement (teacher-forced
@@ -134,3 +137,23 @@ STAGE4_SWAP_DISK_GB = 110.0     # choice: three caches of about 34 GB (1, 2 and 
 TEST_DISK_GB = 40.0             # choice: one cache plus margin, checked again before each
                                 # configuration's test, so a resumed stage stops before a test that
                                 # cannot finish its conversion
+
+# ---- plan 5: stage 7, the package ---------------------------------------------------------------
+PACKAGE_FORMATS = ("v6", "v5.1")    # the values --package-format accepts
+PACKAGE_DEFERRED = {                # formats that are accepted as names and refused at start
+    "v5.1": ("a v5.1 container package needs a new image build (1.5 to 2.5 h cold, measured on the "
+             "Audio8 v5.1 build), and tt-model package --container always builds one. Plan 5 "
+             "builds v6 thin bundles only"),
+}
+PACKAGE_THIN_TIMEOUT_S = 1800.0     # choice: `tt-model package-thin --out` copies the wheels and writes
+                                    # a few files; not measured
+PACKAGE_INSTALL_TIMEOUT_S = 5400.0  # choice: install.sh fetches an interpreter and the pip pins and
+                                    # builds vLLM from source; not measured on this machine
+PACKAGE_HEALTH_TIMEOUT_S = 3300.0   # how long the boot check waits for /health. The installed copy
+                                    # starts with an empty tensor cache and an empty kernel compile
+                                    # cache, as stage 2's first boot did: weight conversion about 5 min
+                                    # plus a cold compile of more than 26 min (measured 2026-10-03). The
+                                    # same value as the swap template's HEALTH_TIMEOUT_S
+PACKAGE_VERIFY_DEADLINE_S = 4200.0  # choice: the boot check's hardware deadline: the health wait, 33
+                                    # short requests, and the server's stop
+TT_MODEL_MODELS_ROOT = "~/.cache/tt-model/models"   # where `tt-model` installs bundles on this machine

@@ -52,3 +52,63 @@ def scrub_bundle(bundle, *, hostname: str | None = None, home: str | None = None
         text = f.read_text(encoding="utf-8", errors="replace")
         hits += [f"{f.relative_to(root)}: {what}" for what in scrub_text(text, hostname=hostname, home=home)]
     return hits
+
+
+
+# ---- the package scrub (plan 5, stage 7) --------------------------------------------------------
+# A staged package is uploaded as it is, so it gets a stricter check than the operator bundle:
+# besides the text search above, nothing produced by installing or serving may be in it. A tensor
+# cache is keyed by layer name only, so a cache built for another model would serve that model's
+# weights without an error. Weights are a pointer in the manifest and are never shipped. Wheels are
+# binary and are not searched; orchard/package.py checks that each one is byte-identical to the
+# wheel in the source bundle it came from.
+
+FORBIDDEN_DIRS = {".tt_cache": "a tensor cache directory", "tensors": "a tensor cache directory",
+                  "venv": "an installed venv", ".venv": "an installed venv",
+                  ".python": "an installed interpreter", ".uv": "an installed uv",
+                  ".hf": "a Hugging Face cache", ".cache": "a runtime cache",
+                  "model-dir": "a built model directory"}
+FORBIDDEN_SUFFIXES = {".tensorbin": "a tensor cache file", ".safetensors": "a weights file",
+                      ".bin": "a weights or cache file", ".pt": "a weights file",
+                      ".pth": "a weights file", ".gguf": "a weights file"}
+BINARY_SUFFIXES = (".whl",)
+NAMESPACE_FILES = frozenset({"README.md"})       # where the operator's repo id is meant to appear
+
+
+def scrub_package(root, *, hostname: str | None = None, home: str | None = None,
+                  namespace: str | None = None) -> list[str]:
+    """Every hit in a staged package, as 'relative/path: what was found', sorted by path.
+
+    A forbidden directory is reported once and not searched. `namespace` is the operator's Hugging
+    Face namespace: it belongs in the card's serve and publish lines and nowhere else."""
+    hostname = socket.gethostname() if hostname is None else hostname
+    home = os.path.expanduser("~") if home is None else home
+    root = Path(root)
+    hits: list[tuple[str, str]] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        here = Path(dirpath)
+        for d in sorted(dirnames):
+            rel = (here / d).relative_to(root).as_posix()
+            if (here / d).is_symlink():
+                hits.append((rel, "a symbolic link"))
+            elif d in FORBIDDEN_DIRS:
+                hits.append((rel, FORBIDDEN_DIRS[d]))
+        dirnames[:] = [d for d in dirnames if d not in FORBIDDEN_DIRS and not (here / d).is_symlink()]
+        for name in filenames:
+            f = here / name
+            rel = f.relative_to(root).as_posix()
+            if f.is_symlink():
+                hits.append((rel, "a symbolic link"))
+                continue
+            suffix = f.suffix.lower()
+            if suffix in FORBIDDEN_SUFFIXES:
+                hits.append((rel, FORBIDDEN_SUFFIXES[suffix]))
+                continue
+            if suffix in BINARY_SUFFIXES:
+                continue
+            text = f.read_text(encoding="utf-8", errors="replace")
+            hits += [(rel, what) for what in scrub_text(text, hostname=hostname, home=home)]
+            if (namespace and rel not in NAMESPACE_FILES
+                    and re.search(rf"(?<![\w.-]){re.escape(namespace)}/", text)):
+                hits.append((rel, f"the operator's namespace {namespace!r} outside README.md"))
+    return [f"{rel}: {what}" for rel, what in sorted(hits)]
