@@ -25,6 +25,20 @@ PHASE_TASKS = {
                 "supervisor runs the command on a leased board with TT_VISIBLE_DEVICES set, saves "
                 "its output to evidence/hw-test-output.txt and writes test-result.json. Then reply "
                 "with a short summary and no tool call."),
+    # A stage whose spec has `tests` (stage 4 on the weights-only path) prepares a list of tests.
+    "prepare-tests": ("Prepare this stage's hardware tests, one per chip configuration. Do not run "
+                      "them yourself. Put each configuration's files in configs/<chips>/ of your "
+                      "stage directory as the skill describes. Then write hw_tests.json in your "
+                      "stage directory as {{\"tests\": [{{\"chips\": <n>, \"script\": "
+                      "\"serve_and_compare.py\" or \"serve_and_compare_container.py\", "
+                      "\"deadline_s\": <seconds>}}, ...]}} and handoff.json with the keys goal, "
+                      "stage, evidence, next_action and check_on_return. The supervisor runs each "
+                      "test as `python3 stages/{n}/configs/<chips>/<script>`, in order of chip "
+                      "count, on leased chips with TT_VISIBLE_DEVICES, ORCHARD_DEVICE_IDS and "
+                      "ORCHARD_TEST_LABEL set. It saves each test's output to "
+                      "tests/<chips>/output.txt, writes tests/<chips>/test-result.json, and writes "
+                      "test-result.json for the whole list. Then reply with a short summary and no "
+                      "tool call."),
     "finish": ("The supervisor ran your hardware test; its record and output are below and in "
                "your stage directory. Write {gate} from that evidence. Do not invent a result. "
                "If the test failed (returncode not 0, or timed_out true), write {gate} with the "
@@ -89,7 +103,8 @@ def build_messages(*, spec: StageSpec, phase: str, run_dir, stage_dir, skill_pat
         system += ["", "## Related skills (read one with shell if you need it)"]
         system += [f"- {name}: {path or 'not installed on this machine'}" for name, path in refs.items()]
 
-    user = ["## Task", PHASE_TASKS[phase].format(gate=spec.gate_file, n=n), "", "## Run"]
+    task = PHASE_TASKS["prepare-tests" if phase == "prepare" and spec.tests else phase]
+    user = ["## Task", task.format(gate=spec.gate_file, n=n), "", "## Run"]
     user += [f"- {k}: {v}" for k, v in facts.items()]
     user += [f"- stage directory: stages/{n}"]
     if n == 4 and facts.get("required chip configurations"):
@@ -113,7 +128,7 @@ def build_messages(*, spec: StageSpec, phase: str, run_dir, stage_dir, skill_pat
     if resumed and spec.marker and (stage_dir / spec.marker).is_file():
         own.append(spec.marker)
     if phase == "finish":
-        own += ["hw_test.json", "test-result.json"]
+        own += ["hw_tests.json" if spec.tests else "hw_test.json", "test-result.json"]
     for name in own:
         f = stage_dir / name
         if f.is_file():
