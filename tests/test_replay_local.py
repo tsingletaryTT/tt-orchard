@@ -20,13 +20,15 @@ pytestmark = [
     pytest.mark.skipif(os.environ.get("ORCHARD_REPLAY") != "1",
                        reason="set ORCHARD_REPLAY=1 to replay the local qwen transcripts; "
                               "a skipped replay is not evidence"),
-    pytest.mark.skipif(not QWEN.is_dir(),
-                       reason=f"no qwen transcripts at {QWEN}; this replay was not run, and a "
-                              "skipped replay is not evidence"),
 ]
 
 
 def test_the_detectors_fire_on_the_recorded_loop_and_nowhere_else():
+    # The directory check is here and not in a module-level skipif: collection must not touch
+    # ~/.qwen in a normal run. The ORCHARD_REPLAY skip above runs first.
+    if not QWEN.is_dir():
+        pytest.skip(f"no qwen transcripts at {QWEN}; this replay was not run, and a skipped "
+                    "replay is not evidence")
     paths = sorted(QWEN.glob("*/chats/*.jsonl"))
     assert any(p.name == LOOP for p in paths), f"{LOOP} is no longer under {QWEN}"
     hits = {}
