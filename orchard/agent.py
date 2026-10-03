@@ -288,13 +288,17 @@ class AgentStep:
         self.max_turns, self.max_tokens, self.timeout = max_turns, max_tokens, timeout
         self.thinking = thinking     # False sends enable_thinking=false (see defaults.AGENT_THINKING)
         self._seen: dict[str, tuple[int, int]] = {}
+        # The model turn number on every Event this step feeds the watchdog. It counts up through
+        # `run` and `continue_with`, so a continuation's turns never reuse an earlier number.
+        self._turn = 0
         # The conversation, kept on the step so `continue_with` can add to it. None until `run`.
         self.messages: list[dict] | None = None
 
     # ---- helpers ----------------------------------------------------------------------------
 
     def _event(self, kind: str, **fields) -> None:
-        self.feed(Event(ts=self.clock(), agent=self.agent, kind=kind, stage=self.stage, **fields))
+        self.feed(Event(ts=self.clock(), agent=self.agent, kind=kind, stage=self.stage,
+                        turn=self._turn or None, **fields))
 
     def _log(self, record: dict) -> None:
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -378,6 +382,7 @@ class AgentStep:
         messages = self.messages
         bad_run: list[str] = []             # kinds of the replies in a row that ran no command
         for turn in range(1, max_turns + 1):
+            self._turn += 1
             for text in self.control.take_nudges(self.agent):
                 messages.append({"role": "user", "content": text})
             reason = self.control.stop_reason()
@@ -449,6 +454,8 @@ class AgentStep:
                 self._event("tool_call", tool=name, args_hash=sha(args))
                 result = self.tools.call(name, args)
                 messages.append({"role": "tool", "tool_call_id": str(call.get("id", "")), "content": result})
-                self._event("tool_result", tool=name, output_hash=sha(result))
+                # wrote: did this write_file call write its file? None for other tools.
+                self._event("tool_result", tool=name, output_hash=sha(result),
+                            wrote=result.startswith("wrote ") if name == "write_file" else None)
                 self._record_new_evidence()
         return self._end("turns", max_turns, detail=f"no final answer after {max_turns} turns")

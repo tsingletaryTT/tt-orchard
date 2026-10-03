@@ -2,8 +2,9 @@
 import pytest
 
 from orchard.adapters import AdapterError, ChipState
-from orchard.watchdog import (Event, IdenticalResponses, LeaseIdle, NoNewEvidence, RepeatedToolCall,
-                              StageOverBudget, ThinkingWithoutAction, replay)
+from orchard.watchdog import (Event, IdenticalResponses, LeaseIdle, NoFileWritten, NoNewEvidence,
+                              RepeatedToolCall, StageOverBudget, ThinkingWithoutAction, TurnRepeat,
+                              replay)
 
 
 def resp(ts, i=1000, o=100, think=50, text=None, tool=False, agent="a"):
@@ -175,3 +176,153 @@ def test_a_finished_stage_or_one_without_a_budget_never_fires():
     evs = [stage_event(0, "stage_start"), stage_event(50, "stage_end"), resp(500),
            stage_event(600, "stage_start", stage=5), resp(5000)]
     assert replay(evs, [d]) == []
+
+
+# ---- NoFileWritten -------------------------------------------------------------------------------
+
+def wrote(ts, ok=True, tool="write_file", agent="a"):
+    """The result of a file-writing tool call. ok=None is a transcript, which does not say."""
+    return Event(ts=ts, agent=agent, kind="tool_result", tool=tool, output_hash="2" * 64, wrote=ok)
+
+
+def test_writeless_turns_default_is_twenty():
+    from orchard.defaults import WRITELESS_TURNS
+    assert WRITELESS_TURNS == 20 and NoFileWritten().turns == 20
+
+
+def test_twenty_turns_without_a_write_fire_once():
+    found = replay([resp(t, i=t) for t in range(1, 51)], [NoFileWritten()])
+    assert times(found) == [20]
+    f = found[0]
+    assert f.detector == "no_file_written" and f.evidence["turns"] == 20
+    assert f.pause is False and f.notice_only is False          # nudge level
+    assert "20 model turns" in f.nudge and "no file was written" in f.nudge
+    assert "write the files the skill names now" in f.nudge and "blocks" in f.nudge
+
+
+def test_a_write_re_arms_the_detector():
+    evs = [resp(t, i=t) for t in range(1, 26)] + [wrote(26)] + [resp(t, i=t) for t in range(27, 47)]
+    assert times(replay(evs, [NoFileWritten()])) == [20, 46]
+
+
+def test_a_write_resets_the_count_before_it_fires():
+    evs = [resp(t, i=t) for t in range(1, 16)] + [wrote(16)] + [resp(t, i=t) for t in range(17, 36)]
+    assert replay(evs, [NoFileWritten()]) == []
+
+
+def test_a_new_evidence_file_counts_as_a_write():
+    evs = ([resp(t, i=t) for t in range(1, 16)]
+           + [Event(ts=16, agent="a", kind="evidence", name="stages/2/evidence/x.json")]
+           + [resp(t, i=t) for t in range(17, 36)])
+    assert replay(evs, [NoFileWritten()]) == []
+
+
+def test_a_refused_write_or_a_shell_result_is_not_a_write():
+    evs = []
+    for t in range(1, 21):
+        evs += [resp(t, i=t), wrote(t + 0.5, ok=False),
+                Event(ts=t + 0.6, agent="a", kind="tool_result", tool="shell", output_hash="3" * 64)]
+    assert times(replay(evs, [NoFileWritten()])) == [20]
+
+
+@pytest.mark.parametrize("tool", ["write_file", "edit", "replace"])
+def test_a_transcript_write_tool_counts_when_the_source_does_not_say(tool):
+    evs = [resp(t, i=t) for t in range(1, 16)] + [wrote(16, ok=None, tool=tool)] + \
+          [resp(t, i=t) for t in range(17, 36)]
+    assert replay(evs, [NoFileWritten()]) == []
+
+
+def test_writeless_turns_are_counted_per_agent():
+    evs = [resp(t, i=t, agent="a" if t % 2 else "b") for t in range(1, 39)]
+    assert replay(evs, [NoFileWritten()]) == []
+
+
+
+@pytest.mark.parametrize("name", ["qwen_quiet_signature.jsonl", "qwen_loop_signature.jsonl"])
+def test_no_file_written_stays_quiet_on_the_committed_signatures(name):
+    # The transcripts do not say whether a write succeeded, so a result from qwen-code's write
+    # tools counts. The longest run without one is 18 turns (loop chat) and 16 (quiet chat).
+    from pathlib import Path
+
+    from orchard.transcripts import load_signature
+    evs = load_signature(Path(__file__).resolve().parent / "fixtures" / name)
+    assert replay(evs, [NoFileWritten()]) == []
+
+
+# ---- TurnRepeat ----------------------------------------------------------------------------------
+
+def tcall(ts, turn, args, tool="shell"):
+    return Event(ts=ts, agent="a", kind="tool_call", tool=tool, args_hash=args, turn=turn)
+
+
+def tresp(ts, turn):
+    return Event(ts=ts, agent="a", kind="response", input_tokens=ts, output_tokens=7,
+                 had_tool_call=True, turn=turn)
+
+
+GREP_A, GREP_B = "a" * 64, "b" * 64
+
+
+def alternating_turns(n, start=1):
+    """The live failure: each turn runs the same two grep commands, for n turns."""
+    evs = []
+    for k in range(start, start + n):
+        evs += [tresp(10 * k, k), tcall(10 * k + 1, k, GREP_A), tcall(10 * k + 2, k, GREP_B)]
+    return evs
+
+
+def test_two_alternating_calls_per_turn_escape_the_single_call_detector():
+    assert replay(alternating_turns(5), [RepeatedToolCall()]) == []
+
+
+def test_the_same_calls_in_three_turns_in_a_row_fire():
+    # A turn is complete when the next one starts, so the third repeat is seen at turn 4's response.
+    found = replay(alternating_turns(5), [TurnRepeat()])
+    assert times(found) == [40]
+    assert found[0].detector == "turn_repeat" and found[0].evidence["turns"] == 3
+    assert found[0].evidence["calls"] == 2 and not found[0].pause
+
+
+def test_turn_repeat_re_arms_after_it_fires():
+    assert times(replay(alternating_turns(7), [TurnRepeat()])) == [40, 70]
+
+
+def test_the_order_of_calls_inside_a_turn_does_not_matter():
+    evs = [tresp(10, 1), tcall(11, 1, GREP_A), tcall(12, 1, GREP_B),
+           tresp(20, 2), tcall(21, 2, GREP_B), tcall(22, 2, GREP_A),
+           tresp(30, 3), tcall(31, 3, GREP_A), tcall(32, 3, GREP_B),
+           tresp(40, 4)]
+    assert times(replay(evs, [TurnRepeat()])) == [40]
+
+
+def test_a_different_turn_breaks_the_streak():
+    evs = alternating_turns(2) + [tresp(30, 3), tcall(31, 3, GREP_A)] + alternating_turns(2, start=4)
+    evs.append(tresp(60, 6))
+    assert replay(evs, [TurnRepeat()]) == []
+
+
+def test_a_turn_with_no_calls_breaks_the_streak():
+    evs = alternating_turns(2) + [tresp(30, 3)] + alternating_turns(2, start=4) + [tresp(60, 6)]
+    assert replay(evs, [TurnRepeat()]) == []
+
+
+def test_without_a_turn_field_each_response_starts_a_turn():
+    # Transcript events carry no turn number; the response that precedes the calls opens the turn.
+    evs = []
+    for k in range(1, 5):
+        evs += [resp(10 * k, i=k, tool=True), call(10 * k + 1, args=GREP_A), call(10 * k + 2, args=GREP_B)]
+    assert times(replay(evs, [TurnRepeat()])) == [40]
+
+
+@pytest.mark.parametrize("name", ["qwen_quiet_signature.jsonl", "qwen_loop_signature.jsonl"])
+def test_turn_repeat_stays_quiet_on_the_committed_signatures(name):
+    from pathlib import Path
+
+    from orchard.transcripts import load_signature
+    evs = load_signature(Path(__file__).resolve().parent / "fixtures" / name)
+    assert replay(evs, [TurnRepeat()]) == []
+
+
+def test_turn_repeat_default_is_three():
+    from orchard.defaults import TURN_REPEAT_N
+    assert TURN_REPEAT_N == 3 and TurnRepeat().n == 3

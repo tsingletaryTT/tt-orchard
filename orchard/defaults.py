@@ -62,6 +62,16 @@ NO_EVIDENCE_S = 3600.0          # choice; not measured: transcripts carry no evi
 LEASE_IDLE_S = 1800.0           # choice; not measured
 LEASE_POLL_S = 60.0             # choice: `gozer status` is read at most once a minute by the watchdog
 RUNG_CAPS = {"nudge": 1, "escalate": 1, "pause": 1}   # choice: each rung once per agent and stage
+TURN_REPEAT_N = 3               # choice: model turns in a row with the same set of tool calls. Same
+                                # value as REPEAT_TOOL_N. The live stage 2 run ran the same two grep
+                                # commands in each of 5 turns; REPEAT_TOOL_N saw them alternate and
+                                # never fired. The committed qwen transcript signatures stay quiet.
+WRITELESS_TURNS = 20            # choice: model turns in a row in which no file was written (no
+                                # successful write_file, no new evidence file) before the step is
+                                # nudged. A third of AGENT_MAX_TURNS. In the committed qwen transcript
+                                # signatures the longest such run is 18 turns (counting qwen-code's
+                                # write tools), so 20 stays quiet there. The live stage 2 run that
+                                # grepped vLLM source for 60 turns would have been nudged at turn 20.
 
 # ---- plan 4: stages, agent steps and the run ---------------------------------------------------
 # Per-stage wall-clock budgets (spec section 10). Choices; none is measured. Stage 5 holds one 2-chip
@@ -75,13 +85,15 @@ STAGE_BUDGET_S = {0: 7200.0, 1: 14400.0, 2: 14400.0, 3: 21600.0, 4: 28800.0, 5: 
 STAGE_DISK_GB = {0: 1.0, 1: 5.0, 2: 40.0, 3: 40.0, 4: 80.0, 5: 40.0, 6: 40.0, 7: 0.0, 8: 1.0}
 LONG_STAGE_S = 3600.0           # spec section 10: a stage with a longer budget must declare a resume marker
 STAGE2_PCC_MIN = 0.995          # the functional-decoder skill's default acceptance bar (prefill and decode)
-SWAP_TOP1_MIN = 0.6             # choice: the weights-only stage 2 bar for top1_agreement (teacher-forced
+SWAP_TOP1_MIN = 0.85            # choice: the weights-only stage 2 bar for top1_agreement (teacher-forced
                                 # next-token agreement between the chip and the stage 1 CPU reference).
-                                # The one hand prototype (Hemmingway-1 on the 2-chip Qwen3.8-27B bundle,
-                                # 2026-10-03) measured 0.78, 25 of 32. The chip runs quantized weights
-                                # and the reference runs bf16, so near-synonyms differ. Wrong or
-                                # scrambled weights would agree on close to 0 tokens. One measurement
-                                # only; revisit when more weights-only runs exist.
+                                # Two measurements on 2026-10-03, Hemmingway-1 CPU reference, the 2-chip
+                                # Qwen3.8-27B bundle, one prompt of 32 tokens each: 0.78 (25 of 32) when
+                                # the base Qwen3.8-27B weights stood in by mistake (the bundle's HF_MODEL),
+                                # and 0.94 (30 of 32) with the correct weights (MODEL_WEIGHTS_DIR set).
+                                # The old bar of 0.6 passed the base weights. 0.85 sits between the two;
+                                # the margin is thin and rests on one prompt. Revisit when more
+                                # weights-only runs exist.
 SWAP_MIN_TOKENS = 16            # choice: the fewest compared tokens the weights-only gate accepts; the
                                 # skill's script compares 32
 AGENT_MAX_TURNS = 60            # choice: model turns in one agent step before the step counts as failed

@@ -20,7 +20,7 @@ from typing import Protocol
 
 from orchard.adapters import AdapterError
 from orchard.defaults import (IDENTICAL_N, LEASE_IDLE_S, LEASE_POLL_S, NO_EVIDENCE_S, REPEAT_TOOL_N,
-                              RUNG_CAPS, THINKING_CAP)
+                              RUNG_CAPS, THINKING_CAP, TURN_REPEAT_N, WRITELESS_TURNS)
 
 KINDS = frozenset({"response", "tool_call", "tool_result", "evidence", "ledger"})
 
@@ -41,6 +41,14 @@ class Event:
     had_tool_call: bool = False       # the response asked for at least one tool call
     name: str | None = None           # ledger event name, or evidence path
     stage: int | None = None
+    # On a tool_result: True when the call wrote a file, False when a file-writing call was
+    # refused or failed, None when the source does not say (transcripts, or a tool that does not
+    # write files). AgentStep sets it for its write_file tool.
+    wrote: bool | None = None
+    # The agent step's model turn that produced this event: its response, the tool calls and
+    # results that follow, and any evidence file they wrote. It counts up through a step and its
+    # continuation. None when the source does not number turns (transcripts).
+    turn: int | None = None
 
     def __post_init__(self):
         if self.kind not in KINDS:
@@ -56,6 +64,7 @@ class Finding:
     evidence: dict = field(default_factory=dict, hash=False)
     pause: bool = False               # a budget cap: go straight to pause (spec section 10)
     notice_only: bool = False         # a supervisor matter (an idle lease): a notice, no rung
+    nudge: str | None = None          # the text the nudge rung sends; None uses the repeat text
 
     def record(self) -> dict:
         return {"detector": self.detector, "agent": self.agent, "ts": self.ts,
@@ -193,6 +202,119 @@ class RepeatedToolCall:
         return None
 
 
+class TurnRepeat:
+    """The same set of tool calls in `n` model turns in a row.
+
+    A turn's signature is the sorted tuple of (tool, args_hash) of its calls, so a turn that runs
+    the same commands in another order still matches. RepeatedToolCall misses this loop: two
+    commands that alternate never repeat back to back. A turn with no tool calls breaks the
+    streak.
+
+    Turns are told apart by Event.turn. An event with no turn number (a transcript) starts a new
+    turn at each response, which comes before that turn's calls. A turn is complete when the next
+    one starts, so the finding comes at the response of the turn after the n-th repeat. The
+    detector re-arms after it fires.
+    """
+    name = "turn_repeat"
+
+    def __init__(self, n: int = TURN_REPEAT_N):
+        if n < 2:
+            raise ValueError("n must be at least 2")
+        self.n = n
+        self._turn: dict[str, object] = {}      # agent -> the current turn's key
+        self._calls: dict[str, list] = {}       # agent -> the current turn's (tool, args_hash)
+        self._last: dict[str, tuple] = {}       # agent -> the last complete turn's signature
+        self._count: dict[str, int] = {}        # agent -> turns in a row with that signature
+        self._seq: dict[str, int] = {}          # agent -> responses seen, for unnumbered turns
+
+    def _close(self, agent: str, ts: float) -> Finding | None:
+        calls = self._calls.pop(agent, [])
+        sig = tuple(sorted((str(t), str(a)) for t, a in calls))
+        if not sig:
+            self._last.pop(agent, None)
+            self._count[agent] = 0
+            return None
+        count = self._count.get(agent, 0) + 1 if self._last.get(agent) == sig else 1
+        self._last[agent] = sig
+        if count < self.n:
+            self._count[agent] = count
+            return None
+        self._count[agent] = 0                  # re-arm: the next n repeats fire again
+        tools = sorted({t for t, _ in sig})
+        return Finding(self.name, agent, ts,
+                       f"the same {len(sig)} tool call(s) ({', '.join(tools)}) in {self.n} turns "
+                       "in a row", {"turns": self.n, "calls": len(sig), "tools": tools})
+
+    def feed(self, ev: Event) -> Finding | None:
+        if ev.kind not in ("response", "tool_call"):
+            return None
+        if ev.turn is not None:
+            key = ("turn", ev.turn)
+        elif ev.kind == "response":
+            self._seq[ev.agent] = self._seq.get(ev.agent, 0) + 1
+            key = ("seq", self._seq[ev.agent])
+        else:
+            key = self._turn.get(ev.agent)
+        found = None
+        if key != self._turn.get(ev.agent):
+            if ev.agent in self._turn:
+                found = self._close(ev.agent, ev.ts)
+            self._turn[ev.agent] = key
+        if ev.kind == "tool_call":
+            self._calls.setdefault(ev.agent, []).append((ev.tool, ev.args_hash))
+        return found
+
+
+# Tool names that write a file, for sources that do not say whether a write succeeded (Event.wrote
+# is None). write_file is orchard's own tool; edit and replace are qwen-code's.
+WRITE_TOOLS = frozenset({"write_file", "edit", "replace"})
+
+
+class NoFileWritten:
+    """A step that makes `turns` model turns in a row without writing any file.
+
+    A write is a tool_result with wrote=True, a tool_result from a tool in WRITE_TOOLS whose
+    source does not say (wrote=None), or a new evidence file. A refused write_file (wrote=False)
+    is not a write. The detector fires once and then stays quiet until the agent writes a file,
+    which starts a new count. The finding is nudge level and carries its own nudge text.
+    """
+    name = "no_file_written"
+
+    def __init__(self, turns: int = WRITELESS_TURNS):
+        if turns < 1:
+            raise ValueError("turns must be at least 1")
+        self.turns = turns
+        self._count: dict[str, int] = {}
+        self._fired: set[str] = set()
+
+    @staticmethod
+    def _is_write(ev: Event) -> bool:
+        if ev.kind == "evidence":
+            return True
+        if ev.kind != "tool_result":
+            return False
+        return ev.wrote is True or (ev.wrote is None and ev.tool in WRITE_TOOLS)
+
+    def feed(self, ev: Event) -> Finding | None:
+        if self._is_write(ev):
+            self._count[ev.agent] = 0
+            self._fired.discard(ev.agent)
+            return None
+        if ev.kind != "response" or ev.agent in self._fired:
+            return None
+        count = self._count.get(ev.agent, 0) + 1
+        self._count[ev.agent] = count
+        if count < self.turns:
+            return None
+        self._fired.add(ev.agent)
+        return Finding(self.name, ev.agent, ev.ts,
+                       f"{count} model turns in a row and no file written",
+                       {"turns": count},
+                       nudge=(f"{count} model turns have passed and no file was written. "
+                              "Stop investigating: write the files the skill names now, or say "
+                              "what blocks you from writing them."))
+
+
 class LeaseIdle:
     """A lease held while its chips have no device open, for longer than idle_s.
 
@@ -295,11 +417,17 @@ class Actuator(Protocol):
 
 
 def nudge_message(findings: list[Finding]) -> str:
-    lines = ["The supervisor stopped this step because it is repeating itself:"]
-    lines += [f"- {f.summary}" for f in findings]
-    lines.append("The model server decodes greedily, so the same request returns the same answer. "
-                 "Do something different: run a tool to get new information, write down what you "
-                 "have found so far, or say what is blocking you.")
+    """The text of a nudge. A finding with its own nudge text sends that text. The others share
+    the repeat text, which names each of them."""
+    repeats = [f for f in findings if f.nudge is None]
+    lines = []
+    if repeats:
+        lines.append("The supervisor stopped this step because it is repeating itself:")
+        lines += [f"- {f.summary}" for f in repeats]
+        lines.append("The model server decodes greedily, so the same request returns the same "
+                     "answer. Do something different: run a tool to get new information, write "
+                     "down what you have found so far, or say what is blocking you.")
+    lines += [f.nudge for f in findings if f.nudge is not None]
     return "\n".join(lines)
 
 

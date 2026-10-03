@@ -58,8 +58,9 @@ resets the board in place, runs the work, and brings the large model back. It ho
 under its own pid the whole time, so no other agent can take the board during the swap. A small
 local CPU model keeps the loop running while the large model is stopped.
 
-A watchdog looks for loops (repeated identical calls, runaway thinking, no new evidence) in agents
-the supervisor launched, and nudges, escalates or pauses. For agents it did not launch, it only
+A watchdog looks for loops (repeated identical calls, the same set of calls turn after turn,
+runaway thinking, no new evidence, 20 turns without writing a file) in agents the supervisor
+launched, and nudges, escalates or pauses. For agents it did not launch, it only
 writes a notice.
 
 The full design is in `docs/superpowers/specs/2026-10-01-orchard-design.md`.
@@ -93,11 +94,12 @@ The full design is in `docs/superpowers/specs/2026-10-01-orchard-design.md`.
   the coder back. It writes one ledger entry per step. After a restart it replays the ledger and
   trusts the machine where the two differ. `orchard/park_check.py` runs it on one real board with
   fake servers (runbook: "Park check").
-- **Watchdog.** A normalised event stream, six detectors, a capped response ladder and a retry
-  guard. It acts through an injected actuator that plan 4 supplies. `orchard/transcripts.py` turns
+- **Watchdog.** A normalised event stream, eight detectors, a capped response ladder and a retry
+  guard. `NoFileWritten` and `TurnRepeat` were added on 2026-10-03 after a live stage 2 step grepped
+  for 60 turns and wrote nothing. It acts through an injected actuator that plan 4 supplies. `orchard/transcripts.py` turns
   a qwen-code transcript into that stream, and the detector thresholds come from a replay of the
   recorded loop.
-- **Supervisor.** The supervisor (`python3 -m orchard.supervisor run ...`) runs stages 0 to 6 and 8 of a weights-only bring-up with local models, parks the coder for hardware stages, records every step in the ledger, and stops at ready for operator review. It never publishes. The path stage 0 writes in `delta.json` decides stages 2 and 3. On `weights-only`, stage 2 serves the new weights with the nearest model's existing TT implementation and compares the chip's tokens with the CPU reference (skill `weights-swap-check`, gate `gate_weights_swap`), and stage 3 is recorded as skipped. On `full-port`, or a path the supervisor cannot read, stage 2 runs `functional-decoder` and stage 3 runs as before.
+- **Supervisor.** The supervisor (`python3 -m orchard.supervisor run ...`) runs stages 0 to 6 and 8 of a weights-only bring-up with local models, parks the coder for hardware stages, records every step in the ledger, and stops at ready for operator review. It never publishes. The path stage 0 writes in `delta.json` decides stages 2 and 3. On `weights-only`, stage 2 serves the new weights with the nearest model's existing TT implementation and compares the chip's tokens with the CPU reference (skill `weights-swap-check`, gate `gate_weights_swap`), and stage 3 is recorded as skipped. The agent copies two tested scripts from `orchard/skills/weights-swap-templates/` and fills in one config file; it does not write a serving script. The scripts point the server at the new weights with `MODEL_WEIGHTS_DIR` and `HF_MODEL`; without them the bundle serves the nearest model's weights. The gate needs `top1_agreement` of at least 0.85: the nearest model's weights standing in agreed on 25 of 32 tokens (0.78), the new weights on 30 of 32 (0.94), one prompt each. On `full-port`, or a path the supervisor cannot read, stage 2 runs `functional-decoder` and stage 3 runs as before.
 
 ## Try it
 

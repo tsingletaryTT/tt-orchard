@@ -197,9 +197,36 @@ failed, and the escalation started a fresh context. Three changes, each test-fir
 ## 2026-10-03: the stage machine follows the path stage 0 chose
 Prompt: make stages 2 and 3 path-aware for a weights-only delta, using the draft `weights-swap-check` skill (branch
 `weights-swap`, TDD, one commit per change). On `weights-only`, stage 2 uses that skill and the new `gate_weights_swap`
-(serves, coherent, `n_tokens` >= 16, `top1_agreement` >= `SWAP_TOP1_MIN` = 0.6, positive `server_ready_s`, evidence files);
+(serves, coherent, `n_tokens` >= 16, `top1_agreement` >= `SWAP_TOP1_MIN` = 0.6 (raised to 0.85 later that day, see below), positive `server_ready_s`, evidence files);
 stage 3 is recorded as skipped the way stage 7 is, and the run goes on to stage 4. `full-port` and an unknown path keep the
 old table. Decision: stage 0's passing `stage_end` records the path, and `run_path` reads it from the ledger before each stage,
 so a resume makes the same choice even after an agent edits `delta.json`; older ledgers fall back to `delta.json`. No per-path
 budget was added: the stage 2 budget (14,400 s) already exceeds the skill's 2,400 s test deadline. Mutations (swap skill on every
 path, stage 3 skipped on every path, a low `top1_agreement` accepted, an unknown path read as weights-only) each turned tests red.
+
+## 2026-10-03: swap templates and two watchdog detectors
+Prompt: replace "the model writes a 400-line script from a description" with tested templates it copies, and add two
+watchdog detectors for the loops a live stage 2 step fell into (branch `swap-templates`, worktree, tests first, a mutation
+per guard). On that run the agent spent 60 turns grepping vLLM source for an unrelated timeout and wrote nothing; part of it
+was two grep commands repeated in each of 5 turns.
+- `orchard/skills/weights-swap-templates/`: `prepare_swap.py` builds `model-dir/` and the edited `run.sh` from
+  `swap_config.json`, and exits 2 when an expected edit does not happen exactly once. `serve_and_compare.py` refuses a
+  non-empty tensor cache without a matching `.orchard-model` marker (exit 3), serves, measures coherence and teacher-forced
+  top-1 agreement, and stops the server's process group in a `finally`. Tests run both on a stdlib fake server and a
+  WordLevel tokenizer. Mutations seen red: `proc.pgid`, no `finally` stop, no marker check, any text counted as a match.
+- The skill now says: find four facts, write `swap_config.json` first, copy the templates from the main checkout, run
+  `prepare_swap.py`, write `hw_test.json` and `handoff.json`. The finish phase writes `serves` false with the failure text
+  when the test failed.
+- `NoFileWritten` (`WRITELESS_TURNS` = 20, a choice) nudges once when no file was written for 20 turns, and re-arms after
+  a write. `TurnRepeat` (`TURN_REPEAT_N` = 3) fires when one turn's set of calls repeats in 3 turns in a row. `Event`
+  gained `wrote` and `turn`, fed by `AgentStep`. Both stay quiet on the committed transcript signatures. They are not in
+  `transcript_detectors()`, so the opt-in replay of `~/.qwen` (not run here) is unchanged.
+- Correction (same day): the hand prototype that the skill was written from served the BASE Qwen3.8-27B weights. The TT
+  runtime takes its weights directory from `MODEL_WEIGHTS_DIR`, then `HF_MODEL`, then the config path, and the bundle's
+  `run.sh` exports `HF_MODEL=Qwen/Qwen3.8-27B`. Its 25 of 32 (0.78) agreement compared the base model on the chip with the
+  Hemmingway-1 CPU reference. Re-run with `MODEL_WEIGHTS_DIR` set: 30 of 32 (0.94), and the free-run text matched the
+  CPU text (`docs/run-logs/2026-10-hemmingway-1.md`, 17:45Z and 17:55Z entries). The templates now set
+  `MODEL_WEIGHTS_DIR` and `HF_MODEL` in the server's environment and rewrite the run.sh copy's `HF_MODEL` line; the skill
+  lists this as its fourth fact. `SWAP_TOP1_MIN` went from 0.6 to 0.85, because the base weights passed 0.6. Both
+  numbers come from one prompt of 32 tokens, so 0.85 is a choice with a thin margin. Mutations seen red: drop either
+  variable, leave the `HF_MODEL` line at the nearest model id, set the bar back to 0.6.
