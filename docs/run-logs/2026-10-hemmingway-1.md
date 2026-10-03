@@ -65,3 +65,21 @@ path, so packaging is the next piece to build after stages 0 to 6 are shown to w
   (`mando2222/qwen3.8-27b-dflash2-p300x2-q4kv`, profile batch8-dflash2, port 8000). The boot is
   running. This package was chosen from notes and `tt-model` output; its boot time on 4 chips has not
   been measured before.
+- **12:55:33Z to 12:58:46Z run 1 blocked at the coder.** The 4-chip container booted in about 2 minutes
+  (warm cache). The supervisor's canary request then got `content: null` and the run paused
+  ("the coder did not start and answer"). Two causes, found by sending the same style of request by hand:
+  1. *Harness bug.* The model reasons before it answers. With a small token budget the reply is cut off
+     while still reasoning, so `content` is null. The canary code reported that as "not text" with no
+     explanation, and it does not switch thinking off.
+  2. *The package is broken on this box.* `mando2222/qwen3.8-27b-dflash2-p300x2-q4kv` produced noise in
+     every request (reasoning text such as `ignyikkoignyikko…`). Its own log shows
+     `accept 0.00/7`: the speculative decoder accepted none of its drafts. It decodes at about
+     17 tokens/s. The 2-chip small tier served earlier from the `episod` package answered correctly, so
+     the box and the base weights are fine. Cause of the noise is not known; it was not debugged.
+  The harness stopped on the right thing, but by accident: a server returning garbage inside
+  `content` would have passed this canary. A first-boot check with a known answer is needed.
+- **12:58:46Z operator abort, first use of the abort path on hardware.** The supervisor stopped the
+  coder with `tt-model stop`, released the lease, and exited in 47 s. All four chips FREE, no
+  containers left. The ledger holds the pause, the abort, `stopping the coder`, and `hardware released`.
+- **Decision (operator, 2026-10-03):** required chip configurations for this model are 2 and 4.
+  1 chip is optional. Stage 4's gate is being changed to take `--required-chips 2,4`.
