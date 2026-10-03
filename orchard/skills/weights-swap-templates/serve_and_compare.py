@@ -12,7 +12,11 @@ Steps:
     non-empty tt_cache must hold `.orchard-model` whose text equals new_model_id, or this exits 3
     before any server starts. A missing or empty cache is created and the marker written.
 (b) Start `bash run.sh --port <port>` in its own session, with TT_CACHE_PATH, TT_CACHE_HOME,
-    HF_HOME and HF_HUB_OFFLINE=1 added to the inherited environment, output to
+    HF_HOME, HF_HUB_OFFLINE=1, MODEL_WEIGHTS_DIR and HF_MODEL added to the inherited environment.
+    The TT runtime takes its weights directory from MODEL_WEIGHTS_DIR, then HF_MODEL, then the
+    config path, and the bundle's run.sh sets HF_MODEL to the nearest model. Without these two the
+    server loads the nearest model's weights from the HF cache. Both are set to model-dir, so a
+    later change in that order cannot fall back to the base weights. Output goes to
     evidence/server.log. The `try` starts on the line after Popen, and its `finally` stops the
     whole process group: SIGTERM, up to 60 s for the group to go, then SIGKILL.
 (c) Poll /health every 2 s for up to HEALTH_TIMEOUT_S (config key health_timeout_s overrides it,
@@ -216,8 +220,10 @@ def main() -> int:
     evidence = STAGE_DIR / "evidence"
     evidence.mkdir(parents=True, exist_ok=True)
     log_path = evidence / "server.log"
+    model_dir = str(STAGE_DIR / "model-dir")
+    weights_env = {"MODEL_WEIGHTS_DIR": model_dir, "HF_MODEL": model_dir}
     env = dict(os.environ, TT_CACHE_PATH=str(cache), TT_CACHE_HOME=str(cache),
-               HF_HOME=str(cfg["hf_home"]), HF_HUB_OFFLINE="1")
+               HF_HOME=str(cfg["hf_home"]), HF_HUB_OFFLINE="1", **weights_env)
     log = open(log_path, "wb")
     proc = subprocess.Popen(["bash", str(STAGE_DIR / "run.sh"), "--port", str(cfg["port"])],
                             env=env, stdout=log, stderr=subprocess.STDOUT,
@@ -243,7 +249,8 @@ def main() -> int:
              "cache_dir": str(cache),
              "evidence": [os.path.relpath(swap_json, run_dir), os.path.relpath(log_path, run_dir)]}
     report = {"label": "measured", "new_model_id": cfg["new_model_id"],
-              "model_dir": str(STAGE_DIR / "model-dir"), "port": cfg["port"],
+              "model_dir": model_dir, "port": cfg["port"],
+              "weights_dir_env": weights_env, "hf_model_env": weights_env["HF_MODEL"],
               "server_ready_s": m["server_ready_s"], "n_tokens": N_TOKENS,
               "matches": m["matches"], "top1_agreement": top1, **coh,
               "prompt_ids": prompt_ids, "reference_generated_ids": generated_ids[:N_TOKENS],

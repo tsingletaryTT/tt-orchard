@@ -122,12 +122,14 @@ def test_prepare_edits_the_run_script(prep):
     assert "BASH_SOURCE" not in text
     assert text.count("--model ") == 1 and f"--model {md} " in text
     assert "--revision" not in text and "--tokenizer-revision" not in text
-    # The HF_MODEL default line also names the nearest model; it is left alone.
-    assert f'export HF_MODEL="${{HF_MODEL:-{NEAREST}}}"' in text
+    # The HF_MODEL line is set to the model-dir: the TT runtime takes its weights directory from
+    # MODEL_WEIGHTS_DIR, then HF_MODEL, so the nearest model's id there serves the base weights.
+    assert f'export HF_MODEL="{md}"\n' in text and NEAREST not in text
     assert "--max_num_seqs 4 --max_model_len 262144" in text
     assert out.stat().st_mode & stat.S_IXUSR
     # Everything except the three edited spots is unchanged.
     expect = (BUNDLE_RUN_SH
+              .replace(f'export HF_MODEL="${{HF_MODEL:-{NEAREST}}}"', f'export HF_MODEL="{md}"')
               .replace('HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"', f'HERE="{prep["bundle"]}"')
               .replace(f'--model "{NEAREST}"', f"--model {md}")
               .replace(f" --revision {REV}", "").replace(f" --tokenizer-revision {TOK_REV}", ""))
@@ -143,6 +145,14 @@ def test_prepare_accepts_an_unquoted_model_and_reports_absent_revisions(prep):
     assert f"--model {prep['stage'] / 'model-dir'} " in (prep["stage"] / "run.sh").read_text()
     assert "--revision" in r.stdout and "absent" in r.stdout
     assert "--tokenizer-revision" in r.stdout
+
+
+def test_prepare_reports_an_absent_hf_model_line_and_goes_on(prep):
+    src = BUNDLE_RUN_SH.replace(f'export HF_MODEL="${{HF_MODEL:-{NEAREST}}}"\n', "")
+    (prep["bundle"] / "run.sh").write_text(src)
+    r = run_prepare(prep["stage"])
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "HF_MODEL" in r.stdout and "absent" in r.stdout
 
 
 def test_prepare_runs_twice(prep):
@@ -212,22 +222,28 @@ def swap(tmp_path):
     shutil.copy(TEMPLATES / "serve_and_compare.py", stage)
     pid_file = tmp_path / "server-pid.json"
     server_cfg = tmp_path / "server.json"
+    weights_env = tmp_path / "weights-env.txt"
     (stage / "run.sh").write_text(
-        f'#!/usr/bin/env bash\nexec "{sys.executable}" "{FAKE_SERVER}" --config "{server_cfg}" "$@"\n')
+        "#!/usr/bin/env bash\n"
+        f'printf "%s\\n%s\\n" "${{MODEL_WEIGHTS_DIR-<unset>}}" "${{HF_MODEL-<unset>}}" > "{weights_env}"\n'
+        f'exec "{sys.executable}" "{FAKE_SERVER}" --config "{server_cfg}" "$@"\n')
     cfg = {"run_dir": str(run), "bundle_dir": str(tmp_path / "bundle"), "nearest_model_id": NEAREST,
            "base_snapshot": str(tmp_path / "base"), "new_snapshot": str(tmp_path / "new"),
            "new_model_id": "Altworld/Hemmingway-1", "tt_cache": str(tmp_path / "cache" / "tt_cache"),
            "hf_home": str(tmp_path / "hf"), "port": free_port(), "health_timeout_s": 30}
 
-    state = {"stage": stage, "run": run, "cfg": cfg, "pid_file": pid_file}
+    state = {"stage": stage, "run": run, "cfg": cfg, "pid_file": pid_file, "weights_env": weights_env,
+             "server_cfg": server_cfg}
 
     def start(mode="perfect", **overrides):
         (stage / "swap_config.json").write_text(json.dumps(cfg | overrides))
         server_cfg.write_text(json.dumps({"mode": mode, "vocab": VOCAB, "prompt_ids": PROMPT_IDS,
                                           "generated_ids": GENERATED, "model": str(md),
                                           "pid_file": str(pid_file)}))
+        # The test's own environment must not supply the variables under test.
+        env = {k: v for k, v in os.environ.items() if k not in ("MODEL_WEIGHTS_DIR", "HF_MODEL")}
         return subprocess.run([sys.executable, str(stage / "serve_and_compare.py")],
-                              capture_output=True, text=True, timeout=180)
+                              capture_output=True, text=True, timeout=180, env=env)
 
     state["start"] = start
     try:
@@ -274,9 +290,11 @@ def test_perfect_agreement(swap):
     assert rep["mismatches"] == []
     assert json.loads(r.stdout[r.stdout.index("{"):]) == draft
     # The server got the cache, HF home and offline flag; the cache was created with its marker.
+    md = str(swap["stage"] / "model-dir")
     env = json.loads(swap["pid_file"].read_text())["env"]
     assert env == {"TT_CACHE_PATH": swap["cfg"]["tt_cache"], "TT_CACHE_HOME": swap["cfg"]["tt_cache"],
-                   "HF_HOME": swap["cfg"]["hf_home"], "HF_HUB_OFFLINE": "1"}
+                   "HF_HOME": swap["cfg"]["hf_home"], "HF_HUB_OFFLINE": "1",
+                   "MODEL_WEIGHTS_DIR": md, "HF_MODEL": md}
     marker = Path(swap["cfg"]["tt_cache"]) / ".orchard-model"
     assert marker.read_text() == "Altworld/Hemmingway-1"
     assert wait_gone(server_pgid(swap))
@@ -350,3 +368,48 @@ def test_the_script_sends_only_the_fields_the_server_accepts():
     text = (TEMPLATES / "serve_and_compare.py").read_text()
     assert not re.search(r'["\']logprobs["\']\s*:', text)
     assert not re.search(r'["\']top_p["\']\s*:', text)
+
+
+def test_the_server_is_told_to_load_the_model_dir_weights(swap):
+    # The TT runtime takes its weights directory from MODEL_WEIGHTS_DIR, then HF_MODEL. Both must
+    # name the model-dir, or the server loads the nearest model's weights from the HF cache.
+    r = swap["start"]("perfect")
+    assert r.returncode == 0, r.stdout + r.stderr
+    md = str(swap["stage"] / "model-dir")
+    assert swap["weights_env"].read_text().splitlines() == [md, md]
+    rep = report(swap)
+    assert rep["weights_dir_env"] == {"MODEL_WEIGHTS_DIR": md, "HF_MODEL": md}
+    assert rep["hf_model_env"] == md
+
+
+def test_prepare_then_serve_through_a_fake_bundle(swap, tmp_path):
+    """The whole path: prepare_swap edits a bundle run.sh whose command execs the fake server."""
+    bundle = tmp_path / "bundle"
+    (bundle / "venv" / "bin").mkdir(parents=True)
+    (bundle / "venv" / "bin" / "python").symlink_to(sys.executable)
+    (bundle / "run.sh").write_text(
+        "#!/usr/bin/env bash\nset -euo pipefail\n"
+        'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\n'
+        'PYBIN="$HERE/venv/bin/python"\n'
+        f'export HF_MODEL="${{HF_MODEL:-{NEAREST}}}"\n'
+        f'CMD=("$PYBIN" "{FAKE_SERVER}" --config "{swap['server_cfg']}" --model "{NEAREST}" '
+        f'--revision {REV} --tokenizer-revision {TOK_REV} "$@")\n'
+        'exec "${CMD[@]}"\n')
+    base = make_snapshot(tmp_path / "base", {"config.json": "{}"})
+    new = make_snapshot(tmp_path / "new", {"tokenizer.json": (swap["stage"] / "model-dir" /
+                                                               "tokenizer.json").read_text(),
+                                           "model-00001-of-00001.safetensors": "w"})
+    stage = swap["stage"]
+    shutil.copy(TEMPLATES / "prepare_swap.py", stage)
+    (stage / "swap_config.json").write_text(json.dumps(
+        swap["cfg"] | {"bundle_dir": str(bundle), "base_snapshot": str(base), "new_snapshot": str(new)}))
+    p = run_prepare(stage)
+    assert p.returncode == 0, p.stdout + p.stderr
+    r = swap["start"]("perfect", bundle_dir=str(bundle), base_snapshot=str(base),
+                      new_snapshot=str(new))
+    assert r.returncode == 0, r.stdout + r.stderr
+    md = str(stage / "model-dir")
+    seen = json.loads(swap["pid_file"].read_text())
+    assert seen["model_arg"] == md
+    assert seen["env"]["MODEL_WEIGHTS_DIR"] == md and seen["env"]["HF_MODEL"] == md
+    assert report(swap)["result_draft"]["top1_agreement"] == 1.0

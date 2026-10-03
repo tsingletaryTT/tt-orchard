@@ -19,7 +19,7 @@ Like the real server, it answers 400 to a request that carries any key other tha
 max_tokens and temperature (the real one rejects logprobs and sampling parameters), and to a
 request whose model is not the expected model directory.
 
-On start it writes {"pid", "pgid", "env"} to the config's "pid_file", so the test can check the
+On start it writes {"pid", "pgid", "env", "model_arg"} to the config's "pid_file", so the test can check the
 environment it was given and, afterwards, that its process group is gone.
 """
 from __future__ import annotations
@@ -31,7 +31,7 @@ import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ALLOWED_KEYS = {"model", "prompt", "max_tokens", "temperature"}
-ENV_KEYS = ("TT_CACHE_PATH", "TT_CACHE_HOME", "HF_HOME", "HF_HUB_OFFLINE")
+ENV_KEYS = ("TT_CACHE_PATH", "TT_CACHE_HOME", "HF_HOME", "HF_HUB_OFFLINE", "MODEL_WEIGHTS_DIR", "HF_MODEL")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -86,12 +86,13 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True)
     ap.add_argument("--port", type=int, required=True)
+    ap.add_argument("--model")            # passed when the test runs a prepare_swap-built run.sh
     args = ap.parse_args()
     with open(args.config, encoding="utf-8") as f:
         cfg = json.load(f)
     with open(cfg["pid_file"], "w", encoding="utf-8") as f:
         json.dump({"pid": os.getpid(), "pgid": os.getpgid(0),
-                   "env": {k: os.environ.get(k) for k in ENV_KEYS}}, f)
+                   "env": {k: os.environ.get(k) for k in ENV_KEYS}, "model_arg": args.model}, f)
     if cfg["mode"] == "die":
         for i in range(70):
             print(f"fake server log line {i}", flush=True)

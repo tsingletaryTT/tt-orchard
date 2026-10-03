@@ -20,6 +20,11 @@ The weights-swap-check skill copies this file into the stage directory and runs 
    - `--model "<nearest_model_id>"` (quoted or unquoted) becomes `--model <model-dir>` (exactly once);
    - ` --revision <40 hex>` and ` --tokenizer-revision <40 hex>` are deleted, because a local
      directory has no revision. Each may appear at most once; an absent one is reported.
+   - every `export HF_MODEL=...` line becomes `export HF_MODEL="<model-dir>"`. The TT runtime
+     takes its weights directory from MODEL_WEIGHTS_DIR, then HF_MODEL, then the config path.
+     The bundle sets HF_MODEL to the nearest model's id, which resolves to that model's HF cache,
+     so `--model <model-dir>` alone serves the BASE weights. An absent line is reported; it is not
+     an error, because serve_and_compare.py also sets both variables in the server's environment.
 
 An expected edit that does not happen exactly once exits 2 with a message that names it, and no
 run.sh is written. Everything else in the script, including its environment lines, stays as it is.
@@ -103,6 +108,13 @@ def edit_run_script(text: str, bundle: Path, nearest: str, model_dir: Path) -> t
     if n != 1:
         fail(f'expected exactly one --model "{nearest}" in {bundle / "run.sh"}, found {n}')
     notes = []
+    text, n = re.subn(r"^([ \t]*)export[ \t]+HF_MODEL=.*$",
+                      lambda m: f'{m.group(1)}export HF_MODEL="{model_dir}"', text, flags=re.MULTILINE)
+    if n == 0:
+        notes.append("export HF_MODEL=... was absent; nothing to rewrite (serve_and_compare.py sets "
+                     "HF_MODEL and MODEL_WEIGHTS_DIR itself)")
+    else:
+        notes.append(f'export HF_MODEL="{model_dir}" ({n} line(s) rewritten)')
     for flag in ("--revision", "--tokenizer-revision"):
         # The leading space keeps " --revision" from matching inside "--tokenizer-revision".
         text, n = re.subn(r" " + flag + r'\s+"?[0-9a-f]{40}"?(?=\s|$)', "", text)
