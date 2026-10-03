@@ -14,7 +14,7 @@ from orchard.supervisor import (EXIT_ABORTED, EXIT_ERROR, EXIT_READY, EXIT_REFUS
                                 main, parse)
 from run_fakes import (BOARDS, DELTA, FEEDBACK_HEAD, FILES, SWAP_LOW, CrashingLedger, Machine,
                        MachineAdapter, MachineCoder, argv, bringup, clock, feedback_aware, plenty,
-                       where, write_tiers)
+                       test_fails_until_escalated, where, write_tiers)
 
 # The hardware test and agent shells run real bash here, so stub tools come first on PATH.
 pytestmark = pytest.mark.usefixtures("stub_tools")
@@ -721,6 +721,47 @@ def test_a_continuation_that_still_fails_escalates_as_before(rig):
     assert len(fbs) == 1                                   # one continuation in the attempt, no more
     esc = next(e["data"] for e in es if e["event"] == "escalate")
     assert esc["by"] == "stage machine" and "top1_agreement 0.1 is below" in esc["reasons"][0]
+
+
+# ---- no gate feedback after a failed hardware test ------------------------------------------------
+# The live run: stage 2's hardware test failed, the finish step honestly wrote serves false, and the
+# continuation told the agent to make serves true. It could not do that honestly, explored for 20
+# turns without writing a file, and the watchdog paused the run. A result that honestly records a
+# failed test gets no continuation. The stage ends and the next attempt runs a fresh test.
+
+def no_feedback_decisions(rig, n):
+    return [e["data"] for e in rig.entries() if e["event"] == "decision" and e["stage"] == n
+            and e["data"]["decision"].startswith("no gate feedback")]
+
+
+def hardware_results(rig, n):
+    return [(e["data"]["returncode"], e["data"]["timed_out"]) for e in rig.entries()
+            if e["event"] == "evidence" and e["stage"] == n and e["data"].get("what") == "hardware test"]
+
+
+@pytest.mark.parametrize("mode,first", [("exit", (4, False)), ("hang", (None, True))])
+def test_a_failed_hardware_test_gets_no_continuation_and_the_next_attempt_tests_again(rig, mode, first):
+    rig.script = test_fails_until_escalated(2, mode)
+    assert rig.run() == EXIT_READY
+    assert [d["result"] for d in rig.ends(2)] == ["escalate", "pass"]
+    assert feedback_decisions(rig, 2) == []
+    [d] = no_feedback_decisions(rig, 2)
+    assert d["decision"] == "no gate feedback: the hardware test failed"
+    assert (d["returncode"], d["timed_out"]) == first
+    # The escalated attempt prepared and ran a fresh hardware test, which succeeded.
+    assert hardware_results(rig, 2) == [first, (0, False)]
+    assert not any((m.get("content") or "").startswith(FEEDBACK_HEAD)
+                   for r in rig.chip_server.requests if "tools" in r for m in r["messages"])
+
+
+def test_a_malformed_result_after_a_good_hardware_test_still_gets_the_continuation(rig):
+    rig.script = feedback_aware(2, "finish", {"result.json": "{not json"})
+    assert rig.run() == EXIT_READY
+    assert [d["result"] for d in rig.ends(2)] == ["pass"]
+    [fb] = feedback_decisions(rig, 2)
+    assert fb["phase"] == "finish" and "result.json" in fb["reasons"][0]
+    assert no_feedback_decisions(rig, 2) == []
+    assert hardware_results(rig, 2) == [(0, False)]
 
 
 def test_no_continuation_after_a_step_that_ended_in_error(rig):

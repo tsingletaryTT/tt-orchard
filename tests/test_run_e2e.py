@@ -14,7 +14,7 @@ from orchard.ledger import Ledger, replay_state
 from orchard.stages import run_progress
 from orchard.supervisor import EXIT_READY, build, parse
 from run_fakes import (BOARDS, SWAP_LOW, CrashingLedger, Machine, MachineAdapter, MachineCoder, argv,
-                       bringup, clock, feedback_aware, plenty, write_tiers)
+                       bringup, clock, feedback_aware, plenty, test_fails_until_escalated, write_tiers)
 
 FIRST, SECOND = 100, 200          # supervisor pids before and after the kill
 
@@ -177,3 +177,40 @@ def test_a_kill_around_the_gate_feedback_continuation_resumes_to_the_same_final_
                 elif e["data"].get("decision") == "gate feedback":
                     per_start[-1] += 1
             assert per_start and max(per_start) <= 1, (k, per_start)
+
+
+def test_a_kill_around_a_failed_hardware_test_resumes_to_the_same_final_state(tmp_path):
+    """Stage 2's first hardware test exits with code 4 and the finish step records the failure. The
+    supervisor gives no continuation, records a "no gate feedback" decision and escalates, and the
+    escalated attempt tests again and passes. The supervisor is killed after each ledger event of
+    stage 2, including between that decision and the stage_end, and each resumed run must reach the
+    same final state with no continuation at all."""
+    script = test_fails_until_escalated(2, "exit")
+    with FakeModel(script, models=["qwen-27b"]) as chip, FakeModel(script, models=["cpu-model"]) as cpu:
+        ref = tmp_path / "reference"
+        assert run(ref, (chip, cpu), Machine(), chips=2, pid=FIRST) == EXIT_READY
+        want = final_state(ref)
+        es = entries(ref)
+        assert want["last_result"][2] == "pass"
+        assert [e["data"]["result"] for e in es if e["event"] == "stage_end" and e["stage"] == 2] == \
+            ["escalate", "pass"]
+        idx = [i for i, e in enumerate(es) if e["stage"] == 2]
+        nofb = next(i for i, e in enumerate(es)
+                    if str(e["data"].get("decision")).startswith("no gate feedback"))
+        assert idx[0] < nofb < idx[-1]
+        # crash_after=k kills after the k-th append, which is list index k - 1.
+        after_escalate = next(i for i, e in enumerate(es) if e["event"] == "escalate") + 1
+        for k in range(idx[0] + 1, idx[-1] + 2):            # kill after each of the stage's events
+            base = tmp_path / f"kill-{k:03d}"
+            m = Machine()
+            with pytest.raises(Crash):
+                run(base, (chip, cpu), m, chips=2, pid=FIRST, crash_after=k)
+            assert run(base, (chip, cpu), m, chips=2, pid=SECOND) == EXIT_READY, k
+            assert final_state(base) == want, k
+            assert not m.coder_running and m.leases == {}, (k, m.leases)
+            got = entries(base)
+            assert not [e for e in got if e["data"].get("decision") == "gate feedback"], k
+            # A kill between the escalate entry and the stage_end resumes the stage escalated. Its
+            # failed test record is not reused, so the escalated attempt tests again.
+            fresh = [e for e in got if e["data"].get("decision") == "not resuming from a failed hardware test"]
+            assert len(fresh) == (1 if k == after_escalate else 0), k

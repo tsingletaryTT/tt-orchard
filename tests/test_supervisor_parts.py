@@ -1,10 +1,14 @@
-"""The supervisor's parts: control file, actuator, external stand-in, coder tier, versions."""
+"""The supervisor's parts: control file, actuator, external stand-in, coder tier, versions, and the
+reading of a hardware test's record."""
+import json
+
 import pytest
 
 from fake_model import FakeModel, final
 from fakes import FakeRun
 from orchard.server import ServerSpec
-from orchard.supervisor import Control, ExternalStandIn, RunActuator, coder_tier, resolve_versions
+from orchard.supervisor import (Control, ExternalStandIn, RunActuator, coder_tier, hardware_test_failure,
+                                resolve_versions)
 from orchard.tiers import load
 from run_fakes import write_tiers
 
@@ -84,3 +88,41 @@ def test_the_stage_watchdog_runs_the_turn_repeat_detector(tmp_path):
         fake = SimpleNamespace(actuator=None, ledger=led, clock=lambda: 0.0)
         wd = Supervisor._watchdog(fake, spec_for(2, "weights-only"))
     assert any(isinstance(d, TurnRepeat) for d in wd.detectors)
+
+
+# ---- did the hardware test succeed? ---------------------------------------------------------------
+# Only an exit code of exactly 0 with no timeout counts as success. Anything else, including a
+# record that is missing or cannot be read, is a failure, so a failed test gets no gate feedback.
+
+def record(tmp_path, data):
+    (tmp_path / "test-result.json").write_text(data if isinstance(data, str) else json.dumps(data))
+    return tmp_path
+
+
+def test_a_test_that_exited_0_in_time_succeeded(tmp_path):
+    assert hardware_test_failure(record(tmp_path, {"returncode": 0, "timed_out": False})) is None
+
+
+@pytest.mark.parametrize("data,want", [
+    ({"returncode": 4, "timed_out": False}, (4, False)),
+    ({"returncode": None, "timed_out": True}, (None, True)),
+    ({"returncode": 0, "timed_out": True}, (0, True)),
+    # No exit code and no timeout: the command was refused when it was started.
+    ({"returncode": None, "timed_out": False}, (None, False)),
+    ({"returncode": False, "timed_out": False}, (False, False)),     # a bool is not an exit code
+    ({"timed_out": False}, (None, False)),
+])
+def test_a_test_that_did_not_exit_0_in_time_failed(tmp_path, data, want):
+    got = hardware_test_failure(record(tmp_path, data))
+    assert (got["returncode"], got["timed_out"]) == want
+
+
+@pytest.mark.parametrize("data", ["{not json", "[1, 2]"])
+def test_an_unreadable_record_counts_as_a_failure(tmp_path, data):
+    got = hardware_test_failure(record(tmp_path, data))
+    assert got is not None and "test-result.json" in got["problem"]
+
+
+def test_a_missing_record_counts_as_a_failure(tmp_path):
+    got = hardware_test_failure(tmp_path)
+    assert got is not None and "test-result.json" in got["problem"]

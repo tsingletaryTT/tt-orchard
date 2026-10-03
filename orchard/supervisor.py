@@ -280,6 +280,33 @@ def boot_unfinished(entries: list[dict]) -> bool:
     return last == "coder starting"
 
 
+def hardware_test_failure(stage_dir: Path) -> dict | None:
+    """None when the stage's hardware test succeeded: test-result.json holds an exit code of
+    exactly 0 and `timed_out` is false. Otherwise a dict with `returncode`, `timed_out` and a
+    plain `problem` sentence. A missing or unreadable record counts as a failure, because nothing
+    shows the test succeeded."""
+    path = stage_dir / "test-result.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return {"returncode": None, "timed_out": None,
+                "problem": f"test-result.json could not be read: {exc}"}
+    if not isinstance(data, dict):
+        return {"returncode": None, "timed_out": None,
+                "problem": "test-result.json does not hold a JSON object"}
+    code, timed_out = data.get("returncode"), data.get("timed_out")
+    # bool is a subclass of int in Python, so False would otherwise compare equal to 0.
+    if type(code) is int and code == 0 and timed_out is False:
+        return None
+    if timed_out:
+        problem = "the hardware test ran past its deadline and was stopped"
+    elif code is None:
+        problem = "the hardware test has no exit code (it was refused or did not start)"
+    else:
+        problem = f"the hardware test exited with code {code!r}"
+    return {"returncode": code, "timed_out": timed_out, "problem": problem}
+
+
 GATE_FEEDBACK_HEAD = "The supervisor checked your stage's output and it does not pass yet."
 
 
@@ -711,6 +738,15 @@ class Supervisor:
         if not ok:
             self._block(n, f"stage {n} needs {spec.disk_gb} GB free on the run directory's disk; "
                            f"{free} GB is free", need_gb=spec.disk_gb, free_gb=free)
+        marker = self.run_dir / "stages" / str(n) / "test-result.json"
+        if resuming and escalated and spec.boards and marker.is_file() and hardware_test_failure(marker.parent):
+            # A kill came after the escalate entry and before the stage_end. The escalated attempt
+            # must run a fresh prepare and hardware test: its finish step cannot pass on a test
+            # that failed, and it gets no gate feedback for one. So the failed record is not a
+            # resume point, and open_stage_dir moves the directory aside.
+            self.ledger.append("decision", n, decision="not resuming from a failed hardware test",
+                               marker=evidence_record(self.run_dir, marker))
+            resuming = False
         stage_dir, resumed = open_stage_dir(self.run_dir, spec, resuming=resuming, ledger=self.ledger)
         self.ledger.append("stage_start", n, escalated=escalated, resumed=resumed)
         self.actuator.clear()
@@ -743,8 +779,18 @@ class Supervisor:
             if out.status != "done":
                 return out.status, [f"the finish step ended: {out.status} {out.detail}".strip()], None
         gate = self._check_gate(spec, stage_dir)
+        if not gate.ok and spec.boards and (failed := hardware_test_failure(stage_dir)):
+            # The finish step was told to record a failed test honestly. Its result cannot pass
+            # the gate, and a continuation would ask the agent to make it pass. So the stage ends
+            # here through the usual fail or escalate path, and the next attempt runs a fresh
+            # prepare and hardware test.
+            self.ledger.append("decision", spec.number,
+                               decision="no gate feedback: the hardware test failed", **failed)
+            return "fail", list(gate.reasons), gate
         if not gate.ok:
-            # One continuation per run of the stage body; there is no loop here on purpose.
+            # One continuation per run of the stage body; there is no loop here on purpose. It is
+            # for a missing or malformed output file after a run step, or after a hardware test
+            # that succeeded.
             out = self._gate_feedback(spec, stage_dir, step, gate)
             if out.status != "done":
                 return out.status, [f"the {step.phase} step's continuation ended: "
