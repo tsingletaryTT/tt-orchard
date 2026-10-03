@@ -364,3 +364,12 @@ path, so packaging is the next piece to build after stages 0 to 6 are shown to w
   evidence records `MODEL_WEIGHTS_DIR` and `HF_MODEL` both set to the stage's model directory, so these are
   Hemmingway-1's weights. **This is the first time the harness itself has run Hemmingway-1 on TT hardware.**
   It still needs the finish step to write `result.json` and the gate to pass.
+- **20:35:27Z STAGE 2 PASSED on the harness's own result.** The finish step wrote `result.json` from the
+  test's evidence in 25 seconds and the gate passed: `serves` true, `coherent` true, `n_tokens` 32,
+  `top1_agreement` 0.9375 (bar 0.85), `server_ready_s` 728.1. **Stages passed by the harness so far: 0, 1,
+  2.** Stage 3 was skipped as designed (weights-only path: stage 2 covers the full model).
+- **20:35:27Z to 20:43Z stage 4 started with the old code and flailed, so I paused the run.** The supervisor
+  process still had the generic `mesh-shrink` skill for stage 4 (the multi-chip plan was not yet built). The
+  agent made 20 turns without writing a file by 20:39, and the `no_file_written` detector fired. I sent
+  `pause` at 20:43:20Z. The multi-chip plan (12 tasks, 90 new tests, verified by its writer in a scratch
+  clone) is ready; executing it next. The run stays paused, with the coder idle on board 1.
