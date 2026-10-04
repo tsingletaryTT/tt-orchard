@@ -240,3 +240,30 @@ def test_the_reference_gate_skill_has_the_write_first_rules_and_the_card_caveat(
     assert "Do not investigate anything outside the paths this skill lists" in flat
     assert "form check only" in flat and "Keep that sentence." in flat
     assert "Do not change a check's `pass` from false to true." in flat
+
+
+# ---- stage 8: the operator-bundle template ------------------------------------------------------
+
+def test_the_operator_bundle_skill_runs_the_template_that_exists_in_this_repo():
+    import importlib.util
+    text = (SKILLS / "operator-bundle.md").read_text()
+    flat = " ".join(text.split())
+    script = SKILLS / "operator-bundle-templates" / "build_bundle.py"
+    assert script.is_file()
+    assert "cp {{ORCHARD_DIR}}/orchard/skills/operator-bundle-templates/build_bundle.py stages/8/" in flat
+    assert "python3 stages/8/build_bundle.py" in flat
+    spec = importlib.util.spec_from_file_location("build_bundle_for_skill_test", script)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert set(_config_block(text, "run_dir")) == set(mod.CONFIG_KEYS)
+
+
+def test_the_operator_bundle_skill_has_the_write_first_rules():
+    flat = " ".join((SKILLS / "operator-bundle.md").read_text().split())
+    assert "Write `bundle_config.json` FIRST" in flat
+    assert "Never read the run's ledger" in flat and "transcripts" in flat
+    assert "Do not investigate anything outside the bundle's own files" in flat
+    assert "Read `bundle/RESULTS.md` and `bundle/RISKS.md` once" in flat
+    assert "summary paragraph" in flat and "evidence path" in flat
+    assert "Do not change a `Dealt with: Not shown` line to `yes`" in flat
+    assert "Exit 2" in flat and "scrub" in flat

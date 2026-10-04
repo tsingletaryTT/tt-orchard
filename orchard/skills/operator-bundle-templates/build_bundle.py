@@ -45,7 +45,7 @@ The `Dealt with:` line of the tensor-cache hazard is computed: `yes` only when e
 stage 2 and stage 4 recorded is a distinct directory, each one is empty or holds the
 `.orchard-model` marker naming this model, and none lies under the nearest model's cache path (a
 path named in the hazard's finding, tt-model's cache, or the bundle a test served). The caches
-are checked when this script runs, so a cache deleted since its test reads as `Not shown`. Other
+are checked when this script runs, so a cache deleted since its test gets `Not shown`. Other
 hazards say `Not shown` unless a result file holds the measurement that would settle them.
 
 It never touches the network, never starts a process, and writes only under stages/8/bundle and
