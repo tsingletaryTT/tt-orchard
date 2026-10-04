@@ -46,3 +46,5 @@ wall time per stage, stage retries and escalations, watchdog firings, and every 
 ## Observations
 
 (entries are added as the run proceeds)
+
+- **2026-10-04T15:54:25Z run started** (supervisor pid 2624896, run directory `openthai2-run1`). Hands off from here.
