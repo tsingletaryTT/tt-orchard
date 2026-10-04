@@ -117,3 +117,11 @@ Interventions in attempt 2 so far: 3, all caused by stage 8 having no template. 
   Contents (from `RESULTS.md`): weights-only; 1, 2 and 4 chip serving checks at top-1 agreement 0.906; two v6
   packages staged (p150 and p300); the p300 package passed its boot check and the p150 package was not boot-checked.
   Nothing was published.
+
+- **2026-10-04 (23:55Z) creative sample from the 2-chip package.** At the operator's request the same "building
+  remembering its 1930s past" prompt used for Hemmingway-1 was sent to the Thai model, in English and in Thai
+  (thinking off, greedy, 900-token cap). Both answers are coherent and in persona; the Thai answer sets the
+  building in Thailand and has a few doubtful phrases. Full text and notes:
+  `docs/run-logs/samples/2026-10-04-openthai2-building.md`. This needed a fresh boot of the package on board 1
+  (lease 823e9c, released and reset after); the boot took about 33 minutes warm, which is the same slow warm
+  boot the benchmark agent measured (31 to 34 minutes).
