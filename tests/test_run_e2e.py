@@ -236,3 +236,40 @@ def test_a_kill_around_a_failed_hardware_test_resumes_to_the_same_final_state(tm
             # failed test record is not reused, so the escalated attempt tests again.
             fresh = [e for e in got if e["data"].get("decision") == "not resuming from a failed hardware test"]
             assert len(fresh) == (1 if k == after_escalate else 0), k
+
+
+@pytest.mark.parametrize("stage,phase,chips", [(0, "run", 2), (2, "finish", 4)])
+def test_a_kill_around_the_wrap_up_resumes_to_the_same_final_state(tmp_path, stage, phase, chips):
+    """A step uses up its turns with evidence on disk and no deliverable, and its one wrap-up
+    writes the file. The supervisor is killed after each ledger event of that stage, including
+    between the "wrap-up" decision and the wrap-up's result. A resumed stage starts a fresh step
+    (the killed conversation is gone), which may use its own one wrap-up."""
+    from run_fakes import exhausting
+    script = exhausting(stage, phase)
+    with FakeModel(script, models=["qwen-27b"]) as chip, FakeModel(script, models=["cpu-model"]) as cpu:
+        ref = tmp_path / "reference"
+        assert run(ref, (chip, cpu), Machine(), chips=chips, pid=FIRST) == EXIT_READY
+        want = final_state(ref)
+        es = entries(ref)
+        assert want["last_result"][stage] == "pass" and not [e for e in es if e["event"] == "escalate"]
+        idx = [i for i, e in enumerate(es) if e["stage"] == stage]
+        wu = next(i for i, e in enumerate(es) if e["data"].get("decision") == "wrap-up")
+        assert idx[0] < wu < idx[-1]
+        for k in range(idx[0] + 1, idx[-1] + 2):            # kill after each of the stage's events
+            base = tmp_path / f"kill-{k:03d}"
+            m = Machine()
+            with pytest.raises(Crash):
+                run(base, (chip, cpu), m, chips=chips, pid=FIRST, crash_after=k)
+            assert run(base, (chip, cpu), m, chips=chips, pid=SECOND) == EXIT_READY, k
+            assert final_state(base) == want, k
+            assert not m.coder_running and m.leases == {}, (k, m.leases)
+            assert not [e for e in entries(base) if e["event"] == "escalate"], k
+            per_start = []
+            for e in entries(base):
+                if e["stage"] != stage:
+                    continue
+                if e["event"] == "stage_start":
+                    per_start.append(0)
+                elif e["data"].get("decision") == "wrap-up":
+                    per_start[-1] += 1
+            assert per_start and max(per_start) <= 1, (k, per_start)

@@ -904,3 +904,73 @@ def test_no_continuation_after_a_step_that_ended_in_error(rig):
     assert [d["result"] for d in rig.ends(1)] == ["escalate", "pass"]
     assert feedback_decisions(rig, 1) == []
     assert "empty" in rig.ends(1)[0]["reasons"][0]
+
+
+# ---- wrap-up when a step uses up its turns -------------------------------------------------------
+# The second-model run: stage 0's agent wrote 8 evidence files, used all 60 turns and never wrote
+# delta.json, and the stage failed. A step that runs out of turns with evidence on disk and no
+# deliverable now gets one wrap-up continuation of the same conversation.
+
+def wrapup_decisions(rig, n):
+    return [e["data"] for e in rig.entries() if e["event"] == "decision" and e["stage"] == n
+            and e["data"]["decision"] == "wrap-up"]
+
+
+def test_a_step_out_of_turns_with_evidence_gets_one_wrap_up_and_passes(rig):
+    from orchard.defaults import AGENT_MAX_TURNS, AGENT_WRAPUP_TURNS
+    from run_fakes import WRAPUP_HEAD, exhausting
+    rig.script = exhausting(0, "run")
+    assert rig.run() == EXIT_READY
+    assert [d["result"] for d in rig.ends(0)] == ["pass"]
+    assert not [e for e in rig.entries() if e["event"] == "escalate"]
+    [w] = wrapup_decisions(rig, 0)
+    assert w["phase"] == "run" and w["file"] == "stages/0/delta.json"
+    assert w["evidence"] == ["stages/0/evidence/notes.txt"] and w["turns"] == AGENT_WRAPUP_TURNS == 12
+    # The wrap-up went into the same conversation, after all of its turns.
+    sent = next(r["messages"] for r in rig.chip_server.requests if "tools" in r
+                and any((m.get("content") or "").startswith(WRAPUP_HEAD) for m in r["messages"]))
+    text = next(m["content"] for m in sent if (m.get("content") or "").startswith(WRAPUP_HEAD))
+    assert sum(1 for m in sent if m["role"] == "assistant") == AGENT_MAX_TURNS
+    assert "stages/0/delta.json" in text and "- stages/0/evidence/notes.txt" in text
+    assert "No new investigation is allowed" in text and "12 turns" in text
+    # The wrap-up's transcript is kept apart from the step's.
+    paths = [e["data"]["path"] for e in rig.entries() if e["stage"] == 0 and e["event"] == "evidence"
+             and e["data"].get("what") == "transcript"]
+    assert len(paths) == 2 and "wrapup" in paths[1]
+
+
+def test_a_step_out_of_turns_with_no_evidence_gets_no_wrap_up(rig):
+    from run_fakes import exhausting
+    rig.script = exhausting(0, "run", evidence=False)
+    assert rig.run() == EXIT_READY
+    assert wrapup_decisions(rig, 0) == []
+    assert [d["result"] for d in rig.ends(0)] == ["escalate", "pass"]
+    assert "turns" in rig.ends(0)[0]["reasons"][0]
+
+
+def test_a_wrap_up_that_also_runs_out_gets_no_second_wrap_up(rig):
+    from run_fakes import exhausting
+    rig.script = exhausting(0, "run", wrapup="keep-going")
+    assert rig.run() == EXIT_READY
+    assert [d["result"] for d in rig.ends(0)] == ["escalate", "pass"]
+    es = [e for e in rig.entries() if e["stage"] == 0]
+    first_end = next(i for i, e in enumerate(es) if e["event"] == "stage_end")
+    assert len([e for e in es[:first_end] if e["data"].get("decision") == "wrap-up"]) == 1
+    assert "wrap-up" in rig.ends(0)[0]["reasons"][0]
+
+
+def test_a_wrap_up_whose_file_fails_the_gate_gets_no_gate_feedback(rig):
+    from run_fakes import exhausting
+    rig.script = exhausting(0, "run", wrapup={"delta.json": {"model": "x"}})
+    assert rig.run() == EXIT_READY
+    assert [d["result"] for d in rig.ends(0)] == ["escalate", "pass"]
+    assert len(wrapup_decisions(rig, 0)) == 1 and feedback_decisions(rig, 0) == []
+
+
+def test_a_finish_step_out_of_turns_gets_the_wrap_up_too(rig):
+    from run_fakes import exhausting
+    rig.script = exhausting(2, "finish")
+    assert rig.run() == EXIT_READY
+    assert [d["result"] for d in rig.ends(2)] == ["pass"]
+    [w] = wrapup_decisions(rig, 2)
+    assert w["phase"] == "finish" and w["file"] == "stages/2/result.json"

@@ -108,6 +108,12 @@ SWAP_MIN_TOKENS = 16            # choice: the fewest compared tokens the weights
 AGENT_MAX_TURNS = 60            # choice: model turns in one agent step before the step counts as failed
 AGENT_CONTINUATION_TURNS = 20   # choice: model turns for a step's gate-feedback continuation (at most one).
                                 # It only has to fix what the gate named, so it gets a third of a step.
+AGENT_WRAPUP_TURNS = 12        # choice: model turns for a step's wrap-up (at most one per attempt). It
+                                # runs when a step used up AGENT_MAX_TURNS with evidence files on disk
+                                # and its deliverable missing, and it may only write that file from the
+                                # evidence. Writing one JSON file from files the agent already wrote
+                                # takes a few turns; 12 leaves room for one read of each of the second-
+                                # model run's 8 evidence files plus the write.
 AGENT_THINKING = False          # choice: agent turns run with the model's thinking mode off. The 2-chip
                                 # DFlash2 server decodes greedily only. In thinking mode a greedy model
                                 # circles in its reasoning (6,000 tokens on one point, no command) and

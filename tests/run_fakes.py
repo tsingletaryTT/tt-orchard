@@ -449,3 +449,34 @@ class StuckClock(FakeClock):
 
 def clock():
     return StuckClock(time.time())
+
+
+# A step that uses up its whole turn budget (the second-model run's stage 0): it writes one evidence
+# file on its first turn (unless evidence=False), then a new note outside evidence/ on every turn,
+# and never ends. When the conversation holds the supervisor's wrap-up message it writes `wrapup`
+# (by default the stage's real files without the evidence) and finishes, counting turns from that
+# message. wrapup="keep-going" keeps writing notes through the wrap-up too. An escalated attempt
+# runs the normal bring-up.
+WRAPUP_HEAD = "Your turn budget for this step is used up."
+
+
+def exhausting(stage, phase, *, evidence=True, wrapup=None):
+    def script(request):
+        if "tools" in request and where(request) == (stage, phase):
+            ctx = request["messages"][1]["content"]
+            if f"stage {stage} escalate" in ctx or f"stage {stage}: escalate" in ctx:
+                return bringup(request)
+            msgs = request["messages"]
+            wu = [i for i, m in enumerate(msgs) if m["role"] == "user"
+                  and (m.get("content") or "").startswith(WRAPUP_HEAD)]
+            if wu and wrapup != "keep-going":
+                files = wrapup if wrapup is not None else {
+                    k: v for k, v in FILES[(stage, phase)].items() if not k.startswith("evidence/")}
+                return bringup(dict(request, messages=msgs[:2] + msgs[wu[-1]:]),
+                               overrides={(stage, phase): files})
+            k = turn(request)
+            if k == 0 and evidence:
+                return call("write_file", path="evidence/notes.txt", content="configs compared")
+            return call("write_file", path=f"notes/{k}.txt", content=f"turn {k}")
+        return bringup(request)
+    return script

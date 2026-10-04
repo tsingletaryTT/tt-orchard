@@ -35,8 +35,10 @@ This module owns three things.
    the step's log carries the reply's finish_reason.
 
    The step keeps its conversation in `messages`. `continue_with` adds one user message and runs
-   the loop again with its own turn cap and its own log file. The supervisor calls it once, with
-   the exit gate's reasons, when a step ended "done" and the gate failed.
+   the loop again with its own turn cap and its own log file. The supervisor calls it with the
+   exit gate's reasons when a step ended "done" and the gate failed, or as a wrap-up when a step
+   used up its turns with evidence on disk and its deliverable not written. A step gets at most
+   one of the two.
 
    The environment also sets TT_VISIBLE_DEVICES and TT_METAL_VISIBLE_DEVICES to NO_CHIP, a
    device mask that matches no chip. This is a request to the runtime. Nothing in orchard stops a
@@ -379,8 +381,9 @@ class AgentStep:
     def continue_with(self, text: str, *, max_turns: int, log_path) -> Outcome:
         """Add one user message to this step's conversation and run the loop again.
 
-        The supervisor uses this once, when a step ended "done" and the stage's exit gate failed:
-        `text` is the gate feedback. The continuation has its own turn cap and writes its own log
+        The supervisor uses this once per step: for gate feedback, when a step ended "done" and
+        the stage's exit gate failed, or for a wrap-up, when a step used up its turns with
+        evidence on disk and its deliverable not written. The continuation has its own turn cap and writes its own log
         at `log_path`, so the first run's log stays as it was.
         """
         if self.messages is None:

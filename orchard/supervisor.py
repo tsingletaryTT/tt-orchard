@@ -22,6 +22,17 @@ only after status "done". If the gate passes afterwards the stage passes; otherw
 or fails as before. A kill during the continuation loses the conversation: the resumed stage starts
 a fresh step, which may use its own one continuation.
 
+A second exception covers a step that runs out of turns. When a step ends with status "turns",
+the step has not written its deliverable (the gate file for a run or finish step, hw_test.json
+or hw_tests.json for a prepare step: missing, or unchanged since the step started), and its stage
+directory holds at least one evidence file, the same
+conversation gets one wrap-up (AGENT_WRAPUP_TURNS). The message names the missing file, lists the
+evidence files, and allows no new investigation. The second-model run showed why: stage 0's agent
+wrote 8 evidence files, used all 60 turns and never wrote delta.json. The ledger records a "wrap-up"
+decision before the continuation runs. There is at most one wrap-up per run of the stage body, and
+a step that was wrapped up gets no gate feedback: if its file fails the gate, the stage fails or
+escalates as before. A kill during the wrap-up loses the conversation, as with gate feedback.
+
 The first start of the coder in a run is also asked a
 known-answer question (7 times 6); a server that answers without 42 blocks the run, because the
 canary alone would accept noise. When stage 0 finds that the model needs new model code
@@ -90,6 +101,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import dataclasses
 import functools
 import hashlib
 import json
@@ -109,7 +121,7 @@ from orchard.canary import CanaryError, compare, post_json
 from orchard.canary import ask as canary_ask
 from orchard.commands import run_command
 from orchard.context import build_messages, facts_from
-from orchard.defaults import (AGENT_CONTINUATION_TURNS, CHIPS_PER_BOARD, CMD_TIMEOUT_S,
+from orchard.defaults import (AGENT_CONTINUATION_TURNS, AGENT_WRAPUP_TURNS, CHIPS_PER_BOARD, CMD_TIMEOUT_S,
                               COLD_BOOT_BUDGET_S, CONTROL_POLL_S, FIRST_BOOT_EXPECTED,
                               FIRST_BOOT_PROMPT, PACKAGE_DEFERRED, PACKAGE_FORMATS,
                               RUN_CANARY_PROMPT, STOP_TIMEOUT_S, TEST_DISK_GB)
@@ -372,6 +384,45 @@ def hardware_test_failure(stage_dir: Path) -> dict | None:
 
 
 GATE_FEEDBACK_HEAD = "The supervisor checked your stage's output and it does not pass yet."
+WRAPUP_HEAD = "Your turn budget for this step is used up."
+
+
+def deliverable(spec, phase: str) -> str | None:
+    """The file a step of this phase must leave in the stage directory."""
+    if phase == "prepare":
+        return "hw_tests.json" if spec.tests else "hw_test.json"
+    return spec.gate_file
+
+
+def file_stamp(path: Path) -> tuple | None:
+    """(size, mtime_ns) of a file, or None when it does not exist."""
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return (st.st_size, st.st_mtime_ns)
+
+
+def evidence_files(run_dir: Path, stage_dir: Path) -> list[str]:
+    """Every file under the stage's evidence/ directory, relative to the run directory."""
+    ev = stage_dir / "evidence"
+    if not ev.is_dir():
+        return []
+    return sorted(os.path.relpath(f, run_dir) for f in ev.rglob("*") if f.is_file())
+
+
+def wrapup_text(spec, name: str, files: list[str]) -> str:
+    """The user message of a wrap-up: the missing file, the evidence, and the rules."""
+    n = spec.number
+    lines = [WRAPUP_HEAD, f"This step has not written stages/{n}/{name}. These evidence files are "
+                          "in your stage directory:"]
+    lines += [f"- {f}" for f in files]
+    lines += [f"Write stages/{n}/{name} now, from these files, in the shape the skill describes. "
+              "No new investigation is allowed: do not search, list or read anything except the "
+              f"files above. You have {AGENT_WRAPUP_TURNS} turns. Where the evidence does not cover "
+              "a field, say so in that field. When the file is written, reply with a short summary "
+              "and no tool call."]
+    return "\n".join(lines)
 
 
 def gate_feedback_text(spec, reasons) -> str:
@@ -847,10 +898,12 @@ class Supervisor:
         return spec.gate
 
     def _stage_body(self, spec, stage_dir: Path, escalated: bool, resumed: bool):
+        self._wrapup_used = False           # at most one wrap-up per run of the stage body
         if spec.harness:
             return self._package_body(spec, stage_dir, resumed)
         if spec.boards == 0:
             out, step = self._step(spec, "run", stage_dir, escalated, resumed)
+            out = self._wrap_up(spec, stage_dir, step, out)
             if out.status != "done":
                 return out.status, [f"the agent step ended: {out.status} {out.detail}".strip()], None
         else:
@@ -859,7 +912,8 @@ class Supervisor:
                 if ended:
                     return ended
             elif not (resumed and (stage_dir / "test-result.json").is_file()):
-                out, _ = self._step(spec, "prepare", stage_dir, escalated, resumed)
+                out, prep = self._step(spec, "prepare", stage_dir, escalated, resumed)
+                out = self._wrap_up(spec, stage_dir, prep, out)
                 if out.status != "done":
                     return out.status, [f"the prepare step ended: {out.status} {out.detail}".strip()], None
                 test, problems = self._read_test(stage_dir)
@@ -867,6 +921,7 @@ class Supervisor:
                     return "fail", problems, None
                 self._hardware_phase(spec, stage_dir, test)
             out, step = self._step(spec, "finish", stage_dir, escalated, resumed)
+            out = self._wrap_up(spec, stage_dir, step, out)
             if out.status != "done":
                 return out.status, [f"the finish step ended: {out.status} {out.detail}".strip()], None
         gate = self._check_gate(spec, stage_dir)
@@ -878,6 +933,9 @@ class Supervisor:
             self.ledger.append("decision", spec.number,
                                decision="no gate feedback: the hardware test failed", **failed)
             return "fail", list(gate.reasons), gate
+        if not gate.ok and getattr(step, "wrapped_up", False):
+            # The step already had its one continuation, the wrap-up.
+            return "fail", list(gate.reasons), gate
         if not gate.ok:
             # One continuation per run of the stage body; there is no loop here on purpose. It is
             # for a missing or malformed output file after a run step, or after a hardware test
@@ -888,6 +946,30 @@ class Supervisor:
                                     f"{out.status} {out.detail}".strip(), *gate.reasons], None
             gate = self._check_gate(spec, stage_dir)
         return ("pass", [], gate) if gate.ok else ("fail", list(gate.reasons), gate)
+
+    def _wrap_up(self, spec, stage_dir: Path, step: AgentStep, out):
+        """A step that used up its turns with evidence on disk and its deliverable missing gets one
+        wrap-up continuation of the same conversation. Any other outcome is returned as it is."""
+        if out.status != "turns" or self._wrapup_used:
+            return out
+        name = deliverable(spec, step.phase)
+        files = evidence_files(self.run_dir, stage_dir)
+        # "Not written by this step": missing, or unchanged since the step started. A kill after an
+        # earlier attempt's wrap-up can leave that attempt's file behind in a kept stage directory.
+        if not name or not files or file_stamp(stage_dir / name) != step.deliverable_stamp:
+            return out
+        self._wrapup_used = True
+        n = spec.number
+        entry = self.ledger.append("decision", n, decision="wrap-up", phase=step.phase,
+                                   file=f"stages/{n}/{name}", evidence=files, turns=AGENT_WRAPUP_TURNS,
+                                   after=f"{out.status} {out.detail}".strip())
+        step.wrapped_up = True
+        log = stage_dir / "log" / f"{step.phase}-wrapup-{entry['seq']:05d}.jsonl"
+        done = step.continue_with(wrapup_text(spec, name, files), max_turns=AGENT_WRAPUP_TURNS,
+                                  log_path=log)
+        if done.status == "done":
+            return done
+        return dataclasses.replace(done, detail=f"(in the wrap-up) {done.detail}".strip())
 
     def _test_failure(self, spec, stage_dir: Path) -> dict | None:
         """Why the stage's hardware testing failed, or None. One test: its test-result.json. A list
@@ -1044,6 +1126,8 @@ class Supervisor:
                          evidence_dir=stage_dir / "evidence",
                          log_path=stage_dir / "log" / f"{phase}-{len(entries) + 1:05d}.jsonl",
                          http=self.http, clock=self.clock, guard=self.guard)
+        name = deliverable(spec, phase)
+        step.deliverable_stamp = file_stamp(stage_dir / name) if name else None
         return step.run(system, user), step
 
     # ---- the hardware test ----------------------------------------------------------------------
@@ -1146,7 +1230,8 @@ class Supervisor:
         n = spec.number
         tests = load_plan(stage_dir) if resumed else None
         if tests is None:
-            out, _ = self._step(spec, "prepare", stage_dir, escalated, resumed)
+            out, prep = self._step(spec, "prepare", stage_dir, escalated, resumed)
+            out = self._wrap_up(spec, stage_dir, prep, out)
             if out.status != "done":
                 return out.status, [f"the prepare step ended: {out.status} {out.detail}".strip()], None
             tests, problems = read_plan(stage_dir, required=self.required_chips,
