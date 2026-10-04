@@ -80,3 +80,20 @@ intervention, stopped at stage 0.
 
 **Interventions (attempt 2):** (none yet)
 - **2026-10-04T17:37:08Z attempt 2 started** (supervisor pid 3074828, run directory `openthai2-run2`). Hands off.
+- **17:37Z to 19:53Z attempt 2, stages 0 to 7: zero interventions, about 2 hours 16 minutes of wall time.** Stage 0 pass
+  in 2 min 38 s (attempt 1 had run out of turns); stage 1 pass in 8 min with one watchdog nudge that resolved
+  itself; stage 2 pass (cold boot, ready in 1970 s, agreement 0.906); stage 3 skipped by design; stage 4 pass
+  on all three configurations (1 chip ready 1810 s, 2 chips 266 s, 4 chips 300 s, each agreement 0.906, one
+  park for the 4-chip test); stages 5 and 6 skipped by design; stage 7 pass at 19:53:12Z (packages staged, an
+  installed copy booted in the verify step). The delta triage found, with no hand-tuning: weights-only, 1199
+  shared tensors with 0 differing in shape or dtype, the base model's vision tower kept (333 tensors), the
+  same Apache-2.0 license, and the four standing hazards. Escalations 0, pauses 0, nudges 1.
+- **19:53Z to 20:01Z attempt 2 stopped at stage 8 (operator bundle).** The first attempt (19:53:12Z) read stage
+  7's evidence with 33 `cd ... && cat` commands, wrote nothing, and was escalated at 19:56:56Z after the
+  `identical_responses` nudge and the 20-turn no-file watchdog; the escalated attempt read for 20 more turns,
+  wrote nothing, and the watchdog paused the run at 20:00:59Z. Cause: stage 8 is the last stage that is still an
+  open-ended agent step with no template; it must read every stage's results before it can write
+  `RESULTS.md`, and a model that reads before it writes runs into the 20-turn limit. Its pass on the
+  first model was not reliable. Fix: a template for stage 8 (a script that builds the bundle deterministically
+  from the ledger and stage results; the agent reviews and adds risks), then resume this run to finish it
+  (those steps count as interventions: a merge, a restart and a resume), and then a third model, fully clean.
