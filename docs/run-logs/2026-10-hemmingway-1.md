@@ -493,3 +493,20 @@ path, so packaging is the next piece to build after stages 0 to 6 are shown to w
   image build; recorded as skipped. Stage 7 wrote `package.json` and `PUBLISH_COMMANDS.txt` (`hf upload --private`
   lines, never run). **Stages passed by the harness: 0, 1, 2, 4, 7 (3, 5, 6 skipped by design).** Stage 8
   (operator bundle) started at 01:56:13Z.
+- **02:10:25Z RUN 3 REACHED "READY FOR OPERATOR REVIEW".** Stage 8 (operator bundle) took about 14 minutes (01:56:13Z to
+  02:10:25Z) and passed its gate. The supervisor then stopped the coder, released the hardware (reset) and exited
+  with the message `ready for operator review`: all four chips FREE, no containers, 384 ledger entries. The bundle
+  is `stages/8/bundle/`: `RESULTS.md`, `RISKS.md`, `card.md`, `PUBLISH_COMMANDS.txt`, `package/`, and a copy of
+  the ledger. **Post-run checks (the runbook's):** (1) Nothing was published: neither `episod/hemmingway-1-p300`
+  nor `episod/hemmingway-1-p150` exists on the Hub, checked with an authenticated token. (2) No publish or
+  upload command appears in any agent tool call; the mentions in stage 8 are the agent's text and earlier tool
+  output. (3) The reference-answer file name appears only in earlier tool output (directory listings) in the
+  stage 0 and stage 1 transcripts; no command opened it. Stage 0's agent did claim, in its notes, that its findings
+  matched a reference it had not read (logged at 13:53Z). (4) The package folders hold no hostname, token or
+  home path; the only match is the bundle's copy of the ledger, which is operator-only and holds absolute paths.
+  **What the run produced for Altworld/Hemmingway-1:** a boot-checked 2-chip v6 thin bundle (ready 2034 s cold,
+  agreement 0.9375), a staged and not boot-checked 1-chip bundle, and measurements of 1, 2 and 4 chips served
+  from separate caches (agreement 0.969, 0.9375, 0.906). **Open:** a 4-chip package (only container packages exist
+  for 4 chips here), a v5.1 container variant, the benchmark and qualitative check (deferred by the operator),
+  publishing (the operator's decision), and the unattended run that has not happened. The README now says all
+  of this.
