@@ -9,7 +9,9 @@ where the coder's lease is recorded. Nothing here starts a process or calls a mo
 The table holds one spec per stage. The path stage 0 chose can replace a spec: on the weights-only
 path stage 2 uses the weights-swap-check skill and `gate_weights_swap`, stage 4 runs one hardware
 test per chip configuration (`WEIGHTS_ONLY_STAGE_4`, `gate_mesh_swap`), and stages 3, 5 and 6 are
-skipped (`spec_for`, `run_path`).
+skipped (`spec_for`, `run_path`). On the weights-only path of a run started with --package-format
+v6, stage 7 is `PACKAGE_STAGE_7`: supervisor code (orchard/package.py) does its work, with no agent,
+and `gate_package` checks the package again from the files on disk (`package_format`).
 
 A gate checks the shape of a stage's result file and that every evidence path it lists is a file
 inside the run directory. A gate cannot tell whether a claim is true. The operator reviews the
@@ -35,9 +37,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from orchard.defaults import (COLD_START_S, LONG_STAGE_S, RUN_COLD_BOOT_CAP, RUN_ESCALATION_CAP,
-                              RUN_WALL_CLOCK_S, STAGE2_PCC_MIN, STAGE4_SWAP_DISK_GB, STAGE_BUDGET_S,
-                              STAGE_DISK_GB, SWAP_MIN_TOKENS, SWAP_TOP1_MIN)
+from orchard.defaults import (COLD_START_S, LONG_STAGE_S, PACKAGE_FORMATS, RUN_COLD_BOOT_CAP,
+                              RUN_ESCALATION_CAP, RUN_WALL_CLOCK_S, STAGE2_PCC_MIN,
+                              STAGE4_SWAP_DISK_GB, STAGE_BUDGET_S, STAGE_DISK_GB, SWAP_MIN_TOKENS,
+                              SWAP_TOP1_MIN)
 from orchard.tiers import TierConfig
 
 
@@ -63,6 +66,7 @@ class StageSpec:
     gate: Callable[[Path, Path], GateResult] | None
     marker: str | None                  # resume marker: a file in the stage directory
     skip: str | None = None             # why plan 4 skips this stage
+    harness: bool = False               # supervisor code does the work; no agent and no model
     tests: bool = False                 # the hardware phase runs a list of tests (hw_tests.json,
                                         # orchard/hwtests.py) in place of one hw_test.json
     disk: float | None = None           # free disk the stage needs, when it differs from STAGE_DISK_GB
@@ -449,8 +453,103 @@ def gate_bundle(stage_dir, run_dir) -> GateResult:
     return _done(reasons, seen)
 
 
-SKIP_7 = ("plan 4 builds no package or container image; the operator bundle reports the "
-          "package as not built")
+def _inside_dir(run_dir, rel) -> Path | None:
+    """The directory `rel` names, if it is a directory inside the run directory (links resolved)."""
+    if not isinstance(rel, str) or not rel or os.path.isabs(rel):
+        return None
+    root = os.path.realpath(run_dir)
+    p = os.path.realpath(os.path.join(root, rel))
+    return Path(p) if os.path.commonpath([root, p]) == root and os.path.isdir(p) else None
+
+
+def gate_package(stage_dir, run_dir) -> GateResult:
+    """Stage 7: a staged v6 package whose boot check passed.
+
+    Everything that matters is checked again from the files on disk: the license (read from the
+    new model's snapshot), each staged directory's scrub, run.sh's weights settings, the manifest's
+    weights, the card, the boot check's verify.json and the publish commands. package.json only
+    says where to look."""
+    # Imported here: orchard.package imports this module.
+    from orchard.package import PUBLISH_FILE, publish_problems, weights_wiring_problems
+    from orchard.package_card import card_problems, read_license
+    from orchard.scrub import scrub_package
+    d, err = _load(stage_dir, "package.json")
+    if err:
+        return GateResult(False, (err,))
+    run = Path(run_dir)
+    reasons, seen = [], []
+    if d.get("format") != "v6":
+        reasons.append(f"package.json format must be 'v6', got {d.get('format')!r}")
+    delta, _ = _load(run / "stages" / "0", "delta.json")
+    swap, _ = _load(run / "stages" / "2", "swap_config.json")
+    delta, swap = delta or {}, swap or {}
+    license_id = read_license(swap.get("new_snapshot") or "/nonexistent")
+    if not license_id:
+        reasons.append("the new model's license cannot be read from its snapshot's README.md")
+    elif d.get("license") != license_id:
+        reasons.append(f"package.json says the license is {d.get('license')!r}; the model's is "
+                       f"{license_id!r}")
+    profiles = d.get("profiles") if isinstance(d.get("profiles"), list) else []
+    if not any(isinstance(p, dict) and p.get("required") and p.get("verified") is True
+               for p in profiles):
+        failed = [p.get("verify", {}).get("failed") for p in profiles if isinstance(p, dict)]
+        reasons.append("no required profile passed its boot check"
+                       + (f": {failed[0]}" if failed and failed[0] else ""))
+    for p in profiles:
+        name = p.get("name") if isinstance(p, dict) else None
+        out = _inside_dir(run, p.get("dir")) if isinstance(p, dict) else None
+        if out is None:
+            reasons.append(f"profile {name!r}: its dir is not a directory inside the run directory")
+            continue
+        try:
+            m = json.loads((out / "tt_kernel_manifest.json").read_text(encoding="utf-8"))
+            run_sh = (out / "run.sh").read_text(encoding="utf-8")
+            card = (out / "README.md").read_text(encoding="utf-8")
+        except (OSError, ValueError) as exc:
+            reasons.append(f"profile {name}: {exc}")
+            continue
+        w = m.get("weights") or {}
+        if (w.get("repo_id"), w.get("revision")) != (delta.get("model"), d.get("revision")):
+            reasons.append(f"profile {name}: the manifest's weights are {w.get('repo_id')}@"
+                           f"{w.get('revision')}; expected {delta.get('model')}@{d.get('revision')}")
+        reasons += [f"profile {name}: {x}" for x in
+                    weights_wiring_problems(run_sh, nearest_model=delta.get("nearest_model") or "")]
+        reasons += [f"profile {name}: scrub: {x}" for x in
+                    scrub_package(out, namespace=d.get("namespace"))]
+        if license_id:
+            reasons += [f"profile {name}: card: {x}" for x in
+                        card_problems(card, license_id=license_id, run_dir=run)]
+        if p.get("verified") is True:
+            v, verr = _load(Path(stage_dir) / "verify" / "evidence", "verify.json")
+            if verr:
+                reasons.append(f"profile {name}: {verr}")
+                continue
+            top1, n = v.get("top1_agreement"), v.get("n_tokens")
+            if not _number(top1) or top1 < SWAP_TOP1_MIN:
+                reasons.append(f"profile {name}: the boot check's top1_agreement {top1!r} is below "
+                               f"{SWAP_TOP1_MIN}")
+            if v.get("coherent") is not True:
+                reasons.append(f"profile {name}: the boot check's free-run text is not coherent")
+            if isinstance(n, bool) or not isinstance(n, int) or n < SWAP_MIN_TOKENS:
+                reasons.append(f"profile {name}: the boot check compared {n!r} tokens; at least "
+                               f"{SWAP_MIN_TOKENS} are needed")
+            served = v.get("served_model") or ""
+            if (not served.endswith("/model-dir")
+                    or set((v.get("server_weights_env") or {}).values()) != {served}):
+                reasons.append(f"profile {name}: the boot check's server did not serve its own "
+                               "model-dir with MODEL_WEIGHTS_DIR and HF_MODEL set to it")
+            _evidence(run_dir, v.get("evidence"), f"profile {name} boot check", reasons, seen)
+    try:
+        text = (Path(stage_dir) / PUBLISH_FILE).read_text(encoding="utf-8")
+        reasons += publish_problems(text)
+    except OSError:
+        reasons.append(f"{PUBLISH_FILE} is missing")
+    return _done(reasons, seen)
+
+
+SKIP_7 = ("stage 7 builds a package only on the weights-only path of a run started with "
+          "--package-format v6; this run builds none, and the operator bundle reports the package "
+          "as not built")
 
 STAGES: tuple[StageSpec, ...] = (
     StageSpec(0, "intake and delta triage", "delta-triage", ("model-bringup",), 0,
@@ -480,8 +579,9 @@ def validate_table(stages=STAGES) -> None:
     for s in stages:
         if s.skip:
             continue
-        if s.gate is None or not s.gate_file or not s.skill:
-            raise ValueError(f"stage {s.number} needs a skill, a gate file and a gate")
+        if s.gate is None or not s.gate_file or not (s.skill or s.harness):
+            raise ValueError(f"stage {s.number} needs a skill (or harness code), a gate file "
+                             "and a gate")
         if s.budget_s > LONG_STAGE_S and not s.marker:
             raise ValueError(f"stage {s.number} has a budget of {s.budget_s} s and declares no "
                              "resume marker (spec section 10)")
@@ -534,6 +634,15 @@ SKIP_6_WEIGHTS_ONLY = ("weights-only path: the operator deferred the qualitative
                        "stage 4 already shows the output is coherent")
 WEIGHTS_ONLY_STAGE_6 = dataclasses.replace(STAGES[6], skip=SKIP_6_WEIGHTS_ONLY)
 
+# Stage 7 on the weights-only path of a run started with --package-format v6 (plan 5): supervisor
+# code stages a v6 thin package, installs a copy and boots it on one board (orchard/package.py).
+# The hardware phase is the one-test phase stages 2 and 3 use, so the coder is parked when no
+# board is free.
+PACKAGE_STAGE_7 = dataclasses.replace(
+    STAGES[7], name="package (v6 thin bundle) and boot check", boards=1, gate_file="package.json",
+    gate=gate_package, marker="test-result.json", skip=None, harness=True)
+validate_table(tuple(PACKAGE_STAGE_7 if s.number == 7 else s for s in STAGES))
+
 
 def delta_path(run_dir) -> str | None:
     """The path in stages/0/delta.json, or None when the file is missing, unreadable or names
@@ -565,16 +674,40 @@ def run_path(entries: list[dict], run_dir) -> str | None:
     return delta_path(run_dir)
 
 
-def spec_for(number: int, path: str | None) -> StageSpec:
+def spec_for(number: int, path: str | None, package_format: str | None = None) -> StageSpec:
     """The stage spec for `number` on `path`. Only the weights-only path changes the table: stage 2
-    gets the swap skill and gate, stage 4 runs one test per chip configuration, and stages 3, 5
-    and 6 are skipped (the supervisor records each as skipped, as it does stage 7)."""
+    gets the swap skill and gate, stage 4 runs one test per chip configuration, stages 3, 5 and 6
+    are skipped (the supervisor records each as skipped), and when the run was started with
+    --package-format v6, stage 7 packages the model. Every other run skips stage 7."""
     if path == "weights-only":
         weights_only = {2: WEIGHTS_ONLY_STAGE_2, 3: WEIGHTS_ONLY_STAGE_3, 4: WEIGHTS_ONLY_STAGE_4,
                         5: WEIGHTS_ONLY_STAGE_5, 6: WEIGHTS_ONLY_STAGE_6}
         if number in weights_only:
             return weights_only[number]
+        if number == 7 and package_format == "v6":
+            return PACKAGE_STAGE_7
     return STAGES[number]
+
+
+PACKAGE_OPTIONS_SET = "package options set"
+
+
+def package_options(entries: list[dict]) -> dict | None:
+    """The run's stage 7 options: run_start's `package`, or a later "package options set" decision
+    (a run started without them may get them on a resume, before stage 7 has started)."""
+    opts = None
+    for e in entries:
+        if e["event"] == "run_start":
+            opts = e["data"].get("package")
+        elif e["event"] == "decision" and e["data"].get("decision") == PACKAGE_OPTIONS_SET:
+            opts = e["data"].get("package")
+    return opts if isinstance(opts, dict) else None
+
+
+def package_format(entries: list[dict]) -> str | None:
+    """The run's package format ("v6"), or None when the run builds no package."""
+    fmt = (package_options(entries) or {}).get("format")
+    return fmt if fmt in PACKAGE_FORMATS else None
 
 
 # ---- tiers, skills and disk ---------------------------------------------------------------------
