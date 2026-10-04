@@ -36,8 +36,8 @@ it, fixed the code, and restarted it many times. Each fix is described in
 
 | # | Stage | On real hardware |
 |---|---|---|
-| 0 | Intake and delta triage against the nearest supported model | Passed on Hemmingway-1 (27 min, 59 agent turns, path `weights-only`) |
-| 1 | Environment and CPU reference | Passed on Hemmingway-1 on the fifth attempt (8 min, 25 turns), after fixes to the agent loop and with agent thinking turned off |
+| 0 | Intake and delta triage against the nearest supported model | Passed on Hemmingway-1 (27 min, 59 agent turns, path `weights-only`) with an open-ended skill. Failed twice on the second model (iapp/openthai2.0-qwen3.8-27b): the agent explored and never wrote `delta.json`. Since 2026-10-04 a template script (`delta_triage.py`) measures and drafts `delta.json` and the agent reviews it; tested with fakes, not yet run on hardware |
+| 1 | Environment and CPU reference | Passed on Hemmingway-1 on the fifth attempt (8 min, 25 turns), after fixes to the agent loop and with agent thinking turned off. Since 2026-10-04 a template script (`reference_gate.py`) loads the model, runs the four checks and drafts `reference.json`; tested on a tiny random model, not yet run on hardware |
 | 2 | Functional decoder on one chip; on the weights-only path, a weights swap on one board | Passed on Hemmingway-1 (weights-only path): the chip agreed with the CPU reference on 30 of 32 tokens (0.9375, measured, one prompt) |
 | 3 | Full model | Skipped by design on the weights-only path. Never run on the full-port path |
 | 4 | Multichip, then shrink to fewer chips; on the weights-only path, one test per chip configuration | In progress on Hemmingway-1 when this was written. No result yet |
@@ -59,10 +59,10 @@ supervisor pauses before stage 2 for the operator.
 | Lease adapters (gozer, single tenant) | `orchard/adapters/` | Built and tested. The gozer adapter was used on the real run. The single-tenant adapter is tested with fakes only and the command line does not offer it |
 | Server control and canary | `orchard/server.py`, `orchard/canary.py` | Built and tested. Used on the real run |
 | Park and restore | `orchard/handoff.py` | Built and tested. The park check ran once on one real board with fake model servers. No real model has been parked during a run yet |
-| Watchdog | `orchard/watchdog.py`, `orchard/transcripts.py` | Built and tested. Fired on a real agent during the run |
+| Watchdog | `orchard/watchdog.py`, `orchard/transcripts.py` | Built and tested. Fired on a real agent during the run. The near-duplicate command check (command shapes, 4 turns) was added after the second-model run and has not fired on a real agent yet |
 | Stage machine, agent loop, supervisor | `orchard/stages.py`, `orchard/agent.py`, `orchard/context.py`, `orchard/supervisor.py` | Built and tested. Ran stages 0 to 2 on the real run |
 | Crash recovery | `orchard/supervisor.py`, `orchard/handoff.py` | Tested with fakes by killing the supervisor after every ledger event. On hardware: `kill -9`, restart, resume worked at least four times on the real run |
-| Stage skills | `orchard/skills/` | Drafts. `delta-triage`, `reference-gate` and `weights-swap-check` have been used on the real run. `weights-swap-configs` and `operator-bundle` have been used on the real run. `serving-check` has never run |
+| Stage skills | `orchard/skills/` | Drafts. `delta-triage`, `reference-gate` and `weights-swap-check` have been used on the real run. `weights-swap-configs` and `operator-bundle` have been used on the real run. `serving-check` has never run. `delta-triage` and `reference-gate` were rewritten on 2026-10-04 to run template scripts (`delta-triage-templates/`, `reference-gate-templates/`); the rewritten versions have not run on hardware |
 | Packaging (stage 7) | `orchard/package.py`, `orchard/package_card.py`, `orchard/package_templates/` | Built and tested with fakes, then run once on hardware (Hemmingway-1; see stage 7 above). Wired into the stage table as opt-in supervisor code. A v5.1 container package is refused at start |
 | Bundle and package scrub | `orchard/scrub.py` | Built and tested with fakes. The stage 8 gate calls it; it ran once on the real run |
 | CPU sizing tool | `orchard/sizing.py` | Built and tested against a fake server. It has not been run against a real ollama. The CPU numbers in this README come from the run log |
@@ -381,9 +381,12 @@ on its own.
 5. When a test needs the coder's board and no other board is free, it parks the coder: the CPU
    tier answers a canary question, the coder stops, the board is reset in place, the test runs,
    the board is reset again, the coder restarts and must give the same canary answer as before.
-6. A failed stage is escalated once to its `diagnose` tier (or the `[escalation]` default). A
+6. An agent step that uses up its turns with evidence files on disk and its output file not
+   written gets one wrap-up: the same conversation is told which file is missing and which
+   evidence exists, and has 12 turns to write it with no new investigation.
+7. A failed stage is escalated once to its `diagnose` tier (or the `[escalation]` default). A
    second failure pauses the run for you.
-7. At the end it stops the coder, releases every lease, and prints `ready for operator review`.
+8. At the end it stops the coder, releases every lease, and prints `ready for operator review`.
 
 ### 4.5 The run directory
 
@@ -447,8 +450,8 @@ supervisor refuses a ledger whose chain is broken.
 
 | # | Stage | Skill | What it does |
 |---|---|---|---|
-| 0 | Delta triage | `delta-triage` | Compares the new model with the nearest supported model and writes `delta.json` with every difference and the path: `weights-only` or `full-port` |
-| 1 | CPU reference | `reference-gate` | Builds a CPU reference of the new model and checks it against the model card before anything is compared with it |
+| 0 | Delta triage | `delta-triage` | The agent writes `triage_config.json` and runs `delta_triage.py`, which compares configs, safetensors headers, tokenizers (with an encode test of 206 strings), files, generation config, license and free disk, and drafts `delta.json` with every difference and the path: `weights-only` or `full-port`. The agent reviews the findings and adds hazards |
+| 1 | CPU reference | `reference-gate` | The agent writes `reference_config.json` and runs `reference_gate.py`, which loads the model on CPU in bf16, reports missing and unexpected keys, round-trips 14 strings, decodes 32 greedy tokens with the first-token and append-at-end checks, and drafts `reference.json`. The card check is a form check only. The agent reviews the notes |
 | 2 | Weights swap check (weights-only) or functional decoder (full-port) | `weights-swap-check` or `functional-decoder` | Serves the new weights on one board through the existing implementation and compares the chip's tokens with the CPU reference |
 | 3 | Full model | `full-model` | Full-port path only. Skipped on the weights-only path |
 | 4 | Each chip configuration (weights-only) or multichip and shrink (full-port) | `weights-swap-configs` or `mesh-shrink` | Runs one serve-and-compare test per chip configuration, each under its own lease |
@@ -590,7 +593,7 @@ Each of these happened on the development machine. Details are in the
 |---|---|
 | [`orchard/`](orchard/) | The supervisor package. Each module's docstring says what it owns and what it does not do |
 | [`orchard/defaults.py`](orchard/defaults.py) | Every timing, budget and threshold, each labelled measured or choice |
-| [`orchard/skills/`](orchard/skills/) | The draft stage skills and the weights-swap template scripts |
+| [`orchard/skills/`](orchard/skills/) | The draft stage skills and the template scripts they copy (delta triage, reference gate, weights swap) |
 | [`orchard/package_templates/`](orchard/package_templates/) | The script each stage 7 package carries (`prepare_model_dir.py`) and stage 7's boot check (`verify_bundle.py`) |
 | [`config/tiers.example.toml`](config/tiers.example.toml) | The example tier config |
 | [`tests/`](tests/) | The test suite and its fakes |

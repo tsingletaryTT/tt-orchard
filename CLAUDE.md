@@ -326,3 +326,30 @@ typed. Fix it so a label cannot fool it (branch `package-id-check`, TDD). Key de
 - Both swap skills tell the agent to copy stage 0's `model` value verbatim into `new_model_id`.
 Mutations seen red: skipping the link check, comparing labels strictly (the live case), accepting mixed revisions.
 Not run on hardware.
+
+## 2026-10-04: templates for stages 0 and 1, near-duplicate repeats, wrap-up at turn exhaustion
+Prompt: the second-model run (iapp/openthai2.0-qwen3.8-27b, `docs/run-logs/2026-10-openthai-run1.md`)
+stopped twice at stage 0. Template stages 0 and 1 as stages 2, 4 and 7 were, catch near-duplicate
+repetition, and give a step that runs out of turns one wrap-up (branch `template-stages-0-1`, worktree,
+TDD, one commit per change, a mutation per guard). Key decisions:
+- `orchard/skills/delta-triage-templates/delta_triage.py` reads `triage_config.json`, measures from
+  safetensors headers (stdlib) and small JSON files, runs a tokenizer encode test (106 fixed strings, 100
+  fixed-seed random ones) and drafts `delta.json`. `weights-only` needs equal decisive text config values,
+  equal shapes and dtypes for every shared tensor, and no text tensor in only one model (vision, projector
+  and `mtp.*` tensors may differ; this last rule is stricter than the prompt asked). A tokenizer difference
+  does not change the path. An id without `@revision` gets the snapshot's revision.
+- `orchard/skills/reference-gate-templates/reference_gate.py` loads in bf16 with low_cpu_mem_usage, decodes
+  32 tokens with one full forward pass per token (no KV cache, so hybrid-attention models need no cache
+  handling), checks the first token against a separate prompt-only forward pass, and writes evidence after
+  each step. The card check is a form check only.
+- Both skills now say: write the config first, copy and run the template, review the draft, never read the
+  ledger, logs or transcripts.
+- `TurnRepeat` has a shape track (`command_shape`, `TURN_SHAPE_N` = 4); `AgentStep` puts the shape on each
+  shell call's event.
+- Wrap-up (`AGENT_WRAPUP_TURNS` = 12): one continuation per attempt when a step ends `turns`, its
+  deliverable is not written by this step and evidence exists. A wrapped step gets no gate feedback.
+  Found by the kill test: a kill after a wrap-up wrote its file left that file behind, so "not written"
+  means missing or unchanged since the step started.
+Mutations seen red: no prefix normalization, always weights-only, no encode test, a weakened append check,
+no missing-keys report, shape track off, no shape on the event, no wrap-up, a wrap-up with no evidence.
+Not run on hardware: neither template has run on a real model.
