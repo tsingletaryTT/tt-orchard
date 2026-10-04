@@ -156,4 +156,3 @@ PACKAGE_HEALTH_TIMEOUT_S = 3300.0   # how long the boot check waits for /health.
                                     # same value as the swap template's HEALTH_TIMEOUT_S
 PACKAGE_VERIFY_DEADLINE_S = 4200.0  # choice: the boot check's hardware deadline: the health wait, 33
                                     # short requests, and the server's stop
-TT_MODEL_MODELS_ROOT = "~/.cache/tt-model/models"   # where `tt-model` installs bundles on this machine

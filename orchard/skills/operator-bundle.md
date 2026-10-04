@@ -13,13 +13,17 @@ whether it is public, and whether it enters any catalog. Write these files in `b
 stage directory:
 
 - `RESULTS.md`: what each stage found, from the stage result files in your context. Every number
-  appears with its label (`measured` or `TODO`) and the evidence path behind it. Say that stage 7
-  (package and container build) was skipped, so no package exists yet.
+  appears with its label (`measured` or `TODO`) and the evidence path behind it. Say what stage 7
+  did. When it staged a package, the supervisor copied its record (`package.json`), its publish
+  commands and each package's card into `bundle/package/`: name each package, its chip count, its
+  license, and whether its boot check passed. When stage 7 was skipped, say so: no package exists.
 - `RISKS.md`: open risks. Include every `TODO` number, every stage 0 hazard and whether a later
-  stage dealt with it, anything a gate passed on thin evidence, and what was never tested.
+  stage dealt with it, anything a gate passed on thin evidence, and what was never tested. When the
+  package's license is non-commercial, say so, and say that its card says so.
 - `PUBLISH_COMMANDS.txt`: the exact commands the operator would run to package and publish, as
   text, one per line, private by default. You never run them. The supervisor refuses publish,
-  push and upload commands.
+  push and upload commands. When `bundle/package/PUBLISH_COMMANDS.txt` exists, copy its lines into
+  yours word for word, comments included.
 - `card.md` (optional): a draft model card built only from measured numbers.
 
 ## The scrub check

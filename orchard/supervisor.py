@@ -53,8 +53,18 @@ and a preflight refuses to start while known credential files exist in the opera
 unless the operator passes --accept-credentials-visible (the ledger records that). Agent shells
 run as the same user, so code an agent runs can still read any file that user can read.
 
-Plan 4 runs stages 0 to 6 and 8. Stage 7 (package and container build) is recorded as skipped,
-and so are stages 3, 5 and 6 on the weights-only path.
+Plan 4 runs stages 0 to 6 and 8; stages 3, 5 and 6 are recorded as skipped on the weights-only
+path. Stage 7 (plan 5) packages the model only on the weights-only path of a run started with
+--package-format v6 and --package-namespace; otherwise it is recorded as skipped. It is supervisor
+code (orchard/package.py) with no agent: it stages a v6 thin bundle per profile, scrubs each one,
+installs a copy of the required profile, boots that copy on a leased board as the stage's hardware
+test (parking the coder when no board is free, as stage 2 does), writes the cards and the publish
+commands as text, and runs gate_package. A failure pauses the run and is not escalated, because no
+model ran. The run's ledger records the package options in run_start, and a resumed run keeps them.
+A run that started without them can be given them on a resume before stage 7 starts; the ledger
+then records a "package options set" decision. --package-format v5.1 is refused at start
+(orchard/defaults.py, PACKAGE_DEFERRED). Stage 7 looks for other chip counts of the nearest model
+in --package-models-root, which defaults to the run's {{TT_MODEL_ROOT}} (orchard/paths.py).
 
 On the weights-only path stage 4 runs a list of hardware tests, one per chip configuration
 (orchard/hwtests.py). The prepare step writes hw_tests.json; the supervisor validates it, writes
@@ -101,20 +111,23 @@ from orchard.commands import run_command
 from orchard.context import build_messages, facts_from
 from orchard.defaults import (AGENT_CONTINUATION_TURNS, CHIPS_PER_BOARD, CMD_TIMEOUT_S,
                               COLD_BOOT_BUDGET_S, CONTROL_POLL_S, FIRST_BOOT_EXPECTED,
-                              FIRST_BOOT_PROMPT, RUN_CANARY_PROMPT, STOP_TIMEOUT_S, TEST_DISK_GB)
+                              FIRST_BOOT_PROMPT, PACKAGE_DEFERRED, PACKAGE_FORMATS,
+                              RUN_CANARY_PROMPT, STOP_TIMEOUT_S, TEST_DISK_GB)
 from orchard.handoff import (NOTE_KEYS, Blocked, Budgets, Handoff, decide_park, progress, reacquire,
                              recover, wait_stopped)
 from orchard.hwtests import (failed_tests, load_plan, move_aside, pending, read_plan, suspect_caches,
                              unrecorded, write_plan, write_record, write_summary)
 from orchard.ledger import Ledger, LedgerCorrupt, LedgerLocked
+from orchard.package import PackageError, stage_all
+from orchard.package import finish as package_finish
 from orchard.paths import (PATHS_RECORDED, RunPaths, UnknownPlaceholder, absolute_path,
                            recorded_paths)
 from orchard.runner import Denied, check_string
 from orchard.server import ServerControl, ServerError, ServerSpec, StopCheck
-from orchard.stages import (GateResult, TierUnavailable, attempt_started_ts, budget_cap, check_disk,
-                            coder_state, delta_path, evidence_record, open_stage_dir,
-                            resolve_endpoint, resolve_skill, run_path, run_progress, spec_for,
-                            tier_for)
+from orchard.stages import (PACKAGE_OPTIONS_SET, GateResult, TierUnavailable, attempt_started_ts,
+                            budget_cap, check_disk, coder_state, delta_path, evidence_record,
+                            open_stage_dir, package_format, package_options, resolve_endpoint,
+                            resolve_skill, run_path, run_progress, spec_for, tier_for)
 from orchard.tiers import TierConfigError, load
 from orchard.watchdog import (Event, IdenticalResponses, Ladder, NoFileWritten, NoNewEvidence,
                               RepeatedToolCall, RetryGuard, StageOverBudget, ThinkingWithoutAction,
@@ -392,7 +405,8 @@ class Supervisor:
                  sleep=time.sleep, budgets: Budgets = Budgets(), disk_usage=shutil.disk_usage,
                  credentials_visible: list[str] | None = None,
                  required_chips: tuple[int, ...] | None = None, home=None, containers=None,
-                 paths: RunPaths | None = None):
+                 paths: RunPaths | None = None, package: dict | None = None,
+                 package_added: bool = False):
         self.run_dir = Path(run_dir).resolve()
         self.ledger, self.cfg, self.model_id = ledger, cfg, model_id
         self.adapter, self.coder, self.coder_chips, self.standin = adapter, coder, coder_chips, standin
@@ -403,6 +417,8 @@ class Supervisor:
         self.budgets, self.disk_usage = budgets, disk_usage
         self.credentials_visible = list(credentials_visible or [])
         self.required_chips = tuple(required_chips) if required_chips else None   # stage 4's required counts
+        self.package = dict(package) if package else None    # stage 7: format, namespace, models_root
+        self.package_added = package_added    # given on a resume of a run that started without them
         self.home = Path(home) if home is not None else operator_home()   # whose shared caches to refuse
         self.containers = containers if containers is not None else LabelledContainers()
         # The machine paths the skills' placeholders name (orchard/paths.py).
@@ -561,13 +577,18 @@ class Supervisor:
         if not p.started:
             self.ledger.append("run_start", None, model=self.model_id, versions=self.versions,
                                inputs=self.inputs, required_chips=list(self.required_chips or ()) or None,
-                               paths=self.paths.record(), coder=self.coder.record(),
+                               paths=self.paths.record(), package=self.package,
+                               coder=self.coder.record(),
                                tiers={k: dict(v) for k, v in self.cfg.tiers.items()})
         elif recorded_paths(self.ledger.read()) is None:
             # The run started under a supervisor that did not record paths. Record them once now,
             # so every later resume is held to the same values.
             self.ledger.append("decision", None, decision=PATHS_RECORDED, paths=self.paths.record(),
                                note="the run_start entry predates the paths record")
+        if self.package_added and package_options(self.ledger.read()) != self.package:
+            # Options given on a resume of a run that started without them (build checked that
+            # stage 7 has not started). Recorded once; a later resume reads them from here.
+            self.ledger.append("decision", None, decision=PACKAGE_OPTIONS_SET, package=self.package)
         if self.credentials_visible:
             # Recorded at every start, because each start is a fresh acceptance by the operator.
             self.ledger.append("decision", None, decision="operator accepted visible credentials",
@@ -589,7 +610,8 @@ class Supervisor:
                 continue
             # The spec follows the path stage 0 chose, read from the ledger each time, so a
             # resumed run picks the same skill and gate as the run that crashed.
-            spec = spec_for(p.next_stage, run_path(self.ledger.read(), self.run_dir))
+            entries = self.ledger.read()
+            spec = spec_for(p.next_stage, run_path(entries, self.run_dir), package_format(entries))
             try:
                 self._ensure_coder()
                 result = self._run_stage(spec, resuming=p.open_stage == p.next_stage,
@@ -825,6 +847,8 @@ class Supervisor:
         return spec.gate
 
     def _stage_body(self, spec, stage_dir: Path, escalated: bool, resumed: bool):
+        if spec.harness:
+            return self._package_body(spec, stage_dir, resumed)
         if spec.boards == 0:
             out, step = self._step(spec, "run", stage_dir, escalated, resumed)
             if out.status != "done":
@@ -873,11 +897,42 @@ class Supervisor:
             return failed_tests(stage_dir, self.required_chips)
         return hardware_test_failure(stage_dir)
 
+    def _package_body(self, spec, stage_dir: Path, resumed: bool):
+        """Stage 7 as supervisor code (orchard/package.py): stage and scrub every profile, install a
+        copy of the required one, boot it under a lease (the same one-test hardware phase as stage
+        2), then record the result, write the cards and publish commands, and run the gate.
+
+        package-thin and install.sh get the agent shells' environment: no tokens, and HOME inside
+        the run directory. So even a call that tried to upload would find no credentials."""
+        n = spec.number
+        opts = package_options(self.ledger.read())
+        if not (resumed and (stage_dir / "test-result.json").is_file()):
+            try:
+                staged = stage_all(self.run_dir, stage_dir, namespace=opts["namespace"],
+                                   models_root=opts["models_root"],
+                                   env=agent_env(self.run_dir, extra=self.extra_env))
+            except PackageError as exc:
+                return "fail", [f"packaging: {exc}"], None
+            self.ledger.append("evidence", n, what="package staged",
+                               profiles=[p["name"] for p in staged["profiles"]],
+                               **evidence_record(self.run_dir, stage_dir / "package.json"))
+            test, problems = self._read_test(stage_dir)
+            if problems:
+                return "fail", problems, None
+            self._hardware_phase(spec, stage_dir, test)
+        try:
+            package_finish(self.run_dir, stage_dir)
+        except PackageError as exc:
+            return "fail", [f"packaging: {exc}"], None
+        gate = self._check_gate(spec, stage_dir)
+        return ("pass", [], gate) if gate.ok else ("fail", list(gate.reasons), gate)
+
     def _check_gate(self, spec, stage_dir: Path):
         if spec.number == 8:
             bundle = stage_dir / "bundle"
             bundle.mkdir(exist_ok=True)
             shutil.copyfile(self.ledger.path, bundle / "ledger.jsonl")
+            self._copy_package(bundle)
         gate = self._gate(spec)(stage_dir, self.run_dir)
         if spec.tests:
             # The gate reads the test records from the stage directory, where the agent can write
@@ -886,6 +941,21 @@ class Supervisor:
             if forged:
                 return GateResult(False, gate.reasons + tuple(forged), gate.evidence)
         return gate
+
+    def _copy_package(self, bundle: Path) -> None:
+        """Put stage 7's record, publish commands and cards in the operator bundle's package/
+        folder, so the operator reads them with the rest. Nothing is copied when no package was
+        staged. The bundle scrub then searches these copies too."""
+        s7 = self.run_dir / "stages" / "7"
+        if not (s7 / "package.json").is_file():
+            return
+        dest = bundle / "package"
+        dest.mkdir(exist_ok=True)
+        shutil.copyfile(s7 / "package.json", dest / "package.json")
+        if (s7 / "PUBLISH_COMMANDS.txt").is_file():
+            shutil.copyfile(s7 / "PUBLISH_COMMANDS.txt", dest / "PUBLISH_COMMANDS.txt")
+        for card in sorted((s7 / "package").glob("*/README.md")):
+            shutil.copyfile(card, dest / f"{card.parent.name}-README.md")
 
     def _gate_feedback(self, spec, stage_dir: Path, step: AgentStep, gate):
         """The step ended "done" and the exit gate failed. Tell the same conversation what the gate
@@ -916,6 +986,13 @@ class Supervisor:
             return "pause"
         if status == "abort":
             return "abort"
+        if spec.harness:
+            # Supervisor code failed: another model cannot fix it, so it is not escalated.
+            self.ledger.append("decision", n, decision="pause",
+                               reason=f"stage {n} ({spec.name}) failed; it is supervisor code and "
+                                      "is not escalated: " + "; ".join(reasons)[:500])
+            self.ledger.append("stage_end", n, result="fail", reasons=reasons)
+            return "fail"
         if status == "escalate":
             # The watchdog's ladder escalated and wrote the escalate entry before acting.
             self.ledger.append("stage_end", n, result="escalate", reasons=reasons)
@@ -1241,6 +1318,19 @@ def parse(argv=None):
                    help="the operator's home, where tt-model keeps its packages; skills name it "
                         "as {{OPERATOR_HOME}}. Default: this user's home from the passwd entry. "
                         "Recorded and kept like --cache-root")
+    r.add_argument("--package-format", choices=PACKAGE_FORMATS, default=None,
+                   help="stage 7 builds this package on the weights-only path: v6 (a thin bundle). "
+                        "v5.1 is refused at start: it needs a container image build. Without this, "
+                        "stage 7 is skipped. The ledger records it, and a resumed run keeps it. A "
+                        "run that started without it can be given it on a resume before stage 7 "
+                        "starts")
+    r.add_argument("--package-namespace", default=None,
+                   help="the operator's Hugging Face namespace, used in the card and in the "
+                        "publish commands (text only; the run never publishes)")
+    r.add_argument("--package-models-root", default=None, metavar="DIR",
+                   help="where tt-model installs bundles; stage 7 looks here for other chip "
+                        "counts of the nearest model. Default: the run's {{TT_MODEL_ROOT}}, "
+                        "<operator home>/.cache/tt-model/models")
     r.add_argument("--gozer", default="gozer")
     r.add_argument("--accept-credentials-visible", action="store_true",
                    help="start even though credential files exist in the operator's home "
@@ -1249,6 +1339,23 @@ def parse(argv=None):
     c.add_argument("--run-dir", required=True)
     c.add_argument("command", choices=Control.COMMANDS)
     return p.parse_args(argv)
+
+
+def package_option(args) -> dict | None:
+    """The stage 7 options as the ledger records them, or None. Refuses a deferred format and a
+    format without a namespace. `models_root` is None when --package-models-root was not given;
+    build fills in the run's tt_model_root (orchard/paths.py)."""
+    fmt = getattr(args, "package_format", None)
+    if fmt is None:
+        return None
+    if fmt in PACKAGE_DEFERRED:
+        raise ValueError(f"--package-format {fmt} is deferred: {PACKAGE_DEFERRED[fmt]}")
+    if not args.package_namespace:
+        raise ValueError("--package-format needs --package-namespace, the operator's Hugging Face "
+                         "namespace for the card and the publish commands")
+    root = args.package_models_root
+    return {"format": fmt, "namespace": args.package_namespace,
+            "models_root": absolute_path(root) if root else None}
 
 
 def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_json,
@@ -1262,6 +1369,7 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
     run_dir = Path(args.run_dir).resolve()
     inputs, extra_env = pairs(args.input, "input"), pairs(args.env, "env")
     agent_env(run_dir, extra=extra_env)
+    package = package_option(args)
     found = [str(p) for p in visible_credentials(operator_home() if home is None else home)]
     if found and not args.accept_credentials_visible:
         raise ValueError(
@@ -1291,6 +1399,21 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
     home = operator_home() if home is None else home
     paths = run_paths(args, run_dir, recorded_paths(entries) if progress.started else None,
                       home=home, environ=environ)
+    if package is not None and package["models_root"] is None:
+        package["models_root"] = paths.tt_model_root
+    added = False
+    if progress.started:                        # a resumed run keeps the package it started with
+        recorded = package_options(entries)
+        stage7_started = any(e["event"] == "stage_start" and e["stage"] == 7 for e in entries)
+        if package is not None and package != recorded:
+            if recorded is not None or stage7_started:
+                raise ValueError(f"this run has package options {recorded}; the options given now "
+                                 f"({package}) differ. Leave them out to resume with the recorded "
+                                 "ones. Options can be added to a run that has none only before "
+                                 "stage 7 starts")
+            added = True                        # the run records them before its next stage
+        else:
+            package = recorded
     return Supervisor(run_dir=run_dir, ledger=ledger, cfg=cfg, model_id=args.model, adapter=adapter,
                       coder=coder, coder_chips=args.coder_chips,
                       standin=ExternalStandIn(cpu["endpoint"], cpu["model"], http=http),
@@ -1298,7 +1421,8 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
                       extra_env=extra_env, versions=versions, http=http, probe=probe,
                       clock=clock, sleep=sleep, budgets=budgets, disk_usage=disk_usage,
                       credentials_visible=found, required_chips=required,
-                      home=home, containers=containers, paths=paths)
+                      home=home, containers=containers, paths=paths, package=package,
+                      package_added=added)
 
 
 PATH_FLAGS = {"--cache-root": "cache_root", "--hf-home": "hf_home", "--operator-home": "operator_home"}

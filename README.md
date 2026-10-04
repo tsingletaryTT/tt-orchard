@@ -309,6 +309,7 @@ python3 -m orchard.supervisor run --model MODEL --run-dir RUN_DIR --tiers TIERS
     --coder-port CODER_PORT --coder-chips CODER_CHIPS [--coder-image-id CODER_IMAGE_ID]
     [--skills-dir SKILLS_DIR] [--input NAME=PATH] [--env NAME=VALUE]
     [--required-chips N,N] [--cache-root DIR] [--hf-home DIR] [--operator-home DIR]
+    [--package-format {v6,v5.1}] [--package-namespace NS] [--package-models-root DIR]
     [--gozer GOZER] [--accept-credentials-visible]
 ```
 
@@ -330,10 +331,14 @@ python3 -m orchard.supervisor run --model MODEL --run-dir RUN_DIR --tiers TIERS
 | `--cache-root` | no | Where the per-model tensor caches go (`{{CACHE_ROOT}}` in the skills). Default `<parent of --run-dir>/cache`. The ledger records it, and a resume with a different value is refused |
 | `--hf-home` | no | Your Hugging Face cache (`{{HF_HOME}}`). Default `$HF_HOME`, else `<operator home>/.cache/huggingface`. Recorded and kept like `--cache-root` |
 | `--operator-home` | no | Your home directory (`{{OPERATOR_HOME}}`), where tt-model keeps its packages. Default your home from the passwd entry. Recorded and kept like `--cache-root` |
+| `--package-format` | no | `v6` makes stage 7 build a v6 thin package on the weights-only path (see [5.3](#53-what-each-stage-does)). `v5.1` is refused at start, because it needs a container image build. Without this flag stage 7 is skipped. The ledger records it, and a resume with different options is refused. A run that started without it can be given it on a resume, as long as stage 7 has not started |
+| `--package-namespace` | with `--package-format` | Your Hugging Face namespace. Stage 7 writes it into the package card and the publish commands. The run never publishes |
+| `--package-models-root` | no | Where tt-model installs bundles. Stage 7 looks here for other chip counts of the nearest model. Default `{{TT_MODEL_ROOT}}`, which is `<operator home>/.cache/tt-model/models` |
 | `--gozer` | no | The gozer executable. Default `gozer` from `PATH` |
 | `--accept-credentials-visible` | no | Start even though credential files exist in your home directory. **Warning:** agent shells run as your user, so code an agent runs can read those files. The ledger records that you accepted this |
 
-The command line has no package options yet. Stage 7 is recorded as skipped.
+Stage 7 runs only when `--package-format v6` and `--package-namespace` are given and stage 0 chose
+the weights-only path. Otherwise it is recorded as skipped.
 
 Exit codes: 0 ready for operator review, 2 refused (nothing was started), 3 stopped on an error
 (the hardware was released; run the same command again to resume), 4 aborted.

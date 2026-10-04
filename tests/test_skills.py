@@ -163,3 +163,9 @@ def test_the_swap_skills_put_each_tensor_cache_under_the_cache_root():
         assert '"hf_home": "{{HF_HOME}}"' in text
         assert "{{TT_MODEL_ROOT}}/episod/qwen3.8-27b-dflash2-p300" in text
     assert '"operator_home": "{{OPERATOR_HOME}}"' in configs
+
+
+def test_the_bundle_skill_carries_stage_7s_publish_commands_word_for_word():
+    text = (SKILLS / "operator-bundle.md").read_text()
+    assert "bundle/package/PUBLISH_COMMANDS.txt" in text and "word for word" in text
+    assert "non-commercial" in text
