@@ -475,3 +475,21 @@ path, so packaging is the next piece to build after stages 0 to 6 are shown to w
   right to insist that what was tested is what is packaged, but a typed label is the wrong thing to compare:
   the revision is fixed by where the served model directory's weight links resolve. A fix is in progress: compare
   the repo name and the revision resolved from the links, and tell the skill to copy stage 0's id verbatim.
+- **01:16Z to 01:56Z STAGE 7 PASSED: the harness produced packages.** After merging the id-check fix (it resolves
+  the served weights' revision from the model directory's links; it also found two more failures waiting
+  one step later; suite 1626 passed, 1 skipped) the supervisor was restarted and resumed at 01:16:16Z (coder
+  recovered, canary identical for the eighth time). Stage 7 ran the real `tt-model package-thin --out`
+  for two profiles, scrubbed them, wrote cards, then installed a copy of the 2-chip bundle (about 3 minutes;
+  the vLLM build was quick) and booted it on the free board under a lease. **2-chip bundle `hemmingway-1-p300`:
+  booted from a clean install with empty tensor and compile caches, server ready in 2034 s (about 34
+  minutes, cold), `coherent` true, top-1 agreement 0.9375 (30 of 32), free-run text "Let me work through this
+  carefully. The user wants a text message to their landlord about a broken boiler..."; the server's own
+  environment pointed the weights at the bundle's model directory.** Its `run.sh` sets `HF_MODEL` and
+  `MODEL_WEIGHTS_DIR` to `$HERE/model-dir` and passes `--model "$HERE/model-dir"`; at each start
+  `prepare_model_dir.py` builds that directory from the shipped base config files plus the new model's
+  tokenizer and weights. The card carries CC BY-NC 4.0 and "Non-commercial use only", and labels each number
+  measured or TODO. **1-chip bundle `hemmingway-1-p150`: staged, NOT boot-checked** (labelled so in its
+  publish text). **No 4-chip package:** the only 4-chip packages here are containers (v5.1 style), which need an
+  image build; recorded as skipped. Stage 7 wrote `package.json` and `PUBLISH_COMMANDS.txt` (`hf upload --private`
+  lines, never run). **Stages passed by the harness: 0, 1, 2, 4, 7 (3, 5, 6 skipped by design).** Stage 8
+  (operator bundle) started at 01:56:13Z.
