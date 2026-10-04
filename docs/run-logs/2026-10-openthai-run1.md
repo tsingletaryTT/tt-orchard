@@ -69,3 +69,13 @@ wall time per stage, stage retries and escalations, watchdog firings, and every 
   repetition, add a wrap-up step at turn exhaustion, then rerun this model from a clean start. The first run's
   stage 0 and 1 results were produced under a hand-written delta-triage skill that took 27 and 8 minutes and
   needed no resume; this run shows that was not reliable on a second model.
+
+## Attempt 2: the same model, after templating stages 0 and 1
+
+Setup (not counted): the harness fixes above were built and merged (stage 0 and stage 1 template scripts, a
+near-duplicate repetition detector, a wrap-up step at turn exhaustion; suite 1701 passed, 1 skipped), and the
+run script `openthai-run2.sh` was written with a new run directory (`openthai2-run2`). Same model, same pinned
+revision, same flags. The intervention count restarts at zero. Attempt 1's result stays as recorded: 1
+intervention, stopped at stage 0.
+
+**Interventions (attempt 2):** (none yet)
