@@ -457,3 +457,12 @@ path, so packaging is the next piece to build after stages 0 to 6 are shown to w
   I paused the run at 23:44Z, because that skill is open-ended and the earlier stages flailed on open-ended
   skills until they got templates. Stages 5 and 6 (serving checks, qualitative check and benchmark) overlap with
   stage 4's black-box test and with the operator's "benchmark later"; the next step is the packaging stage.
+- **00:30Z to 00:44Z stage 7 wiring merged; run 3 restarted with the packaging options.** Stages 5 and 6 are skipped on
+  the weights-only path (stage 4's black-box tests cover serving; the operator deferred the benchmark), and
+  stage 7 (packaging: stage a v6 thin bundle for the required profiles, scrub it, install a copy, boot the
+  copy on a leased board and compare with the CPU reference, publish commands as text only) is wired into the
+  stage table and the supervisor. Suite on the merged main: 1600 passed, 1 skipped. I restarted the supervisor
+  (pid 2040065) with `--package-format v6 --package-namespace episod` and resumed at 00:44:38Z. The run
+  script keeps uv and pip caches and temp files on the SSD, because the root disk is down to 25 GB free
+  (the rebuilt 31 GB 4-chip cache sits beside the 31 GB stale one that was moved aside). The stale
+  `tensors.aside-20261003` caches on root are not deleted; that is the operator's call.
