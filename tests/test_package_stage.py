@@ -60,6 +60,42 @@ def test_a_run_stage_7_cannot_package_is_refused_with_the_reason(world, breakage
         read_run(world["run"])
 
 
+def swap_check(w, **changes):
+    path = w["run"] / "stages/2/evidence/swap-check.json"
+    write(path, {**json.loads(path.read_text()), **changes})
+
+
+def relink_weights(w, rev):
+    """Point model-dir's weight link at another revision's snapshot of the new model."""
+    other = w["snapshot"].parent / rev
+    other.mkdir()
+    (other / "model-00001-of-00001.safetensors").write_text("other weights")
+    link = w["run"] / "stages/2/model-dir/model-00001-of-00001.safetensors"
+    link.unlink()
+    link.symlink_to(other / "model-00001-of-00001.safetensors")
+
+
+def test_a_short_label_passes_when_the_served_links_match_stage_0(world):
+    # Run 3's live case: stage 0 names '<repo>@<rev>', stage 2's label is '<repo>' alone.
+    assert json.loads((world["run"] / "stages/0/delta.json").read_text())["model"] == f"{NEW}@{NEW_REV}"
+    f = read_run(world["run"])
+    assert (f.model_id, f.revision) == (NEW, NEW_REV)
+
+
+@pytest.mark.parametrize("breakage, words", [
+    (lambda w: swap_check(w, new_model_id="Someone/Else"), "Someone/Else"),
+    (lambda w: swap_check(w, new_model_id=f"{NEW}@{'0' * 40}"), "0" * 40),
+    (lambda w: relink_weights(w, "e" * 40), "e" * 40),
+    (lambda w: swap_check(w, model_dir=None), "model_dir"),
+    (lambda w: write(w["run"] / "stages/0/delta.json", {
+        **json.loads((w["run"] / "stages/0/delta.json").read_text()), "model": NEW}), "names no revision"),
+])
+def test_stage_7_refuses_weights_stage_0_does_not_name(world, breakage, words):
+    breakage(world)
+    with pytest.raises(PackageError, match=re.escape(words)):
+        read_run(world["run"])
+
+
 def test_only_installed_v6_bundles_of_the_nearest_model_are_sources(world):
     container = world["models"] / "mando" / "x-p300x2"
     write(container / "tt_kernel_manifest.json", {"schema_version": "5.1", "name": "x-p300x2"})

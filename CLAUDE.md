@@ -308,3 +308,21 @@ tasks 9 to 11 (stage table, supervisor, documents) on branch `stage7-wiring`. Ke
   supervisor test passes `FakeContainers`, because stage 4's list of tests searches for leftover containers. The
   README flag table gained the three flags in the supervisor commit, because `tests/test_readme.py` requires a row
   for every run flag.
+
+## 2026-10-03: stage 7 reads the served revision from the weight links
+Prompt: run 3's stage 7 failed at once with `packaging: stage 2 served 'Altworld/Hemmingway-1'; stage 0 names
+'Altworld/Hemmingway-1@1a5f363a...'`. The check compared stage 0's `<repo>@<revision>` with a label the stage agent
+typed. Fix it so a label cannot fool it (branch `package-id-check`, TDD). Key decisions:
+- `served_weights_problems` (orchard/package.py) takes stage 0's model and swap-check.json's `new_model_id` and
+  `model_dir`. The label must name stage 0's repo, and stage 0's revision if it has an `@revision`. Every
+  `*.safetensors` file in `model_dir` must link into stage 0's repo, all at one revision, equal to stage 0's.
+- prepare_swap.py links each weight file to its blob (`os.path.realpath` of the snapshot file), so the resolved path
+  names no revision. A blob link is matched to the snapshots whose same-named file is that blob. A link into
+  `snapshots/<rev>/` names the revision directly. Both layouts are tested.
+- Stage 0's ids are split into repo and revision before stage 7 uses them, and `gate_package` does the same. With
+  the real `<repo>@<revision>` format, the nearest-model check and the manifest check failed one step later.
+- The fake HF cache names blobs by content hash, as the real cache does. Before, two revisions of one repo shared a
+  blob file and the mixed-revision test could not fail.
+- Both swap skills tell the agent to copy stage 0's `model` value verbatim into `new_model_id`.
+Mutations seen red: skipping the link check, comparing labels strictly (the live case), accepting mixed revisions.
+Not run on hardware.

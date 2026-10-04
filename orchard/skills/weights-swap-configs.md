@@ -79,7 +79,7 @@ To check a row, run `tt-model list` and read `{{OPERATOR_HOME}}/.cache/tt-model/
         "nearest_model_id": "Qwen/Qwen3.8-27B",
         "base_snapshot": "<nearest model snapshot>",
         "new_snapshot": "<new model snapshot>",
-        "new_model_id": "<new model id>",
+        "new_model_id": "<the model value from stages/0/delta.json, for example Altworld/Hemmingway-1@<revision>>",
         "tt_cache": "{{CACHE_ROOT}}/<slug>/<N>chip-<package name>/tt_cache",
         "hf_home": "{{HF_HOME}}",
         "port": <8100 + N>}
@@ -94,11 +94,15 @@ To check a row, run `tt-model list` and read `{{OPERATOR_HOME}}/.cache/tt-model/
         "nearest_model_id": "Qwen/Qwen3.8-27B",
         "base_snapshot": "<nearest model snapshot>",
         "new_snapshot": "<new model snapshot>",
-        "new_model_id": "<new model id>",
+        "new_model_id": "<the model value from stages/0/delta.json, for example Altworld/Hemmingway-1@<revision>>",
         "tt_cache": "{{CACHE_ROOT}}/<slug>/4chip-qwen3.8-27b-p300x2/tt_cache",
         "hf_home": "{{HF_HOME}}",
         "operator_home": "{{OPERATOR_HOME}}",
         "port": 8104}
+
+   Copy the `model` value from `stages/0/delta.json` verbatim, including the `@revision`, into
+   `new_model_id`. Stage 7 compares this label with stage 0's model and the revision of the weights
+   the test served, so the label must name the same weights.
 
    Every configuration gets its own new `tt_cache`. Never reuse stage 2's cache, another
    configuration's cache, or anything under `{{OPERATOR_HOME}}/.cache/tt-model/` or

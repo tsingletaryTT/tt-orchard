@@ -470,7 +470,8 @@ def gate_package(stage_dir, run_dir) -> GateResult:
     weights, the card, the boot check's verify.json and the publish commands. package.json only
     says where to look."""
     # Imported here: orchard.package imports this module.
-    from orchard.package import PUBLISH_FILE, publish_problems, weights_wiring_problems
+    from orchard.package import (PUBLISH_FILE, publish_problems, split_model_id,
+                                 weights_wiring_problems)
     from orchard.package_card import card_problems, read_license
     from orchard.scrub import scrub_package
     d, err = _load(stage_dir, "package.json")
@@ -483,6 +484,9 @@ def gate_package(stage_dir, run_dir) -> GateResult:
     delta, _ = _load(run / "stages" / "0", "delta.json")
     swap, _ = _load(run / "stages" / "2", "swap_config.json")
     delta, swap = delta or {}, swap or {}
+    # Stage 0 writes <repo>@<revision>; the manifest keeps the repo and the revision apart.
+    new_repo, new_rev = split_model_id(delta.get("model"))
+    nearest_repo = split_model_id(delta.get("nearest_model"))[0]
     license_id = read_license(swap.get("new_snapshot") or "/nonexistent")
     if not license_id:
         reasons.append("the new model's license cannot be read from its snapshot's README.md")
@@ -509,11 +513,12 @@ def gate_package(stage_dir, run_dir) -> GateResult:
             reasons.append(f"profile {name}: {exc}")
             continue
         w = m.get("weights") or {}
-        if (w.get("repo_id"), w.get("revision")) != (delta.get("model"), d.get("revision")):
+        if (w.get("repo_id"), w.get("revision")) != (new_repo, new_rev) or d.get("revision") != new_rev:
             reasons.append(f"profile {name}: the manifest's weights are {w.get('repo_id')}@"
-                           f"{w.get('revision')}; expected {delta.get('model')}@{d.get('revision')}")
+                           f"{w.get('revision')} and package.json's revision is "
+                           f"{d.get('revision')}; stage 0 names {delta.get('model')}")
         reasons += [f"profile {name}: {x}" for x in
-                    weights_wiring_problems(run_sh, nearest_model=delta.get("nearest_model") or "")]
+                    weights_wiring_problems(run_sh, nearest_model=nearest_repo)]
         reasons += [f"profile {name}: scrub: {x}" for x in
                     scrub_package(out, namespace=d.get("namespace"))]
         if license_id:

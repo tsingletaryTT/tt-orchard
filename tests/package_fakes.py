@@ -9,6 +9,7 @@ Nothing here opens a device or reaches the network.
 """
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -79,15 +80,19 @@ def make_source(root: Path, *, name="qwen3.8-27b-dflash2-p300", chips=2, mesh="P
 
 
 def hf_snapshot(hf_home: Path, repo: str, rev: str, files: dict) -> Path:
-    """An HF-cache-shaped snapshot under hf_home/hub: files are relative links into blobs/."""
+    """An HF-cache-shaped snapshot under hf_home/hub: files are relative links into blobs/.
+
+    Blobs are named by a hash of their content, as in the real cache, so two revisions of one repo
+    share a blob only when the file's bytes are the same."""
     org, name = repo.split("/")
     root = hf_home / "hub" / f"models--{org}--{name}"
     blobs, snap = root / "blobs", root / "snapshots" / rev
     blobs.mkdir(parents=True, exist_ok=True)
     snap.mkdir(parents=True)
     for fname, content in files.items():
-        (blobs / f"b-{fname}").write_text(content)
-        (snap / fname).symlink_to(os.path.relpath(blobs / f"b-{fname}", snap))
+        blob = blobs / hashlib.sha256(content.encode()).hexdigest()
+        blob.write_text(content)
+        (snap / fname).symlink_to(os.path.relpath(blob, snap))
     return snap
 
 
@@ -106,13 +111,17 @@ def make_run(tmp: Path, source: Path, *, license_id="cc-by-nc-4.0") -> dict:
         "tokenizer.json": tokenizer_json(), "model-00001-of-00001.safetensors": "new weights"})
     hf_snapshot(hf_op, DRAFTER, DRAFTER_REV, {"model.safetensors": "drafter"})
     hf_snapshot(hf_op, BASE, BASE_REV, {"model-00001-of-00001.safetensors": "base weights"})
-    write(run / "stages/0/delta.json", {"model": NEW, "nearest_model": BASE, "path": "weights-only"})
+    # Stage 0 names both models as <repo>@<revision>, as the delta-triage skill asks.
+    write(run / "stages/0/delta.json", {"model": f"{NEW}@{NEW_REV}", "nearest_model": f"{BASE}@{BASE_REV}",
+                                        "path": "weights-only"})
     ref = run / "stages/1/evidence/reference"
     write(ref / "prompt-ids.json", {"prompt_ids": PROMPT_IDS})
     write(ref / "generated-ids.json", {"generated_ids": GENERATED,
                                        "generated_text": " ".join(VOCAB[i] for i in GENERATED)})
     s2 = run / "stages/2"
-    write(s2 / "evidence/swap-check.json", {"top1_agreement": 0.94})
+    # The label is the short repo id, as run 3's stage agent typed it. model_dir is what was served.
+    write(s2 / "evidence/swap-check.json", {"top1_agreement": 0.94, "new_model_id": NEW,
+                                            "model_dir": str(s2 / "model-dir")})
     write(s2 / "evidence/server.log", "ready\n")
     write(s2 / "result.json", {"serves": True, "server_ready_s": 280.5, "coherent": True,
                                "free_run_text": "x", "top1_agreement": 0.94, "n_tokens": 32,
@@ -124,6 +133,9 @@ def make_run(tmp: Path, source: Path, *, license_id="cc-by-nc-4.0") -> dict:
     write(s2 / "model-dir/config.json", '{"architectures": ["Qwen3_5ForConditionalGeneration"]}')
     write(s2 / "model-dir/preprocessor_config.json", "{}")
     (s2 / "model-dir/tokenizer.json").symlink_to(snap / "tokenizer.json")
+    # prepare_swap.py links each weight file to its blob (the realpath of the snapshot file).
+    weights = "model-00001-of-00001.safetensors"
+    (s2 / "model-dir" / weights).symlink_to(os.path.realpath(snap / weights))
     write(run / "stages/4/evidence/hw-test-output.txt", "ok\n")
     write(run / "stages/4/result.json", {"configs": [
         {"chips": 2, "pass": True, "evidence": ["stages/4/evidence/hw-test-output.txt"]},
