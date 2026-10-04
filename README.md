@@ -27,8 +27,9 @@ Tenstorrent QuietBox 2 with two p300c boards (four Blackhole chips). The model w
 `Altworld/Hemmingway-1`, a fine-tune of `Qwen/Qwen3.8-27B` with the same architecture. That is one
 model from one family. Nothing has been run on any other machine.
 
-The harness has never run unattended from start to finish. During the first run a person paused
-it, fixed the code, and restarted it several times. Each fix is described in
+The harness has reached "ready for operator review" once, on one model, with a person watching: stages 0, 1, 2, 4, 7 and 8 passed and
+stages 3, 5 and 6 were skipped by design. It has never run unattended from start to finish. During that run a person paused
+it, fixed the code, and restarted it many times. Each fix is described in
 [docs/run-logs/2026-10-hemmingway-1.md](docs/run-logs/2026-10-hemmingway-1.md).
 
 ### Stages
@@ -42,8 +43,8 @@ it, fixed the code, and restarted it several times. Each fix is described in
 | 4 | Multichip, then shrink to fewer chips; on the weights-only path, one test per chip configuration | In progress on Hemmingway-1 when this was written. No result yet |
 | 5 | Serving integration | Skipped by design on the weights-only path. Stage 4's serve-and-compare tests boot each configuration, compare the output with the CPU reference and check that it is coherent. Never run on the full-port path |
 | 6 | Qualitative check and benchmark | Skipped on the weights-only path, because the operator deferred it. Stage 4's coherence check is the only quality evidence there. Never run on the full-port path |
-| 7 | Package and container build | Not yet run. On the weights-only path, with `--package-format v6`, it stages a v6 thin package and boots an installed copy on one board. Every other run records it as skipped |
-| 8 | Operator bundle | Not yet run |
+| 7 | Package and container build | Passed once, on Hemmingway-1 (weights-only path, `--package-format v6`): staged a 2-chip and a 1-chip v6 thin bundle with the real `tt-model package-thin`, installed a copy of the 2-chip bundle and booted it from empty caches on a leased board (ready in 2034 s, top-1 agreement 0.9375 with the CPU reference). The 1-chip bundle is staged and not boot-checked. No 4-chip package is built, because the 4-chip packages on the development machine are container packages. Every other run records the stage as skipped |
+| 8 | Operator bundle | Passed once, on Hemmingway-1: wrote `RESULTS.md`, `RISKS.md`, `card.md`, the packages and the publish commands as text, and the run ended at "ready for operator review". Nothing was published |
 
 The full-port path (a model that needs new model code) has never run. When stage 0 chooses it, the
 supervisor pauses before stage 2 for the operator.
@@ -61,9 +62,9 @@ supervisor pauses before stage 2 for the operator.
 | Watchdog | `orchard/watchdog.py`, `orchard/transcripts.py` | Built and tested. Fired on a real agent during the run |
 | Stage machine, agent loop, supervisor | `orchard/stages.py`, `orchard/agent.py`, `orchard/context.py`, `orchard/supervisor.py` | Built and tested. Ran stages 0 to 2 on the real run |
 | Crash recovery | `orchard/supervisor.py`, `orchard/handoff.py` | Tested with fakes by killing the supervisor after every ledger event. On hardware: `kill -9`, restart, resume worked at least four times on the real run |
-| Stage skills | `orchard/skills/` | Drafts. `delta-triage`, `reference-gate` and `weights-swap-check` have been used on the real run. `weights-swap-configs` is in use in stage 4. `serving-check` and `operator-bundle` have never run |
-| Packaging (stage 7) | `orchard/package.py`, `orchard/package_card.py`, `orchard/package_templates/` | Built and tested with fakes only (a fake `tt-model`, fake bundles, a fake server). Wired into the stage table as opt-in supervisor code. Never run on hardware. A v5.1 container package is refused at start |
-| Bundle and package scrub | `orchard/scrub.py` | Built and tested with fakes. The stage 8 gate calls it; stage 8 has never run |
+| Stage skills | `orchard/skills/` | Drafts. `delta-triage`, `reference-gate` and `weights-swap-check` have been used on the real run. `weights-swap-configs` and `operator-bundle` have been used on the real run. `serving-check` has never run |
+| Packaging (stage 7) | `orchard/package.py`, `orchard/package_card.py`, `orchard/package_templates/` | Built and tested with fakes, then run once on hardware (Hemmingway-1; see stage 7 above). Wired into the stage table as opt-in supervisor code. A v5.1 container package is refused at start |
+| Bundle and package scrub | `orchard/scrub.py` | Built and tested with fakes. The stage 8 gate calls it; it ran once on the real run |
 | CPU sizing tool | `orchard/sizing.py` | Built and tested against a fake server. It has not been run against a real ollama. The CPU numbers in this README come from the run log |
 | Hardware-check driver | `orchard/hardware_check.py` | Ran on both boards of the development machine, 22 to 24 checks passed per run |
 | Park-check driver | `orchard/park_check.py` | Ran once, on one board, with fake model servers. Exit 0, two resets of 41.7 s each (measured) |
