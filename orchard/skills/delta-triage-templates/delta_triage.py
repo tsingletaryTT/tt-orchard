@@ -547,7 +547,7 @@ def encode_test(model_dir: Path, base_dir: Path) -> dict:
     try:
         tm = Tokenizer.from_file(str(model_dir / "tokenizer.json"))
         tb = Tokenizer.from_file(str(base_dir / "tokenizer.json"))
-    except Exception as exc:  # noqa: BLE001 - any load failure is reported, not raised
+    except Exception as exc:  # noqa: BLE001 - any load failure goes into the evidence file
         return {**out, "ran": False, "reason": f"a tokenizer.json did not load: {exc}"}
     differing, by_cat, examples = 0, {}, []
     for cat, text in fixed + rand:

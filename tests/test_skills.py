@@ -180,3 +180,37 @@ def test_the_swap_skills_copy_stage_0s_model_id_verbatim(name):
            'Altworld/Hemmingway-1@<revision>>"' in text
     assert "Copy the `model` value from `stages/0/delta.json` verbatim, including the `@revision`" in text
     assert "Stage 7 compares this label with stage 0's model and the revision of the weights" in text
+
+
+# ---- stage 0: the delta-triage template ---------------------------------------------------------
+
+def _config_block(text: str, first_key: str) -> dict:
+    """The JSON config block a skill shows, starting at `{"<first_key>"`."""
+    import json
+    block = re.search(r'(\{"' + first_key + r'".*?\})', text, re.S).group(1)
+    return json.loads(" ".join(block.split()))
+
+
+def test_the_delta_triage_skill_runs_the_template_that_exists_in_this_repo():
+    import importlib.util
+    text = (SKILLS / "delta-triage.md").read_text()
+    flat = " ".join(text.split())
+    script = SKILLS / "delta-triage-templates" / "delta_triage.py"
+    assert script.is_file()
+    assert "cp {{ORCHARD_DIR}}/orchard/skills/delta-triage-templates/delta_triage.py stages/0/" in flat
+    assert "python3 stages/0/delta_triage.py" in flat
+    # The config block names exactly the keys the script reads.
+    spec = importlib.util.spec_from_file_location("delta_triage_for_skill_test", script)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert set(_config_block(text, "run_dir")) == set(mod.CONFIG_KEYS)
+    assert "{{HF_HOME}}/hub/models--<org>--<name>/snapshots/<sha>/" in flat
+
+
+def test_the_delta_triage_skill_has_the_write_first_rules():
+    flat = " ".join((SKILLS / "delta-triage.md").read_text().split())
+    assert "Write `triage_config.json` FIRST" in flat
+    assert "Never read the run's ledger" in flat and "transcripts" in flat
+    assert "Do not investigate anything outside the paths this skill lists" in flat
+    assert "Edit a `finding` only where a measured fact needs explaining" in flat
+    assert "Do not change `path`" in flat

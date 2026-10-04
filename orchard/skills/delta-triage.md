@@ -1,7 +1,7 @@
 ---
 name: delta-triage
 description: Stage 0 of a tt-orchard run. Compare a new Hugging Face model with the nearest model that already runs on Tenstorrent hardware, write down every difference with evidence, and name the path the run takes.
-status: draft. A local tt-orchard copy. Its home is the tt-model-bringup plugin in tenstorrent/skills (spec section 11). Move it there after a real run has used it.
+status: draft. A local tt-orchard copy. Since 2026-10-04 a tested template script does the measuring and drafts delta.json; you configure it, run it and review what it wrote. Its home is the tt-model-bringup plugin in tenstorrent/skills (spec section 11). Move it there after a real run has used it.
 ---
 
 # Delta triage
@@ -12,57 +12,93 @@ Write `delta.json` in your stage directory. It lists what differs between the ne
 nearest supported model, gives evidence for each difference, and names the path:
 
 - `weights-only`: the model code that runs the nearest model can run the new one with new weights.
-- `full-port`: new model code is needed. Plan 4 of tt-orchard stops the run for the operator here.
+- `full-port`: new model code is needed. The run stops for the operator before stage 2.
 
-## Inputs
+A tested script does all of the measuring and writes a draft `delta.json`. You give it one config
+file, run it, read what it wrote, and correct the findings where a measured fact needs explaining.
+You do not write a comparison script.
 
-The run lists input paths, for example `model=` and `base=` snapshot directories. Read the files
-there. Do not download anything. The run has no Hugging Face token, and the weights are on disk.
+## How to work
 
-## What to compare
+- Write `triage_config.json` FIRST, as soon as you know the four facts below.
+- Do not investigate anything outside the paths this skill lists: the two snapshot directories,
+  the template, and your stage directory.
+- Never read the run's ledger (`ledger.jsonl`), the step logs under `stages/*/log/`, or any
+  transcripts. An earlier stage 0 agent spent 19 turns reading them and wrote nothing.
+- Do not download anything. The run has no Hugging Face token, and the weights are on disk.
 
-Save the output of each comparison under `evidence/`.
+## Steps
 
-1. `config.json`: every key that differs. The text-model keys matter most: layers, hidden size,
-   attention heads, KV heads, layer types, vocabulary size, context length. Name keys that differ
-   only as bookkeeping (`architectures`, `transformers_version`).
-2. Tensors: names from each `model.safetensors.index.json`, and shapes and dtypes from the
-   safetensors headers. Report the counts, names found in only one model, and every shape or dtype
-   difference. A consistent name prefix difference is its own entry (area `tensor_names`).
-3. Tokenizer: vocabulary size, merges, added tokens, chat template and pre-tokenizer pattern. If
-   any of them differs, encode a set of test strings with both tokenizers and count the strings
-   whose ids differ. Save the strings.
-4. Files: the weight shards, their total size, and files only one model has (for example `mtp.*`
-   or vision weights).
-5. `generation_config.json`: the sampling defaults.
-6. The license, from the model card or the LICENSE file.
+1. Find four facts with a few `ls` commands:
+   - `model_id`: the run's `model` value from the run facts in your task, for example
+     `Altworld/Hemmingway-1@<revision>`. If it has no `@<revision>`, the script adds the revision
+     from the snapshot directory's name.
+   - `model_snapshot`: the new model's snapshot directory,
+     `{{HF_HOME}}/hub/models--<org>--<name>/snapshots/<sha>/`. If the run facts list an input
+     path for the model, use that path.
+   - `nearest_model_id`: the nearest supported model. Use the run facts' `input base` when it
+     names one. Otherwise read the `base_model:` line in the front matter of the new model's
+     `README.md`. For a Qwen3.8-27B fine-tune it is `Qwen/Qwen3.8-27B`.
+   - `nearest_snapshot`: the nearest model's snapshot directory, found the same way, or the
+     `input base` path.
+2. Write `triage_config.json` in your stage directory (absolute paths):
 
-A safetensors header needs no extra package: the first 8 bytes are a little-endian length, and
-that many bytes of JSON follow. Write a short Python script into your stage directory with
-write_file and run it with `python3`. The supervisor refuses heredocs.
+       {"run_dir": "<the run directory>",
+        "model_id": "<the run's model value>",
+        "model_snapshot": "<new model snapshot>",
+        "nearest_model_id": "<nearest model id>",
+        "nearest_snapshot": "<nearest model snapshot>"}
+
+3. Copy the template into your stage directory:
+
+       cp {{ORCHARD_DIR}}/orchard/skills/delta-triage-templates/delta_triage.py stages/0/
+
+4. Run `python3 stages/0/delta_triage.py`. It reads only the safetensors headers and the small
+   JSON files, so it never loads the weights. It prints a line for each evidence file it writes.
+   Exit 2 means `triage_config.json` is incomplete or names a directory that does not exist; the
+   message names the key. Fix that key and run it again.
+5. Read `stages/0/delta.json` and the evidence files it cites under `stages/0/evidence/`:
+   `config-compare.json`, `tensor-compare.json`, `tokenizer-compare.json`,
+   `tokenizer-encode.json`, `files-compare.json`, `genconfig-license.json` and `disk-free.json`.
+6. Review the draft. Edit a `finding` only where a measured fact needs explaining. Examples:
+   - the new model keeps or drops the nearest model's vision tower: say what that means for a
+     text-generation recipe;
+   - a tokenizer difference that matters for the model's language, for example Thai or
+     Devanagari strings that encode differently (`tokenizer-encode.json` lists them by category);
+   - a license change: name both licenses and what the new one restricts.
+   Keep each finding's measured numbers. Do not change `path`, `model` or `nearest_model`. If the
+   evidence shows that the path is wrong, add a difference with area `other` that says why and
+   cites the evidence file. The operator reads it.
+7. The draft has the standing hazards: `tensor_cache`, `drafter`, `disk`, and `license` when the
+   license changed. Add any further hazard you can justify from the evidence, with an area from
+   the list below, a finding and the evidence path.
+8. Write the reviewed `delta.json` with write_file (the whole file). Then reply with a short
+   summary and no tool call.
 
 ## The file
 
+The script writes this shape. The gate checks it.
+
     {"model": "<org/name>@<revision>", "nearest_model": "<org/name>@<revision>",
-     "path": "weights-only",
+     "path": "weights-only", "path_reasons": [],
      "differences": [{"area": "tokenizer", "finding": "...",
-                      "evidence": ["stages/0/evidence/tokenizer-diff.txt"]}],
-     "hazards": [{"area": "tensor_cache", "finding": "..."}]}
+                      "evidence": ["stages/0/evidence/tokenizer-compare.json"]}],
+     "hazards": [{"area": "tensor_cache", "finding": "...",
+                  "evidence": ["stages/0/evidence/tensor-compare.json"]}]}
 
 A difference's `area` is one of: config, architecture, tensors, tensor_names, tokenizer,
-chat_template, files, generation_config, license, other. Write one entry for each area you
-checked, including areas with no difference (the finding says "identical" and the evidence shows
-it). A hazard's `area` is one of: tensor_cache, drafter, disk, license, other. Evidence paths are
-relative to the run directory and must be files inside it.
+chat_template, files, generation_config, license, other. A hazard's `area` is one of:
+tensor_cache, drafter, disk, license, other. Evidence paths are relative to the run directory and
+must be files inside it.
 
-## Hazards to look for
+## What the script decides
 
-- A converted tensor cache of the nearest model that a later stage could reuse. A cache keyed
-  only by layer name serves the old weights silently. Name the cache directory that must stay
-  unused.
-- A draft model for speculative decoding that was trained against the nearest model. Its
-  acceptance rate may drop, so it must be measured.
-- Free disk where the weights and caches will go.
+The path is `weights-only` when the text config values that matter (layers, hidden size, heads,
+KV heads, head_dim, layer types, vocabulary size) are equal, every tensor both models share has
+the same shape and dtype, and neither model has a text tensor the other lacks. Vision-tower,
+projector and `mtp.*` tensors may differ. Otherwise the path is `full-port`, and `path_reasons`
+lists each reason. A tokenizer difference does not change the path, because the runtime loads the
+new model's tokenizer.
 
 ## Resume notes
 
