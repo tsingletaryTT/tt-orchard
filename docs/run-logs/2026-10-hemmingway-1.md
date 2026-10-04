@@ -510,3 +510,11 @@ path, so packaging is the next piece to build after stages 0 to 6 are shown to w
   for 4 chips here), a v5.1 container variant, the benchmark and qualitative check (deferred by the operator),
   publishing (the operator's decision), and the unattended run that has not happened. The README now says all
   of this.
+
+- **2026-10-04 (22:59Z to 23:00Z) first creative sample from the 2-chip package.** At the operator's request, one prompt
+  ("You are a building remembering your past. You were built in the 1930s. What do you remember?") was sent to the
+  running 2-chip package during the publishing benchmarks. Thinking off, greedy, 830 tokens. The answer stays in
+  the 1930s persona and runs by decade to the present; the operator said it "has good style". With thinking on, the
+  same prompt returned no visible answer (all 700 tokens went to reasoning), so the published card must say to
+  turn thinking off. Full text: `docs/run-logs/samples/2026-10-04-hemmingway-1-building.md`. The two requests
+  overlapped the benchmark agent's timing runs, and the agent was told the window.
