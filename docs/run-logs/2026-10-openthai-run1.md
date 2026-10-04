@@ -19,6 +19,11 @@ Not chosen: quantized and abliterated variants (not full bf16 weights), CC BY-NC
 
 ## Protocol
 
+Setup done before the start (not counted): freed disk by deleting three scratch caches from earlier today
+(34 + 34 + 27 GB: a base-weights cache, a prototype cache, an interrupted partial cache) and the 34 GB tensor
+cache inside Hemmingway-1's stage 7 install copy (the venv and the evidence stay); downloaded the pinned
+revision (14 shards, sizes verified, 53 GB). Free space on `/mnt/bonus` before the start: 208 GB.
+
 Setup that is not counted (what an operator does before pressing Enter): choosing the model, downloading
 its weights, freeing disk space, writing the run script, starting the supervisor with its flags.
 The command is `/mnt/bonus/models/orchard-runs/openthai-run1.sh`. The operator chose not to isolate the
