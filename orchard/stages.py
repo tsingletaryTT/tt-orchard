@@ -7,9 +7,9 @@ runs next, whether the run is paused, how many escalations and coder starts it h
 where the coder's lease is recorded. Nothing here starts a process or calls a model.
 
 The table holds one spec per stage. The path stage 0 chose can replace a spec: on the weights-only
-path stage 2 uses the weights-swap-check skill and `gate_weights_swap`, stage 3 is skipped, and
-stage 4 runs one hardware test per chip configuration (`WEIGHTS_ONLY_STAGE_4`, `gate_mesh_swap`)
-(`spec_for`, `run_path`).
+path stage 2 uses the weights-swap-check skill and `gate_weights_swap`, stage 4 runs one hardware
+test per chip configuration (`WEIGHTS_ONLY_STAGE_4`, `gate_mesh_swap`), and stages 3, 5 and 6 are
+skipped (`spec_for`, `run_path`).
 
 A gate checks the shape of a stage's result file and that every evidence path it lists is a file
 inside the run directory. A gate cannot tell whether a claim is true. The operator reviews the
@@ -520,6 +520,21 @@ WEIGHTS_ONLY_STAGE_4 = dataclasses.replace(
     disk=STAGE4_SWAP_DISK_GB)
 
 
+# Stage 5 is the black-box serving check: boot, a passkey or needle, a canary. On the weights-only
+# path stage 4's serve-and-compare tests already boot the server on each configuration, compare its
+# tokens with the CPU reference and check that its free-run text is coherent.
+SKIP_5_WEIGHTS_ONLY = ("weights-only path: stage 4's serve-and-compare tests boot each configuration, "
+                       "check the output against the CPU reference and check it is coherent (the "
+                       "black-box serving check)")
+WEIGHTS_ONLY_STAGE_5 = dataclasses.replace(STAGES[5], skip=SKIP_5_WEIGHTS_ONLY)
+
+# Stage 6 is the qualitative check and the benchmark. The operator deferred both on the
+# weights-only path (2026-10-03). Stage 4's coherence check is the only quality evidence there.
+SKIP_6_WEIGHTS_ONLY = ("weights-only path: the operator deferred the qualitative check and benchmark; "
+                       "stage 4 already shows the output is coherent")
+WEIGHTS_ONLY_STAGE_6 = dataclasses.replace(STAGES[6], skip=SKIP_6_WEIGHTS_ONLY)
+
+
 def delta_path(run_dir) -> str | None:
     """The path in stages/0/delta.json, or None when the file is missing, unreadable or names
     another value. The stage 0 gate validated the file; this only reads it."""
@@ -552,14 +567,13 @@ def run_path(entries: list[dict], run_dir) -> str | None:
 
 def spec_for(number: int, path: str | None) -> StageSpec:
     """The stage spec for `number` on `path`. Only the weights-only path changes the table: stage 2
-    gets the swap skill and gate, stage 3 is skipped (the supervisor records it as skipped, as it
-    does stage 7), and stage 4 runs one test per chip configuration."""
-    if path == "weights-only" and number == 2:
-        return WEIGHTS_ONLY_STAGE_2
-    if path == "weights-only" and number == 3:
-        return WEIGHTS_ONLY_STAGE_3
-    if path == "weights-only" and number == 4:
-        return WEIGHTS_ONLY_STAGE_4
+    gets the swap skill and gate, stage 4 runs one test per chip configuration, and stages 3, 5
+    and 6 are skipped (the supervisor records each as skipped, as it does stage 7)."""
+    if path == "weights-only":
+        weights_only = {2: WEIGHTS_ONLY_STAGE_2, 3: WEIGHTS_ONLY_STAGE_3, 4: WEIGHTS_ONLY_STAGE_4,
+                        5: WEIGHTS_ONLY_STAGE_5, 6: WEIGHTS_ONLY_STAGE_6}
+        if number in weights_only:
+            return weights_only[number]
     return STAGES[number]
 
 

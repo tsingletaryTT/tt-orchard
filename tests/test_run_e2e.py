@@ -69,7 +69,7 @@ def test_with_the_coder_on_four_chips_every_hardware_stage_parks_it(tmp_path, se
     m = Machine()
     assert run(tmp_path, servers, m, chips=4, pid=FIRST) == EXIT_READY
     es = entries(tmp_path)
-    for n in (2, 5, 6):                     # stage 3 is skipped on the weights-only path
+    for n in (2,):                          # stages 3, 5 and 6 are skipped on the weights-only path
         seq = [(e["event"], e["data"].get("step") or e["data"].get("decision")) for e in es if e["stage"] == n]
         test = seq.index(("decision", "hardware test started"))
         assert seq.index(("park", "reset")) < test < seq.index(("restore", "reset")), n
@@ -100,15 +100,15 @@ def test_with_the_coder_on_two_chips_only_the_4_chip_test_parks_it(tmp_path, ser
     taken = [(e["stage"], e["data"].get("config"), e["data"]["test_lease"]["chips"]) for e in es
              if e["data"].get("decision") == "test lease taken"]
     b1 = list(BOARDS["B1"])
-    # Stages 2, 5 and 6 and the 1- and 2-chip configurations use the free board; the 4-chip
-    # configuration takes the free board too, then parks the coder for its board.
-    assert taken == [(2, None, b1), (4, 1, b1), (4, 2, b1), (4, 4, b1), (5, None, b1), (6, None, b1)]
+    # Stage 2 and the 1- and 2-chip configurations use the free board; the 4-chip configuration
+    # takes the free board too, then parks the coder for its board. Stages 5 and 6 are skipped.
+    assert taken == [(2, None, b1), (4, 1, b1), (4, 2, b1), (4, 4, b1)]
     seq = [(e["data"].get("decision") or e["data"].get("step"), e["data"].get("config")) for e in es if e["stage"] == 4]
     assert seq.index(("test lease taken", 4)) < seq.index(("note", None))      # the further board first
     env = (tmp_path / "run" / "stages" / "4" / "configs" / "4" / "evidence" / "devices.txt").read_text()
     assert f"TT_VISIBLE_DEVICES={','.join(BOARDS['B0'] + BOARDS['B1'])}\n" in env
     released = [e for e in es if e["data"].get("decision") == "test lease released"]
-    assert len(released) == 6 and m.leases == {}
+    assert len(released) == 4 and m.leases == {}
     assert final_state(tmp_path)["finished"]
 
 
@@ -120,10 +120,12 @@ def test_a_weights_only_run_serves_and_compares_in_stage_2_skips_3_and_goes_on_t
     skills = [e["data"]["skill"] for e in es if e["stage"] == 2 and e["data"].get("decision") == "agent step"]
     assert [s.rsplit("/", 1)[1] for s in skills] == ["weights-swap-check.md"] * 2     # prepare, finish
     assert [e["stage"] for e in es if e["event"] == "stage_start"][:6] == [0, 1, 2, 3, 4, 5]
-    s3 = [(e["event"], e["data"].get("result")) for e in es if e["stage"] == 3]
-    assert s3 == [("stage_start", None), ("stage_end", "skipped")]
+    for n in (3, 5, 6):                     # skipped on the weights-only path
+        got = [(e["event"], e["data"].get("result")) for e in es if e["stage"] == n]
+        assert got == [("stage_start", None), ("stage_end", "skipped")], n
     assert final_state(tmp_path)["last_result"] == {0: "pass", 1: "pass", 2: "pass", 3: "skipped",
-                                                    4: "pass", 5: "pass", 6: "pass", 7: "skipped", 8: "pass"}
+                                                    4: "pass", 5: "skipped", 6: "skipped",
+                                                    7: "skipped", 8: "pass"}
 
 
 @pytest.mark.parametrize("chips", [4, 2])
@@ -131,9 +133,9 @@ def test_a_kill_after_any_ledger_event_reaches_the_same_final_state(tmp_path, se
     ref = tmp_path / "reference"
     assert run(ref, servers, Machine(), chips=chips, pid=FIRST) == EXIT_READY
     want = final_state(ref)
-    # The reference walks the weights-only path, so the kills below include one after stage 3's
-    # skip start and one after its skip end.
-    assert want["last_result"][3] == "skipped"
+    # The reference walks the weights-only path, so the kills below include one after the skip
+    # start and one after the skip end of each of stages 3, 5 and 6.
+    assert [want["last_result"][n] for n in (3, 5, 6)] == ["skipped"] * 3
     total = len(entries(ref))
     for k in range(1, total + 1):
         base = tmp_path / f"kill-{k:03d}"

@@ -274,3 +274,12 @@ optional (plan `docs/superpowers/plans/2026-10-03-multichip-stage-4.md`). Decisi
   means a test that must pass did not: a required configuration's, or any listed one when no counts are required. An
   optional configuration that failed still gets gate feedback (one continuation) for a malformed `result.json`.
 Not measured: the 4-chip cold conversion time, the 4-chip coder's restart, the 1-chip cache size.
+
+## 2026-10-03: stages 5 and 6 are skipped on the weights-only path
+Prompt: skip stages 5 and 6 on the weights-only path the way stage 3 is skipped (branch `stage7-wiring`, TDD). `spec_for`
+returns a skipped spec for 5 and 6 on that path, and the supervisor writes `stage_start {skip: true}` and
+`stage_end {result: "skipped", reason}` as it does for stage 3. Stage 5's reason: stage 4's serve-and-compare tests boot
+each configuration, compare the output with the CPU reference and check that it is coherent. Stage 6's reason: the operator
+deferred the qualitative check and benchmark. The full-port path and an unknown path keep both stages. Supervisor tests
+that used stage 5 or 6 for escalation, numbers or a coder death now use stages 1, 2 or 4, or a full-port run. The
+kill-after-every-ledger-event test covers the new skip entries.

@@ -40,8 +40,8 @@ it, fixed the code, and restarted it several times. Each fix is described in
 | 2 | Functional decoder on one chip; on the weights-only path, a weights swap on one board | Passed on Hemmingway-1 (weights-only path): the chip agreed with the CPU reference on 30 of 32 tokens (0.9375, measured, one prompt) |
 | 3 | Full model | Skipped by design on the weights-only path. Never run on the full-port path |
 | 4 | Multichip, then shrink to fewer chips; on the weights-only path, one test per chip configuration | In progress on Hemmingway-1 when this was written. No result yet |
-| 5 | Serving integration | Not yet run |
-| 6 | Qualitative check and benchmark | Not yet run |
+| 5 | Serving integration | Skipped by design on the weights-only path. Stage 4's serve-and-compare tests boot each configuration, compare the output with the CPU reference and check that it is coherent. Never run on the full-port path |
+| 6 | Qualitative check and benchmark | Skipped on the weights-only path, because the operator deferred it. Stage 4's coherence check is the only quality evidence there. Never run on the full-port path |
 | 7 | Package and container build | Recorded as skipped. The packaging code exists but the stage table does not call it yet |
 | 8 | Operator bundle | Not yet run |
 
@@ -445,8 +445,8 @@ supervisor refuses a ledger whose chain is broken.
 | 2 | Weights swap check (weights-only) or functional decoder (full-port) | `weights-swap-check` or `functional-decoder` | Serves the new weights on one board through the existing implementation and compares the chip's tokens with the CPU reference |
 | 3 | Full model | `full-model` | Full-port path only. Skipped on the weights-only path |
 | 4 | Each chip configuration (weights-only) or multichip and shrink (full-port) | `weights-swap-configs` or `mesh-shrink` | Runs one serve-and-compare test per chip configuration, each under its own lease |
-| 5 | Serving integration | `serving-check` | Checks a served model from outside: boot, a passkey test at two lengths, a repeated canary |
-| 6 | Qualitative check and benchmark | `serving-check` | Five prompts read by the agent, and decode speed and time to first token, each labelled measured or TODO |
+| 5 | Serving integration | `serving-check` | Full-port path only. Checks a served model from outside: boot, a passkey test at two lengths, a repeated canary. Skipped on the weights-only path |
+| 6 | Qualitative check and benchmark | `serving-check` | Full-port path only. Five prompts read by the agent, and decode speed and time to first token, each labelled measured or TODO. Skipped on the weights-only path |
 | 7 | Package and container build | none | Skipped for now |
 | 8 | Operator bundle | `operator-bundle` | Writes the bundle for review. The supervisor copies the ledger in and scrubs the bundle |
 

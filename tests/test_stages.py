@@ -119,7 +119,27 @@ def test_a_full_port_or_unknown_path_keeps_todays_stage_2_and_3(path):
     assert spec_for(3, path) == STAGES[3]
 
 
-@pytest.mark.parametrize("n", [0, 1, 5, 6, 7, 8])
+SKIP_5_REASON = ("weights-only path: stage 4's serve-and-compare tests boot each configuration, check "
+                 "the output against the CPU reference and check it is coherent (the black-box "
+                 "serving check)")
+SKIP_6_REASON = ("weights-only path: the operator deferred the qualitative check and benchmark; "
+                 "stage 4 already shows the output is coherent")
+
+
+def test_the_weights_only_path_skips_stages_5_and_6_with_reasons():
+    s5, s6 = spec_for(5, "weights-only"), spec_for(6, "weights-only")
+    assert (s5.number, s5.skip) == (5, SKIP_5_REASON)
+    assert (s6.number, s6.skip) == (6, SKIP_6_REASON)
+    assert STAGES[5].skip is None and STAGES[6].skip is None
+
+
+@pytest.mark.parametrize("path", ["full-port", None])
+def test_a_full_port_or_unknown_path_keeps_stages_5_and_6(path):
+    for n in (5, 6):
+        assert spec_for(n, path) == STAGES[n] and spec_for(n, path).skill == "serving-check"
+
+
+@pytest.mark.parametrize("n", [0, 1, 7, 8])
 def test_the_path_changes_no_other_stage(n):
     for path in ("weights-only", "full-port", None):
         assert spec_for(n, path) == STAGES[n]

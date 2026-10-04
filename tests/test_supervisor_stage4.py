@@ -138,7 +138,7 @@ def test_a_failed_4_chip_test_still_releases_its_board_and_restores_the_coder(ri
     assert not [x for x in seq if x[1] == "recover after restart; the machine wins"]
     rec = json.loads((rig.run_dir / "stages" / "4" / "tests" / "4" / "test-result.json").read_text())
     assert rec["returncode"] == 4
-    assert [d["result"] for d in rig.ends(4)] == ["pass"] and rig.ends(5)[0]["result"] == "pass"
+    assert [d["result"] for d in rig.ends(4)] == ["pass"] and rig.ends(8)[0]["result"] == "pass"
 
 
 def test_a_pass_claimed_for_a_configuration_whose_test_never_ran_fails_the_gate(rig):

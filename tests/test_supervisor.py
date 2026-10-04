@@ -160,7 +160,7 @@ def test_a_failed_gate_escalates_once_to_the_diagnose_tier(rig):
 
 
 def test_a_second_failure_pauses_the_run_until_the_operator_resumes(rig):
-    bad = {(5, "finish"): {"result.json": {"checks": {}}}}
+    bad = {(2, "finish"): {"result.json": {"serves": True}}}
     rig.script = lambda r: bringup(r, overrides=bad)
 
     def fixed_and_resumed():
@@ -168,18 +168,22 @@ def test_a_second_failure_pauses_the_run_until_the_operator_resumes(rig):
         Control(rig.run_dir).write("resume")
     rig.on_sleep = fixed_and_resumed
     assert rig.run() == EXIT_READY
-    assert [d["result"] for d in rig.ends(5)] == ["escalate", "fail", "pass"]
+    assert [d["result"] for d in rig.ends(2)] == ["escalate", "fail", "pass"]
     pauses = [d for d in rig.decisions() if d["decision"] in ("pause", "resume")]
-    assert pauses[0]["reason"].startswith("stage 5 failed after escalation")
+    assert pauses[0]["reason"].startswith("stage 2 failed after escalation")
     assert pauses[1] == {"decision": "resume", "by": "operator"}
 
 
 def test_the_escalation_cap_pauses_the_run(rig):
     def bad(n):
+        if n == 1:
+            return {(1, "run"): {"reference.json": {"broken": True}}}
         return {(n, "finish"): {"result.json": {"broken": True}}}
 
     def script(request):
-        if "tools" in request and where(request)[0] in (2, 4, 5):       # stage 3 is skipped (weights-only)
+        # Stages 3, 5 and 6 are skipped on the weights-only path, so 1, 2 and 4 are the three
+        # agent stages before the bundle.
+        if "tools" in request and where(request)[0] in (1, 2, 4):
             n = where(request)[0]
             return escalation_aware(n, bad(n))(request)
         return bringup(request)
@@ -188,7 +192,7 @@ def test_the_escalation_cap_pauses_the_run(rig):
     assert rig.run() == EXIT_READY
     pauses = [e for e in rig.entries() if e["event"] == "decision" and e["data"]["decision"] == "pause"]
     assert [(e["stage"], e["data"]["reason"]) for e in pauses] == [
-        (5, "3 escalations since the last resume (cap 3)")]   # before stage 5 runs again
+        (4, "3 escalations since the last resume (cap 3)")]   # before stage 4 runs again
 
 
 def test_a_full_port_pauses_before_stage_2(rig):
@@ -233,6 +237,23 @@ def test_a_weights_only_run_skips_stage_3_and_goes_on_to_stage_4(rig):
     assert not (rig.run_dir / "stages" / "3").exists()      # no agent step and no stage directory
 
 
+def test_a_weights_only_run_skips_stages_5_and_6_after_stage_4(rig):
+    assert rig.run() == EXIT_READY
+    for n, reason in ((5, "weights-only path: stage 4's serve-and-compare tests boot each "
+                          "configuration, check the output against the CPU reference and check it "
+                          "is coherent (the black-box serving check)"),
+                      (6, "weights-only path: the operator deferred the qualitative check and "
+                          "benchmark; stage 4 already shows the output is coherent")):
+        got = [(e["event"], e["data"]) for e in rig.entries() if e["stage"] == n]
+        assert got == [("stage_start", {"skip": True}),
+                       ("stage_end", {"result": "skipped", "reason": reason})], n
+        assert not (rig.run_dir / "stages" / str(n)).exists(), n
+        assert step_skills(rig, n) == [], n
+    ends = [(e["stage"], e["data"]["result"]) for e in rig.entries() if e["event"] == "stage_end"]
+    assert ends[:8] == [(0, "pass"), (1, "pass"), (2, "pass"), (3, "skipped"), (4, "pass"),
+                        (5, "skipped"), (6, "skipped"), (7, "skipped")]
+
+
 def test_a_full_port_run_keeps_the_functional_decoder_and_the_full_model(rig):
     rig.script = lambda r: bringup(r, overrides=FULL_PORT_DELTA)
     rig.on_sleep = lambda: Control(rig.run_dir).write("resume")    # the operator goes on after the pause
@@ -241,6 +262,11 @@ def test_a_full_port_run_keeps_the_functional_decoder_and_the_full_model(rig):
     assert all(s.endswith("functional-decoder/SKILL.md") for s in step_skills(rig, 2))
     assert [d["result"] for d in rig.ends(2)] == ["pass"] and [d["result"] for d in rig.ends(3)] == ["pass"]
     assert step_skills(rig, 3) and all(s.endswith("full-model/SKILL.md") for s in step_skills(rig, 3))
+    # Stages 5 and 6 run on the full-port path, each with the serving-check skill.
+    for n in (5, 6):
+        assert [d["result"] for d in rig.ends(n)] == ["pass"], n
+        skills = step_skills(rig, n)
+        assert len(skills) == 2 and all(s.endswith("orchard/skills/serving-check.md") for s in skills), n
 
 
 def test_a_resume_keeps_the_path_stage_0_chose_even_if_delta_json_changed(rig):
@@ -405,6 +431,9 @@ def test_the_hardware_test_gets_the_leased_chips_and_no_token(rig, monkeypatch):
 
 
 def test_numbers_from_stage_6_become_labelled_measurements(rig):
+    # Stage 6 runs on the full-port path only; the weights-only path skips it.
+    rig.script = lambda r: bringup(r, overrides=FULL_PORT_DELTA)
+    rig.on_sleep = lambda: Control(rig.run_dir).write("resume")    # the operator goes on after the pause
     assert rig.run() == EXIT_READY
     got = [(e["data"]["name"], e["data"]["label"]) for e in rig.entries()
            if e["event"] == "measurement" and e["stage"] == 6]
@@ -433,9 +462,11 @@ def test_a_coder_that_dies_is_restarted_once_and_a_second_death_blocks(rig):
     def script(request):
         if "tools" in request:
             n, phase = where(request)
-            # Stages 1 and 5: stage 4 on the weights-only path parks the coder for its 4-chip
+            # Stages 0 and 1: stage 4 on the weights-only path parks the coder for its 4-chip
             # test, and a park asks the coder first, so a death there blocks the park instead.
-            if n in (1, 5) and turn(request) == 0 and n not in killed:
+            # Stages 5 and 6 are skipped on that path, so stages 0 and 1 are the two that run
+            # before stage 4 with no park.
+            if n in (0, 1) and turn(request) == 0 and n not in killed:
                 killed.add(n)
                 rig.m.coder_running = False         # the coder dies while the agent works
         return bringup(request)
