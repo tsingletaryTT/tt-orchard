@@ -54,3 +54,18 @@ wall time per stage, stage retries and escalations, watchdog firings, and every 
 (entries are added as the run proceeds)
 
 - **2026-10-04T15:54:25Z run started** (supervisor pid 2624896, run directory `openthai2-run1`). Hands off from here.
+
+- **16:23:44Z the run stopped a second time at stage 0, and this run ends here.** After the resume (intervention 1) the
+  stage restarted from a fresh attempt; it used all 60 turns without a final answer ("stage 0 failed after
+  escalation") and the run paused. What the agent did: it wrote 8 evidence files (config, files, generation
+  config, license, tensor names, tensor shapes and dtypes, tokenizer, tokenizer encode test) and two scripts
+  by about turn 35, never wrote `delta.json`, and spent turns 53 to 60 repeating nearly identical `grep`
+  commands on an unrelated package's files. **Result of this run: not ready for operator review. 1
+  intervention, then stopped at stage 0 again on a model the harness had never seen.** Findings:
+  (1) stage 0 has no template, so the agent explores; (2) the `turn_repeat` detector needs identical
+  arguments, and near-duplicates (the same command with a different trailing argument) escape it; (3) when the
+  turn budget runs out with evidence on disk, nothing asks the agent to write the deliverable. Next: template
+  stages 0 and 1 (scripts that do the measuring, the agent reviews and adds the hazards), catch near-duplicate
+  repetition, add a wrap-up step at turn exhaustion, then rerun this model from a clean start. The first run's
+  stage 0 and 1 results were produced under a hand-written delta-triage skill that took 27 and 8 minutes and
+  needed no resume; this run shows that was not reliable on a second model.
