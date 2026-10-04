@@ -390,3 +390,18 @@ def test_every_event_carries_its_turn_and_a_continuation_keeps_counting(run):
         ("response", 2),
         ("response", 3), ("tool_call", 3), ("tool_result", 3),
         ("response", 4)]
+
+
+def test_a_shell_call_event_carries_the_command_shape(run):
+    # TurnRepeat's shape track reads Event.shape; the step must set it for every shell call.
+    from orchard.watchdog import command_shape
+    run_dir, ledger = run
+    cmd = "grep -rn hello stages/0/evidence/a.txt | head -5"
+    script = [call("write_file", path="evidence/a.txt", content="hello"), call("shell", command=cmd),
+              final("done")]
+    with FakeModel(lambda r: script[turn(r)]) as fm:
+        s, events, _ = step(run_dir, ledger, fm.endpoint)
+        s.run("s", "u")
+    calls = [e for e in events if e.kind == "tool_call"]
+    assert [(e.tool, e.shape) for e in calls] == [("write_file", None), ("shell", command_shape(cmd))]
+    assert calls[1].shape == "grep stages/0/evidence/a.txt"

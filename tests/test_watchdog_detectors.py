@@ -326,3 +326,88 @@ def test_turn_repeat_stays_quiet_on_the_committed_signatures(name):
 def test_turn_repeat_default_is_three():
     from orchard.defaults import TURN_REPEAT_N
     assert TURN_REPEAT_N == 3 and TurnRepeat().n == 3
+
+
+# ---- near-duplicate commands: the shape track of TurnRepeat ---------------------------------------
+# The second-model run: stage 0 spent turns 53 to 60 repeating nearly identical grep commands that
+# differed only in a trailing argument. Their args_hash differed, so the identical-call track never
+# fired. A command's shape (orchard.watchdog.command_shape) ignores that difference.
+
+@pytest.mark.parametrize("a,b", [
+    ('grep -rn "max_model_len" /opt/venv/lib/vllm/config.py | head -50',
+     'grep -rn "max_model_len" /opt/venv/lib/vllm/config.py | head -80'),
+    ('grep -rn "timeout" /opt/venv/lib/vllm', 'grep -rn "deadline" /opt/venv/lib/vllm'),
+    ("sed -n 100,200p stages/0/notes.txt", "sed -n 200,300p stages/0/notes.txt"),
+    ("ls -la  stages/0/evidence", "ls -la stages/0/evidence 2>/dev/null"),
+    ("tail -n 200", "tail -n 400"),
+    ("head -50", "head   -80"),
+])
+def test_commands_that_differ_only_in_a_trailing_argument_share_a_shape(a, b):
+    from orchard.watchdog import command_shape
+    assert command_shape(a) == command_shape(b), (command_shape(a), command_shape(b))
+
+
+@pytest.mark.parametrize("a,b", [
+    ("ls stages/0/evidence", "cat stages/0/evidence/config.json"),
+    ("grep -rn foo /src/a", "grep -rn foo /src/b"),
+    ("ls -la", "ls -lah"),
+    ("python3 stages/0/delta_triage.py", "python3 stages/1/reference_gate.py"),
+])
+def test_different_commands_have_different_shapes(a, b):
+    from orchard.watchdog import command_shape
+    assert command_shape(a) != command_shape(b)
+
+
+def test_a_shape_is_the_first_word_and_the_first_path_like_argument():
+    from orchard.watchdog import command_shape
+    assert command_shape('grep -rn "x" /src/a.py | head -5') == "grep /src/a.py"
+    assert command_shape("cat notes.txt") == "cat notes.txt"
+    assert command_shape("echo  hello   world > out 2>&1") == "echo hello world"
+    assert len(command_shape("echo " + "word " * 40)) == 40
+    assert command_shape("") == ""
+
+
+def scall(ts, turn, args, shape):
+    return Event(ts=ts, agent="a", kind="tool_call", tool="shell", args_hash=args, turn=turn, shape=shape)
+
+
+def near_duplicate_turns(n, start=1):
+    """Each turn runs the same two greps with a new trailing argument (a new args_hash)."""
+    evs = []
+    for k in range(start, start + n):
+        evs += [tresp(10 * k, k), scall(10 * k + 1, k, f"{k:064x}", "grep /src/vllm"),
+                scall(10 * k + 2, k, f"{k + 500:064x}", "sed /src/vllm/config.py")]
+    return evs
+
+
+def test_near_duplicate_turns_escape_the_identical_track_until_the_shape_track_sees_four():
+    assert replay(near_duplicate_turns(4), [TurnRepeat()]) == []            # 4th turn not yet complete
+    found = replay(near_duplicate_turns(5), [TurnRepeat()])
+    assert times(found) == [50]                                             # seen at turn 5's response
+    assert found[0].detector == "turn_repeat" and found[0].evidence["turns"] == 4
+    assert found[0].evidence["match"] == "shape"
+    assert "grep /src/vllm" in found[0].summary
+
+
+def test_the_shape_track_re_arms_after_it_fires():
+    assert times(replay(near_duplicate_turns(9), [TurnRepeat()])) == [50, 90]
+
+
+def test_three_near_duplicate_turns_then_a_different_turn_do_not_fire():
+    evs = near_duplicate_turns(3) + [tresp(40, 4), scall(41, 4, "f" * 64, "cat stages/0/delta.json")]
+    evs += near_duplicate_turns(3, start=5) + [tresp(80, 8)]
+    assert replay(evs, [TurnRepeat()]) == []
+
+
+def test_identical_turns_fire_once_through_the_identical_track_only():
+    # The identical track fires at 3; both tracks re-arm, so the 4th identical turn adds nothing.
+    evs = []
+    for k in range(1, 6):
+        evs += [tresp(10 * k, k), scall(10 * k + 1, k, GREP_A, "grep /src")]
+    found = replay(evs, [TurnRepeat()])
+    assert times(found) == [40] and found[0].evidence["match"] == "identical"
+
+
+def test_turn_shape_default_is_four():
+    from orchard.defaults import TURN_SHAPE_N
+    assert TURN_SHAPE_N == 4 and TurnRepeat().shape_n == 4

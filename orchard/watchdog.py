@@ -14,13 +14,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+import shlex
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Protocol
 
 from orchard.adapters import AdapterError
 from orchard.defaults import (IDENTICAL_N, LEASE_IDLE_S, LEASE_POLL_S, NO_EVIDENCE_S, REPEAT_TOOL_N,
-                              RUNG_CAPS, THINKING_CAP, TURN_REPEAT_N, WRITELESS_TURNS)
+                              RUNG_CAPS, THINKING_CAP, TURN_REPEAT_N, TURN_SHAPE_N,
+                              WRITELESS_TURNS)
 
 KINDS = frozenset({"response", "tool_call", "tool_result", "evidence", "ledger"})
 
@@ -49,6 +52,9 @@ class Event:
     # results that follow, and any evidence file they wrote. It counts up through a step and its
     # continuation. None when the source does not number turns (transcripts).
     turn: int | None = None
+    # On a tool_call: the call's shape (command_shape of a shell command), so TurnRepeat can match
+    # commands that differ only in a trailing argument. None for other tools and for transcripts.
+    shape: str | None = None
 
     def __post_init__(self):
         if self.kind not in KINDS:
@@ -202,48 +208,113 @@ class RepeatedToolCall:
         return None
 
 
-class TurnRepeat:
-    """The same set of tool calls in `n` model turns in a row.
+# Redirect suffixes (`> out`, `2>&1`, `2>/dev/null`, `< in`) and command separators, for
+# command_shape.
+_REDIRECT = re.compile(r"\s*(?:\d?>>?|&>)\s*\S+|\s*<\s*\S+")
+_SEPARATOR = re.compile(r"\|\||&&|;|\|")
+_NUMERIC = re.compile(r"-?[\d.,:]+[a-zA-Z]?")
+_EXTENSION = re.compile(r"\.[A-Za-z][A-Za-z0-9]{0,7}$")
+SHAPE_CHARS = 40
 
-    A turn's signature is the sorted tuple of (tool, args_hash) of its calls, so a turn that runs
-    the same commands in another order still matches. RepeatedToolCall misses this loop: two
-    commands that alternate never repeat back to back. A turn with no tool calls breaks the
-    streak.
+
+def _path_like(token: str) -> bool:
+    return "/" in token or token.startswith(("~", ".")) or bool(_EXTENSION.search(token))
+
+
+def command_shape(command: str) -> str:
+    """What a shell command is doing, without its details.
+
+    Only the part before the first pipe or separator counts, and redirect suffixes are dropped.
+    The shape is the first word plus the first path-like argument (one with a slash, a leading
+    `~` or `.`, or a file extension). A command with no path-like argument is cut to its first
+    SHAPE_CHARS characters after trailing numeric arguments are removed and whitespace is
+    normalised. So `grep -rn x /src | head -50` and `grep -rn y /src | head -80` share the shape
+    `grep /src`, and `tail -n 200` and `tail -n 400` share `tail -n`.
+    """
+    if not isinstance(command, str) or not command.strip():
+        return ""
+    head = _REDIRECT.sub("", _SEPARATOR.split(command, 1)[0])
+    try:
+        tokens = shlex.split(head)
+    except ValueError:                    # unbalanced quotes: fall back to whitespace
+        tokens = head.split()
+    if not tokens:
+        return ""
+    for t in tokens[1:]:
+        if not t.startswith("-") and _path_like(t):
+            return f"{tokens[0]} {t}"
+    while len(tokens) > 1 and _NUMERIC.fullmatch(tokens[-1]):
+        tokens.pop()
+    return " ".join(tokens)[:SHAPE_CHARS]
+
+
+class TurnRepeat:
+    """The same set of tool calls in model turns in a row, matched two ways.
+
+    Identical track: a turn's signature is the sorted tuple of (tool, args_hash) of its calls, so a
+    turn that runs the same commands in another order still matches. It fires after `n` such
+    turns in a row. RepeatedToolCall misses this loop: two commands that alternate never repeat
+    back to back.
+
+    Shape track: a turn's signature is the set of its calls' shapes (Event.shape, set by AgentStep
+    from command_shape; a call with no shape uses its tool and args_hash). It fires after
+    `shape_n` such turns in a row. It catches commands that differ only in a trailing argument,
+    which the second-model run repeated in turns 53 to 60 of stage 0.
+
+    A turn with no tool calls breaks both streaks. When either track fires, both re-arm, so an
+    identical loop is reported once by the identical track and the shape track does not report
+    it again one turn later. Both findings use this detector's name, so they share the ladder.
 
     Turns are told apart by Event.turn. An event with no turn number (a transcript) starts a new
     turn at each response, which comes before that turn's calls. A turn is complete when the next
-    one starts, so the finding comes at the response of the turn after the n-th repeat. The
-    detector re-arms after it fires.
+    one starts, so a finding comes at the response of the turn after the last repeat.
     """
     name = "turn_repeat"
 
-    def __init__(self, n: int = TURN_REPEAT_N):
-        if n < 2:
-            raise ValueError("n must be at least 2")
-        self.n = n
+    def __init__(self, n: int = TURN_REPEAT_N, shape_n: int = TURN_SHAPE_N):
+        if n < 2 or shape_n < 2:
+            raise ValueError("n and shape_n must be at least 2")
+        self.n, self.shape_n = n, shape_n
         self._turn: dict[str, object] = {}      # agent -> the current turn's key
-        self._calls: dict[str, list] = {}       # agent -> the current turn's (tool, args_hash)
+        self._calls: dict[str, list] = {}       # agent -> the current turn's (tool, args_hash, shape)
         self._last: dict[str, tuple] = {}       # agent -> the last complete turn's signature
         self._count: dict[str, int] = {}        # agent -> turns in a row with that signature
+        self._shape_last: dict[str, tuple] = {}  # agent -> the last complete turn's shape set
+        self._shape_count: dict[str, int] = {}  # agent -> turns in a row with that shape set
         self._seq: dict[str, int] = {}          # agent -> responses seen, for unnumbered turns
+
+    def _rearm(self, agent: str) -> None:
+        self._count[agent] = 0
+        self._shape_count[agent] = 0
 
     def _close(self, agent: str, ts: float) -> Finding | None:
         calls = self._calls.pop(agent, [])
-        sig = tuple(sorted((str(t), str(a)) for t, a in calls))
+        sig = tuple(sorted((str(t), str(a)) for t, a, _ in calls))
         if not sig:
             self._last.pop(agent, None)
-            self._count[agent] = 0
+            self._shape_last.pop(agent, None)
+            self._rearm(agent)
             return None
+        shapes = tuple(sorted({s if s else f"{t}:{a}" for t, a, s in calls}))
         count = self._count.get(agent, 0) + 1 if self._last.get(agent) == sig else 1
-        self._last[agent] = sig
-        if count < self.n:
-            self._count[agent] = count
-            return None
-        self._count[agent] = 0                  # re-arm: the next n repeats fire again
+        shape_count = self._shape_count.get(agent, 0) + 1 if self._shape_last.get(agent) == shapes else 1
+        self._last[agent], self._shape_last[agent] = sig, shapes
         tools = sorted({t for t, _ in sig})
-        return Finding(self.name, agent, ts,
-                       f"the same {len(sig)} tool call(s) ({', '.join(tools)}) in {self.n} turns "
-                       "in a row", {"turns": self.n, "calls": len(sig), "tools": tools})
+        if count >= self.n:
+            self._rearm(agent)                  # re-arm: the next repeats fire again
+            return Finding(self.name, agent, ts,
+                           f"the same {len(sig)} tool call(s) ({', '.join(tools)}) in {self.n} turns "
+                           "in a row", {"turns": self.n, "calls": len(sig), "tools": tools,
+                                        "match": "identical"})
+        if shape_count >= self.shape_n:
+            self._rearm(agent)
+            return Finding(self.name, agent, ts,
+                           f"near-duplicate tool calls with the same shape ({'; '.join(shapes)}) in "
+                           f"{self.shape_n} turns in a row",
+                           {"turns": self.shape_n, "calls": len(sig), "tools": tools, "match": "shape",
+                            "shapes": list(shapes)})
+        self._count[agent], self._shape_count[agent] = count, shape_count
+        return None
 
     def feed(self, ev: Event) -> Finding | None:
         if ev.kind not in ("response", "tool_call"):
@@ -261,7 +332,7 @@ class TurnRepeat:
                 found = self._close(ev.agent, ev.ts)
             self._turn[ev.agent] = key
         if ev.kind == "tool_call":
-            self._calls.setdefault(ev.agent, []).append((ev.tool, ev.args_hash))
+            self._calls.setdefault(ev.agent, []).append((ev.tool, ev.args_hash, ev.shape))
         return found
 
 

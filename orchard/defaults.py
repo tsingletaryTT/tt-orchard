@@ -66,6 +66,12 @@ TURN_REPEAT_N = 3               # choice: model turns in a row with the same set
                                 # value as REPEAT_TOOL_N. The live stage 2 run ran the same two grep
                                 # commands in each of 5 turns; REPEAT_TOOL_N saw them alternate and
                                 # never fired. The committed qwen transcript signatures stay quiet.
+TURN_SHAPE_N = 4                # choice: model turns in a row whose calls have the same set of command
+                                # shapes (orchard.watchdog.command_shape: the first word and the first
+                                # path-like argument). One more than TURN_REPEAT_N, because a shape
+                                # match is looser than an identical one. The second-model run (2026-10-04)
+                                # repeated near-identical greps that differed in a trailing argument
+                                # for 8 turns (53 to 60) of stage 0; this fires on the 4th.
 WRITELESS_TURNS = 20            # choice: model turns in a row in which no file was written (no
                                 # successful write_file, no new evidence file) before the step is
                                 # nudged. A third of AGENT_MAX_TURNS. In the committed qwen transcript

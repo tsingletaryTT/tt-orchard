@@ -16,7 +16,8 @@ This module owns three things.
 3. The loop (`AgentStep`): it sends the conversation to a tier's OpenAI-compatible endpoint
    (stdlib urllib, non-streaming), runs each tool call, records each new file under the stage's
    `evidence/` directory in the ledger with its sha256, and feeds the watchdog an Event for every
-   response, tool call and tool result. A nudge the watchdog's ladder sends is added to the next
+   response, tool call and tool result (a shell call's event carries its command's shape, which
+   the watchdog's TurnRepeat uses to match near-duplicate commands). A nudge the watchdog's ladder sends is added to the next
    request as a user message. Transport failures are retried once, through the watchdog's
    RetryGuard (spec section 3).
 
@@ -66,7 +67,7 @@ from orchard.defaults import (AGENT_MAX_TOKENS, AGENT_MAX_TURNS, AGENT_REQUEST_T
                               AGENT_THINKING, TOOL_OUTPUT_CHARS, TOOL_TIMEOUT_S)
 from orchard.runner import Denied, check_string
 from orchard.stages import evidence_record
-from orchard.watchdog import Event, RetryGuard
+from orchard.watchdog import Event, RetryGuard, command_shape
 
 # ---- environment --------------------------------------------------------------------------------
 
@@ -346,6 +347,17 @@ class AgentStep:
         return Outcome(status, turns, final_text, detail)
 
     @staticmethod
+    def _shape(name: str, args: str) -> str | None:
+        """The shape of a shell call's command (orchard.watchdog.command_shape), else None."""
+        if name != "shell":
+            return None
+        try:
+            command = json.loads(args).get("command")
+        except (ValueError, AttributeError):
+            return None
+        return command_shape(command) if isinstance(command, str) else None
+
+    @staticmethod
     def _bad_detail(kinds: list[str], tokens) -> str:
         """The error detail when too many replies in a row ran no command. It names each kind."""
         if kinds == ["truncated", "truncated"]:
@@ -451,7 +463,7 @@ class AgentStep:
                 fn = call.get("function") if isinstance(call.get("function"), dict) else {}
                 name, args = str(fn.get("name", "")), fn.get("arguments") or "{}"
                 args = args if isinstance(args, str) else json.dumps(args)
-                self._event("tool_call", tool=name, args_hash=sha(args))
+                self._event("tool_call", tool=name, args_hash=sha(args), shape=self._shape(name, args))
                 result = self.tools.call(name, args)
                 messages.append({"role": "tool", "tool_call_id": str(call.get("id", "")), "content": result})
                 # wrote: did this write_file call write its file? None for other tools.
