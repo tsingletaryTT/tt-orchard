@@ -76,7 +76,9 @@ Spec: `docs/superpowers/specs/`. Plans: `docs/superpowers/plans/`. Code: `orchar
 Plan 1 is implemented through Task 4 (ledger, runner, tiers, sizing). Task 5 (run the sizing tool
 against a real ollama, which downloads models and loads the host) was not run. It needs the
 operator. Plan 2 is merged to `main` in tt-gozer. Plan 3 (adapters, server control, park and restore, watchdog) is implemented on branch `plan3-supervisor-behavior`. Plan 4 (stage machine, agent steps, supervisor loop, draft stage skills) is implemented on branch
-`plan4-stage-machine`. The Hemmingway-1 run in the runbook has not been run.
+`plan4-stage-machine`. The Hemmingway-1 run in the runbook has not been run. Plan 5 (stage 7: a v6
+thin package, its boot check, card and publish commands as text) is implemented on branch
+`stage7-wiring` (modules merged to main earlier); its hardware run has not been done.
 
 ## Open decision for the operator
 No adversarial search for bypasses of the command runner has been done. Decide before plan 4 ships:
@@ -283,3 +285,26 @@ each configuration, compare the output with the CPU reference and check that it 
 deferred the qualitative check and benchmark. The full-port path and an unknown path keep both stages. Supervisor tests
 that used stage 5 or 6 for escalation, numbers or a coder death now use stages 1, 2 or 4, or a full-port run. The
 kill-after-every-ledger-event test covers the new skip entries.
+
+## 2026-10-03: plan 5, stage 7 packages a weights-only model
+Prompt (operator): the harness must produce, from a model it brought up, a tt-model package for the profiles already
+shipped (2 and 4 chips; 1 optional), and never publish; the run ends at the operator bundle with the publish commands
+as text. Plan: `docs/superpowers/plans/2026-10-03-packaging-stage-7.md`. Tasks 1 to 8 (the modules) merged earlier;
+tasks 9 to 11 (stage table, supervisor, documents) on branch `stage7-wiring`. Key decisions:
+- Stage 7 is supervisor code (`orchard/package.py`, `StageSpec.harness`), with no agent and no model. It runs only on
+  the weights-only path of a run started with `--package-format v6` and `--package-namespace`; other runs skip it as
+  before. Options can be added on a resume before stage 7 starts (a "package options set" decision). A failure pauses
+  the run and is not escalated.
+- The package is built from the nearest model's installed v6 bundle with `tt-model package-thin --out` and `--weights`
+  naming the new model. `run.sh` runs `prepare_model_dir.py` first, and `--model`, `HF_MODEL` and `MODEL_WEIGHTS_DIR`
+  all name the built `model-dir`.
+- The boot check installs a copy and serves it on a leased board with the one-test hardware phase stage 2 uses. Only
+  stage 2's profile (2 chips here) is boot-checked; other installed v6 bundles give optional profiles whose publish
+  lines stay commented out. v5.1 is refused at start: it needs an image build.
+- `gate_package` checks again from disk: license, scrub, `run.sh` wiring, manifest weights, card, the boot check's
+  numbers and server environment, and the publish commands.
+- Changes from the plan text, because main had moved: `--package-models-root` defaults to the run's recorded
+  `tt_model_root` (orchard/paths.py), so it follows `--operator-home`, and `TT_MODEL_MODELS_ROOT` was removed. The
+  supervisor test passes `FakeContainers`, because stage 4's list of tests searches for leftover containers. The
+  README flag table gained the three flags in the supervisor commit, because `tests/test_readme.py` requires a row
+  for every run flag.

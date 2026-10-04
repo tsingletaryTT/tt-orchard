@@ -256,3 +256,29 @@ def test_without_package_models_root_stage_7_looks_in_the_runs_tt_model_root(rig
     assert start["paths"]["tt_model_root"] == want and start["package"]["models_root"] == want
     names = [p["name"] for p in json.loads((r.run_dir / "stages/7/package.json").read_text())["profiles"]]
     assert names == ["hemmingway-1-p300"]
+
+
+def test_a_run_paused_in_an_old_stage_5_attempt_resumes_into_stage_7(rig):
+    """Run 3's state on 2026-10-03: stages 0 to 4 passed, older code started stage 5 with an agent
+    step, and the operator paused the run. Restarted on this code with the package options, the
+    open stage 5 is recorded as skipped, stage 6 too, and stage 7 packages the model."""
+    from orchard.supervisor import Control
+    r = rig(chips=2)
+    plain = r.argv[:r.argv.index("--package-format")] + r.argv[r.argv.index("--package-models-root") + 2:]
+    full, r.argv = r.argv, plain
+    with pytest.raises(Crash):
+        r.run(crash_if=lambda e: e["event"] == "stage_end" and e["stage"] == 4)
+    with Ledger(r.run_dir / "ledger.jsonl") as led:      # what the older code and the operator left
+        led.append("stage_start", 5, escalated=False, resumed=False)
+        led.append("decision", 5, decision="pause", reason="operator")
+    (r.run_dir / "stages" / "5" / "evidence").mkdir(parents=True)
+    Control(r.run_dir).write("resume")
+    r.sleep = r.clock.sleep                  # this test expects the recorded pause; do not stop on it
+    r.argv = full
+    assert r.run(pid=200) == EXIT_READY
+    es = r.entries()
+    ends = {n: [e["data"]["result"] for e in es if e["event"] == "stage_end" and e["stage"] == n]
+            for n in (5, 6, 7)}
+    assert ends == {5: ["skipped"], 6: ["skipped"], 7: ["pass"]}
+    assert len([e for e in es if e["data"].get("decision") == "package options set"]) == 1
+    assert not [e for e in es if e["stage"] in (5, 6) and e["data"].get("decision") == "agent step"]

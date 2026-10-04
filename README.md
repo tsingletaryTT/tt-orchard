@@ -42,7 +42,7 @@ it, fixed the code, and restarted it several times. Each fix is described in
 | 4 | Multichip, then shrink to fewer chips; on the weights-only path, one test per chip configuration | In progress on Hemmingway-1 when this was written. No result yet |
 | 5 | Serving integration | Skipped by design on the weights-only path. Stage 4's serve-and-compare tests boot each configuration, compare the output with the CPU reference and check that it is coherent. Never run on the full-port path |
 | 6 | Qualitative check and benchmark | Skipped on the weights-only path, because the operator deferred it. Stage 4's coherence check is the only quality evidence there. Never run on the full-port path |
-| 7 | Package and container build | Recorded as skipped. The packaging code exists but the stage table does not call it yet |
+| 7 | Package and container build | Not yet run. On the weights-only path, with `--package-format v6`, it stages a v6 thin package and boots an installed copy on one board. Every other run records it as skipped |
 | 8 | Operator bundle | Not yet run |
 
 The full-port path (a model that needs new model code) has never run. When stage 0 chooses it, the
@@ -62,7 +62,7 @@ supervisor pauses before stage 2 for the operator.
 | Stage machine, agent loop, supervisor | `orchard/stages.py`, `orchard/agent.py`, `orchard/context.py`, `orchard/supervisor.py` | Built and tested. Ran stages 0 to 2 on the real run |
 | Crash recovery | `orchard/supervisor.py`, `orchard/handoff.py` | Tested with fakes by killing the supervisor after every ledger event. On hardware: `kill -9`, restart, resume worked at least four times on the real run |
 | Stage skills | `orchard/skills/` | Drafts. `delta-triage`, `reference-gate` and `weights-swap-check` have been used on the real run. `weights-swap-configs` is in use in stage 4. `serving-check` and `operator-bundle` have never run |
-| Packaging (stage 7) | `orchard/package.py`, `orchard/package_card.py`, `orchard/package_templates/` | Built and tested with fakes only. Never run on hardware. Not wired into the stage table |
+| Packaging (stage 7) | `orchard/package.py`, `orchard/package_card.py`, `orchard/package_templates/` | Built and tested with fakes only (a fake `tt-model`, fake bundles, a fake server). Wired into the stage table as opt-in supervisor code. Never run on hardware. A v5.1 container package is refused at start |
 | Bundle and package scrub | `orchard/scrub.py` | Built and tested with fakes. The stage 8 gate calls it; stage 8 has never run |
 | CPU sizing tool | `orchard/sizing.py` | Built and tested against a fake server. It has not been run against a real ollama. The CPU numbers in this README come from the run log |
 | Hardware-check driver | `orchard/hardware_check.py` | Ran on both boards of the development machine, 22 to 24 checks passed per run |
@@ -70,7 +70,7 @@ supervisor pauses before stage 2 for the operator.
 
 ### Tests
 
-The suite has 1529 passing tests and 1 skipped test (measured with
+The suite has 1600 passing tests and 1 skipped test (measured with
 `python3 -m pytest -q -p no:cacheprovider`). It needs no hardware and no network. The skipped test
 replays local agent transcripts and runs only when `ORCHARD_REPLAY=1` is set and those transcripts
 exist.
@@ -114,6 +114,7 @@ All numbers are for a Qwen3.8-27B-sized model.
 | One converted tensor cache, 1 chip | Not measured |
 | Free space the supervisor requires before stages 2, 3, 5 and 6 | 40 GB each (choice) |
 | Free space before stage 4 on the weights-only path | 110 GB (choice), plus 40 GB again before each configuration's test (choice) |
+| Free space before stage 7 (packaging) | 80 GB (choice): an installed copy of the package, its venv and a fresh tensor cache |
 
 Each chip configuration needs its own tensor cache. The supervisor checks free space only on the
 filesystem that holds the run directory. On the development machine the root disk was 99% full, so
@@ -452,7 +453,7 @@ supervisor refuses a ledger whose chain is broken.
 | 4 | Each chip configuration (weights-only) or multichip and shrink (full-port) | `weights-swap-configs` or `mesh-shrink` | Runs one serve-and-compare test per chip configuration, each under its own lease |
 | 5 | Serving integration | `serving-check` | Full-port path only. Checks a served model from outside: boot, a passkey test at two lengths, a repeated canary. Skipped on the weights-only path |
 | 6 | Qualitative check and benchmark | `serving-check` | Full-port path only. Five prompts read by the agent, and decode speed and time to first token, each labelled measured or TODO. Skipped on the weights-only path |
-| 7 | Package and container build | none | Skipped for now |
+| 7 | Package and container build | none (supervisor code) | Weights-only path with `--package-format v6` only. Runs `tt-model package-thin --out` from the nearest model's installed v6 bundle, points every weights setting in `run.sh` at a `model-dir` built from the new weights, scrubs each package, installs a copy of the required profile and boots it on a leased board against the stage 1 reference, then writes a card and the publish commands as text. A failure pauses the run and is not escalated. Every other run records it as skipped |
 | 8 | Operator bundle | `operator-bundle` | Writes the bundle for review. The supervisor copies the ledger in and scrubs the bundle |
 
 ### 5.4 Recover after a crash
@@ -531,6 +532,10 @@ When the run prints `ready for operator review`, read `stages/8/bundle/`:
 4. `PUBLISH_COMMANDS.txt`: the commands you would run to package and publish, as text. The harness
    never runs them. You decide whether to run them, whether the result is private or public, and
    whether it is listed anywhere.
+5. `package/`, when stage 7 staged a package: its record (`package.json`), its publish commands and
+   each package's card (`<name>-README.md`). Read each card before you run a publish command. The
+   gate checks the card's license and that each number names its evidence. It cannot tell whether
+   the prose is true. A publish line for a package whose boot check did not run is commented out.
 
 `bundle/ledger.jsonl` holds absolute paths from your machine. It is your record and is not for
 publishing. The supervisor scrubs the other bundle files for the hostname, tokens and home paths,
@@ -585,7 +590,7 @@ Each of these happened on the development machine. Details are in the
 | [`orchard/`](orchard/) | The supervisor package. Each module's docstring says what it owns and what it does not do |
 | [`orchard/defaults.py`](orchard/defaults.py) | Every timing, budget and threshold, each labelled measured or choice |
 | [`orchard/skills/`](orchard/skills/) | The draft stage skills and the weights-swap template scripts |
-| [`orchard/package_templates/`](orchard/package_templates/) | Scripts the stage 7 package carries (not wired yet) |
+| [`orchard/package_templates/`](orchard/package_templates/) | The script each stage 7 package carries (`prepare_model_dir.py`) and stage 7's boot check (`verify_bundle.py`) |
 | [`config/tiers.example.toml`](config/tiers.example.toml) | The example tier config |
 | [`tests/`](tests/) | The test suite and its fakes |
 | [`docs/superpowers/specs/2026-10-01-orchard-design.md`](docs/superpowers/specs/2026-10-01-orchard-design.md) | The design spec |
@@ -621,7 +626,8 @@ checked by mutation: remove the guard, watch a test fail, then restore it.
 
 - The harness never pushes, uploads or publishes. A run ends at "ready for operator review". The
   packaging code runs `tt-model package-thin` only with `--out` and writes publish commands as
-  text.
+  text. Agents may not run `tt-model package` or `package-thin` at all, because given a repo id
+  both upload.
 - Every model endpoint must be on the same machine. The tier loader refuses any other host.
 - The license of a packaged model comes from the new model's own Hugging Face card and is carried
   into the package card. A license the code cannot name counts as non-commercial. A fine-tune can

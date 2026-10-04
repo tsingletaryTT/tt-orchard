@@ -456,3 +456,61 @@ the operator.
 Stop conditions for this stage, in addition to the run's: a `blocked` notice that names test
 containers still running, a cache moved aside that you did not expect, or a 4-chip
 `top1_agreement` under 0.85.
+
+## Packaging Hemmingway-1 (plan 5)
+
+Purpose: stage 7 packages a weights-only model as a v6 thin bundle and boots an installed copy on
+one board. The run publishes nothing. It ends with the publish commands as text.
+
+Who runs it: the controller, with the operator's agreement. It needs one board for the boot check
+(or parks the coder when no board is free), the network for the copy's `install.sh`, and 80 GB free
+on the run directory's disk (`STAGE_DISK_GB[7]`).
+
+Before running:
+- Stages 0, 1, 2 and 4 passed on the weights-only path. Stages 3, 5 and 6 are skipped on that path.
+- The nearest model's v6 bundle is installed: `tt-model list` shows
+  `episod/qwen3.8-27b-dflash2-p300`, and stage 2's `swap_config.json` names it as `bundle_dir`.
+  Other installed v6 bundles of the same model (here the 1-chip `episod/qwen3.8-27b-dflash2-p150`)
+  become optional profiles when stage 4 passed their chip count. They are found under
+  `--package-models-root`, which defaults to the run's recorded `tt_model_root`
+  (`<operator home>/.cache/tt-model/models`).
+- `uv` is on PATH, or `install.sh` downloads it.
+- The drafter `incoai/Qwen3.8-27B-DFlash2` is in the Hugging Face home stage 2 used (`hf_home` in
+  `swap_config.json`).
+- The interpreter that runs the supervisor can import `tokenizers` (the boot check reuses
+  `serve_and_compare.py`, as stage 2 did).
+
+Run: the run's own `run` command plus `--package-format v6 --package-namespace <NS>`. A run that
+started without these options can be given them on a resume, as long as stage 7 has not started;
+the ledger then records a "package options set" decision. Leave `--required-chips`, `--cache-root`,
+`--hf-home` and `--operator-home` out on a resume, or give exactly the recorded values; a different
+value is refused. `--package-format v5.1` is refused at start.
+
+Starting stage 7 on run 3 (paused at stage 5 under older code, 2026-10-03 23:44Z). A running
+supervisor keeps the code it loaded, so stop it with `kill -9 <pid>` (Ctrl-C, `kill <pid>` and
+`control abort` abort the run, and an aborted run cannot be resumed). Restart it from a tree that
+has this code, with the same flags as before plus the two package options. The ledger's open stage 5
+attempt is then recorded as skipped (stages 5 and 6 are skipped on the weights-only path), stage 6
+likewise, and stage 7 runs. The run was paused by the operator, so send `control resume` after the
+restart.
+
+What happens: stage 7 runs `tt-model package-thin --out` once per profile, edits each `run.sh`,
+scrubs each package (a hit pauses the run before anything is installed), installs a copy of the
+2-chip package under `stages/7/verify/bundle`, and runs `stages/7/verify/verify_bundle.py` as the
+hardware test. With the coder on 2 chips the test leases the free board and the coder stays up. The
+copy converts a fresh tensor cache (34 GB measured for the 2-chip cache) and compiles its kernels
+into an empty cache (more than 26 min measured on 2026-10-03), so the check waits up to 3300 s for
+the server (`PACKAGE_HEALTH_TIMEOUT_S`). The check refuses to compare tokens unless the port was
+free, `/v1/models` lists the copy's model-dir, the server process has `MODEL_WEIGHTS_DIR` and
+`HF_MODEL` set to it, and `model-dir/.weights` names `Altworld/Hemmingway-1` at the pinned
+revision. A failure pauses the run; it is not escalated. While `package-thin` and `install.sh` run,
+the supervisor does not read the control file, so a `pause` or `abort` takes effect only after they
+return (up to 30 and 90 minutes, both choices).
+
+Record afterwards: `stages/7/package.json`, `stages/7/verify/evidence/verify.json` (the top-1
+agreement and ready time, labelled measured), `stages/7/verify/install.log` and its time, the server
+log's line that names the weights directory, `stages/7/PUBLISH_COMMANDS.txt`, each package's
+`run.sh` (read it by eye: `package-thin` is beta and the fake follows the 2026-09-30 layout) and
+each package's card. Do not run the publish commands; they are for the operator. A retried stage 7
+keeps the earlier attempt's copy, venv and tensor cache under `stages/7.partial-<k>`; the disk check
+for the next attempt counts them.

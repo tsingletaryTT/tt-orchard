@@ -1,8 +1,9 @@
 # tt-orchard: design
 
 Status: draft for operator review. Date: 2026-10-01. Author: Claude, with Taylor Singletary.
-Plans 1 to 4 are implemented. Not yet done: plan 1 Task 5 (the sizing tool on this machine), plan 3's
-park check on hardware, and plan 4's Hemmingway-1 run (docs/runbooks/hardware-validation.md). Every
+Plans 1 to 5 are implemented. Not yet done: plan 1 Task 5 (the sizing tool on this machine), plan 3's
+park check on hardware, plan 4's Hemmingway-1 run and plan 5's packaging run
+(docs/runbooks/hardware-validation.md). Every
 number below is either cited to a
 measurement made on this machine or marked **unmeasured**.
 
@@ -110,7 +111,7 @@ hands the stage to the large model.
 | 4 | Multichip, then shrink to 2 and 1 chips | large plans, small runs; large diagnoses | per-config evidence required by `mesh-shrink` |
 | 5 | Serving integration | small | black-box server checks pass |
 | 6 | Qualitative check and benchmark | small | measured numbers, each labeled measured or TODO |
-| 7 | Package and container build | none; supervisor waits, chips released | image boots and passes the stage 5 checks |
+| 7 | Package: a v6 thin bundle (plan 5; a v5.1 container is deferred) | none; supervisor code | each staged package scrubs clean, its run.sh loads the new weights, its card passes the license and number checks, and an installed copy boots on a leased board and agrees with the stage 1 reference (`gate_package`) |
 | 8 | Operator bundle | small | results file, ledger, open risks, exact publish commands, scrub check clean |
 
 Tiers are named in a local config file (`config/tiers.toml`, not committed; TOML because the
@@ -335,6 +336,8 @@ Operator commands: `pause`, `resume`, `abort`. Abort releases the hardware and c
 
 Denials enforced by the command runner, which every stage agent's shell goes through:
 
+- `tt-model package` and `tt-model package-thin` in any form (given a repo id, both upload; stage 7
+  packages as supervisor code).
 - `tt-model push` and `tt-model publish`; `git push` (including `subtree push`, `lfs push`, git
   aliases set with `-c`, and the `git-push` helper); `gh repo create`; `hf upload` and
   `huggingface-cli upload` (any `upload*` subcommand).
@@ -366,13 +369,17 @@ between sanctioning an adversarial review of the runner and accepting best effor
 layers.
 
 Bundle scrub check (stage 8): search the package and card for the machine hostname, tokens and
-absolute home paths. A hit blocks the bundle.
+absolute home paths. A hit blocks the bundle. Stage 7 scrubs each staged package more strictly
+(`scrub_package`): no symbolic link, tensor cache, weights file, venv or model-dir may be in it, and
+the operator's namespace may appear only in its card. Wheels are binary and are not searched; each
+must be byte-identical to the source bundle's.
 
 ## 11. Skills
 
 New skills, each named for the plugin that owns it:
 
 - `tt-model-bringup`: `delta-triage`, `reference-gate`, `operator-bundle`. They never name a lease tool.
+- Stage 7 has no skill. It is supervisor code (`orchard/package.py`, plan 5).
 - `tt-gozer/skills`: `gozer-park` (hold the lease through a swap, reset in place, and release
   instead for a long phase with no hardware use).
 - Existing skills used by stages: `model-bringup`, `functional-decoder`, `full-model`, `multichip`,
