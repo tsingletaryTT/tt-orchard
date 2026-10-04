@@ -106,3 +106,14 @@ intervention, stopped at stage 0.
 - **`control resume`** sent to the run directory. Intervention 3.
 
 Interventions in attempt 2 so far: 3, all caused by stage 8 having no template. Stages 0 to 7 needed none.
+
+- **2026-10-04T20:53Z attempt 2 reached `ready for operator review`.** Stage 8 passed on its first attempt after the
+  resume, using the new template. Total attempt 2: stages 0 to 7 with zero interventions, then 3 interventions
+  (merge, restart, resume), all at stage 8. The run never reached "ready for operator review" with zero
+  interventions, so the zero-intervention test is still open.
+  Checks after the run: ledger hash chain verifies (144 entries); bundle scrub reported 0 findings; grep of the
+  bundle's text files for `hf_` tokens and the operator home path found 0 hits; the bundle is 191 MB with 39 files
+  listed (sha256) in `stages/8/evidence/bundle-build.json`; all four chips free; no supervisor running.
+  Contents (from `RESULTS.md`): weights-only; 1, 2 and 4 chip serving checks at top-1 agreement 0.906; two v6
+  packages staged (p150 and p300); the p300 package passed its boot check and the p150 package was not boot-checked.
+  Nothing was published.
