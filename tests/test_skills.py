@@ -169,3 +169,14 @@ def test_the_bundle_skill_carries_stage_7s_publish_commands_word_for_word():
     text = (SKILLS / "operator-bundle.md").read_text()
     assert "bundle/package/PUBLISH_COMMANDS.txt" in text and "word for word" in text
     assert "non-commercial" in text
+
+
+@pytest.mark.parametrize("name", ("weights-swap-check", "weights-swap-configs"))
+def test_the_swap_skills_copy_stage_0s_model_id_verbatim(name):
+    # Run 3's stage 7 stopped because stage 2's label left off stage 0's @revision. Stage 7 now
+    # reads the revision from the served weights, and the label must still agree with stage 0.
+    text = " ".join((SKILLS / f"{name}.md").read_text().split())
+    assert '"new_model_id": "<the model value from stages/0/delta.json, for example ' \
+           'Altworld/Hemmingway-1@<revision>>"' in text
+    assert "Copy the `model` value from `stages/0/delta.json` verbatim, including the `@revision`" in text
+    assert "Stage 7 compares this label with stage 0's model and the revision of the weights" in text

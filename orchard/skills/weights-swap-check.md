@@ -82,10 +82,14 @@ Four facts decide whether a swap works. Each was found by failing first.
         "nearest_model_id": "Qwen/Qwen3.8-27B",
         "base_snapshot": "<nearest model snapshot>",
         "new_snapshot": "<new model snapshot>",
-        "new_model_id": "<new model id, for example Altworld/Hemmingway-1>",
+        "new_model_id": "<the model value from stages/0/delta.json, for example Altworld/Hemmingway-1@<revision>>",
         "tt_cache": "<a new directory whose name contains the model's slug>",
         "hf_home": "{{HF_HOME}}",
         "port": 8100}
+
+   Copy the `model` value from `stages/0/delta.json` verbatim, including the `@revision`, into
+   `new_model_id`. Stage 7 compares this label with stage 0's model and the revision of the weights
+   the test served, so the label must name the same weights.
 
    `tt_cache` must be a new directory, for example `{{CACHE_ROOT}}/<slug>/tt_cache`, or one this
    run already used for this model. Never point it at
