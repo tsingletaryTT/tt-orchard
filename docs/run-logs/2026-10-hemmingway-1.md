@@ -466,3 +466,12 @@ path, so packaging is the next piece to build after stages 0 to 6 are shown to w
   script keeps uv and pip caches and temp files on the SSD, because the root disk is down to 25 GB free
   (the rebuilt 31 GB 4-chip cache sits beside the 31 GB stale one that was moved aside). The stale
   `tensors.aside-20261003` caches on root are not deleted; that is the operator's call.
+- **00:46:45Z stages 5 and 6 recorded as skipped; stage 7 failed at once on an id check, and the run paused.** The
+  restarted supervisor recovered the coder (board 1 this time, ready in 116 s, canary identical for the
+  seventh time), recorded stage 5's stale attempt and stage 6 as skipped with the stated reasons, and started
+  stage 7. Stage 7 failed in the first check: "stage 2 served 'Altworld/Hemmingway-1'; stage 0 names
+  'Altworld/Hemmingway-1@1a5f363a...'". The stage 2 agent had written a label without the revision. The
+  supervisor treated it as supervisor-code failure, did not escalate, and paused, as designed. The check is
+  right to insist that what was tested is what is packaged, but a typed label is the wrong thing to compare:
+  the revision is fixed by where the served model directory's weight links resolve. A fix is in progress: compare
+  the repo name and the revision resolved from the links, and tell the skill to copy stage 0's id verbatim.
