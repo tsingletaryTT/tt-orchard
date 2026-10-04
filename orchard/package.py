@@ -215,6 +215,103 @@ def find_sources(models_root, *, entry_cls: str, nearest_model: str) -> list[Sou
     return sorted(found, key=lambda s: (s.chips, s.name))
 
 
+# ---- which weights stage 2 served ----------------------------------------------------------------
+
+REVISION = re.compile(r"[0-9a-f]{40}")
+# A path inside a Hugging Face cache repo: .../models--<org>--<name>/(snapshots/<rev>|blobs)/...
+HF_SNAPSHOT_PATH = re.compile(r"(?:^|/)models--(?P<org>[^/]+?)--(?P<name>[^/]+)/snapshots/"
+                              r"(?P<rev>[0-9a-f]{40})/")
+HF_BLOB_PATH = re.compile(r"^(?P<root>.*/models--(?P<org>[^/]+?)--(?P<name>[^/]+))/blobs/[^/]+$")
+MAX_LINK_HOPS = 40
+
+
+def split_model_id(model_id) -> tuple[str, str | None]:
+    """'org/name@<40 hex>' -> ('org/name', '<40 hex>'); 'org/name' -> ('org/name', None).
+
+    Stage 0's delta.json writes `<repo>@<revision>` (the delta-triage skill). Anything after '@'
+    that is not a 40-hex revision is kept as part of the repo, so a malformed id never matches."""
+    text = model_id if isinstance(model_id, str) else ""
+    repo, sep, rev = text.rpartition("@")
+    if sep and REVISION.fullmatch(rev):
+        return repo, rev
+    return text, None
+
+
+def _weight_origin(path: Path) -> tuple[str, set[str]] | None:
+    """The repo and the candidate revisions one weight file in a model dir comes from, or None.
+
+    Each hop of the file's symlink chain is read in turn. A hop inside `snapshots/<rev>/` names the
+    revision directly (the layout the HF cache uses, and any link made into it). prepare_swap.py
+    instead links each file to `os.path.realpath` of the snapshot file, which is a blob and names
+    no revision. Then the candidates are the snapshots of that repo whose same-named file resolves
+    to the same blob. Two revisions that share a blob hold identical bytes for that file."""
+    hop = str(path)
+    for _ in range(MAX_LINK_HOPS):
+        if not os.path.islink(hop):
+            break
+        hop = os.path.normpath(os.path.join(os.path.dirname(hop), os.readlink(hop)))
+        m = HF_SNAPSHOT_PATH.search(hop)
+        if m:
+            return f"{m['org']}/{m['name']}", {m["rev"]}
+    real = os.path.realpath(path)
+    m = HF_SNAPSHOT_PATH.search(real)
+    if m:
+        return f"{m['org']}/{m['name']}", {m["rev"]}
+    m = HF_BLOB_PATH.match(real)
+    if m is None:
+        return None
+    snaps = Path(m["root"]) / "snapshots"
+    revs = {s.name for s in (sorted(snaps.iterdir()) if snaps.is_dir() else [])
+            if REVISION.fullmatch(s.name) and os.path.realpath(s / path.name) == real}
+    return (f"{m['org']}/{m['name']}", revs) if revs else None
+
+
+def served_weights_problems(stage0_model, label, model_dir) -> list[str]:
+    """Why the weights stage 2 served are not the ones stage 0 names; empty when they are.
+
+    `stage0_model` is delta.json's `model` (`<repo>@<revision>`). `label` is swap-check.json's
+    `new_model_id`, which the stage agent typed, and `model_dir` is the directory the test served.
+    The label must name stage 0's repo, and if it carries an `@revision`, stage 0's revision. The
+    weights decide the rest: every `*.safetensors` file in model_dir must link into stage 0's repo
+    in the HF cache, all at one revision, and that revision must be stage 0's."""
+    want_repo, want_rev = split_model_id(stage0_model)
+    if not want_repo or want_rev is None:
+        return [f"stage 0's model {stage0_model!r} names no revision; delta.json must give "
+                "<repo>@<revision>"]
+    label_repo, label_rev = split_model_id(label)
+    if label_repo != want_repo:
+        return [f"stage 2 served {label!r}; stage 0 names {stage0_model!r}. The repos differ."]
+    if label_rev is not None and label_rev != want_rev:
+        return [f"stage 2 served {label!r}; stage 0 names {stage0_model!r}. The revisions differ."]
+    md = Path(model_dir) if isinstance(model_dir, str) and model_dir else None
+    if md is None or not md.is_dir():
+        return [f"stage 2's model_dir {model_dir!r} is not a directory, so the weights it served "
+                "cannot be checked"]
+    weights = sorted(md.glob("*.safetensors"))
+    if not weights:
+        return [f"stage 2's model_dir {md} has no *.safetensors file, so the weights it served "
+                "cannot be checked"]
+    origins = {}
+    for w in weights:
+        origin = _weight_origin(w)
+        if origin is None:
+            return [f"{w} links into no Hugging Face snapshot, so its revision is unknown; stage 0 "
+                    f"names {stage0_model}"]
+        origins[w.name] = origin
+    repos = sorted({repo for repo, _ in origins.values()})
+    if repos != [want_repo]:
+        return [f"the weights in {md} come from {', '.join(repos)}; stage 0 names {stage0_model}"]
+    common = set.intersection(*(revs for _, revs in origins.values()))
+    if not common:
+        found = "; ".join(f"{n}: {', '.join(sorted(revs))}" for n, (_, revs) in origins.items())
+        return [f"the weights in {md} resolve to different revisions ({found}); stage 0 names "
+                f"{stage0_model}"]
+    if want_rev not in common:
+        return [f"the weights in {md} are revision {', '.join(sorted(common))}; stage 0 names "
+                f"{stage0_model}"]
+    return []
+
+
 @dataclass(frozen=True)
 class RunFacts:
     run_dir: Path
@@ -239,14 +336,25 @@ def read_run(run_dir) -> RunFacts:
     if not gate.ok:
         raise PackageError("stage 2's result does not pass its gate: " + "; ".join(gate.reasons))
     cfg = _json(run / "stages/2/swap_config.json", "stage 2's swap_config.json")
-    model_id = delta.get("model")
-    if cfg.get("new_model_id") != model_id:
-        raise PackageError(f"stage 2 served {cfg.get('new_model_id')!r}; stage 0 names {model_id!r}")
+    # What was served is read from the weights the test loaded (swap-check.json's model_dir), and
+    # the label the stage agent typed only has to agree with it (served_weights_problems).
+    served = _json(run / "stages/2/evidence/swap-check.json", "stage 2's swap-check.json")
+    problems = served_weights_problems(delta.get("model"), served.get("new_model_id"),
+                                       served.get("model_dir"))
+    if problems:
+        raise PackageError("; ".join(problems))
+    # From here on the ids are bare repo ids: package-thin, the manifest and the card take the
+    # revision separately.
+    model_id, revision = split_model_id(delta.get("model"))
+    nearest_model = split_model_id(delta.get("nearest_model"))[0]
     snap = Path(cfg.get("new_snapshot") or "")
-    if not re.fullmatch(r"[0-9a-f]{40}", snap.name) or not snap.is_dir():
+    if not REVISION.fullmatch(snap.name) or not snap.is_dir():
         raise PackageError(f"stage 2's new_snapshot {str(snap)!r} is not a pinned snapshot directory")
+    if snap.name != revision:
+        raise PackageError(f"stage 2's new_snapshot is revision {snap.name}; stage 0 names "
+                           f"{delta.get('model')}")
     source = load_source(cfg.get("bundle_dir") or "")
-    if source.weights_repo != delta.get("nearest_model"):
+    if source.weights_repo != nearest_model:
         raise PackageError(f"stage 2's bundle serves {source.weights_repo}; the nearest model is "
                            f"{delta.get('nearest_model')}")
     md = run / "stages/2/model-dir"
@@ -260,7 +368,7 @@ def read_run(run_dir) -> RunFacts:
     if not license_id:
         raise PackageError(f"the new model's license is not in {snap}/README.md; stage 7 stages no "
                            "package without it")
-    return RunFacts(run, model_id, snap.name, delta["nearest_model"], snap,
+    return RunFacts(run, model_id, revision, nearest_model, snap,
                     Path(cfg.get("hf_home") or ""), source, base, passing, license_id)
 
 

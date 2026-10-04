@@ -53,11 +53,24 @@ class PackageRig:
         swap = {"run_dir": str(self.run_dir), "bundle_dir": str(self.source),
                 "nearest_model_id": BASE, "new_snapshot": str(snap), "new_model_id": NEW,
                 "hf_home": str(hf_op), "port": 8100}
+        # Stage 2's test writes swap-check.json as serve_and_compare.py does: the short label the
+        # agent typed and the model-dir it served, whose weight file links to the new model's blob
+        # (prepare_swap.py links each file to the realpath of the snapshot file).
+        weights = "model-00001-of-00001.safetensors"
+        md = self.run_dir / "stages/2/model-dir"
+        report = json.dumps({"new_model_id": NEW, "model_dir": str(md)})
+        test2 = (f"ln -s {os.path.realpath(snap / weights)} {md / weights} && "
+                 f"printf '%s' '{report}' > stages/2/evidence/swap-check.json && "
+                 "printenv > stages/2/evidence/devices.txt")
         self.files = {
+            (0, "run"): {**FILES[(0, "run")], "delta.json": {
+                **FILES[(0, "run")]["delta.json"], "model": f"{NEW}@{NEW_REV}",
+                "nearest_model": f"{BASE}@{BASE_REV}"}},
             (1, "run"): {**FILES[(1, "run")],
                          "evidence/reference/prompt-ids.json": {"prompt_ids": PROMPT_IDS},
                          "evidence/reference/generated-ids.json": {"generated_ids": GENERATED}},
             (2, "prepare"): {**hw(2), "swap_config.json": swap,
+                             "hw_test.json": {**hw(2)["hw_test.json"], "command": test2},
                              "model-dir/config.json": '{"architectures": ["Qwen3_5ForConditionalGeneration"]}',
                              "model-dir/preprocessor_config.json": "{}"}}
         self.pid_file, server_cfg = tmp / "server-pid.json", tmp / "server.json"

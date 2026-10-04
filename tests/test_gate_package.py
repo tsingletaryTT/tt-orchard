@@ -71,6 +71,16 @@ def test_a_staged_and_boot_checked_package_passes(stage7):
     assert "stages/7/verify/evidence/verify.json" in g.evidence
 
 
+def test_a_manifest_at_another_revision_than_stage_0s_fails(stage7):
+    # Stage 0 names <repo>@<revision>; the manifest keeps the two apart and both must match.
+    m = stage7["pkg"] / "tt_kernel_manifest.json"
+    data = json.loads(m.read_text())
+    data["weights"]["revision"] = "0" * 40
+    write(m, data)
+    assert any("the manifest's weights are Altworld/Hemmingway-1@" + "0" * 40 in r
+               for r in reasons(stage7))
+
+
 def test_a_run_sh_edited_back_to_the_base_weights_fails(stage7):
     run_sh = stage7["pkg"] / "run.sh"
     run_sh.write_text(run_sh.read_text().replace('export MODEL_WEIGHTS_DIR="$HERE/model-dir"\n', ""))
