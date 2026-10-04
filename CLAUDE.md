@@ -353,3 +353,30 @@ TDD, one commit per change, a mutation per guard). Key decisions:
 Mutations seen red: no prefix normalization, always weights-only, no encode test, a weakened append check,
 no missing-keys report, shape track off, no shape on the event, no wrap-up, a wrap-up with no evidence.
 Not run on hardware: neither template has run on a real model.
+
+## 2026-10-04: a template for stage 8
+Prompt: on the second-model run both stage 8 attempts stopped. The agent read stage 7's evidence with 33
+`cat` commands, wrote nothing for 20 turns, and `no_file_written` stopped it. Template stage 8 the way
+stages 0 and 1 were (branch `template-stage-8`, worktree, TDD, one commit per change). Key decisions:
+- `orchard/skills/operator-bundle-templates/build_bundle.py` reads `bundle_config.json` (`run_dir`) and
+  rebuilds `stages/8/bundle/` from scratch from the ledger and each stage's files. It finds the checkout
+  from the ledger's `paths.orchard_dir` and uses `orchard.stages` for stage names and `orchard.scrub`
+  for the scrub, with the operator's home from the ledger, as the gate sees it.
+- The tensor-cache hazard is `Dealt with: yes` only when every cache stage 2 and stage 4 recorded is a
+  distinct directory, each is empty or holds a `.orchard-model` marker naming the model, and none is
+  under a path the stage 0 finding names, tt-model's cache directory or a served bundle. The caches
+  are checked when the script runs. Every other hazard says `Not shown` unless a result file settles it.
+- Text copied from result files has the run's paths replaced by labels (`<CACHE_ROOT>` and so on) and
+  any home path, hostname or token removed. Copied package files are not edited, so a planted token
+  shows up in the scrub output and the gate fails the bundle.
+- When stage 7 was skipped, `PUBLISH_COMMANDS.txt` holds only comments. When stage 7 ran and left no
+  `PUBLISH_COMMANDS.txt`, the script exits 2 and names the file. This is a choice: the prompt said to
+  refuse when stage 7 produced none, and a run without `--package-format v6` must still reach review.
+- The package copy leaves out every directory and suffix the package scrub forbids, links, wheels the
+  manifest does not list, and files over 1 GB. The gate's scrub reads shipped wheels as text.
+- The skill: write the config first, copy and run the template, read RESULTS.md and RISKS.md once,
+  rewrite the summary paragraph, add risks only with evidence, never read the ledger or transcripts.
+Mutations seen red: skipped-stage reasons dropped, every hazard marked dealt with, venv copied, scrub
+skipped, shared-cache check off, marker check off, nearest-cache check off, unlisted wheels copied,
+redaction off, size limit off, unverified profile left out of the TODO list.
+Not run on a real run: the template has only run on fake run directories.

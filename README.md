@@ -44,7 +44,7 @@ it, fixed the code, and restarted it many times. Each fix is described in
 | 5 | Serving integration | Skipped by design on the weights-only path. Stage 4's serve-and-compare tests boot each configuration, compare the output with the CPU reference and check that it is coherent. Never run on the full-port path |
 | 6 | Qualitative check and benchmark | Skipped on the weights-only path, because the operator deferred it. Stage 4's coherence check is the only quality evidence there. Never run on the full-port path |
 | 7 | Package and container build | Passed once, on Hemmingway-1 (weights-only path, `--package-format v6`): staged a 2-chip and a 1-chip v6 thin bundle with the real `tt-model package-thin`, installed a copy of the 2-chip bundle and booted it from empty caches on a leased board (ready in 2034 s, top-1 agreement 0.9375 with the CPU reference). The 1-chip bundle is staged and not boot-checked. No 4-chip package is built, because the 4-chip packages on the development machine are container packages. Every other run records the stage as skipped |
-| 8 | Operator bundle | Passed once, on Hemmingway-1: wrote `RESULTS.md`, `RISKS.md`, `card.md`, the packages and the publish commands as text, and the run ended at "ready for operator review". Nothing was published |
+| 8 | Operator bundle | Passed once, on Hemmingway-1, with an open-ended skill: wrote `RESULTS.md`, `RISKS.md`, `card.md`, the packages and the publish commands as text, and the run ended at "ready for operator review". Nothing was published. Failed twice on the second model: the agent read stage 7's files with 33 `cat` commands and wrote nothing for 20 turns. Since 2026-10-04 a template script (`build_bundle.py`) builds the whole bundle from the run's files and the agent reviews it; tested with fakes, not yet run on a real run |
 
 The full-port path (a model that needs new model code) has never run. When stage 0 chooses it, the
 supervisor pauses before stage 2 for the operator.
@@ -62,7 +62,7 @@ supervisor pauses before stage 2 for the operator.
 | Watchdog | `orchard/watchdog.py`, `orchard/transcripts.py` | Built and tested. Fired on a real agent during the run. The near-duplicate command check (command shapes, 4 turns) was added after the second-model run and has not fired on a real agent yet |
 | Stage machine, agent loop, supervisor | `orchard/stages.py`, `orchard/agent.py`, `orchard/context.py`, `orchard/supervisor.py` | Built and tested. Ran stages 0 to 2 on the real run |
 | Crash recovery | `orchard/supervisor.py`, `orchard/handoff.py` | Tested with fakes by killing the supervisor after every ledger event. On hardware: `kill -9`, restart, resume worked at least four times on the real run |
-| Stage skills | `orchard/skills/` | Drafts. `delta-triage`, `reference-gate` and `weights-swap-check` have been used on the real run. `weights-swap-configs` and `operator-bundle` have been used on the real run. `serving-check` has never run. `delta-triage` and `reference-gate` were rewritten on 2026-10-04 to run template scripts (`delta-triage-templates/`, `reference-gate-templates/`); the rewritten versions have not run on hardware |
+| Stage skills | `orchard/skills/` | Drafts. `delta-triage`, `reference-gate` and `weights-swap-check` have been used on the real run. `weights-swap-configs` and `operator-bundle` have been used on the real run. `serving-check` has never run. `delta-triage`, `reference-gate` and `operator-bundle` were rewritten on 2026-10-04 to run template scripts (`delta-triage-templates/`, `reference-gate-templates/`, `operator-bundle-templates/`); the rewritten versions have not run on a real run |
 | Packaging (stage 7) | `orchard/package.py`, `orchard/package_card.py`, `orchard/package_templates/` | Built and tested with fakes, then run once on hardware (Hemmingway-1; see stage 7 above). Wired into the stage table as opt-in supervisor code. A v5.1 container package is refused at start |
 | Bundle and package scrub | `orchard/scrub.py` | Built and tested with fakes. The stage 8 gate calls it; it ran once on the real run |
 | CPU sizing tool | `orchard/sizing.py` | Built and tested against a fake server. It has not been run against a real ollama. The CPU numbers in this README come from the run log |
@@ -403,7 +403,7 @@ on its own.
 | `stages/<n>/` | One directory per stage: the agent's result file (`delta.json`, `reference.json`, `result.json`), `evidence/`, `log/` (each agent step's transcript), and for hardware stages `hw_test.json`, `handoff.json` and `test-result.json` |
 | `stages/<n>.partial-<k>/` | An earlier attempt at the stage, moved aside. Nothing is deleted |
 | `stages/4/configs/<N>/`, `stages/4/tests/<N>/` | Stage 4 on the weights-only path: each chip configuration's files and the supervisor's record of its test |
-| `stages/8/bundle/` | The operator bundle: `RESULTS.md`, `RISKS.md`, `PUBLISH_COMMANDS.txt`, an optional `card.md`, and a copy of the ledger |
+| `stages/8/bundle/` | The operator bundle: `RESULTS.md`, `RISKS.md`, `card.md`, `PUBLISH_COMMANDS.txt`, `package/` (stage 7's packages and cards) and a copy of the ledger. `stages/8/evidence/bundle-build.json` lists each bundle file with its sha256 |
 
 ## 5. Operate a run
 
@@ -458,7 +458,7 @@ supervisor refuses a ledger whose chain is broken.
 | 5 | Serving integration | `serving-check` | Full-port path only. Checks a served model from outside: boot, a passkey test at two lengths, a repeated canary. Skipped on the weights-only path |
 | 6 | Qualitative check and benchmark | `serving-check` | Full-port path only. Five prompts read by the agent, and decode speed and time to first token, each labelled measured or TODO. Skipped on the weights-only path |
 | 7 | Package and container build | none (supervisor code) | Weights-only path with `--package-format v6` only. First checks that stage 2 served the weights stage 0 names: the label must name stage 0's repo, and the weight files in the served `model-dir` must link to stage 0's revision in the Hugging Face cache. Then runs `tt-model package-thin --out` from the nearest model's installed v6 bundle, points every weights setting in `run.sh` at a `model-dir` built from the new weights, scrubs each package, installs a copy of the required profile and boots it on a leased board against the stage 1 reference, then writes a card and the publish commands as text. A failure pauses the run and is not escalated. Every other run records it as skipped |
-| 8 | Operator bundle | `operator-bundle` | Writes the bundle for review. The supervisor copies the ledger in and scrubs the bundle |
+| 8 | Operator bundle | `operator-bundle` | The agent writes `bundle_config.json` and runs `build_bundle.py`, which builds the bundle from the ledger and each stage's files: results with labelled numbers and evidence paths, risks with a computed `Dealt with:` line for the tensor-cache hazard, the model card, stage 7's packages and publish commands, and a copy of the ledger. It prints the scrub's findings. The agent rewrites the summary paragraph and adds risks it can back with evidence. The supervisor copies the ledger in again and scrubs the bundle |
 
 ### 5.4 Recover after a crash
 
@@ -525,8 +525,9 @@ account the run uses, the lease tool, and not giving the agents credentials.
 
 When the run prints `ready for operator review`, read `stages/8/bundle/`:
 
-1. `RISKS.md` first: every `TODO` number, every stage 0 hazard and whether a later stage dealt
-   with it, anything a gate passed on thin evidence, and what was never tested.
+1. `RISKS.md` first: every `TODO` number (including what the package cards list under Not
+   measured), every stage 0 hazard with a `Dealt with:` line, the numbers that rest on thin
+   evidence, and the license. `Dealt with: Not shown` means the run's files cannot show it.
 2. `RESULTS.md`: each number has a label (`measured` or `TODO`) and an evidence path. Open the
    evidence for the numbers you rely on. A gate checks that the files exist and have the right
    shape. It cannot tell whether a claim is true.
@@ -536,10 +537,12 @@ When the run prints `ready for operator review`, read `stages/8/bundle/`:
 4. `PUBLISH_COMMANDS.txt`: the commands you would run to package and publish, as text. The harness
    never runs them. You decide whether to run them, whether the result is private or public, and
    whether it is listed anywhere.
-5. `package/`, when stage 7 staged a package: its record (`package.json`), its publish commands and
-   each package's card (`<name>-README.md`). Read each card before you run a publish command. The
-   gate checks the card's license and that each number names its evidence. It cannot tell whether
-   the prose is true. A publish line for a package whose boot check did not run is commented out.
+5. `package/`, when stage 7 staged a package: a copy of each package folder, its record
+   (`package.json`), its publish commands and each package's card (`<name>-README.md`). Read each
+   card before you run a publish command. The gate checks the card's license and that each number
+   names its evidence. It cannot tell whether the prose is true. A publish line for a package
+   whose boot check did not run is commented out. `card.md` collects the package cards in one
+   file.
 
 `bundle/ledger.jsonl` holds absolute paths from your machine. It is your record and is not for
 publishing. The supervisor scrubs the other bundle files for the hostname, tokens and home paths,
@@ -593,7 +596,7 @@ Each of these happened on the development machine. Details are in the
 |---|---|
 | [`orchard/`](orchard/) | The supervisor package. Each module's docstring says what it owns and what it does not do |
 | [`orchard/defaults.py`](orchard/defaults.py) | Every timing, budget and threshold, each labelled measured or choice |
-| [`orchard/skills/`](orchard/skills/) | The draft stage skills and the template scripts they copy (delta triage, reference gate, weights swap) |
+| [`orchard/skills/`](orchard/skills/) | The draft stage skills and the template scripts they copy (delta triage, reference gate, weights swap, operator bundle) |
 | [`orchard/package_templates/`](orchard/package_templates/) | The script each stage 7 package carries (`prepare_model_dir.py`) and stage 7's boot check (`verify_bundle.py`) |
 | [`config/tiers.example.toml`](config/tiers.example.toml) | The example tier config |
 | [`tests/`](tests/) | The test suite and its fakes |
