@@ -1,0 +1,43 @@
+# Second-model run: iapp/openthai2.0-qwen3.8-27b, as hands-off as possible
+
+Kept by Claude for the operator. Times are UTC unless marked. Numbers are measured unless marked.
+Purpose: measure how often the harness needs a person on a model it has never seen. The first run
+(Altworld/Hemmingway-1, see `2026-10-hemmingway-1.md`) needed a person many times and ended at
+"ready for operator review". This run uses the code as it stands after that run. Nobody tunes the
+harness for this model in advance.
+
+## The model and why
+
+`iapp/openthai2.0-qwen3.8-27b`: an open Thai knowledge, document-understanding and agentic model from a
+Thai organization, a full fine-tune of Qwen/Qwen3.8-27B. Pinned revision
+`a64f2b125f481320522ded36dcbc3c8c2737bb33` (the repository changed hours before the run, so the
+revision is fixed). Apache-2.0, bf16, 14 shards, 56.5 GB, 64 layers, hidden 5120, vocabulary 248320.
+Chosen because it is useful (few Thai models run on Tenstorrent hardware), different from
+Hemmingway-1 (it keeps the base model's vision-language structure, so its tensor names and config
+differ from a text-only export) and a hard case for the tokenizer (Thai depends on combining marks).
+Not chosen: quantized and abliterated variants (not full bf16 weights), CC BY-NC models.
+
+## Protocol
+
+Setup that is not counted (what an operator does before pressing Enter): choosing the model, downloading
+its weights, freeing disk space, writing the run script, starting the supervisor with its flags.
+The command is `/mnt/bonus/models/orchard-runs/openthai-run1.sh`. The operator chose not to isolate the
+agents, so the run passes `--accept-credentials-visible`, as the first run did.
+
+An **intervention** is anything done to the run or its environment after the supervisor starts:
+a restart, a `control` command (pause, resume, abort), a code change or merge, killing a process, editing
+a file, freeing disk, or any step that unblocks a stop. Each is logged below with the time and the reason.
+Reading the ledger, logs and chip state is observation and is not counted.
+Not an intervention: anything the harness resolves by itself (a stage retry, an escalation, a coder
+recovery, a park and restore, a watchdog nudge).
+
+Success: the run prints `ready for operator review` with **zero interventions**. Other numbers kept:
+wall time per stage, stage retries and escalations, watchdog firings, and every stop that needed a person.
+
+## Interventions
+
+(none yet)
+
+## Observations
+
+(entries are added as the run proceeds)
