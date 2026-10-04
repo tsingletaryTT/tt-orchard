@@ -41,7 +41,13 @@ wall time per stage, stage retries and escalations, watchdog firings, and every 
 
 ## Interventions
 
-(none yet)
+1. **16:05:18 Z: `control resume` after the first stop.** The run paused at 16:03:51Z in stage 0 (delta triage) after 9
+   minutes. Attempt 1 (15:56:36Z) had looped on two `ls` commands for 17 turns and the `turn_repeat`
+   detector nudged, then escalated it. Attempt 2 (escalated) spent 19 turns reading its own transcripts, the coder
+   log and this model's repository (including an `adapter/` directory and the blobs) and wrote its first file on
+   turn 20; the `no_file_written` detector (20 turns) paused the run at that moment, as the last rung of the
+   ladder. No code was changed. Cause: stage 0 is still an open-ended agent step with no template, unlike
+   stages 2, 4 and 7. Count: 1.
 
 ## Observations
 
