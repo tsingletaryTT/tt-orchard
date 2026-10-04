@@ -214,3 +214,29 @@ def test_the_delta_triage_skill_has_the_write_first_rules():
     assert "Do not investigate anything outside the paths this skill lists" in flat
     assert "Edit a `finding` only where a measured fact needs explaining" in flat
     assert "Do not change `path`" in flat
+
+
+# ---- stage 1: the reference-gate template -------------------------------------------------------
+
+def test_the_reference_gate_skill_runs_the_template_that_exists_in_this_repo():
+    import importlib.util
+    text = (SKILLS / "reference-gate.md").read_text()
+    flat = " ".join(text.split())
+    script = SKILLS / "reference-gate-templates" / "reference_gate.py"
+    assert script.is_file()
+    assert "cp {{ORCHARD_DIR}}/orchard/skills/reference-gate-templates/reference_gate.py stages/1/" in flat
+    assert "<python> stages/1/reference_gate.py" in flat
+    spec = importlib.util.spec_from_file_location("reference_gate_for_skill_test", script)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert set(_config_block(text, "run_dir")) == set(mod.CONFIG_KEYS)
+    assert mod.PROMPT in flat
+
+
+def test_the_reference_gate_skill_has_the_write_first_rules_and_the_card_caveat():
+    flat = " ".join((SKILLS / "reference-gate.md").read_text().split())
+    assert "Write `reference_config.json` FIRST" in flat
+    assert "Never read the run's ledger" in flat and "transcripts" in flat
+    assert "Do not investigate anything outside the paths this skill lists" in flat
+    assert "form check only" in flat and "Keep that sentence." in flat
+    assert "Do not change a check's `pass` from false to true." in flat
