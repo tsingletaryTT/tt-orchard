@@ -97,3 +97,12 @@ intervention, stopped at stage 0.
   first model was not reliable. Fix: a template for stage 8 (a script that builds the bundle deterministically
   from the ledger and stage results; the agent reviews and adds risks), then resume this run to finish it
   (those steps count as interventions: a merge, a restart and a resume), and then a third model, fully clean.
+
+## Attempt 2, continued: finishing at stage 8
+
+**Interventions (attempt 2), counted from the stop at stage 8:**
+- **2026-10-04 (about 13:40 local) merge of the stage 8 template** (`build_bundle.py`, skill rewrite, 26 new tests; suite 1728 passed, 1 skipped). Intervention 1.
+- **`kill -9` of the paused supervisor (pid 3074828) and restart with `openthai-run2.sh`** (new pid 3924428). Intervention 2. The old lease was held by the dead pid; the new supervisor took over and booted the coder on board 1.
+- **`control resume`** sent to the run directory. Intervention 3.
+
+Interventions in attempt 2 so far: 3, all caused by stage 8 having no template. Stages 0 to 7 needed none.
