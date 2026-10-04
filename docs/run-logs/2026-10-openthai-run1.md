@@ -79,3 +79,4 @@ revision, same flags. The intervention count restarts at zero. Attempt 1's resul
 intervention, stopped at stage 0.
 
 **Interventions (attempt 2):** (none yet)
+- **2026-10-04T17:37:08Z attempt 2 started** (supervisor pid 3074828, run directory `openthai2-run2`). Hands off.
