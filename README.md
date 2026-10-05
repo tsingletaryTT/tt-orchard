@@ -394,6 +394,7 @@ on its own.
 |---|---|
 | `ledger.jsonl` | The append-only record of the run. The state of the run is computed from it, and no other state file exists |
 | `ledger.jsonl.lock` | The single-writer lock. A second supervisor on the same run is refused |
+| `supervisor.pid` | The pid of the supervisor that last started on this run. `status` reads it. Runs from before this file existed do not have one |
 | `*.torn-<time>` | A partial last line cut off by a crash, kept beside the ledger |
 | `control`, `control.done-<k>` | The operator command file and the commands already acted on |
 | `coder.log` | The coder server's output |
@@ -406,6 +407,32 @@ on its own.
 | `stages/8/bundle/` | The operator bundle: `RESULTS.md`, `RISKS.md`, `card.md`, `PUBLISH_COMMANDS.txt`, `package/` (stage 7's packages and cards) and a copy of the ledger. `stages/8/evidence/bundle-build.json` lists each bundle file with its sha256 |
 
 ## 5. Operate a run
+
+### 5.0 Operating a run
+
+To see where a run stands, run this from the checkout. It reads the run directory and changes
+nothing. It takes no lock, so it is safe while the supervisor runs.
+
+```bash
+python3 -m orchard.supervisor status --run-dir <RUN_DIR>
+python3 -m orchard.supervisor status --run-dir <RUN_DIR> --json
+```
+
+It prints about 30 lines: the state of the run (`running`, `paused`, `ready-for-operator-review`,
+`aborted`, `stopped-or-crashed` or `not-started`) and how that was decided, each stage's status and
+wall time, counts of retries, escalations, nudges, pauses and operator commands, the reason for a
+pause, the last five ledger events, free disk, the chip leases, and a final `next:` line with the
+usual action for that situation. It exits 0 when it produced a status, and 2 for a bad run
+directory or a ledger that fails its hash check. The JSON keys are listed in the docstring of
+[`orchard/status.py`](orchard/status.py).
+
+A small local model can act as the operator. [`orchard/skills/operator-runbook.md`](orchard/skills/operator-runbook.md)
+tells it to run `status`, pick one action from a table, log it, wait five minutes and repeat. To use
+it with qwen-code, add one line to the `QWEN.md` or `AGENTS.md` in the directory where the operator
+model starts: "Read `<ORCHARD_DIR>/orchard/skills/operator-runbook.md` before you touch a run." The
+runbook never publishes, never aborts and never changes the run script. When the run is ready,
+`python3 -m orchard.operator_checks --run-dir <RUN_DIR>` runs the read-only post-run checks (publish-like
+tool calls, repos that already exist on the hub, secrets and home paths in the bundle).
 
 ### 5.1 Pause, resume, abort
 
@@ -596,7 +623,8 @@ Each of these happened on the development machine. Details are in the
 |---|---|
 | [`orchard/`](orchard/) | The supervisor package. Each module's docstring says what it owns and what it does not do |
 | [`orchard/defaults.py`](orchard/defaults.py) | Every timing, budget and threshold, each labelled measured or choice |
-| [`orchard/skills/`](orchard/skills/) | The draft stage skills and the template scripts they copy (delta triage, reference gate, weights swap, operator bundle) |
+| [`orchard/skills/`](orchard/skills/) | The stage skills and the template scripts they copy (delta triage, reference gate, weights swap, operator bundle). These skills live in this repository. It also holds [`operator-runbook.md`](orchard/skills/operator-runbook.md), which is for whoever watches a run and is not a stage skill |
+| [`orchard/status.py`](orchard/status.py), [`orchard/operator_checks.py`](orchard/operator_checks.py) | The read-only `status` command and the post-run checks |
 | [`orchard/package_templates/`](orchard/package_templates/) | The script each stage 7 package carries (`prepare_model_dir.py`) and stage 7's boot check (`verify_bundle.py`) |
 | [`config/tiers.example.toml`](config/tiers.example.toml) | The example tier config |
 | [`tests/`](tests/) | The test suite and its fakes |

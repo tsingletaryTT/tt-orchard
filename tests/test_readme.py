@@ -25,7 +25,7 @@ from pathlib import Path
 
 import pytest
 
-from orchard import hardware_check, park_check, sizing, supervisor
+from orchard import hardware_check, operator_checks, park_check, sizing, supervisor
 from orchard.stages import STAGES
 
 REPO = Path(__file__).resolve().parent.parent
@@ -86,11 +86,11 @@ def _subparsers(parser: argparse.ArgumentParser) -> dict[str, argparse.ArgumentP
 
 
 def supervisor_flags() -> set[str]:
-    """The flags of `python3 -m orchard.supervisor run` and `control`."""
+    """The flags of `python3 -m orchard.supervisor run`, `control` and `status`."""
     top = _captured_parser(supervisor, lambda m: m.parse([]))
     subs = _subparsers(top)
-    assert set(subs) == {"run", "control"}, sorted(subs)
-    return _option_strings(subs["run"]) | _option_strings(subs["control"])
+    assert set(subs) == {"run", "control", "status"}, sorted(subs)
+    return _option_strings(subs["run"]) | _option_strings(subs["control"]) | _option_strings(subs["status"])
 
 
 def other_repo_flags() -> set[str]:
@@ -99,6 +99,7 @@ def other_repo_flags() -> set[str]:
     flags |= _option_strings(_captured_parser(hardware_check, lambda m: m.parse_args([])))
     flags |= _option_strings(_captured_parser(park_check, lambda m: m.parse_args([])))
     flags |= _option_strings(_captured_parser(sizing, lambda m: m.main([])))
+    flags |= _option_strings(_captured_parser(operator_checks, lambda m: m.main([])))
     return flags
 
 

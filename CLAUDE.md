@@ -380,3 +380,27 @@ Mutations seen red: skipped-stage reasons dropped, every hazard marked dealt wit
 skipped, shared-cache check off, marker check off, nearest-cache check off, unlisted wheels copied,
 redaction off, size limit off, unverified profile left out of the TODO list.
 Not run on a real run: the template has only run on fake run directories.
+
+## 2026-10-05: an operator surface for a small local model
+Prompt: let a small local LLM agent (qwen-code on Qwen3.8-27B, small context, weak at long reading) act as the
+operator of a run. Two deliverables: a read-only status command and an operator runbook skill. Built test first,
+with a mutation per key guard (state from supervisor liveness, the disk rule, the writer lock, the pid wiring, the
+pause detector, the runbook's command lines and NEVER list).
+- `python3 -m orchard.supervisor status --run-dir DIR [--json]` (`orchard/status.py`) prints about 30 lines: state,
+  how it was decided, stages with wall time, counts, pause reason and detector, last 5 events, disk, leases and a
+  `next:` hint from a table (`HINT_RULES`). It never opens the ledger writer. `ledger.read_entries(path)` is the
+  lock-free, repair-free reader that `Ledger.read` now calls. Exit 0 for a status, 2 for a bad directory or a corrupt
+  ledger.
+- The supervisor did not record its pid. It now writes `supervisor.pid` at the start of `run()`. Older runs have none,
+  so status falls back to the holder of the `ledger.jsonl.lock` flock, found in `/proc/locks` (reading it takes no
+  lock). A pid from the file counts only if the command line still mentions the supervisor.
+- `orchard/operator_checks.py` runs the post-run checks the runbook names. On the real data it first flagged
+  `hf upload` text that stage 8 wrote with `write_file` (PUBLISH_COMMANDS.txt). Only `shell` calls are commands, so it
+  now reads those. The hub lookup then found `episod/openthai2.0-qwen3.8-27b-p300` public, because a person published
+  it after the run (see docs/run-logs/2026-10-publishing.md); that is a true finding for the check.
+- `orchard/skills/operator-runbook.md` is a 150-line loop (status, table, one action, one log line, `sleep 300`).
+  Tests parse every command it quotes with the real argparse, and check each state and the NEVER list.
+- Decision (the user, 2026-10-05): the stage skills stay in tt-orchard and are not moved to the tt-model-bringup plugin
+  in tenstorrent/skills. The `status:` lines, the spec and the plans that said "their home is the plugin" were reworded.
+  The existing plugin skills the stages name (`model-bringup`, `tt-device-usage` and the rest) are still read through
+  `--skills-dir`.
