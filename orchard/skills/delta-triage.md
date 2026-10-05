@@ -1,7 +1,7 @@
 ---
 name: delta-triage
 description: Stage 0 of a tt-orchard run. Compare a new Hugging Face model with the nearest model that already runs on Tenstorrent hardware, write down every difference with evidence, and name the path the run takes.
-status: draft. A local tt-orchard copy. Since 2026-10-04 a tested template script does the measuring and drafts delta.json; you configure it, run it and review what it wrote. Its home is the tt-model-bringup plugin in tenstorrent/skills (spec section 11). Move it there after a real run has used it.
+status: draft. A local tt-orchard copy. Since 2026-10-04 a tested template script does the measuring and drafts delta.json; you configure it, run it and review what it wrote. It lives in tt-orchard.
 ---
 
 # Delta triage

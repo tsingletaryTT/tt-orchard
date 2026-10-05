@@ -24,7 +24,7 @@
 - Every default value lives in `orchard/defaults.py` as one named constant, with a comment that cites where it was measured or says that it is a choice and was not measured.
 - Every guard gets a mutation step: change the guard, run the named test, watch it fail, restore the guard (spec section 13). After each restore, delete the bytecode (`find . -name __pycache__ -prune -exec rm -rf {} +`) before the confirming run. Plan 3 found that a stale `.pyc` can hide a restore.
 - Run the whole suite before each commit: `cd /home/ttuser/code/tt-orchard && python3 -m pytest -q -p no:cacheprovider`. The baseline is 854 passed and 1 skipped in about 175 s. After this plan: 962 passed and 1 skipped in about 200 s.
-- The stage skills in `orchard/skills/` are local drafts, marked `status: draft.` Their home is the tt-model-bringup plugin in tenstorrent/skills (spec section 11). They never name a lease tool. This plan changes nothing in tenstorrent/skills and opens no PR.
+- The stage skills in `orchard/skills/` are local drafts, marked `status: draft.` They live in tt-orchard. They never name a lease tool. This plan changes nothing in tenstorrent/skills and opens no PR.
 - Out of scope: the request-rewriting proxy for agents the supervisor did not launch, streaming, new model code for architectures that do not match (full ports), stage 7 (package and container build), the `stage-review` skill, read-only mounts, and publishing of any kind.
 - Commit messages are plain English, one idea per commit. Writing rules for docs and comments: state the finding; short sentences; no "X, not Y" framing; no aphoristic closers; no metaphors that stand in for a claim.
 
@@ -2394,7 +2394,7 @@ Create `orchard/skills/delta-triage.md`:
 ---
 name: delta-triage
 description: Stage 0 of a tt-orchard run. Compare a new Hugging Face model with the nearest model that already runs on Tenstorrent hardware, write down every difference with evidence, and name the path the run takes.
-status: draft. A local tt-orchard copy. Its home is the tt-model-bringup plugin in tenstorrent/skills (spec section 11). Move it there after a real run has used it.
+status: draft. A local tt-orchard copy. It lives in tt-orchard.
 ---
 
 # Delta triage
@@ -2469,7 +2469,7 @@ Create `orchard/skills/reference-gate.md`:
 ---
 name: reference-gate
 description: Stage 1 of a tt-orchard run. Build a CPU reference of the new model and show that it reproduces the model's published behavior before any device result is compared with it.
-status: draft. A local tt-orchard copy. Its home is the tt-model-bringup plugin in tenstorrent/skills (spec section 11). Move it there after a real run has used it.
+status: draft. A local tt-orchard copy. It lives in tt-orchard.
 ---
 
 # Reference gate
@@ -2527,7 +2527,7 @@ Create `orchard/skills/serving-check.md`:
 ---
 name: serving-check
 description: Stages 5 and 6 of a tt-orchard run. Check a served model from the outside (boot, passkey, canary), then run a short qualitative check and a benchmark, with every number labelled measured or TODO.
-status: draft. A local tt-orchard copy, thinner than the vllm-integration, qualitative-check and benchmark-model skills it points to. Its home is the tt-model-bringup plugin in tenstorrent/skills.
+status: draft. A local tt-orchard copy, thinner than the vllm-integration, qualitative-check and benchmark-model skills it points to. It lives in tt-orchard.
 ---
 
 # Serving check
@@ -2588,7 +2588,7 @@ Create `orchard/skills/operator-bundle.md`:
 ---
 name: operator-bundle
 description: Stage 8 of a tt-orchard run. Write the bundle an operator reviews before anything is published - results, open risks and the exact publish commands as text - and never run those commands.
-status: draft. A local tt-orchard copy. Its home is the tt-model-bringup plugin in tenstorrent/skills (spec section 11). Move it there after a real run has used it.
+status: draft. A local tt-orchard copy. It lives in tt-orchard.
 ---
 
 # Operator bundle
@@ -4462,7 +4462,7 @@ with:
 
 ```markdown
 | Stage machine, agent steps and supervisor loop (`orchard/stages.py`, `orchard/agent.py`, `orchard/context.py`, `orchard/supervisor.py`, `orchard/scrub.py`) | built, tested against a fake machine and fake model servers, including a kill after every ledger event; not yet run on hardware (Hemmingway-1 entry in `docs/runbooks/hardware-validation.md`) |
-| Stage skills (`orchard/skills/`: delta-triage, reference-gate, serving-check, operator-bundle) | local drafts; their home is the tt-model-bringup plugin |
+| Stage skills (`orchard/skills/`: delta-triage, reference-gate, serving-check, operator-bundle) | local drafts that live in tt-orchard |
 | Model proxy for agents the supervisor did not launch, stage 7 (package and image build) | designed; no code yet |
 ```
 
@@ -4635,4 +4635,4 @@ git commit -m "Document plan 4 and add the Hemmingway-1 runbook entry"
 - tt-metal and vLLM versions are recorded as TODO, because they live inside the coder image. `tt-model --version` and the firmware bundle from `tt-smi -s` are recorded.
 - The watchdog thresholds are plan 3's in-sample defaults. The first real run's ledger and agent transcripts (`stages/<n>/log/`) are the data to check them against.
 - The open decision about an adversarial review of the command runner (spec section 14, item 5) is still open. The runbook entry says not to start without the operator's answer.
-- The draft skills move to the tt-model-bringup plugin after a real run has used them, following that repo's rules (both manifests, both catalogues, version bump, README, CODEOWNER, `pytest tests/`).
+- The draft skills live in tt-orchard (`orchard/skills/`). They stay there.

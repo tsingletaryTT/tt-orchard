@@ -63,7 +63,7 @@ Four layers. Each has one reason to change.
 |---|---|---|
 | Lease mechanism | Board-granular leases, FIFO queue, release and reset, history, and two additions: `reset` in place and an ownership check that counts the owner's child processes | `tt-gozer` |
 | Lease-aware skills | Park-and-restore guidance: hold the lease through a swap, reset in place, when to release instead, what to do on exit 10 or a stale ticket | `tt-gozer/skills/` |
-| Stage skills | Delta triage, reference gate, the existing bring-up stages, operator bundle. They say "run hardware work under whatever lease the machine provides" and never name gozer | `tenstorrent/skills`, `tt-model-bringup` plugin (new skills added there) |
+| Stage skills | Delta triage, reference gate, the existing bring-up stages, operator bundle. They say "run hardware work under whatever lease the machine provides" and never name gozer | `tt-orchard` (`orchard/skills/`) |
 | Policy and loop | Supervisor: stage state machine, tier config, ledger, watchdog, command runner with denials | `tt-orchard` (this repo, local until the operator creates a remote) |
 
 `tt-orchard` talks to the lease mechanism through an adapter with three calls: `acquire` (the lease
@@ -376,9 +376,9 @@ must be byte-identical to the source bundle's.
 
 ## 11. Skills
 
-New skills, each named for the plugin that owns it:
+New skills, each named for the repository that holds it:
 
-- `tt-model-bringup`: `delta-triage`, `reference-gate`, `operator-bundle`. They never name a lease tool.
+- `tt-orchard` (`orchard/skills/`): `delta-triage`, `reference-gate`, `operator-bundle`. They never name a lease tool.
 - Stage 7 has no skill. It is supervisor code (`orchard/package.py`, plan 5).
 - `tt-gozer/skills`: `gozer-park` (hold the lease through a swap, reset in place, and release
   instead for a long phase with no hardware use).
@@ -386,7 +386,7 @@ New skills, each named for the plugin that owns it:
   `mesh-shrink`, `vllm-integration`, `qualitative-check`, `benchmark-model`, `tt-device-usage`,
   `stage-review`, `tti-release`, plus `gozer-keymaster` and `gozer-gatekeeper`.
 
-Changes to `tenstorrent/skills` follow that repo's rules: both manifests, both catalogues, version
+The stage skills live in tt-orchard and are not moved to `tenstorrent/skills`. Changes to the existing skills the stages use, which stay in `tenstorrent/skills`, follow that repo's rules: both manifests, both catalogues, version
 bump in both manifests, README update, CODEOWNER, and `pytest tests/`. No PR is opened without the
 operator asking. The unreviewed `mesh-shrink` work and the drafts under `docs/superpowers/` on the
 current branch are not part of this spec.

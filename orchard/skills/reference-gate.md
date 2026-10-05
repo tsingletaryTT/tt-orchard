@@ -1,7 +1,7 @@
 ---
 name: reference-gate
 description: Stage 1 of a tt-orchard run. Build a CPU reference of the new model and show that it reproduces the model's published behavior before any device result is compared with it.
-status: draft. A local tt-orchard copy. Since 2026-10-04 a tested template script loads the model, runs every check and drafts reference.json; you configure it, run it and review what it wrote. Its home is the tt-model-bringup plugin in tenstorrent/skills (spec section 11). Move it there after a real run has used it.
+status: draft. A local tt-orchard copy. Since 2026-10-04 a tested template script loads the model, runs every check and drafts reference.json; you configure it, run it and review what it wrote. It lives in tt-orchard.
 ---
 
 # Reference gate

@@ -1,7 +1,7 @@
 ---
 name: weights-swap-configs
 description: Stage 4 of a tt-orchard run when stage 0 found a weights-only delta. Serve the new weights on each chip configuration the packages will ship for (2 and 4 chips required, 1 chip optional), using the packages that already serve the nearest model, and compare each with the stage 1 CPU reference.
-status: draft. A local tt-orchard copy written on 2026-10-03 from the stage 2 weights-swap-check skill and its templates. No harness run has used it yet. Its home is the tt-model-bringup plugin in tenstorrent/skills, after a harness run has used it.
+status: draft. A local tt-orchard copy written on 2026-10-03 from the stage 2 weights-swap-check skill and its templates. No harness run has used it yet. It lives in tt-orchard.
 ---
 
 # Weights swap on each chip configuration

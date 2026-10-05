@@ -1,7 +1,7 @@
 ---
 name: serving-check
 description: Stages 5 and 6 of a tt-orchard run. Check a served model from the outside (boot, passkey, canary), then run a short qualitative check and a benchmark, with every number labelled measured or TODO.
-status: draft. A local tt-orchard copy, thinner than the vllm-integration, qualitative-check and benchmark-model skills it points to. Its home is the tt-model-bringup plugin in tenstorrent/skills.
+status: draft. A local tt-orchard copy, thinner than the vllm-integration, qualitative-check and benchmark-model skills it points to. It lives in tt-orchard.
 ---
 
 # Serving check

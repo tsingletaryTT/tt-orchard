@@ -1,7 +1,7 @@
 ---
 name: operator-bundle
 description: Stage 8 of a tt-orchard run. Build the bundle an operator reviews before anything is published - results, open risks, a model card, the packages and the exact publish commands as text - and never run those commands.
-status: draft. A local tt-orchard copy. Since 2026-10-04 a tested template script builds the whole bundle from the run's files; you configure it, run it and review what it wrote. Its home is the tt-model-bringup plugin in tenstorrent/skills (spec section 11). Move it there after a real run has used it.
+status: draft. A local tt-orchard copy. Since 2026-10-04 a tested template script builds the whole bundle from the run's files; you configure it, run it and review what it wrote. It lives in tt-orchard.
 ---
 
 # Operator bundle

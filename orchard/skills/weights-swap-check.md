@@ -1,7 +1,7 @@
 ---
 name: weights-swap-check
 description: Stage 2 of a tt-orchard run when stage 0 found a weights-only delta. Load the new weights into the existing TT implementation of the nearest model, serve them on one leased board, and compare the chip's output with the stage 1 CPU reference.
-status: draft. A local tt-orchard copy, written from one hand prototype on 2026-10-03 (Altworld/Hemmingway-1 on the 2-chip Qwen3.8-27B bundle). Since 2026-10-03 the work is done by two tested template scripts that you copy. Its home is the tt-model-bringup plugin in tenstorrent/skills, after a harness run has used it.
+status: draft. A local tt-orchard copy, written from one hand prototype on 2026-10-03 (Altworld/Hemmingway-1 on the 2-chip Qwen3.8-27B bundle). Since 2026-10-03 the work is done by two tested template scripts that you copy. It lives in tt-orchard.
 ---
 
 # Weights swap check

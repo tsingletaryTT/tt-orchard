@@ -4503,7 +4503,7 @@ The spec's stage table, denials, scrub paragraph and skills list change to match
 Replace in `README.md`:
 
 ```markdown
-| Stage skills (`orchard/skills/`: delta-triage, reference-gate, serving-check, operator-bundle) | local drafts; their home is the tt-model-bringup plugin |
+| Stage skills (`orchard/skills/`: delta-triage, reference-gate, serving-check, operator-bundle) | local drafts that live in tt-orchard |
 | Model proxy for agents the supervisor did not launch, stage 7 (package and image build) | designed; no code yet |
 
 The suite has 1199 passing tests and 1 skipped, and runs without hardware or network. 854 of them predate plan 4. The skipped test is the opt-in replay of local qwen-code transcripts (`ORCHARD_REPLAY=1 python3 -m pytest tests/test_replay_local.py`). 607 of the tests predate plan 3. The driver's tests use fake gozer roots and a stub child.
@@ -4513,7 +4513,7 @@ The suite has 1199 passing tests and 1 skipped, and runs without hardware or net
 with:
 
 ```markdown
-| Stage skills (`orchard/skills/`: delta-triage, reference-gate, serving-check, operator-bundle) | local drafts; their home is the tt-model-bringup plugin |
+| Stage skills (`orchard/skills/`: delta-triage, reference-gate, serving-check, operator-bundle) | local drafts that live in tt-orchard |
 | Stage 7: a v6 thin package, its boot check, card and publish commands as text (`orchard/package.py`, `orchard/package_card.py`, `orchard/package_templates/`) | built, tested against a fake `tt-model`, fake bundles and a fake server; not yet run on hardware. A v5.1 container package is deferred |
 | Model proxy for agents the supervisor did not launch | designed; no code yet |
 
@@ -4674,14 +4674,14 @@ must be byte-identical to the source bundle's.
 Replace in `docs/superpowers/specs/2026-10-01-orchard-design.md`:
 
 ```markdown
-- `tt-model-bringup`: `delta-triage`, `reference-gate`, `operator-bundle`. They never name a lease tool.
+- `tt-orchard` (`orchard/skills/`): `delta-triage`, `reference-gate`, `operator-bundle`. They never name a lease tool.
 - `tt-gozer/skills`: `gozer-park` (hold the lease through a swap, reset in place, and release
 ```
 
 with:
 
 ```markdown
-- `tt-model-bringup`: `delta-triage`, `reference-gate`, `operator-bundle`. They never name a lease tool.
+- `tt-orchard` (`orchard/skills/`): `delta-triage`, `reference-gate`, `operator-bundle`. They never name a lease tool.
 - Stage 7 has no skill. It is supervisor code (`orchard/package.py`, plan 5).
 - `tt-gozer/skills`: `gozer-park` (hold the lease through a swap, reset in place, and release
 ```
