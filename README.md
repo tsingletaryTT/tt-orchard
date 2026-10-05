@@ -71,7 +71,7 @@ supervisor pauses before stage 2 for the operator.
 
 ### Tests
 
-The suite has 1600 passing tests and 1 skipped test (measured with
+The suite has 1811 passing tests and 1 skipped test (measured with
 `python3 -m pytest -q -p no:cacheprovider`). It needs no hardware and no network. The skipped test
 replays local agent transcripts and runs only when `ORCHARD_REPLAY=1` is set and those transcripts
 exist.
