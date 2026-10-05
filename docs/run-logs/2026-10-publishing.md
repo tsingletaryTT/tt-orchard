@@ -32,3 +32,20 @@ upstream repos (the Hub test used local copies), no v5.1 package. The 1-chip che
 Operational notes: `gozer run` killed with SIGTERM left the server running and its lease STALE; the server's process
 group had to be killed and `gozer reconcile` run. Releasing a lease while another agent resets its board can print
 "reset failed" and still end with the chips FREE.
+
+## Follow-up: why is draft acceptance low on writing? (2026-10-04, evening)
+
+Question from the operator. Test: the unmodified Qwen3.8-27B package (`episod/qwen3.8-27b-dflash2-p300`, its own
+warm cache, up in under 4 minutes) answered the same 10 everyday-writing prompts as Hemmingway-1 (greedy, thinking
+off, 600-token cap). DFlash2 acceptance, weighted by steps, from the server log:
+
+| Model | Accepted of 7 | Tokens per step |
+|---|---|---|
+| Qwen3.8-27B (base), 10 writing prompts, 1,113 steps | 2.21 (31.6%) | 3.20 |
+| Hemmingway-1, same prompts, 356 steps | 1.72 (24.6%) | 2.69 |
+| Hemmingway-1, 80 coding prompts | 4.38 (62.6%) | 5.36 |
+
+Reading: most of the drop on prose is present in the base model, so it comes from prose being harder to draft
+than code. The fine-tune lowers acceptance further, by about 22 percent (2.21 to 1.72). One run each on 10 prompts;
+the two models wrote different text, so the contexts differ. Answers saved in the run directory
+`hubtest/base_qual.json`. No change was made to the published cards for this.
