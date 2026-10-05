@@ -94,6 +94,14 @@ def test_main_writes_the_control_file(tmp_path, capsys):
     assert (tmp_path / "control").read_text() == "pause\n"
 
 
+def test_a_run_records_its_pid_for_the_status_command(rig):
+    # The wiring, end to end: a real supervisor run leaves supervisor.pid, and status reads it.
+    rig.run()
+    assert (rig.run_dir / "supervisor.pid").read_text().strip() == str(os.getpid())
+    from orchard import status
+    assert status._read_pid_file(rig.run_dir) == os.getpid()
+
+
 def test_main_refuses_a_credential_before_running_anything(tmp_path, capsys):
     tiers = write_tiers(tmp_path / "t.toml", "http://127.0.0.1:8000/v1", "http://127.0.0.1:11434/v1")
     a = argv(tmp_path, tiers, "http://127.0.0.1:8000/v1") + ["--env", "HF_TOKEN=hf_x", "--gozer", "/nonexistent"]

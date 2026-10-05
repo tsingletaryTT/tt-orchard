@@ -54,6 +54,53 @@ def _digest(line: str) -> str:
     return hashlib.sha256(line.encode("utf-8")).hexdigest()
 
 
+def _complete_lines(path: Path) -> list[str]:
+    """The complete lines of the file (those that end in a newline). Bytes after the last newline
+    are a write in progress or cut off by a crash; they are not part of the chain and are ignored
+    here. Only a writer's `_recover` sets them aside."""
+    if not path.exists():
+        return []
+    try:
+        text = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        # Not a line the ledger wrote (it writes ASCII JSON), so a person has to look.
+        raise LedgerCorrupt(f"{path} is not valid UTF-8 ({exc.reason} at byte {exc.start})") from exc
+    return text.split("\n")[:-1]
+
+
+def read_entries(path) -> list[dict]:
+    """Read a ledger file and verify its whole hash chain. Raises LedgerCorrupt on any defect.
+
+    This takes no lock and writes nothing, so it is safe next to a running supervisor and for
+    tools that must not touch a run (orchard/status.py). A line the writer is still appending
+    may be missing from the result; a complete line is never missing.
+    """
+    entries, prev = [], GENESIS
+    for i, line in enumerate(_complete_lines(Path(path)), start=1):
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise LedgerCorrupt(f"line {i} is not JSON") from exc
+        # Valid JSON is not enough: replay_state indexes these fields, so a wrong shape must be
+        # reported here as corruption and not surface later as a KeyError or AttributeError.
+        if not isinstance(entry, dict):
+            raise LedgerCorrupt(f"line {i} is not a JSON object")
+        seq = entry.get("seq")
+        if type(seq) is not int or seq != i:   # `true` equals 1 in Python, so check the type
+            raise LedgerCorrupt(f"line {i}: expected sequence {i}, found {seq!r}")
+        if entry.get("prev") != prev:
+            raise LedgerCorrupt(f"line {i}: hash chain broken")
+        if not isinstance(entry.get("event"), str):
+            raise LedgerCorrupt(f"line {i}: event must be a string")
+        if "stage" not in entry:
+            raise LedgerCorrupt(f"line {i} has no stage field")
+        if not isinstance(entry.get("data"), dict):
+            raise LedgerCorrupt(f"line {i}: data must be an object")
+        entries.append(entry)
+        prev = _digest(line)
+    return entries
+
+
 class Ledger:
     def __init__(self, path):
         self.path = Path(path)
@@ -90,15 +137,7 @@ class Ledger:
         self.close()
 
     def _lines(self) -> list[str]:
-        if not self.path.exists():
-            return []
-        # After _recover the file is empty or ends in a newline, so the last split piece is "".
-        try:
-            text = self.path.read_text(encoding="utf-8")
-        except UnicodeDecodeError as exc:
-            # Not a line the ledger wrote (it writes ASCII JSON), so a person has to look.
-            raise LedgerCorrupt(f"{self.path} is not valid UTF-8 ({exc.reason} at byte {exc.start})") from exc
-        return text.split("\n")[:-1]
+        return _complete_lines(self.path)
 
     def _recover(self) -> None:
         if self.path.exists():
@@ -134,30 +173,7 @@ class Ledger:
             self._prev = _digest(self._lines()[-1])
 
     def read(self) -> list[dict]:
-        entries, prev = [], GENESIS
-        for i, line in enumerate(self._lines(), start=1):
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError as exc:
-                raise LedgerCorrupt(f"line {i} is not JSON") from exc
-            # Valid JSON is not enough: replay_state indexes these fields, so a wrong shape must be
-            # reported here as corruption and not surface later as a KeyError or AttributeError.
-            if not isinstance(entry, dict):
-                raise LedgerCorrupt(f"line {i} is not a JSON object")
-            seq = entry.get("seq")
-            if type(seq) is not int or seq != i:   # `true` equals 1 in Python, so check the type
-                raise LedgerCorrupt(f"line {i}: expected sequence {i}, found {seq!r}")
-            if entry.get("prev") != prev:
-                raise LedgerCorrupt(f"line {i}: hash chain broken")
-            if not isinstance(entry.get("event"), str):
-                raise LedgerCorrupt(f"line {i}: event must be a string")
-            if "stage" not in entry:
-                raise LedgerCorrupt(f"line {i} has no stage field")
-            if not isinstance(entry.get("data"), dict):
-                raise LedgerCorrupt(f"line {i}: data must be an object")
-            entries.append(entry)
-            prev = _digest(line)
-        return entries
+        return read_entries(self.path)
 
     def append(self, event: str, stage: int | None = None, **data) -> dict:
         if self._closed:

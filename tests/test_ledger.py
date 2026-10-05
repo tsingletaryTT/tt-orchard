@@ -302,3 +302,21 @@ def test_an_evidence_entry_is_accepted(tmp_path):
     with Ledger(tmp_path / "ledger.jsonl") as led:
         e = led.append("evidence", 0, path="stages/0/evidence/a.txt", sha256="0" * 64)
     assert e["event"] == "evidence"
+
+
+def test_read_entries_verifies_the_chain_without_the_writer_lock_or_repair(tmp_path):
+    from orchard.ledger import read_entries
+    path = tmp_path / "ledger.jsonl"
+    with Ledger(path) as led:
+        run_script(led, SCRIPT)
+        # read_entries works while this writer holds the lock
+        assert len(read_entries(path)) == len(SCRIPT)
+    path.write_bytes(path.read_bytes() + b'{"seq": 8, "cut')        # a write in progress
+    size = path.stat().st_size
+    assert len(read_entries(path)) == len(SCRIPT)                   # the tail is ignored
+    assert path.stat().st_size == size and not list(tmp_path.glob("*.torn-*"))   # and not repaired
+    lines = path.read_text().split("\n")
+    lines[2] = lines[2].replace("pass", "fail")
+    path.write_text("\n".join(lines))
+    with pytest.raises(LedgerCorrupt):
+        read_entries(path)

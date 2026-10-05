@@ -56,6 +56,9 @@ aborted, so running the same command again resumes it. When the ledger cannot be
 release works from what this process remembers. A SIGKILL, a power cut or a crash of Python
 itself runs no handler: the coder then keeps its chips under a dead pid's lease until the run is
 resumed (which re-leases it) or aborted.
+`python3 -m orchard.supervisor status --run-dir DIR [--json]` prints the state of a run without
+taking the ledger lock or writing anything (orchard/status.py). The supervisor writes its pid to
+`<run dir>/supervisor.pid` at start so that command can tell a live supervisor from a dead one.
 A paused supervisor keeps its leases and waits. Abort stops the coder, releases its lease and
 closes the ledger. The run ends at "ready for operator review". The supervisor never publishes.
 Agents are kept from publishing in three ways, none of them complete: the command runner refuses
@@ -200,6 +203,19 @@ class Control:
             k += 1
         os.replace(self.path, done)
         return text if text in self.COMMANDS else None
+
+
+def write_pid_file(run_dir) -> None:
+    """Record this process's pid in `<run dir>/supervisor.pid`, replacing any earlier one.
+
+    `python3 -m orchard.supervisor status` reads it to tell a running supervisor from a dead one.
+    The file is written by rename, so a reader never sees half a number. A pid alone can be reused
+    by another process after a crash, so the status command also checks the command line.
+    """
+    path = Path(run_dir) / "supervisor.pid"
+    tmp = path.with_name("supervisor.pid.tmp")
+    tmp.write_text(f"{os.getpid()}\n")
+    os.replace(tmp, path)
 
 
 class RunActuator:
@@ -515,6 +531,7 @@ class Supervisor:
         The release sits in `except` clauses. A bare `finally` would also run on the tests'
         Crash, which stands for a SIGKILL, after which no code runs. Releasing there would hide
         the crash recovery that the kill test checks."""
+        write_pid_file(self.run_dir)    # first, so `status` sees this process as soon as it starts
         with self._signals():
             try:
                 return self._run()
@@ -1423,6 +1440,9 @@ def parse(argv=None):
     c = sub.add_parser("control", help="send pause, resume or abort to a running supervisor")
     c.add_argument("--run-dir", required=True)
     c.add_argument("command", choices=Control.COMMANDS)
+    st = sub.add_parser("status", help="print the state of a run (read-only; no lock, no writes)")
+    st.add_argument("--run-dir", required=True)
+    st.add_argument("--json", action="store_true", help="print the facts as one JSON object")
     return p.parse_args(argv)
 
 
@@ -1535,6 +1555,10 @@ def main(argv=None, *, home=None) -> int:
         Control(args.run_dir).write(args.command)
         print(f"wrote {args.command!r} to {Path(args.run_dir) / 'control'}")
         return 0
+    if args.cmd == "status":
+        # Read-only: orchard/status.py never opens the ledger writer, so it works next to a live run.
+        from orchard import status
+        return status.main(["--run-dir", args.run_dir] + (["--json"] if args.json else []))
     run_dir = Path(args.run_dir)
     try:
         with Ledger(run_dir / "ledger.jsonl") as ledger:
