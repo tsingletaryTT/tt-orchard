@@ -1,0 +1,576 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Context Size Comparison - tt-orchard Models</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            color: #e4e4e4;
+            line-height: 1.6;
+            padding: 20px;
+            min-height: 100vh;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        h1 {
+            text-align: center;
+            margin-bottom: 10px;
+            font-size: 2.5rem;
+            color: #00d4ff;
+            text-shadow: 0 0 20px rgba(0, 212, 255, 0.3);
+        }
+        .subtitle {
+            text-align: center;
+            margin-bottom: 40px;
+            color: #888;
+            font-size: 1.1rem;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            gap: 24px;
+            margin-bottom: 40px;
+        }
+        .card {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 16px;
+            padding: 24px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        .card:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 8px 32px rgba(0, 212, 255, 0.2);
+        }
+        .card h2 {
+            font-size: 1.4rem;
+            margin-bottom: 16px;
+            color: #00d4ff;
+            border-bottom: 2px solid rgba(0, 212, 255, 0.3);
+            padding-bottom: 8px;
+        }
+        .model-info {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+            padding: 12px;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 8px;
+        }
+        .model-name {
+            font-weight: 600;
+            font-size: 1.1rem;
+        }
+        .model-role {
+            font-size: 0.9rem;
+            color: #aaa;
+            margin-top: 4px;
+        }
+        .context-bar {
+            height: 48px;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 8px;
+            position: relative;
+            margin: 16px 0;
+            overflow: hidden;
+        }
+        .context-fill {
+            height: 100%;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            padding-left: 12px;
+            font-weight: 600;
+            white-space: nowrap;
+            overflow: hidden;
+            transition: width 0.5s ease;
+        }
+        .context-fill.large {
+            width: 100%;
+            background: linear-gradient(90deg, #00d4ff, #0099cc);
+        }
+        .context-fill.agent {
+            width: 6.25%;
+            background: linear-gradient(90deg, #ff6b6b, #ee5a5a);
+        }
+        .context-fill.canary {
+            width: 0.025%;
+            background: linear-gradient(90deg, #ffd93d, #ffaa00);
+        }
+        .context-label {
+            font-size: 0.85rem;
+            color: #888;
+            margin-top: 4px;
+        }
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 12px;
+            margin-top: 16px;
+        }
+        .stat {
+            background: rgba(0, 0, 0, 0.2);
+            padding: 12px;
+            border-radius: 8px;
+            text-align: center;
+        }
+        .stat-value {
+            font-size: 1.3rem;
+            font-weight: 700;
+            color: #00d4ff;
+        }
+        .stat-label {
+            font-size: 0.85rem;
+            color: #888;
+            margin-top: 4px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+            background: rgba(255, 255, 255, 0.03);
+            border-radius: 12px;
+            overflow: hidden;
+        }
+        th, td {
+            padding: 14px 16px;
+            text-align: left;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        }
+        th {
+            background: rgba(0, 212, 255, 0.15);
+            font-weight: 600;
+            color: #00d4ff;
+        }
+        tr:last-child td {
+            border-bottom: none;
+        }
+        tr:hover td {
+            background: rgba(255, 255, 255, 0.05);
+        }
+        .badge {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 0.8rem;
+            font-weight: 600;
+        }
+        .badge-large {
+            background: rgba(0, 212, 255, 0.2);
+            color: #00d4ff;
+        }
+        .badge-agent {
+            background: rgba(255, 107, 107, 0.2);
+            color: #ff6b6b;
+        }
+        .badge-canary {
+            background: rgba(255, 217, 62, 0.2);
+            color: #ffd93d;
+        }
+        .section-title {
+            font-size: 1.5rem;
+            margin: 40px 0 20px 0;
+            color: #00d4ff;
+            border-bottom: 2px solid rgba(0, 212, 255, 0.3);
+            padding-bottom: 8px;
+        }
+        .comparison-box {
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 12px;
+            padding: 20px;
+            margin: 20px 0;
+        }
+        .comparison-row {
+            display: flex;
+            align-items: center;
+            margin: 12px 0;
+        }
+        .comparison-label {
+            width: 180px;
+            font-weight: 600;
+        }
+        .comparison-bar {
+            flex: 1;
+            height: 32px;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 6px;
+            position: relative;
+            overflow: hidden;
+        }
+        .comparison-fill {
+            height: 100%;
+            display: flex;
+            align-items: center;
+            padding-left: 12px;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+        .highlight {
+            background: rgba(0, 212, 255, 0.1);
+            border-left: 3px solid #00d4ff;
+            padding: 16px;
+            margin: 16px 0;
+            border-radius: 0 8px 8px 0;
+        }
+        .note {
+            font-size: 0.9rem;
+            color: #888;
+            font-style: italic;
+            margin-top: 8px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🧠 Context Size Comparison</h1>
+        <p class="subtitle">Model context windows and token budgets in the tt-orchard workflow</p>
+
+        <!-- Model Context Windows -->
+        <h2 class="section-title">Model Context Windows</h2>
+        <div class="grid">
+            <div class="card">
+                <h2>🏢 Large Tier</h2>
+                <div class="model-info">
+                    <div>
+                        <div class="model-name">Qwen3.8-27B</div>
+                        <div class="model-role">Plan and diagnose</div>
+                    </div>
+                    <span class="badge badge-large">256K</span>
+                </div>
+                <div class="context-bar">
+                    <div class="context-fill large">262,144 tokens (100%)</div>
+                </div>
+                <div class="stats">
+                    <div class="stat">
+                        <div class="stat-value">256K</div>
+                        <div class="stat-label">Context Window</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-value">Chips</div>
+                        <div class="stat-label">Placement</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>💻 CPU Tier</h2>
+                <div class="model-info">
+                    <div>
+                        <div class="model-name">qwen3-coder:30b</div>
+                        <div class="model-role">Stand-in while chips busy</div>
+                    </div>
+                    <span class="badge badge-large">256K</span>
+                </div>
+                <div class="context-bar">
+                    <div class="context-fill large">262,144 tokens (100%)</div>
+                </div>
+                <div class="stats">
+                    <div class="stat">
+                        <div class="stat-value">256K</div>
+                        <div class="stat-label">Context Window</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-value">CPU</div>
+                        <div class="stat-label">Placement</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>🔬 Small Tier</h2>
+                <div class="model-info">
+                    <div>
+                        <div class="model-name">Qwen3.8-27B</div>
+                        <div class="model-role">Routine steps</div>
+                    </div>
+                    <span class="badge badge-large">256K</span>
+                </div>
+                <div class="context-bar">
+                    <div class="context-fill large">262,144 tokens (100%)</div>
+                </div>
+                <div class="stats">
+                    <div class="stat">
+                        <div class="stat-value">256K</div>
+                        <div class="stat-label">Context Window</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-value">Chips</div>
+                        <div class="stat-label">Placement</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Agent Token Budgets -->
+        <h2 class="section-title">Agent Token Budgets</h2>
+        <div class="grid">
+            <div class="card">
+                <h2>🤖 Agent Response Budget</h2>
+                <div class="model-info">
+                    <div>
+                        <div class="model-name">AGENT_MAX_TOKENS</div>
+                        <div class="model-role">Per agent turn limit</div>
+                    </div>
+                    <span class="badge badge-agent">16K</span>
+                </div>
+                <div class="context-bar">
+                    <div class="context-fill agent">16,384 tokens (6.25%)</div>
+                </div>
+                <div class="stats">
+                    <div class="stat">
+                        <div class="stat-value">16K</div>
+                        <div class="stat-label">Max Tokens</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-value">~200s</div>
+                        <div class="stat-label">At 80 tokens/s</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>🔍 Canary Budget</h2>
+                <div class="model-info">
+                    <div>
+                        <div class="model-name">CANARY_MAX_TOKENS</div>
+                        <div class="model-role">Quick sanity checks</div>
+                    </div>
+                    <span class="badge badge-canary">64</span>
+                </div>
+                <div class="context-bar">
+                    <div class="context-fill canary">64 tokens (0.025%)</div>
+                </div>
+                <div class="stats">
+                    <div class="stat">
+                        <div class="stat-value">64</div>
+                        <div class="stat-label">Max Tokens</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-value">300s</div>
+                        <div class="stat-label">Timeout</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Detailed Comparison Table -->
+        <h2 class="section-title">Detailed Comparison</h2>
+        <div class="comparison-box">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Component</th>
+                        <th>Context Size</th>
+                        <th>% of Max</th>
+                        <th>Use Case</th>
+                        <th>Source</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><span class="badge badge-large">Large Tier</span><br>Qwen3.8-27B</td>
+                        <td>262,144 tokens<br><small>(256K)</small></td>
+                        <td>100%</td>
+                        <td>Planning, diagnosis, complex reasoning</td>
+                        <td>config/tiers.toml</td>
+                    </tr>
+                    <tr>
+                        <td><span class="badge badge-large">CPU Tier</span><br>qwen3-coder:30b</td>
+                        <td>262,144 tokens<br><small>(256K)</small></td>
+                        <td>100%</td>
+                        <td>Stand-in while chips busy, short steps</td>
+                        <td>config/tiers.toml</td>
+                    </tr>
+                    <tr>
+                        <td><span class="badge badge-large">Small Tier</span><br>Qwen3.8-27B</td>
+                        <td>262,144 tokens<br><small>(256K)</small></td>
+                        <td>100%</td>
+                        <td>Routine steps while one board free</td>
+                        <td>config/tiers.toml</td>
+                    </tr>
+                    <tr>
+                        <td><span class="badge badge-agent">Agent Max</span><br>AGENT_MAX_TOKENS</td>
+                        <td>16,384 tokens<br><small>(16K)</small></td>
+                        <td>6.25%</td>
+                        <td>Per-turn response budget</td>
+                        <td>defaults.py</td>
+                    </tr>
+                    <tr>
+                        <td><span class="badge badge-canary">Canary Max</span><br>CANARY_MAX_TOKENS</td>
+                        <td>64 tokens<br><small>(tiny)</small></td>
+                        <td>0.025%</td>
+                        <td>Quick sanity checks</td>
+                        <td>defaults.py</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Visual Scale Comparison -->
+        <h2 class="section-title">Visual Scale Comparison</h2>
+        <div class="comparison-box">
+            <div class="comparison-row">
+                <div class="comparison-label">Large/Small/CPU Tier</div>
+                <div class="comparison-bar">
+                    <div class="comparison-fill large" style="width: 100%; background: linear-gradient(90deg, #00d4ff, #0099cc);">262,144 tokens</div>
+                </div>
+            </div>
+            <div class="comparison-row">
+                <div class="comparison-label">Agent Max</div>
+                <div class="comparison-bar">
+                    <div class="comparison-fill agent" style="width: 6.25%; background: linear-gradient(90deg, #ff6b6b, #ee5a5a);">16,384 tokens</div>
+                </div>
+            </div>
+            <div class="comparison-row">
+                <div class="comparison-label">Canary Max</div>
+                <div class="comparison-bar">
+                    <div class="comparison-fill canary" style="width: 0.025%; background: linear-gradient(90deg, #ffd93d, #ffaa00);">64 tokens</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Key Insights -->
+        <div class="highlight">
+            <h3>🔑 Key Insights</h3>
+            <ul style="margin-left: 20px; margin-top: 12px;">
+                <li style="margin: 12px 0;"><strong>All model tiers have identical context windows</strong> (256K), making them interchangeable for the supervisor's purposes.</li>
+                <li style="margin: 12px 0;"><strong>Agent responses are limited to 6.25% of model capacity</strong> - the 16K token budget is designed to keep agent turns focused and prevent runaway reasoning loops.</li>
+                <li style="margin: 12px 0;"><strong>Canary checks use just 64 tokens</strong> - enough for a short answer to questions like "What is 7 times 6?" without room for elaborate reasoning.</li>
+                <li style="margin: 12px 0;"><strong>The 16K agent budget was chosen because</strong> at ~80 tokens/second, a full response takes about 200 seconds, which is manageable for agent coordination.</li>
+            </ul>
+        </div>
+
+        <!-- Context Usage Patterns -->
+        <h2 class="section-title">Context Usage Patterns</h2>
+        <div class="grid">
+            <div class="card">
+                <h2>📊 Model Context</h2>
+                <div class="stats">
+                    <div class="stat">
+                        <div class="stat-value">256K</div>
+                        <div class="stat-label">Available</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-value">~200s</div>
+                        <div class="stat-label">Full turn (at 80 tok/s)</div>
+                    </div>
+                </div>
+                <p class="note">Models are sized for complex reasoning tasks with long context requirements</p>
+            </div>
+
+            <div class="card">
+                <h2>🤖 Agent Budget</h2>
+                <div class="stats">
+                    <div class="stat">
+                        <div class="stat-value">16K</div>
+                        <div class="stat-label">Per Turn</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-value">6.25%</div>
+                        <div class="stat-label">Of Model Capacity</div>
+                    </div>
+                </div>
+                <p class="note">Prevents reasoning loops while allowing substantial reasoning</p>
+            </div>
+
+            <div class="card">
+                <h2>🔍 Canary Check</h2>
+                <div class="stats">
+                    <div class="stat">
+                        <div class="stat-value">64</div>
+                        <div class="stat-label">Tokens</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-value">0.025%</div>
+                        <div class="stat-label">Of Model Capacity</div>
+                    </div>
+                </div>
+                <p class="note">Minimal budget for quick sanity checks</p>
+            </div>
+        </div>
+
+        <!-- Technical Details -->
+        <h2 class="section-title">Technical Details</h2>
+        <div class="comparison-box">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Parameter</th>
+                        <th>Value</th>
+                        <th>Rationale</th>
+                        <th>File Location</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><code>context_tokens</code></td>
+                        <td>262,144</td>
+                        <td>Supports long-context reasoning tasks</td>
+                        <td><code>config/tiers.toml</code></td>
+                    </tr>
+                    <tr>
+                        <td><code>AGENT_MAX_TOKENS</code></td>
+                        <td>16,384</td>
+                        <td>Balance between reasoning depth and turn management</td>
+                        <td><code>orchard/defaults.py</code></td>
+                    </tr>
+                    <tr>
+                        <td><code>CANARY_MAX_TOKENS</code></td>
+                        <td>64</td>
+                        <td>Enough for short answers without elaborate reasoning</td>
+                        <td><code>orchard/defaults.py</code></td>
+                    </tr>
+                    <tr>
+                        <td><code>AGENT_REQUEST_TIMEOUT_S</code></td>
+                        <td>900s (15 min)</td>
+                        <td>Single non-streaming response timeout</td>
+                        <td><code>orchard/defaults.py</code></td>
+                    </tr>
+                    <tr>
+                        <td><code>CANARY_TIMEOUT_S</code></td>
+                        <td>300s (5 min)</td>
+                        <td>One short greedy answer</td>
+                        <td><code>orchard/defaults.py</code></td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Scale Illustration -->
+        <h2 class="section-title">Scale Illustration</h2>
+        <div class="highlight">
+            <p style="margin: 16px 0;"><strong>Imagine the model context window is a 262-meter building:</strong></p>
+            <ul style="margin-left: 20px;">
+                <li style="margin: 12px 0;"><strong>Agent Budget (16K):</strong> A 16-meter tall section - substantial, but clearly bounded</li>
+                <li style="margin: 12px 0;"><strong>Canary Budget (64):</strong> A 6.4-centimeter strip at the bottom - barely noticeable</li>
+            </ul>
+            <p class="note">This illustrates why the supervisor needs strict turn limits: without them, agents could consume the entire context window in a single turn.</p>
+        </div>
+
+        <!-- Summary -->
+        <div class="highlight">
+            <h3>📈 Summary</h3>
+            <p style="margin: 12px 0;">
+                The tt-orchard system uses <strong>256K context windows</strong> for all model tiers (Large, Small, and CPU), 
+                but constrains agent responses to <strong>16K tokens (6.25%)</strong> to prevent runaway reasoning loops. 
+                Canary checks use just <strong>64 tokens (0.025%)</strong> for quick sanity checks.
+            </p>
+            <p class="note">
+                This design ensures agents can do substantial reasoning while remaining manageable and predictable in their resource consumption.
+            </p>
+        </div>
+    </div>
+</body>
+</html>

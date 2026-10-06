@@ -1,0 +1,755 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Qwen3.5-122B-A10B vs Qwen3.8-27B Comparison</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #0f0f1a 0%, #1a1a2e 50%, #16213e 100%);
+            color: #e4e4e4;
+            line-height: 1.6;
+            padding: 20px;
+            min-height: 100vh;
+        }
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        h1 {
+            text-align: center;
+            margin-bottom: 8px;
+            font-size: 2.8rem;
+            background: linear-gradient(90deg, #00d4ff, #ff6b6b, #ffd93d);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        .subtitle {
+            text-align: center;
+            margin-bottom: 40px;
+            color: #888;
+            font-size: 1.2rem;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+            gap: 24px;
+            margin-bottom: 40px;
+        }
+        .card {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 16px;
+            padding: 24px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        .card:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 8px 32px rgba(0, 212, 255, 0.2);
+        }
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding-bottom: 12px;
+            border-bottom: 2px solid rgba(255, 255, 255, 0.1);
+        }
+        .card-title {
+            font-size: 1.4rem;
+            font-weight: 700;
+        }
+        .badge {
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-size: 0.85rem;
+            font-weight: 600;
+        }
+        .badge-27b {
+            background: rgba(0, 212, 255, 0.2);
+            color: #00d4ff;
+        }
+        .badge-122b {
+            background: rgba(255, 107, 107, 0.2);
+            color: #ff6b6b;
+        }
+        .metric-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 12px 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        }
+        .metric-row:last-child {
+            border-bottom: none;
+        }
+        .metric-label {
+            color: #aaa;
+            font-size: 0.95rem;
+        }
+        .metric-value {
+            font-weight: 600;
+            font-size: 1.1rem;
+        }
+        .bar-container {
+            margin: 16px 0;
+        }
+        .bar-label {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 6px;
+            font-size: 0.9rem;
+            color: #888;
+        }
+        .bar {
+            height: 32px;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 8px;
+            position: relative;
+            overflow: hidden;
+        }
+        .bar-fill {
+            height: 100%;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            padding-left: 12px;
+            font-weight: 600;
+            white-space: nowrap;
+            overflow: hidden;
+            transition: width 0.5s ease;
+        }
+        .fill-27b {
+            background: linear-gradient(90deg, #00d4ff, #0099cc);
+        }
+        .fill-122b {
+            background: linear-gradient(90deg, #ff6b6b, #ee5a5a);
+        }
+        .fill-comparison {
+            background: linear-gradient(90deg, #ffd93d, #ffaa00);
+        }
+        .comparison-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 16px;
+            margin: 24px 0;
+        }
+        .comparison-box {
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 12px;
+            padding: 20px;
+            text-align: center;
+        }
+        .comparison-value {
+            font-size: 2rem;
+            font-weight: 700;
+            margin-bottom: 8px;
+        }
+        .comparison-label {
+            font-size: 0.9rem;
+            color: #888;
+        }
+        .highlight-box {
+            background: rgba(255, 107, 107, 0.1);
+            border-left: 4px solid #ff6b6b;
+            padding: 20px;
+            margin: 24px 0;
+            border-radius: 0 12px 12px 0;
+        }
+        .success-box {
+            background: rgba(0, 212, 255, 0.1);
+            border-left: 4px solid #00d4ff;
+            padding: 20px;
+            margin: 24px 0;
+            border-radius: 0 12px 12px 0;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 24px 0;
+            background: rgba(255, 255, 255, 0.03);
+            border-radius: 12px;
+            overflow: hidden;
+        }
+        th, td {
+            padding: 14px 16px;
+            text-align: left;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        }
+        th {
+            background: rgba(0, 212, 255, 0.15);
+            font-weight: 600;
+            color: #00d4ff;
+        }
+        tr:last-child td {
+            border-bottom: none;
+        }
+        .warning {
+            color: #ffd93d;
+        }
+        .danger {
+            color: #ff6b6b;
+        }
+        .success {
+            color: #00d4ff;
+        }
+        .chip-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 12px;
+            margin: 20px 0;
+        }
+        .chip {
+            background: rgba(0, 0, 0, 0.3);
+            border: 2px solid rgba(255, 255, 255, 0.1);
+            border-radius: 8px;
+            padding: 16px;
+            text-align: center;
+        }
+        .chip.active {
+            border-color: #00d4ff;
+            background: rgba(0, 212, 255, 0.1);
+        }
+        .chip.122b {
+            border-color: #ff6b6b;
+            background: rgba(255, 107, 107, 0.1);
+        }
+        .chip-label {
+            font-size: 0.85rem;
+            color: #888;
+            margin-top: 8px;
+        }
+        .section-title {
+            font-size: 1.6rem;
+            margin: 40px 0 20px 0;
+            color: #00d4ff;
+            border-bottom: 2px solid rgba(0, 212, 255, 0.3);
+            padding-bottom: 8px;
+        }
+        .multiplier {
+            font-size: 0.9rem;
+            color: #ffd93d;
+            margin-left: 8px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚀 Qwen3.5-122B-A10B vs Qwen3.8-27B</h1>
+        <p class="subtitle">Comparing model characteristics and tt-orchard integration requirements</p>
+
+        <!-- Model Overview -->
+        <div class="grid">
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">Qwen3.8-27B (Current)</span>
+                    <span class="badge badge-27b">27 Billion</span>
+                </div>
+                <div class="metric-row">
+                    <span class="metric-label">Total Parameters</span>
+                    <span class="metric-value">27B</span>
+                </div>
+                <div class="metric-row">
+                    <span class="metric-label">Active Parameters (MoE)</span>
+                    <span class="metric-value">~3B</span>
+                </div>
+                <div class="metric-row">
+                    <span class="metric-label">Weights (4-bit)</span>
+                    <span class="metric-value">~51 GB</span>
+                </div>
+                <div class="metric-row">
+                    <span class="metric-label">Weights (bf16)</span>
+                    <span class="metric-value">~216 GB</span>
+                </div>
+                <div class="metric-row">
+                    <span class="metric-label">Context Window</span>
+                    <span class="metric-value">256K</span>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">Qwen3.5-122B-A10B</span>
+                    <span class="badge badge-122b">122 Billion</span>
+                </div>
+                <div class="metric-row">
+                    <span class="metric-label">Total Parameters</span>
+                    <span class="metric-value">122B</span>
+                </div>
+                <div class="metric-row">
+                    <span class="metric-label">Active Parameters (MoE)</span>
+                    <span class="metric-value">~10-15B</span>
+                </div>
+                <div class="metric-row">
+                    <span class="metric-label">Weights (4-bit)</span>
+                    <span class="metric-value">~230 GB</span>
+                </div>
+                <div class="metric-row">
+                    <span class="metric-label">Weights (bf16)</span>
+                    <span class="metric-value">~976 GB</span>
+                </div>
+                <div class="metric-row">
+                    <span class="metric-label">Context Window</span>
+                    <span class="metric-value">256K+</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Performance Comparison -->
+        <h2 class="section-title">⚡ Performance Comparison</h2>
+        <div class="comparison-grid">
+            <div class="comparison-box">
+                <div class="comparison-value success">15-25 tok/s</div>
+                <div class="comparison-label">Decode Speed (27B, 4 chips)</div>
+            </div>
+            <div class="comparison-box">
+                <div class="comparison-value danger">3-8 tok/s</div>
+                <div class="comparison-label">Decode Speed (122B, 4 chips)</div>
+            </div>
+            <div class="comparison-box">
+                <div class="comparison-value success">20-40 tok/s</div>
+                <div class="comparison-label">Decode Speed (122B, 16 chips)</div>
+            </div>
+        </div>
+
+        <!-- Hardware Requirements -->
+        <h2 class="section-title">🔧 Hardware Requirements</h2>
+        
+        <div class="highlight-box">
+            <strong>⚠️ Critical Finding:</strong> The 122B model requires <strong>4-5x more hardware resources</strong> than the 27B model. On the existing 4-chip QuietBox 2, inference would be impractically slow.
+        </div>
+
+        <div class="grid">
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">Current Setup (27B)</span>
+                </div>
+                <div class="chip-grid">
+                    <div class="chip active"><div class="chip-label">Chip 0</div></div>
+                    <div class="chip active"><div class="chip-label">Chip 1</div></div>
+                    <div class="chip active"><div class="chip-label">Chip 2</div></div>
+                    <div class="chip active"><div class="chip-label">Chip 3</div></div>
+                </div>
+                <p style="text-align: center; color: #888; margin-top: 12px;">4 chips total (2 boards)</p>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">122B on Same Hardware</span>
+                </div>
+                <div class="chip-grid">
+                    <div class="chip 122b"><div class="chip-label">Chip 0</div></div>
+                    <div class="chip 122b"><div class="chip-label">Chip 1</div></div>
+                    <div class="chip 122b"><div class="chip-label">Chip 2</div></div>
+                    <div class="chip 122b"><div class="chip-label">Chip 3</div></div>
+                </div>
+                <p style="text-align: center; color: #ff6b6b; margin-top: 12px;"><strong>⚠️ 4-5x slower inference</strong></p>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">122B Recommended</span>
+                </div>
+                <div class="chip-grid">
+                    <div class="chip 122b"><div class="chip-label">Chip 0</div></div>
+                    <div class="chip 122b"><div class="chip-label">Chip 1</div></div>
+                    <div class="chip 122b"><div class="chip-label">Chip 2</div></div>
+                    <div class="chip 122b"><div class="chip-label">Chip 3</div></div>
+                    <div class="chip 122b"><div class="chip-label">Chip 4</div></div>
+                    <div class="chip 122b"><div class="chip-label">Chip 5</div></div>
+                    <div class="chip 122b"><div class="chip-label">Chip 6</div></div>
+                    <div class="chip 122b"><div class="chip-label">Chip 7</div></div>
+                    <div class="chip 122b"><div class="chip-label">Chip 8</div></div>
+                    <div class="chip 122b"><div class="chip-label">Chip 9</div></div>
+                    <div class="chip 122b"><div class="chip-label">Chip 10</div></div>
+                    <div class="chip 122b"><div class="chip-label">Chip 11</div></div>
+                    <div class="chip 122b"><div class="chip-label">Chip 12</div></div>
+                    <div class="chip 122b"><div class="chip-label">Chip 13</div></div>
+                    <div class="chip 122b"><div class="chip-label">Chip 14</div></div>
+                    <div class="chip 122b"><div class="chip-label">Chip 15</div></div>
+                </div>
+                <p style="text-align: center; color: #00d4ff; margin-top: 12px;"><strong>✅ 16 chips (8 boards)</strong></p>
+            </div>
+        </div>
+
+        <!-- Agent Turn Time -->
+        <h2 class="section-title">🤖 Agent Turn Time Impact</h2>
+        <div class="bar-container">
+            <div class="bar-label">
+                <span>27B Model (16K tokens)</span>
+                <span>~200 seconds</span>
+            </div>
+            <div class="bar">
+                <div class="bar-fill fill-27b" style="width: 10%;">100%</div>
+            </div>
+        </div>
+
+        <div class="bar-container">
+            <div class="bar-label">
+                <span>122B Model on 4 chips (8K tokens)</span>
+                <span>~1200-3000 seconds</span>
+            </div>
+            <div class="bar">
+                <div class="bar-fill fill-122b" style="width: 100%;">600-1500%</div>
+            </div>
+        </div>
+
+        <div class="bar-container">
+            <div class="bar-label">
+                <span>122B Model on 16 chips (8K tokens)</span>
+                <span>~400-800 seconds</span>
+            </div>
+            <div class="bar">
+                <div class="bar-fill fill-comparison" style="width: 40%;">200-400%</div>
+            </div>
+        </div>
+
+        <!-- Disk Space Comparison -->
+        <h2 class="section-title">💾 Disk Space Requirements</h2>
+        <div class="grid">
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">Model Weights</span>
+                </div>
+                <div class="bar-container">
+                    <div class="bar-label">
+                        <span>27B (4-bit)</span>
+                        <span>51 GB</span>
+                    </div>
+                    <div class="bar">
+                        <div class="bar-fill fill-27b" style="width: 22%;">100%</div>
+                    </div>
+                </div>
+                <div class="bar-container">
+                    <div class="bar-label">
+                        <span>122B (4-bit)</span>
+                        <span>230 GB</span>
+                    </div>
+                    <div class="bar">
+                        <div class="bar-fill fill-122b" style="width: 100%;">450%</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">Tensor Cache (4-chip)</span>
+                </div>
+                <div class="bar-container">
+                    <div class="bar-label">
+                        <span>27B</span>
+                        <span>31 GB</span>
+                    </div>
+                    <div class="bar">
+                        <div class="bar-fill fill-27b" style="width: 14%;">100%</div>
+                    </div>
+                </div>
+                <div class="bar-container">
+                    <div class="bar-label">
+                        <span>122B</span>
+                        <span>124 GB</span>
+                    </div>
+                    <div class="bar">
+                        <div class="bar-fill fill-122b" style="width: 100%;">400%</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">Stage 4 Total</span>
+                </div>
+                <div class="bar-container">
+                    <div class="bar-label">
+                        <span>27B</span>
+                        <span>110 GB</span>
+                    </div>
+                    <div class="bar">
+                        <div class="bar-fill fill-27b" style="width: 28%;">100%</div>
+                    </div>
+                </div>
+                <div class="bar-container">
+                    <div class="bar-label">
+                        <span>122B</span>
+                        <span>440 GB</span>
+                    </div>
+                    <div class="bar">
+                        <div class="bar-fill fill-122b" style="width: 100%;">400%</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Detailed Comparison Table -->
+        <h2 class="section-title">📊 Detailed Comparison</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Metric</th>
+                    <th>27B (4 chips)</th>
+                    <th>122B (4 chips)</th>
+                    <th>122B (16 chips)</th>
+                    <th>Multiplier</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>Prefill Speed</strong></td>
+                    <td class="success">130-200 tok/s</td>
+                    <td class="danger">30-50 tok/s</td>
+                    <td class="success">100-150 tok/s</td>
+                    <td>4-5x</td>
+                </tr>
+                <tr>
+                    <td><strong>Decode Speed</strong></td>
+                    <td class="success">15-25 tok/s</td>
+                    <td class="danger">3-8 tok/s</td>
+                    <td class="success">20-40 tok/s</td>
+                    <td>4-5x</td>
+                </tr>
+                <tr>
+                    <td><strong>Time to First Token</strong></td>
+                    <td class="success">2-5 s</td>
+                    <td class="warning">15-30 s</td>
+                    <td class="success">5-10 s</td>
+                    <td>6-10x</td>
+                </tr>
+                <tr>
+                    <td><strong>Context (130K)</strong></td>
+                    <td class="success">~42 seconds</td>
+                    <td class="danger">~180 seconds</td>
+                    <td class="success">~60 seconds</td>
+                    <td>4-5x</td>
+                </tr>
+                <tr>
+                    <td><strong>Agent Turn (16K)</strong></td>
+                    <td class="success">~200 s (3 min)</td>
+                    <td class="danger">~1200-3000 s (20-50 min)</td>
+                    <td class="warning">~400-800 s (7-13 min)</td>
+                    <td>6-15x</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <!-- Stage Budgets -->
+        <h2 class="section-title">⏱️ Stage Budget Adjustments</h2>
+        <div class="grid">
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">Stage 2 (Decoder)</span>
+                </div>
+                <div class="bar-container">
+                    <div class="bar-label">
+                        <span>27B Budget</span>
+                        <span>4 hours</span>
+                    </div>
+                    <div class="bar">
+                        <div class="bar-fill fill-27b" style="width: 25%;">100%</div>
+                    </div>
+                </div>
+                <div class="bar-container">
+                    <div class="bar-label">
+                        <span>122B Budget</span>
+                        <span>16 hours</span>
+                    </div>
+                    <div class="bar">
+                        <div class="bar-fill fill-122b" style="width: 100%;">400%</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">Stage 4 (Multichip)</span>
+                </div>
+                <div class="bar-container">
+                    <div class="bar-label">
+                        <span>27B Budget</span>
+                        <span>8 hours</span>
+                    </div>
+                    <div class="bar">
+                        <div class="bar-fill fill-27b" style="width: 17%;">100%</div>
+                    </div>
+                </div>
+                <div class="bar-container">
+                    <div class="bar-label">
+                        <span>122B Budget</span>
+                        <span>32 hours</span>
+                    </div>
+                    <div class="bar">
+                        <div class="bar-fill fill-122b" style="width: 100%;">400%</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">Stage 7 (Package)</span>
+                </div>
+                <div class="bar-container">
+                    <div class="bar-label">
+                        <span>27B Budget</span>
+                        <span>4 hours</span>
+                    </div>
+                    <div class="bar">
+                        <div class="bar-fill fill-27b" style="width: 17%;">100%</div>
+                    </div>
+                </div>
+                <div class="bar-container">
+                    <div class="bar-label">
+                        <span>122B Budget</span>
+                        <span>16 hours</span>
+                    </div>
+                    <div class="bar">
+                        <div class="bar-fill fill-122b" style="width: 100%;">400%</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Critical Issues -->
+        <h2 class="section-title">⚠️ Critical Issues</h2>
+        
+        <div class="highlight-box">
+            <strong>Issue 1: Agent Turn Time</strong><br>
+            With a 122B model on 4 chips, a single agent turn could take <strong>20-50 minutes</strong>. This breaks the supervisor's assumptions about turn management, watchdog timing, and stage budgets. The current 16K token budget would need to be reduced to 8K tokens to keep turns under 30 minutes.
+        </div>
+
+        <div class="highlight-box">
+            <strong>Issue 2: Hardware Requirements</strong><br>
+            The 122B model requires <strong>4x the chip count</strong> for acceptable performance. The QuietBox 2 (4 chips) is insufficient. You would need to upgrade to an 8-board (16-chip) system for reasonable inference speeds.
+        </div>
+
+        <div class="highlight-box">
+            <strong>Issue 3: Memory Bandwidth Saturation</strong><br>
+            At 4-bit quantization, the 122B model requires ~60 GB/s for decent performance. DDR5-5600 with 2 channels provides 89.6 GB/s theoretical, leaving little headroom for overhead.
+        </div>
+
+        <!-- Configuration Changes -->
+        <h2 class="section-title">🔧 Required Configuration Changes</h2>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>Parameter</th>
+                    <th>27B Current</th>
+                    <th>122B Required</th>
+                    <th>Change</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><code>AGENT_MAX_TOKENS</code></td>
+                    <td class="success">16,384</td>
+                    <td class="warning">8,192</td>
+                    <td>-50%</td>
+                </tr>
+                <tr>
+                    <td><code>CANARY_MAX_TOKENS</code></td>
+                    <td class="success">64</td>
+                    <td class="warning">32</td>
+                    <td>-50%</td>
+                </tr>
+                <tr>
+                    <td><code>AGENT_REQUEST_TIMEOUT_S</code></td>
+                    <td class="success">900 (15 min)</td>
+                    <td class="warning">1800 (30 min)</td>
+                    <td>+100%</td>
+                </tr>
+                <tr>
+                    <td><code>CANARY_TIMEOUT_S</code></td>
+                    <td class="success">300 (5 min)</td>
+                    <td class="warning">600 (10 min)</td>
+                    <td>+100%</td>
+                </tr>
+                <tr>
+                    <td><code>COLD_BOOT_BUDGET_S</code></td>
+                    <td class="success">2700 (45 min)</td>
+                    <td class="warning">7200 (2 hours)</td>
+                    <td>+167%</td>
+                </tr>
+                <tr>
+                    <td><code>STAGE4_SWAP_DISK_GB</code></td>
+                    <td class="success">110</td>
+                    <td class="warning">440</td>
+                    <td>+300%</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <!-- Recommendations -->
+        <h2 class="section-title">✅ Recommendations</h2>
+
+        <div class="success-box">
+            <strong>Option 1: Hybrid Approach (Recommended)</strong><br>
+            Keep the 27B model for agent coordination (stages 0, 1, 8) and use the 122B model only for hardware-intensive stages (2-6) if needed. This maintains reasonable agent turn times while leveraging the 122B model's superior capabilities for complex reasoning tasks.
+        </div>
+
+        <div class="success-box">
+            <strong>Option 2: Hardware Upgrade</strong><br>
+            Upgrade to a 16+ chip system (8 boards) for acceptable 122B performance across all stages. This provides ~20-40 tok/s decode speed and keeps agent turns under 15 minutes.
+        </div>
+
+        <div class="success-box">
+            <strong>Option 3: Quantize More Aggressively</strong><br>
+            Use 2-bit or 3-bit quantization for the 122B model to reduce memory requirements. This may impact model quality but could make the model feasible on 4-8 chips.
+        </div>
+
+        <!-- Summary -->
+        <h2 class="section-title">📈 Summary</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Aspect</th>
+                    <th>27B Model</th>
+                    <th>122B Model (4 chips)</th>
+                    <th>122B Model (16 chips)</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>Viability on 4 chips</strong></td>
+                    <td class="success">✅ Excellent</td>
+                    <td class="danger">❌ Too slow</td>
+                    <td class="success">✅ N/A</td>
+                </tr>
+                <tr>
+                    <td><strong>Hardware needed</strong></td>
+                    <td class="success">4 chips</td>
+                    <td class="warning">4 chips (slow)</td>
+                    <td class="success">16 chips</td>
+                </tr>
+                <tr>
+                    <td><strong>Agent turn time</strong></td>
+                    <td class="success">~200s</td>
+                    <td class="danger">~1200-3000s</td>
+                    <td class="warning">~400-800s</td>
+                </tr>
+                <tr>
+                    <td><strong>Disk space</strong></td>
+                    <td class="success">110 GB</td>
+                    <td class="warning">440 GB</td>
+                    <td class="warning">440 GB</td>
+                </tr>
+                <tr>
+                    <td><strong>Overall recommendation</strong></td>
+                    <td class="success">✅ Keep for agents</td>
+                    <td class="danger">❌ Avoid</td>
+                    <td class="success">✅ Upgrade hardware</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="highlight-box">
+            <strong>Final Verdict:</strong> The 122B model would require significant hardware upgrades (16+ chips) and configuration changes to work well with tt-orchard's supervisor architecture. On the existing 4-chip QuietBox 2, it would be impractical due to extremely long agent turn times (20-50 minutes per turn). Consider a hybrid approach or hardware upgrade before switching to the 122B model.
+        </div>
+    </div>
+</body>
+</html>

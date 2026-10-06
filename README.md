@@ -36,7 +36,7 @@ it, fixed the code, and restarted it many times. Each fix is described in
 
 | # | Stage | On real hardware |
 |---|---|---|
-| 0 | Intake and delta triage against the nearest supported model | Passed on Hemmingway-1 (27 min, 59 agent turns, path `weights-only`) with an open-ended skill. Failed twice on the second model (iapp/openthai2.0-qwen3.8-27b): the agent explored and never wrote `delta.json`. Since 2026-10-04 a template script (`delta_triage.py`) measures and drafts `delta.json` and the agent reviews it; tested with fakes, not yet run on hardware |
+| 0 | Intake and delta triage against the nearest supported model | Passed on Hemmingway-1 (27 min, 59 agent turns, path `weights-only`) with an open-ended skill. Failed twice on the second model (iapp/openthai2.0-qwen3.8-27b): the agent explored and never wrote `delta.json`. Since 2026-10-04 a template script (`delta_triage.py`) measures and drafts `delta.json` and the agent reviews it; tested with fakes, not yet run on hardware. **Note:** See [122B Analysis](docs/analysis/qwen3-5-122b-analysis.md) for hardware requirements if using larger models like Qwen3.5-122B-A10B |
 | 1 | Environment and CPU reference | Passed on Hemmingway-1 on the fifth attempt (8 min, 25 turns), after fixes to the agent loop and with agent thinking turned off. Since 2026-10-04 a template script (`reference_gate.py`) loads the model, runs the four checks and drafts `reference.json`; tested on a tiny random model, not yet run on hardware |
 | 2 | Functional decoder on one chip; on the weights-only path, a weights swap on one board | Passed on Hemmingway-1 (weights-only path): the chip agreed with the CPU reference on 30 of 32 tokens (0.9375, measured, one prompt) |
 | 3 | Full model | Skipped by design on the weights-only path. Never run on the full-port path |
@@ -633,6 +633,8 @@ Each of these happened on the development machine. Details are in the
 | [`docs/runbooks/hardware-validation.md`](docs/runbooks/hardware-validation.md) | Runbook for the hardware checks, the park check, the first run and stage 4 |
 | [`docs/runbooks/driver-build-report.md`](docs/runbooks/driver-build-report.md), [`docs/runbooks/driver-review-findings.md`](docs/runbooks/driver-review-findings.md) | How the hardware-check driver was built and what its safety review found |
 | [`docs/run-logs/2026-10-hemmingway-1.md`](docs/run-logs/2026-10-hemmingway-1.md) | The log of the first real run |
+| [`docs/analysis/qwen3-5-122b-analysis.md`](docs/analysis/qwen3-5-122b-analysis.md) | Analysis: Using Qwen3.5-122B-A10B with tt-orchard |
+| [`docs/analysis/qwen3-5-122b-comparison.html`](docs/analysis/qwen3-5-122b-comparison.html) | Visual comparison: 27B vs 122B model requirements |
 | [`CLAUDE.md`](CLAUDE.md) | The project log: decisions and notable moments |
 
 ### Add or change a stage skill
