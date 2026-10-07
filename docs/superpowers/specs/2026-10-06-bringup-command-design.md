@@ -129,11 +129,20 @@ Design decisions:
   per-question probabilities. Thresholds are set in `defaults.py` as a choice, with the reasoning
   next to them, and are checked against the CPU-versus-CPU noise floor first (two CPU runs with
   different thread counts), so the bar is above what the reference itself varies by.
-- **Hidden states are the open question.** The check needs final hidden states from the chips. Phase 1
-  decides how: (a) the TT serving stack already exposes them (a pooling or embedding route, or a
-  logits-processor hook); (b) a small change to the serve-and-compare template that loads the model
-  through the TT generator directly; (c) neither is possible, in which case the Clef class ends
-  `blocked` with `unsupported-input-type`, and this spec is revised before Phase 3 starts.
+- **Hidden states (decided after Phase 1; see the spike log).** The head reads the backbone's
+  `last_hidden_state` for every token position (`ClefModel.forward` in `joint_schema_model.py`), and also
+  takes the backbone's output-embedding matrix (`lm_head.weight`, in the backbone shards, loaded on host).
+  The TT serving path cannot return hidden states: the vLLM plugin has no pooling route, and the
+  device prefill keeps only the last row before the norm and the lm head. So the parity gate does not
+  go through vLLM. A template script (`orchard/skills/sidecar-parity-templates/hidden_parity.py`) builds
+  the nearest model's `Qwen36Model` on a leased board from the Clef backbone directory, runs the layer loop
+  itself over all rows, applies the model's own final norm, and reads one replica back. It changes nothing in
+  tt-metal. It depends on `embd`, `layers`, `norm` and a few helper methods of one tt-metal revision, so the
+  evidence records that revision. A wiring check guards the reimplementation: for the last row, the script
+  applies the model's `_lm_head` to its own normed row and compares the logits with the model's
+  `prefill_tp` output on the same tokens. If they differ, the gate fails instead of comparing hidden states
+  from a loop that no longer matches the model. If the model code lacks those attributes, the Clef class
+  ends `blocked` with `unsupported-input-type`.
 - **Third-party code.** `joint_schema_model.py` runs only inside the agent shell sandbox (no
   credentials, no-chip device mask) for CPU references, and on the host for the parity run only after
   stage 0 records its sha256 and a read of its imports. The harness never passes `trust_remote_code`
@@ -190,7 +199,7 @@ could not do), the class contract it used, and any template it needed.
 
 ## 9. Phases
 
-1. **Spike (read mostly, short chip use under a lease).** Answers: (a) is
+1. **Spike (read mostly, short chip use under a lease; done 2026-10-06).** Answers: (a) is
    `raahemnabeel/qwen3-coder-next-blackhole` installed or pullable, and does it boot on 2 chips;
    (b) how can hidden states leave the TT stack; (c) does `delta_triage.py` classify Clef as
    expected from the Hub's headers and README; (d) what holds the stale leases that `gozer status`

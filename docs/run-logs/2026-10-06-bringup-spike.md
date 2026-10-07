@@ -42,8 +42,20 @@ small change to the model code would expose them. I have not read these files my
 Consequence for the spec: Clef's parity gate needs a small change in the serve-and-compare template or
 the model (a `return_hidden` path), or a direct call of the generator. This is the largest open item for
 Phase 3. If it cannot be done, Clef ends `blocked` with `unsupported-input-type`, as the spec says.
-Next step: read `qwen36/tt/model.py` and the package copy to confirm the cited lines before any design
-depends on them.
+Confirmed by a second read (a subagent, then me on the lines that matter), source only, nothing run:
+- `qwen36/tt/model.py` `prefill_tp` (l.579-634): the layer loop, then a one-hot row select (l.608-618), then
+  `self.norm` (l.625) and `self._lm_head` (l.626). The traced and chunked path ends the same way (l.2455).
+  So per-token post-norm states are never formed, in prefill or in the vLLM path.
+- Clef's head reads all of them: `ClefModel.forward` passes `text_model(...).last_hidden_state` (every
+  position, `use_cache=False`, with an attention mask) and `base_model.get_output_embeddings().weight` to
+  the head (`joint_schema_model.py` l.468-490, read as text and not run). Text-only records skip the vision
+  tower. The head needs the lm_head matrix as an input, which the host reads from the backbone shards.
+- `DistributedNorm` all-gathers after the norm, so the normed rows are replicated; one replica is enough.
+- The model reads `MODEL_WEIGHTS_DIR`, then `HF_MODEL`, from `config.json` and the index. By the code, a
+  sidecar file outside the index (`joint_head.safetensors`) is ignored. This was read, not run: the first
+  hardware run must check it.
+- Decision: no change to tt-metal. A template in this repo runs the layer loop itself over all rows and
+  checks itself against `prefill_tp` on the last row (spec section 6).
 
 ## (c) Does the triage rule classify Clef as expected?
 
