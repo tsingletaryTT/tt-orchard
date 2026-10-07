@@ -277,6 +277,99 @@ def test_the_other_lines_of_run_sh_are_unchanged_when_the_drafter_is_cleared(pre
     assert text.count("QWEN36_DRAFTER") == 1
 
 
+# ---- on-device sampling with the drafter off -----------------------------------------------------
+# With the drafter on, the bundle's DFlash path samples on its own. With it off the model code asks for
+# on-device sampling because the bundle's --additional-config sets "sample_on_device_mode", and refuses it on
+# a 1x2 mesh ("requires a certified TP topology (1x4 or 1x8) ... Unset sample_on_device_mode for host
+# sampling", Cloudflare/clef, 2026-10-06). So clearing the drafter also removes that key.
+
+SAMPLING_CONFIG = ("--additional-config '{\"tt\": {\"l1_small_size\": 24576, \"fabric_config\": \"FABRIC_1D\", "
+                   "\"sample_on_device_mode\": \"decode_only\", \"trace_region_size\": 1073741824}}'")
+
+
+def with_sampling(prep, config=SAMPLING_CONFIG):
+    run = prep["bundle"] / "run.sh"
+    run.write_text(run.read_text().replace(" --max_num_seqs 4", f" --max_num_seqs 4 {config}", 1))
+
+
+def additional_config(prep):
+    import re
+    text = (prep["stage"] / "run.sh").read_text()
+    found = re.findall(r"--additional-config '([^']*)'", text)
+    return [json.loads(x) for x in found]
+
+
+def test_clearing_the_drafter_also_removes_on_device_sampling(prep):
+    with_drafter(prep)
+    with_sampling(prep)
+    new_index(prep, ["model.embed_tokens.weight"])
+    r = run_prepare(prep["stage"])
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert additional_config(prep) == [{"tt": {"l1_small_size": 24576, "fabric_config": "FABRIC_1D",
+                                               "trace_region_size": 1073741824}}]
+    assert "sample_on_device_mode" in r.stdout
+
+
+def test_on_device_sampling_stays_when_the_drafter_stays(prep):
+    with_drafter(prep)
+    with_sampling(prep)
+    new_index(prep, ["model.embed_tokens.weight", "mtp.fc.weight"])
+    assert run_prepare(prep["stage"]).returncode == 0
+    assert additional_config(prep)[0]["tt"]["sample_on_device_mode"] == "decode_only"
+
+
+def test_on_device_sampling_stays_when_the_weights_cannot_be_read(prep):
+    with_drafter(prep)
+    with_sampling(prep)
+    assert run_prepare(prep["stage"]).returncode == 0
+    assert additional_config(prep)[0]["tt"]["sample_on_device_mode"] == "decode_only"
+
+
+def test_a_command_without_the_sampling_key_is_left_alone(prep):
+    with_drafter(prep)
+    with_sampling(prep, "--additional-config '{\"tt\": {\"l1_small_size\": 24576}}'")
+    new_index(prep, ["model.embed_tokens.weight"])
+    r = run_prepare(prep["stage"])
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert additional_config(prep) == [{"tt": {"l1_small_size": 24576}}]
+
+
+def test_a_command_without_additional_config_is_left_alone_and_reported(prep):
+    with_drafter(prep)
+    new_index(prep, ["model.embed_tokens.weight"])
+    r = run_prepare(prep["stage"])
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "additional-config" in r.stdout and "absent" in r.stdout
+
+
+def test_two_additional_config_options_are_an_error_when_the_drafter_is_cleared(prep):
+    with_drafter(prep)
+    with_sampling(prep)
+    run = prep["bundle"] / "run.sh"
+    run.write_text(run.read_text().replace(" --max_num_seqs 4", f" --max_num_seqs 4 {SAMPLING_CONFIG}", 1))
+    new_index(prep, ["model.embed_tokens.weight"])
+    r = run_prepare(prep["stage"])
+    assert r.returncode == 2 and "additional-config" in r.stdout + r.stderr
+    assert not (prep["stage"] / "run.sh").exists()
+
+
+def test_an_additional_config_that_is_not_json_is_left_alone_and_reported(prep):
+    with_drafter(prep)
+    with_sampling(prep, "--additional-config '{not json'")
+    new_index(prep, ["model.embed_tokens.weight"])
+    r = run_prepare(prep["stage"])
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "not valid JSON" in r.stdout
+
+
+def test_the_sampling_key_is_removed_wherever_it_sits_in_the_tt_table(prep):
+    with_drafter(prep)
+    with_sampling(prep, "--additional-config '{\"tt\": {\"sample_on_device_mode\": \"all\", \"l1_small_size\": 1}}'")
+    new_index(prep, ["model.embed_tokens.weight"])
+    assert run_prepare(prep["stage"]).returncode == 0
+    assert additional_config(prep) == [{"tt": {"l1_small_size": 1}}]
+
+
 # ---- serve_and_compare.py ------------------------------------------------------------------------
 
 VOCAB = [a + b for a in ("ba", "de", "ki", "lo", "mu", "ra", "so", "tu") for b in ("n", "l", "r", "s", "t")]
@@ -543,3 +636,12 @@ def test_prepare_with_neither_a_bundle_nor_a_package_exits_2(prep):
     assert r.returncode == 2, r.stdout + r.stderr
     assert "bundle_dir (or package" in r.stderr
     assert not (prep["stage"] / "model-dir").exists()
+
+
+def test_the_rewritten_additional_config_stays_on_the_commands_one_line(prep):
+    with_drafter(prep)
+    with_sampling(prep)
+    new_index(prep, ["model.embed_tokens.weight"])
+    assert run_prepare(prep["stage"]).returncode == 0
+    lines = [l for l in (prep["stage"] / "run.sh").read_text().splitlines() if "--additional-config" in l]
+    assert len(lines) == 1 and lines[0].startswith("CMD=(") and lines[0].rstrip().endswith(")")

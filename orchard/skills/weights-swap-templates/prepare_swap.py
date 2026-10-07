@@ -32,7 +32,10 @@ The weights-swap-check skill copies this file into the stage directory and runs 
      "model has no MTP head" (Cloudflare/clef, 2026-10-06). With the drafter off the bundle serves plain
      decoding, which gives the same greedy tokens, so the check measures the same weights. The check reads
      the new model's `model.safetensors.index.json`, or the shard headers when there is no index. When it
-     cannot tell, the line is left alone and the script says so.
+     cannot tell, the line is left alone and the script says so. With the drafter off the script also
+     removes `"sample_on_device_mode"` from the command's single `--additional-config`, because plain
+     decoding on a 1x2 mesh refuses on-device sampling ("Unset sample_on_device_mode for host sampling");
+     the host samples instead.
 
 An expected edit that does not happen exactly once exits 2 with a message that names it, and no
 run.sh is written. Everything else in the script, including its environment lines, stays as it is.
@@ -152,6 +155,34 @@ def has_mtp_tensors(new: Path) -> bool | None:
     return any(MTP_NAME.search(k) for k in names)
 
 
+ADDITIONAL = re.compile(r"--additional-config\s+'([^']*)'")
+
+
+def drop_device_sampling(text: str, bundle: Path) -> tuple[str, str]:
+    """Remove "sample_on_device_mode" from the single --additional-config of the command. With the drafter
+    on, the DFlash path samples on its own. With it off, the model code asks for on-device sampling and
+    refuses it unless the mesh is 1x4, 1x8 or 1x1 ("Unset sample_on_device_mode for host sampling"). Returns
+    (new text, a note). A command without the option or the key, or with a config that is not JSON, is left
+    alone and the note says so."""
+    found = list(ADDITIONAL.finditer(text))
+    if not found:
+        return text, "--additional-config was absent; nothing to change for sampling"
+    if len(found) > 1:
+        fail(f"expected at most one --additional-config in {bundle / 'run.sh'}, found {len(found)}")
+    m = found[0]
+    try:
+        cfg = json.loads(m.group(1))
+    except ValueError:
+        return text, "--additional-config is not valid JSON, so sample_on_device_mode was not removed"
+    tt = cfg.get("tt") if isinstance(cfg, dict) else None
+    if not isinstance(tt, dict) or "sample_on_device_mode" not in tt:
+        return text, "sample_on_device_mode was absent from --additional-config; nothing to remove"
+    del tt["sample_on_device_mode"]
+    return (text[:m.start()] + f"--additional-config '{json.dumps(cfg)}'" + text[m.end():],
+            'removed "sample_on_device_mode" from --additional-config (the drafter is off, so sampling '
+            "moves to the host; on-device sampling is certified only on 1x4, 1x8 and 1x1 meshes)")
+
+
 def edit_run_script(text: str, bundle: Path, nearest: str, model_dir: Path,
                     drafter_off: bool = False) -> tuple[str, list[str]]:
     """Apply the edits. Returns (new text, notes about optional edits that did not apply)."""
@@ -178,6 +209,8 @@ def edit_run_script(text: str, bundle: Path, nearest: str, model_dir: Path,
         notes.append('export QWEN36_DRAFTER="" (the new model has no mtp.* tensors, so the speculative drafter '
                      "that needs the MTP head is switched off)" if n else
                      "export QWEN36_DRAFTER=... was absent; nothing to clear")
+        text, note = drop_device_sampling(text, bundle)
+        notes.append(note)
     for flag in ("--revision", "--tokenizer-revision"):
         # The leading space keeps " --revision" from matching inside "--tokenizer-revision".
         text, n = re.subn(r" " + flag + r'\s+"?[0-9a-f]{40}"?(?=\s|$)', "", text)
