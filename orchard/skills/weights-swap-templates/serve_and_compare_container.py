@@ -151,6 +151,27 @@ def has_mtp_tensors(new: Path) -> bool | None:
     return any(MTP_NAME.search(k) for k in names)
 
 
+def serving_from_argv(argv: list[str]) -> dict:
+    """The same record as serve_and_compare.serving_state, read from the edited `docker run` argv: the
+    `--env QWEN36_DRAFTER=` option and the server's `--additional-config`."""
+    drafter = "not set by the package"
+    for i, a in enumerate(argv[:-1]):
+        if a == "--env" and argv[i + 1].startswith("QWEN36_DRAFTER="):
+            value = argv[i + 1].split("=", 1)[1]
+            drafter = "off" if value == "" else f"on ({value})"
+    config = next((argv[i + 1] for i, a in enumerate(argv[:-1]) if a == "--additional-config"), None)
+    if config is None:
+        sampling = "not set by the package"
+    else:
+        try:
+            tt = json.loads(config).get("tt")
+        except (ValueError, AttributeError):
+            tt = "unknown"
+        mode = tt.get("sample_on_device_mode") if isinstance(tt, dict) else None
+        sampling = "unknown" if tt == "unknown" else (f"on device ({mode})" if mode else "host")
+    return {"drafter": drafter, "sampling": sampling}
+
+
 def edit_docker_argv(argv: list[str], *, image: str, nearest: str, model_dir, tt_cache, hf_dir,
                      name: str, label: str, device_ids: list[int], port: int,
                      blobs: list[str], drafter_off: bool = False) -> list[str]:
@@ -397,7 +418,8 @@ def main() -> int:
     write_report(cfg, run_dir, cache, weights_env, m, tokenizer, reference, log_path,
                  extra={"kind": "container", "package": cfg["package"], "profile": cfg["profile"],
                         "chips": int(cfg["chips"]), "device_ids": ids, "docker_argv": argv,
-                        "hf_isolated": str(hf_dir), "container_stopped": stopped})
+                        "hf_isolated": str(hf_dir), "container_stopped": stopped,
+                        "serving": serving_from_argv(argv)})
     return 0
 
 

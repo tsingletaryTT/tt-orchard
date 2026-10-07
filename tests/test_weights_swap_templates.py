@@ -645,3 +645,55 @@ def test_the_rewritten_additional_config_stays_on_the_commands_one_line(prep):
     assert run_prepare(prep["stage"]).returncode == 0
     lines = [l for l in (prep["stage"] / "run.sh").read_text().splitlines() if "--additional-config" in l]
     assert len(lines) == 1 and lines[0].startswith("CMD=(") and lines[0].rstrip().endswith(")")
+
+
+# ---- what the swap check records about how it served --------------------------------------------------
+# The operator bundle reports whether each check ran with the speculative drafter and with on-device
+# sampling, because both change what a speed figure means.
+
+def load_swap_template():
+    spec = importlib.util.spec_from_file_location("serve_and_compare_under_test", TEMPLATES / "serve_and_compare.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def config_line(tt: dict | None) -> str:
+    return "" if tt is None else f" --additional-config '{json.dumps({'tt': tt})}'"
+
+
+@pytest.mark.parametrize("lines,drafter", [
+    ('export QWEN36_DRAFTER=""\n', "off"),
+    ('export QWEN36_DRAFTER="dflash2"\n', "on (dflash2)"),
+    ('export QWEN36_DRAFTER=mtp\n', "on (mtp)"),
+    ("", "not set by the run script"),
+    ('export QWEN36_DRAFTER="dflash2"\nexport QWEN36_DRAFTER=""\n', "off"),            # the last one wins
+    ('  export QWEN36_DRAFTER=""\n', "off"),
+    ('# export QWEN36_DRAFTER="dflash2"\n', "not set by the run script"),
+])
+def test_the_serving_record_names_the_drafter_the_run_script_sets(lines, drafter):
+    mod = load_swap_template()
+    assert mod.serving_state(lines + 'CMD=("$PYBIN" -m vllm)\n')["drafter"] == drafter
+
+
+@pytest.mark.parametrize("tt,sampling", [
+    ({"sample_on_device_mode": "decode_only"}, "on device (decode_only)"),
+    ({"l1_small_size": 1}, "host"),
+    (None, "not set by the run script"),
+])
+def test_the_serving_record_names_where_sampling_happens(tt, sampling):
+    mod = load_swap_template()
+    assert mod.serving_state('CMD=("$PYBIN" -m vllm' + config_line(tt) + ' "$@")\n')["sampling"] == sampling
+
+
+def test_an_additional_config_that_is_not_json_is_reported_as_unknown():
+    mod = load_swap_template()
+    assert mod.serving_state("CMD=(x --additional-config '{not json')\n")["sampling"] == "unknown"
+
+
+def test_the_swap_report_carries_the_serving_record(swap):
+    swap["stage"].joinpath("run.sh").write_text(
+        swap["stage"].joinpath("run.sh").read_text().replace("exec ", 'export QWEN36_DRAFTER=""\nexec ', 1))
+    r = swap["start"]("perfect")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert report(swap)["serving"]["drafter"] == "off"

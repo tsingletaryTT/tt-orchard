@@ -480,3 +480,32 @@ def test_when_the_model_directory_cannot_say_the_drafter_is_left_as_the_package_
     r = crig["start"]()                              # the fixture's weights file is not a safetensors file
     assert r.returncode == 0, r.stdout + r.stderr
     assert run_env_values(crig, "QWEN36_DRAFTER") == ["mtp"]
+
+
+# ---- what the container check records about how it served ---------------------------------------------
+
+def argv_with(*pairs):
+    return ["docker", "run", *[x for k, v in pairs for x in (k, v)], "image", "vllm", "serve", "m"]
+
+
+def test_the_container_serving_record_names_the_drafter():
+    assert sac.serving_from_argv(argv_with(("--env", "QWEN36_DRAFTER=")))["drafter"] == "off"
+    assert sac.serving_from_argv(argv_with(("--env", "QWEN36_DRAFTER=mtp")))["drafter"] == "on (mtp)"
+    assert sac.serving_from_argv(argv_with(("--env", "HF_HOME=/hf")))["drafter"] == "not set by the package"
+
+
+def test_the_container_serving_record_names_where_sampling_happens():
+    on = '{"tt": {"sample_on_device_mode": "all"}}'
+    host = '{"tt": {"fabric_config": "FABRIC_1D"}}'
+    assert sac.serving_from_argv(["--additional-config", on])["sampling"] == "on device (all)"
+    assert sac.serving_from_argv(["--additional-config", host])["sampling"] == "host"
+    assert sac.serving_from_argv(["--additional-config", "{no"])["sampling"] == "unknown"
+    assert sac.serving_from_argv(["--port", "1"])["sampling"] == "not set by the package"
+
+
+def test_the_container_report_carries_the_serving_record(crig):
+    set_index(crig, ["model.embed_tokens.weight"])
+    r = crig["start"]()
+    assert r.returncode == 0, r.stdout + r.stderr
+    rep = json.loads((crig["cdir"] / "evidence" / "swap-check.json").read_text())
+    assert rep["serving"]["drafter"] == "off"

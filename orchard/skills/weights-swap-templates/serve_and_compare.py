@@ -27,7 +27,8 @@ Steps:
     generated_ids[k]. top1_agreement = matches / 32.
 (f) coherent: the free-run text is non-empty, at least 80 percent of its characters are letters,
     digits, whitespace or common punctuation, and no 6-word phrase appears more than 3 times.
-(g) Write evidence/swap-check.json (every number, the texts, ids, mismatches and a `result_draft`
+(g) Write evidence/swap-check.json (every number, the texts, ids, mismatches, a `serving` record of the
+    drafter and sampling the run script sets, and a `result_draft`
     holding exactly the fields the skill's result.json needs) and print the draft.
 
 Exit codes: 0 when the measurements completed, whatever they say. 3 cache guard. 4 the server
@@ -218,6 +219,32 @@ def load_reference(run_dir: Path) -> tuple[list[int], list[int], str | None]:
     return prompt_ids, gen["generated_ids"], gen.get("generated_text")
 
 
+def describe_sampling(config_json: str | None) -> str:
+    """Where sampling happens, from the text of one --additional-config argument."""
+    if config_json is None:
+        return "not set by the run script"
+    try:
+        tt = json.loads(config_json).get("tt")
+    except (ValueError, AttributeError):
+        return "unknown"
+    mode = tt.get("sample_on_device_mode") if isinstance(tt, dict) else None
+    return f"on device ({mode})" if mode else "host"
+
+
+def serving_state(run_sh_text: str) -> dict:
+    """How the bundle's run.sh serves, for the operator bundle: whether a speculative drafter is on, and
+    where sampling happens. Both change what a speed figure means. The last `export QWEN36_DRAFTER=` line
+    wins, as in bash; a commented line does not count."""
+    drafter = "not set by the run script"
+    for line in run_sh_text.splitlines():
+        m = re.match(r"\s*export\s+QWEN36_DRAFTER=(.*)$", line)
+        if m:
+            value = m.group(1).strip().strip("\"'")
+            drafter = "off" if value == "" else f"on ({value})"
+    m = re.search(r"--additional-config\s+'([^']*)'", run_sh_text)
+    return {"drafter": drafter, "sampling": describe_sampling(m.group(1) if m else None)}
+
+
 def write_report(cfg: dict, run_dir: Path, cache: Path, weights_env: dict, m: dict, tokenizer,
                  reference, log_path: Path, extra: dict | None = None) -> dict:
     """Step (g). Writes swap-check.json next to log_path and prints the result draft. `extra` adds
@@ -278,7 +305,8 @@ def main() -> int:
     finally:
         stop_server(proc)
         log.close()
-    write_report(cfg, run_dir, cache, weights_env, m, tokenizer, reference, log_path)
+    write_report(cfg, run_dir, cache, weights_env, m, tokenizer, reference, log_path,
+                 extra={"serving": serving_state((STAGE_DIR / "run.sh").read_text(encoding="utf-8"))})
     return 0
 
 if __name__ == "__main__":
