@@ -111,19 +111,19 @@ Four facts decide whether a swap works. Each was found by failing first.
    the facts above:
 
        {"run_dir": "<the run directory>",
+        "bundle_dir": "<the same bundle directory as in swap_config.json>",
         "model_snapshot": "<new model snapshot>",
-        "base_snapshot": "<nearest model snapshot>",
         "head_file": "<the sidecar weights file name in delta.json sidecars, for example joint_head.safetensors>",
         "head_config": "<the sidecar's config file name in the snapshot, for example joint_head_config.json>",
         "code_file": "<the code file name in delta.json code_files, for example joint_schema_model.py>",
         "code_sha256": "<that code file's sha256 from delta.json code_files>",
-        "head_sha256": "<the sidecar's sha256 from delta.json sidecars>",
         "tt_cache": "<a second new directory, next to the first, whose name contains the model's slug>",
         "mesh_shape": [1, 2]}
 
-   Copy the two sha256 values from `delta.json` exactly. The parity script refuses to run when a file's hash
-   differs from them, because the sidecar code is third-party code and only the file stage 0 recorded may be
-   used. Do not open or run the code file yourself.
+   Copy `code_sha256` from `delta.json` exactly. The parity script refuses to run when the code file's hash
+   differs from it, because the sidecar code is third-party code and only the file stage 0 recorded may be
+   used. The script hashes the head file itself, and the gate compares that hash with the one stage 0
+   recorded. Do not open or run the code file yourself.
 4. Copy the templates into your stage directory:
 
        cp {{ORCHARD_DIR}}/orchard/skills/weights-swap-templates/prepare_swap.py {{ORCHARD_DIR}}/orchard/skills/weights-swap-templates/serve_and_compare.py stages/2/
