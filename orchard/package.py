@@ -98,6 +98,77 @@ def splice_extra_args(text: str, extra: str) -> str:
     return text.replace(line, line[:-len(PASS_THROUGH)] + " " + extra + PASS_THROUGH)
 
 
+ADDITIONAL = re.compile(r"--additional-config\s+'([^']*)'")
+DRAFTER_ENV = re.compile(r"^(DFLASH_WEIGHTS|QWEN36_DFLASH_\w+)$")
+
+
+def drop_device_sampling(extra: str) -> str:
+    """Remove "sample_on_device_mode" from the one --additional-config in `extra`.
+
+    Stage 2 and 4 served a model without mtp.* tensors with the drafter off, and plain decoding on a
+    1x2 mesh refuses on-device sampling, so the host samples. A package that kept the key would not be
+    the thing that was tested. An option that is absent, or a config without the key, is left alone."""
+    found = ADDITIONAL.findall(extra)
+    if len(found) > 1:
+        raise PackageError(f"expected at most one --additional-config in the fixed vLLM arguments, "
+                           f"found {len(found)}")
+    if not found:
+        return extra
+    try:
+        cfg = json.loads(found[0])
+        tt = cfg.get("tt")
+    except (ValueError, AttributeError):
+        raise PackageError("the --additional-config in the fixed vLLM arguments is not valid JSON")
+    if not isinstance(tt, dict) or "sample_on_device_mode" not in tt:
+        return extra
+    del tt["sample_on_device_mode"]
+    return ADDITIONAL.sub(lambda m: f"--additional-config '{json.dumps(cfg)}'", extra, count=1)
+
+
+def serving_env(env: dict, *, drafter_off: bool) -> dict:
+    """The manifest environment package-thin is given. With the drafter off, QWEN36_DRAFTER is empty
+    and the drafter's own settings (its repo, tensor-parallel size, block sizes) are not passed, so the
+    package names no drafter repo and downloads none."""
+    if not drafter_off:
+        return dict(env)
+    out = {k: v for k, v in env.items() if not DRAFTER_ENV.match(k)}
+    out["QWEN36_DRAFTER"] = ""
+    return out
+
+
+def serving_problems(run_sh: str, env: dict, *, drafter_off: bool, host_sampling: bool) -> list[str]:
+    """What is wrong with a staged package's serving settings next to what stage 2 served with."""
+    problems = []
+    if drafter_off:
+        drafter = [m.group(1).strip().strip("\"'") for ln in run_sh.splitlines()
+                   if (m := re.match(r"\s*export\s+QWEN36_DRAFTER=(.*)$", ln))]
+        if any(drafter):
+            problems.append(f"run.sh turns the drafter on ({drafter}); stage 2 served with it off")
+        if env.get("QWEN36_DRAFTER"):
+            problems.append(f"the manifest sets QWEN36_DRAFTER={env['QWEN36_DRAFTER']!r}; stage 2 "
+                            "served with the drafter off")
+        left = sorted(k for k in env if DRAFTER_ENV.match(k)) + \
+            (["DFLASH_WEIGHTS in run.sh"] if "DFLASH_WEIGHTS" in run_sh else [])
+        if left:
+            problems.append(f"the drafter's settings are still in the package: {left}")
+    if host_sampling and "sample_on_device_mode" in run_sh:
+        problems.append("run.sh sets sample_on_device_mode; stage 2 served with host sampling")
+    return problems
+
+
+def stage_2_serving(run_dir) -> tuple[bool, bool]:
+    """(drafter_off, host_sampling) as the run script stage 2 served with says. A run without that
+    file (older runs) is taken to have served as the source bundle does."""
+    path = Path(run_dir) / "stages/2/run.sh"
+    if not path.is_file():
+        return False, False
+    text = path.read_text(encoding="utf-8")
+    drafter = [m.group(1).strip().strip("\"'") for ln in text.splitlines()
+               if (m := re.match(r"\s*export\s+QWEN36_DRAFTER=(.*)$", ln))]
+    cfg = ADDITIONAL.search(text)
+    return bool(drafter) and drafter[-1] == "", bool(cfg) and "sample_on_device_mode" not in cfg.group(1)
+
+
 def _once(pattern: str, repl: str, text: str, what: str, flags=0) -> str:
     out, n = re.subn(pattern, lambda m: repl, text, flags=flags)
     if n != 1:
@@ -324,6 +395,9 @@ class RunFacts:
     base_config: tuple[Path, ...]    # the nearest model's config files stage 2 used
     passing_chips: frozenset[int]    # chip counts with a passing stage 4 configuration
     license_id: str
+    drafter_off: bool = False        # stage 2 served with the speculative drafter off
+    host_sampling: bool = False      # ... and with the host sampling
+    sidecars: tuple = ()             # stage 0's sidecar files (the package does not serve them)
 
 
 def read_run(run_dir) -> RunFacts:
@@ -368,8 +442,10 @@ def read_run(run_dir) -> RunFacts:
     if not license_id:
         raise PackageError(f"the new model's license is not in {snap}/README.md; stage 7 stages no "
                            "package without it")
+    drafter_off, host_sampling = stage_2_serving(run)
     return RunFacts(run, model_id, revision, nearest_model, snap,
-                    Path(cfg.get("hf_home") or ""), source, base, passing, license_id)
+                    Path(cfg.get("hf_home") or ""), source, base, passing, license_id,
+                    drafter_off, host_sampling, tuple(delta.get("sidecars") or ()))
 
 
 @dataclass(frozen=True)
@@ -441,7 +517,8 @@ def assert_no_publish(argv) -> None:
                                "given that way")
 
 
-def thin_argv(source: Source, *, model_id: str, revision: str, name: str, out: Path) -> list[str]:
+def thin_argv(source: Source, *, model_id: str, revision: str, name: str, out: Path,
+              drafter_off: bool = False) -> list[str]:
     m, s = source.manifest, source.path
     deps, res = m["deps"], m["resources"]
     plugin = [w for w in deps.get("wheels") or [] if Path(w).name.startswith("vllm_tt_plugin")]
@@ -457,7 +534,8 @@ def thin_argv(source: Source, *, model_id: str, revision: str, name: str, out: P
             "--python", deps.get("python") or "3.12", "--vllm-version", deps["vllm"]["version"],
             "--max-num-seqs", res["max_num_seqs"], "--block-size", res["block_size"],
             "--max-model-len", res["max_model_len"], "--name", name,
-            *[x for k, v in (m.get("env") or {}).items() for x in ("--env", f"{k}={v}")],
+            *[x for k, v in serving_env(m.get("env") or {}, drafter_off=drafter_off).items()
+               for x in ("--env", f"{k}={v}")],
             "--out", out]
     return [str(a) for a in argv]
 
@@ -507,7 +585,8 @@ def stage_profile(profile: Profile, facts: RunFacts, out: Path, *, env: dict | N
     out = Path(out)
     if out.exists():
         raise PackageError(f"{out} already exists; stage 7 stages into a fresh directory")
-    argv = thin_argv(src, model_id=facts.model_id, revision=facts.revision, name=name, out=out)
+    argv = thin_argv(src, model_id=facts.model_id, revision=facts.revision, name=name, out=out,
+                     drafter_off=facts.drafter_off)
     assert_no_publish(argv)
     log = out.parent / f"{name}.package-thin.log"
     rc = run_logged(argv, log=log, timeout=PACKAGE_THIN_TIMEOUT_S, env=env)
@@ -515,12 +594,19 @@ def stage_profile(profile: Profile, facts: RunFacts, out: Path, *, env: dict | N
         raise PackageError(f"tt-model package-thin for {name} exited {rc}; the end of {log.name}:\n"
                            + _tail(log))
     run_sh = out / "run.sh"
-    text = splice_extra_args(run_sh.read_text(encoding="utf-8"),
-                             extra_args_from((src.path / "run.sh").read_text(encoding="utf-8")))
+    extra = extra_args_from((src.path / "run.sh").read_text(encoding="utf-8"))
+    if facts.host_sampling:
+        extra = drop_device_sampling(extra)
+    text = splice_extra_args(run_sh.read_text(encoding="utf-8"), extra)
     text = wire_weights(text, facts.model_id)
     problems = weights_wiring_problems(text, nearest_model=facts.nearest_model)
     if problems:
         raise PackageError(f"{name}/run.sh: " + "; ".join(problems))
+    manifest_env = _json(out / "tt_kernel_manifest.json", "the staged manifest").get("env") or {}
+    problems = serving_problems(text, manifest_env, drafter_off=facts.drafter_off,
+                                host_sampling=facts.host_sampling)
+    if problems:
+        raise PackageError(f"{name}: " + "; ".join(problems))
     run_sh.write_text(text, encoding="utf-8")
     mpath = out / "tt_kernel_manifest.json"
     m = _json(mpath, "the staged manifest")
@@ -697,7 +783,9 @@ def write_card(out: Path, facts: RunFacts, profile: dict, *, namespace: str,
         arch=m["arch"], max_model_len=m["resources"]["max_model_len"],
         max_num_seqs=m["resources"]["max_num_seqs"], drafter=drafters[0] if drafters else None,
         verified=verify is not None and profile["required"],
-        numbers=tuple(card_numbers(facts, profile, verify)), not_measured=tuple(not_measured))
+        numbers=tuple(card_numbers(facts, profile, verify)), not_measured=tuple(not_measured),
+        drafter_off=facts.drafter_off, host_sampling=facts.host_sampling,
+        sidecars=tuple(s["file"] for s in facts.sidecars))
     (out / "README.md").write_text(render_card(facts_card), encoding="utf-8")
 
 

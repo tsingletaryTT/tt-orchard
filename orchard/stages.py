@@ -578,8 +578,8 @@ def gate_package(stage_dir, run_dir) -> GateResult:
     weights, the card, the boot check's verify.json and the publish commands. package.json only
     says where to look."""
     # Imported here: orchard.package imports this module.
-    from orchard.package import (PUBLISH_FILE, publish_problems, split_model_id,
-                                 weights_wiring_problems)
+    from orchard.package import (PUBLISH_FILE, publish_problems, serving_problems, split_model_id,
+                                 stage_2_serving, weights_wiring_problems)
     from orchard.package_card import card_problems, read_license
     from orchard.scrub import scrub_package
     d, err = _load(stage_dir, "package.json")
@@ -601,6 +601,8 @@ def gate_package(stage_dir, run_dir) -> GateResult:
     elif d.get("license") != license_id:
         reasons.append(f"package.json says the license is {d.get('license')!r}; the model's is "
                        f"{license_id!r}")
+    drafter_off, host_sampling = stage_2_serving(run)
+    sidecars = [s.get("file") for s in delta.get("sidecars") or () if isinstance(s, dict)]
     profiles = d.get("profiles") if isinstance(d.get("profiles"), list) else []
     if not any(isinstance(p, dict) and p.get("required") and p.get("verified") is True
                for p in profiles):
@@ -627,11 +629,15 @@ def gate_package(stage_dir, run_dir) -> GateResult:
                            f"{d.get('revision')}; stage 0 names {delta.get('model')}")
         reasons += [f"profile {name}: {x}" for x in
                     weights_wiring_problems(run_sh, nearest_model=nearest_repo)]
+        reasons += [f"profile {name}: {x}" for x in
+                    serving_problems(run_sh, m.get("env") or {}, drafter_off=drafter_off,
+                                     host_sampling=host_sampling)]
         reasons += [f"profile {name}: scrub: {x}" for x in
                     scrub_package(out, namespace=d.get("namespace"))]
         if license_id:
             reasons += [f"profile {name}: card: {x}" for x in
-                        card_problems(card, license_id=license_id, run_dir=run)]
+                        card_problems(card, license_id=license_id, run_dir=run,
+                                      sidecars=sidecars)]
         if p.get("verified") is True:
             v, verr = _load(Path(stage_dir) / "verify" / "evidence", "verify.json")
             if verr:

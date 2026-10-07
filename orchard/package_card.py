@@ -91,6 +91,9 @@ class CardFacts:
     verified: bool                   # the stage 7 boot check passed for this profile
     numbers: tuple[Number, ...]
     not_measured: tuple[str, ...]
+    drafter_off: bool = False        # served without the speculative drafter (no mtp.* tensors)
+    host_sampling: bool = False      # tokens are sampled on the host
+    sidecars: tuple[str, ...] = ()   # sidecar files the model's repository ships and the bundle does not serve
 
 
 def _value(n: Number) -> str:
@@ -129,6 +132,18 @@ def render_card(f: CardFacts) -> str:
         lines.append(f"- Speculative decoding uses the drafter {f.drafter}, which was trained on "
                      f"{f.nearest_model}. Its acceptance rate on this model is listed under Not "
                      "measured.")
+    if f.drafter_off:
+        lines.append(f"- Speculative decoding is off. The drafter of {f.nearest_model} needs the MTP "
+                     f"tensors of the model, and {f.model_id} has none.")
+    if f.host_sampling:
+        lines.append("- Sampling runs on the host, because on-device sampling is not used with the "
+                     "drafter off on this mesh.")
+    if f.sidecars:
+        lines += ["", "## Not served", "",
+                  f"{f.model_id} ships files this bundle does not load: "
+                  + ", ".join(f"`{s}`" for s in f.sidecars) + ". The bundle serves the language-model "
+                  "backbone only, so the sidecar head is not served. The run checked the head on the "
+                  "host against the CPU reference; that check does not make it part of this bundle."]
     lines += ["", NUMBERS_HEAD, "",
               "Every number is labelled. A `measured` number names its evidence files, relative to "
               "the run directory; the first file holds the value. `TODO` means not measured.", "",
@@ -159,8 +174,11 @@ def _numbers_section(card: str) -> tuple[str, str]:
     return section, before + (sep + rest if sep else "")
 
 
-def card_problems(card: str, *, license_id: str, run_dir) -> list[str]:
+def card_problems(card: str, *, license_id: str, run_dir, sidecars=()) -> list[str]:
     problems = []
+    for s in sidecars:
+        if s not in card or "not served" not in card.lower():
+            problems.append(f"the card must name the sidecar {s} and say it is not served")
     m = re.search(r"^license:\s*(\S+)\s*$", _front(card), re.M)
     if m is None:
         problems.append("the card's front matter has no license")

@@ -13,6 +13,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -181,3 +182,17 @@ def fake_boot_result(stage: Path, *, returncode=0, top1=0.94) -> None:
             "server_weights_env": {"MODEL_WEIGHTS_DIR": str(md), "HF_MODEL": str(md)},
             "evidence": ["stages/7/verify/evidence/verify.json",
                          "stages/7/verify/evidence/server.log"]})
+
+
+SIDECAR = {"file": "joint_head.safetensors", "size": 256125024, "sha256": "a" * 64, "num_tensors": 122}
+
+
+def make_clef_like(run: Path, source: Path) -> None:
+    """Turn make_run's run into Clef's shape: stage 2 served with the speculative drafter off and host
+    sampling (stages/2/run.sh is the edited copy prepare_swap.py leaves), and stage 0 found a sidecar."""
+    text = (source / "run.sh").read_text()
+    text = re.sub(r"^export QWEN36_DRAFTER=.*\n", "", text, flags=re.M)
+    text = text.replace("CMD=(", 'export QWEN36_DRAFTER=""\nCMD=(', 1)
+    write(run / "stages/2/run.sh", text)
+    d = json.loads((run / "stages/0/delta.json").read_text())
+    write(run / "stages/0/delta.json", {**d, "class": "weights+sidecar", "sidecars": [SIDECAR]})
