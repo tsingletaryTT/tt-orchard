@@ -491,3 +491,183 @@ def test_the_script_prints_progress_and_names_the_path(text_case):
     r = run_triage(stage)
     assert r.returncode == 0
     assert "delta.json" in r.stdout and "weights-only" in r.stdout
+
+
+# ---- sidecars (a weights file the nearest model's runtime does not load) --------------------------
+
+import hashlib  # noqa: E402
+
+HEAD_TENSORS = {"evidence_layers.0.attention.in_proj_weight": ("BF16", [3 * H, H]),
+                "evidence_layers.0.attention.in_proj_bias": ("BF16", [3 * H]),
+                "hidden_norm.weight": ("BF16", [H])}
+
+
+def add_sidecar(stage: Path, tensors=None, name="joint_head.safetensors") -> Path:
+    model = Path(json.loads((stage / "triage_config.json").read_text())["model_snapshot"])
+    write_safetensors(model / name, tensors or HEAD_TENSORS)
+    return model / name
+
+
+def test_a_weight_file_outside_the_index_is_a_sidecar_and_the_class_says_so(text_case):
+    stage = text_case()
+    head = add_sidecar(stage)
+    r = run_triage(stage)
+    assert r.returncode == 0, r.stdout + r.stderr
+    d = delta(stage)
+    assert d["class"] == "weights+sidecar" and d["path"] == "weights-only", d.get("path_reasons")
+    [side] = d["sidecars"]
+    assert side["file"] == "joint_head.safetensors" and side["num_tensors"] == 3
+    assert side["size"] == head.stat().st_size and side["dtypes"] == ["BF16"]
+    assert side["sha256"] == hashlib.sha256(head.read_bytes()).hexdigest()
+    assert side["tensor_names"] == sorted(HEAD_TENSORS)
+    assert evidence(stage, "sidecar-compare.json")["sidecars"][0]["file"] == "joint_head.safetensors"
+
+
+def test_the_sidecar_is_not_counted_as_extra_text_tensors_of_the_backbone(text_case):
+    stage = text_case()
+    add_sidecar(stage)
+    assert run_triage(stage).returncode == 0
+    t = evidence(stage, "tensor-compare.json")
+    assert not any(n.startswith("evidence_layers") for n in t["normalized_name_sets"]["only_in_model"])
+    assert t["normalized_name_sets"]["unexplained_only_in_model"] == []
+
+
+def test_the_draft_with_a_sidecar_passes_the_stage_0_gate(text_case):
+    stage = text_case()
+    add_sidecar(stage)
+    assert run_triage(stage).returncode == 0
+    gate = gate_delta(stage, stage.parent.parent)
+    assert gate.ok, gate.reasons
+
+
+def test_a_sidecar_whose_tensor_names_overlap_the_backbone_is_unknown_and_full_port(text_case):
+    stage = text_case()
+    add_sidecar(stage, {"model.norm.weight": ("BF16", [H]), **HEAD_TENSORS})
+    assert run_triage(stage).returncode == 0
+    d = delta(stage)
+    assert d["class"] == "unknown" and d["path"] == "full-port"
+    assert any("overlap" in r and "model.norm.weight" in r for r in d["path_reasons"])
+
+
+def test_a_sidecar_that_is_not_safetensors_is_unknown_because_its_tensors_cannot_be_read(text_case):
+    stage = text_case()
+    model = Path(json.loads((stage / "triage_config.json").read_text())["model_snapshot"])
+    (model / "head.bin").write_bytes(b"pickle")
+    assert run_triage(stage).returncode == 0
+    d = delta(stage)
+    assert d["class"] == "unknown" and any("head.bin" in r for r in d["path_reasons"])
+
+
+def test_a_plain_weights_only_model_has_no_sidecars(text_case):
+    stage = text_case()
+    assert run_triage(stage).returncode == 0
+    d = delta(stage)
+    assert d["class"] == "weights-only" and d["sidecars"] == []
+
+
+def test_a_changed_shape_is_full_port_even_when_a_sidecar_is_present(text_case):
+    stage = text_case(config_change={"num_key_value_heads": 2})
+    add_sidecar(stage)
+    assert run_triage(stage).returncode == 0
+    d = delta(stage)
+    assert d["class"] == "full-port" and d["path"] == "full-port"
+
+
+def test_a_code_file_in_the_repo_is_recorded_with_its_hash_and_raises_a_hazard(text_case):
+    stage = text_case(extra_files={"joint_schema_model.py": "import torch\n"})
+    assert run_triage(stage).returncode == 0
+    d = delta(stage)
+    assert d["code_files"] == [{"file": "joint_schema_model.py",
+                                "sha256": hashlib.sha256(b"import torch\n").hexdigest()}]
+    assert any(h["area"] == "other" and "joint_schema_model.py" in h["finding"] for h in d["hazards"])
+    assert d["class"] == "weights-only"                    # code alone does not change the class
+
+
+def test_a_sidecar_shows_in_the_differences_and_the_hazards(text_case):
+    stage = text_case()
+    add_sidecar(stage)
+    assert run_triage(stage).returncode == 0
+    d = delta(stage)
+    assert any(i["area"] == "other" and "joint_head.safetensors" in i["finding"] for i in d["differences"])
+    assert any(h["area"] == "other" and "sidecar" in h["finding"] for h in d["hazards"])
+
+
+def test_a_model_with_a_single_unindexed_weight_file_is_not_mistaken_for_a_sidecar(tmp_path, tokenizer_json):
+    """No index file: model.safetensors is the backbone itself."""
+    model = make_snapshot(tmp_path / "new", MODEL_REV, nested=False, vision=False, tokenizer=tokenizer_json)
+    (model / "model.safetensors.index.json").unlink()
+    nearest = make_snapshot(tmp_path / "base", BASE_REV, nested=True, vision=True, tokenizer=tokenizer_json)
+    stage = stage_for(tmp_path, model, nearest)
+    assert run_triage(stage).returncode == 0
+    assert delta(stage)["sidecars"] == [] and delta(stage)["class"] == "weights-only"
+
+
+# ---- gaps the mutation run found ---------------------------------------------------------------
+
+def model_dir_of(stage: Path) -> Path:
+    return Path(json.loads((stage / "triage_config.json").read_text())["model_snapshot"])
+
+
+def test_backbone_shards_with_unusual_names_are_found_through_the_index(text_case):
+    stage = text_case()
+    model = model_dir_of(stage)
+    index = json.loads((model / "model.safetensors.index.json").read_text())
+    renames = {"model-00001-of-00002.safetensors": "weights-a.safetensors",
+               "model-00002-of-00002.safetensors": "weights-b.safetensors"}
+    for old, new in renames.items():
+        (model / old).rename(model / new)
+    index["weight_map"] = {k: renames[v] for k, v in index["weight_map"].items()}
+    (model / "model.safetensors.index.json").write_text(json.dumps(index))
+    add_sidecar(stage)
+    assert run_triage(stage).returncode == 0
+    d = delta(stage)
+    assert d["class"] == "weights+sidecar"
+    assert evidence(stage, "tensor-compare.json")["model"]["shards"] == ["weights-a.safetensors", "weights-b.safetensors"]
+
+
+def test_a_single_unindexed_model_file_and_a_sidecar_are_told_apart_by_name(tmp_path, tokenizer_json):
+    model = make_snapshot(tmp_path / "new", MODEL_REV, nested=False, vision=False, tokenizer=tokenizer_json)
+    vocab = len(json.loads(tokenizer_json)["model"]["vocab"]) + len(SPECIALS)
+    for shard in model.glob("model-0000*-of-00002.safetensors"):
+        shard.unlink()
+    (model / "model.safetensors.index.json").unlink()
+    write_safetensors(model / "model.safetensors", text_tensors(vocab))
+    nearest = make_snapshot(tmp_path / "base", BASE_REV, nested=True, vision=True, tokenizer=tokenizer_json)
+    stage = stage_for(tmp_path, model, nearest)
+    add_sidecar(stage)
+    assert run_triage(stage).returncode == 0
+    d = delta(stage)
+    assert [s["file"] for s in d["sidecars"]] == ["joint_head.safetensors"] and d["class"] == "weights+sidecar"
+
+
+def test_a_file_the_nearest_model_also_has_is_not_a_sidecar_of_the_new_one(text_case, tmp_path):
+    stage = text_case()
+    add_sidecar(stage)
+    nearest = Path(json.loads((stage / "triage_config.json").read_text())["nearest_snapshot"])
+    write_safetensors(nearest / "joint_head.safetensors", HEAD_TENSORS)
+    assert run_triage(stage).returncode == 0
+    assert delta(stage)["sidecars"] == [] and delta(stage)["class"] == "weights-only"
+
+
+def test_a_sidecar_overlap_is_found_after_the_language_model_prefix_is_normalized(text_case):
+    stage = text_case()
+    add_sidecar(stage, {"model.language_model.norm.weight": ("BF16", [H]), **HEAD_TENSORS})
+    assert run_triage(stage).returncode == 0
+    d = delta(stage)
+    assert d["class"] == "unknown" and any("overlap" in r for r in d["path_reasons"])
+
+
+def test_a_corrupt_safetensors_sidecar_is_unknown(text_case):
+    stage = text_case()
+    (model_dir_of(stage) / "broken.safetensors").write_bytes(b"not a header at all")
+    assert run_triage(stage).returncode == 0
+    d = delta(stage)
+    assert d["class"] == "unknown" and any("broken.safetensors cannot be read" in r for r in d["path_reasons"])
+
+
+def test_a_pytorch_bin_file_next_to_the_shards_is_not_a_sidecar(text_case):
+    stage = text_case()
+    (model_dir_of(stage) / "pytorch_model-00001-of-00002.bin").write_bytes(b"pickle")
+    assert run_triage(stage).returncode == 0
+    d = delta(stage)
+    assert d["sidecars"] == [] and d["class"] == "weights-only"

@@ -7,3 +7,4 @@ runs/
 *.lock
 .superpowers/
 generated/
+.claude/worktrees/

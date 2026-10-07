@@ -27,6 +27,7 @@ It measures, and writes each measurement under `evidence/` next to itself:
                              pre-tokenizer, decoder and post-processor, and the chat template's sha256
     tokenizer-encode.json    ids from both tokenizers (the `tokenizers` package) for the fixed strings
                              below and 100 fixed-seed random-unicode strings
+    sidecar-compare.json     weights files outside the backbone, their tensor names, and any problem
     files-compare.json       every file and its size, and the weight shards
     genconfig-license.json   generation_config.json and the license (model card front matter, then
                              the LICENSE file)
@@ -46,6 +47,18 @@ The path rule. `weights-only` needs all of these, otherwise the path is `full-po
 
 A tokenizer difference does not change the path: the runtime loads the new model's tokenizer.
 It is reported in the tokenizer finding.
+
+The class. delta.json also carries a `class` (orchard/classes.py): `weights-only`, `weights+sidecar`,
+`full-port` or `unknown`. A sidecar is a weights file in the new model's snapshot that is not one of
+the backbone shards (the shards its `model.safetensors.index.json` lists, or `model*.safetensors`
+when there is no index) and that the nearest model does not have, such as a task head. The backbone
+is compared as above, without the sidecar. When the backbone is weights-only and every sidecar is a
+readable safetensors file whose tensor names do not overlap the backbone's, the class is
+`weights+sidecar` and the path stays `weights-only`. An unreadable sidecar, or one that overlaps,
+makes the class `unknown` and the path `full-port`, with the reason in `path_reasons`. The class is
+also `unknown` when the backbone could not be compared at all. `sidecars` lists each file with its
+size, sha256, tensor count, dtypes and tensor names, and `code_files` lists each top-level `.py`
+file with its sha256. Nothing here runs a code file.
 
 Exit codes: 0 when delta.json was written (whatever the path), 2 when triage_config.json is
 missing, incomplete or names a directory that does not exist, or the stage directory is not inside
@@ -335,9 +348,28 @@ def safetensors_header(path: Path) -> dict:
             for k, v in header.items() if k != "__metadata__" and isinstance(v, dict)}
 
 
+INDEX_NAME = "model.safetensors.index.json"
+BACKBONE_SHARD = re.compile(r"model(-\d+-of-\d+)?\.safetensors")
+WEIGHT_SUFFIXES = (".safetensors", ".bin", ".pt", ".pth", ".ckpt", ".gguf", ".npz")
+BACKBONE_BIN = re.compile(r"pytorch_model.*\.bin")
+MAX_LISTED_NAMES = 1000
+
+
+def backbone_shards(snapshot: Path) -> list[str]:
+    """The safetensors files that hold the backbone: the shards the model's index lists, or
+    `model*.safetensors` when there is no index. A snapshot with odd names and no index treats every
+    safetensors file as the backbone, as this script always did."""
+    top = sorted(p.name for p in snapshot.iterdir() if p.is_file() and p.name.endswith(".safetensors"))
+    index, _ = read_json(snapshot / INDEX_NAME)
+    if isinstance(index, dict) and isinstance(index.get("weight_map"), dict):
+        listed = set(index["weight_map"].values())
+        return [n for n in top if n in listed]
+    return [n for n in top if BACKBONE_SHARD.fullmatch(n)] or top
+
+
 def read_tensors(snapshot: Path) -> tuple[list[str], dict, list[str]]:
-    """(shard names, {tensor: {"dtype", "shape", "shard"}}, errors)."""
-    shards = sorted(p.name for p in snapshot.iterdir() if p.name.endswith(".safetensors") and p.is_file())
+    """(shard names, {tensor: {"dtype", "shape", "shard"}}, errors). Backbone shards only."""
+    shards = backbone_shards(snapshot)
     tensors, errors = {}, []
     for shard in shards:
         try:
@@ -407,6 +439,64 @@ def compare_tensors(model_dir: Path, base_dir: Path) -> dict:
         "vision_tensors": {"model": sum(1 for k in mn if re.search(r"(^|\.)(visual|vision)", k)),
                            "base": sum(1 for k in bn if re.search(r"(^|\.)(visual|vision)", k))},
     }
+
+
+# ---- sidecars and code files -----------------------------------------------------------------------
+
+def file_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def compare_sidecars(model_dir: Path, base_dir: Path, backbone_names: set[str]) -> dict:
+    """Weights files in the new model that are not backbone shards and that the nearest model lacks.
+    `problems` says why a sidecar cannot be trusted (unreadable, or its names overlap the backbone)."""
+    shards = set(backbone_shards(model_dir))
+    base_files = {p.name for p in base_dir.iterdir() if p.is_file()}
+    backbone = backbone_names | {normalize(n) for n in backbone_names}
+    sidecars, problems = [], []
+    for p in sorted(model_dir.iterdir()):
+        if (not p.is_file() or not p.name.endswith(WEIGHT_SUFFIXES) or p.name in shards
+                or p.name in base_files or BACKBONE_BIN.fullmatch(p.name)):
+            continue
+        entry = {"file": p.name, "size": p.stat().st_size, "sha256": file_sha256(p), "num_tensors": None,
+                 "dtypes": [], "tensor_names": []}
+        if p.name.endswith(".safetensors"):
+            try:
+                header = safetensors_header(p)
+            except (OSError, ValueError, UnicodeDecodeError) as exc:
+                problems.append(f"sidecar {p.name} cannot be read: {exc}")
+            else:
+                names = sorted(header)
+                entry.update(num_tensors=len(names), dtypes=sorted({v["dtype"] for v in header.values()}),
+                             tensor_names=names[:MAX_LISTED_NAMES], names_truncated=len(names) > MAX_LISTED_NAMES)
+                clash = sorted(n for n in names if n in backbone or normalize(n) in backbone)
+                if clash:
+                    problems.append(f"sidecar {p.name} has {len(clash)} tensor names that overlap the "
+                                    f"backbone: {short(clash, 5)}")
+        else:
+            problems.append(f"sidecar {p.name} is not a safetensors file, so its tensors cannot be read "
+                            "without loading it")
+        sidecars.append(entry)
+    return {"sidecars": sidecars, "problems": problems,
+            "note": "a sidecar is a weights file outside the backbone shards that the nearest model lacks"}
+
+
+def code_files(model_dir: Path) -> list[dict]:
+    return [{"file": p.name, "sha256": file_sha256(p)} for p in sorted(model_dir.glob("*.py")) if p.is_file()]
+
+
+def sidecar_finding(sc: dict) -> str:
+    parts = [f"{e['file']} ({e['size'] / 1e6:.1f} MB, {e['num_tensors']} tensors, sha256 {e['sha256'][:12]})"
+             for e in sc["sidecars"]]
+    s = ("The new model ships weights outside the backbone that the nearest model's runtime does not load: "
+         + "; ".join(parts) + ".")
+    if sc["problems"]:
+        s += " Problems: " + "; ".join(sc["problems"]) + "."
+    return s
 
 
 # ---- tokenizer ------------------------------------------------------------------------------------
@@ -870,6 +960,19 @@ def decide_path(c: dict, t: dict) -> list[str]:
     return reasons
 
 
+def decide_class(c: dict, t: dict, reasons: list[str], sc: dict) -> str:
+    """weights-only, weights+sidecar, full-port or unknown. `reasons` already holds the backbone's
+    reasons for full-port and the sidecar problems."""
+    ns = t["normalized_name_sets"]
+    could_not_compare = ((c.get("errors") and "text_key_values" not in c) or bool(t["errors"])
+                         or ns["common"] == 0 or bool(sc["problems"]))
+    if could_not_compare:
+        return "unknown"
+    if reasons:
+        return "full-port"
+    return "weights+sidecar" if sc["sidecars"] else "weights-only"
+
+
 def hazards(model_id: str, nearest_id: str, t: dict, f: dict, g: dict, disk: dict, ev) -> list[dict]:
     out = [
         {"area": "tensor_cache",
@@ -931,10 +1034,17 @@ def main() -> int:
     write_json("disk-free.json", disk)
     say("wrote evidence/files-compare.json, genconfig-license.json and disk-free.json")
 
-    reasons = decide_path(c, t)
+    backbone_names = set(read_tensors(model_dir)[1])
+    sc = compare_sidecars(model_dir, base_dir, backbone_names)
+    write_json("sidecar-compare.json", sc)
+    code = code_files(model_dir)
+    say(f"wrote evidence/sidecar-compare.json ({len(sc['sidecars'])} sidecars, {len(code)} code files)")
+    reasons = decide_path(c, t) + sc["problems"]
     path = "full-port" if reasons else "weights-only"
+    cls = decide_class(c, t, reasons, sc)
     delta = {
-        "model": model_id, "nearest_model": nearest_id, "path": path, "path_reasons": reasons,
+        "model": model_id, "nearest_model": nearest_id, "path": path, "class": cls,
+        "path_reasons": reasons, "sidecars": sc["sidecars"], "code_files": code,
         "draft": ("written by delta_triage.py from the evidence files; the agent reviews each finding "
                   "and adds hazards it can justify"),
         "differences": [
@@ -954,8 +1064,22 @@ def main() -> int:
         ],
         "hazards": hazards(model_id, nearest_id, t, f, g, disk, ev),
     }
+    if sc["sidecars"]:
+        delta["differences"].append({"area": "other", "finding": sidecar_finding(sc),
+                                     "evidence": [ev("sidecar-compare.json")]})
+        delta["hazards"].append({"area": "other", "evidence": [ev("sidecar-compare.json")],
+                                 "finding": ("The new model has a sidecar the nearest model's runtime does not "
+                                             "load. A check that only generates text from the backbone does "
+                                             "not exercise it. Its output must be checked on the host against "
+                                             "the CPU reference, with the exact file hash recorded.")})
+    if code:
+        delta["hazards"].append({"area": "other", "evidence": [ev("files-compare.json")],
+                                 "finding": ("The model repository ships code: "
+                                             + ", ".join(f"{x['file']} (sha256 {x['sha256'][:12]})" for x in code)
+                                             + ". It was not run. Read it before any run imports it, and "
+                                             "record the hash of the file a check used.")})
     (HERE_DIR / "delta.json").write_text(json.dumps(delta, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    say(f"wrote delta.json: path {path}")
+    say(f"wrote delta.json: path {path}, class {cls}")
     for r in reasons:
         say(f"  full-port because {r}")
     return 0
