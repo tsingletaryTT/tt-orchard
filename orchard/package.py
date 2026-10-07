@@ -702,6 +702,8 @@ def redact_evidence(text: str, *, run_dir: Path, hostname: str | None, home: str
     if home and home != "/":
         text = text.replace(home, "<HOME>")
     text = HOME_PATH.sub("<HOME>", text)
+    # tt-model installs a bundle under <org>/<name>; the org there is the operator's namespace.
+    text = re.sub(r"<HOME>/\.cache/tt-model/models/[^/\s]+/", "<TT_MODEL_MODELS>/", text)
     if hostname and hostname != "localhost":
         text = re.sub(rf"\b{re.escape(hostname)}\b", "<HOST>", text)
     return text

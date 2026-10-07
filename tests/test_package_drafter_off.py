@@ -252,3 +252,12 @@ def test_a_card_that_cites_a_file_outside_the_run_is_refused(world, tmp_path):
     out.mkdir()
     with pytest.raises(PackageError, match="not a file inside the run"):
         copy_evidence(read_run(world["run"]), out, card)
+
+
+def test_an_installed_bundle_path_loses_its_namespace(world):
+    (world["run"] / "stages/2/evidence/server.log").write_text(
+        f"{os.path.expanduser('~')}/.cache/tt-model/models/episod/qwen3.8-27b-dflash2-p300/.python/x.py:279\n")
+    stage, pkg = staged(world)
+    text = (pkg / "evidence/stages/2/evidence/server.log").read_text()
+    assert "episod" not in text and "<TT_MODEL_MODELS>/qwen3.8-27b-dflash2-p300/.python/x.py" in text
+    assert gate_package(stage, world["run"]).ok
