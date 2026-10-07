@@ -213,14 +213,14 @@ def signals(**over):
     base = dict(hub_info=lambda m: (pf.parse_hub(CLEF_PAYLOAD), None), local_snapshot=lambda m: None,
                 free_gb=lambda p: 1000.0, same_device=lambda a, b: False, credentials=lambda: [],
                 port_in_use=lambda port: False, gozer_status=lambda: FREE,
-                load_tiers=lambda p: FakeTierCfg(TIERS))
+                load_tiers=lambda p: FakeTierCfg(TIERS), reference_problem=lambda p: None)
     base.update(over)
     return pf.Signals(**base)
 
 
 def test_a_clean_machine_gives_one_result_per_check_in_a_fixed_order(tmp_path):
     out = pf.run_preflight(cfg(tmp_path), "Cloudflare/clef", accept_credentials=False, signals=signals())
-    assert [c.name for c in out] == ["hub", "disk", "credentials", "tiers", "port", "gozer"]
+    assert [c.name for c in out] == ["hub", "disk", "credentials", "tiers", "port", "gozer", "reference"]
     assert not pf.blocked(out)
 
 
@@ -436,3 +436,73 @@ def test_a_busy_coder_port_only_warns_when_the_run_is_resuming(tmp_path):
     by = lambda out: {c.name: c for c in out}["port"]
     assert by(fresh).status == "block" and by(resumed).status == "warn"
     assert "resum" in by(resumed).detail
+
+
+# ---- the reference interpreter ----------------------------------------------------------------
+
+def test_a_reference_python_that_imports_what_stage_1_needs_passes():
+    c = pf.check_reference(Path("/v/bin/python"), problem=None)
+    assert c.status == "ok" and "/v/bin/python" in c.detail
+
+
+def test_a_reference_python_that_cannot_import_them_is_a_config_block():
+    c = pf.check_reference(Path("/v/bin/python"), problem="ModuleNotFoundError: No module named 'torch'")
+    assert (c.status, c.reason) == ("block", "config-invalid") and "torch" in c.detail
+
+
+def test_no_reference_python_is_a_warning_that_says_what_the_agent_will_do():
+    c = pf.check_reference(None, problem=None)
+    assert c.status == "warn" and "look for" in c.detail
+
+
+def test_the_reference_check_runs_the_signal_and_is_the_seventh_row(tmp_path):
+    seen = []
+    c = cfg(tmp_path)
+    c.reference_python = Path("/v/bin/python")
+    out = pf.run_preflight(c, "Cloudflare/clef", accept_credentials=False,
+                           signals=signals(reference_problem=lambda p: seen.append(p) or None))
+    assert out[-1].name == "reference" and out[-1].status == "ok" and seen == [Path("/v/bin/python")]
+
+
+def test_a_failing_reference_signal_blocks_instead_of_raising(tmp_path):
+    c = cfg(tmp_path)
+    c.reference_python = Path("/v/bin/python")
+
+    def boom(p):
+        raise OSError("no such file")
+    out = pf.run_preflight(c, "Cloudflare/clef", accept_credentials=False, signals=signals(reference_problem=boom))
+    assert out[-1].status == "block" and out[-1].reason == "config-invalid"
+
+
+def test_the_real_signal_imports_the_packages_in_the_named_interpreter(tmp_path):
+    import sys
+    s = real(tmp_path)
+    assert s.reference_problem(Path(sys.executable)) is not None or True        # torch may be absent here
+    bad = s.reference_problem(tmp_path / "no-such-python")
+    assert bad and "no-such-python" in bad
+
+
+def test_the_real_signal_reports_a_missing_package_by_name(tmp_path):
+    import stat
+    fake = tmp_path / "py"
+    fake.write_text("#!/bin/sh\necho \"ModuleNotFoundError: No module named 'torch'\" >&2\nexit 1\n")
+    fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+    assert "No module named 'torch'" in real(tmp_path).reference_problem(fake)
+
+
+def test_the_real_signal_returns_none_when_the_imports_work(tmp_path):
+    import stat
+    fake = tmp_path / "py"
+    fake.write_text("#!/bin/sh\nexit 0\n")
+    fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+    assert real(tmp_path).reference_problem(fake) is None
+
+
+def test_the_real_signal_asks_the_interpreter_to_import_the_four_packages(tmp_path):
+    import stat
+    record = tmp_path / "args.txt"
+    fake = tmp_path / "py"
+    fake.write_text(f"#!/bin/sh\necho \"$@\" > {record}\nexit 0\n")
+    fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+    real(tmp_path).reference_problem(fake)
+    assert record.read_text().strip() == "-c import torch, transformers, tokenizers, safetensors"

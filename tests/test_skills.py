@@ -267,3 +267,10 @@ def test_the_operator_bundle_skill_has_the_write_first_rules():
     assert "summary paragraph" in flat and "evidence path" in flat
     assert "Do not change a `Dealt with: Not shown` line to `yes`" in flat
     assert "Exit 2" in flat and "scrub" in flat
+
+
+def test_the_reference_gate_skill_tells_the_agent_to_use_the_reference_python_input_and_never_to_install():
+    text = " ".join((Path(__file__).resolve().parent.parent / "orchard" / "skills" / "reference-gate.md")
+                    .read_text().split())
+    assert "input named `reference_python`" in text and "use that path exactly" in text
+    assert "Never install or upgrade a package" in text

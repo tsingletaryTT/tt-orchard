@@ -23,7 +23,7 @@ from orchard.tiers import SENTINEL, _unknown_key_message
 
 TOP_KEYS = {"runs_root", "tiers", "cache_root", "hf_home", "operator_home", "gozer", "required_chips",
             "skills_dirs", "package_format", "package_namespace", "package_models_root", "min_free_gb",
-            "env", "coder"}
+            "reference_python", "env", "coder"}
 CODER_KEYS = {"target", "kind", "profile", "port", "chips", "image_id"}
 CODER_KINDS = ("container", "bundle")
 PACKAGE_FORMATS = ("v6", "v5.1")     # the values `supervisor run --package-format` accepts
@@ -62,6 +62,7 @@ class BringupConfig:
     package_namespace: str | None = None
     package_models_root: Path | None = None
     min_free_gb: float | None = None
+    reference_python: Path | None = None    # the interpreter stage 1 runs the CPU reference with
     env: dict[str, str] = field(default_factory=dict)
 
 
@@ -181,6 +182,7 @@ def load(path) -> BringupConfig:
         package_namespace=_text(raw["package_namespace"], "package_namespace") if "package_namespace" in raw else None,
         package_models_root=opt("package_models_root"),
         min_free_gb=float(min_free) if min_free is not None else None,
+        reference_python=opt("reference_python"),
         env=dict(env),
     )
 
@@ -218,7 +220,10 @@ def supervisor_argv(cfg: BringupConfig, model_id: str, run_dir: Path | None = No
         argv += ["--skills-dir", str(d)]
     for name, value in cfg.env.items():
         argv += ["--env", f"{name}={value}"]
-    for name, value in (inputs or {}).items():
+    all_inputs = dict(inputs or {})
+    if cfg.reference_python is not None:
+        all_inputs["reference_python"] = str(cfg.reference_python)     # listed in every agent's prompt
+    for name, value in all_inputs.items():
         argv += ["--input", f"{name}={value}"]
     argv.append("--unattended")        # a bring-up started here never waits for a person
     if accept_credentials:

@@ -33,6 +33,7 @@ from orchard.defaults import TEST_DISK_GB
 OK, WARN, BLOCK = "ok", "warn", "block"
 HUB_TIMEOUT_S = 20
 GOZER_TIMEOUT_S = 10
+REFERENCE_IMPORT_TIMEOUT_S = 180     # importing torch and transformers cold can take a minute
 _LICENSE_FILE = re.compile(r"(licen[cs]e|copying)", re.IGNORECASE)
 _CHIP_LINE = re.compile(r"^\s*chip\s+(\d+)\s+\S+\s+(\S+)", re.MULTILINE)
 
@@ -147,6 +148,18 @@ def check_port(port: int, in_use: bool, resuming: bool = False) -> Check:
     return Check("port", OK, f"coder port {port} is free")
 
 
+def check_reference(python: Path | None, problem: str | None) -> Check:
+    """The interpreter stage 1 runs the CPU reference with. Without one the agent looks for an interpreter
+    itself, which is how an earlier run ended up installing packages into the machine's shared venv."""
+    if python is None:
+        return Check("reference", WARN, "no reference_python is configured, so the stage 1 agent will look for "
+                     "an interpreter with torch and transformers itself; set reference_python in bringup.toml")
+    if problem:
+        return Check("reference", BLOCK, f"reference_python {python} cannot import torch, transformers, "
+                     f"tokenizers and safetensors: {problem}", "config-invalid")
+    return Check("reference", OK, f"{python} imports torch, transformers, tokenizers and safetensors")
+
+
 def check_gozer(text: str) -> Check:
     if not text.strip():
         return Check("gozer", BLOCK, "gozer gave no status; the chips cannot be leased", "hardware-unhealthy")
@@ -176,6 +189,7 @@ class Signals:
     port_in_use: Callable         # (port) -> bool
     gozer_status: Callable        # () -> text of `gozer status`, "" when unavailable
     load_tiers: Callable          # (path) -> TierConfig
+    reference_problem: Callable | None = None   # (python path) -> why it cannot import the packages, or None
 
 
 def hf_home_for(cfg) -> Path:
@@ -225,6 +239,9 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
     guarded("tiers", "config-invalid", lambda: check_tiers(s.load_tiers, Path(cfg.tiers), cfg.coder.port))
     guarded("port", "coder-unusable", lambda: check_port(cfg.coder.port, bool(s.port_in_use(cfg.coder.port)), resuming))
     guarded("gozer", "hardware-unhealthy", lambda: check_gozer(s.gozer_status()))
+    ref = cfg.reference_python
+    guarded("reference", "config-invalid", lambda: check_reference(
+        ref, s.reference_problem(ref) if ref is not None and s.reference_problem else None))
     return out
 
 
@@ -277,9 +294,21 @@ def default_signals(cfg) -> Signals:
         except OSError:
             return False
 
+    def reference_problem(python) -> str | None:
+        try:
+            done = subprocess.run([str(python), "-c", "import torch, transformers, tokenizers, safetensors"],
+                                  capture_output=True, text=True, timeout=REFERENCE_IMPORT_TIMEOUT_S)
+        except (OSError, subprocess.SubprocessError) as exc:
+            return f"{type(exc).__name__}: {exc}"
+        if done.returncode == 0:
+            return None
+        lines = (done.stderr or "").strip().splitlines()
+        return lines[-1] if lines else f"exit {done.returncode}"
+
     return Signals(
         hub_info=hub_info, local_snapshot=local_snapshot,
         free_gb=lambda p: shutil.disk_usage(_nearest_existing(p)).free / 1e9,
         same_device=lambda a, b: os.stat(_nearest_existing(a)).st_dev == os.stat(_nearest_existing(b)).st_dev,
         credentials=lambda: supervisor.visible_credentials(cfg.operator_home or supervisor.operator_home()),
-        port_in_use=port_in_use, gozer_status=gozer_status, load_tiers=tiers.load)
+        port_in_use=port_in_use, gozer_status=gozer_status, load_tiers=tiers.load,
+        reference_problem=reference_problem)

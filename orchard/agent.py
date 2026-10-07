@@ -227,11 +227,17 @@ class Tools:
         return f"{head}\n{clip(text, self.limit)}"
 
     def target(self, path) -> Path | None:
-        """The real path `path` names inside the stage directory, or None (links resolved)."""
+        """The real path `path` names inside the stage directory, or None (links resolved).
+
+        A path is relative to the stage directory, except that one starting with `stages/` is read the
+        way read_file reads it, relative to the run directory, and must land in this stage. Models that
+        read `stages/1/evidence/a.txt` write the same form, and read as stage-relative it made
+        `stages/1/stages/1/evidence/a.txt`. A `stages/` path into another stage is refused."""
         if not isinstance(path, str) or not path.strip():
             return None
         root = os.path.realpath(self.stage_dir)
-        p = os.path.realpath(os.path.join(root, path))
+        base = os.path.realpath(self.run_dir) if path.replace("\\", "/").split("/", 1)[0] == "stages" else root
+        p = os.path.realpath(os.path.join(base, path))
         if p == root or os.path.commonpath([root, p]) != root:
             return None
         return Path(p)

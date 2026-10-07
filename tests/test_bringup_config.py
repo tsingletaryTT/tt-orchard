@@ -244,3 +244,30 @@ def test_accepting_credentials_is_added_only_when_the_operator_asked(tmp_path):
     assert "--accept-credentials-visible" in bc.supervisor_argv(cfg, "Cloudflare/clef", accept_credentials=True)
     assert "--accept-credentials-visible" not in bc.supervisor_argv(cfg, "Cloudflare/clef")
     supervisor.parse(bc.supervisor_argv(cfg, "Cloudflare/clef", accept_credentials=True))
+
+
+# ---- the reference interpreter ----------------------------------------------------------------
+
+def test_a_reference_python_is_read_and_resolved_against_the_config_directory(tmp_path):
+    cfg = load(tmp_path, 'reference_python = "venvs/ref/bin/python"\n' + MINIMAL)
+    assert cfg.reference_python == tmp_path / "venvs" / "ref" / "bin" / "python"
+    assert load(tmp_path, 'reference_python = "/abs/py"\n' + MINIMAL).reference_python == Path("/abs/py")
+    assert load(tmp_path).reference_python is None
+
+
+def test_the_reference_python_is_handed_to_agents_as_an_input(tmp_path):
+    argv = bc.supervisor_argv(load(tmp_path, 'reference_python = "/v/bin/python"\n' + MINIMAL), "Cloudflare/clef",
+                              inputs={"model": "/hf/snap"})
+    inputs = [argv[i + 1] for i, a in enumerate(argv) if a == "--input"]
+    assert inputs == ["model=/hf/snap", "reference_python=/v/bin/python"]
+    assert supervisor.parse(argv).input == inputs
+
+
+def test_without_a_reference_python_no_such_input_is_passed(tmp_path):
+    argv = bc.supervisor_argv(load(tmp_path), "Cloudflare/clef", inputs={"model": "/hf/snap"})
+    assert [argv[i + 1] for i, a in enumerate(argv) if a == "--input"] == ["model=/hf/snap"]
+
+
+def test_an_empty_reference_python_is_refused(tmp_path):
+    with pytest.raises(bc.BringupConfigError, match="reference_python"):
+        load(tmp_path, 'reference_python = ""\n' + MINIMAL)

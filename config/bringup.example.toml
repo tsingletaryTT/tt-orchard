@@ -32,6 +32,12 @@ required_chips = "2,4"
 # supervisor's TEST_DISK_GB.
 # min_free_gb = 40
 
+# The interpreter stage 1 runs the CPU reference with: a venv that imports torch, transformers, tokenizers and
+# safetensors, with a transformers new enough for the model. The preflight checks the imports. Without it the
+# stage 1 agent looks for an interpreter itself. Agents are not allowed to install packages (the command
+# runner refuses pip, uv pip and conda installs outside the run directory).
+# reference_python = "CHANGE-ME/venvs/reference/bin/python"
+
 # Variables for agent shells. Names that look like credentials are refused.
 [env]
 HF_HUB_OFFLINE = "1"

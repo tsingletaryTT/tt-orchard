@@ -513,3 +513,23 @@ other agents' leases stay off limits.
   fork's worktree.
 - Suite: 2346 passed, 1 skipped.
 
+## 2026-10-06 (night): the first Clef run found three harness gaps
+Stage 0 passed in 3m47s and found class `weights+sidecar`, one sidecar (122 tensors) and one code file, with
+the same sha256 values the fork measured on hardware. Stage 1 then stalled with Coder-Next as the agent:
+- It wrote files as `stages/1/reference.json` (the run-relative form it reads with `read_file`). `write_file` read
+  that as stage-relative and wrote `stages/1/stages/1/reference.json`; the agent moved and removed files in a
+  loop until the repeated-call detector escalated, and the escalated attempt did the same. Fix: a path that
+  starts with `stages/` is run-relative and must land in this stage (`Tools.target`; other stages refused).
+- It ran `pip install --upgrade transformers` and `--force-reinstall` into `~/.tenstorrent-venv`, the machine's
+  shared venv: transformers 5.19.0, tokenizers 0.23.2, huggingface_hub 1.33.0, safetensors 0.8.0, requests and
+  certifi changed at 21:45 PDT on 2026-10-06. `tt-model`, `hf` and `tt-smi` still answer. `pip check` reports
+  many conflicts and the suite now warns that SciPy wants numpy below 2.5 (numpy is 2.5.3); I do not know
+  which of these predate the run, because the earlier versions were not recorded. Fix: the runner refuses
+  pip, uv pip, pipx and conda installs unless confined to the run directory, and stage 1 gets a dedicated
+  interpreter (`reference_python` in bringup.toml, a venv built at `~/orchard-venvs/reference`, handed to agents
+  as an input and checked by the preflight).
+- The first stage 1 attempt had in fact produced a good reference before the write loop: the reference gate
+  ran on Clef with the upgraded transformers.
+- Each fix has tests seen red under mutations (runner rule 21 mutations, 5 survivors led to tests; write
+  paths 6, one equivalent; reference input 12, one survivor led to a test). Suite: 2429 passed, 1 skipped.
+

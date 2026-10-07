@@ -3,8 +3,9 @@
 It refuses a fixed list of command spellings (see RULES): publishing, pushing and uploading;
 tt-smi resets; gozer commands that take, release or reset a lease; the tt CLI's reset, firmware
 and serving verbs; docker and tt-model commands that start, stop, remove or push; kill, pkill,
-killall and systemctl stop; ssh, scp, sftp and rsync to a host; curl and wget requests that send
-data; changes to the agent shells' device mask; and deletion outside the run directory. The check
+killall and systemctl stop; pip, uv pip, pipx and conda installs that are not confined to the run
+directory; ssh, scp, sftp and rsync to a host; curl and wget requests that send data; changes to the
+agent shells' device mask; and deletion outside the run directory. The check
 sits where commands execute, so a model that ignores its prompt still meets it. It stops only
 these spellings. It does not stop code that does the same thing (see WHAT THIS DOES NOT COVER).
 
@@ -46,7 +47,9 @@ refusal names the construct and says how to rewrite the command.
   env, queue, history, --help and --version, and any gozer --force; tt/tt-cli with stop, serve,
   run, firmware or a reset word; docker with stop, kill, rm, run, start, restart, push, exec, cp
   and similar verbs; tt-model stop, serve, run, rm, unpublish, login, package and package-thin;
-  kill, pkill, killall, reboot, shutdown and systemctl/service stop or restart; ssh, scp and
+  kill, pkill, killall, reboot, shutdown and systemctl/service stop or restart; pip/pip3, `python -m
+  pip`, uv pip, pipx and conda install or uninstall, unless the tool is a venv's own inside the run
+  directory or its --target, --prefix or --python names a path there; ssh, scp and
   sftp, and rsync with a
   `host:` or `rsync://` operand; curl with a request body, form, upload or a method other than
   GET or HEAD, and wget with --post-*, --body-* or such a --method; and rm/rmdir/unlink outside
@@ -899,6 +902,62 @@ def _rm_xargs(name, argv, ctx):
     return name in DELETERS and ctx.via_xargs
 
 
+PACKAGE_VERBS = {"install", "uninstall"}
+CONDA_VERBS = {"install", "remove", "uninstall", "update", "upgrade"}
+CONDA_TOOLS = {"conda", "mamba", "micromamba"}
+_PIP_NAME = re.compile(r"pip[0-9.]*")
+_PY_NAME = re.compile(r"python[0-9.]*")
+
+
+def _inside_run_dir(path: str, ctx) -> bool:
+    """Does `path` (links resolved, relative to the command's directory) lie inside the run directory?
+    A relative path in an unknown directory cannot be judged, so it does not."""
+    if not os.path.isabs(path):
+        if ctx.cwd is None:
+            return False
+        path = os.path.join(ctx.cwd, path)
+    return os.path.realpath(path).startswith(ctx.run_dir + os.sep)
+
+
+def _flag_values(argv: list[str], flags: tuple[str, ...]) -> list[str]:
+    out = []
+    for i, a in enumerate(argv):
+        for f in flags:
+            if a == f and i + 1 < len(argv):
+                out.append(argv[i + 1])
+            elif f.startswith("--") and a.startswith(f + "="):
+                out.append(a.split("=", 1)[1])
+    return out
+
+
+def _package_install(name, argv, ctx):
+    """pip, uv pip, pipx and conda commands that install or remove packages. They change a Python
+    environment the whole machine uses (a stage-1 agent once upgraded transformers, tokenizers and
+    huggingface_hub in the TT venv). An install is allowed only when it is confined to the run
+    directory: the tool is a venv's own pip or python inside the run directory, or its --target,
+    --prefix or --python names a path there."""
+    ops = _operands(argv)
+    scoped = ("--target", "-t", "--prefix")
+    if _PIP_NAME.fullmatch(name) or name == "pipx":
+        installing = any(a in PACKAGE_VERBS for a in ops)
+    elif _PY_NAME.fullmatch(name):
+        i = argv.index("-m") if "-m" in argv else -1
+        installing = i >= 0 and argv[i + 1:i + 2] == ["pip"] and any(a in PACKAGE_VERBS for a in ops)
+    elif name == "uv":
+        installing = ops[:1] == ["pip"] and any(a in PACKAGE_VERBS for a in ops[1:])
+        scoped = ("--target", "--prefix", "--python", "-p")
+    elif name in CONDA_TOOLS:
+        installing, scoped = bool(ops[:1]) and ops[0] in CONDA_VERBS, ()
+    else:
+        return False
+    if not installing:
+        return False
+    if "/" in argv[0] and _inside_run_dir(argv[0], ctx):
+        return False
+    values = _flag_values(argv, scoped)
+    return not (values and all(_inside_run_dir(v, ctx) for v in values))
+
+
 RULES = [
     ("tt-model-push", _tt_model_push),
     ("tt-model-publish", _tt_model_publish),
@@ -912,6 +971,7 @@ RULES = [
     ("docker-control", _docker_control),
     ("tt-model-control", _tt_model_control),
     ("process-kill", _process_kill),
+    ("package-install", _package_install),
     ("remote-access", _remote_access),
     ("http-write", _http_write),
     # rm-ledger comes before the glob and outside rules on purpose: a glob such as `{run}/ledger*`
@@ -944,6 +1004,10 @@ RULE_DETAIL = {
     "process-kill": "the run does not signal processes or stop services. To proceed: the shell "
                     "tool already kills a command that runs past its timeout; to look at a "
                     "process, use ps -p PID",
+    "package-install": "installing or removing packages changes a Python environment that the whole "
+                       "machine uses. To proceed: make a venv in your stage directory "
+                       "(python3 -m venv stages/N/venv, or uv venv) and install there with its own "
+                       "pip, or use the interpreter the run's inputs name",
     "remote-access": "the run stays on this machine. To proceed: copy between local paths with "
                      "cp or rsync, and read remote files over plain HTTP GET",
     "http-write": "the run sends nothing out; GET and HEAD requests are allowed. To proceed: drop "

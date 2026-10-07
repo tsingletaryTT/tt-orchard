@@ -102,9 +102,60 @@ ALLOW = [
     "wget -q -O {run}/f https://example.com/x",
     "wget --method=HEAD https://example.com/x",
     "printenv TT_VISIBLE_DEVICES",
+    "pip list",
+    "pip --version",
+    "pip show torch",
+    "pip freeze",
+    "pip check",
+    "python3 -m pip list",
+    "pip download transformers",
+    "python3 -m venv {run}/stages/1/venv",
+    "uv venv {run}/stages/1/venv",
+    "{run}/stages/1/venv/bin/pip install transformers",
+    "{run}/stages/1/venv/bin/python -m pip install transformers",
+    "{run}/stages/1/venv/bin/pip3 install -U transformers",
+    "uv pip install --python {run}/stages/1/venv/bin/python transformers",
+    "pip install --target {run}/stages/1/libs transformers",
+    "pip install --target={run}/stages/1/libs transformers",
+    "pip install -t {run}/stages/1/libs transformers",
+    "conda list",
+    "stages/1/venv/bin/pip install transformers",
+    "python3 -m mymodule install",
+    "true && venv/bin/pip install x",
+    "python3 -m build --wheel install",
 ]
 
 DENY = {
+    "package-install": [
+        "pip install transformers",
+        "pip3 install --upgrade transformers",
+        "pip3.12 install x",
+        "pip uninstall -y transformers",
+        "pip install --force-reinstall transformers==4.52.4 safetensors",
+        "python3 -m pip install x",
+        "python -m pip uninstall x",
+        "python3.12 -m pip install --upgrade pip",
+        "/home/someone/.tenstorrent-venv/bin/pip install x",
+        "/home/someone/.tenstorrent-venv/bin/python3 -m pip install x",
+        "uv pip install transformers",
+        "uv pip install --python /home/someone/.tenstorrent-venv/bin/python x",
+        "uv pip uninstall x",
+        "pipx install x",
+        "conda install numpy",
+        "mamba install numpy",
+        "micromamba remove x",
+        "pip install --target /home/someone/lib x",
+        "pip install --target {run}/../elsewhere x",
+        "pip install -r requirements.txt",
+        "cd {run}/sub && pip install x",
+        "bash -c 'pip install x'",
+        "ls; pip install x",
+        "env A=1 pip install x",
+        "sudo pip install x",
+        "pip install --target {run}/a --target /tmp/b x",
+        "cd $FOO; venv/bin/pip install x",
+        "cd /; venv/bin/pip install x",
+    ],
     "tt-model-push": [
         "setsid tt-model push x",
         "env -i tt-model push x",
@@ -571,7 +622,7 @@ def test_every_rule_has_denied_examples():
 
 
 NEW_RULES = ("gozer-write", "tt-device-control", "docker-control", "tt-model-control",
-             "process-kill", "remote-access", "http-write", "device-mask")
+             "process-kill", "remote-access", "http-write", "device-mask", "package-install")
 
 
 @pytest.mark.parametrize("rule", NEW_RULES)
@@ -656,3 +707,24 @@ def test_a_package_refusal_says_stage_7_packages_and_how_to_proceed(run_dir):
         check_string("tt-model package-thin --model-py model.py --out x", run_dir)
     assert exc.value.rule == "tt-model-package"
     assert "stage 7" in str(exc.value) and "To proceed:" in str(exc.value)
+
+
+def test_a_venv_tool_reached_through_a_link_that_leaves_the_run_directory_is_refused(run_dir, tmp_path_factory):
+    outside = tmp_path_factory.mktemp("elsewhere")
+    (outside / "bin").mkdir()
+    (run_dir / "link").symlink_to(outside)
+    with pytest.raises(Denied) as exc:
+        check_string(f"{run_dir}/link/bin/pip install x", run_dir)
+    assert exc.value.rule == "package-install"
+
+
+def test_a_directory_whose_name_starts_with_the_run_directorys_name_is_not_inside_it(run_dir):
+    sibling = f"{run_dir}-evil"
+    with pytest.raises(Denied) as exc:
+        check_string(f"{sibling}/venv/bin/pip install x", run_dir)
+    assert exc.value.rule == "package-install"
+
+
+def test_the_run_directory_itself_is_not_a_target_inside_it(run_dir):
+    with pytest.raises(Denied):
+        check_string(f"pip install --target {run_dir} x", run_dir)

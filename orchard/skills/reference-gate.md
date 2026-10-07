@@ -32,10 +32,14 @@ fact needs explaining. You do not write a script.
    - `model_snapshot`: the new model's snapshot directory. Stage 0 used it: read
      `model_snapshot` in `stages/0/triage_config.json`. Otherwise it is
      `{{HF_HOME}}/hub/models--<org>--<name>/snapshots/<sha>/`.
-   - `python`: an interpreter that can import torch and transformers. Check with
-     `python3 -c "import torch, transformers; print(torch.__version__, transformers.__version__)"`.
-     If that fails, look for another interpreter on the machine (for example a venv's
-     `bin/python`) and check it the same way.
+   - `python`: an interpreter that can import torch and transformers. If the run facts list an
+     input named `reference_python`, use that path exactly and go on; it was checked before the run
+     started. Otherwise check `python3 -c "import torch, transformers; print(torch.__version__,
+     transformers.__version__)"`. If that fails, look for another interpreter on the machine (for
+     example a venv's `bin/python`) and check it the same way. Never install or upgrade a package
+     (pip, uv and conda installs outside the run directory are refused, and an upgrade of a shared
+     environment broke tools on this machine once). If no interpreter works, write
+     `reference.json` with verdict `fail` and the import error as the reason, then stop.
    - `run_dir`: the run directory from the run facts.
 2. Write `reference_config.json` in your stage directory (absolute paths):
 
