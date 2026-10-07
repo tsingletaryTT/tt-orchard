@@ -606,3 +606,22 @@ publish the model card publicly on HF / tt-model-manager".
 - Not done: the Hugging Face / tt-model publish. No Clef package exists (stage 7 needs the drafter and sampling handling for
   a model without `mtp.*` tensors), and the bundle's `card.md` says no package was staged. Waiting for the operator to choose
   between building a package, publishing only a card, or skipping.
+
+## 2026-10-07: stage 7 for a model without `mtp.*` tensors, and the Clef package (branch `clef-package`)
+Prompt (operator): option 1, build a Clef package and publish it with tt-model. The operator also said the card
+requirements in `~/code/tt-model-manager` had been updated.
+- `orchard/package.py` reads from stage 2's `run.sh` copy whether the drafter was off and sampling was on the host
+  (`stage_2_serving`). With the drafter off, `serving_env` passes `QWEN36_DRAFTER=` and drops `DFLASH_WEIGHTS` and
+  `QWEN36_DFLASH_*`; `drop_device_sampling` removes `sample_on_device_mode` from the fixed arguments;
+  `serving_problems` checks the staged files and `gate_package` runs it again. The card says speculative decoding is off,
+  sampling is on the host, and the sidecar head is not served (gate checks it names every sidecar).
+- Card layout follows tt-model-manager's standard (`model-card-standardizer` skill): Intended use, Expected performance,
+  Limitations, Risks and safety considerations. The catalog's required-section check reads container packages only;
+  a v6 thin bundle is not checked, but the card carries the sections anyway.
+- 28 mutations over the new code; 4 survivors each led to a test.
+- Stage 7 was run by hand on the finished Clef run (its ledger records stage 7 as skipped): `stage_all`, then the boot
+  check under `gozer run --chips 2` with the supervisor's environment, then `finish` and `gate_package`. Not in the ledger.
+  `clef-p300` (2 chips): boot check passed, 31 of 32 tokens (top1 0.96875), ready in 1,484 s on a fresh install and empty
+  cache, 1,515 s for the whole check. `clef-p150` (1 chip) was staged and not boot-checked, so it is not to be published.
+- Publish: `hf upload --private episod/clef-p300 ...` was blocked by the permission classifier (creates a Hub repo).
+  Nothing was uploaded.
