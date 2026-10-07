@@ -58,3 +58,9 @@ def test_no_lexicon_text_uses_the_phrasings_the_house_style_bans():
     for banned in (", not ", "rather than", "instead of", "reads as", "honest", "load-bearing"):
         assert banned not in text.lower(), banned
     assert not re.search(r"\bthe one\b", text.lower())
+
+
+def test_the_refusal_line_lists_every_reason_and_says_nothing_started():
+    line = lexicon.refused_line(["credentials-needed", "coder-unusable"], ui.Style("none", True))
+    assert "credentials-needed" in line and "coder-unusable" in line and "Nothing was started" in line
+    assert lexicon.refused_line(["x"], ui.Style("none", False)).startswith("frost")

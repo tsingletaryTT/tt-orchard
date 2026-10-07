@@ -1,6 +1,7 @@
 __pycache__/
 .pytest_cache/
 config/tiers.toml
+config/bringup.toml
 runs/
 *.torn-*
 *.lock

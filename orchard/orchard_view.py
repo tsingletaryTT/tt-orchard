@@ -18,17 +18,18 @@ BAR = "║  "
 LABEL = 8   # columns the label takes, padded by what a person sees (an escape code takes none)
 
 
-def _label(label: str, style: Style, role: str) -> str:
-    """The label, coloured when it has text, padded to LABEL visible columns."""
+def _label(label: str, style: Style, role: str, width: int = LABEL) -> str:
+    """The label, coloured when it has text, padded to `width` visible columns and always followed by a
+    space, so a long label cannot run into its text."""
     shown = style.paint(label, role) if label else ""
-    return shown + " " * max(LABEL - visible_width(label), 0)
+    return shown + " " * max(width - visible_width(label), 1 if label else 0)
 
 
-def _wrap(label: str, text: str, style: Style, role: str = "dim") -> list[str]:
+def _wrap(label: str, text: str, style: Style, role: str = "dim", width: int = LABEL) -> list[str]:
     """`║  label  text`, wrapped so no line passes WIDTH columns; continuation lines align under the text."""
-    indent = len(BAR) + LABEL
+    indent = len(BAR) + width
     lines = textwrap.wrap(text, WIDTH - indent, break_long_words=True, break_on_hyphens=False) or [""]
-    out = [BAR + _label(label, style, role) + lines[0]]
+    out = [BAR + _label(label, style, role, width) + lines[0]]
     out += [" " * indent + ln for ln in lines[1:]]
     return out
 
@@ -82,3 +83,22 @@ def render_pretty(f: dict, style: Style) -> str:
 def _hms(seconds: int) -> str:
     h, rem = divmod(int(seconds), 3600)
     return f"{h}h{rem // 60:02d}m" if h else f"{rem // 60}m{rem % 60:02d}s"
+
+
+PREFLIGHT_LABEL = 15       # the longest label ("⛔ credentials") plus the space after it
+_MARKS = {"ok": ("✅", "good"), "warn": ("⚠️", "warn"), "block": ("⛔", "bad")}
+
+
+def render_preflight(model: str, run_dir, resuming: bool, config_path, checks, style: Style) -> str:
+    """The page `tt-orchard bringup` prints before it starts: where the run lives, then one row per check.
+    Each row says its status in words as well as with an icon, so the plain page carries the same facts."""
+    out = [f"╔══ {style.icon('🍎')}" + style.paint("tt-orchard bringup", "title") + f" · {model}"]
+    out += _wrap("run", f"{run_dir} ({'resuming' if resuming else 'new'})", style, width=PREFLIGHT_LABEL)
+    out += _wrap("config", str(config_path), style, width=PREFLIGHT_LABEL)
+    for c in checks:
+        mark, role = _MARKS[c.status]
+        out += _wrap(f"{style.icon(mark)}{c.name}", f"{c.status.upper() if c.status == 'block' else c.status}"
+                     f"  {c.detail}" + (f"  [{c.reason}]" if c.reason else ""), style, role,
+                     width=PREFLIGHT_LABEL)
+    out.append("╚══")
+    return "\n".join(out)

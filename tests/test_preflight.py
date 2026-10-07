@@ -413,3 +413,26 @@ def test_the_cache_root_defaults_to_a_directory_beside_the_runs(tmp_path):
     c = cfg(tmp_path)
     c.cache_root = None
     assert pf.cache_root_for(c) == tmp_path / "runs" / "cache"
+
+
+# ---- what the command needs from the preflight -------------------------------------------------
+
+def test_the_hub_result_carries_the_hub_data_so_the_command_does_not_ask_twice(tmp_path):
+    out = pf.run_preflight(cfg(tmp_path), "Cloudflare/clef", accept_credentials=False, signals=signals())
+    assert isinstance(out[0].data, pf.HubInfo) and out[0].data.sha == "2f3de3dd"
+
+
+def test_an_unreachable_hub_leaves_no_data(tmp_path):
+    s = signals(hub_info=lambda m: (None, "timed out"), local_snapshot=lambda m: Path("/snap"))
+    assert pf.run_preflight(cfg(tmp_path), "Cloudflare/clef", accept_credentials=False, signals=s)[0].data is None
+
+
+def test_a_busy_coder_port_only_warns_when_the_run_is_resuming(tmp_path):
+    """A crashed run can leave its own coder serving; the supervisor stops it on recovery."""
+    s = signals(port_in_use=lambda p: True)
+    fresh = pf.run_preflight(cfg(tmp_path), "Cloudflare/clef", accept_credentials=False, signals=s)
+    resumed = pf.run_preflight(cfg(tmp_path), "Cloudflare/clef", accept_credentials=False, signals=s,
+                               resuming=True)
+    by = lambda out: {c.name: c for c in out}["port"]
+    assert by(fresh).status == "block" and by(resumed).status == "warn"
+    assert "resum" in by(resumed).detail

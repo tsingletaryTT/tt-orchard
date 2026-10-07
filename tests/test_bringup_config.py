@@ -231,3 +231,16 @@ def test_min_free_gb_must_be_a_positive_number(tmp_path, value):
 
 def test_min_free_gb_is_kept_when_valid(tmp_path):
     assert load(tmp_path, "min_free_gb = 60\n" + MINIMAL).min_free_gb == 60.0
+
+
+def test_the_snapshot_input_is_passed_to_the_supervisor_as_an_input_flag(tmp_path):
+    argv = bc.supervisor_argv(load(tmp_path), "Cloudflare/clef", inputs={"model": "/hf/snap"})
+    assert argv[argv.index("--input") + 1] == "model=/hf/snap"
+    supervisor.parse(argv)
+
+
+def test_accepting_credentials_is_added_only_when_the_operator_asked(tmp_path):
+    cfg = load(tmp_path)
+    assert "--accept-credentials-visible" in bc.supervisor_argv(cfg, "Cloudflare/clef", accept_credentials=True)
+    assert "--accept-credentials-visible" not in bc.supervisor_argv(cfg, "Cloudflare/clef")
+    supervisor.parse(bc.supervisor_argv(cfg, "Cloudflare/clef", accept_credentials=True))

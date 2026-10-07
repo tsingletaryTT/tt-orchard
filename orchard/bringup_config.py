@@ -197,10 +197,11 @@ def run_dir(cfg: BringupConfig, model_id: str) -> Path:
     return cfg.runs_root / slug(model_id)
 
 
-def supervisor_argv(cfg: BringupConfig, model_id: str, run_dir: Path | None = None) -> list[str]:
+def supervisor_argv(cfg: BringupConfig, model_id: str, run_dir: Path | None = None, *,
+                    inputs: dict[str, str] | None = None, accept_credentials: bool = False) -> list[str]:
     """The arguments after `python3 -m orchard.supervisor`. Optional flags appear only when the config
-    sets them, so the supervisor's own defaults stay the defaults. `--accept-credentials-visible` is never
-    added here: only the operator's flag on the command line passes it."""
+    sets them, so the supervisor's own defaults stay the defaults. `--accept-credentials-visible` is added
+    only when the caller says the operator asked for it on the command line; the config cannot add it."""
     c = cfg.coder
     argv = ["run", "--model", model_id, "--run-dir", str(run_dir or globals()["run_dir"](cfg, model_id)),
             "--tiers", str(cfg.tiers), "--coder-target", c.target, "--coder-kind", c.kind,
@@ -217,4 +218,8 @@ def supervisor_argv(cfg: BringupConfig, model_id: str, run_dir: Path | None = No
         argv += ["--skills-dir", str(d)]
     for name, value in cfg.env.items():
         argv += ["--env", f"{name}={value}"]
+    for name, value in (inputs or {}).items():
+        argv += ["--input", f"{name}={value}"]
+    if accept_credentials:
+        argv.append("--accept-credentials-visible")
     return argv

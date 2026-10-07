@@ -66,12 +66,13 @@ supervisor pauses before stage 2 for the operator.
 | Packaging (stage 7) | `orchard/package.py`, `orchard/package_card.py`, `orchard/package_templates/` | Built and tested with fakes, then run once on hardware (Hemmingway-1; see stage 7 above). Wired into the stage table as opt-in supervisor code. A v5.1 container package is refused at start |
 | Bundle and package scrub | `orchard/scrub.py` | Built and tested with fakes. The stage 8 gate calls it; it ran once on the real run |
 | CPU sizing tool | `orchard/sizing.py` | Built and tested against a fake server. It has not been run against a real ollama. The CPU numbers in this README come from the run log |
+| `tt-orchard` command | `orchard/cli.py`, `orchard/bringup_config.py`, `orchard/preflight.py`, `orchard/fetch.py`, `bin/tt-orchard` | Built and tested with fakes. The preflight ran for real on the development machine as a dry run for `Cloudflare/clef` (all checks passed except the credentials check, which needs the operator's decision). A run has not been started through it |
 | Hardware-check driver | `orchard/hardware_check.py` | Ran on both boards of the development machine, 22 to 24 checks passed per run |
 | Park-check driver | `orchard/park_check.py` | Ran once, on one board, with fake model servers. Exit 0, two resets of 41.7 s each (measured) |
 
 ### Tests
 
-The suite has 1884 passing tests and 1 skipped test (measured with
+The suite has 2032 passing tests and 1 skipped test (measured with
 `python3 -m pytest -q -p no:cacheprovider`). It needs no hardware and no network. The skipped test
 replays local agent transcripts and runs only when `ORCHARD_REPLAY=1` is set and those transcripts
 exist.
@@ -294,6 +295,49 @@ message that names the placeholder and the file. The free-space check looks only
 variables `ORCHARD_GOZER`, `ORCHARD_ENV_SCRIPT` and `ORCHARD_CHILD_PYTHON` work in their place.
 
 ## 4. Run a bring-up
+
+### 4.0 The `tt-orchard` command
+
+`tt-orchard` is the front door. It reads `config/bringup.toml`, checks everything that can be checked
+without a lease, downloads the model if it is not on disk, and starts the supervisor with the flags the
+config implies. A run it starts is an ordinary supervisor run. Run the same command again to resume.
+
+```bash
+ln -s <ORCHARD_DIR>/bin/tt-orchard ~/.local/bin/tt-orchard     # a link, so it follows the checkout
+cp config/bringup.example.toml config/bringup.toml            # then edit it; CHANGE-ME values are refused
+tt-orchard bringup org/name --dry-run                         # the checks and the command; starts nothing
+tt-orchard bringup org/name                                   # check, fetch, run
+tt-orchard status org/name                                    # also pause, resume, abort
+tt-orchard --version
+```
+
+The name is `tt-orchard`, never `tt`: `tt` is the official Tenstorrent CLI.
+
+The preflight prints one row per check. A `BLOCK` stops the run before anything starts (exit 2) and names
+its reason; a `warn` is information.
+
+| Check | Blocks when | Reason it names |
+|---|---|---|
+| hub | the model is not found, is gated or private, or has no license | `model-unavailable`, `credentials-needed`, `license-needs-review` |
+| disk | the download plus 40 GB (or `min_free_gb`) does not fit on the `hf_home` disk, or 40 GB does not fit on the `cache_root` disk | `disk-full` |
+| credentials | credential files are visible to agent shells and `--accept-credentials-visible` was not given | `credentials-needed` |
+| tiers | the tier config is invalid, or not exactly one chips tier uses `coder.port` | `config-invalid` |
+| port | something already listens on `coder.port` (a warning when resuming) | `coder-unusable` |
+| gozer | gozer gives no usable status. Stale leases and chips in use are warnings, and nothing is cleared | `hardware-unhealthy` |
+
+The model is downloaded with `hf download`, pinned to the revision the preflight saw. The harness never
+uses your Hugging Face token: the download runs with every token variable removed, so a gated model is a
+block and not a login. Files the model repo ships (for example a `.py` file) are downloaded and recorded.
+The harness does not run them outside the agent sandbox. `--no-fetch` skips the download and requires the
+snapshot to be in `hf_home` already.
+
+`config/bringup.toml` holds the runs root (each model gets `<runs_root>/<org>--<name>`), the coder
+(`target`, `port`, `chips`, and optionally `kind`, `profile`, `image_id`), and optional `tiers`,
+`cache_root`, `hf_home`, `operator_home`, `gozer`, `required_chips`, `skills_dirs`, `package_format`,
+`package_namespace`, `package_models_root`, `min_free_gb` and an `[env]` table. Unknown keys are refused
+with a suggestion. The file is found from `--config`, then `$ORCHARD_BRINGUP_CONFIG`, then
+`<checkout>/config/bringup.toml`, then `~/.config/tt-orchard/bringup.toml`. The tier config stays in
+`tiers.toml`, because the tier loader refuses tables it does not know.
 
 ### 4.1 Before you start
 

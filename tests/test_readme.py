@@ -25,7 +25,7 @@ from pathlib import Path
 
 import pytest
 
-from orchard import hardware_check, operator_checks, park_check, sizing, supervisor
+from orchard import cli, hardware_check, operator_checks, park_check, sizing, supervisor
 from orchard.stages import STAGES
 
 REPO = Path(__file__).resolve().parent.parent
@@ -100,6 +100,16 @@ def other_repo_flags() -> set[str]:
     flags |= _option_strings(_captured_parser(park_check, lambda m: m.parse_args([])))
     flags |= _option_strings(_captured_parser(sizing, lambda m: m.main([])))
     flags |= _option_strings(_captured_parser(operator_checks, lambda m: m.main([])))
+    flags |= tt_orchard_flags()
+    return flags
+
+
+def tt_orchard_flags() -> set[str]:
+    """The flags of `tt-orchard` and each of its subcommands."""
+    top = cli._parser()
+    flags = _option_strings(top)
+    for sub in _subparsers(top).values():
+        flags |= _option_strings(sub)
     return flags
 
 
@@ -194,3 +204,9 @@ def test_the_readme_names_every_stage():
     assert not missing_names, f"README does not name these stages as orchard/stages.py does: {missing_names}"
     missing_rows = [n for n in range(9) if not re.search(rf"^\|\s*{n}\s*\|", text, flags=re.M)]
     assert not missing_rows, f"README has no table row for stages {missing_rows}"
+
+
+def test_every_flag_of_the_tt_orchard_command_is_in_the_readme():
+    missing = sorted(f for f in tt_orchard_flags() if f not in ("-h", "--help") and f"`{f}`" not in _text()
+                     and f" {f}" not in _text() and f"[{f}" not in _text())
+    assert not missing, f"the README does not mention these tt-orchard flags: {missing}"

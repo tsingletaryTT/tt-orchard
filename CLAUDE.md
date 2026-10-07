@@ -424,3 +424,34 @@ Short design shown in chat, approved, built test first with a mutation per guard
 - Not done: the class and rootstock line (the outcome classes are in the bringup spec, not built), a live
   `watch` view, and the start banner (it belongs to the `tt-orchard bringup` command).
 - Suite: 1884 passed, 1 skipped. Package version 0.0.2.
+
+## 2026-10-06: the `tt-orchard` command, Phase 2 of the bringup spec (branch `bringup-command`)
+Prompt (operator): "Our goal is an unsupervised model bring up of Cloudflare/clef. Make a plan for running this in a
+way that will leave a pattern of success for future runs where users initiate with `tt-orchard bringup
+Cloudflare/clef` and it goes from there, hell or highwater." Then: approach A (outcome-class contracts), write the
+spec and start. Then: "build the orchard UX, then confirm the hidden-state change, and then proceed."
+Spec `docs/superpowers/specs/2026-10-06-bringup-command-design.md`, plan
+`docs/superpowers/plans/2026-10-06-tt-orchard-command.md`, spike log `docs/run-logs/2026-10-06-bringup-spike.md`.
+Key decisions and findings:
+- Spike (Phase 1): Coder-Next boots on one p300 board (`p300` profile, bfp4 routed experts, 681 s cold, 39 tok/s
+  decode, about 3,560 tok/s prefill, one sample each). The default profile takes all four chips. The package was
+  built from a dirty, unpushed tt-metal tree. The analysis docs' success rates and the arbiter's scores are
+  unmeasured, and the arbiter is not used.
+- Clef: the backbone has no tensor Qwen3.8-27B lacks except 15 `mtp.*` ones (allowed), so triage should say
+  weights-only. The 122-tensor head is a sidecar. The head reads the final hidden state of every token and the
+  lm_head matrix. The TT stack keeps only the last row, so the parity check is a template in this repo that
+  runs the layer loop itself (spec section 6). No tt-metal change. Source read, not run.
+- The bringup defaults live in `config/bringup.toml`, not in `tiers.toml`: the tier loader refuses unknown tables.
+- `bringup` never uses the operator's Hugging Face token (a gated model is a block), never clears a gozer lease,
+  and never accepts visible credentials by itself. A blocked preflight reaches neither the download nor the
+  supervisor; a dry run starts nothing. Each of these has a test that was seen red under a mutation (about 100
+  mutations over the new modules; the ones that survived led to new tests).
+- Found while testing: the UX label column was one column too narrow for the longest check name (the width test
+  caught it); `orchard.__version__` had drifted from `pyproject.toml` (now tested); `textwrap` is told not to
+  break at hyphens.
+- The real dry run for Clef passes every check except credentials: this home has an HF token, gh and docker
+  credentials and three SSH keys visible to agent shells. Accepting that is the operator's decision (README 5.6).
+- Not done (Phase 3 and 4): outcome classes, the `blocked` end state, the run budget, the sidecar parity template,
+  the role-fit test for Coder-Next, the chaos run on Hemmingway-1, the Clef run itself.
+- Suite: 2032 passed, 1 skipped. Package version 0.0.3.
+

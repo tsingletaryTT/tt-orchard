@@ -43,6 +43,7 @@ class Check:
     status: str                     # ok, warn or block
     detail: str
     reason: str | None = None       # set for a block: one of the spec's enumerated reasons
+    data: object = None             # what the check learned that the command reuses (the hub check: HubInfo)
 
 
 @dataclass
@@ -93,8 +94,9 @@ def check_hub(hub: HubInfo | None, error: str | None, local: bool) -> Check:
               f"{hub.total_bytes / 1e9:.1f} GB")
     if hub.code_files:
         return Check("hub", WARN, detail + f". The repo ships code ({', '.join(hub.code_files)}); it is "
-                     "fetched and recorded, and the harness does not run it outside the agent sandbox")
-    return Check("hub", OK, detail)
+                     "fetched and recorded, and the harness does not run it outside the agent sandbox",
+                     data=hub)
+    return Check("hub", OK, detail, data=hub)
 
 
 def check_disk(*, free_gb: dict[str, float], model_gb: float, local: bool, min_free_gb: float,
@@ -135,7 +137,10 @@ def check_tiers(load: Callable, path: Path, coder_port: int) -> Check:
     return Check("tiers", OK, f"tier {on_port[0]!r} serves on port {coder_port}")
 
 
-def check_port(port: int, in_use: bool) -> Check:
+def check_port(port: int, in_use: bool, resuming: bool = False) -> Check:
+    if in_use and resuming:
+        return Check("port", WARN, f"something listens on the coder port {port}. This run is resuming, so it "
+                     "may be this run's own coder; the supervisor stops it on recovery")
     if in_use:
         return Check("port", BLOCK, f"something already listens on the coder port {port}; stop it or "
                      "change coder.port", "coder-unusable")
@@ -186,7 +191,8 @@ def cache_root_for(cfg) -> Path:
     return Path(cfg.cache_root) if cfg.cache_root else Path(cfg.runs_root) / "cache"
 
 
-def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Signals | None = None) -> list[Check]:
+def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Signals | None = None,
+                  resuming: bool = False) -> list[Check]:
     s = signals or default_signals(cfg)
     out: list[Check] = []
 
@@ -217,7 +223,7 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
     guarded("credentials", "credentials-needed",
             lambda: check_credentials(list(s.credentials()), accept_credentials))
     guarded("tiers", "config-invalid", lambda: check_tiers(s.load_tiers, Path(cfg.tiers), cfg.coder.port))
-    guarded("port", "coder-unusable", lambda: check_port(cfg.coder.port, bool(s.port_in_use(cfg.coder.port))))
+    guarded("port", "coder-unusable", lambda: check_port(cfg.coder.port, bool(s.port_in_use(cfg.coder.port)), resuming))
     guarded("gozer", "hardware-unhealthy", lambda: check_gozer(s.gozer_status()))
     return out
 
