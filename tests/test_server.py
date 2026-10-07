@@ -183,6 +183,34 @@ def test_only_a_refused_connection_confirms_the_port_is_closed(rc):
     assert ctl.confirm_stopped().checks["health_refused"] is False
 
 
+# tt-model 0.1.0 stops container packages only. Its refusal for a bundle, seen on 2026-10-07.
+NOT_A_CONTAINER = (1, "", "org/qwen-bundle is not a pulled container package (nor a container "
+                          "manifest path). Pull it first:  tt-model pull org/qwen-bundle\n")
+
+
+def test_a_bundle_that_tt_model_will_not_stop_is_stopped_by_its_process_group():
+    ctl, _, _, killed, _, _ = control(BUNDLE, **{"tt-model stop": [NOT_A_CONTAINER]})
+    ctl.start(LEASE)
+    result = ctl.stop()
+    assert killed == [(4321, signal.SIGTERM)]
+    assert result["returncode"] == 1 and result["signalled"]["how"] == "SIGTERM"
+
+
+def test_a_bundle_that_tt_model_stops_is_not_signalled():
+    ctl, _, _, killed, _, _ = control(BUNDLE)
+    ctl.start(LEASE)
+    result = ctl.stop()
+    assert killed == [] and "signalled" not in result
+
+
+def test_an_adopted_bundle_whose_pid_was_reused_is_not_signalled():
+    ctl, _, _, killed, _, _ = control(BUNDLE, **{"tt-model stop": [NOT_A_CONTAINER]})
+    ctl.adopt({"pid": 4321, "pgid": 4321, "start_time": 111, "boot_id": "boot-A"})
+    ctl.identity = lambda pid: ("boot-A", 999)       # the pid now belongs to another process
+    result = ctl.stop()
+    assert killed == [] and result["signalled"]["how"].startswith("not signalled")
+
+
 def test_bundle_worker_left_in_the_group_is_not_stopped():
     # The parent is gone; a vLLM worker it started still runs in its process group.
     ctl, *_ = control(BUNDLE, **{"pgrep -g": [(0, "4400\n", "")]})

@@ -251,7 +251,13 @@ class ServerControl:
         if self.proc is not None:
             self.proc.poll()          # reap a bundle's `tt-model serve`
         # A mesh reset by tt-model runs outside gozer, so the caller waits longer for quiet chips.
-        return {**res.record(), "mesh_reset": bool(MESH_RESET_TEXT.search(res.stdout + res.stderr))}
+        out = {**res.record(), "mesh_reset": bool(MESH_RESET_TEXT.search(res.stdout + res.stderr))}
+        if s.kind == "bundle" and res.returncode != 0:
+            # tt-model 0.1.0 stops container packages only and refuses a bundle, which left the
+            # bundle serving on its lease (2026-10-07). We started its `tt-model serve` as a group
+            # leader, so stop the group the way a process server is stopped.
+            out["signalled"] = self._signal_group()
+        return out
 
     def _signal_group(self) -> dict:
         if self.pgid is None:
