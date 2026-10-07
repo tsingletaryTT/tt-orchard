@@ -533,3 +533,30 @@ the same sha256 values the fork measured on hardware. Stage 1 then stalled with 
 - Each fix has tests seen red under mutations (runner rule 21 mutations, 5 survivors led to tests; write
   paths 6, one equivalent; reference input 12, one survivor led to a test). Suite: 2429 passed, 1 skipped.
 
+## 2026-10-07 (early): stage 2 on Clef needed two more fixes; it then passed
+Stage 2 (class `weights+sidecar`, swap check plus sidecar parity) failed three times, each for a new reason, and
+each failure was found by reading the server log, not by guessing:
+1. The two prepare scripts both built `stages/2/model-dir`. The parity script wiped the swap script's directory, so
+   the swap server had no `preprocessor_config.json` and died at once. Each template passed its own tests;
+   nothing ran both in one directory. Now `parity-model-dir`, and `tests/test_sidecar_swap_together.py` runs both
+   scripts in one directory in both orders.
+2. The nearest bundle (`episod/qwen3.8-27b-dflash2-p300`) serves with a DFlash2 speculative drafter that needs the
+   model's `mtp.*` tensors (the spike log noted Clef dropped them; I did not connect that to the serving bundle).
+   Engine start died with "model has no MTP head". `prepare_swap.py` now clears `QWEN36_DRAFTER` in its `run.sh`
+   copy when the new model has no `mtp.*` tensor (read from the weight index, else the shard headers; when it
+   cannot tell it changes nothing). `serve_and_compare_container.py` does the same for the container's
+   environment. Stage 0 now records the counts in `delta.json` (`mtp`) and adds a drafter hazard.
+3. With the drafter off, plain decoding asked for on-device sampling (`sample_on_device_mode` in the bundle's
+   `--additional-config`), which the model code refuses on a 1x2 mesh. The key is removed too, so the host samples.
+I tested fix 3 by hand: a scratch stage directory inside the run directory, a gozer lease on the free board, and
+`serve_and_compare.py` with the supervisor's environment (`agent_env` plus the leased chips). It served in 1022 s
+cold and agreed with the CPU reference on 31 of 32 tokens. That was much faster than another supervised attempt.
+The supervised retry then passed stage 2: swap check 31 of 32 (ready in 236 s on warm caches) and the sidecar
+parity gate, with the same numbers as the prototype. Stage 3, 5 and 6 are skipped on the weights-only path.
+Also seen: Coder-Next's finish step investigates a failed hardware test with repeated greps instead of
+recording the failure (the watchdog escalated it twice); a passing test avoids that. Disk was tight: failed
+attempts leave 31 GB tensor caches in their partial stage directories, so stage 4 (110 GB) nearly blocked; I
+deleted the caches of abandoned attempts.
+Stage 7 will need the same drafter handling in `orchard/package.py` when a run packages a model without
+`mtp.*` tensors; it is not done, because this run does not use `--package-format`.
+
