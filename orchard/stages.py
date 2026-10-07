@@ -580,7 +580,7 @@ def gate_package(stage_dir, run_dir) -> GateResult:
     # Imported here: orchard.package imports this module.
     from orchard.package import (PUBLISH_FILE, publish_problems, serving_problems, split_model_id,
                                  stage_2_serving, weights_wiring_problems)
-    from orchard.package_card import card_problems, read_license
+    from orchard.package_card import card_evidence_paths, card_problems, read_license
     from orchard.scrub import scrub_package
     d, err = _load(stage_dir, "package.json")
     if err:
@@ -638,6 +638,8 @@ def gate_package(stage_dir, run_dir) -> GateResult:
             reasons += [f"profile {name}: card: {x}" for x in
                         card_problems(card, license_id=license_id, run_dir=run,
                                       sidecars=sidecars)]
+        reasons += [f"profile {name}: the card cites {e}, which is missing at evidence/{e}"
+                    for e in card_evidence_paths(card) if not (out / "evidence" / e).is_file()]
         if p.get("verified") is True:
             v, verr = _load(Path(stage_dir) / "verify" / "evidence", "verify.json")
             if verr:

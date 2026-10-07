@@ -47,8 +47,9 @@ from pathlib import Path
 
 from orchard.defaults import (PACKAGE_HEALTH_TIMEOUT_S, PACKAGE_INSTALL_TIMEOUT_S,
                               PACKAGE_THIN_TIMEOUT_S, PACKAGE_VERIFY_DEADLINE_S)
-from orchard.package_card import CardFacts, Number, non_commercial, read_license, render_card
-from orchard.scrub import scrub_package
+from orchard.package_card import (CardFacts, Number, card_evidence_paths, inside, non_commercial,
+                                  read_license, render_card)
+from orchard.scrub import HOME_PATH, scrub_package
 from orchard.stages import gate_weights_swap
 
 TEMPLATES = Path(__file__).with_name("package_templates")
@@ -689,6 +690,46 @@ def prepare_verify(staged: Path, verify_dir: Path, facts: RunFacts, *, env: dict
             "deadline_s": PACKAGE_VERIFY_DEADLINE_S, "hf_linked": linked, "hf_missing": missing}
 
 
+# ---- the evidence a card cites ships with the package -------------------------------------------
+
+EVIDENCE_MAX_BYTES = 5_000_000
+
+
+def redact_evidence(text: str, *, run_dir: Path, hostname: str | None, home: str | None) -> str:
+    """The run directory, the home directory (any user's) and the host name replaced by labels. Tokens
+    are not touched: a token in evidence stops the package at the scrub."""
+    text = text.replace(str(run_dir), "<RUN_DIR>")
+    if home and home != "/":
+        text = text.replace(home, "<HOME>")
+    text = HOME_PATH.sub("<HOME>", text)
+    if hostname and hostname != "localhost":
+        text = re.sub(rf"\b{re.escape(hostname)}\b", "<HOST>", text)
+    return text
+
+
+def copy_evidence(facts: RunFacts, out: Path, card: str, *, hostname: str | None = None) -> list[str]:
+    """Copy every file the card's measured numbers cite into out/evidence/<run-relative path>, redacted.
+    Returns the paths. A cited file that is missing or over EVIDENCE_MAX_BYTES is an error."""
+    dest = out / "evidence"
+    if dest.exists():
+        shutil.rmtree(dest)
+    paths = card_evidence_paths(card)
+    for rel in paths:
+        src = inside(facts.run_dir, rel)
+        if src is None:
+            raise PackageError(f"the card cites {rel}, which is not a file inside the run directory")
+        if src.stat().st_size > EVIDENCE_MAX_BYTES:
+            raise PackageError(f"{rel} is too large to ship ({src.stat().st_size} bytes; the limit is "
+                               f"{EVIDENCE_MAX_BYTES})")
+        target = dest / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        text = src.read_text(encoding="utf-8", errors="replace")
+        target.write_text(redact_evidence(text, run_dir=facts.run_dir, hostname=(
+            socket.gethostname() if hostname is None else hostname), home=os.path.expanduser("~")),
+            encoding="utf-8")
+    return paths
+
+
 # ---- cards, publish commands and the stage's record ----------------------------------------------
 
 PUBLISH_FILE = "PUBLISH_COMMANDS.txt"
@@ -857,6 +898,8 @@ def finish(run_dir, stage_dir, *, hostname: str | None = None) -> dict:
                                                         "server_ready_s", "evidence")}
         write_card(out, facts, rec, namespace=package["namespace"],
                    verify=verify if rec["required"] else None)
+        rec["evidence_files"] = copy_evidence(facts, out, (out / "README.md").read_text(encoding="utf-8"),
+                                              hostname=hostname)
         rec["scrub"] = scrub_package(out, hostname=hostname, namespace=package["namespace"])
     (stage_dir / PUBLISH_FILE).write_text(
         publish_commands(package["profiles"], namespace=package["namespace"],

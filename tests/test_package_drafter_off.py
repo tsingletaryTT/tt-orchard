@@ -164,3 +164,91 @@ def test_staging_refuses_a_package_that_still_serves_with_the_drafter(world, mon
     stage.mkdir(parents=True)
     with pytest.raises(PackageError, match="drafter"):
         stage_all(world["run"], stage, namespace="episod", models_root=world["models"], env=world["env"])
+
+
+# ---- the evidence the card cites ships with the package -----------------------------------------
+
+def cited(card: str) -> list[str]:
+    from orchard.package_card import card_evidence_paths
+    return card_evidence_paths(card)
+
+
+def test_every_file_a_measured_number_cites_ships_under_evidence(world):
+    _, pkg = staged(world)
+    paths = cited((pkg / "README.md").read_text())
+    assert "stages/2/result.json" in paths and "stages/7/verify/evidence/verify.json" in paths
+    for p in paths:
+        assert (pkg / "evidence" / p).is_file(), p
+    assert not (world["models"].parent / "x").exists()
+
+
+def test_the_copied_evidence_has_the_run_and_home_paths_replaced(world, monkeypatch):
+    run = str(world["run"])
+    _, pkg = staged(world)
+    text = (pkg / "evidence/stages/2/evidence/swap-check.json").read_text()
+    assert run not in text and "<RUN_DIR>" in text
+
+
+def test_hostname_and_home_are_replaced_in_the_copy(world, monkeypatch):
+    import socket
+    monkeypatch.setattr(socket, "gethostname", lambda: "tt-secret-box")
+    log = world["run"] / "stages/2/evidence/server.log"
+    log.write_text(f"ready on tt-secret-box\nweights in /home/someone/.cache/x and {os.path.expanduser('~')}/y\n")
+    _, pkg = staged(world)
+    text = (pkg / "evidence/stages/2/evidence/server.log").read_text()
+    assert "tt-secret-box" not in text and "/home/someone" not in text and os.path.expanduser("~") not in text
+    assert "<HOST>" in text and "<HOME>" in text
+
+
+def test_a_token_in_evidence_fails_the_gate(world):
+    (world["run"] / "stages/2/evidence/server.log").write_text("hf_" + "a" * 36 + "\n")
+    stage = world["run"] / "stages/7"
+    stage.mkdir(parents=True)
+    stage_all(world["run"], stage, namespace="episod", models_root=world["models"], env=world["env"])
+    fake_boot_result(stage)
+    finish(world["run"], stage)
+    reasons = gate_package(stage, world["run"]).reasons
+    assert any("token" in r and "evidence/stages/2/evidence/server.log" in r for r in reasons), reasons
+
+
+def test_evidence_that_is_too_large_is_refused(world, monkeypatch):
+    import orchard.package as package
+    monkeypatch.setattr(package, "EVIDENCE_MAX_BYTES", 10)
+    stage = world["run"] / "stages/7"
+    stage.mkdir(parents=True)
+    stage_all(world["run"], stage, namespace="episod", models_root=world["models"], env=world["env"])
+    fake_boot_result(stage)
+    with pytest.raises(PackageError, match="too large"):
+        finish(world["run"], stage)
+
+
+def test_the_gate_fails_when_a_cited_evidence_file_is_missing(world):
+    stage, pkg = staged(world)
+    (pkg / "evidence/stages/2/result.json").unlink()
+    reasons = gate_package(stage, world["run"]).reasons
+    assert any("evidence/stages/2/result.json" in r for r in reasons), reasons
+
+
+def test_the_card_says_where_the_evidence_is(world):
+    _, pkg = staged(world)
+    card = (pkg / "README.md").read_text()
+    assert "`evidence/`" in card and "relative to the run directory" not in card
+
+
+def test_a_home_directory_outside_slash_home_is_replaced(world, monkeypatch):
+    monkeypatch.setattr(os.path, "expanduser", lambda p: "/srv/people/bob" if p == "~" else p)
+    (world["run"] / "stages/2/evidence/server.log").write_text("cache in /srv/people/bob/.cache\n")
+    _, pkg = staged(world)
+    text = (pkg / "evidence/stages/2/evidence/server.log").read_text()
+    assert "/srv/people/bob" not in text and "<HOME>/.cache" in text
+
+
+def test_a_card_that_cites_a_file_outside_the_run_is_refused(world, tmp_path):
+    from orchard.package import copy_evidence
+    (world["tmp"] / "outside.txt").write_text("x")
+    card = ("## Expected performance\n\n| Number | Value | Label | Evidence |\n|---|---|---|---|\n"
+            "| n | 1 fraction | measured | `../outside.txt` |\n\n## Limitations\n")
+    out = world["tmp"] / "pkg"
+    out.mkdir()
+    with pytest.raises(PackageError, match="not a file inside the run"):
+        copy_evidence(read_run(world["run"]), out, card)

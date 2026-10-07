@@ -150,8 +150,10 @@ def render_card(f: CardFacts) -> str:
     if f.sidecars:
         lines.append("Out of scope: the sidecar head, which this bundle does not serve.")
     lines += ["", NUMBERS_HEAD, "",
-              "Every number is labelled. A `measured` number names its evidence files, relative to "
-              "the run directory; the first file holds the value. `TODO` means not measured.", "",
+              "Every number is labelled. A `measured` number names its evidence files; the first file "
+              "holds the value. The files are in this repository under `evidence/`, at the paths "
+              "shown, with the run's directory, the home directory and the host name replaced by "
+              "`<RUN_DIR>`, `<HOME>` and `<HOST>`. `TODO` means not measured.", "",
               "| Number | Value | Label | Evidence |", "|---|---|---|---|"]
     for n in f.numbers:
         ev = ", ".join(f"`{e}`" for e in n.evidence) if n.label == "measured" else "-"
@@ -176,6 +178,20 @@ def render_card(f: CardFacts) -> str:
                "This profile was not booted on hardware by the run. Boot it before publishing."),
               "", "## How to serve", "", f"    tt-model serve {f.namespace}/{f.name}", ""]
     return "\n".join(lines)
+
+
+def card_evidence_paths(card: str) -> list[str]:
+    """Every file the Numbers table cites for a `measured` number, in order, without repeats."""
+    section, _ = _numbers_section(card)
+    seen: list[str] = []
+    for row in (r for r in section.splitlines() if r.startswith("| ") and not r.startswith("| Number ")):
+        cells = [c.strip() for c in row.strip().strip("|").split("|")]
+        if len(cells) == 4 and cells[2] == "measured":
+            for p in cells[3].split(","):
+                p = p.strip().strip("`")
+                if p and p != "-" and p not in seen:
+                    seen.append(p)
+    return seen
 
 
 def _front(card: str) -> str:
