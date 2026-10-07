@@ -1,0 +1,214 @@
+# `tt-orchard bringup`: unattended bring-up by outcome class
+
+Date: 2026-10-06. Status: written for review; the operator asked to start executing at the same
+time, so Phase 1 (a spike) begins before sign-off. Phases 2 to 4 wait for the spike's answers.
+
+## 1. Intent
+
+`tt-orchard bringup <hf-model-id>` runs one model from a Hugging Face id to an operator review
+bundle, with no one watching. It must survive a supervisor crash, a dead model server, a stuck
+agent, a chip fault, a full disk and a model swap. The first target is `Cloudflare/clef`. The way
+that run is built must be the way later runs go.
+
+What the operator said (2026-10-06):
+- Success for Clef means the Qwen3.8-27B backbone and vision encoder run on the chips and the schema
+  head runs on the host CPU.
+- `qwen3-coder-next` (served with `tt-model serve raahemnabeel/qwen3-coder-next-blackhole`) is
+  expected to take the agent roles on the 2-chip tier.
+- The harness never publishes. That rule is unchanged.
+
+Assumptions I made (flagged, not confirmed):
+- "Hell or highwater" means every run ends at a bundle that says what happened. It does not mean the
+  harness keeps retrying forever, and it does not mean the harness may skip a safety rule.
+- The first Clef run may take many hours.
+
+## 2. What exists and what does not
+
+- A supervisor with a ledger, a stage machine (stages 0 to 8), park and restore, a watchdog and
+  crash recovery (README section 1). Entry point today: `python3 -m orchard.supervisor run ...` with
+  about 20 flags. There is no `tt-orchard` binary.
+- Two paths for a model: `weights-only` and `full-port`. Full-port has never run and pauses for the
+  operator before stage 2.
+- No notion of a file outside the backbone's shards. Clef has one (`joint_head.safetensors`).
+- No check that works on a model with no text output.
+
+## 3. Outcome classes
+
+Stage 0 assigns each model one class. Each class has a written contract: the stages that run, the
+evidence that counts as a pass, and the bundle that is written when the contract cannot be met.
+The class is written to the ledger when stage 0 ends and is read from the ledger after that, as the
+path is today.
+
+| Class | Meaning | Contract |
+|---|---|---|
+| `weights-only` | Same architecture as a supported model, only weights differ | As today: coherence and top-1 agreement against the CPU reference, per chip configuration |
+| `weights+sidecar` | `weights-only` for the backbone, plus extra weight files the supported runtime does not load | The backbone passes the `weights-only` contract on chips. The sidecar runs on host. Parity check described in section 6 |
+| `full-port` | New model code needed | Runs to the point the harness can do unaided, then ends at a blocked bundle (section 5) |
+| `unknown` | Stage 0 could not decide | Ends at a blocked bundle |
+
+`path` in `delta.json` stays as it is for old runs. A new `class` field carries the four values, and
+`path` is derived from it (`weights+sidecar` has `path` `weights-only`), so existing gates keep
+working. The class table lives in one module (`orchard/classes.py`). Stage specs ask that module
+what to run; the supervisor holds no per-class branches.
+
+## 4. The `tt-orchard` command
+
+One console script, named `tt-orchard`. It is a front end over `orchard.supervisor`, not a second
+supervisor. `tt` is not used: it belongs to the official CLI.
+
+| Command | Does |
+|---|---|
+| `tt-orchard bringup MODEL [--run-dir DIR] [--profile NAME]` | Preflight, then start or resume the run for MODEL. The run directory defaults to `<runs root>/<model slug>`. Starting again on the same directory resumes |
+| `tt-orchard status [MODEL or --run-dir]` | The existing read-only status |
+| `tt-orchard pause`, `resume`, `abort` | The existing control commands |
+
+Defaults come from `config/tiers.toml` plus a `[bringup]` table (runs root, cache root, HF home,
+package namespace, coder target and port). `bringup` refuses to start, naming the missing key, when
+a default is absent. It never guesses a path (a repo test already forbids machine paths in skills).
+`bringup` sets `--package-format v6` only when the operator's config says so, because the format
+decides whether stage 7 runs.
+
+Preflight (all read-only, all before any lease):
+1. Disk: enough free space under the HF home and cache root for the model, its caches and the coder.
+   The estimate comes from the Hub file sizes (`/api/models/<id>/tree`).
+2. The model id resolves and has a license file. A gated or private model stops here with the
+   reason in the bundle.
+3. Credential files visible to agent shells (the existing check).
+4. gozer is reachable and `gozer status` shows no live foreign lease on the chips the run needs.
+   Stale leases are reported and left for `gozer reconcile`, which the operator or the
+   gozer-gatekeeper procedure runs. The harness does not clear another agent's lease.
+5. The coder tier answers its canary, or can be started by the supervisor.
+
+## 5. Hell or highwater: what "never stuck" means
+
+Every terminal state of a run is one of three, and each writes the operator bundle.
+
+- `ready`: every contract passed. Today's `ready for operator review`.
+- `blocked`: the harness did everything it could do and names what stopped it, with evidence.
+  Reasons are an enumerated set (`needs-new-model-code`, `unsupported-input-type`,
+  `hardware-unhealthy`, `disk-full`, `credentials-needed`, `license-needs-review`,
+  `coder-unusable`, `retry-budget-spent`).
+- `aborted`: the operator asked.
+
+Today a pause is a fourth state that needs a person to look. The change: a pause caused by one of
+the enumerated reasons becomes `blocked` and writes the bundle, and the supervisor exits with a
+distinct code. A pause the harness cannot name stays a pause and the status command says so. That
+is the one place a person is still required, and the design keeps it small instead of hiding it.
+
+Retries are bounded and recorded. A stage already has attempt, escalate and continue rules. This
+design adds one budget for the whole run (wall time and cold boots, `RUN_BUDGET` in
+`orchard/defaults.py`), so that a run that keeps failing in new ways ends in `blocked` with
+`retry-budget-spent` after a stated time.
+
+Faults the harness recovers from without stopping, each with an existing or new test that goes red
+when the recovery is removed:
+- supervisor killed: resume from the ledger (exists; kill-after-every-event test exists)
+- coder server dead: restart under the owner-pid lease (exists)
+- agent loops or goes silent: watchdog nudges, then escalates the tier (exists)
+- chip hung after a test: reset in place through gozer (exists)
+- disk low mid-run: new. Free space is checked before each stage; the stage ends `blocked` with
+  `disk-full` before a write could fail halfway
+- a fault the supervisor itself raises: the existing abort path releases the hardware
+
+## 6. Clef: the `weights+sidecar` contract
+
+Facts from the Hub (2026-10-06, `Cloudflare/clef` at revision `2f3de3d…`): `qwen3_5` architecture,
+Qwen3.8-27B text config with a vision encoder, 12 shards, a 256 MB `joint_head.safetensors`
+(width 1024, 4 layers, 16 heads, 2 routing layers, input 5120), and `joint_schema_model.py`
+(576 lines) that encodes records and loads the head. Output is one logit per option per question.
+
+Design decisions:
+- **Classification.** `delta_triage.py` compares the backbone shards against Qwen3.8-27B. Files named
+  in the model's own README as a head, and not listed in `model.safetensors.index.json`, are recorded
+  as `sidecars` with their size and tensor names. If the backbone matches and the sidecar loads
+  with no tensor that overlaps a backbone tensor, the class is `weights+sidecar`. Anything else
+  with an unexplained extra file stays `unknown`.
+- **Parity check (new gate `gate_sidecar_parity`).** The reference is the CPU run of the full model
+  (backbone, then head) on a fixed set of records. The device run produces the backbone's final hidden
+  states for the same records, and the head runs on host from those states. The gate compares the
+  per-question probabilities. Thresholds are set in `defaults.py` as a choice, with the reasoning
+  next to them, and are checked against the CPU-versus-CPU noise floor first (two CPU runs with
+  different thread counts), so the bar is above what the reference itself varies by.
+- **Hidden states are the open question.** The check needs final hidden states from the chips. Phase 1
+  decides how: (a) the TT serving stack already exposes them (a pooling or embedding route, or a
+  logits-processor hook); (b) a small change to the serve-and-compare template that loads the model
+  through the TT generator directly; (c) neither is possible, in which case the Clef class ends
+  `blocked` with `unsupported-input-type`, and this spec is revised before Phase 3 starts.
+- **Third-party code.** `joint_schema_model.py` runs only inside the agent shell sandbox (no
+  credentials, no-chip device mask) for CPU references, and on the host for the parity run only after
+  stage 0 records its sha256 and a read of its imports. The harness never passes `trust_remote_code`
+  to a run with credentials visible. The run's bundle lists the file's hash.
+- **Vision.** The first contract covers text records only. Image and video records are listed in
+  the bundle as not tested. The operator can widen this later.
+- **Stages for this class.** 0, 1, 2 and 4 as on `weights-only`, with the parity gate added to
+  stage 2 (one chip configuration) and stage 4 (each configuration that claims a pass). Stage 3, 5
+  and 6 stay skipped with reasons. Stage 7 packages the backbone only and records that the head is a
+  sidecar the package does not load. Publishing is out of scope.
+
+## 7. The coder tier: qwen3-coder-next
+
+The analysis documents in `docs/analysis/` are hypotheses. Their success-rate tables and the
+arbiter's capability scores were not measured, and the arbiter assumes a 122B tier this machine
+cannot run. This design does not use the arbiter. A model takes a role only when it passes a
+role-fit test.
+
+Role-fit test (`orchard/rolefit.py`, run before the coder is changed in `tiers.toml`):
+1. Serves on the configured chips: boot time, memory, and the canary including the existing
+   "7 times 6" first-start question.
+2. Tool-call format: 50 recorded agent turns (from the Hemmingway-1 and openthai ledgers and the
+   committed transcript signatures) replayed against the server. Pass means a parsable tool call
+   or text on at least 95 percent.
+3. The turns that failed the 27B (the stage 2 thinking loop, the stage 0 and stage 8 stalls) replayed
+   with thinking on and off. Pass means no repeat of the same failure in 5 replays each.
+4. Throughput: decode tokens per second at 8K and 32K context, measured, with the chips otherwise
+   idle.
+
+The result is a file under `docs/run-logs/` with the numbers, and `tiers.toml` changes only when the
+operator's rule passes. If a 2-chip Coder-Next fails, the large tier stays as it is. A blackhole
+build artifact must exist before any claim about 2 chips: the Phase 1 spike checks that
+`raahemnabeel/qwen3-coder-next-blackhole` pulls and lists as servable.
+
+## 8. Proof that it works unattended
+
+Chaos run on Hemmingway-1 (a known-good model) before Clef, scripted in `scripts/chaos_bringup.py`:
+- kill the supervisor at 5 random ledger events
+- kill the coder server once during a stage
+- stall the agent (a fake server that stops answering) once
+- fill a scratch filesystem so the disk check fires
+- hold one chip with a foreign lease to check the harness waits and does not take it
+
+Pass: the run ends `ready`, no lease is left, and no foreign lease was touched. The script writes
+its result to the run log. A chaos script that has never been seen to fail is a claim, so each
+injected fault is also tested against a build with the matching recovery removed.
+
+Then the real Clef run. The pattern it leaves is the run log (what the harness did, what it
+could not do), the class contract it used, and any template it needed.
+
+## 9. Phases
+
+1. **Spike (read mostly, short chip use under a lease).** Answers: (a) is
+   `raahemnabeel/qwen3-coder-next-blackhole` installed or pullable, and does it boot on 2 chips;
+   (b) how can hidden states leave the TT stack; (c) does `delta_triage.py` classify Clef as
+   expected from the Hub's headers and README; (d) what holds the stale leases that `gozer status`
+   shows now. Output: `docs/run-logs/2026-10-06-bringup-spike.md` and an update to this spec.
+2. **`tt-orchard` command.** Console script, `[bringup]` config, preflight, exit codes. Tests first.
+3. **Class contracts and the sidecar check.** `orchard/classes.py`, the triage change, the
+   parity gate, the `blocked` terminal state and the run budget. Tests first, a mutation per guard.
+4. **Proof.** Role-fit test on Coder-Next, chaos run on Hemmingway-1, then Clef.
+
+Each of phases 2 to 4 gets its own plan under `docs/superpowers/plans/` when it starts, written
+from what the spike found.
+
+## 10. Not in this design
+
+The model-selection arbiter; any 122B tier; publishing; the full-port path beyond a clean
+`blocked` bundle; moving stage skills to another repo (the operator decided they stay here).
+
+## 11. Risks
+
+- Hidden states may not be reachable on the chips (section 6). The fallback is `blocked`.
+- Coder-Next may be slower or less reliable than the 27B in this loop. The role-fit test decides.
+- A first unattended run of a model with a new class will find bugs. The bundle and ledger make
+  them visible; the budget keeps the run from spinning.
+- Another agent shares the machine. Stale leases are visible now. The harness waits and reports; it
+  does not take or reset a chip it does not hold.
