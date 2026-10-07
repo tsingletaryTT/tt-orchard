@@ -1097,3 +1097,72 @@ def test_an_attended_run_never_resumes_an_earlier_pause_by_itself(rig):
     rig.on_sleep = lambda: Control(rig.run_dir).write("abort")
     assert rig.run() == EXIT_ABORTED
     assert {"decision": "resume", "by": "retry"} not in rig.decisions()
+
+
+# ---- the outcome class in a run ------------------------------------------------------------------
+
+from run_fakes import skill_named  # noqa: E402
+
+HEAD_SHA_FAKE, CODE_SHA_FAKE = "a" * 64, "b" * 64
+SIDE_DELTA_FAKE = {**DELTA, "class": "weights+sidecar",
+                   "sidecars": [{"file": "joint_head.safetensors", "size": 1, "sha256": HEAD_SHA_FAKE,
+                                 "num_tensors": 3, "dtypes": ["BF16"], "tensor_names": ["a"]}],
+                   "code_files": [{"file": "joint_schema_model.py", "sha256": CODE_SHA_FAKE}]}
+PARITY_FAKE = {"measured": True, "n_records": 6, "n_questions": 17, "hidden_pcc_min": 0.997,
+               "hidden_pcc_mean": 0.998, "prob_max_abs_diff": 0.01, "top1_agree_fraction": 1.0,
+               "noise_floor": {"prob_max_abs_diff": 0.002}, "wiring_check": {"cosine": 0.9999, "passed": True},
+               "code_sha256": CODE_SHA_FAKE, "head_sha256": HEAD_SHA_FAKE}
+SIDECAR_FILES = {
+    (0, "run"): {**FILES[(0, "run")], "delta.json": SIDE_DELTA_FAKE},
+    (2, "finish"): {"evidence/sidecar-parity.json": "{}",
+                    "result.json": {**FILES[(2, "finish")]["result.json"], "sidecar_parity": PARITY_FAKE,
+                                    "evidence": ["stages/2/evidence/notes.txt",
+                                                 "stages/2/evidence/sidecar-parity.json"]}},
+}
+
+
+def test_stage_0_records_the_class_it_chose(rig):
+    rig.script = lambda r: bringup(r, overrides=SIDECAR_FILES)
+    assert rig.run() == EXIT_READY
+    end = rig.ends(0)[0]
+    assert end["class"] == "weights+sidecar" and end["path"] == "weights-only"
+
+
+def test_a_delta_without_a_class_records_the_class_its_path_implies(rig):
+    assert rig.run() == EXIT_READY
+    assert rig.ends(0)[0]["class"] == "weights-only"
+
+
+def test_the_sidecar_class_runs_stage_2_with_the_sidecar_skill_and_every_other_stage_as_before(rig):
+    seen = []
+
+    def script(request):
+        if "tools" in request:
+            seen.append((where(request)[0], skill_named(request)))
+        return bringup(request, overrides=SIDECAR_FILES)
+    rig.script = script
+    assert rig.run() == EXIT_READY
+    assert {s for n, s in seen if n == 2} == {"weights-sidecar-check"}
+    assert {s for n, s in seen if n == 4} == {"weights-swap-configs"}
+    assert [d["result"] for d in rig.ends(2)] == ["pass"]
+
+
+def test_a_sidecar_result_with_no_parity_fails_the_gate_and_escalates(rig):
+    no_parity = {**SIDECAR_FILES, (2, "finish"): {"result.json": FILES[(2, "finish")]["result.json"]}}
+    rig.script = escalation_aware(2, no_parity)
+    rig.args.unattended = True
+    never_wait(rig)
+    rig.script = lambda r: bringup(r, overrides={**SIDECAR_FILES, **no_parity})
+    assert rig.run() == supervisor.EXIT_BLOCKED
+    assert [d["result"] for d in rig.ends(2)] == ["escalate", "fail"]
+    reasons = " ".join(rig.ends(2)[0]["reasons"])
+    assert "sidecar_parity" in reasons
+
+
+def test_a_resumed_run_keeps_the_class_stage_0_recorded_even_if_delta_json_is_edited(rig):
+    rig.script = lambda r: bringup(r, overrides=SIDECAR_FILES)
+    assert rig.run() == EXIT_READY
+    delta = rig.run_dir / "stages" / "0" / "delta.json"
+    delta.write_text(delta.read_text().replace("weights+sidecar", "weights-only"))
+    from orchard.stages import run_class
+    assert run_class(rig.entries(), rig.run_dir) == "weights+sidecar"

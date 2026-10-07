@@ -66,7 +66,8 @@ You do not write a comparison script.
    - a tokenizer difference that matters for the model's language, for example Thai or
      Devanagari strings that encode differently (`tokenizer-encode.json` lists them by category);
    - a license change: name both licenses and what the new one restricts.
-   Keep each finding's measured numbers. Do not change `path`, `model` or `nearest_model`. If the
+   Keep each finding's measured numbers. Do not change `path`, `class`, `sidecars`, `code_files`, `model`
+   or `nearest_model`. If the
    evidence shows that the path is wrong, add a difference with area `other` that says why and
    cites the evidence file. The operator reads it.
 7. The draft has the standing hazards: `tensor_cache`, `drafter`, `disk`, and `license` when the
@@ -80,7 +81,8 @@ You do not write a comparison script.
 The script writes this shape. The gate checks it.
 
     {"model": "<org/name>@<revision>", "nearest_model": "<org/name>@<revision>",
-     "path": "weights-only", "path_reasons": [],
+     "path": "weights-only", "class": "weights-only", "path_reasons": [],
+     "sidecars": [], "code_files": [],
      "differences": [{"area": "tokenizer", "finding": "...",
                       "evidence": ["stages/0/evidence/tokenizer-compare.json"]}],
      "hazards": [{"area": "tensor_cache", "finding": "...",
@@ -92,6 +94,15 @@ tensor_cache, drafter, disk, license, other. Evidence paths are relative to the 
 must be files inside it.
 
 ## What the script decides
+
+The class is one of `weights-only`, `weights+sidecar`, `full-port` and `unknown`. A sidecar is a weights
+file the new model ships outside its backbone shards (the shards its index lists) that the nearest model
+does not have, for example a task head. `sidecars` lists each one with its size, sha256, tensor count and
+tensor names, and `code_files` lists each `.py` file in the repo with its sha256. The script reads headers
+and hashes files. It never imports or runs a code file, and neither do you. When a model has a readable
+sidecar whose tensor names do not overlap the backbone, and the backbone is weights-only, the class is
+`weights+sidecar` and the path stays `weights-only`. An unreadable or overlapping sidecar makes the class
+`unknown` and the path `full-port`.
 
 The path is `weights-only` when the text config values that matter (layers, hidden size, heads,
 KV heads, head_dim, layer types, vocabulary size) are equal, every tensor both models share has

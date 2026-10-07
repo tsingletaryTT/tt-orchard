@@ -103,6 +103,17 @@ SWAP_TOP1_MIN = 0.85            # choice: the weights-only stage 2 bar for top1_
                                 # The old bar of 0.6 passed the base weights. 0.85 sits between the two;
                                 # the margin is thin and rests on one prompt. Revisit when more
                                 # weights-only runs exist.
+# The sidecar parity check (docs/superpowers/plans/2026-10-06-sidecar-parity.md): the device's final hidden
+# states for a few fixed records, run through the model's sidecar head on the host, against the same head run
+# on the CPU reference. All five are provisional choices set before any hardware measurement; each is to be
+# replaced by a measured value with its margin once the first run exists.
+SIDECAR_PCC_MIN = 0.99          # choice (provisional): the lowest per-record Pearson correlation of the
+                                # device's hidden states with the CPU reference's, over all positions
+SIDECAR_TOP1_MIN = 0.9          # choice (provisional): the fraction of questions whose top option agrees
+SIDECAR_PROB_DIFF_MAX = 0.05    # choice (provisional): the largest probability difference on any option
+SIDECAR_NOISE_FACTOR = 4.0      # choice: the probability bar is at least this many times the CPU-versus-CPU
+                                # difference, so a bar below the reference's own noise is never applied
+SIDECAR_MIN_QUESTIONS = 10      # choice: fewest questions a parity result may rest on
 SWAP_MIN_TOKENS = 16            # choice: the fewest compared tokens the weights-only gate accepts; the
                                 # skill's script compares 32
 AGENT_MAX_TURNS = 60            # choice: model turns in one agent step before the step counts as failed

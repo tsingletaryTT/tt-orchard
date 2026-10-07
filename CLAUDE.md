@@ -471,3 +471,23 @@ other agents' leases stay off limits.
 - 27 mutations over the new code; two survivors led to tests (last_pause across a resume, and an attended run
   never auto-resuming). Suite: 2077 passed, 1 skipped.
 
+## 2026-10-06 (later still): outcome classes and the sidecar gate, Phase 3 part 2 (branch `bringup-command`)
+- `orchard/classes.py`: `weights-only`, `weights+sidecar`, `full-port`, `unknown`. Each maps to a path the stage
+  machine already knows (`weights+sidecar` -> `weights-only`; `unknown` -> `full-port`), so nothing that ignores
+  the class changes. Stage 0's passing `stage_end` records `class` beside `path`; `run_class` reads it back the
+  way `run_path` does, and an older ledger with only a path gets the class that path implies.
+- Found by reading the triage template for Clef: `read_tensors` read every `*.safetensors` file in the snapshot,
+  so Clef's `joint_head.safetensors` (122 tensors) would have counted as extra text tensors and forced the
+  full-port path. The backbone is now the shards the model's index lists (or `model*.safetensors` without an
+  index). Any other weights file the nearest model lacks is a sidecar; an unreadable or overlapping one makes
+  the class `unknown`. `.py` files are hashed and listed in `code_files`, never imported. 12 more mutations on
+  the triage code; 6 survivors each led to a test.
+- `gate_weights_swap_sidecar` = the swap gate plus `gate_sidecar_parity`, which also ties the parity run to the
+  exact head file and code file hashes stage 0 recorded. The five thresholds in `defaults.py`
+  (`SIDECAR_*`) are provisional and labelled so; the first hardware measurement replaces them.
+- `orchard/skills/weights-sidecar-check.md` is the stage 2 skill for the class. The three templates it names
+  (`sidecar-parity-templates/`) are being built and run on hardware by a forked agent in its own worktree.
+- A `git add -A` swept the fork's worktree directory into a commit as an embedded repository. Amended out, and
+  `.claude/worktrees/` is now ignored.
+- Suite: 2159 passed, 1 skipped.
+

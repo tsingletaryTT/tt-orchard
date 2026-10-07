@@ -37,10 +37,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from orchard.classes import CLASSES, class_of_path, path_of
 from orchard.defaults import (COLD_START_S, LONG_STAGE_S, PACKAGE_FORMATS, RUN_COLD_BOOT_CAP,
                               RUN_ESCALATION_CAP, RUN_WALL_CLOCK_S, STAGE2_PCC_MIN,
                               STAGE4_SWAP_DISK_GB, STAGE_BUDGET_S, STAGE_DISK_GB, SWAP_MIN_TOKENS,
-                              SWAP_TOP1_MIN)
+                              SWAP_TOP1_MIN, SIDECAR_MIN_QUESTIONS, SIDECAR_NOISE_FACTOR,
+                              SIDECAR_PCC_MIN, SIDECAR_PROB_DIFF_MAX, SIDECAR_TOP1_MIN)
 from orchard.tiers import TierConfig
 
 
@@ -161,6 +163,7 @@ def gate_delta(stage_dir, run_dir) -> GateResult:
             reasons.append(f"delta.json needs {key}")
     if d.get("path") not in PATHS:
         reasons.append(f"delta.json path must be one of {PATHS}")
+    reasons += _class_reasons(d)
     diffs = d.get("differences")
     if not isinstance(diffs, list) or not diffs:
         reasons.append("delta.json differences must be a non-empty list")
@@ -178,6 +181,40 @@ def gate_delta(stage_dir, run_dir) -> GateResult:
         if not isinstance(item, dict) or item.get("area") not in HAZARD_AREAS or not _text(item.get("finding")):
             reasons.append(f"hazards[{i}] needs an area from {HAZARD_AREAS} and a finding")
     return _done(reasons, seen)
+
+
+def _class_reasons(d: dict) -> list[str]:
+    """The class, sidecars and code files of delta.json. A delta.json with none of them is a run from before
+    classes and passes. With a class, the path, the sidecars and the class must agree."""
+    reasons = []
+    if "class" in d:
+        if d["class"] not in CLASSES:
+            reasons.append(f"delta.json class must be one of {CLASSES}")
+        elif path_of(d["class"]) != d.get("path"):
+            reasons.append(f"delta.json class {d['class']!r} takes the path {path_of(d['class'])!r}, "
+                           f"but its path is {d.get('path')!r}")
+    sidecars = d.get("sidecars", [])
+    if not isinstance(sidecars, list):
+        reasons.append("delta.json sidecars must be a list")
+        sidecars = []
+    for i, item in enumerate(sidecars):
+        if not isinstance(item, dict) or not _text(item.get("file")):
+            reasons.append(f"sidecars[{i}] needs a file")
+        elif not re.fullmatch(r"[0-9a-f]{64}", str(item.get("sha256", ""))):
+            reasons.append(f"sidecars[{i}] ({item['file']}) needs a sha256 of 64 hex digits")
+    if d.get("class") == "weights+sidecar" and not sidecars:
+        reasons.append("class weights+sidecar needs at least one entry in sidecars")
+    if "class" in d and d["class"] != "weights+sidecar" and sidecars:
+        reasons.append(f"class {d['class']!r} cannot have sidecars; only weights+sidecar does")
+    code = d.get("code_files", [])
+    if not isinstance(code, list):
+        reasons.append("delta.json code_files must be a list")
+        code = []
+    for i, item in enumerate(code):
+        if (not isinstance(item, dict) or not _text(item.get("file"))
+                or not re.fullmatch(r"[0-9a-f]{64}", str(item.get("sha256", "")))):
+            reasons.append(f"code_files[{i}] needs a file and a sha256 of 64 hex digits")
+    return reasons
 
 
 def gate_reference(stage_dir, run_dir) -> GateResult:
@@ -228,6 +265,71 @@ def gate_weights_swap(stage_dir, run_dir) -> GateResult:
     if err:
         return GateResult(False, (err,))
     reasons, seen = _swap_reasons(d), []
+    _evidence(run_dir, d.get("evidence"), "result.json", reasons, seen)
+    return _done(reasons, seen)
+
+
+def gate_sidecar_parity(sp, delta: dict) -> list[str]:
+    """The reasons a result's `sidecar_parity` object is not good enough (empty when it is). `delta` is
+    stage 0's delta.json: the parity run must have used the exact head file and code file stage 0 recorded."""
+    if not isinstance(sp, dict):
+        return ["sidecar_parity must be an object (the parity check's measurements)"]
+    reasons = []
+    if sp.get("measured") is not True:
+        reasons.append(f"sidecar_parity measured must be true, got {sp.get('measured')!r}")
+    wiring = sp.get("wiring_check")
+    if not isinstance(wiring, dict) or wiring.get("passed") is not True:
+        reasons.append("sidecar_parity wiring_check must have passed: the script's own layer loop must "
+                       "agree with the model's prefill before its hidden states mean anything")
+    nq = sp.get("n_questions")
+    if isinstance(nq, bool) or not isinstance(nq, int) or nq < SIDECAR_MIN_QUESTIONS:
+        reasons.append(f"sidecar_parity n_questions must be a whole number of at least {SIDECAR_MIN_QUESTIONS}, "
+                       f"got {nq!r}")
+    pcc = sp.get("hidden_pcc_min")
+    if not _number(pcc):
+        reasons.append(f"sidecar_parity hidden_pcc_min must be a number, got {pcc!r}")
+    elif pcc < SIDECAR_PCC_MIN:
+        reasons.append(f"sidecar_parity hidden_pcc_min {pcc} is below the minimum of {SIDECAR_PCC_MIN}")
+    top1 = sp.get("top1_agree_fraction")
+    if not _number(top1) or not 0 <= top1 <= 1:
+        reasons.append(f"sidecar_parity top1_agree_fraction must be a fraction from 0 to 1, got {top1!r}")
+    elif top1 < SIDECAR_TOP1_MIN:
+        reasons.append(f"sidecar_parity top1_agree_fraction {top1} is below the minimum of {SIDECAR_TOP1_MIN}")
+    diff = sp.get("prob_max_abs_diff")
+    floor = (sp.get("noise_floor") or {}).get("prob_max_abs_diff") if isinstance(sp.get("noise_floor"), dict) else None
+    bar = max(SIDECAR_PROB_DIFF_MAX, SIDECAR_NOISE_FACTOR * floor if _number(floor) else 0.0)
+    if not _number(diff):
+        reasons.append(f"sidecar_parity prob_max_abs_diff must be a number, got {diff!r}")
+    elif diff > bar:
+        reasons.append(f"sidecar_parity prob_max_abs_diff {diff} is above the bar of {bar:g} "
+                       f"(the larger of {SIDECAR_PROB_DIFF_MAX} and {SIDECAR_NOISE_FACTOR:g} times the "
+                       "CPU-versus-CPU difference)")
+    heads = {x.get("sha256") for x in delta.get("sidecars", []) if isinstance(x, dict)}
+    if sp.get("head_sha256") not in heads:
+        reasons.append("sidecar_parity head_sha256 does not match any sidecar stage 0 recorded; the parity "
+                       "run used a different head file")
+    codes = {x.get("sha256") for x in delta.get("code_files", []) if isinstance(x, dict)}
+    if codes and sp.get("code_sha256") not in codes:
+        reasons.append("sidecar_parity code_sha256 does not match any code file stage 0 recorded; the parity "
+                       "run used different code")
+    return reasons
+
+
+def gate_weights_swap_sidecar(stage_dir, run_dir) -> GateResult:
+    """Stage 2 on the weights+sidecar class: everything gate_weights_swap checks, and the sidecar parity
+    measured in the same lease (orchard/skills/weights-sidecar-check.md)."""
+    d, err = _load(stage_dir, "result.json")
+    if err:
+        return GateResult(False, (err,))
+    reasons, seen = _swap_reasons(d), []
+    delta, derr = _load(Path(run_dir) / "stages" / "0", "delta.json")
+    if derr:
+        reasons.append(f"stage 0's {derr}, so the sidecar parity cannot be tied to the files stage 0 recorded")
+    else:
+        reasons += gate_sidecar_parity(d.get("sidecar_parity"), delta)
+    listed = d.get("evidence")
+    if not isinstance(listed, list) or not any(Path(str(e)).name == "sidecar-parity.json" for e in listed):
+        reasons.append("result.json evidence must list evidence/sidecar-parity.json")
     _evidence(run_dir, d.get("evidence"), "result.json", reasons, seen)
     return _done(reasons, seen)
 
@@ -607,6 +709,14 @@ WEIGHTS_ONLY_STAGE_2 = dataclasses.replace(
     gate=gate_weights_swap)
 
 
+# The weights+sidecar class (orchard/classes.py): stage 2 also measures the sidecar head's parity in the same
+# hardware lease (the weights-sidecar-check skill), and its gate checks both. Every other stage is the
+# weights-only spec: the backbone is what those stages test.
+SIDECAR_STAGE_2 = dataclasses.replace(
+    WEIGHTS_ONLY_STAGE_2, name="weights swap check and sidecar parity on one board",
+    skill="weights-sidecar-check", gate=gate_weights_swap_sidecar)
+
+
 # Stage 3 builds and checks the full TT model. On the weights-only path that model already exists,
 # and stage 2 has served the new weights through it and compared every token with the reference.
 SKIP_3_WEIGHTS_ONLY = "weights-only path: the stage 2 serve-and-compare covers the full model"
@@ -679,13 +789,45 @@ def run_path(entries: list[dict], run_dir) -> str | None:
     return delta_path(run_dir)
 
 
-def spec_for(number: int, path: str | None, package_format: str | None = None) -> StageSpec:
+def delta_class(run_dir) -> str | None:
+    """The class in stages/0/delta.json (a delta.json with a path and no class implies one), or None when
+    the file is missing, unreadable, or names a value that is not a class."""
+    try:
+        data = json.loads((Path(run_dir) / "stages" / "0" / "delta.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    if "class" in data:
+        return data["class"] if data["class"] in CLASSES else None
+    return class_of_path(data.get("path"))
+
+
+def run_class(entries: list[dict], run_dir) -> str | None:
+    """The class this run follows, read the way run_path reads the path: stage 0's passing stage_end holds
+    it, so a resumed run uses the class the first attempt chose even if delta.json is edited later. An
+    older ledger with only a path gets the class that path implies; one with neither reads delta.json."""
+    end = None
+    for e in entries:
+        if e["event"] == "stage_end" and e["stage"] == 0 and e["data"].get("result") == "pass":
+            end = e["data"]
+    if end is None:
+        return None
+    if "class" in end:
+        return end["class"] if end["class"] in CLASSES else None
+    if "path" in end:
+        return class_of_path(end["path"])
+    return delta_class(run_dir)
+
+
+def spec_for(number: int, path: str | None, package_format: str | None = None,
+             cls: str | None = None) -> StageSpec:
     """The stage spec for `number` on `path`. Only the weights-only path changes the table: stage 2
     gets the swap skill and gate, stage 4 runs one test per chip configuration, stages 3, 5 and 6
     are skipped (the supervisor records each as skipped), and when the run was started with
     --package-format v6, stage 7 packages the model. Every other run skips stage 7."""
     if path == "weights-only":
-        weights_only = {2: WEIGHTS_ONLY_STAGE_2, 3: WEIGHTS_ONLY_STAGE_3, 4: WEIGHTS_ONLY_STAGE_4,
+        weights_only = {2: SIDECAR_STAGE_2 if cls == "weights+sidecar" else WEIGHTS_ONLY_STAGE_2, 3: WEIGHTS_ONLY_STAGE_3, 4: WEIGHTS_ONLY_STAGE_4,
                         5: WEIGHTS_ONLY_STAGE_5, 6: WEIGHTS_ONLY_STAGE_6}
         if number in weights_only:
             return weights_only[number]

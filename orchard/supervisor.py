@@ -142,9 +142,9 @@ from orchard.paths import (PATHS_RECORDED, RunPaths, UnknownPlaceholder, absolut
 from orchard.runner import Denied, check_string
 from orchard.server import ServerControl, ServerError, ServerSpec, StopCheck
 from orchard.stages import (PACKAGE_OPTIONS_SET, GateResult, TierUnavailable, attempt_started_ts,
-                            budget_cap, check_disk, coder_state, delta_path, evidence_record,
+                            budget_cap, check_disk, coder_state, delta_class, delta_path, evidence_record,
                             open_stage_dir, package_format, package_options, resolve_endpoint,
-                            resolve_skill, run_path, run_progress, spec_for, tier_for)
+                            resolve_skill, run_class, run_path, run_progress, spec_for, tier_for)
 from orchard.tiers import TierConfigError, load
 from orchard.watchdog import (Event, IdenticalResponses, Ladder, NoFileWritten, NoNewEvidence,
                               RepeatedToolCall, RetryGuard, StageOverBudget, ThinkingWithoutAction,
@@ -695,7 +695,8 @@ class Supervisor:
             # The spec follows the path stage 0 chose, read from the ledger each time, so a
             # resumed run picks the same skill and gate as the run that crashed.
             entries = self.ledger.read()
-            spec = spec_for(p.next_stage, run_path(entries, self.run_dir), package_format(entries))
+            spec = spec_for(p.next_stage, run_path(entries, self.run_dir), package_format(entries),
+                            run_class(entries, self.run_dir))
             try:
                 self._ensure_coder()
                 result = self._run_stage(spec, resuming=p.open_stage == p.next_stage,
@@ -1105,7 +1106,8 @@ class Supervisor:
                 self._record_numbers(stage_dir)
             # Stage 0's pass records the path it chose. Later stages read it from here
             # (orchard/stages.py, run_path), so an edit to delta.json cannot change the run's path.
-            extra = {"path": delta_path(self.run_dir)} if n == 0 else {}
+            extra = ({"path": delta_path(self.run_dir), "class": delta_class(self.run_dir)}
+                     if n == 0 else {})
             self.ledger.append("stage_end", n, result="pass", evidence=ev, **extra)
             return "pass"
         if status == "pause":
