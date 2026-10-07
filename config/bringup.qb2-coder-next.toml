@@ -1,0 +1,16 @@
+# tt-orchard bringup defaults for a QuietBox 2, written by scripts/setup.sh. Edit freely; setup never overwrites it.
+runs_root = "@RUNS_ROOT@"
+required_chips = "2,4"
+reference_python = "@REFERENCE_PYTHON@"
+@SKILLS_LINE@
+[env]
+HF_HUB_OFFLINE = "1"
+
+# Qwen3-Coder-Next on one board: the recommended agent model for a QuietBox 2 (see config/tiers.qb2-coder-next.toml).
+# The other board stays free for hardware stages.
+[coder]
+target = "raahemnabeel/qwen3-coder-next-blackhole"
+kind = "container"
+profile = "p300"
+port = 8001
+chips = 2

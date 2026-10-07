@@ -25,7 +25,7 @@ from pathlib import Path
 
 import pytest
 
-from orchard import cli, hardware_check, operator_checks, park_check, rolefit, sizing, supervisor
+from orchard import cli, hardware_check, operator_checks, park_check, rolefit, setup_machine, sizing, supervisor
 from orchard.stages import STAGES
 
 REPO = Path(__file__).resolve().parent.parent
@@ -38,6 +38,7 @@ OTHER_TOOL_FLAGS = {
     "--delete": "rsync (named as something the command runner does not stop)",
     "--force": "gozer (the README says never to pass it)",
     "--help": "gozer reset --help",
+    "--owner-pid": "gozer acquire",
     "--out": "tt-model package-thin",
     "--version": "tt-model --version",
 }
@@ -101,6 +102,7 @@ def other_repo_flags() -> set[str]:
     flags |= _option_strings(_captured_parser(sizing, lambda m: m.main([])))
     flags |= _option_strings(_captured_parser(operator_checks, lambda m: m.main([])))
     flags |= _option_strings(_captured_parser(rolefit, lambda m: m.main([])))
+    flags |= _option_strings(_captured_parser(setup_machine, lambda m: m.main([])))
     flags |= tt_orchard_flags()
     return flags
 

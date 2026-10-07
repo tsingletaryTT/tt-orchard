@@ -1,0 +1,60 @@
+# QuietBox 2 (two p300c boards, four chips): the recommended arrangement. Used by scripts/setup.sh.
+#
+# The agent model is Qwen3-Coder-Next on ONE board (the `p300` profile of
+# raahemnabeel/qwen3-coder-next-blackhole). The other board stays free for hardware stages, so only stage 4's
+# 4-chip test needs the coder parked. `large` names the same model on its own port. It is never started, and a
+# step that names it is served by `small` (same model).
+#
+# Why this is the recommendation: it passed the role-fit test (python3 -m orchard.rolefit; 50 of 50 recorded
+# turns well formed, and none of 35 replays of the Qwen3.8-27B's failure turns repeated its failure) and it ran
+# a whole bring-up (Cloudflare/clef) to the operator bundle. Measured limits: one run; the package was built
+# from an unpushed tt-metal tree; the p300 profile uses bfp4 routed experts. See README, "Recommended setup".
+# Check it on your own machine with the role-fit test before trusting it.
+#
+# cpu: qwen3-coder:30b under ollama, the stand-in while the coder is parked for the 4-chip test.
+
+[tiers.large]
+role = "plan and diagnose"
+endpoint = "http://127.0.0.1:8000/v1"
+model = "Qwen/Qwen3-Coder-Next"
+placement = "chips"
+context_tokens = 262144
+
+[tiers.small]
+role = "routine steps while one board is free"
+endpoint = "http://127.0.0.1:8001/v1"
+model = "Qwen/Qwen3-Coder-Next"
+placement = "chips"
+context_tokens = 262144
+
+[tiers.cpu]
+role = "stand-in while the coder is parked, and short steps"
+endpoint = "http://127.0.0.1:11434/v1"
+model = "qwen3-coder:30b"
+placement = "cpu"
+
+[stages.0]
+run = "small"
+[stages.1]
+run = "small"
+[stages.2]
+run = "small"
+diagnose = "large"
+[stages.3]
+run = "small"
+diagnose = "large"
+[stages.4]
+run = "small"
+plan = "large"
+diagnose = "large"
+[stages.5]
+run = "small"
+[stages.6]
+run = "small"
+[stages.7]
+run = "none"
+[stages.8]
+run = "small"
+
+[escalation]
+default = "large"

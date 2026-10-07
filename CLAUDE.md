@@ -587,3 +587,22 @@ ended `ready` after 11,092 s of ledger time. Stages 0, 1, 2 and 4 passed; 3, 5, 
   2026-10-06; SciPy now warns about numpy 2.5.3). The earlier versions were not recorded.
 - Suite: 2515 passed, 1 skipped.
 
+
+## 2026-10-07: setup script, QuietBox 2 defaults, release to main (version 0.1.0)
+Prompt (operator): "commit and push and merge everything in tt-orchard to main so anyone can make use of this. make sure we
+have a setup script with pre-reqs handled with tt-gozer. position the model change as a strong suggestion or default for QB2.
+publish the model card publicly on HF / tt-model-manager".
+- `scripts/setup.sh` runs `orchard/setup_machine.py` (`tt-orchard setup` flags: `--coder`, `--yes`, `--check`,
+  `--start-ollama`, `--runs-root`, `--venv-dir`, `--gozer-dir`). It checks Python 3.12+, tt-gozer 0.3.2+ (clones and installs
+  it when missing), tt-model, docker, hf, ollama, hugepages, the reference venv and the coder package, and writes
+  `config/tiers.toml` and `config/bringup.toml` from `config/*.qb2-*.toml`. Existing files are never overwritten. Other
+  hardware gets a warning and no files. It never runs `reset`, `publish`, `push`, `reconcile`, `acquire` or `release`
+  (`COMMANDS_NEVER_RUN`, tested with a fake machine whose every call is logged).
+- Coder-Next on one board is the default for a QuietBox 2; `--coder 27b` gives the earlier arrangement. The README says what
+  the evidence is and what it is not (single measurements, dirty unpushed tt-metal build, bfp4 experts).
+- Process lapse: I wrote `setup_machine.py` before its tests. I moved it aside, wrote the tests, watched the import fail,
+  restored it and ran 53 mutations. Three survived (a QuietBox 2 without "p300", the CPU torch index, the default coder); each
+  now has a test and is red under its mutation.
+- Not done: the Hugging Face / tt-model publish. No Clef package exists (stage 7 needs the drafter and sampling handling for
+  a model without `mtp.*` tensors), and the bundle's `card.md` says no package was staged. Waiting for the operator to choose
+  between building a package, publishing only a card, or skipping.

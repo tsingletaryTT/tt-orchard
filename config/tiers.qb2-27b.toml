@@ -1,0 +1,53 @@
+# QuietBox 2, the earlier arrangement: Qwen3.8-27B on all four chips (both boards). Used by
+# `scripts/setup.sh --coder 27b`. While the coder is loaded no board is free, so every hardware stage parks it.
+# This is the arrangement the Hemmingway-1 and openthai runs used. Its known weaknesses are in README
+# "Lessons that will bite you" (reasoning loops in greedy decoding; thinking is switched off for agent turns).
+#
+# large: Qwen3.8-27B across all four chips. small: the same model on two chips (one board), not started here.
+# cpu:   qwen3-coder:30b under ollama.
+
+[tiers.large]
+role = "plan and diagnose"
+endpoint = "http://127.0.0.1:8000/v1"
+model = "Qwen/Qwen3.8-27B"
+placement = "chips"
+context_tokens = 262144
+
+[tiers.small]
+role = "routine steps while one board is free"
+endpoint = "http://127.0.0.1:8001/v1"
+model = "Qwen/Qwen3.8-27B"
+placement = "chips"
+context_tokens = 262144
+
+[tiers.cpu]
+role = "stand-in while the large model is parked, and short steps"
+endpoint = "http://127.0.0.1:11434/v1"
+model = "qwen3-coder:30b"
+placement = "cpu"
+
+[stages.0]
+run = "large"
+[stages.1]
+run = "small"
+[stages.2]
+run = "small"
+diagnose = "large"
+[stages.3]
+run = "small"
+diagnose = "large"
+[stages.4]
+run = "small"
+plan = "large"
+diagnose = "large"
+[stages.5]
+run = "small"
+[stages.6]
+run = "small"
+[stages.7]
+run = "none"
+[stages.8]
+run = "small"
+
+[escalation]
+default = "large"

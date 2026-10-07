@@ -11,6 +11,7 @@ anything.
 
 ## Contents
 
+0. [Recommended setup for a QuietBox 2](#recommended-setup-for-a-quietbox-2)
 1. [Status](#1-status)
 2. [What you need](#2-what-you-need)
 3. [Install](#3-install)
@@ -19,6 +20,48 @@ anything.
 6. [Lessons that will bite you](#6-lessons-that-will-bite-you)
 7. [Where things are](#7-where-things-are)
 8. [Safety and license notes](#8-safety-and-license-notes)
+
+## Recommended setup for a QuietBox 2
+
+On a QuietBox 2 (two p300 boards, four chips), run the setup script first. It checks each prerequisite,
+installs tt-gozer when it is missing, and writes the machine config. It never resets a chip, never takes or
+releases a lease and never publishes anything. It never overwrites a config file that already exists.
+
+```bash
+git clone https://github.com/tsingletaryTT/tt-orchard.git
+cd tt-orchard
+scripts/setup.sh --check      # report only; runs nothing
+scripts/setup.sh              # asks before each step that changes the machine
+scripts/setup.sh --yes        # does every step without asking
+```
+
+Options: `--coder {coder-next,27b}` (default `coder-next`), `--yes`, `--check`, `--start-ollama` (starts
+`ollama serve` in the background when it is down), `--runs-root`, `--venv-dir` and `--gozer-dir`.
+
+What it covers: Python 3.12 or newer; tt-gozer 0.3.2 or newer with `acquire --owner-pid` and `reset`
+(cloned and installed from [tt-gozer](https://github.com/tsingletaryTT/tt-gozer) when absent; stale leases and busy
+chips are reported as warnings and left alone); `tt-model`; docker; the `hf` CLI; ollama and its CPU-tier
+model; 1 GB hugepages; a reference Python environment with CPU torch for stage 1; the coder's tt-model
+package; and the config files `config/tiers.toml` and `config/bringup.toml`, written from the
+`config/*.qb2-*.toml` templates. On other hardware it prints a warning and writes no config.
+
+### Why Coder-Next is the default on a QuietBox 2
+
+`raahemnabeel/qwen3-coder-next-blackhole` on one board (the `p300` profile) is the suggested agent model.
+It leaves the other board free for the bring-up's hardware tests, so most stages need no park and restore of
+the coder. The earlier choice, Qwen3.8-27B on all four chips, holds both boards, so every hardware stage
+parks it.
+
+Evidence, from [the role-fit run](docs/run-logs/2026-10-06-rolefit-qwen3-coder-next.md): 50 of 50 replayed
+agent turns were well formed, none of the 35 replays of the 27B's failure turns repeated a failure, and decode
+ran at 41.8 tok/s at an 8K prompt and 38.4 at 32K. The first full Clef bring-up used it and reached
+`ready for operator review` (see the log in CLAUDE.md).
+
+Limits: these are single measurements. The package was built from a tt-metal tree that was dirty and not
+pushed, so it cannot be rebuilt from public sources. The `p300` profile uses bfp4 routed experts, and whether
+that affects tool-call reliability over many runs is not measured. Check it on your own machine with
+`python3 -m orchard.rolefit` (section 5.3b) before relying on it. To use the 27B instead, run
+`scripts/setup.sh --coder 27b`; the config templates are `config/*.qb2-27b.toml`.
 
 ## 1. Status
 
@@ -150,10 +193,11 @@ steps. These numbers are **not verified outside the development machine**.
 
 ### 3.1 Get the code and run the tests
 
-tt-orchard has no public remote yet. Get a copy from whoever shared it with you, then:
+On a QuietBox 2, use `scripts/setup.sh` instead of sections 3.2 to 3.7 (see the recommended setup above).
+To set up by hand:
 
 ```bash
-git clone <REPO_URL> tt-orchard
+git clone https://github.com/tsingletaryTT/tt-orchard.git tt-orchard
 cd tt-orchard
 python3 -m pytest -q
 ```
