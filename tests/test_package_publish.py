@@ -114,7 +114,7 @@ def test_finish_records_a_passing_boot_check_on_the_required_profile_only(world)
             in card)
     assert card_problems(card, license_id="cc-by-nc-4.0", run_dir=world["run"]) == []
     opt_card = (world["run"] / opt["dir"] / "README.md").read_text()
-    assert "stage 2" not in opt_card.split("## Numbers")[1].split("## ")[0]       # no borrowed numbers
+    assert "stage 2" not in opt_card.split("## Expected performance")[1].split("## ")[0]       # no borrowed numbers
     text = (world["stage"] / "PUBLISH_COMMANDS.txt").read_text()
     assert publish_problems(text) == []
     assert "private episod/hemmingway-1-p300 stages/7/package/hemmingway-1-p300 .\n" in text

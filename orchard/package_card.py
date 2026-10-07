@@ -42,7 +42,7 @@ COMMERCIAL_CLAIMS = (r"(?<!non-)(?<!non )commercial (?:use|deployments?|purposes
                      r"\bcommercially\b", r"production[- ]ready", r"\bfor (?:your )?customers\b",
                      r"\benterprise\b", r"\bresell", r"\bmonetiz")
 PERF_IN_PROSE = re.compile(r"\b\d[\d.,]*\s*(?:tok/s|tokens/s|t/s|tokens per second|ms\b|%)")
-NUMBERS_HEAD = "## Numbers"
+NUMBERS_HEAD = "## Expected performance"
 CARD_TAGS = ("tt-model-cache", "vllm", "thin")       # the tags tt-model's own push adds to a v6 bundle
 
 
@@ -144,6 +144,11 @@ def render_card(f: CardFacts) -> str:
                   + ", ".join(f"`{s}`" for s in f.sidecars) + ". The bundle serves the language-model "
                   "backbone only, so the sidecar head is not served. The run checked the head on the "
                   "host against the CPU reference; that check does not make it part of this bundle."]
+    lines += ["", "## Intended use", "",
+              f"Text generation with {f.model_id} through the OpenAI-compatible server that "
+              "`tt-model serve` starts."]
+    if f.sidecars:
+        lines.append("Out of scope: the sidecar head, which this bundle does not serve.")
     lines += ["", NUMBERS_HEAD, "",
               "Every number is labelled. A `measured` number names its evidence files, relative to "
               "the run directory; the first file holds the value. `TODO` means not measured.", "",
@@ -151,7 +156,19 @@ def render_card(f: CardFacts) -> str:
     for n in f.numbers:
         ev = ", ".join(f"`{e}`" for e in n.evidence) if n.label == "measured" else "-"
         lines.append(f"| {n.name} | {_value(n)} | {n.label} | {ev} |")
-    lines += ["", "## Not measured", "", *[f"- {item}" for item in f.not_measured], "",
+    limits = [f"Tested on {f.chips} chips (mesh {f.mesh}) only; other configurations are not claimed "
+              "by this bundle.",
+              "Accuracy was compared with the CPU reference on one short fixed prompt only."]
+    if f.drafter_off:
+        limits.append("Speculative decoding is off, so decode speed is that of plain decoding.")
+    if f.host_sampling:
+        limits.append("Sampling runs on the host.")
+    limits += [f"`{s}` is not served." for s in f.sidecars]
+    lines += ["", "## Limitations", "", *[f"- {item}" for item in limits], "",
+              "## Risks and safety considerations", "",
+              f"The check above does not cover long outputs, tool calling or safety behaviour. "
+              f"Output can differ from {f.model_id} run on a CPU or GPU in ways it does not show.", "",
+              "## Not measured", "", *[f"- {item}" for item in f.not_measured], "",
               "## Boot check", "",
               ("Stage 7 of the run installed this bundle, served it on a leased board and compared "
                "its tokens with the CPU reference. The Numbers table has the result."
@@ -195,6 +212,9 @@ def card_problems(card: str, *, license_id: str, run_dir, sidecars=()) -> list[s
             if hit:
                 problems.append(f"the card implies commercial use of a {license_id} model: "
                                 f"{hit.group(0)!r}")
+    for head in ("## Intended use", "## Limitations", "## Risks and safety considerations"):
+        if head not in card:
+            problems.append(f"the card has no {head!r} section")
     section, rest = _numbers_section(card)
     if not section:
         problems.append("the card has no Numbers section")

@@ -118,3 +118,20 @@ def test_the_license_is_read_from_the_snapshot_card(tmp_path):
                                             ("mit", False), ("cc-by-4.0", False), ("other", True)])
 def test_non_commercial_licenses_are_recognised(license_id, nc):
     assert non_commercial(license_id) is nc
+
+
+def test_the_card_has_the_sections_the_catalog_standard_names(tmp_path):
+    card = render_card(facts(sidecars=("joint_head.safetensors",), drafter_off=True))
+    for head in ("## Intended use", "## Expected performance", "## Limitations",
+                 "## Risks and safety considerations"):
+        assert head in card, head
+    limits = card.split("## Limitations")[1].split("\n## ")[0]
+    assert "joint_head.safetensors" in limits and "speculative decoding is off" in limits.lower()
+    assert card_problems(card, license_id="cc-by-nc-4.0", run_dir=run_with_evidence(tmp_path)) == []
+
+
+@pytest.mark.parametrize("head", ["## Intended use", "## Limitations", "## Risks and safety considerations"])
+def test_a_card_without_a_required_section_is_a_problem(tmp_path, head):
+    card = render_card(facts()).replace(head, "## Other")
+    problems = card_problems(card, license_id="cc-by-nc-4.0", run_dir=run_with_evidence(tmp_path))
+    assert any(head in p for p in problems), problems

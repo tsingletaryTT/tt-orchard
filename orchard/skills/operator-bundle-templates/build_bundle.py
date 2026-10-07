@@ -710,7 +710,7 @@ def todo_items(run: Run, redact: Redactor) -> list[str]:
                          f"ready time are TODO. Evidence: {ev(['stages/7/package.json', card])}.")
     not_measured: dict[str, list[str]] = {}
     for name, (rel, text) in sorted(run.cards.items()):
-        for row in card_section(text, "## Numbers"):
+        for row in card_section(text, "## Expected performance"):
             cells = [c.strip() for c in row.strip().strip("|").split("|")]
             if row.startswith("| ") and len(cells) == 4 and cells[2] == "TODO":
                 items.append(f"{name}: {redact(cells[0])} is TODO. Evidence: `{rel}`.")
