@@ -452,3 +452,202 @@ def test_watch_all_starts_from_the_first_entry(conf):
     _, recent, _ = run(conf, ["watch", "Cloudflare/clef", "--once"])
     _, everything, _ = run(conf, ["watch", "Cloudflare/clef", "--once", "--all"])
     assert "run started" not in recent and "run started" in everything
+
+
+# ---- bringup: choosing the model to base the run on -------------------------------------------
+
+from orchard import nearest  # noqa: E402
+
+GEMMA = "google/gemma-4-12B"
+GEMMA_IT = "google/gemma-4-12B-it"
+BUNDLE = "stisiTT/gemma-4-12b-it-p150"
+GEMMA_REV = "d" * 40
+
+
+def hub_payload(model_id):
+    if model_id == "jialinyyzz/humanizer":
+        return {**PAYLOAD, "id": model_id, "cardData": {"license": "apache-2.0", "base_model": GEMMA}}
+    return {"id": model_id, "private": False, "gated": False, "sha": GEMMA_REV, "cardData": {"license": "gemma"},
+            "siblings": [{"rfilename": "config.json", "size": 1}, {"rfilename": "w.safetensors", "size": 2_000_000_000}]}
+
+
+class BaseWorld:
+    """The outside world for the base-model tests: bundles that are installed, what a search finds, and
+    what `tt-model pull` does."""
+
+    def __init__(self, installed=(), found=(), pull_ok=True, local=None, pull_installs=(BUNDLE, GEMMA_IT)):
+        self.installed = list(installed)
+        self.found = list(found)
+        self.pull_ok, self.local, self.pull_installs = pull_ok, local or {}, pull_installs
+        self.pulled, self.asked, self.chose = [], [], []
+
+    def signals(self, **over):
+        return signals(hub_info=lambda m: (pf.parse_hub(hub_payload(m)), None),
+                       installed_bundles=lambda: list(self.installed),
+                       search_bundles=lambda q: self.asked.append(q) or list(self.found),
+                       local_snapshot=lambda m: self.local.get(m), **over)
+
+    def puller(self, bundle):
+        self.pulled.append(bundle)
+        if self.pull_ok:
+            name, repo = self.pull_installs
+            self.installed.append(nearest.Installed(name, repo, "6", 1))
+            return True, ""
+        return False, "no such bundle"
+
+
+def run_base(conf, args, world, chooser=None, out=None):
+    rec = Recorder()
+    out = out if out is not None else Pipe()
+    code = cli.main(["--config", str(conf), "bringup", "jialinyyzz/humanizer", *args], env={}, stdout=out,
+                    signals=world.signals(), supervisor_main=rec.supervisor, fetcher=rec.fetcher,
+                    chooser=chooser, puller=world.puller)
+    return code, out.getvalue(), rec
+
+
+FOUND = [{"name": BUNDLE, "installed": False}]
+
+
+def test_without_a_base_bundle_a_script_run_is_refused_with_the_candidates_and_the_flag(conf):
+    w = BaseWorld(found=FOUND)
+    code, out, rec = run_base(conf, [], w)
+    assert code == 2 and rec.argv is None and rec.fetched == [] and w.pulled == []
+    assert "nearest-model-missing" in out and BUNDLE in out
+    assert f"tt-orchard bringup jialinyyzz/humanizer --base {BUNDLE}" in out
+    assert w.asked == ["gemma"]
+
+
+def test_the_search_is_never_asked_when_the_base_is_already_served(conf, tmp_path):
+    inst = [nearest.Installed("episod/gemma-p300", GEMMA, "6", 2)]
+    w = BaseWorld(installed=inst, found=FOUND, local={GEMMA: tmp_path / "g"})
+    code, out, rec = run_base(conf, [], w)
+    assert code == 0 and w.asked == []
+
+
+def test_at_a_terminal_the_operator_is_asked_to_pick_and_the_pick_is_installed_and_used(conf, tmp_path):
+    w = BaseWorld(found=FOUND)
+
+    def chooser(candidates, model, base):
+        w.chose.append(([c["name"] for c in candidates], model, base))
+        return BUNDLE
+    code, out, rec = run_base(conf, [], w, chooser=chooser)
+    assert w.chose == [([BUNDLE], "jialinyyzz/humanizer", GEMMA)]
+    assert w.pulled == [BUNDLE]
+    assert code == 0 and rec.argv is not None
+    base_fetch = [f for f in rec.fetched if f[0] == GEMMA_IT]
+    assert base_fetch and base_fetch[0][1] == GEMMA_REV
+    snap = fetch.snapshot_dir(tmp_path / "hf", GEMMA_IT, GEMMA_REV)
+    assert f"base={snap}" in rec.argv
+
+
+def test_choosing_nothing_stops_the_run_and_installs_nothing(conf):
+    w = BaseWorld(found=FOUND)
+    code, out, rec = run_base(conf, [], w, chooser=lambda c, m, b: None)
+    assert code == 2 and rec.argv is None and w.pulled == []
+
+
+def test_an_already_installed_pick_is_not_pulled_again(conf, tmp_path):
+    inst = [nearest.Installed(BUNDLE, GEMMA_IT, "6", 1)]
+    w = BaseWorld(installed=inst, found=[{"name": BUNDLE, "installed": True}], local={GEMMA_IT: tmp_path / "g"})
+    code, out, rec = run_base(conf, [], w, chooser=lambda c, m, b: BUNDLE)
+    assert code == 0 and w.pulled == []
+
+
+def test_base_names_a_bundle_to_install_and_needs_no_prompt(conf, tmp_path):
+    w = BaseWorld(found=FOUND)
+    code, out, rec = run_base(conf, ["--base", BUNDLE], w)
+    assert code == 0 and w.pulled == [BUNDLE] and rec.argv is not None
+    assert any(f"base={fetch.snapshot_dir(tmp_path / 'hf', GEMMA_IT, GEMMA_REV)}" == a for a in rec.argv)
+
+
+def test_base_naming_an_installed_bundle_uses_its_weights_repo_without_pulling(conf, tmp_path):
+    inst = [nearest.Installed(BUNDLE, GEMMA_IT, "6", 1)]
+    w = BaseWorld(installed=inst, local={GEMMA_IT: tmp_path / "g"})
+    code, out, rec = run_base(conf, ["--base", BUNDLE], w)
+    assert code == 0 and w.pulled == [] and w.asked == []
+    assert f"base={tmp_path / 'g'}" in rec.argv
+
+
+def test_base_naming_a_weights_repo_with_a_bundle_installed_works(conf, tmp_path):
+    inst = [nearest.Installed("x/y-p150", GEMMA_IT, "6", 1)]
+    w = BaseWorld(installed=inst, local={GEMMA_IT: tmp_path / "g"})
+    code, out, rec = run_base(conf, ["--base", GEMMA_IT], w)
+    assert code == 0 and w.pulled == []
+
+
+def test_a_failed_install_stops_the_run_with_the_reason(conf, capsys):
+    w = BaseWorld(found=FOUND, pull_ok=False)
+    code, out, rec = run_base(conf, ["--base", BUNDLE], w)
+    err = capsys.readouterr().err
+    assert code == 2 and rec.argv is None and "no such bundle" in err and BUNDLE in err
+
+
+def test_a_local_base_snapshot_is_handed_to_the_supervisor_and_nothing_is_downloaded(conf, tmp_path):
+    inst = [nearest.Installed("episod/gemma-p300", GEMMA, "6", 2)]
+    w = BaseWorld(installed=inst, local={GEMMA: tmp_path / "g"})
+    code, out, rec = run_base(conf, [], w)
+    assert f"base={tmp_path / 'g'}" in rec.argv and [f[0] for f in rec.fetched] == ["jialinyyzz/humanizer"]
+
+
+def test_a_dry_run_neither_asks_nor_installs(conf):
+    w = BaseWorld(found=FOUND)
+    code, out, rec = run_base(conf, ["--dry-run"], w, chooser=lambda c, m, b: pytest.fail("asked"))
+    assert code == 2 and w.pulled == [] and rec.argv is None
+
+
+def test_the_preflight_page_shows_the_base_row(conf):
+    code, out, rec = run_base(conf, [], BaseWorld(found=FOUND))
+    flat = " ".join(out.replace("║", " ").split())
+    assert "BLOCK no installed bundle serves google/gemma-4-12B" in flat and "[nearest-model-missing]" in flat
+
+
+def test_a_search_that_found_nothing_says_how_to_install_a_bundle_by_hand(conf):
+    code, out, rec = run_base(conf, [], BaseWorld(found=[]))
+    assert code == 2 and "found no bundle" in out.replace("\n", " ").replace("║", "")
+
+
+def answers_from(items):
+    it = iter(items)
+    return lambda _prompt: next(it)
+
+
+def test_the_prompt_lists_the_candidates_and_returns_the_one_chosen():
+    cands = [{"name": "a/installed", "installed": True}, {"name": "b/other", "installed": False}]
+    out = Pipe()
+    got = cli.pick_base(cands, "x/new", "g/base", out=out, ask=answers_from(["2"]))
+    text = out.getvalue()
+    assert got == "b/other" and "1. a/installed  [installed]" in text and "2. b/other  [not installed" in text
+    assert "x/new is based on g/base" in text
+
+
+@pytest.mark.parametrize("answers, expected, bad", [(["0"], None, 0), ([""], None, 0),
+                                                    (["x", "9", "1"], "a/installed", 2)])
+def test_the_prompt_stops_on_zero_or_enter_and_asks_again_on_a_bad_answer(answers, expected, bad):
+    cands = [{"name": "a/installed", "installed": True}]
+    out = Pipe()
+    assert cli.pick_base(cands, "m", "b", out=out, ask=answers_from(answers)) == expected
+    assert out.getvalue().count("not a choice") == bad
+
+
+def test_the_prompt_gives_up_at_the_end_of_input():
+    def eof(_):
+        raise EOFError
+    assert cli.pick_base([{"name": "a/b", "installed": True}], "m", "b", out=Pipe(), ask=eof) is None
+
+
+def test_a_piped_run_never_prompts(conf, monkeypatch):
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    code, out, rec = run_base(conf, [], BaseWorld(found=FOUND))       # stdout is a pipe
+    assert code == 2 and "choose a number" not in out
+
+
+def test_a_dry_run_with_base_does_not_install_the_bundle(conf):
+    w = BaseWorld(found=FOUND)
+    code, out, rec = run_base(conf, ["--dry-run", "--base", BUNDLE], w)
+    assert w.pulled == [] and rec.argv is None
+
+
+def test_a_base_flag_that_still_blocks_is_not_followed_by_a_prompt(conf):
+    w = BaseWorld(found=FOUND)
+    code, out, rec = run_base(conf, ["--base", GEMMA], w, chooser=lambda c, m, b: pytest.fail("asked"))
+    assert code == 2 and rec.argv is None and w.pulled == []

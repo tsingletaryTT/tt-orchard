@@ -413,6 +413,7 @@ ln -s <ORCHARD_DIR>/bin/tt-orchard ~/.local/bin/tt-orchard     # a link, so it f
 cp config/bringup.example.toml config/bringup.toml            # then edit it; CHANGE-ME values are refused
 tt-orchard bringup org/name --dry-run                         # the checks and the command; starts nothing
 tt-orchard bringup org/name                                   # check, fetch, run
+tt-orchard bringup org/name --base <bundle or model id>       # base the run on this model
 tt-orchard watch org/name                                     # follow a run from another terminal
 tt-orchard status org/name                                    # also pause, resume, abort
 tt-orchard --version
@@ -459,6 +460,7 @@ its reason; a `warn` is information.
 | tiers | the tier config is invalid, or not exactly one chips tier uses `coder.port` | `config-invalid` |
 | port | something already listens on `coder.port` (a warning when resuming) | `coder-unusable` |
 | gozer | gozer gives no usable status. Stale leases and chips in use are warnings, and nothing is cleared | `hardware-unhealthy` |
+| base | no installed tt-model bundle serves the model this one is based on (the card's `base_model`, or the model named with `--base`). It then runs `tt model search` for the model's family and lists what it finds. At a terminal it asks which bundle to base the run on and installs the pick with `tt-model pull`. In a script it stops and prints the `--base` commands. A base snapshot that is not on disk is downloaded. A card with no `base_model` is a warning | `nearest-model-missing` |
 | reference | `reference_python` is set and cannot import torch, transformers, tokenizers and safetensors. Not set is a warning: the stage 1 agent then looks for an interpreter itself | `config-invalid` |
 
 The model is downloaded with `hf download`, pinned to the revision the preflight saw. The harness never

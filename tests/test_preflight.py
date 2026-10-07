@@ -222,7 +222,7 @@ def signals(**over):
 
 def test_a_clean_machine_gives_one_result_per_check_in_a_fixed_order(tmp_path):
     out = pf.run_preflight(cfg(tmp_path), "Cloudflare/clef", accept_credentials=False, signals=signals())
-    assert [c.name for c in out] == ["hub", "disk", "credentials", "tiers", "port", "gozer", "reference"]
+    assert [c.name for c in out] == ["hub", "disk", "credentials", "tiers", "port", "gozer", "base", "reference"]
     assert not pf.blocked(out)
 
 

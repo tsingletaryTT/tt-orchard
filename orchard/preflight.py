@@ -25,7 +25,7 @@ import socket
 import subprocess
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 from urllib.parse import urlparse
@@ -60,6 +60,8 @@ class HubInfo:
     files: list[str]
     code_files: list[str]
     has_license_file: bool
+    base_models: list[str] = field(default_factory=list)       # the card's base_model, as a list
+    architectures: list[str] = field(default_factory=list)
 
 
 def parse_hub(payload: dict) -> HubInfo:
@@ -72,7 +74,13 @@ def parse_hub(payload: dict) -> HubInfo:
             if isinstance(tag, str) and tag.startswith("license:"):
                 lic = tag.split(":", 1)[1]
                 break
+    raw_base = (payload.get("cardData") or {}).get("base_model")
+    bases = [raw_base] if isinstance(raw_base, str) else [b for b in raw_base if isinstance(b, str)] \
+        if isinstance(raw_base, list) else []
+    archs = (payload.get("config") or {}).get("architectures")
     return HubInfo(
+        base_models=[b for b in bases if b != payload.get("id")],
+        architectures=[a for a in archs if isinstance(a, str)] if isinstance(archs, list) else [],
         id=payload.get("id", ""), sha=payload.get("sha") or "", private=bool(payload.get("private")),
         gated=bool(payload.get("gated")), license=lic or None,
         total_bytes=sum(int(s.get("size") or 0) for s in siblings), files=names,
@@ -162,6 +170,57 @@ def check_reference(python: Path | None, problem: str | None) -> Check:
     return Check("reference", OK, f"{python} imports torch, transformers, tokenizers and safetensors")
 
 
+def check_base(*, model_id: str, hub: HubInfo | None, base_override: str | None, local_snapshot: Callable,
+               installed: list, search: Callable | None) -> Check:
+    """The model this run is compared with and served through. It needs an installed bundle (stages 2 and
+    4 serve the new weights with it) and a snapshot on disk (stage 0 compares tensors and configs). A missing
+    snapshot is downloaded by the command. A missing bundle is a block that lists what `tt model search`
+    found, so the operator can pick one with --base."""
+    from orchard import nearest
+    base = base_override or (hub.base_models[0] if hub and hub.base_models else None)
+    if not base:
+        return Check("base", WARN, "the model card names no base_model, so stage 0 has nothing to compare it "
+                     "with. Pass --base <bundle or model id> to name the model to start from",
+                     data={"base": None, "snapshot": None, "needs_fetch": False, "candidates": []})
+    serving = [b for b in installed if b.weights_repo == base]
+    if serving:
+        snap = local_snapshot(base)
+        data = {"base": base, "snapshot": snap, "bundle": serving[0].name, "needs_fetch": snap is None,
+                "candidates": []}
+        where = "its snapshot is local" if snap else "its snapshot will be downloaded"
+        if not any(b.schema == "6" for b in serving):
+            return Check("base", WARN, f"base {base}: bundle {serving[0].name} is installed, but it is a "
+                         f"{serving[0].schema} container package and stage 2's swap check expects a v6 thin "
+                         f"bundle, so stage 2 will probably not run; {where}", data=data)
+        return Check("base", OK, f"base {base}: bundle {serving[0].name} is installed; {where}", data=data)
+    family = nearest.family_query(base)
+    found = None
+    if search is not None:
+        try:
+            found = search(family)
+        except Exception:
+            found = None
+    cands: dict[str, dict] = {}
+    for b in installed:
+        if nearest.family_query(b.weights_repo) == family and b.name != model_id:
+            cands[b.name] = {"name": b.name, "installed": True}
+    for c in found or []:
+        if c["name"] != model_id and c["name"] not in cands:
+            cands[c["name"]] = {"name": c["name"], "installed": c.get("installed")}
+    ordered = sorted(cands.values(), key=lambda c: (not c["installed"], c["name"]))
+    if found is None:
+        listing = f"the search for '{family}' bundles could not be made"
+    elif ordered:
+        listing = f"`tt model search {family}` found: " + ", ".join(c["name"] for c in ordered)
+    else:
+        listing = f"`tt model search {family}` found no bundle"
+    return Check("base", BLOCK, f"no installed bundle serves {base}, the model this one is based on, so stages "
+                 f"0, 2 and 4 have nothing to compare it with or serve it through. {listing}. Pick one "
+                 "with --base <bundle>, or install a bundle yourself and run bringup again",
+                 "nearest-model-missing", data={"base": base, "snapshot": None, "bundle": None,
+                                                "needs_fetch": False, "candidates": ordered})
+
+
 def check_gozer(text: str) -> Check:
     if not text.strip():
         return Check("gozer", BLOCK, "gozer gave no status; the chips cannot be leased", "hardware-unhealthy")
@@ -192,6 +251,8 @@ class Signals:
     gozer_status: Callable        # () -> text of `gozer status`, "" when unavailable
     load_tiers: Callable          # (path) -> TierConfig
     reference_problem: Callable | None = None   # (python path) -> why it cannot import the packages, or None
+    installed_bundles: Callable | None = None   # () -> list[nearest.Installed]
+    search_bundles: Callable | None = None      # (query) -> [{"name", "installed"}] or None
 
 
 def hf_home_for(cfg) -> Path:
@@ -208,7 +269,7 @@ def cache_root_for(cfg) -> Path:
 
 
 def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Signals | None = None,
-                  resuming: bool = False) -> list[Check]:
+                  resuming: bool = False, base_override: str | None = None) -> list[Check]:
     s = signals or default_signals(cfg)
     out: list[Check] = []
 
@@ -228,10 +289,28 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
         local = False
     out.append(check_hub(hub, err, local))
 
+    def base() -> Check:
+        inst = list(s.installed_bundles()) if s.installed_bundles else []
+        return check_base(model_id=model_id, hub=hub, base_override=base_override,
+                          local_snapshot=s.local_snapshot, installed=inst, search=s.search_bundles)
+
+    base_check = None
+    try:
+        base_check = base()
+    except Exception as exc:
+        base_check = Check("base", BLOCK, f"could not check: {type(exc).__name__}: {exc}", "nearest-model-missing")
+    base_gb = 0.0
+    if base_check.data and base_check.data.get("needs_fetch"):
+        try:
+            base_hub, _ = s.hub_info(base_check.data["base"])
+            base_gb = base_hub.total_bytes / 1e9 if base_hub else 0.0
+        except Exception:
+            base_gb = 0.0
+
     def disk() -> Check:
         paths = {"hf_home": hf_home_for(cfg), "cache_root": cache_root_for(cfg)}
         return check_disk(free_gb={k: s.free_gb(p) for k, p in paths.items()},
-                          model_gb=(hub.total_bytes / 1e9 if hub else 0.0), local=local,
+                          model_gb=(hub.total_bytes / 1e9 if hub else 0.0) + base_gb, local=local,
                           min_free_gb=cfg.min_free_gb or TEST_DISK_GB,
                           same_device=bool(s.same_device(paths["hf_home"], paths["cache_root"])))
 
@@ -241,6 +320,7 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
     guarded("tiers", "config-invalid", lambda: check_tiers(s.load_tiers, Path(cfg.tiers), cfg.coder.port))
     guarded("port", "coder-unusable", lambda: check_port(cfg.coder.port, bool(s.port_in_use(cfg.coder.port)), resuming))
     guarded("gozer", "hardware-unhealthy", lambda: check_gozer(s.gozer_status()))
+    out.append(base_check)
     ref = cfg.reference_python
     guarded("reference", "config-invalid", lambda: check_reference(
         ref, s.reference_problem(ref) if ref is not None and s.reference_problem else None))
@@ -307,7 +387,14 @@ def default_signals(cfg) -> Signals:
         lines = (done.stderr or "").strip().splitlines()
         return lines[-1] if lines else f"exit {done.returncode}"
 
+    def models_root() -> Path:
+        if cfg.package_models_root:
+            return Path(cfg.package_models_root)
+        return Path(cfg.operator_home or supervisor.operator_home()) / ".cache" / "tt-model" / "models"
+
+    from orchard import nearest
     return Signals(
+        installed_bundles=lambda: nearest.read_installed(models_root()), search_bundles=nearest.search,
         hub_info=hub_info, local_snapshot=local_snapshot,
         free_gb=lambda p: shutil.disk_usage(_nearest_existing(p)).free / 1e9,
         same_device=lambda a, b: os.stat(_nearest_existing(a)).st_dev == os.stat(_nearest_existing(b)).st_dev,

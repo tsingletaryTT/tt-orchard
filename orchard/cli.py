@@ -30,7 +30,7 @@ import sys
 import time
 from pathlib import Path
 
-from orchard import __version__, bringup_config, fetch, lexicon, narrate, orchard_view, preflight, ui
+from orchard import __version__, bringup_config, fetch, lexicon, narrate, nearest, orchard_view, preflight, ui
 
 EXIT_OK, EXIT_REFUSED, EXIT_ERROR, EXIT_ABORTED, EXIT_BLOCKED = 0, 2, 3, 4, 5   # the supervisor's own codes
 CONFIG_ENV = "ORCHARD_BRINGUP_CONFIG"
@@ -75,6 +75,8 @@ def _parser() -> argparse.ArgumentParser:
     b.add_argument("--no-fetch", action="store_true", help="never download; the snapshot must be local")
     b.add_argument("--accept-credentials-visible", action="store_true",
                    help="start even though credential files are visible to agent shells (the ledger records it)")
+    b.add_argument("--base", help="the model to base the run on: a tt-model bundle (as `tt model search` lists "
+                                  "it) or a Hugging Face model id. Default: the model card's base_model")
     b.add_argument("--quiet", action="store_true", help="do not print what the run is doing as it goes")
     w = sub.add_parser("watch", parents=[common], help="follow a run: what each role is doing, live (read-only)")
     w.add_argument("model", nargs="?")
@@ -95,6 +97,63 @@ def _parser() -> argparse.ArgumentParser:
 def _refuse(message: str) -> int:
     print(f"refused: {message}", file=sys.stderr)
     return EXIT_REFUSED
+
+
+def _installed(sig) -> list:
+    return list(sig.installed_bundles()) if sig.installed_bundles else []
+
+
+def resolve_base(arg: str, sig, puller, out, style, *, dry_run: bool = False) -> tuple[str | None, str | None]:
+    """(the weights repo to base the run on, an error text). `arg` is an installed bundle, a model id that
+    an installed bundle serves, a published bundle (installed here with `tt-model pull`), or any other
+    model id, which the base check then judges."""
+    inst = _installed(sig)
+    for b in inst:
+        if b.name == arg:
+            return b.weights_repo, None
+    if any(b.weights_repo == arg for b in inst) or dry_run:
+        return arg, None
+    found = sig.search_bundles(nearest.family_query(arg)) if sig.search_bundles else None
+    if arg not in {c["name"] for c in found or []}:
+        return arg, None                                  # a model id
+    print(f"{style.icon('📦')}installing the bundle {arg} with `tt-model pull` (this can take a while)", file=out)
+    ok, why = puller(arg)
+    if not ok:
+        return None, f"`tt-model pull {arg}` failed: {why}"
+    for b in _installed(sig):
+        if b.name == arg:
+            return b.weights_repo, None
+    return None, f"{arg} was pulled but is not among the installed bundles tt-orchard looks at"
+
+
+def pick_base(candidates: list[dict], model: str, base: str, *, out, ask=input) -> str | None:
+    """Ask the operator which bundle to base the run on. Returns its name, or None for none."""
+    print(f"║  {model} is based on {base}, and no installed bundle serves it. Bundles found:", file=out)
+    for i, c in enumerate(candidates, 1):
+        tag = "installed" if c.get("installed") else "not installed (will be installed with tt-model pull)"
+        print(f"║    {i}. {c['name']}  [{tag}]", file=out)
+    print("║    0. none of these; stop", file=out)
+    while True:
+        try:
+            answer = ask("║  choose a number: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            return None
+        if answer in ("", "0"):
+            return None
+        if answer.isdigit() and 1 <= int(answer) <= len(candidates):
+            return candidates[int(answer) - 1]["name"]
+        print("║  not a choice", file=out)
+
+
+def _base_help(check, model: str, out) -> None:
+    cands = (check.data or {}).get("candidates") or []
+    print("╔══ How to choose a base", file=out)
+    if cands:
+        for c in cands:
+            print(f"║  tt-orchard bringup {model} --base {c['name']}"
+                  + ("" if c.get("installed") else "    (installs it first)"), file=out)
+    print("║  or install a bundle for the base yourself (`tt-model pull <bundle>`) and run bringup again", file=out)
+    print("╚══", file=out)
 
 
 def _print_block_digest(run_dir: Path, code: str, model: str, out) -> None:
@@ -127,13 +186,15 @@ def _watch(run_dir: Path, args, style, out) -> int:
     return EXIT_OK
 
 
-def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None, fetcher=None) -> int:
+def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None, fetcher=None,
+         chooser=None, puller=None) -> int:
     env = os.environ if env is None else env
     out = sys.stdout if stdout is None else stdout
     if supervisor_main is None:
         from orchard import supervisor
         supervisor_main = supervisor.main
     fetcher = fetcher or fetch.fetch_snapshot
+    puller = puller or nearest.pull
     args = _parser().parse_args(argv)
     style = ui.detect(out, env, getattr(args, "style", "auto"))
     home = Path(env.get("HOME") or Path.home())
@@ -169,12 +230,36 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
         return _refuse(str(exc))
     resuming = (run_dir / "ledger.jsonl").exists()
     sig = signals or preflight.default_signals(cfg)
-    checks = preflight.run_preflight(cfg, args.model, accept_credentials=args.accept_credentials_visible,
-                                     signals=sig, resuming=resuming)
-    print(orchard_view.render_preflight(args.model, run_dir, resuming, cfg_path, checks, style), file=out)
+    override = None
+    if args.base:
+        override, why = resolve_base(args.base, sig, puller, out, style, dry_run=args.dry_run)
+        if why:
+            return _refuse(why)
+
+    def preflight_page():
+        got = preflight.run_preflight(cfg, args.model, accept_credentials=args.accept_credentials_visible,
+                                      signals=sig, resuming=resuming, base_override=override)
+        print(orchard_view.render_preflight(args.model, run_dir, resuming, cfg_path, got, style), file=out)
+        return got
+
+    checks = preflight_page()
+    base_check = next(c for c in checks if c.name == "base")
+    if (base_check.status == preflight.BLOCK and (base_check.data or {}).get("candidates") and not args.base
+            and not args.dry_run):
+        if chooser is None and sys.stdin.isatty() and ui.stream_is_tty(out):
+            chooser = lambda c, m, b: pick_base(c, m, b, out=out)   # noqa: E731
+        pick = chooser(base_check.data["candidates"], args.model, base_check.data["base"]) if chooser else None
+        if pick:
+            override, why = resolve_base(pick, sig, puller, out, style)
+            if why:
+                return _refuse(why)
+            checks = preflight_page()
     stops = preflight.blocked(checks)
     if stops:
         print(lexicon.refused_line([c.reason for c in stops], style), file=out)
+        for c in stops:
+            if c.name == "base":
+                _base_help(c, args.model, out)
         return EXIT_REFUSED
 
     hub = checks[0].data
@@ -186,7 +271,15 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
         return _refuse("--no-fetch was given and the snapshot is not in " + str(hf_home))
     else:
         snapshot = fetch.snapshot_dir(hf_home, args.model, hub.sha)      # where the download will put it
-    argv_run = bringup_config.supervisor_argv(cfg, args.model, run_dir, inputs={"model": str(snapshot)},
+    base_data = next(c for c in checks if c.name == "base").data or {}
+    base_hub, base_snapshot = None, base_data.get("snapshot")
+    if base_data.get("needs_fetch"):
+        base_hub, why = sig.hub_info(base_data["base"])
+        if base_hub is None:
+            return _refuse(f"cannot look up the base model {base_data['base']} on the hub: {why}")
+        base_snapshot = fetch.snapshot_dir(hf_home, base_data["base"], base_hub.sha)
+    inputs = {"model": str(snapshot), **({"base": str(base_snapshot)} if base_snapshot else {})}
+    argv_run = bringup_config.supervisor_argv(cfg, args.model, run_dir, inputs=inputs,
                                               accept_credentials=args.accept_credentials_visible)
     command = "python3 -m orchard.supervisor " + shlex.join(argv_run)
     if args.dry_run:
@@ -198,6 +291,13 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
               f"{hf_home}", file=out)
         try:
             snapshot = Path(fetcher(args.model, hub.sha, hf_home, files=hub.files))
+        except fetch.FetchError as exc:
+            return _refuse(str(exc))
+    if base_hub is not None:
+        print(f"{style.icon('🌱')}fetching the base model {base_data['base']} at {base_hub.sha[:8]} "
+              f"({base_hub.total_bytes / 1e9:.1f} GB) into {hf_home}", file=out)
+        try:
+            fetcher(base_data["base"], base_hub.sha, hf_home, files=base_hub.files)
         except fetch.FetchError as exc:
             return _refuse(str(exc))
     narrator = None

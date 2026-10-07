@@ -656,3 +656,23 @@ escalation: ... turns no final answer after 60 turns".
   (`replay=6` on a fresh run) is equivalent, because the ledger does not exist when the first poll runs.
 - Not done: the stage 4 per-configuration test output is found by newest file under the stage, not by configuration;
   turn lines are not shown for the hardware tests' own subprocesses.
+
+## 2026-10-07 (later still): the base model preflight check (version 0.3.0)
+Prompt (operator): after the `jialinyyzz/humanizer` run stopped, "yes build that preflight check. we should do a `tt search
+gemma` in a case like this and ask if we want to select a matching model to base on."
+Cause of that run (read from its ledger, logs and the cache): the model is a fine-tune of `google/gemma-4-12B`; that base
+was not on disk and no installed bundle served it (only Qwen3.8-27B bundles were installed; the cache held manifest-only
+Gemma repos). Three coder boots and 105 agent turns went to `ls` on cache directories.
+- New `base` preflight check (`preflight.check_base`, `orchard/nearest.py`). The base is the card's `base_model` or
+  `--base`. An installed bundle must serve it (`tt_kernel_manifest.json` `weights.repo_id`). A missing snapshot is
+  downloaded and its size counts in the disk check. A card with no base is a warning. A base served only by a v5.1
+  container package is a warning, because the swap template expects a v6 thin bundle (read from the template, not run).
+- No bundle: block `nearest-model-missing`, after `tt model search <family>` (the official CLI first, `tt-model search`
+  as the fallback). Candidates: installed bundles of the family first, then the search results.
+  At a terminal `bringup` asks which to use and installs the pick with `tt-model pull`; in a script it prints the
+  `--base <bundle>` commands. `--base` takes a bundle or a model id and needs no prompt. A dry run never prompts or pulls.
+- The base snapshot path goes to the supervisor as `--input base=<path>` (the delta-triage skill already reads it).
+- 30 mutations; 2 survivors led to tests (dry run with `--base`, a `--base` that still blocks). A first mutation run was
+  meaningless because two tests were already failing; check the baseline is green before reading a mutation table.
+- Real dry run on this machine for the humanizer: the check blocks and lists the two Gemma bundles in about 10 seconds.
+- Not done: whether stage 2 can use a v5.1 container Gemma bundle; this run was not resumed.

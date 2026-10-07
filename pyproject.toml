@@ -1,6 +1,6 @@
 [project]
 name = "tt-orchard"
-version = "0.2.0"
+version = "0.3.0"
 description = "Supervisor that brings new models up on a Tenstorrent Quietbox with local open-source models."
 requires-python = ">=3.12"
 license = "Apache-2.0"
