@@ -75,7 +75,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
+import struct
 import subprocess
 import sys
 from pathlib import Path
@@ -107,10 +109,54 @@ def _once(count: int, what: str) -> None:
         raise EditError(f"expected exactly one {what} in the printed command, found {count}")
 
 
+# The same check as prepare_swap.py (each template is copied into the stage directory on its own, and a test
+# keeps the two sources identical).
+MTP_NAME = re.compile(r"(^|\.)mtp\.")
+
+
+def shard_tensor_names(path: Path) -> list[str] | None:
+    """Tensor names from a safetensors header, or None when the file is not readable as one."""
+    try:
+        with open(path, "rb") as f:
+            raw = f.read(8)
+            if len(raw) != 8:
+                return None
+            (n,) = struct.unpack("<Q", raw)
+            if not 0 < n <= 100 * 1024 * 1024:
+                return None
+            header = json.loads(f.read(n).decode("utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return None
+    return [k for k in header if k != "__metadata__"] if isinstance(header, dict) else None
+
+
+def has_mtp_tensors(new: Path) -> bool | None:
+    """Does the new model hold `mtp.*` tensors? Read from its weight index, else from the shard headers.
+    None when neither can be read, so the caller can leave things alone."""
+    try:
+        weight_map = json.loads((new / "model.safetensors.index.json").read_text(encoding="utf-8"))["weight_map"]
+        if isinstance(weight_map, dict):
+            return any(MTP_NAME.search(k) for k in weight_map)
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    shards = sorted(new.glob("*.safetensors"))
+    if not shards:
+        return None
+    names = []
+    for shard in shards:
+        got = shard_tensor_names(shard)
+        if got is None:
+            return None
+        names += got
+    return any(MTP_NAME.search(k) for k in names)
+
+
 def edit_docker_argv(argv: list[str], *, image: str, nearest: str, model_dir, tt_cache, hf_dir,
                      name: str, label: str, device_ids: list[int], port: int,
-                     blobs: list[str]) -> list[str]:
-    """The edited `docker run` argv (see the module docstring). Raises EditError."""
+                     blobs: list[str], drafter_off: bool = False) -> list[str]:
+    """The edited `docker run` argv (see the module docstring). Raises EditError. With `drafter_off`,
+    `--env QWEN36_DRAFTER=<x>` becomes `--env QWEN36_DRAFTER=` (at most one such option): the speculative
+    drafter needs the model's mtp.* tensors, and the engine dies at start without them."""
     if argv[:2] != ["docker", "run"]:
         raise EditError(f"the printed command does not start with 'docker run': {argv[:2]}")
     hits = [i for i, a in enumerate(argv) if a == image]
@@ -119,7 +165,7 @@ def edit_docker_argv(argv: list[str], *, image: str, nearest: str, model_dir, tt
     md = str(model_dir)
     out = ["docker", "run", "--detach"]
     seen = {"--name": 0, "/tensor-cache": 0, "/hf": 0, "HF_MODEL": 0, "MODEL_WEIGHTS_DIR": 0,
-            "TT_CACHE_PATH": 0}
+            "TT_CACHE_PATH": 0, "QWEN36_DRAFTER": 0}
     devices = []
     i = 0
     while i < len(opts):
@@ -167,6 +213,9 @@ def edit_docker_argv(argv: list[str], *, image: str, nearest: str, model_dir, tt
                     raise EditError(f"--env {val}: the tensor cache must be the /tensor-cache volume")
                 seen[key] += 1
                 out += [opt, val]
+            elif key == "QWEN36_DRAFTER" and drafter_off:
+                seen[key] += 1
+                out += [opt, "QWEN36_DRAFTER="]
             elif key != "HF_TOKEN":
                 out += [opt, val]
         else:
@@ -176,6 +225,8 @@ def edit_docker_argv(argv: list[str], *, image: str, nearest: str, model_dir, tt
     _once(seen["/hf"], "--volume <dir>:/hf")
     _once(seen["TT_CACHE_PATH"], "--env TT_CACHE_PATH=/tensor-cache")
     _once(seen["HF_MODEL"], "--env HF_MODEL=<id>")
+    if seen["QWEN36_DRAFTER"] > 1:
+        raise EditError(f"expected at most one --env QWEN36_DRAFTER, found {seen['QWEN36_DRAFTER']}")
     if seen["MODEL_WEIGHTS_DIR"] > 1:
         raise EditError(f"expected at most one --env MODEL_WEIGHTS_DIR, found {seen['MODEL_WEIGHTS_DIR']}")
     want = sorted(str(d) for d in device_ids)
@@ -315,7 +366,8 @@ def main() -> int:
                                 nearest=cfg["nearest_model_id"], model_dir=model_dir,
                                 tt_cache=cache, hf_dir=hf_dir,
                                 name=f"orchard-{cfg['chips']}chip-{cfg['port']}", label=label,
-                                device_ids=ids, port=int(cfg["port"]), blobs=blob_dirs(model_dir))
+                                device_ids=ids, port=int(cfg["port"]), blobs=blob_dirs(model_dir),
+                                drafter_off=(has_mtp_tensors(model_dir) is False))
     except EditError as exc:
         fail(str(exc))
     evidence = STAGE_DIR / "evidence"

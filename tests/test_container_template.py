@@ -103,6 +103,96 @@ def test_a_token_variable_is_not_passed_to_the_test_container(paths):
     assert "HF_TOKEN" not in edit(paths, printed=printed)
 
 
+# ---- the drafter and the MTP head ------------------------------------------------------------------
+# Same finding as in prepare_swap.py: a speculative drafter needs the model's mtp.* tensors.
+
+def printed(paths, **kw):
+    return printed_argv(hf=paths["hf"], pkg_cache=paths["pkg"], port=8100, device_ids=[0, 1, 2, 3], **kw)
+
+
+def second_drafter(paths):
+    """The usual printed command already sets QWEN36_DRAFTER=mtp; this adds a second option."""
+    argv = printed(paths)
+    k = argv.index(IMAGE)
+    return argv[:k] + ["--env", "QWEN36_DRAFTER=dflash2"] + argv[k:]
+
+
+def without_drafter(paths):
+    argv, out, i = printed(paths), [], 0
+    while i < len(argv):
+        if argv[i] == "--env" and argv[i + 1].startswith("QWEN36_DRAFTER"):
+            i += 2
+            continue
+        out.append(argv[i])
+        i += 1
+    return out
+
+
+def drafter_env(argv):
+    return [e for e in pairs(argv, "--env") if e.startswith("QWEN36_DRAFTER")]
+
+
+def test_the_drafter_is_cleared_when_the_new_model_has_no_mtp_tensors(paths):
+    assert drafter_env(edit(paths, drafter_off=True)) == ["QWEN36_DRAFTER="]
+
+
+def test_the_drafter_is_kept_when_the_model_has_mtp_tensors(paths):
+    assert drafter_env(edit(paths)) == ["QWEN36_DRAFTER=mtp"]
+    assert drafter_env(edit(paths, drafter_off=False)) == ["QWEN36_DRAFTER=mtp"]
+
+
+def test_a_command_without_a_drafter_variable_is_unchanged_by_drafter_off(paths):
+    plain = without_drafter(paths)
+    assert drafter_env(plain) == []
+    assert edit(paths, printed=plain, drafter_off=True) == edit(paths, printed=plain)
+
+
+def test_two_drafter_variables_cannot_be_cleared_because_one_cannot_be_chosen(paths):
+    with pytest.raises(sac.EditError) as exc:
+        edit(paths, printed=second_drafter(paths), drafter_off=True)
+    assert "QWEN36_DRAFTER" in str(exc.value)
+
+
+def test_two_drafter_variables_are_left_alone_when_the_drafter_is_kept(paths):
+    assert len(drafter_env(edit(paths, printed=second_drafter(paths)))) == 2
+
+
+def test_clearing_the_drafter_changes_nothing_else(paths):
+    kept, cleared = edit(paths), edit(paths, drafter_off=True)
+    assert [a for a in kept if not a.startswith("QWEN36_DRAFTER")] == [a for a in cleared if not a.startswith("QWEN36_DRAFTER")]
+
+
+def write_shard(path, names):
+    import json, struct
+    header = json.dumps({n: {"dtype": "BF16", "shape": [1], "data_offsets": [0, 2]} for n in names}).encode()
+    path.write_bytes(struct.pack("<Q", len(header)) + header + b"\0\0")
+
+
+def test_the_template_reads_mtp_tensors_from_the_model_directory(tmp_path):
+    import json
+    (tmp_path / "model.safetensors.index.json").write_text(json.dumps({"weight_map": {"a": "x", "mtp.fc.weight": "x"}}))
+    assert sac.has_mtp_tensors(tmp_path) is True
+    (tmp_path / "model.safetensors.index.json").write_text(json.dumps({"weight_map": {"a": "x"}}))
+    assert sac.has_mtp_tensors(tmp_path) is False
+    (tmp_path / "model.safetensors.index.json").unlink()
+    assert sac.has_mtp_tensors(tmp_path) is None                        # no index and no shards
+    write_shard(tmp_path / "model-1.safetensors", ["a", "model.language_model.mtp.norm.weight"])
+    assert sac.has_mtp_tensors(tmp_path) is True
+
+
+def test_the_two_templates_use_the_same_mtp_check():
+    """prepare_swap.py and serve_and_compare_container.py are copied into a stage directory on their own, so
+    each carries the check. They must not drift."""
+    import importlib.util
+    import inspect
+    spec = importlib.util.spec_from_file_location("prepare_swap_under_test", TEMPLATES / "prepare_swap.py")
+    ps = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ps)
+    for name in ("shard_tensor_names", "has_mtp_tensors"):
+        assert inspect.getsource(getattr(ps, name)) == inspect.getsource(getattr(sac, name)), name
+    assert ps.MTP_NAME.pattern == sac.MTP_NAME.pattern
+
+
 def bad(paths, change):
     printed = printed_argv(hf=paths["hf"], pkg_cache=paths["pkg"], port=8100, device_ids=[0, 1, 2, 3])
     return change(printed, paths)
@@ -357,3 +447,36 @@ def test_a_package_that_is_not_installed_exits_2(crig):
     r = crig["start"](package="someone/else-p300x2")
     assert r.returncode == 2 and "is not installed" in r.stderr
     assert docker_runs(crig) == []
+
+
+# ---- the drafter, through the whole script ------------------------------------------------------
+
+def run_env_values(rig, key):
+    argv = docker_runs(rig)[0]
+    return [argv[i + 1].split("=", 1)[1] for i, a in enumerate(argv[:-1])
+            if a == "--env" and argv[i + 1].startswith(key + "=")]
+
+
+def set_index(rig, keys):
+    (rig["cdir"] / "model-dir" / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {k: "model-00001-of-00001.safetensors" for k in keys}}))
+
+
+def test_a_model_without_mtp_tensors_is_served_with_the_drafter_cleared(crig):
+    set_index(crig, ["model.embed_tokens.weight", "lm_head.weight"])
+    r = crig["start"]()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert run_env_values(crig, "QWEN36_DRAFTER") == [""]
+
+
+def test_a_model_with_mtp_tensors_is_served_with_the_drafter_the_package_sets(crig):
+    set_index(crig, ["model.embed_tokens.weight", "mtp.fc.weight"])
+    r = crig["start"]()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert run_env_values(crig, "QWEN36_DRAFTER") == ["mtp"]
+
+
+def test_when_the_model_directory_cannot_say_the_drafter_is_left_as_the_package_sets_it(crig):
+    r = crig["start"]()                              # the fixture's weights file is not a safetensors file
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert run_env_values(crig, "QWEN36_DRAFTER") == ["mtp"]

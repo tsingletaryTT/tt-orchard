@@ -176,6 +176,107 @@ def test_prepare_exits_2_when_an_edit_does_not_happen_exactly_once(prep, edit, n
     assert not (prep["stage"] / "run.sh").exists()
 
 
+# ---- the drafter and the MTP head ----------------------------------------------------------------
+# The nearest bundle may serve with a speculative-decoding drafter that needs the model's `mtp.*` tensors.
+# Cloudflare/clef has none (it dropped them), so the bundle's engine died with "model has no MTP head" after
+# the image processor error was fixed (2026-10-06). When the new model has no mtp.* tensor the script
+# clears QWEN36_DRAFTER in its run.sh copy. When it cannot tell, it changes nothing.
+
+DRAFTER_LINE = 'export QWEN36_DRAFTER="dflash2"\n'
+
+
+def with_drafter(prep):
+    run = prep["bundle"] / "run.sh"
+    run.write_text(run.read_text().replace('CMD=(', DRAFTER_LINE + 'export DFLASH_WEIGHTS="incoai/x@abc"\nCMD=(', 1))
+
+
+def new_index(prep, keys):
+    """Replace the new snapshot's weight index with a real one that lists `keys`."""
+    blob = (prep["new"] / "model.safetensors.index.json").resolve()
+    blob.write_text(json.dumps({"metadata": {}, "weight_map": {k: "model-00001-of-00002.safetensors" for k in keys}}))
+
+
+def drafter_lines(prep):
+    return [l for l in (prep["stage"] / "run.sh").read_text().splitlines() if "QWEN36_DRAFTER" in l]
+
+
+def test_a_model_without_mtp_tensors_gets_the_drafter_cleared(prep):
+    with_drafter(prep)
+    new_index(prep, ["model.embed_tokens.weight", "model.layers.0.mlp.up_proj.weight", "lm_head.weight"])
+    r = run_prepare(prep["stage"])
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert drafter_lines(prep) == ['export QWEN36_DRAFTER=""']
+    assert "no mtp" in r.stdout.lower() and "drafter" in r.stdout.lower()
+
+
+def test_a_model_with_mtp_tensors_keeps_the_drafter(prep):
+    with_drafter(prep)
+    new_index(prep, ["model.embed_tokens.weight", "mtp.fc.weight", "mtp.layers.0.mlp.up_proj.weight"])
+    r = run_prepare(prep["stage"])
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert drafter_lines(prep) == [DRAFTER_LINE.strip()]
+
+
+def test_mtp_tensors_under_a_prefix_count_too(prep):
+    with_drafter(prep)
+    new_index(prep, ["model.embed_tokens.weight", "model.language_model.mtp.fc.weight"])
+    assert run_prepare(prep["stage"]).returncode == 0
+    assert drafter_lines(prep) == [DRAFTER_LINE.strip()]
+
+
+def test_a_name_that_only_contains_the_letters_mtp_is_not_an_mtp_tensor(prep):
+    with_drafter(prep)
+    new_index(prep, ["model.embed_tokens.weight", "model.layers.0.attn_mtpx.weight"])
+    assert run_prepare(prep["stage"]).returncode == 0
+    assert drafter_lines(prep) == ['export QWEN36_DRAFTER=""']
+
+
+def test_when_the_weights_cannot_be_read_nothing_is_changed_and_the_script_says_so(prep):
+    with_drafter(prep)                                  # the fixture's index and shards are not parseable
+    r = run_prepare(prep["stage"])
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert drafter_lines(prep) == [DRAFTER_LINE.strip()]
+    assert "could not tell" in r.stdout.lower()
+
+
+def test_without_an_index_the_shard_headers_are_read(prep):
+    import struct
+    with_drafter(prep)
+    (prep["new"] / "model.safetensors.index.json").unlink()
+    header = json.dumps({"model.embed_tokens.weight": {"dtype": "BF16", "shape": [1], "data_offsets": [0, 2]}}).encode()
+    for shard in sorted(prep["new"].glob("*.safetensors")):          # the fixture also has a model-mtp shard
+        shard.resolve().write_bytes(struct.pack("<Q", len(header)) + header + b"\0\0")
+    assert run_prepare(prep["stage"]).returncode == 0
+    assert drafter_lines(prep) == ['export QWEN36_DRAFTER=""']
+
+
+def test_a_bundle_with_no_drafter_line_is_left_alone_and_reported(prep):
+    new_index(prep, ["model.embed_tokens.weight"])
+    r = run_prepare(prep["stage"])
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert drafter_lines(prep) == []
+    assert "QWEN36_DRAFTER" in r.stdout and "absent" in r.stdout
+
+
+def test_two_drafter_lines_are_an_error_because_one_cannot_be_chosen(prep):
+    with_drafter(prep)
+    run = prep["bundle"] / "run.sh"
+    run.write_text(run.read_text().replace('CMD=(', DRAFTER_LINE + 'CMD=(', 1))
+    new_index(prep, ["model.embed_tokens.weight"])
+    r = run_prepare(prep["stage"])
+    assert r.returncode == 2 and "QWEN36_DRAFTER" in r.stdout + r.stderr
+    assert not (prep["stage"] / "run.sh").exists()
+
+
+def test_the_other_lines_of_run_sh_are_unchanged_when_the_drafter_is_cleared(prep):
+    with_drafter(prep)
+    new_index(prep, ["model.embed_tokens.weight"])
+    assert run_prepare(prep["stage"]).returncode == 0
+    text = (prep["stage"] / "run.sh").read_text()
+    assert 'export DFLASH_WEIGHTS="incoai/x@abc"' in text and 'export QWEN36_DRAFTER=""' in text
+    assert text.count("QWEN36_DRAFTER") == 1
+
+
 # ---- serve_and_compare.py ------------------------------------------------------------------------
 
 VOCAB = [a + b for a in ("ba", "de", "ki", "lo", "mu", "ra", "so", "tu") for b in ("n", "l", "r", "s", "t")]

@@ -73,6 +73,12 @@ Four facts decide whether a swap works. Each was found by failing first.
    the model directory it agreed on 30 of 32, and its free-run text matched the CPU text. The
    template sets `MODEL_WEIGHTS_DIR` and `HF_MODEL` for you and records both in `swap-check.json`.
 
+5. The bundle's speculative drafter needs the model's `mtp.*` tensors. If the new model has none (stage 0's
+   `tensors` finding says which tensors it lacks), a drafter bundle's engine dies at start with "model has no
+   MTP head". `prepare_swap.py` reads the new model's weight index and, when there is no `mtp.*` tensor,
+   writes `export QWEN36_DRAFTER=""` into its `run.sh`, so the bundle serves plain decoding. That gives the
+   same greedy tokens. You do nothing; the script prints what it did. Never edit `run.sh` yourself.
+
 ## Prepare phase: the steps
 
 1. Find four facts with a few commands:

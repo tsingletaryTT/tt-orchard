@@ -26,6 +26,14 @@ The weights-swap-check skill copies this file into the stage directory and runs 
      so `--model <model-dir>` alone serves the BASE weights. An absent line is reported; it is not
      an error, because serve_and_compare.py also sets both variables in the server's environment.
 
+   - when the new model has no `mtp.*` tensor, `export QWEN36_DRAFTER=...` becomes
+     `export QWEN36_DRAFTER=""` (at most one such line). The nearest bundle may serve with a speculative
+     drafter that needs the model's MTP head, and a model without those tensors dies at engine start with
+     "model has no MTP head" (Cloudflare/clef, 2026-10-06). With the drafter off the bundle serves plain
+     decoding, which gives the same greedy tokens, so the check measures the same weights. The check reads
+     the new model's `model.safetensors.index.json`, or the shard headers when there is no index. When it
+     cannot tell, the line is left alone and the script says so.
+
 An expected edit that does not happen exactly once exits 2 with a message that names it, and no
 run.sh is written. Everything else in the script, including its environment lines, stays as it is.
 
@@ -43,6 +51,7 @@ import os
 import re
 import shlex
 import shutil
+import struct
 import sys
 from pathlib import Path
 
@@ -103,7 +112,48 @@ def build_model_dir(base: Path, new: Path) -> tuple[Path, list[str], list[str], 
     return md, copied, linked, absent
 
 
-def edit_run_script(text: str, bundle: Path, nearest: str, model_dir: Path) -> tuple[str, list[str]]:
+MTP_NAME = re.compile(r"(^|\.)mtp\.")
+
+
+def shard_tensor_names(path: Path) -> list[str] | None:
+    """Tensor names from a safetensors header, or None when the file is not readable as one."""
+    try:
+        with open(path, "rb") as f:
+            raw = f.read(8)
+            if len(raw) != 8:
+                return None
+            (n,) = struct.unpack("<Q", raw)
+            if not 0 < n <= 100 * 1024 * 1024:
+                return None
+            header = json.loads(f.read(n).decode("utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return None
+    return [k for k in header if k != "__metadata__"] if isinstance(header, dict) else None
+
+
+def has_mtp_tensors(new: Path) -> bool | None:
+    """Does the new model hold `mtp.*` tensors? Read from its weight index, else from the shard headers.
+    None when neither can be read, so the caller can leave things alone."""
+    try:
+        weight_map = json.loads((new / "model.safetensors.index.json").read_text(encoding="utf-8"))["weight_map"]
+        if isinstance(weight_map, dict):
+            return any(MTP_NAME.search(k) for k in weight_map)
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    shards = sorted(new.glob("*.safetensors"))
+    if not shards:
+        return None
+    names = []
+    for shard in shards:
+        got = shard_tensor_names(shard)
+        if got is None:
+            return None
+        names += got
+    return any(MTP_NAME.search(k) for k in names)
+
+
+def edit_run_script(text: str, bundle: Path, nearest: str, model_dir: Path,
+                    drafter_off: bool = False) -> tuple[str, list[str]]:
     """Apply the edits. Returns (new text, notes about optional edits that did not apply)."""
     text, n = re.subn(r"^HERE=.*$", lambda m: f'HERE="{bundle}"', text, flags=re.MULTILINE)
     if n != 1:
@@ -120,6 +170,14 @@ def edit_run_script(text: str, bundle: Path, nearest: str, model_dir: Path) -> t
                      "HF_MODEL and MODEL_WEIGHTS_DIR itself)")
     else:
         notes.append(f'export HF_MODEL="{model_dir}" ({n} line(s) rewritten)')
+    if drafter_off:
+        text, n = re.subn(r"^([ \t]*)export[ \t]+QWEN36_DRAFTER=.*$",
+                          lambda m: f'{m.group(1)}export QWEN36_DRAFTER=""', text, flags=re.MULTILINE)
+        if n > 1:
+            fail(f"expected at most one export QWEN36_DRAFTER= line in {bundle / 'run.sh'}, found {n}")
+        notes.append('export QWEN36_DRAFTER="" (the new model has no mtp.* tensors, so the speculative drafter '
+                     "that needs the MTP head is switched off)" if n else
+                     "export QWEN36_DRAFTER=... was absent; nothing to clear")
     for flag in ("--revision", "--tokenizer-revision"):
         # The leading space keeps " --revision" from matching inside "--tokenizer-revision".
         text, n = re.subn(r" " + flag + r'\s+"?[0-9a-f]{40}"?(?=\s|$)', "", text)
@@ -143,8 +201,12 @@ def main() -> int:
         if not src_run.is_file():
             fail(f"{src_run} does not exist")
         # Edit in memory first, so a failed edit leaves no run.sh and no half-built model-dir.
+        mtp = has_mtp_tensors(new)
         text, notes = edit_run_script(src_run.read_text(encoding="utf-8"), bundle,
-                                      cfg["nearest_model_id"], model_dir)
+                                      cfg["nearest_model_id"], model_dir, drafter_off=(mtp is False))
+        if mtp is None:
+            notes.append("could not tell whether the new model has mtp.* tensors (no readable weight index or "
+                         "shard headers), so the drafter setting is unchanged")
     model_dir, copied, linked, absent = build_model_dir(base, new)
     print(f"model-dir: {model_dir}")
     print(f"  copied from base_snapshot: {', '.join(copied) or 'nothing'}")
