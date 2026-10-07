@@ -164,9 +164,13 @@ Role-fit test (`orchard/rolefit.py`, run before the coder is changed in `tiers.t
    idle.
 
 The result is a file under `docs/run-logs/` with the numbers, and `tiers.toml` changes only when the
-operator's rule passes. If a 2-chip Coder-Next fails, the large tier stays as it is. A blackhole
-build artifact must exist before any claim about 2 chips: the Phase 1 spike checks that
-`raahemnabeel/qwen3-coder-next-blackhole` pulls and lists as servable.
+operator's rule passes. If a 2-chip Coder-Next fails, the large tier stays as it is. Phase 1 result
+(`docs/run-logs/2026-10-06-bringup-spike.md`): the package exists and boots. The "2 chips" claim is one
+p300 board (2 dies) with bfp4 routed experts. The default profile `p300x2` takes all four chips. The
+test therefore runs on both profiles, and a tier that uses the 4-chip profile follows the existing
+park and restore rules like the large tier. One boot (681 s), a canary, one tool call and one throughput
+sample (39 tok/s decode, about 3,560 tok/s prefill on `p300`) passed; steps 2 to 4 above have not run.
+The package was built from a dirty, unpushed tt-metal tree, which the bundle records.
 
 ## 8. Proof that it works unattended
 
