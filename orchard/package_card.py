@@ -109,7 +109,7 @@ def render_card(f: CardFacts) -> str:
              f"# {f.name}", "",
              f"A tt-model v6 thin bundle that serves {f.model_id} (revision `{f.revision}`) on "
              f"{f.chips} Tenstorrent {f.arch} chips (mesh {f.mesh}). The tt-orchard harness staged it "
-             "from a run of that model. It is a draft for operator review.", "",
+             "from a run of that model.", "",
              "## License", ""]
     if non_commercial(f.license_id):
         lines.append(f"The weights this bundle points to are licensed {lic}. {NC_LINE} "
@@ -171,7 +171,7 @@ def render_card(f: CardFacts) -> str:
               "## Not measured", "", *[f"- {item}" for item in f.not_measured], "",
               "## Boot check", "",
               ("Stage 7 of the run installed this bundle, served it on a leased board and compared "
-               "its tokens with the CPU reference. The Numbers table has the result."
+               "its tokens with the CPU reference. The Expected performance table has the result."
                if f.verified else
                "This profile was not booted on hardware by the run. Boot it before publishing."),
               "", "## How to serve", "", f"    tt-model serve {f.namespace}/{f.name}", ""]
