@@ -22,10 +22,20 @@ anything.
 
 ## 1. Status
 
-tt-orchard is early. It has driven part of one bring-up on one machine. The machine is a
-Tenstorrent QuietBox 2 with two p300c boards (four Blackhole chips). The model was
-`Altworld/Hemmingway-1`, a fine-tune of `Qwen/Qwen3.8-27B` with the same architecture. That is one
-model from one family. Nothing has been run on any other machine.
+tt-orchard is early. It has run two bring-ups, both on one machine: a Tenstorrent QuietBox 2 with two
+p300c boards (four Blackhole chips). The first model was `Altworld/Hemmingway-1`, a fine-tune of
+`Qwen/Qwen3.8-27B`. The second was `Cloudflare/clef`, a post-train of the same model with a separate
+weights file for a task head (class `weights+sidecar`). Both are Qwen3.8-27B family models. Nothing has been
+run on any other machine.
+
+The Clef run was started with one command, `tt-orchard bringup Cloudflare/clef`, with Qwen3-Coder-Next on
+one board as the agent model, and it ended `ready for operator review` after 3 hours of wall time. It was
+not hands-off: it ended blocked twice and failed three times in stage 2, and each time the cause was a
+harness bug that was fixed in the code before the same command was run again (the run resumes from its
+ledger). Nobody edited a stage file or told an agent what to do. The fixes are listed in
+[the design spec](docs/superpowers/specs/2026-10-06-bringup-command-design.md) (section 12) and in `CLAUDE.md`.
+The shared Python environment on the development machine was changed by an agent's `pip install` before the
+runner refused those; see `CLAUDE.md`, 2026-10-06 (night).
 
 The harness has reached "ready for operator review" once, on one model, with a person watching: stages 0, 1, 2, 4, 7 and 8 passed and
 stages 3, 5 and 6 were skipped by design. It has never run unattended from start to finish. During that run a person paused
@@ -66,16 +76,16 @@ supervisor pauses before stage 2 for the operator.
 | Packaging (stage 7) | `orchard/package.py`, `orchard/package_card.py`, `orchard/package_templates/` | Built and tested with fakes, then run once on hardware (Hemmingway-1; see stage 7 above). Wired into the stage table as opt-in supervisor code. A v5.1 container package is refused at start |
 | Bundle and package scrub | `orchard/scrub.py` | Built and tested with fakes. The stage 8 gate calls it; it ran once on the real run |
 | CPU sizing tool | `orchard/sizing.py` | Built and tested against a fake server. It has not been run against a real ollama. The CPU numbers in this README come from the run log |
-| `tt-orchard` command | `orchard/cli.py`, `orchard/bringup_config.py`, `orchard/preflight.py`, `orchard/fetch.py`, `bin/tt-orchard` | Built and tested with fakes. The preflight ran for real on the development machine as a dry run for `Cloudflare/clef` (all checks passed except the credentials check, which needs the operator's decision). A run has not been started through it |
-| Outcome classes, blocked end state | `orchard/classes.py`, `orchard/blocked.py` | Built and tested with fakes. The sidecar class has run on hardware only inside the prototype (one board, Clef). No full run has used it |
-| Sidecar parity | `orchard/skills/sidecar-parity-templates/` | Built by a forked agent and run on one leased board with Clef (15 of 16 questions agree). Not yet run inside a supervisor run, and not run after a real swap check in the same lease |
+| `tt-orchard` command | `orchard/cli.py`, `orchard/bringup_config.py`, `orchard/preflight.py`, `orchard/fetch.py`, `bin/tt-orchard` | Built and tested with fakes, then used for the Clef run on the development machine (the preflight, the download check, the unattended end states and the retry path all ran for real) |
+| Outcome classes, blocked end state | `orchard/classes.py`, `orchard/blocked.py` | Built and tested with fakes. Both were used by the Clef run: the class `weights+sidecar` through stages 0, 2, 4 and 8, and the blocked end state twice, with a retry each time |
+| Sidecar parity | `orchard/skills/sidecar-parity-templates/` | Built by a forked agent and run on one leased board with Clef (15 of 16 questions agree), then run inside the supervisor's stage 2 after a swap check in the same lease with the same numbers |
 | Role-fit test | `orchard/rolefit.py` | Built and tested with fakes, then run against Qwen3-Coder-Next on one board (result in `docs/run-logs`) |
 | Hardware-check driver | `orchard/hardware_check.py` | Ran on both boards of the development machine, 22 to 24 checks passed per run |
 | Park-check driver | `orchard/park_check.py` | Ran once, on one board, with fake model servers. Exit 0, two resets of 41.7 s each (measured) |
 
 ### Tests
 
-The suite has 2429 passing tests and 1 skipped test (measured with
+The suite has 2515 passing tests and 1 skipped test (measured with
 `python3 -m pytest -q -p no:cacheprovider`). It needs no hardware and no network. The skipped test
 replays local agent transcripts and runs only when `ORCHARD_REPLAY=1` is set and those transcripts
 exist.

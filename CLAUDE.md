@@ -560,3 +560,30 @@ deleted the caches of abandoned attempts.
 Stage 7 will need the same drafter handling in `orchard/package.py` when a run packages a model without
 `mtp.*` tensors; it is not done, because this run does not use `--package-format`.
 
+## 2026-10-07: the first Clef bring-up reached `ready for operator review`
+`tt-orchard bringup Cloudflare/clef` (Coder-Next on one board, run directory `~/orchard-runs/cloudflare--clef`)
+ended `ready` after 11,092 s of ledger time. Stages 0, 1, 2 and 4 passed; 3, 5, 6 and 7 were skipped by design.
+- Stage 2 (swap check plus sidecar parity): 31 of 32 tokens, ready in 236 s on warm caches; parity hidden_pcc_min
+  0.954, top-1 agreement 15 of 16, largest probability difference 0.123 (the prototype's numbers, to the digit).
+- Stage 4: 1 chip 31 of 32 (1,256 s cold), 2 chips 31 of 32 (218 s), 4 chips 30 of 32 (254 s). The 4-chip test
+  parked the real coder (canary, stand-in, `tt-model stop`, reset) and restored it: the first park and restore
+  of a real model in a real run.
+- It was not hands-off. It ended blocked twice (stage 1 `stage-failed`, stage 2 `agent-stuck`) and stage 2 failed
+  three times; every cause was a harness bug, fixed in code before the same command was run again. The retry
+  path (`resume by retry`, a new coder boot, a fresh stage directory) worked each time.
+- What the bundle (`stages/8/bundle`) lacked, found by reading it: it did not mention the sidecar parity, the
+  class, or that every swap check ran with the speculative drafter off, and it said "the bundle has no check for
+  this hazard" about the sidecar. Fixed in `build_bundle.py` (class, sidecar and MTP rows, a parity section with
+  the bars, per-check serving state, and hazard dispositions from the evidence). The supervisor's original bundle
+  was left as built; a rebuilt copy is at `~/orchard-runs/cloudflare--clef-bundle-rebuilt`.
+- I tested the stage 2 swap fix by hand in a scratch stage directory with my own lease before another supervised
+  attempt; use that when a stage fails inside a long hardware test.
+- A trap I fell into again: `pgrep -f` in a wait loop matches the loop's own shell (the global CLAUDE.md says
+  so). Wait on the supervisor's recorded pid instead.
+- Not done: stage 7 packaging for a model without `mtp.*` tensors (`orchard/package.py` needs the same drafter and
+  sampling handling), a chaos run, the sidecar parity at 4 chips, image and video records, and a second sidecar
+  model. The shared TT venv was changed by an agent's pip install before the runner refused it (transformers
+  5.19.0, huggingface_hub 1.33.0, safetensors 0.8.0, tokenizers 0.23.2, requests, certifi at 21:45 PDT on
+  2026-10-06; SciPy now warns about numpy 2.5.3). The earlier versions were not recorded.
+- Suite: 2515 passed, 1 skipped.
+
