@@ -684,3 +684,42 @@ warning that names the files, and the ledger still records the acceptance. `--ac
 no-op so older commands work. `supervisor run` itself is unchanged and still refuses until the flag is passed. The
 exposure is the same as before (agent shells run as the operator and can read the files); only the default moved.
 Four mutations, all red.
+
+## 2026-10-07: `tt-orchard ui`, a browser page to watch and control runs (version 0.4.0)
+Prompt (operator, ezietlow): "build a full UI that will allow for monitoring and control of the orchard project. It
+needs to follow best practices for UI design and be an easy to use tool." Plan approved in chat: in this repository,
+loopback only (reach it with `ssh -L`), the full lifecycle (watch; pause, resume, abort; retry a blocked run; start a
+new bring-up through the preflight), stdlib server and plain HTML/CSS/JS with no build step.
+- `orchard/webui.py`: a `ThreadingHTTPServer` on 127.0.0.1:8780 (`tiers.LOCAL_HOSTS` only). Reads with
+  `status.collect` (gozer shared for 15 s), `ledger.read_entries`, and a `narrate.Narrator` subclass (`Feed`) whose
+  lines go to the page as server-sent events. Writes only `supervisor.Control` words, and only when the run can act on
+  them (pause or abort while running, resume while paused), and launches only a detached `tt-orchard bringup`
+  (`start_new_session`), for a new model when the preflight has no block or for a blocked or stopped run (retry).
+- Requests: the Host header must be a loopback name (DNS rebinding), every POST needs the per-process token from
+  `/api/meta` and a loopback Origin when one is sent. Files come from an allow-list (gate files, evidence, the bundle's
+  text, BLOCKED.md, coder.log; never the ledger, transcripts or the control file), stay inside the run (a symlink out
+  is refused), are tailed past 256 KB, and are redacted with the scrub's token and home-path patterns plus the host name.
+- `orchard/web/`: one page. Machine panel (boards and chips from `gozer status`, coder and CPU-tier ports, disk), runs
+  sorted by what needs a person, the selected run's state with orchard and real names, the `next:` hint, block and pause
+  panels, a nine-stage stepper, and tabs for the live feed, the ledger, the files and the details. Confirmations are
+  `<dialog>`s that say what happens; abort needs a second click. Light and dark themes from `ui.ROLES`, keyboard tabs,
+  `aria-live` feed, no external hosts (a CSP forbids them), every server string set with `textContent`.
+- 57 tests in `tests/test_webui.py`, written first. 14 mutations, one per guard (loopback host, token, Origin, Host
+  header, allow-list, symlink, redaction, control-state check, preflight block, one launch at a time, model id
+  validation, gozer cache, new session, retry state): all red.
+- Found in the browser, on node6 against real runs: an aborted run's open stage showed "running" with a clock still
+  counting (`stage_rows` reports an open stage as running whatever the run's state), two runs of one model could not be
+  told apart, polling rebuilt focused controls every few seconds (now only on change), and CLAIMED chips were coloured
+  as a fault.
+- The feed was not redacted at first: an agent's `ls ~/.cache/...` reached the page with the home path. Feed lines now
+  pass through the same redaction as files (test first; the mutation that skips it is red).
+- On node6's chips (QuietBox 2, gozer 0.3.3, Coder-Next on one board): the page ran the preflight for
+  Altworld/Hemmingway-1, started the bring-up detached, and followed it. Coder-Next booted cold in 10 min 22 s
+  (18:55:27 to 19:05:49Z) and passed its canary; stage 0 started. Pause from the page: paused within seconds, chips
+  still leased. Resume: running again about 5 s later. Abort (two clicks): `abort: operator` at 19:08:04Z, `hardware
+  released` at 19:08:47Z, then all four chips FREE, no container or supervisor left, port 8001 closed. While the
+  Coder-Next container served, gozer showed its board HELD-FOREIGN; the page now says why.
+- A hidden tab first stopped polling, so its title (the run's state) went stale; it now polls every 30 s.
+- Not done: screenshots in the README, a test of the page's own JavaScript (it is checked by hand in a browser and
+  by `node --check`), and `stage_rows` itself still calls an aborted run's open stage "running" (the page shows it
+  as stopped).

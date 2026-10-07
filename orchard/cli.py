@@ -6,6 +6,7 @@
     tt-orchard status   [MODEL | --run-dir DIR] [--json] [--style S]
     tt-orchard watch    [MODEL | --run-dir DIR] [--all] [--once] [--style S]
     tt-orchard pause | resume | abort   [MODEL | --run-dir DIR]
+    tt-orchard ui       [--host 127.0.0.1] [--port 8780]
 
 It is a thin layer over `python3 -m orchard.supervisor`. `bringup` reads config/bringup.toml, checks what
 can be checked without a lease (orchard/preflight.py), fetches the model snapshot when it is not local
@@ -23,6 +24,7 @@ The supervisor, the download and the outside signals are parameters of `main`, s
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import shlex
@@ -94,6 +96,11 @@ def _parser() -> argparse.ArgumentParser:
         c = sub.add_parser(word, parents=[common], help=f"send {word} to a running supervisor")
         c.add_argument("model", nargs="?")
         c.add_argument("--run-dir")
+    u = sub.add_parser("ui", parents=[common], help="watch and control the runs on this machine in a browser")
+    u.add_argument("--host", default="127.0.0.1",
+                   help="the loopback address to listen on (127.0.0.1, localhost or ::1); other addresses are "
+                        "refused. From another computer use `ssh -L 8780:localhost:8780 <box>`")
+    u.add_argument("--port", type=int, default=8780, help="the port to listen on (default 8780)")
     return p
 
 
@@ -189,6 +196,54 @@ def _watch(run_dir: Path, args, style, out) -> int:
     return EXIT_OK
 
 
+def _ui_preflight(cfg):
+    """The preflight the UI runs: the same checks as `bringup --dry-run`, with `--base` resolved without
+    installing anything (an install happens only when the run itself starts)."""
+    def run(model, base):
+        sig = preflight.default_signals(cfg)
+        override = None
+        if base:
+            override, why = resolve_base(base, sig, None, io.StringIO(), ui.Style("none", False), dry_run=True)
+            if why:
+                return [preflight.Check("base", preflight.BLOCK, why, "nearest-model-missing")]
+        resuming = (bringup_config.run_dir(cfg, model) / "ledger.jsonl").exists()
+        return preflight.run_preflight(cfg, model, accept_credentials=True, signals=sig, resuming=resuming,
+                                       base_override=override)
+    return run
+
+
+def _ui(args, env, home, out) -> int:
+    from orchard import tiers, webui
+    if args.host not in tiers.LOCAL_HOSTS:
+        return _refuse(f"--host {args.host} is not a loopback address; the UI listens only on "
+                       f"{', '.join(sorted(tiers.LOCAL_HOSTS))}. From another computer, forward the port: "
+                       f"ssh -L {args.port}:localhost:{args.port} <this machine>")
+    try:
+        path = find_config(getattr(args, "config", None), env, CHECKOUT, home)
+        cfg = bringup_config.load(path)
+    except (NoConfig, bringup_config.BringupConfigError) as exc:
+        return _refuse(str(exc))
+    app = webui.WebApp(runs_root=cfg.runs_root, config_path=path, cfg=cfg, preflight=_ui_preflight(cfg))
+    try:
+        server = webui.make_server(app, args.host, args.port)
+    except OSError as exc:
+        return _refuse(f"cannot listen on {args.host}:{args.port}: {exc}")
+    host = f"[{args.host}]" if ":" in args.host else args.host
+    print(f"tt-orchard ui {__version__}: http://{host}:{args.port}/  (runs in {cfg.runs_root})", file=out)
+    print(f"from another computer: ssh -L {args.port}:localhost:{args.port} {app.hostname}  "
+          f"then open http://localhost:{args.port}/", file=out)
+    print("Ctrl-C stops the page. It never stops a run.", file=out)
+    out.flush()
+    try:
+        server.serve_forever(poll_interval=0.5)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.stopping.set()                     # open live feeds end; serve_forever has already returned
+        server.server_close()
+    return EXIT_OK
+
+
 def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None, fetcher=None,
          chooser=None, puller=None) -> int:
     env = os.environ if env is None else env
@@ -205,6 +260,9 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
     def config():
         return bringup_config.load(find_config(getattr(args, "config", None), env, CHECKOUT, home)), \
             find_config(getattr(args, "config", None), env, CHECKOUT, home)
+
+    if args.cmd == "ui":
+        return _ui(args, env, home, out)
 
     # status and the control words only need a run directory.
     if args.cmd != "bringup":

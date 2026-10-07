@@ -415,6 +415,7 @@ tt-orchard bringup org/name --dry-run                         # the checks and t
 tt-orchard bringup org/name                                   # check, fetch, run
 tt-orchard bringup org/name --base <bundle or model id>       # base the run on this model
 tt-orchard watch org/name                                     # follow a run from another terminal
+tt-orchard ui                                                 # watch and control every run in a browser
 tt-orchard status org/name                                    # also pause, resume, abort
 tt-orchard --version
 ```
@@ -444,6 +445,34 @@ line of the test's output. `--quiet` turns this off. A resumed run starts by sho
 `tt-orchard watch org/name` prints the same lines from another terminal. It reads the ledger and the agent
 logs and writes nothing. It starts from the last 15 entries (`--all` starts from the first), follows the run
 until it ends, and `--once` prints the recent history and stops.
+
+#### In a browser: `tt-orchard ui`
+
+`tt-orchard ui` serves one page for the whole machine: the chips and who holds them, every run under
+`runs_root` (runs that need you first), and for the run you pick its stages, the same live lines as
+`watch`, the ledger, its files (gate results, evidence, the operator bundle, `BLOCKED.md`, the coder log)
+and what to do next.
+
+```bash
+tt-orchard ui                                  # http://127.0.0.1:8780/
+ssh -L 8780:localhost:8780 <the box>           # from your own computer, then open http://localhost:8780/
+```
+
+It listens on a loopback address only: `--host` takes `127.0.0.1`, `localhost` or `::1` and refuses
+anything else, and `--port` picks the port (default 8780). From another computer, forward the port over
+ssh as above. The page can pause, resume and abort a run (each behind a confirmation that says what
+happens; abort needs a second click), retry a run that ended blocked or stopped, and start a new
+bring-up after showing the preflight as a checklist. Start stays disabled while a check blocks, and
+when no installed bundle serves the base it lists the candidates to choose from. A run it starts is
+the same detached `tt-orchard bringup`, so it outlives the page, and Ctrl-C on `tt-orchard ui` never
+stops a run.
+
+What it will not do: publish, upload, push, reset chips or release leases. It reads runs the way
+`status` and `watch` do, without the ledger lock. It refuses a request that names another host (DNS
+rebinding) and a change that lacks the page's per-process token or comes from another site. Files are
+shown from an allow-list (never the ledger, the agent transcripts or the control file), and they,
+the ledger summaries and the live feed have tokens, the home path and the host name taken out. The code is [`orchard/webui.py`](orchard/webui.py) and
+[`orchard/web/`](orchard/web/).
 
 When a run ends blocked, the command prints what was tried in the stage that stopped (the watchdog's
 findings, the hardware test's last output, the agent's last actions) and what to do for that block code.
@@ -892,6 +921,7 @@ Each of these happened on the development machine. Details are in the
 | [`orchard/defaults.py`](orchard/defaults.py) | Every timing, budget and threshold, each labelled measured or choice |
 | [`orchard/skills/`](orchard/skills/) | The stage skills and the template scripts they copy (delta triage, reference gate, weights swap, operator bundle). These skills live in this repository. It also holds [`operator-runbook.md`](orchard/skills/operator-runbook.md), which is for whoever watches a run and is not a stage skill |
 | [`orchard/status.py`](orchard/status.py), [`orchard/operator_checks.py`](orchard/operator_checks.py) | The read-only `status` command and the post-run checks |
+| [`orchard/webui.py`](orchard/webui.py), [`orchard/web/`](orchard/web/) | `tt-orchard ui`: the browser page and its server |
 | [`orchard/package_templates/`](orchard/package_templates/) | The script each stage 7 package carries (`prepare_model_dir.py`) and stage 7's boot check (`verify_bundle.py`) |
 | [`config/tiers.example.toml`](config/tiers.example.toml) | The example tier config |
 | [`tests/`](tests/) | The test suite and its fakes |

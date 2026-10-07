@@ -1,0 +1,189 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>tt-orchard</title>
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/app.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#run-view">Skip to the selected run</a>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark" aria-hidden="true">🌳</span>
+    <span class="brand-name">tt-orchard</span>
+    <span class="brand-host" id="brand-host"></span>
+  </div>
+  <div class="topbar-right">
+    <span class="conn" id="conn" role="status" aria-live="polite"><span class="conn-dot" aria-hidden="true"></span><span class="conn-text">Connecting…</span></span>
+    <button type="button" class="btn btn-primary" id="new-run-btn">New bring-up</button>
+  </div>
+</header>
+
+<div class="layout">
+  <aside class="sidebar" aria-label="Machine and runs">
+    <section class="panel" aria-labelledby="machine-h">
+      <div class="panel-head">
+        <h2 id="machine-h">Machine</h2>
+        <span class="panel-note" id="machine-note"></span>
+      </div>
+      <div id="machine" class="machine"><p class="muted">Reading gozer…</p></div>
+    </section>
+
+    <section class="panel runs-panel" aria-labelledby="runs-h">
+      <div class="panel-head">
+        <h2 id="runs-h">Runs</h2>
+        <span class="panel-note" id="runs-note"></span>
+      </div>
+      <div id="launches"></div>
+      <ul id="runs" class="runs" aria-label="Runs on this machine"></ul>
+    </section>
+  </aside>
+
+  <main id="run-view" class="main" tabindex="-1">
+    <div id="run-empty" class="empty">
+      <h1>Pick a run</h1>
+      <p class="muted">Runs that need you are listed first. Start a new one with <strong>New bring-up</strong>.</p>
+    </div>
+
+    <article id="run" class="run" hidden>
+      <header class="run-head">
+        <div class="run-title">
+          <span class="badge" id="run-badge"></span>
+          <h1 id="run-model"></h1>
+          <p class="run-sub" id="run-sub"></p>
+        </div>
+        <div class="actions" id="run-actions" role="group" aria-label="Run actions"></div>
+      </header>
+
+      <p class="hint" id="run-hint"><span class="hint-label">Next</span><span id="run-hint-text"></span></p>
+
+      <section class="callout callout-bad" id="block-panel" hidden aria-labelledby="block-h">
+        <h2 id="block-h">Blocked</h2>
+        <p id="block-reason"></p>
+        <div class="callout-cols">
+          <div>
+            <h3>What was tried</h3>
+            <ul id="block-tried" class="plain-list"></ul>
+          </div>
+          <div>
+            <h3>How to unblock</h3>
+            <ul id="block-unblock" class="plain-list"></ul>
+          </div>
+        </div>
+      </section>
+
+      <section class="callout callout-warn" id="pause-panel" hidden aria-labelledby="pause-h">
+        <h2 id="pause-h">Paused</h2>
+        <p id="pause-reason"></p>
+      </section>
+
+      <section aria-labelledby="stages-h" class="stages-wrap">
+        <h2 id="stages-h" class="visually-hidden">Stages</h2>
+        <ol class="stepper" id="stepper"></ol>
+      </section>
+
+      <div class="tabs" role="tablist" aria-label="Run details" id="tabs">
+        <button type="button" role="tab" id="tab-feed" aria-controls="pane-feed" aria-selected="true">Live feed</button>
+        <button type="button" role="tab" id="tab-ledger" aria-controls="pane-ledger" aria-selected="false" tabindex="-1">Ledger</button>
+        <button type="button" role="tab" id="tab-files" aria-controls="pane-files" aria-selected="false" tabindex="-1">Files</button>
+        <button type="button" role="tab" id="tab-details" aria-controls="pane-details" aria-selected="false" tabindex="-1">Details</button>
+      </div>
+
+      <section role="tabpanel" id="pane-feed" aria-labelledby="tab-feed" class="pane">
+        <div class="pane-tools">
+          <label class="field-inline">Show
+            <select id="feed-filter">
+              <option value="">everyone</option>
+            </select>
+          </label>
+          <span class="feed-state" id="feed-state"></span>
+        </div>
+        <div class="feed-wrap">
+          <ol id="feed" class="feed" aria-live="polite" aria-relevant="additions" aria-label="What each role is doing"></ol>
+          <button type="button" class="btn btn-small jump" id="feed-jump" hidden>Jump to latest ↓</button>
+        </div>
+      </section>
+
+      <section role="tabpanel" id="pane-ledger" aria-labelledby="tab-ledger" class="pane" hidden>
+        <div class="pane-tools">
+          <label class="field-inline">Event
+            <select id="ledger-filter"><option value="">all</option></select>
+          </label>
+          <span class="muted" id="ledger-count"></span>
+        </div>
+        <div class="table-wrap">
+          <table class="ledger">
+            <thead><tr><th scope="col">#</th><th scope="col">Time</th><th scope="col">Stage</th><th scope="col">Event</th><th scope="col">Summary</th></tr></thead>
+            <tbody id="ledger-rows"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section role="tabpanel" id="pane-files" aria-labelledby="tab-files" class="pane" hidden>
+        <div class="files">
+          <nav class="file-list" id="file-list" aria-label="Run files"></nav>
+          <div class="file-view">
+            <div class="file-view-head"><span id="file-name" class="mono">Pick a file</span></div>
+            <pre id="file-body" class="file-body" tabindex="0"></pre>
+          </div>
+        </div>
+      </section>
+
+      <section role="tabpanel" id="pane-details" aria-labelledby="tab-details" class="pane" hidden>
+        <dl class="details" id="details"></dl>
+      </section>
+    </article>
+  </main>
+</div>
+
+<div id="toasts" class="toasts" role="status" aria-live="polite"></div>
+
+<dialog id="confirm" class="dialog" aria-labelledby="confirm-title">
+  <form method="dialog" class="dialog-body">
+    <h2 id="confirm-title"></h2>
+    <p id="confirm-text"></p>
+    <div class="dialog-actions">
+      <button type="button" class="btn" id="confirm-cancel">Cancel</button>
+      <button type="button" class="btn" id="confirm-ok"></button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="new-run" class="dialog dialog-wide" aria-labelledby="new-run-title">
+  <form class="dialog-body" id="new-run-form" novalidate>
+    <h2 id="new-run-title">New bring-up</h2>
+    <p class="muted">Checks run first, the same as <code>tt-orchard bringup --dry-run</code>. Nothing starts until you press <strong>Start bring-up</strong>.</p>
+    <div class="field">
+      <label for="nr-model">Hugging Face model</label>
+      <input id="nr-model" name="model" type="text" placeholder="org/name" autocomplete="off" spellcheck="false" required>
+      <p class="field-help">For example <span class="mono">Altworld/Hemmingway-1</span>.</p>
+    </div>
+    <div class="field">
+      <label for="nr-base">Base <span class="muted">(optional)</span></label>
+      <input id="nr-base" name="base" type="text" placeholder="the model card's base_model" autocomplete="off" spellcheck="false">
+      <p class="field-help">A tt-model bundle or model id to base the run on. Leave empty to use the model card.</p>
+    </div>
+    <p class="form-error" id="nr-error" role="alert" hidden></p>
+    <div id="nr-result" class="preflight" hidden>
+      <p class="preflight-run" id="nr-run"></p>
+      <ul class="checks" id="nr-checks"></ul>
+      <fieldset class="candidates" id="nr-candidates" hidden>
+        <legend>Choose a bundle to base the run on</legend>
+        <div id="nr-candidate-list"></div>
+      </fieldset>
+    </div>
+    <div class="dialog-actions">
+      <button type="button" class="btn" id="nr-cancel">Cancel</button>
+      <button type="submit" class="btn" id="nr-check">Run checks</button>
+      <button type="button" class="btn btn-primary" id="nr-start" disabled>Start bring-up</button>
+    </div>
+  </form>
+</dialog>
+</body>
+</html>
