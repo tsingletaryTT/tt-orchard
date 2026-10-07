@@ -625,3 +625,14 @@ requirements in `~/code/tt-model-manager` had been updated.
   cache, 1,515 s for the whole check. `clef-p150` (1 chip) was staged and not boot-checked, so it is not to be published.
 - Publish: `hf upload --private episod/clef-p300 ...` was blocked by the permission classifier (creates a Hub repo).
   Nothing was uploaded.
+
+## 2026-10-07 (later): evidence ships with the package; `episod/clef-p300` is public
+Prompt (operator): merge to main and push; fix the evidence-path gap; "you have my explicit permission to create the HF
+repo, as a public repo".
+- `copy_evidence` copies every file a measured card number cites into `evidence/<run-relative path>` with the run
+  directory, home directory (any user's) and host name replaced by `<RUN_DIR>`, `<HOME>`, `<HOST>`, and an installed
+  bundle path's org replaced (`<TT_MODEL_MODELS>/`), because that org is the operator's namespace and the scrub refuses
+  it. Over 5 MB is refused. `gate_package` fails a card that cites a file missing from `evidence/`. A token in evidence
+  fails the scrub in the gate. 13 mutations, 3 survivors led to tests, 1 was an equivalent mutant.
+- Uploaded with `hf upload --private`, then `tt-model publish episod/clef-p300` made it public and listed it in the
+  community catalog. Only the 2-chip profile. Pull and boot from the Hub is not tested. Delist: `tt-model unpublish`.
