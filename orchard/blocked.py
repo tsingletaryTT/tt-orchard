@@ -20,6 +20,7 @@ import json
 import time
 from pathlib import Path
 
+from orchard import narrate
 from orchard.stages import STAGES
 from orchard.status import classify_pause, stage_rows
 
@@ -94,8 +95,10 @@ def write_bundle(run_dir, entries: list[dict], code: str, reason: str, *, now: f
     names = _stage_names()
     for r in rows:
         lines.append(f"| {r['stage']} | {names.get(r['stage'], r['name'])} | {r['status']} | {r['wall_s']} | {r['attempts']} |")
-    lines += ["", "## What to do", "",
-              f"Fix what the reason names, then run `tt-orchard bringup {model}` again. The run resumes from its "
-              "ledger.", "The ledger, each stage's evidence and the agent logs are in this run directory.",
+    if stage is not None:
+        lines += ["", "## What was tried", ""] + narrate.what_was_tried(run_dir, stage=stage)
+    lines += ["", "## How to unblock", ""] + [f"- {a}" for a in narrate.how_to_unblock(code, model)]
+    lines += ["", f"The run resumes from its ledger when `tt-orchard bringup {model}` is run again. The ledger, each "
+              "stage's evidence and the agent logs are in this run directory.",
               "Nothing was published, pushed or uploaded."]
     (run_dir / "BLOCKED.md").write_text("\n".join(lines) + "\n", encoding="utf-8")

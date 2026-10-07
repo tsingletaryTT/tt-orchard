@@ -345,3 +345,110 @@ def test_a_blocked_exit_prints_the_reason_and_where_the_bundle_is(conf, tmp_path
 def test_a_blocked_exit_without_a_bundle_still_says_blocked(conf):
     got, out, rec = run(conf, ["bringup", "Cloudflare/clef"], rec=Recorder(5))
     assert got == 5 and "blocked" in out
+
+
+# ---- bringup and watch: say what is happening -------------------------------------------------
+
+class Writer(Recorder):
+    """A supervisor that writes ledger entries into the run directory it is given, as the real one does."""
+
+    def __init__(self, code=0, script=None):
+        super().__init__(code)
+        self.script = script or []
+
+    def supervisor(self, argv):
+        from orchard.ledger import Ledger
+        self.argv = argv
+        run_dir = Path(argv[argv.index("--run-dir") + 1])
+        run_dir.mkdir(parents=True, exist_ok=True)
+        with Ledger(run_dir / "ledger.jsonl") as led:
+            for ev, stage, data in self.script:
+                led.append(ev, stage, **data)
+        if self.code == 5:
+            from orchard import blocked
+            from orchard.ledger import read_entries
+            blocked.write_bundle(run_dir, read_entries(run_dir / "ledger.jsonl"), "stage-failed",
+                                 "stage 1 failed after escalation", now=0)
+        return self.code
+
+
+SCRIPT = [("run_start", None, {"model": "Cloudflare/clef", "coder": {"target": "pkg/coder"}}),
+          ("stage_start", 0, {"escalated": False, "resumed": False}),
+          ("stage_end", 0, {"result": "pass"})]
+
+
+def test_bringup_prints_what_the_supervisor_records_as_it_goes(conf):
+    code, out, _ = run(conf, ["bringup", "Cloudflare/clef"], rec=Writer(0, SCRIPT))
+    assert "stage 0 (survey): starting" in out and "stage 0 (survey): pass" in out
+    assert "orchardist" in out
+
+
+def test_quiet_turns_the_narration_off(conf):
+    code, out, _ = run(conf, ["bringup", "Cloudflare/clef", "--quiet"], rec=Writer(0, SCRIPT))
+    assert "stage 0 (survey)" not in out
+
+
+def test_a_blocked_run_ends_with_what_was_tried_and_how_to_unblock(conf):
+    script = SCRIPT[:2] + [("decision", 1, {"decision": "pause", "reason": "stage 1 failed after escalation"}),
+                           ("decision", None, {"decision": "blocked", "code": "stage-failed",
+                                               "reason": "stage 1 failed after escalation"})]
+    code, out, _ = run(conf, ["bringup", "Cloudflare/clef"], rec=Writer(5, script))
+    tail = out.split("frost")[-1]
+    assert code == 5 and "What was tried" in tail and "How to unblock" in tail
+    assert "tt-orchard bringup Cloudflare/clef" in tail
+
+
+def test_watch_once_shows_the_recent_history_and_stops(conf, tmp_path):
+    rec = Writer(0, SCRIPT)
+    run(conf, ["bringup", "Cloudflare/clef", "--quiet"], rec=rec)
+    code, out, _ = run(conf, ["watch", "Cloudflare/clef", "--once"])
+    assert code == 0 and "stage 0 (survey): pass" in out
+
+
+def test_watch_without_a_run_is_refused(conf, capsys):
+    code, out, _ = run(conf, ["watch", "Cloudflare/clef", "--once"])
+    assert code == 2 and "no run" in capsys.readouterr().err
+
+
+def test_watch_stops_by_itself_when_the_run_has_ended(conf):
+    import threading
+    script = SCRIPT + [("decision", None, {"decision": "ready for operator review", "bundle": "stages/8/bundle"})]
+    run(conf, ["bringup", "Cloudflare/clef", "--quiet"], rec=Writer(0, script))
+    result = {}
+    t = threading.Thread(target=lambda: result.update(r=run(conf, ["watch", "Cloudflare/clef"])), daemon=True)
+    t.start()
+    t.join(10)
+    assert not t.is_alive() and result["r"][0] == 0 and "ready for operator review" in result["r"][1]
+
+
+def test_the_narrator_stops_and_flushes_even_when_the_supervisor_raises(conf):
+    class Boom(Writer):
+        def supervisor(self, argv):
+            super().supervisor(argv)
+            raise RuntimeError("supervisor died")
+    with pytest.raises(RuntimeError):
+        out = Pipe()
+        cli.main(["--config", str(conf), "bringup", "Cloudflare/clef"], env={}, stdout=out, signals=signals(),
+                 supervisor_main=Boom(0, SCRIPT).supervisor, fetcher=Recorder().fetcher)
+    assert "stage 0 (survey): pass" in out.getvalue()
+
+
+def test_a_resumed_run_starts_by_showing_where_it_left_off(conf):
+    first = Writer(0, SCRIPT)
+    run(conf, ["bringup", "Cloudflare/clef", "--quiet"], rec=first)
+    code, out, _ = run(conf, ["bringup", "Cloudflare/clef"], rec=Writer(0, []))
+    assert "stage 0 (survey): pass" in out
+
+
+def test_a_fresh_run_does_not_replay_anything(conf):
+    code, out, _ = run(conf, ["bringup", "Cloudflare/clef"], rec=Writer(0, []))
+    assert "orchardist" not in out
+
+
+def test_watch_all_starts_from_the_first_entry(conf):
+    script = [("run_start", None, {"model": "Cloudflare/clef", "coder": {}})] + [
+        ("stage_start", 0, {"escalated": False, "resumed": False})] * 20
+    run(conf, ["bringup", "Cloudflare/clef", "--quiet"], rec=Writer(0, script))
+    _, recent, _ = run(conf, ["watch", "Cloudflare/clef", "--once"])
+    _, everything, _ = run(conf, ["watch", "Cloudflare/clef", "--once", "--all"])
+    assert "run started" not in recent and "run started" in everything

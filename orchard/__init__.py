@@ -2,4 +2,4 @@
 # SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """tt-orchard: supervisor for autonomous model bring-up on a Tenstorrent Quietbox."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

@@ -636,3 +636,23 @@ repo, as a public repo".
   fails the scrub in the gate. 13 mutations, 3 survivors led to tests, 1 was an equivalent mutant.
 - Uploaded with `hf upload --private`, then `tt-model publish episod/clef-p300` made it public and listed it in the
   community catalog. Only the 2-chip profile. Pull and boot from the Hub is not tested. Delist: `tt-model unpublish`.
+
+## 2026-10-07 (later): live narration, `tt-orchard watch`, and "what was tried" on a block (version 0.2.0)
+Prompt (operator): "we need to log more in this tool to the screen. when it's starting things, what each role is doing,
+etc. just had a failure / blocker but am just retrying it as it wasn't clear how to unblock. maybe if I'd seen what was
+tried in real time?" Before this, a run printed almost nothing and BLOCKED.md said only "stage 1 failed after
+escalation: ... turns no final answer after 60 turns".
+- `orchard/narrate.py`: `Narrator` follows the ledger (lock-free `read_entries`) and the agent logs
+  (`stages/*/log/*.jsonl`) and prints one line per event with the role: orchardist (supervisor), grafter (coder),
+  head grower (large tier), seasonal hand (CPU tier), sheepdog (watchdog). Agent turns show the command run, the file
+  read or written, and the result with the next turn. After 60 quiet seconds it says what it waits for; during a
+  hardware test it shows the last output line. A failed hardware test is followed by the end of its output. A
+  background thread polls once a second and gives up on its first error, saying so, so a narrator bug cannot stop a run.
+- `tt-orchard bringup` prints it (`--quiet` turns it off); a resumed run first shows its last six entries.
+  `tt-orchard watch` follows a run from another terminal (`--all`, `--once`) and exits when the run ends.
+- A block now prints, and `BLOCKED.md` holds, "What was tried" (watchdog findings, the test's last output, the agent's
+  last actions) and "How to unblock" per block code (`narrate.UNBLOCK`; a test ties its keys to `blocked.REASONS`).
+- A test caught `stop()` joining a thread that never started. 31 mutations; 4 survivors led to tests and one
+  (`replay=6` on a fresh run) is equivalent, because the ledger does not exist when the first poll runs.
+- Not done: the stage 4 per-configuration test output is found by newest file under the stage, not by configuration;
+  turn lines are not shown for the hardware tests' own subprocesses.

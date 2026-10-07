@@ -4,6 +4,7 @@
 
     tt-orchard bringup MODEL [--run-dir DIR] [--dry-run] [--no-fetch] [--accept-credentials-visible]
     tt-orchard status   [MODEL | --run-dir DIR] [--json] [--style S]
+    tt-orchard watch    [MODEL | --run-dir DIR] [--all] [--once] [--style S]
     tt-orchard pause | resume | abort   [MODEL | --run-dir DIR]
 
 It is a thin layer over `python3 -m orchard.supervisor`. `bringup` reads config/bringup.toml, checks what
@@ -26,9 +27,10 @@ import json
 import os
 import shlex
 import sys
+import time
 from pathlib import Path
 
-from orchard import __version__, bringup_config, fetch, lexicon, orchard_view, preflight, ui
+from orchard import __version__, bringup_config, fetch, lexicon, narrate, orchard_view, preflight, ui
 
 EXIT_OK, EXIT_REFUSED, EXIT_ERROR, EXIT_ABORTED, EXIT_BLOCKED = 0, 2, 3, 4, 5   # the supervisor's own codes
 CONFIG_ENV = "ORCHARD_BRINGUP_CONFIG"
@@ -73,6 +75,12 @@ def _parser() -> argparse.ArgumentParser:
     b.add_argument("--no-fetch", action="store_true", help="never download; the snapshot must be local")
     b.add_argument("--accept-credentials-visible", action="store_true",
                    help="start even though credential files are visible to agent shells (the ledger records it)")
+    b.add_argument("--quiet", action="store_true", help="do not print what the run is doing as it goes")
+    w = sub.add_parser("watch", parents=[common], help="follow a run: what each role is doing, live (read-only)")
+    w.add_argument("model", nargs="?")
+    w.add_argument("--run-dir")
+    w.add_argument("--all", action="store_true", help="start from the first entry, not the last 15")
+    w.add_argument("--once", action="store_true", help="print the recent history and stop")
     s = sub.add_parser("status", parents=[common], help="print the state of a run (read-only)")
     s.add_argument("model", nargs="?")
     s.add_argument("--run-dir")
@@ -87,6 +95,36 @@ def _parser() -> argparse.ArgumentParser:
 def _refuse(message: str) -> int:
     print(f"refused: {message}", file=sys.stderr)
     return EXIT_REFUSED
+
+
+def _print_block_digest(run_dir: Path, code: str, model: str, out) -> None:
+    """What was tried and what to do, under a left bar, after a run ends blocked."""
+    try:
+        stage = json.loads((run_dir / "blocked.json").read_text(encoding="utf-8")).get("stage")
+    except (OSError, ValueError):
+        stage = None
+    print("╔══ What was tried" + (f" in stage {stage}" if stage is not None else ""), file=out)
+    for line in (narrate.what_was_tried(run_dir, stage=stage) if stage is not None else ["Nothing was recorded."]):
+        print(f"║  {line}", file=out)
+    print("╠══ How to unblock", file=out)
+    for line in narrate.how_to_unblock(code, model):
+        print(f"║  - {line}", file=out)
+    print("╚══", file=out)
+
+
+def _watch(run_dir: Path, args, style, out) -> int:
+    """Follow a run from another terminal. Read-only: it never opens the ledger writer."""
+    if not (run_dir / "ledger.jsonl").exists():
+        return _refuse(f"no run at {run_dir} (there is no ledger there yet)")
+    n = narrate.Narrator(run_dir, style, out, replay=True if args.all else 15)
+    n.poll()
+    try:
+        while not args.once and not n.finished:
+            time.sleep(narrate.POLL_S)
+            n.poll()
+    except KeyboardInterrupt:
+        pass
+    return EXIT_OK
 
 
 def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None, fetcher=None) -> int:
@@ -115,6 +153,8 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
                 run_dir = str(bringup_config.run_dir(cfg, args.model))
             except (NoConfig, bringup_config.BringupConfigError) as exc:
                 return _refuse(str(exc))
+        if args.cmd == "watch":
+            return _watch(Path(run_dir), args, style, out)
         if args.cmd == "status":
             fwd = ["status", "--run-dir", run_dir] + (["--json"] if args.json else [])
             if hasattr(args, "style"):
@@ -160,7 +200,16 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
             snapshot = Path(fetcher(args.model, hub.sha, hf_home, files=hub.files))
         except fetch.FetchError as exc:
             return _refuse(str(exc))
-    code = supervisor_main(argv_run)
+    narrator = None
+    if not args.quiet:
+        # An existing run shows its last few entries first, so a resume says where it left off.
+        narrator = narrate.Narrator(run_dir, style, out, replay=6 if resuming else False)
+        narrator.start()
+    try:
+        code = supervisor_main(argv_run)
+    finally:
+        if narrator is not None:
+            narrator.stop()
     where = run_dir / "stages" / "8" / "bundle"
     if code == EXIT_OK:
         print(lexicon.closing_line("ready-for-operator-review", style, where=str(where)), file=out)
@@ -173,6 +222,7 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
             reason = "blocked"
         print(lexicon.frost_line(reason, style) + f" See {run_dir / 'BLOCKED.md'}. Run the same command "
               "again to retry.", file=out)
+        _print_block_digest(run_dir, reason, args.model, out)
     elif code == EXIT_ERROR:
         print(f"{style.icon('⛈')}the run stopped on an error and the hardware was released. Run the same "
               "command again to resume.", file=out)

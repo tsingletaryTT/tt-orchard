@@ -413,11 +413,40 @@ ln -s <ORCHARD_DIR>/bin/tt-orchard ~/.local/bin/tt-orchard     # a link, so it f
 cp config/bringup.example.toml config/bringup.toml            # then edit it; CHANGE-ME values are refused
 tt-orchard bringup org/name --dry-run                         # the checks and the command; starts nothing
 tt-orchard bringup org/name                                   # check, fetch, run
+tt-orchard watch org/name                                     # follow a run from another terminal
 tt-orchard status org/name                                    # also pause, resume, abort
 tt-orchard --version
 ```
 
 The name is `tt-orchard`, never `tt`: `tt` is the official Tenstorrent CLI.
+
+#### What it prints while it runs
+
+`bringup` prints a line for each thing that starts, ends or is tried, with the role that did it and the
+time. A run that stops tells you what was attempted:
+
+```
+05:20:31  orchardist    stage 2 (graft): starting
+05:20:31  grafter       Qwen/Qwen3-Coder-Next starts the prepare step (weights-swap-check)
+05:21:02  grafter       reads stages/2/evidence/swap-check.json
+05:21:02  grafter         got 5621 characters
+05:33:12  orchardist    hardware test failed (exit 4)
+05:37:42  orchardist    not asking the agent to retry: the hardware test exited with code 4
+05:41:10  sheepdog      stage 2 handed to the next tier. watchdog repeated_tool_call: the same tool call ...
+```
+
+The roles are the orchard names from [the lexicon](orchard/lexicon.py): `orchardist` (the supervisor),
+`grafter` (the coder), `head grower` (the large tier), `seasonal hand` (the CPU tier) and `sheepdog` (the
+watchdog). After a quiet minute it says what it is waiting for, and during a hardware test it shows the last
+line of the test's output. `--quiet` turns this off. A resumed run starts by showing its last six entries.
+
+`tt-orchard watch org/name` prints the same lines from another terminal. It reads the ledger and the agent
+logs and writes nothing. It starts from the last 15 entries (`--all` starts from the first), follows the run
+until it ends, and `--once` prints the recent history and stops.
+
+When a run ends blocked, the command prints what was tried in the stage that stopped (the watchdog's
+findings, the hardware test's last output, the agent's last actions) and what to do for that block code.
+`BLOCKED.md` in the run directory holds the same two sections.
 
 The preflight prints one row per check. A `BLOCK` stops the run before anything starts (exit 2) and names
 its reason; a `warn` is information.
