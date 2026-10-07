@@ -1,13 +1,46 @@
 # tt-orchard
 
-tt-orchard is a supervisor program that brings a new model up on a Tenstorrent machine. It drives
-the work with open-source models served on the same machine, and it calls no remote model service.
-A run starts from a Hugging Face model id and moves through nine stages, from comparing the new
-model with a model that already runs on the hardware to serving and measuring it on the chips.
-Every step, decision and evidence file is recorded in an append-only ledger, so a run can be
-paused, resumed and recovered after a crash. A run ends at a bundle of results, risks and draft
-publish commands for a person to review, and the harness never publishes, pushes or uploads
-anything.
+A new model lands on Hugging Face. You own a QuietBox 2. You want to know whether it runs on your
+Blackhole chips, and you want a package other people can serve with one command.
+
+tt-orchard does that work on the box itself. You give it a model id:
+
+```bash
+tt-orchard bringup Cloudflare/clef
+```
+
+It downloads the model, works out how it differs from a model that already runs on Tenstorrent
+hardware, writes and runs the tests, brings it up on the chips, checks its output against a CPU
+reference, and tries it on 1, 2 and 4 chips. It stops at a review bundle: results, risks, a model card
+and the publish commands as text, for you to read first.
+
+## The mission
+
+Bring up a model for a QuietBox 2, on a QuietBox 2, with only the compute the QuietBox 2 has.
+
+- **No remote model service.** The agents that write and run the tests are open-source models served on
+  the same machine. One p300 board serves the coder (Qwen3-Coder-Next). The CPU serves a fallback
+  (`qwen3-coder:30b` through ollama). The other board stays free for the new model's hardware tests.
+  Nothing calls out to a hosted model.
+- **One box, shared fairly.** Every chip is leased through [tt-gozer](https://github.com/tsingletaryTT/tt-gozer).
+  The supervisor never touches a chip it does not hold, and it never clears another agent's lease.
+- **A model tells you what it needs.** Each model is sorted into a class: weights only, weights plus a
+  sidecar, or a full port. A weights-only model can finish in hours. A model that needs new code
+  stops with a reason, and does not guess.
+- **It can be left alone.** Every step, decision and evidence file goes into an append-only ledger. A run
+  can be paused, resumed, and recovered after a crash. When it cannot go on, it stops as `blocked`,
+  says why, and releases the hardware.
+- **A person publishes.** The harness never publishes, pushes or uploads anything.
+
+### What it has done
+
+`Cloudflare/clef` is a post-train of Qwen3.8-27B with a separate task head. One command took it to
+`ready for operator review`: about 3 hours of ledger time on one QuietBox 2, with the coder on one board.
+The run ended with a 2-chip package, `episod/clef-p300`, which passed a boot check on the chips and matched
+the CPU reference on 31 of 32 tokens. It is public on Hugging Face and listed in the tt-model catalog.
+
+That run was not hands-off. It blocked twice and each time the cause was a bug in tt-orchard, fixed
+before the same command was run again. Section 1 has the details and the limits.
 
 ## Contents
 
