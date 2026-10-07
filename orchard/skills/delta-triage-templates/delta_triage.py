@@ -97,6 +97,7 @@ LM_PREFIX = "model.language_model."
 # Tensors one model may have and the other lack without new text-model code.
 EXPLAINED_EXTRA = re.compile(r"(^|\.)(visual|vision_tower|vision_model|vision|multi_modal_projector|"
                              r"mm_projector|mtp)(\.|$)")
+MTP_NAME = re.compile(r"(^|\.)mtp\.")        # the MTP head's tensors, with or without a prefix
 MAX_HEADER = 100 * 1024 * 1024          # a header larger than this is refused as corrupt
 
 GIB = float(1 << 30)
@@ -436,6 +437,8 @@ def compare_tensors(model_dir: Path, base_dir: Path) -> dict:
             "unexplained_only_in_base": [k for k in only_b if not EXPLAINED_EXTRA.search(k)]},
         "shape_diffs_normalized": shape_diffs,
         "dtype_diffs_normalized": dtype_diffs,
+        "mtp_tensors": {"model": sum(1 for k in mt if MTP_NAME.search(k)),
+                        "base": sum(1 for k in bt if MTP_NAME.search(k))},
         "vision_tensors": {"model": sum(1 for k in mn if re.search(r"(^|\.)(visual|vision)", k)),
                            "base": sum(1 for k in bn if re.search(r"(^|\.)(visual|vision)", k))},
     }
@@ -994,6 +997,16 @@ def hazards(model_id: str, nearest_id: str, t: dict, f: dict, g: dict, disk: dic
                      "against each heavy stage's need before it starts."),
          "evidence": [ev("disk-free.json"), ev("files-compare.json")]},
     ]
+    mtp = t["mtp_tensors"]
+    if mtp["model"] == 0 and mtp["base"] > 0:
+        out.append({"area": "drafter",
+                    "finding": (f"The new model has no mtp.* tensors; the nearest model ({nearest_id}) has "
+                                f"{mtp['base']}. A speculative drafter that needs the MTP head cannot run on "
+                                "the new model: the nearest bundle's engine stops at start with 'model has no "
+                                "MTP head'. Swap checks and packages must serve it without the drafter, and "
+                                "sampling then moves to the host. Speed figures from the nearest model's "
+                                "packages do not carry over."),
+                    "evidence": [ev("tensor-compare.json")]})
     if g["license_changed"] is True:
         out.append({"area": "license",
                     "finding": (f"The license changed from {g['base_license']['license']} (nearest model) to "
@@ -1045,6 +1058,7 @@ def main() -> int:
     delta = {
         "model": model_id, "nearest_model": nearest_id, "path": path, "class": cls,
         "path_reasons": reasons, "sidecars": sc["sidecars"], "code_files": code,
+        "mtp": {"nearest_tensors": t["mtp_tensors"]["base"], "new_tensors": t["mtp_tensors"]["model"]},
         "draft": ("written by delta_triage.py from the evidence files; the agent reviews each finding "
                   "and adds hazards it can justify"),
         "differences": [

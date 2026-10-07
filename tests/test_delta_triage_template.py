@@ -671,3 +671,65 @@ def test_a_pytorch_bin_file_next_to_the_shards_is_not_a_sidecar(text_case):
     assert run_triage(stage).returncode == 0
     d = delta(stage)
     assert d["sidecars"] == [] and d["class"] == "weights-only"
+
+
+# ---- the MTP head -------------------------------------------------------------------------------
+# The nearest bundle's speculative drafter needs mtp.* tensors. delta.json says how many each model has, so
+# the swap checks, stage 7 and the bundle can act on it without reading weights again.
+
+NO_MTP = {"mtp.fc.weight": None, "mtp.norm.weight": None}
+
+
+def test_the_counts_of_mtp_tensors_are_recorded(text_case):
+    stage = text_case()
+    assert run_triage(stage).returncode == 0
+    assert delta(stage)["mtp"] == {"nearest_tensors": 2, "new_tensors": 2}
+
+
+def test_a_model_without_mtp_tensors_is_still_weights_only_and_gets_a_drafter_hazard(text_case):
+    stage = text_case(tensor_change=NO_MTP)
+    assert run_triage(stage).returncode == 0
+    d = delta(stage)
+    assert d["path"] == "weights-only" and d["mtp"] == {"nearest_tensors": 2, "new_tensors": 0}
+    drafter = [h for h in d["hazards"] if h["area"] == "drafter"]
+    assert len(drafter) == 2 and any("no mtp" in h["finding"].lower() and "MTP head" in h["finding"] for h in drafter)
+
+
+def test_a_model_that_keeps_its_mtp_tensors_gets_only_the_standing_drafter_hazard(text_case):
+    stage = text_case()
+    assert run_triage(stage).returncode == 0
+    assert len([h for h in delta(stage)["hazards"] if h["area"] == "drafter"]) == 1
+
+
+def test_the_draft_with_an_mtp_count_still_passes_the_stage_0_gate(text_case):
+    stage = text_case(tensor_change=NO_MTP)
+    assert run_triage(stage).returncode == 0
+    gate = gate_delta(stage, stage.parent.parent)
+    assert gate.ok, gate.reasons
+
+
+def test_the_mtp_tensors_are_counted_after_the_language_model_prefix_is_normalized(tmp_path, tokenizer_json):
+    model = make_snapshot(tmp_path / "new", MODEL_REV, nested=True, vision=True, tokenizer=tokenizer_json,
+                          tensor_change={"model.language_model.mtp.extra.weight": ("BF16", [H])})
+    nearest = make_snapshot(tmp_path / "base", BASE_REV, nested=True, vision=True, tokenizer=tokenizer_json)
+    stage = stage_for(tmp_path, model, nearest)
+    assert run_triage(stage).returncode == 0
+    assert delta(stage)["mtp"] == {"nearest_tensors": 2, "new_tensors": 3}
+
+
+def test_a_tensor_that_only_contains_the_letters_mtp_is_not_counted(text_case):
+    stage = text_case(tensor_change={"model.layers.0.attn_mtpx.weight": ("BF16", [H])})
+    assert run_triage(stage).returncode == 0
+    assert delta(stage)["mtp"] == {"nearest_tensors": 2, "new_tensors": 2}
+
+
+def test_no_drafter_hazard_is_added_when_neither_model_has_mtp_tensors(tmp_path, tokenizer_json):
+    model = make_snapshot(tmp_path / "new", MODEL_REV, nested=False, vision=False, tokenizer=tokenizer_json,
+                          tensor_change=NO_MTP)
+    nearest = make_snapshot(tmp_path / "base", BASE_REV, nested=True, vision=True, tokenizer=tokenizer_json,
+                            tensor_change={"mtp.fc.weight": None, "mtp.norm.weight": None})
+    stage = stage_for(tmp_path, model, nearest)
+    assert run_triage(stage).returncode == 0
+    d = delta(stage)
+    assert d["mtp"] == {"nearest_tensors": 0, "new_tensors": 0}
+    assert len([h for h in d["hazards"] if h["area"] == "drafter"]) == 1

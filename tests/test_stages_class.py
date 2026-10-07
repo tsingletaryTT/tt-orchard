@@ -262,3 +262,22 @@ def test_the_thresholds_are_labelled_choices_in_defaults():
                  "SIDECAR_NOISE_FACTOR"):
         line = next(l for l in src.splitlines() if l.startswith(name))
         assert "choice" in line.lower() or "measured" in line.lower(), line
+
+
+# ---- the mtp counts in delta.json -------------------------------------------------------------
+
+@pytest.mark.parametrize("mtp", [{"nearest_tensors": 15, "new_tensors": 0}, {"nearest_tensors": 0, "new_tensors": 0}])
+def test_the_gate_accepts_mtp_counts(tmp_path, mtp):
+    g = gate(tmp_path, {**GOOD_DELTA, "mtp": mtp})
+    assert g.ok, g.reasons
+
+
+@pytest.mark.parametrize("mtp", ["some", {"nearest_tensors": -1, "new_tensors": 0}, {"nearest_tensors": 1},
+                                 {"nearest_tensors": True, "new_tensors": 0}, {"nearest_tensors": 1.5, "new_tensors": 0}])
+def test_the_gate_refuses_malformed_mtp_counts(tmp_path, mtp):
+    g = gate(tmp_path, {**GOOD_DELTA, "mtp": mtp})
+    assert not g.ok and any("mtp" in r for r in g.reasons), g.reasons
+
+
+def test_a_delta_without_mtp_counts_still_passes(tmp_path):
+    assert gate(tmp_path, GOOD_DELTA).ok

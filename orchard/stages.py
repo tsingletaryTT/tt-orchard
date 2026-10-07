@@ -206,6 +206,12 @@ def _class_reasons(d: dict) -> list[str]:
         reasons.append("class weights+sidecar needs at least one entry in sidecars")
     if "class" in d and d["class"] != "weights+sidecar" and sidecars:
         reasons.append(f"class {d['class']!r} cannot have sidecars; only weights+sidecar does")
+    if "mtp" in d:
+        m = d["mtp"]
+        counts = (m.get("nearest_tensors"), m.get("new_tensors")) if isinstance(m, dict) else ()
+        if len(counts) != 2 or any(isinstance(c, bool) or not isinstance(c, int) or c < 0 for c in counts):
+            reasons.append('delta.json mtp must be {"nearest_tensors": N, "new_tensors": M} with whole numbers '
+                           "of zero or more")
     code = d.get("code_files", [])
     if not isinstance(code, list):
         reasons.append("delta.json code_files must be a list")
