@@ -1443,6 +1443,8 @@ def parse(argv=None):
     st = sub.add_parser("status", help="print the state of a run (read-only; no lock, no writes)")
     st.add_argument("--run-dir", required=True)
     st.add_argument("--json", action="store_true", help="print the facts as one JSON object")
+    st.add_argument("--style", choices=("auto", "pretty", "plain"), default=None,
+                    help="auto (default): colour and emoji on a capable terminal, plain text otherwise")
     return p.parse_args(argv)
 
 
@@ -1558,7 +1560,8 @@ def main(argv=None, *, home=None) -> int:
     if args.cmd == "status":
         # Read-only: orchard/status.py never opens the ledger writer, so it works next to a live run.
         from orchard import status
-        return status.main(["--run-dir", args.run_dir] + (["--json"] if args.json else []))
+        return status.main(["--run-dir", args.run_dir] + (["--json"] if args.json else [])
+                           + (["--style", args.style] if args.style else []))
     run_dir = Path(args.run_dir)
     try:
         with Ledger(run_dir / "ledger.jsonl") as ledger:

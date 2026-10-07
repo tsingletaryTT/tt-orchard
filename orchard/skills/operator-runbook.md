@@ -23,7 +23,7 @@ Do these five steps, in order, every time. Run one command per step.
 
 1. Run status:
 
-       python3 -m orchard.supervisor status --run-dir {{RUN_DIR}}
+       python3 -m orchard.supervisor status --run-dir {{RUN_DIR}} --style plain
 
 2. Read the lines `state:`, `paused at`, `disk free:` and `next:`. Find the row in the table below.
 3. Do the one action in that row. Do nothing else.
@@ -114,7 +114,7 @@ Run these checks, in this order. Each is one command.
 
 1. The ledger chain. Status must print `ledger: ok`:
 
-       python3 -m orchard.supervisor status --run-dir {{RUN_DIR}}
+       python3 -m orchard.supervisor status --run-dir {{RUN_DIR}} --style plain
 
 2. Publish and secret checks. They look for publish-like tool calls, repos that already exist on the
    hub, and hostnames, tokens or home paths in the bundle:

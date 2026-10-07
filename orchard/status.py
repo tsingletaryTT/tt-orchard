@@ -60,6 +60,7 @@ import sys
 import time
 from pathlib import Path
 
+from orchard import orchard_view, ui
 from orchard.defaults import TEST_DISK_GB
 from orchard.ledger import LedgerCorrupt, read_entries
 from orchard.stages import STAGES, ledger_ts, run_progress
@@ -434,6 +435,9 @@ def main(argv=None) -> int:
                                 description="read-only status of a run (takes no lock, changes nothing)")
     p.add_argument("--run-dir", required=True)
     p.add_argument("--json", action="store_true", help="print the facts as one JSON object")
+    p.add_argument("--style", choices=ui.STYLES, default="auto",
+                   help="auto: colour and emoji on a capable terminal, plain text otherwise (default); "
+                        "pretty: always decorate; plain: never decorate. --json is never styled")
     args = p.parse_args(argv)
     run_dir = Path(args.run_dir)
     if not run_dir.is_dir():
@@ -447,7 +451,11 @@ def main(argv=None) -> int:
         else:
             print(f"ledger: CORRUPT ({exc}). Do not touch the run. Stop and ask a human.")
         return EXIT_BAD
-    print(json.dumps(facts, indent=2, sort_keys=True) if args.json else render(facts))
+    if args.json:
+        print(json.dumps(facts, indent=2, sort_keys=True))
+        return EXIT_OK
+    style = ui.detect(sys.stdout, os.environ, args.style)
+    print(orchard_view.render_pretty(facts, style) if style.pretty else render(facts))
     return EXIT_OK
 
 
