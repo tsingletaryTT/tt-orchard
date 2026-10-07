@@ -409,3 +409,26 @@ def test_an_explicit_model_id_in_the_config_wins(tmp_path):
     assert hp.read_config(p)["model_id"] == "me/mine@1"
     p.write_text(json.dumps(PLAN_CONFIG))
     assert hp.read_config(p)["model_id"] == "Cloudflare/clef@abc123"
+
+
+# ---- per-question detail ---------------------------------------------------------------------------------
+
+def test_question_details_pair_each_questions_options_with_both_probability_lists():
+    from types import SimpleNamespace as NS
+    qs = [NS(question_id="dept", option_ids=("billing", "technical")), NS(question_id="down", option_ids=("true", "false"))]
+    out = hp.question_details(qs, [[0.9, 0.1], [0.4, 0.6]], [[0.8, 0.2], [0.6, 0.4]])
+    assert out[0] == {"id": "dept", "options": ["billing", "technical"], "ref": [0.9, 0.1], "dev": [0.8, 0.2],
+                      "agree": True, "ref_margin": pytest.approx(0.8), "dev_margin": pytest.approx(0.6)}
+    assert out[1]["agree"] is False and out[1]["ref_margin"] == pytest.approx(0.2)
+
+
+def test_a_question_with_one_option_has_a_margin_of_its_probability():
+    from types import SimpleNamespace as NS
+    out = hp.question_details([NS(question_id="q", option_ids=("only",))], [[1.0]], [[1.0]])
+    assert out[0]["ref_margin"] == 1.0 and out[0]["agree"] is True
+
+
+def test_the_detail_lists_must_line_up_with_the_questions():
+    from types import SimpleNamespace as NS
+    with pytest.raises(ValueError):
+        hp.question_details([NS(question_id="q", option_ids=("a", "b"))], [[0.5, 0.5], [0.5, 0.5]], [[0.5, 0.5]])

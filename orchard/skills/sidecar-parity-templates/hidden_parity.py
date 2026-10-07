@@ -252,6 +252,26 @@ def record_metrics(record_id: str, ref_hidden, dev_hidden, ref_probs, dev_probs)
             "n_questions": len(ref_probs)}
 
 
+def _margin(probs: list[float]) -> float:
+    """Top probability minus the runner-up (the top probability alone for a single option)."""
+    ordered = sorted(probs, reverse=True)
+    return ordered[0] - (ordered[1] if len(ordered) > 1 else 0.0)
+
+
+def question_details(questions, ref_probs, dev_probs) -> list[dict]:
+    """One entry per question: its options, the reference's and the device's probabilities, whether the top
+    choice agrees and how clear each side's top choice was. A disagreement with a small margin on both sides is
+    a near tie; one with a large margin on either side is not."""
+    if not (len(questions) == len(ref_probs) == len(dev_probs)):
+        raise ValueError("questions and probability lists have different lengths")
+    out = []
+    for q, ref, dev in zip(questions, ref_probs, dev_probs):
+        top = lambda p: max(range(len(p)), key=p.__getitem__)
+        out.append({"id": q.question_id, "options": list(q.option_ids), "ref": ref, "dev": dev,
+                    "agree": top(ref) == top(dev), "ref_margin": _margin(ref), "dev_margin": _margin(dev)})
+    return out
+
+
 def pad_length(n: int) -> int:
     return -(-n // PAD_MULTIPLE) * PAD_MULTIPLE
 
@@ -593,7 +613,9 @@ def run_device(cfg: dict, records: list[dict], ref: dict, sidecar, tokenizer, ev
         ref_probs, dev_probs = probs_from_logits(ref["logits"]), probs_from_logits(dev_logits)
         per = [record_metrics(r["id"], ref["hidden"][i].float(), dev_hidden[i].float(), ref_probs[i], dev_probs[i])
                for i, r in enumerate(records)]
-        noise = {"prob_max_abs_diff": max_abs_prob_diff(ref_probs, probs_from_logits(ref["noise_logits"]))}
+        for i, row in enumerate(per):
+            row["questions"] = question_details(encoded[i].questions, ref_probs[i], dev_probs[i])
+        noise ={"prob_max_abs_diff": max_abs_prob_diff(ref_probs, probs_from_logits(ref["noise_logits"]))}
         meta = {"tt_metal_sha": runtime_versions()["ttnn"], "versions": runtime_versions(),
                 "code_sha256": sha256_file(Path(cfg["model_snapshot"]) / cfg["code_file"]),
                 "head_sha256": sha256_file(Path(cfg["model_snapshot"]) / cfg["head_file"]),
