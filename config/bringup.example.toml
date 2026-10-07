@@ -1,0 +1,47 @@
+# Defaults for `tt-orchard bringup MODEL`. Copy to config/bringup.toml and edit. Not committed (see .gitignore).
+# A value that still says CHANGE-ME is refused, so the command cannot start on an unedited copy.
+# Relative paths are relative to this file's directory.
+
+# Each model gets <runs_root>/<org>--<name> as its run directory. Starting again on the same model
+# resumes the run in that directory.
+runs_root = "CHANGE-ME/orchard-runs"
+
+# The tier config the supervisor reads. Default: tiers.toml beside this file.
+# tiers = "tiers.toml"
+
+# Where per-model tensor caches go, the operator's Hugging Face cache, and the operator's home.
+# Leave a line out to get the supervisor's default (see the README, section 4.2).
+# cache_root = "CHANGE-ME/cache"
+# hf_home = "CHANGE-ME/hf"
+# operator_home = "CHANGE-ME/home"
+
+# gozer executable, default "gozer".
+# gozer = "gozer"
+
+# Chip counts stage 4 must pass. Any other count it records is optional.
+required_chips = "2,4"
+
+# More skill directories, searched after orchard/skills.
+# skills_dirs = ["CHANGE-ME/skills/plugins/tt-model-bringup/skills"]
+
+# Stage 7 builds a v6 thin package on the weights-only path when both are set (the run never publishes).
+# package_format = "v6"
+# package_namespace = "CHANGE-ME"
+
+# Free space the preflight wants on the cache disks, on top of the model's own size. Default: the
+# supervisor's TEST_DISK_GB.
+# min_free_gb = 40
+
+# Variables for agent shells. Names that look like credentials are refused.
+[env]
+HF_HUB_OFFLINE = "1"
+
+# The model that serves the agents, on the chips. The port must be the endpoint port of exactly one
+# `chips` tier in the tier config.
+[coder]
+target = "CHANGE-ME/coder-package"
+# kind = "container"        # or "bundle"
+# profile = "default"
+port = 8000
+chips = 4
+# image_id = ""
