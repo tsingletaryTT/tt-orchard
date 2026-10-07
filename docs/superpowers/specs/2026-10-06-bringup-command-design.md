@@ -1,7 +1,7 @@
 # `tt-orchard bringup`: unattended bring-up by outcome class
 
-Date: 2026-10-06. Status: written for review; the operator asked to start executing at the same
-time, so Phase 1 (a spike) begins before sign-off. Phases 2 to 4 wait for the spike's answers.
+Date: 2026-10-06. Status: built and running. The operator asked to start executing at the same time as the
+spec was written, then told the harness to proceed for hours. Section 12 records what each phase found.
 
 ## 1. Intent
 
@@ -226,3 +226,38 @@ The model-selection arbiter; any 122B tier; publishing; the full-port path beyon
   them visible; the budget keeps the run from spinning.
 - Another agent shares the machine. Stale leases are visible now. The harness waits and reports; it
   does not take or reset a chip it does not hold.
+
+## 12. What was built and what the first real run found (2026-10-06)
+
+Phase 1 (spike): see `docs/run-logs/2026-10-06-bringup-spike.md`.
+
+Phase 2 (`tt-orchard` command): built as specified, with these changes. The defaults live in
+`config/bringup.toml` because the tier loader refuses unknown tables. The preflight gained a `reference`
+check (the interpreter stage 1 uses). `bringup` always passes `--unattended`.
+
+Phase 3: `orchard/classes.py` and `orchard/blocked.py` (sections 3 and 5), `gate_weights_swap_sidecar`, and the
+parity templates, built by a forked agent and run on one board with Clef (15 of 16 questions agree; bars in
+`orchard/defaults.py`). Two findings changed the design:
+- Triage read every `*.safetensors` file in the snapshot, so a sidecar would have forced the full-port path. The
+  backbone is now the shards the model's index lists.
+- On the full-port path an operator's resume means "go on into the full-port stages". An unattended retry must
+  never do that, so an unattended full port blocks every time.
+
+Role-fit test (section 7): built (`orchard/rolefit.py`) and run against Qwen3-Coder-Next on one board; it passes
+once the loop offers a read-only `read_file` tool (docs/run-logs/2026-10-06-rolefit-qwen3-coder-next.md). The
+arbiter of the analysis documents was not built.
+
+The chaos run on Hemmingway-1 was replaced by the real Clef run, because each fault the chaos script would
+inject (a crash, a stalled agent, a hardware fault) is more informative when it happens in a real run. The
+supervisor's kill-after-every-event tests still cover crash recovery with fakes.
+
+First Clef run (Coder-Next on one board, 27B untouched):
+- Stage 0 passed in 3m47s: class `weights+sidecar`, the sidecar and code file found, hashes equal to the
+  hardware prototype's.
+- Stage 1 stalled twice: Coder-Next wrote `stages/1/...` paths that `write_file` read as stage-relative, and ran
+  `pip install --upgrade transformers` in the machine's shared venv. The run ended `blocked: stage-failed`
+  after 60 turns, wrote `BLOCKED.md`, released the hardware, and `tt-orchard bringup` printed the reason and
+  the retry instruction. This was the first real use of the blocked end state and the retry path; both worked.
+- The fixes: `write_file` accepts run-relative stage paths; the runner refuses package installs outside the run
+  directory; `reference_python` gives stage 1 a dedicated interpreter. The retry passed stage 1 in 4 minutes.
+
