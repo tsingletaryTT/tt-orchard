@@ -68,13 +68,13 @@ def test_a_step_runs_tool_calls_until_a_final_answer(run):
     assert kinds.count("tool_result") == 2 and kinds.count("evidence") == 1
 
 
-def test_the_request_is_greedy_non_streaming_and_offers_both_tools(run):
+def test_the_request_is_greedy_non_streaming_and_offers_all_three_tools(run):
     run_dir, ledger = run
     with FakeModel(lambda r: final()) as fm:
         step(run_dir, ledger, fm.endpoint)[0].run("s", "u")
     req = fm.requests[0]
     assert req["temperature"] == 0 and req["stream"] is False and req["model"] == "fake"
-    assert [t["function"]["name"] for t in req["tools"]] == ["shell", "write_file"]
+    assert [t["function"]["name"] for t in req["tools"]] == ["shell", "read_file", "write_file"]
     assert req["messages"] == [{"role": "system", "content": "s"}, {"role": "user", "content": "u"}]
 
 

@@ -176,6 +176,13 @@ TOOL_SCHEMAS = [
         "parameters": {"type": "object", "properties": {"command": {"type": "string"}},
                        "required": ["command"]}}},
     {"type": "function", "function": {
+        "name": "read_file",
+        "description": ("Read a text file inside the run directory (read only). The path is relative to "
+                        "the run directory, or to your stage directory when it is not found there. Long "
+                        "files are cut in the middle."),
+        "parameters": {"type": "object", "properties": {"path": {"type": "string"}},
+                       "required": ["path"]}}},
+    {"type": "function", "function": {
         "name": "write_file",
         "description": "Write a text file. The path is relative to your stage directory.",
         "parameters": {"type": "object", "properties": {"path": {"type": "string"},
@@ -199,9 +206,11 @@ class Tools:
             return "error: the arguments must be a JSON object"
         if name == "shell":
             return self.shell(args.get("command"))
+        if name == "read_file":
+            return self.read_file(args.get("path"))
         if name == "write_file":
             return self.write_file(args.get("path"), args.get("content"))
-        return f"error: there is no tool named {name!r}; the tools are shell and write_file"
+        return f"error: there is no tool named {name!r}; the tools are shell, read_file and write_file"
 
     def shell(self, command) -> str:
         if not isinstance(command, str) or not command.strip():
@@ -226,6 +235,31 @@ class Tools:
         if p == root or os.path.commonpath([root, p]) != root:
             return None
         return Path(p)
+
+    def read_file(self, path) -> str:
+        """Read a text file that lies inside the run directory. A path is tried against the run directory
+        first and the stage directory second, because models write both. Links are resolved before the
+        check, so a link out of the run directory is refused. Nothing is written."""
+        if not isinstance(path, str) or not path.strip():
+            return "error: path must be a non-empty string"
+        root = os.path.realpath(self.run_dir)
+        bases = (root, os.path.realpath(self.stage_dir))
+        found = None
+        for base in bases:
+            p = os.path.realpath(os.path.join(base, path))
+            if os.path.commonpath([root, p]) != root:
+                return f"refused: {path!r} is outside the run directory {self.run_dir}"
+            if os.path.exists(p):
+                found = p
+                break
+        if found is None:
+            return (f"error: {path!r} does not exist in the run directory or in your stage directory "
+                    f"{self.stage_dir}")
+        if os.path.isdir(found):
+            return f"error: {path!r} is a directory; use shell with ls to list it"
+        with open(found, "rb") as f:
+            raw = f.read(self.limit * 4 + 4)               # bounded: a huge file is cut, not loaded
+        return clip(raw.decode("utf-8", errors="replace"), self.limit)
 
     def write_file(self, path, content) -> str:
         if not isinstance(content, str):

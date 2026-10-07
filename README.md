@@ -67,12 +67,15 @@ supervisor pauses before stage 2 for the operator.
 | Bundle and package scrub | `orchard/scrub.py` | Built and tested with fakes. The stage 8 gate calls it; it ran once on the real run |
 | CPU sizing tool | `orchard/sizing.py` | Built and tested against a fake server. It has not been run against a real ollama. The CPU numbers in this README come from the run log |
 | `tt-orchard` command | `orchard/cli.py`, `orchard/bringup_config.py`, `orchard/preflight.py`, `orchard/fetch.py`, `bin/tt-orchard` | Built and tested with fakes. The preflight ran for real on the development machine as a dry run for `Cloudflare/clef` (all checks passed except the credentials check, which needs the operator's decision). A run has not been started through it |
+| Outcome classes, blocked end state | `orchard/classes.py`, `orchard/blocked.py` | Built and tested with fakes. The sidecar class has run on hardware only inside the prototype (one board, Clef). No full run has used it |
+| Sidecar parity | `orchard/skills/sidecar-parity-templates/` | Built by a forked agent and run on one leased board with Clef (15 of 16 questions agree). Not yet run inside a supervisor run, and not run after a real swap check in the same lease |
+| Role-fit test | `orchard/rolefit.py` | Built and tested with fakes, then run against Qwen3-Coder-Next on one board (result in `docs/run-logs`) |
 | Hardware-check driver | `orchard/hardware_check.py` | Ran on both boards of the development machine, 22 to 24 checks passed per run |
 | Park-check driver | `orchard/park_check.py` | Ran once, on one board, with fake model servers. Exit 0, two resets of 41.7 s each (measured) |
 
 ### Tests
 
-The suite has 2159 passing tests and 1 skipped test (measured with
+The suite has 2346 passing tests and 1 skipped test (measured with
 `python3 -m pytest -q -p no:cacheprovider`). It needs no hardware and no network. The skipped test
 replays local agent transcripts and runs only when `ORCHARD_REPLAY=1` is set and those transcripts
 exist.
@@ -564,6 +567,54 @@ supervisor refuses a ledger whose chain is broken.
 | 6 | Qualitative check and benchmark | `serving-check` | Full-port path only. Five prompts read by the agent, and decode speed and time to first token, each labelled measured or TODO. Skipped on the weights-only path |
 | 7 | Package and container build | none (supervisor code) | Weights-only path with `--package-format v6` only. First checks that stage 2 served the weights stage 0 names: the label must name stage 0's repo, and the weight files in the served `model-dir` must link to stage 0's revision in the Hugging Face cache. Then runs `tt-model package-thin --out` from the nearest model's installed v6 bundle, points every weights setting in `run.sh` at a `model-dir` built from the new weights, scrubs each package, installs a copy of the required profile and boots it on a leased board against the stage 1 reference, then writes a card and the publish commands as text. A failure pauses the run and is not escalated. Every other run records it as skipped |
 | 8 | Operator bundle | `operator-bundle` | The agent writes `bundle_config.json` and runs `build_bundle.py`, which builds the bundle from the ledger and each stage's files: results with labelled numbers and evidence paths, risks with a computed `Dealt with:` line for the tensor-cache hazard, the model card, stage 7's packages and publish commands, and a copy of the ledger. It prints the scrub's findings. The agent rewrites the summary paragraph and adds risks it can back with evidence. The supervisor copies the ledger in again and scrubs the bundle |
+
+### 5.3a Outcome classes
+
+Stage 0 gives the model one class (`orchard/classes.py`), written to `delta.json` and to stage 0's entry in
+the ledger. Each class takes one of the two paths above, so a stage that does not care about the class
+does not change.
+
+| Class | Meaning | Path | What differs |
+|---|---|---|---|
+| `weights-only` | The nearest supported model's architecture; only the weights differ | `weights-only` | Nothing: the stages above |
+| `weights+sidecar` | `weights-only` for the backbone, plus a weights file outside the backbone shards that the nearest model lacks (a task head, for example) | `weights-only` | Stage 2 also measures the sidecar's parity (below) |
+| `full-port` | The model needs new model code | `full-port` | An unattended run ends blocked (`needs-new-model-code`); an attended run pauses before stage 2 |
+| `unknown` | Stage 0 could not decide: an unreadable or overlapping sidecar, or headers that would not parse | `full-port` | Nothing unproven runs as weights-only |
+
+A sidecar is found by name: the backbone is the shards the model's `model.safetensors.index.json` lists (or
+`model*.safetensors` without an index), and any other weights file the nearest model does not have is a
+sidecar. `delta.json` lists each sidecar with its size, sha256, tensor count and tensor names, and each
+top-level `.py` file in the repo with its sha256 (`code_files`). The triage script reads headers and
+hashes files. It never imports or runs a code file.
+
+**The sidecar parity check** (stage 2, class `weights+sidecar`; skill `weights-sidecar-check`). The sidecar
+head reads the backbone's final hidden state for every token, which the TT serving stack does not return.
+`hidden_parity.py` (in `orchard/skills/sidecar-parity-templates/`) loads the backbone on the leased board
+through the nearest model's own model code, runs its layer loop over all rows, applies the model's final
+norm, and runs the sidecar head on the host from those states and from the CPU reference's. It imports the
+sidecar's code file only after its sha256 matches the one stage 0 recorded, and it checks its own loop
+against the model's `prefill_tp` on the last row before it trusts anything (exit 6 when they differ).
+`gate_weights_swap_sidecar` needs the measured fields, and it needs the head file and code file hashes to
+equal the ones in `delta.json`. On Clef (6 records, 16 questions, one board) the head agreed with the CPU
+reference on 15 of 16 questions, with a hidden-state correlation of at least 0.954 and a largest probability
+difference of 0.123. The bars (`SIDECAR_*` in `orchard/defaults.py`) rest on that one model.
+
+### 5.3b Choosing the coder: the role-fit test
+
+A model takes an agent role in `tiers.toml` only after `python3 -m orchard.rolefit` passes for it. The test
+replays up to 50 recorded agent turns from earlier runs' logs against the candidate server, with the loop's
+own tool definitions. A reply passes when it is a well-formed tool call or non-empty text and was not cut off.
+The bar is 95 percent. It also replays every recorded turn that failed live (cut off, or empty with no tool
+call) several times at a higher temperature, and any repeat fails the test. It checks the "7 times 6" canary
+and records prefill and decode speed at 8K and 32K prompt tokens. The endpoint must be on this machine.
+
+```bash
+python3 -m orchard.rolefit --endpoint http://127.0.0.1:8001/v1 --model <MODEL> --logs <RUNS_DIR> --out result.json
+```
+
+Options: `--turns` (default 50), `--repeats` (default 5), `--sizes` (default `8192,32768`) and
+`--thinking-off` (sends `enable_thinking=false`, as the loop does for the Qwen3.8 coder). Exit 0 passed,
+1 failed, 2 refused (a remote endpoint).
 
 ### 5.4 Recover after a crash
 

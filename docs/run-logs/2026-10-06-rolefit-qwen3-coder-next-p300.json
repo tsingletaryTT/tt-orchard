@@ -1,0 +1,170 @@
+{
+  "model": "Qwen/Qwen3-Coder-Next",
+  "endpoint": "http://127.0.0.1:20010/v1",
+  "when": "2026-10-07T04:27:45Z",
+  "canary": {
+    "passed": true,
+    "answer": "42"
+  },
+  "format": {
+    "passed": true,
+    "n": 50,
+    "ok": 50,
+    "fraction": 1.0,
+    "bar": 0.95,
+    "by_verdict": {
+      "ok": 50
+    },
+    "sources": [
+      "hemmingway-1-run3/stages/0/log/run-00009.jsonl",
+      "hemmingway-1-run3/stages/1.partial-2/log/run-00033.jsonl",
+      "hemmingway-1-run3/stages/1.partial-3/log/run-00048.jsonl",
+      "hemmingway-1-run3/stages/1.partial-4/log/run-00081.jsonl",
+      "hemmingway-1-run3/stages/1/log/run-00098.jsonl",
+      "hemmingway-1-run3/stages/2.partial-1/log/prepare-00111.jsonl",
+      "hemmingway-1-run3/stages/2.partial-3/log/finish-00139.jsonl",
+      "hemmingway-1-run3/stages/2.partial-3/log/prepare-00130.jsonl",
+      "hemmingway-1-run3/stages/2.partial-4/log/prepare-00147.jsonl",
+      "hemmingway-1-run3/stages/2.partial-5/log/finish-00170.jsonl",
+      "hemmingway-1-run3/stages/2.partial-5/log/finish-continuation-00172.jsonl",
+      "hemmingway-1-run3/stages/2.partial-5/log/prepare-00161.jsonl",
+      "hemmingway-1-run3/stages/2/log/prepare-00187.jsonl",
+      "hemmingway-1-run3/stages/4.partial-1/log/prepare-00202.jsonl",
+      "hemmingway-1-run3/stages/4.partial-2/log/prepare-00217.jsonl",
+      "hemmingway-1-run3/stages/4/log/finish-00330.jsonl",
+      "hemmingway-1-run3/stages/4/log/prepare-00290.jsonl",
+      "hemmingway-1-run3/stages/8/log/run-00378.jsonl",
+      "openthai2-run1/stages/0.partial-1/log/run-00009.jsonl",
+      "openthai2-run1/stages/0.partial-2/log/run-00016.jsonl",
+      "openthai2-run1/stages/0/log/run-00022.jsonl",
+      "openthai2-run2/stages/0/log/run-00009.jsonl",
+      "openthai2-run2/stages/1/log/run-00021.jsonl",
+      "openthai2-run2/stages/2/log/prepare-00041.jsonl",
+      "openthai2-run2/stages/4/log/prepare-00057.jsonl",
+      "openthai2-run2/stages/8.partial-1/log/run-00117.jsonl",
+      "openthai2-run2/stages/8.partial-2/log/run-00124.jsonl",
+      "openthai2-run2/stages/8/log/run-00138.jsonl"
+    ]
+  },
+  "failures": {
+    "passed": true,
+    "replayed": [
+      {
+        "source": "hemmingway-1-run3/stages/1.partial-1/log/run-00027.jsonl",
+        "turn": 8,
+        "recorded_failure": "empty",
+        "repeats": 5,
+        "failed_again": 0,
+        "verdicts": [
+          "ok",
+          "ok",
+          "ok",
+          "ok",
+          "ok"
+        ]
+      },
+      {
+        "source": "hemmingway-1-run3/stages/1.partial-2/log/run-00033.jsonl",
+        "turn": 12,
+        "recorded_failure": "empty",
+        "repeats": 5,
+        "failed_again": 0,
+        "verdicts": [
+          "ok",
+          "ok",
+          "ok",
+          "ok",
+          "ok"
+        ]
+      },
+      {
+        "source": "hemmingway-1-run3/stages/1.partial-3/log/run-00048.jsonl",
+        "turn": 9,
+        "recorded_failure": "truncated",
+        "repeats": 5,
+        "failed_again": 0,
+        "verdicts": [
+          "ok",
+          "ok",
+          "ok",
+          "ok",
+          "ok"
+        ]
+      },
+      {
+        "source": "hemmingway-1-run3/stages/1.partial-3/log/run-00048.jsonl",
+        "turn": 48,
+        "recorded_failure": "truncated",
+        "repeats": 5,
+        "failed_again": 0,
+        "verdicts": [
+          "ok",
+          "ok",
+          "ok",
+          "ok",
+          "ok"
+        ]
+      },
+      {
+        "source": "hemmingway-1-run3/stages/1.partial-3/log/run-00048.jsonl",
+        "turn": 49,
+        "recorded_failure": "empty",
+        "repeats": 5,
+        "failed_again": 0,
+        "verdicts": [
+          "ok",
+          "ok",
+          "ok",
+          "ok",
+          "ok"
+        ]
+      },
+      {
+        "source": "hemmingway-1-run3/stages/1.partial-4/log/run-00081.jsonl",
+        "turn": 5,
+        "recorded_failure": "truncated",
+        "repeats": 5,
+        "failed_again": 0,
+        "verdicts": [
+          "ok",
+          "ok",
+          "ok",
+          "ok",
+          "ok"
+        ]
+      },
+      {
+        "source": "hemmingway-1-run3/stages/1.partial-4/log/run-00081.jsonl",
+        "turn": 6,
+        "recorded_failure": "empty",
+        "repeats": 5,
+        "failed_again": 0,
+        "verdicts": [
+          "ok",
+          "ok",
+          "ok",
+          "ok",
+          "ok"
+        ]
+      }
+    ],
+    "note": "every recorded failure turn was replayed and none repeated"
+  },
+  "throughput": {
+    "decode_tok_s": {
+      "8192": 41.77,
+      "32768": 38.44
+    },
+    "prefill_tok_s": {
+      "8192": 3459.9,
+      "32768": 3705.7
+    },
+    "out_tokens": 256,
+    "errors": {},
+    "note": "end to end through the server, one request at a time, temperature 0"
+  },
+  "verdict": {
+    "passed": true,
+    "failed": []
+  }
+}

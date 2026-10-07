@@ -8,3 +8,4 @@ runs/
 .superpowers/
 generated/
 .claude/worktrees/
+config/local-*

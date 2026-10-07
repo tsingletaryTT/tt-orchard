@@ -25,7 +25,7 @@ from pathlib import Path
 
 import pytest
 
-from orchard import cli, hardware_check, operator_checks, park_check, sizing, supervisor
+from orchard import cli, hardware_check, operator_checks, park_check, rolefit, sizing, supervisor
 from orchard.stages import STAGES
 
 REPO = Path(__file__).resolve().parent.parent
@@ -100,6 +100,7 @@ def other_repo_flags() -> set[str]:
     flags |= _option_strings(_captured_parser(park_check, lambda m: m.parse_args([])))
     flags |= _option_strings(_captured_parser(sizing, lambda m: m.main([])))
     flags |= _option_strings(_captured_parser(operator_checks, lambda m: m.main([])))
+    flags |= _option_strings(_captured_parser(rolefit, lambda m: m.main([])))
     flags |= tt_orchard_flags()
     return flags
 

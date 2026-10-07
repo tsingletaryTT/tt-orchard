@@ -491,3 +491,25 @@ other agents' leases stay off limits.
   `.claude/worktrees/` is now ignored.
 - Suite: 2159 passed, 1 skipped.
 
+## 2026-10-06 (evening): sidecar templates merged, role-fit test, `read_file`, Coder-Next chosen
+- The forked agent built and hardware-tested `orchard/skills/sidecar-parity-templates/` in its own worktree.
+  Clef on one board: the sidecar head agrees with the CPU reference on 15 of 16 questions, hidden-state
+  correlation min 0.954, largest probability difference 0.123 (docs/run-logs/2026-10-06-sidecar-parity-prototype.md).
+  The `SIDECAR_*` bars in `defaults.py` are now measured-and-chosen, not provisional. The loader ignores
+  `joint_head.safetensors`, as predicted. The merge was clean (new files only). `tests/test_sidecar_skill.py`
+  checks the skill's config example against the scripts' required keys and the files it copies.
+- `orchard/rolefit.py` replays recorded agent turns against a candidate server (format, repeated failures,
+  speed). Coder-Next on one board (`p300` profile): first run 46 of 50 well-formed, all 4 misses a `read_file`
+  call the loop did not offer; 35 replays of the 27B's 7 failure turns repeated none. The loop now offers a
+  read-only `read_file` tool; second run 50 of 50, same zero repeats, 41.8 / 38.4 tok/s decode at 8K / 32K.
+  Result files and the write-up are in docs/run-logs/2026-10-06-rolefit-qwen3-coder-next*.
+- Machine config (not committed): `config/tiers.toml` and `config/bringup.toml` now name Coder-Next on one
+  board (port 8001, `--coder-chips 2`), run directory and caches on the root drive (stage 4's disk check reads
+  the run directory's filesystem and wants 110 GB; `/mnt/bonus` had 101 GB free). The 27B configs are in
+  `config/local-27b.*.toml`. The operator's standing instruction was to proceed for hours and credentials may
+  be used, so the first Clef run passes `--accept-credentials-visible`.
+- Mistakes worth keeping: a mutation run that lets a remote endpoint through made a test try a real host and
+  hang for minutes (the guard test should fail before any network call); and my first `git add -A` swept in a
+  fork's worktree.
+- Suite: 2346 passed, 1 skipped.
+

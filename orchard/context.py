@@ -61,8 +61,9 @@ PHASE_TASKS = {
 }
 
 RULES = """Rules of this run:
-- Your tools are shell and write_file. shell starts in the run directory {run_dir}. write_file writes
-  only inside your stage directory, stages/{n}.
+- Your tools are shell, read_file and write_file. shell starts in the run directory {run_dir}. read_file
+  reads a text file inside the run directory. write_file writes only inside your stage directory,
+  stages/{n}.
 - Put every file that backs a claim under stages/{n}/evidence/. The supervisor records each one in the
   ledger with its sha256. Evidence paths you cite are relative to the run directory.
 - Label every number "measured" (you measured it and the evidence file shows it) or "TODO".

@@ -93,6 +93,8 @@ def tc(name="shell", arguments='{"command": "ls"}'):
     (msg(content=None), "stop", "empty"),
     (msg(content=""), "length", "truncated"),
     (msg(content="some text that was cut", tool_calls=None), "length", "truncated"),
+    (msg(tool_calls=[tc("read_file", '{"path": "a.txt"}')]), "tool_calls", "ok"),
+    (msg(tool_calls=[tc("read_file", '{}')]), "tool_calls", "bad_arguments"),
     (msg(tool_calls=[tc("browse")]), "tool_calls", "unknown_tool"),
     (msg(tool_calls=[tc(arguments="{not json")]), "tool_calls", "bad_arguments"),
     (msg(tool_calls=[tc(arguments='["ls"]')]), "tool_calls", "bad_arguments"),
@@ -122,7 +124,7 @@ def test_a_replay_sends_the_recorded_prompt_with_the_agents_tools_and_settings(t
         sent = server.requests[0]
     assert [r["verdict"] for r in out] == ["ok", "ok"]
     assert sent["messages"][0] == SYSTEM and sent["temperature"] == 0.0
-    assert {t["function"]["name"] for t in sent["tools"]} == {"shell", "write_file"}
+    assert {t["function"]["name"] for t in sent["tools"]} == {"shell", "read_file", "write_file"}
     assert sent["max_tokens"] == rolefit.defaults.AGENT_MAX_TOKENS and sent["stream"] is False
 
 
