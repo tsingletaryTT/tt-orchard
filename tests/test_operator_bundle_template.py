@@ -86,9 +86,18 @@ def card(name: str, chips: int, mesh: str, *, verified: bool) -> str:
                       "package from the Hub")))
 
 
+HEAD_SHA, CODE_SHA = "a010ac04f078" + "0" * 52, "0e304cf7c650" + "1" * 52
+PARITY = {"measured": True, "n_records": 6, "n_questions": 16, "hidden_pcc_min": 0.954, "hidden_pcc_mean": 0.9676,
+          "prob_max_abs_diff": 0.1233, "top1_agree_fraction": 0.9375, "noise_floor": {"prob_max_abs_diff": 0.0},
+          "wiring_check": {"cosine": 0.9999, "passed": True, "minimum": 0.99}, "mesh_shape": [1, 2],
+          "tt_metal_sha": "0.79.0.dev", "code_sha256": CODE_SHA, "head_sha256": HEAD_SHA}
+
+
 def make_run(tmp_path: Path, *, shared_cache=False, marker=MODEL, stage7=True, publish=True,
-             nearest_cache=False) -> Path:
-    """A run directory that has finished stages 0 to 7 on the weights-only path."""
+             nearest_cache=False, sidecar=False, drafter=None, parity=True, drafter_4=None) -> Path:
+    """A run directory that has finished stages 0 to 7 on the weights-only path. `sidecar` makes it a
+    weights+sidecar run (a head file, its code file, the MTP finding and a sidecar parity result in stage 2);
+    `drafter` ("off" or "on (mtp)") records how each swap check served."""
     run = tmp_path / "run"
     op = tmp_path / "op"
     cache_root = tmp_path / "cache"
@@ -114,6 +123,21 @@ def make_run(tmp_path: Path, *, shared_cache=False, marker=MODEL, stage7=True, p
             {"area": "disk", "finding": "120 GiB free.", "evidence": ["stages/0/evidence/disk-free.json"]},
             {"area": "license", "finding": "The license changed to cc-by-nc-4.0.",
              "evidence": ["stages/0/evidence/genconfig-license.json"]}]})
+    if sidecar:
+        d = json.loads((s / "0" / "delta.json").read_text())
+        d.update({"class": "weights+sidecar",
+                  "sidecars": [{"file": "joint_head.safetensors", "size": 256_125_024, "sha256": HEAD_SHA,
+                                "num_tensors": 122, "dtypes": ["BF16"], "tensor_names": ["a"]}],
+                  "code_files": [{"file": "joint_schema_model.py", "sha256": CODE_SHA}],
+                  "mtp": {"nearest_tensors": 15, "new_tensors": 0}})
+        d["hazards"] += [
+            {"area": "drafter", "finding": "The new model has no mtp.* tensors; the nearest model has 15. A drafter "
+             "that needs the MTP head cannot run on it.", "evidence": ["stages/0/evidence/tensor-compare.json"]},
+            {"area": "other", "finding": "The new model has a sidecar the nearest model's runtime does not load.",
+             "evidence": ["stages/0/evidence/tensor-compare.json"]},
+            {"area": "other", "finding": "The model repository ships code: joint_schema_model.py (sha256 0e304cf7c650).",
+             "evidence": ["stages/0/evidence/tensor-compare.json"]}]
+        write_json(s / "0" / "delta.json", d)
     # stage 1
     for name in ("load-report.json", "decode.txt", "card-check.txt"):
         write(s / "1" / "evidence" / name, "fake\n")
@@ -131,20 +155,27 @@ def make_run(tmp_path: Path, *, shared_cache=False, marker=MODEL, stage7=True, p
     if nearest_cache:
         c2 = make_cache(op / ".cache" / "src-build" / "tensors", marker=marker)
     write(s / "2" / "evidence" / "server.log", "ready\n")
-    write_json(s / "2" / "evidence" / "swap-check.json", {"result_draft": {"top1_agreement": 0.9375}})
+    serving = ({"serving": {"drafter": drafter, "sampling": "host"}} if drafter else {})
+    write_json(s / "2" / "evidence" / "swap-check.json", {"result_draft": {"top1_agreement": 0.9375}, **serving})
+    if sidecar and parity:
+        write_json(s / "2" / "evidence" / "sidecar-parity.json", PARITY)
     write_json(s / "2" / "swap_config.json", {"tt_cache": str(c2), "bundle_dir": str(op / "bundle-p300"),
                                               "new_model_id": MODEL})
     write_json(s / "2" / "result.json", {
         "serves": True, "server_ready_s": 728.1, "coherent": True, "free_run_text": "Let me work.",
         "top1_agreement": 0.9375, "n_tokens": 32, "cache_dir": str(c2),
-        "evidence": ["stages/2/evidence/swap-check.json", "stages/2/evidence/server.log"]})
+        **({"sidecar_parity": PARITY} if sidecar and parity else {}),
+        "evidence": ["stages/2/evidence/swap-check.json", "stages/2/evidence/server.log",
+                     *(["stages/2/evidence/sidecar-parity.json"] if sidecar and parity else [])]})
     # stage 4
     configs = []
     for chips, top1 in ((2, 0.9375), (4, 0.90625)):
         cache = c2 if (shared_cache and chips == 2) else make_cache(
             cache_root / "hemmingway-1" / f"{chips}chip" / "tt_cache", marker=marker)
         ev = s / "4" / "configs" / str(chips) / "evidence"
-        write_json(ev / "swap-check.json", {"result_draft": {"top1_agreement": top1}})
+        write_json(ev / "swap-check.json", {"result_draft": {"top1_agreement": top1},
+                                            **({"serving": {"drafter": drafter_4 or drafter, "sampling": "host" if chips == 2 else "on device (all)"}}
+                                               if drafter else {})})
         write(s / "4" / "tests" / str(chips) / "output.txt", "ok\n")
         configs.append({"chips": chips, "pass": True, "kind": "bundle", "package": f"episod/p{chips}",
                         "serves": True, "server_ready_s": 150.0 + chips, "coherent": True,
@@ -200,7 +231,8 @@ def make_run(tmp_path: Path, *, shared_cache=False, marker=MODEL, stage7=True, p
                           "tt_model_root": str(op / ".cache" / "tt-model" / "models"),
                           "cache_root": str(cache_root)})
         led.append("stage_start", 0, escalated=False, resumed=False)
-        led.append("stage_end", 0, result="pass", path="weights-only", evidence=[])
+        led.append("stage_end", 0, result="pass", path="weights-only", evidence=[],
+                   **({"class": "weights+sidecar"} if sidecar else {}))
         led.append("stage_start", 1, escalated=False, resumed=False)
         led.append("retry", 1, what="model request", phase="run", attempt=2)
         led.append("stage_end", 1, result="pass", evidence=[])
@@ -526,3 +558,140 @@ def test_the_build_record_lists_every_file_written_with_its_sha256(tmp_path):
                hashlib.sha256(p.read_bytes()).hexdigest()
                for p in bundle.rglob("*") if p.is_file()}
     assert listed == on_disk
+
+
+
+# ---- a weights+sidecar run ------------------------------------------------------------------------------
+
+def built(tmp_path, **kw):
+    run = make_run(tmp_path, **kw)
+    r = build(run)
+    assert r.returncode == 0, r.stdout + r.stderr
+    b = bundle_of(run)
+    return run, (b / "RESULTS.md").read_text(), (b / "RISKS.md").read_text()
+
+
+def test_the_run_facts_state_the_class_the_sidecar_and_the_mtp_counts(tmp_path):
+    _, results, _ = built(tmp_path, sidecar=True)
+    facts = section(results, "## Run facts")
+    assert "| Class | weights+sidecar |" in facts
+    assert "joint_head.safetensors" in facts and "122 tensors" in facts and HEAD_SHA[:12] in facts
+    assert "| MTP tensors | nearest model 15, new model 0 |" in facts
+
+
+def test_a_run_without_a_class_states_the_class_its_path_implies_and_no_sidecar_row(tmp_path):
+    _, results, _ = built(tmp_path)
+    facts = section(results, "## Run facts")
+    assert "| Class | weights-only |" in facts and "Sidecar" not in facts and "MTP tensors" not in facts
+
+
+def test_stage_2_reports_the_sidecar_parity_with_labels_evidence_and_bars(tmp_path):
+    _, results, _ = built(tmp_path, sidecar=True)
+    heading = next(l for l in results.splitlines() if l.startswith("## Stage 2:"))
+    text = section(results, heading)
+    assert "### Sidecar parity" in text
+    for needle in ("| hidden_pcc_min | 0.954 | measured |", "| prob_max_abs_diff | 0.1233 | measured |",
+                   "| top1_agree_fraction | 0.9375 | measured |", "| n_questions | 16 | measured |",
+                   "`stages/2/evidence/sidecar-parity.json`", HEAD_SHA[:12], CODE_SHA[:12], "[1, 2]"):
+        assert needle in text, needle
+    from orchard import defaults
+    assert str(defaults.SIDECAR_PCC_MIN) in text and str(defaults.SIDECAR_PROB_DIFF_MAX) in text
+
+
+def test_a_run_without_a_sidecar_has_no_parity_section(tmp_path):
+    _, results, _ = built(tmp_path)
+    assert "Sidecar parity" not in results
+
+
+def test_the_bundle_says_how_each_check_served(tmp_path):
+    _, results, _ = built(tmp_path, sidecar=True, drafter="off")
+    assert "Served with: drafter off; sampling host." in results
+    four = [l for l in results.splitlines() if l.startswith("- 4 chips:")]
+    assert four and "drafter off" in four[0] and "sampling on device (all)" in four[0]
+
+
+def test_a_check_that_recorded_nothing_is_not_described(tmp_path):
+    _, results, _ = built(tmp_path)
+    assert "Served with" not in results and "- 2 chips: drafter" not in results
+
+
+def test_the_sidecar_hazard_is_dealt_with_when_stage_2_measured_the_parity(tmp_path):
+    _, _, risks = built(tmp_path, sidecar=True)
+    block = [b for b in section(risks, "## Stage 0 hazards").split("### ") if b.startswith("other\n")][0]
+    assert "Dealt with: yes" in block and "hidden_pcc_min 0.954" in block and "`stages/2/evidence/sidecar-parity.json`" in block
+
+
+def test_the_code_hazard_is_not_dealt_with_but_names_the_hash_that_was_used(tmp_path):
+    _, _, risks = built(tmp_path, sidecar=True)
+    block = [b for b in section(risks, "## Stage 0 hazards").split("### ") if b.startswith("other (2)\n")][0]
+    assert "Dealt with: Not shown" in block and CODE_SHA[:12] in block and "Nobody in the run read" in block
+
+
+def test_the_mtp_drafter_hazard_is_dealt_with_when_every_check_served_without_the_drafter(tmp_path):
+    _, _, risks = built(tmp_path, sidecar=True, drafter="off")
+    blocks = [b for b in section(risks, "## Stage 0 hazards").split("### ") if b.startswith("drafter")]
+    mtp = [b for b in blocks if "no mtp" in b.lower()][0]
+    assert "Dealt with: yes" in mtp and "drafter off" in mtp and "do not carry over" in mtp
+
+
+def test_the_mtp_drafter_hazard_is_not_dealt_with_when_a_check_kept_the_drafter(tmp_path):
+    _, _, risks = built(tmp_path, sidecar=True, drafter="on (mtp)")
+    mtp = [b for b in section(risks, "## Stage 0 hazards").split("### ") if "no mtp" in b.lower()][0]
+    assert "Dealt with: Not shown" in mtp and "on (mtp)" in mtp
+
+
+def test_the_mtp_drafter_hazard_is_not_shown_when_no_check_recorded_how_it_served(tmp_path):
+    _, _, risks = built(tmp_path, sidecar=True)
+    mtp = [b for b in section(risks, "## Stage 0 hazards").split("### ") if "no mtp" in b.lower()][0]
+    assert "Dealt with: Not shown" in mtp and "recorded" in mtp
+
+
+def test_the_sidecar_bundle_passes_the_real_stage_8_gate_and_the_scrub(tmp_path):
+    run = make_run(tmp_path, sidecar=True, drafter="off")
+    out = build(run)
+    assert out.returncode == 0, out.stderr + out.stdout
+    bundle = bundle_of(run)
+    shutil.copyfile(run / "ledger.jsonl", bundle / "ledger.jsonl")
+    Supervisor._copy_package(SimpleNamespace(run_dir=run), bundle)
+    gate = gate_bundle(run / "stages" / "8", run)
+    assert gate.ok, gate.reasons
+    assert scrub_bundle(bundle) == []
+
+
+def test_the_stage_2_heading_names_the_sidecar_check(tmp_path):
+    _, results, _ = built(tmp_path, sidecar=True)
+    assert "sidecar parity" in next(l for l in results.splitlines() if l.startswith("## Stage 2:"))
+
+
+def test_the_parity_section_says_which_bars_the_gate_used(tmp_path):
+    _, results, _ = built(tmp_path, sidecar=True)
+    assert "Bars the gate used (orchard/defaults.py)" in results
+
+
+def test_the_sidecar_hazard_is_not_shown_when_stage_2_has_no_parity_result(tmp_path):
+    _, _, risks = built(tmp_path, sidecar=True, parity=False)
+    block = [b for b in section(risks, "## Stage 0 hazards").split("### ") if b.startswith("other\n")][0]
+    assert "Dealt with: Not shown" in block and "No stage measured the sidecar" in block
+
+
+def test_the_mtp_hazard_is_not_dealt_with_when_only_some_checks_served_without_the_drafter(tmp_path):
+    _, _, risks = built(tmp_path, sidecar=True, drafter="off", drafter_4="on (mtp)")
+    mtp = [b for b in section(risks, "## Stage 0 hazards").split("### ") if "no mtp" in b.lower()][0]
+    assert "Dealt with: Not shown" in mtp and "stage 2: off" in mtp and "on (mtp)" in mtp
+
+
+def test_the_generic_drafter_hazard_keeps_its_own_acceptance_rate_logic(tmp_path):
+    _, _, risks = built(tmp_path, sidecar=True, drafter="off")
+    generic = [b for b in section(risks, "## Stage 0 hazards").split("### ") if b.startswith("drafter\n")][0]
+    assert "No stage measured the drafter's acceptance rate" in generic and "do not carry over" not in generic
+
+
+def test_the_summary_names_the_class_when_it_is_more_than_the_path(tmp_path):
+    _, results, _ = built(tmp_path, sidecar=True)
+    summary = section(results, "## Summary")
+    assert "class weights+sidecar" in summary and "weights-only path" in summary
+
+
+def test_the_summary_of_a_plain_run_does_not_mention_a_class(tmp_path):
+    _, results, _ = built(tmp_path)
+    assert "class " not in section(results, "## Summary")

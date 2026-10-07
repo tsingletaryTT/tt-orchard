@@ -245,8 +245,9 @@ class Run:
         self.paths = recorded_paths(entries)
         self.st = stages_mod
         self.path = stages_mod.run_path(entries, run_dir)
+        self.cls = stages_mod.run_class(entries, run_dir)
         self.package_format = stages_mod.package_format(entries)
-        self.specs = {n: stages_mod.spec_for(n, self.path, self.package_format) for n in range(9)}
+        self.specs = {n: stages_mod.spec_for(n, self.path, self.package_format, self.cls) for n in range(9)}
         self.outcome = {}          # stage -> the data of its last stage_end
         self.attempts = {}         # stage -> stage_start entries that were not a skip
         for e in entries:
@@ -265,6 +266,16 @@ class Run:
                 continue
             rel = f"stages/{n}/{spec.gate_file}"
             self.results[n] = read_json(run_dir / rel, rel, required=self.result(n) == "pass")
+        # How each swap check served (the drafter and where sampling happened), as the check recorded it.
+        self.serving = {}
+        sc = read_json(s / "2" / "evidence" / "swap-check.json", "", required=False) or {}
+        if isinstance(sc.get("serving"), dict):
+            self.serving[2] = sc["serving"]
+        for d in sorted((s / "4" / "configs").glob("*/evidence/swap-check.json")):
+            n = d.parent.parent.name
+            sc = read_json(d, "", required=False) or {}
+            if n.isdigit() and isinstance(sc.get("serving"), dict):
+                self.serving[(4, int(n))] = sc["serving"]
         self.swap = {2: read_json(s / "2" / "swap_config.json", "", required=False) or {}}
         for d in sorted((s / "4" / "configs").glob("*/swap_config.json")):
             if d.parent.name.isdigit():
@@ -453,6 +464,37 @@ def field_table(result: dict, rel: str, redact: Redactor) -> list[str]:
     return lines
 
 
+def serving_text(sv: dict) -> str:
+    return f"drafter {sv.get('drafter', 'unknown')}; sampling {sv.get('sampling', 'unknown')}"
+
+
+def parity_section(sp: dict, result: dict) -> list[str]:
+    """The sidecar parity measurements of stage 2, each labelled, with the bars the gate used."""
+    from orchard import defaults
+    rel = next((e for e in result.get("evidence") or [] if isinstance(e, str) and e.endswith("sidecar-parity.json")),
+               "stages/2/evidence/sidecar-parity.json")
+    evidence = ev(["stages/2/result.json", rel])
+    floor = (sp.get("noise_floor") or {}).get("prob_max_abs_diff") if isinstance(sp.get("noise_floor"), dict) else None
+    wiring = (sp.get("wiring_check") or {}).get("cosine") if isinstance(sp.get("wiring_check"), dict) else None
+    rows = [("n_records", sp.get("n_records")), ("n_questions", sp.get("n_questions")),
+            ("hidden_pcc_min", sp.get("hidden_pcc_min")), ("hidden_pcc_mean", sp.get("hidden_pcc_mean")),
+            ("prob_max_abs_diff", sp.get("prob_max_abs_diff")), ("top1_agree_fraction", sp.get("top1_agree_fraction")),
+            ("cpu_vs_cpu_prob_diff", floor), ("wiring_cosine", wiring)]
+    lines = ["", "### Sidecar parity", "",
+             "The sidecar head run on the host from the device's final hidden states, against the same head run on "
+             "the CPU reference's states, for a few fixed text records.", "",
+             "| Field | Value | Label | Evidence |", "|---|---|---|---|"]
+    lines += [f"| {k} | {fmt(v)} | {'measured' if is_number(v) else 'TODO'} | {evidence} |" for k, v in rows]
+    lines += ["", f"Mesh: {json.dumps(sp.get('mesh_shape'))}. tt-metal: {sp.get('tt_metal_sha')}. Head file sha256 "
+              f"{str(sp.get('head_sha256'))[:12]}. Code file sha256 {str(sp.get('code_sha256'))[:12]}.",
+              f"Bars the gate used (orchard/defaults.py): hidden_pcc_min at least {defaults.SIDECAR_PCC_MIN}; "
+              f"top1_agree_fraction at least {defaults.SIDECAR_TOP1_MIN}; prob_max_abs_diff at most the larger of "
+              f"{defaults.SIDECAR_PROB_DIFF_MAX} and {defaults.SIDECAR_NOISE_FACTOR:g} times the CPU-versus-CPU "
+              f"difference; at least {defaults.SIDECAR_MIN_QUESTIONS} questions. One model and one small set of "
+              "records measured these numbers."]
+    return lines
+
+
 def stage_results(run: Run, redact: Redactor) -> dict[int, list[str]]:
     """The body of each stage's section."""
     body: dict[int, list[str]] = {}
@@ -491,6 +533,10 @@ def stage_results(run: Run, redact: Redactor) -> dict[int, list[str]]:
         res = run.results.get(n)
         if res is not None:
             body[n] = field_table(res, f"stages/{n}/{run.specs[n].gate_file}", redact)
+    if 2 in run.serving and 2 in body:
+        body[2] += ["", f"Served with: {serving_text(run.serving[2])}. Evidence: `stages/2/evidence/swap-check.json`."]
+    if isinstance(run.results.get(2), dict) and isinstance(run.results[2].get("sidecar_parity"), dict):
+        body[2] += parity_section(run.results[2]["sidecar_parity"], run.results[2])
 
     configs = run.configs()
     if configs:
@@ -517,6 +563,12 @@ def stage_results(run: Run, redact: Redactor) -> dict[int, list[str]]:
             for c in failed:
                 lines.append(f"- {chips(c.get('chips'))}: {end(redact(c.get('reason') or 'no reason recorded'))} "
                              f"Evidence: {ev(c.get('evidence'))}.")
+        served = [(c, run.serving[(4, c["chips"])]) for c in sorted(configs, key=lambda c: c.get("chips") or 0)
+                  if (4, c.get("chips")) in run.serving]
+        if served:
+            lines += ["", "How each configuration served:", ""]
+            lines += [f"- {chips(c.get('chips'))}: {serving_text(sv)}. Evidence: "
+                      f"`stages/4/configs/{c.get('chips')}/evidence/swap-check.json`." for c, sv in served]
         body[4] = lines
     elif run.results.get(4) is not None:
         body[4] = field_table(run.results[4], "stages/4/result.json", redact)
@@ -556,7 +608,8 @@ def summary(run: Run, n_todo: int, n_hazards: int) -> str:
     skipped = [n for n in range(8) if run.result(n) == "skipped"]
     other = [n for n in range(8) if n not in passed and n not in skipped]
     repo, _ = run.model()
-    text = (f"This run brought up {repo} on the {run.path or 'unknown'} path. "
+    cls = f" (class {run.cls})" if run.cls and run.cls != run.path else ""
+    text = (f"This run brought up {repo} on the {run.path or 'unknown'} path{cls}. "
             f"Stages that passed: {', '.join(map(str, passed)) or 'none'}. "
             f"Stages skipped: {', '.join(map(str, skipped)) or 'none'}. ")
     if other:
@@ -571,6 +624,19 @@ def summary(run: Run, n_todo: int, n_hazards: int) -> str:
     return text
 
 
+def run_fact_rows(run: Run, redact: Redactor) -> list[str]:
+    """Table rows for the sidecars and the MTP count stage 0 recorded; none for a model without either."""
+    rows = []
+    for x in run.delta.get("sidecars") or []:
+        if isinstance(x, dict):
+            rows.append(f"| Sidecar | {redact(str(x.get('file')))} ({(x.get('size') or 0) / 1e6:.1f} MB, "
+                        f"{x.get('num_tensors')} tensors, sha256 {str(x.get('sha256'))[:12]}) |")
+    m = run.delta.get("mtp")
+    if isinstance(m, dict):
+        rows.append(f"| MTP tensors | nearest model {m.get('nearest_tensors')}, new model {m.get('new_tensors')} |")
+    return rows
+
+
 def render_results(run: Run, redact: Redactor, n_todo: int, n_hazards: int, skipped_files: list) -> str:
     repo, rev = run.model()
     lic, nc = run.license()
@@ -582,6 +648,8 @@ def render_results(run: Run, redact: Redactor, n_todo: int, n_hazards: int, skip
              f"| Model | {repo} |", f"| Revision | {rev or 'not recorded'} |",
              f"| Nearest model | {run.delta.get('nearest_model')} |",
              f"| Path | {run.path or 'not recorded'} |",
+             f"| Class | {run.cls or run.delta.get('class') or 'not recorded'} |",
+             *run_fact_rows(run, redact),
              f"| License | {lic or 'not recorded'}{' (non-commercial)' if nc else ''} |", "",
              "## The run", "", "Counted from `ledger.jsonl`.", "",
              "| Count | Value | Label | Evidence |", "|---|---|---|---|"]
@@ -676,6 +744,20 @@ def todo_items(run: Run, redact: Redactor) -> list[str]:
     return items
 
 
+def mtp_drafter_dealt_with(run: Run) -> tuple[bool, list[str]]:
+    """The model has no mtp.* tensors, so a drafter that needs the MTP head cannot serve it. Dealt with when
+    every swap check recorded that it served with the drafter off."""
+    states = {k: v.get("drafter") for k, v in run.serving.items()}
+    if not states:
+        return False, ["No swap check recorded how it served, so the bundle cannot say whether the drafter was off."]
+    label = lambda k: "stage 2" if k == 2 else f"stage 4, {chips(k[1])}"
+    if all(v == "off" for v in states.values()):
+        return True, [f"Every swap check served with the drafter off ({', '.join(label(k) for k in sorted(states, key=str))}). "
+                      "No figure with a drafter was measured, so speed numbers from the nearest model's packages "
+                      "do not carry over. Evidence: each check's `swap-check.json`."]
+    return False, ["Drafter state per check: " + "; ".join(f"{label(k)}: {v}" for k, v in sorted(states.items(), key=str)) + "."]
+
+
 def hazard_entries(run: Run, redact: Redactor) -> list[tuple[str, str, list[str], bool, list[str]]]:
     """(heading, finding, evidence, dealt with, why) for each stage 0 hazard."""
     out, seen = [], {}
@@ -689,6 +771,25 @@ def hazard_entries(run: Run, redact: Redactor) -> list[tuple[str, str, list[str]
         heading = area if seen[area] == 1 else f"{area} ({seen[area]})"
         if area == "tensor_cache":
             ok, why = tensor_cache_dealt_with(run, redact)
+        elif area == "drafter" and "no mtp" in str(h.get("finding", "")).lower():
+            ok, why = mtp_drafter_dealt_with(run)
+        elif area == "other" and "ships code" in str(h.get("finding", "")).lower():
+            sp = (run.results.get(2) or {}).get("sidecar_parity") if isinstance(run.results.get(2), dict) else None
+            ok = False
+            names = ", ".join(str(c.get("file")) for c in run.delta.get("code_files") or [] if isinstance(c, dict))
+            why = ([f"Stage 2's parity run imported {names} only after its sha256 ({str(sp.get('code_sha256'))[:12]}) "
+                    "matched the one stage 0 recorded. Nobody in the run read the code. Read it before running it "
+                    "yourself."] if isinstance(sp, dict) and sp.get("measured") is True else
+                   ["No stage used the file. Nobody in the run read it."])
+        elif area == "other" and "sidecar" in str(h.get("finding", "")).lower():
+            res2 = run.results.get(2) if isinstance(run.results.get(2), dict) else {}
+            sp = res2.get("sidecar_parity")
+            ok = isinstance(sp, dict) and sp.get("measured") is True
+            why = ([f"Stage 2 measured the sidecar parity on the device and the host: hidden_pcc_min "
+                    f"{fmt(sp.get('hidden_pcc_min'))}, top1_agree_fraction {fmt(sp.get('top1_agree_fraction'))}, "
+                    f"prob_max_abs_diff {fmt(sp.get('prob_max_abs_diff'))}, over {fmt(sp.get('n_questions'))} "
+                    "questions. Evidence: `stages/2/evidence/sidecar-parity.json`."] if ok else
+                   ["No stage measured the sidecar's output. Read the finding and its evidence."])
         elif area == "drafter":
             rate = [x for x in s6.get("numbers") or [] if isinstance(x, dict)
                     and x.get("label") == "measured" and "accept" in str(x.get("name", "")).lower()]
