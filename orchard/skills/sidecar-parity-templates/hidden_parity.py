@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Check a model's sidecar head against the device: do the chips give the head the same inputs the CPU does?
 
 Some models are a known backbone plus an extra head in a file of its own (the first case is

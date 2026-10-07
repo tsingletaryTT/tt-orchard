@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """The operator runbook skill (orchard/skills/operator-runbook.md) cannot drift from the CLI.
 
 Every orchard command line the runbook quotes is parsed with the real argparse parsers, every

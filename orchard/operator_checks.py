@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Post-run checks for the operator: `python3 -m orchard.operator_checks --run-dir DIR`.
 
 Run it on a run that is "ready-for-operator-review". It is read-only and needs no hardware. It

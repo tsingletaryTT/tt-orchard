@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Opt-in replay of every qwen-code transcript on this machine (spec section 12).
 
 Normal test runs read nothing outside the repo, so this test runs only with ORCHARD_REPLAY=1.

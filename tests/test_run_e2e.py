@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """End to end: a scripted Hemmingway-1 bring-up from stage 0 to the operator bundle, against a fake
 machine and fake model servers, with the supervisor killed after every ledger event (spec section 13).
 The scripted delta is weights-only, so stage 2 runs the weights swap check and stage 3 is skipped.

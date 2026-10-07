@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """The role-fit test: can a candidate model do the agent role in this loop?
 
 A model takes a role in tiers.toml only after it passes this test. The success rates and capability scores

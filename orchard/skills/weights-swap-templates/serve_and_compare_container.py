@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Serve the swapped weights with a container package and compare the chip's tokens with the CPU
 reference (stage 4 on the weights-only path).
 

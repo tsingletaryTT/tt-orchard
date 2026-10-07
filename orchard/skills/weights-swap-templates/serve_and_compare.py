@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Serve the swapped weights with the bundle and compare the chip's tokens with the CPU reference.
 
 The weights-swap-check skill copies this file into the stage directory. The supervisor runs it as

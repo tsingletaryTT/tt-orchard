@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """A stand-in for `tt-model`, for tests/test_container_template.py.
 
 It answers only `tt-model serve <package> ... --print`: it prints a note line and then the docker

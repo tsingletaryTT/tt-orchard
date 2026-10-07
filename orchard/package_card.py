@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """The package card and the license it carries (plan 5, stage 7).
 
 This module owns the README.md of a staged package: what it says, and the check that it says only

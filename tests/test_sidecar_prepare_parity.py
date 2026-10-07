@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """prepare_parity.py (orchard/skills/sidecar-parity-templates/).
 
 It builds, in a stage directory, the launcher for the sidecar parity check (a copy of the nearest

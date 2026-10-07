@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """The weights-sidecar-check skill and the templates it tells the agent to copy must agree.
 
 The agent writes parity_config.json from the skill's example, so the example has to hold every key the

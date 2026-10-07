@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """serve_and_compare_container.py: the stage 4 template that serves the swapped weights with a
 container package. The argv edit is tested in-process; the whole script runs against a fake
 `tt-model` and a fake `docker` (tests/fake_tt_model.py, tests/fake_docker.py) that start

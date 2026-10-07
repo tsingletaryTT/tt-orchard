@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """scripts/setup.sh and orchard/setup_machine.py: prepare a machine for tt-orchard.
 
 Everything runs against a fake machine: a dictionary of installed tools and canned command output, so no test

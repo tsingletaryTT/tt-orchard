@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Stage 7, part 1: read the run, find the source bundles, run package-thin with --out only (plan 5)."""
 import json
 import os

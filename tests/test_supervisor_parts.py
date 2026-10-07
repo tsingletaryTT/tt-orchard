@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """The supervisor's parts: control file, actuator, external stand-in, coder tier, versions, and the
 reading of a hardware test's record."""
 import json

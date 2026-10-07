@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Stage 7 for a model without mtp.* tensors (Clef): the package serves the way stage 2 and 4 tested it.
 
 Stage 2's run.sh copy has the speculative drafter off and no on-device sampling. The staged package

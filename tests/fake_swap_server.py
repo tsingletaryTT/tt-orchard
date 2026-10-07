@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """A stand-in for the bundle's vLLM server, for tests/test_weights_swap_templates.py.
 
 It opens no device and loads no model. The test writes a JSON config and a run.sh that execs this

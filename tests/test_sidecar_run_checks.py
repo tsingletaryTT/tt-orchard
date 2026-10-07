@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """run_sidecar_checks.py (orchard/skills/sidecar-parity-templates/).
 
 It is the one command of stage 2's hardware test on a `weights+sidecar` model. It runs serve_and_compare.py

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """The pretty status page for a person at a terminal (`status --style pretty`, or `auto` on a terminal).
 
 A pure function of the facts dict `status.collect` returns, so it takes no lock and reads nothing. The

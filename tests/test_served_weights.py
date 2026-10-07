@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Stage 7 checks that stage 2 served the weights stage 0 names, from the files on disk.
 
 Stage 0's delta.json names the model as `<repo>@<revision>`. Stage 2's swap-check.json holds

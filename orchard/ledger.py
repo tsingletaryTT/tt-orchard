@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Append-only run ledger.
 
 One JSON object per line. Each line carries the sha256 of the previous line's text, so editing

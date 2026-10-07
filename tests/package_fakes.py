@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Fakes for the stage 7 tests: an installed source bundle, a finished run and its HF caches.
 
 `make_source` writes a v6 thin bundle of the nearest model in the layout `tt-model` installs, with a

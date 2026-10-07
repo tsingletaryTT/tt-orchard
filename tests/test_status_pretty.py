@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """The pretty status view (orchard/orchard_view.py) and the --style flag of the status command.
 
 The plain text view is what the operator runbook and a small local model read, so it must not change.

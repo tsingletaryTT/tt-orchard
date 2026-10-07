@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Agent steps: one fresh model context per stage phase, and the tool-call loop that serves it.
 
 This module owns three things.

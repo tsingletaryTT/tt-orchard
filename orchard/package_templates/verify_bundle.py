@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Boot an installed copy of the staged package and compare its tokens with the CPU reference.
 
 Stage 7 copies this file and serve_and_compare.py (the weights-swap-check template, whose server

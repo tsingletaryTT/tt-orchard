@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """What `tt-orchard bringup` checks before it starts anything.
 
 Each check is a pure function of values handed to it, so a test needs no network, no gozer, no socket and

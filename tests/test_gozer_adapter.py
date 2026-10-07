@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """GozerAdapter against hand-written gozer output (tests/test_gozer_contract.py checks the real CLI)."""
 import pytest
 

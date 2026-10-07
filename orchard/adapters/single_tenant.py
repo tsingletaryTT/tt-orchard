@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Lease adapter for a machine with no lease tool.
 
 It assumes one tenant: this supervisor. It keeps nothing on disk. A lease is a record in memory of

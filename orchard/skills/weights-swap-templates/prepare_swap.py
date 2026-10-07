@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Build the model directory and the run script for a weights-only swap (stage 2).
 
 The weights-swap-check skill copies this file into the stage directory and runs it. It reads

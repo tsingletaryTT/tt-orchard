@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Hardware-check driver for the hold-through-swap runbook (docs/runbooks/hardware-validation.md).
 
 Run it as:

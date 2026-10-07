@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Stage 2's hardware test for a model of class `weights+sidecar`: the swap check, then the parity check.
 
 The sidecar-parity skill copies this file next to `serve_and_compare.py` and `parity-run.sh` in the stage

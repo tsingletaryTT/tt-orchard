@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Replaying the ledger: the next stage, pauses, escalations, caps, the coder's lease, stage dirs."""
 import calendar
 import time

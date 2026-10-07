@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """The run.sh edits for a weights-only package, and the model-dir script it runs (plan 5)."""
 import json
 import os

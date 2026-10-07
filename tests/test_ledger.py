@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Ledger tests. The fault-injection test stops the writer at every point in a scripted run
 and checks that the resumed run ends in the same state as an uninterrupted one."""
 import pytest

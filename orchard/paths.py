@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """The machine paths a stage skill may name, and the rendering of their placeholders.
 
 The skills under orchard/skills are written once and run on any machine. Where a skill needs a

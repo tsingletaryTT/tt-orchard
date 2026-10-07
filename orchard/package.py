@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Stage 7: stage a v6 thin package of a weights-only model, as supervisor code (plan 5).
 
 This module owns the package a run hands to the operator. It never publishes. It runs one external

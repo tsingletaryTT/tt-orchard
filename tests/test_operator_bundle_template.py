@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """The stage 8 template the operator-bundle skill copies: build_bundle.py.
 
 Every test builds a fake run directory in tmp: a ledger written by the real orchard.ledger.Ledger

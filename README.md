@@ -59,6 +59,7 @@ before the same command was run again. Section 1 has the details and the limits.
 6. [Lessons that will bite you](#6-lessons-that-will-bite-you)
 7. [Where things are](#7-where-things-are)
 8. [Safety and license notes](#8-safety-and-license-notes)
+9. [License](#9-license)
 
 ## Recommended setup for a QuietBox 2
 
@@ -907,3 +908,20 @@ checked by mutation: remove the guard, watch a test fail, then restore it.
 - gozer cannot see device handles held by another user's processes, such as a root-owned
   container. The supervisor confirms with docker, ps and the server's port that a server has
   stopped before it resets a board.
+
+## 9. License
+
+This project is licensed under the **Apache License 2.0**. See the [LICENSE](LICENSE) file for details.
+Source files carry an SPDX header (`Apache-2.0`, copyright Tenstorrent USA, Inc.).
+
+### License understanding
+
+This software assists in programming Tenstorrent products. However, making, using, or selling hardware,
+models, or IP may require the license of rights (such as patent rights) from Tenstorrent or others. See
+[LICENSE_understanding.txt](LICENSE_understanding.txt) for details.
+
+### Other licenses
+
+The supervisor uses only the Python standard library. The models and tools it drives (tt-gozer, tt-model,
+ollama, the coder and the model being brought up) have their own licenses. A packaged model keeps the
+license of its own Hugging Face card (section 8).

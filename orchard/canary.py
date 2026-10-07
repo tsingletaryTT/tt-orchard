@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Canary prompts: ask a model server one fixed question and compare the answers.
 
 This module owns the chat call the park sequence uses to check a server (spec section 6, steps 2

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """A stand-in for the `tt-model` CLI in the stage 7 tests. It opens no device and uploads nothing.
 
 Every call appends its arguments as one JSON line to $FAKE_TT_MODEL_LOG. Only

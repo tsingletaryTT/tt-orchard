@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """RunPaths: the machine paths a skill may name, and the rendering of their placeholders."""
 from pathlib import Path
 

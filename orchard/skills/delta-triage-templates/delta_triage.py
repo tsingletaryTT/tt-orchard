@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Compare a new model with the nearest supported model and draft stage 0's delta.json.
 
 The delta-triage skill copies this file into the stage directory and runs it with `python3`. It

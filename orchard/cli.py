@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """`tt-orchard`: the front door to a model bring-up.
 
     tt-orchard bringup MODEL [--run-dir DIR] [--dry-run] [--no-fetch] [--accept-credentials-visible]

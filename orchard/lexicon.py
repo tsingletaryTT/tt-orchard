@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """The orchard vocabulary: what each state, stage and actor is called when a person reads the output.
 
 The names are flavour. The real state and stage names always stay on the page next to them, because the

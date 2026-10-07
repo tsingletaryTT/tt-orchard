@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Test doubles shared by the plan 3 tests. Nothing here touches hardware or the network."""
 from __future__ import annotations
 

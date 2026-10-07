@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Prepare a machine for tt-orchard: `scripts/setup.sh`, or `python3 -m orchard.setup_machine`.
 
 It checks every prerequisite, says what is missing, and with your yes does what it can do safely:

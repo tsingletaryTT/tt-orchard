@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Hardware check for park and restore (docs/runbooks/hardware-validation.md, "Park check").
 
 Run it as: python3 -m orchard.park_check --board <BDF of the board's first chip>

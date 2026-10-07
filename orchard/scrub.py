@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """The bundle scrub check (spec section 10): search for the hostname, tokens and home paths.
 
 The first p150 repo exposed a hostname in an old revision (spec section 3), so the operator bundle

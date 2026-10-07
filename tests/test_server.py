@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """ServerControl with fake commands: start, stop, the stop checks, readiness."""
 import signal
 

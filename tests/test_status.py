@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """The read-only status command (orchard/status.py).
 
 The run directories here are built with the real Ledger writer, so the ledger the status command

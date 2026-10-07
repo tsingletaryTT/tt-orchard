@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Run one external program for supervisor code and keep what it printed.
 
 This module owns the one place where supervisor code (the lease adapters and server control)

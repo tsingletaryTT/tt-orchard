@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """A hardware phase that runs several tests: stage 4 on the weights-only path (spec section 5).
 
 This module owns the list of tests one stage runs, one per chip configuration, and the files that

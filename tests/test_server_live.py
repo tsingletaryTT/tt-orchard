@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """ServerControl's stop checks with the real ps, pgrep, ss and curl against a fake server.
 
 The FakeRun tests check how ServerControl reads command output written by hand. This file checks

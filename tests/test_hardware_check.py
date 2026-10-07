@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Tests for the hardware-check driver, run against fake gozer roots.
 
 Nothing here touches a real device. gozer runs from the tt-gozer branch checkout with a fake

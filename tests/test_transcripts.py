@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """The qwen-code transcript reader, the committed signatures and what the detectors find in them."""
 import json
 import re

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """The list of hardware tests a weights-only stage 4 runs, and the records it leaves."""
 import json
 from pathlib import Path

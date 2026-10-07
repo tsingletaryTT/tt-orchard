@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """The stage 0 template the delta-triage skill copies: delta_triage.py.
 
 Everything here runs on fake model snapshots in tmp directories. A fake snapshot holds a config,

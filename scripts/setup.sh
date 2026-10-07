@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 # Prepare this machine for tt-orchard: check every prerequisite, install what can be installed safely
 # (tt-gozer with its own installer, the reference venv, the coder package, the CPU-tier model), and write a
 # first configuration. Idempotent. `--check` only reports. `--yes` asks nothing. `--help` lists the options.

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """decide_park, chips_quiet and progress: pure functions over chip states and ledger entries."""
 import pytest
 

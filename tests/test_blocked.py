@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """The blocked end state (orchard/blocked.py): which pauses an unattended run turns into a named block,
 and the bundle it leaves. Pure functions of ledger entries, so no supervisor is needed here."""
 import json

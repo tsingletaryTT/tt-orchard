@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """The defaults for `tt-orchard bringup`: config/bringup.toml, the run directory name for a model, and the
 `orchard.supervisor run` argument list those two imply.
 

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Lease adapter for tt-gozer.
 
 This module owns the translation between the supervisor's lease calls and the `gozer` command

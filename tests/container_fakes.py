@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """The docker command `tt-model serve <container package> ... --print` prints, for the container
 template tests (tests/test_container_template.py, tests/fake_tt_model.py).
 

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """park_check against the real gozer CLI with fake roots, and real fake-server processes.
 
 Nothing here opens a device: gozer's reset command is a stub that writes a marker file. The

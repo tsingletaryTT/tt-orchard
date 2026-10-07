@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Read qwen-code session transcripts as the watchdog's event stream.
 
 This module owns the mapping from a qwen-code (0.24.7) chat file to `Event`s, and the sanitised

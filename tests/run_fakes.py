@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Fakes for the supervisor tests: a two-board machine, its coder, and a scripted bring-up.
 
 `Machine` is the state a crash leaves behind: leases (with the pid that owns each), and whether the

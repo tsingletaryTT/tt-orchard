@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Shim for `tt-orchard`: put the checkout on the import path and run orchard.cli.
 
 Link this file from a directory on PATH (`ln -s <checkout>/bin/tt-orchard ~/.local/bin/tt-orchard`). A link,

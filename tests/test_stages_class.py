@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """The outcome class in the stage machine: orchard/classes.py, the stage 0 gate, run_class, spec_for and the
 sidecar parity gate. The class is stage 0's answer to "what kind of bring-up is this?" and each class has a
 contract (docs/superpowers/specs/2026-10-06-bringup-command-design.md, section 3)."""

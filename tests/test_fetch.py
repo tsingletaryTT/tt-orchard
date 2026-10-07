@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Fetching the model snapshot (orchard/fetch.py).
 
 The supervisor never downloads, and agents run offline, so `bringup` fetches the snapshot first. The

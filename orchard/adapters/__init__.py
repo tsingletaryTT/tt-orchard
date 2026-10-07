@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Lease adapters: how the supervisor takes, resets and gives back Tenstorrent boards.
 
 This package owns the interface between the supervisor and whatever controls access to the chips

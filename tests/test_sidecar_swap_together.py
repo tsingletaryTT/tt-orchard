@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """The two prepare scripts of the weights-sidecar-check skill, run in ONE stage directory.
 
 The skill runs prepare_swap.py and then prepare_parity.py in `stages/2`. Each had its own tests and each

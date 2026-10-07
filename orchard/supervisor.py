@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """The supervisor loop: run a bring-up stage by stage, from the ledger (spec sections 5 to 7, 10).
 
 This module owns the run. At start it records the run (model, resolved versions, inputs) or, on a

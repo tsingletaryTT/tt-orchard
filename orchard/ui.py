@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Terminal styling for people: colour and emoji, only where a person is looking at a terminal.
 
 The rule: a pipe, a file, a dumb terminal or `--style plain` gets plain text. A small local model that

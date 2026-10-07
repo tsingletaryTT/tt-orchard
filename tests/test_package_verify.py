@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Stage 7, part 2: install a copy of the staged package and boot-check it (plan 5).
 
 The copy's install.sh (from tests/fake_package_thin.py) makes venv/bin/python a wrapper that serves

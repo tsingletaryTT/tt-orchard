@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Stage 7, part 3: stage every profile, write the cards, the record and the publish commands (plan 5)."""
 import json
 import os

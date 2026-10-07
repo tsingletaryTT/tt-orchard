@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Measure a CPU-served model so the tier choice rests on numbers (spec sections 5.1 and 12).
 
 Talks to a local ollama over HTTP. It measures load time, prefill speed, decode speed and the

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Build stage 1's CPU reference of the new model, check it, and draft reference.json.
 
 The reference-gate skill copies this file into the stage directory and runs it with the

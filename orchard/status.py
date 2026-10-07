@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Read-only status of a run: `python3 -m orchard.supervisor status --run-dir DIR [--json]`.
 
 This exists so a small local model, acting as the run's operator, can see the whole state of a

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """The supervisor runs stage 7 on the weights-only path when asked for a package (plan 5).
 
 A scripted bring-up walks stages 0 to 8 against the fake two-board machine. Its stage 1 writes the

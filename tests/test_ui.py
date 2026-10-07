@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Terminal capability and styling (orchard/ui.py).
 
 The rule under test: colour and emoji appear only when a person is looking at a terminal that can show

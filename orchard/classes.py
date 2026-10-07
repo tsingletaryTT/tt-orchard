@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """The outcome class of a bring-up: what kind of work this model needs, decided once by stage 0.
 
     weights-only     the nearest supported model's architecture, only the weights differ

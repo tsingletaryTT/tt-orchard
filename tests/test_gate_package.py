@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Stage 7's spec on each path, and gate_package checking the staged package from disk (plan 5)."""
 import json
 import os

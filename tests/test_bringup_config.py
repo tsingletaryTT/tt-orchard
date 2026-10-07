@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """config/bringup.toml, the run directory name and the `supervisor run` argument list
 (orchard/bringup_config.py). Everything here is a pure function of a config file and a model id."""
 from pathlib import Path

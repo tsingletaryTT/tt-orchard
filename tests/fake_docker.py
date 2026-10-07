@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """A stand-in for `docker`, for tests/test_container_template.py. It opens no device.
 
 State lives in the directory $FAKE_DOCKER_STATE: config.json ({"image", "fake_server",

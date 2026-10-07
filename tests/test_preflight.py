@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """The checks `tt-orchard bringup` makes before it starts anything (orchard/preflight.py).
 
 Every check is a function of injected signals, so no test touches the network, gozer, a socket or the

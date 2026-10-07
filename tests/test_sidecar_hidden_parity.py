@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """The device-free parts of hidden_parity.py (orchard/skills/sidecar-parity-templates/).
 
 The script runs on a leased board inside a tt-model bundle's venv. These tests cover everything that

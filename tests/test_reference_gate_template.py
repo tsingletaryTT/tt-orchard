@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """The stage 1 template the reference-gate skill copies: reference_gate.py.
 
 The end-to-end tests build a TINY random-weight model with transformers (a 2-layer Qwen2 with a

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """The `tt-orchard` command (orchard/cli.py).
 
 The supervisor, the download and the outside signals are all injected. The tests that matter most prove

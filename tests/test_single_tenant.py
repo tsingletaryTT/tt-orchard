@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """SingleTenantAdapter: one tenant, no lease tool, whole boards, a fake /proc."""
 import os
 

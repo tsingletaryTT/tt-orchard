@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """The local draft stage skills, and the skill names the stage table uses."""
 import re
 from pathlib import Path

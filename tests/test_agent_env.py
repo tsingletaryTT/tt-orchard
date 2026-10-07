@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """The agent's environment and tools: no tokens, checked commands, writes only in the stage dir."""
 import os
 import shutil

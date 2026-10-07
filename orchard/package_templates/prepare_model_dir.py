@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Build model-dir/ for this bundle before vLLM starts. run.sh runs it with the bundle's python.
 
 Written by tt-orchard (stage 7) for a model whose weights are a fine-tune of a supported model.

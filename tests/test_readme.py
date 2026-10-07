@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """The README is checked against the code it describes.
 
 A reader with no other source follows README.md command by command, so these tests check what can

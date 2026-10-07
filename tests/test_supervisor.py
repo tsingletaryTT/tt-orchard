@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """The supervisor run: escalation, pause and resume, abort, disk, the hardware test, the coder."""
 import os
 import shutil

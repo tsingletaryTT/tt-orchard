@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """The blocked end state of an unattended run.
 
 An unattended run (`tt-orchard bringup`, `supervisor run --unattended`) never waits for a person. When the

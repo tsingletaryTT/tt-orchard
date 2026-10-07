@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Recovery: kill the supervisor after every ledger event and check the final state (spec section 13)."""
 import signal
 

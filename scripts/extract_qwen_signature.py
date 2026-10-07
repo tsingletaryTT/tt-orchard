@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Write the sanitised event signature of one qwen-code transcript.
 
 Usage: python3 scripts/extract_qwen_signature.py TRANSCRIPT OUT

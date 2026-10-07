@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """The fresh, short context each agent step starts from (spec section 5).
 
 A step gets only: the stage skill, the rules of the run, a ledger excerpt (how earlier stages

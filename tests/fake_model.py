@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """A deterministic OpenAI-shaped model server for tests. No model, no network beyond 127.0.0.1.
 
 `FakeModel(script)` serves GET /v1/models and POST /v1/chat/completions. For each chat request

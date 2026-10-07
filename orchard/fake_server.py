@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """A small OpenAI-shaped HTTP server that opens no device.
 
 orchard/park_check.py runs two of these, one standing in for the coder and one for the CPU

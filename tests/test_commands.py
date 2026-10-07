@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """run_command: exit codes, output, timeouts, and leaving a reset running."""
 import os
 import signal

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Fetch a model snapshot into the operator's Hugging Face cache before a run starts.
 
 The supervisor never downloads weights, and agents run with HF_HUB_OFFLINE=1, so `tt-orchard bringup` makes

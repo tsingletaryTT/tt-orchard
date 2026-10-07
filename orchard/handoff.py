@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Park and restore: swap the coder off a board and back (spec section 6).
 
 This module owns the decision whether a stage needs a park, the park and restore sequence, and

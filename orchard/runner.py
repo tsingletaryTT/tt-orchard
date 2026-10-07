@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """The command runner: the only way the supervisor runs commands for a stage agent.
 
 It refuses a fixed list of command spellings (see RULES): publishing, pushing and uploading;

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """GozerAdapter against the real gozer command line, with fake roots.
 
 gozer runs from ORCHARD_GOZER, or ~/code/tt-gozer/bin/gozer, with a fake sysfs, a fake /proc, a

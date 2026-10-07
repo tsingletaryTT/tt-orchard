@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """The read_file tool (orchard/agent.py): a read-only way to look at a text file in the run directory.
 
 Qwen3-Coder-Next calls a `read_file` tool by habit (4 of 50 replayed turns in the role-fit test, where the

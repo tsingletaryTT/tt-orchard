@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """The stage table, the exit gates and the replay that drives the stage machine (spec sections 5, 10).
 
 This module owns what each stage is: its number, owner skill, the boards its hardware test needs,

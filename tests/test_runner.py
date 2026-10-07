@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Runner tests. Every rule has denied forms in DENY. A structural test fails when a rule is added
 without one, so a rule cannot exist untested."""
 import subprocess

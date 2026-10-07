@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """The two scripts the weights-swap-check skill copies: prepare_swap.py and serve_and_compare.py.
 
 Everything here runs on fakes in tmp directories. The bundle's run.sh is replaced by one that

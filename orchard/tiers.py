@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Tier config: which local model fills each role, and which tier runs each stage.
 
 The file is local to the machine and never committed. It names models, and the choice of models

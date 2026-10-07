@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """write_file path forms (orchard/agent.py, Tools.target).
 
 write_file is documented as relative to the stage directory, but a model that reads files with run-relative

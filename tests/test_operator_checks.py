@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """The operator's post-run checks (orchard/operator_checks.py): read-only, no hardware.
 
 The hub lookup is injected, so no test touches the network."""

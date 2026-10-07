@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Stage 4 on the weights-only path: one hardware test per chip configuration, each under its own
 lease, with the coder parked only when its boards are needed."""
 import hashlib

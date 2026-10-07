@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Build the launcher and the model directory for the sidecar parity check.
 
 The sidecar-parity skill copies this file into the stage directory and runs it. It reads

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """The role-fit test (orchard/rolefit.py): can a candidate model do the agent role in this loop?
 
 It replays recorded agent turns (the run logs hold each turn's full prompt and the model's reply) against a

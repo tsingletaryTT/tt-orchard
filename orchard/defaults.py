@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Every timing, budget and threshold the supervisor uses, one named constant each.
 
 Each constant says where its number comes from. "Measured" means measured on this Quietbox 2 and

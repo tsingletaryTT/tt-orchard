@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Stage 8 template: build the operator bundle from the run's own files (the operator-bundle skill).
 
 The stage 8 agent copies this file into stages/8/, writes stages/8/bundle_config.json next to it:

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Start, stop, check and question the model server that holds a board.
 
 This module owns the server side of a park (spec section 6, steps 3 and 5): starting the coder,
