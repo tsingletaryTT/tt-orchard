@@ -87,7 +87,7 @@ Every terminal state of a run is one of three, and each writes the operator bund
 - `blocked`: the harness did everything it could do and names what stopped it, with evidence.
   Reasons are an enumerated set (`needs-new-model-code`, `unsupported-input-type`,
   `hardware-unhealthy`, `disk-full`, `credentials-needed`, `license-needs-review`,
-  `coder-unusable`, `retry-budget-spent`).
+  `coder-unusable`, `model-unavailable`, `config-invalid`, `retry-budget-spent`).
 - `aborted`: the operator asked.
 
 Today a pause is a fourth state that needs a person to look. The change: a pause caused by one of

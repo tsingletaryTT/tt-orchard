@@ -29,12 +29,18 @@ phase: outcome classes, the `blocked` end state, the run budget, the sidecar gat
    the builder; only the `--accept-credentials-visible` flag of `bringup` passes it.
 4. **Preflight** (`orchard/preflight.py`). Each check is a pure function of injected signals and returns a
    result with a name, a status (`ok`, `warn`, `block`), a detail line and, for a block, a reason from the
-   spec's enumerated set. Checks: model id and hub lookup (exists, public, has a license, file sizes);
+   spec's enumerated set. Block reasons add two names to the spec's set: `model-unavailable` and `config-invalid`. Checks: hub lookup
+   (exists, public, has a license, file sizes; a repo that ships `.py` files is a warning that names them);
    disk (model bytes plus `TEST_DISK_GB`, on the filesystems of `hf_home` and `cache_root`); credentials
    (`supervisor.visible_credentials`); tiers load and the coder port names exactly one chips tier; coder
    port free; gozer reachable, with `STALE` and foreign leases reported as warnings and never cleared. A hub
    that cannot be reached is a warning when the snapshot is already local and a block otherwise.
-5. **Command** (`orchard/cli.py`, console script `tt-orchard`, `python -m orchard.cli`). `bringup` prints the
+5. **Fetch** (`orchard/fetch.py`). The supervisor never downloads weights and agents run with
+   `HF_HUB_OFFLINE=1`, so `bringup` fetches the snapshot into `hf_home` when it is missing (resumable;
+   `--no-fetch` skips it). The download passes `token=False`: the harness never uses the operator's Hugging
+   Face token, so a gated or private model is a block (`credentials-needed`), not a login. The snapshot's
+   path goes to the supervisor as `--input model=<snapshot>`. Files in the model repo are fetched, never run.
+5b. **Command** (`orchard/cli.py`, console script `tt-orchard`, `python -m orchard.cli`). `bringup` prints the
    preflight with the orchard styling, refuses (exit 2) on any block, supports `--dry-run` (prints the
    checks and the command, starts nothing), and otherwise calls `supervisor.main`. `status`, `pause`,
    `resume`, `abort` forward. Exit codes of the supervisor pass through.
