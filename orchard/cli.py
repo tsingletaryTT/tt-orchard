@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """`tt-orchard`: the front door to a model bring-up.
 
-    tt-orchard bringup MODEL [--run-dir DIR] [--dry-run] [--no-fetch] [--accept-credentials-visible]
+    tt-orchard bringup MODEL [--run-dir DIR] [--dry-run] [--no-fetch] [--refuse-credentials-visible]
     tt-orchard status   [MODEL | --run-dir DIR] [--json] [--style S]
     tt-orchard watch    [MODEL | --run-dir DIR] [--all] [--once] [--style S]
     tt-orchard pause | resume | abort   [MODEL | --run-dir DIR]
@@ -74,7 +74,10 @@ def _parser() -> argparse.ArgumentParser:
     b.add_argument("--dry-run", action="store_true", help="print the checks and the command; start nothing")
     b.add_argument("--no-fetch", action="store_true", help="never download; the snapshot must be local")
     b.add_argument("--accept-credentials-visible", action="store_true",
-                   help="start even though credential files are visible to agent shells (the ledger records it)")
+                   help="accept that credential files are visible to agent shells (this is the default; the "
+                        "flag is kept so older commands still work)")
+    b.add_argument("--refuse-credentials-visible", action="store_true",
+                   help="block the run while credential files are visible to agent shells")
     b.add_argument("--base", help="the model to base the run on: a tt-model bundle (as `tt model search` lists "
                                   "it) or a Hugging Face model id. Default: the model card's base_model")
     b.add_argument("--quiet", action="store_true", help="do not print what the run is doing as it goes")
@@ -237,7 +240,7 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
             return _refuse(why)
 
     def preflight_page():
-        got = preflight.run_preflight(cfg, args.model, accept_credentials=args.accept_credentials_visible,
+        got = preflight.run_preflight(cfg, args.model, accept_credentials=not args.refuse_credentials_visible,
                                       signals=sig, resuming=resuming, base_override=override)
         print(orchard_view.render_preflight(args.model, run_dir, resuming, cfg_path, got, style), file=out)
         return got
@@ -280,7 +283,7 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
         base_snapshot = fetch.snapshot_dir(hf_home, base_data["base"], base_hub.sha)
     inputs = {"model": str(snapshot), **({"base": str(base_snapshot)} if base_snapshot else {})}
     argv_run = bringup_config.supervisor_argv(cfg, args.model, run_dir, inputs=inputs,
-                                              accept_credentials=args.accept_credentials_visible)
+                                              accept_credentials=not args.refuse_credentials_visible)
     command = "python3 -m orchard.supervisor " + shlex.join(argv_run)
     if args.dry_run:
         print(f"║  command  {command}\n╚══", file=out)

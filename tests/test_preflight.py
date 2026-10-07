@@ -125,7 +125,7 @@ def test_visible_credentials_block_unless_the_operator_accepted_them():
     found = [Path("/h/.netrc")]
     c = pf.check_credentials(found, accepted=False)
     assert (c.status, c.reason) == ("block", "credentials-needed")
-    assert "--accept-credentials-visible" in c.detail and ".netrc" in c.detail
+    assert "--refuse-credentials-visible" in c.detail and ".netrc" in c.detail
     assert pf.check_credentials(found, accepted=True).status == "warn"
     assert pf.check_credentials([], accepted=False).status == "ok"
 

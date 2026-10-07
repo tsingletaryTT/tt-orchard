@@ -131,8 +131,8 @@ def check_credentials(found: list[Path], accepted: bool) -> Check:
     names = ", ".join(str(p) for p in found)
     if accepted:
         return Check("credentials", WARN, f"visible to agent shells and accepted: {names}")
-    return Check("credentials", BLOCK, f"credential files agents could read: {names}. Move them, or pass "
-                 "--accept-credentials-visible to accept the risk", "credentials-needed")
+    return Check("credentials", BLOCK, f"credential files agents could read: {names}. Move them, or run "
+                 "bringup without --refuse-credentials-visible to accept the risk", "credentials-needed")
 
 
 def check_tiers(load: Callable, path: Path, coder_port: int) -> Check:

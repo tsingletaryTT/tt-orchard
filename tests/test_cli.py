@@ -103,7 +103,7 @@ def test_a_dry_run_prints_the_checks_and_the_command_and_starts_nothing(conf):
 
 def test_a_blocked_preflight_never_reaches_the_supervisor_or_the_download(conf, capsys):
     s = signals(credentials=lambda: [Path("/h/.netrc")], port_in_use=lambda p: True)
-    code, out, rec = run(conf, ["bringup", "Cloudflare/clef"], sig=s)
+    code, out, rec = run(conf, ["bringup", "Cloudflare/clef", "--refuse-credentials-visible"], sig=s)
     assert code == 2 and rec.argv is None and rec.fetched == []
     assert "credentials-needed" in out and "coder-unusable" in out and "Nothing was started" in out
 
@@ -167,16 +167,32 @@ def test_a_failed_download_is_a_refusal_because_nothing_was_started(conf, capsys
     assert code == 2 and rec.argv is None and "hf download exited 1" in capsys.readouterr().err
 
 
-def test_credentials_are_accepted_only_with_the_operator_flag(conf):
+def test_visible_credentials_are_accepted_by_default_and_the_supervisor_is_told_so(conf):
+    s = signals(credentials=lambda: [Path("/h/.netrc")])
+    code, out, rec = run(conf, ["bringup", "Cloudflare/clef"], sig=s)
+    assert code == 0 and "--accept-credentials-visible" in rec.argv
+    assert "accepted" in out and ".netrc" in out            # the page still names what is visible
+
+
+def test_the_old_flag_is_still_accepted(conf):
     s = signals(credentials=lambda: [Path("/h/.netrc")])
     code, out, rec = run(conf, ["bringup", "Cloudflare/clef", "--accept-credentials-visible"], sig=s)
     assert code == 0 and "--accept-credentials-visible" in rec.argv
-    code, out, rec = run(conf, ["bringup", "Cloudflare/clef"], sig=s)
-    assert code == 2 and rec.argv is None
 
 
-def test_without_the_flag_the_supervisor_is_never_told_to_accept_credentials(conf):
+def test_refusing_visible_credentials_restores_the_block(conf):
+    s = signals(credentials=lambda: [Path("/h/.netrc")])
+    code, out, rec = run(conf, ["bringup", "Cloudflare/clef", "--refuse-credentials-visible"], sig=s)
+    assert code == 2 and rec.argv is None and "credentials-needed" in out
+
+
+def test_with_no_credentials_visible_the_flag_is_still_passed_so_the_ledger_is_consistent(conf):
     code, out, rec = run(conf, ["bringup", "Cloudflare/clef"])
+    assert "--accept-credentials-visible" in rec.argv
+
+
+def test_refusing_means_the_supervisor_is_not_told_to_accept(conf):
+    code, out, rec = run(conf, ["bringup", "Cloudflare/clef", "--refuse-credentials-visible"])
     assert "--accept-credentials-visible" not in rec.argv
 
 
@@ -280,7 +296,8 @@ def test_style_pretty_adds_emoji_and_style_plain_removes_them_on_a_terminal(conf
 
 def test_every_preflight_line_stays_inside_80_columns_without_a_right_border(conf):
     from orchard import ui
-    code, out, rec = run(conf, ["bringup", "Cloudflare/clef", "--dry-run", "--style", "pretty"],
+    code, out, rec = run(conf, ["bringup", "Cloudflare/clef", "--dry-run", "--style", "pretty",
+                                   "--refuse-credentials-visible"],
                          sig=signals(credentials=lambda: [Path("/home/someone/" + "x" * 90 + "/.netrc")]))
     for line in out.splitlines():
         if line.startswith(("║", "╔", "╚", " ")):
@@ -319,7 +336,7 @@ def test_the_label_column_fits_every_check_name_with_its_icon_and_a_space(conf):
 def test_the_plain_page_says_each_checks_status_in_words(conf):
     s = signals(credentials=lambda: [Path("/h/.netrc")],
                 gozer_status=lambda: FREE.replace("FREE", "HELD", 1))
-    code, out, rec = run(conf, ["bringup", "Cloudflare/clef", "--dry-run"], sig=s)
+    code, out, rec = run(conf, ["bringup", "Cloudflare/clef", "--dry-run", "--refuse-credentials-visible"], sig=s)
     rows = {line.split()[1]: line for line in out.splitlines() if line.startswith("║") and len(line.split()) > 2}
     assert " BLOCK " in rows["credentials"] and " warn " in rows["gozer"] and " ok " in rows["disk"]
 

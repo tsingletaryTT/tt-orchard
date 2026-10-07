@@ -676,3 +676,11 @@ Gemma repos). Three coder boots and 105 agent turns went to `ls` on cache direct
   meaningless because two tests were already failing; check the baseline is green before reading a mutation table.
 - Real dry run on this machine for the humanizer: the check blocks and lists the two Gemma bundles in about 10 seconds.
 - Not done: whether stage 2 can use a v5.1 container Gemma bundle; this run was not resumed.
+
+## 2026-10-07 (later still): visible credentials are accepted by default (version 0.3.1)
+Prompt (operator): "make --accept-credentials-visible the default please". `tt-orchard bringup` now passes
+`--accept-credentials-visible` to the supervisor unless `--refuse-credentials-visible` is given. The preflight row is a
+warning that names the files, and the ledger still records the acceptance. `--accept-credentials-visible` stays as a
+no-op so older commands work. `supervisor run` itself is unchanged and still refuses until the flag is passed. The
+exposure is the same as before (agent shells run as the operator and can read the files); only the default moved.
+Four mutations, all red.

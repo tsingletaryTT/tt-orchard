@@ -456,7 +456,7 @@ its reason; a `warn` is information.
 |---|---|---|
 | hub | the model is not found, is gated or private, or has no license | `model-unavailable`, `credentials-needed`, `license-needs-review` |
 | disk | the download plus 40 GB (or `min_free_gb`) does not fit on the `hf_home` disk, or 40 GB does not fit on the `cache_root` disk | `disk-full` |
-| credentials | credential files are visible to agent shells and `--accept-credentials-visible` was not given | `credentials-needed` |
+| credentials | credential files are visible to agent shells and `--refuse-credentials-visible` was given. By default they are accepted, shown as a warning, and recorded in the ledger | `credentials-needed` |
 | tiers | the tier config is invalid, or not exactly one chips tier uses `coder.port` | `config-invalid` |
 | port | something already listens on `coder.port` (a warning when resuming) | `coder-unusable` |
 | gozer | gozer gives no usable status. Stale leases and chips in use are warnings, and nothing is cleared | `hardware-unhealthy` |
@@ -787,9 +787,12 @@ before it starts, the supervisor looks for these files in your home directory:
 private keys (`.ssh/id_*` without `.pub`). It checks only that they exist. If any exist, it
 refuses to start (exit 2) and names them.
 
-You can move them aside for the run and put them back afterwards. Or you can pass
-`--accept-credentials-visible`, and the ledger records that you accepted the risk. The check does
-not look inside `HF_HOME` or other places, so check those yourself.
+`tt-orchard bringup` accepts them by default: the preflight shows a warning that names the files, and
+the ledger records that the risk was accepted. Agent shells run as your user, so code an agent runs can
+read those files. To block the run instead, pass `--refuse-credentials-visible`, or move the files aside
+for the run and put them back afterwards. The supervisor's own `run` command still refuses until you pass
+`--accept-credentials-visible`. The check does not look inside `HF_HOME` or other places, so check those
+yourself.
 
 ### 5.7 What the command runner does not stop
 
