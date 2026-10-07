@@ -71,7 +71,7 @@ supervisor pauses before stage 2 for the operator.
 
 ### Tests
 
-The suite has 1811 passing tests and 1 skipped test (measured with
+The suite has 1884 passing tests and 1 skipped test (measured with
 `python3 -m pytest -q -p no:cacheprovider`). It needs no hardware and no network. The skipped test
 replays local agent transcripts and runs only when `ORCHARD_REPLAY=1` is set and those transcripts
 exist.
@@ -425,6 +425,38 @@ pause, the last five ledger events, free disk, the chip leases, and a final `nex
 usual action for that situation. It exits 0 when it produced a status, and 2 for a bad run
 directory or a ledger that fails its hash check. The JSON keys are listed in the docstring of
 [`orchard/status.py`](orchard/status.py).
+
+On a terminal, `status` draws a page with colour and emoji. The page uses the Tenstorrent palette and
+the orchard names below. It prints the real state and stage names next to the orchard names, and it
+has a left bar and a bottom bar only, so a narrow terminal cannot break it. A pipe, a file, a dumb
+terminal, `NO_COLOR` (colour only) and `ORCHARD_PLAIN=1` (colour and emoji) all select plainer output.
+`--style pretty` decorates whatever the output is, and `--style plain` never decorates. `--json` is never
+styled.
+
+```bash
+python3 -m orchard.supervisor status --run-dir <RUN_DIR> --style pretty
+```
+
+Who is who in the orchard (the table is `orchard/lexicon.py`, and a test keeps it in step with the
+code):
+
+| Orchard name | What it is in the harness |
+|---|---|
+| orchardist | the supervisor. It tends every row and answers for the whole run |
+| grafter | the coder model. It does the hands-on work in each stage |
+| head grower | the large tier. It is called in for plans and hard diagnoses |
+| seasonal hand | the CPU tier. It fills in while the chips are busy |
+| sheepdog | the watchdog. It watches the rows and acts only on what it launched |
+| almanac | the ledger. It is append-only, and every step and decision is written in it |
+| gate | the gozer lease. One party at a time goes through |
+| shed | park and restore. The coder is put away so the chips can be used, then brought back |
+| harvest basket | the operator bundle. The operator decides what goes to market. The harness never publishes |
+
+A bring-up is a graft. The nearest supported model is the rootstock and the new model's weights are
+the scion. The stages are `survey` (0), `soil test` (1), `graft` (2), `trunk` (3), `rows` (4),
+`farm gate` (5), `taste test` (6), `crate` (7) and `harvest` (8). A finished run is `ripe`
+(`ready-for-operator-review`) or `fallen` (`aborted`). A run that could not finish ends in `frost`
+with the reason named.
 
 A small local model can act as the operator. [`orchard/skills/operator-runbook.md`](orchard/skills/operator-runbook.md)
 tells it to run `status`, pick one action from a table, log it, wait five minutes and repeat. To use

@@ -107,3 +107,12 @@ def test_the_loop_has_five_steps_and_waits_in_its_own_command():
     loop = text().split("## The loop")[1].split("##")[0]
     assert len(re.findall(r"^\d\. ", loop, re.M)) == 5
     assert re.search(r"^\s+sleep 300$", loop, re.M)
+
+
+def test_every_status_command_in_the_runbook_pins_the_plain_view():
+    """A small model may read through a pseudo-terminal, where `auto` would decorate the output. The
+    runbook and its tests are written against the plain block, so the command says so."""
+    status_cmds = [c for c in orchard_commands() if " status " in c]
+    assert status_cmds
+    for c in status_cmds:
+        assert "--style plain" in c, c

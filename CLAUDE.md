@@ -404,3 +404,23 @@ pause detector, the runbook's command lines and NEVER list).
   in tenstorrent/skills. The `status:` lines, the spec and the plans that said "their home is the plugin" were reworded.
   The existing plugin skills the stages name (`model-bringup`, `tt-device-usage` and the rest) are still read through
   `--skills-dir`.
+
+## 2026-10-06: the orchard view of `status` (branch `orchard-ux`)
+Prompt (operator): "make tt-orchards UX/DX more pleasant and delightful, playing on the orchard metaphor and what
+it means with model bring up, and the roles each actor plays. maybe we get some color and some emojis even."
+Short design shown in chat, approved, built test first with a mutation per guard (17, all seen red).
+- `orchard/ui.py` detects what a stream can show. Colour and emoji appear only on a capable terminal (`auto`);
+  a pipe, a dumb terminal, `ORCHARD_PLAIN=1` or `--style plain` get plain text, `NO_COLOR` removes colour only,
+  `--style pretty` forces decoration. Palette is the docs-site theme from the global CLAUDE.md. Left bar and
+  bottom bar only.
+- `orchard/lexicon.py` is the one table of orchard names (states, stages, actors, closing lines). A test ties it
+  to `status.STATES` and `stages.STAGES`. The real state and stage names always stay on the page next to the
+  orchard names.
+- `orchard/orchard_view.py` renders the page from the facts dict. `status.render` and `--json` are unchanged;
+  piped output is byte-identical to before (tested). The operator runbook now pins `--style plain`, because a
+  model reading through a pseudo-terminal would otherwise get the decorated page (tested).
+- Found while testing: `textwrap` broke `ready-for-operator-review` at its hyphens. A test now forbids a line
+  ending in a hyphen, and the wrapper has `break_on_hyphens=False`.
+- Not done: the class and rootstock line (the outcome classes are in the bringup spec, not built), a live
+  `watch` view, and the start banner (it belongs to the `tt-orchard bringup` command).
+- Suite: 1884 passed, 1 skipped. Package version 0.0.2.
