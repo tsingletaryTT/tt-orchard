@@ -21,7 +21,7 @@ Steps:
     backbone then runs again with another torch thread count; the difference between the two runs is the
     noise floor of the reference itself.
 (c) Device (phase `device`). Cache guard (exit 3, as in serve_and_compare.py), then the mesh is opened
-    (exit 4 when it cannot be) and `Qwen36Model.from_pretrained` loads `model-dir`. For each record the
+    (exit 4 when it cannot be) and `Qwen36Model.from_pretrained` loads `parity-model-dir`. For each record the
     layer loop runs over all rows, the model's final norm is applied, and one replica is read back.
 (d) Wiring check. For record 0, `prefill_tp` gives the model's own last-row logits. The script applies the
     output-embedding matrix on the host to its own last normed row and takes the cosine with those logits.
@@ -560,7 +560,7 @@ def runtime_versions() -> dict:
 
 def run_device(cfg: dict, records: list[dict], ref: dict, sidecar, tokenizer, evidence: Path) -> int:
     torch = _torch()
-    snap = Path(cfg["snapshot_dir"])                 # model-dir: the clean backbone directory
+    snap = Path(cfg["snapshot_dir"])                 # parity-model-dir: the clean backbone directory
     guard_cache(Path(cfg["tt_cache"]), cfg["model_id"])
     try:
         import ttnn
@@ -658,7 +658,7 @@ def main(argv=None) -> int:
     evidence = HERE_DIR / "evidence"
     evidence.mkdir(exist_ok=True)
     (evidence / "records.json").write_text(json.dumps(records, indent=2) + "\n", encoding="utf-8")
-    cfg["snapshot_dir"] = str(HERE_DIR / "model-dir") if (HERE_DIR / "model-dir").is_dir() else str(snap)
+    cfg["snapshot_dir"] = str(HERE_DIR / "parity-model-dir") if (HERE_DIR / "parity-model-dir").is_dir() else str(snap)
     sidecar = import_sidecar(snap / cfg["code_file"])
     from transformers import AutoTokenizer
     tokenizer = AutoTokenizer.from_pretrained(str(snap))

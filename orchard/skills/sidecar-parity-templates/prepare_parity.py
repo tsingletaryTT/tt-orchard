@@ -4,7 +4,9 @@
 The sidecar-parity skill copies this file into the stage directory and runs it. It reads
 `parity_config.json` from its own directory and writes two things next to itself:
 
-1. `model-dir/`, a clean directory for the Qwen3.8 TT model code to load weights from. It holds
+1. `parity-model-dir/` (not `model-dir/`: prepare_swap.py builds that name in the same stage directory, and the
+   two directories differ: the swap server needs the nearest model's processor files and this one does not),
+   a clean directory for the Qwen3.8 TT model code to load weights from. It holds
    - a COPY of the new model's own config.json (the model is loaded directly, not through vLLM, so the
      nearest model's config is not needed), and
    - SYMLINKS (absolute, fully resolved) to the tokenizer files, model.safetensors.index.json and every
@@ -18,7 +20,7 @@ The sidecar-parity skill copies this file into the stage directory and runs it. 
      (exactly once), so the script runs in the bundle's python with the environment the server uses;
    - `export QWEN36_DRAFTER=...` becomes `export QWEN36_DRAFTER=""` (at most once): no drafter is loaded;
    - just before the exec line these are exported, so they come after the bundle's own lines and win:
-     `QWEN36_DRAFTER=""`, `HF_MODEL` and `MODEL_WEIGHTS_DIR` set to `<model-dir>` (the TT runtime takes
+     `QWEN36_DRAFTER=""`, `HF_MODEL` and `MODEL_WEIGHTS_DIR` set to `<parity-model-dir>` (the TT runtime takes
      its weights directory from MODEL_WEIGHTS_DIR, then HF_MODEL; the bundle sets HF_MODEL to the nearest
      model's id), `TT_CACHE_PATH` and `TT_CACHE_HOME` set to `tt_cache`, and `HF_HUB_OFFLINE=1`.
    - `export QWEN36_DRAFTER=...` in the bundle's own lines becomes empty too (at most once), so a reader
@@ -73,8 +75,8 @@ def check_snapshot(snap: Path) -> None:
 
 
 def build_model_dir(snap: Path) -> tuple[Path, list[str], list[str]]:
-    """Make model-dir from scratch. Returns (path, copied names, linked names)."""
-    md = HERE_DIR / "model-dir"
+    """Make parity-model-dir from scratch. Returns (path, copied names, linked names)."""
+    md = HERE_DIR / "parity-model-dir"
     if md.is_symlink():
         fail(f"{md} is a symlink; remove it so this script can build a real directory")
     if md.exists():
@@ -126,8 +128,8 @@ def main() -> int:
     src_run = bundle / "run.sh"
     if not src_run.is_file():
         fail(f"{src_run} does not exist")
-    model_dir = HERE_DIR / "model-dir"
-    # Edit in memory and check the snapshot first, so a failure leaves no launcher and no model-dir.
+    model_dir = HERE_DIR / "parity-model-dir"
+    # Edit in memory and check the snapshot first, so a failure leaves no launcher and no parity-model-dir.
     text, notes = edit_run_script(src_run.read_text(encoding="utf-8"), bundle, HERE_DIR / "hidden_parity.py",
                                   model_dir, cfg["tt_cache"])
     check_snapshot(snap)
@@ -135,7 +137,7 @@ def main() -> int:
     out = HERE_DIR / "parity-run.sh"
     out.write_text(text, encoding="utf-8")
     out.chmod(out.stat().st_mode | 0o111)
-    print(f"model-dir: {model_dir}")
+    print(f"parity-model-dir: {model_dir}")
     print(f"  copied: {', '.join(copied)}")
     print(f"  linked: {len(linked)} files ({', '.join(linked)})")
     print(f"parity-run.sh: {out}")

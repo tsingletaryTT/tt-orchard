@@ -132,7 +132,8 @@ Four facts decide whether a swap works. Each was found by failing first.
 5. Run `python3 stages/2/prepare_swap.py`, then `python3 stages/2/prepare_parity.py`. Each prints a summary.
    Exit 2 means a fact in the config does not fit; its message names the key or the edit. Fix that fact and
    run it again.
-6. Check that `stages/2/model-dir` and `stages/2/run.sh` exist (`ls -l`).
+6. Check that `stages/2/model-dir`, `stages/2/run.sh`, `stages/2/parity-model-dir` and `stages/2/parity-run.sh`
+   exist (`ls -l`). The two scripts build different directories on purpose; never copy files between them.
 7. Write `hw_test.json`: `{"command": "python3 stages/2/run_sidecar_checks.py", "deadline_s": 7200}`.
 8. Write `handoff.json` and reply with a short summary.
 

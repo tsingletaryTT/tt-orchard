@@ -105,7 +105,7 @@ def test_no_drafter_is_asked_for(stage):
 def test_both_weight_variables_name_the_model_dir(stage):
     prepare(stage)
     text = (stage / "parity-run.sh").read_text()
-    md = stage / "model-dir"
+    md = stage / "parity-model-dir"
     assert f'export HF_MODEL="{md}"' in text and f'export MODEL_WEIGHTS_DIR="{md}"' in text
 
 
@@ -136,7 +136,7 @@ def test_an_edit_that_does_not_happen_exactly_once_exits_2_and_writes_nothing(st
     edit_bundle(stage, fn)
     done = prepare(stage)
     assert done.returncode == 2 and needle in done.stderr, name
-    assert not (stage / "parity-run.sh").exists() and not (stage / "model-dir").exists()
+    assert not (stage / "parity-run.sh").exists() and not (stage / "parity-model-dir").exists()
 
 
 def test_an_absent_drafter_line_is_reported_and_not_an_error(stage):
@@ -150,7 +150,7 @@ def test_an_absent_drafter_line_is_reported_and_not_an_error(stage):
 
 def test_the_model_dir_links_the_backbone_and_leaves_the_sidecar_and_code_out(stage):
     assert prepare(stage).returncode == 0
-    names = sorted(p.name for p in (stage / "model-dir").iterdir())
+    names = sorted(p.name for p in (stage / "parity-model-dir").iterdir())
     assert "model-00001-of-00002.safetensors" in names and "tokenizer.json" in names
     assert "config.json" in names and "model.safetensors.index.json" in names
     for left_out in ("joint_head.safetensors", "joint_head_config.json", "joint_schema_model.py", "README.md"):
@@ -159,25 +159,25 @@ def test_the_model_dir_links_the_backbone_and_leaves_the_sidecar_and_code_out(st
 
 def test_weight_links_are_resolved_to_the_blobs(stage):
     prepare(stage)
-    link = stage / "model-dir" / "model-00001-of-00002.safetensors"
+    link = stage / "parity-model-dir" / "model-00001-of-00002.safetensors"
     assert link.is_symlink() and os.path.isabs(os.readlink(link)) and "snapshots" not in os.readlink(link)
     assert link.read_text() == "w1"
 
 
 def test_the_config_is_the_new_models_own(stage):
     prepare(stage)
-    assert json.loads((stage / "model-dir" / "config.json").read_text()) == {"model_type": "qwen3_5"}
+    assert json.loads((stage / "parity-model-dir" / "config.json").read_text()) == {"model_type": "qwen3_5"}
 
 
 def test_a_second_run_rebuilds_the_model_dir_from_scratch(stage):
     prepare(stage)
-    (stage / "model-dir" / "stray").write_text("x")
+    (stage / "parity-model-dir" / "stray").write_text("x")
     prepare(stage)
-    assert not (stage / "model-dir" / "stray").exists()
+    assert not (stage / "parity-model-dir" / "stray").exists()
 
 
 def test_a_symlinked_model_dir_is_refused(stage, tmp_path):
-    (stage / "model-dir").symlink_to(tmp_path)
+    (stage / "parity-model-dir").symlink_to(tmp_path)
     done = prepare(stage)
     assert done.returncode == 2 and "symlink" in done.stderr
 
