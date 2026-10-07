@@ -1,0 +1,96 @@
+{
+  "measured": true,
+  "n_records": 6,
+  "n_questions": 16,
+  "hidden_pcc_min": 0.99953161829506,
+  "hidden_pcc_mean": 0.9995979464032055,
+  "prob_max_abs_diff": 0.00258481502532959,
+  "top1_agree_fraction": 0.9375,
+  "noise_floor": {
+    "prob_max_abs_diff": 0.0
+  },
+  "wiring_check": {
+    "cosine": 0.9999445804302111,
+    "passed": true,
+    "minimum": 0.99
+  },
+  "tt_metal_sha": "0.79.0.dev20260929+qwen36p150x2.g9f6b02d",
+  "versions": {
+    "ttnn": "0.79.0.dev20260929+qwen36p150x2.g9f6b02d",
+    "torch": "2.14.1+cpu",
+    "transformers": "5.17.0"
+  },
+  "code_sha256": "0e304cf7c6500e8bb59bef7e2afd2c6373f82596dfb3b57d1aa93c175e2dc3a3",
+  "head_sha256": "a010ac04f078e699988e4049cbea5e62c962393f59fec366640b64e8d69a4953",
+  "mesh_shape": [
+    1,
+    2
+  ],
+  "n_layers": 4,
+  "model_load_s": 22.1,
+  "device_seconds_per_record": [
+    109.58,
+    0.02,
+    12.74,
+    0.02,
+    0.02,
+    0.02
+  ],
+  "peak_rss_gb": 16.0,
+  "per_record": [
+    {
+      "id": "outage",
+      "tokens": 363,
+      "hidden_pcc": 0.9996438232715563,
+      "prob_max_abs_diff": 0.00258481502532959,
+      "top1_agree": 3,
+      "n_questions": 3
+    },
+    {
+      "id": "invoice",
+      "tokens": 274,
+      "hidden_pcc": 0.9996114208675931,
+      "prob_max_abs_diff": 0.000244140625,
+      "top1_agree": 2,
+      "n_questions": 2
+    },
+    {
+      "id": "review",
+      "tokens": 410,
+      "hidden_pcc": 0.9996202537273636,
+      "prob_max_abs_diff": 0.0019834935665130615,
+      "top1_agree": 3,
+      "n_questions": 3
+    },
+    {
+      "id": "access",
+      "tokens": 281,
+      "hidden_pcc": 0.99953161829506,
+      "prob_max_abs_diff": 0.0008469521999359131,
+      "top1_agree": 2,
+      "n_questions": 2
+    },
+    {
+      "id": "support-thread",
+      "tokens": 501,
+      "hidden_pcc": 0.9995885539643983,
+      "prob_max_abs_diff": 0.0012319386005401611,
+      "top1_agree": 3,
+      "n_questions": 3
+    },
+    {
+      "id": "deploy",
+      "tokens": 369,
+      "hidden_pcc": 0.9995920082932621,
+      "prob_max_abs_diff": 0.0020550191402435303,
+      "top1_agree": 2,
+      "n_questions": 3
+    }
+  ],
+  "label": {
+    "hidden_pcc_min": "measured",
+    "hidden_pcc_mean": "measured",
+    "prob_max_abs_diff": "measured",
+    "top1_agree_fraction": "measured"
+  }
+}
