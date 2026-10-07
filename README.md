@@ -14,6 +14,12 @@ hardware, writes and runs the tests, brings it up on the chips, checks its outpu
 reference, and tries it on 1, 2 and 4 chips. It stops at a review bundle: results, risks, a model card
 and the publish commands as text, for you to read first.
 
+> **Requires [tt-gozer](https://github.com/tsingletaryTT/tt-gozer).** tt-gozer leases the chips, so
+> several agents can share one QuietBox 2 without opening a device at the same time. tt-orchard will not
+> start a hardware step without a gozer lease. `scripts/setup.sh` installs it for you (see
+> [the recommended setup](#recommended-setup-for-a-quietbox-2)), or follow
+> [section 3.2](#32-install-tt-gozer).
+
 ## The mission
 
 Bring up a model for a QuietBox 2, on a QuietBox 2, with only the compute the QuietBox 2 has.
@@ -57,7 +63,7 @@ before the same command was run again. Section 1 has the details and the limits.
 ## Recommended setup for a QuietBox 2
 
 On a QuietBox 2 (two p300 boards, four chips), run the setup script first. It checks each prerequisite,
-installs tt-gozer when it is missing, and writes the machine config. It never resets a chip, never takes or
+installs [tt-gozer](https://github.com/tsingletaryTT/tt-gozer) (the chip lease manager tt-orchard needs) when it is missing, and writes the machine config. It never resets a chip, never takes or
 releases a lease and never publishes anything. It never overwrites a config file that already exists.
 
 ```bash
@@ -242,8 +248,17 @@ here, stop and find out why before going further.
 
 ### 3.2 Install tt-gozer
 
-Follow the install section of the [tt-gozer README](https://github.com/tsingletaryTT/tt-gozer). Then
-check that `gozer status` lists your boards and that `gozer reset --help` works.
+[tt-gozer](https://github.com/tsingletaryTT/tt-gozer) is required. It is the only thing that decides which
+agent may open which chip, and the supervisor holds every board under a gozer lease for the whole run.
+`scripts/setup.sh` does this step. By hand:
+
+```bash
+git clone https://github.com/tsingletaryTT/tt-gozer.git
+cd tt-gozer && ./install.sh
+```
+
+Then check that `gozer status` lists your boards and that `gozer reset --help` works. You need version
+0.3.2 or newer. Read the tt-gozer README before you share the box with other agents.
 
 ### 3.3 Install tt-model and a bundle for the nearest supported model
 
