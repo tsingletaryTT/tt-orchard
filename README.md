@@ -72,7 +72,7 @@ supervisor pauses before stage 2 for the operator.
 
 ### Tests
 
-The suite has 2032 passing tests and 1 skipped test (measured with
+The suite has 2077 passing tests and 1 skipped test (measured with
 `python3 -m pytest -q -p no:cacheprovider`). It needs no hardware and no network. The skipped test
 replays local agent transcripts and runs only when `ORCHARD_REPLAY=1` is set and those transcripts
 exist.
@@ -380,6 +380,7 @@ python3 -m orchard.supervisor run --model MODEL --run-dir RUN_DIR --tiers TIERS
 | `--package-format` | no | `v6` makes stage 7 build a v6 thin package on the weights-only path (see [5.3](#53-what-each-stage-does)). `v5.1` is refused at start, because it needs a container image build. Without this flag stage 7 is skipped. The ledger records it, and a resume with different options is refused. A run that started without it can be given it on a resume, as long as stage 7 has not started |
 | `--package-namespace` | with `--package-format` | Your Hugging Face namespace. Stage 7 writes it into the package card and the publish commands. The run never publishes |
 | `--package-models-root` | no | Where tt-model installs bundles. Stage 7 looks here for other chip counts of the nearest model. Default `{{TT_MODEL_ROOT}}`, which is `<operator home>/.cache/tt-model/models` |
+| `--unattended` | no | Never wait for an operator. When the run would pause, it names the reason (`needs-new-model-code`, `retry-budget-spent`, `stage-failed`, `agent-stuck`, `disk-full`, `hardware-unhealthy`, `coder-unusable`, `blocked` or `unclassified`), writes `BLOCKED.md` and `blocked.json` in the run directory, releases the hardware and exits 5. Running the same command again retries from the ledger. A pause the operator asked for with `control pause` still waits. `tt-orchard bringup` always passes it |
 | `--gozer` | no | The gozer executable. Default `gozer` from `PATH` |
 | `--accept-credentials-visible` | no | Start even though credential files exist in your home directory. **Warning:** agent shells run as your user, so code an agent runs can read those files. The ledger records that you accepted this |
 
@@ -387,7 +388,8 @@ Stage 7 runs only when `--package-format v6` and `--package-namespace` are given
 the weights-only path. Otherwise it is recorded as skipped.
 
 Exit codes: 0 ready for operator review, 2 refused (nothing was started), 3 stopped on an error
-(the hardware was released; run the same command again to resume), 4 aborted.
+(the hardware was released; run the same command again to resume), 4 aborted, 5 blocked (an unattended
+run that named why it could not go on; see `--unattended`).
 
 ### 4.3 An example
 

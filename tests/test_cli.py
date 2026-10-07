@@ -320,3 +320,26 @@ def test_the_plain_page_says_each_checks_status_in_words(conf):
     code, out, rec = run(conf, ["bringup", "Cloudflare/clef", "--dry-run"], sig=s)
     rows = {line.split()[1]: line for line in out.splitlines() if line.startswith("║") and len(line.split()) > 2}
     assert " BLOCK " in rows["credentials"] and " warn " in rows["gozer"] and " ok " in rows["disk"]
+
+
+def test_a_bringup_is_always_an_unattended_supervisor_run(conf):
+    code, out, rec = run(conf, ["bringup", "Cloudflare/clef"])
+    assert "--unattended" in rec.argv
+
+
+def test_a_blocked_exit_prints_the_reason_and_where_the_bundle_is(conf, tmp_path):
+    run_dir = tmp_path / "runs" / "cloudflare--clef"
+    run_dir.mkdir(parents=True)
+
+    class Blocking(Recorder):
+        def supervisor(self, argv):
+            self.argv = argv
+            (run_dir / "blocked.json").write_text('{"code": "needs-new-model-code", "reason": "full port"}')
+            return 5
+    got, out, rec = run(conf, ["bringup", "Cloudflare/clef"], rec=Blocking())
+    assert got == 5 and "frost" in out and "needs-new-model-code" in out and "BLOCKED.md" in out
+
+
+def test_a_blocked_exit_without_a_bundle_still_says_blocked(conf):
+    got, out, rec = run(conf, ["bringup", "Cloudflare/clef"], rec=Recorder(5))
+    assert got == 5 and "blocked" in out

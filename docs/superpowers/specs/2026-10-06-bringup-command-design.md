@@ -87,10 +87,11 @@ Every terminal state of a run is one of three, and each writes the operator bund
 - `blocked`: the harness did everything it could do and names what stopped it, with evidence.
   Reasons are an enumerated set (`needs-new-model-code`, `unsupported-input-type`,
   `hardware-unhealthy`, `disk-full`, `credentials-needed`, `license-needs-review`,
-  `coder-unusable`, `model-unavailable`, `config-invalid`, `retry-budget-spent`).
+  `coder-unusable`, `model-unavailable`, `config-invalid`, `retry-budget-spent`, `stage-failed`,
+  `agent-stuck`, `blocked`, `unclassified`).
 - `aborted`: the operator asked.
 
-Today a pause is a fourth state that needs a person to look. The change: a pause caused by one of
+Built 2026-10-06 (`orchard/blocked.py`, `supervisor run --unattended`, exit code 5). Today a pause is a fourth state that needs a person to look. The change: a pause caused by one of
 the enumerated reasons becomes `blocked` and writes the bundle, and the supervisor exits with a
 distinct code. A pause the harness cannot name stays a pause and the status command says so. That
 is the one place a person is still required, and the design keeps it small instead of hiding it.

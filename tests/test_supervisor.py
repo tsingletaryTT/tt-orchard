@@ -982,3 +982,118 @@ def test_a_finish_step_out_of_turns_gets_the_wrap_up_too(rig):
     assert [d["result"] for d in rig.ends(2)] == ["pass"]
     [w] = wrapup_decisions(rig, 2)
     assert w["phase"] == "finish" and w["file"] == "stages/2/result.json"
+
+
+# ---- the unattended run: a pause becomes a named block ------------------------------------------
+
+FULL_PORT_DELTA_U = {(0, "run"): {**FILES[(0, "run")], "delta.json": {**DELTA, "path": "full-port"}}}
+
+
+def never_wait(rig):
+    """A run that must not wait for the operator: sleeping for a control word fails the test."""
+    def fail():
+        raise Stop("the unattended run waited for the operator")
+    rig.on_sleep = fail
+
+
+def test_parse_has_an_unattended_flag_that_defaults_off(tmp_path):
+    from orchard.supervisor import parse
+    a = argv(tmp_path, tmp_path / "t.toml", "http://127.0.0.1:8000/v1")
+    assert parse(a).unattended is False and parse(a + ["--unattended"]).unattended is True
+
+
+def test_an_unattended_full_port_run_ends_blocked_and_never_waits(rig):
+    rig.args.unattended = True
+    rig.script = lambda r: bringup(r, overrides=FULL_PORT_DELTA_U)
+    never_wait(rig)
+    assert rig.run() == supervisor.EXIT_BLOCKED == 5
+    block = [d for d in rig.decisions() if d["decision"] == "blocked"]
+    assert len(block) == 1 and block[0]["code"] == "needs-new-model-code" and "full port" in block[0]["reason"]
+    assert (rig.run_dir / "BLOCKED.md").exists() and (rig.run_dir / "blocked.json").exists()
+
+
+def test_a_block_releases_the_hardware_and_stops_the_coder(rig):
+    rig.args.unattended = True
+    rig.script = lambda r: bringup(r, overrides=FULL_PORT_DELTA_U)
+    never_wait(rig)
+    rig.run()
+    assert not rig.m.coder_running and rig.m.leases == {}
+    assert [d["decision"] for d in rig.decisions()][-3:] == ["blocked", "stopping the coder", "hardware released"]
+
+
+def test_an_unattended_stage_that_fails_twice_ends_blocked_as_stage_failed(rig):
+    rig.args.unattended = True
+    bad = {(2, "finish"): {"result.json": {"serves": True}}}
+    rig.script = lambda r: bringup(r, overrides=bad)
+    never_wait(rig)
+    assert rig.run() == supervisor.EXIT_BLOCKED
+    block = [d for d in rig.decisions() if d["decision"] == "blocked"][0]
+    assert block["code"] == "stage-failed" and block["reason"].startswith("stage 2 failed after escalation")
+    assert "stage 2" in (rig.run_dir / "BLOCKED.md").read_text()
+
+
+def test_an_attended_run_still_pauses_instead_of_blocking(rig):
+    """The default is unchanged: without --unattended a pause waits for the operator."""
+    rig.script = lambda r: bringup(r, overrides=FULL_PORT_DELTA_U)
+
+    def operator():
+        Control(rig.run_dir).write("abort")
+    rig.on_sleep = operator
+    assert rig.run() == EXIT_ABORTED
+    assert not [d for d in rig.decisions() if d["decision"] == "blocked"]
+
+
+def test_an_operator_pause_still_waits_when_unattended(rig):
+    rig.args.unattended = True
+    Control(rig.run_dir).write("pause")
+
+    def operator_resumes():
+        Control(rig.run_dir).write("resume")
+    rig.on_sleep = operator_resumes
+    assert rig.run() == EXIT_READY
+    assert not [d for d in rig.decisions() if d["decision"] == "blocked"]
+
+
+def test_running_again_after_a_block_records_a_retry_and_goes_on_from_the_ledger(rig):
+    rig.args.unattended = True
+    bad = {(2, "finish"): {"result.json": {"serves": True}}}
+    rig.script = lambda r: bringup(r, overrides=bad)
+    never_wait(rig)
+    assert rig.run() == supervisor.EXIT_BLOCKED
+    rig.script = bringup                                  # whatever was wrong is fixed
+    rig.on_sleep = None
+    assert rig.run() == EXIT_READY
+    decisions = rig.decisions()
+    assert {"decision": "resume", "by": "retry"} in decisions
+    assert [d["result"] for d in rig.ends(2)][-1] == "pass"
+
+
+def test_a_block_that_cannot_be_fixed_blocks_again_on_retry_with_the_same_reason(rig):
+    rig.args.unattended = True
+    rig.script = lambda r: bringup(r, overrides=FULL_PORT_DELTA_U)
+    never_wait(rig)
+    assert rig.run() == supervisor.EXIT_BLOCKED
+    assert rig.run() == supervisor.EXIT_BLOCKED
+    assert [d["code"] for d in rig.decisions() if d["decision"] == "blocked"] == ["needs-new-model-code"] * 2
+
+
+def test_a_crash_after_the_pause_and_before_the_block_still_ends_blocked_on_restart(rig):
+    rig.args.unattended = True
+    rig.script = lambda r: bringup(r, overrides=FULL_PORT_DELTA_U)
+    never_wait(rig)
+    with pytest.raises(Crash):
+        rig.run(crash_if=lambda e: e["event"] == "decision" and e["data"].get("decision") == "blocked")
+    assert rig.run() == supervisor.EXIT_BLOCKED
+    assert (rig.run_dir / "BLOCKED.md").exists()
+
+
+def test_an_attended_run_never_resumes_an_earlier_pause_by_itself(rig):
+    """The retry record belongs to unattended runs. An attended restart of a paused run waits for the
+    operator, as it always did."""
+    rig.script = lambda r: bringup(r, overrides=FULL_PORT_DELTA_U)
+    never_wait(rig)
+    with pytest.raises(Stop):
+        rig.run()                                            # paused, waiting for the operator
+    rig.on_sleep = lambda: Control(rig.run_dir).write("abort")
+    assert rig.run() == EXIT_ABORTED
+    assert {"decision": "resume", "by": "retry"} not in rig.decisions()

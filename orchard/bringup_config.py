@@ -220,6 +220,7 @@ def supervisor_argv(cfg: BringupConfig, model_id: str, run_dir: Path | None = No
         argv += ["--env", f"{name}={value}"]
     for name, value in (inputs or {}).items():
         argv += ["--input", f"{name}={value}"]
+    argv.append("--unattended")        # a bring-up started here never waits for a person
     if accept_credentials:
         argv.append("--accept-credentials-visible")
     return argv

@@ -20,6 +20,7 @@ The supervisor, the download and the outside signals are parameters of `main`, s
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shlex
 import sys
@@ -27,7 +28,7 @@ from pathlib import Path
 
 from orchard import __version__, bringup_config, fetch, lexicon, orchard_view, preflight, ui
 
-EXIT_OK, EXIT_REFUSED, EXIT_ERROR, EXIT_ABORTED = 0, 2, 3, 4   # the supervisor's own codes
+EXIT_OK, EXIT_REFUSED, EXIT_ERROR, EXIT_ABORTED, EXIT_BLOCKED = 0, 2, 3, 4, 5   # the supervisor's own codes
 CONFIG_ENV = "ORCHARD_BRINGUP_CONFIG"
 CHECKOUT = Path(__file__).resolve().parent.parent
 
@@ -163,6 +164,13 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
         print(lexicon.closing_line("ready-for-operator-review", style, where=str(where)), file=out)
     elif code == EXIT_ABORTED:
         print(lexicon.closing_line("aborted", style, where=str(run_dir)), file=out)
+    elif code == EXIT_BLOCKED:
+        try:
+            reason = json.loads((run_dir / "blocked.json").read_text(encoding="utf-8"))["code"]
+        except (OSError, ValueError, KeyError):
+            reason = "blocked"
+        print(lexicon.frost_line(reason, style) + f" See {run_dir / 'BLOCKED.md'}. Run the same command "
+              "again to retry.", file=out)
     elif code == EXIT_ERROR:
         print(f"{style.icon('⛈')}the run stopped on an error and the hardware was released. Run the same "
               "command again to resume.", file=out)

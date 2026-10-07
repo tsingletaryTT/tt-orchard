@@ -282,7 +282,7 @@ def test_the_run_state_line_ends_with_the_hint(tmp_path, clock):
 # ---- JSON, text size, corruption, read-only ----------------------------------------------------
 
 JSON_KEYS = {"ledger", "model", "run_dir", "run_name", "state", "supervisor", "stage", "stages", "counts",
-             "pause", "last_events", "control_pending", "disk", "leases", "hint", "now"}
+             "pause", "blocked", "last_events", "control_pending", "disk", "leases", "hint", "now"}
 
 
 def test_json_keys_are_stable(tmp_path, clock, capsys):
@@ -406,3 +406,43 @@ def test_the_lock_holder_is_found_from_proc_locks_for_a_real_ledger_lock(tmp_pat
     assert status._lock_holder(run) is None            # nobody holds it after write_run closed
     with Ledger(run / "ledger.jsonl"):
         assert status._lock_holder(run) == os.getpid()
+
+
+# ---- the blocked state (an unattended run that named why it stopped) -----------------------------------
+
+BLOCKED = [
+    (10, "stage_start", 0, {}),
+    (100, "decision", 2, {"decision": "pause", "reason": "stage 2 failed after escalation: serves is false"}),
+    (110, "decision", None, {"decision": "blocked", "code": "stage-failed",
+                             "reason": "stage 2 failed after escalation: serves is false"}),
+]
+
+
+def test_a_run_that_ended_blocked_says_so_whether_or_not_anyone_is_alive(tmp_path, clock):
+    run = write_run(tmp_path / "run", clock, BLOCKED)
+    for alive in (False, True):
+        f = facts(run, alive=alive)
+        assert f["state"] == "blocked"
+        assert f["blocked"] == {"code": "stage-failed",
+                                "reason": "stage 2 failed after escalation: serves is false"}
+
+
+def test_the_blocked_hint_names_the_bundle_and_says_to_stop(tmp_path, clock):
+    f = facts(write_run(tmp_path / "run", clock, BLOCKED))
+    assert "BLOCKED.md" in f["hint"] and "stop" in f["hint"].lower()
+
+
+def test_a_retry_after_a_block_clears_it(tmp_path, clock):
+    run = write_run(tmp_path / "run", clock, BLOCKED + [
+        (200, "decision", None, {"decision": "resume", "by": "retry"})])
+    f = facts(run, alive=True)
+    assert f["state"] == "running" and f["blocked"] is None
+
+
+def test_a_run_that_is_not_blocked_has_a_null_block(tmp_path, clock):
+    assert facts(write_run(tmp_path / "run", clock, PAUSED), alive=True)["blocked"] is None
+
+
+def test_the_text_block_prints_the_code_when_blocked(tmp_path, clock):
+    text = status.render(facts(write_run(tmp_path / "run", clock, BLOCKED)))
+    assert "blocked: stage-failed" in text and "state: blocked" in text

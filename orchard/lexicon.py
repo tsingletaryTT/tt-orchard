@@ -32,6 +32,7 @@ STATES = {
     "aborted": StateEntry("🍂", "dim", "fallen"),
     "stopped-or-crashed": StateEntry("⛈", "alarm", "storm damage"),
     "not-started": StateEntry("🌰", "dim", "seed"),
+    "blocked": StateEntry("❄️", "bad", "frost"),
 }
 
 # One entry for each stage number in stages.STAGES.
@@ -82,7 +83,7 @@ def closing_line(state: str, style: Style, *, where: str) -> str | None:
 
 def frost_line(reason: str, style: Style) -> str:
     """The closing line of a run that could not finish. `reason` is the named blocking reason."""
-    return f"{style.icon('❄️')}frost: {reason}; the bundle says what stopped it"
+    return f"{style.icon('❄️')}frost: {reason}; the bundle says what stopped it."
 
 
 def refused_line(reasons: list[str], style: Style) -> str:

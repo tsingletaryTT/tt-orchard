@@ -120,6 +120,8 @@ from urllib.parse import urlparse
 
 from orchard.adapters import AdapterError, Lease
 from orchard.agent import AgentStep, Tools, agent_env, probe_model, spawn_checked
+from orchard.blocked import block_code, last_pause
+from orchard.blocked import write_bundle as write_blocked_bundle
 from orchard.canary import CanaryError, compare, post_json
 from orchard.canary import ask as canary_ask
 from orchard.commands import run_command
@@ -151,6 +153,7 @@ from orchard.watchdog import (Event, IdenticalResponses, Ladder, NoFileWritten, 
 WHO = "orchard:supervisor"
 AGENT = "stage-agent"                 # the launched agent's name; the ladder counts its rungs per stage
 EXIT_READY, EXIT_REFUSED, EXIT_ERROR, EXIT_ABORTED = 0, 2, 3, 4
+EXIT_BLOCKED = 5     # an unattended run could not go on and named why (orchard/blocked.py)
 FULL_PORT = ("stage 0 found a full port (new model code is needed); plan 4 runs weights-only "
              "bring-ups, so the operator decides whether to go on")
 SKILLS_DIR = Path(__file__).with_name("skills")
@@ -473,7 +476,7 @@ class Supervisor:
                  credentials_visible: list[str] | None = None,
                  required_chips: tuple[int, ...] | None = None, home=None, containers=None,
                  paths: RunPaths | None = None, package: dict | None = None,
-                 package_added: bool = False):
+                 package_added: bool = False, unattended: bool = False):
         self.run_dir = Path(run_dir).resolve()
         self.ledger, self.cfg, self.model_id = ledger, cfg, model_id
         self.adapter, self.coder, self.coder_chips, self.standin = adapter, coder, coder_chips, standin
@@ -486,6 +489,7 @@ class Supervisor:
         self.required_chips = tuple(required_chips) if required_chips else None   # stage 4's required counts
         self.package = dict(package) if package else None    # stage 7: format, namespace, models_root
         self.package_added = package_added    # given on a resume of a run that started without them
+        self.unattended = unattended          # a pause becomes a named block, never a wait (orchard/blocked.py)
         self.home = Path(home) if home is not None else operator_home()   # whose shared caches to refuse
         self.containers = containers if containers is not None else LabelledContainers()
         # The machine paths the skills' placeholders name (orchard/paths.py).
@@ -661,9 +665,21 @@ class Supervisor:
             # Recorded at every start, because each start is a fresh acceptance by the operator.
             self.ledger.append("decision", None, decision="operator accepted visible credentials",
                                paths=self.credentials_visible, by="--accept-credentials-visible")
+        if self.unattended:
+            p = run_progress(self.ledger.read())
+            if p.paused is not None:
+                # Running the command again is the operator's retry of an earlier block. Whatever it was,
+                # the checks run again from the ledger, and a block that cannot be fixed blocks again.
+                self.ledger.append("decision", None, decision="resume", by="retry")
+                self.actuator.clear()
         while True:
             p = run_progress(self.ledger.read())
             if p.paused is not None:
+                if self.unattended:
+                    pause = last_pause(self.ledger.read())
+                    code = block_code(pause) if pause is not None else None
+                    if code is not None:
+                        return self._end_blocked(code, str(pause.get("reason") or "paused"))
                 if self._wait_for_operator() == "abort":
                     return self._abort()
                 continue
@@ -702,7 +718,11 @@ class Supervisor:
     def _full_port_unacknowledged(self) -> bool:
         """Stage 0 chose a full port, and the run has not yet paused for it."""
         entries = self.ledger.read()
-        return run_path(entries, self.run_dir) == "full-port" and not any(
+        if run_path(entries, self.run_dir) != "full-port":
+            return False
+        # Unattended, a full port always blocks: an operator's resume is what lets an attended run go on
+        # into the full-port stages, and no unattended retry may do that.
+        return self.unattended or not any(
             e["event"] == "decision" and e["data"].get("reason") == FULL_PORT for e in entries)
 
     def _wait_for_operator(self) -> str:
@@ -715,6 +735,16 @@ class Supervisor:
             if cmd == "abort":
                 return "abort"
             self.sleep(CONTROL_POLL_S)
+
+    def _end_blocked(self, code: str, reason: str) -> int:
+        """End an unattended run that cannot go on: name why, write the bundle, give the hardware back.
+        The decision is written first, so a crash during the release still leaves a blocked run, and
+        running the command again retries."""
+        entries = self.ledger.read()
+        self.ledger.append("decision", None, decision="blocked", code=code, reason=reason)
+        write_blocked_bundle(self.run_dir, entries, code, reason, now=self.clock())
+        self._release_all()
+        return EXIT_BLOCKED
 
     def _abort(self) -> int:
         # Recorded first: a crash during the release still leaves an aborted run, and a restart
@@ -1434,6 +1464,10 @@ def parse(argv=None):
                         "counts of the nearest model. Default: the run's {{TT_MODEL_ROOT}}, "
                         "<operator home>/.cache/tt-model/models")
     r.add_argument("--gozer", default="gozer")
+    r.add_argument("--unattended", action="store_true",
+                   help="never wait for an operator: when the run would pause, name the reason, write "
+                        "BLOCKED.md, release the hardware and exit 5. Running the command again retries. "
+                        "A pause the operator asked for with `control pause` still waits")
     r.add_argument("--accept-credentials-visible", action="store_true",
                    help="start even though credential files exist in the operator's home "
                         "(agent shells can read them); the ledger records this")
@@ -1529,7 +1563,7 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
                       clock=clock, sleep=sleep, budgets=budgets, disk_usage=disk_usage,
                       credentials_visible=found, required_chips=required,
                       home=home, containers=containers, paths=paths, package=package,
-                      package_added=added)
+                      package_added=added, unattended=getattr(args, "unattended", False))
 
 
 PATH_FLAGS = {"--cache-root": "cache_root", "--hf-home": "hf_home", "--operator-home": "operator_home"}
@@ -1584,7 +1618,8 @@ def main(argv=None, *, home=None) -> int:
         return EXIT_REFUSED
     if sup.stop_message:
         print(sup.stop_message, file=sys.stderr)
-    print({EXIT_READY: "ready for operator review", EXIT_ABORTED: "aborted"}.get(code, code))
+    print({EXIT_READY: "ready for operator review", EXIT_ABORTED: "aborted",
+           EXIT_BLOCKED: "blocked"}.get(code, code))
     return code
 
 

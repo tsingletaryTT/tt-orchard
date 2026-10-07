@@ -455,3 +455,19 @@ Key decisions and findings:
   the role-fit test for Coder-Next, the chaos run on Hemmingway-1, the Clef run itself.
 - Suite: 2032 passed, 1 skipped. Package version 0.0.3.
 
+## 2026-10-06 (later): the blocked end state, Phase 3 part 1 (branch `bringup-command`)
+Prompt (operator): "yes just proceed -- for hours, you have the conch. i don't mind you using my creds and all
+that or the child processes. no harm." Credentials may be used where a run needs them. Publishing, pushing and
+other agents' leases stay off limits.
+- `supervisor run --unattended` (always passed by `tt-orchard bringup`): when the run would pause, it records a
+  `blocked` decision with a code, writes `BLOCKED.md` and `blocked.json` in the run directory, releases the
+  hardware and exits 5. Running the command again records `resume by retry` and goes on from the ledger. A pause
+  the operator asked for still waits. `status` has a `blocked` state; the runbook has a row for it.
+- The run budget needed no new code: the escalation, cold-boot and wall-clock caps already pause a run, and an
+  unattended pause is now a block with the code `retry-budget-spent`.
+- Found while designing the tests: on the full-port path an operator's resume lets an attended run go on into
+  the full-port stages. An unattended retry must never do that, so a full port blocks every time when unattended.
+- `_block` already existed in the supervisor (for notices); the new method is `_end_blocked`.
+- 27 mutations over the new code; two survivors led to tests (last_pause across a resume, and an attended run
+  never auto-resuming). Suite: 2077 passed, 1 skipped.
+

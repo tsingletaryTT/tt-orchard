@@ -188,7 +188,7 @@ def test_the_argument_list_matches_the_documented_run_command(tmp_path):
         "--required-chips", "2,4", "--cache-root", "/c", "--hf-home", "/h", "--operator-home", "/o",
         "--package-format", "v6", "--package-namespace", "me", "--package-models-root", "/m",
         "--gozer", "/bin/gozer", "--skills-dir", "/s1", "--skills-dir", "/s2",
-        "--env", "HF_HUB_OFFLINE=1", "--env", "HF_HOME=/h",
+        "--env", "HF_HUB_OFFLINE=1", "--env", "HF_HOME=/h", "--unattended",
     ]
 
 

@@ -48,6 +48,7 @@ If status prints `ledger: CORRUPT` or exits with a number other than 0, stop and
 | stopped-or-crashed | | Restart (see "Restart after a crash") |
 | ready-for-operator-review | | Run the post-run checks. Then stop |
 | aborted | | Stop. A human decides |
+| blocked | `next:` says the run ended on purpose | Stop. A human reads BLOCKED.md and decides |
 | any | disk free below 40 GB | Stop and ask a human |
 | any | anything not in this table | Stop and ask a human |
 

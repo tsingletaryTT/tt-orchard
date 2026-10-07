@@ -11,7 +11,8 @@ not repaired. The run directory is only read: no sidecar, lock or pid file is cr
 What it reports, and where each fact comes from:
 
 - state: one of running, paused, ready-for-operator-review, aborted, stopped-or-crashed,
-  not-started. "ready-for-operator-review" and "aborted" come from the ledger alone. "paused" and
+  not-started, blocked. "blocked" is an unattended run that named why it could not go on
+  (orchard/blocked.py): the ledger's last "blocked" decision with no resume after it. "ready-for-operator-review" and "aborted" come from the ledger alone. "paused" and
   "running" additionally need a live supervisor. A run that is neither finished nor aborted and
   has no live supervisor is "stopped-or-crashed", whatever the ledger says about a pause.
 - supervisor liveness: the supervisor writes `<run dir>/supervisor.pid` when it starts. Runs that
@@ -39,6 +40,7 @@ JSON (`--json`) is one object with these keys:
                       skipped, running or escalated; only stages that appear in the ledger are listed
     counts           {"retries", "escalations", "nudges", "pauses", "operator_commands"};
                       operator_commands is the number of control.done-* files in the run directory
+    blocked          null, or {"code", "reason"} for a run that ended blocked
     pause            null, or {"reason", "kind", "detector", "stage"}; kind is watchdog, operator,
                       stage_failed, blocked, budget, full_port or other
     last_events      the last 5 entries as {"seq", "ts", "event", "stage", "summary"}
@@ -71,7 +73,7 @@ SUMMARY_CHARS = 100         # one event summary, so the whole block stays short
 QUIET_STUCK_S = 5 * 3600.0  # choice: longer than the longest stage budget (4 h) plus margin
 DISK_STOP_GB = TEST_DISK_GB  # the same 40 GB the supervisor wants before a hardware test
 STATES = ("running", "paused", "ready-for-operator-review", "aborted", "stopped-or-crashed",
-          "not-started")
+          "not-started", "blocked")
 
 
 # ---- outside signals (each one is injectable in `collect`, so tests need no real process) ------
@@ -250,6 +252,19 @@ def stage_rows(entries: list[dict], now: float) -> list[dict]:
     return [rows[n] for n in sorted(rows)]
 
 
+def _blocked(entries: list[dict]) -> dict | None:
+    """{"code", "reason"} of the last "blocked" decision, unless a resume came after it."""
+    for e in reversed(entries):
+        if e["event"] != "decision":
+            continue
+        decision = e["data"].get("decision")
+        if decision == "resume":
+            return None
+        if decision == "blocked":
+            return {"code": str(e["data"].get("code") or "blocked"), "reason": str(e["data"].get("reason") or "")}
+    return None
+
+
 def _last_pause(entries: list[dict]) -> dict | None:
     for e in reversed(entries):
         if e["event"] == "decision" and e["data"].get("decision") == "pause":
@@ -275,6 +290,8 @@ HINT_RULES = (
      "terminal, a human decides. Do nothing."),
     ("ready", lambda f: f["state"] == "ready-for-operator-review",
      "run the post-run checks in the operator runbook; never publish."),
+    ("blocked", lambda f: f["state"] == "blocked",
+     "terminal, a human decides. Stop. The run ended on purpose; BLOCKED.md in the run directory says why."),
     ("not started", lambda f: f["state"] == "not-started",
      "start the run with the run script a human gave you; do not edit its flags."),
     ("disk low", lambda f: f["disk"]["run_dir_free_gb"] < DISK_STOP_GB,
@@ -325,12 +342,15 @@ def collect(run_dir, *, now: float | None = None, pid_alive=_supervisor_alive, l
         elif pid is None:
             sup = {"pid": None, "alive": False, "source": "none"}
 
+    blocked = _blocked(entries) if progress.started else None
     if not progress.started:
         state = "not-started"
     elif progress.aborted:
         state = "aborted"
     elif progress.finished:
         state = "ready-for-operator-review"
+    elif blocked is not None:
+        state = "blocked"
     elif not sup["alive"]:
         state = "stopped-or-crashed"
     else:
@@ -377,6 +397,7 @@ def collect(run_dir, *, now: float | None = None, pid_alive=_supervisor_alive, l
         "stages": stages,
         "counts": counts,
         "pause": pause,
+        "blocked": blocked,
         "last_events": [{"seq": e["seq"], "ts": e["ts"], "event": e["event"], "stage": e["stage"],
                          "summary": summarize(e)} for e in entries[-LAST_EVENTS:]],
         "control_pending": control_word,
@@ -412,6 +433,9 @@ def render(f: dict) -> str:
     c = f["counts"]
     lines.append(f"counts: retries {c['retries']}, escalations {c['escalations']}, nudges {c['nudges']}, "
                  f"pauses {c['pauses']}, operator commands {c['operator_commands']}")
+    if f["blocked"]:
+        lines.append(f"blocked: {f['blocked']['code']}")
+        lines.append("  " + _one_line(f["blocked"]["reason"], 200))
     if f["pause"]:
         p = f["pause"]
         lines.append(f"paused at stage {p['stage']} by {p['detector'] or p['kind']}:")
