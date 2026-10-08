@@ -270,6 +270,9 @@ class Tools:
         return clip(raw.decode("utf-8", errors="replace"), self.limit)
 
     def write_file(self, path, content) -> str:
+        if not isinstance(path, str) or not path.strip():
+            return ("error: write_file needs a path (a file in your stage directory, such as handoff.json) "
+                    "and the content")
         if not isinstance(content, str):
             return "error: content must be a string"
         p = self.target(path)
@@ -277,9 +280,16 @@ class Tools:
             return f"refused: {path!r} is outside your stage directory {self.stage_dir}"
         if p.name.startswith("ledger"):
             return "refused: the ledger is written only by the supervisor"
+        rel = os.path.relpath(p, os.path.realpath(self.run_dir))
+        # A repeat of the last write is answered, not done: an agent that has finished sometimes writes
+        # the same file again and again instead of ending the step (the first lab run).
+        if p.is_file() and p.read_text(encoding="utf-8", errors="replace") == content:
+            return (f"unchanged: {rel} already holds exactly this content; nothing was written. If every "
+                    "file this step needs is written, end the step now: reply with a short summary and no "
+                    "tool call.")
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
-        return f"wrote {len(content)} characters to {os.path.relpath(p, os.path.realpath(self.run_dir))}"
+        return f"wrote {len(content)} characters to {rel}"
 
 
 # ---- the model endpoint -------------------------------------------------------------------------

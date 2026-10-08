@@ -112,11 +112,34 @@ def test_write_file_stays_inside_the_stage_directory(run, tmp_path):
     assert t.write_file("evidence/a.txt", "x").startswith("wrote 1 characters to stages/0/evidence/a.txt")
     (tmp_path / "outside").mkdir()
     os.symlink(tmp_path / "outside", run / "stages" / "0" / "link")
-    for path in ("../escape.txt", str(tmp_path / "abs.txt"), "link/x.txt", "", "."):
+    for path in ("../escape.txt", str(tmp_path / "abs.txt"), "link/x.txt", "."):
         assert t.write_file(path, "x").startswith("refused:"), path
     assert not list((tmp_path / "outside").iterdir())
     assert not (run / "stages" / "escape.txt").exists()
     assert t.write_file("ledger.jsonl", "{}").startswith("refused: the ledger")
+
+
+def test_a_write_without_a_path_says_a_path_is_needed(run):
+    """Coder-Next sometimes sent write_file with no path; the answer said "None is outside your stage
+    directory", which told it nothing it could act on."""
+    t = tools(run)
+    for path in (None, "", "  "):
+        out = t.write_file(path, "x")
+        assert out.startswith("error: write_file needs a path") and "None" not in out, path
+
+
+def test_writing_the_same_content_again_changes_nothing_and_says_how_to_finish(run):
+    """On the first lab run the agent wrote handoff.json, then wrote it again unchanged until the
+    watchdog stopped the run. The answer to a repeat says nothing changed and how to end the step."""
+    t = tools(run)
+    assert t.write_file("handoff.json", "{}").startswith("wrote ")
+    f = run / "stages" / "0" / "handoff.json"
+    before = f.stat().st_mtime_ns
+    out = t.write_file("handoff.json", "{}")
+    assert out.startswith("unchanged: stages/0/handoff.json already holds exactly this content")
+    assert "no tool call" in out and not out.startswith("wrote ")
+    assert f.stat().st_mtime_ns == before
+    assert t.write_file("handoff.json", '{"a": 1}').startswith("wrote ")
 
 
 def test_bad_tool_calls_get_an_answer_and_raise_nothing(run):
