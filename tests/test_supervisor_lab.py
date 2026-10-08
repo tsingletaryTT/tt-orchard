@@ -43,6 +43,9 @@ class FakeLab:
     def sync_down(self, path):
         self.events.append(("down", str(path)))
 
+    def mirror_up(self, path):
+        self.events.append(("mirror", str(path)))
+
     def run_test(self, command, *, cwd, env, timeout, stdout):
         held = {c for lease, _ in self.m.leases.values() for c in lease.chips}
         self.events.append(("run", command, env["TT_VISIBLE_DEVICES"], frozenset(held)))
@@ -146,6 +149,22 @@ def test_files_go_to_the_lab_before_each_test_and_come_back_after(rig):
     sd = rig.run_dir / "stages" / "4"
     rec = sd / "tests" / "2" / "test-result.json"
     assert rec.exists() and (sd / "tests" / "2" / "output.txt").exists()
+
+
+def test_the_stage_directory_is_mirrored_to_the_lab_before_each_test(rig):
+    """A failed attempt's stage directory is moved aside on the brain, but its files stay on the lab
+    (rsync never deletes). Mirroring stages/N before the test keeps them out of the next attempt."""
+    assert rig.run() == EXIT_READY
+    ev = rig.lab.events
+    for i, e in enumerate(ev):
+        if e[0] != "run":
+            continue
+        mirrors = [j for j, x in enumerate(ev[:i]) if x[0] == "mirror"]
+        assert mirrors, e
+        last = ev[mirrors[-1]][1]
+        assert last.startswith(str(rig.run_dir.resolve() / "stages")) and last.rstrip("/").split("/")[-1].isdigit()
+        run_up = max(j for j, x in enumerate(ev[:i]) if x == ("up", str(rig.run_dir.resolve())))
+        assert mirrors[-1] > run_up                              # after the run directory goes up
 
 
 def test_the_lab_caches_are_audited_after_each_test(rig):

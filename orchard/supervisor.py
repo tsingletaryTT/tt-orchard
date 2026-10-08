@@ -1374,6 +1374,7 @@ class Supervisor:
         directory comes back, so the finish step, the gates and the ledger hashes read it here."""
         check_string(command, self.run_dir)
         self.lab.sync_up(self.run_dir)
+        self.lab.mirror_up(self.run_dir / "stages" / str(n))     # no earlier attempt's files in it
         self.lab.sync_up(self.paths.hf_home)
         try:
             return self.lab.run_test(command, cwd=self.run_dir, env=env, timeout=deadline, stdout=out)

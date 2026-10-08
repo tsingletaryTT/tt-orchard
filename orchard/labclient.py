@@ -220,13 +220,14 @@ class LabGozerAdapter(GozerAdapter):
 
 
 class Sync:
-    """rsync over ssh between a path on the brain and the same path on the lab. Never deletes."""
+    """rsync over ssh between a path on the brain and the same path on the lab. Never deletes, except
+    `mirror_up` inside one stage directory on the lab."""
 
     def __init__(self, *, host, ssh=SSH, run=run_command, timeout: float = SYNC_TIMEOUT_S):
         self.host, self.ssh, self.run, self.timeout = host, list(ssh), run, timeout
 
-    def _rsync(self, src: str, dst: str) -> None:
-        argv = ["rsync", "-a", "--mkpath", "--partial", "-e", " ".join(self.ssh), src, dst]
+    def _rsync(self, src: str, dst: str, *extra: str) -> None:
+        argv = ["rsync", "-a", "--mkpath", "--partial", *extra, "-e", " ".join(self.ssh), src, dst]
         res = self.run(argv, self.timeout)
         if res.returncode != 0:
             raise LabError(f"rsync {src} -> {dst} failed ({res.returncode}): "
@@ -239,6 +240,17 @@ class Sync:
     def down(self, path, *, is_dir: bool = True) -> None:
         p = str(path).rstrip("/") + ("/" if is_dir else "")
         self._rsync(f"{self.host}:{p}", p)
+
+    def mirror_up(self, path) -> None:
+        """Make the lab's copy of one stage directory (`.../stages/<N>`) exactly the brain's. A failed
+        attempt's directory is moved aside on the brain, but its files stay on the lab; without this
+        the next sync down would bring them into the new attempt. Refuses any other path."""
+        p = str(path).rstrip("/")
+        parts = p.split("/")
+        if (os.path.normpath(p) != p or not os.path.isabs(p) or len(parts) < 3 or parts[-2] != "stages"
+                or not parts[-1].isdigit()):
+            raise LabError(f"mirror_up takes a stage directory (.../stages/<N>), not {path}")
+        self._rsync(p + "/", f"{self.host}:{p}/", "--delete")
 
 
 class LabSide:
@@ -273,6 +285,9 @@ class LabSide:
 
     def sync_down(self, path):
         self.sync.down(path)
+
+    def mirror_up(self, path):
+        self.sync.mirror_up(path)
 
     def run_test(self, command, *, cwd, env, timeout, stdout):
         return self.lab.shell(command, cwd=cwd, env=env, timeout=timeout, stdout=stdout, path=self.test_path)

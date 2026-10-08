@@ -222,6 +222,33 @@ def test_sync_uses_rsync_over_ssh_with_the_same_path_on_both_sides():
     assert "--delete" not in up and "--delete" not in down      # never removes anything on either side
 
 
+def test_mirror_up_makes_the_lab_copy_of_one_directory_exactly_the_brains():
+    """Only a stage directory is mirrored, and only towards the lab: a failed attempt's files on the
+    lab must not come back into the next attempt's directory with the next sync down."""
+    calls = []
+
+    def run(argv, timeout, **kw):
+        calls.append(argv)
+        from orchard.commands import CommandResult
+        return CommandResult(argv, 0, "", "")
+
+    labclient.Sync(host="node4", ssh=["ssh"], run=run).mirror_up("/srv/orchard/runs/r/stages/2")
+    (argv,) = calls
+    assert "--delete" in argv
+    assert argv[-2:] == ["/srv/orchard/runs/r/stages/2/", "node4:/srv/orchard/runs/r/stages/2/"]
+
+
+def test_mirror_up_refuses_anything_but_a_stage_directory():
+    def run(argv, timeout, **kw):
+        raise AssertionError("nothing may run")
+    sync = labclient.Sync(host="node4", ssh=["ssh"], run=run)
+    for path in ("/srv/orchard", "/srv/orchard/runs/r", "/srv/orchard/hf", "/srv/orchard/runs/r/stages",
+                 "/srv/orchard/runs/r/stages/2/evidence", "/srv/orchard/runs/r/stages/../stages/2",
+                 "/srv/orchard/runs/r/stages/2.partial-1"):
+        with pytest.raises(labclient.LabError, match="stage directory"):
+            sync.mirror_up(path)
+
+
 def test_a_failed_sync_is_an_error():
     def run(argv, timeout, **kw):
         from orchard.commands import CommandResult
