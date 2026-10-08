@@ -178,3 +178,14 @@ def test_bundles_still_to_be_copied_are_not_checked_on_the_lab(box):
     run = Fake([("test -f", (1, "", "")), ("gozer status", (0, GOZER, ""))])
     s = by_name(plan(box, run))["bundle interpreters"]
     assert s.status == OK and not [c for c in run.calls if "--check" in " ".join(c)]
+
+
+def test_the_relink_step_prints_the_script_by_name_not_its_source(box, tmp_path):
+    root, _ = box
+    b = root / "tt-model/models/episod/b1"
+    _bad_venv(b, tmp_path / "gone")
+    run = Fake([("--check", (1, f"{b}: venv/bin/python links outside the bundle\n", "")),
+                ("gozer status", (0, GOZER, "")), ("test -f", (0, "", ""))])
+    s = by_name(plan(box, run))["bundle interpreters"]
+    shown = [a.describe() for a in s.actions]
+    assert shown == [f"python3 -c <orchard/bundle_relink.py> {b}", f"ssh node4 python3 -c <orchard/bundle_relink.py> {b}"]

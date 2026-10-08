@@ -192,9 +192,11 @@ def _interpreters_step(lab, bundles, missing, *, run, ssh=SSH) -> Step:
             unknown = True
     actions = []
     if here:
-        actions.append(Action("run", ([sys.executable, "-c", src, *map(str, here)],)))
+        actions.append(Action("run", ([sys.executable, "-c", src, *map(str, here)],),
+                              label=f"python3 -c <orchard/bundle_relink.py> " + " ".join(map(str, here))))
     if there:
-        actions.append(Action("run", (remote(lab, f"python3 -c {q(src)} " + " ".join(q(str(b)) for b in there), ssh),)))
+        actions.append(Action("run", (remote(lab, f"python3 -c {q(src)} " + " ".join(q(str(b)) for b in there), ssh),),
+                              label=f"ssh {lab.host} python3 -c <orchard/bundle_relink.py> " + " ".join(map(str, there))))
     if unknown:
         return Step("bundle interpreters", WARN, "could not check the bundles' interpreters on the lab", actions)
     if not actions:
