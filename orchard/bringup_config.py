@@ -25,8 +25,11 @@ from orchard.tiers import SENTINEL, _unknown_key_message
 
 TOP_KEYS = {"runs_root", "tiers", "cache_root", "hf_home", "operator_home", "gozer", "required_chips",
             "skills_dirs", "package_format", "package_namespace", "package_models_root", "min_free_gb",
-            "reference_python", "env", "coder"}
+            "reference_python", "env", "coder", "tt_model_root", "lab"}
 CODER_KEYS = {"target", "kind", "profile", "port", "chips", "image_id"}
+LAB_KEYS = {"host", "root", "gozer", "path", "python", "test_python"}
+# An ssh destination: [user@]host. It must not start with "-", or ssh would read it as an option.
+_SSH_HOST = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(@[A-Za-z0-9][A-Za-z0-9._-]*)?")
 CODER_KINDS = ("container", "bundle")
 PACKAGE_FORMATS = ("v6", "v5.1")     # the values `supervisor run --package-format` accepts
 
@@ -50,6 +53,18 @@ class Coder:
 
 
 @dataclass
+class Lab:
+    """A lab box: every hardware test runs there (supervisor --lab). `root` has the same absolute path
+    on both boxes."""
+    host: str
+    root: Path
+    gozer: str = "gozer"
+    path: list[str] = field(default_factory=list)
+    python: str = "python3"
+    test_python: str | None = None
+
+
+@dataclass
 class BringupConfig:
     runs_root: Path
     coder: Coder
@@ -66,6 +81,8 @@ class BringupConfig:
     min_free_gb: float | None = None
     reference_python: Path | None = None    # the interpreter stage 1 runs the CPU reference with
     env: dict[str, str] = field(default_factory=dict)
+    tt_model_root: Path | None = None
+    lab: Lab | None = None
 
 
 def _strings(value, out: list[str]) -> list[str]:
@@ -172,6 +189,25 @@ def load(path) -> BringupConfig:
     def opt(key):
         return where(raw[key], key) if key in raw else None
 
+    lab = None
+    if "lab" in raw:
+        lab_raw = raw["lab"]
+        if not isinstance(lab_raw, dict):
+            raise BringupConfigError("lab must be a table")
+        _check_keys("[lab]", lab_raw, LAB_KEYS)
+        host = _text(_required(lab_raw, "host", "lab."), "lab.host")
+        if not _SSH_HOST.fullmatch(host):
+            raise BringupConfigError(f"lab.host {host!r} is not an ssh host such as node4 or user@node4")
+        root = Path(_text(_required(lab_raw, "root", "lab."), "lab.root"))
+        if not root.is_absolute():
+            raise BringupConfigError("lab.root must be an absolute path: the same path on both boxes")
+        lab_path = lab_raw.get("path", [])
+        if not isinstance(lab_path, list) or not all(isinstance(d, str) and d for d in lab_path):
+            raise BringupConfigError("lab.path must be a list of directories")
+        lab = Lab(host=host, root=root, gozer=_text(lab_raw.get("gozer", "gozer"), "lab.gozer"), path=lab_path,
+                  python=_text(lab_raw.get("python", "python3"), "lab.python"),
+                  test_python=_text(lab_raw["test_python"], "lab.test_python") if "test_python" in lab_raw else None)
+
     return BringupConfig(
         runs_root=where(_required(raw, "runs_root"), "runs_root"),
         coder=coder,
@@ -186,6 +222,8 @@ def load(path) -> BringupConfig:
         min_free_gb=float(min_free) if min_free is not None else None,
         reference_python=opt("reference_python"),
         env=dict(env),
+        tt_model_root=opt("tt_model_root"),
+        lab=lab,
     )
 
 
@@ -214,9 +252,18 @@ def supervisor_argv(cfg: BringupConfig, model_id: str, run_dir: Path | None = No
                         ("--cache-root", cfg.cache_root), ("--hf-home", cfg.hf_home),
                         ("--operator-home", cfg.operator_home), ("--package-format", cfg.package_format),
                         ("--package-namespace", cfg.package_namespace),
-                        ("--package-models-root", cfg.package_models_root)):
+                        ("--package-models-root", cfg.package_models_root),
+                        ("--tt-model-root", cfg.tt_model_root)):
         if value is not None:
             argv += [flag, str(value)]
+    if cfg.lab is not None:
+        lab = cfg.lab
+        argv += ["--lab", lab.host, "--lab-root", str(lab.root), "--lab-gozer", lab.gozer,
+                 "--lab-python", lab.python]
+        for d in lab.path:
+            argv += ["--lab-path", d]
+        if lab.test_python:
+            argv += ["--lab-test-python", lab.test_python]
     argv += ["--gozer", cfg.gozer]
     for d in cfg.skills_dirs:
         argv += ["--skills-dir", str(d)]

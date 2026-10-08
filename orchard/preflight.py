@@ -253,6 +253,24 @@ class Signals:
     reference_problem: Callable | None = None   # (python path) -> why it cannot import the packages, or None
     installed_bundles: Callable | None = None   # () -> list[nearest.Installed]
     search_bundles: Callable | None = None      # (query) -> [{"name", "installed"}] or None
+    lab_status: Callable | None = None          # () -> (answered, text of the lab's `gozer status`, error)
+
+
+def check_lab(lab, status) -> Check:
+    """A run with a lab box needs the lab to answer over ssh; its chips should be free (the run waits
+    for busy ones, as it does here)."""
+    answered, text, err = status
+    if not answered:
+        return Check("lab", BLOCK, f"the lab {lab.host} did not answer over ssh: {(err or '').strip()[-200:]}. "
+                                   "Check it with `tt-orchard lab setup --check`", "hardware-unhealthy")
+    states = [line.split()[3] for line in text.splitlines() if line.split()[:1] == ["chip"] and len(line.split()) >= 4]
+    if not states:
+        return Check("lab", WARN, f"the lab {lab.host} answers, but `gozer status` there listed no chips")
+    busy = [s for s in states if s != "FREE"]
+    if busy:
+        return Check("lab", WARN, f"the lab {lab.host} answers; {len(busy)} of {len(states)} chips are in use "
+                                  f"({', '.join(sorted(set(busy)))}); its tests wait for them")
+    return Check("lab", OK, f"the lab {lab.host} answers; {len(states)} chips, all free")
 
 
 def hf_home_for(cfg) -> Path:
@@ -320,6 +338,8 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
     guarded("tiers", "config-invalid", lambda: check_tiers(s.load_tiers, Path(cfg.tiers), cfg.coder.port))
     guarded("port", "coder-unusable", lambda: check_port(cfg.coder.port, bool(s.port_in_use(cfg.coder.port)), resuming))
     guarded("gozer", "hardware-unhealthy", lambda: check_gozer(s.gozer_status()))
+    if getattr(cfg, "lab", None) is not None and s.lab_status is not None:
+        guarded("lab", "hardware-unhealthy", lambda: check_lab(cfg.lab, s.lab_status()))
     out.append(base_check)
     ref = cfg.reference_python
     guarded("reference", "config-invalid", lambda: check_reference(
@@ -400,4 +420,15 @@ def default_signals(cfg) -> Signals:
         same_device=lambda a, b: os.stat(_nearest_existing(a)).st_dev == os.stat(_nearest_existing(b)).st_dev,
         credentials=lambda: supervisor.visible_credentials(cfg.operator_home or supervisor.operator_home()),
         port_in_use=port_in_use, gozer_status=gozer_status, load_tiers=tiers.load,
-        reference_problem=reference_problem)
+        reference_problem=reference_problem, lab_status=(lambda: _lab_status(cfg.lab)) if getattr(cfg, "lab", None) else None)
+
+
+def _lab_status(lab) -> tuple[bool, str, str]:
+    from orchard.lab_setup import remote
+    try:
+        done = subprocess.run(remote(lab, f"{lab.gozer} status"), capture_output=True, text=True, timeout=GOZER_TIMEOUT_S)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, "", f"{type(exc).__name__}: {exc}"
+    if done.returncode == 255:                      # ssh's own failure
+        return False, "", done.stderr
+    return True, done.stdout if done.returncode == 0 else "", done.stderr

@@ -508,3 +508,46 @@ def test_the_real_signal_asks_the_interpreter_to_import_the_four_packages(tmp_pa
     fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
     real(tmp_path).reference_problem(fake)
     assert record.read_text().strip() == "-c import torch, transformers, tokenizers, safetensors"
+
+
+# ---- a lab box ([lab]) --------------------------------------------------------------------------
+
+LAB_FREE = """grain: chip   (2 boards, 2 chips)
+board 000004033192101E  (p150a)
+  chip 0  0000:01:00.0  FREE
+board 0000040331921021  (p150a)
+  chip 1  0000:03:00.0  FREE
+"""
+
+
+def lab_cfg(tmp_path):
+    from orchard.bringup_config import Lab
+    c = cfg(tmp_path)
+    c.lab = Lab(host="node4", root=Path("/srv/orchard"))
+    return c
+
+
+def test_with_a_lab_the_preflight_checks_that_the_lab_answers_and_its_chips_are_free(tmp_path):
+    out = pf.run_preflight(lab_cfg(tmp_path), "Cloudflare/clef", accept_credentials=False,
+                           signals=signals(lab_status=lambda: (True, LAB_FREE, "")))
+    lab = next(c for c in out if c.name == "lab")
+    assert lab.status == pf.OK and "node4" in lab.detail and "2 chips" in lab.detail
+
+
+def test_a_lab_that_does_not_answer_blocks_the_run(tmp_path):
+    out = pf.run_preflight(lab_cfg(tmp_path), "Cloudflare/clef", accept_credentials=False,
+                           signals=signals(lab_status=lambda: (False, "", "No route to host")))
+    lab = next(c for c in out if c.name == "lab")
+    assert lab.status == pf.BLOCK and lab.reason == "hardware-unhealthy" and "No route to host" in lab.detail
+
+
+def test_busy_lab_chips_are_a_warning_the_run_waits_for(tmp_path):
+    busy = LAB_FREE.replace("chip 1  0000:03:00.0  FREE", "chip 1  0000:03:00.0  HELD  someone pid 9")
+    out = pf.run_preflight(lab_cfg(tmp_path), "Cloudflare/clef", accept_credentials=False,
+                           signals=signals(lab_status=lambda: (True, busy, "")))
+    assert next(c for c in out if c.name == "lab").status == pf.WARN
+
+
+def test_without_a_lab_there_is_no_lab_row(tmp_path):
+    out = pf.run_preflight(cfg(tmp_path), "Cloudflare/clef", accept_credentials=False, signals=signals())
+    assert "lab" not in [c.name for c in out]

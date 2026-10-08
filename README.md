@@ -520,6 +520,13 @@ python3 -m orchard.supervisor run --model MODEL --run-dir RUN_DIR --tiers TIERS
 | `--package-models-root` | no | Where tt-model installs bundles. Stage 7 looks here for other chip counts of the nearest model. Default `{{TT_MODEL_ROOT}}`, which is `<operator home>/.cache/tt-model/models` |
 | `--unattended` | no | Never wait for an operator. When the run would pause, it names the reason (`needs-new-model-code`, `retry-budget-spent`, `stage-failed`, `agent-stuck`, `disk-full`, `hardware-unhealthy`, `coder-unusable`, `blocked` or `unclassified`), writes `BLOCKED.md` and `blocked.json` in the run directory, releases the hardware and exits 5. Running the same command again retries from the ledger. A pause the operator asked for with `control pause` still waits. `tt-orchard bringup` always passes it |
 | `--gozer` | no | The gozer executable. Default `gozer` from `PATH` |
+| `--tt-model-root` | no | Where tt-model installs bundles (`{{TT_MODEL_ROOT}}`). Default `<operator home>/.cache/tt-model/models`. Recorded and kept like `--cache-root` |
+| `--lab` | no | An ssh host to run every hardware test on (a lab box). The coder stays on this box and is never parked. See [5.9](#59-run-the-hardware-tests-on-a-lab-box). Recorded; a resume with another lab is refused |
+| `--lab-root` | with `--lab` | The directory with the same absolute path on both boxes (such as `/srv/orchard`). The run directory, `--cache-root`, `--hf-home`, `--tt-model-root` and every `--input` path must be under it |
+| `--lab-gozer` | no | The gozer command on the lab. Default `gozer` |
+| `--lab-path` | no, repeatable | A directory to put first on `PATH` on the lab, such as `~/.local/bin` |
+| `--lab-python` | no | The Python on the lab that runs the lab helper. Default `python3` |
+| `--lab-test-python` | no | The interpreter hardware tests use on the lab (its directory goes first on `PATH`), such as the reference venv under the lab root |
 | `--accept-credentials-visible` | no | Start even though credential files exist in your home directory. **Warning:** agent shells run as your user, so code an agent runs can read those files. The ledger records that you accepted this |
 
 Stage 7 runs only when `--package-format v6` and `--package-namespace` are given and stage 0 chose
@@ -842,6 +849,33 @@ When the run prints `ready for operator review`, read `stages/8/bundle/`:
 publishing. The supervisor scrubs the other bundle files for the hostname, tokens and home paths,
 and a hit blocks the bundle. The scrub does not find a hostname written another way, a token
 format it does not know, or anything inside a binary file.
+
+### 5.9 Run the hardware tests on a lab box
+
+With `--lab HOST`, the supervisor and the coder stay on this box (the brain) and every hardware test
+runs on the lab box over ssh. The coder is never parked for a test, so there is no stop, reset and
+restart around each one, and the agents keep their chip-tier model. The lab only needs its chips free.
+
+How it works: the supervisor copies this checkout to `<lab root>/orchard` on the lab and starts a small
+helper there (`python3 -m orchard.lab serve`, in [`orchard/lab.py`](orchard/lab.py)). The helper takes
+the lab's gozer leases under its own pid and runs each test as its child, so gozer counts the test as
+the lease's work. Before a test the run directory and the Hugging Face cache go to the lab with rsync
+(to the same paths; incremental after the first copy), the test's output streams back as it runs, and
+the stage directory comes back afterwards, so the finish step, the gates and the ledger read it here.
+A test is killed on the lab at its deadline. If the supervisor dies or the connection drops, the helper
+stops its tests and gives back every lease the run held. Agents never reach the lab: the command
+runner still refuses ssh, scp and rsync in anything an agent runs.
+
+Every path a test touches must have one absolute path on both boxes, so the run lives under a lab
+root that exists on each, for example `/srv/orchard`:
+
+```bash
+sudo mkdir -p /srv/orchard && sudo chown "$USER" /srv/orchard      # once on the brain and once on the lab
+```
+
+and the run's `runs_root`, `cache_root`, `hf_home` and `tt_model_root` sit under it. Stage 7
+(`--package-format`) is refused with `--lab` for now: its boot check and install would have to run on
+the lab. A stage 4 configuration needs the lab to have that many chips.
 
 ## 6. Lessons that will bite you
 
