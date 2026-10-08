@@ -50,6 +50,13 @@ elif cmd == "release":
     print(json.dumps({"released": lid}))
 elif cmd == "status":
     print(json.dumps({"chips": []}))
+elif cmd == "queue":
+    try:
+        print(json.dumps({"queue": json.load(open(state + ".queue"))}))
+    except (OSError, ValueError):
+        print(json.dumps({"queue": []}))
+elif cmd == "cancel":
+    print(json.dumps({"cancelled": sys.argv[2]}))
 '''
 
 
@@ -135,7 +142,7 @@ def test_the_brain_going_away_kills_running_tests_and_releases_leases(labroot, t
     while time.time() < deadline and (pid_alive(child) or "release L1" not in " ".join(gozer_log(tmp_path))):
         time.sleep(0.1)
     assert not pid_alive(child)
-    assert "release L1" in gozer_log(tmp_path)[-1]
+    assert "release L1 --json" in gozer_log(tmp_path)
 
 
 def test_a_released_lease_is_not_released_again_when_the_brain_leaves(labroot, tmp_path):
@@ -146,7 +153,25 @@ def test_a_released_lease_is_not_released_again_when_the_brain_leaves(labroot, t
     adapter.release(lease)
     lab_.close()
     time.sleep(0.5)
-    assert [line.split()[0] for line in gozer_log(tmp_path)] == ["acquire", "release"]
+    assert [line.split()[0] for line in gozer_log(tmp_path) if line.split()[0] != "queue"] == ["acquire", "release"]
+
+
+def test_when_the_brain_leaves_the_helper_cancels_its_own_queue_tickets(labroot, tmp_path):
+    """The supervisor was killed while its 4-chip request waited in node4's queue. The helper killed the
+    waiting gozer process, but the ticket stayed, and gozer opened claim windows for it, holding freed
+    chips back from later requests. The helper now cancels the tickets its own pid owns."""
+    root, gz = labroot
+    lab_ = connect(root, gz, tmp_path)
+    mine = int(lab_.hello["pid"])
+    (tmp_path / "gozer-state.json.queue").write_text(json.dumps([
+        {"ticket": "T1", "pid": mine, "who": "orchard:supervisor", "min_chips": 4},
+        {"ticket": "T2", "pid": mine + 1, "who": "someone-else", "min_chips": 1}]))
+    lab_.close()
+    deadline = time.time() + 10
+    while time.time() < deadline and "cancel T1" not in gozer_log(tmp_path):
+        time.sleep(0.1)
+    log = gozer_log(tmp_path)
+    assert "cancel T1" in log and "cancel T2" not in log
 
 
 def test_gozer_sees_the_helper_as_the_lease_owner(labroot, tmp_path):

@@ -47,6 +47,8 @@ from pathlib import Path
 from orchard.commands import run_command
 from orchard.defaults import RESET_TIMEOUT_S
 
+QUEUE_TIMEOUT_S = 60.0          # gozer queue and cancel answer at once; this is only a backstop
+
 CHUNK = 64 * 1024
 MARKER = ".orchard-model"           # the tensor cache's owner marker (weights-swap templates)
 
@@ -200,7 +202,9 @@ class Helper:
 
     # ---- the brain went away ----
     def shutdown(self) -> None:
-        """Kill every running test, then give back every lease the brain held through us."""
+        """Kill every running test, give back every lease the brain held through us, and cancel every
+        queue ticket we own: a request still waiting when the brain went away (the waiting gozer process
+        is killed with the rest, but its ticket would stay in the queue and hold freed chips back)."""
         with self._lock:
             procs, held = list(self.running.values()), sorted(self.held)
             self.held.clear()
@@ -208,6 +212,16 @@ class Helper:
             self._kill(proc)
         for lease_id in held:
             run_command([self.gozer, "release", lease_id, "--json"], RESET_TIMEOUT_S, kill_on_timeout=False)
+        for ticket in self._own_tickets():
+            run_command([self.gozer, "cancel", ticket], QUEUE_TIMEOUT_S, kill_on_timeout=False)
+
+    def _own_tickets(self) -> list[str]:
+        res = run_command([self.gozer, "queue", "--json"], QUEUE_TIMEOUT_S)
+        try:
+            queue = json.loads(res.stdout or "{}").get("queue") or []
+        except (ValueError, AttributeError):
+            return []
+        return [str(t["ticket"]) for t in queue if isinstance(t, dict) and t.get("ticket") and t.get("pid") == os.getpid()]
 
 
 def serve(root, gozer="gozer", path=(), stdin=None, out=None) -> int:
