@@ -508,7 +508,7 @@ class Ladder:
     """The response ladder (spec section 7): nudge, then escalate, then pause, each capped.
 
     Rungs are counted per agent and stage, and the counts are read back from the ledger, so a
-    restarted supervisor does not repeat a rung. An agent the supervisor did not launch gets one
+    restarted supervisor does not repeat a rung. A resume starts the counts again. An agent the supervisor did not launch gets one
     `notice` per finding with the evidence, and no action. A finding with pause=True (a budget
     cap) goes straight to the pause rung, for any agent, because pausing the run is the
     supervisor's own action.
@@ -524,7 +524,11 @@ class Ladder:
         self._taken: Counter = Counter()
         for e in ledger.read():
             d = e["data"]
-            if d.get("watchdog") and d.get("rung") in RUNGS:
+            if e["event"] == "decision" and d.get("decision") == "resume":
+                # A resume (the operator's, or an unattended retry) is a fresh start for the ladder;
+                # only a restart without one must not repeat a rung.
+                self._taken.clear()
+            elif d.get("watchdog") and d.get("rung") in RUNGS:
                 self._taken[(d.get("agent"), e["stage"], d["rung"])] += 1
 
     def _left(self, agent: str, stage, rung: str) -> bool:

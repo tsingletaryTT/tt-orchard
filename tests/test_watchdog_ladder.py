@@ -85,6 +85,32 @@ def test_an_idle_lease_gets_a_notice_and_never_a_nudge(ledger):
                                           if e["event"] == "notice"])
 
 
+@pytest.mark.parametrize("by", ["retry", "operator"])
+def test_a_resume_gives_the_ladder_back_its_rungs(ledger, by):
+    """On the lab run stage 2 used its nudge, escalate and pause before an unattended block. After
+    `resume by retry` the ladder still read them from the ledger and answered every finding with
+    "none": the agent ran one pair of commands 25 times and nothing stopped it, not even the budget."""
+    first = Ladder(Actuator(), ledger, {"coder"})
+    assert [first.respond("coder", [finding()], 2) for _ in range(3)] == ["nudge", "escalate", "pause"]
+    ledger.append("decision", None, decision="resume", by=by)
+    act = Actuator()
+    again = Ladder(act, ledger, {"coder"})
+    assert [again.respond("coder", [finding()], 2) for _ in range(4)] == ["nudge", "escalate", "pause", "none"]
+    assert [c[0] for c in act.calls] == ["nudge", "escalate", "pause"]
+
+
+def test_rungs_taken_after_a_resume_still_count_across_a_restart(ledger):
+    ledger.append("decision", None, decision="resume", by="retry")
+    Ladder(Actuator(), ledger, {"coder"}).respond("coder", [finding()], 2)       # the nudge
+    assert Ladder(Actuator(), ledger, {"coder"}).respond("coder", [finding()], 2) == "escalate"
+
+
+def test_a_budget_pause_works_again_after_a_resume(ledger):
+    Ladder(Actuator(), ledger, {"coder"}).respond("coder", [finding(pause=True)], 2)
+    ledger.append("decision", None, decision="resume", by="retry")
+    assert Ladder(Actuator(), ledger, {"coder"}).respond("coder", [finding(pause=True)], 2) == "pause"
+
+
 def test_rungs_are_counted_per_stage(ledger):
     ladder = Ladder(Actuator(), ledger, {"coder"})
     assert ladder.respond("coder", [finding()], 2) == "nudge"
