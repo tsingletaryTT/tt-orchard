@@ -13,7 +13,8 @@ const HIDDEN_POLL_MS = 30000;
 const S = {
   meta: null, runs: [], launches: [], machine: null, selected: null, detail: null,
   tab: "feed", source: null, feedSeen: new Set(), feedFilter: "", follow: true,
-  ledgerAfter: 0, ledgerRows: [], ledgerFilter: "", file: null, lastOk: 0, startingRun: null,
+  ledgerAfter: 0, ledgerRows: [], ledgerFilter: "", ledgerFirst: {}, file: null, lastOk: 0, startingRun: null,
+  scene: null, view: "orchard", hw: null,
 };
 
 // ---- small helpers ------------------------------------------------------------------------------
@@ -155,20 +156,20 @@ function renderMachine() {
         title: [c.bdf, c.owner, c.note].filter(Boolean).join(" · "),
       }, h("strong", {}, `chip ${c.index} · ${c.state}`), h("span", { class: "owner" }, c.owner || c.bdf))))));
   }
-  box.append(h("div", { class: "services" },
-    h("span", { class: "svc", dataset: { up: String(m.coder.up) } }, `coder :${m.coder.port ?? "?"} ${m.coder.up ? "up" : "down"}`),
-    h("span", { class: "svc", dataset: { up: String(m.cpu_tier.up) } }, `CPU tier :${m.cpu_tier.port} ${m.cpu_tier.up ? "up" : "down"}`),
-    h("span", {}, `${m.disk_free_gb} GB free`)));
   // gozer marks a chip HELD-FOREIGN when a process outside the lease owner's tree has it open. A tt-model
   // container serving under the supervisor's lease is such a process (CLAUDE.md, 2026-10-02), so say so.
-  const foreign = m.boards.flatMap((b) => b.chips).filter((c) => c.state === "HELD-FOREIGN");
+  const all = m.boards.flatMap((b) => b.chips);
+  const foreign = all.filter((c) => c.state === "HELD-FOREIGN");
   if (foreign.length && foreign.every((c) => c.owner.startsWith("orchard:"))) {
     box.append(h("p", { class: "muted small" }, "HELD-FOREIGN under an orchard lease is expected while a coder " +
       "container serves: gozer counts the container as outside the supervisor's process tree."));
   }
-  const free = m.boards.flatMap((b) => b.chips).filter((c) => c.state === "FREE").length;
-  const total = m.boards.flatMap((b) => b.chips).length;
-  $("machine-note").textContent = total ? `${free} of ${total} chips free` : "";
+  box.append(h("div", { class: "services" },
+    h("span", { class: "svc", dataset: { up: String(m.coder.up) } }, `coder :${m.coder.port ?? "?"} ${m.coder.up ? "up" : "down"}`),
+    h("span", { class: "svc", dataset: { up: String(m.cpu_tier.up) } }, `CPU tier :${m.cpu_tier.port} ${m.cpu_tier.up ? "up" : "down"}`),
+    h("span", {}, `${m.disk_free_gb} GB free`)));
+  const free = all.filter((c) => c.state === "FREE").length;
+  $("machine-note").textContent = all.length ? `${free} of ${all.length} chips free` : "";
 }
 
 function renderLaunches() {
@@ -239,6 +240,7 @@ function select(name, { push = true } = {}) {
   S.ledgerAfter = 0; S.ledgerRows = []; S.file = null;
   if (push) history.replaceState(null, "", `#run/${encodeURIComponent(name)}`);
   renderRuns();
+  if (S.view !== "orchard") setView("orchard", { push: false });
   $("run-empty").hidden = true;
   $("run").hidden = false;
   clear($("feed")); clear($("ledger-rows")); clear($("file-list"));
@@ -251,6 +253,12 @@ function select(name, { push = true } = {}) {
 async function refreshRun() {
   if (!S.selected) return;
   const name = S.selected;
+  if (!(name in S.ledgerFirst)) {
+    S.ledgerFirst[name] = null;
+    api(`/api/runs/${encodeURIComponent(name)}/ledger?after=0`).then((out) => {
+      S.ledgerFirst[name] = out.entries.length ? parseTs(out.entries[0].ts) : null;
+    }).catch(() => {});
+  }
   try {
     const d = await api(`/api/runs/${encodeURIComponent(name)}`);
     if (S.selected !== name) return;
@@ -281,6 +289,7 @@ function renderRun() {
   renderBlock(d);
   renderPause(d);
   renderStepper(d);
+  renderScene(d);
   renderDetails(d);
   if (S.tab === "files") renderFiles();
   document.title = `${(S.meta.states[d.state] || {}).emoji || ""} ${d.model || d.name} · tt-orchard`;
@@ -353,6 +362,21 @@ function renderStepper(d) {
       h("span", { class: "real" }, s.real),
       h("span", { class: "stat" }, r ? `${mark} ${status}${r.wall_s && !stopped ? " · " + dur(r.wall_s) : ""}${r.attempts > 1 ? ` · ×${r.attempts}` : ""}` : "not yet")));
   }
+}
+
+const WEATHER = {
+  "running": "☀ sunny", "paused": "🌧 rain", "blocked": "❄ frost", "stopped-or-crashed": "⛈ storm",
+  "aborted": "🍂 leaves falling", "ready-for-operator-review": "🧺 harvest day", "not-started": "🌰 seed",
+};
+
+function renderScene(d) {
+  if (S.scene) S.scene.setRun({ state: d.state, stages: d.stages, current: d.stage ? d.stage.current : null });
+  const passed = d.stages.filter((r) => r.status === "pass").length;
+  const started = S.ledgerFirst[d.name];
+  const day = started ? Math.max(1, Math.floor((Date.now() - started) / 86400000) + 1) : 1;
+  const cap = clear($("scene-caption"));
+  cap.append(h("span", {}, `Day ${day} of this run`), h("span", {}, WEATHER[d.state] || d.state),
+    h("span", {}, `🍎 ${passed} of 9 plots fruiting`));
 }
 
 function renderDetails(d) {
@@ -454,6 +478,7 @@ function addFeedLine(e) {
   const ph = feed.querySelector(".placeholder");
   if (ph) ph.remove();
   ensureActorOption(e.actor);
+  if (S.scene) S.scene.event(e.actor);
   const li = h("li", { dataset: { actor: e.actor, bad: String(e.bad) } },
     h("span", { class: "t" }, clock(e.ts)),
     h("span", { class: "who", dataset: { role: e.role } }, h("span", { "aria-hidden": "true" }, (e.icon || "") + " "), e.actor),
@@ -668,6 +693,8 @@ async function startBringup() {
 
 function wire() {
   $("new-run-btn").addEventListener("click", openNewRun);
+  $("view-orchard-btn").addEventListener("click", () => setView("orchard"));
+  $("view-hardware-btn").addEventListener("click", () => setView("hardware"));
   $("nr-cancel").addEventListener("click", () => $("new-run").close());
   $("new-run-form").addEventListener("submit", (ev) => { ev.preventDefault(); runChecks(); });
   $("nr-start").addEventListener("click", startBringup);
@@ -696,7 +723,112 @@ function wire() {
   $("ledger-filter").addEventListener("change", (ev) => { S.ledgerFilter = ev.target.value; renderLedger(); });
 }
 
+function tickClock() {
+  const now = new Date();
+  const wd = now.toLocaleDateString([], { weekday: "short" });
+  $("clock-day").textContent = `${wd}. ${now.getDate()}`;
+  $("clock-time").textContent = now.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }).toLowerCase();
+}
+
+// ---- views: the orchard and the hardware TV -------------------------------------------------------------
+
+function setView(view, { push = true } = {}) {
+  S.view = view;
+  $("view-orchard-btn").setAttribute("aria-pressed", String(view === "orchard"));
+  $("view-hardware-btn").setAttribute("aria-pressed", String(view === "hardware"));
+  $("hardware-view").hidden = view !== "hardware";
+  const runShown = view === "orchard" && S.selected;
+  $("run").hidden = !runShown;
+  $("run-empty").hidden = view !== "orchard" || Boolean(S.selected);
+  if (view === "hardware") {
+    if (push) history.replaceState(null, "", "#hardware");
+    startToplike(S.hwMode || "normal");
+  } else {
+    stopToplike();
+    if (push) history.replaceState(null, "", S.selected ? `#run/${encodeURIComponent(S.selected)}` : "#");
+  }
+}
+
+// ---- tt-toplike, view-only ------------------------------------------------------------------------
+// The page draws tt-toplike's own terminal UI with xterm.js. It never sends keystrokes: stdin is disabled in the
+// terminal and the server has no input route. A view button restarts tt-toplike with that --mode.
+
+const MODE_LABEL = { normal: "Table", starfield: "Starfield", castle: "Memory Castle", flow: "Memory Flow",
+  arcade: "Arcade", training: "Training", rotate: "Rotate all" };
+
+function buildChannels() {
+  const box = clear($("hw-channels"));
+  const tp = S.meta.toplike;
+  if (!tp.available) { $("hw-missing").hidden = false; return; }
+  for (const mode of tp.modes) {
+    box.append(h("button", { type: "button", class: "btn btn-small", "aria-pressed": "false", dataset: { mode },
+      onclick: () => startToplike(mode) }, MODE_LABEL[mode] || mode));
+  }
+}
+
+function stopToplike() {
+  const hw = S.hw;
+  if (!hw) return;
+  hw.source.close();
+  hw.ro.disconnect();
+  hw.term.dispose();
+  S.hw = null;
+  $("hw-status").textContent = "Off";
+}
+
+function startToplike(mode) {
+  stopToplike();
+  if (!S.meta.toplike.available || typeof Terminal === "undefined") return;
+  S.hwMode = mode;
+  for (const b of $("hw-channels").querySelectorAll("button")) b.setAttribute("aria-pressed", String(b.dataset.mode === mode));
+  const el = clear($("term"));
+  const term = new Terminal({
+    disableStdin: true, cursorBlink: false, convertEol: false, scrollback: 0, fontSize: 13,
+    fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+    theme: { background: "#1b1a2e", foreground: "#f3e6c8", cursor: "#1b1a2e" },
+  });
+  const fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.open(el);
+  fit.fit();
+  const source = new EventSource(`/api/toplike?mode=${encodeURIComponent(mode)}&cols=${term.cols}&rows=${term.rows}`);
+  const hw = { term, fit, source, id: null, ro: null, mode };
+  S.hw = hw;
+  $("hw-status").textContent = `Tuning in: ${MODE_LABEL[mode] || mode}…`;
+  source.addEventListener("session", (ev) => {
+    hw.id = JSON.parse(ev.data).id;
+    $("hw-status").textContent = `tt-toplike · ${MODE_LABEL[mode] || mode} · on ${S.meta.hostname}`;
+  });
+  source.onmessage = (ev) => {
+    const bin = atob(ev.data), bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    term.write(bytes);
+  };
+  source.addEventListener("exit", () => {
+    source.close();
+    $("hw-status").textContent = "tt-toplike stopped. Pick a view to start it again.";
+  });
+  source.onerror = () => {
+    // The server refuses (busy or not installed) with an error status, and a dropped stream ends the session.
+    // Either way this view is over; do not let EventSource start another tt-toplike by reconnecting.
+    source.close();
+    if (S.hw === hw && !hw.id) $("hw-status").textContent = "Could not start tt-toplike (too many open, or not installed).";
+    else if (S.hw === hw) $("hw-status").textContent = "The connection dropped. Pick a view to reconnect.";
+  };
+  let timer = null;
+  hw.ro = new ResizeObserver(() => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      if (S.hw !== hw) return;
+      fit.fit();
+      if (hw.id) api(`/api/toplike/${encodeURIComponent(hw.id)}/resize`, { body: { cols: term.cols, rows: term.rows } }).catch(() => {});
+    }, 200);
+  });
+  hw.ro.observe(el);
+}
+
 function routeFromHash() {
+  if (location.hash === "#hardware") { setView("hardware", { push: false }); return; }
   const m = location.hash.match(/^#run\/(.+)$/);
   if (m) select(decodeURIComponent(m[1]), { push: false });
 }
@@ -710,10 +842,15 @@ async function main() {
     clear($("machine")).append(h("p", { class: "form-error" }, err.message));
     return;
   }
-  $("brand-host").textContent = `${S.meta.hostname} · ${S.meta.version}`;
+  $("brand-host").textContent = `${S.meta.hostname} · ${S.meta.version}${S.meta.lan ? " · open on the network" : ""}`;
+  S.scene = window.OrchardScene ? new window.OrchardScene($("scene")) : null;
+  if (S.scene) S.scene.start();
+  tickClock();
+  setInterval(tickClock, 10000);
+  buildChannels();
   await refreshRuns();
   routeFromHash();
-  if (!S.selected && S.runs.length) select(S.runs[0].name);
+  if (!S.selected && S.runs.length && S.view === "orchard") select(S.runs[0].name);
   // A hidden tab keeps its title (which shows the run's state) current, but polls only every 30 s.
   let lastHidden = 0;
   const due = () => {

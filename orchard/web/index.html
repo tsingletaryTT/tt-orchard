@@ -7,7 +7,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <title>tt-orchard</title>
+<link rel="stylesheet" href="/static/vendor/xterm/xterm.css">
 <link rel="stylesheet" href="/static/app.css">
+<script src="/static/vendor/xterm/xterm.js" defer></script>
+<script src="/static/vendor/xterm/addon-fit.js" defer></script>
+<script src="/static/scene.js" defer></script>
 <script src="/static/app.js" defer></script>
 </head>
 <body>
@@ -19,9 +23,17 @@
     <span class="brand-name">tt-orchard</span>
     <span class="brand-host" id="brand-host"></span>
   </div>
+  <nav class="views" aria-label="Views">
+    <button type="button" class="view-btn" id="view-orchard-btn" aria-pressed="true">🧺 Orchard</button>
+    <button type="button" class="view-btn" id="view-hardware-btn" aria-pressed="false">📺 Hardware</button>
+  </nav>
   <div class="topbar-right">
-    <span class="conn" id="conn" role="status" aria-live="polite"><span class="conn-dot" aria-hidden="true"></span><span class="conn-text">Connecting…</span></span>
-    <button type="button" class="btn btn-primary" id="new-run-btn">New bring-up</button>
+    <div class="clock" aria-label="Machine time and connection">
+      <span class="clock-day" id="clock-day"></span>
+      <span class="clock-time" id="clock-time"></span>
+      <span class="conn" id="conn" role="status" aria-live="polite"><span class="conn-dot" aria-hidden="true"></span><span class="conn-text">Connecting…</span></span>
+    </div>
+    <button type="button" class="btn btn-primary" id="new-run-btn">🌱 New bring-up</button>
   </div>
 </header>
 
@@ -46,6 +58,25 @@
   </aside>
 
   <main id="run-view" class="main" tabindex="-1">
+    <section id="hardware-view" class="hardware" hidden aria-labelledby="hw-h">
+      <div class="hw-head">
+        <div>
+          <h1 id="hw-h">Hardware</h1>
+          <p class="muted" id="hw-sub">tt-toplike, live from this machine.</p>
+        </div>
+        <div class="channels" id="hw-channels" role="group" aria-label="tt-toplike view"></div>
+      </div>
+      <div class="tv">
+        <div class="tv-screen"><div id="term" class="term" role="img" aria-label="tt-toplike's terminal display"></div></div>
+        <div class="tv-base"><span class="tv-label" id="hw-status">Off</span><span class="tv-knobs" aria-hidden="true"><i></i><i></i></span></div>
+      </div>
+      <p class="muted small">View only: nothing you type here is sent to the machine. Pick a view above; each one starts tt-toplike with that view.</p>
+      <div id="hw-missing" class="empty" hidden>
+        <h2>tt-toplike is not installed here</h2>
+        <p class="muted">Install it (github.com/tenstorrent/tt-toplike), or start the page with <code>tt-orchard ui --toplike PATH</code>.</p>
+      </div>
+    </section>
+
     <div id="run-empty" class="empty">
       <h1>Pick a run</h1>
       <p class="muted">Runs that need you are listed first. Start a new one with <strong>New bring-up</strong>.</p>
@@ -60,6 +91,11 @@
         </div>
         <div class="actions" id="run-actions" role="group" aria-label="Run actions"></div>
       </header>
+
+      <figure class="scene-frame">
+        <canvas id="scene" class="scene" aria-hidden="true"></canvas>
+        <figcaption class="scene-caption" id="scene-caption"></figcaption>
+      </figure>
 
       <p class="hint" id="run-hint"><span class="hint-label">Next</span><span id="run-hint-text"></span></p>
 

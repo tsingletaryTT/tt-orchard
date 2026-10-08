@@ -40,6 +40,8 @@ OTHER_TOOL_FLAGS = {
     "--delete": "rsync (named as something the command runner does not stop)",
     "--force": "gozer (the README says never to pass it)",
     "--help": "gozer reset --help",
+    "--mode": "tt-toplike (each Hardware view button starts it with one)",
+    "--rotate": "tt-toplike (its kiosk rotation, one of the Hardware views)",
     "--owner-pid": "gozer acquire",
     "--out": "tt-model package-thin",
     "--version": "tt-model --version",

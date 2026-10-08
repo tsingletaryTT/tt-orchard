@@ -6,7 +6,7 @@
     tt-orchard status   [MODEL | --run-dir DIR] [--json] [--style S]
     tt-orchard watch    [MODEL | --run-dir DIR] [--all] [--once] [--style S]
     tt-orchard pause | resume | abort   [MODEL | --run-dir DIR]
-    tt-orchard ui       [--host 127.0.0.1] [--port 8780]
+    tt-orchard ui       [--lan] [--host ADDR] [--port 8780] [--toplike PATH]
 
 It is a thin layer over `python3 -m orchard.supervisor`. `bringup` reads config/bringup.toml, checks what
 can be checked without a lease (orchard/preflight.py), fetches the model snapshot when it is not local
@@ -97,9 +97,16 @@ def _parser() -> argparse.ArgumentParser:
         c.add_argument("model", nargs="?")
         c.add_argument("--run-dir")
     u = sub.add_parser("ui", parents=[common], help="watch and control the runs on this machine in a browser")
-    u.add_argument("--host", default="127.0.0.1",
-                   help="the loopback address to listen on (127.0.0.1, localhost or ::1); other addresses are "
-                        "refused. From another computer use `ssh -L 8780:localhost:8780 <box>`")
+    u.add_argument("--host", default=None,
+                   help="the address to listen on. Default 127.0.0.1; with --lan, 0.0.0.0 (every interface). Without "
+                        "--lan only a loopback address is accepted; from another computer use "
+                        "`ssh -L 8780:localhost:8780 <box>`")
+    u.add_argument("--toplike", metavar="PATH",
+                   help="the tt-toplike binary the Hardware view runs (view-only). Default: tt-toplike or "
+                        "tt-toplike-tui on PATH; without one the view says how to install it")
+    u.add_argument("--lan", action="store_true",
+                   help="listen on the local network with no login: anyone who can reach the port can pause, abort "
+                        "and start runs. Open the port in the firewall yourself")
     u.add_argument("--port", type=int, default=8780, help="the port to listen on (default 8780)")
     return p
 
@@ -212,26 +219,66 @@ def _ui_preflight(cfg):
     return run
 
 
+def _toplike_argv(path) -> list[str] | None:
+    import shutil
+    if path:
+        return [path]
+    for name in ("tt-toplike", "tt-toplike-tui"):
+        found = shutil.which(name)
+        if found:
+            return [found]
+    return None
+
+
+def _ui_host(args) -> str:
+    return args.host or ("0.0.0.0" if args.lan else "127.0.0.1")
+
+
+def _lan_addresses() -> list[str]:
+    """This machine's address on the local network, found by asking the kernel which address a packet to a
+    LAN host would leave from (nothing is sent)."""
+    import socket
+    found = []
+    for probe in ("192.168.0.1", "10.0.0.1", "172.16.0.1"):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.connect((probe, 9))
+                ip = s.getsockname()[0]
+        except OSError:
+            continue
+        if ip not in found and not ip.startswith("127."):
+            found.append(ip)
+    return found
+
+
 def _ui(args, env, home, out) -> int:
     from orchard import tiers, webui
-    if args.host not in tiers.LOCAL_HOSTS:
-        return _refuse(f"--host {args.host} is not a loopback address; the UI listens only on "
-                       f"{', '.join(sorted(tiers.LOCAL_HOSTS))}. From another computer, forward the port: "
-                       f"ssh -L {args.port}:localhost:{args.port} <this machine>")
+    host = _ui_host(args)
+    if host not in tiers.LOCAL_HOSTS and not args.lan:
+        return _refuse(f"--host {host} is not a loopback address; the UI listens only on "
+                       f"{', '.join(sorted(tiers.LOCAL_HOSTS))} unless you pass --lan. From another computer, "
+                       f"forward the port instead: ssh -L {args.port}:localhost:{args.port} <this machine>")
     try:
         path = find_config(getattr(args, "config", None), env, CHECKOUT, home)
         cfg = bringup_config.load(path)
     except (NoConfig, bringup_config.BringupConfigError) as exc:
         return _refuse(str(exc))
-    app = webui.WebApp(runs_root=cfg.runs_root, config_path=path, cfg=cfg, preflight=_ui_preflight(cfg))
+    app = webui.WebApp(runs_root=cfg.runs_root, config_path=path, cfg=cfg, preflight=_ui_preflight(cfg),
+                       lan=args.lan, toplike=_toplike_argv(args.toplike))
     try:
-        server = webui.make_server(app, args.host, args.port)
-    except OSError as exc:
-        return _refuse(f"cannot listen on {args.host}:{args.port}: {exc}")
-    host = f"[{args.host}]" if ":" in args.host else args.host
-    print(f"tt-orchard ui {__version__}: http://{host}:{args.port}/  (runs in {cfg.runs_root})", file=out)
-    print(f"from another computer: ssh -L {args.port}:localhost:{args.port} {app.hostname}  "
-          f"then open http://localhost:{args.port}/", file=out)
+        server = webui.make_server(app, host, args.port)
+    except (OSError, ValueError) as exc:
+        return _refuse(f"cannot listen on {host}:{args.port}: {exc}")
+    shown = f"[{host}]" if ":" in host else host
+    print(f"tt-orchard ui {__version__}: http://{shown}:{args.port}/  (runs in {cfg.runs_root})", file=out)
+    if args.lan:
+        for addr in [app.hostname, *_lan_addresses()]:
+            print(f"on the network: http://{addr}:{args.port}/", file=out)
+        print("NO LOGIN: anyone who can reach this port can pause, abort and start runs. The firewall must allow "
+              f"the port (for ufw: sudo ufw allow from <your LAN>/24 to any port {args.port} proto tcp).", file=out)
+    else:
+        print(f"from another computer: ssh -L {args.port}:localhost:{args.port} {app.hostname}  "
+              f"then open http://localhost:{args.port}/  (or start it with --lan)", file=out)
     print("Ctrl-C stops the page. It never stops a run.", file=out)
     out.flush()
     try:

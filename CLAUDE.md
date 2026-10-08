@@ -723,3 +723,30 @@ new bring-up through the preflight), stdlib server and plain HTML/CSS/JS with no
 - Not done: screenshots in the README, a test of the page's own JavaScript (it is checked by hand in a browser and
   by `node --check`), and `stage_rows` itself still calls an aborted run's open stage "running" (the page shows it
   as stopped).
+
+## 2026-10-08: `tt-orchard ui --lan`, tt-toplike in the page, and the farm look
+Prompts (operator): "open everything so I can access it from any box on lan"; "Can we use the tt-toplike project
+for some of the card visualization? We also don't need login for now"; "please use everything from tt-toplike
+don't re-write it"; "gamify the UI with some kind of stardew valley type animation ... theme the whole UI with
+more stardew valley type color scheme and elements".
+- `--lan`: listens beyond loopback with no login (the operator's call). The Host check is skipped there; every
+  POST still needs the token and an Origin equal to the request's Host. The firewall is the operator's to open.
+- A first attempt ported tt-toplike's portrait, colours and hwmon reader into the page. The operator asked for
+  tt-toplike itself instead, so the port was removed. tt-toplike has no web build, so the page runs the real
+  `tt-toplike-tui` in a pseudo-terminal per viewer and draws it with xterm.js (vendored). Forwarding keystrokes
+  from an unauthenticated LAN page into it was refused by the session's safety check as a remote-execution
+  surface; the operator chose view-only: no input route, `disableStdin`, and a `--mode` from TOPLIKE_MODES
+  (`hivemind` left out). At most TOPLIKE_MAX per server; a closed page stops its tt-toplike (the server watches
+  the socket, because a still screen sends nothing to fail on).
+- tt-toplike printed in one colour at first: it gives up true colour when TMUX is set (src/ui/colors.rs), and
+  the UI ran in tmux. It now gets the environment tt-toplike's own app gives it (src/bin/app.rs). Then the page's
+  CSP blocked xterm.js's inline styles (thousands of console errors); styles may be inline now, scripts stay 'self'.
+- The farm look: parchment menus in wooden frames on a grass field by day, indigo and lantern light by night,
+  Pixelify Sans (vendored, OFL) for headings and buttons. `orchard/web/scene.js` draws the run as a pixel orchard
+  in code: nine plots that grow into fruit trees as stages pass, the orchardist walking to the running stage,
+  the grafter working while the agent talks, the sheepdog dashing by on a watchdog line, and weather for the
+  state (sun, rain, frost, a soft storm with no strobe, falling leaves, harvest basket). Reduced motion draws it
+  still. The scene is decorative; everything it shows is text on the page too.
+- Checked on node6: tt-toplike 0.13.10 (built in ~/build/tt-toplike-orchard) shows all four p300c chips in
+  colour in Table and Arcade views, inside the page.
+

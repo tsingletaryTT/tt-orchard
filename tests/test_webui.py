@@ -8,10 +8,12 @@ a file outside the allow-list (or a token inside an allowed one) reaching the br
 sent to a run that cannot act on it, a launch while the preflight blocks, and the server listening
 beyond this machine.
 """
+import base64
 import http.client
 import json
 import re
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -73,7 +75,8 @@ def root(tmp_path):
     return r
 
 
-def make_app(root, *, alive=(), preflight=None, gozer=None, clock=None, ports=None, launched_alive=None):
+def make_app(root, *, alive=(), preflight=None, gozer=None, clock=None, ports=None, launched_alive=None,
+             toplike=None):
     """A WebApp whose supervisor liveness, gozer, ports, preflight and launches are all fakes.
     `alive` names the runs whose supervisor counts as alive (via their supervisor.pid)."""
     def pid_alive(pid):
@@ -92,7 +95,7 @@ def make_app(root, *, alive=(), preflight=None, gozer=None, clock=None, ports=No
                         "disk_free_gb": lambda p: 321.0},
         port_open=ports or (lambda port: port == 11434),
         pid_running=launched_alive or (lambda pid: False),
-        hostname="quietbox", home=HOME, sse_poll_s=0.05,
+        hostname="quietbox", home=HOME, sse_poll_s=0.05, toplike=toplike,
     )
 
 
@@ -452,11 +455,42 @@ def test_the_page_and_its_assets_are_served_with_a_strict_policy(root):
     with Served(make_app(root)) as s:
         code, headers, body = s.request("GET", "/")
         assert code == 200 and b"<title>" in body
-        assert "default-src 'self'" in headers["Content-Security-Policy"]
+        csp = headers["Content-Security-Policy"]
+        assert "default-src 'self'" in csp
+        # xterm.js styles its cells inline, so styles may be inline; scripts never are.
+        assert "script-src 'self';" in csp and "unsafe-inline" not in csp.split("script-src", 1)[1].split(";")[0]
+        assert "style-src 'self' 'unsafe-inline'" in csp
         for asset in ("/static/app.js", "/static/app.css"):
             code, _, _ = s.request("GET", asset)
             assert code == 200
         assert s.request("GET", "/static/../webui.py")[0] == 404
+
+
+@pytest.mark.parametrize("path,ctype", [
+    ("/static/scene.js", "text/javascript"),
+    ("/static/vendor/xterm/xterm.js", "text/javascript"),
+    ("/static/vendor/xterm/xterm.css", "text/css"),
+    ("/static/vendor/xterm/addon-fit.js", "text/javascript"),
+    ("/static/vendor/pixelify-sans/pixelify-sans-latin-400-normal.woff2", "font/woff2"),
+    ("/static/vendor/pixelify-sans/pixelify-sans-latin-700-normal.woff2", "font/woff2"),
+])
+def test_the_vendored_and_scene_assets_are_served(root, path, ctype):
+    with Served(make_app(root)) as s:
+        code, headers, body = s.request("GET", path)
+    assert code == 200 and headers["Content-Type"].startswith(ctype) and body
+
+
+@pytest.mark.parametrize("path", ["/static/vendor/xterm/LICENSE", "/static/vendor/../webui.py",
+                                  "/static/vendor/xterm/xterm.js.map", "/static/vendor/other/x.js"])
+def test_only_the_listed_vendor_files_are_served(root, path):
+    with Served(make_app(root)) as s:
+        assert s.request("GET", path)[0] == 404
+
+
+def test_vendored_code_ships_with_its_license():
+    vendor = Path(webui.__file__).with_name("web") / "vendor"
+    for lib in vendor.iterdir():
+        assert (lib / "LICENSE").is_file() and (lib / "README").is_file(), lib.name
 
 
 def test_meta_gives_the_token_and_the_vocabulary(root):
@@ -541,6 +575,194 @@ def test_the_ledger_endpoint_pages_by_sequence(root):
     assert rows[-1]["summary"] == "stage 0 pass"
 
 
+# ---- the LAN mode ------------------------------------------------------------------------------------
+
+def test_the_server_listens_beyond_loopback_only_in_lan_mode(root):
+    with pytest.raises(ValueError):
+        webui.make_server(make_app(root), "0.0.0.0", 0)
+    app = make_app(root)
+    app.lan = True
+    server = webui.make_server(app, "0.0.0.0", 0)
+    server.server_close()
+
+
+def lan_app(root, **kw):
+    app = make_app(root, **kw)
+    app.lan = True
+    return app
+
+
+def test_in_lan_mode_a_lan_host_name_is_served(root):
+    with Served(lan_app(root)) as s:
+        assert s.request("GET", "/api/meta", host=f"192.168.50.51:{s.port}")[0] == 200
+        assert s.request("GET", "/api/meta", host=f"tt-quietbox:{s.port}")[0] == 200
+
+
+def test_in_lan_mode_a_change_must_come_from_the_page_it_was_served_on(root):
+    run = write_ledger(root / "org--a", ("stage_start", 0, {}))
+    with_supervisor(run, 5)
+    with Served(lan_app(root, alive={5})) as s:
+        host = f"192.168.50.51:{s.port}"
+        hdr = {"X-Orchard-Token": TOKEN, "Origin": "http://evil.example"}
+        assert s.request("POST", "/api/runs/org--a/control", {"word": "pause"}, hdr, host=host)[0] == 403
+        assert s.request("POST", "/api/runs/org--a/control", {"word": "pause"},
+                         {"X-Orchard-Token": "wrong", "Origin": f"http://{host}"}, host=host)[0] == 403
+        assert not (run / "control").exists()
+        code = s.request("POST", "/api/runs/org--a/control", {"word": "pause"},
+                         {"X-Orchard-Token": TOKEN, "Origin": f"http://{host}"}, host=host)[0]
+    assert code == 200 and (run / "control").read_text().strip() == "pause"
+
+
+# ---- tt-toplike in the page, view-only -------------------------------------------------------------------
+# The page shows tt-toplike's own terminal UI. It sends no keystrokes: a mode is picked from an allow-list and
+# tt-toplike is started with that `--mode`, so nothing typed in a browser reaches a program on the machine.
+
+FAKE_TOPLIKE = """
+import os, sys
+cols, rows = os.get_terminal_size(0)
+sys.stdout.write("\\x1b[2Jtoplike-ready %dx%d %s\\n" % (cols, rows, " ".join(sys.argv[1:]))); sys.stdout.flush()
+import time
+while True:
+    time.sleep(0.2)
+"""
+
+
+@pytest.fixture
+def toplike_cmd(tmp_path):
+    script = tmp_path / "fake_toplike.py"
+    script.write_text(FAKE_TOPLIKE)
+    return [sys.executable, str(script)]
+
+
+def read_until(resp, want: bytes, timeout=5.0):
+    """Collect the terminal bytes from an SSE stream until `want` appears. Returns (session id, bytes)."""
+    sid, got, deadline, event = None, b"", time.time() + timeout, None
+    while time.time() < deadline and want not in got:
+        line = resp.fp.readline()
+        if not line:
+            break
+        if line.startswith(b"event:"):
+            event = line[6:].strip()
+        elif line.startswith(b"data:"):
+            payload = line[5:].strip()
+            if event == b"session":
+                sid = json.loads(payload)["id"]
+            elif event is None:
+                got += base64.b64decode(payload)
+            event = None
+    return sid, got
+
+
+def open_toplike(s, query="cols=100&rows=30"):
+    conn = http.client.HTTPConnection("127.0.0.1", s.port, timeout=5)
+    conn.request("GET", f"/api/toplike?{query}", headers={"Host": f"127.0.0.1:{s.port}"})
+    return conn, conn.getresponse()
+
+
+def test_toplike_runs_in_a_terminal_of_the_pages_size_and_streams_to_it(root, toplike_cmd):
+    with Served(make_app(root, toplike=toplike_cmd)) as s:
+        conn, resp = open_toplike(s, "cols=100&rows=30")
+        assert resp.status == 200
+        sid, got = read_until(resp, b"toplike-ready")
+        conn.close()
+    assert sid and b"toplike-ready 100x30" in got
+
+
+@pytest.mark.parametrize("mode,args", [("arcade", b"--quiet --mode arcade"), ("rotate", b"--quiet --rotate"),
+                                       ("", b"--quiet")])
+def test_a_mode_from_the_list_becomes_toplikes_own_flag(root, toplike_cmd, mode, args):
+    with Served(make_app(root, toplike=toplike_cmd)) as s:
+        conn, resp = open_toplike(s, f"cols=80&rows=24&mode={mode}")
+        _, got = read_until(resp, b"\n")
+        conn.close()
+    assert got.rstrip().endswith(args)
+
+
+@pytest.mark.parametrize("mode", ["hivemind", "--backend luwen", "arcade;id", "normal --serve"])
+def test_a_mode_outside_the_list_is_refused_and_nothing_runs(root, toplike_cmd, mode):
+    app = make_app(root, toplike=toplike_cmd)
+    with Served(app) as s:
+        conn, resp = open_toplike(s, "cols=80&rows=24&mode=" + mode.replace(" ", "%20").replace(";", "%3B"))
+        assert resp.status == 400
+        conn.close()
+    assert app.toplike_sessions() == 0
+
+
+def test_toplike_gets_the_environment_its_own_app_gives_it(root, tmp_path, monkeypatch):
+    # tt-toplike falls back from true colour when TMUX is set (src/ui/colors.rs); its own terminal app
+    # (src/bin/app.rs) starts the TUI with COLORTERM=truecolor, TERM=xterm-256color and LANG=en_US.UTF-8.
+    script = tmp_path / "env_toplike.py"
+    script.write_text("import os, sys, time\n"
+                      "sys.stdout.write('ENV %s|%s|%s|%s\\n' % (os.environ.get('COLORTERM'), os.environ.get('TERM'),"
+                      " os.environ.get('LANG'), os.environ.get('TMUX', 'none'))); sys.stdout.flush()\n"
+                      "time.sleep(5)\n")
+    monkeypatch.setenv("TMUX", "/tmp/tmux-1000/default,1,0")
+    with Served(make_app(root, toplike=[sys.executable, str(script)])) as s:
+        conn, resp = open_toplike(s)
+        _, got = read_until(resp, b"\n")
+        resp.close()
+        conn.close()
+    assert b"ENV truecolor|xterm-256color|en_US.UTF-8|none" in got
+
+
+def test_there_is_no_way_to_type_into_toplike(root, toplike_cmd):
+    with Served(make_app(root, toplike=toplike_cmd)) as s:
+        conn, resp = open_toplike(s)
+        sid, _ = read_until(resp, b"toplike-ready")
+        for what in ("input", "keys", "write", "stdin"):
+            assert s.post(f"/api/toplike/{sid}/{what}", {"data": "q"})[0] == 404
+        conn.close()
+
+
+def test_a_resize_reaches_the_terminal_within_bounds(root, toplike_cmd):
+    app = make_app(root, toplike=toplike_cmd)
+    with Served(app) as s:
+        conn, resp = open_toplike(s, "cols=80&rows=24")
+        sid, _ = read_until(resp, b"toplike-ready")
+        assert s.post(f"/api/toplike/{sid}/resize", {"cols": 132, "rows": 40})[0] == 200
+        assert app.toplike_size(sid) == (132, 40)
+        assert s.post(f"/api/toplike/{sid}/resize", {"cols": 5000, "rows": 40})[0] == 400
+        assert s.post(f"/api/toplike/{sid}/resize", {"cols": 100, "rows": 40}, token=None)[0] == 403
+        conn.close()
+
+
+def test_closing_the_page_stops_its_toplike(root, toplike_cmd):
+    app = make_app(root, toplike=toplike_cmd)
+    with Served(app) as s:
+        conn, resp = open_toplike(s)
+        sid, _ = read_until(resp, b"toplike-ready")
+        pid = app.toplike_pid(sid)
+        resp.close()                          # the response holds the socket open after conn.close()
+        conn.close()
+        deadline = time.time() + 5
+        while time.time() < deadline and webui.pid_running(pid):
+            time.sleep(0.1)
+        # checked while the server still runs: shutting it down stops every tt-toplike anyway
+        assert not webui.pid_running(pid)
+        assert app.toplike_pid(sid) is None
+
+
+def test_the_number_of_toplike_terminals_is_capped(root, toplike_cmd):
+    with Served(make_app(root, toplike=toplike_cmd)) as s:
+        opened = [open_toplike(s) for _ in range(webui.TOPLIKE_MAX)]
+        for _, resp in opened:
+            read_until(resp, b"toplike-ready")
+        conn, resp = open_toplike(s)
+        assert resp.status == 409
+        conn.close()
+        for c, _ in opened:
+            c.close()
+
+
+def test_without_toplike_the_page_is_told_and_nothing_runs(root):
+    with Served(make_app(root, toplike=None)) as s:
+        meta = json.loads(s.request("GET", "/api/meta")[2])
+        assert meta["toplike"]["available"] is False and "arcade" in meta["toplike"]["modes"]
+        conn, resp = open_toplike(s)
+        assert resp.status == 503
+        conn.close()
+
+
 # ---- the command ------------------------------------------------------------------------------------
 
 @pytest.mark.parametrize("host", ["0.0.0.0", "192.168.50.51", "example.com", "::"])
@@ -550,9 +772,30 @@ def test_the_command_refuses_to_listen_beyond_this_machine(host, capsys):
     assert "loopback" in capsys.readouterr().err
 
 
+def test_lan_mode_is_the_only_way_off_loopback(capsys):
+    code = cli.main(["ui", "--lan", "--host", "not-an-address!"], env={"HOME": "/nonexistent"}, stdout=None)
+    assert code == cli.EXIT_REFUSED                       # still refused: no config, and a bad address
+    assert cli._ui_host(type("A", (), {"host": None, "lan": True})()) == "0.0.0.0"
+    assert cli._ui_host(type("A", (), {"host": None, "lan": False})()) == "127.0.0.1"
+    assert cli._ui_host(type("A", (), {"host": "192.168.50.51", "lan": True})()) == "192.168.50.51"
+
+
+def test_the_toplike_command_is_found_on_path_or_given(tmp_path, monkeypatch):
+    exe = tmp_path / "tt-toplike"
+    exe.write_text("#!/bin/sh\n")
+    exe.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    assert cli._toplike_argv(None) == [str(exe)]
+    assert cli._toplike_argv("/opt/tt-toplike-tui") == ["/opt/tt-toplike-tui"]
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    assert cli._toplike_argv(None) is None
+
+
 def test_no_asset_loads_anything_from_another_host():
     web = Path(webui.__file__).with_name("web")
     for f in web.iterdir():
+        if f.is_dir():
+            continue                                  # vendor/: third-party code, served as shipped
         text = f.read_text(encoding="utf-8")
         assert not re.search(r"(src|href)\s*=\s*[\"']?(https?:)?//", text), f.name
         assert "fetch('http" not in text and 'fetch("http' not in text, f.name
