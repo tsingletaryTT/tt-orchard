@@ -34,14 +34,15 @@ class FakeLab:
         self.events: list[tuple] = []
         self.closed = False
         self.audits: dict = {}
+        self.chips = None                          # unknown: no limit (a test sets the lab's chip count)
         self.info = {"host": "node4", "root": str(self.root), "hostname": "node4", "pid": owner_pid,
                      "firmware": {"fw_bundle": "19.15.0.0"}}
 
     def sync_up(self, path):
         self.events.append(("up", str(path)))
 
-    def sync_down(self, path):
-        self.events.append(("down", str(path)))
+    def sync_down(self, path, exclude=()):
+        self.events.append(("down", str(path), tuple(exclude)))
 
     def mirror_up(self, path):
         self.events.append(("mirror", str(path)))
@@ -165,6 +166,40 @@ def test_the_stage_directory_is_mirrored_to_the_lab_before_each_test(rig):
         assert last.startswith(str(rig.run_dir.resolve() / "stages")) and last.rstrip("/").split("/")[-1].isdigit()
         run_up = max(j for j, x in enumerate(ev[:i]) if x == ("up", str(rig.run_dir.resolve())))
         assert mirrors[-1] > run_up                              # after the run directory goes up
+
+
+def test_the_sync_down_never_overwrites_the_streamed_test_output(rig):
+    """Every streamed output of the first lab run came back empty: the sync up carried the just-opened
+    output file to the lab, and the sync down copied that empty copy back over the streamed one."""
+    assert rig.run() == EXIT_READY
+    downs = [e for e in rig.lab.events if e[0] == "down"]
+    assert downs and all(len(e[2]) == 1 for e in downs)
+    names = {e[2][0] for e in downs}
+    assert "evidence/hw-test-output.txt" in names and "tests/1/output.txt" in names
+
+
+def test_an_optional_test_larger_than_the_lab_is_recorded_as_not_run_and_never_leased(rig):
+    rig.lab.chips = 2
+    rig.args.required_chips = (1, 2)
+    rig.args.unattended = True
+    rig.run()
+    acquires = [c[1] for c in rig.lab.adapter.calls if c[0] == "acquire"]
+    assert 4 not in acquires
+    rec = json.loads((rig.run_dir / "stages" / "4" / "tests" / "4" / "test-result.json").read_text())
+    assert rec["returncode"] is None and "the lab node4 has 2 chips" in rec["not_run"]
+    ev = [e["data"] for e in rig.entries() if e["data"].get("what") == "hardware test" and e["data"].get("config") == 4]
+    assert ev and ev[0]["path"] == "stages/4/tests/4/test-result.json"
+
+
+def test_a_required_test_larger_than_the_lab_blocks_with_the_reason(rig):
+    rig.lab.chips = 2
+    rig.args.required_chips = (2, 4)
+    rig.args.unattended = True
+    rig.run()
+    entries = rig.entries()
+    assert 4 not in [c[1] for c in rig.lab.adapter.calls if c[0] == "acquire"]
+    reasons = [str(e["data"].get("reason")) for e in entries if e["data"].get("decision") in ("pause", "blocked")]
+    assert any("requires a 4-chip test" in r and "has 2 chips" in r for r in reasons)
 
 
 def test_the_lab_caches_are_audited_after_each_test(rig):

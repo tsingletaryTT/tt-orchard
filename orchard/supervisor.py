@@ -1413,13 +1413,17 @@ class Supervisor:
         same paths), the test runs on the lab with its output streamed into `out`, and the stage's
         directory comes back, so the finish step, the gates and the ledger hashes read it here."""
         check_string(command, self.run_dir)
+        stage = self.run_dir / "stages" / str(n)
         self.lab.sync_up(self.run_dir)
-        self.lab.mirror_up(self.run_dir / "stages" / str(n))     # no earlier attempt's files in it
+        self.lab.mirror_up(stage)                                 # no earlier attempt's files in it
         self.lab.sync_up(self.paths.hf_home)
+        # The output streams into `out` here; the lab's copy of that file is the empty one the sync up
+        # carried, so the sync down leaves it out.
+        streamed = os.path.relpath(os.path.realpath(out.name), os.path.realpath(stage))
         try:
             return self.lab.run_test(command, cwd=self.run_dir, env=env, timeout=deadline, stdout=out)
         finally:
-            self.lab.sync_down(self.run_dir / "stages" / str(n))
+            self.lab.sync_down(stage, exclude=[] if streamed.startswith("..") else [streamed])
 
     # ---- a list of hardware tests (stage 4 on the weights-only path) ---------------------------
 
@@ -1501,6 +1505,22 @@ class Supervisor:
         """One configuration's test on the lab: the cache checks there, a lease of exactly the chips
         the test needs (a lab's boards may hold one chip each), the test, the sweep, the release."""
         n = spec.number
+        lab_chips = getattr(self.lab, "chips", None)
+        if lab_chips and test.chips > lab_chips:
+            host = self.lab.info.get("host")
+            if self.required_chips and test.chips in self.required_chips:
+                self._block(n, f"this run requires a {test.chips}-chip test, and the lab {host} has "
+                               f"{lab_chips} chips", config=test.chips, lab_chips=lab_chips)
+            # An optional configuration the lab cannot hold: recorded as not run, never leased (a lease
+            # for more chips than the lab has would wait until the stage budget ran out).
+            reason = f"not run: the lab {host} has {lab_chips} chips and this configuration needs {test.chips}"
+            path = write_record(stage_dir, test.chips, {"config": test.chips, "command": test.command(n),
+                                                        "returncode": None, "timed_out": False, "seconds": 0,
+                                                        "chips": [], "not_run": reason})
+            self.ledger.append("evidence", n, what="hardware test", config=test.chips, cache=test.cache,
+                               returncode=None, timed_out=False, not_run=reason,
+                               **evidence_record(self.run_dir, path))
+            return
         free = self.lab.disk_free_gb(self.paths.cache_root)
         if free < TEST_DISK_GB:
             self._block(n, f"the {test.chips}-chip test needs {TEST_DISK_GB} GB free on the lab's cache disk; "

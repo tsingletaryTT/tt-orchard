@@ -249,6 +249,38 @@ def test_mirror_up_refuses_anything_but_a_stage_directory():
             sync.mirror_up(path)
 
 
+def test_sync_down_leaves_out_the_files_it_is_told_to():
+    """The test's output streams into a file on the brain; the lab's copy of that file is the empty one
+    the sync up carried. Without the exclusion the sync down overwrote every streamed output with it."""
+    calls = []
+
+    def run(argv, timeout, **kw):
+        calls.append(argv)
+        from orchard.commands import CommandResult
+        return CommandResult(argv, 0, "", "")
+
+    labclient.Sync(host="node4", ssh=["ssh"], run=run).down("/srv/orchard/runs/r/stages/4",
+                                                             exclude=["tests/1/output.txt"])
+    (argv,) = calls
+    assert argv[argv.index("--exclude") + 1] == "/tests/1/output.txt"      # anchored at the stage directory
+    with pytest.raises(labclient.LabError):
+        labclient.Sync(host="node4", ssh=["ssh"], run=run).down("/x", exclude=["../outside"])
+
+
+def test_the_lab_side_counts_the_labs_chips_from_gozer():
+    from orchard.commands import CommandResult
+
+    class Helper:
+        hello = {"pid": 4242, "hostname": "node4"}
+
+        def run_argv(self, argv, timeout, **kw):
+            text = ("grain: chip   (2 boards, 2 chips)\nboard A  (p150a)\n  chip 0  0000:01:00.0  FREE\n"
+                    "board B  (p150a)\n  chip 1  0000:03:00.0  FREE\n")
+            return CommandResult(list(argv), 0, text, "")
+    side = labclient.LabSide(Helper(), labclient.Sync(host="node4"), host="node4", root="/srv/orchard")
+    assert side.chips == 2 and side.info["chips"] == 2
+
+
 def test_a_failed_sync_is_an_error():
     def run(argv, timeout, **kw):
         from orchard.commands import CommandResult

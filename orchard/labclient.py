@@ -16,6 +16,7 @@ import itertools
 import json
 import os
 import queue
+import re
 import shlex
 import subprocess
 import sys
@@ -237,9 +238,18 @@ class Sync:
         p = str(path).rstrip("/") + ("/" if is_dir else "")
         self._rsync(p, f"{self.host}:{p}")
 
-    def down(self, path, *, is_dir: bool = True) -> None:
+    def down(self, path, *, is_dir: bool = True, exclude=()) -> None:
+        """Copy back from the lab. `exclude` names files under `path` to leave as they are here: a test's
+        output streams into a file on the brain, and the lab's copy of it is the empty one the sync up
+        carried."""
+        extra = []
+        for e in exclude:
+            norm = os.path.normpath(str(e))
+            if os.path.isabs(norm) or norm == ".." or norm.startswith("../"):
+                raise LabError(f"an exclusion must lie under {path}, not {e}")
+            extra += ["--exclude", "/" + norm]
         p = str(path).rstrip("/") + ("/" if is_dir else "")
-        self._rsync(f"{self.host}:{p}", p)
+        self._rsync(f"{self.host}:{p}", p, *extra)
 
     def mirror_up(self, path) -> None:
         """Make the lab's copy of one stage directory (`.../stages/<N>`) exactly the brain's. A failed
@@ -262,8 +272,18 @@ class LabSide:
         self.lab, self.sync = lab, sync
         self.adapter = LabGozerAdapter(lab, gozer=gozer)
         self.test_path = [str(Path(test_python).parent)] if test_python else []
+        self.chips = self._count_chips(lab, gozer)
         self.info = {"host": host, "root": root, "hostname": lab.hello.get("hostname"),
-                     "pid": lab.hello.get("pid"), "python": lab.hello.get("python")}
+                     "pid": lab.hello.get("pid"), "python": lab.hello.get("python"), "chips": self.chips}
+
+    @staticmethod
+    def _count_chips(lab, gozer) -> int | None:
+        """How many chips the lab has, from `gozer status` there; None when it cannot be read."""
+        res = lab.run_argv([gozer, "status"], 60)
+        if res.returncode != 0:
+            return None
+        n = len(re.findall(r"^\s*chip\s+\d+\s", res.stdout, re.M))
+        return n or None
 
     @classmethod
     def connect(cls, *, host, root, gozer="gozer", path=(), python="python3", test_python=None,
@@ -283,8 +303,8 @@ class LabSide:
     def sync_up(self, path):
         self.sync.up(path)
 
-    def sync_down(self, path):
-        self.sync.down(path)
+    def sync_down(self, path, exclude=()):
+        self.sync.down(path, exclude=exclude)
 
     def mirror_up(self, path):
         self.sync.mirror_up(path)
