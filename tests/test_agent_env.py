@@ -142,6 +142,62 @@ def test_writing_the_same_content_again_changes_nothing_and_says_how_to_finish(r
     assert t.write_file("handoff.json", '{"a": 1}').startswith("wrote ")
 
 
+def test_a_short_file_is_read_whole_with_no_footer(run):
+    (run / "stages" / "0" / "small.txt").write_text("hello\n")
+    assert tools(run, limit=100).read_file("small.txt") == "hello\n"
+
+
+def test_a_long_file_is_read_in_pages_that_say_where_the_next_one_starts(run):
+    """On the lab run stage 0's tensor-compare.json was 131 KB. read_file showed its first and last
+    6,000 characters and nothing could reach the middle, so the agent read the same file again and
+    again until the watchdog stopped it (three attempts in a row)."""
+    text = "".join(f"line {i:05d}\n" for i in range(2000))          # 22,000 characters
+    (run / "stages" / "0" / "big.json").write_text(text)
+    t = tools(run, limit=1000)
+    first = t.read_file("big.json")
+    assert first.startswith(text[:1000])
+    assert f"characters 0 to 1000 of {len(text)}" in first and "offset=1000" in first
+    pages, offset = [], 0
+    while True:
+        out = t.read_file("big.json", offset)
+        body, _, footer = out.rpartition("\n[")
+        pages.append(body)
+        if "end of the file" in footer:
+            break
+        offset += 1000
+    assert "".join(pages) == text
+    assert len(pages) == 22
+
+
+def test_read_file_takes_its_offset_from_the_tool_call(run):
+    (run / "stages" / "0" / "big.txt").write_text("a" * 500 + "b" * 500)
+    out = tools(run, limit=100).call("read_file", '{"path": "big.txt", "offset": 500}')
+    assert out.startswith("b" * 100) and "characters 500 to 600 of 1000" in out
+
+
+def test_a_bad_offset_gets_an_answer(run):
+    (run / "stages" / "0" / "big.txt").write_text("x" * 50)
+    t = tools(run, limit=10)
+    assert t.read_file("big.txt", 50).startswith("error: offset 50 is at or past the end")
+    for bad in (-1, "3", 1.5, True):
+        assert t.read_file("big.txt", bad).startswith("error: offset must be"), bad
+
+
+def test_a_huge_file_points_to_the_shell(run, monkeypatch):
+    from orchard import agent
+    monkeypatch.setattr(agent, "READ_FILE_MAX_BYTES", 1000)
+    (run / "stages" / "0" / "huge.txt").write_text("x" * 2000)
+    out = tools(run, limit=100).read_file("huge.txt")
+    assert out.startswith("error: huge.txt is 2000 bytes") and "grep" in out
+
+
+def test_the_read_file_schema_offers_an_offset():
+    from orchard.agent import TOOL_SCHEMAS
+    rf = next(t["function"] for t in TOOL_SCHEMAS if t["function"]["name"] == "read_file")
+    assert rf["parameters"]["properties"]["offset"]["type"] == "integer"
+    assert rf["parameters"]["required"] == ["path"] and "offset" in rf["description"]
+
+
 def test_bad_tool_calls_get_an_answer_and_raise_nothing(run):
     t = tools(run)
     assert t.call("shell", "not json").startswith("error:")

@@ -95,11 +95,11 @@ def test_a_missing_or_wrong_path_argument_is_an_error(tools, args):
     assert read(t, **args).startswith("error:")
 
 
-def test_a_long_file_is_clipped_to_the_limit_and_says_so(tools):
+def test_a_long_file_comes_back_one_bounded_page_that_says_where_the_next_starts(tools):
     t, run, stage = tools
     (run / "big.txt").write_text("x" * 5000)
     out = read(t, path="big.txt")
-    assert len(out) < 5000 and "characters cut" in out and out.startswith("x") and out.endswith("x")
+    assert len(out) < 5000 and out.startswith("x") and "of 5000" in out and "offset=" in out
 
 
 def test_a_file_that_is_not_utf8_is_read_with_replacement_characters(tools):

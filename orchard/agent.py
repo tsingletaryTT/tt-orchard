@@ -150,6 +150,9 @@ def _kill_session(proc) -> None:
     proc.wait()
 
 
+READ_FILE_MAX_BYTES = 16 * 1024 * 1024    # choice: read_file loads a file whole to page through it
+
+
 def clip(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
@@ -180,9 +183,13 @@ TOOL_SCHEMAS = [
     {"type": "function", "function": {
         "name": "read_file",
         "description": ("Read a text file inside the run directory (read only). The path is relative to "
-                        "the run directory, or to your stage directory when it is not found there. Long "
-                        "files are cut in the middle."),
-        "parameters": {"type": "object", "properties": {"path": {"type": "string"}},
+                        "the run directory, or to your stage directory when it is not found there. A long "
+                        "file comes back one page at a time: the page ends with the offset to pass to "
+                        "read the next one."),
+        "parameters": {"type": "object", "properties": {"path": {"type": "string"},
+                                                        "offset": {"type": "integer",
+                                                                   "description": "first character to read "
+                                                                                  "(default 0)"}},
                        "required": ["path"]}}},
     {"type": "function", "function": {
         "name": "write_file",
@@ -209,7 +216,7 @@ class Tools:
         if name == "shell":
             return self.shell(args.get("command"))
         if name == "read_file":
-            return self.read_file(args.get("path"))
+            return self.read_file(args.get("path"), args.get("offset", 0))
         if name == "write_file":
             return self.write_file(args.get("path"), args.get("content"))
         return f"error: there is no tool named {name!r}; the tools are shell, read_file and write_file"
@@ -244,12 +251,18 @@ class Tools:
             return None
         return Path(p)
 
-    def read_file(self, path) -> str:
+    def read_file(self, path, offset=0) -> str:
         """Read a text file that lies inside the run directory. A path is tried against the run directory
         first and the stage directory second, because models write both. Links are resolved before the
-        check, so a link out of the run directory is refused. Nothing is written."""
+        check, so a link out of the run directory is refused. Nothing is written.
+
+        A file longer than the output limit comes back one page from `offset`, with a footer that says
+        where the page sits in the file and the offset of the next page. (It used to be cut in the
+        middle, and an agent that needed the middle read the same view again and again.)"""
         if not isinstance(path, str) or not path.strip():
             return "error: path must be a non-empty string"
+        if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+            return "error: offset must be a whole number of characters, 0 or more"
         root = os.path.realpath(self.run_dir)
         bases = (root, os.path.realpath(self.stage_dir))
         found = None
@@ -265,9 +278,23 @@ class Tools:
                     f"{self.stage_dir}")
         if os.path.isdir(found):
             return f"error: {path!r} is a directory; use shell with ls to list it"
+        size = os.path.getsize(found)
+        if size > READ_FILE_MAX_BYTES:
+            return (f"error: {path} is {size} bytes, too large to read page by page; use shell to read "
+                    "parts of it (grep, head -c, tail -c, jq)")
         with open(found, "rb") as f:
-            raw = f.read(self.limit * 4 + 4)               # bounded: a huge file is cut, not loaded
-        return clip(raw.decode("utf-8", errors="replace"), self.limit)
+            text = f.read().decode("utf-8", errors="replace")
+        if offset == 0 and len(text) <= self.limit:
+            return text
+        if offset >= len(text):
+            return f"error: offset {offset} is at or past the end of the file ({len(text)} characters)"
+        end = min(offset + self.limit, len(text))
+        if end == len(text):
+            footer = f"[characters {offset} to {end} of {len(text)}: the end of the file]"
+        else:
+            footer = (f"[characters {offset} to {end} of {len(text)}; read on with read_file offset={end}, "
+                      "or use shell (grep, jq) to find one field]")
+        return f"{text[offset:end]}\n{footer}"
 
     def write_file(self, path, content) -> str:
         if not isinstance(path, str) or not path.strip():
