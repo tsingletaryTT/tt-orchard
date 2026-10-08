@@ -135,3 +135,46 @@ def test_setup_never_takes_resets_or_releases_a_lease(box):
     for text in planned + asked:
         for word in (" acquire", " reset", " release", " reconcile", "sudo "):
             assert word not in text, text
+
+
+def _bad_venv(bundle: Path, orig: Path) -> None:
+    """A bundle whose venv still names the directory tt-model installed it in (test_bundle_relink.py)."""
+    real = bundle / ".python" / "cpython-3.12.14-linux-x86_64-gnu" / "bin"
+    real.mkdir(parents=True)
+    (real / "python3.12").write_text("")
+    (bundle / ".python" / "cpython-3.12-linux-x86_64-gnu").symlink_to(orig / ".python" / "cpython-3.12.14-linux-x86_64-gnu")
+    (bundle / "venv" / "bin").mkdir(parents=True)
+    (bundle / "venv" / "bin" / "python").symlink_to(orig / ".python" / "cpython-3.12-linux-x86_64-gnu" / "bin" / "python3.12")
+    (bundle / "venv" / "pyvenv.cfg").write_text(f"home = {orig}/.python/cpython-3.12-linux-x86_64-gnu/bin\n")
+
+
+def test_a_bundle_interpreter_outside_the_bundle_is_relinked_here_first(box, tmp_path):
+    import subprocess
+    root, _ = box
+    b = root / "tt-model/models/episod/b1"
+    _bad_venv(b, tmp_path / "gone")
+    run = Fake([("gozer status", (0, GOZER, "")), ("test -f", (0, "", ""))])
+    s = by_name(plan(box, run))["bundle interpreters"]
+    assert s.status == TODO and "1 here" in s.detail
+    argv = s.actions[0].args[0]
+    assert "-c" in argv and argv[-1] == str(b)
+    assert subprocess.run(argv).returncode == 0                  # the planned command fixes it
+    s = by_name(plan(box, Fake([("gozer status", (0, GOZER, "")), ("test -f", (0, "", ""))])))["bundle interpreters"]
+    assert s.status == OK
+
+
+def test_a_bundle_interpreter_broken_on_the_lab_is_relinked_there(box):
+    root, _ = box
+    b = root / "tt-model/models/episod/b1"
+    run = Fake([("--check", (1, f"{b}: venv/bin/python links outside the bundle, to /home/x\n", "")),
+                ("gozer status", (0, GOZER, "")), ("test -f", (0, "", ""))])
+    s = by_name(plan(box, run))["bundle interpreters"]
+    assert s.status == TODO and "1 on node4" in s.detail
+    remote_cmd = s.actions[0].args[0]
+    assert remote_cmd[-2] == "node4" and remote_cmd[-1].endswith(f"' {b}")     # the fix, not the --check
+
+
+def test_bundles_still_to_be_copied_are_not_checked_on_the_lab(box):
+    run = Fake([("test -f", (1, "", "")), ("gozer status", (0, GOZER, ""))])
+    s = by_name(plan(box, run))["bundle interpreters"]
+    assert s.status == OK and not [c for c in run.calls if "--check" in " ".join(c)]

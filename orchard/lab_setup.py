@@ -21,6 +21,7 @@ import shlex
 import sys
 from pathlib import Path
 
+from orchard import bundle_relink
 from orchard.labclient import SSH
 from orchard.setup_machine import (FAIL, OK, TODO, WARN, Action, Step, _run, apply, render_steps)
 
@@ -115,6 +116,7 @@ def plan(lab, *, run, reference_python, local_fw, models=(), model_sources=(), t
         rc, _, _ = run(remote(lab, f"test -f {q(str(b / 'tt_kernel_manifest.json'))}", ssh), 30)
         if rc != 0:
             missing.append(b)
+    steps.append(_interpreters_step(lab, bundles, missing, run=run, ssh=ssh))
     actions = []
     for b in missing:
         argv = ["rsync", "-a", "--mkpath"]
@@ -170,6 +172,36 @@ def plan(lab, *, run, reference_python, local_fw, models=(), model_sources=(), t
                           f"{len(busy)} of {len(states)} chips are not free ({', '.join(sorted(set(busy)))}); setup "
                           "never clears a lease"))
     return steps
+
+
+def _interpreters_step(lab, bundles, missing, *, run, ssh=SSH) -> Step:
+    """A bundle copied under the lab root still runs the interpreter of the directory tt-model installed it
+    in (orchard/bundle_relink.py). Fixed on the brain first, so a bundle copied to the lab afterwards is
+    already right; bundles already on the lab are checked and fixed there."""
+    q = shlex.quote
+    src = Path(bundle_relink.__file__).read_text()
+    here = [b for b in bundles if bundle_relink.problems(b)]
+    present = [b for b in bundles if b not in missing]
+    there: list = []
+    unknown = False
+    if present:
+        rc, out, _ = run(remote(lab, f"python3 -c {q(src)} --check " + " ".join(q(str(b)) for b in present), ssh), 60)
+        if rc == 1:
+            there = [b for b in present if f"{b}: " in out]
+        elif rc != 0:
+            unknown = True
+    actions = []
+    if here:
+        actions.append(Action("run", ([sys.executable, "-c", src, *map(str, here)],)))
+    if there:
+        actions.append(Action("run", (remote(lab, f"python3 -c {q(src)} " + " ".join(q(str(b)) for b in there), ssh),)))
+    if unknown:
+        return Step("bundle interpreters", WARN, "could not check the bundles' interpreters on the lab", actions)
+    if not actions:
+        return Step("bundle interpreters", OK, "every bundle's venv runs the interpreter inside the bundle")
+    where = [f"{len(here)} here"] * bool(here) + [f"{len(there)} on {lab.host}"] * bool(there)
+    return Step("bundle interpreters", TODO, "relinks the venv interpreter inside the bundle for " + " and ".join(where)
+                + " (it still names the directory tt-model installed it in)", actions)
 
 
 def local_firmware() -> str:
