@@ -287,3 +287,15 @@ def test_both_swap_skills_start_from_the_drafted_config_and_expect_the_architect
         flat = " ".join((SKILLS / name).read_text().split())
         assert "The supervisor has usually written `swap_config.json` already" in flat, name
         assert "That difference is expected on this path" in flat and "Do not investigate it." in flat, name
+
+
+def test_the_prepare_steps_start_from_the_drafted_config_and_fact_finding_is_only_a_fallback():
+    # With the draft only mentioned in a note, Coder-Next followed step 1 ("Find four facts") and
+    # never opened the config the supervisor had written.
+    for name in ("weights-swap-check.md", "weights-sidecar-check.md"):
+        text = (SKILLS / name).read_text()
+        steps = text.split("## Prepare phase: the steps", 1)[1].split("\n## ", 1)[0]
+        assert steps.lstrip().startswith("1. Read `stages/2/swap_config.json`"), name
+        assert "tt-model list`, then read" not in steps and "Find four facts" not in steps, name
+        fallback = text.split("## When there is no swap_config.json", 1)[1].split("\n## ", 1)[0]
+        assert "Find four facts" in fallback and "weights-swap-templates/prepare_swap.py" in fallback, name

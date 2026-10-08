@@ -53,7 +53,8 @@ write a script.
   bundle, the snapshots or a port yourself: skip finding the facts and writing the swap config, and
   do not copy the two swap templates again. Change a value only when `prepare_swap.py` exits 2 and
   its message names that value.
-- If `swap_config.json` does not exist, write it FIRST, as soon as you know the facts below.
+- If `swap_config.json` does not exist, write it FIRST, as soon as you know the facts (see
+  "When there is no swap_config.json").
 - The nearest model is a vision-language model: its bundle's `vllm_metadata.json` names
   `Qwen3_5ForConditionalGeneration`, and the new model's `config.json` may name
   `Qwen3_5ForCausalLM`. That difference is expected on this path and needs nothing from you:
@@ -91,6 +92,46 @@ Four facts decide whether a swap works. Each was found by failing first.
 
 ## Prepare phase: the steps
 
+1. Read `stages/2/swap_config.json`. The supervisor wrote it before you started, from facts the run
+   already holds, and copied `prepare_swap.py` and `serve_and_compare.py` next to it. Use it as it
+   is: do not look for the bundle, the snapshots or a port, and do not run `tt-model list`. Only if
+   the file does not exist, do the steps under "When there is no swap_config.json" below first.
+2. Write `parity_config.json` in your stage directory. Every value comes from `stages/0/delta.json` or from
+   `swap_config.json`:
+
+       {"run_dir": "<the run directory>",
+        "bundle_dir": "<the same bundle directory as in swap_config.json>",
+        "model_snapshot": "<new model snapshot>",
+        "head_file": "<the sidecar weights file name in delta.json sidecars, for example joint_head.safetensors>",
+        "head_config": "<the sidecar's config file name in the snapshot, for example joint_head_config.json>",
+        "code_file": "<the code file name in delta.json code_files, for example joint_schema_model.py>",
+        "code_sha256": "<that code file's sha256 from delta.json code_files>",
+        "tt_cache": "<a second new directory, next to the first, whose name contains the model's slug>",
+        "mesh_shape": [1, 2]}
+
+   Copy `code_sha256` from `delta.json` exactly. The parity script refuses to run when the code file's hash
+   differs from it, because the sidecar code is third-party code and only the file stage 0 recorded may be
+   used. The script hashes the head file itself, and the gate compares that hash with the one stage 0
+   recorded. Do not open or run the code file yourself.
+3. Copy the parity templates into your stage directory:
+
+       cp {{ORCHARD_DIR}}/orchard/skills/sidecar-parity-templates/prepare_parity.py {{ORCHARD_DIR}}/orchard/skills/sidecar-parity-templates/hidden_parity.py {{ORCHARD_DIR}}/orchard/skills/sidecar-parity-templates/run_sidecar_checks.py stages/2/
+
+4. Run `python3 stages/2/prepare_swap.py`, then `python3 stages/2/prepare_parity.py`. Each prints a summary.
+   Exit 2 means a fact in the config does not fit; its message names the key or the edit. Fix that fact and
+   run it again.
+5. Check that `stages/2/model-dir`, `stages/2/run.sh`, `stages/2/parity-model-dir` and `stages/2/parity-run.sh`
+   exist (`ls -l`). The two scripts build different directories on purpose; never copy files between them.
+6. Write `hw_test.json`: `{"command": "python3 stages/2/run_sidecar_checks.py", "deadline_s": 7200}`.
+7. Write `handoff.json` and reply with a short summary.
+
+Do not run `serve_and_compare.py`, `hidden_parity.py` or `run_sidecar_checks.py` yourself. The supervisor runs
+the last one on a leased board. It runs the swap check and then the parity check, one after the other.
+
+## When there is no swap_config.json
+
+Only then. The supervisor writes it whenever it can.
+
 1. Find four facts with a few commands:
    - `bundle_dir`: the installed `tt-model` bundle that serves the nearest model. Read
      `delta.json` for `nearest_model` and its `architecture`. Run `tt-model list`, then read
@@ -123,38 +164,9 @@ Four facts decide whether a swap works. Each was found by failing first.
    `{{OPERATOR_HOME}}/.cache/qwen36-src-build/...`. `hf_home` is the operator's Hugging Face cache
    on this machine. Your shell's HOME points somewhere else, so write the path out as shown. It
    holds the drafter the run script names in `DFLASH_WEIGHTS`.
-3. Write `parity_config.json` in your stage directory. Every value comes from `stages/0/delta.json` or from
-   the facts above:
-
-       {"run_dir": "<the run directory>",
-        "bundle_dir": "<the same bundle directory as in swap_config.json>",
-        "model_snapshot": "<new model snapshot>",
-        "head_file": "<the sidecar weights file name in delta.json sidecars, for example joint_head.safetensors>",
-        "head_config": "<the sidecar's config file name in the snapshot, for example joint_head_config.json>",
-        "code_file": "<the code file name in delta.json code_files, for example joint_schema_model.py>",
-        "code_sha256": "<that code file's sha256 from delta.json code_files>",
-        "tt_cache": "<a second new directory, next to the first, whose name contains the model's slug>",
-        "mesh_shape": [1, 2]}
-
-   Copy `code_sha256` from `delta.json` exactly. The parity script refuses to run when the code file's hash
-   differs from it, because the sidecar code is third-party code and only the file stage 0 recorded may be
-   used. The script hashes the head file itself, and the gate compares that hash with the one stage 0
-   recorded. Do not open or run the code file yourself.
-4. Copy the templates into your stage directory:
+3. Copy the two swap templates into your stage directory:
 
        cp {{ORCHARD_DIR}}/orchard/skills/weights-swap-templates/prepare_swap.py {{ORCHARD_DIR}}/orchard/skills/weights-swap-templates/serve_and_compare.py stages/2/
-       cp {{ORCHARD_DIR}}/orchard/skills/sidecar-parity-templates/prepare_parity.py {{ORCHARD_DIR}}/orchard/skills/sidecar-parity-templates/hidden_parity.py {{ORCHARD_DIR}}/orchard/skills/sidecar-parity-templates/run_sidecar_checks.py stages/2/
-
-5. Run `python3 stages/2/prepare_swap.py`, then `python3 stages/2/prepare_parity.py`. Each prints a summary.
-   Exit 2 means a fact in the config does not fit; its message names the key or the edit. Fix that fact and
-   run it again.
-6. Check that `stages/2/model-dir`, `stages/2/run.sh`, `stages/2/parity-model-dir` and `stages/2/parity-run.sh`
-   exist (`ls -l`). The two scripts build different directories on purpose; never copy files between them.
-7. Write `hw_test.json`: `{"command": "python3 stages/2/run_sidecar_checks.py", "deadline_s": 7200}`.
-8. Write `handoff.json` and reply with a short summary.
-
-Do not run `serve_and_compare.py`, `hidden_parity.py` or `run_sidecar_checks.py` yourself. The supervisor runs
-the last one on a leased board. It runs the swap check and then the parity check, one after the other.
 
 ## What serve_and_compare.py measures
 
