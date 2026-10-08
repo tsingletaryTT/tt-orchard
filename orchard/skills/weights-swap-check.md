@@ -36,7 +36,17 @@ or TODO.
 Two tested scripts do all of the work. You copy them and give them one config file. You do not
 write a script.
 
-- Write `swap_config.json` FIRST, as soon as you know the facts below.
+- The supervisor has usually written `swap_config.json` already, and copied `prepare_swap.py` and
+  `serve_and_compare.py` into your stage directory: every fact in it is one the run already holds.
+  If `stages/2/swap_config.json` exists, read it once and use it as it is. Do not look for the
+  bundle, the snapshots or a port yourself: skip finding the facts and writing the swap config, and
+  do not copy the two swap templates again. Change a value only when `prepare_swap.py` exits 2 and
+  its message names that value.
+- If `swap_config.json` does not exist, write it FIRST, as soon as you know the facts below.
+- The nearest model is a vision-language model: its bundle's `vllm_metadata.json` names
+  `Qwen3_5ForConditionalGeneration`, and the new model's `config.json` may name
+  `Qwen3_5ForCausalLM`. That difference is expected on this path and needs nothing from you:
+  `prepare_swap.py` copies the nearest model's config files (fact 1 below). Do not investigate it.
 - Write each file as soon as you know its content. Do not wait until the end.
 - Do not investigate anything this skill does not list. On an earlier run the model spent 60 turns
   grepping vLLM source for an unrelated timeout and wrote nothing.

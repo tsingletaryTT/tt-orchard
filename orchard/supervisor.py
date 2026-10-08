@@ -142,6 +142,7 @@ from orchard.package import finish as package_finish
 from orchard.paths import (PATHS_RECORDED, RunPaths, UnknownPlaceholder, absolute_path,
                            recorded_paths)
 from orchard.runner import Denied, check_string
+from orchard import swap_draft
 from orchard.server import ServerControl, ServerError, ServerSpec, StopCheck
 from orchard.stages import (PACKAGE_OPTIONS_SET, GateResult, TierUnavailable, attempt_started_ts,
                             budget_cap, check_disk, coder_state, delta_class, delta_path, evidence_record,
@@ -469,6 +470,9 @@ def coder_tier(cfg, port: int) -> str:
 
 
 # ---- the supervisor -----------------------------------------------------------------------------
+
+SWAP_TEMPLATES = ("prepare_swap.py", "serve_and_compare.py")      # copied with a drafted swap_config.json
+
 
 class Supervisor:
     def __init__(self, *, run_dir, ledger, cfg, model_id: str, adapter, coder, coder_chips: int,
@@ -976,6 +980,7 @@ class Supervisor:
                 if ended:
                     return ended
             elif not (resumed and (stage_dir / "test-result.json").is_file()):
+                self._draft(spec, stage_dir)
                 out, prep = self._step(spec, "prepare", stage_dir, escalated, resumed)
                 out = self._wrap_up(spec, stage_dir, prep, out)
                 if out.status != "done":
@@ -1194,6 +1199,30 @@ class Supervisor:
         name = deliverable(spec, phase)
         step.deliverable_stamp = file_stamp(stage_dir / name) if name else None
         return step.run(system, user), step
+
+    def _draft(self, spec, stage_dir: Path) -> None:
+        """Write the config a stage's skill starts from, when the run already holds every fact in it
+        (orchard/swap_draft.py), and copy the templates that read it. A config already in the stage
+        directory (a resumed stage) is kept. When a fact is missing or ambiguous nothing is written,
+        the ledger says why, and the agent finds the facts as its skill describes."""
+        if spec.draft != "swap_config" or (stage_dir / "swap_config.json").exists():
+            return
+        cfg, problems = swap_draft.draft(run_dir=self.run_dir, tt_model_root=self.paths.tt_model_root,
+                                         cache_root=self.paths.cache_root, hf_home=self.paths.hf_home,
+                                         inputs=self.inputs, chips=spec.boards * CHIPS_PER_BOARD)
+        if cfg is None:
+            self.ledger.append("decision", spec.number, decision="swap config not drafted", problems=problems)
+            return
+        target = stage_dir / "swap_config.json"
+        target.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
+        templates = Path(self.paths.orchard_dir) / "orchard" / "skills" / "weights-swap-templates"
+        copied = []
+        for name in SWAP_TEMPLATES:
+            shutil.copy2(templates / name, stage_dir / name)
+            copied.append(name)
+        self.ledger.append("decision", spec.number, decision="swap config drafted",
+                           config=evidence_record(self.run_dir, target), bundle_dir=cfg["bundle_dir"],
+                           copied=copied)
 
     # ---- the hardware test ----------------------------------------------------------------------
 

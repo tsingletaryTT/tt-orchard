@@ -61,7 +61,9 @@ def test_the_swap_skill_copies_the_templates_that_exist_in_this_repo():
         assert main + name in text
         assert (SKILLS / "weights-swap-templates" / name).is_file()
     assert '"command": "python3 stages/2/serve_and_compare.py", "deadline_s": 3600' in text
-    assert "swap_config.json` FIRST" in text
+    flat = " ".join(text.split())
+    assert "If `stages/2/swap_config.json` exists, read it once and use it as it is" in flat
+    assert "does not exist, write it FIRST" in flat
     assert "`serves` false" in text and "Do not investigate firmware or cache directories" in text
 
 
@@ -276,3 +278,12 @@ def test_the_reference_gate_skill_tells_the_agent_to_use_the_reference_python_in
                     .read_text().split())
     assert "input named `reference_python`" in text and "use that path exactly" in text
     assert "Never install or upgrade a package" in text
+
+
+def test_both_swap_skills_start_from_the_drafted_config_and_expect_the_architecture_difference():
+    # orchard/swap_draft.py writes the config; on the lab run the agent kept investigating the
+    # ConditionalGeneration / CausalLM difference instead of using it.
+    for name in ("weights-swap-check.md", "weights-sidecar-check.md"):
+        flat = " ".join((SKILLS / name).read_text().split())
+        assert "The supervisor has usually written `swap_config.json` already" in flat, name
+        assert "That difference is expected on this path" in flat and "Do not investigate it." in flat, name

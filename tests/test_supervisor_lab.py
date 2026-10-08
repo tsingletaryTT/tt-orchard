@@ -180,6 +180,41 @@ def test_the_run_records_its_lab_and_closes_it_at_the_end(rig):
     assert rig.lab.closed
 
 
+def _installed_for_draft(rig):
+    """The facts a swap config is drafted from: both snapshots and a 2-chip v6 bundle of the nearest model."""
+    for key in ("base", "model"):
+        Path(next(i for i in rig.args.input if i.startswith(key + "=")).split("=", 1)[1]).mkdir(parents=True)
+    b = rig.root / "tt-model" / "models" / "episod" / "qwen3.8-27b-dflash2-p300"
+    b.mkdir(parents=True)
+    (b / "tt_kernel_manifest.json").write_text(json.dumps(
+        {"schema_version": "6", "device_count": 2, "weights": {"repo_id": "Qwen/Qwen3.8-27B"}}))
+    (b / "run.sh").write_text("#!/bin/bash\n")
+    return b
+
+
+def test_stage_2_starts_from_a_drafted_swap_config_and_the_templates(rig):
+    """On the lab run the agent spent whole attempts finding the bundle and the snapshots, and was
+    stopped by the watchdog before it wrote swap_config.json. The supervisor now writes it first."""
+    b = _installed_for_draft(rig)
+    assert rig.run() == EXIT_READY
+    entries = rig.entries()
+    drafted = [i for i, e in enumerate(entries) if e["data"].get("decision") == "swap config drafted"]
+    assert drafted and entries[drafted[0]]["stage"] == 2
+    d = entries[drafted[0]]["data"]
+    assert d["bundle_dir"] == str(b) and d["copied"] == ["prepare_swap.py", "serve_and_compare.py"]
+    assert d["config"]["path"] == "stages/2/swap_config.json"
+    prepare = next(i for i, e in enumerate(entries) if e["stage"] == 2 and e["data"].get("phase") == "prepare")
+    assert drafted[0] < prepare                                 # before the agent's first turn
+    assert (rig.run_dir / "stages" / "2" / "prepare_swap.py").is_file()
+
+
+def test_without_the_facts_nothing_is_drafted_and_the_ledger_says_why(rig):
+    assert rig.run() == EXIT_READY
+    d = next(e["data"] for e in rig.entries() if e["data"].get("decision") == "swap config not drafted")
+    assert any("does not exist" in p or "no installed v6 bundle" in p for p in d["problems"])
+    assert not (rig.run_dir / "stages" / "2" / "prepare_swap.py").exists()
+
+
 def test_a_resume_with_a_different_lab_is_refused(rig):
     rig.args.lab = "node9"
     from orchard.ledger import Ledger
@@ -261,3 +296,21 @@ def test_a_lab_that_cannot_be_reached_is_a_refusal_not_a_crash(rig, monkeypatch)
     with Ledger(rig.run_dir / "ledger.jsonl") as led, pytest.raises(ValueError, match="could not be reached"):
         build(rig.args, led, adapter=rig.adapter_cls(rig.m), coder=rig.coder_cls(rig.m), versions={},
               home=rig.home, containers=rig.containers)
+
+
+def test_a_swap_config_already_in_the_stage_directory_is_kept(rig):
+    """A resumed stage keeps the config it had, including one the agent corrected."""
+    from orchard.ledger import Ledger
+    from orchard.stages import WEIGHTS_ONLY_STAGE_2
+    _installed_for_draft(rig)
+    rig.run_dir.mkdir(parents=True, exist_ok=True)
+    stage = rig.run_dir / "stages" / "2"
+    stage.mkdir(parents=True)
+    (stage / "swap_config.json").write_text("{\"port\": 9999}")
+    with Ledger(rig.run_dir / "ledger.jsonl") as led:
+        sup = build(rig.args, led, adapter=rig.adapter_cls(rig.m, owner_pid=100), coder=rig.coder_cls(rig.m),
+                    versions={}, clock=rig.clock, sleep=rig.sleep, disk_usage=lambda p: rig.usage(p),
+                    home=rig.home, containers=rig.containers, lab=rig.lab)
+        sup._draft(WEIGHTS_ONLY_STAGE_2, stage)
+        assert not [e for e in led.read() if "swap config" in str(e["data"].get("decision"))]
+    assert (stage / "swap_config.json").read_text() == "{\"port\": 9999}"
