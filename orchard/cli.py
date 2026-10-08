@@ -281,12 +281,19 @@ def _ui(args, env, home, out) -> int:
               f"then open http://localhost:{args.port}/  (or start it with --lan)", file=out)
     print("Ctrl-C stops the page. It never stops a run.", file=out)
     out.flush()
+    import signal
+
+    def stop(signum, frame):
+        raise KeyboardInterrupt
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, stop)                    # tmux kill-session sends SIGHUP: clean up as for Ctrl-C
     try:
         server.serve_forever(poll_interval=0.5)
     except KeyboardInterrupt:
         pass
     finally:
         server.stopping.set()                     # open live feeds end; serve_forever has already returned
+        app.toplike_close_all()
         server.server_close()
     return EXIT_OK
 

@@ -14,7 +14,7 @@ const S = {
   meta: null, runs: [], launches: [], machine: null, selected: null, detail: null,
   tab: "feed", source: null, feedSeen: new Set(), feedFilter: "", follow: true,
   ledgerAfter: 0, ledgerRows: [], ledgerFilter: "", ledgerFirst: {}, file: null, lastOk: 0, startingRun: null,
-  scene: null, view: "orchard", hw: null,
+  scene: null, view: "orchard", hw: null, health: null, leases: null,
 };
 
 // ---- small helpers ------------------------------------------------------------------------------
@@ -154,7 +154,8 @@ function renderMachine() {
       h("div", { class: "chips" }, b.chips.map((c) => h("div", {
         class: "chip", dataset: { tone: CHIP_TONE[c.state] || "alarm" },
         title: [c.bdf, c.owner, c.note].filter(Boolean).join(" · "),
-      }, h("strong", {}, `chip ${c.index} · ${c.state}`), h("span", { class: "owner" }, c.owner || c.bdf))))));
+      }, h("strong", {}, `chip ${c.index} · ${c.state}`), h("span", { class: "owner" }, c.owner || c.bdf),
+        h("span", { class: "chip-reading", dataset: { reading: c.bdf } }))))));
   }
   // gozer marks a chip HELD-FOREIGN when a process outside the lease owner's tree has it open. A tt-model
   // container serving under the supervisor's lease is such a process (CLAUDE.md, 2026-10-02), so say so.
@@ -170,6 +171,46 @@ function renderMachine() {
     h("span", {}, `${m.disk_free_gb} GB free`)));
   const free = all.filter((c) => c.state === "FREE").length;
   $("machine-note").textContent = all.length ? `${free} of ${all.length} chips free` : "";
+  renderReadings();
+}
+
+// ---- machine health: the scene's weather and how hard the farmer works --------------------------------
+
+const WEATHER_WORD = { clear: "☀ clear skies", heatwave: "🔥 heatwave", overcast: "☁ overcast", storm: "⛈ storm", unknown: "· weather unknown" };
+
+function renderReadings() {
+  const hl = S.health;
+  if (!hl) return;
+  for (const el of document.querySelectorAll("[data-reading]")) {
+    const c = hl.chips[el.dataset.reading];
+    el.textContent = c ? [c.temp_c !== null ? `${Math.round(c.temp_c)} °C` : null, c.power_w !== null ? `${Math.round(c.power_w)} W` : null,
+      `${Math.round(c.utilization * 100)}% busy`].filter(Boolean).join(" · ") : "";
+  }
+}
+
+function runUtilization() {
+  // While a run is going, the farmer works as hard as the chips its supervisor holds; otherwise the busiest chip.
+  const hl = S.health;
+  if (!hl) return 0;
+  const chips = Object.entries(hl.chips);
+  const held = chips.filter(([bdf]) => (hl.leases[bdf] || "").includes("orchard:"));
+  const pool = S.detail && ["running", "paused"].includes(S.detail.state) && held.length ? held : chips;
+  return pool.length ? Math.max(...pool.map(([, c]) => c.utilization)) : 0;
+}
+
+async function pollHealth() {
+  try {
+    const hl = await api("/api/health");
+    const changed = S.leases && JSON.stringify(S.leases) !== JSON.stringify(hl.leases);
+    S.health = hl;
+    S.leases = hl.leases;
+    if (S.scene) {
+      S.scene.setMachine({ weather: hl.weather.kind, util: runUtilization() });
+      if (changed) S.scene.event("lease");          // chips changing hands: off to the shed for tools
+    }
+    renderReadings();
+    if (S.detail) renderSceneCaption(S.detail);
+  } catch { /* the runs poll reports a lost connection */ }
 }
 
 function renderLaunches() {
@@ -371,11 +412,20 @@ const WEATHER = {
 
 function renderScene(d) {
   if (S.scene) S.scene.setRun({ state: d.state, stages: d.stages, current: d.stage ? d.stage.current : null });
+  renderSceneCaption(d);
+}
+
+function renderSceneCaption(d) {
   const passed = d.stages.filter((r) => r.status === "pass").length;
   const started = S.ledgerFirst[d.name];
   const day = started ? Math.max(1, Math.floor((Date.now() - started) / 86400000) + 1) : 1;
   const cap = clear($("scene-caption"));
-  cap.append(h("span", {}, `Day ${day} of this run`), h("span", {}, WEATHER[d.state] || d.state),
+  const hl = S.health, u = runUtilization();
+  const sky = hl ? WEATHER_WORD[hl.weather.kind] || hl.weather.kind : WEATHER_WORD.unknown;
+  cap.append(h("span", {}, `Day ${day}`),
+    h("span", { title: hl ? hl.weather.why : "" }, sky),
+    h("span", {}, u > 0.08 ? `⚒ chips ${Math.round(u * 100)}% busy` : "💤 chips resting"),
+    h("span", {}, `${(WEATHER[d.state] || d.state).replace(/^\S+ /, "")}`),
     h("span", {}, `🍎 ${passed} of 9 plots fruiting`));
 }
 
@@ -478,7 +528,10 @@ function addFeedLine(e) {
   const ph = feed.querySelector(".placeholder");
   if (ph) ph.remove();
   ensureActorOption(e.actor);
-  if (S.scene) S.scene.event(e.actor);
+  if (S.scene) {
+    S.scene.event(e.actor);
+    if (/\blease\b|\bpark|\brestore|hardware released/i.test(e.text)) S.scene.event("lease");
+  }
   const li = h("li", { dataset: { actor: e.actor, bad: String(e.bad) } },
     h("span", { class: "t" }, clock(e.ts)),
     h("span", { class: "who", dataset: { role: e.role } }, h("span", { "aria-hidden": "true" }, (e.icon || "") + " "), e.actor),
@@ -695,6 +748,19 @@ function wire() {
   $("new-run-btn").addEventListener("click", openNewRun);
   $("view-orchard-btn").addEventListener("click", () => setView("orchard"));
   $("view-hardware-btn").addEventListener("click", () => setView("hardware"));
+  $("hw-zoom-in").addEventListener("click", () => zoomToplike(+1));
+  $("hw-zoom-out").addEventListener("click", () => zoomToplike(-1));
+  $("hw-wide").addEventListener("click", () => {
+    const on = !document.body.classList.contains("wide");
+    document.body.classList.toggle("wide", on);
+    $("hw-wide").setAttribute("aria-pressed", String(on));
+  });
+  $("hw-full").addEventListener("click", () => {
+    const tv = document.querySelector(".tv");
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+    else if (tv.requestFullscreen) tv.requestFullscreen().catch(() => toast("Full screen is not available here.", "bad"));
+  });
+  document.addEventListener("fullscreenchange", () => setTimeout(refitToplike, 100));
   $("nr-cancel").addEventListener("click", () => $("new-run").close());
   $("new-run-form").addEventListener("submit", (ev) => { ev.preventDefault(); runChecks(); });
   $("nr-start").addEventListener("click", startBringup);
@@ -745,6 +811,8 @@ function setView(view, { push = true } = {}) {
     startToplike(S.hwMode || "normal");
   } else {
     stopToplike();
+    document.body.classList.remove("wide");
+    $("hw-wide").setAttribute("aria-pressed", "false");
     if (push) history.replaceState(null, "", S.selected ? `#run/${encodeURIComponent(S.selected)}` : "#");
   }
 }
@@ -766,6 +834,60 @@ function buildChannels() {
   }
 }
 
+// The skin. tt-toplike paints its own near-black backgrounds (ESC[48;2;r;g;b with r+g+b small). Only those are
+// retinted to the TV's night indigo, so the picture sits in the page; every colour tt-toplike chooses for what it
+// draws stays exactly as it sends it. A chunk can end inside an escape, so an unfinished CSI is carried over.
+const SKIN_BG = [29, 24, 48];          // --tv, #1d1830
+const SKIN_THEME = {
+  background: "#1d1830", foreground: "#f3e6c8", cursor: "#1d1830", cursorAccent: "#1d1830",
+  black: "#1d1830", red: "#e0533d", green: "#7cc35a", yellow: "#f2c84b", blue: "#6aa8e0", magenta: "#c47ad6",
+  cyan: "#5cc8c0", white: "#f3e6c8", brightBlack: "#5a4a6e", brightRed: "#ff8a6e", brightGreen: "#a8e07c",
+  brightYellow: "#ffe08a", brightBlue: "#9ccfff", brightMagenta: "#e8a8f5", brightCyan: "#9ef0e6", brightWhite: "#fffbe6",
+};
+
+function skinSgr(params) {
+  const p = params.split(";");
+  for (let i = 0; i < p.length; i++) {
+    if ((p[i] === "38" || p[i] === "48") && p[i + 1] === "5") { i += 2; continue; }
+    if ((p[i] === "38" || p[i] === "48") && p[i + 1] === "2" && i + 4 < p.length) {
+      if (p[i] === "48" && (+p[i + 2]) + (+p[i + 3]) + (+p[i + 4]) < 80) {
+        p[i + 2] = String(SKIN_BG[0]); p[i + 3] = String(SKIN_BG[1]); p[i + 4] = String(SKIN_BG[2]);
+      }
+      i += 4;
+    }
+  }
+  return p.join(";");
+}
+
+function makeSkinner() {
+  const dec = new TextDecoder("utf-8");
+  let carry = "";
+  return (bytes) => {
+    let text = carry + dec.decode(bytes, { stream: true });
+    carry = "";
+    const cut = text.lastIndexOf("\x1b");
+    if (cut !== -1 && /^\x1b(\[[0-9;?]*)?$/.test(text.slice(cut))) { carry = text.slice(cut); text = text.slice(0, cut); }
+    return text.replace(/\x1b\[([0-9;]*)m/g, (m, ps) => "\x1b[" + skinSgr(ps) + "m");
+  };
+}
+
+function loadFont() { try { return Math.min(18, Math.max(8, +localStorage.getItem("orchard.hwFont") || 11)); } catch { return 11; } }
+function saveFont(n) { try { localStorage.setItem("orchard.hwFont", String(n)); } catch { /* fine */ } }
+
+function refitToplike() {
+  const hw = S.hw;
+  if (!hw) return;
+  hw.fit.fit();
+  if (hw.id) api(`/api/toplike/${encodeURIComponent(hw.id)}/resize`, { body: { cols: hw.term.cols, rows: hw.term.rows } }).catch(() => {});
+}
+
+function zoomToplike(delta) {
+  const hw = S.hw;
+  const size = Math.min(18, Math.max(8, (hw ? hw.term.options.fontSize : loadFont()) + delta));
+  saveFont(size);
+  if (hw) { hw.term.options.fontSize = size; refitToplike(); }
+}
+
 function stopToplike() {
   const hw = S.hw;
   if (!hw) return;
@@ -783,14 +905,25 @@ function startToplike(mode) {
   for (const b of $("hw-channels").querySelectorAll("button")) b.setAttribute("aria-pressed", String(b.dataset.mode === mode));
   const el = clear($("term"));
   const term = new Terminal({
-    disableStdin: true, cursorBlink: false, convertEol: false, scrollback: 0, fontSize: 13,
-    fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
-    theme: { background: "#1b1a2e", foreground: "#f3e6c8", cursor: "#1b1a2e" },
+    disableStdin: true, cursorBlink: false, cursorStyle: "bar", cursorWidth: 1, convertEol: false, scrollback: 0,
+    fontSize: loadFont(), lineHeight: 1, letterSpacing: 0, customGlyphs: true, drawBoldTextInBrightColors: false,
+    fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono', monospace",
+    theme: SKIN_THEME,
   });
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
   term.open(el);
+  // The WebGL renderer draws block and box characters as exact pixel glyphs, where tt-toplike's portraits live;
+  // without WebGL the default renderer is used.
+  try {
+    if (typeof WebglAddon !== "undefined") {
+      const gl = new WebglAddon.WebglAddon();
+      gl.onContextLoss(() => gl.dispose());
+      term.loadAddon(gl);
+    }
+  } catch { /* the DOM renderer still works */ }
   fit.fit();
+  const skin = makeSkinner();
   const source = new EventSource(`/api/toplike?mode=${encodeURIComponent(mode)}&cols=${term.cols}&rows=${term.rows}`);
   const hw = { term, fit, source, id: null, ro: null, mode };
   S.hw = hw;
@@ -802,7 +935,7 @@ function startToplike(mode) {
   source.onmessage = (ev) => {
     const bin = atob(ev.data), bytes = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    term.write(bytes);
+    term.write(skin(bytes));
   };
   source.addEventListener("exit", () => {
     source.close();
@@ -818,11 +951,7 @@ function startToplike(mode) {
   let timer = null;
   hw.ro = new ResizeObserver(() => {
     clearTimeout(timer);
-    timer = setTimeout(() => {
-      if (S.hw !== hw) return;
-      fit.fit();
-      if (hw.id) api(`/api/toplike/${encodeURIComponent(hw.id)}/resize`, { body: { cols: term.cols, rows: term.rows } }).catch(() => {});
-    }, 200);
+    timer = setTimeout(() => { if (S.hw === hw) refitToplike(); }, 200);
   });
   hw.ro.observe(el);
 }
@@ -847,6 +976,8 @@ async function main() {
   if (S.scene) S.scene.start();
   tickClock();
   setInterval(tickClock, 10000);
+  pollHealth();
+  setInterval(() => { if (!document.hidden) pollHealth(); }, 2000);
   buildChannels();
   await refreshRuns();
   routeFromHash();

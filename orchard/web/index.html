@@ -11,6 +11,7 @@
 <link rel="stylesheet" href="/static/app.css">
 <script src="/static/vendor/xterm/xterm.js" defer></script>
 <script src="/static/vendor/xterm/addon-fit.js" defer></script>
+<script src="/static/vendor/xterm/addon-webgl.js" defer></script>
 <script src="/static/scene.js" defer></script>
 <script src="/static/app.js" defer></script>
 </head>
@@ -37,24 +38,24 @@
   </div>
 </header>
 
-<div class="layout">
-  <aside class="sidebar" aria-label="Machine and runs">
-    <section class="panel" aria-labelledby="machine-h">
-      <div class="panel-head">
-        <h2 id="machine-h">Machine</h2>
-        <span class="panel-note" id="machine-note"></span>
-      </div>
-      <div id="machine" class="machine"><p class="muted">Reading gozer…</p></div>
-    </section>
-
-    <section class="panel runs-panel" aria-labelledby="runs-h">
-      <div class="panel-head">
+<div class="sheet">
+  <aside class="rail" aria-label="Runs and machine">
+    <section class="rail-section" aria-labelledby="runs-h">
+      <div class="rail-head">
         <h2 id="runs-h">Runs</h2>
-        <span class="panel-note" id="runs-note"></span>
+        <span class="rail-note" id="runs-note"></span>
       </div>
       <div id="launches"></div>
       <ul id="runs" class="runs" aria-label="Runs on this machine"></ul>
     </section>
+    <section class="rail-section" aria-labelledby="machine-h">
+      <div class="rail-head">
+        <h2 id="machine-h">Machine</h2>
+        <span class="rail-note" id="machine-note"></span>
+      </div>
+      <div id="machine" class="machine"><p class="muted">Reading gozer…</p></div>
+    </section>
+
   </aside>
 
   <main id="run-view" class="main" tabindex="-1">
@@ -68,7 +69,15 @@
       </div>
       <div class="tv">
         <div class="tv-screen"><div id="term" class="term" role="img" aria-label="tt-toplike's terminal display"></div></div>
-        <div class="tv-base"><span class="tv-label" id="hw-status">Off</span><span class="tv-knobs" aria-hidden="true"><i></i><i></i></span></div>
+        <div class="tv-base">
+          <span class="tv-label" id="hw-status">Off</span>
+          <span class="tv-controls" role="group" aria-label="Screen">
+            <button type="button" class="knob" id="hw-zoom-out" title="Smaller text: more of tt-toplike's detail">−</button>
+            <button type="button" class="knob" id="hw-zoom-in" title="Larger text">+</button>
+            <button type="button" class="knob knob-wide" id="hw-wide" aria-pressed="false" title="Use the whole width">Wide</button>
+            <button type="button" class="knob knob-wide" id="hw-full" title="Full screen">Full screen</button>
+          </span>
+        </div>
       </div>
       <p class="muted small">View only: nothing you type here is sent to the machine. Pick a view above; each one starts tt-toplike with that view.</p>
       <div id="hw-missing" class="empty" hidden>
@@ -92,12 +101,14 @@
         <div class="actions" id="run-actions" role="group" aria-label="Run actions"></div>
       </header>
 
+      <p class="hint" id="run-hint"><span class="hint-label">Next</span><span id="run-hint-text"></span></p>
+
       <figure class="scene-frame">
         <canvas id="scene" class="scene" aria-hidden="true"></canvas>
         <figcaption class="scene-caption" id="scene-caption"></figcaption>
       </figure>
 
-      <p class="hint" id="run-hint"><span class="hint-label">Next</span><span id="run-hint-text"></span></p>
+
 
       <section class="callout callout-bad" id="block-panel" hidden aria-labelledby="block-h">
         <h2 id="block-h">Blocked</h2>

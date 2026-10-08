@@ -749,4 +749,20 @@ more stardew valley type color scheme and elements".
   still. The scene is decorative; everything it shows is text on the page too.
 - Checked on node6: tt-toplike 0.13.10 (built in ~/build/tt-toplike-orchard) shows all four p300c chips in
   colour in Table and Arcade views, inside the page.
+- Later the same day (operator: "make weather conditions based on chip health. make the worker work based on
+  utilization and rest based on the same. Make him go back and get tools from the shed when chips are switching
+  leases"). tt-toplike's `--serve` stream was the first choice for the data, but it only serves with its json or
+  hybrid backend, which polls `tt-smi` and opens the chips; gozer refuses a reset while a device is open, and the
+  page's tt-toplike on its default backend had already shown up as BUSY-UNTRACKED in `gozer status`. So the page's
+  tt-toplike now always runs `--backend sysfs`, and `read_chips` reads the same kernel files that backend reads.
+  `weather()` and `utilization()` are pure and tested; a heartbeat that has not moved for 5 s is a storm. The farmer
+  works, rests and fetches tools from the shed from `/api/health`; a lease change is seen within GOZER_TTL_S (5 s).
+- Found: killing the UI's tmux session left tt-toplike children running (their own session, so no hangup). Now
+  SIGTERM and SIGHUP close every session, and each child asks the kernel for SIGTERM when the server dies
+  (PR_SET_PDEATHSIG); checked on node6 with `tmux kill-session` and with `kill -9` of the server: none left.
+- Checked on node6's chips: four Blackholes at 34-36 °C, 12-13 W, aiclk 800 MHz, heartbeats moving: clear skies,
+  farmer resting. A real `gozer acquire` and `release --no-reset` on board 0 sent him to the shed and back.
+- Layout (operator: "cleaner and less like a series of panels"): one parchment sheet with a quiet rail; only the
+  orchard scene and the tt-toplike TV keep wooden frames. The TV uses xterm.js's WebGL renderer, retints only
+  tt-toplike's near-black backgrounds to the skin, and has zoom, wide and full-screen controls.
 

@@ -71,7 +71,8 @@ from orchard.supervisor import Control
 from orchard.tiers import LOCAL_HOSTS
 
 DEFAULT_PORT = 8780
-GOZER_TTL_S = 15.0              # one `gozer status` serves every request in this window
+GOZER_TTL_S = 5.0               # one `gozer status` serves every request in this window (the farm
+                                # scene sends the farmer to the shed when a lease changes, so keep it short)
 FILE_TAIL_BYTES = 256 * 1024    # a longer file is served as its last 256 KB
 BODY_LIMIT = 64 * 1024
 SSE_PING_S = 15.0
@@ -87,6 +88,7 @@ ASSETS = {"/": ("index.html", "text/html; charset=utf-8"),
           "/static/vendor/xterm/xterm.js": ("vendor/xterm/xterm.js", JS),
           "/static/vendor/xterm/xterm.css": ("vendor/xterm/xterm.css", CSS),
           "/static/vendor/xterm/addon-fit.js": ("vendor/xterm/addon-fit.js", JS),
+          "/static/vendor/xterm/addon-webgl.js": ("vendor/xterm/addon-webgl.js", JS),
           "/static/vendor/pixelify-sans/pixelify-sans-latin-400-normal.woff2":
               ("vendor/pixelify-sans/pixelify-sans-latin-400-normal.woff2", WOFF2),
           "/static/vendor/pixelify-sans/pixelify-sans-latin-700-normal.woff2":
@@ -109,6 +111,24 @@ RETRYABLE = ("blocked", "stopped-or-crashed")
 # processes' activity, is left out: an open page should not start it.
 TOPLIKE_MODES = ("normal", "starfield", "castle", "flow", "arcade", "training", "rotate")
 TOPLIKE_MAX = 4
+# Chip health for the farm scene: the kernel files tt-toplike's sysfs backend reads (docs/SYSFS_BACKEND.md there).
+# hwmon gives power, temperature, current, voltage and fan; tt-kmd's class directory (<pci dir>/tenstorrent/*/)
+# gives the AI clock and the ARC firmware heartbeat. They are ordinary world-readable files: nothing here opens a
+# device, so gozer never refuses a run's reset because the page is watching.
+HWMON = Path("/sys/class/hwmon")
+TT_HWMON_NAMES = ("blackhole", "wormhole", "grayskull")
+HWMON_NO_READING = 0xFFFFFFFF   # the driver's "no value" (a p300c's fan1_input: it has no fan of its own)
+HWMON_FIELDS = (("power_w", "power1_input", 1e6), ("power_max_w", "power1_max", 1e6),
+                ("temp_c", "temp1_input", 1e3), ("temp_max_c", "temp1_max", 1e3),
+                ("current_a", "curr1_input", 1e3), ("voltage_v", "in0_input", 1e3), ("fan_rpm", "fan1_input", 1))
+KMD_FIELDS = (("aiclk_mhz", "tt_aiclk", int), ("heartbeat", "tt_heartbeat", int),
+              ("card", "tt_card_type", str), ("firmware", "tt_fw_bundle_ver", str))
+IDLE_W = 15.0                   # a p300c chip idles at 12-13 W (measured on node6)
+AICLK_IDLE, AICLK_BUSY = 800, 1350   # MHz: tt-kmd's tt_aiclk at rest and under load on Blackhole
+HOT_C = 70.0                    # choice: a heatwave
+NEAR_LIMIT_C = 8.0              # choice: within this of temp1_max is a storm
+HEARTBEAT_STALL_S = 5.0         # the heartbeat advances about ten times a second; five quiet seconds is a stall
+LEASE_OK = ("FREE", "CLAIMED", "HELD")
 CHIP_LINE = re.compile(r"^\s*chip\s+(\d+)\s+(\S+)\s+(\S+)\s*(.*)$")
 BOARD_LINE = re.compile(r"^\s*board\s+(\S+)(?:\s+\(([^)]*)\))?")
 
@@ -184,6 +204,78 @@ def parse_gozer(text: str) -> list[dict]:
     return boards
 
 
+def _read(path: Path, conv=float):
+    try:
+        return conv(path.read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def read_chips(root=HWMON) -> dict[str, dict]:
+    """Each Tenstorrent chip's readings, keyed by PCI address (the address `gozer status` prints). A value that
+    cannot be read is None; no hwmon directory gives {}."""
+    out: dict[str, dict] = {}
+    try:
+        dirs = sorted(Path(root).iterdir())
+    except OSError:
+        return out
+    for d in dirs:
+        name = _read(d / "name", str)
+        if name not in TT_HWMON_NAMES:
+            continue
+        pci = Path(os.path.realpath(d / "device"))
+        chip: dict = {"arch": name}
+        for key, fname, div in HWMON_FIELDS:
+            raw = _read(d / fname)
+            chip[key] = None if raw is None or raw >= HWMON_NO_READING else (
+                round(raw / div, 3) if div != 1 else int(raw))
+        kmd = next(iter(sorted((pci / "tenstorrent").glob("*"))), None) if (pci / "tenstorrent").is_dir() else None
+        for key, fname, conv in KMD_FIELDS:
+            chip[key] = _read(kmd / fname, conv) if kmd else None
+        out[pci.name] = chip
+    return out
+
+
+def utilization(chip: dict) -> float:
+    """0 at rest, 1 flat out: the larger of power above idle (of the chip's own power1_max) and the AI clock above
+    its resting speed."""
+    p, pmax, clk = chip.get("power_w"), chip.get("power_max_w") or 125.0, chip.get("aiclk_mhz")
+    by_power = (p - IDLE_W) / max(1.0, pmax - IDLE_W) if p is not None else 0.0
+    by_clock = (clk - AICLK_IDLE) / (AICLK_BUSY - AICLK_IDLE) if clk is not None else 0.0
+    return round(max(0.0, min(1.0, max(by_power, by_clock * 0.6))), 3)
+
+
+def weather(chips: dict, seen: dict, gozer_chips: list[dict], *, now: float) -> dict:
+    """The farm's weather from the chips' health. `seen` keeps each heartbeat and when it last moved, across calls.
+    storm: a heartbeat stopped, or a chip is near its temperature limit; heatwave: a chip is hot; overcast: a lease
+    is stale or a chip is in use outside a lease; clear otherwise; unknown when there is nothing to read."""
+    if not chips and not gozer_chips:
+        return {"kind": "unknown", "why": "no chip readings on this machine"}
+    storm, hot = [], []
+    for bdf, c in sorted(chips.items()):
+        hb = c.get("heartbeat")
+        if hb is not None:
+            last = seen.get(bdf)
+            if last is None or last[0] != hb:
+                seen[bdf] = (hb, now)
+            elif now - last[1] > HEARTBEAT_STALL_S:
+                storm.append(f"{bdf}: the ARC heartbeat has not moved for {now - last[1]:.0f} s")
+        t, tmax = c.get("temp_c"), c.get("temp_max_c")
+        if t is not None and tmax and t >= tmax - NEAR_LIMIT_C:
+            storm.append(f"{bdf}: {t:.0f} °C, near its {tmax:.0f} °C limit")
+        elif t is not None and t >= HOT_C:
+            hot.append(f"{bdf}: {t:.0f} °C")
+    if storm:
+        return {"kind": "storm", "why": "; ".join(storm)}
+    if hot:
+        return {"kind": "heatwave", "why": "; ".join(hot)}
+    odd = [f"{g['bdf']}: {g['state']}" for g in gozer_chips
+           if g["state"] not in LEASE_OK and not (g["state"] == "HELD-FOREIGN" and g.get("owner", "").startswith("orchard:"))]
+    if odd:
+        return {"kind": "overcast", "why": "; ".join(odd)}
+    return {"kind": "clear", "why": "every chip is healthy"}
+
+
 def _iso(ts: float) -> str:
     return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -215,7 +307,8 @@ class WebApp:
 
     def __init__(self, *, runs_root, config_path, cfg, token=None, gozer_status=None, clock=time.time,
                  spawn=spawn_detached, preflight=None, collect_kwargs=None, port_open=port_open,
-                 pid_running=pid_running, hostname=None, home=None, sse_poll_s=1.0, toplike=None, lan=False):
+                 pid_running=pid_running, hostname=None, home=None, sse_poll_s=1.0, toplike=None, lan=False,
+                 chips=read_chips):
         self.runs_root = Path(runs_root)
         self.config_path = Path(config_path)
         self.cfg = cfg
@@ -232,6 +325,8 @@ class WebApp:
         self.sse_poll_s = sse_poll_s
         self.toplike_cmd = list(toplike) if toplike else None     # argv of tt-toplike, or None when absent
         self._toplike: dict[str, Toplike] = {}
+        self.chips = chips
+        self._heartbeats: dict = {}
         self.lan = lan                  # True: listen on the network, no login (the operator's choice)
         self._gozer_cache: tuple[float, str] | None = None
         self._lock = threading.Lock()
@@ -296,6 +391,17 @@ class WebApp:
             "disk_free_gb": disk(self.runs_root),
             "now": self.clock(),
         }
+
+    def health(self) -> dict:
+        """What the farm scene draws from: the weather, each chip's readings, utilization and lease."""
+        readings = self.chips()
+        gz = [c for b in parse_gozer(self._gozer()) for c in b["chips"]]
+        with self._lock:
+            w = weather(readings, self._heartbeats, gz, now=self.clock())
+        leases = {c["bdf"]: f"{c['state']} {c['owner']}" for c in gz}
+        chips = {bdf: {**c, "utilization": utilization(c), "lease": next((g["state"] for g in gz if g["bdf"] == bdf), None)}
+                 for bdf, c in readings.items()}
+        return {"weather": w, "chips": chips, "leases": leases, "now": self.clock()}
 
     def list_runs(self) -> list[dict]:
         rows = []
@@ -492,8 +598,10 @@ class WebApp:
         if mode not in TOPLIKE_MODES and mode != "":
             raise BadRequest(f"unknown view {mode!r}; the views are {', '.join(TOPLIKE_MODES)}")
         cols, rows = _term_size(cols, rows)
-        argv = [*self.toplike_cmd, "--quiet"] + (["--rotate"] if mode == "rotate" else
-                                                  ["--mode", mode] if mode else [])
+        # tt-toplike's sysfs backend reads hwmon and tt-kmd's sysfs files and opens no device. Its default (hybrid)
+        # also runs `tt-smi -s`, which opens the chips, and gozer refuses to reset a board while a device is open.
+        argv = [*self.toplike_cmd, "--quiet", "--backend", "sysfs"] + (["--rotate"] if mode == "rotate" else
+                                                                        ["--mode", mode] if mode else [])
         with self._lock:
             self._toplike = {k: t for k, t in self._toplike.items() if t.alive()}
             if len(self._toplike) >= TOPLIKE_MAX:
@@ -528,6 +636,12 @@ class WebApp:
     def toplike_sessions(self) -> int:
         return len(self._toplike)
 
+    def toplike_close_all(self) -> None:
+        with self._lock:
+            sessions, self._toplike = list(self._toplike.values()), {}
+        for t in sessions:
+            t.close()
+
 
 def _term_size(cols, rows) -> tuple[int, int]:
     try:
@@ -537,6 +651,17 @@ def _term_size(cols, rows) -> tuple[int, int]:
     if not (20 <= cols <= 400 and 8 <= rows <= 200):
         raise BadRequest("the terminal must be 20-400 columns by 8-200 rows")
     return cols, rows
+
+
+def _die_with_parent():
+    """In the child, before exec: on Linux, ask for SIGTERM when the UI server dies, however it dies. Its own
+    session keeps it away from the terminal's signals, so without this a killed server left tt-toplike running."""
+    if sys.platform.startswith("linux"):
+        import ctypes
+        try:
+            ctypes.CDLL("libc.so.6", use_errno=True).prctl(1, signal.SIGTERM)   # PR_SET_PDEATHSIG
+        except OSError:
+            pass
 
 
 class Toplike:
@@ -553,7 +678,7 @@ class Toplike:
         env.update({"COLORTERM": "truecolor", "TERM": "xterm-256color", "LANG": "en_US.UTF-8"})
         try:
             self.proc = subprocess.Popen(list(argv), stdin=slave, stdout=slave, stderr=slave, env=env,
-                                         start_new_session=True, close_fds=True)
+                                         start_new_session=True, close_fds=True, preexec_fn=_die_with_parent)
         finally:
             os.close(slave)
         self._size = (cols, rows)
@@ -716,6 +841,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, app.meta())
         if segs == ["api", "machine"]:
             return self._json(200, app.machine())
+        if segs == ["api", "health"]:
+            return self._json(200, app.health())
         if segs == ["api", "toplike"]:
             return self._toplike_stream(q)
         if segs == ["api", "launches"]:

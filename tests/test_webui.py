@@ -471,6 +471,7 @@ def test_the_page_and_its_assets_are_served_with_a_strict_policy(root):
     ("/static/vendor/xterm/xterm.js", "text/javascript"),
     ("/static/vendor/xterm/xterm.css", "text/css"),
     ("/static/vendor/xterm/addon-fit.js", "text/javascript"),
+    ("/static/vendor/xterm/addon-webgl.js", "text/javascript"),
     ("/static/vendor/pixelify-sans/pixelify-sans-latin-400-normal.woff2", "font/woff2"),
     ("/static/vendor/pixelify-sans/pixelify-sans-latin-700-normal.woff2", "font/woff2"),
 ])
@@ -613,6 +614,103 @@ def test_in_lan_mode_a_change_must_come_from_the_page_it_was_served_on(root):
     assert code == 200 and (run / "control").read_text().strip() == "pause"
 
 
+# ---- machine health for the farm scene ------------------------------------------------------------------
+# The same kernel files tt-toplike's sysfs backend reads (hwmon and tt-kmd's class attributes). They are
+# ordinary world-readable files: reading them opens no device, so a run's chip reset is never refused for it.
+
+def fake_chip(root: Path, n: int, bdf: str, *, power_uw=12_000_000, temp_mc=34_000, aiclk=800, heartbeat=1000,
+              name="blackhole"):
+    pci = root / "devices" / bdf
+    kmd = pci / "tenstorrent" / f"tenstorrent!{n}"
+    kmd.mkdir(parents=True)
+    for f, v in {"tt_aiclk": aiclk, "tt_heartbeat": heartbeat, "tt_card_type": "p300c",
+                 "tt_fw_bundle_ver": "19.15.0.0"}.items():
+        (kmd / f).write_text(f"{v}\n")
+    hw = root / "hwmon" / f"hwmon{n}"
+    hw.mkdir(parents=True)
+    (hw / "device").symlink_to(pci)
+    for f, v in {"name": name, "power1_input": power_uw, "power1_max": 125_000_000, "temp1_input": temp_mc,
+                 "temp1_max": 90_000, "curr1_input": 18_000, "in0_input": 717, "fan1_input": 4294967295}.items():
+        (hw / f).write_text(f"{v}\n")
+    return kmd
+
+
+def test_chip_readings_come_from_hwmon_and_the_kmd_class_files(tmp_path):
+    fake_chip(tmp_path, 0, "0000:01:00.0", power_uw=90_500_000, temp_mc=61_250, aiclk=1350, heartbeat=777)
+    fake_chip(tmp_path, 9, "0000:00:1f.3", name="nvme")
+    t = webui.read_chips(tmp_path / "hwmon")
+    assert list(t) == ["0000:01:00.0"]
+    c = t["0000:01:00.0"]
+    assert c["power_w"] == 90.5 and c["power_max_w"] == 125.0 and c["temp_c"] == 61.25 and c["temp_max_c"] == 90.0
+    assert c["aiclk_mhz"] == 1350 and c["heartbeat"] == 777 and c["card"] == "p300c" and c["firmware"] == "19.15.0.0"
+    assert c["fan_rpm"] is None                       # 0xFFFFFFFF: the driver's "no reading"
+    assert webui.read_chips(tmp_path / "missing") == {}
+
+
+def chip(power=12.0, temp=34.0, aiclk=800, heartbeat=1, **kw):
+    return {"power_w": power, "power_max_w": 125.0, "temp_c": temp, "temp_max_c": 90.0, "aiclk_mhz": aiclk,
+            "heartbeat": heartbeat, **kw}
+
+
+def test_an_idle_chip_has_no_work_and_a_busy_one_has_a_lot():
+    assert webui.utilization(chip()) < 0.05
+    assert webui.utilization(chip(power=95.0, aiclk=1350)) > 0.6
+    assert 0.0 <= webui.utilization(chip(power=None, aiclk=None)) <= 0.0
+
+
+def board(*states):
+    return [{"bdf": f"0000:0{i + 1}:00.0", "state": st, "owner": "orchard:supervisor pid 1" if "HELD" in st else ""}
+            for i, st in enumerate(states)]
+
+
+def test_the_weather_is_the_chips_health():
+    ok = {"0000:01:00.0": chip(), "0000:02:00.0": chip()}
+    assert webui.weather(ok, {}, board("FREE", "FREE"), now=10)["kind"] == "clear"
+    hot = {"0000:01:00.0": chip(temp=74.0), "0000:02:00.0": chip()}
+    assert webui.weather(hot, {}, board("FREE", "FREE"), now=10)["kind"] == "heatwave"
+    near_limit = {"0000:01:00.0": chip(temp=84.0)}
+    w = webui.weather(near_limit, {}, board("FREE"), now=10)
+    assert w["kind"] == "storm" and "0000:01:00.0" in w["why"]
+    stale = webui.weather(ok, {}, board("FREE", "STALE"), now=10)
+    assert stale["kind"] == "overcast" and "STALE" in stale["why"]
+    outside = webui.weather(ok, {}, board("BUSY-UNTRACKED", "FREE"), now=10)
+    assert outside["kind"] == "overcast"
+    assert webui.weather({}, {}, [], now=10)["kind"] == "unknown"
+
+
+def test_a_heartbeat_that_stops_is_a_storm():
+    seen = {}
+    a = {"0000:01:00.0": chip(heartbeat=100)}
+    assert webui.weather(a, seen, board("FREE"), now=0)["kind"] == "clear"
+    assert webui.weather({"0000:01:00.0": chip(heartbeat=140)}, seen, board("FREE"), now=6)["kind"] == "clear"
+    w = webui.weather({"0000:01:00.0": chip(heartbeat=140)}, seen, board("FREE"), now=13)
+    assert w["kind"] == "storm" and "heartbeat" in w["why"]
+
+
+def test_the_health_endpoint_reports_weather_utilization_and_leases(root, tmp_path):
+    fake_chip(tmp_path, 0, "0000:01:00.0", power_uw=80_000_000, aiclk=1350)
+    app = make_app(root)
+    app.chips = lambda: webui.read_chips(tmp_path / "hwmon")
+    with Served(app) as s:
+        code, _, body = s.request("GET", "/api/health")
+    h = json.loads(body)
+    assert code == 200 and h["weather"]["kind"] in ("clear", "heatwave", "overcast", "storm")
+    c = h["chips"]["0000:01:00.0"]
+    assert c["utilization"] > 0.4 and c["lease"] == "HELD"
+    assert h["leases"] == {"0000:01:00.0": "HELD orchard:supervisor pid 4242", "0000:02:00.0": "HELD orchard:supervisor pid 4242",
+                           "0000:03:00.0": "FREE ", "0000:04:00.0": "STALE orchard:supervisor pid 99"}
+
+
+def test_stopping_the_ui_stops_every_toplike(root, tmp_path):
+    script = tmp_path / "idle.py"
+    script.write_text("import time\nprint('up', flush=True)\ntime.sleep(60)\n")
+    app = make_app(root, toplike=[sys.executable, str(script)])
+    sid, term = app.toplike_open("", 80, 24)
+    pid = term.proc.pid
+    app.toplike_close_all()
+    assert not webui.pid_running(pid) and app.toplike_sessions() == 0
+
+
 # ---- tt-toplike in the page, view-only -------------------------------------------------------------------
 # The page shows tt-toplike's own terminal UI. It sends no keystrokes: a mode is picked from an allow-list and
 # tt-toplike is started with that `--mode`, so nothing typed in a browser reaches a program on the machine.
@@ -668,8 +766,12 @@ def test_toplike_runs_in_a_terminal_of_the_pages_size_and_streams_to_it(root, to
     assert sid and b"toplike-ready 100x30" in got
 
 
-@pytest.mark.parametrize("mode,args", [("arcade", b"--quiet --mode arcade"), ("rotate", b"--quiet --rotate"),
-                                       ("", b"--quiet")])
+# Always tt-toplike's sysfs backend: it reads hwmon and tt-kmd's sysfs files and never opens a device. Its default
+# (hybrid) also runs `tt-smi -s`, which opens the chips, and gozer refuses to reset a board while a device is open,
+# so watching could make a run's reset fail.
+@pytest.mark.parametrize("mode,args", [("arcade", b"--quiet --backend sysfs --mode arcade"),
+                                       ("rotate", b"--quiet --backend sysfs --rotate"),
+                                       ("", b"--quiet --backend sysfs")])
 def test_a_mode_from_the_list_becomes_toplikes_own_flag(root, toplike_cmd, mode, args):
     with Served(make_app(root, toplike=toplike_cmd)) as s:
         conn, resp = open_toplike(s, f"cols=80&rows=24&mode={mode}")

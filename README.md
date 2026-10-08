@@ -449,8 +449,7 @@ until it ends, and `--once` prints the recent history and stops.
 #### In a browser: `tt-orchard ui`
 
 `tt-orchard ui` serves one page for the whole machine, dressed as a farm game: the chips and who holds them,
-every run under `runs_root` (runs that need you first), and for the run you pick an animated orchard (nine
-plots, one per stage, that grow into fruit trees as stages pass, with weather for the run's state), its stages,
+every run under `runs_root` (runs that need you first), and for the run you pick an animated orchard, its stages,
 the same live lines as `watch`, the ledger, its files (gate results, evidence, the operator bundle,
 `BLOCKED.md`, the coder log) and what to do next. The Hardware view shows
 [tt-toplike](https://github.com/tenstorrent/tt-toplike) itself on a TV: its own terminal UI, run on this
@@ -477,8 +476,20 @@ outlives the page, and Ctrl-C on `tt-orchard ui` never stops a run.
 
 The Hardware view is view-only. Nothing typed in the browser reaches the machine: the terminal takes no
 input and the server has no route for it. Each view button starts tt-toplike with that `--mode` (or
-`--rotate`) from a fixed list; `hivemind`, its opt-in sniffer of other processes, is not on it. Each viewer
-gets their own tt-toplike, at most four at once, stopped when the page goes away.
+`--rotate`) from a fixed list; `hivemind`, its opt-in sniffer of other processes, is not on it.
+
+The orchard is the machine and the run at a glance. The weather is the chips' health, read from the same kernel
+files tt-toplike's sysfs backend reads (hwmon and tt-kmd's class attributes; no device is opened): clear when
+every chip is well, a heatwave when one runs at 70 °C or more, overcast when a lease is stale or a chip is in use
+outside a lease, and a storm when a chip's ARC heartbeat stops or it comes within 8 °C of its limit. The farmer
+(the supervisor) works the running stage's plot as hard as the chips the run holds are working (power above
+idle and the AI clock), rests on the bench by the shed when they are idle, and walks to the shed for tools when
+chips change leases. The nine plots grow into fruit trees as stages pass; the run's state is on the ground
+(frost when it is blocked, autumn when it was aborted, a basket when it is ripe). The caption says all of it in
+words, and the scene is still under reduced motion. Each viewer
+gets their own tt-toplike, at most four at once, stopped when the page goes away. It always runs with
+tt-toplike's `sysfs` backend, which reads the kernel's sensor files and never opens a chip, so watching cannot
+get in the way of a run's chip reset.
 
 What it will not do: publish, upload, push, reset chips or release leases. It reads runs the way `status`
 and `watch` do, without the ledger lock. Every change needs the page's per-process token and must come from

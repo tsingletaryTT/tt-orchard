@@ -42,6 +42,7 @@ OTHER_TOOL_FLAGS = {
     "--help": "gozer reset --help",
     "--mode": "tt-toplike (each Hardware view button starts it with one)",
     "--rotate": "tt-toplike (its kiosk rotation, one of the Hardware views)",
+    "--backend": "tt-toplike (the page always runs its sysfs backend)",
     "--owner-pid": "gozer acquire",
     "--out": "tt-model package-thin",
     "--version": "tt-model --version",
