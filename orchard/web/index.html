@@ -27,6 +27,7 @@
   <nav class="views" aria-label="Views">
     <button type="button" class="view-btn" id="view-orchard-btn" aria-pressed="true">🧺 Orchard</button>
     <button type="button" class="view-btn" id="view-hardware-btn" aria-pressed="false">📺 Hardware</button>
+    <button type="button" class="view-btn" id="view-settings-btn" aria-pressed="false">🧰 Settings</button>
   </nav>
   <div class="topbar-right">
     <div class="clock" aria-label="Machine time and connection">
@@ -84,6 +85,42 @@
         <h2>tt-toplike is not installed here</h2>
         <p class="muted">Install it (github.com/tenstorrent/tt-toplike), or start the page with <code>tt-orchard ui --toplike PATH</code>.</p>
       </div>
+    </section>
+
+    <section id="settings-view" class="settings" hidden aria-labelledby="settings-h">
+      <div>
+        <h1 id="settings-h">Settings</h1>
+        <p class="muted">Which models the orchard's workers use. A change applies to the next run or retry; a run
+          that is going keeps the models it started with.</p>
+      </div>
+      <p class="callout callout-warn" id="settings-running" hidden></p>
+      <form id="settings-form" class="settings-form" novalidate>
+        <fieldset class="layouts">
+          <legend>Chip layout <span class="muted small">the model each run boots on the chips</span></legend>
+          <div id="settings-layouts" class="layout-cards"></div>
+        </fieldset>
+        <div class="field">
+          <label for="settings-cpu">CPU stand-in <span class="muted small">(seasonal hand)</span></label>
+          <select id="settings-cpu"></select>
+          <span class="field-help" id="settings-cpu-help">Any model ollama has on this machine. It serves steps while the chips are busy.</span>
+        </div>
+        <section aria-labelledby="roles-h" class="roles-wrap">
+          <h2 id="roles-h">Who uses which model</h2>
+          <div class="table-wrap">
+            <table class="ledger roles">
+              <thead><tr><th scope="col">Role</th><th scope="col">Does</th><th scope="col">Tier</th><th scope="col">Model</th><th scope="col">Endpoint</th></tr></thead>
+              <tbody id="settings-roles"></tbody>
+            </table>
+          </div>
+          <p class="muted small">The grafter and the head grower share the model on the chips: the supervisor boots one
+            server there.</p>
+        </section>
+        <div class="settings-actions">
+          <button type="submit" class="btn btn-primary" id="settings-save">💾 Save</button>
+          <span class="muted small" id="settings-files"></span>
+        </div>
+        <p class="form-error" id="settings-error" role="alert" hidden></p>
+      </form>
     </section>
 
     <div id="run-empty" class="empty">

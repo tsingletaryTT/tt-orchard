@@ -57,13 +57,14 @@ import termios
 import sys
 import threading
 import time
+import urllib.request
 from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-from orchard import __version__, bringup_config, lexicon, narrate, status, ui
+from orchard import __version__, bringup_config, lexicon, narrate, settings, status, ui
 from orchard.ledger import LedgerCorrupt, read_entries
 from orchard.scrub import HOME_PATH, TOKEN_PATTERNS
 from orchard.stages import STAGES
@@ -308,13 +309,45 @@ class Feed(narrate.Narrator):
         return out
 
 
+OLLAMA_TAGS = "http://127.0.0.1:11434/api/tags"
+TT_MODEL_LIST_TTL_S = 60.0
+
+
+def ollama_models() -> list[str]:
+    """The models ollama has on this machine (the CPU tier's choices), or [] when it does not answer."""
+    try:
+        with urllib.request.urlopen(OLLAMA_TAGS, timeout=3) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except (OSError, ValueError):
+        return []
+    return [m["name"] for m in data.get("models") or [] if isinstance(m, dict) and isinstance(m.get("name"), str)]
+
+
+class TtModelList:
+    """Is a package installed and servable here? `tt-model list` marks those with a check mark."""
+
+    def __init__(self, run=subprocess.run, clock=time.time):
+        self.run, self.clock, self._cache = run, clock, None
+
+    def __call__(self, target: str) -> bool:
+        now = self.clock()
+        if self._cache is None or now - self._cache[0] > TT_MODEL_LIST_TTL_S:
+            env = {**os.environ, "PATH": os.pathsep.join([os.path.expanduser("~/.local/bin"), os.environ.get("PATH", "")])}
+            try:
+                out = self.run(["tt-model", "list"], capture_output=True, text=True, timeout=60, env=env).stdout
+            except (OSError, subprocess.SubprocessError):
+                out = ""
+            self._cache = (now, out)
+        return any(re.match(rf"^\s*✓\s+{re.escape(target)}\s", line) for line in self._cache[1].splitlines())
+
+
 class WebApp:
     """What the pages ask for. Every outside signal is a parameter, so a test supplies its own."""
 
     def __init__(self, *, runs_root, config_path, cfg, token=None, gozer_status=None, clock=time.time,
                  spawn=spawn_detached, preflight=None, collect_kwargs=None, port_open=port_open,
                  pid_running=pid_running, hostname=None, home=None, sse_poll_s=1.0, toplike=None, lan=False,
-                 chips=read_chips):
+                 chips=read_chips, settings_dir=None, cpu_models=ollama_models, is_installed=None):
         self.runs_root = Path(runs_root)
         self.config_path = Path(config_path)
         self.cfg = cfg
@@ -338,6 +371,9 @@ class WebApp:
         self._gozer_cache: tuple[float, str] | None = None
         self._lock = threading.Lock()
         self._launches: dict[str, dict] = {}
+        self.settings_dir = Path(settings_dir) if settings_dir else CHECKOUT / "config"
+        self.cpu_models = cpu_models
+        self.is_installed = is_installed or TtModelList()
 
     # ---- shared signals ----
     def _gozer(self) -> str:
@@ -398,6 +434,28 @@ class WebApp:
             "disk_free_gb": disk(self.runs_root),
             "now": self.clock(),
         }
+
+    # ---- settings: which chip layout and which CPU stand-in (orchard/settings.py) ----
+    def settings(self) -> dict:
+        try:
+            out = settings.current(self.config_path, self.settings_dir, cpu_models=self.cpu_models,
+                                   is_installed=self.is_installed)
+        except (OSError, ValueError, KeyError, settings.SettingsError) as exc:
+            raise Conflict(f"the settings cannot be read from {self.config_path}: {exc}") from exc
+        out["running"] = [r["name"] for r in self.list_runs() if r.get("supervisor_alive")]
+        return out
+
+    def save_settings(self, layout, cpu_model) -> dict:
+        if not isinstance(layout, str) or not isinstance(cpu_model, str):
+            raise BadRequest("give a layout and a CPU model")
+        try:
+            out = settings.apply(self.config_path, self.settings_dir, layout=layout, cpu_model=cpu_model,
+                                 cpu_models=self.cpu_models, is_installed=self.is_installed)
+        except settings.SettingsError as exc:
+            raise BadRequest(str(exc)) from exc
+        self.cfg = bringup_config.load(self.config_path)
+        out["note"] = "Saved. The next run or retry uses these models; a running run keeps the ones it started with."
+        return out
 
     def health(self) -> dict:
         """What the farm scene draws from: the weather, each chip's readings, utilization and lease."""
@@ -861,6 +919,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, app.health())
         if segs == ["api", "toplike"]:
             return self._toplike_stream(q)
+        if segs == ["api", "settings"]:
+            return self._json(200, app.settings())
         if segs == ["api", "launches"]:
             return self._json(200, {"launches": app.launches()})
         if segs == ["api", "runs"]:
@@ -890,6 +950,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, app.preflight(body.get("model"), body.get("base")))
         if segs == ["api", "bringup"]:
             return self._json(200, app.bringup(body.get("model"), body.get("base")))
+        if segs == ["api", "settings"]:
+            return self._json(200, app.save_settings(body.get("layout"), body.get("cpu_model")))
         if len(segs) == 4 and segs[:2] == ["api", "toplike"] and segs[3] == "resize":
             app.toplike_resize(segs[2], body.get("cols"), body.get("rows"))
             return self._json(200, {"ok": True})

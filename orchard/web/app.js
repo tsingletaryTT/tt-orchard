@@ -750,6 +750,8 @@ function wire() {
   $("new-run-btn").addEventListener("click", openNewRun);
   $("view-orchard-btn").addEventListener("click", () => setView("orchard"));
   $("view-hardware-btn").addEventListener("click", () => setView("hardware"));
+  $("view-settings-btn").addEventListener("click", () => setView("settings"));
+  $("settings-form").addEventListener("submit", saveSettings);
   $("hw-zoom-in").addEventListener("click", () => zoomToplike(+1));
   $("hw-zoom-out").addEventListener("click", () => zoomToplike(-1));
   $("hw-wide").addEventListener("click", () => {
@@ -804,18 +806,121 @@ function setView(view, { push = true } = {}) {
   S.view = view;
   $("view-orchard-btn").setAttribute("aria-pressed", String(view === "orchard"));
   $("view-hardware-btn").setAttribute("aria-pressed", String(view === "hardware"));
+  $("view-settings-btn").setAttribute("aria-pressed", String(view === "settings"));
   $("hardware-view").hidden = view !== "hardware";
+  $("settings-view").hidden = view !== "settings";
   const runShown = view === "orchard" && S.selected;
   $("run").hidden = !runShown;
   $("run-empty").hidden = view !== "orchard" || Boolean(S.selected);
   if (view === "hardware") {
     if (push) history.replaceState(null, "", "#hardware");
     startToplike(S.hwMode || "normal");
-  } else {
-    stopToplike();
-    document.body.classList.remove("wide");
-    $("hw-wide").setAttribute("aria-pressed", "false");
-    if (push) history.replaceState(null, "", S.selected ? `#run/${encodeURIComponent(S.selected)}` : "#");
+    return;
+  }
+  stopToplike();
+  document.body.classList.remove("wide");
+  $("hw-wide").setAttribute("aria-pressed", "false");
+  if (view === "settings") {
+    if (push) history.replaceState(null, "", "#settings");
+    loadSettings();
+  } else if (push) {
+    history.replaceState(null, "", S.selected ? `#run/${encodeURIComponent(S.selected)}` : "#");
+  }
+}
+
+// ---- settings: which chip layout and which CPU stand-in -------------------------------------------------
+// The server offers the QuietBox 2 layouts setup ships (orchard/settings.py) and saves a choice only after the
+// supervisor's own loaders accept it. A change applies to the next run or retry.
+
+async function loadSettings() {
+  $("settings-error").hidden = true;
+  try {
+    S.settings = await api("/api/settings");
+  } catch (err) {
+    clear($("settings-layouts")).append(h("p", { class: "form-error" }, err.message));
+    return;
+  }
+  renderSettings();
+}
+
+function renderSettings() {
+  const st = S.settings;
+  const box = clear($("settings-layouts"));
+  if (!st.layout) {
+    box.append(h("p", { class: "muted small" },
+      `The coder in the config now (${st.coder.target}) is not one of these layouts. Saving replaces it.`));
+  }
+  for (const p of st.layouts) {
+    const id = `layout-${p.name}`;
+    const input = h("input", { type: "radio", name: "layout", id, value: p.name, disabled: !p.installed });
+    input.checked = p.name === st.layout;
+    input.addEventListener("change", previewRoles);
+    box.append(h("label", { class: "layout-card", for: id, dataset: { installed: String(p.installed) } },
+      input,
+      h("span", { class: "layout-text" },
+        h("span", { class: "layout-name" }, p.chip_model),
+        h("span", { class: "layout-meta" }, `${p.coder.chips} chips · port ${p.coder.port} · ${p.coder.target}`),
+        h("span", { class: "muted small" }, p.note),
+        p.installed ? null : h("span", { class: "layout-missing small" }, `Not installed here: tt-model pull ${p.coder.target}`))));
+  }
+  const sel = clear($("settings-cpu"));
+  const cur = (st.roles.find((r) => r.tier === "cpu") || {}).model;
+  const names = cur && !st.cpu_models.includes(cur) ? [cur, ...st.cpu_models] : st.cpu_models;
+  for (const n of names) {
+    const o = h("option", { value: n }, n + (st.cpu_models.includes(n) ? "" : " (not in ollama now)"));
+    o.selected = n === cur;
+    sel.append(o);
+  }
+  sel.onchange = previewRoles;
+  $("settings-cpu-help").textContent = st.cpu_models.length
+    ? "Any model ollama has on this machine. It serves steps while the chips are busy."
+    : "ollama did not answer, so no CPU model can be picked. Start it (ollama serve) and reload.";
+  $("settings-files").textContent = `Saved to ${st.config} and ${st.tiers_path}, with a dated copy of each.`;
+  const running = $("settings-running");
+  running.hidden = !st.running.length;
+  running.textContent = st.running.length
+    ? `Running now: ${st.running.join(", ")}. It keeps the models it started with; a change applies to the next run or retry.`
+    : "";
+  previewRoles();
+}
+
+function previewRoles() {
+  const st = S.settings;
+  const picked = document.querySelector('input[name="layout"]:checked');
+  const layout = picked && st.layouts.find((p) => p.name === picked.value);
+  const cpu = $("settings-cpu").value;
+  const body = clear($("settings-roles"));
+  for (const r of st.roles) {
+    let model = r.model;
+    let endpoint = r.endpoint;
+    if (layout && layout.tiers[r.tier]) ({ model, endpoint } = layout.tiers[r.tier]);
+    if (r.tier === "cpu" && cpu) model = cpu;
+    const changed = model !== r.model || endpoint !== r.endpoint;
+    body.append(h("tr", { dataset: { changed: String(changed) } },
+      h("td", {}, r.role), h("td", {}, r.does), h("td", {}, r.tier),
+      h("td", {}, model, changed ? h("span", { class: "muted small" }, " after saving") : null),
+      h("td", {}, endpoint)));
+  }
+}
+
+async function saveSettings(ev) {
+  ev.preventDefault();
+  const picked = document.querySelector('input[name="layout"]:checked');
+  const err = $("settings-error");
+  err.hidden = true;
+  if (!picked) { err.textContent = "Pick a chip layout first."; err.hidden = false; return; }
+  const btn = $("settings-save");
+  btn.disabled = true;
+  try {
+    const out = await api("/api/settings", { body: { layout: picked.value, cpu_model: $("settings-cpu").value } });
+    toast(out.note);
+    S.meta = await api("/api/meta");
+    await loadSettings();
+  } catch (e) {
+    err.textContent = e.message;
+    err.hidden = false;
+  } finally {
+    btn.disabled = false;
   }
 }
 
@@ -960,6 +1065,7 @@ function startToplike(mode) {
 
 function routeFromHash() {
   if (location.hash === "#hardware") { setView("hardware", { push: false }); return; }
+  if (location.hash === "#settings") { setView("settings", { push: false }); return; }
   const m = location.hash.match(/^#run\/(.+)$/);
   if (m) select(decodeURIComponent(m[1]), { push: false });
 }
