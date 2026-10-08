@@ -53,6 +53,7 @@ def box(tmp_path):
 
 def plan(box, run, **kw):
     root, lab = box
+    kw.setdefault("local_sfpi", "7.78.0")
     return ls.plan(lab, run=run, reference_python=root / "venvs/reference/bin/python", local_fw="19.15.0.0", **kw)
 
 
@@ -62,7 +63,7 @@ def by_name(steps):
 
 def test_a_ready_lab_is_all_ok(box):
     run = Fake([("gozer status", (0, GOZER, "")), ("tt_fw_bundle_ver", (0, "19.15.0.0\n", "")),
-                ("test -f", (0, "", ""))])
+                ("dpkg-query", (0, "7.78.0", "")), ("test -f", (0, "", ""))])
     steps = by_name(plan(box, run))
     assert {n: s.status for n, s in steps.items()} == {n: OK for n in steps}, \
         {n: (s.status, s.detail) for n, s in steps.items() if s.status != OK}
@@ -189,3 +190,22 @@ def test_the_relink_step_prints_the_script_by_name_not_its_source(box, tmp_path)
     s = by_name(plan(box, run))["bundle interpreters"]
     shown = [a.describe() for a in s.actions]
     assert shown == [f"python3 -c <orchard/bundle_relink.py> {b}", f"ssh node4 python3 -c <orchard/bundle_relink.py> {b}"]
+
+
+def test_an_older_sfpi_on_the_lab_fails_and_says_how_to_install_this_boxs():
+    """On the first lab run the 2-chip bundle opened its mesh on node4 and then failed to compile kernels:
+    "'vLut8si' is not a member of 'sfpi'". The TT runtime compiles kernels at every boot with the system
+    SFPI toolchain; node4 had 7.61.0 and the bundles were built against 7.78.0."""
+    import tempfile
+    root = Path(tempfile.mkdtemp())
+    for sub in ("runs", "cache", "hf/hub", "tt-model/models", "venvs/reference/bin"):
+        (root / sub).mkdir(parents=True)
+    lab = Lab(host="node4", root=root)
+    run = Fake([("dpkg-query", (0, "7.61.0", "")), ("gozer status", (0, GOZER, ""))])
+    s = by_name(plan((root, lab), run))["sfpi"]
+    assert s.status == FAIL and "7.61.0" in s.detail and "7.78.0" in s.detail
+    assert "sudo dpkg -i" in s.detail and not s.actions                  # setup never runs sudo itself
+    run = Fake([("dpkg-query", (1, "", "no packages found matching sfpi")), ("gozer status", (0, GOZER, ""))])
+    assert by_name(plan((root, lab), run))["sfpi"].status == FAIL
+    run = Fake([("dpkg-query", (0, "7.78.0", "")), ("gozer status", (0, GOZER, ""))])
+    assert by_name(plan((root, lab), run))["sfpi"].status == OK

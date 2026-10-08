@@ -6,7 +6,7 @@ It reads the `[lab]` table of config/bringup.toml and checks, in order: that ssh
 the lab root exists and is writable on both boxes (the same absolute path on each); the run layout under
 it; gozer, hugepages and the test interpreter on the lab; the brain's reference interpreter; that every
 bundle installed under the lab root on the brain is also on the lab; the models asked for with --model;
-that the two boxes run the same firmware; and that the lab's chips are free.
+that the two boxes run the same firmware and SFPI kernel compiler; and that the lab's chips are free.
 
 Like `tt-orchard setup` it prints every command before it runs it, asks first unless --yes, and runs
 nothing with --check. It never runs sudo (a missing lab root is the operator's to create, and it says
@@ -38,7 +38,7 @@ def remote(lab, command: str, ssh=SSH) -> list[str]:
     return [*ssh, lab.host, prefix + command]
 
 
-def plan(lab, *, run, reference_python, local_fw, models=(), model_sources=(), tt_model_root=None,
+def plan(lab, *, run, reference_python, local_fw, local_sfpi=None, models=(), model_sources=(), tt_model_root=None,
          hf_home=None, ssh=SSH) -> list[Step]:
     root = Path(lab.root)
     tt_model_root = Path(tt_model_root or root / "tt-model" / "models")
@@ -161,6 +161,20 @@ def plan(lab, *, run, reference_python, local_fw, models=(), model_sources=(), t
         steps.append(Step("firmware", WARN, f"the lab runs firmware {', '.join(lab_fw)} and this box {local_fw}; a "
                                             "bundle measured on one may not serve on the other"))
 
+    rc, out, _ = run(remote(lab, "dpkg-query -W -f='${Version}' sfpi", ssh), 30)
+    lab_sfpi = out.strip() if rc == 0 else ""
+    deb = f"sfpi_{local_sfpi}_x86_64_debian.deb"
+    if not local_sfpi:
+        steps.append(Step("sfpi", WARN, "this box's SFPI version could not be read (dpkg-query -W sfpi)"))
+    elif lab_sfpi == local_sfpi:
+        steps.append(Step("sfpi", OK, f"both boxes have SFPI {local_sfpi} (the kernel compiler the TT runtime uses)"))
+    else:
+        steps.append(Step("sfpi", FAIL, f"the lab has SFPI {lab_sfpi or 'none'} and this box {local_sfpi}. The TT "
+                                        "runtime compiles kernels with it at every boot, and an older one fails "
+                                        "(\"... is not a member of 'sfpi'\"). Install this box's version on the lab: "
+                                        f"copy {deb} there (github.com/tenstorrent/sfpi releases) and run "
+                                        f"`sudo dpkg -i {deb}`"))
+
     rc, out, _ = run(remote(lab, f"{q(lab.gozer)} status", ssh), 60)
     states = CHIP_STATE.findall(out) if rc == 0 else []
     if not states:
@@ -206,6 +220,11 @@ def _interpreters_step(lab, bundles, missing, *, run, ssh=SSH) -> Step:
                 + " (it still names the directory tt-model installed it in)", actions)
 
 
+def local_sfpi(run=_run) -> str | None:
+    rc, out, _ = run(["dpkg-query", "-W", "-f=${Version}", "sfpi"], 30)
+    return (out.strip() or None) if rc == 0 else None
+
+
 def local_firmware() -> str:
     for p in sorted(Path("/sys/class/tenstorrent").glob("*/tt_fw_bundle_ver")):
         try:
@@ -231,7 +250,7 @@ def main(argv=None, *, cfg=None, run=_run, say=print, ask=None) -> int:
     ref = cfg.reference_python or (Path(cfg.lab.root) / "venvs" / "reference" / "bin" / "python")
     sources = [Path(os.environ.get("HF_HOME") or Path.home() / ".cache" / "huggingface")]
     say(f"{style.icon('🧪')}tt-orchard lab setup: {cfg.lab.host}, lab root {cfg.lab.root}")
-    kw = dict(run=run, reference_python=ref, local_fw=local_firmware(), models=args.model, model_sources=sources,
+    kw = dict(run=run, reference_python=ref, local_fw=local_firmware(), local_sfpi=local_sfpi(run), models=args.model, model_sources=sources,
               tt_model_root=cfg.tt_model_root, hf_home=cfg.hf_home)
     steps = plan(cfg.lab, **kw)
     for line in render_steps(steps, style):
