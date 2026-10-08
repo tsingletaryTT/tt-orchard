@@ -314,3 +314,25 @@ def test_a_swap_config_already_in_the_stage_directory_is_kept(rig):
         sup._draft(WEIGHTS_ONLY_STAGE_2, stage)
         assert not [e for e in led.read() if "swap config" in str(e["data"].get("decision"))]
     assert (stage / "swap_config.json").read_text() == "{\"port\": 9999}"
+
+
+def test_a_prepare_agent_that_repeats_its_last_write_still_gets_its_hardware_test(rig):
+    """On the lab run the agent wrote hw_test.json and handoff.json for stage 2 and then wrote them
+    again unchanged instead of ending; the watchdog escalated and blocked. With both files valid, the
+    repeat ends the step as done and the test runs."""
+    from run_fakes import bringup, where, turn, call
+    import run_fakes
+
+    def repeating(request):
+        if "tools" in request and where(request) == (2, "prepare"):
+            files = run_fakes.FILES[(2, "prepare")]
+            writes = [call("write_file", path=p, content=c if isinstance(c, str) else json.dumps(c))
+                      for p, c in files.items()]
+            return writes[min(turn(request), len(writes) - 1)]      # never a final answer
+        return bringup(request)
+    rig.script = repeating
+    assert rig.run() == EXIT_READY
+    entries = rig.entries()
+    assert any(e["data"].get("decision") == "step finished: repeated write" and e["stage"] == 2 for e in entries)
+    assert not [e for e in entries if e["data"].get("watchdog") and e["stage"] == 2 and e["data"].get("rung")]
+    assert any(e["data"].get("decision") == "hardware test started" and e["stage"] == 2 for e in entries)

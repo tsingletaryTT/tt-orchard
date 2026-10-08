@@ -1195,7 +1195,8 @@ class Supervisor:
                          control=self.actuator, run_dir=self.run_dir,
                          evidence_dir=stage_dir / "evidence",
                          log_path=stage_dir / "log" / f"{phase}-{len(entries) + 1:05d}.jsonl",
-                         http=self.http, clock=self.clock, guard=self.guard)
+                         http=self.http, clock=self.clock, guard=self.guard,
+                         finished=self._finished_check(spec, phase, stage_dir))
         name = deliverable(spec, phase)
         step.deliverable_stamp = file_stamp(stage_dir / name) if name else None
         return step.run(system, user), step
@@ -1223,6 +1224,16 @@ class Supervisor:
         self.ledger.append("decision", spec.number, decision="swap config drafted",
                            config=evidence_record(self.run_dir, target), bundle_dir=cfg["bundle_dir"],
                            copied=copied)
+
+    def _finished_check(self, spec, phase: str, stage_dir: Path):
+        """What says a step's files are written and valid (AgentStep's `finished`): for one hardware
+        test's prepare step, hw_test.json and handoff.json as the hardware phase reads them; for a run or
+        finish step, the stage's gate. A list of tests (stage 4) and stage 7 have no such check."""
+        if phase == "prepare":
+            if spec.tests:
+                return None
+            return lambda: not self._read_test(stage_dir)[1]
+        return lambda: self._gate(spec)(stage_dir, self.run_dir).ok
 
     # ---- the hardware test ----------------------------------------------------------------------
 

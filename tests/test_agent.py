@@ -407,3 +407,41 @@ def test_a_shell_call_event_carries_the_command_shape(run):
     calls = [e for e in events if e.kind == "tool_call"]
     assert [(e.tool, e.shape) for e in calls] == [("write_file", None), ("shell", command_shape(cmd))]
     assert calls[1].shape == "grep stages/0/evidence/a.txt"
+
+
+# ---- a step whose files are written and valid ends when the agent only repeats them ---------------------
+
+def test_a_repeated_unchanged_write_ends_the_step_as_done_when_its_files_are_finished(run):
+    """On the lab run Coder-Next wrote hw_test.json and handoff.json, then wrote them again and again
+    instead of ending the step, until the repeat watchdog escalated and then blocked the run. With the
+    files valid, a repeat changes nothing, so the step ends there as done."""
+    run_dir, ledger = run
+    note = call("write_file", path="handoff.json", content="{}")
+    script = by_request(note, note, note, note, final("never reached"))
+    with FakeModel(script) as fm:
+        s, events, _ = step(run_dir, ledger, fm.endpoint, finished=lambda: True)
+        out = s.run("s", "u")
+    assert out.status == "done" and out.turns == 2
+    assert "wrote them again unchanged" in out.detail
+    d = [e["data"] for e in ledger.read() if e["data"].get("decision") == "step finished: repeated write"]
+    assert d and d[0]["phase"] == "run"
+
+
+def test_without_finished_files_a_repeated_write_does_not_end_the_step(run):
+    run_dir, ledger = run
+    note = call("write_file", path="handoff.json", content="{}")
+    script = by_request(note, note, final("stage done"))
+    with FakeModel(script) as fm:
+        s, events, _ = step(run_dir, ledger, fm.endpoint, finished=lambda: False)
+        out = s.run("s", "u")
+    assert out.status == "done" and out.turns == 3 and out.final_text == "stage done"
+
+
+def test_a_changed_write_never_ends_the_step_early(run):
+    run_dir, ledger = run
+    script = by_request(call("write_file", path="handoff.json", content="{}"),
+                        call("write_file", path="handoff.json", content='{"a": 1}'), final("stage done"))
+    with FakeModel(script) as fm:
+        s, events, _ = step(run_dir, ledger, fm.endpoint, finished=lambda: True)
+        out = s.run("s", "u")
+    assert out.turns == 3 and out.final_text == "stage done"

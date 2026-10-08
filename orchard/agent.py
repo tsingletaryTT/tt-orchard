@@ -360,7 +360,7 @@ class AgentStep:
                  phase: str, feed, control, run_dir, evidence_dir, log_path, http=post_json,
                  clock=time.time, guard: RetryGuard | None = None, max_turns: int = AGENT_MAX_TURNS,
                  max_tokens: int = AGENT_MAX_TOKENS, timeout: float = AGENT_REQUEST_TIMEOUT_S,
-                 thinking: bool = AGENT_THINKING):
+                 thinking: bool = AGENT_THINKING, finished=None):
         self.agent, self.endpoint, self.model, self.tools = agent, endpoint, model, tools
         self.ledger, self.stage, self.phase = ledger, stage, phase
         self.feed, self.control, self.http, self.clock = feed, control, http, clock
@@ -369,6 +369,10 @@ class AgentStep:
         self.guard = guard if guard is not None else RetryGuard()
         self.max_turns, self.max_tokens, self.timeout = max_turns, max_tokens, timeout
         self.thinking = thinking     # False sends enable_thinking=false (see defaults.AGENT_THINKING)
+        # finished() -> bool: are this step's files written and valid (the supervisor's check)? When it
+        # is true and the agent writes a file again unchanged, the step ends as done: an agent that has
+        # finished sometimes repeats its last write instead of ending (the first lab run).
+        self.finished = finished
         self._seen: dict[str, tuple[int, int]] = {}
         # The model turn number on every Event this step feeds the watchdog. It counts up through
         # `run` and `continue_with`, so a continuation's turns never reuse an earlier number.
@@ -541,6 +545,7 @@ class AgentStep:
             bad_run = []
             if not calls:
                 return self._end(self.control.stop_reason() or "done", turn, final_text=content)
+            repeated = False
             for call in calls:
                 fn = call.get("function") if isinstance(call.get("function"), dict) else {}
                 name, args = str(fn.get("name", "")), fn.get("arguments") or "{}"
@@ -552,4 +557,16 @@ class AgentStep:
                 self._event("tool_result", tool=name, output_hash=sha(result),
                             wrote=result.startswith("wrote ") if name == "write_file" else None)
                 self._record_new_evidence()
+                repeated = repeated or (name == "write_file" and result.startswith("unchanged:"))
+            if repeated and self.finished is not None and self._finished():
+                self.ledger.append("decision", self.stage, decision="step finished: repeated write",
+                                   phase=self.phase, turn=turn)
+                return self._end("done", turn, detail="the step's files were written and valid, and the agent "
+                                                      "wrote them again unchanged instead of ending")
         return self._end("turns", max_turns, detail=f"no final answer after {max_turns} turns")
+
+    def _finished(self) -> bool:
+        try:
+            return bool(self.finished())
+        except Exception:                # a check that fails is not a finished step
+            return False
