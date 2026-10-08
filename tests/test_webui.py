@@ -658,6 +658,31 @@ def test_an_idle_chip_has_no_work_and_a_busy_one_has_a_lot():
     assert 0.0 <= webui.utilization(chip(power=None, aiclk=None)) <= 0.0
 
 
+def test_a_loaded_model_waiting_for_work_is_resting_not_working():
+    # Measured on node6: with Coder-Next resident, board 0 holds tt_aiclk at 1350 MHz and draws 32-35 W while no
+    # request runs. The clock says a model is loaded, not that it is working; the floor is the chip's own recent
+    # lowest power, so a resident model at rest reads as rest.
+    resident = chip(power=34.0, aiclk=1350)
+    assert webui.utilization(resident, floor_w=33.0) < 0.05
+    assert webui.utilization(chip(power=70.0, aiclk=1350), floor_w=33.0) > 0.4
+    assert webui.utilization(chip(power=60.0, aiclk=800), floor_w=12.0) == 0.0     # clock at rest: not running
+
+
+def test_the_floor_is_each_chips_lowest_recent_power(root):
+    t = [0.0]
+    app = make_app(root, clock=lambda: t[0])
+    readings = {"0000:01:00.0": chip(power=34.0, aiclk=1350)}
+    app.chips = lambda: readings
+    assert app.health()["chips"]["0000:01:00.0"]["utilization"] < 0.05
+    t[0] = 30.0
+    readings["0000:01:00.0"] = chip(power=80.0, aiclk=1350)
+    assert app.health()["chips"]["0000:01:00.0"]["utilization"] > 0.5
+    t[0] = 30.0 + webui.FLOOR_WINDOW_S + 1          # the old low sample has aged out of the window
+    readings["0000:01:00.0"] = chip(power=80.0, aiclk=1350)
+    app.health()
+    assert app.health()["chips"]["0000:01:00.0"]["utilization"] < 0.05
+
+
 def board(*states):
     return [{"bdf": f"0000:0{i + 1}:00.0", "state": st, "owner": "orchard:supervisor pid 1" if "HELD" in st else ""}
             for i, st in enumerate(states)]
@@ -696,7 +721,8 @@ def test_the_health_endpoint_reports_weather_utilization_and_leases(root, tmp_pa
     h = json.loads(body)
     assert code == 200 and h["weather"]["kind"] in ("clear", "heatwave", "overcast", "storm")
     c = h["chips"]["0000:01:00.0"]
-    assert c["utilization"] > 0.4 and c["lease"] == "HELD"
+    # the first sample is also the floor: work shows as power above what the chip has been drawing
+    assert c["floor_w"] == 80.0 and c["utilization"] == 0.0 and c["lease"] == "HELD"
     assert h["leases"] == {"0000:01:00.0": "HELD orchard:supervisor pid 4242", "0000:02:00.0": "HELD orchard:supervisor pid 4242",
                            "0000:03:00.0": "FREE ", "0000:04:00.0": "STALE orchard:supervisor pid 99"}
 

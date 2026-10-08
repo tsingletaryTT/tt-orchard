@@ -765,4 +765,11 @@ more stardew valley type color scheme and elements".
 - Layout (operator: "cleaner and less like a series of panels"): one parchment sheet with a quiet rail; only the
   orchard scene and the tt-toplike TV keep wooden frames. The TV uses xterm.js's WebGL renderer, retints only
   tt-toplike's near-black backgrounds to the skin, and has zoom, wide and full-screen controls.
+- Tested with a real bring-up started from the page (Altworld/Hemmingway-1, Coder-Next on board 0, 2026-10-08).
+  The first readings showed the AI clock is not a work signal: with Coder-Next resident, tt_aiclk sits at 1350 MHz
+  and the board draws 32-35 W with no request in flight, which the first formula called 60 % busy. Utilization is
+  now power above each chip's lowest reading in the last ten minutes (FLOOR_WINDOW_S). Measured during stage 0:
+  resting 34-36 W reads 0.00; token generation reads 44-75 W with peaks of 118-170 W (above power1_max, 125 W),
+  0.2 to 1.0; the idle board stays at 0. The farmer also waited at plot 0 while the coder booted, because the facts
+  name the next stage as current before it starts; the scene now works a plot only once that stage has started.
 

@@ -411,7 +411,9 @@ const WEATHER = {
 };
 
 function renderScene(d) {
-  if (S.scene) S.scene.setRun({ state: d.state, stages: d.stages, current: d.stage ? d.stage.current : null });
+  // Before a stage has started (the coder is still booting) there is no plot to work yet.
+  const started = d.stage && d.stage.attempt > 0;
+  if (S.scene) S.scene.setRun({ state: d.state, stages: d.stages, current: started ? d.stage.current : null });
   renderSceneCaption(d);
 }
 

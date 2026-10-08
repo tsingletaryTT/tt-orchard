@@ -124,7 +124,9 @@ HWMON_FIELDS = (("power_w", "power1_input", 1e6), ("power_max_w", "power1_max", 
 KMD_FIELDS = (("aiclk_mhz", "tt_aiclk", int), ("heartbeat", "tt_heartbeat", int),
               ("card", "tt_card_type", str), ("firmware", "tt_fw_bundle_ver", str))
 IDLE_W = 15.0                   # a p300c chip idles at 12-13 W (measured on node6)
-AICLK_IDLE, AICLK_BUSY = 800, 1350   # MHz: tt-kmd's tt_aiclk at rest and under load on Blackhole
+AICLK_IDLE = 800                # MHz: tt-kmd's tt_aiclk at rest on Blackhole (1350 whenever a model is loaded)
+FLOOR_WINDOW_S = 600.0          # a chip's resting floor is its lowest power in the last ten minutes
+POWER_NOISE_W = 2.0             # hwmon reports whole watts and wobbles by one or two
 HOT_C = 70.0                    # choice: a heatwave
 NEAR_LIMIT_C = 8.0              # choice: within this of temp1_max is a storm
 HEARTBEAT_STALL_S = 5.0         # the heartbeat advances about ten times a second; five quiet seconds is a stall
@@ -236,13 +238,17 @@ def read_chips(root=HWMON) -> dict[str, dict]:
     return out
 
 
-def utilization(chip: dict) -> float:
-    """0 at rest, 1 flat out: the larger of power above idle (of the chip's own power1_max) and the AI clock above
-    its resting speed."""
+def utilization(chip: dict, floor_w: float | None = None) -> float:
+    """0 at rest, 1 flat out: power above the chip's resting floor, as a share of the headroom to 60% of its
+    power1_max. The floor is the lowest power seen recently (FLOOR_WINDOW_S), the "change from baseline" idea
+    tt-toplike uses: a model that is loaded and waiting (Coder-Next on node6: tt_aiclk pinned at 1350 MHz, 32-35 W)
+    reads as rest, and only work above that reads as work. A chip whose AI clock is at rest is not running at all."""
     p, pmax, clk = chip.get("power_w"), chip.get("power_max_w") or 125.0, chip.get("aiclk_mhz")
-    by_power = (p - IDLE_W) / max(1.0, pmax - IDLE_W) if p is not None else 0.0
-    by_clock = (clk - AICLK_IDLE) / (AICLK_BUSY - AICLK_IDLE) if clk is not None else 0.0
-    return round(max(0.0, min(1.0, max(by_power, by_clock * 0.6))), 3)
+    if p is None or (clk is not None and clk <= AICLK_IDLE):
+        return 0.0
+    floor = IDLE_W if floor_w is None else floor_w
+    top = max(floor + 10.0, pmax * 0.6)
+    return round(max(0.0, min(1.0, (p - floor - POWER_NOISE_W) / (top - floor))), 3)
 
 
 def weather(chips: dict, seen: dict, gozer_chips: list[dict], *, now: float) -> dict:
@@ -327,6 +333,7 @@ class WebApp:
         self._toplike: dict[str, Toplike] = {}
         self.chips = chips
         self._heartbeats: dict = {}
+        self._power: dict[str, list[tuple[float, float]]] = {}      # bdf -> [(time, watts)] for the floor
         self.lan = lan                  # True: listen on the network, no login (the operator's choice)
         self._gozer_cache: tuple[float, str] | None = None
         self._lock = threading.Lock()
@@ -399,8 +406,17 @@ class WebApp:
         with self._lock:
             w = weather(readings, self._heartbeats, gz, now=self.clock())
         leases = {c["bdf"]: f"{c['state']} {c['owner']}" for c in gz}
-        chips = {bdf: {**c, "utilization": utilization(c), "lease": next((g["state"] for g in gz if g["bdf"] == bdf), None)}
-                 for bdf, c in readings.items()}
+        now = self.clock()
+        chips = {}
+        with self._lock:
+            for bdf, c in readings.items():
+                hist = self._power.setdefault(bdf, [])
+                if c.get("power_w") is not None:
+                    hist.append((now, c["power_w"]))
+                hist[:] = [(t, w) for t, w in hist if now - t <= FLOOR_WINDOW_S]
+                floor = min((w for _, w in hist), default=None)
+                chips[bdf] = {**c, "floor_w": floor, "utilization": utilization(c, floor),
+                              "lease": next((g["state"] for g in gz if g["bdf"] == bdf), None)}
         return {"weather": w, "chips": chips, "leases": leases, "now": self.clock()}
 
     def list_runs(self) -> list[dict]:
