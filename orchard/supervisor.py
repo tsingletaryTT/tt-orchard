@@ -461,6 +461,14 @@ def gate_feedback_text(spec, reasons) -> str:
     return "\n".join(lines)
 
 
+def quiet_substitute(cfg, coder: str | None, asked: str, used: str) -> bool:
+    """A substitution the layout means: the step asked for a tier that is never started (Coder-Next's
+    large tier) and the coder serves it with the same model. Recording it on every stage told the
+    operator nothing; any other substitution is still recorded."""
+    return (coder is not None and used == coder and used != asked
+            and cfg.tiers[used]["model"] == cfg.tiers[asked]["model"])
+
+
 def coder_tier(cfg, port: int) -> str:
     """The chip tier whose endpoint uses the coder's port."""
     names = [n for n, t in cfg.tiers.items()
@@ -486,8 +494,9 @@ class Supervisor:
                  required_chips: tuple[int, ...] | None = None, home=None, containers=None,
                  paths: RunPaths | None = None, package: dict | None = None,
                  package_added: bool = False, unattended: bool = False, lab=None,
-                 four_chip_package: str | None = None):
+                 four_chip_package: str | None = None, coder_tier: str | None = None):
         self.run_dir = Path(run_dir).resolve()
+        self.coder_tier = coder_tier                # the tier whose endpoint is the coder's port
         self.ledger, self.cfg, self.model_id = ledger, cfg, model_id
         self.adapter, self.coder, self.coder_chips, self.standin = adapter, coder, coder_chips, standin
         # With a lab box (orchard/labclient.py), every hardware test runs there under the lab's own
@@ -1209,7 +1218,7 @@ class Supervisor:
             used, endpoint, note = resolve_endpoint(self.cfg, tier, self.probe)
         except TierUnavailable as exc:
             self._block(n, str(exc))
-        if note:
+        if note and not quiet_substitute(self.cfg, self.coder_tier, tier, used):
             self.ledger.append("decision", n, decision="tier substituted", note=note)
         skill = resolve_skill(spec.skill, self.skills_dirs)
         if skill is None:
@@ -1982,7 +1991,7 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
                       home=home, containers=containers, paths=paths, package=package,
                       package_added=added, unattended=getattr(args, "unattended", False),
                       lab=lab if lab_host else None,
-                      four_chip_package=getattr(args, "four_chip_package", None))
+                      four_chip_package=getattr(args, "four_chip_package", None), coder_tier=tier)
 
 
 PATH_FLAGS = {"--cache-root": "cache_root", "--hf-home": "hf_home", "--operator-home": "operator_home",
