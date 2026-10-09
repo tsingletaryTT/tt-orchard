@@ -420,3 +420,63 @@ def test_a_prepare_agent_that_repeats_its_last_write_still_gets_its_hardware_tes
     assert any(e["data"].get("decision") == "step finished: repeated write" and e["stage"] == 2 for e in entries)
     assert not [e for e in entries if e["data"].get("watchdog") and e["stage"] == 2 and e["data"].get("rung")]
     assert any(e["data"].get("decision") == "hardware test started" and e["stage"] == 2 for e in entries)
+
+
+
+def test_stage_4_starts_from_drafted_configs_for_the_counts_the_lab_can_hold(rig):
+    """The agent wrote stage 4's configs by hand and named caches differently in each run, so no run
+    reused another's. The supervisor drafts them, with fixed names, for the counts the lab can hold."""
+    _installed_for_draft(rig)                                        # snapshots and the 2-chip bundle
+    one = rig.root / "tt-model" / "models" / "episod" / "qwen3.8-27b-dflash2-p150"
+    one.mkdir(parents=True)
+    (one / "tt_kernel_manifest.json").write_text(json.dumps(
+        {"schema_version": "6", "device_count": 1, "weights": {"repo_id": "Qwen/Qwen3.8-27B"}}))
+    (one / "run.sh").write_text("#!/bin/bash\n")
+    rig.lab.chips = 2
+    rig.args.required_chips = (1, 2)
+    rig.args.unattended = True
+    rig.run()
+    entries = rig.entries()
+    d = next(e["data"] for e in entries if e["data"].get("decision") == "stage 4 configs drafted")
+    assert sorted(int(k) for k in d["configs"]) == [1, 2] and d["hw_tests"] is True
+    drafted = next(i for i, e in enumerate(entries) if e["data"].get("decision") == "stage 4 configs drafted")
+    prepare = next(i for i, e in enumerate(entries) if e["stage"] == 4 and e["data"].get("phase") == "prepare")
+    assert drafted < prepare
+    assert d["caches"]["1"].endswith("/altworld--hemmingway-1/1chip-episod--qwen3.8-27b-dflash2-p150/tt_cache")
+    assert d["caches"]["2"].endswith("/altworld--hemmingway-1/2chip-episod--qwen3.8-27b-dflash2-p300/tt_cache")
+
+
+def test_agent_shells_can_list_the_runs_bundles(rig):
+    """`tt-model list` in an agent shell said "No bundles installed": the shells did not know the bundle root."""
+    from orchard.agent import Tools
+    seen = []
+    real_init = Tools.__init__
+
+    def spy(self, run_dir, stage_dir, env, **kw):
+        seen.append(env.get("TT_MODEL_MODELS_DIR"))
+        real_init(self, run_dir, stage_dir, env, **kw)
+    import orchard.agent
+    orchard.agent.Tools.__init__ = spy
+    try:
+        assert rig.run() == EXIT_READY
+    finally:
+        orchard.agent.Tools.__init__ = real_init
+    assert seen and all(v == f"{rig.root}/tt-model/models" for v in seen)
+
+
+
+def test_a_stage_4_prepare_that_repeats_its_last_write_still_gets_its_tests(rig):
+    from run_fakes import bringup, where, turn, call
+    import run_fakes
+
+    def repeating(request):
+        if "tools" in request and where(request) == (4, "prepare"):
+            files = run_fakes.FILES[(4, "prepare")]
+            writes = [call("write_file", path=p, content=c if isinstance(c, str) else json.dumps(c))
+                      for p, c in files.items()]
+            return writes[min(turn(request), len(writes) - 1)]
+        return bringup(request)
+    rig.script = repeating
+    assert rig.run() == EXIT_READY
+    assert any(e["data"].get("decision") == "step finished: repeated write" and e["stage"] == 4
+               for e in rig.entries())

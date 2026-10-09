@@ -46,11 +46,38 @@ and a positive `server_ready_s`; and its evidence includes
 
 ## How to work
 
+- The supervisor has usually drafted every configuration (`hw_tests.json` and
+  `configs/<N>/swap_config.json`). Start from those; see the steps below.
 - Do the configurations one at a time, in this order: 2 chips, 4 chips, then 1 chip.
 - Write each file as soon as you know its content.
 - Do not investigate anything this skill does not list.
 
-## The configurations on this machine
+## Prepare phase: the steps
+
+1. Read `stages/4/hw_tests.json` and each `stages/4/configs/<N>/swap_config.json`. The supervisor wrote
+   them before you started, from facts the run already holds, and copied the three templates into each
+   `configs/<N>`. Use them as they are: do not look for packages, snapshots, caches or ports, and do not
+   run `tt-model list`. A count with no `configs/<N>/swap_config.json` was not drafted (the ledger says
+   why): only for that count, do the steps under "When a configuration has no drafted config" below.
+2. For each configuration N in `hw_tests.json`, run `python3 stages/4/configs/N/prepare_swap.py`. It
+   builds `stages/4/configs/N/model-dir/` and, for a bundle, `stages/4/configs/N/run.sh`. Exit 2 means an
+   edit did not apply or a fact does not fit; its message names it. Fix that value in that
+   configuration's `swap_config.json` and run it again.
+3. Check that each `stages/4/configs/N/model-dir` exists (`ls -l`), and for a bundle `run.sh` too.
+4. If `stages/4/hw_tests.json` does not exist (a count was not drafted), write it as the steps below
+   describe, one entry per configuration you prepared.
+5. Write `handoff.json` and reply with a short summary.
+
+Do not run either serve script yourself. The supervisor runs each one under a lease, in order of
+chip count, and records it.
+
+## When a configuration has no drafted config
+
+Only then. The supervisor drafts every configuration it can: the bundle of the nearest model with that
+many chips, and for 4 chips the container package bringup.toml names in `four_chip_package` (or the only
+one installed).
+
+### The packages on this machine
 
 | chips | kind | package | context | template script |
 |---|---|---|---|---|
@@ -62,7 +89,7 @@ To check a row, run `tt-model list` and read `{{OPERATOR_HOME}}/.cache/tt-model/
 (a container package has `"container": true` and an `"image"`). A bundle has `run.sh` and
 `venv/` in its directory. If a required package is missing, write that in `result.json` and stop.
 
-## Prepare phase: the steps for one configuration with N chips
+### The steps for one configuration with N chips
 
 1. Make the directory and copy the three templates into it:
 

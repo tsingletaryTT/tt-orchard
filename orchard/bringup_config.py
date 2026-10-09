@@ -26,7 +26,7 @@ from orchard.tiers import SENTINEL, _unknown_key_message
 
 TOP_KEYS = {"runs_root", "tiers", "cache_root", "hf_home", "operator_home", "gozer", "required_chips",
             "skills_dirs", "package_format", "package_namespace", "package_models_root", "min_free_gb",
-            "reference_python", "env", "coder", "tt_model_root", "lab", "mode"}
+            "reference_python", "env", "coder", "tt_model_root", "lab", "mode", "four_chip_package"}
 # Where a run's hardware tests run: "local" (this box; the coder is parked when a test needs its boards) or
 # "lab" (the [lab] box; the coder is never parked). `tt-orchard bringup --mode` overrides it per run.
 MODES = ("local", "lab")
@@ -88,6 +88,7 @@ class BringupConfig:
     tt_model_root: Path | None = None
     lab: Lab | None = None
     mode: str = "local"
+    four_chip_package: str | None = None     # stage 4's 4-chip container, when several installed ones fit
 
 
 def _strings(value, out: list[str]) -> list[str]:
@@ -242,6 +243,7 @@ def load(path) -> BringupConfig:
         tt_model_root=opt("tt_model_root"),
         lab=lab,
         mode=mode,
+        four_chip_package=_package_id(raw["four_chip_package"]) if "four_chip_package" in raw else None,
     )
 
 
@@ -255,6 +257,12 @@ def for_mode(cfg: BringupConfig, mode: str | None) -> BringupConfig:
     if mode == "lab" and cfg.lab is None:
         raise BringupConfigError("--mode lab needs a [lab] table in the config (host and root of the lab box)")
     return dataclasses.replace(cfg, mode=mode, lab=cfg.lab if mode == "lab" else None)
+
+
+def _package_id(value) -> str:
+    if not isinstance(value, str) or not _MODEL_ID.fullmatch(value):
+        raise BringupConfigError(f"four_chip_package {value!r} must be a tt-model package id of the form org/name")
+    return value
 
 
 def slug(model_id: str) -> str:
@@ -283,7 +291,8 @@ def supervisor_argv(cfg: BringupConfig, model_id: str, run_dir: Path | None = No
                         ("--operator-home", cfg.operator_home), ("--package-format", cfg.package_format),
                         ("--package-namespace", cfg.package_namespace),
                         ("--package-models-root", cfg.package_models_root),
-                        ("--tt-model-root", cfg.tt_model_root)):
+                        ("--tt-model-root", cfg.tt_model_root),
+                        ("--four-chip-package", cfg.four_chip_package)):
         if value is not None:
             argv += [flag, str(value)]
     if cfg.mode == "lab" and cfg.lab is not None:
