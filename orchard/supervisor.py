@@ -1271,8 +1271,7 @@ class Supervisor:
         every count got a config; otherwise the agent writes it as its skill describes."""
         if (stage_dir / "hw_tests.json").exists() or (stage_dir / "configs").exists():
             return
-        cap = (self.lab.chips if self.lab is not None and getattr(self.lab, "chips", None)
-               else spec.boards * CHIPS_PER_BOARD)
+        cap = self._chip_cap(spec)
         counts = [n for n in (self.required_chips or (1, 2, 4)) if n <= cap]
         configs, tests, notes = swap_draft.draft_stage4(
             run_dir=self.run_dir, tt_model_root=self.paths.tt_model_root, cache_root=self.paths.cache_root,
@@ -1294,7 +1293,42 @@ class Supervisor:
         self.ledger.append("decision", spec.number, decision="stage 4 configs drafted", counts=counts,
                            configs={str(n): c.get("bundle_dir") or c.get("package") for n, c in configs.items()},
                            caches={str(n): c["tt_cache"] for n, c in configs.items()},
-                           hw_tests=tests is not None, notes=notes)
+                           hw_tests=tests is not None, tests=tests, cap=cap, notes=notes)
+
+    def _chip_cap(self, spec) -> int:
+        """The most chips one test here can have: the lab's, or this stage's boards on this box."""
+        if self.lab is not None and getattr(self.lab, "chips", None):
+            return self.lab.chips
+        return spec.boards * CHIPS_PER_BOARD
+
+    def _keep_drafted_tests(self, spec, stage_dir: Path) -> None:
+        """When the supervisor drafted every count, its hw_tests.json is the list. On lab run 2 the agent
+        added a 4-chip test on a 2-chip lab (and built its config by hand); the test could only be
+        recorded as not run. The drafted list goes back, and the ledger says what was dropped."""
+        drafted = next((e["data"] for e in reversed(self.ledger.read())
+                        if e["stage"] == spec.number and e["data"].get("decision") == "stage 4 configs drafted"), {})
+        want = drafted.get("tests")
+        if not isinstance(want, dict):
+            return
+        path = stage_dir / "hw_tests.json"
+        try:
+            have = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            have = None
+        if have == want:
+            return
+
+        def counts(d):
+            items = d.get("tests") if isinstance(d, dict) else None
+            return sorted({t.get("chips") for t in items if isinstance(t, dict) and isinstance(t.get("chips"), int)}
+                          if isinstance(items, list) else set())
+        agent, kept = counts(have), counts(want)
+        where = f"the lab {self.lab.info.get('host')}" if self.lab is not None else "this box"
+        self.ledger.append("decision", spec.number, decision="kept the drafted test list", agent=agent,
+                           drafted=kept, dropped=[n for n in agent if n not in kept],
+                           reason=f"{where} has {self._chip_cap(spec)} chips for a test; the supervisor "
+                                  f"drafted {kept}")
+        path.write_text(json.dumps(want, indent=2) + "\n", encoding="utf-8")
 
     def _keep_drafted_caches(self, spec, stage_dir: Path) -> None:
         """The tensor cache of a configuration the supervisor drafted is the drafted one. On the first run
@@ -1557,6 +1591,7 @@ class Supervisor:
             out = self._wrap_up(spec, stage_dir, prep, out)
             if out.status != "done":
                 return out.status, [f"the prepare step ended: {out.status} {out.detail}".strip()], None
+            self._keep_drafted_tests(spec, stage_dir)
             self._keep_drafted_caches(spec, stage_dir)
             tests, problems = self._read_plan(spec, stage_dir)
             if problems:

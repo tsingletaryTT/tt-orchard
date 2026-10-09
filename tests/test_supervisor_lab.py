@@ -449,6 +449,13 @@ def test_stage_4_starts_from_drafted_configs_for_the_counts_the_lab_can_hold(rig
     assert {str(t["chips"]): t["cache"] for t in plan["tests"] if str(t["chips"]) in d["caches"]} == d["caches"]
     kept = [e["data"] for e in entries if e["data"].get("decision") == "kept the drafted tensor cache"]
     assert {k["config"] for k in kept} == {1, 2}
+    # The fake agent also lists a 4-chip test (as Coder-Next did on lab run 2); the drafted list stands.
+    assert d["tests"] == {"tests": [{k: t[k] for k in ("chips", "script", "deadline_s")} for t in d["tests"]["tests"]]}
+    assert sorted(t["chips"] for t in plan["tests"]) == [1, 2]
+    held = [e["data"] for e in entries if e["data"].get("decision") == "kept the drafted test list"]
+    assert held and held[0]["dropped"] == [4] and held[0]["drafted"] == [1, 2]
+    assert "the lab node4 has 2 chips for a test" in held[0]["reason"]
+    assert not (rig.run_dir / "stages" / "4" / "tests" / "4").exists()
 
 
 def test_agent_shells_can_list_the_runs_bundles(rig):

@@ -270,3 +270,12 @@ def test_the_stage_4_steps_start_from_the_drafted_configs_and_the_table_is_only_
     fallback = text.split("## When a configuration has no drafted config", 1)[1].split("\n## ", 1)[0]
     assert "mkdir -p stages/4/configs/N" in fallback and "four_chip_package" in fallback
     assert "changh95/qwen3.8-27b-p300x2" in fallback
+
+
+def test_the_stage_4_skill_keeps_to_the_drafted_counts():
+    # Lab run 2: the skill listed "2 chips, 4 chips, then 1 chip" and called a count with no drafted
+    # config "not drafted", so the agent built a 4-chip config by hand on a 2-chip lab.
+    flat = " ".join((SKILLS / "weights-swap-configs.md").read_text().split())
+    assert "When `hw_tests.json` exists, its counts are the whole list. Do not add a count to it" in flat
+    assert "2 chips, 4 chips, then 1 chip" not in flat
+    assert "Only when `hw_tests.json` does not exist" in flat
