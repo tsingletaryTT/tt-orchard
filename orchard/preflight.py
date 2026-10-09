@@ -234,22 +234,31 @@ def check_base(*, model_id: str, hub: HubInfo | None, base_override: str | None,
                                                 "needs_fetch": False, "candidates": ordered})
 
 
-def check_gozer(text: str) -> Check:
+def check_gozer(text: str, kept: bool = False) -> Check:
+    """`kept`: a lab run will use the coder an earlier run kept up, so the chips its lease holds are
+    expected to be HELD (orchard/kept_coder.py), and the run does not wait for them."""
     if not text.strip():
         return Check("gozer", BLOCK, "gozer gave no status; the chips cannot be leased", "hardware-unhealthy")
     chips = _CHIP_LINE.findall(text)
     if not chips:
         return Check("gozer", BLOCK, "could not read gozer's status", "hardware-unhealthy")
+    from orchard.kept_coder import KEPT_WHO
+    kept_chips = ({n for line in text.splitlines() if KEPT_WHO in line for n, _ in _CHIP_LINE.findall(line)}
+                  if kept else set())
     stale = [n for n, state in chips if state == "STALE"]
-    busy = [(n, state) for n, state in chips if state not in ("FREE", "STALE")]
+    busy = [(n, state) for n, state in chips if state not in ("FREE", "STALE") and n not in kept_chips]
     notes = []
+    if kept_chips:
+        notes.append(f"chip {', '.join(sorted(kept_chips))} serve the kept coder")
     if stale:
         notes.append(f"chip {', '.join(stale)} hold a stale lease; `gozer reconcile` clears it (not done here)")
     if busy:
         notes.append("chips in use: " + ", ".join(f"chip {n} {s}" for n, s in busy)
                      + "; the run waits for them and takes none it does not hold")
-    if notes:
+    if stale or busy:
         return Check("gozer", WARN, "; ".join(notes))
+    if notes:
+        return Check("gozer", OK, "; ".join(notes) + "; the others are free")
     return Check("gozer", OK, f"all {len(chips)} chips are free")
 
 
@@ -351,7 +360,7 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
     guarded("tiers", "config-invalid", lambda: check_tiers(s.load_tiers, Path(cfg.tiers), cfg.coder.port))
     guarded("port", "coder-unusable", lambda: check_port(cfg.coder.port, bool(s.port_in_use(cfg.coder.port)), resuming,
                                                           kept=_kept_on_port(cfg)))
-    guarded("gozer", "hardware-unhealthy", lambda: check_gozer(s.gozer_status()))
+    guarded("gozer", "hardware-unhealthy", lambda: check_gozer(s.gozer_status(), kept=_kept_on_port(cfg)))
     if getattr(cfg, "mode", "local") == "lab" and getattr(cfg, "lab", None) is not None and s.lab_status is not None:
         guarded("lab", "hardware-unhealthy", lambda: check_lab(cfg.lab, s.lab_status()))
     out.append(base_check)
