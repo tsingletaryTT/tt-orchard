@@ -117,9 +117,9 @@ def _parser() -> argparse.ArgumentParser:
                                                        "run there (`lab setup --help`)")
     lab.add_argument("action", choices=["setup"])
     lab.add_argument("rest", nargs=argparse.REMAINDER, help="options for the action")
-    ca = sub.add_parser("caches", parents=[common], help="list the tensor caches (here and on the lab) and prune "
-                                                         "the ones no run uses (`caches --help`)")
-    ca.add_argument("rest", nargs=argparse.REMAINDER, help="--lab, --prune --older-than DAYS, --yes")
+    from orchard import caches as _caches
+    sub.add_parser("caches", parents=[common, _caches.parser(add_help=False)],
+                   help="list the tensor caches (here and on the lab) and prune the ones no run uses")
     return p
 
 
@@ -335,7 +335,7 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
             cfg, _ = config()
         except (NoConfig, bringup_config.BringupConfigError) as exc:
             return _refuse(str(exc))
-        return caches.main(args.rest, cfg=cfg, say=lambda line: print(line, file=out))
+        return caches.main(cfg=cfg, args=args, say=lambda line: print(line, file=out))
     if args.cmd == "lab":
         from orchard import lab_setup
         try:

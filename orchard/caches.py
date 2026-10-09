@@ -148,8 +148,8 @@ def render(caches: list[Cache], now: float) -> list[str]:
     return lines
 
 
-def parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="tt-orchard caches", description=__doc__.split("\n\n")[0])
+def parser(add_help: bool = True) -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="tt-orchard caches", description=__doc__.split("\n\n")[0], add_help=add_help)
     p.add_argument("--lab", action="store_true", help="also list the caches on the [lab] box")
     p.add_argument("--prune", action="store_true", help="remove the caches no unfinished run uses (asks first)")
     p.add_argument("--older-than", type=float, metavar="DAYS", help="with --prune: only caches not written for DAYS")
@@ -157,8 +157,8 @@ def parser() -> argparse.ArgumentParser:
     return p
 
 
-def main(argv=None, *, cfg, run=_run, say=print, ask=None, now=time.time) -> int:
-    args = parser().parse_args(argv)
+def main(argv=None, *, cfg, run=_run, say=print, ask=None, now=time.time, args=None) -> int:
+    args = args if args is not None else parser().parse_args(argv)
     if args.prune and args.older_than is None:
         say("refused: --prune needs --older-than DAYS")
         return 2

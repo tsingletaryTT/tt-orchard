@@ -704,3 +704,9 @@ def test_caches_lists_the_tensor_caches_under_the_cache_root(conf, tmp_path):
     (d / ".orchard-model").write_text("org/m@abc")
     code, out, rec = run(conf, ["caches"])
     assert code == 0 and "org/m@abc" in out and rec.argv is None
+
+
+
+def test_caches_takes_its_own_flags(conf, tmp_path):
+    code, out, rec = run(conf, ["caches", "--prune"])
+    assert code == 2                                   # --prune needs --older-than; the flag reached caches
