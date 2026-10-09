@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """The stage table, tier and skill lookup, the disk check, the exit gates and the stage 0 comparison."""
 import dataclasses
+import hashlib
 import json
 import os
 import socket
@@ -46,7 +47,8 @@ def write(root, rel, text="x"):
 def test_the_table_names_the_owner_skills_and_hardware_stages():
     assert [s.skill for s in STAGES] == ["delta-triage", "reference-gate", "functional-decoder",
                                          "full-model", "mesh-shrink", "serving-check",
-                                         "serving-check", "", "operator-bundle"]
+                                         "serving-check", "", ""]
+    assert [s.number for s in STAGES if s.harness] == [8]       # stage 7 turns harness when packaging
     assert [s.boards for s in STAGES] == [0, 0, 1, 1, 1, 1, 1, 0, 0]
     assert STAGES[7].skip and all(s.skip is None for s in STAGES if s.number != 7)
 
@@ -415,14 +417,19 @@ def test_numbers_gate_needs_a_label_on_every_number(tmp_path):
 
 
 def bundle(tmp_path, **files):
+    """A stage 8 directory as build_bundle.py leaves it: the files, and the record of each one's sha256."""
     b = tmp_path / "run" / "stages" / "8" / "bundle"
     b.mkdir(parents=True)
-    base = {"RESULTS.md": "Results.", "RISKS.md": "Risks.",
+    base = {"RESULTS.md": "Results.", "RISKS.md": "Risks.", "card.md": "Card.",
             "PUBLISH_COMMANDS.txt": "tt-model push example/hemmingway-1-p300\n",
             "ledger.jsonl": "{}\n"}
     for name, text in {**base, **files}.items():
         if text is not None:
             (b / name).write_text(text)
+    record = [{"path": f"stages/8/bundle/{f.name}", "sha256": hashlib.sha256(f.read_bytes()).hexdigest()}
+              for f in sorted(b.iterdir())]
+    (b.parent / "evidence").mkdir()
+    (b.parent / "evidence" / "bundle-build.json").write_text(json.dumps({"files": record}))
     return b.parent, tmp_path / "run"
 
 
@@ -430,6 +437,33 @@ def test_a_complete_clean_bundle_passes_the_gate(tmp_path):
     g = gate_bundle(*bundle(tmp_path))
     assert g.ok, g.reasons
     assert "stages/8/bundle/PUBLISH_COMMANDS.txt" in g.evidence
+    assert "stages/8/evidence/bundle-build.json" in g.evidence
+
+
+def test_a_bundle_file_edited_after_the_build_fails_the_gate(tmp_path):
+    # Lab run 2: the agent rewrote RESULTS.md with stage names and an evidence path the run never had.
+    stage_dir, run_dir = bundle(tmp_path)
+    (stage_dir / "bundle" / "RESULTS.md").write_text("Result: pass. Evidence: `stages/8/result.json`.")
+    g = gate_bundle(stage_dir, run_dir)
+    assert "stages/8/bundle/RESULTS.md changed after build_bundle.py wrote it" in g.reasons
+
+
+def test_the_ledger_copy_may_change_but_no_other_file_may_appear_or_go(tmp_path):
+    stage_dir, run_dir = bundle(tmp_path)
+    (stage_dir / "bundle" / "ledger.jsonl").write_text("{}\n{}\n")      # the supervisor copies it again
+    assert gate_bundle(stage_dir, run_dir).ok
+    (stage_dir / "bundle" / "NOTES.md").write_text("Extra.")
+    (stage_dir / "bundle" / "RISKS.md").unlink()
+    g = gate_bundle(stage_dir, run_dir)
+    assert "stages/8/bundle/NOTES.md was not written by build_bundle.py" in g.reasons
+    assert "stages/8/bundle/RISKS.md was written by build_bundle.py and is gone" in g.reasons
+
+
+def test_a_bundle_with_no_build_record_fails_the_gate(tmp_path):
+    stage_dir, run_dir = bundle(tmp_path)
+    (stage_dir / "evidence" / "bundle-build.json").unlink()
+    g = gate_bundle(stage_dir, run_dir)
+    assert any("bundle-build.json is missing or unreadable" in r for r in g.reasons)
 
 
 def test_a_scrub_hit_or_a_missing_file_blocks_the_bundle(tmp_path):

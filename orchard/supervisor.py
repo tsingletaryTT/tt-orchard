@@ -114,6 +114,7 @@ import os
 import pwd
 import shutil
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -471,6 +472,7 @@ def coder_tier(cfg, port: int) -> str:
 
 # ---- the supervisor -----------------------------------------------------------------------------
 
+BUNDLE_BUILD_TIMEOUT_S = 600            # build_bundle.py reads files and copies packages; no network
 SWAP_TEMPLATES = ("prepare_swap.py", "serve_and_compare.py")      # copied with a drafted swap_config.json
 STAGE4_TEMPLATES = (*SWAP_TEMPLATES, "serve_and_compare_container.py")     # into each drafted configs/<N>
 
@@ -972,6 +974,8 @@ class Supervisor:
     def _stage_body(self, spec, stage_dir: Path, escalated: bool, resumed: bool):
         self._wrapup_used = False           # at most one wrap-up per run of the stage body
         if spec.harness:
+            if spec.number == 8:
+                return self._bundle_body(spec, stage_dir)
             return self._package_body(spec, stage_dir, resumed)
         if spec.boards == 0:
             out, step = self._step(spec, "run", stage_dir, escalated, resumed)
@@ -1079,6 +1083,35 @@ class Supervisor:
             package_finish(self.run_dir, stage_dir)
         except PackageError as exc:
             return "fail", [f"packaging: {exc}"], None
+        gate = self._check_gate(spec, stage_dir)
+        return ("pass", [], gate) if gate.ok else ("fail", list(gate.reasons), gate)
+
+    def _bundle_body(self, spec, stage_dir: Path):
+        """Stage 8 as supervisor code: copy build_bundle.py into the stage, write its one-line config,
+        run it, and run the gate. The script rebuilds the bundle from scratch each time, so a resume
+        simply runs it again. It gets the agent shells' environment (no tokens, HOME in the run)."""
+        n = spec.number
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        script = stage_dir / "build_bundle.py"
+        shutil.copyfile(Path(self.paths.orchard_dir) / "orchard" / "skills" / "operator-bundle-templates"
+                        / "build_bundle.py", script)
+        (stage_dir / "bundle_config.json").write_text(
+            json.dumps({"run_dir": str(self.run_dir), "orchard_dir": str(self.paths.orchard_dir)}, indent=2)
+            + "\n", encoding="utf-8")
+        (stage_dir / "log").mkdir(exist_ok=True)
+        log = stage_dir / "log" / "build_bundle.log"
+        try:
+            proc = subprocess.run([sys.executable, str(script)], cwd=self.run_dir, capture_output=True,
+                                  text=True, timeout=BUNDLE_BUILD_TIMEOUT_S,
+                                  env=agent_env(self.run_dir, extra=self.extra_env))
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return "fail", [f"build_bundle.py did not finish: {exc}"], None
+        log.write_text(proc.stdout + proc.stderr, encoding="utf-8")
+        if proc.returncode != 0:
+            last = (proc.stderr.strip() or proc.stdout.strip() or "no output").splitlines()[-1]
+            return "fail", [f"build_bundle.py exited {proc.returncode}: {last}"[:500]], None
+        self.ledger.append("evidence", n, what="bundle built",
+                           **evidence_record(self.run_dir, stage_dir / "evidence" / "bundle-build.json"))
         gate = self._check_gate(spec, stage_dir)
         return ("pass", [], gate) if gate.ok else ("fail", list(gate.reasons), gate)
 

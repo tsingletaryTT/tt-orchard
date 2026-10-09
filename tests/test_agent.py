@@ -427,6 +427,40 @@ def test_a_repeated_unchanged_write_ends_the_step_as_done_when_its_files_are_fin
     assert d and d[0]["phase"] == "run"
 
 
+def said(text: str, **arguments) -> dict:
+    """A reply with visible text and one shell call."""
+    return {**call("shell", **arguments), "content": text}
+
+
+def test_the_same_reply_again_ends_the_step_as_done_when_its_files_are_finished(run):
+    """Lab run 2, stage 8: the summary was done, and the agent repeated it with `echo "Done"`,
+    `echo "Finished"` ... for 16 turns until the watchdog escalated a stage whose files had passed."""
+    run_dir, ledger = run
+    text = "The summary in RESULTS.md already matches the required format."
+    script = by_request(said(text, command="echo Done"), said(text, command="echo Finished"),
+                        said(text, command="echo Complete"), final("never reached"))
+    with FakeModel(script) as fm:
+        s, events, _ = step(run_dir, ledger, fm.endpoint, finished=lambda: True)
+        out = s.run("s", "u")
+    assert out.status == "done" and out.turns == 2
+    assert "gave the same reply again" in out.detail
+    d = [e["data"] for e in ledger.read() if e["data"].get("decision") == "step finished: repeated reply"]
+    assert d and d[0]["phase"] == "run"
+
+
+def test_the_same_reply_does_not_end_a_step_whose_files_are_not_finished_nor_does_an_empty_one(run):
+    run_dir, ledger = run
+    text = "Still working on it."
+    script = by_request(said(text, command="echo a"), said(text, command="echo b"), final("stage done"))
+    with FakeModel(script) as fm:
+        s, events, _ = step(run_dir, ledger, fm.endpoint, finished=lambda: False)
+        assert s.run("s", "u").turns == 3
+    script = by_request(call("shell", command="echo a"), call("shell", command="echo b"), final("stage done"))
+    with FakeModel(script) as fm:
+        s, events, _ = step(run_dir, ledger, fm.endpoint, finished=lambda: True)
+        assert s.run("s", "u").turns == 3
+
+
 def test_without_finished_files_a_repeated_write_does_not_end_the_step(run):
     run_dir, ledger = run
     note = call("write_file", path="handoff.json", content="{}")

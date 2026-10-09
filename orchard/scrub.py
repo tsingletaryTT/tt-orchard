@@ -4,11 +4,10 @@
 
 The first p150 repo exposed a hostname in an old revision (spec section 3), so the operator bundle
 is searched before it is called ready. A hit blocks the bundle. The supervisor runs this check
-itself; the stage 8 agent's own scrub notes are not trusted for it.
+itself, on the bundle build_bundle.py wrote (stage 8 is supervisor code).
 
 `ledger.jsonl` is skipped. It is the operator's copy of the run's record, it is never published,
-and it holds absolute evidence paths written by the park sequence (orchard/handoff.py). The
-operator-bundle skill tells the agent to say so in RESULTS.md.
+and it holds absolute evidence paths written by the park sequence (orchard/handoff.py).
 
 What this does not find: a token in a format not listed below, a hostname written in another form
 (an IP address, a fully qualified name that differs from `socket.gethostname()`), or anything
