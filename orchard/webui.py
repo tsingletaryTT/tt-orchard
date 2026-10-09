@@ -64,7 +64,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-from orchard import __version__, bringup_config, lexicon, narrate, settings, status, ui
+from orchard import __version__, bringup_config, lexicon, machine_checks, narrate, settings, status, ui
+from orchard.preflight import _lab_status
 from orchard.ledger import LedgerCorrupt, read_entries
 from orchard.scrub import HOME_PATH, TOKEN_PATTERNS
 from orchard.stages import STAGES
@@ -309,6 +310,7 @@ class Feed(narrate.Narrator):
         return out
 
 
+LAB_TTL_S = 30.0                # how long the lab's gozer status (an ssh call) is reused
 OLLAMA_TAGS = "http://127.0.0.1:11434/api/tags"
 TT_MODEL_LIST_TTL_S = 60.0
 
@@ -347,7 +349,8 @@ class WebApp:
     def __init__(self, *, runs_root, config_path, cfg, token=None, gozer_status=None, clock=time.time,
                  spawn=spawn_detached, preflight=None, collect_kwargs=None, port_open=port_open,
                  pid_running=pid_running, hostname=None, home=None, sse_poll_s=1.0, toplike=None, lan=False,
-                 chips=read_chips, settings_dir=None, cpu_models=ollama_models, is_installed=None):
+                 chips=read_chips, settings_dir=None, cpu_models=ollama_models, is_installed=None,
+                 preflight_for=None, lab_status=_lab_status, checks=None):
         self.runs_root = Path(runs_root)
         self.config_path = Path(config_path)
         self.cfg = cfg
@@ -371,6 +374,12 @@ class WebApp:
         self._gozer_cache: tuple[float, str] | None = None
         self._lock = threading.Lock()
         self._launches: dict[str, dict] = {}
+        # preflight_for(cfg) -> preflight(model, base): built from the config at each call, so a run is judged
+        # by the config as it is now (after a Settings save) and in the mode the page asks for.
+        self._preflight_for = preflight_for
+        self._lab_status = lab_status
+        self._lab_cache: tuple[float, dict] | None = None
+        self.checks = checks or machine_checks.ChecksJob()
         self.settings_dir = Path(settings_dir) if settings_dir else CHECKOUT / "config"
         self.cpu_models = cpu_models
         self.is_installed = is_installed or TtModelList()
@@ -415,6 +424,8 @@ class WebApp:
             "toplike": {"available": bool(self.toplike_cmd), "modes": list(TOPLIKE_MODES),
                         "command": " ".join(self.toplike_cmd[-1:]) if self.toplike_cmd else None},
             "config": {"path": str(self.config_path), "runs_root": str(self.runs_root),
+                       "mode": getattr(self.cfg, "mode", "local"),
+                       "lab": getattr(getattr(self.cfg, "lab", None), "host", None),
                        "coder": None if coder is None else {"target": getattr(coder, "target", None),
                                                             "port": getattr(coder, "port", None),
                                                             "chips": getattr(coder, "chips", None)}},
@@ -433,7 +444,39 @@ class WebApp:
             "cpu_tier": {"port": CPU_TIER_PORT, "up": self.port_open(CPU_TIER_PORT)},
             "disk_free_gb": disk(self.runs_root),
             "now": self.clock(),
+            **({"lab": self._lab_group()} if getattr(self.cfg, "mode", "local") == "lab"
+               and getattr(self.cfg, "lab", None) is not None else {}),
         }
+
+    def _lab_group(self) -> dict:
+        """The lab's chips from its `gozer status` (over ssh), asked at most every LAB_TTL_S seconds."""
+        now = self.clock()
+        with self._lock:
+            if self._lab_cache is not None and now - self._lab_cache[0] < LAB_TTL_S:
+                return self._lab_cache[1]
+        lab = self.cfg.lab
+        try:
+            ok, text, err = self._lab_status(lab)
+        except Exception as exc:              # an ssh problem must not break the machine panel
+            ok, text, err = False, "", f"{type(exc).__name__}: {exc}"
+        group = {"host": lab.host, "ok": bool(ok and text.strip()), "boards": parse_gozer(text) if ok else [],
+                 "error": None if ok and text.strip() else self.redact((err or "no chips listed").strip()[-200:])}
+        with self._lock:
+            self._lab_cache = (now, group)
+        return group
+
+    def _cfg_for(self, mode):
+        if mode in (None, ""):
+            return self.cfg
+        try:
+            return bringup_config.for_mode(self.cfg, mode)
+        except bringup_config.BringupConfigError as exc:
+            raise BadRequest(str(exc)) from exc
+
+    def _checks_for(self, model, base, mode):
+        cfg = self._cfg_for(mode)
+        fn = self._preflight_for(cfg) if self._preflight_for else self._preflight
+        return fn(model, base)
 
     # ---- settings: which chip layout and which CPU stand-in (orchard/settings.py) ----
     def settings(self) -> dict:
@@ -445,16 +488,19 @@ class WebApp:
         out["running"] = [r["name"] for r in self.list_runs() if r.get("supervisor_alive")]
         return out
 
-    def save_settings(self, layout, cpu_model) -> dict:
+    def save_settings(self, layout, cpu_model, mode=None) -> dict:
         if not isinstance(layout, str) or not isinstance(cpu_model, str):
             raise BadRequest("give a layout and a CPU model")
+        if mode not in (None, *bringup_config.MODES):
+            raise BadRequest(f"mode must be one of {', '.join(bringup_config.MODES)}")
         try:
             out = settings.apply(self.config_path, self.settings_dir, layout=layout, cpu_model=cpu_model,
-                                 cpu_models=self.cpu_models, is_installed=self.is_installed)
+                                 cpu_models=self.cpu_models, is_installed=self.is_installed, mode=mode)
         except settings.SettingsError as exc:
             raise BadRequest(str(exc)) from exc
         self.cfg = bringup_config.load(self.config_path)
-        out["note"] = "Saved. The next run or retry uses these models; a running run keeps the ones it started with."
+        self._lab_cache = None
+        out["note"] = "Saved. The next run or retry uses these settings; a running run keeps the ones it started with."
         return out
 
     def health(self) -> dict:
@@ -638,9 +684,9 @@ class WebApp:
             raise BadRequest("the base must be a bundle or model id as org/name")
         return model, base or None
 
-    def preflight(self, model, base=None) -> dict:
+    def preflight(self, model, base=None, mode=None) -> dict:
         model, base = self._check_ids(model, base)
-        checks = self._preflight(model, base)
+        checks = self._checks_for(model, base, mode)
         name = bringup_config.slug(model)
         rows = []
         for c in checks:
@@ -651,18 +697,20 @@ class WebApp:
                 "resuming": (self.runs_root / name / "ledger.jsonl").is_file(),
                 "ok": not any(c.status == "block" for c in checks), "checks": rows}
 
-    def bringup(self, model, base=None) -> dict:
+    def bringup(self, model, base=None, mode=None) -> dict:
         model, base = self._check_ids(model, base)
+        self._cfg_for(mode)                               # a mode the config cannot run is refused first
         name = bringup_config.slug(model)
         if (self.runs_root / name / "ledger.jsonl").is_file():
             state = self._collect(self.runs_root / name)["state"]
             if state in ("running", "paused"):
                 raise Conflict(f"{name} is already {state}")
-        checks = self._preflight(model, base)
+        checks = self._checks_for(model, base, mode)
         stops = [c for c in checks if c.status == "block"]
         if stops:
             raise Conflict("the preflight blocks: " + ", ".join(f"{c.name} ({c.reason})" for c in stops))
-        return self._launch(name, self._bringup_argv(model, ["--base", base] if base else []))
+        extra = (["--base", base] if base else []) + (["--mode", mode] if mode else [])
+        return self._launch(name, self._bringup_argv(model, extra))
 
 
     # ---- tt-toplike ----
@@ -921,6 +969,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._toplike_stream(q)
         if segs == ["api", "settings"]:
             return self._json(200, app.settings())
+        if segs == ["api", "checks"]:
+            return self._json(200, app.checks.state())
         if segs == ["api", "launches"]:
             return self._json(200, {"launches": app.launches()})
         if segs == ["api", "runs"]:
@@ -947,11 +997,15 @@ class Handler(BaseHTTPRequestHandler):
         app = self.app
         body = self._body()
         if segs == ["api", "preflight"]:
-            return self._json(200, app.preflight(body.get("model"), body.get("base")))
+            return self._json(200, app.preflight(body.get("model"), body.get("base"), body.get("mode")))
         if segs == ["api", "bringup"]:
-            return self._json(200, app.bringup(body.get("model"), body.get("base")))
+            return self._json(200, app.bringup(body.get("model"), body.get("base"), body.get("mode")))
         if segs == ["api", "settings"]:
-            return self._json(200, app.save_settings(body.get("layout"), body.get("cpu_model")))
+            return self._json(200, app.save_settings(body.get("layout"), body.get("cpu_model"), body.get("mode")))
+        if segs == ["api", "checks"]:
+            if not app.checks.start(app.cfg, config_path=app.config_path):
+                raise Conflict("a check is already running")
+            return self._json(200, app.checks.state())
         if len(segs) == 4 and segs[:2] == ["api", "toplike"] and segs[3] == "resize":
             app.toplike_resize(segs[2], body.get("cols"), body.get("rows"))
             return self._json(200, {"ok": True})

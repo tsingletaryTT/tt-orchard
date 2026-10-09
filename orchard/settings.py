@@ -76,6 +76,8 @@ def current(cfg_path, config_dir, *, cpu_models, is_installed) -> dict:
     return {
         "config": str(cfg_path), "tiers_path": str(cfg.tiers),
         "layout": layout,
+        "mode": getattr(cfg, "mode", "local"),
+        "lab": getattr(getattr(cfg, "lab", None), "host", None),
         "coder": {k: getattr(cfg.coder, k, None) for k in CODER_FIELDS},
         "roles": [{"role": role, "tier": t, "does": does, "model": tier.get(t, {}).get("model"),
                    "endpoint": tier.get(t, {}).get("endpoint")} for role, t, does in ROLES],
@@ -110,7 +112,20 @@ def set_values(text: str, table: str, values: dict) -> str:
     return "".join(lines)
 
 
-def apply(cfg_path, config_dir, *, layout: str, cpu_model: str, cpu_models, is_installed, clock=time.time) -> dict:
+def set_top_value(text: str, key: str, value) -> str:
+    """`text` with the top-level `key = value` set: the line before the first table is replaced, or added
+    as the first line."""
+    lines = text.splitlines(keepends=True)
+    first_table = next((i for i, l in enumerate(lines) if re.match(r"^\s*\[", l)), len(lines))
+    for i in range(first_table):
+        if re.match(rf"^\s*{re.escape(key)}\s*=", lines[i]):
+            lines[i] = f"{key} = {_toml_value(value)}\n"
+            return "".join(lines)
+    return f"{key} = {_toml_value(value)}\n" + text
+
+
+def apply(cfg_path, config_dir, *, layout: str, cpu_model: str, cpu_models, is_installed, clock=time.time,
+          mode: str | None = None) -> dict:
     cfg_path = Path(cfg_path)
     preset = next((p for p in presets(config_dir) if p["name"] == layout), None)
     if preset is None:
@@ -129,6 +144,8 @@ def apply(cfg_path, config_dir, *, layout: str, cpu_model: str, cpu_models, is_i
     for name, v in preset["tiers"].items():
         t_text = set_values(t_text, f"tiers.{name}", v)
     t_text = set_values(t_text, "tiers.cpu", {"model": cpu_model})
+    if mode is not None:
+        b_text = set_top_value(b_text, "mode", mode)
 
     staged = []
     try:
@@ -160,4 +177,4 @@ def apply(cfg_path, config_dir, *, layout: str, cpu_model: str, cpu_models, is_i
         shutil.copy2(path, bak)
         backups.append(str(bak))
         os.replace(tmp, path)
-    return {"layout": layout, "cpu_model": cpu_model, "backups": backups}
+    return {"layout": layout, "cpu_model": cpu_model, "mode": mode, "backups": backups}

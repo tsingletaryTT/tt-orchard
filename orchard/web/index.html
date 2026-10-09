@@ -53,6 +53,7 @@
       <div class="rail-head">
         <h2 id="machine-h">Machine</h2>
         <span class="rail-note" id="machine-note"></span>
+        <button type="button" class="btn btn-small" id="machine-check-btn" title="Check both boxes for what a run needs">🔍 Check</button>
       </div>
       <div id="machine" class="machine"><p class="muted">Reading gozer…</p></div>
     </section>
@@ -104,6 +105,18 @@
           <select id="settings-cpu"></select>
           <span class="field-help" id="settings-cpu-help">Any model ollama has on this machine. It serves steps while the chips are busy.</span>
         </div>
+        <fieldset class="modes" id="settings-modes">
+          <legend>Where hardware tests run</legend>
+          <label class="mode-option" for="mode-local">
+            <input type="radio" name="mode" id="mode-local" value="local">
+            <span><strong>This box</strong> <span class="muted small">Everything runs here; the coder is parked while a test needs its boards.</span></span>
+          </label>
+          <label class="mode-option" for="mode-lab">
+            <input type="radio" name="mode" id="mode-lab" value="lab">
+            <span><strong>The lab box <span id="mode-lab-host"></span></strong> <span class="muted small">Tests run there; the coder here is never parked.</span></span>
+          </label>
+          <span class="field-help" id="mode-help"></span>
+        </fieldset>
         <section aria-labelledby="roles-h" class="roles-wrap">
           <h2 id="roles-h">Who uses which model</h2>
           <div class="table-wrap">
@@ -121,6 +134,14 @@
         </div>
         <p class="form-error" id="settings-error" role="alert" hidden></p>
       </form>
+      <section class="checks-wrap" aria-labelledby="checks-h">
+        <div class="checks-head">
+          <h2 id="checks-h">Check machines</h2>
+          <button type="button" class="btn" id="checks-run">🔍 Check machines</button>
+        </div>
+        <p class="muted small" id="checks-status">Runs the setup checks on this box, and on the lab when there is one. Nothing is changed: each problem shows the command that fixes it.</p>
+        <div id="checks-boxes" class="checks-boxes"></div>
+      </section>
     </section>
 
     <div id="run-empty" class="empty">
@@ -252,6 +273,14 @@
       <label for="nr-base">Base <span class="muted">(optional)</span></label>
       <input id="nr-base" name="base" type="text" placeholder="the model card's base_model" autocomplete="off" spellcheck="false">
       <p class="field-help">A tt-model bundle or model id to base the run on. Leave empty to use the model card.</p>
+    </div>
+    <div class="field">
+      <label for="nr-mode">Where the hardware tests run</label>
+      <select id="nr-mode">
+        <option value="local">This box</option>
+        <option value="lab">The lab box</option>
+      </select>
+      <span class="field-help" id="nr-mode-help"></span>
     </div>
     <p class="form-error" id="nr-error" role="alert" hidden></p>
     <div id="nr-result" class="preflight" hidden>

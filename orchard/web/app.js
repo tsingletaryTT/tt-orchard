@@ -141,22 +141,24 @@ function setConn(state) {
 // STALE needs `gozer reconcile`; anything else (HELD-FOREIGN, BUSY-UNTRACKED, ...) is a chip used outside a lease.
 const CHIP_TONE = { FREE: "good", CLAIMED: "accent", HELD: "accent", STALE: "warn" };
 
+function boardEl(b, readings) {
+  return h("div", { class: "board" },
+    h("div", { class: "board-head" }, h("span", { class: "mono", title: b.id }, `board …${b.id.slice(-6)}`), h("span", {}, b.kind)),
+    h("div", { class: "chips" }, b.chips.map((c) => h("div", {
+      class: "chip", dataset: { tone: CHIP_TONE[c.state] || "alarm" },
+      title: [c.bdf, c.owner, c.note].filter(Boolean).join(" · "),
+    }, h("strong", {}, `chip ${c.index} · ${c.state}`), h("span", { class: "owner" }, c.owner || c.bdf),
+      readings ? h("span", { class: "chip-reading", dataset: { reading: c.bdf } }) : null))));
+}
+
 function renderMachine() {
   const m = S.machine;
-  if (!m || !changed($("machine"), [m.boards, m.coder, m.cpu_tier, m.disk_free_gb, m.gozer_ok])) return;
+  if (!m || !changed($("machine"), [m.boards, m.coder, m.cpu_tier, m.disk_free_gb, m.gozer_ok, m.lab])) return;
   const box = clear($("machine"));
   if (!m.gozer_ok) {
     box.append(h("p", { class: "muted" }, "gozer did not answer. Chip leases are unknown; check `gozer status`."));
   }
-  for (const b of m.boards) {
-    box.append(h("div", { class: "board" },
-      h("div", { class: "board-head" }, h("span", { class: "mono", title: b.id }, `board …${b.id.slice(-6)}`), h("span", {}, b.kind)),
-      h("div", { class: "chips" }, b.chips.map((c) => h("div", {
-        class: "chip", dataset: { tone: CHIP_TONE[c.state] || "alarm" },
-        title: [c.bdf, c.owner, c.note].filter(Boolean).join(" · "),
-      }, h("strong", {}, `chip ${c.index} · ${c.state}`), h("span", { class: "owner" }, c.owner || c.bdf),
-        h("span", { class: "chip-reading", dataset: { reading: c.bdf } }))))));
-  }
+  for (const b of m.boards) box.append(boardEl(b, true));
   // gozer marks a chip HELD-FOREIGN when a process outside the lease owner's tree has it open. A tt-model
   // container serving under the supervisor's lease is such a process (CLAUDE.md, 2026-10-02), so say so.
   const all = m.boards.flatMap((b) => b.chips);
@@ -169,6 +171,11 @@ function renderMachine() {
     h("span", { class: "svc", dataset: { up: String(m.coder.up) } }, `coder :${m.coder.port ?? "?"} ${m.coder.up ? "up" : "down"}`),
     h("span", { class: "svc", dataset: { up: String(m.cpu_tier.up) } }, `CPU tier :${m.cpu_tier.port} ${m.cpu_tier.up ? "up" : "down"}`),
     h("span", {}, `${m.disk_free_gb} GB free`)));
+  if (m.lab) {
+    box.append(h("h3", { class: "lab-head" }, `Lab · ${m.lab.host}`));
+    if (!m.lab.ok) box.append(h("p", { class: "muted small" }, `The lab did not answer: ${m.lab.error || "no chips listed"}`));
+    for (const b of m.lab.boards) box.append(boardEl(b, false));
+  }
   const free = all.filter((c) => c.state === "FREE").length;
   $("machine-note").textContent = all.length ? `${free} of ${all.length} chips free` : "";
   renderReadings();
@@ -666,6 +673,12 @@ let lastPreflight = null;
 
 function openNewRun() {
   lastPreflight = null;
+  const cfg = (S.meta && S.meta.config) || {};
+  $("nr-mode").value = cfg.mode === "lab" && cfg.lab ? "lab" : "local";
+  $("nr-mode").querySelector('option[value="lab"]').disabled = !cfg.lab;
+  $("nr-mode").querySelector('option[value="lab"]').textContent = cfg.lab ? `The lab box (${cfg.lab})` : "The lab box (none in the config)";
+  $("nr-mode-help").textContent = cfg.lab ? `The config says ${cfg.mode === "lab" ? "the lab box" : "this box"}; this run can choose either.`
+    : "No [lab] table in the config: the run stays on this box.";
   $("nr-result").hidden = true;
   $("nr-error").hidden = true;
   $("nr-start").disabled = true;
@@ -689,7 +702,8 @@ async function runChecks() {
   $("nr-check").textContent = "Checking…";
   $("nr-start").disabled = true;
   try {
-    const out = await api("/api/preflight", { body: { model, base: base || null } });
+    const out = await api("/api/preflight", { body: { model, base: base || null, mode: $("nr-mode").value } });
+    out.mode = $("nr-mode").value;
     lastPreflight = out;
     renderPreflight(out);
   } catch (err) {
@@ -728,12 +742,12 @@ function renderPreflight(out) {
 async function startBringup() {
   if (!lastPreflight || !lastPreflight.ok) return;
   const model = $("nr-model").value.trim(), base = $("nr-base").value.trim();
-  if (model !== lastPreflight.model || (base || null) !== lastPreflight.base) {
-    formError("The model or base changed since the checks ran. Run the checks again."); return;
+  if (model !== lastPreflight.model || (base || null) !== lastPreflight.base || $("nr-mode").value !== lastPreflight.mode) {
+    formError("The model, base or mode changed since the checks ran. Run the checks again."); return;
   }
   $("nr-start").disabled = true;
   try {
-    const out = await api("/api/bringup", { body: { model, base: base || null } });
+    const out = await api("/api/bringup", { body: { model, base: base || null, mode: $("nr-mode").value } });
     $("new-run").close();
     toast(`Started ${model} (pid ${out.pid}). It shows in the run list once its ledger exists; the download can take a while.`);
     S.startingRun = out.run;
@@ -752,6 +766,9 @@ function wire() {
   $("view-hardware-btn").addEventListener("click", () => setView("hardware"));
   $("view-settings-btn").addEventListener("click", () => setView("settings"));
   $("settings-form").addEventListener("submit", saveSettings);
+  $("checks-run").addEventListener("click", startChecks);
+  $("machine-check-btn").addEventListener("click", () => { setView("settings"); startChecks(); });
+  $("nr-mode").addEventListener("change", () => { $("nr-start").disabled = true; });
   $("hw-zoom-in").addEventListener("click", () => zoomToplike(+1));
   $("hw-zoom-out").addEventListener("click", () => zoomToplike(-1));
   $("hw-wide").addEventListener("click", () => {
@@ -832,8 +849,64 @@ function setView(view, { push = true } = {}) {
 // The server offers the QuietBox 2 layouts setup ships (orchard/settings.py) and saves a choice only after the
 // supervisor's own loaders accept it. A change applies to the next run or retry.
 
+// ---- Check machines: setup's checks, read-only, for this box and the lab ------------------------------
+
+const CHECK_TONE = { ok: "ok", warn: "warn", todo: "warn", fail: "block" };
+let checksTimer = null;
+
+async function startChecks() {
+  $("checks-run").disabled = true;
+  try {
+    renderChecks(await api("/api/checks", { body: {} }));
+  } catch (err) {
+    $("checks-run").disabled = false;
+    $("checks-status").textContent = err.message;
+    return;
+  }
+  pollChecks();
+}
+
+async function pollChecks() {
+  clearTimeout(checksTimer);
+  try {
+    const st = await api("/api/checks");
+    renderChecks(st);
+    if (st.running) checksTimer = setTimeout(pollChecks, 1500);
+  } catch (err) {
+    $("checks-status").textContent = err.message;
+  }
+}
+
+function copyButton(text) {
+  return h("button", { type: "button", class: "btn btn-small", onclick: (ev) => {
+    const done = () => { ev.target.textContent = "Copied"; setTimeout(() => { ev.target.textContent = "Copy"; }, 1500); };
+    if (navigator.clipboard) navigator.clipboard.writeText(text).then(done, () => {});
+  } }, "Copy");
+}
+
+function renderChecks(st) {
+  $("checks-run").disabled = Boolean(st.running);
+  const when = (t) => new Date(t * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  $("checks-status").textContent = st.running ? "Checking… (an import test and the lab's ssh calls take a minute)"
+    : st.error ? `The check failed: ${st.error}`
+    : st.finished ? `Checked at ${when(st.finished)}. Nothing was changed.`
+    : "Runs the setup checks on this box, and on the lab when there is one. Nothing is changed: each problem shows the command that fixes it.";
+  const box = clear($("checks-boxes"));
+  for (const b of st.boxes || []) {
+    const bad = b.steps.filter((x) => x.status !== "ok").length;
+    box.append(h("div", { class: "checkbox-panel" },
+      h("h3", {}, `${b.name} `, h("span", { class: "muted small" }, bad ? `${bad} to look at` : "ready")),
+      h("ul", { class: "checks" }, b.steps.map((x) => h("li", { class: "check", dataset: { status: CHECK_TONE[x.status] || "warn" } },
+        h("span", { class: "mark", "aria-label": x.status }, CHECK_MARK[CHECK_TONE[x.status]] || "!"),
+        h("span", { class: "name" }, x.name),
+        h("span", { class: "detail" }, x.detail,
+          x.fix.map((f) => h("span", { class: "fix" }, h("code", {}, f), copyButton(f)))))))));
+  }
+}
+
 async function loadSettings() {
   $("settings-error").hidden = true;
+  pollChecks();
   try {
     S.settings = await api("/api/settings");
   } catch (err) {
@@ -875,6 +948,12 @@ function renderSettings() {
   $("settings-cpu-help").textContent = st.cpu_models.length
     ? "Any model ollama has on this machine. It serves steps while the chips are busy."
     : "ollama did not answer, so no CPU model can be picked. Start it (ollama serve) and reload.";
+  $("mode-local").checked = st.mode !== "lab";
+  $("mode-lab").checked = st.mode === "lab";
+  $("mode-lab").disabled = !st.lab;
+  $("mode-lab-host").textContent = st.lab ? `(${st.lab})` : "";
+  $("mode-help").textContent = st.lab ? "A bring-up can still choose the other mode for itself."
+    : "There is no [lab] table in the config, so every run stays on this box. README 5.9 says how to add a lab.";
   $("settings-files").textContent = `Saved to ${st.config} and ${st.tiers_path}, with a dated copy of each.`;
   const running = $("settings-running");
   running.hidden = !st.running.length;
@@ -912,7 +991,8 @@ async function saveSettings(ev) {
   const btn = $("settings-save");
   btn.disabled = true;
   try {
-    const out = await api("/api/settings", { body: { layout: picked.value, cpu_model: $("settings-cpu").value } });
+    const mode = $("mode-lab").checked ? "lab" : "local";
+    const out = await api("/api/settings", { body: { layout: picked.value, cpu_model: $("settings-cpu").value, mode } });
     toast(out.note);
     S.meta = await api("/api/meta");
     await loadSettings();

@@ -275,7 +275,7 @@ def _ui(args, env, home, out) -> int:
         cfg = bringup_config.load(path)
     except (NoConfig, bringup_config.BringupConfigError) as exc:
         return _refuse(str(exc))
-    app = webui.WebApp(runs_root=cfg.runs_root, config_path=path, cfg=cfg, preflight=_ui_preflight(cfg),
+    app = webui.WebApp(runs_root=cfg.runs_root, config_path=path, cfg=cfg, preflight_for=_ui_preflight,
                        lan=args.lan, toplike=_toplike_argv(args.toplike))
     try:
         server = webui.make_server(app, host, args.port)
