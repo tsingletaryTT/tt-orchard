@@ -6,6 +6,7 @@
     tt-orchard status   [MODEL | --run-dir DIR] [--json] [--style S]
     tt-orchard watch    [MODEL | --run-dir DIR] [--all] [--once] [--style S]
     tt-orchard pause | resume | abort   [MODEL | --run-dir DIR]
+    tt-orchard lab setup [--model ORG/NAME]... [--yes] [--check]
 
 It is a thin layer over `python3 -m orchard.supervisor`. `bringup` reads config/bringup.toml, checks what
 can be checked without a lease (orchard/preflight.py), fetches the model snapshot when it is not local
@@ -94,6 +95,10 @@ def _parser() -> argparse.ArgumentParser:
         c = sub.add_parser(word, parents=[common], help=f"send {word} to a running supervisor")
         c.add_argument("model", nargs="?")
         c.add_argument("--run-dir")
+    lab = sub.add_parser("lab", parents=[common], help="get the [lab] box ready for runs whose hardware tests "
+                                                       "run there (`lab setup --help`)")
+    lab.add_argument("action", choices=["setup"])
+    lab.add_argument("rest", nargs=argparse.REMAINDER, help="options for the action")
     return p
 
 
@@ -205,6 +210,14 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
     def config():
         return bringup_config.load(find_config(getattr(args, "config", None), env, CHECKOUT, home)), \
             find_config(getattr(args, "config", None), env, CHECKOUT, home)
+
+    if args.cmd == "lab":
+        from orchard import lab_setup
+        try:
+            cfg, _ = config()
+        except (NoConfig, bringup_config.BringupConfigError) as exc:
+            return _refuse(str(exc))
+        return lab_setup.main(args.rest, cfg=cfg)
 
     # status and the control words only need a run directory.
     if args.cmd != "bringup":

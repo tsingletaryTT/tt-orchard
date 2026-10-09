@@ -36,7 +36,18 @@ or TODO.
 Two tested scripts do all of the work. You copy them and give them one config file. You do not
 write a script.
 
-- Write `swap_config.json` FIRST, as soon as you know the facts below.
+- The supervisor has usually written `swap_config.json` already, and copied `prepare_swap.py` and
+  `serve_and_compare.py` into your stage directory: every fact in it is one the run already holds.
+  If `stages/2/swap_config.json` exists, read it once and use it as it is. Do not look for the
+  bundle, the snapshots or a port yourself: skip finding the facts and writing the swap config, and
+  do not copy the two swap templates again. Change a value only when `prepare_swap.py` exits 2 and
+  its message names that value.
+- If `swap_config.json` does not exist, write it FIRST, as soon as you know the facts (see
+  "When there is no swap_config.json").
+- The nearest model is a vision-language model: its bundle's `vllm_metadata.json` names
+  `Qwen3_5ForConditionalGeneration`, and the new model's `config.json` may name
+  `Qwen3_5ForCausalLM`. That difference is expected on this path and needs nothing from you:
+  `prepare_swap.py` copies the nearest model's config files (fact 1 below). Do not investigate it.
 - Write each file as soon as you know its content. Do not wait until the end.
 - Do not investigate anything this skill does not list. On an earlier run the model spent 60 turns
   grepping vLLM source for an unrelated timeout and wrote nothing.
@@ -70,6 +81,23 @@ Four facts decide whether a swap works. Each was found by failing first.
 
 ## Prepare phase: the steps
 
+1. Read `stages/2/swap_config.json`. The supervisor wrote it before you started, from facts the run
+   already holds, and copied `prepare_swap.py` and `serve_and_compare.py` next to it. Use it as it
+   is: do not look for the bundle, the snapshots or a port, and do not run `tt-model list`. Only if
+   the file does not exist, do the steps under "When there is no swap_config.json" below first.
+2. Run `python3 stages/2/prepare_swap.py`. It builds `stages/2/model-dir/` and `stages/2/run.sh` and
+   prints a summary. Exit 2 means an edit of `run.sh` did not apply or a fact does not fit; its
+   message names it. Fix that value in `swap_config.json` and run it again.
+3. Check that `stages/2/model-dir` and `stages/2/run.sh` exist (`ls -l`).
+4. Write `hw_test.json`: `{"command": "python3 stages/2/serve_and_compare.py", "deadline_s": 3600}`.
+5. Write `handoff.json` and reply with a short summary.
+
+Do not run `serve_and_compare.py` yourself. The supervisor runs it on a leased board.
+
+## When there is no swap_config.json
+
+Only then. The supervisor writes it whenever it can.
+
 1. Find four facts with a few commands:
    - `bundle_dir`: the installed `tt-model` bundle that serves the nearest model. Read
      `delta.json` for `nearest_model` and its `architecture`. Run `tt-model list`, then read
@@ -102,18 +130,9 @@ Four facts decide whether a swap works. Each was found by failing first.
    `{{OPERATOR_HOME}}/.cache/qwen36-src-build/...`. `hf_home` is the operator's Hugging Face cache
    on this machine. Your shell's HOME points somewhere else, so write the path out as shown. It
    holds the drafter the run script names in `DFLASH_WEIGHTS`.
-3. Copy the two templates into your stage directory:
+3. Copy the two swap templates into your stage directory:
 
        cp {{ORCHARD_DIR}}/orchard/skills/weights-swap-templates/prepare_swap.py {{ORCHARD_DIR}}/orchard/skills/weights-swap-templates/serve_and_compare.py stages/2/
-
-4. Run `python3 stages/2/prepare_swap.py`. It builds `stages/2/model-dir/` and `stages/2/run.sh` and
-   prints a summary. Exit 2 means an edit of `run.sh` did not apply; its message names the edit.
-   Fix the fact in `swap_config.json` that it points to and run it again.
-5. Check that `stages/2/model-dir` and `stages/2/run.sh` exist (`ls -l`).
-6. Write `hw_test.json`: `{"command": "python3 stages/2/serve_and_compare.py", "deadline_s": 3600}`.
-7. Write `handoff.json` and reply with a short summary.
-
-Do not run `serve_and_compare.py` yourself. The supervisor runs it on a leased board.
 
 ## What serve_and_compare.py measures
 

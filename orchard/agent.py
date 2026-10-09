@@ -150,6 +150,9 @@ def _kill_session(proc) -> None:
     proc.wait()
 
 
+READ_FILE_MAX_BYTES = 16 * 1024 * 1024    # choice: read_file loads a file whole to page through it
+
+
 def clip(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
@@ -180,9 +183,13 @@ TOOL_SCHEMAS = [
     {"type": "function", "function": {
         "name": "read_file",
         "description": ("Read a text file inside the run directory (read only). The path is relative to "
-                        "the run directory, or to your stage directory when it is not found there. Long "
-                        "files are cut in the middle."),
-        "parameters": {"type": "object", "properties": {"path": {"type": "string"}},
+                        "the run directory, or to your stage directory when it is not found there. A long "
+                        "file comes back one page at a time: the page ends with the offset to pass to "
+                        "read the next one."),
+        "parameters": {"type": "object", "properties": {"path": {"type": "string"},
+                                                        "offset": {"type": "integer",
+                                                                   "description": "first character to read "
+                                                                                  "(default 0)"}},
                        "required": ["path"]}}},
     {"type": "function", "function": {
         "name": "write_file",
@@ -209,7 +216,7 @@ class Tools:
         if name == "shell":
             return self.shell(args.get("command"))
         if name == "read_file":
-            return self.read_file(args.get("path"))
+            return self.read_file(args.get("path"), args.get("offset", 0))
         if name == "write_file":
             return self.write_file(args.get("path"), args.get("content"))
         return f"error: there is no tool named {name!r}; the tools are shell, read_file and write_file"
@@ -244,12 +251,18 @@ class Tools:
             return None
         return Path(p)
 
-    def read_file(self, path) -> str:
+    def read_file(self, path, offset=0) -> str:
         """Read a text file that lies inside the run directory. A path is tried against the run directory
         first and the stage directory second, because models write both. Links are resolved before the
-        check, so a link out of the run directory is refused. Nothing is written."""
+        check, so a link out of the run directory is refused. Nothing is written.
+
+        A file longer than the output limit comes back one page from `offset`, with a footer that says
+        where the page sits in the file and the offset of the next page. (It used to be cut in the
+        middle, and an agent that needed the middle read the same view again and again.)"""
         if not isinstance(path, str) or not path.strip():
             return "error: path must be a non-empty string"
+        if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+            return "error: offset must be a whole number of characters, 0 or more"
         root = os.path.realpath(self.run_dir)
         bases = (root, os.path.realpath(self.stage_dir))
         found = None
@@ -265,11 +278,28 @@ class Tools:
                     f"{self.stage_dir}")
         if os.path.isdir(found):
             return f"error: {path!r} is a directory; use shell with ls to list it"
+        size = os.path.getsize(found)
+        if size > READ_FILE_MAX_BYTES:
+            return (f"error: {path} is {size} bytes, too large to read page by page; use shell to read "
+                    "parts of it (grep, head -c, tail -c, jq)")
         with open(found, "rb") as f:
-            raw = f.read(self.limit * 4 + 4)               # bounded: a huge file is cut, not loaded
-        return clip(raw.decode("utf-8", errors="replace"), self.limit)
+            text = f.read().decode("utf-8", errors="replace")
+        if offset == 0 and len(text) <= self.limit:
+            return text
+        if offset >= len(text):
+            return f"error: offset {offset} is at or past the end of the file ({len(text)} characters)"
+        end = min(offset + self.limit, len(text))
+        if end == len(text):
+            footer = f"[characters {offset} to {end} of {len(text)}: the end of the file]"
+        else:
+            footer = (f"[characters {offset} to {end} of {len(text)}; read on with read_file offset={end}, "
+                      "or use shell (grep, jq) to find one field]")
+        return f"{text[offset:end]}\n{footer}"
 
     def write_file(self, path, content) -> str:
+        if not isinstance(path, str) or not path.strip():
+            return ("error: write_file needs a path (a file in your stage directory, such as handoff.json) "
+                    "and the content")
         if not isinstance(content, str):
             return "error: content must be a string"
         p = self.target(path)
@@ -277,9 +307,16 @@ class Tools:
             return f"refused: {path!r} is outside your stage directory {self.stage_dir}"
         if p.name.startswith("ledger"):
             return "refused: the ledger is written only by the supervisor"
+        rel = os.path.relpath(p, os.path.realpath(self.run_dir))
+        # A repeat of the last write is answered, not done: an agent that has finished sometimes writes
+        # the same file again and again instead of ending the step (the first lab run).
+        if p.is_file() and p.read_text(encoding="utf-8", errors="replace") == content:
+            return (f"unchanged: {rel} already holds exactly this content; nothing was written. If every "
+                    "file this step needs is written, end the step now: reply with a short summary and no "
+                    "tool call.")
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
-        return f"wrote {len(content)} characters to {os.path.relpath(p, os.path.realpath(self.run_dir))}"
+        return f"wrote {len(content)} characters to {rel}"
 
 
 # ---- the model endpoint -------------------------------------------------------------------------
@@ -323,7 +360,7 @@ class AgentStep:
                  phase: str, feed, control, run_dir, evidence_dir, log_path, http=post_json,
                  clock=time.time, guard: RetryGuard | None = None, max_turns: int = AGENT_MAX_TURNS,
                  max_tokens: int = AGENT_MAX_TOKENS, timeout: float = AGENT_REQUEST_TIMEOUT_S,
-                 thinking: bool = AGENT_THINKING):
+                 thinking: bool = AGENT_THINKING, finished=None):
         self.agent, self.endpoint, self.model, self.tools = agent, endpoint, model, tools
         self.ledger, self.stage, self.phase = ledger, stage, phase
         self.feed, self.control, self.http, self.clock = feed, control, http, clock
@@ -332,6 +369,10 @@ class AgentStep:
         self.guard = guard if guard is not None else RetryGuard()
         self.max_turns, self.max_tokens, self.timeout = max_turns, max_tokens, timeout
         self.thinking = thinking     # False sends enable_thinking=false (see defaults.AGENT_THINKING)
+        # finished() -> bool: are this step's files written and valid (the supervisor's check)? When it
+        # is true and the agent writes a file again unchanged, the step ends as done: an agent that has
+        # finished sometimes repeats its last write instead of ending (the first lab run).
+        self.finished = finished
         self._seen: dict[str, tuple[int, int]] = {}
         # The model turn number on every Event this step feeds the watchdog. It counts up through
         # `run` and `continue_with`, so a continuation's turns never reuse an earlier number.
@@ -504,6 +545,7 @@ class AgentStep:
             bad_run = []
             if not calls:
                 return self._end(self.control.stop_reason() or "done", turn, final_text=content)
+            repeated = False
             for call in calls:
                 fn = call.get("function") if isinstance(call.get("function"), dict) else {}
                 name, args = str(fn.get("name", "")), fn.get("arguments") or "{}"
@@ -515,4 +557,16 @@ class AgentStep:
                 self._event("tool_result", tool=name, output_hash=sha(result),
                             wrote=result.startswith("wrote ") if name == "write_file" else None)
                 self._record_new_evidence()
+                repeated = repeated or (name == "write_file" and result.startswith("unchanged:"))
+            if repeated and self.finished is not None and self._finished():
+                self.ledger.append("decision", self.stage, decision="step finished: repeated write",
+                                   phase=self.phase, turn=turn)
+                return self._end("done", turn, detail="the step's files were written and valid, and the agent "
+                                                      "wrote them again unchanged instead of ending")
         return self._end("turns", max_turns, detail=f"no final answer after {max_turns} turns")
+
+    def _finished(self) -> bool:
+        try:
+            return bool(self.finished())
+        except Exception:                # a check that fails is not a finished step
+            return False

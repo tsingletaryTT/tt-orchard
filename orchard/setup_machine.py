@@ -64,8 +64,11 @@ class Action:
     ("spawn", argv, log_path)."""
     kind: str
     args: tuple
+    label: str | None = None      # what to print instead of a long argv (an inline script)
 
     def describe(self) -> str:
+        if self.label is not None:
+            return self.label
         if self.kind == "run":
             return " ".join(self.args[0])
         if self.kind == "write":

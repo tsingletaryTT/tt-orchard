@@ -273,3 +273,59 @@ def test_without_a_reference_python_no_such_input_is_passed(tmp_path):
 def test_an_empty_reference_python_is_refused(tmp_path):
     with pytest.raises(bc.BringupConfigError, match="reference_python"):
         load(tmp_path, 'reference_python = ""\n' + MINIMAL)
+
+
+# ---- a lab box (`[lab]`) ------------------------------------------------------------------------
+
+LAB = """
+runs_root = "/srv/orchard/runs"
+cache_root = "/srv/orchard/cache"
+hf_home = "/srv/orchard/hf"
+tt_model_root = "/srv/orchard/tt-model/models"
+required_chips = "1,2"
+
+[coder]
+target = "raahemnabeel/qwen3-coder-next-blackhole"
+profile = "p300"
+port = 8001
+chips = 2
+
+[lab]
+host = "node4"
+root = "/srv/orchard"
+path = ["~/.local/bin", "~/.tenstorrent-venv/bin"]
+test_python = "/srv/orchard/venvs/reference/bin/python"
+"""
+
+
+def test_a_lab_table_loads_and_becomes_the_supervisors_lab_flags(tmp_path):
+    cfg = load(tmp_path, LAB)
+    assert cfg.lab.host == "node4" and cfg.lab.root == Path("/srv/orchard")
+    assert cfg.lab.gozer == "gozer" and cfg.lab.python == "python3"
+    assert cfg.tt_model_root == Path("/srv/orchard/tt-model/models")
+    argv = bc.supervisor_argv(cfg, "Altworld/Hemmingway-1")
+    pairs = list(zip(argv, argv[1:]))
+    assert ("--lab", "node4") in pairs and ("--lab-root", "/srv/orchard") in pairs
+    assert ("--tt-model-root", "/srv/orchard/tt-model/models") in pairs
+    assert ("--lab-path", "~/.local/bin") in pairs and ("--lab-path", "~/.tenstorrent-venv/bin") in pairs
+    assert ("--lab-test-python", "/srv/orchard/venvs/reference/bin/python") in pairs
+    args = supervisor.parse(argv)                       # the supervisor accepts every flag it is given
+    assert args.lab == "node4" and args.lab_path == ["~/.local/bin", "~/.tenstorrent-venv/bin"]
+
+
+def test_without_a_lab_table_no_lab_flag_is_passed(tmp_path):
+    argv = bc.supervisor_argv(load(tmp_path), "Altworld/Hemmingway-1")
+    assert not [a for a in argv if a.startswith("--lab")]
+
+
+@pytest.mark.parametrize("table,message", [
+    ('[lab]\nroot = "/srv/orchard"\n', "host"),
+    ('[lab]\nhost = "node4"\n', "root"),
+    ('[lab]\nhost = "node4"\nroot = "relative/dir"\n', "absolute"),
+    ('[lab]\nhost = "node4"\nroot = "/srv/orchard"\nhostname = "x"\n', "hostname"),
+    ('[lab]\nhost = "-oProxyCommand=evil"\nroot = "/srv/orchard"\n', "host"),
+    ('[lab]\nhost = "node4"\nroot = "/srv/orchard"\npath = "~/.local/bin"\n', "list"),
+])
+def test_a_bad_lab_table_is_refused(tmp_path, table, message):
+    with pytest.raises(bc.BringupConfigError, match=message):
+        load(tmp_path, MINIMAL + table)
