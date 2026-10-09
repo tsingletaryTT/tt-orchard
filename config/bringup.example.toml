@@ -52,3 +52,4 @@ target = "CHANGE-ME/coder-package"
 port = 8000
 chips = 4
 # image_id = ""
+# keep_up = false          # lab mode: leave the coder serving for the next run (README 5.9)

@@ -1113,7 +1113,7 @@ def coder_state(entries: list[dict]) -> tuple[dict | None, dict | None, dict | N
     lease = server = canary = None
     for e in entries:
         d = e["data"]
-        own = e["event"] == "decision" and d.get("decision") in ("coder starting", "coder started")
+        own = e["event"] == "decision" and d.get("decision") in ("coder starting", "coder adopted", "coder started")
         if e["event"] in ("park", "restore") or own:
             if isinstance(d.get("lease"), dict):
                 lease = d["lease"]

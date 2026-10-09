@@ -544,7 +544,7 @@ with a suggestion. The file is found from `--config`, then `$ORCHARD_BRINGUP_CON
 ```text
 python3 -m orchard.supervisor run --model MODEL --run-dir RUN_DIR --tiers TIERS
     --coder-target CODER_TARGET [--coder-kind {container,bundle}] [--coder-profile CODER_PROFILE]
-    --coder-port CODER_PORT --coder-chips CODER_CHIPS [--coder-image-id CODER_IMAGE_ID]
+    --coder-port CODER_PORT --coder-chips CODER_CHIPS [--coder-image-id CODER_IMAGE_ID] [--coder-keep-up]
     [--skills-dir SKILLS_DIR] [--input NAME=PATH] [--env NAME=VALUE]
     [--required-chips N,N] [--four-chip-package ORG/NAME] [--cache-root DIR] [--hf-home DIR] [--operator-home DIR]
     [--package-format {v6,v5.1}] [--package-namespace NS] [--package-models-root DIR]
@@ -562,6 +562,7 @@ python3 -m orchard.supervisor run --model MODEL --run-dir RUN_DIR --tiers TIERS
 | `--coder-port` | yes | The port the coder serves on. Exactly one `chips` tier in the config must use this port, and the coder must list that tier's `model` at `/v1/models` |
 | `--coder-chips` | yes | How many chips the coder uses. gozer leases whole boards of two chips |
 | `--coder-image-id` | no | The container image id `tt-model list` prints. It helps the supervisor recognise the coder's container in `docker ps` when it confirms a stop |
+| `--coder-keep-up` | no | Lab mode only: leave the coder serving at the end of the run and use a coder an earlier run left up (`[coder] keep_up`, section 5.9) |
 | `--skills-dir` | no, repeatable | More skill directories, searched after `orchard/skills`. Stages on the full-port path use skills from the `tt-model-bringup` plugin (for example `functional-decoder`, `full-model`, `mesh-shrink`), so pass that plugin's `skills` directory. A stage whose skill cannot be found blocks |
 | `--input` | no, repeatable | `NAME=PATH` facts every agent prompt lists, for example `model=<MODEL_SNAPSHOT_DIR>`. Anything you pass here, every agent sees |
 | `--env` | no, repeatable | `NAME=VALUE` variables for agent shells, for example `HF_HOME` and `HF_HUB_OFFLINE=1`. Names that look like credentials are refused |
@@ -954,6 +955,22 @@ sudo mkdir -p /srv/orchard && sudo chown "$USER" /srv/orchard      # once on the
 and the run's `runs_root`, `cache_root`, `hf_home` and `tt_model_root` sit under it. Stage 7
 (`--package-format`) is refused with `--lab` for now: its boot check and install would have to run on
 the lab. A stage 4 configuration needs the lab to have that many chips.
+
+**Keep the coder up between lab runs.** Booting the coder is the largest fixed cost of a warm lab run
+(about 6.5 minutes of 31). With `keep_up = true` under `[coder]` (lab mode only), a run that ends ready
+or blocked with a healthy coder leaves it serving: the supervisor gives up its own lease without a
+reset and has gozer adopt the coder's board, so the lease is judged by the container's processes
+and outlives the run (`gozer status` shows `orchard:coder-kept`). It writes
+`<cache_root>/coder/kept.json`. The next run uses that coder with no boot when it is the same coder
+(target, kind, port, profile, image, model and chips), the port lists the model, gozer shows the board
+held by it, and its canary answer equals the one it gave when first started. Otherwise the run records
+`kept coder not used` with the reason and never stops it. An abort or a signal still stops the coder.
+In local mode the setting is ignored, because tests park the coder for its board anyway.
+
+```bash
+tt-orchard coder status        # the kept coder, its lease, and whether it serves
+tt-orchard coder stop          # stop it and free its chips (asks first; --yes to skip)
+```
 
 ### 5.10 Tensor caches and disk
 

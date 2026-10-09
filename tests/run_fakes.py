@@ -21,7 +21,7 @@ import time
 
 from fake_model import call, final, turn
 from fakes import Crash, FakeClock
-from orchard.adapters import ChipState, Lease, LeaseLost, Queued, Refused
+from orchard.adapters import AdapterError, ChipState, Lease, LeaseLost, Queued, Refused
 from orchard.defaults import FIRST_BOOT_PROMPT
 from orchard.ledger import Ledger
 from orchard.server import NotReady, StopCheck
@@ -65,6 +65,9 @@ class Machine:
         return set(self.coder_chips) if self.coder_running else set()
 
 
+KEPT_PID = 4321                      # the kept coder's container process, as gozer sees it
+
+
 class MachineAdapter:
     def __init__(self, machine: Machine, owner_pid=None):
         self.m = machine
@@ -100,14 +103,27 @@ class MachineAdapter:
     def cancel(self, ticket):
         self.calls.append(("cancel", ticket))
 
-    def release(self, lease):
-        self.calls.append(("release", lease.lease_id))
+    def release(self, lease, keep_running=False):
+        self.calls.append(("release-keep" if keep_running else "release", lease.lease_id))
         if lease.lease_id not in self.m.leases:
             raise LeaseLost(f"no lease {lease.lease_id}")
-        if set(lease.chips) & self.m.held():
+        if not keep_running and set(lease.chips) & self.m.held():
             raise Refused("device still open")
         del self.m.leases[lease.lease_id]
-        self.m.resets.append(("release", lease.lease_id))
+        if not keep_running:
+            self.m.resets.append(("release", lease.lease_id))
+
+    def adopt(self, unit, who, reason):
+        """gozer adopt: a lease judged by the processes holding the board (KEPT_PID), not a supervisor."""
+        self.calls.append(("adopt", unit))
+        chips = tuple(BOARDS[unit])
+        if not set(chips) <= self.m.held() or any(set(chips) & set(l.chips) for l, _ in self.m.leases.values()):
+            raise AdapterError(f"gozer adopt {unit} exited 12: not held, or already leased")
+        self.m.n += 1
+        lease = Lease(f"A{self.m.n}", chips, tuple(DEV[c] for c in chips),
+                      {"TT_VISIBLE_DEVICES": ",".join(chips)}, (unit,))
+        self.m.leases[lease.lease_id] = (lease, ("adopted", who))
+        return lease.lease_id, [KEPT_PID]
 
     def reset(self, lease):
         self.calls.append(("reset", lease.lease_id))
@@ -128,6 +144,10 @@ class MachineAdapter:
                                          board=board, dev_index=DEV[c]))
                     continue
                 owner = owner_of[c]
+                if isinstance(owner, tuple):             # an adopted lease: judged by the holder
+                    out.append(ChipState(c, "HELD" if c in held else "STALE", owner[1], board=board,
+                                         dev_index=DEV[c], lease_pid=KEPT_PID))
+                    continue
                 state = ("HELD-FOREIGN" if c in held else
                          "CLAIMED" if owner == self.m.owner_pid else "STALE")
                 out.append(ChipState(c, state, "orchard", board=board, dev_index=DEV[c],

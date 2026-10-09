@@ -148,7 +148,10 @@ def check_tiers(load: Callable, path: Path, coder_port: int) -> Check:
     return Check("tiers", OK, f"tier {on_port[0]!r} serves on port {coder_port}")
 
 
-def check_port(port: int, in_use: bool, resuming: bool = False) -> Check:
+def check_port(port: int, in_use: bool, resuming: bool = False, kept: bool = False) -> Check:
+    if in_use and kept:
+        return Check("port", OK, f"the coder an earlier lab run kept up listens on port {port}; the run checks "
+                     "it and uses it (`tt-orchard coder stop` stops it)")
     if in_use and resuming:
         return Check("port", WARN, f"something listens on the coder port {port}. This run is resuming, so it "
                      "may be this run's own coder; the supervisor stops it on recovery")
@@ -156,6 +159,16 @@ def check_port(port: int, in_use: bool, resuming: bool = False) -> Check:
         return Check("port", BLOCK, f"something already listens on the coder port {port}; stop it or "
                      "change coder.port", "coder-unusable")
     return Check("port", OK, f"coder port {port} is free")
+
+
+def _kept_on_port(cfg) -> bool:
+    """A lab run with keep_up, and a kept coder recorded for this port (orchard/kept_coder.py)."""
+    if getattr(cfg, "mode", "local") != "lab" or not getattr(cfg.coder, "keep_up", False):
+        return False
+    from orchard import kept_coder
+    from orchard.caches import cache_root_of
+    rec = kept_coder.read(cache_root_of(cfg)) or {}
+    return (rec.get("identity") or {}).get("port") == cfg.coder.port
 
 
 def check_reference(python: Path | None, problem: str | None) -> Check:
@@ -336,7 +349,8 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
     guarded("credentials", "credentials-needed",
             lambda: check_credentials(list(s.credentials()), accept_credentials))
     guarded("tiers", "config-invalid", lambda: check_tiers(s.load_tiers, Path(cfg.tiers), cfg.coder.port))
-    guarded("port", "coder-unusable", lambda: check_port(cfg.coder.port, bool(s.port_in_use(cfg.coder.port)), resuming))
+    guarded("port", "coder-unusable", lambda: check_port(cfg.coder.port, bool(s.port_in_use(cfg.coder.port)), resuming,
+                                                          kept=_kept_on_port(cfg)))
     guarded("gozer", "hardware-unhealthy", lambda: check_gozer(s.gozer_status()))
     if getattr(cfg, "mode", "local") == "lab" and getattr(cfg, "lab", None) is not None and s.lab_status is not None:
         guarded("lab", "hardware-unhealthy", lambda: check_lab(cfg.lab, s.lab_status()))

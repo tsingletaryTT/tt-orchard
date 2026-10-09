@@ -89,6 +89,12 @@ def _decision(e: dict, d: dict) -> list[Line]:
                         "boot can take 10 minutes or more")]
     if what == "coder started":
         return [Line(o, "the coder is ready (it answered the canary question)")]
+    if what == "coder adopted":
+        return [Line(o, "using the coder an earlier run kept up (no boot); checking its canary answer")]
+    if what == "kept coder not used":
+        return [Line(o, f"not using the kept coder: {d.get('reason', '?')}")]
+    if what == "coder left up":
+        return [Line(o, "left the coder serving for the next run (`tt-orchard coder stop` stops it)")]
     if what == "lease granted":
         return [Line(o, f"lease {d.get('lease_id', '?')} granted on {', '.join(d.get('chips') or []) or '?'} "
                         f"(waited {d.get('waited_s', 0)}s)")]

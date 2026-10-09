@@ -1209,3 +1209,11 @@ def test_only_the_layouts_own_substitution_is_quiet():
     assert not quiet_substitute(cfg, None, "large", "small")
     cfg.tiers["other"]["model"] = "m"
     assert not quiet_substitute(cfg, "small", "other", "large")         # not the coder serving it
+
+
+def test_keep_up_is_for_lab_mode_only(rig):
+    # In local mode tests park the coder for its board, so a run never leaves it up.
+    rig.args.coder_keep_up = True
+    assert rig.run() == EXIT_READY
+    assert not rig.m.coder_running and rig.m.leases == {}
+    assert not [d for d in rig.decisions() if d.get("decision") == "coder left up"]

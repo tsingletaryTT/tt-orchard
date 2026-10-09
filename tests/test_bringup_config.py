@@ -372,3 +372,18 @@ def test_for_mode_overrides_the_config_in_both_directions(tmp_path):
         bc.for_mode(load(tmp_path), "lab")
     with pytest.raises(bc.BringupConfigError, match="mode"):
         bc.for_mode(lab_cfg, "remote")
+
+
+def test_coder_keep_up_is_passed_in_lab_mode_only(tmp_path):
+    kept = LAB.replace("chips = 2\n", "chips = 2\nkeep_up = true\n", 1)
+    cfg = load(tmp_path, kept)
+    assert cfg.coder.keep_up is True
+    argv = bc.supervisor_argv(cfg, "Altworld/Hemmingway-1")
+    assert "--coder-keep-up" in argv and supervisor.parse(argv).coder_keep_up
+    assert "--coder-keep-up" not in bc.supervisor_argv(bc.for_mode(cfg, "local"), "Altworld/Hemmingway-1")
+    assert load(tmp_path, LAB).coder.keep_up is False
+
+
+def test_coder_keep_up_must_be_true_or_false(tmp_path):
+    with pytest.raises(bc.BringupConfigError, match="coder.keep_up must be true or false"):
+        load(tmp_path, LAB.replace("chips = 2\n", 'chips = 2\nkeep_up = "yes"\n', 1))
