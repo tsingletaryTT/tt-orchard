@@ -98,6 +98,16 @@ def test_meta_says_the_configs_mode_and_lab(tmp_path):
 
 # ---- the lab's chips in the machine panel ----------------------------------------------------------
 
+def _settled(app):
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        m = app.machine()
+        if not m["lab"].get("asking"):
+            return m
+        time.sleep(0.02)
+    raise AssertionError("the lab never answered")
+
+
 def test_the_machine_panel_shows_the_labs_chips_in_lab_mode_and_asks_once_per_interval(tmp_path):
     calls = []
 
@@ -105,7 +115,9 @@ def test_the_machine_panel_shows_the_labs_chips_in_lab_mode_and_asks_once_per_in
         calls.append(lab.host)
         return True, GOZER_LAB, ""
     app, _ = app_for(config(tmp_path, mode="lab", lab=True), lab_status=lab_status)
-    m = app.machine()
+    first = app.machine()["lab"]
+    assert first["asking"] is True and first["boards"] == []          # the first paint never waits for ssh
+    m = _settled(app)
     assert m["lab"]["host"] == "node4" and m["lab"]["ok"] is True
     states = [c["state"] for b in m["lab"]["boards"] for c in b["chips"]]
     assert states == ["FREE", "HELD"]
@@ -121,7 +133,8 @@ def test_a_local_config_has_no_lab_group(tmp_path):
 def test_a_lab_that_does_not_answer_says_so(tmp_path):
     app, _ = app_for(config(tmp_path, mode="lab", lab=True),
                      lab_status=lambda lab: (False, "", "ssh: connect to host node4: No route to host"))
-    m = app.machine()["lab"]
+    app.machine()
+    m = _settled(app)["lab"]
     assert m["ok"] is False and "No route" in m["error"] and m["boards"] == []
 
 

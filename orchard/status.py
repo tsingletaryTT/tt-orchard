@@ -201,8 +201,15 @@ def summarize(entry: dict) -> str:
     ev, d = entry["event"], entry["data"]
     if ev == "decision":
         what = d.get("decision", "?")
+        if what == "files copied to the lab":
+            return _one_line(f"files copied to the {d.get('where', 'lab')} in {d.get('seconds', '?')} s: "
+                             + (", ".join(d.get("repos") or []) or "the run directory"))
         extra = d.get("reason") or d.get("by") or ""
-        return _one_line(f"{what}: {extra}" if extra else what)
+        where = d.get("where") if str(d.get("where", "")).startswith("lab ") else ""
+        line = f"{what}: {extra}" if extra else what
+        return _one_line(f"{line} ({where})" if where else line)
+    if ev == "measurement":
+        return _one_line(f"{d.get('name', '?')} = {d.get('value')} {d.get('unit') or ''}".strip())
     if ev == "notice":
         findings = d.get("findings")
         if isinstance(findings, list) and findings and isinstance(findings[0], dict):
