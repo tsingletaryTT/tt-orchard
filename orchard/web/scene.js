@@ -50,6 +50,18 @@
          ".PPPPPP.", ".PP..PP.", ".PP..PP.", ".bb..bb."],
         ["..RRRR..", ".RRRRRR.", "..SSSS..", "..SESE..", "..SSSS..", ".GGGGGG.", "SGAAAAG.", "SGAAAAGX",
          ".PPPPPP.", ".PP..PP.", ".PP..PP.", ".bb..bb."]] },
+    head: { pal: { R: "#5b3a8a", r: "#3d2660", S: "#f2c18d", E: "#3b2414", G: "#6b4fa3", A: "#e9d8a6", P: "#3d2660", b: "#2a1a10" },
+      frames: [
+        [".rRRRRr.", "RRRRRRRR", "..SSSS..", "..SESE..", "..SSSS..", ".GGGGGG.", "SGGAAGGS", "SGGAAGGS",
+         ".GGGGGG.", ".PP..PP.", ".PP..PP.", ".bb..bb."],
+        [".rRRRRr.", "RRRRRRRR", "..SSSS..", "..SESE..", "..SSSS..", ".GGGGGG.", "SGGAAGG.", "SGGAAGGS",
+         ".GGGGGG.", ".PP..PP.", ".PP..PP.", ".bb..bb."]] },
+    seasonal: { pal: { Y: "#e8d27a", y: "#b89a3a", S: "#f2c18d", E: "#3b2414", O: "#5a7fb0", W: "#f3ebdd", P: "#4a6a94", b: "#4a2e18" },
+      frames: [
+        [".yYYYYy.", "yYYYYYYy", "..SSSS..", "..SESE..", "..SSSS..", ".OWWWWO.", "SOOOOOOS", "SOOOOOOS",
+         ".OOOOOO.", ".PP..PP.", ".PP..PP.", ".bb..bb."],
+        [".yYYYYy.", "yYYYYYYy", "..SSSS..", "..SESE..", "..SSSS..", ".OWWWWO.", "SOOOOOO.", "SOOOOOOS",
+         ".OOOOOO.", ".PP..PP.", ".PP..PP.", ".bb..bb."]] },
     dog: { pal: { D: "#9a6233", W: "#f3ebdd", K: "#2b1b10" },
       frames: [
         ["........DD..", "D......DDKD.", ".DDDDDDDDDDK", ".DWWWWWDD...", ".DDDDDDDD...", ".D.D..D.D...", ".K.K..K.K..."],
@@ -64,6 +76,9 @@
     3: ["111", "001", "011", "001", "111"], 4: ["101", "101", "111", "001", "001"], 5: ["111", "100", "111", "001", "111"],
     6: ["111", "100", "111", "101", "111"], 7: ["111", "001", "010", "010", "010"], 8: ["111", "101", "111", "101", "111"],
   };
+
+  const HELPER = { grafter: "grafter", "head grower": "head", "seasonal hand": "seasonal" };
+  const GH_X = 206, GH_W = 34;     // the lab's greenhouse, on the far hill
 
   function rng(seed) {
     let s = seed >>> 0;
@@ -90,6 +105,10 @@
       this.busyUntil = 0;
       this.flash = 0;
       this.dirt = [];
+      this.helper = "grafter";       // who works beside the farmer: the grafter, the head grower or the seasonal hand
+      this.lab = null;               // the lab box's name in lab mode: a greenhouse on the far hill
+      this.activity = null;          // what the run is doing now (/api/runs/<n> activity)
+      this.activityAt = 0;
       this.reduce = window.matchMedia("(prefers-reduced-motion: reduce)");
       this._last = 0;
       this._seed = rng(7);
@@ -121,9 +140,22 @@
       if (this.isStill()) this.draw();
     }
 
+    setLab(host) { this.lab = host || null; if (this.isStill()) this.draw(); }
+
+    setActivity(a) {
+      this.activity = a && a.since ? a : null;
+      this.activityAt = this.t;
+      if (a && a.actor) this.helper = HELPER[a.actor] || "grafter";
+      if (this.isStill()) this.draw();
+    }
+
+    act(kind) { return this.activity && this.activity.kind === kind ? this.activity : null; }
+
+    elapsed() { return this.activity ? (this.activity.elapsed_s || 0) + (this.t - this.activityAt) : 0; }
+
     event(kind) {
       if (kind === "sheepdog") this.dog = { x: -14, until: this.t + 6 };
-      else if (kind === "grafter") this.busyUntil = this.t + 20;
+      else if (HELPER[kind]) { this.helper = HELPER[kind]; this.busyUntil = this.t + 20; }
       else if (kind === "lease" && !this.errand) this.errand = "to-shed";
       if (this.isStill()) this.draw();
     }
@@ -145,10 +177,17 @@
     }
 
     // ---- who does what ----
-    working() { return this.state === "running" && this.current !== null && this.current !== undefined && this.util > 0.08; }
+    working() {
+      if (this.act("test") && this.act("test").host) return false;     // the lab does the work; he waits by the plot
+      return this.state === "running" && this.current !== null && this.current !== undefined
+        && (this.util > 0.08 || Boolean(this.act("agent")));
+    }
+
+    waitingOnLab() { const a = this.act("test") || this.act("copy"); return Boolean(a && a.host && this.current !== null && this.current !== undefined); }
 
     target() {
       if (this.errand === "to-shed" || this.errand === "inside") return SHED_DOOR;
+      if (this.waitingOnLab()) return this.plotX(this.current) - 9;
       if (this.working() || (this.state === "running" && this.current !== null && this.current !== undefined))
         return this.working() ? this.plotX(this.current) - 9 : BENCH_X;
       if (this.state === "ready-for-operator-review") return this.plotX(8) + PLOT_W + 2;
@@ -242,8 +281,10 @@
         this.px(x, y, 1, 2, frost ? C.frost : r() < 0.5 ? C.grassDark : C.grassLight);
       }
       if (this.weather === "heatwave" && !still) this.shimmer();
+      if (this.lab) this.greenhouse();
       this.shed();
       for (let i = 0; i < 9; i++) this.plot(i);
+      if (this.act("copy")) this.wagon();
       this.fence();
       this.people();
       for (const p of this.dirt) this.px(p.x, p.y, 1, 1, C.soilDark);
@@ -266,6 +307,10 @@
         const hx = this.x + 10, hy = y + 6 + (swing ? 4 : 0);
         this.px(hx, hy, 1, 8 - (swing ? 4 : 0), "#8a5a2b"); this.px(hx - 1, hy + (swing ? 4 : 8), 4, 2, "#9aa3b5");
         if (this.util > 0.7 && !still && Math.floor(this.t * 3) % 2) this.px(this.x + 1, y + 2, 1, 2, C.drop);
+      } else if (this.waitingOnLab() && at && !this.errand) {
+        // the test runs on the lab: he stands by the plot, looking toward the greenhouse
+        this.sprite("farmer", this.x, y, 0);
+        if (!still && Math.floor(this.t * 1.5) % 4 === 0) this.bubble(this.x + 2, y - 7, "…");
       } else if (!this.errand && at && this.x <= BENCH_X + 1) {
         this.sprite("sitting", BENCH_X, GROUND + 9);                    // resting on the bench
         if (this.util <= 0.08 && !still) {
@@ -280,11 +325,49 @@
       if (this.state === "paused" && !this.errand) this.bubble(this.x + 2, y - 7, "…");
       if (this.state === "blocked" && !this.errand) this.bubble(this.x + 2, y - 7, "?");
       const cur = this.current;
-      if (cur !== null && cur !== undefined && this.t < this.busyUntil && this.state === "running") {
+      const boot = this.act("coder");
+      if (boot) {
+        // the coder boots: the grafter walks from the shed toward the first plot as the boot goes on (about 7 min)
+        const k = Math.min(1, this.elapsed() / 420), gx = SHED_DOOR + 6 + k * (this.plotX(0) - SHED_DOOR - 6);
+        this.sprite("grafter", gx, GROUND + 6, still ? 0 : Math.floor(this.t * 5));
+      } else if (this.act("park")) {
+        this.sprite("grafter", BENCH_X + 2, GROUND + 9, 0);             // the coder is parked: the grafter rests
+        if (!still) { const k = Math.floor(this.t) % 3; this.zzz(BENCH_X + 12 + k * 3, GROUND + 4 - k * 4); }
+      } else if (cur !== null && cur !== undefined && this.state === "running" && (this.t < this.busyUntil || this.act("agent"))) {
         const gx = this.plotX(cur) + PLOT_W - 6, bob = still ? 0 : Math.round(Math.sin(this.t * (6 + 8 * this.util)));
-        this.sprite("grafter", gx, GROUND + 6 + bob, Math.floor(this.t * (3 + 6 * this.util)));
+        this.sprite(this.helper, gx, GROUND + 6 + bob, Math.floor(this.t * (3 + 6 * this.util)));
         if (!still && Math.floor(this.t * 4) % 2) this.px(gx + 9, GROUND + 12, 2, 2, "#fff6a8");
       }
+    }
+
+    greenhouse() {
+      // the lab box: a glasshouse on the far hill; its panes glow and a hand works inside while a test runs there
+      const x = GH_X, base = GROUND - 9, still = this.reduce.matches;
+      const test = this.act("test"), busy = Boolean(test && test.host);
+      this.px(x - 2, base + 1, GH_W + 4, 2, "#4f8a35");
+      this.px(x, base - 12, GH_W, 13, "#e6f3f7");
+      for (let i = 0; i <= GH_W; i += 6) this.px(x + i, base - 12, 1, 13, "#7d9aa3");
+      for (let r = 0; r < 7; r++) this.px(x + 3 + r * 2, base - 13 - r, GH_W - 6 - r * 4, 1, "#7d9aa3");
+      this.px(x, base - 6, GH_W, 1, "#7d9aa3");
+      if (busy) {
+        const glow = still ? 0.5 : 0.35 + 0.25 * Math.sin(this.t * 3);
+        this.cx.fillStyle = `rgba(255, 230, 120, ${glow})`;
+        this.cx.fillRect(x + 1, base - 11, GH_W - 2, 11);
+        const hx = x + 6 + (still ? 0 : Math.round((Math.sin(this.t * 1.3) + 1) * 9));
+        this.px(hx, base - 7, 2, 2, "#f2c18d"); this.px(hx, base - 5, 2, 4, "#3f8f4f");
+      }
+      // a tiny flag: green when its chips are free, gold while it works
+      this.px(x + GH_W - 3, base - 22, 1, 9, C.signDark);
+      this.px(x + GH_W - 2, base - 22, 4, 3, busy ? C.gold : "#5fb04a");
+    }
+
+    wagon() {
+      // files go to the lab: a cart with crates rolls from the shed to the greenhouse, again and again
+      const still = this.reduce.matches, k = still ? 0.5 : (this.t % 6) / 6;
+      const x0 = SHED_X + 30, x1 = GH_X - 12, x = x0 + k * (x1 - x0), y = GROUND - 3;
+      this.px(x, y - 4, 12, 4, "#8a5a2b"); this.px(x + 1, y - 7, 4, 3, "#c98b4b"); this.px(x + 6, y - 6, 4, 2, "#c98b4b");
+      this.px(x + 1, y, 3, 3, "#3b2414"); this.px(x + 8, y, 3, 3, "#3b2414");
+      this.px(x - 4, y - 3, 4, 1, "#6e4522");
     }
 
     zzz(x, y) { this.px(x, y, 3, 1, "#ffffff"); this.px(x + 2, y + 1, 1, 1, "#ffffff"); this.px(x + 1, y + 2, 1, 1, "#ffffff"); this.px(x, y + 3, 3, 1, "#ffffff"); }
@@ -349,7 +432,12 @@
       const mid = x + Math.floor(PLOT_W / 2) - 1, base = y + 6, still = this.reduce.matches;
       const sway = still ? 0 : Math.round(Math.sin(this.t * (this.weather === "storm" ? 6 : 2) + i));
       const frost = this.state === "blocked";
-      if (st === "skipped") { this.px(x + 3, y + 2, PLOT_W - 6, 10, C.grassDark); return; }
+      if (st === "skipped") {
+        // fallow by choice: grass and a hay bale, so it does not read as a plot still to be planted
+        this.px(x + 3, y + 2, PLOT_W - 6, 10, C.grassDark);
+        this.px(x + 6, y + 4, 9, 6, "#e0c060"); this.px(x + 6, y + 6, 9, 1, "#b8963a"); this.px(x + 6, y + 8, 9, 1, "#b8963a");
+        return;
+      }
       if (st === "pending") { for (let s = 0; s < 4; s++) this.px(x + 4 + s * 5, y + 6, 1, 1, "#d8b07a"); return; }
       if (st === "fail") {
         this.px(mid, base - 8, 1, 8, C.wilt); this.px(mid - 3, base - 6, 3, 1, C.wilt); this.px(mid + 1, base - 4, 3, 1, C.wilt);

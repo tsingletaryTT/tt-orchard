@@ -1263,6 +1263,26 @@ class Supervisor:
                            caches={str(n): c["tt_cache"] for n, c in configs.items()},
                            hw_tests=tests is not None, notes=notes)
 
+    def _keep_drafted_caches(self, spec, stage_dir: Path) -> None:
+        """The tensor cache of a configuration the supervisor drafted is the drafted one. On the first run
+        with drafts the agent rewrote the configs with its own spelling of the cache names, so no later run
+        would have found them. The cache is read only when the test runs, so setting it back after the
+        prepare step changes nothing the agent built."""
+        drafted = next((e["data"].get("caches") or {} for e in reversed(self.ledger.read())
+                        if e["stage"] == spec.number and e["data"].get("decision") == "stage 4 configs drafted"), {})
+        for n, cache in drafted.items():
+            path = stage_dir / "configs" / str(n) / "swap_config.json"
+            try:
+                cfg = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if not isinstance(cfg, dict) or cfg.get("tt_cache") == cache:
+                continue
+            self.ledger.append("decision", spec.number, decision="kept the drafted tensor cache", config=int(n),
+                               agent=cfg.get("tt_cache"), drafted=cache)
+            cfg["tt_cache"] = cache
+            path.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
+
     def _read_plan(self, spec, stage_dir: Path):
         return read_plan(stage_dir, required=self.required_chips, max_chips=spec.boards * CHIPS_PER_BOARD,
                          budget_s=spec.budget_s, home=self.home)
@@ -1504,6 +1524,7 @@ class Supervisor:
             out = self._wrap_up(spec, stage_dir, prep, out)
             if out.status != "done":
                 return out.status, [f"the prepare step ended: {out.status} {out.detail}".strip()], None
+            self._keep_drafted_caches(spec, stage_dir)
             tests, problems = self._read_plan(spec, stage_dir)
             if problems:
                 return "fail", problems, None

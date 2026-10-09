@@ -444,6 +444,11 @@ def test_stage_4_starts_from_drafted_configs_for_the_counts_the_lab_can_hold(rig
     assert drafted < prepare
     assert d["caches"]["1"].endswith("/altworld--hemmingway-1/1chip-episod--qwen3.8-27b-dflash2-p150/tt_cache")
     assert d["caches"]["2"].endswith("/altworld--hemmingway-1/2chip-episod--qwen3.8-27b-dflash2-p300/tt_cache")
+    # The fake agent writes its own configs over the drafts (as Coder-Next did); the drafted caches stand.
+    plan = json.loads((rig.run_dir / "stages" / "4" / "tests" / "plan.json").read_text())
+    assert {str(t["chips"]): t["cache"] for t in plan["tests"] if str(t["chips"]) in d["caches"]} == d["caches"]
+    kept = [e["data"] for e in entries if e["data"].get("decision") == "kept the drafted tensor cache"]
+    assert {k["config"] for k in kept} == {1, 2}
 
 
 def test_agent_shells_can_list_the_runs_bundles(rig):
