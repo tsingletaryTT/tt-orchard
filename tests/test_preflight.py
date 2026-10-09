@@ -524,6 +524,7 @@ def lab_cfg(tmp_path):
     from orchard.bringup_config import Lab
     c = cfg(tmp_path)
     c.lab = Lab(host="node4", root=Path("/srv/orchard"))
+    c.mode = "lab"
     return c
 
 
@@ -551,3 +552,14 @@ def test_busy_lab_chips_are_a_warning_the_run_waits_for(tmp_path):
 def test_without_a_lab_there_is_no_lab_row(tmp_path):
     out = pf.run_preflight(cfg(tmp_path), "Cloudflare/clef", accept_credentials=False, signals=signals())
     assert "lab" not in [c.name for c in out]
+
+
+
+def test_a_local_mode_config_with_a_lab_table_never_asks_the_lab(tmp_path):
+    """mode = "local" keeps a [lab] table for `lab setup` only; the preflight must not ssh to it."""
+    c = lab_cfg(tmp_path)
+    c.mode = "local"
+    asked = []
+    checks = pf.run_preflight(c, "Org/Model", accept_credentials=True,
+                           signals=signals(lab_status=lambda: asked.append(1) or (0, "", "")))
+    assert not asked and "lab" not in [x.name for x in checks]

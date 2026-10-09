@@ -910,6 +910,26 @@ With `--lab HOST`, the supervisor and the coder stay on this box (the brain) and
 runs on the lab box over ssh. The coder is never parked for a test, so there is no stop, reset and
 restart around each one, and the agents keep their chip-tier model. The lab only needs its chips free.
 
+**Choosing the mode.** A run is either `local` (everything on this box; the coder is parked when a test
+needs its boards) or `lab`. `config/bringup.toml` says which, and `tt-orchard bringup` passes the lab flags
+only in lab mode:
+
+```toml
+mode = "lab"                 # or "local" (the default)
+
+[lab]
+host = "node4"               # an ssh host with key login
+root = "/srv/orchard"        # the same absolute path on both boxes
+path = ["~/.local/bin", "~/.tenstorrent-venv/bin"]
+test_python = "/srv/orchard/venvs/reference/bin/python"
+```
+
+`tt-orchard bringup ORG/NAME --mode local` (or `--mode lab`) overrides the config for one run, and the
+command prints the mode it uses. A config with a `[lab]` table must say `mode`, so a lab config never turns
+into a one-box run unnoticed; `mode = "local"` keeps the table for `tt-orchard lab setup`. The ledger
+records the mode, and a resume in the other mode is refused. Check the lab with
+`tt-orchard lab setup --check` before the first run.
+
 How it works: the supervisor copies this checkout to `<lab root>/orchard` on the lab and starts a small
 helper there (`python3 -m orchard.lab serve`, in [`orchard/lab.py`](orchard/lab.py)). The helper takes
 the lab's gozer leases under its own pid and runs each test as its child, so gozer counts the test as

@@ -15,6 +15,7 @@ hardware (that is orchard/preflight.py), and nothing starts a run (orchard/cli.p
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import re
 import tomllib
 from dataclasses import dataclass, field
@@ -25,7 +26,10 @@ from orchard.tiers import SENTINEL, _unknown_key_message
 
 TOP_KEYS = {"runs_root", "tiers", "cache_root", "hf_home", "operator_home", "gozer", "required_chips",
             "skills_dirs", "package_format", "package_namespace", "package_models_root", "min_free_gb",
-            "reference_python", "env", "coder", "tt_model_root", "lab"}
+            "reference_python", "env", "coder", "tt_model_root", "lab", "mode"}
+# Where a run's hardware tests run: "local" (this box; the coder is parked when a test needs its boards) or
+# "lab" (the [lab] box; the coder is never parked). `tt-orchard bringup --mode` overrides it per run.
+MODES = ("local", "lab")
 CODER_KEYS = {"target", "kind", "profile", "port", "chips", "image_id"}
 LAB_KEYS = {"host", "root", "gozer", "path", "python", "test_python"}
 # An ssh destination: [user@]host. It must not start with "-", or ssh would read it as an option.
@@ -83,6 +87,7 @@ class BringupConfig:
     env: dict[str, str] = field(default_factory=dict)
     tt_model_root: Path | None = None
     lab: Lab | None = None
+    mode: str = "local"
 
 
 def _strings(value, out: list[str]) -> list[str]:
@@ -208,6 +213,18 @@ def load(path) -> BringupConfig:
                   python=_text(lab_raw.get("python", "python3"), "lab.python"),
                   test_python=_text(lab_raw["test_python"], "lab.test_python") if "test_python" in lab_raw else None)
 
+    mode = raw.get("mode")
+    if mode is None:
+        if lab is not None:
+            # A [lab] table used to mean lab mode by itself; a config written then must say which it means,
+            # so it never turns into a one-box run without anyone noticing.
+            raise BringupConfigError('the config has a [lab] table: set mode = "lab" or mode = "local"')
+        mode = "local"
+    if mode not in MODES:
+        raise BringupConfigError(f'mode must be "local" or "lab", not {mode!r}')
+    if mode == "lab" and lab is None:
+        raise BringupConfigError('mode = "lab" needs a [lab] table (host and root of the lab box)')
+
     return BringupConfig(
         runs_root=where(_required(raw, "runs_root"), "runs_root"),
         coder=coder,
@@ -224,7 +241,20 @@ def load(path) -> BringupConfig:
         env=dict(env),
         tt_model_root=opt("tt_model_root"),
         lab=lab,
+        mode=mode,
     )
+
+
+def for_mode(cfg: BringupConfig, mode: str | None) -> BringupConfig:
+    """The config for one run in `mode` (`--mode`), or `cfg` itself when no mode is given. A local run
+    carries no lab, so nothing downstream (the preflight, the supervisor's flags) can reach for one."""
+    if mode is None:
+        return cfg
+    if mode not in MODES:
+        raise BringupConfigError(f'mode must be "local" or "lab", not {mode!r}')
+    if mode == "lab" and cfg.lab is None:
+        raise BringupConfigError("--mode lab needs a [lab] table in the config (host and root of the lab box)")
+    return dataclasses.replace(cfg, mode=mode, lab=cfg.lab if mode == "lab" else None)
 
 
 def slug(model_id: str) -> str:
@@ -256,7 +286,7 @@ def supervisor_argv(cfg: BringupConfig, model_id: str, run_dir: Path | None = No
                         ("--tt-model-root", cfg.tt_model_root)):
         if value is not None:
             argv += [flag, str(value)]
-    if cfg.lab is not None:
+    if cfg.mode == "lab" and cfg.lab is not None:
         lab = cfg.lab
         argv += ["--lab", lab.host, "--lab-root", str(lab.root), "--lab-gozer", lab.gozer,
                  "--lab-python", lab.python]

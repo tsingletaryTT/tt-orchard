@@ -84,6 +84,9 @@ def _parser() -> argparse.ArgumentParser:
     b.add_argument("--base", help="the model to base the run on: a tt-model bundle (as `tt model search` lists "
                                   "it) or a Hugging Face model id. Default: the model card's base_model")
     b.add_argument("--quiet", action="store_true", help="do not print what the run is doing as it goes")
+    b.add_argument("--mode", choices=bringup_config.MODES,
+                   help="where the hardware tests run for this run: local (this box) or lab (the [lab] box). "
+                        "Default: the config's mode")
     w = sub.add_parser("watch", parents=[common], help="follow a run: what each role is doing, live (read-only)")
     w.add_argument("model", nargs="?")
     w.add_argument("--run-dir")
@@ -352,10 +355,13 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
 
     try:
         cfg, cfg_path = config()
+        cfg = bringup_config.for_mode(cfg, args.mode or cfg.mode)
         run_dir = Path(args.run_dir) if args.run_dir else bringup_config.run_dir(cfg, args.model)
     except (NoConfig, bringup_config.BringupConfigError) as exc:
         return _refuse(str(exc))
     resuming = (run_dir / "ledger.jsonl").exists()
+    print(f"{style.icon('🧭')}mode: " + (f"lab ({cfg.lab.host}): hardware tests run there; the coder stays here"
+                                         if cfg.mode == "lab" else "local: everything runs on this box"), file=out)
     sig = signals or preflight.default_signals(cfg)
     override = None
     if args.base:

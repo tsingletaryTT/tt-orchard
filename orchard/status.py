@@ -393,6 +393,7 @@ def collect(run_dir, *, now: float | None = None, pid_alive=_supervisor_alive, l
         "model": progress.run_start.get("model") if progress.run_start else None,
         "run_dir": str(run_dir.resolve()),
         "run_name": run_dir.resolve().name,
+        "mode": _mode(progress.run_start),
         "state": state,
         "supervisor": sup,
         "stage": {"current": current, "name": names.get(current), "attempt": attempt},
@@ -415,6 +416,14 @@ def _hms(seconds: int) -> str:
     return f"{h}h{rem // 60:02d}m" if h else f"{rem // 60}m{rem % 60:02d}s"
 
 
+def _mode(run_start) -> str | None:
+    """'local', or 'lab (<host>)'; None before the run starts. An older ledger has no mode: a lab means lab mode."""
+    if not run_start:
+        return None
+    host = (run_start.get("lab") or {}).get("host")
+    return f"lab ({host})" if (run_start.get("mode") == "lab" or host) else "local"
+
+
 def render(f: dict) -> str:
     """The plain-text block. Every line is clipped by the summaries, so the block stays short."""
     sup = f["supervisor"]
@@ -427,6 +436,7 @@ def render(f: dict) -> str:
         f"ledger: ok ({f['ledger']['entries']} entries, chain verified)",
         f"model: {f['model']}",
         f"run: {f['run_name']}",
+        *([f"mode: {f['mode']}"] if f.get("mode") else []),
         f"state: {f['state']}",
         f"decided by: {who}",
         "stage: " + (f"{stage['current']} {stage['name']}, attempt {stage['attempt']}"

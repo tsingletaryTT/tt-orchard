@@ -338,7 +338,7 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
     guarded("tiers", "config-invalid", lambda: check_tiers(s.load_tiers, Path(cfg.tiers), cfg.coder.port))
     guarded("port", "coder-unusable", lambda: check_port(cfg.coder.port, bool(s.port_in_use(cfg.coder.port)), resuming))
     guarded("gozer", "hardware-unhealthy", lambda: check_gozer(s.gozer_status()))
-    if getattr(cfg, "lab", None) is not None and s.lab_status is not None:
+    if getattr(cfg, "mode", "local") == "lab" and getattr(cfg, "lab", None) is not None and s.lab_status is not None:
         guarded("lab", "hardware-unhealthy", lambda: check_lab(cfg.lab, s.lab_status()))
     out.append(base_check)
     ref = cfg.reference_python

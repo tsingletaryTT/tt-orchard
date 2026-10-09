@@ -669,6 +669,7 @@ class Supervisor:
                                paths=self.paths.record(), package=self.package,
                                coder=self.coder.record(),
                                tiers={k: dict(v) for k, v in self.cfg.tiers.items()},
+                               mode="lab" if self.lab is not None else "local",
                                **({"lab": self.lab.info} if self.lab is not None else {}))
         elif recorded_paths(self.ledger.read()) is None:
             # The run started under a supervisor that did not record paths. Record them once now,
@@ -1775,9 +1776,13 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
     lab_host = getattr(args, "lab", None)
     if progress.started:                        # a resumed run keeps the lab it started with
         recorded_lab = (progress.run_start or {}).get("lab")
-        if (recorded_lab or {}).get("host") != lab_host:
-            raise ValueError(f"this run started with lab {(recorded_lab or {}).get('host')}; --lab {lab_host} "
-                             "differs. Give the recorded lab (or none, for a run without one)")
+        recorded_host = (recorded_lab or {}).get("host")
+        if recorded_host != lab_host:
+            was = f"lab mode (lab {recorded_host})" if recorded_host else "local mode"
+            now = f"lab mode (lab {lab_host})" if lab_host else "local mode"
+            raise ValueError(f"this run started in {was} and would resume in {now}. A run keeps its mode: "
+                             f"resume it with --mode {'lab' if recorded_host else 'local'}"
+                             + (f" and the lab {recorded_host} in the config" if recorded_host else ""))
     if lab_host:
         from orchard.bringup_config import _SSH_HOST
         if not _SSH_HOST.fullmatch(lab_host):

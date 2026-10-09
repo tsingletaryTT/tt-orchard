@@ -250,6 +250,23 @@ def test_without_the_facts_nothing_is_drafted_and_the_ledger_says_why(rig):
     assert not (rig.run_dir / "stages" / "2" / "prepare_swap.py").exists()
 
 
+def test_the_run_start_records_the_mode(rig, tmp_path):
+    assert rig.run() == EXIT_READY
+    start = next(e["data"] for e in rig.entries() if e["event"] == "run_start")
+    assert start["mode"] == "lab"
+
+
+def test_a_lab_run_resumed_without_its_lab_is_refused_in_terms_of_the_mode(rig):
+    from orchard.ledger import Ledger
+    rig.run_dir.mkdir(parents=True, exist_ok=True)
+    with Ledger(rig.run_dir / "ledger.jsonl") as led:
+        led.append("run_start", None, model="Altworld/Hemmingway-1", versions={}, inputs={},
+                   lab={"host": "node4", "root": str(rig.root)}, mode="lab")
+    rig.args.lab = None
+    with pytest.raises(ValueError, match="--mode lab"):
+        rig.run()
+
+
 def test_a_resume_with_a_different_lab_is_refused(rig):
     rig.args.lab = "node9"
     from orchard.ledger import Ledger
