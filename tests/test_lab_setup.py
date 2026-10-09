@@ -54,6 +54,7 @@ def box(tmp_path):
 def plan(box, run, **kw):
     root, lab = box
     kw.setdefault("local_sfpi", "7.78.0")
+    kw.setdefault("local_kmd", "2.10.1-pre")
     return ls.plan(lab, run=run, reference_python=root / "venvs/reference/bin/python", local_fw="19.15.0.0", **kw)
 
 
@@ -63,7 +64,8 @@ def by_name(steps):
 
 def test_a_ready_lab_is_all_ok(box):
     run = Fake([("gozer status", (0, GOZER, "")), ("tt_fw_bundle_ver", (0, "19.15.0.0\n", "")),
-                ("dpkg-query", (0, "7.78.0", "")), ("test -f", (0, "", ""))])
+                ("dpkg-query", (0, "7.78.0", "")), ("tenstorrent/version", (0, "2.10.1-pre\n", "")),
+                ("df -P", (0, "500\n", "")), ("test -f", (0, "", ""))])
     steps = by_name(plan(box, run))
     assert {n: s.status for n, s in steps.items()} == {n: OK for n in steps}, \
         {n: (s.status, s.detail) for n, s in steps.items() if s.status != OK}
@@ -209,3 +211,42 @@ def test_an_older_sfpi_on_the_lab_fails_and_says_how_to_install_this_boxs():
     assert by_name(plan((root, lab), run))["sfpi"].status == FAIL
     run = Fake([("dpkg-query", (0, "7.78.0", "")), ("gozer status", (0, GOZER, ""))])
     assert by_name(plan((root, lab), run))["sfpi"].status == OK
+
+
+
+# ---- kernel driver, tools and disk on the lab ------------------------------------------------------
+
+def _lab_box():
+    import tempfile
+    root = Path(tempfile.mkdtemp())
+    for sub in ("runs", "cache", "hf/hub", "tt-model/models", "venvs/reference/bin"):
+        (root / sub).mkdir(parents=True)
+    return root, Lab(host="node4", root=root)
+
+
+def test_a_different_kernel_driver_on_the_lab_is_a_warning_and_none_loaded_a_failure():
+    """node4 ran KMD 2.9.0 against node6's 2.10.1-pre; it was found by hand."""
+    box = _lab_box()
+    s = by_name(plan(box, Fake([("tenstorrent/version", (0, "2.9.0\n", "")), ("gozer status", (0, GOZER, ""))])))["kmd"]
+    assert s.status == WARN and "2.9.0" in s.detail and "2.10.1-pre" in s.detail
+    s = by_name(plan(box, Fake([("tenstorrent/version", (1, "", "No such file")), ("gozer status", (0, GOZER, ""))])))["kmd"]
+    assert s.status == FAIL and "not loaded" in s.detail
+    s = by_name(plan(box, Fake([("tenstorrent/version", (0, "2.10.1-pre\n", "")), ("gozer status", (0, GOZER, ""))])))["kmd"]
+    assert s.status == OK
+
+
+def test_tt_smi_missing_on_the_lab_fails_and_tt_model_missing_warns():
+    box = _lab_box()
+    s = by_name(plan(box, Fake([("command -v $t", (0, "tt-smi\n", "")), ("gozer status", (0, GOZER, ""))])))["tools (lab)"]
+    assert s.status == FAIL and "tt-smi" in s.detail
+    s = by_name(plan(box, Fake([("command -v $t", (0, "tt-model\n", "")), ("gozer status", (0, GOZER, ""))])))["tools (lab)"]
+    assert s.status == WARN and "tt-model" in s.detail
+    s = by_name(plan(box, Fake([("gozer status", (0, GOZER, ""))])))["tools (lab)"]
+    assert s.status == OK
+
+
+@pytest.mark.parametrize("free,status", [("10\n", FAIL), ("60\n", WARN), ("500\n", OK), ("", WARN)])
+def test_the_labs_free_disk_under_its_root_is_checked(free, status):
+    box = _lab_box()
+    s = by_name(plan(box, Fake([("df -P", (0, free, "")), ("gozer status", (0, GOZER, ""))])))["disk (lab)"]
+    assert s.status == status

@@ -695,3 +695,12 @@ def test_mode_local_overrides_a_lab_config_for_one_run(lab_conf):
 def test_mode_lab_without_a_lab_table_is_refused(conf, capsys):
     code, out, rec = run(conf, ["bringup", "Cloudflare/clef", "--dry-run", "--mode", "lab"])
     assert code == 2 and rec.argv is None and "[lab]" in capsys.readouterr().err
+
+
+
+def test_caches_lists_the_tensor_caches_under_the_cache_root(conf, tmp_path):
+    d = tmp_path / "cache" / "org--m" / "1chip-x" / "tt_cache"
+    d.mkdir(parents=True)
+    (d / ".orchard-model").write_text("org/m@abc")
+    code, out, rec = run(conf, ["caches"])
+    assert code == 0 and "org/m@abc" in out and rec.argv is None

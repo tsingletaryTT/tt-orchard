@@ -6,7 +6,8 @@ It reads the `[lab]` table of config/bringup.toml and checks, in order: that ssh
 the lab root exists and is writable on both boxes (the same absolute path on each); the run layout under
 it; gozer, hugepages and the test interpreter on the lab; the brain's reference interpreter; that every
 bundle installed under the lab root on the brain is also on the lab; the models asked for with --model;
-that the two boxes run the same firmware and SFPI kernel compiler; and that the lab's chips are free.
+that the two boxes run the same firmware, SFPI kernel compiler and kernel driver; that the lab has
+tt-smi and tt-model and room for a tensor cache; and that the lab's chips are free.
 
 Like `tt-orchard setup` it prints every command before it runs it, asks first unless --yes, and runs
 nothing with --check. It never runs sudo (a missing lab root is the operator's to create, and it says
@@ -22,6 +23,7 @@ import sys
 from pathlib import Path
 
 from orchard import bundle_relink
+from orchard.defaults import TEST_DISK_GB
 from orchard.labclient import SSH
 from orchard.setup_machine import (FAIL, OK, TODO, WARN, Action, Step, _run, apply, render_steps)
 
@@ -38,7 +40,8 @@ def remote(lab, command: str, ssh=SSH) -> list[str]:
     return [*ssh, lab.host, prefix + command]
 
 
-def plan(lab, *, run, reference_python, local_fw, local_sfpi=None, models=(), model_sources=(), tt_model_root=None,
+def plan(lab, *, run, reference_python, local_fw, local_sfpi=None, local_kmd=None, models=(), model_sources=(),
+         tt_model_root=None,
          hf_home=None, ssh=SSH) -> list[Step]:
     root = Path(lab.root)
     tt_model_root = Path(tt_model_root or root / "tt-model" / "models")
@@ -175,6 +178,44 @@ def plan(lab, *, run, reference_python, local_fw, local_sfpi=None, models=(), mo
                                         f"copy {deb} there (github.com/tenstorrent/sfpi releases) and run "
                                         f"`sudo dpkg -i {deb}`"))
 
+    rc, out, _ = run(remote(lab, "cat /sys/module/tenstorrent/version", ssh), 30)
+    lab_kmd = out.strip() if rc == 0 else ""
+    if not lab_kmd:
+        steps.append(Step("kmd", FAIL, "the tenstorrent kernel driver is not loaded on the lab "
+                                       "(/sys/module/tenstorrent/version is missing)"))
+    elif local_kmd and lab_kmd != local_kmd:
+        steps.append(Step("kmd", WARN, f"the lab runs kernel driver {lab_kmd} and this box {local_kmd}; build the "
+                                       "same tt-kmd on both (a bundle measured with one may not serve with the other)"))
+    else:
+        steps.append(Step("kmd", OK, f"kernel driver {lab_kmd}" + (" on both boxes" if local_kmd else "")))
+
+    rc, out, _ = run(remote(lab, "for t in tt-smi tt-model; do command -v $t >/dev/null || echo $t; done", ssh), 30)
+    missing_tools = out.split() if rc == 0 else ["tt-smi", "tt-model"]
+    if "tt-smi" in missing_tools:
+        steps.append(Step("tools (lab)", FAIL, "tt-smi is not on the lab's PATH: the run reads the lab's firmware and "
+                                               "resets with it. Add its directory to [lab] path"))
+    elif missing_tools:
+        steps.append(Step("tools (lab)", WARN, "tt-model is not on the lab's PATH: container tests (4 chips) need it"))
+    else:
+        steps.append(Step("tools (lab)", OK, "tt-smi and tt-model are on the lab's PATH"))
+
+    rc, out, _ = run(remote(lab, f"df -P -BG {q(str(root))} | tail -1 | awk '{{print $4}}' | tr -d G", ssh), 30)
+    try:
+        free = float(out.strip())
+    except ValueError:
+        free = None
+    if free is None:
+        steps.append(Step("disk (lab)", WARN, f"the free space under {root} on the lab could not be read"))
+    elif free < TEST_DISK_GB:
+        steps.append(Step("disk (lab)", FAIL, f"{free:g} GB free under {root} on the lab; a hardware test needs "
+                                              f"{TEST_DISK_GB:g} GB for its tensor cache. `tt-orchard caches --lab` "
+                                              "lists what can go"))
+    elif free < 2 * TEST_DISK_GB:
+        steps.append(Step("disk (lab)", WARN, f"{free:g} GB free under {root} on the lab: room for one more "
+                                              "tensor cache"))
+    else:
+        steps.append(Step("disk (lab)", OK, f"{free:g} GB free under {root} on the lab"))
+
     rc, out, _ = run(remote(lab, f"{q(lab.gozer)} status", ssh), 60)
     states = CHIP_STATE.findall(out) if rc == 0 else []
     if not states:
@@ -225,6 +266,13 @@ def local_sfpi(run=_run) -> str | None:
     return (out.strip() or None) if rc == 0 else None
 
 
+def local_kmd() -> str | None:
+    try:
+        return Path("/sys/module/tenstorrent/version").read_text().strip() or None
+    except OSError:
+        return None
+
+
 def local_firmware() -> str:
     for p in sorted(Path("/sys/class/tenstorrent").glob("*/tt_fw_bundle_ver")):
         try:
@@ -250,7 +298,7 @@ def main(argv=None, *, cfg=None, run=_run, say=print, ask=None) -> int:
     ref = cfg.reference_python or (Path(cfg.lab.root) / "venvs" / "reference" / "bin" / "python")
     sources = [Path(os.environ.get("HF_HOME") or Path.home() / ".cache" / "huggingface")]
     say(f"{style.icon('🧪')}tt-orchard lab setup: {cfg.lab.host}, lab root {cfg.lab.root}")
-    kw = dict(run=run, reference_python=ref, local_fw=local_firmware(), local_sfpi=local_sfpi(run), models=args.model, model_sources=sources,
+    kw = dict(run=run, reference_python=ref, local_fw=local_firmware(), local_sfpi=local_sfpi(run), local_kmd=local_kmd(), models=args.model, model_sources=sources,
               tt_model_root=cfg.tt_model_root, hf_home=cfg.hf_home)
     steps = plan(cfg.lab, **kw)
     for line in render_steps(steps, style):

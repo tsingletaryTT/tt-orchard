@@ -64,6 +64,7 @@ class Machine:
             ("tt-model", "list"): (0, listing, ""),
             ("docker", "info"): (0, "ok", ""),
             ("ollama", "list"): (0, ollama_list, ""),
+            ("sh", "-c", sm.HARDWARE_SCRIPT): (0, "19.15.0.0\n--\n2.10.1-pre\n--\n7.78.0", ""),
         }
         self.existing = set()
         if venv_ok:
@@ -581,3 +582,17 @@ def test_without_the_coder_option_the_recommendation_is_set_up(tmp_path):
     assert "raahemnabeel/qwen3-coder-next-blackhole" in out
     code, out = run_main(Machine(tmp_path / "b", listing=LIST_NEXT), "--check", "--coder", "27b")
     assert "27b:" in out.splitlines()[0] and "mando2222" in out
+
+
+
+@pytest.mark.parametrize("answer,status,words", [
+    ("19.15.0.0\n--\n2.10.1-pre\n--\n7.78.0", "ok", ["19.15.0.0", "2.10.1-pre", "7.78.0"]),
+    ("19.15.0.0\n--\n2.9.0\n--\n7.78.0", "warn", ["2.9.0", "2.10"]),
+    ("19.15.0.0\n--\n2.10.1-pre\n--\n", "warn", ["SFPI"]),
+    ("\n--\n\n--\n7.78.0", "warn", ["driver"]),
+])
+def test_the_hardware_row_reports_firmware_driver_and_sfpi(tmp_path, answer, status, words):
+    m = Machine(tmp_path)
+    m.answers[("sh", "-c", sm.HARDWARE_SCRIPT)] = (0, answer, "")
+    s = steps_by_name(m)["hardware"]
+    assert s.status == status and all(w in s.detail for w in words), s.detail

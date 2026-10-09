@@ -8,6 +8,7 @@
     tt-orchard pause | resume | abort   [MODEL | --run-dir DIR]
     tt-orchard ui       [--lan] [--host ADDR] [--port 8780] [--toplike PATH]
     tt-orchard lab setup [--model ORG/NAME]... [--yes] [--check]
+    tt-orchard caches   [--lab] [--prune --older-than DAYS [--yes]]
 
 It is a thin layer over `python3 -m orchard.supervisor`. `bringup` reads config/bringup.toml, checks what
 can be checked without a lease (orchard/preflight.py), fetches the model snapshot when it is not local
@@ -116,6 +117,9 @@ def _parser() -> argparse.ArgumentParser:
                                                        "run there (`lab setup --help`)")
     lab.add_argument("action", choices=["setup"])
     lab.add_argument("rest", nargs=argparse.REMAINDER, help="options for the action")
+    ca = sub.add_parser("caches", parents=[common], help="list the tensor caches (here and on the lab) and prune "
+                                                         "the ones no run uses (`caches --help`)")
+    ca.add_argument("rest", nargs=argparse.REMAINDER, help="--lab, --prune --older-than DAYS, --yes")
     return p
 
 
@@ -325,6 +329,13 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
 
     if args.cmd == "ui":
         return _ui(args, env, home, out)
+    if args.cmd == "caches":
+        from orchard import caches
+        try:
+            cfg, _ = config()
+        except (NoConfig, bringup_config.BringupConfigError) as exc:
+            return _refuse(str(exc))
+        return caches.main(args.rest, cfg=cfg, say=lambda line: print(line, file=out))
     if args.cmd == "lab":
         from orchard import lab_setup
         try:

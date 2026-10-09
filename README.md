@@ -955,6 +955,15 @@ and the run's `runs_root`, `cache_root`, `hf_home` and `tt_model_root` sit under
 (`--package-format`) is refused with `--lab` for now: its boot check and install would have to run on
 the lab. A stage 4 configuration needs the lab to have that many chips.
 
+### 5.10 Tensor caches and disk
+
+Each chip configuration keeps a tensor cache under `cache_root`, named by model and package
+(`<cache_root>/<model>/<N>chip-<org>--<name>/tt_cache`), so a later run of the same model reuses it, and
+every hardware test shares one tt-metal kernel cache, `<cache_root>/kernels`. `tt-orchard caches` lists them
+with their model, size, age and the unfinished runs that use them (`--lab` adds the lab's).
+`tt-orchard caches --prune --older-than DAYS` removes the ones no unfinished run uses and that have not been
+written for that long, after asking; it never removes the kernel cache or anything outside the cache root.
+
 ## 6. Lessons that will bite you
 
 Each of these happened on the development machine. Details are in the
