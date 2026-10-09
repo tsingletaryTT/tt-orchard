@@ -70,7 +70,7 @@ class RunPaths:
 
     @classmethod
     def resolve(cls, run_dir, *, home, environ=None, cache_root=None, hf_home=None,
-                operator_home=None) -> "RunPaths":
+                operator_home=None, tt_model_root=None) -> "RunPaths":
         """The values for a new run. `home` is the operator's home from the passwd entry; an
         explicit `operator_home` replaces it. `environ` supplies $HF_HOME (default os.environ)."""
         env = os.environ if environ is None else environ
@@ -80,7 +80,8 @@ class RunPaths:
         if cache_root is None:
             cache_root = Path(absolute_path(run_dir)).parent / "cache"
         return cls(orchard_dir=str(ORCHARD_DIR), hf_home=absolute_path(hf_home), operator_home=op_home,
-                   tt_model_root=os.path.join(op_home, ".cache", "tt-model", "models"),
+                   tt_model_root=absolute_path(tt_model_root) if tt_model_root is not None
+                   else os.path.join(op_home, ".cache", "tt-model", "models"),
                    cache_root=absolute_path(cache_root))
 
     def record(self) -> dict:

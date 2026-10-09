@@ -7,6 +7,7 @@
     tt-orchard watch    [MODEL | --run-dir DIR] [--all] [--once] [--style S]
     tt-orchard pause | resume | abort   [MODEL | --run-dir DIR]
     tt-orchard ui       [--lan] [--host ADDR] [--port 8780] [--toplike PATH]
+    tt-orchard lab setup [--model ORG/NAME]... [--yes] [--check]
 
 It is a thin layer over `python3 -m orchard.supervisor`. `bringup` reads config/bringup.toml, checks what
 can be checked without a lease (orchard/preflight.py), fetches the model snapshot when it is not local
@@ -108,6 +109,10 @@ def _parser() -> argparse.ArgumentParser:
                    help="listen on the local network with no login: anyone who can reach the port can pause, abort "
                         "and start runs. Open the port in the firewall yourself")
     u.add_argument("--port", type=int, default=8780, help="the port to listen on (default 8780)")
+    lab = sub.add_parser("lab", parents=[common], help="get the [lab] box ready for runs whose hardware tests "
+                                                       "run there (`lab setup --help`)")
+    lab.add_argument("action", choices=["setup"])
+    lab.add_argument("rest", nargs=argparse.REMAINDER, help="options for the action")
     return p
 
 
@@ -317,6 +322,13 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
 
     if args.cmd == "ui":
         return _ui(args, env, home, out)
+    if args.cmd == "lab":
+        from orchard import lab_setup
+        try:
+            cfg, _ = config()
+        except (NoConfig, bringup_config.BringupConfigError) as exc:
+            return _refuse(str(exc))
+        return lab_setup.main(args.rest, cfg=cfg)
 
     # status and the control words only need a run directory.
     if args.cmd != "bringup":

@@ -74,6 +74,8 @@ class StageSpec:
     tests: bool = False                 # the hardware phase runs a list of tests (hw_tests.json,
                                         # orchard/hwtests.py) in place of one hw_test.json
     disk: float | None = None           # free disk the stage needs, when it differs from STAGE_DISK_GB
+    draft: str | None = None            # a config the supervisor drafts before a fresh prepare step
+                                        # ("swap_config": orchard/swap_draft.py)
 
     @property
     def budget_s(self) -> float:
@@ -722,7 +724,7 @@ validate_table()
 
 WEIGHTS_ONLY_STAGE_2 = dataclasses.replace(
     STAGES[2], name="weights swap check on one board", skill="weights-swap-check",
-    gate=gate_weights_swap)
+    gate=gate_weights_swap, draft="swap_config")
 
 
 # The weights+sidecar class (orchard/classes.py): stage 2 also measures the sidecar head's parity in the same

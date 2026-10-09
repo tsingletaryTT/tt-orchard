@@ -142,6 +142,7 @@ from orchard.package import finish as package_finish
 from orchard.paths import (PATHS_RECORDED, RunPaths, UnknownPlaceholder, absolute_path,
                            recorded_paths)
 from orchard.runner import Denied, check_string
+from orchard import swap_draft
 from orchard.server import ServerControl, ServerError, ServerSpec, StopCheck
 from orchard.stages import (PACKAGE_OPTIONS_SET, GateResult, TierUnavailable, attempt_started_ts,
                             budget_cap, check_disk, coder_state, delta_class, delta_path, evidence_record,
@@ -470,6 +471,9 @@ def coder_tier(cfg, port: int) -> str:
 
 # ---- the supervisor -----------------------------------------------------------------------------
 
+SWAP_TEMPLATES = ("prepare_swap.py", "serve_and_compare.py")      # copied with a drafted swap_config.json
+
+
 class Supervisor:
     def __init__(self, *, run_dir, ledger, cfg, model_id: str, adapter, coder, coder_chips: int,
                  standin, skills_dirs, inputs: dict | None = None, extra_env: dict | None = None,
@@ -478,10 +482,14 @@ class Supervisor:
                  credentials_visible: list[str] | None = None,
                  required_chips: tuple[int, ...] | None = None, home=None, containers=None,
                  paths: RunPaths | None = None, package: dict | None = None,
-                 package_added: bool = False, unattended: bool = False):
+                 package_added: bool = False, unattended: bool = False, lab=None):
         self.run_dir = Path(run_dir).resolve()
         self.ledger, self.cfg, self.model_id = ledger, cfg, model_id
         self.adapter, self.coder, self.coder_chips, self.standin = adapter, coder, coder_chips, standin
+        # With a lab box (orchard/labclient.py), every hardware test runs there under the lab's own
+        # leases, and the coder on this box is never parked. Without one, tests share this box.
+        self.lab = lab
+        self.test_adapter = lab.adapter if lab is not None else adapter
         self.skills_dirs = [Path(d) for d in skills_dirs]
         self.inputs, self.extra_env = dict(inputs or {}), dict(extra_env or {})
         self.versions = dict(versions or {})
@@ -538,16 +546,23 @@ class Supervisor:
         Crash, which stands for a SIGKILL, after which no code runs. Releasing there would hide
         the crash recovery that the kill test checks."""
         write_pid_file(self.run_dir)    # first, so `status` sees this process as soon as it starts
-        with self._signals():
-            try:
-                return self._run()
-            except Interrupted as exc:
-                return self._stop_on_signal(exc.name)
-            except KeyboardInterrupt:              # SIGINT when the handler is not installed
-                return self._stop_on_signal("SIGINT")
-            except Exception as exc:
-                self._stop_on_error(exc)
-                raise
+        try:
+            with self._signals():
+                try:
+                    return self._run()
+                except Interrupted as exc:
+                    return self._stop_on_signal(exc.name)
+                except KeyboardInterrupt:              # SIGINT when the handler is not installed
+                    return self._stop_on_signal("SIGINT")
+                except Exception as exc:
+                    self._stop_on_error(exc)
+                    raise
+        finally:
+            # Closing the lab connection is safe on every way out, a crash included: a SIGKILL drops
+            # the ssh connection, and the lab helper then does what close() asks of it (stop its tests,
+            # give back the leases it holds).
+            if self.lab is not None:
+                self.lab.close()
 
     @contextlib.contextmanager
     def _signals(self):
@@ -611,7 +626,7 @@ class Supervisor:
         if lease is None:
             return True
         try:
-            self.adapter.release(lease)
+            self.test_adapter.release(lease)
         except AdapterError as exc:
             self.ledger.append("notice", None, what="releasing the test lease failed",
                                lease_id=lease.lease_id, error=str(exc))
@@ -638,7 +653,7 @@ class Supervisor:
                     if not check["ok"]:
                         ok = False
                         continue
-                self.adapter.release(lease)
+                (self.adapter if is_coder else self.test_adapter).release(lease)
             except (AdapterError, ServerError, OSError):
                 ok = False
         return ok
@@ -653,12 +668,15 @@ class Supervisor:
                                inputs=self.inputs, required_chips=list(self.required_chips or ()) or None,
                                paths=self.paths.record(), package=self.package,
                                coder=self.coder.record(),
-                               tiers={k: dict(v) for k, v in self.cfg.tiers.items()})
+                               tiers={k: dict(v) for k, v in self.cfg.tiers.items()},
+                               **({"lab": self.lab.info} if self.lab is not None else {}))
         elif recorded_paths(self.ledger.read()) is None:
             # The run started under a supervisor that did not record paths. Record them once now,
             # so every later resume is held to the same values.
             self.ledger.append("decision", None, decision=PATHS_RECORDED, paths=self.paths.record(),
                                note="the run_start entry predates the paths record")
+        if self.lab is not None and p.started:
+            self._recover_lab_leases()
         if self.package_added and package_options(self.ledger.read()) != self.package:
             # Options given on a resume of a run that started without them (build checked that
             # stage 7 has not started). Recorded once; a later resume reads them from here.
@@ -962,6 +980,7 @@ class Supervisor:
                 if ended:
                     return ended
             elif not (resumed and (stage_dir / "test-result.json").is_file()):
+                self._draft(spec, stage_dir)
                 out, prep = self._step(spec, "prepare", stage_dir, escalated, resumed)
                 out = self._wrap_up(spec, stage_dir, prep, out)
                 if out.status != "done":
@@ -1176,10 +1195,45 @@ class Supervisor:
                          control=self.actuator, run_dir=self.run_dir,
                          evidence_dir=stage_dir / "evidence",
                          log_path=stage_dir / "log" / f"{phase}-{len(entries) + 1:05d}.jsonl",
-                         http=self.http, clock=self.clock, guard=self.guard)
+                         http=self.http, clock=self.clock, guard=self.guard,
+                         finished=self._finished_check(spec, phase, stage_dir))
         name = deliverable(spec, phase)
         step.deliverable_stamp = file_stamp(stage_dir / name) if name else None
         return step.run(system, user), step
+
+    def _draft(self, spec, stage_dir: Path) -> None:
+        """Write the config a stage's skill starts from, when the run already holds every fact in it
+        (orchard/swap_draft.py), and copy the templates that read it. A config already in the stage
+        directory (a resumed stage) is kept. When a fact is missing or ambiguous nothing is written,
+        the ledger says why, and the agent finds the facts as its skill describes."""
+        if spec.draft != "swap_config" or (stage_dir / "swap_config.json").exists():
+            return
+        cfg, problems = swap_draft.draft(run_dir=self.run_dir, tt_model_root=self.paths.tt_model_root,
+                                         cache_root=self.paths.cache_root, hf_home=self.paths.hf_home,
+                                         inputs=self.inputs, chips=spec.boards * CHIPS_PER_BOARD)
+        if cfg is None:
+            self.ledger.append("decision", spec.number, decision="swap config not drafted", problems=problems)
+            return
+        target = stage_dir / "swap_config.json"
+        target.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
+        templates = Path(self.paths.orchard_dir) / "orchard" / "skills" / "weights-swap-templates"
+        copied = []
+        for name in SWAP_TEMPLATES:
+            shutil.copy2(templates / name, stage_dir / name)
+            copied.append(name)
+        self.ledger.append("decision", spec.number, decision="swap config drafted",
+                           config=evidence_record(self.run_dir, target), bundle_dir=cfg["bundle_dir"],
+                           copied=copied)
+
+    def _finished_check(self, spec, phase: str, stage_dir: Path):
+        """What says a step's files are written and valid (AgentStep's `finished`): for one hardware
+        test's prepare step, hw_test.json and handoff.json as the hardware phase reads them; for a run or
+        finish step, the stage's gate. A list of tests (stage 4) and stage 7 have no such check."""
+        if phase == "prepare":
+            if spec.tests:
+                return None
+            return lambda: not self._read_test(stage_dir)[1]
+        return lambda: self._gate(spec)(stage_dir, self.run_dir).ok
 
     # ---- the hardware test ----------------------------------------------------------------------
 
@@ -1205,6 +1259,8 @@ class Supervisor:
 
     def _hardware_phase(self, spec, stage_dir: Path, test: dict) -> None:
         n = spec.number
+        if self.lab is not None:
+            return self._lab_hardware_phase(spec, stage_dir, test)
         chips = self.adapter.status()
         d = decide_park(self.coder_lease.units, chips, spec.boards)
         self.ledger.append("decision", n, decision="hardware phase", action=d.action,
@@ -1231,6 +1287,81 @@ class Supervisor:
             self._block(n, f"releasing the test lease failed: {exc}", lease_id=lease.lease_id)
         self.test_lease = None
         self.ledger.append("decision", n, decision="test lease released", lease_id=lease.lease_id)
+
+    def _lab_hardware_phase(self, spec, stage_dir: Path, test: dict) -> None:
+        """The hardware phase with a lab box: lease the chips there, run the test there, give the
+        chips back. The coder on this box keeps serving the agents throughout."""
+        n = spec.number
+        self.ledger.append("decision", n, decision="hardware phase", action="lab", where=self._where())
+        lease = reacquire(self.test_adapter, chips=spec.boards * CHIPS_PER_BOARD, who=WHO,
+                          reason=f"stage {n} hardware test", ledger=self.ledger, stage=n,
+                          wait_budget_s=spec.budget_s, clock=self.clock, sleep=self.sleep)
+        self.test_lease = lease
+        self.ledger.append("decision", n, decision="test lease taken", test_lease=lease.record(),
+                           where=self._where())
+        self._run_test(spec, stage_dir, test, lease)
+        self._audit_lab_caches(n, stage_dir, self._swap_cache(stage_dir))
+        try:
+            self.test_adapter.release(lease)
+        except AdapterError as exc:
+            self._block(n, f"releasing the lab test lease failed: {exc}", lease_id=lease.lease_id)
+        self.test_lease = None
+        self.ledger.append("decision", n, decision="test lease released", lease_id=lease.lease_id)
+
+    def _recover_lab_leases(self) -> None:
+        """Give back lab test leases an earlier supervisor of this run took and never released (it
+        died, and the lab helper could not release them). Only leases this run's ledger records."""
+        taken, released = {}, set()
+        for e in self.ledger.read():
+            d = e["data"]
+            if e["event"] != "decision":
+                continue
+            if d.get("decision") == "test lease taken" and str(d.get("where", "")).startswith("lab"):
+                rec = d.get("test_lease") or {}
+                if rec.get("lease_id"):
+                    taken[rec["lease_id"]] = rec
+            elif d.get("decision") == "test lease released":
+                released.add(d.get("lease_id"))
+        for lease_id, rec in taken.items():
+            if lease_id in released:
+                continue
+            try:
+                self.test_adapter.release(Lease.from_record(rec))
+                outcome = "released"
+            except AdapterError as exc:
+                outcome = f"not released: {exc}"
+            self.ledger.append("decision", None, decision="test lease released", lease_id=lease_id,
+                               note=f"left by an earlier supervisor of this run; {outcome}", where=self._where())
+
+    def _where(self) -> str:
+        return f"lab {self.lab.info.get('host')}" if self.lab is not None else "this box"
+
+    @staticmethod
+    def _swap_cache(stage_dir: Path) -> list[str]:
+        try:
+            cache = json.loads((stage_dir / "swap_config.json").read_text()).get("tt_cache")
+        except (OSError, ValueError, AttributeError):
+            return []
+        return [cache] if isinstance(cache, str) and cache else []
+
+    def _audit_lab_caches(self, n: int, stage_dir: Path, caches: list[str]) -> None:
+        """What each tensor cache on the lab holds, kept with the stage's evidence: the caches stay on
+        the lab, and stage 8's hazard check reads this file in their place."""
+        if self.lab is None or not caches:
+            return
+        try:
+            audit = self.lab.cache_audit(caches)
+        except Exception as exc:                       # the audit is evidence, not a gate
+            self.ledger.append("notice", n, what="the lab cache audit failed", error=str(exc))
+            return
+        path = stage_dir / "evidence" / "lab-caches.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            known = json.loads(path.read_text())
+        except (OSError, ValueError):
+            known = {}
+        known.update(audit)
+        path.write_text(json.dumps(known, indent=2, sort_keys=True))
 
     def _run_test(self, spec, stage_dir: Path, test: dict, lease: Lease) -> dict:
         n = spec.number
@@ -1260,17 +1391,39 @@ class Supervisor:
         env["ORCHARD_DEVICE_IDS"] = ",".join(str(i) for i in ids)
         env["ORCHARD_TEST_LABEL"] = self.run_label
         self.ledger.append("decision", n, decision="hardware test started", command=command,
-                           deadline_s=deadline, chips=list(chips), **record)
+                           deadline_s=deadline, chips=list(chips), **record,
+                           **({"where": self._where()} if self.lab is not None else {}))
         t0 = self.clock()
         with open(out_path, "wb") as out:
             try:
-                code, timed_out = spawn_checked(command, self.run_dir, env, deadline, out)
+                if self.lab is not None:
+                    code, timed_out = self._spawn_on_lab(n, command, env, deadline, out)
+                else:
+                    code, timed_out = spawn_checked(command, self.run_dir, env, deadline, out)
             except Denied as exc:
                 code, timed_out = None, False
                 out.write(f"refused: {exc}\n".encode("utf-8"))
         return {"command": command, "returncode": code, "timed_out": timed_out,
                 "seconds": round(self.clock() - t0, 3), "chips": list(chips),
                 "output": evidence_record(self.run_dir, out_path)}
+
+    def _spawn_on_lab(self, n: int, command: str, env: dict, deadline: float, out) -> tuple[int | None, bool]:
+        """The lab's side of a test. The command passes the runner's checks here first, as a local
+        test's does. The run directory and the Hugging Face cache go up (rsync, incremental, to the
+        same paths), the test runs on the lab with its output streamed into `out`, and the stage's
+        directory comes back, so the finish step, the gates and the ledger hashes read it here."""
+        check_string(command, self.run_dir)
+        stage = self.run_dir / "stages" / str(n)
+        self.lab.sync_up(self.run_dir)
+        self.lab.mirror_up(stage)                                 # no earlier attempt's files in it
+        self.lab.sync_up(self.paths.hf_home)
+        # The output streams into `out` here; the lab's copy of that file is the empty one the sync up
+        # carried, so the sync down leaves it out.
+        streamed = os.path.relpath(os.path.realpath(out.name), os.path.realpath(stage))
+        try:
+            return self.lab.run_test(command, cwd=self.run_dir, env=env, timeout=deadline, stdout=out)
+        finally:
+            self.lab.sync_down(stage, exclude=[] if streamed.startswith("..") else [streamed])
 
     # ---- a list of hardware tests (stage 4 on the weights-only path) ---------------------------
 
@@ -1303,6 +1456,8 @@ class Supervisor:
 
     def _run_listed(self, spec, stage_dir: Path, test) -> None:
         n = spec.number
+        if self.lab is not None:
+            return self._run_listed_on_lab(spec, stage_dir, test)
         ok, free = check_disk(self.run_dir, TEST_DISK_GB, usage=self.disk_usage)
         if not ok:
             self._block(n, f"the {test.chips}-chip test needs {TEST_DISK_GB} GB free on the run "
@@ -1346,20 +1501,58 @@ class Supervisor:
         h.restore()
         self.coder_lease = h.lease
 
-    def _take_test_lease(self, spec, test, boards: int, exact) -> Lease:
+    def _run_listed_on_lab(self, spec, stage_dir: Path, test) -> None:
+        """One configuration's test on the lab: the cache checks there, a lease of exactly the chips
+        the test needs (a lab's boards may hold one chip each), the test, the sweep, the release."""
         n = spec.number
-        lease = reacquire(self.adapter, chips=boards * CHIPS_PER_BOARD, who=WHO,
+        lab_chips = getattr(self.lab, "chips", None)
+        if lab_chips and test.chips > lab_chips:
+            host = self.lab.info.get("host")
+            if self.required_chips and test.chips in self.required_chips:
+                self._block(n, f"this run requires a {test.chips}-chip test, and the lab {host} has "
+                               f"{lab_chips} chips", config=test.chips, lab_chips=lab_chips)
+            # An optional configuration the lab cannot hold: recorded as not run, never leased (a lease
+            # for more chips than the lab has would wait until the stage budget ran out).
+            reason = f"not run: the lab {host} has {lab_chips} chips and this configuration needs {test.chips}"
+            path = write_record(stage_dir, test.chips, {"config": test.chips, "command": test.command(n),
+                                                        "returncode": None, "timed_out": False, "seconds": 0,
+                                                        "chips": [], "not_run": reason})
+            self.ledger.append("evidence", n, what="hardware test", config=test.chips, cache=test.cache,
+                               returncode=None, timed_out=False, not_run=reason,
+                               **evidence_record(self.run_dir, path))
+            return
+        free = self.lab.disk_free_gb(self.paths.cache_root)
+        if free < TEST_DISK_GB:
+            self._block(n, f"the {test.chips}-chip test needs {TEST_DISK_GB} GB free on the lab's cache disk; "
+                           f"{free} GB is free", need_gb=TEST_DISK_GB, free_gb=free, where=self._where())
+        if test.cache in suspect_caches(self.ledger.read(), n):
+            aside = self.lab.move_aside(test.cache)
+            if aside is not None:
+                self.ledger.append("decision", n, decision="moved a tensor cache aside",
+                                   reason="its last test did not exit 0, so it may be part-written",
+                                   cache=test.cache, aside=str(aside), where=self._where())
+        self.ledger.append("decision", n, decision="hardware phase", config=test.chips, action="lab",
+                           where=self._where())
+        lease = self._take_test_lease(spec, test, None, None, chips=test.chips)
+        self._run_listed_test(spec, stage_dir, test, [lease])
+        self._audit_lab_caches(n, stage_dir, [test.cache])
+        self._sweep(n)
+        self._give_back_test_lease(n, lease)
+
+    def _take_test_lease(self, spec, test, boards, exact, *, chips: int | None = None) -> Lease:
+        n = spec.number
+        lease = reacquire(self.test_adapter, chips=chips if chips is not None else boards * CHIPS_PER_BOARD, who=WHO,
                           reason=f"stage {n} {test.chips}-chip test", ledger=self.ledger, stage=n,
                           wait_budget_s=spec.budget_s, clock=self.clock, sleep=self.sleep,
                           exact=exact)
         self.test_lease = lease
         self.ledger.append("decision", n, decision="test lease taken", config=test.chips,
-                           test_lease=lease.record())
+                           test_lease=lease.record(), **({"where": self._where()} if self.lab is not None else {}))
         return lease
 
     def _give_back_test_lease(self, n: int, lease: Lease) -> None:
         try:
-            self.adapter.release(lease)        # the lease tool resets the board as it releases
+            self.test_adapter.release(lease)        # the lease tool resets the board as it releases
         except AdapterError as exc:
             self._block(n, f"releasing the test lease failed: {exc}", lease_id=lease.lease_id)
         self.test_lease = None
@@ -1468,6 +1661,25 @@ def parse(argv=None):
                         "counts of the nearest model. Default: the run's {{TT_MODEL_ROOT}}, "
                         "<operator home>/.cache/tt-model/models")
     r.add_argument("--gozer", default="gozer")
+    r.add_argument("--tt-model-root", default=None, metavar="DIR",
+                   help="where tt-model installs bundles; skills name it as {{TT_MODEL_ROOT}}. Default: "
+                        "<operator home>/.cache/tt-model/models. Recorded and kept like --cache-root")
+    r.add_argument("--lab", default=None, metavar="HOST",
+                   help="run every hardware test on this ssh host (a lab box) instead of here; the coder "
+                        "stays here and is never parked. Needs --lab-root, and every run path under it on "
+                        "both boxes. The ledger records it, and a resumed run keeps it")
+    r.add_argument("--lab-root", default=None, metavar="DIR",
+                   help="the directory that has the same absolute path on this box and the lab (such as "
+                        "/srv/orchard); the run directory, caches, Hugging Face cache and bundles live under it")
+    r.add_argument("--lab-gozer", default="gozer", help="the gozer command on the lab")
+    r.add_argument("--lab-path", action="append", default=[], metavar="DIR",
+                   help="a directory to put first on PATH on the lab (repeatable), such as ~/.local/bin")
+    r.add_argument("--lab-python", default="python3",
+                   help="the Python on the lab that runs the lab helper; hardware tests get the directory "
+                        "of --lab-test-python first on PATH")
+    r.add_argument("--lab-test-python", default=None, metavar="PATH",
+                   help="the interpreter tests run with on the lab (its directory goes first on PATH), such as "
+                        "the reference venv under --lab-root")
     r.add_argument("--unattended", action="store_true",
                    help="never wait for an operator: when the run would pause, name the reason, write "
                         "BLOCKED.md, release the hardware and exit 5. Running the command again retries. "
@@ -1503,9 +1715,23 @@ def package_option(args) -> dict | None:
             "models_root": absolute_path(root) if root else None}
 
 
+def lab_problems(args, run_dir: Path, paths: RunPaths, inputs: dict) -> list[str]:
+    """Why a run with a lab cannot start: every path a hardware test touches must be the same path on
+    both boxes, so each one must sit under --lab-root."""
+    if not getattr(args, "lab_root", None):
+        return ["--lab needs --lab-root, the directory with the same absolute path on both boxes"]
+    root = absolute_path(args.lab_root).rstrip("/") + "/"
+    named = {"the run directory": str(run_dir), "--cache-root": paths.cache_root, "--hf-home": paths.hf_home,
+             "--tt-model-root": paths.tt_model_root,
+             **{f"--input {k}": v for k, v in inputs.items() if str(v).startswith(("/", "~"))}}
+    return [f"{what} {path} is not under the lab root {root.rstrip('/')}; a lab run needs every path it "
+            "shares with the lab under the lab root" for what, path in named.items()
+            if not (absolute_path(path) + "/").startswith(root)]
+
+
 def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_json,
           probe=probe_model, clock=time.time, sleep=time.sleep, budgets=Budgets(),
-          disk_usage=shutil.disk_usage, home=None, containers=None, environ=None) -> Supervisor:
+          disk_usage=shutil.disk_usage, home=None, containers=None, environ=None, lab=None) -> Supervisor:
     """A Supervisor from parsed `run` arguments. Tests pass fakes for the machine. `environ`
     supplies $HF_HOME for the default --hf-home (default os.environ)."""
     # Everything that can be refused is checked before any external command runs.
@@ -1546,6 +1772,32 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
                       home=home, environ=environ)
     if package is not None and package["models_root"] is None:
         package["models_root"] = paths.tt_model_root
+    lab_host = getattr(args, "lab", None)
+    if progress.started:                        # a resumed run keeps the lab it started with
+        recorded_lab = (progress.run_start or {}).get("lab")
+        if (recorded_lab or {}).get("host") != lab_host:
+            raise ValueError(f"this run started with lab {(recorded_lab or {}).get('host')}; --lab {lab_host} "
+                             "differs. Give the recorded lab (or none, for a run without one)")
+    if lab_host:
+        from orchard.bringup_config import _SSH_HOST
+        if not _SSH_HOST.fullmatch(lab_host):
+            raise ValueError(f"--lab {lab_host!r} is not an ssh host such as node4 or user@node4")
+        if package is not None:
+            raise ValueError("--package-format cannot be used with --lab yet: stage 7's boot check and its "
+                             "install would have to run on the lab. Leave it out, or run without --lab")
+        problems = lab_problems(args, run_dir, paths, inputs)
+        if problems:
+            raise ValueError("; ".join(problems))
+        if lab is None:
+            from orchard.labclient import LabError, LabSide
+            try:
+                lab = LabSide.connect(host=lab_host, root=absolute_path(args.lab_root), gozer=args.lab_gozer,
+                                      path=args.lab_path, python=args.lab_python, test_python=args.lab_test_python)
+            except (LabError, OSError) as exc:
+                raise ValueError(f"the lab {lab_host} could not be reached or started: {exc}. Check it with "
+                                 "`tt-orchard lab setup --check`") from exc
+        if containers is None:
+            containers = LabelledContainers(run=lab.run_argv)
     added = False
     if progress.started:                        # a resumed run keeps the package it started with
         recorded = package_options(entries)
@@ -1567,10 +1819,12 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
                       clock=clock, sleep=sleep, budgets=budgets, disk_usage=disk_usage,
                       credentials_visible=found, required_chips=required,
                       home=home, containers=containers, paths=paths, package=package,
-                      package_added=added, unattended=getattr(args, "unattended", False))
+                      package_added=added, unattended=getattr(args, "unattended", False),
+                      lab=lab if lab_host else None)
 
 
-PATH_FLAGS = {"--cache-root": "cache_root", "--hf-home": "hf_home", "--operator-home": "operator_home"}
+PATH_FLAGS = {"--cache-root": "cache_root", "--hf-home": "hf_home", "--operator-home": "operator_home",
+              "--tt-model-root": "tt_model_root"}
 
 
 def run_paths(args, run_dir, recorded: dict | None, *, home, environ=None) -> RunPaths:
@@ -1579,10 +1833,11 @@ def run_paths(args, run_dir, recorded: dict | None, *, home, environ=None) -> Ru
     as --required-chips is."""
     if recorded is None:
         return RunPaths.resolve(run_dir, home=home, environ=environ, cache_root=args.cache_root,
-                                hf_home=args.hf_home, operator_home=args.operator_home)
+                                hf_home=args.hf_home, operator_home=args.operator_home,
+                                tt_model_root=getattr(args, "tt_model_root", None))
     paths = RunPaths.from_record(recorded)
     for flag, field in PATH_FLAGS.items():
-        given, kept = getattr(args, field), getattr(paths, field)
+        given, kept = getattr(args, field, None), getattr(paths, field)
         if given is not None and absolute_path(given) != kept:
             raise ValueError(f"this run started with {flag} {kept}; {flag} {given} differs. Leave "
                              "the option out to resume with the recorded value")
