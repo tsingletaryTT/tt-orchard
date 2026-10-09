@@ -684,3 +684,92 @@ warning that names the files, and the ledger still records the acceptance. `--ac
 no-op so older commands work. `supervisor run` itself is unchanged and still refuses until the flag is passed. The
 exposure is the same as before (agent shells run as the operator and can read the files); only the default moved.
 Four mutations, all red.
+
+## 2026-10-07: `tt-orchard ui`, a browser page to watch and control runs (version 0.4.0)
+Prompt (operator, ezietlow): "build a full UI that will allow for monitoring and control of the orchard project. It
+needs to follow best practices for UI design and be an easy to use tool." Plan approved in chat: in this repository,
+loopback only (reach it with `ssh -L`), the full lifecycle (watch; pause, resume, abort; retry a blocked run; start a
+new bring-up through the preflight), stdlib server and plain HTML/CSS/JS with no build step.
+- `orchard/webui.py`: a `ThreadingHTTPServer` on 127.0.0.1:8780 (`tiers.LOCAL_HOSTS` only). Reads with
+  `status.collect` (gozer shared for 15 s), `ledger.read_entries`, and a `narrate.Narrator` subclass (`Feed`) whose
+  lines go to the page as server-sent events. Writes only `supervisor.Control` words, and only when the run can act on
+  them (pause or abort while running, resume while paused), and launches only a detached `tt-orchard bringup`
+  (`start_new_session`), for a new model when the preflight has no block or for a blocked or stopped run (retry).
+- Requests: the Host header must be a loopback name (DNS rebinding), every POST needs the per-process token from
+  `/api/meta` and a loopback Origin when one is sent. Files come from an allow-list (gate files, evidence, the bundle's
+  text, BLOCKED.md, coder.log; never the ledger, transcripts or the control file), stay inside the run (a symlink out
+  is refused), are tailed past 256 KB, and are redacted with the scrub's token and home-path patterns plus the host name.
+- `orchard/web/`: one page. Machine panel (boards and chips from `gozer status`, coder and CPU-tier ports, disk), runs
+  sorted by what needs a person, the selected run's state with orchard and real names, the `next:` hint, block and pause
+  panels, a nine-stage stepper, and tabs for the live feed, the ledger, the files and the details. Confirmations are
+  `<dialog>`s that say what happens; abort needs a second click. Light and dark themes from `ui.ROLES`, keyboard tabs,
+  `aria-live` feed, no external hosts (a CSP forbids them), every server string set with `textContent`.
+- 57 tests in `tests/test_webui.py`, written first. 14 mutations, one per guard (loopback host, token, Origin, Host
+  header, allow-list, symlink, redaction, control-state check, preflight block, one launch at a time, model id
+  validation, gozer cache, new session, retry state): all red.
+- Found in the browser, on node6 against real runs: an aborted run's open stage showed "running" with a clock still
+  counting (`stage_rows` reports an open stage as running whatever the run's state), two runs of one model could not be
+  told apart, polling rebuilt focused controls every few seconds (now only on change), and CLAIMED chips were coloured
+  as a fault.
+- The feed was not redacted at first: an agent's `ls ~/.cache/...` reached the page with the home path. Feed lines now
+  pass through the same redaction as files (test first; the mutation that skips it is red).
+- On node6's chips (QuietBox 2, gozer 0.3.3, Coder-Next on one board): the page ran the preflight for
+  Altworld/Hemmingway-1, started the bring-up detached, and followed it. Coder-Next booted cold in 10 min 22 s
+  (18:55:27 to 19:05:49Z) and passed its canary; stage 0 started. Pause from the page: paused within seconds, chips
+  still leased. Resume: running again about 5 s later. Abort (two clicks): `abort: operator` at 19:08:04Z, `hardware
+  released` at 19:08:47Z, then all four chips FREE, no container or supervisor left, port 8001 closed. While the
+  Coder-Next container served, gozer showed its board HELD-FOREIGN; the page now says why.
+- A hidden tab first stopped polling, so its title (the run's state) went stale; it now polls every 30 s.
+- Not done: screenshots in the README, a test of the page's own JavaScript (it is checked by hand in a browser and
+  by `node --check`), and `stage_rows` itself still calls an aborted run's open stage "running" (the page shows it
+  as stopped).
+
+## 2026-10-08: `tt-orchard ui --lan`, tt-toplike in the page, and the farm look
+Prompts (operator): "open everything so I can access it from any box on lan"; "Can we use the tt-toplike project
+for some of the card visualization? We also don't need login for now"; "please use everything from tt-toplike
+don't re-write it"; "gamify the UI with some kind of stardew valley type animation ... theme the whole UI with
+more stardew valley type color scheme and elements".
+- `--lan`: listens beyond loopback with no login (the operator's call). The Host check is skipped there; every
+  POST still needs the token and an Origin equal to the request's Host. The firewall is the operator's to open.
+- A first attempt ported tt-toplike's portrait, colours and hwmon reader into the page. The operator asked for
+  tt-toplike itself instead, so the port was removed. tt-toplike has no web build, so the page runs the real
+  `tt-toplike-tui` in a pseudo-terminal per viewer and draws it with xterm.js (vendored). Forwarding keystrokes
+  from an unauthenticated LAN page into it was refused by the session's safety check as a remote-execution
+  surface; the operator chose view-only: no input route, `disableStdin`, and a `--mode` from TOPLIKE_MODES
+  (`hivemind` left out). At most TOPLIKE_MAX per server; a closed page stops its tt-toplike (the server watches
+  the socket, because a still screen sends nothing to fail on).
+- tt-toplike printed in one colour at first: it gives up true colour when TMUX is set (src/ui/colors.rs), and
+  the UI ran in tmux. It now gets the environment tt-toplike's own app gives it (src/bin/app.rs). Then the page's
+  CSP blocked xterm.js's inline styles (thousands of console errors); styles may be inline now, scripts stay 'self'.
+- The farm look: parchment menus in wooden frames on a grass field by day, indigo and lantern light by night,
+  Pixelify Sans (vendored, OFL) for headings and buttons. `orchard/web/scene.js` draws the run as a pixel orchard
+  in code: nine plots that grow into fruit trees as stages pass, the orchardist walking to the running stage,
+  the grafter working while the agent talks, the sheepdog dashing by on a watchdog line, and weather for the
+  state (sun, rain, frost, a soft storm with no strobe, falling leaves, harvest basket). Reduced motion draws it
+  still. The scene is decorative; everything it shows is text on the page too.
+- Checked on node6: tt-toplike 0.13.10 (built in ~/build/tt-toplike-orchard) shows all four p300c chips in
+  colour in Table and Arcade views, inside the page.
+- Later the same day (operator: "make weather conditions based on chip health. make the worker work based on
+  utilization and rest based on the same. Make him go back and get tools from the shed when chips are switching
+  leases"). tt-toplike's `--serve` stream was the first choice for the data, but it only serves with its json or
+  hybrid backend, which polls `tt-smi` and opens the chips; gozer refuses a reset while a device is open, and the
+  page's tt-toplike on its default backend had already shown up as BUSY-UNTRACKED in `gozer status`. So the page's
+  tt-toplike now always runs `--backend sysfs`, and `read_chips` reads the same kernel files that backend reads.
+  `weather()` and `utilization()` are pure and tested; a heartbeat that has not moved for 5 s is a storm. The farmer
+  works, rests and fetches tools from the shed from `/api/health`; a lease change is seen within GOZER_TTL_S (5 s).
+- Found: killing the UI's tmux session left tt-toplike children running (their own session, so no hangup). Now
+  SIGTERM and SIGHUP close every session, and each child asks the kernel for SIGTERM when the server dies
+  (PR_SET_PDEATHSIG); checked on node6 with `tmux kill-session` and with `kill -9` of the server: none left.
+- Checked on node6's chips: four Blackholes at 34-36 °C, 12-13 W, aiclk 800 MHz, heartbeats moving: clear skies,
+  farmer resting. A real `gozer acquire` and `release --no-reset` on board 0 sent him to the shed and back.
+- Layout (operator: "cleaner and less like a series of panels"): one parchment sheet with a quiet rail; only the
+  orchard scene and the tt-toplike TV keep wooden frames. The TV uses xterm.js's WebGL renderer, retints only
+  tt-toplike's near-black backgrounds to the skin, and has zoom, wide and full-screen controls.
+- Tested with a real bring-up started from the page (Altworld/Hemmingway-1, Coder-Next on board 0, 2026-10-08).
+  The first readings showed the AI clock is not a work signal: with Coder-Next resident, tt_aiclk sits at 1350 MHz
+  and the board draws 32-35 W with no request in flight, which the first formula called 60 % busy. Utilization is
+  now power above each chip's lowest reading in the last ten minutes (FLOOR_WINDOW_S). Measured during stage 0:
+  resting 34-36 W reads 0.00; token generation reads 44-75 W with peaks of 118-170 W (above power1_max, 125 W),
+  0.2 to 1.0; the idle board stays at 0. The farmer also waited at plot 0 while the coder booted, because the facts
+  name the next stage as current before it starts; the scene now works a plot only once that stage has started.
+

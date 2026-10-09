@@ -6,6 +6,7 @@
     tt-orchard status   [MODEL | --run-dir DIR] [--json] [--style S]
     tt-orchard watch    [MODEL | --run-dir DIR] [--all] [--once] [--style S]
     tt-orchard pause | resume | abort   [MODEL | --run-dir DIR]
+    tt-orchard ui       [--lan] [--host ADDR] [--port 8780] [--toplike PATH]
     tt-orchard lab setup [--model ORG/NAME]... [--yes] [--check]
 
 It is a thin layer over `python3 -m orchard.supervisor`. `bringup` reads config/bringup.toml, checks what
@@ -24,6 +25,7 @@ The supervisor, the download and the outside signals are parameters of `main`, s
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import shlex
@@ -95,6 +97,18 @@ def _parser() -> argparse.ArgumentParser:
         c = sub.add_parser(word, parents=[common], help=f"send {word} to a running supervisor")
         c.add_argument("model", nargs="?")
         c.add_argument("--run-dir")
+    u = sub.add_parser("ui", parents=[common], help="watch and control the runs on this machine in a browser")
+    u.add_argument("--host", default=None,
+                   help="the address to listen on. Default 127.0.0.1; with --lan, 0.0.0.0 (every interface). Without "
+                        "--lan only a loopback address is accepted; from another computer use "
+                        "`ssh -L 8780:localhost:8780 <box>`")
+    u.add_argument("--toplike", metavar="PATH",
+                   help="the tt-toplike binary the Hardware view runs (view-only). Default: tt-toplike or "
+                        "tt-toplike-tui on PATH; without one the view says how to install it")
+    u.add_argument("--lan", action="store_true",
+                   help="listen on the local network with no login: anyone who can reach the port can pause, abort "
+                        "and start runs. Open the port in the firewall yourself")
+    u.add_argument("--port", type=int, default=8780, help="the port to listen on (default 8780)")
     lab = sub.add_parser("lab", parents=[common], help="get the [lab] box ready for runs whose hardware tests "
                                                        "run there (`lab setup --help`)")
     lab.add_argument("action", choices=["setup"])
@@ -194,6 +208,101 @@ def _watch(run_dir: Path, args, style, out) -> int:
     return EXIT_OK
 
 
+def _ui_preflight(cfg):
+    """The preflight the UI runs: the same checks as `bringup --dry-run`, with `--base` resolved without
+    installing anything (an install happens only when the run itself starts)."""
+    def run(model, base):
+        sig = preflight.default_signals(cfg)
+        override = None
+        if base:
+            override, why = resolve_base(base, sig, None, io.StringIO(), ui.Style("none", False), dry_run=True)
+            if why:
+                return [preflight.Check("base", preflight.BLOCK, why, "nearest-model-missing")]
+        resuming = (bringup_config.run_dir(cfg, model) / "ledger.jsonl").exists()
+        return preflight.run_preflight(cfg, model, accept_credentials=True, signals=sig, resuming=resuming,
+                                       base_override=override)
+    return run
+
+
+def _toplike_argv(path) -> list[str] | None:
+    import shutil
+    if path:
+        return [path]
+    for name in ("tt-toplike", "tt-toplike-tui"):
+        found = shutil.which(name)
+        if found:
+            return [found]
+    return None
+
+
+def _ui_host(args) -> str:
+    return args.host or ("0.0.0.0" if args.lan else "127.0.0.1")
+
+
+def _lan_addresses() -> list[str]:
+    """This machine's address on the local network, found by asking the kernel which address a packet to a
+    LAN host would leave from (nothing is sent)."""
+    import socket
+    found = []
+    for probe in ("192.168.0.1", "10.0.0.1", "172.16.0.1"):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.connect((probe, 9))
+                ip = s.getsockname()[0]
+        except OSError:
+            continue
+        if ip not in found and not ip.startswith("127."):
+            found.append(ip)
+    return found
+
+
+def _ui(args, env, home, out) -> int:
+    from orchard import tiers, webui
+    host = _ui_host(args)
+    if host not in tiers.LOCAL_HOSTS and not args.lan:
+        return _refuse(f"--host {host} is not a loopback address; the UI listens only on "
+                       f"{', '.join(sorted(tiers.LOCAL_HOSTS))} unless you pass --lan. From another computer, "
+                       f"forward the port instead: ssh -L {args.port}:localhost:{args.port} <this machine>")
+    try:
+        path = find_config(getattr(args, "config", None), env, CHECKOUT, home)
+        cfg = bringup_config.load(path)
+    except (NoConfig, bringup_config.BringupConfigError) as exc:
+        return _refuse(str(exc))
+    app = webui.WebApp(runs_root=cfg.runs_root, config_path=path, cfg=cfg, preflight=_ui_preflight(cfg),
+                       lan=args.lan, toplike=_toplike_argv(args.toplike))
+    try:
+        server = webui.make_server(app, host, args.port)
+    except (OSError, ValueError) as exc:
+        return _refuse(f"cannot listen on {host}:{args.port}: {exc}")
+    shown = f"[{host}]" if ":" in host else host
+    print(f"tt-orchard ui {__version__}: http://{shown}:{args.port}/  (runs in {cfg.runs_root})", file=out)
+    if args.lan:
+        for addr in [app.hostname, *_lan_addresses()]:
+            print(f"on the network: http://{addr}:{args.port}/", file=out)
+        print("NO LOGIN: anyone who can reach this port can pause, abort and start runs. The firewall must allow "
+              f"the port (for ufw: sudo ufw allow from <your LAN>/24 to any port {args.port} proto tcp).", file=out)
+    else:
+        print(f"from another computer: ssh -L {args.port}:localhost:{args.port} {app.hostname}  "
+              f"then open http://localhost:{args.port}/  (or start it with --lan)", file=out)
+    print("Ctrl-C stops the page. It never stops a run.", file=out)
+    out.flush()
+    import signal
+
+    def stop(signum, frame):
+        raise KeyboardInterrupt
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, stop)                    # tmux kill-session sends SIGHUP: clean up as for Ctrl-C
+    try:
+        server.serve_forever(poll_interval=0.5)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.stopping.set()                     # open live feeds end; serve_forever has already returned
+        app.toplike_close_all()
+        server.server_close()
+    return EXIT_OK
+
+
 def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None, fetcher=None,
          chooser=None, puller=None) -> int:
     env = os.environ if env is None else env
@@ -211,6 +320,8 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
         return bringup_config.load(find_config(getattr(args, "config", None), env, CHECKOUT, home)), \
             find_config(getattr(args, "config", None), env, CHECKOUT, home)
 
+    if args.cmd == "ui":
+        return _ui(args, env, home, out)
     if args.cmd == "lab":
         from orchard import lab_setup
         try:

@@ -415,6 +415,7 @@ tt-orchard bringup org/name --dry-run                         # the checks and t
 tt-orchard bringup org/name                                   # check, fetch, run
 tt-orchard bringup org/name --base <bundle or model id>       # base the run on this model
 tt-orchard watch org/name                                     # follow a run from another terminal
+tt-orchard ui                                                 # watch and control every run in a browser
 tt-orchard status org/name                                    # also pause, resume, abort
 tt-orchard --version
 ```
@@ -444,6 +445,59 @@ line of the test's output. `--quiet` turns this off. A resumed run starts by sho
 `tt-orchard watch org/name` prints the same lines from another terminal. It reads the ledger and the agent
 logs and writes nothing. It starts from the last 15 entries (`--all` starts from the first), follows the run
 until it ends, and `--once` prints the recent history and stops.
+
+#### In a browser: `tt-orchard ui`
+
+`tt-orchard ui` serves one page for the whole machine, dressed as a farm game: the chips and who holds them,
+every run under `runs_root` (runs that need you first), and for the run you pick an animated orchard, its stages,
+the same live lines as `watch`, the ledger, its files (gate results, evidence, the operator bundle,
+`BLOCKED.md`, the coder log) and what to do next. The Hardware view shows
+[tt-toplike](https://github.com/tenstorrent/tt-toplike) itself on a TV: its own terminal UI, run on this
+machine and drawn in the page, with a button for each of its views.
+
+```bash
+tt-orchard ui                                  # http://127.0.0.1:8780/ on this machine
+ssh -L 8780:localhost:8780 <the box>           # from your own computer, then open http://localhost:8780/
+tt-orchard ui --lan                            # or open it to the local network (no login; see below)
+```
+
+By default it listens on a loopback address only, and `--host` must be `127.0.0.1`, `localhost` or `::1`.
+`--lan` listens on every interface (or the `--host` you give) **with no login**: anyone who can reach the
+port can pause, abort and start runs. Use it only on a network you trust, and open the port in the firewall
+yourself (for ufw: `sudo ufw allow from <your LAN>/24 to any port 8780 proto tcp`). `--port` picks the port
+(default 8780). `--toplike` names the tt-toplike binary (a path); by default `tt-toplike` or `tt-toplike-tui` on
+`PATH` is used, and without one the Hardware view says how to install it.
+
+The page can pause, resume and abort a run (each behind a confirmation that says what happens; abort needs
+a second click), retry a run that ended blocked or stopped, and start a new bring-up after showing the
+preflight as a checklist. Start stays disabled while a check blocks, and when no installed bundle serves the
+base it lists the candidates to choose from. A run it starts is the same detached `tt-orchard bringup`, so it
+outlives the page, and Ctrl-C on `tt-orchard ui` never stops a run.
+
+The Hardware view is view-only. Nothing typed in the browser reaches the machine: the terminal takes no
+input and the server has no route for it. Each view button starts tt-toplike with that `--mode` (or
+`--rotate`) from a fixed list; `hivemind`, its opt-in sniffer of other processes, is not on it.
+
+The orchard is the machine and the run at a glance. The weather is the chips' health, read from the same kernel
+files tt-toplike's sysfs backend reads (hwmon and tt-kmd's class attributes; no device is opened): clear when
+every chip is well, a heatwave when one runs at 70 °C or more, overcast when a lease is stale or a chip is in use
+outside a lease, and a storm when a chip's ARC heartbeat stops or it comes within 8 °C of its limit. The farmer
+(the supervisor) works the running stage's plot as hard as the chips the run holds are working (power above
+idle and the AI clock), rests on the bench by the shed when they are idle, and walks to the shed for tools when
+chips change leases. The nine plots grow into fruit trees as stages pass; the run's state is on the ground
+(frost when it is blocked, autumn when it was aborted, a basket when it is ripe). The caption says all of it in
+words, and the scene is still under reduced motion. Each viewer
+gets their own tt-toplike, at most four at once, stopped when the page goes away. It always runs with
+tt-toplike's `sysfs` backend, which reads the kernel's sensor files and never opens a chip, so watching cannot
+get in the way of a run's chip reset.
+
+What it will not do: publish, upload, push, reset chips or release leases. It reads runs the way `status`
+and `watch` do, without the ledger lock. Every change needs the page's per-process token and must come from
+the page's own origin; on loopback it also refuses a request that names another host (DNS rebinding).
+Files are shown from an allow-list (never the ledger, the agent transcripts or the control file), and they,
+the ledger summaries and the live feed have tokens, the home path and the host name taken out. The code is
+[`orchard/webui.py`](orchard/webui.py) and [`orchard/web/`](orchard/web/); the pixel font (Pixelify Sans,
+OFL) and xterm.js (MIT) are vendored unmodified under `orchard/web/vendor/` with their licences.
 
 When a run ends blocked, the command prints what was tried in the stage that stopped (the watchdog's
 findings, the hardware test's last output, the agent's last actions) and what to do for that block code.
@@ -926,6 +980,7 @@ Each of these happened on the development machine. Details are in the
 | [`orchard/defaults.py`](orchard/defaults.py) | Every timing, budget and threshold, each labelled measured or choice |
 | [`orchard/skills/`](orchard/skills/) | The stage skills and the template scripts they copy (delta triage, reference gate, weights swap, operator bundle). These skills live in this repository. It also holds [`operator-runbook.md`](orchard/skills/operator-runbook.md), which is for whoever watches a run and is not a stage skill |
 | [`orchard/status.py`](orchard/status.py), [`orchard/operator_checks.py`](orchard/operator_checks.py) | The read-only `status` command and the post-run checks |
+| [`orchard/webui.py`](orchard/webui.py), [`orchard/web/`](orchard/web/) | `tt-orchard ui`: the browser page and its server |
 | [`orchard/package_templates/`](orchard/package_templates/) | The script each stage 7 package carries (`prepare_model_dir.py`) and stage 7's boot check (`verify_bundle.py`) |
 | [`config/tiers.example.toml`](config/tiers.example.toml) | The example tier config |
 | [`tests/`](tests/) | The test suite and its fakes |

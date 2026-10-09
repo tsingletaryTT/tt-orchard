@@ -1,0 +1,2 @@
+xterm.js 5.5.0 (@xterm/xterm), @xterm/addon-fit 0.10.0 and @xterm/addon-webgl 0.18.0, unmodified, from the npm
+registry. MIT License; see LICENSE. Used by tt-orchard ui to show tt-toplike's terminal UI in the browser.
