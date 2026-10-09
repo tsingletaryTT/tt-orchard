@@ -168,6 +168,9 @@ class Helper:
                 k += 1
             os.rename(path, aside)
             return {"aside": str(aside)}
+        if action == "mkdir":
+            Path(self.under_root(req["path"])).mkdir(parents=True, exist_ok=True)
+            return {}
         if action == "cache_audit":
             out = {}
             for p in req["paths"]:

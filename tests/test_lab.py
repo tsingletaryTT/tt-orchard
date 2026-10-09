@@ -323,3 +323,54 @@ def test_the_lab_helper_is_launched_from_the_synced_checkout():
     remote = argv[-1]
     assert "cd /srv/orchard/orchard" in remote and "-m orchard.lab serve" in remote
     assert "--root /srv/orchard" in remote and "--gozer gozer" in remote
+
+
+
+# ---- what a test needs from the HF cache, and a directory on the lab -------------------------------
+
+def _hub(tmp_path):
+    """An HF cache with the new model, the base model and a drafter, the way the hub lays them out."""
+    hub = tmp_path / "hf" / "hub"
+    for repo, rev in (("models--Altworld--Hemmingway-1", "def"), ("models--Qwen--Qwen3.8-27B", "abc"),
+                      ("models--incoai--Qwen3.8-27B-DFlash2", "d1")):
+        (hub / repo / "snapshots" / rev).mkdir(parents=True)
+        (hub / repo / "blobs").mkdir()
+        (hub / repo / "blobs" / "b1").write_text("w")
+        (hub / repo / "snapshots" / rev / "model.safetensors").symlink_to(hub / repo / "blobs" / "b1")
+    return hub
+
+
+def test_a_test_needs_the_new_model_and_its_drafter_and_never_the_base(tmp_path):
+    hub = _hub(tmp_path)
+    stage = tmp_path / "run" / "stages" / "2"
+    (stage / "model-dir").mkdir(parents=True)
+    (stage / "model-dir" / "model.safetensors").symlink_to(hub / "models--Altworld--Hemmingway-1" / "blobs" / "b1")
+    (stage / "model-dir" / "config.json").write_text("{}")         # copied from the base: no link
+    (stage / "run.sh").write_text('export DFLASH_WEIGHTS="incoai/Qwen3.8-27B-DFlash2@d1"\n')
+    inputs = {"model": str(hub / "models--Altworld--Hemmingway-1" / "snapshots" / "def"),
+              "base": str(hub / "models--Qwen--Qwen3.8-27B" / "snapshots" / "abc")}
+    got = labclient.lab_hf_repos(stage, tmp_path / "hf", inputs)
+    assert [g.name for g in got] == ["models--Altworld--Hemmingway-1", "models--incoai--Qwen3.8-27B-DFlash2"]
+
+
+def test_a_drafter_that_is_not_in_the_cache_is_left_out_and_a_link_outside_the_hub_is_ignored(tmp_path):
+    hub = _hub(tmp_path)
+    stage = tmp_path / "run" / "stages" / "4" / "configs" / "1"
+    stage.mkdir(parents=True)
+    (stage / "run.sh").write_text('DFLASH_WEIGHTS=someone/Missing@x\n')
+    (stage / "elsewhere").symlink_to(tmp_path)
+    got = labclient.lab_hf_repos(stage.parent.parent, tmp_path / "hf", {})
+    assert got == []
+
+
+def test_the_helper_makes_a_directory_only_under_its_root(labroot, tmp_path):
+    root, gz = labroot
+    lab_ = connect(root, gz, tmp_path)
+    try:
+        lab_.ensure_dir(root / "cache" / "kernels")
+        assert (root / "cache" / "kernels").is_dir()
+        with pytest.raises(labclient.LabError):
+            lab_.ensure_dir(tmp_path / "outside")
+        assert not (tmp_path / "outside").exists()
+    finally:
+        lab_.close()

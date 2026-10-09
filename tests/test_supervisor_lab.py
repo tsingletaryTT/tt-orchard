@@ -32,6 +32,7 @@ class FakeLab:
         self.m = Machine(owner_pid=owner_pid)
         self.adapter = MachineAdapter(self.m, owner_pid=owner_pid)
         self.events: list[tuple] = []
+        self.envs: list[dict] = []
         self.closed = False
         self.audits: dict = {}
         self.chips = None                          # unknown: no limit (a test sets the lab's chip count)
@@ -47,9 +48,13 @@ class FakeLab:
     def mirror_up(self, path):
         self.events.append(("mirror", str(path)))
 
+    def ensure_dir(self, path):
+        self.events.append(("mkdir", str(path)))
+
     def run_test(self, command, *, cwd, env, timeout, stdout):
         held = {c for lease, _ in self.m.leases.values() for c in lease.chips}
         self.events.append(("run", command, env["TT_VISIBLE_DEVICES"], frozenset(held)))
+        self.envs.append(dict(env))
         p = subprocess.run(["bash", "-c", command], cwd=cwd, env=env, stdout=stdout, stderr=subprocess.STDOUT,
                            timeout=timeout)
         return p.returncode, False
@@ -142,7 +147,7 @@ def test_files_go_to_the_lab_before_each_test_and_come_back_after(rig):
         if e[0] != "run":
             continue
         before = ev[:i]
-        assert ("up", str(rig.run_dir.resolve())) in before and ("up", f"{rig.root}/hf") in before
+        assert ("up", str(rig.run_dir.resolve())) in before
         stage = e[1].split("stages/")[1].split("/")[0] if "stages/" in e[1] else None
         after = ev[i + 1:]
         assert any(x[0] == "down" and "/stages/" in x[1] for x in after)
@@ -200,6 +205,33 @@ def test_a_required_test_larger_than_the_lab_blocks_with_the_reason(rig):
     assert 4 not in [c[1] for c in rig.lab.adapter.calls if c[0] == "acquire"]
     reasons = [str(e["data"].get("reason")) for e in entries if e["data"].get("decision") in ("pause", "blocked")]
     assert any("requires a 4-chip test" in r and "has 2 chips" in r for r in reasons)
+
+
+def test_the_files_go_to_the_lab_before_the_lease_is_taken(rig):
+    """The first lab test spent its copy of the HF cache holding node4's chips. Copy first, then lease."""
+    assert rig.run() == EXIT_READY
+    entries = rig.entries()
+    for i, e in enumerate(entries):
+        if e["data"].get("decision") != "test lease taken":
+            continue
+        copied = [j for j in range(i) if entries[j]["data"].get("decision") == "files copied to the lab"
+                  and entries[j]["stage"] == e["stage"]]
+        assert copied, f"no copy before the lease at {i}"
+        between = [entries[j]["data"].get("decision") for j in range(copied[-1] + 1, i)]
+        assert "test lease released" not in between
+
+
+def test_the_whole_hf_cache_is_never_copied(rig):
+    assert rig.run() == EXIT_READY
+    assert ("up", f"{rig.root}/hf") not in rig.lab.events
+    assert not [e for e in rig.lab.events if e[0] == "up" and "models--Qwen--Qwen3.8-27B" in e[1]]
+
+
+def test_every_lab_test_shares_one_kernel_cache_under_the_cache_root(rig):
+    assert rig.run() == EXIT_READY
+    want = f"{rig.root}/cache/kernels"
+    assert rig.lab.envs and all(env.get("TT_METAL_CACHE") == want for env in rig.lab.envs)
+    assert ("mkdir", want) in rig.lab.events
 
 
 def test_the_lab_caches_are_audited_after_each_test(rig):

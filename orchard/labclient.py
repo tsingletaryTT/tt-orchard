@@ -32,6 +32,35 @@ SYNC_TIMEOUT_S = 4 * 3600.0          # the first copy of a model's weights can b
 CHECKOUT = Path(__file__).resolve().parent.parent
 
 
+DRAFTER_LINE = re.compile(r"""DFLASH_WEIGHTS=["']?([A-Za-z0-9][\w.-]*/[A-Za-z0-9][\w.-]*)""")
+
+
+def lab_hf_repos(stage_dir, hf_home, inputs) -> list[Path]:
+    """The Hugging Face repos (hub/models--org--name) a stage's hardware test reads, so only those go to the
+    lab: the new model (the `model=` input), every repo a link under the stage directory resolves into
+    (prepare_swap's model-dir links its weights to the new model's blobs), and the drafter a run.sh names
+    in DFLASH_WEIGHTS. The base model is not among them: its config files are copied into model-dir."""
+    hub = os.path.realpath(os.path.join(str(hf_home), "hub"))
+
+    def repo_of(path):
+        rel = os.path.relpath(os.path.realpath(path), hub)
+        first = rel.split(os.sep)[0]
+        return Path(hub) / first if not rel.startswith("..") and first.startswith("models--") else None
+
+    found = set()
+    if inputs.get("model"):
+        found.add(repo_of(inputs["model"]))
+    for top, dirs, files in os.walk(str(stage_dir)):              # never follows a link to a directory
+        for name in dirs + files:
+            path = os.path.join(top, name)
+            if os.path.islink(path):
+                found.add(repo_of(path))
+            if name == "run.sh" and not os.path.islink(path):
+                for m in DRAFTER_LINE.finditer(Path(path).read_text(encoding="utf-8", errors="replace")):
+                    found.add(Path(hub) / ("models--" + m.group(1).replace("/", "--")))
+    return sorted((r for r in found if r is not None and r.is_dir()), key=lambda r: r.name)
+
+
 class LabError(Exception):
     """The lab helper refused a request, failed it, or went away."""
 
@@ -164,6 +193,10 @@ class Lab:
 
     def move_aside(self, path) -> str | None:
         return self.call("fs", action="move_aside", path=str(path))["aside"]
+
+    def ensure_dir(self, path) -> None:
+        """mkdir -p on the lab, under its root only."""
+        self.call("fs", action="mkdir", path=str(path))
 
     def cache_audit(self, paths) -> dict:
         return self.call("fs", action="cache_audit", paths=[str(p) for p in paths])["audit"]
@@ -320,6 +353,9 @@ class LabSide:
 
     def move_aside(self, path):
         return self.lab.move_aside(path)
+
+    def ensure_dir(self, path):
+        self.lab.ensure_dir(path)
 
     def cache_audit(self, paths):
         return self.lab.cache_audit(paths)

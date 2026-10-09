@@ -1294,6 +1294,7 @@ class Supervisor:
         chips back. The coder on this box keeps serving the agents throughout."""
         n = spec.number
         self.ledger.append("decision", n, decision="hardware phase", action="lab", where=self._where())
+        self._lab_files_up(n)
         lease = reacquire(self.test_adapter, chips=spec.boards * CHIPS_PER_BOARD, who=WHO,
                           reason=f"stage {n} hardware test", ledger=self.ledger, stage=n,
                           wait_budget_s=spec.budget_s, clock=self.clock, sleep=self.sleep)
@@ -1391,6 +1392,11 @@ class Supervisor:
         env.pop("TT_METAL_VISIBLE_DEVICES", None)
         env["ORCHARD_DEVICE_IDS"] = ",".join(str(i) for i in ids)
         env["ORCHARD_TEST_LABEL"] = self.run_label
+        # One kernel cache for every run (tt-metal keys it by build). Under the run's HOME it was new for
+        # every run, and each configuration's first boot recompiled every kernel (25+ minutes).
+        env["TT_METAL_CACHE"] = str(self._kernel_cache())
+        if self.lab is None:
+            self._kernel_cache().mkdir(parents=True, exist_ok=True)
         self.ledger.append("decision", n, decision="hardware test started", command=command,
                            deadline_s=deadline, chips=list(chips), **record,
                            **({"where": self._where()} if self.lab is not None else {}))
@@ -1408,6 +1414,26 @@ class Supervisor:
                 "seconds": round(self.clock() - t0, 3), "chips": list(chips),
                 "output": evidence_record(self.run_dir, out_path)}
 
+    def _kernel_cache(self) -> Path:
+        return Path(self.paths.cache_root) / "kernels"
+
+    def _lab_files_up(self, n: int) -> None:
+        """Copy what stage `n`'s test reads to the lab, before its lease is taken: the run directory, an
+        exact copy of stages/<n>, and only the HF repos the test reads (labclient.lab_hf_repos). The
+        first copy of a model's weights takes minutes; the lab's chips stay free for others meanwhile."""
+        t0 = self.clock()
+        stage = self.run_dir / "stages" / str(n)
+        self.ledger.append("decision", n, decision="copying files to the lab", where=self._where())
+        self.lab.sync_up(self.run_dir)
+        self.lab.mirror_up(stage)                                 # no earlier attempt's files in it
+        from orchard.labclient import lab_hf_repos
+        repos = lab_hf_repos(stage, self.paths.hf_home, self.inputs)
+        for repo in repos:
+            self.lab.sync_up(repo)
+        self.lab.ensure_dir(self._kernel_cache())
+        self.ledger.append("decision", n, decision="files copied to the lab", seconds=round(self.clock() - t0, 1),
+                           repos=[r.name for r in repos], where=self._where())
+
     def _spawn_on_lab(self, n: int, command: str, env: dict, deadline: float, out) -> tuple[int | None, bool]:
         """The lab's side of a test. The command passes the runner's checks here first, as a local
         test's does. The run directory and the Hugging Face cache go up (rsync, incremental, to the
@@ -1415,9 +1441,6 @@ class Supervisor:
         directory comes back, so the finish step, the gates and the ledger hashes read it here."""
         check_string(command, self.run_dir)
         stage = self.run_dir / "stages" / str(n)
-        self.lab.sync_up(self.run_dir)
-        self.lab.mirror_up(stage)                                 # no earlier attempt's files in it
-        self.lab.sync_up(self.paths.hf_home)
         # The output streams into `out` here; the lab's copy of that file is the empty one the sync up
         # carried, so the sync down leaves it out.
         streamed = os.path.relpath(os.path.realpath(out.name), os.path.realpath(stage))
@@ -1534,6 +1557,7 @@ class Supervisor:
                                    cache=test.cache, aside=str(aside), where=self._where())
         self.ledger.append("decision", n, decision="hardware phase", config=test.chips, action="lab",
                            where=self._where())
+        self._lab_files_up(n)
         lease = self._take_test_lease(spec, test, None, None, chips=test.chips)
         self._run_listed_test(spec, stage_dir, test, [lease])
         self._audit_lab_caches(n, stage_dir, [test.cache])

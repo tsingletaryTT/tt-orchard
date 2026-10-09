@@ -933,9 +933,12 @@ records the mode, and a resume in the other mode is refused. Check the lab with
 How it works: the supervisor copies this checkout to `<lab root>/orchard` on the lab and starts a small
 helper there (`python3 -m orchard.lab serve`, in [`orchard/lab.py`](orchard/lab.py)). The helper takes
 the lab's gozer leases under its own pid and runs each test as its child, so gozer counts the test as
-the lease's work. Before a test the run directory and the Hugging Face cache go to the lab with rsync
-(to the same paths; incremental after the first copy), the test's output streams back as it runs, and
-the stage directory comes back afterwards, so the finish step, the gates and the ledger read it here.
+the lease's work. Before a test, and before its lease is taken, the run directory and the Hugging Face
+repos the test reads (the new model and its drafter, never the base model) go to the lab with rsync (to
+the same paths; incremental after the first copy). The test's output streams back as it runs, and the
+stage directory comes back afterwards, so the finish step, the gates and the ledger read it here. In both
+modes every hardware test shares one tt-metal kernel cache, `<cache_root>/kernels` (`TT_METAL_CACHE`), so
+a configuration's kernels are compiled once, not once per run.
 A test is killed on the lab at its deadline. If the supervisor dies or the connection drops, the helper
 stops its tests and gives back every lease the run held. Agents never reach the lab: the command
 runner still refuses ssh, scp and rsync in anything an agent runs.
