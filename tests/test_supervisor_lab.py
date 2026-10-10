@@ -32,6 +32,7 @@ class FakeLab:
         self.m = Machine(owner_pid=owner_pid)
         self.adapter = MachineAdapter(self.m, owner_pid=owner_pid)
         self.events: list[tuple] = []
+        self.envs: list[dict] = []
         self.closed = False
         self.audits: dict = {}
         self.chips = None                          # unknown: no limit (a test sets the lab's chip count)
@@ -47,9 +48,13 @@ class FakeLab:
     def mirror_up(self, path):
         self.events.append(("mirror", str(path)))
 
+    def ensure_dir(self, path):
+        self.events.append(("mkdir", str(path)))
+
     def run_test(self, command, *, cwd, env, timeout, stdout):
         held = {c for lease, _ in self.m.leases.values() for c in lease.chips}
         self.events.append(("run", command, env["TT_VISIBLE_DEVICES"], frozenset(held)))
+        self.envs.append(dict(env))
         p = subprocess.run(["bash", "-c", command], cwd=cwd, env=env, stdout=stdout, stderr=subprocess.STDOUT,
                            timeout=timeout)
         return p.returncode, False
@@ -142,7 +147,7 @@ def test_files_go_to_the_lab_before_each_test_and_come_back_after(rig):
         if e[0] != "run":
             continue
         before = ev[:i]
-        assert ("up", str(rig.run_dir.resolve())) in before and ("up", f"{rig.root}/hf") in before
+        assert ("up", str(rig.run_dir.resolve())) in before
         stage = e[1].split("stages/")[1].split("/")[0] if "stages/" in e[1] else None
         after = ev[i + 1:]
         assert any(x[0] == "down" and "/stages/" in x[1] for x in after)
@@ -202,6 +207,33 @@ def test_a_required_test_larger_than_the_lab_blocks_with_the_reason(rig):
     assert any("requires a 4-chip test" in r and "has 2 chips" in r for r in reasons)
 
 
+def test_the_files_go_to_the_lab_before_the_lease_is_taken(rig):
+    """The first lab test spent its copy of the HF cache holding node4's chips. Copy first, then lease."""
+    assert rig.run() == EXIT_READY
+    entries = rig.entries()
+    for i, e in enumerate(entries):
+        if e["data"].get("decision") != "test lease taken":
+            continue
+        copied = [j for j in range(i) if entries[j]["data"].get("decision") == "files copied to the lab"
+                  and entries[j]["stage"] == e["stage"]]
+        assert copied, f"no copy before the lease at {i}"
+        between = [entries[j]["data"].get("decision") for j in range(copied[-1] + 1, i)]
+        assert "test lease released" not in between
+
+
+def test_the_whole_hf_cache_is_never_copied(rig):
+    assert rig.run() == EXIT_READY
+    assert ("up", f"{rig.root}/hf") not in rig.lab.events
+    assert not [e for e in rig.lab.events if e[0] == "up" and "models--Qwen--Qwen3.8-27B" in e[1]]
+
+
+def test_every_lab_test_shares_one_kernel_cache_under_the_cache_root(rig):
+    assert rig.run() == EXIT_READY
+    want = f"{rig.root}/cache/kernels"
+    assert rig.lab.envs and all(env.get("TT_METAL_CACHE") == want for env in rig.lab.envs)
+    assert ("mkdir", want) in rig.lab.events
+
+
 def test_the_lab_caches_are_audited_after_each_test(rig):
     assert rig.run() == EXIT_READY
     audit = json.loads((rig.run_dir / "stages" / "4" / "evidence" / "lab-caches.json").read_text())
@@ -248,6 +280,23 @@ def test_without_the_facts_nothing_is_drafted_and_the_ledger_says_why(rig):
     d = next(e["data"] for e in rig.entries() if e["data"].get("decision") == "swap config not drafted")
     assert any("does not exist" in p or "no installed v6 bundle" in p for p in d["problems"])
     assert not (rig.run_dir / "stages" / "2" / "prepare_swap.py").exists()
+
+
+def test_the_run_start_records_the_mode(rig, tmp_path):
+    assert rig.run() == EXIT_READY
+    start = next(e["data"] for e in rig.entries() if e["event"] == "run_start")
+    assert start["mode"] == "lab"
+
+
+def test_a_lab_run_resumed_without_its_lab_is_refused_in_terms_of_the_mode(rig):
+    from orchard.ledger import Ledger
+    rig.run_dir.mkdir(parents=True, exist_ok=True)
+    with Ledger(rig.run_dir / "ledger.jsonl") as led:
+        led.append("run_start", None, model="Altworld/Hemmingway-1", versions={}, inputs={},
+                   lab={"host": "node4", "root": str(rig.root)}, mode="lab")
+    rig.args.lab = None
+    with pytest.raises(ValueError, match="--mode lab"):
+        rig.run()
 
 
 def test_a_resume_with_a_different_lab_is_refused(rig):
@@ -371,3 +420,68 @@ def test_a_prepare_agent_that_repeats_its_last_write_still_gets_its_hardware_tes
     assert any(e["data"].get("decision") == "step finished: repeated write" and e["stage"] == 2 for e in entries)
     assert not [e for e in entries if e["data"].get("watchdog") and e["stage"] == 2 and e["data"].get("rung")]
     assert any(e["data"].get("decision") == "hardware test started" and e["stage"] == 2 for e in entries)
+
+
+
+def test_stage_4_starts_from_drafted_configs_for_the_counts_the_lab_can_hold(rig):
+    """The agent wrote stage 4's configs by hand and named caches differently in each run, so no run
+    reused another's. The supervisor drafts them, with fixed names, for the counts the lab can hold."""
+    _installed_for_draft(rig)                                        # snapshots and the 2-chip bundle
+    one = rig.root / "tt-model" / "models" / "episod" / "qwen3.8-27b-dflash2-p150"
+    one.mkdir(parents=True)
+    (one / "tt_kernel_manifest.json").write_text(json.dumps(
+        {"schema_version": "6", "device_count": 1, "weights": {"repo_id": "Qwen/Qwen3.8-27B"}}))
+    (one / "run.sh").write_text("#!/bin/bash\n")
+    rig.lab.chips = 2
+    rig.args.required_chips = (1, 2)
+    rig.args.unattended = True
+    rig.run()
+    entries = rig.entries()
+    d = next(e["data"] for e in entries if e["data"].get("decision") == "stage 4 configs drafted")
+    assert sorted(int(k) for k in d["configs"]) == [1, 2] and d["hw_tests"] is True
+    drafted = next(i for i, e in enumerate(entries) if e["data"].get("decision") == "stage 4 configs drafted")
+    prepare = next(i for i, e in enumerate(entries) if e["stage"] == 4 and e["data"].get("phase") == "prepare")
+    assert drafted < prepare
+    assert d["caches"]["1"].endswith("/altworld--hemmingway-1/1chip-episod--qwen3.8-27b-dflash2-p150/tt_cache")
+    assert d["caches"]["2"].endswith("/altworld--hemmingway-1/2chip-episod--qwen3.8-27b-dflash2-p300/tt_cache")
+    # The fake agent writes its own configs over the drafts (as Coder-Next did); the drafted caches stand.
+    plan = json.loads((rig.run_dir / "stages" / "4" / "tests" / "plan.json").read_text())
+    assert {str(t["chips"]): t["cache"] for t in plan["tests"] if str(t["chips"]) in d["caches"]} == d["caches"]
+    kept = [e["data"] for e in entries if e["data"].get("decision") == "kept the drafted tensor cache"]
+    assert {k["config"] for k in kept} == {1, 2}
+
+
+def test_agent_shells_can_list_the_runs_bundles(rig):
+    """`tt-model list` in an agent shell said "No bundles installed": the shells did not know the bundle root."""
+    from orchard.agent import Tools
+    seen = []
+    real_init = Tools.__init__
+
+    def spy(self, run_dir, stage_dir, env, **kw):
+        seen.append(env.get("TT_MODEL_MODELS_DIR"))
+        real_init(self, run_dir, stage_dir, env, **kw)
+    import orchard.agent
+    orchard.agent.Tools.__init__ = spy
+    try:
+        assert rig.run() == EXIT_READY
+    finally:
+        orchard.agent.Tools.__init__ = real_init
+    assert seen and all(v == f"{rig.root}/tt-model/models" for v in seen)
+
+
+
+def test_a_stage_4_prepare_that_repeats_its_last_write_still_gets_its_tests(rig):
+    from run_fakes import bringup, where, turn, call
+    import run_fakes
+
+    def repeating(request):
+        if "tools" in request and where(request) == (4, "prepare"):
+            files = run_fakes.FILES[(4, "prepare")]
+            writes = [call("write_file", path=p, content=c if isinstance(c, str) else json.dumps(c))
+                      for p, c in files.items()]
+            return writes[min(turn(request), len(writes) - 1)]
+        return bringup(request)
+    rig.script = repeating
+    assert rig.run() == EXIT_READY
+    assert any(e["data"].get("decision") == "step finished: repeated write" and e["stage"] == 4
+               for e in rig.entries())

@@ -20,6 +20,7 @@ runs_root = "CHANGE-ME/orchard-runs"
 
 # Chip counts stage 4 must pass. Any other count it records is optional.
 required_chips = "2,4"
+# four_chip_package = "org/name"   # stage 4's 4-chip container when several installed ones fit
 
 # More skill directories, searched after orchard/skills.
 # skills_dirs = ["CHANGE-ME/skills/plugins/tt-model-bringup/skills"]

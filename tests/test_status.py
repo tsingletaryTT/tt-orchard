@@ -283,7 +283,7 @@ def test_the_run_state_line_ends_with_the_hint(tmp_path, clock):
 
 # ---- JSON, text size, corruption, read-only ----------------------------------------------------
 
-JSON_KEYS = {"ledger", "model", "run_dir", "run_name", "state", "supervisor", "stage", "stages", "counts",
+JSON_KEYS = {"ledger", "model", "run_dir", "run_name", "mode", "state", "supervisor", "stage", "stages", "counts",
              "pause", "blocked", "last_events", "control_pending", "disk", "leases", "hint", "now"}
 
 

@@ -472,6 +472,7 @@ def coder_tier(cfg, port: int) -> str:
 # ---- the supervisor -----------------------------------------------------------------------------
 
 SWAP_TEMPLATES = ("prepare_swap.py", "serve_and_compare.py")      # copied with a drafted swap_config.json
+STAGE4_TEMPLATES = (*SWAP_TEMPLATES, "serve_and_compare_container.py")     # into each drafted configs/<N>
 
 
 class Supervisor:
@@ -482,7 +483,8 @@ class Supervisor:
                  credentials_visible: list[str] | None = None,
                  required_chips: tuple[int, ...] | None = None, home=None, containers=None,
                  paths: RunPaths | None = None, package: dict | None = None,
-                 package_added: bool = False, unattended: bool = False, lab=None):
+                 package_added: bool = False, unattended: bool = False, lab=None,
+                 four_chip_package: str | None = None):
         self.run_dir = Path(run_dir).resolve()
         self.ledger, self.cfg, self.model_id = ledger, cfg, model_id
         self.adapter, self.coder, self.coder_chips, self.standin = adapter, coder, coder_chips, standin
@@ -497,6 +499,7 @@ class Supervisor:
         self.budgets, self.disk_usage = budgets, disk_usage
         self.credentials_visible = list(credentials_visible or [])
         self.required_chips = tuple(required_chips) if required_chips else None   # stage 4's required counts
+        self.four_chip_package = four_chip_package      # the container stage 4's 4-chip draft uses, if several fit
         self.package = dict(package) if package else None    # stage 7: format, namespace, models_root
         self.package_added = package_added    # given on a resume of a run that started without them
         self.unattended = unattended          # a pause becomes a named block, never a wait (orchard/blocked.py)
@@ -669,6 +672,7 @@ class Supervisor:
                                paths=self.paths.record(), package=self.package,
                                coder=self.coder.record(),
                                tiers={k: dict(v) for k, v in self.cfg.tiers.items()},
+                               mode="lab" if self.lab is not None else "local",
                                **({"lab": self.lab.info} if self.lab is not None else {}))
         elif recorded_paths(self.ledger.read()) is None:
             # The run started under a supervisor that did not record paths. Record them once now,
@@ -1190,7 +1194,8 @@ class Supervisor:
         self.ledger.append("decision", n, decision="agent step", phase=phase, tier=used, model=model,
                            escalated=escalated, skill=str(skill))
         step = AgentStep(agent=AGENT, endpoint=endpoint, model=model,
-                         tools=Tools(self.run_dir, stage_dir, agent_env(self.run_dir, extra=self.extra_env)),
+                         tools=Tools(self.run_dir, stage_dir, agent_env(self.run_dir, extra={
+                             **self.extra_env, "TT_MODEL_MODELS_DIR": str(self.paths.tt_model_root)})),
                          ledger=self.ledger, stage=n, phase=phase, feed=self.watchdog.feed,
                          control=self.actuator, run_dir=self.run_dir,
                          evidence_dir=stage_dir / "evidence",
@@ -1206,6 +1211,8 @@ class Supervisor:
         (orchard/swap_draft.py), and copy the templates that read it. A config already in the stage
         directory (a resumed stage) is kept. When a fact is missing or ambiguous nothing is written,
         the ledger says why, and the agent finds the facts as its skill describes."""
+        if spec.draft == "stage4":
+            return self._draft_stage4(spec, stage_dir)
         if spec.draft != "swap_config" or (stage_dir / "swap_config.json").exists():
             return
         cfg, problems = swap_draft.draft(run_dir=self.run_dir, tt_model_root=self.paths.tt_model_root,
@@ -1225,13 +1232,68 @@ class Supervisor:
                            config=evidence_record(self.run_dir, target), bundle_dir=cfg["bundle_dir"],
                            copied=copied)
 
+    def _draft_stage4(self, spec, stage_dir: Path) -> None:
+        """Stage 4's configs (swap_draft.draft_stage4) for the counts this run plans: the required ones, or
+        1, 2 and 4, and never more chips than the lab (or this box) has. hw_tests.json is written only when
+        every count got a config; otherwise the agent writes it as its skill describes."""
+        if (stage_dir / "hw_tests.json").exists() or (stage_dir / "configs").exists():
+            return
+        cap = (self.lab.chips if self.lab is not None and getattr(self.lab, "chips", None)
+               else spec.boards * CHIPS_PER_BOARD)
+        counts = [n for n in (self.required_chips or (1, 2, 4)) if n <= cap]
+        configs, tests, notes = swap_draft.draft_stage4(
+            run_dir=self.run_dir, tt_model_root=self.paths.tt_model_root, cache_root=self.paths.cache_root,
+            hf_home=self.paths.hf_home, operator_home=self.paths.operator_home, inputs=self.inputs,
+            counts=counts, four_chip_package=self.four_chip_package)
+        if not configs:
+            self.ledger.append("decision", spec.number, decision="stage 4 configs not drafted", counts=counts,
+                               problems=notes)
+            return
+        templates = Path(self.paths.orchard_dir) / "orchard" / "skills" / "weights-swap-templates"
+        for n, cfg in configs.items():
+            cdir = stage_dir / "configs" / str(n)
+            cdir.mkdir(parents=True, exist_ok=True)
+            (cdir / "swap_config.json").write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
+            for name in STAGE4_TEMPLATES:
+                shutil.copy2(templates / name, cdir / name)
+        if tests is not None:
+            (stage_dir / "hw_tests.json").write_text(json.dumps(tests, indent=2) + "\n", encoding="utf-8")
+        self.ledger.append("decision", spec.number, decision="stage 4 configs drafted", counts=counts,
+                           configs={str(n): c.get("bundle_dir") or c.get("package") for n, c in configs.items()},
+                           caches={str(n): c["tt_cache"] for n, c in configs.items()},
+                           hw_tests=tests is not None, notes=notes)
+
+    def _keep_drafted_caches(self, spec, stage_dir: Path) -> None:
+        """The tensor cache of a configuration the supervisor drafted is the drafted one. On the first run
+        with drafts the agent rewrote the configs with its own spelling of the cache names, so no later run
+        would have found them. The cache is read only when the test runs, so setting it back after the
+        prepare step changes nothing the agent built."""
+        drafted = next((e["data"].get("caches") or {} for e in reversed(self.ledger.read())
+                        if e["stage"] == spec.number and e["data"].get("decision") == "stage 4 configs drafted"), {})
+        for n, cache in drafted.items():
+            path = stage_dir / "configs" / str(n) / "swap_config.json"
+            try:
+                cfg = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if not isinstance(cfg, dict) or cfg.get("tt_cache") == cache:
+                continue
+            self.ledger.append("decision", spec.number, decision="kept the drafted tensor cache", config=int(n),
+                               agent=cfg.get("tt_cache"), drafted=cache)
+            cfg["tt_cache"] = cache
+            path.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
+
+    def _read_plan(self, spec, stage_dir: Path):
+        return read_plan(stage_dir, required=self.required_chips, max_chips=spec.boards * CHIPS_PER_BOARD,
+                         budget_s=spec.budget_s, home=self.home)
+
     def _finished_check(self, spec, phase: str, stage_dir: Path):
         """What says a step's files are written and valid (AgentStep's `finished`): for one hardware
         test's prepare step, hw_test.json and handoff.json as the hardware phase reads them; for a run or
         finish step, the stage's gate. A list of tests (stage 4) and stage 7 have no such check."""
         if phase == "prepare":
             if spec.tests:
-                return None
+                return lambda: not self._read_plan(spec, stage_dir)[1]
             return lambda: not self._read_test(stage_dir)[1]
         return lambda: self._gate(spec)(stage_dir, self.run_dir).ok
 
@@ -1293,6 +1355,7 @@ class Supervisor:
         chips back. The coder on this box keeps serving the agents throughout."""
         n = spec.number
         self.ledger.append("decision", n, decision="hardware phase", action="lab", where=self._where())
+        self._lab_files_up(n)
         lease = reacquire(self.test_adapter, chips=spec.boards * CHIPS_PER_BOARD, who=WHO,
                           reason=f"stage {n} hardware test", ledger=self.ledger, stage=n,
                           wait_budget_s=spec.budget_s, clock=self.clock, sleep=self.sleep)
@@ -1390,6 +1453,11 @@ class Supervisor:
         env.pop("TT_METAL_VISIBLE_DEVICES", None)
         env["ORCHARD_DEVICE_IDS"] = ",".join(str(i) for i in ids)
         env["ORCHARD_TEST_LABEL"] = self.run_label
+        # One kernel cache for every run (tt-metal keys it by build). Under the run's HOME it was new for
+        # every run, and each configuration's first boot recompiled every kernel (25+ minutes).
+        env["TT_METAL_CACHE"] = str(self._kernel_cache())
+        if self.lab is None:
+            self._kernel_cache().mkdir(parents=True, exist_ok=True)
         self.ledger.append("decision", n, decision="hardware test started", command=command,
                            deadline_s=deadline, chips=list(chips), **record,
                            **({"where": self._where()} if self.lab is not None else {}))
@@ -1407,16 +1475,33 @@ class Supervisor:
                 "seconds": round(self.clock() - t0, 3), "chips": list(chips),
                 "output": evidence_record(self.run_dir, out_path)}
 
-    def _spawn_on_lab(self, n: int, command: str, env: dict, deadline: float, out) -> tuple[int | None, bool]:
-        """The lab's side of a test. The command passes the runner's checks here first, as a local
-        test's does. The run directory and the Hugging Face cache go up (rsync, incremental, to the
-        same paths), the test runs on the lab with its output streamed into `out`, and the stage's
-        directory comes back, so the finish step, the gates and the ledger hashes read it here."""
-        check_string(command, self.run_dir)
+    def _kernel_cache(self) -> Path:
+        return Path(self.paths.cache_root) / "kernels"
+
+    def _lab_files_up(self, n: int) -> None:
+        """Copy what stage `n`'s test reads to the lab, before its lease is taken: the run directory, an
+        exact copy of stages/<n>, and only the HF repos the test reads (labclient.lab_hf_repos). The
+        first copy of a model's weights takes minutes; the lab's chips stay free for others meanwhile."""
+        t0 = self.clock()
         stage = self.run_dir / "stages" / str(n)
+        self.ledger.append("decision", n, decision="copying files to the lab", where=self._where())
         self.lab.sync_up(self.run_dir)
         self.lab.mirror_up(stage)                                 # no earlier attempt's files in it
-        self.lab.sync_up(self.paths.hf_home)
+        from orchard.labclient import lab_hf_repos
+        repos = lab_hf_repos(stage, self.paths.hf_home, self.inputs)
+        for repo in repos:
+            self.lab.sync_up(repo)
+        self.lab.ensure_dir(self._kernel_cache())
+        self.ledger.append("decision", n, decision="files copied to the lab", seconds=round(self.clock() - t0, 1),
+                           repos=[r.name for r in repos], where=self._where())
+
+    def _spawn_on_lab(self, n: int, command: str, env: dict, deadline: float, out) -> tuple[int | None, bool]:
+        """The lab's side of a test, after _lab_files_up has copied what it reads. The command passes
+        the runner's checks here first, as a local test's does. The test runs on the lab with its output
+        streamed into `out`, and the stage's directory comes back, so the finish step, the gates and the
+        ledger hashes read it here."""
+        check_string(command, self.run_dir)
+        stage = self.run_dir / "stages" / str(n)
         # The output streams into `out` here; the lab's copy of that file is the empty one the sync up
         # carried, so the sync down leaves it out.
         streamed = os.path.relpath(os.path.realpath(out.name), os.path.realpath(stage))
@@ -1434,13 +1519,13 @@ class Supervisor:
         n = spec.number
         tests = load_plan(stage_dir) if resumed else None
         if tests is None:
+            self._draft(spec, stage_dir)
             out, prep = self._step(spec, "prepare", stage_dir, escalated, resumed)
             out = self._wrap_up(spec, stage_dir, prep, out)
             if out.status != "done":
                 return out.status, [f"the prepare step ended: {out.status} {out.detail}".strip()], None
-            tests, problems = read_plan(stage_dir, required=self.required_chips,
-                                        max_chips=spec.boards * CHIPS_PER_BOARD,
-                                        budget_s=spec.budget_s, home=self.home)
+            self._keep_drafted_caches(spec, stage_dir)
+            tests, problems = self._read_plan(spec, stage_dir)
             if problems:
                 return "fail", problems, None
             plan = write_plan(stage_dir, tests)
@@ -1533,6 +1618,7 @@ class Supervisor:
                                    cache=test.cache, aside=str(aside), where=self._where())
         self.ledger.append("decision", n, decision="hardware phase", config=test.chips, action="lab",
                            where=self._where())
+        self._lab_files_up(n)
         lease = self._take_test_lease(spec, test, None, None, chips=test.chips)
         self._run_listed_test(spec, stage_dir, test, [lease])
         self._audit_lab_caches(n, stage_dir, [test.cache])
@@ -1631,6 +1717,9 @@ def parse(argv=None):
     r.add_argument("--input", action="append", default=[], metavar="NAME=PATH")
     r.add_argument("--env", action="append", default=[], metavar="NAME=VALUE",
                    help="a variable for agent shells (never a credential)")
+    r.add_argument("--four-chip-package", default=None, metavar="ORG/NAME",
+                   help="the container package stage 4 drafts its 4-chip configuration with, when several "
+                        "installed ones serve the nearest model")
     r.add_argument("--required-chips", type=chip_counts, default=None, metavar="N,N",
                    help="chip counts stage 4 must pass, such as 2,4. Any other count it records is "
                         "optional. Without this, every configuration stage 4 lists must pass. The "
@@ -1775,9 +1864,13 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
     lab_host = getattr(args, "lab", None)
     if progress.started:                        # a resumed run keeps the lab it started with
         recorded_lab = (progress.run_start or {}).get("lab")
-        if (recorded_lab or {}).get("host") != lab_host:
-            raise ValueError(f"this run started with lab {(recorded_lab or {}).get('host')}; --lab {lab_host} "
-                             "differs. Give the recorded lab (or none, for a run without one)")
+        recorded_host = (recorded_lab or {}).get("host")
+        if recorded_host != lab_host:
+            was = f"lab mode (lab {recorded_host})" if recorded_host else "local mode"
+            now = f"lab mode (lab {lab_host})" if lab_host else "local mode"
+            raise ValueError(f"this run started in {was} and would resume in {now}. A run keeps its mode: "
+                             f"resume it with --mode {'lab' if recorded_host else 'local'}"
+                             + (f" and the lab {recorded_host} in the config" if recorded_host else ""))
     if lab_host:
         from orchard.bringup_config import _SSH_HOST
         if not _SSH_HOST.fullmatch(lab_host):
@@ -1820,7 +1913,8 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
                       credentials_visible=found, required_chips=required,
                       home=home, containers=containers, paths=paths, package=package,
                       package_added=added, unattended=getattr(args, "unattended", False),
-                      lab=lab if lab_host else None)
+                      lab=lab if lab_host else None,
+                      four_chip_package=getattr(args, "four_chip_package", None))
 
 
 PATH_FLAGS = {"--cache-root": "cache_root", "--hf-home": "hf_home", "--operator-home": "operator_home",

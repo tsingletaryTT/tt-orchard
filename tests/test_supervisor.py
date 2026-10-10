@@ -9,6 +9,8 @@ import pytest
 
 from fake_model import FakeModel, turn
 from fakes import Crash
+from pathlib import Path
+
 from orchard import supervisor
 from orchard.adapters import AdapterError
 from orchard.ledger import Ledger, LedgerCorrupt
@@ -1168,3 +1170,20 @@ def test_a_resumed_run_keeps_the_class_stage_0_recorded_even_if_delta_json_is_ed
     delta.write_text(delta.read_text().replace("weights+sidecar", "weights-only"))
     from orchard.stages import run_class
     assert run_class(rig.entries(), rig.run_dir) == "weights+sidecar"
+
+
+
+def test_a_local_hardware_test_uses_the_shared_kernel_cache(rig, monkeypatch):
+    """Every new run recompiled every kernel (25+ minutes per configuration): tt-metal's JIT cache followed
+    HOME into the run directory. Tests now share one cache under the cache root, in both modes."""
+    seen = []
+    real = supervisor.spawn_checked
+
+    def spy(command, cwd, env, deadline, out):
+        seen.append(env.get("TT_METAL_CACHE"))
+        return real(command, cwd, env, deadline, out)
+    monkeypatch.setattr(supervisor, "spawn_checked", spy)
+    assert rig.run() == supervisor.EXIT_READY
+    start = next(e["data"] for e in rig.entries() if e["event"] == "run_start")
+    want = str(Path(start["paths"]["cache_root"]) / "kernels")
+    assert seen and all(v == want for v in seen) and Path(want).is_dir()

@@ -299,3 +299,14 @@ def test_the_prepare_steps_start_from_the_drafted_config_and_fact_finding_is_onl
         assert "tt-model list`, then read" not in steps and "Find four facts" not in steps, name
         fallback = text.split("## When there is no swap_config.json", 1)[1].split("\n## ", 1)[0]
         assert "Find four facts" in fallback and "weights-swap-templates/prepare_swap.py" in fallback, name
+
+
+
+def test_the_stage_4_steps_start_from_the_drafted_configs_and_the_table_is_only_a_fallback():
+    text = (SKILLS / "weights-swap-configs.md").read_text()
+    steps = text.split("## Prepare phase: the steps", 1)[1].split("\n## ", 1)[0]
+    assert steps.lstrip().startswith("1. Read `stages/4/hw_tests.json`"), steps[:80]
+    assert "tt-model list`, then" not in steps and "mkdir -p stages/4/configs/N" not in steps
+    fallback = text.split("## When a configuration has no drafted config", 1)[1].split("\n## ", 1)[0]
+    assert "mkdir -p stages/4/configs/N" in fallback and "four_chip_package" in fallback
+    assert "changh95/qwen3.8-27b-p300x2" in fallback

@@ -278,6 +278,7 @@ def test_an_empty_reference_python_is_refused(tmp_path):
 # ---- a lab box (`[lab]`) ------------------------------------------------------------------------
 
 LAB = """
+mode = "lab"
 runs_root = "/srv/orchard/runs"
 cache_root = "/srv/orchard/cache"
 hf_home = "/srv/orchard/hf"
@@ -329,3 +330,45 @@ def test_without_a_lab_table_no_lab_flag_is_passed(tmp_path):
 def test_a_bad_lab_table_is_refused(tmp_path, table, message):
     with pytest.raises(bc.BringupConfigError, match=message):
         load(tmp_path, MINIMAL + table)
+
+
+# ---- run modes: local (one box) and lab (hardware tests on a lab box) ----------------------------
+
+def test_the_mode_defaults_to_local(tmp_path):
+    assert load(tmp_path).mode == "local"
+
+
+def test_a_lab_table_without_a_mode_is_refused_so_no_lab_config_turns_local_silently(tmp_path):
+    with pytest.raises(bc.BringupConfigError, match='set mode = "lab" or mode = "local"'):
+        load(tmp_path, LAB.replace('mode = "lab"\n', ""))
+
+
+def test_lab_mode_without_a_lab_table_is_refused(tmp_path):
+    with pytest.raises(bc.BringupConfigError, match=r"\[lab\]"):
+        load(tmp_path, 'mode = "lab"\n' + MINIMAL)
+
+
+def test_an_unknown_mode_is_refused(tmp_path):
+    with pytest.raises(bc.BringupConfigError, match="mode"):
+        load(tmp_path, 'mode = "remote"\n' + MINIMAL)
+
+
+def test_a_local_config_keeps_its_lab_table_for_lab_setup_but_passes_no_lab_flag(tmp_path):
+    cfg = load(tmp_path, LAB.replace('mode = "lab"', 'mode = "local"'))
+    assert cfg.mode == "local" and cfg.lab is not None and cfg.lab.host == "node4"
+    assert not [a for a in bc.supervisor_argv(cfg, "Altworld/Hemmingway-1") if a.startswith("--lab")]
+
+
+def test_for_mode_overrides_the_config_in_both_directions(tmp_path):
+    lab_cfg = load(tmp_path, LAB)
+    local = bc.for_mode(lab_cfg, "local")
+    assert local.mode == "local" and local.lab is None
+    assert not [a for a in bc.supervisor_argv(local, "Altworld/Hemmingway-1") if a.startswith("--lab")]
+    again = bc.for_mode(load(tmp_path, LAB.replace('mode = "lab"', 'mode = "local"')), "lab")
+    argv = bc.supervisor_argv(again, "a/b")
+    assert again.mode == "lab" and argv[argv.index("--lab") + 1] == "node4"
+    assert bc.for_mode(lab_cfg, None) == lab_cfg                     # no override: the config decides
+    with pytest.raises(bc.BringupConfigError, match=r"\[lab\]"):
+        bc.for_mode(load(tmp_path), "lab")
+    with pytest.raises(bc.BringupConfigError, match="mode"):
+        bc.for_mode(lab_cfg, "remote")

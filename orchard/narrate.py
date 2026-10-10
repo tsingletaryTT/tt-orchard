@@ -98,8 +98,15 @@ def _decision(e: dict, d: dict) -> list[Line]:
         return [Line(who, f"{d.get('model', '?')} starts the {d.get('phase', '?')} step"
                           + (f" ({skill})" if skill else "") + (" [escalated]" if d.get("escalated") else ""))]
     if what == "hardware test started":
-        return [Line(o, f"hardware test started on {', '.join(d.get('chips') or []) or '?'}: {d.get('command', '?')} "
-                        f"(deadline {duration(d.get('deadline_s') or 0)})")]
+        box = f" on {d['where'][4:]}" if str(d.get("where", "")).startswith("lab ") else ""
+        return [Line(o, f"hardware test started{box} on {', '.join(d.get('chips') or []) or '?'}: "
+                        f"{d.get('command', '?')} (deadline {duration(d.get('deadline_s') or 0)})")]
+    if what == "copying files to the lab":
+        return [Line(o, f"copying the run's files to {str(d.get('where', 'lab'))[4:] or 'the lab'}")]
+    if what == "files copied to the lab":
+        repos = [r.removeprefix("models--").replace("--", "/") for r in d.get("repos") or []]
+        return [Line(o, f"copied to {str(d.get('where', 'lab'))[4:] or 'the lab'} in {d.get('seconds', '?')} s"
+                        + (f" (with {', '.join(repos)})" if repos else ""))]
     if what == "gate feedback":
         return [Line(o, "the stage gate rejected the result; giving the agent one more go with these reasons: "
                         + _reasons(d.get("reasons"), 3), True)]
@@ -112,10 +119,13 @@ def _decision(e: dict, d: dict) -> list[Line]:
     if what == "resume":
         return [Line(o, f"resumed ({d.get('by', 'operator')})")]
     if what == "hardware phase":
+        if d.get("action") == "lab":
+            return [Line(o, f"hardware phase on the lab {str(d.get('where', ''))[4:]}".rstrip())]
         return [Line(o, f"hardware phase: {d.get('action', '?')}")]
     if what in ("test lease taken", "test lease released"):
         lease = d.get("test_lease") or {}
-        return [Line(o, f"{what}" + (f": {', '.join(lease.get('chips') or [])}" if lease else ""))]
+        box = f" on {d['where'][4:]}" if str(d.get("where", "")).startswith("lab ") else ""
+        return [Line(o, f"{what}{box}" + (f": {', '.join(lease.get('chips') or [])}" if lease else ""))]
     if what == "ready for operator review":
         return [Line(o, f"ready for operator review: the bundle is at {d.get('bundle', '?')}")]
     if what == "tier substituted":

@@ -49,6 +49,8 @@ def render_pretty(f: dict, style: Style) -> str:
         who = f"orchardist pid {sup['pid']} {'on duty' if sup['alive'] else 'not alive'}"
     out += _wrap("by", who, style)
     out += _wrap("run", f["run_name"], style)
+    if f.get("mode"):
+        out += _wrap("mode", f["mode"], style)
     stage = f["stage"]
     out += _wrap("stage", f"{stage['current']} {stage['name']}, attempt {stage['attempt']}"
                  if stage["current"] is not None else "none left", style)

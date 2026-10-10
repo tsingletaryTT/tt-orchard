@@ -141,22 +141,31 @@ function setConn(state) {
 // STALE needs `gozer reconcile`; anything else (HELD-FOREIGN, BUSY-UNTRACKED, ...) is a chip used outside a lease.
 const CHIP_TONE = { FREE: "good", CLAIMED: "accent", HELD: "accent", STALE: "warn" };
 
+// gozer calls a chip HELD-FOREIGN when a process outside the lease owner's tree has it open; under an orchard lease
+// that is the coder's container serving, which is expected, so it is drawn as held, not as an alarm.
+function chipTone(c) {
+  if (c.state === "HELD-FOREIGN" && (c.owner || "").startsWith("orchard:")) return CHIP_TONE.HELD;
+  return CHIP_TONE[c.state] || "alarm";
+}
+
+function boardEl(b, readings) {
+  return h("div", { class: "board" },
+    h("div", { class: "board-head" }, h("span", { class: "mono", title: b.id }, `board …${b.id.slice(-6)}`), h("span", {}, b.kind)),
+    h("div", { class: "chips" }, b.chips.map((c) => h("div", {
+      class: "chip", dataset: { tone: chipTone(c) },
+      title: [c.bdf, c.owner, c.note].filter(Boolean).join(" · "),
+    }, h("strong", {}, `chip ${c.index} · ${c.state}`), h("span", { class: "owner" }, c.owner || c.bdf),
+      readings ? h("span", { class: "chip-reading", dataset: { reading: c.bdf } }) : null))));
+}
+
 function renderMachine() {
   const m = S.machine;
-  if (!m || !changed($("machine"), [m.boards, m.coder, m.cpu_tier, m.disk_free_gb, m.gozer_ok])) return;
+  if (!m || !changed($("machine"), [m.boards, m.coder, m.cpu_tier, m.disk_free_gb, m.gozer_ok, m.lab])) return;
   const box = clear($("machine"));
   if (!m.gozer_ok) {
     box.append(h("p", { class: "muted" }, "gozer did not answer. Chip leases are unknown; check `gozer status`."));
   }
-  for (const b of m.boards) {
-    box.append(h("div", { class: "board" },
-      h("div", { class: "board-head" }, h("span", { class: "mono", title: b.id }, `board …${b.id.slice(-6)}`), h("span", {}, b.kind)),
-      h("div", { class: "chips" }, b.chips.map((c) => h("div", {
-        class: "chip", dataset: { tone: CHIP_TONE[c.state] || "alarm" },
-        title: [c.bdf, c.owner, c.note].filter(Boolean).join(" · "),
-      }, h("strong", {}, `chip ${c.index} · ${c.state}`), h("span", { class: "owner" }, c.owner || c.bdf),
-        h("span", { class: "chip-reading", dataset: { reading: c.bdf } }))))));
-  }
+  for (const b of m.boards) box.append(boardEl(b, true));
   // gozer marks a chip HELD-FOREIGN when a process outside the lease owner's tree has it open. A tt-model
   // container serving under the supervisor's lease is such a process (CLAUDE.md, 2026-10-02), so say so.
   const all = m.boards.flatMap((b) => b.chips);
@@ -169,6 +178,11 @@ function renderMachine() {
     h("span", { class: "svc", dataset: { up: String(m.coder.up) } }, `coder :${m.coder.port ?? "?"} ${m.coder.up ? "up" : "down"}`),
     h("span", { class: "svc", dataset: { up: String(m.cpu_tier.up) } }, `CPU tier :${m.cpu_tier.port} ${m.cpu_tier.up ? "up" : "down"}`),
     h("span", {}, `${m.disk_free_gb} GB free`)));
+  if (m.lab) {
+    box.append(h("h3", { class: "lab-head" }, `Lab · ${m.lab.host}`));
+    if (!m.lab.ok) box.append(h("p", { class: "muted small" }, `The lab did not answer: ${m.lab.error || "no chips listed"}`));
+    for (const b of m.lab.boards) box.append(boardEl(b, false));
+  }
   const free = all.filter((c) => c.state === "FREE").length;
   $("machine-note").textContent = all.length ? `${free} of ${all.length} chips free` : "";
   renderReadings();
@@ -201,7 +215,8 @@ function runUtilization() {
 async function pollHealth() {
   try {
     const hl = await api("/api/health");
-    const changed = S.leases && JSON.stringify(S.leases) !== JSON.stringify(hl.leases);
+    const orchard = (ls) => JSON.stringify(Object.entries(ls || {}).filter(([, o]) => (o || "").includes("orchard:")));
+    const changed = S.leases && orchard(S.leases) !== orchard(hl.leases);
     S.health = hl;
     S.leases = hl.leases;
     if (S.scene) {
@@ -213,23 +228,34 @@ async function pollHealth() {
   } catch { /* the runs poll reports a lost connection */ }
 }
 
-function renderLaunches() {
-  if (!changed($("launches"), S.launches.map((l) => [l.run, l.alive, l.has_ledger, l.log_tail]))) return;
+function dismissedLaunches() {
+  try { return JSON.parse(localStorage.getItem("orchard.dismissed") || "[]"); } catch { return []; }
+}
+
+function dismissLaunch(started) {
+  try { localStorage.setItem("orchard.dismissed", JSON.stringify([...dismissedLaunches(), String(started)].slice(-50))); } catch { /* private window */ }
+}
+
+function renderLaunches(force) {
+  if (!changed($("launches"), [S.launches.map((l) => [l.run, l.alive, l.has_ledger, l.log_tail]), dismissedLaunches()]) && !force) return;
   const box = clear($("launches"));
   for (const l of S.launches.filter((x) => x.alive && !x.has_ledger)) {
     box.append(h("div", { class: "launch" },
       h("strong", {}, `Starting ${l.model}`), " ", h("span", { class: "muted" }, ago(l.started * 1000)),
       h("pre", {}, l.log_tail || "waiting for output…")));
   }
-  for (const l of S.launches.filter((x) => !x.alive && !x.has_ledger)) {
+  const gone = dismissedLaunches();
+  for (const l of S.launches.filter((x) => !x.alive && !x.has_ledger && !gone.includes(String(x.started)))) {
     box.append(h("div", { class: "launch" },
-      h("strong", {}, `${l.model} did not start`), h("pre", {}, l.log_tail || "(no output)")));
+      h("strong", {}, `${l.model} did not start`),
+      h("button", { type: "button", class: "btn btn-small", onclick: () => { dismissLaunch(l.started); renderLaunches(true); } }, "Dismiss"),
+      h("pre", {}, l.log_tail || "(no output)")));
   }
 }
 
 function renderRuns() {
   const list = $("runs");
-  if (!changed(list, [S.selected, S.runs.map((r) => [r.name, r.state, r.model, r.stage && r.stage.current, r.last_ts,
+  if (!changed(list, [S.selected, S.runs.map((r) => [r.name, r.state, r.model, r.mode, r.stage && r.stage.current, r.last_ts,
     r.launching, Math.floor((Date.now() - (parseTs(r.last_ts) || 0)) / 60000)])])) return;
   clear(list);
   $("runs-note").textContent = S.runs.length ? `${S.runs.length}` : "";
@@ -244,7 +270,8 @@ function renderRuns() {
       type: "button", class: "run-item", "aria-current": String(r.name === S.selected),
       onclick: () => select(r.name),
     }, stateBadge(r.state),
-      h("span", { class: "model" }, r.model || r.name),
+      h("span", { class: "model" }, r.model || r.name,
+        (r.mode || "").startsWith("lab") ? h("span", { class: "mode-tag", title: `hardware tests ran on ${r.mode.slice(5, -1)}` }, "lab") : null),
       h("span", { class: "meta mono" }, r.name),
       h("span", { class: "meta" },
         h("span", {}, r.stage && r.stage.current !== null ? `stage ${r.stage.current}` : ""),
@@ -325,7 +352,16 @@ function renderRun() {
     h("span", {}, stageText(d.stage) + (d.stage && d.stage.attempt > 1 ? ` · attempt ${d.stage.attempt}` : "")),
     h("span", {}, d.supervisor.alive ? `supervisor pid ${d.supervisor.pid}` : "no supervisor running"),
     h("span", {}, d.last_events.length ? `last activity ${ago(d.last_events[d.last_events.length - 1].ts)}` : ""));
-  $("run-hint-text").textContent = d.hint || "";
+  $("run-hint-text").textContent = d.next_step || d.hint || "";
+  const mode = $("run-mode");
+  mode.hidden = !d.mode;
+  mode.textContent = !d.mode ? "" : d.mode.startsWith("lab") ? `🧪 tests on ${d.mode.slice(5, -1)}` : "🏡 this box";
+  mode.title = !d.mode ? "" : d.mode.startsWith("lab") ? "Lab mode: hardware tests run on the lab box; the coder stays here and is never parked"
+    : "Local mode: everything runs on this machine";
+  S.activity = d.activity ? { ...d.activity, seenAt: Date.now() } : null;
+  renderNow();
+  renderResults(d);
+  if (S.tab === "timeline") renderTimeline(d);
   renderActions(d);
   renderBlock(d);
   renderPause(d);
@@ -334,6 +370,108 @@ function renderRun() {
   renderDetails(d);
   if (S.tab === "files") renderFiles();
   document.title = `${(S.meta.states[d.state] || {}).emoji || ""} ${d.model || d.name} · tt-orchard`;
+}
+
+// ---- what the run is doing now ----------------------------------------------------------------------------
+
+function renderNow() {
+  const a = S.activity, box = $("run-now");
+  const live = a && a.since;
+  box.hidden = !a;
+  if (!a) return;
+  box.dataset.kind = a.kind;
+  $("run-now-text").textContent = a.text;
+  const elapsed = live ? a.elapsed_s + (Date.now() - a.seenAt) / 1000 : null;
+  $("run-now-time").textContent = live ? (a.deadline_s ? `${dur(elapsed)} of ${dur(a.deadline_s)}` : dur(elapsed)) : "";
+  const bar = $("run-now-bar");
+  bar.hidden = !(live && a.deadline_s);
+  if (!bar.hidden) $("run-now-fill").style.width = `${Math.min(100, (100 * elapsed) / a.deadline_s).toFixed(1)}%`;
+}
+
+// ---- results, the timeline, other runs of the model --------------------------------------------------
+
+const pct = (x) => (x === null || x === undefined ? "–" : `${Math.round(x * 100)}%`);
+const where = (host) => (host ? `on ${host}` : "on this box");
+
+function renderResults(d) {
+  const r = d.results || {}, box = clear($("results-body"));
+  const any = r.swap || (r.configs && r.configs.length) || r.triage;
+  $("results").hidden = !any;
+  if (!any) return;
+  if (r.triage) {
+    box.append(h("p", { class: "result-line" }, h("strong", {}, "Survey: "),
+      `${r.triage.class || "?"} (path ${r.triage.path || "?"}), based on ${(r.triage.nearest_model || "?").split("@")[0]}`));
+  }
+  if (r.swap) {
+    const s = r.swap, n = s.n_tokens;
+    const hits = s.top1_agreement !== null && n ? Math.round(s.top1_agreement * n) : null;
+    box.append(h("div", { class: "result-card", dataset: { ok: String(Boolean(s.coherent && s.top1_agreement >= 0.85)) } },
+      h("div", { class: "result-head" }, h("strong", {}, "Graft: one-board swap check "), h("span", { class: "muted" }, where(s.host))),
+      h("div", { class: "result-nums" },
+        h("span", {}, h("b", {}, hits !== null ? `${hits} of ${n}` : pct(s.top1_agreement)), " tokens match the CPU reference"),
+        h("span", {}, "server ready in ", h("b", {}, s.server_ready_s ? dur(s.server_ready_s) : "–")),
+        h("span", {}, s.coherent ? "✓ coherent text" : "✕ not coherent")),
+      s.free_run_text ? h("blockquote", { class: "free-text" }, `“${s.free_run_text}…”`) : null));
+  }
+  if (r.configs && r.configs.length) {
+    const rows = r.configs.map((c) => h("tr", { dataset: { tone: c.pass === true ? "good" : c.pass === false ? "bad" : "" } },
+      h("td", {}, `${c.chips} chip${c.chips > 1 ? "s" : ""}`),
+      h("td", {}, c.pass === true ? "✓ pass" : c.pass === false ? "✕ no" : "…"),
+      h("td", {}, pct(c.top1_agreement)),
+      h("td", {}, c.server_ready_s ? dur(c.server_ready_s) : "–"),
+      h("td", {}, c.host ? c.host : c.pass === undefined || c.pass === null ? "" : "this box"),
+      h("td", { class: "muted" }, c.reason || c.package || "")));
+    box.append(h("div", { class: "result-card" },
+      h("div", { class: "result-head" }, h("strong", {}, "Rows: each chip configuration")),
+      h("div", { class: "table-wrap" }, h("table", { class: "ledger configs" },
+        h("thead", {}, h("tr", {}, ["Chips", "Result", "Match", "Ready in", "Where", "Note"].map((x) => h("th", { scope: "col" }, x)))),
+        h("tbody", {}, rows)))));
+  }
+  if (r.bundle) {
+    box.append(h("p", {}, h("button", { type: "button", class: "btn btn-small", onclick: () => { setTab("files"); openFirstBundleFile(); } },
+      "📄 Read RESULTS.md")));
+  }
+  renderCompare(d, box);
+}
+
+function renderCompare(d, box) {
+  const others = (d.compare || []);
+  if (others.length < 2) return;
+  const cfgs = [...new Set(others.flatMap((o) => Object.keys(o.configs || {})))].sort((a, b) => a - b);
+  box.append(h("details", { class: "compare" },
+    h("summary", {}, `${others.length} runs of ${d.model}`),
+    h("div", { class: "table-wrap" }, h("table", { class: "ledger" },
+      h("thead", {}, h("tr", {}, ["Run", "Mode", "Started", "Took", "Graft ready", ...cfgs.map((c) => `${c}-chip ready`)].map((x) => h("th", { scope: "col" }, x)))),
+      h("tbody", {}, others.map((o) => h("tr", { dataset: { tone: o.this ? "good" : "" } },
+        h("td", { class: "mono" }, o.this ? `${o.name} (this)` : o.name),
+        h("td", {}, o.mode || "–"),
+        h("td", {}, o.started ? ago(o.started * 1000) : "–"),
+        h("td", {}, o.wall_s ? dur(o.wall_s) : "–"),
+        h("td", {}, o.swap_ready_s ? dur(o.swap_ready_s) : "–"),
+        ...cfgs.map((c) => { const x = (o.configs || {})[c];
+          return h("td", {}, !x ? "–" : x.pass === null || x.pass === undefined ? "…" : `${x.pass ? "" : "✕ "}${x.ready_s ? dur(x.ready_s) : "–"}`); }))))))));
+}
+
+const LANE_NAME = { stage: "Stages", agent: "Agent steps", coder: "Coder boot", copy: "Copy to lab", queue: "Wait for chips", test: "Hardware tests", park: "Coder parked" };
+
+function renderTimeline(d) {
+  const t = d.timeline, box = clear($("timeline"));
+  if (!t || !t.spans || !t.spans.length) { box.append(h("p", { class: "muted" }, "Nothing on the timeline yet.")); return; }
+  const span = Math.max(1, t.end - t.start);
+  const at = (x) => `${(100 * (x - t.start) / span).toFixed(2)}%`;
+  const width = (s) => `${Math.max(0.4, 100 * (s.end - s.start) / span).toFixed(2)}%`;
+  const lanes = t.lanes.filter((l) => t.spans.some((s) => s.kind === l));
+  box.append(h("div", { class: "tl-axis" }, h("span", {}, clock(new Date(t.start * 1000).toISOString())),
+    h("span", {}, `${dur(span)} in all`), h("span", {}, clock(new Date(t.end * 1000).toISOString()))));
+  for (const lane of lanes) {
+    const bars = t.spans.filter((s) => s.kind === lane).map((s) => h("span", {
+      class: "tl-bar", dataset: { kind: s.kind, ok: s.ok === false ? "false" : "true", open: String(Boolean(s.open)) },
+      style: `left:${at(s.start)};width:${width(s)}`,
+      title: `${s.label || s.kind}${s.host ? ` on ${s.host}` : ""}: ${dur(s.end - s.start)}${s.open ? " (still going)" : ""}`,
+    }, lane === "stage" ? `${s.stage}` : ""));
+    box.append(h("div", { class: "tl-lane" }, h("span", { class: "tl-name" }, LANE_NAME[lane] || lane),
+      h("span", { class: "tl-track" }, bars)));
+  }
 }
 
 function renderActions(d) {
@@ -413,12 +551,18 @@ const WEATHER = {
 function renderScene(d) {
   // Before a stage has started (the coder is still booting) there is no plot to work yet.
   const started = d.stage && d.stage.attempt > 0;
-  if (S.scene) S.scene.setRun({ state: d.state, stages: d.stages, current: started ? d.stage.current : null });
+  if (S.scene) {
+    S.scene.setRun({ state: d.state, stages: d.stages, current: started ? d.stage.current : null });
+    S.scene.setLab((d.mode || "").startsWith("lab") ? d.mode.slice(5, -1) : null);
+    S.scene.setActivity(d.activity || null);
+  }
   renderSceneCaption(d);
 }
 
 function renderSceneCaption(d) {
   const passed = d.stages.filter((r) => r.status === "pass").length;
+  const planned = 9 - d.stages.filter((r) => r.status === "skipped").length;
+  const a = d.activity || {};
   const started = S.ledgerFirst[d.name];
   const day = started ? Math.max(1, Math.floor((Date.now() - started) / 86400000) + 1) : 1;
   const cap = clear($("scene-caption"));
@@ -426,9 +570,10 @@ function renderSceneCaption(d) {
   const sky = hl ? WEATHER_WORD[hl.weather.kind] || hl.weather.kind : WEATHER_WORD.unknown;
   cap.append(h("span", {}, `Day ${day}`),
     h("span", { title: hl ? hl.weather.why : "" }, sky),
-    h("span", {}, u > 0.08 ? `⚒ chips ${Math.round(u * 100)}% busy` : "💤 chips resting"),
+    h("span", {}, a.kind === "test" && a.host ? `🧪 testing on ${a.host}` : a.kind === "copy" ? `🛒 carting files to ${a.host || "the lab"}`
+      : u > 0.08 ? `⚒ chips ${Math.round(u * 100)}% busy` : "💤 chips resting"),
     h("span", {}, `${(WEATHER[d.state] || d.state).replace(/^\S+ /, "")}`),
-    h("span", {}, `🍎 ${passed} of 9 plots fruiting`));
+    h("span", {}, `🍎 ${passed} of ${planned} planned plots fruiting`));
 }
 
 function renderDetails(d) {
@@ -439,7 +584,9 @@ function renderDetails(d) {
   row("Ledger", `${d.ledger.entries} entries, hash chain verified`);
   row("Counts", Object.entries(d.counts).map(([k, v]) => `${k.replace(/_/g, " ")} ${v}`).join(" · "));
   row("Disk free", `run dir ${d.disk.run_dir_free_gb} GB · home ${d.disk.home_free_gb} GB`);
-  row("Leases", d.leases.length ? h("span", {}, d.leases.map((l) => h("span", { class: "mono" }, l, h("br")))) : "none listed");
+  row("Mode", d.mode ? (d.mode.startsWith("lab") ? `lab: hardware tests on ${d.mode.slice(5, -1)}` : "local: everything on this box") : "–");
+  row("Leases on this machine now", d.leases.length ? h("span", {}, d.leases.map((l) => h("span", { class: "mono" }, l, h("br")))) : "none listed");
+  if (d.hint) row("Runbook hint", h("span", { class: "muted" }, d.hint));
   row("Control word", d.control_pending || "none waiting");
 }
 
@@ -530,11 +677,19 @@ function addFeedLine(e) {
   const ph = feed.querySelector(".placeholder");
   if (ph) ph.remove();
   ensureActorOption(e.actor);
-  if (S.scene) {
+  // A reconnect or a newly opened run replays recent lines; only lines from the last half minute animate the scene.
+  if (S.scene && Date.now() - (parseTs(e.ts) || 0) < 30000) {
     S.scene.event(e.actor);
     if (/\blease\b|\bpark|\brestore|hardware released/i.test(e.text)) S.scene.event("lease");
   }
-  const li = h("li", { dataset: { actor: e.actor, bad: String(e.bad) } },
+  // "still hardware test running ... (12m)" comes every minute: it updates the line before it, not a new line.
+  const last = feed.lastElementChild;
+  if (/^still /.test(e.text) && last && last.dataset.heartbeat === "true" && last.dataset.actor === e.actor) {
+    last.querySelector(".t").textContent = clock(e.ts);
+    last.querySelector(".what").textContent = e.text;
+    return;
+  }
+  const li = h("li", { dataset: { actor: e.actor, bad: String(e.bad), heartbeat: String(/^still /.test(e.text)) } },
     h("span", { class: "t" }, clock(e.ts)),
     h("span", { class: "who", dataset: { role: e.role } }, h("span", { "aria-hidden": "true" }, (e.icon || "") + " "), e.actor),
     h("span", { class: "what" }, e.text));
@@ -642,7 +797,7 @@ async function openFile(path) {
 
 // ---- tabs ------------------------------------------------------------------------------------------
 
-const TABS = ["feed", "ledger", "files", "details"];
+const TABS = ["feed", "ledger", "files", "timeline", "details"];
 
 function setTab(tab, focus) {
   S.tab = tab;
@@ -656,6 +811,7 @@ function setTab(tab, focus) {
   }
   if (tab === "ledger") loadLedger();
   if (tab === "files") renderFiles();
+  if (tab === "timeline" && S.detail) renderTimeline(S.detail);
   if (tab === "feed" && S.follow) $("feed").scrollTop = $("feed").scrollHeight;
 }
 
@@ -666,6 +822,12 @@ let lastPreflight = null;
 
 function openNewRun() {
   lastPreflight = null;
+  const cfg = (S.meta && S.meta.config) || {};
+  $("nr-mode").value = cfg.mode === "lab" && cfg.lab ? "lab" : "local";
+  $("nr-mode").querySelector('option[value="lab"]').disabled = !cfg.lab;
+  $("nr-mode").querySelector('option[value="lab"]').textContent = cfg.lab ? `The lab box (${cfg.lab})` : "The lab box (none in the config)";
+  $("nr-mode-help").textContent = cfg.lab ? `The config says ${cfg.mode === "lab" ? "the lab box" : "this box"}; this run can choose either.`
+    : "No [lab] table in the config: the run stays on this box.";
   $("nr-result").hidden = true;
   $("nr-error").hidden = true;
   $("nr-start").disabled = true;
@@ -689,7 +851,8 @@ async function runChecks() {
   $("nr-check").textContent = "Checking…";
   $("nr-start").disabled = true;
   try {
-    const out = await api("/api/preflight", { body: { model, base: base || null } });
+    const out = await api("/api/preflight", { body: { model, base: base || null, mode: $("nr-mode").value } });
+    out.mode = $("nr-mode").value;
     lastPreflight = out;
     renderPreflight(out);
   } catch (err) {
@@ -728,12 +891,12 @@ function renderPreflight(out) {
 async function startBringup() {
   if (!lastPreflight || !lastPreflight.ok) return;
   const model = $("nr-model").value.trim(), base = $("nr-base").value.trim();
-  if (model !== lastPreflight.model || (base || null) !== lastPreflight.base) {
-    formError("The model or base changed since the checks ran. Run the checks again."); return;
+  if (model !== lastPreflight.model || (base || null) !== lastPreflight.base || $("nr-mode").value !== lastPreflight.mode) {
+    formError("The model, base or mode changed since the checks ran. Run the checks again."); return;
   }
   $("nr-start").disabled = true;
   try {
-    const out = await api("/api/bringup", { body: { model, base: base || null } });
+    const out = await api("/api/bringup", { body: { model, base: base || null, mode: $("nr-mode").value } });
     $("new-run").close();
     toast(`Started ${model} (pid ${out.pid}). It shows in the run list once its ledger exists; the download can take a while.`);
     S.startingRun = out.run;
@@ -752,6 +915,11 @@ function wire() {
   $("view-hardware-btn").addEventListener("click", () => setView("hardware"));
   $("view-settings-btn").addEventListener("click", () => setView("settings"));
   $("settings-form").addEventListener("submit", saveSettings);
+  $("checks-run").addEventListener("click", startChecks);
+  $("caches-run").addEventListener("click", loadCaches);
+  setInterval(renderNow, 1000);
+  $("machine-check-btn").addEventListener("click", () => { setView("settings"); startChecks(); });
+  $("nr-mode").addEventListener("change", () => { $("nr-start").disabled = true; });
   $("hw-zoom-in").addEventListener("click", () => zoomToplike(+1));
   $("hw-zoom-out").addEventListener("click", () => zoomToplike(-1));
   $("hw-wide").addEventListener("click", () => {
@@ -832,8 +1000,90 @@ function setView(view, { push = true } = {}) {
 // The server offers the QuietBox 2 layouts setup ships (orchard/settings.py) and saves a choice only after the
 // supervisor's own loaders accept it. A change applies to the next run or retry.
 
+// ---- Check machines: setup's checks, read-only, for this box and the lab ------------------------------
+
+const CHECK_TONE = { ok: "ok", warn: "warn", todo: "warn", fail: "block" };
+let checksTimer = null;
+
+async function startChecks() {
+  $("checks-run").disabled = true;
+  try {
+    renderChecks(await api("/api/checks", { body: {} }));
+  } catch (err) {
+    $("checks-run").disabled = false;
+    $("checks-status").textContent = err.message;
+    return;
+  }
+  pollChecks();
+}
+
+async function pollChecks() {
+  clearTimeout(checksTimer);
+  try {
+    const st = await api("/api/checks");
+    renderChecks(st);
+    if (st.running) checksTimer = setTimeout(pollChecks, 1500);
+  } catch (err) {
+    $("checks-status").textContent = err.message;
+  }
+}
+
+function copyButton(text) {
+  return h("button", { type: "button", class: "btn btn-small", onclick: (ev) => {
+    const done = () => { ev.target.textContent = "Copied"; setTimeout(() => { ev.target.textContent = "Copy"; }, 1500); };
+    if (navigator.clipboard) navigator.clipboard.writeText(text).then(done, () => {});
+  } }, "Copy");
+}
+
+function renderChecks(st) {
+  $("checks-run").disabled = Boolean(st.running);
+  const when = (t) => new Date(t * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  $("checks-status").textContent = st.running ? "Checking… (an import test and the lab's ssh calls take a minute)"
+    : st.error ? `The check failed: ${st.error}`
+    : st.finished ? `Checked at ${when(st.finished)}. Nothing was changed.`
+    : "Runs the setup checks on this box, and on the lab when there is one. Nothing is changed: each problem shows the command that fixes it.";
+  const box = clear($("checks-boxes"));
+  for (const b of st.boxes || []) {
+    const bad = b.steps.filter((x) => x.status !== "ok").length;
+    box.append(h("div", { class: "checkbox-panel" },
+      h("h3", {}, `${b.name} `, h("span", { class: "muted small" }, bad ? `${bad} to look at` : "ready")),
+      h("ul", { class: "checks" }, b.steps.map((x) => h("li", { class: "check", dataset: { status: CHECK_TONE[x.status] || "warn" } },
+        h("span", { class: "mark", "aria-label": x.status }, CHECK_MARK[CHECK_TONE[x.status]] || "!"),
+        h("span", { class: "name" }, x.name),
+        h("span", { class: "detail" }, x.detail,
+          x.fix.map((f) => h("span", { class: "fix" }, h("code", {}, f), copyButton(f)))))))));
+  }
+}
+
+async function loadCaches() {
+  const lab = $("caches-lab").checked;
+  $("caches-run").disabled = true;
+  $("caches-status").textContent = lab ? "Reading the caches here and on the lab…" : "Reading the caches…";
+  try {
+    const out = await api(`/api/caches${lab ? "?lab=1" : ""}`);
+    const rows = clear($("caches-rows"));
+    const now = Date.now() / 1000;
+    for (const c of out.caches.slice().sort((a, b) => a.box.localeCompare(b.box) || b.gb - a.gb)) {
+      rows.append(h("tr", { dataset: { tone: c.used_by.length ? "good" : "" } },
+        h("td", {}, c.box), h("td", { class: "num" }, c.gb.toFixed(1)),
+        h("td", { class: "num" }, c.last_write ? Math.round((now - c.last_write) / 86400) : "–"),
+        h("td", {}, c.used_by.join(", ") || "–"),
+        h("td", {}, h("span", {}, c.model || "?"), h("br"), h("span", { class: "mono muted small" }, c.path))));
+    }
+    $("caches-table").hidden = !out.caches.length;
+    const total = out.caches.reduce((a, c) => a + c.gb, 0);
+    $("caches-status").textContent = (out.error ? `${out.error}. ` : "") +
+      `${out.caches.length} cache(s), ${total.toFixed(1)} GB, under ${out.root}. Green rows are used by a run that is not finished.`;
+  } catch (err) {
+    $("caches-status").textContent = err.message;
+  } finally {
+    $("caches-run").disabled = false;
+  }
+}
+
 async function loadSettings() {
   $("settings-error").hidden = true;
+  pollChecks();
   try {
     S.settings = await api("/api/settings");
   } catch (err) {
@@ -875,6 +1125,12 @@ function renderSettings() {
   $("settings-cpu-help").textContent = st.cpu_models.length
     ? "Any model ollama has on this machine. It serves steps while the chips are busy."
     : "ollama did not answer, so no CPU model can be picked. Start it (ollama serve) and reload.";
+  $("mode-local").checked = st.mode !== "lab";
+  $("mode-lab").checked = st.mode === "lab";
+  $("mode-lab").disabled = !st.lab;
+  $("mode-lab-host").textContent = st.lab ? `(${st.lab})` : "";
+  $("mode-help").textContent = st.lab ? "A bring-up can still choose the other mode for itself."
+    : "There is no [lab] table in the config, so every run stays on this box. README 5.9 says how to add a lab.";
   $("settings-files").textContent = `Saved to ${st.config} and ${st.tiers_path}, with a dated copy of each.`;
   const running = $("settings-running");
   running.hidden = !st.running.length;
@@ -912,7 +1168,8 @@ async function saveSettings(ev) {
   const btn = $("settings-save");
   btn.disabled = true;
   try {
-    const out = await api("/api/settings", { body: { layout: picked.value, cpu_model: $("settings-cpu").value } });
+    const mode = $("mode-lab").checked ? "lab" : "local";
+    const out = await api("/api/settings", { body: { layout: picked.value, cpu_model: $("settings-cpu").value, mode } });
     toast(out.note);
     S.meta = await api("/api/meta");
     await loadSettings();

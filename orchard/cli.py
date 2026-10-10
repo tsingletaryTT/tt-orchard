@@ -8,6 +8,7 @@
     tt-orchard pause | resume | abort   [MODEL | --run-dir DIR]
     tt-orchard ui       [--lan] [--host ADDR] [--port 8780] [--toplike PATH]
     tt-orchard lab setup [--model ORG/NAME]... [--yes] [--check]
+    tt-orchard caches   [--lab] [--prune --older-than DAYS [--yes]]
 
 It is a thin layer over `python3 -m orchard.supervisor`. `bringup` reads config/bringup.toml, checks what
 can be checked without a lease (orchard/preflight.py), fetches the model snapshot when it is not local
@@ -84,6 +85,9 @@ def _parser() -> argparse.ArgumentParser:
     b.add_argument("--base", help="the model to base the run on: a tt-model bundle (as `tt model search` lists "
                                   "it) or a Hugging Face model id. Default: the model card's base_model")
     b.add_argument("--quiet", action="store_true", help="do not print what the run is doing as it goes")
+    b.add_argument("--mode", choices=bringup_config.MODES,
+                   help="where the hardware tests run for this run: local (this box) or lab (the [lab] box). "
+                        "Default: the config's mode")
     w = sub.add_parser("watch", parents=[common], help="follow a run: what each role is doing, live (read-only)")
     w.add_argument("model", nargs="?")
     w.add_argument("--run-dir")
@@ -113,6 +117,9 @@ def _parser() -> argparse.ArgumentParser:
                                                        "run there (`lab setup --help`)")
     lab.add_argument("action", choices=["setup"])
     lab.add_argument("rest", nargs=argparse.REMAINDER, help="options for the action")
+    from orchard import caches as _caches
+    sub.add_parser("caches", parents=[common, _caches.parser(add_help=False)],
+                   help="list the tensor caches (here and on the lab) and prune the ones no run uses")
     return p
 
 
@@ -268,7 +275,7 @@ def _ui(args, env, home, out) -> int:
         cfg = bringup_config.load(path)
     except (NoConfig, bringup_config.BringupConfigError) as exc:
         return _refuse(str(exc))
-    app = webui.WebApp(runs_root=cfg.runs_root, config_path=path, cfg=cfg, preflight=_ui_preflight(cfg),
+    app = webui.WebApp(runs_root=cfg.runs_root, config_path=path, cfg=cfg, preflight_for=_ui_preflight,
                        lan=args.lan, toplike=_toplike_argv(args.toplike))
     try:
         server = webui.make_server(app, host, args.port)
@@ -322,6 +329,13 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
 
     if args.cmd == "ui":
         return _ui(args, env, home, out)
+    if args.cmd == "caches":
+        from orchard import caches
+        try:
+            cfg, _ = config()
+        except (NoConfig, bringup_config.BringupConfigError) as exc:
+            return _refuse(str(exc))
+        return caches.main(cfg=cfg, args=args, say=lambda line: print(line, file=out))
     if args.cmd == "lab":
         from orchard import lab_setup
         try:
@@ -352,10 +366,13 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
 
     try:
         cfg, cfg_path = config()
+        cfg = bringup_config.for_mode(cfg, args.mode or cfg.mode)
         run_dir = Path(args.run_dir) if args.run_dir else bringup_config.run_dir(cfg, args.model)
     except (NoConfig, bringup_config.BringupConfigError) as exc:
         return _refuse(str(exc))
     resuming = (run_dir / "ledger.jsonl").exists()
+    print(f"{style.icon('🧭')}mode: " + (f"lab ({cfg.lab.host}): hardware tests run there; the coder stays here"
+                                         if cfg.mode == "lab" else "local: everything runs on this box"), file=out)
     sig = signals or preflight.default_signals(cfg)
     override = None
     if args.base:

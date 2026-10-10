@@ -668,3 +668,45 @@ def test_a_base_flag_that_still_blocks_is_not_followed_by_a_prompt(conf):
     w = BaseWorld(found=FOUND)
     code, out, rec = run_base(conf, ["--base", GEMMA], w, chooser=lambda c, m, b: pytest.fail("asked"))
     assert code == 2 and rec.argv is None and w.pulled == []
+
+
+# ---- --mode: one box or the lab, per run -------------------------------------------------------
+
+@pytest.fixture
+def lab_conf(tmp_path):
+    p = tmp_path / "bringup.toml"
+    p.write_text(f'mode = "lab"\nruns_root = "{tmp_path}/runs"\nhf_home = "{tmp_path}/hf"\n'
+                 f'cache_root = "{tmp_path}/cache"\n'
+                 '[coder]\ntarget = "pkg/coder"\nport = 8000\nchips = 4\n'
+                 '[lab]\nhost = "node4"\nroot = "/srv/orchard"\n')
+    return p
+
+
+def test_a_lab_config_runs_on_the_lab_and_says_so(lab_conf):
+    code, out, rec = run(lab_conf, ["bringup", "Cloudflare/clef", "--dry-run"])
+    assert code == 0 and "--lab node4" in out and "mode: lab (node4)" in out
+
+
+def test_mode_local_overrides_a_lab_config_for_one_run(lab_conf):
+    code, out, rec = run(lab_conf, ["bringup", "Cloudflare/clef", "--dry-run", "--mode", "local"])
+    assert code == 0 and "--lab" not in out.split("command", 1)[1] and "mode: local" in out
+
+
+def test_mode_lab_without_a_lab_table_is_refused(conf, capsys):
+    code, out, rec = run(conf, ["bringup", "Cloudflare/clef", "--dry-run", "--mode", "lab"])
+    assert code == 2 and rec.argv is None and "[lab]" in capsys.readouterr().err
+
+
+
+def test_caches_lists_the_tensor_caches_under_the_cache_root(conf, tmp_path):
+    d = tmp_path / "cache" / "org--m" / "1chip-x" / "tt_cache"
+    d.mkdir(parents=True)
+    (d / ".orchard-model").write_text("org/m@abc")
+    code, out, rec = run(conf, ["caches"])
+    assert code == 0 and "org/m@abc" in out and rec.argv is None
+
+
+
+def test_caches_takes_its_own_flags(conf, tmp_path):
+    code, out, rec = run(conf, ["caches", "--prune"])
+    assert code == 2                                   # --prune needs --older-than; the flag reached caches

@@ -546,7 +546,7 @@ python3 -m orchard.supervisor run --model MODEL --run-dir RUN_DIR --tiers TIERS
     --coder-target CODER_TARGET [--coder-kind {container,bundle}] [--coder-profile CODER_PROFILE]
     --coder-port CODER_PORT --coder-chips CODER_CHIPS [--coder-image-id CODER_IMAGE_ID]
     [--skills-dir SKILLS_DIR] [--input NAME=PATH] [--env NAME=VALUE]
-    [--required-chips N,N] [--cache-root DIR] [--hf-home DIR] [--operator-home DIR]
+    [--required-chips N,N] [--four-chip-package ORG/NAME] [--cache-root DIR] [--hf-home DIR] [--operator-home DIR]
     [--package-format {v6,v5.1}] [--package-namespace NS] [--package-models-root DIR]
     [--gozer GOZER] [--accept-credentials-visible]
 ```
@@ -566,6 +566,7 @@ python3 -m orchard.supervisor run --model MODEL --run-dir RUN_DIR --tiers TIERS
 | `--input` | no, repeatable | `NAME=PATH` facts every agent prompt lists, for example `model=<MODEL_SNAPSHOT_DIR>`. Anything you pass here, every agent sees |
 | `--env` | no, repeatable | `NAME=VALUE` variables for agent shells, for example `HF_HOME` and `HF_HUB_OFFLINE=1`. Names that look like credentials are refused |
 | `--required-chips` | no | The chip counts stage 4 must pass, such as `2,4`. Other counts are optional. Without it, every configuration stage 4 lists must pass. The ledger records it, and a resume with a different value is refused |
+| `--four-chip-package` | no | The container package stage 4 drafts its 4-chip configuration with, when several installed ones serve the nearest model (bringup.toml `four_chip_package`). Without it, the only such package is used, and with several the agent chooses |
 | `--cache-root` | no | Where the per-model tensor caches go (`{{CACHE_ROOT}}` in the skills). Default `<parent of --run-dir>/cache`. The ledger records it, and a resume with a different value is refused |
 | `--hf-home` | no | Your Hugging Face cache (`{{HF_HOME}}`). Default `$HF_HOME`, else `<operator home>/.cache/huggingface`. Recorded and kept like `--cache-root` |
 | `--operator-home` | no | Your home directory (`{{OPERATOR_HOME}}`), where tt-model keeps its packages. Default your home from the passwd entry. Recorded and kept like `--cache-root` |
@@ -910,12 +911,35 @@ With `--lab HOST`, the supervisor and the coder stay on this box (the brain) and
 runs on the lab box over ssh. The coder is never parked for a test, so there is no stop, reset and
 restart around each one, and the agents keep their chip-tier model. The lab only needs its chips free.
 
+**Choosing the mode.** A run is either `local` (everything on this box; the coder is parked when a test
+needs its boards) or `lab`. `config/bringup.toml` says which, and `tt-orchard bringup` passes the lab flags
+only in lab mode:
+
+```toml
+mode = "lab"                 # or "local" (the default)
+
+[lab]
+host = "node4"               # an ssh host with key login
+root = "/srv/orchard"        # the same absolute path on both boxes
+path = ["~/.local/bin", "~/.tenstorrent-venv/bin"]
+test_python = "/srv/orchard/venvs/reference/bin/python"
+```
+
+`tt-orchard bringup ORG/NAME --mode local` (or `--mode lab`) overrides the config for one run, and the
+command prints the mode it uses. A config with a `[lab]` table must say `mode`, so a lab config never turns
+into a one-box run unnoticed; `mode = "local"` keeps the table for `tt-orchard lab setup`. The ledger
+records the mode, and a resume in the other mode is refused. Check the lab with
+`tt-orchard lab setup --check` before the first run.
+
 How it works: the supervisor copies this checkout to `<lab root>/orchard` on the lab and starts a small
 helper there (`python3 -m orchard.lab serve`, in [`orchard/lab.py`](orchard/lab.py)). The helper takes
 the lab's gozer leases under its own pid and runs each test as its child, so gozer counts the test as
-the lease's work. Before a test the run directory and the Hugging Face cache go to the lab with rsync
-(to the same paths; incremental after the first copy), the test's output streams back as it runs, and
-the stage directory comes back afterwards, so the finish step, the gates and the ledger read it here.
+the lease's work. Before a test, and before its lease is taken, the run directory and the Hugging Face
+repos the test reads (the new model and its drafter, never the base model) go to the lab with rsync (to
+the same paths; incremental after the first copy). The test's output streams back as it runs, and the
+stage directory comes back afterwards, so the finish step, the gates and the ledger read it here. In both
+modes every hardware test shares one tt-metal kernel cache, `<cache_root>/kernels` (`TT_METAL_CACHE`), so
+a configuration's kernels are compiled once, not once per run.
 A test is killed on the lab at its deadline. If the supervisor dies or the connection drops, the helper
 stops its tests and gives back every lease the run held. Agents never reach the lab: the command
 runner still refuses ssh, scp and rsync in anything an agent runs.
@@ -930,6 +954,15 @@ sudo mkdir -p /srv/orchard && sudo chown "$USER" /srv/orchard      # once on the
 and the run's `runs_root`, `cache_root`, `hf_home` and `tt_model_root` sit under it. Stage 7
 (`--package-format`) is refused with `--lab` for now: its boot check and install would have to run on
 the lab. A stage 4 configuration needs the lab to have that many chips.
+
+### 5.10 Tensor caches and disk
+
+Each chip configuration keeps a tensor cache under `cache_root`, named by model and package
+(`<cache_root>/<model>/<N>chip-<org>--<name>/tt_cache`), so a later run of the same model reuses it, and
+every hardware test shares one tt-metal kernel cache, `<cache_root>/kernels`. `tt-orchard caches` lists them
+with their model, size, age and the unfinished runs that use them (`--lab` adds the lab's).
+`tt-orchard caches --prune --older-than DAYS` removes the ones no unfinished run uses and that have not been
+written for that long, after asking; it never removes the kernel cache or anything outside the cache root.
 
 ## 6. Lessons that will bite you
 

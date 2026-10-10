@@ -53,6 +53,7 @@
       <div class="rail-head">
         <h2 id="machine-h">Machine</h2>
         <span class="rail-note" id="machine-note"></span>
+        <button type="button" class="btn btn-small" id="machine-check-btn" title="Check both boxes for what a run needs">🔍 Check</button>
       </div>
       <div id="machine" class="machine"><p class="muted">Reading gozer…</p></div>
     </section>
@@ -104,6 +105,18 @@
           <select id="settings-cpu"></select>
           <span class="field-help" id="settings-cpu-help">Any model ollama has on this machine. It serves steps while the chips are busy.</span>
         </div>
+        <fieldset class="modes" id="settings-modes">
+          <legend>Where hardware tests run</legend>
+          <label class="mode-option" for="mode-local">
+            <input type="radio" name="mode" id="mode-local" value="local">
+            <span><strong>This box</strong> <span class="muted small">Everything runs here; the coder is parked while a test needs its boards.</span></span>
+          </label>
+          <label class="mode-option" for="mode-lab">
+            <input type="radio" name="mode" id="mode-lab" value="lab">
+            <span><strong>The lab box <span id="mode-lab-host"></span></strong> <span class="muted small">Tests run there; the coder here is never parked.</span></span>
+          </label>
+          <span class="field-help" id="mode-help"></span>
+        </fieldset>
         <section aria-labelledby="roles-h" class="roles-wrap">
           <h2 id="roles-h">Who uses which model</h2>
           <div class="table-wrap">
@@ -121,6 +134,32 @@
         </div>
         <p class="form-error" id="settings-error" role="alert" hidden></p>
       </form>
+      <section class="checks-wrap" aria-labelledby="checks-h">
+        <div class="checks-head">
+          <h2 id="checks-h">Check machines</h2>
+          <button type="button" class="btn" id="checks-run">🔍 Check machines</button>
+        </div>
+        <p class="muted small" id="checks-status">Runs the setup checks on this box, and on the lab when there is one. Nothing is changed: each problem shows the command that fixes it.</p>
+        <div id="checks-boxes" class="checks-boxes"></div>
+      </section>
+      <section class="checks-wrap" aria-labelledby="caches-h">
+        <div class="checks-head">
+          <h2 id="caches-h">Tensor caches</h2>
+          <span class="caches-tools">
+            <label class="field-inline" for="caches-lab"><input type="checkbox" id="caches-lab"> include the lab</label>
+            <button type="button" class="btn" id="caches-run">📦 Show caches</button>
+          </span>
+        </div>
+        <p class="muted small" id="caches-status">Each model and chip count keeps a tensor cache, and every test shares one kernel
+          cache. Listing them reads their sizes (the lab's over ssh), so it takes a moment. To free space, run
+          <code>tt-orchard caches --prune --older-than DAYS</code>; this page never deletes.</p>
+        <div class="table-wrap" id="caches-table" hidden>
+          <table class="ledger caches">
+            <thead><tr><th scope="col">Box</th><th scope="col">GB</th><th scope="col">Days</th><th scope="col">Used by</th><th scope="col">Model and path</th></tr></thead>
+            <tbody id="caches-rows"></tbody>
+          </table>
+        </div>
+      </section>
     </section>
 
     <div id="run-empty" class="empty">
@@ -132,12 +171,19 @@
       <header class="run-head">
         <div class="run-title">
           <span class="badge" id="run-badge"></span>
+          <span class="mode-chip" id="run-mode" hidden></span>
           <h1 id="run-model"></h1>
           <p class="run-sub" id="run-sub"></p>
         </div>
         <div class="actions" id="run-actions" role="group" aria-label="Run actions"></div>
       </header>
 
+      <div class="now" id="run-now" hidden>
+        <span class="hint-label now-label">Now</span>
+        <span class="now-text" id="run-now-text"></span>
+        <span class="now-time mono" id="run-now-time"></span>
+        <span class="now-bar" id="run-now-bar" hidden><span class="now-fill" id="run-now-fill"></span></span>
+      </div>
       <p class="hint" id="run-hint"><span class="hint-label">Next</span><span id="run-hint-text"></span></p>
 
       <figure class="scene-frame">
@@ -172,12 +218,24 @@
         <ol class="stepper" id="stepper"></ol>
       </section>
 
+      <section class="results" id="results" hidden aria-labelledby="results-h">
+        <h2 id="results-h">Results</h2>
+        <div id="results-body" class="results-body"></div>
+      </section>
+
       <div class="tabs" role="tablist" aria-label="Run details" id="tabs">
         <button type="button" role="tab" id="tab-feed" aria-controls="pane-feed" aria-selected="true">Live feed</button>
         <button type="button" role="tab" id="tab-ledger" aria-controls="pane-ledger" aria-selected="false" tabindex="-1">Ledger</button>
         <button type="button" role="tab" id="tab-files" aria-controls="pane-files" aria-selected="false" tabindex="-1">Files</button>
+        <button type="button" role="tab" id="tab-timeline" aria-controls="pane-timeline" aria-selected="false" tabindex="-1">Timeline</button>
         <button type="button" role="tab" id="tab-details" aria-controls="pane-details" aria-selected="false" tabindex="-1">Details</button>
       </div>
+
+      <section role="tabpanel" id="pane-timeline" aria-labelledby="tab-timeline" class="pane" hidden>
+        <p class="muted small">Where the time went: each stage, agent step, coder boot, copy to the lab, wait for chips and
+          hardware test, on one time axis. Hover a bar for its length.</p>
+        <div id="timeline" class="timeline"></div>
+      </section>
 
       <section role="tabpanel" id="pane-feed" aria-labelledby="tab-feed" class="pane">
         <div class="pane-tools">
@@ -252,6 +310,14 @@
       <label for="nr-base">Base <span class="muted">(optional)</span></label>
       <input id="nr-base" name="base" type="text" placeholder="the model card's base_model" autocomplete="off" spellcheck="false">
       <p class="field-help">A tt-model bundle or model id to base the run on. Leave empty to use the model card.</p>
+    </div>
+    <div class="field">
+      <label for="nr-mode">Where the hardware tests run</label>
+      <select id="nr-mode">
+        <option value="local">This box</option>
+        <option value="lab">The lab box</option>
+      </select>
+      <span class="field-help" id="nr-mode-help"></span>
     </div>
     <p class="form-error" id="nr-error" role="alert" hidden></p>
     <div id="nr-result" class="preflight" hidden>

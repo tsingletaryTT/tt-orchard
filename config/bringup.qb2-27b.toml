@@ -2,6 +2,9 @@
 # `scripts/setup.sh --coder 27b`. Edit freely; setup never overwrites it.
 runs_root = "@RUNS_ROOT@"
 required_chips = "2,4"
+# Stage 4 drafts its 4-chip configuration with this container package (several installed ones serve
+# Qwen/Qwen3.8-27B on a QuietBox 2); the stage 4 skill has pinned it since 2026-10-03.
+four_chip_package = "changh95/qwen3.8-27b-p300x2"
 reference_python = "@REFERENCE_PYTHON@"
 @SKILLS_LINE@
 [env]

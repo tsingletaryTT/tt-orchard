@@ -354,9 +354,33 @@ def check_link(env: Env) -> Step:
                 [Action("link", (str(link), str(target)))])
 
 
+HARDWARE_SCRIPT = ("cat /sys/class/tenstorrent/*/tt_fw_bundle_ver 2>/dev/null | sort -u; echo --; "
+                   "cat /sys/module/tenstorrent/version 2>/dev/null; echo --; "
+                   "dpkg-query -W -f='${Version}' sfpi 2>/dev/null")
+MIN_KMD = (2, 10)          # the oldest kernel driver a QuietBox 2 bundle has been run with here
+
+
+def check_hardware(env: Env) -> Step:
+    """This box's firmware, kernel driver and SFPI kernel compiler: what a lab must match, and what the
+    TT runtime needs to compile kernels at all."""
+    rc, out, _ = env.run(["sh", "-c", HARDWARE_SCRIPT], 30)
+    parts = [p.strip() for p in (out if rc == 0 else "--\n--").split("--")] + ["", "", ""]
+    fw, kmd, sfpi = ", ".join(parts[0].split()) or "unknown", parts[1], parts[2]
+    detail = f"firmware {fw}, kernel driver {kmd or 'not loaded'}, SFPI {sfpi or 'not installed'}"
+    if not kmd:
+        return Step("hardware", WARN, detail + ": the tenstorrent kernel driver is not loaded")
+    if not sfpi:
+        return Step("hardware", WARN, detail + ": without SFPI the TT runtime cannot compile kernels")
+    nums = tuple(int(x) for x in re.findall(r"\d+", kmd)[:2])
+    if nums and nums < MIN_KMD:
+        return Step("hardware", WARN, detail + f": the kernel driver is older than {'.'.join(map(str, MIN_KMD))}")
+    return Step("hardware", OK, detail)
+
+
 def plan(env: Env, opts: Options) -> list[Step]:
     GOZER_TEXT.clear()
-    steps = [check_python(env), check_gozer(env, opts), check_tt_model(env), check_docker(env), check_hf(env),
+    steps = [check_python(env), check_gozer(env, opts), check_hardware(env), check_tt_model(env), check_docker(env),
+             check_hf(env),
              check_ollama(env, opts), check_hugepages(env), check_reference_venv(env, opts),
              check_coder_package(env, opts)]
     steps.append(check_config(env, opts, machine_kind(GOZER_TEXT.get("status", ""))))

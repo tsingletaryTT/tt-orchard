@@ -750,7 +750,7 @@ WEIGHTS_ONLY_STAGE_3 = dataclasses.replace(STAGES[3], skip=SKIP_3_WEIGHTS_ONLY)
 WEIGHTS_ONLY_STAGE_4 = dataclasses.replace(
     STAGES[4], name="weights swap on each chip configuration", skill="weights-swap-configs",
     refs=("tt-device-usage",), boards=2, gate=gate_mesh_swap, marker="tests/plan.json", tests=True,
-    disk=STAGE4_SWAP_DISK_GB)
+    disk=STAGE4_SWAP_DISK_GB, draft="stage4")
 
 
 # Stage 5 is the black-box serving check: boot, a passkey or needle, a canary. On the weights-only
