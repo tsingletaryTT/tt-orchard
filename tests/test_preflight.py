@@ -563,3 +563,31 @@ def test_a_local_mode_config_with_a_lab_table_never_asks_the_lab(tmp_path):
     checks = pf.run_preflight(c, "Org/Model", accept_credentials=True,
                            signals=signals(lab_status=lambda: asked.append(1) or (0, "", "")))
     assert not asked and "lab" not in [x.name for x in checks]
+
+
+def test_a_kept_coder_on_the_port_is_expected_only_in_lab_mode_with_keep_up(tmp_path):
+    from types import SimpleNamespace
+    from orchard import kept_coder
+    assert pf.check_port(8001, in_use=True, kept=True).status == "ok"
+    assert pf.check_port(8001, in_use=True, kept=False).status == "block"
+    cfg = SimpleNamespace(mode="lab", cache_root=tmp_path / "cache", runs_root=tmp_path / "runs",
+                          coder=SimpleNamespace(port=8001, keep_up=True))
+    assert not pf._kept_on_port(cfg)                               # nothing kept yet
+    kept_coder.write(cfg.cache_root, {"identity": {"port": 8001}})
+    assert pf._kept_on_port(cfg)
+    cfg.coder.port = 8002
+    assert not pf._kept_on_port(cfg)                               # kept on another port
+    cfg.coder.port, cfg.mode = 8001, "local"
+    assert not pf._kept_on_port(cfg)
+    cfg.mode, cfg.coder.keep_up = "lab", False
+    assert not pf._kept_on_port(cfg)
+
+
+def test_the_kept_coders_chips_are_not_chips_the_run_waits_for():
+    text = ("grain: board   (2 boards, 4 chips)\nboard 000004613193402F  (p300c)\n"
+            "  chip 0  0000:01:00.0  HELD             orchard:coder-kept pid 2326845\n"
+            "  chip 1  0000:02:00.0  HELD             orchard:coder-kept pid 2326845\n"
+            "board 0000046131934060  (p300c)\n  chip 2  0000:03:00.0  FREE\n  chip 3  0000:04:00.0  FREE\n")
+    c = pf.check_gozer(text, kept=True)
+    assert c.status == "ok" and "chip 0, 1 serve the kept coder" in c.detail
+    assert pf.check_gozer(text).status == "warn"                  # without keep_up they are someone else's

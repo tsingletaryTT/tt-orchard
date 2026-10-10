@@ -184,3 +184,22 @@ def test_the_adapter_never_forces_and_never_waits():
         a.release(LEASE)
     assert not any("--force" in argv for argv in run.argvs())
     assert not any(argv[1] == "wait" for argv in run.argvs())
+
+
+def test_a_release_for_a_kept_coder_neither_resets_nor_waits_for_closed_devices():
+    a, run = make({"release": [(0, {"released": True, "message": "released fb9995"}, "")]})
+    a.release(LEASE, keep_running=True)
+    assert run.argvs() == [["gozer", "release", LEASE.lease_id, "--json", "--force", "--no-reset"]]
+
+
+def test_adopt_returns_the_lease_and_the_holding_pids():
+    a, run = make({"adopt": [(0, {"adopted": True, "lease_id": "f78464", "pids": [311586, 311650]}, "")]})
+    assert a.adopt("000004613193402F", "orchard:coder-kept", "kept") == ("f78464", [311586, 311650])
+    assert run.argvs() == [["gozer", "adopt", "000004613193402F", "--who", "orchard:coder-kept",
+                            "--reason", "kept", "--json"]]
+
+
+def test_adopt_that_finds_no_holder_raises():
+    a, _ = make({"adopt": [(0, {"adopted": False}, "")]})
+    with pytest.raises(AdapterError, match="gozer adopt"):
+        a.adopt("u1", "w", "r")

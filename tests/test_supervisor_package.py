@@ -163,7 +163,7 @@ def test_a_weights_only_run_with_a_package_format_stages_and_boot_checks_in_stag
     assert verify["top1_agreement"] == 1.0
     assert verify["served_model"] == str(r.run_dir / "stages/7/verify/bundle/model-dir")
     bundle = r.run_dir / "stages/8/bundle/package"
-    assert sorted(p.name for p in bundle.iterdir()) == ["PUBLISH_COMMANDS.txt",
+    assert sorted(p.name for p in bundle.iterdir()) == ["PUBLISH_COMMANDS.txt", "hemmingway-1-p300",
                                                        "hemmingway-1-p300-README.md", "package.json"]
     # The only tt-model calls were package-thin with --out; the stub tools (hf, git, gh, docker,
     # curl and the rest) never ran; the fake server was stopped.

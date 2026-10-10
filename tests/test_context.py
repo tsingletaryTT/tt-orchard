@@ -115,7 +115,10 @@ def test_a_stage_with_a_list_of_tests_prepares_hw_tests_json_and_finishes_from_t
     common = dict(spec=WEIGHTS_ONLY_STAGE_4, run_dir=run, stage_dir=sd, skill_path=sp, refs={},
                   entries=[], facts={"model": "m"}, resumed=False)
     _, user = build_messages(phase="prepare", **common)
-    assert "write hw_tests.json in your stage directory" in user and "hw_test.json" not in user
+    assert "hw_test.json" not in user
+    flat = " ".join(user.split())
+    assert "If the supervisor has not written hw_tests.json, write it in your stage directory" in flat
+    assert "if it has, do not change it" in flat
     assert "`python3 stages/4/configs/<chips>/<script>`" in user
     (sd / "hw_tests.json").write_text('{"tests": [{"chips": 4}]}')
     (sd / "test-result.json").write_text('{"tests": [{"returncode": 0}]}')

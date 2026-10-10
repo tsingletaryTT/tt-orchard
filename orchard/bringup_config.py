@@ -30,7 +30,7 @@ TOP_KEYS = {"runs_root", "tiers", "cache_root", "hf_home", "operator_home", "goz
 # Where a run's hardware tests run: "local" (this box; the coder is parked when a test needs its boards) or
 # "lab" (the [lab] box; the coder is never parked). `tt-orchard bringup --mode` overrides it per run.
 MODES = ("local", "lab")
-CODER_KEYS = {"target", "kind", "profile", "port", "chips", "image_id"}
+CODER_KEYS = {"target", "kind", "profile", "port", "chips", "image_id", "keep_up"}
 LAB_KEYS = {"host", "root", "gozer", "path", "python", "test_python"}
 # An ssh destination: [user@]host. It must not start with "-", or ssh would read it as an option.
 _SSH_HOST = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(@[A-Za-z0-9][A-Za-z0-9._-]*)?")
@@ -46,6 +46,12 @@ class BringupConfigError(ValueError):
     """The bringup config or the model id is not usable."""
 
 
+def _flag(value, name: str) -> bool:
+    if not isinstance(value, bool):
+        raise BringupConfigError(f"{name} must be true or false, got {value!r}")
+    return value
+
+
 @dataclass
 class Coder:
     target: str
@@ -54,6 +60,7 @@ class Coder:
     kind: str = "container"
     profile: str = "default"
     image_id: str | None = None
+    keep_up: bool = False           # lab mode: leave the coder serving for the next run (orchard/kept_coder.py)
 
 
 @dataclass
@@ -159,6 +166,7 @@ def load(path) -> BringupConfig:
         kind=kind,
         profile=_text(coder_raw.get("profile", "default"), "coder.profile"),
         image_id=_text(coder_raw["image_id"], "coder.image_id") if "image_id" in coder_raw else None,
+        keep_up=_flag(coder_raw.get("keep_up", False), "coder.keep_up"),
     )
 
     required_chips = raw.get("required_chips")
@@ -299,6 +307,8 @@ def supervisor_argv(cfg: BringupConfig, model_id: str, run_dir: Path | None = No
         lab = cfg.lab
         argv += ["--lab", lab.host, "--lab-root", str(lab.root), "--lab-gozer", lab.gozer,
                  "--lab-python", lab.python]
+        if c.keep_up:
+            argv.append("--coder-keep-up")
         for d in lab.path:
             argv += ["--lab-path", d]
         if lab.test_python:

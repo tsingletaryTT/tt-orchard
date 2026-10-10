@@ -114,6 +114,7 @@ import os
 import pwd
 import shutil
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -142,7 +143,7 @@ from orchard.package import finish as package_finish
 from orchard.paths import (PATHS_RECORDED, RunPaths, UnknownPlaceholder, absolute_path,
                            recorded_paths)
 from orchard.runner import Denied, check_string
-from orchard import swap_draft
+from orchard import kept_coder, swap_draft
 from orchard.server import ServerControl, ServerError, ServerSpec, StopCheck
 from orchard.stages import (PACKAGE_OPTIONS_SET, GateResult, TierUnavailable, attempt_started_ts,
                             budget_cap, check_disk, coder_state, delta_class, delta_path, evidence_record,
@@ -370,12 +371,14 @@ def operator_home() -> Path:
 
 
 def boot_unfinished(entries: list[dict]) -> bool:
-    """The last coder start has a "coder starting" entry and no "coder started" after it."""
+    """The last coder start ("coder starting", or "coder adopted" for a kept coder) has no "coder
+    started" after it."""
     last = None
     for e in entries:
-        if e["event"] == "decision" and e["data"].get("decision") in ("coder starting", "coder started"):
+        if e["event"] == "decision" and e["data"].get("decision") in ("coder starting", "coder adopted",
+                                                                       "coder started"):
             last = e["data"]["decision"]
-    return last == "coder starting"
+    return last in ("coder starting", "coder adopted")
 
 
 def hardware_test_failure(stage_dir: Path) -> dict | None:
@@ -460,6 +463,14 @@ def gate_feedback_text(spec, reasons) -> str:
     return "\n".join(lines)
 
 
+def quiet_substitute(cfg, coder: str | None, asked: str, used: str) -> bool:
+    """A substitution the layout means: the step asked for a tier that is never started (Coder-Next's
+    large tier) and the coder serves it with the same model. Recording it on every stage told the
+    operator nothing; any other substitution is still recorded."""
+    return (coder is not None and used == coder and used != asked
+            and cfg.tiers[used]["model"] == cfg.tiers[asked]["model"])
+
+
 def coder_tier(cfg, port: int) -> str:
     """The chip tier whose endpoint uses the coder's port."""
     names = [n for n, t in cfg.tiers.items()
@@ -471,6 +482,7 @@ def coder_tier(cfg, port: int) -> str:
 
 # ---- the supervisor -----------------------------------------------------------------------------
 
+BUNDLE_BUILD_TIMEOUT_S = 600            # build_bundle.py reads files and copies packages; no network
 SWAP_TEMPLATES = ("prepare_swap.py", "serve_and_compare.py")      # copied with a drafted swap_config.json
 STAGE4_TEMPLATES = (*SWAP_TEMPLATES, "serve_and_compare_container.py")     # into each drafted configs/<N>
 
@@ -484,8 +496,13 @@ class Supervisor:
                  required_chips: tuple[int, ...] | None = None, home=None, containers=None,
                  paths: RunPaths | None = None, package: dict | None = None,
                  package_added: bool = False, unattended: bool = False, lab=None,
-                 four_chip_package: str | None = None):
+                 four_chip_package: str | None = None, coder_tier: str | None = None,
+                 keep_up: bool = False, coder_identity: dict | None = None):
         self.run_dir = Path(run_dir).resolve()
+        # Lab mode only: in local mode tests park the coder for its board, so a kept coder saves little.
+        self.keep_up = keep_up and lab is not None
+        self.coder_identity = coder_identity      # what kept_coder.mismatch compares
+        self.coder_tier = coder_tier                # the tier whose endpoint is the coder's port
         self.ledger, self.cfg, self.model_id = ledger, cfg, model_id
         self.adapter, self.coder, self.coder_chips, self.standin = adapter, coder, coder_chips, standin
         # With a lab box (orchard/labclient.py), every hardware test runs there under the lab's own
@@ -736,8 +753,8 @@ class Supervisor:
                            bundle="stages/8/bundle")
         # Nothing owns the coder once this process exits. gozer would then show a lease whose owner
         # pid is dead while the container still has the devices open. So the run gives the
-        # hardware back.
-        self._release_all()
+        # hardware back, or (keep_up) hands the coder's chips to a lease its container owns.
+        self._release_or_keep()
         return EXIT_READY
 
     def _full_port_unacknowledged(self) -> bool:
@@ -768,7 +785,7 @@ class Supervisor:
         entries = self.ledger.read()
         self.ledger.append("decision", None, decision="blocked", code=code, reason=reason)
         write_blocked_bundle(self.run_dir, entries, code, reason, now=self.clock())
-        self._release_all()
+        self._release_or_keep()
         return EXIT_BLOCKED
 
     def _abort(self) -> int:
@@ -784,10 +801,11 @@ class Supervisor:
         entries = self.ledger.read()
         lease_rec, server_rec, _ = coder_state(entries)
         released = {e["data"].get("lease_id") for e in entries
-                    if e["event"] == "decision" and e["data"].get("decision") == "hardware released"}
+                    if e["event"] == "decision" and e["data"].get("decision") in ("hardware released", "coder left up")}
         if lease_rec is None or lease_rec["lease_id"] in released:
             return True
         lease = Lease.from_record(lease_rec)
+        adopted = lease.lease_id in self._adopted_ids(entries)
         if server_rec:
             self.coder.adopt(server_rec)
         try:
@@ -804,10 +822,131 @@ class Supervisor:
                 return False
             self.adapter.release(lease)
             self.ledger.append("decision", None, decision="hardware released", lease_id=lease.lease_id)
+            if adopted:
+                kept_coder.forget(self.paths.cache_root, lease.lease_id)
             return True
         except (AdapterError, ServerError, OSError) as exc:
             self.ledger.append("notice", None, what="releasing the hardware failed", error=str(exc))
             return False
+
+    # ---- a coder kept up between lab runs (orchard/kept_coder.py) ------------------------------
+
+    @staticmethod
+    def _adopted_ids(entries: list[dict]) -> set[str]:
+        """Coder leases that a container owns (gozer adopt), not this supervisor."""
+        ids = set()
+        for e in entries:
+            d = e["data"]
+            if e["event"] == "decision" and d.get("decision") == "coder adopted":
+                ids.add((d.get("lease") or {}).get("lease_id"))
+            if e["event"] == "decision" and d.get("decision") == "coder left up":
+                ids.add(d.get("kept_lease_id"))
+        return ids - {None}
+
+    def _release_or_keep(self) -> bool:
+        if self.keep_up:
+            kept = self._leave_coder_up()
+            if kept is not None:
+                return kept
+        return self._release_all()
+
+    def _leave_coder_up(self) -> bool | None:
+        """Hand a healthy coder's chips to a lease its container owns, and write the record the next run
+        adopts. None when the coder cannot be kept (the caller releases as usual)."""
+        entries = self.ledger.read()
+        lease_rec, server_rec, canary = coder_state(entries)
+        released = {e["data"].get("lease_id") for e in entries if e["event"] == "decision"
+                    and e["data"].get("decision") in ("hardware released", "coder left up")}
+        if (lease_rec is None or lease_rec["lease_id"] in released or boot_unfinished(entries)
+                or not isinstance(canary, dict) or not hasattr(self.adapter, "adopt")):
+            return None
+        lease = Lease.from_record(lease_rec)
+        if len(lease.units) != 1:
+            self.ledger.append("notice", None, what="the coder was not kept up",
+                               reason=f"it holds {len(lease.units)} lease units; a kept coder must be on one")
+            return None
+        if server_rec:
+            self.coder.adopt(server_rec)
+        try:
+            if self.coder.confirm_stopped().stopped:
+                return None
+            canary_text = (self.run_dir / canary["path"]).read_text(encoding="utf-8")
+        except (ServerError, OSError):
+            return None
+        holders: list[int] = []
+        kept_id = lease.lease_id
+        if lease.lease_id not in self._adopted_ids(entries):
+            self.ledger.append("decision", None, decision="handing the coder's chips to its container",
+                               lease_id=lease.lease_id)
+            try:
+                self.adapter.release(lease, keep_running=True)
+            except AdapterError as exc:
+                self.ledger.append("notice", None, what="the coder was not kept up", reason=str(exc))
+                return None
+            try:
+                kept_id, holders = self.adapter.adopt(lease.units[0], who=kept_coder.KEPT_WHO,
+                                                      reason="coder kept up for the next run")
+            except AdapterError as exc:
+                # The supervisor's lease is gone and nothing owns the chips: stop the coder rather than
+                # leave it serving on chips gozer could grant to someone else.
+                self.ledger.append("notice", None, what="the coder was not kept up; stopping it",
+                                   reason=str(exc), result=self.coder.stop())
+                self.ledger.append("decision", None, decision="hardware released", lease_id=lease.lease_id,
+                                   reset=False)
+                return False
+        else:
+            holders = sorted({p for c in self.adapter.status() if c.bdf in lease.chips
+                              for p in (c.lease_pid, *c.pids_holding) if p})
+        kept = dataclasses.replace(lease, lease_id=kept_id)
+        kept_coder.write(self.paths.cache_root, {
+            "identity": self.coder_identity, "lease": kept.record(), "holder_pids": holders,
+            "server": self.coder.record(), "canary": canary_text, "run_dir": str(self.run_dir),
+            "left_at": self.clock()})
+        self.ledger.append("decision", None, decision="coder left up", lease_id=lease.lease_id,
+                           kept_lease_id=kept_id, holder_pids=holders,
+                           record=str(kept_coder.path(self.paths.cache_root)))
+        return True
+
+    def _adopt_kept_coder(self) -> bool:
+        """Use the coder an earlier run left up, if every check holds (orchard/kept_coder.py). It never
+        stops anything: a coder that fails a check is left for the operator (`tt-orchard coder stop`)."""
+        kept = kept_coder.read(self.paths.cache_root)
+        if kept is None:
+            return False
+        why = kept_coder.mismatch(kept, self.coder_identity)
+        lease = None
+        if why is None:
+            try:
+                lease = Lease.from_record(kept["lease"])
+            except (KeyError, TypeError, ValueError):
+                why = "its record has no usable lease"
+        if why is None:
+            t = self.cfg.tiers[self.coder_tier]
+            if not self.probe(t["endpoint"], t["model"]):
+                why = f"nothing lists {t['model']} at {t['endpoint']}"
+        if why is None:
+            try:
+                chips = {c.bdf: c for c in self.adapter.status()}
+            except AdapterError as exc:
+                why = f"gozer status failed: {exc}"
+            else:
+                holders = set(kept.get("holder_pids") or [])
+                bad = [b for b in lease.chips if not (b in chips and chips[b].state == "HELD"
+                                                      and chips[b].who == kept_coder.KEPT_WHO
+                                                      and chips[b].lease_pid in holders)]
+                if bad:
+                    why = f"gozer does not show {', '.join(bad)} held by the kept coder"
+        if why is not None:
+            self.ledger.append("decision", None, decision="kept coder not used", reason=why,
+                               from_run=kept.get("run_dir"))
+            return False
+        self.ledger.append("decision", None, decision="coder adopted", lease=lease.record(),
+                           server=kept["server"], from_run=kept.get("run_dir"), left_at=kept.get("left_at"))
+        self.coder.adopt(kept["server"])
+        self.coder_lease = lease
+        baseline = evidence_record(self.run_dir, self._evidence_file("coder-canary-kept", str(kept.get("canary", ""))))
+        self._finish_boot(lease, baseline)
+        return True
 
     # ---- the coder ----------------------------------------------------------------------------
 
@@ -827,13 +966,20 @@ class Supervisor:
             entries = self.ledger.read()      # abandoned: the coder serves under the old lease
         lease_rec, server_rec, canary = coder_state(entries)
         if lease_rec is None:
+            if self.keep_up and self._adopt_kept_coder():
+                return
             self._start_coder(None)
             return
         if server_rec:
             self.coder.adopt(server_rec)
         lease = Lease.from_record(lease_rec)
         mine = [c for c in self.adapter.status() if c.bdf in lease.chips]
-        if not (mine and all(c.lease_pid == self.adapter.owner_pid for c in mine)):
+        if lease.lease_id in self._adopted_ids(entries):
+            # A kept coder's lease is owned by its container's processes, not by this supervisor.
+            ours = mine and all(c.state == "HELD" and c.who == kept_coder.KEPT_WHO for c in mine)
+        else:
+            ours = mine and all(c.lease_pid == self.adapter.owner_pid for c in mine)
+        if not ours:
             self._relaunch_coder(lease, canary)
             return
         self.coder_lease = lease
@@ -911,7 +1057,18 @@ class Supervisor:
                              accept=("CLAIMED", "STALE", "FREE"))
         if not check["ok"]:
             self._block(None, "the coder could not be confirmed stopped for the relaunch", **check)
+        if old.lease_id in self._adopted_ids(self.ledger.read()):
+            self._release_kept_lease(old)
         self._start_coder(canary)
+
+    def _release_kept_lease(self, lease: Lease) -> None:
+        """A kept coder's lease stays (STALE) after its container stops; give it back before a new start."""
+        try:
+            self.adapter.release(lease)
+        except AdapterError as exc:
+            self._block(None, f"the kept coder's lease {lease.lease_id} could not be released: {exc}")
+        self.ledger.append("decision", None, decision="hardware released", lease_id=lease.lease_id)
+        kept_coder.forget(self.paths.cache_root, lease.lease_id)
 
     def _coder_died(self, lease: Lease, canary: dict | None) -> None:
         """Spec section 10: one restart with the same config and a canary check; a second death
@@ -919,6 +1076,10 @@ class Supervisor:
         if run_progress(self.ledger.read()).coder_deaths >= 1:
             self._block(None, "the coder died a second time since the last resume")
         self.ledger.append("decision", None, decision="coder died; restarting it once")
+        if lease.lease_id in self._adopted_ids(self.ledger.read()):
+            self._release_kept_lease(lease)    # the release resets the chips; then a lease of our own
+            self._start_coder(canary)
+            return
         try:
             self.adapter.reset(lease)          # a dead server can leave the chips dirty
         except AdapterError as exc:
@@ -972,6 +1133,8 @@ class Supervisor:
     def _stage_body(self, spec, stage_dir: Path, escalated: bool, resumed: bool):
         self._wrapup_used = False           # at most one wrap-up per run of the stage body
         if spec.harness:
+            if spec.number == 8:
+                return self._bundle_body(spec, stage_dir)
             return self._package_body(spec, stage_dir, resumed)
         if spec.boards == 0:
             out, step = self._step(spec, "run", stage_dir, escalated, resumed)
@@ -1082,6 +1245,35 @@ class Supervisor:
         gate = self._check_gate(spec, stage_dir)
         return ("pass", [], gate) if gate.ok else ("fail", list(gate.reasons), gate)
 
+    def _bundle_body(self, spec, stage_dir: Path):
+        """Stage 8 as supervisor code: copy build_bundle.py into the stage, write its one-line config,
+        run it, and run the gate. The script rebuilds the bundle from scratch each time, so a resume
+        simply runs it again. It gets the agent shells' environment (no tokens, HOME in the run)."""
+        n = spec.number
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        script = stage_dir / "build_bundle.py"
+        shutil.copyfile(Path(self.paths.orchard_dir) / "orchard" / "skills" / "operator-bundle-templates"
+                        / "build_bundle.py", script)
+        (stage_dir / "bundle_config.json").write_text(
+            json.dumps({"run_dir": str(self.run_dir), "orchard_dir": str(self.paths.orchard_dir)}, indent=2)
+            + "\n", encoding="utf-8")
+        (stage_dir / "log").mkdir(exist_ok=True)
+        log = stage_dir / "log" / "build_bundle.log"
+        try:
+            proc = subprocess.run([sys.executable, str(script)], cwd=self.run_dir, capture_output=True,
+                                  text=True, timeout=BUNDLE_BUILD_TIMEOUT_S,
+                                  env=agent_env(self.run_dir, extra=self.extra_env))
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return "fail", [f"build_bundle.py did not finish: {exc}"], None
+        log.write_text(proc.stdout + proc.stderr, encoding="utf-8")
+        if proc.returncode != 0:
+            last = (proc.stderr.strip() or proc.stdout.strip() or "no output").splitlines()[-1]
+            return "fail", [f"build_bundle.py exited {proc.returncode}: {last}"[:500]], None
+        self.ledger.append("evidence", n, what="bundle built",
+                           **evidence_record(self.run_dir, stage_dir / "evidence" / "bundle-build.json"))
+        gate = self._check_gate(spec, stage_dir)
+        return ("pass", [], gate) if gate.ok else ("fail", list(gate.reasons), gate)
+
     def _check_gate(self, spec, stage_dir: Path):
         if spec.number == 8:
             bundle = stage_dir / "bundle"
@@ -1176,7 +1368,7 @@ class Supervisor:
             used, endpoint, note = resolve_endpoint(self.cfg, tier, self.probe)
         except TierUnavailable as exc:
             self._block(n, str(exc))
-        if note:
+        if note and not quiet_substitute(self.cfg, self.coder_tier, tier, used):
             self.ledger.append("decision", n, decision="tier substituted", note=note)
         skill = resolve_skill(spec.skill, self.skills_dirs)
         if skill is None:
@@ -1238,8 +1430,7 @@ class Supervisor:
         every count got a config; otherwise the agent writes it as its skill describes."""
         if (stage_dir / "hw_tests.json").exists() or (stage_dir / "configs").exists():
             return
-        cap = (self.lab.chips if self.lab is not None and getattr(self.lab, "chips", None)
-               else spec.boards * CHIPS_PER_BOARD)
+        cap = self._chip_cap(spec)
         counts = [n for n in (self.required_chips or (1, 2, 4)) if n <= cap]
         configs, tests, notes = swap_draft.draft_stage4(
             run_dir=self.run_dir, tt_model_root=self.paths.tt_model_root, cache_root=self.paths.cache_root,
@@ -1261,7 +1452,42 @@ class Supervisor:
         self.ledger.append("decision", spec.number, decision="stage 4 configs drafted", counts=counts,
                            configs={str(n): c.get("bundle_dir") or c.get("package") for n, c in configs.items()},
                            caches={str(n): c["tt_cache"] for n, c in configs.items()},
-                           hw_tests=tests is not None, notes=notes)
+                           hw_tests=tests is not None, tests=tests, cap=cap, notes=notes)
+
+    def _chip_cap(self, spec) -> int:
+        """The most chips one test here can have: the lab's, or this stage's boards on this box."""
+        if self.lab is not None and getattr(self.lab, "chips", None):
+            return self.lab.chips
+        return spec.boards * CHIPS_PER_BOARD
+
+    def _keep_drafted_tests(self, spec, stage_dir: Path) -> None:
+        """When the supervisor drafted every count, its hw_tests.json is the list. On lab run 2 the agent
+        added a 4-chip test on a 2-chip lab (and built its config by hand); the test could only be
+        recorded as not run. The drafted list goes back, and the ledger says what was dropped."""
+        drafted = next((e["data"] for e in reversed(self.ledger.read())
+                        if e["stage"] == spec.number and e["data"].get("decision") == "stage 4 configs drafted"), {})
+        want = drafted.get("tests")
+        if not isinstance(want, dict):
+            return
+        path = stage_dir / "hw_tests.json"
+        try:
+            have = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            have = None
+        if have == want:
+            return
+
+        def counts(d):
+            items = d.get("tests") if isinstance(d, dict) else None
+            return sorted({t.get("chips") for t in items if isinstance(t, dict) and isinstance(t.get("chips"), int)}
+                          if isinstance(items, list) else set())
+        agent, kept = counts(have), counts(want)
+        where = f"the lab {self.lab.info.get('host')}" if self.lab is not None else "this box"
+        self.ledger.append("decision", spec.number, decision="kept the drafted test list", agent=agent,
+                           drafted=kept, dropped=[n for n in agent if n not in kept],
+                           reason=f"{where} has {self._chip_cap(spec)} chips for a test; the supervisor "
+                                  f"drafted {kept}")
+        path.write_text(json.dumps(want, indent=2) + "\n", encoding="utf-8")
 
     def _keep_drafted_caches(self, spec, stage_dir: Path) -> None:
         """The tensor cache of a configuration the supervisor drafted is the drafted one. On the first run
@@ -1524,6 +1750,7 @@ class Supervisor:
             out = self._wrap_up(spec, stage_dir, prep, out)
             if out.status != "done":
                 return out.status, [f"the prepare step ended: {out.status} {out.detail}".strip()], None
+            self._keep_drafted_tests(spec, stage_dir)
             self._keep_drafted_caches(spec, stage_dir)
             tests, problems = self._read_plan(spec, stage_dir)
             if problems:
@@ -1712,6 +1939,9 @@ def parse(argv=None):
                    help="the port of the chip tier the coder serves (matches its endpoint in --tiers)")
     r.add_argument("--coder-chips", type=int, required=True)
     r.add_argument("--coder-image-id", default=None)
+    r.add_argument("--coder-keep-up", action="store_true",
+                   help="lab mode: leave the coder serving at the end of the run, and adopt a coder an "
+                        "earlier run left up (orchard/kept_coder.py)")
     r.add_argument("--skills-dir", action="append", default=[],
                    help="more skill directories, searched after orchard/skills")
     r.add_argument("--input", action="append", default=[], metavar="NAME=PATH")
@@ -1914,7 +2144,12 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
                       home=home, containers=containers, paths=paths, package=package,
                       package_added=added, unattended=getattr(args, "unattended", False),
                       lab=lab if lab_host else None,
-                      four_chip_package=getattr(args, "four_chip_package", None))
+                      four_chip_package=getattr(args, "four_chip_package", None), coder_tier=tier,
+                      keep_up=bool(getattr(args, "coder_keep_up", False)),
+                      coder_identity={"target": args.coder_target, "kind": args.coder_kind,
+                                      "port": args.coder_port, "profile": args.coder_profile,
+                                      "image_id": args.coder_image_id, "model": cfg.tiers[tier]["model"],
+                                      "chips": args.coder_chips})
 
 
 PATH_FLAGS = {"--cache-root": "cache_root", "--hf-home": "hf_home", "--operator-home": "operator_home",

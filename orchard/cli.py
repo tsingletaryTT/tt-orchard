@@ -9,6 +9,7 @@
     tt-orchard ui       [--lan] [--host ADDR] [--port 8780] [--toplike PATH]
     tt-orchard lab setup [--model ORG/NAME]... [--yes] [--check]
     tt-orchard caches   [--lab] [--prune --older-than DAYS [--yes]]
+    tt-orchard coder    [status | stop [--yes]]
 
 It is a thin layer over `python3 -m orchard.supervisor`. `bringup` reads config/bringup.toml, checks what
 can be checked without a lease (orchard/preflight.py), fetches the model snapshot when it is not local
@@ -120,6 +121,9 @@ def _parser() -> argparse.ArgumentParser:
     from orchard import caches as _caches
     sub.add_parser("caches", parents=[common, _caches.parser(add_help=False)],
                    help="list the tensor caches (here and on the lab) and prune the ones no run uses")
+    from orchard import kept_coder as _kept
+    sub.add_parser("coder", parents=[common, _kept.parser(add_help=False)],
+                   help="show or stop the coder a lab run kept up ([coder] keep_up)")
     return p
 
 
@@ -336,6 +340,13 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
         except (NoConfig, bringup_config.BringupConfigError) as exc:
             return _refuse(str(exc))
         return caches.main(cfg=cfg, args=args, say=lambda line: print(line, file=out))
+    if args.cmd == "coder":
+        from orchard import kept_coder
+        try:
+            cfg, _ = config()
+        except (NoConfig, bringup_config.BringupConfigError) as exc:
+            return _refuse(str(exc))
+        return kept_coder.main(cfg=cfg, args=args, say=lambda line: print(line, file=out))
     if args.cmd == "lab":
         from orchard import lab_setup
         try:

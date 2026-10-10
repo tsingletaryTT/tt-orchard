@@ -9,16 +9,14 @@ import pytest
 from orchard.stages import STAGES, resolve_skill, spec_for
 
 SKILLS = Path(__file__).resolve().parent.parent / "orchard" / "skills"
-LOCAL = ("delta-triage", "reference-gate", "weights-swap-check", "weights-swap-configs", "serving-check",
-         "operator-bundle")
+LOCAL = ("delta-triage", "reference-gate", "weights-swap-check", "weights-swap-configs", "serving-check")
 # Spec section 11: existing skills the stages use, referenced by name only.
 SPEC_EXISTING = {"model-bringup", "functional-decoder", "full-model", "multichip", "mesh-shrink",
                  "vllm-integration", "qualitative-check", "benchmark-model", "tt-device-usage",
                  "stage-review", "tti-release"}
 GATE_FILES = {"delta-triage": "delta.json", "reference-gate": "reference.json",
               "weights-swap-check": "result.json", "weights-swap-configs": "result.json",
-              "serving-check": "result.json",
-              "operator-bundle": "PUBLISH_COMMANDS.txt"}
+              "serving-check": "result.json"}
 
 
 @pytest.mark.parametrize("name", LOCAL)
@@ -41,15 +39,10 @@ def test_every_skill_the_table_names_is_local_or_named_in_the_spec():
     # Every path's table: stage 2 on the weights-only path names a different skill.
     specs = {spec_for(s.number, path) for s in STAGES for path in ("weights-only", "full-port", None)}
     for s in sorted(specs, key=lambda s: (s.number, s.skill)):
-        if s.skip:
+        if s.skip or s.harness:
             continue
         assert s.skill in LOCAL or s.skill in SPEC_EXISTING, s.skill
         assert set(s.refs) <= SPEC_EXISTING, s.refs
-
-
-def test_the_bundle_skill_keeps_publishing_with_the_operator():
-    text = (SKILLS / "operator-bundle.md").read_text()
-    assert "You never run them." in text and "ready for operator review" in text
 
 
 def test_the_swap_skill_copies_the_templates_that_exist_in_this_repo():
@@ -169,12 +162,6 @@ def test_the_swap_skills_put_each_tensor_cache_under_the_cache_root():
     assert '"operator_home": "{{OPERATOR_HOME}}"' in configs
 
 
-def test_the_bundle_skill_carries_stage_7s_publish_commands_word_for_word():
-    text = (SKILLS / "operator-bundle.md").read_text()
-    assert "bundle/package/PUBLISH_COMMANDS.txt" in text and "word for word" in text
-    assert "non-commercial" in text
-
-
 @pytest.mark.parametrize("name", ("weights-swap-check", "weights-swap-configs"))
 def test_the_swap_skills_copy_stage_0s_model_id_verbatim(name):
     # Run 3's stage 7 stopped because stage 2's label left off stage 0's @revision. Stage 7 now
@@ -246,33 +233,6 @@ def test_the_reference_gate_skill_has_the_write_first_rules_and_the_card_caveat(
     assert "Do not change a check's `pass` from false to true." in flat
 
 
-# ---- stage 8: the operator-bundle template ------------------------------------------------------
-
-def test_the_operator_bundle_skill_runs_the_template_that_exists_in_this_repo():
-    import importlib.util
-    text = (SKILLS / "operator-bundle.md").read_text()
-    flat = " ".join(text.split())
-    script = SKILLS / "operator-bundle-templates" / "build_bundle.py"
-    assert script.is_file()
-    assert "cp {{ORCHARD_DIR}}/orchard/skills/operator-bundle-templates/build_bundle.py stages/8/" in flat
-    assert "python3 stages/8/build_bundle.py" in flat
-    spec = importlib.util.spec_from_file_location("build_bundle_for_skill_test", script)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    assert set(_config_block(text, "run_dir")) == set(mod.CONFIG_KEYS)
-
-
-def test_the_operator_bundle_skill_has_the_write_first_rules():
-    flat = " ".join((SKILLS / "operator-bundle.md").read_text().split())
-    assert "Write `bundle_config.json` FIRST" in flat
-    assert "Never read the run's ledger" in flat and "transcripts" in flat
-    assert "Do not investigate anything outside the bundle's own files" in flat
-    assert "Read `bundle/RESULTS.md` and `bundle/RISKS.md` once" in flat
-    assert "summary paragraph" in flat and "evidence path" in flat
-    assert "Do not change a `Dealt with: Not shown` line to `yes`" in flat
-    assert "Exit 2" in flat and "scrub" in flat
-
-
 def test_the_reference_gate_skill_tells_the_agent_to_use_the_reference_python_input_and_never_to_install():
     text = " ".join((Path(__file__).resolve().parent.parent / "orchard" / "skills" / "reference-gate.md")
                     .read_text().split())
@@ -310,3 +270,12 @@ def test_the_stage_4_steps_start_from_the_drafted_configs_and_the_table_is_only_
     fallback = text.split("## When a configuration has no drafted config", 1)[1].split("\n## ", 1)[0]
     assert "mkdir -p stages/4/configs/N" in fallback and "four_chip_package" in fallback
     assert "changh95/qwen3.8-27b-p300x2" in fallback
+
+
+def test_the_stage_4_skill_keeps_to_the_drafted_counts():
+    # Lab run 2: the skill listed "2 chips, 4 chips, then 1 chip" and called a count with no drafted
+    # config "not drafted", so the agent built a 4-chip config by hand on a 2-chip lab.
+    flat = " ".join((SKILLS / "weights-swap-configs.md").read_text().split())
+    assert "When `hw_tests.json` exists, its counts are the whole list. Do not add a count to it" in flat
+    assert "2 chips, 4 chips, then 1 chip" not in flat
+    assert "Only when `hw_tests.json` does not exist" in flat

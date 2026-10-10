@@ -155,7 +155,7 @@ supervisor pauses before stage 2 for the operator.
 | Watchdog | `orchard/watchdog.py`, `orchard/transcripts.py` | Built and tested. Fired on a real agent during the run. The near-duplicate command check (command shapes, 4 turns) was added after the second-model run and has not fired on a real agent yet |
 | Stage machine, agent loop, supervisor | `orchard/stages.py`, `orchard/agent.py`, `orchard/context.py`, `orchard/supervisor.py` | Built and tested. Ran stages 0 to 2 on the real run |
 | Crash recovery | `orchard/supervisor.py`, `orchard/handoff.py` | Tested with fakes by killing the supervisor after every ledger event. On hardware: `kill -9`, restart, resume worked at least four times on the real run |
-| Stage skills | `orchard/skills/` | Drafts. `delta-triage`, `reference-gate` and `weights-swap-check` have been used on the real run. `weights-swap-configs` and `operator-bundle` have been used on the real run. `serving-check` has never run. `delta-triage`, `reference-gate` and `operator-bundle` were rewritten on 2026-10-04 to run template scripts (`delta-triage-templates/`, `reference-gate-templates/`, `operator-bundle-templates/`); the rewritten versions have not run on a real run |
+| Stage skills | `orchard/skills/` | Drafts. `delta-triage`, `reference-gate` and `weights-swap-check` have been used on the real run. `weights-swap-configs` has been used on the real run; stage 8 is now supervisor code that runs `operator-bundle-templates/build_bundle.py`. `serving-check` has never run. `delta-triage`, `reference-gate` and `operator-bundle` were rewritten on 2026-10-04 to run template scripts (`delta-triage-templates/`, `reference-gate-templates/`, `operator-bundle-templates/`); the rewritten versions have not run on a real run |
 | Packaging (stage 7) | `orchard/package.py`, `orchard/package_card.py`, `orchard/package_templates/` | Built and tested with fakes, then run once on hardware (Hemmingway-1; see stage 7 above). Wired into the stage table as opt-in supervisor code. A v5.1 container package is refused at start |
 | Bundle and package scrub | `orchard/scrub.py` | Built and tested with fakes. The stage 8 gate calls it; it ran once on the real run |
 | CPU sizing tool | `orchard/sizing.py` | Built and tested against a fake server. It has not been run against a real ollama. The CPU numbers in this README come from the run log |
@@ -544,7 +544,7 @@ with a suggestion. The file is found from `--config`, then `$ORCHARD_BRINGUP_CON
 ```text
 python3 -m orchard.supervisor run --model MODEL --run-dir RUN_DIR --tiers TIERS
     --coder-target CODER_TARGET [--coder-kind {container,bundle}] [--coder-profile CODER_PROFILE]
-    --coder-port CODER_PORT --coder-chips CODER_CHIPS [--coder-image-id CODER_IMAGE_ID]
+    --coder-port CODER_PORT --coder-chips CODER_CHIPS [--coder-image-id CODER_IMAGE_ID] [--coder-keep-up]
     [--skills-dir SKILLS_DIR] [--input NAME=PATH] [--env NAME=VALUE]
     [--required-chips N,N] [--four-chip-package ORG/NAME] [--cache-root DIR] [--hf-home DIR] [--operator-home DIR]
     [--package-format {v6,v5.1}] [--package-namespace NS] [--package-models-root DIR]
@@ -562,6 +562,7 @@ python3 -m orchard.supervisor run --model MODEL --run-dir RUN_DIR --tiers TIERS
 | `--coder-port` | yes | The port the coder serves on. Exactly one `chips` tier in the config must use this port, and the coder must list that tier's `model` at `/v1/models` |
 | `--coder-chips` | yes | How many chips the coder uses. gozer leases whole boards of two chips |
 | `--coder-image-id` | no | The container image id `tt-model list` prints. It helps the supervisor recognise the coder's container in `docker ps` when it confirms a stop |
+| `--coder-keep-up` | no | Lab mode only: leave the coder serving at the end of the run and use a coder an earlier run left up (`[coder] keep_up`, section 5.9) |
 | `--skills-dir` | no, repeatable | More skill directories, searched after `orchard/skills`. Stages on the full-port path use skills from the `tt-model-bringup` plugin (for example `functional-decoder`, `full-model`, `mesh-shrink`), so pass that plugin's `skills` directory. A stage whose skill cannot be found blocks |
 | `--input` | no, repeatable | `NAME=PATH` facts every agent prompt lists, for example `model=<MODEL_SNAPSHOT_DIR>`. Anything you pass here, every agent sees |
 | `--env` | no, repeatable | `NAME=VALUE` variables for agent shells, for example `HF_HOME` and `HF_HUB_OFFLINE=1`. Names that look like credentials are refused |
@@ -763,7 +764,7 @@ supervisor refuses a ledger whose chain is broken.
 | 5 | Serving integration | `serving-check` | Full-port path only. Checks a served model from outside: boot, a passkey test at two lengths, a repeated canary. Skipped on the weights-only path |
 | 6 | Qualitative check and benchmark | `serving-check` | Full-port path only. Five prompts read by the agent, and decode speed and time to first token, each labelled measured or TODO. Skipped on the weights-only path |
 | 7 | Package and container build | none (supervisor code) | Weights-only path with `--package-format v6` only. First checks that stage 2 served the weights stage 0 names: the label must name stage 0's repo, and the weight files in the served `model-dir` must link to stage 0's revision in the Hugging Face cache. Then runs `tt-model package-thin --out` from the nearest model's installed v6 bundle, points every weights setting in `run.sh` at a `model-dir` built from the new weights, scrubs each package, installs a copy of the required profile and boots it on a leased board against the stage 1 reference, then writes a card and the publish commands as text. A failure pauses the run and is not escalated. Every other run records it as skipped |
-| 8 | Operator bundle | `operator-bundle` | The agent writes `bundle_config.json` and runs `build_bundle.py`, which builds the bundle from the ledger and each stage's files: results with labelled numbers and evidence paths, risks with a computed `Dealt with:` line for the tensor-cache hazard, the model card, stage 7's packages and publish commands, and a copy of the ledger. It prints the scrub's findings. The agent rewrites the summary paragraph and adds risks it can back with evidence. The supervisor copies the ledger in again and scrubs the bundle |
+| 8 | Operator bundle | supervisor code | The supervisor writes `bundle_config.json` and runs `build_bundle.py`, which builds the bundle from the ledger and each stage's files: a summary, results with labelled numbers and evidence paths, risks with a computed `Dealt with:` line for the tensor-cache hazard, the model card, stage 7's packages and publish commands, and a copy of the ledger. It records each file's sha256 in `stages/8/evidence/bundle-build.json`. No agent runs: on lab run 2 the agent looped after the bundle was built, then rewrote `RESULTS.md` with facts the run did not have. The gate checks each file against that record, then the supervisor copies the ledger in again and scrubs the bundle |
 
 ### 5.3a Outcome classes
 
@@ -954,6 +955,22 @@ sudo mkdir -p /srv/orchard && sudo chown "$USER" /srv/orchard      # once on the
 and the run's `runs_root`, `cache_root`, `hf_home` and `tt_model_root` sit under it. Stage 7
 (`--package-format`) is refused with `--lab` for now: its boot check and install would have to run on
 the lab. A stage 4 configuration needs the lab to have that many chips.
+
+**Keep the coder up between lab runs.** Booting the coder is the largest fixed cost of a warm lab run
+(about 6.5 minutes of 31). With `keep_up = true` under `[coder]` (lab mode only), a run that ends ready
+or blocked with a healthy coder leaves it serving: the supervisor gives up its own lease without a
+reset and has gozer adopt the coder's board, so the lease is judged by the container's processes
+and outlives the run (`gozer status` shows `orchard:coder-kept`). It writes
+`<cache_root>/coder/kept.json`. The next run uses that coder with no boot when it is the same coder
+(target, kind, port, profile, image, model and chips), the port lists the model, gozer shows the board
+held by it, and its canary answer equals the one it gave when first started. Otherwise the run records
+`kept coder not used` with the reason and never stops it. An abort or a signal still stops the coder.
+In local mode the setting is ignored, because tests park the coder for its board anyway.
+
+```bash
+tt-orchard coder status        # the kept coder, its lease, and whether it serves
+tt-orchard coder stop          # stop it and free its chips (asks first; --yes to skip)
+```
 
 ### 5.10 Tensor caches and disk
 

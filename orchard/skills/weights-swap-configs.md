@@ -48,7 +48,10 @@ and a positive `server_ready_s`; and its evidence includes
 
 - The supervisor has usually drafted every configuration (`hw_tests.json` and
   `configs/<N>/swap_config.json`). Start from those; see the steps below.
-- Do the configurations one at a time, in this order: 2 chips, 4 chips, then 1 chip.
+- When `hw_tests.json` exists, its counts are the whole list. Do not add a count to it and do not make
+  a `configs/<N>` for any other count: the supervisor drafted every count this machine can run, and it
+  puts its list back after your step.
+- Do the configurations one at a time, from the largest chip count to the smallest.
 - Write each file as soon as you know its content.
 - Do not investigate anything this skill does not list.
 
@@ -57,8 +60,9 @@ and a positive `server_ready_s`; and its evidence includes
 1. Read `stages/4/hw_tests.json` and each `stages/4/configs/<N>/swap_config.json`. The supervisor wrote
    them before you started, from facts the run already holds, and copied the three templates into each
    `configs/<N>`. Use them as they are: do not look for packages, snapshots, caches or ports, and do not
-   run `tt-model list`. A count with no `configs/<N>/swap_config.json` was not drafted (the ledger says
-   why): only for that count, do the steps under "When a configuration has no drafted config" below.
+   run `tt-model list`. Only when `hw_tests.json` does not exist, a count in "required chip
+   configurations" (or 1, 2 and 4 when none are required) with no `configs/<N>/swap_config.json` was not
+   drafted: only for that count, do the steps under "When a configuration has no drafted config" below.
 2. For each configuration N in `hw_tests.json`, run `python3 stages/4/configs/N/prepare_swap.py`. It
    builds `stages/4/configs/N/model-dir/` and, for a bundle, `stages/4/configs/N/run.sh`. Exit 2 means an
    edit did not apply or a fact does not fit; its message names it. Fix that value in that

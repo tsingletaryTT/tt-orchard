@@ -479,6 +479,7 @@ class AgentStep:
     def _loop(self, max_turns: int, *, logged: int) -> Outcome:
         messages = self.messages
         bad_run: list[str] = []             # kinds of the replies in a row that ran no command
+        last_reply = ""                     # the visible text of the last reply that called a tool
         for turn in range(1, max_turns + 1):
             self._turn += 1
             for text in self.control.take_nudges(self.agent):
@@ -558,11 +559,21 @@ class AgentStep:
                             wrote=result.startswith("wrote ") if name == "write_file" else None)
                 self._record_new_evidence()
                 repeated = repeated or (name == "write_file" and result.startswith("unchanged:"))
-            if repeated and self.finished is not None and self._finished():
-                self.ledger.append("decision", self.stage, decision="step finished: repeated write",
+            # The same visible text again, with another tool call: on lab run 2 the stage 8 agent said its
+            # summary was done, then ran `echo "Done"`, `echo "Finished"` ... with that same text for 16
+            # turns, until the identical-responses watchdog escalated a stage whose files had passed.
+            same_reply = bool(content.strip()) and content == last_reply
+            last_reply = content
+            if (repeated or same_reply) and self.finished is not None and self._finished():
+                if repeated:
+                    self.ledger.append("decision", self.stage, decision="step finished: repeated write",
+                                       phase=self.phase, turn=turn)
+                    return self._end("done", turn, detail="the step's files were written and valid, and the "
+                                                          "agent wrote them again unchanged instead of ending")
+                self.ledger.append("decision", self.stage, decision="step finished: repeated reply",
                                    phase=self.phase, turn=turn)
                 return self._end("done", turn, detail="the step's files were written and valid, and the agent "
-                                                      "wrote them again unchanged instead of ending")
+                                                      "gave the same reply again instead of ending")
         return self._end("turns", max_turns, detail=f"no final answer after {max_turns} turns")
 
     def _finished(self) -> bool:

@@ -146,9 +146,13 @@ class GozerAdapter:
             return
         raise AdapterError(f"gozer cancel exited {res.returncode}: {self._detail(res, payload)}")
 
-    def release(self, lease: Lease) -> None:
+    def release(self, lease: Lease, *, keep_running: bool = False) -> None:
+        """Give the lease back (gozer resets the chips). With keep_running, the lease goes but the chips
+        are not reset and may stay open: the coder kept up for the next run keeps serving on them, and
+        `adopt` puts a lease around it at once (orchard/kept_coder.py)."""
         self._not_in_flight(lease)
-        res, payload = self._call("release", lease.lease_id, "--json", long=True)
+        extra = ("--force", "--no-reset") if keep_running else ()
+        res, payload = self._call("release", lease.lease_id, "--json", *extra, long=True)
         if res.timed_out:
             self.in_flight.add(lease.lease_id)
             raise ResetFailed(f"gozer release {lease.lease_id} still running after "
@@ -164,6 +168,15 @@ class GozerAdapter:
         if res.returncode == EXIT_REFUSED:
             raise Refused(self._detail(res, payload))
         raise AdapterError(f"gozer release exited {res.returncode}: {self._detail(res, payload)}")
+
+    def adopt(self, unit: str, who: str, reason: str) -> tuple[str, list[int]]:
+        """Put a lease around the processes holding `unit` (gozer adopt). The lease is judged by those
+        processes, not by this supervisor, so it outlives the run. Returns (lease id, holder pids)."""
+        res, payload = self._call("adopt", unit, "--who", who, "--reason", reason, "--json")
+        p = payload or {}
+        if res.returncode == EXIT_OK and p.get("adopted") and isinstance(p.get("lease_id"), str):
+            return p["lease_id"], [int(x) for x in p.get("pids") or []]
+        raise AdapterError(f"gozer adopt {unit} exited {res.returncode}: {self._detail(res, payload)}")
 
     def reset(self, lease: Lease) -> None:
         self._not_in_flight(lease)

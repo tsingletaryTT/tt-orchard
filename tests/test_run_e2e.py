@@ -8,6 +8,8 @@ The two machine layouts are the operator's: the coder on all four chips (every h
 parks it) and the coder on two chips (every hardware stage uses the free board).
 """
 
+import re
+
 import pytest
 
 from fake_model import FakeModel
@@ -19,6 +21,7 @@ from run_fakes import (BOARDS, SWAP_LOW, CrashingLedger, FakeContainers, Machine
                        MachineCoder, argv, bringup, clock, feedback_aware, plenty,
                        test_fails_until_escalated, write_tiers)
 
+VARYING_ROWS = ("| Wall time (first to last ledger entry) |", "| Ledger entries |", "| Retries |")
 FIRST, SECOND = 100, 200          # supervisor pids before and after the kill
 
 
@@ -61,7 +64,12 @@ def final_state(base):
     bundle = base / "run" / "stages" / "8" / "bundle"
     return {"finished": p.finished, "done": p.done, "parked": replay_state(es)["parked"],
             "paused": p.paused, "last_result": last,
-            "bundle": {f.name: f.read_text() for f in sorted(bundle.iterdir()) if f.name != "ledger.jsonl"},
+            # build_bundle.py writes the bundle from the ledger. A kill adds entries, wall time and an
+            # attempt to the stage it interrupted, so those are the only things allowed to differ.
+            "bundle": {f.name: re.sub(r"Attempts: \d+", "Attempts: N",
+                                      "".join(line for line in f.read_text().splitlines(True)
+                                              if not line.startswith(VARYING_ROWS)))
+                       for f in sorted(bundle.iterdir()) if f.is_file() and f.name != "ledger.jsonl"},
             # The stage 6 result numbers (they carry an evidence key); handoff timings vary with kills.
             "numbers": sorted({e["data"]["name"] for e in es if e["event"] == "measurement"
                                and e["stage"] == 6 and "evidence" in e["data"]})}

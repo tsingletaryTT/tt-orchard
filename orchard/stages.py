@@ -546,13 +546,19 @@ def gate_numbers(stage_dir, run_dir) -> GateResult:
     return _done(reasons, seen)
 
 
-BUNDLE_FILES = ("RESULTS.md", "RISKS.md", "PUBLISH_COMMANDS.txt", "ledger.jsonl")
+BUNDLE_FILES = ("RESULTS.md", "RISKS.md", "card.md", "PUBLISH_COMMANDS.txt", "ledger.jsonl")
+BUNDLE_RECORD = "evidence/bundle-build.json"
 
 
 def gate_bundle(stage_dir, run_dir) -> GateResult:
-    """Stage 8: results, ledger, open risks, publish commands as text, and a clean scrub."""
+    """Stage 8: results, ledger, open risks, the card, publish commands as text, and a clean scrub.
+    Every file is the one build_bundle.py wrote: its record holds each file's sha256, and only the
+    ledger copy (which the supervisor writes again just before this gate) may differ. On run 2 an
+    agent rewrote RESULTS.md with stage names and an evidence path the run never had, and the gate
+    of the time passed it."""
     from orchard.scrub import scrub_bundle
-    bundle = Path(stage_dir) / "bundle"
+    stage_dir = Path(stage_dir)
+    bundle = stage_dir / "bundle"
     reasons, seen = [], []
     for name in BUNDLE_FILES:
         f = bundle / name
@@ -560,9 +566,37 @@ def gate_bundle(stage_dir, run_dir) -> GateResult:
             reasons.append(f"bundle/{name} is missing or empty")
         else:
             seen.append(os.path.relpath(f, run_dir))
+    try:
+        built = json.loads((stage_dir / BUNDLE_RECORD).read_text(encoding="utf-8"))
+        recorded = {f["path"]: f["sha256"] for f in built["files"]}
+    except (OSError, ValueError, KeyError, TypeError):
+        reasons.append(f"stages/8/{BUNDLE_RECORD} is missing or unreadable: the bundle was not built "
+                       "by build_bundle.py")
+    else:
+        seen.append(os.path.relpath(stage_dir / BUNDLE_RECORD, run_dir))
+        found = set()
+        for f in sorted(bundle.rglob("*")) if bundle.is_dir() else ():
+            if not f.is_file() or f == bundle / "ledger.jsonl":
+                continue
+            rel = f"stages/8/bundle/{f.relative_to(bundle).as_posix()}"
+            found.add(rel)
+            if rel not in recorded:
+                reasons.append(f"{rel} was not written by build_bundle.py")
+            elif _sha256(f) != recorded[rel]:
+                reasons.append(f"{rel} changed after build_bundle.py wrote it")
+        for rel in sorted(set(recorded) - found - {"stages/8/bundle/ledger.jsonl"}):
+            reasons.append(f"{rel} was written by build_bundle.py and is gone")
     for hit in scrub_bundle(bundle):
         reasons.append(f"scrub: {hit}")
     return _done(reasons, seen)
+
+
+def _sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def _inside_dir(run_dir, rel) -> Path | None:
@@ -693,7 +727,9 @@ STAGES: tuple[StageSpec, ...] = (
               ("qualitative-check", "benchmark-model"), 1, "result.json", gate_numbers,
               "test-result.json"),
     StageSpec(7, "package and container build", "", (), 0, None, None, None, skip=SKIP_7),
-    StageSpec(8, "operator bundle", "operator-bundle", (), 0, "bundle/RESULTS.md", gate_bundle, None),
+    # Stage 8 is supervisor code: build_bundle.py writes the whole bundle, summary included, in one
+    # call. An agent added nothing the gate checks and, on lab run 2, made the bundle wrong.
+    StageSpec(8, "operator bundle", "", (), 0, "bundle/RESULTS.md", gate_bundle, None, harness=True),
 )
 
 
@@ -1077,7 +1113,7 @@ def coder_state(entries: list[dict]) -> tuple[dict | None, dict | None, dict | N
     lease = server = canary = None
     for e in entries:
         d = e["data"]
-        own = e["event"] == "decision" and d.get("decision") in ("coder starting", "coder started")
+        own = e["event"] == "decision" and d.get("decision") in ("coder starting", "coder adopted", "coder started")
         if e["event"] in ("park", "restore") or own:
             if isinstance(d.get("lease"), dict):
                 lease = d["lease"]

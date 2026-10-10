@@ -1187,3 +1187,33 @@ def test_a_local_hardware_test_uses_the_shared_kernel_cache(rig, monkeypatch):
     start = next(e["data"] for e in rig.entries() if e["event"] == "run_start")
     want = str(Path(start["paths"]["cache_root"]) / "kernels")
     assert seen and all(v == want for v in seen) and Path(want).is_dir()
+
+
+# ---- tier substitution ----------------------------------------------------------------------------
+
+def test_the_coder_serving_a_tier_that_is_never_started_is_not_recorded_as_a_substitution(rig):
+    # The rig is the Coder-Next layout: the tier on the coder port serves; the other names the same
+    # model and is never started. Lab run 2 recorded "tier substituted" on every stage.
+    assert rig.run() == EXIT_READY
+    assert not [d for d in rig.decisions() if d.get("decision") == "tier substituted"]
+    steps = [d for d in rig.decisions() if d.get("decision") == "agent step"]
+    assert steps and {d.get("tier") for d in steps} == {"large"}       # the tier used is still recorded
+
+
+def test_only_the_layouts_own_substitution_is_quiet():
+    from types import SimpleNamespace
+    from orchard.supervisor import quiet_substitute
+    cfg = SimpleNamespace(tiers={"large": {"model": "m"}, "small": {"model": "m"}, "other": {"model": "x"}})
+    assert quiet_substitute(cfg, "small", "large", "small")
+    assert not quiet_substitute(cfg, "small", "small", "large")         # the coder's own tier was down
+    assert not quiet_substitute(cfg, None, "large", "small")
+    cfg.tiers["other"]["model"] = "m"
+    assert not quiet_substitute(cfg, "small", "other", "large")         # not the coder serving it
+
+
+def test_keep_up_is_for_lab_mode_only(rig):
+    # In local mode tests park the coder for its board, so a run never leaves it up.
+    rig.args.coder_keep_up = True
+    assert rig.run() == EXIT_READY
+    assert not rig.m.coder_running and rig.m.leases == {}
+    assert not [d for d in rig.decisions() if d.get("decision") == "coder left up"]

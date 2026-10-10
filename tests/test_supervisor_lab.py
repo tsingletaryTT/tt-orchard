@@ -94,13 +94,23 @@ class LabRig(Rig):
         self.root.mkdir()
         self.lab = FakeLab(self.root)
         self.args, self.run_dir = lab_args(self, self.root)
+        self.adapters = []                          # the brain adapter of each run, in order
+
+    @property
+    def adapter_calls(self):
+        return [c for a in self.adapters for c in a.calls]
+
+    def status(self):
+        return self.adapter_cls(self.m).status()
 
     def run(self, pid=100, crash_if=None, lab=None):
         from orchard.ledger import Ledger
         self.m.owner_pid = pid
         self.run_dir.mkdir(parents=True, exist_ok=True)
+        adapter = self.adapter_cls(self.m, owner_pid=pid)
+        self.adapters.append(adapter)
         with Ledger(self.run_dir / "ledger.jsonl") as led:
-            sup = build(self.args, led, adapter=self.adapter_cls(self.m, owner_pid=pid),
+            sup = build(self.args, led, adapter=adapter,
                         coder=self.coder_cls(self.m), versions={"tt_model": "test"}, clock=self.clock,
                         sleep=self.sleep, disk_usage=lambda p: self.usage(p), home=self.home,
                         containers=self.containers, lab=lab or self.lab)
@@ -449,6 +459,13 @@ def test_stage_4_starts_from_drafted_configs_for_the_counts_the_lab_can_hold(rig
     assert {str(t["chips"]): t["cache"] for t in plan["tests"] if str(t["chips"]) in d["caches"]} == d["caches"]
     kept = [e["data"] for e in entries if e["data"].get("decision") == "kept the drafted tensor cache"]
     assert {k["config"] for k in kept} == {1, 2}
+    # The fake agent also lists a 4-chip test (as Coder-Next did on lab run 2); the drafted list stands.
+    assert d["tests"] == {"tests": [{k: t[k] for k in ("chips", "script", "deadline_s")} for t in d["tests"]["tests"]]}
+    assert sorted(t["chips"] for t in plan["tests"]) == [1, 2]
+    held = [e["data"] for e in entries if e["data"].get("decision") == "kept the drafted test list"]
+    assert held and held[0]["dropped"] == [4] and held[0]["drafted"] == [1, 2]
+    assert "the lab node4 has 2 chips for a test" in held[0]["reason"]
+    assert not (rig.run_dir / "stages" / "4" / "tests" / "4").exists()
 
 
 def test_agent_shells_can_list_the_runs_bundles(rig):
@@ -485,3 +502,97 @@ def test_a_stage_4_prepare_that_repeats_its_last_write_still_gets_its_tests(rig)
     assert rig.run() == EXIT_READY
     assert any(e["data"].get("decision") == "step finished: repeated write" and e["stage"] == 4
                for e in rig.entries())
+
+
+# ---- a coder kept up between lab runs (orchard/kept_coder.py) ---------------------------------------
+
+def next_run(rig, name="hemmingway-2"):
+    """Point the rig at a new run directory; the machine (and a kept coder) carries over."""
+    rig.run_dir = rig.root / "runs" / name
+    rig.args.run_dir = str(rig.run_dir)
+
+
+def decided(rig, what):
+    return [e["data"] for e in rig.entries() if e["data"].get("decision") == what]
+
+
+def test_a_kept_coder_is_left_up_and_the_next_run_uses_it_without_a_boot(rig):
+    from orchard import kept_coder
+    from run_fakes import KEPT_PID
+    from orchard.supervisor import FIRST_BOOT_PROMPT
+    rig.args.coder_keep_up = True
+    assert rig.run() == EXIT_READY
+    left = decided(rig, "coder left up")
+    assert left and left[0]["holder_pids"] == [KEPT_PID]
+    assert rig.m.coder_running and rig.m.coder_starts == 1
+    # The supervisor's lease went without a reset, and gozer adopted the board for the container.
+    assert ("release-keep", left[0]["lease_id"]) in rig.adapter_calls
+    chips = [c for c in rig.status() if c.who == kept_coder.KEPT_WHO]
+    assert chips and all(c.state == "HELD" and c.lease_pid == KEPT_PID for c in chips)
+    rec = kept_coder.read(rig.root / "cache")
+    assert rec["lease"]["lease_id"] == left[0]["kept_lease_id"] and rec["identity"]["port"] == rig.args.coder_port
+
+    next_run(rig)
+    asked_before = list(rig.m.asked)
+    assert rig.run(pid=200) == EXIT_READY
+    adopted = decided(rig, "coder adopted")
+    assert adopted and adopted[0]["lease"]["lease_id"] == rec["lease"]["lease_id"]
+    assert rig.m.coder_starts == 1                          # no second boot
+    started = decided(rig, "coder started")
+    assert started and started[0]["canary"]["path"].startswith("evidence/coder-canary-kept")
+    assert FIRST_BOOT_PROMPT not in rig.m.asked[len(asked_before):]     # the canary is compared instead
+    # It is left up again under the same adopted lease: no second hand-over.
+    again = decided(rig, "coder left up")
+    assert again and again[0]["kept_lease_id"] == rec["lease"]["lease_id"]
+    assert [c for c in rig.adapter_calls if c[0] == "release-keep"] == [("release-keep", left[0]["lease_id"])]
+    assert kept_coder.read(rig.root / "cache")["run_dir"] == str(rig.run_dir)
+
+
+def test_a_kept_coder_that_is_not_this_runs_coder_is_not_used_and_not_stopped(rig):
+    from orchard import kept_coder
+    rig.args.coder_keep_up = True
+    assert rig.run() == EXIT_READY
+    kept_id = kept_coder.read(rig.root / "cache")["lease"]["lease_id"]
+    next_run(rig)
+    rig.args.coder_image_id = "sha256:other"
+    rig.args.unattended = True
+    rig.run(pid=200)
+    why = decided(rig, "kept coder not used")
+    assert why and "image_id" in why[0]["reason"]
+    assert not decided(rig, "coder adopted")
+    assert ("release", kept_id) not in rig.adapter_calls     # never released or stopped by this run
+
+
+def test_a_kept_coder_whose_canary_changed_is_stopped_and_its_chips_freed(rig):
+    from orchard import kept_coder
+    from orchard.supervisor import EXIT_BLOCKED
+    rig.args.coder_keep_up = True
+    assert rig.run() == EXIT_READY
+    kept_id = kept_coder.read(rig.root / "cache")["lease"]["lease_id"]
+    next_run(rig)
+    rig.args.unattended = True
+    rig.m.coder_answer = "a different answer"
+    assert rig.run(pid=200) == EXIT_BLOCKED
+    assert decided(rig, "coder adopted") and not decided(rig, "coder left up")
+    assert not rig.m.coder_running
+    assert ("release", kept_id) in rig.adapter_calls and kept_id not in rig.m.leases
+    assert kept_coder.read(rig.root / "cache") is None
+
+
+def test_an_abort_stops_the_coder_even_with_keep_up(rig):
+    from orchard import kept_coder
+    from orchard.supervisor import Control
+    from orchard.supervisor import EXIT_ABORTED
+    rig.args.coder_keep_up = True
+    rig.run_dir.mkdir(parents=True, exist_ok=True)
+    Control(rig.run_dir).write("abort")
+    assert rig.run() == EXIT_ABORTED
+    assert not rig.m.coder_running and not decided(rig, "coder left up")
+    assert kept_coder.read(rig.root / "cache") is None
+
+
+def test_without_keep_up_the_coder_is_stopped_and_nothing_is_kept(rig):
+    from orchard import kept_coder
+    assert rig.run() == EXIT_READY
+    assert not rig.m.coder_running and not decided(rig, "coder left up")
+    assert kept_coder.read(rig.root / "cache") is None
