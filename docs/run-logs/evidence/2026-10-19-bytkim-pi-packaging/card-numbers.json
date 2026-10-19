@@ -1,0 +1,61 @@
+{
+  "what": "The speed numbers on the card, rounded as the card shows them, copied from packaging/measurements.json (the full file names the operator's namespace in its bundle field, which the package scrub refuses, so it is not shipped).",
+  "bundle": "the installed v6 bundle qwen3.8-27b-dflash2-p300 (2 chips, bfp8 weights, DFlash2 drafter on, sampling on the device)",
+  "prompt_set_sha256": "6d2c2d4f531b00a260887730970df24296c89f82ec9c5ba100aa85025745bbb2",
+  "prompt_set_identical_for_both_models": true,
+  "decoding": "greedy (temperature 0), thinking mode as the chat template defaults it, streamed",
+  "method": {
+    "warmup_requests": 1,
+    "repetitions_per_prompt": 3,
+    "statistics": "median with min and max over the repetitions",
+    "ttft_s": "seconds from sending the request to the first content, reasoning or tool-call chunk",
+    "decode_tok_s": "(completion tokens - 1) / seconds from the first chunk to the last, per run"
+  },
+  "pi": {
+    "pi-coding": {
+      "decode_tok_s_median": 53.0,
+      "decode_tok_s_min": 52.8,
+      "decode_tok_s_max": 53.1,
+      "ttft_s_median": 0.18,
+      "completion_tokens": 384
+    },
+    "tool-call": {
+      "decode_tok_s_median": 68.1,
+      "decode_tok_s_min": 62.3,
+      "decode_tok_s_max": 70.2,
+      "ttft_s_median": 0.22,
+      "completion_tokens": 55
+    },
+    "tool-call-write": {
+      "decode_tok_s_median": 73.3,
+      "decode_tok_s_min": 72.7,
+      "decode_tok_s_max": 73.9,
+      "ttft_s_median": 0.21,
+      "completion_tokens": 357
+    },
+    "chat": {
+      "decode_tok_s_median": 48.7,
+      "decode_tok_s_min": 48.5,
+      "decode_tok_s_max": 49.1,
+      "ttft_s_median": 0.16,
+      "completion_tokens": 224
+    }
+  },
+  "ratio_pi_over_base_decode": {
+    "pi-coding": 0.974,
+    "tool-call": 1.01,
+    "tool-call-write": 1.149,
+    "chat": 1.104
+  },
+  "not_measured_or_not_comparable": [
+    "the two models write different text for the same prompt on some prompts (see same_generated_text and the token counts), and with a speculative drafter the decode rate depends on the text and on how often the drafter's guesses are accepted. A difference of the size seen here (a few percent to 15%, in both directions) is within what that alone could explain; this file supports no claim that the fine-tune is faster or slower than the base.",
+    "server_ready_s is not comparable: the pi server started on a warm tensor cache and the base server on an empty one.",
+    "one board, one session, three repetitions per prompt, greedy decoding only; no concurrency (max_num_seqs 4 was configured; one request at a time was sent), no long-context prefill, no sampling with a temperature.",
+    "output quality was not measured here. The author's own benchmark claims (Pi-harness completion by reasoning effort) are charts on the model card; they were not read and are not verified.",
+    "the tool-call prompt produced 55 tokens for both models (a short call); it is in the set to show tool calling works, and the 100-token floor is met by the other three prompts."
+  ],
+  "drafter_acceptance": "not measured: the server exports no spec-decode counters on /metrics and prints none in its log. Decode tokens per second is the only net effect of the drafter that was measured.",
+  "same_text_prompts": [
+    "tool-call"
+  ]
+}

@@ -179,14 +179,29 @@ def _once(pattern: str, repl: str, text: str, what: str, flags=0) -> str:
     return out
 
 
+# The package-thin of tt-model 0.1.0 (seen 2026-10-19) resolves the pinned weights itself: it sets a default HF_MODEL near the top,
+# resolves the snapshot with snapshot_download into `resolved_hf_model`, and just before the exec sets HF_MODEL and MODEL_WEIGHTS_DIR to it.
+RESOLVED_LINES = ('export HF_MODEL="$resolved_hf_model"', 'export MODEL_WEIGHTS_DIR="$resolved_hf_model"')
+DEFAULT_HF_MODEL = re.compile(r'^\s*export HF_MODEL="\$\{HF_MODEL:-[A-Za-z0-9_.@/-]+\}"$')
+
+
 def wire_weights(text: str, model_id: str) -> str:
-    """Point every weights setting in a generated run.sh at the bundle's model-dir."""
+    """Point every weights setting in a generated run.sh at the bundle's model-dir.
+
+    Two generated formats: one `export HF_MODEL=` default (older package-thin), or that default plus a resolver block whose result is
+    exported as HF_MODEL and MODEL_WEIGHTS_DIR before the exec (current package-thin). In the second the default and the resolver stay
+    (the resolver only makes sure the pinned snapshot is in the Hugging Face cache, which prepare_model_dir.py needs) and the two exports
+    after it become the wiring lines."""
     q = re.escape(model_id)
     text = _once(rf'--model (?:"{q}"|{q})(?=\s)', f"--model {MODEL_DIR}", text, f'--model "{model_id}"')
     text = _once(r" --revision [0-9a-f]{40}(?=\s)", "", text, "--revision <40 hex>")
     text = _once(r" --tokenizer-revision [0-9a-f]{40}(?=\s)", "", text, "--tokenizer-revision <40 hex>")
-    text = _once(r"^export HF_MODEL=.*$", "\n".join(WIRING_LINES), text, "export HF_MODEL= line",
-                 flags=re.M)
+    if "resolved_hf_model" in text:
+        for resolved, wired in zip(RESOLVED_LINES, WIRING_LINES):
+            text = _once(rf"^{re.escape(resolved)}$", wired, text, f"{resolved} line", flags=re.M)
+    else:
+        text = _once(r"^export HF_MODEL=.*$", "\n".join(WIRING_LINES), text, "export HF_MODEL= line",
+                     flags=re.M)
     return _once(r"^exec \"\$\{CMD\[@\]\}\"$", f"{PREPARE_LINE}\n{EXEC_LINE}", text,
                  'exec "${CMD[@]}" line', flags=re.M)
 
@@ -198,6 +213,8 @@ def weights_wiring_problems(text: str, *, nearest_model: str) -> list[str]:
     lines = text.splitlines()
     for var, want in (("HF_MODEL", WIRING_LINES[0]), ("MODEL_WEIGHTS_DIR", WIRING_LINES[1])):
         sets = [ln for ln in lines if re.match(rf"\s*(?:export\s+)?{var}=", ln)]
+        if var == "HF_MODEL" and len(sets) == 2 and DEFAULT_HF_MODEL.match(sets[0]) and nearest_model not in sets[0]:
+            sets = sets[1:]          # the resolving format's default (the id its resolver reads), then the wiring line
         if sets != [want]:
             problems.append(f"run.sh must set {var} exactly once, as {want!r}; found {sets}")
     cmd = [ln for ln in lines if ln.startswith("CMD=(")]
