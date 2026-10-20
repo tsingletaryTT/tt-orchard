@@ -698,8 +698,8 @@ class Supervisor:
             # so every later resume is held to the same values.
             self.ledger.append("decision", None, decision=PATHS_RECORDED, paths=self.paths.record(),
                                note="the run_start entry predates the paths record")
-        if self.lab is not None and p.started:
-            self._recover_lab_leases()
+        if p.started:
+            self._recover_test_leases()
         if self.package_added and package_options(self.ledger.read()) != self.package:
             # Options given on a resume of a run that started without them (build checked that
             # stage 7 has not started). Recorded once; a later resume reads them from here.
@@ -801,6 +801,9 @@ class Supervisor:
         entries = self.ledger.read()
         self.ledger.append("decision", None, decision="blocked", code=code, reason=reason)
         write_blocked_bundle(self.run_dir, entries, code, reason, now=self.clock())
+        # A stage can block while its own test lease is held (a refused reset, for one). That lease goes back first,
+        # or the automatic retry would run against chips this process still held.
+        self._release_test_lease()
         self._release_or_keep()
         return EXIT_BLOCKED
 
@@ -1613,15 +1616,16 @@ class Supervisor:
         self.test_lease = None
         self.ledger.append("decision", n, decision="test lease released", lease_id=lease.lease_id)
 
-    def _recover_lab_leases(self) -> None:
-        """Give back lab test leases an earlier supervisor of this run took and never released (it
-        died, and the lab helper could not release them). Only leases this run's ledger records."""
+    def _recover_test_leases(self) -> None:
+        """Give back test leases an earlier supervisor of this run took and never released (it died, and nothing
+        released them). Only leases this run's ledger records, and only those taken where this supervisor runs: a lab
+        run gives back the lab's, a local run this box's. A lease that is already gone is noted as not released."""
         taken, released = {}, set()
         for e in self.ledger.read():
             d = e["data"]
             if e["event"] != "decision":
                 continue
-            if d.get("decision") == "test lease taken" and str(d.get("where", "")).startswith("lab"):
+            if d.get("decision") == "test lease taken" and str(d.get("where", "")).startswith("lab") == (self.lab is not None):
                 rec = d.get("test_lease") or {}
                 if rec.get("lease_id"):
                     taken[rec["lease_id"]] = rec
