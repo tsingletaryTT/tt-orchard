@@ -531,7 +531,7 @@ def test_write_report_counts_attempts_to_first_pass_per_op(tmp_path):
 
 def test_the_category_list_includes_forbidden_code_and_hang():
     assert {"no_kernel", "import_error", "tt_lang_error", "shape_mismatch", "numeric_mismatch", "timeout",
-            "compile_error", "hang", "hw_numeric_mismatch", "harness_error", "forbidden_code"} == set(kp.CATEGORIES)
+            "compile_error", "hang", "hw_numeric_mismatch", "harness_error", "forbidden_code", "queued"} == set(kp.CATEGORIES)
 
 
 # ---- the probe-owned verdict directory (fix round 1) ------------------------------------------------------------
@@ -3618,3 +3618,96 @@ def test_a_credential_named_gozer_variable_is_dropped_not_passed_and_not_fatal(f
     monkeypatch.setenv("GOZER_AUTH_TOKEN", "planted")
     env = kp.child_env(fake_kenv.scratch_dir, hardware=True)
     assert "GOZER_AUTH_TOKEN" not in env
+
+
+# ---- a queued gozer request is "queued, not run" (review finding 9) ---------------------------------------------
+
+
+def queued_fake(calls, *, text="queued: ticket 3fa9c1\n"):
+    """A fake run_watched for a busy box: `gozer run` prints its ticket and exits 10 without running the command."""
+    def fake(argv, **kw):
+        calls.append(list(argv))
+        with open(kw["log_path"], "a") as f:
+            f.write(text)
+        return kp.Watched(10, None, False, 0.5)
+    return fake
+
+
+class Canceller:
+    def __init__(self, error=None):
+        self.tickets, self.error = [], error
+
+    def __call__(self, ticket):
+        self.tickets.append(ticket)
+        return self.error
+
+
+def test_a_queued_smoke_test_is_not_a_failed_one_and_its_ticket_is_cancelled(tmp_path, fake_kenv):
+    calls, cancel, seen = [], Canceller(), {}
+    ok, tail = kp.smoke_test(env=fake_kenv, shared_python="/p", run_watched=queued_fake(calls), record=seen,
+                             cancel=cancel)
+    assert ok is False and cancel.tickets == ["3fa9c1"]
+    assert seen["queued"] == {"ticket": "3fa9c1", "cancel_error": None}
+    # run_hardware stops there, runs no kernel, and says "queued", which the report must not call a failed test.
+    adir, attempt = _passed_attempt(tmp_path, fake_kenv)
+    calls.clear()
+    state = {}
+    hw = kp.run_hardware([attempt], probe_dir=tmp_path, env=fake_kenv, shared_python="/p",
+                         run_watched=queued_fake(calls), state=state, cancel=Canceller())
+    assert len(calls) == 1 and hw["available"] is False and hw["queued"]["ticket"] == "3fa9c1"
+    assert state["smoke"]["queued"]["ticket"] == "3fa9c1"
+    header = kp.report_header(env=fake_kenv, coder_model="c", probe_id="t", ops=["add"], hw=hw, tt_lang=FACTS)
+    kp.write_report(tmp_path, [attempt], header)
+    text = (tmp_path / "kernel-probe-report.md").read_text()
+    assert "queued, not run" in text and "smoke test (upstream's eltwise_add.py on one chip) failed" not in text
+
+
+def test_a_queued_smoke_test_with_no_ticket_in_its_output_or_a_failed_cancel_is_reported(tmp_path, fake_kenv):
+    cancel, seen = Canceller(), {}
+    kp.smoke_test(env=fake_kenv, shared_python="/p", run_watched=queued_fake([], text="something else\n"),
+                  record=seen, cancel=cancel)
+    assert cancel.tickets == [] and "no ticket" in seen["queued"]["cancel_error"]
+    bad, seen = Canceller(error="no such ticket: 3fa9c1"), {}
+    kp.smoke_test(env=fake_kenv, shared_python="/p", run_watched=queued_fake([]), record=seen, cancel=bad)
+    assert seen["queued"] == {"ticket": "3fa9c1", "cancel_error": "no such ticket: 3fa9c1"}
+
+
+def test_a_queued_kernel_run_is_recorded_as_queued_cancelled_and_blocks_the_probe(tmp_path, fake_kenv):
+    adir, attempt = _passed_attempt(tmp_path, fake_kenv)
+    cancel = Canceller()
+    with pytest.raises(kp.ProbeBlocked, match="queued, not run"):
+        kp.hardware_phase(adir, attempt, env=fake_kenv, shared_python="/p", run_watched=queued_fake([]),
+                          cancel=cancel)
+    assert cancel.tickets == ["3fa9c1"]
+    hw = json.loads((adir / "attempt.json").read_text())["hw"]
+    assert hw["passed"] is False and hw["category"] == "queued" and hw["queued"]["ticket"] == "3fa9c1"
+
+
+def test_cancel_ticket_runs_gozer_cancel_and_reports_a_refusal():
+    calls = []
+
+    class Done:
+        returncode, stdout, stderr = 0, "cancelled 3fa9c1\n", ""
+
+    assert kp.cancel_ticket("3fa9c1", run=lambda argv, **kw: calls.append(list(argv)) or Done()) is None
+    assert calls == [["gozer", "cancel", "3fa9c1"]]
+
+    class Refused:
+        returncode, stdout, stderr = 1, "no such ticket: 3fa9c1\n", ""
+
+    assert "no such ticket" in kp.cancel_ticket("3fa9c1", run=lambda argv, **kw: Refused())
+
+    def boom(argv, **kw):
+        raise OSError("no gozer")
+    assert "no gozer" in kp.cancel_ticket("3fa9c1", run=boom)
+    # a ticket that could pass as an option is not handed to gozer
+    assert kp.cancel_ticket("--help", run=lambda argv, **kw: pytest.fail("ran gozer")) is not None
+
+
+def test_a_run_the_watcher_killed_is_a_hang_even_if_its_exit_code_is_10(fake_kenv):
+    def killed(argv, **kw):
+        return kp.Watched(10, "stalled: no output and no CPU use for 60 s", True, 61.0)
+    cancel = Canceller()
+    with pytest.raises(kp.ProbeBlocked, match="hung"):
+        kp.smoke_test(env=fake_kenv, shared_python="/p", run_watched=killed, cancel=cancel)
+    assert cancel.tickets == []
