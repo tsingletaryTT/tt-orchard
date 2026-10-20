@@ -474,3 +474,40 @@ def test_probe_check_reports_busy_with_the_numbers(tmp_path, monkeypatch):
 
 def test_running_requests_is_none_for_a_gauge_value_that_is_not_a_number():
     assert REAL_RUNNING_REQUESTS("http://h/v1", get=get_text('vllm:num_requests_running{engine="0"} 1.2.3\n')) is None
+
+
+# ---- finding 14: a response cut off mid-body is an error sample -----------------------------------------------------------------------
+
+import http.client
+
+
+@pytest.mark.parametrize("exc", [http.client.IncompleteRead(b"par", 100), http.client.BadStatusLine("x"),
+                                 http.client.RemoteDisconnected("closed")])
+def test_a_response_cut_off_mid_body_is_a_speed_error(exc):
+    def cut(url, body, timeout):
+        raise exc
+    with pytest.raises(sw.SpeedError) as err:
+        sw.measure("http://127.0.0.1:8011/v1", "m", post=cut, clock=lambda: 0.0)
+    assert "127.0.0.1:8011" in str(err.value)
+
+
+@pytest.mark.parametrize("exc", [http.client.IncompleteRead(b"par", 100), http.client.BadStatusLine("x")])
+def test_probe_check_reports_a_cut_off_response_as_an_error_state(tmp_path, exc):
+    def cut(url, body, timeout):
+        raise exc
+    r = sw.probe_check(tmp_path, post=cut, clock=lambda: 0.0, sleep=lambda s: None)("http://h/v1", "m")
+    assert r["state"] == "error" and r.get("tok_s") is None
+
+
+def test_a_cut_off_metrics_response_means_the_running_count_is_unknown():
+    def cut(url, timeout):
+        raise http.client.IncompleteRead(b"x")
+    assert REAL_RUNNING_REQUESTS("http://h/v1", get=cut) is None
+
+
+# ---- a baseline of zero ---------------------------------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("base", [0, 0.0, -5.0, float("nan"), float("inf")])
+def test_judge_refuses_a_baseline_that_is_not_a_positive_number(base):
+    with pytest.raises(ValueError, match="baseline"):
+        sw.judge([10.0], base)
