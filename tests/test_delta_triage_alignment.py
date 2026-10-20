@@ -453,6 +453,41 @@ def test_without_a_sidecar_a_missing_lm_head_is_a_full_port(decider_case):
     assert d["class"] == "full-port" and d["head"]["restricted"] is False
 
 
+# ---- names paired by prefix are classed weights-only, but no swap or serve template applies the name map -------------------------------
+
+def prefix_case(tmp_path, tokenizer_json, *, rename):
+    """The nearest model's layout, with the text tensors renamed by prefix (or left alone). lm_head and mtp are kept, so only the names differ."""
+    n_vocab = len(json.loads(tokenizer_json)["model"]["vocab"]) + 3
+    base = make_snapshot(tmp_path / "base", BASE_REV, nested=True, vision=True, tokenizer=tokenizer_json)
+    change = {}
+    if rename:
+        for k, v in text_tensors(n_vocab).items():
+            if k.startswith("model."):
+                change[k] = None
+                change["language_model." + k[len("model."):]] = v
+    new = make_snapshot(tmp_path / "new", MODEL_REV, nested=False, vision=False, tokenizer=tokenizer_json, tensor_change=change)
+    return base, new
+
+
+def test_a_model_paired_with_the_nearest_by_prefix_gets_a_hazard_that_the_swap_does_not_apply_the_map(tmp_path, tokenizer_json):
+    base, new = prefix_case(tmp_path, tokenizer_json, rename=True)
+    stage, d = run(tmp_path, new, base)
+    assert d["alignment"]["aligned_by_prefix"] > 0
+    assert d["path"] == "weights-only", d["path_reasons"]
+    [h] = [x for x in d["hazards"] if "paired by prefix" in x["finding"]]
+    assert h["area"] == "other" and h["evidence"]
+    assert "stage 1 CPU reference" in h["finding"] and "stages 2 and 4" in h["finding"]
+    assert str(d["alignment"]["aligned_by_prefix"]) in h["finding"]
+    assert gate_delta(stage, tmp_path / "run").ok
+
+
+def test_a_model_whose_names_already_match_gets_no_name_map_hazard(tmp_path, tokenizer_json):
+    base, new = prefix_case(tmp_path, tokenizer_json, rename=False)
+    stage, d = run(tmp_path, new, base)
+    assert d["alignment"]["aligned_by_prefix"] == 0
+    assert not [x for x in d["hazards"] if "paired by prefix" in x["finding"]]
+
+
 # ---- how a restricted head is read: facts from the model's own files and code ----------------------------------------------------
 
 def test_a_json_file_that_states_an_attention_mode_is_reported(tmp_path):

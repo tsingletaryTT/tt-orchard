@@ -1581,6 +1581,16 @@ def main() -> int:
                                              "load. A check that only generates text from the backbone does "
                                              "not exercise it. Its output must be checked on the host against "
                                              "the CPU reference, with the exact file hash recorded.")})
+    if ns["aligned"]["pairs"]:
+        # Names paired by prefix count as the nearest model's tensors, so the path stays weights-only. Only the stage 1 CPU reference
+        # loader and the restricted-head parity script apply the name map. The swap and serve templates of stages 2 and 4 link the
+        # new model's files as they are, so the TT runtime sees the new names.
+        delta["hazards"].append({"area": "other", "evidence": [ev("tensor-compare.json")],
+                                 "finding": (f"{ns['aligned']['pairs']} tensors of the new model were paired by prefix with the nearest "
+                                             "model's tensors, because their names differ (alignment.rules lists the rewrites). Only "
+                                             "the stage 1 CPU reference applies that map. Nothing in stages 2 and 4 renames the weights "
+                                             "before the TT runtime reads them, and stage 0 does not check that the runtime accepts the "
+                                             "new names. If a boot finds no weights or the wrong ones, check the tensor names first.")})
     if values["samples"]:
         delta["differences"].append({"area": "other", "finding": values_finding(values),
                                      "evidence": [ev("value-compare.json")]})
