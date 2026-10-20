@@ -17,7 +17,9 @@ server was changed on purpose. The verdict says all three, and `reset` forgets a
 """
 from __future__ import annotations
 
+import http.client
 import json
+import math
 import os
 import re
 import time
@@ -89,7 +91,7 @@ def running_requests(endpoint: str, *, get=_get_text) -> int | None:
     try:
         text = get(_origin(endpoint) + "/metrics", METRICS_TIMEOUT_S)
         values = [float(v) for v in GAUGE_RE.findall(text)]
-    except (OSError, ValueError):
+    except (OSError, ValueError, http.client.HTTPException):          # a reply cut off mid-body is not an OSError
         return None
     return int(sum(values)) if values else None
 
@@ -105,7 +107,7 @@ def measure(endpoint: str, model: str, *, post=post_json, clock=time.monotonic, 
     start = clock()
     try:
         data = post(url, body, timeout)
-    except (OSError, ValueError, CanaryError) as exc:
+    except (OSError, ValueError, CanaryError, http.client.HTTPException) as exc:   # IncompleteRead and BadStatusLine are not OSError
         raise SpeedError(f"the speed request to {url} failed: {exc}") from exc
     seconds = clock() - start
     after = running(endpoint)
@@ -128,6 +130,8 @@ def judge(samples: list[float], baseline: float | None, *, ratio: float = SLOW_R
     if not samples:
         raise ValueError("judge needs at least one sample")
     now = samples[-1]
+    if baseline is not None and not (math.isfinite(baseline) and baseline > 0):
+        raise ValueError(f"the baseline must be a speed greater than 0 tok/s, not {baseline!r}")
     if baseline is None:
         return Verdict("unknown", now, None, None,
                        f"{now:.1f} tok/s; there is no baseline for this server yet, so this sample becomes the baseline.")
@@ -309,6 +313,9 @@ def run(args, *, out, home, tier_config=None, post=post_json, clock=time.monoton
     targets, error = _targets(args, tier_config)
     if error:
         print(f"error: {error}", file=out)
+        return EXIT_ERROR
+    if args.baseline is not None and not (math.isfinite(args.baseline) and args.baseline > 0):
+        print(f"error: --baseline must be a speed greater than 0 tok/s, not {args.baseline!r}", file=out)
         return EXIT_ERROR
     store = Baselines(args.baseline_file or Path(home) / ".cache" / "tt-orchard" / SPEED_BASELINE_FILE)
     if args.reset_baseline:

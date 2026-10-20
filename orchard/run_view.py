@@ -132,6 +132,18 @@ def _read(path: Path):
         return None
 
 
+def _read_obj(path: Path) -> dict | None:
+    """A JSON file whose top level is an object, else None. Results files are written by agents and by hand, so a list or a
+    string in one is read as absent here, where `.get` would otherwise fail on it."""
+    data = _read(path)
+    return data if isinstance(data, dict) else None
+
+
+def _dicts(value) -> list[dict]:
+    """The objects in a JSON list; anything else (a missing key, a number, a string) is an empty list."""
+    return [x for x in value if isinstance(x, dict)] if isinstance(value, list) else []
+
+
 def results(run_dir, entries: list[dict]) -> dict:
     """The run's measured results: stage 0's finding, stage 2's swap check, stage 4 per chip count."""
     run_dir = Path(run_dir)
@@ -147,20 +159,20 @@ def results(run_dir, entries: list[dict]) -> dict:
     s2 = _read(run_dir / "stages" / "2" / "evidence" / "swap-check.json")
     if isinstance(s2, dict) and isinstance(s2.get("result_draft"), dict):
         r = s2["result_draft"]
-        test = _read(run_dir / "stages" / "2" / "test-result.json") or {}
+        test = _read_obj(run_dir / "stages" / "2" / "test-result.json") or {}
         out["swap"] = {"top1_agreement": r.get("top1_agreement"), "n_tokens": r.get("n_tokens"),
                        "server_ready_s": r.get("server_ready_s"), "coherent": r.get("coherent"),
                        "free_run_text": (r.get("free_run_text") or "")[:FREE_TEXT_CHARS],
                        "test_seconds": test.get("seconds"), "host": where.get((2, None))}
-    s4 = _read(run_dir / "stages" / "4" / "result.json")
-    plan = _read(run_dir / "stages" / "4" / "tests" / "plan.json") or {}
-    counts = sorted({c.get("chips") for c in (s4 or {}).get("configs", []) if isinstance(c, dict)}
-                    | {t.get("chips") for t in plan.get("tests", []) if isinstance(t, dict)} - {None})
+    s4 = _read_obj(run_dir / "stages" / "4" / "result.json") or {}
+    plan = _read_obj(run_dir / "stages" / "4" / "tests" / "plan.json") or {}
+    configs, planned = _dicts(s4.get("configs")), _dicts(plan.get("tests"))
+    counts = sorted({n for n in (x.get("chips") for x in configs + planned) if isinstance(n, int) and not isinstance(n, bool)})
     rows = []
-    by_chips = {c.get("chips"): c for c in (s4 or {}).get("configs", []) if isinstance(c, dict)}
+    by_chips = {c["chips"]: c for c in configs if isinstance(c.get("chips"), int)}
     for n in counts:
         c = by_chips.get(n, {})
-        rec = _read(run_dir / "stages" / "4" / "tests" / str(n) / "test-result.json") or {}
+        rec = _read_obj(run_dir / "stages" / "4" / "tests" / str(n) / "test-result.json") or {}
         rows.append({"chips": n, "pass": c.get("pass"), "top1_agreement": c.get("top1_agreement"),
                      "server_ready_s": c.get("server_ready_s"), "package": c.get("package"),
                      "reason": rec.get("not_run") or c.get("reason"), "test_seconds": rec.get("seconds"),

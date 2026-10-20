@@ -1147,3 +1147,32 @@ def test_the_verdict_panel_is_for_operator_mode_and_is_built_without_innerhtml()
     body = js[js.index("function renderVerdict"):]
     body = body[:body.index("\nfunction ", 10)]
     assert "innerHTML" not in body and "renderVerdict(d.verdict)" in js
+
+
+# ---- finding 12: a malformed results file breaks only its own run -----------------------------------------------------------------
+
+@pytest.mark.parametrize("junk", ["[1]", '"text"', "7", "null", '{"configs": 5}', '{"configs": [1, null]}', '{"configs": [{"chips": 2}], "x": 1}', '{"configs": [{"chips": [2]}, {"chips": null}, {"chips": 2}]}'])
+def test_a_malformed_stage_4_result_file_does_not_break_other_runs_detail_pages(root, junk):
+    bad = write_ledger(root / "org--bad", model="org/bad")
+    (bad / "stages" / "4").mkdir(parents=True)
+    (bad / "stages" / "4" / "result.json").write_text(junk)
+    write_ledger(root / "org--good", model="org/good")
+    app = make_app(root)
+    assert app.run_detail("org--good")["model"] == "org/good"      # the other run's page still renders
+    assert app.run_detail("org--bad")["model"] == "org/bad"        # and the bad run's own page does too
+
+
+@pytest.mark.parametrize("rel", ["stages/4/tests/plan.json", "stages/4/tests/2/test-result.json", "stages/2/test-result.json"])
+def test_a_malformed_plan_or_test_record_does_not_break_the_page(root, rel):
+    run = write_ledger(root / "org--bad", model="org/bad")
+    (run / "stages" / "4").mkdir(parents=True)
+    (run / "stages" / "4" / "result.json").write_text(json.dumps({"configs": [{"chips": 2, "pass": True}]}))
+    f = run / rel
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text("[1]")
+    (run / "stages" / "2" / "evidence").mkdir(parents=True, exist_ok=True)
+    (run / "stages" / "2" / "evidence" / "swap-check.json").write_text(json.dumps({"result_draft": {"top1_agreement": 1.0}}))
+    write_ledger(root / "org--good", model="org/good")
+    app = make_app(root)
+    assert app.run_detail("org--good")["model"] == "org/good"
+    assert app.run_detail("org--bad")["model"] == "org/bad"

@@ -273,3 +273,33 @@ def test_a_watch_over_a_busy_server_keeps_going_and_a_later_quiet_slow_run_ends_
     load = iter([1, 1, 1, 1, 0, 0, 0, 0, 0, 0])                           # busy for two samples (two readings each), then quiet
     code, text = run(tmp_path, s, *target("--watch", "30"), running=lambda e: next(load))
     assert code == 3 and text.count("[busy]") == 2 and "[slow]" in text.splitlines()[-1] and len(s.calls) == 5
+
+
+def test_a_cut_off_response_ends_the_command_with_an_error_line_and_exit_2(tmp_path):
+    import http.client
+    server = Server([40.0])
+
+    def cut(url, body, timeout):
+        raise http.client.IncompleteRead(b"x", 10)
+    server.post = cut
+    code, text = run(tmp_path, server, "--endpoint", URL, "--model", MODEL)
+    assert code == 2 and "error:" in text and "Traceback" not in text
+
+
+def test_watch_survives_cut_off_responses_and_ends_after_three_in_a_row(tmp_path):
+    import http.client
+    server = Server([40.0])
+
+    def cut(url, body, timeout):
+        raise http.client.BadStatusLine("x")
+    server.post = cut
+    code, text = run(tmp_path, server, "--endpoint", URL, "--model", MODEL, "--watch", "1")
+    assert code == 2 and "3 errors in a row" in text
+
+
+@pytest.mark.parametrize("value", ["0", "-3", "nan", "inf"])
+def test_a_baseline_that_is_not_positive_is_refused_with_a_message(tmp_path, value):
+    server = Server([40.0])
+    code, text = run(tmp_path, server, "--endpoint", URL, "--model", MODEL, "--baseline", value)
+    assert code == 2 and "--baseline" in text and "greater than 0" in text
+    assert server.calls == []                                       # refused before any request
