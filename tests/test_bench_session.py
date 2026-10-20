@@ -339,6 +339,8 @@ port="$2"
 echo $$ > "$PIDFILE"
 exec %(python)s - "$port" <<'PY'
 import json, sys
+LINE = "(EngineCore pid=1) 2026-10-19 18:13:51.463 | INFO     | m:end:907 - [dflash2-serve] slot 0 session: 8 iters, 20 committed tokens, accept 1.50/7 -> 2.50 tok/iter, 40.0 tok/s in-model (incl. seed); histogram [2, 3, 1, 1, 1, 0, 0, 0]"
+print(LINE, flush=True)                                   # before any phase: it must not be counted for a phase
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
@@ -347,7 +349,7 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):
         self._send({"data": [{"id": "from-run-sh"}]} if self.path.startswith("/v1/models") else {"ok": True})
     def do_POST(self):
-        self.rfile.read(int(self.headers["Content-Length"])); self._send({"choices": [{"finish_reason": "stop", "message": {"content": "ok"}}], "usage": {"prompt_tokens": 1, "completion_tokens": 1}})
+        self.rfile.read(int(self.headers["Content-Length"])); print(LINE, flush=True); self._send({"choices": [{"finish_reason": "stop", "message": {"content": "ok"}}], "usage": {"prompt_tokens": 1, "completion_tokens": 1}})
 ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
 PY
 '''
@@ -482,3 +484,73 @@ def test_a_session_gives_the_harness_the_task_directory_of_this_repository(harne
     logged = json.loads((harness["tmp"] / "argv.jsonl").read_text().splitlines()[0])
     argv = logged["argv"]
     assert argv[argv.index("--include_path") + 1] == str(bs.TASKS_DIR) and bs.TASKS_DIR.is_dir()
+
+
+# ---- the drafter's acceptance, read from the server's own log ---------------------------------------------------------------------------
+
+SAMPLE = (FIX / "dflash2_serve_sample.log").read_text()
+
+
+def test_each_session_line_is_read_and_the_totals_are_weighted_by_iterations():
+    got = bs.drafter_stats(SAMPLE)
+    assert got["sessions"] == 5 and got["iters"] == 4 + 1 + 16 + 65 + 28 and got["committed_tokens"] == 3 + 0 + 103 + 237 + 178
+    assert got["tokens_per_iter"] == pytest.approx(521 / 114)
+    assert got["histogram"] == [sum(h) for h in zip(*[[4, 0, 0, 0, 0, 0, 0, 0], [1, 0, 0, 0, 0, 0, 0, 0], [1, 0, 2, 1, 1, 0, 0, 11],
+                                                       [19, 12, 7, 6, 2, 5, 2, 12], [1, 2, 1, 2, 2, 3, 1, 16]])]
+    accepted = sum(i * c for i, c in enumerate(got["histogram"]))
+    assert got["accepted_per_iter"] == pytest.approx(accepted / 114) and got["draft_length"] == 7
+    assert got["accept_rate"] == pytest.approx(accepted / (114 * 7))
+
+
+def test_the_median_in_model_speed_is_over_sessions_that_committed_tokens():
+    got = bs.drafter_stats(SAMPLE)
+    assert got["tok_s_in_model_median"] == pytest.approx(40.1)                     # the middle two of 3.5, 36.3, 43.9, 44.4; the 0.0 session is left out
+
+
+def test_text_with_no_session_lines_gives_none():
+    assert bs.drafter_stats("") is None and bs.drafter_stats("INFO nothing here\nwarm sweep: 4 seeds") is None
+
+
+def test_other_lines_around_the_session_lines_are_ignored():
+    got = bs.drafter_stats("noise\n" + SAMPLE.splitlines()[2] + "\nmore noise\n")
+    assert got["sessions"] == 1 and got["iters"] == 16 and got["committed_tokens"] == 103
+
+
+def test_a_line_that_is_cut_off_is_skipped_not_guessed():
+    line = SAMPLE.splitlines()[2]
+    assert bs.drafter_stats(line[: line.index("histogram")]) is None
+
+
+def test_a_phase_counts_only_the_drafter_lines_written_while_it_ran(bundle):
+    bs.main(session_argv(bundle, limit=1))
+    s = json.loads((bundle["tmp"] / "out" / "summary.json").read_text())
+    d = s["phases"][0]["drafter"]
+    assert d["sessions"] == 2 and d["iters"] == 16 and d["committed_tokens"] == 40       # two requests, not the line written at startup
+
+
+def test_a_session_against_a_running_server_has_no_drafter_section(harness):
+    code, out = run_session(harness, "bfcl")
+    assert json.loads((out / "summary.json").read_text())["phases"][0]["drafter"] is None
+
+
+def _line(iters, committed, k, hist, speed=40.0):
+    return (f"[dflash2-serve] slot 0 session: {iters} iters, {committed} committed tokens, accept 1.00/{k} -> 2.00 tok/iter, {speed} tok/s in-model (incl. seed); "
+            f"histogram [{', '.join(str(h) for h in hist)}]\n")
+
+
+def test_a_line_whose_histogram_has_the_wrong_number_of_counts_is_skipped():
+    text = _line(8, 20, 7, [8, 0, 0, 0, 0, 0, 0]) + _line(8, 20, 7, [2, 3, 1, 1, 1, 0, 0, 0])
+    got = bs.drafter_stats(text)
+    assert got["sessions"] == 1 and got["iters"] == 8
+
+
+def test_a_line_whose_histogram_does_not_add_up_to_its_iterations_is_skipped():
+    text = _line(9, 20, 7, [2, 3, 1, 1, 1, 0, 0, 0]) + _line(8, 20, 7, [2, 3, 1, 1, 1, 0, 0, 0])
+    got = bs.drafter_stats(text)
+    assert got["sessions"] == 1 and got["iters"] == 8
+
+
+def test_a_line_with_a_different_draft_length_from_the_first_is_skipped_so_totals_stay_comparable():
+    text = _line(8, 20, 7, [2, 3, 1, 1, 1, 0, 0, 0]) + _line(4, 9, 3, [1, 1, 1, 1])
+    got = bs.drafter_stats(text)
+    assert got["sessions"] == 1 and got["draft_length"] == 7 and len(got["histogram"]) == 8

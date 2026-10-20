@@ -23,6 +23,8 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
+import statistics
 import subprocess
 import sys
 import time
@@ -99,6 +101,39 @@ def parse_lm_eval_results(root) -> dict:
             "total_evaluation_time_seconds": data.get("total_evaluation_time_seconds")}
 
 
+# ---- the drafter's acceptance, from the server's own log ------------------------------------------------------------------------------
+
+# The DFlash2 serving code logs one line when a request on a slot ends, for example
+#   [dflash2-serve] slot 1 session: 56 iters, 276 committed tokens, accept 3.95/7 -> 4.93 tok/iter, 59.0 tok/s in-model (incl. seed); histogram [7, 10, 3, 5, 6, 3, 3, 19]
+# `accept A/K` is the mean number of drafted tokens accepted per iteration out of K drafted, and the histogram counts iterations by how many were accepted.
+SESSION_LINE = re.compile(r"\[dflash2-serve\] slot \d+ session: (\d+) iters, (\d+) committed tokens, accept [0-9.]+/(\d+) -> [0-9.]+ tok/iter, "
+                          r"([0-9.]+) tok/s in-model \(incl\. seed\); histogram \[([0-9, ]+)\]")
+
+
+def drafter_stats(text: str):
+    """Totals over the drafter's session lines in `text`, weighted by iterations, or None when there are none. A line that does not parse, or whose
+    histogram does not have K + 1 counts that add up to its iterations, is skipped."""
+    sessions = iters = committed = 0
+    hist, k_seen, speeds = None, None, []
+    for m in SESSION_LINE.finditer(text or ""):
+        n_iters, n_committed, k, speed = int(m.group(1)), int(m.group(2)), int(m.group(3)), float(m.group(4))
+        counts = [int(x) for x in m.group(5).split(",")]
+        if len(counts) != k + 1 or sum(counts) != n_iters or (k_seen not in (None, k)):
+            continue
+        k_seen = k
+        hist = counts if hist is None else [a + b for a, b in zip(hist, counts)]
+        sessions, iters, committed = sessions + 1, iters + n_iters, committed + n_committed
+        if n_committed > 0:
+            speeds.append(speed)
+    if not sessions:
+        return None
+    accepted = sum(i * c for i, c in enumerate(hist))
+    return {"sessions": sessions, "iters": iters, "committed_tokens": committed,
+            "tokens_per_iter": committed / iters if iters else None, "draft_length": k_seen, "histogram": hist,
+            "accepted_per_iter": accepted / iters if iters else None, "accept_rate": accepted / (iters * k_seen) if iters and k_seen else None,
+            "tok_s_in_model_median": statistics.median(speeds) if speeds else None}
+
+
 # ---- the tool-call phase ------------------------------------------------------------------------------------------------------------
 
 def run_bfcl_phase(*, chat_url: str, served: str, bfcl_dir, out_dir, limit, concurrency: int, max_tokens: int, seed: int) -> dict:
@@ -138,13 +173,14 @@ def _inject(thinking: str) -> dict:
     return {} if thinking == "default" else {"chat_template_kwargs": {"enable_thinking": thinking == "on"}}
 
 
-def _phase(name: str, a, *, upstream: str, served: str, out_dir: Path) -> dict:
+def _phase(name: str, a, *, upstream: str, served: str, out_dir: Path, server_log=None) -> dict:
     phase_dir = out_dir / name
     phase_dir.mkdir(parents=True, exist_ok=True)
     proxy = bench_proxy.Proxy(upstream, inject=_inject(a.thinking), log_path=phase_dir / "requests.jsonl")
     proxy.start()
     chat_url = f"http://127.0.0.1:{proxy.port}/v1/chat/completions"
-    rec = {"name": name, "ok": False, "problem": None, "command": None}
+    rec = {"name": name, "ok": False, "problem": None, "command": None, "drafter": None}
+    log_start = server_log.stat().st_size if server_log is not None else None
     t0 = time.monotonic()
     try:
         if name == "bfcl":
@@ -175,6 +211,10 @@ def _phase(name: str, a, *, upstream: str, served: str, out_dir: Path) -> dict:
         rec["wall_s"] = round(time.monotonic() - t0, 1)
         rec["proxy"] = proxy.summary()
         proxy.stop()
+        if server_log is not None:
+            with open(server_log, "rb") as f:
+                f.seek(log_start)
+                rec["drafter"] = drafter_stats(f.read().decode("utf-8", errors="replace"))
     return rec
 
 
@@ -249,7 +289,7 @@ def main(argv=None) -> int:
         summary["served_name"] = _served_name(base, a.model_dir or a.label)
         write()
         for name in phases:
-            rec = _phase(name, a, upstream=base, served=summary["served_name"], out_dir=out_dir)
+            rec = _phase(name, a, upstream=base, served=summary["served_name"], out_dir=out_dir, server_log=None if a.url else out_dir / "server.log")
             summary["phases"].append(rec)
             if summary["lm_eval_version"] is None and rec.get("scores", {}).get("lm_eval_version"):
                 summary["lm_eval_version"] = rec["scores"]["lm_eval_version"]
