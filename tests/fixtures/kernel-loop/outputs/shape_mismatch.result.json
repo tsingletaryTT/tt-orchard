@@ -1,0 +1,9 @@
+{
+  "phase": "sim",
+  "sets": [],
+  "error": {
+    "phase": "run",
+    "type": "RuntimeError",
+    "text": "node0-add_read: ValueError: Tensor shape (32, 32) does not match Block shape (2, 2) (tile counts: 1 vs 4)"
+  }
+}

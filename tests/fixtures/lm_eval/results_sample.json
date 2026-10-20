@@ -1,0 +1,65 @@
+{
+ "results": {
+  "gsm8k": {
+   "name": "gsm8k",
+   "alias": "gsm8k",
+   "sample_len": 5,
+   "exact_match,strict-match": 0.0,
+   "exact_match_stderr,strict-match": 0.0,
+   "exact_match,flexible-extract": 0.0,
+   "exact_match_stderr,flexible-extract": 0.0
+  },
+  "humaneval": {
+   "name": "humaneval",
+   "alias": "humaneval",
+   "sample_len": 5,
+   "pass@1,create_test": 0.0,
+   "pass@1_stderr,create_test": 0.0
+  },
+  "ifeval": {
+   "name": "ifeval",
+   "alias": "ifeval",
+   "sample_len": 5,
+   "prompt_level_strict_acc,none": 0.2,
+   "prompt_level_strict_acc_stderr,none": 0.2,
+   "inst_level_strict_acc,none": 0.25,
+   "inst_level_strict_acc_stderr,none": "N/A",
+   "prompt_level_loose_acc,none": 0.4,
+   "prompt_level_loose_acc_stderr,none": 0.24494897427831783,
+   "inst_level_loose_acc,none": 0.375,
+   "inst_level_loose_acc_stderr,none": "N/A"
+  }
+ },
+ "versions": {
+  "gsm8k": 3.0,
+  "humaneval": 1.0,
+  "ifeval": 4.0
+ },
+ "n-shot": {
+  "gsm8k": 5,
+  "humaneval": 0,
+  "ifeval": 0
+ },
+ "n-samples": {
+  "gsm8k": {
+   "original": 1319,
+   "effective": 5
+  },
+  "humaneval": {
+   "original": 164,
+   "effective": 5
+  },
+  "ifeval": {
+   "original": 541,
+   "effective": 5
+  }
+ },
+ "lm_eval_version": "0.4.13",
+ "model_name_sanitized": "fake",
+ "total_evaluation_time_seconds": "8.518468746999133",
+ "config": {
+  "model": "local-chat-completions",
+  "limit": 5.0,
+  "gen_kwargs": {}
+ }
+}

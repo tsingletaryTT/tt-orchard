@@ -24,8 +24,14 @@ from orchard import narrate
 from orchard.stages import STAGES
 from orchard.status import classify_pause, stage_rows
 
-REASONS = ("needs-new-model-code", "retry-budget-spent", "stage-failed", "agent-stuck", "disk-full",
+REASONS = ("needs-new-model-code", "restricted-head", "retry-budget-spent", "stage-failed", "agent-stuck", "disk-full",
            "hardware-unhealthy", "coder-unusable", "blocked", "unclassified")
+
+# Blocks that `tt-orchard bringup` retries by itself (orchard/cli.py). A retry resumes from the ledger with a fresh
+# coder context. These three can clear on their own: a coder that did not come up, a chip or lease that settled after a
+# release, an agent that looped. A missing model, a full disk, a rule and a failed stage after escalation do not clear
+# by repeating the command, so they wait for a person.
+AUTO_RETRY = ("coder-unusable", "hardware-unhealthy", "agent-stuck")
 
 # Words in a "blocked: ..." reason that say what kind of block it is. The first matching row wins.
 _BLOCKED_WORDS = (
@@ -42,6 +48,8 @@ def block_code(pause: dict) -> str | None:
         return None
     if kind == "full_port":
         return "needs-new-model-code"
+    if kind == "restricted_head":
+        return "restricted-head"
     if kind == "budget":
         return "retry-budget-spent"
     if kind == "stage_failed":

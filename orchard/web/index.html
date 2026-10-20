@@ -7,6 +7,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <title>tt-orchard</title>
+<script src="/static/mode.js"></script>
 <link rel="stylesheet" href="/static/vendor/xterm/xterm.css">
 <link rel="stylesheet" href="/static/app.css">
 <script src="/static/vendor/xterm/xterm.js" defer></script>
@@ -34,6 +35,10 @@
       <span class="clock-day" id="clock-day"></span>
       <span class="clock-time" id="clock-time"></span>
       <span class="conn" id="conn" role="status" aria-live="polite"><span class="conn-dot" aria-hidden="true"></span><span class="conn-text">Connecting…</span></span>
+    </div>
+    <div class="mode-switch" id="mode-switch" role="group" aria-label="Page style">
+      <button type="button" class="view-btn" id="mode-playful-btn" data-mode="playful" aria-pressed="true" title="The farm look">Playful</button>
+      <button type="button" class="view-btn" id="mode-operator-btn" data-mode="operator" aria-pressed="false" title="Plain type, state first: what is happening, what happened, what to do">Operator</button>
     </div>
     <button type="button" class="btn btn-primary" id="new-run-btn">🌱 New bring-up</button>
   </div>
@@ -168,6 +173,7 @@
     </div>
 
     <article id="run" class="run" hidden>
+      <div class="op-left">
       <header class="run-head">
         <div class="run-title">
           <span class="badge" id="run-badge"></span>
@@ -185,6 +191,11 @@
         <span class="now-bar" id="run-now-bar" hidden><span class="now-fill" id="run-now-fill"></span></span>
       </div>
       <p class="hint" id="run-hint"><span class="hint-label">Next</span><span id="run-hint-text"></span></p>
+
+      <section id="verdict" class="verdict" aria-labelledby="verdict-h" hidden>
+        <h2 id="verdict-h">Verdict</h2>
+        <ul id="verdict-list" class="verdict-list"></ul>
+      </section>
 
       <figure class="scene-frame">
         <canvas id="scene" class="scene" aria-hidden="true"></canvas>
@@ -213,6 +224,8 @@
         <p id="pause-reason"></p>
       </section>
 
+      </div>
+      <div class="op-right">
       <section aria-labelledby="stages-h" class="stages-wrap">
         <h2 id="stages-h" class="visually-hidden">Stages</h2>
         <ol class="stepper" id="stepper"></ol>
@@ -281,6 +294,7 @@
         <dl class="details" id="details"></dl>
         <div class="research" id="research" hidden></div>
       </section>
+      </div>
     </article>
   </main>
 </div>

@@ -74,6 +74,11 @@ TURN_SHAPE_N = 4                # choice: model turns in a row whose calls have 
                                 # match is looser than an identical one. The second-model run (2026-10-04)
                                 # repeated near-identical greps that differed in a trailing argument
                                 # for 8 turns (53 to 60) of stage 0; this fires on the 4th.
+TURN_CYCLE_MAX_PERIOD = 3       # choice: TurnRepeat also reports turns that repeat with a period of 2 or 3 (A,B,A,B,...).
+TURN_CYCLE_REPEATS = 3          # choice: after three full periods (6 turns for period 2, 9 for period 3), the same
+                                # count as TURN_REPEAT_N. The live kernel probe (2026-10-16, rmsnorm L4c) alternated
+                                # two identical sed commands from turn 22 to 30; this fires after turn 27. Longer
+                                # periods are not reported, to stay conservative.
 WRITELESS_TURNS = 20            # choice: model turns in a row in which no file was written (no
                                 # successful write_file, no new evidence file) before the step is
                                 # nudged. A third of AGENT_MAX_TURNS. In the committed qwen transcript
@@ -167,6 +172,8 @@ STAGE4_SWAP_DISK_GB = 110.0     # choice: three caches of about 34 GB (1, 2 and 
 TEST_DISK_GB = 40.0             # choice: one cache plus margin, checked again before each
                                 # configuration's test, so a resumed stage stops before a test that
                                 # cannot finish its conversion
+FAST_FAIL_S = 180.0             # choice: a multi-board test that fails sooner than this failed to start (the 4-chip
+                                # fabric timeouts took 13 to 57 s), so it is reset and run once more; a cold boot is 300+ s
 
 # ---- plan 5: stage 7, the package ---------------------------------------------------------------
 PACKAGE_FORMATS = ("v6", "v5.1")    # the values --package-format accepts
@@ -186,3 +193,38 @@ PACKAGE_HEALTH_TIMEOUT_S = 3300.0   # how long the boot check waits for /health.
                                     # same value as the swap template's HEALTH_TIMEOUT_S
 PACKAGE_VERIFY_DEADLINE_S = 4200.0  # choice: the boot check's hardware deadline: the health wait, 33
                                     # short requests, and the server's stop
+
+# ---- tt-lang, for `tt-orchard kernel-env` and `kernel-probe` (spec 2026-10-15-kernel-attempt-design.md) ----
+TTLANG_URL = "https://github.com/tenstorrent/tt-lang.git"
+TTLANG_PIN = "1cd7d410d3d69d9550b7afbd2761d0cc75b4dd41"   # choice: v1.1.10 plus 26 commits (one CI-only commit over the last pin: .github and test/packaging; diagnostics.py unchanged), read 2026-10-18
+TTLANG_VERSION_TAG = "1.1.10"                             # the tag TTLANG_PIN is counted from
+# sha256 of python/ttl/diagnostics.py at TTLANG_PIN. The tt-lang-sim wheel looks for this file at
+# site-packages/ttl/ttl/diagnostics.py and does not ship it, so a diagnosed kernel error ends as
+# FileNotFoundError. kernel-env copies the file there, and refuses to if the file at the pin has changed.
+TTLANG_DIAGNOSTICS_SHA256 = "e3964f222cc5dc253157f97645a914f8751ab613f0fa82eb334e97046da8f84f"
+# (example path under tt-lang's examples/, text that must appear in the simulator's output). A bare
+# non-zero exit proves nothing here: the wheel's bug also ends these examples with a non-zero exit.
+TTLANG_NEGATIVE_EXAMPLES = (
+    ("errors/eltwise_add_error.py", ("does not match Block shape",)),
+    ("compiler_only_external_call.py", ("ttl.call_extern_func is not supported by the Python simulator",
+                                        "use tt-lang-sim --backend=emule")),
+)
+
+# The ops the kernel probe can ask for (orchard/kernelprobe.py re-exports this as OPS). It lives here so the CLI can
+# offer the choices without importing the probe and the agent machinery behind it.
+KERNEL_PROBE_OPS = ("add", "silu_mul", "rmsnorm", "linear_scan")
+
+# ---- decode speed watch (orchard/speedwatch.py) ------------------------------------------------------------------
+# Measured 2026-10-17 on this Quietbox 2, Qwen3-Coder-Next on one board: one 400-token greedy answer 38.7 tok/s idle;
+# 2 clients at once 29.6 tok/s each, 3 clients 23.4 each (77% and 60% of the single-client speed). Decode also slows
+# with context: 300 tokens took 9.1 s at a 2.3K-token prompt and 12.4 s at 16K. The watcher's own request has a short
+# prompt, so context length does not enter it.
+SPEED_MAX_TOKENS = 300          # choice: long enough that prefill is a small part of the time, about 8 s at full speed
+SPEED_MIN_TOKENS = 100          # choice: a shorter answer is mostly prefill and says little about decode
+SPEED_TIMEOUT_S = 300.0         # choice: 300 tokens at 1 tok/s; a server slower than that is not decoding
+SPEED_SLOW_RATIO = 0.5          # choice: below half the best speed seen. Three clients measured 60%, so ordinary sharing
+                                # does not trip it; four or more clients can, and the message says so
+SPEED_SLOW_CONSECUTIVE = 3      # choice: three samples in a row, so one busy moment is only "suspect"
+SPEED_PROMPT = ("Write a Python function that merges two sorted lists, with a docstring and three tests.")
+                                # the prompt of the 2026-10-17 measurements; the answer is a few hundred tokens
+SPEED_BASELINE_FILE = "speed-baseline.json"   # under the cache directory (~/.cache/tt-orchard)

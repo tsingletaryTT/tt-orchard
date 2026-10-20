@@ -16,6 +16,7 @@ import subprocess
 import sys
 import threading
 import time
+from html.parser import HTMLParser
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -487,6 +488,7 @@ def test_the_page_and_its_assets_are_served_with_a_strict_policy(root):
 
 @pytest.mark.parametrize("path,ctype", [
     ("/static/scene.js", "text/javascript"),
+    ("/static/mode.js", "text/javascript"),
     ("/static/vendor/xterm/xterm.js", "text/javascript"),
     ("/static/vendor/xterm/xterm.css", "text/css"),
     ("/static/vendor/xterm/addon-fit.js", "text/javascript"),
@@ -951,3 +953,226 @@ def test_no_asset_loads_anything_from_another_host():
 def test_the_page_never_uses_blocking_browser_dialogs():
     js = Path(webui.__file__).with_name("web").joinpath("app.js").read_text(encoding="utf-8")
     assert not re.search(r"\b(alert|confirm|prompt)\(", js)
+
+
+# ---- the page style switch: "playful" (the farm look) and "operator" (plain, state first) ----------------------
+WEB = Path(webui.__file__).with_name("web")
+_VOID = {"meta", "link", "input", "br", "img", "hr"}
+
+
+class _Ancestry(HTMLParser):
+    """For every element with an id: the classes of all its ancestors. Plain HTML5 only; the page is well formed."""
+
+    def __init__(self):
+        super().__init__()
+        self.stack, self.chain, self.scripts = [], {}, []
+
+    def handle_starttag(self, tag, attrs):
+        a = dict(attrs)
+        if a.get("id"):
+            self.chain[a["id"]] = [c for _, cl in self.stack for c in cl]
+        if tag == "script":
+            self.scripts.append(a)
+        if tag not in _VOID:
+            self.stack.append((tag, (a.get("class") or "").split()))
+
+    def handle_endtag(self, tag):
+        while self.stack and self.stack.pop()[0] != tag:
+            pass
+
+
+def _page():
+    p = _Ancestry()
+    p.feed((WEB / "index.html").read_text(encoding="utf-8"))
+    return p
+
+
+def test_operator_mode_puts_now_and_next_in_the_left_pane_and_history_in_the_right():
+    chain = _page().chain
+    for el in ("run-badge", "run-model", "run-actions", "run-now", "run-hint", "verdict", "block-panel", "pause-panel"):
+        assert "op-left" in chain[el] and "op-right" not in chain[el], el
+    for el in ("stepper", "results", "tabs", "pane-feed", "pane-ledger", "pane-details"):
+        assert "op-right" in chain[el] and "op-left" not in chain[el], el
+
+
+def test_the_page_has_a_two_button_style_switch_in_the_top_bar():
+    chain = _page().chain
+    html = (WEB / "index.html").read_text(encoding="utf-8")
+    for mode in ("playful", "operator"):
+        assert f'id="mode-{mode}-btn"' in html and f'data-mode="{mode}"' in html
+        assert "topbar" in chain[f"mode-{mode}-btn"]
+
+
+def test_the_style_is_set_before_first_paint_by_a_plain_script():
+    tags = [a for a in _page().scripts if a.get("src") == "/static/mode.js"]
+    assert len(tags) == 1
+    assert "defer" not in tags[0] and "async" not in tags[0] and tags[0].get("type") != "module"
+
+
+def test_mode_js_accepts_only_the_two_styles_and_never_trusts_storage():
+    js = (WEB / "mode.js").read_text(encoding="utf-8")
+    assert re.search(r'MODES\s*=\s*\[\s*"playful"\s*,\s*"operator"\s*\]', js)
+    assert "MODES.includes(" in js                                  # a ?mode= value or a stored value is checked
+    assert "URLSearchParams" in js and "documentElement.dataset.mode" in js
+    # the value from a link is validated where it is read, not later
+    assert re.search(r'fromLink\s*=\s*valid\(\s*new URLSearchParams\([^)]*\)\.get\("mode"\)\s*\)', js)
+    # every storage touch sits in a try block: a private window can throw
+    for call in re.finditer(r"localStorage\.(getItem|setItem)", js):
+        before = js[:call.start()]
+        assert before.rfind("try {") > before.rfind("}"), call.group(0)
+    assert js.count("catch") >= js.count("localStorage.")
+
+
+def _operator_rules(css):
+    return [m.group(0) for m in re.finditer(r'html\[data-mode="operator"\][^{]*\{[^}]*\}', css)]
+
+
+def test_operator_css_drops_the_pixel_face_and_the_scene_and_keeps_the_panes_apart():
+    css = (WEB / "app.css").read_text(encoding="utf-8")
+    rules = "\n".join(_operator_rules(css))
+    assert re.search(r'html\[data-mode="operator"\]\s*\{[^}]*--pixel:\s*var\(--font\)', css)
+    assert re.search(r'\.scene-frame[^{]*\{[^}]*display:\s*none', rules)
+    assert re.search(r'\.op-left[^{]*\{[^}]*position:\s*sticky', rules)
+    # outside operator mode the two wrappers must not exist as boxes, or the playful page would change
+    assert re.search(r'(?m)^\.op-left,\s*\.op-right\s*\{\s*display:\s*contents', css)
+
+
+def test_operator_pulse_is_motion_that_respects_reduced_motion():
+    css = (WEB / "app.css").read_text(encoding="utf-8")
+    for m in re.finditer(r"animation\s*:", css.split('html[data-mode="operator"]', 1)[1]):
+        before = css.split('html[data-mode="operator"]', 1)[1][:m.start()]
+        assert "prefers-reduced-motion: no-preference" in before[before.rfind("@media"):], "pulse outside the media query"
+
+
+def test_the_run_carries_its_state_and_tone_for_the_band_and_the_scene_rests_in_operator_mode():
+    js = (WEB / "app.js").read_text(encoding="utf-8")
+    assert re.search(r'\$\("run"\)\.dataset\.state\s*=', js) and re.search(r'\$\("run"\)\.dataset\.tone\s*=', js)
+    scene = (WEB / "scene.js").read_text(encoding="utf-8")
+    assert re.search(r"isStill\(\)\s*\{[^}]*dataset\.mode\s*===\s*[\"']operator", scene)
+
+
+def test_operator_mode_leads_with_the_real_names_and_drops_the_orchard_ones():
+    js = (WEB / "app.js").read_text(encoding="utf-8")
+    css = (WEB / "app.css").read_text(encoding="utf-8")
+    # the page gives CSS something to hold on to: the real state name, the feed icon, the orchard part of the stage line
+    assert re.search(r'class:\s*"name"\s*\}\s*,\s*state\.replace\(', js)
+    assert re.search(r'class:\s*"icon"', js)
+    assert js.count('class: "orchard"') >= 2                       # the stepper's and the stage line's
+    # playful shows none of the new real-name span; operator shows it in place of the orchard word
+    assert re.search(r'(?m)^\.badge \.name\s*\{\s*display:\s*none', css)
+    ops = "\n".join(_operator_rules(css))
+    for hidden in (r"\.badge \.word", r"\.badge \.real", r"\.step \.orchard", r"\.who \.icon", r"\.run-sub \.orchard"):
+        assert re.search(hidden + r"[^{]*\{[^}]*display:\s*none", ops), hidden
+    assert re.search(r"\.badge \.name[^{]*\{[^}]*display:\s*inline", ops)
+    assert re.search(r"\.run-head \.mode-chip[^{]*\{[^}]*background:\s*transparent", ops)
+
+
+# ---- the verdict line: sentences with yardsticks (orchard/verdict.py) -------------------------------------------------------------
+
+def write_results(run: Path, *, swap=None, configs=None):
+    """The files run_view.results reads: stage 2's swap-check evidence and stage 4's result."""
+    if swap is not None:
+        p = run / "stages" / "2" / "evidence" / "swap-check.json"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps({"result_draft": swap}))
+    if configs is not None:
+        p = run / "stages" / "4" / "result.json"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps({"configs": configs}))
+
+
+def verdict_items(app, name):
+    return {i["id"]: i for i in app.run_detail(name)["verdict"]}
+
+
+def test_run_detail_sets_the_reference_evidence_against_the_agents_file(root):
+    run = write_ledger(root / "org--a")
+    s1 = run / "stages" / "1"
+    (s1 / "evidence").mkdir(parents=True)
+    (s1 / "reference.json").write_text(json.dumps({"verdict": "pass"}))
+    (s1 / "evidence" / "summary.json").write_text(json.dumps({"verdict": "fail"}))
+    (s1 / "evidence" / "load-report.json").write_text(json.dumps({"missing_keys": ["model.layers.0.w"], "model_key_count": 1, "ignore_patterns": []}))
+    item = verdict_items(make_app(root), "org--a")["reference"]
+    assert item["tone"] == "bad" and "reference.json says pass" in item["headline"]
+
+
+def test_the_other_runs_are_the_yardsticks_and_a_run_is_never_its_own(root):
+    old = write_ledger(root / "org--old", model="org/old-model")
+    write_results(old, swap={"top1_agreement": 0.9375, "n_tokens": 32, "server_ready_s": 900.0, "coherent": True})
+    this = write_ledger(root / "org--this", model="org/this-one")
+    write_results(this, swap={"top1_agreement": 1.0, "n_tokens": 32, "server_ready_s": 700.0, "coherent": True})
+    detail = verdict_items(make_app(root), "org--this")["swap"]["detail"]
+    assert "0.94" in detail and "old-model" in detail and "this-one" not in detail
+
+
+def test_a_boot_time_is_ranked_only_against_the_same_package_and_chips_across_runs(root):
+    cfg = lambda ready, pkg="p/a", chips=2: {"chips": chips, "pass": True, "top1_agreement": 1.0, "server_ready_s": ready, "package": pkg}   # noqa: E731
+    for name, ready in (("org--p1", 100.0), ("org--p2", 110.0)):
+        write_results(write_ledger(root / name, model=f"org/{name}"), configs=[cfg(ready)])
+    write_results(write_ledger(root / "org--other", model="org/other"), configs=[cfg(1.0, pkg="p/other")])
+    write_results(write_ledger(root / "org--this", model="org/this"), configs=[cfg(105.0)])
+    detail = verdict_items(make_app(root), "org--this")["config-2"]["detail"]
+    assert "100 s" in detail and "110 s" in detail and "about the same as" in detail and " 1 s" not in detail
+
+
+def test_the_verdict_text_is_redacted_like_every_other_string_the_page_gets(root):
+    run = write_ledger(root / "org--a")
+    write_results(run, configs=[{"chips": 4, "pass": False, "reason": f"died in {HOME}/secret/dir"}])
+    detail = verdict_items(make_app(root), "org--a")["config-4"]["detail"]
+    assert HOME not in detail and "~/secret/dir" in detail
+
+
+def test_the_other_runs_ledgers_are_read_again_only_when_they_change(root, monkeypatch):
+    old = write_ledger(root / "org--old", model="org/old")
+    write_results(old, swap={"top1_agreement": 0.97, "n_tokens": 32, "server_ready_s": 900.0, "coherent": True})
+    write_ledger(root / "org--this", model="org/this")
+    real, seen = webui.run_view.results, []
+    monkeypatch.setattr(webui.run_view, "results", lambda run, entries: (seen.append(Path(run).name), real(run, entries))[1])
+    app = make_app(root)
+    app.run_detail("org--this")
+    app.run_detail("org--this")
+    assert seen.count("org--old") == 1
+    write_ledger(old, ("stage_start", 0, {}))                      # the ledger grew: its numbers are read again
+    app.run_detail("org--this")
+    assert seen.count("org--old") == 2
+
+
+def test_the_verdict_panel_is_for_operator_mode_and_is_built_without_innerhtml():
+    css = (WEB / "app.css").read_text(encoding="utf-8")
+    js = (WEB / "app.js").read_text(encoding="utf-8")
+    assert re.search(r"(?m)^#verdict\s*\{[^}]*display:\s*none", css)
+    assert re.search(r'html\[data-mode="operator"\] #verdict[^{]*\{[^}]*display:\s*grid', css)
+    for tone in ("bad", "warn", "good", "info"):
+        assert re.search(rf'#verdict[^{{]*\[data-tone="{tone}"\][^{{]*\{{[^}}]*border-left-color', css), tone
+    body = js[js.index("function renderVerdict"):]
+    body = body[:body.index("\nfunction ", 10)]
+    assert "innerHTML" not in body and "renderVerdict(d.verdict)" in js
+
+
+# ---- finding 12: a malformed results file breaks only its own run -----------------------------------------------------------------
+
+@pytest.mark.parametrize("junk", ["[1]", '"text"', "7", "null", '{"configs": 5}', '{"configs": [1, null]}', '{"configs": [{"chips": 2}], "x": 1}', '{"configs": [{"chips": [2]}, {"chips": null}, {"chips": 2}]}'])
+def test_a_malformed_stage_4_result_file_does_not_break_other_runs_detail_pages(root, junk):
+    bad = write_ledger(root / "org--bad", model="org/bad")
+    (bad / "stages" / "4").mkdir(parents=True)
+    (bad / "stages" / "4" / "result.json").write_text(junk)
+    write_ledger(root / "org--good", model="org/good")
+    app = make_app(root)
+    assert app.run_detail("org--good")["model"] == "org/good"      # the other run's page still renders
+    assert app.run_detail("org--bad")["model"] == "org/bad"        # and the bad run's own page does too
+
+
+@pytest.mark.parametrize("rel", ["stages/4/tests/plan.json", "stages/4/tests/2/test-result.json", "stages/2/test-result.json"])
+def test_a_malformed_plan_or_test_record_does_not_break_the_page(root, rel):
+    run = write_ledger(root / "org--bad", model="org/bad")
+    (run / "stages" / "4").mkdir(parents=True)
+    (run / "stages" / "4" / "result.json").write_text(json.dumps({"configs": [{"chips": 2, "pass": True}]}))
+    f = run / rel
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text("[1]")
+    (run / "stages" / "2" / "evidence").mkdir(parents=True, exist_ok=True)
+    (run / "stages" / "2" / "evidence" / "swap-check.json").write_text(json.dumps({"result_draft": {"top1_agreement": 1.0}}))
+    write_ledger(root / "org--good", model="org/good")
+    app = make_app(root)
+    assert app.run_detail("org--good")["model"] == "org/good"
+    assert app.run_detail("org--bad")["model"] == "org/bad"

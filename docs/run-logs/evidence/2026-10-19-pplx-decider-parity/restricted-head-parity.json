@@ -1,0 +1,360 @@
+{
+  "model": "perplexity-ai/pplx-decider-v1.2",
+  "attention_mode": "noncausal_full_attention",
+  "result": {
+    "hidden_pcc_min": 0.9558379054069519,
+    "hidden_pcc_mean": 0.9677414298057556,
+    "marker_hidden_pcc_min": 0.99751216173172,
+    "prob_max_abs_diff": 0.04803371999834871,
+    "top1_agree_fraction": 1.0,
+    "n_questions": 14,
+    "noise_prob_max_abs_diff": 0.0,
+    "wiring_cosine": 0.987267255783081,
+    "verdict": {
+      "passed": true,
+      "failures": [],
+      "bars": {
+        "hidden_pcc_min": 0.9,
+        "top1_min": 0.85,
+        "prob_diff_max": 0.25,
+        "min_questions": 10,
+        "wiring_cosine_min": 0.9
+      }
+    }
+  },
+  "mask_effect_on_cpu": {
+    "prob_max_abs_diff": 0.4655798318289785,
+    "top1_changed": 1,
+    "questions": 14,
+    "per_record": [
+      {
+        "prob_max_abs_diff": 0.07199296238206243,
+        "top1_changed": 0,
+        "questions": 3
+      },
+      {
+        "prob_max_abs_diff": 0.1998956528842406,
+        "top1_changed": 0,
+        "questions": 2
+      },
+      {
+        "prob_max_abs_diff": 0.009828424437376528,
+        "top1_changed": 0,
+        "questions": 3
+      },
+      {
+        "prob_max_abs_diff": 0.2608978883342622,
+        "top1_changed": 1,
+        "questions": 2
+      },
+      {
+        "prob_max_abs_diff": 0.4655798318289785,
+        "top1_changed": 0,
+        "questions": 2
+      },
+      {
+        "prob_max_abs_diff": 0.0016787664993099989,
+        "top1_changed": 0,
+        "questions": 2
+      }
+    ]
+  },
+  "records": [
+    {
+      "id": "support-401",
+      "tokens": 212,
+      "hidden_pcc": 0.9692399501800537,
+      "marker_hidden_pcc": 0.99815434217453,
+      "prob_max_abs_diff": 0.011284886238172365,
+      "questions": [
+        {
+          "key": "team",
+          "options": 3,
+          "reference": [
+            0.00024364953922682562,
+            0.9993903455340808,
+            0.0003660049266924616
+          ],
+          "device": [
+            0.00024711338191098946,
+            0.9993135995336979,
+            0.0004392870843911144
+          ],
+          "top1_agree": true
+        },
+        {
+          "key": "urgent",
+          "options": 2,
+          "reference": [
+            0.0006440480747577514,
+            0.9993559519252424
+          ],
+          "device": [
+            0.000508085337360371,
+            0.9994919146626396
+          ],
+          "top1_agree": true
+        },
+        {
+          "key": "frustration",
+          "options": 4,
+          "reference": [
+            0.004401956354540656,
+            0.043176634722439405,
+            0.65071532627926,
+            0.3017060826437599
+          ],
+          "device": [
+            0.004595052603733766,
+            0.048917986995969095,
+            0.6560657639947096,
+            0.29042119640558756
+          ],
+          "top1_agree": true
+        }
+      ]
+    },
+    {
+      "id": "review-boiler",
+      "tokens": 151,
+      "hidden_pcc": 0.9558379054069519,
+      "marker_hidden_pcc": 0.99751216173172,
+      "prob_max_abs_diff": 0.028474418696930653,
+      "questions": [
+        {
+          "key": "sentiment",
+          "options": 3,
+          "reference": [
+            0.01245758141621518,
+            0.2249669896205069,
+            0.7625754289632779
+          ],
+          "device": [
+            0.015150707758025087,
+            0.19649257092357625,
+            0.7883567213183986
+          ],
+          "top1_agree": true
+        },
+        {
+          "key": "complaint",
+          "options": 2,
+          "reference": [
+            0.00213116806408075,
+            0.9978688319359191
+          ],
+          "device": [
+            0.0018302875503351298,
+            0.9981697124496649
+          ],
+          "top1_agree": true
+        }
+      ]
+    },
+    {
+      "id": "select-all",
+      "tokens": 158,
+      "hidden_pcc": 0.9704060554504395,
+      "marker_hidden_pcc": 0.9980602860450745,
+      "prob_max_abs_diff": 0.00019909749388929092,
+      "questions": [
+        {
+          "key": "charger",
+          "options": 2,
+          "reference": [
+            0.0006892110239636113,
+            0.9993107889760364
+          ],
+          "device": [
+            0.0005435090006876866,
+            0.9994564909993122
+          ],
+          "top1_agree": true
+        },
+        {
+          "key": "cable",
+          "options": 2,
+          "reference": [
+            0.0006440480747577514,
+            0.9993559519252424
+          ],
+          "device": [
+            0.00044495058086846043,
+            0.9995550494191316
+          ],
+          "top1_agree": true
+        },
+        {
+          "key": "headphones",
+          "options": 2,
+          "reference": [
+            0.9995410863741158,
+            0.0004589136258842898
+          ],
+          "device": [
+            0.9995714089598563,
+            0.0004285910401437351
+          ],
+          "top1_agree": true
+        }
+      ]
+    },
+    {
+      "id": "moderation",
+      "tokens": 161,
+      "hidden_pcc": 0.982107400894165,
+      "marker_hidden_pcc": 0.9991132616996765,
+      "prob_max_abs_diff": 0.04803371999834871,
+      "questions": [
+        {
+          "key": "category",
+          "options": 4,
+          "reference": [
+            0.5802808468442758,
+            0.00631055891583939,
+            0.3528949885652601,
+            0.06051360567462474
+          ],
+          "device": [
+            0.6283145668426245,
+            0.005367446324652064,
+            0.3165626214736586,
+            0.04975536535906482
+          ],
+          "top1_agree": true
+        },
+        {
+          "key": "severity",
+          "options": 4,
+          "reference": [
+            0.11339016362398784,
+            0.07548385036645465,
+            0.577378662004729,
+            0.23374732400482853
+          ],
+          "device": [
+            0.11985781628189206,
+            0.06633809601591792,
+            0.5671319805476218,
+            0.24667210715456814
+          ],
+          "top1_agree": true
+        }
+      ]
+    },
+    {
+      "id": "contract",
+      "tokens": 135,
+      "hidden_pcc": 0.9663113951683044,
+      "marker_hidden_pcc": 0.9983882308006287,
+      "prob_max_abs_diff": 0.0010360208590510789,
+      "questions": [
+        {
+          "key": "termination",
+          "options": 2,
+          "reference": [
+            0.0034995683334011376,
+            0.9965004316665989
+          ],
+          "device": [
+            0.00453558919245213,
+            0.9954644108075478
+          ],
+          "top1_agree": true
+        },
+        {
+          "key": "refund",
+          "options": 2,
+          "reference": [
+            0.9994375982621823,
+            0.0005624017378176915
+          ],
+          "device": [
+            0.9993266211772852,
+            0.0006733788227147583
+          ],
+          "top1_agree": true
+        }
+      ]
+    },
+    {
+      "id": "language",
+      "tokens": 131,
+      "hidden_pcc": 0.9625458717346191,
+      "marker_hidden_pcc": 0.9982815384864807,
+      "prob_max_abs_diff": 0.0007768161454040357,
+      "questions": [
+        {
+          "key": "language",
+          "options": 4,
+          "reference": [
+            0.0005619358834674748,
+            0.9986097339054206,
+            0.00041884630545570745,
+            0.00040948390565622664
+          ],
+          "device": [
+            0.0006117131642935136,
+            0.9984411251743627,
+            0.0004910456727411885,
+            0.00045611598860257566
+          ],
+          "top1_agree": true
+        },
+        {
+          "key": "polite",
+          "options": 2,
+          "reference": [
+            0.0015192042869750122,
+            0.9984807957130251
+          ],
+          "device": [
+            0.0022960204323789427,
+            0.997703979567621
+          ],
+          "top1_agree": true
+        }
+      ]
+    }
+  ],
+  "meta": {
+    "versions": {
+      "ttnn": "0.79.0.dev20260929+qwen36p150x2.g9f6b02d",
+      "torch": "2.14.1+cpu",
+      "transformers": "5.17.0"
+    },
+    "mesh_shape": [
+      1,
+      2
+    ],
+    "n_layers": null,
+    "model_load_s": 46.2,
+    "device_seconds_per_record": [
+      0.35,
+      0.23,
+      0.2,
+      0.2,
+      0.19,
+      0.21
+    ],
+    "causal_sdpa_calls_per_record": [
+      16,
+      16,
+      16,
+      16,
+      16,
+      16
+    ],
+    "sdpa_retried_without_program_config": false,
+    "loader_key_mapping": {
+      "^language_model\\.": "model.language_model.",
+      "^visual\\.": "model.visual."
+    },
+    "temperature": 1.3823494677922652,
+    "readout_sha256": "3bada2dac60a9a27264f6847e00d85a81de606fbe85dcbf9a60a3f9677a0ae6b",
+    "pinned_code": {
+      "source/src/pplx_decider/protocol.py": "b29d7a50d7214bd42397f8d3ddd5b5706cb8da2b257e175bf89b5a8da455d6a0",
+      "source/src/pplx_decider/model.py": "ab5f42bd051d9e04cb9266e378d96dd72684c7a7f074efd9fc5117508e3dee91"
+    }
+  }
+}

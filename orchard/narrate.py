@@ -527,7 +527,9 @@ UNBLOCK = {
         "Run `df -h` on the run directory and on the Hugging Face cache. Stage 4 needs about 110 GB free on the run "
         "directory's filesystem.",
         "Failed attempts leave tensor caches (about 31 GB each) in stages/<N>.partial-*. Delete those from "
-        "abandoned attempts, then run `tt-orchard bringup <MODEL>` again."],
+        "abandoned attempts, then run `tt-orchard bringup <MODEL>` again.",
+        "`tt-orchard bringup <MODEL> --prune-caches` removes the oldest tensor caches that no unfinished run uses, just "
+        "enough to fit, when a full disk is the only block (`tt-orchard caches` lists what exists)."],
     "hardware-unhealthy": [
         "Run `gozer status`. tt-orchard never clears a lease or resets a chip that it does not hold.",
         "A STALE lease whose owner is gone is cleared with `gozer reconcile`. A chip held by another agent "
@@ -543,6 +545,13 @@ UNBLOCK = {
         "unattended run cannot write that.",
         "Read stages/0/delta.json (`path_reasons`) for what differs. Choosing another nearest model or porting by "
         "hand is a person's decision; `tt-orchard bringup <MODEL>` blocks again until stage 0 finds weights-only."],
+    "restricted-head": [
+        "The model is the nearest model's backbone with its lm_head cut down to a few sidecar rows. Stage 0 measured it: "
+        "read stages/0/delta.json (`alignment` for how the names pair, `values` for whether the weights are the nearest model's, "
+        "`head` for which lm_head rows the sidecar copies).",
+        "The harness stops here on purpose: how those rows are read (marker tokens, a different attention mask) is in the model's own "
+        "code (`code_files`), not in its weights, and the nearest runtime may not support it. Read that code, then decide whether to "
+        "port it by hand or choose another model."],
     "blocked": [
         "The supervisor needed something it could not get. The reason is quoted above.",
         "`tt-orchard status <MODEL>` shows the full state. Fix what the reason names, then run `tt-orchard "

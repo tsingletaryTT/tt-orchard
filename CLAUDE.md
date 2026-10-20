@@ -143,6 +143,46 @@ two-process lock test.
   the run blocks and does not retry. A restart with a baseline skips the question; a resume after a block
   asks it again. Each guard was checked by mutation: remove it and a test goes red.
 
+## 2026-10-17: `tt-orchard coder-speed`, and a correction (branch `ka-speedwatch`, version 0.6.2)
+Prompt (operator): "can we add something that detects when coder gets too slow and needs a restart (or any model we're
+using because it will change over time)". Context: during the kernel-probe batches I reported the coder had slowed from 38
+to 7.6 tok/s, twice, and the operator approved a restart and reset for it. Both reports read vLLM's "Avg generation
+throughput" log line, which is tokens over the whole 10 s window. An agent's turns are short tool calls with idle time
+between them, so a healthy server reads 5 to 8 tok/s there. Measured idle, the same server decoded at 38.7 tok/s. The
+restart was probably not needed. The ledger and the operator were told.
+- `orchard/speedwatch.py` asks a server for one fixed greedy answer (about 300 tokens, thinking off) and divides the tokens
+  the server reports by the seconds the client measured. It keeps the best speed seen per model and endpoint
+  (`~/.cache/tt-orchard/speed-baseline.json`; a slow sample never lowers it) and calls a server `slow` when the last three
+  samples are all below half of that. It reports and never restarts, because a restart interrupts every client.
+- Found by running it live: a fresh request beside the batch's long conversation measured 7.3 tok/s, while two short requests
+  together got 29.6 each. A decode step serves every running request, so one long context slows all of them. The check now
+  reads `vllm:num_requests_running` before and after its own request; a sample taken beside another request is `busy`, is not
+  counted and teaches nothing. A server with no such count is measured anyway and the message says it could not tell.
+- `tt-orchard coder-speed [--endpoint URL --model NAME | --tiers] [--samples N] [--watch SECONDS] [--json]`; exit 0, 2
+  (could not measure) or 3 (slow). `kernel-probe` measures before each attempt, records `coder_speed` in each attempt.json,
+  lists it in the report and stops with exit 6 when the coder is slow (`--allow-slow-coder` overrides); `busy` and `error`
+  never stop it, and the report marks those attempts as not comparable.
+- Tests first. 85 in the two new files and 13 in the probe; about 55 mutations over the module and the wiring, each red,
+  except one equivalent (an extra re-check that can never run). Tests that call the module never reach a server: an autouse
+  fixture replaces the metrics call, because 127.0.0.1:8011 is a live coder on the machine they were written on.
+- Not done: the supervisor's watchdog does not use it (restarting the coder inside a bring-up needs the park and restore
+  machinery); the baseline needs `--reset-baseline` after a change on purpose; one pass over `--tiers` takes a sample per tier.
+
+## 2026-10-17 (later): the check says how far off a wrong kernel is (branch `ka-numdiag`, version 0.6.3)
+L4e's `rmsnorm` attempts 3 and 4 (temperature 0.7, different seeds) wrote the same wrong kernel: the mean of the squares was
+divided by 8 tiles, not 256 elements. Their results match to three or four digits (max abs error 9094.3965 in both, slope
+964). Each was told only `pcc 0.9796, bar 0.999`; the slope of 964, which says the output is about 964 times too big, was in the
+result file and never reached them. The first-line summary stops at the first bar that fails, and PCC is checked first.
+- `kernel_harness.py` records the three worst positions of each input set (`worst`: index, expected, got; a value that is not
+  finite ranks first and is null). `kernel_check.py` `numeric_detail` turns the first failing set into one line, printed as
+  `numbers: ...` under the `FAIL` line the way `where:` and `hint:` are: how far off the scale is (about Nx expected, the opposite
+  sign, or about right), PCC, relative L2, the largest error beside the size of the expected values, the two worst places, and
+  how many input sets fail. It states measured facts, names no op and gives no fix. The first line and `check.json` are unchanged.
+- 14 mutations, 13 red; the survivor (`numbers:` for a non-numeric category) is equivalent in practice, because such a result
+  has no failing numeric set. Two assertions I first wrote could not fail (one ended in `or True`); I rewrote them before running.
+- Not run on the live coder yet: the probe batch (L4e) was still running on the other checkout. Whether the line helps the coder is
+  not known.
+
 ## Notable moments
 - The `shlex` runner was shown to be bypassable (comments, keywords, `eval`, shells on stdin,
   wrapper options). Two fix rounds replaced it with the lexer. Later reviews were limited to
@@ -1143,3 +1183,445 @@ Prompt (operator): "get the new screenshot". No browser tool was available in th
   Page text now reads "The song ended at 5.2 s, before the 20 s asked for: the lyrics were finished." The README and the card say the page explains an early end again.
 - Pushed to GitHub (`2f8c3d5`) and re-uploaded to the Hugging Face companion repo. The page running under tt-disco on 7871 still has the old code, so it has the blank-steps
   bug until it is restarted from the catalog. The weights upload was at 7.6 GB; `finish_weights.sh` has not run yet.
+
+## 2026-10-18: making unattended bring-up need fewer people (branch `autonomy-pr`, version 0.6.1)
+Prompt (operator): "proceed in making the harness 'good at' bringing up models without Claude supervision", after the RAG-Gate replay
+test. Method: list every stop in the past runs that a person cleared, keep the ones whose cause is known, and fix each test first with a
+mutation per guard. The causes come from the entries above (RAG-Gate-27B, Clef, the SFPI downgrade, the music run). Each change is a
+precaution or a check with a stated evidence base; none was seen to change a real run's outcome yet.
+- Pre-test reset (`supervisor._reset_test_chips`): a test that needs two or more boards resets its leased chips in place before it
+  runs. The park resets only the coder's board, and the RAG-Gate 4-chip test failed twice on chips earlier tests had used and passed
+  after all four were reset. The cause was not isolated. A refused reset blocks with its text.
+- Preflight `cpu` row: the CPU stand-in (ollama) must answer and list the tier's model. On the RAG-Gate run it was down and the park's
+  canary failed three hours in. Blocks as `coder-unusable`.
+- Preflight `sfpi` row (`orchard/sfpi.py`): the box's SFPI must be at least what the chosen bundle pins in its ttnn wheel. A system
+  update to 7.67.0 broke every host boot of the Qwen3.8 bundle (pin 7.73.0); 7.83.0 and 7.87.0 booted it. Three observations, so the
+  rule is stated as fitted to them. Blocks as `hardware-unhealthy`; installing the package stays the operator's.
+- `bringup --auto-retries N` (default 2, 0 off): a run blocked as `coder-unusable`, `hardware-unhealthy` or `agent-stuck` is retried after
+  60 s (a released board shows busy for about a minute). Other blocks are never retried (`blocked.AUTO_RETRY`).
+- `bringup --prune-caches`: when disk is the only block and removing regenerable tensor caches can cover it, remove the oldest ones no
+  unfinished run uses, just enough; never the kernel cache or anything outside the cache root; all or nothing; `--dry-run` only reports.
+- Decided against (for now): a hardware-test stall rule. Six healthy cold boots had at most 198 s between log lines; the music hang was
+  silent 40 to 60 minutes. But a test's own stdout is nearly silent during a healthy boot (its server log goes to a file), and the hang
+  burns CPU, so neither signal the stall watcher has would catch it. A rule needs "no file under the stage directory grew for N s".
+- RAG-Gate-27B replay (kernel probe): see the ledger for the comparison written before the run.
+- Found on the live box: the Coder-Next container answered `/v1/models` while its prefill had hung after the overnight suspend; only a
+  completion shows that. `coder-speed` timed out on it. A bring-up's coder canary asks a real question, so it would catch this at start.
+- Not done: the live unattended run of a new model. It needs both boards, so the kernel-probe coder (also used through qwencode) has to stop
+  first, which is the operator's decision. Candidates checked by dry run: `bytkim/Qwen3.8-27B-pi` (preflight passes apart from the coder
+  port), `tsinghua-sigs-robot-lab/VeriLoop-E2` and `perplexity-ai/pplx-decider-v1.1-27b` (disk: 136 and 132 GB needed, 111 free).
+
+## 2026-10-18 (later): the first unattended bring-up with the new setup (`bytkim/Qwen3.8-27B-pi`, version 0.6.1)
+Prompt (operator): "go ahead" to stop the kernel-probe coder and run an unattended bring-up of a new model. Run directory
+`~/orchard-runs/bytkim--qwen3.8-27b-pi`. It ended `ready-for-operator-review` after six launches of the same command. Stage 2 (one chip):
+32 of 32 tokens, ready in 682 s. Stage 4: 2 chips 1.0, 4 chips 0.96875 (ready in 254 s). Stages 3, 5, 6, 7 skipped by design. Nothing was
+published, pushed or uploaded. Interventions, each with its cause:
+1. ollama was down after the suspend. The new `cpu` preflight row blocked before anything started (the row did its job). I restarted ollama
+   with `OLLAMA_MODELS` set.
+2. A cache entry for the model held only `config.json` and `README.md`. `local_snapshot` counted any snapshot with a config as local, so the
+   59 GB of weights were never fetched, stage 0 compared an empty model and called it a full port, and stage 1 failed four times. Fixed: a
+   snapshot is local only if a weight file exists behind its link (2 tests, mutation red).
+3. A retry kept stage 0's stale verdict. `bringup` now moves the earlier run directory aside (`<run>.stale-<time>`) when it has to fetch the
+   weights (3 tests, 2 mutations red). For this run I did the move by hand once, because the weights were already on disk.
+4. Disk: stage 4 wants 110 GB free at entry. Twice the free space was short (49 GB, then 109 GB). The operator chose deleting the Clef and
+   RAG-Gate run directories (kept small files in `*.kept`: ledger, evidence, package staging, gate-check results). Then I removed this run's
+   own stage 2 and 4-chip caches. `--prune-caches` could not help: the only caches were this run's own.
+5. The 4-chip test failed with `Fabric Router Sync: Timeout` after 57 s, the same as the RAG-Gate run. The pre-test reset had run and did
+   not prevent it, so the 2026-10-13 "stale chip state" guess is not enough. By hand, one lease on all four chips, one `gozer reset`, then the
+   supervisor's script passed (31 of 32, ready 302 s). Resetting board 1 then board 0 (the supervisor's order) got past fabric start and then
+   hung loading the warm tensor cache, which looks like the cached-tensor load hang found on the music container (2026-10-15). I stopped my
+   own container by id and released my leases. The cause of the fabric failure is still not isolated; the same procedure passed on the last
+   attempt (260 s, top-1 0.969).
+Added from this: a multi-board test that fails within 180 s without timing out is reset (every leased chip) and run once more
+(`FAST_FAIL_S`, 5 tests, 5 mutations red). That retry did not fire in the final attempt, so it has not run on real hardware.
+Also seen: a launcher that saves `$!` after `setsid nohup` saves the wrapper's pid, which exits at once; wait on the run's `supervisor.pid`.
+The stall rule is still deferred. A shared-venv, no-weights stage 0 verdict is still possible if a snapshot is replaced mid-run.
+Not done: the 4-chip warm-cache hang (not investigated here). The run's version numbers (0.7.0, 0.7.1) belong to the combined branch; split out, these changes are 0.6.1 (a self-review found that the set-aside also fired for a run that had passed stage 2 whose snapshot was later deleted; it now keeps such a run).
+## 2026-10-15: design for attempting kernels when no equivalent model exists (branch `kernel-attempt`)
+Prompt (operator): "What would it take for tt-orchard to take the initiative with models it can't find an equivalent for and
+attempt to write the kernels (in tt-lang for example, using the present skills) instead?" Then: go with the op inventory and
+the kernel probe, keep in step with the tt-model-manager branches ("metadata being part of what we need clarity on"), keep
+provenance orchard-side, "don't draft an upstream fix. fix for yourself for now only. the goal is to get a branch where this
+logic is in place." Spec: `docs/superpowers/specs/2026-10-15-kernel-attempt-design.md`. No product code yet; the spec waits for
+the operator's review, then a plan.
+- Corrected my own first answer: handing over agent-written ops is mostly possible already. The installed `tt-model package-thin`
+  takes `--extra-code` and `--ops-wheel` (generic_op wheels); a new registered C++ ttnn op still needs v5 or v5.1, which orchard
+  refuses. tt-model-manager's `deps.custom_ops` records only `--ops-wheel` wheels that `model.py` imports statically.
+- ttnn op names are not readable without importing ttnn (zero hits in its `.py` files), and importing opens the device. The
+  coverage list is a dump taken under a lease and stamped with the ttnn version. My first plan, an `ast` scan, would not have worked.
+- tt-lang: the shared venv's `tt-lang 1.1.6` is the latest on PyPI; the repo is at v1.1.10 plus 23 commits. A simulator venv
+  (`~/orchard-venvs/ttlang`) and a clean clone (`~/orchard-src/tt-lang`) were built outside the repo. The operator's own
+  `~/code/tt-lang` (85 commits behind, edited submodule, 22 GB of builds) was left alone.
+- Bug found in the tt-lang-sim wheel (1.1.6 and main): it loads `ttl/ttl/diagnostics.py`, a source-tree path the wheel does not
+  ship, so a diagnosed kernel error becomes `FileNotFoundError`. Upstream's negative examples exit non-zero both with and
+  without the bug, so an exit code cannot show it. Copying the source `diagnostics.py` into the venv fixes it locally; the
+  environment command in the spec does that and then checks for the named diagnostic text. Not reported upstream, by decision.
+- Process slips: my first run of all upstream examples used a launch setup unlike upstream's tests and gave 7 of 20; the second,
+  with the source `python/` directory on the path, failed all 25 identically because it shadowed the wheel's `ttl` with an
+  uncompiled one. Neither result was evidence about the simulator. The third run (helper package only) gave 12 of 25, and the
+  causes of the 13 failures are listed in the memory note, partly unverified.
+
+## 2026-10-16: the kernel attempt, implemented (branch `kernel-attempt`, version 0.6.0)
+Prompt (operator): "approve and continue with subagent development. CONTINUE UNTIL IT WORKS OR I SAY OTHERWISE. Stop looping and
+watch for bad behavior. Instead of pure timers, we need watchers." Spec `docs/superpowers/specs/2026-10-15-kernel-attempt-design.md`
+(section 11 lists every change from the approved design), plan `docs/superpowers/plans/2026-10-15-kernel-attempt.md`, ledger
+`.superpowers/sdd/2026-10-15-kernel-attempt/progress.md` with a report per task. The goal is a measurement: can the local coder write a
+working tt-lang kernel for an op, and how many ops of a new model have no ttnn equivalent.
+Built, by task:
+- Task 1, `tt-orchard kernel-env`: a tt-lang checkout and a simulator venv, with the diagnostics patch. It completes an interrupted clone
+  and never resets one at another commit (the plan's code deleted it, which blocked every retry after one failed fetch).
+- Task 2, the command wiring in `orchard/cli.py` and the README section.
+- Task 3 and 3b, `orchard/stallwatch.py`: every long child of `kernel-probe` (the simulator check, the smoke test, the hardware runs)
+  runs under a watcher that stops it on a stall (no output and no CPU) or a repeating output line. The stop sends SIGTERM to the process group first and SIGKILL after a grace period, so `gozer run` can release
+  its lease. The first SIGTERM is guarded (pgid above 1, a group other than the caller's, child leads it); the SIGKILL checks the first two and that the group has members, and skips leadership because the leader may be reaped.
+- Tasks 4 and 4b, the op inventory template: traces a model on the meta device with `torch.export`, counts ops per static node, scales
+  in-layer counts, follows higher-order bodies and keeps python-level nodes out of the op list.
+- Tasks 5 and 6, `orchard/opinventory.py` and `inventory refresh-ttnn`: statuses mapped, composable, unmapped, ignored and unchecked; a
+  committed ttnn dump.
+- Task 7, the stage 0 hook (step 9 of the delta-triage skill, after `delta.json` is final) and Task 11, the bundle section.
+- Tasks 8, 9 and 10, the kernel loop templates, `orchard/kernelprobe.py` and `tt-orchard kernel-probe`, with four ops (`add` as a
+  calibration op, `silu_mul`, `rmsnorm`, `linear_scan`).
+Review findings that changed the design:
+- A PCC-only check passes a kernel whose output is scaled, because PCC ignores scale. The check now also needs relative L2 error, slope
+  and max-abs-error bars (provisional, in the op specs). A best-effort `ast` gate stops a kernel that computes with torch and calls
+  that a pass; it reports every violation with a remedy and adds the category `forbidden_code`.
+- Trust boundary: the probe first read its verdict from a directory the agent could write and followed links. Now the probe re-runs the
+  shipped check on its own copy under `.verdict/<op>-<n>/` (regular file, at most 256 KiB, `O_NOFOLLOW`), re-checks the sha256 before
+  the gozer call and caps every read of an agent-writable file. It is best effort against shortcuts and accidents.
+- A device-open failure was blamed on the kernel. The harness `setup` phase and the category `harness_error` fix that.
+- The ttnn dump script was fragile: classes were listed as ops, and one failing attribute ended the script before its marker. It now
+  skips classes and records names that raised under `skipped`.
+- The first inventory missed ops inside higher-order bodies (the rotary embedding's cos, sin and to.device). Task 4b traverses them.
+- A crash or interrupt lost the whole probe report. The report is now written from the records so far (exit 3 crash, 4 interrupt, 5
+  hardware hang).
+Live results:
+- L1: `kernel-env --check` passed all six steps (exit 0).
+- L2 and L3: the inventory ran on default configs of Qwen3, RWKV, Mamba2 and Moshi's text model (`MoshiForCausalLM`), 2 layers
+  traced. The first `inventory refresh-ttnn` ran under `gozer run --chips 1 --exact 1` and wrote the dump for ttnn
+  0.65.1rc17.dev6200: 821 names, none skipped, lease released, all four chips free afterwards. Final run on the final code
+  (mapped / composable / unmapped / ignored): Qwen3 26/0/6/3; RWKV 17/1/2/2; Mamba2 30/1/4/3; Moshi's text model 26/1/7/3.
+  Unmapped: Qwen3 `__and__`, `index`, `to.dtype_layout`, `diff`, `new_ones`, `to.device`; RWKV `copy_` (256 scaled), `div_` (4);
+  Mamba2 `einsum` (320), `bitwise_not` (256), `masked_fill` (256), `split_with_sizes` (128); Moshi `type_as` (65), `to.device`
+  (32) and the five Qwen3 ones other than `to.device`. An earlier run before the higher-order-body fix gave other numbers: the fix
+  added the ops inside the rotary-embedding bodies and removed the python-level `getitem` and wrapper nodes. `rsub.Scalar` and
+  `conv1d` are mapped now. By name, each architecture's ops are almost all in ttnn's name list. The unmapped ones are a short list
+  of cast, in-place, indexing and masking ops plus Mamba2's `einsum`. `mapped` is a name match, so this does not say the models
+  would run or run fast.
+- L4 and L5 (the probe against the live coder, and the hardware phase) are run by the controller and added by the controller.
+Notable moments and mistakes:
+- The terminal died on 2026-10-16. Cause: a new test fed a symlink to `/dev/zero` to an uncapped `read_text()`, and the kernel OOM
+  killer stopped it (exit 137). My first theory, `os.killpg(0, ...)` in the stallwatch tests, was wrong; the guards stay as hardening.
+  That test now runs in a child process limited to 2 GiB with a 60 s timeout. Tests that spawn or kill processes run under `setsid -w`.
+- While a suite was running I ran one `gozer run --chips 2 -- env` to see what a lease hands its child; it released and reset board 0, which was free and unused, and no chip was opened. It was avoidable.
+- The first parse of the ttnn dump listed classes as ops, which led to the `callable()` fix above.
+- Reviewers found the large gaps (the scale-blind check, the forgeable verdict, the lost report); the authors' own tests had passed.
+Process: two parallel worktree streams (`ka-inventory`: tasks 4 to 7 and 11; `ka-probe`: tasks 8 to 10) merged into `kernel-attempt`;
+more than 20 review rounds; most tasks had implementer-run mutation tables (the counts are the implementers' reports; reviewers read them and spot-checked some, and the controller did not re-run them); for two guards in Task 9 (the regular-file read layers) both layers were removed together, so no single layer was seen red alone; the ledger is the record. Full suite after
+the merge: 3,860 passed, 2 skipped.
+Not done:
+- The hardware phase (L5) has not run. L4 and L5 results come from the controller.
+- Success criterion A is not met: Qwen3 has 6 unmapped ops (`__and__`, `index`, `to.dtype_layout`, `diff`, `new_ones`, `to.device`). They
+  stay unmapped because their ttnn semantics are not provably identical to the aten ops. Mapping them is a table decision for the
+  operator or a later task.
+- Only `kernel-probe` runs its children under the stall watcher. These still use timers only: `inventory refresh-ttnn` (a 1800 s
+  `subprocess.run` timeout), the `inventory` trace, the `kernel-env` steps, and the agent's own shell commands (the `Tools` timeout).
+  They can adopt the watcher later.
+- The stall watcher's 60 s quiet period and the probe's other budgets are provisional and unmeasured.
+- Stage wiring (option C in the spec) is the operator's decision from the probe's table.
+- The `generic_op` export route is not built. The full-port stages are untouched.
+- The tt-lang diagnostics patch is local and has not been reported upstream, by decision.
+- Deferred minors for each task are in the ledger.
+
+## 2026-10-16: fixes after the final review of the kernel attempt (branch `ka-final-fixes`)
+Prompt (controller): fix the final whole-branch review's findings (one Critical, eight Important, two minor), then a re-review's
+regression and its smaller items, test first, one commit per item, with a mutation per new guard. Worked in its own worktree while a
+live probe batch ran the shipped templates from `kernel-attempt`. Reports: `.superpowers/sdd/2026-10-15-kernel-attempt/final-fixes-report.md`.
+Key decisions (spec section 11, items 17 to 25):
+- gozer gets 120 s after the watcher's SIGTERM, because its lease release runs a chip reset of about 42 s. The first 5 s grace
+  killed gozer during the reset.
+- The probe stops stray agent processes before any verdict: same uid, `ORCHARD_RUN_DIR` exactly the attempt directory, SIGTERM,
+  2 s, a second scan, SIGKILL. `stopped` means the process is gone. It cannot see a process whose /proc environ no longer
+  holds the value (an exec with a new environment; `clearenv()` alone does not change it) or a non-dumpable process.
+- The report gives the watcher's longest quiet stretch and longest repeat for each hardware run, so its limits can be set from a
+  measurement; it also has a status column and notes on `add` and the simulator's f32.
+- The static gate allows only listed names from `typing` and `__future__` and refuses forbidden names as attributes and imports.
+  `from ttnn import shutil as s` still passes: the gate cannot tell a module from a name without importing ttnn.
+- `opinventory.main` defaults `--ttnn-python` under the passwd home, because in an agent shell HOME points inside the run directory.
+- The ops-inventory template builds only a `PreTrainedModel` subclass.
+- kernel_check runs the simulator in its own session with `PR_SET_PDEATHSIG` and a SIGTERM handler. The first version of this fix
+  (session only) orphaned the simulator when the watcher stopped kernel_check; the re-review found it.
+- `kernel-probe` holds an flock on `probe.lock` in its output directory. A first version (a pid file with a staleness
+  check) let two probes run at once after both judged a stale lock dead; the re-review found it.
+Notable moment: an I7 test written against the old code had a child print without end under a 60 s backstop. It wrote a 48 GB log
+under `/tmp/pytest-of-ttuser` and took the root disk to 97% while the live probe ran. I deleted it at once. Tests that make large
+output now run the child under `RLIMIT_FSIZE` (16 MiB) and write a bounded amount.
+
+## 2026-10-16: kernel probe sampling (branch `ka-final-fixes`, round 3 of the fix wave)
+Prompt (operator, through the controller): "as much as we can make determinism happen when it is useful, we should do it. but we
+should also make it easy to adjust temperature so wild, zany or ingenious results can be found too".
+- Live finding at the code before this change: every request sent `temperature: 0` (greedy decoding asked for), and attempts
+  at one prompt were often the same sample. `add` gave 1 distinct kernel in 3 attempts, `linear_scan` 1 in 5 (identical: 9 turns
+  and 198 s each), `rmsnorm` 3 in 5, and `silu_mul` 5 different kernels in 5 attempts, 26 to 37 turns each; why `silu_mul`
+  diverged was not measured. The report's "independent draws" sentence was wrong, and so was calling greedy attempts
+  repeatable: repeats are common at temperature 0 and not guaranteed.
+- `AgentStep` takes temperature, top_p and seed; its default request is byte for byte the old one. `kernel-probe` takes
+  `--temperature`, `--temperatures`, `--top-p` and `--seed`; greedy stays the default. No seed at temperature 0; above it,
+  attempt k sends base + k, and a base derived from the probe id is recorded so a run can be repeated with `--seed` (if the
+  server honours seeds, which is not verified).
+- The report splits each op by temperature and counts distinct kernels, with a warning when all attempts wrote one kernel.
+- Same round: kernel_check now exits by the signal that stopped it (it used to exit as SIGINT for every signal), and an
+  interrupt can no longer be lost inside the sweep's SIGKILL pass. Spec section 11, items 26 and 27.
+
+
+## 2026-10-16: the latest skills (Task 14, branch `ka-skills`, version 0.6.1)
+Prompt (operator, through the controller): "WE USE THE LATEST tenstorrent/skills and tt-lang skills available. We check in
+preflight whether we have the latest even." The live probe had given the coder only `kernel-probe.md` and `eltwise_add.py`;
+`rmsnorm` passed 0 of 10 and `linear_scan` 0 of 6 on tt-lang API mistakes, and the installed tt-lang skill was never used.
+- `orchard/skillsfresh.py` compares the tenstorrent/skills clone(s), the tt-lang checkout and the installed tt-lang skill with
+  upstream, read only (a runner that refuses every git subcommand that could write, `gh api` GETs only, github.com only,
+  `GIT_OPTIONAL_LOCKS=0`, a network budget). `kernel-probe` and `kernel-env --check` refuse a stale tt-lang source unless
+  `--allow-stale-skills`; the bringup preflight's `skills` row warns and never blocks. Spec section 11, item 28.
+- Found while reading the skill: it documents tt-lang specification 0.12 and the pinned checkout is at 0.20 (`ttl.kernel` is
+  now `ttl.operation`, `reduce_sum` lost its scaler and takes a `shape`, `broadcast` and `fill` moved to `ttl.block`). The
+  probe therefore also gives the coder the checkout's specification and `eltwise_broadcast_reduce.py`, and `kernel-probe.md`
+  lists the renamed names. A test reads the simulator's source and checks each claim.
+- On this machine on 2026-10-16 (read only): the tt-lang checkout is 1 commit behind upstream main (a compiler-only change),
+  so the probe now refuses without `--allow-stale-skills` until the pin moves; the tt-lang skill matches its upstream; the
+  tenstorrent/skills clone is 3 commits behind, dirty, on `tsingletaryTT/squeeze` (a bringup warning).
+- Not measured: whether the reference files change the probe's pass counts.
+- Fix wave after the independent review (`.superpowers/sdd/2026-10-15-kernel-attempt/task-14-review.md` in the
+  `kernel-attempt` worktree): I1 to I3, M1 to M9, and git hardening (no redirects, no fsmonitor or hooks, process-group
+  kill on a timeout), one commit each, test first. Notable: the conftest guard now fails a test that reaches the real
+  git or gh runner; a process test first passed under its mutation because the call still waited the full 60 s for the
+  grandchild to close the pipes, so it now bounds the call's duration.
+- Task 14b (2026-10-16): the live rmsnorm probe (L4c) wrote a real kernel by turn 9 and then spent 22 turns on
+  `no_kernel: kernel.py defines no OPERATION`, because it named the function `rmsnorm`. The check now names a single
+  misnamed `@ttl.operation` function and says to rename it (still `no_kernel`); the skill says the name is literally
+  `OPERATION`, gives a skeleton, and says inputs come in the order of the spec's `inputs` keys.
+- Task 14c (2026-10-16): the next L4c rmsnorm attempt sliced in elements (tt-lang slices count tiles) and then
+  alternated two identical `sed` commands for 9 turns, which TurnRepeat did not report. The skill now states units,
+  dtype and the output as general facts, each checked against the harness, the specification or a simulator run.
+  TurnRepeat gained a cycle track (period 2 or 3, three full periods), which applies to every agent step.
+- Task 14d (2026-10-16): the coder ignored the literal-name rule a third time (`def rmsnorm` six times with the rule and
+  a `def OPERATION` skeleton in its prompt, no check run between writes). The harness stopped requiring the name: the
+  one `@ttl.operation` function is the operation, and the harness calls the function the gate names. Step 4 now says
+  to run the check after each write. The 14b rename message is gone.
+
+## 2026-10-18 (night): the first hardware runs of the kernel probe (L5, version 0.6.4)
+Prompt (operator): "go ahead and use the full machine. when you're done, shut down the LLMs and then the machine itself." The tensixinet session
+had finished its read-only demo and said the chips were free. Coder-Next ran on board 1 (chips 2 and 3, port 8011); the hardware phase ran on
+chip 1 under `gozer run`, as the probe does.
+- First launch refused: the latest-skills preflight found tt-lang upstream main one commit ahead of the pin (a CI-only commit; `diagnostics.py`
+  unchanged, sha256 the same). Pin moved to `1cd7d41`, `kernel-env` rebuilt, version 0.6.4 (local commit, not pushed).
+- `add`, 1 attempt: smoke test passed; simulator pass (7 turns, 45 s); hardware pass (PCC 0.999998, max abs error 0.0156). The kernel is upstream's
+  `eltwise_add.py` renamed, so this checks the loop, not the coder.
+- `silu_mul`, 3 attempts at T=0.7: 3 of 3 passed the simulator (10, 15 and 13 turns; 250 to 372 s) and 3 of 3 passed on hardware (PCC min 0.999996 each).
+  Three distinct kernels. Prediction written before the run (at least 2 of 3 in the simulator, most of those on hardware) held.
+- Correction of an earlier statement of mine: "no coder-written kernel has passed the simulator" was wrong. `silu_mul` passed 5 of 5 in L4.
+  `rmsnorm` (0 of 16 over L4, L4e, L4f) and `linear_scan` (0 of 8) have not passed.
+- Not done: a hardware run of `rmsnorm` or `linear_scan` (neither passes the simulator), repeated hardware runs for variance, any op beyond these four.
+
+## 2026-10-19: PRs 9 and 10 merged locally; the Nemotron-3.5-Bolt-74B bring-up stopped at preflight
+Prompt (operator): "Have this directory represent the combo of PRs 9 and 10, as if they were merged to main already", then "Perform an
+unattended bring up of nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB. The only thing to 'help with' is HDD space. If it fails, we log the fail and
+report back ... Don't make the changes yourself."
+- Merged `pr-10` then `pr-9` into local `main` (not pushed). Conflicts were additive: `CLAUDE.md` keeps both sections, `preflight.py` keeps
+  the CPU stand-in and SFPI signals beside the skills-freshness signal (my first resolution interleaved two `return Signals(` calls; fixed before
+  the commit), the version is 0.6.4. The suite passes: 4422 passed, 2 skipped.
+- Bring-up: blocked at preflight by `nearest-model-missing` (no bundle serves the BF16 base) and `coder-unusable` (ollama not running). Disk
+  was enough. Nothing started. Write-up and what would be needed: `docs/run-logs/2026-10-19-nemotron-bolt-74b.md`. I did not start ollama,
+  because the base block decides the outcome and the instruction was to change nothing else.
+
+## 2026-10-19 (later): pplx-decider-v1.2 stopped at stage 2, and stage 1's pass was false
+Prompt (operator): "OK let's do pplx-decider" (unattended, log the failure and report what we would need, change nothing). Ended `blocked`
+(`needs-new-model-code`) after stage 0 (class `unknown`, path `full-port`, 20 m 31 s) and stage 1 (11 m 18 s). Write-up and the list of what
+would be needed: `docs/run-logs/2026-10-19-pplx-decider-v1.2.md`. I started ollama (the CPU stand-in check blocks without it); nothing else was done by hand.
+- Found by reading the evidence: stage 1's `summary.json` says `verdict: fail` (all 851 model keys missing, so the CPU reference ran on
+  uninitialised weights and produced noise), the agent wrote `reference.json` with `verdict: pass`, and the gate accepted it. The gate trusts the
+  agent's file instead of the evidence the template wrote.
+- Stage 0's prefix normalization (`model.language_model.` to `model.`) matches 0 of 1183 names for a checkpoint that uses `language_model.*` and
+  `visual.*`; the draft contradicts its own evidence on the prefix; `code_files` misses nested directories.
+- The pplx-decider's real difference (a readout head and non-causal attention across a request's questions) is in the card and the code, not in the
+  config or the tensor names; no stage can see it today.
+## 2026-10-19: operator mode for the web UI (branch `ui-operator-mode`, version 0.6.5)
+Prompt (operator): "add a very lightweight theme switcher to the tt-orchard UI. For now, call what we have now 'playful' mode. I want
+'operator' mode, less focused on fun and more on what's happening now and what happened before and what to do next." Brainstormed first.
+The operator's complaints about the page: what is running does not stand out enough, the font is hard to read, text is hard to copy, it is
+hard to tell decoration from information, and numbers come with no context ("if perf is good I want it to tell me"). The operator chose
+mockup B (two panes, "now" stays put) and said to build the switcher and layout first and the verdict line after.
+- `orchard/web/mode.js` (a plain script in `<head>`, so no flash) sets `<html data-mode>` from `?mode=`, else the stored choice, else
+  `playful`; only the two names are accepted and every storage call is in a `try`. Two buttons in the top bar switch it.
+- The run view has two wrappers, `.op-left` (state band, Now, Next, block and pause panels) and `.op-right` (stages, results, tabs and
+  panes). Outside operator mode they are `display: contents`, and a browser check showed every key element at the same position as on the
+  old page. In operator mode the left pane is sticky and the right scrolls; below 900 px they stack.
+- The state band takes its colour from `#run[data-state]` and `[data-tone]` (blue and pulsing for running; the pulse sits in a
+  `prefers-reduced-motion: no-preference` query). Operator mode drops the pixel face by redefining `--pixel` as the system face, hides
+  the scene (and `scene.js` stops drawing), and shows the real state name, stage name and feed role instead of the orchard words and icons.
+- Checked in headless Chrome against the live pplx-decider run (light and dark, widths 1440 to 400, no horizontal scroll, storage blocked,
+  an invalid `?mode=` ignored, Hardware and Settings views still open). 25 mutations in all; the first run left one survivor (the link
+  value was not validated where it is read), which now has a test.
+- A test of mine used an element id that did not exist (`run-head` is a class); it failed with a KeyError, not an assertion.
+- Not done: the Verdict line (a plain sentence with a yardstick for each number; it needs the pass bars from the code and the numbers from
+  earlier runs' ledgers), a "copy" button for long commands, and hiding the emoji inside the mode chip and the "Now" line. One 404 showed
+  once in a browser console and did not recur in eight more loads on either UI. The page's own JavaScript still has no automated test;
+  the browser checks were run by hand with Playwright in a scratch venv.
+
+## 2026-10-19 (later): the Verdict line (branch `ui-operator-mode`, version 0.6.6)
+Prompt (operator): "go ahead with the verdict line" (the second half of the operator-mode request: "if perf is good I want it to tell me instead of
+just giving me numbers I don't have context for"). Tests first (`tests/test_verdict.py`, five more in `tests/test_webui.py`), 26 mutations.
+- `orchard/verdict.py` turns `run_view.results` into {id, tone, headline, detail} lines, worst first. A swap or configuration result is set
+  against `SWAP_TOP1_MIN` and the earlier runs' scores (named by model). A configuration's boot time is ranked (quicker than, about the same as,
+  somewhat slower than, slower than) against the median of earlier runs of the same package and chip count that passed, and only when at least
+  two exist; stage 2's boot time is stated and never ranked, because its caches are sometimes warm and the result does not say. A run with
+  hardware results and no timing says "Not measured: generation speed". The cut-offs (a 15% band, 1.5 times for slow, a margin of 0.05) are choices.
+- The reference line reads `stages/1/evidence/summary.json` and `load-report.json` (inside the run, under 2 MiB, no link out) and sets them
+  beside `reference.json`. On the real pplx-decider run it shows, first and in red, that the template said fail with 851 of 851 keys missing while the
+  agent's file said pass. The gate itself is unchanged: this is a display, and the gate fix is in the pplx-decider run log.
+- `WebApp._peers` reads the other runs' results once per ledger change (mtime and size) because the page asks for the detail every few seconds;
+  verdict strings pass through `redact`. The page shows the section in operator mode only; it is built with text nodes, never markup.
+- Mutation lessons: three survived the first pass (a failed run counted as a yardstick, the minimum used instead of the median, a size cap
+  tested with a file that was invalid JSON anyway); each now has a test that goes red.
+- Checked in headless Chrome on the real runs: pplx-decider (bad, warn), bytkim (four good, three info, with 0.97 from RAG-Gate and clef and the
+  118 s and 218 s boots for 2 chips). Not done: a hardware-free way to say whether tokens per second is good (nothing times generation yet, so the line
+  says so), the same verdict in the playful view, and a copy button.
+
+## 2026-10-19 (night): stage 0 matches by what the tensors are, and stops on a restricted head (branch `model-alignment`, version 0.6.7)
+Prompt (operator): after the pplx-decider run, "we have proximal models right but the way we're matching isn't helping us yet"; asked what I
+would have found if I drove the bring-up, I ran the analysis by hand (names, shapes, values, the readout rows) and then the operator ruled
+"stop and report now" and "yes, build it in a worktree that has all our open PRs still merged together" (this branch is local `main`, which has
+PRs 9 and 10 merged; the UI branch `ui-operator-mode` is not a PR and is not in it). Design note: `docs/superpowers/specs/2026-10-19-model-alignment-design.md`.
+- Found by hand: all 1183 decider tensors have an analogue in Qwen3.8-27B (`language_model.X` and `visual.X` against `model.language_model.X` and
+  `model.visual.X`, shapes equal); the base has 16 more (`lm_head`, 15 `mtp.*`); sampled values are near (cosine 0.9999) so it is a fine-tune; the
+  255 readout rows are copies of `lm_head` rows for the tokens A, B, ... AA, AB (cosine at least 0.9999).
+- Built, tests first (new files `test_delta_triage_alignment.py`, `test_restricted_head.py`, `test_gate_reference_evidence.py`): `align_leftovers`
+  (suffix matching plus voted prefix rewrites), `sample_value_diffs` (standard library), `detect_restricted_head` (numpy, says when skipped), nested
+  `code_files`, the class `restricted-head` (path full-port; the supervisor pauses before stage 1; unattended it blocks with the code `restricted-head`),
+  and a stage 1 gate that compares `reference.json` with the template's `evidence/summary.json` and `load-report.json`.
+- Run on the real checkpoints (4 s): class `restricted-head`; 1183 of 1183 aligned (850 and 333 by two prefix rewrites); values 1 identical and 7 near;
+  head restricted, 255 rows, tokens A, B, C, ...; 5 code files found. The new gate fails the real pplx-decider stage 1 (three reasons) and still passes
+  the bytkim, RAG-Gate and Clef stage 1 directories.
+- Found while testing: `code_files` skipped symlinks, and a Hugging Face cache snapshot is all symlinks, so the decider's code was missed until a
+  test with links went red. 38 mutations: 31 red first time; the 7 survivors (the "must not match" name guards, one vote as a rule, any one row as a
+  head, a full-size matrix as a restriction, an unattended retry passing the stop) were tests that never reached their branch (the tie test's names
+  shared too little to tie); each is fixed and red now. Two of my own assertions had `or True` and could not fail; fixed before any run.
+- Not done: a reference loader that uses the name map (the gate now fails such a run instead of passing it); the decider's attention mask and marker
+  readout (its `model.py` has not been read); a middle path that checks a restricted head against the producer's code on the host. The suite was run in
+  full once at the end of this entry.
+
+## 2026-10-19 (night, later): one branch, the loader's real cause, the mask answer and the parity run (branch `make-it-work-make-it-useful`, version 0.8.1)
+Prompts (operator): "do the reference-loader and the attention mask. may as well follow that middle path. then, let's take all these PRs and branches
+and decide: we're going to go one true branch for all these changes together. 'Make it work and make it useful' branch." Later: "i accidentally ran
+tt-smi -r sorry" and "might need to re-run it before retrying and continuing".
+- The branch: local `main` (PRs 9 and 10 merged) plus `ui-operator-mode` plus `model-alignment`, merged in that order; conflicts were CLAUDE.md (log
+  entries) and the version, now 0.8.x. Nothing else carried commits `main` lacked: `autonomy` and `autonomy-keep` are the same commit, the old combined branch
+  from before the split into #9 and #10, and `main` is ahead of it (a later self-review fix, a newer tt-lang pin). The full suite on the merge passed (4514).
+  Not pushed; PRs 9 and 10 are not closed.
+- The loader, corrected: I first said the template fell back to AutoModelForCausalLM because `transformers.Qwen3_5Model` is not exported. That was wrong
+  (it is exported on both interpreters). The stage 1 agent had edited its copy of `reference_gate.py`. Fixes: both gates compare the stage's copy of
+  `delta_triage.py` / `reference_gate.py` with the shipped file; the template resolves the class from the architecture (module, then by name), retries a
+  load that misses keys once with a key_mapping from stage 0's `alignment.raw_rules`, and fails a model with no lm_head with evidence; every failure path
+  writes `evidence/summary.json`. The skills say not to edit the scripts.
+- The mask, read and measured (`docs/run-logs/2026-10-19-pplx-decider-parity.md`): only the 16 full-attention layers are bidirectional; a causal runtime
+  changes probabilities by up to 0.47 on the CPU reference, about eight times the producer's own noise. Stage 0 now records the model's declared
+  `attention_mode` and the code lines that mention masks, hooks and the readout (`evidence/readout-facts.json`).
+- The middle path, built and run: `orchard/skills/restricted-head-templates/` (`restricted_head_parity.py`, `prepare_restricted_head.py`) and
+  `docs/restricted-head-parity.md`. Host reference written from the protocol text, pinned to the producer's code by sha256, never imported. Two shims
+  during the run only: a key_mapping into the TT loader's `Qwen3_5ForCausalLM.from_pretrained` (otherwise this checkpoint loads as random weights with
+  a warning) and a wrapper that makes the prefill attention's one causal SDPA call non-causal with a mask hiding the padding. On one board: 14 of 14
+  top-1 agree, largest probability difference 0.048, marker hidden-state correlation 0.9975 or better, wiring cosine 0.987, all 16 causal calls turned. A
+  repeat after the operator's `tt-smi -r` gave identical numbers.
+- Slips: my wrong first explanation of the loader (above); `AutoProcessor` needs torchvision; the readout was first read from the directory that holds
+  only the backbone (a 3-minute boot lost); two assertions of mine ended in `or True`-style tails that could not fail and were tightened. 45 mutations over
+  the new code: 40 red first time, the five survivors got tests (the sixth anchor was a redundant guard, removed).
+- Not done: a `tt-orchard head-check` command; images, long states and 255-option questions; a 4-chip run; the bars are copied from the sidecar check, not
+  measured for this head; serving.
+
+
+## 2026-10-19 (night, last): a classification bench for stage 0 (version 0.8.2)
+Prompt (operator): "is there a way to try just this new area of classification logic against like a group of 40 models (without downloading
+their weights fully) and comparing the decisions it makes for those 40 against the decisions you, Claude, would make yourself?"
+- `orchard/classify_bench.py` (`collect`, `compare`) reads each model's headers and configs through the research fetcher, runs the real stage 0 functions,
+  and writes one evidence packet per model with no verdict. Three fresh labelers (opus, sonnet, fable) labeled the packets blind. Corpus and how-to: `docs/classify-bench/`.
+- Result on 42 models (2 skipped: the Hub would not serve them): the tool matched the labelers' majority on 39 of 40. Against 6 models with a known outcome the tool and
+  each labeler were right on 6 of 6. The 3 differences: Timestral-209M (labelers split unknown vs full-port), Sieve-27B-v2 (labelers split; no config.json, `head.pt` unreadable),
+  and sabi-noema (all three labelers say weights-only; the tool says full-port because 96 small `A_log` and norm tensors are F32 where the base has BF16).
+- Bugs the bench found in the tool, each fixed test first: a repo with its own `lm_head` could be called a restricted head; a sidecar problem hid a backbone mismatch
+  (`decide_class` now checks the backbone first); subdirectory weights were listed as sidecars; the shard, body and request caps made large repos unreadable (the bench has
+  its own limits and `headers.read_model` takes `max_shards`); `evidence_complete` counted GGUF and `.pt` sidecars as gaps.
+- Quantized copies of the base (GPTQ, FP8) are full-port in the tool and in all three labelers' second round, but all three called it medium confidence: the guide has no class for a copy
+  that differs only by quantization. First-round labels for those four packets said unknown or full-port; the second round used packets with the added evidence.
+- Open: sabi-noema's dtype rule needs a hardware swap test before it is relaxed (TT casts `A_log` to float32 itself). The labelers saw packets the tool wrote, so a gap in a packet is a gap for both.
+
+## 2026-10-19 (night, later): model card benchmark plan and tooling, and a Copilot finding (version 0.8.3)
+Prompt (operator): "for these model cards, don't we want a full benchmark?" Then: "yes, write the benchmark plan and pilot on bytkim", and "don't use the HW yet".
+The plan is `docs/superpowers/plans/2026-10-19-model-card-benchmark.md`. The pilot has not run: the operator said not to use the hardware yet, so
+everything built so far needs no chip.
+- Why: the bytkim card has 32 of 32 tokens against the CPU and decode speed on four prompts whose text differed between base and fine-tune. That is no
+  evidence about the fine-tune. The plan compares base and fine-tune on the same bundle and server: GSM8K, HumanEval, IFEval, MBPP (lm-eval) and BFCL
+  `simple` and `multiple` (a scorer in this repo), plus a speed sweep over input length and concurrency.
+- Built, test first, a mutation table per module: `orchard/toolcall_bench.py` (BFCL scorer, 47 mutations), `orchard/bench_proxy.py` (adds thinking off, records
+  tokens, cut-offs and latency per request, 20 mutations), `orchard/bench_session.py` (starts a bundle's run.sh, runs the phases under the stall watcher with a
+  scrubbed environment, writes `summary.json`, 41 mutations). `tests/fixtures/bfcl` holds the first lines of the real data; `tests/fixtures/lm_eval` a trimmed real
+  results file.
+- Found while testing: the scrubbed harness environment hid the fake harness's log path, so the first session test failed for a reason that was the design working. A
+  mutation run first crashed on a mutation that hung the tests; the harness now counts a hang as detected. `lm_eval`'s plain `humaneval` cuts chat replies at stop strings
+  such as `\ndef`; the plan uses `humaneval_instruct` and `mbpp_instruct`.
+- Copilot's review of PR 11 found that `used_caches()` ignored the tensor caches that sidecar-parity and restricted-head checks keep, so `--prune-caches` could delete one
+  mid-run. Fixed in `79ddf24`: `caches.CACHE_CONFIGS` lists all three config names. Four tests were red without the change; a mutation table of 5 left no survivors. My first
+  prune test could not fail (cache sizes round to 0.0 GB for small files, so nothing was covered); it now uses sparse 2 GB files and older protected caches.
+- Not done: the pilot, a speed sweep script, the BFCL download helper, and any card change.
+
+## 2026-10-20 (UTC): the benchmark pilot on bytkim/Qwen3.8-27B-pi, and a broken instrument (version 0.8.4)
+Prompt (operator): "yes, write the benchmark plan and pilot on bytkim", then "don't use the HW yet", then "go". Results: `docs/run-logs/2026-10-19-bytkim-pi-benchmark-pilot.md`.
+- Eight sessions on one 2-chip board (pi and base, thinking on and off, first pass and code pass), 20 items per task, each under its own `gozer run` lease. At that size the
+  fine-tune and the base cannot be told apart on GSM8K, IFEval, BFCL, HumanEval or MBPP. Thinking off cut a session to a third of the time without a clear loss.
+- The first pass scored HumanEval 0.0 for both models. Cause (read from the stored samples, 12 of 20 replies empty): lm-eval's `humaneval_instruct` expects a prefilled
+  assistant turn and stops at `\ndef`; `mbpp_instruct` relies on the same prefill. My plan had named `humaneval_instruct` as the fix for exactly this problem, and it was not.
+  `orchard/lm_eval_tasks/` has `humaneval_chat` and `mbpp_chat`, with 41 tests and an 18-mutation table. A control server that answers with the datasets' own solutions
+  scores 1.0 and 1.0 (whole function and body-only replies) and a stub scores 0.0, on 40 items each.
+- The first control run scored 0 for every mode, because my control server left `"index": 0` out of each choice; lm-eval turns that into an empty reply with no error. A
+  score of 0 for every mode was the sign that the instrument, not the model, was wrong.
+- While the pilot ran I developed in a second worktree (`bench-code-tasks`), because the driver imports `orchard.bench_session` for each session and an edit mid-run would have
+  changed later sessions.
+- Not done: the speed sweep, drafter acceptance from `server.log` (the packaging log said none is printed; each request logs `accept x/7`), a full-size run, and the card.
+
+## 2026-10-20 (UTC): full-size benchmark of bytkim/Qwen3.8-27B-pi, and the card is public (version 0.8.5)
+Prompt (operator): "push benchmark wor. run at full size with thinking. publish the card after", then "publish the model with tt-model-manager as public HF model",
+then "tell the tensixinet agent it can continue (after you take down the running model)". Results: `docs/run-logs/2026-10-20-bytkim-pi-benchmark-full.md`.
+- Every item of HumanEval, MBPP, GSM8K, IFEval and BFCL simple and multiple, for the fine-tune and then the base, 9.8 hours of chip time in all. The fine-tune is ahead on
+  every set; the gap is clear on GSM8K (0.839 against 0.792) and MBPP (0.896 against 0.864) and within noise elsewhere. The 20-item pilot could not show this.
+- The 8192-token limit with thinking on costs both models: 44 of 52 MBPP failures for the fine-tune and 53 of 68 for the base are empty replies. The card says so.
+- Drafter acceptance now comes from the server log per phase (commit `1bfdaa8`): 0.46 to 0.60 of drafted tokens.
+- `episod/qwen3.8-27b-pi-p300` is public and listed in the community catalog (delist with `tt-model unpublish`). The package gate passed after the card rewrite.
+- tensixinet was told the chips were free after the server was down and `gozer status` showed all four chips FREE.
+- Cleared 70 GB at the operator's request (three unused Hugging Face models, the audio8-asr tensor cache, four old animatediff image tags).
+- Not done: the speed sweep, MMLU-Pro, long context, thinking-off and higher-limit runs, per-item BFCL results, `tt-model pull` and a boot from the Hub.
+
+## 2026-10-20 (UTC): fixes for ezietlowTT's review of PR 11 (version 0.8.6)
+Prompt (operator): "Respond to PR 11 comments and requests", then "push the fixes and reply to the review; review PR 12 against this env too". The review had 15
+findings and some smaller items. Four agents each took a group in its own worktree (`pr11-a` to `pr11-d`), test first, one commit per finding, a mutation per guard;
+I merged the four branches. The suite on the merged branch: 4930 passed, 2 skipped. Every finding was real; two were fixed differently from the suggestion.
+- Lab mode: the `cpu` row is skipped (#1); the `sfpi` row reads the lab's version over ssh and is left out with no lab probe (#2). A run directory is not set aside while a
+  supervisor holds its ledger lock, and `local_snapshot` accepts `.safetensors` at any depth and top-level `pytorch_model*.bin` (#4). A `.bin`-only model now passes preflight
+  and may fail at stage 2, which reads top-level safetensors only.
+- Gates: stages 0 and 1 need the template's copy and the template's own sha256 stamp (#3; a hand-forged stamp still passes, so this is best effort). Prefix-aligned checkpoints
+  get a stage 0 hazard that says stages 2 and 4 do not rename weights (#10; a path reason would have undone the alignment feature). The reference loader frees the first model
+  before a retry and keeps the first load report (#11). The restricted-head reference digest includes the revision and readout hash and loads with `weights_only=True` (#15).
+- Credentials and leases: kernel probe children get a clean environment and are swept afterwards (#5). HumanEval and MBPP programs run in a Landlock and seccomp sandbox that
+  refuses file reads outside Python's prefixes and every socket; user namespaces and bwrap are blocked on this box. The session refuses code phases when the sandbox cannot
+  start unless `--allow-unsandboxed-code` is passed (#6). A block releases the test lease, and a restart gives back a local one (#7). `refresh-ttnn` stops the whole gozer
+  group on a timeout (#8). A queued gozer request is reported as queued and its ticket cancelled (#9). A phase with any failed request is no longer ok.
+- UI, verdict and speed: one malformed result file no longer breaks other runs' pages (#12); NaN is not a number (#13); a cut-off response is an error sample (#14).
+- Check of the published card: the 1,328 stored HumanEval and MBPP programs (both models) were scored again by the new sandbox and gave the same verdict on every one, so the
+  card's numbers stand. Group C wrote #6's code before its tests; its 38 mutations were run afterwards.
+- Not done: `orchard/canary.py` `ask` has the same uncaught `IncompleteRead` as #14; the skills do not yet say the template copy is required.
+## 2026-10-20 (UTC): the research catalog row falls back to `tt-model` (branch `ezietlow/research-catalog-fallback`, onto `make-it-work-make-it-useful`)
+Prompt (operator, reviewing PR 11 on node6): "Lets get the dependecies onto node6 and try again", then "Lets fix the gap and contribute it back to the PR".
+- With the test dependencies in place on node6 (gozer via `ORCHARD_TEST_GOZER`, tt-lang via `tt-orchard kernel-env`, `ORCHARD_LIVE_RESEARCH=1`) the suite was 4785 passed,
+  1 failed, 3 skipped. The failure was `test_research_live.py`: `bundle_choices` empty, because the catalog row ran only `tt model search --catalog`, and none of node4, node5
+  or node6 has a `tt` command (tt-model-manager ships `tt-model` and `tt-kernel`). `nearest.search` already fell back to `tt-model`; `research/ports.catalog` did not.
+- `catalog()` now asks `tt` first and then `tt-model search <family> --catalog --json` when `tt` is missing or gives no answer; `nearest.parse_search` already reads both
+  outputs. The unavailable row names every command that was tried, or says neither is installed. The plain-term check still runs before either command sees the family.
+- Test first: 3 of 4 new tests red before the change (the fourth pins that `tt` answering means `tt-model` is not asked). Mutations, each red: no fallback, stop after the
+  first attempt, `tt-model` asked first, the old reason text, `--catalog` dropped. The live humanizer test passes on node6 with no `tt` and no shim.
+- Suite on node6 with the same dependencies: 4790 passed, 3 skipped (the two tests that need the skill installed as `ttm-tt-lang` by `tt-warp`, and the qwen transcript replay).

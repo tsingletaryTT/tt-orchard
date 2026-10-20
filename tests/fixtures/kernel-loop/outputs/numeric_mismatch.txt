@@ -1,0 +1,15 @@
+PROGRESS import
+PROGRESS open_device
+PROGRESS set seed0
+PROGRESS run seed0
+PROGRESS set seed0-tail
+PROGRESS run seed0-tail
+PROGRESS set seed1
+PROGRESS run seed1
+PROGRESS set seed1-tail
+PROGRESS run seed1-tail
+PROGRESS set seed2
+PROGRESS run seed2
+PROGRESS set seed2-tail
+PROGRESS run seed2-tail
+

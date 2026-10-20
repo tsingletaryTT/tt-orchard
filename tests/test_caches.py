@@ -33,10 +33,10 @@ def cache(root: Path, name: str, model: str, gb_bytes=1000, age_days=30, now=Non
     return d
 
 
-def run_using(runs: Path, name: str, cache_dir: Path, *, finished=False):
+def run_using(runs: Path, name: str, cache_dir: Path, *, finished=False, config="swap_config.json", where="stages/4/configs/1"):
     run = runs / name
-    (run / "stages" / "4" / "configs" / "1").mkdir(parents=True)
-    (run / "stages" / "4" / "configs" / "1" / "swap_config.json").write_text(json.dumps({"tt_cache": str(cache_dir)}))
+    (run / where).mkdir(parents=True)
+    (run / where / config).write_text(json.dumps({"tt_cache": str(cache_dir)}))
     with Ledger(run / "ledger.jsonl") as led:
         led.append("run_start", None, model="org/m", versions={}, inputs={})
         if finished:
@@ -126,3 +126,45 @@ def test_nothing_outside_the_cache_root_is_ever_removed(box):
         return (0, listing, "") if "find" in argv[-1] else (0, "", "")
     main(cfg, "--lab", "--prune", "--older-than", "0", "--yes", run=run)
     assert not [c for c in calls if c[-1].startswith("rm -rf")]
+
+
+# ---- every config that names a tensor cache counts as using it (review comment on PR 11) -----------------------------------------------
+
+@pytest.mark.parametrize("config", ["swap_config.json", "parity_config.json", "restricted_head_config.json"])
+def test_a_cache_named_by_any_stage_config_of_an_unfinished_run_is_in_use(box, config):
+    root, runs, cfg = box
+    mine = cache(root, f"m/{config}/tt_cache", "org/m@abc")
+    run_using(runs, "org--m", mine, config=config, where="stages/2")
+    assert caches.used_caches(runs) == {os.path.realpath(mine): ["org--m"]}
+
+
+@pytest.mark.parametrize("config", ["parity_config.json", "restricted_head_config.json"])
+def test_prune_keeps_the_cache_of_an_unfinished_parity_or_head_check(box, config):
+    """The protected caches are older than the stale one, so a pruner that did not see them would take them first."""
+    root, runs, cfg = box
+    swap = cache(root, "m/swap/tt_cache", "org/m@abc", age_days=60)
+    other = cache(root, f"m/{config}/tt_cache", "org/m@abc", age_days=60)
+    stale = cache(root, "m/old/tt_cache", "org/old@abc", age_days=30)
+    for d in (swap, other, stale):
+        with open(d / "weights.bin", "r+b") as f:
+            f.truncate(2_000_000_000)                                   # a sparse 2 GB file: sizes are read from the file, no disk is used
+    run = run_using(runs, "org--m", swap, where="stages/2")
+    (run / "stages" / "2" / config).write_text(json.dumps({"tt_cache": str(other)}))
+    removed = []
+    covered, chosen = caches.prune_to_fit(cfg, 1.0, say=lambda *_: None, remove=removed.append)
+    assert covered is True and [c.path for c in chosen] == [str(stale)] and removed == [str(stale)]
+
+
+def test_a_finished_run_s_parity_cache_is_not_in_use(box):
+    root, runs, cfg = box
+    mine = cache(root, "m/p/tt_cache", "org/m@abc")
+    run_using(runs, "org--m", mine, config="parity_config.json", where="stages/2", finished=True)
+    assert caches.used_caches(runs) == {}
+
+
+def test_two_configs_in_one_run_naming_the_same_cache_list_the_run_once(box):
+    root, runs, cfg = box
+    mine = cache(root, "m/p/tt_cache", "org/m@abc")
+    run = run_using(runs, "org--m", mine, config="parity_config.json", where="stages/2")
+    (run / "stages" / "2" / "swap_config.json").write_text(json.dumps({"tt_cache": str(mine)}))
+    assert caches.used_caches(runs) == {os.path.realpath(mine): ["org--m"]}

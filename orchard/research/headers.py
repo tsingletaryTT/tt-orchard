@@ -48,7 +48,7 @@ def shard_header(fetch, repo: str, name: str) -> dict:
             for k, v in header.items() if k != "__metadata__" and isinstance(v, dict)}
 
 
-def read_model(fetch, repo: str, files: list[str]) -> Result:
+def read_model(fetch, repo: str, files: list[str], *, max_shards: int = MAX_SHARDS) -> Result:
     """The backbone's tensors from the headers of its shards. `files` is the repo's file list from the hub.
     The backbone is the shards the index lists, or `model*.safetensors` when there is no index. An index the repo
     advertises but that cannot be used still falls back to the file names, and says so in `errors`, so the class
@@ -86,8 +86,8 @@ def read_model(fetch, repo: str, files: list[str]) -> Result:
     if shards is None:
         pattern = triage_rules.load().BACKBONE_SHARD
         shards = [n for n in safe if pattern.fullmatch(n)] or safe
-    if len(shards) > MAX_SHARDS:
-        res.unavailable.append(Unavailable("headers", f"{repo}: more than {MAX_SHARDS} shards"))
+    if len(shards) > max_shards:
+        res.unavailable.append(Unavailable("headers", f"{repo}: more than {max_shards} shards"))
         return res
     res.data["shards"] = shards
     res.data["extra_safetensors"] = [n for n in safe if n not in shards]

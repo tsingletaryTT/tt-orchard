@@ -1,0 +1,5 @@
+{"op": "silu_mul", "description": "out = silu(gate) * up, elementwise", "inputs": {"gate": [64, 128], "up": [64, 128]},
+ "output": [64, 128], "dtype": "bfloat16", "reference": "silu_mul", "pcc_bar_sim": 0.999, "pcc_bar_hw": 0.99,
+ "rel_l2_bar_sim": 1e-2, "rel_l2_bar_hw": 5e-2, "slope_band_sim": [0.98, 1.02], "slope_band_hw": [0.95, 1.05],
+ "max_abs_atol_sim": 1e-2, "max_abs_rtol_sim": 1e-2, "max_abs_atol_hw": 1e-1, "max_abs_rtol_hw": 5e-2,
+ "seeds": [0, 1, 2], "heavy_tail": true, "provisional": true}

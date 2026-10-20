@@ -417,4 +417,6 @@ def test_a_kill_after_the_escalate_entry_tests_the_escalated_attempt_again(rig):
     assert rig.run(pid=200) == EXIT_READY
     assert len(stage4(rig, "not resuming from a failed hardware test")) == 1
     assert [d["result"] for d in rig.ends(4)] == ["pass"]
-    assert [d["config"] for d in stage4(rig, "hardware test started")] == [1, 2, 4, 1, 2, 4]
+    # The failing 4-chip script exits at once, so the first attempt runs it twice (the startup retry); the escalated
+    # attempt then tests 1, 2 and 4 again.
+    assert [d["config"] for d in stage4(rig, "hardware test started")] == [1, 2, 4, 4, 1, 2, 4]

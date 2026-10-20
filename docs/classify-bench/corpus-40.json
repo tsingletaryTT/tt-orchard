@@ -1,0 +1,182 @@
+[
+ {
+  "id": "Cloudflare/clef",
+  "stratum": "known: sidecar head",
+  "truth": "weights+sidecar",
+  "note": "brought up 2026-10-07: 31 of 32 tokens, sidecar parity measured"
+ },
+ {
+  "id": "ThakiCloud/RAG-Gate-27B",
+  "stratum": "known: fine-tune",
+  "truth": "weights-only",
+  "note": "brought up 2026-10-13, published as episod/rag-gate-27b-p300"
+ },
+ {
+  "id": "bytkim/Qwen3.8-27B-pi",
+  "stratum": "known: fine-tune",
+  "truth": "weights-only",
+  "note": "brought up 2026-10-18"
+ },
+ {
+  "id": "iapp/openthai2.0-qwen3.8-27b",
+  "stratum": "known: fine-tune",
+  "truth": "weights-only",
+  "note": "brought up 2026-10-04 (second-model run)"
+ },
+ {
+  "id": "Altworld/Hemmingway-1",
+  "stratum": "known: fine-tune",
+  "truth": "weights-only",
+  "note": "the first target model"
+ },
+ {
+  "id": "perplexity-ai/pplx-decider-v1.2",
+  "stratum": "known: restricted head",
+  "truth": "restricted-head",
+  "note": "hand analysis plus a chip parity run, 2026-10-19"
+ },
+ {
+  "id": "sabicap/sabi-noema",
+  "stratum": "fine-tune"
+ },
+ {
+  "id": "migtissera/Tess-4.5-27B",
+  "stratum": "fine-tune"
+ },
+ {
+  "id": "ThakiCloud/FactGuard-27B",
+  "stratum": "fine-tune"
+ },
+ {
+  "id": "bespokelabs/Nimble-v4-max",
+  "stratum": "fine-tune"
+ },
+ {
+  "id": "VincentHancoder/RAP-Qwen3.8-27B-RL",
+  "stratum": "fine-tune"
+ },
+ {
+  "id": "summerMC/Diffusion-Qwen3.8-27B",
+  "stratum": "fine-tune"
+ },
+ {
+  "id": "anaghaa/Resonance-27B-S2",
+  "stratum": "fine-tune"
+ },
+ {
+  "id": "OmniJev/OneJev1.5-27B",
+  "stratum": "fine-tune"
+ },
+ {
+  "id": "hirundo-io/Qwen3.8-27B-Westernized",
+  "stratum": "fine-tune"
+ },
+ {
+  "id": "amazon/LAR-27B",
+  "stratum": "fine-tune"
+ },
+ {
+  "id": "perplexity-ai/pplx-decider-flash-v1.2",
+  "stratum": "decision or classifier head"
+ },
+ {
+  "id": "Maincode/matilda-decision-v1",
+  "stratum": "decision or classifier head"
+ },
+ {
+  "id": "FrontiersMind/Lumma-fev-27B",
+  "stratum": "decision or classifier head"
+ },
+ {
+  "id": "knowledgator/gliclass-v4-27b",
+  "stratum": "decision or classifier head"
+ },
+ {
+  "id": "sthanika-ai/Sieve-27B-v2",
+  "stratum": "decision or classifier head"
+ },
+ {
+  "id": "apertixai/cerno-27b",
+  "stratum": "decision or classifier head"
+ },
+ {
+  "id": "mukaddamzaid/amos-1-large",
+  "stratum": "decision or classifier head"
+ },
+ {
+  "id": "intel-ai/Qwen3.8-27B-MXFP8-MXFP8MTP-CT-AutoRound",
+  "stratum": "quantized"
+ },
+ {
+  "id": "intel-ai/Qwen3.8-27B-MXFP4-AutoRound",
+  "stratum": "quantized"
+ },
+ {
+  "id": "nm-testing/Qwen3.8-27B-MXFP6A8",
+  "stratum": "quantized"
+ },
+ {
+  "id": "autotrust/Qwen3.8-27B-NVFP4-DGX-SPARK",
+  "stratum": "quantized"
+ },
+ {
+  "id": "darioooooo0o/Qwen3.8-27B-GPTQ-Int4-asym",
+  "stratum": "quantized"
+ },
+ {
+  "id": "Kamnsv/Qwen3.8-27B-AWQ-INT4",
+  "stratum": "quantized"
+ },
+ {
+  "id": "pitcany/Qwen3.8-27B-FP8",
+  "stratum": "quantized"
+ },
+ {
+  "id": "Qwen/Qwen3.8-27B-FP8",
+  "stratum": "quantized"
+ },
+ {
+  "id": "bartowski/bytkim_Qwen3.8-27B-pi-GGUF",
+  "stratum": "gguf or mlx"
+ },
+ {
+  "id": "SeraphicHero/Qwen3.8-27B-GGUF",
+  "stratum": "gguf or mlx"
+ },
+ {
+  "id": "airagrp/Qwen3.8-27B-iq4-iq6-mlx",
+  "stratum": "gguf or mlx"
+ },
+ {
+  "id": "hotdogs/qwen3.8-27B-clef_svd_lora",
+  "stratum": "adapter"
+ },
+ {
+  "id": "William-Gao1/qwen3.8-27b-pirate-lora",
+  "stratum": "adapter"
+ },
+ {
+  "id": "superqwen/qwen3.8-27b-swe-lora",
+  "stratum": "adapter"
+ },
+ {
+  "id": "liuchen88/CLA1.0-27B",
+  "stratum": "adapter"
+ },
+ {
+  "id": "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB",
+  "stratum": "other architecture"
+ },
+ {
+  "id": "LiquidAI/LFM2.5-24B-A2B",
+  "stratum": "other architecture"
+ },
+ {
+  "id": "microsoft/UserRepGen-4B",
+  "stratum": "other architecture"
+ },
+ {
+  "id": "mistralai/Timestral-209M",
+  "stratum": "other architecture"
+ }
+]

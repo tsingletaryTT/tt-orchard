@@ -639,6 +639,49 @@ def run_fact_rows(run: Run, redact: Redactor) -> list[str]:
     return rows
 
 
+def inventory_section(run: Run, redact: Redactor) -> list[str]:
+    """The "Ops and kernels" section, from stage 0's `ops-inventory.json`. Returns no lines when the
+    file is missing or is not a JSON object, so a run without an inventory gets the same RESULTS.md as
+    before. Every copied string goes through the redactor."""
+    inv = read_json(run.dir / "stages" / "0" / "ops-inventory.json", "stages/0/ops-inventory.json",
+                    required=False)
+    if inv is None:
+        return []
+    lines = ["", "## Ops and kernels", "", "From `stages/0/ops-inventory.json`.", ""]
+    if inv.get("skipped"):
+        lines.append(f"The inventory was skipped: {end(redact(one_line(inv['skipped'])))}")
+        return lines
+    traced = inv.get("traced_class")
+    lines.append(f"Traced class: {redact(one_line(traced)) if isinstance(traced, str) and traced else 'not recorded'}.")
+    summary = inv.get("summary") if isinstance(inv.get("summary"), dict) else {}
+    distinct = summary.get("distinct") if isinstance(summary.get("distinct"), dict) else {}
+    if distinct:
+        lines.append("Distinct ops by status: "
+                     + ", ".join(f"{redact(str(k))} {redact(fmt(v))}" for k, v in distinct.items()) + ".")
+    dump = inv.get("ttnn_dump")
+    version = dump.get("ttnn_version") if isinstance(dump, dict) else None
+    if version:
+        lines.append(f"ttnn dump: version {redact(one_line(version))}.")
+    else:
+        note = inv.get("ttnn_dump_note")
+        note = note if isinstance(note, str) and note else "no reason recorded"
+        lines.append("ttnn dump: none. " + end(redact(one_line(note))))
+    ops_in = inv.get("ops")
+    ops_in = ops_in if isinstance(ops_in, list) else []
+    ops = [o for o in ops_in
+           if isinstance(o, dict) and o.get("status") == "unmapped" and isinstance(o.get("op"), str)]
+    ops.sort(key=lambda o: -(o["scaled_count"] if is_number(o.get("scaled_count")) else 0))
+    if ops:
+        lines += ["", "Unmapped ops, most frequent first (at most 10):", ""]
+        for o in ops[:10]:
+            count = o.get("scaled_count")
+            shown = redact(fmt(count)) if is_number(count) else "count not recorded"
+            lines.append(f"- `{redact(one_line(o['op']))}` ({shown})")
+    lines += ["", "`mapped` is a name match against a recorded ttnn dump. It does not say the op supports "
+                  "the shape, dtype or layout the model needs."]
+    return lines
+
+
 def render_results(run: Run, redact: Redactor, n_todo: int, n_hazards: int, skipped_files: list) -> str:
     repo, rev = run.model()
     lic, nc = run.license()
@@ -657,6 +700,7 @@ def render_results(run: Run, redact: Redactor, n_todo: int, n_hazards: int, skip
              "| Count | Value | Label | Evidence |", "|---|---|---|---|"]
     for name, value in run_counts(run.entries):
         lines.append(f"| {name} | {value} | {'TODO' if value == 'TODO' else 'measured'} | `ledger.jsonl` |")
+    lines += inventory_section(run, redact)
     body = stage_results(run, redact)
     for n in range(9):
         spec = run.specs[n]

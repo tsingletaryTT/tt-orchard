@@ -1,0 +1,128 @@
+[
+  {
+    "id": "support-401",
+    "state": "Subject: API returns 401 since yesterday\nBody: We rotated our API key on Monday and every request from our integration now fails with 401 Unauthorized. Production checkout is down. Please help urgently, this is the third time I have written.",
+    "questions": {
+      "team": {
+        "type": "choice",
+        "instructions": "Which team should handle this request?",
+        "criteria": {
+          "billing": "Charges and refunds",
+          "support": "Technical integration errors",
+          "sales": "Buying a product"
+        }
+      },
+      "urgent": {
+        "type": "noul",
+        "instructions": "Is the customer blocked right now?"
+      },
+      "frustration": {
+        "type": "score",
+        "instructions": "How frustrated is the customer?",
+        "criteria": [
+          "calm",
+          "mildly annoyed",
+          "frustrated",
+          "angry"
+        ]
+      }
+    }
+  },
+  {
+    "id": "review-boiler",
+    "state": "I bought this boiler in March. It heats the flat quickly and is quieter than my old one, but the display stopped working after six weeks and the installer has not called back.",
+    "questions": {
+      "sentiment": {
+        "type": "choice",
+        "instructions": "What is the overall sentiment of the review?",
+        "criteria": {
+          "positive": null,
+          "negative": null,
+          "mixed": null
+        }
+      },
+      "complaint": {
+        "type": "noul",
+        "instructions": "Does the review mention a defect?"
+      }
+    }
+  },
+  {
+    "id": "select-all",
+    "state": "The package includes a charger, a USB-C cable and a carrying case. No headphones are included.",
+    "questions": {
+      "charger": {
+        "type": "noul",
+        "instructions": "Is a charger included?"
+      },
+      "cable": {
+        "type": "noul",
+        "instructions": "Is a USB-C cable included?"
+      },
+      "headphones": {
+        "type": "noul",
+        "instructions": "Are headphones included?"
+      }
+    }
+  },
+  {
+    "id": "moderation",
+    "state": "You are all idiots if you think this update is any good. Whoever shipped it should be fired.",
+    "questions": {
+      "category": {
+        "type": "choice",
+        "instructions": "Which category best describes the message?",
+        "criteria": {
+          "harassment": "Insults aimed at people",
+          "spam": "Unwanted promotion",
+          "feedback": "Criticism of a product",
+          "safe": "Nothing to flag"
+        }
+      },
+      "severity": {
+        "type": "score",
+        "instructions": "How severe is the message?",
+        "criteria": [
+          "none",
+          "mild",
+          "moderate",
+          "severe"
+        ]
+      }
+    }
+  },
+  {
+    "id": "contract",
+    "state": "Either party may terminate this agreement with thirty days written notice. Fees already paid are not refundable.",
+    "questions": {
+      "termination": {
+        "type": "noul",
+        "instructions": "Can the agreement be terminated without cause?"
+      },
+      "refund": {
+        "type": "noul",
+        "instructions": "Are paid fees refundable on termination?"
+      }
+    }
+  },
+  {
+    "id": "language",
+    "state": "Guten Tag, ich m\u00f6chte gern wissen, wann meine Bestellung ankommt.",
+    "questions": {
+      "language": {
+        "type": "choice",
+        "instructions": "Which language is the message written in?",
+        "criteria": {
+          "english": null,
+          "german": null,
+          "french": null,
+          "spanish": null
+        }
+      },
+      "polite": {
+        "type": "noul",
+        "instructions": "Is the tone polite?"
+      }
+    }
+  }
+]

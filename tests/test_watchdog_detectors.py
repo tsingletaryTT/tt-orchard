@@ -413,3 +413,81 @@ def test_identical_turns_fire_once_through_the_identical_track_only():
 def test_turn_shape_default_is_four():
     from orchard.defaults import TURN_SHAPE_N
     assert TURN_SHAPE_N == 4 and TurnRepeat().shape_n == 4
+
+
+# ---- cycles of period 2 and 3 (Task 14c) ----------------------------------------------------------------------------
+
+def _recorded_alternation():
+    """Turns 22 to 30 of the live rmsnorm probe (tests/fixtures/watchdog/alternating_sed_turns.json): two identical
+    sed commands alternating, hashed and shaped the way AgentStep does it."""
+    import json
+    from pathlib import Path
+
+    from orchard.agent import AgentStep, sha
+    doc = json.loads((Path(__file__).resolve().parent / "fixtures" / "watchdog" / "alternating_sed_turns.json").read_text())
+    evs = []
+    for t in doc["turns"]:
+        k = t["turn"]
+        evs.append(tresp(10 * k, k))
+        for i, c in enumerate(t["calls"]):
+            evs.append(Event(ts=10 * k + 1 + i, agent="a", kind="tool_call", tool=c["tool"], args_hash=sha(c["arguments"]),
+                             shape=AgentStep._shape(c["tool"], c["arguments"]), turn=k))
+    last = doc["turns"][-1]["turn"] + 1
+    return evs + [tresp(10 * last, last)], [t["turn"] for t in doc["turns"]]
+
+
+def test_the_recorded_period_2_alternation_fires_once_three_periods_are_complete():
+    evs, turns = _recorded_alternation()
+    assert turns == list(range(22, 31))
+    found = replay(evs, [TurnRepeat()])
+    # Turns 22..27 are three full periods of A,B; turn 27 is complete when turn 28 starts (ts 280).
+    assert times(found) == [280]
+    assert found[0].detector == "turn_repeat" and found[0].evidence["match"] == "cycle"
+    assert found[0].evidence["period"] == 2 and found[0].evidence["turns"] == 6
+    assert not found[0].pause
+
+
+def cycle_turns(pattern: str, start=1):
+    """One call per turn, its args the letter of the pattern."""
+    evs = []
+    for i, letter in enumerate(pattern):
+        k = start + i
+        evs += [tresp(10 * k, k), tcall(10 * k + 1, k, letter * 64)]
+    k = start + len(pattern)
+    return evs + [tresp(10 * k, k)]
+
+
+def test_a_period_3_cycle_fires_after_three_periods():
+    found = replay(cycle_turns("ABCABCABC"), [TurnRepeat()])
+    assert times(found) == [100] and found[0].evidence["period"] == 3
+
+
+@pytest.mark.parametrize("pattern", ["ABABA", "ABCABCAB", "ABACABAB", "ABCDABCDABCD", "AABBAABB", "ABCBA", "ABABAC",
+                                     "ABCABCABD"])
+def test_patterns_short_of_three_periods_or_of_a_longer_period_do_not_fire(pattern):
+    assert replay(cycle_turns(pattern), [TurnRepeat()]) == []
+
+
+def test_a_cycle_re_arms_after_it_fires():
+    assert times(replay(cycle_turns("ABABABABABAB"), [TurnRepeat()])) == [70, 130]
+
+
+def test_a_turn_with_no_calls_breaks_a_cycle():
+    evs = cycle_turns("ABAB")[:-1] + [tresp(50, 5)] + cycle_turns("ABAB", start=6)
+    assert replay(evs, [TurnRepeat()]) == []
+
+
+def test_the_same_turn_repeated_is_still_the_identical_track():
+    found = replay(cycle_turns("AAAA"), [TurnRepeat()])
+    assert times(found) == [40] and found[0].evidence["match"] == "identical"
+
+
+def test_the_cycle_limits_are_conservative():
+    from orchard.defaults import TURN_CYCLE_MAX_PERIOD, TURN_CYCLE_REPEATS
+    assert TURN_CYCLE_MAX_PERIOD == 3 and TURN_CYCLE_REPEATS == 3
+
+
+def test_one_turn_repeated_is_never_reported_as_a_cycle():
+    """With the identical track set high, six identical turns are still not a cycle: that is the identical track's
+    finding, not this one's."""
+    assert replay(cycle_turns("AAAAAAAAA"), [TurnRepeat(n=20, shape_n=20)]) == []

@@ -10,6 +10,13 @@
     tt-orchard lab setup [--model ORG/NAME]... [--yes] [--check]
     tt-orchard caches   [--lab] [--prune --older-than DAYS [--yes]]
     tt-orchard coder    [status | stop [--yes]]
+    tt-orchard kernel-env [--check] [--src-dir DIR] [--venv-dir DIR] [--tt-lang-skill-dir DIR] [--allow-stale-skills]
+    tt-orchard inventory TARGET [--python P] [--ttnn-python P] [--against F] [--layers N] [--seq N] [--class C] [--out DIR]
+    tt-orchard coder-speed [--endpoint URL --model NAME | --tiers] [--samples N] [--watch SECONDS] [--json]
+    tt-orchard kernel-probe --op NAME [--attempts N] [--phase sim|hw] [--out DIR] [--endpoint URL] [--model NAME]
+                            [--temperature T | --temperatures T1,T2] [--top-p P] [--seed N]
+                            [--src-dir D] [--venv-dir D] [--shared-python P] [--tt-lang-skill-dir D]
+                            [--allow-stale-skills] [--allow-slow-coder]
 
 It is a thin layer over `python3 -m orchard.supervisor`. `bringup` reads config/bringup.toml, checks what
 can be checked without a lease (orchard/preflight.py), fetches the model snapshot when it is not local
@@ -29,6 +36,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import io
+import fcntl
 import json
 import os
 import shlex
@@ -37,9 +45,12 @@ import threading
 import time
 from pathlib import Path
 
-from orchard import __version__, bringup_config, fetch, lexicon, narrate, nearest, orchard_view, preflight, ui
+from orchard import __version__, blocked, bringup_config, fetch, lexicon, narrate, nearest, orchard_view, preflight, ui
+from orchard import caches as tensor_caches
 
 EXIT_OK, EXIT_REFUSED, EXIT_ERROR, EXIT_ABORTED, EXIT_BLOCKED = 0, 2, 3, 4, 5   # the supervisor's own codes
+AUTO_RETRIES = 2            # a choice: a transient block gets two more tries, then a person decides
+AUTO_RETRY_WAIT_S = 60.0    # `gozer status` shows a released board BUSY-UNTRACKED for about a minute
 CONFIG_ENV = "ORCHARD_BRINGUP_CONFIG"
 CHECKOUT = Path(__file__).resolve().parent.parent
 
@@ -88,6 +99,14 @@ def _parser() -> argparse.ArgumentParser:
     b.add_argument("--base", help="the model to base the run on: a tt-model bundle (as `tt model search` lists "
                                   "it) or a Hugging Face model id. Default: the model card's base_model")
     b.add_argument("--quiet", action="store_true", help="do not print what the run is doing as it goes")
+    b.add_argument("--prune-caches", action="store_true",
+                   help="when the only block is a full disk, remove the oldest tensor caches that no unfinished run "
+                        "uses, just enough to fit (never the kernel cache), then check again. With --dry-run it "
+                        "only says what it would remove")
+    b.add_argument("--auto-retries", type=int, default=AUTO_RETRIES, metavar="N",
+                   help=f"retry a run that ends blocked for a transient reason (coder-unusable, hardware-unhealthy, "
+                        f"agent-stuck) up to N times, waiting {AUTO_RETRY_WAIT_S:.0f} s before each. 0 turns it off. "
+                        f"Default {AUTO_RETRIES}")
     b.add_argument("--offline", action="store_true",
                    help="skip the base-model research and make no request for it. The preflight's hub lookup, "
                         "`tt model search` and any download still happen")
@@ -137,7 +156,147 @@ def _parser() -> argparse.ArgumentParser:
     from orchard import kept_coder as _kept
     sub.add_parser("coder", parents=[common, _kept.parser(add_help=False)],
                    help="show or stop the coder a lab run kept up ([coder] keep_up)")
+    k = sub.add_parser("kernel-env", parents=[common],
+                       help="build or check the tt-lang simulator environment that kernel-probe uses")
+    k.add_argument("--check", action="store_true",
+                   help="change nothing; report each step and exit 2 if one is missing or failed")
+    k.add_argument("--src-dir", help="where the tt-lang checkout lives (default ~/orchard-src/tt-lang, or "
+                                     "$ORCHARD_TTLANG_SRC)")
+    k.add_argument("--venv-dir", help="where the simulator venv lives (default ~/orchard-venvs/ttlang, or "
+                                      "$ORCHARD_TTLANG_VENV)")
+    k.add_argument("--tt-lang-skill-dir", help="the installed tt-lang skill whose guide and examples the probe gives "
+                                               "the coder (default ~/.claude/skills/ttm-tt-lang, or "
+                                               "$ORCHARD_TTLANG_SKILL)")
+    k.add_argument("--allow-stale-skills", action="store_true",
+                   help="with --check: a tt-lang checkout or tt-lang skill that is not the latest upstream has does "
+                        "not fail the check")
+    inv = sub.add_parser("inventory", parents=[common],
+                         help="list the ops a model's reference code uses and which ones ttnn has; "
+                              "`inventory refresh-ttnn` records ttnn's op names (takes a one-chip lease)")
+    inv.add_argument("target", help="a model directory with a config.json, or the word refresh-ttnn")
+    inv.add_argument("--python", help="interpreter with torch and transformers (default $ORCHARD_REFERENCE_PYTHON, "
+                                      "then reference_python in bringup.toml)")
+    inv.add_argument("--ttnn-python", help="interpreter whose installed ttnn version is read, and that refresh-ttnn "
+                                           "runs under a lease (default ~/.tenstorrent-venv/bin/python)")
+    inv.add_argument("--against", metavar="FILE", help="an ops-inventory.json of a nearest model, to mark shared ops")
+    inv.add_argument("--layers", type=int, default=2, help="layers to trace (default 2)")
+    inv.add_argument("--seq", type=int, default=8, help="sequence length to trace (default 8)")
+    inv.add_argument("--class", dest="cls", help="the transformers class to trace if not config.json's first architecture")
+    inv.add_argument("--out", help="output directory (default ./ops-inventory)")
+    cs = sub.add_parser("coder-speed", parents=[common],
+                        help="measure how fast a model server decodes and compare it with the best it has done "
+                             "(read-only; it reports a slow server and never restarts one)")
+    cs.add_argument("--endpoint", help="the server's OpenAI-compatible URL (default: the coder tier of the tier config)")
+    cs.add_argument("--model", help="the model id the server serves; needed with --endpoint")
+    cs.add_argument("--tiers", action="store_true", help="check every distinct server the tier config names")
+    cs.add_argument("--samples", type=int, default=1,
+                    help="samples per server in one run (default 1); three low samples in a row make a server slow")
+    cs.add_argument("--interval", type=float, default=sw_interval(),
+                    help="seconds between the samples of one run (default %(default)s)")
+    cs.add_argument("--watch", type=float, metavar="SECONDS",
+                    help="keep sampling every SECONDS until a server is slow (exit 3), or three errors in a row (exit 2)")
+    cs.add_argument("--baseline", type=float, metavar="TOK_S",
+                    help="compare with this speed instead of the stored best (the stored best is not changed)")
+    cs.add_argument("--reset-baseline", action="store_true",
+                    help="forget the stored best for these servers first (after changing a server on purpose)")
+    cs.add_argument("--baseline-file", help="where the best speeds are kept (default ~/.cache/tt-orchard/speed-baseline.json)")
+    cs.add_argument("--json", action="store_true", help="print one JSON list instead of lines")
+    from orchard.defaults import KERNEL_PROBE_OPS
+    kp = sub.add_parser("kernel-probe", parents=[common],
+                        help="ask the running coder to write a tt-lang kernel for one op, N times, and check each "
+                             "on the simulator (and with --phase hw, on one leased chip). Starts no server")
+    kp.add_argument("--op", required=True, choices=KERNEL_PROBE_OPS, help="the op to write a kernel for")
+    kp.add_argument("--attempts", type=int, default=5,
+                    help="attempts per temperature, each a fresh conversation (default 5)")
+    kp.add_argument("--temperature", metavar="T",
+                    help="sampling temperature, 0 to 2 (default 0: asks the server for greedy decoding; attempts then "
+                         "often repeat each other but are not guaranteed to be identical. Raise it to explore wilder "
+                         "or more ingenious kernels)")
+    kp.add_argument("--temperatures", metavar="T1,T2,...",
+                    help="several temperatures, comma-separated (for example 0,0.5,1.0); --attempts runs at each. "
+                         "Not with --temperature")
+    kp.add_argument("--top-p", dest="top_p", metavar="P", help="nucleus sampling, 0 < P <= 1 (default: not sent)")
+    kp.add_argument("--seed", metavar="N",
+                    help="a base seed: above temperature 0, attempt k sends N + k (default: derived from the probe id "
+                         "and recorded in the report). A seed makes the request the same on a rerun; whether the server "
+                         "honours it is not verified")
+    kp.add_argument("--phase", choices=("sim", "hw"), default="sim",
+                    help="sim (default): the simulator only. hw: then a smoke test and each simulator pass on one "
+                         "chip, under `gozer run --chips 1`")
+    kp.add_argument("--out", default="kernel-probe", help="output directory (default ./kernel-probe)")
+    kp.add_argument("--endpoint", help="the coder's OpenAI-compatible URL, ending in /v1 (default: the tier stage 2 "
+                                       "uses, from the tier config bringup.toml names)")
+    kp.add_argument("--model", help="the model id the coder serves (default: that tier's model)")
+    kp.add_argument("--src-dir", help="the tt-lang checkout (default ~/orchard-src/tt-lang, or $ORCHARD_TTLANG_SRC)")
+    kp.add_argument("--venv-dir", help="the simulator venv (default ~/orchard-venvs/ttlang, or $ORCHARD_TTLANG_VENV)")
+    kp.add_argument("--shared-python", help="the interpreter with ttnn and tt-lang that the hardware phase runs "
+                                            "(default ~/.tenstorrent-venv/bin/python)")
+    kp.add_argument("--tt-lang-skill-dir", help="the installed tt-lang skill whose guide.md and examples.md go into "
+                                                "each attempt's reference/ (default ~/.claude/skills/ttm-tt-lang, or "
+                                                "$ORCHARD_TTLANG_SKILL)")
+    kp.add_argument("--allow-slow-coder", action="store_true",
+                    help="run even when the coder is decoding far below its best speed (the probe measures it before "
+                         "each attempt and otherwise stops, exit 6); the report records each measurement")
+    kp.add_argument("--allow-stale-skills", action="store_true",
+                    help="run even when the tt-lang checkout or the tt-lang skill is not the latest upstream has, or "
+                         "could not be compared; the report records it with the shas")
     return p
+
+
+def _inventory(args, env, home, out) -> int:
+    """`inventory refresh-ttnn` records ttnn's op names (takes a lease); `inventory DIR` traces a model."""
+    from orchard import opinventory, ttnn_dump
+    say = lambda line: print(line, file=out)
+    ttnn_python = args.ttnn_python or str(home / ".tenstorrent-venv" / "bin" / "python")
+    if args.target == "refresh-ttnn":
+        return ttnn_dump.main(ttnn_python, say=say)
+    python = args.python or env.get("ORCHARD_REFERENCE_PYTHON")
+    if not python:
+        try:
+            python = bringup_config.load(find_config(getattr(args, "config", None), env, CHECKOUT, home)).reference_python
+        except (NoConfig, bringup_config.BringupConfigError):
+            python = None
+    if not python:
+        return _refuse("no interpreter with torch and transformers: pass --python, set ORCHARD_REFERENCE_PYTHON, "
+                       "or set reference_python in bringup.toml")
+    return opinventory.run_inventory(args.target, python=python, ttnn_python=ttnn_python,
+                                     out_dir=args.out or "ops-inventory", layers=args.layers, seq=args.seq,
+                                     cls=args.cls, against=args.against, say=say)
+
+
+def sw_interval() -> float:
+    from orchard.speedwatch import DEFAULT_INTERVAL_S
+    return DEFAULT_INTERVAL_S
+
+
+def _coder_speed(args, env, home, out) -> int:
+    """`coder-speed`: the server comes from --endpoint and --model, or from the tier config bringup.toml names."""
+    from orchard import speedwatch, tiers
+    tier_config = None
+    if args.tiers or not (args.endpoint and args.model):
+        try:
+            cfg = bringup_config.load(find_config(getattr(args, "config", None), env, CHECKOUT, home))
+            tier_config = tiers.load(cfg.tiers)
+        except (NoConfig, bringup_config.BringupConfigError, tiers.TierConfigError) as exc:
+            print(f"note: no tier config read ({exc})", file=out)
+    return speedwatch.run(args, out=out, home=home, tier_config=tier_config)
+
+
+def _kernel_probe(args, env, home, out) -> int:
+    """`kernel-probe`: the coder comes from --endpoint and --model, or else from the tier config that bringup.toml
+    names. No config is needed when both flags are given; with neither flags nor a config the probe refuses."""
+    from orchard import kernelprobe, tiers
+    if not args.shared_python:
+        args.shared_python = str(home / ".tenstorrent-venv" / "bin" / "python")
+    tier_config = None
+    if not (args.endpoint and args.model):
+        try:
+            cfg = bringup_config.load(find_config(getattr(args, "config", None), env, CHECKOUT, home))
+            tier_config = tiers.load(cfg.tiers)
+        except (NoConfig, bringup_config.BringupConfigError, tiers.TierConfigError) as exc:
+            print(f"note: no tier config read ({exc})", file=out)
+    from orchard import speedwatch
+    return kernelprobe.main(args, out=out, tier_config=tier_config, speed_check=speedwatch.probe_check(home))
 
 
 def _refuse(message: str) -> int:
@@ -393,8 +552,55 @@ def _ui(args, env, home, out) -> int:
     return EXIT_OK
 
 
+def _served_the_model(run_dir: Path) -> bool:
+    """True when the run's ledger records a passing stage 2. A run that served the model read real weights. The lines are
+    read one by one, because a torn or unreadable line must not stop a bring-up from starting."""
+    try:
+        lines = (run_dir / "ledger.jsonl").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+    for line in lines:
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        if (isinstance(e, dict) and e.get("event") == "stage_end" and e.get("stage") == 2
+                and isinstance(e.get("data"), dict) and e["data"].get("result") == "pass"):
+            return True
+    return False
+
+
+def _supervisor_holds_lock(run_dir: Path) -> bool:
+    """True when a live supervisor holds the run's ledger lock. Only an existing lock file is opened, so the check
+    creates nothing; the lock is dropped again at once."""
+    lock = run_dir / "ledger.jsonl.lock"
+    try:
+        fh = open(lock, "r")
+    except OSError:
+        return False
+    try:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        except OSError:
+            return False
+        fcntl.flock(fh, fcntl.LOCK_UN)
+        return False
+    finally:
+        fh.close()
+
+
+def _block_code(run_dir: Path) -> str:
+    """The reason code in the run's blocked.json, or "blocked" when it is missing or unreadable."""
+    try:
+        return str(json.loads((run_dir / "blocked.json").read_text(encoding="utf-8"))["code"])
+    except (OSError, ValueError, KeyError):
+        return "blocked"
+
+
 def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None, fetcher=None,
-         chooser=None, puller=None) -> int:
+         chooser=None, puller=None, sleep=None) -> int:
     env = os.environ if env is None else env
     out = sys.stdout if stdout is None else stdout
     if supervisor_main is None:
@@ -410,6 +616,15 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
         return bringup_config.load(find_config(getattr(args, "config", None), env, CHECKOUT, home)), \
             find_config(getattr(args, "config", None), env, CHECKOUT, home)
 
+    if args.cmd == "kernel-env":
+        from orchard import ttlang_env
+        return ttlang_env.main(args, out=out)
+    if args.cmd == "inventory":
+        return _inventory(args, env, home, out)
+    if args.cmd == "kernel-probe":
+        return _kernel_probe(args, env, home, out)
+    if args.cmd == "coder-speed":
+        return _coder_speed(args, env, home, out)
     if args.cmd == "ui":
         return _ui(args, env, home, out)
     if args.cmd == "caches":
@@ -495,6 +710,14 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
                 return _refuse(why)
             checks = preflight_page()
     stops = preflight.blocked(checks)
+    if stops and args.prune_caches and all(c.reason == "disk-full" for c in stops):
+        short = preflight.prunable_shortfall(next(c for c in stops if c.name == "disk"))
+        if short:
+            ok, _gone = tensor_caches.prune_to_fit(cfg, short, say=lambda m: print(f"{style.icon('🧹')}{m}", file=out),
+                                            dry_run=args.dry_run)
+            if ok and not args.dry_run:
+                checks = preflight_page()
+                stops = preflight.blocked(checks)
     if stops:
         print(lexicon.refused_line([c.reason for c in stops], style), file=out)
         for c in stops:
@@ -511,6 +734,17 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
         return _refuse("--no-fetch was given and the snapshot is not in " + str(hf_home))
     else:
         snapshot = fetch.snapshot_dir(hf_home, args.model, hub.sha)      # where the download will put it
+    if local is None and resuming and not args.dry_run and not _served_the_model(run_dir):
+        # The weights are about to be downloaded, so an earlier run read a snapshot with none (a run that passed stage 2 did not). Its stage 0 verdict (a full port,
+        # for bytkim/Qwen3.8-27B-pi) and stage 1 reference describe that empty snapshot, and a retry would keep both.
+        # The directory is moved, not deleted, and never while a supervisor still holds its ledger lock.
+        if _supervisor_holds_lock(run_dir):
+            return _refuse(f"the run in {run_dir} has a live supervisor (it holds ledger.jsonl.lock) and its weights are "
+                           "not in the cache. Stop that run first, or wait for it to end")
+        aside = run_dir.with_name(f"{run_dir.name}.stale-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}")
+        run_dir.rename(aside)
+        resuming = False
+        print(f"{style.icon('🍂')}the earlier run read a snapshot with no weights; set aside as {aside}", file=out)
     base_data = next(c for c in checks if c.name == "base").data or {}
     base_hub, base_snapshot = None, base_data.get("snapshot")
     if base_data.get("needs_fetch"):
@@ -556,21 +790,30 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
         # An existing run shows its last few entries first, so a resume says where it left off.
         narrator = narrate.Narrator(run_dir, style, out, replay=6 if resuming else False)
         narrator.start()
+    retried = 0
     try:
         code = supervisor_main(argv_run)
+        while code == EXIT_BLOCKED and retried < args.auto_retries:
+            reason = _block_code(run_dir)
+            if reason not in blocked.AUTO_RETRY:
+                break
+            retried += 1
+            print(f"{style.icon('🔁')}blocked: {reason}. Retrying automatically ({retried} of {args.auto_retries}) "
+                  f"after {AUTO_RETRY_WAIT_S:.0f} s.", file=out)
+            (sleep or time.sleep)(AUTO_RETRY_WAIT_S)
+            code = supervisor_main(argv_run)
     finally:
         if narrator is not None:
             narrator.stop()
+    if retried and code == EXIT_BLOCKED:
+        print(f"Still blocked after {retried} automatic retries.", file=out)
     where = run_dir / "stages" / "8" / "bundle"
     if code == EXIT_OK:
         print(lexicon.closing_line("ready-for-operator-review", style, where=str(where)), file=out)
     elif code == EXIT_ABORTED:
         print(lexicon.closing_line("aborted", style, where=str(run_dir)), file=out)
     elif code == EXIT_BLOCKED:
-        try:
-            reason = json.loads((run_dir / "blocked.json").read_text(encoding="utf-8"))["code"]
-        except (OSError, ValueError, KeyError):
-            reason = "blocked"
+        reason = _block_code(run_dir)
         print(lexicon.frost_line(reason, style) + f" See {run_dir / 'BLOCKED.md'}. Run the same command "
               "again to retry.", file=out)
         _print_block_digest(run_dir, reason, args.model, out)

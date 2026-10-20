@@ -24,8 +24,8 @@ from typing import Protocol
 
 from orchard.adapters import AdapterError
 from orchard.defaults import (IDENTICAL_N, LEASE_IDLE_S, LEASE_POLL_S, NO_EVIDENCE_S, REPEAT_TOOL_N,
-                              RUNG_CAPS, THINKING_CAP, TURN_REPEAT_N, TURN_SHAPE_N,
-                              WRITELESS_TURNS)
+                              RUNG_CAPS, THINKING_CAP, TURN_CYCLE_MAX_PERIOD, TURN_CYCLE_REPEATS, TURN_REPEAT_N,
+                              TURN_SHAPE_N, WRITELESS_TURNS)
 
 KINDS = frozenset({"response", "tool_call", "tool_result", "evidence", "ledger"})
 
@@ -263,7 +263,13 @@ class TurnRepeat:
     `shape_n` such turns in a row. It catches commands that differ only in a trailing argument,
     which the second-model run repeated in turns 53 to 60 of stage 0.
 
-    A turn with no tool calls breaks both streaks. When either track fires, both re-arm, so an
+    Cycle track (Task 14c): the identical signatures of the last turns repeat with a period of 2 to
+    `cycle_max_period` (A,B,A,B,... or A,B,C,A,B,C,...) for `cycle_repeats` full periods. The live
+    kernel probe alternated two identical commands for 9 turns and neither track above saw it. The
+    smallest period that matches is reported; a window of one repeated turn is left to the identical
+    track.
+
+    A turn with no tool calls breaks every streak. When any track fires, all re-arm, so an
     identical loop is reported once by the identical track and the shape track does not report
     it again one turn later. Both findings use this detector's name, so they share the ladder.
 
@@ -273,10 +279,13 @@ class TurnRepeat:
     """
     name = "turn_repeat"
 
-    def __init__(self, n: int = TURN_REPEAT_N, shape_n: int = TURN_SHAPE_N):
-        if n < 2 or shape_n < 2:
-            raise ValueError("n and shape_n must be at least 2")
+    def __init__(self, n: int = TURN_REPEAT_N, shape_n: int = TURN_SHAPE_N,
+                 cycle_max_period: int = TURN_CYCLE_MAX_PERIOD, cycle_repeats: int = TURN_CYCLE_REPEATS):
+        if n < 2 or shape_n < 2 or cycle_repeats < 2:
+            raise ValueError("n, shape_n and cycle_repeats must be at least 2")
         self.n, self.shape_n = n, shape_n
+        self.cycle_max_period, self.cycle_repeats = cycle_max_period, cycle_repeats
+        self._hist: dict[str, list] = {}        # agent -> the last complete turns' signatures, oldest first
         self._turn: dict[str, object] = {}      # agent -> the current turn's key
         self._calls: dict[str, list] = {}       # agent -> the current turn's (tool, args_hash, shape)
         self._last: dict[str, tuple] = {}       # agent -> the last complete turn's signature
@@ -288,6 +297,20 @@ class TurnRepeat:
     def _rearm(self, agent: str) -> None:
         self._count[agent] = 0
         self._shape_count[agent] = 0
+        self._hist[agent] = []
+
+    def _cycle(self, agent: str) -> int | None:
+        """The smallest period p in 2..cycle_max_period with which the last p * cycle_repeats signatures repeat,
+        or None. A window made of one signature repeated is not a cycle here (the identical track covers it)."""
+        hist = self._hist.get(agent, [])
+        for p in range(2, self.cycle_max_period + 1):
+            need = p * self.cycle_repeats
+            if len(hist) < need:
+                break
+            w = hist[-need:]
+            if len(set(w[:p])) > 1 and all(w[i] == w[i + p] for i in range(need - p)):
+                return p
+        return None
 
     def _close(self, agent: str, ts: float) -> Finding | None:
         calls = self._calls.pop(agent, [])
@@ -301,6 +324,9 @@ class TurnRepeat:
         count = self._count.get(agent, 0) + 1 if self._last.get(agent) == sig else 1
         shape_count = self._shape_count.get(agent, 0) + 1 if self._shape_last.get(agent) == shapes else 1
         self._last[agent], self._shape_last[agent] = sig, shapes
+        hist = self._hist.setdefault(agent, [])
+        hist.append(sig)
+        del hist[:-self.cycle_max_period * self.cycle_repeats]
         tools = sorted({t for t, _ in sig})
         if count >= self.n:
             self._rearm(agent)                  # re-arm: the next repeats fire again
@@ -316,6 +342,17 @@ class TurnRepeat:
                            {"turns": self.shape_n, "calls": len(sig), "tools": tools, "match": "shape",
                             "shapes": list(shapes)})
         self._count[agent], self._shape_count[agent] = count, shape_count
+        period = self._cycle(agent) if self.cycle_max_period >= 2 else None
+        if period is not None:
+            turns = period * self.cycle_repeats
+            distinct = list(dict.fromkeys(self._hist[agent][-period:]))
+            cycle_tools = sorted({t for s in distinct for t, _ in s})
+            self._rearm(agent)
+            return Finding(self.name, agent, ts,
+                           f"the same {period} turns of tool calls ({', '.join(cycle_tools)}) repeated "
+                           f"{self.cycle_repeats} times in a row ({turns} turns)",
+                           {"turns": turns, "period": period, "calls": sum(len(s) for s in distinct),
+                            "tools": cycle_tools, "match": "cycle"})
         return None
 
     def feed(self, ev: Event) -> Finding | None:

@@ -142,6 +142,22 @@ it, fixed the code, and restarted it many times. Each fix is described in
 The full-port path (a model that needs new model code) has never run. When stage 0 chooses it, the
 supervisor pauses before stage 2 for the operator.
 
+**Matching a model to its nearest one.** Stage 0 pairs the two models' tensors the way a person would. Names the
+`model.language_model.` rule leaves over are paired by what they share (`language_model.layers.5...` and
+`model.language_model.layers.5...`), and the pairs and prefix rewrites are recorded in `delta.json` under
+`alignment`. `evidence/value-compare.json` samples the paired tensors' values (identical, near, changed or unrelated;
+a fine-tune is near), and `evidence/head-compare.json` says whether a sidecar is the nearest model's `lm_head` cut down
+to some rows. When the backbone lines up and every row of a sidecar matrix is a copy of an `lm_head` row (the first such
+model was `perplexity-ai/pplx-decider-v1.2`: 255 answer-code rows), the class is `restricted-head`. The harness does not
+serve those models: the run stops after stage 0 with the block code `restricted-head` and says what it found, because
+how the rows are read (at marker tokens, under a different attention mask) is in the model's own code. The stage 1
+gate now compares the stage agent's `reference.json` with the reference template's own evidence, and fails a reference
+whose weights did not load. It also compares a stage's copy of `delta_triage.py` and `reference_gate.py` with the shipped file and fails the stage if
+they differ: on the pplx-decider run the stage agent edited its copy of the reference script, and that, not the template, is why no weights loaded.
+After a restricted-head stop an operator can ask for a measured report of whether the chips give the model's own readout the CPU's answers
+([docs/restricted-head-parity.md](docs/restricted-head-parity.md); first result: 14 of 14 answers agree, largest probability difference 0.048,
+against 0.47 for a runtime that applied a causal mask).
+
 ### Parts
 
 | Part | Files | State |
@@ -464,6 +480,17 @@ the estimate. The Hardware view shows
 [tt-toplike](https://github.com/tenstorrent/tt-toplike) itself on a TV: its own terminal UI, run on this
 machine and drawn in the page, with a button for each of its views.
 
+The two buttons in the top bar switch the page style. **Playful** is the farm look described above. **Operator**
+is the same page, plain: system type, no orchard scene, and the run in two panes. On the left, a colour band that
+states the run's state in its real name (the only large block of colour on the page, pulsing while the run
+works), then what it is doing now and what to do next. On the right, the stages and the live feed, ledger, files
+and details. Orchard names and icons give way to the real stage and state names, and a command or path selects
+with one click. Between "Next" and the rest sits a **Verdict**: one sentence for each finding with its yardstick, worst
+news first. A swap or configuration result is set against the bar from the code and the other runs on the machine; a
+boot time is ranked only against earlier runs of the same package on the same chip count. The reference line reads the
+evidence the reference template wrote and says so when the agent's `reference.json` disagrees with it. A run with no
+timing says "not measured" instead of leaving the gap. The browser remembers the choice; a link ending in `?mode=operator` or `?mode=playful` sets it.
+
 ```bash
 tt-orchard ui                                  # http://127.0.0.1:8780/ on this machine
 ssh -L 8780:localhost:8780 <the box>           # from your own computer, then open http://localhost:8780/
@@ -522,9 +549,12 @@ its reason; a `warn` is information.
 | credentials | credential files are visible to agent shells and `--refuse-credentials-visible` was given. By default they are accepted, shown as a warning, and recorded in the ledger | `credentials-needed` |
 | tiers | the tier config is invalid, or not exactly one chips tier uses `coder.port` | `config-invalid` |
 | port | something already listens on `coder.port` (a warning when resuming) | `coder-unusable` |
+| cpu | the CPU tier's server (ollama) does not answer, or does not list the tier's model. Stage 4's 4-chip test parks the coder behind it, so a run without it would stop hours in | `coder-unusable` |
 | gozer | gozer gives no usable status. Stale leases and chips in use are warnings, and nothing is cleared | `hardware-unhealthy` |
 | base | no installed tt-model bundle serves the model this one is based on (the card's `base_model`, or the model named with `--base`). It then runs `tt model search` for the model's family and lists what it finds. At a terminal it asks which bundle to base the run on and installs the pick with `tt-model pull`. In a script it stops and prints the `--base` commands. A base snapshot that is not on disk is downloaded. A card with no `base_model` is a warning. If an installed v6 bundle has the model's architecture, it becomes an inferred base. An inferred base blocks until the operator confirms it: the bundle picked at a terminal or in the new-run dialog, `--base <bundle>`, or `--accept-inferred-base` (then it is a warning and its snapshot is downloaded). See "How the base model is found" | `nearest-model-missing`, `inferred-base-unconfirmed` |
+| sfpi | the box's SFPI compiler (`dpkg-query -W sfpi`) is older than the version the chosen bundle pins in its ttnn wheel (`ttnn/tt_metal/sfpi-version`). Kernel compiles then fail with `'vLut8si' is not a member of 'sfpi'` (7.67.0 against a pin of 7.73.0, 2026-10-13). tt-orchard does not install system packages; the row names the release to install. A version it cannot read is a warning | `hardware-unhealthy` |
 | reference | `reference_python` is set and cannot import torch, transformers, tokenizers and safetensors. Not set is a warning: the stage 1 agent then looks for an interpreter itself | `config-invalid` |
+| skills | never. Each tenstorrent/skills clone that `skills_dirs` points into is compared with upstream main (read only: `git ls-remote`, nothing is pulled). A clone that is behind, differs, could not be compared, has uncommitted changes or is on a branch other than main is a warning that says how to update. No `skills_dirs` is a warning. A check of the same commit from the last 10 minutes is reused | none |
 
 The model is downloaded with `hf download`, pinned to the revision the preflight saw. The harness never
 uses your Hugging Face token: the download runs with every token variable removed, so a gated model is a
@@ -553,7 +583,8 @@ anything large. It reads, with no Hugging Face token:
 - the safetensors headers of the new model and a candidate, by two byte-range requests per file (a
   header larger than 8 MiB is not read, and the estimate is then `unknown`), to estimate the class (`weights-only`, `full-port` or `unknown`) and the download size. A sidecar's
   tensors would need a download, so the estimate only says one is possible;
-- the tt-model community catalog, published bundles (their manifest says which model they serve, and a
+- the tt-model community catalog (`tt model search --catalog`, or `tt-model search --catalog` where there
+  is no `tt` command), published bundles (their manifest says which model they serve, and a
   container bundle may ship its own port under `code/models/`), tt-metal's `models/` directories and
   models README, and GitHub issues and pull requests for the architecture name. GitHub code search needs
   `gh auth login`; without it that one search is skipped and the report says so.
@@ -894,6 +925,29 @@ releases the leases first. Fix the cause and run the same command to resume. A b
 If the supervisor says releasing the hardware failed, read the last `notice` and `gozer status`
 before doing anything. Never run `tt-smi -r` by hand and never pass `--force` to gozer.
 
+### 5.5a Automatic retries
+
+`tt-orchard bringup` retries a run that ends blocked for a reason a retry can clear: `coder-unusable`,
+`hardware-unhealthy` and `agent-stuck`. It waits 60 seconds first (a released board shows as busy for about a
+minute), then runs the same command again, which resumes from the ledger with a fresh coder context. It makes at most
+`--auto-retries` retries (default 2, and 0 turns it off) and says each one on the screen. A block that names a missing
+model, a full disk, a credential or a rule, a failed stage after escalation, or a spent retry budget is never retried
+automatically. After the last retry the run ends blocked as before.
+
+Before a multi-board hardware test (stage 4's 4-chip test) the supervisor also resets the chips it leased, in place and
+through gozer. The 4-chip test failed twice with fabric router timeouts on chips that earlier tests had used and passed
+after all four were reset. The cause was not isolated, so this is a precaution that costs about 42 seconds per board.
+
+### 5.5b Freeing disk with `--prune-caches`
+
+A full disk is the stop that most often needed a person. `tt-orchard bringup MODEL --prune-caches` clears it when the
+disk check is the only block and removing tensor caches can cover the shortfall: it removes the oldest caches that no
+unfinished run uses (the same ones `tt-orchard caches --prune` would offer), just enough to fit, says each one, and
+checks again. It never removes the shared kernel cache, a cache an unfinished run names, or anything outside the cache
+root. When the unused caches together cannot cover the shortfall it removes nothing. A shortfall on a hub disk that the
+caches do not share is not touched. With `--dry-run` it only says what it would remove. Deleting is opt-in: without the
+flag the run is refused as before. A removed cache is rebuilt by the next test that needs it (about 20 minutes).
+
 ### 5.6 The credentials preflight
 
 Agent shells run as your user. The supervisor gives them an environment with no tokens and a home
@@ -1024,6 +1078,246 @@ In local mode the setting is ignored, because tests park the coder for its board
 tt-orchard coder status        # the kept coder, its lease, and whether it serves
 tt-orchard coder stop          # stop it and free its chips (asks first; --yes to skip)
 ```
+
+### 5.9a Kernel environment
+
+```bash
+tt-orchard kernel-env --check     # report each step; change nothing; exit 2 if one is missing or failed
+tt-orchard kernel-env             # build whatever is missing
+```
+
+This builds the tt-lang simulator environment that the kernel probe uses: a tt-lang checkout and a Python
+venv with the simulator wheel. It needs no `bringup.toml`, so it can run on a machine that is not set up yet.
+The simulator wheel does not ship `diagnostics.py`, so a diagnosed kernel error ends as a
+`FileNotFoundError`. The command copies the checkout's file into the venv. This is a local patch of a
+vendor package and is labelled as a patch wherever the probe reports tt-lang versions.
+An interrupted clone (a `.git` with no HEAD and the right origin) is completed. A clone at another commit is
+reported and never reset.
+
+Flags:
+
+With `--check` it also checks what the kernel probe gives the coder (section 5.9d): every reference file must be
+readable, and the tt-lang checkout and the installed tt-lang skill must be the latest upstream has. A stale one fails
+the check and the line says what to run to update. `--check` keeps its comparison results in memory and writes
+nothing.
+
+- `--check`: change nothing. Report each step and exit 2 if one is missing or failed.
+- `--src-dir`: where the tt-lang checkout lives (default `~/orchard-src/tt-lang`, or `$ORCHARD_TTLANG_SRC`).
+- `--venv-dir`: where the simulator venv lives (default `~/orchard-venvs/ttlang`, or `$ORCHARD_TTLANG_VENV`).
+- `--tt-lang-skill-dir`: the installed tt-lang skill (default `~/.claude/skills/ttm-tt-lang`, or `$ORCHARD_TTLANG_SKILL`).
+- `--allow-stale-skills`: with `--check`, a stale tt-lang checkout or skill does not fail the check.
+
+### 5.9b Op inventory
+
+```bash
+tt-orchard inventory /path/to/model-dir      # trace the model's reference code, write ops-inventory/
+tt-orchard inventory refresh-ttnn            # record ttnn's op names; takes a one-chip gozer lease
+```
+
+`inventory DIR` traces the model's reference code on the meta device with torch (2 layers by default) and
+lists the ops it uses. Each op gets a status. `mapped` means the mapping table names a ttnn op and the
+recorded dump for the installed ttnn contains that name. It is a name match and does not say the op
+supports the model's shape, dtype or layout. `composable` means a decomposition exists whose leaves are all
+`mapped`. `unmapped` means neither. `ignored` marks metadata-only ops. `unchecked` means no dump exists for the
+installed ttnn version, so nothing is claimed.
+
+`refresh-ttnn` imports ttnn, which opens the device, so it runs under a one-chip gozer lease and writes
+`orchard/data/ttnn_ops-<version>.json`. Run it once per ttnn version. The supervisor never runs it.
+
+- The word `refresh-ttnn` is reserved. To trace a directory with that name, pass it as `./refresh-ttnn`.
+- The dump is written into the package's own `orchard/data` directory, which must be writable (an editable checkout is).
+- Counts are per static node of the traced graph, so a loop body that runs many times counts once. The report
+  scales in-layer ops by the layers in the config over the layers traced, and says when it cannot scale.
+- The trace follows higher-order-op bodies. Python-level nodes such as `getitem` stay out of the op list and appear under
+  `python_nodes`; wrappers appear under `higher_order_nodes` (they count nodes).
+- The mapping table is a name match. `rsub` is exact only for alpha=1, and `conv1d` takes prepared weights.
+- If gozer queues the lease (exit 10), the command says so and exits 2. Run `gozer wait <ticket>` or retry.
+- Names that raised when ttnn was inspected are listed under `skipped` in the dump file.
+
+Flags:
+
+- `--python`: interpreter with torch and transformers (default `$ORCHARD_REFERENCE_PYTHON`, then `reference_python` in `bringup.toml`).
+- `--ttnn-python`: interpreter whose installed ttnn version is read, and that `refresh-ttnn` runs (default `~/.tenstorrent-venv/bin/python`).
+- `--against`: an `ops-inventory.json` of a nearest model, to mark the ops both models use.
+- `--layers`: layers to trace (default 2).
+- `--seq`: sequence length to trace (default 8).
+- `--class`: the transformers class to trace, when it is not the first architecture in `config.json`.
+- `--out`: output directory (default `./ops-inventory`).
+
+### 5.9c Kernel probe
+
+```bash
+tt-orchard kernel-probe --op add --endpoint http://127.0.0.1:8011/v1 --model <coder model id>
+tt-orchard kernel-probe --op rmsnorm --attempts 5 --phase hw      # coder from the tier config; then one chip
+```
+
+The kernel probe measures whether the local coder can write a working tt-lang kernel for one op. Each attempt is a
+fresh conversation in `<out>/<op>/attempt-<n>/`. The agent writes `kernel.py` and may run the kernel check as often as
+it likes. The ops are `add` (a calibration op whose working kernel is upstream's example), `silu_mul`, `rmsnorm` and
+`linear_scan`.
+
+- It starts no model server. The coder must already answer at its endpoint; starting it is `tt-orchard bringup`'s
+  job. For a flag you leave out it uses the tier stage 2 runs on, from the tier config that `bringup.toml`
+  names. With a flag missing and no config it refuses and names the two flags. A URL is printed without any
+  `user:password@` part.
+- It refuses (exit 2) when the simulator environment does not pass `tt-orchard kernel-env --check`, when a
+  reference file is missing or the tt-lang sources are not the latest (section 5.9d), and when
+  another probe is using the same `--out` directory (it holds a lock on `probe.lock`). The lock goes away when its
+  probe ends, however it ends; a `probe.lock` file left after a SIGKILL is harmless.
+- The verdict is the probe's own re-check: after the agent ends, the probe runs the shipped check on a copy of
+  `kernel.py` made as a regular file of at most 256 KiB, under `<out>/.verdict/<op>-<n>/`. The agent's own `check.json`
+  is never believed; when it disagrees, the report marks it `agent_check_untrusted`. Before that re-check, the probe
+  stops every process the agent left running (found by the `ORCHARD_RUN_DIR` value each agent process carries), and
+  the report counts them. This boundary is best effort against shortcuts and accidents.
+- The check needs more than PCC. A static gate on `kernel.py` runs first and reports every violation with a remedy.
+  Imports are limited to `ttl`, `ttnn` and `math` (aliases of the three accepted), plus a listed set of names from
+  `typing` (such as `Any` and `Optional`) and from `__future__` (such as `annotations`). Forbidden names such as
+  `open`, `os` and `sys` are refused as a name, an attribute or an import, also under an alias. There is no
+  `import torch` or host code, and the operation is the one top-level `def` decorated with `@ttl.operation`, under any name the gate does not refuse (two such functions are refused). The numeric check then needs PCC, a relative L2 error, a least-squares slope and a max-abs-error bar on
+  every input set. A failure is sorted into a category such as `forbidden_code` (the gate refused the file) or
+  `harness_error` (a fault in the templates or the environment, including the setup phase).
+- The bars and the budget are provisional, and the inputs are synthetic (seeded random values plus a heavy-tailed
+  set). The report gives counts and no rates. Temperature 0 (the default) asks the server for greedy decoding.
+  Attempts then often repeat each other but are not guaranteed to be identical, so for each op and temperature the
+  report counts the distinct kernels and warns when every attempt that wrote a kernel wrote the same one.
+- `--phase hw` takes one chip at a time: each hardware run is a `gozer run` that leases exactly one chip. It first
+  runs a smoke test (upstream's `eltwise_add.py`). When that passes, it runs each attempt that passed the simulator.
+  The lease's release resets the chip; the probe never resets one itself. A hardware run that stops making progress
+  is stopped by the stall watcher (SIGTERM to the whole process group first, then SIGKILL after a grace period of
+  120 s), the probe stops, and the command exits 5 with the report written for what ran. The grace covers gozer's
+  lease release, whose chip reset takes about 42 s, so a watcher stop normally ends with the lease released. Only
+  when gozer itself had to be killed can the lease be left under a dead process: after the grace, or at once when a
+  second interrupt (another Ctrl-C or SIGTERM) arrives during the grace. Then look with `gozer status` and use the
+  gozer-gatekeeper skill. The watcher's limits on hardware (60 s with no output and no
+  CPU use, 20 repeats of one line) are not measured. For the smoke test and each hardware run the report gives the
+  longest quiet stretch and the longest repeat the watcher saw, and a stopped run's first line names the rule
+  that stopped it (`backstop`, `stalled` or `repeating`).
+- Exit 0 means a report was written (`kernel-probe-report.md` and `.json` in the output directory), whatever the
+  attempts' results.
+- A run that stops early still writes its report from the attempts that finished, with the reason. An exception
+  exits 3, Ctrl-C or SIGTERM exits 4, and no hardware run starts after either.
+- When a kernel fails the numeric bars, the check prints a `numbers:` line under the `FAIL` line: the first input set that
+  fails, how far off the scale is (the least-squares slope, for example "got is about 964x expected"), the PCC, the
+  relative L2 error, the largest error beside the size of the expected values, and the two worst places with their
+  expected and got values. The first line, and `check.json`, are unchanged. The coder sees the same text.
+- Before each attempt the probe measures the coder's decode speed (section 5.9e) and records it in the attempt's
+  `attempt.json` as `coder_speed`. The report lists the speed before each attempt. If the coder is slow (three samples in a
+  row below half of the best speed seen), the probe stops before that attempt, writes its report and exits 6, and no hardware
+  run starts. `--allow-slow-coder` runs anyway. A coder that is busy with another client (`busy`), and a server that
+  cannot be measured, do not stop the probe. The attempts that ran while the coder was busy or below its best speed are
+  marked in the report as not comparable in turns, wall time and request timeouts.
+
+Flags:
+
+- `--op`: the op to write a kernel for (`add`, `silu_mul`, `rmsnorm`, `linear_scan`). Required.
+- `--attempts`: attempts per temperature, each a fresh conversation (default 5).
+- `--temperature`: the sampling temperature, 0 to 2 (default 0). Temperature 0 asks the server for greedy decoding.
+  Attempts then often repeat each other but are not guaranteed to be identical (the live probe at temperature 0
+  gave 1 distinct kernel in 5 attempts of `linear_scan` and 5 in 5 of `silu_mul`). Raise it to explore wild or
+  ingenious kernels.
+- `--temperatures`: several temperatures, comma-separated (for example `0,0.5,1.0`); `--attempts` runs at each, so
+  `--attempts 3 --temperatures 0,0.7` runs 6. Not with `--temperature`.
+- `--top-p`: nucleus sampling, above 0 and at most 1 (default: not sent).
+- `--seed`: a base seed. Above temperature 0, attempt k sends the base plus k; without `--seed` the base comes from
+  the probe id and the report records it. A seed makes the request the same on a rerun; whether the server honours
+  it is not verified, and no kernel is promised to come out the same.
+- `--phase`: `sim` (default) for the simulator only; `hw` to add the smoke test and the one-chip runs.
+- `--out`: output directory (default `./kernel-probe`).
+- `--endpoint`: the coder's OpenAI-compatible URL, ending in `/v1` (default: from the tier config).
+- `--model`: the model id the coder serves (default: from the tier config).
+- `--src-dir`: the tt-lang checkout (default `~/orchard-src/tt-lang`, or `$ORCHARD_TTLANG_SRC`).
+- `--venv-dir`: the simulator venv (default `~/orchard-venvs/ttlang`, or `$ORCHARD_TTLANG_VENV`).
+- `--shared-python`: the interpreter with ttnn and tt-lang that the hardware phase runs (default
+  `~/.tenstorrent-venv/bin/python`).
+- `--tt-lang-skill-dir`: the installed tt-lang skill whose `guide.md` and `examples.md` the coder gets (default
+  `~/.claude/skills/ttm-tt-lang`, or `$ORCHARD_TTLANG_SKILL`).
+- `--allow-stale-skills`: run even when the tt-lang checkout or the tt-lang skill is not the latest upstream has, or
+  could not be compared. The report records it, with each source's local and upstream shas.
+- `--allow-slow-coder`: run even when the coder is decoding far below its best speed. The report records each
+  measurement.
+
+### 5.9d The latest skills
+
+The operator's rule (2026-10-16): "WE USE THE LATEST tenstorrent/skills and tt-lang skills available. We check in
+preflight whether we have the latest even." Three sources are checked, read only. Orchard never updates one; each
+result says what to run.
+
+| Source | Where | Compared with | Where it is checked |
+|---|---|---|---|
+| tenstorrent/skills | the clone(s) `skills_dirs` in `bringup.toml` point into | upstream `main` (`git ls-remote origin refs/heads/main`) | `tt-orchard bringup` preflight: a warning, never a block |
+| tt-lang checkout | `--src-dir` (default `~/orchard-src/tt-lang`), pinned in `orchard/defaults.py` | upstream `main` | `kernel-probe` (refuses) and `kernel-env --check` (fails) |
+| tt-lang skill | `--tt-lang-skill-dir` (default `~/.claude/skills/ttm-tt-lang`) | each file's git blob sha in tenstorrent/tt-metal, branch `agentic-research/fast-models-fast`, `.agents/skills/tt-lang` | `kernel-probe` (refuses) and `kernel-env --check` (fails) |
+
+- tenstorrent/skills has no tt-lang skill. The installed one was copied by `tt-warp fastmodels sync` from that
+  tt-metal branch; tt-metal's `main` removed the path, so the branch is the only upstream copy. Its `SKILL.md` is
+  compared after tt-warp's two edits are undone (the `ttm-` name prefix and the provenance block).
+- The tt-lang checkout is pinned, so "behind" means upstream `main` has moved past the pin. Moving the pin is a code
+  change (`TTLANG_PIN` and `TTLANG_DIAGNOSTICS_SHA256` in `orchard/defaults.py`) followed by `tt-orchard kernel-env`
+  with the old checkout moved aside. Until then the probe needs `--allow-stale-skills`.
+- A comparison that cannot be made (no network, an origin off github.com, a malformed answer) is `unknown`, never
+  current. A check from the last 24 hours that found the same local state current covers it; otherwise the probe
+  refuses. Results are cached in `~/.cache/tt-orchard/skills-freshness.json`; `kernel-env --check`, a bringup dry
+  run and the UI's preflight keep them in memory and write no file. An `unknown` result names no update; it says to
+  compare again when GitHub answers.
+- The checker runs only read-only git commands (`git status` without taking the index lock) and `gh api` GET
+  requests to github.com, each with a 15 s timeout and 45 s for all of them. git follows no HTTP redirect and runs no
+  fsmonitor command or hook, and a call that times out is killed with its whole process group.
+- The tt-lang skill documents tt-lang specification 0.12; the pinned checkout documents 0.20. The check warns when
+  the skill's version is older. The probe gives the coder both: the skill's `guide.md` and `examples.md`, and the
+  checkout's `TTLangSpecification.md`, `eltwise_add.py` and `eltwise_broadcast_reduce.py`, in each attempt's
+  `reference/` directory. Its skill (`orchard/skills/kernel-probe.md`) says which file to read for each kind of op
+  and which names changed since 0.12. Each file's sha256 is in the report and in every attempt's provenance. The
+  skill files are read once: the freshness check hashes the same bytes the coder gets. A reference file reached
+  through a linked directory is refused. `eltwise_broadcast_reduce.py` passes in the simulator and is tagged
+  `TTLANG_HARDWARE_CI: xfail-compiler` by tt-lang's CI, and the skill says so.
+
+### 5.9e Decode speed of a model server
+
+```bash
+tt-orchard coder-speed                                   # the coder tier of the tier config
+tt-orchard coder-speed --tiers --samples 3               # every server the tier config names
+tt-orchard coder-speed --endpoint http://127.0.0.1:8011/v1 --model <model id> --watch 300
+```
+
+`coder-speed` asks a server for one fixed greedy answer (about 300 tokens, thinking off) and divides the tokens the server
+says it generated by the seconds the request took. It compares the result with the best speed it has seen before for
+that model at that endpoint. It reports a slow server. It never restarts one, because a restart interrupts everything
+that uses the server.
+
+| State | Meaning |
+|---|---|
+| `unknown` | No best speed is stored yet. This sample becomes the baseline. |
+| `ok` | At or above half of the best speed. |
+| `suspect` | Below half, but fewer than three samples in a row. |
+| `slow` | The last three samples were all below half of the best speed. |
+| `busy` | Another client's request was running, so the sample says nothing about the server. It is not counted. |
+
+The best speed is kept per model and endpoint in `~/.cache/tt-orchard/speed-baseline.json`. A slow sample never
+lowers it, so a server that has gone slow is still compared with its healthy speed. Exit codes: 0 for `ok`, `suspect`, `busy` or
+`unknown`; 2 when a server could not be measured; 3 when one is `slow`.
+
+Other clients lower the number. A decode step serves every request that is running, so one long conversation slows all of
+them: on 2026-10-17 a fresh request next to an agent's long conversation measured 7.3 tok/s, and the same request on the
+idle coder 38.7. Two short requests together got about 77% of the single-client speed each and three about 60%. Before
+and after its own request the check reads `vllm:num_requests_running` from the server's `/metrics`. If another request
+was running the sample is `busy` and does not count towards `slow`. A server that does not report the count (not vLLM,
+or no answer) is measured anyway, and a `suspect` or `slow` message says it could not tell. A server changed on purpose (another profile or model
+build) needs `--reset-baseline`, because the old best no longer applies. A long conversation decodes more slowly than the
+short prompt this check uses, so a slow agent does not always mean a slow server.
+
+Do not read the speed from the server's log. vLLM's "Avg generation throughput" is tokens over the whole 10 s window. An
+agent's turns are short tool calls with idle time between them, so a healthy server reads 5 to 8 tok/s there. On
+2026-10-17 that reading was taken for a slowdown twice, and the coder was restarted for it once. Measured idle, the same
+server decoded at 38.7 tok/s.
+
+- `--endpoint`, `--model`: the server to measure (give both, or neither to use the tier config).
+- `--tiers`: check every distinct server the tier config names (a server two tiers share is checked once).
+- `--samples`: samples per server in one run (default 1). `--interval`: seconds between them (default 20).
+- `--watch`: keep sampling, every SECONDS, until a server is slow (exit 3) or there are three errors in a row (exit 2).
+- `--baseline`: compare with this speed (tokens per second) instead of the stored best; the stored best is not changed.
+- `--reset-baseline`: forget the stored best for these servers first.
+- `--baseline-file`: where the best speeds are kept.
+- `--json`: print one JSON list instead of lines.
 
 ### 5.10 Tensor caches and disk
 

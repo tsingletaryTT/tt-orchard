@@ -64,6 +64,9 @@ You do not write a comparison script.
 
        cp {{ORCHARD_DIR}}/orchard/skills/delta-triage-templates/delta_triage.py stages/0/
 
+   Do not edit the script. The gate compares its sha256 with the shipped template and fails the stage if they differ.
+   Change only `triage_config.json`.
+
 4. Run `python3 stages/0/delta_triage.py`. It reads only the safetensors headers and the small
    JSON files, so it never loads the weights. It prints a line for each evidence file it writes.
    Exit 2 means `triage_config.json` is incomplete or names a directory that does not exist; the
@@ -77,15 +80,29 @@ You do not write a comparison script.
    - a tokenizer difference that matters for the model's language, for example Thai or
      Devanagari strings that encode differently (`tokenizer-encode.json` lists them by category);
    - a license change: name both licenses and what the new one restricts.
-   Keep each finding's measured numbers. Do not change `path`, `class`, `sidecars`, `code_files`, `model`
+   Keep each finding's measured numbers. Do not change `path`, `class`, `sidecars`, `code_files`, `alignment`, `values`, `head`, `model`
    or `nearest_model`. If the
    evidence shows that the path is wrong, add a difference with area `other` that says why and
    cites the evidence file. The operator reads it.
 7. The draft has the standing hazards: `tensor_cache`, `drafter`, `disk`, and `license` when the
    license changed. Add any further hazard you can justify from the evidence, with an area from
    the list below, a finding and the evidence path.
-8. Write the reviewed `delta.json` with write_file (the whole file). Then reply with a short
-   summary and no tool call.
+8. Write the reviewed `delta.json` with write_file (the whole file).
+9. The op inventory. Do this only when the run facts list an input `reference_python`. Without it, skip this step
+   and reply with a short summary and no tool call. Run it with that interpreter and the new model's snapshot
+   directory:
+
+       PYTHONPATH={{ORCHARD_DIR}} python3 -m orchard.opinventory --model-dir <new model snapshot> --out stages/0 --python <reference_python> --ttnn-python {{OPERATOR_HOME}}/.tenstorrent-venv/bin/python
+
+   Type the command on one line. The `--ttnn-python` interpreter is asked only for the installed ttnn's version;
+   ttnn is not imported. The command runs the template
+   `{{ORCHARD_DIR}}/orchard/skills/ops-inventory-templates/ops_inventory.py` on the meta device, writes
+   `ops-inventory.json` and `ops-inventory.md` in your stage directory, and adds an `inventory`
+   summary to the `delta.json` you just wrote. Read `ops-inventory.md` once. Add ONE difference with area `other`
+   to `delta.json` only when the inventory lists `unmapped` ops and the class is `weights-only`; cite
+   `stages/0/ops-inventory.json` and name the ops. Keep the `inventory` key when you rewrite the file. The
+   measured class still decides: do not change `path` or `class` because of the inventory. Exit 2 means the
+   trace did not run; note that in RESUME.md and go on. Then reply with a short summary and no tool call.
 
 ## The file
 
@@ -106,7 +123,7 @@ must be files inside it.
 
 ## What the script decides
 
-The class is one of `weights-only`, `weights+sidecar`, `full-port` and `unknown`. A sidecar is a weights
+The class is one of `weights-only`, `weights+sidecar`, `restricted-head`, `full-port` and `unknown`. A sidecar is a weights
 file the new model ships outside its backbone shards (the shards its index lists) that the nearest model
 does not have, for example a task head. `sidecars` lists each one with its size, sha256, tensor count and
 tensor names, and `code_files` lists each `.py` file in the repo with its sha256. The script reads headers
@@ -114,6 +131,17 @@ and hashes files. It never imports or runs a code file, and neither do you. When
 sidecar whose tensor names do not overlap the backbone, and the backbone is weights-only, the class is
 `weights+sidecar` and the path stays `weights-only`. An unreadable or overlapping sidecar makes the class
 `unknown` and the path `full-port`.
+
+Names that the `model.language_model.` rule leaves over are paired by what they share: a model that calls its
+text tensors `language_model.layers.5...` against a nearest model's `model.language_model.layers.5...` still has
+an analogue for every tensor. `alignment` in `delta.json` lists the pairs and the prefix rewrites, and
+`evidence/value-compare.json` samples the paired tensors' values (identical, near, changed or unrelated; a
+fine-tune is near). `evidence/head-compare.json` says whether a sidecar is the nearest model's `lm_head` cut down
+to some rows: when every row of a sidecar matrix is a copy of a row of `lm_head.weight` and the backbone lines up,
+the class is `restricted-head`. The harness does not serve those models. The run stops after this stage and a
+person decides, because how the rows are read (at which positions, under which attention mask) is in the model's
+own code, which you do not run. Do not argue the class away; if the code you can read in `code_files` changes the
+picture, add a difference with area `other` and cite the file.
 
 The path is `weights-only` when the text config values that matter (layers, hidden size, heads,
 KV heads, head_dim, layer types, vocabulary size) are equal, every tensor both models share has

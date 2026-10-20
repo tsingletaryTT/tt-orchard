@@ -1,0 +1,3 @@
+{"id": "simple_0", "ground_truth": [{"calculate_triangle_area": {"base": [10], "height": [5], "unit": ["units", ""]}}]}
+{"id": "simple_1", "ground_truth": [{"math.factorial": {"number": [5]}}]}
+{"id": "simple_2", "ground_truth": [{"math.hypot": {"x": [4], "y": [5], "z": ["", 0]}}]}

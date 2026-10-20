@@ -1,0 +1,9 @@
+{
+  "phase": "sim",
+  "sets": [],
+  "error": {
+    "phase": "run",
+    "type": "RuntimeError",
+    "text": "Deadlock detected: all generators blocked"
+  }
+}

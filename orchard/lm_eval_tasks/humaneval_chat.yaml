@@ -1,0 +1,26 @@
+# HumanEval for a chat model behind the chat completions API: ask for the whole function, stop at nothing, and build the program from the code block.
+# (The harness's own humaneval_instruct needs a prefilled assistant turn and stops at "\ndef", so it scores a chat reply as empty.)
+task: humaneval_chat
+dataset_path: openai/openai_humaneval
+unsafe_code: true
+output_type: generate_until
+test_split: test
+doc_to_text: "Complete the following Python function. Reply with the complete function in one ```python code block and nothing else.\n\n```python\n{{ prompt }}\n```\n"
+doc_to_target: "{{test}}\ncheck({{entry_point}})"
+metric_list:
+  - metric: !function code_chat_utils.pass_at_k
+    aggregation: mean
+    higher_is_better: true
+    k: [1]
+generation_kwargs:
+  until: []
+  do_sample: false
+repeats: 1
+num_fewshot: 0
+filter_list:
+  - name: "create_test"
+    filter:
+      - function: "custom"
+        filter_fn: !function code_chat_utils.build_humaneval
+metadata:
+  version: 1.0

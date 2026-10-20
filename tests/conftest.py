@@ -47,3 +47,22 @@ def pytest_runtest_makereport(item, call):
     report = outcome.get_result()
     if report.when == "call" and report.failed and item.module.__name__ == "test_gozer_contract":
         report.sections.append(("gozer under test", item.module.gozer_identity()))
+
+
+@pytest.fixture(autouse=True)
+def no_skills_network(monkeypatch, tmp_path):
+    """No test may run real git or gh for the skills freshness check (orchard/skillsfresh.py). Its process runner is
+    replaced with one that answers every call with a failure and records it; a test that reached it fails at teardown
+    with an error naming the commands. Tests of the check itself hand it a fake runner. XDG_CACHE_HOME points into the
+    test's own directory, so a default Cache() never reads or writes the operator's cache file."""
+    from orchard import skillsfresh
+    calls = []
+
+    def refused(argv, timeout, env=None):
+        calls.append(list(argv))
+        return 127, "", "the test suite makes no git or gh call"
+    monkeypatch.setattr(skillsfresh, "_raw_run", refused)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg-cache"))
+    yield
+    if calls:
+        pytest.fail(f"this test reached the real git or gh runner of the skills check: {calls[:3]}", pytrace=False)

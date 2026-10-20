@@ -1,0 +1,50 @@
+PROGRESS import
+PROGRESS open_device
+PROGRESS set seed0
+PROGRESS run seed0
+
+Deadlock detected: all generators blocked
+
+❌ Error during deadlock detection:
+error: blocked on wait() on DataflowBuffer(a_dfb) (nodes: 0-1, 8-9, 16-17, 24-25)
+  --> <ATTEMPT_DIR>/kernel.py:44:1
+   |
+44 |                             a_dfb.wait() as a_blk,
+   | ^
+   |
+--------------------------------------------------
+
+❌ Error during deadlock detection:
+error: blocked on wait() on DataflowBuffer(a_dfb) (nodes: 0-1, 8-9, 16-17, 24-25)
+  --> <ATTEMPT_DIR>/kernel.py:60:1
+   |
+60 |                         with a_dfb.wait() as a_blk, b_dfb.wait() as b_blk:
+   | ^
+   |
+--------------------------------------------------
+
+❌ Error during deadlock detection:
+error: blocked on wait() on DataflowBuffer(out_dfb) (nodes: 0-1, 8-9, 16-17, 24-25)
+  --> <ATTEMPT_DIR>/kernel.py:76:1
+   |
+76 |                         with out_dfb.wait() as out_blk:
+   | ^
+   |
+--------------------------------------------------
+
+RuntimeError: deadlock
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "<TEMPLATES>/kernel_harness.py", line 121, in main
+    operation(*tt_ins, out)
+  File "<TTLANG_VENV>/lib/python3.12/site-packages/ttl/sim/operation.py", line 172, in wrapper
+    run_operation(modified_func, actual_grid, args, kwargs)
+  File "<TTLANG_VENV>/lib/python3.12/site-packages/ttl/sim/program.py", line 277, in run_operation
+    _schedule_and_run(
+  File "<TTLANG_VENV>/lib/python3.12/site-packages/ttl/sim/program.py", line 485, in _schedule_and_run
+    scheduler.run()
+  File "<TTLANG_VENV>/lib/python3.12/site-packages/ttl/sim/greenlet_scheduler.py", line 581, in run
+    raise RuntimeError(
+RuntimeError: Deadlock detected: all generators blocked

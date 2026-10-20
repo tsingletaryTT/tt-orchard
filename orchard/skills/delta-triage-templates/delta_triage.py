@@ -50,8 +50,16 @@ The path rule. `weights-only` needs all of these, otherwise the path is `full-po
 A tokenizer difference does not change the path: the runtime loads the new model's tokenizer.
 It is reported in the tokenizer finding.
 
+Alignment. Names the `model.language_model.` rule leaves over are paired by what they share (a model that
+calls its text tensors `language_model.layers.5...` and its vision tensors `visual.blocks.0...` against a nearest
+model that says `model.language_model.layers.5...`): see align_leftovers. delta.json's `alignment` lists the
+pairs and the prefix rewrites; evidence/value-compare.json samples the paired tensors' values (identical, near,
+changed or unrelated); evidence/head-compare.json says whether a sidecar is a head cut down from the nearest
+model's lm_head (numpy needed; the check says when it was skipped).
+
 The class. delta.json also carries a `class` (orchard/classes.py): `weights-only`, `weights+sidecar`,
-`full-port` or `unknown`. A sidecar is a weights file in the new model's snapshot that is not one of
+`restricted-head` (the backbone lines up and the only missing tensor is an lm_head that a sidecar's rows stand
+in for; the harness stops after stage 0 and a person decides), `full-port` or `unknown`. A sidecar is a weights file in the new model's snapshot that is not one of
 the backbone shards (the shards its `model.safetensors.index.json` lists, or `model*.safetensors`
 when there is no index) and that the nearest model does not have, such as a task head. The backbone
 is compared as above, without the sidecar. When the backbone is weights-only and every sidecar is a
@@ -59,8 +67,8 @@ readable safetensors file whose tensor names do not overlap the backbone's, the 
 `weights+sidecar` and the path stays `weights-only`. An unreadable sidecar, or one that overlaps,
 makes the class `unknown` and the path `full-port`, with the reason in `path_reasons`. The class is
 also `unknown` when the backbone could not be compared at all. `sidecars` lists each file with its
-size, sha256, tensor count, dtypes and tensor names, and `code_files` lists each top-level `.py`
-file with its sha256. Nothing here runs a code file.
+size, sha256, tensor count, dtypes and tensor names, and `code_files` lists each `.py`
+file (down four directory levels) with its sha256. Nothing here runs a code file.
 
 Exit codes: 0 when delta.json was written (whatever the path), 2 when triage_config.json is
 missing, incomplete or names a directory that does not exist, or the stage directory is not inside
@@ -68,8 +76,10 @@ run_dir. The script writes only inside its own directory and opens no network co
 """
 from __future__ import annotations
 
+import collections
 import hashlib
 import json
+import math
 import os
 import random
 import re
@@ -77,7 +87,14 @@ import struct
 import sys
 from pathlib import Path
 
+try:                                     # numpy is optional: only the restricted-head check needs it
+    import numpy as np
+except ImportError:                      # that check then says it was skipped
+    np = None
+
 HERE_DIR = Path(__file__).resolve().parent
+# The sha256 of this file, written into delta.json so the stage gate can compare it with the shipped template.
+THIS_SHA256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 EVIDENCE = HERE_DIR / "evidence"
 CONFIG_KEYS = ("run_dir", "model_id", "model_snapshot", "nearest_model_id", "nearest_snapshot")
 REPORT_MAX_BYTES = 2 * 1024 * 1024        # the research report is read only up to this size
@@ -105,6 +122,28 @@ MTP_NAME = re.compile(r"(^|\.)mtp\.")        # the MTP head's tensors, with or w
 MAX_HEADER = 100 * 1024 * 1024          # a header larger than this is refused as corrupt
 
 GIB = float(1 << 30)
+
+# ---- aligning names, sampling values, finding a restricted head -----------------------------------------------------------
+HEAD_NAME = re.compile(r"(^|\.)lm_head(\.|$)")
+MIN_RULE_VOTES = 3            # choice: a prefix rewrite needs this many tensors that agree before it reaches short names
+SAMPLE_ELEMENTS = 4096        # choice: values read from the start of each sampled tensor
+SAMPLE_TENSORS = 8            # choice: tensors sampled per comparison, spread evenly over the sorted names
+NEAR_COSINE = 0.999           # choice: at or above this the sampled values are "near" (a fine-tune moves them a little)
+CHANGED_COSINE = 0.5          # choice: below this they are "unrelated"
+HEAD_MATCH_COSINE = 0.999     # choice: a sidecar row this close to a base head row is a copy of it
+HEAD_CHUNK_ROWS = 8192        # base head rows compared at a time (8192 rows of 5120 floats is 168 MB)
+MAX_CODE_FILES = 60           # choice: code files listed
+MAX_CODE_DEPTH = 4            # choice: directories searched for code below the model directory
+SKIP_CODE_DIRS = {".git", ".cache", "__pycache__", "node_modules", "venv", ".venv", "site-packages"}
+ITEMSIZE = {"BF16": 2, "F16": 2, "F32": 4}
+READOUT_JSON_MAX = 256 * 1024     # choice: a small JSON file that declares an attention mode is read up to this size
+CODE_SCAN_MAX = 400 * 1024        # choice: a code file larger than this is not scanned for hints
+MAX_HINT_LINES = 8               # line numbers listed per hint
+CODE_HINTS = (("noncausal", re.compile(r"non[-_ ]?causal", re.IGNORECASE)),
+              ("causal flag", re.compile(r"is_causal\s*[=:]\s*(True|False)")),
+              ("forward hook", re.compile(r"register_forward(_pre)?_hook")),
+              ("attention mask", re.compile(r"create_\w*attention_mask|attention_mask")),
+              ("readout", re.compile(r"readout", re.IGNORECASE)))
 
 # ---- the encode test strings ----------------------------------------------------------------------
 # Each base string is used as written and with a leading space (a byte-level tokenizer encodes a
@@ -382,8 +421,8 @@ def compare_config_dicts(mcfg, bcfg, errors: list, model_path: str, base_path: s
 
 # ---- tensors --------------------------------------------------------------------------------------
 
-def safetensors_header(path: Path) -> dict:
-    """{name: {"dtype", "shape"}} from a safetensors file's header. Reads only the header."""
+def raw_header(path: Path) -> tuple[dict, int]:
+    """(the whole header with data_offsets, the file offset where the tensor data starts). Reads only the header."""
     with open(path, "rb") as f:
         raw = f.read(8)
         if len(raw) != 8:
@@ -397,6 +436,12 @@ def safetensors_header(path: Path) -> dict:
     header = json.loads(blob.decode("utf-8"))
     if not isinstance(header, dict):
         raise ValueError("header is not a JSON object")
+    return header, 8 + n
+
+
+def safetensors_header(path: Path) -> dict:
+    """{name: {"dtype", "shape"}} from a safetensors file's header. Reads only the header."""
+    header, _ = raw_header(path)
     return {k: {"dtype": v.get("dtype"), "shape": v.get("shape")}
             for k, v in header.items() if k != "__metadata__" and isinstance(v, dict)}
 
@@ -466,19 +511,123 @@ def compare_tensors(model_dir: Path, base_dir: Path) -> dict:
                                model_path=str(model_dir), base_path=str(base_dir))
 
 
+def _suffix_len(a: list[str], b: list[str]) -> int:
+    k = 0
+    while k < min(len(a), len(b)) and a[-1 - k] == b[-1 - k]:
+        k += 1
+    return k
+
+
+def align_leftovers(only_m: dict, only_b: dict) -> dict:
+    """Pair the names the `model.language_model.` rule left over, the way a person does: by what the names share.
+
+    {"pairs": {model name: base name}, "rules": [{"model_prefix", "base_prefix", "tensors", "same_shape"}]}. Both arguments map
+    a name to its {"shape", "dtype"}. Two phases:
+
+    1. A model name pairs with the base name that shares the longest run of trailing dotted parts, if the run is at least three
+       parts, or at least two when one name is wholly the end of the other (`visual.pos_embed.weight` and
+       `model.visual.pos_embed.weight`). A tie leaves the name unmatched, and so does a base name wanted by two model names. The
+       layer number is part of the run, so a layer cannot pair with another layer.
+    2. Pairs from phase 1 vote for prefix rewrites (`language_model` -> `model`). A rewrite with MIN_RULE_VOTES votes also pairs
+       the names too short to match alone (`language_model.norm.weight`, `language_model.embed_tokens.weight`).
+    """
+    by_tail: dict[tuple, list[str]] = {}
+    for b in only_b:
+        by_tail.setdefault(tuple(b.split(".")[-2:]), []).append(b)
+    wants: dict[str, str] = {}
+    for m in only_m:
+        ms = m.split(".")
+        best, best_k, tie = None, 0, False
+        for b in by_tail.get(tuple(ms[-2:]), []):
+            bs = b.split(".")
+            k = _suffix_len(ms, bs)
+            if not (k >= 3 or (k >= 2 and k in (len(ms), len(bs)))):
+                continue
+            if k > best_k:
+                best, best_k, tie = b, k, False
+            elif k == best_k:
+                tie = True
+        if best is not None and not tie:
+            wants[m] = best
+    claimed = collections.Counter(wants.values())
+    pairs = {m: b for m, b in wants.items() if claimed[b] == 1}
+
+    def rule_of(m: str, b: str) -> tuple[str, str]:
+        ms, bs = m.split("."), b.split(".")
+        k = _suffix_len(ms, bs)
+        return ".".join(ms[:len(ms) - k]), ".".join(bs[:len(bs) - k])
+
+    votes = collections.Counter(rule_of(m, b) for m, b in pairs.items())
+    used = set(pairs.values())
+    for (mp, bp), n in votes.most_common():
+        if n < MIN_RULE_VOTES:
+            break
+        for m in only_m:
+            if m in pairs or (mp and not m.startswith(mp + ".")):
+                continue
+            cand = (bp + "." if bp else "") + (m[len(mp) + 1:] if mp else m)
+            if cand in only_b and cand not in used:
+                pairs[m] = cand
+                used.add(cand)
+    tally: dict[tuple, list[int]] = {}
+    for m, b in pairs.items():
+        row = tally.setdefault(rule_of(m, b), [0, 0])
+        row[0] += 1
+        row[1] += int(only_m[m]["shape"] == only_b[b]["shape"] and only_m[m]["dtype"] == only_b[b]["dtype"])
+    rules = [{"model_prefix": mp, "base_prefix": bp, "tensors": n, "same_shape": same}
+             for (mp, bp), (n, same) in sorted(tally.items(), key=lambda kv: (-kv[1][0], kv[0]))]
+    return {"pairs": pairs, "rules": rules}
+
+
+def _pair_names(mt: dict, bt: dict) -> dict:
+    """Everything the name matching knows, so the comparison and `raw_pair_map` cannot disagree."""
+    mraw = {normalize(k): k for k in mt}
+    braw = {normalize(k): k for k in bt}
+    mn = {k: mt[v] for k, v in mraw.items()}
+    bn = {k: bt[v] for k, v in braw.items()}
+    common = sorted(set(mn) & set(bn))
+    only_m, only_b = sorted(set(mn) - set(bn)), sorted(set(bn) - set(mn))
+    al = align_leftovers({k: mn[k] for k in only_m}, {k: bn[k] for k in only_b})
+    pairs = [(k, k) for k in common] + sorted(al["pairs"].items())
+    gone_m, gone_b = set(al["pairs"]), set(al["pairs"].values())
+    return {"mn": mn, "bn": bn, "mraw": mraw, "braw": braw, "pairs": pairs, "aligned": al,
+            "only_m": [k for k in only_m if k not in gone_m], "only_b": [k for k in only_b if k not in gone_b]}
+
+
+def raw_pair_map(mt: dict, bt: dict) -> dict:
+    """{raw model tensor name: raw base tensor name} for every pair the comparison found, aligned pairs included."""
+    p = _pair_names(mt, bt)
+    return {p["mraw"][m]: p["braw"][b] for m, b in p["pairs"]}
+
+
+def raw_rules(raw_pairs: dict) -> list[dict]:
+    """Prefix rewrites that turn the model's tensor names into the nearest model's, from {raw model name: raw base name}: {"from", "to",
+    "tensors"} where names starting with `from.` are called `to.` there (`to` is empty when the nearest model has no prefix). A name that
+    already matches makes no rule. The reference loader turns these into transformers' `key_mapping` when a load misses keys."""
+    tally: collections.Counter = collections.Counter()
+    for m, b in raw_pairs.items():
+        ms, bs = m.split("."), b.split(".")
+        k = _suffix_len(ms, bs)
+        mp, bp = ms[:len(ms) - k], bs[:len(bs) - k]
+        if mp:
+            tally[(".".join(mp), ".".join(bp))] += 1
+        elif bp:
+            tally[(ms[0], ".".join(bp + [ms[0]]))] += 1
+    return [{"from": f, "to": t, "tensors": n} for (f, t), n in sorted(tally.items(), key=lambda kv: (-kv[1], kv[0]))]
+
+
 def compare_tensor_maps(mt: dict, bt: dict, *, mshards: list, bshards: list, merr: list, berr: list,
                         model_path: str, base_path: str) -> dict:
     """The tensor comparison on two already-read {name: {"dtype", "shape", "shard"}} maps. The research
     package builds the maps from safetensors headers fetched by range request."""
     m_raw, b_raw = set(mt), set(bt)
-    mn = {normalize(k): v for k, v in mt.items()}
-    bn = {normalize(k): v for k, v in bt.items()}
-    common = sorted(set(mn) & set(bn))
-    only_m, only_b = sorted(set(mn) - set(bn)), sorted(set(bn) - set(mn))
-    shape_diffs = [{"name": k, "model": mn[k]["shape"], "base": bn[k]["shape"]}
-                   for k in common if mn[k]["shape"] != bn[k]["shape"]]
-    dtype_diffs = [{"name": k, "model": mn[k]["dtype"], "base": bn[k]["dtype"]}
-                   for k in common if mn[k]["dtype"] != bn[k]["dtype"]]
+    p = _pair_names(mt, bt)
+    mn, bn, al = p["mn"], p["bn"], p["aligned"]
+    only_m, only_b = p["only_m"], p["only_b"]
+    shape_diffs = sorted(({"name": b, "model": mn[m]["shape"], "base": bn[b]["shape"]}
+                          for m, b in p["pairs"] if mn[m]["shape"] != bn[b]["shape"]), key=lambda x: x["name"])
+    dtype_diffs = sorted(({"name": b, "model": mn[m]["dtype"], "base": bn[b]["dtype"]}
+                          for m, b in p["pairs"] if mn[m]["dtype"] != bn[b]["dtype"]), key=lambda x: x["name"])
     return {
         "model": {"path": model_path, "shards": mshards, "num_tensors": len(mt),
                   "dtype_histogram": dtype_histogram(mt),
@@ -490,8 +639,14 @@ def compare_tensor_maps(mt: dict, bt: dict, *, mshards: list, bshards: list, mer
         "raw_name_sets": {"common": len(m_raw & b_raw), "only_in_model": sorted(m_raw - b_raw),
                           "only_in_base": sorted(b_raw - m_raw)},
         "normalized_name_sets": {
-            "note": f"names normalized by changing the prefix '{LM_PREFIX}' to 'model.' in both models",
-            "common": len(common), "only_in_model": only_m, "only_in_base": only_b,
+            "note": (f"names normalized by changing the prefix '{LM_PREFIX}' to 'model.' in both models; names still "
+                     "unmatched were then paired when they share the same trailing parts and differ only by a prefix "
+                     "(see aligned)"),
+            "common": len(p["pairs"]), "only_in_model": only_m, "only_in_base": only_b,
+            "aligned": {"pairs": len(al["pairs"]), "rules": al["rules"],
+                        "examples": [list(x) for x in sorted(al["pairs"].items())[:5]],
+                        "all_pairs": dict(sorted(al["pairs"].items())),
+                        "raw_rules": raw_rules({p["mraw"][m]: p["braw"][b] for m, b in p["pairs"]})},
             "only_in_model_groups": group(only_m), "only_in_base_groups": group(only_b),
             "unexplained_only_in_model": [k for k in only_m if not EXPLAINED_EXTRA.search(k)],
             "unexplained_only_in_base": [k for k in only_b if not EXPLAINED_EXTRA.search(k)]},
@@ -502,6 +657,229 @@ def compare_tensor_maps(mt: dict, bt: dict, *, mshards: list, bshards: list, mer
         "vision_tensors": {"model": sum(1 for k in mn if re.search(r"(^|\.)(visual|vision)", k)),
                            "base": sum(1 for k in bn if re.search(r"(^|\.)(visual|vision)", k))},
     }
+
+
+# ---- values: are the analogues the same weights, a fine-tune of them, or unrelated? ---------------------------------------------
+
+def tensor_index(snapshot: Path) -> dict:
+    """{name: {"file", "dtype", "shape", "start", "end"}} for the backbone shards, with absolute byte offsets."""
+    out = {}
+    for shard in backbone_shards(snapshot):
+        try:
+            header, base = raw_header(snapshot / shard)
+        except (OSError, ValueError, UnicodeDecodeError):
+            continue
+        for name, v in header.items():
+            if name == "__metadata__" or not isinstance(v, dict) or not isinstance(v.get("data_offsets"), list):
+                continue
+            lo, hi = v["data_offsets"]
+            out[name] = {"file": snapshot / shard, "dtype": v.get("dtype"), "shape": v.get("shape") or [],
+                         "start": base + lo, "end": base + hi}
+    return out
+
+
+def decode_values(buf: bytes, dtype: str):
+    """floats from raw bytes, or None for a dtype this does not read. Plain Python: a few thousand values is cheap."""
+    size = ITEMSIZE.get(dtype)
+    if size is None:
+        return None
+    n = len(buf) // size
+    if dtype == "BF16":
+        return [struct.unpack("<f", struct.pack("<I", v << 16))[0] for v in struct.unpack(f"<{n}H", buf[:n * 2])]
+    return list(struct.unpack(f"<{n}{'e' if dtype == 'F16' else 'f'}", buf[:n * size]))
+
+
+def read_prefix(entry: dict, elements: int):
+    size = ITEMSIZE.get(entry["dtype"])
+    if size is None:
+        return None
+    numel = 1
+    for d in entry["shape"]:
+        numel *= int(d)
+    with open(entry["file"], "rb") as f:
+        f.seek(entry["start"])
+        return decode_values(f.read(min(elements, numel) * size), entry["dtype"])
+
+
+def relation(a: list[float], b: list[float]) -> tuple[str, float | None]:
+    if a == b:
+        return "identical", 1.0
+    na, nb = math.sqrt(sum(x * x for x in a)), math.sqrt(sum(y * y for y in b))
+    if na == 0 or nb == 0:
+        return "unrelated", None
+    cos = sum(x * y for x, y in zip(a, b)) / (na * nb)
+    return ("near" if cos >= NEAR_COSINE else "changed" if cos >= CHANGED_COSINE else "unrelated"), cos
+
+
+def sample_value_diffs(model_dir: Path, base_dir: Path, pairs: dict) -> dict:
+    """Compare the first SAMPLE_ELEMENTS values of SAMPLE_TENSORS paired tensors. `pairs` maps a raw model name to a raw base name.
+    identical: equal; near: cosine at least NEAR_COSINE (what a fine-tune looks like); changed; unrelated."""
+    mi, bi = tensor_index(model_dir), tensor_index(base_dir)
+    names = sorted(k for k in pairs if k in mi and pairs[k] in bi)
+    chosen = names if len(names) <= SAMPLE_TENSORS else [names[i * len(names) // SAMPLE_TENSORS] for i in range(SAMPLE_TENSORS)]
+    samples, skipped = [], []
+    for m in chosen:
+        b = pairs[m]
+        if mi[m]["shape"] != bi[b]["shape"]:
+            skipped.append(f"{m}: shapes differ ({mi[m]['shape']} and {bi[b]['shape']})")
+            continue
+        a, c = read_prefix(mi[m], SAMPLE_ELEMENTS), read_prefix(bi[b], SAMPLE_ELEMENTS)
+        if a is None or c is None:
+            skipped.append(f"{m}: dtype {mi[m]['dtype']} / {bi[b]['dtype']} is not read")
+            continue
+        rel, cos = relation(a, c)
+        diffs = [abs(x - y) for x, y in zip(a, c)]
+        samples.append({"model_tensor": m, "base_tensor": b, "elements": len(a), "relation": rel,
+                        "cosine": None if cos is None else round(cos, 6),
+                        "mean_abs_diff": sum(diffs) / len(diffs) if diffs else 0.0, "max_abs_diff": max(diffs, default=0.0),
+                        "mean_abs_base": sum(abs(y) for y in c) / len(c) if c else 0.0})
+    summary = {k: sum(1 for x in samples if x["relation"] == k) for k in ("identical", "near", "changed", "unrelated")}
+    return {"samples": samples, "summary": summary, "skipped": skipped,
+            "note": (f"the first {SAMPLE_ELEMENTS} values of up to {SAMPLE_TENSORS} paired tensors; a fine-tune is 'near' "
+                     f"(cosine at least {NEAR_COSINE}), identical weights are 'identical'")}
+
+
+# ---- a restricted head: no lm_head, and a sidecar whose rows are copies of some of the base head's rows --------------------------
+
+def _np_decode(buf: bytes, dtype: str):
+    if dtype == "BF16":
+        return (np.frombuffer(buf, dtype="<u2").astype("<u4") << 16).view("<f4")
+    if dtype == "F16":
+        return np.frombuffer(buf, dtype="<f2").astype("<f4")
+    if dtype == "F32":
+        return np.frombuffer(buf, dtype="<f4")
+    return None
+
+
+def _unit_rows(x):
+    n = np.linalg.norm(x, axis=1, keepdims=True)
+    return x / np.where(n == 0, 1.0, n)
+
+
+def detect_restricted_head(model_dir: Path, base_dir: Path, sc: dict) -> dict:
+    """Is a sidecar a head restricted to some of the nearest model's lm_head rows (a decision model's answer codes, for example)?
+    restricted is True when every row of a sidecar matrix is a copy (cosine at least HEAD_MATCH_COSINE) of a base head row;
+    None when the check could not run (no numpy)."""
+    out = {"restricted": False, "rows": None, "base_rows": None, "matched_rows": 0, "token_ids": [], "min_cosine": None,
+           "sidecar": None, "tensor": None, "note": ""}
+    sidecars = [e for e in sc.get("sidecars", []) if str(e.get("file", "")).endswith(".safetensors")]
+    if not sidecars:
+        out["note"] = "the new model has no safetensors sidecar"
+        return out
+    if np is None:
+        out.update(restricted=None, note="numpy is not installed, so the restricted-head check was skipped")
+        return out
+    if any(HEAD_NAME.search(n) for n in tensor_index(model_dir)):
+        out["note"] = "the new model has its own lm_head, so no sidecar stands in for it"
+        return out
+    head = tensor_index(base_dir).get("lm_head.weight")
+    if head is None or len(head["shape"]) != 2 or head["dtype"] not in ITEMSIZE:
+        out["note"] = "the nearest model has no readable lm_head.weight to compare with"
+        return out
+    vocab, dim = head["shape"]
+    size = ITEMSIZE[head["dtype"]]
+    best_try = None
+    unreadable = []
+    for entry in sidecars:
+        try:
+            header, base_off = raw_header(model_dir / entry["file"])
+        except (OSError, ValueError, UnicodeDecodeError):
+            continue
+        for name, v in sorted(header.items()):
+            shape = v.get("shape") if isinstance(v, dict) else None
+            if name == "__metadata__" or not shape or len(shape) != 2 or shape[1] != dim or shape[0] >= vocab \
+                    or v.get("dtype") not in ITEMSIZE:
+                continue
+            rows = shape[0]
+            try:
+                # A truncated file, a header with no offsets or offsets that do not fit the shape each raise here. The check then
+                # says it could not run (restricted None), where it used to end stage 0 with a traceback.
+                lo, hi = v["data_offsets"]
+                with open(model_dir / entry["file"], "rb") as f:
+                    f.seek(base_off + lo)
+                    rowsmat = _unit_rows(_np_decode(f.read(hi - lo), v["dtype"]).reshape(rows, dim))
+                best = np.full(rows, -2.0, dtype="float32")
+                best_idx = np.zeros(rows, dtype="int64")
+                with open(head["file"], "rb") as f:
+                    for r0 in range(0, vocab, HEAD_CHUNK_ROWS):
+                        n = min(HEAD_CHUNK_ROWS, vocab - r0)
+                        f.seek(head["start"] + r0 * dim * size)
+                        chunk = _unit_rows(_np_decode(f.read(n * dim * size), head["dtype"]).reshape(n, dim))
+                        sim = rowsmat @ chunk.T
+                        j, val = sim.argmax(axis=1), sim.max(axis=1)
+                        better = val > best
+                        best[better], best_idx[better] = val[better], j[better] + r0
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                unreadable.append(f"{entry['file']} {name}: {type(exc).__name__}: {exc}"[:300])
+                continue
+            matched = int((best >= HEAD_MATCH_COSINE).sum())
+            found = {"restricted": bool(matched == rows and rows >= 2), "rows": rows, "base_rows": vocab,
+                     "matched_rows": matched, "token_ids": [int(i) for i in best_idx][:MAX_LISTED_NAMES],
+                     "min_cosine": round(min(1.0, float(best.min())), 6), "sidecar": entry["file"], "tensor": name,
+                     "note": ("every row of the sidecar matrix is a copy of a row of the nearest model's lm_head.weight"
+                              if matched == rows else f"{matched} of {rows} rows match a row of lm_head.weight")}
+            if found["restricted"]:
+                return found
+            if best_try is None or matched > best_try["matched_rows"]:
+                best_try = found
+    if unreadable:
+        # Something could not be read, so "not restricted" would be a guess. A match found before the failure was returned above.
+        return {**(best_try or out), "restricted": None,
+                "note": "the restricted-head check could not run to the end: " + "; ".join(unreadable[:3]) + " (a sidecar or the nearest "
+                        "model's lm_head.weight could not be read in full; the file may be truncated)"}
+    if best_try is not None:
+        return best_try
+    out["note"] = "no sidecar matrix has the head's width and fewer rows"
+    return out
+
+
+def readout_facts(model_dir: Path, code: list[dict]) -> dict:
+    """How a head is read, from the model's own files, without running anything: small top-level JSON files that declare an
+    `attention_mode` (with their pooling, temperature and code count), and the lines of the listed code files that mention masks, hooks
+    and the readout. A line number is a place to read, not a finding: the code decides what the mask is."""
+    declared, hints, skipped = [], [], []
+    for p in sorted(model_dir.glob("*.json")):
+        try:
+            if not p.is_file() or p.stat().st_size > READOUT_JSON_MAX:
+                continue
+            d = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(d, dict) and isinstance(d.get("attention_mode"), str):
+            codes = d.get("codes")
+            declared.append({"file": p.name, "attention_mode": d["attention_mode"], "pooling": d.get("pooling"),
+                             "temperature": d.get("temperature"), "num_codes": len(codes) if isinstance(codes, list) else None})
+    for entry in code:
+        p = model_dir / entry["file"]
+        try:
+            if p.stat().st_size > CODE_SCAN_MAX:
+                skipped.append(f"{entry['file']}: over {CODE_SCAN_MAX} bytes, not scanned")
+                continue
+            lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            skipped.append(f"{entry['file']}: unreadable")
+            continue
+        for name, pattern in CODE_HINTS:
+            hit = [i + 1 for i, line in enumerate(lines) if pattern.search(line)]
+            if hit:
+                hints.append({"file": entry["file"], "hint": name, "lines": hit[:MAX_HINT_LINES], "count": len(hit)})
+    return {"declared": declared, "code_hints": hints, "skipped": skipped,
+            "note": "declared: small JSON files that state an attention_mode; code_hints: lines in the listed code files that mention it. "
+                    "Nothing was run."}
+
+
+def token_names(base_dir: Path, ids: list[int], limit: int = 400) -> list[str]:
+    """The nearest model's token strings for some ids, from tokenizer.json; [] when it cannot be read."""
+    try:
+        tok = json.loads((base_dir / "tokenizer.json").read_text(encoding="utf-8"))
+        wanted = set(ids[:limit])
+        names = {i: t for t, i in (tok.get("model", {}).get("vocab") or {}).items() if i in wanted}
+        for a in tok.get("added_tokens") or []:
+            if a.get("id") in wanted:
+                names[a["id"]] = a.get("content")
+        return [str(names.get(i, "?")) for i in ids[:limit]]
+    except (OSError, ValueError, AttributeError, TypeError):
+        return []
 
 
 # ---- sidecars and code files -----------------------------------------------------------------------
@@ -549,7 +927,18 @@ def compare_sidecars(model_dir: Path, base_dir: Path, backbone_names: set[str]) 
 
 
 def code_files(model_dir: Path) -> list[dict]:
-    return [{"file": p.name, "sha256": file_sha256(p)} for p in sorted(model_dir.glob("*.py")) if p.is_file()]
+    """Every `.py` file in the model directory, down MAX_CODE_DEPTH levels, listed with its sha256 (at most MAX_CODE_FILES, sorted
+    by path). A model that ships its own inference code usually keeps it under source/ or src/. Nothing here imports or runs it."""
+    found = []
+    for root, dirs, files in os.walk(model_dir):
+        depth = len(Path(root).relative_to(model_dir).parts)
+        dirs[:] = sorted(d for d in dirs if d not in SKIP_CODE_DIRS and not d.startswith(".") and depth < MAX_CODE_DEPTH)
+        for name in files:
+            p = Path(root) / name
+            if name.endswith(".py") and p.is_file():           # is_file follows a link: a cache snapshot is all links
+                found.append(p)
+    found.sort(key=lambda p: p.relative_to(model_dir).as_posix())
+    return [{"file": p.relative_to(model_dir).as_posix(), "sha256": file_sha256(p)} for p in found[:MAX_CODE_FILES]]
 
 
 def sidecar_finding(sc: dict) -> str:
@@ -892,6 +1281,14 @@ def tensors_finding(t: dict) -> str:
 def tensor_names_finding(t: dict) -> str:
     mp, bp = t["model"]["uses_language_model_prefix"], t["base"]["uses_language_model_prefix"]
     raw, ns = t["raw_name_sets"]["common"], t["normalized_name_sets"]["common"]
+    al = t["normalized_name_sets"]["aligned"]
+    if al["pairs"]:
+        rules = "; ".join(f"'{r['model_prefix'] or '(none)'}' in the new model is '{r['base_prefix'] or '(none)'}' in the nearest model "
+                          f"({r['tensors']} tensors, {r['same_shape']} with the same shape and dtype)" for r in al["rules"][:4])
+        return (f"The two models name their tensors differently: {raw} names match as written. After the "
+                f"'{LM_PREFIX}' rewrite and pairing names that differ only by a prefix, {ns} tensors have an analogue "
+                f"({al['pairs']} of them paired by prefix): {rules}. A loader that accepts only one prefix needs the names remapped "
+                f"(delta.json's alignment.all_pairs lists every pair).")
     if mp == bp:
         where = LM_PREFIX if mp else "model."
         return (f"Both models name their text tensors under the same prefix ({where}). "
@@ -900,6 +1297,27 @@ def tensor_names_finding(t: dict) -> str:
     return (f"The new model's text tensors use the prefix '{new}' and the nearest model's use "
             f"'{old}'. {raw} names match as written and {ns} match after the prefix is normalized. "
             "A loader that accepts only one prefix needs the names remapped.")
+
+
+def values_finding(v: dict) -> str:
+    sm, n = v["summary"], len(v["samples"])
+    parts = [f"{sm[k]} {k}" for k in ("identical", "near", "changed", "unrelated") if sm[k]]
+    s = (f"Sampled values of {n} paired tensors (the first {SAMPLE_ELEMENTS} values of each): {', '.join(parts) or 'none'}. "
+         f"'near' means a cosine of at least {NEAR_COSINE} with the nearest model's tensor, which is what a fine-tune looks like; "
+         "'identical' would mean the weights were not trained at all.")
+    if sm["unrelated"] or sm["changed"]:
+        s += " A pair that is changed or unrelated may not be an analogue: check the name alignment."
+    if v["skipped"]:
+        s += " Skipped: " + "; ".join(v["skipped"][:3]) + "."
+    return s
+
+
+def head_finding(h: dict) -> str:
+    toks = h.get("tokens") or []
+    shown = (" for the tokens " + ", ".join(repr(t) for t in toks[:12]) + (" ..." if len(toks) > 12 else "")) if toks else ""
+    return (f"The new model has no lm_head.weight. Its sidecar {h['sidecar']} (tensor '{h['tensor']}', {h['rows']} rows) holds rows that "
+            f"are copies of {h['matched_rows']} of the nearest model's {h['base_rows']} lm_head rows (lowest cosine "
+            f"{h['min_cosine']}){shown}. The model is the nearest model's backbone with its head cut down to those tokens.")
 
 
 def tokenizer_finding(tc: dict, enc: dict) -> str:
@@ -1018,21 +1436,29 @@ def decide_path(c: dict, t: dict) -> list[str]:
         reasons.append(f"tensor {x['name']} has dtype {x['model']} in the new model and {x['base']} in the nearest model")
     for side, who in (("model", "the new model"), ("base", "the nearest model")):
         extra = ns[f"unexplained_only_in_{side}"]
+        if side == "base" and (t.get("head") or {}).get("restricted"):
+            extra = [k for k in extra if not HEAD_NAME.search(k)]      # the readout rows stand in for lm_head
         if extra:
             reasons.append(f"{len(extra)} text tensors exist only in {who}: {short(extra, 5)}")
     return reasons
 
 
 def decide_class(c: dict, t: dict, reasons: list[str], sc: dict) -> str:
-    """weights-only, weights+sidecar, full-port or unknown. `reasons` already holds the backbone's
-    reasons for full-port and the sidecar problems."""
+    """weights-only, weights+sidecar, restricted-head, full-port or unknown. `reasons` already holds the backbone's
+    reasons for full-port and the sidecar problems (sc["problems"], told apart by value). restricted-head: the backbone matches and the only thing missing is an
+    lm_head that a sidecar's rows stand in for (t["head"]["restricted"], set by detect_restricted_head)."""
     ns = t["normalized_name_sets"]
-    could_not_compare = ((c.get("errors") and "text_key_values" not in c) or bool(t["errors"])
-                         or ns["common"] == 0 or bool(sc["problems"]))
+    could_not_compare = (c.get("errors") and "text_key_values" not in c) or bool(t["errors"]) or ns["common"] == 0
     if could_not_compare:
         return "unknown"
-    if reasons:
+    # A definite difference in the backbone is full-port whatever a sidecar's problems are (summerMC/Diffusion-Qwen3.8-27B: 48 extra text tensors
+    # and a dllm_extras.pt that cannot be read). The sidecar problems alone, on a backbone that lines up, are what make the class unknown.
+    if [r for r in reasons if r not in sc["problems"]]:
         return "full-port"
+    if sc["problems"]:
+        return "unknown"
+    if (t.get("head") or {}).get("restricted"):
+        return "restricted-head"
     return "weights+sidecar" if sc["sidecars"] else "weights-only"
 
 
@@ -1107,17 +1533,38 @@ def main() -> int:
     write_json("disk-free.json", disk)
     say("wrote evidence/files-compare.json, genconfig-license.json and disk-free.json")
 
-    backbone_names = set(read_tensors(model_dir)[1])
+    model_tensors, base_tensors = read_tensors(model_dir)[1], read_tensors(base_dir)[1]
+    backbone_names = set(model_tensors)
     sc = compare_sidecars(model_dir, base_dir, backbone_names)
     write_json("sidecar-compare.json", sc)
     code = code_files(model_dir)
     say(f"wrote evidence/sidecar-compare.json ({len(sc['sidecars'])} sidecars, {len(code)} code files)")
-    reasons = decide_path(c, t) + sc["problems"]
+    values = sample_value_diffs(model_dir, base_dir, raw_pair_map(model_tensors, base_tensors))
+    write_json("value-compare.json", values)
+    say(f"wrote evidence/value-compare.json ({len(values['samples'])} tensors sampled: {fmt(values['summary'])})")
+    head = detect_restricted_head(model_dir, base_dir, sc)
+    if head.get("restricted"):
+        head["tokens"] = token_names(base_dir, head["token_ids"])
+        head["readout"] = readout_facts(model_dir, code)
+        write_json("readout-facts.json", head["readout"])
+    write_json("head-compare.json", head)
+    say(f"wrote evidence/head-compare.json (restricted head: {head['restricted']}; {head['note']})")
+    reasons = decide_path({**c}, {**t, "head": head}) + sc["problems"]
+    cls = decide_class(c, {**t, "head": head}, reasons, sc)
+    if cls == "restricted-head":
+        reasons = [(f"the nearest model's lm_head.weight is replaced by {head['rows']} sidecar rows ({head['sidecar']}) that are "
+                    f"copies of rows of it: the harness does not serve a restricted head, so a person decides")]
     path = "full-port" if reasons else "weights-only"
-    cls = decide_class(c, t, reasons, sc)
+    ns = t["normalized_name_sets"]
     delta = {
         "model": model_id, "nearest_model": nearest_id, "path": path, "class": cls,
-        "path_reasons": reasons, "sidecars": sc["sidecars"], "code_files": code,
+        "template_sha256": THIS_SHA256, "path_reasons": reasons, "sidecars": sc["sidecars"], "code_files": code,
+        "alignment": {"pairs": ns["common"], "aligned_by_prefix": ns["aligned"]["pairs"], "rules": ns["aligned"]["rules"],
+                      "raw_rules": ns["aligned"]["raw_rules"], "all_pairs": ns["aligned"]["all_pairs"], "only_in_model": ns["only_in_model"][:50],
+                      "only_in_base": ns["only_in_base"][:50]},
+        "values": {"summary": values["summary"], "samples": [{k: x[k] for k in ("model_tensor", "relation", "cosine")}
+                                                              for x in values["samples"]]},
+        "head": head,
         "mtp": {"nearest_tensors": t["mtp_tensors"]["base"], "new_tensors": t["mtp_tensors"]["model"]},
         "draft": ("written by delta_triage.py from the evidence files; the agent reviews each finding "
                   "and adds hazards it can justify"),
@@ -1146,6 +1593,38 @@ def main() -> int:
                                              "load. A check that only generates text from the backbone does "
                                              "not exercise it. Its output must be checked on the host against "
                                              "the CPU reference, with the exact file hash recorded.")})
+    if ns["aligned"]["pairs"]:
+        # Names paired by prefix count as the nearest model's tensors, so the path stays weights-only. Only the stage 1 CPU reference
+        # loader and the restricted-head parity script apply the name map. The swap and serve templates of stages 2 and 4 link the
+        # new model's files as they are, so the TT runtime sees the new names.
+        delta["hazards"].append({"area": "other", "evidence": [ev("tensor-compare.json")],
+                                 "finding": (f"{ns['aligned']['pairs']} tensors of the new model were paired by prefix with the nearest "
+                                             "model's tensors, because their names differ (alignment.rules lists the rewrites). Only "
+                                             "the stage 1 CPU reference applies that map. Nothing in stages 2 and 4 renames the weights "
+                                             "before the TT runtime reads them, and stage 0 does not check that the runtime accepts the "
+                                             "new names. If a boot finds no weights or the wrong ones, check the tensor names first.")})
+    if values["samples"]:
+        delta["differences"].append({"area": "other", "finding": values_finding(values),
+                                     "evidence": [ev("value-compare.json")]})
+    if head.get("restricted"):
+        delta["differences"].append({"area": "other", "finding": head_finding(head), "evidence": [ev("head-compare.json")]})
+        declared = head["readout"]["declared"]
+        stated = ("; ".join(f"{d['file']} says attention_mode {d['attention_mode']!r}"
+                            + (f" and pooling {d['pooling']!r}" if d.get("pooling") else "") for d in declared)
+                  if declared else "")
+        delta["hazards"].append({"area": "other", "evidence": [ev("head-compare.json"), ev("readout-facts.json")],
+                                 "finding": ("A restricted head is read in a way the nearest model's runtime may not support: the "
+                                             "answers come from a few token rows, and the model's own code decides at which positions "
+                                             "they are read and under which attention mask. "
+                                             + (f"The model's own files state it: {stated}. " if stated else "")
+                                             + "A runtime that keeps only the last position's hidden state, or applies a causal mask, "
+                                             "would give plausible but wrong probabilities. Neither is in the weights or the config. "
+                                             "The harness stops after stage 0 on this class; read code_files (code_hints in "
+                                             "evidence/readout-facts.json says where) before deciding.")})
+    elif head.get("restricted") is None and sc["sidecars"]:
+        delta["hazards"].append({"area": "other", "evidence": [ev("head-compare.json")],
+                                 "finding": f"The restricted-head check did not run: {head['note']}. A sidecar may be a head cut down "
+                                            "from the nearest model's lm_head; compare its rows with lm_head.weight by hand."})
     if code:
         delta["hazards"].append({"area": "other", "evidence": [ev("files-compare.json")],
                                  "finding": ("The model repository ships code: "

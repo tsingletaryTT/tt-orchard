@@ -41,13 +41,22 @@ step prints progress lines, because a 27B model on this CPU takes minutes:
 
 Stage 2 reads prompt-ids.json and generated-ids.json and needs 32 generated ids.
 
+The class and the name map. The class comes from the checkpoint's `architectures` (transformers' top level, then the model's own
+module, then AutoModel for a bare name or AutoModelForCausalLM for a `For` name). When the first load still misses or does not expect
+keys and stage 0 (stages/0/delta.json, `alignment.raw_rules`) paired names by prefix, the weights are loaded once more with those
+rewrites as `key_mapping`; load-report.json lists both attempts. A model with no lm_head loads and then fails "decodes forward" with
+evidence; it does not crash.
+
 Exit codes: 0 when reference.json was written after a load (its verdict may be "fail"), 2 when
 reference_config.json is missing or incomplete or the stage directory is not inside run_dir,
-3 when the weights did not load (reference.json is still written, with verdict "fail"), 4 when
+3 when the weights did not load or the model has no lm_head (reference.json and summary.json are still written, with verdict "fail"), 4 when
 torch or transformers is not importable. The script writes only inside its own directory.
 """
 from __future__ import annotations
 
+import gc
+import hashlib
+import importlib
 import json
 import os
 import platform
@@ -58,6 +67,8 @@ import time
 from pathlib import Path
 
 HERE_DIR = Path(__file__).resolve().parent
+# The sha256 of this file, written into summary.json so the stage gate can compare it with the shipped template.
+THIS_SHA256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 EVIDENCE = HERE_DIR / "evidence"
 REFERENCE = EVIDENCE / "reference"
 CONFIG_KEYS = ("run_dir", "model_snapshot", "python")
@@ -197,19 +208,102 @@ def roundtrip(tokenizer) -> dict:
     return {"total": len(rows), "ok": ok, "pass": ok == len(rows), "add_special_tokens": False, "rows": rows}
 
 
-def load_model(torch, transformers, snapshot: Path) -> tuple[object, dict]:
-    """(model, load report). Raises when from_pretrained raises."""
+class NoLogits(RuntimeError):
+    """The loaded class returns hidden states and no logits: the model has no lm_head."""
+
+
+MAX_DELTA_BYTES = 2 * 1024 * 1024       # stage 0's delta.json is read only up to this size
+MIN_REMAP_TENSORS = 3                   # a prefix rewrite stage 0 saw on fewer tensors than this is not trusted
+MAX_LISTED_KEYS = 50
+
+
+def resolve_class(transformers, config, arch):
+    """The class the checkpoint was saved from. `transformers.<arch>` first; many classes (Qwen3_5Model, for one) are not exported at the
+    top level, so the model's own module is searched next; then a name with `For` in it is a head model (the causal LM) and a bare name is
+    the base model (AutoModel). A bare name must not become AutoModelForCausalLM: on the pplx-decider run the stage agent put that class in
+    its copy of this script, and it found none of the headless checkpoint's keys (the stage 1 gate now checks the copy's hash)."""
+    cls = getattr(transformers, arch, None) if arch else None
+    model_type = getattr(config, "model_type", None)
+    if cls is None and arch and model_type:
+        try:
+            cls = getattr(importlib.import_module(f"transformers.models.{model_type}.modeling_{model_type}"), arch, None)
+        except ImportError:
+            cls = None
+    if cls is None:
+        cls = transformers.AutoModel if arch and "For" not in arch else transformers.AutoModelForCausalLM
+    return cls
+
+
+def remap_from_delta(run_dir) -> dict:
+    """{regex: replacement} key rewrites from stage 0's `alignment.raw_rules` ({"from", "to", "tensors"}: names that start with `from.` are
+    called `to.` in the nearest model). Rules seen on fewer than MIN_REMAP_TENSORS tensors, rules that change nothing, and a delta.json that
+    is missing, unreadable or over MAX_DELTA_BYTES give an empty dict."""
+    path = Path(run_dir) / "stages" / "0" / "delta.json"
+    try:
+        if not path.is_file() or path.stat().st_size > MAX_DELTA_BYTES:
+            return {}
+        rules = (json.loads(path.read_text(encoding="utf-8")).get("alignment") or {}).get("raw_rules")
+    except (OSError, ValueError, AttributeError):
+        return {}
+    out = {}
+    for r in rules if isinstance(rules, list) else []:
+        frm, to, n = (r.get("from"), r.get("to"), r.get("tensors")) if isinstance(r, dict) else (None, None, None)
+        if (isinstance(frm, str) and frm and isinstance(to, str) and to != frm and isinstance(n, int)
+                and not isinstance(n, bool) and n >= MIN_REMAP_TENSORS):
+            out[rf"^{re.escape(frm)}\."] = to + "." if to else ""
+    return out
+
+
+def load_model(torch, transformers, snapshot: Path, remap: dict | None = None) -> tuple[object, dict]:
+    """(model, load report). Raises when from_pretrained raises. When the first load still misses or does not expect keys and `remap` is
+    given (stage 0's name map, see remap_from_delta), the weights are loaded once more with transformers' `key_mapping`, and the load
+    that leaves fewer keys unresolved is kept. The report lists both attempts."""
     config = transformers.AutoConfig.from_pretrained(str(snapshot))
     arch = (getattr(config, "architectures", None) or [None])[0]
-    cls = getattr(transformers, arch, None) if arch else None
-    if cls is None:
-        cls = transformers.AutoModelForCausalLM
+    cls = resolve_class(transformers, config, arch)
     # transformers renamed torch_dtype to dtype in 4.56.
     dkey = "dtype" if version_tuple(transformers.__version__) >= (4, 56) else "torch_dtype"
-    t0 = time.time()
-    model, info = cls.from_pretrained(str(snapshot), low_cpu_mem_usage=True, output_loading_info=True,
-                                      **{dkey: torch.bfloat16})
-    seconds = round(time.time() - t0, 2)
+
+    def attempt(key_mapping):
+        t0 = time.time()
+        kw = {"key_mapping": key_mapping} if key_mapping else {}
+        got, got_info = cls.from_pretrained(str(snapshot), low_cpu_mem_usage=True, output_loading_info=True,
+                                            **{dkey: torch.bfloat16}, **kw)
+        return got, got_info, round(time.time() - t0, 2)
+
+    def unresolved(i):
+        return len(i.get("missing_keys") or []) + len(i.get("unexpected_keys") or [])
+
+    model, info, seconds = attempt(None)
+    tried = [{"key_mapping": None, "missing_keys": sorted(str(k) for k in info.get("missing_keys") or [])[:MAX_LISTED_KEYS],
+              "unexpected_keys": sorted(str(k) for k in info.get("unexpected_keys") or [])[:MAX_LISTED_KEYS], "chosen": True}]
+    if remap and unresolved(info):
+        # A large model in bf16 is tens of GB, so two copies do not fit in RAM. The first is dropped before the retry loads. If the
+        # retry raises or does not leave fewer keys unresolved, the first load is repeated; that costs one more load in the case where the
+        # remap does not help, and holds one model at a time.
+        first_unresolved = unresolved(info)
+        del model
+        gc.collect()
+        entry = {"key_mapping": dict(remap), "chosen": False}
+        second = None
+        try:
+            second, second_info, second_seconds = attempt(remap)
+        except Exception as exc:  # noqa: BLE001 - e.g. a transformers without key_mapping raises TypeError; the first load stays the result
+            entry["error"] = f"{type(exc).__name__}: {exc}"[:1000]
+            second_seconds = 0.0
+        if second is not None:
+            entry["missing_keys"] = sorted(str(k) for k in second_info.get("missing_keys") or [])[:MAX_LISTED_KEYS]
+            entry["unexpected_keys"] = sorted(str(k) for k in second_info.get("unexpected_keys") or [])[:MAX_LISTED_KEYS]
+        tried.append(entry)
+        if second is not None and unresolved(second_info) < first_unresolved:
+            entry["chosen"] = True
+            tried[0]["chosen"] = False
+            model, info, seconds = second, second_info, round(seconds + second_seconds, 2)
+        else:
+            del second
+            gc.collect()
+            model, info, again = attempt(None)
+            seconds = round(seconds + second_seconds + again, 2)
     model.eval()
     patterns = list(getattr(cls, "_keys_to_ignore_on_load_unexpected", None) or []) + \
         list(getattr(model, "_keys_to_ignore_on_load_unexpected", None) or [])
@@ -223,7 +317,7 @@ def load_model(torch, transformers, snapshot: Path) -> tuple[object, dict]:
     errors = [str(e) for e in info.get("error_msgs") or []]
     model_keys = set(model.state_dict().keys())
     report = {
-        "class": cls.__name__, "architecture": arch, "seconds": seconds, "device": "cpu",
+        "class": cls.__name__, "architecture": arch, "seconds": seconds, "device": "cpu", "attempts": tried,
         "dtype": str(next(model.parameters()).dtype), "low_cpu_mem_usage": True,
         "missing_keys": missing, "unexpected_keys": unexpected, "mismatched_keys": mismatched,
         "error_msgs": errors, "ignore_patterns": patterns, "ignored_checkpoint_keys": ignored,
@@ -256,7 +350,10 @@ def top(torch, tokenizer, logits) -> list[dict]:
 def last_logits(torch, model, seq: list[int]):
     with torch.inference_mode():
         out = model(input_ids=torch.tensor([seq], dtype=torch.long), use_cache=False)
-    return out.logits[0, -1].float()
+    logits = getattr(out, "logits", None)
+    if logits is None:
+        raise NoLogits(f"{type(model).__name__} returns hidden states and no logits: it has no lm_head")
+    return logits[0, -1].float()
 
 
 def decode(torch, model, tokenizer, prompt: str, tag: str) -> dict:
@@ -363,7 +460,10 @@ def main() -> int:
 
     say("loading the weights on CPU in bf16 (this takes minutes for a large model)")
     try:
-        model, rep = load_model(torch, transformers, snapshot)
+        remap = remap_from_delta(run_dir)
+        if remap:
+            say(f"stage 0 paired names by prefix; a load that misses keys is retried with {len(remap)} key rewrites")
+        model, rep = load_model(torch, transformers, snapshot, remap=remap)
     except Exception as exc:  # noqa: BLE001 - the failure goes into the evidence and reference.json
         rep = {"pass": False, "error": f"{type(exc).__name__}: {exc}"[:4000]}
         write_json(EVIDENCE / "load-report.json", rep)
@@ -376,15 +476,34 @@ def main() -> int:
                           "note": f"{rt['ok']} of {rt['total']} strings round trip exactly.",
                           "evidence": [rel(EVIDENCE / "tokenizer-roundtrip.json")]})
         write_json(HERE_DIR / "reference.json", {"verdict": "fail", "environment": env, "checks": checks})
+        write_json(EVIDENCE / "summary.json", {"verdict": "fail", "checks": {c["name"]: c["pass"] for c in checks}, "environment": env,
+                                            "template_sha256": THIS_SHA256})
         say(f"the weights did not load: {rep['error'][:300]}")
         return 3
     write_json(EVIDENCE / "load-report.json", rep)
     say(f"wrote evidence/load-report.json ({rep['class']}, {rep['seconds']} s, {len(rep['missing_keys'])} "
         f"missing, {len(rep['unexpected_keys'])} unexpected, {len(rep['mismatched_keys'])} mismatched)")
 
-    main_run = decode(torch, model, tokenizer, PROMPT, "")
     thai = has_thai_tokens(tokenizer)
-    thai_run = decode(torch, model, tokenizer, THAI_PROMPT, "thai-") if thai else None
+    try:
+        main_run = decode(torch, model, tokenizer, PROMPT, "")
+        thai_run = decode(torch, model, tokenizer, THAI_PROMPT, "thai-") if thai else None
+    except NoLogits as exc:
+        # A headless model (a restricted-head model, for example) loads fine and has nothing to decode. That is a result, with evidence,
+        # and not a traceback with no reference.json.
+        note = f"{exc}. The checkpoint has no lm_head, so there are no logits to decode text from."
+        checks = [{"name": "loads", "pass": rep["pass"], "note": f"Loaded through {rep['class']}: {len(rep['missing_keys'])} missing, "
+                   f"{len(rep['unexpected_keys'])} unexpected keys.", "evidence": [rel(EVIDENCE / "load-report.json")]},
+                  {"name": "tokenizer round trip", "pass": rt["pass"], "note": f"{rt['ok']} of {rt['total']} strings round trip exactly.",
+                   "evidence": [rel(EVIDENCE / "tokenizer-roundtrip.json")]},
+                  {"name": "decodes forward", "pass": False, "note": note, "evidence": [rel(EVIDENCE / "load-report.json")]},
+                  {"name": "matches the card", "pass": False, "note": "not run: no text was generated",
+                   "evidence": [rel(EVIDENCE / "load-report.json")]}]
+        write_json(HERE_DIR / "reference.json", {"verdict": "fail", "environment": env, "checks": checks})
+        write_json(EVIDENCE / "summary.json", {"verdict": "fail", "checks": {c["name"]: c["pass"] for c in checks}, "environment": env,
+                                            "template_sha256": THIS_SHA256})
+        say(note)
+        return 3
     if not thai:
         say("the tokenizer has no token that decodes to a Thai character; no Thai decode")
 
@@ -432,6 +551,7 @@ def main() -> int:
     ]
     verdict = "pass" if all(c["pass"] for c in checks) else "fail"
     summary = {"verdict": verdict, "checks": {c["name"]: c["pass"] for c in checks}, "environment": env,
+               "template_sha256": THIS_SHA256,
                "load_seconds": rep["seconds"], "decode_seconds": main_run["seconds"],
                "thai_tokens": thai, "thai_decode_seconds": thai_run["seconds"] if thai_run else None,
                "reasoning_start": reasoning_start(main_run["text"])}

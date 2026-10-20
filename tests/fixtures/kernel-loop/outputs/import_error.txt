@@ -1,0 +1,13 @@
+PROGRESS import
+
+Traceback (most recent call last):
+  File "<TEMPLATES>/kernel_harness.py", line 99, in main
+    loader.loader.exec_module(module)
+  File "<frozen importlib._bootstrap_external>", line 995, in exec_module
+  File "<frozen importlib._bootstrap_external>", line 1133, in get_code
+  File "<frozen importlib._bootstrap_external>", line 1063, in source_to_code
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "<ATTEMPT_DIR>/kernel.py", line 15
+    def OPERATION(a_in: ttnn.Tensor, b_in: ttnn.Tensor, out: ttnn.Tensor) -> None
+                                                                                 ^
+SyntaxError: expected ':'

@@ -1,0 +1,783 @@
+{
+  "architectures": [
+    "Mamba2ForCausalLM"
+  ],
+  "failures": [],
+  "higher_order_nodes": {},
+  "layers_in_config": 64,
+  "layers_traced": 2,
+  "model_dir": "<fixture mamba2>",
+  "note": "prefill graph from torch.export(strict=False, use_cache=False) on the meta device; cache and state updates of decoding are not traced. Bodies of higher-order operations (for example wrap_with_set_grad_enabled) were traversed, so the ops inside them are counted; the wrapper itself is not an op",
+  "ops": [
+    {
+      "count": 40,
+      "count_in_layers": 36,
+      "modules": [
+        "backbone.layers.0",
+        "backbone.layers.0.norm",
+        "backbone.layers.0.mixer",
+        "backbone.layers.0.mixer.norm",
+        "backbone.layers.1"
+      ],
+      "op": "aten._assert_tensor_metadata.default",
+      "sample": null
+    },
+    {
+      "count": 40,
+      "count_in_layers": 36,
+      "modules": [
+        "backbone.layers.0",
+        "backbone.layers.0.norm",
+        "backbone.layers.0.mixer",
+        "backbone.layers.0.mixer.norm",
+        "backbone.layers.1"
+      ],
+      "op": "aten.to.dtype",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            8,
+            4096
+          ]
+        ]
+      }
+    },
+    {
+      "count": 24,
+      "count_in_layers": 22,
+      "modules": [
+        "backbone.layers.0.norm",
+        "backbone.layers.0.mixer",
+        "backbone.layers.0.mixer.norm",
+        "backbone.layers.1.norm",
+        "backbone.layers.1.mixer"
+      ],
+      "op": "aten.mul.Tensor",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            8,
+            4096
+          ]
+        ]
+      }
+    },
+    {
+      "count": 14,
+      "count_in_layers": 14,
+      "modules": [
+        "backbone.layers.0.mixer",
+        "backbone.layers.1.mixer"
+      ],
+      "op": "aten.unsqueeze.default",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            10240,
+            1,
+            4
+          ]
+        ]
+      }
+    },
+    {
+      "count": 13,
+      "count_in_layers": 12,
+      "modules": [
+        "backbone.layers.0.norm",
+        "backbone.layers.0.mixer",
+        "backbone.layers.0.mixer.norm",
+        "backbone.layers.0",
+        "backbone.layers.1.norm"
+      ],
+      "op": "aten.add.Tensor",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            8,
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "count": 12,
+      "count_in_layers": 12,
+      "modules": [
+        "backbone.layers.0.mixer",
+        "backbone.layers.1.mixer"
+      ],
+      "op": "aten.pad.default",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            256,
+            128,
+            64
+          ]
+        ]
+      }
+    },
+    {
+      "count": 12,
+      "count_in_layers": 12,
+      "modules": [
+        "backbone.layers.0.mixer",
+        "backbone.layers.1.mixer"
+      ],
+      "op": "aten.reshape.default",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            1,
+            256,
+            128,
+            64
+          ]
+        ]
+      }
+    },
+    {
+      "count": 10,
+      "count_in_layers": 10,
+      "modules": [
+        "backbone.layers.0.mixer",
+        "backbone.layers.1.mixer"
+      ],
+      "op": "aten.einsum.default",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            1,
+            256,
+            256,
+            128
+          ]
+        ]
+      }
+    },
+    {
+      "count": 10,
+      "count_in_layers": 10,
+      "modules": [
+        "backbone.layers.0.mixer",
+        "backbone.layers.1.mixer"
+      ],
+      "op": "aten.exp.default",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            128
+          ]
+        ]
+      }
+    },
+    {
+      "count": 8,
+      "count_in_layers": 8,
+      "modules": [
+        "backbone.layers.0.mixer",
+        "backbone.layers.1.mixer"
+      ],
+      "op": "aten.bitwise_not.default",
+      "sample": {
+        "dtype": "torch.bool",
+        "output_shapes": [
+          [
+            256,
+            256
+          ]
+        ]
+      }
+    },
+    {
+      "count": 8,
+      "count_in_layers": 8,
+      "modules": [
+        "backbone.layers.0.mixer",
+        "backbone.layers.1.mixer"
+      ],
+      "op": "aten.masked_fill.Scalar",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            128,
+            1,
+            256,
+            256
+          ]
+        ]
+      }
+    },
+    {
+      "count": 8,
+      "count_in_layers": 8,
+      "modules": [
+        "backbone.layers.0.mixer",
+        "backbone.layers.1.mixer"
+      ],
+      "op": "aten.ones.default",
+      "sample": {
+        "dtype": "torch.bool",
+        "output_shapes": [
+          [
+            256,
+            256
+          ]
+        ]
+      }
+    },
+    {
+      "count": 8,
+      "count_in_layers": 8,
+      "modules": [
+        "backbone.layers.0.mixer",
+        "backbone.layers.1.mixer"
+      ],
+      "op": "aten.permute.default",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            128,
+            1,
+            256
+          ]
+        ]
+      }
+    },
+    {
+      "count": 8,
+      "count_in_layers": 8,
+      "modules": [
+        "backbone.layers.0.mixer",
+        "backbone.layers.1.mixer"
+      ],
+      "op": "aten.slice.Tensor",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            10240,
+            8
+          ]
+        ]
+      }
+    },
+    {
+      "count": 8,
+      "count_in_layers": 8,
+      "modules": [
+        "backbone.layers.0.mixer",
+        "backbone.layers.1.mixer"
+      ],
+      "op": "aten.tril.default",
+      "sample": {
+        "dtype": "torch.bool",
+        "output_shapes": [
+          [
+            256,
+            256
+          ]
+        ]
+      }
+    },
+    {
+      "count": 6,
+      "count_in_layers": 6,
+      "modules": [
+        "backbone.layers.0.mixer",
+        "backbone.layers.1.mixer"
+      ],
+      "op": "aten.cumsum.default",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            128,
+            1,
+            256
+          ]
+        ]
+      }
+    },
+    {
+      "count": 6,
+      "count_in_layers": 6,
+      "modules": [
+        "backbone.layers.0.mixer",
+        "backbone.layers.1.mixer"
+      ],
+      "op": "aten.transpose.int",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            10240,
+            8
+          ]
+        ]
+      }
+    },
+    {
+      "count": 6,
+      "count_in_layers": 6,
+      "modules": [
+        "backbone.layers.0.mixer",
+        "backbone.layers.1.mixer"
+      ],
+      "op": "aten.view.default",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            8,
+            128,
+            64
+          ]
+        ]
+      }
+    },
+    {
+      "count": 5,
+      "count_in_layers": 4,
+      "modules": [
+        "backbone.layers.0.mixer.in_proj",
+        "backbone.layers.0.mixer.out_proj",
+        "backbone.layers.1.mixer.in_proj",
+        "backbone.layers.1.mixer.out_proj",
+        "lm_head"
+      ],
+      "op": "aten.linear.default",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            8,
+            18560
+          ]
+        ]
+      }
+    },
+    {
+      "count": 5,
+      "count_in_layers": 4,
+      "modules": [
+        "backbone.layers.0.norm",
+        "backbone.layers.0.mixer.norm",
+        "backbone.layers.1.norm",
+        "backbone.layers.1.mixer.norm",
+        "backbone.norm_f"
+      ],
+      "op": "aten.mean.dim",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            8,
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "count": 5,
+      "count_in_layers": 4,
+      "modules": [
+        "backbone.layers.0.norm",
+        "backbone.layers.0.mixer.norm",
+        "backbone.layers.1.norm",
+        "backbone.layers.1.mixer.norm",
+        "backbone.norm_f"
+      ],
+      "op": "aten.pow.Tensor_Scalar",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            8,
+            4096
+          ]
+        ]
+      }
+    },
+    {
+      "count": 5,
+      "count_in_layers": 4,
+      "modules": [
+        "backbone.layers.0.norm",
+        "backbone.layers.0.mixer.norm",
+        "backbone.layers.1.norm",
+        "backbone.layers.1.mixer.norm",
+        "backbone.norm_f"
+      ],
+      "op": "aten.rsqrt.default",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            8,
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "count": 4,
+      "count_in_layers": 4,
+      "modules": [
+        "backbone.layers.0.mixer",
+        "backbone.layers.1.mixer"
+      ],
+      "op": "aten.expand.default",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            128,
+            1,
+            256,
+            256
+          ]
+        ]
+      }
+    },
+    {
+      "count": 4,
+      "count_in_layers": 4,
+      "modules": [
+        "backbone.layers.0.mixer",
+        "backbone.layers.1.mixer"
+      ],
+      "op": "aten.repeat_interleave.self_int",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            8,
+            128,
+            128
+          ]
+        ]
+      }
+    },
+    {
+      "count": 4,
+      "count_in_layers": 4,
+      "modules": [
+        "backbone.layers.0.mixer",
+        "backbone.layers.1.mixer"
+      ],
+      "op": "aten.select.int",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            128,
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "count": 4,
+      "count_in_layers": 4,
+      "modules": [
+        "backbone.layers.0.mixer",
+        "backbone.layers.0.mixer.norm",
+        "backbone.layers.1.mixer",
+        "backbone.layers.1.mixer.norm"
+      ],
+      "op": "aten.silu.default",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            10240,
+            8
+          ]
+        ]
+      }
+    },
+    {
+      "count": 4,
+      "count_in_layers": 4,
+      "modules": [
+        "backbone.layers.0.mixer",
+        "backbone.layers.1.mixer"
+      ],
+      "op": "aten.split_with_sizes.default",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            8,
+            8192
+          ],
+          [
+            1,
+            8,
+            10240
+          ],
+          [
+            1,
+            8,
+            128
+          ]
+        ]
+      }
+    },
+    {
+      "count": 3,
+      "count_in_layers": 2,
+      "modules": [
+        "backbone.layers.0.mixer",
+        "backbone.layers.1.mixer"
+      ],
+      "op": "aten.alias.default",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            1,
+            128,
+            64,
+            128
+          ]
+        ]
+      }
+    },
+    {
+      "count": 2,
+      "count_in_layers": 2,
+      "modules": [
+        "backbone.layers.0.mixer",
+        "backbone.layers.1.mixer"
+      ],
+      "op": "aten.cat.default",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            2,
+            128,
+            64,
+            128
+          ]
+        ]
+      }
+    },
+    {
+      "count": 2,
+      "count_in_layers": 2,
+      "modules": [
+        "backbone.layers.0.mixer",
+        "backbone.layers.1.mixer"
+      ],
+      "op": "aten.clamp.default",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            8,
+            128
+          ]
+        ]
+      }
+    },
+    {
+      "count": 2,
+      "count_in_layers": 2,
+      "modules": [
+        "backbone.layers.0.mixer",
+        "backbone.layers.1.mixer"
+      ],
+      "op": "aten.contiguous.default",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            1,
+            256,
+            128,
+            64
+          ]
+        ]
+      }
+    },
+    {
+      "count": 2,
+      "count_in_layers": 2,
+      "modules": [
+        "backbone.layers.0.mixer",
+        "backbone.layers.1.mixer"
+      ],
+      "op": "aten.conv1d.default",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            10240,
+            11
+          ]
+        ]
+      }
+    },
+    {
+      "count": 2,
+      "count_in_layers": 2,
+      "modules": [
+        "backbone.layers.0.mixer",
+        "backbone.layers.1.mixer"
+      ],
+      "op": "aten.neg.default",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            128
+          ]
+        ]
+      }
+    },
+    {
+      "count": 2,
+      "count_in_layers": 2,
+      "modules": [
+        "backbone.layers.0.mixer",
+        "backbone.layers.1.mixer"
+      ],
+      "op": "aten.softplus.default",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            8,
+            128
+          ]
+        ]
+      }
+    },
+    {
+      "count": 2,
+      "count_in_layers": 2,
+      "modules": [
+        "backbone.layers.0.mixer",
+        "backbone.layers.1.mixer"
+      ],
+      "op": "aten.squeeze.dim",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            10240,
+            4
+          ]
+        ]
+      }
+    },
+    {
+      "count": 2,
+      "count_in_layers": 2,
+      "modules": [
+        "backbone.layers.0.mixer",
+        "backbone.layers.1.mixer"
+      ],
+      "op": "aten.sub.Tensor",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            128,
+            1,
+            256
+          ]
+        ]
+      }
+    },
+    {
+      "count": 2,
+      "count_in_layers": 2,
+      "modules": [
+        "backbone.layers.0.mixer",
+        "backbone.layers.1.mixer"
+      ],
+      "op": "aten.zeros_like.default",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            1,
+            128,
+            64,
+            128
+          ]
+        ]
+      }
+    },
+    {
+      "count": 1,
+      "count_in_layers": 0,
+      "modules": [
+        "backbone.embeddings"
+      ],
+      "op": "aten.embedding.default",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            8,
+            4096
+          ]
+        ]
+      }
+    }
+  ],
+  "python_nodes": {
+    "<built-in function getitem>": 12
+  },
+  "schema": 1,
+  "seq_len": 8,
+  "torch": "2.14.1+cpu",
+  "traced_class": "Mamba2ForCausalLM",
+  "transformers": "5.19.0"
+}

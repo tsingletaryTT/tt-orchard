@@ -1,0 +1,185 @@
+{
+  "models": {
+    "pi": "bytkim/Qwen3.8-27B-pi@34d3f21045f7b41453e66c39e137cfc818a603ce",
+    "base": "Qwen/Qwen3.8-27B@1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+  },
+  "conditions": "same bundle (qwen3.8-27b-dflash2-p300, 2 chips, bfp8, DFlash2 drafter on, sampling on the device), same run.sh apart from the model path, thinking as the chat template defaults it, temperature 0, max_gen_toks 8192, concurrency 4, every item of each set, lm-evaluation-harness 0.4.13, BFCL v3 revision 61fc0608cfd831fcfbbaa676ebdfef0ed963eeda",
+  "tasks": {
+    "humaneval": {
+      "pi": {
+        "n": 164,
+        "passed": 157,
+        "score": 0.957,
+        "stderr": 0.016,
+        "cut_off": 6,
+        "requests": 164,
+        "errors": 0,
+        "wall_s": 1161,
+        "drafter_tokens_per_iteration": 4.59,
+        "drafter_accept_rate": 0.514
+      },
+      "base": {
+        "n": 164,
+        "passed": 154,
+        "score": 0.939,
+        "stderr": 0.019,
+        "cut_off": 8,
+        "requests": 164,
+        "errors": 0,
+        "wall_s": 1425,
+        "drafter_tokens_per_iteration": 4.42,
+        "drafter_accept_rate": 0.489
+      },
+      "paired": {
+        "items": 164,
+        "pi_only_right": 6,
+        "base_only_right": 3,
+        "sign_test_p": 0.5078
+      }
+    },
+    "bfcl_simple": {
+      "pi": {
+        "n": 400,
+        "passed": 373,
+        "score": 0.932,
+        "stderr": 0.013,
+        "drafter_tokens_per_iteration": 5.19,
+        "drafter_accept_rate": 0.604
+      },
+      "base": {
+        "n": 400,
+        "passed": 372,
+        "score": 0.93,
+        "stderr": 0.013,
+        "drafter_tokens_per_iteration": 4.88,
+        "drafter_accept_rate": 0.559
+      }
+    },
+    "bfcl_multiple": {
+      "pi": {
+        "n": 200,
+        "passed": 191,
+        "score": 0.955,
+        "stderr": 0.015,
+        "drafter_tokens_per_iteration": 5.19,
+        "drafter_accept_rate": 0.604
+      },
+      "base": {
+        "n": 200,
+        "passed": 187,
+        "score": 0.935,
+        "stderr": 0.017,
+        "drafter_tokens_per_iteration": 4.88,
+        "drafter_accept_rate": 0.559
+      }
+    },
+    "gsm8k": {
+      "pi": {
+        "n": 1319,
+        "passed": 1107,
+        "score": 0.839,
+        "stderr": 0.01,
+        "cut_off": 0,
+        "requests": 1319,
+        "errors": 0,
+        "wall_s": 2439,
+        "drafter_tokens_per_iteration": 4.89,
+        "drafter_accept_rate": 0.559
+      },
+      "base": {
+        "n": 1319,
+        "passed": 1045,
+        "score": 0.792,
+        "stderr": 0.011,
+        "cut_off": 0,
+        "requests": 1319,
+        "errors": 0,
+        "wall_s": 2452,
+        "drafter_tokens_per_iteration": 4.86,
+        "drafter_accept_rate": 0.554
+      },
+      "paired": {
+        "items": 1319,
+        "pi_only_right": 101,
+        "base_only_right": 39,
+        "sign_test_p": 0.0
+      }
+    },
+    "gsm8k_strict_format": {
+      "pi": {
+        "n": 1319,
+        "score": 0.603,
+        "stderr": 0.013
+      },
+      "base": {
+        "n": 1319,
+        "score": 0.562,
+        "stderr": 0.014
+      }
+    },
+    "mbpp": {
+      "pi": {
+        "n": 500,
+        "passed": 448,
+        "score": 0.896,
+        "stderr": 0.014,
+        "cut_off": 44,
+        "requests": 500,
+        "errors": 0,
+        "wall_s": 5545,
+        "drafter_tokens_per_iteration": 4.24,
+        "drafter_accept_rate": 0.464
+      },
+      "base": {
+        "n": 500,
+        "passed": 432,
+        "score": 0.864,
+        "stderr": 0.015,
+        "cut_off": 54,
+        "requests": 500,
+        "errors": 0,
+        "wall_s": 6277,
+        "drafter_tokens_per_iteration": 4.19,
+        "drafter_accept_rate": 0.456
+      },
+      "paired": {
+        "items": 500,
+        "pi_only_right": 26,
+        "base_only_right": 10,
+        "sign_test_p": 0.0113
+      }
+    },
+    "ifeval": {
+      "pi": {
+        "n": 541,
+        "passed": 473,
+        "score": 0.874,
+        "stderr": 0.014,
+        "cut_off": 30,
+        "requests": 541,
+        "errors": 0,
+        "wall_s": 5538,
+        "drafter_tokens_per_iteration": 4.7,
+        "drafter_accept_rate": 0.529
+      },
+      "base": {
+        "n": 541,
+        "passed": 460,
+        "score": 0.85,
+        "stderr": 0.015,
+        "cut_off": 38,
+        "requests": 541,
+        "errors": 0,
+        "wall_s": 6591,
+        "drafter_tokens_per_iteration": 4.66,
+        "drafter_accept_rate": 0.523
+      },
+      "paired": {
+        "items": 541,
+        "pi_only_right": 31,
+        "base_only_right": 18,
+        "sign_test_p": 0.0854
+      }
+    }
+  }
+}

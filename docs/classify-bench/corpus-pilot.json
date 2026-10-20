@@ -1,0 +1,50 @@
+[
+ {
+  "id": "Cloudflare/clef",
+  "stratum": "known: sidecar head",
+  "truth": "weights+sidecar",
+  "note": "brought up 2026-10-07: 31 of 32 tokens, sidecar parity measured"
+ },
+ {
+  "id": "ThakiCloud/RAG-Gate-27B",
+  "stratum": "known: fine-tune",
+  "truth": "weights-only",
+  "note": "brought up 2026-10-13, published as episod/rag-gate-27b-p300"
+ },
+ {
+  "id": "bytkim/Qwen3.8-27B-pi",
+  "stratum": "known: fine-tune",
+  "truth": "weights-only",
+  "note": "brought up 2026-10-18"
+ },
+ {
+  "id": "perplexity-ai/pplx-decider-v1.2",
+  "stratum": "known: restricted head",
+  "truth": "restricted-head",
+  "note": "hand analysis plus a chip parity run, 2026-10-19"
+ },
+ {
+  "id": "sabicap/sabi-noema",
+  "stratum": "fine-tune"
+ },
+ {
+  "id": "knowledgator/gliclass-v4-27b",
+  "stratum": "decision or classifier head"
+ },
+ {
+  "id": "intel-ai/Qwen3.8-27B-MXFP8-MXFP8MTP-CT-AutoRound",
+  "stratum": "quantized"
+ },
+ {
+  "id": "bartowski/bytkim_Qwen3.8-27B-pi-GGUF",
+  "stratum": "gguf or mlx"
+ },
+ {
+  "id": "hotdogs/qwen3.8-27B-clef_svd_lora",
+  "stratum": "adapter"
+ },
+ {
+  "id": "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB",
+  "stratum": "other architecture"
+ }
+]

@@ -251,6 +251,33 @@ class Tools:
             return None
         return Path(p)
 
+    def readable(self, path) -> tuple[str | None, str | None]:
+        """(real path, None) of a file `path` names inside the run directory, or (None, the message to give the model).
+        The path is tried against the run directory first and the stage directory second. Links are resolved before the
+        check, so a link out of the run directory is refused. A directory, and a file over READ_FILE_MAX_BYTES, are
+        errors."""
+        if not isinstance(path, str) or not path.strip():
+            return None, "error: path must be a non-empty string"
+        root = os.path.realpath(self.run_dir)
+        found = None
+        for base in (root, os.path.realpath(self.stage_dir)):
+            p = os.path.realpath(os.path.join(base, path))
+            if os.path.commonpath([root, p]) != root:
+                return None, f"refused: {path!r} is outside the run directory {self.run_dir}"
+            if os.path.exists(p):
+                found = p
+                break
+        if found is None:
+            return None, (f"error: {path!r} does not exist in the run directory or in your stage directory "
+                          f"{self.stage_dir}")
+        if os.path.isdir(found):
+            return None, f"error: {path!r} is a directory; use shell with ls to list it"
+        size = os.path.getsize(found)
+        if size > READ_FILE_MAX_BYTES:
+            return None, (f"error: {path} is {size} bytes, too large to read page by page; use shell to read "
+                          "parts of it (grep, head -c, tail -c, jq)")
+        return found, None
+
     def read_file(self, path, offset=0) -> str:
         """Read a text file that lies inside the run directory. A path is tried against the run directory
         first and the stage directory second, because models write both. Links are resolved before the
@@ -259,29 +286,11 @@ class Tools:
         A file longer than the output limit comes back one page from `offset`, with a footer that says
         where the page sits in the file and the offset of the next page. (It used to be cut in the
         middle, and an agent that needed the middle read the same view again and again.)"""
-        if not isinstance(path, str) or not path.strip():
-            return "error: path must be a non-empty string"
         if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
             return "error: offset must be a whole number of characters, 0 or more"
-        root = os.path.realpath(self.run_dir)
-        bases = (root, os.path.realpath(self.stage_dir))
-        found = None
-        for base in bases:
-            p = os.path.realpath(os.path.join(base, path))
-            if os.path.commonpath([root, p]) != root:
-                return f"refused: {path!r} is outside the run directory {self.run_dir}"
-            if os.path.exists(p):
-                found = p
-                break
-        if found is None:
-            return (f"error: {path!r} does not exist in the run directory or in your stage directory "
-                    f"{self.stage_dir}")
-        if os.path.isdir(found):
-            return f"error: {path!r} is a directory; use shell with ls to list it"
-        size = os.path.getsize(found)
-        if size > READ_FILE_MAX_BYTES:
-            return (f"error: {path} is {size} bytes, too large to read page by page; use shell to read "
-                    "parts of it (grep, head -c, tail -c, jq)")
+        found, error = self.readable(path)
+        if error:
+            return error
         with open(found, "rb") as f:
             text = f.read().decode("utf-8", errors="replace")
         if offset == 0 and len(text) <= self.limit:
@@ -360,7 +369,8 @@ class AgentStep:
                  phase: str, feed, control, run_dir, evidence_dir, log_path, http=post_json,
                  clock=time.time, guard: RetryGuard | None = None, max_turns: int = AGENT_MAX_TURNS,
                  max_tokens: int = AGENT_MAX_TOKENS, timeout: float = AGENT_REQUEST_TIMEOUT_S,
-                 thinking: bool = AGENT_THINKING, finished=None):
+                 thinking: bool = AGENT_THINKING, finished=None, temperature: float = 0,
+                 top_p: float | None = None, seed: int | None = None):
         self.agent, self.endpoint, self.model, self.tools = agent, endpoint, model, tools
         self.ledger, self.stage, self.phase = ledger, stage, phase
         self.feed, self.control, self.http, self.clock = feed, control, http, clock
@@ -369,6 +379,9 @@ class AgentStep:
         self.guard = guard if guard is not None else RetryGuard()
         self.max_turns, self.max_tokens, self.timeout = max_turns, max_tokens, timeout
         self.thinking = thinking     # False sends enable_thinking=false (see defaults.AGENT_THINKING)
+        # Sampling. The default is greedy decoding (temperature 0), sent exactly as before. top_p and seed are sent
+        # only when a caller sets them; whether a server honours the seed is up to the server.
+        self.temperature, self.top_p, self.seed = temperature, top_p, seed
         # finished() -> bool: are this step's files written and valid (the supervisor's check)? When it
         # is true and the agent writes a file again unchanged, the step ends as done: an agent that has
         # finished sometimes repeats its last write instead of ending (the first lab run).
@@ -487,8 +500,13 @@ class AgentStep:
             reason = self.control.stop_reason()
             if reason:
                 return self._end(reason, turn - 1)
-            request = {"model": self.model, "messages": messages, "tools": TOOL_SCHEMAS,
-                       "temperature": 0, "max_tokens": self.max_tokens, "stream": False}
+            request = {"model": self.model, "messages": messages, "tools": getattr(self.tools, "schemas", TOOL_SCHEMAS),
+                       "temperature": 0 if self.temperature == 0 else self.temperature,
+                       "max_tokens": self.max_tokens, "stream": False}
+            if self.top_p is not None:
+                request["top_p"] = self.top_p
+            if self.seed is not None:
+                request["seed"] = self.seed
             if not self.thinking:
                 request["chat_template_kwargs"] = {"enable_thinking": False}
             try:

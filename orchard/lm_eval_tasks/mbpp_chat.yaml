@@ -1,0 +1,24 @@
+# MBPP for a chat model behind the chat completions API: the same three listed tests, zero-shot, the whole function in a code block, no stop strings.
+task: mbpp_chat
+dataset_path: google-research-datasets/mbpp
+dataset_name: full
+unsafe_code: true
+output_type: generate_until
+test_split: test
+doc_to_text: "You are an expert Python programmer, and here is your task:\n{{text}}\nYour code should pass these tests:\n{{test_list[0]}}\n{{test_list[1]}}\n{{test_list[2]}}\n\nReply with the complete function in one ```python code block and nothing else."
+doc_to_target: "{{test_list[0]}}\n{{test_list[1]}}\n{{test_list[2]}}"
+metric_list:
+  - metric: !function code_chat_utils.pass_at_1
+    aggregation: mean
+    higher_is_better: true
+generation_kwargs:
+  until: []
+  do_sample: false
+num_fewshot: 0
+filter_list:
+  - name: "extract_code"
+    filter:
+      - function: "custom"
+        filter_fn: !function code_chat_utils.build_mbpp
+metadata:
+  version: 1.0

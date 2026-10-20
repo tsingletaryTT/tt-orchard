@@ -160,7 +160,7 @@
       if (this.isStill()) this.draw();
     }
 
-    isStill() { return this.reduce.matches || document.hidden; }
+    isStill() { return this.reduce.matches || document.hidden || document.documentElement.dataset.mode === "operator"; }
 
     start() {
       const tick = (now) => {

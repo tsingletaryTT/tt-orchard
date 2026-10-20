@@ -35,7 +35,9 @@ from orchard.defaults import TEST_DISK_GB
 OK, WARN, BLOCK = "ok", "warn", "block"
 HUB_TIMEOUT_S = 20
 GOZER_TIMEOUT_S = 10
+CPU_PROBE_TIMEOUT_S = 5
 REFERENCE_IMPORT_TIMEOUT_S = 180     # importing torch and transformers cold can take a minute
+SKILLS_REUSE_S = 600.0               # choice: the UI asks for a preflight on every form edit; one check in 10 min will do
 _LICENSE_FILE = re.compile(r"(licen[cs]e|copying)", re.IGNORECASE)
 _CHIP_LINE = re.compile(r"^\s*chip\s+(\d+)\s+\S+\s+(\S+)", re.MULTILINE)
 
@@ -120,9 +122,26 @@ def check_disk(*, free_gb: dict[str, float], model_gb: float, local: bool, min_f
     short = [f"{label}: needs {need[label]:.0f} GB, {free_gb[label]:.0f} GB free" for label in need
              if free_gb[label] < need[label]]
     if short:
-        return Check("disk", BLOCK, "; ".join(short), "disk-full")
+        # How far short each disk is, so `--prune-caches` knows how much to free and whether it can.
+        data = {"short_gb": {label: round(need[label] - free_gb[label], 3) for label in need
+                             if free_gb[label] < need[label]}, "same_device": same_device}
+        return Check("disk", BLOCK, "; ".join(short), "disk-full", data)
     return Check("disk", OK, ", ".join(f"{label} {free_gb[label]:.0f} GB free (needs {need[label]:.0f})"
                                        for label in need))
+
+
+def prunable_shortfall(check: Check) -> float | None:
+    """GB that removing tensor caches would have to free to clear this disk block, or None when it cannot help.
+
+    The caches live under cache_root. Removing them frees the cache_root disk, and the hf_home disk only when the two
+    share one (check_disk then reports the sum under hf_home). A shortfall on a separate hub disk is not theirs to fix."""
+    data = check.data if check.status == BLOCK and isinstance(check.data, dict) else None
+    if not data or "short_gb" not in data:
+        return None
+    short = data["short_gb"]
+    if "hf_home" in short and not data.get("same_device"):
+        return None
+    return max(short.values()) if short else None
 
 
 def check_credentials(found: list[Path], accepted: bool) -> Check:
@@ -171,6 +190,28 @@ def _kept_on_port(cfg) -> bool:
     return (rec.get("identity") or {}).get("port") == cfg.coder.port
 
 
+def check_cpu_standin(problem: str | None, endpoint: str, model: str) -> Check:
+    """The CPU tier takes the coder's place while stage 4's 4-chip test parks it. A park whose stand-in is down
+    fails its canary hours into a run (RAG-Gate-27B, 2026-10-13), so the run does not start without it."""
+    if problem is None:
+        return Check("cpu", OK, f"the CPU stand-in answers: {model} at {endpoint}")
+    return Check("cpu", BLOCK, f"the CPU stand-in {model} at {endpoint} is not usable: {problem}. Start it with "
+                 "`OLLAMA_MODELS=<your models directory> ollama serve` (and `ollama pull` the model if it is "
+                 "missing); the coder is parked behind it during stage 4's 4-chip test", "coder-unusable")
+
+
+def cpu_standin_problem(endpoint: str, model: str, timeout: float = CPU_PROBE_TIMEOUT_S) -> str | None:
+    """Ask the CPU tier's server for its model list. None means it answers and lists `model`."""
+    try:
+        with urllib.request.urlopen(endpoint.rstrip("/") + "/models", timeout=timeout) as resp:
+            ids = [str(m.get("id")) for m in json.load(resp).get("data", [])]
+    except (OSError, ValueError) as exc:
+        return f"{type(exc).__name__}: {exc}"
+    if model not in ids:
+        return f"the server does not list {model} (it lists {', '.join(ids) or 'nothing'}); run `ollama pull {model}`"
+    return None
+
+
 def check_reference(python: Path | None, problem: str | None) -> Check:
     """The interpreter stage 1 runs the CPU reference with. Without one the agent looks for an interpreter
     itself, which is how an earlier run ended up installing packages into the machine's shared venv."""
@@ -181,6 +222,27 @@ def check_reference(python: Path | None, problem: str | None) -> Check:
         return Check("reference", BLOCK, f"reference_python {python} cannot import torch, transformers, "
                      f"tokenizers and safetensors: {problem}", "config-invalid")
     return Check("reference", OK, f"{python} imports torch, transformers, tokenizers and safetensors")
+
+
+def check_skills(results: list) -> Check:
+    """The tenstorrent/skills clone(s) that skills_dirs point into, compared with upstream main (orchard/skillsfresh).
+
+    The operator's rule is that runs use the latest tenstorrent/skills. Bringup runs unattended, so anything short of
+    current is a warning that says what was found and how to update; it never blocks. Orchard updates nothing."""
+    if not results:
+        return Check("skills", WARN, "bringup.toml names no skills_dirs, so the stage skills from tenstorrent/skills "
+                     "(model-bringup and the others) are not read and nothing was compared with upstream")
+    notes, worst = [], OK
+    for r in results:
+        text = f"{r.path}: {r.state}. {r.detail}"
+        if r.state != "current":
+            worst = WARN
+            text += " " + r.update_text()
+        if r.warnings:
+            worst = WARN
+            text += " " + " ".join(r.warnings)
+        notes.append(text)
+    return Check("skills", worst, " | ".join(notes))
 
 
 def _class_note(report, repo: str) -> str:
@@ -345,6 +407,10 @@ class Signals:
     search_bundles: Callable | None = None      # (query) -> [{"name", "installed"}] or None
     lab_status: Callable | None = None          # () -> (answered, text of the lab's `gozer status`, error)
     research: Callable | None = None            # (model_id, hub, base_override, installed) -> report dict
+    cpu_standin: Callable | None = None         # (endpoint, model) -> why the CPU tier does not answer, or None
+    sfpi: Callable | None = None                # (bundle name) -> (installed SFPI version, version the bundle pins)
+    lab_sfpi: Callable | None = None            # () -> the lab's installed SFPI version, or None (lab mode)
+    skills_freshness: Callable | None = None    # () -> list[skillsfresh.Freshness] for the skills_dirs clones
 
 
 def check_lab(lab, status) -> Check:
@@ -362,6 +428,16 @@ def check_lab(lab, status) -> Check:
         return Check("lab", WARN, f"the lab {lab.host} answers; {len(busy)} of {len(states)} chips are in use "
                                   f"({', '.join(sorted(set(busy)))}); its tests wait for them")
     return Check("lab", OK, f"the lab {lab.host} answers; {len(states)} chips, all free")
+
+
+class _SkipRow(Exception):
+    """Raised inside a check's try block to leave its row out."""
+
+
+def has_weights(snapshot: Path) -> bool:
+    """True when the snapshot directory holds a readable weight file (see `local_snapshot`)."""
+    return (any(w.exists() for w in snapshot.rglob("*.safetensors"))
+            or any(w.exists() for w in snapshot.glob("pytorch_model*.bin")))
 
 
 def hf_home_for(cfg) -> Path:
@@ -441,13 +517,52 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
     guarded("tiers", "config-invalid", lambda: check_tiers(s.load_tiers, Path(cfg.tiers), cfg.coder.port))
     guarded("port", "coder-unusable", lambda: check_port(cfg.coder.port, bool(s.port_in_use(cfg.coder.port)), resuming,
                                                           kept=_kept_on_port(cfg)))
+    in_lab = getattr(cfg, "mode", "local") == "lab"
+    # The stand-in takes the coder's place while stage 4's 4-chip test parks it. A lab run never parks (its tests run on
+    # the lab), so the row would block a run for a server it never uses.
+    if s.cpu_standin is not None and not in_lab:
+        def cpu() -> Check:
+            tier = next(t for t in s.load_tiers(Path(cfg.tiers)).tiers.values() if t.get("placement") == "cpu")
+            return check_cpu_standin(s.cpu_standin(tier["endpoint"], tier["model"]), tier["endpoint"], tier["model"])
+        # The tiers row already reports a config that cannot be read; this row is only about the stand-in.
+        try:
+            s.load_tiers(Path(cfg.tiers))
+            guarded("cpu", "coder-unusable", cpu)
+        except Exception:
+            pass
     guarded("gozer", "hardware-unhealthy", lambda: check_gozer(s.gozer_status(), kept=_kept_on_port(cfg)))
-    if getattr(cfg, "mode", "local") == "lab" and getattr(cfg, "lab", None) is not None and s.lab_status is not None:
+    if in_lab and getattr(cfg, "lab", None) is not None and s.lab_status is not None:
         guarded("lab", "hardware-unhealthy", lambda: check_lab(cfg.lab, s.lab_status()))
     out.append(base_check)
+    bundle = (base_check.data or {}).get("bundle") if isinstance(base_check.data, dict) else None
+    if bundle and s.sfpi is not None:
+        from orchard import sfpi as sfpi_check
+        try:
+            installed, pinned = s.sfpi(bundle)
+            where = None
+            if in_lab:
+                # The kernels compile on the lab, so its SFPI is the one that counts. The pin is read from this box's copy
+                # of the bundle, which `lab setup` mirrors to the lab. With no way to read the lab's version, this box's
+                # would be the wrong box, so the row is left out.
+                lab = getattr(cfg, "lab", None)
+                if lab is None or s.lab_sfpi is None:
+                    raise _SkipRow
+                installed, where = s.lab_sfpi(), f"the lab {lab.host}"
+            row = sfpi_check.check_sfpi(installed, pinned, bundle, where=where)
+            if row is not None:
+                out.append(row)
+        except _SkipRow:
+            pass
+        except Exception as exc:                      # a warning: the row guards against a drift it cannot always see
+            out.append(Check("sfpi", WARN, f"could not check the SFPI compiler: {type(exc).__name__}: {exc}"))
     ref = cfg.reference_python
     guarded("reference", "config-invalid", lambda: check_reference(
         ref, s.reference_problem(ref) if ref is not None and s.reference_problem else None))
+    if s.skills_freshness is not None:
+        try:
+            out.append(check_skills(list(s.skills_freshness())))
+        except Exception as exc:                      # a warning, like the row itself: bringup is not blocked
+            out.append(Check("skills", WARN, f"could not check the skills clone: {type(exc).__name__}: {exc}"))
     return out
 
 
@@ -483,6 +598,11 @@ def default_signals(cfg, research_options=None) -> Signals:
         org, name = model_id.split("/", 1)
         snaps = hf_home_for(cfg) / "hub" / f"models--{org}--{name}" / "snapshots"
         found = sorted(snaps.glob("*/config.json")) if snaps.is_dir() else []
+        # A config alone is not a model. An old manifest-only fetch leaves config.json and README.md, and counting that as
+        # local skipped the download. A weight file counts when its link resolves (`exists()` follows it). The kinds are the
+        # ones the stage templates read: *.safetensors at any depth (some repos keep a component in a subfolder) and the
+        # top-level pytorch_model*.bin that stage 0's backbone rule names. Other files, such as training_args.bin, do not.
+        found = [c for c in found if has_weights(c.parent)]
         return found[-1].parent if found else None
 
     def gozer_status() -> str:
@@ -526,7 +646,34 @@ def default_signals(cfg, research_options=None) -> Signals:
         research = lambda model_id, hub, override, inst: research_report.build(     # noqa: E731
             model_id=model_id, hub=hub, base_override=override, installed=inst, search=nearest.search,
             hub_info=hub_info, fetch=fetcher, no_github=research_options.no_github)
+    def sfpi_versions(bundle: str):
+        from orchard import sfpi as sfpi_check
+        return sfpi_check.installed_version(), sfpi_check.pinned_version(models_root(), bundle)
+
+    def lab_sfpi():
+        from orchard.lab_setup import remote
+        lab = getattr(cfg, "lab", None)
+        if lab is None:
+            return None
+        try:
+            done = subprocess.run(remote(lab, "dpkg-query -W -f='${Version}' sfpi"), capture_output=True, text=True,
+                                  timeout=GOZER_TIMEOUT_S)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return done.stdout.strip() or None if done.returncode == 0 else None
+
+    def skills_freshness():
+        # The research rule for a dry run (and the UI's preflight, which runs like one) is "no cache and no file": both
+        # pass research options with no cache directory. The skills result cache then stays in memory. A caller with
+        # no options is treated the same way.
+        from orchard import skillsfresh
+        offline = bool(getattr(research_options, "offline", False)) if research_options is not None else False
+        write = research_options is not None and getattr(research_options, "cache_dir", None) is not None
+        return skillsfresh.check_skills_dirs(cfg.skills_dirs, reuse_s=SKILLS_REUSE_S, offline=offline,
+                                             cache=skillsfresh.Cache(write=write))
+
     return Signals(
+        cpu_standin=cpu_standin_problem, sfpi=sfpi_versions, lab_sfpi=lab_sfpi, skills_freshness=skills_freshness,
         installed_bundles=lambda: nearest.read_installed(models_root()), search_bundles=nearest.search,
         hub_info=hub_info, local_snapshot=local_snapshot,
         free_gb=lambda p: shutil.disk_usage(_nearest_existing(p)).free / 1e9,

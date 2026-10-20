@@ -132,7 +132,7 @@ from orchard.context import build_messages, facts_from
 from orchard.defaults import (AGENT_CONTINUATION_TURNS, AGENT_WRAPUP_TURNS, CHIPS_PER_BOARD, CMD_TIMEOUT_S,
                               COLD_BOOT_BUDGET_S, CONTROL_POLL_S, FIRST_BOOT_EXPECTED,
                               FIRST_BOOT_PROMPT, PACKAGE_DEFERRED, PACKAGE_FORMATS,
-                              RUN_CANARY_PROMPT, STOP_TIMEOUT_S, TEST_DISK_GB)
+                              RUN_CANARY_PROMPT, STOP_TIMEOUT_S, TEST_DISK_GB, FAST_FAIL_S)
 from orchard.handoff import (NOTE_KEYS, Blocked, Budgets, Handoff, decide_park, progress, reacquire,
                              recover, wait_stopped)
 from orchard.hwtests import (failed_tests, load_plan, move_aside, pending, read_plan, suspect_caches,
@@ -160,6 +160,8 @@ EXIT_READY, EXIT_REFUSED, EXIT_ERROR, EXIT_ABORTED = 0, 2, 3, 4
 EXIT_BLOCKED = 5     # an unattended run could not go on and named why (orchard/blocked.py)
 FULL_PORT = ("stage 0 found a full port (new model code is needed); plan 4 runs weights-only "
              "bring-ups, so the operator decides whether to go on")
+RESTRICTED_HEAD = ("stage 0 found the nearest model's backbone with a restricted head (its lm_head is replaced by sidecar "
+                   "rows); the harness does not serve that, so a person decides whether to go on")
 SKILLS_DIR = Path(__file__).with_name("skills")
 
 
@@ -696,8 +698,8 @@ class Supervisor:
             # so every later resume is held to the same values.
             self.ledger.append("decision", None, decision=PATHS_RECORDED, paths=self.paths.record(),
                                note="the run_start entry predates the paths record")
-        if self.lab is not None and p.started:
-            self._recover_lab_leases()
+        if p.started:
+            self._recover_test_leases()
         if self.package_added and package_options(self.ledger.read()) != self.package:
             # Options given on a resume of a run that started without them (build checked that
             # stage 7 has not started). Recorded once; a later resume reads them from here.
@@ -729,6 +731,9 @@ class Supervisor:
             cap = budget_cap(p, self.clock())
             if cap:
                 self.ledger.append("decision", p.next_stage, decision="pause", reason=cap)
+                continue
+            if p.next_stage == 1 and self._restricted_head_unacknowledged():
+                self.ledger.append("decision", 1, decision="pause", reason=RESTRICTED_HEAD)
                 continue
             if p.next_stage == 2 and self._full_port_unacknowledged():
                 self.ledger.append("decision", 2, decision="pause", reason=FULL_PORT)
@@ -763,9 +768,20 @@ class Supervisor:
         if run_path(entries, self.run_dir) != "full-port":
             return False
         # Unattended, a full port always blocks: an operator's resume is what lets an attended run go on
-        # into the full-port stages, and no unattended retry may do that.
+        # into the full-port stages, and no unattended retry may do that. A pause for a restricted head
+        # counts as the same acknowledgement, so one resume is enough.
         return self.unattended or not any(
-            e["event"] == "decision" and e["data"].get("reason") == FULL_PORT for e in entries)
+            e["event"] == "decision" and e["data"].get("reason") in (FULL_PORT, RESTRICTED_HEAD) for e in entries)
+
+    def _restricted_head_unacknowledged(self) -> bool:
+        """Stage 0 filed the model as a restricted head, and the run has not yet paused for it. The harness does not serve
+        such a model (the operator's ruling, 2026-10-19), so the run stops before stage 1 instead of spending a coder boot and
+        a CPU reference on it. Unattended, it always blocks."""
+        entries = self.ledger.read()
+        if run_class(entries, self.run_dir) != "restricted-head":
+            return False
+        return self.unattended or not any(
+            e["event"] == "decision" and e["data"].get("reason") == RESTRICTED_HEAD for e in entries)
 
     def _wait_for_operator(self) -> str:
         while True:
@@ -785,6 +801,9 @@ class Supervisor:
         entries = self.ledger.read()
         self.ledger.append("decision", None, decision="blocked", code=code, reason=reason)
         write_blocked_bundle(self.run_dir, entries, code, reason, now=self.clock())
+        # A stage can block while its own test lease is held (a refused reset, for one). That lease goes back first,
+        # or the automatic retry would run against chips this process still held.
+        self._release_test_lease()
         self._release_or_keep()
         return EXIT_BLOCKED
 
@@ -1597,15 +1616,16 @@ class Supervisor:
         self.test_lease = None
         self.ledger.append("decision", n, decision="test lease released", lease_id=lease.lease_id)
 
-    def _recover_lab_leases(self) -> None:
-        """Give back lab test leases an earlier supervisor of this run took and never released (it
-        died, and the lab helper could not release them). Only leases this run's ledger records."""
+    def _recover_test_leases(self) -> None:
+        """Give back test leases an earlier supervisor of this run took and never released (it died, and nothing
+        released them). Only leases this run's ledger records, and only those taken where this supervisor runs: a lab
+        run gives back the lab's, a local run this box's. A lease that is already gone is noted as not released."""
         taken, released = {}, set()
         for e in self.ledger.read():
             d = e["data"]
             if e["event"] != "decision":
                 continue
-            if d.get("decision") == "test lease taken" and str(d.get("where", "")).startswith("lab"):
+            if d.get("decision") == "test lease taken" and str(d.get("where", "")).startswith("lab") == (self.lab is not None):
                 rec = d.get("test_lease") or {}
                 if rec.get("lease_id"):
                     taken[rec["lease_id"]] = rec
@@ -1861,7 +1881,23 @@ class Supervisor:
         self.test_lease = lease
         self.ledger.append("decision", n, decision="test lease taken", config=test.chips,
                            test_lease=lease.record(), **({"where": self._where()} if self.lab is not None else {}))
+        if test.boards >= 2:
+            self._reset_test_chips(n, test, lease)
         return lease
+
+    def _reset_test_chips(self, n: int, test, lease: Lease) -> None:
+        """Reset a multi-board test's chips in place, so the test starts on chips reset after their last use.
+
+        The park resets only the coder's board. On 2026-10-13 the 4-chip test failed twice with fabric router
+        timeouts on the chips the smaller tests had used, and passed once all four were reset. The cause was
+        not isolated, so this is a precaution that costs about 42 s per board, and a refused reset blocks."""
+        try:
+            self.test_adapter.reset(lease)
+        except AdapterError as exc:
+            self._block(n, f"resetting the chips for the {test.chips}-chip test failed: {exc}",
+                        lease_id=lease.lease_id, config=test.chips)
+        self.ledger.append("decision", n, decision="test chips reset", config=test.chips,
+                           lease_id=lease.lease_id)
 
     def _give_back_test_lease(self, n: int, lease: Lease) -> None:
         try:
@@ -1879,10 +1915,26 @@ class Supervisor:
         chosen = held[:test.chips]
         out_dir = stage_dir / "tests" / str(test.chips)
         out_dir.mkdir(parents=True, exist_ok=True)
-        result = self._spawn(n, test.command(n), [c for _, c in chosen], [i for i, _ in chosen],
-                             min(test.deadline_s, spec.budget_s), out_dir / "output.txt",
-                             config=test.chips, cache=test.cache,
-                             lease_ids=[lease.lease_id for lease in leases])
+        def spawn() -> dict:
+            return self._spawn(n, test.command(n), [c for _, c in chosen], [i for i, _ in chosen],
+                               min(test.deadline_s, spec.budget_s), out_dir / "output.txt",
+                               config=test.chips, cache=test.cache,
+                               lease_ids=[lease.lease_id for lease in leases])
+        result = spawn()
+        if (test.boards >= 2 and result["returncode"] != 0 and not result["timed_out"]
+                and result["seconds"] < FAST_FAIL_S):
+            # A multi-board test that dies this early failed to start (the 4-chip test's `Fabric Router Sync:
+            # Timeout`, seen after 13 to 57 s and gone after the chips were reset together). The cause is not
+            # isolated, so reset every chip the test holds and run it once more. Its record is the second try's.
+            # The second try writes output.txt again. The first try's text says why it failed, so it is kept beside it.
+            first = out_dir / "output-first-try.txt"
+            os.replace(out_dir / "output.txt", first)
+            self.ledger.append("decision", n, decision="test failed at startup; resetting the test chips and trying once more",
+                               config=test.chips, returncode=result["returncode"], seconds=result["seconds"],
+                               first_output=evidence_record(self.run_dir, first))
+            for lease in leases:
+                self._reset_test_chips(n, test, lease)
+            result = spawn()
         path = write_record(stage_dir, test.chips, {"config": test.chips, **result,
                                                     "device_ids": [i for i, _ in chosen]})
         self.ledger.append("evidence", n, what="hardware test", config=test.chips, cache=test.cache,

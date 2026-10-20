@@ -145,6 +145,85 @@ def test_a_snapshot_that_is_already_local_is_used_and_nothing_is_downloaded(conf
     assert rec.fetched == [] and rec.argv[rec.argv.index("--input") + 1] == f"model={local}"
 
 
+def _earlier_run(tmp_path):
+    run_dir = tmp_path / "runs" / "cloudflare--clef"
+    (run_dir / "stages" / "0").mkdir(parents=True)
+    (run_dir / "ledger.jsonl").write_text("{}\n")
+    (run_dir / "stages" / "0" / "delta.json").write_text('{"path": "full-port"}')
+    return run_dir
+
+
+def test_an_earlier_run_that_read_a_snapshot_with_no_weights_is_set_aside_when_the_weights_are_fetched(conf, tmp_path):
+    # bytkim/Qwen3.8-27B-pi: stage 0 compared an empty snapshot, called it a full port, and every retry kept that verdict even
+    # after the weights were downloaded. Stages 0 and 1 are only valid for the snapshot they read, so the run starts again.
+    run_dir = _earlier_run(tmp_path)
+    code, out, rec = run(conf, ["bringup", "Cloudflare/clef"])
+    assert rec.fetched, "the weights were fetched"
+    assert not (run_dir / "ledger.jsonl").exists()
+    aside = [p for p in (tmp_path / "runs").iterdir() if p.name.startswith("cloudflare--clef.stale-")]
+    assert len(aside) == 1 and (aside[0] / "stages" / "0" / "delta.json").exists()
+    assert "set aside" in out
+
+
+def test_an_earlier_run_is_kept_when_its_snapshot_was_already_local(conf, tmp_path):
+    run_dir = _earlier_run(tmp_path)
+    local = tmp_path / "hf" / "hub" / "models--Cloudflare--clef" / "snapshots" / "oldrev"
+    code, out, rec = run(conf, ["bringup", "Cloudflare/clef"], sig=signals(local_snapshot=lambda m: local))
+    assert (run_dir / "ledger.jsonl").exists() and rec.fetched == []
+    assert not [p for p in (tmp_path / "runs").iterdir() if ".stale-" in p.name]
+
+
+def test_an_earlier_run_that_already_passed_stage_2_is_kept_when_its_snapshot_has_gone(conf, tmp_path):
+    # A run that served the model has read real weights. If the cache was cleaned since, the weights are fetched again and the
+    # run goes on; setting it aside would throw away stages 0 to 2 for a snapshot that was fine when they ran.
+    run_dir = _earlier_run(tmp_path)
+    (run_dir / "ledger.jsonl").write_text('{"event": "stage_end", "stage": 2, "data": {"result": "pass"}}\n')
+    code, out, rec = run(conf, ["bringup", "Cloudflare/clef"])
+    assert rec.fetched, "the weights were fetched again"
+    assert (run_dir / "ledger.jsonl").exists()
+    assert not [p for p in (tmp_path / "runs").iterdir() if ".stale-" in p.name]
+
+
+def test_a_stage_2_that_failed_does_not_keep_an_earlier_run(conf, tmp_path):
+    run_dir = _earlier_run(tmp_path)
+    (run_dir / "ledger.jsonl").write_text('{"event": "stage_end", "stage": 2, "data": {"result": "fail"}}\n')
+    run(conf, ["bringup", "Cloudflare/clef"])
+    assert not (run_dir / "ledger.jsonl").exists()
+
+
+def test_an_earlier_run_with_a_live_supervisor_is_never_set_aside(conf, tmp_path):
+    # A supervisor holds an flock on ledger.jsonl.lock while it lives. If the weights vanish from the cache during a run and
+    # someone starts bringup again, moving the directory would pull it out from under the live run (PR 11 review, finding 4).
+    import fcntl
+    run_dir = _earlier_run(tmp_path)
+    with open(run_dir / "ledger.jsonl.lock", "w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        code, out, rec = run(conf, ["bringup", "Cloudflare/clef"])
+    assert code == cli.EXIT_REFUSED and rec.argv is None and rec.fetched == []
+    assert (run_dir / "ledger.jsonl").exists()
+    assert not [p for p in (tmp_path / "runs").iterdir() if ".stale-" in p.name]
+
+
+def test_a_lock_file_nobody_holds_does_not_stop_the_set_aside(conf, tmp_path):
+    run_dir = _earlier_run(tmp_path)
+    (run_dir / "ledger.jsonl.lock").write_text("")
+    run(conf, ["bringup", "Cloudflare/clef"])
+    assert not (run_dir / "ledger.jsonl").exists()
+    assert [p for p in (tmp_path / "runs").iterdir() if p.name.startswith("cloudflare--clef.stale-")]
+
+
+def test_the_lock_check_leaves_no_lock_file_behind_when_there_was_none(tmp_path):
+    run_dir = _earlier_run(tmp_path)
+    assert cli._supervisor_holds_lock(run_dir) is False
+    assert not (run_dir / "ledger.jsonl.lock").exists()
+
+
+def test_a_dry_run_leaves_an_earlier_run_alone(conf, tmp_path):
+    run_dir = _earlier_run(tmp_path)
+    run(conf, ["bringup", "Cloudflare/clef", "--dry-run"])
+    assert (run_dir / "ledger.jsonl").exists()
+
+
 def test_a_local_snapshot_works_when_the_hub_cannot_be_reached(conf, tmp_path):
     local = tmp_path / "snap"
     code, out, rec = run(conf, ["bringup", "Cloudflare/clef"],
@@ -453,7 +532,9 @@ def test_the_narrator_stops_and_flushes_even_when_the_supervisor_raises(conf):
 def test_a_resumed_run_starts_by_showing_where_it_left_off(conf):
     first = Writer(0, SCRIPT)
     run(conf, ["bringup", "Cloudflare/clef", "--quiet"], rec=first)
-    code, out, _ = run(conf, ["bringup", "Cloudflare/clef"], rec=Writer(0, []))
+    # By the second launch the first one has downloaded the weights, so the snapshot is local and the run is kept.
+    code, out, _ = run(conf, ["bringup", "Cloudflare/clef"], rec=Writer(0, []),
+                       sig=signals(local_snapshot=lambda m: Path("/hf/snap")))
     assert "stage 0 (survey): pass" in out
 
 
@@ -715,3 +796,125 @@ def test_caches_takes_its_own_flags(conf, tmp_path):
 def test_coder_status_with_nothing_kept(conf, tmp_path):
     code, out, rec = run(conf, ["coder", "status"])
     assert code == 0 and "no coder is kept up" in out and rec.argv is None
+
+
+def test_kernel_env_check_runs_the_check_and_returns_its_exit_code(tmp_path, monkeypatch):
+    from orchard import cli, ttlang_env
+    seen = {}
+
+    def fake_main(args, *, env=None, out=None, run=None):
+        seen["check"], seen["src"], seen["venv"] = args.check, args.src_dir, args.venv_dir
+        return 2
+
+    monkeypatch.setattr(ttlang_env, "main", fake_main)
+    out = io.StringIO()
+    code = cli.main(["kernel-env", "--check", "--src-dir", str(tmp_path / "s"), "--venv-dir", str(tmp_path / "v")],
+                    stdout=out)
+    assert code == 2 and seen == {"check": True, "src": str(tmp_path / "s"), "venv": str(tmp_path / "v")}
+
+
+def test_kernel_env_needs_no_bringup_config(tmp_path, monkeypatch):
+    """The command must work on a machine with no bringup.toml: it is how a machine gets ready."""
+    from orchard import cli, ttlang_env
+    monkeypatch.setattr(ttlang_env, "main", lambda args, **kw: 0)
+    monkeypatch.setenv("ORCHARD_BRINGUP_CONFIG", str(tmp_path / "does-not-exist.toml"))
+    assert cli.main(["kernel-env", "--check"], stdout=io.StringIO()) == 0
+
+
+# ---------------------------------------------------------------- inventory
+
+def _fake_inventory(monkeypatch):
+    """Replace both back ends with recorders, so no test traces a model or takes a lease."""
+    from orchard import opinventory, ttnn_dump
+    calls = {"dump": [], "inv": []}
+    monkeypatch.setattr(ttnn_dump, "main", lambda python, **kw: calls["dump"].append(python) or 0)
+    monkeypatch.setattr(opinventory, "run_inventory", lambda model_dir, **kw: calls["inv"].append((model_dir, kw)) or 0)
+    return calls
+
+
+def test_inventory_refresh_ttnn_calls_the_dump_with_the_ttnn_python_and_never_the_inventory(monkeypatch, tmp_path):
+    calls = _fake_inventory(monkeypatch)
+    code = cli.main(["inventory", "refresh-ttnn", "--ttnn-python", "/t/py"], env={"HOME": str(tmp_path)},
+                    stdout=io.StringIO())
+    assert code == 0 and calls["dump"] == ["/t/py"] and calls["inv"] == []
+
+
+def test_inventory_of_a_model_directory_uses_the_python_given(monkeypatch, tmp_path):
+    calls = _fake_inventory(monkeypatch)
+    code = cli.main(["inventory", str(tmp_path / "m"), "--python", "/r/py", "--layers", "3"],
+                    env={"HOME": str(tmp_path)}, stdout=io.StringIO())
+    assert code == 0 and calls["dump"] == []
+    model, kw = calls["inv"][0]
+    assert model == str(tmp_path / "m") and kw["python"] == "/r/py" and kw["layers"] == 3
+    assert kw["ttnn_python"] == str(tmp_path / ".tenstorrent-venv" / "bin" / "python")
+
+
+def test_inventory_reads_the_interpreter_from_the_environment(monkeypatch, tmp_path):
+    calls = _fake_inventory(monkeypatch)
+    cli.main(["inventory", "somedir"], env={"HOME": str(tmp_path), "ORCHARD_REFERENCE_PYTHON": "/e/py"},
+             stdout=io.StringIO())
+    assert calls["inv"][0][1]["python"] == "/e/py"
+
+
+def test_inventory_with_no_interpreter_anywhere_refuses_and_calls_neither(monkeypatch, tmp_path):
+    calls = _fake_inventory(monkeypatch)
+    code = cli.main(["inventory", "somedir", "--config", str(tmp_path / "missing.toml")],
+                    env={"HOME": str(tmp_path)}, stdout=io.StringIO())
+    assert code == 2 and calls == {"dump": [], "inv": []}
+
+
+# ---------------------------------------------------------------- kernel-probe
+
+def _fake_probe_main(monkeypatch):
+    from orchard import kernelprobe
+    calls = []
+    monkeypatch.setattr(kernelprobe, "main", lambda args, **kw: calls.append((args, kw)) or 0)
+    return calls
+
+
+def test_kernel_probe_refuses_an_unknown_op_and_calls_nothing(monkeypatch, tmp_path, capsys):
+    calls = _fake_probe_main(monkeypatch)
+    with pytest.raises(SystemExit) as info:
+        cli.main(["kernel-probe", "--op", "softmax"], env={"HOME": str(tmp_path)}, stdout=io.StringIO())
+    assert info.value.code == 2 and calls == []
+    assert "invalid choice" in capsys.readouterr().err
+
+
+def test_kernel_probe_passes_the_parsed_flags_to_kernelprobe_main(monkeypatch, tmp_path):
+    calls = _fake_probe_main(monkeypatch)
+    code = cli.main(["kernel-probe", "--op", "rmsnorm", "--attempts", "3", "--phase", "hw", "--out", str(tmp_path / "o"),
+                     "--endpoint", "http://127.0.0.1:8011/v1", "--model", "coder", "--src-dir", "/s", "--venv-dir", "/v",
+                     "--shared-python", "/sp"], env={"HOME": str(tmp_path)}, stdout=io.StringIO())
+    assert code == 0 and len(calls) == 1
+    args, kw = calls[0]
+    assert (args.op, args.attempts, args.phase, args.out) == ("rmsnorm", 3, "hw", str(tmp_path / "o"))
+    assert (args.endpoint, args.model, args.src_dir, args.venv_dir, args.shared_python) == \
+        ("http://127.0.0.1:8011/v1", "coder", "/s", "/v", "/sp")
+    assert kw["tier_config"] is None                       # both flags given: no config is read
+
+
+def test_kernel_probe_and_kernel_env_take_the_skill_flags(monkeypatch, tmp_path):
+    from orchard import ttlang_env
+    calls = _fake_probe_main(monkeypatch)
+    cli.main(["kernel-probe", "--op", "add", "--endpoint", "http://127.0.0.1:9/v1", "--model", "m",
+              "--tt-lang-skill-dir", "/sk", "--allow-stale-skills"], env={"HOME": str(tmp_path)}, stdout=io.StringIO())
+    args, _ = calls[0]
+    assert args.tt_lang_skill_dir == "/sk" and args.allow_stale_skills is True
+    cli.main(["kernel-probe", "--op", "add", "--endpoint", "http://127.0.0.1:9/v1", "--model", "m"],
+             env={"HOME": str(tmp_path)}, stdout=io.StringIO())
+    args, _ = calls[1]
+    assert args.tt_lang_skill_dir is None and args.allow_stale_skills is False
+    seen = []
+    monkeypatch.setattr(ttlang_env, "main", lambda a, **kw: seen.append(a) or 0)
+    cli.main(["kernel-env", "--check", "--tt-lang-skill-dir", "/sk", "--allow-stale-skills"], stdout=io.StringIO())
+    assert seen[0].tt_lang_skill_dir == "/sk" and seen[0].allow_stale_skills is True
+
+
+def test_kernel_probe_defaults(monkeypatch, tmp_path):
+    calls = _fake_probe_main(monkeypatch)
+    cli.main(["kernel-probe", "--op", "add", "--config", str(tmp_path / "missing.toml")], env={"HOME": str(tmp_path)},
+             stdout=io.StringIO())
+    args, kw = calls[0]
+    assert (args.attempts, args.phase, args.out, args.endpoint, args.model) == (5, "sim", "kernel-probe", None, None)
+    assert args.shared_python == str(tmp_path / ".tenstorrent-venv" / "bin" / "python")
+    assert kw["tier_config"] is None                       # no config: kernelprobe.main refuses, naming the flags

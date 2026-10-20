@@ -38,8 +38,8 @@ def test_a_path_alone_implies_a_class_for_a_run_that_predates_classes():
     assert classes.class_of_path("maybe") is None
 
 
-def test_the_class_set_is_the_documented_four():
-    assert classes.CLASSES == ("weights-only", "weights+sidecar", "full-port", "unknown")
+def test_the_class_set_is_the_documented_five():
+    assert classes.CLASSES == ("weights-only", "weights+sidecar", "restricted-head", "full-port", "unknown")
 
 
 # ---- the stage 0 gate -------------------------------------------------------------------------

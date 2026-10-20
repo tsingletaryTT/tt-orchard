@@ -1,0 +1,2 @@
+{"id": "multiple_0", "ground_truth": [{"triangle_properties.get": {"side1": [5], "side2": [4], "side3": [3], "get_area": ["", true], "get_perimeter": ["", true], "get_angles": ["", true]}}]}
+{"id": "multiple_1", "ground_truth": [{"math.triangle_area_heron": {"side1": [3], "side2": [4], "side3": [5]}}]}

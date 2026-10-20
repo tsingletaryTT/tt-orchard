@@ -1,0 +1,9 @@
+{
+  "phase": "sim",
+  "sets": [],
+  "error": {
+    "phase": "import",
+    "type": "SyntaxError",
+    "text": "expected ':' (kernel.py, line 15)"
+  }
+}

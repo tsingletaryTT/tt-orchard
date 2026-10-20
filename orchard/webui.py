@@ -64,7 +64,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-from orchard import __version__, bringup_config, caches, lexicon, machine_checks, narrate, run_view, settings, status, ui
+from orchard import __version__, bringup_config, caches, lexicon, machine_checks, narrate, run_view, settings, status, ui, verdict
 from orchard.preflight import _lab_status
 from orchard.ledger import LedgerCorrupt, read_entries
 from orchard.scrub import HOME_PATH, TOKEN_PATTERNS
@@ -89,6 +89,7 @@ JS, CSS, WOFF2 = "text/javascript; charset=utf-8", "text/css; charset=utf-8", "f
 ASSETS = {"/": ("index.html", "text/html; charset=utf-8"),
           "/static/app.js": ("app.js", JS),
           "/static/scene.js": ("scene.js", JS),
+          "/static/mode.js": ("mode.js", JS),
           "/static/app.css": ("app.css", CSS),
           "/static/vendor/xterm/xterm.js": ("vendor/xterm/xterm.js", JS),
           "/static/vendor/xterm/xterm.css": ("vendor/xterm/xterm.css", CSS),
@@ -381,6 +382,7 @@ class WebApp:
         self.lan = lan                  # True: listen on the network, no login (the operator's choice)
         self._gozer_cache: tuple[float, str] | None = None
         self._lock = threading.Lock()
+        self._peer_cache: dict = {}      # run directory -> ((ledger mtime_ns, size), {"model", "results"}); see _peers
         self._launches: dict[str, dict] = {}
         # preflight_for(cfg) -> preflight(model, base): built from the config at each call, so a run is judged
         # by the config as it is now (after a Settings save) and in the mode the page asks for.
@@ -591,6 +593,8 @@ class WebApp:
         f["results"] = run_view.results(run, entries)
         if (f["results"].get("swap") or {}).get("free_run_text"):
             f["results"]["swap"]["free_run_text"] = self.redact(f["results"]["swap"]["free_run_text"])
+        f["verdict"] = [{**i, "headline": self.redact(i["headline"]), "detail": self.redact(i["detail"])}
+                        for i in verdict.build(f["results"], self._peers(run), verdict.reference_check(run))]
         f["timeline"] = run_view.timeline(entries, now)
         f["compare"] = self._compare(run, f["model"])
         f["block"] = None
@@ -606,6 +610,37 @@ class WebApp:
                           if stage is not None else [],
                           "unblock": narrate.how_to_unblock(code, f["model"])}
         return f
+
+    def _peers(self, run: Path) -> list[dict]:
+        """The other runs here, newest first, as {"model", "results"}: the yardsticks for the verdict line. The page asks for a
+        run's detail every few seconds, so another run's results are read again only when its ledger has changed."""
+        found = []
+        if not self.runs_root.is_dir():
+            return []
+        for other in self.runs_root.iterdir():
+            led = other / "ledger.jsonl"
+            if other == run or not NAME_RE.match(other.name) or not led.is_file():
+                continue
+            try:
+                st = led.stat()
+            except OSError:
+                continue
+            key = (st.st_mtime_ns, st.st_size)
+            with self._lock:
+                hit = self._peer_cache.get(other)
+            if hit is None or hit[0] != key:
+                try:
+                    entries = read_entries(led)
+                    start = next((e for e in entries if e["event"] == "run_start"), None)
+                    value = {"model": ((start or {}).get("data") or {}).get("model"), "results": run_view.results(other, entries)}
+                except (LedgerCorrupt, OSError, ValueError):
+                    continue
+                hit = (key, value)
+                with self._lock:
+                    self._peer_cache[other] = hit
+            found.append((key[0], hit[1]))
+        found.sort(key=lambda t: t[0], reverse=True)
+        return [v for _, v in found]
 
     def _compare(self, run: Path, model) -> list[dict]:
         """The other runs of the same model, newest first, with the numbers that compare."""

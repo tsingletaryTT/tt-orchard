@@ -1,0 +1,6 @@
+{"op": "linear_scan", "description": "out[t] = a[t] * out[t-1] + b[t] down axis 0, per column, out[-1] = 0",
+ "inputs": {"a": [64, 128], "b": [64, 128]}, "output": [64, 128], "gen": {"a": "sigmoid"}, "dtype": "bfloat16",
+ "reference": "linear_scan", "pcc_bar_sim": 0.999, "pcc_bar_hw": 0.99,
+ "rel_l2_bar_sim": 1e-2, "rel_l2_bar_hw": 5e-2, "slope_band_sim": [0.98, 1.02], "slope_band_hw": [0.95, 1.05],
+ "max_abs_atol_sim": 1e-2, "max_abs_rtol_sim": 1e-2, "max_abs_atol_hw": 1e-1, "max_abs_rtol_hw": 5e-2, "seeds": [0, 1, 2], "heavy_tail": true,
+ "provisional": true}

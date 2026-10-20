@@ -1,0 +1,13 @@
+restricted_head_parity: reusing evidence/cpu-reference.pt
+restricted_head_parity: loading Qwen36Model on a 1x2 mesh (max_seq_len 2048); loader key mapping: {'^language_model\\.': 'model.language_model.', '^visual\\.': 'model.visual.'}
+restricted_head_parity: model loaded in 46 s
+restricted_head_parity:   device support-401: 212 tokens, 0.3 s, 16 causal SDPA calls turned non-causal
+restricted_head_parity:   device review-boiler: 151 tokens, 0.2 s, 16 causal SDPA calls turned non-causal
+restricted_head_parity:   device select-all: 158 tokens, 0.2 s, 16 causal SDPA calls turned non-causal
+restricted_head_parity:   device moderation: 161 tokens, 0.2 s, 16 causal SDPA calls turned non-causal
+restricted_head_parity:   device contract: 135 tokens, 0.2 s, 16 causal SDPA calls turned non-causal
+restricted_head_parity:   device language: 131 tokens, 0.2 s, 16 causal SDPA calls turned non-causal
+restricted_head_parity: wiring: cosine 0.98727 between the device's and the CPU's causal last row (minimum 0.9)
+restricted_head_parity: wrote <RUN_DIR>/stages/3/evidence/restricted-head-parity.json
+restricted_head_parity: hidden_pcc min 0.95584; prob_max_abs_diff 0.04803 (noise floor 0.00000); top1 agreement 1.000 over 14 questions; mask effect on the CPU: 1 of 14 answers change with a causal mask (largest probability change 0.466); verdict pass
+exit 0

@@ -1,0 +1,433 @@
+{
+  "architectures": [
+    "RwkvForCausalLM"
+  ],
+  "failures": [],
+  "higher_order_nodes": {
+    "wrap_with_set_grad_enabled": 1
+  },
+  "layers_in_config": 32,
+  "layers_traced": 2,
+  "model_dir": "<fixture rwkv>",
+  "note": "prefill graph from torch.export(strict=False, use_cache=False) on the meta device; cache and state updates of decoding are not traced. Bodies of higher-order operations (for example wrap_with_set_grad_enabled) were traversed, so the ops inside them are counted; the wrapper itself is not an op",
+  "ops": [
+    {
+      "count": 142,
+      "count_in_layers": 142,
+      "modules": [
+        "rwkv.blocks.0.attention",
+        "rwkv.blocks.0",
+        "rwkv.blocks.0.feed_forward",
+        "rwkv.blocks.1.attention",
+        "rwkv.blocks.1"
+      ],
+      "op": "aten.add.Tensor",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            8,
+            4096
+          ]
+        ]
+      }
+    },
+    {
+      "count": 120,
+      "count_in_layers": 120,
+      "modules": [
+        "rwkv.blocks.0.attention",
+        "rwkv.blocks.0.feed_forward",
+        "rwkv.blocks.1.attention",
+        "rwkv.blocks.1.feed_forward"
+      ],
+      "op": "aten.mul.Tensor",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            8,
+            4096
+          ]
+        ]
+      }
+    },
+    {
+      "count": 66,
+      "count_in_layers": 66,
+      "modules": [
+        "rwkv.blocks.0.attention",
+        "rwkv.blocks.1.attention"
+      ],
+      "op": "aten.exp.default",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            4096
+          ]
+        ]
+      }
+    },
+    {
+      "count": 66,
+      "count_in_layers": 66,
+      "modules": [
+        "rwkv.blocks.0.attention",
+        "rwkv.blocks.1.attention"
+      ],
+      "op": "aten.sub.Tensor",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            4096
+          ]
+        ]
+      }
+    },
+    {
+      "count": 54,
+      "count_in_layers": 54,
+      "modules": [
+        "rwkv.blocks.0.attention",
+        "rwkv.blocks.1.attention"
+      ],
+      "op": "aten.select.int",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            4096
+          ]
+        ]
+      }
+    },
+    {
+      "count": 32,
+      "count_in_layers": 32,
+      "modules": [
+        "rwkv.blocks.0.attention",
+        "rwkv.blocks.1.attention"
+      ],
+      "op": "aten._assert_tensor_metadata.default",
+      "sample": null
+    },
+    {
+      "count": 32,
+      "count_in_layers": 32,
+      "modules": [
+        "rwkv.blocks.0.attention",
+        "rwkv.blocks.1.attention"
+      ],
+      "op": "aten.maximum.default",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            4096
+          ]
+        ]
+      }
+    },
+    {
+      "count": 32,
+      "count_in_layers": 32,
+      "modules": [
+        "rwkv.blocks.0.attention",
+        "rwkv.blocks.1.attention"
+      ],
+      "op": "aten.to.dtype",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            4096
+          ]
+        ]
+      }
+    },
+    {
+      "count": 16,
+      "count_in_layers": 16,
+      "modules": [
+        "rwkv.blocks.0.attention",
+        "rwkv.blocks.1.attention"
+      ],
+      "op": "aten.copy_.default",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            4096
+          ]
+        ]
+      }
+    },
+    {
+      "count": 16,
+      "count_in_layers": 16,
+      "modules": [
+        "rwkv.blocks.0.attention",
+        "rwkv.blocks.1.attention"
+      ],
+      "op": "aten.div.Tensor",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            4096
+          ]
+        ]
+      }
+    },
+    {
+      "count": 15,
+      "count_in_layers": 14,
+      "modules": [
+        "rwkv.blocks.0.attention.key",
+        "rwkv.blocks.0.attention.value",
+        "rwkv.blocks.0.attention.receptance",
+        "rwkv.blocks.0.attention.output",
+        "rwkv.blocks.0.feed_forward.key"
+      ],
+      "op": "aten.linear.default",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            8,
+            4096
+          ]
+        ]
+      }
+    },
+    {
+      "count": 10,
+      "count_in_layers": 10,
+      "modules": [
+        "rwkv.blocks.0.attention",
+        "rwkv.blocks.0.feed_forward",
+        "rwkv.blocks.1.attention",
+        "rwkv.blocks.1.feed_forward"
+      ],
+      "op": "aten.rsub.Scalar",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            1,
+            4096
+          ]
+        ]
+      }
+    },
+    {
+      "count": 8,
+      "count_in_layers": 8,
+      "modules": [
+        "rwkv.blocks.0.attention",
+        "rwkv.blocks.1.attention"
+      ],
+      "op": "aten.zeros_like.default",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            8,
+            4096
+          ]
+        ]
+      }
+    },
+    {
+      "count": 6,
+      "count_in_layers": 5,
+      "modules": [
+        "rwkv.blocks.0.pre_ln",
+        "rwkv.blocks.0.ln1",
+        "rwkv.blocks.0.ln2",
+        "rwkv.blocks.1.ln1",
+        "rwkv.blocks.1.ln2"
+      ],
+      "op": "aten.layer_norm.default",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            8,
+            4096
+          ]
+        ]
+      }
+    },
+    {
+      "count": 4,
+      "count_in_layers": 0,
+      "modules": [
+        "rwkv"
+      ],
+      "op": "aten.div_.Tensor",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            4096,
+            4096
+          ]
+        ]
+      }
+    },
+    {
+      "count": 4,
+      "count_in_layers": 4,
+      "modules": [
+        "rwkv.blocks.0.attention.time_shift",
+        "rwkv.blocks.0.feed_forward.time_shift",
+        "rwkv.blocks.1.attention.time_shift",
+        "rwkv.blocks.1.feed_forward.time_shift"
+      ],
+      "op": "aten.pad.default",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            8,
+            4096
+          ]
+        ]
+      }
+    },
+    {
+      "count": 4,
+      "count_in_layers": 4,
+      "modules": [
+        "rwkv.blocks.0.attention",
+        "rwkv.blocks.0.feed_forward",
+        "rwkv.blocks.1.attention",
+        "rwkv.blocks.1.feed_forward"
+      ],
+      "op": "aten.sigmoid.default",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            8,
+            4096
+          ]
+        ]
+      }
+    },
+    {
+      "count": 2,
+      "count_in_layers": 2,
+      "modules": [
+        "rwkv.blocks.0.attention",
+        "rwkv.blocks.1.attention"
+      ],
+      "op": "aten.neg.default",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            4096
+          ]
+        ]
+      }
+    },
+    {
+      "count": 2,
+      "count_in_layers": 2,
+      "modules": [
+        "rwkv.blocks.0.feed_forward",
+        "rwkv.blocks.1.feed_forward"
+      ],
+      "op": "aten.relu.default",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            8,
+            16384
+          ]
+        ]
+      }
+    },
+    {
+      "count": 2,
+      "count_in_layers": 2,
+      "modules": [
+        "rwkv.blocks.0.feed_forward",
+        "rwkv.blocks.1.feed_forward"
+      ],
+      "op": "aten.square.default",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            8,
+            16384
+          ]
+        ]
+      }
+    },
+    {
+      "count": 1,
+      "count_in_layers": 0,
+      "modules": [],
+      "op": "aten.alias.default",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            8,
+            4096
+          ]
+        ]
+      }
+    },
+    {
+      "count": 1,
+      "count_in_layers": 0,
+      "modules": [
+        "rwkv.embeddings"
+      ],
+      "op": "aten.embedding.default",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            8,
+            4096
+          ]
+        ]
+      }
+    }
+  ],
+  "python_nodes": {
+    "<built-in function getitem>": 4
+  },
+  "schema": 1,
+  "seq_len": 8,
+  "torch": "2.14.1+cpu",
+  "traced_class": "RwkvForCausalLM",
+  "transformers": "5.19.0"
+}

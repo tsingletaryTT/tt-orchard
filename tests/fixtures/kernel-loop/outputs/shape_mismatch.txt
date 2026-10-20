@@ -1,0 +1,53 @@
+PROGRESS import
+PROGRESS open_device
+PROGRESS set seed0
+PROGRESS run seed0
+
+❌ Error in kernel node0-add_read:
+error: ValueError: Tensor shape (32, 32) does not match Block shape (2, 2) (tile counts: 1 vs 4)
+  --> <ATTEMPT_DIR>/kernel.py:46:27
+   |
+46 |                     tx_a = ttl.copy(a[r, c], a_block)
+   |                           ^
+   |
+--------------------------------------------------
+
+Traceback (most recent call last):
+  File "<TTLANG_VENV>/lib/python3.12/site-packages/ttl/sim/greenlet_scheduler.py", line 483, in run
+    state.g.switch()
+  File "<TTLANG_VENV>/lib/python3.12/site-packages/ttl/sim/greenlet_scheduler.py", line 192, in wrapped_func
+    func()
+  File "<TTLANG_VENV>/lib/python3.12/site-packages/ttl/sim/program.py", line 454, in _tagged
+    fn()
+  File "<ATTEMPT_DIR>/kernel.py", line 46, in add_read
+    tx_a = ttl.copy(a[r, c], a_block)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<TTLANG_VENV>/lib/python3.12/site-packages/ttl/sim/copy.py", line 423, in copy
+    handle = transaction_type(
+             ^^^^^^^^^^^^^^^^^
+  File "<TTLANG_VENV>/lib/python3.12/site-packages/ttl/sim/copy.py", line 133, in __init__
+    handler.validate(src, dst, byte_count)
+  File "<TTLANG_VENV>/lib/python3.12/site-packages/ttl/sim/copyhandlers.py", line 436, in validate
+    _validate_tensor_to_block_shapes(
+  File "<TTLANG_VENV>/lib/python3.12/site-packages/ttl/sim/copyhandlers.py", line 171, in _validate_tensor_to_block_shapes
+    check_count_match(
+  File "<TTLANG_VENV>/lib/python3.12/site-packages/ttl/sim/ttnnsim.py", line 1566, in check_count_match
+    raise ValueError(
+ValueError: Tensor shape (32, 32) does not match Block shape (2, 2) (tile counts: 1 vs 4)
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "<TEMPLATES>/kernel_harness.py", line 121, in main
+    operation(*tt_ins, out)
+  File "<TTLANG_VENV>/lib/python3.12/site-packages/ttl/sim/operation.py", line 172, in wrapper
+    run_operation(modified_func, actual_grid, args, kwargs)
+  File "<TTLANG_VENV>/lib/python3.12/site-packages/ttl/sim/program.py", line 277, in run_operation
+    _schedule_and_run(
+  File "<TTLANG_VENV>/lib/python3.12/site-packages/ttl/sim/program.py", line 485, in _schedule_and_run
+    scheduler.run()
+  File "<TTLANG_VENV>/lib/python3.12/site-packages/ttl/sim/greenlet_scheduler.py", line 511, in run
+    self._format_and_raise_kernel_error(
+  File "<TTLANG_VENV>/lib/python3.12/site-packages/ttl/sim/greenlet_scheduler.py", line 338, in _format_and_raise_kernel_error
+    raise RuntimeError(error_msg) from exception
+RuntimeError: node0-add_read: ValueError: Tensor shape (32, 32) does not match Block shape (2, 2) (tile counts: 1 vs 4)

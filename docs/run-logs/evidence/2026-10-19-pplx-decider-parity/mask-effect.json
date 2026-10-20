@@ -1,0 +1,37 @@
+{
+  "prob_max_abs_diff": 0.4655798318289785,
+  "top1_changed": 1,
+  "questions": 14,
+  "per_record": [
+    {
+      "prob_max_abs_diff": 0.07199296238206243,
+      "top1_changed": 0,
+      "questions": 3
+    },
+    {
+      "prob_max_abs_diff": 0.1998956528842406,
+      "top1_changed": 0,
+      "questions": 2
+    },
+    {
+      "prob_max_abs_diff": 0.009828424437376528,
+      "top1_changed": 0,
+      "questions": 3
+    },
+    {
+      "prob_max_abs_diff": 0.2608978883342622,
+      "top1_changed": 1,
+      "questions": 2
+    },
+    {
+      "prob_max_abs_diff": 0.4655798318289785,
+      "top1_changed": 0,
+      "questions": 2
+    },
+    {
+      "prob_max_abs_diff": 0.0016787664993099989,
+      "top1_changed": 0,
+      "questions": 2
+    }
+  ]
+}

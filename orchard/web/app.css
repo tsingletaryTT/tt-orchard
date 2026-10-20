@@ -166,6 +166,7 @@ body.wide .rail { display: none; }
 .badge[data-tone="bad"] { background: var(--bad-bg); color: var(--bad); }
 .badge[data-tone="alarm"] { background: var(--alarm-bg); color: var(--alarm); }
 .badge .real { font: 500 .76rem var(--font); opacity: .9; }
+.badge .name { display: none; }          /* the real state name; operator mode shows it in place of the orchard word */
 
 .empty { padding: 48px 8px; display: grid; gap: 8px; max-width: 52ch; }
 
@@ -447,3 +448,124 @@ table.ledger { border-collapse: collapse; width: 100%; font-size: .82rem; font-v
 .research-line { margin: 0 0 4px; overflow-wrap: anywhere; }
 .research-list { margin: 0; padding-left: 18px; display: grid; gap: 2px; overflow-wrap: anywhere; }
 .research a { color: var(--accent, inherit); }
+
+/* ======================================================================================================================
+   Page style switch (orchard/web/mode.js sets <html data-mode>). "playful" is everything above. "operator" is below:
+   plain type, state first, no scene, and the run in two panes: now and next stay in view on the left; stages and history
+   scroll on the right. Same data and same controls; only the look and the arrangement change.
+   ====================================================================================================================== */
+
+/* The two panes are real boxes only in operator mode. Elsewhere they vanish, so the playful page lays out as it always did. */
+.op-left, .op-right { display: contents; }
+
+html[data-mode="operator"] {
+  --field: #e8f0f0;  --field-2: #e8f0f0;
+  --paper: #ffffff;  --paper-2: #f1f8f8;  --paper-3: #dcf0ee;
+  --ink: #092221;    --muted: #3a5452;    --line: #c7d9d8;
+  --good: #1d6b5b;   --good-bg: #dcefe9;
+  --warn: #8a5a00;   --warn-bg: #fff0c7;
+  --bad: #b3290a;    --bad-bg: #fbe0d8;
+  --alarm: #b3290a;  --alarm-bg: #fbe0d8;
+  --dim: #46605d;    --dim-bg: #e3edec;
+  --accent: #1b8eb1; --title: #092221;  --focus: #1b8eb1;
+  --btn: #ffffff;    --btn-dark: #8fb0ad;  --btn-ink: #092221;
+  --go: #1b8eb1;     --go-dark: #146d88;
+  --stop: #b3290a;   --stop-dark: #7a1a05;
+  --wood: #092221;   --wood-light: #c7d9d8; --wood-dark: #c7d9d8; --wood-shadow: transparent;
+  --pixel: var(--font);                    /* every heading, tab and button that asked for the pixel face now uses the system face */
+}
+@media (prefers-color-scheme: dark) {
+  html[data-mode="operator"] {
+    --field: #0b1f1e;  --field-2: #0b1f1e;
+    --paper: #112b2a;  --paper-2: #17383a;  --paper-3: #1e4546;
+    --ink: #e4f1f0;    --muted: #a9c4c2;    --line: #2f4f4d;
+    --good: #7fd1b9;   --good-bg: #17372f;
+    --warn: #f2c14e;   --warn-bg: #3a2f10;
+    --bad: #ff9e8a;    --bad-bg: #40211c;
+    --alarm: #ff9e8a;  --alarm-bg: #40211c;
+    --dim: #a9c4c2;    --dim-bg: #1b3433;
+    --accent: #74c5df; --title: #e4f1f0;  --focus: #74c5df;
+    --btn: #17383a;    --btn-dark: #3f6664;  --btn-ink: #e4f1f0;
+    --go: #1b8eb1;     --go-dark: #74c5df;
+    --wood: #061615;   --wood-light: #2f4f4d; --wood-dark: #2f4f4d;
+  }
+}
+
+html[data-mode="operator"] body { background-image: none; background-color: var(--field); font-size: 15px; line-height: 1.5; }
+html[data-mode="operator"] h1, html[data-mode="operator"] h2, html[data-mode="operator"] h3 { letter-spacing: 0; text-wrap: pretty; }
+html[data-mode="operator"] h3 { letter-spacing: .06em; }
+html[data-mode="operator"] .brand-mark,
+html[data-mode="operator"] .badge .emoji,
+html[data-mode="operator"] .scene-frame { display: none; }              /* decoration: the scene, the tree, the badge emoji */
+
+/* top bar and sheet: flat */
+html[data-mode="operator"] .topbar { background: #092221; border-bottom: 0; box-shadow: none; color: #e4f1f0; }
+html[data-mode="operator"] .brand-name { color: #fff; text-shadow: none; font-size: 1.15rem; }
+html[data-mode="operator"] .brand-host { color: #a9c4c2; }
+html[data-mode="operator"] .view-btn { background: transparent; color: #e4f1f0; border: 1px solid #3f6664; box-shadow: none; font-weight: 600; }
+html[data-mode="operator"] .view-btn[aria-pressed="true"] { background: #e4f1f0; color: #092221; border-color: #e4f1f0; box-shadow: none; }
+html[data-mode="operator"] .clock { background: transparent; color: #e4f1f0; border: 0; box-shadow: none; padding: 0; }
+html[data-mode="operator"] .conn { color: #a9c4c2; }
+html[data-mode="operator"] .sheet { border: 1px solid var(--line); border-radius: 4px; box-shadow: none; }
+html[data-mode="operator"] .rail { border-right: 1px solid var(--line); }
+html[data-mode="operator"] .btn { box-shadow: none; border-width: 1px; font-weight: 600; letter-spacing: 0; }
+html[data-mode="operator"] .btn:active:not(:disabled) { transform: none; box-shadow: none; }
+html[data-mode="operator"] .btn-primary { color: #fff; }
+html[data-mode="operator"] .btn-danger { color: #fff; }
+html[data-mode="operator"] .hint-label { font-weight: 700; color: #fff; background: #092221; }
+html[data-mode="operator"] code { user-select: all; }                    /* a command or a path: one click selects it all, ready to copy */
+
+/* the run: now and next on the left, history on the right */
+html[data-mode="operator"] .run { grid-template-columns: minmax(300px, 2fr) minmax(0, 3fr); gap: 0 28px; align-items: start; }
+html[data-mode="operator"] .op-left { display: grid; gap: 16px; position: sticky; top: 76px; align-self: start;
+  max-height: calc(100vh - 92px); overflow: auto; min-width: 0; }
+html[data-mode="operator"] .op-right { display: grid; gap: 22px; min-width: 0; }
+html[data-mode="operator"] .hint { margin-top: 0; display: grid; gap: 6px; padding: 12px 14px; background: var(--paper);
+  border: 2px solid var(--ink); border-radius: 6px; font-size: 1rem; }
+html[data-mode="operator"] .hint-label { justify-self: start; }
+html[data-mode="operator"] .callout { border-left-width: 6px; }
+
+/* the state band: the one large block of colour on the page. Its colour is the run's state and means nothing else. */
+html[data-mode="operator"] .run-head { padding: 14px 16px; border-radius: 6px; color: #fff; background: #46605d; display: grid; gap: 10px; }
+html[data-mode="operator"] #run[data-tone="good"] .run-head { background: #1d6b5b; }
+html[data-mode="operator"] #run[data-tone="warn"] .run-head { background: #8a5a00; }
+html[data-mode="operator"] #run[data-tone="bad"] .run-head,
+html[data-mode="operator"] #run[data-tone="alarm"] .run-head { background: #b3290a; }
+html[data-mode="operator"] #run[data-state="running"] .run-head { background: #146d88; }
+html[data-mode="operator"] .run-head .badge { background: transparent; color: #fff; padding: 0; font-size: 1.5rem; font-weight: 800; letter-spacing: .01em; }
+/* real names first: the state, the stage and the feed's role read as what they are; the orchard words and icons step aside */
+html[data-mode="operator"] .badge .word,
+html[data-mode="operator"] .badge .real,
+html[data-mode="operator"] .step .orchard,
+html[data-mode="operator"] .run-sub .orchard,
+html[data-mode="operator"] .who .icon { display: none; }
+html[data-mode="operator"] .badge .name { display: inline; text-transform: uppercase; letter-spacing: .03em; }
+html[data-mode="operator"] .step .real { font-weight: 700; color: var(--ink); font-size: .84rem; }
+html[data-mode="operator"] .run-head h1 { color: #fff; font-size: 1.05rem; font-weight: 600; }
+html[data-mode="operator"] .run-head .run-sub { color: rgba(255,255,255,.9); }
+html[data-mode="operator"] .run-head .btn { color: #092221; background: #fff; border-color: #fff; }
+html[data-mode="operator"] .run-head .mode-chip { color: #fff; background: transparent; border-color: rgba(255,255,255,.6); }
+@media (prefers-reduced-motion: no-preference) {
+  html[data-mode="operator"] #run[data-state="running"] .run-head .badge::before {
+    content: ""; width: 14px; height: 14px; border-radius: 50%; background: #fff; display: inline-block; margin-right: 10px;
+    animation: orchard-pulse 1.4s ease-in-out infinite; }
+  @keyframes orchard-pulse { 50% { opacity: .25; transform: scale(.7); } }
+}
+
+@media (max-width: 900px) {
+  html[data-mode="operator"] .run { grid-template-columns: minmax(0, 1fr); gap: 22px; }
+  html[data-mode="operator"] .op-left { position: static; max-height: none; overflow: visible; }
+}
+
+/* ---- the verdict: a sentence per finding with its yardstick (operator mode only) ---- */
+#verdict { display: none; }
+.verdict-list { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 8px; }
+.verdict-item { display: grid; gap: 2px; padding: 8px 12px; border-left: 5px solid var(--dim); background: var(--paper-2); border-radius: 3px; }
+.verdict-headline { font-weight: 700; }
+.verdict-detail { color: var(--muted); font-size: .88rem; }
+html[data-mode="operator"] #verdict { display: grid; gap: 4px; }
+html[data-mode="operator"] #verdict h2 { font-size: .8rem; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+#verdict .verdict-item[data-tone="bad"] { border-left-color: var(--bad); background: var(--bad-bg); }
+#verdict .verdict-item[data-tone="warn"] { border-left-color: var(--warn); background: var(--warn-bg); }
+#verdict .verdict-item[data-tone="good"] { border-left-color: var(--good); background: var(--good-bg); }
+#verdict .verdict-item[data-tone="info"] { border-left-color: var(--dim); background: var(--paper-2); }

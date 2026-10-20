@@ -87,14 +87,16 @@ function stateBadge(state) {
   if (!st) return h("span", { class: "badge", dataset: { tone: state === "unreadable" ? "alarm" : "dim" } },
     state === "unreadable" ? "⚠ unreadable" : state);
   return h("span", { class: "badge", dataset: { tone: TONE[st.role] || "dim" }, title: `${st.word} (${state})` },
-    h("span", { "aria-hidden": "true", class: "emoji" }, st.emoji), h("span", { class: "word" }, st.word), h("span", { class: "real" }, `· ${state}`));
+    h("span", { "aria-hidden": "true", class: "emoji" }, st.emoji), h("span", { class: "word" }, st.word), h("span", { class: "name" }, state.replace(/-/g, " ")),
+    h("span", { class: "real" }, `· ${state}`));      // "name" is the real state, shown instead of the orchard word in operator mode
 }
 
-function stageText(stage) {
+// "stage 1 🧪 soil test · environment and CPU reference". The orchard part sits in its own span so operator mode can drop it.
+function stageLine(stage) {
   if (!stage || stage.current === null || stage.current === undefined) return "";
   const s = S.meta && S.meta.stages[stage.current];
-  const orchard = s ? `${s.emoji} ${s.name}` : "";
-  return `stage ${stage.current} ${orchard} · ${stage.name || (s && s.real) || ""}`.replace(/\s+/g, " ").trim();
+  return h("span", {}, `stage ${stage.current} `, s ? h("span", { class: "orchard" }, `${s.emoji} ${s.name} `) : "",
+    `· ${stage.name || (s && s.real) || ""}`);
 }
 
 function toast(text, tone) {
@@ -342,16 +344,33 @@ async function refreshRun() {
   }
 }
 
+// The verdict: one sentence per finding with its yardstick, worst first. Operator mode shows it (the CSS hides it otherwise).
+// Strings come from the server and are set as text, never as markup.
+function renderVerdict(items) {
+  const box = $("verdict");
+  const list = Array.isArray(items) ? items : [];
+  box.hidden = list.length === 0;
+  if (!changed($("verdict-list"), list)) return;
+  const ul = clear($("verdict-list"));
+  for (const i of list) {
+    ul.append(h("li", { class: "verdict-item", dataset: { tone: i.tone, id: i.id } },
+      h("strong", { class: "verdict-headline" }, i.headline), i.detail ? h("span", { class: "verdict-detail" }, i.detail) : null));
+  }
+}
+
 function renderRun() {
   const d = S.detail;
   if (!d) return;
   const badge = $("run-badge");
-  badge.replaceWith(Object.assign(stateBadge(d.state), { id: "run-badge" }));
+  const fresh = Object.assign(stateBadge(d.state), { id: "run-badge" });
+  badge.replaceWith(fresh);
+  $("run").dataset.state = d.state;                 // operator mode colours its state band from these two
+  $("run").dataset.tone = fresh.dataset.tone;
   $("run-model").textContent = d.model || d.name;
   const sub = clear($("run-sub"));
   sub.append(
     h("span", { class: "mono" }, d.name),
-    h("span", {}, stageText(d.stage) + (d.stage && d.stage.attempt > 1 ? ` · attempt ${d.stage.attempt}` : "")),
+    h("span", {}, stageLine(d.stage), d.stage && d.stage.attempt > 1 ? ` · attempt ${d.stage.attempt}` : ""),
     h("span", {}, d.supervisor.alive ? `supervisor pid ${d.supervisor.pid}` : "no supervisor running"),
     h("span", {}, d.last_events.length ? `last activity ${ago(d.last_events[d.last_events.length - 1].ts)}` : ""));
   $("run-hint-text").textContent = d.next_step || d.hint || "";
@@ -362,6 +381,7 @@ function renderRun() {
     : "Local mode: everything runs on this machine";
   S.activity = d.activity ? { ...d.activity, seenAt: Date.now() } : null;
   renderNow();
+  renderVerdict(d.verdict);
   renderResults(d);
   if (S.tab === "timeline") renderTimeline(d);
   renderActions(d);
@@ -696,7 +716,7 @@ function addFeedLine(e) {
   }
   const li = h("li", { dataset: { actor: e.actor, bad: String(e.bad), heartbeat: String(/^still /.test(e.text)) } },
     h("span", { class: "t" }, clock(e.ts)),
-    h("span", { class: "who", dataset: { role: e.role } }, h("span", { "aria-hidden": "true" }, (e.icon || "") + " "), e.actor),
+    h("span", { class: "who", dataset: { role: e.role } }, h("span", { "aria-hidden": "true", class: "icon" }, (e.icon || "") + " "), e.actor),
     h("span", { class: "what" }, e.text));
   if (S.feedFilter && e.actor !== S.feedFilter) li.hidden = true;
   feed.append(li);
