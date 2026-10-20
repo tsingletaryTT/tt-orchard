@@ -297,7 +297,7 @@ def test_watch_survives_cut_off_responses_and_ends_after_three_in_a_row(tmp_path
     assert code == 2 and "3 errors in a row" in text
 
 
-@pytest.mark.parametrize("value", ["0", "-3", "nan"])
+@pytest.mark.parametrize("value", ["0", "-3", "nan", "inf"])
 def test_a_baseline_that_is_not_positive_is_refused_with_a_message(tmp_path, value):
     server = Server([40.0])
     code, text = run(tmp_path, server, "--endpoint", URL, "--model", MODEL, "--baseline", value)
