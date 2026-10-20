@@ -209,3 +209,39 @@ def test_an_oversized_reference_file_is_not_read(tmp_path):
         json.dumps({"missing_keys": [], "model_key_count": 851, "ignore_patterns": [], "pad": "x" * (3 * 1024 * 1024)}))
     ref = verdict.reference_check(tmp_path)
     assert ref is None or ref["missing"] is None
+
+
+# ---- finding 13: a number that is not finite is not a measurement ------------------------------------------------------------------
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+@pytest.mark.parametrize("n", [0, 32])
+def test_a_non_finite_agreement_gives_no_swap_verdict_and_does_not_raise(bad, n):
+    items = by_id(verdict.build(swap(top1=bad, n=n), []))
+    assert "swap" not in items
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf")])
+def test_a_non_finite_boot_time_is_not_stated_or_ranked(bad):
+    assert "swap-boot" not in by_id(verdict.build(swap(ready=bad), []))
+    items = by_id(verdict.build({"configs": [cfg(top1=bad, ready=bad)]}, []))
+    assert "config-2" not in items                                  # neither number is usable, so there is nothing to say
+
+
+def test_a_non_finite_peer_number_is_left_out_of_the_yardstick():
+    peers = [peer(top1=float("nan")), peer("org/ok", top1=0.9375)]
+    detail = by_id(verdict.build(swap(top1=1.0), peers))["swap"]["detail"]
+    assert "nan" not in detail and "0.94" in detail
+
+
+def test_a_very_large_integer_is_still_a_number():
+    assert verdict._num(10**400) is True
+    assert verdict._num(float("nan")) is False and verdict._num(True) is False
+
+
+# ---- a boot time is ranked only against a recorded package ---------------------------------------------------------------------------
+
+def test_runs_with_no_recorded_package_are_not_grouped_together():
+    peers = [peer(configs=[cfg(package=None, ready=r)]) for r in (100.0, 110.0, 120.0)]
+    item = by_id(verdict.build({"configs": [cfg(package=None, ready=900.0)]}, peers))["config-2"]
+    assert item["tone"] == "good" and "slower" not in item["detail"]
+    assert "package" in item["detail"] and "not recorded" in item["detail"]

@@ -17,6 +17,7 @@ A number with no yardstick tells the operator nothing. Each verdict here is one 
 from __future__ import annotations
 
 import json
+import math
 import re
 import statistics
 from pathlib import Path
@@ -33,7 +34,11 @@ MAX_FILE_BYTES = 2 * 1024 * 1024
 
 
 def _num(x) -> bool:
-    return isinstance(x, (int, float)) and not isinstance(x, bool)
+    """A real measurement: an int or a finite float. `json.loads` accepts NaN and Infinity, and a number that is not finite
+    would print as "nan" in a sentence or make `round` raise. An int of any size counts (`math.isfinite` overflows on a huge one)."""
+    if isinstance(x, bool):
+        return False
+    return isinstance(x, int) or (isinstance(x, float) and math.isfinite(x))
 
 
 def _short(model) -> str:
@@ -154,6 +159,9 @@ def _swap_items(swap: dict, peers: list[dict]) -> list[dict]:
 
 def _boot(chips, package, ready, peers: list[dict]) -> tuple[str, str]:
     """(tone, sentence) for one configuration's boot time, against earlier runs of the same package on the same chip count."""
+    if package is None:
+        return "good", (f"The package for this configuration was not recorded, so {_secs(ready)} on {chips} chips is not ranked "
+                        "against earlier runs.")
     same = []
     for p in peers:
         for c in (p.get("results") or {}).get("configs") or []:
