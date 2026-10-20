@@ -70,3 +70,29 @@ def test_the_real_probe_reports_a_closed_port():
 
 def test_the_default_signals_carry_the_real_probe(tmp_path):
     assert pf.default_signals(cfg(tmp_path)).cpu_standin is pf.cpu_standin_problem
+
+
+# ---- a lab box: the coder is never parked, so the stand-in is never used (PR 11 review, finding 1) ----
+
+def test_in_lab_mode_the_stand_in_is_not_asked_for_because_a_lab_run_never_parks(tmp_path):
+    from pathlib import Path
+    from orchard.bringup_config import Lab
+    c = cfg(tmp_path)
+    c.lab = Lab(host="node4", root=Path("/srv/orchard"))
+    c.mode = "lab"
+    asked = []
+    out = pf.run_preflight(c, "Cloudflare/clef", accept_credentials=False,
+                           signals=signals(cpu_standin=lambda e, m: asked.append((e, m)) or "connection refused"))
+    assert not asked and "cpu" not in [x.name for x in out]
+    assert "coder-unusable" not in [x.reason for x in pf.blocked(out)]
+
+
+def test_a_local_mode_config_with_a_lab_table_still_checks_the_stand_in(tmp_path):
+    from pathlib import Path
+    from orchard.bringup_config import Lab
+    c = cfg(tmp_path)
+    c.lab = Lab(host="node4", root=Path("/srv/orchard"))
+    c.mode = "local"
+    out = pf.run_preflight(c, "Cloudflare/clef", accept_credentials=False,
+                           signals=signals(cpu_standin=lambda e, m: "connection refused"))
+    assert [x.reason for x in pf.blocked(out)] == ["coder-unusable"]

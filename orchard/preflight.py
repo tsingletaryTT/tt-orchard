@@ -506,7 +506,9 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
     guarded("tiers", "config-invalid", lambda: check_tiers(s.load_tiers, Path(cfg.tiers), cfg.coder.port))
     guarded("port", "coder-unusable", lambda: check_port(cfg.coder.port, bool(s.port_in_use(cfg.coder.port)), resuming,
                                                           kept=_kept_on_port(cfg)))
-    if s.cpu_standin is not None:
+    # The stand-in takes the coder's place while stage 4's 4-chip test parks it. A lab run never parks (its tests run on
+    # the lab), so the row would block a run for a server it never uses.
+    if s.cpu_standin is not None and getattr(cfg, "mode", "local") != "lab":
         def cpu() -> Check:
             tier = next(t for t in s.load_tiers(Path(cfg.tiers)).tiers.values() if t.get("placement") == "cpu")
             return check_cpu_standin(s.cpu_standin(tier["endpoint"], tier["model"]), tier["endpoint"], tier["model"])
