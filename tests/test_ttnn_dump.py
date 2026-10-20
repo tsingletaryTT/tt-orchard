@@ -163,4 +163,98 @@ def test_the_printed_command_shows_the_interpreter_and_not_the_script(tmp_path):
 def test_a_queued_lease_is_reported_as_queued(tmp_path):
     said = []
     code = td.main("/py/bin/python", run=lambda a, t: (10, "", "queued ticket 7"), data_dir=tmp_path, say=said.append)
-    assert code == 2 and any("queued" in s and "gozer wait" in s for s in said) and not any("dump failed" in s for s in said)
+    assert code == 2 and any("queued" in s for s in said) and not any("dump failed" in s for s in said)
+    # `gozer wait` grants a lease that has no owner pid (orchard/handoff.py avoids it), so it is not suggested.
+    assert not any("gozer wait" in s for s in said)
+
+
+def test_a_queued_dump_cancels_its_ticket(tmp_path):
+    said, cancelled = [], []
+    code = td.main("/py/bin/python", run=lambda a, t: (10, "", "queued: ticket 3fa9c1\n"), data_dir=tmp_path,
+                   say=said.append, cancel=lambda t: cancelled.append(t))
+    assert code == 2 and cancelled == ["3fa9c1"] and any("3fa9c1" in s and "cancelled" in s for s in said)
+    assert not any("gozer wait" in s for s in said)
+
+
+def test_a_failed_cancel_is_said_and_does_not_hide_the_queued_exit(tmp_path):
+    said = []
+    code = td.main("/py/bin/python", run=lambda a, t: (10, "", "queued: ticket 3fa9c1\n"), data_dir=tmp_path,
+                   say=said.append, cancel=lambda t: "no such ticket")
+    assert code == 2 and any("could not be cancelled" in s and "no such ticket" in s for s in said)
+
+
+def _gone(pid: int) -> bool:
+    """True when the process has ended. A zombie that nobody has reaped yet counts as ended."""
+    try:
+        state = open(f"/proc/{pid}/stat").read().rsplit(")", 1)[1].split()[0]
+    except OSError:
+        return True
+    return state == "Z"
+
+
+def test_a_timeout_stops_the_whole_process_group_not_just_the_first_process(tmp_path):
+    """The old subprocess.run(timeout=) killed only the direct child, so what gozer had started kept running with the
+    chip open. The stub stands in for gozer: it starts a grandchild and waits for it."""
+    pidfile = tmp_path / "grandchild.pid"
+    stub = tmp_path / "stub-gozer"
+    stub.write_text(f"#!/bin/sh\nsleep 60 &\necho $! > {pidfile}\nwait\n")
+    stub.chmod(0o755)
+    pid = None
+    try:
+        rc, out, err = td._real_run([str(stub)], timeout=2, term_grace_s=5)
+        pid = int(pidfile.read_text())
+        assert rc == 127 and "timed out" in err
+        assert _gone(pid), "the grandchild survived the timeout"
+    finally:
+        if pid is not None and not _gone(pid):
+            import os, signal
+            os.kill(pid, signal.SIGKILL)
+
+
+def test_the_stop_sends_sigterm_first_so_gozer_can_release_its_lease(tmp_path):
+    """The stub traps SIGTERM and records it, as gozer does before it releases the lease."""
+    mark = tmp_path / "got-term"
+    stub = tmp_path / "stub-gozer"
+    stub.write_text(f"#!/bin/sh\ntrap 'echo term > {mark}; exit 0' TERM\nwhile true; do sleep 0.1; done\n")
+    stub.chmod(0o755)
+    rc, out, err = td._real_run([str(stub)], timeout=2, term_grace_s=5)
+    assert mark.read_text().strip() == "term" and "timed out" in err
+
+
+def test_the_timeout_grace_is_the_probes_gozer_grace():
+    import inspect
+    from orchard import kernelprobe
+    assert inspect.signature(td._real_run).parameters["term_grace_s"].default == kernelprobe.GOZER_TERM_GRACE_S
+
+
+@pytest.mark.parametrize("exc", [KeyboardInterrupt, RuntimeError])
+def test_an_interrupt_or_error_while_waiting_stops_the_group_too(tmp_path, monkeypatch, exc):
+    pidfile = tmp_path / "grandchild.pid"
+    stub = tmp_path / "stub-gozer"
+    stub.write_text(f"#!/bin/sh\nsleep 60 &\necho $! > {pidfile}\nwait\n")
+    stub.chmod(0o755)
+    real_popen = td.subprocess.Popen
+
+    class Interrupted(real_popen):
+        def communicate(self, *a, **kw):
+            import time
+            for _ in range(100):                      # let the stub start its child first
+                if pidfile.exists() and pidfile.read_text().strip():
+                    break
+                time.sleep(0.05)
+            if not getattr(self, "_raised", False):
+                self._raised = True
+                raise exc("stop")
+            return super().communicate(*a, **kw)
+
+    monkeypatch.setattr(td.subprocess, "Popen", Interrupted)
+    pid = None
+    try:
+        with pytest.raises(exc):
+            td._real_run([str(stub)], timeout=30, term_grace_s=5)
+        pid = int(pidfile.read_text())
+        assert _gone(pid)
+    finally:
+        if pid is not None and not _gone(pid):
+            import os, signal
+            os.kill(pid, signal.SIGKILL)
