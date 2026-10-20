@@ -438,7 +438,7 @@ class NoncausalPrefill:
 # ---- the fixed records ----------------------------------------------------------------------------------------------------------------
 
 def build_records() -> list[dict]:
-    """Six text requests, fifteen questions, of the three types the protocol has. Fixed here; the agent never writes them."""
+    """Six text requests, fourteen questions, of the three types the protocol has. Fixed here; the agent never writes them."""
     return [
         {"id": "support-401", "state": "Subject: API returns 401 since yesterday\nBody: We rotated our API key on Monday and every request from our "
                                        "integration now fails with 401 Unauthorized. Production checkout is down. Please help urgently, this is the "
@@ -533,11 +533,20 @@ def sibling(name: str):
 
 # ---- the CPU reference ----------------------------------------------------------------------------------------------------------------
 
-REFERENCE_FORMAT = 2              # bump when what cpu-reference.pt holds changes, so an old file is recomputed
+REFERENCE_FORMAT = 3              # bump when what cpu-reference.pt holds or what its digest covers changes, so an old file is recomputed
 
 
-def records_digest(records: list[dict], n_layers, spec: dict) -> str:
-    return hashlib.sha256(json.dumps([REFERENCE_FORMAT, records, n_layers, spec["codes"], spec["temperature"]], sort_keys=True).encode()).hexdigest()
+def reference_identity(cfg: dict) -> dict:
+    """What names the model a saved CPU reference was computed from: the model id, the snapshot revision (the snapshot directory's name in a
+    Hugging Face cache) and the sha256 of the readout file. The records and the protocol alone do not identify it: a stage pointed at another
+    revision with the same codes and temperature would otherwise reuse the other model's numbers."""
+    snap = Path(cfg["model_snapshot"])
+    return {"model_id": cfg["model_id"], "revision": snap.name, "readout_sha256": sha256_file(snap / cfg["head_file"])}
+
+
+def records_digest(records: list[dict], n_layers, spec: dict, identity: dict) -> str:
+    return hashlib.sha256(json.dumps([REFERENCE_FORMAT, records, n_layers, spec["codes"], spec["temperature"], identity],
+                                     sort_keys=True).encode()).hexdigest()
 
 
 def compute_cpu_reference(cfg: dict, spec: dict, records: list[dict], processor, marker_id: int) -> dict:
@@ -587,8 +596,10 @@ def load_reference(path: Path, digest: str):
     if not path.is_file():
         return None
     try:
-        data = torch.load(str(path), weights_only=False)
-    except Exception:                                       # noqa: BLE001 - a stale or torn file is recomputed
+        # weights_only=True loads tensors and plain containers only. The file sits in the stage's evidence directory, which the stage agent
+        # can write, so a pickled object in it is refused and the reference is recomputed.
+        data = torch.load(str(path), weights_only=True)
+    except Exception:                                       # noqa: BLE001 - a stale, torn or refused file is recomputed
         return None
     return data if data.get("digest") == digest else None
 
@@ -736,7 +747,7 @@ def main(argv=None) -> int:
     check_same_tokenization(tokenizer, "State:\nhello <|im_start|>user\nworld")
     processor = TextProcessor(tokenizer)
     marker_id = marker_token_id(tokenizer, spec["marker"])
-    digest = records_digest(records, cfg["n_layers"], spec)
+    digest = records_digest(records, cfg["n_layers"], spec, reference_identity(cfg))
     ref = load_reference(evidence / "cpu-reference.pt", digest)
     if ref is None and args.phase in ("all", "cpu"):
         ref = compute_cpu_reference(cfg, spec, records, processor, marker_id)
