@@ -54,6 +54,7 @@ torch or transformers is not importable. The script writes only inside its own d
 """
 from __future__ import annotations
 
+import gc
 import hashlib
 import importlib
 import json
@@ -277,15 +278,32 @@ def load_model(torch, transformers, snapshot: Path, remap: dict | None = None) -
     tried = [{"key_mapping": None, "missing_keys": sorted(str(k) for k in info.get("missing_keys") or [])[:MAX_LISTED_KEYS],
               "unexpected_keys": sorted(str(k) for k in info.get("unexpected_keys") or [])[:MAX_LISTED_KEYS], "chosen": True}]
     if remap and unresolved(info):
-        second, second_info, second_seconds = attempt(remap)
-        better = unresolved(second_info) < unresolved(info)
-        tried.append({"key_mapping": dict(remap),
-                      "missing_keys": sorted(str(k) for k in second_info.get("missing_keys") or [])[:MAX_LISTED_KEYS],
-                      "unexpected_keys": sorted(str(k) for k in second_info.get("unexpected_keys") or [])[:MAX_LISTED_KEYS],
-                      "chosen": better})
-        if better:
+        # A large model in bf16 is tens of GB, so two copies do not fit in RAM. The first is dropped before the retry loads. If the
+        # retry raises or does not leave fewer keys unresolved, the first load is repeated; that costs one more load in the case where the
+        # remap does not help, and holds one model at a time.
+        first_unresolved = unresolved(info)
+        del model
+        gc.collect()
+        entry = {"key_mapping": dict(remap), "chosen": False}
+        second = None
+        try:
+            second, second_info, second_seconds = attempt(remap)
+        except Exception as exc:  # noqa: BLE001 - e.g. a transformers without key_mapping raises TypeError; the first load stays the result
+            entry["error"] = f"{type(exc).__name__}: {exc}"[:1000]
+            second_seconds = 0.0
+        if second is not None:
+            entry["missing_keys"] = sorted(str(k) for k in second_info.get("missing_keys") or [])[:MAX_LISTED_KEYS]
+            entry["unexpected_keys"] = sorted(str(k) for k in second_info.get("unexpected_keys") or [])[:MAX_LISTED_KEYS]
+        tried.append(entry)
+        if second is not None and unresolved(second_info) < first_unresolved:
+            entry["chosen"] = True
             tried[0]["chosen"] = False
             model, info, seconds = second, second_info, round(seconds + second_seconds, 2)
+        else:
+            del second
+            gc.collect()
+            model, info, again = attempt(None)
+            seconds = round(seconds + second_seconds + again, 2)
     model.eval()
     patterns = list(getattr(cls, "_keys_to_ignore_on_load_unexpected", None) or []) + \
         list(getattr(model, "_keys_to_ignore_on_load_unexpected", None) or [])
