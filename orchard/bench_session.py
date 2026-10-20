@@ -9,8 +9,12 @@ The caller holds the hardware lease (`gozer run --chips 2 ... -- timeout N pytho
 uses a server that is already running and starts nothing; the tests use that.
 
 Phases: `gsm8k`, `humaneval` (`humaneval_chat`, from orchard/lm_eval_tasks), `mbpp` (`mbpp_chat`), `ifeval` run lm-evaluation-harness in its own venv as a
-child process with a scrubbed environment (no tokens, a home inside the output directory) under the stall watcher. `bfcl` runs the
-tool-call scorer in this process. Every phase goes through a recording proxy, which adds `chat_template_kwargs` when thinking is set and
+child process under the stall watcher. Its environment has no token variables and a HOME and HF_HOME inside the output directory. That does not
+stop code from opening a file by its absolute path or a socket, so the environment is not what protects the operator's token file from a model's
+code. The code phases (`humaneval`, `mbpp`) score by running each reply in `orchard/lm_eval_tasks/code_sandbox.py`: a child that restricts itself with
+Landlock and seccomp to a scratch directory and no sockets, and never runs a reply inside the harness's own process. Before the server starts, the
+session runs the sandbox's self-check and refuses a code phase when it fails; `--allow-unsandboxed-code` runs the replies without isolation, and the
+summary says so. `bfcl` runs the tool-call scorer in this process. Every phase goes through a recording proxy, which adds `chat_template_kwargs` when thinking is set and
 records tokens, finish reasons and latency per request.
 
 The summary records what two runs must share to be compared: the settings, the harness version, the task versions and sample counts, the
@@ -63,16 +67,27 @@ def lm_eval_command(*, lm_eval, model: str, base_url: str, task: str, limit, con
     return argv
 
 
-def lm_eval_env(task: str, out_dir) -> dict:
+def lm_eval_env(task: str, out_dir, *, unsandboxed: bool = False) -> dict:
     """The environment of the harness child: the search path and locale, a home and Hugging Face directory inside the output directory (so
-    the operator's token file is not found), no token variables, and the code-execution gate only for code tasks. The datasets download,
-    so offline mode is not set."""
+    a token file under the real home is not found by the usual lookup), and no token variables. The datasets download, so offline mode is not set.
+
+    This does not isolate anything. Code that opens an absolute path or a socket is not stopped by it; the code tasks score through
+    code_sandbox.py, which is. HF_ALLOW_CODE_EVAL is never set: it would let Hugging Face's `code_eval` run a reply inside the harness's own
+    process. `unsandboxed` (the operator's --allow-unsandboxed-code) tells the code tasks to run replies without the sandbox."""
     out_dir = Path(out_dir)
     env = {k: os.environ[k] for k in ENV_KEEP if k in os.environ}
     env.update({"HOME": str(out_dir / "home"), "HF_HOME": str(out_dir / "hf-datasets"), "TOKENIZERS_PARALLELISM": "false"})
-    if task in CODE_TASKS:
-        env["HF_ALLOW_CODE_EVAL"] = "1"
+    if unsandboxed and task in CODE_TASKS:
+        env["ORCHARD_CODE_UNSANDBOXED"] = "1"
     return env
+
+
+def code_sandbox_check() -> dict:
+    """The sandbox's own check (code_sandbox.self_check): {"ok", "detail", "seen"}. ok is True only when the kernel enforced every restriction."""
+    spec = importlib.util.spec_from_file_location("code_sandbox_for_bench", str(TASKS_DIR / "code_sandbox.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.self_check()
 
 
 def _number(v):
@@ -194,7 +209,7 @@ def _phase(name: str, a, *, upstream: str, served: str, out_dir: Path, server_lo
                                    max_gen_toks=a.max_gen_toks, output_path=phase_dir / "results", include_path=TASKS_DIR)
             rec["command"] = argv
             (phase_dir / "work").mkdir(exist_ok=True)
-            watched = run_watched(argv, cwd=phase_dir / "work", env=lm_eval_env(task, out_dir), log_path=phase_dir / "lm_eval.log",
+            watched = run_watched(argv, cwd=phase_dir / "work", env=lm_eval_env(task, out_dir, unsandboxed=a.allow_unsandboxed_code), log_path=phase_dir / "lm_eval.log",
                                   watcher=StallWatcher(quiet_s=a.quiet_s, repeat_lines=10 ** 9), backstop_s=a.phase_backstop_s)
             rec["watch"] = {"max_quiet_s": watched.max_quiet_s}
             if watched.killed:
@@ -210,6 +225,12 @@ def _phase(name: str, a, *, upstream: str, served: str, out_dir: Path, server_lo
     finally:
         rec["wall_s"] = round(time.monotonic() - t0, 1)
         rec["proxy"] = proxy.summary()
+        failed = rec["proxy"]["errors"]
+        if rec["ok"] and failed:
+            # The harness retries once and then scores a failed request as an empty reply, so it exits 0 and the score includes the failures.
+            rec["ok"] = False
+            rec["problem"] = (f"{failed} of {rec['proxy']['requests']} requests to the server failed (the proxy recorded them); "
+                              "the scores count those items as failures")
         proxy.stop()
         if server_log is not None:
             with open(server_log, "rb") as f:
@@ -240,6 +261,8 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--quiet-s", type=float, default=900.0, help="stop a phase after this many seconds with no output and no CPU use")
     ap.add_argument("--phase-backstop-s", type=float, default=4 * 3600.0)
+    ap.add_argument("--allow-unsandboxed-code", action="store_true",
+                    help="run the humaneval and mbpp replies without the sandbox when its self-check fails (the replies run as you, with your files and network)")
     return ap
 
 
@@ -256,6 +279,16 @@ def main(argv=None) -> int:
         missing = [n for n in ("model_id", "run_sh", "model_dir", "tt_cache", "hf_home") if not getattr(a, n)]
         if missing:
             ap.error("starting a server needs " + ", ".join("--" + m.replace("_", "-") for m in missing) + " (or pass --url)")
+    code_sandbox = None
+    if any(LM_EVAL_TASKS.get(p) in CODE_TASKS for p in phases):
+        check = code_sandbox_check()
+        if check["ok"]:
+            code_sandbox = {"mode": "landlock+seccomp", "detail": check["detail"]}
+        elif a.allow_unsandboxed_code:
+            code_sandbox = {"mode": "none", "reason": check["detail"], "allowed_by": "--allow-unsandboxed-code"}
+        else:
+            ap.error(f"the code phases need the sandbox, and its check failed: {check['detail']}. "
+                     "Pass --allow-unsandboxed-code to run the replies as yourself, with your files and network.")
     out_dir = Path(a.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     started = time.time()
@@ -263,6 +296,8 @@ def main(argv=None) -> int:
                "settings": {"phases": phases, "limit": a.limit, "concurrency": a.concurrency, "thinking": a.thinking, "max_gen_toks": a.max_gen_toks,
                             "seed": a.seed, "temperature": 0},
                "lm_eval_version": None, "started_at": started, "phases": []}
+    if code_sandbox is not None:
+        summary["code_sandbox"] = code_sandbox
 
     def write():
         summary["wall_s"] = round(time.time() - started, 1)

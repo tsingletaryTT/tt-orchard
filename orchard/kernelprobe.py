@@ -61,13 +61,14 @@ import secrets
 import shutil
 import signal
 import stat
+import subprocess
 import sys
 import time
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 from orchard import defaults, ttlang_env
-from orchard.agent import TOOL_SCHEMAS, AgentStep, Tools, agent_env, probe_model
+from orchard.agent import DEVICE_VARS, SECRET_NAME, TOOL_SCHEMAS, AgentStep, Tools, agent_env, probe_model
 from orchard.canary import post_json
 from orchard.ledger import Ledger
 from orchard.stallwatch import StallWatcher, Watched, run_watched
@@ -110,7 +111,7 @@ TEMPLATE_FILES = ("kernel_check.py", "kernel_harness.py", "references.py")
 # Every category an attempt can end in. The check and the harness produce all but `hang`, which the probe sets when
 # the stall watcher kills a hardware run.
 CATEGORIES = ("no_kernel", "import_error", "tt_lang_error", "shape_mismatch", "numeric_mismatch", "timeout",
-              "compile_error", "hang", "hw_numeric_mismatch", "harness_error", "forbidden_code")
+              "compile_error", "hang", "hw_numeric_mismatch", "harness_error", "forbidden_code", "queued")
 SMOKE_TAIL_LINES = 20
 
 
@@ -425,6 +426,38 @@ def copy_kernel(adir: Path, clean: Path) -> tuple[str | None, str | None, str]:
     return None, hashlib.sha256(data).hexdigest(), ""
 
 
+# ---- the environment of the probe's children --------------------------------------------------------------------
+#
+# The simulator check, the smoke test and the hardware run import or run code the probe did not write (the agent's
+# kernel, upstream's example). They get agent_env's environment, as the agent's own shell does: an allow-list, a HOME
+# that holds no credentials, a token path that does not exist. A child that inherited the probe's environment would see
+# the operator's HOME, any token variable and SSH_AUTH_SOCK.
+
+# Variables a hardware child needs from the probe's environment: where gozer keeps its leases and the tt-metal
+# locations. A name that looks like a credential is never passed, whatever its prefix.
+PASS_PREFIXES = ("GOZER_", "TT_METAL_CACHE", "TT_METAL_HOME", "TT_METAL_RUNTIME_ROOT", "ARCH_NAME")
+
+
+def child_env(home_run_dir, adir=None, *, hardware: bool, source=None) -> dict:
+    """The explicit environment of one child of the probe.
+
+    HOME is inside `home_run_dir`, a directory the probe owns (a verdict directory, or the scratch directory), so the
+    child's user site-packages are not a directory the agent can write. ORCHARD_RUN_DIR names the attempt directory
+    (`adir`) when there is one, so sweep_strays finds what the child leaves behind. A leased (`hardware`) child gets no
+    device mask: gozer sets TT_VISIBLE_DEVICES for it, and the no-chip value in TT_METAL_VISIBLE_DEVICES would hide the
+    leased chip. A child that is not leased keeps the mask."""
+    source = os.environ if source is None else source
+    extra = {k: v for k, v in source.items()
+             if k.startswith(PASS_PREFIXES) and not SECRET_NAME.search(k) and k not in DEVICE_VARS}
+    env = agent_env(home_run_dir, extra=extra, source=source)
+    if adir is not None:
+        env["ORCHARD_RUN_DIR"] = str(Path(adir).resolve())
+    if hardware:
+        for k in DEVICE_VARS:
+            env.pop(k, None)
+    return env
+
+
 FILE_RULE_REMEDY = "write kernel.py with write_file as a plain file of at most 256 KiB"
 
 
@@ -455,8 +488,7 @@ def authoritative_check(adir: Path, *, op: str, env, run_watched=run_watched, tt
             "--spec", str(TEMPLATES / "ops" / f"{op}.json"), "--sim", str(env.sim),
             "--timeout-s", str(BUDGET["sim_timeout_s"]), "--tt-lang-json", json.dumps(facts),
             "--out", str(out)]
-    # env=None: the child inherits the probe's own environment. The shipped check needs PATH; it is not an agent shell.
-    got = run_watched(argv, cwd=clean, env=None, log_path=vdir / "authoritative-output.txt",
+    got = run_watched(argv, cwd=clean, env=child_env(vdir, adir, hardware=False), log_path=vdir / "authoritative-output.txt",
                       watcher=StallWatcher(quiet_s=BUDGET["sim_timeout_s"] / 2),
                       backstop_s=BUDGET["sim_timeout_s"] + 120)
     if got.killed:
@@ -836,7 +868,12 @@ def run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_id
         # Before any verdict, and on a crash or an interrupt too: no process the agent started may keep running.
         swept = sweep_strays(adir)
     agent_wall_s = round(time.monotonic() - started, 2)
-    check = authoritative_check(adir, op=op, env=env, run_watched=run_watched, tt_lang=facts)
+    try:
+        check = authoritative_check(adir, op=op, env=env, run_watched=run_watched, tt_lang=facts)
+    finally:
+        # The check imports the agent's kernel, which can start a process that outlives the check. The children carry
+        # ORCHARD_RUN_DIR=<attempt directory>, so the same sweep finds them.
+        swept = swept + sweep_strays(adir)
     sets = check.get("sets") if isinstance(check.get("sets"), list) else []
     measures = set_measures(sets)
     passed = check.get("passed") is True
@@ -892,20 +929,63 @@ def _watch_text(w: dict) -> str:
             f"watcher limits {w['quiet_limit_s']:.0f} s and {w['repeat_limit']} lines")
 
 
-def smoke_test(*, env, shared_python, run_watched=run_watched, record: dict | None = None) -> tuple[bool, list[str]]:
+GOZER_QUEUED_EXIT = 10      # `gozer run` prints "queued: ticket X" and exits 10 when it could not lease at once
+_TICKET = re.compile(r"queued: ticket ([0-9A-Za-z]+)")
+
+
+def cancel_ticket(ticket: str, run=subprocess.run) -> str | None:
+    """Drop a gozer queue ticket (`gozer cancel`, which touches no chip). None when it worked, else the reason it did not.
+    A ticket that could pass as an option is not handed to gozer."""
+    if not re.fullmatch(r"[0-9A-Za-z]+", ticket or ""):
+        return f"not a ticket name: {ticket!r}"
+    try:
+        got = run(["gozer", "cancel", ticket], capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return str(exc)
+    if got.returncode != 0:
+        return ((got.stdout or "") + (got.stderr or "")).strip() or f"gozer cancel exited {got.returncode}"
+    return None
+
+
+def _queued(got, text: str, cancel) -> dict | None:
+    """When `gozer run` did not run the command because the chips were busy (it queued a ticket and exited 10), cancel
+    the ticket and return {"ticket", "cancel_error"}. None for any other result. A ticket left in the queue would be
+    granted to a process that is not there, and the queue would wait on it until it expired."""
+    if got.killed or got.returncode != GOZER_QUEUED_EXIT:
+        return None
+    m = _TICKET.search(text)
+    if m is None:
+        return {"ticket": None, "cancel_error": "no ticket in gozer's output, so nothing was cancelled"}
+    return {"ticket": m.group(1), "cancel_error": cancel(m.group(1))}
+
+
+def _queued_text(q: dict) -> str:
+    cancelled = (f"the ticket {q['ticket']} was cancelled" if q["ticket"] and q["cancel_error"] is None
+                 else f"the ticket could not be cancelled: {q['cancel_error']}; look with `gozer status`")
+    return f"gozer queued the request because the chips were busy, so the command was queued, not run; {cancelled}"
+
+
+def smoke_test(*, env, shared_python, run_watched=run_watched, record: dict | None = None,
+               cancel=cancel_ticket) -> tuple[bool, list[str]]:
     """Upstream's examples/eltwise_add.py with the shared venv's tt-lang and ttnn, on one leased chip (spec 5.4).
     (ok, the last lines of its output). ok needs exit 0 and `PASSED!` in the output. A run the stall watcher
-    killed raises ProbeBlocked. `record`, when given, receives `watch`: what the stall watcher saw (_watch_facts)."""
+    killed raises ProbeBlocked. `record`, when given, receives `watch`: what the stall watcher saw (_watch_facts), and
+    `queued` when gozer queued the request instead of running it (the ticket is cancelled; see _queued)."""
     Path(env.scratch_dir).mkdir(parents=True, exist_ok=True)
     log = Path(env.scratch_dir) / "smoke.txt"
     start = _size(log)
     argv = _gozer("kernel-probe smoke test", str(shared_python), str(Path(env.src_dir) / "examples" / "eltwise_add.py"))
-    got = run_watched(argv, cwd=env.scratch_dir, env=None, log_path=log, watcher=_hw_watcher(),
+    got = run_watched(argv, cwd=env.scratch_dir, env=child_env(env.scratch_dir, hardware=True), log_path=log, watcher=_hw_watcher(),
                       backstop_s=BUDGET["hw_backstop_s"], term_grace_s=GOZER_TERM_GRACE_S)
     text = _new_text(log, start)
     tail = text.splitlines()[-SMOKE_TAIL_LINES:]
     if record is not None:
         record["watch"] = _watch_facts(got)
+    queued = _queued(got, text, cancel)
+    if queued is not None:
+        if record is not None:
+            record["queued"] = queued
+        return False, tail
     if got.killed:
         # A hang blocks the probe. The watcher's SIGTERM reaches gozer too, and gozer normally releases its lease
         # (with the chip reset) within GOZER_TERM_GRACE_S. Only a gozer that had to be killed after the grace can
@@ -928,7 +1008,8 @@ def _record_hw(adir: Path, attempt: dict, hw: dict) -> dict:
     return hw
 
 
-def hardware_phase(adir: Path, attempt: dict, *, env, shared_python, run_watched=run_watched) -> dict:
+def hardware_phase(adir: Path, attempt: dict, *, env, shared_python, run_watched=run_watched,
+                   cancel=cancel_ticket) -> dict:
     """Run one attempt's checked kernel on one chip and judge it with the hardware bars. Call it only for an attempt
     whose authoritative simulator check passed, after a passing smoke test (run_hardware does both).
 
@@ -966,14 +1047,27 @@ def hardware_phase(adir: Path, attempt: dict, *, env, shared_python, run_watched
     argv = _gozer(f"kernel-probe {op} attempt {n}", str(shared_python), str(TEMPLATES / "kernel_harness.py"),
                   "--spec", str(TEMPLATES / "ops" / f"{op}.json"), "--kernel", str(kernel), "--out", str(out),
                   "--phase", "hw")
-    got = run_watched(argv, cwd=vdir / CLEAN_DIR, env=None, log_path=log, watcher=_hw_watcher(),
-                      backstop_s=BUDGET["hw_backstop_s"], term_grace_s=GOZER_TERM_GRACE_S)
+    try:
+        got = run_watched(argv, cwd=vdir / CLEAN_DIR, env=child_env(vdir, adir, hardware=True), log_path=log,
+                          watcher=_hw_watcher(), backstop_s=BUDGET["hw_backstop_s"], term_grace_s=GOZER_TERM_GRACE_S)
+    finally:
+        # gozer has released the lease by now. A process the kernel left behind is stopped here (finding 5).
+        swept = sweep_strays(adir)
+    extra = {"swept": swept} if swept else {}
+    queued = _queued(got, _new_text(log, start), cancel)
+    if queued is not None:
+        # The chips were busy and the kernel never ran: not a failure of the kernel, and the later attempts would be
+        # queued too, so the probe stops.
+        _record_hw(adir, attempt, {"passed": False, "category": "queued", "pcc_min": None, "sets": [],
+                                   "violations": [], "first_line": _queued_text(queued), "queued": queued,
+                                   "watch": _watch_facts(got), **extra})
+        raise ProbeBlocked(f"{op} attempt {n}: {_queued_text(queued)}")
     if got.killed:
         # The first line is the watcher's own reason ("backstop: ..." or "stalled: ..." or "repeating: ..."), so a
         # watcher stop is not read as a device hang without saying which rule stopped it.
         _record_hw(adir, attempt, {"passed": False, "category": "hang", "pcc_min": None, "sets": [], "violations": [],
                                    "first_line": got.reason, "elapsed_s": round(got.elapsed_s, 1),
-                                   "watch": _watch_facts(got)})
+                                   "watch": _watch_facts(got), **extra})
         raise ProbeBlocked(f"{op} attempt {n}: {got.reason}")
     try:
         raw = _read_regular(out, 64 * 1024 * 1024)
@@ -989,11 +1083,11 @@ def hardware_phase(adir: Path, attempt: dict, *, env, shared_python, run_watched
     sets = result.get("sets") if result and isinstance(result.get("sets"), list) else []
     return _record_hw(adir, attempt, {"passed": category is None, "category": category, "first_line": line,
                                       **set_measures(sets), "sets": sets, "violations": [],
-                                      "elapsed_s": round(got.elapsed_s, 1), "watch": _watch_facts(got)})
+                                      "elapsed_s": round(got.elapsed_s, 1), "watch": _watch_facts(got), **extra})
 
 
 def run_hardware(attempts: list[dict], *, probe_dir, env, shared_python, run_watched=run_watched,
-                 state: dict | None = None) -> dict:
+                 state: dict | None = None, cancel=cancel_ticket) -> dict:
     """The hardware phase of a probe: one smoke test, then hardware_phase for each attempt that passed the simulator.
 
     A failed smoke test ends the phase with no further gozer call, and the report says `hw: unavailable` with the
@@ -1004,15 +1098,17 @@ def run_hardware(attempts: list[dict], *, probe_dir, env, shared_python, run_wat
     writes each attempt's `hw` block into its record in place, and the smoke test's result is stored in `state["smoke"]`
     before any kernel runs."""
     seen: dict = {}
-    ok, tail = smoke_test(env=env, shared_python=shared_python, run_watched=run_watched, record=seen)
+    ok, tail = smoke_test(env=env, shared_python=shared_python, run_watched=run_watched, record=seen, cancel=cancel)
+    extra = {"queued": seen["queued"]} if seen.get("queued") else {}
     if state is not None:
-        state["smoke"] = {"available": ok, "smoke_tail": tail, "watch": seen.get("watch")}
+        state["smoke"] = {"available": ok, "smoke_tail": tail, "watch": seen.get("watch"), **extra}
     if not ok:
-        return {"available": False, "smoke_tail": tail, "watch": seen.get("watch")}
+        return {"available": False, "smoke_tail": tail, "watch": seen.get("watch"), **extra}
     for attempt in attempts:
         if attempt.get("passed_sim") is True:
             adir = Path(probe_dir) / attempt["op"] / f"attempt-{attempt['attempt']}"
-            hardware_phase(adir, attempt, env=env, shared_python=shared_python, run_watched=run_watched)
+            hardware_phase(adir, attempt, env=env, shared_python=shared_python, run_watched=run_watched,
+                           cancel=cancel)
     return {"available": True, "smoke_tail": tail, "watch": seen.get("watch")}
 
 
@@ -1280,6 +1376,10 @@ def write_report(probe_dir, attempts: list[dict], header: dict) -> dict:
         lines.append("hw: not run")
     elif hw.get("available"):
         lines.append("hw: available (the smoke test passed)")
+    elif hw.get("queued"):
+        lines += [f"hw: not run. {_queued_text(hw['queued'])}. "
+                  "Run the probe again when `gozer status` shows free chips. The smoke test's last lines:", "",
+                  "```", *[str(x) for x in hw.get("smoke_tail") or []], "```"]
     elif hw.get("hung"):
         lines += [f"hw: blocked. The probe stopped: the smoke test hung ({hw.get('reason')}). Its last lines:", "",
                   "```", *[str(x) for x in hw.get("smoke_tail") or []], "```"]
@@ -1731,7 +1831,9 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
             for a in records:
                 if isinstance(a.get("hw"), dict):
                     say(_hw_line(a))
-            if hw and not hw.get("available") and not hw.get("hung"):
+            if hw and hw.get("queued"):
+                say(f"hardware busy: {_queued_text(hw['queued'])}")
+            elif hw and not hw.get("available") and not hw.get("hung"):
                 say("hardware unavailable: the smoke test failed (the report has its last lines)")
             header = report_header(env=env, coder_model=model, probe_id=probe_id, ops=[args.op], hw=hw, tt_lang=facts,
                                    ignored_records=0)

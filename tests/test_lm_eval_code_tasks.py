@@ -258,33 +258,42 @@ def test_mbpp_chat_checks_the_three_listed_asserts():
         assert "{{test_list[%d]}}" % i in t["doc_to_target"]
 
 
-def test_the_module_imports_only_the_standard_library_until_a_score_is_computed():
+def test_the_module_imports_only_the_standard_library():
     src = (DIR / "code_chat_utils.py").read_text()
     top = [l for l in src.splitlines() if l.startswith(("import ", "from "))]
-    assert all(l.split()[1].split(".")[0] in {"re", "typing", "__future__"} for l in top), top
+    allowed = {"re", "os", "importlib", "pathlib", "concurrent", "typing", "__future__"}
+    assert all(l.split()[1].split(".")[0] in allowed for l in top), top
+    assert "evaluate" not in "".join(top), "the harness's code_eval runs model code in the harness's own process"
 
 
 # ---- the metric wrappers -------------------------------------------------------------------------------------------------------------
 
-class FakeCodeEval:
+class FakeRun:
+    """Stands in for the sandbox: a program passes when it contains the word PASS."""
     def __init__(self):
-        self.calls = []
+        self.programs = []
 
-    def compute(self, **kw):
-        self.calls.append(kw)
-        return {"pass@1": 0.5}, {"detail": 1}
+    def __call__(self, program):
+        self.programs.append(program)
+        return "PASS" in program
 
 
-def test_pass_at_k_returns_the_score_dictionary_and_turns_an_int_k_into_a_list():
-    fake = FakeCodeEval()
-    u._code_eval = fake
-    try:
-        assert u.pass_at_k(["ref"], [["pred"]], k=1) == {"pass@1": 0.5}
-        assert u.pass_at_k(["ref"], [["pred"]], k=[1, 5]) == {"pass@1": 0.5}
-    finally:
-        u._code_eval = None
-    assert fake.calls[0] == {"references": ["ref"], "predictions": [["pred"]], "k": [1]}
-    assert fake.calls[1]["k"] == [1, 5]
+@pytest.fixture
+def fake_run(monkeypatch):
+    fake = FakeRun()
+    monkeypatch.setattr(u, "run_one", fake)
+    return fake
+
+
+def test_pass_at_k_runs_each_prediction_with_its_reference_and_returns_the_score_dictionary(fake_run):
+    assert u.pass_at_k(["T"], [["PASS a", "no"]], k=1) == {"pass@1": 0.5}
+    assert fake_run.programs == ["PASS a\nT", "no\nT"]
+    assert u.pass_at_k(["T"], [["PASS", "no"]], k=[1, 5]) == {"pass@1": 0.5}      # k=5 needs 5 predictions, so it is left out
+    assert u.pass_at_k(["T"], [["PASS", "no"]], k=[1, 2]) == {"pass@1": 0.5, "pass@2": 1.0}
+
+
+def test_pass_at_k_averages_over_problems(fake_run):
+    assert u.pass_at_k(["A", "B"], [["PASS"], ["fail"]], k=1) == {"pass@1": 0.5}
 
 
 def test_pass_at_k_needs_a_k():
@@ -292,16 +301,56 @@ def test_pass_at_k_needs_a_k():
         u.pass_at_k(["ref"], [["pred"]])
 
 
-def test_pass_at_1_wraps_single_strings_and_returns_the_number():
-    fake = FakeCodeEval()
-    u._code_eval = fake
-    try:
-        assert u.pass_at_1("asserts", ["code"]) == 0.5
-        assert u.pass_at_1(["asserts"], [["code"]]) == 0.5
-    finally:
-        u._code_eval = None
-    assert fake.calls[0] == {"references": ["asserts"], "predictions": [["code"]], "k": [1]}
-    assert fake.calls[1] == fake.calls[0]
+def test_pass_at_1_wraps_single_strings_and_returns_the_number(fake_run):
+    assert u.pass_at_1("asserts", ["PASS code"]) == 1.0
+    assert u.pass_at_1(["asserts"], [["no"]]) == 0.0
+    assert fake_run.programs == ["PASS code\nasserts", "no\nasserts"]
+
+
+def test_the_estimator_is_the_unbiased_pass_at_k():
+    assert u.estimate_pass_at_k(1, 1, 1) == 1.0 and u.estimate_pass_at_k(1, 0, 1) == 0.0
+    assert u.estimate_pass_at_k(4, 1, 1) == pytest.approx(0.25)
+    assert u.estimate_pass_at_k(4, 1, 2) == pytest.approx(0.5)            # 1 - C(3,2)/C(4,2)
+    assert u.estimate_pass_at_k(4, 3, 2) == 1.0                           # fewer than k wrong ones
+
+
+# ---- the sandbox: no program of the model's runs in the harness's process, with the operator's files and network --------------------------
+
+def test_a_sandbox_that_cannot_start_stops_scoring_instead_of_scoring_zero(monkeypatch):
+    box = u._load_sandbox()
+    monkeypatch.setattr(box, "run_program", lambda program, **kw: box.Outcome("sandbox_unavailable", "this kernel has no Landlock"))
+    monkeypatch.delenv(u.UNSANDBOXED_ENV, raising=False)
+    with pytest.raises(RuntimeError, match="sandbox could not start"):
+        u.pass_at_k(["T"], [["x"]], k=1)
+
+
+def test_the_unsandboxed_variable_is_the_only_way_to_run_without_the_sandbox(monkeypatch):
+    box = u._load_sandbox()
+    seen = []
+    monkeypatch.setattr(box, "run_program", lambda program, **kw: seen.append(kw["unsandboxed"]) or box.Outcome("passed"))
+    monkeypatch.delenv(u.UNSANDBOXED_ENV, raising=False)
+    u.run_one("x")
+    monkeypatch.setenv(u.UNSANDBOXED_ENV, "0")
+    u.run_one("x")
+    monkeypatch.setenv(u.UNSANDBOXED_ENV, "1")
+    u.run_one("x")
+    assert seen == [False, False, True]
+
+
+needs_landlock = pytest.mark.skipif(not u._load_sandbox().landlock_abi(), reason="SKIPPED: this kernel has no Landlock")
+
+
+@needs_landlock
+def test_a_reply_that_reads_a_planted_token_file_scores_zero_and_a_plain_reply_passes(tmp_path, monkeypatch):
+    monkeypatch.delenv(u.UNSANDBOXED_ENV, raising=False)
+    token = tmp_path / "token"
+    token.write_text("hf_planted\n")
+    thief = f"assert open({str(token)!r}).read().startswith('hf_')\n"      # passes only if it can read the file
+    assert u.pass_at_k(["pass"], [[thief]], k=1) == {"pass@1": 0.0}
+    monkeypatch.setenv(u.UNSANDBOXED_ENV, "1")                              # control: with no sandbox the same program passes
+    assert u.pass_at_k(["pass"], [[thief]], k=1) == {"pass@1": 1.0}
+    monkeypatch.delenv(u.UNSANDBOXED_ENV)
+    assert u.pass_at_k(["assert f(2) == 4"], [["def f(x):\n    return x * 2\n"]], k=1) == {"pass@1": 1.0}
 
 
 def test_an_unlabeled_block_counts_as_python():

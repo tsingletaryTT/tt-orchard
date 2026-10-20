@@ -15,7 +15,10 @@ import subprocess
 from pathlib import Path
 
 from orchard import opinventory
+from orchard.kernelprobe import _TICKET, GOZER_TERM_GRACE_S, cancel_ticket
+from orchard.stallwatch import _kill_group
 
+WAIT_AFTER_KILL_S = 10.0     # how long to read the output of a group that was stopped
 MARK = "ORCHARD_TTNN_DUMP "
 # Public callables at the top of ttnn and one level into the two namespaces that hold model ops.
 SCRIPT = r'''
@@ -96,21 +99,48 @@ def write_dump(dump: dict, data_dir) -> Path:
     return out
 
 
-def _real_run(argv, timeout):
+def _real_run(argv, timeout, term_grace_s: float = GOZER_TERM_GRACE_S):
+    """Run `argv` in its own session. On a timeout the whole group gets SIGTERM, so `gozer run` forwards it and releases
+    its lease (the release resets the chip, about 42 s), and SIGKILL only after `term_grace_s`. subprocess.run(timeout=)
+    would SIGKILL gozer alone: its release would never run and the python child that opened the device would keep
+    running. Returns (exit code, stdout, stderr); 127 when the command could not run or timed out."""
     try:
-        done = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
-    except (OSError, subprocess.SubprocessError) as exc:
+        proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                start_new_session=True)
+    except OSError as exc:
         return 127, "", f"{type(exc).__name__}: {exc}"
-    return done.returncode, done.stdout, done.stderr
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_group(proc, term_grace_s)
+        try:
+            out, err = proc.communicate(timeout=WAIT_AFTER_KILL_S)
+        except subprocess.TimeoutExpired:
+            out, err = "", ""
+        return 127, out or "", f"timed out after {timeout} s and was stopped: {(err or '').strip()[-300:]}"
+    except BaseException:
+        _kill_group(proc, term_grace_s)           # an interrupt of the command must not leave the lease running
+        raise
+    return proc.returncode, out, err
 
 
-def main(python, *, run=_real_run, data_dir=opinventory.DATA_DIR, say=print) -> int:
+def main(python, *, run=_real_run, data_dir=opinventory.DATA_DIR, say=print, cancel=cancel_ticket) -> int:
     """Show the command, run it, write the file. 0 on success, 2 when the dump failed or could not be read."""
     argv = dump_command(python)
     say("running (it takes a one-chip lease): " + " ".join(argv[:12]) + " -c <script>")
     rc, out, err = run(argv, 1800)
     if rc == 10:
-        say("gozer queued the lease (exit 10): run `gozer wait <ticket>` or retry")
+        # `gozer wait` is not suggested: it grants a lease that has no owner pid (see orchard/handoff.py).
+        m = _TICKET.search(err + out)
+        if m is None:
+            say("gozer queued the lease (exit 10), so nothing ran; no ticket was found in its output, look with "
+                "`gozer status`. Run the command again when chips are free")
+        else:
+            problem = cancel(m.group(1))
+            say(f"gozer queued the lease (exit 10), so nothing ran; "
+                + (f"the ticket {m.group(1)} was cancelled" if problem is None else
+                   f"the ticket {m.group(1)} could not be cancelled: {problem}")
+                + ". Run the command again when `gozer status` shows free chips")
         return 2
     if rc != 0:
         say(f"the dump failed (exit {rc}): {(err or out).strip()[-300:]}")

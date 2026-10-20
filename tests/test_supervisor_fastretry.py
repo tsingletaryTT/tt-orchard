@@ -66,6 +66,18 @@ def test_a_4_chip_test_that_fails_at_startup_is_run_again_after_every_leased_chi
     assert len({e["data"]["lease_id"] for e in resets_between}) == 2
 
 
+def test_the_first_tries_output_is_kept_beside_the_second_tries(rig):
+    """The second spawn used to open the same output.txt for writing, so the text that said why the first try failed
+    was gone."""
+    rig.script = lambda r: bringup(r, overrides=with_config(4, FLAKY.format(n=4) + FAKE_SWAP_TEST))
+    assert rig.run() == EXIT_READY
+    out = rig.run_dir / "stages" / "4" / "tests" / "4"
+    assert "Fabric Router Sync: Timeout" in (out / "output-first-try.txt").read_text()
+    assert "Fabric Router Sync: Timeout" not in (out / "output.txt").read_text()
+    kept = retries(rig, 4)[0]["first_output"]
+    assert kept["path"].endswith("tests/4/output-first-try.txt") and len(kept["sha256"]) == 64
+
+
 def test_the_second_try_is_the_last(rig):
     rig.args.required_chips = (2,)
     rig.script = lambda r: bringup(r, overrides=with_config(4, NEVER, ok=False))
