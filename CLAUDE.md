@@ -1584,3 +1584,15 @@ Prompt (operator): "yes, write the benchmark plan and pilot on bytkim", then "do
 - While the pilot ran I developed in a second worktree (`bench-code-tasks`), because the driver imports `orchard.bench_session` for each session and an edit mid-run would have
   changed later sessions.
 - Not done: the speed sweep, drafter acceptance from `server.log` (the packaging log said none is printed; each request logs `accept x/7`), a full-size run, and the card.
+
+## 2026-10-20 (UTC): full-size benchmark of bytkim/Qwen3.8-27B-pi, and the card is public (version 0.8.5)
+Prompt (operator): "push benchmark wor. run at full size with thinking. publish the card after", then "publish the model with tt-model-manager as public HF model",
+then "tell the tensixinet agent it can continue (after you take down the running model)". Results: `docs/run-logs/2026-10-20-bytkim-pi-benchmark-full.md`.
+- Every item of HumanEval, MBPP, GSM8K, IFEval and BFCL simple and multiple, for the fine-tune and then the base, 9.8 hours of chip time in all. The fine-tune is ahead on
+  every set; the gap is clear on GSM8K (0.839 against 0.792) and MBPP (0.896 against 0.864) and within noise elsewhere. The 20-item pilot could not show this.
+- The 8192-token limit with thinking on costs both models: 44 of 52 MBPP failures for the fine-tune and 53 of 68 for the base are empty replies. The card says so.
+- Drafter acceptance now comes from the server log per phase (commit `1bfdaa8`): 0.46 to 0.60 of drafted tokens.
+- `episod/qwen3.8-27b-pi-p300` is public and listed in the community catalog (delist with `tt-model unpublish`). The package gate passed after the card rewrite.
+- tensixinet was told the chips were free after the server was down and `gozer status` showed all four chips FREE.
+- Cleared 70 GB at the operator's request (three unused Hugging Face models, the audio8-asr tensor cache, four old animatediff image tags).
+- Not done: the speed sweep, MMLU-Pro, long context, thinking-off and higher-limit runs, per-item BFCL results, `tt-model pull` and a boot from the Hub.

@@ -120,6 +120,11 @@ Run on the hardware with the operator's go-ahead: `docs/run-logs/2026-10-19-bytk
 apart, thinking on or off. Sessions took 3 to 11 minutes. A full run is about 11 hours for both models with thinking on and about 3 hours with thinking off.
 The pilot also found that the harness's HumanEval and MBPP instruct tasks cannot score a chat reply; the chat versions in this repository replace them.
 
+## Full run result (2026-10-20 UTC)
+
+The full run (every item, thinking on, 8192 token limit) is in `docs/run-logs/2026-10-20-bytkim-pi-benchmark-full.md`. The fine-tune scores at or above the base on every set;
+the gap is clear on GSM8K and MBPP. The card was updated and published on that basis.
+
 ## Not decided yet
 
 - Whether a benchmark becomes a stage 7 requirement for every package. The bytkim pilot gives the cost; the decision comes after it.
