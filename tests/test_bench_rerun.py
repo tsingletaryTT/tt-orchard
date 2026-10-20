@@ -1,0 +1,141 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+"""Re-running cut-off items (orchard/bench_rerun.py): find the items whose reply came back empty, and merge a re-run's results into the first run's.
+
+Sample files are small fabrications in the layout lm-eval writes (`<phase>/results/<model>/samples_<task>_<time>.jsonl`, one JSON object per item).
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from orchard import bench_rerun as br
+
+
+def write_samples(root: Path, phase: str, rows: list[dict], stamp="2026-10-19T21-17-43.912713", task=None):
+    d = root / phase / "results" / "served"
+    d.mkdir(parents=True, exist_ok=True)
+    f = d / f"samples_{task or phase + '_chat'}_{stamp}.jsonl"
+    f.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    return f
+
+
+def row(doc_id, text, **metrics):
+    return {"doc_id": doc_id, "resps": [[text]], "filtered_resps": [text], "doc": {}, "target": "t", **metrics}
+
+
+# ---- finding the items ----------------------------------------------------------------------------------------------------------------
+
+def test_items_with_an_empty_reply_are_listed_by_document_id(tmp_path):
+    write_samples(tmp_path, "mbpp", [row(0, "ok", pass_at_1=1), row(1, "", pass_at_1=0), row(2, "  \n", pass_at_1=0), row(3, "x", pass_at_1=0)])
+    assert br.cutoff_items(tmp_path, ["mbpp"]) == {"mbpp": [1, 2]}
+
+
+def test_a_phase_with_no_empty_reply_is_left_out(tmp_path):
+    write_samples(tmp_path, "mbpp", [row(0, "ok", pass_at_1=1)])
+    write_samples(tmp_path, "ifeval", [row(5, "", prompt_level_strict_acc=False)])
+    assert br.cutoff_items(tmp_path, ["mbpp", "ifeval"]) == {"ifeval": [5]}
+
+
+def test_the_ids_come_back_sorted_and_without_repeats(tmp_path):
+    write_samples(tmp_path, "mbpp", [row(9, ""), row(2, ""), row(2, "")])
+    assert br.cutoff_items(tmp_path, ["mbpp"]) == {"mbpp": [2, 9]}
+
+
+def test_the_newest_samples_file_is_read(tmp_path):
+    write_samples(tmp_path, "mbpp", [row(1, "")], stamp="2026-10-19T10-00-00.000000")
+    write_samples(tmp_path, "mbpp", [row(2, "")], stamp="2026-10-19T11-00-00.000000")
+    assert br.cutoff_items(tmp_path, ["mbpp"]) == {"mbpp": [2]}
+
+
+def test_a_phase_with_no_samples_file_is_an_error_that_names_it(tmp_path):
+    with pytest.raises(FileNotFoundError, match="mbpp"):
+        br.cutoff_items(tmp_path, ["mbpp"])
+
+
+def test_a_reply_that_is_not_a_string_is_not_counted_as_empty(tmp_path):
+    write_samples(tmp_path, "mbpp", [{"doc_id": 1, "resps": [[None]]}, {"doc_id": 2, "resps": []}, {"doc_id": 3, "resps": [["x"]]}])
+    assert br.cutoff_items(tmp_path, ["mbpp"]) == {}
+
+
+# ---- merging ------------------------------------------------------------------------------------------------------------------------
+
+def test_a_rerun_replaces_the_first_runs_result_for_the_same_item(tmp_path):
+    first, again = tmp_path / "first", tmp_path / "again"
+    write_samples(first, "mbpp", [row(0, "a", pass_at_1=1), row(1, "", pass_at_1=0), row(2, "", pass_at_1=0), row(3, "d", pass_at_1=0)])
+    write_samples(again, "mbpp", [row(1, "fixed", pass_at_1=1), row(2, "still wrong", pass_at_1=0)])
+    got = br.merge(first, again, ["mbpp"])["mbpp"]
+    assert got["n"] == 4 and got["rerun_n"] == 2
+    assert got["metrics"]["pass_at_1"] == {"before": 0.25, "after": 0.5}
+    assert got["flips"] == {"pass_at_1": {"gained": [1], "lost": []}}
+
+
+def test_an_item_the_rerun_did_not_cover_keeps_the_first_runs_result(tmp_path):
+    first, again = tmp_path / "first", tmp_path / "again"
+    write_samples(first, "mbpp", [row(0, "a", pass_at_1=1), row(1, "", pass_at_1=0)])
+    write_samples(again, "mbpp", [row(1, "x", pass_at_1=0)])
+    assert br.merge(first, again, ["mbpp"])["mbpp"]["metrics"]["pass_at_1"] == {"before": 0.5, "after": 0.5}
+
+
+def test_a_rerun_item_that_got_worse_is_reported_as_lost(tmp_path):
+    first, again = tmp_path / "first", tmp_path / "again"
+    write_samples(first, "mbpp", [row(0, "", pass_at_1=1)])
+    write_samples(again, "mbpp", [row(0, "x", pass_at_1=0)])
+    got = br.merge(first, again, ["mbpp"])["mbpp"]
+    assert got["flips"]["pass_at_1"] == {"gained": [], "lost": [0]} and got["metrics"]["pass_at_1"]["after"] == 0.0
+
+
+def test_a_rerun_item_missing_from_the_first_run_is_an_error(tmp_path):
+    first, again = tmp_path / "first", tmp_path / "again"
+    write_samples(first, "mbpp", [row(0, "a", pass_at_1=1)])
+    write_samples(again, "mbpp", [row(7, "x", pass_at_1=1)])
+    with pytest.raises(ValueError, match="7"):
+        br.merge(first, again, ["mbpp"])
+
+
+def test_every_numeric_per_item_metric_is_merged_and_text_fields_are_not(tmp_path):
+    first, again = tmp_path / "first", tmp_path / "again"
+    a = row(0, "", prompt_level_strict_acc=False, prompt_level_loose_acc=False, inst_level_strict_acc=[False, False])
+    write_samples(first, "ifeval", [a, row(1, "y", prompt_level_strict_acc=True, prompt_level_loose_acc=True, inst_level_strict_acc=[True])])
+    write_samples(again, "ifeval", [row(0, "x", prompt_level_strict_acc=True, prompt_level_loose_acc=False, inst_level_strict_acc=[True, True])])
+    got = br.merge(first, again, ["ifeval"])["ifeval"]["metrics"]
+    assert set(got) == {"prompt_level_strict_acc", "prompt_level_loose_acc"}
+    assert got["prompt_level_strict_acc"] == {"before": 0.5, "after": 1.0} and got["prompt_level_loose_acc"] == {"before": 0.5, "after": 0.5}
+
+
+def test_the_merge_does_not_touch_either_input(tmp_path):
+    first, again = tmp_path / "first", tmp_path / "again"
+    f = write_samples(first, "mbpp", [row(0, "", pass_at_1=0)])
+    g = write_samples(again, "mbpp", [row(0, "x", pass_at_1=1)])
+    before = (f.read_bytes(), g.read_bytes())
+    br.merge(first, again, ["mbpp"])
+    assert (f.read_bytes(), g.read_bytes()) == before
+
+
+# ---- the command line -----------------------------------------------------------------------------------------------------------------
+
+def test_the_items_command_writes_a_file_the_session_accepts(tmp_path, capsys):
+    from orchard import bench_session as bs
+    write_samples(tmp_path / "run", "mbpp", [row(4, ""), row(1, ""), row(2, "ok")])
+    out = tmp_path / "items.json"
+    assert br.main(["items", "--run", str(tmp_path / "run"), "--phases", "mbpp", "--out", str(out)]) == 0
+    assert bs.load_items(out) == {"mbpp": [1, 4]}
+    assert "mbpp: 2 items" in capsys.readouterr().out
+
+
+def test_the_items_command_with_nothing_to_rerun_writes_no_file_and_says_so(tmp_path, capsys):
+    write_samples(tmp_path / "run", "mbpp", [row(2, "ok")])
+    out = tmp_path / "items.json"
+    assert br.main(["items", "--run", str(tmp_path / "run"), "--phases", "mbpp", "--out", str(out)]) == 3
+    assert not out.exists() and "nothing to re-run" in capsys.readouterr().out
+
+
+def test_the_merge_command_prints_the_before_and_after(tmp_path, capsys):
+    write_samples(tmp_path / "first", "mbpp", [row(0, "", pass_at_1=0)])
+    write_samples(tmp_path / "again", "mbpp", [row(0, "x", pass_at_1=1)])
+    out = tmp_path / "merged.json"
+    assert br.main(["merge", "--first", str(tmp_path / "first"), "--again", str(tmp_path / "again"), "--phases", "mbpp", "--out", str(out)]) == 0
+    assert json.loads(out.read_text())["mbpp"]["metrics"]["pass_at_1"] == {"before": 0.0, "after": 1.0}
+    assert "mbpp" in capsys.readouterr().out

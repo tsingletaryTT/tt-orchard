@@ -53,12 +53,15 @@ TOKEN_VARS = ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACE_HUB_TOKEN")
 
 # ---- the lm-evaluation-harness child ------------------------------------------------------------------------------------------------
 
-def lm_eval_command(*, lm_eval, model: str, base_url: str, task: str, limit, concurrency: int, max_gen_toks: int, output_path, include_path) -> list[str]:
+def lm_eval_command(*, lm_eval, model: str, base_url: str, task: str, limit, concurrency: int, max_gen_toks: int, output_path, include_path,
+                    samples=None) -> list[str]:
     margs = f"model={model},base_url={base_url},num_concurrent={concurrency},max_retries=1,tokenized_requests=False,timeout=3600"
     argv = [str(lm_eval), "--model", "local-chat-completions", "--model_args", margs, "--tasks", task, "--apply_chat_template",
             "--gen_kwargs", f"max_gen_toks={max_gen_toks},temperature=0", "--output_path", str(output_path), "--log_samples",
             "--include_path", str(include_path)]
-    if limit is not None:
+    if samples is not None:
+        argv += ["--samples", json.dumps({task: sorted(samples)})]     # the harness refuses --samples together with --limit
+    elif limit is not None:
         argv += ["--limit", str(limit)]
     if task == "gsm8k":
         argv += ["--num_fewshot", "5", "--fewshot_as_multiturn"]
@@ -206,7 +209,8 @@ def _phase(name: str, a, *, upstream: str, served: str, out_dir: Path, server_lo
         else:
             task = LM_EVAL_TASKS[name]
             argv = lm_eval_command(lm_eval=a.lm_eval, model=served, base_url=chat_url, task=task, limit=a.limit, concurrency=a.concurrency,
-                                   max_gen_toks=a.max_gen_toks, output_path=phase_dir / "results", include_path=TASKS_DIR)
+                                   max_gen_toks=a.max_gen_toks, output_path=phase_dir / "results", include_path=TASKS_DIR,
+                                   samples=(a.items or {}).get(name))
             rec["command"] = argv
             (phase_dir / "work").mkdir(exist_ok=True)
             watched = run_watched(argv, cwd=phase_dir / "work", env=lm_eval_env(task, out_dir, unsandboxed=a.allow_unsandboxed_code), log_path=phase_dir / "lm_eval.log",
@@ -239,6 +243,20 @@ def _phase(name: str, a, *, upstream: str, served: str, out_dir: Path, server_lo
     return rec
 
 
+def load_items(path) -> dict:
+    """The `--items` file: {phase: [document ids]}, each list non-empty, ids non-negative integers. Raises ValueError with the reason."""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"cannot read {path}: {exc}")
+    if not isinstance(data, dict) or not data:
+        raise ValueError("the items file must be a JSON object of phase -> list of document ids")
+    for phase, ids in data.items():
+        if not isinstance(ids, list) or not ids or not all(type(i) is int and i >= 0 for i in ids):
+            raise ValueError(f"items for {phase!r} must be a non-empty list of non-negative integers")
+    return {phase: sorted(set(ids)) for phase, ids in data.items()}
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--label", required=True)
@@ -255,6 +273,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--phases", default="gsm8k,humaneval,ifeval,bfcl")
     ap.add_argument("--bfcl-dir")
     ap.add_argument("--limit", type=int)
+    ap.add_argument("--items", dest="items_file", help="JSON file {phase: [document ids]}: run only those items of each lm-eval phase (not with --limit; not for bfcl)")
     ap.add_argument("--concurrency", type=int, default=4)
     ap.add_argument("--thinking", choices=("default", "on", "off"), default="default")
     ap.add_argument("--max-gen-toks", type=int, default=8192)
@@ -273,6 +292,19 @@ def main(argv=None) -> int:
     unknown = [p for p in phases if p not in PHASES]
     if unknown:
         ap.error(f"unknown phase {unknown}; choose from {', '.join(PHASES)}")
+    a.items = None
+    if a.items_file:
+        if a.limit is not None:
+            ap.error("--items and --limit cannot be used together")
+        try:
+            a.items = load_items(a.items_file)
+        except ValueError as exc:
+            ap.error(str(exc))
+        if "bfcl" in phases:
+            ap.error("the bfcl phase cannot take --items")
+        absent = [p for p in phases if p not in a.items]
+        if absent:
+            ap.error(f"the items file has no entry for phase {', '.join(absent)}")
     if "bfcl" in phases and not a.bfcl_dir:
         ap.error("the bfcl phase needs --bfcl-dir")
     if not a.url:
@@ -293,7 +325,7 @@ def main(argv=None) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     started = time.time()
     summary = {"label": a.label, "model_id": a.model_id, "served_name": None, "server_ready_s": None, "run_sh": a.run_sh, "run_sh_sha256": None,
-               "settings": {"phases": phases, "limit": a.limit, "concurrency": a.concurrency, "thinking": a.thinking, "max_gen_toks": a.max_gen_toks,
+               "settings": {"phases": phases, "limit": a.limit, "items": a.items, "concurrency": a.concurrency, "thinking": a.thinking, "max_gen_toks": a.max_gen_toks,
                             "seed": a.seed, "temperature": 0},
                "lm_eval_version": None, "started_at": started, "phases": []}
     if code_sandbox is not None:
