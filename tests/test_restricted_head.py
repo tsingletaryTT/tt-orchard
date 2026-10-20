@@ -15,7 +15,7 @@ import pytest
 
 from orchard import blocked, classes, narrate, status, supervisor
 from orchard.stages import gate_delta
-from run_fakes import DELTA, FILES, bringup
+from run_fakes import DELTA, FILES, TEMPLATE_SHA, TEMPLATE_TEXT, bringup
 from test_supervisor import never_wait, rig  # noqa: F401  (rig is a fixture)
 
 SIDECAR = {"file": "readout.safetensors", "size": 2611312, "sha256": "ab" * 32, "num_tensors": 1, "dtypes": ["BF16"],
@@ -36,7 +36,8 @@ def test_the_class_exists_and_takes_the_full_port_path():
 def write_stage(tmp_path, delta):
     (tmp_path / "evidence").mkdir(exist_ok=True)
     (tmp_path / "evidence" / "e.json").write_text("{}")
-    (tmp_path / "delta.json").write_text(json.dumps(delta))
+    (tmp_path / "delta.json").write_text(json.dumps({"template_sha256": TEMPLATE_SHA["delta_triage.py"], **delta}))
+    (tmp_path / "delta_triage.py").write_text(TEMPLATE_TEXT["delta_triage.py"])
     return tmp_path
 
 

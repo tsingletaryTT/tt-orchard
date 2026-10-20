@@ -301,6 +301,111 @@ def test_the_cpu_reference_reads_the_hidden_state_at_each_marker(tiny_model):
     assert torch.allclose(ref["logits"], h[[2, 5, 7]] @ readout.T, atol=1e-4)
 
 
+def test_the_fixed_records_hold_the_number_of_questions_their_docstring_names():
+    t = tmpl()
+    records = t.build_records()
+    questions = sum(len(r["questions"]) for r in records)
+    words = {6: "six", 14: "fourteen", 15: "fifteen"}
+    assert (len(records), questions) == (6, 14)
+    assert f"{words[len(records)]} text requests, {words[questions]} questions" in t.build_records.__doc__.lower()
+
+
+# ---- the saved CPU reference ----------------------------------------------------------------------------------------------------
+
+def sample_reference(tiny_model):
+    """A reference shaped like compute_cpu_reference's: tensors from cpu_forward, the encoded records, None for an unset field."""
+    import torch
+    t = tmpl()
+    enc = {"input_ids": IDS, "markers": [2, 5, 7], "counts": [2, 3, 2], "keys": ["a", "b", "c"]}
+    one = t.cpu_forward(tiny_model.language_model, torch.randn(4, 32), enc, noncausal=True)
+    return {"encoded": [enc], "noncausal": [one], "causal": [one], "noise": [one], "causal0": one}
+
+
+def identity(**change):
+    base = {"model_id": "org/model", "revision": "a" * 40, "readout_sha256": "b" * 64}
+    return {**base, **change}
+
+
+def test_the_reference_digest_changes_with_the_snapshot_revision_the_readout_file_and_the_model():
+    t = tmpl()
+    records, spec = t.build_records(), {"codes": ["A", "B"], "temperature": 1.5}
+    d = t.records_digest(records, None, spec, identity())
+    assert d == t.records_digest(t.build_records(), None, spec, identity())
+    for change in ({"revision": "c" * 40}, {"readout_sha256": "d" * 64}, {"model_id": "org/other"}):
+        assert t.records_digest(records, None, spec, identity(**change)) != d, change
+
+
+def test_the_identity_is_read_from_the_snapshot_directory_and_the_readout_file(tmp_path):
+    t = tmpl()
+    snap = tmp_path / "models--org--model" / "snapshots" / ("e" * 40)
+    snap.mkdir(parents=True)
+    (snap / "readout.safetensors").write_bytes(b"readout bytes")
+    ident = t.reference_identity({"model_snapshot": str(snap), "head_file": "readout.safetensors", "model_id": "org/model"})
+    assert ident == {"model_id": "org/model", "revision": "e" * 40, "readout_sha256": t.sha256_file(snap / "readout.safetensors")}
+    (snap / "readout.safetensors").write_bytes(b"other bytes")
+    assert t.reference_identity({"model_snapshot": str(snap), "head_file": "readout.safetensors", "model_id": "org/model"}) != ident
+
+
+def test_a_saved_reference_round_trips_and_a_stale_digest_is_refused(tiny_model, tmp_path):
+    import torch
+    t = tmpl()
+    ref = sample_reference(tiny_model)
+    path = tmp_path / "cpu-reference.pt"
+    t.save_reference(path, "digest-1", ref)
+    got = t.load_reference(path, "digest-1")
+    assert got is not None and got["encoded"] == ref["encoded"]
+    assert torch.equal(got["noncausal"][0]["logits"], ref["noncausal"][0]["logits"])
+    assert t.load_reference(path, "digest-2") is None
+
+
+def digest_main_uses(monkeypatch, tmp_path, snap, *, head_bytes=b"readout"):
+    """Run main(--phase cpu) with every heavy step replaced, and return the digest it asks load_reference about."""
+    import transformers
+    t = tmpl()
+    snap.mkdir(parents=True, exist_ok=True)
+    (snap / "readout.safetensors").write_bytes(head_bytes)
+    cfg = {"model_snapshot": str(snap), "head_file": "readout.safetensors", "model_id": "org/model", "n_layers": None}
+    seen = []
+    monkeypatch.setattr(t, "HERE_DIR", tmp_path / "stage")
+    (tmp_path / "stage").mkdir(exist_ok=True)
+    monkeypatch.setattr(t, "read_config", lambda path: dict(cfg))
+    monkeypatch.setattr(t, "read_spec", lambda s: {"codes": ["A"], "temperature": 1.5, "marker": "m", "attention_mode": "x"})
+    monkeypatch.setattr(t, "verify_code", lambda s: None)
+    monkeypatch.setattr(t, "check_same_tokenization", lambda *a: None)
+    monkeypatch.setattr(t, "TextProcessor", lambda tok: None)
+    monkeypatch.setattr(t, "marker_token_id", lambda tok, m: 1)
+    monkeypatch.setattr(t, "all_mask_effects", lambda ref, spec: {"questions": 0, "prob_max_abs_diff": 0.0, "top1_changed": 0})
+    monkeypatch.setattr(transformers.AutoTokenizer, "from_pretrained", staticmethod(lambda *a, **k: None))
+
+    def fake_load(path, digest):
+        seen.append(digest)
+        return {"stub": True}
+    monkeypatch.setattr(t, "load_reference", fake_load)
+    assert t.main(["--phase", "cpu"]) == t.EXIT_OK
+    return seen[0]
+
+
+def test_main_asks_for_a_reference_by_a_digest_that_names_the_snapshot_and_the_readout(monkeypatch, tmp_path):
+    a = digest_main_uses(monkeypatch, tmp_path, tmp_path / "snapshots" / ("a" * 40))
+    assert a == digest_main_uses(monkeypatch, tmp_path, tmp_path / "snapshots" / ("a" * 40))
+    assert a != digest_main_uses(monkeypatch, tmp_path, tmp_path / "snapshots" / ("b" * 40))
+    assert a != digest_main_uses(monkeypatch, tmp_path, tmp_path / "snapshots" / ("a" * 40), head_bytes=b"another readout")
+
+
+class Planted:
+    """Stands in for a pickled object: loading it with weights_only=False would build one of these."""
+
+
+def test_a_reference_file_holding_a_pickled_object_is_not_loaded(tiny_model, tmp_path):
+    """The file sits in the stage's evidence directory, which the stage agent can write. weights_only=True refuses anything but tensors and
+    plain containers, so a planted pickle is recomputed instead of run."""
+    import torch
+    t = tmpl()
+    path = tmp_path / "cpu-reference.pt"
+    torch.save({"digest": "digest-1", "planted": Planted()}, str(path))
+    assert t.load_reference(path, "digest-1") is None
+
+
 # ---- the comparison --------------------------------------------------------------------------------------------------------------
 
 def test_pcc_ignores_a_shift_and_a_scale_which_a_plain_cosine_would_not():

@@ -17,6 +17,7 @@ from orchard.stages import (STAGES, TierUnavailable, check_disk, compare_delta, 
                             resolve_endpoint, resolve_skill, run_path, spec_for, tier_for,
                             validate_table)
 from orchard.defaults import SWAP_TOP1_MIN
+from run_fakes import TEMPLATE_SHA, TEMPLATE_TEXT
 from orchard.tiers import TierConfig
 
 REFERENCE = Path(__file__).parent / "fixtures" / "hemmingway_stage0_reference.md"
@@ -212,8 +213,18 @@ GOOD_DELTA = {
 
 
 def stage(tmp_path, n, name, data):
+    """A stage directory holding `name`. Stages 0 and 1 also get an unedited copy of their template and, for stage 1, the summary
+    the template writes, because the gates require both (orchard/stages.py); a test that wants them wrong removes or edits them."""
     run = tmp_path / "run"
     write(run, f"stages/{n}/evidence/diff.txt", "evidence")
+    if name == "delta.json" and isinstance(data, dict):
+        data = {"template_sha256": TEMPLATE_SHA["delta_triage.py"], **data}
+        write(run, f"stages/{n}/delta_triage.py", TEMPLATE_TEXT["delta_triage.py"])
+    if name == "reference.json" and isinstance(data, dict):
+        write(run, f"stages/{n}/reference_gate.py", TEMPLATE_TEXT["reference_gate.py"])
+        write(run, f"stages/{n}/evidence/summary.json", {
+            "verdict": data.get("verdict"), "template_sha256": TEMPLATE_SHA["reference_gate.py"],
+            "checks": {c["name"]: c.get("pass") for c in data.get("checks", []) if isinstance(c, dict) and "name" in c}})
     write(run, f"stages/{n}/{name}", data)
     return run / "stages" / str(n), run
 

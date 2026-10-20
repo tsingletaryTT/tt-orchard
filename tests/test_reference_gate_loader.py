@@ -13,6 +13,7 @@ derived from stage 0's `alignment`, and a model with no lm_head fails with evide
 """
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import subprocess
@@ -156,6 +157,7 @@ def test_a_load_that_misses_keys_is_retried_once_with_the_remap_and_both_attempt
     model, rep = load(snap, remap={r"^language_model\.": "model.language_model.", r"^visual\.": "model.visual."})
     attempts = rep["attempts"]
     assert len(attempts) == 2 and attempts[0]["key_mapping"] is None and attempts[1]["key_mapping"]
+    assert attempts[0]["chosen"] is False and attempts[1]["chosen"] is True            # the retry left fewer keys unresolved, so it is kept
     assert len(attempts[0]["missing_keys"]) > 10 and attempts[0]["unexpected_keys"]
     assert rep["missing_keys"] == ["lm_head.weight"] and rep["unexpected_keys"] == []          # only the genuinely absent head
     assert rep["pass"] is False                                                                # still not a pass: there is no lm_head
@@ -168,6 +170,69 @@ def test_a_retry_that_does_not_help_is_not_kept(tmp_path):
     first, second = rep["attempts"]
     assert first["chosen"] is True and second["chosen"] is False
     assert set(first["missing_keys"]) <= set(rep["missing_keys"]) and rep["unexpected_keys"]       # the report is the first load's
+
+
+def fake_class(calls, *, fail_on=None, missing_when=("a", "b")):
+    """A stand-in for the model class. `calls` collects one record per from_pretrained call: the key mapping it got and a weak reference to the
+    model it returned, so a test can ask whether an earlier model was still alive when a later load began. The first load (no mapping) and
+    every load with a mapping miss keys, so the retry runs; `fail_on` names a call number (1-based) that raises TypeError."""
+    import torch
+
+    class FakeModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.lin = torch.nn.Linear(2, 2, dtype=torch.bfloat16)
+
+    class Fake:
+        @staticmethod
+        def from_pretrained(path, low_cpu_mem_usage=None, output_loading_info=None, key_mapping=None, **kw):
+            import weakref
+            alive_before = [r() is not None for r in (c["ref"] for c in calls)]
+            record = {"key_mapping": key_mapping, "alive_before": alive_before}
+            calls.append(record)
+            if fail_on == len(calls):
+                record["ref"] = lambda: None
+                raise TypeError("from_pretrained() got an unexpected keyword argument 'key_mapping'")
+            m = FakeModel()
+            record["ref"] = weakref.ref(m)
+            return m, {"missing_keys": list(missing_when), "unexpected_keys": [], "mismatched_keys": [], "error_msgs": []}
+    return Fake
+
+
+def load_with_fake(snap, fake, remap):
+    import torch
+    import transformers
+    t = template()
+    t.resolve_class = lambda *a, **k: fake
+    return t.load_model(torch, transformers, snap, remap=remap)
+
+
+def test_the_first_model_is_freed_before_the_retry_loads_a_second(headless):
+    """A 27B model in bf16 is about 54 GB; the retry used to start while the first was still held, so two of them had to fit in RAM."""
+    calls = []
+    load_with_fake(headless, fake_class(calls), {r"^x\.": "y."})
+    assert len(calls) >= 2 and calls[1]["key_mapping"]
+    assert calls[1]["alive_before"] == [False], "the first model was still in memory when the retry began"
+
+
+def test_a_retry_that_raises_keeps_the_first_loads_report_and_a_working_model(headless):
+    """An old transformers rejects key_mapping with a TypeError. The first load's keys are still the result, and the model must exist."""
+    calls = []
+    model, rep = load_with_fake(headless, fake_class(calls, fail_on=2), {r"^x\.": "y."})
+    assert model is not None and hasattr(model, "lin")
+    first, second = rep["attempts"]
+    assert first["chosen"] is True and first["missing_keys"] == ["a", "b"]
+    assert second["chosen"] is False and "TypeError" in second["error"]
+    assert rep["missing_keys"] == ["a", "b"]
+
+
+def test_a_retry_that_does_not_help_does_not_leave_two_models_alive(headless):
+    calls = []
+    model, rep = load_with_fake(headless, fake_class(calls), {r"^x\.": "y."})
+    gc_alive = [c["ref"]() is not None for c in calls]
+    assert sum(gc_alive) == 1, gc_alive             # only the model that was returned is alive
+    assert len(calls) == 3 and calls[2]["key_mapping"] is None          # the first load is repeated
+    assert calls[2]["alive_before"] == [False, False], "the rejected retry was still in memory while the first load was repeated"
 
 
 def test_a_load_that_passes_is_never_retried(headless):
@@ -201,6 +266,7 @@ def test_a_model_with_no_lm_head_fails_with_evidence_instead_of_crashing(headles
     ref = json.loads((stage / "reference.json").read_text())
     summary = json.loads((stage / "evidence" / "summary.json").read_text())
     assert ref["verdict"] == "fail" and summary["verdict"] == "fail"
+    assert summary["template_sha256"] == hashlib.sha256(TEMPLATE.read_bytes()).hexdigest()
     note = next(c["note"] for c in ref["checks"] if c["name"] == "decodes forward")
     assert "no lm_head" in note and "logits" in note
     assert json.loads((stage / "evidence" / "load-report.json").read_text())["missing_keys"] == []        # it did load
@@ -213,3 +279,4 @@ def test_a_load_that_raises_also_writes_the_summary_the_gate_reads(tmp_path):
     assert r.returncode == 3
     summary = json.loads((stage / "evidence" / "summary.json").read_text())
     assert summary["verdict"] == "fail" and summary["checks"]["loads"] is False
+    assert summary["template_sha256"] == hashlib.sha256(TEMPLATE.read_bytes()).hexdigest()

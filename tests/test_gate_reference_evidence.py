@@ -8,11 +8,12 @@ note "expected and does not affect functionality". The gate checked reference.js
 fix: the template's evidence decides; a check the evidence failed cannot be passed by the agent's file; missing backbone keys fail;
 and an evidence file that is missing (where the template was used), unreadable, oversized or a link out of the run fails closed.
 """
+import hashlib
 import json
 
 import pytest
 
-from orchard.stages import gate_reference
+from orchard.stages import SHIPPED_TEMPLATES, gate_reference
 
 CHECKS = ("loads", "tokenizer round trip", "decodes forward", "matches the card")
 
@@ -28,11 +29,11 @@ def stage(tmp_path, *, claimed="pass", claimed_checks=None, summary="pass", summ
         {"name": n, "pass": ok, "evidence": ["evidence/e.json"]} for n, ok in claimed_checks.items()]}))
     if summary is not None:
         (s1 / "evidence" / "summary.json").write_text(json.dumps(
-            {"verdict": summary, "checks": summary_checks or {c: summary == "pass" for c in CHECKS}}))
+            {"verdict": summary, "checks": summary_checks or {c: summary == "pass" for c in CHECKS},
+             "template_sha256": hashlib.sha256(SHIPPED_TEMPLATES["reference_gate.py"].read_bytes()).hexdigest()}))
     (s1 / "evidence" / "load-report.json").write_text(json.dumps(
         {"missing_keys": list(missing), "model_key_count": keys, "ignore_patterns": list(ignore)}))
     if template:
-        from orchard.stages import SHIPPED_TEMPLATES
         (s1 / "reference_gate.py").write_text(SHIPPED_TEMPLATES["reference_gate.py"].read_text())      # an unedited copy
     return s1
 
@@ -75,10 +76,12 @@ def test_the_template_was_used_but_its_summary_is_gone(tmp_path):
     assert not g.ok and any("evidence/summary.json is missing" in r for r in g.reasons)
 
 
-def test_a_stage_that_never_used_the_template_is_judged_as_before(tmp_path):
+def test_a_stage_that_never_used_the_template_no_longer_passes(tmp_path):
+    """Before, a stage with no copy was judged on reference.json alone, which let an agent delete the copy after running an edited one."""
     s1 = stage(tmp_path, summary=None, template=False)
     (s1 / "evidence" / "load-report.json").unlink()
-    assert gate_reference(s1, tmp_path).ok
+    g = gate_reference(s1, tmp_path)
+    assert not g.ok and any("reference_gate.py is not in this stage directory" in r for r in g.reasons)
 
 
 def test_an_evidence_file_that_is_oversized_fails_closed(tmp_path):

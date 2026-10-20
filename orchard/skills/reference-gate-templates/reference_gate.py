@@ -54,6 +54,8 @@ torch or transformers is not importable. The script writes only inside its own d
 """
 from __future__ import annotations
 
+import gc
+import hashlib
 import importlib
 import json
 import os
@@ -65,6 +67,8 @@ import time
 from pathlib import Path
 
 HERE_DIR = Path(__file__).resolve().parent
+# The sha256 of this file, written into summary.json so the stage gate can compare it with the shipped template.
+THIS_SHA256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 EVIDENCE = HERE_DIR / "evidence"
 REFERENCE = EVIDENCE / "reference"
 CONFIG_KEYS = ("run_dir", "model_snapshot", "python")
@@ -274,15 +278,32 @@ def load_model(torch, transformers, snapshot: Path, remap: dict | None = None) -
     tried = [{"key_mapping": None, "missing_keys": sorted(str(k) for k in info.get("missing_keys") or [])[:MAX_LISTED_KEYS],
               "unexpected_keys": sorted(str(k) for k in info.get("unexpected_keys") or [])[:MAX_LISTED_KEYS], "chosen": True}]
     if remap and unresolved(info):
-        second, second_info, second_seconds = attempt(remap)
-        better = unresolved(second_info) < unresolved(info)
-        tried.append({"key_mapping": dict(remap),
-                      "missing_keys": sorted(str(k) for k in second_info.get("missing_keys") or [])[:MAX_LISTED_KEYS],
-                      "unexpected_keys": sorted(str(k) for k in second_info.get("unexpected_keys") or [])[:MAX_LISTED_KEYS],
-                      "chosen": better})
-        if better:
+        # A large model in bf16 is tens of GB, so two copies do not fit in RAM. The first is dropped before the retry loads. If the
+        # retry raises or does not leave fewer keys unresolved, the first load is repeated; that costs one more load in the case where the
+        # remap does not help, and holds one model at a time.
+        first_unresolved = unresolved(info)
+        del model
+        gc.collect()
+        entry = {"key_mapping": dict(remap), "chosen": False}
+        second = None
+        try:
+            second, second_info, second_seconds = attempt(remap)
+        except Exception as exc:  # noqa: BLE001 - e.g. a transformers without key_mapping raises TypeError; the first load stays the result
+            entry["error"] = f"{type(exc).__name__}: {exc}"[:1000]
+            second_seconds = 0.0
+        if second is not None:
+            entry["missing_keys"] = sorted(str(k) for k in second_info.get("missing_keys") or [])[:MAX_LISTED_KEYS]
+            entry["unexpected_keys"] = sorted(str(k) for k in second_info.get("unexpected_keys") or [])[:MAX_LISTED_KEYS]
+        tried.append(entry)
+        if second is not None and unresolved(second_info) < first_unresolved:
+            entry["chosen"] = True
             tried[0]["chosen"] = False
             model, info, seconds = second, second_info, round(seconds + second_seconds, 2)
+        else:
+            del second
+            gc.collect()
+            model, info, again = attempt(None)
+            seconds = round(seconds + second_seconds + again, 2)
     model.eval()
     patterns = list(getattr(cls, "_keys_to_ignore_on_load_unexpected", None) or []) + \
         list(getattr(model, "_keys_to_ignore_on_load_unexpected", None) or [])
@@ -455,7 +476,8 @@ def main() -> int:
                           "note": f"{rt['ok']} of {rt['total']} strings round trip exactly.",
                           "evidence": [rel(EVIDENCE / "tokenizer-roundtrip.json")]})
         write_json(HERE_DIR / "reference.json", {"verdict": "fail", "environment": env, "checks": checks})
-        write_json(EVIDENCE / "summary.json", {"verdict": "fail", "checks": {c["name"]: c["pass"] for c in checks}, "environment": env})
+        write_json(EVIDENCE / "summary.json", {"verdict": "fail", "checks": {c["name"]: c["pass"] for c in checks}, "environment": env,
+                                            "template_sha256": THIS_SHA256})
         say(f"the weights did not load: {rep['error'][:300]}")
         return 3
     write_json(EVIDENCE / "load-report.json", rep)
@@ -478,7 +500,8 @@ def main() -> int:
                   {"name": "matches the card", "pass": False, "note": "not run: no text was generated",
                    "evidence": [rel(EVIDENCE / "load-report.json")]}]
         write_json(HERE_DIR / "reference.json", {"verdict": "fail", "environment": env, "checks": checks})
-        write_json(EVIDENCE / "summary.json", {"verdict": "fail", "checks": {c["name"]: c["pass"] for c in checks}, "environment": env})
+        write_json(EVIDENCE / "summary.json", {"verdict": "fail", "checks": {c["name"]: c["pass"] for c in checks}, "environment": env,
+                                            "template_sha256": THIS_SHA256})
         say(note)
         return 3
     if not thai:
@@ -528,6 +551,7 @@ def main() -> int:
     ]
     verdict = "pass" if all(c["pass"] for c in checks) else "fail"
     summary = {"verdict": verdict, "checks": {c["name"]: c["pass"] for c in checks}, "environment": env,
+               "template_sha256": THIS_SHA256,
                "load_seconds": rep["seconds"], "decode_seconds": main_run["seconds"],
                "thai_tokens": thai, "thai_decode_seconds": thai_run["seconds"] if thai_run else None,
                "reasoning_start": reasoning_start(main_run["text"])}

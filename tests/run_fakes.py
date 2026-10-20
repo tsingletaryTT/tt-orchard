@@ -14,6 +14,7 @@ server would, so a restarted supervisor gets the same answers.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import socket
@@ -25,6 +26,7 @@ from orchard.adapters import AdapterError, ChipState, Lease, LeaseLost, Queued, 
 from orchard.defaults import FIRST_BOOT_PROMPT
 from orchard.ledger import Ledger
 from orchard.server import NotReady, StopCheck
+from orchard.stages import SHIPPED_TEMPLATES
 
 BOARDS = {"B0": ("0000:01:00.0", "0000:02:00.0"), "B1": ("0000:03:00.0", "0000:04:00.0")}
 DEV = {c: i for i, c in enumerate(BOARDS["B0"] + BOARDS["B1"])}
@@ -218,7 +220,11 @@ def ev(n, *names):
     return [f"stages/{n}/evidence/{x}" for x in names or ("notes.txt",)]
 
 
-DELTA = {"model": "Altworld/Hemmingway-1", "nearest_model": "Qwen/Qwen3.8-27B", "path": "weights-only",
+# The gates compare the stage's copy of each template, and the sha256 its evidence carries, with the shipped file (orchard/stages.py).
+TEMPLATE_TEXT = {name: path.read_text() for name, path in SHIPPED_TEMPLATES.items()}
+TEMPLATE_SHA = {name: hashlib.sha256(text.encode()).hexdigest() for name, text in TEMPLATE_TEXT.items()}
+
+DELTA = {"template_sha256": TEMPLATE_SHA["delta_triage.py"], "model": "Altworld/Hemmingway-1", "nearest_model": "Qwen/Qwen3.8-27B", "path": "weights-only",
          "differences": [{"area": a, "finding": "checked", "evidence": ev(0)}
                          for a in ("config", "tensors", "tensor_names", "tokenizer", "files",
                                    "generation_config")],
@@ -280,8 +286,12 @@ def swap_entry(n, ok=True):
 
 
 FILES = {
-    (0, "run"): {"evidence/notes.txt": "configs, tensors and tokenizers compared", "delta.json": DELTA},
-    (1, "run"): {"evidence/notes.txt": "greedy decode matches",
+    (0, "run"): {"evidence/notes.txt": "configs, tensors and tokenizers compared", "delta.json": DELTA,
+                 "delta_triage.py": TEMPLATE_TEXT["delta_triage.py"]},
+    (1, "run"): {"evidence/notes.txt": "greedy decode matches", "reference_gate.py": TEMPLATE_TEXT["reference_gate.py"],
+                 "evidence/summary.json": {"verdict": "pass", "template_sha256": TEMPLATE_SHA["reference_gate.py"],
+                                           "checks": {n: True for n in ("loads", "tokenizer round trip", "decodes forward",
+                                                                        "matches the card")}},
                  "reference.json": {"verdict": "pass", "checks": [
                      {"name": n, "pass": True, "evidence": ev(1)}
                      for n in ("loads", "tokenizer round trip", "decodes forward", "matches the card")]}},
