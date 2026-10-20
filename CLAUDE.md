@@ -1596,3 +1596,22 @@ then "tell the tensixinet agent it can continue (after you take down the running
 - tensixinet was told the chips were free after the server was down and `gozer status` showed all four chips FREE.
 - Cleared 70 GB at the operator's request (three unused Hugging Face models, the audio8-asr tensor cache, four old animatediff image tags).
 - Not done: the speed sweep, MMLU-Pro, long context, thinking-off and higher-limit runs, per-item BFCL results, `tt-model pull` and a boot from the Hub.
+
+## 2026-10-20 (UTC): fixes for ezietlowTT's review of PR 11 (version 0.8.6)
+Prompt (operator): "Respond to PR 11 comments and requests", then "push the fixes and reply to the review; review PR 12 against this env too". The review had 15
+findings and some smaller items. Four agents each took a group in its own worktree (`pr11-a` to `pr11-d`), test first, one commit per finding, a mutation per guard;
+I merged the four branches. The suite on the merged branch: 4930 passed, 2 skipped. Every finding was real; two were fixed differently from the suggestion.
+- Lab mode: the `cpu` row is skipped (#1); the `sfpi` row reads the lab's version over ssh and is left out with no lab probe (#2). A run directory is not set aside while a
+  supervisor holds its ledger lock, and `local_snapshot` accepts `.safetensors` at any depth and top-level `pytorch_model*.bin` (#4). A `.bin`-only model now passes preflight
+  and may fail at stage 2, which reads top-level safetensors only.
+- Gates: stages 0 and 1 need the template's copy and the template's own sha256 stamp (#3; a hand-forged stamp still passes, so this is best effort). Prefix-aligned checkpoints
+  get a stage 0 hazard that says stages 2 and 4 do not rename weights (#10; a path reason would have undone the alignment feature). The reference loader frees the first model
+  before a retry and keeps the first load report (#11). The restricted-head reference digest includes the revision and readout hash and loads with `weights_only=True` (#15).
+- Credentials and leases: kernel probe children get a clean environment and are swept afterwards (#5). HumanEval and MBPP programs run in a Landlock and seccomp sandbox that
+  refuses file reads outside Python's prefixes and every socket; user namespaces and bwrap are blocked on this box. The session refuses code phases when the sandbox cannot
+  start unless `--allow-unsandboxed-code` is passed (#6). A block releases the test lease, and a restart gives back a local one (#7). `refresh-ttnn` stops the whole gozer
+  group on a timeout (#8). A queued gozer request is reported as queued and its ticket cancelled (#9). A phase with any failed request is no longer ok.
+- UI, verdict and speed: one malformed result file no longer breaks other runs' pages (#12); NaN is not a number (#13); a cut-off response is an error sample (#14).
+- Check of the published card: the 1,328 stored HumanEval and MBPP programs (both models) were scored again by the new sandbox and gave the same verdict on every one, so the
+  card's numbers stand. Group C wrote #6's code before its tests; its 38 mutations were run afterwards.
+- Not done: `orchard/canary.py` `ask` has the same uncaught `IncompleteRead` as #14; the skills do not yet say the template copy is required.
