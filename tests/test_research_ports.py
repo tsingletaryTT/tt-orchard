@@ -200,6 +200,65 @@ def test_a_missing_tt_or_a_failed_search_is_unavailable():
     assert ports.catalog("gemma", run=Run("not json"), which=lambda n: "/x/tt", now=NOW).unavailable
 
 
+# `tt-model search gemma-4 --catalog --json` on node6 (tt-model 0.1.0), 2026-10-20.
+TT_MODEL_CATALOG = json.dumps([
+    {"id": "tt-hous/gemma-4-26B-A4B-it_p150_p150x2_p150x4", "private": False, "downloads": 0,
+     "last_modified": "2026-10-14 20:18:31+00:00"},
+    {"id": "stisiTT/gemma-4-12b-it-p150", "private": False, "downloads": 0,
+     "last_modified": "2026-09-15 00:20:05+00:00"}])
+
+
+class Runs:
+    """One answer per call, in order."""
+
+    def __init__(self, *outs):
+        self.outs = [subprocess.CompletedProcess([], rc, out, "") for out, rc in outs]
+        self.argv = []
+
+    def __call__(self, argv, **kw):
+        self.argv.append(argv)
+        return self.outs[len(self.argv) - 1]
+
+
+def only(*names):
+    return lambda n: f"/x/{n}" if n in names else None
+
+
+def test_without_tt_the_catalog_search_uses_tt_model():
+    # No box this was run on (node4, node5, node6) has a `tt` command; tt-model ships only `tt-model`. The catalog
+    # row was then always unavailable, and the live humanizer test found no bundle choices.
+    run = Run(TT_MODEL_CATALOG)
+    r = ports.catalog("gemma", run=run, which=only("tt-model"), now=NOW)
+    assert run.argv == [["/x/tt-model", "search", "gemma", "--catalog", "--json"]]
+    assert [b["name"] for b in r.data["bundles"]] == ["tt-hous/gemma-4-26B-A4B-it_p150_p150x2_p150x4",
+                                                      "stisiTT/gemma-4-12b-it-p150"]
+    assert r.evidence[1].claim == "the community catalog lists stisiTT/gemma-4-12b-it-p150"
+    assert r.unavailable == []
+
+
+def test_tt_is_asked_first_and_tt_model_answers_when_tt_fails():
+    run = Runs(("", 2), (TT_MODEL_CATALOG, 0))
+    r = ports.catalog("gemma", run=run, which=only("tt", "tt-model"), now=NOW)
+    assert [a[0] for a in run.argv] == ["/x/tt", "/x/tt-model"]
+    assert len(r.data["bundles"]) == 2 and r.unavailable == []
+
+
+def test_tt_answering_means_tt_model_is_not_asked():
+    run = Runs(((FIX / "catalog-gemma.json").read_text(), 0), (TT_MODEL_CATALOG, 0))
+    r = ports.catalog("gemma", run=run, which=only("tt", "tt-model"), now=NOW)
+    assert [a[0] for a in run.argv] == ["/x/tt"]
+    assert [b["name"] for b in r.data["bundles"]] == ["stisiTT/gemma-4-12b-it-p150"]
+
+
+def test_with_neither_command_or_both_failing_the_row_names_what_was_tried():
+    r = ports.catalog("gemma", run=Run(), which=only(), now=NOW)
+    assert r.unavailable[0].reason == "neither `tt` nor `tt-model` is installed"
+    r = ports.catalog("gemma", run=Runs(("", 2), ("not json", 0)), which=only("tt", "tt-model"), now=NOW)
+    assert r.data["bundles"] == [] and len(r.unavailable) == 1
+    assert r.unavailable[0].reason == ("`tt model search --catalog` gave no answer (exit 2); "
+                                       "`tt-model search --catalog` gave no answer (exit 0)")
+
+
 # ---- code shipped in a bundle -----------------------------------------------------------------------------
 
 def test_a_bundle_that_ships_autoport_code_is_evidence_of_a_port():
@@ -228,7 +287,7 @@ def test_collect_skips_github_when_asked_and_runs_the_rest():
     r = ports.collect(f, CFG, family="gemma", run=run, which=which_gh, no_github=True)
     assert not any("search/issues" in u for u in f.urls)
     assert run.argv == []                                     # no gh, and `tt` is not found by which_gh
-    assert [u.source for u in r.unavailable] == ["catalog"]   # `tt` is not installed in this test
+    assert [u.source for u in r.unavailable] == ["catalog"]   # neither `tt` nor `tt-model` is found here
 
 
 def test_collect_runs_the_github_searches_by_default():
@@ -264,7 +323,7 @@ def test_bundle_code_refuses_a_bundle_id_that_is_not_a_hub_id():
 @pytest.mark.parametrize("family", ["-xyz", "--help", "a b", "a;b", "ab", "", None, "x" * 81, "a/b"])
 def test_a_family_that_is_not_a_plain_term_never_reaches_tt(family):
     run = Run(json.dumps({"bundles": []}))
-    r = ports.catalog(family, run=run, which=lambda n: "/x/tt", now=NOW)
+    r = ports.catalog(family, run=run, which=lambda n: f"/x/{n}", now=NOW)      # `tt` and `tt-model` both found
     assert run.argv == [] and r.unavailable and r.unavailable[0].source == "catalog"
 
 

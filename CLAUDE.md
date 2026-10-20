@@ -1615,3 +1615,13 @@ I merged the four branches. The suite on the merged branch: 4930 passed, 2 skipp
 - Check of the published card: the 1,328 stored HumanEval and MBPP programs (both models) were scored again by the new sandbox and gave the same verdict on every one, so the
   card's numbers stand. Group C wrote #6's code before its tests; its 38 mutations were run afterwards.
 - Not done: `orchard/canary.py` `ask` has the same uncaught `IncompleteRead` as #14; the skills do not yet say the template copy is required.
+## 2026-10-20 (UTC): the research catalog row falls back to `tt-model` (branch `ezietlow/research-catalog-fallback`, onto `make-it-work-make-it-useful`)
+Prompt (operator, reviewing PR 11 on node6): "Lets get the dependecies onto node6 and try again", then "Lets fix the gap and contribute it back to the PR".
+- With the test dependencies in place on node6 (gozer via `ORCHARD_TEST_GOZER`, tt-lang via `tt-orchard kernel-env`, `ORCHARD_LIVE_RESEARCH=1`) the suite was 4785 passed,
+  1 failed, 3 skipped. The failure was `test_research_live.py`: `bundle_choices` empty, because the catalog row ran only `tt model search --catalog`, and none of node4, node5
+  or node6 has a `tt` command (tt-model-manager ships `tt-model` and `tt-kernel`). `nearest.search` already fell back to `tt-model`; `research/ports.catalog` did not.
+- `catalog()` now asks `tt` first and then `tt-model search <family> --catalog --json` when `tt` is missing or gives no answer; `nearest.parse_search` already reads both
+  outputs. The unavailable row names every command that was tried, or says neither is installed. The plain-term check still runs before either command sees the family.
+- Test first: 3 of 4 new tests red before the change (the fourth pins that `tt` answering means `tt-model` is not asked). Mutations, each red: no fallback, stop after the
+  first attempt, `tt-model` asked first, the old reason text, `--catalog` dropped. The live humanizer test passes on node6 with no `tt` and no shim.
+- Suite on node6 with the same dependencies: 4790 passed, 3 skipped (the two tests that need the skill installed as `ttm-tt-lang` by `tt-warp`, and the qwen transcript replay).

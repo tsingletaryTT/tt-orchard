@@ -46,6 +46,7 @@ OTHER_TOOL_FLAGS = {
     "--owner-pid": "gozer acquire",
     "--out": "tt-model package-thin",
     "--version": "tt-model --version",
+    "--catalog": "tt model search / tt-model search (the research catalog row)",
 }
 
 FLAG = re.compile(r"(?<![\w-])--[a-z][a-z0-9-]*")

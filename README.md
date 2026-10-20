@@ -583,7 +583,8 @@ anything large. It reads, with no Hugging Face token:
 - the safetensors headers of the new model and a candidate, by two byte-range requests per file (a
   header larger than 8 MiB is not read, and the estimate is then `unknown`), to estimate the class (`weights-only`, `full-port` or `unknown`) and the download size. A sidecar's
   tensors would need a download, so the estimate only says one is possible;
-- the tt-model community catalog, published bundles (their manifest says which model they serve, and a
+- the tt-model community catalog (`tt model search --catalog`, or `tt-model search --catalog` where there
+  is no `tt` command), published bundles (their manifest says which model they serve, and a
   container bundle may ship its own port under `code/models/`), tt-metal's `models/` directories and
   models README, and GitHub issues and pull requests for the architecture name. GitHub code search needs
   `gh auth login`; without it that one search is skipped and the report says so.

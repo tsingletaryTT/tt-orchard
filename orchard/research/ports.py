@@ -158,29 +158,38 @@ def github_code(t: dict, *, run=subprocess.run, which=shutil.which, now: str = "
 
 
 def catalog(family: str, *, run=subprocess.run, which=shutil.which, now: str = "") -> Result:
-    """Bundles in the community catalog for this family (`tt model search <family> --catalog --json`)."""
+    """Bundles in the community catalog for this family: `tt model search <family> --catalog --json`, or, when `tt`
+    is missing or gives no answer, `tt-model search <family> --catalog --json` (the order `nearest.search` uses).
+    None of the boxes this was run on has `tt`, so without the fallback the catalog row was always unavailable."""
     res = Result(data={"bundles": []})
-    # The family becomes an argv element of `tt`. A leading dash would be read as an option.
+    # The family becomes an argv element of `tt` or `tt-model`. A leading dash would be read as an option.
     if not (isinstance(family, str) and SAFE_TERM.fullmatch(family) and not family.startswith("-")):
         res.unavailable.append(Unavailable("catalog", "the search term is not a plain word, so no search was made"))
         return res
-    exe = which("tt")
-    if not exe:
-        res.unavailable.append(Unavailable("catalog", "the `tt` command is not installed"))
+    attempts = [(label, [exe, *sub, family, "--catalog", "--json"])
+                for label, name, sub in (("tt model search", "tt", ["model", "search"]),
+                                         ("tt-model search", "tt-model", ["search"]))
+                if (exe := which(name))]
+    if not attempts:
+        res.unavailable.append(Unavailable("catalog", "neither `tt` nor `tt-model` is installed"))
         return res
-    try:
-        done = run([exe, "model", "search", family, "--catalog", "--json"], capture_output=True, text=True,
-                   timeout=nearest.SEARCH_TIMEOUT_S)
-    except (OSError, subprocess.SubprocessError) as exc:
-        res.unavailable.append(Unavailable("catalog", f"{type(exc).__name__}"))
-        return res
-    got = nearest.parse_search(done.stdout) if done.returncode == 0 else None
+    got, failures = None, []
+    for label, argv in attempts:
+        try:
+            done = run(argv, capture_output=True, text=True, timeout=nearest.SEARCH_TIMEOUT_S)
+        except (OSError, subprocess.SubprocessError) as exc:
+            failures.append(f"`{label} --catalog` failed: {type(exc).__name__}")
+            continue
+        got = nearest.parse_search(done.stdout) if done.returncode == 0 else None
+        if got is not None:
+            break
+        failures.append(f"`{label} --catalog` gave no answer (exit {done.returncode})")
     if got is None:
-        res.unavailable.append(Unavailable("catalog", f"`tt model search --catalog` gave no answer (exit {done.returncode})"))
+        res.unavailable.append(Unavailable("catalog", "; ".join(failures)))
         return res
     skipped = 0
     for b in got:
-        # `tt` output is untrusted; a name that is not a Hub id never becomes a URL or a bundle row.
+        # The search output is untrusted; a name that is not a Hub id never becomes a URL or a bundle row.
         if not valid_id(b.get("name")):
             skipped += 1
             continue
