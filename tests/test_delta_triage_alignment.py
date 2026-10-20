@@ -270,6 +270,31 @@ def test_a_sidecar_as_tall_as_the_head_is_a_copy_not_a_restriction(tmp_path):
     assert out["restricted"] is False and "fewer rows" in out["note"]
 
 
+def test_a_truncated_sidecar_gives_unknown_instead_of_crashing(tmp_path):
+    """The header promises more bytes than the file holds (a download cut short). The reshape used to raise ValueError and end stage 0."""
+    new, base, ids = head_case(tmp_path)
+    side = new / "readout.safetensors"
+    side.write_bytes(side.read_bytes()[:-20])
+    out = template().detect_restricted_head(new, base, sidecars_of(new))
+    assert out["restricted"] is None and "readout.safetensors" in out["note"] and "could not be read" in out["note"]
+
+
+def test_a_truncated_base_head_gives_unknown_instead_of_crashing(tmp_path):
+    new, base, ids = head_case(tmp_path)
+    shard = base / "model.safetensors"
+    shard.write_bytes(shard.read_bytes()[:-500])
+    out = template().detect_restricted_head(new, base, sidecars_of(new))
+    assert out["restricted"] is None and "could not be read" in out["note"]
+
+
+def test_a_sidecar_header_with_no_offsets_gives_unknown_instead_of_crashing(tmp_path):
+    new, base, ids = head_case(tmp_path)
+    raw = json.dumps({"weight": {"dtype": "BF16", "shape": [6, 16]}}).encode()
+    (new / "readout.safetensors").write_bytes(struct.pack("<Q", len(raw)) + raw)
+    out = template().detect_restricted_head(new, base, sidecars_of(new))
+    assert out["restricted"] is None and "could not be read" in out["note"]
+
+
 def test_a_model_with_its_own_lm_head_is_not_a_restricted_head_even_if_a_sidecar_copies_head_rows(tmp_path):
     """Restricted means the sidecar STANDS IN for the lm_head. A model that kept a full lm_head and ships a file of copied rows has not cut anything."""
     new, base, ids = head_case(tmp_path)

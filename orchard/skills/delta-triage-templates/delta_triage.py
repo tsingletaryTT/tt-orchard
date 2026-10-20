@@ -779,6 +779,7 @@ def detect_restricted_head(model_dir: Path, base_dir: Path, sc: dict) -> dict:
     vocab, dim = head["shape"]
     size = ITEMSIZE[head["dtype"]]
     best_try = None
+    unreadable = []
     for entry in sidecars:
         try:
             header, base_off = raw_header(model_dir / entry["file"])
@@ -790,21 +791,27 @@ def detect_restricted_head(model_dir: Path, base_dir: Path, sc: dict) -> dict:
                     or v.get("dtype") not in ITEMSIZE:
                 continue
             rows = shape[0]
-            lo, hi = v["data_offsets"]
-            with open(model_dir / entry["file"], "rb") as f:
-                f.seek(base_off + lo)
-                rowsmat = _unit_rows(_np_decode(f.read(hi - lo), v["dtype"]).reshape(rows, dim))
-            best = np.full(rows, -2.0, dtype="float32")
-            best_idx = np.zeros(rows, dtype="int64")
-            with open(head["file"], "rb") as f:
-                for r0 in range(0, vocab, HEAD_CHUNK_ROWS):
-                    n = min(HEAD_CHUNK_ROWS, vocab - r0)
-                    f.seek(head["start"] + r0 * dim * size)
-                    chunk = _unit_rows(_np_decode(f.read(n * dim * size), head["dtype"]).reshape(n, dim))
-                    sim = rowsmat @ chunk.T
-                    j, val = sim.argmax(axis=1), sim.max(axis=1)
-                    better = val > best
-                    best[better], best_idx[better] = val[better], j[better] + r0
+            try:
+                # A truncated file, a header with no offsets or offsets that do not fit the shape each raise here. The check then
+                # says it could not run (restricted None), where it used to end stage 0 with a traceback.
+                lo, hi = v["data_offsets"]
+                with open(model_dir / entry["file"], "rb") as f:
+                    f.seek(base_off + lo)
+                    rowsmat = _unit_rows(_np_decode(f.read(hi - lo), v["dtype"]).reshape(rows, dim))
+                best = np.full(rows, -2.0, dtype="float32")
+                best_idx = np.zeros(rows, dtype="int64")
+                with open(head["file"], "rb") as f:
+                    for r0 in range(0, vocab, HEAD_CHUNK_ROWS):
+                        n = min(HEAD_CHUNK_ROWS, vocab - r0)
+                        f.seek(head["start"] + r0 * dim * size)
+                        chunk = _unit_rows(_np_decode(f.read(n * dim * size), head["dtype"]).reshape(n, dim))
+                        sim = rowsmat @ chunk.T
+                        j, val = sim.argmax(axis=1), sim.max(axis=1)
+                        better = val > best
+                        best[better], best_idx[better] = val[better], j[better] + r0
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                unreadable.append(f"{entry['file']} {name}: {type(exc).__name__}: {exc}"[:300])
+                continue
             matched = int((best >= HEAD_MATCH_COSINE).sum())
             found = {"restricted": bool(matched == rows and rows >= 2), "rows": rows, "base_rows": vocab,
                      "matched_rows": matched, "token_ids": [int(i) for i in best_idx][:MAX_LISTED_NAMES],
@@ -815,6 +822,11 @@ def detect_restricted_head(model_dir: Path, base_dir: Path, sc: dict) -> dict:
                 return found
             if best_try is None or matched > best_try["matched_rows"]:
                 best_try = found
+    if unreadable:
+        # Something could not be read, so "not restricted" would be a guess. A match found before the failure was returned above.
+        return {**(best_try or out), "restricted": None,
+                "note": "the restricted-head check could not run to the end: " + "; ".join(unreadable[:3]) + " (a sidecar or the nearest "
+                        "model's lm_head.weight could not be read in full; the file may be truncated)"}
     if best_try is not None:
         return best_try
     out["note"] = "no sidecar matrix has the head's width and fewer rows"
