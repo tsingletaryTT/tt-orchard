@@ -1926,8 +1926,12 @@ class Supervisor:
             # A multi-board test that dies this early failed to start (the 4-chip test's `Fabric Router Sync:
             # Timeout`, seen after 13 to 57 s and gone after the chips were reset together). The cause is not
             # isolated, so reset every chip the test holds and run it once more. Its record is the second try's.
+            # The second try writes output.txt again. The first try's text says why it failed, so it is kept beside it.
+            first = out_dir / "output-first-try.txt"
+            os.replace(out_dir / "output.txt", first)
             self.ledger.append("decision", n, decision="test failed at startup; resetting the test chips and trying once more",
-                               config=test.chips, returncode=result["returncode"], seconds=result["seconds"])
+                               config=test.chips, returncode=result["returncode"], seconds=result["seconds"],
+                               first_output=evidence_record(self.run_dir, first))
             for lease in leases:
                 self._reset_test_chips(n, test, lease)
             result = spawn()
