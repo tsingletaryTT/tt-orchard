@@ -191,6 +191,33 @@ def test_a_stage_2_that_failed_does_not_keep_an_earlier_run(conf, tmp_path):
     assert not (run_dir / "ledger.jsonl").exists()
 
 
+def test_an_earlier_run_with_a_live_supervisor_is_never_set_aside(conf, tmp_path):
+    # A supervisor holds an flock on ledger.jsonl.lock while it lives. If the weights vanish from the cache during a run and
+    # someone starts bringup again, moving the directory would pull it out from under the live run (PR 11 review, finding 4).
+    import fcntl
+    run_dir = _earlier_run(tmp_path)
+    with open(run_dir / "ledger.jsonl.lock", "w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        code, out, rec = run(conf, ["bringup", "Cloudflare/clef"])
+    assert code == cli.EXIT_REFUSED and rec.argv is None and rec.fetched == []
+    assert (run_dir / "ledger.jsonl").exists()
+    assert not [p for p in (tmp_path / "runs").iterdir() if ".stale-" in p.name]
+
+
+def test_a_lock_file_nobody_holds_does_not_stop_the_set_aside(conf, tmp_path):
+    run_dir = _earlier_run(tmp_path)
+    (run_dir / "ledger.jsonl.lock").write_text("")
+    run(conf, ["bringup", "Cloudflare/clef"])
+    assert not (run_dir / "ledger.jsonl").exists()
+    assert [p for p in (tmp_path / "runs").iterdir() if p.name.startswith("cloudflare--clef.stale-")]
+
+
+def test_the_lock_check_leaves_no_lock_file_behind_when_there_was_none(tmp_path):
+    run_dir = _earlier_run(tmp_path)
+    assert cli._supervisor_holds_lock(run_dir) is False
+    assert not (run_dir / "ledger.jsonl.lock").exists()
+
+
 def test_a_dry_run_leaves_an_earlier_run_alone(conf, tmp_path):
     run_dir = _earlier_run(tmp_path)
     run(conf, ["bringup", "Cloudflare/clef", "--dry-run"])

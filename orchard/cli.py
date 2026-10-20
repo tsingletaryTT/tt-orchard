@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import io
+import fcntl
 import json
 import os
 import shlex
@@ -569,6 +570,27 @@ def _served_the_model(run_dir: Path) -> bool:
     return False
 
 
+def _supervisor_holds_lock(run_dir: Path) -> bool:
+    """True when a live supervisor holds the run's ledger lock. Only an existing lock file is opened, so the check
+    creates nothing; the lock is dropped again at once."""
+    lock = run_dir / "ledger.jsonl.lock"
+    try:
+        fh = open(lock, "r")
+    except OSError:
+        return False
+    try:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        except OSError:
+            return False
+        fcntl.flock(fh, fcntl.LOCK_UN)
+        return False
+    finally:
+        fh.close()
+
+
 def _block_code(run_dir: Path) -> str:
     """The reason code in the run's blocked.json, or "blocked" when it is missing or unreadable."""
     try:
@@ -715,7 +737,10 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
     if local is None and resuming and not args.dry_run and not _served_the_model(run_dir):
         # The weights are about to be downloaded, so an earlier run read a snapshot with none (a run that passed stage 2 did not). Its stage 0 verdict (a full port,
         # for bytkim/Qwen3.8-27B-pi) and stage 1 reference describe that empty snapshot, and a retry would keep both.
-        # The directory is moved, not deleted.
+        # The directory is moved, not deleted, and never while a supervisor still holds its ledger lock.
+        if _supervisor_holds_lock(run_dir):
+            return _refuse(f"the run in {run_dir} has a live supervisor (it holds ledger.jsonl.lock) and its weights are "
+                           "not in the cache. Stop that run first, or wait for it to end")
         aside = run_dir.with_name(f"{run_dir.name}.stale-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}")
         run_dir.rename(aside)
         resuming = False

@@ -434,6 +434,12 @@ class _SkipRow(Exception):
     """Raised inside a check's try block to leave its row out."""
 
 
+def has_weights(snapshot: Path) -> bool:
+    """True when the snapshot directory holds a readable weight file (see `local_snapshot`)."""
+    return (any(w.exists() for w in snapshot.rglob("*.safetensors"))
+            or any(w.exists() for w in snapshot.glob("pytorch_model*.bin")))
+
+
 def hf_home_for(cfg) -> Path:
     from orchard.supervisor import operator_home
     if cfg.hf_home:
@@ -593,8 +599,10 @@ def default_signals(cfg, research_options=None) -> Signals:
         snaps = hf_home_for(cfg) / "hub" / f"models--{org}--{name}" / "snapshots"
         found = sorted(snaps.glob("*/config.json")) if snaps.is_dir() else []
         # A config alone is not a model. An old manifest-only fetch leaves config.json and README.md, and counting that as
-        # local skipped the download. `exists()` follows the link, so a weight file whose blob is gone does not count.
-        found = [c for c in found if any(w.exists() for w in c.parent.glob("*.safetensors"))]
+        # local skipped the download. A weight file counts when its link resolves (`exists()` follows it). The kinds are the
+        # ones the stage templates read: *.safetensors at any depth (some repos keep a component in a subfolder) and the
+        # top-level pytorch_model*.bin that stage 0's backbone rule names. Other files, such as training_args.bin, do not.
+        found = [c for c in found if has_weights(c.parent)]
         return found[-1].parent if found else None
 
     def gozer_status() -> str:
