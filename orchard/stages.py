@@ -185,6 +185,7 @@ def gate_delta(stage_dir, run_dir) -> GateResult:
         if not isinstance(item, dict) or item.get("area") not in HAZARD_AREAS or not _text(item.get("finding")):
             reasons.append(f"hazards[{i}] needs an area from {HAZARD_AREAS} and a finding")
     reasons += _template_reasons(Path(stage_dir), "delta_triage.py")
+    reasons += _stamp_reasons(d, "delta_triage.py", "delta.json")
     return _done(reasons, seen)
 
 
@@ -273,11 +274,16 @@ def _template_reasons(stage_dir: Path, name: str) -> list[str]:
     """A stage whose evidence comes from a shipped template is only as trustworthy as the script. If the stage's copy differs from the
     shipped file, the evidence is not the template's. On the pplx-decider run the stage 1 agent edited reference_gate.py (it put
     AutoModelForCausalLM in place of the class lookup), the edited script loaded none of the weights, and the gate accepted the result.
-    A stage that holds no copy is not held to one."""
+    A stage with no copy fails too: an agent could run an edited script under another name, or delete the copy after running it, and
+    the gate would have nothing to compare. The evidence the template writes also carries the sha256 of the script that wrote it
+    (`template_sha256`); `_stamp_reasons` compares that with the shipped file."""
     copy, shipped = stage_dir / name, SHIPPED_TEMPLATES[name]
     try:
-        if not copy.is_file() or not shipped.is_file():
+        if not shipped.is_file():
             return []
+        if not copy.is_file():
+            return [f"{name} is not in this stage directory. Copy it from the skill's templates directory and run it from there, "
+                    "so the gate can check that the evidence came from the shipped script."]
         mine, theirs = _sha256(copy), _sha256(shipped)
     except OSError:
         return []
@@ -285,6 +291,22 @@ def _template_reasons(stage_dir: Path, name: str) -> list[str]:
         return []
     return [f"{name} in this stage differs from the shipped template (sha256 {mine[:12]} against {theirs[:12]}), so the evidence it wrote "
             f"is not the template's. Copy {name} from the skill's templates directory again and change only the config file."]
+
+
+def _stamp_reasons(data: dict, name: str, where: str) -> list[str]:
+    """`data` is a file the template named `name` wrote (delta.json or evidence/summary.json). It must carry the sha256 of the
+    script that wrote it, equal to the shipped file's. This is best effort, because the agent can write the file too; it catches a
+    run of an edited script under another name, and a copy deleted after the run, which the copy check alone cannot see."""
+    try:
+        theirs = _sha256(SHIPPED_TEMPLATES[name])
+    except OSError:
+        return []
+    got = data.get("template_sha256")
+    if got == theirs:
+        return []
+    if not isinstance(got, str):
+        return [f"{where} has no template_sha256, so it was not written by the shipped {name}. Run the copy from the skill's templates directory."]
+    return [f"{where} template_sha256 {got[:12]} differs from the shipped {name} ({theirs[:12]}), so the evidence is not the template's."]
 
 
 def _evidence_json(stage_dir: Path, name: str, *, required: bool, reasons: list):
@@ -324,6 +346,7 @@ def _reference_evidence_reasons(stage_dir: Path, agent: dict) -> list[str]:
     summary = _evidence_json(stage_dir, "summary.json", required=used_template, reasons=reasons)
     report = _evidence_json(stage_dir, "load-report.json", required=False, reasons=reasons)
     if isinstance(summary, dict):
+        reasons += _stamp_reasons(summary, "reference_gate.py", "evidence/summary.json")
         if summary.get("verdict") != "pass":
             reasons.append(f"evidence/summary.json (written by the reference template) says verdict {summary.get('verdict')!r}, "
                            f"but reference.json says {agent.get('verdict')!r}; the evidence decides")

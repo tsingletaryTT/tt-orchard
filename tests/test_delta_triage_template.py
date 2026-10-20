@@ -277,6 +277,13 @@ def test_the_draft_passes_the_stage_0_gate_and_the_hemmingway_reference(text_cas
     assert "license" not in hazards                      # both are apache-2.0 here
 
 
+def test_the_draft_carries_the_sha256_of_the_script_that_wrote_it(text_case):
+    import hashlib
+    stage = text_case()
+    assert run_triage(stage).returncode == 0
+    assert delta(stage)["template_sha256"] == hashlib.sha256((stage / "delta_triage.py").read_bytes()).hexdigest()
+
+
 def test_the_tensor_comparison_normalizes_the_language_model_prefix(text_case):
     stage = text_case()
     assert run_triage(stage).returncode == 0

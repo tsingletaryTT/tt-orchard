@@ -255,6 +255,14 @@ def test_the_round_trip_and_the_card_check(good_run):
 
 
 @needs_stack
+def test_the_summary_carries_the_sha256_of_the_script_that_wrote_it(good_run):
+    import hashlib
+    stage, _ = good_run
+    summary = json.loads(ev(stage, "summary.json").read_text())
+    assert summary["template_sha256"] == hashlib.sha256(TEMPLATE.read_bytes()).hexdigest()
+
+
+@needs_stack
 def test_a_tokenizer_with_thai_tokens_gets_a_thai_decode_too(good_run):
     stage, r = good_run
     assert ev(stage, "reference", "thai-prompt-ids.json").is_file()

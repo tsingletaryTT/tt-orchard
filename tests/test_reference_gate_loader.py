@@ -13,6 +13,7 @@ derived from stage 0's `alignment`, and a model with no lm_head fails with evide
 """
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import subprocess
@@ -201,6 +202,7 @@ def test_a_model_with_no_lm_head_fails_with_evidence_instead_of_crashing(headles
     ref = json.loads((stage / "reference.json").read_text())
     summary = json.loads((stage / "evidence" / "summary.json").read_text())
     assert ref["verdict"] == "fail" and summary["verdict"] == "fail"
+    assert summary["template_sha256"] == hashlib.sha256(TEMPLATE.read_bytes()).hexdigest()
     note = next(c["note"] for c in ref["checks"] if c["name"] == "decodes forward")
     assert "no lm_head" in note and "logits" in note
     assert json.loads((stage / "evidence" / "load-report.json").read_text())["missing_keys"] == []        # it did load
@@ -213,3 +215,4 @@ def test_a_load_that_raises_also_writes_the_summary_the_gate_reads(tmp_path):
     assert r.returncode == 3
     summary = json.loads((stage / "evidence" / "summary.json").read_text())
     assert summary["verdict"] == "fail" and summary["checks"]["loads"] is False
+    assert summary["template_sha256"] == hashlib.sha256(TEMPLATE.read_bytes()).hexdigest()

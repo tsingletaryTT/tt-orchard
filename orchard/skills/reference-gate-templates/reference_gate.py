@@ -54,6 +54,7 @@ torch or transformers is not importable. The script writes only inside its own d
 """
 from __future__ import annotations
 
+import hashlib
 import importlib
 import json
 import os
@@ -65,6 +66,8 @@ import time
 from pathlib import Path
 
 HERE_DIR = Path(__file__).resolve().parent
+# The sha256 of this file, written into summary.json so the stage gate can compare it with the shipped template.
+THIS_SHA256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 EVIDENCE = HERE_DIR / "evidence"
 REFERENCE = EVIDENCE / "reference"
 CONFIG_KEYS = ("run_dir", "model_snapshot", "python")
@@ -455,7 +458,8 @@ def main() -> int:
                           "note": f"{rt['ok']} of {rt['total']} strings round trip exactly.",
                           "evidence": [rel(EVIDENCE / "tokenizer-roundtrip.json")]})
         write_json(HERE_DIR / "reference.json", {"verdict": "fail", "environment": env, "checks": checks})
-        write_json(EVIDENCE / "summary.json", {"verdict": "fail", "checks": {c["name"]: c["pass"] for c in checks}, "environment": env})
+        write_json(EVIDENCE / "summary.json", {"verdict": "fail", "checks": {c["name"]: c["pass"] for c in checks}, "environment": env,
+                                            "template_sha256": THIS_SHA256})
         say(f"the weights did not load: {rep['error'][:300]}")
         return 3
     write_json(EVIDENCE / "load-report.json", rep)
@@ -478,7 +482,8 @@ def main() -> int:
                   {"name": "matches the card", "pass": False, "note": "not run: no text was generated",
                    "evidence": [rel(EVIDENCE / "load-report.json")]}]
         write_json(HERE_DIR / "reference.json", {"verdict": "fail", "environment": env, "checks": checks})
-        write_json(EVIDENCE / "summary.json", {"verdict": "fail", "checks": {c["name"]: c["pass"] for c in checks}, "environment": env})
+        write_json(EVIDENCE / "summary.json", {"verdict": "fail", "checks": {c["name"]: c["pass"] for c in checks}, "environment": env,
+                                            "template_sha256": THIS_SHA256})
         say(note)
         return 3
     if not thai:
@@ -528,6 +533,7 @@ def main() -> int:
     ]
     verdict = "pass" if all(c["pass"] for c in checks) else "fail"
     summary = {"verdict": verdict, "checks": {c["name"]: c["pass"] for c in checks}, "environment": env,
+               "template_sha256": THIS_SHA256,
                "load_seconds": rep["seconds"], "decode_seconds": main_run["seconds"],
                "thai_tokens": thai, "thai_decode_seconds": thai_run["seconds"] if thai_run else None,
                "reasoning_start": reasoning_start(main_run["text"])}

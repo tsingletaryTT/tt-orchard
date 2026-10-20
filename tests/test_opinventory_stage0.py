@@ -7,6 +7,7 @@ from pathlib import Path
 
 from orchard import opinventory as oi
 from orchard.stages import gate_delta
+from run_fakes import TEMPLATE_SHA, TEMPLATE_TEXT
 
 SKILL = Path(__file__).resolve().parent.parent / "orchard" / "skills" / "delta-triage.md"
 
@@ -96,7 +97,9 @@ def test_a_skipped_inventory_records_only_the_reason(tmp_path):
 
 
 def test_the_gate_accepts_an_inventory_key_and_still_needs_its_old_fields(tmp_path):
-    sd = stage_dir(tmp_path, inventory=inv_json([{"op": "a", "scaled_count": 1, "status": "unmapped"}]))
+    sd = stage_dir(tmp_path, delta={**DELTA, "template_sha256": TEMPLATE_SHA["delta_triage.py"]},
+                   inventory=inv_json([{"op": "a", "scaled_count": 1, "status": "unmapped"}]))
+    (sd / "delta_triage.py").write_text(TEMPLATE_TEXT["delta_triage.py"])        # the gate wants an unedited copy and its stamp
     run = tmp_path
     (run / "stages/0/evidence").mkdir()
     (run / "stages/0/evidence/diff.txt").write_text("e")

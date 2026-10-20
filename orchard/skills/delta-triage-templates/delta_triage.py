@@ -93,6 +93,8 @@ except ImportError:                      # that check then says it was skipped
     np = None
 
 HERE_DIR = Path(__file__).resolve().parent
+# The sha256 of this file, written into delta.json so the stage gate can compare it with the shipped template.
+THIS_SHA256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 EVIDENCE = HERE_DIR / "evidence"
 CONFIG_KEYS = ("run_dir", "model_id", "model_snapshot", "nearest_model_id", "nearest_snapshot")
 REPORT_MAX_BYTES = 2 * 1024 * 1024        # the research report is read only up to this size
@@ -1544,7 +1546,7 @@ def main() -> int:
     ns = t["normalized_name_sets"]
     delta = {
         "model": model_id, "nearest_model": nearest_id, "path": path, "class": cls,
-        "path_reasons": reasons, "sidecars": sc["sidecars"], "code_files": code,
+        "template_sha256": THIS_SHA256, "path_reasons": reasons, "sidecars": sc["sidecars"], "code_files": code,
         "alignment": {"pairs": ns["common"], "aligned_by_prefix": ns["aligned"]["pairs"], "rules": ns["aligned"]["rules"],
                       "raw_rules": ns["aligned"]["raw_rules"], "all_pairs": ns["aligned"]["all_pairs"], "only_in_model": ns["only_in_model"][:50],
                       "only_in_base": ns["only_in_base"][:50]},
