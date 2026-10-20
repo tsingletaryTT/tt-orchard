@@ -3,7 +3,12 @@
 """Build the program to run from a chat model's reply, for the `humaneval_chat` and `mbpp_chat` tasks.
 
 lm-evaluation-harness loads this file by path from the task directory (`!function code_chat_utils.build_humaneval`), so it imports nothing from
-this repository and nothing outside the standard library until a score is computed. The tests load it the same way.
+this repository and nothing outside the standard library. The tests load it the same way.
+
+The programs are run by `code_sandbox.py` (the file beside this one), which gives each program no network and no files outside a scratch
+directory. The scorer never runs a model's code in the harness's own process: Hugging Face's `code_eval` would, with the operator's HOME, token
+file and network, and its `reliability_guard` is not a sandbox. When the sandbox cannot start, scoring raises an error. Setting
+`ORCHARD_CODE_UNSANDBOXED=1` (what `bench_session --allow-unsandboxed-code` does) runs the programs without it.
 
 A chat reply is a few sentences and a fenced code block. The block may hold the whole function, the whole prompt and the body, or only the body;
 there may be a second block with example calls. `choose_block` picks the block that defines the function, and `humaneval_program` puts the
@@ -13,7 +18,11 @@ the function.
 """
 from __future__ import annotations
 
+import importlib.util
+import os
 import re
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 PYTHON_LANGS = ("", "python", "py", "python3")
 FENCE = re.compile(r"```([A-Za-z0-9_+-]*)[ \t]*\n(.*?)(?:```|\Z)", re.DOTALL)
@@ -87,24 +96,68 @@ def build_mbpp(resps: list[list[str]], docs: list[dict]) -> list[list[str]]:
     return [[mbpp_program(r, doc) for r in resp] for resp, doc in zip(resps, docs)]
 
 
-# ---- scoring: the same `code_eval` metric the harness's own code tasks use, loaded when first needed ----------------------------------------
+# ---- scoring: each program runs in the sandbox, and the score is HumanEval's unbiased pass@k estimate ------------------------------------------
 
-_code_eval = None
+UNSANDBOXED_ENV = "ORCHARD_CODE_UNSANDBOXED"
+TIMEOUT_S = 10.0           # per program; the harness's own `code_eval` allows 3 s, and this includes starting the sandboxed interpreter
+_sandbox = None
 
 
-def _compute():
-    global _code_eval
-    if _code_eval is None:
-        import evaluate
-        _code_eval = evaluate.load("code_eval")
-    return _code_eval
+def _load_sandbox():
+    global _sandbox
+    if _sandbox is None:
+        path = Path(__file__).resolve().with_name("code_sandbox.py")
+        spec = importlib.util.spec_from_file_location("code_sandbox_for_chat_tasks", path)
+        _sandbox = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_sandbox)
+    return _sandbox
+
+
+def run_one(program: str) -> bool:
+    """Whether `program` ran to the end without an error, in the sandbox. A sandbox that could not start raises RuntimeError (the score would
+    otherwise be a column of failures that looks like a result)."""
+    box = _load_sandbox()
+    outcome = box.run_program(program, timeout_s=TIMEOUT_S, unsandboxed=os.environ.get(UNSANDBOXED_ENV) == "1")
+    if outcome.status == "sandbox_unavailable":
+        raise RuntimeError("the code sandbox could not start, so no program was run: " + outcome.detail
+                           + f". Fix the kernel's Landlock support, or set {UNSANDBOXED_ENV}=1 to run the programs without isolation.")
+    return outcome.status == "passed"
+
+
+def estimate_pass_at_k(n: int, c: int, k: int) -> float:
+    """The unbiased estimator of Chen et al. 2021: the chance that at least one of k samples drawn from n, c of which are correct, is correct."""
+    if n - c < k:
+        return 1.0
+    miss = 1.0
+    for i in range(n - c + 1, n + 1):
+        miss *= 1.0 - k / i
+    return 1.0 - miss
+
+
+def _compute(references, predictions, k):
+    """Like `evaluate.load("code_eval").compute`: each prediction plus its reference test, run as one program. Returns {"pass@k": mean}
+    for every k that no problem has fewer predictions than."""
+    _load_sandbox()                      # once, before the worker threads start
+    programs = [(i, pred + "\n" + ref) for i, (ref, preds) in enumerate(zip(references, predictions)) for pred in preds]
+    with ThreadPoolExecutor(max_workers=min(8, os.cpu_count() or 1)) as pool:
+        ok = list(pool.map(lambda item: run_one(item[1]), programs))
+    passed = {}
+    counts = {}
+    for (i, _), result in zip(programs, ok):
+        counts[i] = counts.get(i, 0) + 1
+        passed[i] = passed.get(i, 0) + (1 if result else 0)
+    out = {}
+    for kk in k:
+        if counts and all(n >= kk for n in counts.values()):
+            out[f"pass@{kk}"] = sum(estimate_pass_at_k(counts[i], passed[i], kk) for i in counts) / len(counts)
+    return out
 
 
 def pass_at_k(references, predictions, k=None):
     assert k is not None
     if isinstance(k, int):
         k = [k]
-    return _compute().compute(references=references, predictions=predictions, k=k)[0]
+    return _compute(references, predictions, k)
 
 
 def pass_at_1(references, predictions):
@@ -112,4 +165,4 @@ def pass_at_1(references, predictions):
         references = [references]
     if isinstance(predictions[0], str):
         predictions = [[p] for p in predictions]
-    return _compute().compute(references=references, predictions=predictions, k=[1])[0]["pass@1"]
+    return _compute(references, predictions, [1])["pass@1"]

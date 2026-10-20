@@ -94,13 +94,28 @@ def test_the_environment_has_no_token_and_a_home_inside_the_output_directory(tmp
     assert "HF_HUB_OFFLINE" not in env                                         # the datasets must be downloadable
     assert env["HOME"].startswith(str(tmp_path)) and env["HF_HOME"].startswith(str(tmp_path))
     assert env["PATH"] == "/usr/bin" and env["LANG"] == "C.UTF-8"
-    assert env["HF_ALLOW_CODE_EVAL"] == "1"
+    assert "HF_ALLOW_CODE_EVAL" not in env
 
 
-def test_the_code_eval_gate_is_set_only_for_code_tasks(tmp_path):
-    assert "HF_ALLOW_CODE_EVAL" not in bs.lm_eval_env("gsm8k", tmp_path)
-    assert "HF_ALLOW_CODE_EVAL" not in bs.lm_eval_env("ifeval", tmp_path)
-    assert bs.lm_eval_env("mbpp_chat", tmp_path)["HF_ALLOW_CODE_EVAL"] == "1"
+def test_no_task_gets_the_hugging_face_code_execution_gate(tmp_path):
+    """The chat code tasks score through orchard/lm_eval_tasks/code_sandbox.py. The gate would let Hugging Face's `code_eval` run a model's code in
+    the harness's own process, with the operator's files and network (its reliability_guard is not a sandbox), so it is never set."""
+    for task in ("gsm8k", "ifeval", "humaneval_chat", "mbpp_chat"):
+        assert "HF_ALLOW_CODE_EVAL" not in bs.lm_eval_env(task, tmp_path)
+        assert "HF_ALLOW_CODE_EVAL" not in bs.lm_eval_env(task, tmp_path, unsandboxed=True)
+
+
+def test_the_unsandboxed_variable_is_set_only_when_the_operator_allowed_it_and_only_for_code_tasks(tmp_path):
+    assert "ORCHARD_CODE_UNSANDBOXED" not in bs.lm_eval_env("humaneval_chat", tmp_path)
+    assert bs.lm_eval_env("humaneval_chat", tmp_path, unsandboxed=True)["ORCHARD_CODE_UNSANDBOXED"] == "1"
+    assert bs.lm_eval_env("mbpp_chat", tmp_path, unsandboxed=True)["ORCHARD_CODE_UNSANDBOXED"] == "1"
+    assert "ORCHARD_CODE_UNSANDBOXED" not in bs.lm_eval_env("gsm8k", tmp_path, unsandboxed=True)
+
+
+def test_the_docstring_does_not_claim_more_than_the_environment_does():
+    doc = bs.__doc__
+    assert "scrubbed environment (no tokens" not in doc
+    assert "code_sandbox" in doc and "Landlock" in doc
 
 
 # ---- reading the harness's results --------------------------------------------------------------------------------------------------
@@ -220,7 +235,8 @@ c = http.client.HTTPConnection(u.hostname, u.port, timeout=10)
 c.request("POST", u.path, json.dumps({"model": margs["model"], "messages": [{"role": "user", "content": "q"}]}), {"Content-Type": "application/json"})
 c.getresponse().read()
 here = os.path.dirname(os.path.abspath(__file__))
-open(here + "/argv.jsonl", "a").write(json.dumps({"argv": a, "home": os.environ.get("HOME"), "token": os.environ.get("HF_TOKEN")}) + "\n")
+open(here + "/argv.jsonl", "a").write(json.dumps({"argv": a, "home": os.environ.get("HOME"), "token": os.environ.get("HF_TOKEN"),
+                                                  "unsandboxed": os.environ.get("ORCHARD_CODE_UNSANDBOXED"), "gate": os.environ.get("HF_ALLOW_CODE_EVAL")}) + "\n")
 out = flag("--output_path")
 task = flag("--tasks")
 if os.path.exists(here + "/fail"):
@@ -248,7 +264,7 @@ def run_session(h, phases, **kw):
     argv = ["--label", "t", "--url", f"http://127.0.0.1:{h['server'].port}", "--out-dir", str(out), "--lm-eval", str(h["lm_eval"]), "--phases", phases,
             "--bfcl-dir", str(FIX / "bfcl"), "--limit", "2", "--concurrency", "2", "--quiet-s", "30"]
     for k, v in kw.items():
-        argv += [f"--{k.replace('_', '-')}", str(v)]
+        argv += [f"--{k.replace('_', '-')}"] + ([] if v is True else [str(v)])
     code = bs.main(argv)
     return code, out
 
@@ -554,3 +570,84 @@ def test_a_line_with_a_different_draft_length_from_the_first_is_skipped_so_total
     text = _line(8, 20, 7, [2, 3, 1, 1, 1, 0, 0, 0]) + _line(4, 9, 3, [1, 1, 1, 1])
     got = bs.drafter_stats(text)
     assert got["sessions"] == 1 and got["draft_length"] == 7 and len(got["histogram"]) == 8
+
+
+# ---- the code phases need the sandbox (review finding 6) -----------------------------------------------------------------------------
+
+SANDBOX_OK = {"ok": True, "detail": "every probe action was refused", "seen": {}}
+SANDBOX_BAD = {"ok": False, "detail": "this kernel has no Landlock", "seen": None}
+
+
+@pytest.fixture
+def sandbox(monkeypatch):
+    state = {"result": SANDBOX_OK, "calls": 0}
+
+    def check():
+        state["calls"] += 1
+        return state["result"]
+    monkeypatch.setattr(bs, "code_sandbox_check", check)
+    return state
+
+
+def logged(harness):
+    return [json.loads(l) for l in (harness["tmp"] / "argv.jsonl").read_text().splitlines()]
+
+
+def test_a_code_phase_is_refused_before_anything_runs_when_the_sandbox_is_unavailable(harness, sandbox):
+    sandbox["result"] = SANDBOX_BAD
+    with pytest.raises(SystemExit) as exc:
+        run_session(harness, "gsm8k,humaneval")
+    assert exc.value.code == 2 and harness["server"].seen == []
+    assert not (harness["tmp"] / "argv.jsonl").exists()
+
+
+def test_the_refusal_names_the_reason_and_the_flag(harness, sandbox, capsys):
+    sandbox["result"] = SANDBOX_BAD
+    with pytest.raises(SystemExit):
+        run_session(harness, "mbpp")
+    err = capsys.readouterr().err
+    assert "no Landlock" in err and "--allow-unsandboxed-code" in err
+
+
+def test_the_operators_flag_lets_the_code_phase_run_without_the_sandbox_and_the_summary_says_so(harness, sandbox):
+    sandbox["result"] = SANDBOX_BAD
+    code, out = run_session(harness, "humaneval", allow_unsandboxed_code=True)
+    s = json.loads((out / "summary.json").read_text())
+    assert code == 0 and s["code_sandbox"]["mode"] == "none" and "no Landlock" in s["code_sandbox"]["reason"]
+    assert logged(harness)[0]["unsandboxed"] == "1" and logged(harness)[0]["gate"] is None
+
+
+def test_a_working_sandbox_is_recorded_and_the_child_is_not_told_to_skip_it(harness, sandbox):
+    code, out = run_session(harness, "humaneval,mbpp")
+    s = json.loads((out / "summary.json").read_text())
+    assert code == 0 and s["code_sandbox"]["mode"] == "landlock+seccomp"
+    assert all(e["unsandboxed"] is None and e["gate"] is None for e in logged(harness))
+
+
+def test_a_session_with_no_code_phase_does_not_check_the_sandbox(harness, sandbox):
+    sandbox["result"] = SANDBOX_BAD
+    code, out = run_session(harness, "gsm8k,bfcl")
+    assert code == 0 and sandbox["calls"] == 0
+    assert "code_sandbox" not in json.loads((out / "summary.json").read_text())
+
+
+def test_the_real_check_is_the_one_in_the_task_directory():
+    """The name the session calls must reach code_sandbox.self_check, not a stub of its own."""
+    import inspect
+    assert "self_check" in inspect.getsource(bs.code_sandbox_check)
+
+
+# ---- a phase whose requests failed is not ok --------------------------------------------------------------------------------------
+
+def test_a_harness_phase_with_failed_server_requests_is_flagged_even_though_the_harness_exited_zero(harness):
+    harness["server"].fail = True
+    code, out = run_session(harness, "gsm8k")
+    g = json.loads((out / "summary.json").read_text())["phases"][0]
+    assert g["proxy"]["errors"] == 1
+    assert g["ok"] is False and "1 of 1 requests" in g["problem"] and code == 1
+    assert g["scores"]["tasks"]["gsm8k"], "the scores are kept, so the reader can see what the failures did to them"
+
+
+def test_a_phase_with_no_failed_requests_stays_ok(harness):
+    code, out = run_session(harness, "gsm8k")
+    assert json.loads((out / "summary.json").read_text())["phases"][0]["ok"] is True and code == 0
