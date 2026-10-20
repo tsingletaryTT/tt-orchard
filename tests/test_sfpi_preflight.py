@@ -13,7 +13,7 @@ from pathlib import Path
 
 from orchard import preflight as pf
 from orchard import sfpi
-from test_preflight import CLEF_PAYLOAD, cfg, signals
+from test_preflight import CLEF_PAYLOAD, LAB_FREE, cfg, lab_cfg, signals
 
 BUNDLE = "episod/qwen3.8-27b-dflash2-p300"
 
@@ -128,3 +128,60 @@ from orchard.nearest import Installed        # noqa: E402  (after the tests that
 
 BUNDLE_INSTALLED = Installed(BUNDLE, "org/base-27b", "6", 2)
 HUB = pf.parse_hub({**CLEF_PAYLOAD, "cardData": {"license": "apache-2.0", "base_model": "org/base-27b"}})
+
+
+# ---- a lab box: the kernels compile on the lab, so the lab's SFPI is the one that counts (PR 11 review, finding 2) ----
+
+def _lab_run(tmp_path, *, brain, lab, with_lab_signal=True):
+    from orchard.bringup_config import Lab
+    c = lab_cfg(tmp_path)
+    kw = dict(sfpi=lambda b: (brain, "7.73.0"), installed_bundles=lambda: [BUNDLE_INSTALLED],
+              hub_info=lambda m: (HUB, None), local_snapshot=lambda m: Path("/hf/snap"),
+              lab_status=lambda: (True, LAB_FREE, ""))
+    if with_lab_signal:
+        kw["lab_sfpi"] = lab
+    return pf.run_preflight(c, "Cloudflare/clef", accept_credentials=False, signals=signals(**kw))
+
+
+def test_in_lab_mode_a_stale_sfpi_on_this_box_does_not_block(tmp_path):
+    out = _lab_run(tmp_path, brain="7.67.0", lab=lambda: "7.87.0")
+    row = next(c for c in out if c.name == "sfpi")
+    assert row.status == pf.OK and "7.87.0" in row.detail and "node4" in row.detail
+    assert not pf.blocked(out)
+
+
+def test_in_lab_mode_a_stale_sfpi_on_the_lab_blocks_and_names_the_lab(tmp_path):
+    out = _lab_run(tmp_path, brain="7.87.0", lab=lambda: "7.67.0")
+    row = next(c for c in out if c.name == "sfpi")
+    assert (row.status, row.reason) == (pf.BLOCK, "hardware-unhealthy")
+    assert "7.67.0" in row.detail and "node4" in row.detail
+
+
+def test_in_lab_mode_an_unreadable_lab_version_is_a_warning(tmp_path):
+    out = _lab_run(tmp_path, brain="7.67.0", lab=lambda: None)
+    row = next(c for c in out if c.name == "sfpi")
+    assert row.status == pf.WARN and "node4" in row.detail and not pf.blocked(out)
+
+
+def test_in_lab_mode_a_failing_lab_probe_is_a_warning_and_never_an_exception(tmp_path):
+    def boom():
+        raise OSError("ssh died")
+    out = _lab_run(tmp_path, brain="7.67.0", lab=boom)
+    row = next(c for c in out if c.name == "sfpi")
+    assert row.status == pf.WARN and not pf.blocked(out)
+
+
+def test_in_lab_mode_with_no_lab_probe_the_row_is_left_out_instead_of_reading_this_box(tmp_path):
+    out = _lab_run(tmp_path, brain="7.67.0", lab=None, with_lab_signal=False)
+    assert "sfpi" not in [c.name for c in out]
+
+
+def test_the_default_signals_read_the_labs_version_over_ssh(tmp_path, monkeypatch):
+    calls = []
+
+    class Done:
+        returncode, stdout, stderr = 0, "7.87.0\n", ""
+    monkeypatch.setattr(pf.subprocess, "run", lambda argv, **kw: calls.append(argv) or Done())
+    c = lab_cfg(tmp_path)
+    assert pf.default_signals(c).lab_sfpi() == "7.87.0"
+    assert calls and "node4" in calls[0] and "dpkg-query" in calls[0][-1] and "sfpi" in calls[0][-1]

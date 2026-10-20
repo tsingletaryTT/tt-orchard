@@ -55,15 +55,16 @@ def installed_version(run=_run) -> str | None:
     return out.strip() if rc == 0 and parse_version(out) else None
 
 
-def check_sfpi(installed: str | None, pinned: str | None, bundle: str) -> Check | None:
-    """None when the bundle pins no version (nothing to compare)."""
+def check_sfpi(installed: str | None, pinned: str | None, bundle: str, where: str | None = None) -> Check | None:
+    """None when the bundle pins no version (nothing to compare). `where` names a box other than this one (the lab)."""
     if pinned is None:
         return None
+    at = f" on {where}" if where else ""
     if installed is None:
-        return Check("sfpi", WARN, f"the installed SFPI version could not be read (`dpkg-query -W sfpi`); bundle "
+        return Check("sfpi", WARN, f"the installed SFPI version{at} could not be read (`dpkg-query -W sfpi`); bundle "
                      f"{bundle} pins {pinned}")
     if parse_version(installed) < parse_version(pinned):
-        return Check("sfpi", BLOCK, f"the installed SFPI compiler is {installed} and bundle {bundle} pins {pinned}. "
+        return Check("sfpi", BLOCK, f"the installed SFPI compiler{at} is {installed} and bundle {bundle} pins {pinned}. "
                      "Kernel compiles fail with `'vLut8si' is not a member of 'sfpi'` (seen on 2026-10-13 with 7.67.0 "
                      f"against 7.73.0). {FIX}", "hardware-unhealthy")
-    return Check("sfpi", OK, f"installed SFPI {installed} is at least the {pinned} that bundle {bundle} pins")
+    return Check("sfpi", OK, f"installed SFPI {installed}{at} is at least the {pinned} that bundle {bundle} pins")
