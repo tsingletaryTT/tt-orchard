@@ -1894,7 +1894,7 @@ def test_run_attempt_stops_agent_processes_that_outlive_the_step_before_the_verd
         attempt = kp.run_attempt(op="add", n=1, probe_dir=tmp_path / "probe", env=fake_kenv, endpoint="http://x/v1",
                                  model="m", coder_model="m", probe_id="t", run_watched=check, tt_lang=FACTS)
         (p,) = _BackgroundingStep.started
-        assert order == ["sweep", "check"]
+        assert order == ["sweep", "check", "sweep"]            # the second sweep is after the check (finding 5)
         assert [s["pid"] for s in attempt["swept"]] == [p.pid] and p.wait(timeout=5) is not None
         on_disk = json.loads((kp.verdict_dir(tmp_path / "probe", "add", 1) / "attempt.json").read_text())
         assert on_disk["swept"] == attempt["swept"]
@@ -3496,3 +3496,125 @@ def test_the_report_header_records_the_reply_cap_with_the_other_budgets():
     header = kp.report_header(env=None, coder_model="m", probe_id="p", ops=["add"], hw=None,
                               tt_lang={"sim_version": "x"}, ignored_records=0)
     assert header["budget"]["max_tokens"] == 4096
+
+
+# ---- the environment of the probe's children (review finding 5) -------------------------------------------------
+
+SECRET_ENV = {"HF_TOKEN": "hf_planted", "GH_TOKEN": "gh_planted", "SSH_AUTH_SOCK": "/tmp/planted-agent.sock",
+              "AWS_SECRET_ACCESS_KEY": "planted", "OPENAI_API_KEY": "sk-planted"}
+
+
+@pytest.fixture
+def secret_env(monkeypatch):
+    for k, v in SECRET_ENV.items():
+        monkeypatch.setenv(k, v)
+    return SECRET_ENV
+
+
+def _assert_no_operator_secrets(env: dict, *, real_home: str):
+    assert isinstance(env, dict), "the child must get an explicit environment, not the probe's own"
+    for k in SECRET_ENV:
+        assert k not in env, k
+    assert env["HOME"] != real_home and not env["HOME"].startswith(real_home + "/.")
+    assert env["PATH"]
+    assert env["HF_TOKEN_PATH"].startswith(env["HOME"])        # a token path that does not exist
+
+
+def test_the_authoritative_check_child_gets_a_clean_environment(tmp_path, fake_kenv, secret_env):
+    seen = {}
+
+    def fake(argv, **kw):
+        seen.update(kw)
+        Path(argv[argv.index("--out") + 1]).write_text(json.dumps({"passed": False, "category": "numeric_mismatch",
+                                                                  "first_line": "x", "sets": []}))
+        return kp.Watched(1, None, False, 0.1)
+
+    adir = tmp_path / "add" / "attempt-1"
+    kp.prepare_attempt(adir, op="add", env=fake_kenv, tt_lang=FACTS)
+    (adir / "kernel.py").write_text("# kernel\n")
+    kp.authoritative_check(adir, op="add", env=fake_kenv, run_watched=fake, tt_lang=FACTS)
+    env = seen["env"]
+    _assert_no_operator_secrets(env, real_home=str(Path.home()))
+    # The simulator child is not leased, so it keeps the no-chip mask. Its HOME is in the probe's own verdict
+    # directory, not in the attempt directory the agent can write.
+    assert env["TT_VISIBLE_DEVICES"] == NO_CHIP and env["TT_METAL_VISIBLE_DEVICES"] == NO_CHIP
+    assert Path(env["HOME"]).resolve().is_relative_to(kp.verdict_dir(tmp_path, "add", 1).resolve())
+    assert env["ORCHARD_RUN_DIR"] == str(adir.resolve())        # so sweep_strays can find what the child leaves
+
+
+def test_the_smoke_test_and_the_hardware_run_get_a_clean_environment_and_no_device_mask(tmp_path, fake_kenv,
+                                                                                         secret_env):
+    seen = []
+
+    def fake(argv, **kw):
+        seen.append(kw["env"])
+        if "--out" in argv:
+            Path(argv[argv.index("--out") + 1]).write_text(json.dumps({"phase": "hw", "sets": [GOOD_HW_SET],
+                                                                      "error": None}))
+        else:
+            with open(kw["log_path"], "a") as f:
+                f.write("PASSED!\n")
+        return kp.Watched(0, None, False, 1.0)
+
+    adir, attempt = _passed_attempt(tmp_path, fake_kenv)
+    kp.run_hardware([attempt], probe_dir=tmp_path, env=fake_kenv, shared_python="/p", run_watched=fake)
+    assert len(seen) == 2
+    for env in seen:
+        _assert_no_operator_secrets(env, real_home=str(Path.home()))
+        # gozer sets TT_VISIBLE_DEVICES for its child; a no-chip mask left in TT_METAL_VISIBLE_DEVICES would hide the
+        # leased chip from it.
+        assert "TT_VISIBLE_DEVICES" not in env and "TT_METAL_VISIBLE_DEVICES" not in env
+    assert seen[1]["ORCHARD_RUN_DIR"] == str(adir.resolve())
+
+
+def test_the_gozer_variables_reach_the_hardware_child(tmp_path, fake_kenv, monkeypatch):
+    """The lease store is found through GOZER_ROOT; a clean environment must not lose it."""
+    monkeypatch.setenv("GOZER_ROOT", "/some/gozer/root")
+    seen = []
+
+    def fake(argv, **kw):
+        seen.append(kw["env"])
+        return kp.Watched(0, None, False, 1.0)
+
+    kp.smoke_test(env=fake_kenv, shared_python="/p", run_watched=fake)
+    assert seen[0]["GOZER_ROOT"] == "/some/gozer/root"
+
+
+def test_the_agents_background_process_is_swept_after_the_check_as_well(tmp_path, fake_kenv, monkeypatch):
+    """A kernel the check imports can start a background process. The sweep before the verdict cannot see it."""
+    order = []
+    monkeypatch.setattr(kp, "sweep_strays", lambda d, **kw: order.append("sweep") or [])
+
+    def fake(argv, **kw):
+        order.append("check")
+        Path(argv[argv.index("--out") + 1]).write_text(json.dumps({"passed": False, "category": "numeric_mismatch",
+                                                                  "first_line": "x", "sets": []}))
+        return kp.Watched(1, None, False, 0.1)
+
+    with FakeModel(scripted(call("write_file", path="kernel.py", content="# a kernel\n"), final("done"))) as server:
+        run_attempt(tmp_path, fake_kenv, server, run_watched=fake)
+    assert order == ["sweep", "check", "sweep"]
+
+
+def test_the_hardware_run_is_swept_after_gozer_returns(tmp_path, fake_kenv, monkeypatch):
+    """The kernel runs on a leased chip; a process it leaves running must be stopped when the lease is released."""
+    order = []
+    monkeypatch.setattr(kp, "sweep_strays", lambda d, **kw: order.append(("sweep", Path(d).name)) or
+                        [{"pid": 1234, "cmdline": "sleep", "stopped": True}])
+    adir, attempt = _passed_attempt(tmp_path, fake_kenv)
+
+    def fake(argv, **kw):
+        order.append("gozer")
+        Path(argv[argv.index("--out") + 1]).write_text(json.dumps({"phase": "hw", "sets": [GOOD_HW_SET],
+                                                                  "error": None}))
+        return kp.Watched(0, None, False, 1.0)
+
+    hw = kp.hardware_phase(adir, attempt, env=fake_kenv, shared_python="/p", run_watched=fake)
+    assert order == ["gozer", ("sweep", "attempt-1")]
+    assert hw["swept"] == [{"pid": 1234, "cmdline": "sleep", "stopped": True}]
+
+
+def test_a_credential_named_gozer_variable_is_dropped_not_passed_and_not_fatal(fake_kenv, monkeypatch):
+    monkeypatch.setenv("GOZER_AUTH_TOKEN", "planted")
+    env = kp.child_env(fake_kenv.scratch_dir, hardware=True)
+    assert "GOZER_AUTH_TOKEN" not in env

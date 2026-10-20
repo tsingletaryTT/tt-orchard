@@ -67,7 +67,7 @@ from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 from orchard import defaults, ttlang_env
-from orchard.agent import TOOL_SCHEMAS, AgentStep, Tools, agent_env, probe_model
+from orchard.agent import DEVICE_VARS, SECRET_NAME, TOOL_SCHEMAS, AgentStep, Tools, agent_env, probe_model
 from orchard.canary import post_json
 from orchard.ledger import Ledger
 from orchard.stallwatch import StallWatcher, Watched, run_watched
@@ -425,6 +425,38 @@ def copy_kernel(adir: Path, clean: Path) -> tuple[str | None, str | None, str]:
     return None, hashlib.sha256(data).hexdigest(), ""
 
 
+# ---- the environment of the probe's children --------------------------------------------------------------------
+#
+# The simulator check, the smoke test and the hardware run import or run code the probe did not write (the agent's
+# kernel, upstream's example). They get agent_env's environment, as the agent's own shell does: an allow-list, a HOME
+# that holds no credentials, a token path that does not exist. A child that inherited the probe's environment would see
+# the operator's HOME, any token variable and SSH_AUTH_SOCK.
+
+# Variables a hardware child needs from the probe's environment: where gozer keeps its leases and the tt-metal
+# locations. A name that looks like a credential is never passed, whatever its prefix.
+PASS_PREFIXES = ("GOZER_", "TT_METAL_CACHE", "TT_METAL_HOME", "TT_METAL_RUNTIME_ROOT", "ARCH_NAME")
+
+
+def child_env(home_run_dir, adir=None, *, hardware: bool, source=None) -> dict:
+    """The explicit environment of one child of the probe.
+
+    HOME is inside `home_run_dir`, a directory the probe owns (a verdict directory, or the scratch directory), so the
+    child's user site-packages are not a directory the agent can write. ORCHARD_RUN_DIR names the attempt directory
+    (`adir`) when there is one, so sweep_strays finds what the child leaves behind. A leased (`hardware`) child gets no
+    device mask: gozer sets TT_VISIBLE_DEVICES for it, and the no-chip value in TT_METAL_VISIBLE_DEVICES would hide the
+    leased chip. A child that is not leased keeps the mask."""
+    source = os.environ if source is None else source
+    extra = {k: v for k, v in source.items()
+             if k.startswith(PASS_PREFIXES) and not SECRET_NAME.search(k) and k not in DEVICE_VARS}
+    env = agent_env(home_run_dir, extra=extra, source=source)
+    if adir is not None:
+        env["ORCHARD_RUN_DIR"] = str(Path(adir).resolve())
+    if hardware:
+        for k in DEVICE_VARS:
+            env.pop(k, None)
+    return env
+
+
 FILE_RULE_REMEDY = "write kernel.py with write_file as a plain file of at most 256 KiB"
 
 
@@ -455,8 +487,7 @@ def authoritative_check(adir: Path, *, op: str, env, run_watched=run_watched, tt
             "--spec", str(TEMPLATES / "ops" / f"{op}.json"), "--sim", str(env.sim),
             "--timeout-s", str(BUDGET["sim_timeout_s"]), "--tt-lang-json", json.dumps(facts),
             "--out", str(out)]
-    # env=None: the child inherits the probe's own environment. The shipped check needs PATH; it is not an agent shell.
-    got = run_watched(argv, cwd=clean, env=None, log_path=vdir / "authoritative-output.txt",
+    got = run_watched(argv, cwd=clean, env=child_env(vdir, adir, hardware=False), log_path=vdir / "authoritative-output.txt",
                       watcher=StallWatcher(quiet_s=BUDGET["sim_timeout_s"] / 2),
                       backstop_s=BUDGET["sim_timeout_s"] + 120)
     if got.killed:
@@ -836,7 +867,12 @@ def run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_id
         # Before any verdict, and on a crash or an interrupt too: no process the agent started may keep running.
         swept = sweep_strays(adir)
     agent_wall_s = round(time.monotonic() - started, 2)
-    check = authoritative_check(adir, op=op, env=env, run_watched=run_watched, tt_lang=facts)
+    try:
+        check = authoritative_check(adir, op=op, env=env, run_watched=run_watched, tt_lang=facts)
+    finally:
+        # The check imports the agent's kernel, which can start a process that outlives the check. The children carry
+        # ORCHARD_RUN_DIR=<attempt directory>, so the same sweep finds them.
+        swept = swept + sweep_strays(adir)
     sets = check.get("sets") if isinstance(check.get("sets"), list) else []
     measures = set_measures(sets)
     passed = check.get("passed") is True
@@ -900,7 +936,7 @@ def smoke_test(*, env, shared_python, run_watched=run_watched, record: dict | No
     log = Path(env.scratch_dir) / "smoke.txt"
     start = _size(log)
     argv = _gozer("kernel-probe smoke test", str(shared_python), str(Path(env.src_dir) / "examples" / "eltwise_add.py"))
-    got = run_watched(argv, cwd=env.scratch_dir, env=None, log_path=log, watcher=_hw_watcher(),
+    got = run_watched(argv, cwd=env.scratch_dir, env=child_env(env.scratch_dir, hardware=True), log_path=log, watcher=_hw_watcher(),
                       backstop_s=BUDGET["hw_backstop_s"], term_grace_s=GOZER_TERM_GRACE_S)
     text = _new_text(log, start)
     tail = text.splitlines()[-SMOKE_TAIL_LINES:]
@@ -966,14 +1002,19 @@ def hardware_phase(adir: Path, attempt: dict, *, env, shared_python, run_watched
     argv = _gozer(f"kernel-probe {op} attempt {n}", str(shared_python), str(TEMPLATES / "kernel_harness.py"),
                   "--spec", str(TEMPLATES / "ops" / f"{op}.json"), "--kernel", str(kernel), "--out", str(out),
                   "--phase", "hw")
-    got = run_watched(argv, cwd=vdir / CLEAN_DIR, env=None, log_path=log, watcher=_hw_watcher(),
-                      backstop_s=BUDGET["hw_backstop_s"], term_grace_s=GOZER_TERM_GRACE_S)
+    try:
+        got = run_watched(argv, cwd=vdir / CLEAN_DIR, env=child_env(vdir, adir, hardware=True), log_path=log,
+                          watcher=_hw_watcher(), backstop_s=BUDGET["hw_backstop_s"], term_grace_s=GOZER_TERM_GRACE_S)
+    finally:
+        # gozer has released the lease by now. A process the kernel left behind is stopped here (finding 5).
+        swept = sweep_strays(adir)
+    extra = {"swept": swept} if swept else {}
     if got.killed:
         # The first line is the watcher's own reason ("backstop: ..." or "stalled: ..." or "repeating: ..."), so a
         # watcher stop is not read as a device hang without saying which rule stopped it.
         _record_hw(adir, attempt, {"passed": False, "category": "hang", "pcc_min": None, "sets": [], "violations": [],
                                    "first_line": got.reason, "elapsed_s": round(got.elapsed_s, 1),
-                                   "watch": _watch_facts(got)})
+                                   "watch": _watch_facts(got), **extra})
         raise ProbeBlocked(f"{op} attempt {n}: {got.reason}")
     try:
         raw = _read_regular(out, 64 * 1024 * 1024)
@@ -989,7 +1030,7 @@ def hardware_phase(adir: Path, attempt: dict, *, env, shared_python, run_watched
     sets = result.get("sets") if result and isinstance(result.get("sets"), list) else []
     return _record_hw(adir, attempt, {"passed": category is None, "category": category, "first_line": line,
                                       **set_measures(sets), "sets": sets, "violations": [],
-                                      "elapsed_s": round(got.elapsed_s, 1), "watch": _watch_facts(got)})
+                                      "elapsed_s": round(got.elapsed_s, 1), "watch": _watch_facts(got), **extra})
 
 
 def run_hardware(attempts: list[dict], *, probe_dir, env, shared_python, run_watched=run_watched,
