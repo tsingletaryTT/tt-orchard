@@ -50,7 +50,7 @@ for phase in LM:
     a, b = per_item("pi-default", phase), per_item("base-default", phase)
     ids = sorted(set(a) & set(b))
     w = sum(1 for i in ids if a[i] > b[i]); l = sum(1 for i in ids if a[i] < b[i])
-    res["tasks"][phase]["paired"] = {"items": len(ids), "pi_only_right": w, "base_only_right": l, "sign_test_p": round(sign_test(w, l), 4)}
+    res["tasks"][phase]["paired"] = {"items": len(ids), "pi_only_right": w, "base_only_right": l, "sign_test_p": float(f"{sign_test(w, l):.4g}")}
 json.dump(res, open(sys.argv[1], "w"), indent=2)
 for t, v in res["tasks"].items():
     print(t, {m: (x.get("passed"), x["score"], x.get("cut_off")) for m, x in v.items() if m in ("pi", "base")}, v.get("paired"))

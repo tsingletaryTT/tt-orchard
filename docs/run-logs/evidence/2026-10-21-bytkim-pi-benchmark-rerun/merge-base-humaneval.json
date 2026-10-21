@@ -1,0 +1,23 @@
+{
+ "humaneval": {
+  "n": 164,
+  "rerun_n": 8,
+  "metrics": {
+   "pass@1": {
+    "before": 0.939024,
+    "after": 0.963415
+   }
+  },
+  "flips": {
+   "pass@1": {
+    "gained": [
+     22,
+     32,
+     116,
+     132
+    ],
+    "lost": []
+   }
+  }
+ }
+}

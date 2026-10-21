@@ -195,3 +195,101 @@ def test_an_unpinned_weights_revision_is_refused(bundle, tmp_path):
         {"weights": {"repo_id": NEW, "revision": "main"}}))
     r = run_prepare(bundle, tmp_path / "hf")
     assert r.returncode == 2 and "40-character" in r.stderr
+
+
+# ---- the package-thin that resolves the pinned weights itself (tt-model 0.1.0, seen 2026-10-19) ----------------------------------
+# Until then package-thin wrote one `export HF_MODEL=` default. The current one adds a block that resolves the pinned weights with
+# snapshot_download and then sets HF_MODEL and MODEL_WEIGHTS_DIR to the resolved snapshot just before the exec, so wire_weights found
+# two HF_MODEL exports and stopped ("expected exactly one export HF_MODEL= line, found 2"). The fixture is the real generated file.
+
+FIXTURE = Path(__file__).resolve().parent / "fixtures" / "package" / "package_thin_run_sh_resolving.txt"
+PI, PI_REV = "bytkim/Qwen3.8-27B-pi", "34d3f21045f7b41453e66c39e137cfc818a603ce"
+
+
+def resolving():
+    return FIXTURE.read_text(encoding="utf-8")
+
+
+def test_the_fixture_is_the_resolving_format():
+    text = resolving()
+    assert text.count("\nexport HF_MODEL=") == 2 and 'export HF_MODEL="$resolved_hf_model"' in text
+    assert 'export MODEL_WEIGHTS_DIR="$resolved_hf_model"' in text and 'resolved_hf_model="$(' in text
+
+
+def test_the_resolving_format_is_wired_to_the_model_dir_and_keeps_its_resolver():
+    text = wire_weights(resolving(), PI)
+    lines = text.splitlines()
+    assert [ln for ln in lines if ln.startswith("export HF_MODEL=")] == [f'export HF_MODEL="${{HF_MODEL:-{PI}}}"', WIRING_LINES[0]]
+    assert [ln for ln in lines if ln.startswith("export MODEL_WEIGHTS_DIR=")] == [WIRING_LINES[1]]
+    assert "snapshot_download" in text and 'resolved_hf_model="$(' in text            # the resolver still runs, before the wiring
+    assert text.index('resolved_hf_model="$(') < text.index(WIRING_LINES[0]) < text.index(PREPARE_LINE) < text.index(EXEC_LINE)
+    assert '--model "$HERE/model-dir"' in text and "--revision" not in text and "--tokenizer-revision" not in text
+    assert text.count(EXEC_LINE) == 1
+    assert weights_wiring_problems(text, nearest_model=BASE) == []
+
+
+def test_the_wired_resolving_script_is_valid_bash(tmp_path):
+    f = tmp_path / "run.sh"
+    f.write_text(wire_weights(resolving(), PI))
+    assert subprocess.run(["bash", "-n", str(f)], capture_output=True, text=True).returncode == 0
+
+
+def test_the_unwired_resolving_script_has_wiring_problems():
+    problems = weights_wiring_problems(resolving(), nearest_model=BASE)
+    assert any("HF_MODEL" in p for p in problems) and any("MODEL_WEIGHTS_DIR" in p for p in problems)
+    assert any("prepare_model_dir.py" in p for p in problems)
+
+
+def test_a_default_that_names_the_nearest_model_is_a_wiring_problem_in_the_resolving_format():
+    text = wire_weights(resolving(), PI).replace(f'export HF_MODEL="${{HF_MODEL:-{PI}}}"', f'export HF_MODEL="${{HF_MODEL:-{BASE}}}"')
+    assert any("HF_MODEL" in p for p in weights_wiring_problems(text, nearest_model=BASE))
+
+
+def test_a_first_hf_model_line_that_is_not_the_default_form_is_a_wiring_problem_in_the_resolving_format():
+    text = wire_weights(resolving(), PI).replace(f'export HF_MODEL="${{HF_MODEL:-{PI}}}"', 'export HF_MODEL="/somewhere/else"')
+    assert any("HF_MODEL" in p for p in weights_wiring_problems(text, nearest_model=BASE))
+
+
+def test_an_extra_hf_model_setting_in_the_resolving_format_is_a_wiring_problem():
+    text = wire_weights(resolving(), PI).replace(EXEC_LINE, f'export HF_MODEL="/somewhere/else"\n{EXEC_LINE}')
+    assert any("HF_MODEL" in p for p in weights_wiring_problems(text, nearest_model=BASE))
+
+
+@pytest.mark.parametrize("old, named", [
+    ('export HF_MODEL="$resolved_hf_model"\n', "HF_MODEL"),
+    ('export MODEL_WEIGHTS_DIR="$resolved_hf_model"\n', "MODEL_WEIGHTS_DIR"),
+])
+def test_a_resolving_script_missing_one_of_its_final_exports_is_refused(old, named):
+    text = resolving().replace(old, "")
+    assert old not in text
+    with pytest.raises(PackageError, match=named):
+        wire_weights(text, PI)
+
+
+# ---- the nearest-model check matches the whole id -------------------------------------------------------------------------------------
+
+def test_a_longer_model_id_that_starts_with_the_nearest_model_is_not_named_by_it():
+    text = wire_weights(resolving(), PI) + f"\n# fine-tuned from {BASE}-v2 and {BASE}.5\n"
+    assert not any("names the nearest model" in p for p in weights_wiring_problems(text, nearest_model=BASE))
+
+
+@pytest.mark.parametrize("tail", ["", ".", ",", ")", "\n", " and more", "@abc123"])
+def test_the_nearest_model_is_still_found_when_the_id_ends_there(tail):
+    text = wire_weights(resolving(), PI) + f"\n# from {BASE}{tail}\n"
+    assert any("names the nearest model" in p for p in weights_wiring_problems(text, nearest_model=BASE))
+
+
+def test_an_id_with_a_longer_owner_is_not_the_nearest_model():
+    text = wire_weights(resolving(), PI) + f"\n# see other{BASE}\n"
+    assert not any("names the nearest model" in p for p in weights_wiring_problems(text, nearest_model=BASE))
+
+
+def test_a_default_hf_model_naming_a_longer_id_is_judged_by_the_whole_id():
+    text = wire_weights(resolving(), PI).replace(f'export HF_MODEL="${{HF_MODEL:-{PI}}}"', f'export HF_MODEL="${{HF_MODEL:-{BASE}-v2}}"')
+    problems = weights_wiring_problems(text, nearest_model=BASE)
+    assert not any("HF_MODEL" in p for p in problems)
+
+
+def test_an_id_with_a_hyphenated_longer_owner_is_not_the_nearest_model():
+    text = wire_weights(resolving(), PI) + f"\n# see my-{BASE}\n"
+    assert not any("names the nearest model" in p for p in weights_wiring_problems(text, nearest_model=BASE))

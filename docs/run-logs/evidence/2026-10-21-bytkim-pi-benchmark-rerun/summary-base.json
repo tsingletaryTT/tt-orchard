@@ -1,0 +1,396 @@
+{
+ "label": "base",
+ "model_id": "Qwen/Qwen3.8-27B@1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+ "served_name": "<HOME>/.cache/huggingface/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+ "server_ready_s": 144.0,
+ "run_sh": "<HOME>/orchard-runs/bytkim--qwen3.8-27b-pi/benchmark-pilot/base-run.sh",
+ "run_sh_sha256": "a53260570c26ad0563c3bdba3e76b1dfcb2b8924af5e07a0550960c6e0b21386",
+ "settings": {
+  "phases": [
+   "humaneval",
+   "mbpp",
+   "ifeval"
+  ],
+  "limit": null,
+  "items": {
+   "humaneval": [
+    22,
+    32,
+    39,
+    47,
+    116,
+    132,
+    134,
+    145
+   ],
+   "mbpp": [
+    20,
+    23,
+    49,
+    56,
+    66,
+    89,
+    96,
+    100,
+    110,
+    111,
+    112,
+    123,
+    125,
+    136,
+    137,
+    148,
+    149,
+    166,
+    169,
+    177,
+    184,
+    187,
+    207,
+    218,
+    228,
+    234,
+    235,
+    249,
+    252,
+    264,
+    292,
+    293,
+    295,
+    301,
+    302,
+    328,
+    335,
+    344,
+    349,
+    350,
+    360,
+    375,
+    391,
+    392,
+    404,
+    405,
+    419,
+    425,
+    427,
+    429,
+    472,
+    482,
+    499
+   ],
+   "ifeval": [
+    13,
+    23,
+    37,
+    55,
+    59,
+    85,
+    103,
+    105,
+    134,
+    139,
+    146,
+    162,
+    167,
+    178,
+    193,
+    199,
+    225,
+    226,
+    239,
+    244,
+    255,
+    279,
+    283,
+    284,
+    306,
+    320,
+    322,
+    324,
+    376,
+    391,
+    395,
+    412,
+    423,
+    466,
+    471,
+    482,
+    511
+   ]
+  },
+  "concurrency": 4,
+  "thinking": "default",
+  "max_gen_toks": 32768,
+  "seed": 0,
+  "temperature": 0
+ },
+ "lm_eval_version": "0.4.13",
+ "started_at": 1792528987.3240635,
+ "phases": [
+  {
+   "name": "humaneval",
+   "ok": true,
+   "problem": null,
+   "command": [
+    "<HOME>/orchard-venvs/bench/bin/lm_eval",
+    "--model",
+    "local-chat-completions",
+    "--model_args",
+    "model=<HOME>/.cache/huggingface/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0,base_url=http://127.0.0.1:37759/v1/chat/completions,num_concurrent=4,max_retries=1,tokenized_requests=False,timeout=3600",
+    "--tasks",
+    "humaneval_chat",
+    "--apply_chat_template",
+    "--gen_kwargs",
+    "max_gen_toks=32768,temperature=0",
+    "--output_path",
+    "<HOME>/orchard-runs/bytkim--qwen3.8-27b-pi/benchmark-rerun/base-32k/humaneval/results",
+    "--log_samples",
+    "--include_path",
+    "<HOME>/code/tt-orchard/.claude/worktrees/bench-rerun/orchard/lm_eval_tasks",
+    "--samples",
+    "{\"humaneval_chat\": [22, 32, 39, 47, 116, 132, 134, 145]}",
+    "--confirm_run_unsafe_code"
+   ],
+   "drafter": {
+    "sessions": 8,
+    "iters": 35149,
+    "committed_tokens": 154314,
+    "tokens_per_iter": 4.390281373581041,
+    "draft_length": 7,
+    "histogram": [
+     5459,
+     8872,
+     3728,
+     2160,
+     1528,
+     1259,
+     1043,
+     11100
+    ],
+    "accepted_per_iter": 3.390508976073288,
+    "accept_rate": 0.48435842515332683,
+    "tok_s_in_model_median": 29.55
+   },
+   "watch": {
+    "max_quiet_s": 429.7679101419926
+   },
+   "scores": {
+    "tasks": {
+     "humaneval_chat": {
+      "version": 1.0,
+      "n_samples": {
+       "original": 164,
+       "effective": 8
+      },
+      "n_shot": 0,
+      "metrics": [
+       {
+        "metric": "pass@1",
+        "filter": "create_test",
+        "value": 0.5,
+        "stderr": 0.1889822365046136
+       }
+      ]
+     }
+    },
+    "lm_eval_version": "0.4.13",
+    "total_evaluation_time_seconds": "1408.0694212419912"
+   },
+   "wall_s": 1408.8,
+   "proxy": {
+    "requests": 8,
+    "errors": 0,
+    "cut_off": 2,
+    "completion_tokens_total": 154315,
+    "completion_tokens_median": 16552.5,
+    "prompt_tokens_total": 1729,
+    "latency_s_median": 648.228,
+    "latency_s_max": 1144.901
+   }
+  },
+  {
+   "name": "mbpp",
+   "ok": true,
+   "problem": null,
+   "command": [
+    "<HOME>/orchard-venvs/bench/bin/lm_eval",
+    "--model",
+    "local-chat-completions",
+    "--model_args",
+    "model=<HOME>/.cache/huggingface/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0,base_url=http://127.0.0.1:38311/v1/chat/completions,num_concurrent=4,max_retries=1,tokenized_requests=False,timeout=3600",
+    "--tasks",
+    "mbpp_chat",
+    "--apply_chat_template",
+    "--gen_kwargs",
+    "max_gen_toks=32768,temperature=0",
+    "--output_path",
+    "<HOME>/orchard-runs/bytkim--qwen3.8-27b-pi/benchmark-rerun/base-32k/mbpp/results",
+    "--log_samples",
+    "--include_path",
+    "<HOME>/code/tt-orchard/.claude/worktrees/bench-rerun/orchard/lm_eval_tasks",
+    "--samples",
+    "{\"mbpp_chat\": [20, 23, 49, 56, 66, 89, 96, 100, 110, 111, 112, 123, 125, 136, 137, 148, 149, 166, 169, 177, 184, 187, 207, 218, 228, 234, 235, 249, 252, 264, 292, 293, 295, 301, 302, 328, 335, 344, 349, 350, 360, 375, 391, 392, 404, 405, 419, 425, 427, 429, 472, 482, 499]}",
+    "--confirm_run_unsafe_code"
+   ],
+   "drafter": {
+    "sessions": 53,
+    "iters": 237995,
+    "committed_tokens": 1119331,
+    "tokens_per_iter": 4.703170234668796,
+    "draft_length": 7,
+    "histogram": [
+     35408,
+     36175,
+     28718,
+     22218,
+     16714,
+     13230,
+     10605,
+     74927
+    ],
+    "accepted_per_iter": 3.703397130191811,
+    "accept_rate": 0.5290567328845444,
+    "tok_s_in_model_median": 36.4
+   },
+   "watch": {
+    "max_quiet_s": 420.74074388699955
+   },
+   "scores": {
+    "tasks": {
+     "mbpp_chat": {
+      "version": 1.0,
+      "n_samples": {
+       "original": 500,
+       "effective": 53
+      },
+      "n_shot": 0,
+      "metrics": [
+       {
+        "metric": "pass_at_1",
+        "filter": "extract_code",
+        "value": 0.6037735849056604,
+        "stderr": 0.0678277006998428
+       }
+      ]
+     }
+    },
+    "lm_eval_version": "0.4.13",
+    "total_evaluation_time_seconds": "7774.909053366995"
+   },
+   "wall_s": 7775.6,
+   "proxy": {
+    "requests": 53,
+    "errors": 0,
+    "cut_off": 19,
+    "completion_tokens_total": 1119299,
+    "completion_tokens_median": 19026,
+    "prompt_tokens_total": 13347,
+    "latency_s_median": 545.027,
+    "latency_s_max": 947.116
+   }
+  },
+  {
+   "name": "ifeval",
+   "ok": true,
+   "problem": null,
+   "command": [
+    "<HOME>/orchard-venvs/bench/bin/lm_eval",
+    "--model",
+    "local-chat-completions",
+    "--model_args",
+    "model=<HOME>/.cache/huggingface/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0,base_url=http://127.0.0.1:36935/v1/chat/completions,num_concurrent=4,max_retries=1,tokenized_requests=False,timeout=3600",
+    "--tasks",
+    "ifeval",
+    "--apply_chat_template",
+    "--gen_kwargs",
+    "max_gen_toks=32768,temperature=0",
+    "--output_path",
+    "<HOME>/orchard-runs/bytkim--qwen3.8-27b-pi/benchmark-rerun/base-32k/ifeval/results",
+    "--log_samples",
+    "--include_path",
+    "<HOME>/code/tt-orchard/.claude/worktrees/bench-rerun/orchard/lm_eval_tasks",
+    "--samples",
+    "{\"ifeval\": [13, 23, 37, 55, 59, 85, 103, 105, 134, 139, 146, 162, 167, 178, 193, 199, 225, 226, 239, 244, 255, 279, 283, 284, 306, 320, 322, 324, 376, 391, 395, 412, 423, 466, 471, 482, 511]}"
+   ],
+   "drafter": {
+    "sessions": 37,
+    "iters": 109484,
+    "committed_tokens": 749666,
+    "tokens_per_iter": 6.8472653538416575,
+    "draft_length": 7,
+    "histogram": [
+     5857,
+     5240,
+     4575,
+     3757,
+     3013,
+     2395,
+     1992,
+     82655
+    ],
+    "accepted_per_iter": 5.847658105293924,
+    "accept_rate": 0.8353797293277034,
+    "tok_s_in_model_median": 56.4
+   },
+   "watch": {
+    "max_quiet_s": 266.3271478509996
+   },
+   "scores": {
+    "tasks": {
+     "ifeval": {
+      "version": 4.0,
+      "n_samples": {
+       "original": 541,
+       "effective": 37
+      },
+      "n_shot": 0,
+      "metrics": [
+       {
+        "metric": "prompt_level_strict_acc",
+        "filter": "none",
+        "value": 0.1891891891891892,
+        "stderr": 0.06527647182968216
+       },
+       {
+        "metric": "inst_level_strict_acc",
+        "filter": "none",
+        "value": 0.23636363636363636,
+        "stderr": null
+       },
+       {
+        "metric": "prompt_level_loose_acc",
+        "filter": "none",
+        "value": 0.1891891891891892,
+        "stderr": 0.06527647182968216
+       },
+       {
+        "metric": "inst_level_loose_acc",
+        "filter": "none",
+        "value": 0.23636363636363636,
+        "stderr": null
+       }
+      ]
+     }
+    },
+    "lm_eval_version": "0.4.13",
+    "total_evaluation_time_seconds": "3535.4401073820045"
+   },
+   "wall_s": 3536.4,
+   "proxy": {
+    "requests": 37,
+    "errors": 0,
+    "cut_off": 13,
+    "completion_tokens_total": 749645,
+    "completion_tokens_median": 18376,
+    "prompt_tokens_total": 3543,
+    "latency_s_median": 336.265,
+    "latency_s_max": 647.037
+   }
+  }
+ ],
+ "code_sandbox": {
+  "mode": "landlock+seccomp",
+  "detail": "every probe action was refused"
+ },
+ "wall_s": 12866.1
+}

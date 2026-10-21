@@ -1,0 +1,287 @@
+{
+  "what": "decode speed and time to first token of bytkim/Qwen3.8-27B-pi and of the base Qwen/Qwen3.8-27B, served through the same installed bundle on one 2-chip board",
+  "bundle": "episod/qwen3.8-27b-dflash2-p300 (bfp8 weights as the bundle ships them, DFlash2 drafter on, sampling on the device, max_model_len 262144, max_num_seqs 4)",
+  "prompt_set_sha256": "6d2c2d4f531b00a260887730970df24296c89f82ec9c5ba100aa85025745bbb2",
+  "prompt_set_identical": true,
+  "decoding": "greedy (temperature 0), thinking mode as the chat template defaults it, streamed",
+  "method": {
+    "warmup_requests": 1,
+    "repetitions_per_prompt": 3,
+    "statistics": "median with min and max over the repetitions",
+    "ttft_s": "seconds from sending the request to the first content, reasoning or tool-call chunk",
+    "decode_tok_s": "(completion tokens - 1) / seconds from the first chunk to the last, per run",
+    "launcher": "the same run.sh text for both; only the model path (HF_MODEL and --model) differs in 2 lines",
+    "launcher_differences": [
+      {
+        "pi": "t HF_MODEL=\"<HOME>/orchard-runs/bytkim--qwen3.8-27b-pi/stages/4/configs/2/model-dir\"",
+        "base": "gingface/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0\""
+      },
+      {
+        "pi": "choice --tool-call-parser qwen3_coder --reasoning_parser qwen3 --no-async-scheduling \"$@\")",
+        "base": "choice --tool-call-parser qwen3_coder --reasoning_parser qwen3 --no-async-scheduling \"$@\")"
+      }
+    ]
+  },
+  "pi": {
+    "model": "bytkim/Qwen3.8-27B-pi@34d3f21045f7b41453e66c39e137cfc818a603ce",
+    "tensor_cache": "existing, warm (built by stage 4's 2-chip test)",
+    "server_ready_s": 104.0,
+    "prompts": {
+      "pi-coding": {
+        "runs": 3,
+        "ttft_s": {
+          "median": 0.1751467859976401,
+          "min": 0.17504679799822043,
+          "max": 0.1762855410015618
+        },
+        "decode_tok_s": {
+          "median": 53.0112519810773,
+          "min": 52.83356033439482,
+          "max": 53.08826670180194
+        },
+        "completion_tokens": {
+          "median": 384,
+          "min": 384,
+          "max": 384
+        }
+      },
+      "tool-call": {
+        "runs": 3,
+        "ttft_s": {
+          "median": 0.21764773800168769,
+          "min": 0.2162362769995525,
+          "max": 0.2249537429997872
+        },
+        "decode_tok_s": {
+          "median": 68.09148820294492,
+          "min": 62.29101127799272,
+          "max": 70.15648002714626
+        },
+        "completion_tokens": {
+          "median": 55,
+          "min": 55,
+          "max": 55
+        }
+      },
+      "tool-call-write": {
+        "runs": 3,
+        "ttft_s": {
+          "median": 0.2130148289979843,
+          "min": 0.2125444660014182,
+          "max": 0.21734915300112334
+        },
+        "decode_tok_s": {
+          "median": 73.28778299166717,
+          "min": 72.72976828693474,
+          "max": 73.92834368027265
+        },
+        "completion_tokens": {
+          "median": 357,
+          "min": 357,
+          "max": 357
+        }
+      },
+      "chat": {
+        "runs": 3,
+        "ttft_s": {
+          "median": 0.15573029699953622,
+          "min": 0.1545031809982902,
+          "max": 0.15615282799990382
+        },
+        "decode_tok_s": {
+          "median": 48.73057106040274,
+          "min": 48.47542843975678,
+          "max": 49.09042113173419
+        },
+        "completion_tokens": {
+          "median": 224,
+          "min": 224,
+          "max": 224
+        }
+      }
+    }
+  },
+  "base": {
+    "model": "Qwen/Qwen3.8-27B@1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+    "tensor_cache": "new and empty at the start (built during this run)",
+    "server_ready_s": 236.1,
+    "prompts": {
+      "pi-coding": {
+        "runs": 3,
+        "ttft_s": {
+          "median": 0.20238496700039832,
+          "min": 0.17765619800047716,
+          "max": 0.21244685000056052
+        },
+        "decode_tok_s": {
+          "median": 54.43298914475235,
+          "min": 53.50694622740825,
+          "max": 56.010273940868544
+        },
+        "completion_tokens": {
+          "median": 384,
+          "min": 384,
+          "max": 384
+        }
+      },
+      "tool-call": {
+        "runs": 3,
+        "ttft_s": {
+          "median": 0.21419930000047316,
+          "min": 0.21350161499867681,
+          "max": 0.22385487599967746
+        },
+        "decode_tok_s": {
+          "median": 67.44899945084124,
+          "min": 66.81885055866505,
+          "max": 68.12322481130094
+        },
+        "completion_tokens": {
+          "median": 55,
+          "min": 55,
+          "max": 55
+        }
+      },
+      "tool-call-write": {
+        "runs": 3,
+        "ttft_s": {
+          "median": 0.2156338560016593,
+          "min": 0.21295249600007082,
+          "max": 0.2161638329998823
+        },
+        "decode_tok_s": {
+          "median": 63.778366479657734,
+          "min": 57.20966099842518,
+          "max": 64.25477864876956
+        },
+        "completion_tokens": {
+          "median": 384,
+          "min": 384,
+          "max": 384
+        }
+      },
+      "chat": {
+        "runs": 3,
+        "ttft_s": {
+          "median": 0.17876005799917039,
+          "min": 0.15756454700022005,
+          "max": 0.2639768240005651
+        },
+        "decode_tok_s": {
+          "median": 44.142003523926945,
+          "min": 43.18439151576363,
+          "max": 44.388373897423484
+        },
+        "completion_tokens": {
+          "median": 206,
+          "min": 206,
+          "max": 206
+        }
+      }
+    }
+  },
+  "comparison": {
+    "pi-coding": {
+      "pi_median_tok_s": 53.0112519810773,
+      "base_median_tok_s": 54.43298914475235,
+      "pi_range_tok_s": [
+        52.83356033439482,
+        53.08826670180194
+      ],
+      "base_range_tok_s": [
+        53.50694622740825,
+        56.010273940868544
+      ],
+      "ratio_pi_over_base": 0.974,
+      "pi_ttft_median_s": 0.1751467859976401,
+      "base_ttft_median_s": 0.20238496700039832,
+      "pi_tokens_median": 384,
+      "base_tokens_median": 384,
+      "same_generated_text": false,
+      "both_meet_100_tokens": true
+    },
+    "tool-call": {
+      "pi_median_tok_s": 68.09148820294492,
+      "base_median_tok_s": 67.44899945084124,
+      "pi_range_tok_s": [
+        62.29101127799272,
+        70.15648002714626
+      ],
+      "base_range_tok_s": [
+        66.81885055866505,
+        68.12322481130094
+      ],
+      "ratio_pi_over_base": 1.01,
+      "pi_ttft_median_s": 0.21764773800168769,
+      "base_ttft_median_s": 0.21419930000047316,
+      "pi_tokens_median": 55,
+      "base_tokens_median": 55,
+      "same_generated_text": true,
+      "both_meet_100_tokens": false
+    },
+    "tool-call-write": {
+      "pi_median_tok_s": 73.28778299166717,
+      "base_median_tok_s": 63.778366479657734,
+      "pi_range_tok_s": [
+        72.72976828693474,
+        73.92834368027265
+      ],
+      "base_range_tok_s": [
+        57.20966099842518,
+        64.25477864876956
+      ],
+      "ratio_pi_over_base": 1.149,
+      "pi_ttft_median_s": 0.2130148289979843,
+      "base_ttft_median_s": 0.2156338560016593,
+      "pi_tokens_median": 357,
+      "base_tokens_median": 384,
+      "same_generated_text": false,
+      "both_meet_100_tokens": true
+    },
+    "chat": {
+      "pi_median_tok_s": 48.73057106040274,
+      "base_median_tok_s": 44.142003523926945,
+      "pi_range_tok_s": [
+        48.47542843975678,
+        49.09042113173419
+      ],
+      "base_range_tok_s": [
+        43.18439151576363,
+        44.388373897423484
+      ],
+      "ratio_pi_over_base": 1.104,
+      "pi_ttft_median_s": 0.15573029699953622,
+      "base_ttft_median_s": 0.17876005799917039,
+      "pi_tokens_median": 224,
+      "base_tokens_median": 206,
+      "same_generated_text": false,
+      "both_meet_100_tokens": true
+    }
+  },
+  "drafter_acceptance": {
+    "pi": null,
+    "base": null,
+    "note": "not measured: the server exports no spec-decode counters on /metrics and prints none in its log. Decode tokens per second is the only net effect of the drafter that was measured."
+  },
+  "not_comparable_or_not_measured": [
+    "the two models write different text for the same prompt on some prompts (see same_generated_text and the token counts), and with a speculative drafter the decode rate depends on the text and on how often the drafter's guesses are accepted. A difference of the size seen here (a few percent to 15%, in both directions) is within what that alone could explain; this file supports no claim that the fine-tune is faster or slower than the base.",
+    "server_ready_s is not comparable: the pi server started on a warm tensor cache and the base server on an empty one.",
+    "one board, one session, three repetitions per prompt, greedy decoding only; no concurrency (max_num_seqs 4 was configured; one request at a time was sent), no long-context prefill, no sampling with a temperature.",
+    "output quality was not measured here. The author's own benchmark claims (Pi-harness completion by reasoning effort) are charts on the model card; they were not read and are not verified.",
+    "the tool-call prompt produced 55 tokens for both models (a short call); it is in the set to show tool calling works, and the 100-token floor is met by the other three prompts."
+  ],
+  "sources": {
+    "pi": "packaging/measure-pi.json",
+    "base": "packaging/measure-base.json",
+    "logs": [
+      "packaging/measure-pi.log",
+      "packaging/measure-base.log"
+    ]
+  },
+  "control": {
+    "prompt": "tool-call",
+    "what": "both models wrote the identical 55-token output (same text hash), so the difference in decode rate between the two servers is not caused by different text",
+    "ratio_pi_over_base": 1.01,
+    "reading": "about 1% is the server-to-server noise of this setup on a short identical output; it is a floor for what a difference in decode rate can mean, not a bound for longer or different outputs"
+  }
+}

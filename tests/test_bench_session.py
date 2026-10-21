@@ -118,6 +118,64 @@ def test_the_docstring_does_not_claim_more_than_the_environment_does():
     assert "code_sandbox" in doc and "Landlock" in doc
 
 
+# ---- re-running a chosen list of items -----------------------------------------------------------------------------------------------
+
+def test_a_list_of_items_becomes_the_harness_samples_argument_and_no_limit():
+    argv = cmd("mbpp_chat", limit=None, samples=[7, 3, 9])
+    assert json.loads(flag(argv, "--samples")) == {"mbpp_chat": [3, 7, 9]}
+    assert "--limit" not in argv
+
+
+def test_samples_win_over_a_limit_when_both_reach_the_command():
+    assert "--limit" not in cmd("mbpp_chat", limit=20, samples=[1])
+
+
+def test_no_samples_means_no_samples_argument():
+    assert "--samples" not in cmd("mbpp_chat", limit=None)
+
+
+def test_the_session_passes_each_phases_items_and_records_them(harness, tmp_path):
+    items = tmp_path / "items.json"
+    items.write_text(json.dumps({"gsm8k": [4, 2]}))
+    out = tmp_path / "out"
+    argv = ["--label", "t", "--url", f"http://127.0.0.1:{harness['server'].port}", "--out-dir", str(out), "--lm-eval", str(harness["lm_eval"]),
+            "--phases", "gsm8k", "--items", str(items), "--concurrency", "2", "--quiet-s", "30"]
+    assert bs.main(argv) == 0
+    run = json.loads((harness["tmp"] / "argv.jsonl").read_text().splitlines()[0])["argv"]
+    assert json.loads(run[run.index("--samples") + 1]) == {"gsm8k": [2, 4]}
+    s = json.loads((out / "summary.json").read_text())
+    assert s["settings"]["items"] == {"gsm8k": [2, 4]} and s["settings"]["limit"] is None
+
+
+def test_items_and_limit_together_are_refused(harness, tmp_path):
+    items = tmp_path / "items.json"
+    items.write_text(json.dumps({"gsm8k": [1]}))
+    with pytest.raises(SystemExit):
+        bs.main(["--label", "t", "--url", "http://127.0.0.1:9", "--out-dir", str(tmp_path / "o"), "--phases", "gsm8k", "--items", str(items), "--limit", "2"])
+
+
+def test_a_phase_with_no_entry_in_the_items_file_is_refused(harness, tmp_path):
+    items = tmp_path / "items.json"
+    items.write_text(json.dumps({"gsm8k": [1]}))
+    with pytest.raises(SystemExit):
+        bs.main(["--label", "t", "--url", "http://127.0.0.1:9", "--out-dir", str(tmp_path / "o"), "--phases", "gsm8k,ifeval", "--items", str(items)])
+
+
+def test_the_tool_call_phase_cannot_take_items(harness, tmp_path):
+    items = tmp_path / "items.json"
+    items.write_text(json.dumps({"bfcl": [1]}))
+    with pytest.raises(SystemExit):
+        bs.main(["--label", "t", "--url", "http://127.0.0.1:9", "--out-dir", str(tmp_path / "o"), "--phases", "bfcl", "--items", str(items), "--bfcl-dir", str(FIX / "bfcl")])
+
+
+@pytest.mark.parametrize("body", ["[1, 2]", '{"gsm8k": "1,2"}', '{"gsm8k": [1, "2"]}', '{"gsm8k": [true]}', '{"gsm8k": [-1]}', '{"gsm8k": []}', "not json"])
+def test_a_malformed_items_file_is_refused(harness, tmp_path, body):
+    items = tmp_path / "items.json"
+    items.write_text(body)
+    with pytest.raises(SystemExit):
+        bs.main(["--label", "t", "--url", "http://127.0.0.1:9", "--out-dir", str(tmp_path / "o"), "--phases", "gsm8k", "--items", str(items)])
+
+
 # ---- reading the harness's results --------------------------------------------------------------------------------------------------
 
 def sample_dir(tmp_path):

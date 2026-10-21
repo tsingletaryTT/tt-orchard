@@ -1625,3 +1625,26 @@ Prompt (operator, reviewing PR 11 on node6): "Lets get the dependecies onto node
 - Test first: 3 of 4 new tests red before the change (the fourth pins that `tt` answering means `tt-model` is not asked). Mutations, each red: no fallback, stop after the
   first attempt, `tt-model` asked first, the old reason text, `--catalog` dropped. The live humanizer test passes on node6 with no `tt` and no shim.
 - Suite on node6 with the same dependencies: 4790 passed, 3 skipped (the two tests that need the skill installed as `ttm-tt-lang` by `tt-warp`, and the qwen transcript replay).
+
+## 2026-10-21 (UTC): the cut-off items asked again at 32768 tokens (version 0.8.7)
+Prompt (operator): "rerun the cut-off items with a higher token cap", then "let it finish, then update the card" and "if it ends up going really badly, let me know sooner". Results:
+`docs/run-logs/2026-10-21-bytkim-pi-benchmark-rerun.md`.
+- `bench_session --items FILE` runs chosen documents of a phase (the harness's `--samples`); `orchard/bench_rerun.py` lists the empty-reply items of a finished run and merges a re-run
+  into it. Tests first; 13 mutations on the session change (2 survivors, one equivalent, one got a test) and 17 on the new module, all red.
+- 81 items for the fine-tune and 98 for the base, 3.0 and 3.6 hours of chip time. No request failed and no item got worse. At the higher limit the models are close on HumanEval, MBPP
+  and IFEval (paired p 0.69, 0.38, 0.11); the MBPP gap that was clear at 8192 tokens (p 0.011) is not. GSM8K is still the one clear difference.
+- The card was updated (scores, a section on the re-run, intended use, limits) and passes `gate_package`. On `main` the gate rejected the package's `run.sh`, because the format-fix
+  commit `e61df0f` was not merged; PR 13 carries it as a cherry-pick (with `orchard/measure_serving.py` and the 10-19 packaging log). The card was uploaded to
+  `episod/qwen3.8-27b-pi-p300` (commit `84d3c49`) and published again on 2026-10-21.
+- Slip: I ended one command with `pkill -f` and `pgrep -f`, which killed my own shell. It matched nothing else. Wait on a pid instead.
+
+## 2026-10-21 (UTC): fixes for ezietlowTT's approval notes on PR 13 (version 0.8.8)
+Prompt (operator): "fix all the notes before we merge". The review approved and left nine non-blocking notes; each was checked and fixed.
+- `bench_rerun.merge` refuses: two rows for one item (lm-eval writes one per filter, so GSM8K would have kept one), a changed `doc_hash` or `prompt_hash`, a re-run that is not exactly
+  the requested items (new `--items FILE`), and a sample with no value for a metric (it counted as 0). Re-running the six merges on the real run directories gives byte-identical
+  output to the committed `merge-*.json` and passes every new check.
+- `weights_wiring_problems` names the nearest model by whole id (`_names_model`): `org/model-v2` and `other-org/model` no longer match; `org/model.` and `${HF_MODEL:-org/model}` still do.
+- 17 mutations over the two changes, all red (the first mutation run had no survivors). Tests first: 3 of the 4 package tests and 6 of the merge tests failed on the old code before the change.
+- GSM8K's paired sign-test p was stored as `0.0` (the compile scripts rounded to 4 places). The scripts now keep 4 significant digits and the four `benchmark.json` copies hold
+  1.607e-07 (the exact value is 1.6066e-07). The card says "below 0.001" and is unchanged. The copy on the Hub still has 0.0 until the file is uploaded again.
+- README lists PyYAML as needed by `tests/test_lm_eval_code_tasks.py`. The commit bodies are empty; the mutation tables are in this log and the run log.
