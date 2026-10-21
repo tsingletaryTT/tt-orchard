@@ -1649,7 +1649,7 @@ Prompt (operator): "fix all the notes before we merge". The review approved and 
   1.607e-07 (the exact value is 1.6066e-07). The card says "below 0.001" and is unchanged. The copy on the Hub still has 0.0 until the file is uploaded again.
 - README lists PyYAML as needed by `tests/test_lm_eval_code_tasks.py`. The commit bodies are empty; the mutation tables are in this log and the run log.
 
-## 2026-10-21 (UTC): research finds tt-transformers and says what a tt-metal demo is (branch `base-code-research`)
+## 2026-10-21 (UTC): research finds tt-transformers and says what a tt-metal demo is (branch `base-code-research`, version 0.8.9)
 Prompt (operator): the preflight blocked `Plurato123/OctLLM` with `nearest-model-missing`, and the operator expected tt-metal or tt-transformers to
 already have the config. "Read qwen25_vl and see if it can be served, but also do A and B."
 - Found first: research did list `models/demos/qwen25_vl` as existing work. It had no effect on the outcome, because stages 2 and 4 swap weights into an
