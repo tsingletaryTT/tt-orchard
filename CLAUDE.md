@@ -1648,3 +1648,28 @@ Prompt (operator): "fix all the notes before we merge". The review approved and 
 - GSM8K's paired sign-test p was stored as `0.0` (the compile scripts rounded to 4 places). The scripts now keep 4 significant digits and the four `benchmark.json` copies hold
   1.607e-07 (the exact value is 1.6066e-07). The card says "below 0.001" and is unchanged. The copy on the Hub still has 0.0 until the file is uploaded again.
 - README lists PyYAML as needed by `tests/test_lm_eval_code_tasks.py`. The commit bodies are empty; the mutation tables are in this log and the run log.
+
+## 2026-10-21 (UTC): research finds tt-transformers and says what a tt-metal demo is (branch `base-code-research`)
+Prompt (operator): the preflight blocked `Plurato123/OctLLM` with `nearest-model-missing`, and the operator expected tt-metal or tt-transformers to
+already have the config. "Read qwen25_vl and see if it can be served, but also do A and B."
+- Found first: research did list `models/demos/qwen25_vl` as existing work. It had no effect on the outcome, because stages 2 and 4 swap weights into an
+  installed v6 thin bundle and a demo directory is code, not a bundle. Nothing in the repo read tt-transformers at all.
+- `qwen25_vl` (read upstream, because the local tt-metal checkout is stale): Qwen2.5-VL-7B is supported, with a vLLM generator file
+  (`tt/generator_vllm.py`), but the README, `PERF.md` and `model_config.py` name only N150, N300, T3K and TG, and the code gates on `is_wormhole_b0()`.
+  Blackhole is not mentioned. That is not proof it fails on this box. Not run.
+- A: `ports.tt_transformers` reads tt-metal's `models/tt_transformers/model_params` (named by Hugging Face model name, so a match is exact), its README
+  table (which gives the boards each model runs on) and the standalone repo's `src/tt_transformers/models`. The report passes the stated bases and the
+  model itself as `ids`. It runs under `--no-github`, because it uses the contents API like the tt-metal listing.
+- B: `ports.demo_facts` adds, for the first two demos that matched by name, whether `tt/` has `generator_vllm.py` and which boards the README names (only
+  board names reach the claim). `preflight._code_note` puts that first in the `nearest-model-missing` message ("code for it exists, but code is not a
+  bundle"), warns when the code names no Blackhole board, and caps the searched bundle list at 8. The reason code did not change. The phrase the writer and
+  the reader share lives in `research/types.py` (`LACKS_BLACKHOLE`), and a test feeds a real `demo_facts` claim into the preflight.
+- Tests first, a mutation table per commit: 19, 23 and 28 mutations. Survivors, each given a test: an id that is not `org/name`, case in board names, p300,
+  the count of demos read, the exact file name, the claim length limit, and the phrase being spelled in two modules. Two of my own tests were wrong first
+  (a sort order I assumed, an import). The suite passed: 5054 passed, 2 skipped.
+- Not done: nothing runs `qwen25_vl` on hardware; no bundle is built from demo code; `tt-transformers` is read only by name and README, not by its code.
+- OctLLM itself is not a fit (checked the card, config and weight index): twelve layers carry extra `mesh_*` attention and MLP tensors, there is a separate
+  `completion/model.safetensors`, and the output goes through CUDA decoders. Its official environment is conda with an NVIDIA GPU. Stage 0 would call it
+  full-port or unknown.
+- Candidate research for text-to-3D models: no installed v6 bundle serves the base of any model found (BlenderLLM on Qwen2.5-7B, LLaMA-Mesh on Llama-3.1-8B,
+  BrickGPT as a LoRA on Llama-3.2-1B). BAAI/AREX-2 passes the preflight as a Qwen3.8-27B fine-tune; the operator is running it.

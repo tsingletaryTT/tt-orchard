@@ -17,7 +17,7 @@ from urllib.parse import quote
 
 from orchard import nearest
 from orchard.research.http import FetchError
-from orchard.research.types import INFERRED, WEAK, Evidence, Result, Unavailable, clean, valid_id
+from orchard.research.types import INFERRED, LACKS_BLACKHOLE, WEAK, Evidence, Result, Unavailable, clean, valid_id
 
 SAFE_TERM = re.compile(r"[A-Za-z0-9_.-]{3,80}")
 METAL = "tenstorrent/tt-metal"
@@ -157,7 +157,7 @@ def demo_facts(fetch, found: Result, *, limit: int = MAX_DEMO_FACTS) -> Result:
             if bh:
                 facts.append(f"README names Blackhole boards ({', '.join(bh)})")
             elif wh:
-                facts.append(f"no Blackhole board named in its README, which names {', '.join(wh)}")
+                facts.append(f"{LACKS_BLACKHOLE} in its README, which names {', '.join(wh)}")
             else:
                 facts.append("README names no boards")
         except FetchError as exc:
