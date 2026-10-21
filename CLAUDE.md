@@ -1625,3 +1625,14 @@ Prompt (operator, reviewing PR 11 on node6): "Lets get the dependecies onto node
 - Test first: 3 of 4 new tests red before the change (the fourth pins that `tt` answering means `tt-model` is not asked). Mutations, each red: no fallback, stop after the
   first attempt, `tt-model` asked first, the old reason text, `--catalog` dropped. The live humanizer test passes on node6 with no `tt` and no shim.
 - Suite on node6 with the same dependencies: 4790 passed, 3 skipped (the two tests that need the skill installed as `ttm-tt-lang` by `tt-warp`, and the qwen transcript replay).
+
+## 2026-10-21 (UTC): the cut-off items asked again at 32768 tokens (version 0.8.7)
+Prompt (operator): "rerun the cut-off items with a higher token cap", then "let it finish, then update the card" and "if it ends up going really badly, let me know sooner". Results:
+`docs/run-logs/2026-10-21-bytkim-pi-benchmark-rerun.md`.
+- `bench_session --items FILE` runs chosen documents of a phase (the harness's `--samples`); `orchard/bench_rerun.py` lists the empty-reply items of a finished run and merges a re-run
+  into it. Tests first; 13 mutations on the session change (2 survivors, one equivalent, one got a test) and 17 on the new module, all red.
+- 81 items for the fine-tune and 98 for the base, 3.0 and 3.6 hours of chip time. No request failed and no item got worse. At the higher limit the models are close on HumanEval, MBPP
+  and IFEval (paired p 0.69, 0.38, 0.11); the MBPP gap that was clear at 8192 tokens (p 0.011) is not. GSM8K is still the one clear difference.
+- The card was updated (scores, a section on the re-run, intended use, limits) and passes `gate_package` when run with the `bytkim-package` branch's code. On `main` the gate rejects the
+  package's `run.sh`, because the format-fix commit `e61df0f` is not merged. Not uploaded.
+- Slip: I ended one command with `pkill -f` and `pgrep -f`, which killed my own shell. It matched nothing else. Wait on a pid instead.

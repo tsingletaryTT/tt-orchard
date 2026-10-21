@@ -1,0 +1,40 @@
+{
+ "ifeval": {
+  "n": 541,
+  "rerun_n": 31,
+  "metrics": {
+   "prompt_level_loose_acc": {
+    "before": 0.89464,
+    "after": 0.90573
+   },
+   "prompt_level_strict_acc": {
+    "before": 0.874307,
+    "after": 0.885397
+   }
+  },
+  "flips": {
+   "prompt_level_loose_acc": {
+    "gained": [
+     37,
+     146,
+     167,
+     225,
+     236,
+     405
+    ],
+    "lost": []
+   },
+   "prompt_level_strict_acc": {
+    "gained": [
+     37,
+     146,
+     167,
+     225,
+     236,
+     405
+    ],
+    "lost": []
+   }
+  }
+ }
+}

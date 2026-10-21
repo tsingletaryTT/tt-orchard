@@ -1,0 +1,379 @@
+{
+ "label": "pi",
+ "model_id": "bytkim/Qwen3.8-27B-pi@34d3f21045f7b41453e66c39e137cfc818a603ce",
+ "served_name": "<HOME>/orchard-runs/bytkim--qwen3.8-27b-pi/stages/4/configs/2/model-dir",
+ "server_ready_s": 130.0,
+ "run_sh": "<HOME>/orchard-runs/bytkim--qwen3.8-27b-pi/stages/4/configs/2/run.sh",
+ "run_sh_sha256": "d15fdd33cb71a99aaa82ac648a6b9ff1a314ca815372b975877e55b7ec642d6e",
+ "settings": {
+  "phases": [
+   "humaneval",
+   "mbpp",
+   "ifeval"
+  ],
+  "limit": null,
+  "items": {
+   "humaneval": [
+    32,
+    47,
+    76,
+    99,
+    116,
+    145
+   ],
+   "mbpp": [
+    9,
+    20,
+    71,
+    96,
+    110,
+    111,
+    112,
+    123,
+    125,
+    137,
+    149,
+    166,
+    168,
+    169,
+    198,
+    200,
+    207,
+    218,
+    228,
+    234,
+    235,
+    236,
+    249,
+    264,
+    275,
+    292,
+    293,
+    295,
+    301,
+    302,
+    328,
+    335,
+    344,
+    349,
+    375,
+    385,
+    404,
+    405,
+    425,
+    450,
+    472,
+    475,
+    482,
+    499
+   ],
+   "ifeval": [
+    13,
+    23,
+    37,
+    48,
+    50,
+    59,
+    105,
+    120,
+    134,
+    139,
+    146,
+    167,
+    225,
+    236,
+    239,
+    255,
+    284,
+    322,
+    326,
+    341,
+    352,
+    391,
+    398,
+    405,
+    411,
+    415,
+    423,
+    454,
+    471,
+    484,
+    511
+   ]
+  },
+  "concurrency": 4,
+  "thinking": "default",
+  "max_gen_toks": 32768,
+  "seed": 0,
+  "temperature": 0
+ },
+ "lm_eval_version": "0.4.13",
+ "started_at": 1792518186.3481255,
+ "phases": [
+  {
+   "name": "humaneval",
+   "ok": true,
+   "problem": null,
+   "command": [
+    "<HOME>/orchard-venvs/bench/bin/lm_eval",
+    "--model",
+    "local-chat-completions",
+    "--model_args",
+    "model=<HOME>/orchard-runs/bytkim--qwen3.8-27b-pi/stages/4/configs/2/model-dir,base_url=http://127.0.0.1:46543/v1/chat/completions,num_concurrent=4,max_retries=1,tokenized_requests=False,timeout=3600",
+    "--tasks",
+    "humaneval_chat",
+    "--apply_chat_template",
+    "--gen_kwargs",
+    "max_gen_toks=32768,temperature=0",
+    "--output_path",
+    "<HOME>/orchard-runs/bytkim--qwen3.8-27b-pi/benchmark-rerun/pi-32k/humaneval/results",
+    "--log_samples",
+    "--include_path",
+    "<HOME>/code/tt-orchard/.claude/worktrees/bench-rerun/orchard/lm_eval_tasks",
+    "--samples",
+    "{\"humaneval_chat\": [32, 47, 76, 99, 116, 145]}",
+    "--confirm_run_unsafe_code"
+   ],
+   "drafter": {
+    "sessions": 6,
+    "iters": 20785,
+    "committed_tokens": 100520,
+    "tokens_per_iter": 4.8361799374548955,
+    "draft_length": 7,
+    "histogram": [
+     3040,
+     2981,
+     2474,
+     1868,
+     1329,
+     983,
+     793,
+     7317
+    ],
+    "accepted_per_iter": 3.8364686071686314,
+    "accept_rate": 0.548066943881233,
+    "tok_s_in_model_median": 38.5
+   },
+   "watch": {
+    "max_quiet_s": 296.2306279359909
+   },
+   "scores": {
+    "tasks": {
+     "humaneval_chat": {
+      "version": 1.0,
+      "n_samples": {
+       "original": 164,
+       "effective": 6
+      },
+      "n_shot": 0,
+      "metrics": [
+       {
+        "metric": "pass@1",
+        "filter": "create_test",
+        "value": 0.5,
+        "stderr": 0.22360679774997896
+       }
+      ]
+     }
+    },
+    "lm_eval_version": "0.4.13",
+    "total_evaluation_time_seconds": "780.3909971599933"
+   },
+   "wall_s": 781.1,
+   "proxy": {
+    "requests": 6,
+    "errors": 0,
+    "cut_off": 1,
+    "completion_tokens_total": 100522,
+    "completion_tokens_median": 14302.5,
+    "prompt_tokens_total": 1416,
+    "latency_s_median": 371.2045,
+    "latency_s_max": 775.123
+   }
+  },
+  {
+   "name": "mbpp",
+   "ok": true,
+   "problem": null,
+   "command": [
+    "<HOME>/orchard-venvs/bench/bin/lm_eval",
+    "--model",
+    "local-chat-completions",
+    "--model_args",
+    "model=<HOME>/orchard-runs/bytkim--qwen3.8-27b-pi/stages/4/configs/2/model-dir,base_url=http://127.0.0.1:45147/v1/chat/completions,num_concurrent=4,max_retries=1,tokenized_requests=False,timeout=3600",
+    "--tasks",
+    "mbpp_chat",
+    "--apply_chat_template",
+    "--gen_kwargs",
+    "max_gen_toks=32768,temperature=0",
+    "--output_path",
+    "<HOME>/orchard-runs/bytkim--qwen3.8-27b-pi/benchmark-rerun/pi-32k/mbpp/results",
+    "--log_samples",
+    "--include_path",
+    "<HOME>/code/tt-orchard/.claude/worktrees/bench-rerun/orchard/lm_eval_tasks",
+    "--samples",
+    "{\"mbpp_chat\": [9, 20, 71, 96, 110, 111, 112, 123, 125, 137, 149, 166, 168, 169, 198, 200, 207, 218, 228, 234, 235, 236, 249, 264, 275, 292, 293, 295, 301, 302, 328, 335, 344, 349, 375, 385, 404, 405, 425, 450, 472, 475, 482, 499]}",
+    "--confirm_run_unsafe_code"
+   ],
+   "drafter": {
+    "sessions": 44,
+    "iters": 203044,
+    "committed_tokens": 1005241,
+    "tokens_per_iter": 4.950853017080042,
+    "draft_length": 7,
+    "histogram": [
+     28404,
+     30067,
+     21515,
+     16595,
+     12550,
+     9993,
+     8246,
+     75674
+    ],
+    "accepted_per_iter": 3.9510697188786668,
+    "accept_rate": 0.564438531268381,
+    "tok_s_in_model_median": 37.6
+   },
+   "watch": {
+    "max_quiet_s": 564.3292209520005
+   },
+   "scores": {
+    "tasks": {
+     "mbpp_chat": {
+      "version": 1.0,
+      "n_samples": {
+       "original": 500,
+       "effective": 44
+      },
+      "n_shot": 0,
+      "metrics": [
+       {
+        "metric": "pass_at_1",
+        "filter": "extract_code",
+        "value": 0.5,
+        "stderr": 0.07624928516630235
+       }
+      ]
+     }
+    },
+    "lm_eval_version": "0.4.13",
+    "total_evaluation_time_seconds": "6853.378819249992"
+   },
+   "wall_s": 6854.1,
+   "proxy": {
+    "requests": 44,
+    "errors": 0,
+    "cut_off": 18,
+    "completion_tokens_total": 1005205,
+    "completion_tokens_median": 21790.5,
+    "prompt_tokens_total": 11437,
+    "latency_s_median": 567.7345,
+    "latency_s_max": 1018.583
+   }
+  },
+  {
+   "name": "ifeval",
+   "ok": true,
+   "problem": null,
+   "command": [
+    "<HOME>/orchard-venvs/bench/bin/lm_eval",
+    "--model",
+    "local-chat-completions",
+    "--model_args",
+    "model=<HOME>/orchard-runs/bytkim--qwen3.8-27b-pi/stages/4/configs/2/model-dir,base_url=http://127.0.0.1:45613/v1/chat/completions,num_concurrent=4,max_retries=1,tokenized_requests=False,timeout=3600",
+    "--tasks",
+    "ifeval",
+    "--apply_chat_template",
+    "--gen_kwargs",
+    "max_gen_toks=32768,temperature=0",
+    "--output_path",
+    "<HOME>/orchard-runs/bytkim--qwen3.8-27b-pi/benchmark-rerun/pi-32k/ifeval/results",
+    "--log_samples",
+    "--include_path",
+    "<HOME>/code/tt-orchard/.claude/worktrees/bench-rerun/orchard/lm_eval_tasks",
+    "--samples",
+    "{\"ifeval\": [13, 23, 37, 48, 50, 59, 105, 120, 134, 139, 146, 167, 225, 236, 239, 255, 284, 322, 326, 341, 352, 391, 398, 405, 411, 415, 423, 454, 471, 484, 511]}"
+   ],
+   "drafter": {
+    "sessions": 31,
+    "iters": 102204,
+    "committed_tokens": 720639,
+    "tokens_per_iter": 7.05098626276858,
+    "draft_length": 7,
+    "histogram": [
+     4565,
+     4026,
+     3319,
+     2916,
+     2415,
+     1837,
+     1672,
+     81454
+    ],
+    "accepted_per_iter": 6.051299362060194,
+    "accept_rate": 0.8644713374371705,
+    "tok_s_in_model_median": 63.6
+   },
+   "watch": {
+    "max_quiet_s": 242.00426873000106
+   },
+   "scores": {
+    "tasks": {
+     "ifeval": {
+      "version": 4.0,
+      "n_samples": {
+       "original": 541,
+       "effective": 31
+      },
+      "n_shot": 0,
+      "metrics": [
+       {
+        "metric": "prompt_level_strict_acc",
+        "filter": "none",
+        "value": 0.1935483870967742,
+        "stderr": 0.07213122508063838
+       },
+       {
+        "metric": "inst_level_strict_acc",
+        "filter": "none",
+        "value": 0.2653061224489796,
+        "stderr": null
+       },
+       {
+        "metric": "prompt_level_loose_acc",
+        "filter": "none",
+        "value": 0.1935483870967742,
+        "stderr": 0.07213122508063838
+       },
+       {
+        "metric": "inst_level_loose_acc",
+        "filter": "none",
+        "value": 0.2653061224489796,
+        "stderr": null
+       }
+      ]
+     }
+    },
+    "lm_eval_version": "0.4.13",
+    "total_evaluation_time_seconds": "2989.7604718820076"
+   },
+   "wall_s": 2990.7,
+   "proxy": {
+    "requests": 31,
+    "errors": 0,
+    "cut_off": 15,
+    "completion_tokens_total": 720613,
+    "completion_tokens_median": 28729,
+    "prompt_tokens_total": 2866,
+    "latency_s_median": 407.3,
+    "latency_s_max": 583.336
+   }
+  }
+ ],
+ "code_sandbox": {
+  "mode": "landlock+seccomp",
+  "detail": "every probe action was refused"
+ },
+ "wall_s": 10759.1
+}

@@ -125,6 +125,10 @@ The pilot also found that the harness's HumanEval and MBPP instruct tasks cannot
 The full run (every item, thinking on, 8192 token limit) is in `docs/run-logs/2026-10-20-bytkim-pi-benchmark-full.md`. The fine-tune scores at or above the base on every set;
 the gap is clear on GSM8K and MBPP. The card was updated and published on that basis.
 
+## Re-run at 32768 tokens (2026-10-21 UTC)
+
+The empty replies of HumanEval, MBPP and IFEval were asked again with a limit of 32768 tokens (`docs/run-logs/2026-10-21-bytkim-pi-benchmark-rerun.md`). The fine-tune and the base are close on those sets at that limit; the MBPP difference found at 8192 tokens is not clear any more.
+
 ## Not decided yet
 
 - Whether a benchmark becomes a stage 7 requirement for every package. The bytkim pilot gives the cost; the decision comes after it.
