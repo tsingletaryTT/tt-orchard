@@ -635,3 +635,10 @@ def test_an_open_model_is_not_gated_and_the_markdown_has_no_gated_line():
 def test_an_offline_report_does_not_know_whether_the_model_is_gated():
     assert report.build(model_id="h/new", hub=None, base_override=None, installed=[], search=NO_SEARCH,
                         hub_info=HUBINFO, fetch=World(offline=True), run=RUN, which=lambda n: None)["new_model_gated"] is None
+
+
+def test_the_ports_step_gets_the_stated_bases_and_the_model_itself_as_ids_to_match_exactly(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(report.ports, "collect", lambda fetch, cfg, **kw: seen.update(kw) or Result())
+    r = build(world())
+    assert seen["ids"] == ["g/base", r["model"]]

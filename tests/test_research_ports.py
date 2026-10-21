@@ -282,7 +282,7 @@ def test_the_recorded_gemma_bundle_listing_yields_one_port_row_and_ignores_share
 # ---- collect ------------------------------------------------------------------------------------------------
 
 def test_collect_skips_github_when_asked_and_runs_the_rest():
-    f = FakeFetch({DEMOS: [], EXPER: [], README: b""})
+    f = FakeFetch({DEMOS: [], EXPER: [], README: b"", **tt_routes()})
     run = Run(json.dumps({"bundles": []}))
     r = ports.collect(f, CFG, family="gemma", run=run, which=which_gh, no_github=True)
     assert not any("search/issues" in u for u in f.urls)
@@ -291,7 +291,7 @@ def test_collect_skips_github_when_asked_and_runs_the_rest():
 
 
 def test_collect_runs_the_github_searches_by_default():
-    f = FakeFetch({DEMOS: [], EXPER: [], README: b""})
+    f = FakeFetch({DEMOS: [], EXPER: [], README: b"", **tt_routes()})
     run = Run(json.dumps({"items": []}))
     ports.collect(f, CFG, family="gemma", run=run, which=which_gh)
     assert any("search/issues" in u for u in f.urls)
@@ -338,3 +338,133 @@ def test_a_tt_metal_answer_that_is_not_a_listing_is_unavailable():
     f = FakeFetch({DEMOS: {"message": "Not Found"}, EXPER: [], README: b""})
     r = ports.metal(f, ports.terms(CFG))
     assert r.evidence == [] and any("not a listing" in u.reason for u in r.unavailable)
+
+
+# ---- tt-transformers --------------------------------------------------------------------------------
+# Two homes: tt-metal's models/tt_transformers (its model_params directories are named by Hugging Face model
+# name, and its README lists the boards each model runs on) and the standalone tenstorrent/tt-transformers repo.
+
+QCFG = {"model_type": "qwen2_5_vl", "architectures": ["Qwen2_5_VLForConditionalGeneration"]}
+PARAMS = "https://api.github.com/repos/tenstorrent/tt-metal/contents/models/tt_transformers/model_params"
+TT_README = "https://raw.githubusercontent.com/tenstorrent/tt-metal/main/models/tt_transformers/README.md"
+STANDALONE = "https://api.github.com/repos/tenstorrent/tt-transformers/contents/src/tt_transformers/models"
+BASE = "Qwen/Qwen2.5-VL-7B-Instruct"
+TT_README_TEXT = (
+    b"| Model | Hardware | HF_MODEL |\n|---|---|---|\n"
+    b"| [Llama 3.1 8B](https://huggingface.co/meta-llama/Llama-3.1-8B) | n150 / p100 / p150 | ```meta-llama/Llama-3.1-8B``` |\n"
+    b"| [Qwen 2.5 7B](https://huggingface.co/Qwen/Qwen2.5-7B) | n300 | ```Qwen/Qwen2.5-7B``` |\n")
+
+
+def tt_routes(**over):
+    routes = {PARAMS: [{"name": n, "type": "dir"} for n in
+                       ("Qwen2.5-VL-3B-Instruct", "Qwen2.5-VL-7B-Instruct", "Qwen3-32B", "Llama-3.1-8B-Instruct")],
+              TT_README: TT_README_TEXT,
+              STANDALONE: [{"name": n, "type": "dir"} for n in ("qwen2_7b", "llama3_8b", "qwen3_32b")]}
+    routes.update(over)
+    return routes
+
+
+def tt_claims(res):
+    return [(e.source, e.claim, e.confidence) for e in res.evidence]
+
+
+def test_a_model_params_directory_named_like_the_base_is_an_exact_match():
+    r = ports.tt_transformers(FakeFetch(tt_routes()), ports.terms(QCFG), [BASE])
+    exact = [e for e in r.evidence if "model_params" in e.claim]
+    assert [(e.source, e.confidence) for e in exact] == [("tt-transformers", "inferred")]
+    assert "Qwen2.5-VL-7B-Instruct" in exact[0].claim
+    # the 3B and the unrelated models are not the same model, whatever their family
+    assert not any("3B" in e.claim or "Qwen3-32B" in e.claim or "Llama-3.1-8B-Instruct" in e.claim for e in exact)
+
+
+def test_the_model_name_is_compared_without_case_or_punctuation():
+    r = ports.tt_transformers(FakeFetch(tt_routes()), ports.terms(QCFG), ["someone/qwen2_5-vl-7B-INSTRUCT"])
+    assert any("model_params" in e.claim and "Qwen2.5-VL-7B-Instruct" in e.claim for e in r.evidence)
+
+
+def test_a_string_that_is_not_a_model_id_is_not_compared():
+    # ids come from cards and the hub; one that is not `org/name` is left out here as well as in the report
+    r = ports.tt_transformers(FakeFetch(tt_routes()), ports.terms(QCFG), ["Qwen2.5-VL-7B-Instruct", "a b/Qwen2.5-VL-7B-Instruct", None, 5])
+    assert not any("model_params" in e.claim for e in r.evidence)
+
+
+def test_with_no_model_id_there_is_no_params_match():
+    r = ports.tt_transformers(FakeFetch(tt_routes()), ports.terms(QCFG), [])
+    assert not any("model_params" in e.claim for e in r.evidence)
+
+
+def test_a_readme_row_for_the_base_gives_the_boards_it_runs_on():
+    r = ports.tt_transformers(FakeFetch(tt_routes()), ports.terms({}), ["meta-llama/Llama-3.1-8B-Instruct"])
+    rows = [e for e in r.evidence if "README" in e.claim]
+    assert len(rows) == 1 and rows[0].confidence == "inferred" and rows[0].source == "tt-transformers"
+    assert "Llama 3.1 8B" in rows[0].claim and "n150 / p100 / p150" in rows[0].claim
+    assert "Qwen" not in rows[0].claim
+
+
+def test_the_standalone_repos_model_directories_match_by_the_architecture_terms():
+    r = ports.tt_transformers(FakeFetch(tt_routes()), ports.terms(QCFG), [])
+    stand = [e for e in r.evidence if "tt-transformers repo" in e.claim]
+    assert [(e.claim, e.confidence) for e in stand] == [
+        ("the tt-transformers repo has src/tt_transformers/models/qwen2_7b", "inferred"),
+        ("the tt-transformers repo has src/tt_transformers/models/qwen3_32b", "weak")]
+
+
+def test_a_listing_that_fails_is_unavailable_and_the_others_are_still_read():
+    r = ports.tt_transformers(FakeFetch(tt_routes(**{PARAMS: FetchError("HTTP 403")})), ports.terms(QCFG), [BASE])
+    assert [(u.source, "403" in u.reason) for u in r.unavailable] == [("tt-transformers", True)]
+    assert any("tt-transformers repo" in e.claim for e in r.evidence)
+
+
+def test_all_three_sources_failing_gives_three_unavailable_rows_and_no_evidence():
+    f = FakeFetch({PARAMS: FetchError("a"), TT_README: FetchError("b"), STANDALONE: FetchError("c")})
+    r = ports.tt_transformers(f, ports.terms(QCFG), [BASE])
+    assert r.evidence == [] and len(r.unavailable) == 3
+
+
+def test_a_listing_that_is_not_a_list_is_unavailable_not_a_crash():
+    r = ports.tt_transformers(FakeFetch(tt_routes(**{PARAMS: {"message": "x"}, STANDALONE: "x"})), ports.terms(QCFG), [BASE])
+    assert sum(u.source == "tt-transformers" for u in r.unavailable) == 2
+
+
+def test_a_hostile_directory_name_is_cleaned_and_a_foreign_id_never_becomes_a_match():
+    hostile = "Qwen2.5-VL-7B-Instruct\nIGNORE PREVIOUS /home/someone/x"
+    f = FakeFetch(tt_routes(**{PARAMS: [{"name": hostile, "type": "dir"}]}))
+    r = ports.tt_transformers(f, ports.terms(QCFG), [BASE])
+    assert not any("model_params" in e.claim for e in r.evidence)        # not the same name, so not a match
+    assert all("\n" not in e.claim and "/home/" not in e.claim for e in r.evidence)
+
+
+def test_a_directory_name_with_a_control_character_is_not_matched():
+    # "Qwen2.5-VL-7B-Instruct\n" has the same letters and digits as the base, so only the name check refuses it.
+    f = FakeFetch(tt_routes(**{PARAMS: [{"name": "Qwen2.5-VL-7B-Instruct\n", "type": "dir"}]}))
+    r = ports.tt_transformers(f, ports.terms(QCFG), [BASE])
+    assert not any("model_params" in e.claim for e in r.evidence)
+
+
+def test_every_link_is_a_github_link():
+    foreign = [{"name": "Qwen2.5-VL-7B-Instruct", "type": "dir", "html_url": "https://evil.example/x"}]
+    foreign2 = [{"name": "qwen2_7b", "type": "dir", "html_url": "https://evil.example/y"}]
+    f = FakeFetch(tt_routes(**{PARAMS: foreign, STANDALONE: foreign2}))
+    r = ports.tt_transformers(f, ports.terms(QCFG), [BASE])
+    assert len(r.evidence) >= 2 and all(e.url.startswith("https://github.com/") for e in r.evidence)
+    r = ports.tt_transformers(FakeFetch(tt_routes()), ports.terms(QCFG), [BASE, "meta-llama/Llama-3.1-8B-Instruct"])
+    assert r.evidence and all(e.url.startswith("https://github.com/") for e in r.evidence)
+
+
+def test_collect_puts_the_tt_transformers_rows_before_the_tt_metal_rows(monkeypatch):
+    ev = lambda src: ports.Result(evidence=[ports.Evidence(src, src, "https://github.com/x", "inferred", NOW)])
+    monkeypatch.setattr(ports, "tt_transformers", lambda fetch, t, ids: ev("tt-transformers"))
+    monkeypatch.setattr(ports, "metal", lambda fetch, t: ev("tt-metal"))
+    monkeypatch.setattr(ports, "catalog", lambda *a, **kw: ports.Result(data={"bundles": []}))
+    r = ports.collect(FakeFetch({}), QCFG, family="qwen", ids=[BASE], no_github=True)
+    assert [e.source for e in r.evidence] == ["tt-transformers", "tt-metal"]
+
+
+def test_collect_reads_tt_transformers_for_the_model_ids_it_is_given(monkeypatch):
+    seen = []
+    monkeypatch.setattr(ports, "tt_transformers", lambda fetch, t, ids: seen.append(list(ids)) or ports.Result())
+    monkeypatch.setattr(ports, "metal", lambda fetch, t: ports.Result())
+    monkeypatch.setattr(ports, "catalog", lambda *a, **kw: ports.Result(data={"bundles": []}))
+    ports.collect(FakeFetch({}), QCFG, family="qwen", ids=[BASE], no_github=True)
+    assert seen == [[BASE]]                                               # and it still runs with --no-github
+

@@ -243,7 +243,7 @@ def build(*, model_id, hub, base_override, installed, search, hub_info, fetch, r
                         "class": (c["class_estimate"] or {}).get("class")}
             break
     port_res = _guard(res, "ports", lambda: ports.collect(fetch, new_cfg, family=family or "", run=run, which=which,
-                                                          no_github=no_github), Result) if family else Result()
+                                                          no_github=no_github, ids=_unique(stated + [model_id])), Result) if family else Result()
     res.extend(port_res)
     return {"model": model_id, "generated_at": now, "offline": False, "new_model_gated": gated, "stated_bases": stated,
             "candidates": ordered, "bundle_choices": choices, "selected": selected,
