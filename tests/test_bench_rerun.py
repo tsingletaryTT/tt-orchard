@@ -139,3 +139,98 @@ def test_the_merge_command_prints_the_before_and_after(tmp_path, capsys):
     assert br.main(["merge", "--first", str(tmp_path / "first"), "--again", str(tmp_path / "again"), "--phases", "mbpp", "--out", str(out)]) == 0
     assert json.loads(out.read_text())["mbpp"]["metrics"]["pass_at_1"] == {"before": 0.0, "after": 1.0}
     assert "mbpp" in capsys.readouterr().out
+
+
+# ---- refusing a re-run that does not fit the first run ---------------------------------------------------------------------------------
+
+def test_a_task_with_two_rows_per_document_is_refused(tmp_path):
+    """lm-eval writes one row per document per filter (GSM8K has two); keying by document id would keep only one of them."""
+    first, again = tmp_path / "first", tmp_path / "again"
+    write_samples(first, "gsm8k", [{**row(0, "a", exact_match=1), "filter": "strict-match"}, {**row(0, "a", exact_match=0), "filter": "flexible-extract"}])
+    write_samples(again, "gsm8k", [{**row(0, "a", exact_match=1), "filter": "strict-match"}])
+    with pytest.raises(ValueError, match="gsm8k.*more than one row.*0"):
+        br.merge(first, again, ["gsm8k"])
+
+
+def test_a_repeated_document_in_the_rerun_is_refused(tmp_path):
+    first, again = tmp_path / "first", tmp_path / "again"
+    write_samples(first, "mbpp", [row(0, "", pass_at_1=0)])
+    write_samples(again, "mbpp", [row(0, "x", pass_at_1=1), row(0, "y", pass_at_1=0)])
+    with pytest.raises(ValueError, match="more than one row"):
+        br.merge(first, again, ["mbpp"])
+
+
+def test_a_rerun_made_with_a_different_prompt_is_refused(tmp_path):
+    first, again = tmp_path / "first", tmp_path / "again"
+    write_samples(first, "mbpp", [{**row(0, "", pass_at_1=0), "prompt_hash": "aaa", "doc_hash": "d"}])
+    write_samples(again, "mbpp", [{**row(0, "x", pass_at_1=1), "prompt_hash": "bbb", "doc_hash": "d"}])
+    with pytest.raises(ValueError, match="mbpp: item 0.*prompt_hash"):
+        br.merge(first, again, ["mbpp"])
+
+
+def test_a_rerun_with_a_different_document_is_refused(tmp_path):
+    first, again = tmp_path / "first", tmp_path / "again"
+    write_samples(first, "mbpp", [{**row(0, "", pass_at_1=0), "prompt_hash": "p", "doc_hash": "aaa"}])
+    write_samples(again, "mbpp", [{**row(0, "x", pass_at_1=1), "prompt_hash": "p", "doc_hash": "bbb"}])
+    with pytest.raises(ValueError, match="doc_hash"):
+        br.merge(first, again, ["mbpp"])
+
+
+def test_matching_hashes_merge_and_rows_with_no_hashes_are_not_compared(tmp_path):
+    first, again = tmp_path / "first", tmp_path / "again"
+    write_samples(first, "mbpp", [{**row(0, "", pass_at_1=0), "prompt_hash": "p", "doc_hash": "d"}, row(1, "", pass_at_1=0)])
+    write_samples(again, "mbpp", [{**row(0, "x", pass_at_1=1), "prompt_hash": "p", "doc_hash": "d"}, {**row(1, "x", pass_at_1=1), "prompt_hash": "q"}])
+    assert br.merge(first, again, ["mbpp"])["mbpp"]["metrics"]["pass_at_1"]["after"] == 1.0
+
+
+def test_a_rerun_that_is_not_exactly_the_requested_items_is_refused(tmp_path):
+    first, again = tmp_path / "first", tmp_path / "again"
+    write_samples(first, "mbpp", [row(0, "", pass_at_1=0), row(1, "", pass_at_1=0), row(2, "a", pass_at_1=1)])
+    write_samples(again, "mbpp", [row(0, "x", pass_at_1=1)])
+    with pytest.raises(ValueError, match="mbpp.*missing.*1"):
+        br.merge(first, again, ["mbpp"], expected={"mbpp": [0, 1]})
+    write_samples(again, "mbpp", [row(0, "x", pass_at_1=1), row(1, "x", pass_at_1=1), row(2, "x", pass_at_1=1)], stamp="2026-10-20T00-00-00.000000")
+    with pytest.raises(ValueError, match="mbpp.*not requested.*2"):
+        br.merge(first, again, ["mbpp"], expected={"mbpp": [0, 1]})
+
+
+def test_a_rerun_that_is_exactly_the_requested_items_merges(tmp_path):
+    first, again = tmp_path / "first", tmp_path / "again"
+    write_samples(first, "mbpp", [row(0, "", pass_at_1=0), row(1, "a", pass_at_1=1)])
+    write_samples(again, "mbpp", [row(0, "x", pass_at_1=1)])
+    assert br.merge(first, again, ["mbpp"], expected={"mbpp": [0]})["mbpp"]["rerun_n"] == 1
+
+
+def test_a_phase_missing_from_the_requested_items_is_refused(tmp_path):
+    first, again = tmp_path / "first", tmp_path / "again"
+    write_samples(first, "mbpp", [row(0, "", pass_at_1=0)])
+    write_samples(again, "mbpp", [row(0, "x", pass_at_1=1)])
+    with pytest.raises(ValueError, match="mbpp.*not in the requested"):
+        br.merge(first, again, ["mbpp"], expected={"ifeval": [0]})
+
+
+def test_a_sample_missing_a_metric_is_an_error_not_a_zero(tmp_path):
+    first, again = tmp_path / "first", tmp_path / "again"
+    write_samples(first, "mbpp", [row(0, "", pass_at_1=0), row(1, "a", pass_at_1=1)])
+    write_samples(again, "mbpp", [row(0, "x")])
+    with pytest.raises(ValueError, match="mbpp: item 0 of the re-run has no pass_at_1"):
+        br.merge(first, again, ["mbpp"])
+
+
+def test_a_first_run_sample_missing_a_metric_is_an_error(tmp_path):
+    first, again = tmp_path / "first", tmp_path / "again"
+    write_samples(first, "mbpp", [row(0, "", pass_at_1=0), row(1, "a")])
+    write_samples(again, "mbpp", [row(0, "x", pass_at_1=1)])
+    with pytest.raises(ValueError, match="item 1 of the first run has no pass_at_1"):
+        br.merge(first, again, ["mbpp"])
+
+
+def test_the_merge_command_checks_the_requested_items_when_given_them(tmp_path):
+    write_samples(tmp_path / "first", "mbpp", [row(0, "", pass_at_1=0), row(1, "", pass_at_1=0)])
+    write_samples(tmp_path / "again", "mbpp", [row(0, "x", pass_at_1=1)])
+    items = tmp_path / "items.json"
+    items.write_text('{"mbpp": [0, 1]}')
+    out = tmp_path / "merged.json"
+    with pytest.raises(ValueError, match="missing"):
+        br.main(["merge", "--first", str(tmp_path / "first"), "--again", str(tmp_path / "again"), "--phases", "mbpp", "--items", str(items), "--out", str(out)])
+    assert not out.exists()

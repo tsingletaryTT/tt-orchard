@@ -206,6 +206,12 @@ def wire_weights(text: str, model_id: str) -> str:
                  'exec "${CMD[@]}" line', flags=re.M)
 
 
+def _names_model(text: str, model: str) -> bool:
+    """True when `text` holds the whole model id: not as the start of a longer id (`org/model-v2`, `org/model.5`) and not as the end of one
+    with a longer owner (a `-` before it counts as part of an owner, except in the shell default `:-`). A sentence's closing full stop still counts as the end of the id."""
+    return re.search(rf"(?<![\w./])(?<![^:]-){re.escape(model)}(?![\w\-])(?!\.\w)", text) is not None
+
+
 def weights_wiring_problems(text: str, *, nearest_model: str) -> list[str]:
     """What is wrong with a staged run.sh's weights settings; empty when the chips will load the
     weights in model-dir and nothing names the nearest model."""
@@ -213,7 +219,7 @@ def weights_wiring_problems(text: str, *, nearest_model: str) -> list[str]:
     lines = text.splitlines()
     for var, want in (("HF_MODEL", WIRING_LINES[0]), ("MODEL_WEIGHTS_DIR", WIRING_LINES[1])):
         sets = [ln for ln in lines if re.match(rf"\s*(?:export\s+)?{var}=", ln)]
-        if var == "HF_MODEL" and len(sets) == 2 and DEFAULT_HF_MODEL.match(sets[0]) and nearest_model not in sets[0]:
+        if var == "HF_MODEL" and len(sets) == 2 and DEFAULT_HF_MODEL.match(sets[0]) and not _names_model(sets[0], nearest_model):
             sets = sets[1:]          # the resolving format's default (the id its resolver reads), then the wiring line
         if sets != [want]:
             problems.append(f"run.sh must set {var} exactly once, as {want!r}; found {sets}")
@@ -224,7 +230,7 @@ def weights_wiring_problems(text: str, *, nearest_model: str) -> list[str]:
         problems.append("run.sh pins a --revision, which a local model-dir does not have")
     if PREPARE_LINE not in lines or EXEC_LINE not in lines or lines.index(PREPARE_LINE) > lines.index(EXEC_LINE):
         problems.append("run.sh must run prepare_model_dir.py before it starts vLLM")
-    if nearest_model in text:
+    if _names_model(text, nearest_model):
         problems.append(f"run.sh names the nearest model {nearest_model}")
     return problems
 

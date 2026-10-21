@@ -33,7 +33,7 @@ for phase in METRIC:
                         "score_before": round(sum(before[model].values()) / n, 3), "score": round(p, 3), "passed": round(p * n), "stderr": round(math.sqrt(p * (1 - p) / (n - 1)), 3)}
     ids = sorted(set(after["pi"]) & set(after["base"]))
     w = sum(after["pi"][i] > after["base"][i] for i in ids); l = sum(after["pi"][i] < after["base"][i] for i in ids)
-    entry["paired"] = {"items": len(ids), "pi_only_right": w, "base_only_right": l, "sign_test_p": round(sign_test(w, l), 4)}
+    entry["paired"] = {"items": len(ids), "pi_only_right": w, "base_only_right": l, "sign_test_p": float(f"{sign_test(w, l):.4g}")}
     out["tasks"][phase] = entry
 data = json.load(open(sys.argv[1]))
 data["rerun_32k"] = out

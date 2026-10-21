@@ -264,3 +264,32 @@ def test_a_resolving_script_missing_one_of_its_final_exports_is_refused(old, nam
     assert old not in text
     with pytest.raises(PackageError, match=named):
         wire_weights(text, PI)
+
+
+# ---- the nearest-model check matches the whole id -------------------------------------------------------------------------------------
+
+def test_a_longer_model_id_that_starts_with_the_nearest_model_is_not_named_by_it():
+    text = wire_weights(resolving(), PI) + f"\n# fine-tuned from {BASE}-v2 and {BASE}.5\n"
+    assert not any("names the nearest model" in p for p in weights_wiring_problems(text, nearest_model=BASE))
+
+
+@pytest.mark.parametrize("tail", ["", ".", ",", ")", "\n", " and more", "@abc123"])
+def test_the_nearest_model_is_still_found_when_the_id_ends_there(tail):
+    text = wire_weights(resolving(), PI) + f"\n# from {BASE}{tail}\n"
+    assert any("names the nearest model" in p for p in weights_wiring_problems(text, nearest_model=BASE))
+
+
+def test_an_id_with_a_longer_owner_is_not_the_nearest_model():
+    text = wire_weights(resolving(), PI) + f"\n# see other{BASE}\n"
+    assert not any("names the nearest model" in p for p in weights_wiring_problems(text, nearest_model=BASE))
+
+
+def test_a_default_hf_model_naming_a_longer_id_is_judged_by_the_whole_id():
+    text = wire_weights(resolving(), PI).replace(f'export HF_MODEL="${{HF_MODEL:-{PI}}}"', f'export HF_MODEL="${{HF_MODEL:-{BASE}-v2}}"')
+    problems = weights_wiring_problems(text, nearest_model=BASE)
+    assert not any("HF_MODEL" in p for p in problems)
+
+
+def test_an_id_with_a_hyphenated_longer_owner_is_not_the_nearest_model():
+    text = wire_weights(resolving(), PI) + f"\n# see my-{BASE}\n"
+    assert not any("names the nearest model" in p for p in weights_wiring_problems(text, nearest_model=BASE))

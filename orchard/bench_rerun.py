@@ -10,8 +10,8 @@ generation limit reasoning comes back with empty content (`finish_reason` length
 count: a reply cut off after its answer began has text, and a model can answer with nothing. The proxy records requests without document ids, so the
 two cannot be matched item by item. The output is the file `orchard.bench_session --items` takes.
 
-`merge` replaces the first run's result for each re-run item and recomputes each per-item metric over every item. It reads files and writes only its
-`--out`. A re-run item that the first run did not have is an error.
+`merge` (with `--items`, the file the re-run was asked for) replaces the first run's result for each re-run item and recomputes each per-item metric over every item. It reads files and writes only its
+`--out`. It refuses a re-run item the first run did not have, a second row for one item, a changed prompt or document hash, a re-run that is not exactly the requested items, and a sample missing a metric.
 """
 from __future__ import annotations
 
@@ -58,23 +58,66 @@ def _metrics(sample: dict) -> dict:
     return {k: float(v) for k, v in sample.items() if k != "doc_id" and isinstance(v, (bool, int, float))}
 
 
-def merge(first_dir, again_dir, phases) -> dict:
+def _by_doc(run_dir, phase: str, which: str) -> dict:
+    """The phase's samples keyed by document id. A second row for one document (lm-eval writes one per filter) would be lost by the key, so it is an error."""
+    rows = {}
+    for s in read_samples(run_dir, phase):
+        if s["doc_id"] in rows:
+            raise ValueError(f"{phase}: the {which} has more than one row for item {s['doc_id']} (a task with several filters?); merge keys rows by item only")
+        rows[s["doc_id"]] = s
+    return rows
+
+
+def _check_same_question(phase: str, first: dict, again: dict) -> None:
+    for i, s in again.items():
+        for key in ("doc_hash", "prompt_hash"):
+            if key in s and key in first[i] and s[key] != first[i][key]:
+                raise ValueError(f"{phase}: item {i} was asked differently in the re-run ({key} differs)")
+
+
+def _check_requested(phase: str, again: dict, expected: dict) -> None:
+    if phase not in expected:
+        raise ValueError(f"{phase}: not in the requested items")
+    want, got = set(expected[phase]), set(again)
+    if want - got:
+        raise ValueError(f"{phase}: the re-run is missing requested items {sorted(want - got)}")
+    if got - want:
+        raise ValueError(f"{phase}: the re-run has items that were not requested {sorted(got - want)}")
+
+
+def _numbers(phase: str, rows: dict, names: list, which: str) -> dict:
+    out = {}
+    for i, s in rows.items():
+        m = _metrics(s)
+        for name in names:
+            if name not in m:
+                raise ValueError(f"{phase}: item {i} of the {which} has no {name}")
+        out[i] = m
+    return out
+
+
+def merge(first_dir, again_dir, phases, expected=None) -> dict:
+    """`expected` ({phase: ids}, the file the re-run was asked for) makes the merge refuse a re-run that is not exactly those items."""
     out = {}
     for phase in phases:
-        first = {s["doc_id"]: s for s in read_samples(first_dir, phase)}
-        again = {s["doc_id"]: s for s in read_samples(again_dir, phase)}
+        first = _by_doc(first_dir, phase, "first run")
+        again = _by_doc(again_dir, phase, "re-run")
         unknown = sorted(set(again) - set(first))
         if unknown:
             raise ValueError(f"{phase}: the re-run has items the first run does not: {unknown}")
+        _check_same_question(phase, first, again)
+        if expected is not None:
+            _check_requested(phase, again, expected)
         merged = {i: (again[i] if i in again else s) for i, s in first.items()}
         names = sorted({k for s in first.values() for k in _metrics(s)})
+        f_num, a_num = _numbers(phase, first, names, "first run"), _numbers(phase, again, names, "re-run")
         metrics, flips = {}, {}
         for name in names:
-            before = [_metrics(s).get(name, 0.0) for s in first.values()]
-            after = [_metrics(s).get(name, 0.0) for s in merged.values()]
+            before = [f_num[i][name] for i in first]
+            after = [(a_num[i] if i in again else f_num[i])[name] for i in first]
             metrics[name] = {"before": round(sum(before) / len(before), 6), "after": round(sum(after) / len(after), 6)}
-            gained = sorted(i for i in again if _metrics(again[i]).get(name, 0.0) > _metrics(first[i]).get(name, 0.0))
-            lost = sorted(i for i in again if _metrics(again[i]).get(name, 0.0) < _metrics(first[i]).get(name, 0.0))
+            gained = sorted(i for i in again if a_num[i][name] > f_num[i][name])
+            lost = sorted(i for i in again if a_num[i][name] < f_num[i][name])
             flips[name] = {"gained": gained, "lost": lost}
         out[phase] = {"n": len(first), "rerun_n": len(again), "metrics": metrics, "flips": flips}
     return out
@@ -91,6 +134,7 @@ def main(argv=None) -> int:
     mg.add_argument("--first", required=True)
     mg.add_argument("--again", required=True)
     mg.add_argument("--phases", required=True)
+    mg.add_argument("--items", help="the file the re-run was asked for; the merge refuses a re-run that is not exactly those items")
     mg.add_argument("--out", required=True)
     a = ap.parse_args(argv)
     phases = [p for p in a.phases.split(",") if p]
@@ -103,7 +147,11 @@ def main(argv=None) -> int:
             return 3
         Path(a.out).write_text(json.dumps(items) + "\n", encoding="utf-8")
         return 0
-    merged = merge(a.first, a.again, phases)
+    expected = None
+    if a.items:
+        from orchard.bench_session import load_items
+        expected = load_items(a.items)
+    merged = merge(a.first, a.again, phases, expected=expected)
     Path(a.out).write_text(json.dumps(merged, indent=1) + "\n", encoding="utf-8")
     for phase, m in merged.items():
         for name, v in m["metrics"].items():

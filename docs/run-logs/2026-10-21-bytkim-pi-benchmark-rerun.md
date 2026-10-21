@@ -34,7 +34,9 @@ So the MBPP gap that the card called clear came mostly from the length limit. Th
 ## Gate finding
 
 `gate_package` on `main` rejects the package's `run.sh` (`HF_MODEL` set twice: the thin-package default line and the `model-dir` line). The `run.sh` format fix is commit `e61df0f` on `bytkim-package`,
-which is not in `main`. The card gate was run with that branch's code and passed. Merging `e61df0f` (or fixing the rule) is needed before another package is gated on `main`.
+which was not in `main`. The card gate first passed with that branch's code. This branch now carries `e61df0f` as a cherry-pick (PR 13), so the gate passes here; it brings `orchard/measure_serving.py` and the 10-19 packaging run log with it, and `bytkim-package` will overlap this branch when it lands.
+
+The updated card was uploaded to `episod/qwen3.8-27b-pi-p300` (commit `84d3c49`) and published again on 2026-10-21, after the gate passed.
 
 ## Not done
 

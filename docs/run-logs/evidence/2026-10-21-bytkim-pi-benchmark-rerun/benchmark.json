@@ -102,7 +102,7 @@
         "items": 1319,
         "pi_only_right": 101,
         "base_only_right": 39,
-        "sign_test_p": 0.0
+        "sign_test_p": 1.607e-07
       }
     },
     "gsm8k_strict_format": {
