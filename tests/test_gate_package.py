@@ -3,6 +3,7 @@
 """Stage 7's spec on each path, and gate_package checking the staged package from disk (plan 5)."""
 import json
 import os
+import re
 import socket
 import sys
 from pathlib import Path
@@ -180,6 +181,34 @@ def test_a_card_that_dropped_the_borrowed_sampling_statement_fails_the_gate(stag
     card.write_text("\n".join(kept) + "\n")
     assert any("card:" in r and "generation_config.json" in r and "sampling defaults" in r
                for r in reasons(stage7_borrowed))
+
+
+def _attribution_fails(world, edit):
+    card = world["pkg"] / "README.md"
+    card.write_text(edit(card.read_text()))
+    return [r for r in reasons(world) if "card:" in r and "generation_config.json" in r]
+
+
+def test_a_card_that_keeps_the_absence_sentence_but_drops_whose_defaults_are_used_fails_the_gate(stage7_borrowed):
+    """The bullet says the model ships no generation config; the gate must also see the sentence that says the stop
+    tokens and sampling defaults are the nearest model's."""
+    def edit(text):
+        return "\n".join(ln.split(", so the stop tokens")[0] + "." if "ships no generation_config.json" in ln else ln
+                         for ln in text.splitlines()) + "\n"
+    assert _attribution_fails(stage7_borrowed, edit)
+
+
+def test_a_card_that_names_another_model_as_the_source_of_the_defaults_fails_the_gate(stage7_borrowed):
+    card = (stage7_borrowed["pkg"] / "README.md").read_text()
+    m = re.search(r"are those of (\S+)\.", card)
+    assert m, card
+    assert _attribution_fails(stage7_borrowed, lambda t: t.replace(f"are those of {m.group(1)}.", "are those of other/model."))
+
+
+def test_a_card_that_drops_the_sampling_limitation_fails_the_gate(stage7_borrowed):
+    def edit(text):
+        return "\n".join(ln for ln in text.splitlines() if not ln.startswith("- Default sampling settings")) + "\n"
+    assert _attribution_fails(stage7_borrowed, edit)
 
 
 def test_a_card_that_does_not_name_a_base_config_file_fails_the_gate(stage7):

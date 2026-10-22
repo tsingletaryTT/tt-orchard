@@ -155,8 +155,7 @@ def render_card(f: CardFacts) -> str:
               f"load the weights of {f.model_id}.",
               f"- Context length {f.max_model_len} tokens; up to {f.max_num_seqs} sequences at a time."]
     if f.sampling_from_base:
-        lines.append(f"- {f.model_id} ships no generation_config.json, so the stop tokens and the sampling "
-                     f"defaults the server applies when a request sets none are those of {f.nearest_model}.")
+        lines.append(f"- {sampling_disclosures(f.model_id, f.nearest_model)[0]}")
     if f.drafter:
         lines.append(f"- Speculative decoding uses the drafter {f.drafter}, which was trained on "
                      f"{f.nearest_model}. Its acceptance rate on this model is listed under Not "
@@ -202,8 +201,8 @@ def render_card(f: CardFacts) -> str:
     if f.host_sampling:
         limits.append("Sampling runs on the host.")
     if f.sampling_from_base:
-        limits.append(f"Default sampling settings are those of {f.nearest_model}, because {f.model_id} ships "
-                      "no generation_config.json. Send your own settings or use those on the model's card.")
+        limits.append(f"{sampling_disclosures(f.model_id, f.nearest_model)[1]} Send your own settings or use "
+                      "those on the model's card.")
     limits += [f"`{s}` is not served." for s in f.sidecars]
     lines += ["", "## Limitations", "", *[f"- {item}" for item in limits], "",
               "## Risks and safety considerations", "",
@@ -255,7 +254,17 @@ def _section(card: str, head: str) -> tuple[str, str]:
     return section, before + (sep + rest if sep else "")
 
 
-def card_problems(card: str, *, license_id: str, run_dir, sidecars=(), base_files=(), reported=()) -> list[str]:
+def sampling_disclosures(model_id: str, nearest_model: str) -> tuple[str, str]:
+    """The two sentences a card must keep when the package serves the nearest model's generation_config.json: the
+    one in the facts list and the one under Limitations. `render_card` writes them and `card_problems` looks for them."""
+    return (f"{model_id} ships no generation_config.json, so the stop tokens and the sampling defaults the "
+            f"server applies when a request sets none are those of {nearest_model}.",
+            f"Default sampling settings are those of {nearest_model}, because {model_id} ships "
+            "no generation_config.json.")
+
+
+def card_problems(card: str, *, license_id: str, run_dir, sidecars=(), base_files=(), reported=(), model_id="",
+                  nearest_model="") -> list[str]:
     problems = []
     reported_section, card_without_reported = _section(card, REPORTED_HEAD)
     if reported:
@@ -270,10 +279,13 @@ def card_problems(card: str, *, license_id: str, run_dir, sidecars=(), base_file
     for n in base_files:
         if f"`{n}`" not in card:
             problems.append(f"the card must name `{n}`, which the package takes from the nearest model")
-    if "generation_config.json" in base_files and "ships no generation_config.json" not in card:
-        problems.append("the package serves the nearest model's generation_config.json, so the card must say "
-                        "the model ships none and that the sampling defaults and stop tokens are the nearest "
-                        "model's")
+    if "generation_config.json" in base_files:
+        flat = " ".join(card.split())
+        if not all(s in flat for s in sampling_disclosures(model_id, nearest_model)):
+            problems.append("the package serves the nearest model's generation_config.json, so the card must say "
+                            "the model ships none, that the stop tokens and sampling defaults are "
+                            f"{nearest_model or 'the nearest model'}'s, and give the same default-sampling "
+                            "limitation under Limitations")
     for s in sidecars:
         if s not in card or "not served" not in card.lower():
             problems.append(f"the card must name the sidecar {s} and say it is not served")
