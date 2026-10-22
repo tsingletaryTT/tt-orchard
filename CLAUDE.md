@@ -1800,7 +1800,7 @@ templates, one inside `tokenizer_config.json` and one in `chat_template.jinja`; 
 - Not done, and needs hardware: the second half of the issue, one chat request in stage 2 that uses the new template and checks the reply starts and stops as the model card
   says. The special-token check does not compare the new model's end token with the stop ids the server uses, because whether the server also stops on the tokenizer's eos token
   was not found out. A Qwen3.8 fine-tune with a different template has not been seen, so the "different" hazard has run only on other families and on built fixtures.
-## 2026-10-22 (UTC): the base control and the board are built by code (branch `bench-base-control`, version 0.8.18)
+## 2026-10-22 (UTC): the base control and the board are built by code (branch `bench-base-control`, version 0.8.23 after the merge with main; built as 0.8.18)
 Prompt (operator): "while we wait, let's take on more issues"; this is issue #20. The AREX-2 benchmark drivers were copied shell scripts: the base control's run.sh was made with `sed`,
 and two launches that both wrote `--exact 2` asked for the same board.
 - `orchard/bench_control.py`, with two commands. `build` writes the control's run.sh from the model's run.sh by replacing the model's directory with the base snapshot, in the `HF_MODEL` line and
