@@ -187,12 +187,7 @@ def render_card(f: CardFacts) -> str:
         ev = ", ".join(f"`{e}`" for e in n.evidence) if n.label == "measured" else "-"
         lines.append(f"| {n.name} | {_value(n)} | {n.label} | {ev} |")
     if f.reported:
-        lines += ["", REPORTED_HEAD, "",
-                  f"These scores come from {f.reported_source or 'the model authors'}. They {NOT_MEASURED_SENTENCE}: "
-                  "the authors' protocol, tools and judge differ from the checks in the table above, and nothing in "
-                  "this repository reproduces them.", "",
-                  "| Benchmark | Reported | Note |", "|---|---|---|"]
-        lines += [f"| {_cell(r.name)} | {_cell(r.value)} | {_cell(r.note)} |" for r in f.reported]
+        lines += ["", REPORTED_HEAD, "", *reported_lines(f.reported, f.reported_source)]
     limits = [f"Tested on {f.chips} chips (mesh {f.mesh}) only; other configurations are not claimed "
               "by this bundle.",
               "Accuracy was compared with the CPU reference on one short fixed prompt only."]
@@ -263,7 +258,34 @@ def sampling_disclosures(model_id: str, nearest_model: str) -> tuple[str, str]:
             "no generation_config.json.")
 
 
-def card_problems(card: str, *, license_id: str, run_dir, sidecars=(), base_files=(), reported=(), model_id="",
+def _units(text: str) -> list[str]:
+    """Prose and table rows to compare: a table row is one unit, and a run of prose lines (a paragraph the author
+    of a card may have re-wrapped) is one unit with its whitespace collapsed."""
+    units, prose = [], []
+    for ln in text.splitlines() + [""]:
+        if ln.strip() and not ln.lstrip().startswith("|"):
+            prose.append(ln)
+            continue
+        if prose:
+            units.append(" ".join(" ".join(prose).split()))
+            prose = []
+        if ln.strip():
+            units.append(" ".join(ln.split()))
+    return units
+
+
+def reported_lines(reported, source: str) -> list[str]:
+    """The lines of the "Reported by the authors" section after its heading, one list item per line: the sentence
+    that cites the source and says the scores were not measured, a blank line, and the table. `render_card` writes
+    them and `card_problems` compares the card's section with them."""
+    return [f"These scores come from {_cell(source) or 'the model authors'}. They {NOT_MEASURED_SENTENCE}: "
+            "the authors' protocol, tools and judge differ from the checks in the table above, and nothing in "
+            "this repository reproduces them.", "",
+            "| Benchmark | Reported | Note |", "|---|---|---|",
+            *[f"| {_cell(r.name)} | {_cell(r.value)} | {_cell(r.note)} |" for r in reported]]
+
+
+def card_problems(card: str, *, license_id: str, run_dir, sidecars=(), base_files=(), reported=(), reported_source="", model_id="",
                   nearest_model="") -> list[str]:
     problems = []
     reported_section, card_without_reported = _section(card, REPORTED_HEAD)
@@ -275,11 +297,22 @@ def card_problems(card: str, *, license_id: str, run_dir, sidecars=(), base_file
         if not reported_section:
             problems.append(f"the card must have the section {REPORTED_HEAD!r}: the run was given scores the authors report")
         else:
-            if NOT_MEASURED_SENTENCE not in reported_section:
+            have, want = _units(reported_section), _units("\n".join(reported_lines(reported, reported_source)))
+            intro = want[0]
+            if not any(NOT_MEASURED_SENTENCE in ln for ln in have):
                 problems.append(f"the reported-scores section must say the scores {NOT_MEASURED_SENTENCE}")
-            for r in reported:
-                if f"| {_cell(r.name)} | {_cell(r.value)} |" not in reported_section:
-                    problems.append(f"the reported score {r.name}: {r.value} is not in the reported-scores section")
+            elif intro not in have:
+                problems.append("the reported-scores section must cite the source of the scores, "
+                                f"{reported_source or 'the model authors'}, and give the protocol sentence unchanged")
+            for r, row in zip(reported, want[3:]):
+                if row not in have:
+                    shown = f"{r.name}: {r.value}" + (f" ({r.note})" if r.note else "")
+                    problems.append(f"the reported score {shown} is not in the reported-scores section as given "
+                                    "in reported-results.json (name, value and note)")
+            for ln in have:
+                if ln not in want:
+                    problems.append(f"the reported-scores section has a line that reported-results.json does not "
+                                    f"give: {ln[:80]!r}")
     for n in base_files:
         if f"`{n}`" not in card:
             problems.append(f"the card must name `{n}`, which the package takes from the nearest model")

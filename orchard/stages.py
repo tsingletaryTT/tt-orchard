@@ -770,10 +770,10 @@ def gate_package(stage_dir, run_dir) -> GateResult:
                        f"{license_id!r}")
     drafter_off, host_sampling = stage_2_serving(run)
     try:
-        reported = read_reported(run)[0]
+        reported, reported_source = read_reported(run)
     except PackageError as exc:
         reasons.append(str(exc))
-        reported = ()
+        reported, reported_source = (), ""
     sidecars = [s.get("file") for s in delta.get("sidecars") or () if isinstance(s, dict)]
     profiles = d.get("profiles") if isinstance(d.get("profiles"), list) else []
     if not any(isinstance(p, dict) and p.get("required") and p.get("verified") is True
@@ -809,7 +809,7 @@ def gate_package(stage_dir, run_dir) -> GateResult:
         if license_id:
             reasons += [f"profile {name}: card: {x}" for x in
                         card_problems(card, license_id=license_id, run_dir=run, sidecars=sidecars,
-                                      base_files=_shipped_names(out / "base_config"), reported=reported,
+                                      base_files=_shipped_names(out / "base_config"), reported=reported, reported_source=reported_source,
                                       model_id=new_repo, nearest_model=nearest_repo)]
         reasons += [f"profile {name}: the card cites {e}, which is missing at evidence/{e}"
                     for e in card_evidence_paths(card) if not (out / "evidence" / e).is_file()]

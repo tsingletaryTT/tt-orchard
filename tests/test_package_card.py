@@ -246,19 +246,19 @@ def test_a_card_without_reported_scores_has_no_such_section():
 
 def test_a_card_with_reported_scores_passes_its_own_check(tmp_path):
     run = run_with_evidence(tmp_path)
-    assert card_problems(reported_card(), license_id="cc-by-nc-4.0", run_dir=run, reported=REPORTED) == []
+    assert card_problems(reported_card(), license_id="cc-by-nc-4.0", run_dir=run, reported=REPORTED, reported_source=SOURCE) == []
 
 
 def test_a_percent_in_the_reported_section_is_not_a_number_outside_the_numbers_table(tmp_path):
     run = run_with_evidence(tmp_path)
-    problems = card_problems(reported_card(), license_id="cc-by-nc-4.0", run_dir=run, reported=REPORTED)
+    problems = card_problems(reported_card(), license_id="cc-by-nc-4.0", run_dir=run, reported=REPORTED, reported_source=SOURCE)
     assert not any("outside the Numbers table" in p for p in problems)
 
 
 def test_a_percent_in_prose_outside_the_reported_section_is_still_refused(tmp_path):
     run = run_with_evidence(tmp_path)
     card = reported_card().replace("## Limitations", "## Limitations\n\nIt is 93.8% good.\n")
-    problems = card_problems(card, license_id="cc-by-nc-4.0", run_dir=run, reported=REPORTED)
+    problems = card_problems(card, license_id="cc-by-nc-4.0", run_dir=run, reported=REPORTED, reported_source=SOURCE)
     assert any("outside the Numbers table" in p and "93.8%" in p for p in problems)
 
 
@@ -272,14 +272,14 @@ def test_a_card_that_leaves_reported_scores_or_the_disclaimer_out_is_refused(tmp
     run = run_with_evidence(tmp_path)
     card = reported_card()
     assert cut in card
-    problems = card_problems(card.replace(cut, "x"), license_id="cc-by-nc-4.0", run_dir=run, reported=REPORTED)
+    problems = card_problems(card.replace(cut, "x"), license_id="cc-by-nc-4.0", run_dir=run, reported=REPORTED, reported_source=SOURCE)
     assert any(word in p for p in problems), problems
 
 
 def test_a_card_that_changes_a_reported_value_is_refused(tmp_path):
     run = run_with_evidence(tmp_path)
     card = reported_card().replace("| MLE-Lite | 81.8 |", "| MLE-Lite | 91.8 |")
-    problems = card_problems(card, license_id="cc-by-nc-4.0", run_dir=run, reported=REPORTED)
+    problems = card_problems(card, license_id="cc-by-nc-4.0", run_dir=run, reported=REPORTED, reported_source=SOURCE)
     assert any("MLE-Lite" in p and "81.8" in p for p in problems)
 
 
@@ -288,7 +288,7 @@ def test_a_reported_score_listed_as_measured_is_refused(tmp_path):
     measured = Number("MLE-Lite", 0.5, "fraction", "measured", ("stages/2/result.json",))
     card = render_card(facts(reported=REPORTED, reported_source=SOURCE,
                              numbers=(*facts().numbers, measured)))
-    problems = card_problems(card, license_id="cc-by-nc-4.0", run_dir=run, reported=REPORTED)
+    problems = card_problems(card, license_id="cc-by-nc-4.0", run_dir=run, reported=REPORTED, reported_source=SOURCE)
     assert any("MLE-Lite" in p and "measured" in p for p in problems)
 
 
@@ -308,3 +308,72 @@ def test_a_reported_section_on_a_card_whose_run_has_no_reported_scores_is_refuse
     problems = card_problems(card, license_id="cc-by-nc-4.0", run_dir=run)
     assert any(REPORTED_HEAD in x and "reported-results.json" in x for x in problems), problems
     assert any("80 tok/s" in x for x in problems), problems       # and the claim is no longer exempt from the number check
+
+
+def _reported_problems(card, tmp_path, **over):
+    kw = {"reported": REPORTED, "reported_source": SOURCE, **over}
+    return card_problems(card, license_id="cc-by-nc-4.0", run_dir=run_with_evidence(tmp_path), **kw)
+
+
+def test_a_card_that_deletes_the_source_sentence_is_refused(tmp_path):
+    card = reported_card()
+    cut = f"These scores come from {SOURCE}. "
+    assert cut in card
+    problems = _reported_problems(card.replace(cut, ""), tmp_path)
+    assert any("source" in p and SOURCE in p for p in problems), problems
+
+
+def test_a_card_that_changes_the_source_is_refused(tmp_path):
+    problems = _reported_problems(reported_card().replace(SOURCE, "a blog post"), tmp_path)
+    assert any("source" in p and SOURCE in p for p in problems), problems
+
+
+def test_a_gate_that_expects_another_source_than_the_card_cites_refuses_the_card(tmp_path):
+    problems = _reported_problems(reported_card(), tmp_path, reported_source="the paper")
+    assert any("source" in p and "the paper" in p for p in problems), problems
+
+
+def test_a_card_with_no_source_cites_the_model_authors_and_passes_when_the_gate_has_none(tmp_path):
+    card = render_card(facts(reported=REPORTED))
+    assert "These scores come from the model authors." in card
+    assert _reported_problems(card, tmp_path, reported_source="") == []
+
+
+@pytest.mark.parametrize("old, new", [
+    ("Any Medal, mean of 3 seeds", "Any Medal, best of 3 seeds"),
+    ("Any Medal, mean of 3 seeds", ""),
+    ("188 tasks", "190 tasks"),
+])
+def test_a_card_that_changes_or_drops_a_reported_note_is_refused(tmp_path, old, new):
+    card = reported_card()
+    assert old in card
+    problems = _reported_problems(card.replace(old, new), tmp_path)
+    assert any("note" in p for p in problems), problems
+
+
+def test_a_card_that_adds_a_note_to_a_row_that_had_none_is_refused(tmp_path):
+    card = reported_card().replace("| DeepSearchQA | 93.8% |  |", "| DeepSearchQA | 93.8% | with search |")
+    assert any("DeepSearchQA" in p for p in _reported_problems(card, tmp_path))
+
+
+def test_a_card_that_adds_a_row_or_a_line_to_the_reported_section_is_refused(tmp_path):
+    card = reported_card()
+    extra_row = card.replace("| DeepSearchQA | 93.8% |  |", "| DeepSearchQA | 93.8% |  |\n| Invented | 99 | |")
+    assert any("Invented" in p for p in _reported_problems(extra_row, tmp_path / "row"))
+    extra_line = card.replace("\n| Benchmark |", "\nIt is the best model.\n| Benchmark |")
+    assert any("best model" in p for p in _reported_problems(extra_line, tmp_path / "line"))
+
+
+def test_a_reflowed_reported_section_still_passes(tmp_path):
+    card = reported_card().replace("They were not", "They\n  were   not")
+    assert _reported_problems(card, tmp_path) == [], card
+
+
+def test_a_line_after_the_reported_table_is_refused(tmp_path):
+    card = reported_card().replace("| DeepSearchQA | 93.8% |  |", "| DeepSearchQA | 93.8% |  |\n\nIt beats every rival.")
+    assert any("beats every rival" in p for p in _reported_problems(card, tmp_path))
+
+
+def test_a_reported_table_with_other_spacing_still_passes(tmp_path):
+    card = reported_card().replace("| MLE-Lite | 81.8 | Any Medal", "|   MLE-Lite  |  81.8   |  Any   Medal")
+    assert _reported_problems(card, tmp_path) == []
