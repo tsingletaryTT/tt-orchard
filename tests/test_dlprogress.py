@@ -351,6 +351,48 @@ def test_a_plain_style_gets_log_lines_even_on_a_terminal(tmp_path):
     assert "\r" not in out.getvalue() and out.getvalue().count("\n") >= 2
 
 
+def test_the_summary_counts_the_bytes_that_arrived_not_the_size_of_the_files(tmp_path):
+    m, blobs, snap, out, clock = make(tmp_path, total=1000, tty=False)
+    grow(blobs, "b.incomplete", 900)                                    # an earlier attempt got this far
+    m.begin()
+    clock.advance(10)
+    grow(blobs, "b.incomplete", 1000)                                   # 100 bytes arrived in this one
+    m.finish(True)
+    assert out.getvalue().splitlines()[-1] == "downloaded 100 B in 10s (10 B/s average)"
+
+
+def test_the_summary_takes_a_last_measurement_instead_of_the_last_tick(tmp_path):
+    m, blobs, snap, out, clock = make(tmp_path, total=1000, tty=False)
+    m.begin()
+    clock.advance(4)
+    grow(blobs, "b", 400)                                               # arrived after the last reading
+    m.finish(True)
+    assert out.getvalue().splitlines()[-1] == "downloaded 400 B in 4s (100 B/s average)"
+
+
+def test_a_download_that_fetched_nothing_says_so(tmp_path):
+    m, blobs, snap, out, clock = make(tmp_path, total=1000, tty=False)
+    m.begin()
+    clock.advance(3)
+    m.finish(True)
+    assert out.getvalue().splitlines()[-1] == "downloaded nothing new in 3s"
+
+
+def test_a_failed_last_measurement_does_not_stop_the_summary(tmp_path, monkeypatch):
+    m, blobs, snap, out, clock = make(tmp_path, total=1000, tty=False)
+    m.begin()
+    clock.advance(10)
+    grow(blobs, "b", 250)
+    m.tick()
+    clock.advance(10)
+
+    def broken(path):
+        raise RuntimeError("the disk went away")
+    monkeypatch.setattr(dp, "dir_bytes", broken)
+    m.finish(True)                                                      # must not raise
+    assert out.getvalue().splitlines()[-1] == "downloaded 250 B in 20s (12 B/s average)"
+
+
 def test_a_log_ends_with_the_summary_line(tmp_path):
     m, blobs, snap, out, clock = make(tmp_path, total=1000, tty=False)
     m.begin()
@@ -409,7 +451,7 @@ def test_a_meter_that_breaks_says_so_once_and_the_download_goes_on(tmp_path, mon
     with m:
         monkeypatch.setattr(m, "reading", boom)
         time.sleep(0.1)
-    assert len(calls) == 1                                             # it gave up on its first error
+        assert len(calls) == 1                                         # the thread gave up on its first error
     assert out.getvalue().count("progress display stopped: OSError") == 1
 
 

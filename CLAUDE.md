@@ -1667,6 +1667,9 @@ when first starting up." Both were measured before anything was changed.
 - Tests first, a mutation table per commit: 47 + 5 (meter), 10 (command wiring), 36 (startup). Survivors got tests; two are equivalent (a write to a stream that
   already failed; `reporter(None)` that would raise a `TypeError` the `except` catches). Two of my own assertions were wrong first (`or`-tail that could not fail;
   1000 bytes is "1 KB").
+- Review fixes (Copilot, PR 33): a blob that `hf` moves to the shared store leaves a link in the repo's `blobs/`, and the meter ignored links, so a finished shard dropped out of
+  the count; it now counts the file a link reaches, once per inode. The closing summary used the planned size, which overstated a resumed download; it now takes a last
+  measurement and reports the bytes that arrived (or "downloaded nothing new"). 6 and 7 mutations, all red.
 - Not done: reading the shard headers in parallel would cut the 65 to 81 s itself (the fetcher keeps a request budget and a per-host state, so it needs care);
   the supervisor's coder boot (about 10 minutes cold) shows only what the narrator already shows; `hf download` was not replaced by our own downloader.
 

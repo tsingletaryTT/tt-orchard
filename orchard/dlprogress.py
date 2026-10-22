@@ -266,11 +266,17 @@ class DownloadMeter:
         if self.animate:
             self._write(ERASE)
         if ok:
-            r = self._last
-            size = r.need or r.done
+            try:
+                r = self.reading()                   # one last look, so bytes since the final tick count
+            except Exception:                        # a measurement that fails must not hide the summary
+                r = self._last
             elapsed = self.clock() - self._t0
-            average = f" ({human_bytes(size / elapsed)}/s average)" if elapsed > 0 and size else ""
-            self._write(f"downloaded {human_bytes(size)} in {human_duration(elapsed)}{average}\n")
+            if r.done <= 0:
+                self._write(f"downloaded nothing new in {human_duration(elapsed)}\n")
+                return
+            # the bytes that arrived in this call: a resumed file counts only what it still needed
+            average = f" ({human_bytes(r.done / elapsed)}/s average)" if elapsed > 0 else ""
+            self._write(f"downloaded {human_bytes(r.done)} in {human_duration(elapsed)}{average}\n")
 
     # -- the thread -------------------------------------------------------------------------------------
 
