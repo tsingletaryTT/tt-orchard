@@ -1,0 +1,50 @@
+INFO 10-21 16:55:35 [__init__.py:52] Available plugins for group vllm.platform_plugins:
+INFO 10-21 16:55:35 [__init__.py:54] - tt -> vllm_tt_plugin.entrypoints:platform_plugin
+INFO 10-21 16:55:35 [__init__.py:57] All plugins in this group will be loaded. Set `VLLM_PLUGINS` to control which plugins to load.
+(EngineCore pid=100665) ERROR 10-21 16:59:10 [core.py:1330] EngineCore failed to start.
+(EngineCore pid=100665) ERROR 10-21 16:59:10 [core.py:1330] Traceback (most recent call last):
+(EngineCore pid=100665) ERROR 10-21 16:59:10 [core.py:1330]   File "/home/user/.cache/tt-model/models/episod/qwen3.8-27b-dflash2-p300/venv/lib/python3.12/site-packages/vllm/v1/engine/core.py", line 1299, in run_engine_core
+(EngineCore pid=100665) ERROR 10-21 16:59:10 [core.py:1330]     engine_core = EngineCoreProc(*args, engine_index=dp_rank, **kwargs)
+(EngineCore pid=100665) ERROR 10-21 16:59:10 [core.py:1330]                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=100665) ERROR 10-21 16:59:10 [core.py:1330]   File "/home/user/.cache/tt-model/models/episod/qwen3.8-27b-dflash2-p300/venv/lib/python3.12/site-packages/vllm/tracing/otel.py", line 178, in sync_wrapper
+(EngineCore pid=100665) ERROR 10-21 16:59:10 [core.py:1330]     return func(*args, **kwargs)
+(EngineCore pid=100665) ERROR 10-21 16:59:10 [core.py:1330]            ^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=100665) ERROR 10-21 16:59:10 [core.py:1330]   File "/home/user/.cache/tt-model/models/episod/qwen3.8-27b-dflash2-p300/venv/lib/python3.12/site-packages/vllm/v1/engine/core.py", line 1065, in __init__
+(EngineCore pid=100665) ERROR 10-21 16:59:10 [core.py:1330]     super().__init__(
+(EngineCore pid=100665) ERROR 10-21 16:59:10 [core.py:1330]   File "/home/user/.cache/tt-model/models/episod/qwen3.8-27b-dflash2-p300/venv/lib/python3.12/site-packages/vllm/v1/engine/core.py", line 125, in __init__
+(EngineCore pid=100665) ERROR 10-21 16:59:10 [core.py:1330]     self.model_executor = executor_class(vllm_config)
+(EngineCore pid=100665) ERROR 10-21 16:59:10 [core.py:1330]                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=100665) ERROR 10-21 16:59:10 [core.py:1330]   File "/home/user/.cache/tt-model/models/episod/qwen3.8-27b-dflash2-p300/venv/lib/python3.12/site-packages/vllm/tracing/otel.py", line 178, in sync_wrapper
+(EngineCore pid=100665) ERROR 10-21 16:59:10 [core.py:1330]     return func(*args, **kwargs)
+(EngineCore pid=100665) ERROR 10-21 16:59:10 [core.py:1330]            ^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=100665) ERROR 10-21 16:59:10 [core.py:1330]   File "/home/user/.cache/tt-model/models/episod/qwen3.8-27b-dflash2-p300/venv/lib/python3.12/site-packages/vllm/v1/executor/abstract.py", line 109, in __init__
+(EngineCore pid=100665) ERROR 10-21 16:59:10 [core.py:1330]     self._init_executor()
+(EngineCore pid=100665) ERROR 10-21 16:59:10 [core.py:1330]   File "/home/user/.cache/tt-model/models/episod/qwen3.8-27b-dflash2-p300/venv/lib/python3.12/site-packages/vllm/v1/executor/uniproc_executor.py", line 68, in _init_executor
+(EngineCore pid=100665) ERROR 10-21 16:59:10 [core.py:1330]     self.driver_worker.load_model()
+(EngineCore pid=100665) ERROR 10-21 16:59:10 [core.py:1330]   File "/home/user/.cache/tt-model/models/episod/qwen3.8-27b-dflash2-p300/venv/lib/python3.12/site-packages/vllm_tt_plugin/worker.py", line 273, in load_model
+(EngineCore pid=100665) ERROR 10-21 16:59:10 [core.py:1330]     self.model_runner.load_model()
+(EngineCore pid=100665) ERROR 10-21 16:59:10 [core.py:1330]   File "/home/user/.cache/tt-model/models/episod/qwen3.8-27b-dflash2-p300/venv/lib/python3.12/site-packages/vllm_tt_plugin/model_runner.py", line 404, in load_model
+(EngineCore pid=100665) ERROR 10-21 16:59:10 [core.py:1330]     self.model = loader.load_model(
+(EngineCore pid=100665) ERROR 10-21 16:59:10 [core.py:1330]                  ^^^^^^^^^^^^^^^^^^
+(EngineCore pid=100665) ERROR 10-21 16:59:10 [core.py:1330]   File "/home/user/.cache/tt-model/models/episod/qwen3.8-27b-dflash2-p300/venv/lib/python3.12/site-packages/vllm_tt_plugin/loader.py", line 38, in load_model
+(EngineCore pid=100665) ERROR 10-21 16:59:10 [core.py:1330]     model = model_class.initialize_vllm_model(
+(EngineCore pid=100665) ERROR 10-21 16:59:10 [core.py:1330]             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=100665) ERROR 10-21 16:59:10 [core.py:1330]   File "/home/user/.cache/tt-model/models/episod/qwen3.8-27b-dflash2-p300/venv/lib/python3.12/site-packages/models/demos/blackhole/qwen36/tt/qwen36_vllm.py", line 245, in initialize_vllm_model
+(EngineCore pid=100665) ERROR 10-21 16:59:10 [core.py:1330]     return cls([model], [args], mesh_device)
+(EngineCore pid=100665) ERROR 10-21 16:59:10 [core.py:1330]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=100665) ERROR 10-21 16:59:10 [core.py:1330]   File "/home/user/.cache/tt-model/models/episod/qwen3.8-27b-dflash2-p300/venv/lib/python3.12/site-packages/models/demos/blackhole/qwen36/tt/qwen36_vllm_dflash.py", line 234, in __init__
+(EngineCore pid=100665) ERROR 10-21 16:59:10 [core.py:1330]     self._eos = self._load_eos_ids(model)
+(EngineCore pid=100665) ERROR 10-21 16:59:10 [core.py:1330]                 ^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore pid=100665) ERROR 10-21 16:59:10 [core.py:1330]   File "/home/user/.cache/tt-model/models/episod/qwen3.8-27b-dflash2-p300/venv/lib/python3.12/site-packages/models/demos/blackhole/qwen36/tt/qwen36_vllm_dflash.py", line 386, in _load_eos_ids
+(EngineCore pid=100665) ERROR 10-21 16:59:10 [core.py:1330]     raise RuntimeError("no eos_token_id found for the served checkpoint")
+(EngineCore pid=100665) ERROR 10-21 16:59:10 [core.py:1330] RuntimeError: no eos_token_id found for the served checkpoint
+(EngineCore pid=100665) Process EngineCore:
+(EngineCore pid=100665) Traceback (most recent call last):
+(EngineCore pid=100665)   File "/home/user/.cache/tt-model/models/episod/qwen3.8-27b-dflash2-p300/.python/cpython-3.12.12-linux-x86_64-gnu/lib/python3.12/multiprocessing/process.py", line 314, in _bootstrap
+(EngineCore pid=100665)   ...
+(EngineCore pid=100665)     raise RuntimeError("no eos_token_id found for the served checkpoint")
+(EngineCore pid=100665) RuntimeError: no eos_token_id found for the served checkpoint
+(APIServer pid=99411)     wait_for_engine_startup(
+(APIServer pid=99411)   File "/home/user/.cache/tt-model/models/episod/qwen3.8-27b-dflash2-p300/venv/lib/python3.12/site-packages/vllm/v1/engine/utils.py", line 1272, in wait_for_engine_startup
+(APIServer pid=99411)     raise RuntimeError(
+(APIServer pid=99411) RuntimeError: Engine core initialization failed. See root cause above. Failed core proc(s): {}
