@@ -390,7 +390,8 @@ class Narrator:
                     if e["event"] == "evidence" and e["data"].get("what") == "hardware test" \
                             and e["data"].get("returncode") != 0 and e["stage"] is not None:
                         # The reason is in the test's output, which the ledger only points to.
-                        first = _first_error(self.run, e["stage"])
+                        first = _first_error(self.run, e["stage"], e["data"].get("config")) \
+                            if _is_newest_test(entries, e) else None
                         if first is not None:
                             self._emit(Line("orchardist", f"  first error in the server log ({first[0]}, line "
                                                           f"{first[1]}): {first[2]}", True), e.get("ts"))
@@ -490,21 +491,39 @@ def root_cause_in_file(path) -> tuple[int, str] | None:
     return root_cause(raw.decode("utf-8", errors="replace"))
 
 
-def _first_error(run: Path, stage) -> tuple[str, int, str] | None:
-    """(run-relative path, line number, text) of the first error in the newest server.log of the stage (any
-    attempt, any configuration), or None."""
-    logs = sorted((run / "stages").glob(f"{stage}*/**/server.log"), key=lambda p: p.stat().st_mtime)
-    if not logs:
-        return None
-    found = root_cause_in_file(logs[-1])
-    if found is None:
-        return None
-    return logs[-1].relative_to(run).as_posix(), found[0], found[1]
+def _is_newest_test(entries: list[dict], e: dict) -> bool:
+    """True when no later entry replaced the test `e` ended: a later test of the same stage and configuration,
+    or a later start of the stage (which moves the attempt's directory aside). Only then is the log on disk
+    the log `e` wrote."""
+    for later in entries:
+        if later["seq"] <= e["seq"] or later["stage"] != e["stage"]:
+            continue
+        if later["event"] == "stage_start":
+            return False
+        if later["event"] == "evidence" and later["data"].get("what") == "hardware test" \
+                and later["data"].get("config") == e["data"].get("config"):
+            return False
+    return True
 
 
-def _root_cause_lines(run: Path, stage) -> list[str]:
-    """The first error of the stage's newest server log, as digest lines."""
-    found = _first_error(run, stage)
+def _first_error(run: Path, stage, config=None) -> tuple[str, int, str] | None:
+    """(run-relative path, line number, text) of the first error in the server log of one hardware test, or
+    None. A stage 4 test has its own log under `configs/<config>/`; any other test writes `evidence/server.log`
+    (stage 7: `verify/evidence/server.log`) of the stage's current attempt. A log that is not there gives None: another test's log is never used."""
+    base = run / "stages" / str(stage)
+    # Stage 7's boot check serves from `verify/`; every other single test writes into the stage directory.
+    candidates = [base / "configs" / str(config) / "evidence" / "server.log"] if config is not None \
+        else [base / "evidence" / "server.log", base / "verify" / "evidence" / "server.log"]
+    for log in candidates:
+        found = root_cause_in_file(log)
+        if found is not None:
+            return log.relative_to(run).as_posix(), found[0], found[1]
+    return None
+
+
+def _root_cause_lines(run: Path, stage, config=None) -> list[str]:
+    """The first error of one hardware test's server log, as digest lines."""
+    found = _first_error(run, stage, config)
     if found is None:
         return []
     rel, line, text = found
@@ -521,7 +540,7 @@ def what_was_tried(run_dir, *, stage, limit: int = 8) -> list[str]:
         entries = []
     start = max((i for i, e in enumerate(entries) if e["event"] == "stage_start" and e["stage"] == stage), default=0)
     out: list[str] = []
-    events, failed_test = [], False
+    events, failed_test, last_config = [], False, None
     for e in entries[start:]:
         if e["stage"] != stage:
             continue
@@ -532,10 +551,11 @@ def what_was_tried(run_dir, *, stage, limit: int = 8) -> list[str]:
         if e["event"] == "evidence" and e["data"].get("what") == "hardware test":
             events += [l.text for l in lines_for(e)]
             failed_test = e["data"].get("returncode") != 0
+            last_config = e["data"].get("config")
     if events:
         out += ["The supervisor and watchdog recorded:"] + [f"  - {t}" for t in events]
     if failed_test:
-        out += _root_cause_lines(run, stage)
+        out += _root_cause_lines(run, stage, last_config)
         tail = _output_tail(run, stage)
         if tail:
             out += ["The hardware test's last output:"] + [f"  | {_clip(l, 160)}" for l in tail]

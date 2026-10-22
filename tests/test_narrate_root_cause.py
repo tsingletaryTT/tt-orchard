@@ -158,7 +158,7 @@ def test_only_the_newest_attempts_log_is_quoted(tmp_path):
 def test_a_stage_4_configuration_log_is_found(tmp_path):
     put_logs(tmp_path / "stages/4/configs/2", FIXTURE.read_text())
     write_ledger(tmp_path, ("stage_start", 4, {"escalated": False, "resumed": False}),
-                 ("evidence", 4, {"what": "hardware test", "returncode": 1, "timed_out": False, "path": "p", "sha256": "s"}))
+                 ("evidence", 4, {"what": "hardware test", "config": 2, "returncode": 1, "timed_out": False, "path": "p", "sha256": "s"}))
     text = "\n".join(narrate.what_was_tried(tmp_path, stage=4))
     assert "(stages/4/configs/2/evidence/server.log, line 40)" in text and CAUSE in text
 
@@ -209,3 +209,82 @@ def test_a_failed_test_with_no_error_in_the_log_prints_only_the_last_output(tmp_
     write_ledger(tmp_path, *FAILED_TEST)
     text = live(tmp_path)
     assert "first error" not in text and "last words here" in text
+
+
+# ---- each failure is shown with its own test's log --------------------------------------------------------
+# A stage 4 run has one hardware test per configuration, each with its own server log, and a stage has one
+# directory per attempt. The newest log is only the right one for the newest test.
+
+OTHER = "RuntimeError: Fabric Router Sync: Timeout after 10000 ms"
+
+
+def hw_event(stage, returncode, **extra):
+    return ("evidence", stage, {"what": "hardware test", "returncode": returncode, "timed_out": False,
+                                "path": "p", "sha256": "s", **extra})
+
+
+def two_configs(tmp_path, log2, log4):
+    put_logs(tmp_path / "stages/4/configs/2", log2)
+    put_logs(tmp_path / "stages/4/configs/4", log4)
+    os.utime(tmp_path / "stages/4/configs/2/evidence/server.log", (1000, 1000))     # the 4-chip log is the newer
+    os.utime(tmp_path / "stages/4/configs/4/evidence/server.log", (2000, 2000))
+    write_ledger(tmp_path, ("stage_start", 4, {"escalated": False, "resumed": False}),
+                 hw_event(4, 1, config=2), hw_event(4, 1, config=4))
+
+
+def test_two_failed_configurations_each_show_their_own_cause_on_the_screen(tmp_path):
+    two_configs(tmp_path, FIXTURE.read_text(), "INFO start\n" + OTHER + "\n")
+    text = live(tmp_path)
+    assert text.count(CAUSE) == 1 and text.count(OTHER) == 1
+    assert text.index(CAUSE) < text.index(OTHER)                       # config 2's failure comes first
+
+
+def test_a_failed_configuration_with_a_healthy_log_does_not_borrow_the_newest_failures_cause(tmp_path):
+    two_configs(tmp_path, "INFO fine\n", "INFO start\n" + OTHER + "\n")
+    text = live(tmp_path)
+    assert text.count(OTHER) == 1                                       # shown once, for config 4 only
+    assert "configs/2/evidence/server.log" not in text
+
+
+def test_the_digest_quotes_the_last_tests_own_configuration(tmp_path):
+    two_configs(tmp_path, FIXTURE.read_text(), "INFO start\n" + OTHER + "\n")
+    text = "\n".join(narrate.what_was_tried(tmp_path, stage=4))
+    assert OTHER in text and "configs/4/evidence/server.log" in text and CAUSE not in text
+
+
+def test_a_failure_from_an_earlier_attempt_does_not_get_the_later_attempts_log(tmp_path):
+    # Attempt 1 failed (its directory is now stages/2.partial-1 and is never read), attempt 2 started and failed.
+    put_logs(tmp_path / "stages/2", FIXTURE.read_text())
+    write_ledger(tmp_path, ("stage_start", 2, {"escalated": False, "resumed": False}), hw_event(2, 1),
+                 ("stage_start", 2, {"escalated": True, "resumed": False}), hw_event(2, 1))
+    text = live(tmp_path)
+    assert text.count(CAUSE) == 1                                       # the second failure only
+
+
+def test_a_failure_before_a_newer_attempt_started_is_not_given_that_attempts_log(tmp_path):
+    put_logs(tmp_path / "stages/2", FIXTURE.read_text())               # the new attempt's log, still being written
+    write_ledger(tmp_path, ("stage_start", 2, {"escalated": False, "resumed": False}), hw_event(2, 1),
+                 ("stage_start", 2, {"escalated": True, "resumed": False}))
+    assert CAUSE not in live(tmp_path)
+
+
+def test_a_stage_7_boot_check_log_is_found_under_verify(tmp_path):
+    put_logs(tmp_path / "stages/7/verify", FIXTURE.read_text())
+    write_ledger(tmp_path, ("stage_start", 7, {"escalated": False, "resumed": False}), hw_event(7, 1))
+    assert "stages/7/verify/evidence/server.log" in "\n".join(narrate.what_was_tried(tmp_path, stage=7))
+    assert "stages/7/verify/evidence/server.log" in live(tmp_path)
+
+
+def test_two_failures_of_one_configuration_in_one_attempt_quote_the_log_once(tmp_path):
+    # A fast failure is reset and run again; the second run rewrote the log, so only it is the log's test.
+    put_logs(tmp_path / "stages/4/configs/2", FIXTURE.read_text())
+    write_ledger(tmp_path, ("stage_start", 4, {"escalated": False, "resumed": False}),
+                 hw_event(4, 4, config=2), hw_event(4, 4, config=2))
+    assert live(tmp_path).count(CAUSE) == 1
+
+
+def test_a_later_stage_starting_does_not_hide_an_earlier_stages_failure(tmp_path):
+    put_logs(tmp_path / "stages/2", FIXTURE.read_text())
+    write_ledger(tmp_path, ("stage_start", 2, {"escalated": False, "resumed": False}), hw_event(2, 1),
+                 ("stage_start", 3, {"escalated": False, "resumed": False}))
+    assert CAUSE in live(tmp_path)
