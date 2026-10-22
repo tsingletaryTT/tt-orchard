@@ -71,6 +71,16 @@ def test_a_kernel_build_failure_counts():
     assert narrate.root_cause(text) == (1, "trisc1 build failed ... 'vLut8si' is not a member of 'sfpi'")
 
 
+@pytest.mark.parametrize("prefix", ["", "(EngineCore pid=7) ", "(EngineCore pid=7) ERROR 10-21 16:59:10 [core.py:1330] "])
+def test_an_indented_source_line_that_mentions_a_build_failure_is_not_the_cause(prefix):
+    # A traceback frame shows the source line that raised: its text says "build failed" and it is indented.
+    # The cause is the exception that follows it.
+    text = (prefix + '  File "jit.py", line 9, in compile\n'
+            + prefix + '    raise RuntimeError("trisc1 build failed: " + compiler_stderr)\n'
+            + prefix + "RuntimeError: trisc1 build failed: 'vLut8si' is not a member of 'sfpi'\n")
+    assert narrate.root_cause(text) == (3, "RuntimeError: trisc1 build failed: 'vLut8si' is not a member of 'sfpi'")
+
+
 def test_a_very_long_line_is_cut():
     found = narrate.root_cause("RuntimeError: " + "x" * 2000 + "\n")
     assert found[0] == 1 and len(found[1]) <= 300 and found[1].endswith("...")

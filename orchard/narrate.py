@@ -471,6 +471,8 @@ def root_cause(text: str) -> tuple[int, str] | None:
     qualifies. The text is cut to ROOT_CAUSE_CLIP characters."""
     for n, raw in enumerate(text.split("\n"), 1):
         body = _LOG_PREFIX.sub("", raw, count=1)
+        if body[:1].isspace():
+            continue            # a traceback frame or the source line it shows, which can say "build failed" too
         if any(w in body for w in _WRAPPERS):
             continue
         if _EXCEPTION_LINE.match(body) or _BUILD_FAILED.search(body):
