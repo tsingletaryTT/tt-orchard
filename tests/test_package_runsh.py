@@ -293,3 +293,33 @@ def test_a_default_hf_model_naming_a_longer_id_is_judged_by_the_whole_id():
 def test_an_id_with_a_hyphenated_longer_owner_is_not_the_nearest_model():
     text = wire_weights(resolving(), PI) + f"\n# see my-{BASE}\n"
     assert not any("names the nearest model" in p for p in weights_wiring_problems(text, nearest_model=BASE))
+
+
+# A model that ships no generation_config.json gets the nearest model's, because the bundle's server
+# reads eos_token_id from it and dies at the end of model load without one (BAAI/AREX-2, 2026-10-21).
+BASE_GENERATION = '{"eos_token_id": [248046, 248044]}'
+
+
+def test_a_model_with_no_generation_config_gets_the_one_shipped_in_base_config(bundle, tmp_path):
+    (bundle / "base_config" / "generation_config.json").write_text(BASE_GENERATION)
+    hf = tmp_path / "hf"
+    hf_snapshot(hf, NEW, NEW_REV, {k: v for k, v in NEW_FILES.items() if k != "generation_config.json"})
+    r = run_prepare(bundle, hf)
+    assert r.returncode == 0, r.stdout + r.stderr
+    gen = bundle / "model-dir" / "generation_config.json"
+    assert not gen.is_symlink()
+    assert json.loads(gen.read_text())["eos_token_id"] == [248046, 248044]
+
+
+def test_a_generation_config_the_model_ships_replaces_the_one_in_base_config(bundle, tmp_path):
+    (bundle / "base_config" / "generation_config.json").write_text(BASE_GENERATION)
+    hf = tmp_path / "hf"
+    snap = hf_snapshot(hf, NEW, NEW_REV, {**NEW_FILES, "generation_config.json": '{"eos_token_id": 7}'})
+    r = run_prepare(bundle, hf)
+    assert r.returncode == 0, r.stdout + r.stderr
+    gen = bundle / "model-dir" / "generation_config.json"
+    assert os.readlink(gen) == os.path.realpath(snap / "generation_config.json")
+    assert json.loads(gen.read_text())["eos_token_id"] == 7
+    # the bundle's own copy is untouched
+    assert (bundle / "base_config" / "generation_config.json").read_text() == BASE_GENERATION
+    assert run_prepare(bundle, hf).returncode == 0              # and a second start still works

@@ -56,7 +56,10 @@ from orchard.stages import gate_weights_swap
 
 TEMPLATES = Path(__file__).with_name("package_templates")
 SWAP_TEMPLATES = Path(__file__).with_name("skills") / "weights-swap-templates"
-BASE_CONFIG_FILES = ("config.json", "preprocessor_config.json", "video_preprocessor_config.json")
+# generation_config.json is here for a model that ships none: stage 2's staging copied the nearest model's as a
+# real file. A model's own is a link and is left out, so the package takes it from the model.
+BASE_CONFIG_FILES = ("config.json", "generation_config.json", "preprocessor_config.json",
+                     "video_preprocessor_config.json")
 
 MODEL_DIR = '"$HERE/model-dir"'
 WIRING_LINES = (f"export HF_MODEL={MODEL_DIR}", f"export MODEL_WEIGHTS_DIR={MODEL_DIR}")
@@ -879,7 +882,9 @@ def write_card(out: Path, facts: RunFacts, profile: dict, *, namespace: str,
         verified=verify is not None and profile["required"],
         numbers=tuple(card_numbers(facts, profile, verify)), not_measured=tuple(not_measured),
         drafter_off=facts.drafter_off, host_sampling=facts.host_sampling,
-        sidecars=tuple(s["file"] for s in facts.sidecars))
+        sidecars=tuple(s["file"] for s in facts.sidecars),
+        base_files=tuple(sorted(f.name for f in facts.base_config)),
+        sampling_from_base=any(f.name == "generation_config.json" for f in facts.base_config))
     (out / "README.md").write_text(render_card(facts_card), encoding="utf-8")
 
 

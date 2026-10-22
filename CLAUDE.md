@@ -1697,3 +1697,47 @@ when first starting up." Both were measured before anything was changed.
 - Not done: reading the shard headers in parallel would cut the 65 to 81 s itself (the fetcher keeps a request budget and a per-host state, so it needs care);
   the supervisor's coder boot (about 10 minutes cold) shows only what the narrator already shows; `hf download` was not replaced by our own downloader.
 
+## 2026-10-21 (UTC): stage 2 staging copies generation_config.json when the model has none (branch `stage-generation-config`, version 0.8.11)
+Prompt (operator): "OK our first attempt at bring up failed; what is the reason?" then "fix the staging so generation_config gets copied", then
+"restart the tt-orchard bringup when ready". The attempt was BAAI/AREX-2 (run `~/orchard-runs/baai--arex-2`), which stopped at stage 2.
+- Cause, read from `stages/2/evidence/server.log` (the block message only said "Engine core initialization failed. See root cause above"): the server loaded
+  all 64 layers and then raised `no eos_token_id found for the served checkpoint` in the bundle's `Qwen36DFlash._load_eos_ids`. That reads `eos_token_id`
+  from the model dir's `generation_config.json` or `config.json`, or from the loaded Hugging Face config. AREX-2 ships no `generation_config.json`, and
+  the model dir's `config.json` is the BASE model's (copied by `prepare_swap.py`), which nests the id under `text_config`. Bytkim, Clef and RAG-Gate each
+  ship a generation config, so none of them hit this. The retry failed the same way, because the cause is in the directory and not the attempt.
+- Fix (`prepare_swap.py`, used by stage 2 and by stage 4's container tests): when the new snapshot has no `generation_config.json` (or a link to a blob that
+  is gone), copy the base's as a real file and say so; a file the model ships is still linked and never replaced; when neither has one the script warns
+  that the server may not start. Tested on the real AREX-2 and Qwen3.8-27B snapshots in a scratch directory: the bundle's own rule then finds eos ids
+  248044 and 248046, and finds none without the copy. The copy also brings the base's sampling defaults, which vLLM reads from the model dir; the swap
+  check sends its own sampling settings.
+- Tests first (8 new, 5 red before the change). 13 mutations: 11 red, 2 equivalent (`.exists()` for `.is_file()`, a reworded warning). One mutation would
+  have written through a link into the model's cached blob, so a test now reads the blob after the run.
+- Not done: `prepare_parity.py` (sidecar parity) has the same list of linked files but loads the model directly and has no base snapshot in its config;
+  the stage 7 package's `prepare_model_dir.py` has the same gap and ships inside published packages, so it was left alone and the question is the
+  operator's; a model whose generation config exists but has no `eos_token_id` is not handled; a block does not quote the last `RuntimeError` of
+  `server.log`; stage 0 does not flag a missing generation config.
+
+
+## 2026-10-22 (UTC): stage 7 packages a generation config for a model that ships none (branch `stage7-generation-config`, version 0.8.12)
+Prompt (operator): "fix stage 7", asked after the AREX-2 bring-up passed and before packaging it for a full benchmark and card.
+- The 0.8.11 fix put the nearest model's `generation_config.json` into stage 2's model directory as a real file. Stage 7 builds the package's
+  `base_config/` from the real (non-link) config files of that directory, and its list did not include this one, so a package of AREX-2 would
+  have booted without the file and died at the end of model load, as stage 2 did.
+- `BASE_CONFIG_FILES` now lists `generation_config.json`. A model that ships its own has a link there, which stays out of `base_config/`.
+  The bundle's `prepare_model_dir.py` replaces a base copy with the model's own file when the snapshot has one (it raised
+  `FileExistsError` otherwise), so both cases work.
+- Tests first (4 new; the replace case was red before the change). 4 mutations, all red. The 238 package tests pass.
+
+## 2026-10-22 (UTC): the goal, and the issue tracker for deferred work
+Prompt (operator): "OUR GOAL (remember this) is to make tt-orchard bring models up, and bring them up well. Every chance we get to make the harness better at being true to the model, let's add an improvement. Let's use the issue tracker on the project to log when we're not ready to do something but know it needs to get done."
+- Work that is known and not ready goes in GitHub issues (public repo: no machine paths, host names or tokens), with the evidence, why it waits, and what it needs. Labels: `fidelity`, `benchmark`, `packaging`, `hardware`, `preflight`, `new-model-kinds`, `deferred`.
+- First batch: issues #14 to #31, from the "Not done" lines of this log and the AREX-2 bring-up: drafter without `mtp.*` tensors, a wider fidelity check with a control, generation config gaps, chat template check, long-context measurement, author-reported versus measured card numbers, base control built from the model's run.sh, an agent-style evaluation path, stage 7 as a command, 1-chip and 4-chip packages, a pull-and-boot check of published packages, a board that drops off the bus, 4-chip fabric timeouts, stage 4 disk, a checklist of model kinds the harness cannot bring up, the dtype rule, block messages, and UI JavaScript tests.
+- Found during the AREX-2 benchmark: `gozer run --exact 2` selects the unit that holds chip 2 (a board). It does not ask for two chips (issue #20).
+
+## 2026-10-22 (UTC): a record of where each file of the served model directory came from (branch `file-sources`, version 0.8.13)
+Prompt (operator): "start with the file-source record and go from there", after the AREX-2 bring-up showed that the served directory is built from two models and that nothing recorded which parts came from the base (AREX-2 was served with the base's generation config, so with the base's stop tokens and sampling defaults).
+- `prepare_swap.py` writes `stages/<n>/model-dir-sources.json` beside `model-dir/` (not inside it; vLLM reads that directory): each file's source (base or model) and how (copy or link), the reason for a fallback copy, both snapshot revisions (None when the directory is not named by a commit), absent files, the weights as one entry with a count, and `sampling_defaults_from` ("model", "base" or "none"). No machine paths.
+- The package card lists the files `base_config/` ships. When the model ships no `generation_config.json` it also says the model ships none, that the stop tokens and sampling defaults are the nearest model's, and adds a limitation line. `gate_package` reads the package's own `base_config/` listing and refuses a card that does not name each file or leaves the borrowed-sampling statement out.
+- The stage 8 bundle's RESULTS.md has a "The served model directory" section from stage 2's record (nothing is added for a run without one, so older runs' output is unchanged and the golden text test still passes).
+- Tests first, in the three existing test files. Mutations: 12 on `prepare_swap.py`, 12 on the card and gate wiring and 14 on the bundle section, all red after two survivors (section order and a non-numeric weights count) got tests.
+- Not done: stage 4's per-configuration records are written but not read by the bundle; stage 0 does not yet flag a missing generation config (issue #16); the AREX-2 run predates the record, so its bundle has no section.

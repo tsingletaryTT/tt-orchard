@@ -612,6 +612,138 @@ def test_prepare_then_serve_through_a_fake_bundle(swap, tmp_path):
 
 
 
+# ---- generation_config.json when the new model ships none ---------------------------------------
+# BAAI/AREX-2 ships no generation_config.json. The bundle's serving code (Qwen36DFlash._load_eos_ids) reads
+# eos_token_id from the model dir's generation_config.json or config.json, and the model dir's config.json is
+# the BASE model's, which nests it under text_config. The server loaded all 64 layers and then died with
+# "no eos_token_id found for the served checkpoint" (2026-10-21).
+
+BASE_GEN = '{"eos_token_id": [248046, 248044], "temperature": 0.7}'
+BASE_CONFIG = '{"text_config": {"eos_token_id": 248044}}'
+
+
+def put(snap: Path, name: str, content: str) -> None:
+    """Add or replace a snapshot file the way the HF cache does: a link to a blob."""
+    blob = snap.parent.parent / "blobs" / f"blob-{name}"
+    blob.write_text(content)
+    link = snap / name
+    if link.is_symlink() or link.exists():
+        link.unlink()
+    link.symlink_to(os.path.relpath(blob, snap))
+
+
+def eos_ids(model_dir: Path) -> set:
+    """The rule of the bundle's Qwen36DFlash._load_eos_ids (qwen36_vllm_dflash.py): the top-level eos_token_id of
+    generation_config.json or config.json. Copied here so a change in the bundle shows up as a failing contract."""
+    ids = set()
+    for name in ("generation_config.json", "config.json"):
+        try:
+            v = json.loads((model_dir / name).read_text()).get("eos_token_id")
+        except Exception:
+            v = None
+        if isinstance(v, int):
+            ids.add(v)
+        elif isinstance(v, (list, tuple)):
+            ids.update(int(x) for x in v)
+    return ids
+
+
+@pytest.fixture
+def no_new_gen(prep):
+    """AREX-2's shape: the new model has no generation_config.json; the base has one and a nested-eos config."""
+    (prep["new"] / "generation_config.json").unlink()
+    put(prep["base"], "generation_config.json", BASE_GEN)
+    put(prep["base"], "config.json", BASE_CONFIG)
+    return prep
+
+
+def test_a_model_without_a_generation_config_gets_the_base_models_copy(no_new_gen):
+    prep = no_new_gen
+    r = run_prepare(prep["stage"])
+    assert r.returncode == 0, r.stdout + r.stderr
+    md = prep["stage"] / "model-dir"
+    gen = md / "generation_config.json"
+    assert gen.is_file() and not gen.is_symlink()                 # a real copy, like config.json
+    assert gen.read_text() == BASE_GEN
+    assert [p.name for p in md.iterdir()].count("generation_config.json") == 1
+    assert "generation_config.json: new_snapshot has none; copied from base_snapshot" in r.stdout
+    assert "absent in new_snapshot" not in r.stdout               # it is no longer missing
+    assert "in neither snapshot" not in r.stdout                  # and no warning: a copy was made
+
+
+def test_the_served_checkpoint_can_name_an_eos_token_only_because_of_the_copy(no_new_gen):
+    prep = no_new_gen
+    assert run_prepare(prep["stage"]).returncode == 0
+    md = prep["stage"] / "model-dir"
+    assert eos_ids(md) == {248046, 248044}
+    (md / "generation_config.json").unlink()                      # what the model dir was before the fix
+    assert eos_ids(md) == set()                                   # the bundle would raise here
+
+
+def test_a_generation_config_the_model_ships_is_never_replaced_by_the_base_one(prep):
+    put(prep["base"], "generation_config.json", BASE_GEN)         # the base has one too; the model's own wins
+    r = run_prepare(prep["stage"])
+    assert r.returncode == 0, r.stdout + r.stderr
+    link = prep["stage"] / "model-dir" / "generation_config.json"
+    assert link.is_symlink() and os.readlink(link) == os.path.realpath(prep["new"] / "generation_config.json")
+    assert link.read_text() == "content of generation_config.json"
+    assert (prep["new"] / "generation_config.json").read_text() == "content of generation_config.json"   # the cache blob
+    assert "copied from base_snapshot" in r.stdout and "generation_config.json: new_snapshot has none" not in r.stdout
+
+
+def test_a_model_without_one_and_a_base_without_one_says_so_and_goes_on(prep):
+    (prep["new"] / "generation_config.json").unlink()
+    r = run_prepare(prep["stage"])
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not (prep["stage"] / "model-dir" / "generation_config.json").exists()
+    assert "generation_config.json is in neither snapshot" in r.stdout
+    assert "eos_token_id" in r.stdout
+    assert "absent in new_snapshot, not linked: generation_config.json" in r.stdout
+
+
+def test_a_link_to_a_blob_that_is_gone_counts_as_absent_and_the_base_copy_is_used(no_new_gen):
+    prep = no_new_gen
+    (prep["new"] / "generation_config.json").symlink_to(prep["new"] / "no-such-blob")   # dangling
+    r = run_prepare(prep["stage"])
+    assert r.returncode == 0, r.stdout + r.stderr
+    gen = prep["stage"] / "model-dir" / "generation_config.json"
+    assert gen.is_file() and not gen.is_symlink() and gen.read_text() == BASE_GEN
+
+
+def test_a_base_link_to_a_blob_that_is_gone_is_not_copied(prep):
+    (prep["new"] / "generation_config.json").unlink()
+    (prep["base"] / "generation_config.json").symlink_to(prep["base"] / "no-such-blob")
+    r = run_prepare(prep["stage"])
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not (prep["stage"] / "model-dir" / "generation_config.json").exists()
+    assert "in neither snapshot" in r.stdout
+
+
+def test_a_second_run_gives_the_same_copy(no_new_gen):
+    prep = no_new_gen
+    assert run_prepare(prep["stage"]).returncode == 0
+    r = run_prepare(prep["stage"])
+    assert r.returncode == 0, r.stdout + r.stderr
+    gen = prep["stage"] / "model-dir" / "generation_config.json"
+    assert gen.is_file() and not gen.is_symlink() and gen.read_text() == BASE_GEN
+
+
+def test_a_container_package_run_gets_the_copy_too(no_new_gen):
+    prep = no_new_gen
+    container_config(prep, package="changh95/qwen3.8-27b-p300x2")
+    r = run_prepare(prep["stage"])
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (prep["stage"] / "model-dir" / "generation_config.json").read_text() == BASE_GEN
+
+
+def test_the_run_script_is_the_same_with_or_without_the_copy(no_new_gen, tmp_path):
+    prep = no_new_gen
+    assert run_prepare(prep["stage"]).returncode == 0
+    text = (prep["stage"] / "run.sh").read_text()
+    md = str(prep["stage"] / "model-dir")
+    assert f"--model {md} " in text and f'export HF_MODEL="{md}"' in text
+
+
 # ---- prepare_swap.py for a container package (stage 4) ------------------------------------------
 
 def container_config(prep, **change):
@@ -699,3 +831,118 @@ def test_the_swap_report_carries_the_serving_record(swap):
     r = swap["start"]("perfect")
     assert r.returncode == 0, r.stdout + r.stderr
     assert report(swap)["serving"]["drafter"] == "off"
+
+
+# ---- model-dir-sources.json: where each file of the served model directory came from ----------------
+# The directory is built from two models. Without a record, the only way to know that a run served the base
+# model's sampling defaults (AREX-2) is to read the script.
+
+def sources(stage: Path) -> dict:
+    return json.loads((stage / "model-dir-sources.json").read_text())
+
+
+def by_name(record: dict) -> dict:
+    return {f["name"]: f for f in record["files"]}
+
+
+def test_the_record_says_which_files_came_from_the_base_and_which_from_the_model(prep):
+    assert run_prepare(prep["stage"]).returncode == 0
+    rec = sources(prep["stage"])
+    files = by_name(rec)
+    for name in ("config.json", "preprocessor_config.json"):
+        assert (files[name]["source"], files[name]["how"]) == ("base", "copy"), name
+    for name in ("tokenizer.json", "tokenizer_config.json", "chat_template.jinja", "generation_config.json",
+                 "model.safetensors.index.json"):
+        assert (files[name]["source"], files[name]["how"]) == ("model", "link"), name
+    assert rec["base_model"] == NEAREST
+    assert rec["sampling_defaults_from"] == "model"
+    assert rec["absent"] == []
+
+
+def test_the_weights_are_one_entry_with_a_count_and_not_one_entry_per_shard(prep):
+    assert run_prepare(prep["stage"]).returncode == 0
+    rec = sources(prep["stage"])
+    assert rec["weights"] == {"source": "model", "how": "link", "count": 3}
+    assert not [n for n in by_name(rec) if n.endswith(".safetensors")]
+
+
+def test_a_generation_config_copied_from_the_base_is_recorded_with_its_reason(no_new_gen):
+    assert run_prepare(no_new_gen["stage"]).returncode == 0
+    rec = sources(no_new_gen["stage"])
+    gen = by_name(rec)["generation_config.json"]
+    assert (gen["source"], gen["how"]) == ("base", "copy")
+    assert "new_snapshot has none" in gen["reason"]
+    assert rec["sampling_defaults_from"] == "base"
+    assert "generation_config.json" not in rec["absent"]
+
+
+def test_a_generation_config_in_neither_snapshot_is_recorded_as_absent(prep):
+    (prep["new"] / "generation_config.json").unlink()
+    assert run_prepare(prep["stage"]).returncode == 0
+    rec = sources(prep["stage"])
+    assert rec["sampling_defaults_from"] == "none"
+    assert "generation_config.json" in rec["absent"]
+    assert "generation_config.json" not in by_name(rec)
+
+
+def test_the_record_names_the_snapshot_revisions_when_the_directories_are_named_by_one(prep):
+    assert run_prepare(prep["stage"]).returncode == 0
+    rec = sources(prep["stage"])
+    assert rec["base_revision"] == "0" * 40 and rec["model_revision"] == "0" * 40
+
+
+def test_a_snapshot_directory_that_is_not_a_revision_gives_none(prep):
+    odd = prep["new"].parent / "my-local-copy"
+    prep["new"].rename(odd)
+    cfg_path = prep["stage"] / "swap_config.json"
+    cfg = json.loads(cfg_path.read_text())
+    cfg["new_snapshot"] = str(odd)
+    cfg_path.write_text(json.dumps(cfg))
+    assert run_prepare(prep["stage"]).returncode == 0
+    rec = sources(prep["stage"])
+    assert rec["model_revision"] is None and rec["base_revision"] == "0" * 40
+
+
+def test_the_record_sits_beside_model_dir_and_not_in_it(prep):
+    assert run_prepare(prep["stage"]).returncode == 0
+    assert (prep["stage"] / "model-dir-sources.json").is_file()
+    assert not (prep["stage"] / "model-dir" / "model-dir-sources.json").exists()
+
+
+def test_the_record_holds_no_machine_paths(prep, tmp_path):
+    assert run_prepare(prep["stage"]).returncode == 0
+    assert str(tmp_path) not in (prep["stage"] / "model-dir-sources.json").read_text()
+
+
+def test_a_second_run_replaces_the_record(no_new_gen):
+    prep = no_new_gen
+    assert run_prepare(prep["stage"]).returncode == 0
+    assert sources(prep["stage"])["sampling_defaults_from"] == "base"
+    put(prep["new"], "generation_config.json", '{"eos_token_id": 1}')      # the model now ships one
+    assert run_prepare(prep["stage"]).returncode == 0
+    assert sources(prep["stage"])["sampling_defaults_from"] == "model"
+
+
+def test_a_container_package_config_writes_the_record_too(prep):
+    cfg_path = prep["stage"] / "swap_config.json"
+    cfg = json.loads(cfg_path.read_text())
+    del cfg["bundle_dir"]
+    cfg["package"] = "someone/qwen3.8-27b-p300x2"
+    cfg_path.write_text(json.dumps(cfg))
+    assert run_prepare(prep["stage"]).returncode == 0
+    assert by_name(sources(prep["stage"]))["config.json"]["source"] == "base"
+
+
+@pytest.mark.parametrize("fixture, says", [("prep", "the new model's generation_config.json"),
+                                          ("no_new_gen", "the nearest model's generation_config.json")])
+def test_the_script_says_whose_sampling_defaults_the_server_will_read(fixture, says, request):
+    prep = request.getfixturevalue(fixture)
+    r = run_prepare(prep["stage"])
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert f"model-dir-sources.json: sampling defaults and stop tokens are {says}" in r.stdout
+
+
+def test_the_script_says_when_there_are_no_sampling_defaults(prep):
+    (prep["new"] / "generation_config.json").unlink()
+    r = run_prepare(prep["stage"])
+    assert "model-dir-sources.json: no generation_config.json, so no sampling defaults or stop tokens" in r.stdout

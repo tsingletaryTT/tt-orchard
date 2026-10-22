@@ -8,7 +8,9 @@ The model code in this bundle is registered for the base model's architecture, s
 the base model's config files. The tokenizer and weights must be the fine-tune's. This script
 builds model-dir/ next to itself from both:
 
-- COPIED from base_config/ (shipped in the bundle): every file there, for example config.json.
+- COPIED from base_config/ (shipped in the bundle): every file there, for example config.json. When the
+  fine-tune ships no generation_config.json, base_config/ holds the base model's, and the server needs
+  its eos_token_id.
 - LINKED from the fine-tune's Hugging Face snapshot (absolute links to the resolved files):
   tokenizer.json, tokenizer_config.json, chat_template.jinja, generation_config.json,
   model.safetensors.index.json and every *.safetensors file. tokenizer.json and at least one
@@ -75,6 +77,8 @@ def main() -> int:
     for f in sorted((HERE / "base_config").iterdir()):
         shutil.copyfile(f, md / f.name)
     for n in present:
+        if os.path.lexists(md / n):         # the fine-tune's own file replaces a base copy of it
+            os.unlink(md / n)
         os.symlink(os.path.realpath(snap / n), md / n)
     (md / MARKER).write_text(f"{repo}@{rev}", encoding="utf-8")
     print(f"prepare_model_dir: {md} holds the base config and {len(present)} files of {repo}@{rev}")

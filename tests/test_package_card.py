@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from orchard.package_card import (CardFacts, Number, card_problems, non_commercial, read_license,
+from orchard.package_card import (CardFacts, Number, card_problems, sampling_disclosures, non_commercial, read_license,
                                   render_card)
 
 REV = "1a5f363a3dd2d1cc456c28b8abbb403b9555efaf"
@@ -137,3 +137,78 @@ def test_a_card_without_a_required_section_is_a_problem(tmp_path, head):
     card = render_card(facts()).replace(head, "## Other")
     problems = card_problems(card, license_id="cc-by-nc-4.0", run_dir=run_with_evidence(tmp_path))
     assert any(head in p for p in problems), problems
+
+
+# The card says which files the package takes from the nearest model. A model that ships no
+# generation_config.json is served with the nearest model's stop tokens and sampling defaults (BAAI/AREX-2).
+
+BASE_FILES = ("config.json", "preprocessor_config.json")
+
+
+def test_the_card_lists_the_files_it_takes_from_the_nearest_model():
+    card = render_card(facts(base_files=BASE_FILES))
+    assert "(`config.json`, `preprocessor_config.json`, shipped in `base_config/`)" in card
+
+
+def test_a_card_for_a_model_with_no_generation_config_says_whose_sampling_defaults_it_serves():
+    card = render_card(facts(base_files=(*BASE_FILES, "generation_config.json"), sampling_from_base=True))
+    assert "ships no generation_config.json" in card
+    assert "stop tokens and the sampling defaults" in card
+    assert "those of Qwen/Qwen3.8-27B" in card
+    assert "Default sampling settings are those of Qwen/Qwen3.8-27B" in card.split("## Limitations")[1].split("##")[0]
+
+
+def test_a_card_for_a_model_that_ships_its_own_generation_config_does_not_say_so():
+    card = render_card(facts(base_files=BASE_FILES))
+    assert "ships no generation_config.json" not in card
+    assert "Default sampling settings" not in card
+
+
+def test_the_check_accepts_the_rendered_card_for_both_cases(tmp_path):
+    run = run_with_evidence(tmp_path)
+    own = render_card(facts(base_files=BASE_FILES))
+    assert card_problems(own, license_id="cc-by-nc-4.0", run_dir=run, base_files=BASE_FILES) == []
+    names = (*BASE_FILES, "generation_config.json")
+    borrowed = render_card(facts(base_files=names, sampling_from_base=True))
+    f = facts(base_files=names, sampling_from_base=True)
+    assert card_problems(borrowed, license_id="cc-by-nc-4.0", run_dir=run, base_files=names,
+                         model_id=f.model_id, nearest_model=f.nearest_model) == []
+
+
+def test_a_borrowed_generation_config_needs_both_sentences_naming_the_nearest_model(tmp_path):
+    run = run_with_evidence(tmp_path)
+    names = (*BASE_FILES, "generation_config.json")
+    f = facts(base_files=names, sampling_from_base=True)
+    card = render_card(f)
+    def problems(c, **kw):
+        return card_problems(c, license_id="cc-by-nc-4.0", run_dir=run, base_files=names,
+                             **{"model_id": f.model_id, "nearest_model": f.nearest_model, **kw})
+    first, second = sampling_disclosures(f.model_id, f.nearest_model)
+    assert problems(card.replace(first, f"{f.model_id} ships no generation_config.json."))
+    assert problems(card.replace(second, ""))
+    assert problems(card.replace(f"those of {f.nearest_model}", "those of other/model"))
+    assert problems(card, model_id="", nearest_model="")        # the gate must say whose defaults it expects
+    assert "those of Qwen/Qwen3.8-27B." in card                  # the rendered text itself names the model
+    assert problems(card.replace(", so the stop tokens", ",\nso the   stop tokens")) == []     # a re-wrapped card
+
+
+def test_a_card_that_leaves_out_the_borrowed_sampling_defaults_is_refused(tmp_path):
+    run = run_with_evidence(tmp_path)
+    names = (*BASE_FILES, "generation_config.json")
+    card = render_card(facts(base_files=BASE_FILES))                   # rendered as if the model shipped its own
+    problems = card_problems(card, license_id="cc-by-nc-4.0", run_dir=run, base_files=names)
+    assert any("generation_config.json" in p and "sampling defaults" in p for p in problems)
+
+
+def test_a_card_that_does_not_name_a_base_file_the_package_ships_is_refused(tmp_path):
+    run = run_with_evidence(tmp_path)
+    card = render_card(facts(base_files=("config.json",)))
+    problems = card_problems(card, license_id="cc-by-nc-4.0", run_dir=run, base_files=BASE_FILES)
+    assert any("preprocessor_config.json" in p for p in problems)
+
+
+def test_a_file_name_inside_other_text_does_not_count_as_named(tmp_path):
+    run = run_with_evidence(tmp_path)
+    card = render_card(facts(base_files=("config.json",))) + "\nsee my_preprocessor_config.json.bak\n"
+    problems = card_problems(card, license_id="cc-by-nc-4.0", run_dir=run, base_files=BASE_FILES)
+    assert any("preprocessor_config.json" in p for p in problems)
