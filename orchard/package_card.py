@@ -267,6 +267,10 @@ def card_problems(card: str, *, license_id: str, run_dir, sidecars=(), base_file
                   nearest_model="") -> list[str]:
     problems = []
     reported_section, card_without_reported = _section(card, REPORTED_HEAD)
+    if not reported and reported_section:
+        problems.append(f"the card has the section {REPORTED_HEAD!r}, and the run has no reported-results.json to "
+                        "support it")
+        card_without_reported = card                  # its text is not exempt from the number check
     if reported:
         if not reported_section:
             problems.append(f"the card must have the section {REPORTED_HEAD!r}: the run was given scores the authors report")

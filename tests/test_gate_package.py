@@ -273,3 +273,9 @@ def test_a_package_for_a_run_without_reported_scores_has_a_card_without_the_sect
 def test_the_reported_section_is_written_with_the_not_measured_sentence(stage7_reported):
     card = (stage7_reported["pkg"] / "README.md").read_text()
     assert "These scores come from the model's card. They were not measured here" in card
+
+
+def test_a_reported_section_added_to_the_card_of_a_run_without_reported_scores_fails_the_gate(stage7):
+    card = stage7["pkg"] / "README.md"
+    card.write_text(card.read_text().replace("## Limitations", "## Reported by the authors\n\nIt decodes at 80 tok/s.\n\n## Limitations"))
+    assert any("card:" in r and "reported-results.json" in r for r in reasons(stage7))

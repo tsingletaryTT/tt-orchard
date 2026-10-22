@@ -7,6 +7,7 @@ import pytest
 
 from orchard.package_card import (CardFacts, Number, Reported, card_problems, non_commercial, read_license,
                                   render_card, sampling_disclosures)
+from orchard.package_card import REPORTED_HEAD
 
 REV = "1a5f363a3dd2d1cc456c28b8abbb403b9555efaf"
 
@@ -298,3 +299,12 @@ def test_a_cell_cannot_break_the_table_or_the_card():
     table = [ln for ln in sec.splitlines() if ln.startswith("| a")]
     assert len(table) == 1 and table[0].count("|") == 4 and "## Heading" in table[0]
     assert "\n## Heading" not in card
+
+
+def test_a_reported_section_on_a_card_whose_run_has_no_reported_scores_is_refused(tmp_path):
+    """Adding the heading and a claim to a card must not pass because the run had nothing to report."""
+    run = run_with_evidence(tmp_path)
+    card = render_card(facts()).replace("## Limitations", f"{REPORTED_HEAD}\n\nIt decodes at 80 tok/s.\n\n## Limitations")
+    problems = card_problems(card, license_id="cc-by-nc-4.0", run_dir=run)
+    assert any(REPORTED_HEAD in x and "reported-results.json" in x for x in problems), problems
+    assert any("80 tok/s" in x for x in problems), problems       # and the claim is no longer exempt from the number check
