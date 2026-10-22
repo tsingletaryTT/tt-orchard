@@ -1029,3 +1029,92 @@ def test_stop_tokens_are_read_only_when_they_are_integers(text_case, value, ids)
     stage = text_case(genconfig_change={"eos_token_id": value})
     assert run_triage(stage).returncode == 0
     assert evidence(stage, "genconfig-license.json")["model_eos_token_ids"] == ids
+
+
+# ---- the stop token can also come from the staged config.json ---------------------------------------------------
+# Staging copies the nearest model's config.json, and the bundle reads a top-level eos_token_id from it when
+# generation_config.json has none (prepare_swap.stop_token_ids does the same). A missing or incomplete
+# generation_config.json therefore predicts a failed start only when that config.json has none either.
+
+NEAREST_CONFIG_PHRASE = "the nearest model's config.json, [7777], which staging copies"
+
+
+def set_top_level_eos(snapshot_key: str, stage: Path, value) -> None:
+    cfg = json.loads((stage / "triage_config.json").read_text())
+    path = Path(cfg[snapshot_key]) / "config.json"
+    data = json.loads(path.read_text())
+    data["eos_token_id"] = value
+    path.write_text(json.dumps(data))
+
+
+def drop_eos(snapshot_key: str, stage: Path) -> None:
+    cfg = json.loads((stage / "triage_config.json").read_text())
+    path = Path(cfg[snapshot_key]) / "generation_config.json"
+    gen = json.loads(path.read_text())
+    del gen["eos_token_id"]
+    path.write_text(json.dumps(gen))
+
+
+def test_the_evidence_records_the_nearest_models_config_stop_tokens(text_case):
+    stage = text_case()
+    set_top_level_eos("nearest_snapshot", stage, [5, 6])
+    assert run_triage(stage).returncode == 0
+    assert evidence(stage, "genconfig-license.json")["base_config_eos_token_ids"] == [5, 6]
+
+
+def test_a_nested_or_absent_config_stop_token_is_recorded_as_none(text_case):
+    stage = text_case()                                   # the nearest model nests its config under text_config
+    assert run_triage(stage).returncode == 0
+    assert evidence(stage, "genconfig-license.json")["base_config_eos_token_ids"] == []
+
+
+def test_a_missing_model_file_with_a_stop_token_in_the_staged_config_does_not_predict_a_failed_start(text_case):
+    stage = text_case()
+    drop_model_file(stage, "generation_config.json")
+    drop_eos("nearest_snapshot", stage)                    # the borrowed generation_config.json has no eos_token_id
+    set_top_level_eos("nearest_snapshot", stage, 7777)        # but the config.json staging copies has one
+    assert run_triage(stage).returncode == 0
+    [h] = gen_hazards(stage)
+    assert "stops after loading the weights" not in h["finding"] and "will stop" in h["finding"]
+    assert NEAREST_CONFIG_PHRASE in h["finding"]                       # says where the stop token comes from
+
+
+def test_neither_file_with_a_stop_token_in_the_staged_config_does_not_predict_a_failed_start(text_case):
+    stage = text_case()
+    drop_model_file(stage, "generation_config.json")
+    drop_base_file(stage, "generation_config.json")
+    set_top_level_eos("nearest_snapshot", stage, 7777)
+    assert run_triage(stage).returncode == 0
+    [h] = gen_hazards(stage)
+    assert "stops after loading the weights" not in h["finding"] and "no sampling defaults" in h["finding"]
+    assert NEAREST_CONFIG_PHRASE in h["finding"]
+
+
+def test_an_incomplete_model_file_with_a_stop_token_in_the_staged_config_does_not_predict_a_failed_start(text_case):
+    stage = text_case()
+    drop_eos("model_snapshot", stage)
+    set_top_level_eos("nearest_snapshot", stage, 7777)
+    assert run_triage(stage).returncode == 0
+    [h] = gen_hazards(stage)
+    assert "has no eos_token_id" in h["finding"] and "stops after loading the weights" not in h["finding"]
+    assert NEAREST_CONFIG_PHRASE in h["finding"]
+
+
+def test_the_new_models_own_config_stop_token_does_not_count_because_staging_replaces_its_config(text_case):
+    stage = text_case()
+    drop_model_file(stage, "generation_config.json")
+    drop_base_file(stage, "generation_config.json")
+    set_top_level_eos("model_snapshot", stage, 9)          # staging does not use the model's config.json
+    assert run_triage(stage).returncode == 0
+    [h] = gen_hazards(stage)
+    assert "stops after loading the weights" in h["finding"]
+
+
+def test_a_nearest_config_that_is_not_a_json_object_records_no_stop_token(text_case):
+    stage = text_case()
+    cfg = json.loads((stage / "triage_config.json").read_text())
+    base_config = Path(cfg["nearest_snapshot"]) / "config.json"
+    base_config.write_text("[1, 2]")
+    run_triage(stage)                                       # other checks may refuse such a config; the record must still be sane
+    g = evidence(stage, "genconfig-license.json")
+    assert g["base_config_eos_token_ids"] == []
