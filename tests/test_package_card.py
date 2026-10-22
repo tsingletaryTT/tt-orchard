@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from orchard.package_card import (CardFacts, Number, card_problems, non_commercial, read_license,
+from orchard.package_card import (CardFacts, Number, card_problems, sampling_disclosures, non_commercial, read_license,
                                   render_card)
 
 REV = "1a5f363a3dd2d1cc456c28b8abbb403b9555efaf"
@@ -170,7 +170,26 @@ def test_the_check_accepts_the_rendered_card_for_both_cases(tmp_path):
     assert card_problems(own, license_id="cc-by-nc-4.0", run_dir=run, base_files=BASE_FILES) == []
     names = (*BASE_FILES, "generation_config.json")
     borrowed = render_card(facts(base_files=names, sampling_from_base=True))
-    assert card_problems(borrowed, license_id="cc-by-nc-4.0", run_dir=run, base_files=names) == []
+    f = facts(base_files=names, sampling_from_base=True)
+    assert card_problems(borrowed, license_id="cc-by-nc-4.0", run_dir=run, base_files=names,
+                         model_id=f.model_id, nearest_model=f.nearest_model) == []
+
+
+def test_a_borrowed_generation_config_needs_both_sentences_naming_the_nearest_model(tmp_path):
+    run = run_with_evidence(tmp_path)
+    names = (*BASE_FILES, "generation_config.json")
+    f = facts(base_files=names, sampling_from_base=True)
+    card = render_card(f)
+    def problems(c, **kw):
+        return card_problems(c, license_id="cc-by-nc-4.0", run_dir=run, base_files=names,
+                             **{"model_id": f.model_id, "nearest_model": f.nearest_model, **kw})
+    first, second = sampling_disclosures(f.model_id, f.nearest_model)
+    assert problems(card.replace(first, f"{f.model_id} ships no generation_config.json."))
+    assert problems(card.replace(second, ""))
+    assert problems(card.replace(f"those of {f.nearest_model}", "those of other/model"))
+    assert problems(card, model_id="", nearest_model="")        # the gate must say whose defaults it expects
+    assert "those of Qwen/Qwen3.8-27B." in card                  # the rendered text itself names the model
+    assert problems(card.replace(", so the stop tokens", ",\nso the   stop tokens")) == []     # a re-wrapped card
 
 
 def test_a_card_that_leaves_out_the_borrowed_sampling_defaults_is_refused(tmp_path):
