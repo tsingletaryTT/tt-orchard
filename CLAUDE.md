@@ -1776,7 +1776,7 @@ Prompt (operator): "take on more issues" while the AREX-2 benchmark ran. Issue #
 - Tests first: 8 of the new tests were red on the old code (the others guard behaviour the old code also had). Mutations: 5 on the fetcher, all red; 9 on the header read, 8 red and one equivalent (`UnicodeDecodeError` is a `ValueError`, so listing it adds nothing). A many-thread budget test passed on the unlocked code in my first run, because the race window is small under the GIL; the lock-held checks and the 7-of-48 budget test in the parallel read carry that guard.
 - One baseline run of the sequential read gave 7 header errors on AREX-2 in 6 s and did not repeat in six later runs. It fits one connection failure marking the host, which is the existing rule.
 - Not done: the three models' reads still follow one another (each read is parallel inside); the progress lines are unchanged.
-## 2026-10-22 (UTC): the served chat template and special tokens are recorded and compared (branch `chat-template-check`, version 0.8.17)
+## 2026-10-22 (UTC): the served chat template and special tokens are recorded and compared (branch `chat-template-check`, version 0.8.22 after the merge with main; built as 0.8.17)
 Prompt (operator): "while we wait, let's take on more issues"; issue #17. Read first, in the cached snapshots, before any code: the five Qwen3.8 fine-tunes
 (AREX-2, bytkim, RAG-Gate, Clef, Hemmingway-1) and pplx-decider all ship `chat_template.jinja` only, with the same sha256 as the base's (`c3cf9e34ab`), and the same eos, pad
 tokens. No cached model of that family has a different template, so the check could not be shown on a real differing fine-tune; it was shown on the cached models of other
