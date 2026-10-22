@@ -247,3 +247,21 @@ def test_the_packaging_module_has_no_upload_code():
     src = open(pkg.__file__, encoding="utf-8").read()
     assert not re.search(r"^\s*(?:import|from)\s+(?:huggingface_hub|tt_kernel)\b", src, re.M)
     assert "subprocess.run(" not in src and "os.system" not in src
+
+
+def test_a_generation_config_stage_2_copied_from_the_nearest_model_ships_in_base_config(world):
+    md = world["run"] / "stages/2/model-dir"
+    write(md / "generation_config.json", '{"eos_token_id": [248046, 248044]}')      # a real file: copied
+    f = read_run(world["run"])
+    assert [p.name for p in f.base_config] == ["config.json", "generation_config.json",
+                                               "preprocessor_config.json"]
+    _, _, out = staged(world)
+    assert sorted(p.name for p in (out / "base_config").iterdir()) == [
+        "config.json", "generation_config.json", "preprocessor_config.json"]
+
+
+def test_a_generation_config_the_model_ships_is_not_put_in_base_config(world):
+    md = world["run"] / "stages/2/model-dir"
+    (md / "generation_config.json").symlink_to(world["snapshot"] / "tokenizer.json")  # a link: the model's own
+    f = read_run(world["run"])
+    assert [p.name for p in f.base_config] == ["config.json", "preprocessor_config.json"]

@@ -56,7 +56,10 @@ from orchard.stages import gate_weights_swap
 
 TEMPLATES = Path(__file__).with_name("package_templates")
 SWAP_TEMPLATES = Path(__file__).with_name("skills") / "weights-swap-templates"
-BASE_CONFIG_FILES = ("config.json", "preprocessor_config.json", "video_preprocessor_config.json")
+# generation_config.json is here for a model that ships none: stage 2's staging copied the nearest model's as a
+# real file. A model's own is a link and is left out, so the package takes it from the model.
+BASE_CONFIG_FILES = ("config.json", "generation_config.json", "preprocessor_config.json",
+                     "video_preprocessor_config.json")
 
 MODEL_DIR = '"$HERE/model-dir"'
 WIRING_LINES = (f"export HF_MODEL={MODEL_DIR}", f"export MODEL_WEIGHTS_DIR={MODEL_DIR}")

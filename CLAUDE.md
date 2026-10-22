@@ -1669,3 +1669,13 @@ Prompt (operator): "OK our first attempt at bring up failed; what is the reason?
   operator's; a model whose generation config exists but has no `eos_token_id` is not handled; a block does not quote the last `RuntimeError` of
   `server.log`; stage 0 does not flag a missing generation config.
 
+
+## 2026-10-22 (UTC): stage 7 packages a generation config for a model that ships none (branch `stage7-generation-config`, version 0.8.12)
+Prompt (operator): "fix stage 7", asked after the AREX-2 bring-up passed and before packaging it for a full benchmark and card.
+- The 0.8.11 fix put the nearest model's `generation_config.json` into stage 2's model directory as a real file. Stage 7 builds the package's
+  `base_config/` from the real (non-link) config files of that directory, and its list did not include this one, so a package of AREX-2 would
+  have booted without the file and died at the end of model load, as stage 2 did.
+- `BASE_CONFIG_FILES` now lists `generation_config.json`. A model that ships its own has a link there, which stays out of `base_config/`.
+  The bundle's `prepare_model_dir.py` replaces a base copy with the model's own file when the snapshot has one (it raised
+  `FileExistsError` otherwise), so both cases work.
+- Tests first (4 new; the replace case was red before the change). 4 mutations, all red. The 238 package tests pass.
