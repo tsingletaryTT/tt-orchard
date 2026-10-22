@@ -923,3 +923,73 @@ def test_the_section_comes_after_the_ops_section_when_there_is_one(tmp_path):
 def test_a_weights_count_that_is_not_a_number_gives_no_weights_row(tmp_path):
     text = sources_text(tmp_path, dict(SOURCES, weights={"source": "model", "how": "link", "count": "many"}))
     assert "The served model directory" in text and "safetensors files" not in text
+
+
+# ---- the generation config hazard ---------------------------------------------------------------------------
+
+GEN_HAZARD = {"area": "generation_config", "finding": "The new model ships no generation_config.json. Staging copies "
+              "the nearest model's.", "evidence": ["stages/0/evidence/genconfig-license.json"]}
+
+
+def gen_risks(tmp_path, record=None, card_says=True, stage7=True):
+    run = make_run(tmp_path, stage7=stage7)
+    delta_path = run / "stages" / "0" / "delta.json"
+    d = json.loads(delta_path.read_text())
+    d["hazards"] = [*d.get("hazards", []), GEN_HAZARD]
+    write_json(delta_path, d)
+    if record is not None:
+        write_json(run / "stages" / "2" / "model-dir-sources.json", record)
+    cards = sorted((run / "stages" / "7" / "package").glob("*/README.md"))
+    for i, card in enumerate(cards):
+        says = card_says == "first" and i == 0 or card_says is True
+        text = card.read_text()
+        card.write_text(text + ("\nThe model ships no generation_config.json, so its defaults are the nearest model's.\n"
+                                if says else ""))
+    assert build(run).returncode == 0
+    risks = (bundle_of(run) / "RISKS.md").read_text()
+    return [b for b in section(risks, "## Stage 0 hazards").split("### ") if b.startswith("generation_config")][0]
+
+
+def test_the_generation_config_hazard_is_dealt_with_when_the_borrowed_file_was_served_and_the_cards_say_so(tmp_path):
+    block = gen_risks(tmp_path, dict(SOURCES, sampling_defaults_from="base"))
+    assert "Dealt with: yes" in block
+    assert "nearest model's generation_config.json" in block and "model-dir-sources.json" in block
+    assert "cards that say so" in block
+
+
+def test_the_hazard_is_not_dealt_with_when_a_card_leaves_it_out(tmp_path):
+    block = gen_risks(tmp_path, dict(SOURCES, sampling_defaults_from="base"), card_says=False)
+    assert "Dealt with: Not shown" in block and "0 of" in block
+
+
+def test_the_hazard_is_not_dealt_with_when_the_model_was_served_with_its_own_file(tmp_path):
+    block = gen_risks(tmp_path, dict(SOURCES, sampling_defaults_from="model"))
+    assert "Dealt with: Not shown" in block and "the new model's own" in block
+
+
+def test_the_hazard_is_not_dealt_with_when_neither_file_existed(tmp_path):
+    block = gen_risks(tmp_path, dict(SOURCES, sampling_defaults_from="none"))
+    assert "Dealt with: Not shown" in block and "no generation_config.json" in block
+
+
+def test_the_hazard_says_so_when_the_run_has_no_record(tmp_path):
+    block = gen_risks(tmp_path)
+    assert "Dealt with: Not shown" in block and "model-dir-sources.json is not in this run" in block
+
+
+def test_the_hazard_is_not_dealt_with_when_only_some_cards_say_it(tmp_path):
+    run = make_run(tmp_path)
+    assert len(list((run / "stages" / "7" / "package").glob("*/README.md"))) >= 2     # the fixture has two profiles
+    block = gen_risks(tmp_path / "again", dict(SOURCES, sampling_defaults_from="base"), card_says="first")
+    assert "Dealt with: Not shown" in block and "1 of 2" in block
+
+
+def test_the_hazard_is_not_dealt_with_when_the_run_has_no_package_cards(tmp_path):
+    block = gen_risks(tmp_path, dict(SOURCES, sampling_defaults_from="base"), stage7=False)
+    assert "Dealt with: Not shown" in block and "0 of 0" in block
+
+
+@pytest.mark.parametrize("origin", ["elsewhere", None, 7])
+def test_an_origin_the_record_does_not_name_is_not_taken_as_the_base(tmp_path, origin):
+    block = gen_risks(tmp_path, dict(SOURCES, sampling_defaults_from=origin))
+    assert "Dealt with: Not shown" in block and "does not say whose generation config was served" in block

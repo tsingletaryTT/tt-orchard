@@ -856,6 +856,30 @@ def mtp_drafter_dealt_with(run: Run) -> tuple[bool, list[str]]:
     return False, ["Drafter state per check: " + "; ".join(f"{label(k)}: {v}" for k, v in sorted(states.items(), key=str)) + "."]
 
 
+def generation_config_dealt_with(run: Run) -> tuple[bool, list[str]]:
+    """The generation config hazard is dealt with when stage 2 served the nearest model's file (so the engine found
+    stop tokens) and every package card says the model ships none. The settings are still the nearest model's."""
+    rec = read_json(run.dir / "stages" / "2" / "model-dir-sources.json", "stages/2/model-dir-sources.json",
+                    required=False)
+    if rec is None:
+        return False, ["Stage 2's record of the served directory, stages/2/model-dir-sources.json is not in this "
+                       "run, so the bundle cannot say whose generation config was served."]
+    origin = rec.get("sampling_defaults_from")
+    if origin == "model":
+        return False, ["Stage 2 served the new model's own generation_config.json (`stages/2/model-dir-sources.json`). "
+                       "Read the finding: that file may lack the stop tokens."]
+    if origin == "none":
+        return False, ["Stage 2 served a directory with no generation_config.json "
+                       "(`stages/2/model-dir-sources.json`)."]
+    if origin != "base":
+        return False, ["`stages/2/model-dir-sources.json` does not say whose generation config was served."]
+    saying = [rel for rel, text in run.cards.values() if "ships no generation_config.json" in text]
+    why = ["Stage 2 served the nearest model's generation_config.json (`stages/2/model-dir-sources.json`), so the "
+           "stop tokens and the sampling defaults are the nearest model's.",
+           f"Package cards that say so: {len(saying)} of {len(run.cards)}."]
+    return bool(run.cards) and len(saying) == len(run.cards), why
+
+
 def hazard_entries(run: Run, redact: Redactor) -> list[tuple[str, str, list[str], bool, list[str]]]:
     """(heading, finding, evidence, dealt with, why) for each stage 0 hazard."""
     out, seen = [], {}
@@ -901,6 +925,8 @@ def hazard_entries(run: Run, redact: Redactor) -> list[tuple[str, str, list[str]
                               and "disk" in str(e["data"].get("reason", "")).lower())
             ok, why = False, [f"The run's files do not record where each stage wrote its large files. "
                               f"Pauses whose reason names disk space: {disk_pauses} (ledger.jsonl)."]
+        elif area == "generation_config":
+            ok, why = generation_config_dealt_with(run)
         elif area == "license":
             ok = False
             why = ["A license is the operator's decision. The run cannot settle it."]
