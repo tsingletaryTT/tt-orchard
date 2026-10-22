@@ -20,7 +20,9 @@ from __future__ import annotations
 import json
 import math
 import os
+import hmac
 import re
+import secrets
 import signal
 import socket
 import subprocess
@@ -37,12 +39,14 @@ from orchard.package import (BENCHMARK_NUMBERS_FILE, PUBLISH_FILE, REPORTED_FILE
 from orchard.paths import recorded_paths
 from orchard.runner import Denied, check_string
 from orchard.server import proc_identity
+from orchard.status import _lock_holder
 from orchard.stages import evidence_record, gate_package
 
 EXIT_OK, EXIT_FAILED, EXIT_REFUSED, EXIT_QUEUED = 0, 1, 2, 3
 GOZER_QUEUED = 10                      # gozer's exit code for a request that was queued
 LEASE_WHO = "claude:package"
 BOOT_SLACK_S = 600                     # the lease's timeout is the test's own deadline plus this
+HANDOFF_FILE = ".boot-handoff"          # in stages/7: what the `package` command tells its lease command (see _check_handoff)
 SERVER_RECORD = "verify/evidence/server.pid"   # verify_bundle.py writes the server it starts here, under stages/7
 TERM_WAIT_S = 30.0                     # how long the server's group gets after SIGTERM before SIGKILL
 KILL_WAIT_S = 10.0                     # and how long after SIGKILL before the step says it is still running
@@ -123,13 +127,15 @@ def _paths(entries: list[dict], args) -> tuple[Path, Path]:
 # ---- the lease ---------------------------------------------------------------------------------------
 
 def lease_argv(run: Path, *, chips: int, deadline_s: float, python: str, cache_root: Path, gozer: str = "gozer",
-               exact: int | None = None) -> list[str]:
+               exact: int | None = None, handoff: str | None = None) -> list[str]:
     argv = [gozer, "run", "--chips", str(chips)]
     if exact is not None:
         argv += ["--exact", str(exact)]
     argv += ["--who", LEASE_WHO, "--reason", f"stage 7 boot check of the package for {run.name}", "--",
              "timeout", str(int(deadline_s + BOOT_SLACK_S)), python, "-m", "orchard.cli", "package", str(run),
              "--step", "boot", "--cache-root", str(cache_root)]
+    if handoff:
+        argv += ["--handoff", handoff]
     return argv
 
 
@@ -156,9 +162,17 @@ def check_lease_argv(argv: list[str], *, run_dir, python: str, gozer: str = "goz
         raise PackageCommandError("the lease command must run `timeout SECONDS python -m orchard.cli package ...`")
     rest = tail[2:]
     base = [python, "-m", "orchard.cli", "package", str(run_dir), "--step", "boot"]
-    extra = rest[len(base):]
-    if rest[:len(base)] != base or (extra and not (len(extra) == 2 and extra[0] == "--cache-root")):
+    if rest[:len(base)] != base or not _extra_ok(rest[len(base):]):
         raise PackageCommandError("the lease may run only the package boot step; this one runs " + " ".join(rest))
+
+
+def _extra_ok(extra: list[str]) -> bool:
+    """What may follow `--step boot`: nothing, `--cache-root P`, or that and `--handoff TOKEN` (32 hex digits)."""
+    if not extra:
+        return True
+    if extra[:1] != ["--cache-root"] or len(extra) not in (2, 4):
+        return False
+    return len(extra) == 2 or (extra[2] == "--handoff" and re.fullmatch(r"[0-9a-f]{32}", extra[3]) is not None)
 
 
 def _scrubbed(env) -> dict:
@@ -427,6 +441,37 @@ def _finish(run: Path, led: Ledger, stage_dir: Path, out, *, hostname) -> int:
     return EXIT_OK
 
 
+def _write_handoff(stage_dir: Path) -> str:
+    """The `package` command holds the run's ledger while its lease command boots the package. The lease command
+    is given a token and finds this record: the token, and the identity of the process that holds the run."""
+    token = secrets.token_hex(16)
+    boot_id, start = proc_identity(os.getpid()) or (None, None)
+    path = stage_dir / HANDOFF_FILE
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps({"token": token, "pid": os.getpid(), "boot_id": boot_id, "start_time": start}),
+                   encoding="utf-8")
+    os.replace(tmp, path)
+    return token
+
+
+def _check_handoff(run: Path, stage_dir: Path, token: str) -> None:
+    """The boot step that `package` starts under its lease does not take the run's ledger: its parent holds it. It
+    proves that with the token, and with the record's pid, which must still have the recorded start time and must
+    be the process that holds the ledger lock. A bare `--step boot` has none of this and takes the lock itself."""
+    refuse = lambda why: PackageCommandError(f"the handoff from the package command is not valid: {why}")  # noqa: E731
+    try:
+        rec = json.loads((stage_dir / HANDOFF_FILE).read_text(encoding="utf-8"))
+        want, pid, boot, start = rec["token"], rec["pid"], rec["boot_id"], rec["start_time"]
+    except (OSError, ValueError, KeyError, TypeError):
+        raise refuse("there is no readable record in stages/7") from None
+    if not (isinstance(want, str) and isinstance(token, str) and hmac.compare_digest(want, token)):
+        raise refuse("the token does not match")
+    if not isinstance(pid, int) or proc_identity(pid) != (boot, start):
+        raise refuse("the package command that started this step is not running")
+    if _lock_holder(run) != pid:
+        raise refuse("that command does not hold the run's ledger")
+
+
 def main(args, *, out=None, env=None, runner=None, spawn=None, extra_env=None, hostname=None,
          cancel=None) -> int:
     """`tt-orchard package`. Returns 0 (done and the gate is ok), 1 (a step failed or the gate is not ok),
@@ -439,11 +484,17 @@ def main(args, *, out=None, env=None, runner=None, spawn=None, extra_env=None, h
     run = Path(args.run_dir).resolve()
     try:
         entries = _entries(run)
-        if args.step == "boot":
-            return boot_step(run, args, out, env=env, spawn=spawn, extra_env=extra_env)
         if not _finished(entries):
             raise PackageCommandError(f"the run in {run} has not finished (its ledger has no 'ready for operator "
                                       "review'). Packaging a run that is still going could change files under it")
+        if args.step == "boot":
+            stage_dir = run / "stages" / "7"
+            if getattr(args, "handoff", None):
+                _check_handoff(run, stage_dir, args.handoff)      # the parent holds the ledger; this step writes none
+                return boot_step(run, args, out, env=env, spawn=spawn, extra_env=extra_env)
+            with _open(run) as led:                               # a bare boot step takes the run like the others
+                led.append("decision", 7, decision="package command", step="boot", namespace=args.namespace)
+                return boot_step(run, args, out, env=env, spawn=spawn, extra_env=extra_env)
         with _open(run) as led:
             entries = led.read()
             if args.step in ("all", "stage"):
@@ -462,11 +513,15 @@ def main(args, *, out=None, env=None, runner=None, spawn=None, extra_env=None, h
                 package_json = json.loads((stage_dir / "package.json").read_text(encoding="utf-8"))
                 chips = next(p["chips"] for p in package_json["profiles"] if p["required"])
                 _, cache = _paths(entries, args)
-                argv = lease_argv(run, chips=chips, deadline_s=test["deadline_s"], python=args.python,
-                                  cache_root=cache, gozer=args.gozer, exact=args.exact)
-                check_lease_argv(argv, run_dir=run, python=args.python, gozer=args.gozer)
-                _say(out, "boot check: taking a lease on " + f"{chips} chips (this can take 20 to 30 minutes)")
-                got = runner(argv, _with_checkout(_scrubbed(env)))
+                token = _write_handoff(stage_dir)
+                try:
+                    argv = lease_argv(run, chips=chips, deadline_s=test["deadline_s"], python=args.python,
+                                      cache_root=cache, gozer=args.gozer, exact=args.exact, handoff=token)
+                    check_lease_argv(argv, run_dir=run, python=args.python, gozer=args.gozer)
+                    _say(out, "boot check: taking a lease on " + f"{chips} chips (this can take 20 to 30 minutes)")
+                    got = runner(argv, _with_checkout(_scrubbed(env)))
+                finally:
+                    (stage_dir / HANDOFF_FILE).unlink(missing_ok=True)
                 code, printed = got if isinstance(got, tuple) else (got, "")
                 if code == GOZER_QUEUED:
                     fields, sentence = _queued_text(printed, cancel or cancel_ticket)

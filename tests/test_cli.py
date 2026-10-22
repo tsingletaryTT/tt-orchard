@@ -946,7 +946,15 @@ def test_package_defaults_to_no_restage_and_the_whole_flow(tmp_path, monkeypatch
     monkeypatch.setattr(package_cmd, "main", lambda args, **kw: seen.update(vars(args)) or 0)
     cli.main(["package", str(tmp_path / "run"), "--namespace", "episod"], stdout=io.StringIO())
     assert seen["restage"] is False and seen["step"] == "all" and seen["exact"] is None and seen["gozer"] == "gozer"
-    assert seen["python"] == sys.executable
+    assert seen["python"] == sys.executable and seen["handoff"] is None
+
+
+def test_package_passes_the_handoff_token_to_the_boot_step(tmp_path, monkeypatch):
+    from orchard import cli, package_cmd
+    seen = {}
+    monkeypatch.setattr(package_cmd, "main", lambda args, **kw: seen.update(vars(args)) or 0)
+    cli.main(["package", str(tmp_path / "run"), "--step", "boot", "--handoff", "ab" * 16], stdout=io.StringIO())
+    assert seen["handoff"] == "ab" * 16 and seen["step"] == "boot"
 
 
 @pytest.mark.parametrize("step", ["stage", "boot", "finish", "all"])

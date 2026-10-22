@@ -174,6 +174,9 @@ def _parser() -> argparse.ArgumentParser:
     pk.add_argument("--models-root", help="where installed tt-model bundles live (default: the run's recorded path)")
     pk.add_argument("--cache-root", help="the cache root; the kernel cache is under it (default: the run's recorded path)")
     pk.add_argument("--gozer", default="gozer", help="the gozer command (default gozer)")
+    pk.add_argument("--handoff", metavar="TOKEN", help="set by `package` for the boot step its lease command runs: "
+                                                       "proves the parent holds the run. Leave it out; a bare "
+                                                       "`--step boot` takes the run itself")
     pk.set_defaults(python=sys.executable)
     pc = sub.add_parser("package-card", parents=[common],
                         help="put benchmark results, and optionally the authors' reported scores, in the package "

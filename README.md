@@ -717,6 +717,9 @@ Flags of `package`:
 - `--models-root` DIR: where installed tt-model bundles live. Default: the path the run recorded.
 - `--cache-root` DIR: the cache root, with the kernel cache under it. Default: the path the run recorded.
 - `--gozer` CMD: the gozer command. Default `gozer`.
+- `--handoff` TOKEN: set by `package` for the boot step its lease command runs. It proves that the parent command holds the run's
+  ledger, so the child does not take it. Leave it out. A bare `--step boot` checks that the run has finished and takes the ledger
+  itself, so it is refused while a supervisor holds the run or while another `package` step is running.
 
 `package-card` takes a benchmark file, `{"tasks": {"gsm8k": {"KEY": {"score": 0.93, "n": 1319, "cut_off": 3},
 "BASE": {...}, "paired": {"sign_test_p": 0.001}}}}` (the shape the `bench_rerun` compile scripts write), and

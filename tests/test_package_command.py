@@ -8,6 +8,7 @@ gozer; the stub `gozer` fails the test if it is ever reached."""
 import io
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -977,3 +978,174 @@ def test_a_server_that_takes_a_moment_to_exit_on_sigterm_is_stopped_not_killed(r
         return None, True
     boot_with(rig, monkeypatch, spawn)
     assert result(rig)["server"]["outcome"] == "stopped" and servers[0].wait(timeout=5) == 0
+
+
+# ---- review: a standalone boot step is as guarded as the other steps ------------------------------------
+
+from orchard.ledger import LedgerLocked                                              # noqa: E402
+
+HANDOFF = "boot-handoff"
+TOKEN = "0123456789abcdef0123456789abcdef"
+
+
+def spawn_must_not_run(*a):
+    raise AssertionError("the boot check started")
+
+
+def boot_bare(rig, monkeypatch, spawn=spawn_must_not_run, **kw):
+    monkeypatch.setenv("TT_VISIBLE_DEVICES", "2,3")
+    out = io.StringIO()
+    code = package_cmd.main(args(rig, step="boot", cache_root=str(rig["cache"]), **kw), out=out, spawn=spawn,
+                            extra_env=rig["extra_env"])
+    return code, out.getvalue()
+
+
+def test_a_bare_boot_step_is_refused_while_a_supervisor_holds_the_run(rig, monkeypatch):
+    run_cmd(rig, step="stage")
+    with Ledger(rig["run"] / "ledger.jsonl"):                                       # the supervisor
+        code, text = boot_bare(rig, monkeypatch)
+    assert code == 2 and "supervisor holds" in text
+    assert not (rig["stage"] / "test-result.json").exists()
+
+
+def test_a_bare_boot_step_is_refused_on_a_run_that_has_not_finished(rig, monkeypatch):
+    run_cmd(rig, step="stage")
+    (rig["run"] / "ledger.jsonl").unlink()
+    with Ledger(rig["run"] / "ledger.jsonl") as led:
+        led.append("run_start", None, model="m", package=None,
+                   paths={"tt_model_root": str(rig["models"]), "cache_root": str(rig["cache"])})
+    code, text = boot_bare(rig, monkeypatch)
+    assert code == 2 and "has not finished" in text and not (rig["stage"] / "test-result.json").exists()
+
+
+def test_a_bare_boot_step_is_refused_on_an_aborted_run(rig, monkeypatch):
+    run_cmd(rig, step="stage")
+    with Ledger(rig["run"] / "ledger.jsonl") as led:
+        led.append("decision", None, decision="abort", reason="operator")
+    code, text = boot_bare(rig, monkeypatch)
+    assert code == 2 and "has not finished" in text
+
+
+def test_a_bare_boot_step_holds_the_run_while_it_boots_and_lets_go_afterwards(rig, monkeypatch):
+    run_cmd(rig, step="stage")
+    held = []
+    def spawn(command, run_dir, env, timeout, stdout):
+        try:
+            Ledger(rig["run"] / "ledger.jsonl")
+            held.append(False)
+        except LedgerLocked:
+            held.append(True)
+        return 0, False
+    code, text = boot_bare(rig, monkeypatch, spawn)
+    assert code == 0, text
+    assert held == [True]
+    with Ledger(rig["run"] / "ledger.jsonl"):                                       # released
+        pass
+    boots = [e for e in read_entries(rig["run"] / "ledger.jsonl")
+             if e["data"].get("decision") == "package command" and e["data"].get("step") == "boot"]
+    assert len(boots) == 1
+
+
+def handoff_record(rig, token=TOKEN, pid=None, **over):
+    me = proc_identity(os.getpid())
+    rec = {"token": token, "pid": pid or os.getpid(), "boot_id": me[0], "start_time": me[1], **over}
+    write(rig["stage"] / ("." + HANDOFF), rec)
+
+
+def boot_as_child(rig, monkeypatch, token=TOKEN):
+    """The boot step the `package` command's lease runs: it is given the handoff token, and the parent (this test)
+    holds the run's ledger."""
+    monkeypatch.setenv("TT_VISIBLE_DEVICES", "2,3")
+    out = io.StringIO()
+    ran = []
+    code = package_cmd.main(args(rig, step="boot", cache_root=str(rig["cache"]), handoff=token), out=out,
+                            spawn=lambda c, r, e, t, o: (ran.append(1) or (0, False)), extra_env=rig["extra_env"])
+    return code, out.getvalue(), bool(ran)
+
+
+def test_the_boot_step_of_the_lease_runs_under_its_parents_lock_with_a_valid_handoff(rig, monkeypatch):
+    run_cmd(rig, step="stage")
+    with Ledger(rig["run"] / "ledger.jsonl"):                                       # the parent holds the run
+        handoff_record(rig)
+        code, text, ran = boot_as_child(rig, monkeypatch)
+    assert code == 0 and ran, text
+
+
+@pytest.mark.parametrize("what", ["wrong token", "no record", "parent gone", "parent is not the lock holder",
+                                  "lock not held", "damaged record"])
+def test_the_boot_step_refuses_a_handoff_that_does_not_check_out(rig, monkeypatch, what):
+    run_cmd(rig, step="stage")
+    holder = Ledger(rig["run"] / "ledger.jsonl") if what != "lock not held" else None
+    try:
+        if what == "wrong token":
+            handoff_record(rig, token="f" * 32)
+        elif what == "parent gone":
+            handoff_record(rig, start_time=1)                                       # not this process's start time
+        elif what == "parent is not the lock holder":
+            me = proc_identity(os.getppid())                                        # alive, with its own identity
+            handoff_record(rig, pid=os.getppid(), boot_id=me[0], start_time=me[1])
+        elif what == "lock not held":
+            handoff_record(rig)
+        elif what == "damaged record":
+            (rig["stage"] / ("." + HANDOFF)).write_text("not json")
+        code, text, ran = boot_as_child(rig, monkeypatch)
+    finally:
+        if holder is not None:
+            holder.close()
+    assert code == 2 and not ran and "handoff" in text
+    assert not (rig["stage"] / "test-result.json").exists()
+
+
+def test_a_boot_step_with_a_handoff_is_still_refused_on_an_unfinished_run(rig, monkeypatch):
+    run_cmd(rig, step="stage")
+    (rig["run"] / "ledger.jsonl").unlink()
+    with Ledger(rig["run"] / "ledger.jsonl") as led:
+        led.append("run_start", None, model="m", package=None,
+                   paths={"tt_model_root": str(rig["models"]), "cache_root": str(rig["cache"])})
+        handoff_record(rig)
+        code, text, ran = boot_as_child(rig, monkeypatch)
+    assert code == 2 and not ran and "has not finished" in text
+
+
+def test_the_full_flow_hands_its_lock_to_the_lease_command_with_a_token_that_is_checked(rig):
+    seen = {}
+    class Spy(Runner):
+        def __call__(self, argv, env):
+            seen["argv"] = list(argv)
+            seen["record"] = json.loads((rig["stage"] / ("." + HANDOFF)).read_text())
+            return super().__call__(argv, env)
+    code, text, runner = run_cmd(rig, Spy(rig["stage"]))
+    assert code == 0, text
+    argv = seen["argv"]
+    token = argv[argv.index("--handoff") + 1]
+    assert re.fullmatch(r"[0-9a-f]{32}", token) and seen["record"]["token"] == token
+    assert seen["record"]["pid"] == os.getpid()
+    assert (seen["record"]["boot_id"], seen["record"]["start_time"]) == proc_identity(os.getpid())
+    assert not (rig["stage"] / ("." + HANDOFF)).exists()                            # taken away afterwards
+
+
+def test_the_handoff_record_is_taken_away_even_when_the_lease_command_fails(rig):
+    class Boom(Runner):
+        def __call__(self, argv, env):
+            raise RuntimeError("gozer blew up")
+    with pytest.raises(RuntimeError):
+        run_cmd(rig, Boom(rig["stage"]))
+    assert not (rig["stage"] / ("." + HANDOFF)).exists()
+
+
+def test_the_lease_command_check_allows_the_handoff_token_and_nothing_else_new(tmp_path):
+    ok = package_cmd.lease_argv(tmp_path, chips=2, deadline_s=60, python=sys.executable, cache_root=tmp_path / "c",
+                                handoff=TOKEN)
+    package_cmd.check_lease_argv(ok, run_dir=tmp_path, python=sys.executable)
+    assert ok[-2:] == ["--handoff", TOKEN]
+    for bad in (ok + ["--extra", "x"], ok[:-1] + ["not a token"], ok[:-2] + ["--handoff"]):
+        with pytest.raises(package_cmd.PackageCommandError):
+            package_cmd.check_lease_argv(bad, run_dir=tmp_path, python=sys.executable)
+
+
+def test_each_handoff_gets_a_new_unguessable_token(tmp_path):
+    (tmp_path / "stage").mkdir()
+    first = package_cmd._write_handoff(tmp_path / "stage")
+    second = package_cmd._write_handoff(tmp_path / "stage")
+    assert first != second and re.fullmatch(r"[0-9a-f]{32}", first) and re.fullmatch(r"[0-9a-f]{32}", second)
+    assert json.loads((tmp_path / "stage" / ".boot-handoff").read_text())["token"] == second
