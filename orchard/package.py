@@ -882,7 +882,9 @@ def write_card(out: Path, facts: RunFacts, profile: dict, *, namespace: str,
         verified=verify is not None and profile["required"],
         numbers=tuple(card_numbers(facts, profile, verify)), not_measured=tuple(not_measured),
         drafter_off=facts.drafter_off, host_sampling=facts.host_sampling,
-        sidecars=tuple(s["file"] for s in facts.sidecars))
+        sidecars=tuple(s["file"] for s in facts.sidecars),
+        base_files=tuple(sorted(f.name for f in facts.base_config)),
+        sampling_from_base=any(f.name == "generation_config.json" for f in facts.base_config))
     (out / "README.md").write_text(render_card(facts_card), encoding="utf-8")
 
 

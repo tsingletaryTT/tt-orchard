@@ -140,3 +140,49 @@ def test_a_public_publish_command_fails(stage7):
 def test_a_missing_package_json_fails(tmp_path):
     g = gate_package(tmp_path, tmp_path)
     assert not g.ok and g.reasons == ("package.json is missing",)
+
+
+@pytest.fixture
+def stage7_borrowed(tmp_path, monkeypatch, stub_tools):
+    """Like stage7, for a model that ships no generation_config.json: stage 2's staging copied the nearest
+    model's as a real file, so the package carries it in base_config/."""
+    models = tmp_path / "models"
+    r = make_run(tmp_path, make_source(models))
+    write(r["run"] / "stages/2/model-dir/generation_config.json", '{"eos_token_id": [248046, 248044]}')
+    fb, _ = fake_bin(tmp_path)
+    monkeypatch.setenv("PATH", f"{fb}:{os.environ['PATH']}")
+    env = dict(os.environ, FAKE_TT_MODEL_PYTHON=sys.executable, FAKE_SWAP_SERVER=str(FAKE_SERVER),
+               FAKE_SWAP_CONFIG=str(tmp_path / "server.json"))
+    stage = r["run"] / "stages/7"
+    stage.mkdir(parents=True)
+    stage_all(r["run"], stage, namespace="episod", models_root=models, env=env)
+    fake_boot_result(stage)
+    finish(r["run"], stage)
+    return {**r, "stage": stage, "pkg": stage / "package/hemmingway-1-p300"}
+
+
+def test_the_card_of_a_package_that_borrows_the_generation_config_says_so_and_passes(stage7_borrowed):
+    card = (stage7_borrowed["pkg"] / "README.md").read_text()
+    assert "ships no generation_config.json" in card
+    assert "`generation_config.json`" in card and "shipped in `base_config/`" in card
+    g = gate_package(stage7_borrowed["stage"], stage7_borrowed["run"])
+    assert g.ok, g.reasons
+
+
+def test_the_card_of_a_package_with_the_models_own_generation_config_does_not_say_so(stage7):
+    card = (stage7["pkg"] / "README.md").read_text()
+    assert "ships no generation_config.json" not in card and "`generation_config.json`" not in card
+
+
+def test_a_card_that_dropped_the_borrowed_sampling_statement_fails_the_gate(stage7_borrowed):
+    card = stage7_borrowed["pkg"] / "README.md"
+    kept = [ln for ln in card.read_text().splitlines() if "ships no generation_config.json" not in ln]
+    card.write_text("\n".join(kept) + "\n")
+    assert any("card:" in r and "generation_config.json" in r and "sampling defaults" in r
+               for r in reasons(stage7_borrowed))
+
+
+def test_a_card_that_does_not_name_a_base_config_file_fails_the_gate(stage7):
+    card = stage7["pkg"] / "README.md"
+    card.write_text(card.read_text().replace("`preprocessor_config.json`, ", ""))
+    assert any("card must name `preprocessor_config.json`" in r for r in reasons(stage7))

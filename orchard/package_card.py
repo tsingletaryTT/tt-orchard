@@ -96,10 +96,17 @@ class CardFacts:
     drafter_off: bool = False        # served without the speculative drafter (no mtp.* tensors)
     host_sampling: bool = False      # tokens are sampled on the host
     sidecars: tuple[str, ...] = ()   # sidecar files the model's repository ships and the bundle does not serve
+    base_files: tuple[str, ...] = () # files the package ships in base_config/, taken from the nearest model
+    sampling_from_base: bool = False # the model ships no generation_config.json, so the nearest model's is used
 
 
 def _value(n: Number) -> str:
     return "TODO" if n.label != "measured" else f"{json.dumps(n.value)} {n.unit}"
+
+
+def _base_files(f: CardFacts) -> str:
+    """The names of the files taken from the nearest model, each followed by ", ", or nothing."""
+    return "".join(f"`{n}`, " for n in f.base_files)
 
 
 def render_card(f: CardFacts) -> str:
@@ -126,10 +133,13 @@ def render_card(f: CardFacts) -> str:
               f"bundle {f.source_name}. {f.model_id} has the same text architecture, so only the "
               "weights differ.",
               f"- At each start the launcher builds `model-dir/` from the configuration files of "
-              f"{f.nearest_model} (shipped in `base_config/`) and the tokenizer and weights of "
+              f"{f.nearest_model} ({_base_files(f)}shipped in `base_config/`) and the tokenizer and weights of "
               f"{f.model_id}. It sets MODEL_WEIGHTS_DIR and HF_MODEL to that directory, so the chips "
               f"load the weights of {f.model_id}.",
               f"- Context length {f.max_model_len} tokens; up to {f.max_num_seqs} sequences at a time."]
+    if f.sampling_from_base:
+        lines.append(f"- {f.model_id} ships no generation_config.json, so the stop tokens and the sampling "
+                     f"defaults the server applies when a request sets none are those of {f.nearest_model}.")
     if f.drafter:
         lines.append(f"- Speculative decoding uses the drafter {f.drafter}, which was trained on "
                      f"{f.nearest_model}. Its acceptance rate on this model is listed under Not "
@@ -167,6 +177,9 @@ def render_card(f: CardFacts) -> str:
         limits.append("Speculative decoding is off, so decode speed is that of plain decoding.")
     if f.host_sampling:
         limits.append("Sampling runs on the host.")
+    if f.sampling_from_base:
+        limits.append(f"Default sampling settings are those of {f.nearest_model}, because {f.model_id} ships "
+                      "no generation_config.json. Send your own settings or use those on the model's card.")
     limits += [f"`{s}` is not served." for s in f.sidecars]
     lines += ["", "## Limitations", "", *[f"- {item}" for item in limits], "",
               "## Risks and safety considerations", "",
@@ -209,8 +222,15 @@ def _numbers_section(card: str) -> tuple[str, str]:
     return section, before + (sep + rest if sep else "")
 
 
-def card_problems(card: str, *, license_id: str, run_dir, sidecars=()) -> list[str]:
+def card_problems(card: str, *, license_id: str, run_dir, sidecars=(), base_files=()) -> list[str]:
     problems = []
+    for n in base_files:
+        if f"`{n}`" not in card:
+            problems.append(f"the card must name `{n}`, which the package takes from the nearest model")
+    if "generation_config.json" in base_files and "ships no generation_config.json" not in card:
+        problems.append("the package serves the nearest model's generation_config.json, so the card must say "
+                        "the model ships none and that the sampling defaults and stop tokens are the nearest "
+                        "model's")
     for s in sidecars:
         if s not in card or "not served" not in card.lower():
             problems.append(f"the card must name the sidecar {s} and say it is not served")
