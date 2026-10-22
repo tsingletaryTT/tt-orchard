@@ -576,7 +576,7 @@ def test_the_default_runner_runs_the_command_with_the_given_environment_and_retu
     script = tmp_path / "s.sh"
     script.write_text(f'#!/bin/sh\nprintf "%s" "$PROBE" > {marker}\nexit 7\n')
     script.chmod(0o755)
-    assert package_cmd._default_runner([str(script)], {"PROBE": "hello", "PATH": "/usr/bin:/bin"}) == 7
+    assert package_cmd._default_runner([str(script)], {"PROBE": "hello", "PATH": "/usr/bin:/bin"})[0] == 7
     assert marker.read_text() == "hello"
 
 
@@ -641,3 +641,85 @@ def test_the_boot_step_still_asks_for_the_cache_root_when_the_run_recorded_none(
     code = package_cmd.main(args(rig, step="boot"), out=out, spawn=lambda c, r, e, t, o: (0, False),
                             extra_env=rig["extra_env"])
     assert code == 2 and "--cache-root" in out.getvalue() and "--models-root" not in out.getvalue()
+
+
+# ---- review: a queued gozer request is cancelled, not abandoned ----------------------------------------
+
+class QueuedRunner(Runner):
+    """`gozer run` that queued a ticket: exit 10 and the line gozer prints (the runner returns what it printed too)."""
+
+    def __init__(self, stage, text="queued: ticket T0k3n\nwaiting for chips 2,3\n"):
+        super().__init__(stage, code=10)
+        self.text = text
+
+    def __call__(self, argv, env):
+        self.calls.append((list(argv), dict(env)))
+        return 10, self.text
+
+
+def run_cmd_cancel(rig, runner, cancel):
+    out = io.StringIO()
+    code = package_cmd.main(args(rig), out=out, runner=runner, extra_env=rig["extra_env"], hostname="testhost",
+                            cancel=cancel)
+    return code, out.getvalue()
+
+
+def test_a_queued_request_has_its_ticket_cancelled_and_the_ledger_and_the_operator_are_told(rig):
+    cancelled = []
+    code, text = run_cmd_cancel(rig, QueuedRunner(rig["stage"]), lambda t: cancelled.append(t))
+    assert code == 3 and cancelled == ["T0k3n"]
+    assert "T0k3n" in text and "cancelled" in text
+    e = [x for x in read_entries(rig["run"] / "ledger.jsonl") if x["data"].get("outcome") == "queued"][0]
+    assert e["data"]["ticket"] == "T0k3n" and e["data"]["cancel_error"] is None
+
+
+def test_a_ticket_that_cannot_be_cancelled_is_reported_with_the_reason_and_where_to_look(rig):
+    code, text = run_cmd_cancel(rig, QueuedRunner(rig["stage"]), lambda t: "gozer cancel exited 3")
+    assert code == 3 and "could not be cancelled" in text and "gozer cancel exited 3" in text and "gozer status" in text
+    e = [x for x in read_entries(rig["run"] / "ledger.jsonl") if x["data"].get("outcome") == "queued"][0]
+    assert e["data"]["cancel_error"] == "gozer cancel exited 3"
+
+
+def test_a_queued_exit_with_no_ticket_in_the_output_cancels_nothing_and_says_so(rig):
+    cancelled = []
+    code, text = run_cmd_cancel(rig, QueuedRunner(rig["stage"], text="busy\n"), lambda t: cancelled.append(t))
+    assert code == 3 and cancelled == [] and "no ticket" in text
+
+
+def test_an_exit_ten_that_is_not_a_queue_request_is_not_cancelled(rig):
+    """A runner that reports a plain int (no output) gets no ticket to cancel."""
+    cancelled = []
+    code, text = run_cmd_cancel(rig, Runner(rig["stage"], code=10), lambda t: cancelled.append(t))
+    assert code == 3 and cancelled == [] and "no ticket" in text
+
+
+def test_the_default_runner_returns_the_exit_code_and_what_the_command_printed(tmp_path, capsys):
+    script = tmp_path / "s.sh"
+    script.write_text('#!/bin/sh\necho "queued: ticket Abc9"\necho "oops" >&2\nexit 10\n')
+    script.chmod(0o755)
+    code, text = package_cmd._default_runner([str(script)], {"PATH": "/usr/bin:/bin"})
+    assert code == 10 and "queued: ticket Abc9" in text and "oops" in text
+    assert "queued: ticket Abc9" in capsys.readouterr().out          # the operator still sees it as it happens
+
+
+def test_a_runner_that_returns_a_bare_exit_code_still_works(rig):
+    code, text, _ = run_cmd(rig, Runner(rig["stage"]))
+    assert code == 0, text
+
+
+def test_without_a_cancel_hook_the_command_cancels_through_gozer_cancel(rig, monkeypatch):
+    asked = []
+    monkeypatch.setattr(package_cmd, "cancel_ticket", lambda t: asked.append(t))
+    out = io.StringIO()
+    code = package_cmd.main(args(rig), out=out, runner=QueuedRunner(rig["stage"]), extra_env=rig["extra_env"],
+                            hostname="testhost")
+    assert code == 3 and asked == ["T0k3n"]
+
+
+def test_the_default_runner_keeps_only_the_tail_of_a_long_output(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(package_cmd, "OUTPUT_KEEP", 200)
+    script = tmp_path / "s.sh"
+    script.write_text('#!/bin/sh\nfor i in $(seq 1 100); do echo "filler line $i xxxxxxxxxxxxxxxx"; done\necho "queued: ticket Late1"\n')
+    script.chmod(0o755)
+    code, text = package_cmd._default_runner([str(script)], {"PATH": "/usr/bin:/bin"})
+    assert code == 0 and len(text) <= 200 and "queued: ticket Late1" in text and "filler line 1 " not in text

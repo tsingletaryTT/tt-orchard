@@ -29,6 +29,7 @@ from pathlib import Path
 
 from orchard import package
 from orchard.agent import agent_env, spawn_checked
+from orchard.kernelprobe import _TICKET, cancel_ticket
 from orchard.ledger import Ledger, LedgerLocked, LedgerCorrupt, read_entries
 from orchard.package import (BENCHMARK_NUMBERS_FILE, PUBLISH_FILE, REPORTED_FILE, PackageError,
                              read_reported_file)
@@ -40,6 +41,7 @@ EXIT_OK, EXIT_FAILED, EXIT_REFUSED, EXIT_QUEUED = 0, 1, 2, 3
 GOZER_QUEUED = 10                      # gozer's exit code for a request that was queued
 LEASE_WHO = "claude:package"
 BOOT_SLACK_S = 600                     # the lease's timeout is the test's own deadline plus this
+OUTPUT_KEEP = 65536                    # the tail of `gozer run`'s own output the command keeps, to find a queue ticket
 SECRET = re.compile(r"TOKEN|SECRET|PASSWORD|CREDENTIAL|API_?KEY", re.I)
 BENCHMARK_COPY = "stages/7/benchmark/benchmark.json"
 TASK_LABELS = {"gsm8k": "GSM8K", "ifeval": "IFEval", "humaneval": "HumanEval", "mbpp": "MBPP",
@@ -171,8 +173,32 @@ def _with_checkout(env: dict) -> dict:
     return out
 
 
-def _default_runner(argv, env) -> int:
-    return subprocess.run(argv, env=env, stdin=subprocess.DEVNULL).returncode
+def _default_runner(argv, env) -> tuple[int, str]:
+    """Run the lease command. Returns (exit code, the tail of what it printed). The operator sees the output as it
+    comes; the command keeps the tail so a queue ticket in it can be cancelled."""
+    proc = subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True, errors="replace")
+    kept = ""
+    for line in proc.stdout:
+        print(line, end="", flush=True)
+        kept = (kept + line)[-OUTPUT_KEEP:]
+    return proc.wait(), kept
+
+
+def _queued_text(text: str, cancel) -> tuple[dict, str]:
+    """gozer queued the request (exit 10): cancel its ticket, or an abandoned ticket is granted later to a process
+    that is not there and holds the chips until it expires. Returns the ledger fields and the sentence for the
+    operator."""
+    found = _TICKET.search(text or "")
+    if found is None:
+        return ({"ticket": None, "cancel_error": "no ticket in gozer's output, so nothing was cancelled"},
+                "There was no ticket in gozer's output, so nothing was cancelled: look with `gozer status`")
+    ticket = found.group(1)
+    error = cancel(ticket)
+    if error is None:
+        return {"ticket": ticket, "cancel_error": None}, f"The ticket {ticket} was cancelled."
+    return ({"ticket": ticket, "cancel_error": error},
+            f"The ticket {ticket} could not be cancelled: {error}. Look with `gozer status`")
 
 
 # ---- steps ---------------------------------------------------------------------------------------------
@@ -280,7 +306,8 @@ def _finish(run: Path, led: Ledger, stage_dir: Path, out, *, hostname) -> int:
     return EXIT_OK
 
 
-def main(args, *, out=None, env=None, runner=None, spawn=None, extra_env=None, hostname=None) -> int:
+def main(args, *, out=None, env=None, runner=None, spawn=None, extra_env=None, hostname=None,
+         cancel=None) -> int:
     """`tt-orchard package`. Returns 0 (done and the gate is ok), 1 (a step failed or the gate is not ok),
     2 (refused before anything changed) or 3 (the boards were busy and gozer queued the request)."""
     out = out or sys.stdout
@@ -318,11 +345,13 @@ def main(args, *, out=None, env=None, runner=None, spawn=None, extra_env=None, h
                                   cache_root=cache, gozer=args.gozer, exact=args.exact)
                 check_lease_argv(argv, run_dir=run, python=args.python, gozer=args.gozer)
                 _say(out, "boot check: taking a lease on " + f"{chips} chips (this can take 20 to 30 minutes)")
-                code = runner(argv, _with_checkout(_scrubbed(env)))
+                got = runner(argv, _with_checkout(_scrubbed(env)))
+                code, printed = got if isinstance(got, tuple) else (got, "")
                 if code == GOZER_QUEUED:
-                    led.append("decision", 7, decision="package command", step="boot", outcome="queued")
+                    fields, sentence = _queued_text(printed, cancel or cancel_ticket)
+                    led.append("decision", 7, decision="package command", step="boot", outcome="queued", **fields)
                     _say(out, "gozer queued the lease request: the boards are busy. Nothing was finished. "
-                              "When they are free, run the same command again with --restage")
+                              + sentence + " When they are free, run the same command again with --restage")
                     return EXIT_QUEUED
                 if not (stage_dir / "test-result.json").is_file():
                     _say(out, f"the boot check did not run to a result (gozer exited {code}). Nothing was "
