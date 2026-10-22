@@ -947,3 +947,85 @@ def test_a_view_with_no_estimate_or_a_disagreeing_one_is_recorded_without_changi
     write_view(stage, [{**VIEW_ROW, "class_estimate": None}])
     run_triage(stage)
     assert delta(stage)["base_research"]["estimated_class"] is None
+
+
+# ---- the generation config: stop tokens and sampling defaults the served directory will use -----------------
+# BAAI/AREX-2 ships no generation_config.json. Staging copies the nearest model's, so the server stops on the
+# nearest model's eos_token_id and applies its sampling defaults; with neither file the server stops after
+# loading the weights. Stage 0 says so before any hardware is used.
+
+def drop_model_file(stage: Path, name: str) -> None:
+    cfg = json.loads((stage / "triage_config.json").read_text())
+    (Path(cfg["model_snapshot"]) / name).unlink()
+
+
+def drop_base_file(stage: Path, name: str) -> None:
+    cfg = json.loads((stage / "triage_config.json").read_text())
+    (Path(cfg["nearest_snapshot"]) / name).unlink()
+
+
+def gen_hazards(stage: Path) -> list[dict]:
+    return [h for h in delta(stage)["hazards"] if h["area"] == "generation_config"]
+
+
+def test_a_model_with_no_generation_config_gets_a_hazard_that_names_the_borrowed_settings(text_case):
+    stage = text_case()
+    drop_model_file(stage, "generation_config.json")
+    assert run_triage(stage).returncode == 0
+    [h] = gen_hazards(stage)
+    assert "ships no generation_config.json" in h["finding"]
+    assert "[2, 0]" in h["finding"]                                  # the nearest model's stop tokens
+    assert "temperature 1.0" in h["finding"] and "top_k 20" in h["finding"] and "top_p 0.95" in h["finding"]
+    assert h["evidence"] == ["stages/0/evidence/genconfig-license.json"]
+    assert delta(stage)["path"] == "weights-only"                    # a flag, not a reason to stop
+
+
+def test_the_evidence_records_each_models_stop_tokens(text_case):
+    stage = text_case(genconfig_change={"eos_token_id": 7})
+    assert run_triage(stage).returncode == 0
+    g = evidence(stage, "genconfig-license.json")
+    assert g["model_eos_token_ids"] == [7] and g["base_eos_token_ids"] == [2, 0]
+
+
+def test_a_model_with_its_own_generation_config_and_stop_tokens_gets_no_hazard(text_case):
+    stage = text_case()
+    assert run_triage(stage).returncode == 0
+    assert gen_hazards(stage) == []
+
+
+def test_a_generation_config_without_eos_token_id_gets_a_hazard(text_case):
+    stage = text_case()
+    path = json.loads((stage / "triage_config.json").read_text())["model_snapshot"]
+    gen = json.loads((Path(path) / "generation_config.json").read_text())
+    del gen["eos_token_id"]
+    (Path(path) / "generation_config.json").write_text(json.dumps(gen))
+    assert run_triage(stage).returncode == 0
+    [h] = gen_hazards(stage)
+    assert "has no eos_token_id" in h["finding"] and "stops after loading the weights" in h["finding"]
+    assert evidence(stage, "genconfig-license.json")["model_eos_token_ids"] == []
+
+
+def test_a_generation_config_that_is_not_json_counts_as_having_no_stop_tokens(text_case):
+    stage = text_case()
+    path = json.loads((stage / "triage_config.json").read_text())["model_snapshot"]
+    (Path(path) / "generation_config.json").write_text("{not json")
+    assert run_triage(stage).returncode == 0
+    [h] = gen_hazards(stage)
+    assert "has no eos_token_id" in h["finding"]
+
+
+def test_neither_model_shipping_one_says_the_server_has_no_stop_token(text_case):
+    stage = text_case()
+    drop_model_file(stage, "generation_config.json")
+    drop_base_file(stage, "generation_config.json")
+    assert run_triage(stage).returncode == 0
+    [h] = gen_hazards(stage)
+    assert "Neither model ships a generation_config.json" in h["finding"]
+    assert "stops after loading the weights" in h["finding"]
+
+
+@pytest.mark.parametrize("value, ids", [(7, [7]), ([3, 4], [3, 4]), ("x", []), ([1, "x"], []), ([True, 3], []), (True, []), (None, [])])
+def test_stop_tokens_are_read_only_when_they_are_integers(text_case, value, ids):
+    stage = text_case(genconfig_change={"eos_token_id": value})
+    assert run_triage(stage).returncode == 0
+    assert evidence(stage, "genconfig-license.json")["model_eos_token_ids"] == ids
