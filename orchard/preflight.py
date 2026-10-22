@@ -268,6 +268,34 @@ def _port_note(report) -> str:
     return " Existing work: " + "; ".join(f"{p['claim']} ({p['url']})" for p in found[:2]) + "."
 
 
+LISTED_CODE_ROWS = 3
+LISTED_BUNDLES = 8
+_BLACKHOLE_NAMED = re.compile(r"\b(?:p100a?|p150[abc]?|p300[abc]?|blackhole)\b", re.I)
+
+
+def _code_note(report, base: str) -> str:
+    """Code for the base in tt-metal or tt-transformers, when no bundle serves it. Code is not a bundle: stages 2 and
+    4 swap weights into an installed v6 thin bundle, so the operator has to get one first. The hardware sentence
+    comes from the facts research put in the claims (orchard/research/ports.py); with none, it says nothing."""
+    from orchard.research.types import LACKS_BLACKHOLE
+    code = [p for p in (report or {}).get("ports") or []
+            if p.get("source") in ("tt-metal", "tt-transformers") and p.get("confidence") == "inferred"]
+    if not code:
+        return ""
+    claims = "; ".join(f"{p['claim']} ({p['url']})" for p in code[:LISTED_CODE_ROWS])
+    text = (f" Code for it exists, but code is not a bundle: {claims}. A bundle that serves {base} has to be built "
+            "or installed outside tt-orchard first.")
+    # "no Blackhole board named" holds the word too, so a row that says it must not count as naming one
+    names = any(_BLACKHOLE_NAMED.search(p["claim"].replace(LACKS_BLACKHOLE, "")) for p in code)
+    lacks = any(LACKS_BLACKHOLE in p["claim"] for p in code)
+    if names:
+        return text + " The code names a Blackhole board."
+    if lacks:
+        return text + (" It names no Blackhole board, and this box has Blackhole boards, so check that it runs here "
+                       "before building a bundle.")
+    return text
+
+
 def _selection_basis(report) -> str:
     """How the research chose the base when the card names none: its confidence and the candidate row's reason."""
     sel = report["selected"]
@@ -354,11 +382,15 @@ def check_base(*, model_id: str, hub: HubInfo | None, base_override: str | None,
         if found is None:
             listing = f"the search for '{family}' bundles could not be made"
         elif ordered:
-            listing = f"`tt model search {family}` found: " + ", ".join(c["name"] for c in ordered)
+            shown = ", ".join(c["name"] for c in ordered[:LISTED_BUNDLES])
+            more = f" (and {len(ordered) - LISTED_BUNDLES} more)" if len(ordered) > LISTED_BUNDLES else ""
+            listing = f"`tt model search {family}` found: {shown}{more}"
         else:
             listing = f"`tt model search {family}` found no bundle"
+    code = _code_note(report, base)
     return Check("base", BLOCK, f"no installed bundle serves {base}, the model this one is based on, so stages "
-                 f"0, 2 and 4 have nothing to compare it with or serve it through. {listing}.{_port_note(report)} "
+                 f"0, 2 and 4 have nothing to compare it with or serve it through.{code} {listing}."
+                 f"{'' if code else _port_note(report)} "
                  "Pick one with --base <bundle>, or install a bundle yourself and run bringup again",
                  "nearest-model-missing", data={"base": base, "snapshot": None, "bundle": None,
                                                 "needs_fetch": False, "candidates": ordered, "report": report})
@@ -455,7 +487,11 @@ def cache_root_for(cfg) -> Path:
 
 def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Signals | None = None,
                   resuming: bool = False, base_override: str | None = None,
-                  accept_inferred_base: bool = False) -> list[Check]:
+                  accept_inferred_base: bool = False, progress: Callable[[str], None] | None = None) -> list[Check]:
+    """`progress(text)` is told what is about to run (the hub lookup, the research, the machine checks), so a
+    terminal is not silent while the research reads weight headers for a minute or two."""
+    from orchard.research.types import reporter
+    say = reporter(progress)
     s = signals or default_signals(cfg)
     out: list[Check] = []
 
@@ -465,6 +501,7 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
         except Exception as exc:                      # a failing signal is a result, not a crash
             out.append(Check(name, BLOCK, f"could not check: {type(exc).__name__}: {exc}", reason))
 
+    say(f"asking the hub about {model_id}")
     try:
         hub, err = s.hub_info(model_id)
     except Exception as exc:
@@ -479,6 +516,7 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
         inst = list(s.installed_bundles()) if s.installed_bundles else []
         report, failed = None, None
         if s.research is not None:
+            say("researching the base model: lineage, bundles, weight headers and existing ports")
             try:
                 report = s.research(model_id, hub, base_override, inst)
             except Exception as exc:                  # a failed research call leaves the earlier checks in force
@@ -503,6 +541,8 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
             base_gb = base_hub.total_bytes / 1e9 if base_hub else 0.0
         except Exception:
             base_gb = 0.0
+
+    say("checking this machine: disk, tiers, ports and chips")
 
     def disk() -> Check:
         paths = {"hf_home": hf_home_for(cfg), "cache_root": cache_root_for(cfg)}
@@ -645,7 +685,8 @@ def default_signals(cfg, research_options=None) -> Signals:
                           refresh=research_options.refresh)
         research = lambda model_id, hub, override, inst: research_report.build(     # noqa: E731
             model_id=model_id, hub=hub, base_override=override, installed=inst, search=nearest.search,
-            hub_info=hub_info, fetch=fetcher, no_github=research_options.no_github)
+            hub_info=hub_info, fetch=fetcher, no_github=research_options.no_github,
+            progress=getattr(research_options, "progress", None))
     def sfpi_versions(bundle: str):
         from orchard import sfpi as sfpi_check
         return sfpi_check.installed_version(), sfpi_check.pinned_version(models_root(), bundle)

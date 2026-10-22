@@ -13,6 +13,8 @@ from orchard.scrub import scrub_text
 STATED, INFERRED, WEAK = "stated", "inferred", "weak"
 CONFIDENCE_RANK = {STATED: 0, INFERRED: 1, WEAK: 2}
 MAX_CLAIM = 300
+# Written into a tt-metal demo's claim by ports.demo_facts and read back by preflight._code_note.
+LACKS_BLACKHOLE = "no Blackhole board named"
 
 # C0 and C1 controls, and the bidirectional overrides and isolates that can reorder displayed text.
 _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]")
@@ -60,6 +62,19 @@ def clean(text, limit: int = MAX_CLAIM) -> str:
     # Scrub the whole line before cutting it, so a token that straddles the limit cannot leave a prefix behind.
     hits = scrub_text(one, hostname=socket.gethostname(), home=str(Path.home()))
     return f"[removed: {', '.join(hits)}]" if hits else one[:limit]
+
+
+def reporter(callback):
+    """A function that sends one progress line to `callback`: the text is cleaned like every research line, and an
+    error in the callback (a closed terminal) never reaches the caller. With no callback it does nothing."""
+    def say(text) -> None:
+        if callback is None:
+            return
+        try:
+            callback(clean(text))
+        except Exception:
+            pass
+    return say
 
 
 def valid_id(value) -> bool:

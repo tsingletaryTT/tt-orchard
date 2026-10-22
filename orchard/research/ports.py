@@ -3,7 +3,7 @@
 """Has anyone already ported this architecture?
 
 Sources: the tt-model community catalog (`tt model search --catalog`), tt-metal's `models/` listings and
-models README, GitHub issues and pull requests for the architecture name, GitHub code search through `gh`
+models README, tt-transformers (tt-metal's `models/tt_transformers` and the standalone repo), GitHub issues and pull requests for the architecture name, GitHub code search through `gh`
 (code search needs a login; the other calls do not), and the code a published bundle ships under
 `code/models/`. A search term comes from the new model's own config, so it is checked against SAFE_TERM
 before it reaches a URL or a command line."""
@@ -17,7 +17,7 @@ from urllib.parse import quote
 
 from orchard import nearest
 from orchard.research.http import FetchError
-from orchard.research.types import INFERRED, WEAK, Evidence, Result, Unavailable, clean, valid_id
+from orchard.research.types import INFERRED, LACKS_BLACKHOLE, WEAK, Evidence, Result, Unavailable, clean, valid_id
 
 SAFE_TERM = re.compile(r"[A-Za-z0-9_.-]{3,80}")
 METAL = "tenstorrent/tt-metal"
@@ -25,10 +25,24 @@ CONTENTS = "https://api.github.com/repos/" + METAL + "/contents/models/{sub}"
 README_URL = "https://raw.githubusercontent.com/" + METAL + "/main/models/README.md"
 ISSUES_URL = "https://api.github.com/search/issues?q={q}&per_page={n}"
 GITHUB_PREFIX = "https://github.com/"
+TT_PARAMS_URL = CONTENTS.format(sub="tt_transformers/model_params")
+TT_README_URL = "https://raw.githubusercontent.com/" + METAL + "/main/models/tt_transformers/README.md"
+TT_README_PAGE = GITHUB_PREFIX + METAL + "/tree/main/models/tt_transformers"
+STANDALONE = "tenstorrent/tt-transformers"
+STANDALONE_URL = "https://api.github.com/repos/" + STANDALONE + "/contents/src/tt_transformers/models"
+# | [Llama 3.1 8B](link) | n150 / p100 / p150 | ```meta-llama/Llama-3.1-8B``` |
+TT_README_ROW = re.compile(r"^\|\s*\[([^\]]+)\]\([^)]*\)\s*\|([^|]*)\|\s*`{3}([^`\s]+)`{3}\s*\|")
+DIR_NAME = re.compile(r"[A-Za-z0-9_.-]{1,100}")
 README_ROW = re.compile(r"^\|\s*\[([^\]]+)\]\((https://[^)\s]+)\)")
 NOT_A_MODEL = frozenset({"common", "utils", "perf"})      # shared code in a bundle that is not a model port
 GH_TIMEOUT_S = 30
 MAX_ITEMS = 5
+MAX_DEMO_FACTS = 2                                        # demos whose files are read: two requests each
+DEMO_CLAIM = re.compile(r"tt-metal has models/(demos|experimental)/([A-Za-z0-9_.-]+)")
+# Board names in a README. This box has Blackhole boards; Wormhole is what most older demos name.
+BLACKHOLE = re.compile(r"\b(?:p100a?|p150[abc]?|p300[abc]?|blackhole)\b", re.I)
+WORMHOLE = re.compile(r"\b(?:n150|n300|t3k|tg|galaxy|loudbox)\b", re.I)
+RAW_README = "https://raw.githubusercontent.com/" + METAL + "/main/models/{sub}/{name}/README.md"
 
 
 def terms(config) -> dict:
@@ -102,6 +116,118 @@ def metal(fetch, t: dict) -> Result:
         res.evidence.append(Evidence("tt-metal", clean(f"tt-metal's models README lists {name}"),
                                      by_name[name] if by_name[name].startswith(GITHUB_PREFIX) else README_URL,
                                      conf, fetch.now()))
+    return res
+
+
+def _board_names(pattern, text: str) -> list[str]:
+    out: list[str] = []
+    for m in pattern.finditer(text):
+        name = m.group(0).upper()
+        if name not in out:
+            out.append(name)
+    return out
+
+
+def demo_facts(fetch, found: Result, *, limit: int = MAX_DEMO_FACTS) -> Result:
+    """A tt-metal demo directory is code, not a bundle. For the first `limit` demos that matched by name, read two
+    facts and put them in the row's claim: whether `tt/` has a vLLM generator (`generator_vllm.py`), and which
+    boards its README names. Only board names reach the claim, never other README text. The rows keep their
+    order; a row whose files cannot be read stays as it was, with an unavailable row."""
+    res = Result(unavailable=list(found.unavailable))
+    left = limit
+    for ev in found.evidence:
+        m = DEMO_CLAIM.fullmatch(ev.claim) if ev.source == "tt-metal" and ev.confidence == INFERRED else None
+        if not m or left <= 0:
+            res.evidence.append(ev)
+            continue
+        left -= 1
+        sub, name = m.groups()
+        facts = []
+        try:
+            tt = fetch.json(CONTENTS.format(sub=f"{sub}/{name}/tt"))
+            if not isinstance(tt, list):
+                raise FetchError("the answer is not a listing")
+            has = any(isinstance(i, dict) and i.get("name") == "generator_vllm.py" for i in tt)
+            facts.append("vLLM generator present" if has else "no vLLM generator file")
+        except FetchError as exc:
+            res.unavailable.append(Unavailable("tt-metal", f"models/{sub}/{name}/tt: {exc.reason}"))
+        try:
+            text = fetch.get(RAW_README.format(sub=sub, name=name), max_bytes=2 * 1024 * 1024).decode("utf-8", "replace")
+            bh, wh = _board_names(BLACKHOLE, text), _board_names(WORMHOLE, text)
+            if bh:
+                facts.append(f"README names Blackhole boards ({', '.join(bh)})")
+            elif wh:
+                facts.append(f"{LACKS_BLACKHOLE} in its README, which names {', '.join(wh)}")
+            else:
+                facts.append("README names no boards")
+        except FetchError as exc:
+            res.unavailable.append(Unavailable("tt-metal", f"models/{sub}/{name}/README.md: {exc.reason}"))
+        res.evidence.append(ev if not facts else Evidence(ev.source, clean(f"{ev.claim} ({'; '.join(facts)})"),
+                                                          ev.url, ev.confidence, ev.fetched_at))
+    return res
+
+
+def _model_key(model_id: str) -> str:
+    """A model's name for comparing: the part after the org, lower case, letters and digits only, without a
+    trailing "instruct" (tt-transformers lists Llama-3.1-8B where the fine-tune's base is Llama-3.1-8B-Instruct)."""
+    key = re.sub(r"[^a-z0-9]", "", str(model_id).rsplit("/", 1)[-1].lower())
+    return key[:-len("instruct")] if key.endswith("instruct") and key != "instruct" else key
+
+
+def _listing(fetch, url: str, what: str, res: Result):
+    """A GitHub contents listing as {name: item}; a failure or another shape is an unavailable row."""
+    try:
+        items = fetch.json(url)
+    except FetchError as exc:
+        res.unavailable.append(Unavailable("tt-transformers", f"{what}: {exc.reason}"))
+        return None
+    if not isinstance(items, list):
+        res.unavailable.append(Unavailable("tt-transformers", f"{what}: the answer is not a listing"))
+        return None
+    return {i["name"]: i for i in items
+            if isinstance(i, dict) and isinstance(i.get("name"), str) and DIR_NAME.fullmatch(i["name"])}
+
+
+def _link(item, fallback: str) -> str:
+    link = item.get("html_url") if isinstance(item, dict) else None
+    return link if isinstance(link, str) and link.startswith(GITHUB_PREFIX) else fallback
+
+
+def tt_transformers(fetch, t: dict, ids) -> Result:
+    """Is the base (or the model itself) already a tt-transformers model? Three reads. (1) tt-metal's
+    `models/tt_transformers/model_params`, whose directories are named by Hugging Face model name: a directory named
+    like one of `ids` is an exact match. (2) That directory's README table, which gives the boards each model
+    runs on. (3) The standalone repo's `src/tt_transformers/models`, matched by the architecture terms the way
+    the tt-metal demos are, because its names are code names (qwen25_7b)."""
+    res = Result()
+    keys = {_model_key(i) for i in ids if valid_id(i)}
+    listing = _listing(fetch, TT_PARAMS_URL, "models/tt_transformers/model_params", res)
+    for name, item in (listing or {}).items():
+        if _model_key(name) in keys:
+            res.evidence.append(Evidence(
+                "tt-transformers", clean(f"tt-metal's models/tt_transformers/model_params has a config for {name}"),
+                _link(item, TT_README_PAGE), INFERRED, fetch.now()))
+    try:
+        text = fetch.get(TT_README_URL, max_bytes=2 * 1024 * 1024).decode("utf-8", "replace")
+    except FetchError as exc:
+        res.unavailable.append(Unavailable("tt-transformers", f"models/tt_transformers/README.md: {exc.reason}"))
+        text = ""
+    for line in text.splitlines():
+        m = TT_README_ROW.match(line)
+        if m and _model_key(m.group(3)) in keys:
+            boards = ' '.join(m.group(2).split())
+            # the same phrase the demo claims use, so preflight warns about a row whose boards are all Wormhole
+            lacks = (f"; {LACKS_BLACKHOLE} in that row"
+                     if _board_names(WORMHOLE, boards) and not _board_names(BLACKHOLE, boards) else "")
+            res.evidence.append(Evidence(
+                "tt-transformers",
+                clean(f"tt-metal's tt_transformers README lists {m.group(1).strip()} on {boards}{lacks}"),
+                TT_README_PAGE, INFERRED, fetch.now()))
+    standalone = _listing(fetch, STANDALONE_URL, "tenstorrent/tt-transformers src/tt_transformers/models", res)
+    for name, conf in match_names(list(standalone or {}), t):
+        res.evidence.append(Evidence(
+            "tt-transformers", clean(f"the tt-transformers repo has src/tt_transformers/models/{name}"),
+            _link(standalone[name], GITHUB_PREFIX + STANDALONE), conf, fetch.now()))
     return res
 
 
@@ -215,10 +341,15 @@ def bundle_code(siblings, bundle: str, now: str) -> list[Evidence]:
                      INFERRED, now) for model in seen]
 
 
-def collect(fetch, config, *, family: str, run=subprocess.run, which=shutil.which, no_github: bool = False) -> Result:
+def collect(fetch, config, *, family: str, run=subprocess.run, which=shutil.which, no_github: bool = False,
+            ids=()) -> Result:
+    """`ids`: the model ids to look for by exact name (the stated bases and the model itself). tt-transformers
+    runs first, so an exact match leads the list; it uses GitHub's contents API like tt-metal does, so
+    `no_github` (issues and code search) does not turn it off."""
     t = terms(config)
     res = Result()
-    res.extend(metal(fetch, t))
+    res.extend(tt_transformers(fetch, t, ids))
+    res.extend(demo_facts(fetch, metal(fetch, t)))
     cat = catalog(family, run=run, which=which, now=fetch.now())
     res.extend(cat)
     res.data["catalog"] = cat.data["bundles"]
