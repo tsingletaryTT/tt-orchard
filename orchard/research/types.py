@@ -13,6 +13,8 @@ from orchard.scrub import scrub_text
 STATED, INFERRED, WEAK = "stated", "inferred", "weak"
 CONFIDENCE_RANK = {STATED: 0, INFERRED: 1, WEAK: 2}
 MAX_CLAIM = 300
+# Written into a tt-metal demo's claim by ports.demo_facts and read back by preflight._code_note.
+LACKS_BLACKHOLE = "no Blackhole board named"
 
 # C0 and C1 controls, and the bidirectional overrides and isolates that can reorder displayed text.
 _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]")
