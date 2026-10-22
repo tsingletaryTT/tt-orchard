@@ -830,3 +830,96 @@ def test_equal_counts_keep_file_order_and_a_non_numeric_count_counts_as_zero(tmp
     sec = section(results_text(tmp_path, dict(INVENTORY, ops=ops)), "## Ops and kernels")
     order = [sec.index(f"aten.{n}") for n in ("big", "zeta", "alpha", "text", "zero")]
     assert order == sorted(order)
+
+
+# ---- the served model directory: where each file came from ---------------------------------------------
+
+SOURCES = {
+    "schema": 1, "base_model": "Qwen/Qwen3.8-27B", "base_revision": "a" * 40, "model_revision": "b" * 40,
+    "files": [{"name": "config.json", "source": "base", "how": "copy"},
+              {"name": "generation_config.json", "source": "base", "how": "copy", "reason": "new_snapshot has none"},
+              {"name": "tokenizer.json", "source": "model", "how": "link"}],
+    "weights": {"source": "model", "how": "link", "count": 12},
+    "absent": ["chat_template.jinja"], "sampling_defaults_from": "base",
+}
+
+
+def sources_text(tmp_path, record=None, **kw) -> str:
+    run = make_run(tmp_path, **kw)
+    if record is not None:
+        write_json(run / "stages" / "2" / "model-dir-sources.json", record)
+    assert build(run).returncode == 0
+    return (bundle_of(run) / "RESULTS.md").read_text()
+
+
+def test_the_served_directory_section_says_where_each_file_came_from(tmp_path):
+    sec = section(sources_text(tmp_path, SOURCES), "## The served model directory")
+    assert "`config.json`" in sec and "`tokenizer.json`" in sec
+    rows = {ln.split("|")[1].strip(): ln for ln in sec.splitlines() if ln.startswith("| `")}
+    assert "base" in rows["`config.json`"] and "copied" in rows["`config.json`"]
+    assert "model" in rows["`tokenizer.json`"] and "linked" in rows["`tokenizer.json`"]
+    assert "new_snapshot has none" in rows["`generation_config.json`"]
+    assert "12 safetensors files" in sec
+    assert "`chat_template.jinja`" in sec and "absent" in sec.lower()
+    assert "a" * 40 in sec and "b" * 40 in sec
+
+
+@pytest.mark.parametrize("origin, says", [
+    ("base", "the sampling defaults and stop tokens the server uses are the nearest model's (Qwen/Qwen3.8-27B)"),
+    ("model", "the sampling defaults and stop tokens the server uses are the model's own"),
+    ("none", "there is no generation_config.json, so the server has no sampling defaults or stop tokens from one")])
+def test_the_section_says_whose_sampling_defaults_are_served(tmp_path, origin, says):
+    sec = section(sources_text(tmp_path, dict(SOURCES, sampling_defaults_from=origin)),
+                  "## The served model directory")
+    assert says in sec
+
+
+def test_a_run_with_no_record_gets_no_section_and_the_golden_text(tmp_path):
+    text = sources_text(tmp_path)
+    assert "The served model directory" not in text
+    assert text == GOLDEN.read_text()
+
+
+@pytest.mark.parametrize("record", [
+    {"files": 5, "weights": [], "absent": "x", "sampling_defaults_from": 7},
+    {"files": [1, None, {"name": ["l"]}], "weights": {"count": "many"}, "absent": [3]},
+    {"sampling_defaults_from": "elsewhere"},
+])
+def test_a_malformed_record_cannot_break_the_build(tmp_path, record):
+    text = sources_text(tmp_path, record)
+    assert "Traceback" not in text and "## Stage 8" in text
+
+
+def test_a_record_that_is_not_json_is_left_out(tmp_path):
+    run = make_run(tmp_path)
+    write(run / "stages" / "2" / "model-dir-sources.json", "{not json")
+    assert build(run).returncode == 0
+    assert "The served model directory" not in (bundle_of(run) / "RESULTS.md").read_text()
+
+
+def test_text_copied_from_the_record_is_redacted(tmp_path):
+    rec = json.loads(json.dumps(SOURCES))
+    rec["files"][1]["reason"] = "copied from /home/someone/snapshot"
+    rec["absent"] = ["/home/someone/odd.json"]
+    rec["base_model"] = "/home/someone/Qwen"
+    text = sources_text(tmp_path, rec)
+    assert "The served model directory" in text and "/home/someone" not in text
+
+
+def test_the_section_comes_after_the_run_counts_and_before_stage_0(tmp_path):
+    text = sources_text(tmp_path, SOURCES)
+    assert text.index("## The run") < text.index("## The served model directory") < text.index("## Stage 0")
+
+
+def test_the_section_comes_after_the_ops_section_when_there_is_one(tmp_path):
+    run = make_run(tmp_path)
+    write_json(run / "stages" / "0" / "ops-inventory.json", INVENTORY)
+    write_json(run / "stages" / "2" / "model-dir-sources.json", SOURCES)
+    assert build(run).returncode == 0
+    text = (bundle_of(run) / "RESULTS.md").read_text()
+    assert text.index("## Ops and kernels") < text.index("## The served model directory") < text.index("## Stage 0")
+
+
+def test_a_weights_count_that_is_not_a_number_gives_no_weights_row(tmp_path):
+    text = sources_text(tmp_path, dict(SOURCES, weights={"source": "model", "how": "link", "count": "many"}))
+    assert "The served model directory" in text and "safetensors files" not in text
