@@ -1767,3 +1767,8 @@ Prompt (operator): "start with the file-source record and go from there"; issue 
 - Review fixes (Copilot, PR 37): a reported section on the card of a run with no `reported-results.json` is refused, and its text counts for the number check. The gate passes the file's `source` to `card_problems`, which compares the section with the lines `render_card` writes (`reported_lines`): the source sentence, every row with its note, and no other line. Re-wrapped or re-spaced text still passes. Mutations: 4 and 12, with 2 survivors that got tests.
 - Tests first. Mutations: 26, all red, no survivors on the first run.
 - Not done: reading the scores from a card automatically, and showing them in the stage 8 bundle's RESULTS.md.
+
+## 2026-10-22 (UTC): the re-run item list failed on AREX-2's GSM8K samples (branch `rerun-line-split`, version 0.8.21)
+The chain that lists cut-off items for AREX-2 stopped with `JSONDecodeError: Unterminated string`. `bench_rerun.read_samples` split the samples file with `str.splitlines()`, which also cuts at U+2028, U+2029 and U+0085. lm-eval writes samples with `ensure_ascii` off, so those characters stay raw inside a JSON string, and GSM8K's text holds four U+2028 characters (2,642 pieces for 2,638 records, in both models' files). The bytkim sets had none, so the earlier re-run never hit it.
+- Both loaders now split on `\n` only (`bench_rerun.read_samples`, `toolcall_bench._rows`). Tests first: the three raw separators and the tool-call loader were red; the control characters were already safe because JSON escapes them. 2 mutations, both red.
+- Found by running the list step by hand on the real files. The merge step reads samples through the same function, so it would have failed the same way.
