@@ -18,7 +18,7 @@ from pathlib import Path
 from orchard import nearest
 from orchard.research import arch_match, headers, lineage, ports
 from orchard.research.http import FetchError
-from orchard.research.types import (CONFIDENCE_RANK, INFERRED, STATED, WEAK, Result, Unavailable, clean,
+from orchard.research.types import (CONFIDENCE_RANK, INFERRED, STATED, WEAK, Result, Unavailable, clean, reporter,
                                     valid_id)
 
 MANIFEST_URL = "https://huggingface.co/{name}/resolve/main/tt_kernel_manifest.json"
@@ -132,12 +132,20 @@ def _group(bundles: list[dict]) -> int:
     return 2 if bundles else 3
 
 
+def _shards(files) -> str:
+    n = len([f for f in files or [] if str(f).endswith(".safetensors")])
+    return f"{n} shard" + ("" if n == 1 else "s")
+
+
 def build(*, model_id, hub, base_override, installed, search, hub_info, fetch, run=subprocess.run,
-          which=shutil.which, no_github: bool = False) -> dict:
+          which=shutil.which, no_github: bool = False, progress=None) -> dict:
+    """`progress(text)` is called before each slow read, so a terminal is not silent for a minute."""
     now = fetch.now()
     if getattr(fetch, "offline", False):
         return _empty(model_id, now, True, "--offline")
+    say = reporter(progress)
     res = Result()
+    say(f"reading the lineage of {model_id} on the hub")
     lin = _guard(res, "lineage", lambda: lineage.chain(fetch, model_id), lambda: Result(data={"ancestors": [], "edges": []}))
     res.extend(lin)
     stated = _unique([base_override] + list(hub.base_models if hub else []) + lin.data["ancestors"])
@@ -158,6 +166,8 @@ def build(*, model_id, hub, base_override, installed, search, hub_info, fetch, r
     direct = {base_override, *(hub.base_models if hub else []),
               *(e["parent"] for e in lin.data["edges"] if e["child"] == model_id)}
     parent_of = {e["parent"]: e["child"] for e in reversed(lin.data["edges"])}
+    if family:
+        say(f"listing the published bundles for {family}")
     rows = _guard(res, "bundles", lambda: _bundles(installed, search, family, fetch, res), dict) if family else {}
     by_repo: dict[str, list[dict]] = {}
     for row in rows.values():
@@ -217,11 +227,13 @@ def build(*, model_id, hub, base_override, installed, search, hub_info, fetch, r
             continue
         cand["download_gb"] = round(info.total_bytes / 1e9, 1)
         if new_model is None:
+            say(f"reading the weight headers of {model_id} ({_shards(hub.files if hub is not None else [])})")
             new_model = (_guard(res, "headers", lambda: headers.read_model(fetch, model_id, list(hub.files)),
                                 lambda: Result(data={"tensors": {}, "errors": []})) if hub is not None
                          else Result(unavailable=[Unavailable("headers", f"{model_id}: the hub did not answer")]))
             res.extend(Result(unavailable=new_model.unavailable))
             _note_header_errors(res, model_id, new_model)
+        say(f"reading the weight headers of {cand['repo']} ({_shards(info.files)})")
         other = _guard(res, "headers", lambda: headers.read_model(fetch, cand["repo"], list(info.files)),
                        lambda: Result(data={"tensors": {}, "errors": []}))
         res.extend(Result(unavailable=other.unavailable))
@@ -242,6 +254,8 @@ def build(*, model_id, hub, base_override, installed, search, hub_info, fetch, r
             selected = {"repo": c["repo"], "bundle": b["name"], "confidence": c["confidence"],
                         "class": (c["class_estimate"] or {}).get("class")}
             break
+    if family:
+        say("looking for existing ports: tt-metal, tt-transformers and the catalog")
     port_res = _guard(res, "ports", lambda: ports.collect(fetch, new_cfg, family=family or "", run=run, which=which,
                                                           no_github=no_github, ids=_unique(stated + [model_id])), Result) if family else Result()
     res.extend(port_res)

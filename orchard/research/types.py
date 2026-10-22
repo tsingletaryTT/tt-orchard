@@ -64,6 +64,19 @@ def clean(text, limit: int = MAX_CLAIM) -> str:
     return f"[removed: {', '.join(hits)}]" if hits else one[:limit]
 
 
+def reporter(callback):
+    """A function that sends one progress line to `callback`: the text is cleaned like every research line, and an
+    error in the callback (a closed terminal) never reaches the caller. With no callback it does nothing."""
+    def say(text) -> None:
+        if callback is None:
+            return
+        try:
+            callback(clean(text))
+        except Exception:
+            pass
+    return say
+
+
 def valid_id(value) -> bool:
     """A Hugging Face `org/name`. Ids from a card, a search or a listing are checked before they enter a URL."""
     return isinstance(value, str) and _ID.fullmatch(value) is not None
