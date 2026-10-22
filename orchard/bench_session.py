@@ -17,8 +17,12 @@ session runs the sandbox's self-check and refuses a code phase when it fails; `-
 summary says so. `bfcl` runs the tool-call scorer in this process. Every phase goes through a recording proxy, which adds `chat_template_kwargs` when thinking is set and
 records tokens, finish reasons and latency per request.
 
-The summary records what two runs must share to be compared: the settings, the harness version, the task versions and sample counts, the
-bundle's run.sh hash, and the served model name. A comparison across sessions is the reader's to make from those fields.
+The summary records what two runs must share to be compared: the settings (including `stop`, the stop-string override), the harness version, the task
+versions and sample counts, the bundle's run.sh hash, and the served model name. A comparison across sessions is the reader's to make from those fields.
+
+It also counts `stop_truncated_suspects`: replies that stopped with reasoning text and no answer. lm-eval's gsm8k task sends "Question:" as a stop
+string, vLLM matches it inside the reasoning, and a thinking model that restates the question while thinking is cut off there; the score then measures
+how often the model avoids the phrase. `--stop` replaces the task's stop strings with one string.
 """
 from __future__ import annotations
 
@@ -53,11 +57,24 @@ TOKEN_VARS = ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACE_HUB_TOKEN")
 
 # ---- the lm-evaluation-harness child ------------------------------------------------------------------------------------------------
 
+def validate_stop(stop: str) -> str:
+    """The `--stop` value, or ValueError. The harness reads --gen_kwargs as comma-separated key=value pairs, so a comma would end the value and
+    start another pair, and an empty or blank string would send no usable stop. One string is all the option can carry."""
+    if not stop.strip():
+        raise ValueError("--stop must not be empty")
+    if "," in stop:
+        raise ValueError("--stop cannot contain a comma: the harness reads --gen_kwargs as comma-separated pairs, so it takes one stop string")
+    return stop
+
+
 def lm_eval_command(*, lm_eval, model: str, base_url: str, task: str, limit, concurrency: int, max_gen_toks: int, output_path, include_path,
-                    samples=None) -> list[str]:
+                    samples=None, stop=None) -> list[str]:
+    """The harness command. `stop` replaces the task's own stop strings (the harness's `until`); gsm8k's include "Question:", which vLLM also
+    matches inside a thinking model's reasoning text, so a model that restates "Question:" while thinking is stopped with no answer."""
     margs = f"model={model},base_url={base_url},num_concurrent={concurrency},max_retries=1,tokenized_requests=False,timeout=3600"
+    gen_kwargs = f"max_gen_toks={max_gen_toks},temperature=0" + (f",until={stop}" if stop is not None else "")
     argv = [str(lm_eval), "--model", "local-chat-completions", "--model_args", margs, "--tasks", task, "--apply_chat_template",
-            "--gen_kwargs", f"max_gen_toks={max_gen_toks},temperature=0", "--output_path", str(output_path), "--log_samples",
+            "--gen_kwargs", gen_kwargs, "--output_path", str(output_path), "--log_samples",
             "--include_path", str(include_path)]
     if samples is not None:
         argv += ["--samples", json.dumps({task: sorted(samples)})]     # the harness refuses --samples together with --limit
@@ -210,7 +227,7 @@ def _phase(name: str, a, *, upstream: str, served: str, out_dir: Path, server_lo
             task = LM_EVAL_TASKS[name]
             argv = lm_eval_command(lm_eval=a.lm_eval, model=served, base_url=chat_url, task=task, limit=a.limit, concurrency=a.concurrency,
                                    max_gen_toks=a.max_gen_toks, output_path=phase_dir / "results", include_path=TASKS_DIR,
-                                   samples=(a.items or {}).get(name))
+                                   samples=(a.items or {}).get(name), stop=a.stop)
             rec["command"] = argv
             (phase_dir / "work").mkdir(exist_ok=True)
             watched = run_watched(argv, cwd=phase_dir / "work", env=lm_eval_env(task, out_dir, unsandboxed=a.allow_unsandboxed_code), log_path=phase_dir / "lm_eval.log",
@@ -241,6 +258,22 @@ def _phase(name: str, a, *, upstream: str, served: str, out_dir: Path, server_lo
                 f.seek(log_start)
                 rec["drafter"] = drafter_stats(f.read().decode("utf-8", errors="replace"))
     return rec
+
+
+STOP_SUSPECT_NOTE = ("These replies stopped with reasoning text and no answer. When the harness's stop strings include one that the model writes while "
+                     "thinking (gsm8k's \"Question:\"), the server stops the reply there, and the harness scores the item as empty. The score then "
+                     "measures how often the model avoids that phrase. Re-run the phase with --stop set to a string the model does not write, "
+                     "for example --stop '</s>'.")
+
+
+def stop_suspects(phases: list[dict]) -> dict:
+    """{"total", "by_phase"} from each phase's recorded requests, and a `note` when any phase has one."""
+    by_phase = {p["name"]: p["proxy"]["stop_truncated_suspects"] for p in phases
+                if isinstance(p.get("proxy"), dict) and p["proxy"].get("stop_truncated_suspects")}
+    out = {"total": sum(by_phase.values()), "by_phase": by_phase}
+    if by_phase:
+        out["note"] = STOP_SUSPECT_NOTE
+    return out
 
 
 def load_items(path) -> dict:
@@ -278,6 +311,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--thinking", choices=("default", "on", "off"), default="default")
     ap.add_argument("--max-gen-toks", type=int, default=8192)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--stop", help="one stop string that replaces the task's own (the harness's `until`); gsm8k's own list includes \"Question:\", which vLLM "
+                                   "also matches in a thinking model's reasoning, so a reply that restates it while thinking is cut off with no answer. "
+                                   "One string only: the harness reads --gen_kwargs as comma-separated pairs. Default: the tasks' own")
     ap.add_argument("--quiet-s", type=float, default=900.0, help="stop a phase after this many seconds with no output and no CPU use")
     ap.add_argument("--phase-backstop-s", type=float, default=4 * 3600.0)
     ap.add_argument("--allow-unsandboxed-code", action="store_true",
@@ -292,6 +328,11 @@ def main(argv=None) -> int:
     unknown = [p for p in phases if p not in PHASES]
     if unknown:
         ap.error(f"unknown phase {unknown}; choose from {', '.join(PHASES)}")
+    if a.stop is not None:
+        try:
+            validate_stop(a.stop)
+        except ValueError as exc:
+            ap.error(str(exc))
     a.items = None
     if a.items_file:
         if a.limit is not None:
@@ -326,13 +367,14 @@ def main(argv=None) -> int:
     started = time.time()
     summary = {"label": a.label, "model_id": a.model_id, "served_name": None, "server_ready_s": None, "run_sh": a.run_sh, "run_sh_sha256": None,
                "settings": {"phases": phases, "limit": a.limit, "items": a.items, "concurrency": a.concurrency, "thinking": a.thinking, "max_gen_toks": a.max_gen_toks,
-                            "seed": a.seed, "temperature": 0},
+                            "seed": a.seed, "temperature": 0, "stop": a.stop},
                "lm_eval_version": None, "started_at": started, "phases": []}
     if code_sandbox is not None:
         summary["code_sandbox"] = code_sandbox
 
     def write():
         summary["wall_s"] = round(time.time() - started, 1)
+        summary["stop_truncated_suspects"] = stop_suspects(summary["phases"])
         (out_dir / "summary.json").write_text(json.dumps(summary, indent=1) + "\n", encoding="utf-8")
 
     proc = sc = None

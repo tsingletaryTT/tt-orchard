@@ -57,6 +57,59 @@ def test_the_command_points_the_harness_at_the_chat_code_tasks_in_this_repositor
     assert flag(cmd(), "--include_path") == "/repo/orchard/lm_eval_tasks"
 
 
+# ---- the stop-string override ---------------------------------------------------------------------------------------------------------------
+# gsm8k's own stop strings ("Question:", "</s>", "<|im_end|>") also match the reasoning text, so a thinking model that restates "Question:" while
+# thinking is stopped with no answer (271 of 1,319 base replies, 46 of AREX-2's). `--stop` replaces the task's list with one string. The harness
+# reads --gen_kwargs as comma-separated key=value pairs, so one string is all it can take.
+
+def test_without_a_stop_the_generation_arguments_are_unchanged():
+    assert flag(cmd(stop=None), "--gen_kwargs") == "max_gen_toks=8192,temperature=0"
+    assert flag(cmd(), "--gen_kwargs") == "max_gen_toks=8192,temperature=0"
+
+
+def test_a_stop_becomes_the_harnesss_until_argument():
+    assert flag(cmd(stop="</s>"), "--gen_kwargs") == "max_gen_toks=8192,temperature=0,until=</s>"
+
+
+def test_a_stop_keeps_the_other_generation_arguments_in_place():
+    kv = dict(p.split("=", 1) for p in flag(cmd(stop="###", max_gen_toks=77), "--gen_kwargs").split(","))
+    assert kv == {"max_gen_toks": "77", "temperature": "0", "until": "###"}
+
+
+def test_a_stop_with_an_equals_sign_survives_the_harnesss_key_value_split():
+    kv = dict(p.split("=", 1) for p in flag(cmd(stop="a=b"), "--gen_kwargs").split(","))
+    assert kv["until"] == "a=b"
+
+
+@pytest.mark.parametrize("bad", ["", "a,b", ",", "  "])
+def test_a_stop_the_harness_would_split_or_lose_is_refused(bad):
+    with pytest.raises(ValueError):
+        bs.validate_stop(bad)
+
+
+@pytest.mark.parametrize("good", ["</s>", "###", "a=b", "<|im_end|>", " </s> "])
+def test_a_plain_stop_string_is_accepted_as_it_is(good):
+    assert bs.validate_stop(good) == good
+
+
+def phase(name, suspects):
+    return {"name": name, "proxy": {"stop_truncated_suspects": suspects}}
+
+
+def test_the_total_adds_up_the_phases_and_the_by_phase_map_names_the_ones_with_suspects():
+    got = bs.stop_suspects([phase("gsm8k", 3), phase("ifeval", 0), phase("mbpp", 4)])
+    assert got["total"] == 7 and got["by_phase"] == {"gsm8k": 3, "mbpp": 4}
+
+
+def test_a_phase_with_no_proxy_record_is_left_out_and_does_not_stop_the_summary():
+    assert bs.stop_suspects([{"name": "bfcl"}, phase("gsm8k", 2)]) == {"total": 2, "by_phase": {"gsm8k": 2}, "note": bs.STOP_SUSPECT_NOTE}
+    assert bs.stop_suspects([{"name": "bfcl", "proxy": None}]) == {"total": 0, "by_phase": {}}
+
+
+def test_the_note_gives_the_option_and_an_example_string():
+    assert "--stop '</s>'" in bs.STOP_SUSPECT_NOTE
+
+
 def test_the_code_phases_use_the_chat_tasks_and_not_the_harnesss_prefill_tasks():
     assert bs.LM_EVAL_TASKS["humaneval"] == "humaneval_chat" and bs.LM_EVAL_TASKS["mbpp"] == "mbpp_chat"
     assert bs.CODE_TASKS == {"humaneval_chat", "mbpp_chat"}
@@ -239,6 +292,7 @@ class FakeServer:
     def __init__(self):
         self.seen = []
         self.fail = False
+        self.reasoning_only = False         # answer with reasoning text and no content, the way a stop string inside the thinking leaves a reply
         outer = self
 
         class H(BaseHTTPRequestHandler):
@@ -270,6 +324,8 @@ class FakeServer:
                     fn = body["tools"][0]["function"]
                     args = {"base": 10, "height": 5} if "triangle" in fn["name"] else {"x": 4, "y": 5} if "hypot" in fn["name"] else {"number": 5}
                     msg = {"role": "assistant", "content": None, "tool_calls": [{"id": "1", "type": "function", "function": {"name": fn["name"], "arguments": json.dumps(args)}}]}
+                elif outer.reasoning_only:
+                    msg = {"role": "assistant", "content": None, "reasoning_content": "the user pattern is Question: ..."}
                 else:
                     msg = {"role": "assistant", "content": "ok"}
                 self._send({"choices": [{"finish_reason": "stop", "message": msg}], "usage": {"prompt_tokens": 5, "completion_tokens": 4}})
@@ -345,6 +401,46 @@ def test_the_summary_records_what_makes_two_runs_comparable(harness):
     assert s["settings"]["thinking"] == "off" and s["settings"]["limit"] == 2 and s["settings"]["concurrency"] == 2
     assert s["settings"]["max_gen_toks"] == 1234 and s["settings"]["seed"] == 0
     assert s["lm_eval_version"] == "9.9.9"
+
+
+def harness_argv(h):
+    return json.loads((h["tmp"] / "argv.jsonl").read_text().splitlines()[0])["argv"]
+
+
+def test_a_stop_reaches_the_harness_and_is_recorded_in_the_settings(harness):
+    code, out = run_session(harness, "gsm8k", stop="</s>")
+    assert code == 0
+    assert flag(harness_argv(harness), "--gen_kwargs") == "max_gen_toks=8192,temperature=0,until=</s>"
+    assert json.loads((out / "summary.json").read_text())["settings"]["stop"] == "</s>"
+
+
+def test_a_run_with_no_stop_records_none_and_leaves_the_tasks_own_stop_strings(harness):
+    code, out = run_session(harness, "gsm8k")
+    assert "until" not in flag(harness_argv(harness), "--gen_kwargs")
+    assert json.loads((out / "summary.json").read_text())["settings"]["stop"] is None
+
+
+@pytest.mark.parametrize("bad", ["", "a,b"])
+def test_a_stop_the_harness_would_split_is_refused_before_anything_starts(tmp_path, bad):
+    with pytest.raises(SystemExit):
+        bs.main(["--label", "t", "--url", "http://127.0.0.1:9", "--out-dir", str(tmp_path / "o"), "--phases", "gsm8k", "--stop", bad])
+    assert not (tmp_path / "o" / "summary.json").exists()
+
+
+def test_the_summary_counts_replies_that_look_cut_off_by_a_stop_string(harness):
+    harness["server"].reasoning_only = True
+    code, out = run_session(harness, "gsm8k")
+    s = json.loads((out / "summary.json").read_text())
+    assert s["phases"][0]["proxy"]["stop_truncated_suspects"] == 1
+    assert s["stop_truncated_suspects"]["total"] == 1 and s["stop_truncated_suspects"]["by_phase"] == {"gsm8k": 1}
+    note = s["stop_truncated_suspects"]["note"]
+    assert "stop string" in note and "--stop" in note
+
+
+def test_a_run_with_no_such_replies_says_none_and_has_no_note(harness):
+    code, out = run_session(harness, "gsm8k")
+    s = json.loads((out / "summary.json").read_text())
+    assert s["stop_truncated_suspects"] == {"total": 0, "by_phase": {}}
 
 
 def test_thinking_off_reaches_the_server_for_the_harness_and_for_the_tool_call_phase(harness):
