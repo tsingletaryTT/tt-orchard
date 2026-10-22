@@ -338,6 +338,11 @@ def benchmark_rows(bench: dict, model_key: str, base_key: str | None) -> list[di
         mine = entry.get(model_key) if isinstance(entry, dict) else None
         if not isinstance(mine, dict):
             raise PackageCommandError(f"task {task!r} has no results for {model_key!r}")
+        if base_key and not isinstance(entry.get(base_key), dict):
+            # A requested control that is not here is a typo or a different file. Skipping it would still leave the
+            # paired p-value in the card, which claims a comparison no row shows.
+            raise PackageCommandError(f"task {task!r} has no results for the control {base_key!r}; the keys in the "
+                                      f"file are {', '.join(keys)}. Leave out --base-key for a card without a comparison")
         for who, key, suffix in ((mine, model_key, "this model"),
                                  (entry.get(base_key) if base_key else None, base_key,
                                   "nearest model, same conditions")):

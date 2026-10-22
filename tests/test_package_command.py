@@ -589,3 +589,22 @@ def test_the_command_line_the_lease_runs_is_a_real_entry_point_that_refuses_with
                           capture_output=True, text=True, env=env, cwd=str(rig["tmp"]), timeout=60)
     assert done.returncode == 2 and "runs under a lease" in done.stdout
     assert not (rig["stage"] / "test-result.json").exists()
+
+
+# ---- review: a requested control that the benchmark does not hold --------------------------------------
+
+def test_a_base_key_that_is_not_in_the_benchmark_is_refused_and_no_comparison_is_claimed(packaged):
+    """`--base-key bas` (a typo) used to skip the control's scores but still print the paired p-value."""
+    code, text = run_card(packaged, base_key="bas")
+    assert code == 2 and "'bas'" in text and "arex, base" in text      # names the key and what the file holds
+    assert not (packaged["stage"] / "benchmark-numbers.json").exists()
+    assert "paired sign test" not in card_text(packaged)
+
+
+def test_a_base_key_missing_from_one_task_is_refused_naming_the_task(packaged):
+    bench = json.loads(json.dumps(BENCH))
+    del bench["tasks"]["ifeval"]["base"]
+    (packaged["tmp"] / "benchmark.json").write_text(json.dumps(bench))
+    code, text = run_card(packaged)
+    assert code == 2 and "ifeval" in text and "'base'" in text
+    assert not (packaged["stage"] / "benchmark-numbers.json").exists()
