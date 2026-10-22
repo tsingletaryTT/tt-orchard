@@ -367,8 +367,8 @@ def test_the_session_parser_takes_a_control_record():
 def test_a_session_summary_carries_the_serving_mode_and_the_control_record_when_given(tmp_path):
     run_sh = tmp_path / "base-run.sh"
     run_sh.write_text(build())
-    rec = {"control_sha256": __import__("hashlib").sha256(run_sh.read_bytes()).hexdigest(), "built_from": "/m/run.sh", "swapped_lines": [4, 8]}
-    block = bs.control_summary(run_sh, rec)
+    rec = {"control_sha256": __import__("hashlib").sha256(run_sh.read_bytes()).hexdigest(), "built_from": "/m/run.sh", "swapped_lines": [4, 8], "base_snapshot": BASE}
+    block = bs.control_summary(run_sh, rec, model_dir=BASE)
     assert block["serving"] == {"drafter": "off", "sampling": "host"}
     assert block["control"] == rec
 
@@ -377,3 +377,80 @@ def test_a_control_record_for_another_script_is_refused():
     with pytest.raises(ValueError, match="another script"):
         run_sh = Path(__file__)
         bs.control_summary(run_sh, {"control_sha256": "0" * 64})
+
+
+# ---- the record must describe the weights the session serves -----------------------------------------------------------------------------
+
+def _control(tmp_path, base_snapshot=BASE, **extra):
+    run_sh = tmp_path / "base-run.sh"
+    run_sh.write_text(build())
+    rec = {"control_sha256": __import__("hashlib").sha256(run_sh.read_bytes()).hexdigest(), "built_from": "/m/run.sh", "swapped_lines": [4, 8],
+           "base_snapshot": base_snapshot, **extra}
+    return run_sh, rec
+
+
+def test_a_record_is_accepted_when_the_model_directory_is_its_base_snapshot(tmp_path):
+    run_sh, rec = _control(tmp_path)
+    assert bs.control_summary(run_sh, rec, model_dir=BASE)["control"] == rec
+
+
+def test_a_model_directory_that_is_another_directory_than_the_base_snapshot_is_refused(tmp_path):
+    run_sh, rec = _control(tmp_path)
+    with pytest.raises(ValueError, match="base_snapshot"):
+        bs.control_summary(run_sh, rec, model_dir=MODEL_DIR)
+
+
+def test_a_model_directory_that_links_to_the_base_snapshot_is_accepted(tmp_path):
+    snap = tmp_path / "snap"
+    snap.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(snap)
+    run_sh, rec = _control(tmp_path, base_snapshot=str(snap))
+    assert bs.control_summary(run_sh, rec, model_dir=str(link))["control"] == rec
+
+
+def test_a_record_with_no_model_directory_is_refused_because_nothing_shows_what_is_served(tmp_path):
+    run_sh, rec = _control(tmp_path)
+    with pytest.raises(ValueError, match="--model-dir"):
+        bs.control_summary(run_sh, rec)
+
+
+def test_a_record_with_no_base_snapshot_is_refused_when_a_model_directory_is_given(tmp_path):
+    run_sh, rec = _control(tmp_path)
+    del rec["base_snapshot"]
+    with pytest.raises(ValueError, match="base_snapshot"):
+        bs.control_summary(run_sh, rec, model_dir=BASE)
+
+
+def _never_start(monkeypatch):
+    """The sessions below must be refused before anything starts; if one is not, fail here and launch nothing."""
+    def boom():
+        raise AssertionError("the session went on to start a server")
+    monkeypatch.setattr(bs, "_swap", boom)
+
+
+def _session_args(tmp_path, rec, model_dir):
+    run_sh = tmp_path / "base-run.sh"
+    run_sh.write_text(build())
+    rec = {**rec, "control_sha256": __import__("hashlib").sha256(run_sh.read_bytes()).hexdigest()}
+    record = tmp_path / "base-run.sh.control.json"
+    record.write_text(json.dumps(rec))
+    return ["--label", "base", "--out-dir", str(tmp_path / "out"), "--phases", "gsm8k", "--run-sh", str(run_sh), "--control-record", str(record),
+            "--model-id", "Qwen/Qwen3.8-27B@1d4bf0f", "--model-dir", model_dir, "--tt-cache", str(tmp_path / "c"), "--hf-home", str(tmp_path / "h")]
+
+
+def test_a_session_refuses_to_start_when_its_model_directory_is_not_the_controls_base_snapshot(tmp_path, capsys, monkeypatch):
+    _never_start(monkeypatch)
+    with pytest.raises(SystemExit) as e:
+        bs.main(_session_args(tmp_path, {"base_snapshot": BASE}, MODEL_DIR))
+    assert e.value.code == 2 and "base_snapshot" in capsys.readouterr().err
+
+
+def test_a_control_record_without_a_model_directory_is_refused_by_the_parser(tmp_path, capsys, monkeypatch):
+    _never_start(monkeypatch)
+    args = _session_args(tmp_path, {"base_snapshot": BASE}, BASE)
+    i = args.index("--model-dir")
+    del args[i:i + 2]
+    with pytest.raises(SystemExit) as e:
+        bs.main(args)
+    assert e.value.code == 2 and "--model-dir" in capsys.readouterr().err

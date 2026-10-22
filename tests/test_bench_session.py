@@ -722,7 +722,8 @@ def test_the_summary_of_a_started_server_says_how_its_run_sh_serves(bundle):
 
 def test_a_control_record_is_copied_into_the_summary_of_the_session_it_describes(bundle):
     import hashlib
-    rec = {"control_sha256": hashlib.sha256(bundle["run_sh"].read_bytes()).hexdigest(), "built_from": "/m/run.sh", "swapped_lines": [4, 8], "same_serving": True}
+    rec = {"control_sha256": hashlib.sha256(bundle["run_sh"].read_bytes()).hexdigest(), "built_from": "/m/run.sh", "swapped_lines": [4, 8], "same_serving": True,
+           "base_snapshot": str(bundle["tmp"] / "model")}
     f = bundle["tmp"] / "rec.json"
     f.write_text(json.dumps(rec))
     assert bs.main(session_argv(bundle, control_record=f)) == 0

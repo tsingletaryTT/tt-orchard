@@ -257,14 +257,24 @@ def load_items(path) -> dict:
     return {phase: sorted(set(ids)) for phase, ids in data.items()}
 
 
-def control_summary(run_sh, record=None) -> dict:
+def control_summary(run_sh, record=None, model_dir=None) -> dict:
     """What a summary.json says about how the server was started: the drafter and sampling mode the run.sh asks for and, for a base control, the record
-    `orchard.bench_control build` wrote. A record for another script is refused, because its numbers would describe a different serving mode."""
+    `orchard.bench_control build` wrote. A record for another script is refused, because its numbers would describe a different serving mode. With a
+    `model_dir` (required with a record) the record's `base_snapshot` must be that directory (links resolved): the session exports `model_dir` as
+    MODEL_WEIGHTS_DIR, which the runtime reads before the script's own path, so a control script beside the fine-tune's directory would serve the
+    fine-tune and be reported as the base."""
     data = Path(run_sh).read_bytes()
     out = {"serving": bench_control.serving_facts(data.decode("utf-8", "replace"))}
     if record is not None:
         if record.get("control_sha256") != hashlib.sha256(data).hexdigest():
             raise ValueError(f"the control record is for another script than {run_sh}")
+        if not model_dir:
+            raise ValueError("a control record needs --model-dir, to show that the session serves the base's weights")
+        snap = record.get("base_snapshot")
+        if not isinstance(snap, str) or not snap:
+            raise ValueError("the control record has no base_snapshot, so it cannot show that --model-dir holds the base's weights")
+        if os.path.realpath(snap) != os.path.realpath(model_dir):
+            raise ValueError(f"--model-dir {model_dir} is not the control record's base_snapshot {snap}")
         out["control"] = record
     return out
 
@@ -323,7 +333,7 @@ def main(argv=None) -> int:
         if a.url or not a.run_sh:
             ap.error("--control-record needs --run-sh and no --url")
         try:
-            control = control_summary(a.run_sh, json.loads(Path(a.control_record).read_text(encoding="utf-8")))
+            control = control_summary(a.run_sh, json.loads(Path(a.control_record).read_text(encoding="utf-8")), model_dir=a.model_dir)
         except (OSError, ValueError) as exc:
             ap.error(f"--control-record: {exc}")
     if "bfcl" in phases and not a.bfcl_dir:

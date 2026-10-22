@@ -10,7 +10,8 @@ and device sampling while the fine-tune was served with the drafter off and host
 run.sh from the model's run.sh by replacing the model's directory with the base snapshot, in the `HF_MODEL` line and the `--model` flag and nowhere else. It
 then reads both files again and refuses unless the only lines that differ are lines where that replacement alone explains the difference. It writes a record
 (`<out>.control.json`) with both hashes, the swapped line numbers and the drafter and sampling mode of each script; `bench_session --control-record` copies
-that record into the session's summary.json, so a reader can check the comparison without the scripts.
+that record into the session's summary.json, so a reader can check the comparison without the scripts. The session also refuses a record whose
+`base_snapshot` is not its `--model-dir`, because the runtime reads that directory before the script's own path.
 
 `board` reads `gozer status --json` and names a board whose chips are all FREE. `gozer run --exact N` selects the unit that holds chip N, which is a whole board
 on this machine, so the command gives the device index of the board's first chip. Two sessions asked for together get two different boards. A board that has just
