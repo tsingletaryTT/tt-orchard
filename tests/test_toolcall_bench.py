@@ -499,3 +499,9 @@ def test_the_reason_for_stopping_is_the_error_that_crossed_the_limit_not_a_later
     finally:
         fake.close()
     assert "err 3" in out["stopped"] and "err 4" not in out["stopped"]
+
+
+def test_a_separator_character_inside_a_question_does_not_split_its_line(tmp_path):
+    f = tmp_path / "q.json"
+    f.write_text(json.dumps({"id": "a", "question": [[{"role": "user", "content": "x y"}]]}, ensure_ascii=False) + "\n", encoding="utf-8")
+    assert [r["id"] for r in tb._rows(f)] == ["a"]
