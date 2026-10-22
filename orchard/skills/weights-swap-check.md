@@ -54,6 +54,9 @@ write a script.
   script instead warns that the file is in neither snapshot, the warning is advisory: the copied `config.json` may still
   give the server a stop token, and the hardware test shows whether the server starts. Write `hw_test.json` and
   `handoff.json` as usual and do not stop.
+- `prepare_swap.py` also writes `stages/2/model-dir-sources.json`: which files of `model-dir/` came from the
+  nearest model and which from the new model, and whose generation config the server reads. The stage 8 bundle
+  and the package card quote it. Do not edit it or write one yourself.
 - Write each file as soon as you know its content. Do not wait until the end.
 - Do not investigate anything this skill does not list. On an earlier run the model spent 60 turns
   grepping vLLM source for an unrelated timeout and wrote nothing.

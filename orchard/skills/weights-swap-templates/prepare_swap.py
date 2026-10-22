@@ -47,6 +47,13 @@ The weights-swap-check skill copies this file into the stage directory and runs 
      decoding on a 1x2 mesh refuses on-device sampling ("Unset sample_on_device_mode for host sampling");
      the host samples instead.
 
+3. `model-dir-sources.json`, next to `model-dir/` (not inside it, because vLLM reads that directory). It records
+   where each file came from: the nearest model (copied) or the new model (linked), why a copy was made, the
+   snapshot revisions, the files that were absent, and whose generation_config.json (`sampling_defaults_from`:
+   "model", "base" or "none") the server reads its sampling defaults and stop tokens from. The weights are one
+   entry with a count. The stage 8 bundle and the package card read it, so a reader does not need this script
+   to know that a run served the base model's sampling defaults. It holds no machine paths.
+
 An expected edit that does not happen exactly once exits 2 with a message that names it, and no
 run.sh is written. Everything else in the script, including its environment lines, stays as it is.
 
@@ -128,6 +135,38 @@ def build_model_dir(base: Path, new: Path) -> tuple[Path, list[str], list[str], 
     if not any(n.endswith(".safetensors") for n in linked):
         fail(f"new_snapshot {new} has no *.safetensors file")
     return md, copied, linked, absent
+
+
+REVISION = re.compile(r"[0-9a-f]{40}")
+SOURCES_NAME = "model-dir-sources.json"
+
+
+def snapshot_revision(snapshot: Path) -> str | None:
+    """The snapshot directory's name when it is a 40-character commit, else None."""
+    return snapshot.name if REVISION.fullmatch(snapshot.name) else None
+
+
+def sources_record(base: Path, new: Path, nearest: str, copied: list[str], linked: list[str],
+                   absent: list[str]) -> dict:
+    """Where each file of model-dir came from. Weights are one entry with a count."""
+    files = []
+    for name in copied:
+        entry = {"name": name, "source": "base", "how": "copy"}
+        if name == FALLBACK_COPY:
+            entry["reason"] = "new_snapshot has none"
+        files.append(entry)
+    files += [{"name": n, "source": "model", "how": "link"} for n in linked if not n.endswith(".safetensors")]
+    files.sort(key=lambda f: f["name"])
+    if FALLBACK_COPY in copied:
+        sampling = "base"
+    elif FALLBACK_COPY in linked:
+        sampling = "model"
+    else:
+        sampling = "none"
+    return {"schema": 1, "base_model": nearest, "base_revision": snapshot_revision(base),
+            "model_revision": snapshot_revision(new), "files": files,
+            "weights": {"source": "model", "how": "link", "count": sum(n.endswith(".safetensors") for n in linked)},
+            "absent": sorted(absent), "sampling_defaults_from": sampling}
 
 
 MTP_NAME = re.compile(r"(^|\.)mtp\.")
@@ -256,11 +295,16 @@ def main() -> int:
             notes.append("could not tell whether the new model has mtp.* tensors (no readable weight index or "
                          "shard headers), so the drafter setting is unchanged")
     model_dir, copied, linked, absent = build_model_dir(base, new)
+    record = sources_record(base, new, cfg["nearest_model_id"], copied, linked, absent)
+    (HERE_DIR / SOURCES_NAME).write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     print(f"model-dir: {model_dir}")
     print(f"  copied from base_snapshot: {', '.join(copied) or 'nothing'}")
     print(f"  linked from new_snapshot: {len(linked)} files ({', '.join(linked)})")
     if FALLBACK_COPY in copied:
         print(f"  {FALLBACK_COPY}: new_snapshot has none; copied from base_snapshot")
+    origin = {"model": "the new model's", "base": "the nearest model's", "none": None}[record["sampling_defaults_from"]]
+    print(f"  {SOURCES_NAME}: " + (f"sampling defaults and stop tokens are {origin} generation_config.json"
+                                   if origin else "no generation_config.json, so no sampling defaults or stop tokens"))
     if absent:
         print(f"  absent in new_snapshot, not linked: {', '.join(absent)}")
     if FALLBACK_COPY in absent:

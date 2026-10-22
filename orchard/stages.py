@@ -729,6 +729,14 @@ def _inside_dir(run_dir, rel) -> Path | None:
     return Path(p) if os.path.commonpath([root, p]) == root and os.path.isdir(p) else None
 
 
+def _shipped_names(directory: Path) -> tuple[str, ...]:
+    """The file names in a package's base_config/ (the files it takes from the nearest model), sorted."""
+    try:
+        return tuple(sorted(f.name for f in directory.iterdir() if f.is_file()))
+    except OSError:
+        return ()
+
+
 def gate_package(stage_dir, run_dir) -> GateResult:
     """Stage 7: a staged v6 package whose boot check passed.
 
@@ -795,8 +803,9 @@ def gate_package(stage_dir, run_dir) -> GateResult:
                     scrub_package(out, namespace=d.get("namespace"))]
         if license_id:
             reasons += [f"profile {name}: card: {x}" for x in
-                        card_problems(card, license_id=license_id, run_dir=run,
-                                      sidecars=sidecars)]
+                        card_problems(card, license_id=license_id, run_dir=run, sidecars=sidecars,
+                                      base_files=_shipped_names(out / "base_config"),
+                                      model_id=new_repo, nearest_model=nearest_repo)]
         reasons += [f"profile {name}: the card cites {e}, which is missing at evidence/{e}"
                     for e in card_evidence_paths(card) if not (out / "evidence" / e).is_file()]
         if p.get("verified") is True:

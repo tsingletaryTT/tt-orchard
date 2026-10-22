@@ -497,6 +497,57 @@ def parity_section(sp: dict, result: dict) -> list[str]:
     return lines
 
 
+SAMPLING_SOURCES = {
+    "base": "the sampling defaults and stop tokens the server uses are the nearest model's ({base})",
+    "model": "the sampling defaults and stop tokens the server uses are the model's own",
+    "none": "there is no generation_config.json, so the server has no sampling defaults or stop tokens from one",
+}
+
+
+def served_dir_section(run: Run, redact: Redactor) -> list[str]:
+    """The "The served model directory" section, from stage 2's `model-dir-sources.json` (written by
+    prepare_swap.py). Returns no lines when the file is missing or is not a JSON object, so a run staged before
+    the record existed gets the same RESULTS.md as before. Every copied string goes through the redactor."""
+    rec = read_json(run.dir / "stages" / "2" / "model-dir-sources.json", "stages/2/model-dir-sources.json",
+                    required=False)
+    if rec is None:
+        return []
+    text = lambda v: redact(one_line(v)) if isinstance(v, str) and v else None      # noqa: E731
+    base = text(rec.get("base_model")) or "the nearest model"
+    lines = ["", "## The served model directory", "",
+             "Stage 2 serves a directory built from two models: configuration files from the nearest model "
+             f"({base}) and the tokenizer and weights of the model under test. From "
+             "`stages/2/model-dir-sources.json`.", ""]
+    revs = [f"{label}: `{r}`" for label, r in (("nearest model revision", text(rec.get("base_revision"))),
+                                                ("model revision", text(rec.get("model_revision")))) if r]
+    if revs:
+        lines += [", ".join(revs) + ".", ""]
+    rows = []
+    for f in rec.get("files") if isinstance(rec.get("files"), list) else []:
+        name = text(f.get("name")) if isinstance(f, dict) else None
+        if not name:
+            continue
+        src = text(f.get("source")) or "not recorded"
+        how = {"copy": "copied", "link": "linked"}.get(f.get("how"), "not recorded")
+        rows.append(f"| `{name}` | {src} | {how} | {text(f.get('reason')) or ''} |")
+    w = rec.get("weights")
+    if isinstance(w, dict) and is_number(w.get("count")):
+        rows.append(f"| weights | {text(w.get('source')) or 'not recorded'} | "
+                    f"{ {'copy': 'copied', 'link': 'linked'}.get(w.get('how'), 'not recorded') } | "
+                    f"{fmt(w['count'])} safetensors files |")
+    if rows:
+        lines += ["| File | From | How | Note |", "|---|---|---|---|", *rows, ""]
+    absent = [a for a in (text(x) for x in (rec.get("absent") if isinstance(rec.get("absent"), list) else []))
+              if a]
+    if absent:
+        lines += ["Absent from the model's snapshot and not copied from the nearest model: "
+                  + ", ".join(f"`{a}`" for a in absent) + ".", ""]
+    origin = rec.get("sampling_defaults_from")
+    if isinstance(origin, str) and origin in SAMPLING_SOURCES:
+        lines.append("Generation config: " + SAMPLING_SOURCES[origin].format(base=base) + ".")
+    return lines
+
+
 def stage_results(run: Run, redact: Redactor) -> dict[int, list[str]]:
     """The body of each stage's section."""
     body: dict[int, list[str]] = {}
@@ -701,6 +752,7 @@ def render_results(run: Run, redact: Redactor, n_todo: int, n_hazards: int, skip
     for name, value in run_counts(run.entries):
         lines.append(f"| {name} | {value} | {'TODO' if value == 'TODO' else 'measured'} | `ledger.jsonl` |")
     lines += inventory_section(run, redact)
+    lines += served_dir_section(run, redact)
     body = stage_results(run, redact)
     for n in range(9):
         spec = run.specs[n]

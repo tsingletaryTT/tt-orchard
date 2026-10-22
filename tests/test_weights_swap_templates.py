@@ -831,3 +831,118 @@ def test_the_swap_report_carries_the_serving_record(swap):
     r = swap["start"]("perfect")
     assert r.returncode == 0, r.stdout + r.stderr
     assert report(swap)["serving"]["drafter"] == "off"
+
+
+# ---- model-dir-sources.json: where each file of the served model directory came from ----------------
+# The directory is built from two models. Without a record, the only way to know that a run served the base
+# model's sampling defaults (AREX-2) is to read the script.
+
+def sources(stage: Path) -> dict:
+    return json.loads((stage / "model-dir-sources.json").read_text())
+
+
+def by_name(record: dict) -> dict:
+    return {f["name"]: f for f in record["files"]}
+
+
+def test_the_record_says_which_files_came_from_the_base_and_which_from_the_model(prep):
+    assert run_prepare(prep["stage"]).returncode == 0
+    rec = sources(prep["stage"])
+    files = by_name(rec)
+    for name in ("config.json", "preprocessor_config.json"):
+        assert (files[name]["source"], files[name]["how"]) == ("base", "copy"), name
+    for name in ("tokenizer.json", "tokenizer_config.json", "chat_template.jinja", "generation_config.json",
+                 "model.safetensors.index.json"):
+        assert (files[name]["source"], files[name]["how"]) == ("model", "link"), name
+    assert rec["base_model"] == NEAREST
+    assert rec["sampling_defaults_from"] == "model"
+    assert rec["absent"] == []
+
+
+def test_the_weights_are_one_entry_with_a_count_and_not_one_entry_per_shard(prep):
+    assert run_prepare(prep["stage"]).returncode == 0
+    rec = sources(prep["stage"])
+    assert rec["weights"] == {"source": "model", "how": "link", "count": 3}
+    assert not [n for n in by_name(rec) if n.endswith(".safetensors")]
+
+
+def test_a_generation_config_copied_from_the_base_is_recorded_with_its_reason(no_new_gen):
+    assert run_prepare(no_new_gen["stage"]).returncode == 0
+    rec = sources(no_new_gen["stage"])
+    gen = by_name(rec)["generation_config.json"]
+    assert (gen["source"], gen["how"]) == ("base", "copy")
+    assert "new_snapshot has none" in gen["reason"]
+    assert rec["sampling_defaults_from"] == "base"
+    assert "generation_config.json" not in rec["absent"]
+
+
+def test_a_generation_config_in_neither_snapshot_is_recorded_as_absent(prep):
+    (prep["new"] / "generation_config.json").unlink()
+    assert run_prepare(prep["stage"]).returncode == 0
+    rec = sources(prep["stage"])
+    assert rec["sampling_defaults_from"] == "none"
+    assert "generation_config.json" in rec["absent"]
+    assert "generation_config.json" not in by_name(rec)
+
+
+def test_the_record_names_the_snapshot_revisions_when_the_directories_are_named_by_one(prep):
+    assert run_prepare(prep["stage"]).returncode == 0
+    rec = sources(prep["stage"])
+    assert rec["base_revision"] == "0" * 40 and rec["model_revision"] == "0" * 40
+
+
+def test_a_snapshot_directory_that_is_not_a_revision_gives_none(prep):
+    odd = prep["new"].parent / "my-local-copy"
+    prep["new"].rename(odd)
+    cfg_path = prep["stage"] / "swap_config.json"
+    cfg = json.loads(cfg_path.read_text())
+    cfg["new_snapshot"] = str(odd)
+    cfg_path.write_text(json.dumps(cfg))
+    assert run_prepare(prep["stage"]).returncode == 0
+    rec = sources(prep["stage"])
+    assert rec["model_revision"] is None and rec["base_revision"] == "0" * 40
+
+
+def test_the_record_sits_beside_model_dir_and_not_in_it(prep):
+    assert run_prepare(prep["stage"]).returncode == 0
+    assert (prep["stage"] / "model-dir-sources.json").is_file()
+    assert not (prep["stage"] / "model-dir" / "model-dir-sources.json").exists()
+
+
+def test_the_record_holds_no_machine_paths(prep, tmp_path):
+    assert run_prepare(prep["stage"]).returncode == 0
+    assert str(tmp_path) not in (prep["stage"] / "model-dir-sources.json").read_text()
+
+
+def test_a_second_run_replaces_the_record(no_new_gen):
+    prep = no_new_gen
+    assert run_prepare(prep["stage"]).returncode == 0
+    assert sources(prep["stage"])["sampling_defaults_from"] == "base"
+    put(prep["new"], "generation_config.json", '{"eos_token_id": 1}')      # the model now ships one
+    assert run_prepare(prep["stage"]).returncode == 0
+    assert sources(prep["stage"])["sampling_defaults_from"] == "model"
+
+
+def test_a_container_package_config_writes_the_record_too(prep):
+    cfg_path = prep["stage"] / "swap_config.json"
+    cfg = json.loads(cfg_path.read_text())
+    del cfg["bundle_dir"]
+    cfg["package"] = "someone/qwen3.8-27b-p300x2"
+    cfg_path.write_text(json.dumps(cfg))
+    assert run_prepare(prep["stage"]).returncode == 0
+    assert by_name(sources(prep["stage"]))["config.json"]["source"] == "base"
+
+
+@pytest.mark.parametrize("fixture, says", [("prep", "the new model's generation_config.json"),
+                                          ("no_new_gen", "the nearest model's generation_config.json")])
+def test_the_script_says_whose_sampling_defaults_the_server_will_read(fixture, says, request):
+    prep = request.getfixturevalue(fixture)
+    r = run_prepare(prep["stage"])
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert f"model-dir-sources.json: sampling defaults and stop tokens are {says}" in r.stdout
+
+
+def test_the_script_says_when_there_are_no_sampling_defaults(prep):
+    (prep["new"] / "generation_config.json").unlink()
+    r = run_prepare(prep["stage"])
+    assert "model-dir-sources.json: no generation_config.json, so no sampling defaults or stop tokens" in r.stdout

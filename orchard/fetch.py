@@ -34,6 +34,12 @@ def snapshot_dir(hf_home, model_id: str, revision: str) -> Path:
     return Path(hf_home) / "hub" / f"models--{org}--{name}" / "snapshots" / revision
 
 
+def blob_dir(hf_home, model_id: str) -> Path:
+    """Where `hf download` keeps a repo's files while it works (`*.incomplete` grow here), and what the snapshot links to."""
+    org, name = model_id.split("/", 1)
+    return Path(hf_home) / "hub" / f"models--{org}--{name}" / "blobs"
+
+
 def clean_env(env: dict, hf_home) -> dict:
     out = {k: v for k, v in env.items() if k not in STRIPPED_VARIABLES}
     out.update(HF_HOME=str(hf_home), HF_HUB_DISABLE_IMPLICIT_TOKEN="1", HF_TOKEN_PATH=NO_TOKEN_PATH)
