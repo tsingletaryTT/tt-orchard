@@ -38,6 +38,7 @@ WINDOW_S = 15.0        # the speed is the bytes that arrived over this many seco
 LOG_EVERY_S = 60.0     # a log gets a line at least this often
 LOG_STEP = 10          # and one each time the percentage passes a multiple of this
 WAITING_S = 15.0       # with no bytes for this long (and since the start) the line says it is waiting
+ETA_AFTER_S = 10.0     # an ETA from the first seconds is a wild guess (14 minutes for a 36 second download)
 JOIN_S = 5.0
 ERASE = "\r\x1b[K"
 
@@ -125,7 +126,7 @@ def render_line(r: Reading, width: int, paint=None) -> str:
         extras.append(f"{human_bytes(r.rate)}/s")
     elif r.waiting:
         extras.append("waiting for data")
-    if r.eta is not None and r.rate > 0:
+    if r.eta is not None and r.rate > 0 and r.elapsed >= ETA_AFTER_S:
         extras.append(f"ETA {human_duration(r.eta)}")
     if r.files_total:
         extras.append(f"{r.files_done} of {r.files_total} files")
@@ -228,7 +229,7 @@ class DownloadMeter:
         parts = [f"{human_bytes(r.done)} of {human_bytes(r.need)} ({int(min(r.done / r.need, 1.0) * 100)}%)"]
         if r.rate > 0:
             parts.append(f"{human_bytes(r.rate)}/s")
-            if r.eta is not None:
+            if r.eta is not None and r.elapsed >= ETA_AFTER_S:
                 parts.append(f"ETA {human_duration(r.eta)}")
         elif r.waiting:
             parts.append("waiting for data")

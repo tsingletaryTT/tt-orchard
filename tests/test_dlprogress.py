@@ -202,6 +202,25 @@ def test_an_unknown_total_shows_the_bytes_and_no_bar_or_percentage():
     assert "5 MB" in line and "%" not in line and "█" not in line and "░" not in line
 
 
+def test_the_eta_waits_for_enough_measurements_to_mean_something():
+    early = dp.render_line(reading(elapsed=dp.ETA_AFTER_S - 1, eta=888.0), 200)
+    assert "ETA" not in early and "118 MB/s" in early                 # the speed shows at once, the guess does not
+    assert "ETA 4m 40s" in dp.render_line(reading(elapsed=dp.ETA_AFTER_S, eta=280.0), 200)
+
+
+def test_a_log_line_leaves_out_an_early_eta_too(tmp_path):
+    m, blobs, snap, out, clock = make(tmp_path, total=1000, tty=False)
+    m.begin()
+    clock.advance(2)
+    grow(blobs, "b", 200)
+    m.tick()
+    assert "ETA" not in out.getvalue().splitlines()[-1] and "B/s" in out.getvalue().splitlines()[-1]
+    clock.advance(dp.ETA_AFTER_S)
+    grow(blobs, "b", 500)
+    m.tick()
+    assert "ETA" in out.getvalue().splitlines()[-1]
+
+
 def test_a_finished_download_reads_one_hundred_percent():
     line = dp.render_line(reading(done=54_700_000_000), 200)
     assert "100%" in line and "█" * 20 in line
