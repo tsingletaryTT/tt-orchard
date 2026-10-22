@@ -999,3 +999,119 @@ def test_stop_tokens_are_integers_only(prep, value, ids):
     put(prep["base"], "config.json", "{}")
     assert run_prepare(prep["stage"]).returncode == 0
     assert sources(prep["stage"])["eos_token_ids"] == ids
+
+
+# ---- the chat template and special tokens the served directory holds ----------------------------------
+# The directory takes its tokenizer files from the new model. The record says which template the server will
+# read (the jinja file first, as transformers 5.19.0 does), whether it is the nearest model's, and the special tokens.
+
+import hashlib  # noqa: E402
+
+
+def sha(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def template_case(prep, *, new_jinja=None, new_inline=None, base_jinja=None, base_inline=None, new_tokens=None,
+                  base_tokens=None):
+    """Set each side's template and special tokens; None means the snapshot has none. Both sides' tokenizer_config.json
+    is rewritten as JSON."""
+    for side, jinja, inline, tokens in (("new", new_jinja, new_inline, new_tokens), ("base", base_jinja, base_inline, base_tokens)):
+        snap = prep[side]
+        cfg = dict(tokens or {})
+        if inline is not None:
+            cfg["chat_template"] = inline
+        put(snap, "tokenizer_config.json", json.dumps(cfg))
+        if jinja is not None:
+            put(snap, "chat_template.jinja", jinja)
+        elif (snap / "chat_template.jinja").is_symlink():
+            (snap / "chat_template.jinja").unlink()
+    return prep
+
+
+def test_the_record_gives_the_served_template_and_says_it_matches_the_nearest_models(prep):
+    template_case(prep, new_jinja="T", base_jinja="T")
+    assert run_prepare(prep["stage"]).returncode == 0
+    assert sources(prep["stage"])["chat_template"] == {
+        "file": "chat_template.jinja", "sha256": sha("T"), "nearest_sha256": sha("T"), "same_as_nearest": True}
+
+
+def test_a_different_template_is_recorded_as_different(prep):
+    template_case(prep, new_jinja="NEW", base_jinja="BASE")
+    assert run_prepare(prep["stage"]).returncode == 0
+    ct = sources(prep["stage"])["chat_template"]
+    assert ct["sha256"] == sha("NEW") and ct["nearest_sha256"] == sha("BASE") and ct["same_as_nearest"] is False
+
+
+def test_a_template_inside_tokenizer_config_is_found_when_there_is_no_jinja_file(prep):
+    template_case(prep, new_inline="INLINE", base_jinja="BASE")
+    assert run_prepare(prep["stage"]).returncode == 0
+    ct = sources(prep["stage"])["chat_template"]
+    assert ct["file"] == "tokenizer_config.json" and ct["sha256"] == sha("INLINE")
+
+
+def test_a_list_of_named_templates_is_hashed_the_way_stage_0_hashes_it(prep):
+    named = [{"name": "tool_use", "template": "B"}, {"name": "default", "template": "A"}]
+    template_case(prep, new_inline=named, base_inline=named)
+    assert run_prepare(prep["stage"]).returncode == 0
+    ct = sources(prep["stage"])["chat_template"]
+    assert ct["file"] == "tokenizer_config.json"
+    assert ct["sha256"] == sha(json.dumps(named, sort_keys=True, ensure_ascii=False)) and ct["same_as_nearest"] is True
+
+
+def test_the_jinja_file_wins_over_the_template_inside_tokenizer_config(prep):
+    template_case(prep, new_jinja="FILE", new_inline="INLINE", base_jinja="FILE")
+    assert run_prepare(prep["stage"]).returncode == 0
+    ct = sources(prep["stage"])["chat_template"]
+    assert ct["file"] == "chat_template.jinja" and ct["sha256"] == sha("FILE") and ct["same_as_nearest"] is True
+
+
+def test_a_model_with_no_template_is_recorded_as_having_none_and_the_run_says_so(prep):
+    template_case(prep, base_jinja="BASE")
+    r = run_prepare(prep["stage"])
+    assert r.returncode == 0, r.stdout + r.stderr
+    ct = sources(prep["stage"])["chat_template"]
+    assert ct == {"file": None, "sha256": None, "nearest_sha256": sha("BASE"), "same_as_nearest": None}
+    assert "chat template: the model directory has none, and the nearest model has one" in r.stdout
+
+
+def test_a_nearest_model_with_no_template_leaves_the_comparison_open(prep):
+    template_case(prep, new_jinja="NEW")
+    assert run_prepare(prep["stage"]).returncode == 0
+    ct = sources(prep["stage"])["chat_template"]
+    assert ct["nearest_sha256"] is None and ct["same_as_nearest"] is None and ct["sha256"] == sha("NEW")
+
+
+def test_the_run_prints_the_template_file_and_whether_it_matches(prep):
+    template_case(prep, new_jinja="T", base_jinja="T")
+    r = run_prepare(prep["stage"])
+    assert f"chat template: chat_template.jinja (sha256 {sha('T')[:12]}), the same as the nearest model's" in r.stdout
+    template_case(prep, new_jinja="T", base_jinja="U")
+    r = run_prepare(prep["stage"])
+    assert f"chat template: chat_template.jinja (sha256 {sha('T')[:12]}), different from the nearest model's" in r.stdout
+
+
+def test_the_record_lists_the_special_tokens_and_which_differ_from_the_nearest_models(prep):
+    template_case(prep, new_jinja="T", base_jinja="T",
+                  new_tokens={"eos_token": "<|endoftext|>", "pad_token": {"content": "<pad>", "special": True}},
+                  base_tokens={"eos_token": "<|im_end|>", "pad_token": "<pad>", "bos_token": "<s>"})
+    assert run_prepare(prep["stage"]).returncode == 0
+    rec = sources(prep["stage"])
+    assert rec["special_tokens"] == {"eos_token": "<|endoftext|>", "bos_token": None, "pad_token": "<pad>", "unk_token": None}
+    assert rec["special_tokens_differ_from_nearest"] == ["bos_token", "eos_token"]
+
+
+def test_identical_special_tokens_differ_in_nothing(prep):
+    tokens = {"eos_token": "<|im_end|>"}
+    template_case(prep, new_jinja="T", base_jinja="T", new_tokens=tokens, base_tokens=tokens)
+    assert run_prepare(prep["stage"]).returncode == 0
+    assert sources(prep["stage"])["special_tokens_differ_from_nearest"] == []
+
+
+def test_a_tokenizer_config_that_is_not_json_gives_no_special_tokens_and_no_crash(prep):
+    # the fixture's own tokenizer_config.json holds the text "content of tokenizer_config.json"
+    r = run_prepare(prep["stage"])
+    assert r.returncode == 0, r.stdout + r.stderr
+    rec = sources(prep["stage"])
+    assert rec["special_tokens"] == {"eos_token": None, "bos_token": None, "pad_token": None, "unk_token": None}
+    assert rec["special_tokens_differ_from_nearest"] == []

@@ -26,7 +26,9 @@ It measures, and writes each measurement under `evidence/` next to itself:
                              `model.language_model.` is normalized to `model.`
     tokenizer-compare.json   vocab, merges (a merge may be a 2-element list or one space-joined
                              string; both forms compare equal), added tokens, normalizer,
-                             pre-tokenizer, decoder and post-processor, and the chat template's sha256
+                             pre-tokenizer, decoder and post-processor, the chat template's sha256 (the
+                             template inside tokenizer_config.json and the template in chat_template.jinja
+                             separately, because the file wins), and the eos, bos, pad and unk tokens
     tokenizer-encode.json    ids from both tokenizers (the `tokenizers` package) for the fixed strings
                              below and 100 fixed-seed random-unicode strings
     sidecar-compare.json     weights files outside the backbone, their tensor names, and any problem
@@ -1008,23 +1010,52 @@ def field_diffs(a, b) -> dict:
             for k in sorted(set(fa) | set(fb)) if fa.get(k, ABSENT) != fb.get(k, ABSENT)}
 
 
-def chat_template(snapshot: Path) -> tuple[str | None, str | None]:
-    """(source file, template text): chat_template.jinja first, then tokenizer_config.json."""
+SPECIAL_TOKEN_NAMES = ("eos_token", "bos_token", "pad_token", "unk_token")
+
+
+def template_variants(snapshot: Path) -> tuple[str | None, str | None]:
+    """(the template inside tokenizer_config.json, the text of chat_template.jinja); None for one that is absent."""
     jinja = snapshot / "chat_template.jinja"
-    if jinja.is_file():
-        return "chat_template.jinja", jinja.read_text(encoding="utf-8", errors="replace")
+    file_text = jinja.read_text(encoding="utf-8", errors="replace") if jinja.is_file() else None
     cfg, _ = read_json(snapshot / "tokenizer_config.json")
     t = cfg.get("chat_template") if isinstance(cfg, dict) else None
     if isinstance(t, list):            # named templates: [{"name": ..., "template": ...}]
         t = json.dumps(t, sort_keys=True, ensure_ascii=False)
-    return ("tokenizer_config.json", t) if isinstance(t, str) else (None, None)
+    return (t if isinstance(t, str) else None), file_text
+
+
+def chat_template(snapshot: Path) -> tuple[str | None, str | None]:
+    """(source file, template text): chat_template.jinja first, then tokenizer_config.json. transformers 5.19.0 loads the
+    file when both exist (checked on Qwen/Qwen3-Coder-Next, whose two templates differ)."""
+    inline, file_text = template_variants(snapshot)
+    if file_text is not None:
+        return "chat_template.jinja", file_text
+    return ("tokenizer_config.json", inline) if inline is not None else (None, None)
+
+
+def special_tokens(snapshot: Path) -> dict:
+    """eos, bos, pad and unk tokens as tokenizer_config.json writes them (a string, or an object with `content`);
+    None for one that is absent or unreadable."""
+    cfg, _ = read_json(snapshot / "tokenizer_config.json")
+    cfg = cfg if isinstance(cfg, dict) else {}
+    out = {}
+    for name in SPECIAL_TOKEN_NAMES:
+        v = cfg.get(name)
+        if isinstance(v, dict):
+            v = v.get("content")
+        out[name] = v if isinstance(v, str) else None
+    return out
 
 
 def tokenizer_side(snapshot: Path) -> tuple[dict | None, dict, str | None]:
     """(tokenizer.json data, summary, error)."""
     data, err = read_json(snapshot / "tokenizer.json")
     src, tmpl = chat_template(snapshot)
-    summary = {"chat_template_source": src, "chat_template_sha256": sha256_text(tmpl) if tmpl else None}
+    inline, file_text = template_variants(snapshot)
+    summary = {"chat_template_source": src, "chat_template_sha256": sha256_text(tmpl) if tmpl else None,
+               "chat_template_inline_sha256": sha256_text(inline) if inline else None,
+               "chat_template_file_sha256": sha256_text(file_text) if file_text else None,
+               "special_tokens": special_tokens(snapshot)}
     if not isinstance(data, dict):
         return None, summary, err or "tokenizer.json is missing"
     model = data.get("model") or {}
@@ -1039,8 +1070,11 @@ def tokenizer_side(snapshot: Path) -> tuple[dict | None, dict, str | None]:
 def compare_tokenizers(model_dir: Path, base_dir: Path) -> dict:
     md, ms, merr = tokenizer_side(model_dir)
     bd, bs, berr = tokenizer_side(base_dir)
+    st_diffs = {k: {"model": ms["special_tokens"][k], "base": bs["special_tokens"][k]}
+                for k in SPECIAL_TOKEN_NAMES if ms["special_tokens"][k] != bs["special_tokens"][k]}
     out = {"model": ms, "base": bs, "errors": [e for e in (merr, berr) if e],
-           "chat_template_equal": ms["chat_template_sha256"] == bs["chat_template_sha256"]}
+           "chat_template_equal": ms["chat_template_sha256"] == bs["chat_template_sha256"],
+           "special_tokens_equal": not st_diffs, "special_tokens_diffs": st_diffs}
     if md is None or bd is None:
         return out
     mm, bm = md.get("model") or {}, bd.get("model") or {}
@@ -1368,19 +1402,37 @@ def tokenizer_finding(tc: dict, enc: dict) -> str:
     return s
 
 
+def token_text(value) -> str:
+    return value if isinstance(value, str) else "absent"
+
+
 def chat_template_finding(tc: dict) -> str:
     m, b = tc["model"], tc["base"]
     if m["chat_template_sha256"] is None and b["chat_template_sha256"] is None:
-        return "Neither model ships a chat template."
-    if tc["chat_template_equal"]:
-        return (f"Identical. Both chat templates have sha256 {m['chat_template_sha256'][:16]} "
-                f"(new model from {m['chat_template_source']}, nearest model from {b['chat_template_source']}).")
-    if m["chat_template_sha256"] is None or b["chat_template_sha256"] is None:
+        s = "Neither model ships a chat template."
+    elif tc["chat_template_equal"]:
+        s = (f"Identical. Both chat templates have sha256 {m['chat_template_sha256'][:16]} "
+             f"(new model from {m['chat_template_source']}, nearest model from {b['chat_template_source']}).")
+    elif m["chat_template_sha256"] is None or b["chat_template_sha256"] is None:
         who = "the new model" if m["chat_template_sha256"] else "the nearest model"
-        return f"Only {who} ships a chat template."
-    return (f"Different. The new model's chat template ({m['chat_template_source']}) has sha256 "
-            f"{m['chat_template_sha256'][:16]}; the nearest model's ({b['chat_template_source']}) has "
-            f"{b['chat_template_sha256'][:16]}.")
+        s = f"Only {who} ships a chat template."
+    else:
+        s = (f"Different. The new model's chat template ({m['chat_template_source']}) has sha256 "
+             f"{m['chat_template_sha256'][:16]}; the nearest model's ({b['chat_template_source']}) has "
+             f"{b['chat_template_sha256'][:16]}.")
+    for who, side in (("new", m), ("nearest", b)):
+        i, f = side["chat_template_inline_sha256"], side["chat_template_file_sha256"]
+        if i and f and i != f:
+            s += (f" The {who} model's tokenizer_config.json carries a chat template (sha256 {i[:16]}) that differs from its "
+                  f"chat_template.jinja (sha256 {f[:16]}); transformers 5.19.0 loads the file.")
+    if tc["special_tokens_equal"]:
+        if any(v for v in m["special_tokens"].values()):
+            s += " The eos, bos, pad and unk tokens are the same in both."
+    else:
+        s += (" Special tokens that differ: "
+              + "; ".join(f"{k} is {token_text(d['model'])} in the new model and {token_text(d['base'])} in the nearest model"
+                          for k, d in tc["special_tokens_diffs"].items()) + ".")
+    return s
 
 
 def files_finding(f: dict) -> str:
@@ -1525,7 +1577,31 @@ def generation_config_hazards(nearest_id: str, g: dict, ev) -> list[dict]:
     return [{"area": "generation_config", "finding": finding, "evidence": [ev("genconfig-license.json")]}] if finding else []
 
 
-def hazards(model_id: str, nearest_id: str, t: dict, f: dict, g: dict, disk: dict, ev) -> list[dict]:
+def chat_template_hazards(tc: dict, ev) -> list[dict]:
+    """A hazard when the new model's chat template differs from the nearest model's, when the nearest model has one and the
+    new model has none, or when the special tokens differ. A template only the new model ships, or none on either side, is
+    no hazard. Every swap check sends plain text to /v1/completions (serve_and_compare.py), so none applies a template."""
+    m, b = tc["model"], tc["base"]
+    reasons = []
+    if m["chat_template_sha256"] and b["chat_template_sha256"] and not tc["chat_template_equal"]:
+        reasons.append(f"The new model's chat template (sha256 {m['chat_template_sha256'][:16]}) differs from the nearest "
+                       f"model's (sha256 {b['chat_template_sha256'][:16]}).")
+    if m["chat_template_sha256"] is None and b["chat_template_sha256"]:
+        reasons.append("The new model ships no chat template and the nearest model does, so the staged model directory has "
+                       "none, and transformers 5.19.0 raises an error when asked to apply one.")
+    if not tc["special_tokens_equal"]:
+        reasons.append("Its special tokens differ from the nearest model's: "
+                       + "; ".join(f"{k} {token_text(d['model'])} against {token_text(d['base'])}"
+                                  for k, d in tc["special_tokens_diffs"].items())
+                       + ".")
+    if not reasons:
+        return []
+    return [{"area": "chat_template", "evidence": [ev("tokenizer-compare.json")],
+             "finding": (" ".join(reasons) + " The swap checks in stages 2 and 4 send plain text to /v1/completions, so none "
+                         "of them applies a chat template. Chat output was not checked.")}]
+
+
+def hazards(model_id: str, nearest_id: str, t: dict, f: dict, g: dict, disk: dict, ev, tc: dict) -> list[dict]:
     out = [
         {"area": "tensor_cache",
          "finding": (f"A converted tensor cache of the nearest model ({nearest_id}) is keyed by layer "
@@ -1557,6 +1633,7 @@ def hazards(model_id: str, nearest_id: str, t: dict, f: dict, g: dict, disk: dic
                                 "packages do not carry over."),
                     "evidence": [ev("tensor-compare.json")]})
     out += generation_config_hazards(nearest_id, g, ev)
+    out += chat_template_hazards(tc, ev)
     if g["license_changed"] is True:
         out.append({"area": "license",
                     "finding": (f"The license changed from {g['base_license']['license']} (nearest model) to "
@@ -1647,7 +1724,7 @@ def main() -> int:
              "evidence": [ev("genconfig-license.json")]},
             {"area": "license", "finding": license_finding(g), "evidence": [ev("genconfig-license.json")]},
         ],
-        "hazards": hazards(model_id, nearest_id, t, f, g, disk, ev),
+        "hazards": hazards(model_id, nearest_id, t, f, g, disk, ev, tc),
     }
     if sc["sidecars"]:
         delta["differences"].append({"area": "other", "finding": sidecar_finding(sc),
