@@ -993,3 +993,88 @@ def test_the_hazard_is_not_dealt_with_when_the_run_has_no_package_cards(tmp_path
 def test_an_origin_the_record_does_not_name_is_not_taken_as_the_base(tmp_path, origin):
     block = gen_risks(tmp_path, dict(SOURCES, sampling_defaults_from=origin))
     assert "Dealt with: Not shown" in block and "does not say whose generation config was served" in block
+
+
+# ---- the chat template the served directory holds, and the chat template hazard -----------------------------
+
+CHAT_SHA = "c3cf9e34abf4f9e3" + "0" * 48
+
+
+def chat_record(**ct):
+    return dict(SOURCES, chat_template={"file": "chat_template.jinja", "sha256": CHAT_SHA, "nearest_sha256": CHAT_SHA,
+                                        "same_as_nearest": True, **ct},
+                special_tokens={"eos_token": "<|im_end|>", "bos_token": None, "pad_token": None, "unk_token": None},
+                special_tokens_differ_from_nearest=[])
+
+
+@pytest.mark.parametrize("ct, says", [
+    ({}, "Chat template: `chat_template.jinja` (sha256 c3cf9e34abf4), the same as the nearest model's."),
+    ({"same_as_nearest": False}, "Chat template: `chat_template.jinja` (sha256 c3cf9e34abf4), different from the nearest model's."),
+    ({"same_as_nearest": None, "nearest_sha256": None},
+     "Chat template: `chat_template.jinja` (sha256 c3cf9e34abf4). The nearest model has none."),
+    ({"file": None, "sha256": None, "same_as_nearest": None},
+     "Chat template: the model directory has none, and the nearest model has one."),
+    ({"file": None, "sha256": None, "nearest_sha256": None, "same_as_nearest": None},
+     "Chat template: the model directory has none, and neither has the nearest model.")])
+def test_the_section_says_which_chat_template_is_served(tmp_path, ct, says):
+    sec = section(sources_text(tmp_path, chat_record(**ct)), "## The served model directory")
+    assert says in sec
+    assert "\n\nChat template: " in sec          # its own paragraph, apart from the generation config line
+
+
+def test_the_section_lists_special_tokens_that_differ_and_is_silent_when_none_do(tmp_path):
+    rec = dict(chat_record(), special_tokens_differ_from_nearest=["bos_token", "eos_token"])
+    sec = section(sources_text(tmp_path, rec), "## The served model directory")
+    assert "Special tokens that differ from the nearest model's: `bos_token`, `eos_token`." in sec
+    sec = section(sources_text(tmp_path / "same", chat_record()), "## The served model directory")
+    assert "Special tokens" not in sec
+
+
+def test_a_record_without_chat_facts_says_nothing_about_them(tmp_path):
+    sec = section(sources_text(tmp_path, SOURCES), "## The served model directory")
+    assert "Chat template" not in sec and "Special tokens" not in sec
+
+
+def test_a_chat_template_field_of_the_wrong_shape_is_left_out(tmp_path):
+    for i, bad in enumerate(("text", ["x"], {"file": 3, "sha256": 4}, {"sha256": CHAT_SHA, "same_as_nearest": True},
+                             {"file": None, "sha256": None, "nearest_sha256": 7})):
+        sec = section(sources_text(tmp_path / str(i), dict(SOURCES, chat_template=bad, special_tokens=7,
+                                                                       special_tokens_differ_from_nearest="eos_token")),
+                      "## The served model directory")
+        assert "Chat template" not in sec and "Special tokens" not in sec
+
+
+CHAT_HAZARD = {"area": "chat_template", "finding": "The new model's chat template differs from the nearest model's.",
+               "evidence": ["stages/0/evidence/tokenizer-compare.json"]}
+
+
+def chat_risks(tmp_path, record=None):
+    run = make_run(tmp_path)
+    delta_path = run / "stages" / "0" / "delta.json"
+    d = json.loads(delta_path.read_text())
+    d["hazards"] = [*d.get("hazards", []), CHAT_HAZARD]
+    write_json(delta_path, d)
+    if record is not None:
+        write_json(run / "stages" / "2" / "model-dir-sources.json", record)
+    assert build(run).returncode == 0
+    risks = (bundle_of(run) / "RISKS.md").read_text()
+    return [b for b in section(risks, "## Stage 0 hazards").split("### ") if b.startswith("chat_template")][0]
+
+
+def test_the_chat_template_hazard_is_never_dealt_with_because_no_stage_sent_a_chat_request(tmp_path):
+    block = chat_risks(tmp_path, chat_record(same_as_nearest=False))
+    assert "Dealt with: Not shown" in block
+    assert "No stage sent a chat request" in block and "/v1/completions" in block
+    assert "Stage 2's model directory holds `chat_template.jinja` (sha256 c3cf9e34abf4), different from the nearest model's" in block
+    assert "The bundle has no check for this hazard" not in block
+
+
+def test_the_chat_template_hazard_without_a_record_still_says_no_chat_request_was_sent(tmp_path):
+    block = chat_risks(tmp_path)
+    assert "Dealt with: Not shown" in block and "No stage sent a chat request" in block
+    assert "Stage 2's model directory holds" not in block
+
+
+def test_the_chat_template_hazard_says_when_the_model_directory_has_no_template(tmp_path):
+    block = chat_risks(tmp_path, chat_record(file=None, sha256=None, same_as_nearest=None))
+    assert "Stage 2's model directory has no chat template" in block

@@ -545,7 +545,46 @@ def served_dir_section(run: Run, redact: Redactor) -> list[str]:
     origin = rec.get("sampling_defaults_from")
     if isinstance(origin, str) and origin in SAMPLING_SOURCES:
         lines.append("Generation config: " + SAMPLING_SOURCES[origin].format(base=base) + ".")
+    chat = chat_facts_lines(rec, text)
+    if chat:
+        lines += ["", *chat]
     return lines
+
+
+def chat_template_sentence(rec: dict, text) -> str | None:
+    """One sentence on the chat template the served directory holds, from the record's `chat_template`. None when the
+    record has none or it has the wrong shape (a record from before the field existed)."""
+    ct = rec.get("chat_template")
+    if not isinstance(ct, dict) or "file" not in ct:
+        return None
+    file, sha, nearest = ct.get("file"), ct.get("sha256"), ct.get("nearest_sha256")
+    if nearest is not None and not isinstance(nearest, str):
+        return None
+    if file is None:
+        return ("the model directory has none, and the nearest model has one." if nearest else
+                "the model directory has none, and neither has the nearest model.")
+    if not isinstance(file, str) or not isinstance(sha, str):
+        return None
+    head = f"`{text(file)}` (sha256 {sha[:12]})"
+    same = ct.get("same_as_nearest")
+    if same is True:
+        return head + ", the same as the nearest model's."
+    if same is False:
+        return head + ", different from the nearest model's."
+    return head + ("." if nearest else ". The nearest model has none.")
+
+
+def chat_facts_lines(rec: dict, text) -> list[str]:
+    """The chat template line and, when any differ from the nearest model's, the special tokens line."""
+    out = []
+    sentence = chat_template_sentence(rec, text)
+    if sentence:
+        out.append("Chat template: " + sentence)
+    diff = rec.get("special_tokens_differ_from_nearest")
+    names = [n for n in (text(x) for x in diff) if n] if isinstance(diff, list) else []
+    if names:
+        out.append("Special tokens that differ from the nearest model's: " + ", ".join(f"`{n}`" for n in names) + ".")
+    return out
 
 
 def stage_results(run: Run, redact: Redactor) -> dict[int, list[str]]:
@@ -880,6 +919,19 @@ def generation_config_dealt_with(run: Run) -> tuple[bool, list[str]]:
     return bool(run.cards) and len(saying) == len(run.cards), why
 
 
+def chat_template_dealt_with(run: Run, redact: Redactor) -> tuple[bool, list[str]]:
+    """Never yes: no stage sends a chat request (the swap checks use /v1/completions, which applies no template)."""
+    why = ["No stage sent a chat request. The swap checks in stages 2 and 4 use /v1/completions, which applies no chat "
+           "template."]
+    rec = read_json(run.dir / "stages" / "2" / "model-dir-sources.json", "stages/2/model-dir-sources.json", required=False)
+    text = lambda v: redact(one_line(v)) if isinstance(v, str) and v else None      # noqa: E731
+    sentence = chat_template_sentence(rec, text) if isinstance(rec, dict) else None
+    if sentence:
+        held = "has no chat template" if rec["chat_template"].get("file") is None else "holds " + sentence.rstrip(".")
+        why.append(f"Stage 2's model directory {held} (`stages/2/model-dir-sources.json`).")
+    return False, why
+
+
 def hazard_entries(run: Run, redact: Redactor) -> list[tuple[str, str, list[str], bool, list[str]]]:
     """(heading, finding, evidence, dealt with, why) for each stage 0 hazard."""
     out, seen = [], {}
@@ -927,6 +979,8 @@ def hazard_entries(run: Run, redact: Redactor) -> list[tuple[str, str, list[str]
                               f"Pauses whose reason names disk space: {disk_pauses} (ledger.jsonl)."]
         elif area == "generation_config":
             ok, why = generation_config_dealt_with(run)
+        elif area == "chat_template":
+            ok, why = chat_template_dealt_with(run, redact)
         elif area == "license":
             ok = False
             why = ["A license is the operator's decision. The run cannot settle it."]
