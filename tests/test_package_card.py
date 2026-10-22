@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from orchard.package_card import (CardFacts, Number, card_problems, non_commercial, read_license,
+from orchard.package_card import (CardFacts, Number, Reported, card_problems, non_commercial, read_license,
                                   render_card)
 
 REV = "1a5f363a3dd2d1cc456c28b8abbb403b9555efaf"
@@ -193,3 +193,89 @@ def test_a_file_name_inside_other_text_does_not_count_as_named(tmp_path):
     card = render_card(facts(base_files=("config.json",))) + "\nsee my_preprocessor_config.json.bak\n"
     problems = card_problems(card, license_id="cc-by-nc-4.0", run_dir=run, base_files=BASE_FILES)
     assert any("preprocessor_config.json" in p for p in problems)
+
+
+# ---- numbers the authors reported, kept apart from the ones measured here (#19) ---------------------------------
+
+REPORTED = (Reported("Frontier-CS (agent track)", "70.7", "188 tasks"),
+            Reported("MLE-Lite", "81.8", "Any Medal, mean of 3 seeds"),
+            Reported("DeepSearchQA", "93.8%", ""))
+SOURCE = "the model's card on Hugging Face"
+
+
+def reported_card(**over):
+    return render_card(facts(reported=REPORTED, reported_source=SOURCE, **over))
+
+
+def test_a_card_with_reported_scores_has_a_section_that_says_they_were_not_measured_here():
+    card = reported_card()
+    sec = card.split("## Reported by the authors")[1].split("\n## ")[0]
+    assert f"These scores come from {SOURCE}." in sec and "were not measured here" in sec
+    assert "| Frontier-CS (agent track) | 70.7 | 188 tasks |" in sec
+    assert "| DeepSearchQA | 93.8% |  |" in sec
+
+
+def test_the_reported_section_comes_after_the_measured_numbers_and_before_the_limitations():
+    card = reported_card()
+    assert card.index("## Expected performance") < card.index("## Reported by the authors") < card.index("## Limitations")
+
+
+def test_a_card_without_reported_scores_has_no_such_section():
+    assert "Reported by the authors" not in render_card(facts())
+
+
+def test_a_card_with_reported_scores_passes_its_own_check(tmp_path):
+    run = run_with_evidence(tmp_path)
+    assert card_problems(reported_card(), license_id="cc-by-nc-4.0", run_dir=run, reported=REPORTED) == []
+
+
+def test_a_percent_in_the_reported_section_is_not_a_number_outside_the_numbers_table(tmp_path):
+    run = run_with_evidence(tmp_path)
+    problems = card_problems(reported_card(), license_id="cc-by-nc-4.0", run_dir=run, reported=REPORTED)
+    assert not any("outside the Numbers table" in p for p in problems)
+
+
+def test_a_percent_in_prose_outside_the_reported_section_is_still_refused(tmp_path):
+    run = run_with_evidence(tmp_path)
+    card = reported_card().replace("## Limitations", "## Limitations\n\nIt is 93.8% good.\n")
+    problems = card_problems(card, license_id="cc-by-nc-4.0", run_dir=run, reported=REPORTED)
+    assert any("outside the Numbers table" in p and "93.8%" in p for p in problems)
+
+
+@pytest.mark.parametrize("cut, word", [
+    ("## Reported by the authors", "section"),
+    ("| MLE-Lite | 81.8 | Any Medal, mean of 3 seeds |", "MLE-Lite"),
+    ("were not measured here", "not measured here"),
+    ("| DeepSearchQA | 93.8% |  |", "DeepSearchQA"),
+])
+def test_a_card_that_leaves_reported_scores_or_the_disclaimer_out_is_refused(tmp_path, cut, word):
+    run = run_with_evidence(tmp_path)
+    card = reported_card()
+    assert cut in card
+    problems = card_problems(card.replace(cut, "x"), license_id="cc-by-nc-4.0", run_dir=run, reported=REPORTED)
+    assert any(word in p for p in problems), problems
+
+
+def test_a_card_that_changes_a_reported_value_is_refused(tmp_path):
+    run = run_with_evidence(tmp_path)
+    card = reported_card().replace("| MLE-Lite | 81.8 |", "| MLE-Lite | 91.8 |")
+    problems = card_problems(card, license_id="cc-by-nc-4.0", run_dir=run, reported=REPORTED)
+    assert any("MLE-Lite" in p and "81.8" in p for p in problems)
+
+
+def test_a_reported_score_listed_as_measured_is_refused(tmp_path):
+    run = run_with_evidence(tmp_path)
+    measured = Number("MLE-Lite", 0.5, "fraction", "measured", ("stages/2/result.json",))
+    card = render_card(facts(reported=REPORTED, reported_source=SOURCE,
+                             numbers=(*facts().numbers, measured)))
+    problems = card_problems(card, license_id="cc-by-nc-4.0", run_dir=run, reported=REPORTED)
+    assert any("MLE-Lite" in p and "measured" in p for p in problems)
+
+
+def test_a_cell_cannot_break_the_table_or_the_card():
+    rows = (Reported("a | b", "1\n2", "x\r\n## Heading in a note"),)
+    card = render_card(facts(reported=rows, reported_source=SOURCE))
+    sec = card.split("## Reported by the authors")[1].split("\n## ")[0]
+    table = [ln for ln in sec.splitlines() if ln.startswith("| a")]
+    assert len(table) == 1 and table[0].count("|") == 4 and "## Heading" in table[0]
+    assert "\n## Heading" not in card

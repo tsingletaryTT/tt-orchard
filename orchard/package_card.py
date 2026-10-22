@@ -45,6 +45,8 @@ COMMERCIAL_CLAIMS = (r"(?<!non-)(?<!non )commercial (?:use|deployments?|purposes
                      r"\benterprise\b", r"\bresell", r"\bmonetiz")
 PERF_IN_PROSE = re.compile(r"\b\d[\d.,]*\s*(?:tok/s|tokens/s|t/s|tokens per second|ms\b|%)")
 NUMBERS_HEAD = "## Expected performance"
+REPORTED_HEAD = "## Reported by the authors"
+NOT_MEASURED_SENTENCE = "were not measured here"
 CARD_TAGS = ("tt-model-cache", "vllm", "thin")       # the tags tt-model's own push adds to a v6 bundle
 
 
@@ -76,6 +78,19 @@ class Number:
 
 
 @dataclass(frozen=True)
+class Reported:
+    """A score the model's authors report. The run did not measure it."""
+    name: str                        # the benchmark, as the authors name it
+    value: str                       # as the authors wrote it, for example "81.8" or "93.8%"
+    note: str = ""                   # the protocol or metric, if the authors state one
+
+
+def _cell(text: str) -> str:
+    """One table cell: a pipe or a line break in the text cannot break the row."""
+    return " ".join(str(text).replace("|", "/").split())
+
+
+@dataclass(frozen=True)
 class CardFacts:
     name: str                        # the bundle name, also the repo name the publish line uses
     namespace: str                   # the operator's Hugging Face namespace
@@ -98,6 +113,8 @@ class CardFacts:
     sidecars: tuple[str, ...] = ()   # sidecar files the model's repository ships and the bundle does not serve
     base_files: tuple[str, ...] = () # files the package ships in base_config/, taken from the nearest model
     sampling_from_base: bool = False # the model ships no generation_config.json, so the nearest model's is used
+    reported: tuple[Reported, ...] = ()   # scores the authors report, shown apart from the measured numbers
+    reported_source: str = ""        # where the authors report them (a card or paper), for the sentence above them
 
 
 def _value(n: Number) -> str:
@@ -170,6 +187,13 @@ def render_card(f: CardFacts) -> str:
     for n in f.numbers:
         ev = ", ".join(f"`{e}`" for e in n.evidence) if n.label == "measured" else "-"
         lines.append(f"| {n.name} | {_value(n)} | {n.label} | {ev} |")
+    if f.reported:
+        lines += ["", REPORTED_HEAD, "",
+                  f"These scores come from {f.reported_source or 'the model authors'}. They {NOT_MEASURED_SENTENCE}: "
+                  "the authors' protocol, tools and judge differ from the checks in the table above, and nothing in "
+                  "this repository reproduces them.", "",
+                  "| Benchmark | Reported | Note |", "|---|---|---|"]
+        lines += [f"| {_cell(r.name)} | {_cell(r.value)} | {_cell(r.note)} |" for r in f.reported]
     limits = [f"Tested on {f.chips} chips (mesh {f.mesh}) only; other configurations are not claimed "
               "by this bundle.",
               "Accuracy was compared with the CPU reference on one short fixed prompt only."]
@@ -222,8 +246,27 @@ def _numbers_section(card: str) -> tuple[str, str]:
     return section, before + (sep + rest if sep else "")
 
 
-def card_problems(card: str, *, license_id: str, run_dir, sidecars=(), base_files=()) -> list[str]:
+def _section(card: str, head: str) -> tuple[str, str]:
+    """(the text of the section that starts with `head`, the card without it); ("", card) when it is absent."""
+    if head not in card:
+        return "", card
+    before, after = card.split(head, 1)
+    section, sep, rest = after.partition("\n## ")
+    return section, before + (sep + rest if sep else "")
+
+
+def card_problems(card: str, *, license_id: str, run_dir, sidecars=(), base_files=(), reported=()) -> list[str]:
     problems = []
+    reported_section, card_without_reported = _section(card, REPORTED_HEAD)
+    if reported:
+        if not reported_section:
+            problems.append(f"the card must have the section {REPORTED_HEAD!r}: the run was given scores the authors report")
+        else:
+            if NOT_MEASURED_SENTENCE not in reported_section:
+                problems.append(f"the reported-scores section must say the scores {NOT_MEASURED_SENTENCE}")
+            for r in reported:
+                if f"| {_cell(r.name)} | {_cell(r.value)} |" not in reported_section:
+                    problems.append(f"the reported score {r.name}: {r.value} is not in the reported-scores section")
     for n in base_files:
         if f"`{n}`" not in card:
             problems.append(f"the card must name `{n}`, which the package takes from the nearest model")
@@ -253,9 +296,15 @@ def card_problems(card: str, *, license_id: str, run_dir, sidecars=(), base_file
     for head in ("## Intended use", "## Limitations", "## Risks and safety considerations"):
         if head not in card:
             problems.append(f"the card has no {head!r} section")
-    section, rest = _numbers_section(card)
+    section, rest = _numbers_section(card_without_reported)
     if not section:
         problems.append("the card has no Numbers section")
+    names = {_cell(r.name) for r in reported}
+    for row in (r for r in section.splitlines() if r.startswith("| ") and not r.startswith("| Number ")):
+        first = row.strip().strip("|").split("|")[0].strip()
+        if first in names:
+            problems.append(f"the score {first} is reported by the authors, and the Numbers table lists it as a "
+                            "number the run measured")
     for row in (r for r in section.splitlines() if r.startswith("| ") and not r.startswith("| Number ")):
         cells = [c.strip() for c in row.strip().strip("|").split("|")]
         if len(cells) != 4:
