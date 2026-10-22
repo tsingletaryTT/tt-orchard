@@ -1649,6 +1649,54 @@ Prompt (operator): "fix all the notes before we merge". The review approved and 
   1.607e-07 (the exact value is 1.6066e-07). The card says "below 0.001" and is unchanged. The copy on the Hub still has 0.0 until the file is uploaded again.
 - README lists PyYAML as needed by `tests/test_lm_eval_code_tasks.py`. The commit bodies are empty; the mutation tables are in this log and the run log.
 
+## 2026-10-21 (UTC): research finds tt-transformers and says what a tt-metal demo is (branch `base-code-research`, version 0.8.9)
+Prompt (operator): the preflight blocked `Plurato123/OctLLM` with `nearest-model-missing`, and the operator expected tt-metal or tt-transformers to
+already have the config. "Read qwen25_vl and see if it can be served, but also do A and B."
+- Found first: research did list `models/demos/qwen25_vl` as existing work. It had no effect on the outcome, because stages 2 and 4 swap weights into an
+  installed v6 thin bundle and a demo directory is code, not a bundle. Nothing in the repo read tt-transformers at all.
+- `qwen25_vl` (read upstream, because the local tt-metal checkout is stale): Qwen2.5-VL-7B is supported, with a vLLM generator file
+  (`tt/generator_vllm.py`), but the README, `PERF.md` and `model_config.py` name only N150, N300, T3K and TG, and the code gates on `is_wormhole_b0()`.
+  Blackhole is not mentioned. That is not proof it fails on this box. Not run.
+- A: `ports.tt_transformers` reads tt-metal's `models/tt_transformers/model_params` (named by Hugging Face model name, so a match is exact), its README
+  table (which gives the boards each model runs on) and the standalone repo's `src/tt_transformers/models`. The report passes the stated bases and the
+  model itself as `ids`. It runs under `--no-github`, because it uses the contents API like the tt-metal listing.
+- B: `ports.demo_facts` adds, for the first two demos that matched by name, whether `tt/` has `generator_vllm.py` and which boards the README names (only
+  board names reach the claim). `preflight._code_note` puts that first in the `nearest-model-missing` message ("code for it exists, but code is not a
+  bundle"), warns when the code names no Blackhole board, and caps the searched bundle list at 8. The reason code did not change. The phrase the writer and
+  the reader share lives in `research/types.py` (`LACKS_BLACKHOLE`), and a test feeds a real `demo_facts` claim into the preflight.
+- Tests first, a mutation table per commit: 19, 23 and 28 mutations. Survivors, each given a test: an id that is not `org/name`, case in board names, p300,
+  the count of demos read, the exact file name, the claim length limit, and the phrase being spelled in two modules. Two of my own tests were wrong first
+  (a sort order I assumed, an import). The suite passed: 5054 passed, 2 skipped.
+- Not done: nothing runs `qwen25_vl` on hardware; no bundle is built from demo code; `tt-transformers` is read only by name and README, not by its code.
+- OctLLM itself is not a fit (checked the card, config and weight index): twelve layers carry extra `mesh_*` attention and MLP tensors, there is a separate
+  `completion/model.safetensors`, and the output goes through CUDA decoders. Its official environment is conda with an NVIDIA GPU. Stage 0 would call it
+  full-port or unknown.
+- Candidate research for text-to-3D models: no installed v6 bundle serves the base of any model found (BlenderLLM on Qwen2.5-7B, LLaMA-Mesh on Llama-3.1-8B,
+  BrickGPT as a LoRA on Llama-3.2-1B). BAAI/AREX-2 passes the preflight as a Qwen3.8-27B fine-tune; the operator is running it.
+## 2026-10-21 (UTC): a progress bar for the weight download, and lines while the preflight runs (branch `bringup-progress`, version 0.8.10)
+Prompt (operator): "tt-orchard should show a progress bar while downloading weights. it also waits a very long time before showing more info
+when first starting up." Both were measured before anything was changed.
+- Startup: `run_preflight` returned every check at once and the page printed after that. Timing each signal for BAAI/AREX-2: 84 s in all, 81 s of it
+  research (65 s on a second run), which is three sequential reads of weight headers (14, 21 and 19 s; every shard's header, one request at a time).
+  LLaMA-Mesh took 7.5 s. Now `run_preflight(progress=)` and `research.report.build(progress=)` print a line before each slow step, so the first line after
+  `mode:` comes at 0.1 s, and the header lines name the model and its number of shards. `--quiet` turns them off. A callback that raises never reaches
+  research or the preflight (`research.types.reporter` also cleans the text).
+- Download: `hf download --quiet` ran with its output captured, so a 55 GB fetch printed nothing. Measured with huggingface_hub 1.33.0: without a terminal `hf`
+  prints no progress at all; with one, and with `--format human`, it prints only "Fetching N files", never bytes. The bytes in the cache are the signal:
+  `orchard/dlprogress.py` reads growth of `<hf_home>/hub/models--org--name/blobs` since the start and the files complete in the snapshot, in a thread beside the
+  unchanged fetcher. With Xet a blob grows in bursts (205 MB for 24 s, then 1.5 GB), so the bar can stall and jump; the line says "waiting for data" and keeps
+  an elapsed clock. A live run of a real 1.5 GB download under a pty redrew in place and ended with "downloaded 1.5 GB in 36s (42 MB/s average)". It showed
+  "ETA 14m 48s" in the first second, so the ETA now waits ten seconds.
+- Not terminal output: a pipe, a log, or `--style plain` gets a line at each 10% and at least once a minute.
+- Tests first, a mutation table per commit: 47 + 5 (meter), 10 (command wiring), 36 (startup). Survivors got tests; two are equivalent (a write to a stream that
+  already failed; `reporter(None)` that would raise a `TypeError` the `except` catches). Two of my own assertions were wrong first (`or`-tail that could not fail;
+  1000 bytes is "1 KB").
+- Review fixes (Copilot, PR 33): a blob that `hf` moves to the shared store leaves a link in the repo's `blobs/`, and the meter ignored links, so a finished shard dropped out of
+  the count; it now counts the file a link reaches, once per inode. The closing summary used the planned size, which overstated a resumed download; it now takes a last
+  measurement and reports the bytes that arrived (or "downloaded nothing new"). 6 and 7 mutations, all red.
+- Not done: reading the shard headers in parallel would cut the 65 to 81 s itself (the fetcher keeps a request budget and a per-host state, so it needs care);
+  the supervisor's coder boot (about 10 minutes cold) shows only what the narrator already shows; `hf download` was not replaced by our own downloader.
+
 ## 2026-10-21 (UTC): stage 2 staging copies generation_config.json when the model has none (branch `stage-generation-config`, version 0.8.11)
 Prompt (operator): "OK our first attempt at bring up failed; what is the reason?" then "fix the staging so generation_config gets copied", then
 "restart the tt-orchard bringup when ready". The attempt was BAAI/AREX-2 (run `~/orchard-runs/baai--arex-2`), which stopped at stage 2.

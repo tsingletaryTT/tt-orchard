@@ -34,6 +34,7 @@ The supervisor, the download and the outside signals are parameters of `main`, s
 from __future__ import annotations
 
 import argparse
+import contextlib
 import dataclasses
 import io
 import fcntl
@@ -45,7 +46,7 @@ import threading
 import time
 from pathlib import Path
 
-from orchard import __version__, blocked, bringup_config, fetch, lexicon, narrate, nearest, orchard_view, preflight, ui
+from orchard import __version__, blocked, bringup_config, dlprogress, fetch, lexicon, narrate, nearest, orchard_view, preflight, ui
 from orchard import caches as tensor_caches
 
 EXIT_OK, EXIT_REFUSED, EXIT_ERROR, EXIT_ABORTED, EXIT_BLOCKED = 0, 2, 3, 4, 5   # the supervisor's own codes
@@ -297,6 +298,15 @@ def _kernel_probe(args, env, home, out) -> int:
             print(f"note: no tier config read ({exc})", file=out)
     from orchard import speedwatch
     return kernelprobe.main(args, out=out, tier_config=tier_config, speed_check=speedwatch.probe_check(home))
+
+
+def _download_meter(model_id: str, hub, hf_home, out, style, quiet: bool):
+    """The progress line around one download (orchard/dlprogress.py); nothing when `--quiet` is given."""
+    if quiet:
+        return contextlib.nullcontext()
+    return dlprogress.DownloadMeter(
+        model_id, blob_dir=fetch.blob_dir(hf_home, model_id), snapshot=fetch.snapshot_dir(hf_home, model_id, hub.sha),
+        files=hub.files, total_bytes=hub.total_bytes, out=out, style=style)
 
 
 def _refuse(message: str) -> int:
@@ -680,8 +690,13 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
                                          if cfg.mode == "lab" else "local: everything runs on this box"), file=out)
     from orchard.research import Options
     from orchard.research import types as research_types
+    def status(text: str) -> None:
+        print(f"{style.icon('🔎')}{text}...", file=out, flush=True)
+
+    progress = None if args.quiet else status
     research_options = Options(cache_dir=None if args.dry_run else run_dir / "research" / "cache",
-                               offline=args.offline, no_github=args.no_github, refresh=args.refresh_research)
+                               offline=args.offline, no_github=args.no_github, refresh=args.refresh_research,
+                               progress=progress)
     sig = signals or preflight.default_signals(cfg, research_options=research_options)
     override = None
     if args.base:
@@ -692,7 +707,7 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
     def preflight_page():
         got = preflight.run_preflight(cfg, args.model, accept_credentials=not args.refuse_credentials_visible,
                                       signals=sig, resuming=resuming, base_override=override,
-                                      accept_inferred_base=args.accept_inferred_base)
+                                      accept_inferred_base=args.accept_inferred_base, progress=progress)
         print(orchard_view.render_preflight(args.model, run_dir, resuming, cfg_path, got, style), file=out)
         return got
 
@@ -775,14 +790,16 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
         print(f"{style.icon('🌱')}fetching {args.model} at {hub.sha[:8]} ({hub.total_bytes / 1e9:.1f} GB) into "
               f"{hf_home}", file=out)
         try:
-            snapshot = Path(fetcher(args.model, hub.sha, hf_home, files=hub.files))
+            with _download_meter(args.model, hub, hf_home, out, style, args.quiet):
+                snapshot = Path(fetcher(args.model, hub.sha, hf_home, files=hub.files))
         except fetch.FetchError as exc:
             return _refuse(str(exc))
     if base_hub is not None:
         print(f"{style.icon('🌱')}fetching the base model {base_data['base']} at {base_hub.sha[:8]} "
               f"({base_hub.total_bytes / 1e9:.1f} GB) into {hf_home}", file=out)
         try:
-            fetcher(base_data["base"], base_hub.sha, hf_home, files=base_hub.files)
+            with _download_meter(base_data["base"], base_hub, hf_home, out, style, args.quiet):
+                fetcher(base_data["base"], base_hub.sha, hf_home, files=base_hub.files)
         except fetch.FetchError as exc:
             return _refuse(str(exc))
     narrator = None

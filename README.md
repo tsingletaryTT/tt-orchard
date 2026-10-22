@@ -462,6 +462,11 @@ The roles are the orchard names from [the lexicon](orchard/lexicon.py): `orchard
 watchdog). After a quiet minute it says what it is waiting for, and during a hardware test it shows the last
 line of the test's output. `--quiet` turns this off. A resumed run starts by showing its last six entries.
 
+Before the run starts, `bringup` also says what it is doing while the preflight runs: asking the hub, the research
+steps (the lineage, the published bundles, each model's weight headers with the number of shards, existing ports)
+and the machine checks. The research is the slow part. It took 65 to 81 seconds for a 27B model, nearly all of it
+reading weight headers one shard at a time, and nothing printed until it finished. `--quiet` turns these lines off too.
+
 `tt-orchard watch org/name` prints the same lines from another terminal. It reads the ledger and the agent
 logs and writes nothing. It starts from the last 15 entries (`--all` starts from the first), follows the run
 until it ends, and `--once` prints the recent history and stops.
@@ -551,7 +556,7 @@ its reason; a `warn` is information.
 | port | something already listens on `coder.port` (a warning when resuming) | `coder-unusable` |
 | cpu | the CPU tier's server (ollama) does not answer, or does not list the tier's model. Stage 4's 4-chip test parks the coder behind it, so a run without it would stop hours in | `coder-unusable` |
 | gozer | gozer gives no usable status. Stale leases and chips in use are warnings, and nothing is cleared | `hardware-unhealthy` |
-| base | no installed tt-model bundle serves the model this one is based on (the card's `base_model`, or the model named with `--base`). It then runs `tt model search` for the model's family and lists what it finds. At a terminal it asks which bundle to base the run on and installs the pick with `tt-model pull`. In a script it stops and prints the `--base` commands. A base snapshot that is not on disk is downloaded. A card with no `base_model` is a warning. If an installed v6 bundle has the model's architecture, it becomes an inferred base. An inferred base blocks until the operator confirms it: the bundle picked at a terminal or in the new-run dialog, `--base <bundle>`, or `--accept-inferred-base` (then it is a warning and its snapshot is downloaded). See "How the base model is found" | `nearest-model-missing`, `inferred-base-unconfirmed` |
+| base | no installed tt-model bundle serves the model this one is based on (the card's `base_model`, or the model named with `--base`). It then runs `tt model search` for the model's family and lists what it finds. When research found code for the base in tt-metal or tt-transformers, the message names that code first and says whether it ships a vLLM generator and whether its README names a Blackhole board. Code is not a bundle, so a bundle still has to be built or installed. At a terminal it asks which bundle to base the run on and installs the pick with `tt-model pull`. In a script it stops and prints the `--base` commands. A base snapshot that is not on disk is downloaded. A card with no `base_model` is a warning. If an installed v6 bundle has the model's architecture, it becomes an inferred base. An inferred base blocks until the operator confirms it: the bundle picked at a terminal or in the new-run dialog, `--base <bundle>`, or `--accept-inferred-base` (then it is a warning and its snapshot is downloaded). See "How the base model is found" | `nearest-model-missing`, `inferred-base-unconfirmed` |
 | sfpi | the box's SFPI compiler (`dpkg-query -W sfpi`) is older than the version the chosen bundle pins in its ttnn wheel (`ttnn/tt_metal/sfpi-version`). Kernel compiles then fail with `'vLut8si' is not a member of 'sfpi'` (7.67.0 against a pin of 7.73.0, 2026-10-13). tt-orchard does not install system packages; the row names the release to install. A version it cannot read is a warning | `hardware-unhealthy` |
 | reference | `reference_python` is set and cannot import torch, transformers, tokenizers and safetensors. Not set is a warning: the stage 1 agent then looks for an interpreter itself | `config-invalid` |
 | skills | never. Each tenstorrent/skills clone that `skills_dirs` points into is compared with upstream main (read only: `git ls-remote`, nothing is pulled). A clone that is behind, differs, could not be compared, has uncommitted changes or is on a branch other than main is a warning that says how to update. No `skills_dirs` is a warning. A check of the same commit from the last 10 minutes is reused | none |
@@ -561,6 +566,14 @@ uses your Hugging Face token: the download runs with every token variable remove
 block and not a login. Files the model repo ships (for example a `.py` file) are downloaded and recorded.
 The harness does not run them outside the agent sandbox. `--no-fetch` skips the download and requires the
 snapshot to be in `hf_home` already.
+
+While the weights download, a progress line shows the bytes that have arrived, a bar, the speed, an ETA (after the
+first ten seconds) and the files complete. `hf download` prints no byte counts of its own, so the line measures the
+cache: growth of the repo's `blobs` directory since the start. With Xet those files grow in bursts, so on a single
+large file the bar can sit still and then jump; the elapsed time keeps counting, and "waiting for data" appears when
+nothing has arrived for 15 seconds. On a terminal the line is redrawn in place. In a pipe or a log, and with
+`--style plain`, it prints a line at each 10% and at least once a minute. `--quiet` turns it off. A download that is
+resuming starts the bar a little low, because a partly downloaded file left by the earlier attempt is not counted.
 
 `config/bringup.toml` holds the runs root (each model gets `<runs_root>/<org>--<name>`), the coder
 (`target`, `port`, `chips`, and optionally `kind`, `profile`, `image_id`), and optional `tiers`,
