@@ -1169,10 +1169,23 @@ def license_side(snapshot: Path) -> dict:
             "source": "model card front matter" if field else ("LICENSE file" if guess else None)}
 
 
+def eos_ids(gen: dict) -> list[int]:
+    """The integer stop token ids of a generation config's top-level eos_token_id (an int or a list of ints).
+    Empty when the key is absent or holds anything else: the bundle's serving code reads it only there."""
+    v = gen.get("eos_token_id")
+    if isinstance(v, int) and not isinstance(v, bool):
+        return [v]
+    if isinstance(v, list) and v and all(isinstance(x, int) and not isinstance(x, bool) for x in v):
+        return list(v)
+    return []
+
+
 def compare_genconfig_license(model_dir: Path, base_dir: Path) -> dict:
     mg, merr = read_json(model_dir / "generation_config.json")
     bg, berr = read_json(base_dir / "generation_config.json")
+    bc, _ = read_json(base_dir / "config.json")             # staging copies this one, so its stop token can count
     mg, bg = mg if isinstance(mg, dict) else {}, bg if isinstance(bg, dict) else {}
+    bc = bc if isinstance(bc, dict) else {}
     diffs = {k: {"model": mg.get(k, ABSENT), "base": bg.get(k, ABSENT)}
              for k in sorted(set(mg) | set(bg)) if mg.get(k, ABSENT) != bg.get(k, ABSENT)}
     ml, bl = license_side(model_dir), license_side(base_dir)
@@ -1181,6 +1194,8 @@ def compare_genconfig_license(model_dir: Path, base_dir: Path) -> dict:
             "model_generation_config_present": (model_dir / "generation_config.json").is_file(),
             "base_generation_config_present": (base_dir / "generation_config.json").is_file(),
             "errors": [e for e in (merr, berr) if e],
+            "model_eos_token_ids": eos_ids(mg), "base_eos_token_ids": eos_ids(bg),
+            "base_config_eos_token_ids": eos_ids(bc),
             "generation_config_diffs": diffs, "generation_config_equal": not diffs,
             "generation_config_equal_except_bookkeeping": all(k in BOOKKEEPING for k in diffs),
             "model_license": ml, "base_license": bl, "license_changed": changed}
@@ -1462,6 +1477,54 @@ def decide_class(c: dict, t: dict, reasons: list[str], sc: dict) -> str:
     return "weights+sidecar" if sc["sidecars"] else "weights-only"
 
 
+SAMPLING_KEYS = ("temperature", "top_k", "top_p", "repetition_penalty", "do_sample")
+
+
+def generation_config_hazards(nearest_id: str, g: dict, ev) -> list[dict]:
+    """Stage 2 serves a directory whose generation_config.json is the new model's when it ships one and the
+    nearest model's when it does not. The nearest bundle's engine reads eos_token_id from that file (or from
+    config.json, which here is the nearest model's and nests it) and stops after loading the weights when it
+    finds none (BAAI/AREX-2, 2026-10-21). Flag each case that is not "the model's own file with stop tokens"."""
+    finding = None
+    base_ids = g["base_eos_token_ids"]
+    # Staging copies the nearest model's config.json, and the engine reads a top-level eos_token_id from it when
+    # generation_config.json has none. The new model's own config.json is replaced, so its eos_token_id never counts.
+    cfg_ids = g["base_config_eos_token_ids"]
+    from_config = (f"the eos_token_id of the nearest model's config.json, {fmt(cfg_ids)}, which staging copies"
+                   if cfg_ids else None)
+    if not g["model_generation_config_present"]:
+        if g["base_generation_config_present"]:
+            base = g["base_generation_config"]
+            defaults = ", ".join(f"{k} {fmt(base[k])}" for k in SAMPLING_KEYS if k in base)
+            if base_ids:
+                stop = f"the server will stop on that model's eos_token_id {fmt(base_ids)}"
+            elif from_config:
+                stop = f"the server will stop on {from_config} (the nearest model's generation_config.json has none)"
+            else:
+                stop = "the server will stop on that model's eos_token_id []"
+            finding = (f"The new model ships no generation_config.json. Staging copies the nearest model's "
+                       f"({nearest_id}), so {stop}"
+                       + (f" and apply its sampling defaults ({defaults}) to a request that sets none" if defaults else "")
+                       + (". The nearest model's file has no eos_token_id and neither has its config.json, so the "
+                          "engine stops after loading the weights" if not (base_ids or cfg_ids) else "")
+                       + ". Read the new model's card for the stop tokens and settings it recommends.")
+        elif from_config:
+            finding = ("Neither model ships a generation_config.json, so the server has no sampling defaults. It will "
+                       f"stop on {from_config}. Read the new model's card for the stop tokens and settings it recommends.")
+        else:
+            finding = ("Neither model ships a generation_config.json, so the server has no eos_token_id and the "
+                       "nearest bundle's engine stops after loading the weights.")
+    elif not g["model_eos_token_ids"]:
+        if from_config:
+            finding = ("The new model's generation_config.json has no eos_token_id. The server will stop on "
+                       f"{from_config}. Read the new model's card for the stop tokens it recommends.")
+        else:
+            finding = ("The new model's generation_config.json has no eos_token_id. The nearest bundle's engine reads "
+                       "it from that file or from config.json (the nearest model's here, which nests it) and stops "
+                       "after loading the weights when it finds none.")
+    return [{"area": "generation_config", "finding": finding, "evidence": [ev("genconfig-license.json")]}] if finding else []
+
+
 def hazards(model_id: str, nearest_id: str, t: dict, f: dict, g: dict, disk: dict, ev) -> list[dict]:
     out = [
         {"area": "tensor_cache",
@@ -1493,6 +1556,7 @@ def hazards(model_id: str, nearest_id: str, t: dict, f: dict, g: dict, disk: dic
                                 "sampling then moves to the host. Speed figures from the nearest model's "
                                 "packages do not carry over."),
                     "evidence": [ev("tensor-compare.json")]})
+    out += generation_config_hazards(nearest_id, g, ev)
     if g["license_changed"] is True:
         out.append({"area": "license",
                     "finding": (f"The license changed from {g['base_license']['license']} (nearest model) to "
