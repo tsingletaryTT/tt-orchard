@@ -154,8 +154,8 @@ def text_config(vocab: int, **change) -> dict:
 
 def make_snapshot(root: Path, rev: str, *, nested: bool, vision: bool, tokenizer: str,
                   license_id: str = "apache-2.0", config_change=None, tensor_change=None,
-                  genconfig_change=None, template: str = "{% for m in messages %}{{ m.content }}{% endfor %}",
-                  extra_files=None) -> Path:
+                  genconfig_change=None, template: str | None = "{% for m in messages %}{{ m.content }}{% endfor %}",
+                  tokenizer_config=None, extra_files=None) -> Path:
     """An HF-cache-shaped snapshot directory (blobs are plain files here; the script follows links
     the same way either way)."""
     snap = root / "snapshots" / rev
@@ -174,8 +174,9 @@ def make_snapshot(root: Path, rev: str, *, nested: bool, vision: bool, tokenizer
     gen.update(genconfig_change or {})
     (snap / "generation_config.json").write_text(json.dumps(gen))
     (snap / "tokenizer.json").write_text(tokenizer)
-    (snap / "tokenizer_config.json").write_text(json.dumps({"model_max_length": 1024}))
-    (snap / "chat_template.jinja").write_text(template)
+    (snap / "tokenizer_config.json").write_text(json.dumps({"model_max_length": 1024, **(tokenizer_config or {})}))
+    if template is not None:                  # None: the snapshot ships no chat_template.jinja
+        (snap / "chat_template.jinja").write_text(template)
     (snap / "README.md").write_text(f"---\nlicense: {license_id}\nlibrary_name: transformers\n---\n\n"
                                     "# A model\nIt writes text.\n")
     (snap / "LICENSE").write_text({"apache-2.0": "\n   Apache License\n   Version 2.0, January 2004\n",
@@ -238,11 +239,11 @@ def area(d: dict, name: str) -> dict:
 @pytest.fixture
 def text_case(tmp_path, tokenizer_json):
     """Hemmingway-1's shape: a text-only fine-tune against a vision-language nearest model."""
-    def build(model_tokenizer=None, **model_kw):
+    def build(model_tokenizer=None, base_kw=None, **model_kw):
         model = make_snapshot(tmp_path / "new", MODEL_REV, nested=False, vision=False,
                               tokenizer=model_tokenizer or tokenizer_json, **model_kw)
         nearest = make_snapshot(tmp_path / "base", BASE_REV, nested=True, vision=True,
-                                tokenizer=tokenizer_json)
+                                tokenizer=tokenizer_json, **(base_kw or {}))
         return stage_for(tmp_path, model, nearest)
     return build
 
@@ -391,6 +392,98 @@ def test_a_different_chat_template_is_reported_by_sha256(text_case):
     assert tc["chat_template_equal"] is False
     assert tc["model"]["chat_template_sha256"] != tc["base"]["chat_template_sha256"]
     assert tc["model"]["chat_template_sha256"][:12] in area(delta(stage), "chat_template")["finding"]
+
+
+def chat_hazards(stage):
+    return [h for h in delta(stage)["hazards"] if h["area"] == "chat_template"]
+
+
+def test_identical_templates_and_special_tokens_raise_no_chat_template_hazard(text_case):
+    tokens = {"eos_token": "<|im_end|>", "pad_token": "<|endoftext|>"}
+    stage = text_case(tokenizer_config=tokens, base_kw={"tokenizer_config": tokens})
+    assert run_triage(stage).returncode == 0
+    tc = evidence(stage, "tokenizer-compare.json")
+    assert tc["special_tokens_equal"] is True and tc["special_tokens_diffs"] == {}
+    assert tc["model"]["special_tokens"]["eos_token"] == "<|im_end|>"
+    assert chat_hazards(stage) == []
+    assert "The eos, bos, pad and unk tokens are the same in both." in area(delta(stage), "chat_template")["finding"]
+
+
+def test_a_model_pair_with_no_special_tokens_in_tokenizer_config_says_nothing_about_them(text_case):
+    stage = text_case()
+    assert run_triage(stage).returncode == 0
+    assert evidence(stage, "tokenizer-compare.json")["model"]["special_tokens"] == {
+        "eos_token": None, "bos_token": None, "pad_token": None, "unk_token": None}
+    assert "special tokens" not in area(delta(stage), "chat_template")["finding"].lower()
+    assert "same in both" not in area(delta(stage), "chat_template")["finding"]
+
+
+def test_a_different_chat_template_raises_a_hazard_that_says_what_no_stage_checks(text_case):
+    stage = text_case(template="{{ messages[0].content }} changed")
+    assert run_triage(stage).returncode == 0
+    [h] = chat_hazards(stage)
+    tc = evidence(stage, "tokenizer-compare.json")
+    assert tc["model"]["chat_template_sha256"][:12] in h["finding"] and tc["base"]["chat_template_sha256"][:12] in h["finding"]
+    assert "/v1/completions" in h["finding"] and "Chat output was not checked" in h["finding"]
+    assert h["evidence"] == ["stages/0/evidence/tokenizer-compare.json"]
+
+
+def test_a_model_with_no_chat_template_where_the_nearest_model_has_one_raises_a_hazard(text_case):
+    stage = text_case(template=None)
+    assert run_triage(stage).returncode == 0
+    [h] = chat_hazards(stage)
+    assert "ships no chat template" in h["finding"] and "raises an error" in h["finding"]
+    assert "differs from the nearest model's" not in h["finding"]
+
+
+def test_a_model_that_ships_a_template_the_nearest_model_lacks_raises_no_hazard(text_case):
+    stage = text_case(base_kw={"template": None})
+    assert run_triage(stage).returncode == 0
+    assert evidence(stage, "tokenizer-compare.json")["chat_template_equal"] is False
+    assert chat_hazards(stage) == []
+
+
+def test_neither_model_shipping_a_template_raises_no_hazard(text_case):
+    stage = text_case(template=None, base_kw={"template": None})
+    assert run_triage(stage).returncode == 0
+    assert chat_hazards(stage) == []
+
+
+def test_differing_special_tokens_are_listed_with_both_values_and_raise_the_hazard(text_case):
+    stage = text_case(tokenizer_config={"eos_token": "<|endoftext|>", "pad_token": "<pad>"},
+                      base_kw={"tokenizer_config": {"eos_token": {"content": "<|im_end|>", "special": True},
+                                                    "pad_token": "<pad>"}})
+    assert run_triage(stage).returncode == 0
+    tc = evidence(stage, "tokenizer-compare.json")
+    assert tc["special_tokens_equal"] is False
+    assert tc["special_tokens_diffs"] == {"eos_token": {"model": "<|endoftext|>", "base": "<|im_end|>"}}
+    finding = area(delta(stage), "chat_template")["finding"]
+    assert "eos_token" in finding and "<|endoftext|>" in finding and "<|im_end|>" in finding
+    [h] = chat_hazards(stage)
+    assert "special tokens differ" in h["finding"] and "<|im_end|>" in h["finding"]
+
+
+def test_a_template_in_tokenizer_config_that_differs_from_the_jinja_file_is_reported(text_case):
+    stage = text_case(tokenizer_config={"chat_template": "{{ inline }}"}, template="{{ file }}",
+                      base_kw={"tokenizer_config": {"chat_template": "{{ file }}"}, "template": "{{ file }}"})
+    assert run_triage(stage).returncode == 0
+    tc = evidence(stage, "tokenizer-compare.json")
+    assert tc["model"]["chat_template_inline_sha256"] != tc["model"]["chat_template_file_sha256"]
+    assert tc["base"]["chat_template_inline_sha256"] == tc["base"]["chat_template_file_sha256"]
+    assert tc["chat_template_equal"] is True                          # the file is the one the loader reads
+    finding = area(delta(stage), "chat_template")["finding"]
+    assert "new model's tokenizer_config.json" in finding and "chat_template.jinja" in finding
+    assert "nearest model's tokenizer_config.json" not in finding
+
+
+def test_the_nearest_models_own_template_conflict_is_reported_too(text_case):
+    stage = text_case(template="{{ file }}", base_kw={"tokenizer_config": {"chat_template": "{{ inline }}"},
+                                                       "template": "{{ file }}"})
+    assert run_triage(stage).returncode == 0
+    tc = evidence(stage, "tokenizer-compare.json")
+    assert tc["base"]["chat_template_inline_sha256"] != tc["base"]["chat_template_file_sha256"]
+    finding = area(delta(stage), "chat_template")["finding"]
+    assert "nearest model's tokenizer_config.json" in finding and "new model's tokenizer_config.json" not in finding
 
 
 def test_the_fixed_strings_cover_the_scripts_and_the_random_strings_are_fixed():
