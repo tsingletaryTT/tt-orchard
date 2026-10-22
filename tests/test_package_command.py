@@ -8,8 +8,10 @@ gozer; the stub `gozer` fails the test if it is ever reached."""
 import io
 import json
 import os
+import signal
 import subprocess
 import sys
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -17,6 +19,7 @@ import pytest
 from orchard import package_cmd
 from orchard.ledger import Ledger, read_entries
 from orchard.paths import PATHS_RECORDED
+from orchard.server import proc_identity
 from orchard.stages import gate_package
 from package_fakes import fake_bin, fake_boot_result, make_run, make_source, write
 
@@ -723,3 +726,254 @@ def test_the_default_runner_keeps_only_the_tail_of_a_long_output(tmp_path, monke
     script.chmod(0o755)
     code, text = package_cmd._default_runner([str(script)], {"PATH": "/usr/bin:/bin"})
     assert code == 0 and len(text) <= 200 and "queued: ticket Late1" in text and "filler line 1 " not in text
+
+
+# ---- review: a server the verifier started must not outlive the boot step ------------------------------
+
+RECORD = "verify/evidence/server.pid"
+
+
+def server_like(script="sleep 300", record=None, stage=None):
+    """A process in its own session standing in for the server the verifier started. With `stage`, the verifier's record
+    of it is written the way verify_bundle.py writes it (pid, boot id, start time)."""
+    proc = subprocess.Popen(["sh", "-c", script], start_new_session=True, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+    boot_id, start = proc_identity(proc.pid)
+    if stage is not None:
+        write(stage / RECORD, record or {"pid": proc.pid, "boot_id": boot_id, "start_time": start})
+    return proc
+
+
+@pytest.fixture
+def servers():
+    made = []
+    yield made
+    for proc in made:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.wait()
+
+
+def boot_with(rig, monkeypatch, spawn, **kw):
+    run_cmd(rig, step="stage")
+    monkeypatch.setenv("TT_VISIBLE_DEVICES", "2,3")
+    out = io.StringIO()
+    code = package_cmd.main(args(rig, step="boot", cache_root=str(rig["cache"]), **kw), out=out, spawn=spawn,
+                            extra_env=rig["extra_env"])
+    return code, out.getvalue()
+
+
+def result(rig) -> dict:
+    return json.loads((rig["stage"] / "test-result.json").read_text())
+
+
+def test_a_server_left_behind_by_a_timed_out_check_is_stopped_before_the_step_returns(rig, monkeypatch, servers):
+    def spawn(command, run_dir, env, timeout, stdout):
+        servers.append(server_like(stage=rig["stage"]))
+        return None, True
+    code, text = boot_with(rig, monkeypatch, spawn)
+    assert code == 1
+    assert servers[0].wait(timeout=5) in (-signal.SIGTERM, -signal.SIGKILL)       # gone, and reaped here
+    assert result(rig)["server"] == {"recorded": True, "outcome": "stopped"}
+    assert not (rig["stage"] / RECORD).exists()
+    assert "stopped" in text
+
+
+def test_a_server_that_ignores_sigterm_is_killed_after_the_wait(rig, monkeypatch, servers):
+    monkeypatch.setattr(package_cmd, "TERM_WAIT_S", 0.5)
+    def spawn(command, run_dir, env, timeout, stdout):
+        servers.append(server_like('trap "" TERM; while true; do sleep 1; done', stage=rig["stage"]))
+        time.sleep(0.3)                                                          # let sh install its trap
+        return None, True
+    code, _ = boot_with(rig, monkeypatch, spawn)
+    assert servers[0].wait(timeout=5) == -signal.SIGKILL
+    assert result(rig)["server"]["outcome"] == "killed" and code == 1
+
+
+def test_a_record_whose_process_start_time_differs_is_not_signalled(rig, monkeypatch, servers):
+    """A pid can be reused. The record holds the start time, and a process that does not match it is left alone."""
+    def spawn(command, run_dir, env, timeout, stdout):
+        proc = server_like()
+        servers.append(proc)
+        boot_id, start = proc_identity(proc.pid)
+        write(rig["stage"] / RECORD, {"pid": proc.pid, "boot_id": boot_id, "start_time": start + 1})
+        return 0, False
+    code, text = boot_with(rig, monkeypatch, spawn)
+    assert servers[0].poll() is None                                              # still running: not ours to stop
+    assert result(rig)["server"] == {"recorded": True, "outcome": "not the recorded process"}
+    assert code == 0 and not (rig["stage"] / RECORD).exists()
+
+
+def test_a_server_that_cannot_be_stopped_fails_the_step_and_says_where_to_look(rig, monkeypatch, servers):
+    monkeypatch.setattr(package_cmd, "_signal_group", lambda pgid, sig: None)
+    monkeypatch.setattr(package_cmd, "TERM_WAIT_S", 0.2)
+    monkeypatch.setattr(package_cmd, "KILL_WAIT_S", 0.2)
+    def spawn(command, run_dir, env, timeout, stdout):
+        servers.append(server_like(stage=rig["stage"]))
+        return 0, False
+    code, text = boot_with(rig, monkeypatch, spawn)
+    assert code == 1 and "still running" in text and "gozer status" in text
+    assert result(rig)["server"]["outcome"] == "still running"
+    assert servers[0].poll() is None
+
+
+def test_a_clean_check_leaves_no_server_record_and_the_result_says_so(rig, monkeypatch):
+    code, _ = boot_with(rig, monkeypatch, lambda c, r, e, t, o: (0, False))
+    assert code == 0 and result(rig)["server"] == {"recorded": False}
+
+
+def test_an_interrupted_check_still_stops_the_server_and_the_interrupt_goes_on(rig, monkeypatch, servers):
+    def spawn(command, run_dir, env, timeout, stdout):
+        servers.append(server_like(stage=rig["stage"]))
+        raise KeyboardInterrupt
+    with pytest.raises(KeyboardInterrupt):
+        boot_with(rig, monkeypatch, spawn)
+    assert servers[0].wait(timeout=5) in (-signal.SIGTERM, -signal.SIGKILL)
+
+
+def test_sigterm_from_the_leases_timeout_stops_the_server_too_and_the_handler_is_put_back(rig, monkeypatch, servers):
+    """`timeout` in the lease command sends SIGTERM to the boot step. The baseline handler only counts, so a boot step
+    with no handler of its own fails this test instead of ending the test run."""
+    got = []
+    baseline = lambda sig, frame: got.append(sig)                         # noqa: E731
+    original = signal.signal(signal.SIGTERM, baseline)
+    try:
+        def spawn(command, run_dir, env, timeout, stdout):
+            servers.append(server_like(stage=rig["stage"]))
+            os.kill(os.getpid(), signal.SIGTERM)
+            time.sleep(2)
+            return None, True
+        with pytest.raises(SystemExit) as stopped:
+            boot_with(rig, monkeypatch, spawn)
+        assert stopped.value.code == 128 + signal.SIGTERM                 # the conventional exit of a SIGTERM
+        assert signal.getsignal(signal.SIGTERM) is baseline
+    finally:
+        signal.signal(signal.SIGTERM, original)
+    assert servers[0].wait(timeout=5) in (-signal.SIGTERM, -signal.SIGKILL)
+
+
+def test_the_handler_is_put_back_after_a_normal_step(rig, monkeypatch):
+    baseline = lambda sig, frame: None                                    # noqa: E731
+    original = signal.signal(signal.SIGTERM, baseline)
+    try:
+        boot_with(rig, monkeypatch, lambda c, r, e, t, o: (0, False))
+        assert signal.getsignal(signal.SIGTERM) is baseline
+    finally:
+        signal.signal(signal.SIGTERM, original)
+
+
+@pytest.mark.parametrize("junk", ["not json", '{"pid": "x"}', '{"pid": 0, "boot_id": "b", "start_time": 1}',
+                                  '{"pid": 1, "boot_id": "b"}', '[]', '{"pid": true, "boot_id": "b", "start_time": 1}',
+                                  '{"pid": 4242424, "boot_id": "b", "start_time": true}',
+                                  '{"pid": 4242424, "boot_id": 7, "start_time": 1}'])
+def test_a_damaged_server_record_signals_nothing_and_is_reported(rig, monkeypatch, junk):
+    def spawn(command, run_dir, env, timeout, stdout):
+        (rig["stage"] / RECORD).parent.mkdir(parents=True, exist_ok=True)
+        (rig["stage"] / RECORD).write_text(junk)
+        return 0, False
+    code, text = boot_with(rig, monkeypatch, spawn)
+    assert result(rig)["server"] == {"recorded": True, "outcome": "unreadable record"}
+    assert "gozer status" in text
+
+
+def test_a_real_timed_out_boot_check_leaves_no_server_running(rig, monkeypatch):
+    """The whole path: the staged verifier runs under the real spawn, the fake server is too slow for the deadline,
+    spawn_checked kills the verifier's session, and the server, which has a session of its own, is stopped by the step."""
+    from package_fakes import GENERATED, PROMPT_IDS, VOCAB
+    run_cmd(rig, step="stage")
+    pid_file = rig["tmp"] / "server-pid.json"
+    (rig["tmp"] / "server.json").write_text(json.dumps({"mode": "slow", "delay_s": 3, "vocab": VOCAB,
+                                                        "prompt_ids": PROMPT_IDS, "generated_ids": GENERATED,
+                                                        "pid_file": str(pid_file)}))
+    hw = json.loads((rig["stage"] / "hw_test.json").read_text())
+    hw["deadline_s"] = 20
+    write(rig["stage"] / "hw_test.json", hw)
+    monkeypatch.setenv("TT_VISIBLE_DEVICES", "2,3")
+    out = io.StringIO()
+    server = None
+    try:
+        code = package_cmd.main(args(rig, step="boot", cache_root=str(rig["cache"])), out=out,
+                                extra_env=rig["extra_env"])
+        server = json.loads(pid_file.read_text())
+        assert code == 1 and result(rig)["timed_out"] is True, out.getvalue()
+        assert result(rig)["server"]["outcome"] in ("stopped", "killed")
+        with pytest.raises(ProcessLookupError):
+            os.killpg(server["pgid"], 0)
+    finally:
+        if pid_file.exists():
+            try:
+                os.killpg(json.loads(pid_file.read_text())["pgid"], signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+def test_a_record_from_another_boot_is_not_signalled_even_with_the_same_start_time(rig, monkeypatch, servers):
+    """Start times count clock ticks since boot, so the same number on another boot is a different process."""
+    def spawn(command, run_dir, env, timeout, stdout):
+        proc = server_like()
+        servers.append(proc)
+        boot_id, start = proc_identity(proc.pid)
+        write(rig["stage"] / RECORD, {"pid": proc.pid, "boot_id": "another-boot", "start_time": start})
+        return 0, False
+    boot_with(rig, monkeypatch, spawn)
+    assert servers[0].poll() is None
+    assert result(rig)["server"]["outcome"] == "not the recorded process"
+
+
+def test_a_server_whose_leader_is_gone_but_whose_group_still_runs_is_stopped(rig, monkeypatch, servers):
+    """The server's worker outlived its leader: nothing else can hold that process group id, so the members are the
+    old group's and are stopped."""
+    def spawn(command, run_dir, env, timeout, stdout):
+        leader = server_like("sleep 300 & sleep 0.3", stage=rig["stage"])
+        servers.append(leader)
+        leader.wait(timeout=10)                                                  # the leader is gone, its child is not
+        assert proc_identity(leader.pid) is None
+        return 0, False
+    code, text = boot_with(rig, monkeypatch, spawn)
+    from orchard.package_cmd import _group_members
+    assert result(rig)["server"]["outcome"] == "stopped"
+    assert _group_members(servers[0].pid) == []
+
+
+def test_a_record_whose_process_and_group_are_both_gone_is_reported_as_already_gone(rig, monkeypatch, servers):
+    def spawn(command, run_dir, env, timeout, stdout):
+        proc = server_like("exit 0", stage=rig["stage"])
+        proc.wait(timeout=10)
+        return 0, False
+    boot_with(rig, monkeypatch, spawn)
+    assert result(rig)["server"] == {"recorded": True, "outcome": "already gone"}
+    assert not (rig["stage"] / RECORD).exists()
+
+
+@pytest.mark.parametrize("which", ["pid", "group"])
+def test_a_record_naming_the_commands_own_process_or_group_signals_nothing(rig, monkeypatch, which):
+    """The step runs inside its own process group. A record that names it would have the step signal itself."""
+    own = os.getpid() if which == "pid" else os.getpgrp()
+    def spawn(command, run_dir, env, timeout, stdout):
+        boot_id, start = proc_identity(own)
+        write(rig["stage"] / RECORD, {"pid": own, "boot_id": boot_id, "start_time": start})
+        return 0, False
+    code, text = boot_with(rig, monkeypatch, spawn)                      # still here: nothing signalled this process
+    assert result(rig)["server"] == {"recorded": True, "outcome": "unreadable record"}
+
+
+def test_the_record_reader_refuses_the_steps_own_pid_and_group_separately(tmp_path, monkeypatch):
+    """Pid and group id are told apart here by patching both, because a test run in a session of its own has them equal."""
+    monkeypatch.setattr(os, "getpid", lambda: 111111)
+    monkeypatch.setattr(os, "getpgrp", lambda: 222222)
+    rec = tmp_path / "server.pid"
+    for pid, ok in ((111111, False), (222222, False), (333333, True)):
+        rec.write_text(json.dumps({"pid": pid, "boot_id": "b", "start_time": 5}))
+        assert (package_cmd._read_server_record(rec) is not None) is ok, pid
+
+
+def test_a_server_that_takes_a_moment_to_exit_on_sigterm_is_stopped_not_killed(rig, monkeypatch, servers):
+    """It gets TERM_WAIT_S to leave on its own; only one that does not leave in that time is killed."""
+    def spawn(command, run_dir, env, timeout, stdout):
+        servers.append(server_like("trap 'sleep 0.6; exit 0' TERM; while true; do sleep 0.1; done", stage=rig["stage"]))
+        time.sleep(0.3)                                                          # let sh install its trap
+        return None, True
+    boot_with(rig, monkeypatch, spawn)
+    assert result(rig)["server"]["outcome"] == "stopped" and servers[0].wait(timeout=5) == 0

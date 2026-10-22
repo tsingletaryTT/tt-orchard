@@ -21,6 +21,7 @@ import json
 import math
 import os
 import re
+import signal
 import socket
 import subprocess
 import sys
@@ -35,12 +36,16 @@ from orchard.package import (BENCHMARK_NUMBERS_FILE, PUBLISH_FILE, REPORTED_FILE
                              read_reported_file)
 from orchard.paths import recorded_paths
 from orchard.runner import Denied, check_string
+from orchard.server import proc_identity
 from orchard.stages import evidence_record, gate_package
 
 EXIT_OK, EXIT_FAILED, EXIT_REFUSED, EXIT_QUEUED = 0, 1, 2, 3
 GOZER_QUEUED = 10                      # gozer's exit code for a request that was queued
 LEASE_WHO = "claude:package"
 BOOT_SLACK_S = 600                     # the lease's timeout is the test's own deadline plus this
+SERVER_RECORD = "verify/evidence/server.pid"   # verify_bundle.py writes the server it starts here, under stages/7
+TERM_WAIT_S = 30.0                     # how long the server's group gets after SIGTERM before SIGKILL
+KILL_WAIT_S = 10.0                     # and how long after SIGKILL before the step says it is still running
 OUTPUT_KEEP = 65536                    # the tail of `gozer run`'s own output the command keeps, to find a queue ticket
 SECRET = re.compile(r"TOKEN|SECRET|PASSWORD|CREDENTIAL|API_?KEY", re.I)
 BENCHMARK_COPY = "stages/7/benchmark/benchmark.json"
@@ -250,8 +255,107 @@ def _refuse_command(command: str, run: Path) -> None:
         raise PackageCommandError(f"the boot check's command is refused: {exc}") from None
 
 
+def _group_members(pgid: int, proc_root: str = "/proc") -> list[int]:
+    """Live (not zombie) processes in the process group `pgid`, from /proc/<pid>/stat."""
+    found = []
+    for entry in os.listdir(proc_root):
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"{proc_root}/{entry}/stat") as f:
+                stat = f.read()
+            state, _ppid, pgrp = stat[stat.rindex(")") + 1:].split()[:3]
+        except (OSError, ValueError, IndexError):
+            continue
+        if int(pgrp) == pgid and state != "Z":
+            found.append(int(entry))
+    return found
+
+
+def _signal_group(pgid: int, sig: int) -> None:
+    try:
+        os.killpg(pgid, sig)
+    except ProcessLookupError:
+        pass
+
+
+def _wait_gone(pgid: int, seconds: float, sleep=time.sleep) -> bool:
+    end = time.monotonic() + seconds
+    while True:
+        if not _group_members(pgid):
+            return True
+        if time.monotonic() >= end:
+            return False
+        sleep(0.1)
+
+
+def _read_server_record(path: Path):
+    """(pid, boot id, start time) from verify_bundle.py's record, or None when it is not a record."""
+    try:
+        rec = json.loads(path.read_text(encoding="utf-8"))
+        pid, boot, start = rec["pid"], rec["boot_id"], rec["start_time"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if (not isinstance(pid, int) or pid <= 1 or not isinstance(start, int)
+            or isinstance(start, bool) or not (boot is None or isinstance(boot, str))):
+        return None
+    if pid in (os.getpid(), os.getpgrp()):
+        return None             # signalling the step's own process or group would end the step, not a server
+    return pid, boot, start
+
+
+def _stop_recorded_server(stage_dir: Path, sleep=time.sleep) -> dict:
+    """Stop the server the verifier started, if it is still there. The verifier runs it in a session of its own, so
+    killing the verifier's session (a timeout, an interrupt) leaves it running with the chips open, and the lease
+    would be given back under it. verify_bundle.py records its pid, boot id and start time; the group is signalled
+    only when that process still has this start time, because a pid can be reused. When the leader is gone but its
+    group still has members, they are the old group's: a pid cannot be reused while a group still uses it.
+    Returns the `server` block of test-result.json."""
+    path = stage_dir / SERVER_RECORD
+    if not path.exists():
+        return {"recorded": False}
+    got = _read_server_record(path)
+    if got is None:
+        path.unlink(missing_ok=True)
+        return {"recorded": True, "outcome": "unreadable record"}
+    pid, boot, start = got
+    seen = proc_identity(pid)
+    if seen is not None and seen != (boot, start):
+        path.unlink(missing_ok=True)
+        return {"recorded": True, "outcome": "not the recorded process"}
+    if seen is None and not _group_members(pid):
+        path.unlink(missing_ok=True)
+        return {"recorded": True, "outcome": "already gone"}
+    _signal_group(pid, signal.SIGTERM)
+    outcome = "stopped"
+    if not _wait_gone(pid, TERM_WAIT_S, sleep):
+        _signal_group(pid, signal.SIGKILL)
+        outcome = "killed"
+        if not _wait_gone(pid, KILL_WAIT_S, sleep):
+            return {"recorded": True, "outcome": "still running", "pid": pid}   # the record stays for the next look
+    path.unlink(missing_ok=True)
+    return {"recorded": True, "outcome": outcome}
+
+
+SERVER_TEXT = {
+    "stopped": "the server the verifier started was still running and was stopped",
+    "killed": "the server the verifier started ignored SIGTERM and was killed",
+    "already gone": "the server the verifier started is gone",
+    "not the recorded process": "the pid in the verifier's server record belongs to another process now, so nothing "
+                                "was signalled",
+    "unreadable record": "the verifier's server record is damaged, so nothing was signalled; look with `gozer status` "
+                         "and `ps`",
+}
+
+
+def _term_to_exit(signum, frame):
+    raise SystemExit(128 + signum)
+
+
 def boot_step(run: Path, args, out, *, env, spawn, extra_env) -> int:
-    """The boot check itself. It runs under a lease: gozer sets TT_VISIBLE_DEVICES for its child."""
+    """The boot check itself. It runs under a lease: gozer sets TT_VISIBLE_DEVICES for its child. Whatever ends the
+    check (its deadline, an interrupt, the lease command's `timeout` sending SIGTERM), the server it started is
+    stopped before this step returns and gozer gives the chips back."""
     stage_dir = run / "stages" / "7"
     test = _test(stage_dir)
     _refuse_command(test["command"], run)
@@ -268,15 +372,32 @@ def boot_step(run: Path, args, out, *, env, spawn, extra_env) -> int:
     out_path = stage_dir / "evidence" / "hw-test-output.txt"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     t0 = time.time()
-    with open(out_path, "wb") as log:
-        code, timed_out = spawn(test["command"], run, benv, test["deadline_s"], log)
+    try:
+        previous = signal.signal(signal.SIGTERM, _term_to_exit)
+    except ValueError:                      # not the main thread: nothing to install, the finally still runs
+        previous = None
+    try:
+        with open(out_path, "wb") as log:
+            code, timed_out = spawn(test["command"], run, benv, test["deadline_s"], log)
+    finally:
+        server = _stop_recorded_server(stage_dir)
+        if previous is not None:
+            signal.signal(signal.SIGTERM, previous)
+        if server.get("outcome") in SERVER_TEXT:
+            _say(out, "boot check: " + SERVER_TEXT[server["outcome"]])
+        elif server.get("outcome") == "still running":
+            _say(out, f"boot check: the server the verifier started (pid {server['pid']}) is still running and could "
+                      "not be stopped. The chips are still open: look with `gozer status` and use the "
+                      "gozer-gatekeeper skill. Do not reset a chip by hand")
     result = {"command": test["command"], "returncode": code, "timed_out": timed_out,
               "seconds": round(time.time() - t0, 3), "chips": chips.split(","),
-              "output": evidence_record(run, out_path)}
+              "output": evidence_record(run, out_path), "server": server}
     tmp = stage_dir / "test-result.json.tmp"
     tmp.write_text(json.dumps(result, indent=2), encoding="utf-8")
     os.replace(tmp, stage_dir / "test-result.json")
     _say(out, f"boot check: exit {code}, timed out {timed_out}, {result['seconds']} s")
+    if server.get("outcome") == "still running":
+        return EXIT_FAILED
     return EXIT_OK if code == 0 and not timed_out else EXIT_FAILED
 
 
