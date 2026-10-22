@@ -57,6 +57,11 @@ write a script.
 - `prepare_swap.py` also writes `stages/2/model-dir-sources.json`: which files of `model-dir/` came from the
   nearest model and which from the new model, and whose generation config the server reads. The stage 8 bundle
   and the package card quote it. Do not edit it or write one yourself.
+- `prepare_swap.py` warns "no stop token" when the model directory has no top-level `eos_token_id` in
+  `generation_config.json` or `config.json`. The Qwen3.8 bundle then stops after loading the weights. The warning is
+  advisory, because it predicts from one bundle's reading rule. Do not try to fix it. Write `hw_test.json` and
+  `handoff.json` as usual and let the hardware test show whether the server starts. If it does not, the finish step
+  records the failure and the operator reads the stop tokens question in the block message.
 - Write each file as soon as you know its content. Do not wait until the end.
 - Do not investigate anything this skill does not list. On an earlier run the model spent 60 turns
   grepping vLLM source for an unrelated timeout and wrote nothing.
