@@ -463,6 +463,16 @@ def test_differing_special_tokens_are_listed_with_both_values_and_raise_the_haza
     assert "special tokens differ" in h["finding"] and "<|im_end|>" in h["finding"]
 
 
+def test_a_special_token_one_model_lacks_is_called_absent(text_case):
+    stage = text_case(base_kw={"tokenizer_config": {"bos_token": "<s>"}})
+    assert run_triage(stage).returncode == 0
+    finding = area(delta(stage), "chat_template")["finding"]
+    assert "bos_token is absent in the new model and <s> in the nearest model" in finding
+    assert "null" not in finding.lower()
+    [h] = chat_hazards(stage)
+    assert "bos_token absent against <s>" in h["finding"] and "null" not in h["finding"].lower()
+
+
 def test_a_template_in_tokenizer_config_that_differs_from_the_jinja_file_is_reported(text_case):
     stage = text_case(tokenizer_config={"chat_template": "{{ inline }}"}, template="{{ file }}",
                       base_kw={"tokenizer_config": {"chat_template": "{{ file }}"}, "template": "{{ file }}"})

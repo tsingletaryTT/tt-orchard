@@ -1402,6 +1402,10 @@ def tokenizer_finding(tc: dict, enc: dict) -> str:
     return s
 
 
+def token_text(value) -> str:
+    return value if isinstance(value, str) else "absent"
+
+
 def chat_template_finding(tc: dict) -> str:
     m, b = tc["model"], tc["base"]
     if m["chat_template_sha256"] is None and b["chat_template_sha256"] is None:
@@ -1426,7 +1430,7 @@ def chat_template_finding(tc: dict) -> str:
             s += " The eos, bos, pad and unk tokens are the same in both."
     else:
         s += (" Special tokens that differ: "
-              + "; ".join(f"{k} is {fmt(d['model'])} in the new model and {fmt(d['base'])} in the nearest model"
+              + "; ".join(f"{k} is {token_text(d['model'])} in the new model and {token_text(d['base'])} in the nearest model"
                           for k, d in tc["special_tokens_diffs"].items()) + ".")
     return s
 
@@ -1587,7 +1591,8 @@ def chat_template_hazards(tc: dict, ev) -> list[dict]:
                        "none, and transformers 5.19.0 raises an error when asked to apply one.")
     if not tc["special_tokens_equal"]:
         reasons.append("Its special tokens differ from the nearest model's: "
-                       + "; ".join(f"{k} {fmt(d['model'])} against {fmt(d['base'])}" for k, d in tc["special_tokens_diffs"].items())
+                       + "; ".join(f"{k} {token_text(d['model'])} against {token_text(d['base'])}"
+                                  for k, d in tc["special_tokens_diffs"].items())
                        + ".")
     if not reasons:
         return []
