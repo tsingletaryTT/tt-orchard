@@ -1800,3 +1800,34 @@ templates, one inside `tokenizer_config.json` and one in `chat_template.jinja`; 
 - Not done, and needs hardware: the second half of the issue, one chat request in stage 2 that uses the new template and checks the reply starts and stops as the model card
   says. The special-token check does not compare the new model's end token with the stop ids the server uses, because whether the server also stops on the tokenizer's eos token
   was not found out. A Qwen3.8 fine-tune with a different template has not been seen, so the "different" hazard has run only on other families and on built fixtures.
+## 2026-10-22 (UTC): the base control and the board are built by code (branch `bench-base-control`, version 0.8.23 after the merge with main; built as 0.8.18)
+Prompt (operator): "while we wait, let's take on more issues"; this is issue #20. The AREX-2 benchmark drivers were copied shell scripts: the base control's run.sh was made with `sed`,
+and two launches that both wrote `--exact 2` asked for the same board.
+- `orchard/bench_control.py`, with two commands. `build` writes the control's run.sh from the model's run.sh by replacing the model's directory with the base snapshot, in the `HF_MODEL` line and
+  the `--model` flag. It refuses a script that names the model in only one of them, a base equal to the model, and a path it cannot find as a whole path (`model-dir2` and `model-dir-old` are
+  not swapped). It reads both files again and refuses unless every differing line is explained by that swap alone. It writes `<out>.control.json`: both hashes, the swapped line numbers, and the
+  drafter and sampling mode of each script (`serving_facts`: drafter off when `QWEN36_DRAFTER` is exported empty, sampling on the device when the script sets `sample_on_device_mode`).
+- `board` reads `gozer status --json` and names boards whose chips are all FREE, one per session asked for (`--chips 2 --chips 2` gives two different boards), with the device index of each board's
+  first chip as the `--exact` value (`--exact N` selects the unit holding chip N). `--wait-s` polls every 10 s, because a released board shows BUSY-UNTRACKED for about a minute. It prints the
+  `gozer run` command for each session and exits 2 with the state it saw when no board is free.
+- `bench_session` records `serving` (the run.sh's drafter and sampling mode) in every summary.json that started a server, and takes `--control-record FILE`, which it copies into the summary as
+  `control`. A record whose hash is not the run.sh's is refused before any server starts.
+- Checked on the real AREX-2 files: `build` reproduces the by-hand `base-run.sh` byte for byte (sha256 09e08f55...), and `board` parses the live `gozer status`. Nothing was run on a chip.
+- Tests first (the module's tests were seen red before it existed). Mutations: 32 on `bench_control.py` (5 survived the first run: one clause that cannot fire because the explained-by-swap check
+  already catches that case, removed; four got tests) and 7 on the `bench_session` change, all red.
+- Review fixes (Copilot, four findings, all real; version stays 0.8.18):
+  - `board` placed each session on the next free board whatever its size, so `--chips 2` could be given a free one-chip board. `plan_boards` now gives each session the smallest free board
+    that holds its chips (the lowest on a tie) and keeps the plans in the order of the requests, and refuses when no board that is left is large enough. The first version of the fix placed
+    the largest request first; a brute-force search over boards and requests up to size 4 found no case where order matters with smallest-fit, so that step was removed.
+  - `bench_session` checked the control record against the script hash only. The session exports `--model-dir` as MODEL_WEIGHTS_DIR, which the runtime reads before the script's own path, so a
+    base-control script and record beside the fine-tune's directory would have served the fine-tune. `control_summary` now needs `--model-dir` with a record and refuses one whose
+    `base_snapshot` is not that directory (links resolved). Before the fix, a test of this on the old code started a real `lm_eval` run; the session tests now stub `_swap` so an unguarded session fails
+    at once and starts nothing.
+  - The path swap was a regex over the whole text: it rewrote `<model-dir>/cache` and `/x<model-dir>`, refused the `shlex.quote` form that `prepare_swap` writes, and put a base snapshot with a
+    space into an unquoted `--model` as two arguments, which `verify_control` accepted. The script is now read as shell words (quotes, comments, operators, line continuations). A word, or a
+    NAME= or --flag= value, that the shell turns into exactly the model directory is replaced, written in the quoting style the script used and quoted for its place; a path inside it or a longer
+    path that contains it is left alone. `verify_control` requires the control to equal that rewrite line for line. A directory still named in a string or an unclosed quote is refused. The tests
+    read the result back through `bash`. The real AREX-2 scripts (fixtures) still give the by-hand control byte for byte. 36 mutations on the new code: 29 red first time, 2 survived (an unquoted
+    backslash, a `'` in a base path inside single quotes) and 5 did not apply (wrong search strings); each got a test or a corrected string and is red.
+- Not done: the drivers in `~/orchard-runs/baai--arex-2/benchmark` still use the by-hand scripts, because a benchmark is running from them. Two launchers that call `board` at the same moment can
+  still pick the same board; the second `gozer run` then queues. The check proves the two scripts match; it does not prove that the control's weights load under a bundle made for the model.

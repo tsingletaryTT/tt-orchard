@@ -1,0 +1,632 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+"""The base control for a benchmark (orchard/bench_control.py): its run.sh comes from the model's own run.sh, and the board comes from `gozer status`.
+
+Nothing here touches a chip. `gozer status --json` is a canned payload in the shape the real command prints."""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from orchard import bench_control as bc
+from orchard import bench_session as bs
+
+MODEL_DIR = "/runs/m/stages/4/configs/2/model-dir"
+BASE = "/hf/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f"
+
+RUN_SH = f"""#!/bin/bash
+HERE="/pkg"
+export HF_HOME="${{HF_HOME:-$HERE/.hf}}"
+export HF_MODEL="{MODEL_DIR}"
+export TT_MODEL_WEIGHTS_REVISION="${{TT_MODEL_WEIGHTS_REVISION:-1d4bf0f}}"
+export QWEN36_DRAFTER=""
+export DFLASH_WEIGHTS="incoai/Qwen3.8-27B-DFlash2@dedf8df"
+CMD=("$PYBIN" -m vllm.entrypoints.openai.api_server --model {MODEL_DIR} --max_num_seqs 4 --additional-config '{{"tt": {{"l1_small_size": 24576}}}}' "$@")
+"$CMD" "$@"
+"""
+
+
+def build():
+    return bc.control_run_sh(RUN_SH, MODEL_DIR, BASE)
+
+
+# ---- the control run.sh ---------------------------------------------------------------------------------------------------------------
+
+def test_the_control_swaps_the_model_path_in_the_environment_line_and_the_model_flag():
+    text = build()
+    assert f'export HF_MODEL="{BASE}"' in text
+    assert f"--model {BASE} --max_num_seqs 4" in text
+    assert MODEL_DIR not in text
+
+
+def test_the_control_differs_from_the_models_script_in_those_two_lines_and_no_other():
+    diff = bc.differing_lines(RUN_SH, build())
+    assert [n for n, _, _ in diff] == [4, 8]
+
+
+def test_the_control_keeps_the_flags_the_drafter_setting_and_the_sampling_mode_of_the_model():
+    text = build()
+    assert 'export QWEN36_DRAFTER=""' in text and "--max_num_seqs 4" in text and "l1_small_size" in text
+
+
+def test_a_model_path_the_script_does_not_contain_is_refused():
+    with pytest.raises(bc.ControlError, match="does not contain"):
+        bc.control_run_sh(RUN_SH, "/elsewhere/model-dir", BASE)
+
+
+def test_a_script_that_names_the_model_only_in_one_place_is_refused():
+    only_env = RUN_SH.replace(f"--model {MODEL_DIR}", "--model /other")
+    with pytest.raises(bc.ControlError, match="--model"):
+        bc.control_run_sh(only_env, MODEL_DIR, BASE)
+    only_flag = RUN_SH.replace(f'export HF_MODEL="{MODEL_DIR}"', 'export HF_MODEL="/other"')
+    with pytest.raises(bc.ControlError, match="HF_MODEL"):
+        bc.control_run_sh(only_flag, MODEL_DIR, BASE)
+
+
+def test_a_base_snapshot_equal_to_the_model_directory_is_refused():
+    with pytest.raises(bc.ControlError, match="same"):
+        bc.control_run_sh(RUN_SH, MODEL_DIR, MODEL_DIR)
+
+
+def test_a_longer_path_that_starts_with_the_model_directory_is_not_swapped():
+    longer = RUN_SH + f"# note {MODEL_DIR}-old/keep\n"
+    text = bc.control_run_sh(longer, MODEL_DIR, BASE)
+    assert f"{MODEL_DIR}-old/keep" in text
+
+
+def test_a_sibling_directory_sharing_the_prefix_does_not_count_as_the_model_path():
+    only_sibling = RUN_SH.replace(MODEL_DIR, MODEL_DIR + "2")
+    with pytest.raises(bc.ControlError, match="does not contain"):
+        bc.control_run_sh(only_sibling, MODEL_DIR, BASE)
+
+
+# ---- proving the control is comparable -----------------------------------------------------------------------------------------------
+
+def test_a_control_built_here_has_no_problems():
+    assert bc.verify_control(RUN_SH, build(), MODEL_DIR, BASE) == []
+
+
+def test_a_control_with_another_flag_changed_is_reported_with_its_line():
+    bad = build().replace("--max_num_seqs 4", "--max_num_seqs 8")
+    problems = bc.verify_control(RUN_SH, bad, MODEL_DIR, BASE)
+    assert len(problems) == 1 and "line 8" in problems[0]
+
+
+def test_a_control_with_the_drafter_switched_on_is_reported():
+    bad = build().replace('QWEN36_DRAFTER=""', 'QWEN36_DRAFTER="dflash"')
+    problems = bc.verify_control(RUN_SH, bad, MODEL_DIR, BASE)
+    assert len(problems) == 1 and "line 6" in problems[0]
+
+
+def test_a_control_with_a_different_number_of_lines_is_reported():
+    problems = bc.verify_control(RUN_SH, build() + "echo more\n", MODEL_DIR, BASE)
+    assert problems and "lines" in problems[0]
+
+
+def test_a_control_identical_to_the_model_script_is_reported_because_it_serves_the_model_again():
+    problems = bc.verify_control(RUN_SH, RUN_SH, MODEL_DIR, BASE)
+    assert problems and "no line differs" in problems[0]
+
+
+def test_a_control_that_swaps_the_path_in_only_one_line_is_reported():
+    half = RUN_SH.replace(f'export HF_MODEL="{MODEL_DIR}"', f'export HF_MODEL="{BASE}"')
+    problems = bc.verify_control(RUN_SH, half, MODEL_DIR, BASE)
+    assert problems and any("still names" in p for p in problems)
+
+
+def test_building_checks_the_control_it_made_and_refuses_one_that_fails(tmp_path, monkeypatch):
+    model_sh = tmp_path / "run.sh"
+    model_sh.write_text(RUN_SH)
+    monkeypatch.setattr(bc, "control_run_sh", lambda text, md, bs: text.replace("--max_num_seqs 4", "--max_num_seqs 9"))
+    out = tmp_path / "base-run.sh"
+    with pytest.raises(bc.ControlError, match="more than the model path"):
+        bc.build_control(model_run_sh=model_sh, model_dir=MODEL_DIR, base_snapshot=BASE, base_id="x", out=out)
+    assert not out.exists()
+
+
+def test_the_record_says_the_serving_modes_differ_when_they_do(tmp_path, monkeypatch):
+    model_sh = tmp_path / "run.sh"
+    model_sh.write_text(RUN_SH)
+    modes = iter([{"drafter": "off", "sampling": "host"}, {"drafter": "on", "sampling": "host"}])
+    monkeypatch.setattr(bc, "serving_facts", lambda text: next(modes))
+    rec = bc.build_control(model_run_sh=model_sh, model_dir=MODEL_DIR, base_snapshot=BASE, base_id="x", out=tmp_path / "o.sh")
+    assert rec["same_serving"] is False and rec["serving_control"]["drafter"] == "on"
+
+
+# ---- serving facts ----------------------------------------------------------------------------------------------------------------------
+
+def test_the_serving_facts_read_the_drafter_and_the_sampling_mode_from_the_script():
+    assert bc.serving_facts(RUN_SH) == {"drafter": "off", "sampling": "host"}
+    on = RUN_SH.replace('QWEN36_DRAFTER=""', 'QWEN36_DRAFTER="dflash"').replace("--max_num_seqs 4", '--additional-config {"sample_on_device_mode": "all"}')
+    assert bc.serving_facts(on) == {"drafter": "on", "sampling": "device"}
+
+
+def test_a_script_with_no_drafter_line_says_it_is_not_set():
+    assert bc.serving_facts("#!/bin/bash\necho hi\n")["drafter"] == "not set"
+
+
+# ---- the record ---------------------------------------------------------------------------------------------------------------------------
+
+def test_the_record_names_both_scripts_their_hashes_the_swapped_lines_and_the_serving_mode(tmp_path):
+    model_sh = tmp_path / "run.sh"
+    model_sh.write_text(RUN_SH)
+    out = tmp_path / "base-run.sh"
+    rec = bc.build_control(model_run_sh=model_sh, model_dir=MODEL_DIR, base_snapshot=BASE, base_id="Qwen/Qwen3.8-27B@1d4bf0f", out=out)
+    assert out.read_text() == build()
+    assert rec["built_from"] == str(model_sh) and rec["control"] == str(out)
+    assert rec["built_from_sha256"] != rec["control_sha256"]
+    import hashlib
+    assert rec["control_sha256"] == hashlib.sha256(out.read_bytes()).hexdigest()
+    assert rec["swapped_lines"] == [4, 8]
+    assert rec["model_dir"] == MODEL_DIR and rec["base_snapshot"] == BASE and rec["base_id"] == "Qwen/Qwen3.8-27B@1d4bf0f"
+    assert rec["serving_model"] == rec["serving_control"] == {"drafter": "off", "sampling": "host"}
+    assert rec["same_serving"] is True
+    assert json.loads(Path(str(out) + ".control.json").read_text()) == rec
+
+
+def test_building_over_an_unverifiable_script_writes_nothing(tmp_path):
+    model_sh = tmp_path / "run.sh"
+    model_sh.write_text(RUN_SH.replace(f"--model {MODEL_DIR}", "--model /other"))
+    out = tmp_path / "base-run.sh"
+    with pytest.raises(bc.ControlError):
+        bc.build_control(model_run_sh=model_sh, model_dir=MODEL_DIR, base_snapshot=BASE, base_id="x", out=out)
+    assert not out.exists() and not Path(str(out) + ".control.json").exists()
+
+
+# ---- choosing a board ---------------------------------------------------------------------------------------------------------------
+
+def chip(dev, board, state="FREE"):
+    return {"bdf": f"0000:0{dev + 1}:00.0", "board": board, "card": "p300c", "dev_index": dev, "state": state}
+
+
+def status(*states):
+    """Two boards of two chips; `states` are the four chips' states in order."""
+    boards = ["B0", "B0", "B1", "B1"]
+    return {"grain": "board", "chips": [chip(i, boards[i], s) for i, s in enumerate(states)]}
+
+
+def test_a_free_board_is_chosen_and_named_by_the_device_index_of_its_first_chip():
+    plan = bc.plan_boards(status("HELD", "HELD", "FREE", "FREE"), [2])
+    assert plan == [{"board": "B1", "chips": [2, 3], "exact": 2}]
+
+
+def test_the_lowest_free_board_comes_first_when_both_are_free():
+    assert bc.plan_boards(status("FREE", "FREE", "FREE", "FREE"), [2])[0]["board"] == "B0"
+
+
+def test_two_sessions_get_two_different_boards():
+    plan = bc.plan_boards(status("FREE", "FREE", "FREE", "FREE"), [2, 2])
+    assert [p["board"] for p in plan] == ["B0", "B1"] and [p["exact"] for p in plan] == [0, 2]
+
+
+def test_a_board_with_one_chip_not_free_is_not_free():
+    with pytest.raises(bc.NoFreeBoard) as e:
+        bc.plan_boards(status("FREE", "BUSY-UNTRACKED", "HELD", "HELD"), [2])
+    assert "B0" in str(e.value) and "BUSY-UNTRACKED" in str(e.value)
+
+
+def test_asking_for_more_boards_than_are_free_names_how_many_are():
+    with pytest.raises(bc.NoFreeBoard, match="2 sessions.*1 free"):
+        bc.plan_boards(status("HELD", "HELD", "FREE", "FREE"), [2, 2])
+
+
+def test_a_session_that_needs_more_chips_than_one_board_has_is_refused():
+    with pytest.raises(bc.NoFreeBoard, match="more chips"):
+        bc.plan_boards(status("FREE", "FREE", "FREE", "FREE"), [4])
+
+
+def test_an_excluded_board_is_skipped():
+    plan = bc.plan_boards(status("FREE", "FREE", "FREE", "FREE"), [2], exclude=("B0",))
+    assert plan[0]["board"] == "B1"
+
+
+def sized(*boards):
+    """Boards of differing size: each entry is (board name, [chip states])."""
+    chips, dev = [], 0
+    for name, states in boards:
+        for s in states:
+            chips.append(chip(dev, name, s))
+            dev += 1
+    return {"grain": "board", "chips": chips}
+
+
+def test_a_two_chip_session_is_not_given_a_free_one_chip_board_when_a_two_chip_board_is_free():
+    plan = bc.plan_boards(sized(("S", ["FREE"]), ("D", ["FREE", "FREE"])), [2])
+    assert plan == [{"board": "D", "chips": [1, 2], "exact": 1}]
+
+
+def test_the_larger_request_gets_the_larger_board_and_the_plans_keep_the_order_of_the_requests():
+    st = sized(("S", ["FREE"]), ("D", ["FREE", "FREE"]))
+    assert [p["board"] for p in bc.plan_boards(st, [1, 2])] == ["S", "D"]
+    assert [p["board"] for p in bc.plan_boards(st, [2, 1])] == ["D", "S"]
+
+
+def test_a_one_chip_session_takes_the_smallest_board_that_holds_it():
+    plan = bc.plan_boards(sized(("D", ["FREE", "FREE"]), ("S", ["FREE"])), [1])
+    assert plan[0]["board"] == "S"
+
+
+def test_no_free_board_large_enough_is_refused_with_the_sizes_that_are_free():
+    with pytest.raises(bc.NoFreeBoard, match="at least 2 chips.*S"):
+        bc.plan_boards(sized(("S", ["FREE"]), ("D", ["HELD", "HELD"])), [2])
+
+
+def test_two_requests_that_need_the_same_large_board_are_refused_even_when_the_count_of_free_boards_is_enough():
+    with pytest.raises(bc.NoFreeBoard, match="at least 2 chips"):
+        bc.plan_boards(sized(("S", ["FREE"]), ("D", ["FREE", "FREE"])), [2, 2])
+
+
+def test_the_gozer_command_carries_the_chip_count_the_exact_unit_and_the_label():
+    argv = bc.gozer_run_args({"board": "B1", "chips": [2, 3], "exact": 2}, who="claude:bench", reason="control run")
+    assert argv == ["gozer", "run", "--chips", "2", "--exact", "2", "--who", "claude:bench", "--reason", "control run", "--"]
+
+
+def test_the_chip_count_asked_for_is_the_one_in_the_command_even_when_the_board_has_more():
+    argv = bc.gozer_run_args({"board": "B1", "chips": [2, 3], "exact": 2}, who="w", reason="r", chips=1)
+    assert argv[2:6] == ["--chips", "1", "--exact", "2"]
+
+
+def test_a_status_with_no_chips_is_an_error():
+    with pytest.raises(bc.NoFreeBoard, match="no chips"):
+        bc.plan_boards({"grain": "board", "chips": []}, [2])
+
+
+class FakeGozer:
+    def __init__(self, payloads):
+        self.payloads, self.calls = list(payloads), 0
+
+    def __call__(self, argv, **kw):
+        self.calls += 1
+        assert argv[:3] == ["gozer", "status", "--json"]
+        p = self.payloads.pop(0) if len(self.payloads) > 1 else self.payloads[0]
+        return type("R", (), {"returncode": 0, "stdout": json.dumps(p), "stderr": ""})()
+
+
+def test_waiting_for_a_board_polls_until_one_is_free():
+    busy, free = status("BUSY-UNTRACKED", "BUSY-UNTRACKED", "HELD", "HELD"), status("FREE", "FREE", "HELD", "HELD")
+    g, slept = FakeGozer([busy, busy, free]), []
+    clock = iter(range(0, 1000, 10))
+    plan = bc.choose_boards([2], gozer="gozer", run=g, wait_s=120, sleep=slept.append, now=lambda: next(clock))
+    assert plan[0]["board"] == "B0" and g.calls == 3 and len(slept) == 2
+
+
+def test_waiting_gives_up_after_the_time_given_and_says_what_it_saw():
+    busy = status("BUSY-UNTRACKED", "BUSY-UNTRACKED", "HELD", "HELD")
+    clock = iter(range(0, 1000, 50))
+    with pytest.raises(bc.NoFreeBoard, match="BUSY-UNTRACKED"):
+        bc.choose_boards([2], gozer="gozer", run=FakeGozer([busy]), wait_s=100, sleep=lambda s: None, now=lambda: next(clock))
+
+
+def test_no_waiting_asks_gozer_once():
+    g = FakeGozer([status("HELD", "HELD", "HELD", "HELD")])
+    with pytest.raises(bc.NoFreeBoard):
+        bc.choose_boards([2], gozer="gozer", run=g, wait_s=0, sleep=lambda s: None, now=lambda: 0)
+    assert g.calls == 1
+
+
+def test_a_gozer_that_fails_or_prints_no_json_is_reported_as_that():
+    def fail(argv, **kw):
+        return type("R", (), {"returncode": 3, "stdout": "", "stderr": "boom"})()
+
+    def junk(argv, **kw):
+        return type("R", (), {"returncode": 0, "stdout": "not json", "stderr": ""})()
+    with pytest.raises(bc.NoFreeBoard, match="exit 3"):
+        bc.choose_boards([2], gozer="gozer", run=fail, wait_s=0)
+    with pytest.raises(bc.NoFreeBoard, match="no JSON"):
+        bc.choose_boards([2], gozer="gozer", run=junk, wait_s=0)
+
+
+# ---- the command ---------------------------------------------------------------------------------------------------------------------------
+
+def test_the_build_command_writes_the_control_and_prints_the_record(tmp_path, capsys):
+    model_sh = tmp_path / "run.sh"
+    model_sh.write_text(RUN_SH)
+    out = tmp_path / "base-run.sh"
+    rc = bc.main(["build", "--model-run-sh", str(model_sh), "--model-dir", MODEL_DIR, "--base-snapshot", BASE, "--base-id", "Qwen/Qwen3.8-27B@1d4bf0f",
+                  "--out", str(out)])
+    assert rc == 0 and out.exists()
+    assert json.loads(capsys.readouterr().out)["swapped_lines"] == [4, 8]
+
+
+def test_the_build_command_exits_two_and_says_why_on_a_refusal(tmp_path, capsys):
+    model_sh = tmp_path / "run.sh"
+    model_sh.write_text(RUN_SH)
+    rc = bc.main(["build", "--model-run-sh", str(model_sh), "--model-dir", "/nowhere", "--base-snapshot", BASE, "--base-id", "x", "--out", str(tmp_path / "o.sh")])
+    assert rc == 2 and "does not contain" in capsys.readouterr().err
+
+
+def test_the_board_command_prints_one_gozer_command_per_session(capsys):
+    g = FakeGozer([status("FREE", "FREE", "FREE", "FREE")])
+    rc = bc.main(["board", "--chips", "2", "--chips", "2", "--who", "claude:b", "--reason", "r"], run=g)
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0 and [p["exact"] for p in out["plans"]] == [0, 2]
+    assert out["gozer"][0][:6] == ["gozer", "run", "--chips", "2", "--exact", "0"]
+
+
+def test_the_board_command_prints_the_second_sessions_board_and_chip_count_too(capsys):
+    g = FakeGozer([status("FREE", "FREE", "FREE", "FREE")])
+    bc.main(["board", "--chips", "2", "--chips", "1"], run=g)
+    out = json.loads(capsys.readouterr().out)
+    assert len(out["gozer"]) == 2 and out["gozer"][1][2:6] == ["--chips", "1", "--exact", "2"]
+
+
+def test_the_board_command_exits_two_when_no_board_is_free(capsys):
+    rc = bc.main(["board", "--chips", "2"], run=FakeGozer([status("HELD", "HELD", "HELD", "HELD")]))
+    assert rc == 2 and "no free board" in capsys.readouterr().err
+
+
+# ---- the session summary ------------------------------------------------------------------------------------------------------------------
+
+def test_the_session_parser_takes_a_control_record():
+    a = bs.build_parser().parse_args(["--label", "x", "--out-dir", "/o", "--control-record", "/r/base-run.sh.control.json"])
+    assert a.control_record == "/r/base-run.sh.control.json"
+
+
+def test_a_session_summary_carries_the_serving_mode_and_the_control_record_when_given(tmp_path):
+    run_sh = tmp_path / "base-run.sh"
+    run_sh.write_text(build())
+    rec = {"control_sha256": __import__("hashlib").sha256(run_sh.read_bytes()).hexdigest(), "built_from": "/m/run.sh", "swapped_lines": [4, 8], "base_snapshot": BASE}
+    block = bs.control_summary(run_sh, rec, model_dir=BASE)
+    assert block["serving"] == {"drafter": "off", "sampling": "host"}
+    assert block["control"] == rec
+
+
+def test_a_control_record_for_another_script_is_refused():
+    with pytest.raises(ValueError, match="another script"):
+        run_sh = Path(__file__)
+        bs.control_summary(run_sh, {"control_sha256": "0" * 64})
+
+
+# ---- the record must describe the weights the session serves -----------------------------------------------------------------------------
+
+def _control(tmp_path, base_snapshot=BASE, **extra):
+    run_sh = tmp_path / "base-run.sh"
+    run_sh.write_text(build())
+    rec = {"control_sha256": __import__("hashlib").sha256(run_sh.read_bytes()).hexdigest(), "built_from": "/m/run.sh", "swapped_lines": [4, 8],
+           "base_snapshot": base_snapshot, **extra}
+    return run_sh, rec
+
+
+def test_a_record_is_accepted_when_the_model_directory_is_its_base_snapshot(tmp_path):
+    run_sh, rec = _control(tmp_path)
+    assert bs.control_summary(run_sh, rec, model_dir=BASE)["control"] == rec
+
+
+def test_a_model_directory_that_is_another_directory_than_the_base_snapshot_is_refused(tmp_path):
+    run_sh, rec = _control(tmp_path)
+    with pytest.raises(ValueError, match="base_snapshot"):
+        bs.control_summary(run_sh, rec, model_dir=MODEL_DIR)
+
+
+def test_a_model_directory_that_links_to_the_base_snapshot_is_accepted(tmp_path):
+    snap = tmp_path / "snap"
+    snap.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(snap)
+    run_sh, rec = _control(tmp_path, base_snapshot=str(snap))
+    assert bs.control_summary(run_sh, rec, model_dir=str(link))["control"] == rec
+
+
+def test_a_record_with_no_model_directory_is_refused_because_nothing_shows_what_is_served(tmp_path):
+    run_sh, rec = _control(tmp_path)
+    with pytest.raises(ValueError, match="--model-dir"):
+        bs.control_summary(run_sh, rec)
+
+
+def test_a_record_with_no_base_snapshot_is_refused_when_a_model_directory_is_given(tmp_path):
+    run_sh, rec = _control(tmp_path)
+    del rec["base_snapshot"]
+    with pytest.raises(ValueError, match="base_snapshot"):
+        bs.control_summary(run_sh, rec, model_dir=BASE)
+
+
+def _never_start(monkeypatch):
+    """The sessions below must be refused before anything starts; if one is not, fail here and launch nothing."""
+    def boom():
+        raise AssertionError("the session went on to start a server")
+    monkeypatch.setattr(bs, "_swap", boom)
+
+
+def _session_args(tmp_path, rec, model_dir):
+    run_sh = tmp_path / "base-run.sh"
+    run_sh.write_text(build())
+    rec = {**rec, "control_sha256": __import__("hashlib").sha256(run_sh.read_bytes()).hexdigest()}
+    record = tmp_path / "base-run.sh.control.json"
+    record.write_text(json.dumps(rec))
+    return ["--label", "base", "--out-dir", str(tmp_path / "out"), "--phases", "gsm8k", "--run-sh", str(run_sh), "--control-record", str(record),
+            "--model-id", "Qwen/Qwen3.8-27B@1d4bf0f", "--model-dir", model_dir, "--tt-cache", str(tmp_path / "c"), "--hf-home", str(tmp_path / "h")]
+
+
+def test_a_session_refuses_to_start_when_its_model_directory_is_not_the_controls_base_snapshot(tmp_path, capsys, monkeypatch):
+    _never_start(monkeypatch)
+    with pytest.raises(SystemExit) as e:
+        bs.main(_session_args(tmp_path, {"base_snapshot": BASE}, MODEL_DIR))
+    assert e.value.code == 2 and "base_snapshot" in capsys.readouterr().err
+
+
+def test_a_control_record_without_a_model_directory_is_refused_by_the_parser(tmp_path, capsys, monkeypatch):
+    _never_start(monkeypatch)
+    args = _session_args(tmp_path, {"base_snapshot": BASE}, BASE)
+    i = args.index("--model-dir")
+    del args[i:i + 2]
+    with pytest.raises(SystemExit) as e:
+        bs.main(args)
+    assert e.value.code == 2 and "--model-dir" in capsys.readouterr().err
+
+
+# ---- a model path is found and replaced as a shell word --------------------------------------------------------------------
+
+import hashlib
+import shlex
+
+FIXTURES = Path(__file__).parent / "fixtures" / "bench_control"
+REAL_MODEL_DIR = "/home/ttuser/orchard-runs/baai--arex-2/stages/4/configs/2/model-dir"
+REAL_BASE = "/home/ttuser/.cache/huggingface/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+
+
+def test_the_real_arex_2_script_gives_the_control_that_was_built_by_hand_byte_for_byte():
+    model = (FIXTURES / "model-run.sh").read_text()
+    by_hand = (FIXTURES / "base-run.sh").read_text()
+    made = bc.control_run_sh(model, REAL_MODEL_DIR, REAL_BASE)
+    assert made == by_hand
+    assert hashlib.sha256(made.encode()).hexdigest().startswith("09e08f55")
+    assert bc.verify_control(model, made, REAL_MODEL_DIR, REAL_BASE) == []
+
+
+def test_a_path_inside_the_model_directory_is_left_alone():
+    text = RUN_SH + f'export TT_CACHE_PATH="{MODEL_DIR}/cache"\nexport OTHER={MODEL_DIR}/.tt\n'
+    made = bc.control_run_sh(text, MODEL_DIR, BASE)
+    assert f'export TT_CACHE_PATH="{MODEL_DIR}/cache"' in made and f"export OTHER={MODEL_DIR}/.tt" in made
+    assert bc.verify_control(text, made, MODEL_DIR, BASE) == []
+
+
+def test_a_path_that_contains_the_model_directory_further_along_is_left_alone():
+    text = RUN_SH + f"export ELSEWHERE=/mnt/x{MODEL_DIR}\n"
+    made = bc.control_run_sh(text, MODEL_DIR, BASE)
+    assert f"export ELSEWHERE=/mnt/x{MODEL_DIR}" in made
+
+
+def test_a_control_that_rewrote_a_path_inside_the_model_directory_is_reported():
+    text = RUN_SH + f'export TT_CACHE_PATH="{MODEL_DIR}/cache"\n'
+    bad = bc.control_run_sh(RUN_SH, MODEL_DIR, BASE) + f'export TT_CACHE_PATH="{BASE}/cache"\n'
+    problems = bc.verify_control(text, bad, MODEL_DIR, BASE)
+    assert problems and any("line 10 differs" in p for p in problems)
+
+
+def test_the_model_directory_in_a_comment_is_not_a_reference_and_is_left_alone():
+    text = RUN_SH + f"# it's served from {MODEL_DIR} and that's all\n"
+    made = bc.control_run_sh(text, MODEL_DIR, BASE)
+    assert f"# it's served from {MODEL_DIR} and that's all" in made
+
+
+SPACED = "/runs/new model/model-dir"
+
+
+def test_a_model_directory_that_prepare_swap_quoted_is_found_and_swapped_with_its_quoting():
+    text = f"export HF_MODEL={shlex.quote(SPACED)}\nCMD=(py --model {shlex.quote(SPACED)} --max_num_seqs 4)\n"
+    made = bc.control_run_sh(text, SPACED, BASE)
+    assert made == f"export HF_MODEL='{BASE}'\nCMD=(py --model '{BASE}' --max_num_seqs 4)\n"
+    assert shell_sees(made) == (BASE, ["py", "--model", BASE, "--max_num_seqs", "4"])
+    assert shell_sees(text) == (SPACED, ["py", "--model", SPACED, "--max_num_seqs", "4"])
+    assert bc.verify_control(text, made, SPACED, BASE) == []
+
+
+@pytest.mark.parametrize("flag", ["--model={p}", "--model {p}"])
+def test_the_flag_is_found_with_an_equals_sign_or_a_space(flag):
+    text = f'export HF_MODEL="{MODEL_DIR}"\nCMD=(py {flag.format(p=MODEL_DIR)} x)\n'
+    assert f"{BASE}" in bc.control_run_sh(text, MODEL_DIR, BASE).splitlines()[1]
+
+
+def shell_sees(text: str) -> tuple[str, list[str]]:
+    """What bash makes of the two lines the control changes: the value of HF_MODEL and the words of the CMD array. Nothing is run beyond assigning them."""
+    import subprocess
+    script = text + '\nprintf "%s\\0" "$HF_MODEL"\nprintf "%s\\0" "${CMD[@]}"\n'
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=True, env={"PATH": "/usr/bin:/bin", "HOME": "/nonexistent"}).stdout
+    parts = out.split("\0")[:-1]
+    return parts[0], parts[1:]
+
+
+@pytest.mark.parametrize("snap", ["/hf/my snap", "/hf/it's", "/hf/$HOME/x", '/hf/a"b', "/hf/a`b`c", "/hf/a\\b"])
+def test_a_base_snapshot_with_a_space_or_shell_character_reaches_the_shell_as_one_unchanged_path(snap):
+    text = f'export HF_MODEL="{MODEL_DIR}"\nCMD=(py --model {MODEL_DIR} --max_num_seqs 4)\n'
+    made = bc.control_run_sh(text, MODEL_DIR, snap)
+    hf_model, cmd = shell_sees(made)
+    assert hf_model == snap
+    assert cmd == ["py", "--model", snap, "--max_num_seqs", "4"]
+    assert bc.verify_control(text, made, MODEL_DIR, snap) == []
+
+
+def test_a_control_that_split_a_spaced_base_snapshot_into_two_arguments_is_reported():
+    spaced = "/hf/my snap"
+    text = f'export HF_MODEL="{MODEL_DIR}"\nCMD=(py --model {MODEL_DIR} --max_num_seqs 4)\n'
+    bad = f'export HF_MODEL="{spaced}"\nCMD=(py --model {spaced} --max_num_seqs 4)\n'
+    assert shell_sees(bad)[1] == ["py", "--model", "/hf/my", "snap", "--max_num_seqs", "4"]
+    problems = bc.verify_control(text, bad, MODEL_DIR, spaced)
+    assert problems and any("line 2 differs" in p for p in problems)
+
+
+def test_a_base_snapshot_with_a_newline_in_its_name_is_refused():
+    with pytest.raises(bc.ControlError, match="newline"):
+        bc.control_run_sh(RUN_SH, MODEL_DIR, "/hf/a\nb")
+
+
+@pytest.mark.parametrize("form", ["{p}", '"{p}"', "'{p}'"])
+def test_each_quoting_of_the_model_directory_in_the_script_keeps_its_style_and_reaches_the_shell_as_the_base(form):
+    word = form.format(p=MODEL_DIR)
+    text = f"export HF_MODEL={word}\nCMD=(py --model {word} --max_num_seqs 4)\n"
+    made = bc.control_run_sh(text, MODEL_DIR, BASE)
+    assert made == f"export HF_MODEL={form.format(p=BASE)}\nCMD=(py --model {form.format(p=BASE)} --max_num_seqs 4)\n"
+    assert shell_sees(made) == (BASE, ["py", "--model", BASE, "--max_num_seqs", "4"])
+
+
+def test_a_script_with_an_unclosed_quote_is_refused_because_it_cannot_be_read_safely():
+    with pytest.raises(bc.ControlError, match="quote"):
+        bc.control_run_sh(f'export HF_MODEL="{MODEL_DIR}"\nCMD=(py --model {MODEL_DIR} \'oops)\n', MODEL_DIR, BASE)
+
+
+def test_a_model_directory_named_in_another_variable_is_swapped_too_so_the_control_cannot_serve_the_model():
+    text = RUN_SH + f"export MODEL_WEIGHTS_DIR={MODEL_DIR}\n"
+    made = bc.control_run_sh(text, MODEL_DIR, BASE)
+    assert f"export MODEL_WEIGHTS_DIR={BASE}" in made
+
+
+def test_a_model_directory_left_inside_a_quoted_string_is_reported_as_still_named():
+    text = RUN_SH + f"echo 'serving {MODEL_DIR} now'\n"
+    with pytest.raises(bc.ControlError, match="still names"):
+        bc.control_run_sh(text, MODEL_DIR, BASE)
+
+
+def test_a_command_inside_the_array_ending_in_a_closing_bracket_is_still_found():
+    text = f'export HF_MODEL="{MODEL_DIR}"\nCMD=(py --model {MODEL_DIR})\n'
+    assert bc.control_run_sh(text, MODEL_DIR, BASE).splitlines()[1] == f"CMD=(py --model {BASE})"
+
+
+def test_backslash_escapes_inside_double_quotes_are_read_as_the_shell_reads_them():
+    odd = "/runs/$x/model-dir"
+    text = f'export HF_MODEL="/runs/\\$x/model-dir"\nCMD=(py --model "/runs/\\$x/model-dir" x)\n'
+    assert shell_sees(text.replace("$x", "$x"))[0] == odd
+    made = bc.control_run_sh(text, odd, BASE)
+    assert made == f'export HF_MODEL="{BASE}"\nCMD=(py --model "{BASE}" x)\n'
+
+
+def test_a_script_with_an_unclosed_double_quote_is_refused():
+    with pytest.raises(bc.ControlError, match="double quote"):
+        bc.control_run_sh(f'export HF_MODEL="{MODEL_DIR}"\nCMD=(py --model {MODEL_DIR} "oops)\n', MODEL_DIR, BASE)
+
+
+def test_a_model_path_on_the_next_line_after_a_backslash_is_found():
+    text = f'export HF_MODEL="{MODEL_DIR}"\nCMD=(py --model \\\n   {MODEL_DIR} x)\n'
+    made = bc.control_run_sh(text, MODEL_DIR, BASE)
+    assert made == f'export HF_MODEL="{BASE}"\nCMD=(py --model \\\n   {BASE} x)\n'
+    assert shell_sees(made)[1] == ["py", "--model", BASE, "x"]
+
+
+def test_a_word_that_starts_after_an_operator_is_still_a_word():
+    text = f'export HF_MODEL="{MODEL_DIR}"; CMD=(py --model {MODEL_DIR}); echo done\n'
+    assert bc.control_run_sh(text, MODEL_DIR, BASE) == f'export HF_MODEL="{BASE}"; CMD=(py --model {BASE}); echo done\n'
+
+
+def test_a_model_directory_with_a_space_written_with_a_backslash_is_found():
+    spaced = "/runs/new model/model-dir"
+    text = f'export HF_MODEL={spaced.replace(" ", chr(92) + " ")}\nCMD=(py --model {spaced.replace(" ", chr(92) + " ")} x)\n'
+    assert shell_sees(text) == (spaced, ["py", "--model", spaced, "x"])
+    made = bc.control_run_sh(text, spaced, BASE)
+    assert made == f"export HF_MODEL={BASE}\nCMD=(py --model {BASE} x)\n"
+
+
+@pytest.mark.parametrize("form", ["{p}", '"{p}"', "'{p}'"])
+@pytest.mark.parametrize("snap", ["/hf/my snap", "/hf/it's", "/hf/$HOME/x", '/hf/a"b', "/hf/a`b`c", "/hf/a\\b"])
+def test_every_quoting_of_the_model_directory_takes_every_kind_of_base_snapshot_as_one_unchanged_path(form, snap):
+    word = form.format(p=MODEL_DIR)
+    text = f"export HF_MODEL={word}\nCMD=(py --model {word} --max_num_seqs 4)\n"
+    made = bc.control_run_sh(text, MODEL_DIR, snap)
+    assert shell_sees(made) == (snap, ["py", "--model", snap, "--max_num_seqs", "4"])
+    assert bc.verify_control(text, made, MODEL_DIR, snap) == []
+
+
+def test_a_relative_path_that_ends_like_the_model_directory_is_not_the_model_directory():
+    text = RUN_SH + f"export REL=.{MODEL_DIR}\n"
+    made = bc.control_run_sh(text, MODEL_DIR, BASE)
+    assert f"export REL=.{MODEL_DIR}" in made
