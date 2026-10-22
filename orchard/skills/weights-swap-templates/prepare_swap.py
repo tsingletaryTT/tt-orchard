@@ -69,6 +69,7 @@ The other keys in swap_config.json are for serve_and_compare.py and serve_and_co
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -159,6 +160,54 @@ def stop_token_ids(model_dir: Path) -> list[int]:
                 ids.append(x)
     return ids
 SOURCES_NAME = "model-dir-sources.json"
+SPECIAL_TOKEN_NAMES = ("eos_token", "bos_token", "pad_token", "unk_token")
+
+
+def tokenizer_config(d: Path) -> dict:
+    try:
+        cfg = json.loads((d / "tokenizer_config.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return cfg if isinstance(cfg, dict) else {}
+
+
+def chat_template_of(d: Path) -> tuple[str | None, str | None]:
+    """(file the template comes from, its sha256) in directory `d`: chat_template.jinja first, then the template inside
+    tokenizer_config.json, the order transformers 5.19.0 uses. (None, None) when there is no template."""
+    try:
+        text = (d / "chat_template.jinja").read_text(encoding="utf-8", errors="replace")
+        return "chat_template.jinja", hashlib.sha256(text.encode("utf-8")).hexdigest()
+    except OSError:
+        pass
+    inline = tokenizer_config(d).get("chat_template")
+    if isinstance(inline, list):            # named templates: [{"name": ..., "template": ...}]
+        inline = json.dumps(inline, sort_keys=True, ensure_ascii=False)
+    if isinstance(inline, str):
+        return "tokenizer_config.json", hashlib.sha256(inline.encode("utf-8")).hexdigest()
+    return None, None
+
+
+def special_tokens_of(d: Path) -> dict:
+    """eos, bos, pad and unk tokens as tokenizer_config.json writes them (a string, or an object with `content`)."""
+    cfg, out = tokenizer_config(d), {}
+    for name in SPECIAL_TOKEN_NAMES:
+        v = cfg.get(name)
+        if isinstance(v, dict):
+            v = v.get("content")
+        out[name] = v if isinstance(v, str) else None
+    return out
+
+
+def chat_facts(model_dir: Path, base: Path) -> dict:
+    """What the served model directory holds for chat requests, set against the nearest model's snapshot: the template
+    (read the way the loader reads it) and the special tokens. Nothing here is sent to a server."""
+    file, digest = chat_template_of(model_dir)
+    _, base_digest = chat_template_of(base)
+    served, theirs = special_tokens_of(model_dir), special_tokens_of(base)
+    return {"chat_template": {"file": file, "sha256": digest, "nearest_sha256": base_digest,
+                              "same_as_nearest": None if digest is None or base_digest is None else digest == base_digest},
+            "special_tokens": served,
+            "special_tokens_differ_from_nearest": sorted(k for k in SPECIAL_TOKEN_NAMES if served[k] != theirs[k])}
 
 
 def snapshot_revision(snapshot: Path) -> str | None:
@@ -317,6 +366,7 @@ def main() -> int:
     model_dir, copied, linked, absent = build_model_dir(base, new)
     eos = stop_token_ids(model_dir)
     record = sources_record(base, new, cfg["nearest_model_id"], copied, linked, absent, eos)
+    record.update(chat_facts(model_dir, base))
     (HERE_DIR / SOURCES_NAME).write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     print(f"model-dir: {model_dir}")
     print(f"  copied from base_snapshot: {', '.join(copied) or 'nothing'}")
@@ -326,6 +376,13 @@ def main() -> int:
     origin = {"model": "the new model's", "base": "the nearest model's", "none": None}[record["sampling_defaults_from"]]
     print(f"  {SOURCES_NAME}: " + (f"sampling defaults and stop tokens are {origin} generation_config.json"
                                    if origin else "no generation_config.json, so no sampling defaults or stop tokens"))
+    ct = record["chat_template"]
+    if ct["file"] is None:
+        print("  chat template: the model directory has none" + (", and the nearest model has one" if ct["nearest_sha256"] else ""))
+    else:
+        same = {True: ", the same as the nearest model's", False: ", different from the nearest model's",
+                None: ", and the nearest model has none"}[ct["same_as_nearest"]]
+        print(f"  chat template: {ct['file']} (sha256 {ct['sha256'][:12]}){same}")
     if absent:
         print(f"  absent in new_snapshot, not linked: {', '.join(absent)}")
     if not eos and FALLBACK_COPY not in absent:
