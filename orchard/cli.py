@@ -11,7 +11,7 @@
     tt-orchard caches   [--lab] [--prune --older-than DAYS [--yes]]
     tt-orchard coder    [status | stop [--yes]]
     tt-orchard package  RUN_DIR --namespace ORG [--step stage|boot|finish|all] [--restage] [--exact CHIP]
-    tt-orchard package-card RUN_DIR --benchmark FILE --model-key KEY [--base-key KEY] [--reported FILE]
+    tt-orchard package-card RUN_DIR --benchmark FILE --model-key KEY [--base-key KEY] [--reported FILE] [--accept-unverified-identity]
     tt-orchard kernel-env [--check] [--src-dir DIR] [--venv-dir DIR] [--tt-lang-skill-dir DIR] [--allow-stale-skills]
     tt-orchard inventory TARGET [--python P] [--ttnn-python P] [--against F] [--layers N] [--seq N] [--class C] [--out DIR]
     tt-orchard coder-speed [--endpoint URL --model NAME | --tiers] [--samples N] [--watch SECONDS] [--json]
@@ -189,6 +189,10 @@ def _parser() -> argparse.ArgumentParser:
     pc.add_argument("--reported", metavar="FILE", help="a reported-results.json of the scores the authors report")
     pc.add_argument("--replace-reported", action="store_true",
                     help="replace reported scores the run already holds")
+    pc.add_argument("--accept-unverified-identity", action="store_true",
+                    help="go on when the benchmark file does not say which model (and revision) each key is, so the "
+                         "scores cannot be shown to be this package's. A file that names another model is always "
+                         "refused. The ledger records what was not verified")
     k = sub.add_parser("kernel-env", parents=[common],
                        help="build or check the tt-lang simulator environment that kernel-probe uses")
     k.add_argument("--check", action="store_true",

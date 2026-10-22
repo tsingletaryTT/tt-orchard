@@ -545,6 +545,62 @@ def _score(v) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
 
 
+HEX = re.compile(r"[0-9a-f]+")
+MIN_REVISION_CHARS = 7                 # an abbreviated commit id must be at least this long to count as a match
+
+
+def _packaged_identities(run: Path) -> dict:
+    """The model the package is for and the nearest model its swap checks compared with, as the run recorded them:
+    {role: (repo, revision or None)}."""
+    try:
+        facts = package.read_run(run)
+        delta = json.loads((run / "stages" / "0" / "delta.json").read_text(encoding="utf-8"))
+    except (PackageError, OSError, ValueError) as exc:
+        raise PackageCommandError(f"cannot tell which model this run packaged, so the scores cannot be checked "
+                                  f"against it: {exc}") from None
+    nearest = package.split_model_id(delta.get("nearest_model"))
+    return {"model": (facts.model_id, facts.revision), "control": (facts.nearest_model, nearest[1])}
+
+
+def _identity_findings(models, key: str, role: str, want: tuple[str, str | None]) -> tuple[list[str], list[str]]:
+    """(mismatches, unverified) for the benchmark file's entry `key`, which must be `want` = (repo, revision).
+    A mismatch is a known difference: the file names another repository or another commit. Unverified means the file
+    does not say enough to tell: no `models` entry, a non-string, or no commit id that can be compared."""
+    label = "the model under test" if role == "model" else "the nearest model"
+    repo_want, rev_want = want
+    ident = models.get(key) if isinstance(models, dict) else None
+    if not isinstance(ident, str) or not ident.strip():
+        return [], [f"the benchmark file's `models` does not say which model {key!r} is ({label} is {repo_want})"]
+    repo, _, rev = ident.strip().partition("@")
+    if repo.casefold() != repo_want.casefold():
+        return [f"{key!r} is {repo} in the benchmark file, but {label} is {repo_want}"], []
+    rev = rev.strip().lower()
+    if not rev:
+        return [], [f"{key!r} names {repo} with no revision, so it cannot be shown to be the revision {rev_want} "
+                    f"of {label}" if rev_want else f"{key!r} names {repo} with no revision"]
+    if rev_want is None:
+        return [], [f"the run does not record which revision of {label} ({repo_want}) it used, so {key!r}@{rev} "
+                    "cannot be checked"]
+    if not HEX.fullmatch(rev) or len(rev) < MIN_REVISION_CHARS or len(rev) > len(rev_want):
+        return [], [f"{key!r}@{rev} is not a commit id that can be compared with {rev_want} of {label}"]
+    if not rev_want.startswith(rev):
+        return [f"{key!r} is revision {rev} of {repo} in the benchmark file, but {label} is revision {rev_want}"], []
+    return [], []
+
+
+def check_identities(bench: dict, model_key: str, base_key: str | None, ids: dict) -> tuple[list[str], list[str]]:
+    """(mismatches, unverified) over the model under test and, when a control was asked for, the nearest model."""
+    models = bench.get("models")
+    mismatches, unverified = [], []
+    for key, role in ((model_key, "model"), (base_key, "control")):
+        if key is None:
+            continue
+        bad, unsure = _identity_findings(models, key, role, ids[role])
+        mismatches += bad
+        unverified += unsure
+    return mismatches, unverified
+
+
 def benchmark_rows(bench: dict, model_key: str, base_key: str | None) -> list[dict]:
     """The card's measured rows from a benchmark file: `{"models": {key: id}, "tasks": {task: {key: {n, score,
     cut_off?}, "paired": {sign_test_p?}}}}`, the shape the bytkim benchmark compile scripts wrote. Raises
@@ -615,6 +671,14 @@ def card_main(args, *, out=None, extra_env=None, hostname=None) -> int:
         if not isinstance(bench, dict):
             raise PackageCommandError("the benchmark file must be a JSON object")
         rows = benchmark_rows(bench, args.model_key, args.base_key)
+        mismatches, unverified = check_identities(bench, args.model_key, args.base_key, _packaged_identities(run))
+        if mismatches:
+            raise PackageCommandError("these results are not for this package: " + "; ".join(mismatches)
+                                      + ". Nothing was written")
+        if unverified and not getattr(args, "accept_unverified_identity", False):
+            raise PackageCommandError("the benchmark file does not show that these results are for this package: "
+                                      + "; ".join(unverified) + ". If you know they are, run again with "
+                                      "--accept-unverified-identity; the card step then records that in the ledger")
         reported_text = None
         installed = run / REPORTED_FILE
         if args.reported:
@@ -634,7 +698,12 @@ def card_main(args, *, out=None, extra_env=None, hostname=None) -> int:
                 _replace_file(installed, reported_text)
             led.append("decision", 7, decision="package card", benchmark=BENCHMARK_COPY,
                        model_key=args.model_key, base_key=args.base_key, rows=len(rows),
-                       reported=bool(args.reported), sha256=evidence_record(run, run / BENCHMARK_COPY)["sha256"])
+                       reported=bool(args.reported), identity_unverified=unverified,
+                       sha256=evidence_record(run, run / BENCHMARK_COPY)["sha256"])
+            for note in unverified:
+                _say(out, f"identity not verified (accepted by --accept-unverified-identity): {note}")
+            ids = _packaged_identities(run)
+            _say(out, f"checked against {ids['model'][0]}" + (f" and {ids['control'][0]}" if args.base_key else ""))
             _say(out, f"{len(rows)} measured rows from {Path(args.benchmark).name}"
                       + ("; reported scores installed" if reported_text is not None else ""))
             return _finish(run, led, stage_dir, out, hostname=hostname)

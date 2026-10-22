@@ -22,7 +22,7 @@ from orchard.ledger import Ledger, read_entries
 from orchard.paths import PATHS_RECORDED
 from orchard.server import proc_identity
 from orchard.stages import gate_package
-from package_fakes import fake_bin, fake_boot_result, make_run, make_source, write
+from package_fakes import BASE, BASE_REV, NEW, NEW_REV, fake_bin, fake_boot_result, make_run, make_source, write
 
 FAKE_SERVER = os.path.join(os.path.dirname(__file__), "fake_swap_server.py")
 pytestmark = pytest.mark.usefixtures("stub_tools")
@@ -333,7 +333,7 @@ def test_a_run_with_no_recorded_paths_needs_them_on_the_command_line(rig):
 # ---- the card step -----------------------------------------------------------------------------------
 
 BENCH = {
-    "models": {"arex": "BAAI/AREX-2@abc", "base": "Qwen/Qwen3.8-27B@def"},
+    "models": {"arex": f"{NEW}@{NEW_REV}", "base": f"{BASE}@{BASE_REV}"},     # the model and nearest model the rig packaged
     "conditions": "same bundle, thinking on, temperature 0, max_gen_toks 32768 for the re-run",
     "tasks": {
         "gsm8k": {"arex": {"n": 1319, "passed": 1237, "score": 0.938, "stderr": 0.007, "cut_off": 3},
@@ -1149,3 +1149,168 @@ def test_each_handoff_gets_a_new_unguessable_token(tmp_path):
     second = package_cmd._write_handoff(tmp_path / "stage")
     assert first != second and re.fullmatch(r"[0-9a-f]{32}", first) and re.fullmatch(r"[0-9a-f]{32}", second)
     assert json.loads((tmp_path / "stage" / ".boot-handoff").read_text())["token"] == second
+
+
+# ---- review: the scores must be the packaged model's, and the control the nearest model's --------------
+
+def bench_with(rig, models=None, drop=()):
+    bench = json.loads(json.dumps(BENCH))
+    if models is not None:
+        bench["models"] = models
+    for key in drop:
+        del bench[key]
+    (rig["tmp"] / "benchmark.json").write_text(json.dumps(bench))
+
+
+def untouched(rig):
+    """A refused card step changes nothing: no copy of the benchmark, no rows, no ledger entry."""
+    assert not (rig["stage"] / "benchmark").exists() and not (rig["stage"] / "benchmark-numbers.json").exists()
+    assert ("decision", "package card") not in events(rig)
+
+
+def test_scores_of_another_model_are_not_put_in_the_card(packaged):
+    """The review's case: AREX-2's results on a package of another model."""
+    bench_with(packaged, {"arex": "BAAI/AREX-2@" + "d" * 40, "base": f"{BASE}@{BASE_REV}"})
+    code, text = run_card(packaged)
+    assert code == 2 and "BAAI/AREX-2" in text and NEW in text and "'arex'" in text
+    untouched(packaged)
+
+
+def test_the_same_model_at_another_revision_is_refused(packaged):
+    bench_with(packaged, {"arex": f"{NEW}@" + "e" * 40, "base": f"{BASE}@{BASE_REV}"})
+    code, text = run_card(packaged)
+    assert code == 2 and "revision" in text and NEW_REV in text
+    untouched(packaged)
+
+
+def test_an_abbreviated_revision_that_is_the_start_of_the_packaged_one_is_accepted(packaged):
+    bench_with(packaged, {"arex": f"{NEW}@{NEW_REV[:12]}", "base": f"{BASE}@{BASE_REV[:9]}"})
+    code, text = run_card(packaged)
+    assert code == 0, text
+
+
+@pytest.mark.parametrize("short", ["e" * 12, NEW_REV[:6]])
+def test_an_abbreviated_revision_that_does_not_match_or_is_too_short_to_tell_is_not_accepted(packaged, short):
+    bench_with(packaged, {"arex": f"{NEW}@{short}", "base": f"{BASE}@{BASE_REV}"})
+    code, text = run_card(packaged)
+    assert code == 2
+    untouched(packaged)
+
+
+def test_repository_names_are_compared_without_regard_to_case(packaged):
+    bench_with(packaged, {"arex": f"{NEW.lower()}@{NEW_REV}", "base": f"{BASE.upper()}@{BASE_REV}"})
+    code, text = run_card(packaged)
+    assert code == 0, text
+
+
+@pytest.mark.parametrize("control", ["Other/Model@" + BASE_REV, BASE + "@" + "c" * 40])
+def test_a_control_that_is_not_the_nearest_model_is_refused(packaged, control):
+    bench_with(packaged, {"arex": f"{NEW}@{NEW_REV}", "base": control})
+    code, text = run_card(packaged)
+    assert code == 2 and "'base'" in text and "nearest model" in text
+    untouched(packaged)
+
+
+def test_the_control_is_not_checked_when_no_base_key_is_given(packaged):
+    bench_with(packaged, {"arex": f"{NEW}@{NEW_REV}"})
+    code, text = run_card(packaged, base_key=None)
+    assert code == 0, text
+
+
+@pytest.mark.parametrize("models", [None, {}, {"base": f"{BASE}@{BASE_REV}"}, {"arex": f"{NEW}", "base": f"{BASE}@{BASE_REV}"},
+                                    {"arex": 7, "base": f"{BASE}@{BASE_REV}"}, {"arex": f"{NEW}@abc", "base": f"{BASE}@{BASE_REV}"}])
+def test_a_benchmark_that_does_not_say_which_model_it_measured_needs_an_explicit_flag(packaged, models):
+    bench = json.loads(json.dumps(BENCH))
+    if models is None:
+        del bench["models"]
+    else:
+        bench["models"] = models
+    (packaged["tmp"] / "benchmark.json").write_text(json.dumps(bench))
+    code, text = run_card(packaged)
+    assert code == 2 and "--accept-unverified-identity" in text and "'arex'" in text
+    untouched(packaged)
+    code, text = run_card(packaged, accept_unverified_identity=True)
+    assert code == 0, text
+    assert "not verified" in text and "'arex'" in text                                      # said to the operator
+    e = [x for x in read_entries(packaged["run"] / "ledger.jsonl") if x["data"].get("decision") == "package card"][0]
+    assert any("'arex'" in n for n in e["data"]["identity_unverified"])                     # and recorded
+
+
+def test_a_verified_identity_leaves_nothing_to_confirm_in_the_ledger(packaged):
+    run_card(packaged)
+    e = [x for x in read_entries(packaged["run"] / "ledger.jsonl") if x["data"].get("decision") == "package card"][0]
+    assert e["data"]["identity_unverified"] == []
+
+
+def test_the_flag_never_lets_a_known_mismatch_through(packaged):
+    bench_with(packaged, {"arex": "BAAI/AREX-2@" + "d" * 40, "base": f"{BASE}@{BASE_REV}"})
+    code, text = run_card(packaged, accept_unverified_identity=True)
+    assert code == 2 and "BAAI/AREX-2" in text
+    untouched(packaged)
+
+
+def test_a_known_mismatch_for_the_control_is_refused_even_when_the_model_is_unverified(packaged):
+    bench_with(packaged, {"arex": NEW, "base": "Other/Model@" + BASE_REV})
+    code, text = run_card(packaged, accept_unverified_identity=True)
+    assert code == 2 and "'base'" in text
+    untouched(packaged)
+
+
+def test_an_unverified_model_and_a_mismatched_control_are_both_reported(packaged):
+    bench_with(packaged, {"arex": "BAAI/AREX-2@" + "d" * 40, "base": "Other/Model@" + BASE_REV})
+    code, text = run_card(packaged)
+    assert code == 2 and "'arex'" in text and "'base'" in text
+
+
+def test_the_card_step_says_which_models_it_checked_against(packaged):
+    code, text = run_card(packaged)
+    assert code == 0 and NEW in text and BASE in text
+
+
+def test_the_identity_check_comes_before_the_reported_scores_are_installed(packaged):
+    rep = packaged["tmp"] / "reported.json"
+    rep.write_text(json.dumps(REPORTED))
+    bench_with(packaged, {"arex": "BAAI/AREX-2@" + "d" * 40, "base": f"{BASE}@{BASE_REV}"})
+    code, text = run_card(packaged, reported=str(rep))
+    assert code == 2
+    assert not (packaged["run"] / "reported-results.json").exists()
+
+
+def accepted_only_with_the_flag(rig, models, word):
+    bench_with(rig, models)
+    code, text = run_card(rig)
+    assert code == 2 and word in text and "--accept-unverified-identity" in text
+    untouched(rig)
+    code, text = run_card(rig, accept_unverified_identity=True)
+    assert code == 0, text
+
+
+def test_a_revision_that_is_not_a_commit_id_is_unverified_and_not_a_mismatch(packaged):
+    accepted_only_with_the_flag(packaged, {"arex": f"{NEW}@latest-build", "base": f"{BASE}@{BASE_REV}"}, "commit id")
+
+
+def test_a_revision_longer_than_a_commit_id_is_unverified_and_not_a_mismatch(packaged):
+    accepted_only_with_the_flag(packaged, {"arex": f"{NEW}@{NEW_REV}ab", "base": f"{BASE}@{BASE_REV}"}, "commit id")
+
+
+def test_a_revision_in_capitals_is_the_same_commit(packaged):
+    bench_with(packaged, {"arex": f"{NEW}@{NEW_REV.upper()}", "base": f"{BASE}@{BASE_REV.upper()}"})
+    code, text = run_card(packaged)
+    assert code == 0, text
+
+
+def test_an_id_with_no_revision_says_so(packaged):
+    accepted_only_with_the_flag(packaged, {"arex": NEW, "base": f"{BASE}@{BASE_REV}"}, "no revision")
+
+
+def test_a_run_that_did_not_record_the_nearest_models_revision_leaves_the_control_unverified(packaged):
+    delta = json.loads((packaged["run"] / "stages/0/delta.json").read_text())
+    delta["nearest_model"] = BASE                                                  # the id with no @revision
+    write(packaged["run"] / "stages/0/delta.json", delta)
+    accepted_only_with_the_flag(packaged, BENCH["models"], "does not record which revision")
+
+
+def test_every_unverified_key_is_named_not_only_the_first(packaged):
+    bench_with(packaged, {})
+    code, text = run_card(packaged)
+    assert code == 2 and "'arex'" in text and "'base'" in text

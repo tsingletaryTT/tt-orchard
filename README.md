@@ -696,7 +696,7 @@ value, or lists a reported score as measured.
 has ended `ready-for-operator-review` you can package it afterwards:
 
     tt-orchard package RUN_DIR --namespace ORG [--exact CHIP] [--restage]
-    tt-orchard package-card RUN_DIR --benchmark benchmark.json --model-key KEY [--base-key KEY] [--reported reported-results.json]
+    tt-orchard package-card RUN_DIR --benchmark benchmark.json --model-key KEY [--base-key KEY] [--reported reported-results.json] [--accept-unverified-identity]
 
 `package` stages and scrubs every profile, boots the required one under `gozer run` (it takes the lease itself;
 `--exact CHIP` pins it to the board that holds that chip), writes the cards and the publish text, runs
@@ -728,6 +728,16 @@ the run (`stages/7/benchmark/benchmark.json`) and the card cites it. With `--rep
 authors' reported scores (checked the same way as above; `--replace-reported` replaces a different file the run
 already holds). It writes the cards again, scrubs them and gates them, and records `package card` in the ledger.
 It does not run a benchmark.
+
+Before anything is written it checks that the results are this package's. The file's `models` object says what each
+key is (`{"arex": "BAAI/AREX-2@<revision>", "base": "Qwen/Qwen3.8-27B@<revision>"}`). The key given as `--model-key`
+must be the model the run packaged, and `--base-key`, when given, the nearest model the swap checks compared with: the
+repository is compared without regard to case, and the revision must be the same commit (an abbreviation of at least
+7 hex digits that starts the recorded one counts). A file that names another repository or another revision is
+refused, and `--accept-unverified-identity` does not change that. A file that does not say enough to tell (no `models`
+entry for a key, no revision, a revision that cannot be compared) is refused unless you pass
+`--accept-unverified-identity`; the command then prints what it could not verify and records it in the ledger
+(`identity_unverified`).
 
 Exit codes: 0 ready for operator review, 2 refused (nothing was started), 3 stopped on an error
 (the hardware was released; run the same command again to resume), 4 aborted, 5 blocked (an unattended
