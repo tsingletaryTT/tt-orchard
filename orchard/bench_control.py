@@ -7,7 +7,8 @@
 
 A comparison of a fine-tune with its base is fair only when both are served the same way. The first control for a model (bytkim) was served with the drafter on
 and device sampling while the fine-tune was served with the drafter off and host sampling, and the two could not be compared. `build` writes the control's
-run.sh from the model's run.sh by replacing the model's directory with the base snapshot, in the `HF_MODEL` line and the `--model` flag and nowhere else. It
+run.sh from the model's run.sh by replacing the model's directory with the base snapshot wherever the script uses it as a whole value (the `HF_MODEL` line
+and the `--model` flag are required; a path inside the directory, such as a cache, is left alone), quoted for the place it goes. It
 then reads both files again and refuses unless the only lines that differ are lines where that replacement alone explains the difference. It writes a record
 (`<out>.control.json`) with both hashes, the swapped line numbers and the drafter and sampling mode of each script; `bench_session --control-record` copies
 that record into the session's summary.json, so a reader can check the comparison without the scripts. The session also refuses a record whose
@@ -25,6 +26,7 @@ import argparse
 import hashlib
 import json
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -42,9 +44,132 @@ class NoFreeBoard(Exception):
     """gozer shows no board with all its chips free, or its status cannot be read."""
 
 
-def _path_re(path: str):
-    """The path where it stands as a whole path: not followed by a character that would make it a longer name (`model-dir2`, `model-dir-old`)."""
-    return re.compile(re.escape(path) + r"(?![\w.\-])")
+_OPERATORS = ";|&()<>"          # outside quotes these end a word, so `--model /path)` and `"$@")` are read as words
+_PREFIX = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=|--[A-Za-z][\w-]*=")   # NAME= or --flag= at the front of a word; the value is what follows
+
+
+def _words(text: str) -> list[tuple[int, int]]:
+    """The (start, end) of each shell word in the script: split on unquoted blanks, newlines and operators, with '...' and "..." read as one piece, a backslash
+    protecting the next character, `#` starting a comment where a word could start, and a backslash before a newline joining lines. A quote that is never
+    closed is an error, because the script cannot be read safely."""
+    def line(pos: int) -> int:
+        return text.count("\n", 0, pos) + 1
+    n, i, spans = len(text), 0, []
+    while i < n:
+        c = text[i]
+        if c in " \t\r\n":
+            i += 1
+        elif c == "\\" and text[i + 1:i + 2] == "\n":
+            i += 2
+        elif c == "#":
+            j = text.find("\n", i)
+            i = n if j < 0 else j
+        elif c in _OPERATORS:
+            i += 1
+        else:
+            start = i
+            while i < n and text[i] not in " \t\r\n" and text[i] not in _OPERATORS:
+                c = text[i]
+                if c == "\\":
+                    i = min(i + 2, n)
+                elif c == "'":
+                    j = text.find("'", i + 1)
+                    if j < 0:
+                        raise ControlError(f"line {line(i)} opens a single quote that is never closed, so the script cannot be read safely")
+                    i = j + 1
+                elif c == '"':
+                    j = i + 1
+                    while j < n and text[j] != '"':
+                        j += 2 if text[j] == "\\" else 1
+                    if j >= n:
+                        raise ControlError(f"line {line(i)} opens a double quote that is never closed, so the script cannot be read safely")
+                    i = j + 1
+                else:
+                    i += 1
+            spans.append((start, i))
+    return spans
+
+
+def _unquote(raw: str) -> str:
+    """What the shell makes of one word's quoting: the characters of the word with quotes and protecting backslashes taken out."""
+    out, i, n = [], 0, len(raw)
+    while i < n:
+        c = raw[i]
+        if c == "'":
+            j = raw.index("'", i + 1)
+            out.append(raw[i + 1:j])
+            i = j + 1
+        elif c == '"':
+            i += 1
+            while raw[i] != '"':
+                if raw[i] == "\\" and raw[i + 1] in '$`"\\\n':
+                    out.append("" if raw[i + 1] == "\n" else raw[i + 1])
+                    i += 2
+                else:
+                    out.append(raw[i])
+                    i += 1
+            i += 1
+        elif c == "\\":
+            out.append("" if raw[i + 1:i + 2] == "\n" else raw[i + 1:i + 2])
+            i += 2
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
+def _references(text: str, path: str) -> list[tuple[int, int, str]]:
+    """Each place the script uses `path` as a whole value: a word, or the value of NAME= or --flag=, that the shell turns into exactly `path`. A path inside
+    it (`path/cache`), a longer path that contains it, and the same text in a comment are not references. (start, end, kind) with kind `HF_MODEL`, `--model`
+    (the flag, with `=` or as the word before) or `other`."""
+    refs, prev = [], None
+    for s, e in _words(text):
+        m = _PREFIX.match(text[s:e])
+        vs = s + (m.end() if m else 0)
+        if _unquote(text[vs:e]) == path:
+            name = m.group(0) if m else None
+            kind = "HF_MODEL" if name == "HF_MODEL=" else "--model" if name == "--model=" or (name is None and prev == "--model") else "other"
+            refs.append((vs, e, kind))
+        prev = _unquote(text[s:e])
+    return refs
+
+
+def _named(text: str, path: str) -> bool:
+    """Whether some word still holds `path` as a whole path (not as the front or the end of a longer one), for example inside a quoted string. A control
+    that still names the model's directory somewhere it cannot be swapped would load the model."""
+    hole = re.compile(r"(?<![\w./\-])" + re.escape(path) + r"(?![\w./\-])")
+    return any(hole.search(text[s:e]) for s, e in _words(text))
+
+
+def _quoted_like(old: str, new: str) -> str:
+    """`new` written so the shell reads it back as one word, in the quoting style of `old` (the model's own spelling) where that style can carry it."""
+    if re.fullmatch(r'"(?:[^"\\]|\\.)*"', old, re.S):
+        return '"' + re.sub(r'(["\\$`])', r"\\\1", new) + '"'
+    if re.fullmatch(r"'[^']*'", old):
+        return "'" + new.replace("'", "'\"'\"'") + "'"
+    return shlex.quote(new)
+
+
+def _rewrite(model_text: str, model_dir: str, base_snapshot: str) -> str:
+    """The model's run.sh with each whole-value use of `model_dir` replaced by `base_snapshot`, quoted for where it stands. Refuses when the script does
+    not name the model in both the `HF_MODEL` line and the `--model` flag, because a control that swapped one of them would serve one model and load
+    another, and when the model's directory is still named somewhere the swap cannot reach."""
+    if "\n" in base_snapshot or "\0" in base_snapshot:
+        raise ControlError("the base snapshot's name has a newline in it")
+    refs = _references(model_text, model_dir)
+    if not refs and not _named(model_text, model_dir):
+        raise ControlError(f"the model's run.sh does not contain {model_dir}")
+    if not any(k == "HF_MODEL" for _, _, k in refs):
+        raise ControlError(f"the model's run.sh has no HF_MODEL line that names {model_dir}")
+    if not any(k == "--model" for _, _, k in refs):
+        raise ControlError(f"the model's run.sh has no --model flag that names {model_dir}")
+    text = model_text
+    for s, e, _ in reversed(refs):
+        text = text[:s] + _quoted_like(text[s:e], base_snapshot) + text[e:]
+    if _named(text, model_dir):
+        raise ControlError(f"the script still names {model_dir} somewhere that is not a plain value (for example inside a longer string), "
+                           "so it cannot be swapped safely")
+    return text
 
 
 def differing_lines(a: str, b: str) -> list[tuple[int, str, str]]:
@@ -56,34 +181,25 @@ def differing_lines(a: str, b: str) -> list[tuple[int, str, str]]:
 
 
 def control_run_sh(model_text: str, model_dir: str, base_snapshot: str) -> str:
-    """The model's run.sh with `model_dir` replaced by `base_snapshot`. Refuses when the script does not name the model in both the `HF_MODEL`
-    line and the `--model` flag, because a control that swapped one of them would serve one model and load another."""
+    """The model's run.sh with `model_dir` replaced by `base_snapshot` wherever the script uses it as a whole value (see `_rewrite`)."""
     if model_dir == base_snapshot:
         raise ControlError("the base snapshot is the same directory as the model's")
-    pat = _path_re(model_dir)
-    if not pat.search(model_text):
-        raise ControlError(f"the model's run.sh does not contain {model_dir}")
-    if not re.search(r"^\s*export HF_MODEL=.*" + pat.pattern, model_text, re.M):
-        raise ControlError(f"the model's run.sh has no HF_MODEL line that names {model_dir}")
-    if not re.search(r"--model[ =]" + pat.pattern, model_text):
-        raise ControlError(f"the model's run.sh has no --model flag that names {model_dir}")
-    return pat.sub(lambda _m: base_snapshot, model_text)
+    return _rewrite(model_text, model_dir, base_snapshot)
 
 
 def verify_control(model_text: str, control_text: str, model_dir: str, base_snapshot: str) -> list[str]:
-    """Why the control is not comparable with the model's script; an empty list when it is. Every differing line must be explained by the path swap alone."""
+    """Why the control is not comparable with the model's script; an empty list when it is. The control must be what `_rewrite` makes of the model's
+    script, line for line, so every difference is the path swap and the swap is quoted for its place."""
     try:
         diff = differing_lines(model_text, control_text)
+        expected = _rewrite(model_text, model_dir, base_snapshot)
+        off = differing_lines(expected, control_text)
     except ControlError as exc:
         return [str(exc)]
     if not diff:
         return ["no line differs, so the control serves the model again"]
-    pat = _path_re(model_dir)
-    problems = []
-    for n, was, now in diff:
-        if pat.sub(lambda _m: base_snapshot, was) != now:
-            problems.append(f"line {n} differs by more than the model path")
-    if pat.search(control_text):
+    problems = [f"line {n} differs by more than the model path" for n, _, _ in off]
+    if _named(control_text, model_dir):
         problems.append(f"the control still names {model_dir}")
     return problems
 

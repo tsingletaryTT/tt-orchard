@@ -454,3 +454,179 @@ def test_a_control_record_without_a_model_directory_is_refused_by_the_parser(tmp
     with pytest.raises(SystemExit) as e:
         bs.main(args)
     assert e.value.code == 2 and "--model-dir" in capsys.readouterr().err
+
+
+# ---- a model path is found and replaced as a shell word --------------------------------------------------------------------
+
+import hashlib
+import shlex
+
+FIXTURES = Path(__file__).parent / "fixtures" / "bench_control"
+REAL_MODEL_DIR = "/home/ttuser/orchard-runs/baai--arex-2/stages/4/configs/2/model-dir"
+REAL_BASE = "/home/ttuser/.cache/huggingface/hub/models--Qwen--Qwen3.8-27B/snapshots/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+
+
+def test_the_real_arex_2_script_gives_the_control_that_was_built_by_hand_byte_for_byte():
+    model = (FIXTURES / "model-run.sh").read_text()
+    by_hand = (FIXTURES / "base-run.sh").read_text()
+    made = bc.control_run_sh(model, REAL_MODEL_DIR, REAL_BASE)
+    assert made == by_hand
+    assert hashlib.sha256(made.encode()).hexdigest().startswith("09e08f55")
+    assert bc.verify_control(model, made, REAL_MODEL_DIR, REAL_BASE) == []
+
+
+def test_a_path_inside_the_model_directory_is_left_alone():
+    text = RUN_SH + f'export TT_CACHE_PATH="{MODEL_DIR}/cache"\nexport OTHER={MODEL_DIR}/.tt\n'
+    made = bc.control_run_sh(text, MODEL_DIR, BASE)
+    assert f'export TT_CACHE_PATH="{MODEL_DIR}/cache"' in made and f"export OTHER={MODEL_DIR}/.tt" in made
+    assert bc.verify_control(text, made, MODEL_DIR, BASE) == []
+
+
+def test_a_path_that_contains_the_model_directory_further_along_is_left_alone():
+    text = RUN_SH + f"export ELSEWHERE=/mnt/x{MODEL_DIR}\n"
+    made = bc.control_run_sh(text, MODEL_DIR, BASE)
+    assert f"export ELSEWHERE=/mnt/x{MODEL_DIR}" in made
+
+
+def test_a_control_that_rewrote_a_path_inside_the_model_directory_is_reported():
+    text = RUN_SH + f'export TT_CACHE_PATH="{MODEL_DIR}/cache"\n'
+    bad = bc.control_run_sh(RUN_SH, MODEL_DIR, BASE) + f'export TT_CACHE_PATH="{BASE}/cache"\n'
+    problems = bc.verify_control(text, bad, MODEL_DIR, BASE)
+    assert problems and any("line 10 differs" in p for p in problems)
+
+
+def test_the_model_directory_in_a_comment_is_not_a_reference_and_is_left_alone():
+    text = RUN_SH + f"# it's served from {MODEL_DIR} and that's all\n"
+    made = bc.control_run_sh(text, MODEL_DIR, BASE)
+    assert f"# it's served from {MODEL_DIR} and that's all" in made
+
+
+SPACED = "/runs/new model/model-dir"
+
+
+def test_a_model_directory_that_prepare_swap_quoted_is_found_and_swapped_with_its_quoting():
+    text = f"export HF_MODEL={shlex.quote(SPACED)}\nCMD=(py --model {shlex.quote(SPACED)} --max_num_seqs 4)\n"
+    made = bc.control_run_sh(text, SPACED, BASE)
+    assert made == f"export HF_MODEL='{BASE}'\nCMD=(py --model '{BASE}' --max_num_seqs 4)\n"
+    assert shell_sees(made) == (BASE, ["py", "--model", BASE, "--max_num_seqs", "4"])
+    assert shell_sees(text) == (SPACED, ["py", "--model", SPACED, "--max_num_seqs", "4"])
+    assert bc.verify_control(text, made, SPACED, BASE) == []
+
+
+@pytest.mark.parametrize("flag", ["--model={p}", "--model {p}"])
+def test_the_flag_is_found_with_an_equals_sign_or_a_space(flag):
+    text = f'export HF_MODEL="{MODEL_DIR}"\nCMD=(py {flag.format(p=MODEL_DIR)} x)\n'
+    assert f"{BASE}" in bc.control_run_sh(text, MODEL_DIR, BASE).splitlines()[1]
+
+
+def shell_sees(text: str) -> tuple[str, list[str]]:
+    """What bash makes of the two lines the control changes: the value of HF_MODEL and the words of the CMD array. Nothing is run beyond assigning them."""
+    import subprocess
+    script = text + '\nprintf "%s\\0" "$HF_MODEL"\nprintf "%s\\0" "${CMD[@]}"\n'
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=True, env={"PATH": "/usr/bin:/bin", "HOME": "/nonexistent"}).stdout
+    parts = out.split("\0")[:-1]
+    return parts[0], parts[1:]
+
+
+@pytest.mark.parametrize("snap", ["/hf/my snap", "/hf/it's", "/hf/$HOME/x", '/hf/a"b', "/hf/a`b`c", "/hf/a\\b"])
+def test_a_base_snapshot_with_a_space_or_shell_character_reaches_the_shell_as_one_unchanged_path(snap):
+    text = f'export HF_MODEL="{MODEL_DIR}"\nCMD=(py --model {MODEL_DIR} --max_num_seqs 4)\n'
+    made = bc.control_run_sh(text, MODEL_DIR, snap)
+    hf_model, cmd = shell_sees(made)
+    assert hf_model == snap
+    assert cmd == ["py", "--model", snap, "--max_num_seqs", "4"]
+    assert bc.verify_control(text, made, MODEL_DIR, snap) == []
+
+
+def test_a_control_that_split_a_spaced_base_snapshot_into_two_arguments_is_reported():
+    spaced = "/hf/my snap"
+    text = f'export HF_MODEL="{MODEL_DIR}"\nCMD=(py --model {MODEL_DIR} --max_num_seqs 4)\n'
+    bad = f'export HF_MODEL="{spaced}"\nCMD=(py --model {spaced} --max_num_seqs 4)\n'
+    assert shell_sees(bad)[1] == ["py", "--model", "/hf/my", "snap", "--max_num_seqs", "4"]
+    problems = bc.verify_control(text, bad, MODEL_DIR, spaced)
+    assert problems and any("line 2 differs" in p for p in problems)
+
+
+def test_a_base_snapshot_with_a_newline_in_its_name_is_refused():
+    with pytest.raises(bc.ControlError, match="newline"):
+        bc.control_run_sh(RUN_SH, MODEL_DIR, "/hf/a\nb")
+
+
+@pytest.mark.parametrize("form", ["{p}", '"{p}"', "'{p}'"])
+def test_each_quoting_of_the_model_directory_in_the_script_keeps_its_style_and_reaches_the_shell_as_the_base(form):
+    word = form.format(p=MODEL_DIR)
+    text = f"export HF_MODEL={word}\nCMD=(py --model {word} --max_num_seqs 4)\n"
+    made = bc.control_run_sh(text, MODEL_DIR, BASE)
+    assert made == f"export HF_MODEL={form.format(p=BASE)}\nCMD=(py --model {form.format(p=BASE)} --max_num_seqs 4)\n"
+    assert shell_sees(made) == (BASE, ["py", "--model", BASE, "--max_num_seqs", "4"])
+
+
+def test_a_script_with_an_unclosed_quote_is_refused_because_it_cannot_be_read_safely():
+    with pytest.raises(bc.ControlError, match="quote"):
+        bc.control_run_sh(f'export HF_MODEL="{MODEL_DIR}"\nCMD=(py --model {MODEL_DIR} \'oops)\n', MODEL_DIR, BASE)
+
+
+def test_a_model_directory_named_in_another_variable_is_swapped_too_so_the_control_cannot_serve_the_model():
+    text = RUN_SH + f"export MODEL_WEIGHTS_DIR={MODEL_DIR}\n"
+    made = bc.control_run_sh(text, MODEL_DIR, BASE)
+    assert f"export MODEL_WEIGHTS_DIR={BASE}" in made
+
+
+def test_a_model_directory_left_inside_a_quoted_string_is_reported_as_still_named():
+    text = RUN_SH + f"echo 'serving {MODEL_DIR} now'\n"
+    with pytest.raises(bc.ControlError, match="still names"):
+        bc.control_run_sh(text, MODEL_DIR, BASE)
+
+
+def test_a_command_inside_the_array_ending_in_a_closing_bracket_is_still_found():
+    text = f'export HF_MODEL="{MODEL_DIR}"\nCMD=(py --model {MODEL_DIR})\n'
+    assert bc.control_run_sh(text, MODEL_DIR, BASE).splitlines()[1] == f"CMD=(py --model {BASE})"
+
+
+def test_backslash_escapes_inside_double_quotes_are_read_as_the_shell_reads_them():
+    odd = "/runs/$x/model-dir"
+    text = f'export HF_MODEL="/runs/\\$x/model-dir"\nCMD=(py --model "/runs/\\$x/model-dir" x)\n'
+    assert shell_sees(text.replace("$x", "$x"))[0] == odd
+    made = bc.control_run_sh(text, odd, BASE)
+    assert made == f'export HF_MODEL="{BASE}"\nCMD=(py --model "{BASE}" x)\n'
+
+
+def test_a_script_with_an_unclosed_double_quote_is_refused():
+    with pytest.raises(bc.ControlError, match="double quote"):
+        bc.control_run_sh(f'export HF_MODEL="{MODEL_DIR}"\nCMD=(py --model {MODEL_DIR} "oops)\n', MODEL_DIR, BASE)
+
+
+def test_a_model_path_on_the_next_line_after_a_backslash_is_found():
+    text = f'export HF_MODEL="{MODEL_DIR}"\nCMD=(py --model \\\n   {MODEL_DIR} x)\n'
+    made = bc.control_run_sh(text, MODEL_DIR, BASE)
+    assert made == f'export HF_MODEL="{BASE}"\nCMD=(py --model \\\n   {BASE} x)\n'
+    assert shell_sees(made)[1] == ["py", "--model", BASE, "x"]
+
+
+def test_a_word_that_starts_after_an_operator_is_still_a_word():
+    text = f'export HF_MODEL="{MODEL_DIR}"; CMD=(py --model {MODEL_DIR}); echo done\n'
+    assert bc.control_run_sh(text, MODEL_DIR, BASE) == f'export HF_MODEL="{BASE}"; CMD=(py --model {BASE}); echo done\n'
+
+
+def test_a_model_directory_with_a_space_written_with_a_backslash_is_found():
+    spaced = "/runs/new model/model-dir"
+    text = f'export HF_MODEL={spaced.replace(" ", chr(92) + " ")}\nCMD=(py --model {spaced.replace(" ", chr(92) + " ")} x)\n'
+    assert shell_sees(text) == (spaced, ["py", "--model", spaced, "x"])
+    made = bc.control_run_sh(text, spaced, BASE)
+    assert made == f"export HF_MODEL={BASE}\nCMD=(py --model {BASE} x)\n"
+
+
+@pytest.mark.parametrize("form", ["{p}", '"{p}"', "'{p}'"])
+@pytest.mark.parametrize("snap", ["/hf/my snap", "/hf/it's", "/hf/$HOME/x", '/hf/a"b', "/hf/a`b`c", "/hf/a\\b"])
+def test_every_quoting_of_the_model_directory_takes_every_kind_of_base_snapshot_as_one_unchanged_path(form, snap):
+    word = form.format(p=MODEL_DIR)
+    text = f"export HF_MODEL={word}\nCMD=(py --model {word} --max_num_seqs 4)\n"
+    made = bc.control_run_sh(text, MODEL_DIR, snap)
+    assert shell_sees(made) == (snap, ["py", "--model", snap, "--max_num_seqs", "4"])
+    assert bc.verify_control(text, made, MODEL_DIR, snap) == []
+
+
+def test_a_relative_path_that_ends_like_the_model_directory_is_not_the_model_directory():
+    text = RUN_SH + f"export REL=.{MODEL_DIR}\n"
+    made = bc.control_run_sh(text, MODEL_DIR, BASE)
+    assert f"export REL=.{MODEL_DIR}" in made

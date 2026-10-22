@@ -1783,5 +1783,19 @@ and two launches that both wrote `--exact 2` asked for the same board.
 - Checked on the real AREX-2 files: `build` reproduces the by-hand `base-run.sh` byte for byte (sha256 09e08f55...), and `board` parses the live `gozer status`. Nothing was run on a chip.
 - Tests first (the module's tests were seen red before it existed). Mutations: 32 on `bench_control.py` (5 survived the first run: one clause that cannot fire because the explained-by-swap check
   already catches that case, removed; four got tests) and 7 on the `bench_session` change, all red.
+- Review fixes (Copilot, four findings, all real; version stays 0.8.18):
+  - `board` placed each session on the next free board whatever its size, so `--chips 2` could be given a free one-chip board. `plan_boards` now gives each session the smallest free board
+    that holds its chips (the lowest on a tie) and keeps the plans in the order of the requests, and refuses when no board that is left is large enough. The first version of the fix placed
+    the largest request first; a brute-force search over boards and requests up to size 4 found no case where order matters with smallest-fit, so that step was removed.
+  - `bench_session` checked the control record against the script hash only. The session exports `--model-dir` as MODEL_WEIGHTS_DIR, which the runtime reads before the script's own path, so a
+    base-control script and record beside the fine-tune's directory would have served the fine-tune. `control_summary` now needs `--model-dir` with a record and refuses one whose
+    `base_snapshot` is not that directory (links resolved). Before the fix, a test of this on the old code started a real `lm_eval` run; the session tests now stub `_swap` so an unguarded session fails
+    at once and starts nothing.
+  - The path swap was a regex over the whole text: it rewrote `<model-dir>/cache` and `/x<model-dir>`, refused the `shlex.quote` form that `prepare_swap` writes, and put a base snapshot with a
+    space into an unquoted `--model` as two arguments, which `verify_control` accepted. The script is now read as shell words (quotes, comments, operators, line continuations). A word, or a
+    NAME= or --flag= value, that the shell turns into exactly the model directory is replaced, written in the quoting style the script used and quoted for its place; a path inside it or a longer
+    path that contains it is left alone. `verify_control` requires the control to equal that rewrite line for line. A directory still named in a string or an unclosed quote is refused. The tests
+    read the result back through `bash`. The real AREX-2 scripts (fixtures) still give the by-hand control byte for byte. 36 mutations on the new code: 29 red first time, 2 survived (an unquoted
+    backslash, a `'` in a base path inside single quotes) and 5 did not apply (wrong search strings); each got a test or a corrected string and is red.
 - Not done: the drivers in `~/orchard-runs/baai--arex-2/benchmark` still use the by-hand scripts, because a benchmark is running from them. Two launchers that call `board` at the same moment can
   still pick the same board; the second `gozer run` then queues. The check proves the two scripts match; it does not prove that the control's weights load under a bundle made for the model.
