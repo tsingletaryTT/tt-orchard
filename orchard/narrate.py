@@ -20,6 +20,7 @@ blocked run left open: what was attempted, and what a person can do about it.
 from __future__ import annotations
 
 import json
+import re
 import textwrap
 import threading
 import time
@@ -389,6 +390,11 @@ class Narrator:
                     if e["event"] == "evidence" and e["data"].get("what") == "hardware test" \
                             and e["data"].get("returncode") != 0 and e["stage"] is not None:
                         # The reason is in the test's output, which the ledger only points to.
+                        first = _first_error(self.run, e["stage"], e["data"].get("config")) \
+                            if _is_newest_test(entries, e) else None
+                        if first is not None:
+                            self._emit(Line("orchardist", f"  first error in the server log ({first[0]}, line "
+                                                          f"{first[1]}): {first[2]}", True), e.get("ts"))
                         for text in _output_tail(self.run, e["stage"], 3):
                             self._emit(Line("orchardist", "  last output: " + _clip(text, 150), True), e.get("ts"))
                     self._seq = e["seq"]
@@ -448,6 +454,82 @@ def _last_output_line(run: Path, stage: int) -> str | None:
 
 # ---- when a run stops -------------------------------------------------------------------------
 
+# ---- the first real error in a server log ---------------------------------------------------------
+
+ROOT_CAUSE_MAX_BYTES = 8 * 1024 * 1024     # a log is read up to here; the first error is near the start
+ROOT_CAUSE_CLIP = 300
+# A process tag "(EngineCore pid=7) " and a log prefix "ERROR 10-21 16:59:10 [core.py:1330] ", each with one
+# space after it: a traceback frame has more, so its body starts with a space and matches nothing below.
+_LOG_PREFIX = re.compile(r"^(?:\(\w+ pid=\d+\) )?(?:(?:ERROR|CRITICAL|WARNING) \d\d-\d\d \d\d:\d\d:\d\d \[[^\]]*\] )?")
+_EXCEPTION_LINE = re.compile(r"^(?:\w+\.)*(?:[A-Za-z_]\w*)?(?:Error|Exception|Exit|Interrupt)\b(?::\s.*)?$")
+_BUILD_FAILED = re.compile(r"\bbuild failed\b")
+_WRAPPERS = ("See root cause above",)       # vLLM's last line when the engine died: the cause is earlier
+
+
+def root_cause(text: str) -> tuple[int, str] | None:
+    """(line number, text) of the first line that states an error: an exception line ("RuntimeError: ...")
+    or a kernel build failure. A wrapper that only points back at the cause does not count. None when no line
+    qualifies. The text is cut to ROOT_CAUSE_CLIP characters."""
+    for n, raw in enumerate(text.split("\n"), 1):
+        body = _LOG_PREFIX.sub("", raw, count=1)
+        if body[:1].isspace():
+            continue            # a traceback frame or the source line it shows, which can say "build failed" too
+        if any(w in body for w in _WRAPPERS):
+            continue
+        if _EXCEPTION_LINE.match(body) or _BUILD_FAILED.search(body):
+            return n, _clip(body, ROOT_CAUSE_CLIP)
+    return None
+
+
+def root_cause_in_file(path) -> tuple[int, str] | None:
+    """root_cause of the first ROOT_CAUSE_MAX_BYTES of a file; None when it cannot be read."""
+    try:
+        with open(path, "rb") as f:
+            raw = f.read(ROOT_CAUSE_MAX_BYTES)
+    except OSError:
+        return None
+    return root_cause(raw.decode("utf-8", errors="replace"))
+
+
+def _is_newest_test(entries: list[dict], e: dict) -> bool:
+    """True when no later entry replaced the test `e` ended: a later test of the same stage and configuration,
+    or a later start of the stage (which moves the attempt's directory aside). Only then is the log on disk
+    the log `e` wrote."""
+    for later in entries:
+        if later["seq"] <= e["seq"] or later["stage"] != e["stage"]:
+            continue
+        if later["event"] == "stage_start":
+            return False
+        if later["event"] == "evidence" and later["data"].get("what") == "hardware test" \
+                and later["data"].get("config") == e["data"].get("config"):
+            return False
+    return True
+
+
+def _first_error(run: Path, stage, config=None) -> tuple[str, int, str] | None:
+    """(run-relative path, line number, text) of the first error in the server log of one hardware test, or
+    None. A stage 4 test has its own log under `configs/<config>/`; any other test writes `evidence/server.log`
+    (stage 7: `verify/evidence/server.log`) of the stage's current attempt. A log that is not there gives None: another test's log is never used."""
+    base = run / "stages" / str(stage)
+    # Stage 7's boot check serves from `verify/`; every other single test writes into the stage directory.
+    candidates = [base / "configs" / str(config) / "evidence" / "server.log"] if config is not None \
+        else [base / "evidence" / "server.log", base / "verify" / "evidence" / "server.log"]
+    for log in candidates:
+        found = root_cause_in_file(log)
+        if found is not None:
+            return log.relative_to(run).as_posix(), found[0], found[1]
+    return None
+
+
+def _root_cause_lines(run: Path, stage, config=None) -> list[str]:
+    """The first error of one hardware test's server log, as digest lines."""
+    found = _first_error(run, stage, config)
+    if found is None:
+        return []
+    rel, line, text = found
+    return [f"The server log's first error ({rel}, line {line}):", f"  {text}"]
+
+
 def what_was_tried(run_dir, *, stage, limit: int = 8) -> list[str]:
     """What was attempted in `stage`, newest last: the watchdog's findings and the hardware test's result
     from the ledger, then the agent's last `limit` actions from its logs."""
@@ -458,7 +540,7 @@ def what_was_tried(run_dir, *, stage, limit: int = 8) -> list[str]:
         entries = []
     start = max((i for i, e in enumerate(entries) if e["event"] == "stage_start" and e["stage"] == stage), default=0)
     out: list[str] = []
-    events, failed_test = [], False
+    events, failed_test, last_config = [], False, None
     for e in entries[start:]:
         if e["stage"] != stage:
             continue
@@ -469,9 +551,11 @@ def what_was_tried(run_dir, *, stage, limit: int = 8) -> list[str]:
         if e["event"] == "evidence" and e["data"].get("what") == "hardware test":
             events += [l.text for l in lines_for(e)]
             failed_test = e["data"].get("returncode") != 0
+            last_config = e["data"].get("config")
     if events:
         out += ["The supervisor and watchdog recorded:"] + [f"  - {t}" for t in events]
     if failed_test:
+        out += _root_cause_lines(run, stage, last_config)
         tail = _output_tail(run, stage)
         if tail:
             out += ["The hardware test's last output:"] + [f"  | {_clip(l, 160)}" for l in tail]
