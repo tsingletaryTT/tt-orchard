@@ -1679,3 +1679,9 @@ Prompt (operator): "fix stage 7", asked after the AREX-2 bring-up passed and bef
   The bundle's `prepare_model_dir.py` replaces a base copy with the model's own file when the snapshot has one (it raised
   `FileExistsError` otherwise), so both cases work.
 - Tests first (4 new; the replace case was red before the change). 4 mutations, all red. The 238 package tests pass.
+
+## 2026-10-22 (UTC): the goal, and the issue tracker for deferred work
+Prompt (operator): "OUR GOAL (remember this) is to make tt-orchard bring models up, and bring them up well. Every chance we get to make the harness better at being true to the model, let's add an improvement. Let's use the issue tracker on the project to log when we're not ready to do something but know it needs to get done."
+- Work that is known and not ready goes in GitHub issues (public repo: no machine paths, host names or tokens), with the evidence, why it waits, and what it needs. Labels: `fidelity`, `benchmark`, `packaging`, `hardware`, `preflight`, `new-model-kinds`, `deferred`.
+- First batch: issues #14 to #31, from the "Not done" lines of this log and the AREX-2 bring-up: drafter without `mtp.*` tensors, a wider fidelity check with a control, generation config gaps, chat template check, long-context measurement, author-reported versus measured card numbers, base control built from the model's run.sh, an agent-style evaluation path, stage 7 as a command, 1-chip and 4-chip packages, a pull-and-boot check of published packages, a board that drops off the bus, 4-chip fabric timeouts, stage 4 disk, a checklist of model kinds the harness cannot bring up, the dtype rule, block messages, and UI JavaScript tests.
+- Found during the AREX-2 benchmark: `gozer run --exact 2` selects the unit that holds chip 2 (a board). It does not ask for two chips (issue #20).
