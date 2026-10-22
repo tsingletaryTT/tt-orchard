@@ -282,7 +282,7 @@ def test_the_recorded_gemma_bundle_listing_yields_one_port_row_and_ignores_share
 # ---- collect ------------------------------------------------------------------------------------------------
 
 def test_collect_skips_github_when_asked_and_runs_the_rest():
-    f = FakeFetch({DEMOS: [], EXPER: [], README: b""})
+    f = FakeFetch({DEMOS: [], EXPER: [], README: b"", **tt_routes()})
     run = Run(json.dumps({"bundles": []}))
     r = ports.collect(f, CFG, family="gemma", run=run, which=which_gh, no_github=True)
     assert not any("search/issues" in u for u in f.urls)
@@ -291,7 +291,7 @@ def test_collect_skips_github_when_asked_and_runs_the_rest():
 
 
 def test_collect_runs_the_github_searches_by_default():
-    f = FakeFetch({DEMOS: [], EXPER: [], README: b""})
+    f = FakeFetch({DEMOS: [], EXPER: [], README: b"", **tt_routes()})
     run = Run(json.dumps({"items": []}))
     ports.collect(f, CFG, family="gemma", run=run, which=which_gh)
     assert any("search/issues" in u for u in f.urls)
@@ -338,3 +338,291 @@ def test_a_tt_metal_answer_that_is_not_a_listing_is_unavailable():
     f = FakeFetch({DEMOS: {"message": "Not Found"}, EXPER: [], README: b""})
     r = ports.metal(f, ports.terms(CFG))
     assert r.evidence == [] and any("not a listing" in u.reason for u in r.unavailable)
+
+
+# ---- tt-transformers --------------------------------------------------------------------------------
+# Two homes: tt-metal's models/tt_transformers (its model_params directories are named by Hugging Face model
+# name, and its README lists the boards each model runs on) and the standalone tenstorrent/tt-transformers repo.
+
+QCFG = {"model_type": "qwen2_5_vl", "architectures": ["Qwen2_5_VLForConditionalGeneration"]}
+PARAMS = "https://api.github.com/repos/tenstorrent/tt-metal/contents/models/tt_transformers/model_params"
+TT_README = "https://raw.githubusercontent.com/tenstorrent/tt-metal/main/models/tt_transformers/README.md"
+STANDALONE = "https://api.github.com/repos/tenstorrent/tt-transformers/contents/src/tt_transformers/models"
+BASE = "Qwen/Qwen2.5-VL-7B-Instruct"
+TT_README_TEXT = (
+    b"| Model | Hardware | HF_MODEL |\n|---|---|---|\n"
+    b"| [Llama 3.1 8B](https://huggingface.co/meta-llama/Llama-3.1-8B) | n150 / p100 / p150 | ```meta-llama/Llama-3.1-8B``` |\n"
+    b"| [Qwen 2.5 7B](https://huggingface.co/Qwen/Qwen2.5-7B) | n300 | ```Qwen/Qwen2.5-7B``` |\n")
+
+
+def tt_routes(**over):
+    routes = {PARAMS: [{"name": n, "type": "dir"} for n in
+                       ("Qwen2.5-VL-3B-Instruct", "Qwen2.5-VL-7B-Instruct", "Qwen3-32B", "Llama-3.1-8B-Instruct")],
+              TT_README: TT_README_TEXT,
+              STANDALONE: [{"name": n, "type": "dir"} for n in ("qwen2_7b", "llama3_8b", "qwen3_32b")]}
+    routes.update(over)
+    return routes
+
+
+def tt_claims(res):
+    return [(e.source, e.claim, e.confidence) for e in res.evidence]
+
+
+def test_a_model_params_directory_named_like_the_base_is_an_exact_match():
+    r = ports.tt_transformers(FakeFetch(tt_routes()), ports.terms(QCFG), [BASE])
+    exact = [e for e in r.evidence if "model_params" in e.claim]
+    assert [(e.source, e.confidence) for e in exact] == [("tt-transformers", "inferred")]
+    assert "Qwen2.5-VL-7B-Instruct" in exact[0].claim
+    # the 3B and the unrelated models are not the same model, whatever their family
+    assert not any("3B" in e.claim or "Qwen3-32B" in e.claim or "Llama-3.1-8B-Instruct" in e.claim for e in exact)
+
+
+def test_the_model_name_is_compared_without_case_or_punctuation():
+    r = ports.tt_transformers(FakeFetch(tt_routes()), ports.terms(QCFG), ["someone/qwen2_5-vl-7B-INSTRUCT"])
+    assert any("model_params" in e.claim and "Qwen2.5-VL-7B-Instruct" in e.claim for e in r.evidence)
+
+
+def test_a_string_that_is_not_a_model_id_is_not_compared():
+    # ids come from cards and the hub; one that is not `org/name` is left out here as well as in the report
+    r = ports.tt_transformers(FakeFetch(tt_routes()), ports.terms(QCFG), ["Qwen2.5-VL-7B-Instruct", "a b/Qwen2.5-VL-7B-Instruct", None, 5])
+    assert not any("model_params" in e.claim for e in r.evidence)
+
+
+def test_with_no_model_id_there_is_no_params_match():
+    r = ports.tt_transformers(FakeFetch(tt_routes()), ports.terms(QCFG), [])
+    assert not any("model_params" in e.claim for e in r.evidence)
+
+
+def test_a_readme_row_for_the_base_gives_the_boards_it_runs_on():
+    r = ports.tt_transformers(FakeFetch(tt_routes()), ports.terms({}), ["meta-llama/Llama-3.1-8B-Instruct"])
+    rows = [e for e in r.evidence if "README" in e.claim]
+    assert len(rows) == 1 and rows[0].confidence == "inferred" and rows[0].source == "tt-transformers"
+    assert "Llama 3.1 8B" in rows[0].claim and "n150 / p100 / p150" in rows[0].claim
+    assert "Qwen" not in rows[0].claim
+
+
+def test_a_readme_row_with_only_wormhole_boards_carries_the_blackhole_warning_phrase():
+    from orchard.research.types import LACKS_BLACKHOLE
+    r = ports.tt_transformers(FakeFetch(tt_routes()), ports.terms({}), ["Qwen/Qwen2.5-7B"])
+    rows = [e for e in r.evidence if "README" in e.claim]
+    assert len(rows) == 1 and "n300" in rows[0].claim and LACKS_BLACKHOLE in rows[0].claim
+
+
+def test_a_readme_row_that_names_a_blackhole_board_has_no_warning_phrase():
+    from orchard.research.types import LACKS_BLACKHOLE
+    r = ports.tt_transformers(FakeFetch(tt_routes()), ports.terms({}), ["meta-llama/Llama-3.1-8B-Instruct"])
+    rows = [e for e in r.evidence if "README" in e.claim]
+    assert len(rows) == 1 and LACKS_BLACKHOLE not in rows[0].claim
+
+
+def test_a_readme_row_that_names_no_board_says_nothing_about_blackhole():
+    from orchard.research.types import LACKS_BLACKHOLE
+    text = (b"| Model | Hardware | HF_MODEL |\n|---|---|---|\n"
+            b"| [Qwen 2.5 7B](https://huggingface.co/Qwen/Qwen2.5-7B) | see the table | ```Qwen/Qwen2.5-7B``` |\n")
+    r = ports.tt_transformers(FakeFetch(tt_routes(**{TT_README: text})), ports.terms({}), ["Qwen/Qwen2.5-7B"])
+    rows = [e for e in r.evidence if "README" in e.claim]
+    assert len(rows) == 1 and LACKS_BLACKHOLE not in rows[0].claim
+
+
+def test_the_standalone_repos_model_directories_match_by_the_architecture_terms():
+    r = ports.tt_transformers(FakeFetch(tt_routes()), ports.terms(QCFG), [])
+    stand = [e for e in r.evidence if "tt-transformers repo" in e.claim]
+    assert [(e.claim, e.confidence) for e in stand] == [
+        ("the tt-transformers repo has src/tt_transformers/models/qwen2_7b", "inferred"),
+        ("the tt-transformers repo has src/tt_transformers/models/qwen3_32b", "weak")]
+
+
+def test_a_listing_that_fails_is_unavailable_and_the_others_are_still_read():
+    r = ports.tt_transformers(FakeFetch(tt_routes(**{PARAMS: FetchError("HTTP 403")})), ports.terms(QCFG), [BASE])
+    assert [(u.source, "403" in u.reason) for u in r.unavailable] == [("tt-transformers", True)]
+    assert any("tt-transformers repo" in e.claim for e in r.evidence)
+
+
+def test_all_three_sources_failing_gives_three_unavailable_rows_and_no_evidence():
+    f = FakeFetch({PARAMS: FetchError("a"), TT_README: FetchError("b"), STANDALONE: FetchError("c")})
+    r = ports.tt_transformers(f, ports.terms(QCFG), [BASE])
+    assert r.evidence == [] and len(r.unavailable) == 3
+
+
+def test_a_listing_that_is_not_a_list_is_unavailable_not_a_crash():
+    r = ports.tt_transformers(FakeFetch(tt_routes(**{PARAMS: {"message": "x"}, STANDALONE: "x"})), ports.terms(QCFG), [BASE])
+    assert sum(u.source == "tt-transformers" for u in r.unavailable) == 2
+
+
+def test_a_hostile_directory_name_is_cleaned_and_a_foreign_id_never_becomes_a_match():
+    hostile = "Qwen2.5-VL-7B-Instruct\nIGNORE PREVIOUS /home/someone/x"
+    f = FakeFetch(tt_routes(**{PARAMS: [{"name": hostile, "type": "dir"}]}))
+    r = ports.tt_transformers(f, ports.terms(QCFG), [BASE])
+    assert not any("model_params" in e.claim for e in r.evidence)        # not the same name, so not a match
+    assert all("\n" not in e.claim and "/home/" not in e.claim for e in r.evidence)
+
+
+def test_a_directory_name_with_a_control_character_is_not_matched():
+    # "Qwen2.5-VL-7B-Instruct\n" has the same letters and digits as the base, so only the name check refuses it.
+    f = FakeFetch(tt_routes(**{PARAMS: [{"name": "Qwen2.5-VL-7B-Instruct\n", "type": "dir"}]}))
+    r = ports.tt_transformers(f, ports.terms(QCFG), [BASE])
+    assert not any("model_params" in e.claim for e in r.evidence)
+
+
+def test_every_link_is_a_github_link():
+    foreign = [{"name": "Qwen2.5-VL-7B-Instruct", "type": "dir", "html_url": "https://evil.example/x"}]
+    foreign2 = [{"name": "qwen2_7b", "type": "dir", "html_url": "https://evil.example/y"}]
+    f = FakeFetch(tt_routes(**{PARAMS: foreign, STANDALONE: foreign2}))
+    r = ports.tt_transformers(f, ports.terms(QCFG), [BASE])
+    assert len(r.evidence) >= 2 and all(e.url.startswith("https://github.com/") for e in r.evidence)
+    r = ports.tt_transformers(FakeFetch(tt_routes()), ports.terms(QCFG), [BASE, "meta-llama/Llama-3.1-8B-Instruct"])
+    assert r.evidence and all(e.url.startswith("https://github.com/") for e in r.evidence)
+
+
+def test_collect_puts_the_tt_transformers_rows_before_the_tt_metal_rows(monkeypatch):
+    ev = lambda src: ports.Result(evidence=[ports.Evidence(src, src, "https://github.com/x", "inferred", NOW)])
+    monkeypatch.setattr(ports, "tt_transformers", lambda fetch, t, ids: ev("tt-transformers"))
+    monkeypatch.setattr(ports, "metal", lambda fetch, t: ev("tt-metal"))
+    monkeypatch.setattr(ports, "catalog", lambda *a, **kw: ports.Result(data={"bundles": []}))
+    r = ports.collect(FakeFetch({}), QCFG, family="qwen", ids=[BASE], no_github=True)
+    assert [e.source for e in r.evidence] == ["tt-transformers", "tt-metal"]
+
+
+def test_collect_reads_tt_transformers_for_the_model_ids_it_is_given(monkeypatch):
+    seen = []
+    monkeypatch.setattr(ports, "tt_transformers", lambda fetch, t, ids: seen.append(list(ids)) or ports.Result())
+    monkeypatch.setattr(ports, "metal", lambda fetch, t: ports.Result())
+    monkeypatch.setattr(ports, "catalog", lambda *a, **kw: ports.Result(data={"bundles": []}))
+    ports.collect(FakeFetch({}), QCFG, family="qwen", ids=[BASE], no_github=True)
+    assert seen == [[BASE]]                                               # and it still runs with --no-github
+
+
+
+# ---- what a tt-metal demo is ------------------------------------------------------------------------------
+# A demo directory is code, not a bundle. Two facts decide whether it can be served: a vLLM generator file
+# under tt/, and the boards its README names (this box has Blackhole boards).
+
+QV = "https://api.github.com/repos/tenstorrent/tt-metal/contents/models/demos/qwen25_vl/tt"
+QV_README = "https://raw.githubusercontent.com/tenstorrent/tt-metal/main/models/demos/qwen25_vl/README.md"
+QV_PAGE = "https://github.com/tenstorrent/tt-metal/tree/main/models/demos/qwen25_vl"
+
+
+def demo_ev(name="qwen25_vl", conf="inferred", sub="demos", source="tt-metal"):
+    return ports.Evidence(source, f"tt-metal has models/{sub}/{name}",
+                          f"https://github.com/tenstorrent/tt-metal/tree/main/models/{sub}/{name}", conf, NOW)
+
+
+def facts_of(found, routes, **kw):
+    f = FakeFetch(routes)
+    return ports.demo_facts(f, ports.Result(evidence=found), **kw), f
+
+
+def test_a_demo_with_a_vllm_generator_and_wormhole_boards_says_so():
+    r, _ = facts_of([demo_ev()], {QV: [{"name": "generator.py"}, {"name": "generator_vllm.py"}],
+                                  QV_README: b"| 7B | `N300`, `T3K`, `TG` |\nrun on N300 or T3K\n"})
+    (e,) = r.evidence
+    assert e.claim.startswith("tt-metal has models/demos/qwen25_vl (")
+    assert "vLLM generator present" in e.claim
+    assert "no Blackhole board named in its README" in e.claim and "N300, T3K, TG" in e.claim
+    assert (e.source, e.confidence, e.url) == ("tt-metal", "inferred", QV_PAGE)
+
+
+def test_a_demo_without_a_vllm_generator_says_that():
+    r, _ = facts_of([demo_ev()], {QV: [{"name": "generator.py"}], QV_README: b"N300"})
+    assert "no vLLM generator file" in r.evidence[0].claim
+
+
+def test_a_readme_that_names_a_blackhole_board_says_which():
+    r, _ = facts_of([demo_ev()], {QV: [], QV_README: b"| Model | p150 | and N300 | P150 again |"})
+    claim = r.evidence[0].claim
+    assert "README names Blackhole boards (P150)" in claim and "no Blackhole board" not in claim
+
+
+def test_board_names_match_in_any_case_and_p300_is_a_blackhole_board():
+    r, _ = facts_of([demo_ev()], {QV: [], QV_README: b"Runs on Blackhole, e.g. P300C or p100a"})
+    assert "README names Blackhole boards (BLACKHOLE, P300C, P100A)" in r.evidence[0].claim
+
+
+def test_only_a_file_named_generator_vllm_py_counts_as_the_vllm_generator():
+    r, _ = facts_of([demo_ev()], {QV: [{"name": "not_generator_vllm.py"}, {"name": "vllm_notes.md"}, {"name": "generator_vllm.pyc"}],
+                                  QV_README: b"N300"})
+    assert "no vLLM generator file" in r.evidence[0].claim
+
+
+def test_a_claim_with_the_facts_added_still_fits_the_claim_limit():
+    from orchard.research.types import MAX_CLAIM
+    r, _ = facts_of([demo_ev("d" * 270)], {})
+    assert r.evidence[0].claim.startswith("tt-metal has models/demos/ddd") and len(r.evidence[0].claim) <= MAX_CLAIM
+    r, _ = facts_of([demo_ev("d" * 210)],
+                    {"https://api.github.com/repos/tenstorrent/tt-metal/contents/models/demos/" + "d" * 210 + "/tt": [],
+                     "https://raw.githubusercontent.com/tenstorrent/tt-metal/main/models/demos/" + "d" * 210 + "/README.md": b"N300 T3K TG"})
+    assert len(r.evidence[0].claim) <= MAX_CLAIM
+
+
+def test_a_readme_that_names_no_board_says_that():
+    r, _ = facts_of([demo_ev()], {QV: [], QV_README: b"nothing about hardware here, tp150x is not a board"})
+    assert "README names no boards" in r.evidence[0].claim
+
+
+def test_board_names_inside_longer_words_do_not_count():
+    r, _ = facts_of([demo_ev()], {QV: [], QV_README: b"up150ms and p3000 and blackholes and ZN300"})
+    assert "README names no boards" in r.evidence[0].claim
+
+
+def test_only_inferred_tt_metal_demo_rows_are_read_and_the_rest_pass_through_in_order():
+    rows = [demo_ev("a_demo", "weak"), demo_ev("qwen25_vl"), demo_ev("x", source="github"),
+            ports.Evidence("tt-metal", "tt-metal's models README lists X", "https://github.com/x", "inferred", NOW)]
+    r, f = facts_of(rows, {QV: [], QV_README: b"N300"})
+    assert [e.claim for e in r.evidence][0] == rows[0].claim
+    assert "(" in r.evidence[1].claim
+    assert r.evidence[2] == rows[2] and r.evidence[3] == rows[3]
+    assert all("a_demo" not in u and "/x/" not in u for u in f.urls)
+
+
+def test_experimental_demos_are_read_from_their_own_directory():
+    exp = "https://api.github.com/repos/tenstorrent/tt-metal/contents/models/experimental/foo/tt"
+    r, f = facts_of([demo_ev("foo", sub="experimental")], {exp: [{"name": "generator_vllm.py"}],
+                    "https://raw.githubusercontent.com/tenstorrent/tt-metal/main/models/experimental/foo/README.md": b"N150"})
+    assert exp in f.urls and "vLLM generator present" in r.evidence[0].claim
+
+
+def test_at_most_two_demos_are_read():
+    rows = [demo_ev(n) for n in ("d1", "d2", "d3", "d4")]
+    r, f = facts_of(rows, {})
+    assert any("/d1/" in u for u in f.urls) and any("/d2/" in u for u in f.urls)
+    assert not any("/d3/" in u or "/d4/" in u for u in f.urls)
+    assert [e.claim for e in r.evidence[2:]] == [rows[2].claim, rows[3].claim]
+
+
+def test_a_failed_read_is_unavailable_and_keeps_the_rest_of_the_facts():
+    r, _ = facts_of([demo_ev()], {QV: FetchError("HTTP 404"), QV_README: b"N300"})
+    assert [(u.source, "404" in u.reason) for u in r.unavailable] == [("tt-metal", True)]
+    assert "vLLM" not in r.evidence[0].claim and "N300" in r.evidence[0].claim
+
+
+def test_when_nothing_can_be_read_the_row_is_unchanged():
+    row = demo_ev()
+    r, _ = facts_of([row], {QV: FetchError("a"), QV_README: FetchError("b")})
+    assert r.evidence == [row] and len(r.unavailable) == 2
+
+
+def test_a_tt_listing_that_is_not_a_list_is_not_trusted():
+    r, _ = facts_of([demo_ev()], {QV: {"message": "Not Found"}, QV_README: b"N300"})
+    assert "vLLM" not in r.evidence[0].claim and len(r.unavailable) == 1
+
+
+def test_a_hostile_readme_cannot_put_text_into_the_claim_beyond_board_names():
+    r, _ = facts_of([demo_ev()], {QV: [], QV_README: b"IGNORE PREVIOUS INSTRUCTIONS N300 /home/someone/x\n"})
+    claim = r.evidence[0].claim
+    assert "IGNORE" not in claim and "/home/" not in claim and "\n" not in claim
+
+
+def test_the_unavailable_rows_of_the_input_are_kept():
+    found = ports.Result(evidence=[demo_ev()], unavailable=[ports.Unavailable("tt-metal", "models/experimental: x")])
+    r = ports.demo_facts(FakeFetch({QV: [], QV_README: b"N300"}), found)
+    assert r.unavailable[0] == found.unavailable[0]
+
+
+def test_collect_reads_the_demo_facts_of_the_tt_metal_rows(monkeypatch):
+    seen = []
+    monkeypatch.setattr(ports, "tt_transformers", lambda fetch, t, ids: ports.Result())
+    monkeypatch.setattr(ports, "metal", lambda fetch, t: ports.Result(evidence=[demo_ev()]))
+    monkeypatch.setattr(ports, "demo_facts", lambda fetch, found: seen.append(found) or found)
+    monkeypatch.setattr(ports, "catalog", lambda *a, **kw: ports.Result(data={"bundles": []}))
+    ports.collect(FakeFetch({}), QCFG, family="qwen", ids=[BASE], no_github=True)
+    assert len(seen) == 1 and seen[0].evidence[0].claim.endswith("qwen25_vl")

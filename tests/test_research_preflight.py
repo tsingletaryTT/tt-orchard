@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """check_base with a research report, and the preflight wiring (orchard/preflight.py)."""
+import pytest
+
 from orchard import preflight as pf
 from orchard.nearest import Installed
 
@@ -310,3 +312,126 @@ def test_run_preflight_passes_the_opt_in_through():
     finally:
         mp.undo()
     assert seen.get("accept_inferred") is True
+
+
+# ---- code exists, no bundle --------------------------------------------------------------------------------
+# A tt-metal or tt-transformers directory for the base is code, not a bundle. The block says that first, and says
+# whether the code names a Blackhole board, before the long list of unrelated bundles.
+
+def code_port(claim, source="tt-metal", conf="inferred", url="https://github.com/tenstorrent/tt-metal/tree/main/models/demos/x"):
+    return {"claim": claim, "url": url, "confidence": conf, "source": source, "fetched_at": "t"}
+
+
+def code_block(ports, **kw):
+    return check(report(ports=ports, **kw), h=hub(base_model=GEMMA))
+
+
+def test_code_for_the_base_is_named_before_the_bundles_and_the_reason_is_unchanged():
+    c = code_block([code_port("tt-metal has models/demos/gemma3 (vLLM generator present)")],
+                   bundle_choices=[choice("o/a", "g/a", False, "weights-only", "inferred")])
+    assert c.status == pf.BLOCK and c.reason == "nearest-model-missing"
+    assert ("Code for it exists, but code is not a bundle: tt-metal has models/demos/gemma3 (vLLM generator present) "
+            "(https://github.com/tenstorrent/tt-metal/tree/main/models/demos/x).") in c.detail
+    assert "has to be built or installed outside tt-orchard first" in c.detail
+    assert c.detail.index("Code for it exists") < c.detail.index("ranked bundles:")
+    assert c.detail.endswith("Pick one with --base <bundle>, or install a bundle yourself and run bringup again")
+    assert "Existing work:" not in c.detail
+
+
+@pytest.mark.parametrize("p", [code_port("tt-metal has models/demos/x", conf="weak"),
+                               code_port("PR #1 (open): x", source="github"),
+                               code_port("bundle o/b ships code for x", source="bundle"),
+                               code_port("the community catalog lists o/b", source="catalog")])
+def test_a_weak_port_or_one_that_is_not_code_keeps_the_earlier_message(p):
+    c = code_block([p])
+    assert "Code for it exists" not in c.detail and "Existing work: " + p["claim"] in c.detail
+
+
+def test_tt_transformers_rows_count_as_code_too():
+    c = code_block([code_port("tt-metal's tt_transformers README lists Llama 3.1 8B on n150 / p100 / p150", source="tt-transformers")])
+    assert "Code for it exists, but code is not a bundle: tt-metal's tt_transformers README lists Llama 3.1 8B" in c.detail
+
+
+def test_a_readme_that_names_a_blackhole_board_is_said_so():
+    c = code_block([code_port("tt-metal has models/demos/x (README names Blackhole boards (P150))")])
+    assert "The code names a Blackhole board." in c.detail and "check that it runs here" not in c.detail
+
+
+def test_code_that_names_no_blackhole_board_is_a_warning_because_this_box_is_blackhole():
+    c = code_block([code_port("tt-metal has models/demos/x (no Blackhole board named in its README, which names N300, T3K)")])
+    assert "names no Blackhole board" in c.detail and "this box has Blackhole boards" in c.detail
+    assert "check that it runs here before building a bundle" in c.detail
+
+
+def test_code_with_no_board_facts_says_nothing_about_boards():
+    c = code_block([code_port("tt-metal has models/demos/x")])
+    assert "Blackhole" not in c.detail
+
+
+def test_a_blackhole_row_wins_over_a_wormhole_only_row():
+    c = code_block([code_port("tt-metal has models/demos/a (no Blackhole board named in its README, which names N300)"),
+                    code_port("tt-metal's tt_transformers README lists M on n150 / p150", source="tt-transformers")])
+    assert "The code names a Blackhole board." in c.detail and "this box has Blackhole boards" not in c.detail
+
+
+def test_at_most_three_code_rows_are_listed_in_the_order_given():
+    c = code_block([code_port(f"tt-metal has models/demos/d{i}") for i in range(5)])
+    assert "d0" in c.detail and "d1" in c.detail and "d2" in c.detail and "d3" not in c.detail
+
+
+def test_the_searched_listing_is_capped_so_it_does_not_bury_the_code():
+    names = [{"name": f"o/qwen3-{i:02d}", "installed": False} for i in range(30)]
+    c = pf.check_base(model_id="x/m", hub=hub(base_model="Qwen/Qwen2.5-VL-7B-Instruct"), base_override=None,
+                      local_snapshot=lambda m: None, installed=[], search=lambda q: names,
+                      report=report(ports=[code_port("tt-metal has models/demos/qwen25_vl")]))
+    assert "o/qwen3-07" in c.detail and "o/qwen3-08" not in c.detail and "and 22 more" in c.detail
+    assert len(c.data["candidates"]) == 30                         # the data keeps every candidate
+
+
+def test_a_base_that_a_bundle_serves_gets_no_code_note():
+    b = Installed(name="o/b", weights_repo=GEMMA, schema="6", chips=2)
+    c = check(report(ports=[code_port("tt-metal has models/demos/gemma3")]), h=hub(base_model=GEMMA), installed=[b])
+    assert c.status == pf.OK and "Code for it exists" not in c.detail
+
+
+def test_a_real_demo_claim_from_the_research_step_reaches_the_block_message_with_its_board_warning():
+    # The writer (ports.demo_facts) and the reader (preflight._code_note) share one phrase; nothing here spells it.
+    from orchard.research import ports
+    from orchard.research.types import Evidence
+    qv = "https://api.github.com/repos/tenstorrent/tt-metal/contents/models/demos/qwen25_vl/tt"
+    readme = "https://raw.githubusercontent.com/tenstorrent/tt-metal/main/models/demos/qwen25_vl/README.md"
+
+    class F:
+        def json(self, url, **kw):
+            return [{"name": "generator_vllm.py"}]
+
+        def get(self, url, **kw):
+            return b"N300 T3K TG"
+
+    ev = Evidence("tt-metal", "tt-metal has models/demos/qwen25_vl", "https://github.com/tenstorrent/tt-metal/tree/main/models/demos/qwen25_vl",
+                  "inferred", "t")
+    row = ports.demo_facts(F(), ports.Result(evidence=[ev])).evidence[0].as_dict()
+    c = code_block([row])
+    assert "vLLM generator present" in c.detail and "this box has Blackhole boards" in c.detail
+
+
+def test_a_real_tt_transformers_row_for_wormhole_boards_reaches_the_block_message_with_the_warning():
+    # The collector (ports.tt_transformers) writes the claim and preflight._code_note reads it; no test string here
+    # spells the phrase they share.
+    from orchard.research import ports
+    readme = ("| Model | Hardware | HF_MODEL |\n|---|---|---|\n"
+              "| [Qwen 2.5 7B](https://huggingface.co/Qwen/Qwen2.5-7B) | n300 | ```Qwen/Qwen2.5-7B``` |\n").encode()
+
+    class F:
+        def json(self, url, **kw):
+            return []
+
+        def get(self, url, **kw):
+            return readme
+
+        def now(self):
+            return "t"
+
+    row = ports.tt_transformers(F(), ports.terms({}), ["Qwen/Qwen2.5-7B"]).evidence[0].as_dict()
+    c = code_block([row])
+    assert "n300" in c.detail and "this box has Blackhole boards" in c.detail
