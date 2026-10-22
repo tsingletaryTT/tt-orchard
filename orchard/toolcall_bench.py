@@ -37,7 +37,8 @@ STRING_DROP = re.compile(r"[ ,./\-_*^]")
 # ---- loading ----------------------------------------------------------------------------------------------------------------------
 
 def _rows(path) -> list[dict]:
-    return [json.loads(line) for line in Path(path).read_text(encoding="utf-8").splitlines() if line.strip()]
+    # "\n" only: str.splitlines() would also cut a record at a U+2028 left raw inside a JSON string.
+    return [json.loads(line) for line in Path(path).read_text(encoding="utf-8").split("\n") if line.strip()]
 
 
 def load_items(questions_path, answers_path) -> list[dict]:

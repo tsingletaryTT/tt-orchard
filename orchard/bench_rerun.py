@@ -30,7 +30,8 @@ def samples_file(run_dir, phase: str) -> Path:
 
 def read_samples(run_dir, phase: str) -> list[dict]:
     rows = []
-    for line in samples_file(run_dir, phase).read_text(encoding="utf-8").splitlines():
+    # Split on "\n" only. str.splitlines() also cuts at U+2028, U+2029 and U+0085, which lm-eval leaves raw inside a JSON string.
+    for line in samples_file(run_dir, phase).read_text(encoding="utf-8").split("\n"):
         if line.strip():
             rows.append(json.loads(line))
     return rows
