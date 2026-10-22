@@ -639,6 +639,9 @@ def test_an_offline_report_does_not_know_whether_the_model_is_gated():
 
 def test_the_ports_step_gets_the_stated_bases_and_the_model_itself_as_ids_to_match_exactly(monkeypatch):
     seen = {}
-    monkeypatch.setattr(report.ports, "collect", lambda fetch, cfg, **kw: seen.update(kw) or Result())
+    monkeypatch.setattr(report.ports, "collect", lambda fetch, cfg, **kw: seen.update(kw) or report.Result())
     r = build(world())
     assert seen["ids"] == ["g/base", r["model"]]
+    # an error inside the mock is caught by report._guard and recorded as an unavailable ports collector,
+    # which would let the assertion above pass on the failure path
+    assert not any(u["source"] == "ports" for u in r["unavailable"]), r["unavailable"]
