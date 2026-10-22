@@ -56,7 +56,10 @@ write a script.
   `handoff.json` as usual and do not stop.
 - `prepare_swap.py` also writes `stages/2/model-dir-sources.json`: which files of `model-dir/` came from the
   nearest model and which from the new model, and whose generation config the server reads. The stage 8 bundle
-  and the package card quote it. Do not edit it or write one yourself.
+  and the package card quote it. It also holds the chat template the directory serves (the jinja file first, then the
+  template inside `tokenizer_config.json`), whether that is the nearest model's, and the special tokens. The swap check
+  sends plain text to `/v1/completions`, which applies no chat template, so there is nothing to fix there. Do not edit
+  the record or write one yourself.
 - `prepare_swap.py` warns "no stop token" when the model directory has no top-level `eos_token_id` in
   `generation_config.json` or `config.json`. The Qwen3.8 bundle then stops after loading the weights. The warning is
   advisory, because it predicts from one bundle's reading rule. Do not try to fix it. Write `hw_test.json` and

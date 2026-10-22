@@ -480,7 +480,7 @@ def test_a_template_in_tokenizer_config_that_differs_from_the_jinja_file_is_repo
     tc = evidence(stage, "tokenizer-compare.json")
     assert tc["model"]["chat_template_inline_sha256"] != tc["model"]["chat_template_file_sha256"]
     assert tc["base"]["chat_template_inline_sha256"] == tc["base"]["chat_template_file_sha256"]
-    assert tc["chat_template_equal"] is True                          # the file is the one the loader reads
+    assert tc["chat_template_equal"] is True                          # the loader reads the file
     finding = area(delta(stage), "chat_template")["finding"]
     assert "new model's tokenizer_config.json" in finding and "chat_template.jinja" in finding
     assert "nearest model's tokenizer_config.json" not in finding

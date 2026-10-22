@@ -27,7 +27,7 @@ It measures, and writes each measurement under `evidence/` next to itself:
     tokenizer-compare.json   vocab, merges (a merge may be a 2-element list or one space-joined
                              string; both forms compare equal), added tokens, normalizer,
                              pre-tokenizer, decoder and post-processor, the chat template's sha256 (the
-                             template inside tokenizer_config.json and the one in chat_template.jinja
+                             template inside tokenizer_config.json and the template in chat_template.jinja
                              separately, because the file wins), and the eos, bos, pad and unk tokens
     tokenizer-encode.json    ids from both tokenizers (the `tokenizers` package) for the fixed strings
                              below and 100 fixed-seed random-unicode strings
