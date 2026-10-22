@@ -401,6 +401,29 @@ def test_a_readme_row_for_the_base_gives_the_boards_it_runs_on():
     assert "Qwen" not in rows[0].claim
 
 
+def test_a_readme_row_with_only_wormhole_boards_carries_the_blackhole_warning_phrase():
+    from orchard.research.types import LACKS_BLACKHOLE
+    r = ports.tt_transformers(FakeFetch(tt_routes()), ports.terms({}), ["Qwen/Qwen2.5-7B"])
+    rows = [e for e in r.evidence if "README" in e.claim]
+    assert len(rows) == 1 and "n300" in rows[0].claim and LACKS_BLACKHOLE in rows[0].claim
+
+
+def test_a_readme_row_that_names_a_blackhole_board_has_no_warning_phrase():
+    from orchard.research.types import LACKS_BLACKHOLE
+    r = ports.tt_transformers(FakeFetch(tt_routes()), ports.terms({}), ["meta-llama/Llama-3.1-8B-Instruct"])
+    rows = [e for e in r.evidence if "README" in e.claim]
+    assert len(rows) == 1 and LACKS_BLACKHOLE not in rows[0].claim
+
+
+def test_a_readme_row_that_names_no_board_says_nothing_about_blackhole():
+    from orchard.research.types import LACKS_BLACKHOLE
+    text = (b"| Model | Hardware | HF_MODEL |\n|---|---|---|\n"
+            b"| [Qwen 2.5 7B](https://huggingface.co/Qwen/Qwen2.5-7B) | see the table | ```Qwen/Qwen2.5-7B``` |\n")
+    r = ports.tt_transformers(FakeFetch(tt_routes(**{TT_README: text})), ports.terms({}), ["Qwen/Qwen2.5-7B"])
+    rows = [e for e in r.evidence if "README" in e.claim]
+    assert len(rows) == 1 and LACKS_BLACKHOLE not in rows[0].claim
+
+
 def test_the_standalone_repos_model_directories_match_by_the_architecture_terms():
     r = ports.tt_transformers(FakeFetch(tt_routes()), ports.terms(QCFG), [])
     stand = [e for e in r.evidence if "tt-transformers repo" in e.claim]

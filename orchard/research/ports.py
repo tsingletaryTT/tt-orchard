@@ -215,9 +215,13 @@ def tt_transformers(fetch, t: dict, ids) -> Result:
     for line in text.splitlines():
         m = TT_README_ROW.match(line)
         if m and _model_key(m.group(3)) in keys:
+            boards = ' '.join(m.group(2).split())
+            # the same phrase the demo claims use, so preflight warns about a row whose boards are all Wormhole
+            lacks = (f"; {LACKS_BLACKHOLE} in that row"
+                     if _board_names(WORMHOLE, boards) and not _board_names(BLACKHOLE, boards) else "")
             res.evidence.append(Evidence(
                 "tt-transformers",
-                clean(f"tt-metal's tt_transformers README lists {m.group(1).strip()} on {' '.join(m.group(2).split())}"),
+                clean(f"tt-metal's tt_transformers README lists {m.group(1).strip()} on {boards}{lacks}"),
                 TT_README_PAGE, INFERRED, fetch.now()))
     standalone = _listing(fetch, STANDALONE_URL, "tenstorrent/tt-transformers src/tt_transformers/models", res)
     for name, conf in match_names(list(standalone or {}), t):

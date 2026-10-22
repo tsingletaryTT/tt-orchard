@@ -413,3 +413,25 @@ def test_a_real_demo_claim_from_the_research_step_reaches_the_block_message_with
     row = ports.demo_facts(F(), ports.Result(evidence=[ev])).evidence[0].as_dict()
     c = code_block([row])
     assert "vLLM generator present" in c.detail and "this box has Blackhole boards" in c.detail
+
+
+def test_a_real_tt_transformers_row_for_wormhole_boards_reaches_the_block_message_with_the_warning():
+    # The collector (ports.tt_transformers) writes the claim and preflight._code_note reads it; no test string here
+    # spells the phrase they share.
+    from orchard.research import ports
+    readme = ("| Model | Hardware | HF_MODEL |\n|---|---|---|\n"
+              "| [Qwen 2.5 7B](https://huggingface.co/Qwen/Qwen2.5-7B) | n300 | ```Qwen/Qwen2.5-7B``` |\n").encode()
+
+    class F:
+        def json(self, url, **kw):
+            return []
+
+        def get(self, url, **kw):
+            return readme
+
+        def now(self):
+            return "t"
+
+    row = ports.tt_transformers(F(), ports.terms({}), ["Qwen/Qwen2.5-7B"]).evidence[0].as_dict()
+    c = code_block([row])
+    assert "n300" in c.detail and "this box has Blackhole boards" in c.detail
