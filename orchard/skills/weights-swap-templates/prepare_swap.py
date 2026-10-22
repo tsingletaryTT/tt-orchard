@@ -16,6 +16,14 @@ The weights-swap-check skill copies this file into the stage directory and runs 
      model.safetensors.index.json and every *.safetensors file. tokenizer.json and at least one
      *.safetensors file are required (exit 2 without them); the other names are linked when present
      and reported when absent.
+   - generation_config.json, when new_snapshot has none (or only a link to a blob that is gone), is COPIED from
+     base_snapshot instead, and the script says so. The bundle's serving code reads `eos_token_id` from the
+     model dir's generation_config.json or config.json, and config.json here is the BASE model's, which
+     nests it under text_config. BAAI/AREX-2 ships no generation_config.json: the server loaded all 64 layers
+     and died with "no eos_token_id found for the served checkpoint" (2026-10-21). A generation_config.json the
+     model ships is always linked and never replaced. The copy also brings the base's sampling defaults
+     (vLLM reads them from the model dir); the checks that use this directory send their own sampling
+     settings. When neither snapshot has the file the script warns and goes on.
 2. `run.sh`, a copy of `<bundle_dir>/run.sh` with these edits:
    - the `HERE=...` line becomes `HERE="<bundle_dir>"` (exactly once), so the copy still finds
      the bundle's venv and model code;
@@ -65,6 +73,7 @@ COPIED = ("config.json", "preprocessor_config.json", "video_preprocessor_config.
 LINKED = ("tokenizer.json", "tokenizer_config.json", "chat_template.jinja", "generation_config.json",
           "model.safetensors.index.json")
 REQUIRED_LINKS = ("tokenizer.json",)
+FALLBACK_COPY = "generation_config.json"      # copied from base_snapshot when new_snapshot has none
 
 
 def fail(message: str) -> None:
@@ -109,6 +118,10 @@ def build_model_dir(base: Path, new: Path) -> tuple[Path, list[str], list[str], 
             continue
         os.symlink(os.path.realpath(src), md / name)
         linked.append(name)
+    if FALLBACK_COPY in absent and (base / FALLBACK_COPY).is_file():
+        shutil.copyfile(base / FALLBACK_COPY, md / FALLBACK_COPY)      # follows the snapshot link to the blob
+        absent.remove(FALLBACK_COPY)
+        copied.append(FALLBACK_COPY)
     for name in REQUIRED_LINKS:
         if name not in linked:
             fail(f"{name} is not in new_snapshot {new}")
@@ -246,8 +259,13 @@ def main() -> int:
     print(f"model-dir: {model_dir}")
     print(f"  copied from base_snapshot: {', '.join(copied) or 'nothing'}")
     print(f"  linked from new_snapshot: {len(linked)} files ({', '.join(linked)})")
+    if FALLBACK_COPY in copied:
+        print(f"  {FALLBACK_COPY}: new_snapshot has none; copied from base_snapshot")
     if absent:
         print(f"  absent in new_snapshot, not linked: {', '.join(absent)}")
+    if FALLBACK_COPY in absent:
+        print(f"  warning: {FALLBACK_COPY} is in neither snapshot. The bundle's serving code reads eos_token_id from it or "
+              "from config.json (here the base model's, which may nest it), so the server may not start")
     if bundle is None:
         print(f"run.sh: not built; {cfg['package']} is a container package, and "
               "serve_and_compare_container.py starts it")
