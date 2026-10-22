@@ -1800,3 +1800,25 @@ templates, one inside `tokenizer_config.json` and one in `chat_template.jinja`; 
 - Not done, and needs hardware: the second half of the issue, one chat request in stage 2 that uses the new template and checks the reply starts and stops as the model card
   says. The special-token check does not compare the new model's end token with the stop ids the server uses, because whether the server also stops on the tokenizer's eos token
   was not found out. A Qwen3.8 fine-tune with a different template has not been seen, so the "different" hazard has run only on other families and on built fixtures.
+
+## 2026-10-22 (UTC): GSM8K's stop string cuts thinking models off (branch `bench-stop-strings`, version 0.8.23)
+Prompt (operator, through the controller): drop the stop string and flag the artefact. Found while benchmarking BAAI/AREX-2: the base control (served with the same run.sh) returned an empty
+reply for 271 of 1,319 GSM8K items, AREX-2 for 46, and the proxy counted 14 and 25 cut-offs. The empty replies had finish_reason `stop`, 10 to 30 tokens and a few dozen characters of
+reasoning. On the answered items both models score about 0.96 (flexible-extract), so the 0.766 against 0.903 was mostly the base being cut off more often.
+- Cause, checked by sending one failing prompt to the live base server: lm-eval's gsm8k task sends `stop: ["Question:", "</s>", "<|im_end|>"]` (confirmed with the real harness
+  against a fake server that records request bodies), and vLLM matches stop strings against the reasoning text. The base restates "Question: ..." in its thinking ("User pattern:
+  Question: ...") and is stopped there with `content: None`. Without the stop strings the same prompt answers (`#### 18`); with them it stops at 185 tokens with no content.
+- The same run of the published bytkim card is affected: 178 empty replies for the fine-tune and 242 for the base on GSM8K, with 0.9702 and 0.9703 on the answered items. The card's
+  "GSM8K is the one clear difference" (0.839 against 0.792) comes mostly from that. The card on the Hub has not been changed.
+- `bench_session --stop STRING` replaces the task's `until` through `--gen_kwargs until=STRING` (default unchanged). One string only: the harness reads `--gen_kwargs` as comma-separated
+  pairs, so a comma, an empty string or a blank one is refused before anything starts. With the real harness, `until=</s>` sends `stop: ["</s>"]` and `until=a=b` sends `["a=b"]`.
+  `summary.json` settings record `stop`.
+- The proxy records `content_chars`. `bench_proxy.stop_truncated_suspect` calls a request a suspect when it stopped (not a length cut-off), has reasoning text and no content; for a log
+  from before the field existed it uses a `stop` of at most 35 tokens with reasoning text. The summary has `stop_truncated_suspects` per phase and `{total, by_phase, note}` at the top.
+  `python3 -m orchard.bench_rerun suspects --run DIR --phases gsm8k,ifeval` reads a finished run's `requests.jsonl` and exits 4 when it finds any. On the real runs the old-log rule finds
+  149 and 215 in bytkim's GSM8K, 12 and 225 in AREX-2's and the base's; it undercounts (bytkim has 178 and 242 empty replies, AREX-2 46), because it misses cuts after more than 35 tokens.
+  A run made with this change records content and uses the exact rule.
+- Tests first. Mutations: 17 on the proxy (1 survived, the 35-token bound, and got a test that pins the number), 21 on the session (4 survived and got direct tests: the return value of
+  `validate_stop`, the total over several phases, the example in the note, a phase with no proxy record), 10 on `bench_rerun` (1 survived, any against all phases, and got a mixed-phase test).
+- Not done: no benchmark was re-run here and the bytkim card was not touched. Re-running an old run's GSM8K with `--stop '</s>'` is the fix for its numbers. Removing `Question:` also
+  removes the stop that keeps a non-chat model from writing a next few-shot question; with chat templates and EOS that has not been seen, and it was not measured.
