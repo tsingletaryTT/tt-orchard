@@ -82,15 +82,35 @@ def _open(run: Path) -> Ledger:
                                   "Stop it first, or wait for it to finish") from None
 
 
+def _root(entries: list[dict], args, attr: str, key: str, flag: str) -> Path:
+    value = getattr(args, attr, None) or (recorded_paths(entries) or {}).get(key)
+    if not value:
+        raise PackageCommandError(f"the run did not record its paths, so give {flag}")
+    return Path(value)
+
+
+def _models_root(entries: list[dict], args) -> Path:
+    """The models root: the flag, else what the run recorded. Staging needs it."""
+    return _root(entries, args, "models_root", "tt_model_root", "--models-root")
+
+
+def _cache_root(entries: list[dict], args) -> Path:
+    """The cache root: the flag, else what the run recorded. The boot step needs only this one, and `lease_argv`
+    passes only this one to the child."""
+    return _root(entries, args, "cache_root", "cache_root", "--cache-root")
+
+
 def _paths(entries: list[dict], args) -> tuple[Path, Path]:
-    """(models root, cache root): the flags, else what the run recorded."""
-    rec = recorded_paths(entries) or {}
-    models = getattr(args, "models_root", None) or rec.get("tt_model_root")
-    cache = getattr(args, "cache_root", None) or rec.get("cache_root")
-    missing = [flag for flag, v in (("--models-root", models), ("--cache-root", cache)) if not v]
+    """(models root, cache root), for the steps that need both. One message names every flag that is missing."""
+    missing = []
+    for fn in (_models_root, _cache_root):
+        try:
+            fn(entries, args)
+        except PackageCommandError as exc:
+            missing.append(str(exc).rsplit("give ", 1)[1])
     if missing:
         raise PackageCommandError("the run did not record its paths, so give " + " and ".join(missing))
-    return Path(models), Path(cache)
+    return _models_root(entries, args), _cache_root(entries, args)
 
 
 # ---- the lease ---------------------------------------------------------------------------------------
@@ -213,7 +233,7 @@ def boot_step(run: Path, args, out, *, env, spawn, extra_env) -> int:
     if not chips:
         raise PackageCommandError("the boot step opens the chips, so it runs under a lease: use "
                                   "`tt-orchard package RUN` (it takes one), or `gozer run --chips N -- ...`")
-    _, cache = _paths(_entries(run), args)
+    cache = _cache_root(_entries(run), args)
     benv = agent_env(run, extra=extra_env)
     benv["TT_VISIBLE_DEVICES"] = chips
     benv.pop("TT_METAL_VISIBLE_DEVICES", None)

@@ -321,7 +321,7 @@ def test_a_run_with_no_recorded_paths_needs_them_on_the_command_line(rig):
         led.append("run_start", None, model="m", package=None)
         led.append("decision", None, decision="ready for operator review")
     code, text, runner = run_cmd(rig)
-    assert code == 2 and "--models-root" in text and runner.calls == []
+    assert code == 2 and "--models-root and --cache-root" in text and runner.calls == []
     code, text, _ = run_cmd(rig, models_root=str(rig["models"]), cache_root=str(rig["cache"]))
     assert code == 0, text
 
@@ -608,3 +608,36 @@ def test_a_base_key_missing_from_one_task_is_refused_naming_the_task(packaged):
     code, text = run_card(packaged)
     assert code == 2 and "ifeval" in text and "'base'" in text
     assert not (packaged["stage"] / "benchmark-numbers.json").exists()
+
+
+# ---- review: the leased child needs the cache root and nothing else -------------------------------------
+
+def test_the_boot_step_of_a_run_with_no_recorded_paths_runs_with_only_the_cache_root(rig, monkeypatch):
+    """The outer command is given --models-root and --cache-root, but `lease_argv` forwards only --cache-root, so the
+    child must not ask for the models root it never uses."""
+    (rig["run"] / "ledger.jsonl").unlink()
+    with Ledger(rig["run"] / "ledger.jsonl") as led:
+        led.append("run_start", None, model="m", package=None)
+        led.append("decision", None, decision="ready for operator review")
+    code, text, _ = run_cmd(rig, step="stage", models_root=str(rig["models"]), cache_root=str(rig["cache"]))
+    assert code == 0, text
+    monkeypatch.setenv("TT_VISIBLE_DEVICES", "2,3")
+    seen = []
+    out = io.StringIO()
+    code = package_cmd.main(args(rig, step="boot", cache_root=str(rig["cache"])), out=out,
+                            spawn=lambda c, r, e, t, o: (seen.append(e) or (0, False)), extra_env=rig["extra_env"])
+    assert code == 0, out.getvalue()
+    assert seen[0]["TT_METAL_CACHE"] == str(rig["cache"] / "kernels")
+
+
+def test_the_boot_step_still_asks_for_the_cache_root_when_the_run_recorded_none(rig, monkeypatch):
+    (rig["run"] / "ledger.jsonl").unlink()
+    with Ledger(rig["run"] / "ledger.jsonl") as led:
+        led.append("run_start", None, model="m", package=None)
+        led.append("decision", None, decision="ready for operator review")
+    run_cmd(rig, step="stage", models_root=str(rig["models"]), cache_root=str(rig["cache"]))
+    monkeypatch.setenv("TT_VISIBLE_DEVICES", "2,3")
+    out = io.StringIO()
+    code = package_cmd.main(args(rig, step="boot"), out=out, spawn=lambda c, r, e, t, o: (0, False),
+                            extra_env=rig["extra_env"])
+    assert code == 2 and "--cache-root" in out.getvalue() and "--models-root" not in out.getvalue()
