@@ -946,3 +946,56 @@ def test_the_script_says_when_there_are_no_sampling_defaults(prep):
     (prep["new"] / "generation_config.json").unlink()
     r = run_prepare(prep["stage"])
     assert "model-dir-sources.json: no generation_config.json, so no sampling defaults or stop tokens" in r.stdout
+
+
+# ---- stop tokens: warn at once when the server will find none ---------------------------------------------
+# The Qwen3.8 bundle's serving code reads a top-level eos_token_id from generation_config.json or config.json
+# of the model directory, and stops after loading the weights without one. prepare_swap.py applies the same rule
+# (eos_ids above is a copy kept here so a change in the bundle shows up as a failing contract) and says so in
+# seconds, before a start that takes 15 to 25 minutes.
+
+def test_a_directory_with_stop_tokens_gets_no_stop_token_warning_and_records_them(no_new_gen):
+    r = run_prepare(no_new_gen["stage"])
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "no stop token" not in r.stdout
+    assert sources(no_new_gen["stage"])["eos_token_ids"] == [248046, 248044]
+
+
+def test_a_models_own_generation_config_without_stop_tokens_warns_and_records_none(prep):
+    put(prep["new"], "generation_config.json", '{"temperature": 0.6}')
+    put(prep["base"], "config.json", BASE_CONFIG)                      # nests it, as the Qwen3.8 base does
+    r = run_prepare(prep["stage"])
+    assert r.returncode == 0, r.stdout + r.stderr                     # a warning: the rule is the bundle's, not ours
+    assert "warning: no stop token" in r.stdout and "stops after loading the weights" in r.stdout
+    assert sources(prep["stage"])["eos_token_ids"] == []
+    assert eos_ids(prep["stage"] / "model-dir") == set()              # the same answer the bundle would give
+
+
+def test_a_top_level_stop_token_in_config_json_counts(prep):
+    put(prep["new"], "generation_config.json", '{"temperature": 0.6}')
+    put(prep["base"], "config.json", '{"eos_token_id": 5}')
+    r = run_prepare(prep["stage"])
+    assert "no stop token" not in r.stdout
+    assert sources(prep["stage"])["eos_token_ids"] == [5]
+
+
+def test_the_two_files_stop_tokens_are_joined_without_repeats(prep):
+    put(prep["new"], "generation_config.json", '{"eos_token_id": [7, 8]}')
+    put(prep["base"], "config.json", '{"eos_token_id": 8}')
+    assert run_prepare(prep["stage"]).returncode == 0
+    assert sources(prep["stage"])["eos_token_ids"] == [7, 8]
+
+
+def test_the_missing_file_warning_is_not_repeated_by_the_stop_token_warning(prep):
+    (prep["new"] / "generation_config.json").unlink()
+    r = run_prepare(prep["stage"])
+    assert r.stdout.count("eos_token_id") >= 1 and "warning: no stop token" not in r.stdout
+    assert sources(prep["stage"])["eos_token_ids"] == []
+
+
+@pytest.mark.parametrize("value, ids", [(7, [7]), ([3, 4], [3, 4]), (True, []), ([True, 3], [3]), ("7", []), (None, [])])
+def test_stop_tokens_are_integers_only(prep, value, ids):
+    put(prep["new"], "generation_config.json", json.dumps({"eos_token_id": value}))
+    put(prep["base"], "config.json", "{}")
+    assert run_prepare(prep["stage"]).returncode == 0
+    assert sources(prep["stage"])["eos_token_ids"] == ids

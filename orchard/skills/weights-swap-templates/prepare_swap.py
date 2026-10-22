@@ -52,7 +52,10 @@ The weights-swap-check skill copies this file into the stage directory and runs 
    snapshot revisions, the files that were absent, and whose generation_config.json (`sampling_defaults_from`:
    "model", "base" or "none") the server reads its sampling defaults and stop tokens from. The weights are one
    entry with a count. The stage 8 bundle and the package card read it, so a reader does not need this script
-   to know that a run served the base model's sampling defaults. It holds no machine paths.
+   to know that a run served the base model's sampling defaults. It holds no machine paths. `eos_token_ids` lists
+   the stop tokens the Qwen3.8 bundle's serving code will find in `model-dir/` (a top-level `eos_token_id` of
+   generation_config.json, then config.json). When it is empty the script warns at once, because that bundle
+   stops after loading the weights without one, 15 to 25 minutes into a start.
 
 An expected edit that does not happen exactly once exits 2 with a message that names it, and no
 run.sh is written. Everything else in the script, including its environment lines, stays as it is.
@@ -138,6 +141,23 @@ def build_model_dir(base: Path, new: Path) -> tuple[Path, list[str], list[str], 
 
 
 REVISION = re.compile(r"[0-9a-f]{40}")
+
+
+def stop_token_ids(model_dir: Path) -> list[int]:
+    """The stop tokens the Qwen3.8 bundle's serving code finds in `model_dir`: the top-level integer or list of
+    integers `eos_token_id` of generation_config.json, then of config.json, in that order, without repeats. The
+    bundle reads only the top level (the nearest model's config.json nests it under text_config) and stops after
+    loading the weights when it finds none. Another bundle may read these files differently."""
+    ids: list[int] = []
+    for name in ("generation_config.json", "config.json"):
+        try:
+            v = json.loads((model_dir / name).read_text(encoding="utf-8")).get("eos_token_id")
+        except (OSError, ValueError, AttributeError):
+            continue
+        for x in ([v] if isinstance(v, int) and not isinstance(v, bool) else v if isinstance(v, list) else []):
+            if isinstance(x, int) and not isinstance(x, bool) and x not in ids:
+                ids.append(x)
+    return ids
 SOURCES_NAME = "model-dir-sources.json"
 
 
@@ -147,7 +167,7 @@ def snapshot_revision(snapshot: Path) -> str | None:
 
 
 def sources_record(base: Path, new: Path, nearest: str, copied: list[str], linked: list[str],
-                   absent: list[str]) -> dict:
+                   absent: list[str], eos: list[int]) -> dict:
     """Where each file of model-dir came from. Weights are one entry with a count."""
     files = []
     for name in copied:
@@ -166,7 +186,7 @@ def sources_record(base: Path, new: Path, nearest: str, copied: list[str], linke
     return {"schema": 1, "base_model": nearest, "base_revision": snapshot_revision(base),
             "model_revision": snapshot_revision(new), "files": files,
             "weights": {"source": "model", "how": "link", "count": sum(n.endswith(".safetensors") for n in linked)},
-            "absent": sorted(absent), "sampling_defaults_from": sampling}
+            "absent": sorted(absent), "sampling_defaults_from": sampling, "eos_token_ids": eos}
 
 
 MTP_NAME = re.compile(r"(^|\.)mtp\.")
@@ -295,7 +315,8 @@ def main() -> int:
             notes.append("could not tell whether the new model has mtp.* tensors (no readable weight index or "
                          "shard headers), so the drafter setting is unchanged")
     model_dir, copied, linked, absent = build_model_dir(base, new)
-    record = sources_record(base, new, cfg["nearest_model_id"], copied, linked, absent)
+    eos = stop_token_ids(model_dir)
+    record = sources_record(base, new, cfg["nearest_model_id"], copied, linked, absent, eos)
     (HERE_DIR / SOURCES_NAME).write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     print(f"model-dir: {model_dir}")
     print(f"  copied from base_snapshot: {', '.join(copied) or 'nothing'}")
@@ -307,6 +328,10 @@ def main() -> int:
                                    if origin else "no generation_config.json, so no sampling defaults or stop tokens"))
     if absent:
         print(f"  absent in new_snapshot, not linked: {', '.join(absent)}")
+    if not eos and FALLBACK_COPY not in absent:
+        print("  warning: no stop token (a top-level eos_token_id) in the model directory's generation_config.json or "
+              "config.json. The Qwen3.8 bundle's serving code looks there and stops after loading the weights when it "
+              "finds none, so the server will probably not start")
     if FALLBACK_COPY in absent:
         print(f"  warning: {FALLBACK_COPY} is in neither snapshot. The bundle's serving code reads eos_token_id from it or "
               "from config.json (here the base model's, which may nest it), so the server may not start")
