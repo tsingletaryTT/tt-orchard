@@ -709,3 +709,37 @@ def test_a_harness_phase_with_failed_server_requests_is_flagged_even_though_the_
 def test_a_phase_with_no_failed_requests_stays_ok(harness):
     code, out = run_session(harness, "gsm8k")
     assert json.loads((out / "summary.json").read_text())["phases"][0]["ok"] is True and code == 0
+
+
+# ---- the serving mode and the base control record in the summary ---------------------------------------------------------------------
+
+def test_the_summary_of_a_started_server_says_how_its_run_sh_serves(bundle):
+    bundle["run_sh"].write_text(bundle["run_sh"].read_text() + '\nexport QWEN36_DRAFTER=""\n')
+    assert bs.main(session_argv(bundle)) == 0
+    s = json.loads((bundle["tmp"] / "out" / "summary.json").read_text())
+    assert s["serving"] == {"drafter": "off", "sampling": "host"} and "control" not in s
+
+
+def test_a_control_record_is_copied_into_the_summary_of_the_session_it_describes(bundle):
+    import hashlib
+    rec = {"control_sha256": hashlib.sha256(bundle["run_sh"].read_bytes()).hexdigest(), "built_from": "/m/run.sh", "swapped_lines": [4, 8], "same_serving": True}
+    f = bundle["tmp"] / "rec.json"
+    f.write_text(json.dumps(rec))
+    assert bs.main(session_argv(bundle, control_record=f)) == 0
+    s = json.loads((bundle["tmp"] / "out" / "summary.json").read_text())
+    assert s["control"] == rec and "serving" in s
+
+
+def test_a_control_record_for_another_script_stops_the_session_before_any_server_starts(bundle):
+    f = bundle["tmp"] / "rec.json"
+    f.write_text(json.dumps({"control_sha256": "0" * 64}))
+    with pytest.raises(SystemExit):
+        bs.main(session_argv(bundle, control_record=f))
+    assert not (bundle["tmp"] / "server.pid").exists()
+
+
+def test_a_control_record_needs_a_run_sh_and_no_url(tmp_path):
+    f = tmp_path / "rec.json"
+    f.write_text("{}")
+    with pytest.raises(SystemExit):
+        bs.main(["--label", "t", "--url", "http://127.0.0.1:9", "--out-dir", str(tmp_path / "o"), "--phases", "gsm8k", "--control-record", str(f)])

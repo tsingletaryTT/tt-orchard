@@ -1767,3 +1767,21 @@ Prompt (operator): "start with the file-source record and go from there"; issue 
 - Review fixes (Copilot, PR 37): a reported section on the card of a run with no `reported-results.json` is refused, and its text counts for the number check. The gate passes the file's `source` to `card_problems`, which compares the section with the lines `render_card` writes (`reported_lines`): the source sentence, every row with its note, and no other line. Re-wrapped or re-spaced text still passes. Mutations: 4 and 12, with 2 survivors that got tests.
 - Tests first. Mutations: 26, all red, no survivors on the first run.
 - Not done: reading the scores from a card automatically, and showing them in the stage 8 bundle's RESULTS.md.
+
+## 2026-10-22 (UTC): the base control and the board are built by code (branch `bench-base-control`, version 0.8.18)
+Prompt (operator): "while we wait, let's take on more issues"; this is issue #20. The AREX-2 benchmark drivers were copied shell scripts: the base control's run.sh was made with `sed`,
+and two launches that both wrote `--exact 2` asked for the same board.
+- `orchard/bench_control.py`, with two commands. `build` writes the control's run.sh from the model's run.sh by replacing the model's directory with the base snapshot, in the `HF_MODEL` line and
+  the `--model` flag. It refuses a script that names the model in only one of them, a base equal to the model, and a path it cannot find as a whole path (`model-dir2` and `model-dir-old` are
+  not swapped). It reads both files again and refuses unless every differing line is explained by that swap alone. It writes `<out>.control.json`: both hashes, the swapped line numbers, and the
+  drafter and sampling mode of each script (`serving_facts`: drafter off when `QWEN36_DRAFTER` is exported empty, sampling on the device when the script sets `sample_on_device_mode`).
+- `board` reads `gozer status --json` and names boards whose chips are all FREE, one per session asked for (`--chips 2 --chips 2` gives two different boards), with the device index of each board's
+  first chip as the `--exact` value (`--exact N` selects the unit holding chip N). `--wait-s` polls every 10 s, because a released board shows BUSY-UNTRACKED for about a minute. It prints the
+  `gozer run` command for each session and exits 2 with the state it saw when no board is free.
+- `bench_session` records `serving` (the run.sh's drafter and sampling mode) in every summary.json that started a server, and takes `--control-record FILE`, which it copies into the summary as
+  `control`. A record whose hash is not the run.sh's is refused before any server starts.
+- Checked on the real AREX-2 files: `build` reproduces the by-hand `base-run.sh` byte for byte (sha256 09e08f55...), and `board` parses the live `gozer status`. Nothing was run on a chip.
+- Tests first (the module's tests were seen red before it existed). Mutations: 32 on `bench_control.py` (5 survived the first run: one clause that cannot fire because the explained-by-swap check
+  already catches that case, removed; four got tests) and 7 on the `bench_session` change, all red.
+- Not done: the drivers in `~/orchard-runs/baai--arex-2/benchmark` still use the by-hand scripts, because a benchmark is running from them. Two launchers that call `board` at the same moment can
+  still pick the same board; the second `gozer run` then queues. The check proves the two scripts match; it does not prove that the control's weights load under a bundle made for the model.
