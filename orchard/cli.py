@@ -690,8 +690,13 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
                                          if cfg.mode == "lab" else "local: everything runs on this box"), file=out)
     from orchard.research import Options
     from orchard.research import types as research_types
+    def status(text: str) -> None:
+        print(f"{style.icon('🔎')}{text}...", file=out, flush=True)
+
+    progress = None if args.quiet else status
     research_options = Options(cache_dir=None if args.dry_run else run_dir / "research" / "cache",
-                               offline=args.offline, no_github=args.no_github, refresh=args.refresh_research)
+                               offline=args.offline, no_github=args.no_github, refresh=args.refresh_research,
+                               progress=progress)
     sig = signals or preflight.default_signals(cfg, research_options=research_options)
     override = None
     if args.base:
@@ -702,7 +707,7 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
     def preflight_page():
         got = preflight.run_preflight(cfg, args.model, accept_credentials=not args.refuse_credentials_visible,
                                       signals=sig, resuming=resuming, base_override=override,
-                                      accept_inferred_base=args.accept_inferred_base)
+                                      accept_inferred_base=args.accept_inferred_base, progress=progress)
         print(orchard_view.render_preflight(args.model, run_dir, resuming, cfg_path, got, style), file=out)
         return got
 

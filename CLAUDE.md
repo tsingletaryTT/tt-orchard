@@ -1648,3 +1648,25 @@ Prompt (operator): "fix all the notes before we merge". The review approved and 
 - GSM8K's paired sign-test p was stored as `0.0` (the compile scripts rounded to 4 places). The scripts now keep 4 significant digits and the four `benchmark.json` copies hold
   1.607e-07 (the exact value is 1.6066e-07). The card says "below 0.001" and is unchanged. The copy on the Hub still has 0.0 until the file is uploaded again.
 - README lists PyYAML as needed by `tests/test_lm_eval_code_tasks.py`. The commit bodies are empty; the mutation tables are in this log and the run log.
+
+## 2026-10-21 (UTC): a progress bar for the weight download, and lines while the preflight runs (branch `bringup-progress`, version 0.8.10)
+Prompt (operator): "tt-orchard should show a progress bar while downloading weights. it also waits a very long time before showing more info
+when first starting up." Both were measured before anything was changed.
+- Startup: `run_preflight` returned every check at once and the page printed after that. Timing each signal for BAAI/AREX-2: 84 s in all, 81 s of it
+  research (65 s on a second run), which is three sequential reads of weight headers (14, 21 and 19 s; every shard's header, one request at a time).
+  LLaMA-Mesh took 7.5 s. Now `run_preflight(progress=)` and `research.report.build(progress=)` print a line before each slow step, so the first line after
+  `mode:` comes at 0.1 s, and the header lines name the model and its number of shards. `--quiet` turns them off. A callback that raises never reaches
+  research or the preflight (`research.types.reporter` also cleans the text).
+- Download: `hf download --quiet` ran with its output captured, so a 55 GB fetch printed nothing. Measured with huggingface_hub 1.33.0: without a terminal `hf`
+  prints no progress at all; with one, and with `--format human`, it prints only "Fetching N files", never bytes. The bytes in the cache are the signal:
+  `orchard/dlprogress.py` reads growth of `<hf_home>/hub/models--org--name/blobs` since the start and the files complete in the snapshot, in a thread beside the
+  unchanged fetcher. With Xet a blob grows in bursts (205 MB for 24 s, then 1.5 GB), so the bar can stall and jump; the line says "waiting for data" and keeps
+  an elapsed clock. A live run of a real 1.5 GB download under a pty redrew in place and ended with "downloaded 1.5 GB in 36s (42 MB/s average)". It showed
+  "ETA 14m 48s" in the first second, so the ETA now waits ten seconds.
+- Not terminal output: a pipe, a log, or `--style plain` gets a line at each 10% and at least once a minute.
+- Tests first, a mutation table per commit: 47 + 5 (meter), 10 (command wiring), 36 (startup). Survivors got tests; two are equivalent (a write to a stream that
+  already failed; `reporter(None)` that would raise a `TypeError` the `except` catches). Two of my own assertions were wrong first (`or`-tail that could not fail;
+  1000 bytes is "1 KB").
+- Not done: reading the shard headers in parallel would cut the 65 to 81 s itself (the fetcher keeps a request budget and a per-host state, so it needs care);
+  the supervisor's coder boot (about 10 minutes cold) shows only what the narrator already shows; `hf download` was not replaced by our own downloader.
+

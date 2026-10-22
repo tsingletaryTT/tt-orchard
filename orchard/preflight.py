@@ -455,7 +455,11 @@ def cache_root_for(cfg) -> Path:
 
 def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Signals | None = None,
                   resuming: bool = False, base_override: str | None = None,
-                  accept_inferred_base: bool = False) -> list[Check]:
+                  accept_inferred_base: bool = False, progress: Callable[[str], None] | None = None) -> list[Check]:
+    """`progress(text)` is told what is about to run (the hub lookup, the research, the machine checks), so a
+    terminal is not silent while the research reads weight headers for a minute or two."""
+    from orchard.research.types import reporter
+    say = reporter(progress)
     s = signals or default_signals(cfg)
     out: list[Check] = []
 
@@ -465,6 +469,7 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
         except Exception as exc:                      # a failing signal is a result, not a crash
             out.append(Check(name, BLOCK, f"could not check: {type(exc).__name__}: {exc}", reason))
 
+    say(f"asking the hub about {model_id}")
     try:
         hub, err = s.hub_info(model_id)
     except Exception as exc:
@@ -479,6 +484,7 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
         inst = list(s.installed_bundles()) if s.installed_bundles else []
         report, failed = None, None
         if s.research is not None:
+            say("researching the base model: lineage, bundles, weight headers and existing ports")
             try:
                 report = s.research(model_id, hub, base_override, inst)
             except Exception as exc:                  # a failed research call leaves the earlier checks in force
@@ -503,6 +509,8 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
             base_gb = base_hub.total_bytes / 1e9 if base_hub else 0.0
         except Exception:
             base_gb = 0.0
+
+    say("checking this machine: disk, tiers, ports and chips")
 
     def disk() -> Check:
         paths = {"hf_home": hf_home_for(cfg), "cache_root": cache_root_for(cfg)}
@@ -645,7 +653,8 @@ def default_signals(cfg, research_options=None) -> Signals:
                           refresh=research_options.refresh)
         research = lambda model_id, hub, override, inst: research_report.build(     # noqa: E731
             model_id=model_id, hub=hub, base_override=override, installed=inst, search=nearest.search,
-            hub_info=hub_info, fetch=fetcher, no_github=research_options.no_github)
+            hub_info=hub_info, fetch=fetcher, no_github=research_options.no_github,
+            progress=getattr(research_options, "progress", None))
     def sfpi_versions(bundle: str):
         from orchard import sfpi as sfpi_check
         return sfpi_check.installed_version(), sfpi_check.pinned_version(models_root(), bundle)
