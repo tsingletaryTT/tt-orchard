@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import re
 import struct
+from concurrent.futures import ThreadPoolExecutor
 
 from orchard.research import triage_rules
 from orchard.research.http import MAX_BODY, FetchError
@@ -25,6 +26,9 @@ MAX_REASONS = 5
 # The template accepts a header up to MAX_HEADER (100 MiB) in a local file. Over the network, from a repo anyone can
 # upload, the research reads no more than the fetcher's body cap; real headers are a few MB at most.
 MAX_HEADER_READ = MAX_BODY
+# Each shard's header is two requests and a repo can have 64 shards, so they are read by a few threads at once. The
+# bound keeps the load on the hub small; the fetcher's request budget and deadline still apply to every request.
+HEADER_WORKERS = 6
 
 
 def shard_header(fetch, repo: str, name: str) -> dict:
@@ -91,13 +95,28 @@ def read_model(fetch, repo: str, files: list[str], *, max_shards: int = MAX_SHAR
         return res
     res.data["shards"] = shards
     res.data["extra_safetensors"] = [n for n in safe if n not in shards]
-    for shard in shards:
-        try:
-            for name, info in shard_header(fetch, repo, shard).items():
-                res.data["tensors"][name] = {**info, "shard": shard}
-        except (FetchError, ValueError, UnicodeDecodeError) as exc:
-            res.data["errors"].append(f"{shard}: {getattr(exc, 'reason', exc)}")
+    # Results are merged in shard order, so the tensors, the shard list and the errors do not depend on which read
+    # finished first.
+    for shard, tensors, error in _read_shards(fetch, repo, shards):
+        if error is not None:
+            res.data["errors"].append(f"{shard}: {error}")
+            continue
+        for name, info in tensors.items():
+            res.data["tensors"][name] = {**info, "shard": shard}
     return res
+
+
+def _read_shards(fetch, repo: str, shards: list[str]) -> list[tuple[str, dict | None, str | None]]:
+    """(shard, tensors, None) or (shard, None, reason) for each shard, in the order given, read by at most
+    HEADER_WORKERS threads. A failed shard is a reason and never stops the others."""
+    def one(shard):
+        try:
+            return shard, shard_header(fetch, repo, shard), None
+        except (FetchError, ValueError, UnicodeDecodeError) as exc:
+            return shard, None, str(getattr(exc, "reason", exc))
+
+    with ThreadPoolExecutor(max_workers=min(HEADER_WORKERS, len(shards))) as pool:      # read_model passes no empty list
+        return list(pool.map(one, shards))
 
 
 def estimate_class(new_cfg: dict, new: dict, cand_cfg: dict, cand: dict) -> dict:

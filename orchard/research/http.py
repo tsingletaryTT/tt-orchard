@@ -13,6 +13,7 @@ import datetime
 import hashlib
 import http.client
 import json
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -82,6 +83,9 @@ class Fetcher:
         self.offline, self.refresh, self.timeout = offline, refresh, timeout
         self.max_requests, self.deadline_s, self._clock = max_requests, deadline_s, clock
         self._requests, self._started = 0, None
+        # Several threads read weight headers at once (headers.read_model). The budget, the start time and the
+        # per-host failure state are shared, so each is changed under this lock.
+        self._lock = threading.Lock()
         # Hosts that failed at the connection level (no route, DNS failure, timeout). Later requests to the
         # same host fail at once, so a machine with no network does not wait out the timeout once per request.
         self._unreachable: set[str] = set()
@@ -124,16 +128,17 @@ class Fetcher:
     def _spend(self) -> float:
         """Count one network request against the budget and return its timeout, which never runs past the
         deadline. A spent budget is a FetchError; it is not cached and does not mark the host unreachable."""
-        now = self._clock()
-        if self._started is None:
-            self._started = now
-        left = self.deadline_s - (now - self._started)
-        if self._requests >= self.max_requests:
-            raise FetchError(f"the research's request budget is spent ({self.max_requests} requests)")
-        if left <= 0:
-            raise FetchError(f"the research's time budget is spent ({self.deadline_s:g} s)")
-        self._requests += 1
-        return max(1.0, min(self.timeout, left))
+        with self._lock:                    # the check and the increment are one step, so the budget is exact
+            now = self._clock()
+            if self._started is None:
+                self._started = now
+            left = self.deadline_s - (now - self._started)
+            if self._requests >= self.max_requests:
+                raise FetchError(f"the research's request budget is spent ({self.max_requests} requests)")
+            if left <= 0:
+                raise FetchError(f"the research's time budget is spent ({self.deadline_s:g} s)")
+            self._requests += 1
+            return max(1.0, min(self.timeout, left))
 
     def get(self, url: str, *, byte_range=None, max_bytes: int = MAX_BODY) -> bytes:
         parts = urlsplit(url)
@@ -184,11 +189,12 @@ class Fetcher:
         if not isinstance(exc, OSError):
             return
         reason = getattr(exc, "reason", exc)           # urllib wraps a connect timeout in a URLError
-        if isinstance(reason, TimeoutError):
-            self._timeouts[host] = self._timeouts.get(host, 0) + 1
-            if self._timeouts[host] < TIMEOUTS_TO_GIVE_UP:
-                return
-        self._unreachable.add(host)
+        with self._lock:
+            if isinstance(reason, TimeoutError):
+                self._timeouts[host] = self._timeouts.get(host, 0) + 1
+                if self._timeouts[host] < TIMEOUTS_TO_GIVE_UP:
+                    return
+            self._unreachable.add(host)
 
     def json(self, url: str, **kw):
         try:
