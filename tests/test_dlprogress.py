@@ -84,6 +84,65 @@ def test_dir_bytes_adds_the_regular_files_in_the_directory(tmp_path):
     assert dp.dir_bytes(tmp_path) == 500
 
 
+def share(blobs, shared, name):
+    """What a newer huggingface_hub does when a blob is complete: the file moves to the shared store
+    (`hub/blobs/<2 hex>/<hash>`) and the repo's own blobs/ keeps a link to it."""
+    dest = shared / name[:2] / name
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    (blobs / name).rename(dest)
+    (blobs / name).symlink_to(dest)
+    return dest
+
+
+def test_a_blob_moved_to_the_shared_store_still_counts(tmp_path):
+    shared = tmp_path / "shared"
+    grow(tmp_path, "ab" + "0" * 62, 700)
+    dest = share(tmp_path, shared, "ab" + "0" * 62)
+    assert (tmp_path / ("ab" + "0" * 62)).is_symlink() and dest.is_file()      # the layout of this machine's cache
+    assert dp.dir_bytes(tmp_path) == 700
+
+
+def test_two_names_for_one_blob_count_once(tmp_path):
+    shared = tmp_path / "shared"
+    grow(tmp_path, "cd" + "1" * 62, 700)
+    dest = share(tmp_path, shared, "cd" + "1" * 62)
+    (tmp_path / "second").symlink_to(dest)
+    (tmp_path / "third").hardlink_to(dest)
+    assert dp.dir_bytes(tmp_path) == 700
+
+
+def test_a_dangling_link_and_a_link_to_a_directory_add_nothing(tmp_path):
+    (tmp_path / "gone").symlink_to(tmp_path / "nowhere")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "dir-link").symlink_to(tmp_path / "sub")
+    grow(tmp_path, "real", 5)
+    assert dp.dir_bytes(tmp_path) == 5
+
+
+def test_progress_goes_on_after_a_finished_shard_moves_to_the_shared_store(tmp_path):
+    m, blobs, snap, out, clock = make(tmp_path, total=1000)
+    m.begin()
+    grow(blobs, "aa" + "0" * 62 + ".incomplete", 600)
+    assert m.reading().done == 600
+    (blobs / ("aa" + "0" * 62 + ".incomplete")).rename(blobs / ("aa" + "0" * 62))
+    share(blobs, tmp_path / "shared", "aa" + "0" * 62)                  # shard one is complete and now a link
+    assert m.reading().done == 600
+    grow(blobs, "bb" + "0" * 62 + ".incomplete", 300)                   # shard two arrives
+    assert m.reading().done == 900
+    (blobs / ("bb" + "0" * 62 + ".incomplete")).rename(blobs / ("bb" + "0" * 62))
+    share(blobs, tmp_path / "shared", "bb" + "0" * 62)
+    grow(blobs, "cc" + "0" * 62, 100)
+    assert m.reading().done == 1000
+
+
+def test_a_blob_already_in_the_shared_store_at_the_start_is_not_progress(tmp_path):
+    m, blobs, snap, out, clock = make(tmp_path, total=1000)
+    grow(blobs, "dd" + "0" * 62, 400)
+    share(blobs, tmp_path / "shared", "dd" + "0" * 62)
+    m.begin()
+    assert m.reading().done == 0
+
+
 def test_a_missing_directory_has_no_bytes(tmp_path):
     assert dp.dir_bytes(tmp_path / "nope") == 0
 

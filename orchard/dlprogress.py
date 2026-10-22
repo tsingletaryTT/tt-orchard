@@ -10,7 +10,8 @@ download.
 
 What the numbers mean:
 - Bytes come from the blobs directory, which `hf` fills while it works (`*.incomplete` files grow, then are
-  renamed). With Xet they grow in bursts, so on one large file the bar can sit still and then jump. Eight files
+  renamed; a newer huggingface_hub then moves the finished file to a shared store and leaves a link, which counts
+  as the file it reaches). With Xet they grow in bursts, so on one large file the bar can sit still and then jump. Eight files
   download at once, so a big model averages out. A line that sits still says "waiting for data" instead of
   looking dead, and the elapsed time keeps counting.
 - Only growth since the start counts, so blobs from other revisions are not read as progress. The total is what
@@ -84,16 +85,23 @@ def bar(fraction: float, width: int) -> str:
 
 
 def dir_bytes(path) -> int:
-    """The bytes in the regular files directly in `path` (the blobs directory is flat). Links are not counted."""
+    """The bytes of the regular files that the entries directly in `path` resolve to (the blobs directory is flat).
+    A finished blob in a newer huggingface_hub is a link into the shared store (`hub/blobs/<2 hex>/<hash>`), so a
+    link counts as the file it reaches. Each file counts once, however many names it has. A link that goes nowhere
+    or to a directory adds nothing."""
     total = 0
+    seen = set()
     try:
         with os.scandir(path) as entries:
             for entry in entries:
                 try:
-                    if entry.is_file(follow_symlinks=False):
-                        total += entry.stat(follow_symlinks=False).st_size
+                    st = entry.stat(follow_symlinks=True)
                 except OSError:
                     continue
+                if not stat.S_ISREG(st.st_mode) or (st.st_dev, st.st_ino) in seen:
+                    continue
+                seen.add((st.st_dev, st.st_ino))
+                total += st.st_size
     except OSError:
         return 0
     return total
