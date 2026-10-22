@@ -418,3 +418,67 @@ def test_a_redirect_whose_location_carries_more_than_an_allowed_host_is_refused(
 def test_a_host_in_capitals_is_still_the_allowed_host():
     from orchard.research.http import url_allowed
     assert url_allowed("https://HuggingFace.co/api/models/a/b") and url_allowed("https://us.aws.cdn.hf.co/x?sig=1")
+
+
+# ---- threads: the research reads weight headers in parallel, so the fetcher's counters must hold up ---------------
+
+def test_the_budget_check_and_the_start_time_are_taken_under_the_lock(tmp_path):
+    """Wiring: _spend reads the clock inside its critical section, so a clock that notes the lock shows what is held."""
+    f = fetcher(tmp_path, {HF: Resp(b"{}")})
+    held = []
+    f._clock = lambda: (held.append(f._lock.locked()), 0.0)[1]
+    f._spend()
+    assert held == [True]
+
+
+def test_connection_failure_bookkeeping_is_done_under_the_lock(tmp_path):
+    f = fetcher(tmp_path, {})
+    seen = []
+
+    class WatchedDict(dict):
+        def __setitem__(self, key, value):
+            seen.append(("timeouts", f._lock.locked()))
+            super().__setitem__(key, value)
+
+    class WatchedSet(set):
+        def add(self, item):
+            seen.append(("unreachable", f._lock.locked()))
+            super().add(item)
+
+    f._timeouts, f._unreachable = WatchedDict(), WatchedSet()
+    f._note_connection_failure("huggingface.co", TimeoutError("slow"))
+    f._note_connection_failure("huggingface.co", TimeoutError("slow"))
+    f._note_connection_failure("api.github.com", ConnectionRefusedError("no"))
+    assert seen == [("timeouts", True), ("timeouts", True), ("unreachable", True), ("unreachable", True)]
+
+
+def test_many_threads_never_spend_more_than_the_budget():
+    """The check and the increment are one step: 48 threads ask for 48 distinct URLs at once, five requests are
+    allowed, and exactly five reach the network. Several rounds with a fast thread switch give a race room."""
+    import sys
+    import threading
+    old = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    try:
+        for _ in range(30):
+            urls = [HF + str(i) for i in range(48)]
+            f = Fetcher(None, opener=FakeOpener({u: Resp(b"{}") for u in urls}), max_requests=5)
+            start, results = threading.Barrier(len(urls)), []
+
+            def one(u):
+                start.wait()
+                try:
+                    f.get(u)
+                    results.append("ok")
+                except FetchError as exc:
+                    results.append(exc.reason)
+
+            threads = [threading.Thread(target=one, args=(u,)) for u in urls]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            assert len(f.opener.requests) == 5 and results.count("ok") == 5 and f._requests == 5
+            assert all("budget" in r for r in results if r != "ok")
+    finally:
+        sys.setswitchinterval(old)

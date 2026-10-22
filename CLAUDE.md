@@ -1768,6 +1768,38 @@ Prompt (operator): "start with the file-source record and go from there"; issue 
 - Tests first. Mutations: 26, all red, no survivors on the first run.
 - Not done: reading the scores from a card automatically, and showing them in the stage 8 bundle's RESULTS.md.
 
+## 2026-10-22 (UTC): research reads weight headers in parallel (branch `parallel-headers`, version 0.8.20)
+Prompt (operator): "take on more issues" while the AREX-2 benchmark ran. Issue #30, second half: the preflight spent 65 to 81 s reading three models' weight headers one shard at a time.
+- Measured first, on the real hub with no cache (`BAAI/AREX-2`, 11 shards; `Qwen/Qwen3.8-27B`, 18 shards): 13 to 21 s and 26 s one shard at a time (a first baseline run gave 20.7 s and 25.6 s). With six workers: 2.7 s and 3.8 s, over repeated runs. Eight workers gave 2.7 s and 3.5 s, so the bound is six (`headers.HEADER_WORKERS`).
+- `headers.read_model` reads shards through a bounded `ThreadPoolExecutor` and merges the answers in shard order, so tensors, shards and errors come out the same whichever read finishes first. A failed shard is still one error and never stops the others.
+- The fetcher's shared state is now behind one lock: the request count and the start time (the check and the increment are one step, so the budget stays exact), and the per-host timeout count and unreachable set. A connection failure still marks the host as before; a shard that asked a moment before the mark reports the connection error and a later one reports the unreachable host.
+- Tests first: 8 of the new tests were red on the old code (the others guard behaviour the old code also had). Mutations: 5 on the fetcher, all red; 9 on the header read, 8 red and one equivalent (`UnicodeDecodeError` is a `ValueError`, so listing it adds nothing). A many-thread budget test passed on the unlocked code in my first run, because the race window is small under the GIL; the lock-held checks and the 7-of-48 budget test in the parallel read carry that guard.
+- One baseline run of the sequential read gave 7 header errors on AREX-2 in 6 s and did not repeat in six later runs. It fits one connection failure marking the host, which is the existing rule.
+- Not done: the three models' reads still follow one another (each read is parallel inside); the progress lines are unchanged.
+## 2026-10-22 (UTC): the re-run item list failed on AREX-2's GSM8K samples (branch `rerun-line-split`, version 0.8.21)
+The chain that lists cut-off items for AREX-2 stopped with `JSONDecodeError: Unterminated string`. `bench_rerun.read_samples` split the samples file with `str.splitlines()`, which also cuts at U+2028, U+2029 and U+0085. lm-eval writes samples with `ensure_ascii` off, so those characters stay raw inside a JSON string, and GSM8K's text holds four U+2028 characters (2,642 pieces for 2,638 records, in both models' files). The bytkim sets had none, so the earlier re-run never hit it.
+- Both loaders now split on `\n` only (`bench_rerun.read_samples`, `toolcall_bench._rows`). Tests first: the three raw separators and the tool-call loader were red; the control characters were already safe because JSON escapes them. 2 mutations, both red.
+- Found by running the list step by hand on the real files. The merge step reads samples through the same function, so it would have failed the same way.
+## 2026-10-22 (UTC): the served chat template and special tokens are recorded and compared (branch `chat-template-check`, version 0.8.22 after the merge with main; built as 0.8.17)
+Prompt (operator): "while we wait, let's take on more issues"; issue #17. Read first, in the cached snapshots, before any code: the five Qwen3.8 fine-tunes
+(AREX-2, bytkim, RAG-Gate, Clef, Hemmingway-1) and pplx-decider all ship `chat_template.jinja` only, with the same sha256 as the base's (`c3cf9e34ab`), and the same eos, pad
+tokens. No cached model of that family has a different template, so the check could not be shown on a real differing fine-tune; it was shown on the cached models of other
+families (`Qwen3-Coder-Next`, `Qwen3-0.6B`, `tt-nanollama3`, `humanizer`), which differ from the base and are full-port anyway. `Qwen3-Coder-Next` carries two different
+templates, one inside `tokenizer_config.json` and one in `chat_template.jinja`; transformers 5.19.0 loads the file (checked). A tokenizer with no template raises a
+`ValueError` from `apply_chat_template` (checked on `tt-nanollama3`). The stage 2 and stage 4 swap check posts plain text to `/v1/completions`, so no stage applies a template.
+- Stage 0 (`delta_triage.py`): `tokenizer-compare.json` gains the template inside `tokenizer_config.json` and the file's sha256 separately, the eos, bos, pad and unk tokens of each
+  model and their differences. The chat template finding says when a model's two templates disagree and which special tokens differ. A `chat_template` hazard is written when
+  the templates differ, when the nearest model has one and the new model has none, or when the special tokens differ. A template only the new model ships raises none.
+- Stage 2 (`prepare_swap.py`): `model-dir-sources.json` gains `chat_template` (file, sha256, the nearest model's sha256, whether they match; the jinja file first), `special_tokens` and
+  `special_tokens_differ_from_nearest`, and the run prints one line. Stage 8 quotes both in "The served model directory"; the hazard's disposition is always "Not shown", because
+  no stage sent a chat request.
+- Found on the way: the stage 0 gate's `HAZARD_AREAS` did not list `generation_config`, the area that PR 36 writes, so a model with a missing or borrowed generation config
+  would have failed its own gate. Fixed with a test that was red first; `chat_template` is listed too.
+- Tests first. Mutations: 16 on stage 0 (one survived, the nearest model's own template conflict, and got a test), 16 on stage 2 (one survived, named templates, and got a test),
+  19 on stage 8 (3 survived and got tests), 4 on the skill note (one survived and the test was tightened).
+- Not done, and needs hardware: the second half of the issue, one chat request in stage 2 that uses the new template and checks the reply starts and stops as the model card
+  says. The special-token check does not compare the new model's end token with the stop ids the server uses, because whether the server also stops on the tokenizer's eos token
+  was not found out. A Qwen3.8 fine-tune with a different template has not been seen, so the "different" hazard has run only on other families and on built fixtures.
 ## 2026-10-22 (UTC): the base control and the board are built by code (branch `bench-base-control`, version 0.8.18)
 Prompt (operator): "while we wait, let's take on more issues"; this is issue #20. The AREX-2 benchmark drivers were copied shell scripts: the base control's run.sh was made with `sed`,
 and two launches that both wrote `--exact 2` asked for the same board.

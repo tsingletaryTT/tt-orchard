@@ -234,3 +234,22 @@ def test_the_merge_command_checks_the_requested_items_when_given_them(tmp_path):
     with pytest.raises(ValueError, match="missing"):
         br.main(["merge", "--first", str(tmp_path / "first"), "--again", str(tmp_path / "again"), "--phases", "mbpp", "--items", str(items), "--out", str(out)])
     assert not out.exists()
+
+
+# ---- one record per line, whatever characters the text holds ------------------------------------------------------------------------------
+
+def write_samples_raw(root: Path, phase: str, rows: list[dict]):
+    """lm-eval writes samples with ensure_ascii off, so U+2028 and the like stay raw inside a JSON string."""
+    d = root / phase / "results" / "served"
+    d.mkdir(parents=True, exist_ok=True)
+    f = d / f"samples_{phase}_chat_2026-10-22T10-18-57.902126.jsonl"
+    f.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
+    return f
+
+
+@pytest.mark.parametrize("sep", [" ", " ", "\x85", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e"])
+def test_a_separator_character_inside_a_reply_does_not_split_a_record(tmp_path, sep):
+    write_samples_raw(tmp_path, "gsm8k", [row(0, f"first{sep}second", exact_match=1), row(1, "", exact_match=0), row(2, f"x{sep}", exact_match=0)])
+    assert br.read_samples(tmp_path, "gsm8k")[0]["resps"][0][0] == f"first{sep}second"
+    assert [r["doc_id"] for r in br.read_samples(tmp_path, "gsm8k")] == [0, 1, 2]
+    assert br.cutoff_items(tmp_path, ["gsm8k"]) == {"gsm8k": [1]}
