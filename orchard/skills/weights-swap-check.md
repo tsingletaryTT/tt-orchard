@@ -48,6 +48,10 @@ write a script.
   `Qwen3_5ForConditionalGeneration`, and the new model's `config.json` may name
   `Qwen3_5ForCausalLM`. That difference is expected on this path and needs nothing from you:
   `prepare_swap.py` copies the nearest model's config files (fact 1 below). Do not investigate it.
+- A new model with no `generation_config.json` is expected too. `prepare_swap.py` copies the nearest model's and
+  prints "generation_config.json: new_snapshot has none; copied from base_snapshot". The bundle's server needs an
+  `eos_token_id` from that file and dies at the end of model load without one. Do not investigate or edit it. If the
+  script instead warns that the file is in neither snapshot, write that in `result.json` and stop.
 - Write each file as soon as you know its content. Do not wait until the end.
 - Do not investigate anything this skill does not list. On an earlier run the model spent 60 turns
   grepping vLLM source for an unrelated timeout and wrote nothing.

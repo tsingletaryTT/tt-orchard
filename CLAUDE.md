@@ -1648,3 +1648,24 @@ Prompt (operator): "fix all the notes before we merge". The review approved and 
 - GSM8K's paired sign-test p was stored as `0.0` (the compile scripts rounded to 4 places). The scripts now keep 4 significant digits and the four `benchmark.json` copies hold
   1.607e-07 (the exact value is 1.6066e-07). The card says "below 0.001" and is unchanged. The copy on the Hub still has 0.0 until the file is uploaded again.
 - README lists PyYAML as needed by `tests/test_lm_eval_code_tasks.py`. The commit bodies are empty; the mutation tables are in this log and the run log.
+
+## 2026-10-21 (UTC): stage 2 staging copies generation_config.json when the model has none (branch `stage-generation-config`, version 0.8.11)
+Prompt (operator): "OK our first attempt at bring up failed; what is the reason?" then "fix the staging so generation_config gets copied", then
+"restart the tt-orchard bringup when ready". The attempt was BAAI/AREX-2 (run `~/orchard-runs/baai--arex-2`), which stopped at stage 2.
+- Cause, read from `stages/2/evidence/server.log` (the block message only said "Engine core initialization failed. See root cause above"): the server loaded
+  all 64 layers and then raised `no eos_token_id found for the served checkpoint` in the bundle's `Qwen36DFlash._load_eos_ids`. That reads `eos_token_id`
+  from the model dir's `generation_config.json` or `config.json`, or from the loaded Hugging Face config. AREX-2 ships no `generation_config.json`, and
+  the model dir's `config.json` is the BASE model's (copied by `prepare_swap.py`), which nests the id under `text_config`. Bytkim, Clef and RAG-Gate each
+  ship a generation config, so none of them hit this. The retry failed the same way, because the cause is in the directory and not the attempt.
+- Fix (`prepare_swap.py`, used by stage 2 and by stage 4's container tests): when the new snapshot has no `generation_config.json` (or a link to a blob that
+  is gone), copy the base's as a real file and say so; a file the model ships is still linked and never replaced; when neither has one the script warns
+  that the server may not start. Tested on the real AREX-2 and Qwen3.8-27B snapshots in a scratch directory: the bundle's own rule then finds eos ids
+  248044 and 248046, and finds none without the copy. The copy also brings the base's sampling defaults, which vLLM reads from the model dir; the swap
+  check sends its own sampling settings.
+- Tests first (8 new, 5 red before the change). 13 mutations: 11 red, 2 equivalent (`.exists()` for `.is_file()`, a reworded warning). One mutation would
+  have written through a link into the model's cached blob, so a test now reads the blob after the run.
+- Not done: `prepare_parity.py` (sidecar parity) has the same list of linked files but loads the model directly and has no base snapshot in its config;
+  the stage 7 package's `prepare_model_dir.py` has the same gap and ships inside published packages, so it was left alone and the question is the
+  operator's; a model whose generation config exists but has no `eos_token_id` is not handled; a block does not quote the last `RuntimeError` of
+  `server.log`; stage 0 does not flag a missing generation config.
+
