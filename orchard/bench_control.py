@@ -127,8 +127,10 @@ def _boards(status: dict) -> dict:
 
 
 def plan_boards(status: dict, wants: list[int], exclude=()) -> list[dict]:
-    """One board per entry of `wants` (the chips each session needs), from the boards whose chips are all FREE. Each plan is {board, chips, exact};
-    `exact` is the device index of the board's first chip, which is what `gozer run --exact` takes. The lowest free board is used first."""
+    """One board per entry of `wants` (the chips each session needs), from the boards whose chips are all FREE and that hold at least that many chips.
+    Each plan is {board, chips, exact}; `exact` is the device index of the board's first chip, which is what `gozer run --exact` takes. The plans come back
+    in the order of `wants`. Each request takes the smallest free board that holds it (the lowest one on a tie), so a small request does not use up the only
+    board a larger one fits; with that rule the requests can be placed in any order and an assignment is found whenever one exists."""
     boards = _boards(status)
     if not boards:
         raise NoFreeBoard("gozer status lists no chips")
@@ -148,9 +150,16 @@ def plan_boards(status: dict, wants: list[int], exclude=()) -> list[dict]:
         saw = "; ".join(seen) or "every board is excluded"
         raise NoFreeBoard(f"{len(wants)} session{'s' if len(wants) != 1 else ''} asked for {len(wants)} board{'s' if len(wants) != 1 else ''} "
                           f"and {len(free)} free ({saw})")
-    plan = []
-    for want, (name, cs) in zip(wants, free):
-        plan.append({"board": name, "chips": [c["dev_index"] for c in cs], "exact": cs[0]["dev_index"]})
+    left = sorted(free, key=lambda b: (len(b[1]), b[1][0]["dev_index"]))
+    plan: list = [None] * len(wants)
+    for i in range(len(wants)):
+        fit = next((b for b in left if len(b[1]) >= wants[i]), None)
+        if fit is None:
+            sizes = ", ".join(f"{n} ({len(cs)} chip{'s' if len(cs) != 1 else ''})" for n, cs in left) or "none"
+            raise NoFreeBoard(f"no free board with at least {wants[i]} chips is left for session {i + 1}; free boards not yet used: {sizes}")
+        left.remove(fit)
+        name, cs = fit
+        plan[i] = {"board": name, "chips": [c["dev_index"] for c in cs], "exact": cs[0]["dev_index"]}
     return plan
 
 

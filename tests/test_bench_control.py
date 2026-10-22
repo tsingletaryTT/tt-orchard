@@ -222,6 +222,42 @@ def test_an_excluded_board_is_skipped():
     assert plan[0]["board"] == "B1"
 
 
+def sized(*boards):
+    """Boards of differing size: each entry is (board name, [chip states])."""
+    chips, dev = [], 0
+    for name, states in boards:
+        for s in states:
+            chips.append(chip(dev, name, s))
+            dev += 1
+    return {"grain": "board", "chips": chips}
+
+
+def test_a_two_chip_session_is_not_given_a_free_one_chip_board_when_a_two_chip_board_is_free():
+    plan = bc.plan_boards(sized(("S", ["FREE"]), ("D", ["FREE", "FREE"])), [2])
+    assert plan == [{"board": "D", "chips": [1, 2], "exact": 1}]
+
+
+def test_the_larger_request_gets_the_larger_board_and_the_plans_keep_the_order_of_the_requests():
+    st = sized(("S", ["FREE"]), ("D", ["FREE", "FREE"]))
+    assert [p["board"] for p in bc.plan_boards(st, [1, 2])] == ["S", "D"]
+    assert [p["board"] for p in bc.plan_boards(st, [2, 1])] == ["D", "S"]
+
+
+def test_a_one_chip_session_takes_the_smallest_board_that_holds_it():
+    plan = bc.plan_boards(sized(("D", ["FREE", "FREE"]), ("S", ["FREE"])), [1])
+    assert plan[0]["board"] == "S"
+
+
+def test_no_free_board_large_enough_is_refused_with_the_sizes_that_are_free():
+    with pytest.raises(bc.NoFreeBoard, match="at least 2 chips.*S"):
+        bc.plan_boards(sized(("S", ["FREE"]), ("D", ["HELD", "HELD"])), [2])
+
+
+def test_two_requests_that_need_the_same_large_board_are_refused_even_when_the_count_of_free_boards_is_enough():
+    with pytest.raises(bc.NoFreeBoard, match="at least 2 chips"):
+        bc.plan_boards(sized(("S", ["FREE"]), ("D", ["FREE", "FREE"])), [2, 2])
+
+
 def test_the_gozer_command_carries_the_chip_count_the_exact_unit_and_the_label():
     argv = bc.gozer_run_args({"board": "B1", "chips": [2, 3], "exact": 2}, who="claude:bench", reason="control run")
     assert argv == ["gozer", "run", "--chips", "2", "--exact", "2", "--who", "claude:bench", "--reason", "control run", "--"]
