@@ -451,7 +451,13 @@ def read_reported(run_dir) -> tuple[tuple[Reported, ...], str]:
     path = Path(run_dir) / REPORTED_FILE
     if not path.exists():
         return (), ""
-    data = _json(path, "the reported scores")
+    return read_reported_file(path)
+
+
+def read_reported_file(path) -> tuple[tuple[Reported, ...], str]:
+    """`read_reported` for one named file: the same checks, so a file can be judged before it is installed
+    in a run directory."""
+    data = _json(Path(path), "the reported scores")
     source = data.get("source")
     if not isinstance(source, str) or not source.strip():
         raise PackageError(f"{REPORTED_FILE} needs a non-empty source (where the authors report the scores)")
@@ -881,6 +887,34 @@ def _rel(run_dir: Path, path: Path) -> str:
     return os.path.relpath(path, run_dir)
 
 
+BENCHMARK_NUMBERS_FILE = "stages/7/benchmark-numbers.json"
+
+
+def read_benchmark_numbers(run_dir) -> tuple[Number, ...]:
+    """The measured rows `tt-orchard package-card` left for the card: `{"rows": [{"name", "value", "unit",
+    "evidence"}]}` under stages/7. Absent means none. Each cited file must exist in the run."""
+    run = Path(run_dir)
+    path = run / BENCHMARK_NUMBERS_FILE
+    if not path.is_file():
+        return ()
+    rows = _json(path, "the benchmark numbers").get("rows")
+    if not isinstance(rows, list):
+        raise PackageError(f"{BENCHMARK_NUMBERS_FILE} needs a list of rows")
+    out = []
+    for i, r in enumerate(rows, 1):
+        ok = (isinstance(r, dict) and isinstance(r.get("name"), str) and r["name"].strip()
+              and isinstance(r.get("unit"), str) and isinstance(r.get("evidence"), list) and r["evidence"]
+              and all(isinstance(e, str) for e in r["evidence"])
+              and isinstance(r.get("value"), (int, float)) and not isinstance(r.get("value"), bool))
+        if not ok:
+            raise PackageError(f"{BENCHMARK_NUMBERS_FILE}: row {i} needs a name, a number, a unit and evidence")
+        for e in r["evidence"]:
+            if not (run / e).is_file():
+                raise PackageError(f"{BENCHMARK_NUMBERS_FILE}: row {i} cites {e}, which is not in the run")
+        out.append(Number(r["name"], r["value"], r["unit"], "measured", tuple(r["evidence"])))
+    return tuple(out)
+
+
 def card_numbers(facts: RunFacts, profile: dict, verify: dict | None) -> list[Number]:
     """The numbers one package's card may show. Only the boot-checked profile shows the run's
     measurements, because they were taken on that profile's chip count."""
@@ -910,6 +944,7 @@ def card_numbers(facts: RunFacts, profile: dict, verify: dict | None) -> list[Nu
                         verify["top1_agreement"], "fraction", "measured", ev7),
                  Number("server ready after start, this package (stage 7, fresh install, empty "
                         "tensor cache)", verify["server_ready_s"], "s", "measured", ev7)]
+    nums += read_benchmark_numbers(run)
     return nums
 
 

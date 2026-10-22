@@ -172,7 +172,7 @@ against 0.47 for a runtime that applied a causal mask).
 | Stage machine, agent loop, supervisor | `orchard/stages.py`, `orchard/agent.py`, `orchard/context.py`, `orchard/supervisor.py` | Built and tested. Ran stages 0 to 2 on the real run |
 | Crash recovery | `orchard/supervisor.py`, `orchard/handoff.py` | Tested with fakes by killing the supervisor after every ledger event. On hardware: `kill -9`, restart, resume worked at least four times on the real run |
 | Stage skills | `orchard/skills/` | Drafts. `delta-triage`, `reference-gate` and `weights-swap-check` have been used on the real run. `weights-swap-configs` has been used on the real run; stage 8 is now supervisor code that runs `operator-bundle-templates/build_bundle.py`. `serving-check` has never run. `delta-triage`, `reference-gate` and `operator-bundle` were rewritten on 2026-10-04 to run template scripts (`delta-triage-templates/`, `reference-gate-templates/`, `operator-bundle-templates/`); the rewritten versions have not run on a real run |
-| Packaging (stage 7) | `orchard/package.py`, `orchard/package_card.py`, `orchard/package_templates/` | Built and tested with fakes, then run once on hardware (Hemmingway-1; see stage 7 above). Wired into the stage table as opt-in supervisor code. A v5.1 container package is refused at start |
+| Packaging (stage 7) | `orchard/package.py`, `orchard/package_card.py`, `orchard/package_cmd.py`, `orchard/package_templates/` | Built and tested with fakes, then run once on hardware (Hemmingway-1; see stage 7 above). Wired into the stage table as opt-in supervisor code. `tt-orchard package` and `package-card` run the same steps on a finished run and record them in its ledger. A v5.1 container package is refused at start |
 | Bundle and package scrub | `orchard/scrub.py` | Built and tested with fakes. The stage 8 gate calls it; it ran once on the real run |
 | CPU sizing tool | `orchard/sizing.py` | Built and tested against a fake server. It has not been run against a real ollama. The CPU numbers in this README come from the run log |
 | `tt-orchard` command | `orchard/cli.py`, `orchard/bringup_config.py`, `orchard/preflight.py`, `orchard/fetch.py`, `bin/tt-orchard` | Built and tested with fakes, then used for the Clef run on the development machine (the preflight, the download check, the unattended end states and the retry path all ran for real) |
@@ -691,6 +691,40 @@ directory before stage 7: `{"source": "the model's card on Hugging Face", "rows"
 not parse cards. The card shows the rows in a "Reported by the authors" section that says they were not measured
 here, apart from the numbers the run measured, and `gate_package` refuses a card that drops the section, changes a
 value, or lists a reported score as measured.
+
+**Packaging a run that has already finished.** A run started without `--package-format` skips stage 7. When it
+has ended `ready-for-operator-review` you can package it afterwards:
+
+    tt-orchard package RUN_DIR --namespace ORG [--exact CHIP] [--restage]
+    tt-orchard package-card RUN_DIR --benchmark benchmark.json --model-key KEY [--base-key KEY] [--reported reported-results.json]
+
+`package` stages and scrubs every profile, boots the required one under `gozer run` (it takes the lease itself;
+`--exact CHIP` pins it to the board that holds that chip), writes the cards and the publish text, runs
+`gate_package` and prints the publish commands. It exits 0 when the gate is ok, 1 when a step failed or the gate
+is not ok, 2 when it refused (a run that has not finished, a supervisor that still holds the ledger, an existing
+`stages/7` without `--restage`), and 3 when gozer queued the lease because the boards were busy. Each step is
+written in the ledger (`package command`, `package staged`, `package boot check`, `package gate`), and the run
+still reports as ready for review. `--step stage|boot|finish` runs one part. `boot` opens the chips, so it refuses
+to run without a lease. The command never uploads or publishes. The publish commands are text for you to run.
+The stage 8 bundle was built before the package existed; build it again if it should list the package.
+
+Flags of `package`:
+
+- `--namespace` ORG: the Hugging Face organisation the package is for. Needed to stage.
+- `--step`: `all` (default), `stage`, `boot` (needs a lease) or `finish`.
+- `--restage`: move an earlier `stages/7` aside and stage again.
+- `--exact` CHIP: pin the lease to the board that holds this chip.
+- `--models-root` DIR: where installed tt-model bundles live. Default: the path the run recorded.
+- `--cache-root` DIR: the cache root, with the kernel cache under it. Default: the path the run recorded.
+- `--gozer` CMD: the gozer command. Default `gozer`.
+
+`package-card` takes a benchmark file, `{"tasks": {"gsm8k": {"KEY": {"score": 0.93, "n": 1319, "cut_off": 3},
+"BASE": {...}, "paired": {"sign_test_p": 0.001}}}}` (the shape the `bench_rerun` compile scripts write), and
+puts a measured row for each score, cut-off count and paired test in the package card. The file is copied into
+the run (`stages/7/benchmark/benchmark.json`) and the card cites it. With `--reported` it also installs the
+authors' reported scores (checked the same way as above; `--replace-reported` replaces a different file the run
+already holds). It writes the cards again, scrubs them and gates them, and records `package card` in the ledger.
+It does not run a benchmark.
 
 Exit codes: 0 ready for operator review, 2 refused (nothing was started), 3 stopped on an error
 (the hardware was released; run the same command again to resume), 4 aborted, 5 blocked (an unattended
