@@ -49,7 +49,7 @@ from pathlib import Path
 
 from orchard.defaults import (PACKAGE_HEALTH_TIMEOUT_S, PACKAGE_INSTALL_TIMEOUT_S,
                               PACKAGE_THIN_TIMEOUT_S, PACKAGE_VERIFY_DEADLINE_S)
-from orchard.package_card import (CardFacts, Number, card_evidence_paths, inside, non_commercial,
+from orchard.package_card import (CardFacts, Number, Reported, card_evidence_paths, inside, non_commercial,
                                   read_license, render_card)
 from orchard.scrub import HOME_PATH, scrub_package
 from orchard.stages import gate_weights_swap
@@ -438,6 +438,51 @@ def served_weights_problems(stage0_model, label, model_dir) -> list[str]:
     return []
 
 
+REPORTED_FILE = "reported-results.json"
+MAX_REPORTED = 60                    # rows
+MAX_REPORTED_NAME, MAX_REPORTED_VALUE, MAX_REPORTED_NOTE, MAX_REPORTED_SOURCE = 100, 40, 300, 200
+
+
+def read_reported(run_dir) -> tuple[tuple[Reported, ...], str]:
+    """The scores the model's authors report, from `<run>/reported-results.json` (written by a person from the
+    model's card; the harness does not parse cards): `{"source": "...", "rows": [{"name", "value", "note"?}]}`.
+    A value may be a string or a number. Returns ((), "") when the file is absent; raises PackageError naming
+    what is wrong. The package card shows these apart from the numbers the run measured."""
+    path = Path(run_dir) / REPORTED_FILE
+    if not path.exists():
+        return (), ""
+    data = _json(path, "the reported scores")
+    source = data.get("source")
+    if not isinstance(source, str) or not source.strip():
+        raise PackageError(f"{REPORTED_FILE} needs a non-empty source (where the authors report the scores)")
+    if len(source) > MAX_REPORTED_SOURCE:
+        raise PackageError(f"{REPORTED_FILE}: the source is too long (over {MAX_REPORTED_SOURCE} characters)")
+    rows = data.get("rows")
+    if not isinstance(rows, list) or not rows:
+        raise PackageError(f"{REPORTED_FILE} needs rows: a non-empty list")
+    if len(rows) > MAX_REPORTED:
+        raise PackageError(f"{REPORTED_FILE} has {len(rows)} rows; at most {MAX_REPORTED} are allowed")
+    out, seen = [], set()
+    for i, row in enumerate(rows, 1):
+        value = row.get("value") if isinstance(row, dict) else None
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            value = str(value)
+        name, note = (row.get("name"), row.get("note", "")) if isinstance(row, dict) else (None, "")
+        if not (isinstance(name, str) and name.strip() and isinstance(value, str) and value.strip()
+                and isinstance(note, str)):
+            raise PackageError(f"{REPORTED_FILE}: row {i} needs a name, a value (text or a number) and an "
+                               "optional text note")
+        for what, text, limit in (("name", name, MAX_REPORTED_NAME), ("value", value, MAX_REPORTED_VALUE),
+                                  ("note", note, MAX_REPORTED_NOTE)):
+            if len(text) > limit:
+                raise PackageError(f"{REPORTED_FILE}: the {what} in row {i} is too long (over {limit} characters)")
+        if name in seen:
+            raise PackageError(f"{REPORTED_FILE}: {name!r} appears twice")
+        seen.add(name)
+        out.append(Reported(name, value, note))
+    return tuple(out), source
+
+
 @dataclass(frozen=True)
 class RunFacts:
     run_dir: Path
@@ -453,6 +498,8 @@ class RunFacts:
     drafter_off: bool = False        # stage 2 served with the speculative drafter off
     host_sampling: bool = False      # ... and with the host sampling
     sidecars: tuple = ()             # stage 0's sidecar files (the package does not serve them)
+    reported: tuple = ()             # scores the authors report (reported-results.json), not measured here
+    reported_source: str = ""
 
 
 def read_run(run_dir) -> RunFacts:
@@ -498,9 +545,10 @@ def read_run(run_dir) -> RunFacts:
         raise PackageError(f"the new model's license is not in {snap}/README.md; stage 7 stages no "
                            "package without it")
     drafter_off, host_sampling = stage_2_serving(run)
+    reported, reported_source = read_reported(run)
     return RunFacts(run, model_id, revision, nearest_model, snap,
                     Path(cfg.get("hf_home") or ""), source, base, passing, license_id,
-                    drafter_off, host_sampling, tuple(delta.get("sidecars") or ()))
+                    drafter_off, host_sampling, tuple(delta.get("sidecars") or ()), reported, reported_source)
 
 
 @dataclass(frozen=True)
@@ -884,7 +932,8 @@ def write_card(out: Path, facts: RunFacts, profile: dict, *, namespace: str,
         drafter_off=facts.drafter_off, host_sampling=facts.host_sampling,
         sidecars=tuple(s["file"] for s in facts.sidecars),
         base_files=tuple(sorted(f.name for f in facts.base_config)),
-        sampling_from_base=any(f.name == "generation_config.json" for f in facts.base_config))
+        sampling_from_base=any(f.name == "generation_config.json" for f in facts.base_config),
+        reported=facts.reported, reported_source=facts.reported_source)
     (out / "README.md").write_text(render_card(facts_card), encoding="utf-8")
 
 

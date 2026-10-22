@@ -745,8 +745,8 @@ def gate_package(stage_dir, run_dir) -> GateResult:
     weights, the card, the boot check's verify.json and the publish commands. package.json only
     says where to look."""
     # Imported here: orchard.package imports this module.
-    from orchard.package import (PUBLISH_FILE, publish_problems, serving_problems, split_model_id,
-                                 stage_2_serving, weights_wiring_problems)
+    from orchard.package import (PUBLISH_FILE, PackageError, publish_problems, read_reported, serving_problems,
+                                 split_model_id, stage_2_serving, weights_wiring_problems)
     from orchard.package_card import card_evidence_paths, card_problems, read_license
     from orchard.scrub import scrub_package
     d, err = _load(stage_dir, "package.json")
@@ -769,6 +769,11 @@ def gate_package(stage_dir, run_dir) -> GateResult:
         reasons.append(f"package.json says the license is {d.get('license')!r}; the model's is "
                        f"{license_id!r}")
     drafter_off, host_sampling = stage_2_serving(run)
+    try:
+        reported, reported_source = read_reported(run)
+    except PackageError as exc:
+        reasons.append(str(exc))
+        reported, reported_source = (), ""
     sidecars = [s.get("file") for s in delta.get("sidecars") or () if isinstance(s, dict)]
     profiles = d.get("profiles") if isinstance(d.get("profiles"), list) else []
     if not any(isinstance(p, dict) and p.get("required") and p.get("verified") is True
@@ -804,7 +809,7 @@ def gate_package(stage_dir, run_dir) -> GateResult:
         if license_id:
             reasons += [f"profile {name}: card: {x}" for x in
                         card_problems(card, license_id=license_id, run_dir=run, sidecars=sidecars,
-                                      base_files=_shipped_names(out / "base_config"),
+                                      base_files=_shipped_names(out / "base_config"), reported=reported, reported_source=reported_source,
                                       model_id=new_repo, nearest_model=nearest_repo)]
         reasons += [f"profile {name}: the card cites {e}, which is missing at evidence/{e}"
                     for e in card_evidence_paths(card) if not (out / "evidence" / e).is_file()]

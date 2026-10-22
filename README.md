@@ -685,6 +685,13 @@ python3 -m orchard.supervisor run --model MODEL --run-dir RUN_DIR --tiers TIERS
 Stage 7 runs only when `--package-format v6` and `--package-namespace` are given and stage 0 chose
 the weights-only path. Otherwise it is recorded as skipped.
 
+To show the scores a model's authors report on its package card, put `reported-results.json` in the run
+directory before stage 7: `{"source": "the model's card on Hugging Face", "rows": [{"name": "MLE-Lite",
+"value": "81.8", "note": "Any Medal, mean of 3 seeds"}]}`. A person writes it from the card; the harness does
+not parse cards. The card shows the rows in a "Reported by the authors" section that says they were not measured
+here, apart from the numbers the run measured, and `gate_package` refuses a card that drops the section, changes a
+value, or lists a reported score as measured.
+
 Exit codes: 0 ready for operator review, 2 refused (nothing was started), 3 stopped on an error
 (the hardware was released; run the same command again to resume), 4 aborted, 5 blocked (an unattended
 run that named why it could not go on; see `--unattended`).

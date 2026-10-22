@@ -265,3 +265,67 @@ def test_a_generation_config_the_model_ships_is_not_put_in_base_config(world):
     (md / "generation_config.json").symlink_to(world["snapshot"] / "tokenizer.json")  # a link: the model's own
     f = read_run(world["run"])
     assert [p.name for p in f.base_config] == ["config.json", "preprocessor_config.json"]
+
+
+# ---- reported-results.json: the scores the authors report (#19) -------------------------------------------------
+
+from orchard.package import MAX_REPORTED, read_reported           # noqa: E402
+
+
+def put_reported(run, data):
+    (run / "reported-results.json").write_text(data if isinstance(data, str) else json.dumps(data))
+
+
+GOOD_REPORTED = {"source": "the model's card on Hugging Face",
+                 "rows": [{"name": "MLE-Lite", "value": "81.8", "note": "Any Medal, mean of 3 seeds"},
+                          {"name": "GAIA", "value": 92.2}]}
+
+
+def test_no_reported_file_means_no_reported_scores(tmp_path):
+    assert read_reported(tmp_path) == ((), "")
+
+
+def test_a_reported_file_is_read_with_its_source_and_numbers_become_text(tmp_path):
+    put_reported(tmp_path, GOOD_REPORTED)
+    rows, source = read_reported(tmp_path)
+    assert source == "the model's card on Hugging Face"
+    assert [(r.name, r.value, r.note) for r in rows] == [("MLE-Lite", "81.8", "Any Medal, mean of 3 seeds"),
+                                                         ("GAIA", "92.2", "")]
+
+
+@pytest.mark.parametrize("data, word", [
+    ("{not json", "not JSON"),
+    ([], "JSON object"),
+    ({"rows": []}, "source"),
+    ({"source": "", "rows": [{"name": "a", "value": "1"}]}, "source"),
+    ({"source": "s"}, "rows"),
+    ({"source": "s", "rows": "x"}, "rows"),
+    ({"source": "s", "rows": []}, "rows"),
+    ({"source": "s", "rows": ["x"]}, "row 1"),
+    ({"source": "s", "rows": [{"value": "1"}]}, "row 1"),
+    ({"source": "s", "rows": [{"name": "", "value": "1"}]}, "row 1"),
+    ({"source": "s", "rows": [{"name": "a"}]}, "row 1"),
+    ({"source": "s", "rows": [{"name": "a", "value": True}]}, "row 1"),
+    ({"source": "s", "rows": [{"name": "a", "value": "1", "note": 5}]}, "row 1"),
+    ({"source": "s", "rows": [{"name": "a", "value": "1"}, {"name": "a", "value": "2"}]}, "twice"),
+    ({"source": "s", "rows": [{"name": "a" * 101, "value": "1"}]}, "too long"),
+    ({"source": "s", "rows": [{"name": "a", "value": "1" * 41}]}, "too long"),
+    ({"source": "s", "rows": [{"name": "a", "value": "1", "note": "n" * 301}]}, "too long"),
+    ({"source": "s" * 201, "rows": [{"name": "a", "value": "1"}]}, "too long"),
+])
+def test_a_reported_file_that_is_wrong_is_refused_with_the_reason(tmp_path, data, word):
+    put_reported(tmp_path, data)
+    with pytest.raises(PackageError, match=word):
+        read_reported(tmp_path)
+
+
+def test_too_many_rows_are_refused(tmp_path):
+    put_reported(tmp_path, {"source": "s", "rows": [{"name": f"b{i}", "value": "1"} for i in range(MAX_REPORTED + 1)]})
+    with pytest.raises(PackageError, match="at most"):
+        read_reported(tmp_path)
+
+
+def test_the_run_facts_carry_the_reported_scores(world):
+    put_reported(world["run"], GOOD_REPORTED)
+    f = read_run(world["run"])
+    assert [r.name for r in f.reported] == ["MLE-Lite", "GAIA"] and f.reported_source.startswith("the model's card")

@@ -215,3 +215,95 @@ def test_a_card_that_does_not_name_a_base_config_file_fails_the_gate(stage7):
     card = stage7["pkg"] / "README.md"
     card.write_text(card.read_text().replace("`preprocessor_config.json`, ", ""))
     assert any("card must name `preprocessor_config.json`" in r for r in reasons(stage7))
+
+
+# ---- the gate and the authors' reported scores ------------------------------------------------------------------
+
+def _stage7_with_reported(tmp_path, monkeypatch, data):
+    models = tmp_path / "models"
+    r = make_run(tmp_path, make_source(models))
+    (r["run"] / "reported-results.json").write_text(json.dumps(data))
+    fb, _ = fake_bin(tmp_path)
+    monkeypatch.setenv("PATH", f"{fb}:{os.environ['PATH']}")
+    env = dict(os.environ, FAKE_TT_MODEL_PYTHON=sys.executable, FAKE_SWAP_SERVER=str(FAKE_SERVER),
+               FAKE_SWAP_CONFIG=str(tmp_path / "server.json"))
+    stage = r["run"] / "stages/7"
+    stage.mkdir(parents=True)
+    stage_all(r["run"], stage, namespace="episod", models_root=models, env=env)
+    fake_boot_result(stage)
+    finish(r["run"], stage)
+    return {**r, "stage": stage, "pkg": stage / "package/hemmingway-1-p300"}
+
+
+REPORTED_FILE = {"source": "the model's card", "rows": [{"name": "MLE-Lite", "value": "81.8"}]}
+
+
+@pytest.fixture
+def stage7_reported(tmp_path, monkeypatch, stub_tools):
+    return _stage7_with_reported(tmp_path, monkeypatch, REPORTED_FILE)
+
+
+def test_a_package_card_with_reported_scores_passes_the_gate(stage7_reported):
+    assert "| MLE-Lite | 81.8 |" in (stage7_reported["pkg"] / "README.md").read_text()
+    g = gate_package(stage7_reported["stage"], stage7_reported["run"])
+    assert g.ok, g.reasons
+
+
+def test_a_card_that_dropped_the_reported_section_fails_the_gate(stage7_reported):
+    card = stage7_reported["pkg"] / "README.md"
+    card.write_text(card.read_text().replace("## Reported by the authors", "## Something else"))
+    assert any("card:" in r and "Reported by the authors" in r for r in reasons(stage7_reported))
+
+
+def test_a_reported_score_changed_on_the_card_fails_the_gate(stage7_reported):
+    card = stage7_reported["pkg"] / "README.md"
+    card.write_text(card.read_text().replace("| MLE-Lite | 81.8 |", "| MLE-Lite | 91.8 |"))
+    assert any("MLE-Lite" in r and "81.8" in r for r in reasons(stage7_reported))
+
+
+def test_a_reported_file_that_became_unreadable_fails_the_gate(stage7_reported):
+    (stage7_reported["run"] / "reported-results.json").write_text("{not json")
+    assert any("reported-results.json" in r and "not JSON" in r for r in reasons(stage7_reported))
+
+
+def test_a_package_for_a_run_without_reported_scores_has_a_card_without_the_section(stage7):
+    assert "Reported by the authors" not in (stage7["pkg"] / "README.md").read_text()
+
+
+def test_the_reported_section_is_written_with_the_not_measured_sentence(stage7_reported):
+    card = (stage7_reported["pkg"] / "README.md").read_text()
+    assert "These scores come from the model's card. They were not measured here" in card
+
+
+def test_a_reported_section_added_to_the_card_of_a_run_without_reported_scores_fails_the_gate(stage7):
+    card = stage7["pkg"] / "README.md"
+    card.write_text(card.read_text().replace("## Limitations", "## Reported by the authors\n\nIt decodes at 80 tok/s.\n\n## Limitations"))
+    assert any("card:" in r and "reported-results.json" in r for r in reasons(stage7))
+
+
+NOTED_FILE = {"source": "the model's card", "rows": [{"name": "MLE-Lite", "value": "81.8", "note": "mean of 3 seeds"}]}
+
+
+@pytest.fixture
+def stage7_reported_note(tmp_path, monkeypatch, stub_tools):
+    return _stage7_with_reported(tmp_path, monkeypatch, NOTED_FILE)
+
+
+def test_a_card_that_changes_a_reported_protocol_note_fails_the_gate(stage7_reported_note):
+    card = stage7_reported_note["pkg"] / "README.md"
+    assert "mean of 3 seeds" in card.read_text()
+    assert gate_package(stage7_reported_note["stage"], stage7_reported_note["run"]).ok
+    card.write_text(card.read_text().replace("mean of 3 seeds", "best of 3 seeds"))
+    assert any("MLE-Lite" in r and "note" in r for r in reasons(stage7_reported_note))
+
+
+def test_a_card_that_changes_the_citation_of_the_reported_scores_fails_the_gate(stage7_reported):
+    card = stage7_reported["pkg"] / "README.md"
+    card.write_text(card.read_text().replace("These scores come from the model's card.", "These scores come from a blog post."))
+    assert any("card:" in r and "source" in r and "the model's card" in r for r in reasons(stage7_reported))
+
+
+def test_a_card_that_deletes_the_citation_of_the_reported_scores_fails_the_gate(stage7_reported):
+    card = stage7_reported["pkg"] / "README.md"
+    card.write_text(card.read_text().replace("These scores come from the model's card. ", ""))
+    assert any("card:" in r and "source" in r for r in reasons(stage7_reported))
