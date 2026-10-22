@@ -20,6 +20,7 @@ blocked run left open: what was attempted, and what a person can do about it.
 from __future__ import annotations
 
 import json
+import re
 import textwrap
 import threading
 import time
@@ -389,6 +390,10 @@ class Narrator:
                     if e["event"] == "evidence" and e["data"].get("what") == "hardware test" \
                             and e["data"].get("returncode") != 0 and e["stage"] is not None:
                         # The reason is in the test's output, which the ledger only points to.
+                        first = _first_error(self.run, e["stage"])
+                        if first is not None:
+                            self._emit(Line("orchardist", f"  first error in the server log ({first[0]}, line "
+                                                          f"{first[1]}): {first[2]}", True), e.get("ts"))
                         for text in _output_tail(self.run, e["stage"], 3):
                             self._emit(Line("orchardist", "  last output: " + _clip(text, 150), True), e.get("ts"))
                     self._seq = e["seq"]
@@ -448,6 +453,62 @@ def _last_output_line(run: Path, stage: int) -> str | None:
 
 # ---- when a run stops -------------------------------------------------------------------------
 
+# ---- the first real error in a server log ---------------------------------------------------------
+
+ROOT_CAUSE_MAX_BYTES = 8 * 1024 * 1024     # a log is read up to here; the first error is near the start
+ROOT_CAUSE_CLIP = 300
+# A process tag "(EngineCore pid=7) " and a log prefix "ERROR 10-21 16:59:10 [core.py:1330] ", each with one
+# space after it: a traceback frame has more, so its body starts with a space and matches nothing below.
+_LOG_PREFIX = re.compile(r"^(?:\(\w+ pid=\d+\) )?(?:(?:ERROR|CRITICAL|WARNING) \d\d-\d\d \d\d:\d\d:\d\d \[[^\]]*\] )?")
+_EXCEPTION_LINE = re.compile(r"^(?:\w+\.)*(?:[A-Za-z_]\w*)?(?:Error|Exception|Exit|Interrupt)\b(?::\s.*)?$")
+_BUILD_FAILED = re.compile(r"\bbuild failed\b")
+_WRAPPERS = ("See root cause above",)       # vLLM's last line when the engine died: the cause is earlier
+
+
+def root_cause(text: str) -> tuple[int, str] | None:
+    """(line number, text) of the first line that states an error: an exception line ("RuntimeError: ...")
+    or a kernel build failure. A wrapper that only points back at the cause does not count. None when no line
+    qualifies. The text is cut to ROOT_CAUSE_CLIP characters."""
+    for n, raw in enumerate(text.split("\n"), 1):
+        body = _LOG_PREFIX.sub("", raw, count=1)
+        if any(w in body for w in _WRAPPERS):
+            continue
+        if _EXCEPTION_LINE.match(body) or _BUILD_FAILED.search(body):
+            return n, _clip(body, ROOT_CAUSE_CLIP)
+    return None
+
+
+def root_cause_in_file(path) -> tuple[int, str] | None:
+    """root_cause of the first ROOT_CAUSE_MAX_BYTES of a file; None when it cannot be read."""
+    try:
+        with open(path, "rb") as f:
+            raw = f.read(ROOT_CAUSE_MAX_BYTES)
+    except OSError:
+        return None
+    return root_cause(raw.decode("utf-8", errors="replace"))
+
+
+def _first_error(run: Path, stage) -> tuple[str, int, str] | None:
+    """(run-relative path, line number, text) of the first error in the newest server.log of the stage (any
+    attempt, any configuration), or None."""
+    logs = sorted((run / "stages").glob(f"{stage}*/**/server.log"), key=lambda p: p.stat().st_mtime)
+    if not logs:
+        return None
+    found = root_cause_in_file(logs[-1])
+    if found is None:
+        return None
+    return logs[-1].relative_to(run).as_posix(), found[0], found[1]
+
+
+def _root_cause_lines(run: Path, stage) -> list[str]:
+    """The first error of the stage's newest server log, as digest lines."""
+    found = _first_error(run, stage)
+    if found is None:
+        return []
+    rel, line, text = found
+    return [f"The server log's first error ({rel}, line {line}):", f"  {text}"]
+
+
 def what_was_tried(run_dir, *, stage, limit: int = 8) -> list[str]:
     """What was attempted in `stage`, newest last: the watchdog's findings and the hardware test's result
     from the ledger, then the agent's last `limit` actions from its logs."""
@@ -472,6 +533,7 @@ def what_was_tried(run_dir, *, stage, limit: int = 8) -> list[str]:
     if events:
         out += ["The supervisor and watchdog recorded:"] + [f"  - {t}" for t in events]
     if failed_test:
+        out += _root_cause_lines(run, stage)
         tail = _output_tail(run, stage)
         if tail:
             out += ["The hardware test's last output:"] + [f"  | {_clip(l, 160)}" for l in tail]
