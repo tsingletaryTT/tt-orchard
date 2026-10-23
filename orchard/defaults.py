@@ -126,6 +126,44 @@ SIDECAR_PROB_DIFF_MAX = 0.25    # choice: about twice the measured maximum (0.12
 SIDECAR_NOISE_FACTOR = 4.0      # choice: the probability bar is at least this many times the CPU-versus-CPU
                                 # difference, so a bar below the reference's own noise is never applied
 SIDECAR_MIN_QUESTIONS = 10      # choice: fewest questions a parity result may rest on (the run had 16)
+# The prompt-suite check (issue 15): after the 32-token check, the stage 2 and stage 4 templates send a fixed set of
+# prompts (orchard/skills/weights-swap-templates/prompt_suite.json) and orchard/prompt_suite.py reads the replies for
+# the failure shapes the tenstorrent qualitative-check skill lists. Every number below is a choice. None was
+# calibrated on a measured model: no chip has run the suite yet, so each one is provisional and must be revisited
+# with the first measured controls (issue 15 asks for the bar to be set from them).
+SUITE_MIN_PROMPTS = 5           # choice: issue 15 asks for at least five prompts of different kinds
+SUITE_MAX_TOKENS = 64           # choice: long enough for a loop or a drift to show, short enough that eight
+                                # requests cost about a minute at 20 tokens/s (more with thinking on)
+SUITE_BLOCKING_KINDS = ("control_token_leak", "cross_request_leak", "corrupt_first_token", "repeated_first_token",
+                        "mechanical_repetition", "gibberish")
+                                # choice: the findings that fail a gate when the control does not show them. A
+                                # working model almost never produces these at temperature 0 on these prompts.
+                                # The other kinds (an empty reply, a failed request, a prompt echo, a doubled
+                                # subword, the wrong language) depend on style or on the thinking budget, so they
+                                # are recorded and not gated.
+SUITE_MAX_REASONS = 8           # choice: the most reasons the suite gives a gate; the rest are counted in one line
+SUITE_IDENTICAL_MIN_PROMPTS = 5  # choice: when a run's replies are identical to the control's on at least this many
+                                # prompts and on every prompt both answered, the run has probably not served the new
+                                # weights (issue 15: the base weights stood in by mistake on the first prototype). A
+                                # fine-tune differs from its base in some 64-token greedy reply; a model that moved
+                                # very little from the base could match on all of them, so this is a reason to look,
+                                # and a run that meets it needs a person.
+SUITE_PHRASE_WORDS = 6          # choice: a phrase of this many words ...
+SUITE_PHRASE_REPEATS_MAX = 3    # choice: ... may appear this many times (the swap check's coherence rule)
+SUITE_LINE_REPEATS = 4          # choice: this many identical lines in a row are a loop ...
+SUITE_LINE_MIN_CHARS = 8        # choice: ... when each is at least this long, so nested closing braces are not one
+SUITE_UNIT_REPEATS = 8          # choice: a unit of 2 to 24 characters with a letter or digit in it, repeated this
+SUITE_UNIT_MIN_SPAN = 40        # choice: many times over at least this many characters, is a loop ("ababab...")
+SUITE_DOUBLED_MIN = 3           # choice: this many words made of one unit twice ("ParisParis") are a finding
+SUITE_ECHO_MIN_CHARS = 30       # choice: a prompt at least this long, repeated at the start of the reply, is an echo
+SUITE_FIRST_TOKEN_REPEATS = 4   # choice: the same word this many times at the start of a reply
+SUITE_MIN_LETTERS = 8           # choice: fewest letters a reply needs before its writing system is judged
+SUITE_SCRIPT_MIN_SHARE = 0.5    # choice: at least this share of a reply's letters must be in the expected script
+SUITE_READABLE_MIN = 0.8        # choice: the swap check's share of letters, digits, spaces and common punctuation
+SUITE_READABLE_MIN_CHARS = 20   # choice: shorter replies are not judged on that share
+SUITE_NO_VOWEL_WORD_CHARS = 5   # choice: a Latin word this long with no vowel (y counts) is suspect ...
+SUITE_NO_VOWEL_MIN_WORDS = 8    # choice: ... when at least this many such words are in the reply ...
+SUITE_NO_VOWEL_SHARE_MAX = 0.25  # choice: ... and more than this share of the words that long have none
 # The graft trial (orchard/graft_trial.py). Stage 2 serves the nearest model's mtp.* head grafted onto a model that has none, once, beside the
 # safe configuration, and ships the graft only when these hold. All three are provisional choices from one measurement: BAAI/AREX-2 on 2 chips,
 # 2026-10-23, decode 44 to 68 tokens/s with the graft against about 20 without, top-1 agreement 0.96875 both ways. Replace them with a

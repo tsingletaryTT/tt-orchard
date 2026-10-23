@@ -38,6 +38,13 @@ RESULT = "trial-result.json"
 REPS = 3
 TAIL_LINES = 12
 SHIPPED = ("prepare_swap.py", "serve_and_compare.py")
+SUITE_FILE = "prompt_suite.json"
+
+
+def shipped(cfg: dict) -> tuple[str, ...]:
+    """The files the variant needs next to its scripts: the two swap scripts, and the prompt suite when the stage's config asks for it
+    (serve_and_compare.py exits 2 at its first step when `prompt_suite` is set and the file is not beside it)."""
+    return SHIPPED + ((SUITE_FILE,) if cfg.get("prompt_suite") else ())
 
 
 def fail(message: str) -> None:
@@ -112,12 +119,13 @@ def measure(label: str, orchard: Path, cfg: dict, run_sh: Path, model_dir: Path,
 
 
 def build_variant(orchard: Path, cfg: dict, cache: Path, steps: list) -> tuple[Path | None, str | None]:
-    """The variant directory: the shipped prepare_swap.py and serve_and_compare.py, and the stage's config with the graft on and the new cache."""
+    """The variant directory: the shipped prepare_swap.py and serve_and_compare.py (and prompt_suite.json when the config asks for the suite),
+    and the stage's config with the graft on and the new cache."""
     variant = HERE / "variant"
     shutil.rmtree(variant, ignore_errors=True)
     variant.mkdir(parents=True)
     templates = orchard / "orchard" / "skills" / "weights-swap-templates"
-    for name in SHIPPED:
+    for name in shipped(cfg):
         shutil.copy2(templates / name, variant / name)
     (variant / "swap_config.json").write_text(json.dumps({**cfg, "graft_mtp": True, "tt_cache": str(cache)}, indent=2) + "\n",
                                               encoding="utf-8")
@@ -150,7 +158,7 @@ def main() -> int:
         if cfg.get(key) in (None, ""):
             fail(f"the stage's swap_config.json has no {key}")
     for path in (stage / "run.sh", stage / "model-dir", orchard / "orchard" / "measure_serving.py",
-                 *(orchard / "orchard" / "skills" / "weights-swap-templates" / n for n in SHIPPED)):
+                 *(orchard / "orchard" / "skills" / "weights-swap-templates" / n for n in shipped(cfg))):
         if not path.exists():
             fail(f"{path} does not exist")
     run_dir = Path(cfg["run_dir"]).resolve()

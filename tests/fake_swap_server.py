@@ -18,6 +18,16 @@ Modes (config key "mode"):
 - "die": print 70 log lines and exit 1 before serving anything.
 - "slow": like "perfect", but each completion waits the config's "delay_s" first, so a check can run past its deadline.
 
+The prompt suite (issue 15) adds two things, both off unless the config asks:
+- POST /v1/chat/completions answers with the first of the config's "chat_replies" ([[substring, reply], ...], reply
+  being {"content", "reasoning_content" or "reasoning", "tool_calls", "finish_reason"}) whose substring is in the last
+  user message, else with "chat_default" (a string, default a short healthy sentence). "chat_error_for" is a substring
+  that makes the server answer 400 to a chat request containing it. "chat_break_for" is a substring that makes the server
+  send a status line and a Content-Length it does not keep, then close the connection (a truncated body: the client raises
+  http.client.IncompleteRead). A completion whose prompt is a string (the suite in
+  completion mode) is answered from "text_replies" the same way, else "text_default".
+- "request_log" is a file to which every POST appends {"path", "body"} as one JSON line, so a test can see what was sent.
+
 Like the real server, it answers 400 to a request that carries any key other than model, prompt,
 max_tokens and temperature (the real one rejects logprobs and sampling parameters), and to a
 request whose model is not the expected model directory: the config's "model", or else the
@@ -37,6 +47,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ALLOWED_KEYS = {"model", "prompt", "max_tokens", "temperature"}
+CHAT_ALLOWED_KEYS = {"model", "messages", "max_tokens", "temperature", "tools"}
 ENV_KEYS = ("TT_CACHE_PATH", "TT_CACHE_HOME", "HF_HOME", "HF_HUB_OFFLINE", "MODEL_WEIGHTS_DIR", "HF_MODEL")
 
 
@@ -63,25 +74,34 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         cfg = self.cfg
-        if self.path != "/v1/completions":
+        if self.path not in ("/v1/completions", "/v1/chat/completions"):
             self._send(404, b'{"error": "not found"}')
             return
         req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+        if cfg.get("request_log"):
+            with open(cfg["request_log"], "a", encoding="utf-8") as log:
+                log.write(json.dumps({"path": self.path, "body": req}) + "\n")
         if cfg["mode"] == "http500":
             self._send(500, b"fake server failure", "text/plain")
             return
         if cfg["mode"] == "slow":
             time.sleep(float(cfg.get("delay_s", 1)))
-        extra = set(req) - ALLOWED_KEYS
+        chat = self.path == "/v1/chat/completions"
+        extra = set(req) - (CHAT_ALLOWED_KEYS if chat else ALLOWED_KEYS)
         if extra:
             self._send(400, json.dumps({"error": f"unsupported keys {sorted(extra)}"}).encode())
             return
         if req.get("model") != cfg["model"]:
             self._send(400, json.dumps({"error": f"unknown model {req.get('model')!r}"}).encode())
             return
+        if chat:
+            self._chat(req)
+            return
         vocab, prompt_ids, gen = cfg["vocab"], cfg["prompt_ids"], cfg["generated_ids"]
         prompt = req["prompt"]
-        if req["max_tokens"] > 1:
+        if isinstance(prompt, str):
+            text = next((r for sub, r in cfg.get("text_replies", []) if sub in prompt), cfg.get("text_default", " Paris is the capital."))
+        elif req["max_tokens"] > 1:
             text = " " + " ".join(vocab[i] for i in gen[:req["max_tokens"]])
         else:
             k = len(prompt) - len(prompt_ids)
@@ -90,6 +110,34 @@ class Handler(BaseHTTPRequestHandler):
                 wanted = (wanted + 1) % len(vocab)
             text = " " + vocab[wanted]
         self._send(200, json.dumps({"choices": [{"text": text, "index": 0}]}).encode())
+
+    def _chat(self, req):
+        cfg = self.cfg
+        last = req["messages"][-1]["content"]
+        if cfg.get("chat_error_for") and cfg["chat_error_for"] in last:
+            self._send(400, json.dumps({"error": "the chat request was refused"}).encode())
+            return
+        if cfg.get("chat_break_for") and cfg["chat_break_for"] in last:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", "500")
+            self.end_headers()
+            self.wfile.write(b'{"choices": [')
+            self.wfile.flush()
+            self.close_connection = True
+            return
+        reply = next((r for sub, r in cfg.get("chat_replies", []) if sub in last),
+                     cfg.get("chat_default", "That is a short and healthy reply."))
+        if isinstance(reply, str):
+            reply = {"content": reply}
+        message = {"role": "assistant", "content": reply.get("content")}
+        for key in ("reasoning_content", "reasoning"):
+            if key in reply:
+                message[key] = reply[key]
+        if reply.get("tool_calls"):
+            message["tool_calls"] = [{"id": "call_0", "type": "function", "function": c} for c in reply["tool_calls"]]
+        self._send(200, json.dumps({"choices": [{"index": 0, "message": message,
+                                                 "finish_reason": reply.get("finish_reason", "stop")}]}).encode())
 
 
 def main() -> int:

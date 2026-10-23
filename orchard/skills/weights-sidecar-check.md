@@ -47,8 +47,8 @@ or TODO.
 Two tested scripts do all of the work. You copy them and give them one config file. You do not
 write a script.
 
-- The supervisor has usually written `swap_config.json` already, and copied `prepare_swap.py` and
-  `serve_and_compare.py` into your stage directory: every fact in it is one the run already holds.
+- The supervisor has usually written `swap_config.json` already, and copied `prepare_swap.py`,
+  `serve_and_compare.py` and `prompt_suite.json` into your stage directory: every fact in it is one the run already holds.
   If `stages/2/swap_config.json` exists, read it once and use it as it is. Do not look for the
   bundle, the snapshots or a port yourself: skip finding the facts and writing the swap config, and
   do not copy the two swap templates again. Change a value only when `prepare_swap.py` exits 2 and
@@ -93,7 +93,7 @@ Four facts decide whether a swap works. Each was found by failing first.
 ## Prepare phase: the steps
 
 1. Read `stages/2/swap_config.json`. The supervisor wrote it before you started, from facts the run
-   already holds, and copied `prepare_swap.py` and `serve_and_compare.py` next to it. Use it as it
+   already holds, and copied `prepare_swap.py`, `serve_and_compare.py` and `prompt_suite.json` next to it. Use it as it
    is: do not look for the bundle, the snapshots or a port, and do not run `tt-model list`. Only if
    the file does not exist, do the steps under "When there is no swap_config.json" below first.
 2. Write `parity_config.json` in your stage directory. Every value comes from `stages/0/delta.json` or from
@@ -153,7 +153,8 @@ Only then. The supervisor writes it whenever it can.
         "new_model_id": "<the model value from stages/0/delta.json, for example Altworld/Hemmingway-1@<revision>>",
         "tt_cache": "<a new directory whose name contains the model's slug>",
         "hf_home": "{{HF_HOME}}",
-        "port": 8100}
+        "port": 8100,
+        "prompt_suite": true}
 
    Copy the `model` value from `stages/0/delta.json` verbatim, including the `@revision`, into
    `new_model_id`. Stage 7 compares this label with stage 0's model and the revision of the weights
@@ -164,9 +165,9 @@ Only then. The supervisor writes it whenever it can.
    `{{OPERATOR_HOME}}/.cache/qwen36-src-build/...`. `hf_home` is the operator's Hugging Face cache
    on this machine. Your shell's HOME points somewhere else, so write the path out as shown. It
    holds the drafter the run script names in `DFLASH_WEIGHTS`.
-3. Copy the two swap templates into your stage directory:
+3. Copy the swap templates and the prompt suite into your stage directory:
 
-       cp {{ORCHARD_DIR}}/orchard/skills/weights-swap-templates/prepare_swap.py {{ORCHARD_DIR}}/orchard/skills/weights-swap-templates/serve_and_compare.py stages/2/
+       cp {{ORCHARD_DIR}}/orchard/skills/weights-swap-templates/prepare_swap.py {{ORCHARD_DIR}}/orchard/skills/weights-swap-templates/serve_and_compare.py {{ORCHARD_DIR}}/orchard/skills/weights-swap-templates/prompt_suite.json stages/2/
 
 ## What serve_and_compare.py measures
 
@@ -181,6 +182,18 @@ the two models are close. Agreement under 0.85 usually means the server is not r
 weights. It writes `stages/2/evidence/swap-check.json`, whose `result_draft` holds the fields of
 `result.json`. Exit codes: 0 measured, 3 cache refused, 4 the server did not become healthy, 5 the
 server answered with an HTTP error.
+
+After that check it sends the fixed prompt suite of `prompt_suite.json` (copied next to the script) and
+records the raw replies in `swap-check.json` under `prompt_suite`. The format follows the model's chat
+template: with a template it uses the chat endpoint, without one it sends plain continuation prompts.
+You do not judge the replies. The stage gate reads them against the control and fails a reply only
+when it shows a failure the control does not (a leaked control token, a loop, text that is not
+language, a repeated or corrupt first token, a word from another prompt). It also fails a run whose
+replies are identical to the control's on every prompt both answered, because that run has probably
+not served the new weights. Do not edit
+`prompt_suite.json`: the gate compares its sha256 with the shipped file. `"prompt_suite": true` in
+`swap_config.json` turns the suite on; the supervisor writes it. To read a control, set
+`"suite_control"` to the `swap-check.json` of a run of the same suite on the nearest model.
 
 ## What hidden_parity.py measures
 

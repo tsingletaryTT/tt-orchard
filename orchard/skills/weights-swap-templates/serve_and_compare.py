@@ -32,6 +32,18 @@ Steps:
 (g) Write evidence/swap-check.json (every number, the texts, ids, mismatches, a `serving` record of the
     drafter and sampling the run script sets, and a `result_draft`
     holding exactly the fields the skill's result.json needs) and print the draft.
+(h) The prompt suite (issue 15), only when swap_config.json has `"prompt_suite": true`, which the supervisor
+    writes into the configs it drafts. After the 32-token check the script sends the fixed prompts of
+    `prompt_suite.json` (copied next to this file) and records each raw reply under `prompt_suite` in
+    swap-check.json. The prompt format follows the tokenizer's chat template: a template in model-dir/
+    chat_template.jinja or tokenizer_config.json means /v1/chat/completions with the suite's messages (the tool
+    prompt only when the template mentions tools); none means /v1/completions with the suite's plain text. The
+    format, the template's sha256 and the tokenizer's special tokens are recorded. The script judges nothing:
+    the stage gate reads the replies with orchard/prompt_suite.py, so a copy of this file cannot change a verdict.
+    `suite_control` in the config names the swap-check.json of an earlier run of the same suite on the nearest
+    model (a path, relative to the run directory or absolute). Its record is embedded, and the gate reads the
+    new model's findings against it. A missing suite file or an unusable control exits 2 before any server starts.
+    A request the server refuses is recorded as that prompt's error and the run goes on.
 
 Exit codes: 0 when the measurements completed, whatever they say. 3 cache guard. 4 the server
 exited, or never became healthy. 5 the server answered a request with an HTTP error (its body is
@@ -47,6 +59,8 @@ same way.
 """
 from __future__ import annotations
 
+import hashlib
+import http.client
 import json
 import os
 import re
@@ -65,6 +79,8 @@ HEALTH_POLL_S = 2.0
 STOP_WAIT_S = 60.0
 REQUEST_TIMEOUT_S = 600.0
 N_TOKENS = 32
+SUITE_FILE_NAME = "prompt_suite.json"
+SUITE_MAX_TOKENS = 64         # the same number as SUITE_MAX_TOKENS in orchard/defaults.py (a test holds them equal)
 MARKER = ".orchard-model"
 LOG_TAIL_LINES = 60
 COHERENT_CHAR_SHARE = 0.8
@@ -159,6 +175,15 @@ def wait_healthy(proc, port: int, timeout_s: float, log_path: Path) -> float:
         time.sleep(HEALTH_POLL_S)
 
 
+def error_body(exc) -> str:
+    """The body of an HTTP error answer, as text. A body that is cut short raises IncompleteRead, which is not an OSError; the
+    status code is worth more than the body, so the failure is said in its place."""
+    try:
+        return exc.read().decode("utf-8", errors="replace")
+    except (http.client.HTTPException, OSError) as read_error:
+        return f"(the error body could not be read: {type(read_error).__name__})"
+
+
 def complete(port: int, model: str, prompt: list[int], max_tokens: int) -> str:
     body = json.dumps({"model": model, "prompt": prompt, "max_tokens": max_tokens,
                        "temperature": 0}).encode("utf-8")
@@ -168,9 +193,202 @@ def complete(port: int, model: str, prompt: list[int], max_tokens: int) -> str:
         with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_S) as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        raise ServerHTTPError(f"HTTP {exc.code}: "
-                              f"{exc.read().decode('utf-8', errors='replace')}") from exc
+        raise ServerHTTPError(f"HTTP {exc.code}: {error_body(exc)}") from exc
     return data["choices"][0]["text"]
+
+
+# ---- the prompt suite (step h) -----------------------------------------------------------------------------------
+
+def post_json(port: int, path: str, body: dict) -> dict:
+    req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=json.dumps(body).encode("utf-8"),
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_S) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        raise ServerHTTPError(f"HTTP {exc.code}: {error_body(exc)}") from exc
+
+
+def suite_problems(suite) -> list[str]:
+    """Only what the script needs to send the prompts. The full rules are in orchard/prompt_suite.py."""
+    if not isinstance(suite, dict) or not isinstance(suite.get("prompts"), list) or not suite["prompts"]:
+        return ["the suite has no prompts list"]
+    out, seen = [], set()
+    for i, p in enumerate(suite["prompts"]):
+        ok = (isinstance(p, dict) and isinstance(p.get("id"), str) and isinstance(p.get("text"), str)
+              and isinstance(p.get("messages"), list) and p["messages"])
+        if not ok:
+            out.append(f"prompt {i} needs a string id, a string text and a non-empty messages list")
+            continue
+        if p["id"] in seen:
+            out.append(f"duplicate prompt id {p['id']!r}")
+        seen.add(p["id"])
+    return out
+
+
+_REVISION = re.compile(r"[0-9a-f]{40}")
+
+
+def _split_id(model_id: str) -> tuple[str, str | None]:
+    repo, sep, rev = model_id.rpartition("@")
+    if sep and _REVISION.fullmatch(rev):
+        return repo, rev
+    return model_id, None
+
+
+def control_identity_problem(expected, actual) -> str | None:
+    """Why a control served from `actual` is not a control of the nearest model `expected`, or None when it is. The repository
+    ids must be equal; when `expected` pins a revision, the control's id must carry the same one. The same rule, word for word, is
+    in orchard/prompt_suite.py (this script imports nothing from that package); a test keeps the two equal."""
+    if not isinstance(expected, str) or not expected.strip():
+        return "the nearest model is not known, so the control cannot be checked against it"
+    if not isinstance(actual, str) or not actual.strip():
+        return f"the control's record has no model id, so it cannot be checked against the nearest model {expected}"
+    want_repo, want_rev = _split_id(expected.strip())
+    got_repo, got_rev = _split_id(actual.strip())
+    if want_repo != got_repo:
+        return f"it was served from {actual.strip()}, and the nearest model is {want_repo}, so it explains nothing"
+    if want_rev and got_rev is None:
+        return (f"the nearest model is pinned to revision {want_rev[:12]} and the control's model id carries no revision, so its "
+                "revision cannot be checked")
+    if want_rev and got_rev != want_rev:
+        return f"it was served at revision {got_rev[:12]}, and the nearest model is pinned to revision {want_rev[:12]}"
+    return None
+
+
+def load_control(cfg: dict, run_dir: Path) -> dict | None:
+    """The control named by `suite_control`: {source, sha256, record}. Exits 2 when it cannot be used, which includes a control
+    that was not served from the nearest model (`nearest_model_id`, with its revision when the config pins one)."""
+    value = cfg.get("suite_control")
+    if not value:
+        return None
+    path = Path(value) if os.path.isabs(str(value)) else run_dir / str(value)
+    try:
+        raw = path.read_bytes()
+        record = json.loads(raw.decode("utf-8")).get("prompt_suite")
+    except (OSError, ValueError, AttributeError) as exc:
+        print(f"serve_and_compare: cannot read the control {path}: {exc}", file=sys.stderr)
+        sys.exit(2)
+    if not isinstance(record, dict) or not isinstance(record.get("entries"), list):
+        print(f"serve_and_compare: the control {path} has no prompt_suite record. It must be the swap-check.json "
+              "of a run of the same suite on the nearest model.", file=sys.stderr)
+        sys.exit(2)
+    problem = control_identity_problem(cfg.get("nearest_model_id"), record.get("model_id"))
+    if problem:
+        print(f"serve_and_compare: the control {path} is not a control of the nearest model: {problem}.", file=sys.stderr)
+        sys.exit(2)
+    record = {k: v for k, v in record.items() if k != "control"}
+    try:
+        source = str(path.resolve().relative_to(run_dir.resolve()))
+    except ValueError:
+        source = str(path)
+    return {"source": source, "sha256": hashlib.sha256(raw).hexdigest(), "record": record}
+
+
+def suite_preflight(cfg: dict) -> dict | None:
+    """None when the config does not ask for the suite. Otherwise the suite and the control, read before any
+    server starts: a stage that lacks prompt_suite.json or names an unusable control exits 2."""
+    if not cfg.get("prompt_suite"):
+        return None
+    path = STAGE_DIR / SUITE_FILE_NAME
+    if not path.is_file():
+        print(f"serve_and_compare: swap_config.json asks for the prompt suite, but {path} is missing. Copy "
+              f"{SUITE_FILE_NAME} from the skill's templates directory next to this script.", file=sys.stderr)
+        sys.exit(2)
+    raw = path.read_bytes()
+    try:
+        suite = json.loads(raw.decode("utf-8"))
+    except ValueError as exc:
+        print(f"serve_and_compare: {path} is not JSON: {exc}", file=sys.stderr)
+        sys.exit(2)
+    problems = suite_problems(suite)
+    if problems:
+        print(f"serve_and_compare: {path} has problems: " + "; ".join(problems), file=sys.stderr)
+        sys.exit(2)
+    return {"suite": suite, "suite_sha256": hashlib.sha256(raw).hexdigest(),
+            "control": load_control(cfg, Path(cfg["run_dir"]).resolve())}
+
+
+def chat_template_info(model_dir: Path) -> dict:
+    """Whether the tokenizer has a chat template, where it is, its sha256 and whether it mentions tools.
+    model-dir/chat_template.jinja wins; else tokenizer_config.json's `chat_template` (a string, or a list of
+    {name, template} of which the entry named "default" or else the first is used). A blank template is none."""
+    text, source = None, None
+    jinja = model_dir / "chat_template.jinja"
+    if jinja.is_file():
+        found = jinja.read_text(encoding="utf-8")
+        if found.strip():
+            text, source = found, "chat_template.jinja"
+    if text is None and (model_dir / "tokenizer_config.json").is_file():
+        try:
+            value = json.loads((model_dir / "tokenizer_config.json").read_text(encoding="utf-8")).get("chat_template")
+        except (ValueError, AttributeError):
+            value = None
+        if isinstance(value, list):
+            named = {t.get("name"): t.get("template") for t in value if isinstance(t, dict)}
+            value = named.get("default") or next((t for t in named.values() if isinstance(t, str)), None)
+        if isinstance(value, str) and value.strip():
+            text, source = value, "tokenizer_config.json"
+    if text is None:
+        return {"present": False, "source": None, "sha256": None, "mentions_tools": False}
+    return {"present": True, "source": source, "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            "mentions_tools": "tools" in text}
+
+
+def special_tokens(model_dir: Path) -> list[str]:
+    """The strings of the tokenizer's special added tokens, in file order."""
+    try:
+        added = json.loads((model_dir / "tokenizer.json").read_text(encoding="utf-8")).get("added_tokens") or []
+    except (OSError, ValueError, AttributeError):
+        return []
+    return [t["content"] for t in added if isinstance(t, dict) and t.get("special") is True
+            and isinstance(t.get("content"), str)]
+
+
+def ask_suite_prompt(port: int, model: str, prompt: dict, mode: str, max_tokens: int) -> dict:
+    """One prompt, one reply, recorded raw."""
+    entry = {"id": prompt["id"], "mode": mode, "content": "", "reasoning": "", "tool_calls": [],
+             "finish_reason": None, "error": None}
+    try:
+        if mode == "chat":
+            body = {"model": model, "messages": prompt["messages"], "max_tokens": max_tokens, "temperature": 0}
+            if prompt.get("needs_tools"):
+                body["tools"] = prompt["tools"]
+            choice = post_json(port, "/v1/chat/completions", body)["choices"][0]
+            msg = choice["message"]
+            entry["content"] = msg.get("content") or ""
+            entry["reasoning"] = msg.get("reasoning_content") or msg.get("reasoning") or ""
+            entry["tool_calls"] = [{"name": c["function"]["name"], "arguments": c["function"].get("arguments")}
+                                   for c in msg.get("tool_calls") or []]
+        else:
+            body = {"model": model, "prompt": prompt["text"], "max_tokens": max_tokens, "temperature": 0}
+            choice = post_json(port, "/v1/completions", body)["choices"][0]
+            entry["content"] = choice["text"]
+        entry["finish_reason"] = choice.get("finish_reason")
+    except ServerHTTPError as exc:
+        entry["error"] = str(exc)[:300]
+    except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError, KeyError, IndexError, TypeError) as exc:
+        # http.client.HTTPException (IncompleteRead, BadStatusLine) is not an OSError: one cut-off answer must not end the test.
+        entry["error"] = f"{type(exc).__name__}: {exc}"[:300]
+    return entry
+
+
+def run_suite(cfg: dict, port: int, model: str, model_dir: Path, setup: dict) -> dict:
+    """Step (h): send the suite and return the record that goes under `prompt_suite` in swap-check.json."""
+    template = chat_template_info(model_dir)
+    mode = "chat" if template["present"] else "completion"
+    max_tokens = int(cfg.get("suite_max_tokens", SUITE_MAX_TOKENS))
+    entries, skipped = [], []
+    for prompt in setup["suite"]["prompts"]:
+        if prompt.get("needs_tools") and not template["mentions_tools"]:
+            skipped.append({"id": prompt["id"], "reason": "the chat template does not mention tools"
+                            if template["present"] else "there is no chat template, so no tool format"})
+            continue
+        entries.append(ask_suite_prompt(port, model, prompt, mode, max_tokens))
+    return {"ran": True, "model_id": cfg.get("new_model_id"), "suite_sha256": setup["suite_sha256"], "mode": mode,
+            "max_tokens": max_tokens,
+            "chat_template": template, "special_tokens": special_tokens(model_dir), "entries": entries,
+            "skipped": skipped, "control": setup["control"]}
 
 
 def coherence(text: str) -> dict:
@@ -185,7 +403,7 @@ def coherence(text: str) -> dict:
             "max_6word_phrase_repeats": top}
 
 
-def measure(cfg: dict, proc, log_path: Path, tokenizer, prompt_ids, generated_ids) -> dict:
+def measure(cfg: dict, proc, log_path: Path, tokenizer, prompt_ids, generated_ids, suite_setup: dict | None = None) -> dict:
     port = int(cfg["port"])
     model = str(STAGE_DIR / "model-dir")
     ready_s = wait_healthy(proc, port, float(cfg.get("health_timeout_s", HEALTH_TIMEOUT_S)), log_path)
@@ -204,8 +422,11 @@ def measure(cfg: dict, proc, log_path: Path, tokenizer, prompt_ids, generated_id
             mismatches.append({"position": k, "expected_id": generated_ids[k], "got_id": got_id,
                                "expected_text": tokenizer.decode([generated_ids[k]])[:300],
                                "got_text": got_text[:300]})
-    return {"server_ready_s": round(ready_s, 1), "free_run_text": free_text,
-            "matches": matches, "forced": forced, "mismatches": mismatches}
+    out = {"server_ready_s": round(ready_s, 1), "free_run_text": free_text,
+           "matches": matches, "forced": forced, "mismatches": mismatches}
+    if suite_setup is not None:
+        out["prompt_suite"] = run_suite(cfg, port, model, STAGE_DIR / "model-dir", suite_setup)
+    return out
 
 
 def load_reference(run_dir: Path) -> tuple[list[int], list[int], str | None]:
@@ -273,6 +494,8 @@ def write_report(cfg: dict, run_dir: Path, cache: Path, weights_env: dict, m: di
               "free_run_ids": tokenizer.encode(m["free_run_text"], add_special_tokens=False).ids,
               "teacher_forced": m["forced"], "mismatches": m["mismatches"], **(extra or {}),
               "result_draft": draft}
+    if "prompt_suite" in m:
+        report["prompt_suite"] = m["prompt_suite"]
     swap_json.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
     print(json.dumps(draft, indent=2, ensure_ascii=False))
     return draft
@@ -285,6 +508,7 @@ def main() -> int:
     run_dir = Path(cfg["run_dir"]).resolve()
     reference = load_reference(run_dir)
     tokenizer = Tokenizer.from_file(str(STAGE_DIR / "model-dir" / "tokenizer.json"))
+    suite_setup = suite_preflight(cfg)
     cache = Path(cfg["tt_cache"])
     guard_cache(cache, cfg["new_model_id"])
 
@@ -300,7 +524,7 @@ def main() -> int:
                             env=env, stdout=log, stderr=subprocess.STDOUT,
                             stdin=subprocess.DEVNULL, start_new_session=True)
     try:
-        m = measure(cfg, proc, log_path, tokenizer, reference[0], reference[1])
+        m = measure(cfg, proc, log_path, tokenizer, reference[0], reference[1], suite_setup)
     except ServerHTTPError as exc:
         print(f"serve_and_compare: the server returned an error: {exc}")
         sys.exit(5)

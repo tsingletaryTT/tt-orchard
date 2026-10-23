@@ -352,7 +352,7 @@ def printed_command(cfg: dict, ids: list[int]) -> list[str]:
 def main() -> int:
     from tokenizers import Tokenizer      # imported here so a missing package fails before docker
     from serve_and_compare import (ServerHTTPError, guard_cache, load_reference, measure,
-                                   write_report)
+                                   suite_preflight, write_report)
 
     try:
         cfg = json.loads((STAGE_DIR / "swap_config.json").read_text(encoding="utf-8"))
@@ -375,6 +375,7 @@ def main() -> int:
     if not (model_dir / "tokenizer.json").exists():
         fail(f"{model_dir} has no tokenizer.json; run prepare_swap.py first")
     tokenizer = Tokenizer.from_file(str(model_dir / "tokenizer.json"))
+    suite_setup = suite_preflight(cfg)
     cache = Path(cfg["tt_cache"])
     shared = Path(cfg["operator_home"]) / ".cache" / "tt-model"
     if inside(cache, shared):
@@ -407,7 +408,7 @@ def main() -> int:
     container = Container(r.stdout.split()[-1], log_path)
     stopped = False
     try:
-        m = measure(cfg, container, log_path, tokenizer, reference[0], reference[1])
+        m = measure(cfg, container, log_path, tokenizer, reference[0], reference[1], suite_setup)
     except ServerHTTPError as exc:
         print(f"serve_and_compare_container: the server returned an error: {exc}")
         sys.exit(5)

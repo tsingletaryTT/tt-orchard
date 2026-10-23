@@ -23,7 +23,7 @@ from orchard.bringup_config import slug
 from orchard.nearest import read_installed
 
 KEYS = ("run_dir", "bundle_dir", "nearest_model_id", "base_snapshot", "new_snapshot", "new_model_id",
-        "tt_cache", "hf_home", "port")
+        "tt_cache", "hf_home", "port", "prompt_suite")
 FIRST_PORT = 8100            # the skills' example port; the next free one is used when it is taken
 PORT_TRIES = 100
 
@@ -91,13 +91,14 @@ def draft(*, run_dir, tt_model_root, cache_root, hf_home, inputs: dict, chips: i
             "new_model_id": model,
             "tt_cache": str(Path(cache_root) / slug(_repo(model)) / "tt_cache"),
             "hf_home": str(hf_home),
-            "port": port}, []
+            "port": port,
+            "prompt_suite": True}, []        # the swap test sends the prompt suite too (issue 15)
 
 
 # ---- stage 4: one configuration per chip count --------------------------------------------------------
 
 CONTAINER_KEYS = ("run_dir", "package", "profile", "chips", "nearest_model_id", "base_snapshot", "new_snapshot",
-                  "new_model_id", "tt_cache", "hf_home", "operator_home", "port")
+                  "new_model_id", "tt_cache", "hf_home", "operator_home", "port", "prompt_suite")
 TEST_DEADLINE_S = 3600
 
 
@@ -136,7 +137,8 @@ def draft_stage4(*, run_dir, tt_model_root, cache_root, hf_home, operator_home, 
     grafted = graft_trial.chosen(run_dir)
     home = Path(cache_root) / slug(_repo(model))
     common = {"run_dir": str(run_dir), "nearest_model_id": want, "base_snapshot": snapshots["base"],
-              "new_snapshot": snapshots["model"], "new_model_id": model, "hf_home": str(hf_home)}
+              "new_snapshot": snapshots["model"], "new_model_id": model, "hf_home": str(hf_home),
+              "prompt_suite": True}
     bundles = [b for b in read_installed(tt_model_root) if b.weights_repo == want and b.schema == "6"
                and (Path(tt_model_root) / b.name / "run.sh").is_file()]
     containers = [c for c in installed_containers(operator_home) if c["repo"] == want]

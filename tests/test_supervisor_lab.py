@@ -278,7 +278,7 @@ def test_stage_2_starts_from_a_drafted_swap_config_and_the_templates(rig):
     drafted = [i for i, e in enumerate(entries) if e["data"].get("decision") == "swap config drafted"]
     assert drafted and entries[drafted[0]]["stage"] == 2
     d = entries[drafted[0]]["data"]
-    assert d["bundle_dir"] == str(b) and d["copied"] == ["prepare_swap.py", "serve_and_compare.py"]
+    assert d["bundle_dir"] == str(b) and d["copied"] == ["prepare_swap.py", "serve_and_compare.py", "prompt_suite.json"]
     assert d["config"]["path"] == "stages/2/swap_config.json"
     prepare = next(i for i, e in enumerate(entries) if e["stage"] == 2 and e["data"].get("phase") == "prepare")
     assert drafted[0] < prepare                                 # before the agent's first turn
@@ -452,6 +452,8 @@ def test_stage_4_starts_from_drafted_configs_for_the_counts_the_lab_can_hold(rig
     drafted = next(i for i, e in enumerate(entries) if e["data"].get("decision") == "stage 4 configs drafted")
     prepare = next(i for i, e in enumerate(entries) if e["stage"] == 4 and e["data"].get("phase") == "prepare")
     assert drafted < prepare
+    for n in (1, 2):             # each configuration directory gets the suite file beside the templates
+        assert (rig.run_dir / "stages" / "4" / "configs" / str(n) / "prompt_suite.json").is_file()
     assert d["caches"]["1"].endswith("/altworld--hemmingway-1/1chip-episod--qwen3.8-27b-dflash2-p150/tt_cache")
     assert d["caches"]["2"].endswith("/altworld--hemmingway-1/2chip-episod--qwen3.8-27b-dflash2-p300/tt_cache")
     # The fake agent writes its own configs over the drafts (as Coder-Next did); the drafted caches stand.

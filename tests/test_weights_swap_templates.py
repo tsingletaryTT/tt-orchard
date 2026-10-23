@@ -431,11 +431,11 @@ def swap(tmp_path):
     state = {"stage": stage, "run": run, "cfg": cfg, "pid_file": pid_file, "weights_env": weights_env,
              "server_cfg": server_cfg}
 
-    def start(mode="perfect", **overrides):
+    def start(mode="perfect", server_extra=None, **overrides):
         (stage / "swap_config.json").write_text(json.dumps(cfg | overrides))
         server_cfg.write_text(json.dumps({"mode": mode, "vocab": VOCAB, "prompt_ids": PROMPT_IDS,
                                           "generated_ids": GENERATED, "model": str(md),
-                                          "pid_file": str(pid_file)}))
+                                          "pid_file": str(pid_file), **(server_extra or {})}))
         # The test's own environment must not supply the variables under test.
         env = {k: v for k, v in os.environ.items() if k not in ("MODEL_WEIGHTS_DIR", "HF_MODEL")}
         return subprocess.run([sys.executable, str(stage / "serve_and_compare.py")],

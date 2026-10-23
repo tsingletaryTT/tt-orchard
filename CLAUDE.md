@@ -1963,3 +1963,66 @@ Prompt (operator, through the controller): take what is left of #16 as checks on
 - Left out: the package card does not yet print the sampling defaults the package serves with (the issue's last "done when" line). It touches `package.py`, `package_card.py` and the gate that PRs 46 and 47 are changing; do it after they merge. The stage 7 `prepare_model_dir.py` question was settled in 0.8.12 (base_config ships the base's generation config).
 - A slip: I ran `git stash` and `git stash pop` once to compare a failing test with the old code. The stash stack is shared; it popped at once and nothing else was touched.
 - Review fixes (Copilot, PR 50), both real. (1) The card's number capture was unsigned, so `presence_penalty=-0.5` and `top_k=-1` never became hints and a card with only those gave no `sampling_defaults` hazard. The capture now takes a minus sign and keeps a negative value only for `presence_penalty` and `frequency_penalty` (-2 and up) and a `top_k` of exactly -1; a negative temperature, top_p, min_p or repetition_penalty, or a penalty below -2, is still dropped. `frequency_penalty` is now a hint name. A `top_k` of 0 and of -1 both turn filtering off, so they are not a disagreement. (2) The stop-token check treated the generation config's ids as the only ones the server stops on, but `prepare_swap.stop_token_ids` keeps the ids of generation_config.json and of the staged (nearest model's) config.json together. Stage 0 now counts both: a tokenizer eos id that only the staged config names no longer gives a false hazard, in the model-owned and the borrowed case, and the finding lists both sources and each id once. The stage 8 bundle needed no change: it already quotes `eos_token_ids` from stage 2's record, which is the same union. Mutations: 17 + 5 on the capture and 11 + 2 on the check; survivors were a missing hazard test for `frequency_penalty`, the "-0" spelling, a penalty compared like top_k, and two origin-text cases, and each has a test now. One mutation (a penalty range bound above zero) was equivalent and the code was simplified.
+## 2026-10-23 (UTC): a prompt suite beside the 32-token check (branch `fidelity-suite`, version 0.8.33 after the merge with main; built as 0.8.28)
+Prompt (parent session): take issue 15 (the fidelity check is 32 tokens from one prompt: widen it and calibrate it with a control), follow the
+tenstorrent `qualitative-check` skill, test first, no hardware. Built on `origin/main` 0.8.24. Other branches use 0.8.26 to 0.8.30; the version
+here is a placeholder for the merge to fix.
+- `orchard/skills/weights-swap-templates/prompt_suite.json`: eight fixed prompts (chat, code, arithmetic, a multi-turn exchange with an assistant turn,
+  a Russian question, a tool call, a summary, a list format). Each has `messages` for a chat template and a plain `text` for a model with none. Two carry
+  a marker word that appears in no other prompt, to catch state leaking between requests. `orchard/prompt_suite.py` loads it, refuses a bad suite and
+  hashes it.
+- `serve_and_compare.py` (and, through it, the container template) sends the suite after the 32-token check when `swap_config.json` has
+  `"prompt_suite": true`, which the supervisor now writes into every config it drafts. The prompt format follows the tokenizer's chat template
+  (`chat_template.jinja`, else `tokenizer_config.json`): a template means `/v1/chat/completions`, none means `/v1/completions`. The template
+  records the raw replies (content, reasoning, tool calls, finish reason, error), the template's sha256, the special tokens and the model id under
+  `prompt_suite` in `evidence/swap-check.json`. A refused request is that prompt's error and the run goes on. The tool prompt is skipped when the
+  template does not mention tools. A missing suite file or an unusable `suite_control` exits 2 before any server starts. `result_draft` is unchanged.
+- The gate judges. `orchard/prompt_suite.findings` reads one reply for the shapes the skill lists (a leaked control token, tool markup returned as text,
+  a leak between requests, a loop, a repeated or corrupt first token, unreadable text, the wrong language, a doubled word piece, an echoed question,
+  an empty reply, a failed request). `evaluate` reads a whole record against its control. A finding fails a stage only when its kind is blocking
+  (`SUITE_BLOCKING_KINDS`: leaked token, leak between requests, corrupt or repeated first token, loop, gibberish) and the control does not show the same
+  kind on that prompt. With no control for a prompt, nothing explains the finding, so it counts. The stage 1 free run is read the same way with the CPU
+  reference's text as its control. The other kinds are recorded and listed as advisory. `gate_weights_swap`, `gate_weights_swap_sidecar` and
+  `gate_mesh_swap` read `evidence/swap-check.json` and ignore any suite summary in the agent's `result.json`; a swap-check.json without a suite record changes nothing.
+  Because the template only records, an agent that edits its copy of it cannot change a verdict; a copy that sends other prompts fails on the suite's sha256.
+- The control is the `swap-check.json` of an earlier run of the same suite on the nearest model (`suite_control`). The gate refuses one that ran other prompts
+  or another prompt format, notes one with a different chat template, and refuses one with the same model id as the run. With a comparable control it also
+  fails a run whose replies are identical to the control's on every prompt both answered (at least 5, `SUITE_IDENTICAL_MIN_PROMPTS`): that is the case issue 15
+  names, where the base weights stood in by mistake and scored 0.78 against a bar of 0.85. A healthy base gives healthy replies, so no degenerate-output
+  check can see it.
+- `python3 -m orchard.prompt_suite swap-check.json` prints the reasons, the advisory findings and the summary (exit 0, 1 or 2).
+- Every number is a provisional choice in `orchard/defaults.py` (`SUITE_*`). No chip has run the suite, so none was calibrated.
+- Tests first, in six new files and edits to four. The healthy fixtures are replies a real served model gave (the AREX-2 and Qwen3.8-27B speed runs of
+  2026-10-23). The failing fixtures are written by hand in the shapes the skill names; no chip has produced a failing reply of each kind, so they show that
+  a check fires on its shape. They do not show that real failures look like it. Writing the tests found two false positives in my first checks: a rule of `=`
+  signs counted as a loop, and Thai and Devanagari vowel signs counted as unreadable characters. Both are fixed and pinned.
+- Mutations: 171 in the first tables (19 on the loader, 49 on the checks, 37 on the verdict, 34 on the templates, 3 on the container template, 8 on the gates,
+  6 on the command, 15 on the identical-replies rule), plus the reruns. First-run survivors each got a test and went red: 3, 9, 2, 0, 0, 0, 0 and 8. Two
+  survivors on the checks are equivalent (the echo check reads `content` either way, and the language check's letter count already rules out an empty
+  answer). A mutation of the skill text survived because the quoted key also appears in a sentence; the skill tests now pin the example blocks.
+- Not done, and not testable here: a run on a real chip (no real reply has been judged); calibrating any bar from measured controls (the issue's own
+  "done when"); a control run (the templates can write one by running the same suite with the nearest model as `new_model_id`, but no step does it
+  automatically and it costs a boot per configuration); the extra chip time (about 8 requests of up to 64 tokens per configuration, roughly a minute at
+  20 tokens/s, more with thinking on); stage 2's template copy is not hash-stamped the way stages 0 and 1 are, so an agent could still edit
+  `swap-check.json` itself; whether a lightly fine-tuned model can match its base on all eight prompts (the identical-replies rule would then need a person).
+
+- Review fixes (Copilot, PR 49). All three findings were real; each was reproduced by a failing test first.
+  - A control has to be the nearest model. The gate rejected a control only when its model id equalled the new model's, so a same-suite control of an
+    unrelated model could explain a blocking finding away. `prompt_suite.control_identity_problem(expected, actual)` compares repository ids exactly and,
+    when the nearest model is pinned (`org/name@<40 hex>`), the revision; a pin the control does not carry cannot be checked, so it fails. The template
+    (`load_control`) checks `nearest_model_id` before any server starts and exits 2 with the reason, with the same rule written out in the script (it
+    imports nothing from `orchard`; a test keeps the two equal). The gates call `evaluate(report, nearest_model=...)` with the id from stage 0's
+    `delta.json`, not from the stage's `swap_config.json`, which an agent writes. A control that fails the check explains nothing, so the finding it would
+    have covered fails the stage, and a stage 0 with no nearest model leaves any control unverified. `python3 -m orchard.prompt_suite` takes
+    `--nearest-model`; leaving it out keeps the old behaviour for callers that have no run. Fixtures with a control now write a stage 0 delta.
+  - A cut-off or malformed HTTP answer to one suite request is that prompt's error. `http.client.IncompleteRead` and `BadStatusLine` are not OSErrors,
+    so they left `ask_suite_prompt()` and ended the hardware test before `write_report()` saved the 32-token measurement. They are caught there, and a
+    cut error body is said in place of its text with the status kept (`error_body`, also used by the 32-token request). The tests talk to a raw socket
+    that sends those bytes, and the fake swap server has a `chat_break_for` option for an end-to-end case. The container template shares the helper.
+  - The graft trial's variant gets `prompt_suite.json`. The variant copied only the two scripts, so with the suite on (every drafted config) its
+    `suite_preflight()` exited 2, and each eligible trial kept the safe configuration without measuring the graft. `graft_trial.shipped(cfg)` adds the
+    shipped file when `cfg["prompt_suite"]` is truthy, as the preflight reads it, and the script checks the checkout has it. The tests run the real
+    preflight on the variant, not a stub serving script.
+  - Mutations: 13 + 6 + 7 + 3 on the identity rule and the gates, 9 on the template copy of it, 7 + 2 on the HTTP handling, 6 on the copy list. First-run
+    survivors (an `@` taken as a revision in either copy, an unreadable error body that raises an OSError, and a blank nearest model, which was an
+    equivalent check and was removed) each got a test or were simplified away.
