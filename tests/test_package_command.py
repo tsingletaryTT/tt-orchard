@@ -101,6 +101,30 @@ def test_a_finished_run_is_staged_boot_checked_finished_and_gated(rig):
     assert "nothing was run, uploaded or published" in text
 
 
+def staged_with(rig, monkeypatch, **kw):
+    """The keyword arguments the command gave stage_all."""
+    seen = {}
+    real = package_cmd.package.stage_all
+
+    def spy(*a, **k):
+        seen.update(k)
+        return real(*a, **k)
+    monkeypatch.setattr(package_cmd.package, "stage_all", spy)
+    run_cmd(rig, **kw)
+    return seen
+
+
+def test_graft_mtp_reaches_stage_all_only_when_asked_for(rig, monkeypatch):
+    assert staged_with(rig, monkeypatch)["graft_mtp"] is False
+
+
+def test_the_graft_flag_is_passed_on_and_written_in_the_ledger(rig, monkeypatch):
+    assert staged_with(rig, monkeypatch, graft_mtp=True, step="stage")["graft_mtp"] is True
+    decisions = [e["data"] for e in read_entries(rig["run"] / "ledger.jsonl")
+                 if e["data"].get("decision") == "package command"]
+    assert decisions[-1]["graft_mtp"] is True
+
+
 def test_the_ledger_records_what_the_command_did_and_the_chain_stays_valid(rig):
     run_cmd(rig)
     names = events(rig)

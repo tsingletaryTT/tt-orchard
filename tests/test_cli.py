@@ -949,6 +949,15 @@ def test_package_defaults_to_no_restage_and_the_whole_flow(tmp_path, monkeypatch
     assert seen["python"] == sys.executable and seen["handoff"] is None
 
 
+def test_package_graft_mtp_defaults_off_and_the_flag_turns_it_on(tmp_path, monkeypatch):
+    from orchard import cli, package_cmd
+    seen = []
+    monkeypatch.setattr(package_cmd, "main", lambda args, **kw: seen.append(vars(args)) or 0)
+    cli.main(["package", str(tmp_path / "run"), "--namespace", "episod"], stdout=io.StringIO())
+    cli.main(["package", str(tmp_path / "run"), "--namespace", "episod", "--graft-mtp"], stdout=io.StringIO())
+    assert [s["graft_mtp"] for s in seen] == [False, True]
+
+
 def test_package_passes_the_handoff_token_to_the_boot_step(tmp_path, monkeypatch):
     from orchard import cli, package_cmd
     seen = {}

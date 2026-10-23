@@ -737,6 +737,13 @@ def _shipped_names(directory: Path) -> tuple[str, ...]:
         return ()
 
 
+def delta_model_has_mtp(delta) -> bool | None:
+    """Does the new model ship mtp.* tensors, as stage 0's delta.json says (`mtp.new_tensors`)? None when it does not say."""
+    mtp = delta.get("mtp") if isinstance(delta, dict) else None
+    n = mtp.get("new_tensors") if isinstance(mtp, dict) else None
+    return n > 0 if isinstance(n, int) and not isinstance(n, bool) else None
+
+
 def gate_package(stage_dir, run_dir) -> GateResult:
     """Stage 7: a staged v6 package whose boot check passed.
 
@@ -745,8 +752,9 @@ def gate_package(stage_dir, run_dir) -> GateResult:
     weights, the card, the boot check's verify.json and the publish commands. package.json only
     says where to look."""
     # Imported here: orchard.package imports this module.
-    from orchard.package import (PUBLISH_FILE, PackageError, publish_problems, read_reported, serving_problems,
-                                 split_model_id, stage_2_serving, weights_wiring_problems)
+    from orchard.package import (GRAFT_FILE, PUBLISH_FILE, PackageError, graft_problems, publish_problems,
+                                 read_reported, serving_problems, split_model_id, stage_2_serving,
+                                 weights_wiring_problems)
     from orchard.package_card import card_evidence_paths, card_problems, read_license
     from orchard.scrub import scrub_package
     d, err = _load(stage_dir, "package.json")
@@ -769,6 +777,9 @@ def gate_package(stage_dir, run_dir) -> GateResult:
         reasons.append(f"package.json says the license is {d.get('license')!r}; the model's is "
                        f"{license_id!r}")
     drafter_off, host_sampling = stage_2_serving(run)
+    model_has_mtp = delta_model_has_mtp(delta)
+    # A grafted package serves with the drafter and on-device sampling on, whatever stage 2's run.sh says.
+    graft_expected = isinstance(d.get("mtp_graft"), dict)
     try:
         reported, reported_source = read_reported(run)
     except PackageError as exc:
@@ -801,16 +812,23 @@ def gate_package(stage_dir, run_dir) -> GateResult:
                            f"{d.get('revision')}; stage 0 names {delta.get('model')}")
         reasons += [f"profile {name}: {x}" for x in
                     weights_wiring_problems(run_sh, nearest_model=nearest_repo)]
+        has_graft = (out / GRAFT_FILE).exists()
+        if graft_expected or has_graft:
+            reasons += [f"profile {name}: {x}" for x in
+                        graft_problems(out, nearest_model=nearest_repo,
+                                       base_revision=Path(swap.get("base_snapshot") or "").name)]
         reasons += [f"profile {name}: {x}" for x in
-                    serving_problems(run_sh, m.get("env") or {}, drafter_off=drafter_off,
-                                     host_sampling=host_sampling)]
+                    serving_problems(run_sh, m.get("env") or {},
+                                     drafter_off=drafter_off and not (graft_expected or has_graft),
+                                     host_sampling=host_sampling and not (graft_expected or has_graft),
+                                     model_has_mtp=model_has_mtp, graft=has_graft)]
         reasons += [f"profile {name}: scrub: {x}" for x in
                     scrub_package(out, namespace=d.get("namespace"))]
         if license_id:
             reasons += [f"profile {name}: card: {x}" for x in
                         card_problems(card, license_id=license_id, run_dir=run, sidecars=sidecars,
                                       base_files=_shipped_names(out / "base_config"), reported=reported, reported_source=reported_source,
-                                      model_id=new_repo, nearest_model=nearest_repo)]
+                                      model_id=new_repo, nearest_model=nearest_repo, graft=has_graft)]
         reasons += [f"profile {name}: the card cites {e}, which is missing at evidence/{e}"
                     for e in card_evidence_paths(card) if not (out / "evidence" / e).is_file()]
         if p.get("verified") is True:
