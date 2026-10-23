@@ -212,3 +212,76 @@ def test_a_missing_config_key_is_named(stage, key):
 def test_a_missing_config_file_exits_2(stage):
     (stage / "parity_config.json").unlink()
     assert prepare(stage).returncode == 2
+
+
+# ---- the record of what the parity model dir holds ------------------------------------------------------------
+# prepare_swap.py writes model-dir-sources.json for the swap server. This directory feeds hidden_parity.py, which
+# loads the weights and runs the layers and never generates, so nothing here reads a generation_config.json. The
+# record still says which of the linked files were present, so a reader can see what the check loaded.
+
+def sources(stage):
+    return json.loads((stage / "parity-model-dir-sources.json").read_text())
+
+
+def test_the_record_lists_what_was_copied_and_linked(stage):
+    assert prepare(stage).returncode == 0
+    rec = sources(stage)
+    assert rec["schema"] == 1
+    assert rec["copied"] == ["config.json"]
+    assert "model-00001-of-00002.safetensors" in rec["linked"] and "generation_config.json" in rec["linked"]
+    assert rec["absent"] == [] and rec["generation_config"] == "model"
+
+
+def test_the_record_sits_beside_the_model_dir_and_not_inside_it(stage):
+    prepare(stage)
+    assert not (stage / "parity-model-dir" / "parity-model-dir-sources.json").exists()
+
+
+def test_a_snapshot_without_a_generation_config_is_recorded_and_said_so(stage):
+    cfg = json.loads((stage / "parity_config.json").read_text())
+    (Path(cfg["model_snapshot"]) / "generation_config.json").unlink()
+    r = prepare(stage)
+    assert r.returncode == 0
+    rec = sources(stage)
+    assert rec["absent"] == ["generation_config.json"] and rec["generation_config"] == "absent"
+    assert "generation_config.json" not in rec["linked"]
+    assert "absent from the model snapshot" in r.stdout and "never generates" in r.stdout
+    assert not (stage / "parity-model-dir" / "generation_config.json").exists()
+
+
+def test_every_absent_optional_file_is_listed_in_order(stage):
+    cfg = json.loads((stage / "parity_config.json").read_text())
+    for name in ("chat_template.jinja", "tokenizer_config.json"):
+        (Path(cfg["model_snapshot"]) / name).unlink()
+    r = prepare(stage)
+    assert r.returncode == 0
+    assert sources(stage)["absent"] == ["tokenizer_config.json", "chat_template.jinja"]     # the order of LINKED
+    assert ("absent from the model snapshot: tokenizer_config.json, chat_template.jinja "
+            "(recorded in parity-model-dir-sources.json)") in r.stdout
+    assert "never generates" not in r.stdout                    # the generation config is there
+
+
+def test_a_present_generation_config_prints_no_absent_note(stage):
+    r = prepare(stage)
+    assert "absent from the model snapshot" not in r.stdout
+
+
+def test_the_record_holds_no_machine_path(stage, tmp_path):
+    prepare(stage)
+    text = (stage / "parity-model-dir-sources.json").read_text()
+    assert str(tmp_path) not in text and "/home/" not in text
+
+
+def test_a_second_run_rewrites_the_record(stage):
+    prepare(stage)
+    cfg = json.loads((stage / "parity_config.json").read_text())
+    (Path(cfg["model_snapshot"]) / "generation_config.json").unlink()
+    prepare(stage)
+    assert sources(stage)["generation_config"] == "absent"
+
+
+def test_a_failed_run_leaves_no_record(stage):
+    cfg = json.loads((stage / "parity_config.json").read_text())
+    (Path(cfg["model_snapshot"]) / "tokenizer.json").unlink()
+    assert prepare(stage).returncode == 2
+    assert not (stage / "parity-model-dir-sources.json").exists()

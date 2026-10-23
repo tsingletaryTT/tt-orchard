@@ -1,0 +1,159 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+"""Stage 7 writes the use sections of the card from the model's own files, and the gate reads the same files again."""
+import json
+import os
+import sys
+from pathlib import Path
+
+import pytest
+
+import package_fakes
+from card_use_fixtures import README_WITH_USE, TEMPLATE
+from package_fakes import NEW, NEW_REV, SOURCE_ENV, SOURCE_EXTRA, fake_bin, fake_boot_result, make_run, make_source, write
+from orchard.package import finish, stage_all
+from orchard.stages import gate_package
+
+FAKE_SERVER = Path(__file__).resolve().with_name("fake_swap_server.py")
+FLAGS = "--enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning_parser qwen3"
+
+
+def build(tmp_path, monkeypatch, *, readme=README_WITH_USE, template=TEMPLATE, flags=FLAGS, skip_vision=True,
+          tool_calls=None, tool_model=f"{NEW}@{NEW_REV}", optional=None):
+    monkeypatch.setattr(package_fakes, "SOURCE_EXTRA", f"{SOURCE_EXTRA} {flags}".strip())
+    models = tmp_path / "models"
+    env = {**SOURCE_ENV, **({"QWEN36_SKIP_VISION": "1"} if skip_vision else {})}
+    r = make_run(tmp_path, make_source(models, env=env))
+    if optional:                       # a second installed bundle: its 1-chip profile is staged as an optional one
+        monkeypatch.setattr(package_fakes, "SOURCE_EXTRA", FLAGS if optional == "parser" else "")
+        make_source(models, name="qwen3.8-27b-dflash2-p150", chips=1, mesh="P150", env=env)
+    snap = r["snapshot"]
+    for name, text in (("README.md", readme), ("chat_template.jinja", template)):
+        if text is not None:
+            if os.path.lexists(snap / name):
+                (snap / name).unlink()
+            (snap / name).write_text(text)
+    fb, _ = fake_bin(tmp_path)
+    monkeypatch.setenv("PATH", f"{fb}:{os.environ['PATH']}")
+    run_env = dict(os.environ, FAKE_TT_MODEL_PYTHON=sys.executable, FAKE_SWAP_SERVER=str(FAKE_SERVER),
+                   FAKE_SWAP_CONFIG=str(tmp_path / "server.json"))
+    stage = r["run"] / "stages/7"
+    stage.mkdir(parents=True)
+    if tool_calls is not None:
+        write(stage / "benchmark/speed.json", {"model_id": tool_model, "prompts": {"tool-call": {"runs": [{"tool_calls": tool_calls}]}}})
+    stage_all(r["run"], stage, namespace="episod", models_root=models, env=run_env)
+    fake_boot_result(stage)
+    finish(r["run"], stage)
+    return {**r, "stage": stage, "pkg": stage / "package/hemmingway-1-p300", "opt": stage / "package/hemmingway-1-p150"}
+
+
+def reasons(s):
+    return list(gate_package(s["stage"], s["run"]).reasons)
+
+
+@pytest.fixture
+def staged(tmp_path, monkeypatch, stub_tools):
+    return build(tmp_path, monkeypatch)
+
+
+def test_the_staged_card_says_what_the_model_is_for_and_how_to_call_it(staged):
+    card = (staged["pkg"] / "README.md").read_text()
+    assert "## How to call it" in card and "Text generation with" not in card
+    assert "> AREX-like models are intended for long-horizon agents and tool-augmented research." in card
+    assert "Thinking is on by default" in card and "`reasoning_content`" in card and "`tool_calls`" in card
+    assert "Text only" in card and "`xhigh`, `medium`, `low`" in card
+    assert gate_package(staged["stage"], staged["run"]).ok
+
+
+def test_a_package_whose_sources_give_no_facts_keeps_the_generic_card(tmp_path, monkeypatch, stub_tools):
+    s = build(tmp_path, monkeypatch, readme=None, template="{{ messages }}", flags="", skip_vision=False)
+    card = (s["pkg"] / "README.md").read_text()
+    assert "Text generation with" in card and "## How to call it" not in card
+    assert gate_package(s["stage"], s["run"]).ok
+
+
+def test_a_tool_call_in_the_runs_speed_file_is_cited_and_shipped_with_the_package(tmp_path, monkeypatch, stub_tools):
+    s = build(tmp_path, monkeypatch, tool_calls=[{"name": "run_tests", "arguments": "{}"}])
+    card = (s["pkg"] / "README.md").read_text()
+    assert "the tool-use prompts returned tool calls (`run_tests`)" in card
+    shipped = s["pkg"] / "evidence/stages/7/benchmark/speed.json"
+    assert shipped.is_file() and gate_package(s["stage"], s["run"]).ok
+    shipped.unlink()
+    assert any("missing at evidence/stages/7/benchmark/speed.json" in r for r in reasons(s))
+
+
+def test_the_gate_refuses_a_card_edited_to_claim_images(staged):
+    card = staged["pkg"] / "README.md"
+    card.write_text(card.read_text().replace("## How to call it", "The package accepts images.\n\n## How to call it"))
+    assert any("claims image or video input" in r for r in reasons(staged))
+
+
+def test_the_gate_reads_run_sh_again_and_refuses_text_only_when_the_vision_flag_is_gone(staged):
+    run_sh = staged["pkg"] / "run.sh"
+    run_sh.write_text(run_sh.read_text().replace('export QWEN36_SKIP_VISION="1"\n', ""))
+    assert any("says the package is text only" in r for r in reasons(staged))
+
+
+def test_the_gate_reads_the_template_again_and_refuses_a_wrong_thinking_default(staged):
+    t = staged["snapshot"] / "chat_template.jinja"
+    t.write_text("{%- if enable_thinking is defined and enable_thinking is true %}x{%- endif %}")
+    assert any("says thinking is on by default" in r for r in reasons(staged))
+
+
+def test_the_gate_refuses_a_card_that_lost_its_how_to_call_it_section(staged):
+    card = staged["pkg"] / "README.md"
+    text = card.read_text()
+    head, rest = text.split("## How to call it", 1)
+    card.write_text(head + "## Expected performance" + rest.split("## Expected performance", 1)[1])
+    assert any("How to call it" in r for r in reasons(staged))
+
+
+# ---- the tool-call evidence must be about this package's model (review finding on PR 51) ---------------------------------
+
+def test_a_speed_report_of_the_base_control_does_not_make_the_card_claim_tested_tool_calls(tmp_path, monkeypatch, stub_tools):
+    s = build(tmp_path, monkeypatch, tool_calls=[{"name": "run_tests", "arguments": "{}"}],
+              tool_model="Qwen/Qwen3.8-27B@1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0")
+    card = (s["pkg"] / "README.md").read_text()
+    assert "returned tool calls" not in card and "`run_tests`" not in card
+    assert "The server parses tool calls into `tool_calls`" in card
+    assert gate_package(s["stage"], s["run"]).ok
+
+
+def test_the_gate_refuses_a_card_whose_tool_call_evidence_is_about_another_model(tmp_path, monkeypatch, stub_tools):
+    s = build(tmp_path, monkeypatch, tool_calls=[{"name": "run_tests", "arguments": "{}"}])
+    assert gate_package(s["stage"], s["run"]).ok
+    path = s["stage"] / "benchmark/speed.json"
+    body = json.loads(path.read_text())
+    body["model_id"] = "Qwen/Qwen3.8-27B@1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+    path.write_text(json.dumps(body))
+    assert any("no evidence file in the run shows it" in r for r in reasons(s))
+
+
+# ---- the evidence belongs to the profile the run measured (review finding on PR 51) --------------------------------------
+
+CALLS = [{"name": "run_tests", "arguments": "{}"}]
+
+
+def test_an_optional_profiles_card_does_not_describe_the_tool_calls_as_tested(tmp_path, monkeypatch, stub_tools):
+    s = build(tmp_path, monkeypatch, tool_calls=CALLS, optional="parser")
+    required, optional = (s["pkg"] / "README.md").read_text(), (s["opt"] / "README.md").read_text()
+    assert "the tool-use prompts returned tool calls (`run_tests`)" in required
+    assert "returned tool calls" not in optional and "`run_tests`" not in optional
+    assert "The server parses tool calls into `tool_calls`" in optional and "not tested here" in optional
+    assert gate_package(s["stage"], s["run"]).ok
+
+
+def test_an_optional_profile_with_no_tool_parser_passes_the_gate_when_the_run_has_tool_evidence(tmp_path, monkeypatch, stub_tools):
+    s = build(tmp_path, monkeypatch, tool_calls=CALLS, optional="no-parser")
+    optional = (s["opt"] / "README.md").read_text()
+    assert "returned tool calls" not in optional and "`tool_calls`" not in optional
+    assert gate_package(s["stage"], s["run"]).ok, reasons(s)
+
+
+def test_the_gate_refuses_an_optional_card_that_claims_tested_tool_calls(tmp_path, monkeypatch, stub_tools):
+    s = build(tmp_path, monkeypatch, tool_calls=CALLS, optional="parser")
+    card = s["opt"] / "README.md"
+    card.write_text(card.read_text().replace("The server parses tool calls into `tool_calls`",
+                                             "Tool calls come back in `tool_calls`. In the runs recorded in `stages/7/benchmark/speed.json` the "
+                                             "tool-use prompts returned tool calls (`run_tests`). The server parses tool calls into `tool_calls`"))
+    assert any("p150" in r and "no evidence file in the run shows it" in r for r in reasons(s))
