@@ -22,7 +22,9 @@ The prompt suite (issue 15) adds two things, both off unless the config asks:
 - POST /v1/chat/completions answers with the first of the config's "chat_replies" ([[substring, reply], ...], reply
   being {"content", "reasoning_content" or "reasoning", "tool_calls", "finish_reason"}) whose substring is in the last
   user message, else with "chat_default" (a string, default a short healthy sentence). "chat_error_for" is a substring
-  that makes the server answer 400 to a chat request containing it. A completion whose prompt is a string (the suite in
+  that makes the server answer 400 to a chat request containing it. "chat_break_for" is a substring that makes the server
+  send a status line and a Content-Length it does not keep, then close the connection (a truncated body: the client raises
+  http.client.IncompleteRead). A completion whose prompt is a string (the suite in
   completion mode) is answered from "text_replies" the same way, else "text_default".
 - "request_log" is a file to which every POST appends {"path", "body"} as one JSON line, so a test can see what was sent.
 
@@ -114,6 +116,15 @@ class Handler(BaseHTTPRequestHandler):
         last = req["messages"][-1]["content"]
         if cfg.get("chat_error_for") and cfg["chat_error_for"] in last:
             self._send(400, json.dumps({"error": "the chat request was refused"}).encode())
+            return
+        if cfg.get("chat_break_for") and cfg["chat_break_for"] in last:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", "500")
+            self.end_headers()
+            self.wfile.write(b'{"choices": [')
+            self.wfile.flush()
+            self.close_connection = True
             return
         reply = next((r for sub, r in cfg.get("chat_replies", []) if sub in last),
                      cfg.get("chat_default", "That is a short and healthy reply."))

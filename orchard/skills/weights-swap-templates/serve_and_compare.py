@@ -60,6 +60,7 @@ same way.
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -174,6 +175,15 @@ def wait_healthy(proc, port: int, timeout_s: float, log_path: Path) -> float:
         time.sleep(HEALTH_POLL_S)
 
 
+def error_body(exc) -> str:
+    """The body of an HTTP error answer, as text. A body that is cut short raises IncompleteRead, which is not an OSError; the
+    status code is worth more than the body, so the failure is said in its place."""
+    try:
+        return exc.read().decode("utf-8", errors="replace")
+    except (http.client.HTTPException, OSError) as read_error:
+        return f"(the error body could not be read: {type(read_error).__name__})"
+
+
 def complete(port: int, model: str, prompt: list[int], max_tokens: int) -> str:
     body = json.dumps({"model": model, "prompt": prompt, "max_tokens": max_tokens,
                        "temperature": 0}).encode("utf-8")
@@ -183,8 +193,7 @@ def complete(port: int, model: str, prompt: list[int], max_tokens: int) -> str:
         with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_S) as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        raise ServerHTTPError(f"HTTP {exc.code}: "
-                              f"{exc.read().decode('utf-8', errors='replace')}") from exc
+        raise ServerHTTPError(f"HTTP {exc.code}: {error_body(exc)}") from exc
     return data["choices"][0]["text"]
 
 
@@ -197,8 +206,7 @@ def post_json(port: int, path: str, body: dict) -> dict:
         with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_S) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        raise ServerHTTPError(f"HTTP {exc.code}: "
-                              f"{exc.read().decode('utf-8', errors='replace')}") from exc
+        raise ServerHTTPError(f"HTTP {exc.code}: {error_body(exc)}") from exc
 
 
 def suite_problems(suite) -> list[str]:
@@ -359,7 +367,8 @@ def ask_suite_prompt(port: int, model: str, prompt: dict, mode: str, max_tokens:
         entry["finish_reason"] = choice.get("finish_reason")
     except ServerHTTPError as exc:
         entry["error"] = str(exc)[:300]
-    except (urllib.error.URLError, OSError, ValueError, KeyError, IndexError, TypeError) as exc:
+    except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError, KeyError, IndexError, TypeError) as exc:
+        # http.client.HTTPException (IncompleteRead, BadStatusLine) is not an OSError: one cut-off answer must not end the test.
         entry["error"] = f"{type(exc).__name__}: {exc}"[:300]
     return entry
 

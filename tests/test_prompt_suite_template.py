@@ -45,6 +45,21 @@ def run(swap, tmp_path, **kw):
     return swap["start"]("perfect", server_extra={"request_log": str(tmp_path / "requests.jsonl"), **extra}, **kw)
 
 
+def test_one_cut_off_answer_is_recorded_and_the_32_token_measurement_and_the_other_replies_are_still_saved(swap, tmp_path):
+    """The old template let http.client.IncompleteRead leave the suite loop, so the hardware test ended before write_report()."""
+    stage_for_suite(swap)
+    first = SUITE["prompts"][0]["messages"][-1]["content"]
+    r = run(swap, tmp_path, server_extra={"chat_break_for": first})
+    assert r.returncode == 0, r.stdout + r.stderr
+    rep = report(swap)
+    assert rep["result_draft"]["top1_agreement"] == 1.0 and rep["result_draft"]["n_tokens"] == 32
+    entries = rep["prompt_suite"]["entries"]
+    assert len(entries) == len(SUITE["prompts"])                       # the template mentions tools, so no prompt is skipped
+    broken = [e for e in entries if e["error"]]
+    assert len(broken) == 1 and "IncompleteRead" in broken[0]["error"] and broken[0]["id"] == SUITE["prompts"][0]["id"]
+    assert all(e["content"] for e in entries if not e["error"])
+
+
 # ---- opt-in ---------------------------------------------------------------------------------------------------------
 
 def test_without_the_key_nothing_is_sent_and_nothing_is_recorded(swap, tmp_path):
