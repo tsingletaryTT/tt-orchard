@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from test_prepare_swap_graft import (BACKBONE, MTP, SHARD, read_header,  # noqa: E402
+from test_prepare_swap_graft import (BACKBONE, MTP, SHARD, put_link, read_header,  # noqa: E402
                                      tensor_bytes, write_safetensors)
 
 from orchard.package import (PackageError, finish, prepare_verify, read_run, serving_env,  # noqa: E402
@@ -72,11 +72,27 @@ def stage(w, **kw):
     return stage_dir, stage_all(w["run"], stage_dir, namespace="episod", models_root=w["models"], env=w["env"], **kw)
 
 
+def boot_checked_graft(stage_dir: Path, pkg: Path, **changes) -> dict:
+    """What verify_bundle.py records about the graft it served: graft.json as the installed copy read it and the
+    sha256 of the shard the copy's launcher built (here, the one graft.json promises)."""
+    g = json.loads((pkg / "graft.json").read_text())
+    record = {k: g[k] for k in ("repo", "revision", "file", "shard", "tensors", "sha256")}
+    record["served_shard_sha256"] = g["sha256"]
+    record.update(changes)
+    path = stage_dir / "verify/evidence/verify.json"
+    v = json.loads(path.read_text())
+    v["graft"] = record
+    path.write_text(json.dumps(v))
+    return record
+
+
 def finished(w):
     stage_dir, package = stage(w, graft_mtp=True)
     fake_boot_result(stage_dir)
+    pkg = w["run"] / package["profiles"][0]["dir"]
+    boot_checked_graft(stage_dir, pkg)
     finish(w["run"], stage_dir)
-    return stage_dir, w["run"] / package["profiles"][0]["dir"]
+    return stage_dir, pkg
 
 
 # ---- staging ----------------------------------------------------------------------------------------
@@ -123,11 +139,134 @@ def test_without_the_option_the_package_is_the_drafter_off_package(world):
 
 def test_a_run_whose_stage_2_grafted_gives_a_grafted_package_without_the_option(world):
     # Stage 2 served with the graft: its run.sh keeps the drafter, and its record says so.
-    s2 = world["run"] / "stages/2"
-    (s2 / "run.sh").write_text((world["src"] / "run.sh").read_text())
-    write(s2 / "model-dir-sources.json", {"schema": 1, "mtp_graft": {"from": BASE, "file": SHARD}})
+    stage_2_with_the_real_graft(world)
     _, package = stage(world)
     assert package["mtp_graft"]["file"] == SHARD_FILE
+
+
+def stage_2_with_the_real_graft(w):
+    """Stage 2's model-dir as prepare_swap.py itself builds it with `graft_mtp`: the graft shard is a regular file
+    next to the links to the model's own shards. The script runs in the run's stage 2 directory."""
+    s2 = w["run"] / "stages/2"
+    for name in ("config.json", "preprocessor_config.json"):          # the files prepare_swap copies from the nearest model
+        put_link(w["base"], name, "{}")
+    shutil.copy(SWAP_TEMPLATE, s2 / "prepare_swap.py")
+    cfg = json.loads((s2 / "swap_config.json").read_text())
+    write(s2 / "swap_config.json", {**cfg, "graft_mtp": True})
+    done = subprocess.run([sys.executable, str(s2 / "prepare_swap.py")], capture_output=True, text=True, timeout=60)
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert not (s2 / "model-dir" / SHARD).is_symlink() and (s2 / "model-dir" / SHARD).is_file()
+    (s2 / "run.sh").write_text((w["src"] / "run.sh").read_text())      # stage 2 served with the drafter on
+
+
+def test_a_run_whose_stage_2_really_grafted_is_read_and_packaged(world):
+    # The graft shard is a new regular file, so it links into no Hugging Face snapshot. Only the validated
+    # shard is exempt from the backbone provenance check.
+    stage_2_with_the_real_graft(world)
+    facts = read_run(world["run"])
+    assert facts.stage_2_grafted and facts.graft["file"] == SHARD_FILE
+    _, package = stage(world)
+    assert package["mtp_graft"]["sha256"] == json.loads(
+        (world["run"] / "stages/2/model-dir-sources.json").read_text())["mtp_graft"]["sha256"]
+
+
+def graft_record_path(w):
+    return w["run"] / "stages/2/model-dir-sources.json"
+
+
+def edit_graft_record(w, **changes):
+    rec = json.loads(graft_record_path(w).read_text())
+    rec["mtp_graft"].update(changes)
+    graft_record_path(w).write_text(json.dumps(rec))
+
+
+def test_stage_2s_graft_shard_must_be_the_one_the_record_describes(world):
+    stage_2_with_the_real_graft(world)
+    shard = world["run"] / "stages/2/model-dir" / SHARD
+    with open(shard, "r+b") as f:                       # one byte of the tensors changed
+        f.seek(-1, os.SEEK_END)
+        f.write(b"\xff")
+    with pytest.raises(PackageError, match="does not match the sha256"):
+        read_run(world["run"])
+
+
+def test_a_shard_and_a_record_that_agree_with_each_other_but_not_with_the_nearest_model_are_refused(world):
+    stage_2_with_the_real_graft(world)
+    shard = world["run"] / "stages/2/model-dir" / SHARD
+    write_safetensors(shard, {"mtp.fc.weight": ("BF16", [4, 8])})        # some other bytes, recorded as the graft
+    edit_graft_record(world, sha256=hashlib.sha256(shard.read_bytes()).hexdigest())
+    with pytest.raises(PackageError, match="not what the nearest model's snapshot"):
+        read_run(world["run"])
+
+
+def test_a_graft_record_for_another_revision_of_the_nearest_model_is_refused(world):
+    stage_2_with_the_real_graft(world)
+    edit_graft_record(world, base_revision="e" * 40)
+    with pytest.raises(PackageError, match="base_revision"):
+        read_run(world["run"])
+
+
+@pytest.mark.parametrize("changes, reason", [({"file": "other.safetensors"}, "must be"),
+                                             ({"sha256": "abc"}, "64 hex")])
+def test_a_malformed_graft_record_is_refused(world, changes, reason):
+    stage_2_with_the_real_graft(world)
+    edit_graft_record(world, **changes)
+    with pytest.raises(PackageError, match=reason):
+        read_run(world["run"])
+
+
+def test_a_graft_record_that_is_not_an_object_exempts_nothing(world):
+    stage_2_with_the_real_graft(world)
+    graft_record_path(world).write_text(json.dumps({"schema": 1, "mtp_graft": ["not", "a", "record"]}))
+    with pytest.raises(PackageError, match="links into no Hugging Face snapshot"):
+        read_run(world["run"])
+
+
+def test_a_graft_record_with_a_new_snapshot_that_is_not_pinned_says_so(world):
+    stage_2_with_the_real_graft(world)
+    cfg = json.loads((world["run"] / "stages/2/swap_config.json").read_text())
+    write(world["run"] / "stages/2/swap_config.json", {**cfg, "new_snapshot": str(world["tmp"] / "not-a-snapshot")})
+    with pytest.raises(PackageError, match="is not a pinned snapshot directory"):
+        read_run(world["run"])
+
+
+def test_a_new_snapshot_named_by_a_commit_but_missing_is_refused_before_the_weights_are_read(world):
+    stage_2_with_the_real_graft(world)
+    cfg = json.loads((world["run"] / "stages/2/swap_config.json").read_text())
+    write(world["run"] / "stages/2/swap_config.json", {**cfg, "new_snapshot": str(world["tmp"] / ("c" * 40))})
+    with pytest.raises(PackageError, match="is not a pinned snapshot directory"):
+        read_run(world["run"])
+
+
+def test_a_graft_shard_that_is_a_link_is_refused(world, tmp_path):
+    stage_2_with_the_real_graft(world)
+    shard = world["run"] / "stages/2/model-dir" / SHARD
+    real = tmp_path / "elsewhere.safetensors"
+    shutil.copy(shard, real)
+    shard.unlink()
+    shard.symlink_to(real)
+    with pytest.raises(PackageError, match="not the regular file"):
+        read_run(world["run"])
+
+
+def test_only_the_graft_shard_is_exempt_from_the_provenance_check(world, tmp_path):
+    stage_2_with_the_real_graft(world)
+    write_safetensors(world["run"] / "stages/2/model-dir/model-extra.safetensors", dict(BACKBONE))
+    with pytest.raises(PackageError, match="model-extra.safetensors links into no Hugging Face snapshot"):
+        read_run(world["run"])
+
+
+def test_a_graft_shard_without_a_graft_record_is_not_exempt(world):
+    stage_2_with_the_real_graft(world)
+    graft_record_path(world).write_text(json.dumps({"schema": 1}))        # the record that says it was grafted is gone
+    with pytest.raises(PackageError, match="links into no Hugging Face snapshot"):
+        read_run(world["run"])
+
+
+def test_a_package_that_adds_the_graft_at_stage_7_still_needs_every_stage_2_weight_to_link_into_a_snapshot(world):
+    write_safetensors(world["run"] / "stages/2/model-dir" / SHARD, dict(MTP))      # a stray file, no stage 2 record
+    with pytest.raises(PackageError, match="links into no Hugging Face snapshot"):
+        read_run(world["run"], graft_mtp=True)
 
 
 @pytest.mark.parametrize("what, change, reason", [
@@ -136,6 +275,8 @@ def test_a_run_whose_stage_2_grafted_gives_a_grafted_package_without_the_option(
     ("the nearest model has none", lambda w: real_file(w["base"], SHARD_FILE, dict(BACKBONE)), "no mtp."),
     ("the model's weights cannot be read", lambda w: Path(os.path.realpath(w["snapshot"] / SHARD_FILE)).write_text("text"),
      "cannot tell"),
+    ("the model ships a file with the graft shard's name",
+     lambda w: put_link(w["snapshot"], SHARD, b"ships its own"), "ships a file named"),
 ])
 def test_a_graft_that_cannot_be_made_stops_staging(world, what, change, reason):
     change(world)
@@ -233,9 +374,7 @@ def test_the_card_says_the_stage_2_rows_were_measured_before_the_graft(world):
 
 
 def test_a_package_staged_from_a_graft_in_stage_2_does_not_say_that(world):
-    s2 = world["run"] / "stages/2"
-    (s2 / "run.sh").write_text((world["src"] / "run.sh").read_text())
-    write(s2 / "model-dir-sources.json", {"schema": 1, "mtp_graft": {"from": BASE, "file": SHARD}})
+    stage_2_with_the_real_graft(world)
     _, pkg = finished(world)
     assert "without the graft" not in " ".join((pkg / "README.md").read_text().split())
 
@@ -282,6 +421,85 @@ def test_the_gate_fails_a_graft_json_that_does_not_describe_the_graft(world, key
     (pkg / "graft.json").write_text(json.dumps(graft))
     reasons = gate_package(stage_dir, world["run"]).reasons
     assert any("graft.json" in r and reason in r for r in reasons), reasons
+
+
+def edit_graft_json(pkg: Path, **changes):
+    g = json.loads((pkg / "graft.json").read_text())
+    g.update(changes)
+    (pkg / "graft.json").write_text(json.dumps(g))
+
+
+def test_the_gate_fails_a_graft_json_digest_the_boot_check_did_not_test(world):
+    # Another valid-looking digest: the package would exit 2 at every start, and nothing else would notice.
+    stage_dir, pkg = finished(world)
+    edit_graft_json(pkg, sha256="f" * 64)
+    reasons = gate_package(stage_dir, world["run"]).reasons
+    assert any("graft.json" in r and "boot check" in r and "sha256" in r for r in reasons), reasons
+
+
+@pytest.mark.parametrize("key, value", [("repo", "Someone/Else"), ("revision", "e" * 40), ("file", "model-9.safetensors"),
+                                        ("shard", "other-shard.safetensors"), ("tensors", ["mtp.fc.weight"])])
+def test_the_gate_fails_a_graft_json_that_differs_from_the_one_the_boot_check_served(world, key, value):
+    stage_dir, pkg = finished(world)
+    edit_graft_json(pkg, **{key: value})
+    reasons = gate_package(stage_dir, world["run"]).reasons
+    assert any("graft.json" in r and "boot check" in r and key in r for r in reasons), reasons
+
+
+def test_the_gate_fails_when_the_shard_the_boot_check_served_is_not_the_one_graft_json_promises(world):
+    stage_dir, pkg = finished(world)
+    boot_checked_graft(stage_dir, pkg, served_shard_sha256="0" * 64)
+    reasons = gate_package(stage_dir, world["run"]).reasons
+    assert any("boot check" in r and "served_shard_sha256" in r for r in reasons), reasons
+
+
+@pytest.mark.parametrize("record", [None, "text", ["list"], {}])
+def test_the_gate_fails_when_the_boot_check_recorded_no_graft(world, record):
+    stage_dir, pkg = finished(world)
+    path = stage_dir / "verify/evidence/verify.json"
+    v = json.loads(path.read_text())
+    if record is None:
+        v.pop("graft")
+    else:
+        v["graft"] = record
+    path.write_text(json.dumps(v))
+    reasons = gate_package(stage_dir, world["run"]).reasons
+    assert any("graft.json" in r and "boot check" in r and "records no graft" in r for r in reasons), reasons
+
+
+def test_the_gate_says_nothing_about_the_graft_when_there_is_no_boot_check_evidence_at_all(world):
+    stage_dir, pkg = finished(world)
+    (stage_dir / "verify/evidence/verify.json").unlink()
+    reasons = gate_package(stage_dir, world["run"]).reasons
+    assert reasons and not any("records no graft" in r for r in reasons), reasons
+
+
+def test_the_digest_the_boot_check_read_in_graft_json_must_be_the_staged_one_even_when_the_served_shard_matches(world):
+    stage_dir, pkg = finished(world)
+    boot_checked_graft(stage_dir, pkg, sha256="f" * 64)          # the copy's graft.json said another digest
+    reasons = gate_package(stage_dir, world["run"]).reasons
+    assert any("graft.json's sha256" in r for r in reasons), reasons
+
+
+def test_the_order_of_the_tensor_list_does_not_matter(world):
+    stage_dir, pkg = finished(world)
+    g = json.loads((pkg / "graft.json").read_text())
+    boot_checked_graft(stage_dir, pkg, tensors=list(reversed(g["tensors"])))
+    assert gate_package(stage_dir, world["run"]).ok
+
+
+def test_the_gate_fails_a_profile_without_graft_json_when_the_boot_check_served_a_graft(world):
+    stage_dir, pkg = finished(world)
+    (pkg / "graft.json").unlink()
+    reasons = gate_package(stage_dir, world["run"]).reasons
+    assert any("boot check served a graft" in r for r in reasons), reasons
+
+
+def test_a_package_that_is_not_grafted_is_not_asked_for_graft_evidence(world):
+    stage_dir, package = stage(world)
+    fake_boot_result(stage_dir)
+    finish(world["run"], stage_dir)
+    assert gate_package(stage_dir, world["run"]).ok
 
 
 @pytest.mark.parametrize("phrase", [f"mtp.* tensors of {BASE}", "added at each start", "`graft.json`"])
@@ -502,3 +720,60 @@ def test_stage_2_and_the_package_build_byte_identical_shards(installed, tmp_path
 def test_the_readme_documents_the_flag():
     readme = (Path(__file__).resolve().parent.parent / "README.md").read_text()
     assert "- `--graft-mtp`:" in readme and "graft.json" in readme
+
+
+def put_models_own_file_named_like_the_shard(inst, tmp_path):
+    """The model's snapshot ships a link to a blob named like the graft shard (backbone tensors, no mtp.*)."""
+    mine = tmp_path / "ships.safetensors"
+    write_safetensors(mine, dict(BACKBONE))
+    return put_link(inst["snapshot"], SHARD, mine.read_bytes())
+
+
+def test_the_package_never_writes_through_a_models_own_file_with_the_shards_name(installed, tmp_path):
+    # The launcher links every *.safetensors of the model into model-dir; opening the shard's destination for
+    # writing would follow that link and truncate the model's cached blob.
+    blob = put_models_own_file_named_like_the_shard(installed, tmp_path)
+    before = blob.read_bytes()
+    r = prepare(installed)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert SHARD in r.stderr and "name" in r.stderr
+    assert blob.read_bytes() == before
+    assert not (installed["pkg"] / "model-dir").exists()
+
+
+def test_the_package_refuses_a_shard_destination_that_already_exists(installed):
+    # A file in base_config/ with the shard's name is copied into model-dir before the graft is written.
+    (installed["pkg"] / "base_config" / SHARD).write_bytes(b"in the way")
+    r = prepare(installed)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "already exists" in r.stderr
+
+
+def test_the_real_boot_check_records_the_graft_it_served(world, tmp_path):
+    """verify_bundle.py against the fake server: the installed copy builds its shard, and verify.json says which."""
+    import signal
+    from package_fakes import GENERATED, PROMPT_IDS, VOCAB
+    stage_dir, package = stage(world, graft_mtp=True)          # stage_all also installs the copy and lays out the check
+    pkg = world["run"] / package["profiles"][0]["dir"]
+    verify = stage_dir / "verify"
+    cfg = json.loads((verify / "verify_config.json").read_text())
+    cfg["health_timeout_s"] = 60
+    (verify / "verify_config.json").write_text(json.dumps(cfg))
+    pid_file = tmp_path / "server-pid.json"
+    Path(world["env"]["FAKE_SWAP_CONFIG"]).write_text(json.dumps(
+        {"mode": "perfect", "vocab": VOCAB, "prompt_ids": PROMPT_IDS, "generated_ids": GENERATED, "pid_file": str(pid_file)}))
+    clean = {k: v for k, v in world["env"].items() if k not in ("MODEL_WEIGHTS_DIR", "HF_MODEL")}
+    try:
+        done = subprocess.run([sys.executable, str(verify / "verify_bundle.py")], capture_output=True, text=True,
+                              timeout=180, env=clean, cwd=world["run"])
+    finally:
+        if pid_file.exists():
+            try:
+                os.killpg(json.loads(pid_file.read_text())["pgid"], signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    assert done.returncode == 0, done.stdout + done.stderr
+    recorded = json.loads((verify / "evidence/verify.json").read_text())["graft"]
+    staged = json.loads((pkg / "graft.json").read_text())
+    assert recorded["sha256"] == staged["sha256"] == recorded["served_shard_sha256"]
+    assert recorded["tensors"] == staged["tensors"] and recorded["revision"] == staged["revision"]

@@ -337,3 +337,43 @@ def test_the_skill_tells_the_agent_not_to_set_graft_mtp_and_that_the_supervisor_
     skill = " ".join((Path(__file__).resolve().parent.parent / "orchard" / "skills" / "weights-swap-check.md").read_text().split())
     assert '"graft_mtp": true' in skill and "Do not set it in this stage" in skill
     assert "graft-decision.json" in skill and "do not touch `stages/2/graft-trial/`" in skill
+
+
+
+def models_own_file_named_like_the_graft(prep, tmp_path):
+    """The new model ships a file with the graft shard's name that holds backbone tensors only (no mtp.*)."""
+    mine = tmp_path / "ships.safetensors"
+    write_safetensors(mine, dict(BACKBONE))
+    return put_link(prep["new"], SHARD, mine.read_bytes())
+
+
+def test_a_new_model_that_ships_a_file_with_the_graft_shards_name_is_refused(grafted, tmp_path):
+    # Without this the model's link is replaced by the graft and the model's own tensors are gone.
+    blob = models_own_file_named_like_the_graft(grafted, tmp_path)
+    before = blob.read_bytes()
+    r = run_prepare(grafted["stage"])
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert SHARD in r.stdout + r.stderr and "name" in (r.stdout + r.stderr)
+    assert blob.read_bytes() == before
+
+
+def test_the_graft_shards_name_is_free_to_the_model_when_nothing_is_grafted(prep, tmp_path):
+    blob = models_own_file_named_like_the_graft(prep, tmp_path)
+    r = run_prepare(prep["stage"])
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (model_dir(prep) / SHARD).is_symlink() and blob.read_bytes() == (model_dir(prep) / SHARD).read_bytes()
+
+
+def test_writing_the_graft_shard_never_follows_a_link(grafted, tmp_path):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("prepare_swap_under_test", grafted["stage"] / "prepare_swap.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    plan = mod.plan_mtp_graft(grafted["base"], grafted["new"])
+    victim = tmp_path / "victim.bin"
+    victim.write_bytes(b"original")
+    dest = tmp_path / SHARD
+    dest.symlink_to(victim)
+    with pytest.raises(SystemExit):
+        mod.write_graft_shard(plan, dest)
+    assert victim.read_bytes() == b"original"

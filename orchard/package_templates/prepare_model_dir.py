@@ -139,7 +139,14 @@ def build_graft_shard(g: dict, md: Path) -> None:
     raw = json.dumps(out_header).encode("utf-8")
     raw += b" " * (-len(raw) % 8)
     digest, dest = hashlib.sha256(), md / g["shard"]
-    with open(src, "rb") as f, open(dest, "wb") as out:
+    # The destination must be a new file. model-dir holds links into the model's cached blobs, and opening one of
+    # them for writing would overwrite the blob. O_EXCL refuses an existing file or link; this script never unlinks
+    # one to make room, because it cannot tell a link it made from a file a person left there.
+    try:
+        fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+    except FileExistsError:
+        fail(f"{dest} already exists; the graft shard is only ever written to a new file, never through a link")
+    with open(src, "rb") as f, os.fdopen(fd, "wb") as out:
         for chunk in (struct.pack("<Q", len(raw)), raw):
             out.write(chunk)
             digest.update(chunk)
@@ -200,6 +207,9 @@ def main() -> int:
         fail(f"{md} exists and was not built by this script; move it aside")
     graft = read_graft()
     snap = snapshot(repo, rev)
+    if graft and os.path.lexists(snap / graft["shard"]):
+        fail(f"the model {repo}@{rev} ships a file named {graft['shard']}, the name this package uses for the "
+             "grafted shard; the package cannot be started with that model's files")
     names = list(LINKED) + sorted(p.name for p in snap.glob("*.safetensors"))
     present = [n for n in names if (snap / n).exists()]
     if "tokenizer.json" not in present or not any(n.endswith(".safetensors") for n in present):

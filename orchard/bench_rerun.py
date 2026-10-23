@@ -10,6 +10,13 @@ generation limit reasoning comes back with empty content (`finish_reason` length
 count: a reply cut off after its answer began has text, and a model can answer with nothing. The proxy records requests without document ids, so the
 two cannot be matched item by item. The output is the file `orchard.bench_session --items` takes.
 
+An empty reply is not always a cut-off at the length limit. lm-eval's gsm8k task sends the stop strings "Question:", "</s>" and "<|im_end|>", and vLLM
+matches them against the reasoning text too, so a thinking model that restates "Question:" while thinking stops there with no answer
+(finish_reason "stop", 10 to 200 tokens). Asking those items again with the same stop strings gives the same empty reply. `suspects` counts them in a finished
+run from each phase's `requests.jsonl`, and exits 4 when it finds any; run the phase again with `orchard.bench_session --stop '</s>'`.
+
+    python3 -m orchard.bench_rerun suspects --run RUN/pi-default --phases gsm8k,ifeval
+
 `merge` (with `--items`, the file the re-run was asked for) replaces the first run's result for each re-run item and recomputes each per-item metric over every item. It reads files and writes only its
 `--out`. It refuses a re-run item the first run did not have, a second row for one item, a changed prompt or document hash, a re-run that is not exactly the requested items, and a sample missing a metric.
 """
@@ -124,9 +131,20 @@ def merge(first_dir, again_dir, phases, expected=None) -> dict:
     return out
 
 
+def stop_suspects(run_dir, phases) -> dict:
+    """{phase: {"requests": n, "suspects": m}}: replies in a finished run that look cut off by a stop string inside the reasoning.
+
+    Reads each phase's `requests.jsonl` (the proxy's log); see `bench_proxy.stop_truncated_suspect` for the rule. Raises FileNotFoundError naming a phase with no log."""
+    from orchard import bench_proxy
+    return {phase: bench_proxy.count_stop_suspects(Path(run_dir) / phase / "requests.jsonl") for phase in phases}
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
+    sp = sub.add_parser("suspects", help="count replies cut off by a stop string inside the reasoning (exit 4 when any)")
+    sp.add_argument("--run", required=True)
+    sp.add_argument("--phases", required=True)
     it = sub.add_parser("items", help="list the items with an empty reply")
     it.add_argument("--run", required=True)
     it.add_argument("--phases", required=True)
@@ -139,6 +157,20 @@ def main(argv=None) -> int:
     mg.add_argument("--out", required=True)
     a = ap.parse_args(argv)
     phases = [p for p in a.phases.split(",") if p]
+    if a.cmd == "suspects":
+        try:
+            found = stop_suspects(a.run, phases)
+        except FileNotFoundError as exc:
+            print(exc, file=sys.stderr)
+            return 2
+        for phase, c in found.items():
+            tail = " look cut off by a stop string in their reasoning" if c["suspects"] else ""
+            print(f"{phase}: {c['suspects']} of {c['requests']} requests{tail}")
+        if any(c["suspects"] for c in found.values()):
+            print("Each of these replies has reasoning text and no answer. Run the phase again with orchard.bench_session --stop set to a string the model "
+                  "does not write, for example --stop '</s>'.")
+            return 4
+        return 0
     if a.cmd == "items":
         items = cutoff_items(a.run, phases)
         for phase, ids in items.items():
