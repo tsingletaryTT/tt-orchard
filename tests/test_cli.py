@@ -949,6 +949,15 @@ def test_package_defaults_to_no_restage_and_the_whole_flow(tmp_path, monkeypatch
     assert seen["python"] == sys.executable and seen["handoff"] is None
 
 
+def test_package_graft_mtp_defaults_off_and_the_flag_turns_it_on(tmp_path, monkeypatch):
+    from orchard import cli, package_cmd
+    seen = []
+    monkeypatch.setattr(package_cmd, "main", lambda args, **kw: seen.append(vars(args)) or 0)
+    cli.main(["package", str(tmp_path / "run"), "--namespace", "episod"], stdout=io.StringIO())
+    cli.main(["package", str(tmp_path / "run"), "--namespace", "episod", "--graft-mtp"], stdout=io.StringIO())
+    assert [s["graft_mtp"] for s in seen] == [False, True]
+
+
 def test_package_passes_the_handoff_token_to_the_boot_step(tmp_path, monkeypatch):
     from orchard import cli, package_cmd
     seen = {}
@@ -1005,3 +1014,19 @@ def test_package_card_replaces_reported_scores_only_when_asked(tmp_path, monkeyp
     cli.main(["package-card", str(tmp_path / "run"), "--benchmark", "b.json", "--model-key", "arex"],
              stdout=io.StringIO())
     assert seen["replace_reported"] is False and seen["reported"] is None and seen["base_key"] is None
+
+
+def test_bringup_leaves_the_graft_trial_on_by_default_and_passes_the_opt_out_to_the_supervisor(conf):
+    code, out, rec = run(conf, ["bringup", "Cloudflare/clef"])
+    assert "--no-graft-trial" not in rec.argv
+    code, out, rec = run(conf, ["bringup", "Cloudflare/clef", "--no-graft-trial"])
+    assert code == 0 and "--no-graft-trial" in rec.argv
+
+
+def test_package_no_graft_mtp_defaults_off_and_the_flag_turns_it_on(tmp_path, monkeypatch):
+    from orchard import cli, package_cmd
+    seen = []
+    monkeypatch.setattr(package_cmd, "main", lambda args, **kw: seen.append(vars(args)) or 0)
+    cli.main(["package", str(tmp_path / "run"), "--namespace", "episod"], stdout=io.StringIO())
+    cli.main(["package", str(tmp_path / "run"), "--namespace", "episod", "--no-graft-mtp"], stdout=io.StringIO())
+    assert [s["no_graft_mtp"] for s in seen] == [False, True]

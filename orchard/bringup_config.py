@@ -286,7 +286,8 @@ def run_dir(cfg: BringupConfig, model_id: str) -> Path:
 
 
 def supervisor_argv(cfg: BringupConfig, model_id: str, run_dir: Path | None = None, *,
-                    inputs: dict[str, str] | None = None, accept_credentials: bool = False) -> list[str]:
+                    inputs: dict[str, str] | None = None, accept_credentials: bool = False,
+                    graft_trial: bool = True) -> list[str]:
     """The arguments after `python3 -m orchard.supervisor`. Optional flags appear only when the config
     sets them, so the supervisor's own defaults stay the defaults. `--accept-credentials-visible` is added
     only when the caller says the operator asked for it on the command line; the config cannot add it."""
@@ -324,6 +325,8 @@ def supervisor_argv(cfg: BringupConfig, model_id: str, run_dir: Path | None = No
     for name, value in all_inputs.items():
         argv += ["--input", f"{name}={value}"]
     argv.append("--unattended")        # a bring-up started here never waits for a person
+    if not graft_trial:
+        argv.append("--no-graft-trial")
     if accept_credentials:
         argv.append("--accept-credentials-visible")
     return argv

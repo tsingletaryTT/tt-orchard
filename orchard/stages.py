@@ -40,6 +40,10 @@ from pathlib import Path
 from typing import Callable
 
 from orchard.classes import CLASSES, SIDECAR_CLASSES, class_of_path, path_of
+from orchard.graft_trial import DECISION_FILE as GRAFT_DECISION_FILE
+from orchard.graft_trial import chosen as graft_chosen
+from orchard.graft_trial import read_decision as read_graft_decision
+from orchard.graft_trial import decision_problems
 from orchard.defaults import (COLD_START_S, LONG_STAGE_S, PACKAGE_FORMATS, RUN_COLD_BOOT_CAP,
                               RUN_ESCALATION_CAP, RUN_WALL_CLOCK_S, STAGE2_PCC_MIN,
                               STAGE4_SWAP_DISK_GB, STAGE_BUDGET_S, STAGE_DISK_GB, SWAP_MIN_TOKENS,
@@ -152,7 +156,7 @@ def _done(reasons: list, seen: list) -> GateResult:
 
 DELTA_AREAS = ("config", "architecture", "tensors", "tensor_names", "tokenizer", "chat_template",
                "files", "generation_config", "license", "other")
-HAZARD_AREAS = ("tensor_cache", "drafter", "disk", "license", "generation_config", "stop_tokens", "sampling_defaults", "chat_template", "other")
+HAZARD_AREAS = ("tensor_cache", "drafter", "drafter_graft", "disk", "license", "generation_config", "stop_tokens", "sampling_defaults", "chat_template", "other")
 PATHS = ("weights-only", "full-port")
 
 
@@ -396,6 +400,7 @@ def gate_weights_swap(stage_dir, run_dir) -> GateResult:
     if err:
         return GateResult(False, (err,))
     reasons, seen = _swap_reasons(d), []
+    reasons += decision_problems(stage_dir, run_dir)         # the graft trial's decision, when stage 2 made one
     _evidence(run_dir, d.get("evidence"), "result.json", reasons, seen)
     return _done(reasons, seen)
 
@@ -453,6 +458,7 @@ def gate_weights_swap_sidecar(stage_dir, run_dir) -> GateResult:
     if err:
         return GateResult(False, (err,))
     reasons, seen = _swap_reasons(d), []
+    reasons += decision_problems(stage_dir, run_dir)
     delta, derr = _load(Path(run_dir) / "stages" / "0", "delta.json")
     if derr:
         reasons.append(f"stage 0's {derr}, so the sidecar parity cannot be tied to the files stage 0 recorded")
@@ -611,7 +617,54 @@ def gate_mesh_swap(stage_dir, run_dir, required=None) -> GateResult:
         if not isinstance(draft, dict) or draft.get("top1_agreement") != c.get("top1_agreement"):
             reasons.append(f"{where}: top1_agreement {c.get('top1_agreement')!r} is not the "
                            f"result_draft's in {swap}")
+        reasons += _graft_reasons(stage_dir, run_dir, n, where)
     return _done(reasons, seen)
+
+
+def _graft_reasons(stage_dir, run_dir, n: int, where: str) -> list[str]:
+    """A bundle configuration was built the way stage 2's graft decision says. A configuration served by the nearest model's own bundle
+    has `bundle_dir` in its swap_config.json; the supervisor drafted `graft_mtp` there from the decision, and the agent's prepare step can
+    change it afterwards, so the check reads what prepare_swap.py recorded it built (`mtp_graft` in model-dir-sources.json). A container
+    configuration is another server and is not held to the decision."""
+    cdir = Path(stage_dir) / "configs" / str(n)
+    cfg = _read_json(cdir / "swap_config.json")
+    kind = _serving_type(cfg)
+    if kind is None and read_graft_decision(Path(run_dir) / "stages" / "2") is not None:
+        # Once stage 2 has recorded a decision, a config that is gone or cannot be read must not let a configuration through: it may be an
+        # ungrafted bundle whose config was lost. Only a configuration that names its container package is exempt.
+        return [f"{where}: swap_config.json is missing, cannot be read, or names neither a bundle (bundle_dir) nor a container package "
+                "(package and profile), so how this configuration serves cannot be told and stage 2's graft decision cannot be checked "
+                "against it"]
+    if kind != "bundle":
+        return []
+    sources = _read_json(cdir / "model-dir-sources.json")
+    built = isinstance(sources, dict) and isinstance(sources.get("mtp_graft"), dict)
+    chose = graft_chosen(run_dir)
+    if chose and not built:
+        return [f"{where}: stage 2 chose the graft ({GRAFT_DECISION_FILE}), but configs/{n}/model-dir-sources.json records no mtp_graft, "
+                "so this configuration was built without the grafted head"]
+    if built and not chose:
+        return [f"{where}: configs/{n}/model-dir-sources.json records a grafted head, but stage 2 did not choose the graft"]
+    return []
+
+
+def _serving_type(cfg) -> str | None:
+    """"bundle" when a bundle configuration's swap_config.json names its bundle_dir, "container" when it names a container package and its
+    profile, None when it is not an object or names neither."""
+    if not isinstance(cfg, dict):
+        return None
+    if isinstance(cfg.get("bundle_dir"), str) and cfg["bundle_dir"]:
+        return "bundle"
+    if all(isinstance(cfg.get(k), str) and cfg[k] for k in ("package", "profile")):
+        return "container"
+    return None
+
+
+def _read_json(path: Path):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
 
 
 SERVING_CHECKS = ("boots", "passkey", "canary")
@@ -737,6 +790,13 @@ def _shipped_names(directory: Path) -> tuple[str, ...]:
         return ()
 
 
+def delta_model_has_mtp(delta) -> bool | None:
+    """Does the new model ship mtp.* tensors, as stage 0's delta.json says (`mtp.new_tensors`)? None when it does not say."""
+    mtp = delta.get("mtp") if isinstance(delta, dict) else None
+    n = mtp.get("new_tensors") if isinstance(mtp, dict) else None
+    return n > 0 if isinstance(n, int) and not isinstance(n, bool) else None
+
+
 def gate_package(stage_dir, run_dir) -> GateResult:
     """Stage 7: a staged v6 package whose boot check passed.
 
@@ -745,7 +805,8 @@ def gate_package(stage_dir, run_dir) -> GateResult:
     weights, the card, the boot check's verify.json and the publish commands. package.json only
     says where to look."""
     # Imported here: orchard.package imports this module.
-    from orchard.package import (PUBLISH_FILE, PackageError, publish_problems, read_reported, serving_problems,
+    from orchard.package import (GRAFT_FILE, PUBLISH_FILE, PackageError, graft_evidence_problems, graft_problems,
+                                 graft_trial_numbers, publish_problems, read_reported, serving_problems,
                                  split_model_id, stage_2_serving, weights_wiring_problems)
     from orchard.package_card import card_evidence_paths, card_problems, read_license
     from orchard.scrub import scrub_package
@@ -769,6 +830,13 @@ def gate_package(stage_dir, run_dir) -> GateResult:
         reasons.append(f"package.json says the license is {d.get('license')!r}; the model's is "
                        f"{license_id!r}")
     drafter_off, host_sampling = stage_2_serving(run)
+    model_has_mtp = delta_model_has_mtp(delta)
+    # A grafted package serves with the drafter and on-device sampling on, whatever stage 2's run.sh says.
+    graft_expected = isinstance(d.get("mtp_graft"), dict)
+    decision = read_graft_decision(run / "stages" / "2")
+    graft_chosen_by_stage_2 = decision is not None and decision["choice"] == "graft"
+    trial_decision = decision["choice"] if decision is not None and decision.get("trial") is not None else None
+    trial_rows = tuple(n.name for n in graft_trial_numbers(run))
     try:
         reported, reported_source = read_reported(run)
     except PackageError as exc:
@@ -776,6 +844,7 @@ def gate_package(stage_dir, run_dir) -> GateResult:
         reported, reported_source = (), ""
     sidecars = [s.get("file") for s in delta.get("sidecars") or () if isinstance(s, dict)]
     profiles = d.get("profiles") if isinstance(d.get("profiles"), list) else []
+    boot_check, _ = _load(Path(stage_dir) / "verify" / "evidence", "verify.json")
     if not any(isinstance(p, dict) and p.get("required") and p.get("verified") is True
                for p in profiles):
         failed = [p.get("verify", {}).get("failed") for p in profiles if isinstance(p, dict)]
@@ -801,16 +870,28 @@ def gate_package(stage_dir, run_dir) -> GateResult:
                            f"{d.get('revision')}; stage 0 names {delta.get('model')}")
         reasons += [f"profile {name}: {x}" for x in
                     weights_wiring_problems(run_sh, nearest_model=nearest_repo)]
+        has_graft = (out / GRAFT_FILE).exists()
+        if graft_chosen_by_stage_2 and not has_graft:
+            reasons.append(f"profile {name}: stage 2's graft trial chose the graft, so the package needs {GRAFT_FILE}")
+        if graft_expected or has_graft:
+            reasons += [f"profile {name}: {x}" for x in
+                        graft_problems(out, nearest_model=nearest_repo,
+                                       base_revision=Path(swap.get("base_snapshot") or "").name)]
+        reasons += [f"profile {name}: {x}" for x in graft_evidence_problems(out, boot_check)]
         reasons += [f"profile {name}: {x}" for x in
-                    serving_problems(run_sh, m.get("env") or {}, drafter_off=drafter_off,
-                                     host_sampling=host_sampling)]
+                    serving_problems(run_sh, m.get("env") or {},
+                                     drafter_off=drafter_off and not (graft_expected or has_graft),
+                                     host_sampling=host_sampling and not (graft_expected or has_graft),
+                                     model_has_mtp=model_has_mtp, graft=has_graft)]
         reasons += [f"profile {name}: scrub: {x}" for x in
                     scrub_package(out, namespace=d.get("namespace"))]
         if license_id:
             reasons += [f"profile {name}: card: {x}" for x in
                         card_problems(card, license_id=license_id, run_dir=run, sidecars=sidecars,
                                       base_files=_shipped_names(out / "base_config"), reported=reported, reported_source=reported_source,
-                                      model_id=new_repo, nearest_model=nearest_repo)]
+                                      model_id=new_repo, nearest_model=nearest_repo, graft=has_graft,
+                                      graft_decision=trial_decision,
+                                      trial_rows=trial_rows if p.get("required") else ())]
         reasons += [f"profile {name}: the card cites {e}, which is missing at evidence/{e}"
                     for e in card_evidence_paths(card) if not (out / "evidence" / e).is_file()]
         if p.get("verified") is True:

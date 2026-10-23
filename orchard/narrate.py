@@ -108,6 +108,15 @@ def _decision(e: dict, d: dict) -> list[Line]:
         box = f" on {d['where'][4:]}" if str(d.get("where", "")).startswith("lab ") else ""
         return [Line(o, f"hardware test started{box} on {', '.join(d.get('chips') or []) or '?'}: "
                         f"{d.get('command', '?')} (deadline {duration(d.get('deadline_s') or 0)})")]
+    if what == "graft trial started":
+        return [Line(o, "graft trial: serving the nearest model's mtp.* head grafted onto this model, beside the safe configuration "
+                        "(this test can take 10 to 35 minutes on the chips)")]
+    if what == "graft decision":
+        kept = d.get("choice") == "graft"
+        return [Line(o, ("graft decision: the grafted drafter is kept: " if kept else "graft decision: the safe configuration stays: ")
+                        + _clip(d.get("reason", "?"), 260))]
+    if what == "graft trial skipped":
+        return [Line(o, f"graft trial skipped: {_clip(d.get('reason', '?'), 200)}")]
     if what == "copying files to the lab":
         return [Line(o, f"copying the run's files to {str(d.get('where', 'lab'))[4:] or 'the lab'}")]
     if what == "files copied to the lab":
@@ -151,6 +160,11 @@ def _evidence(e: dict, d: dict) -> list[Line]:
         if rc == 0:
             return [Line(o, "hardware test passed (exit 0)")]
         return [Line(o, f"hardware test failed (exit {rc})", True)]
+    if what == "graft trial test":
+        rc = d.get("returncode")
+        if d.get("timed_out"):
+            return [Line(o, "graft trial test failed: it timed out and was stopped", True)]
+        return [Line(o, "graft trial test passed (exit 0)")] if rc == 0 else [Line(o, f"graft trial test failed (exit {rc})", True)]
     if what == "hardware test list":
         return [Line(o, "will test these chip counts: " + ", ".join(str(c) for c in d.get("configs") or []))]
     if what == "transcript":
@@ -328,7 +342,7 @@ class Narrator:
             self._activity = (f"waiting for the coder {s.get('target', '?')} to boot", now, None, False)
         elif ev == "decision" and what == "hardware test started":
             self._activity = (f"hardware test running: {_clip(d.get('command', ''), 80)}", now, st, True)
-        elif (ev == "evidence" and what in ("hardware test", "transcript")) or ev == "stage_end" \
+        elif (ev == "evidence" and what in ("hardware test", "graft trial test", "transcript")) or ev == "stage_end" \
                 or (ev == "decision" and what in ("coder started", "pause", "blocked", "hardware released",
                                                   "ready for operator review")):
             self._activity = None

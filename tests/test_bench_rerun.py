@@ -141,6 +141,59 @@ def test_the_merge_command_prints_the_before_and_after(tmp_path, capsys):
     assert "mbpp" in capsys.readouterr().out
 
 
+# ---- finding replies cut off by a stop string in a finished run ------------------------------------------------------------------------------
+# lm-eval's gsm8k task stops at "Question:", which vLLM also matches inside a thinking model's reasoning. A run made before the proxy recorded
+# `content_chars` has only token counts and reasoning length, so the check reads each phase's requests.jsonl with the short-reply rule.
+
+def write_requests(root: Path, phase: str, recs: list[dict]):
+    d = root / phase
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "requests.jsonl").write_text("".join(json.dumps(r) + "\n" for r in recs))
+
+
+def old_rec(tokens, reasoning=70, finish="stop"):
+    return {"status": 200, "error": False, "finish_reason": finish, "completion_tokens": tokens, "reasoning_chars": reasoning}
+
+
+def test_the_suspects_are_counted_for_each_phase(tmp_path):
+    write_requests(tmp_path, "gsm8k", [old_rec(20), old_rec(24), old_rec(300), old_rec(8192, finish="length")])
+    write_requests(tmp_path, "ifeval", [old_rec(500), old_rec(600)])
+    got = br.stop_suspects(tmp_path, ["gsm8k", "ifeval"])
+    assert got == {"gsm8k": {"requests": 4, "suspects": 2}, "ifeval": {"requests": 2, "suspects": 0}}
+
+
+def test_a_phase_with_no_request_log_is_an_error_that_names_it(tmp_path):
+    with pytest.raises(FileNotFoundError, match="gsm8k"):
+        br.stop_suspects(tmp_path, ["gsm8k"])
+
+
+def test_the_suspects_command_prints_each_phase_and_exits_4_when_any_are_found(tmp_path, capsys):
+    write_requests(tmp_path, "gsm8k", [old_rec(20), old_rec(300)])
+    assert br.main(["suspects", "--run", str(tmp_path), "--phases", "gsm8k"]) == 4
+    out = capsys.readouterr().out
+    assert "gsm8k: 1 of 2 requests" in out and "stop string" in out
+
+
+def test_one_phase_with_suspects_is_enough_for_exit_4_when_another_has_none(tmp_path, capsys):
+    write_requests(tmp_path, "gsm8k", [old_rec(20)])
+    write_requests(tmp_path, "ifeval", [old_rec(500)])
+    assert br.main(["suspects", "--run", str(tmp_path), "--phases", "ifeval,gsm8k"]) == 4
+    out = capsys.readouterr().out
+    assert "gsm8k: 1 of 1 requests look cut off" in out and "ifeval: 0 of 1 requests" in out and "look cut off" not in out.split("ifeval")[1].split("\n")[0]
+
+
+def test_the_suspects_command_exits_0_and_says_none_when_there_are_none(tmp_path, capsys):
+    write_requests(tmp_path, "gsm8k", [old_rec(300), old_rec(400)])
+    assert br.main(["suspects", "--run", str(tmp_path), "--phases", "gsm8k"]) == 0
+    out = capsys.readouterr().out
+    assert "gsm8k: 0 of 2 requests" in out and "stop string" not in out
+
+
+def test_the_suspects_command_with_no_log_exits_2_and_names_the_file(tmp_path, capsys):
+    assert br.main(["suspects", "--run", str(tmp_path), "--phases", "gsm8k"]) == 2
+    assert "requests.jsonl" in capsys.readouterr().err
+
+
 # ---- refusing a re-run that does not fit the first run ---------------------------------------------------------------------------------
 
 def test_a_task_with_two_rows_per_document_is_refused(tmp_path):
