@@ -182,9 +182,36 @@ def _tool_names(node, depth=0) -> set[str]:
     return names
 
 
-def tool_call_evidence(run_dir) -> tuple[str, tuple[str, ...]] | None:
-    """(run-relative file, sorted tool names) from the first evidence file in which a prompt returned a tool call, or
-    None. Only files inside the run count and a file over MAX_EVIDENCE_BYTES is not read."""
+def _entries(data) -> list[dict]:
+    """The records in an evidence file that say which model they measured: each dict under `models` (a report that holds
+    several models) and the file's own top level when it names a model (a single measure_serving or verifier record)."""
+    if not isinstance(data, dict):
+        return []
+    out = [v for v in data["models"].values() if isinstance(v, dict)] if isinstance(data.get("models"), dict) else []
+    if "model_id" in data:
+        out.append({k: v for k, v in data.items() if k != "models"})
+    return out
+
+
+def _measured(entry: dict, identity: tuple[str, str | None]) -> bool:
+    """The record names the package's model and its revision. A revision comes after `@` in `model_id` or in a separate
+    `revision` field. A record that names neither the model nor the revision is not about this package."""
+    repo, rev = identity
+    named = entry.get("model_id")
+    if not isinstance(named, str) or not rev:
+        return False
+    name, _, at = named.partition("@")
+    found = at or entry.get("revision")
+    return name == repo and isinstance(found, str) and found == rev
+
+
+def tool_call_evidence(run_dir, identity: tuple[str, str | None] | None = None) -> tuple[str, tuple[str, ...]] | None:
+    """(run-relative file, sorted tool names) from the first evidence file in which a prompt of THIS package's model
+    returned a tool call, or None. `identity` is the package's (model repo, revision). Evidence that names another
+    model, another revision or no model is not evidence for this package, and without an identity nothing counts.
+    Only files inside the run count and a file over MAX_EVIDENCE_BYTES is not read."""
+    if not identity:
+        return None
     for rel in TOOL_EVIDENCE_FILES:
         path = inside(run_dir, rel)
         if path is None:
@@ -192,9 +219,13 @@ def tool_call_evidence(run_dir) -> tuple[str, tuple[str, ...]] | None:
         try:
             if path.stat().st_size > MAX_EVIDENCE_BYTES:
                 continue
-            names = _tool_names(json.loads(path.read_text(encoding="utf-8")))
+            data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
+        names: set[str] = set()
+        for entry in _entries(data):
+            if _measured(entry, identity):
+                names |= _tool_names(entry)
         if names:
             return rel, tuple(sorted(names))
     return None
@@ -224,11 +255,12 @@ def _template(snapshot: Path) -> str:
     return t if isinstance(t, str) else ""
 
 
-def read_use_facts(snapshot, run_sh: str, run_dir) -> UseFacts | None:
+def read_use_facts(snapshot, run_sh: str, run_dir, *, identity: tuple[str, str | None] | None = None) -> UseFacts | None:
     """The facts for one package: the model's snapshot (README.md and chat template), the package's run.sh text and the
-    run directory (for the evidence files). None when none of them gives a fact."""
+    run directory (for the evidence files). `identity` is the package's (model repo, revision): tool-call evidence counts
+    only when it names that model. None when none of them gives a fact."""
     snap = Path(snapshot)
     readme = _read(snap / "README.md") or ""
     t, f = template_facts(_template(snap)), flag_facts(run_sh or "")
-    facts = UseFacts(authors_use=authors_intended_use(readme), tool_evidence=tool_call_evidence(run_dir), **t, **f)
+    facts = UseFacts(authors_use=authors_intended_use(readme), tool_evidence=tool_call_evidence(run_dir, identity), **t, **f)
     return facts if has_facts(facts) else None

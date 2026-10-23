@@ -893,7 +893,8 @@ def gate_package(stage_dir, run_dir) -> GateResult:
                                       model_id=new_repo, nearest_model=nearest_repo, graft=has_graft,
                                       graft_decision=trial_decision,
                                       trial_rows=trial_rows if p.get("required") else (),
-                                      use=read_use_facts(swap.get("new_snapshot") or "/nonexistent", run_sh, run))]
+                                      use=read_use_facts(swap.get("new_snapshot") or "/nonexistent", run_sh, run,
+                                                           identity=(new_repo, new_rev)))]
         reasons += [f"profile {name}: the card cites {e}, which is missing at evidence/{e}"
                     for e in card_evidence_paths(card) if not (out / "evidence" / e).is_file()]
         if p.get("verified") is True:

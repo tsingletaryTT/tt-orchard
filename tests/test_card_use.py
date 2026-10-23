@@ -168,60 +168,68 @@ def test_a_single_paragraph_longer_than_the_limit_is_not_quoted():
 
 # ---- evidence that a tool-call prompt returned a call ------------------------------------------------------------
 
-def _speed(run, calls):
+REV = "d4e3502f92d9e889031c2d04e387ab2eb3520268"
+ID = ("BAAI/AREX-2", REV)                      # the package's model, as the card step knows it
+OTHER_REV = "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+
+
+def _speed(run, calls, model_id=f"BAAI/AREX-2@{REV}"):
     p = run / "stages/7/benchmark/speed.json"
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps({"prompts": {"tool-call": {"runs": [{"tool_calls": calls}]}}}))
+    body = {"prompts": {"tool-call": {"runs": [{"tool_calls": calls}]}}}
+    if model_id is not None:
+        body["model_id"] = model_id
+    p.write_text(json.dumps(body))
     return p
 
 
 def test_a_speed_file_with_a_returned_tool_call_is_evidence(tmp_path):
     _speed(tmp_path, [{"name": "run_tests", "arguments": "{}"}])
-    assert tool_call_evidence(tmp_path) == ("stages/7/benchmark/speed.json", ("run_tests",))
+    assert tool_call_evidence(tmp_path, ID) == ("stages/7/benchmark/speed.json", ("run_tests",))
 
 
 def test_empty_tool_call_lists_are_no_evidence(tmp_path):
     _speed(tmp_path, [])
-    assert tool_call_evidence(tmp_path) is None
+    assert tool_call_evidence(tmp_path, ID) is None
 
 
 def test_no_speed_file_is_no_evidence(tmp_path):
-    assert tool_call_evidence(tmp_path) is None
+    assert tool_call_evidence(tmp_path, ID) is None
 
 
 def test_a_file_that_is_not_json_is_no_evidence(tmp_path):
     p = tmp_path / "stages/7/benchmark/speed.json"
     p.parent.mkdir(parents=True)
     p.write_text("not json")
-    assert tool_call_evidence(tmp_path) is None
+    assert tool_call_evidence(tmp_path, ID) is None
 
 
 def test_the_verify_evidence_counts_too_and_names_are_sorted_and_unique(tmp_path):
     p = tmp_path / "stages/7/verify/evidence/verify.json"
     p.parent.mkdir(parents=True)
-    p.write_text(json.dumps({"tool_calls": [{"name": "b"}, {"name": "a"}, {"name": "a"}]}))
-    assert tool_call_evidence(tmp_path) == ("stages/7/verify/evidence/verify.json", ("a", "b"))
+    p.write_text(json.dumps({"model_id": "BAAI/AREX-2", "revision": REV, "tool_calls": [{"name": "b"}, {"name": "a"}, {"name": "a"}]}))
+    assert tool_call_evidence(tmp_path, ID) == ("stages/7/verify/evidence/verify.json", ("a", "b"))
 
 
 def test_a_call_without_a_name_is_not_evidence(tmp_path):
     _speed(tmp_path, [{"arguments": "{}"}])
-    assert tool_call_evidence(tmp_path) is None
+    assert tool_call_evidence(tmp_path, ID) is None
 
 
 def test_a_link_out_of_the_run_is_not_followed(tmp_path):
     outside = tmp_path / "outside.json"
-    outside.write_text(json.dumps({"tool_calls": [{"name": "x"}]}))
+    outside.write_text(json.dumps({"model_id": f"BAAI/AREX-2@{REV}", "tool_calls": [{"name": "x"}]}))
     run = tmp_path / "run"
     (run / "stages/7/benchmark").mkdir(parents=True)
     (run / "stages/7/benchmark/speed.json").symlink_to(outside)
-    assert tool_call_evidence(run) is None
+    assert tool_call_evidence(run, ID) is None
 
 
 # ---- all of it -----------------------------------------------------------------------------------------------------
 
 def _snapshot(tmp_path, readme=README, template=TEMPLATE):
     snap = tmp_path / "snap"
-    snap.mkdir()
+    snap.mkdir(exist_ok=True)
     if readme is not None:
         (snap / "README.md").write_text(readme)
     if template is not None:
@@ -247,7 +255,7 @@ def test_read_use_facts_reads_the_template_from_tokenizer_config_when_there_is_n
 def test_a_tool_call_in_the_speed_file_is_carried_into_the_facts(tmp_path):
     run = tmp_path / "run"
     _speed(run, [{"name": "read_file"}])
-    assert read_use_facts(_snapshot(tmp_path), RUN_SH, run).tool_evidence == ("stages/7/benchmark/speed.json", ("read_file",))
+    assert read_use_facts(_snapshot(tmp_path), RUN_SH, run, identity=ID).tool_evidence == ("stages/7/benchmark/speed.json", ("read_file",))
 
 
 def test_a_model_with_no_readable_source_has_no_facts(tmp_path):
@@ -297,15 +305,15 @@ def test_the_tool_parser_flag_is_read_with_underscores_and_with_an_equals_sign()
 def test_a_tool_call_file_over_the_size_limit_is_not_read(tmp_path):
     p = tmp_path / "stages/7/benchmark/speed.json"
     p.parent.mkdir(parents=True)
-    p.write_text(json.dumps({"tool_calls": [{"name": "x"}], "pad": "a" * (2 * 1024 * 1024)}))
-    assert tool_call_evidence(tmp_path) is None
+    p.write_text(json.dumps({"model_id": f"BAAI/AREX-2@{REV}", "tool_calls": [{"name": "x"}], "pad": "a" * (2 * 1024 * 1024)}))
+    assert tool_call_evidence(tmp_path, ID) is None
 
 
 def test_the_openai_shaped_tool_call_names_are_read(tmp_path):
     p = tmp_path / "stages/7/benchmark/speed.json"
     p.parent.mkdir(parents=True)
-    p.write_text(json.dumps({"choices": [{"message": {"tool_calls": [{"function": {"name": "search"}}]}}]}))
-    assert tool_call_evidence(tmp_path) == ("stages/7/benchmark/speed.json", ("search",))
+    p.write_text(json.dumps({"model_id": f"BAAI/AREX-2@{REV}", "choices": [{"message": {"tool_calls": [{"function": {"name": "search"}}]}}]}))
+    assert tool_call_evidence(tmp_path, ID) == ("stages/7/benchmark/speed.json", ("search",))
 
 
 def test_the_default_template_of_a_list_in_tokenizer_config_is_used(tmp_path):
@@ -346,3 +354,86 @@ def test_a_bare_if_tools_shows_the_template_renders_tools():
 
 def test_the_auto_tool_choice_flag_is_read_with_underscores():
     assert flag_facts("CMD=(x --enable_auto_tool_choice)")["auto_tool_choice"] is True
+
+
+# ---- the evidence must be about this package's model (review finding on PR 51) -------------------------------------------
+
+def test_a_speed_report_of_another_model_is_not_evidence(tmp_path):
+    _speed(tmp_path, [{"name": "run_tests"}], model_id=f"Qwen/Qwen3.8-27B@{OTHER_REV}")
+    assert tool_call_evidence(tmp_path, ID) is None
+
+
+def test_the_same_repo_at_another_revision_is_not_evidence(tmp_path):
+    _speed(tmp_path, [{"name": "run_tests"}], model_id=f"BAAI/AREX-2@{OTHER_REV}")
+    assert tool_call_evidence(tmp_path, ID) is None
+
+
+def test_a_report_that_names_no_model_is_not_evidence(tmp_path):
+    _speed(tmp_path, [{"name": "run_tests"}], model_id=None)
+    assert tool_call_evidence(tmp_path, ID) is None
+
+
+def test_a_repo_with_no_revision_in_the_report_is_not_evidence(tmp_path):
+    _speed(tmp_path, [{"name": "run_tests"}], model_id="BAAI/AREX-2")
+    assert tool_call_evidence(tmp_path, ID) is None
+
+
+def test_no_expected_identity_means_no_evidence(tmp_path):
+    _speed(tmp_path, [{"name": "run_tests"}])
+    assert tool_call_evidence(tmp_path) is None
+    assert tool_call_evidence(tmp_path, None) is None
+    assert tool_call_evidence(tmp_path, ("BAAI/AREX-2", None)) is None
+
+
+def test_a_report_with_several_models_counts_only_the_matching_entry(tmp_path):
+    p = tmp_path / "stages/7/benchmark/speed.json"
+    p.parent.mkdir(parents=True)
+    p.write_text(json.dumps({"note": "x", "models": {
+        "base": {"model_id": f"Qwen/Qwen3.8-27B@{OTHER_REV}", "prompts": {"t": {"runs": [{"tool_calls": [{"name": "base_only"}]}]}}},
+        "graft": {"model_id": f"BAAI/AREX-2@{REV}", "prompts": {"t": {"runs": [{"tool_calls": [{"name": "read_file"}]}]}}}}}))
+    assert tool_call_evidence(tmp_path, ID) == ("stages/7/benchmark/speed.json", ("read_file",))
+
+
+def test_a_report_with_several_models_none_matching_is_not_evidence(tmp_path):
+    p = tmp_path / "stages/7/benchmark/speed.json"
+    p.parent.mkdir(parents=True)
+    p.write_text(json.dumps({"models": {"base": {"model_id": f"Qwen/Qwen3.8-27B@{OTHER_REV}",
+                                                  "prompts": {"t": {"runs": [{"tool_calls": [{"name": "x"}]}]}}}}}))
+    assert tool_call_evidence(tmp_path, ID) is None
+
+
+def test_a_verify_record_names_the_model_and_the_revision_apart(tmp_path):
+    p = tmp_path / "stages/7/verify/evidence/verify.json"
+    p.parent.mkdir(parents=True)
+    p.write_text(json.dumps({"model_id": "BAAI/AREX-2", "revision": OTHER_REV, "tool_calls": [{"name": "a"}]}))
+    assert tool_call_evidence(tmp_path, ID) is None
+
+
+def test_read_use_facts_passes_the_identity_to_the_evidence_reader(tmp_path):
+    run = tmp_path / "run"
+    _speed(run, [{"name": "read_file"}], model_id=f"Qwen/Qwen3.8-27B@{OTHER_REV}")
+    assert read_use_facts(_snapshot(tmp_path), RUN_SH, run, identity=ID).tool_evidence is None
+    assert read_use_facts(_snapshot(tmp_path), RUN_SH, run).tool_evidence is None
+    _speed(run, [{"name": "read_file"}])
+    assert read_use_facts(_snapshot(tmp_path), RUN_SH, run, identity=ID).tool_evidence is not None
+
+
+def test_another_repo_at_the_same_revision_is_not_evidence(tmp_path):
+    _speed(tmp_path, [{"name": "run_tests"}], model_id=f"Someone/Else@{REV}")
+    assert tool_call_evidence(tmp_path, ID) is None
+
+
+def test_an_empty_expected_revision_matches_nothing(tmp_path):
+    p = tmp_path / "stages/7/verify/evidence/verify.json"
+    p.parent.mkdir(parents=True)
+    p.write_text(json.dumps({"model_id": "BAAI/AREX-2", "revision": "", "tool_calls": [{"name": "a"}]}))
+    assert tool_call_evidence(tmp_path, ("BAAI/AREX-2", "")) is None
+
+
+def test_other_models_under_a_matching_top_record_do_not_lend_their_calls(tmp_path):
+    p = tmp_path / "stages/7/benchmark/speed.json"
+    p.parent.mkdir(parents=True)
+    p.write_text(json.dumps({"model_id": f"BAAI/AREX-2@{REV}", "prompts": {"t": {"runs": [{"tool_calls": [{"name": "mine"}]}]}},
+                             "models": {"base": {"model_id": f"Qwen/Qwen3.8-27B@{OTHER_REV}",
+                                                  "prompts": {"t": {"runs": [{"tool_calls": [{"name": "theirs"}]}]}}}}}))
+    assert tool_call_evidence(tmp_path, ID) == ("stages/7/benchmark/speed.json", ("mine",))

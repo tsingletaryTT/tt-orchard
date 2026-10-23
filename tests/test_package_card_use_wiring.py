@@ -10,7 +10,7 @@ import pytest
 
 import package_fakes
 from card_use_fixtures import README_WITH_USE, TEMPLATE
-from package_fakes import SOURCE_ENV, SOURCE_EXTRA, fake_bin, fake_boot_result, make_run, make_source, write
+from package_fakes import NEW, NEW_REV, SOURCE_ENV, SOURCE_EXTRA, fake_bin, fake_boot_result, make_run, make_source, write
 from orchard.package import finish, stage_all
 from orchard.stages import gate_package
 
@@ -19,7 +19,7 @@ FLAGS = "--enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning_pa
 
 
 def build(tmp_path, monkeypatch, *, readme=README_WITH_USE, template=TEMPLATE, flags=FLAGS, skip_vision=True,
-          tool_calls=None):
+          tool_calls=None, tool_model=f"{NEW}@{NEW_REV}"):
     monkeypatch.setattr(package_fakes, "SOURCE_EXTRA", f"{SOURCE_EXTRA} {flags}".strip())
     models = tmp_path / "models"
     env = {**SOURCE_ENV, **({"QWEN36_SKIP_VISION": "1"} if skip_vision else {})}
@@ -37,7 +37,7 @@ def build(tmp_path, monkeypatch, *, readme=README_WITH_USE, template=TEMPLATE, f
     stage = r["run"] / "stages/7"
     stage.mkdir(parents=True)
     if tool_calls is not None:
-        write(stage / "benchmark/speed.json", {"prompts": {"tool-call": {"runs": [{"tool_calls": tool_calls}]}}})
+        write(stage / "benchmark/speed.json", {"model_id": tool_model, "prompts": {"tool-call": {"runs": [{"tool_calls": tool_calls}]}}})
     stage_all(r["run"], stage, namespace="episod", models_root=models, env=run_env)
     fake_boot_result(stage)
     finish(r["run"], stage)
@@ -103,3 +103,24 @@ def test_the_gate_refuses_a_card_that_lost_its_how_to_call_it_section(staged):
     head, rest = text.split("## How to call it", 1)
     card.write_text(head + "## Expected performance" + rest.split("## Expected performance", 1)[1])
     assert any("How to call it" in r for r in reasons(staged))
+
+
+# ---- the tool-call evidence must be about this package's model (review finding on PR 51) ---------------------------------
+
+def test_a_speed_report_of_the_base_control_does_not_make_the_card_claim_tested_tool_calls(tmp_path, monkeypatch, stub_tools):
+    s = build(tmp_path, monkeypatch, tool_calls=[{"name": "run_tests", "arguments": "{}"}],
+              tool_model="Qwen/Qwen3.8-27B@1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0")
+    card = (s["pkg"] / "README.md").read_text()
+    assert "returned tool calls" not in card and "`run_tests`" not in card
+    assert "The server parses tool calls into `tool_calls`" in card
+    assert gate_package(s["stage"], s["run"]).ok
+
+
+def test_the_gate_refuses_a_card_whose_tool_call_evidence_is_about_another_model(tmp_path, monkeypatch, stub_tools):
+    s = build(tmp_path, monkeypatch, tool_calls=[{"name": "run_tests", "arguments": "{}"}])
+    assert gate_package(s["stage"], s["run"]).ok
+    path = s["stage"] / "benchmark/speed.json"
+    body = json.loads(path.read_text())
+    body["model_id"] = "Qwen/Qwen3.8-27B@1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+    path.write_text(json.dumps(body))
+    assert any("no evidence file in the run shows it" in r for r in reasons(s))
