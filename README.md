@@ -500,6 +500,23 @@ boot time is ranked only against earlier runs of the same package on the same ch
 evidence the reference template wrote and says so when the agent's `reference.json` disagrees with it. A run with no
 timing says "not measured" instead of leaving the gap. The browser remembers the choice; a link ending in `?mode=operator` or `?mode=playful` sets it.
 
+![Operator style, a finished run: the state band, what is happening now and what to do next, a verdict for each finding with its yardstick, and the stages on the right](docs/ui/operator-finished-run.png)
+
+The same run in Playful style. The machine chip and the Style switch sit in the same places in both.
+
+![Playful style, a finished run shown as a farm](docs/ui/playful-finished-run.png)
+
+A blocked run lists what was tried and how to unblock, and ends with **Retry run**. The header has the same button.
+
+![A blocked run: the Blocked panel with what was tried, how to unblock and Retry run](docs/ui/operator-blocked-run.png)
+
+In the New bring-up dialog **Run checks** is the main button until the checks pass. The base, the where-tests-run choice and
+the research setting are under **Options**, and the line says what they are now.
+
+![New bring-up: the model field, the closed Options line, Run checks as the main button](docs/ui/operator-new-bringup.png)
+
+The screenshots are of this repository's page on its development machine, with the host name and home directory blanked out.
+
 ```bash
 tt-orchard ui                                  # http://127.0.0.1:8780/ on this machine
 ssh -L 8780:localhost:8780 <the box>           # from your own computer, then open http://localhost:8780/
