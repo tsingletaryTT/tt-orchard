@@ -4,9 +4,9 @@
 
 AREX-2 ships no mtp.* tensors, so every swap check and package served it with the drafter off. A hand
 experiment grafted the nearest model's tensors and the drafter ran about three times faster with the same
-agreement. Stage 0 records the candidate and one hazard; it never changes the path or the class, and nothing
-is grafted unless a person turns it on (`graft_mtp` in stage 2's swap_config.json, `tt-orchard package
---graft-mtp`)."""
+agreement. Stage 0 records the candidate and one hazard; it never changes the path or the class, and grafts
+nothing itself: stage 2's graft trial serves the graft once and keeps it only when the measurement says so
+(orchard/graft_trial.py)."""
 import sys
 from pathlib import Path
 
@@ -32,7 +32,7 @@ def test_a_model_without_mtp_tensors_gets_a_graft_candidate_and_one_hazard(text_
     assert g["hidden_size"] == H and g["shapes_match"] is True and g["graftable"] is True
     assert g["dtypes"] == ["BF16"] and len(g["base_shards"]) == 1
     [h] = graft_hazards(d)
-    assert "graft" in h["finding"] and "off" in h["finding"] and "mtp.* tensors" in h["finding"]
+    assert "graft trial" in h["finding"] and "mtp.* tensors" in h["finding"]
     assert h["evidence"]
 
 
@@ -168,9 +168,11 @@ def test_the_hazard_names_each_reason_the_head_cannot_be_grafted():
         assert reason in h["finding"]
 
 
-def test_a_graftable_head_says_it_is_off_until_a_person_turns_it_on():
+def test_a_graftable_head_says_stage_2_tries_it_and_keeps_it_only_when_it_measures_better():
     g = {"base_tensors": 15, "base_revision": None, "base_shards": ["a"], "dtypes": ["BF16"], "hidden_size": 8,
          "shapes_match": True, "graftable": True}
     h = template_module().graft_hazard("Qwen/Qwen3.8-27B@1", g, lambda name: name)
-    assert "15 mtp.* tensors of Qwen/Qwen3.8-27B@1" in h["finding"] and "off unless a person turns it on" in h["finding"]
-    assert "--graft-mtp" in h["finding"] and "cannot be grafted" not in h["finding"]
+    f = h["finding"]
+    assert "15 mtp.* tensors of Qwen/Qwen3.8-27B@1" in f and "cannot be grafted" not in f
+    assert "graft trial" in f and "graft-decision.json" in f and "only when" in f
+    assert "off unless a person turns it on" not in f

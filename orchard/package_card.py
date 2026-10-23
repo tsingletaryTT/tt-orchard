@@ -117,6 +117,7 @@ class CardFacts:
     reported_source: str = ""        # where the authors report them (a card or paper), for the sentence above them
     graft: dict | None = None        # graft.json: the nearest model's mtp.* tensors are added at each start
     stage_2_without_graft: bool = False   # stage 2 and 4 served without the graft (the drafter off, host sampling)
+    graft_decision: str | None = None     # "graft" or "safe" when stage 2's graft trial ran and decided (orchard/graft_trial.py)
 
 
 def _value(n: Number) -> str:
@@ -170,6 +171,14 @@ def render_card(f: CardFacts) -> str:
                      f"They are added at each start to `model-dir/` as one more weight file, `{g['shard']}` "
                      "(`graft.json` names them). The head was trained on "
                      f"{f.nearest_model}, so how well it suits {f.model_id} is shown only by the rows below.")
+    if f.graft_decision == "graft":
+        lines.append("- Stage 2 chose the graft by a measurement. Its graft trial served this model with and without the nearest model's "
+                     "head in one lease and kept the graft because it served, agreed with the CPU reference and decoded faster. The rows "
+                     "marked graft trial in the table below are that trial's.")
+    elif f.graft_decision == "safe":
+        lines.append("- Stage 2 tried the nearest model's mtp.* head grafted onto this model (its graft trial) and kept the safe "
+                     "configuration. The rows marked graft trial in the table below show what the trial measured, and "
+                     "`graft-decision.json` in the evidence gives the reason.")
     if f.drafter_off:
         lines.append(f"- Speculative decoding is off. The drafter of {f.nearest_model} needs the MTP "
                      f"tensors of the model, and {f.model_id} has none.")
@@ -207,6 +216,9 @@ def render_card(f: CardFacts) -> str:
     if f.stage_2_without_graft:
         limits.append("The stage 2 and stage 4 numbers were measured without the graft (the drafter off and sampling "
                       "on the host). The stage 7 rows were measured with this package's settings.")
+    elif f.graft and f.graft_decision == "graft":
+        limits.append("The stage 2 rows were measured without the graft (the drafter off and sampling on the host). The graft trial "
+                      "and the stage 7 rows were measured with it.")
     if f.drafter_off:
         limits.append("Speculative decoding is off, so decode speed is that of plain decoding.")
     if f.host_sampling:
@@ -306,9 +318,16 @@ def graft_markers(nearest_model: str) -> tuple[str, ...]:
     return (f"mtp.* tensors of {nearest_model}", "added at each start", "`graft.json`")
 
 
+GRAFT_DECISION_MARKERS = {"graft": "chose the graft", "safe": "kept the safe configuration"}
+
+
 def card_problems(card: str, *, license_id: str, run_dir, sidecars=(), base_files=(), reported=(), reported_source="", model_id="",
-                  nearest_model="", graft: bool = False) -> list[str]:
+                  nearest_model="", graft: bool = False, graft_decision: str | None = None, trial_rows=()) -> list[str]:
     problems = []
+    if graft_decision in GRAFT_DECISION_MARKERS:
+        if GRAFT_DECISION_MARKERS[graft_decision] not in " ".join(card.split()):
+            problems.append(f"stage 2's graft trial decided {graft_decision!r}, so the card must say that stage 2 "
+                            f"{GRAFT_DECISION_MARKERS[graft_decision]}")
     if graft:
         flat_card = " ".join(card.split())
         missing = [m for m in graft_markers(nearest_model or "the nearest model") if m not in flat_card]
@@ -376,6 +395,10 @@ def card_problems(card: str, *, license_id: str, run_dir, sidecars=(), base_file
     if not section:
         problems.append("the card has no Numbers section")
     names = {_cell(r.name) for r in reported}
+    shown = {r.strip().strip("|").split("|")[0].strip() for r in section.splitlines() if r.startswith("| ")}
+    for name in trial_rows:
+        if name not in shown:
+            problems.append(f"the Numbers table must show {name!r}: stage 2's graft trial measured it")
     for row in (r for r in section.splitlines() if r.startswith("| ") and not r.startswith("| Number ")):
         first = row.strip().strip("|").split("|")[0].strip()
         if first in names:

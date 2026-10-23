@@ -672,6 +672,7 @@ python3 -m orchard.supervisor run --model MODEL --run-dir RUN_DIR --tiers TIERS
 | `--package-namespace` | with `--package-format` | Your Hugging Face namespace. Stage 7 writes it into the package card and the publish commands. The run never publishes |
 | `--package-models-root` | no | Where tt-model installs bundles. Stage 7 looks here for other chip counts of the nearest model. Default `{{TT_MODEL_ROOT}}`, which is `<operator home>/.cache/tt-model/models` |
 | `--unattended` | no | Never wait for an operator. When the run would pause, it names the reason (`needs-new-model-code`, `retry-budget-spent`, `stage-failed`, `agent-stuck`, `disk-full`, `hardware-unhealthy`, `coder-unusable`, `blocked` or `unclassified`), writes `BLOCKED.md` and `blocked.json` in the run directory, releases the hardware and exits 5. Running the same command again retries from the ledger. A pause the operator asked for with `control pause` still waits. `tt-orchard bringup` always passes it |
+| `--no-graft-trial` | no | Skip stage 2's graft trial (section 5.5c). The run records the choice, and a resume keeps it. `tt-orchard bringup` takes the same flag |
 | `--gozer` | no | The gozer executable. Default `gozer` from `PATH` |
 | `--tt-model-root` | no | Where tt-model installs bundles (`{{TT_MODEL_ROOT}}`). Default `<operator home>/.cache/tt-model/models`. Recorded and kept like `--cache-root` |
 | `--lab` | no | An ssh host to run every hardware test on (a lab box). The coder stays on this box and is never parked. See [5.9](#59-run-the-hardware-tests-on-a-lab-box). Recorded; a resume with another lab is refused |
@@ -695,7 +696,7 @@ value, or lists a reported score as measured.
 **Packaging a run that has already finished.** A run started without `--package-format` skips stage 7. When it
 has ended `ready-for-operator-review` you can package it afterwards:
 
-    tt-orchard package RUN_DIR --namespace ORG [--exact CHIP] [--restage] [--graft-mtp]
+    tt-orchard package RUN_DIR --namespace ORG [--exact CHIP] [--restage] [--graft-mtp | --no-graft-mtp]
     tt-orchard package-card RUN_DIR --benchmark benchmark.json --model-key KEY [--base-key KEY] [--reported reported-results.json] [--accept-unverified-identity]
 
 `package` stages and scrubs every profile, boots the required one under `gozer run` (it takes the lease itself;
@@ -713,7 +714,8 @@ Flags of `package`:
 - `--namespace` ORG: the Hugging Face organisation the package is for. Needed to stage.
 - `--step`: `all` (default), `stage`, `boot` (needs a lease) or `finish`.
 - `--restage`: move an earlier `stages/7` aside and stage again.
-- `--graft-mtp`: for a model that ships no `mtp.*` tensors. The package adds the nearest model's `mtp.*` tensors (the drafter's head) to the served model directory at each start, from that model's pinned snapshot (only that file is downloaded; the package ships no weights, and `graft.json` names the file and the sha256 of the shard it must build), and keeps the speculative drafter and on-device sampling on. The boot check serves the package that way, so stage 2's numbers (taken without the graft) stay labelled as such on the card. The drafter's acceptance rate on the model is not measured. Stage 2's swap does the same when its `swap_config.json` has `"graft_mtp": true`; a run whose stage 2 grafted gets a grafted package without the flag.
+- `--graft-mtp`: for a model that ships no `mtp.*` tensors. The package adds the nearest model's `mtp.*` tensors (the drafter's head) to the served model directory at each start, from that model's pinned snapshot (only that file is downloaded; the package ships no weights, and `graft.json` names the file and the sha256 of the shard it must build), and keeps the speculative drafter and on-device sampling on. The boot check serves the package that way. A package is grafted without the flag when stage 2's graft trial chose the graft (section 5.5c), or when stage 2's own swap grafted (`"graft_mtp": true` in its `swap_config.json`); the flag forces a graft the trial did not choose, and the card then says stage 2 and 4 were measured without it. The drafter's acceptance rate on the model is not measured.
+- `--no-graft-mtp`: stage the package without the graft. It is refused when stage 2's graft trial chose the graft, because stage 4's bundle tests were built with it, and when stage 2 itself served with the graft. To decide against the graft from the start, run `--no-graft-trial`. The card of a package built from a trial shows the trial's rows (decode speed and time to first token of both configurations, and the grafted variant's agreement with the CPU reference).
 - `--exact` CHIP: pin the lease to the board that holds this chip.
 - `--models-root` DIR: where installed tt-model bundles live. Default: the path the run recorded.
 - `--cache-root` DIR: the cache root, with the kernel cache under it. Default: the path the run recorded.
@@ -1015,6 +1017,26 @@ checks again. It never removes the shared kernel cache, a cache an unfinished ru
 root. When the unused caches together cannot cover the shortfall it removes nothing. A shortfall on a hub disk that the
 caches do not share is not touched. With `--dry-run` it only says what it would remove. Deleting is opt-in: without the
 flag the run is refused as before. A removed cache is rebuilt by the next test that needs it (about 20 minutes).
+
+### 5.5c The graft trial (a drafter for a model that ships none)
+
+The nearest bundle's speculative drafter needs an `mtp.*` head in the served weights. A fine-tune that ships none is served
+with the drafter off and sampling on the host. When stage 0 finds that the model has no `mtp.*` tensors and the nearest model has
+a head that fits (`graft_candidate` in `delta.json`: the tensors are BF16, in one shard, and their width matches the model's
+hidden size), stage 2 tries the graft once, after the safe configuration has passed its gate. One more hardware test, under the same
+lease rules, times the safe configuration, serves the nearest model's head grafted onto the model (`graft_mtp`, in
+`stages/2/graft-trial/variant/`, with its own tensor cache) and times that. Both are timed with the same four prompts, three repetitions each,
+greedy, one request at a time.
+
+The graft is kept when the variant served, was coherent, agreed with the CPU reference at least as well as stage 2's bar, lost no
+more than 0.05 of top-1 agreement against the safe run, and decoded at least 1.25 times as fast (the three values are provisional,
+`orchard/defaults.py`). Otherwise the safe configuration stays. A trial that fails, times out or leaves no result does not fail the
+stage: the safe result stands and the reason is recorded. The decision is `stages/2/graft-decision.json` and a `graft decision` ledger
+entry. Stage 4's configurations, stage 7's package, the card and the stage 8 bundle follow it.
+
+The extra test adds a warm boot of the safe configuration (2 to 4 minutes), a cold boot of the variant (4 to 25 minutes measured for the
+Qwen3.8 bundle) and a warm boot of the variant, plus 12 timed requests each. `--no-graft-trial` (on `tt-orchard bringup` and on
+`supervisor run`) leaves it out. The variant converts a second tensor cache, so the trial is skipped, with the reason recorded, when the run directory's disk has less than 40 GB free. It is also skipped on a lab run, whose tests do not run on this box's chips. The drafter's acceptance rate is not measured: the server prints no counters.
 
 ### 5.6 The credentials preflight
 

@@ -333,9 +333,11 @@ def test_a_nearest_model_with_no_index_is_read_from_its_shard_headers(grafted):
     assert names == set(MTP)
 
 
-def test_the_skill_tells_the_agent_not_to_set_graft_mtp():
-    skill = (Path(__file__).resolve().parent.parent / "orchard" / "skills" / "weights-swap-check.md").read_text()
-    assert '"graft_mtp": true' in skill and "Do not set it yourself" in skill
+def test_the_skill_tells_the_agent_not_to_set_graft_mtp_and_that_the_supervisor_tries_it():
+    skill = " ".join((Path(__file__).resolve().parent.parent / "orchard" / "skills" / "weights-swap-check.md").read_text().split())
+    assert '"graft_mtp": true' in skill and "Do not set it in this stage" in skill
+    assert "graft-decision.json" in skill and "do not touch `stages/2/graft-trial/`" in skill
+
 
 
 def models_own_file_named_like_the_graft(prep, tmp_path):
