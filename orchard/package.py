@@ -35,6 +35,7 @@ tried to upload would also find no credentials.
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -44,7 +45,8 @@ import signal
 import socket
 import subprocess
 import sys
-from dataclasses import dataclass
+import tempfile
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from orchard.defaults import (PACKAGE_HEALTH_TIMEOUT_S, PACKAGE_INSTALL_TIMEOUT_S,
@@ -52,7 +54,7 @@ from orchard.defaults import (PACKAGE_HEALTH_TIMEOUT_S, PACKAGE_INSTALL_TIMEOUT_
 from orchard.package_card import (CardFacts, Number, Reported, card_evidence_paths, inside, non_commercial,
                                   read_license, render_card)
 from orchard.scrub import HOME_PATH, scrub_package
-from orchard.stages import gate_weights_swap
+from orchard.stages import delta_model_has_mtp, gate_weights_swap
 
 TEMPLATES = Path(__file__).with_name("package_templates")
 SWAP_TEMPLATES = Path(__file__).with_name("skills") / "weights-swap-templates"
@@ -61,6 +63,8 @@ SWAP_TEMPLATES = Path(__file__).with_name("skills") / "weights-swap-templates"
 BASE_CONFIG_FILES = ("config.json", "generation_config.json", "preprocessor_config.json",
                      "video_preprocessor_config.json")
 
+GRAFT_FILE = "graft.json"
+GRAFT_SHARD = "model-mtp-from-base.safetensors"      # the name prepare_swap.py and the package's prepare_model_dir.py use
 MODEL_DIR = '"$HERE/model-dir"'
 WIRING_LINES = (f"export HF_MODEL={MODEL_DIR}", f"export MODEL_WEIGHTS_DIR={MODEL_DIR}")
 PREPARE_LINE = '"$PYBIN" "$HERE/prepare_model_dir.py"'
@@ -142,8 +146,21 @@ def serving_env(env: dict, *, drafter_off: bool) -> dict:
     return out
 
 
-def serving_problems(run_sh: str, env: dict, *, drafter_off: bool, host_sampling: bool) -> list[str]:
-    """What is wrong with a staged package's serving settings next to what stage 2 served with."""
+def _drafter_on(run_sh: str, env: dict) -> bool:
+    """Does the package turn the speculative drafter on? The last `export QWEN36_DRAFTER=` line of run.sh decides,
+    else the manifest's value."""
+    values = [m.group(1).strip().strip("\"'") for ln in run_sh.splitlines()
+              if (m := re.match(r"\s*export\s+QWEN36_DRAFTER=(.*)$", ln))]
+    return bool(values[-1]) if values else bool(env.get("QWEN36_DRAFTER"))
+
+
+def serving_problems(run_sh: str, env: dict, *, drafter_off: bool, host_sampling: bool,
+                     model_has_mtp: bool | None = None, graft: bool = False) -> list[str]:
+    """What is wrong with a staged package's serving settings next to what stage 2 served with.
+
+    `model_has_mtp` is stage 0's finding (None when it did not record one). A package that turns the drafter on
+    for a model with no mtp.* tensors needs a graft (`graft`: the package has a graft.json); without one the
+    server stops at start with "model has no MTP head"."""
     problems = []
     if drafter_off:
         drafter = [m.group(1).strip().strip("\"'") for ln in run_sh.splitlines()
@@ -159,6 +176,13 @@ def serving_problems(run_sh: str, env: dict, *, drafter_off: bool, host_sampling
             problems.append(f"the drafter's settings are still in the package: {left}")
     if host_sampling and "sample_on_device_mode" in run_sh:
         problems.append("run.sh sets sample_on_device_mode; stage 2 served with host sampling")
+    on = _drafter_on(run_sh, env)
+    if graft and not on:
+        problems.append(f"the package has a {GRAFT_FILE}, but run.sh and the manifest turn the drafter off; the "
+                        "grafted MTP head is used only with the drafter on")
+    if on and model_has_mtp is False and not graft:
+        problems.append(f"run.sh turns the drafter on for a model with no mtp.* tensors, and the package has no "
+                        f"{GRAFT_FILE}: the server stops at start with 'model has no MTP head'")
     return problems
 
 
@@ -173,6 +197,161 @@ def stage_2_serving(run_dir) -> tuple[bool, bool]:
                if (m := re.match(r"\s*export\s+QWEN36_DRAFTER=(.*)$", ln))]
     cfg = ADDITIONAL.search(text)
     return bool(drafter) and drafter[-1] == "", bool(cfg) and "sample_on_device_mode" not in cfg.group(1)
+
+
+def _stage_2_grafted(run: Path) -> bool:
+    """Did stage 2's swap graft the nearest model's mtp.* tensors? (model-dir-sources.json's mtp_graft record)"""
+    try:
+        rec = json.loads((run / "stages/2/model-dir-sources.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(rec, dict) and isinstance(rec.get("mtp_graft"), dict)
+
+
+def _package_grafted(run: Path) -> bool:
+    """Did stage 7 stage a grafted package? (package.json's mtp_graft record; finish and the gate read it)"""
+    try:
+        rec = json.loads((run / "stages/7/package.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(rec, dict) and isinstance(rec.get("mtp_graft"), dict)
+
+
+def _stage_2_graft_record(run: Path) -> dict | None:
+    try:
+        rec = json.loads((run / "stages/2/model-dir-sources.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    rec = rec.get("mtp_graft") if isinstance(rec, dict) else None
+    return rec if isinstance(rec, dict) else None
+
+
+def stage_2_graft_problems(model_dir: Path, record: dict, nearest_model: str, base_snapshot: Path,
+                           new_snapshot: Path) -> list[str]:
+    """Why the graft shard in stage 2's model directory is not the nearest model's mtp.* tensors the record says
+    it is; empty when it is. The shard is a regular file prepare_swap.py wrote, so the Hugging Face links that
+    vouch for the model's own weights cannot vouch for it. Its bytes are hashed and compared with the record's
+    sha256, and that digest is rebuilt from the nearest model's pinned snapshot with the code that built it."""
+    shard = model_dir / GRAFT_SHARD
+    if record.get("file") != GRAFT_SHARD:
+        return [f"model-dir-sources.json's mtp_graft file is {record.get('file')!r}; it must be {GRAFT_SHARD}"]
+    want = record.get("sha256")
+    if not isinstance(want, str) or not re.fullmatch(r"[0-9a-f]{64}", want):
+        return ["model-dir-sources.json's mtp_graft sha256 is not 64 hex characters"]
+    if shard.is_symlink() or not shard.is_file():
+        return [f"{shard} is not the regular file prepare_swap.py writes for a graft"]
+    if sha256(shard) != want:
+        return [f"{shard} does not match the sha256 in model-dir-sources.json's mtp_graft record"]
+    rev = record.get("base_revision")
+    if rev != base_snapshot.name:
+        return [f"model-dir-sources.json's mtp_graft base_revision is {rev!r}; stage 2's nearest-model snapshot is "
+                f"{base_snapshot.name!r}"]
+    source = plan_graft(nearest_model, base_snapshot, new_snapshot)          # PackageError when it cannot be made
+    if source["sha256"] != want:
+        return [f"the graft shard's sha256 is not what the nearest model's snapshot {base_snapshot.name} "
+                "gives for its mtp.* tensors"]
+    return []
+
+
+def _swap_template():
+    """prepare_swap.py, the stage 2 template, loaded as a module whose failures raise PackageError. Stage 7 builds
+    the graft record with the code stage 2 built the graft with, so the two cannot disagree."""
+    spec = importlib.util.spec_from_file_location("orchard_prepare_swap", SWAP_TEMPLATES / "prepare_swap.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    def fail(message: str) -> None:
+        raise PackageError(message)
+    mod.fail = fail
+    return mod
+
+
+def plan_graft(nearest_model: str, base_snapshot: Path, new_snapshot: Path) -> dict:
+    """The record that becomes graft.json: which file of the nearest model's pinned snapshot holds the mtp.* tensors,
+    their names, and the sha256 of the shard they make. Raises PackageError when they cannot be grafted."""
+    if not base_snapshot.is_dir() or not REVISION.fullmatch(base_snapshot.name):
+        raise PackageError(f"the graft needs the nearest model's pinned snapshot: stage 2's swap_config.json base_snapshot "
+                           f"{str(base_snapshot)!r} is not a snapshot directory named by a commit")
+    swap = _swap_template()
+    plan = swap.plan_mtp_graft(base_snapshot, new_snapshot)
+    with tempfile.TemporaryDirectory() as tmp:
+        digest, total = swap.write_graft_shard(plan, Path(tmp) / "shard.safetensors")
+    return {"schema": 1, "repo": nearest_model, "revision": base_snapshot.name, "file": plan["file"],
+            "shard": GRAFT_SHARD, "tensors": sorted(plan["entries"]), "sha256": digest, "bytes": total}
+
+
+def graft_problems(pkg: Path, *, nearest_model: str, base_revision: str) -> list[str]:
+    """What is wrong with a staged package's graft.json next to the run's nearest model and its pinned snapshot."""
+    path = pkg / GRAFT_FILE
+    try:
+        g = json.loads(path.read_text(encoding="utf-8"))
+    except OSError:
+        return [f"{GRAFT_FILE} is missing"]
+    except ValueError:
+        return [f"{GRAFT_FILE} is not valid JSON"]
+    if not isinstance(g, dict):
+        return [f"{GRAFT_FILE} is not a JSON object"]
+    out = []
+    if g.get("repo") != nearest_model:
+        out.append(f"{GRAFT_FILE}'s repo is {g.get('repo')!r}; the nearest model is {nearest_model!r}")
+    rev = g.get("revision")
+    if not isinstance(rev, str) or not REVISION.fullmatch(rev):
+        out.append(f"{GRAFT_FILE}'s revision {rev!r} is not a 40-character commit")
+    elif base_revision and rev != base_revision:
+        out.append(f"{GRAFT_FILE}'s revision is {rev}; stage 2's nearest-model snapshot is {base_revision}")
+    if not isinstance(g.get("file"), str) or not g["file"].endswith(".safetensors"):
+        out.append(f"{GRAFT_FILE}'s file {g.get('file')!r} is not a .safetensors file name")
+    if g.get("shard") != GRAFT_SHARD:
+        out.append(f"{GRAFT_FILE}'s shard is {g.get('shard')!r}; it must be {GRAFT_SHARD}")
+    tensors = g.get("tensors")
+    if not isinstance(tensors, list) or not tensors or not all(isinstance(t, str) and t for t in tensors):
+        out.append(f"{GRAFT_FILE}'s tensors must be a non-empty list of tensor names")
+    if not isinstance(g.get("sha256"), str) or not re.fullmatch(r"[0-9a-f]{64}", g["sha256"]):
+        out.append(f"{GRAFT_FILE}'s sha256 is not 64 hex characters")
+    try:
+        script = (pkg / "prepare_model_dir.py").read_text(encoding="utf-8")
+    except OSError:
+        script = ""
+    if GRAFT_FILE not in script:
+        out.append(f"prepare_model_dir.py does not read {GRAFT_FILE}, so the package would start without the grafted head")
+    return out
+
+
+GRAFT_IDENTITY = ("repo", "revision", "file", "shard", "tensors", "sha256")
+
+
+def graft_evidence_problems(pkg: Path, verify) -> list[str]:
+    """How a staged profile's graft.json differs from the graft the boot check served; empty when they agree.
+
+    The boot check (verify_bundle.py) records, in verify.json's `graft`, the graft.json its installed copy read and the
+    sha256 of the shard that copy's launcher built. graft.json's digest is only a format until it is compared with
+    that: a package whose digest was edited after the boot check would pass every other check and then refuse to start.
+    Every profile is compared, so an optional profile that was never booted cannot carry another graft."""
+    has = (pkg / GRAFT_FILE).is_file()
+    served = verify.get("graft") if isinstance(verify, dict) else None
+    if not has:
+        return ["the boot check served a graft, but this profile has no graft.json"] if isinstance(served, dict) and served else []
+    if not isinstance(verify, dict):
+        return []            # no boot check evidence at all: the gate already says so
+    if not isinstance(served, dict) or not served:
+        return [f"{GRAFT_FILE} cannot be checked against the boot check: its verify.json records no graft"]
+    try:
+        g = json.loads((pkg / GRAFT_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []            # graft_problems reports an unreadable graft.json
+    if not isinstance(g, dict):
+        return []
+    out = []
+    for key in GRAFT_IDENTITY:
+        mine, theirs = g.get(key), served.get(key)
+        if key == "tensors" and isinstance(mine, list) and isinstance(theirs, list):
+            mine, theirs = sorted(map(str, mine)), sorted(map(str, theirs))
+        if mine != theirs:
+            out.append(f"{GRAFT_FILE}'s {key} is {mine!r}; the boot check served {theirs!r}")
+    if served.get("served_shard_sha256") != g.get("sha256"):
+        out.append(f"the boot check's served_shard_sha256 is {served.get('served_shard_sha256')!r}; "
+                   f"{GRAFT_FILE}'s sha256 is {g.get('sha256')!r}")
+    return out
 
 
 def _once(pattern: str, repl: str, text: str, what: str, flags=0) -> str:
@@ -392,14 +571,17 @@ def _shared_blob_origin(hub: Path, name: str, real: str, prefer: str | None) -> 
     return repo, found[repo]
 
 
-def served_weights_problems(stage0_model, label, model_dir) -> list[str]:
+def served_weights_problems(stage0_model, label, model_dir, graft_shard: str | None = None) -> list[str]:
     """Why the weights stage 2 served are not the ones stage 0 names; empty when they are.
 
     `stage0_model` is delta.json's `model` (`<repo>@<revision>`). `label` is swap-check.json's
     `new_model_id`, which the stage agent typed, and `model_dir` is the directory the test served.
     The label must name stage 0's repo, and if it carries an `@revision`, stage 0's revision. The
     weights decide the rest: every `*.safetensors` file in model_dir must link into stage 0's repo
-    in the HF cache, all at one revision, and that revision must be stage 0's."""
+    in the HF cache, all at one revision, and that revision must be stage 0's. `graft_shard` names the one
+    file that is exempt: stage 2's graft shard, a regular file written by prepare_swap.py that links into no
+    snapshot. The caller has already checked it against the graft's recorded source (`stage_2_graft_problems`);
+    any other file that links into no snapshot still fails."""
     want_repo, want_rev = split_model_id(stage0_model)
     if not want_repo or want_rev is None:
         return [f"stage 0's model {stage0_model!r} names no revision; delta.json must give "
@@ -417,6 +599,10 @@ def served_weights_problems(stage0_model, label, model_dir) -> list[str]:
     if not weights:
         return [f"stage 2's model_dir {md} has no *.safetensors file, so the weights it served "
                 "cannot be checked"]
+    weights = [w for w in weights if w.name != graft_shard]
+    if not weights:
+        return [f"stage 2's model_dir {md} has no *.safetensors file besides the graft shard, so the weights "
+                "it served cannot be checked"]
     origins = {}
     for w in weights:
         origin = _weight_origin(w, want_repo)
@@ -506,10 +692,18 @@ class RunFacts:
     sidecars: tuple = ()             # stage 0's sidecar files (the package does not serve them)
     reported: tuple = ()             # scores the authors report (reported-results.json), not measured here
     reported_source: str = ""
+    base_snapshot: Path = Path()     # the nearest model's pinned snapshot stage 2 swapped from (the graft reads it)
+    model_has_mtp: bool | None = None    # stage 0's finding; None when it did not record one
+    graft: dict | None = None        # the graft.json this package carries (mtp.* tensors added at each start)
+    stage_2_grafted: bool = False    # stage 2's own swap grafted them too
 
 
-def read_run(run_dir) -> RunFacts:
-    """What stage 7 needs from stages 0, 2 and 4. Raises PackageError naming what is missing."""
+def read_run(run_dir, graft_mtp: bool = False) -> RunFacts:
+    """What stage 7 needs from stages 0, 2 and 4. Raises PackageError naming what is missing.
+
+    `graft_mtp` asks for the nearest model's mtp.* tensors to be added at start (a graft.json), with the drafter and
+    on-device sampling on. The package is also grafted when stage 2's swap grafted, and when stage 7 already staged
+    a grafted package (the boot check's finish step and the gate read that record)."""
     run = Path(run_dir).resolve()
     delta = _json(run / "stages/0/delta.json", "stage 0's delta")
     if delta.get("path") != "weights-only":
@@ -521,17 +715,26 @@ def read_run(run_dir) -> RunFacts:
     # What was served is read from the weights the test loaded (swap-check.json's model_dir), and
     # the label the stage agent typed only has to agree with it (served_weights_problems).
     served = _json(run / "stages/2/evidence/swap-check.json", "stage 2's swap-check.json")
+    nearest_model = split_model_id(delta.get("nearest_model"))[0]
+    snap = Path(cfg.get("new_snapshot") or "")
+    if not REVISION.fullmatch(snap.name) or not snap.is_dir():
+        raise PackageError(f"stage 2's new_snapshot {str(snap)!r} is not a pinned snapshot directory")
+    # A run that grafted in stage 2 has one regular file among the links: the graft shard. It is exempt from the
+    # provenance check only when its bytes are the nearest model's mtp.* tensors, as the record says.
+    graft_record, exempt = _stage_2_graft_record(run), None
+    if graft_record is not None:
+        md_served = Path(served.get("model_dir") or "")
+        bad = stage_2_graft_problems(md_served, graft_record, nearest_model, Path(cfg.get("base_snapshot") or ""), snap)
+        if bad:
+            raise PackageError("stage 2's graft: " + "; ".join(bad))
+        exempt = GRAFT_SHARD
     problems = served_weights_problems(delta.get("model"), served.get("new_model_id"),
-                                       served.get("model_dir"))
+                                       served.get("model_dir"), graft_shard=exempt)
     if problems:
         raise PackageError("; ".join(problems))
     # From here on the ids are bare repo ids: package-thin, the manifest and the card take the
     # revision separately.
     model_id, revision = split_model_id(delta.get("model"))
-    nearest_model = split_model_id(delta.get("nearest_model"))[0]
-    snap = Path(cfg.get("new_snapshot") or "")
-    if not REVISION.fullmatch(snap.name) or not snap.is_dir():
-        raise PackageError(f"stage 2's new_snapshot {str(snap)!r} is not a pinned snapshot directory")
     if snap.name != revision:
         raise PackageError(f"stage 2's new_snapshot is revision {snap.name}; stage 0 names "
                            f"{delta.get('model')}")
@@ -552,9 +755,16 @@ def read_run(run_dir) -> RunFacts:
                            "package without it")
     drafter_off, host_sampling = stage_2_serving(run)
     reported, reported_source = read_reported(run)
-    return RunFacts(run, model_id, revision, nearest_model, snap,
-                    Path(cfg.get("hf_home") or ""), source, base, passing, license_id,
-                    drafter_off, host_sampling, tuple(delta.get("sidecars") or ()), reported, reported_source)
+    model_has_mtp = delta_model_has_mtp(delta)
+    facts = RunFacts(run, model_id, revision, nearest_model, snap,
+                     Path(cfg.get("hf_home") or ""), source, base, passing, license_id,
+                     drafter_off, host_sampling, tuple(delta.get("sidecars") or ()), reported, reported_source,
+                     Path(cfg.get("base_snapshot") or ""), model_has_mtp, None, _stage_2_grafted(run))
+    if graft_mtp or facts.stage_2_grafted or _package_grafted(run):
+        # The drafter and on-device sampling are on in a grafted package, whatever stage 2's run.sh says.
+        facts = replace(facts, drafter_off=False, host_sampling=False,
+                        graft=plan_graft(nearest_model, facts.base_snapshot, snap))
+    return facts
 
 
 @dataclass(frozen=True)
@@ -713,7 +923,8 @@ def stage_profile(profile: Profile, facts: RunFacts, out: Path, *, env: dict | N
         raise PackageError(f"{name}/run.sh: " + "; ".join(problems))
     manifest_env = _json(out / "tt_kernel_manifest.json", "the staged manifest").get("env") or {}
     problems = serving_problems(text, manifest_env, drafter_off=facts.drafter_off,
-                                host_sampling=facts.host_sampling)
+                                host_sampling=facts.host_sampling, model_has_mtp=facts.model_has_mtp,
+                                graft=facts.graft is not None)
     if problems:
         raise PackageError(f"{name}: " + "; ".join(problems))
     run_sh.write_text(text, encoding="utf-8")
@@ -728,6 +939,8 @@ def stage_profile(profile: Profile, facts: RunFacts, out: Path, *, env: dict | N
     for f in facts.base_config:
         shutil.copyfile(f, out / "base_config" / f.name)
     shutil.copyfile(TEMPLATES / "prepare_model_dir.py", out / "prepare_model_dir.py")
+    if facts.graft:
+        (out / GRAFT_FILE).write_text(json.dumps(facts.graft, indent=2) + "\n", encoding="utf-8")
     for f in ("run.sh", "install.sh", "prepare_model_dir.py"):
         (out / f).chmod(0o755)
     for w in sorted((out / "wheels").glob("*.whl")):
@@ -787,6 +1000,13 @@ def prepare_verify(staged: Path, verify_dir: Path, facts: RunFacts, *, env: dict
             linked.append(repo)
         else:
             missing.append(repo)
+    if facts.graft:       # the package reads the nearest model's mtp.* shard from the Hugging Face cache
+        theirs = _repo_dir(facts.hf_home / "hub", facts.nearest_model)
+        if theirs.is_dir():
+            _repo_dir(hub, facts.nearest_model).symlink_to(theirs)
+            linked.append(facts.nearest_model)
+        else:
+            missing.append(facts.nearest_model)
     (verify_dir / "verify_config.json").write_text(json.dumps({
         "run_dir": str(facts.run_dir), "bundle": str(bundle), "port": free_port(),
         "model_id": facts.model_id, "revision": facts.revision, "hf_home": str(hub.parent),
@@ -968,7 +1188,8 @@ def write_card(out: Path, facts: RunFacts, profile: dict, *, namespace: str,
         sidecars=tuple(s["file"] for s in facts.sidecars),
         base_files=tuple(sorted(f.name for f in facts.base_config)),
         sampling_from_base=any(f.name == "generation_config.json" for f in facts.base_config),
-        reported=facts.reported, reported_source=facts.reported_source)
+        reported=facts.reported, reported_source=facts.reported_source,
+        graft=facts.graft, stage_2_without_graft=facts.graft is not None and not facts.stage_2_grafted)
     (out / "README.md").write_text(render_card(facts_card), encoding="utf-8")
 
 
@@ -979,10 +1200,13 @@ def _write_json(path: Path, data) -> None:
 
 
 def stage_all(run_dir, stage_dir, *, namespace: str, models_root, env: dict | None = None,
-              hostname: str | None = None) -> dict:
+              hostname: str | None = None, graft_mtp: bool = False) -> dict:
     """Stage every profile, scrub each one (a hit stops the stage before anything is installed),
-    install a copy of the required profile and write hw_test.json, handoff.json and package.json."""
-    facts = read_run(run_dir)
+    install a copy of the required profile and write hw_test.json, handoff.json and package.json.
+
+    With `graft_mtp`, every profile carries a graft.json and keeps the drafter and on-device sampling on; the
+    boot check then serves the package that way, whatever stage 2 served."""
+    facts = read_run(run_dir, graft_mtp=graft_mtp)
     stage_dir = Path(stage_dir)
     others = find_sources(models_root, entry_cls=facts.source.entry_cls,
                           nearest_model=facts.nearest_model)
@@ -1012,6 +1236,8 @@ def stage_all(run_dir, stage_dir, *, namespace: str, models_root, env: dict | No
                "license": facts.license_id, "non_commercial": non_commercial(facts.license_id),
                "profiles": records, "skipped_profiles": skipped, "hf_linked": test["hf_linked"],
                "hf_missing": test["hf_missing"], "publish_commands": f"stages/7/{PUBLISH_FILE}"}
+    if facts.graft:
+        package["mtp_graft"] = facts.graft
     _write_json(stage_dir / "package.json", package)
     return package
 

@@ -95,6 +95,9 @@ Four facts decide whether a swap works. Each was found by failing first.
    MTP head". `prepare_swap.py` reads the new model's weight index and, when there is no `mtp.*` tensor,
    writes `export QWEN36_DRAFTER=""` into its `run.sh`, so the bundle serves plain decoding. That gives the
    same greedy tokens. You do nothing; the script prints what it did. Never edit `run.sh` yourself.
+   A person can set `"graft_mtp": true` in `swap_config.json` to add the nearest model's `mtp.*` tensors as one more
+   shard and keep the drafter on. Do not set it yourself and do not remove it: it is a measured experiment, and
+   the script refuses (exit 2) when the grafted head does not fit.
 
 ## Prepare phase: the steps
 

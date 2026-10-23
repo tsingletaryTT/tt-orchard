@@ -115,6 +115,8 @@ class CardFacts:
     sampling_from_base: bool = False # the model ships no generation_config.json, so the nearest model's is used
     reported: tuple[Reported, ...] = ()   # scores the authors report, shown apart from the measured numbers
     reported_source: str = ""        # where the authors report them (a card or paper), for the sentence above them
+    graft: dict | None = None        # graft.json: the nearest model's mtp.* tensors are added at each start
+    stage_2_without_graft: bool = False   # stage 2 and 4 served without the graft (the drafter off, host sampling)
 
 
 def _value(n: Number) -> str:
@@ -160,6 +162,14 @@ def render_card(f: CardFacts) -> str:
         lines.append(f"- Speculative decoding uses the drafter {f.drafter}, which was trained on "
                      f"{f.nearest_model}. Its acceptance rate on this model is listed under Not "
                      "measured.")
+    if f.graft:
+        g = f.graft
+        lines.append(f"- {f.model_id} ships no mtp.* tensors, so the drafter has no MTP head of its own. The launcher "
+                     f"reads the {len(g['tensors'])} mtp.* tensors of {f.nearest_model} from that model's pinned "
+                     f"snapshot (revision `{g['revision']}`, file `{g['file']}`, downloaded alone on the first start). "
+                     f"They are added at each start to `model-dir/` as one more weight file, `{g['shard']}` "
+                     "(`graft.json` names them). The head was trained on "
+                     f"{f.nearest_model}, so how well it suits {f.model_id} is shown only by the rows below.")
     if f.drafter_off:
         lines.append(f"- Speculative decoding is off. The drafter of {f.nearest_model} needs the MTP "
                      f"tensors of the model, and {f.model_id} has none.")
@@ -191,6 +201,12 @@ def render_card(f: CardFacts) -> str:
     limits = [f"Tested on {f.chips} chips (mesh {f.mesh}) only; other configurations are not claimed "
               "by this bundle.",
               "Accuracy was compared with the CPU reference on one short fixed prompt only."]
+    if f.graft:
+        limits.append(f"The drafter's MTP head is the nearest model's ({f.nearest_model}), added to {f.model_id} at "
+                      "start. How often the drafter's guesses are accepted on this model was not measured.")
+    if f.stage_2_without_graft:
+        limits.append("The stage 2 and stage 4 numbers were measured without the graft (the drafter off and sampling "
+                      "on the host). The stage 7 rows were measured with this package's settings.")
     if f.drafter_off:
         limits.append("Speculative decoding is off, so decode speed is that of plain decoding.")
     if f.host_sampling:
@@ -285,9 +301,20 @@ def reported_lines(reported, source: str) -> list[str]:
             *[f"| {_cell(r.name)} | {_cell(r.value)} | {_cell(r.note)} |" for r in reported]]
 
 
+def graft_markers(nearest_model: str) -> tuple[str, ...]:
+    """What a card must say when the package adds the nearest model's mtp.* tensors at start."""
+    return (f"mtp.* tensors of {nearest_model}", "added at each start", "`graft.json`")
+
+
 def card_problems(card: str, *, license_id: str, run_dir, sidecars=(), base_files=(), reported=(), reported_source="", model_id="",
-                  nearest_model="") -> list[str]:
+                  nearest_model="", graft: bool = False) -> list[str]:
     problems = []
+    if graft:
+        flat_card = " ".join(card.split())
+        missing = [m for m in graft_markers(nearest_model or "the nearest model") if m not in flat_card]
+        if missing:
+            problems.append("the package grafts the nearest model's mtp.* tensors at each start, so the card must say "
+                            f"so; it is missing: {', '.join(missing)}")
     reported_section, card_without_reported = _section(card, REPORTED_HEAD)
     if not reported and reported_section:
         problems.append(f"the card has the section {REPORTED_HEAD!r}, and the run has no reported-results.json to "
