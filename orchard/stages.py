@@ -628,7 +628,14 @@ def _graft_reasons(stage_dir, run_dir, n: int, where: str) -> list[str]:
     configuration is another server and is not held to the decision."""
     cdir = Path(stage_dir) / "configs" / str(n)
     cfg = _read_json(cdir / "swap_config.json")
-    if not isinstance(cfg, dict) or not cfg.get("bundle_dir"):
+    kind = _serving_type(cfg)
+    if kind is None and read_graft_decision(Path(run_dir) / "stages" / "2") is not None:
+        # Once stage 2 has recorded a decision, a config that is gone or cannot be read must not let a configuration through: it may be an
+        # ungrafted bundle whose config was lost. Only a configuration that names its container package is exempt.
+        return [f"{where}: swap_config.json is missing, cannot be read, or names neither a bundle (bundle_dir) nor a container package "
+                "(package and profile), so how this configuration serves cannot be told and stage 2's graft decision cannot be checked "
+                "against it"]
+    if kind != "bundle":
         return []
     sources = _read_json(cdir / "model-dir-sources.json")
     built = isinstance(sources, dict) and isinstance(sources.get("mtp_graft"), dict)
@@ -639,6 +646,18 @@ def _graft_reasons(stage_dir, run_dir, n: int, where: str) -> list[str]:
     if built and not chose:
         return [f"{where}: configs/{n}/model-dir-sources.json records a grafted head, but stage 2 did not choose the graft"]
     return []
+
+
+def _serving_type(cfg) -> str | None:
+    """"bundle" when a bundle configuration's swap_config.json names its bundle_dir, "container" when it names a container package and its
+    profile, None when it is not an object or names neither."""
+    if not isinstance(cfg, dict):
+        return None
+    if isinstance(cfg.get("bundle_dir"), str) and cfg["bundle_dir"]:
+        return "bundle"
+    if all(isinstance(cfg.get(k), str) and cfg[k] for k in ("package", "profile")):
+        return "container"
+    return None
 
 
 def _read_json(path: Path):
