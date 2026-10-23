@@ -1904,3 +1904,35 @@ Prompt (operator): "grafts should be chosen automatically. implement it." The AR
   - The stage 4 gate skipped a bundle configuration whose `swap_config.json` was missing, unreadable or named neither serving type. With any recorded decision (graft or safe) such a configuration is now refused; only one that names a `package` and a `profile` (a container package) is exempt. Runs with no decision keep the old behaviour.
   - The package gate required the trial's rows in every profile's card, but `card_numbers()` gives an optional profile one TODO row. Only the required profile's card must show them.
   - 14 mutations on the supervisor change (one hung instead of failing, which counts as caught), 7 on `kernelprobe`, 12 on the bundle (2 survivors got tests), 10 on the stage 4 gate (1 survivor got a test), 4 on the package gate (1 survivor got a test); all red now.
+## 2026-10-23 (UTC): the `bus` preflight row (branch `bus-check`, version 0.8.29)
+Prompt (operator, through the parent): take issue 25. On 2026-10-22 both chips of one board went to PCIe power state D3cold while idle;
+`tt-smi -r` did not bring them back and a reboot did. gozer then refused every lease because it could not read the board's serial, and a
+benchmark session started anyway and died 70 seconds in. Nothing before the run said the board was gone.
+- `orchard/bus.py` reads what the kernel shows and runs nothing: each PCI function with vendor 0x1e52 under `/sys/bus/pci/devices` (its
+  `power_state`, whether a driver is attached, and the driver's `tenstorrent/tenstorrent!N/tt_serial`) and the numbered entries of
+  `/dev/tenstorrent`. It never opens a chip, takes a lease or resets anything.
+- The row `bus` (after `gozer`, only when the signal exists, so older tests keep their row list) blocks as `hardware-unhealthy` and lists every
+  cause it found: fewer chips on the bus than the configuration needs (the coder's chips plus a test board, the whole box for a coder on four
+  chips, the largest `required_chips` count, and only the coder's chips for a lab run); a power state other than D0 (D3cold gets the incident
+  text: a reset did not wake it, a reboot did); a serial that cannot be read (missing, zero or all ones); no driver, no node entry, or a
+  `/dev/tenstorrent/N` that is missing; a chip gozer lists that the bus does not have. It warns on a power state the kernel does not report (old
+  kernels), an extra device node, a gozer that lists fewer chips than the bus shows, and a board that lists fewer chips than another. A bus
+  that cannot be listed at all (no sysfs) is a warning, never a block.
+- The CLI and the UI use the same `run_preflight`, so the row appears in the page's checks and `bringup` refuses a launch while it blocks
+  (tested through `WebApp`). The `hardware-unhealthy` unblock steps and the README preflight table say what the row means and that the fix is a
+  power cycle or reboot.
+- Full suite: 5759 passed, 2 skipped. Tests first, in `tests/test_bus_preflight.py`: 54, all on a fake sysfs tree in a temporary directory; the check is also run with
+  `subprocess` made to fail. Mutations: 41 on the module (7 survived: three were redundant guards and were removed (an empty serial is a subset of both
+  sets, with no `/dev/tenstorrent` the node set is empty, and one board never lists unequal sizes), four led to stronger tests (the gozer
+  count warning was masked by the half-board warning, the half-board test did not check that the complete board was left alone, a block was not
+  shown with a warning beside it, and a non-numeric `required_chips` part); the `0x` serial value was added to the serial cases), 10 on the wiring,
+  5 on the unblock text and 4 on the README row, all red at the end.
+- Review fix (Copilot, PR 48): a box with no readable `/dev/tenstorrent` (missing, a file, or not listable) used to pass, because the per-chip node check
+  was skipped when the directory could not be read, so healthy sysfs entries produced `ok`. It now blocks as `hardware-unhealthy` with one finding for the box
+  that says no chip can be opened and to check that the driver is loaded and the directory listable. It blocks only when the configuration needs chips
+  (`needed_chips` is at least the coder's chips, so only a degenerate configuration needs none). The per-chip missing-node check is unchanged and still needs a
+  readable directory, so the box gets one finding and not four. 5 tests (the old test was changed to expect a block); 9 mutations, all red.
+- Not done: the second half of the issue. The supervisor and the benchmark session still cannot tell a dead board from a model failure, so a run
+  that loses a board after it starts is not stopped for that reason (a `hardware-unhealthy` block is auto-retried, 60 s later, against the
+  same board). The trigger of the D3cold event is not understood. The row was not run against a board in D3cold, because none is available:
+  the sysfs names and the `power_state` values come from the kernel's documentation and one healthy box (four chips, all D0).
