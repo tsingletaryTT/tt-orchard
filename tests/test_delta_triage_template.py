@@ -1221,3 +1221,283 @@ def test_a_nearest_config_that_is_not_a_json_object_records_no_stop_token(text_c
     run_triage(stage)                                       # other checks may refuse such a config; the record must still be sane
     g = evidence(stage, "genconfig-license.json")
     assert g["base_config_eos_token_ids"] == []
+
+
+# ---- the stop tokens the tokenizer and the config name, against the ones the server will use ---------------
+# The server stops on the eos_token_id of the served generation_config.json (the model's own, or the nearest
+# model's when the model ships none). The model's tokenizer and its own config.json name stop tokens too. When
+# they name one the server does not stop on, replies run on or end on the wrong token. Stage 0 says so before any
+# hardware is used. A flag only: the path does not change. In the fixture the tokens are <|endoftext|> 0,
+# <|im_start|> 1 and <|im_end|> 2, and the generation configs stop on [2, 0].
+
+def stop_hazards(stage: Path) -> list[dict]:
+    return [h for h in delta(stage)["hazards"] if h["area"] == "stop_tokens"]
+
+
+def test_a_tokenizer_eos_token_the_generation_config_does_not_stop_on_gets_a_hazard(text_case):
+    stage = text_case(tokenizer_config={"eos_token": "<|im_start|>"})
+    assert run_triage(stage).returncode == 0
+    [h] = stop_hazards(stage)
+    assert "<|im_start|>" in h["finding"] and "id 1" in h["finding"] and "[2, 0]" in h["finding"]
+    assert "the new model's own generation_config.json" in h["finding"]
+    assert h["evidence"] == ["stages/0/evidence/genconfig-license.json"]
+    g = evidence(stage, "genconfig-license.json")
+    assert g["model_tokenizer_eos_token"] == "<|im_start|>" and g["model_tokenizer_eos_token_id"] == 1
+    assert delta(stage)["path"] == "weights-only"                    # a flag, not a reason to stop
+
+
+def test_a_tokenizer_eos_token_the_generation_config_stops_on_gets_no_hazard(text_case):
+    stage = text_case(tokenizer_config={"eos_token": "<|im_end|>"})
+    assert run_triage(stage).returncode == 0
+    assert stop_hazards(stage) == []
+    assert evidence(stage, "genconfig-license.json")["model_tokenizer_eos_token_id"] == 2
+
+
+def test_a_tokenizer_eos_token_written_as_an_object_is_read(text_case):
+    stage = text_case(tokenizer_config={"eos_token": {"content": "<|im_start|>", "lstrip": False}})
+    assert run_triage(stage).returncode == 0
+    assert len(stop_hazards(stage)) == 1
+
+
+def test_a_tokenizer_eos_token_that_is_not_in_the_vocabulary_is_unknown_and_flags_nothing(text_case):
+    stage = text_case(tokenizer_config={"eos_token": "<nope>"})
+    assert run_triage(stage).returncode == 0
+    assert stop_hazards(stage) == []
+    g = evidence(stage, "genconfig-license.json")
+    assert g["model_tokenizer_eos_token"] == "<nope>" and g["model_tokenizer_eos_token_id"] is None
+
+
+def test_a_model_without_a_tokenizer_eos_token_flags_nothing_from_the_tokenizer(text_case):
+    stage = text_case()
+    assert run_triage(stage).returncode == 0
+    assert stop_hazards(stage) == []
+    assert evidence(stage, "genconfig-license.json")["model_tokenizer_eos_token"] is None
+
+
+def test_the_models_own_config_stop_token_missing_from_the_generation_config_gets_a_hazard(text_case):
+    stage = text_case(config_change={"eos_token_id": 5})
+    assert run_triage(stage).returncode == 0
+    [h] = stop_hazards(stage)
+    assert "config.json" in h["finding"] and "[5]" in h["finding"] and "[2, 0]" in h["finding"]
+    assert evidence(stage, "genconfig-license.json")["model_config_eos_token_ids"] == [5]
+
+
+def test_the_models_own_config_stop_tokens_inside_the_generation_configs_list_get_no_hazard(text_case):
+    stage = text_case(config_change={"eos_token_id": 2})
+    assert run_triage(stage).returncode == 0
+    assert stop_hazards(stage) == []
+
+
+def test_a_nested_config_stop_token_is_read_from_text_config(tmp_path, tokenizer_json):
+    mod = template_module()
+    assert mod.config_eos_ids({"text_config": {"eos_token_id": [3, 4]}}) == [3, 4]
+    assert mod.config_eos_ids({"eos_token_id": 3, "text_config": {"eos_token_id": 9}}) == [3]
+    assert mod.config_eos_ids({"eos_token_id": True}) == []
+    assert mod.config_eos_ids([1]) == []
+
+
+def test_with_no_generation_config_the_tokenizer_is_checked_against_the_borrowed_stop_tokens(text_case):
+    stage = text_case(tokenizer_config={"eos_token": "<|im_start|>"})
+    drop_model_file(stage, "generation_config.json")
+    assert run_triage(stage).returncode == 0
+    [h] = stop_hazards(stage)
+    assert "nearest model's" in h["finding"] and "[2, 0]" in h["finding"] and "<|im_start|>" in h["finding"]
+
+
+def test_with_no_generation_config_a_tokenizer_eos_inside_the_borrowed_stop_tokens_gets_no_hazard(text_case):
+    stage = text_case(tokenizer_config={"eos_token": "<|endoftext|>"})
+    drop_model_file(stage, "generation_config.json")
+    assert run_triage(stage).returncode == 0
+    assert stop_hazards(stage) == []
+
+
+def test_with_no_stop_token_at_all_the_stop_token_check_stays_quiet_because_the_other_hazard_says_it(text_case):
+    stage = text_case(tokenizer_config={"eos_token": "<|im_start|>"})
+    drop_model_file(stage, "generation_config.json")
+    drop_base_file(stage, "generation_config.json")
+    assert run_triage(stage).returncode == 0
+    assert stop_hazards(stage) == []
+    assert len(gen_hazards(stage)) == 1
+
+
+def test_a_token_id_is_found_in_added_tokens_then_in_the_vocabulary():
+    mod = template_module()
+    data = {"added_tokens": [{"id": 7, "content": "<|a|>"}], "model": {"vocab": {"b": 3, "<|a|>": 99}}}
+    assert mod.tokenizer_token_id(data, "<|a|>") == 7           # added tokens win
+    assert mod.tokenizer_token_id(data, "b") == 3
+    assert mod.tokenizer_token_id({"model": {"vocab": [["c", -1.0], ["d", -2.0]]}}, "d") == 1
+    assert mod.tokenizer_token_id(data, "zzz") is None
+    assert mod.tokenizer_token_id(data, None) is None
+    assert mod.tokenizer_token_id(None, "b") is None
+    assert mod.tokenizer_token_id({"added_tokens": [{"id": True, "content": "x"}], "model": {}}, "x") is None
+
+
+# ---- sampling settings the model card recommends, against the defaults the server will apply -----------------
+# The server applies the served generation_config.json's sampling defaults to a request that sets none. When the
+# card recommends other values (or recommends a key the file does not set) the package serves with settings the
+# authors did not choose. The card is text, so this is a hint: stage 0 quotes what it found.
+
+def set_model_card(stage: Path, body: str) -> None:
+    cfg = json.loads((stage / "triage_config.json").read_text())
+    (Path(cfg["model_snapshot"]) / "README.md").write_text("---\nlicense: apache-2.0\n---\n\n# A model\n" + body)
+
+
+def sampling_hazards(stage: Path) -> list[dict]:
+    return [h for h in delta(stage)["hazards"] if h["area"] == "sampling_defaults"]
+
+
+def test_a_card_that_recommends_other_sampling_than_the_served_file_sets_gets_a_hazard(text_case):
+    stage = text_case()                                    # served file: temperature 1.0, top_k 20, top_p 0.95
+    set_model_card(stage, "Use temperature=0.6 and top_p=0.9 for best results.\n")
+    assert run_triage(stage).returncode == 0
+    [h] = sampling_hazards(stage)
+    assert "temperature 0.6" in h["finding"] and "served 1.0" in h["finding"]
+    assert "top_p 0.9" in h["finding"] and "served 0.95" in h["finding"]
+    assert "the new model's own generation_config.json" in h["finding"]
+    assert h["evidence"] == ["stages/0/evidence/genconfig-license.json"]
+    assert evidence(stage, "genconfig-license.json")["card_sampling_hints"] == {"temperature": [0.6], "top_p": [0.9]}
+    assert delta(stage)["path"] == "weights-only"
+
+
+def test_a_card_that_recommends_what_the_served_file_already_sets_gets_no_hazard(text_case):
+    stage = text_case()
+    set_model_card(stage, "Recommended: temperature = 1.0, top_k: 20, top_p of 0.95.\n")
+    assert run_triage(stage).returncode == 0
+    assert sampling_hazards(stage) == []
+
+
+def test_a_card_that_recommends_a_key_the_served_file_does_not_set_gets_a_hazard(text_case):
+    stage = text_case()
+    set_model_card(stage, "Set min_p to 0.05 and presence_penalty=1.5.\n")
+    assert run_triage(stage).returncode == 0
+    [h] = sampling_hazards(stage)
+    assert "min_p 0.05" in h["finding"] and "presence_penalty 1.5" in h["finding"] and "not set" in h["finding"]
+
+
+def test_with_no_generation_config_the_hazard_says_the_nearest_models_defaults_are_served(text_case):
+    stage = text_case()
+    set_model_card(stage, "temperature=0.6\n")
+    drop_model_file(stage, "generation_config.json")
+    assert run_triage(stage).returncode == 0
+    [h] = sampling_hazards(stage)
+    assert "nearest model's generation_config.json" in h["finding"] and "served 1.0" in h["finding"]
+
+
+def test_with_no_generation_config_at_all_every_card_hint_is_not_set(text_case):
+    stage = text_case()
+    set_model_card(stage, "temperature=0.6\n")
+    drop_model_file(stage, "generation_config.json")
+    drop_base_file(stage, "generation_config.json")
+    assert run_triage(stage).returncode == 0
+    [h] = sampling_hazards(stage)
+    assert "temperature 0.6" in h["finding"] and "not set" in h["finding"]
+
+
+def test_a_card_with_no_sampling_advice_gets_no_hazard(text_case):
+    stage = text_case()
+    assert run_triage(stage).returncode == 0
+    assert sampling_hazards(stage) == []
+    assert evidence(stage, "genconfig-license.json")["card_sampling_hints"] == {}
+
+
+@pytest.mark.parametrize("text, hints", [
+    ("temperature=0.6", {"temperature": [0.6]}),
+    ("Temperature: 0.7", {"temperature": [0.7]}),
+    ("`temperature` of 0.5", {"temperature": [0.5]}),
+    ("top_k = 40", {"top_k": [40.0]}),
+    ("top-p 0.8", {"top_p": [0.8]}),
+    ("repetition_penalty=1.05, top_k=20", {"repetition_penalty": [1.05], "top_k": [20.0]}),
+    ("temperature=0.6 or temperature=0.7", {"temperature": [0.6, 0.7]}),
+    ("temperature=0.6 and temperature=0.6", {"temperature": [0.6]}),
+    ("the temperature of the room", {}),
+    ("temperature=hot", {}),
+    ("temperature=nan", {}),
+    ("temperature=1e400", {}),
+    ("temperature=-1", {}),
+    ("stop_k=40", {}),
+    ("subtemperature=0.5", {}),
+    ("", {}),
+])
+def test_card_sampling_hints_are_read_from_numbers_next_to_the_setting_name(text, hints):
+    assert template_module().card_sampling_hints(text) == hints
+
+
+def test_card_sampling_hints_come_from_the_first_reading_of_a_long_card_only():
+    mod = template_module()
+    text = "\n".join(f"temperature={0.1 * i:.1f}" for i in range(1, 40))
+    assert len(mod.card_sampling_hints(text)["temperature"]) <= mod.MAX_HINT_VALUES
+
+
+def test_a_card_that_cannot_be_read_gives_no_hints(text_case):
+    stage = text_case()
+    cfg = json.loads((stage / "triage_config.json").read_text())
+    (Path(cfg["model_snapshot"]) / "README.md").write_bytes(b"\xff\xfe temperature=0.6 \x00")
+    assert run_triage(stage).returncode == 0
+    assert evidence(stage, "genconfig-license.json")["card_sampling_hints"] == {"temperature": [0.6]}
+
+
+def test_one_config_stop_token_outside_the_served_list_is_enough_for_a_hazard(text_case):
+    stage = text_case(config_change={"eos_token_id": [2, 5]})
+    assert run_triage(stage).returncode == 0
+    [h] = stop_hazards(stage)
+    assert "[2, 5]" in h["finding"]
+
+
+def test_a_generation_config_without_eos_is_checked_against_the_nearest_models_config_stop_tokens(text_case):
+    stage = text_case(tokenizer_config={"eos_token": "<|im_start|>"})
+    drop_eos("model_snapshot", stage)
+    set_top_level_eos("nearest_snapshot", stage, [2])
+    assert run_triage(stage).returncode == 0
+    [h] = stop_hazards(stage)
+    assert "[2]" in h["finding"] and "nearest model's config.json" in h["finding"]
+
+
+def test_a_tokenizer_eos_inside_the_nearest_models_config_stop_tokens_gets_no_hazard(text_case):
+    stage = text_case(tokenizer_config={"eos_token": "<|im_end|>"})
+    drop_eos("model_snapshot", stage)
+    set_top_level_eos("nearest_snapshot", stage, [2])
+    assert run_triage(stage).returncode == 0
+    assert stop_hazards(stage) == []
+
+
+def test_a_card_that_gives_two_values_one_of_which_is_served_gets_no_hazard(text_case):
+    stage = text_case(genconfig_change={"temperature": 0.6})
+    set_model_card(stage, "Thinking mode: temperature=0.6. Non-thinking mode: temperature=0.7.\n")
+    assert run_triage(stage).returncode == 0
+    assert sampling_hazards(stage) == []
+
+
+def test_a_card_setting_of_one_is_not_met_by_a_served_true(text_case):
+    stage = text_case(genconfig_change={"top_k": True})
+    set_model_card(stage, "top_k=1\n")
+    assert run_triage(stage).returncode == 0
+    [h] = sampling_hazards(stage)
+    assert "top_k 1 (not set)" in h["finding"]
+
+
+def test_a_model_with_no_card_gives_no_hints(text_case):
+    stage = text_case()
+    cfg = json.loads((stage / "triage_config.json").read_text())
+    (Path(cfg["model_snapshot"]) / "README.md").unlink()
+    assert run_triage(stage).returncode == 0
+    assert evidence(stage, "genconfig-license.json")["card_sampling_hints"] == {}
+
+
+def test_only_the_start_of_a_long_card_is_read_for_hints():
+    mod = template_module()
+    text = "x" * mod.CARD_READ_CHARS + " temperature=0.6"
+    assert mod.card_sampling_hints(text) == {}
+    assert mod.card_sampling_hints("temperature=0.6 " + "x" * mod.CARD_READ_CHARS) == {"temperature": [0.6]}
+
+
+def test_a_number_too_large_to_be_a_float_is_not_a_hint():
+    assert template_module().card_sampling_hints("temperature=" + "9" * 400) == {}
+    assert template_module().card_sampling_hints("temperature=0.6.1") == {}
+
+
+def test_the_stage_0_gate_accepts_the_new_hazard_areas(text_case):
+    stage = text_case(tokenizer_config={"eos_token": "<|im_start|>"})
+    set_model_card(stage, "temperature=0.6\n")
+    assert run_triage(stage).returncode == 0
+    assert {h["area"] for h in delta(stage)["hazards"]} >= {"stop_tokens", "sampling_defaults"}
+    assert gate_delta(stage, stage.parent.parent).ok
