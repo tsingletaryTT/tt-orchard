@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """`tt-orchard`: the front door to a model bring-up.
 
-    tt-orchard bringup MODEL [--run-dir DIR] [--dry-run] [--no-fetch] [--refuse-credentials-visible]
+    tt-orchard bringup MODEL [--run-dir DIR] [--dry-run] [--no-fetch] [--refuse-credentials-visible] [--no-graft-trial]
     tt-orchard status   [MODEL | --run-dir DIR] [--json] [--style S]
     tt-orchard watch    [MODEL | --run-dir DIR] [--all] [--once] [--style S]
     tt-orchard pause | resume | abort   [MODEL | --run-dir DIR]
@@ -10,7 +10,7 @@
     tt-orchard lab setup [--model ORG/NAME]... [--yes] [--check]
     tt-orchard caches   [--lab] [--prune --older-than DAYS [--yes]]
     tt-orchard coder    [status | stop [--yes]]
-    tt-orchard package  RUN_DIR --namespace ORG [--step stage|boot|finish|all] [--restage] [--exact CHIP]
+    tt-orchard package  RUN_DIR --namespace ORG [--step stage|boot|finish|all] [--restage] [--graft-mtp | --no-graft-mtp] [--exact CHIP]
     tt-orchard package-card RUN_DIR --benchmark FILE --model-key KEY [--base-key KEY] [--reported FILE] [--accept-unverified-identity]
     tt-orchard kernel-env [--check] [--src-dir DIR] [--venv-dir DIR] [--tt-lang-skill-dir DIR] [--allow-stale-skills]
     tt-orchard inventory TARGET [--python P] [--ttnn-python P] [--against F] [--layers N] [--seq N] [--class C] [--out DIR]
@@ -102,6 +102,10 @@ def _parser() -> argparse.ArgumentParser:
     b.add_argument("--base", help="the model to base the run on: a tt-model bundle (as `tt model search` lists "
                                   "it) or a Hugging Face model id. Default: the model card's base_model")
     b.add_argument("--quiet", action="store_true", help="do not print what the run is doing as it goes")
+    b.add_argument("--no-graft-trial", action="store_true",
+                   help="skip stage 2's graft trial. When the model has no mtp.* tensors and the nearest model has a head that "
+                        "fits, stage 2 serves the grafted drafter once beside the safe configuration and keeps it when it is "
+                        "faster; that is one more hardware test of 10 to 35 minutes. The run records the choice")
     b.add_argument("--prune-caches", action="store_true",
                    help="when the only block is a full disk, remove the oldest tensor caches that no unfinished run "
                         "uses, just enough to fit (never the kernel cache), then check again. With --dry-run it "
@@ -169,6 +173,14 @@ def _parser() -> argparse.ArgumentParser:
                     help="all (default); or one part of it. boot opens the chips, so it runs only under a lease")
     pk.add_argument("--restage", action="store_true",
                     help="move an earlier stages/7 aside and stage again (without it an existing stage 7 is refused)")
+    pk.add_argument("--graft-mtp", action="store_true",
+                    help="stage a package that adds the nearest model's mtp.* tensors at each start and keeps the "
+                         "speculative drafter and on-device sampling on (for a model that ships none). The boot check "
+                         "serves it that way. Stage 2's graft trial (a model with a graft candidate) decides this by itself; the "
+                         "flag forces a graft the trial did not choose")
+    pk.add_argument("--no-graft-mtp", action="store_true",
+                    help="stage a package without the graft. Refused when stage 2's graft trial chose the graft (its stage 4 tests were "
+                         "built with it) or stage 2 itself served with the graft")
     pk.add_argument("--exact", type=int, metavar="CHIP",
                     help="give gozer this chip number: it leases the board that holds it")
     pk.add_argument("--models-root", help="where installed tt-model bundles live (default: the run's recorded path)")
@@ -822,7 +834,8 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
     inputs = {"model": str(snapshot), **({"base": str(base_snapshot)} if base_snapshot else {}),
               **({"base_candidates": str(candidates_path)} if candidates_path else {})}
     argv_run = bringup_config.supervisor_argv(cfg, args.model, run_dir, inputs=inputs,
-                                              accept_credentials=not args.refuse_credentials_visible)
+                                              accept_credentials=not args.refuse_credentials_visible,
+                                              graft_trial=not args.no_graft_trial)
     command = "python3 -m orchard.supervisor " + shlex.join(argv_run)
     if args.dry_run:
         print(f"║  command  {command}\n╚══", file=out)

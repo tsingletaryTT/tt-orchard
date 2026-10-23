@@ -232,3 +232,60 @@ def test_the_record_names_the_server_while_it_runs_and_survives_a_killed_verifie
         if verifier.poll() is None:
             os.killpg(verifier.pid, signal.SIGKILL)
             verifier.wait()
+
+
+# ---- the graft the boot check served -------------------------------------------------------------------
+
+def load_verifier():
+    import hashlib  # noqa: F401
+    import importlib.util
+    here = Path(__file__).resolve().parent.parent / "orchard"
+    sys.path.insert(0, str(here / "skills" / "weights-swap-templates"))
+    try:
+        spec = importlib.util.spec_from_file_location("verify_bundle_under_test", here / "package_templates" / "verify_bundle.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+    finally:
+        sys.path.pop(0)
+    return mod
+
+
+GRAFT = {"schema": 1, "repo": BASE, "revision": "b" * 40, "file": "model-00002-of-00002.safetensors",
+         "shard": "model-mtp-from-base.safetensors", "tensors": ["mtp.fc.weight", "mtp.norm.weight"], "sha256": "a" * 64,
+         "bytes": 10}
+
+
+def test_the_boot_check_records_the_graft_and_the_hash_of_the_shard_it_served(tmp_path):
+    import hashlib
+    bundle, md = tmp_path / "bundle", tmp_path / "bundle" / "model-dir"
+    md.mkdir(parents=True)
+    (bundle / "graft.json").write_text(json.dumps(GRAFT))
+    (md / GRAFT["shard"]).write_bytes(b"the shard the launcher built")
+    rec = load_verifier().graft_evidence(bundle, md)
+    assert rec == {**{k: GRAFT[k] for k in ("repo", "revision", "file", "shard", "tensors", "sha256")},
+                   "served_shard_sha256": hashlib.sha256(b"the shard the launcher built").hexdigest()}
+
+
+def test_a_copy_without_graft_json_records_no_graft(tmp_path):
+    (tmp_path / "model-dir").mkdir()
+    assert load_verifier().graft_evidence(tmp_path, tmp_path / "model-dir") is None
+
+
+@pytest.mark.parametrize("how", ["missing", "link"])
+def test_a_shard_that_is_missing_or_a_link_is_recorded_as_not_served(tmp_path, how):
+    bundle, md = tmp_path / "bundle", tmp_path / "bundle" / "model-dir"
+    md.mkdir(parents=True)
+    (bundle / "graft.json").write_text(json.dumps(GRAFT))
+    if how == "link":
+        (tmp_path / "elsewhere").write_bytes(b"x")
+        (md / GRAFT["shard"]).symlink_to(tmp_path / "elsewhere")
+    assert load_verifier().graft_evidence(bundle, md)["served_shard_sha256"] is None
+
+
+@pytest.mark.parametrize("text", ["not json", "[1, 2]"])
+def test_a_graft_json_that_is_not_an_object_stops_the_boot_check(tmp_path, text):
+    (tmp_path / "graft.json").write_text(text)
+    (tmp_path / "model-dir").mkdir()
+    with pytest.raises(SystemExit) as stopped:
+        load_verifier().graft_evidence(tmp_path, tmp_path / "model-dir")
+    assert stopped.value.code == 10

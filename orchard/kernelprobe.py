@@ -664,8 +664,11 @@ SWEEP_GRACE_S = 2.0          # how long the strays get after SIGTERM before the 
 SWEEP_POLL_S = 0.05
 
 
-def _run_dir_entry(run_dir) -> bytes:
-    return b"ORCHARD_RUN_DIR=" + os.fsencode(str(Path(run_dir).resolve()))
+RUN_DIR_VAR = "ORCHARD_RUN_DIR"
+
+
+def _run_dir_entry(run_dir, var: str = RUN_DIR_VAR) -> bytes:
+    return os.fsencode(var) + b"=" + os.fsencode(str(Path(run_dir).resolve()))
 
 
 def _environ_has(proc_root: str, pid: int, entry: bytes) -> bool:
@@ -678,12 +681,12 @@ def _environ_has(proc_root: str, pid: int, entry: bytes) -> bool:
         return False
 
 
-def scan_strays(run_dir, *, proc_root: str = "/proc", uid: int | None = None) -> list[int]:
+def scan_strays(run_dir, *, proc_root: str = "/proc", uid: int | None = None, var: str = RUN_DIR_VAR) -> list[int]:
     """The pids of the processes owned by `uid` (default: ours) whose environment has ORCHARD_RUN_DIR equal to the
     resolved `run_dir`. The comparison is exact, so attempt-1 does not match attempt-10. An entry that cannot be read
     (the process ended during the scan, or it belongs to someone else) is skipped."""
     uid = os.getuid() if uid is None else uid
-    entry = _run_dir_entry(run_dir)
+    entry = _run_dir_entry(run_dir, var)
     try:
         names = os.listdir(proc_root)
     except OSError:
@@ -719,6 +722,14 @@ def _protected_pids(proc_root: str = "/proc") -> set[int]:
     return out
 
 
+def _boot_id(proc_root: str) -> str | None:
+    try:
+        with open(os.path.join(proc_root, "sys", "kernel", "random", "boot_id"), encoding="utf-8") as f:
+            return f.read().strip() or None
+    except OSError:
+        return None
+
+
 def _cmdline(proc_root: str, pid: int) -> str:
     try:
         with open(os.path.join(proc_root, str(pid), "cmdline"), "rb") as f:
@@ -748,10 +759,12 @@ def _gone(proc_root: str, pid: int, start: int | None) -> bool:
 
 
 def sweep_strays(run_dir, *, proc_root: str = "/proc", kill=os.kill, killpg=os.killpg, grace_s: float = SWEEP_GRACE_S,
-                 clock=time.monotonic, sleep=time.sleep) -> list[dict]:
+                 clock=time.monotonic, sleep=time.sleep, var: str = RUN_DIR_VAR, identity: bool = False) -> list[dict]:
     """Stop every process that carries this attempt's ORCHARD_RUN_DIR: SIGTERM, up to `grace_s` for them to go, then a
     second scan and SIGKILL for everything it finds, so a process a stray started during the grace is caught too.
-    Returns [{"pid", "cmdline", "stopped"}]. `stopped` is True only when the process is gone afterwards (no /proc
+    Returns [{"pid", "cmdline", "stopped"}]. `var` names the environment variable to look for (ORCHARD_RUN_DIR for an agent's
+    strays; the supervisor uses its own for a hardware test's servers). With `identity` each record also has `boot_id` and
+    `start` (field 22 of /proc/<pid>/stat), taken before the process is signalled: a pid alone can be reused. `stopped` is True only when the process is gone afterwards (no /proc
     entry, a zombie, or another process under the pid); a process that still runs, for example under a new program
     without the variable, is recorded with `stopped` False. Never raises an Exception. An interrupt at any point after
     the first scan (during the SIGTERM pass or the grace) still gets the SIGKILL pass before it goes on.
@@ -768,10 +781,10 @@ def sweep_strays(run_dir, *, proc_root: str = "/proc", kill=os.kill, killpg=os.k
     starts: dict[int, int | None] = {}
     try:
         protected = _protected_pids(proc_root)
-        entry = _run_dir_entry(run_dir)
+        entry = _run_dir_entry(run_dir, var)
 
         def found() -> list[int]:
-            return [pid for pid in scan_strays(run_dir, proc_root=proc_root)
+            return [pid for pid in scan_strays(run_dir, proc_root=proc_root, var=var)
                     if isinstance(pid, int) and pid > 1 and pid not in protected]
 
         def note(pids) -> None:
@@ -779,7 +792,11 @@ def sweep_strays(run_dir, *, proc_root: str = "/proc", kill=os.kill, killpg=os.k
                 if pid not in starts:
                     st = _proc_state(proc_root, pid)
                     starts[pid] = st[1] if st else None
-                    records.append({"pid": pid, "cmdline": _cmdline(proc_root, pid), "stopped": False})
+                    rec = {"pid": pid, "cmdline": _cmdline(proc_root, pid), "stopped": False}
+                    if identity:
+                        rec["boot_id"] = _boot_id(proc_root)
+                        rec["start"] = starts[pid]
+                    records.append(rec)
 
         def send(pid: int, sig) -> None:
             if not _environ_has(proc_root, pid, entry):

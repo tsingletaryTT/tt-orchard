@@ -236,11 +236,14 @@ def _stage(run: Path, led: Ledger, args, entries, out, *, extra_env, hostname) -
         stage_dir.rename(aside)
         _say(out, f"moved the earlier stage 7 to {aside}")
     led.append("decision", 7, decision="package command", step=args.step, namespace=args.namespace,
-               models_root=str(models), restage=bool(args.restage))
+               models_root=str(models), restage=bool(args.restage), graft_mtp=bool(getattr(args, "graft_mtp", False)),
+               no_graft_mtp=bool(getattr(args, "no_graft_mtp", False)))
     stage_dir.mkdir(parents=True)
     try:
         staged = package.stage_all(run, stage_dir, namespace=args.namespace, models_root=models,
-                                   env=agent_env(run, extra=extra_env), hostname=hostname)
+                                   env=agent_env(run, extra=extra_env), hostname=hostname,
+                                   graft_mtp=bool(getattr(args, "graft_mtp", False)),
+                                   no_graft_mtp=bool(getattr(args, "no_graft_mtp", False)))
     except PackageError as exc:
         raise PackageCommandError(f"packaging: {exc}") from None
     names = [p["name"] for p in staged["profiles"]]

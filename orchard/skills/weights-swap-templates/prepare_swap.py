@@ -57,6 +57,17 @@ The weights-swap-check skill copies this file into the stage directory and runs 
    generation_config.json, then config.json). When it is empty the script warns at once, because that bundle
    stops after loading the weights without one, 15 to 25 minutes into a start.
 
+4. Optional, `"graft_mtp": true` in swap_config.json (default off): when the new model has no `mtp.*` tensor and
+   the nearest model has them, `model-dir/` also gets `model-mtp-from-base.safetensors`, a shard of the nearest
+   model's `mtp.*` tensors copied byte for byte, and its copy of the weight index lists them. The drafter and
+   on-device sampling stay on, because the engine then finds an MTP head. The head was trained against the
+   nearest model, so how well the drafter's guesses are accepted on the new model is not known until it is
+   measured. The script exits 2, and builds nothing, when the new model already has `mtp.*` tensors, when it
+   cannot tell, when the nearest model has none or keeps them in more than one shard, when a tensor is missing
+   from the shard or is not BF16, or when `mtp.norm.weight` does not match the new model's hidden size. The new
+   snapshot's cached index is never written through (the model-dir copy replaces the link). The record in
+   `model-dir-sources.json` is `mtp_graft`.
+
 An expected edit that does not happen exactly once exits 2 with a message that names it, and no
 run.sh is written. Everything else in the script, including its environment lines, stays as it is.
 
@@ -85,6 +96,7 @@ LINKED = ("tokenizer.json", "tokenizer_config.json", "chat_template.jinja", "gen
           "model.safetensors.index.json")
 REQUIRED_LINKS = ("tokenizer.json",)
 FALLBACK_COPY = "generation_config.json"      # copied from base_snapshot when new_snapshot has none
+GRAFT_SHARD = "model-mtp-from-base.safetensors"
 
 
 def fail(message: str) -> None:
@@ -103,6 +115,8 @@ def load_config() -> dict:
         missing.append("bundle_dir (or package, for a container package)")
     if missing:
         fail(f"swap_config.json is missing {missing}")
+    if "graft_mtp" in cfg and not isinstance(cfg["graft_mtp"], bool):
+        fail(f"swap_config.json's graft_mtp must be true or false, not {cfg['graft_mtp']!r}")
     return cfg
 
 
@@ -278,6 +292,152 @@ def has_mtp_tensors(new: Path) -> bool | None:
     return any(MTP_NAME.search(k) for k in names)
 
 
+def read_shard_header(path: Path) -> tuple[dict, int] | None:
+    """(the safetensors header, the file offset where tensor data starts), or None when it cannot be read."""
+    try:
+        with open(path, "rb") as f:
+            raw = f.read(8)
+            if len(raw) != 8:
+                return None
+            (n,) = struct.unpack("<Q", raw)
+            if not 0 < n <= 100 * 1024 * 1024:
+                return None
+            header = json.loads(f.read(n).decode("utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return None
+    return (header, 8 + n) if isinstance(header, dict) else None
+
+
+def base_mtp_files(base: Path) -> dict[str, str]:
+    """{tensor name: shard file name} for the nearest model's `mtp.*` tensors, from its weight index, else from
+    its shard headers. Empty when it has none or cannot be read."""
+    try:
+        weight_map = json.loads((base / "model.safetensors.index.json").read_text(encoding="utf-8"))["weight_map"]
+        if isinstance(weight_map, dict):
+            return {k: v for k, v in weight_map.items() if MTP_NAME.search(k)}
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    out = {}
+    for shard in sorted(base.glob("*.safetensors")):
+        got = shard_tensor_names(shard)
+        out.update({k: shard.name for k in got or [] if MTP_NAME.search(k)})
+    return out
+
+
+def model_hidden_size(new: Path) -> int | None:
+    try:
+        cfg = json.loads((new / "config.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    for holder in (cfg.get("text_config"), cfg):
+        v = holder.get("hidden_size") if isinstance(holder, dict) else None
+        if isinstance(v, int) and not isinstance(v, bool):
+            return v
+    return None
+
+
+def plan_mtp_graft(base: Path, new: Path) -> dict:
+    """Check that the nearest model's `mtp.*` tensors can be grafted onto the new model, and say where they are.
+    Exits 2 with the reason when they cannot. Nothing is written here."""
+    if os.path.lexists(new / GRAFT_SHARD):
+        # The name is reserved. model-dir links every *.safetensors of the new model, so a file with this name would be
+        # replaced by the graft and its own tensors would be missing; the package's launcher would write through the link.
+        fail(f"the new model ships a file named {GRAFT_SHARD}, the name the graft uses for its shard; the graft would "
+             "replace it, so this model cannot be grafted")
+    has = has_mtp_tensors(new)
+    if has is True:
+        fail("graft_mtp is set, but the new model already has mtp.* tensors; there is nothing to graft")
+    if has is None:
+        fail("graft_mtp is set, but I cannot tell whether the new model has mtp.* tensors (no readable weight "
+             "index or shard headers), so I will not add a second head")
+    where = base_mtp_files(base)
+    if not where:
+        fail("graft_mtp is set, but the nearest model has no mtp.* tensors to graft")
+    files = sorted(set(where.values()))
+    if len(files) > 1:
+        fail(f"the nearest model keeps its mtp.* tensors in more than one shard ({', '.join(files)}); the graft "
+             "reads from one")
+    src = base / files[0]
+    parsed = read_shard_header(src)
+    if parsed is None:
+        fail(f"cannot read the safetensors header of {files[0]} in the nearest model")
+    header, start = parsed
+    size = src.stat().st_size
+    entries = {}
+    for name in sorted(where):
+        e = header.get(name)
+        if not isinstance(e, dict):
+            fail(f"{name} is in the nearest model's index but not in {files[0]}")
+        if e.get("dtype") != "BF16":
+            fail(f"{name} is {e.get('dtype')}; the graft copies BF16 tensors only")
+        try:
+            a, b = e["data_offsets"]
+            elements = 1
+            for d in e["shape"]:
+                elements *= d
+        except (KeyError, TypeError, ValueError):
+            fail(f"{name} has a header entry the graft cannot read")
+        if not (0 <= a <= b and start + b <= size and b - a == 2 * elements):
+            fail(f"{name}'s header entry does not match the bytes in {files[0]}")
+        entries[name] = e
+    hidden, norm = model_hidden_size(new), next((e for k, e in entries.items() if k.endswith("mtp.norm.weight")), None)
+    if hidden is not None and norm is not None and norm["shape"] != [hidden]:
+        fail(f"mtp.norm.weight has shape {norm['shape']}, but the new model's hidden size is {hidden}; "
+             "this head is not for this model")
+    return {"file": files[0], "path": src, "start": start, "entries": entries}
+
+
+def write_graft_shard(plan: dict, dest: Path) -> tuple[str, int]:
+    """Write the grafted shard (the tensors in name order, bytes copied as they are). Returns (sha256, byte count)."""
+    if os.path.lexists(dest):
+        fail(f"{dest} already exists; the graft shard is only ever written to a new file, never through a link")
+    header, off = {"__metadata__": {"format": "pt"}}, 0
+    for name, e in sorted(plan["entries"].items()):
+        n = e["data_offsets"][1] - e["data_offsets"][0]
+        header[name] = {"dtype": "BF16", "shape": e["shape"], "data_offsets": [off, off + n]}
+        off += n
+    raw = json.dumps(header).encode("utf-8")
+    raw += b" " * (-len(raw) % 8)
+    digest, tmp = hashlib.sha256(), dest.with_name(dest.name + ".tmp")
+    with open(plan["path"], "rb") as src, open(tmp, "wb") as out:
+        for chunk in (struct.pack("<Q", len(raw)), raw):
+            out.write(chunk)
+            digest.update(chunk)
+        for name, e in sorted(plan["entries"].items()):
+            a, b = e["data_offsets"]
+            src.seek(plan["start"] + a)
+            left = b - a
+            while left:
+                chunk = src.read(min(left, 1 << 20))
+                if not chunk:
+                    fail(f"{plan['file']} ended while copying {name}")
+                out.write(chunk)
+                digest.update(chunk)
+                left -= len(chunk)
+    os.replace(tmp, dest)
+    return digest.hexdigest(), 8 + len(raw) + off
+
+
+def graft_index(model_dir: Path, names: list[str], total: int) -> None:
+    """Replace the model dir's link to the new model's weight index with a real file that also lists `names`."""
+    path = model_dir / "model.safetensors.index.json"
+    if not os.path.lexists(path):
+        return                  # no index: the loader reads every *.safetensors file in the directory
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))      # follows the link
+        weight_map = data["weight_map"]
+    except (OSError, ValueError, KeyError, TypeError):
+        fail("the new model's model.safetensors.index.json cannot be read, so the graft cannot add to it")
+    if not isinstance(weight_map, dict):
+        fail("the new model's model.safetensors.index.json has no weight_map object")
+    weight_map.update({n: GRAFT_SHARD for n in names})
+    meta = data.setdefault("metadata", {})
+    if isinstance(meta, dict) and isinstance(meta.get("total_size"), int):
+        meta["total_size"] += total
+    os.unlink(path)             # the link, not the cached file it points to
+    path.write_text(json.dumps(data, indent=1), encoding="utf-8")
+
+
 ADDITIONAL = re.compile(r"--additional-config\s+'([^']*)'")
 
 
@@ -352,6 +512,8 @@ def main() -> int:
         if d is not None and not d.is_dir():
             fail(f"{label} {d} is not a directory")
     model_dir = HERE_DIR / "model-dir"
+    graft = cfg.get("graft_mtp") is True
+    plan = plan_mtp_graft(base, new) if graft else None
     if bundle is not None:
         src_run = bundle / "run.sh"
         if not src_run.is_file():
@@ -359,18 +521,35 @@ def main() -> int:
         # Edit in memory first, so a failed edit leaves no run.sh and no half-built model-dir.
         mtp = has_mtp_tensors(new)
         text, notes = edit_run_script(src_run.read_text(encoding="utf-8"), bundle,
-                                      cfg["nearest_model_id"], model_dir, drafter_off=(mtp is False))
-        if mtp is None:
+                                      cfg["nearest_model_id"], model_dir, drafter_off=(mtp is False and not graft))
+        if graft:
+            notes.append("the drafter and on-device sampling stay on: the nearest model's mtp.* tensors are "
+                         "grafted into model-dir")
+        elif mtp is None:
             notes.append("could not tell whether the new model has mtp.* tensors (no readable weight index or "
                          "shard headers), so the drafter setting is unchanged")
     model_dir, copied, linked, absent = build_model_dir(base, new)
+    grafted = None
+    if plan is not None:
+        digest, total = write_graft_shard(plan, model_dir / GRAFT_SHARD)
+        graft_index(model_dir, sorted(plan["entries"]), total)
+        grafted = {"from": cfg["nearest_model_id"], "base_revision": snapshot_revision(base), "file": GRAFT_SHARD,
+                   "source_file": plan["file"], "tensors": len(plan["entries"]), "bytes": total, "sha256": digest}
     eos = stop_token_ids(model_dir)
     record = sources_record(base, new, cfg["nearest_model_id"], copied, linked, absent, eos)
+    if grafted:
+        record["mtp_graft"] = grafted
+        record["files"].append({"name": GRAFT_SHARD, "source": "base", "how": "grafted",
+                                "reason": "the new model has no mtp.* tensors; these are the nearest model's"})
+        record["files"].sort(key=lambda f: f["name"])
     record.update(chat_facts(model_dir, base))
     (HERE_DIR / SOURCES_NAME).write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     print(f"model-dir: {model_dir}")
     print(f"  copied from base_snapshot: {', '.join(copied) or 'nothing'}")
     print(f"  linked from new_snapshot: {len(linked)} files ({', '.join(linked)})")
+    if grafted:
+        print(f"  grafted {grafted['tensors']} mtp.* tensors of {grafted['from']} as {GRAFT_SHARD} "
+              f"(sha256 {digest[:12]}); the drafter's acceptance on the new model is not measured by this script")
     if FALLBACK_COPY in copied:
         print(f"  {FALLBACK_COPY}: new_snapshot has none; copied from base_snapshot")
     origin = {"model": "the new model's", "base": "the nearest model's", "none": None}[record["sampling_defaults_from"]]
