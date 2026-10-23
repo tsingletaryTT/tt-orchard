@@ -1927,6 +1927,11 @@ benchmark session started anyway and died 70 seconds in. Nothing before the run 
   count warning was masked by the half-board warning, the half-board test did not check that the complete board was left alone, a block was not
   shown with a warning beside it, and a non-numeric `required_chips` part); the `0x` serial value was added to the serial cases), 10 on the wiring,
   5 on the unblock text and 4 on the README row, all red at the end.
+- Review fix (Copilot, PR 48): a box with no readable `/dev/tenstorrent` (missing, a file, or not listable) used to pass, because the per-chip node check
+  was skipped when the directory could not be read, so healthy sysfs entries produced `ok`. It now blocks as `hardware-unhealthy` with one finding for the box
+  that says no chip can be opened and to check that the driver is loaded and the directory listable. It blocks only when the configuration needs chips
+  (`needed_chips` is at least the coder's chips, so only a degenerate configuration needs none). The per-chip missing-node check is unchanged and still needs a
+  readable directory, so the box gets one finding and not four. 5 tests (the old test was changed to expect a block); 9 mutations, all red.
 - Not done: the second half of the issue. The supervisor and the benchmark session still cannot tell a dead board from a model failure, so a run
   that loses a board after it starts is not stopped for that reason (a `hardware-unhealthy` block is auto-retried, 60 s later, against the
   same board). The trigger of the D3cold event is not understood. The row was not run against a board in D3cold, because none is available:

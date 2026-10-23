@@ -255,10 +255,40 @@ def test_every_problem_is_listed_not_only_the_first(tmp_path):
     assert BDFS[0] in c.detail and BDFS[3] in c.detail
 
 
-def test_a_box_with_no_device_directory_is_not_read_as_every_node_missing(tmp_path):
+def test_a_box_with_no_device_directory_blocks_instead_of_passing_unchecked(tmp_path):
     pci, _ = box(tmp_path, 4)
     c = bus.check_bus(bus.read_bus(pci, tmp_path / "nodev"), FREE, 4)
+    assert (c.status, c.reason) == ("block", "hardware-unhealthy")
+    assert "/dev/tenstorrent" in c.detail and "cannot be read" in c.detail
+    assert "driver" in c.detail                                  # the next step: is the driver loaded, can this user list the directory
+
+
+def test_a_device_directory_that_is_a_file_blocks_the_same_way(tmp_path):
+    pci, _ = box(tmp_path, 4)
+    not_a_dir = tmp_path / "devfile"
+    not_a_dir.write_text("")
+    c = bus.check_bus(bus.read_bus(pci, not_a_dir), FREE, 4)
+    assert c.status == "block" and "cannot be read" in c.detail
+
+
+def test_an_unreadable_device_directory_is_one_finding_and_does_not_blame_each_chip(tmp_path):
+    pci, _ = box(tmp_path, 4)
+    c = bus.check_bus(bus.read_bus(pci, tmp_path / "nodev"), FREE, 4)
+    assert c.detail.count("cannot be read") == 1
+    assert not any(f"/dev/tenstorrent/{i} is missing" in c.detail for i in range(4))   # the per-chip check needs a readable directory
+
+
+def test_a_run_that_needs_no_chips_is_not_blocked_by_a_missing_device_directory(tmp_path):
+    pci, _ = box(tmp_path, 4)
+    c = bus.check_bus(bus.read_bus(pci, tmp_path / "nodev"), FREE, 0)
     assert c.status == "ok"
+
+
+def test_one_missing_node_is_still_named_when_the_directory_is_readable(tmp_path):
+    pci, dev = box(tmp_path, 4)
+    (dev / "2").rmdir() if (dev / "2").is_dir() else (dev / "2").unlink()
+    c = bus.check_bus(bus.read_bus(pci, dev), FREE, 4)
+    assert c.status == "block" and "/dev/tenstorrent/2 is missing" in c.detail and "cannot be read" not in c.detail
 
 
 def test_a_chip_with_no_driver_is_not_also_blamed_for_its_serial(tmp_path):

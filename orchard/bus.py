@@ -50,7 +50,7 @@ class Bus:
     chips: list[Chip] = field(default_factory=list)
     nodes: frozenset = frozenset()
     readable: bool = True          # False when the PCI directory itself could not be listed
-    nodes_readable: bool = True    # False when there is no /dev/tenstorrent to compare with
+    nodes_readable: bool = True    # False when /dev/tenstorrent is missing or cannot be listed: check_bus blocks on that
 
 
 def _text(path: Path) -> str | None:
@@ -134,6 +134,11 @@ def check_bus(bus: Bus, gozer_text: str, needed: int) -> Check:
     if len(bus.chips) < needed:
         blocks.append(f"only {len(bus.chips)} of the {needed} chips the configuration needs are on the PCIe bus. "
                       + RESET_DOES_NOT_HELP)
+    if not bus.nodes_readable and needed > 0:
+        # Without the device directory no chip can be opened, whatever sysfs shows. This is one finding for the box; the
+        # per-chip check below needs a readable directory to compare with, so it stays quiet here.
+        blocks.append(f"{DEV_NODES} cannot be read (it is missing or cannot be listed), so no chip can be opened. Check that the tenstorrent "
+                      "driver is loaded (`lsmod | grep tenstorrent`) and that this user can list the directory")
     for c in bus.chips:
         if c.power_state is None:
             warns.append(f"{c.bdf}: its power state could not be read")
