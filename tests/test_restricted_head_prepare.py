@@ -92,3 +92,21 @@ def test_the_builder_is_found_in_the_skills_tree_when_it_was_not_copied(tmp_path
     r = subprocess.run([sys.executable, str(work / "prepare_restricted_head.py")], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     assert (work / "parity-model-dir" / "config.json").exists() and (work / "parity-run.sh").exists()     # next to this script, not to the builder
+
+
+def test_the_record_and_the_absent_notes_come_from_the_shared_builder(tmp_path):
+    stage, r = build(tmp_path)
+    assert r.returncode == 0, r.stderr
+    rec = json.loads((stage / "parity-model-dir-sources.json").read_text())
+    assert rec["absent"] == ["tokenizer_config.json", "chat_template.jinja", "generation_config.json"]
+    assert rec["generation_config"] == "absent" and rec["copied"] == ["config.json"]
+    assert not (stage / "parity-model-dir" / "parity-model-dir-sources.json").exists()
+    assert ("absent from the model snapshot: tokenizer_config.json, chat_template.jinja, generation_config.json "
+            "(recorded in parity-model-dir-sources.json)") in r.stdout
+    assert "never generates" in r.stdout
+
+
+def test_no_record_is_left_when_the_snapshot_is_refused(tmp_path):
+    stage, r = build(tmp_path, shards=False)
+    assert r.returncode == 2
+    assert not (stage / "parity-model-dir-sources.json").exists()

@@ -111,6 +111,17 @@ def write_sources(copied: list[str], linked: list[str], absent: list[str]) -> Pa
     return path
 
 
+def absent_notes(absent: list[str]) -> list[str]:
+    """The lines to print for the optional files the snapshot does not have (nothing when none are absent)."""
+    lines = []
+    if absent:
+        lines.append(f"  absent from the model snapshot: {', '.join(absent)} (recorded in parity-model-dir-sources.json)")
+    if "generation_config.json" in absent:
+        lines.append("  generation_config.json is absent from the model snapshot. hidden_parity.py loads weights and runs "
+                     "the layers; it never generates, so this check needs no stop token or sampling defaults.")
+    return lines
+
+
 def edit_run_script(text: str, bundle: Path, script: Path, model_dir: Path, cache: str) -> tuple[str, list[str]]:
     """Apply the edits to run.sh's text. Returns (new text, notes about optional edits)."""
     text, n = re.subn(r"^HERE=.*$", lambda m: f'HERE="{bundle}"', text, flags=re.MULTILINE)
@@ -163,11 +174,8 @@ def main() -> int:
     print(f'  HERE="{bundle}"; exec hidden_parity.py; HF_MODEL and MODEL_WEIGHTS_DIR={model_dir}')
     for note in notes:
         print(f"  {note}")
-    if absent:
-        print(f"  absent from the model snapshot: {', '.join(absent)} (recorded in parity-model-dir-sources.json)")
-    if "generation_config.json" in absent:
-        print("  generation_config.json is absent from the model snapshot. hidden_parity.py loads weights and runs "
-              "the layers; it never generates, so this check needs no stop token or sampling defaults.")
+    for line in absent_notes(absent):
+        print(line)
     return 0
 
 
