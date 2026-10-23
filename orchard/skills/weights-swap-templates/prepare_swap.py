@@ -339,6 +339,11 @@ def model_hidden_size(new: Path) -> int | None:
 def plan_mtp_graft(base: Path, new: Path) -> dict:
     """Check that the nearest model's `mtp.*` tensors can be grafted onto the new model, and say where they are.
     Exits 2 with the reason when they cannot. Nothing is written here."""
+    if os.path.lexists(new / GRAFT_SHARD):
+        # The name is reserved. model-dir links every *.safetensors of the new model, so a file with this name would be
+        # replaced by the graft and its own tensors would be missing; the package's launcher would write through the link.
+        fail(f"the new model ships a file named {GRAFT_SHARD}, the name the graft uses for its shard; the graft would "
+             "replace it, so this model cannot be grafted")
     has = has_mtp_tensors(new)
     if has is True:
         fail("graft_mtp is set, but the new model already has mtp.* tensors; there is nothing to graft")
@@ -384,6 +389,8 @@ def plan_mtp_graft(base: Path, new: Path) -> dict:
 
 def write_graft_shard(plan: dict, dest: Path) -> tuple[str, int]:
     """Write the grafted shard (the tensors in name order, bytes copied as they are). Returns (sha256, byte count)."""
+    if os.path.lexists(dest):
+        fail(f"{dest} already exists; the graft shard is only ever written to a new file, never through a link")
     header, off = {"__metadata__": {"format": "pt"}}, 0
     for name, e in sorted(plan["entries"].items()):
         n = e["data_offsets"][1] - e["data_offsets"][0]

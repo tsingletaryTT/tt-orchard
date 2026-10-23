@@ -259,6 +259,8 @@ def test_a_package_that_adds_the_graft_at_stage_7_still_needs_every_stage_2_weig
     ("the nearest model has none", lambda w: real_file(w["base"], SHARD_FILE, dict(BACKBONE)), "no mtp."),
     ("the model's weights cannot be read", lambda w: Path(os.path.realpath(w["snapshot"] / SHARD_FILE)).write_text("text"),
      "cannot tell"),
+    ("the model ships a file with the graft shard's name",
+     lambda w: put_link(w["snapshot"], SHARD, b"ships its own"), "ships a file named"),
 ])
 def test_a_graft_that_cannot_be_made_stops_staging(world, what, change, reason):
     change(world)
@@ -623,3 +625,30 @@ def test_stage_2_and_the_package_build_byte_identical_shards(installed, tmp_path
 def test_the_readme_documents_the_flag():
     readme = (Path(__file__).resolve().parent.parent / "README.md").read_text()
     assert "- `--graft-mtp`:" in readme and "graft.json" in readme
+
+
+def put_models_own_file_named_like_the_shard(inst, tmp_path):
+    """The model's snapshot ships a link to a blob named like the graft shard (backbone tensors, no mtp.*)."""
+    mine = tmp_path / "ships.safetensors"
+    write_safetensors(mine, dict(BACKBONE))
+    return put_link(inst["snapshot"], SHARD, mine.read_bytes())
+
+
+def test_the_package_never_writes_through_a_models_own_file_with_the_shards_name(installed, tmp_path):
+    # The launcher links every *.safetensors of the model into model-dir; opening the shard's destination for
+    # writing would follow that link and truncate the model's cached blob.
+    blob = put_models_own_file_named_like_the_shard(installed, tmp_path)
+    before = blob.read_bytes()
+    r = prepare(installed)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert SHARD in r.stderr and "name" in r.stderr
+    assert blob.read_bytes() == before
+    assert not (installed["pkg"] / "model-dir").exists()
+
+
+def test_the_package_refuses_a_shard_destination_that_already_exists(installed):
+    # A file in base_config/ with the shard's name is copied into model-dir before the graft is written.
+    (installed["pkg"] / "base_config" / SHARD).write_bytes(b"in the way")
+    r = prepare(installed)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "already exists" in r.stderr
