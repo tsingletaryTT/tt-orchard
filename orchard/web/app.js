@@ -162,7 +162,14 @@ function boardEl(b, readings) {
 
 function renderMachine() {
   const m = S.machine;
-  if (!m || !changed($("machine"), [m.boards, m.coder, m.cpu_tier, m.disk_free_gb, m.gozer_ok, m.lab])) return;
+  if (!m) return;
+  // The top bar's chip is drawn on every poll, before the panel's change guard. An outage marks the chip unknown and leaves the
+  // panel's cache as it was, so when the machine answers again with the same facts the guard returns early and nothing else
+  // would put the chip right.
+  const chips = m.boards.flatMap((b) => b.chips);
+  const freeNow = chips.filter((c) => c.state === "FREE").length;
+  renderMachineChip(m, chips, freeNow);
+  if (!changed($("machine"), [m.boards, m.coder, m.cpu_tier, m.disk_free_gb, m.gozer_ok, m.lab])) return;
   const box = clear($("machine"));
   if (!m.gozer_ok) {
     box.append(h("p", { class: "muted" }, "gozer did not answer. Chip leases are unknown; check `gozer status`."));
@@ -187,7 +194,6 @@ function renderMachine() {
   }
   const free = all.filter((c) => c.state === "FREE").length;
   $("machine-note").textContent = all.length ? `${free} of ${all.length} chips free` : "";
-  renderMachineChip(m, all, free);
   renderReadings();
 }
 

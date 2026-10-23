@@ -166,7 +166,7 @@ def test_the_chip_text_is_built_from_the_same_data_as_the_rail_panel():
     assert 'dataset.tone' in body or 'data-tone' in body
     rm = js[js.index("function renderMachine()"):]
     rm = rm[:rm.index("\n}\n")]
-    assert "renderMachineChip(m, all, free)" in rm, "renderMachine must feed the chip"
+    assert "renderMachineChip(m, chips, freeNow)" in rm, "renderMachine must feed the chip"
 
 
 def test_the_chip_has_tone_rules_in_both_styles():
@@ -466,3 +466,33 @@ def test_the_resume_confirmation_says_the_ledger_records_a_resume_after_the_abor
     body = js[start:js.index("if (!ok) return;", start)]
     assert "resume after the abort" in body
     assert "The ledger records it as a retry." in body            # the blocked and stopped wording is unchanged
+
+
+# ---- PR 53 review: the chip recovers after an outage and the Options line follows a picked base ---------------
+
+def function_body(js, signature):
+    start = js.index(signature)
+    brace = js.index("{", start)
+    depth, i = 0, brace
+    while i < len(js):
+        depth += js[i] == "{"
+        depth -= js[i] == "}"
+        if depth == 0:
+            return js[brace:i + 1]
+        i += 1
+    raise AssertionError(f"no end for {signature}")
+
+
+def test_the_machine_chip_is_drawn_before_the_rail_panels_change_guard():
+    """An outage marks the chip unknown and leaves the panel's change cache as it was. When the machine answers again with the
+    same facts the panel returns early, so the chip must not depend on getting past that guard."""
+    body = function_body(JS(), "function renderMachine()")
+    draw = body.index("renderMachineChip(m, chips, freeNow)")
+    guard = body.index('changed($("machine")')
+    assert draw < guard
+    assert body.count("renderMachineChip(") == 1                      # drawn once, and only there
+
+
+def test_an_outage_still_marks_the_chip_unknown():
+    body = function_body(JS(), "async function refreshRuns()")
+    assert "renderMachineChip(null, [], 0)" in body and body.index("catch") < body.index("renderMachineChip(null, [], 0)")
