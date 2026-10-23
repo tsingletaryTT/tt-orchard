@@ -510,6 +510,10 @@ A blocked run lists what was tried and how to unblock, and ends with **Retry run
 
 ![A blocked run: the Blocked panel with what was tried, how to unblock and Retry run](docs/ui/operator-blocked-run.png)
 
+In Playful style the same panel sits under the farm, which is in frost while the run is blocked.
+
+![Playful style, a blocked run: the frozen farm, then the Blocked panel ending in Retry run](docs/ui/playful-blocked-run.png)
+
 In the New bring-up dialog **Run checks** is the main button until the checks pass. The base, the where-tests-run choice and
 the research setting are under **Options**, and the line says what they are now.
 
