@@ -317,6 +317,43 @@ def graft_problems(pkg: Path, *, nearest_model: str, base_revision: str) -> list
     return out
 
 
+GRAFT_IDENTITY = ("repo", "revision", "file", "shard", "tensors", "sha256")
+
+
+def graft_evidence_problems(pkg: Path, verify) -> list[str]:
+    """How a staged profile's graft.json differs from the graft the boot check served; empty when they agree.
+
+    The boot check (verify_bundle.py) records, in verify.json's `graft`, the graft.json its installed copy read and the
+    sha256 of the shard that copy's launcher built. graft.json's digest is only a format until it is compared with
+    that: a package whose digest was edited after the boot check would pass every other check and then refuse to start.
+    Every profile is compared, so an optional profile that was never booted cannot carry another graft."""
+    has = (pkg / GRAFT_FILE).is_file()
+    served = verify.get("graft") if isinstance(verify, dict) else None
+    if not has:
+        return ["the boot check served a graft, but this profile has no graft.json"] if isinstance(served, dict) and served else []
+    if not isinstance(verify, dict):
+        return []            # no boot check evidence at all: the gate already says so
+    if not isinstance(served, dict) or not served:
+        return [f"{GRAFT_FILE} cannot be checked against the boot check: its verify.json records no graft"]
+    try:
+        g = json.loads((pkg / GRAFT_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []            # graft_problems reports an unreadable graft.json
+    if not isinstance(g, dict):
+        return []
+    out = []
+    for key in GRAFT_IDENTITY:
+        mine, theirs = g.get(key), served.get(key)
+        if key == "tensors" and isinstance(mine, list) and isinstance(theirs, list):
+            mine, theirs = sorted(map(str, mine)), sorted(map(str, theirs))
+        if mine != theirs:
+            out.append(f"{GRAFT_FILE}'s {key} is {mine!r}; the boot check served {theirs!r}")
+    if served.get("served_shard_sha256") != g.get("sha256"):
+        out.append(f"the boot check's served_shard_sha256 is {served.get('served_shard_sha256')!r}; "
+                   f"{GRAFT_FILE}'s sha256 is {g.get('sha256')!r}")
+    return out
+
+
 def _once(pattern: str, repl: str, text: str, what: str, flags=0) -> str:
     out, n = re.subn(pattern, lambda m: repl, text, flags=flags)
     if n != 1:

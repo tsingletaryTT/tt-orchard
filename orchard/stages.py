@@ -752,7 +752,7 @@ def gate_package(stage_dir, run_dir) -> GateResult:
     weights, the card, the boot check's verify.json and the publish commands. package.json only
     says where to look."""
     # Imported here: orchard.package imports this module.
-    from orchard.package import (GRAFT_FILE, PUBLISH_FILE, PackageError, graft_problems, publish_problems,
+    from orchard.package import (GRAFT_FILE, PUBLISH_FILE, PackageError, graft_evidence_problems, graft_problems, publish_problems,
                                  read_reported, serving_problems, split_model_id, stage_2_serving,
                                  weights_wiring_problems)
     from orchard.package_card import card_evidence_paths, card_problems, read_license
@@ -787,6 +787,7 @@ def gate_package(stage_dir, run_dir) -> GateResult:
         reported, reported_source = (), ""
     sidecars = [s.get("file") for s in delta.get("sidecars") or () if isinstance(s, dict)]
     profiles = d.get("profiles") if isinstance(d.get("profiles"), list) else []
+    boot_check, _ = _load(Path(stage_dir) / "verify" / "evidence", "verify.json")
     if not any(isinstance(p, dict) and p.get("required") and p.get("verified") is True
                for p in profiles):
         failed = [p.get("verify", {}).get("failed") for p in profiles if isinstance(p, dict)]
@@ -817,6 +818,7 @@ def gate_package(stage_dir, run_dir) -> GateResult:
             reasons += [f"profile {name}: {x}" for x in
                         graft_problems(out, nearest_model=nearest_repo,
                                        base_revision=Path(swap.get("base_snapshot") or "").name)]
+        reasons += [f"profile {name}: {x}" for x in graft_evidence_problems(out, boot_check)]
         reasons += [f"profile {name}: {x}" for x in
                     serving_problems(run_sh, m.get("env") or {},
                                      drafter_off=drafter_off and not (graft_expected or has_graft),

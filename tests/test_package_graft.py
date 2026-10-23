@@ -72,11 +72,27 @@ def stage(w, **kw):
     return stage_dir, stage_all(w["run"], stage_dir, namespace="episod", models_root=w["models"], env=w["env"], **kw)
 
 
+def boot_checked_graft(stage_dir: Path, pkg: Path, **changes) -> dict:
+    """What verify_bundle.py records about the graft it served: graft.json as the installed copy read it and the
+    sha256 of the shard the copy's launcher built (here, the one graft.json promises)."""
+    g = json.loads((pkg / "graft.json").read_text())
+    record = {k: g[k] for k in ("repo", "revision", "file", "shard", "tensors", "sha256")}
+    record["served_shard_sha256"] = g["sha256"]
+    record.update(changes)
+    path = stage_dir / "verify/evidence/verify.json"
+    v = json.loads(path.read_text())
+    v["graft"] = record
+    path.write_text(json.dumps(v))
+    return record
+
+
 def finished(w):
     stage_dir, package = stage(w, graft_mtp=True)
     fake_boot_result(stage_dir)
+    pkg = w["run"] / package["profiles"][0]["dir"]
+    boot_checked_graft(stage_dir, pkg)
     finish(w["run"], stage_dir)
-    return stage_dir, w["run"] / package["profiles"][0]["dir"]
+    return stage_dir, pkg
 
 
 # ---- staging ----------------------------------------------------------------------------------------
@@ -407,6 +423,85 @@ def test_the_gate_fails_a_graft_json_that_does_not_describe_the_graft(world, key
     assert any("graft.json" in r and reason in r for r in reasons), reasons
 
 
+def edit_graft_json(pkg: Path, **changes):
+    g = json.loads((pkg / "graft.json").read_text())
+    g.update(changes)
+    (pkg / "graft.json").write_text(json.dumps(g))
+
+
+def test_the_gate_fails_a_graft_json_digest_the_boot_check_did_not_test(world):
+    # Another valid-looking digest: the package would exit 2 at every start, and nothing else would notice.
+    stage_dir, pkg = finished(world)
+    edit_graft_json(pkg, sha256="f" * 64)
+    reasons = gate_package(stage_dir, world["run"]).reasons
+    assert any("graft.json" in r and "boot check" in r and "sha256" in r for r in reasons), reasons
+
+
+@pytest.mark.parametrize("key, value", [("repo", "Someone/Else"), ("revision", "e" * 40), ("file", "model-9.safetensors"),
+                                        ("shard", "other-shard.safetensors"), ("tensors", ["mtp.fc.weight"])])
+def test_the_gate_fails_a_graft_json_that_differs_from_the_one_the_boot_check_served(world, key, value):
+    stage_dir, pkg = finished(world)
+    edit_graft_json(pkg, **{key: value})
+    reasons = gate_package(stage_dir, world["run"]).reasons
+    assert any("graft.json" in r and "boot check" in r and key in r for r in reasons), reasons
+
+
+def test_the_gate_fails_when_the_shard_the_boot_check_served_is_not_the_one_graft_json_promises(world):
+    stage_dir, pkg = finished(world)
+    boot_checked_graft(stage_dir, pkg, served_shard_sha256="0" * 64)
+    reasons = gate_package(stage_dir, world["run"]).reasons
+    assert any("boot check" in r and "served_shard_sha256" in r for r in reasons), reasons
+
+
+@pytest.mark.parametrize("record", [None, "text", ["list"], {}])
+def test_the_gate_fails_when_the_boot_check_recorded_no_graft(world, record):
+    stage_dir, pkg = finished(world)
+    path = stage_dir / "verify/evidence/verify.json"
+    v = json.loads(path.read_text())
+    if record is None:
+        v.pop("graft")
+    else:
+        v["graft"] = record
+    path.write_text(json.dumps(v))
+    reasons = gate_package(stage_dir, world["run"]).reasons
+    assert any("graft.json" in r and "boot check" in r and "records no graft" in r for r in reasons), reasons
+
+
+def test_the_gate_says_nothing_about_the_graft_when_there_is_no_boot_check_evidence_at_all(world):
+    stage_dir, pkg = finished(world)
+    (stage_dir / "verify/evidence/verify.json").unlink()
+    reasons = gate_package(stage_dir, world["run"]).reasons
+    assert reasons and not any("records no graft" in r for r in reasons), reasons
+
+
+def test_the_digest_the_boot_check_read_in_graft_json_must_be_the_staged_one_even_when_the_served_shard_matches(world):
+    stage_dir, pkg = finished(world)
+    boot_checked_graft(stage_dir, pkg, sha256="f" * 64)          # the copy's graft.json said another digest
+    reasons = gate_package(stage_dir, world["run"]).reasons
+    assert any("graft.json's sha256" in r for r in reasons), reasons
+
+
+def test_the_order_of_the_tensor_list_does_not_matter(world):
+    stage_dir, pkg = finished(world)
+    g = json.loads((pkg / "graft.json").read_text())
+    boot_checked_graft(stage_dir, pkg, tensors=list(reversed(g["tensors"])))
+    assert gate_package(stage_dir, world["run"]).ok
+
+
+def test_the_gate_fails_a_profile_without_graft_json_when_the_boot_check_served_a_graft(world):
+    stage_dir, pkg = finished(world)
+    (pkg / "graft.json").unlink()
+    reasons = gate_package(stage_dir, world["run"]).reasons
+    assert any("boot check served a graft" in r for r in reasons), reasons
+
+
+def test_a_package_that_is_not_grafted_is_not_asked_for_graft_evidence(world):
+    stage_dir, package = stage(world)
+    fake_boot_result(stage_dir)
+    finish(world["run"], stage_dir)
+    assert gate_package(stage_dir, world["run"]).ok
+
+
 @pytest.mark.parametrize("phrase", [f"mtp.* tensors of {BASE}", "added at each start", "`graft.json`"])
 def test_the_gate_fails_a_card_that_does_not_mention_the_graft(world, phrase):
     stage_dir, pkg = finished(world)
@@ -652,3 +747,33 @@ def test_the_package_refuses_a_shard_destination_that_already_exists(installed):
     r = prepare(installed)
     assert r.returncode == 2, r.stdout + r.stderr
     assert "already exists" in r.stderr
+
+
+def test_the_real_boot_check_records_the_graft_it_served(world, tmp_path):
+    """verify_bundle.py against the fake server: the installed copy builds its shard, and verify.json says which."""
+    import signal
+    from package_fakes import GENERATED, PROMPT_IDS, VOCAB
+    stage_dir, package = stage(world, graft_mtp=True)          # stage_all also installs the copy and lays out the check
+    pkg = world["run"] / package["profiles"][0]["dir"]
+    verify = stage_dir / "verify"
+    cfg = json.loads((verify / "verify_config.json").read_text())
+    cfg["health_timeout_s"] = 60
+    (verify / "verify_config.json").write_text(json.dumps(cfg))
+    pid_file = tmp_path / "server-pid.json"
+    Path(world["env"]["FAKE_SWAP_CONFIG"]).write_text(json.dumps(
+        {"mode": "perfect", "vocab": VOCAB, "prompt_ids": PROMPT_IDS, "generated_ids": GENERATED, "pid_file": str(pid_file)}))
+    clean = {k: v for k, v in world["env"].items() if k not in ("MODEL_WEIGHTS_DIR", "HF_MODEL")}
+    try:
+        done = subprocess.run([sys.executable, str(verify / "verify_bundle.py")], capture_output=True, text=True,
+                              timeout=180, env=clean, cwd=world["run"])
+    finally:
+        if pid_file.exists():
+            try:
+                os.killpg(json.loads(pid_file.read_text())["pgid"], signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    assert done.returncode == 0, done.stdout + done.stderr
+    recorded = json.loads((verify / "evidence/verify.json").read_text())["graft"]
+    staged = json.loads((pkg / "graft.json").read_text())
+    assert recorded["sha256"] == staged["sha256"] == recorded["served_shard_sha256"]
+    assert recorded["tensors"] == staged["tensors"] and recorded["revision"] == staged["revision"]
