@@ -600,3 +600,14 @@ html[data-mode="operator"] #verdict h2 { font-size: .8rem; letter-spacing: .08em
 #verdict .verdict-item[data-tone="warn"] { border-left-color: var(--warn); background: var(--warn-bg); }
 #verdict .verdict-item[data-tone="good"] { border-left-color: var(--good); background: var(--good-bg); }
 #verdict .verdict-item[data-tone="info"] { border-left-color: var(--dim); background: var(--paper-2); }
+
+/* the New bring-up dialog: the options that rarely change are folded under one line */
+.nr-options { margin: 4px 0 12px; border: 1px solid var(--line); border-radius: 4px; background: var(--paper-2); }
+.nr-options > summary { cursor: pointer; padding: 8px 12px; font-weight: 600; font-size: .9rem; list-style: none; }
+.nr-options > summary::before { content: "▸ "; color: var(--muted); }
+.nr-options[open] > summary::before { content: "▾ "; }
+.nr-options > summary::-webkit-details-marker { display: none; }
+.nr-options[open] > summary { border-bottom: 1px solid var(--line); }
+.nr-options > .field { padding: 0 12px; margin: 12px 0 0; }
+.nr-options > .field:last-child { padding-bottom: 12px; }
+.nr-options label .muted { font: 400 .82rem var(--font); letter-spacing: 0; }

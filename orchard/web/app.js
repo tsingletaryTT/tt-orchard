@@ -871,11 +871,27 @@ function openNewRun() {
     : "No [lab] table in the config: the run stays on this box.";
   $("nr-result").hidden = true;
   $("nr-error").hidden = true;
-  $("nr-start").disabled = true;
+  setStartReady(false);
   $("nr-check").disabled = false;
   $("nr-check").textContent = "Run checks";
+  updateOptionsSummary();
   $("new-run").showModal();
   $("nr-model").focus();
+}
+
+// Run checks is the main button until the checks pass; then Start is. `ready` means the last check passed and nothing has changed since.
+function setStartReady(ready) {
+  $("nr-start").disabled = !ready;
+  $("nr-start").classList.toggle("btn-primary", ready);
+  $("nr-check").classList.toggle("btn-primary", !ready);
+}
+
+// The options are folded away because they rarely change, so the closed line says what they are now.
+function updateOptionsSummary() {
+  const where = $("nr-mode").value === "lab" ? "the lab box" : "this box";
+  const research = { full: "full research", "no-github": "research without GitHub", offline: "no research" }[$("nr-research").value] || "full research";
+  const base = $("nr-base").value.trim();
+  $("nr-options-summary").textContent = `Options: ${where}, ${research}${base ? `, base ${base}` : ""}`;
 }
 
 function formError(text) {
@@ -887,10 +903,10 @@ async function runChecks() {
   const model = $("nr-model").value.trim(), base = $("nr-base").value.trim();
   formError("");
   if (!MODEL_RE.test(model)) { formError("Enter the model as org/name, for example Altworld/Hemmingway-1."); $("nr-model").focus(); return; }
-  if (base && !MODEL_RE.test(base)) { formError("The base must be org/name, or left empty."); $("nr-base").focus(); return; }
+  if (base && !MODEL_RE.test(base)) { formError("The base must be org/name, or left empty."); $("nr-options").open = true; $("nr-base").focus(); return; }
   $("nr-check").disabled = true;
   $("nr-check").textContent = "Checking…";
-  $("nr-start").disabled = true;
+  setStartReady(false);
   try {
     const out = await api("/api/preflight", { body: { model, base: base || null, mode: $("nr-mode").value, research: $("nr-research").value } });
     out.mode = $("nr-mode").value;
@@ -991,7 +1007,7 @@ function renderPreflight(out) {
         onchange: () => { $("nr-base").value = c.name; runChecks(); } }),
       h("span", { class: "mono" }, c.name), h("span", { class: "muted" }, c.installed ? "installed" : "installs with tt-model pull"))));
   }
-  $("nr-start").disabled = !out.ok;
+  setStartReady(out.ok);
   if (!out.ok) formError("A check blocks the run. Fix it, or choose a base below, and run the checks again.");
 }
 
@@ -1028,8 +1044,8 @@ function wire() {
   setInterval(renderNow, 1000);
   $("machine-chip").addEventListener("click", () => setView("hardware"));
   $("machine-details-link").addEventListener("click", (ev) => { ev.preventDefault(); setView("hardware"); });
-  $("nr-mode").addEventListener("change", () => { $("nr-start").disabled = true; });
-  $("nr-research").addEventListener("change", () => { $("nr-start").disabled = true; });
+  $("nr-mode").addEventListener("change", () => { setStartReady(false); updateOptionsSummary(); });
+  $("nr-research").addEventListener("change", () => { setStartReady(false); updateOptionsSummary(); });
   $("hw-zoom-in").addEventListener("click", () => zoomToplike(+1));
   $("hw-zoom-out").addEventListener("click", () => zoomToplike(-1));
   $("hw-wide").addEventListener("click", () => {
@@ -1046,7 +1062,7 @@ function wire() {
   $("nr-cancel").addEventListener("click", () => $("new-run").close());
   $("new-run-form").addEventListener("submit", (ev) => { ev.preventDefault(); runChecks(); });
   $("nr-start").addEventListener("click", startBringup);
-  for (const id of ["nr-model", "nr-base"]) $(id).addEventListener("input", () => { $("nr-start").disabled = true; });
+  for (const id of ["nr-model", "nr-base"]) $(id).addEventListener("input", () => { setStartReady(false); updateOptionsSummary(); });
 
   for (const t of TABS) $(`tab-${t}`).addEventListener("click", () => setTab(t));
   $("tabs").addEventListener("keydown", (ev) => {

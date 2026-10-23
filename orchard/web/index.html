@@ -323,28 +323,31 @@
       <input id="nr-model" name="model" type="text" placeholder="org/name" autocomplete="off" spellcheck="false" required>
       <p class="field-help">For example <span class="mono">Altworld/Hemmingway-1</span>.</p>
     </div>
-    <div class="field">
-      <label for="nr-base">Base <span class="muted">(optional)</span></label>
-      <input id="nr-base" name="base" type="text" placeholder="the model card's base_model" autocomplete="off" spellcheck="false">
-      <p class="field-help">A tt-model bundle or model id to base the run on. Leave empty to use the model card.</p>
-    </div>
-    <div class="field">
-      <label for="nr-mode">Where the hardware tests run</label>
-      <select id="nr-mode">
-        <option value="local">This box</option>
-        <option value="lab">The lab box</option>
-      </select>
-      <span class="field-help" id="nr-mode-help"></span>
-    </div>
-    <div class="field">
-      <label for="nr-research">Base-model research</label>
-      <select id="nr-research">
-        <option value="full">Hub, tt-model, tt-metal and GitHub</option>
-        <option value="no-github">Without GitHub issue and code searches</option>
-        <option value="offline">Off (no requests)</option>
-      </select>
-      <span class="field-help">Looks for the model this one was made from, ranks the bundles that could serve it and estimates the class from the safetensors headers, before any download.</span>
-    </div>
+    <details class="nr-options" id="nr-options">
+      <summary id="nr-options-summary">Options: this box, full research</summary>
+      <div class="field">
+        <label for="nr-base">Base <span class="muted">(optional)</span></label>
+        <input id="nr-base" name="base" type="text" placeholder="the model card's base_model" autocomplete="off" spellcheck="false">
+        <p class="field-help">A tt-model bundle or model id to base the run on. Leave empty to use the model card.</p>
+      </div>
+      <div class="field">
+        <label for="nr-mode">Where the hardware tests run <span class="muted">(this run only; the default is set in Models)</span></label>
+        <select id="nr-mode">
+          <option value="local">This box</option>
+          <option value="lab">The lab box</option>
+        </select>
+        <span class="field-help" id="nr-mode-help"></span>
+      </div>
+      <div class="field">
+        <label for="nr-research">Base-model research</label>
+        <select id="nr-research">
+          <option value="full">Hub, tt-model, tt-metal and GitHub</option>
+          <option value="no-github">Without GitHub issue and code searches</option>
+          <option value="offline">Off (no requests)</option>
+        </select>
+        <span class="field-help">Looks for the model this one was made from, ranks the bundles that could serve it and estimates the class from the safetensors headers, before any download.</span>
+      </div>
+    </details>
     <p class="form-error" id="nr-error" role="alert" hidden></p>
     <div id="nr-result" class="preflight" hidden>
       <p class="preflight-run" id="nr-run"></p>
@@ -357,8 +360,8 @@
     </div>
     <div class="dialog-actions">
       <button type="button" class="btn" id="nr-cancel">Cancel</button>
-      <button type="submit" class="btn" id="nr-check">Run checks</button>
-      <button type="button" class="btn btn-primary" id="nr-start" disabled>Start bring-up</button>
+      <button type="submit" class="btn btn-primary" id="nr-check">Run checks</button>
+      <button type="button" class="btn" id="nr-start" disabled>Start bring-up</button>
     </div>
   </form>
 </dialog>

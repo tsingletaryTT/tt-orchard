@@ -260,3 +260,71 @@ def test_opening_the_machine_view_reads_the_last_check_and_models_does_not():
     ls = js[js.index("async function loadSettings"):]
     ls = ls[:ls.index("\n}\n")]
     assert "pollChecks" not in ls
+
+
+# ---- the New bring-up dialog: the button you can press is the main one; the rarely changed options are folded -----------------
+
+def fn_body(js, header):
+    start = js.index(header)
+    return js[start:js.index("\n}\n", start)]
+
+
+def test_run_checks_is_the_primary_button_before_the_checks_pass_and_start_is_not():
+    t = page()
+    assert "btn-primary" in by_id(t, "nr-check").classes
+    start = by_id(t, "nr-start")
+    assert "btn-primary" not in start.classes and "disabled" in start.attrs
+
+
+def test_one_function_moves_the_primary_style_and_the_disabled_state_together():
+    js = JS()
+    body = fn_body(js, "function setStartReady")
+    assert '$("nr-start").disabled = !ready' in body
+    assert '$("nr-start").classList.toggle("btn-primary", ready)' in body
+    assert '$("nr-check").classList.toggle("btn-primary", !ready)' in body
+    for header in ("function openNewRun", "async function runChecks", "function renderPreflight"):
+        assert "setStartReady(" in fn_body(js, header), header
+    for header in ("function openNewRun", "async function runChecks", "function renderPreflight"):
+        assert '$("nr-start").disabled' not in fn_body(js, header).replace('$("nr-start").disabled = !ready', ""), header
+    wire = fn_body(js, "function wire")
+    assert 'setStartReady(false)' in wire[wire.index('$("nr-mode").addEventListener'):wire.index('$("nr-mode").addEventListener') + 300]
+
+
+def test_base_where_and_research_sit_in_a_closed_options_disclosure_under_the_model():
+    t = page()
+    opts = by_id(t, "nr-options")
+    assert opts.tag == "details" and "open" not in opts.attrs
+    for ident in ("nr-base", "nr-mode", "nr-research"):
+        assert by_id(t, ident).inside(opts), ident
+    assert not by_id(t, "nr-model").inside(opts)
+    summary = by_id(t, "nr-options-summary")
+    assert summary.tag == "summary" and summary.all_text().startswith("Options:")
+    assert order(t, "nr-model", "nr-options", "nr-error", "nr-check") == ["nr-model", "nr-options", "nr-error", "nr-check"]
+
+
+def test_the_options_summary_states_the_current_values_and_follows_every_option():
+    js = JS()
+    body = fn_body(js, "function updateOptionsSummary")
+    for word in ("this box", "the lab box", "full research", "no research", "research without GitHub"):
+        assert word in body, word
+    assert 'value === "lab" ? "the lab box" : "this box"' in body
+    assert '${base ? `, base ${base}` : ""}' in body
+    assert "updateOptionsSummary()" in fn_body(js, "function openNewRun")
+    wire = fn_body(js, "function wire")
+    for ident in ("nr-mode", "nr-research"):
+        assert re.search(rf'\$\("{ident}"\)\.addEventListener\("change"[^\n]*updateOptionsSummary\(\)', wire), ident
+    assert re.search(r'for \(const id of \["nr-model", "nr-base"\]\) \$\(id\)\.addEventListener\("input"[^\n]*updateOptionsSummary\(\)', wire)
+
+
+def test_a_bad_base_opens_the_options_before_it_takes_focus():
+    body = fn_body(JS(), "async function runChecks")
+    i = body.index('$("nr-base").focus()')
+    assert '$("nr-options").open = true' in body[:i]
+
+
+def test_the_where_tests_run_label_says_it_applies_to_this_run_and_where_the_default_is_set():
+    t = page()
+    labels = [n for n in t.root.walk() if n.tag == "label" and n.attrs.get("for") == "nr-mode"]
+    assert len(labels) == 1
+    text = labels[0].all_text()
+    assert "this run only" in text and "Models" in text and text.startswith("Where the hardware tests run")
