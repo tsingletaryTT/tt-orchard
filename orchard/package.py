@@ -53,6 +53,7 @@ from pathlib import Path
 from orchard.defaults import (PACKAGE_HEALTH_TIMEOUT_S, PACKAGE_INSTALL_TIMEOUT_S,
                               PACKAGE_THIN_TIMEOUT_S, PACKAGE_VERIFY_DEADLINE_S)
 from orchard.graft_trial import DECISION_FILE, TRIAL_DIR, TRIAL_RESULT, read_decision
+from orchard.card_use import read_use_facts
 from orchard.package_card import (CardFacts, Number, Reported, card_evidence_paths, inside, non_commercial,
                                   read_license, render_card)
 from orchard.scrub import HOME_PATH, scrub_package
@@ -1133,6 +1134,9 @@ def write_card(out: Path, facts: RunFacts, profile: dict, *, namespace: str,
                     "from the Hub"]
     if drafters:
         not_measured.insert(0, "the drafter's acceptance rate on this model")
+    run_sh_path = out / "run.sh"
+    use = read_use_facts(facts.new_snapshot, run_sh_path.read_text(encoding="utf-8") if run_sh_path.is_file() else "",
+                         facts.run_dir)
     facts_card = CardFacts(
         name=profile["name"], namespace=namespace, model_id=facts.model_id, revision=facts.revision,
         nearest_model=facts.nearest_model, source_name=profile["source"],
@@ -1146,7 +1150,7 @@ def write_card(out: Path, facts: RunFacts, profile: dict, *, namespace: str,
         base_files=tuple(sorted(f.name for f in facts.base_config)),
         sampling_from_base=any(f.name == "generation_config.json" for f in facts.base_config),
         reported=facts.reported, reported_source=facts.reported_source,
-        graft=facts.graft, graft_decision=facts.graft_decision,
+        graft=facts.graft, graft_decision=facts.graft_decision, use=use,
         stage_2_without_graft=(facts.graft is not None and not facts.stage_2_grafted and facts.graft_decision != "graft"))
     (out / "README.md").write_text(render_card(facts_card), encoding="utf-8")
 

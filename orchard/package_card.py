@@ -332,7 +332,8 @@ def render_card(f: CardFacts) -> str:
 
 
 def card_evidence_paths(card: str) -> list[str]:
-    """Every file the Numbers table cites for a `measured` number, in order, without repeats."""
+    """Every file the Numbers table cites for a `measured` number, in order, without repeats, then the file the tool-call
+    sentence under Intended use cites, if it does."""
     section, _ = _numbers_section(card)
     seen: list[str] = []
     for row in (r for r in section.splitlines() if r.startswith("| ") and not r.startswith("| Number ")):
@@ -342,6 +343,10 @@ def card_evidence_paths(card: str) -> list[str]:
                 p = p.strip().strip("`")
                 if p and p != "-" and p not in seen:
                     seen.append(p)
+    intended, _ = _section(card, "## Intended use")
+    cited = re.search(r"In the runs recorded in `([^`]+)` the tool-use prompts", " ".join(intended.split()))
+    if cited and cited.group(1) not in seen:
+        seen.append(cited.group(1))
     return seen
 
 

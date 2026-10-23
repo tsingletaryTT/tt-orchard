@@ -757,3 +757,30 @@ def test_a_cut_off_row_that_is_not_measured_needs_no_warning(tmp_path):
 def test_a_cut_off_warning_needs_a_reasoning_parser_in_the_check_too(tmp_path):
     u = use_facts(reasoning_parser=None)
     assert use_problems(render_card(facts(use=u, numbers=(cutoff_number(2),))), u, tmp_path) == []
+
+
+# ---- the evidence file the tool-call sentence cites ships with the package -----------------------------------------
+
+def test_the_file_the_tool_call_sentence_cites_is_listed_with_the_numbers_evidence():
+    from orchard.package_card import card_evidence_paths
+    u = use_facts(tool_evidence=("stages/7/benchmark/speed.json", ("run_tests",)))
+    paths = card_evidence_paths(render_card(facts(use=u)))
+    assert paths[-1] == "stages/7/benchmark/speed.json" and "stages/2/result.json" in paths
+
+
+def test_a_file_cited_by_the_numbers_and_the_tool_call_sentence_is_listed_once():
+    from orchard.package_card import card_evidence_paths
+    u = use_facts(tool_evidence=("stages/2/result.json", ("run_tests",)))
+    assert card_evidence_paths(render_card(facts(use=u))).count("stages/2/result.json") == 1
+
+
+def test_a_card_without_the_tool_call_sentence_cites_only_its_numbers():
+    from orchard.package_card import card_evidence_paths
+    assert card_evidence_paths(render_card(facts(use=use_facts()))) == ["stages/2/result.json", "stages/2/evidence/swap-check.json"]
+
+
+def test_a_tool_call_sentence_outside_intended_use_does_not_add_evidence():
+    from orchard.package_card import card_evidence_paths
+    card = render_card(facts(use=use_facts())).replace(
+        "## Limitations", "## Limitations\n\nIn the runs recorded in `stages/9/other.json` the tool-use prompts returned tool calls.\n")
+    assert "stages/9/other.json" not in card_evidence_paths(card)
