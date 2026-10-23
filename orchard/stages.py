@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Callable
 
 from orchard.classes import CLASSES, SIDECAR_CLASSES, class_of_path, path_of
+from orchard.graft_trial import decision_problems
 from orchard.defaults import (COLD_START_S, LONG_STAGE_S, PACKAGE_FORMATS, RUN_COLD_BOOT_CAP,
                               RUN_ESCALATION_CAP, RUN_WALL_CLOCK_S, STAGE2_PCC_MIN,
                               STAGE4_SWAP_DISK_GB, STAGE_BUDGET_S, STAGE_DISK_GB, SWAP_MIN_TOKENS,
@@ -396,6 +397,7 @@ def gate_weights_swap(stage_dir, run_dir) -> GateResult:
     if err:
         return GateResult(False, (err,))
     reasons, seen = _swap_reasons(d), []
+    reasons += decision_problems(stage_dir, run_dir)         # the graft trial's decision, when stage 2 made one
     _evidence(run_dir, d.get("evidence"), "result.json", reasons, seen)
     return _done(reasons, seen)
 
@@ -453,6 +455,7 @@ def gate_weights_swap_sidecar(stage_dir, run_dir) -> GateResult:
     if err:
         return GateResult(False, (err,))
     reasons, seen = _swap_reasons(d), []
+    reasons += decision_problems(stage_dir, run_dir)
     delta, derr = _load(Path(run_dir) / "stages" / "0", "delta.json")
     if derr:
         reasons.append(f"stage 0's {derr}, so the sidecar parity cannot be tied to the files stage 0 recorded")

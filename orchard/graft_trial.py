@@ -105,10 +105,11 @@ def decide(trial, *, safe_top1) -> dict:
     return {"choice": "safe", "reason": reason, "numbers": numbers, "thresholds": _thresholds()}
 
 
-def write_decision(stage_dir, decision: dict, *, candidate: dict | None) -> Path:
-    """Write stages/2/graft-decision.json whole or not at all. It carries the candidate stage 0 recorded and where the trial's numbers are."""
+def write_decision(stage_dir, decision: dict, *, candidate: dict | None, trial: bool = True) -> Path:
+    """Write stages/2/graft-decision.json whole or not at all. It carries the candidate stage 0 recorded and where the trial's numbers are
+    (`trial` is None when no trial ran: the run opted out, or the trial cannot run there)."""
     sd = Path(stage_dir)
-    record = {**decision, "candidate": candidate, "trial": f"{TRIAL_DIR}/{TRIAL_RESULT}"}
+    record = {**decision, "candidate": candidate, "trial": f"{TRIAL_DIR}/{TRIAL_RESULT}" if trial else None}
     path = sd / DECISION_FILE
     tmp = sd / (DECISION_FILE + ".tmp")
     tmp.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
