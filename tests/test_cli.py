@@ -1014,3 +1014,10 @@ def test_package_card_replaces_reported_scores_only_when_asked(tmp_path, monkeyp
     cli.main(["package-card", str(tmp_path / "run"), "--benchmark", "b.json", "--model-key", "arex"],
              stdout=io.StringIO())
     assert seen["replace_reported"] is False and seen["reported"] is None and seen["base_key"] is None
+
+
+def test_bringup_leaves_the_graft_trial_on_by_default_and_passes_the_opt_out_to_the_supervisor(conf):
+    code, out, rec = run(conf, ["bringup", "Cloudflare/clef"])
+    assert "--no-graft-trial" not in rec.argv
+    code, out, rec = run(conf, ["bringup", "Cloudflare/clef", "--no-graft-trial"])
+    assert code == 0 and "--no-graft-trial" in rec.argv

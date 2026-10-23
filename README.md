@@ -672,6 +672,7 @@ python3 -m orchard.supervisor run --model MODEL --run-dir RUN_DIR --tiers TIERS
 | `--package-namespace` | with `--package-format` | Your Hugging Face namespace. Stage 7 writes it into the package card and the publish commands. The run never publishes |
 | `--package-models-root` | no | Where tt-model installs bundles. Stage 7 looks here for other chip counts of the nearest model. Default `{{TT_MODEL_ROOT}}`, which is `<operator home>/.cache/tt-model/models` |
 | `--unattended` | no | Never wait for an operator. When the run would pause, it names the reason (`needs-new-model-code`, `retry-budget-spent`, `stage-failed`, `agent-stuck`, `disk-full`, `hardware-unhealthy`, `coder-unusable`, `blocked` or `unclassified`), writes `BLOCKED.md` and `blocked.json` in the run directory, releases the hardware and exits 5. Running the same command again retries from the ledger. A pause the operator asked for with `control pause` still waits. `tt-orchard bringup` always passes it |
+| `--no-graft-trial` | no | Skip stage 2's graft trial (section 5.5c). The run records the choice, and a resume keeps it. `tt-orchard bringup` takes the same flag |
 | `--gozer` | no | The gozer executable. Default `gozer` from `PATH` |
 | `--tt-model-root` | no | Where tt-model installs bundles (`{{TT_MODEL_ROOT}}`). Default `<operator home>/.cache/tt-model/models`. Recorded and kept like `--cache-root` |
 | `--lab` | no | An ssh host to run every hardware test on (a lab box). The coder stays on this box and is never parked. See [5.9](#59-run-the-hardware-tests-on-a-lab-box). Recorded; a resume with another lab is refused |
@@ -1015,6 +1016,26 @@ checks again. It never removes the shared kernel cache, a cache an unfinished ru
 root. When the unused caches together cannot cover the shortfall it removes nothing. A shortfall on a hub disk that the
 caches do not share is not touched. With `--dry-run` it only says what it would remove. Deleting is opt-in: without the
 flag the run is refused as before. A removed cache is rebuilt by the next test that needs it (about 20 minutes).
+
+### 5.5c The graft trial (a drafter for a model that ships none)
+
+The nearest bundle's speculative drafter needs an `mtp.*` head in the served weights. A fine-tune that ships none is served
+with the drafter off and sampling on the host. When stage 0 finds that the model has no `mtp.*` tensors and the nearest model has
+a head that fits (`graft_candidate` in `delta.json`: the tensors are BF16, in one shard, and their width matches the model's
+hidden size), stage 2 tries the graft once, after the safe configuration has passed its gate. One more hardware test, under the same
+lease rules, times the safe configuration, serves the nearest model's head grafted onto the model (`graft_mtp`, in
+`stages/2/graft-trial/variant/`, with its own tensor cache) and times that. Both are timed with the same four prompts, three repetitions each,
+greedy, one request at a time.
+
+The graft is kept when the variant served, was coherent, agreed with the CPU reference at least as well as stage 2's bar, lost no
+more than 0.05 of top-1 agreement against the safe run, and decoded at least 1.25 times as fast (the three values are provisional,
+`orchard/defaults.py`). Otherwise the safe configuration stays. A trial that fails, times out or leaves no result does not fail the
+stage: the safe result stands and the reason is recorded. The decision is `stages/2/graft-decision.json` and a `graft decision` ledger
+entry. Stage 4's configurations, stage 7's package, the card and the stage 8 bundle follow it.
+
+The extra test adds a warm boot of the safe configuration (2 to 4 minutes), a cold boot of the variant (4 to 25 minutes measured for the
+Qwen3.8 bundle) and a warm boot of the variant, plus 12 timed requests each. `--no-graft-trial` (on `tt-orchard bringup` and on
+`supervisor run`) leaves it out. The drafter's acceptance rate is not measured: the server prints no counters.
 
 ### 5.6 The credentials preflight
 

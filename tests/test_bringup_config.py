@@ -387,3 +387,11 @@ def test_coder_keep_up_is_passed_in_lab_mode_only(tmp_path):
 def test_coder_keep_up_must_be_true_or_false(tmp_path):
     with pytest.raises(bc.BringupConfigError, match="coder.keep_up must be true or false"):
         load(tmp_path, LAB.replace("chips = 2\n", 'chips = 2\nkeep_up = "yes"\n', 1))
+
+
+def test_the_graft_trial_is_on_unless_the_caller_opts_out(tmp_path):
+    cfg = load(tmp_path, FULL)
+    assert "--no-graft-trial" not in bc.supervisor_argv(cfg, "Cloudflare/clef")
+    argv = bc.supervisor_argv(cfg, "Cloudflare/clef", graft_trial=False)
+    assert "--no-graft-trial" in argv and supervisor.parse(argv).no_graft_trial is True
+    assert supervisor.parse(bc.supervisor_argv(cfg, "Cloudflare/clef")).no_graft_trial is False
