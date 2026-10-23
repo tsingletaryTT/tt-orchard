@@ -425,3 +425,20 @@ def test_the_ui_shows_the_bus_row_and_refuses_a_launch_while_it_blocks(tmp_path,
     from orchard.webui import Conflict
     with pytest.raises(Conflict, match=r"bus \(hardware-unhealthy\)"):
         app.bringup("Cloudflare/clef")
+
+
+# ---- what the operator is told -------------------------------------------------------------------
+
+def test_the_unblock_steps_for_hardware_say_what_to_do_when_the_bus_row_blocks():
+    from orchard import narrate
+    line = next((x for x in narrate.UNBLOCK["hardware-unhealthy"] if "`bus`" in x), "")
+    assert "PCIe" in line and "D3cold" in line and "reboot" in line and "tt-smi -r" in line and "gozer status" in line
+
+
+def test_the_readme_documents_the_bus_row_between_gozer_and_base():
+    readme = (Path(__file__).resolve().parent.parent / "README.md").read_text(encoding="utf-8")
+    rows = [line for line in readme.splitlines() if line.startswith("| ")]
+    names = [line.split("|")[1].strip() for line in rows]
+    assert names.index("gozer") < names.index("bus") < names.index("base")
+    row = rows[names.index("bus")]
+    assert "D3cold" in row and "`hardware-unhealthy`" in row and "reads files" in row
