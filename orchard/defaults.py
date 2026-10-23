@@ -126,6 +126,14 @@ SIDECAR_PROB_DIFF_MAX = 0.25    # choice: about twice the measured maximum (0.12
 SIDECAR_NOISE_FACTOR = 4.0      # choice: the probability bar is at least this many times the CPU-versus-CPU
                                 # difference, so a bar below the reference's own noise is never applied
 SIDECAR_MIN_QUESTIONS = 10      # choice: fewest questions a parity result may rest on (the run had 16)
+# The prompt-suite check (issue 15): after the 32-token check, the stage 2 and stage 4 templates send a fixed set of
+# prompts (orchard/skills/weights-swap-templates/prompt_suite.json) and orchard/prompt_suite.py reads the replies for
+# the failure shapes the tenstorrent qualitative-check skill lists. Every number below is a choice. None was
+# calibrated on a measured model: no chip has run the suite yet, so each one is provisional and must be revisited
+# with the first measured controls (issue 15 asks for the bar to be set from them).
+SUITE_MIN_PROMPTS = 5           # choice: issue 15 asks for at least five prompts of different kinds
+SUITE_MAX_TOKENS = 64           # choice: long enough for a loop or a drift to show, short enough that eight
+                                # requests cost about a minute at 20 tokens/s (more with thinking on)
 SWAP_MIN_TOKENS = 16            # choice: the fewest compared tokens the weights-only gate accepts; the
                                 # skill's script compares 32
 AGENT_MAX_TURNS = 60            # choice: model turns in one agent step before the step counts as failed
