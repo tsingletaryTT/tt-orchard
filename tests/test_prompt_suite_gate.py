@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """The stage 2 and stage 4 swap gates read the prompt suite beside the 32-token check (issue 15).
 
-The gate reads evidence/swap-check.json, which the template wrote, not the agent's result.json: result.json is typed by an
-agent and the record in swap-check.json holds the raw replies, which orchard/prompt_suite.py judges. A swap-check.json
+The gate reads evidence/swap-check.json, which the template wrote. It ignores any suite summary in result.json, because an agent
+types result.json and the record in swap-check.json holds the raw replies, which orchard/prompt_suite.py judges. A swap-check.json
 without a suite record (an older run, or a config that did not ask for the suite) changes nothing."""
 import copy
 import json

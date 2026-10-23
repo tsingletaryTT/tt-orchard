@@ -269,7 +269,7 @@ def suite_preflight(cfg: dict) -> dict | None:
 def chat_template_info(model_dir: Path) -> dict:
     """Whether the tokenizer has a chat template, where it is, its sha256 and whether it mentions tools.
     model-dir/chat_template.jinja wins; else tokenizer_config.json's `chat_template` (a string, or a list of
-    {name, template} of which the one named "default" or else the first is used). A blank template is none."""
+    {name, template} of which the entry named "default" or else the first is used). A blank template is none."""
     text, source = None, None
     jinja = model_dir / "chat_template.jinja"
     if jinja.is_file():

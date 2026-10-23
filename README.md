@@ -965,6 +965,31 @@ Options: `--turns` (default 50), `--repeats` (default 5), `--sizes` (default `81
 `--thinking-off` (sends `enable_thinking=false`, as the loop does for the Qwen3.8 coder). Exit 0 passed,
 1 failed, 2 refused (a remote endpoint).
 
+### 5.3c The prompt suite in stages 2 and 4
+
+The 32-token check compares one prompt with the CPU reference. After it, the swap tests send eight fixed prompts
+(`orchard/skills/weights-swap-templates/prompt_suite.json`: a chat question, code, arithmetic, a multi-turn exchange, a
+Russian question, a tool call, a summary and a list format) and record the raw replies in `evidence/swap-check.json`.
+The prompt format follows the model's tokenizer: a chat template means the chat endpoint, none means plain
+continuation text. The supervisor writes `"prompt_suite": true` into the swap configs it drafts.
+
+The gate reads the replies (`orchard/prompt_suite.py`); the test script only records them. It looks for the failure shapes the
+tenstorrent `qualitative-check` skill lists: a leaked control token, a loop, unreadable text, a repeated or corrupt
+first token, a word from another prompt, the wrong language, a doubled word piece, an echoed question and an empty
+reply. The first five are blocking. A blocking finding fails the stage unless the control shows the same kind on the same
+prompt. The last four are written down and do not fail anything. The stage 1 free run is read the same way, with the CPU
+reference's text as its control.
+
+A control is an earlier run of the same suite on the nearest model: set `"suite_control"` in `swap_config.json` to its
+`swap-check.json`. With a control, the gate also fails a run whose replies are identical to the control's on every prompt
+both answered (on at least five), because that run has probably not served the new weights. Without a control only the
+reading above applies, so a run with no control cannot show that the weights are the new model's. The prompt format
+and the control's prompt-suite hash have to match, or the control is refused.
+
+`python3 -m orchard.prompt_suite evidence/swap-check.json` prints what the gate reads, including the findings that
+do not fail anything. Every number in it is a provisional choice (`SUITE_*` in `orchard/defaults.py`): no chip has run
+the suite yet, and the bars have to be set from measured controls (issue 15).
+
 ### 5.4 Recover after a crash
 
 If the supervisor dies without running its handlers (SIGKILL, a reboot, a Python crash), the coder

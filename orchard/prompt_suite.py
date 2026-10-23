@@ -164,7 +164,7 @@ def _repetition(text: str) -> str | None:
     words = text.split()
     n = defaults.SUITE_PHRASE_WORDS
     phrases = Counter(tuple(words[i:i + n]) for i in range(len(words) - n + 1))
-    # A phrase of punctuation alone ("= = = = = =") is a rule drawn across the page, not a loop.
+    # A phrase of punctuation alone ("= = = = = =") is a rule drawn across the page. It is not a loop.
     phrases = Counter({ph: c for ph, c in phrases.items() if any(ch.isalnum() for w in ph for ch in w)})
     if phrases:
         phrase, count = phrases.most_common(1)[0]
@@ -284,7 +284,7 @@ MODES = ("chat", "completion")
 class Verdict:
     ran: bool
     reasons: list = field(default_factory=list)       # a gate fails on each of these
-    advisory: list = field(default_factory=list)      # recorded, not gated
+    advisory: list = field(default_factory=list)      # recorded only; a gate does not fail on these
     summary: dict = field(default_factory=dict)
 
 

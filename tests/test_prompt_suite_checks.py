@@ -6,7 +6,7 @@ or corrupt first token, gibberish, and an empty or failed reply.
 
 The healthy fixtures are replies a real served model gave (the AREX-2 and Qwen3.8-27B speed runs of 2026-10-23, greedy,
 thinking on). Nothing may be flagged on them. The unhealthy fixtures are built by hand in the shapes the skill names: no chip
-has produced a failing reply of each kind, so they show that a check fires on its shape, not that real failures look like it.
+has produced a failing reply of each kind, so they show that a check fires on its shape. They do not show that real failures look like it.
 """
 import pytest
 

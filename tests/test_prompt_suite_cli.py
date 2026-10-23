@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """`python3 -m orchard.prompt_suite swap-check.json` prints what the gates read in a swap-check.json: the reasons that fail a
-stage, the advisory findings (recorded, not gated) and the summary. Operators and agents use it to see the findings a gate
+stage, the advisory findings (recorded only) and the summary. Operators and agents use it to see the findings a gate
 does not fail on."""
 import json
 import subprocess

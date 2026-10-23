@@ -1850,3 +1850,46 @@ All six findings were real. Each was reproduced or read against the code, fixed 
 - The boot child resolves only the cache root, the one root it is given.
 - Mutations: 5 on the verifier, 23 and 17 on the boot step's server stop (3 survivors, then 1, each given a test), 11 on the queue ticket (2 survivors), 25 on the handoff (2), 29 on the identity check (6), 4 and 5 on the smaller findings. One mutant (the pid guard removed) made the step signal its own process group and ended the mutation helper, which showed the missing guard for a record naming the step's own pid; the helper now runs the tests in a session of its own.
 - Slips: a `pkill -f` pattern matched my own shell; a SIGTERM test first killed pytest because no handler existed yet (its baseline handler now only counts); a killed mutation run left one mutation in the file, found by checking that every mutation anchor still matched.
+
+## 2026-10-23 (UTC): a prompt suite beside the 32-token check (branch `fidelity-suite`, version 0.8.28)
+Prompt (parent session): take issue 15 (the fidelity check is 32 tokens from one prompt: widen it and calibrate it with a control), follow the
+tenstorrent `qualitative-check` skill, test first, no hardware. Built on `origin/main` 0.8.24. Other branches use 0.8.26 to 0.8.30; the version
+here is a placeholder for the merge to fix.
+- `orchard/skills/weights-swap-templates/prompt_suite.json`: eight fixed prompts (chat, code, arithmetic, a multi-turn exchange with an assistant turn,
+  a Russian question, a tool call, a summary, a list format). Each has `messages` for a chat template and a plain `text` for a model with none. Two carry
+  a marker word that appears in no other prompt, to catch state leaking between requests. `orchard/prompt_suite.py` loads it, refuses a bad suite and
+  hashes it.
+- `serve_and_compare.py` (and, through it, the container template) sends the suite after the 32-token check when `swap_config.json` has
+  `"prompt_suite": true`, which the supervisor now writes into every config it drafts. The prompt format follows the tokenizer's chat template
+  (`chat_template.jinja`, else `tokenizer_config.json`): a template means `/v1/chat/completions`, none means `/v1/completions`. The template
+  records the raw replies (content, reasoning, tool calls, finish reason, error), the template's sha256, the special tokens and the model id under
+  `prompt_suite` in `evidence/swap-check.json`. A refused request is that prompt's error and the run goes on. The tool prompt is skipped when the
+  template does not mention tools. A missing suite file or an unusable `suite_control` exits 2 before any server starts. `result_draft` is unchanged.
+- The gate judges. `orchard/prompt_suite.findings` reads one reply for the shapes the skill lists (a leaked control token, tool markup returned as text,
+  a leak between requests, a loop, a repeated or corrupt first token, unreadable text, the wrong language, a doubled word piece, an echoed question,
+  an empty reply, a failed request). `evaluate` reads a whole record against its control. A finding fails a stage only when its kind is blocking
+  (`SUITE_BLOCKING_KINDS`: leaked token, leak between requests, corrupt or repeated first token, loop, gibberish) and the control does not show the same
+  kind on that prompt. With no control for a prompt, nothing explains the finding, so it counts. The stage 1 free run is read the same way with the CPU
+  reference's text as its control. The other kinds are recorded and listed as advisory. `gate_weights_swap`, `gate_weights_swap_sidecar` and
+  `gate_mesh_swap` read `evidence/swap-check.json` and ignore any suite summary in the agent's `result.json`; a swap-check.json without a suite record changes nothing.
+  Because the template only records, an agent that edits its copy of it cannot change a verdict; a copy that sends other prompts fails on the suite's sha256.
+- The control is the `swap-check.json` of an earlier run of the same suite on the nearest model (`suite_control`). The gate refuses one that ran other prompts
+  or another prompt format, notes one with a different chat template, and refuses one with the same model id as the run. With a comparable control it also
+  fails a run whose replies are identical to the control's on every prompt both answered (at least 5, `SUITE_IDENTICAL_MIN_PROMPTS`): that is the case issue 15
+  names, where the base weights stood in by mistake and scored 0.78 against a bar of 0.85. A healthy base gives healthy replies, so no degenerate-output
+  check can see it.
+- `python3 -m orchard.prompt_suite swap-check.json` prints the reasons, the advisory findings and the summary (exit 0, 1 or 2).
+- Every number is a provisional choice in `orchard/defaults.py` (`SUITE_*`). No chip has run the suite, so none was calibrated.
+- Tests first, in six new files and edits to four. The healthy fixtures are replies a real served model gave (the AREX-2 and Qwen3.8-27B speed runs of
+  2026-10-23). The failing fixtures are written by hand in the shapes the skill names; no chip has produced a failing reply of each kind, so they show that
+  a check fires on its shape. They do not show that real failures look like it. Writing the tests found two false positives in my first checks: a rule of `=`
+  signs counted as a loop, and Thai and Devanagari vowel signs counted as unreadable characters. Both are fixed and pinned.
+- Mutations: 171 in the first tables (19 on the loader, 49 on the checks, 37 on the verdict, 34 on the templates, 3 on the container template, 8 on the gates,
+  6 on the command, 15 on the identical-replies rule), plus the reruns. First-run survivors each got a test and went red: 3, 9, 2, 0, 0, 0, 0 and 8. Two
+  survivors on the checks are equivalent (the echo check reads `content` either way, and the language check's letter count already rules out an empty
+  answer). A mutation of the skill text survived because the quoted key also appears in a sentence; the skill tests now pin the example blocks.
+- Not done, and not testable here: a run on a real chip (no real reply has been judged); calibrating any bar from measured controls (the issue's own
+  "done when"); a control run (the templates can write one by running the same suite with the nearest model as `new_model_id`, but no step does it
+  automatically and it costs a boot per configuration); the extra chip time (about 8 requests of up to 64 tokens per configuration, roughly a minute at
+  20 tokens/s, more with thinking on); stage 2's template copy is not hash-stamped the way stages 0 and 1 are, so an agent could still edit
+  `swap-check.json` itself; whether a lightly fine-tuned model can match its base on all eight prompts (the identical-replies rule would then need a person).

@@ -171,7 +171,9 @@ records the raw replies in `swap-check.json` under `prompt_suite`. The format fo
 template: with a template it uses the chat endpoint, without one it sends plain continuation prompts.
 You do not judge the replies. The stage gate reads them against the control and fails a reply only
 when it shows a failure the control does not (a leaked control token, a loop, text that is not
-language, a repeated or corrupt first token, a word from another prompt). Do not edit
+language, a repeated or corrupt first token, a word from another prompt). It also fails a run whose
+replies are identical to the control's on every prompt both answered, because that run has probably
+not served the new weights. Do not edit
 `prompt_suite.json`: the gate compares its sha256 with the shipped file. `"prompt_suite": true` in
 `swap_config.json` turns the suite on; the supervisor writes it. To read a control, set
 `"suite_control"` to the `swap-check.json` of a run of the same suite on the nearest model.
