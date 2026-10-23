@@ -485,7 +485,7 @@ def coder_tier(cfg, port: int) -> str:
 # ---- the supervisor -----------------------------------------------------------------------------
 
 BUNDLE_BUILD_TIMEOUT_S = 600            # build_bundle.py reads files and copies packages; no network
-SWAP_TEMPLATES = ("prepare_swap.py", "serve_and_compare.py")      # copied with a drafted swap_config.json
+SWAP_TEMPLATES = ("prepare_swap.py", "serve_and_compare.py", "prompt_suite.json")      # copied with a drafted swap_config.json
 STAGE4_TEMPLATES = (*SWAP_TEMPLATES, "serve_and_compare_container.py")     # into each drafted configs/<N>
 
 

@@ -95,10 +95,10 @@ To check a row, run `tt-model list` and read `{{OPERATOR_HOME}}/.cache/tt-model/
 
 ### The steps for one configuration with N chips
 
-1. Make the directory and copy the three templates into it:
+1. Make the directory and copy the three templates and the prompt suite into it:
 
        mkdir -p stages/4/configs/N
-       cp {{ORCHARD_DIR}}/orchard/skills/weights-swap-templates/prepare_swap.py {{ORCHARD_DIR}}/orchard/skills/weights-swap-templates/serve_and_compare.py {{ORCHARD_DIR}}/orchard/skills/weights-swap-templates/serve_and_compare_container.py stages/4/configs/N/
+       cp {{ORCHARD_DIR}}/orchard/skills/weights-swap-templates/prepare_swap.py {{ORCHARD_DIR}}/orchard/skills/weights-swap-templates/serve_and_compare.py {{ORCHARD_DIR}}/orchard/skills/weights-swap-templates/serve_and_compare_container.py {{ORCHARD_DIR}}/orchard/skills/weights-swap-templates/prompt_suite.json stages/4/configs/N/
 
 2. Write `stages/4/configs/N/swap_config.json` (absolute paths). The snapshots, the model ids and
    `run_dir` are the same as in stage 2's `swap_config.json` (`stages/2/swap_config.json`); read it.
@@ -113,7 +113,8 @@ To check a row, run `tt-model list` and read `{{OPERATOR_HOME}}/.cache/tt-model/
         "new_model_id": "<the model value from stages/0/delta.json, for example Altworld/Hemmingway-1@<revision>>",
         "tt_cache": "{{CACHE_ROOT}}/<slug>/<N>chip-<package name>/tt_cache",
         "hf_home": "{{HF_HOME}}",
-        "port": <8100 + N>}
+        "port": <8100 + N>,
+        "prompt_suite": true}
 
    For the container package (4 chips): no `bundle_dir`; add the package, its profile, the chip
    count and the operator's home:
@@ -129,7 +130,8 @@ To check a row, run `tt-model list` and read `{{OPERATOR_HOME}}/.cache/tt-model/
         "tt_cache": "{{CACHE_ROOT}}/<slug>/4chip-qwen3.8-27b-p300x2/tt_cache",
         "hf_home": "{{HF_HOME}}",
         "operator_home": "{{OPERATOR_HOME}}",
-        "port": 8104}
+        "port": 8104,
+        "prompt_suite": true}
 
    Copy the `model` value from `stages/0/delta.json` verbatim, including the `@revision`, into
    `new_model_id`. Stage 7 compares this label with stage 0's model and the revision of the weights
@@ -202,3 +204,8 @@ Do not invent a number.
   create.
 - Do not start, stop or remove a container, and do not run `tt-model serve` or `docker` yourself.
 - Do not write model code or your own serving script.
+
+Both scripts then send the fixed prompt suite (`prompt_suite.json`, copied next to them) when the
+config says `"prompt_suite": true`, and record the raw replies in `swap-check.json`. The gate judges
+them; see the stage 2 skill. A configuration that fails the suite fails the stage like any other
+failed swap check. Do not edit `prompt_suite.json`.
