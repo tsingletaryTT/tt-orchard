@@ -141,6 +141,7 @@ SUITE_BLOCKING_KINDS = ("control_token_leak", "cross_request_leak", "corrupt_fir
                                 # The other kinds (an empty reply, a failed request, a prompt echo, a doubled
                                 # subword, the wrong language) depend on style or on the thinking budget, so they
                                 # are recorded and not gated.
+SUITE_MAX_REASONS = 8           # choice: the most reasons the suite gives a gate; the rest are counted in one line
 SUITE_PHRASE_WORDS = 6          # choice: a phrase of this many words ...
 SUITE_PHRASE_REPEATS_MAX = 3    # choice: ... may appear this many times (the swap check's coherence rule)
 SUITE_LINE_REPEATS = 4          # choice: this many identical lines in a row are a loop ...

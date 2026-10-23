@@ -263,3 +263,148 @@ def findings(entry: dict, prompt: dict | None = None, *, specials=(), markers=No
             out["wrong_language"] = (f"{frac:.0%} of the answer's letters are {prompt['expect_script']}; "
                                      f"the prompt expects that script")
     return [{"kind": k, "detail": out[k][:200]} for k in KINDS if k in out]
+
+
+# ---- the verdict -----------------------------------------------------------------------------------------------------
+#
+# What evidence/swap-check.json holds under "prompt_suite" (written by serve_and_compare.py):
+#   ran, suite_sha256 (of the template's copy of prompt_suite.json), mode ("chat" or "completion"), max_tokens,
+#   chat_template {present, source, sha256, mentions_tools}, special_tokens [str],
+#   entries [{id, mode, content, reasoning, tool_calls, finish_reason, error}], skipped [{id, reason}],
+#   control null or {source, sha256, record} where record has the same shape (the swap-check.json of a control run).
+# The gate reads that record and the stage 1 free run beside it (free_run_text, reference_generated_text) here.
+
+from dataclasses import dataclass, field  # noqa: E402
+
+MAX_REASONS = defaults.SUITE_MAX_REASONS
+MODES = ("chat", "completion")
+
+
+@dataclass
+class Verdict:
+    ran: bool
+    reasons: list = field(default_factory=list)       # a gate fails on each of these
+    advisory: list = field(default_factory=list)      # recorded, not gated
+    summary: dict = field(default_factory=dict)
+
+
+def _specials(record: dict) -> list:
+    tokens = record.get("special_tokens")
+    return [t for t in tokens if isinstance(t, str)] if isinstance(tokens, list) else []
+
+
+def _entries(record: dict) -> dict:
+    return {e["id"]: e for e in record.get("entries", []) if isinstance(e, dict) and isinstance(e.get("id"), str)}
+
+
+def _control_problems(record: dict, ctl) -> tuple[dict | None, list, list]:
+    """The control's record when it can explain this one, with the reasons it cannot and the notes about it."""
+    if not isinstance(ctl, dict) or not isinstance(ctl.get("record"), dict):
+        return None, ["the control is not a recorded prompt suite (it has no record)"], []
+    other = ctl["record"]
+    bad = []
+    if other.get("suite_sha256") != record.get("suite_sha256"):
+        bad.append(f"the control ran other prompts (suite sha256 {str(other.get('suite_sha256'))[:12]} against "
+                   f"{str(record.get('suite_sha256'))[:12]}), so it explains nothing")
+    if other.get("mode") != record.get("mode"):
+        bad.append(f"the control was rendered in another prompt format ({other.get('mode')!r} against "
+                   f"{record.get('mode')!r}), so it explains nothing")
+    if bad:
+        return None, bad, []
+    notes = []
+    mine = (record.get("chat_template") or {}).get("sha256")
+    theirs = (other.get("chat_template") or {}).get("sha256")
+    if mine != theirs:
+        notes.append(f"the control's chat template differs from this model's (sha256 {str(theirs)[:12]} against "
+                     f"{str(mine)[:12]}), so the two were rendered into different text")
+    return other, [], notes
+
+
+def evaluate(report: dict, *, suite_path=None) -> Verdict:
+    """Read the prompt-suite record in a swap-check report. `reasons` fail a gate; `advisory` lines are recorded only.
+
+    A finding fails a gate when its kind is in SUITE_BLOCKING_KINDS and the control does not show that kind on the same
+    prompt. A report without a record has no verdict (older runs, and runs that did not opt in)."""
+    record = report.get("prompt_suite") if isinstance(report, dict) else None
+    if record is None:
+        return Verdict(False, summary={"ran": False})
+    if not isinstance(record, dict) or record.get("ran") is not True or not isinstance(record.get("entries"), list):
+        return Verdict(True, ["the prompt suite record is malformed, or says the suite did not run"], summary={"ran": True})
+    try:
+        suite = load_suite(suite_path)
+    except SuiteError as exc:
+        return Verdict(True, [f"the committed prompt suite cannot be read: {exc}"], summary={"ran": True})
+    reasons, advisory, rows = [], [], []
+
+    if record.get("suite_sha256") != suite_sha256(suite_path):
+        reasons.append(f"the recorded prompts are not the committed prompt suite (sha256 "
+                       f"{str(record.get('suite_sha256'))[:12]} against {suite_sha256(suite_path)[:12]})")
+    mode = record.get("mode")
+    template = record.get("chat_template") if isinstance(record.get("chat_template"), dict) else {}
+    if mode not in MODES:
+        reasons.append(f"the recorded prompt mode {mode!r} is neither 'chat' nor 'completion'")
+    elif (mode == "chat") != bool(template.get("present")):
+        reasons.append(f"the recorded prompt format {mode!r} contradicts the chat template record "
+                       f"(present: {template.get('present')!r}); the format must follow the tokenizer's template")
+
+    prompts = {p["id"]: p for p in suite["prompts"]}
+    markers = {pid: p["marker"] for pid, p in prompts.items() if p.get("marker")}
+    entries = _entries(record)
+    if len(entries) != sum(1 for e in record["entries"] if isinstance(e, dict)):
+        reasons.append("an entry of the record has no id, or two entries share one")
+    if any(not isinstance(e, dict) for e in record["entries"]):
+        reasons.append("an entry of the record is not an object")
+    skipped = {s.get("id"): s.get("reason") for s in record.get("skipped") or [] if isinstance(s, dict)}
+    for pid, p in prompts.items():
+        if pid in skipped:
+            if not (p.get("needs_tools") and not template.get("mentions_tools")):
+                reasons.append(f"prompt {pid} was skipped ({skipped[pid]}); only the tool prompt may be skipped, and only "
+                               "when the chat template does not mention tools")
+        elif pid not in entries:
+            reasons.append(f"prompt {pid} has no reply in the record")
+    for pid in entries:
+        if pid not in prompts:
+            reasons.append(f"the record has a reply for {pid!r}, which is not in the committed suite")
+
+    control, bad, notes = (None, [], [])
+    if record.get("control") is not None:
+        control, bad, notes = _control_problems(record, record["control"])
+    reasons += [f"control: {b}" for b in bad]
+    advisory += notes
+    control_entries = _entries(control) if control else {}
+    control_specials = _specials(control) if control else []
+
+    checked = []
+    for pid, p in prompts.items():
+        if pid in entries:
+            fl = findings(entries[pid], p, specials=_specials(record), markers=markers)
+            cl = findings(control_entries[pid], p, specials=control_specials, markers=markers) if pid in control_entries else None
+            checked.append((f"prompt {pid}", pid, fl, cl, "The control does not show it."))
+    free, ref = report.get("free_run_text"), report.get("reference_generated_text")
+    if isinstance(free, str):
+        fl = findings({"id": "stage1", "content": free, "reasoning": "", "tool_calls": [], "error": None}, None,
+                      specials=_specials(record), markers=markers)
+        cl = (findings({"id": "stage1", "content": ref, "reasoning": "", "tool_calls": [], "error": None}, None)
+              if isinstance(ref, str) else None)
+        checked.append(("the stage 1 free run", "stage1", fl, cl, "The CPU reference does not show it."))
+
+    for label, pid, fl, cl, absent in checked:
+        have = {f["kind"] for f in cl} if cl is not None else None
+        for f in fl:
+            shared = have is not None and f["kind"] in have
+            blocking = f["kind"] in defaults.SUITE_BLOCKING_KINDS
+            rows.append({"prompt": pid, "kind": f["kind"], "detail": f["detail"], "shared": shared, "blocking": blocking})
+            if shared:
+                continue
+            line = f"prompt suite, {label}: {f['kind']}: {f['detail']}"
+            if blocking:
+                reasons.append(line + ". " + (absent if have is not None else
+                                              "There is no control for this prompt, so nothing explains it."))
+            else:
+                advisory.append(line)
+    if len(reasons) > MAX_REASONS:
+        extra = len(reasons) - (MAX_REASONS - 1)
+        reasons = reasons[:MAX_REASONS - 1] + [f"{extra} more prompt suite reasons (see the findings in the record)"]
+    return Verdict(True, reasons, advisory,
+                   {"ran": True, "prompts": len(entries), "mode": mode, "control": "file" if control else "none",
+                    "findings": rows})
