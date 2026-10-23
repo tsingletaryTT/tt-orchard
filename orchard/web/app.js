@@ -1091,15 +1091,16 @@ function setView(view, { push = true } = {}) {
   $("run").hidden = !runShown;
   $("run-empty").hidden = view !== "orchard" || Boolean(S.selected);
   if (view === "hardware") {
-    if (push) history.replaceState(null, "", "#hardware");
+    if (push) history.replaceState(null, "", "#machine");
     startToplike(S.hwMode || "normal");
+    pollChecks();                       // the last setup check, if there was one, is shown where the checks now live
     return;
   }
   stopToplike();
   document.body.classList.remove("wide");
   $("hw-wide").setAttribute("aria-pressed", "false");
   if (view === "settings") {
-    if (push) history.replaceState(null, "", "#settings");
+    if (push) history.replaceState(null, "", "#models");
     loadSettings();
   } else if (push) {
     history.replaceState(null, "", S.selected ? `#run/${encodeURIComponent(S.selected)}` : "#");
@@ -1193,7 +1194,6 @@ async function loadCaches() {
 
 async function loadSettings() {
   $("settings-error").hidden = true;
-  pollChecks();
   try {
     S.settings = await api("/api/settings");
   } catch (err) {
@@ -1431,8 +1431,9 @@ function startToplike(mode) {
 }
 
 function routeFromHash() {
-  if (location.hash === "#hardware") { setView("hardware", { push: false }); return; }
-  if (location.hash === "#settings") { setView("settings", { push: false }); return; }
+  // #machine and #models are the names now; #hardware and #settings are what earlier links and bookmarks carry
+  if (location.hash === "#machine" || location.hash === "#hardware") { setView("hardware", { push: false }); return; }
+  if (location.hash === "#models" || location.hash === "#settings") { setView("settings", { push: false }); return; }
   const m = location.hash.match(/^#run\/(.+)$/);
   if (m) select(decodeURIComponent(m[1]), { push: false });
 }

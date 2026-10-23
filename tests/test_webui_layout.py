@@ -192,3 +192,71 @@ def test_opening_the_machine_view_from_the_rail_does_not_start_the_checks():
     handler = js[js.index('$("machine-details-link")'):]
     handler = handler[:handler.index("\n")]
     assert "startChecks" not in handler and "preventDefault" in handler
+
+
+# ---- views: Orchard/Runs, Machine and Models; the diagnostics live with the machine, and nothing follows Save ----------------------
+
+def label_spans(node):
+    return {c: n.all_text() for n in node.walk() for c in ("lbl-playful", "lbl-operator") if c in n.classes}
+
+
+def test_the_machine_and_models_tabs_are_named_for_what_they_hold():
+    t = page()
+    machine, models, first = by_id(t, "view-hardware-btn"), by_id(t, "view-settings-btn"), by_id(t, "view-orchard-btn")
+    assert "Machine" in machine.all_text() and "Hardware" not in machine.all_text()
+    assert "Models" in models.all_text() and "Settings" not in models.all_text()
+    assert label_spans(first) == {"lbl-playful": "Orchard", "lbl-operator": "Runs"}, "playful says Orchard, operator says Runs"
+    assert by_id(t, "hw-h").all_text() == "Machine" and by_id(t, "settings-h").all_text() == "Models"
+
+
+def test_the_first_tab_label_follows_the_page_style_in_the_stylesheet():
+    css = CSS()
+    assert re.search(r'^html\[data-mode="operator"\] \.lbl-playful \{ display: none; \}', css, re.M)
+    assert re.search(r'^html:not\(\[data-mode="operator"\]\) \.lbl-operator \{ display: none; \}', css, re.M)
+
+
+def test_the_checks_and_the_caches_are_in_the_machine_view_and_not_in_models():
+    t = page()
+    machine, models = by_id(t, "hardware-view"), by_id(t, "settings-view")
+    inside_models = {n.attrs["id"] for n in models.walk() if n.attrs.get("id")}
+    for ident in ("checks-h", "checks-run", "checks-boxes", "caches-h", "caches-run", "caches-rows", "caches-lab"):
+        assert by_id(t, ident).inside(machine), ident
+        assert ident not in inside_models, f"{ident} is still in the Models view"
+
+
+def test_every_id_in_the_page_is_unique():
+    ids = [n.attrs["id"] for n in page().root.walk() if n.attrs.get("id")]
+    assert len(ids) == len(set(ids)), sorted({i for i in ids if ids.count(i) > 1})
+
+
+def test_nothing_follows_the_save_button_in_the_models_view():
+    t = page()
+    models = by_id(t, "settings-view")
+    form = by_id(t, "settings-form")
+    direct = [k for k in models.kids if k.tag in ("section", "form", "div", "p")]
+    assert direct[-1] is form, "the form is the last block of the Models view"
+    ids_in_form = [n.attrs["id"] for n in form.walk() if n.attrs.get("id")]
+    assert ids_in_form.index("settings-save") > ids_in_form.index("settings-roles")
+    after_save = ids_in_form[ids_in_form.index("settings-save") + 1:]
+    assert set(after_save) <= {"settings-files", "settings-error"}, after_save
+
+
+def test_the_view_hashes_are_machine_and_models_and_the_old_ones_still_open_them():
+    js = JS()
+    assert 'replaceState(null, "", "#machine")' in js and 'replaceState(null, "", "#models")' in js
+    boot = js[js.index('location.hash === "#machine"'):] if 'location.hash === "#machine"' in js else ""
+    assert boot, "the start-up code reads #machine"
+    for old in ('"#hardware"', '"#settings"', '"#models"'):
+        assert old in js, old
+    assert 'href="#machine"' in (WEB / "index.html").read_text(encoding="utf-8")
+
+
+def test_opening_the_machine_view_reads_the_last_check_and_models_does_not():
+    js = JS()
+    sv = js[js.index("function setView"):]
+    sv = sv[:sv.index("\n}\n")]
+    hw = sv[sv.index('if (view === "hardware")'):sv.index("stopToplike();\n  document.body")]
+    assert "pollChecks()" in hw
+    ls = js[js.index("async function loadSettings"):]
+    ls = ls[:ls.index("\n}\n")]
+    assert "pollChecks" not in ls

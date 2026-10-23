@@ -532,6 +532,9 @@ html[data-mode="operator"] .style-label { color: #a9c4c2; }
 html[data-mode="operator"] .style-btn { color: #e4f1f0; border-color: #3f6664; }
 html[data-mode="operator"] .style-btn[aria-pressed="true"] { background: #1c4a49; color: #fff; box-shadow: inset 0 -2px 0 #74c5df; }
 html[data-mode="operator"] .style-btn:hover { background: #17383a; }
+/* the first tab names the view for the page style: the farm calls it the orchard, the operator page calls it the runs */
+html[data-mode="operator"] .lbl-playful { display: none; }
+html:not([data-mode="operator"]) .lbl-operator { display: none; }
 html[data-mode="operator"] .clock { background: transparent; color: #e4f1f0; border: 0; box-shadow: none; padding: 0; }
 html[data-mode="operator"] .conn { color: #a9c4c2; }
 html[data-mode="operator"] .sheet { border: 1px solid var(--line); border-radius: 4px; box-shadow: none; }

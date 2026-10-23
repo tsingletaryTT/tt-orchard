@@ -26,9 +26,9 @@
     <span class="brand-host" id="brand-host"></span>
   </div>
   <nav class="views" aria-label="Views">
-    <button type="button" class="view-btn" id="view-orchard-btn" aria-pressed="true">🧺 Orchard</button>
-    <button type="button" class="view-btn" id="view-hardware-btn" aria-pressed="false">📺 Hardware</button>
-    <button type="button" class="view-btn" id="view-settings-btn" aria-pressed="false">🧰 Settings</button>
+    <button type="button" class="view-btn" id="view-orchard-btn" aria-pressed="true"><span class="emoji" aria-hidden="true">🧺 </span><span class="lbl-playful">Orchard</span><span class="lbl-operator">Runs</span></button>
+    <button type="button" class="view-btn" id="view-hardware-btn" aria-pressed="false"><span class="emoji" aria-hidden="true">📺 </span>Machine</button>
+    <button type="button" class="view-btn" id="view-settings-btn" aria-pressed="false"><span class="emoji" aria-hidden="true">🧰 </span>Models</button>
   </nav>
   <div class="topbar-right">
     <button type="button" class="machine-chip" id="machine-chip" data-tone="unknown" title="The chips on this box. Opens the Machine view.">Chips: reading…</button>
@@ -71,8 +71,8 @@
     <section id="hardware-view" class="hardware" hidden aria-labelledby="hw-h">
       <div class="hw-head">
         <div>
-          <h1 id="hw-h">Hardware</h1>
-          <p class="muted" id="hw-sub">tt-toplike, live from this machine.</p>
+          <h1 id="hw-h">Machine</h1>
+          <p class="muted" id="hw-sub">The live display, then the setup checks and the tensor caches.</p>
         </div>
         <div class="channels" id="hw-channels" role="group" aria-label="tt-toplike view"></div>
       </div>
@@ -93,11 +93,37 @@
         <h2>tt-toplike is not installed here</h2>
         <p class="muted">Install it (github.com/tenstorrent/tt-toplike), or start the page with <code>tt-orchard ui --toplike PATH</code>.</p>
       </div>
+      <section class="checks-wrap" aria-labelledby="checks-h">
+        <div class="checks-head">
+          <h2 id="checks-h">Check machines</h2>
+          <button type="button" class="btn" id="checks-run">🔍 Check machines</button>
+        </div>
+        <p class="muted small" id="checks-status">Runs the setup checks on this box, and on the lab when there is one. Nothing is changed: each problem shows the command that fixes it.</p>
+        <div id="checks-boxes" class="checks-boxes"></div>
+      </section>
+      <section class="checks-wrap" aria-labelledby="caches-h">
+        <div class="checks-head">
+          <h2 id="caches-h">Tensor caches</h2>
+          <span class="caches-tools">
+            <label class="field-inline" for="caches-lab"><input type="checkbox" id="caches-lab"> include the lab</label>
+            <button type="button" class="btn" id="caches-run">📦 Show caches</button>
+          </span>
+        </div>
+        <p class="muted small" id="caches-status">Each model and chip count keeps a tensor cache, and every test shares one kernel
+          cache. Listing them reads their sizes (the lab's over ssh), so it takes a moment. To free space, run
+          <code>tt-orchard caches --prune --older-than DAYS</code>; this page never deletes.</p>
+        <div class="table-wrap" id="caches-table" hidden>
+          <table class="ledger caches">
+            <thead><tr><th scope="col">Box</th><th scope="col">GB</th><th scope="col">Days</th><th scope="col">Used by</th><th scope="col">Model and path</th></tr></thead>
+            <tbody id="caches-rows"></tbody>
+          </table>
+        </div>
+      </section>
     </section>
 
     <section id="settings-view" class="settings" hidden aria-labelledby="settings-h">
       <div>
-        <h1 id="settings-h">Settings</h1>
+        <h1 id="settings-h">Models</h1>
         <p class="muted">Which models the orchard's workers use. A change applies to the next run or retry; a run
           that is going keeps the models it started with.</p>
       </div>
@@ -141,32 +167,6 @@
         </div>
         <p class="form-error" id="settings-error" role="alert" hidden></p>
       </form>
-      <section class="checks-wrap" aria-labelledby="checks-h">
-        <div class="checks-head">
-          <h2 id="checks-h">Check machines</h2>
-          <button type="button" class="btn" id="checks-run">🔍 Check machines</button>
-        </div>
-        <p class="muted small" id="checks-status">Runs the setup checks on this box, and on the lab when there is one. Nothing is changed: each problem shows the command that fixes it.</p>
-        <div id="checks-boxes" class="checks-boxes"></div>
-      </section>
-      <section class="checks-wrap" aria-labelledby="caches-h">
-        <div class="checks-head">
-          <h2 id="caches-h">Tensor caches</h2>
-          <span class="caches-tools">
-            <label class="field-inline" for="caches-lab"><input type="checkbox" id="caches-lab"> include the lab</label>
-            <button type="button" class="btn" id="caches-run">📦 Show caches</button>
-          </span>
-        </div>
-        <p class="muted small" id="caches-status">Each model and chip count keeps a tensor cache, and every test shares one kernel
-          cache. Listing them reads their sizes (the lab's over ssh), so it takes a moment. To free space, run
-          <code>tt-orchard caches --prune --older-than DAYS</code>; this page never deletes.</p>
-        <div class="table-wrap" id="caches-table" hidden>
-          <table class="ledger caches">
-            <thead><tr><th scope="col">Box</th><th scope="col">GB</th><th scope="col">Days</th><th scope="col">Used by</th><th scope="col">Model and path</th></tr></thead>
-            <tbody id="caches-rows"></tbody>
-          </table>
-        </div>
-      </section>
     </section>
 
     <div id="run-empty" class="empty">
