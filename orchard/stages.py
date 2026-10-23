@@ -40,6 +40,8 @@ from pathlib import Path
 from typing import Callable
 
 from orchard.classes import CLASSES, SIDECAR_CLASSES, class_of_path, path_of
+from orchard.graft_trial import DECISION_FILE as GRAFT_DECISION_FILE
+from orchard.graft_trial import chosen as graft_chosen
 from orchard.graft_trial import decision_problems
 from orchard.defaults import (COLD_START_S, LONG_STAGE_S, PACKAGE_FORMATS, RUN_COLD_BOOT_CAP,
                               RUN_ESCALATION_CAP, RUN_WALL_CLOCK_S, STAGE2_PCC_MIN,
@@ -614,7 +616,35 @@ def gate_mesh_swap(stage_dir, run_dir, required=None) -> GateResult:
         if not isinstance(draft, dict) or draft.get("top1_agreement") != c.get("top1_agreement"):
             reasons.append(f"{where}: top1_agreement {c.get('top1_agreement')!r} is not the "
                            f"result_draft's in {swap}")
+        reasons += _graft_reasons(stage_dir, run_dir, n, where)
     return _done(reasons, seen)
+
+
+def _graft_reasons(stage_dir, run_dir, n: int, where: str) -> list[str]:
+    """A bundle configuration was built the way stage 2's graft decision says. A configuration served by the nearest model's own bundle
+    has `bundle_dir` in its swap_config.json; the supervisor drafted `graft_mtp` there from the decision, and the agent's prepare step can
+    change it afterwards, so the check reads what prepare_swap.py recorded it built (`mtp_graft` in model-dir-sources.json). A container
+    configuration is another server and is not held to the decision."""
+    cdir = Path(stage_dir) / "configs" / str(n)
+    cfg = _read_json(cdir / "swap_config.json")
+    if not isinstance(cfg, dict) or not cfg.get("bundle_dir"):
+        return []
+    sources = _read_json(cdir / "model-dir-sources.json")
+    built = isinstance(sources, dict) and isinstance(sources.get("mtp_graft"), dict)
+    chose = graft_chosen(run_dir)
+    if chose and not built:
+        return [f"{where}: stage 2 chose the graft ({GRAFT_DECISION_FILE}), but configs/{n}/model-dir-sources.json records no mtp_graft, "
+                "so this configuration was built without the grafted head"]
+    if built and not chose:
+        return [f"{where}: configs/{n}/model-dir-sources.json records a grafted head, but stage 2 did not choose the graft"]
+    return []
+
+
+def _read_json(path: Path):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
 
 
 SERVING_CHECKS = ("boots", "passkey", "canary")
