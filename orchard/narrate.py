@@ -632,6 +632,9 @@ UNBLOCK = {
         "Run `gozer status`. tt-orchard never clears a lease or resets a chip that it does not hold.",
         "A STALE lease whose owner is gone is cleared with `gozer reconcile`. A chip held by another agent "
         "needs that agent to finish. Do not run `tt-smi -r` by hand while others use the box.",
+        "If the `bus` preflight row blocked, a chip is off the PCIe bus, powered down (D3cold) or missing its serial or "
+        "device node. A reset does not bring it back (`tt-smi -r` did not on 2026-10-22): power the box off and on, or "
+        "reboot it, then check that `gozer status` lists every chip.",
         "Then run `tt-orchard bringup <MODEL>` again."],
     "coder-unusable": [
         "The coder model did not serve or failed its canary question. Read stages/*/evidence/coder-canary-*.txt "

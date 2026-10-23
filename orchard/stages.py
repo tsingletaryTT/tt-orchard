@@ -808,6 +808,7 @@ def gate_package(stage_dir, run_dir) -> GateResult:
     from orchard.package import (GRAFT_FILE, PUBLISH_FILE, PackageError, graft_evidence_problems, graft_problems,
                                  graft_trial_numbers, publish_problems, read_reported, serving_problems,
                                  split_model_id, stage_2_serving, weights_wiring_problems)
+    from orchard.card_use import read_use_facts
     from orchard.package_card import card_evidence_paths, card_problems, read_license
     from orchard.scrub import scrub_package
     d, err = _load(stage_dir, "package.json")
@@ -891,7 +892,9 @@ def gate_package(stage_dir, run_dir) -> GateResult:
                                       base_files=_shipped_names(out / "base_config"), reported=reported, reported_source=reported_source,
                                       model_id=new_repo, nearest_model=nearest_repo, graft=has_graft,
                                       graft_decision=trial_decision,
-                                      trial_rows=trial_rows if p.get("required") else ())]
+                                      trial_rows=trial_rows if p.get("required") else (),
+                                      use=read_use_facts(swap.get("new_snapshot") or "/nonexistent", run_sh, run,
+                                                           identity=(new_repo, new_rev), measured=bool(p.get("required"))))]
         reasons += [f"profile {name}: the card cites {e}, which is missing at evidence/{e}"
                     for e in card_evidence_paths(card) if not (out / "evidence" / e).is_file()]
         if p.get("verified") is True:
