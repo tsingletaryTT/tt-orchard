@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Callable
 
 from orchard.classes import CLASSES, SIDECAR_CLASSES, class_of_path, path_of
+from orchard import prompt_suite
 from orchard.defaults import (COLD_START_S, LONG_STAGE_S, PACKAGE_FORMATS, RUN_COLD_BOOT_CAP,
                               RUN_ESCALATION_CAP, RUN_WALL_CLOCK_S, STAGE2_PCC_MIN,
                               STAGE4_SWAP_DISK_GB, STAGE_BUDGET_S, STAGE_DISK_GB, SWAP_MIN_TOKENS,
@@ -396,6 +397,7 @@ def gate_weights_swap(stage_dir, run_dir) -> GateResult:
     if err:
         return GateResult(False, (err,))
     reasons, seen = _swap_reasons(d), []
+    reasons += _suite_reasons_in(Path(stage_dir) / "evidence" / "swap-check.json")
     _evidence(run_dir, d.get("evidence"), "result.json", reasons, seen)
     return _done(reasons, seen)
 
@@ -453,6 +455,7 @@ def gate_weights_swap_sidecar(stage_dir, run_dir) -> GateResult:
     if err:
         return GateResult(False, (err,))
     reasons, seen = _swap_reasons(d), []
+    reasons += _suite_reasons_in(Path(stage_dir) / "evidence" / "swap-check.json")
     delta, derr = _load(Path(run_dir) / "stages" / "0", "delta.json")
     if derr:
         reasons.append(f"stage 0's {derr}, so the sidecar parity cannot be tied to the files stage 0 recorded")
@@ -570,6 +573,23 @@ def hw_record_problem(stage_dir, chips: int) -> str | None:
     return None
 
 
+def _suite_reasons(report, where: str = "") -> list[str]:
+    """The prompt-suite reasons (orchard/prompt_suite.py) in one swap-check.json report, each prefixed with `where`.
+    A report without a suite record has none. The gates read the template's swap-check.json and not the agent's
+    result.json: the record holds the raw replies, and the verdict is computed here from them."""
+    return [where + r for r in prompt_suite.evaluate(report).reasons]
+
+
+def _suite_reasons_in(path, where: str = "") -> list[str]:
+    """`_suite_reasons` for the swap-check.json at `path`. A file that is missing or not a JSON object has none: the
+    other checks of the gate already say what they need of it."""
+    try:
+        report = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return _suite_reasons(report, where) if isinstance(report, dict) else []
+
+
 def gate_mesh_swap(stage_dir, run_dir, required=None) -> GateResult:
     """Stage 4 on the weights-only path: `gate_mesh`, and for every configuration that claims a
     pass, proof that the supervisor ran its test and that the test measured a passing swap.
@@ -605,12 +625,15 @@ def gate_mesh_swap(stage_dir, run_dir, required=None) -> GateResult:
             reasons.append(f"{where}: evidence must include {swap}")
             continue
         try:
-            draft = json.loads(inside(run_dir, swap).read_text(encoding="utf-8"))["result_draft"]
+            report = json.loads(inside(run_dir, swap).read_text(encoding="utf-8"))
+            draft = report["result_draft"]
         except (AttributeError, OSError, ValueError, KeyError, TypeError):
-            draft = None
+            report, draft = None, None
         if not isinstance(draft, dict) or draft.get("top1_agreement") != c.get("top1_agreement"):
             reasons.append(f"{where}: top1_agreement {c.get('top1_agreement')!r} is not the "
                            f"result_draft's in {swap}")
+        if isinstance(report, dict):
+            reasons += _suite_reasons(report, f"{where}: ")
     return _done(reasons, seen)
 
 

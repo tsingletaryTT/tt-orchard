@@ -1,0 +1,174 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+"""The stage 2 and stage 4 swap gates read the prompt suite beside the 32-token check (issue 15).
+
+The gate reads evidence/swap-check.json, which the template wrote, not the agent's result.json: result.json is typed by an
+agent and the record in swap-check.json holds the raw replies, which orchard/prompt_suite.py judges. A swap-check.json
+without a suite record (an older run, or a config that did not ask for the suite) changes nothing."""
+import copy
+import json
+
+from orchard import prompt_suite as ps
+from orchard.stages import gate_mesh_swap, gate_weights_swap, gate_weights_swap_sidecar
+from test_prompt_suite_verdict import LOOP, control_of, make_record, with_entry
+from test_stages import SWAP, mesh_stage, stage, swap_config, write
+from test_stages_class import RESULT, SIDE_DELTA
+
+HEALTHY_FREE = "Paris is the capital of France and a large city"
+
+
+def swap_check(record=None, **extra):
+    rep = {"result_draft": {"top1_agreement": SWAP["top1_agreement"]}, "free_run_text": HEALTHY_FREE,
+           "reference_generated_text": HEALTHY_FREE, **extra}
+    if record is not None:
+        rep["prompt_suite"] = record
+    return rep
+
+
+def stage2(tmp_path, report=None, gate=gate_weights_swap):
+    sd, run = stage(tmp_path, 2, "result.json", SWAP)
+    if report is not None:
+        write(run, "stages/2/evidence/swap-check.json", report)
+    return gate(sd, run)
+
+
+def test_a_stage_2_result_with_no_swap_check_file_is_judged_as_before(tmp_path):
+    assert stage2(tmp_path).ok
+
+
+def test_a_swap_check_without_the_suite_changes_nothing(tmp_path):
+    assert stage2(tmp_path, swap_check()).ok
+
+
+def test_a_healthy_suite_passes(tmp_path):
+    g = stage2(tmp_path, swap_check(make_record()))
+    assert g.ok, g.reasons
+
+
+def test_a_swap_check_file_that_is_not_json_changes_nothing(tmp_path):
+    sd, run = stage(tmp_path, 2, "result.json", SWAP)
+    write(run, "stages/2/evidence/swap-check.json", "{not json")
+    assert gate_weights_swap(sd, run).ok
+
+
+def test_a_blocking_finding_the_control_does_not_share_fails_the_stage_and_names_it(tmp_path):
+    g = stage2(tmp_path, swap_check(with_entry(make_record(), "arithmetic", content=LOOP)))
+    assert not g.ok
+    assert any("prompt suite" in r and "arithmetic" in r and "mechanical_repetition" in r for r in g.reasons)
+
+
+def test_the_same_finding_in_the_control_passes(tmp_path):
+    rec = with_entry(make_record(), "arithmetic", content=LOOP)
+    rec["control"] = control_of(rec)
+    assert stage2(tmp_path, swap_check(rec)).ok
+
+
+def test_an_advisory_finding_passes(tmp_path):
+    assert stage2(tmp_path, swap_check(with_entry(make_record(), "chat-capital", content=""))).ok
+
+
+def test_the_suite_is_read_from_the_template_file_and_not_from_the_agents_result(tmp_path):
+    # The agent's result.json carries a prompt_suite summary that says all is well; the swap-check.json says otherwise.
+    sd, run = stage(tmp_path, 2, "result.json", {**SWAP, "prompt_suite": {"ran": True, "findings": []}})
+    write(run, "stages/2/evidence/swap-check.json", swap_check(with_entry(make_record(), "arithmetic", content=LOOP)))
+    assert not gate_weights_swap(sd, run).ok
+
+
+def test_a_looping_free_run_the_cpu_reference_does_not_share_fails_the_stage(tmp_path):
+    g = stage2(tmp_path, swap_check(make_record(), free_run_text=LOOP))
+    assert not g.ok and any("stage 1 free run" in r for r in g.reasons)
+
+
+def test_a_record_of_other_prompts_fails_the_stage(tmp_path):
+    g = stage2(tmp_path, swap_check(make_record(suite_sha256="0" * 64)))
+    assert not g.ok and any("not the committed prompt suite" in r for r in g.reasons)
+
+
+def test_the_32_token_reasons_and_the_suite_reasons_are_both_given(tmp_path):
+    sd, run = stage(tmp_path, 2, "result.json", {**SWAP, "top1_agreement": 0.5})
+    write(run, "stages/2/evidence/swap-check.json", swap_check(with_entry(make_record(), "arithmetic", content=LOOP)))
+    reasons = gate_weights_swap(sd, run).reasons
+    assert any("top1_agreement" in r for r in reasons) and any("prompt suite" in r for r in reasons)
+
+
+# ---- the sidecar variant --------------------------------------------------------------------------------------------
+
+def sidecar_stage2(tmp_path, report):
+    run = tmp_path / "run"
+    write(run, "stages/0/delta.json", SIDE_DELTA)
+    write(run, "stages/2/evidence/sidecar-parity.json", "{}")
+    sd, run = stage(tmp_path, 2, "result.json", RESULT)
+    write(run, "stages/2/evidence/swap-check.json", report)
+    return gate_weights_swap_sidecar(sd, run)
+
+
+def test_the_sidecar_gate_reads_the_suite_too(tmp_path):
+    assert sidecar_stage2(tmp_path / "a", swap_check(make_record())).ok
+    g = sidecar_stage2(tmp_path / "b", swap_check(with_entry(make_record(), "arithmetic", content=LOOP)))
+    assert not g.ok and any("prompt suite" in r for r in g.reasons)
+
+
+# ---- stage 4 --------------------------------------------------------------------------------------------------------
+
+def mesh_with_suite(tmp_path, records, configs=None):
+    """mesh_stage, then each configuration's swap-check.json gets the record given for its chip count."""
+    configs = configs or [swap_config(n) for n in records]
+    sd, run = mesh_stage(tmp_path, configs)
+    for n, rec in records.items():
+        write(run, f"stages/4/configs/{n}/evidence/swap-check.json", swap_check(rec))
+    return sd, run
+
+
+def test_a_stage_4_configuration_with_a_healthy_suite_passes(tmp_path):
+    g = gate_mesh_swap(*mesh_with_suite(tmp_path, {2: make_record(), 4: make_record()}), required=(2, 4))
+    assert g.ok, g.reasons
+
+
+def test_a_stage_4_configuration_with_a_finding_fails_and_says_which_configuration(tmp_path):
+    bad = with_entry(make_record(), "arithmetic", content=LOOP)
+    g = gate_mesh_swap(*mesh_with_suite(tmp_path, {2: make_record(), 4: bad}), required=(2, 4))
+    assert not g.ok
+    assert any(r.startswith("the 4-chip configuration: ") and "arithmetic" in r for r in g.reasons)
+    assert not any(r.startswith("the 2-chip configuration: ") and "prompt suite" in r for r in g.reasons)
+
+
+def test_a_stage_4_swap_check_without_the_suite_is_judged_as_before(tmp_path):
+    sd, run = mesh_stage(tmp_path, [swap_config(2), swap_config(4)])
+    assert gate_mesh_swap(sd, run, required=(2, 4)).ok
+
+
+def test_a_stage_4_configuration_that_does_not_claim_a_pass_is_not_read_for_the_suite(tmp_path):
+    bad = with_entry(make_record(), "arithmetic", content=LOOP)
+    sd, run = mesh_with_suite(tmp_path, {2: make_record(), 1: bad},
+                              configs=[swap_config(2), swap_config(1, ok=False)])
+    g = gate_mesh_swap(sd, run, required=(2,))
+    assert g.ok, g.reasons
+
+
+def test_the_top1_check_of_stage_4_still_works_next_to_the_suite(tmp_path):
+    sd, run = mesh_with_suite(tmp_path, {2: make_record()})
+    write(run, "stages/4/configs/2/evidence/swap-check.json",
+          {**swap_check(make_record()), "result_draft": {"top1_agreement": 0.5}})
+    g = gate_mesh_swap(sd, run, required=(2,))
+    assert not g.ok and any("result_draft" in r for r in g.reasons)
+
+
+def test_a_stage_4_control_shared_finding_passes(tmp_path):
+    rec = with_entry(make_record(), "arithmetic", content=LOOP)
+    rec = copy.deepcopy(rec)
+    rec["control"] = control_of(rec)
+    g = gate_mesh_swap(*mesh_with_suite(tmp_path, {2: rec}), required=(2,))
+    assert g.ok, g.reasons
+
+
+def test_the_suite_gate_does_not_read_a_stage_4_file_it_cannot_parse(tmp_path):
+    sd, run = mesh_with_suite(tmp_path, {2: make_record()})
+    (run / "stages/4/configs/2/evidence/swap-check.json").write_text("{not json")
+    g = gate_mesh_swap(sd, run, required=(2,))
+    assert not g.ok            # the existing check of result_draft still fails it
+    assert not any("prompt suite" in r for r in g.reasons)
+
+
+def test_ps_is_the_module_the_gates_use():
+    import orchard.stages as stages
+    assert stages.prompt_suite is ps
