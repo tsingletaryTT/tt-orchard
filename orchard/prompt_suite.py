@@ -110,3 +110,156 @@ def load_suite(path=None) -> dict:
 def suite_sha256(path=None) -> str:
     """The sha256 of the suite file's bytes. The template records its copy's; the gate compares it with the shipped file's."""
     return hashlib.sha256(Path(path or SUITE_FILE).read_bytes()).hexdigest()
+
+
+# ---- reading one reply -----------------------------------------------------------------------------------------------
+#
+# Each check is deterministic, standard library only, and returns at most one finding per kind. The numbers are
+# provisional choices in orchard/defaults.py (SUITE_*); no chip has run the suite yet.
+
+import re  # noqa: E402
+import unicodedata  # noqa: E402
+from collections import Counter  # noqa: E402
+
+from orchard import defaults  # noqa: E402
+
+KINDS = ("request_failed", "empty_output", "mechanical_repetition", "doubled_subwords", "prompt_echo",
+         "control_token_leak", "cross_request_leak", "repeated_first_token", "corrupt_first_token", "gibberish",
+         "wrong_language")
+THINK_TAGS = ("<think>", "</think>")
+PIPE_TOKEN = re.compile(r"<\|[A-Za-z0-9_]{1,40}\|>")
+TOOL_MARKUP = re.compile(r"</?tool_call>|</?function(?:=|>)|<parameter=|</parameter>")
+# Words that really are one unit twice. A reply with three or more other such words is the finding.
+DOUBLED_OK = frozenset("bonbon booboo byebye cancan chichi coco couscous dodo gaga gogo lulu mama murmur nono papa tartar tutu yoyo "
+                       "blahblah dumdum".split())
+DOUBLED = re.compile(r"\b([A-Za-z]{2,12})\1\b", re.IGNORECASE)
+UNIT_LOOP = re.compile(r"(.{2,24}?)\1{%d,}" % (defaults.SUITE_UNIT_REPEATS - 1), re.DOTALL)
+LEADING_PUNCT = re.compile(r"[,;:!?)\]}]{3}")
+SCRIPT_OF = {"LATIN": "Latin", "CYRILLIC": "Cyrillic", "GREEK": "Greek", "ARABIC": "Arabic", "HEBREW": "Hebrew",
+             "HANGUL": "Hangul", "THAI": "Thai", "DEVANAGARI": "Devanagari", "CJK": "CJK", "HIRAGANA": "CJK",
+             "KATAKANA": "CJK"}
+PUNCTUATION = set(".,;:!?'\"-()[]{}/\\&%$#@*+=<>_`~|^‘’“”–—…")      # the swap check's list of ordinary punctuation
+VOWELS = set("aeiouyAEIOUY")
+
+
+def judged_text(entry: dict) -> str:
+    """What the checks read: the answer when there is one, else the reasoning the server returned."""
+    content = entry.get("content") or ""
+    return content if content.strip() else (entry.get("reasoning") or "")
+
+
+def _all_text(entry: dict) -> str:
+    return (entry.get("reasoning") or "") + "\n" + (entry.get("content") or "")
+
+
+def _snip(text: str, at: int = 0, width: int = 60) -> str:
+    return text[max(0, at):at + width].replace("\n", " ")
+
+
+def _norm(text: str) -> str:
+    return " ".join(text.split()).casefold()
+
+
+def _repetition(text: str) -> str | None:
+    words = text.split()
+    n = defaults.SUITE_PHRASE_WORDS
+    phrases = Counter(tuple(words[i:i + n]) for i in range(len(words) - n + 1))
+    # A phrase of punctuation alone ("= = = = = =") is a rule drawn across the page, not a loop.
+    phrases = Counter({ph: c for ph, c in phrases.items() if any(ch.isalnum() for w in ph for ch in w)})
+    if phrases:
+        phrase, count = phrases.most_common(1)[0]
+        if count > defaults.SUITE_PHRASE_REPEATS_MAX:
+            return f"a {n}-word phrase appears {count} times: {' '.join(phrase)[:60]!r}"
+    run, prev = 0, None
+    for line in (ln.strip() for ln in text.splitlines()):
+        if not line:
+            continue
+        run = run + 1 if line == prev else 1
+        prev = line
+        if run >= defaults.SUITE_LINE_REPEATS and len(line) >= defaults.SUITE_LINE_MIN_CHARS:
+            return f"the line {line[:60]!r} repeats {run} times in a row"
+    for m in UNIT_LOOP.finditer(text):
+        if len(m.group(0)) >= defaults.SUITE_UNIT_MIN_SPAN and any(c.isalnum() for c in m.group(1)):
+            return f"{m.group(1)[:24]!r} repeats over {len(m.group(0))} characters"
+    return None
+
+
+def _script_share(text: str, expected: str) -> tuple[int, float]:
+    counts = Counter()
+    for ch in text:
+        if ch.isalpha():
+            name = unicodedata.name(ch, "").split(" ")[0]
+            counts[SCRIPT_OF.get(name, "Other")] += 1
+    total = sum(counts.values())
+    return total, (counts[expected] / total if total else 0.0)
+
+
+def findings(entry: dict, prompt: dict | None = None, *, specials=(), markers=None) -> list[dict]:
+    """The failure shapes in one reply, as [{"kind", "detail"}], one per kind.
+
+    `entry` is a recorded reply: id, content, reasoning, tool_calls and error. `prompt` is the suite prompt it answered
+    (None for the stage 1 free run). `specials` are the tokenizer's special token strings. `markers` maps every
+    prompt id to its marker, for the leak between requests."""
+    out: dict[str, str] = {}
+    if entry.get("error"):
+        return [{"kind": "request_failed", "detail": str(entry["error"])[:200]}]
+    content, reasoning = entry.get("content") or "", entry.get("reasoning") or ""
+    if not content.strip() and not reasoning.strip() and not entry.get("tool_calls"):
+        return [{"kind": "empty_output", "detail": "the reply has no text and no tool call"}]
+    text = judged_text(entry)
+    both = _all_text(entry)
+
+    loop = _repetition(text)
+    if loop:
+        out["mechanical_repetition"] = loop
+    doubled = [m.group(0) for m in DOUBLED.finditer(text) if m.group(0).lower() not in DOUBLED_OK]
+    if len(doubled) >= defaults.SUITE_DOUBLED_MIN:
+        out["doubled_subwords"] = f"{len(doubled)} words are one unit twice, for example {doubled[0]!r}"
+    if prompt and content.strip():
+        asked = _norm(prompt["messages"][-1]["content"])
+        if len(asked) >= defaults.SUITE_ECHO_MIN_CHARS and _norm(content).startswith(asked[:60]):
+            out["prompt_echo"] = f"the reply begins with the question: {_snip(content)!r}"
+
+    leak = PIPE_TOKEN.search(both)
+    if not leak:
+        for tok in specials:
+            if isinstance(tok, str) and len(tok) >= 3 and tok not in THINK_TAGS and not tok.isalnum() and tok in both:
+                leak = re.search(re.escape(tok), both)
+                break
+    if leak:
+        out["control_token_leak"] = f"the reply contains the token {leak.group(0)!r}"
+    elif TOOL_MARKUP.search(content):
+        m = TOOL_MARKUP.search(content)
+        out["control_token_leak"] = f"tool-call markup came back as text ({m.group(0)!r}); the server's parser did not take it"
+    for pid, marker in (markers or {}).items():
+        if pid != entry.get("id") and re.search(r"(?<![A-Za-z0-9])" + re.escape(marker) + r"(?![A-Za-z0-9])", both):
+            out["cross_request_leak"] = f"the reply contains {marker!r}, a word from the prompt {pid!r}"
+            break
+
+    lead = text.lstrip()
+    if lead:
+        words = re.findall(r"\w+", lead.casefold())[:defaults.SUITE_FIRST_TOKEN_REPEATS]
+        if len(words) == defaults.SUITE_FIRST_TOKEN_REPEATS and len(set(words)) == 1:
+            out["repeated_first_token"] = f"the reply begins with {words[0]!r} {len(words)} times"
+        first = lead[0]
+        if (first == "�" or unicodedata.category(first) in ("Mn", "Mc", "Me", "Cf", "Cc", "Co", "Cs")
+                or LEADING_PUNCT.match(lead)):
+            out["corrupt_first_token"] = f"the reply begins with {lead[:6]!r}"
+
+    # Letters, combining marks (Thai and Devanagari vowel signs are marks), digits, punctuation and separators are readable;
+    # block elements, replacement characters and the like are not.
+    ok = sum(1 for c in text if unicodedata.category(c)[0] in "LMNPZ" or c.isspace() or c in PUNCTUATION)
+    share = ok / len(text) if text else 1.0
+    long_words = [w for w in re.findall(r"[A-Za-z]+", text) if len(w) >= defaults.SUITE_NO_VOWEL_WORD_CHARS]
+    bare = [w for w in long_words if not (VOWELS & set(w))]
+    if len(text) >= defaults.SUITE_READABLE_MIN_CHARS and share < defaults.SUITE_READABLE_MIN:
+        out["gibberish"] = f"only {share:.0%} of the characters are letters, digits, spaces or common punctuation"
+    elif len(bare) >= defaults.SUITE_NO_VOWEL_MIN_WORDS and len(bare) / len(long_words) > defaults.SUITE_NO_VOWEL_SHARE_MAX:
+        out["gibberish"] = f"{len(bare)} of {len(long_words)} long words have no vowel, for example {bare[0]!r}"
+
+    if prompt and prompt.get("expect_script") and content.strip():
+        total, frac = _script_share(content, prompt["expect_script"])
+        if total >= defaults.SUITE_MIN_LETTERS and frac < defaults.SUITE_SCRIPT_MIN_SHARE:
+            out["wrong_language"] = (f"{frac:.0%} of the answer's letters are {prompt['expect_script']}; "
+                                     f"the prompt expects that script")
+    return [{"kind": k, "detail": out[k][:200]} for k in KINDS if k in out]

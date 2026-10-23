@@ -134,6 +134,29 @@ SIDECAR_MIN_QUESTIONS = 10      # choice: fewest questions a parity result may r
 SUITE_MIN_PROMPTS = 5           # choice: issue 15 asks for at least five prompts of different kinds
 SUITE_MAX_TOKENS = 64           # choice: long enough for a loop or a drift to show, short enough that eight
                                 # requests cost about a minute at 20 tokens/s (more with thinking on)
+SUITE_BLOCKING_KINDS = ("control_token_leak", "cross_request_leak", "corrupt_first_token", "repeated_first_token",
+                        "mechanical_repetition", "gibberish")
+                                # choice: the findings that fail a gate when the control does not show them. A
+                                # working model almost never produces these at temperature 0 on these prompts.
+                                # The other kinds (an empty reply, a failed request, a prompt echo, a doubled
+                                # subword, the wrong language) depend on style or on the thinking budget, so they
+                                # are recorded and not gated.
+SUITE_PHRASE_WORDS = 6          # choice: a phrase of this many words ...
+SUITE_PHRASE_REPEATS_MAX = 3    # choice: ... may appear this many times (the swap check's coherence rule)
+SUITE_LINE_REPEATS = 4          # choice: this many identical lines in a row are a loop ...
+SUITE_LINE_MIN_CHARS = 8        # choice: ... when each is at least this long, so nested closing braces are not one
+SUITE_UNIT_REPEATS = 8          # choice: a unit of 2 to 24 characters with a letter or digit in it, repeated this
+SUITE_UNIT_MIN_SPAN = 40        # choice: many times over at least this many characters, is a loop ("ababab...")
+SUITE_DOUBLED_MIN = 3           # choice: this many words made of one unit twice ("ParisParis") are a finding
+SUITE_ECHO_MIN_CHARS = 30       # choice: a prompt at least this long, repeated at the start of the reply, is an echo
+SUITE_FIRST_TOKEN_REPEATS = 4   # choice: the same word this many times at the start of a reply
+SUITE_MIN_LETTERS = 8           # choice: fewest letters a reply needs before its writing system is judged
+SUITE_SCRIPT_MIN_SHARE = 0.5    # choice: at least this share of a reply's letters must be in the expected script
+SUITE_READABLE_MIN = 0.8        # choice: the swap check's share of letters, digits, spaces and common punctuation
+SUITE_READABLE_MIN_CHARS = 20   # choice: shorter replies are not judged on that share
+SUITE_NO_VOWEL_WORD_CHARS = 5   # choice: a Latin word this long with no vowel (y counts) is suspect ...
+SUITE_NO_VOWEL_MIN_WORDS = 8    # choice: ... when at least this many such words are in the reply ...
+SUITE_NO_VOWEL_SHARE_MAX = 0.25  # choice: ... and more than this share of the words that long have none
 SWAP_MIN_TOKENS = 16            # choice: the fewest compared tokens the weights-only gate accepts; the
                                 # skill's script compares 32
 AGENT_MAX_TURNS = 60            # choice: model turns in one agent step before the step counts as failed
