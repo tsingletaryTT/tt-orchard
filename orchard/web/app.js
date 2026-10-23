@@ -85,7 +85,7 @@ const TONE = { good: "good", warn: "warn", bad: "bad", alarm: "alarm", dim: "dim
 function stateBadge(state) {
   const st = S.meta && S.meta.states[state];
   if (!st) return h("span", { class: "badge", dataset: { tone: state === "unreadable" ? "alarm" : "dim" } },
-    state === "unreadable" ? "⚠ unreadable" : state);
+    ...(state === "unreadable" ? [h("span", { class: "emoji", "aria-hidden": "true" }, "⚠ "), "unreadable"] : [state]));
   return h("span", { class: "badge", dataset: { tone: TONE[st.role] || "dim" }, title: `${st.word} (${state})` },
     h("span", { "aria-hidden": "true", class: "emoji" }, st.emoji), h("span", { class: "word" }, st.word), h("span", { class: "name" }, state.replace(/-/g, " ")),
     h("span", { class: "real" }, `· ${state}`));      // "name" is the real state, shown instead of the orchard word in operator mode
@@ -162,7 +162,14 @@ function boardEl(b, readings) {
 
 function renderMachine() {
   const m = S.machine;
-  if (!m || !changed($("machine"), [m.boards, m.coder, m.cpu_tier, m.disk_free_gb, m.gozer_ok, m.lab])) return;
+  if (!m) return;
+  // The top bar's chip is drawn on every poll, before the panel's change guard. An outage marks the chip unknown and leaves the
+  // panel's cache as it was, so when the machine answers again with the same facts the guard returns early and nothing else
+  // would put the chip right.
+  const chips = m.boards.flatMap((b) => b.chips);
+  const freeNow = chips.filter((c) => c.state === "FREE").length;
+  renderMachineChip(m, chips, freeNow);
+  if (!changed($("machine"), [m.boards, m.coder, m.cpu_tier, m.disk_free_gb, m.gozer_ok, m.lab])) return;
   const box = clear($("machine"));
   if (!m.gozer_ok) {
     box.append(h("p", { class: "muted" }, "gozer did not answer. Chip leases are unknown; check `gozer status`."));
@@ -188,6 +195,21 @@ function renderMachine() {
   const free = all.filter((c) => c.state === "FREE").length;
   $("machine-note").textContent = all.length ? `${free} of ${all.length} chips free` : "";
   renderReadings();
+}
+
+// The top bar's one-line answer to "can I start something?": the same chips and coder the rail panel lists, so it never
+// disagrees with it. The tone is a coloured dot and the words say how many chips are free and whether the coder is up.
+function renderMachineChip(m, all, free) {
+  const chip = $("machine-chip");
+  if (!m || !m.gozer_ok || !all.length) {
+    chip.textContent = "Chips: unknown";
+    chip.dataset.tone = "bad";
+    return;
+  }
+  const stale = all.some((c) => c.state === "STALE" || c.state === "BUSY-UNTRACKED");
+  chip.textContent = free === all.length ? `${free} of ${all.length} chips free`
+    : `${free} of ${all.length} chips free · coder ${m.coder.up ? "up" : "down"}`;
+  chip.dataset.tone = free === all.length ? "good" : stale ? "bad" : "warn";
 }
 
 // ---- machine health: the scene's weather and how hard the farmer works --------------------------------
@@ -299,7 +321,7 @@ async function refreshRuns() {
       select(name);
     }
   } catch (err) {
-    if (Date.now() - S.lastOk > STALE_MS) setConn("offline");
+    if (Date.now() - S.lastOk > STALE_MS) { setConn("offline"); renderMachineChip(null, [], 0); }
   }
 }
 
@@ -376,7 +398,10 @@ function renderRun() {
   $("run-hint-text").textContent = d.next_step || d.hint || "";
   const mode = $("run-mode");
   mode.hidden = !d.mode;
-  mode.textContent = !d.mode ? "" : d.mode.startsWith("lab") ? `🧪 tests on ${d.mode.slice(5, -1)}` : "🏡 this box";
+  // the pictures sit in .emoji spans: the operator style hides them
+  if (!d.mode) mode.replaceChildren();
+  else if (d.mode.startsWith("lab")) mode.replaceChildren(h("span", { class: "emoji", "aria-hidden": "true" }, "🧪 "), `tests on ${d.mode.slice(5, -1)}`);
+  else mode.replaceChildren(h("span", { class: "emoji", "aria-hidden": "true" }, "🏡 "), "this box");
   mode.title = !d.mode ? "" : d.mode.startsWith("lab") ? "Lab mode: hardware tests run on the lab box; the coder stays here and is never parked"
     : "Local mode: everything runs on this machine";
   S.activity = d.activity ? { ...d.activity, seenAt: Date.now() } : null;
@@ -450,8 +475,8 @@ function renderResults(d) {
         h("tbody", {}, rows)))));
   }
   if (r.bundle) {
-    box.append(h("p", {}, h("button", { type: "button", class: "btn btn-small", onclick: () => { setTab("files"); openFirstBundleFile(); } },
-      "📄 Read RESULTS.md")));
+    box.append(h("p", {}, h("button", { type: "button", class: "btn btn-small", onclick: openResults },
+      h("span", { class: "emoji", "aria-hidden": "true" }, "📄 "), "Open RESULTS.md")));
   }
   renderCompare(d, box);
 }
@@ -506,14 +531,15 @@ function renderActions(d) {
   }
   if (d.state === "running") {
     add("Pause", "btn-warn", () => doControl("pause"), "Pause at the next check; the chips stay leased");
-    add("Abort", "btn-danger", () => doControl("abort"), "Stop the run and release the chips");
+    add("Abort", "btn-danger btn-apart", () => doControl("abort"), "Stop the run and release the chips");
   } else if (d.state === "paused") {
     add("Resume", "btn-primary", () => doControl("resume"));
-    add("Abort", "btn-danger", () => doControl("abort"));
-  } else if (d.state === "blocked" || d.state === "stopped-or-crashed") {
-    add("Retry run", "btn-primary", doRetry, "Run the same bring-up again; it resumes from the ledger");
+    add("Abort", "btn-danger btn-apart", () => doControl("abort"));
+  } else if (RETRY_STATES.includes(d.state)) {
+    add(d.state === "aborted" ? "Resume run" : "Retry run", "btn-primary", doRetry,
+      "Run the same bring-up again; it resumes from the ledger");
   } else if (d.state === "ready-for-operator-review") {
-    add("Open the bundle", "btn-primary", () => { setTab("files"); openFirstBundleFile(); });
+    add("Open RESULTS.md", "btn-primary", openResults);
   }
   if (d.launch) box.append(h("span", { class: "badge", dataset: { tone: "good" } }, `started from this page · pid ${d.launch.pid}`));
 }
@@ -522,6 +548,7 @@ function renderBlock(d) {
   const panel = $("block-panel");
   if (!d.block) { panel.hidden = true; return; }
   panel.hidden = false;
+  $("block-retry").hidden = !RETRY_STATES.includes(d.state);          // a block record can outlive the block: only a run that can start again gets the button
   $("block-h").textContent = `Blocked: ${d.block.code}`;
   $("block-reason").textContent = d.block.reason || "";
   const tried = clear($("block-tried"));
@@ -552,7 +579,7 @@ function renderStepper(d) {
     // blocked or stopped run it is where the run stopped, and its clock is not still running.
     const stopped = r && r.status === "running" && !going;
     const status = r ? (stopped ? "stopped" : r.status) : "pending";
-    const mark = stopped ? "⏹" : S.meta.marks[status] || "";
+    const mark = h("span", { class: "emoji", "aria-hidden": "true" }, `${stopped ? "⏹" : S.meta.marks[status] || ""} `);
     const isCur = d.stage && d.stage.current === s.number && !["ready-for-operator-review", "aborted"].includes(d.state);
     ol.append(h("li", {
       class: "step", dataset: { status, current: String(Boolean(isCur)), live: String(live) },
@@ -561,7 +588,8 @@ function renderStepper(d) {
       h("span", { class: "num" }, `${s.number}`),
       h("span", { class: "orchard" }, h("span", { "aria-hidden": "true" }, s.emoji + " "), s.name),
       h("span", { class: "real" }, s.real),
-      h("span", { class: "stat" }, r ? `${mark} ${status}${r.wall_s && !stopped ? " · " + dur(r.wall_s) : ""}${r.attempts > 1 ? ` · ×${r.attempts}` : ""}` : "not yet")));
+      h("span", { class: "stat" }, ...(r ? [mark,
+        `${status}${r.wall_s && !stopped ? " · " + dur(r.wall_s) : ""}${r.attempts > 1 ? ` · ×${r.attempts}` : ""}`] : ["not yet"]))));
   }
 }
 
@@ -645,7 +673,7 @@ function confirmDialog({ title, text, ok, danger, twoStep }) {
 const CONTROL_COPY = {
   pause: { title: "Pause this run?", text: "The supervisor stops at its next check and waits. The chips stay leased and the coder keeps running, so nothing else can use them until you resume or abort.", ok: "Pause" },
   resume: { title: "Resume this run?", text: "The supervisor carries on from where it paused.", ok: "Resume" },
-  abort: { title: "Abort this run?", text: "The supervisor stops the coder, releases every chip lease and ends the run. An aborted run cannot be resumed; a new bring-up of the same model starts over in a new run directory only if you move this one aside.", ok: "Abort run", danger: true, twoStep: true },
+  abort: { title: "Abort this run?", text: "The supervisor stops the coder, releases every chip lease and ends the run. The run stays aborted until a person chooses Resume run, which carries on from the ledger.", ok: "Abort run", danger: true, twoStep: true },
 };
 
 async function doControl(word) {
@@ -658,12 +686,18 @@ async function doControl(word) {
   } catch (err) { toast(err.message, "bad"); }
 }
 
+// The states a run can be started again from. The server keeps the same list (orchard/webui.py RETRYABLE); a test holds them equal.
+const RETRY_STATES = ["blocked", "stopped-or-crashed", "aborted"];
+
 async function doRetry() {
   const name = S.selected;
+  const aborted = S.detail && S.detail.state === "aborted";
   const ok = await confirmDialog({
-    title: "Retry this run?",
-    text: "This starts the same `tt-orchard bringup` again in the background. It runs the preflight, takes the chip lease, boots the coder and resumes from the ledger. The ledger records it as a retry.",
-    ok: "Retry run",
+    title: aborted ? "Resume this run?" : "Retry this run?",
+    text: aborted
+      ? "This starts `tt-orchard bringup` for the same model in the background. It runs the preflight, takes the chip lease, boots the coder and resumes from the ledger, where the abort left it. The ledger records a resume after the abort."
+      : "This starts the same `tt-orchard bringup` again in the background. It runs the preflight, takes the chip lease, boots the coder and resumes from the ledger. The ledger records it as a retry.",
+    ok: aborted ? "Resume run" : "Retry run",
   });
   if (!ok) return;
   try {
@@ -797,6 +831,9 @@ function renderFiles() {
   }
 }
 
+// Where a run's bundle report is opened: the header button of a finished run and the button under Results both call it.
+function openResults() { setTab("files"); openFirstBundleFile(); }
+
 function openFirstBundleFile() {
   const d = S.detail;
   const f = d && (d.files.find((x) => x.endsWith("bundle/RESULTS.md")) || d.files.find((x) => x.startsWith("stages/8/bundle/")));
@@ -855,11 +892,27 @@ function openNewRun() {
     : "No [lab] table in the config: the run stays on this box.";
   $("nr-result").hidden = true;
   $("nr-error").hidden = true;
-  $("nr-start").disabled = true;
+  setStartReady(false);
   $("nr-check").disabled = false;
   $("nr-check").textContent = "Run checks";
+  updateOptionsSummary();
   $("new-run").showModal();
   $("nr-model").focus();
+}
+
+// Run checks is the main button until the checks pass; then Start is. `ready` means the last check passed and nothing has changed since.
+function setStartReady(ready) {
+  $("nr-start").disabled = !ready;
+  $("nr-start").classList.toggle("btn-primary", ready);
+  $("nr-check").classList.toggle("btn-primary", !ready);
+}
+
+// The options are folded away because they rarely change, so the closed line says what they are now.
+function updateOptionsSummary() {
+  const where = $("nr-mode").value === "lab" ? "the lab box" : "this box";
+  const research = { full: "full research", "no-github": "research without GitHub", offline: "no research" }[$("nr-research").value] || "full research";
+  const base = $("nr-base").value.trim();
+  $("nr-options-summary").textContent = `Options: ${where}, ${research}${base ? `, base ${base}` : ""}`;
 }
 
 function formError(text) {
@@ -871,10 +924,10 @@ async function runChecks() {
   const model = $("nr-model").value.trim(), base = $("nr-base").value.trim();
   formError("");
   if (!MODEL_RE.test(model)) { formError("Enter the model as org/name, for example Altworld/Hemmingway-1."); $("nr-model").focus(); return; }
-  if (base && !MODEL_RE.test(base)) { formError("The base must be org/name, or left empty."); $("nr-base").focus(); return; }
+  if (base && !MODEL_RE.test(base)) { formError("The base must be org/name, or left empty."); $("nr-options").open = true; $("nr-base").focus(); return; }
   $("nr-check").disabled = true;
   $("nr-check").textContent = "Checking…";
-  $("nr-start").disabled = true;
+  setStartReady(false);
   try {
     const out = await api("/api/preflight", { body: { model, base: base || null, mode: $("nr-mode").value, research: $("nr-research").value } });
     out.mode = $("nr-mode").value;
@@ -972,10 +1025,10 @@ function renderPreflight(out) {
   if (base) {
     base.candidates.forEach((c, i) => list.append(h("label", {},
       h("input", { type: "radio", name: "nr-cand", value: c.name, id: `nr-cand-${i}`,
-        onchange: () => { $("nr-base").value = c.name; runChecks(); } }),
+        onchange: () => { $("nr-base").value = c.name; updateOptionsSummary(); runChecks(); } }),   // an assignment fires no input event
       h("span", { class: "mono" }, c.name), h("span", { class: "muted" }, c.installed ? "installed" : "installs with tt-model pull"))));
   }
-  $("nr-start").disabled = !out.ok;
+  setStartReady(out.ok);
   if (!out.ok) formError("A check blocks the run. Fix it, or choose a base below, and run the checks again.");
 }
 
@@ -1003,6 +1056,7 @@ async function startBringup() {
 
 function wire() {
   $("new-run-btn").addEventListener("click", openNewRun);
+  $("block-retry").addEventListener("click", doRetry);
   $("view-orchard-btn").addEventListener("click", () => setView("orchard"));
   $("view-hardware-btn").addEventListener("click", () => setView("hardware"));
   $("view-settings-btn").addEventListener("click", () => setView("settings"));
@@ -1010,9 +1064,10 @@ function wire() {
   $("checks-run").addEventListener("click", startChecks);
   $("caches-run").addEventListener("click", loadCaches);
   setInterval(renderNow, 1000);
-  $("machine-check-btn").addEventListener("click", () => { setView("settings"); startChecks(); });
-  $("nr-mode").addEventListener("change", () => { $("nr-start").disabled = true; });
-  $("nr-research").addEventListener("change", () => { $("nr-start").disabled = true; });
+  $("machine-chip").addEventListener("click", () => setView("hardware"));
+  $("machine-details-link").addEventListener("click", (ev) => { ev.preventDefault(); setView("hardware"); });
+  $("nr-mode").addEventListener("change", () => { setStartReady(false); updateOptionsSummary(); });
+  $("nr-research").addEventListener("change", () => { setStartReady(false); updateOptionsSummary(); });
   $("hw-zoom-in").addEventListener("click", () => zoomToplike(+1));
   $("hw-zoom-out").addEventListener("click", () => zoomToplike(-1));
   $("hw-wide").addEventListener("click", () => {
@@ -1029,7 +1084,7 @@ function wire() {
   $("nr-cancel").addEventListener("click", () => $("new-run").close());
   $("new-run-form").addEventListener("submit", (ev) => { ev.preventDefault(); runChecks(); });
   $("nr-start").addEventListener("click", startBringup);
-  for (const id of ["nr-model", "nr-base"]) $(id).addEventListener("input", () => { $("nr-start").disabled = true; });
+  for (const id of ["nr-model", "nr-base"]) $(id).addEventListener("input", () => { setStartReady(false); updateOptionsSummary(); });
 
   for (const t of TABS) $(`tab-${t}`).addEventListener("click", () => setTab(t));
   $("tabs").addEventListener("keydown", (ev) => {
@@ -1074,15 +1129,16 @@ function setView(view, { push = true } = {}) {
   $("run").hidden = !runShown;
   $("run-empty").hidden = view !== "orchard" || Boolean(S.selected);
   if (view === "hardware") {
-    if (push) history.replaceState(null, "", "#hardware");
+    if (push) history.replaceState(null, "", "#machine");
     startToplike(S.hwMode || "normal");
+    pollChecks();                       // the last setup check, if there was one, is shown where the checks now live
     return;
   }
   stopToplike();
   document.body.classList.remove("wide");
   $("hw-wide").setAttribute("aria-pressed", "false");
   if (view === "settings") {
-    if (push) history.replaceState(null, "", "#settings");
+    if (push) history.replaceState(null, "", "#models");
     loadSettings();
   } else if (push) {
     history.replaceState(null, "", S.selected ? `#run/${encodeURIComponent(S.selected)}` : "#");
@@ -1176,7 +1232,6 @@ async function loadCaches() {
 
 async function loadSettings() {
   $("settings-error").hidden = true;
-  pollChecks();
   try {
     S.settings = await api("/api/settings");
   } catch (err) {
@@ -1414,8 +1469,9 @@ function startToplike(mode) {
 }
 
 function routeFromHash() {
-  if (location.hash === "#hardware") { setView("hardware", { push: false }); return; }
-  if (location.hash === "#settings") { setView("settings", { push: false }); return; }
+  // #machine and #models are the names now; #hardware and #settings are what earlier links and bookmarks carry
+  if (location.hash === "#machine" || location.hash === "#hardware") { setView("hardware", { push: false }); return; }
+  if (location.hash === "#models" || location.hash === "#settings") { setView("settings", { push: false }); return; }
   const m = location.hash.match(/^#run\/(.+)$/);
   if (m) select(decodeURIComponent(m[1]), { push: false });
 }
@@ -1430,6 +1486,7 @@ async function main() {
     return;
   }
   $("brand-host").textContent = `${S.meta.hostname} · ${S.meta.version}${S.meta.lan ? " · open on the network" : ""}`;
+  $("brand-host").title = $("brand-host").textContent;        // the bar truncates it on narrower screens
   S.scene = window.OrchardScene ? new window.OrchardScene($("scene")) : null;
   if (S.scene) S.scene.start();
   tickClock();

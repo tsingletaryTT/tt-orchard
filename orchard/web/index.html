@@ -26,21 +26,23 @@
     <span class="brand-host" id="brand-host"></span>
   </div>
   <nav class="views" aria-label="Views">
-    <button type="button" class="view-btn" id="view-orchard-btn" aria-pressed="true">🧺 Orchard</button>
-    <button type="button" class="view-btn" id="view-hardware-btn" aria-pressed="false">📺 Hardware</button>
-    <button type="button" class="view-btn" id="view-settings-btn" aria-pressed="false">🧰 Settings</button>
+    <button type="button" class="view-btn" id="view-orchard-btn" aria-pressed="true"><span class="emoji" aria-hidden="true">🧺 </span><span class="lbl-playful">Orchard</span><span class="lbl-operator">Runs</span></button>
+    <button type="button" class="view-btn" id="view-hardware-btn" aria-pressed="false"><span class="emoji" aria-hidden="true">📺 </span>Machine</button>
+    <button type="button" class="view-btn" id="view-settings-btn" aria-pressed="false"><span class="emoji" aria-hidden="true">🧰 </span>Models</button>
   </nav>
   <div class="topbar-right">
+    <button type="button" class="machine-chip" id="machine-chip" data-tone="unknown" title="The chips on this box. Opens the Machine view.">Chips: reading…</button>
     <div class="clock" aria-label="Machine time and connection">
       <span class="clock-day" id="clock-day"></span>
       <span class="clock-time" id="clock-time"></span>
       <span class="conn" id="conn" role="status" aria-live="polite"><span class="conn-dot" aria-hidden="true"></span><span class="conn-text">Connecting…</span></span>
     </div>
-    <div class="mode-switch" id="mode-switch" role="group" aria-label="Page style">
-      <button type="button" class="view-btn" id="mode-playful-btn" data-mode="playful" aria-pressed="true" title="The farm look">Playful</button>
-      <button type="button" class="view-btn" id="mode-operator-btn" data-mode="operator" aria-pressed="false" title="Plain type, state first: what is happening, what happened, what to do">Operator</button>
+    <div class="style-switch" id="mode-switch" role="group" aria-label="Page style">
+      <span class="style-label">Style</span>
+      <button type="button" class="style-btn" id="mode-playful-btn" data-mode="playful" aria-pressed="true" title="The farm look">Playful</button>
+      <button type="button" class="style-btn" id="mode-operator-btn" data-mode="operator" aria-pressed="false" title="Plain type, state first: what is happening, what happened, what to do">Operator</button>
     </div>
-    <button type="button" class="btn btn-primary" id="new-run-btn">🌱 New bring-up</button>
+    <button type="button" class="btn btn-primary" id="new-run-btn"><span class="emoji" aria-hidden="true">🌱 </span>New bring-up</button>
   </div>
 </header>
 
@@ -58,7 +60,7 @@
       <div class="rail-head">
         <h2 id="machine-h">Machine</h2>
         <span class="rail-note" id="machine-note"></span>
-        <button type="button" class="btn btn-small" id="machine-check-btn" title="Check both boxes for what a run needs">🔍 Check</button>
+        <a href="#machine" class="rail-link" id="machine-details-link" title="The live display, the setup checks and the tensor caches">Details ›</a>
       </div>
       <div id="machine" class="machine"><p class="muted">Reading gozer…</p></div>
     </section>
@@ -69,8 +71,8 @@
     <section id="hardware-view" class="hardware" hidden aria-labelledby="hw-h">
       <div class="hw-head">
         <div>
-          <h1 id="hw-h">Hardware</h1>
-          <p class="muted" id="hw-sub">tt-toplike, live from this machine.</p>
+          <h1 id="hw-h">Machine</h1>
+          <p class="muted" id="hw-sub">The live display, then the setup checks and the tensor caches.</p>
         </div>
         <div class="channels" id="hw-channels" role="group" aria-label="tt-toplike view"></div>
       </div>
@@ -91,11 +93,37 @@
         <h2>tt-toplike is not installed here</h2>
         <p class="muted">Install it (github.com/tenstorrent/tt-toplike), or start the page with <code>tt-orchard ui --toplike PATH</code>.</p>
       </div>
+      <section class="checks-wrap" aria-labelledby="checks-h">
+        <div class="checks-head">
+          <h2 id="checks-h">Check machines</h2>
+          <button type="button" class="btn" id="checks-run"><span class="emoji" aria-hidden="true">🔍 </span>Check machines</button>
+        </div>
+        <p class="muted small" id="checks-status">Runs the setup checks on this box, and on the lab when there is one. Nothing is changed: each problem shows the command that fixes it.</p>
+        <div id="checks-boxes" class="checks-boxes"></div>
+      </section>
+      <section class="checks-wrap" aria-labelledby="caches-h">
+        <div class="checks-head">
+          <h2 id="caches-h">Tensor caches</h2>
+          <span class="caches-tools">
+            <label class="field-inline" for="caches-lab"><input type="checkbox" id="caches-lab"> include the lab</label>
+            <button type="button" class="btn" id="caches-run"><span class="emoji" aria-hidden="true">📦 </span>Show caches</button>
+          </span>
+        </div>
+        <p class="muted small" id="caches-status">Each model and chip count keeps a tensor cache, and every test shares one kernel
+          cache. Listing them reads their sizes (the lab's over ssh), so it takes a moment. To free space, run
+          <code>tt-orchard caches --prune --older-than DAYS</code>; this page never deletes.</p>
+        <div class="table-wrap" id="caches-table" hidden>
+          <table class="ledger caches">
+            <thead><tr><th scope="col">Box</th><th scope="col">GB</th><th scope="col">Days</th><th scope="col">Used by</th><th scope="col">Model and path</th></tr></thead>
+            <tbody id="caches-rows"></tbody>
+          </table>
+        </div>
+      </section>
     </section>
 
     <section id="settings-view" class="settings" hidden aria-labelledby="settings-h">
       <div>
-        <h1 id="settings-h">Settings</h1>
+        <h1 id="settings-h">Models</h1>
         <p class="muted">Which models the orchard's workers use. A change applies to the next run or retry; a run
           that is going keeps the models it started with.</p>
       </div>
@@ -134,37 +162,11 @@
             server there.</p>
         </section>
         <div class="settings-actions">
-          <button type="submit" class="btn btn-primary" id="settings-save">💾 Save</button>
+          <button type="submit" class="btn btn-primary" id="settings-save"><span class="emoji" aria-hidden="true">💾 </span>Save</button>
           <span class="muted small" id="settings-files"></span>
         </div>
         <p class="form-error" id="settings-error" role="alert" hidden></p>
       </form>
-      <section class="checks-wrap" aria-labelledby="checks-h">
-        <div class="checks-head">
-          <h2 id="checks-h">Check machines</h2>
-          <button type="button" class="btn" id="checks-run">🔍 Check machines</button>
-        </div>
-        <p class="muted small" id="checks-status">Runs the setup checks on this box, and on the lab when there is one. Nothing is changed: each problem shows the command that fixes it.</p>
-        <div id="checks-boxes" class="checks-boxes"></div>
-      </section>
-      <section class="checks-wrap" aria-labelledby="caches-h">
-        <div class="checks-head">
-          <h2 id="caches-h">Tensor caches</h2>
-          <span class="caches-tools">
-            <label class="field-inline" for="caches-lab"><input type="checkbox" id="caches-lab"> include the lab</label>
-            <button type="button" class="btn" id="caches-run">📦 Show caches</button>
-          </span>
-        </div>
-        <p class="muted small" id="caches-status">Each model and chip count keeps a tensor cache, and every test shares one kernel
-          cache. Listing them reads their sizes (the lab's over ssh), so it takes a moment. To free space, run
-          <code>tt-orchard caches --prune --older-than DAYS</code>; this page never deletes.</p>
-        <div class="table-wrap" id="caches-table" hidden>
-          <table class="ledger caches">
-            <thead><tr><th scope="col">Box</th><th scope="col">GB</th><th scope="col">Days</th><th scope="col">Used by</th><th scope="col">Model and path</th></tr></thead>
-            <tbody id="caches-rows"></tbody>
-          </table>
-        </div>
-      </section>
     </section>
 
     <div id="run-empty" class="empty">
@@ -215,6 +217,7 @@
           <div>
             <h3>How to unblock</h3>
             <ul id="block-unblock" class="plain-list"></ul>
+            <button type="button" class="btn btn-primary" id="block-retry" hidden>Retry run</button>
           </div>
         </div>
       </section>
@@ -321,28 +324,31 @@
       <input id="nr-model" name="model" type="text" placeholder="org/name" autocomplete="off" spellcheck="false" required>
       <p class="field-help">For example <span class="mono">Altworld/Hemmingway-1</span>.</p>
     </div>
-    <div class="field">
-      <label for="nr-base">Base <span class="muted">(optional)</span></label>
-      <input id="nr-base" name="base" type="text" placeholder="the model card's base_model" autocomplete="off" spellcheck="false">
-      <p class="field-help">A tt-model bundle or model id to base the run on. Leave empty to use the model card.</p>
-    </div>
-    <div class="field">
-      <label for="nr-mode">Where the hardware tests run</label>
-      <select id="nr-mode">
-        <option value="local">This box</option>
-        <option value="lab">The lab box</option>
-      </select>
-      <span class="field-help" id="nr-mode-help"></span>
-    </div>
-    <div class="field">
-      <label for="nr-research">Base-model research</label>
-      <select id="nr-research">
-        <option value="full">Hub, tt-model, tt-metal and GitHub</option>
-        <option value="no-github">Without GitHub issue and code searches</option>
-        <option value="offline">Off (no requests)</option>
-      </select>
-      <span class="field-help">Looks for the model this one was made from, ranks the bundles that could serve it and estimates the class from the safetensors headers, before any download.</span>
-    </div>
+    <details class="nr-options" id="nr-options">
+      <summary id="nr-options-summary">Options: this box, full research</summary>
+      <div class="field">
+        <label for="nr-base">Base <span class="muted">(optional)</span></label>
+        <input id="nr-base" name="base" type="text" placeholder="the model card's base_model" autocomplete="off" spellcheck="false">
+        <p class="field-help">A tt-model bundle or model id to base the run on. Leave empty to use the model card.</p>
+      </div>
+      <div class="field">
+        <label for="nr-mode">Where the hardware tests run <span class="muted">(this run only; the default is set in Models)</span></label>
+        <select id="nr-mode">
+          <option value="local">This box</option>
+          <option value="lab">The lab box</option>
+        </select>
+        <span class="field-help" id="nr-mode-help"></span>
+      </div>
+      <div class="field">
+        <label for="nr-research">Base-model research</label>
+        <select id="nr-research">
+          <option value="full">Hub, tt-model, tt-metal and GitHub</option>
+          <option value="no-github">Without GitHub issue and code searches</option>
+          <option value="offline">Off (no requests)</option>
+        </select>
+        <span class="field-help">Looks for the model this one was made from, ranks the bundles that could serve it and estimates the class from the safetensors headers, before any download.</span>
+      </div>
+    </details>
     <p class="form-error" id="nr-error" role="alert" hidden></p>
     <div id="nr-result" class="preflight" hidden>
       <p class="preflight-run" id="nr-run"></p>
@@ -355,8 +361,8 @@
     </div>
     <div class="dialog-actions">
       <button type="button" class="btn" id="nr-cancel">Cancel</button>
-      <button type="submit" class="btn" id="nr-check">Run checks</button>
-      <button type="button" class="btn btn-primary" id="nr-start" disabled>Start bring-up</button>
+      <button type="submit" class="btn btn-primary" id="nr-check">Run checks</button>
+      <button type="button" class="btn" id="nr-start" disabled>Start bring-up</button>
     </div>
   </form>
 </dialog>

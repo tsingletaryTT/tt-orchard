@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """`tt-orchard`: the front door to a model bring-up.
 
-    tt-orchard bringup MODEL [--run-dir DIR] [--dry-run] [--no-fetch] [--refuse-credentials-visible] [--no-graft-trial]
+    tt-orchard bringup MODEL [--run-dir DIR] [--dry-run] [--no-fetch] [--refuse-credentials-visible] [--no-graft-trial] [--resume-aborted]
     tt-orchard status   [MODEL | --run-dir DIR] [--json] [--style S]
     tt-orchard watch    [MODEL | --run-dir DIR] [--all] [--once] [--style S]
     tt-orchard pause | resume | abort   [MODEL | --run-dir DIR]
@@ -106,6 +106,8 @@ def _parser() -> argparse.ArgumentParser:
                    help="skip stage 2's graft trial. When the model has no mtp.* tensors and the nearest model has a head that "
                         "fits, stage 2 serves the grafted drafter once beside the safe configuration and keeps it when it is "
                         "faster; that is one more hardware test of 10 to 35 minutes. The run records the choice")
+    b.add_argument("--resume-aborted", action="store_true",
+                   help="go on with a run that an operator or a signal aborted (the web page's Resume run does this). The ledger records the resume and the run continues from there. Without it an aborted run stays aborted. A finished run, and an abort of any other kind, are left as they are")
     b.add_argument("--prune-caches", action="store_true",
                    help="when the only block is a full disk, remove the oldest tensor caches that no unfinished run "
                         "uses, just enough to fit (never the kernel cache), then check again. With --dry-run it "
@@ -835,7 +837,8 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
               **({"base_candidates": str(candidates_path)} if candidates_path else {})}
     argv_run = bringup_config.supervisor_argv(cfg, args.model, run_dir, inputs=inputs,
                                               accept_credentials=not args.refuse_credentials_visible,
-                                              graft_trial=not args.no_graft_trial)
+                                              graft_trial=not args.no_graft_trial,
+                                              resume_aborted=args.resume_aborted)
     command = "python3 -m orchard.supervisor " + shlex.join(argv_run)
     if args.dry_run:
         print(f"║  command  {command}\n╚══", file=out)

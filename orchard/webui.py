@@ -117,7 +117,7 @@ LISTED = ("BLOCKED.md", "blocked.json", "coder.log", "stages/*/*.json", "stages/
           "stages/8/bundle/*", "research/base-candidates.*")
 # Runs that need a person first, then the ones still going, then the finished ones.
 LIVE_STATES = ("running", "paused")      # listed before everything else; the rest follow newest first
-RETRYABLE = ("blocked", "stopped-or-crashed")
+RETRYABLE = ("blocked", "stopped-or-crashed", "aborted")      # an abort is terminal for the supervisor: an aborted run is resumed only with --resume-aborted
 # tt-toplike's own views (`--mode`), plus its kiosk rotation (`--rotate`). `hivemind`, its opt-in sniffer of other
 # processes' activity, is left out: an open page should not start it.
 TOPLIKE_MODES = ("normal", "starfield", "castle", "flow", "arcade", "training", "rotate")
@@ -785,10 +785,13 @@ class WebApp:
         run = self._run(name)
         f = self._collect(run)
         if f["state"] not in RETRYABLE:
-            raise Conflict(f"{name} is {f['state']}; only a blocked or stopped run is retried")
+            raise Conflict(f"{name} is {f['state']}; only a blocked, stopped or aborted run is retried")
         if not f["model"] or not MODEL_RE.match(f["model"]):
             raise Conflict(f"the ledger of {name} names no model to retry")
-        return self._launch(name, self._bringup_argv(f["model"], ["--run-dir", str(run)]))
+        extra = ["--run-dir", str(run)]
+        if f["state"] == "aborted":
+            extra.append("--resume-aborted")       # the supervisor leaves an abort alone unless it is told to carry on
+        return self._launch(name, self._bringup_argv(f["model"], extra))
 
     @staticmethod
     def _check_ids(model, base):

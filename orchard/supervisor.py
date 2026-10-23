@@ -58,6 +58,8 @@ aborted, so running the same command again resumes it. When the ledger cannot be
 release works from what this process remembers. A SIGKILL, a power cut or a crash of Python
 itself runs no handler: the coder then keeps its chips under a dead pid's lease until the run is
 resumed (which re-leases it) or aborted.
+An abort itself is terminal: running the same command again returns exit 4 and starts nothing. `--resume-aborted` is the operator's explicit
+way to carry on after an operator's or a signal's abort (the web page's `Resume run`); it records `resume` with `after: abort`.
 `python3 -m orchard.supervisor status --run-dir DIR [--json]` prints the state of a run without
 taking the ledger lock or writing anything (orchard/status.py). The supervisor writes its pid to
 `<run dir>/supervisor.pid` at start so that command can tell a live supervisor from a dead one.
@@ -146,7 +148,7 @@ from orchard.runner import Denied, check_string
 from orchard import graft_trial as graft
 from orchard import kept_coder, kernelprobe, swap_draft
 from orchard.server import ServerControl, ServerError, ServerSpec, StopCheck
-from orchard.stages import (PACKAGE_OPTIONS_SET, GateResult, TierUnavailable, attempt_started_ts,
+from orchard.stages import (PACKAGE_OPTIONS_SET, GateResult, TierUnavailable, abort_can_resume, attempt_started_ts,
                             budget_cap, check_disk, coder_state, delta_class, delta_path, evidence_record,
                             open_stage_dir, package_format, package_options, resolve_endpoint,
                             resolve_skill, run_class, run_path, run_progress, spec_for, tier_for)
@@ -502,8 +504,12 @@ class Supervisor:
                  paths: RunPaths | None = None, package: dict | None = None,
                  package_added: bool = False, unattended: bool = False, lab=None,
                  four_chip_package: str | None = None, coder_tier: str | None = None,
-                 keep_up: bool = False, coder_identity: dict | None = None, graft_trial: bool = True):
+                 keep_up: bool = False, coder_identity: dict | None = None, graft_trial: bool = True,
+                 resume_aborted: bool = False):
         self.run_dir = Path(run_dir).resolve()
+        # An abort is terminal unless the operator asks for this (`--resume-aborted`): then an operator's or a signal's abort is
+        # followed by a `resume` decision marked `after: abort`, and the run goes on from the ledger (orchard/stages.py, abort_can_resume).
+        self.resume_aborted = resume_aborted
         # Stage 2 serves a grafted drafter once beside the safe configuration when stage 0 found a candidate; False skips that test.
         self.graft_trial = graft_trial
         # Lab mode only: in local mode tests park the coder for its board, so a kept coder saves little.
@@ -687,6 +693,12 @@ class Supervisor:
 
     def _run(self) -> int:
         p = run_progress(self.ledger.read())
+        if p.aborted and self.resume_aborted and abort_can_resume(self.ledger.read()):
+            # The operator asked to carry on after an abort. Recorded once, before any work; replay then clears the abort and any
+            # pause the run was waiting in, and the run starts its coder again as after any stop.
+            self.ledger.append("decision", None, decision="resume", by="retry", after="abort")
+            self.actuator.clear()
+            p = run_progress(self.ledger.read())
         if p.aborted or p.finished:
             self._release_all()           # finishes a release a crash interrupted; else does nothing
             return EXIT_ABORTED if p.aborted else EXIT_READY
@@ -2183,6 +2195,8 @@ def parse(argv=None):
                    help="skip stage 2's graft trial: with a graft candidate (the model has no mtp.* tensors and the nearest model has "
                         "a head that fits) stage 2 serves the grafted drafter once and keeps it when it is faster; this leaves the "
                         "safe configuration without that extra test (a cold boot adds 4 to 25 minutes). The run records the choice")
+    r.add_argument("--resume-aborted", action="store_true",
+                   help="go on with a run that an operator or a signal aborted: the ledger records `resume` after the abort and the run starts its coder again and continues from the ledger. Without this flag an aborted run stays aborted and running the command again starts nothing. An abort of any other kind, and a finished run, are left as they are")
     r.add_argument("--unattended", action="store_true",
                    help="never wait for an operator: when the run would pause, name the reason, write "
                         "BLOCKED.md, release the hardware and exit 5. Running the command again retries. "
@@ -2330,6 +2344,7 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
                       credentials_visible=found, required_chips=required,
                       home=home, containers=containers, paths=paths, package=package,
                       package_added=added, unattended=getattr(args, "unattended", False), graft_trial=graft_on,
+                      resume_aborted=bool(getattr(args, "resume_aborted", False)),
                       lab=lab if lab_host else None,
                       four_chip_package=getattr(args, "four_chip_package", None), coder_tier=tier,
                       keep_up=bool(getattr(args, "coder_keep_up", False)),

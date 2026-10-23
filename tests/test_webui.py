@@ -345,6 +345,43 @@ def test_a_retry_relaunches_the_same_bringup_detached(root):
     assert call["log_path"] == root / "org--a.ui-launch.log"
 
 
+def test_an_aborted_run_is_resumed_with_the_explicit_flag_and_a_blocked_run_is_not(root):
+    """An abort is terminal for the supervisor unless the operator asks (`--resume-aborted`), so the page asks for it only for an aborted run."""
+    write_ledger(root / "org--a", ("stage_start", 1, {}), ("decision", None, {"decision": "abort", "by": "operator"}),
+                 model="org/a")
+    app = make_app(root)
+    assert app.run_detail("org--a")["state"] == "aborted"
+    app.retry("org--a")
+    argv = app.spawn.calls[0]["argv"]
+    assert argv[2:4] == ["bringup", "org/a"] and argv[argv.index("--run-dir") + 1] == str(root / "org--a")
+    assert "--resume-aborted" in argv
+    write_ledger(root / "org--b", ("stage_start", 1, {}), ("decision", 1, {"decision": "blocked", "code": "stage-failed", "reason": "x"}),
+                 model="org/b")
+    app.retry("org--b")
+    assert "--resume-aborted" not in app.spawn.calls[1]["argv"]
+
+
+@pytest.mark.parametrize("ledger,state", [
+    ((("stage_start", 0, {}),), "running"),
+    ((("stage_start", 0, {}), ("decision", 0, {"decision": "pause", "kind": "operator"})), "paused"),
+    ((("stage_start", 0, {}), ("stage_end", 0, {"result": "pass"}),
+      ("decision", None, {"decision": "ready for operator review", "bundle": "stages/8/bundle"})), "ready-for-operator-review"),
+])
+def test_only_blocked_stopped_and_aborted_runs_are_retried(root, ledger, state):
+    run = write_ledger(root / "org--a", *ledger, model="org/a")
+    if state in ("running", "paused"):
+        with_supervisor(run, 5)
+    app = make_app(root, alive={5})
+    assert app.run_detail("org--a")["state"] == state              # the fixture is the state it names
+    with pytest.raises(webui.Conflict):
+        app.retry("org--a")
+    assert app.spawn.calls == []
+
+
+def test_the_retryable_states_are_exactly_blocked_stopped_and_aborted():
+    assert set(webui.RETRYABLE) == {"blocked", "stopped-or-crashed", "aborted"}
+
+
 def test_a_running_run_cannot_be_retried(root):
     run = write_ledger(root / "org--a", ("stage_start", 0, {}))
     with_supervisor(run, 5)

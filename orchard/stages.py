@@ -1316,6 +1316,10 @@ def run_progress(entries: list[dict]) -> RunProgress:
             elif what == "resume":
                 paused, escalations, cold_boots, coder_deaths = None, 0, 0, 0
                 clock_start = ledger_ts(e)
+                if d.get("after") == "abort":
+                    # The explicit transition (`--resume-aborted`, abort_can_resume). A plain operator resume
+                    # never reaches an aborted run, because no supervisor is waiting to read it.
+                    aborted = False
             elif what == "abort":
                 aborted = True
             elif what == "ready for operator review":
@@ -1328,6 +1332,20 @@ def run_progress(entries: list[dict]) -> RunProgress:
     return RunProgress(run_start is not None, run_start, clock_start, finished, aborted, paused,
                        tuple(done), open_stage, frozenset(escalated), escalations, cold_boots,
                        coder_deaths, next_stage)
+
+
+def abort_can_resume(entries: list[dict]) -> bool:
+    """Whether an explicit resume may follow the run's latest abort: the run started and did not finish, it is
+    aborted now, and the latest abort was an operator's (`by: operator`) or a signal's (`by: signal SIGINT`).
+    An abort of any other kind stays terminal."""
+    p = run_progress(entries)
+    if not p.started or not p.aborted or p.finished:
+        return False
+    by = None
+    for e in entries:
+        if e["event"] == "decision" and e["data"].get("decision") == "abort":
+            by = e["data"].get("by")
+    return isinstance(by, str) and (by == "operator" or (by.startswith("signal ") and len(by) > len("signal ")))
 
 
 def attempt_started_ts(entries: list[dict], stage: int) -> float | None:

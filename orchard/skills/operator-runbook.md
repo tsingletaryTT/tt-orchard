@@ -82,7 +82,7 @@ same script again resumes it.
 
 2. Wait 10 seconds. Run the run script again, exactly as in "Start a run".
 3. Run status after 60 seconds. If it says paused, send `control resume` once.
-4. Never send `control abort`. An aborted run cannot be resumed.
+4. Never send `control abort`. An aborted run stays aborted for you; only a person resumes it.
 
 If the run crashes again within an hour, stop and ask a human.
 
