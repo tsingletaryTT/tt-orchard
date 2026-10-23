@@ -152,7 +152,7 @@ def _done(reasons: list, seen: list) -> GateResult:
 
 DELTA_AREAS = ("config", "architecture", "tensors", "tensor_names", "tokenizer", "chat_template",
                "files", "generation_config", "license", "other")
-HAZARD_AREAS = ("tensor_cache", "drafter", "disk", "license", "other")
+HAZARD_AREAS = ("tensor_cache", "drafter", "disk", "license", "generation_config", "chat_template", "other")
 PATHS = ("weights-only", "full-port")
 
 

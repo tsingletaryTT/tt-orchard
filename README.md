@@ -594,7 +594,7 @@ anything large. It reads, with no Hugging Face token:
 - each candidate's `config.json`, to compare the architecture (model type and the layer, width, head and
   vocabulary sizes);
 - the safetensors headers of the new model and a candidate, by two byte-range requests per file (a
-  header larger than 8 MiB is not read, and the estimate is then `unknown`), to estimate the class (`weights-only`, `full-port` or `unknown`) and the download size. A sidecar's
+  header larger than 8 MiB is not read, and the estimate is then `unknown`; up to six shards are read at once), to estimate the class (`weights-only`, `full-port` or `unknown`) and the download size. A sidecar's
   tensors would need a download, so the estimate only says one is possible;
 - the tt-model community catalog (`tt model search --catalog`, or `tt-model search --catalog` where there
   is no `tt` command), published bundles (their manifest says which model they serve, and a
@@ -618,7 +618,7 @@ Research sends no token, so for a gated or private new model it cannot read the 
 report says so (`new_model_gated` in the JSON, a line in the Markdown and in the UI), and its short candidate
 list is not evidence that there is no base. A source that cannot be reached is listed as unavailable in the report. After one connection failure to a host
 (no route, a timeout), the remaining requests to that host fail at once. One research run makes at most 600
-requests in at most 240 seconds (answers from the cache do not count); after that the remaining requests fail
+requests in at most 240 seconds (answers from the cache do not count; the count stays exact when several shards are read at once); after that the remaining requests fail
 at once, are listed as unavailable, and an estimate that misses a header is `unknown`. `--offline` skips the research and makes
 no request for it. The preflight's own hub lookup, `tt model search` and the download still run.
 `--no-github` skips the GitHub issue and pull request search and the GitHub code search. The listings of tt-metal's

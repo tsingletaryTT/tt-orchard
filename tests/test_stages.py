@@ -235,6 +235,15 @@ def test_delta_gate_passes_a_complete_delta(tmp_path):
     assert "stages/0/evidence/diff.txt" in g.evidence
 
 
+def test_delta_gate_accepts_every_hazard_area_the_template_writes(tmp_path):
+    """delta_triage.py writes hazards with the areas generation_config and chat_template. The gate listed neither, so a
+    model whose generation config was missing, or whose chat template differed, failed its own stage 0 gate."""
+    hazards = [{"area": a, "finding": f"{a} hazard", "evidence": ["stages/0/evidence/diff.txt"]}
+               for a in ("tensor_cache", "drafter", "disk", "license", "generation_config", "chat_template", "other")]
+    g = gate_delta(*stage(tmp_path, 0, "delta.json", {**GOOD_DELTA, "hazards": hazards}))
+    assert g.ok, g.reasons
+
+
 def test_delta_gate_names_what_is_missing(tmp_path):
     bad = {**GOOD_DELTA, "path": "maybe",
            "differences": [{"area": "vibes", "finding": "x", "evidence": ["a"]}]}

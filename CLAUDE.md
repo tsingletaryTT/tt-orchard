@@ -1768,6 +1768,69 @@ Prompt (operator): "start with the file-source record and go from there"; issue 
 - Tests first. Mutations: 26, all red, no survivors on the first run.
 - Not done: reading the scores from a card automatically, and showing them in the stage 8 bundle's RESULTS.md.
 
+## 2026-10-22 (UTC): research reads weight headers in parallel (branch `parallel-headers`, version 0.8.20)
+Prompt (operator): "take on more issues" while the AREX-2 benchmark ran. Issue #30, second half: the preflight spent 65 to 81 s reading three models' weight headers one shard at a time.
+- Measured first, on the real hub with no cache (`BAAI/AREX-2`, 11 shards; `Qwen/Qwen3.8-27B`, 18 shards): 13 to 21 s and 26 s one shard at a time (a first baseline run gave 20.7 s and 25.6 s). With six workers: 2.7 s and 3.8 s, over repeated runs. Eight workers gave 2.7 s and 3.5 s, so the bound is six (`headers.HEADER_WORKERS`).
+- `headers.read_model` reads shards through a bounded `ThreadPoolExecutor` and merges the answers in shard order, so tensors, shards and errors come out the same whichever read finishes first. A failed shard is still one error and never stops the others.
+- The fetcher's shared state is now behind one lock: the request count and the start time (the check and the increment are one step, so the budget stays exact), and the per-host timeout count and unreachable set. A connection failure still marks the host as before; a shard that asked a moment before the mark reports the connection error and a later one reports the unreachable host.
+- Tests first: 8 of the new tests were red on the old code (the others guard behaviour the old code also had). Mutations: 5 on the fetcher, all red; 9 on the header read, 8 red and one equivalent (`UnicodeDecodeError` is a `ValueError`, so listing it adds nothing). A many-thread budget test passed on the unlocked code in my first run, because the race window is small under the GIL; the lock-held checks and the 7-of-48 budget test in the parallel read carry that guard.
+- One baseline run of the sequential read gave 7 header errors on AREX-2 in 6 s and did not repeat in six later runs. It fits one connection failure marking the host, which is the existing rule.
+- Not done: the three models' reads still follow one another (each read is parallel inside); the progress lines are unchanged.
+## 2026-10-22 (UTC): the re-run item list failed on AREX-2's GSM8K samples (branch `rerun-line-split`, version 0.8.21)
+The chain that lists cut-off items for AREX-2 stopped with `JSONDecodeError: Unterminated string`. `bench_rerun.read_samples` split the samples file with `str.splitlines()`, which also cuts at U+2028, U+2029 and U+0085. lm-eval writes samples with `ensure_ascii` off, so those characters stay raw inside a JSON string, and GSM8K's text holds four U+2028 characters (2,642 pieces for 2,638 records, in both models' files). The bytkim sets had none, so the earlier re-run never hit it.
+- Both loaders now split on `\n` only (`bench_rerun.read_samples`, `toolcall_bench._rows`). Tests first: the three raw separators and the tool-call loader were red; the control characters were already safe because JSON escapes them. 2 mutations, both red.
+- Found by running the list step by hand on the real files. The merge step reads samples through the same function, so it would have failed the same way.
+## 2026-10-22 (UTC): the served chat template and special tokens are recorded and compared (branch `chat-template-check`, version 0.8.22 after the merge with main; built as 0.8.17)
+Prompt (operator): "while we wait, let's take on more issues"; issue #17. Read first, in the cached snapshots, before any code: the five Qwen3.8 fine-tunes
+(AREX-2, bytkim, RAG-Gate, Clef, Hemmingway-1) and pplx-decider all ship `chat_template.jinja` only, with the same sha256 as the base's (`c3cf9e34ab`), and the same eos, pad
+tokens. No cached model of that family has a different template, so the check could not be shown on a real differing fine-tune; it was shown on the cached models of other
+families (`Qwen3-Coder-Next`, `Qwen3-0.6B`, `tt-nanollama3`, `humanizer`), which differ from the base and are full-port anyway. `Qwen3-Coder-Next` carries two different
+templates, one inside `tokenizer_config.json` and one in `chat_template.jinja`; transformers 5.19.0 loads the file (checked). A tokenizer with no template raises a
+`ValueError` from `apply_chat_template` (checked on `tt-nanollama3`). The stage 2 and stage 4 swap check posts plain text to `/v1/completions`, so no stage applies a template.
+- Stage 0 (`delta_triage.py`): `tokenizer-compare.json` gains the template inside `tokenizer_config.json` and the file's sha256 separately, the eos, bos, pad and unk tokens of each
+  model and their differences. The chat template finding says when a model's two templates disagree and which special tokens differ. A `chat_template` hazard is written when
+  the templates differ, when the nearest model has one and the new model has none, or when the special tokens differ. A template only the new model ships raises none.
+- Stage 2 (`prepare_swap.py`): `model-dir-sources.json` gains `chat_template` (file, sha256, the nearest model's sha256, whether they match; the jinja file first), `special_tokens` and
+  `special_tokens_differ_from_nearest`, and the run prints one line. Stage 8 quotes both in "The served model directory"; the hazard's disposition is always "Not shown", because
+  no stage sent a chat request.
+- Found on the way: the stage 0 gate's `HAZARD_AREAS` did not list `generation_config`, the area that PR 36 writes, so a model with a missing or borrowed generation config
+  would have failed its own gate. Fixed with a test that was red first; `chat_template` is listed too.
+- Tests first. Mutations: 16 on stage 0 (one survived, the nearest model's own template conflict, and got a test), 16 on stage 2 (one survived, named templates, and got a test),
+  19 on stage 8 (3 survived and got tests), 4 on the skill note (one survived and the test was tightened).
+- Not done, and needs hardware: the second half of the issue, one chat request in stage 2 that uses the new template and checks the reply starts and stops as the model card
+  says. The special-token check does not compare the new model's end token with the stop ids the server uses, because whether the server also stops on the tokenizer's eos token
+  was not found out. A Qwen3.8 fine-tune with a different template has not been seen, so the "different" hazard has run only on other families and on built fixtures.
+## 2026-10-22 (UTC): the base control and the board are built by code (branch `bench-base-control`, version 0.8.23 after the merge with main; built as 0.8.18)
+Prompt (operator): "while we wait, let's take on more issues"; this is issue #20. The AREX-2 benchmark drivers were copied shell scripts: the base control's run.sh was made with `sed`,
+and two launches that both wrote `--exact 2` asked for the same board.
+- `orchard/bench_control.py`, with two commands. `build` writes the control's run.sh from the model's run.sh by replacing the model's directory with the base snapshot, in the `HF_MODEL` line and
+  the `--model` flag. It refuses a script that names the model in only one of them, a base equal to the model, and a path it cannot find as a whole path (`model-dir2` and `model-dir-old` are
+  not swapped). It reads both files again and refuses unless every differing line is explained by that swap alone. It writes `<out>.control.json`: both hashes, the swapped line numbers, and the
+  drafter and sampling mode of each script (`serving_facts`: drafter off when `QWEN36_DRAFTER` is exported empty, sampling on the device when the script sets `sample_on_device_mode`).
+- `board` reads `gozer status --json` and names boards whose chips are all FREE, one per session asked for (`--chips 2 --chips 2` gives two different boards), with the device index of each board's
+  first chip as the `--exact` value (`--exact N` selects the unit holding chip N). `--wait-s` polls every 10 s, because a released board shows BUSY-UNTRACKED for about a minute. It prints the
+  `gozer run` command for each session and exits 2 with the state it saw when no board is free.
+- `bench_session` records `serving` (the run.sh's drafter and sampling mode) in every summary.json that started a server, and takes `--control-record FILE`, which it copies into the summary as
+  `control`. A record whose hash is not the run.sh's is refused before any server starts.
+- Checked on the real AREX-2 files: `build` reproduces the by-hand `base-run.sh` byte for byte (sha256 09e08f55...), and `board` parses the live `gozer status`. Nothing was run on a chip.
+- Tests first (the module's tests were seen red before it existed). Mutations: 32 on `bench_control.py` (5 survived the first run: one clause that cannot fire because the explained-by-swap check
+  already catches that case, removed; four got tests) and 7 on the `bench_session` change, all red.
+- Review fixes (Copilot, four findings, all real; version stays 0.8.18):
+  - `board` placed each session on the next free board whatever its size, so `--chips 2` could be given a free one-chip board. `plan_boards` now gives each session the smallest free board
+    that holds its chips (the lowest on a tie) and keeps the plans in the order of the requests, and refuses when no board that is left is large enough. The first version of the fix placed
+    the largest request first; a brute-force search over boards and requests up to size 4 found no case where order matters with smallest-fit, so that step was removed.
+  - `bench_session` checked the control record against the script hash only. The session exports `--model-dir` as MODEL_WEIGHTS_DIR, which the runtime reads before the script's own path, so a
+    base-control script and record beside the fine-tune's directory would have served the fine-tune. `control_summary` now needs `--model-dir` with a record and refuses one whose
+    `base_snapshot` is not that directory (links resolved). Before the fix, a test of this on the old code started a real `lm_eval` run; the session tests now stub `_swap` so an unguarded session fails
+    at once and starts nothing.
+  - The path swap was a regex over the whole text: it rewrote `<model-dir>/cache` and `/x<model-dir>`, refused the `shlex.quote` form that `prepare_swap` writes, and put a base snapshot with a
+    space into an unquoted `--model` as two arguments, which `verify_control` accepted. The script is now read as shell words (quotes, comments, operators, line continuations). A word, or a
+    NAME= or --flag= value, that the shell turns into exactly the model directory is replaced, written in the quoting style the script used and quoted for its place; a path inside it or a longer
+    path that contains it is left alone. `verify_control` requires the control to equal that rewrite line for line. A directory still named in a string or an unclosed quote is refused. The tests
+    read the result back through `bash`. The real AREX-2 scripts (fixtures) still give the by-hand control byte for byte. 36 mutations on the new code: 29 red first time, 2 survived (an unquoted
+    backslash, a `'` in a base path inside single quotes) and 5 did not apply (wrong search strings); each got a test or a corrected string and is red.
+- Not done: the drivers in `~/orchard-runs/baai--arex-2/benchmark` still use the by-hand scripts, because a benchmark is running from them. Two launchers that call `board` at the same moment can
+  still pick the same board; the second `gozer run` then queues. The check proves the two scripts match; it does not prove that the control's weights load under a bundle made for the model.
 ## 2026-10-22 (UTC): `tt-orchard package` and `package-card` (branch `stage7-command`, version 0.8.19)
 Prompt (operator): "while we wait, let's take on more issues", then issue 22 by a fork. Stage 7 and the benchmark-to-card flow were run by hand for Clef, RAG-Gate, bytkim and AREX-2 from a script kept in a run-log evidence directory, and none of those runs recorded stage 7 in its ledger.
 - `tt-orchard package RUN --namespace ORG` (`orchard/package_cmd.py`) runs the by-hand steps on a run that ended `ready-for-operator-review`: `stage_all`, the boot check under `gozer run`, `finish`, `gate_package`, then it prints the publish text. It refuses a run that has not finished or was aborted, a run a supervisor still holds (the ledger lock), and an existing `stages/7` without `--restage` (which moves it to `7.old-<time>`). It writes `package command`, `package staged`, `package boot check` and `package gate` in the ledger, and `status` still reports the run as ready for review.
