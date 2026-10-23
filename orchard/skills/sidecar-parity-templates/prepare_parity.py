@@ -14,7 +14,9 @@ The sidecar-parity skill copies this file into the stage directory and runs it. 
    - SYMLINKS (absolute, fully resolved) to the tokenizer files, model.safetensors.index.json and every
      model-*.safetensors shard.
    The sidecar files (the head's weights and config) and the model repo's code and README are left out,
-   so the TT loader cannot read them by accident.
+   so the TT loader cannot read them by accident. `parity-model-dir-sources.json` beside it lists what was
+   copied, linked and absent. A snapshot without a generation_config.json is a note: hidden_parity.py loads
+   weights and runs the layers and never generates, so nothing here reads that file.
 2. `parity-run.sh`, a copy of `<bundle_dir>/run.sh` with these edits:
    - the `HERE=...` line becomes `HERE="<bundle_dir>"` (exactly once), so the copy still finds the
      bundle's venv and model code;
@@ -76,15 +78,16 @@ def check_snapshot(snap: Path) -> None:
         fail(f"model_snapshot {snap} has no {SHARD_GLOB} file")
 
 
-def build_model_dir(snap: Path) -> tuple[Path, list[str], list[str]]:
-    """Make parity-model-dir from scratch. Returns (path, copied names, linked names)."""
+def build_model_dir(snap: Path) -> tuple[Path, list[str], list[str], list[str]]:
+    """Make parity-model-dir from scratch. Returns (path, copied names, linked names, absent names): the absent ones
+    are the optional files of LINKED that the snapshot does not have."""
     md = HERE_DIR / "parity-model-dir"
     if md.is_symlink():
         fail(f"{md} is a symlink; remove it so this script can build a real directory")
     if md.exists():
         shutil.rmtree(md)         # only ever a directory this script built: a copy and symlinks
     md.mkdir()
-    copied, linked = [], []
+    copied, linked, absent = [], [], []
     for name in COPIED:
         shutil.copyfile(snap / name, md / name)          # follows the snapshot link to the blob
         copied.append(name)
@@ -92,7 +95,20 @@ def build_model_dir(snap: Path) -> tuple[Path, list[str], list[str]]:
         if (snap / name).exists():
             os.symlink(os.path.realpath(snap / name), md / name)
             linked.append(name)
-    return md, copied, linked
+        else:
+            absent.append(name)
+    return md, copied, linked, absent
+
+
+def write_sources(copied: list[str], linked: list[str], absent: list[str]) -> Path:
+    """parity-model-dir-sources.json, beside the model dir (a file inside it would sit where the TT loader looks).
+    It says which files the check loaded. hidden_parity.py loads weights and runs the layers and never generates, so
+    nothing reads a generation_config.json here and a missing one is a note, not an error."""
+    rec = {"schema": 1, "copied": copied, "linked": linked, "absent": absent,
+           "generation_config": "model" if "generation_config.json" in linked else "absent"}
+    path = HERE_DIR / "parity-model-dir-sources.json"
+    path.write_text(json.dumps(rec, indent=2) + "\n", encoding="utf-8")
+    return path
 
 
 def edit_run_script(text: str, bundle: Path, script: Path, model_dir: Path, cache: str) -> tuple[str, list[str]]:
@@ -135,7 +151,8 @@ def main() -> int:
     text, notes = edit_run_script(src_run.read_text(encoding="utf-8"), bundle, HERE_DIR / "hidden_parity.py",
                                   model_dir, cfg["tt_cache"])
     check_snapshot(snap)
-    model_dir, copied, linked = build_model_dir(snap)
+    model_dir, copied, linked, absent = build_model_dir(snap)
+    write_sources(copied, linked, absent)
     out = HERE_DIR / "parity-run.sh"
     out.write_text(text, encoding="utf-8")
     out.chmod(out.stat().st_mode | 0o111)
@@ -146,6 +163,11 @@ def main() -> int:
     print(f'  HERE="{bundle}"; exec hidden_parity.py; HF_MODEL and MODEL_WEIGHTS_DIR={model_dir}')
     for note in notes:
         print(f"  {note}")
+    if absent:
+        print(f"  absent from the model snapshot: {', '.join(absent)} (recorded in parity-model-dir-sources.json)")
+    if "generation_config.json" in absent:
+        print("  generation_config.json is absent from the model snapshot. hidden_parity.py loads weights and runs "
+              "the layers; it never generates, so this check needs no stop token or sampling defaults.")
     return 0
 
 
