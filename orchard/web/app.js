@@ -1025,7 +1025,7 @@ function renderPreflight(out) {
   if (base) {
     base.candidates.forEach((c, i) => list.append(h("label", {},
       h("input", { type: "radio", name: "nr-cand", value: c.name, id: `nr-cand-${i}`,
-        onchange: () => { $("nr-base").value = c.name; runChecks(); } }),
+        onchange: () => { $("nr-base").value = c.name; updateOptionsSummary(); runChecks(); } }),   // an assignment fires no input event
       h("span", { class: "mono" }, c.name), h("span", { class: "muted" }, c.installed ? "installed" : "installs with tt-model pull"))));
   }
   setStartReady(out.ok);

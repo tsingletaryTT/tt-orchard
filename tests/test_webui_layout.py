@@ -496,3 +496,27 @@ def test_the_machine_chip_is_drawn_before_the_rail_panels_change_guard():
 def test_an_outage_still_marks_the_chip_unknown():
     body = function_body(JS(), "async function refreshRuns()")
     assert "renderMachineChip(null, [], 0)" in body and body.index("catch") < body.index("renderMachineChip(null, [], 0)")
+
+
+def test_every_assignment_to_the_base_field_refreshes_the_closed_options_line():
+    """Assigning `.value` fires no input event, so the code that picks a suggested base must refresh the summary itself."""
+    import re
+    js = JS()
+    spots = [m.start() for m in re.finditer(r'\$\("nr-base"\)\.value = ', js)]
+    assert spots, "the page assigns the base field somewhere (picking a suggestion)"
+    for s in spots:
+        window = js[s:s + 160]
+        assert "updateOptionsSummary()" in window, window
+
+
+def test_the_suggestion_refreshes_the_summary_before_it_runs_the_checks_again():
+    js = JS()
+    s = js.index('onchange: () => { $("nr-base").value = c.name;')
+    line = js[s:js.index("\n", s)]
+    assert line.index("updateOptionsSummary()") < line.index("runChecks()")
+
+
+def test_typing_in_the_model_or_base_field_still_refreshes_the_summary():
+    js = JS()
+    s = js.index('for (const id of ["nr-model", "nr-base"])')
+    assert "updateOptionsSummary()" in js[s:js.index("\n", s)]
