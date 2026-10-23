@@ -547,3 +547,213 @@ def test_the_example_without_tools_asks_a_plain_question_and_not_the_tool_one():
     text = section(render_card(facts(use=use_facts(tool_parser=None))), "## How to call it")
     assert "mutex" in text and "Run the tests" not in text
     assert "Run the tests" in section(render_card(facts(use=use_facts())), "## How to call it")
+
+
+# ---- the check: the section must exist and must not claim what the sources contradict ---------------------------
+
+def use_problems(card, use, tmp_path, **over):
+    run = tmp_path / "run"
+    if not run.exists():
+        run_with_evidence(tmp_path)
+    return card_problems(card, license_id="cc-by-nc-4.0", run_dir=run, use=use, **over)
+
+
+def test_a_rendered_card_with_use_facts_passes_its_own_check(tmp_path):
+    for u in (use_facts(), use_facts(tool_evidence=("stages/7/benchmark/speed.json", ("run_tests",))),
+              use_facts(authors_use=None, thinking_default=False, effort_values=(), tool_parser=None, text_only=False)):
+        assert use_problems(render_card(facts(use=u, numbers=(cutoff_number(2),))), u, tmp_path) == []
+
+
+def test_a_card_with_no_use_facts_is_not_asked_for_the_sections(tmp_path):
+    assert use_problems(render_card(facts()), None, tmp_path) == []
+
+
+def test_a_card_that_dropped_how_to_call_it_is_refused(tmp_path):
+    u = use_facts()
+    card = render_card(facts(use=u))
+    head, rest = card.split("## How to call it", 1)
+    card = head + "## Expected performance" + rest.split("## Expected performance", 1)[1]
+    assert any("How to call it" in p for p in use_problems(card, u, tmp_path))
+
+
+@pytest.mark.parametrize("cut, word", [
+    ("Thinking is on by default", "thinking"),
+    ("`reasoning_effort`", "reasoning effort"),
+    ("`reasoning_content`", "reasoning_content"),
+    ("`xhigh`, `medium`, `low`", "reasoning effort"),
+    ('`{"enable_thinking": false}`', "enable_thinking"),
+    ("`tool_calls`", "tool_calls"),
+    ("Text only", "text only"),
+    (UNTESTED_SENTENCE, "not tested"),
+    ("> It is intended for research on long-horizon agents and tool-augmented deep research.", "authors"),
+    ("reaches `max_tokens` while the model is still thinking", "cut off")])
+def test_a_card_that_leaves_out_a_fact_the_sources_give_is_refused(tmp_path, cut, word):
+    u = use_facts()
+    card = render_card(facts(use=u, numbers=(cutoff_number(2),)))
+    assert cut in card
+    problems = use_problems(card.replace(cut, "xx"), u, tmp_path)
+    assert any(word in p.lower() for p in problems), problems
+
+
+def test_a_card_that_changes_the_authors_words_is_refused(tmp_path):
+    u = use_facts()
+    card = render_card(facts(use=u)).replace("long-horizon agents", "short-horizon agents")
+    assert any("authors" in p for p in use_problems(card, u, tmp_path))
+
+
+def test_the_authors_words_may_be_rewrapped(tmp_path):
+    u = use_facts(authors_use="One two three four five six seven eight.")
+    card = render_card(facts(use=u)).replace("One two three four", "One two\n> three four")
+    assert use_problems(card, u, tmp_path) == []
+
+
+def test_a_card_that_says_thinking_is_off_when_the_template_turns_it_on_is_refused(tmp_path):
+    card = render_card(facts(use=use_facts(thinking_default=False)))
+    assert any("says thinking is off by default" in p for p in use_problems(card, use_facts(thinking_default=True), tmp_path))
+
+
+def test_a_card_that_says_thinking_is_on_when_the_template_turns_it_off_is_refused(tmp_path):
+    card = render_card(facts(use=use_facts(thinking_default=True)))
+    assert any("says thinking is on by default" in p for p in use_problems(card, use_facts(thinking_default=False), tmp_path))
+
+
+def test_a_card_that_names_reasoning_content_without_a_reasoning_parser_is_refused(tmp_path):
+    card = render_card(facts(use=use_facts()))
+    assert any("reasoning_content" in p for p in use_problems(card, use_facts(reasoning_parser=None), tmp_path))
+
+
+def test_a_card_that_names_effort_values_the_template_does_not_have_is_refused(tmp_path):
+    card = render_card(facts(use=use_facts()))
+    assert any("reasoning_effort" in p for p in use_problems(card, use_facts(effort_values=(), effort_default=None), tmp_path))
+
+
+def test_a_card_that_names_the_thinking_switch_the_template_lacks_is_refused(tmp_path):
+    card = render_card(facts(use=use_facts()))
+    assert any("enable_thinking" in p for p in use_problems(card, use_facts(can_disable_thinking=False), tmp_path))
+
+
+@pytest.mark.parametrize("over", [{"tools_in_template": False}, {"tool_parser": None}, {"auto_tool_choice": False}])
+def test_a_card_that_claims_tool_calls_the_server_cannot_return_is_refused(tmp_path, over):
+    card = render_card(facts(use=use_facts()))
+    assert any("tool" in p for p in use_problems(card, use_facts(**over), tmp_path))
+
+
+def test_a_card_that_says_the_prompts_returned_tool_calls_without_evidence_is_refused(tmp_path):
+    card = render_card(facts(use=use_facts(tool_evidence=("stages/7/benchmark/speed.json", ("run_tests",)))))
+    assert any("returned tool calls" in p for p in use_problems(card, use_facts(), tmp_path))
+
+
+def test_a_card_that_names_a_tool_the_evidence_does_not_hold_is_refused(tmp_path):
+    card = render_card(facts(use=use_facts(tool_evidence=("stages/7/benchmark/speed.json", ("run_tests", "invented")))))
+    u = use_facts(tool_evidence=("stages/7/benchmark/speed.json", ("run_tests",)))
+    assert any("invented" in p for p in use_problems(card, u, tmp_path))
+
+
+def test_a_card_with_evidence_that_still_says_untested_for_tool_calls_is_refused(tmp_path):
+    card = render_card(facts(use=use_facts()))
+    u = use_facts(tool_evidence=("stages/7/benchmark/speed.json", ("run_tests",)))
+    assert any("returned tool calls" in p for p in use_problems(card, u, tmp_path))
+
+
+def test_a_card_that_claims_text_only_for_a_package_that_does_not_skip_vision_is_refused(tmp_path):
+    card = render_card(facts(use=use_facts(text_only=True)))
+    assert any("text only" in p.lower() for p in use_problems(card, use_facts(text_only=False), tmp_path))
+
+
+@pytest.mark.parametrize("claim", ["The package accepts images.", "It supports video input.", "Handles vision tasks.",
+                                   "Send an image_url in the message.", "Takes videos as input."])
+def test_a_card_that_claims_vision_for_a_text_only_package_is_refused(tmp_path, claim):
+    u = use_facts()
+    card = render_card(facts(use=u)).replace("## How to call it", claim + "\n\n## How to call it")
+    assert any("vision" in p or "image" in p for p in use_problems(card, u, tmp_path)), claim
+
+
+def test_a_card_that_says_it_does_not_take_images_is_not_a_vision_claim(tmp_path):
+    u = use_facts()
+    assert use_problems(render_card(facts(use=u)), u, tmp_path) == []
+
+
+def test_a_file_name_with_video_in_it_is_not_a_vision_claim(tmp_path):
+    u = use_facts()
+    card = render_card(facts(use=u, base_files=("config.json", "video_preprocessor_config.json")))
+    assert use_problems(card, u, tmp_path, base_files=("config.json", "video_preprocessor_config.json")) == []
+
+
+def test_a_cut_off_warning_for_a_model_that_does_not_think_is_refused(tmp_path):
+    card = render_card(facts(use=use_facts(), numbers=(cutoff_number(2),)))
+    assert any("max_tokens" in p for p in use_problems(card, use_facts(thinking_default=False), tmp_path))
+
+
+def test_a_card_whose_use_sections_hold_a_number_with_a_unit_is_still_refused(tmp_path):
+    u = use_facts()
+    card = render_card(facts(use=u)).replace("## How to call it", "It decodes at 50 tokens/s.\n\n## How to call it")
+    assert any("number outside the Numbers table" in p for p in use_problems(card, u, tmp_path))
+
+
+def test_a_card_that_states_a_thinking_default_the_template_does_not_show_is_refused(tmp_path):
+    u = use_facts(thinking_default=None, effort_values=(), can_disable_thinking=False)
+    card = render_card(facts(use=use_facts()))
+    assert any("says thinking is on by default" in p for p in use_problems(card, u, tmp_path))
+
+
+def test_a_card_that_leaves_out_thinking_off_by_default_is_refused(tmp_path):
+    u = use_facts(thinking_default=False, can_disable_thinking=False, effort_values=(), reasoning_parser=None, text_only=False,
+                  tool_parser=None)
+    card = render_card(facts(use=u)).replace("Thinking is off by default", "xx")
+    assert any("'Thinking is off by default'" in p for p in use_problems(card, u, tmp_path))
+
+
+def test_a_card_that_claims_tool_calls_in_words_alone_or_in_the_example_alone_is_refused(tmp_path):
+    u = use_facts(tool_parser=None)
+    base = render_card(facts(use=use_facts()))
+    words_only = base.replace('"tools"', '"xtools"')
+    example_only = base.replace("`tool_calls`", "xcalls")
+    for card in (words_only, example_only):
+        assert any("claims tool calls" in p for p in use_problems(card, u, tmp_path))
+
+
+@pytest.mark.parametrize("old, new", [("returned tool calls", "gave back nothing"),
+                                      ("stages/7/benchmark/speed.json", "somewhere"),
+                                      ("`run_tests`", "`xx`")])
+def test_a_card_that_leaves_out_the_file_the_tools_or_the_sentence_the_evidence_gives_is_refused(tmp_path, old, new):
+    u = use_facts(tool_evidence=("stages/7/benchmark/speed.json", ("run_tests",)))
+    card = render_card(facts(use=u))
+    bad = card.replace("tool-use prompts returned tool calls (`run_tests`)", "tool-use prompts returned tool calls (`run_tests`)")
+    bad = bad.replace(old, new)
+    assert any("returned tool calls" in p for p in use_problems(bad, u, tmp_path)), old
+
+
+def only(**kw):
+    base = dict(authors_use=None, thinking_default=None, effort_values=(), effort_default=None, can_disable_thinking=False,
+                tools_in_template=False, reasoning_parser=None, tool_parser=None, auto_tool_choice=False, text_only=False,
+                tool_evidence=None)
+    base.update(kw)
+    return UseFacts(**base)
+
+
+@pytest.mark.parametrize("u", [only(thinking_default=True), only(thinking_default=False), only(text_only=True),
+                               only(tools_in_template=True, tool_parser="p", auto_tool_choice=True),
+                               only(effort_values=("low",), effort_default="low")])
+def test_each_fact_taken_from_the_template_or_run_sh_needs_the_not_tested_note(tmp_path, u):
+    card = render_card(facts(use=u))
+    assert UNTESTED_SENTENCE in card and use_problems(card, u, tmp_path) == []
+    bad = card.replace(UNTESTED_SENTENCE, "xx")
+    assert any("not tested here" in p for p in use_problems(bad, u, tmp_path))
+
+
+def test_a_zero_cut_off_count_needs_no_warning(tmp_path):
+    u = use_facts()
+    assert use_problems(render_card(facts(use=u, numbers=(cutoff_number(0),))), u, tmp_path) == []
+
+
+def test_a_cut_off_row_that_is_not_measured_needs_no_warning(tmp_path):
+    u = use_facts()
+    card = render_card(facts(use=u, numbers=(cutoff_number(0),)))
+    card = card.replace("| 0 items | measured |", "| 2 items | TODO |")
+    assert "| 2 items | TODO |" in card
+    assert not any("must warn" in p for p in use_problems(card, u, tmp_path))
+
+
+def test_a_cut_off_warning_needs_a_reasoning_parser_in_the_check_too(tmp_path):
+    u = use_facts(reasoning_parser=None)
+    assert use_problems(render_card(facts(use=u, numbers=(cutoff_number(2),))), u, tmp_path) == []

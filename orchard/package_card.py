@@ -411,9 +411,111 @@ def graft_markers(nearest_model: str) -> tuple[str, ...]:
 GRAFT_DECISION_MARKERS = {"graft": "chose the graft", "safe": "kept the safe configuration"}
 
 
+CUTOFF_MARKER = "reaches `max_tokens` while the model is still thinking"
+_VISION_CLAIM = re.compile(r"(?<!not )(?<!n't )\b(?:accepts?|supports?|takes?|handles?|processes|serves?)\s+"
+                           r"(?:images?|videos?|vision)\b|\b(?:image|video)_url\b", re.I)
+
+
+def _flat(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _cutoffs_in_table(card: str) -> bool:
+    """The card's Numbers table shows a measured count of replies cut off at the token limit above zero."""
+    section, _ = _numbers_section(card)
+    for row in (r for r in section.splitlines() if r.startswith("| ") and not r.startswith("| Number ")):
+        cells = [c.strip() for c in row.strip().strip("|").split("|")]
+        if len(cells) == 4 and CUTOFF_NAME in cells[0] and cells[2] == "measured":
+            try:
+                if float(cells[1].split(" ", 1)[0]) > 0:
+                    return True
+            except ValueError:
+                pass
+    return False
+
+
+def use_problems(card: str, use: UseFacts | None) -> list[str]:
+    """What is wrong with the card's account of how to use the model, given the facts read from the model's files.
+    A fact the sources give must be in the Intended use or How to call it section; a claim the sources contradict is
+    refused wherever the card makes it. Nothing is checked when the run found no facts."""
+    if not has_facts(use):
+        return []
+    u, problems = use, []
+    flat = _flat(card)
+    intended, _ = _section(card, "## Intended use")
+    if "## How to call it" not in card:
+        problems.append("the card has no '## How to call it' section: the model's files give facts about how to call it")
+    how, _ = _section(card, "## How to call it")
+    uflat = _flat(intended + "\n" + how)
+    if u.authors_use:
+        quoted = _flat(" ".join(ln.lstrip("> ").strip() for ln in intended.splitlines() if ln.startswith(">")))
+        if quoted != _flat(u.authors_use):
+            problems.append("the card must quote the authors' intended use unchanged, as a block quote under Intended use")
+    on, off = "Thinking is on by default", "Thinking is off by default"
+    if u.thinking_default is True and on not in uflat:
+        problems.append(f"the chat template turns thinking on by default, so the card must say '{on}'")
+    if u.thinking_default is False and off not in uflat:
+        problems.append(f"the chat template turns thinking off by default, so the card must say '{off}'")
+    if u.thinking_default is not True and re.search(on, flat, re.I):
+        problems.append("the card says thinking is on by default, and the chat template does not show that")
+    if u.thinking_default is not False and re.search(off, flat, re.I):
+        problems.append("the card says thinking is off by default, and the chat template does not show that")
+    if u.thinking_default is True and u.reasoning_parser and "`reasoning_content`" not in uflat:
+        problems.append("run.sh sets a reasoning parser, so the card must say the thinking comes back in `reasoning_content`")
+    if not u.reasoning_parser and "reasoning_content" in card:
+        problems.append("the card names reasoning_content, and run.sh sets no reasoning parser")
+    if u.effort_values:
+        missing = [v for v in u.effort_values if f"`{v}`" not in uflat]
+        if missing or "`reasoning_effort`" not in uflat:
+            problems.append("the card must list the reasoning effort values the chat template accepts "
+                            f"({', '.join(u.effort_values)}) and name `reasoning_effort`")
+    elif "reasoning_effort" in card:
+        problems.append("the card names reasoning_effort, and the chat template lists no reasoning effort values")
+    if u.thinking_default is True and u.can_disable_thinking and '"enable_thinking": false' not in flat:
+        problems.append('the chat template has an enable_thinking switch, so the card must show {"enable_thinking": false}')
+    if not u.can_disable_thinking and "enable_thinking" in card:
+        problems.append("the card names enable_thinking, and the chat template has no such switch")
+    if u.tools_ok:
+        if "`tool_calls`" not in uflat:
+            problems.append("the server parses tool calls, so the card must say they come back in `tool_calls`")
+    elif "`tool_calls`" in card or '"tools"' in card:
+        problems.append("the card claims tool calls, and the chat template or run.sh gives the server no way to return them")
+    if u.tool_evidence:
+        path, names = u.tool_evidence
+        if "returned tool calls" not in flat or f"`{path}`" not in flat or any(f"`{n}`" not in flat for n in names):
+            problems.append(f"the tool-use prompts returned tool calls (`{path}`), so the card must say they returned tool "
+                            f"calls and name the file and the tools: {', '.join(names)}")
+    elif "returned tool calls" in flat:
+        problems.append("the card says the tool-use prompts returned tool calls, and no evidence file in the run shows it")
+    if u.tool_evidence:
+        claimed = re.search(r"returned tool calls \(([^)]*)\)", flat)
+        extra = [n for n in re.findall(r"`([^`]+)`", claimed.group(1)) if n not in u.tool_evidence[1]] if claimed else []
+        if extra:
+            problems.append(f"the card names tools the evidence does not hold: {', '.join(extra)}")
+    if u.text_only and "Text only" not in uflat:
+        problems.append("run.sh skips the vision tower, so the card must say the package is text only")
+    if not u.text_only and "Text only" in card:
+        problems.append("the card says the package is text only, and run.sh does not skip the vision tower")
+    if u.text_only and _VISION_CLAIM.search(card):
+        problems.append("the card claims image or video input, and run.sh skips the vision tower")
+    untested = (u.thinking_default is not None or bool(u.effort_values) or u.text_only
+                or (u.tools_ok and not u.tool_evidence))
+    if untested and UNTESTED_SENTENCE not in uflat:
+        problems.append(f"facts taken from the chat template and run.sh must say '{UNTESTED_SENTENCE}'")
+    warned = u.thinking_default is True and bool(u.reasoning_parser)
+    if warned and _cutoffs_in_table(card) and CUTOFF_MARKER not in uflat:
+        problems.append("the benchmark runs cut off replies at the token limit, so the card must warn that a reply that "
+                        f"{CUTOFF_MARKER}")
+    if CUTOFF_MARKER in flat and not warned:
+        problems.append("the card warns about a reply that reaches max_tokens while thinking, and the sources do not show "
+                        "that the model thinks by default with a reasoning field")
+    return problems
+
+
 def card_problems(card: str, *, license_id: str, run_dir, sidecars=(), base_files=(), reported=(), reported_source="", model_id="",
-                  nearest_model="", graft: bool = False, graft_decision: str | None = None, trial_rows=()) -> list[str]:
-    problems = []
+                  nearest_model="", graft: bool = False, graft_decision: str | None = None, trial_rows=(),
+                  use: UseFacts | None = None) -> list[str]:
+    problems = use_problems(card, use)
     if graft_decision in GRAFT_DECISION_MARKERS:
         if GRAFT_DECISION_MARKERS[graft_decision] not in " ".join(card.split()):
             problems.append(f"stage 2's graft trial decided {graft_decision!r}, so the card must say that stage 2 "
