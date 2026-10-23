@@ -59,11 +59,15 @@ TOKEN_VARS = ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACE_HUB_TOKEN")
 
 def validate_stop(stop: str) -> str:
     """The `--stop` value, or ValueError. The harness reads --gen_kwargs as comma-separated key=value pairs, so a comma would end the value and
-    start another pair, and an empty or blank string would send no usable stop. One string is all the option can carry."""
+    start another pair, and an empty or blank string would send no usable stop. One string is all the option can carry. A brace is refused too:
+    lm-eval 0.4.13 first tries the whole --gen_kwargs text as JSON, and text with a "{" that is not JSON stops it with an error, however the
+    value is quoted."""
     if not stop.strip():
         raise ValueError("--stop must not be empty")
     if "," in stop:
         raise ValueError("--stop cannot contain a comma: the harness reads --gen_kwargs as comma-separated pairs, so it takes one stop string")
+    if "{" in stop:
+        raise ValueError("--stop cannot contain a '{': the harness would try --gen_kwargs as JSON and stop with an error")
     return stop
 
 
@@ -72,7 +76,10 @@ def lm_eval_command(*, lm_eval, model: str, base_url: str, task: str, limit, con
     """The harness command. `stop` replaces the task's own stop strings (the harness's `until`); gsm8k's include "Question:", which vLLM also
     matches inside a thinking model's reasoning text, so a model that restates "Question:" while thinking is stopped with no answer."""
     margs = f"model={model},base_url={base_url},num_concurrent={concurrency},max_retries=1,tokenized_requests=False,timeout=3600"
-    gen_kwargs = f"max_gen_toks={max_gen_toks},temperature=0" + (f",until={stop}" if stop is not None else "")
+    # repr() writes the stop as a Python string literal. lm-eval 0.4.13 casts an unquoted value ("42" to 42, "false" to False, "None" to None,
+    # "0x10" to 16, "nan" to nan) and strips the quotes from a quoted one, but it reads a literal back as the exact string, with its quotes,
+    # backslashes, newlines and spaces.
+    gen_kwargs = f"max_gen_toks={max_gen_toks},temperature=0" + (f",until={stop!r}" if stop is not None else "")
     argv = [str(lm_eval), "--model", "local-chat-completions", "--model_args", margs, "--tasks", task, "--apply_chat_template",
             "--gen_kwargs", gen_kwargs, "--output_path", str(output_path), "--log_samples",
             "--include_path", str(include_path)]
@@ -336,7 +343,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--stop", help="one stop string that replaces the task's own (the harness's `until`); gsm8k's own list includes \"Question:\", which vLLM "
                                    "also matches in a thinking model's reasoning, so a reply that restates it while thinking is cut off with no answer. "
-                                   "One string only: the harness reads --gen_kwargs as comma-separated pairs. Default: the tasks' own")
+                                   "One string only, with no comma and no '{': the harness reads --gen_kwargs as comma-separated pairs and tries text with a brace as JSON. The string is sent exactly as written. Default: the tasks' own")
     ap.add_argument("--quiet-s", type=float, default=900.0, help="stop a phase after this many seconds with no output and no CPU use")
     ap.add_argument("--phase-backstop-s", type=float, default=4 * 3600.0)
     ap.add_argument("--allow-unsandboxed-code", action="store_true",

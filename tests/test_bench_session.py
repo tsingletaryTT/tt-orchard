@@ -67,29 +67,127 @@ def test_without_a_stop_the_generation_arguments_are_unchanged():
     assert flag(cmd(), "--gen_kwargs") == "max_gen_toks=8192,temperature=0"
 
 
-def test_a_stop_becomes_the_harnesss_until_argument():
-    assert flag(cmd(stop="</s>"), "--gen_kwargs") == "max_gen_toks=8192,temperature=0,until=</s>"
+def test_a_stop_becomes_the_harnesss_until_argument_written_as_a_quoted_string():
+    assert flag(cmd(stop="</s>"), "--gen_kwargs") == "max_gen_toks=8192,temperature=0,until='</s>'"
 
 
 def test_a_stop_keeps_the_other_generation_arguments_in_place():
     kv = dict(p.split("=", 1) for p in flag(cmd(stop="###", max_gen_toks=77), "--gen_kwargs").split(","))
-    assert kv == {"max_gen_toks": "77", "temperature": "0", "until": "###"}
+    assert kv == {"max_gen_toks": "77", "temperature": "0", "until": "'###'"}
 
 
 def test_a_stop_with_an_equals_sign_survives_the_harnesss_key_value_split():
     kv = dict(p.split("=", 1) for p in flag(cmd(stop="a=b"), "--gen_kwargs").split(","))
-    assert kv["until"] == "a=b"
+    assert kv["until"] == "'a=b'"
 
 
-@pytest.mark.parametrize("bad", ["", "a,b", ",", "  "])
-def test_a_stop_the_harness_would_split_or_lose_is_refused(bad):
+@pytest.mark.parametrize("bad", ["", "a,b", ",", "  ", "{", "a{b", "{a}"])
+def test_a_stop_the_harness_would_split_or_lose_or_choke_on_is_refused(bad):
     with pytest.raises(ValueError):
         bs.validate_stop(bad)
 
 
-@pytest.mark.parametrize("good", ["</s>", "###", "a=b", "<|im_end|>", " </s> "])
+@pytest.mark.parametrize("good", ["</s>", "###", "a=b", "<|im_end|>", " </s> ", "42", "false", "None", "}"])
 def test_a_plain_stop_string_is_accepted_as_it_is(good):
     assert bs.validate_stop(good) == good
+
+
+# ---- the stop reaches the harness as the same string ------------------------------------------------------------------------------------------
+# lm-eval 0.4.13 reads --gen_kwargs with `key_val_to_dict`: an unquoted value is cast ("42" -> 42, "false" -> False, "None" -> None, "0x10" -> 16,
+# "nan" -> nan, a quoted "'x'" loses its quotes), and a "{" anywhere in the string makes the harness try it as JSON and stop with an error. The
+# stop is written with repr(), a literal the harness reads back exactly. Copied below from lm_eval/_cli/utils.py (0.4.13), so the check runs on
+# a machine without the harness; the second test runs the harness's own parser when its environment is there.
+
+def _harness_gen_kwargs(text):
+    """lm_eval 0.4.13 `MergeDictAction` for one --gen_kwargs value (copied: try_parse_json, split_top_level, handle_cli_value_string)."""
+    import ast
+
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        if "{" in text:
+            raise ValueError(f"Invalid JSON: {text}")
+        parsed = text
+    if isinstance(parsed, dict):
+        return parsed
+
+    def split_top_level(args):
+        parts, buf, depth, quote = [], [], 0, None
+        for ch in args:
+            if quote is not None:
+                if ch == quote:
+                    quote = None
+            elif ch in "\"'":
+                quote = ch
+            elif ch in "[({":
+                depth += 1
+            elif ch in "])}":
+                depth = max(depth - 1, 0)
+            elif ch == "," and depth == 0:
+                parts.append("".join(buf))
+                buf = []
+                continue
+            buf.append(ch)
+        parts.append("".join(buf))
+        return [x for x in parts if x]
+
+    def value(arg):
+        if arg.lower() == "true":
+            return True
+        if arg.lower() == "false":
+            return False
+        if arg.isnumeric():
+            return int(arg)
+        try:
+            return float(arg)
+        except ValueError:
+            try:
+                return ast.literal_eval(arg)
+            except (ValueError, SyntaxError):
+                return arg
+
+    out = {}
+    for item in split_top_level(text):
+        k, v = item.split("=", 1)
+        out[k] = value(v)
+    return out
+
+
+STOPS_THE_HARNESS_WOULD_CHANGE = ["42", "-1", "1e3", "3.5", "true", "True", "false", "None", "null", "0x10", "nan", "inf", "'x'", '"x"', "[1]"]
+STOPS_WITH_AWKWARD_CHARACTERS = ["</s>", "<|im_end|>", " </s> ", "a=b", "it's", 'say "hi"', "back\\slash", "\\n\\n", "line\nbreak", "tab\t", "\u00e9\u4e2d\u6587",
+                                 "'", '"', "[", "a]b", "}", "(x)"]
+
+
+@pytest.mark.parametrize("stop", STOPS_THE_HARNESS_WOULD_CHANGE + STOPS_WITH_AWKWARD_CHARACTERS)
+def test_the_stop_reaches_the_harnesss_parser_as_the_same_string(stop):
+    bs.validate_stop(stop)
+    parsed = _harness_gen_kwargs(flag(cmd(stop=stop), "--gen_kwargs"))
+    assert parsed["until"] == stop and type(parsed["until"]) is str
+    assert parsed["max_gen_toks"] == 8192 and parsed["temperature"] == 0
+
+
+def _bench_python():
+    py = Path(os.environ.get("ORCHARD_BENCH_PYTHON", Path.home() / "orchard-venvs" / "bench" / "bin" / "python3"))
+    if not py.is_file():
+        return None
+    ok = subprocess.run([str(py), "-c", "from lm_eval._cli import HarnessCLI"], capture_output=True).returncode == 0
+    return py if ok else None
+
+
+@pytest.mark.skipif(_bench_python() is None, reason="the benchmark environment with lm_eval is not installed (ORCHARD_BENCH_PYTHON)")
+def test_the_real_harness_parser_reads_every_stop_back_exactly():
+    script = ("import json,sys\nfrom lm_eval._cli import HarnessCLI\n"
+              "out=[]\nfor argv in json.load(sys.stdin):\n"
+              "    sys.argv=['lm_eval']+argv\n    out.append(HarnessCLI().parse_args().gen_kwargs)\n"
+              "print(json.dumps(out))\n")
+    stops = STOPS_THE_HARNESS_WOULD_CHANGE + STOPS_WITH_AWKWARD_CHARACTERS
+    argvs = [cmd(stop=s)[1:] for s in stops]
+    # the real parser needs the arguments its subcommand accepts; ours are the real ones
+    proc = subprocess.run([str(_bench_python()), "-c", script], input=json.dumps(argvs), capture_output=True, text=True, timeout=300)
+    assert proc.returncode == 0, proc.stderr[-800:]
+    parsed = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert [g["until"] for g in parsed] == stops
+    assert all(type(g["until"]) is str for g in parsed)
 
 
 def phase(name, suspects):
@@ -410,8 +508,15 @@ def harness_argv(h):
 def test_a_stop_reaches_the_harness_and_is_recorded_in_the_settings(harness):
     code, out = run_session(harness, "gsm8k", stop="</s>")
     assert code == 0
-    assert flag(harness_argv(harness), "--gen_kwargs") == "max_gen_toks=8192,temperature=0,until=</s>"
+    assert flag(harness_argv(harness), "--gen_kwargs") == "max_gen_toks=8192,temperature=0,until='</s>'"
     assert json.loads((out / "summary.json").read_text())["settings"]["stop"] == "</s>"
+
+
+def test_a_stop_the_harness_would_cast_is_sent_quoted_and_recorded_as_the_original_string(harness):
+    code, out = run_session(harness, "gsm8k", stop="42")
+    assert code == 0
+    assert flag(harness_argv(harness), "--gen_kwargs") == "max_gen_toks=8192,temperature=0,until='42'"
+    assert json.loads((out / "summary.json").read_text())["settings"]["stop"] == "42"
 
 
 def test_a_run_with_no_stop_records_none_and_leaves_the_tasks_own_stop_strings(harness):
