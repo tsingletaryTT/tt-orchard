@@ -221,3 +221,95 @@ def test_a_malformed_decision_cannot_break_the_build(tmp_path, bad):
     run = with_graft(tmp_path, "graft")
     write(run / "stages/2/graft-decision.json", bad)
     assert build(run).returncode == 0
+
+
+# ---- a trial that left no result is not a measured comparison (review finding on PR 47) -------------------------------------------------
+# A timed-out trial gets a safe decision whose `trial` still names trial-result.json, and whose numbers are empty. Before this was settled, the
+# bundle called the hazard dealt with, said both configurations were measured, and cited a result file that does not exist.
+
+TIMED_OUT = "the graft trial timed out and was stopped; the safe configuration stands"
+
+
+def without_result(tmp_path, *, numbers=None, reason=TIMED_OUT, choice="safe"):
+    run = with_graft(tmp_path, choice, package_graft=False, reason=reason)
+    (run / "stages/2/graft-trial/trial-result.json").unlink()
+    d = json.loads((run / "stages/2/graft-decision.json").read_text())
+    d["numbers"] = {} if numbers is None else numbers
+    write_json(run / "stages/2/graft-decision.json", d)
+    return run
+
+
+def test_a_timed_out_trial_with_no_result_is_not_shown_and_gives_the_recorded_reason(tmp_path):
+    block = risks_block(without_result(tmp_path))
+    assert "Dealt with: Not shown" in block
+    assert "timed out" in block
+    assert "measured both" not in block
+
+
+def test_a_missing_result_file_is_not_shown_even_when_the_decision_still_holds_numbers(tmp_path):
+    run = with_graft(tmp_path, "graft", package_graft=True)
+    (run / "stages/2/graft-trial/trial-result.json").unlink()
+    block = risks_block(run)
+    assert "Dealt with: Not shown" in block and "trial-result.json" in block
+
+
+def test_a_trial_whose_safe_speed_was_not_measured_is_not_shown(tmp_path):
+    """The trial's safe measurement failed, so the variant was never tried: there is no comparison."""
+    run = with_graft(tmp_path, "safe", package_graft=False, reason="the graft trial's safe speed was not measured")
+    t = json.loads((run / "stages/2/graft-trial/trial-result.json").read_text())
+    t["safe"] = {"failure": "measure_serving exited with code 1"}
+    t["variant"] = {"served": False, "failure": "not tried: the safe configuration's speed was not measured"}
+    write_json(run / "stages/2/graft-trial/trial-result.json", t)
+    d = json.loads((run / "stages/2/graft-decision.json").read_text())
+    d["numbers"] = {}
+    write_json(run / "stages/2/graft-decision.json", d)
+    block = risks_block(run)
+    assert "Dealt with: Not shown" in block and "safe speed was not measured" in block
+    assert "measured both" not in block
+
+
+def test_a_variant_that_did_not_serve_is_a_trial_that_compared_nothing_but_the_safe_run_is_measured(tmp_path):
+    """The variant failed to serve: both measurements do not exist, so the hazard is not dealt with and the failure is quoted."""
+    run = with_graft(tmp_path, "safe", package_graft=False, reason="the grafted variant did not serve")
+    t = json.loads((run / "stages/2/graft-trial/trial-result.json").read_text())
+    t["variant"] = {"served": False, "failure": "the server exited"}
+    write_json(run / "stages/2/graft-trial/trial-result.json", t)
+    d = json.loads((run / "stages/2/graft-decision.json").read_text())
+    d["numbers"] = {"safe_decode_tok_s": 20.0, "safe_ttft_s": 0.3}
+    write_json(run / "stages/2/graft-decision.json", d)
+    block = risks_block(run)
+    assert "Dealt with: Not shown" in block and "did not serve" in block
+
+
+@pytest.mark.parametrize("choice,packaged", [("safe", False), ("graft", True)])
+def test_a_complete_trial_is_still_dealt_with(tmp_path, choice, packaged):
+    assert "Dealt with: yes" in risks_block(with_graft(tmp_path, choice, package_graft=packaged))
+
+
+def test_the_results_section_does_not_cite_a_result_file_that_is_not_there(tmp_path):
+    text = results(without_result(tmp_path))
+    part = text[text.index("## The graft trial"):]
+    part = part[:part.index("\n## ", 5)] if "\n## " in part[5:] else part
+    assert "trial-result.json" not in part and "graft-decision.json" in part
+    assert "TODO" in part
+
+
+def test_the_results_section_cites_the_result_file_when_it_is_there(tmp_path):
+    text = results(with_graft(tmp_path, "graft", package_graft=True))
+    part = text[text.index("## The graft trial"):]
+    assert "trial-result.json" in part
+
+
+@pytest.mark.parametrize("bad", ["fast", True, None, [20.0]])
+def test_a_decision_number_that_is_not_a_number_is_not_a_measurement(tmp_path, bad):
+    run = without_result(tmp_path, numbers={"safe_decode_tok_s": bad, "variant_decode_tok_s": 21.0})
+    write_json(run / "stages/2/graft-trial/trial-result.json", trial(variant=21.0))      # the result file is there; the decision's number is not
+    block = risks_block(run)
+    assert "Dealt with: Not shown" in block and "decode speed" in block
+
+
+def test_the_results_section_says_the_trial_left_no_result_when_it_left_none(tmp_path):
+    text = results(without_result(tmp_path))
+    part = text[text.index("## The graft trial"):]
+    assert "left no result file" in part and "nothing was compared" in part
+    assert "timed out" in part                                       # the recorded reason is quoted
