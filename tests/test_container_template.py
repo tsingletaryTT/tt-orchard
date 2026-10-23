@@ -314,11 +314,11 @@ def crig(tmp_path):
     rig = {"cdir": cdir, "cfg": cfg, "home": home, "hf": hf, "pkg_cache": pkg_cache, "state": state,
            "pid_file": pid_file, "calls": calls}
 
-    def start(mode="perfect", printed=None, env_change=None, **overrides):
+    def start(mode="perfect", printed=None, env_change=None, server_extra=None, **overrides):
         (cdir / "swap_config.json").write_text(json.dumps(cfg | overrides))
         server_cfg.write_text(json.dumps({"mode": mode, "vocab": VOCAB, "prompt_ids": PROMPT_IDS,
                                           "generated_ids": GENERATED, "model": str(cdir / "model-dir"),
-                                          "pid_file": str(pid_file)}))
+                                          "pid_file": str(pid_file), **(server_extra or {})}))
         tt_cfg.write_text(json.dumps({"calls": str(calls), "pkg_cache": str(pkg_cache),
                                       "printed": printed or {}}))
         env = {k: v for k, v in os.environ.items()
