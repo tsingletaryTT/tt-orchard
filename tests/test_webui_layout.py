@@ -390,3 +390,61 @@ def test_the_next_hints_use_the_names_on_the_buttons():
     assert "Open RESULTS.md" in run_view.NEXT["ready-for-operator-review"]
     assert "open the bundle" not in run_view.NEXT["ready-for-operator-review"].lower()
     assert "Retry" in run_view.NEXT["blocked"] and "Retry" in run_view.NEXT["stopped-or-crashed"]
+
+
+# ---- Operator style is plain text: every emoji the page can show sits in a span that style hides ----------------------------------
+
+EMOJI = re.compile("[\U0001F300-\U0001FAFF☀-➿⏩-⏿⬀-⯿✅✨]")
+TYPOGRAPHIC = set("✓✕✗•")          # check and cross marks next to the word pass/fail are plain glyphs, not pictures
+
+
+def pictures(text):
+    return [c for c in EMOJI.findall(text) if c not in TYPOGRAPHIC]
+
+
+def test_every_emoji_in_the_markup_is_inside_a_span_the_operator_style_hides():
+    t = page()
+    for n in t.root.walk():
+        if pictures(n.text):
+            hidden = "emoji" in n.classes or "brand-mark" in n.classes or any("emoji" in a.classes for a in _ancestors(n))
+            assert hidden, f"<{n.tag} id={n.attrs.get('id')}> shows {pictures(n.text)} outside an .emoji span"
+
+
+def _ancestors(n):
+    p = n.parent
+    while p is not None:
+        yield p
+        p = p.parent
+
+
+def test_every_emoji_the_script_adds_is_in_an_emoji_span_or_in_the_scene_caption_that_operator_style_removes():
+    lines = JS().split("\n")
+    def span(start_marker, end_marker):
+        a = next(i for i, l in enumerate(lines) if l.startswith(start_marker))
+        b = next(i for i, l in enumerate(lines) if i > a and l.startswith(end_marker))
+        return range(a, b + 1)
+    scene = {i for i, l in enumerate(lines) if l.startswith("const WEATHER_WORD")} | set(span("const WEATHER = {", "function renderDetails"))
+    assert len(scene) > 3, "the scene caption region was found"
+    bad = []
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith("//") or not pictures(line) or i in scene:
+            continue
+        if 'class: "emoji"' not in line:
+            bad.append(f"app.js:{i + 1}: {line.strip()[:100]}")
+    assert not bad, "\n".join(bad)
+
+
+def test_the_mode_chip_the_stepper_marks_and_the_unreadable_badge_put_their_pictures_in_emoji_spans():
+    js = JS()
+    mode = js[js.index('const mode = $("run-mode");'):]
+    mode = mode[:mode.index("\n  S.activity")]
+    assert mode.count('class: "emoji"') >= 2 and "replaceChildren" in mode
+    step = fn_body(js, "function renderStepper")
+    assert 'const mark = h("span", { class: "emoji", "aria-hidden": "true" }, `${stopped ? "⏹" : S.meta.marks[status] || ""} `);' in step
+    assert re.search(r'\.\.\.\(r \? \[mark,\s*`\$\{status\}', step)
+    assert 'h("span", { class: "emoji", "aria-hidden": "true" }, "⚠ "), "unreadable"' in fn_body(js, "function stateBadge")
+
+
+def test_operator_style_hides_every_emoji_span():
+    css = CSS()
+    assert re.search(r'^html\[data-mode="operator"\] \.emoji \{ display: none; \}', css, re.M)

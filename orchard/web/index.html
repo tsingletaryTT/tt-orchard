@@ -42,7 +42,7 @@
       <button type="button" class="style-btn" id="mode-playful-btn" data-mode="playful" aria-pressed="true" title="The farm look">Playful</button>
       <button type="button" class="style-btn" id="mode-operator-btn" data-mode="operator" aria-pressed="false" title="Plain type, state first: what is happening, what happened, what to do">Operator</button>
     </div>
-    <button type="button" class="btn btn-primary" id="new-run-btn">🌱 New bring-up</button>
+    <button type="button" class="btn btn-primary" id="new-run-btn"><span class="emoji" aria-hidden="true">🌱 </span>New bring-up</button>
   </div>
 </header>
 
@@ -96,7 +96,7 @@
       <section class="checks-wrap" aria-labelledby="checks-h">
         <div class="checks-head">
           <h2 id="checks-h">Check machines</h2>
-          <button type="button" class="btn" id="checks-run">🔍 Check machines</button>
+          <button type="button" class="btn" id="checks-run"><span class="emoji" aria-hidden="true">🔍 </span>Check machines</button>
         </div>
         <p class="muted small" id="checks-status">Runs the setup checks on this box, and on the lab when there is one. Nothing is changed: each problem shows the command that fixes it.</p>
         <div id="checks-boxes" class="checks-boxes"></div>
@@ -106,7 +106,7 @@
           <h2 id="caches-h">Tensor caches</h2>
           <span class="caches-tools">
             <label class="field-inline" for="caches-lab"><input type="checkbox" id="caches-lab"> include the lab</label>
-            <button type="button" class="btn" id="caches-run">📦 Show caches</button>
+            <button type="button" class="btn" id="caches-run"><span class="emoji" aria-hidden="true">📦 </span>Show caches</button>
           </span>
         </div>
         <p class="muted small" id="caches-status">Each model and chip count keeps a tensor cache, and every test shares one kernel
@@ -162,7 +162,7 @@
             server there.</p>
         </section>
         <div class="settings-actions">
-          <button type="submit" class="btn btn-primary" id="settings-save">💾 Save</button>
+          <button type="submit" class="btn btn-primary" id="settings-save"><span class="emoji" aria-hidden="true">💾 </span>Save</button>
           <span class="muted small" id="settings-files"></span>
         </div>
         <p class="form-error" id="settings-error" role="alert" hidden></p>

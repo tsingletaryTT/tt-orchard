@@ -85,7 +85,7 @@ const TONE = { good: "good", warn: "warn", bad: "bad", alarm: "alarm", dim: "dim
 function stateBadge(state) {
   const st = S.meta && S.meta.states[state];
   if (!st) return h("span", { class: "badge", dataset: { tone: state === "unreadable" ? "alarm" : "dim" } },
-    state === "unreadable" ? "⚠ unreadable" : state);
+    ...(state === "unreadable" ? [h("span", { class: "emoji", "aria-hidden": "true" }, "⚠ "), "unreadable"] : [state]));
   return h("span", { class: "badge", dataset: { tone: TONE[st.role] || "dim" }, title: `${st.word} (${state})` },
     h("span", { "aria-hidden": "true", class: "emoji" }, st.emoji), h("span", { class: "word" }, st.word), h("span", { class: "name" }, state.replace(/-/g, " ")),
     h("span", { class: "real" }, `· ${state}`));      // "name" is the real state, shown instead of the orchard word in operator mode
@@ -392,7 +392,10 @@ function renderRun() {
   $("run-hint-text").textContent = d.next_step || d.hint || "";
   const mode = $("run-mode");
   mode.hidden = !d.mode;
-  mode.textContent = !d.mode ? "" : d.mode.startsWith("lab") ? `🧪 tests on ${d.mode.slice(5, -1)}` : "🏡 this box";
+  // the pictures sit in .emoji spans: the operator style hides them
+  if (!d.mode) mode.replaceChildren();
+  else if (d.mode.startsWith("lab")) mode.replaceChildren(h("span", { class: "emoji", "aria-hidden": "true" }, "🧪 "), `tests on ${d.mode.slice(5, -1)}`);
+  else mode.replaceChildren(h("span", { class: "emoji", "aria-hidden": "true" }, "🏡 "), "this box");
   mode.title = !d.mode ? "" : d.mode.startsWith("lab") ? "Lab mode: hardware tests run on the lab box; the coder stays here and is never parked"
     : "Local mode: everything runs on this machine";
   S.activity = d.activity ? { ...d.activity, seenAt: Date.now() } : null;
@@ -570,7 +573,7 @@ function renderStepper(d) {
     // blocked or stopped run it is where the run stopped, and its clock is not still running.
     const stopped = r && r.status === "running" && !going;
     const status = r ? (stopped ? "stopped" : r.status) : "pending";
-    const mark = stopped ? "⏹" : S.meta.marks[status] || "";
+    const mark = h("span", { class: "emoji", "aria-hidden": "true" }, `${stopped ? "⏹" : S.meta.marks[status] || ""} `);
     const isCur = d.stage && d.stage.current === s.number && !["ready-for-operator-review", "aborted"].includes(d.state);
     ol.append(h("li", {
       class: "step", dataset: { status, current: String(Boolean(isCur)), live: String(live) },
@@ -579,7 +582,8 @@ function renderStepper(d) {
       h("span", { class: "num" }, `${s.number}`),
       h("span", { class: "orchard" }, h("span", { "aria-hidden": "true" }, s.emoji + " "), s.name),
       h("span", { class: "real" }, s.real),
-      h("span", { class: "stat" }, r ? `${mark} ${status}${r.wall_s && !stopped ? " · " + dur(r.wall_s) : ""}${r.attempts > 1 ? ` · ×${r.attempts}` : ""}` : "not yet")));
+      h("span", { class: "stat" }, ...(r ? [mark,
+        `${status}${r.wall_s && !stopped ? " · " + dur(r.wall_s) : ""}${r.attempts > 1 ? ` · ×${r.attempts}` : ""}`] : ["not yet"]))));
   }
 }
 
