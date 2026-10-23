@@ -1330,6 +1330,9 @@ def test_a_token_id_is_found_in_added_tokens_then_in_the_vocabulary():
     assert mod.tokenizer_token_id(data, None) is None
     assert mod.tokenizer_token_id(None, "b") is None
     assert mod.tokenizer_token_id({"added_tokens": [{"id": True, "content": "x"}], "model": {}}, "x") is None
+    assert mod.tokenizer_token_id({"added_tokens": 7, "model": {"vocab": {"x": 4}}}, "x") == 4      # not a list: skipped
+    assert mod.tokenizer_token_id({"added_tokens": [7, None]}, "x") is None
+    assert mod.tokenizer_token_id({"model": 7}, "x") is None
 
 
 # ---- sampling settings the model card recommends, against the defaults the server will apply -----------------

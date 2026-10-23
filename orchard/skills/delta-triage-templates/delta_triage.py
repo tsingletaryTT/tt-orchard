@@ -1231,11 +1231,13 @@ def tokenizer_token_id(data, token) -> int | None:
     vocabulary. None when the token is unknown, `data` is not a tokenizer, or the id is not an integer."""
     if not isinstance(data, dict) or not isinstance(token, str):
         return None
-    for item in data.get("added_tokens") or []:
+    added = data.get("added_tokens")
+    for item in added if isinstance(added, list) else []:
         if isinstance(item, dict) and item.get("content") == token:
             tid = item.get("id")
             return tid if isinstance(tid, int) and not isinstance(tid, bool) else None
-    vocab = vocab_items(data.get("model") or {})
+    model = data.get("model")
+    vocab = vocab_items(model) if isinstance(model, dict) else None
     if isinstance(vocab, dict):
         tid = vocab.get(token)
         return tid if isinstance(tid, int) and not isinstance(tid, bool) else None

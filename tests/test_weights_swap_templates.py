@@ -1115,3 +1115,107 @@ def test_a_tokenizer_config_that_is_not_json_gives_no_special_tokens_and_no_cras
     rec = sources(prep["stage"])
     assert rec["special_tokens"] == {"eos_token": None, "bos_token": None, "pad_token": None, "unk_token": None}
     assert rec["special_tokens_differ_from_nearest"] == []
+
+
+# ---- the tokenizer's eos token against the stop tokens the server will use -------------------------------
+# The server stops on the directory's eos_token_id (above). The new model's tokenizer names an eos token too. One the
+# server does not stop on lets a reply run to the length limit. A warning only (the rule is one bundle's), and the
+# record keeps the id and the answer.
+
+TOKENIZER = json.dumps({"added_tokens": [{"id": 9, "content": "<|stop|>"}, {"id": 5, "content": "<|end|>"}],
+                        "model": {"vocab": {"a": 0, "b": 1}}})
+
+
+def tokenizer_case(prep, eos_token, eos_ids_value=5):
+    put(prep["new"], "tokenizer.json", TOKENIZER)
+    put(prep["new"], "tokenizer_config.json", json.dumps({} if eos_token is None else {"eos_token": eos_token}))
+    put(prep["new"], "generation_config.json", json.dumps({"eos_token_id": eos_ids_value}))
+    put(prep["base"], "config.json", "{}")
+    return run_prepare(prep["stage"])
+
+
+def test_a_tokenizer_eos_token_the_server_does_not_stop_on_warns_and_is_recorded(prep):
+    r = tokenizer_case(prep, "<|stop|>")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "warning: the tokenizer's eos token <|stop|> (id 9) is not among the stop tokens [5]" in r.stdout
+    rec = sources(prep["stage"])
+    assert rec["tokenizer_eos_token_id"] == 9 and rec["tokenizer_eos_served"] is False
+
+
+def test_a_tokenizer_eos_token_the_server_stops_on_gets_no_warning(prep):
+    r = tokenizer_case(prep, "<|end|>")
+    assert "the tokenizer's eos token" not in r.stdout
+    rec = sources(prep["stage"])
+    assert rec["tokenizer_eos_token_id"] == 5 and rec["tokenizer_eos_served"] is True
+
+
+def test_an_eos_token_written_as_an_object_is_read(prep):
+    r = tokenizer_case(prep, {"content": "<|stop|>", "lstrip": False})
+    assert "(id 9)" in r.stdout
+
+
+def test_a_token_found_only_in_the_vocabulary_is_found(prep):
+    r = tokenizer_case(prep, "b")
+    assert "the tokenizer's eos token b (id 1) is not among" in r.stdout
+
+
+@pytest.mark.parametrize("eos_token", [None, "<nope>"])
+def test_an_unknown_or_missing_tokenizer_eos_is_recorded_as_unknown_and_warns_nothing(prep, eos_token):
+    r = tokenizer_case(prep, eos_token)
+    assert "the tokenizer's eos token" not in r.stdout
+    rec = sources(prep["stage"])
+    assert rec["tokenizer_eos_token_id"] is None and rec["tokenizer_eos_served"] is None
+
+
+def test_an_unreadable_tokenizer_json_is_recorded_as_unknown(prep):
+    tokenizer_case(prep, "<|stop|>")
+    put(prep["new"], "tokenizer.json", "not json")
+    r = run_prepare(prep["stage"])
+    assert r.returncode == 0 and "the tokenizer's eos token" not in r.stdout
+    assert sources(prep["stage"])["tokenizer_eos_token_id"] is None
+
+
+def test_with_no_stop_token_at_all_the_mismatch_warning_stays_quiet(prep):
+    put(prep["new"], "tokenizer.json", TOKENIZER)
+    put(prep["new"], "tokenizer_config.json", json.dumps({"eos_token": "<|stop|>"}))
+    put(prep["new"], "generation_config.json", '{"temperature": 0.6}')
+    put(prep["base"], "config.json", BASE_CONFIG)
+    r = run_prepare(prep["stage"])
+    assert "warning: no stop token" in r.stdout and "the tokenizer's eos token" not in r.stdout
+    assert sources(prep["stage"])["tokenizer_eos_served"] is None
+
+
+def test_one_of_several_stop_tokens_is_enough(prep):
+    r = tokenizer_case(prep, "<|stop|>", eos_ids_value=[5, 9])
+    assert "the tokenizer's eos token" not in r.stdout
+    assert sources(prep["stage"])["tokenizer_eos_served"] is True
+
+
+def tokenizer_with(prep, tokenizer_json, eos_token):
+    put(prep["new"], "tokenizer.json", tokenizer_json)
+    put(prep["new"], "tokenizer_config.json", json.dumps({} if eos_token is None else {"eos_token": eos_token}))
+    put(prep["new"], "generation_config.json", '{"eos_token_id": 5}')
+    put(prep["base"], "config.json", "{}")
+    r = run_prepare(prep["stage"])
+    assert r.returncode == 0, r.stdout + r.stderr
+    return sources(prep["stage"])["tokenizer_eos_token_id"]
+
+
+def test_a_missing_eos_token_does_not_match_an_added_token_with_no_content(prep):
+    assert tokenizer_with(prep, json.dumps({"added_tokens": [{"id": 3, "content": None}]}), None) is None
+
+
+@pytest.mark.parametrize("tokenizer_json", ["[1, 2]", '{"added_tokens": 7, "model": 7}', '{"model": []}',
+                                           '{"added_tokens": [7, null, {"id": 1}]}'])
+def test_a_tokenizer_json_of_another_shape_gives_no_id_and_no_crash(prep, tokenizer_json):
+    assert tokenizer_with(prep, tokenizer_json, "x") is None
+
+
+@pytest.mark.parametrize("bad_id", [True, "3", 2.5, None])
+def test_an_added_token_id_that_is_not_an_integer_is_not_an_id(prep, bad_id):
+    assert tokenizer_with(prep, json.dumps({"added_tokens": [{"id": bad_id, "content": "x"}]}), "x") is None
+
+
+def test_a_vocabulary_that_is_a_list_gives_the_position(prep):
+    assert tokenizer_with(prep, json.dumps({"model": {"vocab": [["a", -1.0], ["b", -2.0]]}}), "b") == 1
+    assert tokenizer_with(prep, json.dumps({"model": {"vocab": ["a", "b"]}}), "a") == 0

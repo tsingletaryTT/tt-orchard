@@ -29,3 +29,16 @@ def test_the_supervisor_really_has_no_prepare_failure_outcome_the_skill_could_us
     src = (Path(__file__).parent.parent / "orchard" / "supervisor.py").read_text(encoding="utf-8")
     body = src.split("out, prep = self._step(spec, \"prepare\"", 1)[1].split("self._hardware_phase(spec, stage_dir, test)", 1)[0]
     assert "result.json" not in body and "_read_test(stage_dir)" in body
+
+
+TOKENIZER_START = '- `prepare_swap.py` warns "the tokenizer\'s eos token'
+
+
+def test_the_tokenizer_eos_warning_is_advisory_and_the_agent_goes_on_to_the_hardware_test():
+    b = bullet(TOKENIZER_START)
+    assert "advisory" in b and "`hw_test.json` and `handoff.json`" in b and "Do not try to fix it" in b
+
+
+def test_the_tokenizer_eos_warning_does_not_send_the_agent_to_result_json_and_a_stop():
+    b = bullet(TOKENIZER_START)
+    assert "`result.json`" not in b and "and stop" not in b

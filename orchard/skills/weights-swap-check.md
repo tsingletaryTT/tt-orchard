@@ -65,6 +65,11 @@ write a script.
   advisory, because it predicts from one bundle's reading rule. Do not try to fix it. Write `hw_test.json` and
   `handoff.json` as usual and let the hardware test show whether the server starts. If it does not, the finish step
   records the failure and the operator reads the stop tokens question in the block message.
+- `prepare_swap.py` warns "the tokenizer's eos token ... is not among the stop tokens" when the model's tokenizer
+  names an eos token that the model directory's `eos_token_id` list does not hold. A reply that ends on that token
+  would run to the length limit. The warning is advisory, because the stop tokens may still be right for chat use.
+  Do not try to fix it. Write `hw_test.json` and `handoff.json` as usual. The record `model-dir-sources.json` keeps
+  the id and the answer for the operator.
 - Write each file as soon as you know its content. Do not wait until the end.
 - Do not investigate anything this skill does not list. On an earlier run the model spent 60 turns
   grepping vLLM source for an unrelated timeout and wrote nothing.
