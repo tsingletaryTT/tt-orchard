@@ -255,12 +255,14 @@ def _template(snapshot: Path) -> str:
     return t if isinstance(t, str) else ""
 
 
-def read_use_facts(snapshot, run_sh: str, run_dir, *, identity: tuple[str, str | None] | None = None) -> UseFacts | None:
+def read_use_facts(snapshot, run_sh: str, run_dir, *, identity: tuple[str, str | None] | None = None,
+                   measured: bool = True) -> UseFacts | None:
     """The facts for one package: the model's snapshot (README.md and chat template), the package's run.sh text and the
     run directory (for the evidence files). `identity` is the package's (model repo, revision): tool-call evidence counts
-    only when it names that model. None when none of them gives a fact."""
+    only when it names that model. `measured` is False for a profile the run did not measure (an optional one): the
+    run-wide evidence is not about its server, so it is left out. None when none of them gives a fact."""
     snap = Path(snapshot)
     readme = _read(snap / "README.md") or ""
     t, f = template_facts(_template(snap)), flag_facts(run_sh or "")
-    facts = UseFacts(authors_use=authors_intended_use(readme), tool_evidence=tool_call_evidence(run_dir, identity), **t, **f)
+    facts = UseFacts(authors_use=authors_intended_use(readme), tool_evidence=tool_call_evidence(run_dir, identity) if measured else None, **t, **f)
     return facts if has_facts(facts) else None

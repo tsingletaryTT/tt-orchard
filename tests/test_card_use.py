@@ -437,3 +437,10 @@ def test_other_models_under_a_matching_top_record_do_not_lend_their_calls(tmp_pa
                              "models": {"base": {"model_id": f"Qwen/Qwen3.8-27B@{OTHER_REV}",
                                                   "prompts": {"t": {"runs": [{"tool_calls": [{"name": "theirs"}]}]}}}}}))
     assert tool_call_evidence(tmp_path, ID) == ("stages/7/benchmark/speed.json", ("mine",))
+
+
+def test_a_profile_the_run_did_not_measure_gets_no_tool_call_evidence(tmp_path):
+    run = tmp_path / "run"
+    _speed(run, [{"name": "read_file"}])
+    assert read_use_facts(_snapshot(tmp_path), RUN_SH, run, identity=ID, measured=False).tool_evidence is None
+    assert read_use_facts(_snapshot(tmp_path), RUN_SH, run, identity=ID, measured=True).tool_evidence is not None

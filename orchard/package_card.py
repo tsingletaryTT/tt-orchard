@@ -485,16 +485,18 @@ def use_problems(card: str, use: UseFacts | None) -> list[str]:
             problems.append("the server parses tool calls, so the card must say they come back in `tool_calls`")
     elif "`tool_calls`" in card or '"tools"' in card:
         problems.append("the card claims tool calls, and the chat template or run.sh gives the server no way to return them")
-    if u.tool_evidence:
-        path, names = u.tool_evidence
+    evidence = u.tool_evidence if u.tools_ok else None       # the renderer says it only when the server can return tool calls
+    if evidence:
+        path, names = evidence
         if "returned tool calls" not in flat or f"`{path}`" not in flat or any(f"`{n}`" not in flat for n in names):
             problems.append(f"the tool-use prompts returned tool calls (`{path}`), so the card must say they returned tool "
                             f"calls and name the file and the tools: {', '.join(names)}")
     elif "returned tool calls" in flat:
-        problems.append("the card says the tool-use prompts returned tool calls, and no evidence file in the run shows it")
-    if u.tool_evidence:
+        problems.append("the card says the tool-use prompts returned tool calls, and no evidence file in the run shows it "
+                        "for this package's server")
+    if evidence:
         claimed = re.search(r"returned tool calls \(([^)]*)\)", flat)
-        extra = [n for n in re.findall(r"`([^`]+)`", claimed.group(1)) if n not in u.tool_evidence[1]] if claimed else []
+        extra = [n for n in re.findall(r"`([^`]+)`", claimed.group(1)) if n not in evidence[1]] if claimed else []
         if extra:
             problems.append(f"the card names tools the evidence does not hold: {', '.join(extra)}")
     if u.text_only and "Text only" not in uflat:

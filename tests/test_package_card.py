@@ -784,3 +784,26 @@ def test_a_tool_call_sentence_outside_intended_use_does_not_add_evidence():
     card = render_card(facts(use=use_facts())).replace(
         "## Limitations", "## Limitations\n\nIn the runs recorded in `stages/9/other.json` the tool-use prompts returned tool calls.\n")
     assert "stages/9/other.json" not in card_evidence_paths(card)
+
+
+# ---- the evidence sentence is required only where the renderer writes it (review finding on PR 51) ---------------------
+
+EVIDENCE = ("stages/7/benchmark/speed.json", ("run_tests",))
+
+
+def test_a_server_that_cannot_return_tool_calls_is_not_asked_for_the_evidence_sentence(tmp_path):
+    u = use_facts(tool_parser=None, auto_tool_choice=False, tool_evidence=EVIDENCE)
+    card = render_card(facts(use=u))
+    assert "returned tool calls" not in card
+    assert use_problems(card, u, tmp_path) == []
+
+
+def test_a_card_that_claims_returned_tool_calls_for_a_server_that_cannot_return_them_is_refused(tmp_path):
+    claiming = render_card(facts(use=use_facts(tool_evidence=EVIDENCE)))
+    u = use_facts(tool_parser=None, auto_tool_choice=False, tool_evidence=EVIDENCE)
+    assert any("returned tool calls" in p and "for this package's server" in p for p in use_problems(claiming, u, tmp_path))
+
+
+def test_a_tool_name_not_in_the_evidence_is_still_refused_when_the_server_can_return_tool_calls(tmp_path):
+    card = render_card(facts(use=use_facts(tool_evidence=("stages/7/benchmark/speed.json", ("run_tests", "invented")))))
+    assert any("invented" in p for p in use_problems(card, use_facts(tool_evidence=EVIDENCE), tmp_path))

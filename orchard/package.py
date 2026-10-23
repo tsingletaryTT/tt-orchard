@@ -1225,7 +1225,7 @@ def write_card(out: Path, facts: RunFacts, profile: dict, *, namespace: str,
         not_measured.insert(0, "the drafter's acceptance rate on this model")
     run_sh_path = out / "run.sh"
     use = read_use_facts(facts.new_snapshot, run_sh_path.read_text(encoding="utf-8") if run_sh_path.is_file() else "",
-                         facts.run_dir, identity=(facts.model_id, facts.revision))
+                         facts.run_dir, identity=(facts.model_id, facts.revision), measured=bool(profile["required"]))
     facts_card = CardFacts(
         name=profile["name"], namespace=namespace, model_id=facts.model_id, revision=facts.revision,
         nearest_model=facts.nearest_model, source_name=profile["source"],
