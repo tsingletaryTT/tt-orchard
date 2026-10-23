@@ -144,7 +144,7 @@ from orchard.paths import (PATHS_RECORDED, RunPaths, UnknownPlaceholder, absolut
                            recorded_paths)
 from orchard.runner import Denied, check_string
 from orchard import graft_trial as graft
-from orchard import kept_coder, swap_draft
+from orchard import kept_coder, kernelprobe, swap_draft
 from orchard.server import ServerControl, ServerError, ServerSpec, StopCheck
 from orchard.stages import (PACKAGE_OPTIONS_SET, GateResult, TierUnavailable, attempt_started_ts,
                             budget_cap, check_disk, coder_state, delta_class, delta_path, evidence_record,
@@ -488,6 +488,7 @@ def coder_tier(cfg, port: int) -> str:
 BUNDLE_BUILD_TIMEOUT_S = 600            # build_bundle.py reads files and copies packages; no network
 SWAP_TEMPLATES = ("prepare_swap.py", "serve_and_compare.py")      # copied with a drafted swap_config.json
 STAGE4_TEMPLATES = (*SWAP_TEMPLATES, "serve_and_compare_container.py")     # into each drafted configs/<N>
+GRAFT_TRIAL_ENV = "ORCHARD_TRIAL_DIR"      # in the environment of the trial's test: the trial directory, so its servers can be found
 GRAFT_TRIAL_TEMPLATE = "graft_trial.py"     # copied into stages/2/graft-trial/ when the trial starts (orchard/graft_trial.py)
 
 
@@ -1574,9 +1575,11 @@ class Supervisor:
             problems.append(f"the test command is refused: {exc}")
         return test, problems
 
-    def _hardware_phase(self, spec, stage_dir: Path, test: dict, **record) -> None:
+    def _hardware_phase(self, spec, stage_dir: Path, test: dict, *, after_test=None, **record) -> None:
         """Lease the chips (parking the coder when its board is needed), run `test`, give them back. `record` names where the run's record
-        and output go (see _run_test); the graft trial uses it to leave stage 2's own test record alone."""
+        and output go (see _run_test); the graft trial uses it to leave stage 2's own test record alone. `after_test` runs when the test
+        ends however it ends (a result, a timeout, an interrupt, an error) and before the coder is restored or the lease released: the
+        trial uses it to stop the servers its helpers started, which a kill of the test's own session does not reach."""
         n = spec.number
         if self.lab is not None:
             return self._lab_hardware_phase(spec, stage_dir, test)
@@ -1587,7 +1590,11 @@ class Supervisor:
         if d.park_needed:
             h = self._handoff(n, self.coder_lease)
             lease = h.park()
-            self._run_test(spec, stage_dir, test, lease, **record)
+            try:
+                self._run_test(spec, stage_dir, test, lease, **record)
+            finally:
+                if after_test is not None:
+                    after_test()
             h.restore()
             self.coder_lease = h.lease
             return
@@ -1599,7 +1606,11 @@ class Supervisor:
                           wait_budget_s=spec.budget_s, clock=self.clock, sleep=self.sleep, exact=exact)
         self.test_lease = lease
         self.ledger.append("decision", n, decision="test lease taken", test_lease=lease.record())
-        self._run_test(spec, stage_dir, test, lease, **record)
+        try:
+            self._run_test(spec, stage_dir, test, lease, **record)
+        finally:
+            if after_test is not None:
+                after_test()
         try:
             self.adapter.release(lease)        # the lease tool resets the board as it releases
         except AdapterError as exc:
@@ -1654,7 +1665,9 @@ class Supervisor:
                                note="serving the nearest model's mtp.* head grafted onto this model, beside the safe configuration")
             test = {"command": f"python3 stages/{n}/{graft.TRIAL_DIR}/{GRAFT_TRIAL_TEMPLATE}", "deadline_s": GRAFT_TRIAL_DEADLINE_S}
             self._hardware_phase(spec, stage_dir, test, record=f"{graft.TRIAL_DIR}/test-result.json",
-                                 output=f"{graft.TRIAL_DIR}/evidence/hw-test-output.txt", what="graft trial test")
+                                 output=f"{graft.TRIAL_DIR}/evidence/hw-test-output.txt", what="graft trial test",
+                                 env_extra={GRAFT_TRIAL_ENV: str(trial_dir.resolve())},
+                                 after_test=lambda: self._stop_trial_servers(n, trial_dir, "after the trial test"))
         try:
             record = json.loads(marker.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -1681,6 +1694,21 @@ class Supervisor:
         graft.write_decision(stage_dir, decision, candidate=cand)
         self._record_graft_decision(stage_dir, decision)
         return True
+
+    def _stop_trial_servers(self, n: int, trial_dir: Path, when: str) -> None:
+        """Stop what the graft trial's helpers left running. measure_serving.py and serve_and_compare.py start run.sh in a session of their
+        own, so the kill of the trial's session on a deadline or an interrupt does not reach a server, and a server that stays up holds the
+        chips. Every process of this user that carries the trial directory in ORCHARD_TRIAL_DIR is stopped (SIGTERM, then SIGKILL), with the
+        identity it had (pid, boot id, start time) written to the ledger. A server that is still there afterwards blocks the run: the coder
+        is not restored over it. The trial does not release the lease itself; the run's wind-down does, and gozer refuses to reset a
+        chip that a server holds."""
+        records = kernelprobe.sweep_strays(trial_dir, var=GRAFT_TRIAL_ENV, identity=True)
+        if records:
+            self.ledger.append("decision", n, decision="graft trial servers stopped", when=when, servers=records)
+        left = [r["pid"] for r in records if not r.get("stopped")]
+        if left:
+            self._block(n, "a server of the graft trial is still running (pid " + ", ".join(str(p) for p in left) + "), so the coder is "
+                           "not restored over it; stop it and run the command again", pids=left)
 
     def _record_graft_decision(self, stage_dir: Path, decision: dict) -> None:
         """The ledger's copy of the decision, with the decision file's sha256 so a later stage can tell the file was not changed."""
@@ -1713,6 +1741,9 @@ class Supervisor:
         """Give back test leases an earlier supervisor of this run took and never released (it died, and nothing
         released them). Only leases this run's ledger records, and only those taken where this supervisor runs: a lab
         run gives back the lab's, a local run this box's. A lease that is already gone is noted as not released."""
+        trial_dir = self.run_dir / "stages" / "2" / graft.TRIAL_DIR
+        if self.lab is None and trial_dir.is_dir():
+            self._stop_trial_servers(2, trial_dir, "when the run started again")
         taken, released = {}, set()
         for e in self.ledger.read():
             d = e["data"]
@@ -1766,14 +1797,14 @@ class Supervisor:
         path.write_text(json.dumps(known, indent=2, sort_keys=True))
 
     def _run_test(self, spec, stage_dir: Path, test: dict, lease: Lease, *, record: str = "test-result.json",
-                  output: str = "evidence/hw-test-output.txt", what: str = "hardware test") -> dict:
+                  output: str = "evidence/hw-test-output.txt", what: str = "hardware test", env_extra: dict | None = None) -> dict:
         n = spec.number
         k = spec.boards * CHIPS_PER_BOARD
         deadline = min(float(test["deadline_s"]), spec.budget_s)
         out_path = stage_dir / output
         out_path.parent.mkdir(parents=True, exist_ok=True)
         result = self._spawn(n, test["command"], lease.chips[:k], lease.dev_indices[:k], deadline, out_path,
-                             lease_id=lease.lease_id)
+                             env_extra=env_extra, lease_id=lease.lease_id)
         marker = stage_dir / record
         tmp = marker.with_name(marker.name + ".tmp")
         tmp.write_text(json.dumps(result, indent=2))
@@ -1783,10 +1814,11 @@ class Supervisor:
         return result
 
     def _spawn(self, n: int, command: str, chips, ids, deadline: float, out_path: Path,
-               **record) -> dict:
+               env_extra: dict | None = None, **record) -> dict:
         """Run one hardware test command on `chips` (device indices `ids`) and return its record.
-        `record` adds keys to the "hardware test started" decision."""
+        `record` adds keys to the "hardware test started" decision; `env_extra` adds variables to the test's environment."""
         env = agent_env(self.run_dir, extra=self.extra_env)
+        env.update(env_extra or {})
         # The leased chips replace the agent shells' no-chip mask. TT_METAL_VISIBLE_DEVICES takes
         # device indices in another form, so the hardware test gets none and the runtime follows
         # TT_VISIBLE_DEVICES. A container test needs the /dev/tenstorrent indices of the same
