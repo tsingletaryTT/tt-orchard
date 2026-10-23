@@ -1693,16 +1693,22 @@ def stop_token_hazards(g: dict, ev) -> list[dict]:
     model's when the model ships none; the nearest model's config.json when that file has none). The new model's
     tokenizer and its own config.json name stop tokens too. One the server does not stop on lets a reply run to
     the length limit. Quiet when the server will have no stop token at all: generation_config_hazards says that."""
+    cfg_ids = g["base_config_eos_token_ids"]            # staging copies the nearest model's config.json as well
+    from_config = "the nearest model's config.json, which staging copies"
     if g["model_generation_config_present"] and g["model_eos_token_ids"]:
-        served, origin = g["model_eos_token_ids"], "the new model's own generation_config.json"
+        served, origin = list(g["model_eos_token_ids"]), "the new model's own generation_config.json"
     elif g["model_generation_config_present"] or not g["base_generation_config_present"]:
-        served = g["base_config_eos_token_ids"]
-        origin = "the nearest model's config.json, which staging copies"
+        served, origin = [], from_config
     elif g["base_eos_token_ids"]:
-        served, origin = g["base_eos_token_ids"], "the nearest model's generation_config.json, which staging copies"
+        served, origin = list(g["base_eos_token_ids"]), "the nearest model's generation_config.json, which staging copies"
     else:
-        served = g["base_config_eos_token_ids"]
-        origin = "the nearest model's config.json, which staging copies"
+        served, origin = [], from_config
+    # prepare_swap.stop_token_ids reads the eos_token_id of generation_config.json and then of config.json and keeps
+    # both, so the ids the server can stop on are the two files' together (an id in both counts once).
+    extra = [i for i in cfg_ids if i not in served]
+    if extra and served:
+        origin += " and " + from_config
+    served += extra
     if not served:
         return []
     items = []

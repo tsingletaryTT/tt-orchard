@@ -1246,6 +1246,69 @@ def test_a_tokenizer_eos_token_the_generation_config_does_not_stop_on_gets_a_haz
     assert delta(stage)["path"] == "weights-only"                    # a flag, not a reason to stop
 
 
+# Staging copies the nearest model's config.json into the served directory too, and prepare_swap.stop_token_ids reads the
+# eos_token_id of generation_config.json and then of config.json. So the server's stop tokens are both files' ids together.
+
+def test_a_tokenizer_eos_token_the_staged_config_stops_on_gets_no_hazard(text_case):
+    stage = text_case(tokenizer_config={"eos_token": "<|im_start|>"})       # id 1; the model's generation config stops on [2, 0]
+    set_top_level_eos("nearest_snapshot", stage, 1)                          # the config.json staging copies stops on 1
+    assert run_triage(stage).returncode == 0
+    assert stop_hazards(stage) == []
+
+
+def test_the_same_holds_when_the_generation_config_is_the_nearest_models(text_case):
+    stage = text_case(tokenizer_config={"eos_token": "<|im_start|>"})
+    drop_model_file(stage, "generation_config.json")                         # staging copies the nearest model's: stops on [2, 0]
+    set_top_level_eos("nearest_snapshot", stage, 1)
+    assert run_triage(stage).returncode == 0
+    assert stop_hazards(stage) == []
+
+
+def test_a_tokenizer_eos_token_neither_file_stops_on_still_gets_a_hazard_that_lists_both_sources(text_case):
+    stage = text_case(tokenizer_config={"eos_token": "<|im_start|>"})
+    set_top_level_eos("nearest_snapshot", stage, 7)
+    assert run_triage(stage).returncode == 0
+    [h] = stop_hazards(stage)
+    assert "id 1" in h["finding"] and "[2, 0, 7]" in h["finding"]
+    assert "the new model's own generation_config.json" in h["finding"] and "the nearest model's config.json" in h["finding"]
+
+
+def test_the_borrowed_file_case_names_both_sources_too(text_case):
+    stage = text_case(tokenizer_config={"eos_token": "<|im_start|>"})
+    drop_model_file(stage, "generation_config.json")
+    set_top_level_eos("nearest_snapshot", stage, 7)
+    assert run_triage(stage).returncode == 0
+    [h] = stop_hazards(stage)
+    assert "[2, 0, 7]" in h["finding"]
+    assert "the nearest model's generation_config.json" in h["finding"] and "the nearest model's config.json" in h["finding"]
+
+
+def test_an_id_both_files_hold_is_listed_once(text_case):
+    stage = text_case(tokenizer_config={"eos_token": "<|im_start|>"})
+    set_top_level_eos("nearest_snapshot", stage, 2)                          # the generation config already stops on 2
+    assert run_triage(stage).returncode == 0
+    [h] = stop_hazards(stage)
+    assert "[2, 0]" in h["finding"] and "[2, 0, 2]" not in h["finding"]
+    assert "the nearest model's config.json" not in h["finding"]             # the config added no id, so it is not named
+
+
+def test_with_no_stop_token_in_the_generation_config_the_staged_config_is_named_once(text_case):
+    stage = text_case(tokenizer_config={"eos_token": "<|im_start|>"})
+    drop_eos("model_snapshot", stage)                                        # the model's generation config has no eos_token_id
+    set_top_level_eos("nearest_snapshot", stage, 7)
+    assert run_triage(stage).returncode == 0
+    [h] = stop_hazards(stage)
+    assert "[7]" in h["finding"] and h["finding"].count("the nearest model's config.json") == 1
+
+
+def test_the_new_models_own_config_stop_token_is_still_not_counted_as_served(text_case):
+    stage = text_case()
+    set_top_level_eos("model_snapshot", stage, 9)                            # staging replaces the model's config.json
+    assert run_triage(stage).returncode == 0
+    [h] = stop_hazards(stage)
+    assert "config.json names the stop tokens [9]" in h["finding"]
+
+
 def test_a_tokenizer_eos_token_the_generation_config_stops_on_gets_no_hazard(text_case):
     stage = text_case(tokenizer_config={"eos_token": "<|im_end|>"})
     assert run_triage(stage).returncode == 0
