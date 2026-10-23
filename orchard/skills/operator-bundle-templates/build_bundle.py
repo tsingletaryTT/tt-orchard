@@ -282,6 +282,21 @@ class Run:
         for d in sorted((s / "4" / "configs").glob("*/swap_config.json")):
             if d.parent.name.isdigit():
                 self.swap[(4, int(d.parent.name))] = read_json(d, "", required=False) or {}
+        # Stage 2's graft decision (orchard/graft_trial.py), and which stage 4 bundle configurations were built with the graft
+        # (model-dir-sources.json's mtp_graft record; a container configuration has no bundle_dir and is not held to the decision).
+        decision_path = s / "2" / "graft-decision.json"
+        self.graft_decision_present = decision_path.exists()
+        self.graft_decision = read_json(decision_path, "", required=False)
+        if self.graft_decision is not None and self.graft_decision.get("choice") not in ("graft", "safe"):
+            self.graft_decision = None
+        rec2 = read_json(s / "2" / "model-dir-sources.json", "", required=False) or {}
+        self.stage_2_grafted = isinstance(rec2.get("mtp_graft"), dict)       # stage 2's own swap grafted (a person set graft_mtp)
+        self.graft_built = {}
+        for key, cfg in self.swap.items():
+            if key == 2 or not isinstance(cfg, dict) or not cfg.get("bundle_dir"):
+                continue
+            rec = read_json(s / "4" / "configs" / str(key[1]) / "model-dir-sources.json", "", required=False) or {}
+            self.graft_built[key] = isinstance(rec.get("mtp_graft"), dict)
         # stage 7
         self.package = None
         self.publish = None
@@ -551,6 +566,79 @@ def served_dir_section(run: Run, redact: Redactor) -> list[str]:
     return lines
 
 
+def graft_section(run: Run, redact: Redactor) -> list[str]:
+    """The "The graft trial" section, from stage 2's `graft-decision.json`: which variant the run ships, why, and both measurements. No lines when
+    the run has no decision file, so a run from before the trial gets the same RESULTS.md as before. Every copied string goes through the redactor."""
+    d = run.graft_decision
+    if d is None:
+        return []
+    choice = d["choice"]
+    reason = redact(one_line(d.get("reason"))) if isinstance(d.get("reason"), str) and d["reason"].strip() else "no reason recorded"
+    lines = ["", "## The graft trial", "",
+             "The nearest model's `mtp.*` head can be grafted onto a model that ships none, which lets the drafter and on-device sampling stay on. "
+             "Stage 2 tries that once after the safe configuration passes its gate, and ships the graft only when the measurement favours it. "
+             "From `stages/2/graft-decision.json`.", ""]
+    if d.get("trial") is None:
+        lines.append(f"Result: the trial did not run, and the safe configuration (drafter off, sampling on the host) was kept. {reason}.")
+        return lines
+    lines.append(("Result: stage 2 chose the graft. " if choice == "graft" else
+                  "Result: stage 2 kept the safe configuration (drafter off, sampling on the host). ") + f"{reason}.")
+    nums = d.get("numbers") if isinstance(d.get("numbers"), dict) else {}
+    where = ev(["stages/2/graft-trial/trial-result.json", "stages/2/graft-decision.json"])
+    rows = [("Decode speed (tokens/s, median of four prompts)", "safe_decode_tok_s", "variant_decode_tok_s"),
+            ("Time to first token (s, median of four prompts)", "safe_ttft_s", "variant_ttft_s"),
+            ("Top-1 agreement with the CPU reference", "safe_top1_agreement", "variant_top1_agreement")]
+    lines += ["", "| Measure | Safe configuration | Grafted variant | Label | Evidence |", "|---|---|---|---|---|"]
+    for name, safe_key, var_key in rows:
+        safe, var = nums.get(safe_key), nums.get(var_key)
+        label = "measured" if is_number(safe) or is_number(var) else "TODO"
+        lines.append(f"| {name} | {fmt(safe)} | {fmt(var)} | {label} | {where} |")
+    if is_number(nums.get("speedup")):
+        lines.append(f"| Decode speed ratio (grafted over safe) | - | {fmt(nums['speedup'])} | measured | {where} |")
+    th = d.get("thresholds") if isinstance(d.get("thresholds"), dict) else {}
+    if th:
+        lines += ["", "The graft is kept when the variant served, was coherent, agreed with the CPU reference at least as well as stage 2's bar "
+                  f"({fmt(th.get('top1_min'))}), lost no more than {fmt(th.get('top1_margin'))} against the safe run, and decoded at least "
+                  f"{fmt(th.get('min_speedup'))} times as fast. These values are provisional (`orchard/defaults.py`). Drafter acceptance was "
+                  "not measured."]
+    return lines
+
+
+def graft_hazard_dealt_with(run: Run) -> tuple[bool, list[str]]:
+    """The `drafter_graft` hazard: a graft was possible. Dealt with when stage 2's trial ran, decided, and everything built afterwards agrees with
+    the decision: each stage 4 bundle configuration records the graft when the decision is graft and none does when it is safe, and the same for the
+    package when there is one."""
+    d = run.graft_decision
+    if d is None:
+        why = ("stages/2/graft-decision.json is not in this run, so no trial decided whether the graft helps."
+               if not run.graft_decision_present else
+               "stages/2/graft-decision.json is not readable or names no choice, so the trial's decision cannot be used.")
+        return False, [why]
+    if d.get("trial") is None:
+        reason = one_line(d.get("reason") or "no reason recorded")
+        return False, [f"The graft trial was skipped ({reason}). The safe configuration was served and nothing was measured with the graft."]
+    choice = d["choice"]
+    want = choice == "graft"
+    mismatched = sorted(k[1] for k, built in run.graft_built.items() if built != want)
+    if mismatched:
+        return False, [f"Stage 2's trial chose {'the graft' if want else 'the safe configuration'}, but stage 4's "
+                       f"{', '.join(chips(n) for n in mismatched)} bundle configuration "
+                       f"{'was built without' if want else 'carries'} the grafted head (`stages/4/configs/N/model-dir-sources.json`)."]
+    if run.package is not None:
+        packaged = isinstance(run.package.get("mtp_graft"), dict)
+        if packaged != want:
+            return False, [f"Stage 2's trial chose {'the graft' if want else 'the safe configuration'}, but the package "
+                           f"{'carries no graft' if want else 'is grafted'} (`stages/7/package.json`)."]
+    follows = ("a grafted head in stage 4's bundle configurations and in the package" if want else
+               "no grafted head in stage 4's bundle configurations or in the package")
+    nums = d.get("numbers") if isinstance(d.get("numbers"), dict) else {}
+    speed = (f" Decode speed {fmt(nums.get('safe_decode_tok_s'))} tokens/s safe, {fmt(nums.get('variant_decode_tok_s'))} grafted." if
+             is_number(nums.get("safe_decode_tok_s")) or is_number(nums.get("variant_decode_tok_s")) else "")
+    return True, [f"Stage 2's graft trial measured both configurations and {'chose the graft' if want else 'kept the safe configuration'}; "
+                  f"what was built after it has {follows}.{speed} Evidence: `stages/2/graft-decision.json`, "
+                  "`stages/2/graft-trial/trial-result.json`. The drafter's acceptance rate was not measured."]
+
+
 def chat_template_sentence(rec: dict, text) -> str | None:
     """One sentence on the chat template the served directory holds, from the record's `chat_template`. None when the
     record has none or it has the wrong shape (a record from before the field existed)."""
@@ -792,6 +880,7 @@ def render_results(run: Run, redact: Redactor, n_todo: int, n_hazards: int, skip
         lines.append(f"| {name} | {value} | {'TODO' if value == 'TODO' else 'measured'} | `ledger.jsonl` |")
     lines += inventory_section(run, redact)
     lines += served_dir_section(run, redact)
+    lines += graft_section(run, redact)
     body = stage_results(run, redact)
     for n in range(9):
         spec = run.specs[n]
@@ -888,6 +977,17 @@ def mtp_drafter_dealt_with(run: Run) -> tuple[bool, list[str]]:
     if not states:
         return False, ["No swap check recorded how it served, so the bundle cannot say whether the drafter was off."]
     label = lambda k: "stage 2" if k == 2 else f"stage 4, {chips(k[1])}"
+    if run.graft_decision is not None and run.graft_decision["choice"] == "graft" and run.graft_decision.get("trial") is not None:
+        # A graft was chosen: the drafter may be on where the head was grafted. Stage 2's own check is the safe configuration unless a person
+        # grafted there too.
+        ungrafted = sorted((k for k, v in states.items() if v != "off"
+                            and not (run.stage_2_grafted if k == 2 else run.graft_built.get(k))), key=str)
+        if not ungrafted:
+            return True, ["Stage 2's graft trial chose the graft. Every swap check with a drafter on was built with the nearest model's mtp.* head "
+                          f"grafted ({', '.join(label(k) for k in sorted(states, key=str) if states[k] != 'off') or 'none'}); stage 2's own check "
+                          "served with the drafter off. The drafter's acceptance rate was not measured. Evidence: each check's `swap-check.json` "
+                          "and `model-dir-sources.json`."]
+        return False, ["A drafter was on in a swap check built without the grafted head: " + ", ".join(label(k) for k in ungrafted) + "."]
     if all(v == "off" for v in states.values()):
         return True, [f"Every swap check served with the drafter off ({', '.join(label(k) for k in sorted(states, key=str))}). "
                       "No figure with a drafter was measured, so speed numbers from the nearest model's packages "
@@ -977,6 +1077,8 @@ def hazard_entries(run: Run, redact: Redactor) -> list[tuple[str, str, list[str]
                               and "disk" in str(e["data"].get("reason", "")).lower())
             ok, why = False, [f"The run's files do not record where each stage wrote its large files. "
                               f"Pauses whose reason names disk space: {disk_pauses} (ledger.jsonl)."]
+        elif area == "drafter_graft":
+            ok, why = graft_hazard_dealt_with(run)
         elif area == "generation_config":
             ok, why = generation_config_dealt_with(run)
         elif area == "chat_template":

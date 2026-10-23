@@ -132,7 +132,7 @@ from orchard.context import build_messages, facts_from
 from orchard.defaults import (AGENT_CONTINUATION_TURNS, AGENT_WRAPUP_TURNS, CHIPS_PER_BOARD, CMD_TIMEOUT_S,
                               COLD_BOOT_BUDGET_S, CONTROL_POLL_S, FIRST_BOOT_EXPECTED,
                               FIRST_BOOT_PROMPT, PACKAGE_DEFERRED, PACKAGE_FORMATS,
-                              GRAFT_TRIAL_DEADLINE_S, RUN_CANARY_PROMPT, STOP_TIMEOUT_S, TEST_DISK_GB, FAST_FAIL_S)
+                              GRAFT_TRIAL_DEADLINE_S, GRAFT_TRIAL_DISK_GB, RUN_CANARY_PROMPT, STOP_TIMEOUT_S, TEST_DISK_GB, FAST_FAIL_S)
 from orchard.handoff import (NOTE_KEYS, Blocked, Budgets, Handoff, decide_park, progress, reacquire,
                              recover, wait_stopped)
 from orchard.hwtests import (failed_tests, load_plan, move_aside, pending, read_plan, suspect_caches,
@@ -1631,6 +1631,11 @@ class Supervisor:
             skip = "the graft trial was skipped: --no-graft-trial"
         elif self.lab is not None:
             skip = "the graft trial was skipped: it runs on this box's chips and this run's tests run on a lab"
+        else:
+            enough, free = check_disk(self.run_dir, GRAFT_TRIAL_DISK_GB, usage=self.disk_usage)
+            if not enough:
+                skip = (f"the graft trial was skipped: the grafted variant converts a second tensor cache and needs "
+                        f"{GRAFT_TRIAL_DISK_GB:g} GB free on the run directory's disk; {free} GB is free")
         if skip:
             self.ledger.append("decision", n, decision="graft trial skipped", reason=skip)
             decision = {"choice": "safe", "reason": skip, "numbers": {}, "thresholds": {}}

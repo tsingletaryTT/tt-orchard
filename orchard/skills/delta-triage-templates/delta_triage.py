@@ -1536,8 +1536,9 @@ def graft_candidate(mt: dict, bt: dict, hidden_size: int | None, base_revision: 
     """Could the nearest model's `mtp.*` tensors be grafted onto a model that has none? None when the model has its own or the
     nearest model has none. The record says what the graft would copy (count, shard, dtypes) and whether the head fits the model:
     `shapes_match` compares `mtp.norm.weight`'s width with the model's hidden size (None when either is unknown). `graftable` is true
-    when the tensors are BF16, sit in one shard and do not contradict the hidden size. Nothing is grafted by stage 0: stage 2's
-    `graft_mtp` and `tt-orchard package --graft-mtp` do that, and only when a person sets them."""
+    when the tensors are BF16, sit in one shard and do not contradict the hidden size. Nothing is grafted by stage 0: stage 2's graft
+    trial (orchard/graft_trial.py) serves the graft once, tries it against the safe configuration, and keeps it only when it measures better;
+    `graft_mtp` in swap_config.json and `tt-orchard package --graft-mtp` still force it by hand."""
     if any(MTP_NAME.search(k) for k in mt):
         return None
     head = {k: v for k, v in bt.items() if MTP_NAME.search(k)}
@@ -1633,8 +1634,9 @@ def graft_hazard(nearest_id: str, graft: dict, ev) -> dict:
     """The one hazard line for a graft candidate: what it would do, or why it cannot be done."""
     return {"area": "drafter_graft",
             "finding": ((f"The {graft['base_tensors']} mtp.* tensors of {nearest_id} could be grafted onto the new model, which "
-                         "would let the drafter and on-device sampling stay on. It is off unless a person turns it on "
-                         "(\"graft_mtp\": true in stage 2's swap_config.json, or tt-orchard package --graft-mtp). The head was "
+                         "would let the drafter and on-device sampling stay on. Stage 2 does not graft by itself: after the safe "
+                         "configuration passes, its graft trial serves the grafted variant once and keeps it only when the measurement "
+                         "says it is better (stages/2/graft-decision.json; --no-graft-trial skips the trial). The head was "
                          "trained on the nearest model, so the drafter's acceptance on the new model is not known until it is measured.")
                         if graft["graftable"] else
                         (f"The {graft['base_tensors']} mtp.* tensors of {nearest_id} cannot be grafted onto the new model: "

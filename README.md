@@ -1036,7 +1036,7 @@ entry. Stage 4's configurations, stage 7's package, the card and the stage 8 bun
 
 The extra test adds a warm boot of the safe configuration (2 to 4 minutes), a cold boot of the variant (4 to 25 minutes measured for the
 Qwen3.8 bundle) and a warm boot of the variant, plus 12 timed requests each. `--no-graft-trial` (on `tt-orchard bringup` and on
-`supervisor run`) leaves it out. The drafter's acceptance rate is not measured: the server prints no counters.
+`supervisor run`) leaves it out. The variant converts a second tensor cache, so the trial is skipped, with the reason recorded, when the run directory's disk has less than 40 GB free. It is also skipped on a lab run, whose tests do not run on this box's chips. The drafter's acceptance rate is not measured: the server prints no counters.
 
 ### 5.6 The credentials preflight
 

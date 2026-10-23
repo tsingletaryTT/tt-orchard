@@ -134,6 +134,8 @@ GRAFT_MIN_SPEEDUP = 1.25        # choice: the grafted variant's median decode sp
                                 # (the median of the four prompts' medians, greedy, one request at a time). The one observed ratio was about 3.
 GRAFT_TOP1_MARGIN = 0.05        # choice: the variant's top-1 agreement may be at most this far below the safe run's (teacher-forced, 32 tokens, so
                                 # one token is 0.03125; the margin allows one differing token and not two).
+GRAFT_TRIAL_DISK_GB = 40.0      # choice: the variant converts a second tensor cache; the 2-chip cache of Qwen3.8-27B weights measured 34 GB (2026-09-30).
+                                # Short of this the trial is skipped and the safe configuration stands.
 GRAFT_TRIAL_DEADLINE_S = 7200.0  # choice: one hardware test: a warm boot of the safe configuration (about 2 to 4 minutes), a cold boot of the variant
                                 # (4 to 25 minutes measured for this bundle), a warm boot of the variant, and 12 timed requests per boot.
 SWAP_MIN_TOKENS = 16            # choice: the fewest compared tokens the weights-only gate accepts; the

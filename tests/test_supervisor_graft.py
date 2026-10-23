@@ -412,3 +412,32 @@ def test_a_kill_after_the_decision_was_recorded_resumes_without_a_second_decisio
     assert rig.run(pid=200) == EXIT_READY
     assert len(spy.trials) == 1 and len(stage2(rig, "graft decision")) == 1
     assert [d["result"] for d in rig.ends(2)] == ["pass"]
+
+
+def test_a_disk_too_full_for_the_variants_tensor_cache_skips_the_trial_and_says_so(rig, spy):
+    """The variant converts a second tensor cache (34 GB measured for 2 chips). Short of space, the trial is not run, and the run goes on."""
+    from collections import namedtuple
+    from run_fakes import plenty
+    sd2 = rig.run_dir / "stages" / "2"
+
+    def usage(path):
+        if (sd2 / "result.json").exists() and not (sd2 / DECISION_FILE).exists():
+            return namedtuple("U", "total used free")(0, 0, (defaults.GRAFT_TRIAL_DISK_GB - 1) * 1e9)
+        return plenty(path)
+    rig.usage = usage
+    assert rig.run() == EXIT_READY
+    assert spy.trials == []
+    d = json.loads((sd2 / DECISION_FILE).read_text())
+    assert d["choice"] == "safe" and d["trial"] is None and "GB" in d["reason"] and "tensor cache" in d["reason"]
+    assert stage2(rig, "graft trial skipped")[0]["reason"] == d["reason"]
+
+
+def test_enough_disk_runs_the_trial(rig, spy):
+    from collections import namedtuple
+    sd2 = rig.run_dir / "stages" / "2"
+
+    def usage(path):
+        free = defaults.GRAFT_TRIAL_DISK_GB * 1e9 if (sd2 / "result.json").exists() and not (sd2 / DECISION_FILE).exists() else 10 ** 15
+        return namedtuple("U", "total used free")(0, 0, free)
+    rig.usage = usage
+    assert rig.run() == EXIT_READY and len(spy.trials) == 1
