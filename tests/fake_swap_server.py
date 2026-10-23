@@ -16,6 +16,7 @@ Modes (config key "mode"):
 - "every4": positions 3, 7, 11, ... answer the next vocabulary word, so 8 of 32 are wrong.
 - "http500": /v1/completions answers 500 with a plain body.
 - "die": print 70 log lines and exit 1 before serving anything.
+- "slow": like "perfect", but each completion waits the config's "delay_s" first, so a check can run past its deadline.
 
 Like the real server, it answers 400 to a request that carries any key other than model, prompt,
 max_tokens and temperature (the real one rejects logprobs and sampling parameters), and to a
@@ -32,6 +33,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ALLOWED_KEYS = {"model", "prompt", "max_tokens", "temperature"}
@@ -68,6 +70,8 @@ class Handler(BaseHTTPRequestHandler):
         if cfg["mode"] == "http500":
             self._send(500, b"fake server failure", "text/plain")
             return
+        if cfg["mode"] == "slow":
+            time.sleep(float(cfg.get("delay_s", 1)))
         extra = set(req) - ALLOWED_KEYS
         if extra:
             self._send(400, json.dumps({"error": f"unsupported keys {sorted(extra)}"}).encode())

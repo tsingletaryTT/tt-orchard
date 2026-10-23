@@ -24,7 +24,9 @@ Then: 32 greedy tokens from the stage 1 prompt, and for each of the 32 reference
 token with the reference prefix, re-tokenized and compared with the reference id. Exit 4: the
 server exited or never became healthy, or exited during the check. Exit 5: an HTTP error. Exit 0:
 measured, whatever the numbers say; evidence/verify.json holds them. The server's process group
-is stopped on every exit path.
+is stopped on every exit path. While it runs, evidence/server.pid holds the server's pid, boot id and start
+time, so a caller that has to kill this script (a timeout) can still stop the server, which runs in a session
+of its own.
 """
 from __future__ import annotations
 
@@ -41,6 +43,22 @@ sys.path.insert(0, str(HERE))
 import serve_and_compare as sac  # noqa: E402
 
 SCRUBBED_ENV = ("MODEL_WEIGHTS_DIR", "HF_MODEL", "TT_CACHE_PATH", "TT_CACHE_HOME", "HF_HUB_CACHE")
+SERVER_RECORD = "server.pid"       # in evidence/: the server's pid, boot id and start time, while it runs
+
+
+def identity(pid: int) -> tuple[str | None, int | None]:
+    """(boot id, start time in clock ticks) of a process: field 22 of /proc/<pid>/stat. The caller that
+    stops a server this check left running signals it only when the start time still matches."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+        start = int(stat[stat.rindex(")") + 1:].split()[19])
+    except (OSError, ValueError, IndexError):
+        return None, None
+    try:
+        boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip() or None
+    except OSError:
+        boot = None
+    return boot, start
 
 
 def port_answers(port: int) -> bool:
@@ -87,6 +105,9 @@ def main() -> int:
     proc = subprocess.Popen(["bash", str(bundle / "run.sh"), "--port", str(port)], env=env,
                             stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                             start_new_session=True)
+    boot_id, start_time = identity(proc.pid)
+    (evidence / SERVER_RECORD).write_text(json.dumps({"pid": proc.pid, "boot_id": boot_id,
+                                                      "start_time": start_time}), encoding="utf-8")
     try:
         ready_s = sac.wait_healthy(proc, port, float(cfg["health_timeout_s"]), log_path)
         models = served_models(port)
@@ -118,6 +139,7 @@ def main() -> int:
         stop(5, f"the server returned an error: {exc}")
     finally:
         sac.stop_server(proc)
+        (evidence / SERVER_RECORD).unlink(missing_ok=True)      # the server is gone: nothing is left for a caller to stop
         log.close()
     coh = sac.coherence(free_text)
     report = {"label": "measured", "model_id": cfg["model_id"], "revision": cfg["revision"],
