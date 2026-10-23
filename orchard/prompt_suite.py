@@ -268,7 +268,7 @@ def findings(entry: dict, prompt: dict | None = None, *, specials=(), markers=No
 # ---- the verdict -----------------------------------------------------------------------------------------------------
 #
 # What evidence/swap-check.json holds under "prompt_suite" (written by serve_and_compare.py):
-#   ran, suite_sha256 (of the template's copy of prompt_suite.json), mode ("chat" or "completion"), max_tokens,
+#   ran, model_id (swap_config's new_model_id), suite_sha256 (of the template's copy of prompt_suite.json), mode ("chat" or "completion"), max_tokens,
 #   chat_template {present, source, sha256, mentions_tools}, special_tokens [str],
 #   entries [{id, mode, content, reasoning, tool_calls, finish_reason, error}], skipped [{id, reason}],
 #   control null or {source, sha256, record} where record has the same shape (the swap-check.json of a control run).
@@ -318,6 +318,35 @@ def _control_problems(record: dict, ctl) -> tuple[dict | None, list, list]:
         notes.append(f"the control's chat template differs from this model's (sha256 {str(theirs)[:12]} against "
                      f"{str(mine)[:12]}), so the two were rendered into different text")
     return other, [], notes
+
+
+def _fingerprint(entry: dict):
+    """What a reply said, for comparing two runs: None for a failed request or a reply with nothing in it."""
+    if entry.get("error"):
+        return None
+    content, reasoning, calls = entry.get("content") or "", entry.get("reasoning") or "", entry.get("tool_calls") or []
+    if not content.strip() and not reasoning.strip() and not calls:
+        return None
+    return (content, reasoning, json.dumps(calls, sort_keys=True, default=str))
+
+
+def _same_weights_reasons(record: dict, control: dict, entries: dict, control_entries: dict) -> list[str]:
+    """A control has to be a different model, and a run that matches it on every prompt has probably not served the new weights.
+
+    Issue 15: on the first prototype the base model's weights stood in by mistake and scored 0.78 against the fine-tune's
+    reference, close to the bar of 0.85. A healthy base gives healthy replies, so the checks of `findings` cannot see it. A
+    fine-tune usually differs from its base in some 64-token greedy reply. When the replies are identical on every prompt
+    both runs answered, and on at least SUITE_IDENTICAL_MIN_PROMPTS of them, that is a reason to look."""
+    mine, theirs = record.get("model_id"), control.get("model_id")
+    if mine and theirs and mine == theirs:
+        return [f"control: it was served from the same model id as this run ({mine}), so it is not a control of the nearest model"]
+    both = [pid for pid in entries if pid in control_entries and _fingerprint(entries[pid]) is not None
+            and _fingerprint(control_entries[pid]) is not None]
+    if len(both) >= defaults.SUITE_IDENTICAL_MIN_PROMPTS and all(
+            _fingerprint(entries[pid]) == _fingerprint(control_entries[pid]) for pid in both):
+        return [f"every reply to the {len(both)} prompts both runs answered is identical to the control's, so the chip may be "
+                "serving the control's weights and not the new model's (a fine-tune usually differs within a few dozen tokens)"]
+    return []
 
 
 def evaluate(report: dict, *, suite_path=None) -> Verdict:
@@ -373,6 +402,8 @@ def evaluate(report: dict, *, suite_path=None) -> Verdict:
     advisory += notes
     control_entries = _entries(control) if control else {}
     control_specials = _specials(control) if control else []
+    if control:
+        reasons += _same_weights_reasons(record, control, entries, control_entries)
 
     checked = []
     for pid, p in prompts.items():

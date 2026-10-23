@@ -142,6 +142,12 @@ SUITE_BLOCKING_KINDS = ("control_token_leak", "cross_request_leak", "corrupt_fir
                                 # subword, the wrong language) depend on style or on the thinking budget, so they
                                 # are recorded and not gated.
 SUITE_MAX_REASONS = 8           # choice: the most reasons the suite gives a gate; the rest are counted in one line
+SUITE_IDENTICAL_MIN_PROMPTS = 5  # choice: when a run's replies are identical to the control's on at least this many
+                                # prompts and on every prompt both answered, the run has probably not served the new
+                                # weights (issue 15: the base weights stood in by mistake on the first prototype). A
+                                # fine-tune differs from its base in some 64-token greedy reply; a model that moved
+                                # very little from the base could match on all of them, so this is a reason to look,
+                                # and a run that meets it needs a person.
 SUITE_PHRASE_WORDS = 6          # choice: a phrase of this many words ...
 SUITE_PHRASE_REPEATS_MAX = 3    # choice: ... may appear this many times (the swap check's coherence rule)
 SUITE_LINE_REPEATS = 4          # choice: this many identical lines in a row are a loop ...

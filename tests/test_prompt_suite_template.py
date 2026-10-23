@@ -67,6 +67,7 @@ def test_a_model_with_a_chat_template_gets_the_suite_through_the_chat_endpoint(s
     assert r.returncode == 0, r.stdout + r.stderr
     rec = report(swap)["prompt_suite"]
     assert rec["ran"] is True and rec["mode"] == "chat"
+    assert rec["model_id"] == swap["cfg"]["new_model_id"]            # the gate needs it to tell a control from a copy
     assert [e["id"] for e in rec["entries"]] == [p["id"] for p in SUITE["prompts"]]
     assert rec["skipped"] == []
     assert rec["suite_sha256"] == ps.suite_sha256()
@@ -298,11 +299,22 @@ def test_a_shared_finding_between_the_model_and_its_control_does_not_fail(swap, 
     loop = "Sure. " + "the quick brown fox jumps over " * 5
     stage_for_suite(swap)
     assert run(swap, tmp_path, server_extra={"chat_replies": [["pens", loop]]}).returncode == 0
+    # The control is an earlier run on the nearest model: another model id, and replies that differ on some prompt.
+    control = json.loads((swap["stage"] / "evidence" / "swap-check.json").read_text())
+    control["prompt_suite"]["model_id"] = "Qwen/Qwen3.8-27B"
+    next(e for e in control["prompt_suite"]["entries"] if e["id"] == "list-format")["content"] = "Red\nGreen\nBlue"
     path = swap["run"] / "stages" / "2" / "control" / "swap-check.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text((swap["stage"] / "evidence" / "swap-check.json").read_text())
+    path.write_text(json.dumps(control))
     assert run(swap, tmp_path, suite_control=str(path), server_extra={"chat_replies": [["pens", loop]]}).returncode == 0
     assert ps.evaluate(report(swap)).reasons == []
+
+
+def test_a_control_that_is_a_copy_of_the_run_is_refused_by_the_gate(swap, tmp_path):
+    # The same model served twice: same model id, same replies. It is no control of the nearest model.
+    path = control_file(swap, tmp_path)
+    assert run(swap, tmp_path, suite_control=str(path)).returncode == 0
+    assert any("same model id" in r for r in ps.evaluate(report(swap)).reasons)
 
 
 # ---- the container template runs the same suite ---------------------------------------------------------------------

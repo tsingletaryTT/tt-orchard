@@ -172,3 +172,19 @@ def test_the_suite_gate_does_not_read_a_stage_4_file_it_cannot_parse(tmp_path):
 def test_ps_is_the_module_the_gates_use():
     import orchard.stages as stages
     assert stages.prompt_suite is ps
+
+
+# ---- the base weights stood in by mistake (issue 15) ----------------------------------------------------------------------
+
+def test_a_stage_2_run_whose_replies_equal_the_control_on_every_prompt_fails_with_a_reason_that_says_why(tmp_path):
+    rec = make_record()
+    rec["control"] = control_of(rec, differ=False)
+    g = stage2(tmp_path, swap_check(rec))
+    assert not g.ok and any("identical to the control" in r and "weights" in r for r in g.reasons)
+
+
+def test_a_stage_4_configuration_whose_replies_equal_the_control_fails_that_configuration(tmp_path):
+    rec = make_record()
+    rec["control"] = control_of(rec, differ=False)
+    g = gate_mesh_swap(*mesh_with_suite(tmp_path, {2: make_record(), 4: rec}), required=(2, 4))
+    assert not g.ok and any(r.startswith("the 4-chip configuration: ") and "identical" in r for r in g.reasons)

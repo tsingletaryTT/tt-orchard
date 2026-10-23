@@ -341,7 +341,8 @@ def run_suite(cfg: dict, port: int, model: str, model_dir: Path, setup: dict) ->
                             if template["present"] else "there is no chat template, so no tool format"})
             continue
         entries.append(ask_suite_prompt(port, model, prompt, mode, max_tokens))
-    return {"ran": True, "suite_sha256": setup["suite_sha256"], "mode": mode, "max_tokens": max_tokens,
+    return {"ran": True, "model_id": cfg.get("new_model_id"), "suite_sha256": setup["suite_sha256"], "mode": mode,
+            "max_tokens": max_tokens,
             "chat_template": template, "special_tokens": special_tokens(model_dir), "entries": entries,
             "skipped": skipped, "control": setup["control"]}
 
