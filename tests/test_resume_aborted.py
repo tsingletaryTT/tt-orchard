@@ -139,7 +139,7 @@ def test_an_operators_or_a_signals_abort_can_resume(by):
     assert abort_can_resume(base_entries() + [ev("decision", {"decision": "abort", "by": by})])
 
 
-@pytest.mark.parametrize("by", [None, "", "watchdog", "signal", "operator2", "Operator"])
+@pytest.mark.parametrize("by", [None, "", "watchdog", "signal", "signal ", "signalSIGTERM", "operator2", "Operator", 5, ["operator"]])
 def test_an_abort_by_anything_else_cannot_resume(by):
     assert not abort_can_resume(base_entries() + [ev("decision", {"decision": "abort", "by": by})])
 
@@ -178,3 +178,34 @@ def test_the_unattended_run_does_not_resume_an_abort_by_itself(rig):
     rig.args.unattended = True
     assert rig.run() == EXIT_ABORTED
     assert not any(d == RESUME_AFTER_ABORT for d in rig.decisions())
+
+
+def test_a_ledger_with_an_abort_but_no_run_start_has_nothing_to_resume():
+    assert not abort_can_resume([ev("decision", {"decision": "abort", "by": "operator"})])
+
+
+def test_an_abort_of_another_kind_is_left_alone_by_a_supervisor_that_was_asked_to_resume(rig):
+    from orchard.ledger import Ledger
+    abort_at_start(rig)
+    with Ledger(rig.run_dir / "ledger.jsonl") as led:
+        led.append("decision", None, decision="abort", by="watchdog")          # not an operator's and not a signal's
+    rig.args.resume_aborted = True
+    starts = rig.m.coder_starts
+    assert rig.run() == EXIT_ABORTED and rig.m.coder_starts == starts
+    assert not any(d == RESUME_AFTER_ABORT for d in rig.decisions())
+
+
+def test_a_supervisor_built_directly_does_not_resume_an_abort():
+    """The option is off unless something turns it on. `build()` passes it explicitly, so only the signature shows the default."""
+    import inspect
+
+    from orchard.supervisor import Supervisor
+    assert inspect.signature(Supervisor.__init__).parameters["resume_aborted"].default is False
+
+
+def test_the_operator_runbook_still_says_never_abort_and_no_longer_says_an_abort_cannot_be_resumed():
+    from pathlib import Path
+    text = (Path(__file__).resolve().parent.parent / "orchard" / "skills" / "operator-runbook.md").read_text(encoding="utf-8")
+    assert "Never send `control abort`." in text
+    assert "cannot be resumed" not in text
+    assert "only a person resumes it" in text
