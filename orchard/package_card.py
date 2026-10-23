@@ -454,10 +454,14 @@ def use_problems(card: str, use: UseFacts | None) -> list[str]:
         problems.append("the card has no '## How to call it' section: the model's files give facts about how to call it")
     how, _ = _section(card, "## How to call it")
     uflat = _flat(intended + "\n" + how)
+    own_prose = card                       # what the card says about this package, without the authors' words
     if u.authors_use:
-        quoted = _flat(" ".join(ln.lstrip("> ").strip() for ln in intended.splitlines() if ln.startswith(">")))
+        quote_lines = [ln for ln in intended.splitlines() if ln.startswith(">")]
+        quoted = _flat(" ".join(ln.lstrip("> ").strip() for ln in quote_lines))
         if quoted != _flat(u.authors_use):
             problems.append("the card must quote the authors' intended use unchanged, as a block quote under Intended use")
+        else:                              # a verified quotation says what the authors say, not what this package does
+            own_prose = "\n".join(ln for ln in card.splitlines() if ln not in quote_lines)
     on, off = "Thinking is on by default", "Thinking is off by default"
     if u.thinking_default is True and on not in uflat:
         problems.append(f"the chat template turns thinking on by default, so the card must say '{on}'")
@@ -513,7 +517,7 @@ def use_problems(card: str, use: UseFacts | None) -> list[str]:
         problems.append("run.sh skips the vision tower, so the card must say the package is text only")
     if not u.text_only and "Text only" in card:
         problems.append("the card says the package is text only, and run.sh does not skip the vision tower")
-    if u.text_only and _VISION_CLAIM.search(card):
+    if u.text_only and _VISION_CLAIM.search(own_prose):
         problems.append("the card claims image or video input, and run.sh skips the vision tower")
     untested = (u.thinking_default is not None or bool(u.effort_values) or u.text_only
                 or (u.tools_ok and not u.tool_evidence))

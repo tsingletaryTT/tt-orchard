@@ -863,3 +863,49 @@ def test_a_capitalised_default_effort_is_read_too(tmp_path):
     u = use_facts()
     card = render_card(facts(use=u)).replace("## How to call it", "Default effort is `low`.\n\n## How to call it")
     assert any("default" in p for p in use_problems(card, u, tmp_path))
+
+
+# ---- the authors' quotation is not a claim about this package (review finding on PR 51) --------------------------------
+
+UPSTREAM_IMAGES = "The upstream model supports images and text, and is meant for long-horizon agents."
+
+
+def test_an_authors_quotation_that_mentions_images_does_not_fail_a_text_only_package(tmp_path):
+    u = use_facts(authors_use=UPSTREAM_IMAGES, text_only=True)
+    card = render_card(facts(use=u))
+    assert "supports images" in card and "Text only" in card
+    assert use_problems(card, u, tmp_path) == []
+
+
+def test_the_packages_own_claim_of_image_input_is_still_refused_beside_a_quotation_about_images(tmp_path):
+    u = use_facts(authors_use=UPSTREAM_IMAGES, text_only=True)
+    card = render_card(facts(use=u)).replace("## How to call it", "The package accepts images.\n\n## How to call it")
+    assert any("claims image or video input" in p for p in use_problems(card, u, tmp_path))
+
+
+def test_a_quotation_that_was_changed_is_not_excused_and_is_refused_twice(tmp_path):
+    u = use_facts(authors_use="The upstream model is meant for agents.", text_only=True)
+    card = render_card(facts(use=u)).replace("The upstream model is meant for agents.", "The model supports images.")
+    problems = use_problems(card, u, tmp_path)
+    assert any("quote the authors' intended use unchanged" in p for p in problems)
+    assert any("claims image or video input" in p for p in problems)
+
+
+def test_a_quotation_about_images_is_still_excused_when_it_is_rewrapped(tmp_path):
+    u = use_facts(authors_use="One upstream model supports images and two other things happen here.", text_only=True)
+    card = render_card(facts(use=u)).replace("supports images", "supports\n> images")
+    assert use_problems(card, u, tmp_path) == []
+
+
+def test_only_the_block_quote_lines_are_excused(tmp_path):
+    u = use_facts(authors_use=UPSTREAM_IMAGES, text_only=True)
+    card = render_card(facts(use=u)).replace("## How to call it", "> The package supports video.\n\n## How to call it")
+    assert any("claims image or video input" in p or "quote the authors" in p for p in use_problems(card, u, tmp_path))
+
+
+def test_a_block_quote_elsewhere_in_the_card_is_not_excused_by_the_authors_quotation(tmp_path):
+    u = use_facts(authors_use=UPSTREAM_IMAGES, text_only=True)
+    card = render_card(facts(use=u)) + "\n## Notes\n\n> The package accepts video input.\n"
+    problems = use_problems(card, u, tmp_path)
+    assert any("claims image or video input" in p for p in problems)
+    assert not any("quote the authors' intended use unchanged" in p for p in problems)     # the Intended use quotation is intact
