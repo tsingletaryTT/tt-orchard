@@ -807,3 +807,59 @@ def test_a_card_that_claims_returned_tool_calls_for_a_server_that_cannot_return_
 def test_a_tool_name_not_in_the_evidence_is_still_refused_when_the_server_can_return_tool_calls(tmp_path):
     card = render_card(facts(use=use_facts(tool_evidence=("stages/7/benchmark/speed.json", ("run_tests", "invented")))))
     assert any("invented" in p for p in use_problems(card, use_facts(tool_evidence=EVIDENCE), tmp_path))
+
+
+# ---- the reasoning-effort default is checked too (review finding on PR 51) ---------------------------------------------
+
+def test_a_card_that_changes_the_effort_default_is_refused(tmp_path):
+    u = use_facts()
+    card = render_card(facts(use=u)).replace("(default `xhigh`)", "(default `low`)")
+    assert any("default" in p and "`xhigh`" in p for p in use_problems(card, u, tmp_path))
+
+
+def test_a_card_that_drops_the_effort_default_is_refused(tmp_path):
+    u = use_facts()
+    card = render_card(facts(use=u)).replace(" (default `xhigh`)", "")
+    assert "default `xhigh`" not in card
+    assert any("default" in p and "`xhigh`" in p for p in use_problems(card, u, tmp_path))
+
+
+def test_a_card_that_names_a_default_the_template_does_not_give_is_refused(tmp_path):
+    with_default = render_card(facts(use=use_facts()))
+    u = use_facts(effort_default=None)
+    assert any("default" in p and "does not give" in p for p in use_problems(with_default, u, tmp_path))
+
+
+def test_a_template_with_no_effort_default_is_stated_without_one(tmp_path):
+    u = use_facts(effort_default=None)
+    card = render_card(facts(use=u))
+    assert "(default" not in card and use_problems(card, u, tmp_path) == []
+
+
+def test_a_second_default_stated_in_other_words_is_refused(tmp_path):
+    u = use_facts()
+    card = render_card(facts(use=u)).replace("## How to call it", "The default effort is `low`.\n\n## How to call it")
+    assert any("default" in p for p in use_problems(card, u, tmp_path))
+
+
+def test_the_right_default_passes(tmp_path):
+    u = use_facts()
+    assert "(default `xhigh`)" in render_card(facts(use=u)) and use_problems(render_card(facts(use=u)), u, tmp_path) == []
+
+
+def test_a_default_of_something_else_is_not_read_as_the_effort_default(tmp_path):
+    u = use_facts()
+    card = render_card(facts(use=u)).replace("## How to call it", "The default `max_tokens` is 4096 and the default `low_cost` is off.\n\n## How to call it")
+    assert use_problems(card, u, tmp_path) == []
+
+
+def test_a_default_effort_stated_outside_the_use_sections_is_not_this_checks_business(tmp_path):
+    u = use_facts()
+    card = render_card(facts(use=u)) + "\n## Notes\n\nThe default `low` is what another tool sets.\n"
+    assert use_problems(card, u, tmp_path) == []
+
+
+def test_a_capitalised_default_effort_is_read_too(tmp_path):
+    u = use_facts()
+    card = render_card(facts(use=u)).replace("## How to call it", "Default effort is `low`.\n\n## How to call it")
+    assert any("default" in p for p in use_problems(card, u, tmp_path))

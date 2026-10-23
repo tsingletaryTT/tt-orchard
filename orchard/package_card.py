@@ -417,6 +417,8 @@ GRAFT_DECISION_MARKERS = {"graft": "chose the graft", "safe": "kept the safe con
 
 
 CUTOFF_MARKER = "reaches `max_tokens` while the model is still thinking"
+# "(default `x`)", "the default effort is `x`", "default reasoning effort `x`"
+_EFFORT_DEFAULT_CLAIM = re.compile(r"\bdefault(?:\s+(?:reasoning\s+)?effort)?(?:\s+(?:is|of))?\s+`([^`]+)`", re.I)
 _VISION_CLAIM = re.compile(r"(?<!not )(?<!n't )\b(?:accepts?|supports?|takes?|handles?|processes|serves?)\s+"
                            r"(?:images?|videos?|vision)\b|\b(?:image|video)_url\b", re.I)
 
@@ -474,6 +476,14 @@ def use_problems(card: str, use: UseFacts | None) -> list[str]:
         if missing or "`reasoning_effort`" not in uflat:
             problems.append("the card must list the reasoning effort values the chat template accepts "
                             f"({', '.join(u.effort_values)}) and name `reasoning_effort`")
+        stated = {v for v in _EFFORT_DEFAULT_CLAIM.findall(uflat) if v in u.effort_values}
+        if u.effort_default and stated != {u.effort_default}:
+            problems.append(f"the chat template's default reasoning effort is `{u.effort_default}`, so the card must say "
+                            f"(default `{u.effort_default}`) and no other default (it says: "
+                            f"{', '.join(sorted(stated)) or 'none'})")
+        if not u.effort_default and stated:
+            problems.append("the card names a default reasoning effort, and the chat template does not give one: "
+                            f"{', '.join(sorted(stated))}")
     elif "reasoning_effort" in card:
         problems.append("the card names reasoning_effort, and the chat template lists no reasoning effort values")
     if u.thinking_default is True and u.can_disable_thinking and '"enable_thinking": false' not in flat:
