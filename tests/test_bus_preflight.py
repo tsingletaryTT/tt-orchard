@@ -331,3 +331,97 @@ def test_a_lab_run_needs_only_the_coders_chips_here(tmp_path):
     c.coder.chips = 2
     c.lab, c.mode = Lab(host="node4", root=Path("/srv/orchard")), "lab"
     assert bus.needed_chips(c) == 2
+
+
+# ---- in the preflight ---------------------------------------------------------------------------
+
+def healthy(tmp_path, chips=4):
+    pci, dev = box(tmp_path, chips)
+    return lambda: bus.read_bus(pci, dev)
+
+
+def run(tmp_path, config=None, **over):
+    return pf.run_preflight(config or cfg(tmp_path), "Cloudflare/clef", accept_credentials=False,
+                            signals=signals(**over))
+
+
+def by(out):
+    return {c.name: c for c in out}
+
+
+def test_the_bus_row_sits_right_after_gozer_and_only_when_the_signal_exists(tmp_path):
+    names = [c.name for c in run(tmp_path, bus=healthy(tmp_path))]
+    assert names == ["hub", "disk", "credentials", "tiers", "port", "gozer", "bus", "base", "reference"]
+    assert "bus" not in [c.name for c in run(tmp_path)]
+
+
+def test_the_row_judges_the_bus_against_what_the_configuration_needs(tmp_path):
+    out = run(tmp_path, bus=healthy(tmp_path, chips=2))                # cfg's coder holds 4 chips
+    row = by(out)["bus"]
+    assert (row.status, row.reason) == ("block", "hardware-unhealthy") and "2 of the 4" in row.detail
+    assert pf.blocked(out) == [row]
+
+
+def test_the_row_reads_the_same_gozer_text_once(tmp_path):
+    calls = []
+    run(tmp_path, bus=healthy(tmp_path), gozer_status=lambda: calls.append(1) or FREE)
+    assert calls == [1]
+
+
+def test_the_row_compares_with_gozers_chips(tmp_path):
+    gone = FREE.replace("0000:04:00.0", "0000:09:00.0")
+    row = by(run(tmp_path, bus=healthy(tmp_path), gozer_status=lambda: gone))["bus"]
+    assert row.status == "block" and "0000:09:00.0" in row.detail
+
+
+def test_a_gozer_that_fails_leaves_the_bus_row_standing_alone(tmp_path):
+    def boom():
+        raise OSError("gozer gone")
+    out = by(run(tmp_path, bus=healthy(tmp_path), gozer_status=boom))
+    assert out["gozer"].status == "block" and out["bus"].status == "ok"
+
+
+def test_a_bus_signal_that_fails_is_a_block_with_the_hardware_reason(tmp_path):
+    def boom():
+        raise OSError("sysfs gone")
+    row = by(run(tmp_path, bus=boom))["bus"]
+    assert (row.status, row.reason) == ("block", "hardware-unhealthy") and "sysfs gone" in row.detail
+
+
+def test_a_lab_run_needs_only_the_coders_chips_on_this_box(tmp_path):
+    from test_preflight import lab_cfg
+    c = lab_cfg(tmp_path)
+    c.coder.chips = 2
+    one_board = "\n".join(FREE.splitlines()[:4])             # this box has one board; the tests run on the lab
+    out = run(tmp_path, config=c, bus=healthy(tmp_path / "lab", chips=2), gozer_status=lambda: one_board,
+              lab_status=lambda: (True, FREE, ""))
+    assert by(out)["bus"].status == "ok"
+    local = cfg(tmp_path)
+    local.coder.chips = 2                                     # the same box without a lab needs a test board as well
+    assert by(run(tmp_path, config=local, bus=healthy(tmp_path / "local", chips=2), gozer_status=lambda: one_board))["bus"].status == "block"
+
+
+def test_the_default_signals_read_the_real_bus(tmp_path, monkeypatch):
+    marker = bus.Bus(chips=[], readable=False)
+    monkeypatch.setattr(bus, "read_bus", lambda *a, **k: marker)
+    s = pf.default_signals(cfg(tmp_path))
+    assert s.bus is not None and s.bus() is marker
+
+
+def test_the_ui_shows_the_bus_row_and_refuses_a_launch_while_it_blocks(tmp_path, monkeypatch):
+    from orchard import cli
+    from test_webui import make_app
+    pci, dev = box(tmp_path, 4)
+    (pci / BDFS[1] / "power_state").write_text("D3cold\n")
+    monkeypatch.setattr(cli.preflight, "default_signals",
+                        lambda c, research_options=None: signals(bus=lambda: bus.read_bus(pci, dev)))
+    rows = cli._ui_preflight(cfg(tmp_path))("Cloudflare/clef", None)
+    root = tmp_path / "orchard-runs"
+    root.mkdir()
+    app = make_app(root, preflight=lambda m, b: rows)
+    shown = app.preflight("Cloudflare/clef")
+    row = next(r for r in shown["checks"] if r["name"] == "bus")
+    assert shown["ok"] is False and row["status"] == "block" and BDFS[1] in row["detail"]
+    from orchard.webui import Conflict
+    with pytest.raises(Conflict, match=r"bus \(hardware-unhealthy\)"):
+        app.bringup("Cloudflare/clef")

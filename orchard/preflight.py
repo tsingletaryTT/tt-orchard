@@ -443,6 +443,7 @@ class Signals:
     sfpi: Callable | None = None                # (bundle name) -> (installed SFPI version, version the bundle pins)
     lab_sfpi: Callable | None = None            # () -> the lab's installed SFPI version, or None (lab mode)
     skills_freshness: Callable | None = None    # () -> list[skillsfresh.Freshness] for the skills_dirs clones
+    bus: Callable | None = None                 # () -> orchard.bus.Bus: the chips the kernel shows (sysfs and /dev; no lease)
 
 
 def check_lab(lab, status) -> Check:
@@ -570,7 +571,24 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
             guarded("cpu", "coder-unusable", cpu)
         except Exception:
             pass
-    guarded("gozer", "hardware-unhealthy", lambda: check_gozer(s.gozer_status(), kept=_kept_on_port(cfg)))
+    gozer_seen: list[str] = []
+
+    def gozer_text() -> str:
+        """`gozer status` once per preflight: the gozer row and the bus row both read it."""
+        if not gozer_seen:
+            gozer_seen.append(s.gozer_status())
+        return gozer_seen[0]
+
+    guarded("gozer", "hardware-unhealthy", lambda: check_gozer(gozer_text(), kept=_kept_on_port(cfg)))
+    if s.bus is not None:
+        def bus_row() -> Check:
+            from orchard import bus as bus_check
+            try:
+                text = gozer_text()
+            except Exception:                         # the gozer row already says so; the bus findings stand alone
+                text = ""
+            return bus_check.check_bus(s.bus(), text, bus_check.needed_chips(cfg))
+        guarded("bus", "hardware-unhealthy", bus_row)
     if in_lab and getattr(cfg, "lab", None) is not None and s.lab_status is not None:
         guarded("lab", "hardware-unhealthy", lambda: check_lab(cfg.lab, s.lab_status()))
     out.append(base_check)
@@ -713,8 +731,12 @@ def default_signals(cfg, research_options=None) -> Signals:
         return skillsfresh.check_skills_dirs(cfg.skills_dirs, reuse_s=SKILLS_REUSE_S, offline=offline,
                                              cache=skillsfresh.Cache(write=write))
 
+    def read_bus():
+        from orchard import bus as bus_check
+        return bus_check.read_bus()
+
     return Signals(
-        cpu_standin=cpu_standin_problem, sfpi=sfpi_versions, lab_sfpi=lab_sfpi, skills_freshness=skills_freshness,
+        cpu_standin=cpu_standin_problem, sfpi=sfpi_versions, lab_sfpi=lab_sfpi, skills_freshness=skills_freshness, bus=read_bus,
         installed_bundles=lambda: nearest.read_installed(models_root()), search_bundles=nearest.search,
         hub_info=hub_info, local_snapshot=local_snapshot,
         free_gb=lambda p: shutil.disk_usage(_nearest_existing(p)).free / 1e9,
