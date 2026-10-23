@@ -611,3 +611,7 @@ html[data-mode="operator"] #verdict h2 { font-size: .8rem; letter-spacing: .08em
 .nr-options > .field { padding: 0 12px; margin: 12px 0 0; }
 .nr-options > .field:last-child { padding-bottom: 12px; }
 .nr-options label .muted { font: 400 .82rem var(--font); letter-spacing: 0; }
+
+/* a run's actions: Abort stands apart from the routine ones, and the Blocked panel's own Retry sits under the steps it follows */
+.actions .btn-apart { margin-left: 18px; }
+#block-retry { margin-top: 12px; }

@@ -328,3 +328,65 @@ def test_the_where_tests_run_label_says_it_applies_to_this_run_and_where_the_def
     assert len(labels) == 1
     text = labels[0].all_text()
     assert "this run only" in text and "Models" in text and text.startswith("Where the hardware tests run")
+
+
+# ---- a run's actions: where the button is, what it is called, and that the page and the server agree on which runs can act ------
+
+def test_the_blocked_panel_ends_its_unblock_list_with_a_retry_button():
+    t = page()
+    panel = by_id(t, "block-panel")
+    btn = by_id(t, "block-retry")
+    assert btn.inside(panel) and btn.tag == "button" and btn.all_text() == "Retry run" and "btn-primary" in btn.classes
+    assert btn.parent is by_id(t, "block-unblock").parent, "the button sits in the same column as the unblock steps"
+    assert order(t, "block-unblock", "block-retry") == ["block-unblock", "block-retry"]
+
+
+def test_the_page_and_the_server_name_the_same_states_as_retryable():
+    from orchard import webui
+    m = re.search(r"const RETRY_STATES = \[([^\]]*)\];", JS())
+    assert m, "app.js has a RETRY_STATES list"
+    assert set(re.findall(r'"([a-z-]+)"', m.group(1))) == set(webui.RETRYABLE)
+
+
+def test_the_retry_button_is_shown_only_for_a_retryable_run_and_runs_the_same_handler_as_the_header_one():
+    js = JS()
+    assert '$("block-retry").addEventListener("click", doRetry)' in js
+    block = fn_body(js, "function renderBlock")
+    assert '$("block-retry").hidden = !RETRY_STATES.includes(d.state)' in block
+    actions = fn_body(js, "function renderActions")
+    assert "RETRY_STATES.includes(d.state)" in actions
+
+
+def test_an_aborted_run_is_resumed_with_a_button_that_says_so_and_a_confirmation_that_says_what_it_does():
+    js = JS()
+    actions = fn_body(js, "function renderActions")
+    assert '"aborted" ? "Resume run" : "Retry run"' in actions
+    retry = fn_body(js, "async function doRetry")
+    for words in ("tt-orchard bringup", "same model", "Resume this run?"):
+        assert words in retry, words
+    assert "resumes from the ledger, where the abort left it" in retry
+    assert 'S.detail && S.detail.state === "aborted"' in retry
+
+
+def test_both_buttons_that_open_the_results_file_have_one_name_and_one_handler():
+    js = JS()
+    assert "Open the bundle" not in js and "Read RESULTS.md" not in js
+    assert js.count('"Open RESULTS.md"') == 2
+    assert "function openResults()" in js
+    assert js.count("openResults") >= 3          # the definition and the two buttons
+
+
+def test_abort_sits_apart_from_the_routine_actions():
+    js = JS()
+    actions = fn_body(js, "function renderActions")
+    assert actions.count('"btn-danger btn-apart"') == 2           # the running and the paused row
+    assert re.search(r"^\.actions \.btn-apart \{[^}]*margin-left", CSS(), re.M)
+
+
+def test_the_next_hints_use_the_names_on_the_buttons():
+    from orchard import run_view
+    assert "Resume run" in run_view.NEXT["aborted"] and "ledger" in run_view.NEXT["aborted"]
+    assert "Start a new bring-up to try again" not in run_view.NEXT["aborted"]
+    assert "Open RESULTS.md" in run_view.NEXT["ready-for-operator-review"]
+    assert "open the bundle" not in run_view.NEXT["ready-for-operator-review"].lower()
+    assert "Retry" in run_view.NEXT["blocked"] and "Retry" in run_view.NEXT["stopped-or-crashed"]

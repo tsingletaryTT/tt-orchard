@@ -466,8 +466,8 @@ function renderResults(d) {
         h("tbody", {}, rows)))));
   }
   if (r.bundle) {
-    box.append(h("p", {}, h("button", { type: "button", class: "btn btn-small", onclick: () => { setTab("files"); openFirstBundleFile(); } },
-      "📄 Read RESULTS.md")));
+    box.append(h("p", {}, h("button", { type: "button", class: "btn btn-small", onclick: openResults },
+      h("span", { class: "emoji", "aria-hidden": "true" }, "📄 "), "Open RESULTS.md")));
   }
   renderCompare(d, box);
 }
@@ -522,14 +522,15 @@ function renderActions(d) {
   }
   if (d.state === "running") {
     add("Pause", "btn-warn", () => doControl("pause"), "Pause at the next check; the chips stay leased");
-    add("Abort", "btn-danger", () => doControl("abort"), "Stop the run and release the chips");
+    add("Abort", "btn-danger btn-apart", () => doControl("abort"), "Stop the run and release the chips");
   } else if (d.state === "paused") {
     add("Resume", "btn-primary", () => doControl("resume"));
-    add("Abort", "btn-danger", () => doControl("abort"));
-  } else if (d.state === "blocked" || d.state === "stopped-or-crashed") {
-    add("Retry run", "btn-primary", doRetry, "Run the same bring-up again; it resumes from the ledger");
+    add("Abort", "btn-danger btn-apart", () => doControl("abort"));
+  } else if (RETRY_STATES.includes(d.state)) {
+    add(d.state === "aborted" ? "Resume run" : "Retry run", "btn-primary", doRetry,
+      "Run the same bring-up again; it resumes from the ledger");
   } else if (d.state === "ready-for-operator-review") {
-    add("Open the bundle", "btn-primary", () => { setTab("files"); openFirstBundleFile(); });
+    add("Open RESULTS.md", "btn-primary", openResults);
   }
   if (d.launch) box.append(h("span", { class: "badge", dataset: { tone: "good" } }, `started from this page · pid ${d.launch.pid}`));
 }
@@ -538,6 +539,7 @@ function renderBlock(d) {
   const panel = $("block-panel");
   if (!d.block) { panel.hidden = true; return; }
   panel.hidden = false;
+  $("block-retry").hidden = !RETRY_STATES.includes(d.state);          // a block record can outlive the block: only a run that can start again gets the button
   $("block-h").textContent = `Blocked: ${d.block.code}`;
   $("block-reason").textContent = d.block.reason || "";
   const tried = clear($("block-tried"));
@@ -674,12 +676,18 @@ async function doControl(word) {
   } catch (err) { toast(err.message, "bad"); }
 }
 
+// The states a run can be started again from. The server keeps the same list (orchard/webui.py RETRYABLE); a test holds them equal.
+const RETRY_STATES = ["blocked", "stopped-or-crashed", "aborted"];
+
 async function doRetry() {
   const name = S.selected;
+  const aborted = S.detail && S.detail.state === "aborted";
   const ok = await confirmDialog({
-    title: "Retry this run?",
-    text: "This starts the same `tt-orchard bringup` again in the background. It runs the preflight, takes the chip lease, boots the coder and resumes from the ledger. The ledger records it as a retry.",
-    ok: "Retry run",
+    title: aborted ? "Resume this run?" : "Retry this run?",
+    text: aborted
+      ? "This starts `tt-orchard bringup` for the same model in the background. It runs the preflight, takes the chip lease, boots the coder and resumes from the ledger, where the abort left it. The ledger records it as a retry."
+      : "This starts the same `tt-orchard bringup` again in the background. It runs the preflight, takes the chip lease, boots the coder and resumes from the ledger. The ledger records it as a retry.",
+    ok: aborted ? "Resume run" : "Retry run",
   });
   if (!ok) return;
   try {
@@ -812,6 +820,9 @@ function renderFiles() {
       }, f))))));
   }
 }
+
+// The one place a run's bundle report is opened: the header button of a finished run and the button under Results both call it.
+function openResults() { setTab("files"); openFirstBundleFile(); }
 
 function openFirstBundleFile() {
   const d = S.detail;
@@ -1035,6 +1046,7 @@ async function startBringup() {
 
 function wire() {
   $("new-run-btn").addEventListener("click", openNewRun);
+  $("block-retry").addEventListener("click", doRetry);
   $("view-orchard-btn").addEventListener("click", () => setView("orchard"));
   $("view-hardware-btn").addEventListener("click", () => setView("hardware"));
   $("view-settings-btn").addEventListener("click", () => setView("settings"));
