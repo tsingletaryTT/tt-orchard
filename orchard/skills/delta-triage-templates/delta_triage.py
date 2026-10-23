@@ -1248,12 +1248,18 @@ def tokenizer_token_id(data, token) -> int | None:
     return None
 
 
-HINT_NAMES = ("temperature", "top_p", "top_k", "min_p", "repetition_penalty", "presence_penalty")
+HINT_NAMES = ("temperature", "top_p", "top_k", "min_p", "repetition_penalty", "presence_penalty", "frequency_penalty")
 MAX_HINT_VALUES = 4                 # distinct values kept per setting
 CARD_READ_CHARS = 200_000           # the part of a model card that is read for hints
 _HINT = re.compile(r"(?<![A-Za-z0-9_])(temperature|top[_-]?p|top[_-]?k|min[_-]?p|repetition[_-]?penalty|"
-                   r"presence[_-]?penalty)[`'\"*]*[ \t]*(?:=|:|of|to|at|is)?[ \t]*[`'\"*]*"
-                   r"(\d+(?:\.\d+)?)(?![0-9A-Za-z_])(?!\.\d)", re.IGNORECASE)
+                   r"presence[_-]?penalty|frequency[_-]?penalty)[`'\"*]*[ \t]*(?:=|:|of|to|at|is)?[ \t]*[`'\"*]*"
+                   r"(-?\d+(?:\.\d+)?)(?![0-9A-Za-z_])(?!\.\d)", re.IGNORECASE)
+# A card can write a negative number. Only some settings take one: presence_penalty and frequency_penalty run from -2 to 2
+# (vLLM and the OpenAI API), and a top_k of -1 turns top-k filtering off. A negative temperature, top_p, min_p or
+# repetition_penalty, or a value outside those ranges, is not something the server could apply, so it is left out.
+NEGATIVE_OK = {"presence_penalty": lambda v: v >= -2.0,      # called only for a value written with a minus sign
+               "frequency_penalty": lambda v: v >= -2.0,
+               "top_k": lambda v: v == -1.0}
 
 
 def card_sampling_hints(text: str) -> dict:
@@ -1270,6 +1276,8 @@ def card_sampling_hints(text: str) -> dict:
             continue
         if not math.isfinite(value):
             continue
+        if m.group(2).startswith("-") and not NEGATIVE_OK.get(name, lambda v: False)(value):
+            continue          # written with a minus sign, and this setting cannot take one ("-0" counts as written negative)
         values = out.setdefault(name, [])
         if value not in values and len(values) < MAX_HINT_VALUES:
             values.append(value)
@@ -1731,8 +1739,8 @@ def sampling_default_hazards(g: dict, ev) -> list[dict]:
             continue
         have = served.get(name)
         numeric = isinstance(have, (int, float)) and not isinstance(have, bool)
-        if numeric and any(math.isclose(have, v) for v in values):
-            continue
+        if numeric and any(math.isclose(have, v) or (name == "top_k" and have <= 0 and v <= 0) for v in values):
+            continue          # top_k of 0 and of -1 both turn top-k filtering off, so they do not disagree
         shown = " or ".join(f"{v:g}" for v in values)
         items.append(f"{name} {shown} (" + (f"served {fmt(have)}" if numeric else "not set") + ")")
     if not items:

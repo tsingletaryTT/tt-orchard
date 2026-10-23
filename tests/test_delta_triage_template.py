@@ -1425,6 +1425,76 @@ def test_card_sampling_hints_are_read_from_numbers_next_to_the_setting_name(text
     assert template_module().card_sampling_hints(text) == hints
 
 
+@pytest.mark.parametrize("text, hints", [
+    ("presence_penalty=-0.5", {"presence_penalty": [-0.5]}),
+    ("presence-penalty: -2", {"presence_penalty": [-2.0]}),
+    ("frequency_penalty = -0.3", {"frequency_penalty": [-0.3]}),
+    ("frequency_penalty=0.3", {"frequency_penalty": [0.3]}),
+    ("top_k=-1", {"top_k": [-1.0]}),
+    ("top-k of -1", {"top_k": [-1.0]}),
+    ("presence_penalty=-0.5 and presence_penalty=1.5", {"presence_penalty": [-0.5, 1.5]}),
+])
+def test_card_sampling_hints_keep_a_negative_value_for_the_settings_that_accept_one(text, hints):
+    """vLLM and the OpenAI API take presence_penalty and frequency_penalty from -2 to 2, and top_k of -1 turns top-k filtering off."""
+    assert template_module().card_sampling_hints(text) == hints
+
+
+@pytest.mark.parametrize("text", [
+    "temperature=-0.5", "top_p=-0.1", "min_p=-0.05", "repetition_penalty=-1", "top_k=-2",
+    "presence_penalty=-2.5", "presence_penalty=-3", "frequency_penalty=-9", "temperature=-0", "top_p=-0.0",
+])
+def test_card_sampling_hints_still_drop_a_negative_value_the_setting_cannot_take(text):
+    assert template_module().card_sampling_hints(text) == {}
+
+
+def served_sampling(stage: Path, **keys) -> None:
+    cfg = json.loads((stage / "triage_config.json").read_text())
+    path = Path(cfg["model_snapshot"]) / "generation_config.json"
+    data = json.loads(path.read_text()); data.update(keys); path.write_text(json.dumps(data))
+
+
+def test_a_card_that_recommends_only_negative_settings_gets_a_hazard_against_the_served_file(text_case):
+    stage = text_case()                                    # served file: top_k 20, no penalties
+    set_model_card(stage, "Use presence_penalty=-0.5 and top_k=-1.\n")
+    assert run_triage(stage).returncode == 0
+    [h] = sampling_hazards(stage)
+    assert "top_k -1 (served 20)" in h["finding"] and "presence_penalty -0.5 (not set)" in h["finding"]
+    assert evidence(stage, "genconfig-license.json")["card_sampling_hints"] == {"top_k": [-1.0], "presence_penalty": [-0.5]}
+
+
+def test_a_frequency_penalty_the_served_file_does_not_hold_gets_a_hazard(text_case):
+    stage = text_case()
+    set_model_card(stage, "frequency_penalty=-0.3\n")
+    assert run_triage(stage).returncode == 0
+    [h] = sampling_hazards(stage)
+    assert "frequency_penalty -0.3 (not set)" in h["finding"]
+
+
+def test_a_penalty_the_card_gives_is_compared_exactly_not_treated_like_top_k_off(text_case):
+    stage = text_case()
+    served_sampling(stage, presence_penalty=-1.0)         # both are zero or below, but they are different penalties
+    set_model_card(stage, "presence_penalty=-0.5\n")
+    assert run_triage(stage).returncode == 0
+    [h] = sampling_hazards(stage)
+    assert "presence_penalty -0.5 (served -1.0)" in h["finding"]
+
+
+def test_a_card_that_recommends_the_negative_value_the_served_file_holds_gets_no_hazard(text_case):
+    stage = text_case()
+    served_sampling(stage, presence_penalty=-0.5, top_k=-1)
+    set_model_card(stage, "Use presence_penalty=-0.5 and top_k=-1.\n")
+    assert run_triage(stage).returncode == 0
+    assert sampling_hazards(stage) == []
+
+
+def test_top_k_zero_and_minus_one_both_turn_filtering_off_so_they_do_not_disagree(text_case):
+    stage = text_case()
+    served_sampling(stage, top_k=0)
+    set_model_card(stage, "top_k=-1\n")
+    assert run_triage(stage).returncode == 0
+    assert sampling_hazards(stage) == []
+
+
 def test_card_sampling_hints_come_from_the_first_reading_of_a_long_card_only():
     mod = template_module()
     text = "\n".join(f"temperature={0.1 * i:.1f}" for i in range(1, 40))
