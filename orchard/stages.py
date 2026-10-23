@@ -42,6 +42,7 @@ from typing import Callable
 from orchard.classes import CLASSES, SIDECAR_CLASSES, class_of_path, path_of
 from orchard.graft_trial import DECISION_FILE as GRAFT_DECISION_FILE
 from orchard.graft_trial import chosen as graft_chosen
+from orchard.graft_trial import read_decision as read_graft_decision
 from orchard.graft_trial import decision_problems
 from orchard.defaults import (COLD_START_S, LONG_STAGE_S, PACKAGE_FORMATS, RUN_COLD_BOOT_CAP,
                               RUN_ESCALATION_CAP, RUN_WALL_CLOCK_S, STAGE2_PCC_MIN,
@@ -785,9 +786,9 @@ def gate_package(stage_dir, run_dir) -> GateResult:
     weights, the card, the boot check's verify.json and the publish commands. package.json only
     says where to look."""
     # Imported here: orchard.package imports this module.
-    from orchard.package import (GRAFT_FILE, PUBLISH_FILE, PackageError, graft_problems, publish_problems,
-                                 read_reported, serving_problems, split_model_id, stage_2_serving,
-                                 weights_wiring_problems)
+    from orchard.package import (GRAFT_FILE, PUBLISH_FILE, PackageError, graft_problems, graft_trial_numbers,
+                                 publish_problems, read_reported, serving_problems, split_model_id,
+                                 stage_2_serving, weights_wiring_problems)
     from orchard.package_card import card_evidence_paths, card_problems, read_license
     from orchard.scrub import scrub_package
     d, err = _load(stage_dir, "package.json")
@@ -813,6 +814,10 @@ def gate_package(stage_dir, run_dir) -> GateResult:
     model_has_mtp = delta_model_has_mtp(delta)
     # A grafted package serves with the drafter and on-device sampling on, whatever stage 2's run.sh says.
     graft_expected = isinstance(d.get("mtp_graft"), dict)
+    decision = read_graft_decision(run / "stages" / "2")
+    graft_chosen_by_stage_2 = decision is not None and decision["choice"] == "graft"
+    trial_decision = decision["choice"] if decision is not None and decision.get("trial") is not None else None
+    trial_rows = tuple(n.name for n in graft_trial_numbers(run))
     try:
         reported, reported_source = read_reported(run)
     except PackageError as exc:
@@ -846,6 +851,8 @@ def gate_package(stage_dir, run_dir) -> GateResult:
         reasons += [f"profile {name}: {x}" for x in
                     weights_wiring_problems(run_sh, nearest_model=nearest_repo)]
         has_graft = (out / GRAFT_FILE).exists()
+        if graft_chosen_by_stage_2 and not has_graft:
+            reasons.append(f"profile {name}: stage 2's graft trial chose the graft, so the package needs {GRAFT_FILE}")
         if graft_expected or has_graft:
             reasons += [f"profile {name}: {x}" for x in
                         graft_problems(out, nearest_model=nearest_repo,
@@ -861,7 +868,8 @@ def gate_package(stage_dir, run_dir) -> GateResult:
             reasons += [f"profile {name}: card: {x}" for x in
                         card_problems(card, license_id=license_id, run_dir=run, sidecars=sidecars,
                                       base_files=_shipped_names(out / "base_config"), reported=reported, reported_source=reported_source,
-                                      model_id=new_repo, nearest_model=nearest_repo, graft=has_graft)]
+                                      model_id=new_repo, nearest_model=nearest_repo, graft=has_graft,
+                                      graft_decision=trial_decision, trial_rows=trial_rows)]
         reasons += [f"profile {name}: the card cites {e}, which is missing at evidence/{e}"
                     for e in card_evidence_paths(card) if not (out / "evidence" / e).is_file()]
         if p.get("verified") is True:

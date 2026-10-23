@@ -28,7 +28,8 @@ if b.get("exit"):
 def prompt(d, t):
     return {"summary": {"decode_tok_s": {"median": d}, "ttft_s": {"median": t}, "completion_tokens": {"median": 100}}, "runs": []}
 rec = {"label": arg("--label"), "server_ready_s": b.get("ready", 100.0), "prompt_set_sha256": "abc", "reps": 3,
-       "prompts": {"a": prompt(b["decode"][0], 0.3), "b": prompt(b["decode"][1], 0.2), "c": prompt(b["decode"][2], 0.4)}}
+       "prompts": {"a": prompt(b["decode"][0], b.get("ttft", [0.3, 0.2, 0.4])[0]), "b": prompt(b["decode"][1], b.get("ttft", [0.3, 0.2, 0.4])[1]),
+                   "c": prompt(b["decode"][2], b.get("ttft", [0.3, 0.2, 0.4])[2])}}
 pathlib.Path(arg("--out")).write_text(json.dumps(rec))
 '''
 
@@ -262,3 +263,13 @@ def test_a_prompt_speed_that_is_a_boolean_is_not_counted(rig):
     rig.set(measure={"safe": {"decode": [True, 100, 50]}, "variant": {"decode": [60, 60, 60]}})
     rig.run()
     assert rig.result()["safe"]["decode_tok_s"] == 75
+
+
+def test_the_speeds_are_rounded_so_the_card_can_show_exactly_what_the_file_holds(rig):
+    rig.set(measure={"safe": {"decode": [19.876543, 19.876543, 19.876543], "ttft": [0.123456, 0.123456, 0.123456]},
+                     "variant": {"decode": [61.234567, 61.234567, 61.234567], "ttft": [0.0123456] * 3}})
+    rig.run()
+    res = rig.result()
+    assert res["safe"]["decode_tok_s"] == 19.88 and res["variant"]["decode_tok_s"] == 61.23
+    assert res["safe"]["ttft_s"] == 0.123 and res["variant"]["ttft_s"] == 0.012
+    assert res["safe"]["per_prompt"]["a"]["decode_tok_s"] == 19.88 and res["safe"]["per_prompt"]["a"]["ttft_s"] == 0.123

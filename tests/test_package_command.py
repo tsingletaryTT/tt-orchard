@@ -1338,3 +1338,22 @@ def test_every_unverified_key_is_named_not_only_the_first(packaged):
     bench_with(packaged, {})
     code, text = run_card(packaged)
     assert code == 2 and "'arex'" in text and "'base'" in text
+
+
+def test_no_graft_mtp_reaches_stage_all_only_when_asked_for(rig, monkeypatch):
+    assert staged_with(rig, monkeypatch)["no_graft_mtp"] is False
+    assert staged_with(rig, monkeypatch, no_graft_mtp=True, step="stage", restage=True)["no_graft_mtp"] is True
+
+
+def test_the_no_graft_flag_is_written_in_the_ledger(rig, monkeypatch):
+    staged_with(rig, monkeypatch, no_graft_mtp=True, step="stage")
+    decisions = [e["data"] for e in read_entries(rig["run"] / "ledger.jsonl") if e["data"].get("decision") == "package command"]
+    assert decisions[-1]["no_graft_mtp"] is True
+
+
+def test_a_package_that_the_graft_flags_refuse_is_a_clean_command_error(rig, monkeypatch):
+    def refuse(*a, **k):
+        raise package_cmd.package.PackageError("--no-graft-mtp: stage 2's graft trial chose the graft")
+    monkeypatch.setattr(package_cmd.package, "stage_all", refuse)
+    code, text, _ = run_cmd(rig, no_graft_mtp=True, step="stage")
+    assert code == package_cmd.EXIT_REFUSED and "package: packaging: --no-graft-mtp" in text

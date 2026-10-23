@@ -696,7 +696,7 @@ value, or lists a reported score as measured.
 **Packaging a run that has already finished.** A run started without `--package-format` skips stage 7. When it
 has ended `ready-for-operator-review` you can package it afterwards:
 
-    tt-orchard package RUN_DIR --namespace ORG [--exact CHIP] [--restage] [--graft-mtp]
+    tt-orchard package RUN_DIR --namespace ORG [--exact CHIP] [--restage] [--graft-mtp | --no-graft-mtp]
     tt-orchard package-card RUN_DIR --benchmark benchmark.json --model-key KEY [--base-key KEY] [--reported reported-results.json] [--accept-unverified-identity]
 
 `package` stages and scrubs every profile, boots the required one under `gozer run` (it takes the lease itself;
@@ -714,7 +714,8 @@ Flags of `package`:
 - `--namespace` ORG: the Hugging Face organisation the package is for. Needed to stage.
 - `--step`: `all` (default), `stage`, `boot` (needs a lease) or `finish`.
 - `--restage`: move an earlier `stages/7` aside and stage again.
-- `--graft-mtp`: for a model that ships no `mtp.*` tensors. The package adds the nearest model's `mtp.*` tensors (the drafter's head) to the served model directory at each start, from that model's pinned snapshot (only that file is downloaded; the package ships no weights, and `graft.json` names the file and the sha256 of the shard it must build), and keeps the speculative drafter and on-device sampling on. The boot check serves the package that way, so stage 2's numbers (taken without the graft) stay labelled as such on the card. The drafter's acceptance rate on the model is not measured. Stage 2's swap does the same when its `swap_config.json` has `"graft_mtp": true`; a run whose stage 2 grafted gets a grafted package without the flag.
+- `--graft-mtp`: for a model that ships no `mtp.*` tensors. The package adds the nearest model's `mtp.*` tensors (the drafter's head) to the served model directory at each start, from that model's pinned snapshot (only that file is downloaded; the package ships no weights, and `graft.json` names the file and the sha256 of the shard it must build), and keeps the speculative drafter and on-device sampling on. The boot check serves the package that way. A package is grafted without the flag when stage 2's graft trial chose the graft (section 5.5c), or when stage 2's own swap grafted (`"graft_mtp": true` in its `swap_config.json`); the flag forces a graft the trial did not choose, and the card then says stage 2 and 4 were measured without it. The drafter's acceptance rate on the model is not measured.
+- `--no-graft-mtp`: stage the package without the graft. It is refused when stage 2's graft trial chose the graft, because stage 4's bundle tests were built with it, and when stage 2 itself served with the graft. To decide against the graft from the start, run `--no-graft-trial`. The card of a package built from a trial shows the trial's rows (decode speed and time to first token of both configurations, and the grafted variant's agreement with the CPU reference).
 - `--exact` CHIP: pin the lease to the board that holds this chip.
 - `--models-root` DIR: where installed tt-model bundles live. Default: the path the run recorded.
 - `--cache-root` DIR: the cache root, with the kernel cache under it. Default: the path the run recorded.

@@ -75,14 +75,20 @@ def run_step(name: str, argv: list, cwd: Path, steps: list) -> tuple[int, Path]:
 
 def speed_summary(record: dict) -> dict:
     """measure_serving's record as the numbers the decision uses: each prompt's median decode speed and first-token time, and the median
-    of the prompts' medians."""
+    of the prompts' medians. The values are rounded (decode speed to 0.01 tokens/s, first-token time to 1 ms) so the card can show exactly
+    what the file holds."""
+    def rounded(v, key):
+        digits = 2 if key == "decode_tok_s" else 3
+        return round(v, digits) if isinstance(v, (int, float)) and not isinstance(v, bool) else v
+
     per = {}
     for pid, r in (record.get("prompts") or {}).items():
         s = r.get("summary") or {}
-        per[pid] = {"decode_tok_s": (s.get("decode_tok_s") or {}).get("median"), "ttft_s": (s.get("ttft_s") or {}).get("median")}
+        per[pid] = {k: rounded((s.get(k) or {}).get("median"), k) for k in ("decode_tok_s", "ttft_s")}
+
     def med(key):
         vals = [v[key] for v in per.values() if isinstance(v[key], (int, float)) and not isinstance(v[key], bool)]
-        return statistics.median(vals) if vals else None
+        return rounded(statistics.median(vals), key) if vals else None
     return {"decode_tok_s": med("decode_tok_s"), "ttft_s": med("ttft_s"), "server_ready_s": record.get("server_ready_s"),
             "per_prompt": per, "prompt_set_sha256": record.get("prompt_set_sha256"), "reps": record.get("reps")}
 

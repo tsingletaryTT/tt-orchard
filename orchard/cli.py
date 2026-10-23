@@ -10,7 +10,7 @@
     tt-orchard lab setup [--model ORG/NAME]... [--yes] [--check]
     tt-orchard caches   [--lab] [--prune --older-than DAYS [--yes]]
     tt-orchard coder    [status | stop [--yes]]
-    tt-orchard package  RUN_DIR --namespace ORG [--step stage|boot|finish|all] [--restage] [--graft-mtp] [--exact CHIP]
+    tt-orchard package  RUN_DIR --namespace ORG [--step stage|boot|finish|all] [--restage] [--graft-mtp | --no-graft-mtp] [--exact CHIP]
     tt-orchard package-card RUN_DIR --benchmark FILE --model-key KEY [--base-key KEY] [--reported FILE] [--accept-unverified-identity]
     tt-orchard kernel-env [--check] [--src-dir DIR] [--venv-dir DIR] [--tt-lang-skill-dir DIR] [--allow-stale-skills]
     tt-orchard inventory TARGET [--python P] [--ttnn-python P] [--against F] [--layers N] [--seq N] [--class C] [--out DIR]
@@ -176,7 +176,11 @@ def _parser() -> argparse.ArgumentParser:
     pk.add_argument("--graft-mtp", action="store_true",
                     help="stage a package that adds the nearest model's mtp.* tensors at each start and keeps the "
                          "speculative drafter and on-device sampling on (for a model that ships none). The boot check "
-                         "serves it that way. Without the flag the package serves as stage 2 did")
+                         "serves it that way. Stage 2's graft trial (a model with a graft candidate) decides this by itself; the "
+                         "flag forces a graft the trial did not choose")
+    pk.add_argument("--no-graft-mtp", action="store_true",
+                    help="stage a package without the graft. Refused when stage 2's graft trial chose the graft (its stage 4 tests were "
+                         "built with it) or stage 2 itself served with the graft")
     pk.add_argument("--exact", type=int, metavar="CHIP",
                     help="give gozer this chip number: it leases the board that holds it")
     pk.add_argument("--models-root", help="where installed tt-model bundles live (default: the run's recorded path)")

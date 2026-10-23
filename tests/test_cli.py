@@ -1021,3 +1021,12 @@ def test_bringup_leaves_the_graft_trial_on_by_default_and_passes_the_opt_out_to_
     assert "--no-graft-trial" not in rec.argv
     code, out, rec = run(conf, ["bringup", "Cloudflare/clef", "--no-graft-trial"])
     assert code == 0 and "--no-graft-trial" in rec.argv
+
+
+def test_package_no_graft_mtp_defaults_off_and_the_flag_turns_it_on(tmp_path, monkeypatch):
+    from orchard import cli, package_cmd
+    seen = []
+    monkeypatch.setattr(package_cmd, "main", lambda args, **kw: seen.append(vars(args)) or 0)
+    cli.main(["package", str(tmp_path / "run"), "--namespace", "episod"], stdout=io.StringIO())
+    cli.main(["package", str(tmp_path / "run"), "--namespace", "episod", "--no-graft-mtp"], stdout=io.StringIO())
+    assert [s["no_graft_mtp"] for s in seen] == [False, True]

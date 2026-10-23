@@ -63,7 +63,9 @@ and a positive `server_ready_s`; and its evidence includes
    run `tt-model list`. Only when `hw_tests.json` does not exist, a count in "required chip
    configurations" (or 1, 2 and 4 when none are required) with no `configs/<N>/swap_config.json` was not
    drafted: only for that count, do the steps under "When a configuration has no drafted config" below.
-2. For each configuration N in `hw_tests.json`, run `python3 stages/4/configs/N/prepare_swap.py`. It
+2. If a drafted `configs/<N>/swap_config.json` has `"graft_mtp": true`, leave it: stage 2 measured the grafted drafter and chose it
+   (`stages/2/graft-decision.json`), and the gate refuses a bundle configuration that was built without it. Never add it yourself.
+   For each configuration N in `hw_tests.json`, run `python3 stages/4/configs/N/prepare_swap.py`. It
    builds `stages/4/configs/N/model-dir/` and, for a bundle, `stages/4/configs/N/run.sh`. Exit 2 means an
    edit did not apply or a fact does not fit; its message names it. Fix that value in that
    configuration's `swap_config.json` and run it again.

@@ -37,6 +37,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import re
 import shlex
@@ -51,6 +52,7 @@ from pathlib import Path
 
 from orchard.defaults import (PACKAGE_HEALTH_TIMEOUT_S, PACKAGE_INSTALL_TIMEOUT_S,
                               PACKAGE_THIN_TIMEOUT_S, PACKAGE_VERIFY_DEADLINE_S)
+from orchard.graft_trial import DECISION_FILE, TRIAL_DIR, TRIAL_RESULT, read_decision
 from orchard.package_card import (CardFacts, Number, Reported, card_evidence_paths, inside, non_commercial,
                                   read_license, render_card)
 from orchard.scrub import HOME_PATH, scrub_package
@@ -616,14 +618,19 @@ class RunFacts:
     model_has_mtp: bool | None = None    # stage 0's finding; None when it did not record one
     graft: dict | None = None        # the graft.json this package carries (mtp.* tensors added at each start)
     stage_2_grafted: bool = False    # stage 2's own swap grafted them too
+    graft_decision: str | None = None   # "graft" or "safe" when stage 2's graft trial ran and decided (orchard/graft_trial.py)
 
 
-def read_run(run_dir, graft_mtp: bool = False) -> RunFacts:
+def read_run(run_dir, graft_mtp: bool = False, no_graft_mtp: bool = False) -> RunFacts:
     """What stage 7 needs from stages 0, 2 and 4. Raises PackageError naming what is missing.
 
     `graft_mtp` asks for the nearest model's mtp.* tensors to be added at start (a graft.json), with the drafter and
-    on-device sampling on. The package is also grafted when stage 2's swap grafted, and when stage 7 already staged
-    a grafted package (the boot check's finish step and the gate read that record)."""
+    on-device sampling on. The package is also grafted when stage 2's graft trial chose the graft (stages/2/graft-decision.json),
+    when stage 2's swap grafted, and when stage 7 already staged a grafted package (the boot check's finish step and the gate read
+    that record). `no_graft_mtp` refuses all of those but the last: a package without the graft would not be the configuration
+    stage 2 chose or stage 2's numbers describe."""
+    if graft_mtp and no_graft_mtp:
+        raise PackageError("--graft-mtp and --no-graft-mtp both given; they ask for opposite packages")
     run = Path(run_dir).resolve()
     delta = _json(run / "stages/0/delta.json", "stage 0's delta")
     if delta.get("path") != "weights-only":
@@ -671,7 +678,17 @@ def read_run(run_dir, graft_mtp: bool = False) -> RunFacts:
                      Path(cfg.get("hf_home") or ""), source, base, passing, license_id,
                      drafter_off, host_sampling, tuple(delta.get("sidecars") or ()), reported, reported_source,
                      Path(cfg.get("base_snapshot") or ""), model_has_mtp, None, _stage_2_grafted(run))
-    if graft_mtp or facts.stage_2_grafted or _package_grafted(run):
+    decision = read_decision(run / "stages/2")
+    decided = decision is not None and decision["choice"] == "graft"
+    if no_graft_mtp and (decided or facts.stage_2_grafted):
+        why = ("stage 2's graft trial chose the graft and stage 4's bundle configurations were built with it, so a package without it "
+               "would not be the configuration those results describe; run again with --no-graft-trial to skip the trial and decide "
+               "on the safe configuration from the start" if decided else
+               "stage 2 itself served with the graft, so its numbers describe a grafted package")
+        raise PackageError(f"--no-graft-mtp: {why}")
+    trial_ran = decision is not None and decision.get("trial") is not None
+    facts = replace(facts, graft_decision=decision["choice"] if trial_ran else None)
+    if not no_graft_mtp and (graft_mtp or decided or facts.stage_2_grafted or _package_grafted(run)):
         # The drafter and on-device sampling are on in a grafted package, whatever stage 2's run.sh says.
         facts = replace(facts, drafter_off=False, host_sampling=False,
                         graft=plan_graft(nearest_model, facts.base_snapshot, snap))
@@ -1046,6 +1063,34 @@ def read_benchmark_numbers(run_dir) -> tuple[Number, ...]:
     return tuple(out)
 
 
+GRAFT_TRIAL_ROWS = (("decode speed, safe configuration (graft trial, median of four prompts)", "safe", "decode_tok_s", "tokens/s"),
+                    ("decode speed, grafted drafter (graft trial, median of four prompts)", "variant", "decode_tok_s", "tokens/s"),
+                    ("time to first token, safe configuration (graft trial, median of four prompts)", "safe", "ttft_s", "s"),
+                    ("time to first token, grafted drafter (graft trial, median of four prompts)", "variant", "ttft_s", "s"),
+                    ("top1 agreement with the CPU reference, grafted drafter (graft trial)", "variant", "top1_agreement", "fraction"))
+
+
+def graft_trial_numbers(run_dir) -> tuple[Number, ...]:
+    """The rows stage 2's graft trial measured, for the card: the speed of the safe configuration and of the grafted variant, and the
+    variant's agreement with the CPU reference. A row appears when the trial's result holds a positive number for it. The values are
+    the ones in stages/2/graft-trial/trial-result.json (the script rounds them), and the decision file is the second evidence file."""
+    run = Path(run_dir)
+    decision = read_decision(run / "stages/2")
+    if decision is None or decision.get("trial") is None:
+        return ()
+    try:
+        trial = json.loads((run / "stages/2" / TRIAL_DIR / TRIAL_RESULT).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ()
+    evidence = (f"stages/2/{TRIAL_DIR}/{TRIAL_RESULT}", f"stages/2/{DECISION_FILE}")
+    out = []
+    for name, side, key, unit in GRAFT_TRIAL_ROWS:
+        v = (trial.get(side) or {}).get(key) if isinstance(trial, dict) and isinstance(trial.get(side), dict) else None
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and v > 0:
+            out.append(Number(name, v, unit, "measured", evidence))
+    return tuple(out)
+
+
 def card_numbers(facts: RunFacts, profile: dict, verify: dict | None) -> list[Number]:
     """The numbers one package's card may show. Only the boot-checked profile shows the run's
     measurements, because they were taken on that profile's chip count."""
@@ -1075,6 +1120,7 @@ def card_numbers(facts: RunFacts, profile: dict, verify: dict | None) -> list[Nu
                         verify["top1_agreement"], "fraction", "measured", ev7),
                  Number("server ready after start, this package (stage 7, fresh install, empty "
                         "tensor cache)", verify["server_ready_s"], "s", "measured", ev7)]
+    nums += graft_trial_numbers(run)
     nums += read_benchmark_numbers(run)
     return nums
 
@@ -1100,7 +1146,8 @@ def write_card(out: Path, facts: RunFacts, profile: dict, *, namespace: str,
         base_files=tuple(sorted(f.name for f in facts.base_config)),
         sampling_from_base=any(f.name == "generation_config.json" for f in facts.base_config),
         reported=facts.reported, reported_source=facts.reported_source,
-        graft=facts.graft, stage_2_without_graft=facts.graft is not None and not facts.stage_2_grafted)
+        graft=facts.graft, graft_decision=facts.graft_decision,
+        stage_2_without_graft=(facts.graft is not None and not facts.stage_2_grafted and facts.graft_decision != "graft"))
     (out / "README.md").write_text(render_card(facts_card), encoding="utf-8")
 
 
@@ -1111,13 +1158,13 @@ def _write_json(path: Path, data) -> None:
 
 
 def stage_all(run_dir, stage_dir, *, namespace: str, models_root, env: dict | None = None,
-              hostname: str | None = None, graft_mtp: bool = False) -> dict:
+              hostname: str | None = None, graft_mtp: bool = False, no_graft_mtp: bool = False) -> dict:
     """Stage every profile, scrub each one (a hit stops the stage before anything is installed),
     install a copy of the required profile and write hw_test.json, handoff.json and package.json.
 
     With `graft_mtp`, every profile carries a graft.json and keeps the drafter and on-device sampling on; the
     boot check then serves the package that way, whatever stage 2 served."""
-    facts = read_run(run_dir, graft_mtp=graft_mtp)
+    facts = read_run(run_dir, graft_mtp=graft_mtp, no_graft_mtp=no_graft_mtp)
     stage_dir = Path(stage_dir)
     others = find_sources(models_root, entry_cls=facts.source.entry_cls,
                           nearest_model=facts.nearest_model)
