@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from test_prepare_swap_graft import (BACKBONE, MTP, SHARD, read_header,  # noqa: E402
+from test_prepare_swap_graft import (BACKBONE, MTP, SHARD, put_link, read_header,  # noqa: E402
                                      tensor_bytes, write_safetensors)
 
 from orchard.package import (PackageError, finish, prepare_verify, read_run, serving_env,  # noqa: E402
@@ -123,11 +123,134 @@ def test_without_the_option_the_package_is_the_drafter_off_package(world):
 
 def test_a_run_whose_stage_2_grafted_gives_a_grafted_package_without_the_option(world):
     # Stage 2 served with the graft: its run.sh keeps the drafter, and its record says so.
-    s2 = world["run"] / "stages/2"
-    (s2 / "run.sh").write_text((world["src"] / "run.sh").read_text())
-    write(s2 / "model-dir-sources.json", {"schema": 1, "mtp_graft": {"from": BASE, "file": SHARD}})
+    stage_2_with_the_real_graft(world)
     _, package = stage(world)
     assert package["mtp_graft"]["file"] == SHARD_FILE
+
+
+def stage_2_with_the_real_graft(w):
+    """Stage 2's model-dir as prepare_swap.py itself builds it with `graft_mtp`: the graft shard is a regular file
+    next to the links to the model's own shards. The script runs in the run's stage 2 directory."""
+    s2 = w["run"] / "stages/2"
+    for name in ("config.json", "preprocessor_config.json"):          # the files prepare_swap copies from the nearest model
+        put_link(w["base"], name, "{}")
+    shutil.copy(SWAP_TEMPLATE, s2 / "prepare_swap.py")
+    cfg = json.loads((s2 / "swap_config.json").read_text())
+    write(s2 / "swap_config.json", {**cfg, "graft_mtp": True})
+    done = subprocess.run([sys.executable, str(s2 / "prepare_swap.py")], capture_output=True, text=True, timeout=60)
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert not (s2 / "model-dir" / SHARD).is_symlink() and (s2 / "model-dir" / SHARD).is_file()
+    (s2 / "run.sh").write_text((w["src"] / "run.sh").read_text())      # stage 2 served with the drafter on
+
+
+def test_a_run_whose_stage_2_really_grafted_is_read_and_packaged(world):
+    # The graft shard is a new regular file, so it links into no Hugging Face snapshot. Only the validated
+    # shard is exempt from the backbone provenance check.
+    stage_2_with_the_real_graft(world)
+    facts = read_run(world["run"])
+    assert facts.stage_2_grafted and facts.graft["file"] == SHARD_FILE
+    _, package = stage(world)
+    assert package["mtp_graft"]["sha256"] == json.loads(
+        (world["run"] / "stages/2/model-dir-sources.json").read_text())["mtp_graft"]["sha256"]
+
+
+def graft_record_path(w):
+    return w["run"] / "stages/2/model-dir-sources.json"
+
+
+def edit_graft_record(w, **changes):
+    rec = json.loads(graft_record_path(w).read_text())
+    rec["mtp_graft"].update(changes)
+    graft_record_path(w).write_text(json.dumps(rec))
+
+
+def test_stage_2s_graft_shard_must_be_the_one_the_record_describes(world):
+    stage_2_with_the_real_graft(world)
+    shard = world["run"] / "stages/2/model-dir" / SHARD
+    with open(shard, "r+b") as f:                       # one byte of the tensors changed
+        f.seek(-1, os.SEEK_END)
+        f.write(b"\xff")
+    with pytest.raises(PackageError, match="does not match the sha256"):
+        read_run(world["run"])
+
+
+def test_a_shard_and_a_record_that_agree_with_each_other_but_not_with_the_nearest_model_are_refused(world):
+    stage_2_with_the_real_graft(world)
+    shard = world["run"] / "stages/2/model-dir" / SHARD
+    write_safetensors(shard, {"mtp.fc.weight": ("BF16", [4, 8])})        # some other bytes, recorded as the graft
+    edit_graft_record(world, sha256=hashlib.sha256(shard.read_bytes()).hexdigest())
+    with pytest.raises(PackageError, match="not what the nearest model's snapshot"):
+        read_run(world["run"])
+
+
+def test_a_graft_record_for_another_revision_of_the_nearest_model_is_refused(world):
+    stage_2_with_the_real_graft(world)
+    edit_graft_record(world, base_revision="e" * 40)
+    with pytest.raises(PackageError, match="base_revision"):
+        read_run(world["run"])
+
+
+@pytest.mark.parametrize("changes, reason", [({"file": "other.safetensors"}, "must be"),
+                                             ({"sha256": "abc"}, "64 hex")])
+def test_a_malformed_graft_record_is_refused(world, changes, reason):
+    stage_2_with_the_real_graft(world)
+    edit_graft_record(world, **changes)
+    with pytest.raises(PackageError, match=reason):
+        read_run(world["run"])
+
+
+def test_a_graft_record_that_is_not_an_object_exempts_nothing(world):
+    stage_2_with_the_real_graft(world)
+    graft_record_path(world).write_text(json.dumps({"schema": 1, "mtp_graft": ["not", "a", "record"]}))
+    with pytest.raises(PackageError, match="links into no Hugging Face snapshot"):
+        read_run(world["run"])
+
+
+def test_a_graft_record_with_a_new_snapshot_that_is_not_pinned_says_so(world):
+    stage_2_with_the_real_graft(world)
+    cfg = json.loads((world["run"] / "stages/2/swap_config.json").read_text())
+    write(world["run"] / "stages/2/swap_config.json", {**cfg, "new_snapshot": str(world["tmp"] / "not-a-snapshot")})
+    with pytest.raises(PackageError, match="is not a pinned snapshot directory"):
+        read_run(world["run"])
+
+
+def test_a_new_snapshot_named_by_a_commit_but_missing_is_refused_before_the_weights_are_read(world):
+    stage_2_with_the_real_graft(world)
+    cfg = json.loads((world["run"] / "stages/2/swap_config.json").read_text())
+    write(world["run"] / "stages/2/swap_config.json", {**cfg, "new_snapshot": str(world["tmp"] / ("c" * 40))})
+    with pytest.raises(PackageError, match="is not a pinned snapshot directory"):
+        read_run(world["run"])
+
+
+def test_a_graft_shard_that_is_a_link_is_refused(world, tmp_path):
+    stage_2_with_the_real_graft(world)
+    shard = world["run"] / "stages/2/model-dir" / SHARD
+    real = tmp_path / "elsewhere.safetensors"
+    shutil.copy(shard, real)
+    shard.unlink()
+    shard.symlink_to(real)
+    with pytest.raises(PackageError, match="not the regular file"):
+        read_run(world["run"])
+
+
+def test_only_the_graft_shard_is_exempt_from_the_provenance_check(world, tmp_path):
+    stage_2_with_the_real_graft(world)
+    write_safetensors(world["run"] / "stages/2/model-dir/model-extra.safetensors", dict(BACKBONE))
+    with pytest.raises(PackageError, match="model-extra.safetensors links into no Hugging Face snapshot"):
+        read_run(world["run"])
+
+
+def test_a_graft_shard_without_a_graft_record_is_not_exempt(world):
+    stage_2_with_the_real_graft(world)
+    graft_record_path(world).write_text(json.dumps({"schema": 1}))        # the record that says it was grafted is gone
+    with pytest.raises(PackageError, match="links into no Hugging Face snapshot"):
+        read_run(world["run"])
+
+
+def test_a_package_that_adds_the_graft_at_stage_7_still_needs_every_stage_2_weight_to_link_into_a_snapshot(world):
+    write_safetensors(world["run"] / "stages/2/model-dir" / SHARD, dict(MTP))      # a stray file, no stage 2 record
+    with pytest.raises(PackageError, match="links into no Hugging Face snapshot"):
+        read_run(world["run"], graft_mtp=True)
 
 
 @pytest.mark.parametrize("what, change, reason", [
@@ -233,9 +356,7 @@ def test_the_card_says_the_stage_2_rows_were_measured_before_the_graft(world):
 
 
 def test_a_package_staged_from_a_graft_in_stage_2_does_not_say_that(world):
-    s2 = world["run"] / "stages/2"
-    (s2 / "run.sh").write_text((world["src"] / "run.sh").read_text())
-    write(s2 / "model-dir-sources.json", {"schema": 1, "mtp_graft": {"from": BASE, "file": SHARD}})
+    stage_2_with_the_real_graft(world)
     _, pkg = finished(world)
     assert "without the graft" not in " ".join((pkg / "README.md").read_text().split())
 

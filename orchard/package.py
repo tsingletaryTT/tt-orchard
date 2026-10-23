@@ -217,6 +217,42 @@ def _package_grafted(run: Path) -> bool:
     return isinstance(rec, dict) and isinstance(rec.get("mtp_graft"), dict)
 
 
+def _stage_2_graft_record(run: Path) -> dict | None:
+    try:
+        rec = json.loads((run / "stages/2/model-dir-sources.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    rec = rec.get("mtp_graft") if isinstance(rec, dict) else None
+    return rec if isinstance(rec, dict) else None
+
+
+def stage_2_graft_problems(model_dir: Path, record: dict, nearest_model: str, base_snapshot: Path,
+                           new_snapshot: Path) -> list[str]:
+    """Why the graft shard in stage 2's model directory is not the nearest model's mtp.* tensors the record says
+    it is; empty when it is. The shard is a regular file prepare_swap.py wrote, so the Hugging Face links that
+    vouch for the model's own weights cannot vouch for it. Its bytes are hashed and compared with the record's
+    sha256, and that digest is rebuilt from the nearest model's pinned snapshot with the code that built it."""
+    shard = model_dir / GRAFT_SHARD
+    if record.get("file") != GRAFT_SHARD:
+        return [f"model-dir-sources.json's mtp_graft file is {record.get('file')!r}; it must be {GRAFT_SHARD}"]
+    want = record.get("sha256")
+    if not isinstance(want, str) or not re.fullmatch(r"[0-9a-f]{64}", want):
+        return ["model-dir-sources.json's mtp_graft sha256 is not 64 hex characters"]
+    if shard.is_symlink() or not shard.is_file():
+        return [f"{shard} is not the regular file prepare_swap.py writes for a graft"]
+    if sha256(shard) != want:
+        return [f"{shard} does not match the sha256 in model-dir-sources.json's mtp_graft record"]
+    rev = record.get("base_revision")
+    if rev != base_snapshot.name:
+        return [f"model-dir-sources.json's mtp_graft base_revision is {rev!r}; stage 2's nearest-model snapshot is "
+                f"{base_snapshot.name!r}"]
+    source = plan_graft(nearest_model, base_snapshot, new_snapshot)          # PackageError when it cannot be made
+    if source["sha256"] != want:
+        return [f"the graft shard's sha256 is not what the nearest model's snapshot {base_snapshot.name} "
+                "gives for its mtp.* tensors"]
+    return []
+
+
 def _swap_template():
     """prepare_swap.py, the stage 2 template, loaded as a module whose failures raise PackageError. Stage 7 builds
     the graft record with the code stage 2 built the graft with, so the two cannot disagree."""
@@ -498,14 +534,17 @@ def _shared_blob_origin(hub: Path, name: str, real: str, prefer: str | None) -> 
     return repo, found[repo]
 
 
-def served_weights_problems(stage0_model, label, model_dir) -> list[str]:
+def served_weights_problems(stage0_model, label, model_dir, graft_shard: str | None = None) -> list[str]:
     """Why the weights stage 2 served are not the ones stage 0 names; empty when they are.
 
     `stage0_model` is delta.json's `model` (`<repo>@<revision>`). `label` is swap-check.json's
     `new_model_id`, which the stage agent typed, and `model_dir` is the directory the test served.
     The label must name stage 0's repo, and if it carries an `@revision`, stage 0's revision. The
     weights decide the rest: every `*.safetensors` file in model_dir must link into stage 0's repo
-    in the HF cache, all at one revision, and that revision must be stage 0's."""
+    in the HF cache, all at one revision, and that revision must be stage 0's. `graft_shard` names the one
+    file that is exempt: stage 2's graft shard, a regular file written by prepare_swap.py that links into no
+    snapshot. The caller has already checked it against the graft's recorded source (`stage_2_graft_problems`);
+    any other file that links into no snapshot still fails."""
     want_repo, want_rev = split_model_id(stage0_model)
     if not want_repo or want_rev is None:
         return [f"stage 0's model {stage0_model!r} names no revision; delta.json must give "
@@ -523,6 +562,10 @@ def served_weights_problems(stage0_model, label, model_dir) -> list[str]:
     if not weights:
         return [f"stage 2's model_dir {md} has no *.safetensors file, so the weights it served "
                 "cannot be checked"]
+    weights = [w for w in weights if w.name != graft_shard]
+    if not weights:
+        return [f"stage 2's model_dir {md} has no *.safetensors file besides the graft shard, so the weights "
+                "it served cannot be checked"]
     origins = {}
     for w in weights:
         origin = _weight_origin(w, want_repo)
@@ -635,17 +678,26 @@ def read_run(run_dir, graft_mtp: bool = False) -> RunFacts:
     # What was served is read from the weights the test loaded (swap-check.json's model_dir), and
     # the label the stage agent typed only has to agree with it (served_weights_problems).
     served = _json(run / "stages/2/evidence/swap-check.json", "stage 2's swap-check.json")
+    nearest_model = split_model_id(delta.get("nearest_model"))[0]
+    snap = Path(cfg.get("new_snapshot") or "")
+    if not REVISION.fullmatch(snap.name) or not snap.is_dir():
+        raise PackageError(f"stage 2's new_snapshot {str(snap)!r} is not a pinned snapshot directory")
+    # A run that grafted in stage 2 has one regular file among the links: the graft shard. It is exempt from the
+    # provenance check only when its bytes are the nearest model's mtp.* tensors, as the record says.
+    graft_record, exempt = _stage_2_graft_record(run), None
+    if graft_record is not None:
+        md_served = Path(served.get("model_dir") or "")
+        bad = stage_2_graft_problems(md_served, graft_record, nearest_model, Path(cfg.get("base_snapshot") or ""), snap)
+        if bad:
+            raise PackageError("stage 2's graft: " + "; ".join(bad))
+        exempt = GRAFT_SHARD
     problems = served_weights_problems(delta.get("model"), served.get("new_model_id"),
-                                       served.get("model_dir"))
+                                       served.get("model_dir"), graft_shard=exempt)
     if problems:
         raise PackageError("; ".join(problems))
     # From here on the ids are bare repo ids: package-thin, the manifest and the card take the
     # revision separately.
     model_id, revision = split_model_id(delta.get("model"))
-    nearest_model = split_model_id(delta.get("nearest_model"))[0]
-    snap = Path(cfg.get("new_snapshot") or "")
-    if not REVISION.fullmatch(snap.name) or not snap.is_dir():
-        raise PackageError(f"stage 2's new_snapshot {str(snap)!r} is not a pinned snapshot directory")
     if snap.name != revision:
         raise PackageError(f"stage 2's new_snapshot is revision {snap.name}; stage 0 names "
                            f"{delta.get('model')}")
