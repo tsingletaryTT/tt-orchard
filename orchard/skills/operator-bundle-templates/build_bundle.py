@@ -919,6 +919,35 @@ def generation_config_dealt_with(run: Run) -> tuple[bool, list[str]]:
     return bool(run.cards) and len(saying) == len(run.cards), why
 
 
+def stop_tokens_dealt_with(run: Run) -> tuple[bool, list[str]]:
+    """Never yes: the swap checks compare the first 32 generated tokens and stop there, so no stage showed which token
+    ends a reply. The bundle names the stop tokens stage 2's directory holds when its record lists them."""
+    why = ["Stage 2's and stage 4's swap checks compare the first 32 generated tokens with the CPU reference. They "
+           "never run a request until it stops, so no stage showed which token ends a reply."]
+    rec = read_json(run.dir / "stages" / "2" / "model-dir-sources.json", "stages/2/model-dir-sources.json", required=False)
+    ids = rec.get("eos_token_ids") if isinstance(rec, dict) else None
+    if isinstance(ids, list) and ids and all(isinstance(i, int) and not isinstance(i, bool) for i in ids):
+        why.append(f"Stage 2's model directory stops on {fmt(ids)} (`stages/2/model-dir-sources.json`).")
+    return False, why
+
+
+SAMPLING_ORIGINS = {"base": "the nearest model's generation_config.json",
+                    "model": "the new model's own generation_config.json",
+                    "none": "no generation_config.json"}
+
+
+def sampling_defaults_dealt_with(run: Run) -> tuple[bool, list[str]]:
+    """Never yes: no stage compares the card's sampling settings with the defaults the server applies."""
+    why = ["No stage compared the card's sampling settings with the defaults the server applies to a request that "
+           "sets none."]
+    rec = read_json(run.dir / "stages" / "2" / "model-dir-sources.json", "stages/2/model-dir-sources.json", required=False)
+    origin = SAMPLING_ORIGINS.get(rec.get("sampling_defaults_from")) if isinstance(rec, dict) \
+        and isinstance(rec.get("sampling_defaults_from"), str) else None
+    if origin:
+        why.append(f"Stage 2 served {origin} (`stages/2/model-dir-sources.json`).")
+    return False, why
+
+
 def chat_template_dealt_with(run: Run, redact: Redactor) -> tuple[bool, list[str]]:
     """Never yes: no stage sends a chat request (the swap checks use /v1/completions, which applies no template)."""
     why = ["No stage sent a chat request. The swap checks in stages 2 and 4 use /v1/completions, which applies no chat "
@@ -979,6 +1008,10 @@ def hazard_entries(run: Run, redact: Redactor) -> list[tuple[str, str, list[str]
                               f"Pauses whose reason names disk space: {disk_pauses} (ledger.jsonl)."]
         elif area == "generation_config":
             ok, why = generation_config_dealt_with(run)
+        elif area == "stop_tokens":
+            ok, why = stop_tokens_dealt_with(run)
+        elif area == "sampling_defaults":
+            ok, why = sampling_defaults_dealt_with(run)
         elif area == "chat_template":
             ok, why = chat_template_dealt_with(run, redact)
         elif area == "license":
