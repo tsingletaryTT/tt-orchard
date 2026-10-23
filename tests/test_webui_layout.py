@@ -395,7 +395,7 @@ def test_the_next_hints_use_the_names_on_the_buttons():
 # ---- Operator style is plain text: every emoji the page can show sits in a span that style hides ----------------------------------
 
 EMOJI = re.compile("[\U0001F300-\U0001FAFF☀-➿⏩-⏿⬀-⯿✅✨]")
-TYPOGRAPHIC = set("✓✕✗•")          # check and cross marks next to the word pass/fail are plain glyphs, not pictures
+TYPOGRAPHIC = set("✓✕✗•")          # the check and cross marks next to the words pass and fail are plain glyphs
 
 
 def pictures(text):

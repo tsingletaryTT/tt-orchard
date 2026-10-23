@@ -192,7 +192,7 @@ function renderMachine() {
 }
 
 // The top bar's one-line answer to "can I start something?": the same chips and coder the rail panel lists, so it never
-// disagrees with it. A tone, not a colour alone: the words say how many chips are free and whether the coder is up.
+// disagrees with it. The tone is a coloured dot and the words say how many chips are free and whether the coder is up.
 function renderMachineChip(m, all, free) {
   const chip = $("machine-chip");
   if (!m || !m.gozer_ok || !all.length) {
@@ -825,7 +825,7 @@ function renderFiles() {
   }
 }
 
-// The one place a run's bundle report is opened: the header button of a finished run and the button under Results both call it.
+// Where a run's bundle report is opened: the header button of a finished run and the button under Results both call it.
 function openResults() { setTab("files"); openFirstBundleFile(); }
 
 function openFirstBundleFile() {

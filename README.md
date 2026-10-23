@@ -481,16 +481,20 @@ preflight (read-only requests, no cache, no file; one answer per model, base and
 minutes, at most 32 of them) and lists the ranked
 bundles, the existing work and anything that could not be read; its research setting maps to `--no-github` and
 `--offline`. A run's Details tab shows the report that run wrote and how stage 0's measured class compared with
-the estimate. The Hardware view shows
+the estimate. The Machine view shows
 [tt-toplike](https://github.com/tenstorrent/tt-toplike) itself on a TV: its own terminal UI, run on this
-machine and drawn in the page, with a button for each of its views.
+machine and drawn in the page, with a button for each of its views. Below the TV are the setup checks
+(**Check machines**) and the tensor caches. The Models view holds the chip layout, the CPU stand-in, where hardware
+tests run and who uses which model, and ends with **Save**.
 
-The two buttons in the top bar switch the page style. **Playful** is the farm look described above. **Operator**
+The **Style** switch in the top bar sets the page style. It is a small labelled pair, apart from the view tabs, because it
+changes how the whole page looks and no view. Beside it a chip says how many chips are free (and whether the coder is
+up) and opens the Machine view, so the machine's state is on screen without scrolling the run list. **Playful** is the farm look described above. **Operator**
 is the same page, plain: system type, no orchard scene, and the run in two panes. On the left, a colour band that
 states the run's state in its real name (the only large block of colour on the page, pulsing while the run
 works), then what it is doing now and what to do next. On the right, the stages and the live feed, ledger, files
-and details. Orchard names and icons give way to the real stage and state names, and a command or path selects
-with one click. Between "Next" and the rest sits a **Verdict**: one sentence for each finding with its yardstick, worst
+and details. Orchard names and icons give way to the real stage and state names (the first tab reads **Runs**, and no emoji
+appears anywhere), and a command or path selects with one click. Between "Next" and the rest sits a **Verdict**: one sentence for each finding with its yardstick, worst
 news first. A swap or configuration result is set against the bar from the code and the other runs on the machine; a
 boot time is ranked only against earlier runs of the same package on the same chip count. The reference line reads the
 evidence the reference template wrote and says so when the agent's `reference.json` disagrees with it. A run with no
@@ -507,15 +511,18 @@ By default it listens on a loopback address only, and `--host` must be `127.0.0.
 port can pause, abort and start runs. Use it only on a network you trust, and open the port in the firewall
 yourself (for ufw: `sudo ufw allow from <your LAN>/24 to any port 8780 proto tcp`). `--port` picks the port
 (default 8780). `--toplike` names the tt-toplike binary (a path); by default `tt-toplike` or `tt-toplike-tui` on
-`PATH` is used, and without one the Hardware view says how to install it.
+`PATH` is used, and without one the Machine view says how to install it.
 
 The page can pause, resume and abort a run (each behind a confirmation that says what happens; abort needs
-a second click), retry a run that ended blocked or stopped, and start a new bring-up after showing the
-preflight as a checklist. Start stays disabled while a check blocks, and when no installed bundle serves the
+a second click), retry a run that ended blocked or stopped (the Blocked panel ends its steps with a **Retry run** button, and the header has
+one too), resume one that was aborted (**Resume run**, which starts the same detached `tt-orchard bringup` and carries on
+from the ledger), and start a new bring-up after showing the preflight as a checklist. In the New bring-up dialog the
+button you can press is the main one (**Run checks**, then **Start bring-up** once the checks pass), and the base, the
+where-tests-run choice and the research setting sit under one **Options** line. Start stays disabled while a check blocks, and when no installed bundle serves the
 base it lists the candidates to choose from. A run it starts is the same detached `tt-orchard bringup`, so it
 outlives the page, and Ctrl-C on `tt-orchard ui` never stops a run.
 
-The Hardware view is view-only. Nothing typed in the browser reaches the machine: the terminal takes no
+The Machine view's live display is view-only. Nothing typed in the browser reaches the machine: the terminal takes no
 input and the server has no route for it. Each view button starts tt-toplike with that `--mode` (or
 `--rotate`) from a fixed list; `hivemind`, its opt-in sniffer of other processes, is not on it.
 
