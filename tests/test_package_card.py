@@ -377,3 +377,173 @@ def test_a_line_after_the_reported_table_is_refused(tmp_path):
 def test_a_reported_table_with_other_spacing_still_passes(tmp_path):
     card = reported_card().replace("| MLE-Lite | 81.8 | Any Medal", "|   MLE-Lite  |  81.8   |  Any   Medal")
     assert _reported_problems(card, tmp_path) == []
+
+
+# ---- a specific "Intended use" and "How to call it", from facts (card_use.py) ------------------------------------
+
+from orchard.card_use import UNTESTED_SENTENCE, UseFacts
+
+
+def use_facts(**over):
+    base = dict(authors_use="It is intended for research on long-horizon agents and tool-augmented deep research.",
+                thinking_default=True, effort_values=("xhigh", "medium", "low"), effort_default="xhigh",
+                can_disable_thinking=True, tools_in_template=True, reasoning_parser="qwen3", tool_parser="qwen3_coder",
+                auto_tool_choice=True, text_only=True, tool_evidence=None)
+    base.update(over)
+    return UseFacts(**base)
+
+
+def cutoff_number(value=3):
+    return Number("GSM8K replies cut off at the token limit, this model", value, "items", "measured",
+                  ("stages/2/result.json",))
+
+
+def section(card, head):
+    after = card.split(head + "\n", 1)[1]
+    return after.split("\n## ", 1)[0]
+
+
+def test_a_card_with_no_use_facts_keeps_the_generic_sentence_and_has_no_how_to_call_section():
+    card = render_card(facts())
+    assert "Text generation with Altworld/Hemmingway-1 through the OpenAI-compatible server" in card
+    assert "## How to call it" not in card
+
+
+def test_a_card_with_use_facts_does_not_say_text_generation_in_general():
+    assert "Text generation with" not in render_card(facts(use=use_facts()))
+
+
+def test_the_authors_words_are_quoted_and_labelled_as_theirs_and_not_measured():
+    text = section(render_card(facts(use=use_facts())), "## Intended use")
+    assert "> It is intended for research on long-horizon agents and tool-augmented deep research." in text
+    assert "their words" in text and "not measured here" in text
+    assert "Altworld/Hemmingway-1" in text.split(">")[0]
+
+
+def test_without_the_authors_words_there_is_no_quote():
+    text = section(render_card(facts(use=use_facts(authors_use=None))), "## Intended use")
+    assert "\n> " not in text and "their words" not in text
+
+
+def test_a_line_break_or_heading_in_the_authors_words_cannot_start_a_section():
+    card = render_card(facts(use=use_facts(authors_use="Chat.\n## Fake heading\nMore.")))
+    assert "\n## Fake heading" not in card
+
+
+def test_thinking_on_by_default_is_said_with_the_reasoning_field():
+    text = section(render_card(facts(use=use_facts())), "## Intended use")
+    assert "Thinking is on by default" in text and "`reasoning_content`" in text and "`content`" in text
+
+
+def test_without_a_reasoning_parser_the_card_does_not_name_reasoning_content():
+    card = render_card(facts(use=use_facts(reasoning_parser=None)))
+    assert "reasoning_content" not in card and "Thinking is on by default" in card
+
+
+def test_thinking_off_by_default_is_said():
+    text = section(render_card(facts(use=use_facts(thinking_default=False))), "## Intended use")
+    assert "Thinking is off by default" in text and "on by default" not in text
+
+
+def test_a_template_that_does_not_say_whether_it_thinks_gets_no_thinking_sentence():
+    text = section(render_card(facts(use=use_facts(thinking_default=None, effort_values=(), can_disable_thinking=False,
+                                                    reasoning_parser=None))), "## Intended use")
+    assert "Thinking is" not in text and "enable_thinking" not in text
+
+
+def test_the_reasoning_effort_values_are_listed_in_the_templates_order_with_the_default():
+    text = section(render_card(facts(use=use_facts())), "## Intended use")
+    assert "`xhigh`, `medium`, `low`" in text and "default `xhigh`" in text and "`chat_template_kwargs`" in text
+
+
+def test_no_effort_values_no_effort_sentence():
+    assert "reasoning_effort" not in render_card(facts(use=use_facts(effort_values=(), effort_default=None)))
+
+
+def test_the_thinking_switch_is_named_only_when_the_template_has_one():
+    assert '"enable_thinking": false' in render_card(facts(use=use_facts()))
+    assert "enable_thinking" not in render_card(facts(use=use_facts(can_disable_thinking=False)))
+
+
+def test_tool_calls_without_evidence_are_marked_as_untested():
+    line = [ln for ln in render_card(facts(use=use_facts())).splitlines() if "`tool_calls`" in ln][0]
+    assert UNTESTED_SENTENCE in line and "qwen3_coder" in line and "prompts returned tool calls" not in line
+
+
+def test_tool_calls_with_evidence_name_the_file_and_the_tools_and_are_not_marked_untested():
+    u = use_facts(tool_evidence=("stages/7/benchmark/speed.json", ("read_file", "run_tests")))
+    line = [ln for ln in render_card(facts(use=u)).splitlines() if "`tool_calls`" in ln][0]
+    assert "prompts returned tool calls" in line and "`read_file`, `run_tests`" in line
+    assert "`stages/7/benchmark/speed.json`" in line and UNTESTED_SENTENCE not in line
+
+
+def test_a_package_that_cannot_return_tool_calls_does_not_mention_them():
+    for over in ({"tools_in_template": False}, {"tool_parser": None}, {"auto_tool_choice": False}):
+        card = render_card(facts(use=use_facts(**over)))
+        assert "tool_calls" not in card and '"tools"' not in card
+
+
+def test_text_only_is_said_when_run_sh_skips_vision():
+    text = section(render_card(facts(use=use_facts())), "## Intended use")
+    assert "Text only" in text and "images" in text and UNTESTED_SENTENCE in text
+
+
+def test_a_package_that_does_not_skip_vision_does_not_say_text_only():
+    assert "Text only" not in render_card(facts(use=use_facts(text_only=False)))
+
+
+def test_a_cut_off_warning_needs_thinking_a_reasoning_field_and_measured_cut_offs():
+    marker = "reaches `max_tokens` while the model is still thinking"
+    with_cut = facts(use=use_facts(), numbers=(cutoff_number(3),))
+    assert marker in render_card(with_cut)
+    assert marker not in render_card(facts(use=use_facts(), numbers=(cutoff_number(0),)))
+    assert marker not in render_card(facts(use=use_facts(reasoning_parser=None), numbers=(cutoff_number(3),)))
+    assert marker not in render_card(facts(use=use_facts(thinking_default=False), numbers=(cutoff_number(3),)))
+    assert marker not in render_card(facts(use=use_facts()))
+
+
+def test_how_to_call_it_sits_between_intended_use_and_the_numbers():
+    card = render_card(facts(use=use_facts()))
+    assert card.index("## Intended use") < card.index("## How to call it") < card.index("## Expected performance")
+
+
+def test_how_to_call_it_reads_the_model_name_from_the_server():
+    text = section(render_card(facts(use=use_facts())), "## How to call it")
+    assert "/v1/models" in text and "/v1/chat/completions" in text and "--port" in text and '"$MODEL"' in text
+
+
+def test_the_example_has_a_generic_tool_when_the_server_returns_tool_calls():
+    text = section(render_card(facts(use=use_facts())), "## How to call it")
+    assert '"tools"' in text and '"run_tests"' in text and '"type": "function"' in text
+
+
+def test_the_example_has_no_tool_when_it_cannot_return_tool_calls():
+    text = section(render_card(facts(use=use_facts(tool_parser=None))), "## How to call it")
+    assert '"tools"' not in text and '"messages"' in text
+
+
+def test_a_thinking_model_gets_a_large_max_tokens_in_the_example_and_others_a_small_one():
+    assert '"max_tokens": 32768' in render_card(facts(use=use_facts()))
+    assert '"max_tokens": 1024' in render_card(facts(use=use_facts(thinking_default=False, tool_parser=None)))
+
+
+def test_the_sidecar_out_of_scope_line_stays_with_use_facts():
+    text = section(render_card(facts(use=use_facts(), sidecars=("joint_head.safetensors",))), "## Intended use")
+    assert "Out of scope: the sidecar head" in text
+
+
+def test_a_cut_off_count_that_is_not_measured_does_not_trigger_the_warning():
+    todo = Number("GSM8K replies cut off at the token limit, this model", 3, "items", "TODO", ())
+    assert "reaches `max_tokens`" not in render_card(facts(use=use_facts(), numbers=(todo,)))
+
+
+def test_the_thinking_off_switch_is_named_only_for_a_model_that_thinks_by_default():
+    for default in (False, None):
+        card = render_card(facts(use=use_facts(thinking_default=default, can_disable_thinking=True)))
+        assert "enable_thinking" not in card
+
+
+def test_the_example_without_tools_asks_a_plain_question_and_not_the_tool_one():
+    text = section(render_card(facts(use=use_facts(tool_parser=None))), "## How to call it")
+    assert "mutex" in text and "Run the tests" not in text
+    assert "Run the tests" in section(render_card(facts(use=use_facts())), "## How to call it")

@@ -28,6 +28,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from orchard.card_use import PERF_IN_PROSE, UNTESTED_SENTENCE, UseFacts, has_facts
 from orchard.stages import inside
 
 LICENSES = {"cc-by-nc-4.0": ("CC BY-NC 4.0", "https://creativecommons.org/licenses/by-nc/4.0/"),
@@ -43,7 +44,6 @@ COMMERCIAL_CLAIMS = (r"(?<!non-)(?<!non )commercial (?:use|deployments?|purposes
                      r"applications?)(?! is not permitted)",
                      r"\bcommercially\b", r"production[- ]ready", r"\bfor (?:your )?customers\b",
                      r"\benterprise\b", r"\bresell", r"\bmonetiz")
-PERF_IN_PROSE = re.compile(r"\b\d[\d.,]*\s*(?:tok/s|tokens/s|t/s|tokens per second|ms\b|%)")
 NUMBERS_HEAD = "## Expected performance"
 REPORTED_HEAD = "## Reported by the authors"
 NOT_MEASURED_SENTENCE = "were not measured here"
@@ -118,6 +118,7 @@ class CardFacts:
     graft: dict | None = None        # graft.json: the nearest model's mtp.* tensors are added at each start
     stage_2_without_graft: bool = False   # stage 2 and 4 served without the graft (the drafter off, host sampling)
     graft_decision: str | None = None     # "graft" or "safe" when stage 2's graft trial ran and decided (orchard/graft_trial.py)
+    use: UseFacts | None = None           # what the model is for and how to call it, read from its own files (orchard/card_use.py)
 
 
 def _value(n: Number) -> str:
@@ -127,6 +128,90 @@ def _value(n: Number) -> str:
 def _base_files(f: CardFacts) -> str:
     """The names of the files taken from the nearest model, each followed by ", ", or nothing."""
     return "".join(f"`{n}`, " for n in f.base_files)
+
+
+CUTOFF_NAME = "replies cut off at the token limit"
+CUTOFF_SENTENCE = ("A reply that reaches `max_tokens` while the model is still thinking has no answer in `content`. "
+                   "Set `max_tokens` high. The Numbers table counts the replies the benchmark runs cut off at the limit.")
+
+
+def _list(values) -> str:
+    return ", ".join(f"`{v}`" for v in values)
+
+
+def cutoffs_measured(numbers) -> bool:
+    """The run measured a count of replies cut off at the token limit and it is above zero."""
+    return any(CUTOFF_NAME in n.name and n.label == "measured" and isinstance(n.value, (int, float)) and n.value > 0
+               for n in numbers)
+
+
+def intended_use_lines(f: CardFacts) -> list[str]:
+    """The Intended use section after its heading: the authors' words, then what the package does with the model's
+    chat template and run.sh flags. A fact taken from those files and not tried on the served model says so."""
+    u = f.use
+    lines: list[str] = []
+    if u.authors_use:
+        text = " ".join(u.authors_use.split())
+        lines += [f"The authors of {f.model_id} describe the intended use this way. These are their words, from the model "
+                  "card. They were not measured here:", "", f"> {text}", ""]
+    lines.append(f"This package serves {f.model_id} on {f.chips} chips through the OpenAI-compatible chat endpoint. "
+                 "How the model behaves there decides how to call it:")
+    lines.append("")
+    untested = f"({UNTESTED_SENTENCE})"
+    if u.thinking_default is True:
+        think = ("Thinking is on by default: the chat template makes the model think before it answers unless a request "
+                 "turns thinking off.")
+        if u.reasoning_parser:
+            think += " The server returns the thinking in `reasoning_content` and the answer in `content`."
+        lines.append(f"- {think} {untested}")
+    elif u.thinking_default is False:
+        lines.append("- Thinking is off by default: the chat template leaves it off unless a request turns it on. "
+                     f"{untested}")
+    if u.effort_values:
+        default = f" (default `{u.effort_default}`)" if u.effort_default else ""
+        lines.append(f"- Reasoning effort can be set per request with `chat_template_kwargs` and `reasoning_effort`. "
+                     f"The template accepts {_list(u.effort_values)}{default}. {untested}")
+    if u.thinking_default is True and u.can_disable_thinking:
+        lines.append('- Thinking can be turned off per request with `chat_template_kwargs` set to '
+                     f'`{{"enable_thinking": false}}`. {untested}')
+    if u.tools_ok:
+        if u.tool_evidence:
+            path, names = u.tool_evidence
+            lines.append(f"- Tool calls come back in `tool_calls`. In the runs recorded in `{path}` the tool-use prompts "
+                         f"returned tool calls ({_list(names)}).")
+        else:
+            lines.append(f"- The server parses tool calls into `tool_calls` (parser `{u.tool_parser}`). {untested}")
+    if u.text_only:
+        lines.append("- Text only: run.sh skips the vision tower, so the package does not take images or video, whatever "
+                     f"the model accepts upstream. {untested}")
+    if u.thinking_default is True and u.reasoning_parser and cutoffs_measured(f.numbers):
+        lines.append(f"- {CUTOFF_SENTENCE}")
+    return lines
+
+
+EXAMPLE_TOOL = ('{"type": "function", "function": {"name": "run_tests", "description": "Run pytest on a path", '
+                '"parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}}')
+
+
+def how_to_call_lines(f: CardFacts) -> list[str]:
+    """The How to call it section after its heading: where the server listens, how to read the model name, and one
+    request. The request carries a generic tool only when the server can return tool calls."""
+    u = f.use
+    tools = u.tools_ok
+    prompt = "Run the tests under tests/utils and tell me which fail." if tools else \
+        "Explain the difference between a mutex and a semaphore."
+    body = ['      "model": "\'"$MODEL"\'",',
+            f'      "messages": [{{"role": "user", "content": "{prompt}"}}],']
+    if tools:
+        body.append(f'      "tools": [{EXAMPLE_TOOL}],')
+    body.append(f'      "max_tokens": {32768 if u.thinking_default else 1024}')
+    return ["`tt-model serve` starts an OpenAI-compatible server. Its port is vLLM's default, 8000, unless you pass "
+            "`--port` after the bundle id. The server's model name is the path of the package's model directory, so "
+            "read it from `/v1/models` first:", "",
+            "    MODEL=$(curl -s http://localhost:8000/v1/models | python3 -c "
+            "'import sys, json; print(json.load(sys.stdin)[\"data\"][0][\"id\"])')",
+            "    curl http://localhost:8000/v1/chat/completions -H 'content-type: application/json' -d '{",
+            *body, "    }'", ""]
 
 
 def render_card(f: CardFacts) -> str:
@@ -191,11 +276,16 @@ def render_card(f: CardFacts) -> str:
                   + ", ".join(f"`{s}`" for s in f.sidecars) + ". The bundle serves the language-model "
                   "backbone only, so the sidecar head is not served. The run checked the head on the "
                   "host against the CPU reference; that check does not make it part of this bundle."]
-    lines += ["", "## Intended use", "",
-              f"Text generation with {f.model_id} through the OpenAI-compatible server that "
-              "`tt-model serve` starts."]
+    if has_facts(f.use):
+        lines += ["", "## Intended use", "", *intended_use_lines(f)]
+    else:
+        lines += ["", "## Intended use", "",
+                  f"Text generation with {f.model_id} through the OpenAI-compatible server that "
+                  "`tt-model serve` starts."]
     if f.sidecars:
         lines.append("Out of scope: the sidecar head, which this bundle does not serve.")
+    if has_facts(f.use):
+        lines += ["", "## How to call it", "", *how_to_call_lines(f)]
     lines += ["", NUMBERS_HEAD, "",
               "Every number is labelled. A `measured` number names its evidence files; the first file "
               "holds the value. The files are in this repository under `evidence/`, at the paths "
