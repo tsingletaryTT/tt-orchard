@@ -270,7 +270,8 @@ def swap_prepare(caches=None, deadline=60):
                                          for n, s in SWAP_SCRIPTS.items()]}}
     for n, script in SWAP_SCRIPTS.items():
         files[f"configs/{n}/{script}"] = FAKE_SWAP_TEST
-        files[f"configs/{n}/swap_config.json"] = {"tt_cache": (caches or {}).get(n, fake_cache(n))}
+        # A container configuration (what the graft decision does not hold to a build), named the way a real one is.
+        files[f"configs/{n}/swap_config.json"] = {"package": "fake/pkg", "profile": f"p{n}", "tt_cache": (caches or {}).get(n, fake_cache(n))}
     return files
 
 

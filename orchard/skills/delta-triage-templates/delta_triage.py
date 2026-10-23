@@ -1532,6 +1532,35 @@ def decide_class(c: dict, t: dict, reasons: list[str], sc: dict) -> str:
 SAMPLING_KEYS = ("temperature", "top_k", "top_p", "repetition_penalty", "do_sample")
 
 
+def graft_candidate(mt: dict, bt: dict, hidden_size: int | None, base_revision: str | None) -> dict | None:
+    """Could the nearest model's `mtp.*` tensors be grafted onto a model that has none? None when the model has its own or the
+    nearest model has none. The record says what the graft would copy (count, shard, dtypes) and whether the head fits the model:
+    `shapes_match` compares `mtp.norm.weight`'s width with the model's hidden size (None when either is unknown). `graftable` is true
+    when the tensors are BF16, sit in one shard and do not contradict the hidden size. Nothing is grafted by stage 0: stage 2's graft
+    trial (orchard/graft_trial.py) serves the graft once, tries it against the safe configuration, and keeps it only when it measures better;
+    `graft_mtp` in swap_config.json and `tt-orchard package --graft-mtp` still force it by hand."""
+    if any(MTP_NAME.search(k) for k in mt):
+        return None
+    head = {k: v for k, v in bt.items() if MTP_NAME.search(k)}
+    if not head:
+        return None
+    shards, dtypes = sorted({v["shard"] for v in head.values()}), sorted({v["dtype"] for v in head.values()})
+    norm = next((v for k, v in head.items() if k.endswith("mtp.norm.weight")), None)
+    match = None if hidden_size is None or norm is None else norm["shape"] == [hidden_size]
+    return {"base_tensors": len(head), "base_revision": base_revision, "base_shards": shards, "dtypes": dtypes,
+            "hidden_size": hidden_size, "shapes_match": match,
+            "graftable": len(shards) == 1 and dtypes == ["BF16"] and match is not False}
+
+
+def model_hidden_size(model_dir: Path) -> int | None:
+    cfg, _ = read_json(model_dir / "config.json")
+    for holder in (cfg.get("text_config") if isinstance(cfg, dict) else None, cfg):
+        v = holder.get("hidden_size") if isinstance(holder, dict) else None
+        if isinstance(v, int) and not isinstance(v, bool):
+            return v
+    return None
+
+
 def generation_config_hazards(nearest_id: str, g: dict, ev) -> list[dict]:
     """Stage 2 serves a directory whose generation_config.json is the new model's when it ships one and the
     nearest model's when it does not. The nearest bundle's engine reads eos_token_id from that file (or from
@@ -1601,7 +1630,26 @@ def chat_template_hazards(tc: dict, ev) -> list[dict]:
                          "of them applies a chat template. Chat output was not checked.")}]
 
 
-def hazards(model_id: str, nearest_id: str, t: dict, f: dict, g: dict, disk: dict, ev, tc: dict) -> list[dict]:
+def graft_hazard(nearest_id: str, graft: dict, ev) -> dict:
+    """The one hazard line for a graft candidate: what it would do, or why it cannot be done."""
+    return {"area": "drafter_graft",
+            "finding": ((f"The {graft['base_tensors']} mtp.* tensors of {nearest_id} could be grafted onto the new model, which "
+                         "would let the drafter and on-device sampling stay on. Stage 2 does not graft by itself: after the safe "
+                         "configuration passes, its graft trial serves the grafted variant once and keeps it only when the measurement "
+                         "says it is better (stages/2/graft-decision.json; --no-graft-trial skips the trial). The head was "
+                         "trained on the nearest model, so the drafter's acceptance on the new model is not known until it is measured.")
+                        if graft["graftable"] else
+                        (f"The {graft['base_tensors']} mtp.* tensors of {nearest_id} cannot be grafted onto the new model: "
+                         + "; ".join(r for r in (
+                             "they are not all BF16 (" + ", ".join(graft["dtypes"]) + ")" if graft["dtypes"] != ["BF16"] else "",
+                             f"they sit in {len(graft['base_shards'])} shards" if len(graft["base_shards"]) != 1 else "",
+                             f"mtp.norm.weight does not match the new model's hidden size {graft['hidden_size']}"
+                             if graft["shapes_match"] is False else "") if r) + ".")),
+            "evidence": [ev("tensor-compare.json")]}
+
+
+def hazards(model_id: str, nearest_id: str, t: dict, f: dict, g: dict, disk: dict, ev, tc: dict,
+            graft: dict | None = None) -> list[dict]:
     out = [
         {"area": "tensor_cache",
          "finding": (f"A converted tensor cache of the nearest model ({nearest_id}) is keyed by layer "
@@ -1632,6 +1680,8 @@ def hazards(model_id: str, nearest_id: str, t: dict, f: dict, g: dict, disk: dic
                                 "sampling then moves to the host. Speed figures from the nearest model's "
                                 "packages do not carry over."),
                     "evidence": [ev("tensor-compare.json")]})
+    if graft:
+        out.append(graft_hazard(nearest_id, graft, ev))
     out += generation_config_hazards(nearest_id, g, ev)
     out += chat_template_hazards(tc, ev)
     if g["license_changed"] is True:
@@ -1676,6 +1726,8 @@ def main() -> int:
 
     model_tensors, base_tensors = read_tensors(model_dir)[1], read_tensors(base_dir)[1]
     backbone_names = set(model_tensors)
+    graft = graft_candidate(model_tensors, base_tensors, model_hidden_size(model_dir),
+                            base_dir.name if re.fullmatch(r"[0-9a-f]{40}", base_dir.name) else None)
     sc = compare_sidecars(model_dir, base_dir, backbone_names)
     write_json("sidecar-compare.json", sc)
     code = code_files(model_dir)
@@ -1707,6 +1759,7 @@ def main() -> int:
                                                               for x in values["samples"]]},
         "head": head,
         "mtp": {"nearest_tensors": t["mtp_tensors"]["base"], "new_tensors": t["mtp_tensors"]["model"]},
+        **({"graft_candidate": graft} if graft else {}),
         "draft": ("written by delta_triage.py from the evidence files; the agent reviews each finding "
                   "and adds hazards it can justify"),
         "differences": [
@@ -1724,7 +1777,7 @@ def main() -> int:
              "evidence": [ev("genconfig-license.json")]},
             {"area": "license", "finding": license_finding(g), "evidence": [ev("genconfig-license.json")]},
         ],
-        "hazards": hazards(model_id, nearest_id, t, f, g, disk, ev, tc),
+        "hazards": hazards(model_id, nearest_id, t, f, g, disk, ev, tc, graft),
     }
     if sc["sidecars"]:
         delta["differences"].append({"area": "other", "finding": sidecar_finding(sc),

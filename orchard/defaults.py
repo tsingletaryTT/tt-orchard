@@ -164,6 +164,18 @@ SUITE_READABLE_MIN_CHARS = 20   # choice: shorter replies are not judged on that
 SUITE_NO_VOWEL_WORD_CHARS = 5   # choice: a Latin word this long with no vowel (y counts) is suspect ...
 SUITE_NO_VOWEL_MIN_WORDS = 8    # choice: ... when at least this many such words are in the reply ...
 SUITE_NO_VOWEL_SHARE_MAX = 0.25  # choice: ... and more than this share of the words that long have none
+# The graft trial (orchard/graft_trial.py). Stage 2 serves the nearest model's mtp.* head grafted onto a model that has none, once, beside the
+# safe configuration, and ships the graft only when these hold. All three are provisional choices from one measurement: BAAI/AREX-2 on 2 chips,
+# 2026-10-23, decode 44 to 68 tokens/s with the graft against about 20 without, top-1 agreement 0.96875 both ways. Replace them with a
+# measurement of a second model.
+GRAFT_MIN_SPEEDUP = 1.25        # choice: the grafted variant's median decode speed must be at least this many times the safe configuration's
+                                # (the median of the four prompts' medians, greedy, one request at a time). The one observed ratio was about 3.
+GRAFT_TOP1_MARGIN = 0.05        # choice: the variant's top-1 agreement may be at most this far below the safe run's (teacher-forced, 32 tokens, so
+                                # one token is 0.03125; the margin allows one differing token and not two).
+GRAFT_TRIAL_DISK_GB = 40.0      # choice: the variant converts a second tensor cache; the 2-chip cache of Qwen3.8-27B weights measured 34 GB (2026-09-30).
+                                # Short of this the trial is skipped and the safe configuration stands.
+GRAFT_TRIAL_DEADLINE_S = 7200.0  # choice: one hardware test: a warm boot of the safe configuration (about 2 to 4 minutes), a cold boot of the variant
+                                # (4 to 25 minutes measured for this bundle), a warm boot of the variant, and 12 timed requests per boot.
 SWAP_MIN_TOKENS = 16            # choice: the fewest compared tokens the weights-only gate accepts; the
                                 # skill's script compares 32
 AGENT_MAX_TURNS = 60            # choice: model turns in one agent step before the step counts as failed

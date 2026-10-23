@@ -18,6 +18,7 @@ import json
 import socket
 from pathlib import Path
 
+from orchard import graft_trial
 from orchard.bringup_config import slug
 from orchard.nearest import read_installed
 
@@ -133,6 +134,7 @@ def draft_stage4(*, run_dir, tt_model_root, cache_root, hf_home, operator_home, 
     if problems:
         return {}, None, problems
     want = _repo(nearest)
+    grafted = graft_trial.chosen(run_dir)
     home = Path(cache_root) / slug(_repo(model))
     common = {"run_dir": str(run_dir), "nearest_model_id": want, "base_snapshot": snapshots["base"],
               "new_snapshot": snapshots["model"], "new_model_id": model, "hf_home": str(hf_home),
@@ -146,7 +148,10 @@ def draft_stage4(*, run_dir, tt_model_root, cache_root, hf_home, operator_home, 
         fit = [b for b in bundles if b.chips == n]
         if len(fit) == 1:
             configs[n] = {**common, "bundle_dir": str(Path(tt_model_root) / fit[0].name),
-                          "tt_cache": cache(fit[0].name), "port": FIRST_PORT + n}
+                          "tt_cache": cache(fit[0].name), "port": FIRST_PORT + n,
+                          # Stage 2's graft decision (orchard/graft_trial.py) covers the nearest model's own bundle, the server the trial
+                          # measured. A container package below is another server and keeps its configuration.
+                          **({"graft_mtp": True} if grafted else {})}
             continue
         if len(fit) > 1:
             notes.append(f"the {n}-chip configuration: more than one bundle serves {want}: "

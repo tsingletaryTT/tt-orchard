@@ -132,7 +132,7 @@ from orchard.context import build_messages, facts_from
 from orchard.defaults import (AGENT_CONTINUATION_TURNS, AGENT_WRAPUP_TURNS, CHIPS_PER_BOARD, CMD_TIMEOUT_S,
                               COLD_BOOT_BUDGET_S, CONTROL_POLL_S, FIRST_BOOT_EXPECTED,
                               FIRST_BOOT_PROMPT, PACKAGE_DEFERRED, PACKAGE_FORMATS,
-                              RUN_CANARY_PROMPT, STOP_TIMEOUT_S, TEST_DISK_GB, FAST_FAIL_S)
+                              GRAFT_TRIAL_DEADLINE_S, GRAFT_TRIAL_DISK_GB, RUN_CANARY_PROMPT, STOP_TIMEOUT_S, TEST_DISK_GB, FAST_FAIL_S)
 from orchard.handoff import (NOTE_KEYS, Blocked, Budgets, Handoff, decide_park, progress, reacquire,
                              recover, wait_stopped)
 from orchard.hwtests import (failed_tests, load_plan, move_aside, pending, read_plan, suspect_caches,
@@ -143,7 +143,8 @@ from orchard.package import finish as package_finish
 from orchard.paths import (PATHS_RECORDED, RunPaths, UnknownPlaceholder, absolute_path,
                            recorded_paths)
 from orchard.runner import Denied, check_string
-from orchard import kept_coder, swap_draft
+from orchard import graft_trial as graft
+from orchard import kept_coder, kernelprobe, swap_draft
 from orchard.server import ServerControl, ServerError, ServerSpec, StopCheck
 from orchard.stages import (PACKAGE_OPTIONS_SET, GateResult, TierUnavailable, attempt_started_ts,
                             budget_cap, check_disk, coder_state, delta_class, delta_path, evidence_record,
@@ -487,6 +488,8 @@ def coder_tier(cfg, port: int) -> str:
 BUNDLE_BUILD_TIMEOUT_S = 600            # build_bundle.py reads files and copies packages; no network
 SWAP_TEMPLATES = ("prepare_swap.py", "serve_and_compare.py", "prompt_suite.json")      # copied with a drafted swap_config.json
 STAGE4_TEMPLATES = (*SWAP_TEMPLATES, "serve_and_compare_container.py")     # into each drafted configs/<N>
+GRAFT_TRIAL_ENV = "ORCHARD_TRIAL_DIR"      # in the environment of the trial's test: the trial directory, so its servers can be found
+GRAFT_TRIAL_TEMPLATE = "graft_trial.py"     # copied into stages/2/graft-trial/ when the trial starts (orchard/graft_trial.py)
 
 
 class Supervisor:
@@ -499,8 +502,10 @@ class Supervisor:
                  paths: RunPaths | None = None, package: dict | None = None,
                  package_added: bool = False, unattended: bool = False, lab=None,
                  four_chip_package: str | None = None, coder_tier: str | None = None,
-                 keep_up: bool = False, coder_identity: dict | None = None):
+                 keep_up: bool = False, coder_identity: dict | None = None, graft_trial: bool = True):
         self.run_dir = Path(run_dir).resolve()
+        # Stage 2 serves a grafted drafter once beside the safe configuration when stage 0 found a candidate; False skips that test.
+        self.graft_trial = graft_trial
         # Lab mode only: in local mode tests park the coder for its board, so a kept coder saves little.
         self.keep_up = keep_up and lab is not None
         self.coder_identity = coder_identity      # what kept_coder.mismatch compares
@@ -688,6 +693,7 @@ class Supervisor:
         if not p.started:
             self.ledger.append("run_start", None, model=self.model_id, versions=self.versions,
                                inputs=self.inputs, required_chips=list(self.required_chips or ()) or None,
+                               graft_trial=self.graft_trial,
                                paths=self.paths.record(), package=self.package,
                                coder=self.coder.record(),
                                tiers={k: dict(v) for k, v in self.cfg.tiers.items()},
@@ -1200,6 +1206,11 @@ class Supervisor:
                 return out.status, [f"the {step.phase} step's continuation ended: "
                                     f"{out.status} {out.detail}".strip(), *gate.reasons], None
             gate = self._check_gate(spec, stage_dir)
+        if gate.ok and spec.number == 2 and spec.draft == "swap_config":
+            # The safe configuration passed. A model with a graft candidate is tried once more with the grafted drafter. The trial cannot
+            # fail the stage: a failed or slow trial leaves the safe result as it is.
+            if self._graft_trial(spec, stage_dir):
+                gate = self._check_gate(spec, stage_dir)       # the gate also reads the decision file
         return ("pass", [], gate) if gate.ok else ("fail", list(gate.reasons), gate)
 
     def _wrap_up(self, spec, stage_dir: Path, step: AgentStep, out):
@@ -1564,7 +1575,11 @@ class Supervisor:
             problems.append(f"the test command is refused: {exc}")
         return test, problems
 
-    def _hardware_phase(self, spec, stage_dir: Path, test: dict) -> None:
+    def _hardware_phase(self, spec, stage_dir: Path, test: dict, *, after_test=None, **record) -> None:
+        """Lease the chips (parking the coder when its board is needed), run `test`, give them back. `record` names where the run's record
+        and output go (see _run_test); the graft trial uses it to leave stage 2's own test record alone. `after_test` runs when the test
+        ends however it ends (a result, a timeout, an interrupt, an error) and before the coder is restored or the lease released: the
+        trial uses it to stop the servers its helpers started, which a kill of the test's own session does not reach."""
         n = spec.number
         if self.lab is not None:
             return self._lab_hardware_phase(spec, stage_dir, test)
@@ -1575,7 +1590,11 @@ class Supervisor:
         if d.park_needed:
             h = self._handoff(n, self.coder_lease)
             lease = h.park()
-            self._run_test(spec, stage_dir, test, lease)
+            try:
+                self._run_test(spec, stage_dir, test, lease, **record)
+            finally:
+                if after_test is not None:
+                    after_test()
             h.restore()
             self.coder_lease = h.lease
             return
@@ -1587,13 +1606,115 @@ class Supervisor:
                           wait_budget_s=spec.budget_s, clock=self.clock, sleep=self.sleep, exact=exact)
         self.test_lease = lease
         self.ledger.append("decision", n, decision="test lease taken", test_lease=lease.record())
-        self._run_test(spec, stage_dir, test, lease)
+        try:
+            self._run_test(spec, stage_dir, test, lease, **record)
+        finally:
+            if after_test is not None:
+                after_test()
         try:
             self.adapter.release(lease)        # the lease tool resets the board as it releases
         except AdapterError as exc:
             self._block(n, f"releasing the test lease failed: {exc}", lease_id=lease.lease_id)
         self.test_lease = None
         self.ledger.append("decision", n, decision="test lease released", lease_id=lease.lease_id)
+
+    def _graft_trial(self, spec, stage_dir: Path) -> bool:
+        """Stage 2's graft trial (orchard/graft_trial.py). Returns True when it wrote a decision file now.
+
+        Only for a model whose stage 0 delta has a graft candidate (the nearest model's mtp.* head fits and the model has none). One more
+        hardware test, under the same lease rules as stage 2's own, runs skills/weights-swap-templates/graft_trial.py: it times the safe
+        configuration, serves the grafted variant and times that. The decision is code (graft.decide): the graft is shipped only when
+        the variant served, agreed with the CPU reference and decoded enough faster. A test that fails, times out or leaves no result is
+        recorded and the safe configuration stands. graft-decision.json is the marker: a finished stage 2 is not tried again, and a kill
+        after the test's own record resumes at the decision without booting again."""
+        n = spec.number
+        if (stage_dir / graft.DECISION_FILE).exists():
+            return False
+        try:
+            delta = json.loads((self.run_dir / "stages" / "0" / "delta.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
+        cand = graft.candidate(delta)
+        if cand is None:
+            return False
+        skip = None
+        if not self.graft_trial:
+            skip = "the graft trial was skipped: --no-graft-trial"
+        elif self.lab is not None:
+            skip = "the graft trial was skipped: it runs on this box's chips and this run's tests run on a lab"
+        else:
+            enough, free = check_disk(self.run_dir, GRAFT_TRIAL_DISK_GB, usage=self.disk_usage)
+            if not enough:
+                skip = (f"the graft trial was skipped: the grafted variant converts a second tensor cache and needs "
+                        f"{GRAFT_TRIAL_DISK_GB:g} GB free on the run directory's disk; {free} GB is free")
+        if skip:
+            self.ledger.append("decision", n, decision="graft trial skipped", reason=skip)
+            decision = {"choice": "safe", "reason": skip, "numbers": {}, "thresholds": {}}
+            graft.write_decision(stage_dir, decision, candidate=cand, trial=False)
+            self._record_graft_decision(stage_dir, decision)
+            return True
+        trial_dir = stage_dir / graft.TRIAL_DIR
+        trial_dir.mkdir(exist_ok=True)
+        marker = trial_dir / "test-result.json"
+        if not marker.is_file():
+            shutil.copy2(Path(self.paths.orchard_dir) / "orchard" / "skills" / "weights-swap-templates" / GRAFT_TRIAL_TEMPLATE,
+                         trial_dir / GRAFT_TRIAL_TEMPLATE)
+            (trial_dir / "trial_config.json").write_text(
+                json.dumps({"stage_dir": str(stage_dir), "orchard_dir": str(self.paths.orchard_dir)}, indent=2) + "\n", encoding="utf-8")
+            self.ledger.append("decision", n, decision="graft trial started", candidate=cand,
+                               note="serving the nearest model's mtp.* head grafted onto this model, beside the safe configuration")
+            test = {"command": f"python3 stages/{n}/{graft.TRIAL_DIR}/{GRAFT_TRIAL_TEMPLATE}", "deadline_s": GRAFT_TRIAL_DEADLINE_S}
+            self._hardware_phase(spec, stage_dir, test, record=f"{graft.TRIAL_DIR}/test-result.json",
+                                 output=f"{graft.TRIAL_DIR}/evidence/hw-test-output.txt", what="graft trial test",
+                                 env_extra={GRAFT_TRIAL_ENV: str(trial_dir.resolve())},
+                                 after_test=lambda: self._stop_trial_servers(n, trial_dir, "after the trial test"))
+        try:
+            record = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            record = {}
+        trial = None
+        if record.get("returncode") == 0 and not record.get("timed_out"):
+            try:
+                trial = json.loads((trial_dir / graft.TRIAL_RESULT).read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                trial = None
+        try:
+            safe_top1 = json.loads((stage_dir / "result.json").read_text(encoding="utf-8")).get("top1_agreement")
+        except (OSError, ValueError, AttributeError):
+            safe_top1 = None
+        decision = graft.decide(trial, safe_top1=safe_top1)
+        if trial is None:
+            if record.get("timed_out"):
+                why = "the graft trial timed out and was stopped"
+            elif record.get("returncode") not in (0, None):
+                why = f"the graft trial did not finish (exit code {record['returncode']})"
+            else:
+                why = f"the graft trial wrote no {graft.TRIAL_RESULT}"
+            decision = {**decision, "reason": f"{why}; the safe configuration stands"}
+        graft.write_decision(stage_dir, decision, candidate=cand)
+        self._record_graft_decision(stage_dir, decision)
+        return True
+
+    def _stop_trial_servers(self, n: int, trial_dir: Path, when: str) -> None:
+        """Stop what the graft trial's helpers left running. measure_serving.py and serve_and_compare.py start run.sh in a session of their
+        own, so the kill of the trial's session on a deadline or an interrupt does not reach a server, and a server that stays up holds the
+        chips. Every process of this user that carries the trial directory in ORCHARD_TRIAL_DIR is stopped (SIGTERM, then SIGKILL), with the
+        identity it had (pid, boot id, start time) written to the ledger. A server that is still there afterwards blocks the run: the coder
+        is not restored over it. The trial does not release the lease itself; the run's wind-down does, and gozer refuses to reset a
+        chip that a server holds."""
+        records = kernelprobe.sweep_strays(trial_dir, var=GRAFT_TRIAL_ENV, identity=True)
+        if records:
+            self.ledger.append("decision", n, decision="graft trial servers stopped", when=when, servers=records)
+        left = [r["pid"] for r in records if not r.get("stopped")]
+        if left:
+            self._block(n, "a server of the graft trial is still running (pid " + ", ".join(str(p) for p in left) + "), so the coder is "
+                           "not restored over it; stop it and run the command again", pids=left)
+
+    def _record_graft_decision(self, stage_dir: Path, decision: dict) -> None:
+        """The ledger's copy of the decision, with the decision file's sha256 so a later stage can tell the file was not changed."""
+        path = stage_dir / graft.DECISION_FILE
+        self.ledger.append("decision", 2, decision="graft decision", choice=decision["choice"], reason=decision["reason"],
+                           numbers=decision["numbers"], decision_file=evidence_record(self.run_dir, path))
 
     def _lab_hardware_phase(self, spec, stage_dir: Path, test: dict) -> None:
         """The hardware phase with a lab box: lease the chips there, run the test there, give the
@@ -1620,6 +1741,9 @@ class Supervisor:
         """Give back test leases an earlier supervisor of this run took and never released (it died, and nothing
         released them). Only leases this run's ledger records, and only those taken where this supervisor runs: a lab
         run gives back the lab's, a local run this box's. A lease that is already gone is noted as not released."""
+        trial_dir = self.run_dir / "stages" / "2" / graft.TRIAL_DIR
+        if self.lab is None and trial_dir.is_dir():
+            self._stop_trial_servers(2, trial_dir, "when the run started again")
         taken, released = {}, set()
         for e in self.ledger.read():
             d = e["data"]
@@ -1672,25 +1796,29 @@ class Supervisor:
         known.update(audit)
         path.write_text(json.dumps(known, indent=2, sort_keys=True))
 
-    def _run_test(self, spec, stage_dir: Path, test: dict, lease: Lease) -> dict:
+    def _run_test(self, spec, stage_dir: Path, test: dict, lease: Lease, *, record: str = "test-result.json",
+                  output: str = "evidence/hw-test-output.txt", what: str = "hardware test", env_extra: dict | None = None) -> dict:
         n = spec.number
         k = spec.boards * CHIPS_PER_BOARD
         deadline = min(float(test["deadline_s"]), spec.budget_s)
-        result = self._spawn(n, test["command"], lease.chips[:k], lease.dev_indices[:k], deadline,
-                             stage_dir / "evidence" / "hw-test-output.txt", lease_id=lease.lease_id)
-        marker = stage_dir / "test-result.json"
-        tmp = stage_dir / "test-result.json.tmp"
+        out_path = stage_dir / output
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        result = self._spawn(n, test["command"], lease.chips[:k], lease.dev_indices[:k], deadline, out_path,
+                             env_extra=env_extra, lease_id=lease.lease_id)
+        marker = stage_dir / record
+        tmp = marker.with_name(marker.name + ".tmp")
         tmp.write_text(json.dumps(result, indent=2))
         os.replace(tmp, marker)         # the resume marker appears whole or not at all
-        self.ledger.append("evidence", n, what="hardware test", returncode=result["returncode"],
+        self.ledger.append("evidence", n, what=what, returncode=result["returncode"],
                            timed_out=result["timed_out"], **evidence_record(self.run_dir, marker))
         return result
 
     def _spawn(self, n: int, command: str, chips, ids, deadline: float, out_path: Path,
-               **record) -> dict:
+               env_extra: dict | None = None, **record) -> dict:
         """Run one hardware test command on `chips` (device indices `ids`) and return its record.
-        `record` adds keys to the "hardware test started" decision."""
+        `record` adds keys to the "hardware test started" decision; `env_extra` adds variables to the test's environment."""
         env = agent_env(self.run_dir, extra=self.extra_env)
+        env.update(env_extra or {})
         # The leased chips replace the agent shells' no-chip mask. TT_METAL_VISIBLE_DEVICES takes
         # device indices in another form, so the hardware test gets none and the runtime follows
         # TT_VISIBLE_DEVICES. A container test needs the /dev/tenstorrent indices of the same
@@ -2051,6 +2179,10 @@ def parse(argv=None):
     r.add_argument("--lab-test-python", default=None, metavar="PATH",
                    help="the interpreter tests run with on the lab (its directory goes first on PATH), such as "
                         "the reference venv under --lab-root")
+    r.add_argument("--no-graft-trial", action="store_true",
+                   help="skip stage 2's graft trial: with a graft candidate (the model has no mtp.* tensors and the nearest model has "
+                        "a head that fits) stage 2 serves the grafted drafter once and keeps it when it is faster; this leaves the "
+                        "safe configuration without that extra test (a cold boot adds 4 to 25 minutes). The run records the choice")
     r.add_argument("--unattended", action="store_true",
                    help="never wait for an operator: when the run would pause, name the reason, write "
                         "BLOCKED.md, release the hardware and exit 5. Running the command again retries. "
@@ -2138,6 +2270,9 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
             raise ValueError(f"this run started with required chips {recorded}; --required-chips "
                              f"{required} differs. Leave the option out to resume with the recorded value")
         required = recorded
+    graft_on = not getattr(args, "no_graft_trial", False)
+    if progress.started and (progress.run_start or {}).get("graft_trial") is False:
+        graft_on = False                        # a run that opted out of the graft trial stays opted out
     home = operator_home() if home is None else home
     paths = run_paths(args, run_dir, recorded_paths(entries) if progress.started else None,
                       home=home, environ=environ)
@@ -2194,7 +2329,7 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
                       clock=clock, sleep=sleep, budgets=budgets, disk_usage=disk_usage,
                       credentials_visible=found, required_chips=required,
                       home=home, containers=containers, paths=paths, package=package,
-                      package_added=added, unattended=getattr(args, "unattended", False),
+                      package_added=added, unattended=getattr(args, "unattended", False), graft_trial=graft_on,
                       lab=lab if lab_host else None,
                       four_chip_package=getattr(args, "four_chip_package", None), coder_tier=tier,
                       keep_up=bool(getattr(args, "coder_keep_up", False)),

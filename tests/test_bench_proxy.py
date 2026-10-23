@@ -233,3 +233,106 @@ def test_the_proxy_listens_only_on_loopback(rig):
 def test_an_upstream_that_is_not_loopback_is_refused(tmp_path):
     with pytest.raises(ValueError, match="loopback"):
         bp.Proxy("http://example.com:8100", inject={}, log_path=tmp_path / "p.jsonl")
+
+
+# ---- replies cut off by a stop string inside the reasoning ----------------------------------------------------------------------------------
+# lm-eval's gsm8k task sends the stop strings "Question:", "</s>" and "<|im_end|>". vLLM matches a stop string against the reasoning text too, so a
+# thinking model that restates "Question:" in its thinking is stopped there: finish_reason "stop", reasoning text, and no content.
+
+def rec(**kw):
+    base = {"status": 200, "error": False, "finish_reason": "stop", "completion_tokens": 20, "reasoning_chars": 80, "content_chars": 0}
+    base.update(kw)
+    return base
+
+
+def test_the_record_has_the_length_of_the_content(rig):
+    up, proxy = rig(answer=lambda p, b: (200, {"choices": [{"finish_reason": "stop", "message": {"content": "hello", "reasoning_content": "x"}}], "usage": {}}))
+    post(proxy.port, "/v1/chat/completions", {})
+    assert proxy.records[0]["content_chars"] == 5
+
+
+def test_a_null_content_is_zero_characters(rig):
+    up, proxy = rig(answer=lambda p, b: (200, {"choices": [{"finish_reason": "stop", "message": {"content": None, "reasoning_content": "abc"}}], "usage": {}}))
+    post(proxy.port, "/v1/chat/completions", {})
+    assert proxy.records[0]["content_chars"] == 0
+
+
+def test_a_text_completion_counts_its_text_as_the_content(rig):
+    up, proxy = rig(answer=lambda p, b: (200, {"choices": [{"finish_reason": "stop", "text": "abcd"}], "usage": {}}))
+    post(proxy.port, "/v1/completions", {})
+    assert proxy.records[0]["content_chars"] == 4
+
+
+def test_a_reply_with_reasoning_and_no_content_that_stopped_is_a_suspect():
+    assert bp.stop_truncated_suspect(rec()) is True
+
+
+def test_the_number_of_tokens_does_not_matter_when_the_content_is_known_to_be_empty():
+    assert bp.stop_truncated_suspect(rec(completion_tokens=185)) is True
+
+
+def test_a_reply_with_content_is_not_a_suspect():
+    assert bp.stop_truncated_suspect(rec(content_chars=12)) is False
+
+
+def test_a_reply_cut_off_at_the_length_limit_is_not_a_suspect():
+    assert bp.stop_truncated_suspect(rec(finish_reason="length")) is False
+
+
+def test_a_reply_with_no_reasoning_is_not_a_suspect():
+    assert bp.stop_truncated_suspect(rec(reasoning_chars=0)) is False
+
+
+def test_a_failed_request_is_not_a_suspect():
+    assert bp.stop_truncated_suspect(rec(error=True, status=500)) is False
+
+
+def test_a_record_from_before_content_was_recorded_is_judged_by_its_length():
+    old = {"status": 200, "error": False, "finish_reason": "stop", "completion_tokens": 20, "reasoning_chars": 80}
+    assert bp.stop_truncated_suspect(old) is True
+    assert bp.stop_truncated_suspect({**old, "completion_tokens": bp.SHORT_REPLY_TOKENS}) is True
+    assert bp.stop_truncated_suspect({**old, "completion_tokens": bp.SHORT_REPLY_TOKENS + 1}) is False
+
+
+def test_the_short_reply_bound_is_35_tokens():
+    old = {"status": 200, "error": False, "finish_reason": "stop", "reasoning_chars": 80}
+    assert bp.SHORT_REPLY_TOKENS == 35
+    assert bp.stop_truncated_suspect({**old, "completion_tokens": 35}) is True
+    assert bp.stop_truncated_suspect({**old, "completion_tokens": 36}) is False
+
+
+def test_an_old_record_with_no_token_count_or_no_reasoning_is_not_a_suspect():
+    old = {"status": 200, "error": False, "finish_reason": "stop", "completion_tokens": 20, "reasoning_chars": 80}
+    assert bp.stop_truncated_suspect({**old, "completion_tokens": None}) is False
+    assert bp.stop_truncated_suspect({**old, "reasoning_chars": 0}) is False
+
+
+def test_the_summary_counts_the_suspects(rig):
+    state = {"n": 0}
+
+    def varied(path, body):
+        state["n"] += 1
+        n = state["n"]
+        msg = {"content": None, "reasoning_content": "thinking"} if n in (1, 3) else {"content": "answer", "reasoning_content": "thinking"}
+        return 200, {"choices": [{"finish_reason": "stop", "message": msg}], "usage": {"prompt_tokens": 5, "completion_tokens": 9}}
+    up, proxy = rig(answer=varied)
+    for _ in range(4):
+        post(proxy.port, "/v1/chat/completions", {})
+    assert proxy.summary()["stop_truncated_suspects"] == 2
+
+
+def test_the_summary_of_nothing_has_no_suspects(rig):
+    up, proxy = rig()
+    assert proxy.summary()["stop_truncated_suspects"] == 0
+
+
+def test_a_finished_runs_log_is_counted_line_by_line(tmp_path):
+    log = tmp_path / "requests.jsonl"
+    lines = [rec(), rec(content_chars=3), rec(completion_tokens=99), {"finish_reason": "stop", "completion_tokens": 10, "reasoning_chars": 9, "error": False}]
+    log.write_text("".join(json.dumps(x) + "\n" for x in lines) + '{"finish_reason": "sto')                  # a torn last line is skipped
+    assert bp.count_stop_suspects(log) == {"requests": 4, "suspects": 3}
+
+
+def test_a_log_that_is_not_there_is_an_error_that_names_it(tmp_path):
+    with pytest.raises(FileNotFoundError, match="requests.jsonl"):
+        bp.count_stop_suspects(tmp_path / "requests.jsonl")
