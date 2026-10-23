@@ -1946,3 +1946,24 @@ here is a placeholder for the merge to fix.
   automatically and it costs a boot per configuration); the extra chip time (about 8 requests of up to 64 tokens per configuration, roughly a minute at
   20 tokens/s, more with thinking on); stage 2's template copy is not hash-stamped the way stages 0 and 1 are, so an agent could still edit
   `swap-check.json` itself; whether a lightly fine-tuned model can match its base on all eight prompts (the identical-replies rule would then need a person).
+
+- Review fixes (Copilot, PR 49). All three findings were real; each was reproduced by a failing test first.
+  - A control has to be the nearest model. The gate rejected a control only when its model id equalled the new model's, so a same-suite control of an
+    unrelated model could explain a blocking finding away. `prompt_suite.control_identity_problem(expected, actual)` compares repository ids exactly and,
+    when the nearest model is pinned (`org/name@<40 hex>`), the revision; a pin the control does not carry cannot be checked, so it fails. The template
+    (`load_control`) checks `nearest_model_id` before any server starts and exits 2 with the reason, with the same rule written out in the script (it
+    imports nothing from `orchard`; a test keeps the two equal). The gates call `evaluate(report, nearest_model=...)` with the id from stage 0's
+    `delta.json`, not from the stage's `swap_config.json`, which an agent writes. A control that fails the check explains nothing, so the finding it would
+    have covered fails the stage, and a stage 0 with no nearest model leaves any control unverified. `python3 -m orchard.prompt_suite` takes
+    `--nearest-model`; leaving it out keeps the old behaviour for callers that have no run. Fixtures with a control now write a stage 0 delta.
+  - A cut-off or malformed HTTP answer to one suite request is that prompt's error. `http.client.IncompleteRead` and `BadStatusLine` are not OSErrors,
+    so they left `ask_suite_prompt()` and ended the hardware test before `write_report()` saved the 32-token measurement. They are caught there, and a
+    cut error body is said in place of its text with the status kept (`error_body`, also used by the 32-token request). The tests talk to a raw socket
+    that sends those bytes, and the fake swap server has a `chat_break_for` option for an end-to-end case. The container template shares the helper.
+  - The graft trial's variant gets `prompt_suite.json`. The variant copied only the two scripts, so with the suite on (every drafted config) its
+    `suite_preflight()` exited 2, and each eligible trial kept the safe configuration without measuring the graft. `graft_trial.shipped(cfg)` adds the
+    shipped file when `cfg["prompt_suite"]` is truthy, as the preflight reads it, and the script checks the checkout has it. The tests run the real
+    preflight on the variant, not a stub serving script.
+  - Mutations: 13 + 6 + 7 + 3 on the identity rule and the gates, 9 on the template copy of it, 7 + 2 on the HTTP handling, 6 on the copy list. First-run
+    survivors (an `@` taken as a revision in either copy, an unreadable error body that raises an OSError, and a blank nearest model, which was an
+    equivalent check and was removed) each got a test or were simplified away.
