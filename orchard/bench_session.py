@@ -38,7 +38,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import bench_proxy, toolcall_bench
+from . import bench_control, bench_proxy, toolcall_bench
 from .stallwatch import StallWatcher, run_watched
 
 HERE = Path(__file__).resolve().parent
@@ -290,6 +290,28 @@ def load_items(path) -> dict:
     return {phase: sorted(set(ids)) for phase, ids in data.items()}
 
 
+def control_summary(run_sh, record=None, model_dir=None) -> dict:
+    """What a summary.json says about how the server was started: the drafter and sampling mode the run.sh asks for and, for a base control, the record
+    `orchard.bench_control build` wrote. A record for another script is refused, because its numbers would describe a different serving mode. With a
+    `model_dir` (required with a record) the record's `base_snapshot` must be that directory (links resolved): the session exports `model_dir` as
+    MODEL_WEIGHTS_DIR, which the runtime reads before the script's own path, so a control script beside the fine-tune's directory would serve the
+    fine-tune and be reported as the base."""
+    data = Path(run_sh).read_bytes()
+    out = {"serving": bench_control.serving_facts(data.decode("utf-8", "replace"))}
+    if record is not None:
+        if record.get("control_sha256") != hashlib.sha256(data).hexdigest():
+            raise ValueError(f"the control record is for another script than {run_sh}")
+        if not model_dir:
+            raise ValueError("a control record needs --model-dir, to show that the session serves the base's weights")
+        snap = record.get("base_snapshot")
+        if not isinstance(snap, str) or not snap:
+            raise ValueError("the control record has no base_snapshot, so it cannot show that --model-dir holds the base's weights")
+        if os.path.realpath(snap) != os.path.realpath(model_dir):
+            raise ValueError(f"--model-dir {model_dir} is not the control record's base_snapshot {snap}")
+        out["control"] = record
+    return out
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--label", required=True)
@@ -297,6 +319,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--model-id", help="the id the tensor cache marker must name (the weights served)")
     ap.add_argument("--run-sh")
     ap.add_argument("--model-dir")
+    ap.add_argument("--control-record", help="the .control.json that `orchard.bench_control build` wrote for --run-sh; copied into summary.json")
     ap.add_argument("--tt-cache")
     ap.add_argument("--hf-home")
     ap.add_argument("--port", type=int, default=8100)
@@ -346,6 +369,14 @@ def main(argv=None) -> int:
         absent = [p for p in phases if p not in a.items]
         if absent:
             ap.error(f"the items file has no entry for phase {', '.join(absent)}")
+    control = None
+    if a.control_record:
+        if a.url or not a.run_sh:
+            ap.error("--control-record needs --run-sh and no --url")
+        try:
+            control = control_summary(a.run_sh, json.loads(Path(a.control_record).read_text(encoding="utf-8")), model_dir=a.model_dir)
+        except (OSError, ValueError) as exc:
+            ap.error(f"--control-record: {exc}")
     if "bfcl" in phases and not a.bfcl_dir:
         ap.error("the bfcl phase needs --bfcl-dir")
     if not a.url:
@@ -371,6 +402,10 @@ def main(argv=None) -> int:
                "lm_eval_version": None, "started_at": started, "phases": []}
     if code_sandbox is not None:
         summary["code_sandbox"] = code_sandbox
+    if control is not None:
+        summary.update(control)
+    elif a.run_sh and not a.url and Path(a.run_sh).is_file():
+        summary.update(control_summary(a.run_sh))
 
     def write():
         summary["wall_s"] = round(time.time() - started, 1)

@@ -72,7 +72,7 @@ def boot(tmp_path, monkeypatch):
                               text=True, timeout=180, env=clean, cwd=r["run"])
 
     state = {**r, "facts": facts, "out": out, "verify": verify, "test": test, "check": check,
-             "pid_file": pid_file, "cfg": cfg}
+             "pid_file": pid_file, "cfg": cfg, "server_cfg": server_cfg}
     try:
         yield state
     finally:
@@ -189,3 +189,46 @@ def test_auxiliary_repos_never_include_the_nearest_model():
     env = {"DFLASH_WEIGHTS": f"{DRAFTER}@{'d' * 40}", "OTHER": BASE, "ARCH_NAME": "blackhole",
            "X": "a/b/c", "Y": "1"}
     assert aux_repos(env, nearest_model=BASE) == [DRAFTER]
+
+
+# ---- the verifier records the server it starts, so a caller that must kill it can still stop the server ------
+
+def test_a_clean_check_leaves_no_server_record(boot):
+    r = boot["check"]("perfect")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not (boot["verify"] / "evidence" / "server.pid").exists()
+
+
+def test_a_failed_check_leaves_no_server_record_either(boot):
+    r = boot["check"]("http500")
+    assert r.returncode == 5, r.stdout + r.stderr
+    assert not (boot["verify"] / "evidence" / "server.pid").exists()
+
+
+def test_the_record_names_the_server_while_it_runs_and_survives_a_killed_verifier(boot):
+    """The scenario of the review: the verifier is killed (a timeout kills its session), the server it started runs in
+    a session of its own and keeps running, and the record is what is left to find it by."""
+    boot["server_cfg"].write_text(json.dumps({"mode": "slow", "delay_s": 5, "vocab": VOCAB, "prompt_ids": PROMPT_IDS,
+                                              "generated_ids": GENERATED, "pid_file": str(boot["pid_file"])}))
+    clean = {k: v for k, v in os.environ.items() if k not in ("MODEL_WEIGHTS_DIR", "HF_MODEL")}
+    verifier = subprocess.Popen([sys.executable, str(boot["verify"] / "verify_bundle.py")], env=clean,
+                                cwd=boot["run"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                start_new_session=True)
+    record = boot["verify"] / "evidence" / "server.pid"
+    try:
+        end = time.monotonic() + 60
+        while time.monotonic() < end and not (record.exists() and boot["pid_file"].exists()):
+            time.sleep(0.1)
+        assert record.exists() and boot["pid_file"].exists()
+        rec = json.loads(record.read_text())
+        server = json.loads(boot["pid_file"].read_text())
+        assert rec["pid"] == server["pid"] == server["pgid"]                 # the server leads its own group
+        from orchard.server import proc_identity
+        assert (rec["boot_id"], rec["start_time"]) == proc_identity(rec["pid"])
+        os.killpg(verifier.pid, signal.SIGKILL)                              # what spawn_checked does on a timeout
+        verifier.wait()
+        assert group_alive(server["pgid"]) and record.exists()               # the server outlived it, and the record too
+    finally:
+        if verifier.poll() is None:
+            os.killpg(verifier.pid, signal.SIGKILL)
+            verifier.wait()

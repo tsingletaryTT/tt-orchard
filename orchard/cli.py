@@ -10,6 +10,8 @@
     tt-orchard lab setup [--model ORG/NAME]... [--yes] [--check]
     tt-orchard caches   [--lab] [--prune --older-than DAYS [--yes]]
     tt-orchard coder    [status | stop [--yes]]
+    tt-orchard package  RUN_DIR --namespace ORG [--step stage|boot|finish|all] [--restage] [--exact CHIP]
+    tt-orchard package-card RUN_DIR --benchmark FILE --model-key KEY [--base-key KEY] [--reported FILE] [--accept-unverified-identity]
     tt-orchard kernel-env [--check] [--src-dir DIR] [--venv-dir DIR] [--tt-lang-skill-dir DIR] [--allow-stale-skills]
     tt-orchard inventory TARGET [--python P] [--ttnn-python P] [--against F] [--layers N] [--seq N] [--class C] [--out DIR]
     tt-orchard coder-speed [--endpoint URL --model NAME | --tiers] [--samples N] [--watch SECONDS] [--json]
@@ -157,6 +159,40 @@ def _parser() -> argparse.ArgumentParser:
     from orchard import kept_coder as _kept
     sub.add_parser("coder", parents=[common, _kept.parser(add_help=False)],
                    help="show or stop the coder a lab run kept up ([coder] keep_up)")
+    pk = sub.add_parser("package", parents=[common],
+                        help="package a finished run (stage 7): stage, boot-check under a gozer lease, write the "
+                             "cards, run the gate, and print the publish commands as text. Publishes nothing")
+    pk.add_argument("run_dir", help="the run directory (it must have ended ready-for-operator-review)")
+    pk.add_argument("--namespace", help="the Hugging Face organisation the package will be published under "
+                                        "(needed to stage)")
+    pk.add_argument("--step", choices=("all", "stage", "boot", "finish"), default="all",
+                    help="all (default); or one part of it. boot opens the chips, so it runs only under a lease")
+    pk.add_argument("--restage", action="store_true",
+                    help="move an earlier stages/7 aside and stage again (without it an existing stage 7 is refused)")
+    pk.add_argument("--exact", type=int, metavar="CHIP",
+                    help="give gozer this chip number: it leases the board that holds it")
+    pk.add_argument("--models-root", help="where installed tt-model bundles live (default: the run's recorded path)")
+    pk.add_argument("--cache-root", help="the cache root; the kernel cache is under it (default: the run's recorded path)")
+    pk.add_argument("--gozer", default="gozer", help="the gozer command (default gozer)")
+    pk.add_argument("--handoff", metavar="TOKEN", help="set by `package` for the boot step its lease command runs: "
+                                                       "proves the parent holds the run. Leave it out; a bare "
+                                                       "`--step boot` takes the run itself")
+    pk.set_defaults(python=sys.executable)
+    pc = sub.add_parser("package-card", parents=[common],
+                        help="put benchmark results, and optionally the authors' reported scores, in the package "
+                             "cards of a packaged run, then gate it again")
+    pc.add_argument("run_dir", help="the run directory that `tt-orchard package` finished")
+    pc.add_argument("--benchmark", required=True, metavar="FILE",
+                    help="a benchmark.json: {\"tasks\": {task: {KEY: {score, n, cut_off?}, \"paired\": {sign_test_p?}}}}")
+    pc.add_argument("--model-key", required=True, metavar="KEY", help="the key of the model under test in that file")
+    pc.add_argument("--base-key", metavar="KEY", help="the key of the nearest model, run under the same conditions")
+    pc.add_argument("--reported", metavar="FILE", help="a reported-results.json of the scores the authors report")
+    pc.add_argument("--replace-reported", action="store_true",
+                    help="replace reported scores the run already holds")
+    pc.add_argument("--accept-unverified-identity", action="store_true",
+                    help="go on when the benchmark file does not say which model (and revision) each key is, so the "
+                         "scores cannot be shown to be this package's. A file that names another model is always "
+                         "refused. The ledger records what was not verified")
     k = sub.add_parser("kernel-env", parents=[common],
                        help="build or check the tt-lang simulator environment that kernel-probe uses")
     k.add_argument("--check", action="store_true",
@@ -626,6 +662,12 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
         return bringup_config.load(find_config(getattr(args, "config", None), env, CHECKOUT, home)), \
             find_config(getattr(args, "config", None), env, CHECKOUT, home)
 
+    if args.cmd == "package":
+        from orchard import package_cmd
+        return package_cmd.main(args, out=out, env=env)
+    if args.cmd == "package-card":
+        from orchard import package_cmd
+        return package_cmd.card_main(args, out=out)
     if args.cmd == "kernel-env":
         from orchard import ttlang_env
         return ttlang_env.main(args, out=out)

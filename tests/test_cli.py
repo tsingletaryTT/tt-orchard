@@ -918,3 +918,90 @@ def test_kernel_probe_defaults(monkeypatch, tmp_path):
     assert (args.attempts, args.phase, args.out, args.endpoint, args.model) == (5, "sim", "kernel-probe", None, None)
     assert args.shared_python == str(tmp_path / ".tenstorrent-venv" / "bin" / "python")
     assert kw["tier_config"] is None                       # no config: kernelprobe.main refuses, naming the flags
+
+
+# ---------------------------------------------------------------- package and package-card (issue 22)
+
+def test_package_passes_its_flags_to_the_command_and_returns_its_exit_code(tmp_path, monkeypatch):
+    from orchard import cli, package_cmd
+    seen = {}
+
+    def fake_main(args, *, out=None, **kw):
+        seen.update(vars(args))
+        return 3
+
+    monkeypatch.setattr(package_cmd, "main", fake_main)
+    monkeypatch.setenv("ORCHARD_BRINGUP_CONFIG", str(tmp_path / "does-not-exist.toml"))
+    code = cli.main(["package", str(tmp_path / "run"), "--namespace", "episod", "--exact", "2", "--restage",
+                     "--models-root", "/m", "--cache-root", "/c", "--gozer", "/bin/gozer"], stdout=io.StringIO())
+    assert code == 3
+    assert seen["run_dir"] == str(tmp_path / "run") and seen["namespace"] == "episod" and seen["exact"] == 2
+    assert seen["restage"] is True and seen["step"] == "all"
+    assert (seen["models_root"], seen["cache_root"], seen["gozer"]) == ("/m", "/c", "/bin/gozer")
+
+
+def test_package_defaults_to_no_restage_and_the_whole_flow(tmp_path, monkeypatch):
+    from orchard import cli, package_cmd
+    seen = {}
+    monkeypatch.setattr(package_cmd, "main", lambda args, **kw: seen.update(vars(args)) or 0)
+    cli.main(["package", str(tmp_path / "run"), "--namespace", "episod"], stdout=io.StringIO())
+    assert seen["restage"] is False and seen["step"] == "all" and seen["exact"] is None and seen["gozer"] == "gozer"
+    assert seen["python"] == sys.executable and seen["handoff"] is None
+
+
+def test_package_passes_the_handoff_token_to_the_boot_step(tmp_path, monkeypatch):
+    from orchard import cli, package_cmd
+    seen = {}
+    monkeypatch.setattr(package_cmd, "main", lambda args, **kw: seen.update(vars(args)) or 0)
+    cli.main(["package", str(tmp_path / "run"), "--step", "boot", "--handoff", "ab" * 16], stdout=io.StringIO())
+    assert seen["handoff"] == "ab" * 16 and seen["step"] == "boot"
+
+
+@pytest.mark.parametrize("step", ["stage", "boot", "finish", "all"])
+def test_package_takes_each_step(tmp_path, monkeypatch, step):
+    from orchard import cli, package_cmd
+    seen = {}
+    monkeypatch.setattr(package_cmd, "main", lambda args, **kw: seen.update(vars(args)) or 0)
+    cli.main(["package", str(tmp_path / "run"), "--step", step], stdout=io.StringIO())
+    assert seen["step"] == step
+
+
+def test_package_refuses_a_step_it_does_not_know(tmp_path):
+    from orchard import cli
+    with pytest.raises(SystemExit):
+        cli.main(["package", str(tmp_path / "run"), "--step", "publish"], stdout=io.StringIO())
+
+
+def test_package_card_passes_its_flags_to_the_card_step(tmp_path, monkeypatch):
+    from orchard import cli, package_cmd
+    seen = {}
+
+    def fake(args, *, out=None, **kw):
+        seen.update(vars(args))
+        return 2
+
+    monkeypatch.setattr(package_cmd, "card_main", fake)
+    code = cli.main(["package-card", str(tmp_path / "run"), "--benchmark", "b.json", "--model-key", "arex",
+                     "--base-key", "base", "--reported", "r.json", "--replace-reported"], stdout=io.StringIO())
+    assert code == 2
+    assert (seen["run_dir"], seen["benchmark"], seen["model_key"], seen["base_key"], seen["reported"],
+            seen["replace_reported"]) == (str(tmp_path / "run"), "b.json", "arex", "base", "r.json", True)
+
+
+def test_package_card_needs_the_benchmark_file_and_the_model_key(tmp_path):
+    from orchard import cli
+    with pytest.raises(SystemExit):
+        cli.main(["package-card", str(tmp_path / "run")], stdout=io.StringIO())
+    with pytest.raises(SystemExit):
+        cli.main(["package-card", str(tmp_path / "run"), "--benchmark", "b.json"], stdout=io.StringIO())
+    with pytest.raises(SystemExit):
+        cli.main(["package-card", str(tmp_path / "run"), "--model-key", "arex"], stdout=io.StringIO())
+
+
+def test_package_card_replaces_reported_scores_only_when_asked(tmp_path, monkeypatch):
+    from orchard import cli, package_cmd
+    seen = {}
+    monkeypatch.setattr(package_cmd, "card_main", lambda args, **kw: seen.update(vars(args)) or 0)
+    cli.main(["package-card", str(tmp_path / "run"), "--benchmark", "b.json", "--model-key", "arex"],
+             stdout=io.StringIO())
+    assert seen["replace_reported"] is False and seen["reported"] is None and seen["base_key"] is None
