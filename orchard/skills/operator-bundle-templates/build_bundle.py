@@ -285,6 +285,7 @@ class Run:
         # Stage 2's graft decision (orchard/graft_trial.py), and which stage 4 bundle configurations were built with the graft
         # (model-dir-sources.json's mtp_graft record; a container configuration has no bundle_dir and is not held to the decision).
         decision_path = s / "2" / "graft-decision.json"
+        self.graft_trial_result = read_json(s / "2" / "graft-trial" / "trial-result.json", "", required=False)
         self.graft_decision_present = decision_path.exists()
         self.graft_decision = read_json(decision_path, "", required=False)
         if self.graft_decision is not None and self.graft_decision.get("choice") not in ("graft", "safe"):
@@ -581,10 +582,17 @@ def graft_section(run: Run, redact: Redactor) -> list[str]:
     if d.get("trial") is None:
         lines.append(f"Result: the trial did not run, and the safe configuration (drafter off, sampling on the host) was kept. {reason}.")
         return lines
-    lines.append(("Result: stage 2 chose the graft. " if choice == "graft" else
-                  "Result: stage 2 kept the safe configuration (drafter off, sampling on the host). ") + f"{reason}.")
+    have_result = run.graft_trial_result is not None
+    if not have_result:
+        # A trial that timed out or died leaves a decision that still names its result file. Nothing was compared, and the file is not cited.
+        lines.append("Result: the trial left no result file, so nothing was compared. "
+                     + ("Stage 2 kept the safe configuration (drafter off, sampling on the host). " if choice == "safe" else
+                        "The decision file says the graft, but the result it rests on is missing. ") + f"{reason}.")
+    else:
+        lines.append(("Result: stage 2 chose the graft. " if choice == "graft" else
+                      "Result: stage 2 kept the safe configuration (drafter off, sampling on the host). ") + f"{reason}.")
     nums = d.get("numbers") if isinstance(d.get("numbers"), dict) else {}
-    where = ev(["stages/2/graft-trial/trial-result.json", "stages/2/graft-decision.json"])
+    where = ev((["stages/2/graft-trial/trial-result.json"] if have_result else []) + ["stages/2/graft-decision.json"])
     rows = [("Decode speed (tokens/s, median of four prompts)", "safe_decode_tok_s", "variant_decode_tok_s"),
             ("Time to first token (s, median of four prompts)", "safe_ttft_s", "variant_ttft_s"),
             ("Top-1 agreement with the CPU reference", "safe_top1_agreement", "variant_top1_agreement")]
@@ -604,6 +612,22 @@ def graft_section(run: Run, redact: Redactor) -> list[str]:
     return lines
 
 
+def trial_gap(run: Run, d: dict) -> str | None:
+    """Why the trial did not compare both configurations, or None when it did. The decision file names the trial's result even when the trial
+    timed out or died before writing it, and its numbers are empty then, so the file and both speeds have to be on disk."""
+    reason = one_line(d.get("reason") or "no reason recorded")
+    if run.graft_trial_result is None:
+        return (f"The graft trial left no `stages/2/graft-trial/trial-result.json`, so nothing was compared and the safe configuration was kept "
+                f"({reason}). Evidence: `stages/2/graft-decision.json`.")
+    nums = d.get("numbers") if isinstance(d.get("numbers"), dict) else {}
+    missing = [name for name, key in (("the safe configuration's decode speed", "safe_decode_tok_s"),
+                                      ("the grafted variant's decode speed", "variant_decode_tok_s")) if not is_number(nums.get(key))]
+    if missing:
+        return (f"The graft trial's decision holds no measurement of {' and '.join(missing)}, so the two configurations were not compared "
+                f"({reason}). Evidence: `stages/2/graft-decision.json`, `stages/2/graft-trial/trial-result.json`.")
+    return None
+
+
 def graft_hazard_dealt_with(run: Run) -> tuple[bool, list[str]]:
     """The `drafter_graft` hazard: a graft was possible. Dealt with when stage 2's trial ran, decided, and everything built afterwards agrees with
     the decision: each stage 4 bundle configuration records the graft when the decision is graft and none does when it is safe, and the same for the
@@ -617,6 +641,9 @@ def graft_hazard_dealt_with(run: Run) -> tuple[bool, list[str]]:
     if d.get("trial") is None:
         reason = one_line(d.get("reason") or "no reason recorded")
         return False, [f"The graft trial was skipped ({reason}). The safe configuration was served and nothing was measured with the graft."]
+    why = trial_gap(run, d)
+    if why:
+        return False, [why]
     choice = d["choice"]
     want = choice == "graft"
     mismatched = sorted(k[1] for k, built in run.graft_built.items() if built != want)

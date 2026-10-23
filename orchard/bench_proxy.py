@@ -37,9 +37,45 @@ def apply_injection(body, inject: dict):
     return out
 
 
+SHORT_REPLY_TOKENS = 35         # a record from before `content_chars` existed: a "stop" this short with only reasoning text is judged a suspect
+
+
+def stop_truncated_suspect(rec: dict) -> bool:
+    """Whether a recorded request looks like a reply cut off by a stop string inside its reasoning.
+
+    lm-eval's gsm8k task sends the stop strings "Question:", "</s>" and "<|im_end|>", and vLLM matches a stop string against the reasoning text as well.
+    A thinking model that restates "Question:" in its thinking is stopped there: finish_reason is "stop", the reply has reasoning text and no content,
+    and the harness scores the item as empty. When the record has `content_chars`, that is the test. A record from before the field existed has no
+    content length, so a "stop" of at most SHORT_REPLY_TOKENS tokens with reasoning text stands in for it; that rule can miss a longer cut."""
+    if rec.get("error") or rec.get("finish_reason") != "stop" or not rec.get("reasoning_chars"):
+        return False
+    if "content_chars" in rec:
+        return rec["content_chars"] == 0
+    tokens = rec.get("completion_tokens")
+    return isinstance(tokens, int) and tokens <= SHORT_REPLY_TOKENS
+
+
+def count_stop_suspects(log_path) -> dict:
+    """{"requests": n, "suspects": m} for a finished run's `requests.jsonl`. A line that is not JSON (a torn last line) is skipped."""
+    path = Path(log_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"no request log at {path}")
+    requests = suspects = 0
+    for line in path.read_text(encoding="utf-8").split("\n"):
+        if not line.strip():
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        requests += 1
+        suspects += stop_truncated_suspect(rec)
+    return {"requests": requests, "suspects": suspects}
+
+
 def _record_from(path: str, status: int, payload, latency: float) -> dict:
     rec = {"t": round(time.time(), 3), "path": path, "status": status, "error": status >= 400, "latency_s": round(latency, 3),
-           "prompt_tokens": None, "completion_tokens": None, "finish_reason": None, "reasoning_chars": 0}
+           "prompt_tokens": None, "completion_tokens": None, "finish_reason": None, "reasoning_chars": 0, "content_chars": 0}
     if isinstance(payload, dict):
         usage = payload.get("usage") or {}
         rec["prompt_tokens"] = usage.get("prompt_tokens")
@@ -48,6 +84,7 @@ def _record_from(path: str, status: int, payload, latency: float) -> dict:
         rec["finish_reason"] = choice.get("finish_reason")
         message = choice.get("message") or {}
         rec["reasoning_chars"] = len(message.get("reasoning_content") or message.get("reasoning") or "")
+        rec["content_chars"] = len(message.get("content") or choice.get("text") or "")
     return rec
 
 
@@ -146,6 +183,7 @@ class Proxy:
         lat = [r["latency_s"] for r in recs]
         return {"requests": len(recs), "errors": sum(1 for r in recs if r["error"]),
                 "cut_off": sum(1 for r in recs if r["finish_reason"] == "length"),
+                "stop_truncated_suspects": sum(1 for r in recs if stop_truncated_suspect(r)),
                 "completion_tokens_total": sum(comp), "completion_tokens_median": statistics.median(comp) if comp else None,
                 "prompt_tokens_total": sum(prompt), "latency_s_median": statistics.median(lat) if lat else None,
                 "latency_s_max": max(lat) if lat else None}

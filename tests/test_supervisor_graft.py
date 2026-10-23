@@ -447,3 +447,206 @@ def test_the_trials_command_is_one_the_command_runner_allows(rig):
     """spawn_checked runs every test command through the fail-closed lexer; the spy in these tests skips it, so check the command itself."""
     from orchard.runner import check_string
     check_string(f"python3 stages/2/{TRIAL_DIR}/graft_trial.py", rig.run_dir)
+
+
+# ---- the trial's servers (review finding: the helpers start run.sh in a session of its own) ------------------------------------------------
+#
+# spawn_checked stops a timed-out trial by killing the trial's own session. The helpers it runs (measure_serving.py and serve_and_compare.py)
+# start run.sh with start_new_session=True, so a server survives that kill and keeps the chips open. The supervisor finds those servers by
+# the trial directory in their environment, stops them, and only then restores the coder or gives the lease back.
+import os
+import subprocess
+import sys
+
+SERVER_CODE = "import time; time.sleep(600)"
+STUBBORN_CODE = "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(600)"
+
+
+class ServerLeavingSpy(TrialSpy):
+    """The trial's command starts a server in its own session with the environment it was given, and the command then ends (or is killed)
+    without stopping it: what a deadline's SIGKILL of the trial's group does to the helpers' servers."""
+
+    def __init__(self, real, code=None, timed_out=True, stubborn=False, env_override=None):
+        super().__init__(real, code=code, timed_out=timed_out)
+        self.stubborn, self.env_override, self.servers = stubborn, env_override, []
+
+    def __call__(self, command, run_dir, env, timeout, out):
+        if "graft_trial.py" in command:
+            server_env = dict(env) if self.env_override is None else self.env_override(dict(env))
+            self.servers.append(subprocess.Popen([sys.executable, "-c", STUBBORN_CODE if self.stubborn else SERVER_CODE],
+                                                 env=server_env, start_new_session=True, stdout=subprocess.DEVNULL,
+                                                 stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL))
+        return super().__call__(command, run_dir, env, timeout, out)
+
+    def cleanup(self):
+        for p in self.servers:
+            if p.poll() is None:
+                p.kill()
+            p.wait()
+
+
+@pytest.fixture
+def leaver(monkeypatch):
+    s = ServerLeavingSpy(supervisor.spawn_checked)
+    monkeypatch.setattr(supervisor, "spawn_checked", s)
+    yield s
+    s.cleanup()
+
+
+def event_index(rig, pred):
+    return next((i for i, e in enumerate(rig.entries()) if pred(e)), None)
+
+
+def test_the_trial_test_carries_its_directory_in_its_environment(rig, spy):
+    rig.run()
+    assert spy.trials[0]["env"]["ORCHARD_TRIAL_DIR"] == str(sd(rig) / TRIAL_DIR)
+
+
+def make_rig(tmp_path, chips):
+    r = Rig(tmp_path, chips=chips)
+    r.script = lambda req: bringup(req, overrides=GRAFT_DELTA)
+    return r
+
+
+def after_trial_start(rig, pred):
+    start = event_index(rig, lambda e: e["data"].get("decision") == "graft trial started")
+    return next((i for i, e in enumerate(rig.entries()) if i > start and pred(e)), None)
+
+
+def test_a_server_a_timed_out_trial_leaves_behind_is_stopped_before_the_coder_comes_back(tmp_path, monkeypatch):
+    r = make_rig(tmp_path, chips=4)             # the coder holds both boards, so the trial parks it and restores it afterwards
+    s = ServerLeavingSpy(supervisor.spawn_checked)
+    monkeypatch.setattr(supervisor, "spawn_checked", s)
+    try:
+        assert r.run() == EXIT_READY
+        assert len(s.servers) == 1 and s.servers[0].poll() is not None
+        stopped = stage2(r, "graft trial servers stopped")
+        assert len(stopped) == 1 and [x["pid"] for x in stopped[0]["servers"]] == [s.servers[0].pid]
+        assert all(x["stopped"] is True for x in stopped[0]["servers"])
+        at = after_trial_start(r, lambda e: e["data"].get("decision") == "graft trial servers stopped")
+        restore = after_trial_start(r, lambda e: e["event"] == "restore" and e["data"].get("step") == "reset")
+        assert at is not None and restore is not None and at < restore
+    finally:
+        s.cleanup()
+        r.close()
+
+
+def test_the_stopped_server_is_recorded_with_the_identity_it_had(rig, leaver):
+    rig.run()
+    leaver.servers[0].wait()
+    rec = stage2(rig, "graft trial servers stopped")[0]["servers"][0]
+    from orchard.server import proc_identity
+    assert set(rec) >= {"pid", "boot_id", "start", "cmdline", "stopped"}
+    assert isinstance(rec["start"], int) and rec["start"] > 0 and rec["boot_id"]
+    assert proc_identity(rec["pid"]) != (rec["boot_id"], rec["start"])        # that process no longer exists under this identity
+
+
+def test_a_server_that_ignores_sigterm_is_killed(rig, monkeypatch):
+    s = ServerLeavingSpy(supervisor.spawn_checked, stubborn=True)
+    monkeypatch.setattr(supervisor, "spawn_checked", s)
+    try:
+        assert rig.run() == EXIT_READY
+        assert s.servers[0].poll() is not None
+        assert stage2(rig, "graft trial servers stopped")[0]["servers"][0]["stopped"] is True
+    finally:
+        s.cleanup()
+
+
+def test_a_server_is_stopped_after_a_trial_that_exited_normally_too(rig, monkeypatch):
+    s = ServerLeavingSpy(supervisor.spawn_checked, code=0, timed_out=False)
+    monkeypatch.setattr(supervisor, "spawn_checked", s)
+    try:
+        rig.run()
+        assert s.servers[0].poll() is not None
+    finally:
+        s.cleanup()
+
+
+def test_the_use_free_path_stops_the_servers_before_the_test_lease_is_released(rig, leaver):
+    assert rig.run() == EXIT_READY              # the coder holds one board; the trial leases the other
+    at = after_trial_start(rig, lambda e: e["data"].get("decision") == "graft trial servers stopped")
+    released = after_trial_start(rig, lambda e: e["data"].get("decision") == "test lease released")
+    assert at is not None and released is not None and at < released
+
+
+def test_a_trial_with_no_leftover_server_writes_no_servers_entry(rig, spy):
+    rig.run()
+    assert stage2(rig, "graft trial servers stopped") == []
+
+
+@pytest.mark.parametrize("chips", [2, 4])
+def test_a_server_that_cannot_be_stopped_blocks_before_the_lease_goes_back_and_the_coder_comes_back(tmp_path, monkeypatch, chips):
+    r = make_rig(tmp_path, chips=chips)
+    s = ServerLeavingSpy(supervisor.spawn_checked)
+    monkeypatch.setattr(supervisor, "spawn_checked", s)
+    monkeypatch.setattr(supervisor.kernelprobe, "sweep_strays",
+                        lambda *a, **k: [{"pid": s.servers[0].pid, "cmdline": "x", "stopped": False}])
+    def stop():
+        raise Stop()                            # a blocked run waits for the operator here
+    r.on_sleep = stop
+    try:
+        with pytest.raises(Stop):
+            r.run()
+        blocks = [e["data"] for e in r.entries() if e["event"] == "notice" and e["data"].get("blocked")]
+        assert any("still running" in b["reason"] and str(s.servers[0].pid) in b["reason"] for b in blocks)
+        assert after_trial_start(r, lambda e: e["event"] == "restore") is None
+        # The run's wind-down after the pause gives the lease back later (gozer refuses the reset while a server holds a chip); the
+        # trial's own path does not release it over the running server.
+        block = after_trial_start(r, lambda e: e["event"] == "notice" and e["data"].get("blocked"))
+        released = after_trial_start(r, lambda e: e["data"].get("decision") == "test lease released")
+        assert block is not None and (released is None or released > block)
+    finally:
+        s.cleanup()
+        r.close()
+
+
+def test_a_supervisor_that_died_during_the_trial_stops_its_servers_when_it_restarts(rig, monkeypatch):
+    s = ServerLeavingSpy(supervisor.spawn_checked)
+    real_spawn, real_sweep = supervisor.spawn_checked, supervisor.kernelprobe.sweep_strays
+
+    def dying(command, run_dir, env, timeout, out):
+        if "graft_trial.py" in command:
+            s(command, run_dir, env, timeout, out)
+            raise Crash()                       # the supervisor goes down with the server still running
+        return real_spawn(command, run_dir, env, timeout, out)
+    monkeypatch.setattr(supervisor, "spawn_checked", dying)
+    # A SIGKILL runs no `finally`; the fake Crash does, so the sweep is switched off for this first run.
+    monkeypatch.setattr(supervisor.kernelprobe, "sweep_strays", lambda *a, **k: [])
+    try:
+        with pytest.raises(Crash):
+            rig.run()
+        first = s.servers[0]
+        assert first.poll() is None             # nothing has stopped it yet
+        monkeypatch.setattr(supervisor.kernelprobe, "sweep_strays", real_sweep)
+        monkeypatch.setattr(supervisor, "spawn_checked", ServerLeavingSpy(real_spawn, code=0, timed_out=False))
+        assert rig.run(pid=101) == EXIT_READY
+        assert first.poll() is not None
+        assert any(e["data"].get("when") == "when the run started again" for e in rig.entries()
+                   if e["data"].get("decision") == "graft trial servers stopped")
+    finally:
+        s.cleanup()
+
+
+@pytest.mark.parametrize("chips", [2, 4])
+def test_an_error_during_the_trial_test_also_stops_its_servers(tmp_path, monkeypatch, chips):
+    r = make_rig(tmp_path, chips=chips)
+    s = ServerLeavingSpy(supervisor.spawn_checked)
+
+    class Boom(Exception):
+        pass
+
+    def failing(command, run_dir, env, timeout, out):
+        if "graft_trial.py" in command:
+            s(command, run_dir, env, timeout, out)
+            raise Boom("the wait was interrupted")
+        return real(command, run_dir, env, timeout, out)
+    real = supervisor.spawn_checked
+    monkeypatch.setattr(supervisor, "spawn_checked", failing)
+    try:
+        with pytest.raises(Boom):
+            r.run()
+        assert s.servers[0].poll() is not None
+        assert len(stage2(r, "graft trial servers stopped")) == 1
+    finally:
+        s.cleanup()
+        r.close()

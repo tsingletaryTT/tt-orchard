@@ -19,7 +19,9 @@ Before any token is compared it checks that the answers will come from this serv
 - exit 7 if /v1/models does not list the copy's model-dir;
 - exit 8 if the server process's own environment does not set MODEL_WEIGHTS_DIR and HF_MODEL to
   the copy's model-dir (read from /proc/<pid>/environ; run.sh execs the server, so it keeps the pid);
-- exit 9 if model-dir/.weights does not name the manifest's weights and revision.
+- exit 9 if model-dir/.weights does not name the manifest's weights and revision;
+- exit 10 if the copy has a graft.json that is not a JSON object. With one, verify.json's `graft` holds it and the sha256 of the
+  shard the copy's launcher built, and stage 7's gate compares that with every staged profile's graft.json.
 Then: 32 greedy tokens from the stage 1 prompt, and for each of the 32 reference positions one
 token with the reference prefix, re-tokenized and compared with the reference id. Exit 4: the
 server exited or never became healthy, or exited during the check. Exit 5: an HTTP error. Exit 0:
@@ -30,6 +32,7 @@ of its own.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import socket
@@ -59,6 +62,32 @@ def identity(pid: int) -> tuple[str | None, int | None]:
     except OSError:
         boot = None
     return boot, start
+
+
+def graft_evidence(bundle: Path, model_dir: Path) -> dict | None:
+    """What the installed copy served as a graft: its graft.json, and the sha256 of the shard its launcher built in
+    model-dir. None when the copy has no graft.json. stage 7's gate compares this with each staged profile's graft.json,
+    so a digest edited after the boot check cannot pass. A shard that is missing or is a link is recorded as None."""
+    path = bundle / "graft.json"
+    if not path.is_file():
+        return None
+    try:
+        g = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError:
+        stop(10, f"{path} is not valid JSON")
+    if not isinstance(g, dict):
+        stop(10, f"{path} is not a JSON object")
+    record = {k: g.get(k) for k in ("repo", "revision", "file", "shard", "tensors", "sha256")}
+    shard = model_dir / g["shard"] if isinstance(g.get("shard"), str) and g["shard"] else None
+    served = None
+    if shard is not None and shard.is_file() and not shard.is_symlink():
+        h = hashlib.sha256()
+        with open(shard, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        served = h.hexdigest()
+    record["served_shard_sha256"] = served
+    return record
 
 
 def port_answers(port: int) -> bool:
@@ -123,6 +152,7 @@ def main() -> int:
         if marker != want:
             stop(9, f"model-dir/.weights is {marker!r}; expected {want!r}")
         tokenizer = Tokenizer.from_file(str(model_dir / "tokenizer.json"))
+        graft = graft_evidence(bundle, model_dir)       # the shard the server loaded, hashed while it is still served
         free_text = sac.complete(port, str(model_dir), prompt_ids, sac.N_TOKENS)
         matches, mismatches = 0, []
         for k in range(sac.N_TOKENS):
@@ -147,7 +177,7 @@ def main() -> int:
               "model_dir_weights": marker, "server_ready_s": round(ready_s, 1),
               "n_tokens": sac.N_TOKENS, "matches": matches,
               "top1_agreement": matches / sac.N_TOKENS, **coh, "free_run_text": free_text,
-              "mismatches": mismatches,
+              "mismatches": mismatches, **({"graft": graft} if graft is not None else {}),
               "evidence": [os.path.relpath(evidence / "verify.json", run_dir),
                            os.path.relpath(log_path, run_dir)]}
     (evidence / "verify.json").write_text(json.dumps(report, indent=2, ensure_ascii=False),

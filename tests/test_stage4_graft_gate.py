@@ -85,10 +85,60 @@ def test_a_configuration_that_does_not_claim_a_pass_is_not_checked(tmp_path):
     assert gate_mesh_swap(sd, run, required=(2,)).ok
 
 
-def test_a_swap_config_the_gate_cannot_read_is_treated_as_no_bundle_configuration(tmp_path):
+# A configuration whose serving type cannot be told is not let through once stage 2 has recorded a decision: losing or corrupting an
+# ungrafted bundle's config would otherwise hide that it was built without the head the decision says it needs (review finding on PR 47).
+
+@pytest.mark.parametrize("choice", ["graft", "safe"])
+def test_a_swap_config_the_gate_cannot_read_is_refused_when_stage_2_recorded_a_decision(tmp_path, choice):
+    sd, run = gate(tmp_path)
+    decided(run, choice)
+    write(run, "stages/4/configs/2/swap_config.json", "not json")
+    g = gate_mesh_swap(sd, run, required=(2,))
+    assert not g.ok and any("2-chip configuration" in r and "swap_config.json" in r and "how this configuration serves" in r for r in g.reasons)
+
+
+def test_a_missing_swap_config_is_refused_when_stage_2_recorded_a_decision(tmp_path):
     sd, run = gate(tmp_path)
     decided(run, "graft")
+    assert not (run / "stages/4/configs/2/swap_config.json").exists()      # the fixture writes none
+    g = gate_mesh_swap(sd, run, required=(2,))
+    assert not g.ok and any("swap_config.json" in r and "how this configuration serves" in r for r in g.reasons)
+
+
+@pytest.mark.parametrize("config", [{"tt_cache": "/c"}, {"bundle_dir": 5, "tt_cache": "/c"}, {"bundle_dir": "", "tt_cache": "/c"}, {"package": 7, "profile": "p"}, {"package": "", "profile": ""}, {"package": "x/y", "profile": ""}, {"package": "x/y", "tt_cache": "/c"}, {"profile": "p", "tt_cache": "/c"}, ["bundle_dir"], "x"])
+def test_a_swap_config_that_names_neither_serving_type_is_refused_when_stage_2_recorded_a_decision(tmp_path, config):
+    sd, run = gate(tmp_path)
+    decided(run, "graft")
+    write(run, "stages/4/configs/2/swap_config.json", config)
+    g = gate_mesh_swap(sd, run, required=(2,))
+    assert not g.ok and any("swap_config.json" in r and "how this configuration serves" in r for r in g.reasons)
+
+
+def test_an_unreadable_swap_config_passes_as_before_when_stage_2_recorded_no_decision(tmp_path):
+    sd, run = gate(tmp_path)
     write(run, "stages/4/configs/2/swap_config.json", "not json")
+    assert gate_mesh_swap(sd, run, required=(2,)).ok
+
+
+def test_an_unreadable_swap_config_passes_as_before_when_the_decision_file_is_not_a_decision(tmp_path):
+    sd, run = gate(tmp_path)
+    write(run, f"stages/2/{DECISION_FILE}", {"choice": "maybe", "reason": "x"})
+    write(run, "stages/4/configs/2/swap_config.json", "not json")
+    assert gate_mesh_swap(sd, run, required=(2,)).ok
+
+
+def test_a_container_configuration_named_by_package_and_profile_is_still_exempt_with_a_safe_decision(tmp_path):
+    sd, run = gate(tmp_path, n=4)
+    decided(run, "safe")
+    write(run, "stages/4/configs/4/swap_config.json", {"package": "x/y", "profile": "p", "tt_cache": "/c"})
+    assert gate_mesh_swap(sd, run, required=(4,)).ok
+
+
+def test_a_configuration_that_does_not_pass_is_not_refused_for_its_swap_config(tmp_path):
+    sd, run = mesh_stage(tmp_path, [swap_config(2), swap_config(1, ok=False)])
+    decided(run, "graft")
+    bundle_config(run, 2, grafted=True)
+    write(run, "stages/4/configs/1/swap_config.json", "not json")
     assert gate_mesh_swap(sd, run, required=(2,)).ok
 
 

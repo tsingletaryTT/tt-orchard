@@ -628,7 +628,14 @@ def _graft_reasons(stage_dir, run_dir, n: int, where: str) -> list[str]:
     configuration is another server and is not held to the decision."""
     cdir = Path(stage_dir) / "configs" / str(n)
     cfg = _read_json(cdir / "swap_config.json")
-    if not isinstance(cfg, dict) or not cfg.get("bundle_dir"):
+    kind = _serving_type(cfg)
+    if kind is None and read_graft_decision(Path(run_dir) / "stages" / "2") is not None:
+        # Once stage 2 has recorded a decision, a config that is gone or cannot be read must not let a configuration through: it may be an
+        # ungrafted bundle whose config was lost. Only a configuration that names its container package is exempt.
+        return [f"{where}: swap_config.json is missing, cannot be read, or names neither a bundle (bundle_dir) nor a container package "
+                "(package and profile), so how this configuration serves cannot be told and stage 2's graft decision cannot be checked "
+                "against it"]
+    if kind != "bundle":
         return []
     sources = _read_json(cdir / "model-dir-sources.json")
     built = isinstance(sources, dict) and isinstance(sources.get("mtp_graft"), dict)
@@ -639,6 +646,18 @@ def _graft_reasons(stage_dir, run_dir, n: int, where: str) -> list[str]:
     if built and not chose:
         return [f"{where}: configs/{n}/model-dir-sources.json records a grafted head, but stage 2 did not choose the graft"]
     return []
+
+
+def _serving_type(cfg) -> str | None:
+    """"bundle" when a bundle configuration's swap_config.json names its bundle_dir, "container" when it names a container package and its
+    profile, None when it is not an object or names neither."""
+    if not isinstance(cfg, dict):
+        return None
+    if isinstance(cfg.get("bundle_dir"), str) and cfg["bundle_dir"]:
+        return "bundle"
+    if all(isinstance(cfg.get(k), str) and cfg[k] for k in ("package", "profile")):
+        return "container"
+    return None
 
 
 def _read_json(path: Path):
@@ -786,9 +805,9 @@ def gate_package(stage_dir, run_dir) -> GateResult:
     weights, the card, the boot check's verify.json and the publish commands. package.json only
     says where to look."""
     # Imported here: orchard.package imports this module.
-    from orchard.package import (GRAFT_FILE, PUBLISH_FILE, PackageError, graft_problems, graft_trial_numbers,
-                                 publish_problems, read_reported, serving_problems, split_model_id,
-                                 stage_2_serving, weights_wiring_problems)
+    from orchard.package import (GRAFT_FILE, PUBLISH_FILE, PackageError, graft_evidence_problems, graft_problems,
+                                 graft_trial_numbers, publish_problems, read_reported, serving_problems,
+                                 split_model_id, stage_2_serving, weights_wiring_problems)
     from orchard.card_use import read_use_facts
     from orchard.package_card import card_evidence_paths, card_problems, read_license
     from orchard.scrub import scrub_package
@@ -826,6 +845,7 @@ def gate_package(stage_dir, run_dir) -> GateResult:
         reported, reported_source = (), ""
     sidecars = [s.get("file") for s in delta.get("sidecars") or () if isinstance(s, dict)]
     profiles = d.get("profiles") if isinstance(d.get("profiles"), list) else []
+    boot_check, _ = _load(Path(stage_dir) / "verify" / "evidence", "verify.json")
     if not any(isinstance(p, dict) and p.get("required") and p.get("verified") is True
                for p in profiles):
         failed = [p.get("verify", {}).get("failed") for p in profiles if isinstance(p, dict)]
@@ -858,6 +878,7 @@ def gate_package(stage_dir, run_dir) -> GateResult:
             reasons += [f"profile {name}: {x}" for x in
                         graft_problems(out, nearest_model=nearest_repo,
                                        base_revision=Path(swap.get("base_snapshot") or "").name)]
+        reasons += [f"profile {name}: {x}" for x in graft_evidence_problems(out, boot_check)]
         reasons += [f"profile {name}: {x}" for x in
                     serving_problems(run_sh, m.get("env") or {},
                                      drafter_off=drafter_off and not (graft_expected or has_graft),
@@ -870,7 +891,8 @@ def gate_package(stage_dir, run_dir) -> GateResult:
                         card_problems(card, license_id=license_id, run_dir=run, sidecars=sidecars,
                                       base_files=_shipped_names(out / "base_config"), reported=reported, reported_source=reported_source,
                                       model_id=new_repo, nearest_model=nearest_repo, graft=has_graft,
-                                      graft_decision=trial_decision, trial_rows=trial_rows,
+                                      graft_decision=trial_decision,
+                                      trial_rows=trial_rows if p.get("required") else (),
                                       use=read_use_facts(swap.get("new_snapshot") or "/nonexistent", run_sh, run))]
         reasons += [f"profile {name}: the card cites {e}, which is missing at evidence/{e}"
                     for e in card_evidence_paths(card) if not (out / "evidence" / e).is_file()]
