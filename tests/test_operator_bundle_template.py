@@ -1078,3 +1078,66 @@ def test_the_chat_template_hazard_without_a_record_still_says_no_chat_request_wa
 def test_the_chat_template_hazard_says_when_the_model_directory_has_no_template(tmp_path):
     block = chat_risks(tmp_path, chat_record(file=None, sha256=None, same_as_nearest=None))
     assert "Stage 2's model directory has no chat template" in block
+
+
+# ---- the stop token and sampling default hazards ------------------------------------------------------------
+# Neither is ever dealt with: the swap checks compare 32 generated tokens and never run a request to its end, and no
+# stage compares a card's sampling settings with the defaults the server applies. The bundle says what stage 2 served.
+
+STOP_HAZARD = {"area": "stop_tokens", "finding": "The new model's tokenizer names <x> (id 1) as its eos token, but the "
+               "server will stop on [2, 0].", "evidence": ["stages/0/evidence/genconfig-license.json"]}
+SAMPLING_HAZARD = {"area": "sampling_defaults", "finding": "The new model's card mentions temperature 0.6 (served 1.0).",
+                   "evidence": ["stages/0/evidence/genconfig-license.json"]}
+
+
+def risk_block(tmp_path, hazard, record=None):
+    run = make_run(tmp_path)
+    delta_path = run / "stages" / "0" / "delta.json"
+    d = json.loads(delta_path.read_text())
+    d["hazards"] = [*d.get("hazards", []), hazard]
+    write_json(delta_path, d)
+    if record is not None:
+        write_json(run / "stages" / "2" / "model-dir-sources.json", record)
+    assert build(run).returncode == 0
+    risks = (bundle_of(run) / "RISKS.md").read_text()
+    return [b for b in section(risks, "## Stage 0 hazards").split("### ") if b.startswith(hazard["area"])][0]
+
+
+def test_the_stop_token_hazard_is_never_dealt_with_and_says_the_swap_checks_never_run_a_reply_to_its_end(tmp_path):
+    block = risk_block(tmp_path, STOP_HAZARD, dict(SOURCES, eos_token_ids=[2, 0]))
+    assert "Dealt with: Not shown" in block
+    assert "never run a request until it stops, so no stage showed which token ends a reply" in block
+    assert "stops on [2, 0]" in block and "model-dir-sources.json" in block
+    assert "The bundle has no check for this hazard" not in block
+
+
+def test_the_stop_token_hazard_without_a_record_still_says_why_it_is_not_shown(tmp_path):
+    block = risk_block(tmp_path, STOP_HAZARD)
+    assert "Dealt with: Not shown" in block and "never run a request until it stops" in block
+    assert "Stage 2's model directory stops on" not in block
+
+
+@pytest.mark.parametrize("bad", [[], None, "x", 7, [True], [1, "a"]])
+def test_a_stop_token_list_of_the_wrong_shape_is_left_out(tmp_path, bad):
+    block = risk_block(tmp_path, STOP_HAZARD, dict(SOURCES, eos_token_ids=bad))
+    assert "Dealt with: Not shown" in block and "Stage 2's model directory stops on" not in block
+
+
+@pytest.mark.parametrize("origin, says", [("base", "the nearest model's generation_config.json"),
+                                          ("model", "the new model's own generation_config.json"),
+                                          ("none", "no generation_config.json")])
+def test_the_sampling_hazard_names_whose_defaults_stage_2_served(tmp_path, origin, says):
+    block = risk_block(tmp_path, SAMPLING_HAZARD, dict(SOURCES, sampling_defaults_from=origin))
+    assert "Dealt with: Not shown" in block
+    assert f"Stage 2 served {says}" in block
+    assert "No stage compared the card's sampling settings" in block
+    assert "The bundle has no check for this hazard" not in block
+
+
+@pytest.mark.parametrize("record", [None, dict(SOURCES, sampling_defaults_from="elsewhere"),
+                                    dict(SOURCES, sampling_defaults_from=None),
+                                    dict(SOURCES, sampling_defaults_from=["base"])])
+def test_the_sampling_hazard_without_a_known_origin_still_says_why_it_is_not_shown(tmp_path, record):
+    block = risk_block(tmp_path, SAMPLING_HAZARD, record)
+    assert "Dealt with: Not shown" in block and "No stage compared the card's sampling settings" in block
+    assert "Stage 2 served" not in block

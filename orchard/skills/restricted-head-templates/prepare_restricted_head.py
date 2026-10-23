@@ -63,7 +63,8 @@ def main() -> int:
     text, notes = pp.edit_run_script(src_run.read_text(encoding="utf-8"), bundle, HERE_DIR / "restricted_head_parity.py",
                                      HERE_DIR / "parity-model-dir", cfg["tt_cache"])
     pp.check_snapshot(snap)
-    model_dir, copied, linked = pp.build_model_dir(snap)
+    model_dir, copied, linked, absent = pp.build_model_dir(snap)
+    pp.write_sources(copied, linked, absent)
     out = HERE_DIR / "parity-run.sh"
     out.write_text(text, encoding="utf-8")
     out.chmod(out.stat().st_mode | 0o111)
@@ -73,6 +74,8 @@ def main() -> int:
     print(f"parity-run.sh: {out}")
     for note in notes:
         print(f"  {note}")
+    for line in pp.absent_notes(absent):
+        print(line)
     return 0
 
 

@@ -1214,6 +1214,81 @@ def eos_ids(gen: dict) -> list[int]:
     return []
 
 
+def config_eos_ids(cfg) -> list[int]:
+    """The stop token ids a model's config.json names: a top-level eos_token_id, else the one under text_config
+    (an int or a list of ints; empty for anything else)."""
+    if not isinstance(cfg, dict):
+        return []
+    top = eos_ids(cfg)
+    if top:
+        return top
+    text = cfg.get("text_config")
+    return eos_ids(text) if isinstance(text, dict) else []
+
+
+def tokenizer_token_id(data, token) -> int | None:
+    """The id tokenizer.json gives a token string: its added tokens first (special tokens live there), then the
+    vocabulary. None when the token is unknown, `data` is not a tokenizer, or the id is not an integer."""
+    if not isinstance(data, dict) or not isinstance(token, str):
+        return None
+    added = data.get("added_tokens")
+    for item in added if isinstance(added, list) else []:
+        if isinstance(item, dict) and item.get("content") == token:
+            tid = item.get("id")
+            return tid if isinstance(tid, int) and not isinstance(tid, bool) else None
+    model = data.get("model")
+    vocab = vocab_items(model) if isinstance(model, dict) else None
+    if isinstance(vocab, dict):
+        tid = vocab.get(token)
+        return tid if isinstance(tid, int) and not isinstance(tid, bool) else None
+    if isinstance(vocab, list):
+        for i, entry in enumerate(vocab):
+            if (entry[0] if isinstance(entry, tuple) and entry else entry) == token:
+                return i
+    return None
+
+
+HINT_NAMES = ("temperature", "top_p", "top_k", "min_p", "repetition_penalty", "presence_penalty", "frequency_penalty")
+MAX_HINT_VALUES = 4                 # distinct values kept per setting
+CARD_READ_CHARS = 200_000           # the part of a model card that is read for hints
+_HINT = re.compile(r"(?<![A-Za-z0-9_])(temperature|top[_-]?p|top[_-]?k|min[_-]?p|repetition[_-]?penalty|"
+                   r"presence[_-]?penalty|frequency[_-]?penalty)[`'\"*]*[ \t]*(?:=|:|of|to|at|is)?[ \t]*[`'\"*]*"
+                   r"(-?\d+(?:\.\d+)?)(?![0-9A-Za-z_])(?!\.\d)", re.IGNORECASE)
+# A card can write a negative number. Only some settings take one: presence_penalty and frequency_penalty run from -2 to 2
+# (vLLM and the OpenAI API), and a top_k of -1 turns top-k filtering off. A negative temperature, top_p, min_p or
+# repetition_penalty, or a value outside those ranges, is not something the server could apply, so it is left out.
+NEGATIVE_OK = {"presence_penalty": lambda v: v >= -2.0,      # called only for a value written with a minus sign
+               "frequency_penalty": lambda v: v >= -2.0,
+               "top_k": lambda v: v == -1.0}
+
+
+def card_sampling_hints(text: str) -> dict:
+    """{setting: [values]} for sampling settings a model card writes as a number next to the setting's name
+    (`temperature=0.6`, `top_k: 20`, "top-p of 0.8"). Order of first appearance, no repeats, at most MAX_HINT_VALUES
+    per setting. The card is prose, so this is a hint and nothing more."""
+    out: dict[str, list[float]] = {}
+    for m in _HINT.finditer(text[:CARD_READ_CHARS]):
+        name = re.sub(r"[-]", "_", m.group(1).lower())
+        name = {"topp": "top_p", "topk": "top_k", "minp": "min_p"}.get(name.replace("_", ""), name)
+        try:
+            value = float(m.group(2))
+        except ValueError:
+            continue
+        if not math.isfinite(value):
+            continue
+        if m.group(2).startswith("-") and not NEGATIVE_OK.get(name, lambda v: False)(value):
+            continue          # written with a minus sign, and this setting cannot take one ("-0" counts as written negative)
+        values = out.setdefault(name, [])
+        if value not in values and len(values) < MAX_HINT_VALUES:
+            values.append(value)
+    return out
+
+
+def card_hints_of(snapshot: Path) -> dict:
+    readme = snapshot / "README.md"
+    return card_sampling_hints(readme.read_text(encoding="utf-8", errors="replace")) if readme.is_file() else {}
+
+
 def compare_genconfig_license(model_dir: Path, base_dir: Path) -> dict:
     mg, merr = read_json(model_dir / "generation_config.json")
     bg, berr = read_json(base_dir / "generation_config.json")
@@ -1222,6 +1297,9 @@ def compare_genconfig_license(model_dir: Path, base_dir: Path) -> dict:
     bc = bc if isinstance(bc, dict) else {}
     diffs = {k: {"model": mg.get(k, ABSENT), "base": bg.get(k, ABSENT)}
              for k in sorted(set(mg) | set(bg)) if mg.get(k, ABSENT) != bg.get(k, ABSENT)}
+    mc, _ = read_json(model_dir / "config.json")
+    tok_name = special_tokens(model_dir)["eos_token"]
+    tok_data, _ = read_json(model_dir / "tokenizer.json")
     ml, bl = license_side(model_dir), license_side(base_dir)
     changed = None if ml["license"] is None or bl["license"] is None else ml["license"] != bl["license"]
     return {"model_generation_config": mg, "base_generation_config": bg,
@@ -1230,6 +1308,10 @@ def compare_genconfig_license(model_dir: Path, base_dir: Path) -> dict:
             "errors": [e for e in (merr, berr) if e],
             "model_eos_token_ids": eos_ids(mg), "base_eos_token_ids": eos_ids(bg),
             "base_config_eos_token_ids": eos_ids(bc),
+            "model_config_eos_token_ids": config_eos_ids(mc),
+            "model_tokenizer_eos_token": tok_name,
+            "model_tokenizer_eos_token_id": tokenizer_token_id(tok_data, tok_name),
+            "card_sampling_hints": card_hints_of(model_dir),
             "generation_config_diffs": diffs, "generation_config_equal": not diffs,
             "generation_config_equal_except_bookkeeping": all(k in BOOKKEEPING for k in diffs),
             "model_license": ml, "base_license": bl, "license_changed": changed}
@@ -1606,6 +1688,76 @@ def generation_config_hazards(nearest_id: str, g: dict, ev) -> list[dict]:
     return [{"area": "generation_config", "finding": finding, "evidence": [ev("genconfig-license.json")]}] if finding else []
 
 
+def stop_token_hazards(g: dict, ev) -> list[dict]:
+    """The server stops on the eos_token_id of the served generation_config.json (the new model's own, or the nearest
+    model's when the model ships none; the nearest model's config.json when that file has none). The new model's
+    tokenizer and its own config.json name stop tokens too. One the server does not stop on lets a reply run to
+    the length limit. Quiet when the server will have no stop token at all: generation_config_hazards says that."""
+    cfg_ids = g["base_config_eos_token_ids"]            # staging copies the nearest model's config.json as well
+    from_config = "the nearest model's config.json, which staging copies"
+    if g["model_generation_config_present"] and g["model_eos_token_ids"]:
+        served, origin = list(g["model_eos_token_ids"]), "the new model's own generation_config.json"
+    elif g["model_generation_config_present"] or not g["base_generation_config_present"]:
+        served, origin = [], from_config
+    elif g["base_eos_token_ids"]:
+        served, origin = list(g["base_eos_token_ids"]), "the nearest model's generation_config.json, which staging copies"
+    else:
+        served, origin = [], from_config
+    # prepare_swap.stop_token_ids reads the eos_token_id of generation_config.json and then of config.json and keeps
+    # both, so the ids the server can stop on are the two files' together (an id in both counts once).
+    extra = [i for i in cfg_ids if i not in served]
+    if extra and served:
+        origin += " and " + from_config
+    served += extra
+    if not served:
+        return []
+    items = []
+    tid = g["model_tokenizer_eos_token_id"]
+    if tid is not None and tid not in served:
+        items.append(f"tokenizer names {g['model_tokenizer_eos_token']} (id {tid}) as its eos token")
+    cfg_ids = g["model_config_eos_token_ids"]
+    if cfg_ids and any(i not in served for i in cfg_ids):
+        items.append(f"config.json names the stop tokens {fmt(cfg_ids)}")
+    if not items:
+        return []
+    return [{"area": "stop_tokens",
+             "finding": ("The new model's " + " and its ".join(items) + f", but the server will stop on {fmt(served)} "
+                         f"({origin}). A reply that ends on a token the server does not stop on runs to the length "
+                         "limit. Check the model card for the stop tokens it recommends."),
+             "evidence": [ev("genconfig-license.json")]}]
+
+
+def sampling_default_hazards(g: dict, ev) -> list[dict]:
+    """The server applies the served generation_config.json's sampling defaults to a request that sets none. When the
+    model's card writes a setting with a value the served file does not hold (or does not set), the package serves
+    with settings its authors did not choose. The card is prose: the hazard quotes what it found."""
+    hints = g["card_sampling_hints"]
+    if g["model_generation_config_present"]:
+        served, origin = g["model_generation_config"], "the new model's own generation_config.json"
+    elif g["base_generation_config_present"]:
+        served, origin = g["base_generation_config"], "the nearest model's generation_config.json, which staging copies"
+    else:
+        served, origin = {}, "no generation_config.json, so it has no sampling defaults"
+    items = []
+    for name in HINT_NAMES:
+        values = hints.get(name)
+        if not values:
+            continue
+        have = served.get(name)
+        numeric = isinstance(have, (int, float)) and not isinstance(have, bool)
+        if numeric and any(math.isclose(have, v) or (name == "top_k" and have <= 0 and v <= 0) for v in values):
+            continue          # top_k of 0 and of -1 both turn top-k filtering off, so they do not disagree
+        shown = " or ".join(f"{v:g}" for v in values)
+        items.append(f"{name} {shown} (" + (f"served {fmt(have)}" if numeric else "not set") + ")")
+    if not items:
+        return []
+    return [{"area": "sampling_defaults",
+             "finding": ("The new model's card mentions " + ", ".join(items) + f". A request that sets none gets the "
+                         f"defaults of {origin}. Send the card's settings with each request, or ship them in a "
+                         "generation_config.json."),
+             "evidence": [ev("genconfig-license.json")]}]
+
+
 def chat_template_hazards(tc: dict, ev) -> list[dict]:
     """A hazard when the new model's chat template differs from the nearest model's, when the nearest model has one and the
     new model has none, or when the special tokens differ. A template only the new model ships, or none on either side, is
@@ -1683,6 +1835,8 @@ def hazards(model_id: str, nearest_id: str, t: dict, f: dict, g: dict, disk: dic
     if graft:
         out.append(graft_hazard(nearest_id, graft, ev))
     out += generation_config_hazards(nearest_id, g, ev)
+    out += stop_token_hazards(g, ev)
+    out += sampling_default_hazards(g, ev)
     out += chat_template_hazards(tc, ev)
     if g["license_changed"] is True:
         out.append({"area": "license",

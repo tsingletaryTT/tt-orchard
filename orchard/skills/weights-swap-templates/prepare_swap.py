@@ -56,6 +56,9 @@ The weights-swap-check skill copies this file into the stage directory and runs 
    the stop tokens the Qwen3.8 bundle's serving code will find in `model-dir/` (a top-level `eos_token_id` of
    generation_config.json, then config.json). When it is empty the script warns at once, because that bundle
    stops after loading the weights without one, 15 to 25 minutes into a start.
+   `tokenizer_eos_token_id` is the id tokenizer.json gives the new model's eos token (None when it names none or the
+   id cannot be found) and `tokenizer_eos_served` says whether that id is among `eos_token_ids` (None when either is
+   unknown). A False answer prints a warning: a reply that ends on that token runs to the length limit.
 
 4. Optional, `"graft_mtp": true` in swap_config.json (default off): when the new model has no `mtp.*` tensor and
    the nearest model has them, `model-dir/` also gets `model-mtp-from-base.safetensors`, a shard of the nearest
@@ -210,6 +213,33 @@ def special_tokens_of(d: Path) -> dict:
             v = v.get("content")
         out[name] = v if isinstance(v, str) else None
     return out
+
+
+def tokenizer_token_id(model_dir: Path, token) -> int | None:
+    """The id tokenizer.json gives `token`: its added tokens first (special tokens live there), then the vocabulary.
+    None when the token is unknown or tokenizer.json is missing, unreadable or of another shape."""
+    if not isinstance(token, str):
+        return None
+    try:
+        data = json.loads((model_dir / "tokenizer.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    is_id = lambda v: isinstance(v, int) and not isinstance(v, bool)     # noqa: E731
+    added = data.get("added_tokens")
+    for item in added if isinstance(added, list) else []:
+        if isinstance(item, dict) and item.get("content") == token:
+            return item["id"] if is_id(item.get("id")) else None
+    model = data.get("model")
+    vocab = model.get("vocab") if isinstance(model, dict) else None
+    if isinstance(vocab, dict):
+        return vocab[token] if is_id(vocab.get(token)) else None
+    if isinstance(vocab, list):
+        for i, entry in enumerate(vocab):
+            if (entry[0] if isinstance(entry, list) and entry else entry) == token:
+                return i
+    return None
 
 
 def chat_facts(model_dir: Path, base: Path) -> dict:
@@ -543,6 +573,9 @@ def main() -> int:
                                 "reason": "the new model has no mtp.* tensors; these are the nearest model's"})
         record["files"].sort(key=lambda f: f["name"])
     record.update(chat_facts(model_dir, base))
+    tok_id = tokenizer_token_id(model_dir, record["special_tokens"]["eos_token"])
+    record["tokenizer_eos_token_id"] = tok_id
+    record["tokenizer_eos_served"] = None if tok_id is None or not eos else tok_id in eos
     (HERE_DIR / SOURCES_NAME).write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     print(f"model-dir: {model_dir}")
     print(f"  copied from base_snapshot: {', '.join(copied) or 'nothing'}")
@@ -568,6 +601,10 @@ def main() -> int:
         print("  warning: no stop token (a top-level eos_token_id) in the model directory's generation_config.json or "
               "config.json. The Qwen3.8 bundle's serving code looks there and stops after loading the weights when it "
               "finds none, so the server will probably not start")
+    if record["tokenizer_eos_served"] is False:
+        print(f"  warning: the tokenizer's eos token {record['special_tokens']['eos_token']} (id {tok_id}) is not among "
+              f"the stop tokens {eos} the server will stop on, so a reply that ends on it runs to the length limit. "
+              "Check the model card for the stop tokens it recommends")
     if FALLBACK_COPY in absent:
         print(f"  warning: {FALLBACK_COPY} is in neither snapshot. The bundle's serving code reads eos_token_id from it or "
               "from config.json (here the base model's, which may nest it), so the server may not start")
