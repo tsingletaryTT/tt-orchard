@@ -395,3 +395,11 @@ def test_the_graft_trial_is_on_unless_the_caller_opts_out(tmp_path):
     argv = bc.supervisor_argv(cfg, "Cloudflare/clef", graft_trial=False)
     assert "--no-graft-trial" in argv and supervisor.parse(argv).no_graft_trial is True
     assert supervisor.parse(bc.supervisor_argv(cfg, "Cloudflare/clef")).no_graft_trial is False
+
+
+def test_resume_aborted_is_added_only_when_the_caller_asks(tmp_path):
+    cfg = load(tmp_path, FULL)
+    assert "--resume-aborted" not in bc.supervisor_argv(cfg, "Cloudflare/clef")
+    argv = bc.supervisor_argv(cfg, "Cloudflare/clef", resume_aborted=True)
+    assert "--resume-aborted" in argv and supervisor.parse(argv).resume_aborted is True
+    assert supervisor.parse(bc.supervisor_argv(cfg, "Cloudflare/clef")).resume_aborted is False

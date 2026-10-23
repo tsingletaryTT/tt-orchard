@@ -448,3 +448,21 @@ def test_the_mode_chip_the_stepper_marks_and_the_unreadable_badge_put_their_pict
 def test_operator_style_hides_every_emoji_span():
     css = CSS()
     assert re.search(r'^html\[data-mode="operator"\] \.emoji \{ display: none; \}', css, re.M)
+
+
+# ---- PR 53 review: an abort can be resumed, and the page says so truthfully ------------------------------------
+
+def test_the_abort_confirmation_does_not_claim_a_run_cannot_be_resumed():
+    js = JS()
+    start = js.index("abort: { title:")
+    text = js[start:js.index("\n", start)]
+    assert "cannot be resumed" not in text
+    assert "Resume run" in text and "stays aborted" in text
+
+
+def test_the_resume_confirmation_says_the_ledger_records_a_resume_after_the_abort():
+    js = JS()
+    start = js.index("async function doRetry()")
+    body = js[start:js.index("if (!ok) return;", start)]
+    assert "resume after the abort" in body
+    assert "The ledger records it as a retry." in body            # the blocked and stopped wording is unchanged

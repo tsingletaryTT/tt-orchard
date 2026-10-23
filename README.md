@@ -536,8 +536,8 @@ yourself (for ufw: `sudo ufw allow from <your LAN>/24 to any port 8780 proto tcp
 
 The page can pause, resume and abort a run (each behind a confirmation that says what happens; abort needs
 a second click), retry a run that ended blocked or stopped (the Blocked panel ends its steps with a **Retry run** button, and the header has
-one too), resume one that was aborted (**Resume run**, which starts the same detached `tt-orchard bringup` and carries on
-from the ledger), and start a new bring-up after showing the preflight as a checklist. In the New bring-up dialog the
+one too), resume one that was aborted (**Resume run**, which starts the same detached `tt-orchard bringup` with `--resume-aborted`:
+an abort is terminal unless that flag is given, and the ledger then records a resume after the abort and the run carries on), and start a new bring-up after showing the preflight as a checklist. In the New bring-up dialog the
 button you can press is the main one (**Run checks**, then **Start bring-up** once the checks pass), and the base, the
 where-tests-run choice and the research setting sit under one **Options** line. Start stays disabled while a check blocks, and when no installed bundle serves the
 base it lists the candidates to choose from. A run it starts is the same detached `tt-orchard bringup`, so it
@@ -702,6 +702,7 @@ python3 -m orchard.supervisor run --model MODEL --run-dir RUN_DIR --tiers TIERS
 | `--package-models-root` | no | Where tt-model installs bundles. Stage 7 looks here for other chip counts of the nearest model. Default `{{TT_MODEL_ROOT}}`, which is `<operator home>/.cache/tt-model/models` |
 | `--unattended` | no | Never wait for an operator. When the run would pause, it names the reason (`needs-new-model-code`, `retry-budget-spent`, `stage-failed`, `agent-stuck`, `disk-full`, `hardware-unhealthy`, `coder-unusable`, `blocked` or `unclassified`), writes `BLOCKED.md` and `blocked.json` in the run directory, releases the hardware and exits 5. Running the same command again retries from the ledger. A pause the operator asked for with `control pause` still waits. `tt-orchard bringup` always passes it |
 | `--no-graft-trial` | no | Skip stage 2's graft trial (section 5.5c). The run records the choice, and a resume keeps it. `tt-orchard bringup` takes the same flag |
+| `--resume-aborted` | no | Carry on with a run that an operator or a signal aborted. An abort is terminal otherwise: running the command again returns exit 4 and starts nothing. The ledger records `resume` with `after: abort`, then the run starts its coder again and continues from the ledger. A finished run and an abort of any other kind are left as they are. `tt-orchard bringup` takes the same flag, and the web page's `Resume run` passes it |
 | `--gozer` | no | The gozer executable. Default `gozer` from `PATH` |
 | `--tt-model-root` | no | Where tt-model installs bundles (`{{TT_MODEL_ROOT}}`). Default `<operator home>/.cache/tt-model/models`. Recorded and kept like `--cache-root` |
 | `--lab` | no | An ssh host to run every hardware test on (a lab box). The coder stays on this box and is never parked. See [5.9](#59-run-the-hardware-tests-on-a-lab-box). Recorded; a resume with another lab is refused |

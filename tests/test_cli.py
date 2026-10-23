@@ -1023,6 +1023,13 @@ def test_bringup_leaves_the_graft_trial_on_by_default_and_passes_the_opt_out_to_
     assert code == 0 and "--no-graft-trial" in rec.argv
 
 
+def test_bringup_passes_resume_aborted_to_the_supervisor_only_when_asked(conf):
+    code, out, rec = run(conf, ["bringup", "Cloudflare/clef"])
+    assert "--resume-aborted" not in rec.argv
+    code, out, rec = run(conf, ["bringup", "Cloudflare/clef", "--resume-aborted"])
+    assert code == 0 and "--resume-aborted" in rec.argv
+
+
 def test_package_no_graft_mtp_defaults_off_and_the_flag_turns_it_on(tmp_path, monkeypatch):
     from orchard import cli, package_cmd
     seen = []

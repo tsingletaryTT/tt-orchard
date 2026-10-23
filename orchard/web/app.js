@@ -667,7 +667,7 @@ function confirmDialog({ title, text, ok, danger, twoStep }) {
 const CONTROL_COPY = {
   pause: { title: "Pause this run?", text: "The supervisor stops at its next check and waits. The chips stay leased and the coder keeps running, so nothing else can use them until you resume or abort.", ok: "Pause" },
   resume: { title: "Resume this run?", text: "The supervisor carries on from where it paused.", ok: "Resume" },
-  abort: { title: "Abort this run?", text: "The supervisor stops the coder, releases every chip lease and ends the run. An aborted run cannot be resumed; a new bring-up of the same model starts over in a new run directory only if you move this one aside.", ok: "Abort run", danger: true, twoStep: true },
+  abort: { title: "Abort this run?", text: "The supervisor stops the coder, releases every chip lease and ends the run. The run stays aborted until a person chooses Resume run, which carries on from the ledger.", ok: "Abort run", danger: true, twoStep: true },
 };
 
 async function doControl(word) {
@@ -689,7 +689,7 @@ async function doRetry() {
   const ok = await confirmDialog({
     title: aborted ? "Resume this run?" : "Retry this run?",
     text: aborted
-      ? "This starts `tt-orchard bringup` for the same model in the background. It runs the preflight, takes the chip lease, boots the coder and resumes from the ledger, where the abort left it. The ledger records it as a retry."
+      ? "This starts `tt-orchard bringup` for the same model in the background. It runs the preflight, takes the chip lease, boots the coder and resumes from the ledger, where the abort left it. The ledger records a resume after the abort."
       : "This starts the same `tt-orchard bringup` again in the background. It runs the preflight, takes the chip lease, boots the coder and resumes from the ledger. The ledger records it as a retry.",
     ok: aborted ? "Resume run" : "Retry run",
   });

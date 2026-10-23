@@ -345,8 +345,8 @@ def test_a_retry_relaunches_the_same_bringup_detached(root):
     assert call["log_path"] == root / "org--a.ui-launch.log"
 
 
-def test_an_aborted_run_can_be_resumed_the_same_way_as_a_retry(root):
-    """An operator's abort leaves the ledger as it was; the same detached bringup resumes it from there."""
+def test_an_aborted_run_is_resumed_with_the_explicit_flag_and_a_blocked_run_is_not(root):
+    """An abort is terminal for the supervisor unless the operator asks (`--resume-aborted`), so the page asks for it only for an aborted run."""
     write_ledger(root / "org--a", ("stage_start", 1, {}), ("decision", None, {"decision": "abort", "by": "operator"}),
                  model="org/a")
     app = make_app(root)
@@ -354,6 +354,11 @@ def test_an_aborted_run_can_be_resumed_the_same_way_as_a_retry(root):
     app.retry("org--a")
     argv = app.spawn.calls[0]["argv"]
     assert argv[2:4] == ["bringup", "org/a"] and argv[argv.index("--run-dir") + 1] == str(root / "org--a")
+    assert "--resume-aborted" in argv
+    write_ledger(root / "org--b", ("stage_start", 1, {}), ("decision", 1, {"decision": "blocked", "code": "stage-failed", "reason": "x"}),
+                 model="org/b")
+    app.retry("org--b")
+    assert "--resume-aborted" not in app.spawn.calls[1]["argv"]
 
 
 @pytest.mark.parametrize("ledger,state", [
