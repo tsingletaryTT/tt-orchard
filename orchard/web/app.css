@@ -83,18 +83,19 @@ code, .mono { font-family: var(--mono); font-size: .88em; }
 
 /* ---- top bar: a wooden beam ---- */
 .topbar { display: flex; align-items: center; justify-content: space-between; gap: 10px 16px; flex-wrap: wrap;
-  padding: 10px 24px; position: sticky; top: 0; z-index: 10; color: #fdf0c8;
+  padding: 10px 18px; position: sticky; top: 0; z-index: 10; color: #fdf0c8;
   background: repeating-linear-gradient(0deg, var(--wood) 0 6px, color-mix(in srgb, var(--wood) 86%, #000) 6px 7px);
   border-bottom: 4px solid var(--wood-dark); box-shadow: 0 3px 0 var(--wood-shadow); }
 .brand { display: flex; align-items: baseline; gap: 4px 8px; min-width: 0; flex-wrap: wrap; }
 .brand-mark { font-size: 1.35rem; }
 .brand-name { font: 700 1.4rem/1 var(--pixel); color: #fff3c4; text-shadow: 0 2px 0 var(--wood-dark); white-space: nowrap; }
 .brand-host { color: #f6dfb0; font-size: .82rem; }
+@media (max-width: 1520px) { .brand-host { max-width: 15ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } }
 .views { display: flex; gap: 6px; }
 .view-btn { font: 700 .95rem/1 var(--pixel); color: #fdf0c8; background: var(--wood-dark); border: 3px solid var(--wood-shadow);
   border-radius: 4px; padding: 8px 12px; cursor: pointer; box-shadow: inset 0 -3px 0 rgba(0,0,0,.25); }
 .view-btn[aria-pressed="true"] { background: var(--paper); color: var(--ink); border-color: var(--wood-dark); box-shadow: inset 0 0 0 2px var(--wood-light); }
-.topbar-right { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.topbar-right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-left: auto; }
 .clock { display: grid; grid-template-columns: auto auto; gap: 0 10px; align-items: baseline; padding: 3px 12px;
   background: var(--paper); color: var(--ink); border: 3px solid var(--wood-dark); border-radius: 4px;
   box-shadow: inset 0 0 0 2px var(--wood-light); font-family: var(--pixel); }
@@ -105,6 +106,28 @@ code, .mono { font-family: var(--mono); font-size: .88em; }
 .conn[data-state="live"] .conn-dot { background: #5da130; }
 .conn[data-state="stale"] .conn-dot { background: #f2c84b; }
 .conn[data-state="offline"] .conn-dot { background: #c0392b; }
+
+/* the machine chip: the top bar's one-line answer to "are the chips free?"; the tone is a dot, the words carry the meaning */
+.machine-chip { display: inline-flex; align-items: center; gap: 8px; font: 700 .82rem/1 var(--pixel); color: var(--ink); background: var(--paper);
+  border: 3px solid var(--wood-dark); border-radius: 4px; padding: 5px 8px; cursor: pointer; box-shadow: inset 0 0 0 2px var(--wood-light); white-space: nowrap; }
+.machine-chip::before { content: ""; width: 9px; height: 9px; background: var(--dim); box-shadow: 0 0 0 1px var(--wood-dark); }
+.machine-chip[data-tone="good"]::before { background: #5da130; }
+.machine-chip[data-tone="warn"]::before { background: #f2c84b; }
+.machine-chip[data-tone="bad"]::before { background: #c0392b; }
+.machine-chip[data-tone="unknown"]::before { background: var(--dim); }
+.machine-chip:hover { filter: brightness(1.06); }
+
+/* the page style: a setting of the whole page, so it is a small labelled pair and not another tab */
+.style-switch { display: inline-flex; align-items: center; gap: 0; }
+.style-label { font: .72rem var(--font); letter-spacing: .06em; text-transform: uppercase; color: #f6dfb0; margin-right: 8px; }
+.style-btn { font: 600 .78rem/1 var(--font); color: #fdf0c8; background: transparent; border: 1px solid rgba(253, 240, 200, .55);
+  padding: 6px 10px; cursor: pointer; }
+.style-btn:first-of-type { border-radius: 4px 0 0 4px; }
+.style-btn:last-of-type { border-radius: 0 4px 4px 0; border-left-width: 0; }
+.style-btn[aria-pressed="true"] { background: rgba(253, 240, 200, .24); color: #fff; box-shadow: inset 0 -2px 0 #fdf0c8; }
+.style-btn:hover { background: rgba(253, 240, 200, .14); }
+.rail-link { font-size: .78rem; color: var(--title); text-decoration: none; border-bottom: 1px dotted currentColor; }
+.rail-link:hover { border-bottom-style: solid; }
 
 /* ---- the sheet: one parchment page on the field ---- */
 .sheet { display: grid; grid-template-columns: 250px minmax(0, 1fr); max-width: 1500px; margin: 22px auto 40px;
@@ -504,6 +527,11 @@ html[data-mode="operator"] .brand-name { color: #fff; text-shadow: none; font-si
 html[data-mode="operator"] .brand-host { color: #a9c4c2; }
 html[data-mode="operator"] .view-btn { background: transparent; color: #e4f1f0; border: 1px solid #3f6664; box-shadow: none; font-weight: 600; }
 html[data-mode="operator"] .view-btn[aria-pressed="true"] { background: #e4f1f0; color: #092221; border-color: #e4f1f0; box-shadow: none; }
+html[data-mode="operator"] .machine-chip { font: 600 .82rem/1 var(--font); background: transparent; color: #e4f1f0; border: 1px solid #3f6664; box-shadow: none; }
+html[data-mode="operator"] .style-label { color: #a9c4c2; }
+html[data-mode="operator"] .style-btn { color: #e4f1f0; border-color: #3f6664; }
+html[data-mode="operator"] .style-btn[aria-pressed="true"] { background: #1c4a49; color: #fff; box-shadow: inset 0 -2px 0 #74c5df; }
+html[data-mode="operator"] .style-btn:hover { background: #17383a; }
 html[data-mode="operator"] .clock { background: transparent; color: #e4f1f0; border: 0; box-shadow: none; padding: 0; }
 html[data-mode="operator"] .conn { color: #a9c4c2; }
 html[data-mode="operator"] .sheet { border: 1px solid var(--line); border-radius: 4px; box-shadow: none; }

@@ -31,14 +31,16 @@
     <button type="button" class="view-btn" id="view-settings-btn" aria-pressed="false">🧰 Settings</button>
   </nav>
   <div class="topbar-right">
+    <button type="button" class="machine-chip" id="machine-chip" data-tone="unknown" title="The chips on this box. Opens the Machine view.">Chips: reading…</button>
     <div class="clock" aria-label="Machine time and connection">
       <span class="clock-day" id="clock-day"></span>
       <span class="clock-time" id="clock-time"></span>
       <span class="conn" id="conn" role="status" aria-live="polite"><span class="conn-dot" aria-hidden="true"></span><span class="conn-text">Connecting…</span></span>
     </div>
-    <div class="mode-switch" id="mode-switch" role="group" aria-label="Page style">
-      <button type="button" class="view-btn" id="mode-playful-btn" data-mode="playful" aria-pressed="true" title="The farm look">Playful</button>
-      <button type="button" class="view-btn" id="mode-operator-btn" data-mode="operator" aria-pressed="false" title="Plain type, state first: what is happening, what happened, what to do">Operator</button>
+    <div class="style-switch" id="mode-switch" role="group" aria-label="Page style">
+      <span class="style-label">Style</span>
+      <button type="button" class="style-btn" id="mode-playful-btn" data-mode="playful" aria-pressed="true" title="The farm look">Playful</button>
+      <button type="button" class="style-btn" id="mode-operator-btn" data-mode="operator" aria-pressed="false" title="Plain type, state first: what is happening, what happened, what to do">Operator</button>
     </div>
     <button type="button" class="btn btn-primary" id="new-run-btn">🌱 New bring-up</button>
   </div>
@@ -58,7 +60,7 @@
       <div class="rail-head">
         <h2 id="machine-h">Machine</h2>
         <span class="rail-note" id="machine-note"></span>
-        <button type="button" class="btn btn-small" id="machine-check-btn" title="Check both boxes for what a run needs">🔍 Check</button>
+        <a href="#machine" class="rail-link" id="machine-details-link" title="The live display, the setup checks and the tensor caches">Details ›</a>
       </div>
       <div id="machine" class="machine"><p class="muted">Reading gozer…</p></div>
     </section>

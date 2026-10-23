@@ -187,7 +187,23 @@ function renderMachine() {
   }
   const free = all.filter((c) => c.state === "FREE").length;
   $("machine-note").textContent = all.length ? `${free} of ${all.length} chips free` : "";
+  renderMachineChip(m, all, free);
   renderReadings();
+}
+
+// The top bar's one-line answer to "can I start something?": the same chips and coder the rail panel lists, so it never
+// disagrees with it. A tone, not a colour alone: the words say how many chips are free and whether the coder is up.
+function renderMachineChip(m, all, free) {
+  const chip = $("machine-chip");
+  if (!m || !m.gozer_ok || !all.length) {
+    chip.textContent = "Chips: unknown";
+    chip.dataset.tone = "bad";
+    return;
+  }
+  const stale = all.some((c) => c.state === "STALE" || c.state === "BUSY-UNTRACKED");
+  chip.textContent = free === all.length ? `${free} of ${all.length} chips free`
+    : `${free} of ${all.length} chips free · coder ${m.coder.up ? "up" : "down"}`;
+  chip.dataset.tone = free === all.length ? "good" : stale ? "bad" : "warn";
 }
 
 // ---- machine health: the scene's weather and how hard the farmer works --------------------------------
@@ -299,7 +315,7 @@ async function refreshRuns() {
       select(name);
     }
   } catch (err) {
-    if (Date.now() - S.lastOk > STALE_MS) setConn("offline");
+    if (Date.now() - S.lastOk > STALE_MS) { setConn("offline"); renderMachineChip(null, [], 0); }
   }
 }
 
@@ -1010,7 +1026,8 @@ function wire() {
   $("checks-run").addEventListener("click", startChecks);
   $("caches-run").addEventListener("click", loadCaches);
   setInterval(renderNow, 1000);
-  $("machine-check-btn").addEventListener("click", () => { setView("settings"); startChecks(); });
+  $("machine-chip").addEventListener("click", () => setView("hardware"));
+  $("machine-details-link").addEventListener("click", (ev) => { ev.preventDefault(); setView("hardware"); });
   $("nr-mode").addEventListener("change", () => { $("nr-start").disabled = true; });
   $("nr-research").addEventListener("change", () => { $("nr-start").disabled = true; });
   $("hw-zoom-in").addEventListener("click", () => zoomToplike(+1));
@@ -1430,6 +1447,7 @@ async function main() {
     return;
   }
   $("brand-host").textContent = `${S.meta.hostname} · ${S.meta.version}${S.meta.lan ? " · open on the network" : ""}`;
+  $("brand-host").title = $("brand-host").textContent;        // the bar truncates it on narrower screens
   S.scene = window.OrchardScene ? new window.OrchardScene($("scene")) : null;
   if (S.scene) S.scene.start();
   tickClock();
