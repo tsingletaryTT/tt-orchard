@@ -268,3 +268,55 @@ def test_the_gate_refuses_a_card_that_leaves_out_what_stage_2_decided(world, var
     (pkg / "README.md").write_text("\n".join(lines) + "\n")
     reasons = gate_package(stage_dir, world["run"]).reasons
     assert any(said in r for r in reasons), reasons
+
+
+# ---- an optional profile has no trial rows (review finding on PR 47) ---------------------------------------------------------------
+# card_numbers() gives an optional profile one TODO row, because the run's measurements were taken on the required profile's chip count.
+# The gate must not ask that card for the trial's rows either: they would be another chip count's numbers.
+
+def with_optional_profile(w):
+    from package_fakes import make_source
+    make_source(w["models"], name="qwen3.8-27b-dflash2-p150", chips=1, mesh="P150",
+                env={"ARCH_NAME": "blackhole", "QWEN36_DRAFTER": "dflash2", "QWEN36_DFLASH_TP": "1"})
+
+
+@pytest.mark.parametrize("variant", [60.0, 21.0])
+def test_an_optional_profiles_card_is_not_asked_for_the_trials_rows(world, variant):
+    decided(world, variant=variant)                        # graft, then kept safe
+    with_optional_profile(world)
+    stage_dir, package = stage(world)
+    fake_boot_result(stage_dir)
+    finish(world["run"], stage_dir)
+    required = [p for p in package["profiles"] if p["required"]]
+    optional = [p for p in package["profiles"] if not p["required"]]
+    assert len(required) == 1 and len(optional) == 1
+    opt_card = (world["run"] / optional[0]["dir"] / "README.md").read_text()
+    assert "graft trial" not in opt_card or "TODO" in opt_card         # the optional card shows no trial measurement
+    g = gate_package(stage_dir, world["run"])
+    assert g.ok, g.reasons
+
+
+def test_the_required_profiles_card_still_has_to_show_the_trials_rows_next_to_an_optional_one(world):
+    decided(world)
+    with_optional_profile(world)
+    stage_dir, package = stage(world)
+    fake_boot_result(stage_dir)
+    finish(world["run"], stage_dir)
+    req = next(p for p in package["profiles"] if p["required"])
+    card_path = world["run"] / req["dir"] / "README.md"
+    kept = [ln for ln in card_path.read_text().splitlines() if "graft trial" not in ln or "chose the graft" in ln]
+    card_path.write_text("\n".join(kept) + "\n")
+    g = gate_package(stage_dir, world["run"])
+    assert not g.ok and any("graft trial measured it" in r for r in g.reasons)
+
+
+def test_a_required_profile_that_was_not_boot_checked_still_has_to_show_the_trials_rows(world):
+    """The rule follows `required`, as card_numbers does, and not whether the boot check ran."""
+    decided(world)
+    stage_dir, package = stage(world)                           # staged, never boot-checked
+    req = next(p for p in package["profiles"] if p["required"])
+    card_path = world["run"] / req["dir"] / "README.md"
+    kept = [ln for ln in card_path.read_text().splitlines() if "graft trial" not in ln or "chose the graft" in ln]
+    card_path.write_text("\n".join(kept) + "\n")
+    g = gate_package(stage_dir, world["run"])
+    assert any("graft trial measured it" in r for r in g.reasons), g.reasons

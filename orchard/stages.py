@@ -888,7 +888,8 @@ def gate_package(stage_dir, run_dir) -> GateResult:
                         card_problems(card, license_id=license_id, run_dir=run, sidecars=sidecars,
                                       base_files=_shipped_names(out / "base_config"), reported=reported, reported_source=reported_source,
                                       model_id=new_repo, nearest_model=nearest_repo, graft=has_graft,
-                                      graft_decision=trial_decision, trial_rows=trial_rows)]
+                                      graft_decision=trial_decision,
+                                      trial_rows=trial_rows if p.get("required") else ())]
         reasons += [f"profile {name}: the card cites {e}, which is missing at evidence/{e}"
                     for e in card_evidence_paths(card) if not (out / "evidence" / e).is_file()]
         if p.get("verified") is True:
