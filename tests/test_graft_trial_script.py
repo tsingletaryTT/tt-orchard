@@ -15,13 +15,13 @@ from orchard.graft_trial import TRIAL_RESULT, decide
 
 SCRIPT = Path(__file__).resolve().parent.parent / "orchard" / "skills" / "weights-swap-templates" / "graft_trial.py"
 
-STUB_MEASURE = '''import json, sys, pathlib
+STUB_MEASURE = '''import json, os, sys, pathlib
 argv = sys.argv[1:]
 arg = lambda k: argv[argv.index(k) + 1]
 here = pathlib.Path(__file__).resolve().parent
 behave = json.loads((here.parent / "behavior.json").read_text())
 with open(here.parent / "calls.log", "a") as f:
-    f.write(json.dumps({"tool": "measure", "argv": argv}) + "\\n")
+    f.write(json.dumps({"tool": "measure", "argv": argv, "pgrp": os.getpgrp()}) + "\\n")
 b = behave["measure"][arg("--label")]
 if b.get("exit"):
     print(b.get("say", "boom")); sys.exit(b["exit"])
@@ -33,11 +33,11 @@ rec = {"label": arg("--label"), "server_ready_s": b.get("ready", 100.0), "prompt
 pathlib.Path(arg("--out")).write_text(json.dumps(rec))
 '''
 
-STUB_PREPARE = '''import json, pathlib, sys
+STUB_PREPARE = '''import json, os, pathlib, sys
 here = pathlib.Path(__file__).resolve().parent
 log = pathlib.Path(json.loads((here / "swap_config.json").read_text())["calls_log"])
 behave = json.loads(pathlib.Path(json.loads((here / "swap_config.json").read_text())["behavior"]).read_text())
-log.open("a").write(json.dumps({"tool": "prepare", "cwd": str(here), "config": json.loads((here / "swap_config.json").read_text())}) + "\\n")
+log.open("a").write(json.dumps({"tool": "prepare", "cwd": str(here), "pgrp": os.getpgrp(), "config": json.loads((here / "swap_config.json").read_text())}) + "\\n")
 if behave.get("prepare_exit"):
     print("prepare_swap: graft_mtp is set, but the new model already has mtp.* tensors"); sys.exit(behave["prepare_exit"])
 (here / "model-dir").mkdir()
@@ -45,11 +45,11 @@ if behave.get("prepare_exit"):
 (here / "model-dir-sources.json").write_text("{}")
 '''
 
-STUB_SERVE = '''import json, pathlib, sys
+STUB_SERVE = '''import json, os, pathlib, sys
 here = pathlib.Path(__file__).resolve().parent
 cfg = json.loads((here / "swap_config.json").read_text())
 behave = json.loads(pathlib.Path(cfg["behavior"]).read_text())
-pathlib.Path(cfg["calls_log"]).open("a").write(json.dumps({"tool": "serve", "cwd": str(here)}) + "\\n")
+pathlib.Path(cfg["calls_log"]).open("a").write(json.dumps({"tool": "serve", "cwd": str(here), "pgrp": os.getpgrp()}) + "\\n")
 if behave.get("serve_exit"):
     print("serve_and_compare: the server exited with code 1 before it was healthy"); sys.exit(behave["serve_exit"])
 (here / "evidence").mkdir()
@@ -273,3 +273,13 @@ def test_the_speeds_are_rounded_so_the_card_can_show_exactly_what_the_file_holds
     assert res["safe"]["decode_tok_s"] == 19.88 and res["variant"]["decode_tok_s"] == 61.23
     assert res["safe"]["ttft_s"] == 0.123 and res["variant"]["ttft_s"] == 0.012
     assert res["safe"]["per_prompt"]["a"]["decode_tok_s"] == 19.88 and res["safe"]["per_prompt"]["a"]["ttft_s"] == 0.123
+
+
+def test_every_child_stays_in_the_scripts_process_group_so_the_supervisors_stop_reaches_it(rig):
+    """The supervisor ends a test that passes its deadline by killing the test command's process group. A child that started its own
+    session would survive that and keep the leased chips busy."""
+    import os
+    rig.run()
+    calls = rig.calls()
+    assert [c["tool"] for c in calls] == ["measure", "prepare", "serve", "measure"]
+    assert {c["pgrp"] for c in calls} == {os.getpgrp()}

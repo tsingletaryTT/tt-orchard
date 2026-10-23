@@ -61,13 +61,15 @@ def tail(path: Path, n: int = TAIL_LINES) -> str:
 
 
 def run_step(name: str, argv: list, cwd: Path, steps: list) -> tuple[int, Path]:
-    """Run one child to completion (stdin closed, own process group so a stop reaches its server) and record it."""
+    """Run one child to completion (stdin closed) and record it. The child stays in this script's process group: the supervisor stops a
+    test that passes its deadline by killing that group, and a child in its own session would outlive the stop. (The child's own server
+    has its own session, as stage 2's does.)"""
     log = HERE / "evidence" / f"{name}.log"
     log.parent.mkdir(parents=True, exist_ok=True)
     t0 = time.monotonic()
     with open(log, "wb") as out:
         proc = subprocess.Popen([str(a) for a in argv], cwd=str(cwd), stdout=out, stderr=subprocess.STDOUT,
-                                stdin=subprocess.DEVNULL, start_new_session=True)
+                                stdin=subprocess.DEVNULL)
         code = proc.wait()
     steps.append({"name": name, "returncode": code, "seconds": round(time.monotonic() - t0, 1)})
     return code, log

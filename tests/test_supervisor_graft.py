@@ -441,3 +441,9 @@ def test_enough_disk_runs_the_trial(rig, spy):
         return namedtuple("U", "total used free")(0, 0, free)
     rig.usage = usage
     assert rig.run() == EXIT_READY and len(spy.trials) == 1
+
+
+def test_the_trials_command_is_one_the_command_runner_allows(rig):
+    """spawn_checked runs every test command through the fail-closed lexer; the spy in these tests skips it, so check the command itself."""
+    from orchard.runner import check_string
+    check_string(f"python3 stages/2/{TRIAL_DIR}/graft_trial.py", rig.run_dir)
