@@ -1850,3 +1850,31 @@ All six findings were real. Each was reproduced or read against the code, fixed 
 - The boot child resolves only the cache root, the one root it is given.
 - Mutations: 5 on the verifier, 23 and 17 on the boot step's server stop (3 survivors, then 1, each given a test), 11 on the queue ticket (2 survivors), 25 on the handoff (2), 29 on the identity check (6), 4 and 5 on the smaller findings. One mutant (the pid guard removed) made the step signal its own process group and ended the mutation helper, which showed the missing guard for a record naming the step's own pid; the helper now runs the tests in a session of its own.
 - Slips: a `pkill -f` pattern matched my own shell; a SIGTERM test first killed pytest because no handler existed yet (its baseline handler now only counts); a killed mutation run left one mutation in the file, found by checking that every mutation anchor still matched.
+
+## 2026-10-23 (UTC): the `bus` preflight row (branch `bus-check`, version 0.8.29)
+Prompt (operator, through the parent): take issue 25. On 2026-10-22 both chips of one board went to PCIe power state D3cold while idle;
+`tt-smi -r` did not bring them back and a reboot did. gozer then refused every lease because it could not read the board's serial, and a
+benchmark session started anyway and died 70 seconds in. Nothing before the run said the board was gone.
+- `orchard/bus.py` reads what the kernel shows and runs nothing: each PCI function with vendor 0x1e52 under `/sys/bus/pci/devices` (its
+  `power_state`, whether a driver is attached, and the driver's `tenstorrent/tenstorrent!N/tt_serial`) and the numbered entries of
+  `/dev/tenstorrent`. It never opens a chip, takes a lease or resets anything.
+- The row `bus` (after `gozer`, only when the signal exists, so older tests keep their row list) blocks as `hardware-unhealthy` and lists every
+  cause it found: fewer chips on the bus than the configuration needs (the coder's chips plus a test board, the whole box for a coder on four
+  chips, the largest `required_chips` count, and only the coder's chips for a lab run); a power state other than D0 (D3cold gets the incident
+  text: a reset did not wake it, a reboot did); a serial that cannot be read (missing, zero or all ones); no driver, no node entry, or a
+  `/dev/tenstorrent/N` that is missing; a chip gozer lists that the bus does not have. It warns on a power state the kernel does not report (old
+  kernels), an extra device node, a gozer that lists fewer chips than the bus shows, and a board that lists fewer chips than another. A bus
+  that cannot be listed at all (no sysfs) is a warning, never a block.
+- The CLI and the UI use the same `run_preflight`, so the row appears in the page's checks and `bringup` refuses a launch while it blocks
+  (tested through `WebApp`). The `hardware-unhealthy` unblock steps and the README preflight table say what the row means and that the fix is a
+  power cycle or reboot.
+- Full suite: 5759 passed, 2 skipped. Tests first, in `tests/test_bus_preflight.py`: 54, all on a fake sysfs tree in a temporary directory; the check is also run with
+  `subprocess` made to fail. Mutations: 41 on the module (7 survived: three were redundant guards and were removed (an empty serial is a subset of both
+  sets, with no `/dev/tenstorrent` the node set is empty, and one board never lists unequal sizes), four led to stronger tests (the gozer
+  count warning was masked by the half-board warning, the half-board test did not check that the complete board was left alone, a block was not
+  shown with a warning beside it, and a non-numeric `required_chips` part); the `0x` serial value was added to the serial cases), 10 on the wiring,
+  5 on the unblock text and 4 on the README row, all red at the end.
+- Not done: the second half of the issue. The supervisor and the benchmark session still cannot tell a dead board from a model failure, so a run
+  that loses a board after it starts is not stopped for that reason (a `hardware-unhealthy` block is auto-retried, 60 s later, against the
+  same board). The trigger of the D3cold event is not understood. The row was not run against a board in D3cold, because none is available:
+  the sysfs names and the `power_state` values come from the kernel's documentation and one healthy box (four chips, all D0).

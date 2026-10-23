@@ -140,7 +140,7 @@ def check_bus(bus: Bus, gozer_text: str, needed: int) -> Check:
         elif c.power_state != AWAKE:
             note = (" (D3cold: the chip is powered down and inaccessible. " + RESET_DOES_NOT_HELP + ")"
                     if c.power_state == "D3cold" else "")
-            blocks.append(f"{c.bdf} is in PCIe power state {c.power_state}, not {AWAKE}{note}")
+            blocks.append(f"{c.bdf} is in PCIe power state {c.power_state} (a chip that can be used is in {AWAKE}){note}")
         if not c.driver_bound:
             blocks.append(f"{c.bdf}: no tenstorrent driver is attached")
         elif c.node is None:
