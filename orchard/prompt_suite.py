@@ -408,3 +408,28 @@ def evaluate(report: dict, *, suite_path=None) -> Verdict:
     return Verdict(True, reasons, advisory,
                    {"ran": True, "prompts": len(entries), "mode": mode, "control": "file" if control else "none",
                     "findings": rows})
+
+
+# ---- reading a swap-check.json from the command line ---------------------------------------------------------------------
+
+def main(argv=None) -> int:
+    """`python3 -m orchard.prompt_suite swap-check.json`: print what the stage gates read in the file as JSON
+    ({reasons, advisory, summary}). Exit 0 when no reason fails a stage, 1 when one does, 2 when the file cannot be read."""
+    import argparse
+    import sys
+    ap = argparse.ArgumentParser(prog="python3 -m orchard.prompt_suite", description=main.__doc__)
+    ap.add_argument("swap_check", help="a stage 2 or stage 4 evidence/swap-check.json")
+    args = ap.parse_args(argv)
+    try:
+        report = json.loads(Path(args.swap_check).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        print(f"prompt_suite: cannot read {args.swap_check}: {exc}", file=sys.stderr)
+        return 2
+    verdict = evaluate(report)
+    print(json.dumps({"reasons": verdict.reasons, "advisory": verdict.advisory, "summary": verdict.summary},
+                     indent=2, ensure_ascii=False))
+    return 1 if verdict.reasons else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
