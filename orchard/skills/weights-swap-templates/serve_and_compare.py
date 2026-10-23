@@ -218,8 +218,39 @@ def suite_problems(suite) -> list[str]:
     return out
 
 
+_REVISION = re.compile(r"[0-9a-f]{40}")
+
+
+def _split_id(model_id: str) -> tuple[str, str | None]:
+    repo, sep, rev = model_id.rpartition("@")
+    if sep and _REVISION.fullmatch(rev):
+        return repo, rev
+    return model_id, None
+
+
+def control_identity_problem(expected, actual) -> str | None:
+    """Why a control served from `actual` is not a control of the nearest model `expected`, or None when it is. The repository
+    ids must be equal; when `expected` pins a revision, the control's id must carry the same one. The same rule, word for word, is
+    in orchard/prompt_suite.py (this script imports nothing from that package); a test keeps the two equal."""
+    if not isinstance(expected, str) or not expected.strip():
+        return "the nearest model is not known, so the control cannot be checked against it"
+    if not isinstance(actual, str) or not actual.strip():
+        return f"the control's record has no model id, so it cannot be checked against the nearest model {expected}"
+    want_repo, want_rev = _split_id(expected.strip())
+    got_repo, got_rev = _split_id(actual.strip())
+    if want_repo != got_repo:
+        return f"it was served from {actual.strip()}, and the nearest model is {want_repo}, so it explains nothing"
+    if want_rev and got_rev is None:
+        return (f"the nearest model is pinned to revision {want_rev[:12]} and the control's model id carries no revision, so its "
+                "revision cannot be checked")
+    if want_rev and got_rev != want_rev:
+        return f"it was served at revision {got_rev[:12]}, and the nearest model is pinned to revision {want_rev[:12]}"
+    return None
+
+
 def load_control(cfg: dict, run_dir: Path) -> dict | None:
-    """The control named by `suite_control`: {source, sha256, record}. Exits 2 when it cannot be used."""
+    """The control named by `suite_control`: {source, sha256, record}. Exits 2 when it cannot be used, which includes a control
+    that was not served from the nearest model (`nearest_model_id`, with its revision when the config pins one)."""
     value = cfg.get("suite_control")
     if not value:
         return None
@@ -233,6 +264,10 @@ def load_control(cfg: dict, run_dir: Path) -> dict | None:
     if not isinstance(record, dict) or not isinstance(record.get("entries"), list):
         print(f"serve_and_compare: the control {path} has no prompt_suite record. It must be the swap-check.json "
               "of a run of the same suite on the nearest model.", file=sys.stderr)
+        sys.exit(2)
+    problem = control_identity_problem(cfg.get("nearest_model_id"), record.get("model_id"))
+    if problem:
+        print(f"serve_and_compare: the control {path} is not a control of the nearest model: {problem}.", file=sys.stderr)
         sys.exit(2)
     record = {k: v for k, v in record.items() if k != "control"}
     try:

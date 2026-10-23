@@ -297,12 +297,50 @@ def _entries(record: dict) -> dict:
     return {e["id"]: e for e in record.get("entries", []) if isinstance(e, dict) and isinstance(e.get("id"), str)}
 
 
-def _control_problems(record: dict, ctl) -> tuple[dict | None, list, list]:
+_REVISION = re.compile(r"[0-9a-f]{40}")
+_UNSET = object()           # `evaluate` was not told which model is the nearest one: it makes no identity check (older callers)
+
+
+def _split_id(model_id: str) -> tuple[str, str | None]:
+    """'org/name@<40 hex>' -> ('org/name', '<40 hex>'). Anything after '@' that is not a 40-hex revision stays part of the repository."""
+    repo, sep, rev = model_id.rpartition("@")
+    if sep and _REVISION.fullmatch(rev):
+        return repo, rev
+    return model_id, None
+
+
+def control_identity_problem(expected, actual) -> str | None:
+    """Why a control served from `actual` is not a control of the nearest model `expected`, or None when it is.
+
+    The repository ids must be equal. When `expected` pins a revision the control's id must carry the same one: a control
+    that cannot show which revision it was served from cannot be checked. The same rule is in the swap template
+    (serve_and_compare.py), which has no import from this package; a test keeps the two equal."""
+    if not isinstance(expected, str) or not expected.strip():
+        return "the nearest model is not known, so the control cannot be checked against it"
+    if not isinstance(actual, str) or not actual.strip():
+        return f"the control's record has no model id, so it cannot be checked against the nearest model {expected}"
+    want_repo, want_rev = _split_id(expected.strip())
+    got_repo, got_rev = _split_id(actual.strip())
+    if want_repo != got_repo:
+        return f"it was served from {actual.strip()}, and the nearest model is {want_repo}, so it explains nothing"
+    if want_rev and got_rev is None:
+        return (f"the nearest model is pinned to revision {want_rev[:12]} and the control's model id carries no revision, so its "
+                "revision cannot be checked")
+    if want_rev and got_rev != want_rev:
+        return f"it was served at revision {got_rev[:12]}, and the nearest model is pinned to revision {want_rev[:12]}"
+    return None
+
+
+def _control_problems(record: dict, ctl, nearest_model=_UNSET) -> tuple[dict | None, list, list]:
     """The control's record when it can explain this one, with the reasons it cannot and the notes about it."""
     if not isinstance(ctl, dict) or not isinstance(ctl.get("record"), dict):
         return None, ["the control is not a recorded prompt suite (it has no record)"], []
     other = ctl["record"]
     bad = []
+    if nearest_model is not _UNSET:
+        problem = control_identity_problem(nearest_model, other.get("model_id"))
+        if problem:
+            bad.append(problem)
     if other.get("suite_sha256") != record.get("suite_sha256"):
         bad.append(f"the control ran other prompts (suite sha256 {str(other.get('suite_sha256'))[:12]} against "
                    f"{str(record.get('suite_sha256'))[:12]}), so it explains nothing")
@@ -349,11 +387,16 @@ def _same_weights_reasons(record: dict, control: dict, entries: dict, control_en
     return []
 
 
-def evaluate(report: dict, *, suite_path=None) -> Verdict:
+def evaluate(report: dict, *, suite_path=None, nearest_model=_UNSET) -> Verdict:
     """Read the prompt-suite record in a swap-check report. `reasons` fail a gate; `advisory` lines are recorded only.
 
     A finding fails a gate when its kind is in SUITE_BLOCKING_KINDS and the control does not show that kind on the same
-    prompt. A report without a record has no verdict (older runs, and runs that did not opt in)."""
+    prompt. A report without a record has no verdict (older runs, and runs that did not opt in).
+
+    `nearest_model` is the id of the nearest model as stage 0 recorded it. When it is given, a control has to have been served from
+    that model (`control_identity_problem`); a control that fails the check counts as no control, so it explains nothing, and the
+    verdict says why. None means the run does not say which model is the nearest one, so a control cannot be verified. Leaving it out
+    makes no identity check, for callers that have no run to read it from."""
     record = report.get("prompt_suite") if isinstance(report, dict) else None
     if record is None:
         return Verdict(False, summary={"ran": False})
@@ -397,7 +440,7 @@ def evaluate(report: dict, *, suite_path=None) -> Verdict:
 
     control, bad, notes = (None, [], [])
     if record.get("control") is not None:
-        control, bad, notes = _control_problems(record, record["control"])
+        control, bad, notes = _control_problems(record, record["control"], nearest_model)
     reasons += [f"control: {b}" for b in bad]
     advisory += notes
     control_entries = _entries(control) if control else {}
@@ -450,13 +493,16 @@ def main(argv=None) -> int:
     import sys
     ap = argparse.ArgumentParser(prog="python3 -m orchard.prompt_suite", description=main.__doc__)
     ap.add_argument("swap_check", help="a stage 2 or stage 4 evidence/swap-check.json")
+    ap.add_argument("--nearest-model", default=None,
+                    help="the nearest model's id as stage 0 recorded it (org/name or org/name@revision); with it a control is checked "
+                         "against that model")
     args = ap.parse_args(argv)
     try:
         report = json.loads(Path(args.swap_check).read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         print(f"prompt_suite: cannot read {args.swap_check}: {exc}", file=sys.stderr)
         return 2
-    verdict = evaluate(report)
+    verdict = evaluate(report) if args.nearest_model is None else evaluate(report, nearest_model=args.nearest_model)
     print(json.dumps({"reasons": verdict.reasons, "advisory": verdict.advisory, "summary": verdict.summary},
                      indent=2, ensure_ascii=False))
     return 1 if verdict.reasons else 0

@@ -401,7 +401,7 @@ def gate_weights_swap(stage_dir, run_dir) -> GateResult:
     if err:
         return GateResult(False, (err,))
     reasons, seen = _swap_reasons(d), []
-    reasons += _suite_reasons_in(Path(stage_dir) / "evidence" / "swap-check.json")
+    reasons += _suite_reasons_in(Path(stage_dir) / "evidence" / "swap-check.json", run_dir)
     reasons += decision_problems(stage_dir, run_dir)         # the graft trial's decision, when stage 2 made one
     _evidence(run_dir, d.get("evidence"), "result.json", reasons, seen)
     return _done(reasons, seen)
@@ -460,7 +460,7 @@ def gate_weights_swap_sidecar(stage_dir, run_dir) -> GateResult:
     if err:
         return GateResult(False, (err,))
     reasons, seen = _swap_reasons(d), []
-    reasons += _suite_reasons_in(Path(stage_dir) / "evidence" / "swap-check.json")
+    reasons += _suite_reasons_in(Path(stage_dir) / "evidence" / "swap-check.json", run_dir)
     reasons += decision_problems(stage_dir, run_dir)
     delta, derr = _load(Path(run_dir) / "stages" / "0", "delta.json")
     if derr:
@@ -579,21 +579,31 @@ def hw_record_problem(stage_dir, chips: int) -> str | None:
     return None
 
 
-def _suite_reasons(report, where: str = "") -> list[str]:
+def _nearest_model_of(run_dir) -> str | None:
+    """The nearest model's id as stage 0 recorded it (delta.json's `nearest_model`), or None when stage 0 gives none. The gates ask
+    stage 0 and not the stage's own swap_config.json, because an agent writes that file and a control is only worth as much as
+    the model it was served from."""
+    delta, err = _load(Path(run_dir) / "stages" / "0", "delta.json")
+    value = delta.get("nearest_model") if not err and isinstance(delta, dict) else None
+    return value if isinstance(value, str) else None
+
+
+def _suite_reasons(report, run_dir, where: str = "") -> list[str]:
     """The prompt-suite reasons (orchard/prompt_suite.py) in one swap-check.json report, each prefixed with `where`.
     A report without a suite record has none. The gates read the template's swap-check.json and not the agent's
-    result.json: the record holds the raw replies, and the verdict is computed here from them."""
-    return [where + r for r in prompt_suite.evaluate(report).reasons]
+    result.json: the record holds the raw replies, and the verdict is computed here from them. A control in the record has
+    to have been served from the run's nearest model (stage 0's), which is checked here again whatever the template did."""
+    return [where + r for r in prompt_suite.evaluate(report, nearest_model=_nearest_model_of(run_dir)).reasons]
 
 
-def _suite_reasons_in(path, where: str = "") -> list[str]:
+def _suite_reasons_in(path, run_dir, where: str = "") -> list[str]:
     """`_suite_reasons` for the swap-check.json at `path`. A file that is missing or not a JSON object has none: the
     other checks of the gate already say what they need of it."""
     try:
         report = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return []
-    return _suite_reasons(report, where) if isinstance(report, dict) else []
+    return _suite_reasons(report, run_dir, where) if isinstance(report, dict) else []
 
 
 def gate_mesh_swap(stage_dir, run_dir, required=None) -> GateResult:
@@ -639,7 +649,7 @@ def gate_mesh_swap(stage_dir, run_dir, required=None) -> GateResult:
             reasons.append(f"{where}: top1_agreement {c.get('top1_agreement')!r} is not the "
                            f"result_draft's in {swap}")
         if isinstance(report, dict):
-            reasons += _suite_reasons(report, f"{where}: ")
+            reasons += _suite_reasons(report, run_dir, f"{where}: ")
         reasons += _graft_reasons(stage_dir, run_dir, n, where)
     return _done(reasons, seen)
 

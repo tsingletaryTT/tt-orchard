@@ -16,7 +16,7 @@ pytest.importorskip("tokenizers")
 
 from orchard import defaults, prompt_suite as ps  # noqa: E402
 from test_container_template import crig  # noqa: E402,F401  (a fixture)
-from test_weights_swap_templates import TEMPLATES, load_swap_template, report, swap  # noqa: E402,F401  (a fixture)
+from test_weights_swap_templates import NEAREST, TEMPLATES, load_swap_template, report, swap  # noqa: E402,F401  (a fixture)
 
 SUITE = ps.load_suite()
 JINJA = "{% for m in messages %}{{ m.role }}: {{ m.content }}\n{% endfor %}{% if tools %}tools available{% endif %}"
@@ -247,11 +247,12 @@ def test_the_recorded_sha256_is_that_of_the_copy_in_the_stage(swap, tmp_path):
 # ---- a control ------------------------------------------------------------------------------------------------------
 
 def control_file(swap, tmp_path, **change):
-    """The swap-check.json of an earlier run on the nearest model: the record this template wrote."""
+    """The swap-check.json of an earlier run on the nearest model: the record this template wrote, with the nearest model's id (a
+    control of any other model is refused, tests/test_prompt_suite_control_identity.py). `change` overrides record fields."""
     stage_for_suite(swap)
     assert run(swap, tmp_path).returncode == 0
     rep = report(swap)
-    rep["prompt_suite"].update(change)
+    rep["prompt_suite"].update({"model_id": NEAREST, **change})
     path = swap["run"] / "stages" / "2" / "control" / "swap-check.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(rep))
@@ -310,11 +311,16 @@ def test_a_shared_finding_between_the_model_and_its_control_does_not_fail(swap, 
     assert ps.evaluate(report(swap)).reasons == []
 
 
-def test_a_control_that_is_a_copy_of_the_run_is_refused_by_the_gate(swap, tmp_path):
-    # The same model served twice: same model id, same replies. It is no control of the nearest model.
-    path = control_file(swap, tmp_path)
-    assert run(swap, tmp_path, suite_control=str(path)).returncode == 0
-    assert any("same model id" in r for r in ps.evaluate(report(swap)).reasons)
+def test_a_control_that_is_a_copy_of_the_run_is_refused(swap, tmp_path):
+    # The same model served twice: same model id, same replies. It is no control of the nearest model: the template refuses it
+    # before a server starts, and a gate that is not told the nearest model still says "same model id".
+    path = control_file(swap, tmp_path, model_id=swap["cfg"]["new_model_id"])
+    shutil.rmtree(swap["stage"] / "evidence", ignore_errors=True)
+    r = run(swap, tmp_path, suite_control=str(path))
+    assert r.returncode == 2 and "nearest model" in r.stdout + r.stderr
+    rep = json.loads(path.read_text())
+    rep["prompt_suite"]["control"] = {"source": "x", "sha256": "0" * 64, "record": dict(rep["prompt_suite"], control=None)}
+    assert any("same model id" in x for x in ps.evaluate(rep).reasons)
 
 
 # ---- the container template runs the same suite ---------------------------------------------------------------------

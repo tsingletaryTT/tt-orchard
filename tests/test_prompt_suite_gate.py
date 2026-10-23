@@ -11,7 +11,7 @@ import json
 from orchard import prompt_suite as ps
 from orchard.stages import gate_mesh_swap, gate_weights_swap, gate_weights_swap_sidecar
 from test_prompt_suite_verdict import LOOP, control_of, make_record, with_entry
-from test_stages import SWAP, mesh_stage, stage, swap_config, write
+from test_stages import GOOD_DELTA, SWAP, mesh_stage, stage, swap_config, write
 from test_stages_class import RESULT, SIDE_DELTA
 
 HEALTHY_FREE = "Paris is the capital of France and a large city"
@@ -27,6 +27,7 @@ def swap_check(record=None, **extra):
 
 def stage2(tmp_path, report=None, gate=gate_weights_swap):
     sd, run = stage(tmp_path, 2, "result.json", SWAP)
+    write(run, "stages/0/delta.json", GOOD_DELTA)         # names the nearest model, which a control has to have been served from
     if report is not None:
         write(run, "stages/2/evidence/swap-check.json", report)
     return gate(sd, run)
@@ -114,6 +115,7 @@ def mesh_with_suite(tmp_path, records, configs=None):
     """mesh_stage, then each configuration's swap-check.json gets the record given for its chip count."""
     configs = configs or [swap_config(n) for n in records]
     sd, run = mesh_stage(tmp_path, configs)
+    write(run, "stages/0/delta.json", GOOD_DELTA)         # names the nearest model, which a control has to have been served from
     for n, rec in records.items():
         write(run, f"stages/4/configs/{n}/evidence/swap-check.json", swap_check(rec))
     return sd, run
