@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from test_package_graft import SHARD, SHARD_FILE, stage, world  # noqa: E402,F401  (the fixture)
+from test_package_graft import SHARD, SHARD_FILE, boot_checked_graft, stage, world  # noqa: E402,F401  (the fixture)
 from package_fakes import fake_boot_result, write  # noqa: E402
 
 from orchard.graft_trial import DECISION_FILE, TRIAL_DIR, TRIAL_RESULT, decide, write_decision  # noqa: E402
@@ -36,11 +36,23 @@ def decided(w, **kw):
     return d["choice"]
 
 
+def record_boot(w, stage_dir, package):
+    """What verify_bundle.py records when its installed copy served a graft: the first staged profile that has a graft.json."""
+    for prof in package["profiles"]:
+        pkg = w["run"] / prof["dir"]
+        if (pkg / "graft.json").is_file():
+            boot_checked_graft(stage_dir, pkg)
+            return
+
+
 def finished_auto(w):
     stage_dir, package = stage(w)
     fake_boot_result(stage_dir)
+    pkg = w["run"] / package["profiles"][0]["dir"]
+    if (pkg / "graft.json").is_file():
+        boot_checked_graft(stage_dir, pkg)      # what verify_bundle.py records when its installed copy served the graft
     finish(w["run"], stage_dir)
-    return stage_dir, package, w["run"] / package["profiles"][0]["dir"]
+    return stage_dir, package, pkg
 
 
 # ---- the decision sets the package -------------------------------------------------------------------------------------------------
@@ -188,6 +200,7 @@ def test_a_card_for_a_graft_decision_says_how_the_graft_was_chosen_and_which_num
 def test_a_forced_graft_over_no_trial_keeps_the_old_limitation_text(world):
     stage_dir, package = stage(world, graft_mtp=True)
     fake_boot_result(stage_dir)
+    record_boot(world, stage_dir, package)
     finish(world["run"], stage_dir)
     flat = " ".join((world["run"] / package["profiles"][0]["dir"] / "README.md").read_text().split())
     assert "stage 2 and stage 4 numbers were measured without the graft" in flat
@@ -286,6 +299,7 @@ def test_an_optional_profiles_card_is_not_asked_for_the_trials_rows(world, varia
     with_optional_profile(world)
     stage_dir, package = stage(world)
     fake_boot_result(stage_dir)
+    record_boot(world, stage_dir, package)
     finish(world["run"], stage_dir)
     required = [p for p in package["profiles"] if p["required"]]
     optional = [p for p in package["profiles"] if not p["required"]]
@@ -301,6 +315,7 @@ def test_the_required_profiles_card_still_has_to_show_the_trials_rows_next_to_an
     with_optional_profile(world)
     stage_dir, package = stage(world)
     fake_boot_result(stage_dir)
+    record_boot(world, stage_dir, package)
     finish(world["run"], stage_dir)
     req = next(p for p in package["profiles"] if p["required"])
     card_path = world["run"] / req["dir"] / "README.md"
