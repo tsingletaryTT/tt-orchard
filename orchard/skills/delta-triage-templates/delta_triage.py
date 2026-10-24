@@ -138,6 +138,11 @@ MAX_CODE_FILES = 60           # choice: code files listed
 MAX_CODE_DEPTH = 4            # choice: directories searched for code below the model directory
 SKIP_CODE_DIRS = {".git", ".cache", "__pycache__", "node_modules", "venv", ".venv", "site-packages"}
 ITEMSIZE = {"BF16": 2, "F16": 2, "F32": 4}
+# choice: a tensor that is BF16, F16 or F32 in one model and another of those in the other, with the same shape and at most this many
+# elements, does not force a full port. The evidence is one model: sabicap/sabi-noema keeps 96 small tensors (A_log and linear-attention
+# norm weights, at most 128 elements each) in F32 where Qwen3.8-27B has BF16; the base's 2-chip bundle served it with the weights as they
+# are (2026-10-24, 31 of 32 tokens, coherent). Nothing larger or quantized was tested, so those stay full-port.
+DTYPE_TOLERANCE_ELEMENTS = 1_048_576
 READOUT_JSON_MAX = 256 * 1024     # choice: a small JSON file that declares an attention mode is read up to this size
 CODE_SCAN_MAX = 400 * 1024        # choice: a code file larger than this is not scanned for hints
 MAX_HINT_LINES = 8               # line numbers listed per hint
@@ -618,6 +623,30 @@ def raw_rules(raw_pairs: dict) -> list[dict]:
     return [{"from": f, "to": t, "tensors": n} for (f, t), n in sorted(tally.items(), key=lambda kv: (-kv[1], kv[0]))]
 
 
+def _dtype_difference_tolerated(m: dict, b: dict) -> bool:
+    """True for a float-to-float dtype difference on a small tensor of equal shape (see DTYPE_TOLERANCE_ELEMENTS)."""
+    if m["dtype"] not in ITEMSIZE or b["dtype"] not in ITEMSIZE or m["shape"] != b["shape"]:
+        return False
+    n = 1
+    for d in b["shape"] or []:
+        n *= int(d)
+    return n <= DTYPE_TOLERANCE_ELEMENTS
+
+
+def tolerated_dtype_hazards(t: dict, ev) -> list:
+    """One hazard when the new model keeps small tensors in another float dtype than the nearest model (see DTYPE_TOLERANCE_ELEMENTS)."""
+    ok = [x for x in t["dtype_diffs_normalized"] if x["tolerated"]]
+    if not ok:
+        return []
+    kinds = sorted({f"{x['model']} against {x['base']}" for x in ok})
+    return [{"area": "other", "evidence": [ev("tensor-compare.json")],
+             "finding": (f"{len(ok)} tensors differ from the nearest model only in float dtype ({'; '.join(kinds)}), each small with the same "
+                         f"shape, for example {short([x['name'] for x in ok], 3)}. They did not make the path a full port. The weights are "
+                         "served as they are, and whether the runtime casts them or uses them in the stored dtype was not checked. One model "
+                         "was served this way on hardware (sabicap/sabi-noema, 31 of 32 tokens equal to the CPU reference); a larger or "
+                         "quantized dtype difference was not tested and still makes a full port.")}]
+
+
 def compare_tensor_maps(mt: dict, bt: dict, *, mshards: list, bshards: list, merr: list, berr: list,
                         model_path: str, base_path: str) -> dict:
     """The tensor comparison on two already-read {name: {"dtype", "shape", "shard"}} maps. The research
@@ -628,7 +657,8 @@ def compare_tensor_maps(mt: dict, bt: dict, *, mshards: list, bshards: list, mer
     only_m, only_b = p["only_m"], p["only_b"]
     shape_diffs = sorted(({"name": b, "model": mn[m]["shape"], "base": bn[b]["shape"]}
                           for m, b in p["pairs"] if mn[m]["shape"] != bn[b]["shape"]), key=lambda x: x["name"])
-    dtype_diffs = sorted(({"name": b, "model": mn[m]["dtype"], "base": bn[b]["dtype"]}
+    dtype_diffs = sorted(({"name": b, "model": mn[m]["dtype"], "base": bn[b]["dtype"],
+                           "shape": bn[b]["shape"], "tolerated": _dtype_difference_tolerated(mn[m], bn[b])}
                           for m, b in p["pairs"] if mn[m]["dtype"] != bn[b]["dtype"]), key=lambda x: x["name"])
     return {
         "model": {"path": model_path, "shards": mshards, "num_tensors": len(mt),
@@ -1582,6 +1612,8 @@ def decide_path(c: dict, t: dict) -> list[str]:
     for x in t["shape_diffs_normalized"]:
         reasons.append(f"tensor {x['name']} has shape {x['model']} in the new model and {x['base']} in the nearest model")
     for x in t["dtype_diffs_normalized"]:
+        if x.get("tolerated"):
+            continue
         reasons.append(f"tensor {x['name']} has dtype {x['model']} in the new model and {x['base']} in the nearest model")
     for side, who in (("model", "the new model"), ("base", "the nearest model")):
         extra = ns[f"unexplained_only_in_{side}"]
@@ -1941,6 +1973,7 @@ def main() -> int:
                                              "load. A check that only generates text from the backbone does "
                                              "not exercise it. Its output must be checked on the host against "
                                              "the CPU reference, with the exact file hash recorded.")})
+    delta["hazards"].extend(tolerated_dtype_hazards(t, ev))
     if ns["aligned"]["pairs"]:
         # Names paired by prefix count as the nearest model's tensors, so the path stays weights-only. Only the stage 1 CPU reference
         # loader and the restricted-head parity script apply the name map. The swap and serve templates of stages 2 and 4 link the

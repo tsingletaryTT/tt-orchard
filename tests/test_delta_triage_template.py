@@ -102,7 +102,7 @@ def merges_as_strings(text: str) -> str:
 # ---- fake snapshots -------------------------------------------------------------------------------
 
 H, KV, D, INTER = 8, 1, 4, 16
-DTYPE_BYTES = {"BF16": 2, "F32": 4, "F16": 2}
+DTYPE_BYTES = {"BF16": 2, "F32": 4, "F16": 2, "I8": 1}
 
 
 def text_tensors(vocab: int) -> dict:
@@ -517,12 +517,28 @@ def test_a_changed_tensor_shape_makes_the_path_full_port(text_case):
     assert gate_delta(stage, stage.parent.parent).ok
 
 
-def test_a_changed_dtype_makes_the_path_full_port(text_case):
+def test_a_small_float_dtype_change_stays_weights_only_with_a_hazard(text_case):
+    """Issue 29: sabicap/sabi-noema keeps small tensors in F32 where the base has BF16, and the base's bundle served it."""
     stage = text_case(tensor_change={"model.norm.weight": ("F32", [H])})
     assert run_triage(stage).returncode == 0
-    assert delta(stage)["path"] == "full-port"
+    d = delta(stage)
+    assert d["path"] == "weights-only" and d["path_reasons"] == []
+    diffs = evidence(stage, "tensor-compare.json")["dtype_diffs_normalized"]
+    assert [(x["name"], x["tolerated"]) for x in diffs] == [("model.norm.weight", True)]
+    [h] = [i for i in d["hazards"] if "float dtype" in i.get("finding", "")]
+    assert h["area"] == "other" and "model.norm.weight" in h["finding"]
+    assert gate_delta(stage, stage.parent.parent).ok
+
+
+def test_a_quantized_dtype_change_makes_the_path_full_port(text_case):
+    stage = text_case(tensor_change={"model.norm.weight": ("I8", [H])})
+    assert run_triage(stage).returncode == 0
+    d = delta(stage)
+    assert d["path"] == "full-port"
+    assert any("model.norm.weight" in r and "dtype I8" in r for r in d["path_reasons"])
     assert [x["name"] for x in evidence(stage, "tensor-compare.json")["dtype_diffs_normalized"]] == \
         ["model.norm.weight"]
+    assert not any("float dtype" in i.get("finding", "") for i in d["hazards"])
 
 
 def test_a_changed_decisive_config_value_makes_the_path_full_port(text_case):
