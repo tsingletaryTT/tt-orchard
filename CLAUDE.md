@@ -2058,3 +2058,25 @@ change only after a hardware swap test.
   `tensor-compare.json` marks each difference `tolerated`. The research estimate uses the same code, so it agrees. `tensors_finding` still counts every dtype difference.
 - Tests first (16 in `tests/test_delta_triage_dtype.py`, two end-to-end tests replace the old one in `test_delta_triage_template.py`, and the bench case and the
   research test changed expectation). 11 mutations; 2 survived the first table (dropping the equal-shape check, and the hazard wiring in the main flow) and each got a test.
+
+## 2026-10-24 (UTC): a vocabulary trim is its own class and serves (issue 56, branch `vocab-trim`, on `dtype-tolerance`, version 0.8.37)
+Prompt (operator): "I want vocab size models to port easily." `ProprietaryLegal/Qwen3.8-27B-CJK-Trim` (the nearest model with 66,533 CJK vocabulary entries removed: 181,760 rows
+against 248,320 in the embedding and lm_head, every other tensor identical) was called a full port and the unattended run blocked after stage 1.
+- Hardware, by hand with my own lease and the shipped swap templates (three boots, one board each): (1) the base's `config.json` (`vocab_size` 248320): the engine fails at load, size
+  mismatch on the embedding; (2) the model's own `vocab_size`: the weights load, then the speculative drafter's warm-up raises `IndexError` (it embeds token ids of the base's vocabulary,
+  which the trim renumbers); (3) `vocab_size` corrected and the drafter off with host sampling: ready in 190 s, 30 of 32 tokens equal to the CPU reference (top-1 0.9375), coherent, all
+  eight suite prompts clean (no control run). A fourth boot died with `TT_FATAL ... written == bytes` because the disk was full; the failure text names the write, not the disk.
+- Stage 0 (`detect_vocab_trim`): the class `vocab-trim` (path `weights-only`) when the only config difference is a smaller `vocab_size`, the only shape differences are the first dimension of
+  `embed_tokens` and `lm_head` (smaller, same row width), nothing else differs, and every row of those matrices is, byte for byte, a row of the nearest model's (16-byte digests, read in
+  64 MiB chunks). A matrix that cannot be read, or one row that is not in the base, leaves `full-port`. `delta.json` gets `vocab_trim`, evidence gets `vocab-compare.json`, and one hazard says
+  what the stages do and what was not tested. On the real files it takes 8 s and finds 181,760 of 181,760 rows for both matrices.
+- `prepare_swap.py` (stages 2 and 4, bundle and container): when the two configs' `vocab_size` differ it writes the model's value wherever the copied config has the key, switches the
+  drafter and on-device sampling off in `run.sh`, records `vocab` in `model-dir-sources.json`, and refuses `graft_mtp` for a different vocabulary. The container test reads the same record and
+  clears the drafter. The graft trial never runs for a trim.
+- Gates: stage 0's gate needs `vocab_trim` (trimmed, kept_subset true, sizes whole numbers, the model's smaller) for the class and refuses the record on any other class; stage 2 and each passing
+  stage 4 configuration must record the model's `vocab_size` in `model-dir-sources.json` and `serving.drafter` 'off' in `swap-check.json`.
+- Tests first: 16 in `test_prepare_swap_vocab.py`, 25 in `test_delta_triage_vocab_trim.py`, 5 end-to-end in `test_delta_triage_template.py`, class and gate cases in `test_stages_class.py`, 15 in
+  `test_stage4_trim_gate.py`, one each for the graft candidate, the container drafter and the verdict line. Mutation tables on each piece; survivors each got a test (the bool and non-number size
+  guards, a trimmed record with a failed row check, the stage 2 missing-record message, an inclusive `<`).
+- Not done: a real supervised bring-up on this branch; stage 7 packaging of a trim (its `base_config` copy carries the model's `vocab_size` and the drafter-off detection reads stage 2's
+  run.sh, but no test packages a trim); 4 chips; the model's answers beyond 32 tokens and eight prompts; the base-research estimate still says full-port for a trim (the measurement decides).

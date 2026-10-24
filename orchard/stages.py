@@ -222,6 +222,21 @@ def _class_reasons(d: dict) -> list[str]:
         if not isinstance(head, dict) or head.get("restricted") is not True:
             reasons.append("class restricted-head needs delta.json head.restricted to be true "
                            "(the template's restricted-head check found the sidecar rows in the nearest model's lm_head)")
+    vt = d.get("vocab_trim")
+    if d.get("class") == "vocab-trim":
+        if not isinstance(vt, dict):
+            reasons.append("class vocab-trim needs a vocab_trim record in delta.json (stage 0's vocabulary check)")
+        else:
+            if vt.get("trimmed") is not True:
+                reasons.append("class vocab-trim needs vocab_trim.trimmed to be true")
+            if vt.get("kept_subset") is not True:
+                reasons.append("class vocab-trim needs vocab_trim.kept_subset to be true "
+                               "(every kept row must be a row of the nearest model's matrices)")
+            sizes = (vt.get("model_vocab"), vt.get("base_vocab"))
+            if any(isinstance(v, bool) or not isinstance(v, int) for v in sizes) or not sizes[0] < sizes[1]:
+                reasons.append("class vocab-trim needs vocab_trim.model_vocab and base_vocab to be whole numbers, the model's smaller")
+    elif vt is not None:
+        reasons.append("delta.json has a vocab_trim record but its class is not vocab-trim")
     if "mtp" in d:
         m = d["mtp"]
         counts = (m.get("nearest_tensors"), m.get("new_tensors")) if isinstance(m, dict) else ()
@@ -389,6 +404,44 @@ def gate_decoder(stage_dir, run_dir) -> GateResult:
     return _done(reasons, seen)
 
 
+def _trim_vocab(run_dir) -> int | None:
+    """The model's vocabulary size when stage 0 classed the run vocab-trim, else None (no check is made)."""
+    delta, err = _load(Path(run_dir) / "stages" / "0", "delta.json")
+    if err or not isinstance(delta, dict) or delta.get("class") != "vocab-trim":
+        return None
+    vt = delta.get("vocab_trim")
+    want = vt.get("model_vocab") if isinstance(vt, dict) else None
+    return want if isinstance(want, int) and not isinstance(want, bool) else 0
+
+
+def _trim_reasons(want: int, sources, serving, where: str = "") -> list[str]:
+    """One served configuration of a vocabulary trim (issue 56). The served config.json must carry the model's vocab_size, as
+    model-dir-sources.json (`sources`, None when unreadable) records, or the engine fails at load. The speculative drafter works on the
+    nearest model's token ids, so swap-check.json's `serving` record must say it was off."""
+    reasons = []
+    vocab = sources.get("vocab") if isinstance(sources, dict) else None
+    if sources is None:
+        reasons.append(f"{where}this model is a vocabulary trim and model-dir-sources.json is missing or unreadable, so the served "
+                       "config.json's vocab_size cannot be checked")
+    elif not isinstance(vocab, dict) or vocab.get("trimmed") is not True or vocab.get("model") != want:
+        reasons.append(f"{where}this model is a vocabulary trim: model-dir-sources.json must record that the served config.json carries "
+                       f"vocab_size {want} (vocab.trimmed true, vocab.model {want}), got {vocab!r}")
+    if not isinstance(serving, dict) or serving.get("drafter") != "off":
+        reasons.append(f"{where}this model is a vocabulary trim: the speculative drafter works on the nearest model's token ids, so "
+                       f"swap-check.json serving.drafter must be 'off', got {serving.get('drafter') if isinstance(serving, dict) else serving!r}")
+    return reasons
+
+
+def vocab_trim_problems(stage_dir, run_dir) -> list[str]:
+    """Stage 2's check of a vocabulary trim (see _trim_reasons). Nothing is asked of any other class."""
+    want = _trim_vocab(run_dir)
+    if want is None:
+        return []
+    sources, _ = _load(Path(stage_dir), "model-dir-sources.json")
+    check, _ = _load(Path(stage_dir) / "evidence", "swap-check.json")
+    return _trim_reasons(want, sources, check.get("serving") if isinstance(check, dict) else None)
+
+
 def gate_weights_swap(stage_dir, run_dir) -> GateResult:
     """Stage 2 on the weights-only path: the existing TT implementation serves the new weights,
     and its greedy tokens agree with the stage 1 CPU reference (the weights-swap-check skill).
@@ -403,6 +456,7 @@ def gate_weights_swap(stage_dir, run_dir) -> GateResult:
     reasons, seen = _swap_reasons(d), []
     reasons += _suite_reasons_in(Path(stage_dir) / "evidence" / "swap-check.json", run_dir)
     reasons += decision_problems(stage_dir, run_dir)         # the graft trial's decision, when stage 2 made one
+    reasons += vocab_trim_problems(stage_dir, run_dir)
     _evidence(run_dir, d.get("evidence"), "result.json", reasons, seen)
     return _done(reasons, seen)
 
@@ -624,6 +678,7 @@ def gate_mesh_swap(stage_dir, run_dir, required=None) -> GateResult:
         return base
     reasons, seen = list(base.reasons), list(base.evidence)
     rel = os.path.relpath(os.path.realpath(stage_dir), os.path.realpath(run_dir))
+    trim = _trim_vocab(run_dir)
     for c in d.get("configs") if isinstance(d.get("configs"), list) else []:
         if (not isinstance(c, dict) or c.get("pass") is not True or isinstance(c.get("chips"), bool)
                 or not isinstance(c.get("chips"), int)):
@@ -651,6 +706,10 @@ def gate_mesh_swap(stage_dir, run_dir, required=None) -> GateResult:
         if isinstance(report, dict):
             reasons += _suite_reasons(report, run_dir, f"{where}: ")
         reasons += _graft_reasons(stage_dir, run_dir, n, where)
+        if trim is not None:
+            cdir = Path(stage_dir) / "configs" / str(n)
+            reasons += _trim_reasons(trim, _read_json(cdir / "model-dir-sources.json"),
+                                     report.get("serving") if isinstance(report, dict) else None, f"{where}: ")
     return _done(reasons, seen)
 
 

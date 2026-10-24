@@ -131,6 +131,12 @@ def test_speed_is_reported_as_not_measured_when_hardware_ran_and_nothing_timed_g
     assert "speed" not in by_id(verdict.build({**swap(), "speed": {"decode_tok_s": 40.0}}, []))
 
 
+def test_triage_says_a_vocabulary_trim_is_served_by_the_installed_bundle_with_changes():
+    t = by_id(verdict.build({"triage": {"class": "vocab-trim", "path": "weights-only"}}, []))["triage"]
+    assert t["tone"] == "info" and "vocabulary" in t["headline"] and "drafter" in t["headline"]
+    assert "full port" not in t["headline"].lower() and t["detail"] == "Class vocab-trim."
+
+
 def test_triage_says_what_the_class_means_for_an_unattended_run():
     assert by_id(verdict.build({"triage": {"class": "weights-only"}}, []))["triage"]["tone"] == "info"
     full = by_id(verdict.build({"triage": {"class": "unknown", "path": "full-port"}}, []))["triage"]

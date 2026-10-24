@@ -153,6 +153,17 @@ def has_mtp_tensors(new: Path) -> bool | None:
     return any(MTP_NAME.search(k) for k in names)
 
 
+def vocabulary_differs(stage_dir: Path) -> bool:
+    """True when prepare_swap.py recorded that the model's vocabulary differs from the nearest model's (model-dir-sources.json).
+    The speculative drafter works on the nearest model's token ids, so it must be off then (issue 56). Anything else, including a
+    missing or unreadable record, is False."""
+    try:
+        rec = json.loads((stage_dir / "model-dir-sources.json").read_text(encoding="utf-8"))
+        return rec["vocab"]["trimmed"] is True
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
 def serving_from_argv(argv: list[str]) -> dict:
     """The same record as serve_and_compare.serving_state, read from the edited `docker run` argv: the
     `--env QWEN36_DRAFTER=` option and the server's `--additional-config`."""
@@ -391,7 +402,7 @@ def main() -> int:
                                 tt_cache=cache, hf_dir=hf_dir,
                                 name=f"orchard-{cfg['chips']}chip-{cfg['port']}", label=label,
                                 device_ids=ids, port=int(cfg["port"]), blobs=blob_dirs(model_dir),
-                                drafter_off=(has_mtp_tensors(model_dir) is False))
+                                drafter_off=(has_mtp_tensors(model_dir) is False or vocabulary_differs(STAGE_DIR)))
     except EditError as exc:
         fail(str(exc))
     evidence = STAGE_DIR / "evidence"

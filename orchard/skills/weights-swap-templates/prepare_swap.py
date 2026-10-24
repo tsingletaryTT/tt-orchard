@@ -282,6 +282,45 @@ def sources_record(base: Path, new: Path, nearest: str, copied: list[str], linke
             "absent": sorted(absent), "sampling_defaults_from": sampling, "eos_token_ids": eos}
 
 
+def _vocab_in(cfg) -> int | None:
+    """The text vocabulary size a config.json states: text_config's, else the top level's. A whole number above zero only."""
+    if not isinstance(cfg, dict):
+        return None
+    text = cfg.get("text_config")
+    for holder in ((text,) if isinstance(text, dict) and "vocab_size" in text else ()) + (cfg,):
+        v = holder.get("vocab_size")
+        if isinstance(v, int) and not isinstance(v, bool) and v > 0:
+            return v
+        if "vocab_size" in holder:
+            return None
+    return None
+
+
+def vocab_facts(base: Path, new: Path) -> dict:
+    """{"model", "base", "trimmed"}: both vocabulary sizes and whether they differ (None when either is unknown).
+    A model whose vocabulary differs from the nearest model's (ProprietaryLegal/Qwen3.8-27B-CJK-Trim: 181760 against 248320)
+    needs its own size in the served config.json and the speculative drafter off (issue 56)."""
+    sizes = {}
+    for key, snap in (("model", new), ("base", base)):
+        try:
+            sizes[key] = _vocab_in(json.loads((snap / "config.json").read_text(encoding="utf-8")))
+        except (OSError, ValueError):
+            sizes[key] = None
+    trimmed = None if sizes["model"] is None or sizes["base"] is None else sizes["model"] != sizes["base"]
+    return {"model": sizes["model"], "base": sizes["base"], "trimmed": trimmed}
+
+
+def write_vocab(model_dir: Path, size: int) -> None:
+    """Set vocab_size to the model's own wherever the copied (base) config.json has the key."""
+    path = model_dir / "config.json"
+    cfg = json.loads(path.read_text(encoding="utf-8"))
+    holders = [cfg] + ([cfg["text_config"]] if isinstance(cfg.get("text_config"), dict) else [])
+    for h in holders:
+        if "vocab_size" in h:
+            h["vocab_size"] = size
+    path.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
+
+
 MTP_NAME = re.compile(r"(^|\.)mtp\.")
 
 
@@ -497,7 +536,9 @@ def drop_device_sampling(text: str, bundle: Path) -> tuple[str, str]:
 
 
 def edit_run_script(text: str, bundle: Path, nearest: str, model_dir: Path,
-                    drafter_off: bool = False) -> tuple[str, list[str]]:
+                    drafter_off: bool = False,
+                    drafter_reason: str = "the new model has no mtp.* tensors, so the speculative drafter "
+                                          "that needs the MTP head is switched off") -> tuple[str, list[str]]:
     """Apply the edits. Returns (new text, notes about optional edits that did not apply)."""
     text, n = re.subn(r"^HERE=.*$", lambda m: f'HERE="{bundle}"', text, flags=re.MULTILINE)
     if n != 1:
@@ -519,8 +560,7 @@ def edit_run_script(text: str, bundle: Path, nearest: str, model_dir: Path,
                           lambda m: f'{m.group(1)}export QWEN36_DRAFTER=""', text, flags=re.MULTILINE)
         if n > 1:
             fail(f"expected at most one export QWEN36_DRAFTER= line in {bundle / 'run.sh'}, found {n}")
-        notes.append('export QWEN36_DRAFTER="" (the new model has no mtp.* tensors, so the speculative drafter '
-                     "that needs the MTP head is switched off)" if n else
+        notes.append(f'export QWEN36_DRAFTER="" ({drafter_reason})' if n else
                      "export QWEN36_DRAFTER=... was absent; nothing to clear")
         text, note = drop_device_sampling(text, bundle)
         notes.append(note)
@@ -543,6 +583,10 @@ def main() -> int:
             fail(f"{label} {d} is not a directory")
     model_dir = HERE_DIR / "model-dir"
     graft = cfg.get("graft_mtp") is True
+    vocab = vocab_facts(base, new)
+    if graft and vocab["trimmed"]:
+        fail(f"graft_mtp cannot be used: the new model's vocabulary ({vocab['model']}) differs from the nearest model's "
+             f"({vocab['base']}), and the speculative drafter works on the nearest model's token ids")
     plan = plan_mtp_graft(base, new) if graft else None
     if bundle is not None:
         src_run = bundle / "run.sh"
@@ -550,8 +594,14 @@ def main() -> int:
             fail(f"{src_run} does not exist")
         # Edit in memory first, so a failed edit leaves no run.sh and no half-built model-dir.
         mtp = has_mtp_tensors(new)
+        no_drafter_why = None
+        if vocab["trimmed"]:
+            no_drafter_why = (f"the new model's vocabulary ({vocab['model']}) differs from the nearest model's ({vocab['base']}), "
+                              "and the speculative drafter works on the nearest model's token ids")
         text, notes = edit_run_script(src_run.read_text(encoding="utf-8"), bundle,
-                                      cfg["nearest_model_id"], model_dir, drafter_off=(mtp is False and not graft))
+                                      cfg["nearest_model_id"], model_dir,
+                                      drafter_off=((mtp is False or bool(vocab["trimmed"])) and not graft),
+                                      **({"drafter_reason": no_drafter_why} if no_drafter_why else {}))
         if graft:
             notes.append("the drafter and on-device sampling stay on: the nearest model's mtp.* tensors are "
                          "grafted into model-dir")
@@ -559,6 +609,8 @@ def main() -> int:
             notes.append("could not tell whether the new model has mtp.* tensors (no readable weight index or "
                          "shard headers), so the drafter setting is unchanged")
     model_dir, copied, linked, absent = build_model_dir(base, new)
+    if vocab["trimmed"] and "config.json" in copied:
+        write_vocab(model_dir, vocab["model"])
     grafted = None
     if plan is not None:
         digest, total = write_graft_shard(plan, model_dir / GRAFT_SHARD)
@@ -572,6 +624,7 @@ def main() -> int:
         record["files"].append({"name": GRAFT_SHARD, "source": "base", "how": "grafted",
                                 "reason": "the new model has no mtp.* tensors; these are the nearest model's"})
         record["files"].sort(key=lambda f: f["name"])
+    record["vocab"] = vocab
     record.update(chat_facts(model_dir, base))
     tok_id = tokenizer_token_id(model_dir, record["special_tokens"]["eos_token"])
     record["tokenizer_eos_token_id"] = tok_id
@@ -583,6 +636,9 @@ def main() -> int:
     if grafted:
         print(f"  grafted {grafted['tensors']} mtp.* tensors of {grafted['from']} as {GRAFT_SHARD} "
               f"(sha256 {digest[:12]}); the drafter's acceptance on the new model is not measured by this script")
+    if vocab["trimmed"]:
+        print(f"  config.json: vocab_size set to the new model's {vocab['model']} (the nearest model's is {vocab['base']}); "
+              "the speculative drafter is switched off because it works on the nearest model's token ids")
     if FALLBACK_COPY in copied:
         print(f"  {FALLBACK_COPY}: new_snapshot has none; copied from base_snapshot")
     origin = {"model": "the new model's", "base": "the nearest model's", "none": None}[record["sampling_defaults_from"]]

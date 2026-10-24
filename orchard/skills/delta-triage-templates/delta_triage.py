@@ -1595,6 +1595,83 @@ def license_finding(g: dict) -> str:
     return s
 
 
+VOCAB_TENSOR = re.compile(r"(^|\.)(embed_tokens|lm_head)\.weight$")
+VOCAB_CHUNK_BYTES = 64 * 1024 * 1024        # rows are read and hashed this many bytes at a time
+
+
+def _row_digests(entry: dict, start_row: int, rows: int, row_bytes: int):
+    with open(entry["file"], "rb") as f:
+        f.seek(entry["start"] + start_row * row_bytes)
+        buf = f.read(rows * row_bytes)
+    view = memoryview(buf)
+    return [hashlib.blake2b(view[i * row_bytes:(i + 1) * row_bytes], digest_size=16).digest() for i in range(rows)]
+
+
+def rows_found_in_base(m: dict, b: dict) -> int:
+    """How many rows of the model's 2-D matrix are, byte for byte, rows of the nearest model's matrix. Both are read in chunks; the
+    nearest model's rows are kept as 16-byte digests."""
+    size = ITEMSIZE[m["dtype"]]
+    row_bytes = int(m["shape"][1]) * size
+    per_chunk = max(1, VOCAB_CHUNK_BYTES // row_bytes)
+    base_rows = set()
+    for r in range(0, int(b["shape"][0]), per_chunk):
+        base_rows.update(_row_digests(b, r, min(per_chunk, int(b["shape"][0]) - r), row_bytes))
+    found = 0
+    for r in range(0, int(m["shape"][0]), per_chunk):
+        found += sum(d in base_rows for d in _row_digests(m, r, min(per_chunk, int(m["shape"][0]) - r), row_bytes))
+    return found
+
+
+def detect_vocab_trim(c: dict, t: dict, sc: dict, model_dir: Path, base_dir: Path, pairs: dict) -> dict:
+    """Is the new model the nearest model with some vocabulary rows removed (ProprietaryLegal/Qwen3.8-27B-CJK-Trim, issue 56)?
+    trimmed: the only config difference is vocab_size (smaller), the only shape differences are the first dimension of embed_tokens
+    and lm_head (smaller, same row width), and nothing else differs, as decide_path counts it. kept_subset: every row of those matrices
+    is, byte for byte, a row of the nearest model's (True), some row is not (False), or it could not be read (None, with the reason in
+    note). explained_reasons are the path reasons this accounts for."""
+    out = {"trimmed": False, "kept_subset": None, "model_vocab": None, "base_vocab": None, "tensors": [], "explained_reasons": [],
+           "note": ""}
+    vals = (c.get("text_key_values") or {}).get("vocab_size")
+    if list(c.get("decisive_keys_differing") or []) != ["vocab_size"] or not isinstance(vals, dict):
+        out["note"] = "the config difference is not vocab_size alone"
+        return out
+    mv, bv = vals.get("model"), vals.get("base")
+    if not all(isinstance(v, int) and not isinstance(v, bool) for v in (mv, bv)) or not mv < bv:
+        out["note"] = "vocab_size is not a smaller whole number"
+        return out
+    out["model_vocab"], out["base_vocab"] = mv, bv
+    diffs = t["shape_diffs_normalized"]
+    if not diffs or sc["sidecars"] or sc["problems"]:
+        out["note"] = "no tensor differs in shape, or the model has a sidecar"
+        return out
+    for x in diffs:
+        m, b = x["model"], x["base"]
+        if not (VOCAB_TENSOR.search(x["name"]) and len(m) == 2 and len(b) == 2 and m[1] == b[1] and m[0] < b[0]):
+            out["note"] = f"{x['name']} differs in shape in a way a vocabulary trim does not"
+            return out
+    if decide_path({**c, "decisive_keys_differing": []}, {**t, "shape_diffs_normalized": []}):
+        out["note"] = "something besides the vocabulary differs"
+        return out
+    out["trimmed"] = True
+    out["explained_reasons"] = decide_path(c, t)
+    mi, bi = tensor_index(model_dir), tensor_index(base_dir)
+    chosen = sorted((m, b) for m, b in pairs.items() if m in mi and b in bi and VOCAB_TENSOR.search(m)
+                    and mi[m]["shape"][:1] != bi[b]["shape"][:1])
+    if len(chosen) != len(diffs):
+        out["note"] = "the tensors that differ in shape could not all be found in the shard headers"
+        return out
+    unreadable = [m for m, b in chosen if mi[m]["dtype"] != bi[b]["dtype"] or mi[m]["dtype"] not in ITEMSIZE]
+    if unreadable:
+        out["note"] = f"{unreadable[0]}: dtype {mi[unreadable[0]]['dtype']} is not one this check reads or differs from the nearest model's"
+        return out
+    for m, b in chosen:
+        out["tensors"].append({"name": m, "rows": int(mi[m]["shape"][0]), "base_rows": int(bi[b]["shape"][0]),
+                               "rows_found_in_base": rows_found_in_base(mi[m], bi[b])})
+    out["kept_subset"] = all(x["rows_found_in_base"] == x["rows"] for x in out["tensors"])
+    out["note"] = ("every row of " + ", ".join(x["name"] for x in out["tensors"]) + " is a row of the nearest model's" if out["kept_subset"]
+                   else "a row of the new model's matrices is not a row of the nearest model's")
+    return out
+
+
 def decide_path(c: dict, t: dict) -> list[str]:
     """The reasons the path is full-port. An empty list means weights-only."""
     reasons = []
@@ -1624,7 +1701,7 @@ def decide_path(c: dict, t: dict) -> list[str]:
     return reasons
 
 
-def decide_class(c: dict, t: dict, reasons: list[str], sc: dict) -> str:
+def decide_class(c: dict, t: dict, reasons: list[str], sc: dict, vt: dict | None = None) -> str:
     """weights-only, weights+sidecar, restricted-head, full-port or unknown. `reasons` already holds the backbone's
     reasons for full-port and the sidecar problems (sc["problems"], told apart by value). restricted-head: the backbone matches and the only thing missing is an
     lm_head that a sidecar's rows stand in for (t["head"]["restricted"], set by detect_restricted_head)."""
@@ -1634,6 +1711,8 @@ def decide_class(c: dict, t: dict, reasons: list[str], sc: dict) -> str:
         return "unknown"
     # A definite difference in the backbone is full-port whatever a sidecar's problems are (summerMC/Diffusion-Qwen3.8-27B: 48 extra text tensors
     # and a dllm_extras.pt that cannot be read). The sidecar problems alone, on a backbone that lines up, are what make the class unknown.
+    if vt and vt.get("trimmed") and vt.get("kept_subset") is True and not [r for r in reasons if r not in vt["explained_reasons"]]:
+        return "vocab-trim"
     if [r for r in reasons if r not in sc["problems"]]:
         return "full-port"
     if sc["problems"]:
@@ -1929,7 +2008,13 @@ def main() -> int:
     write_json("head-compare.json", head)
     say(f"wrote evidence/head-compare.json (restricted head: {head['restricted']}; {head['note']})")
     reasons = decide_path({**c}, {**t, "head": head}) + sc["problems"]
-    cls = decide_class(c, {**t, "head": head}, reasons, sc)
+    vt = detect_vocab_trim(c, {**t, "head": head}, sc, model_dir, base_dir, raw_pair_map(model_tensors, base_tensors))
+    if vt["trimmed"]:
+        write_json("vocab-compare.json", vt)
+        say(f"wrote evidence/vocab-compare.json (vocabulary trim: kept rows are rows of the nearest model's: {vt['kept_subset']}; {vt['note']})")
+    cls = decide_class(c, {**t, "head": head}, reasons, sc, vt)
+    if cls == "vocab-trim":
+        reasons = []
     if cls == "restricted-head":
         reasons = [(f"the nearest model's lm_head.weight is replaced by {head['rows']} sidecar rows ({head['sidecar']}) that are "
                     f"copies of rows of it: the harness does not serve a restricted head, so a person decides")]
@@ -1944,6 +2029,7 @@ def main() -> int:
         "values": {"summary": values["summary"], "samples": [{k: x[k] for k in ("model_tensor", "relation", "cosine")}
                                                               for x in values["samples"]]},
         "head": head,
+        **({"vocab_trim": vt} if cls == "vocab-trim" else {}),
         "mtp": {"nearest_tensors": t["mtp_tensors"]["base"], "new_tensors": t["mtp_tensors"]["model"]},
         **({"graft_candidate": graft} if graft else {}),
         "draft": ("written by delta_triage.py from the evidence files; the agent reviews each finding "
@@ -2006,6 +2092,16 @@ def main() -> int:
         delta["hazards"].append({"area": "other", "evidence": [ev("head-compare.json")],
                                  "finding": f"The restricted-head check did not run: {head['note']}. A sidecar may be a head cut down "
                                             "from the nearest model's lm_head; compare its rows with lm_head.weight by hand."})
+    if cls == "vocab-trim":
+        delta["hazards"].append({"area": "other", "evidence": [ev("vocab-compare.json")],
+                                 "finding": (f"The new model's vocabulary has {vt['model_vocab']} entries against the nearest model's {vt['base_vocab']}, and "
+                                             "every row of its embedding and lm_head is a row of the nearest model's. The token ids are renumbered "
+                                             "(the tokenizer encode test shows how many strings change), so a client that sends or reads token ids "
+                                             "gets different ids. Stages 2 and 4 write the model's own vocab_size into the served config.json and "
+                                             "switch the speculative drafter off, because the drafter works on the nearest model's token ids. One "
+                                             "model was served this way on hardware (ProprietaryLegal/Qwen3.8-27B-CJK-Trim, 30 of 32 tokens equal "
+                                             "to the CPU reference); the answers of a trimmed model beyond that, 4 chips and the packaged form "
+                                             "were not tested.")})
     if code:
         delta["hazards"].append({"area": "other", "evidence": [ev("files-compare.json")],
                                  "finding": ("The model repository ships code: "

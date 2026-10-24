@@ -32,7 +32,10 @@ CHOICES = ("graft", "safe")
 
 def candidate(delta) -> dict | None:
     """Stage 0's graft candidate when it is worth a trial: the tensors are graftable and their width matches the model's hidden size.
-    A candidate whose fit is unknown (`shapes_match` null) is not tried."""
+    A candidate whose fit is unknown (`shapes_match` null) is not tried. A vocabulary trim is never tried: the grafted head goes with the
+    speculative drafter, and the drafter works on the nearest model's token ids, which a trim renumbers (issue 56)."""
+    if isinstance(delta, dict) and delta.get("class") == "vocab-trim":
+        return None
     c = delta.get("graft_candidate") if isinstance(delta, dict) else None
     if isinstance(c, dict) and c.get("graftable") is True and c.get("shapes_match") is True:
         return c

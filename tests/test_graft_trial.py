@@ -26,6 +26,12 @@ CANDIDATE = {"base_tensors": 15, "base_revision": "a" * 40, "base_shards": ["mod
 
 # ---- the candidate ------------------------------------------------------------------------------------------------------------------
 
+def test_a_vocabulary_trim_is_never_a_candidate():
+    """The grafted head goes with the speculative drafter, which works on the nearest model's token ids (issue 56)."""
+    assert candidate({"graft_candidate": CANDIDATE, "class": "vocab-trim"}) is None
+    assert candidate({"graft_candidate": CANDIDATE, "class": "weights-only"}) == CANDIDATE
+
+
 def test_a_graftable_candidate_whose_shapes_match_is_one():
     assert candidate({"graft_candidate": CANDIDATE}) == CANDIDATE
 

@@ -70,6 +70,10 @@ write a script.
   would run to the length limit. The warning is advisory, because the stop tokens may still be right for chat use.
   Do not try to fix it. Write `hw_test.json` and `handoff.json` as usual. The record `model-dir-sources.json` keeps
   the id and the answer for the operator.
+- When the new model's `vocab_size` differs from the nearest model's (stage 0's class is `vocab-trim`), `prepare_swap.py` writes the
+  model's own `vocab_size` into `model-dir/config.json` and switches the speculative drafter off in `run.sh`, because the drafter
+  works on the nearest model's token ids. It prints both lines and records them in `model-dir-sources.json` (`vocab`). Do not edit
+  the config or `run.sh` by hand, and do not set `graft_mtp`: the script refuses it for a different vocabulary.
 - Write each file as soon as you know its content. Do not wait until the end.
 - Do not investigate anything this skill does not list. On an earlier run the model spent 60 turns
   grepping vLLM source for an unrelated timeout and wrote nothing.
