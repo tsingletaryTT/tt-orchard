@@ -960,6 +960,7 @@ does not change.
 |---|---|---|---|
 | `weights-only` | The nearest supported model's architecture; only the weights differ | `weights-only` | Nothing: the stages above |
 | `weights+sidecar` | `weights-only` for the backbone, plus a weights file outside the backbone shards that the nearest model lacks (a task head, for example) | `weights-only` | Stage 2 also measures the sidecar's parity (below) |
+| `vocab-trim` | The nearest model with vocabulary rows removed: a smaller `vocab_size`, embedding and `lm_head` whose rows are rows of the nearest model's, and nothing else different | `weights-only` | Stages 2 and 4 serve it with the model's own `vocab_size` in the served `config.json` and the speculative drafter off; the gates check both |
 | `full-port` | The model needs new model code | `full-port` | An unattended run ends blocked (`needs-new-model-code`); an attended run pauses before stage 2 |
 | `unknown` | Stage 0 could not decide: an unreadable or overlapping sidecar, or headers that would not parse | `full-port` | Nothing unproven runs as weights-only |
 

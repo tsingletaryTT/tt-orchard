@@ -1653,3 +1653,78 @@ def test_the_stage_0_gate_accepts_the_new_hazard_areas(text_case):
     assert run_triage(stage).returncode == 0
     assert {h["area"] for h in delta(stage)["hazards"]} >= {"stop_tokens", "sampling_defaults"}
     assert gate_delta(stage, stage.parent.parent).ok
+
+
+# ---- a vocabulary-trimmed model (issue 56) ---------------------------------------------------------
+
+def trimmed(tokenizer_json, keep=100, **extra):
+    """The model's embedding and lm_head have `keep` fewer rows and its vocab_size says so; every other tensor matches."""
+    n = len(json.loads(tokenizer_json)["model"]["vocab"]) + len(SPECIALS) - keep
+    return {"config_change": {"vocab_size": n, **extra.pop("config_change", {})},
+            "tensor_change": {"model.embed_tokens.weight": ("BF16", [n, H]), "lm_head.weight": ("BF16", [n, H]),
+                              **extra.pop("tensor_change", {})}, **extra}
+
+
+def test_a_vocabulary_trim_is_its_own_class_on_the_weights_only_path(text_case, tokenizer_json):
+    stage = text_case(**trimmed(tokenizer_json))
+    r = run_triage(stage)
+    assert r.returncode == 0, r.stdout + r.stderr
+    d = delta(stage)
+    assert d["class"] == "vocab-trim" and d["path"] == "weights-only" and d["path_reasons"] == []
+    vt = d["vocab_trim"]
+    assert vt["trimmed"] is True and vt["kept_subset"] is True and vt["model_vocab"] < vt["base_vocab"]
+    assert {x["name"] for x in vt["tensors"]} == {"model.embed_tokens.weight", "lm_head.weight"}
+    assert evidence(stage, "vocab-compare.json") == vt
+    assert gate_delta(stage, stage.parent.parent).ok, gate_delta(stage, stage.parent.parent).reasons
+
+
+def test_a_vocabulary_trim_leaves_a_hazard_that_names_the_config_and_the_drafter(text_case, tokenizer_json):
+    stage = text_case(**trimmed(tokenizer_json))
+    assert run_triage(stage).returncode == 0
+    [h] = [i for i in delta(stage)["hazards"] if "vocabulary" in i.get("finding", "")]
+    assert h["area"] == "other" and h["evidence"] == ["stages/0/evidence/vocab-compare.json"]
+    for word in ("vocab_size", "drafter", "token ids", "not tested", "because the drafter works on the nearest model's token ids"):
+        assert word in h["finding"], word
+
+
+def test_a_smaller_vocabulary_with_another_difference_stays_a_full_port(text_case, tokenizer_json):
+    stage = text_case(**trimmed(tokenizer_json, config_change={"num_key_value_heads": 2}))
+    assert run_triage(stage).returncode == 0
+    d = delta(stage)
+    assert d["class"] == "full-port" and d["path"] == "full-port" and "vocab_trim" not in d
+    assert not (stage / "evidence" / "vocab-compare.json").exists()
+    assert not any("vocabulary" in i.get("finding", "") and i["area"] == "other" for i in d["hazards"])
+
+
+def test_a_model_that_is_not_trimmed_has_no_vocab_trim_record(text_case):
+    stage = text_case()
+    assert run_triage(stage).returncode == 0
+    d = delta(stage)
+    assert d["class"] == "weights-only" and "vocab_trim" not in d
+    assert not (stage / "evidence" / "vocab-compare.json").exists()
+
+
+def poke(snapshot: Path, tensor: str, byte: int) -> None:
+    """Overwrite one tensor's data in whichever shard of the snapshot holds it (the blobs are plain files)."""
+    for shard in sorted(snapshot.glob("*.safetensors")):
+        raw = shard.resolve().read_bytes()
+        (n,) = struct.unpack("<Q", raw[:8])
+        header = json.loads(raw[8:8 + n])
+        if tensor in header:
+            lo, hi = header[tensor]["data_offsets"]
+            data = bytearray(raw)
+            data[8 + n + lo:8 + n + hi] = bytes([byte]) * (hi - lo)
+            shard.resolve().write_bytes(bytes(data))
+            return
+    raise AssertionError(tensor)
+
+
+def test_a_smaller_embedding_whose_rows_are_not_the_nearest_models_is_a_full_port_with_no_trim_record(text_case, tokenizer_json, tmp_path):
+    stage = text_case(**trimmed(tokenizer_json))
+    poke(tmp_path / "base" / "snapshots" / BASE_REV, "model.language_model.embed_tokens.weight", 0x3C)
+    assert run_triage(stage).returncode == 0
+    d = delta(stage)
+    assert d["class"] == "full-port" and d["path"] == "full-port" and "vocab_trim" not in d
+    assert any("vocab_size differs" in r for r in d["path_reasons"])
+    assert evidence(stage, "vocab-compare.json")["kept_subset"] is False        # the evidence is kept even when the class is not
+    assert gate_delta(stage, stage.parent.parent).ok

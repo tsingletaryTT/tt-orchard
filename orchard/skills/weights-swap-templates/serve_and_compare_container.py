@@ -153,6 +153,17 @@ def has_mtp_tensors(new: Path) -> bool | None:
     return any(MTP_NAME.search(k) for k in names)
 
 
+def vocabulary_differs(stage_dir: Path) -> bool:
+    """True when prepare_swap.py recorded that the model's vocabulary differs from the nearest model's (model-dir-sources.json).
+    The speculative drafter works on the nearest model's token ids, so it must be off then (issue 56). Anything else, including a
+    missing or unreadable record, is False."""
+    try:
+        rec = json.loads((stage_dir / "model-dir-sources.json").read_text(encoding="utf-8"))
+        return rec["vocab"]["trimmed"] is True
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
 def serving_from_argv(argv: list[str]) -> dict:
     """The same record as serve_and_compare.serving_state, read from the edited `docker run` argv: the
     `--env QWEN36_DRAFTER=` option and the server's `--additional-config`."""
@@ -176,7 +187,7 @@ def serving_from_argv(argv: list[str]) -> dict:
 
 def edit_docker_argv(argv: list[str], *, image: str, nearest: str, model_dir, tt_cache, hf_dir,
                      name: str, label: str, device_ids: list[int], port: int,
-                     blobs: list[str], drafter_off: bool = False) -> list[str]:
+                     blobs: list[str], drafter_off: bool = False, explicit_off: bool = False) -> list[str]:
     """The edited `docker run` argv (see the module docstring). Raises EditError. With `drafter_off`,
     `--env QWEN36_DRAFTER=<x>` becomes `--env QWEN36_DRAFTER=` (at most one such option): the speculative
     drafter needs the model's mtp.* tensors, and the engine dies at start without them."""
@@ -248,6 +259,8 @@ def edit_docker_argv(argv: list[str], *, image: str, nearest: str, model_dir, tt
     _once(seen["/hf"], "--volume <dir>:/hf")
     _once(seen["TT_CACHE_PATH"], "--env TT_CACHE_PATH=/tensor-cache")
     _once(seen["HF_MODEL"], "--env HF_MODEL=<id>")
+    if drafter_off and explicit_off and seen["QWEN36_DRAFTER"] == 0:
+        out += ["--env", "QWEN36_DRAFTER="]       # the record must say "off", and "not set by the package" is not that (a vocabulary trim)
     if seen["QWEN36_DRAFTER"] > 1:
         raise EditError(f"expected at most one --env QWEN36_DRAFTER, found {seen['QWEN36_DRAFTER']}")
     if seen["MODEL_WEIGHTS_DIR"] > 1:
@@ -273,6 +286,19 @@ def edit_docker_argv(argv: list[str], *, image: str, nearest: str, model_dir, tt
     ports = [server[j + 1] for j, a in enumerate(server[:-1]) if a == "--port"]
     if ports != [str(port)]:
         raise EditError(f"the server's --port is {ports}; the config's port is {port}")
+    if drafter_off:
+        # Plain decoding refuses on-device sampling on a 1x2 mesh (it is certified on 1x1, 1x4 and 1x8 only), as prepare_swap.py
+        # found for the bundle's run.sh, so the key goes with the drafter. Left in place it ends the server's start (issue 56).
+        for j, a in enumerate(server[:-1]):
+            if a == "--additional-config":
+                try:
+                    cfg = json.loads(server[j + 1])
+                    tt = cfg.get("tt") if isinstance(cfg, dict) else None
+                except ValueError as exc:
+                    raise EditError(f"the server's --additional-config is not JSON, so on-device sampling cannot be removed: {exc}") from exc
+                if isinstance(tt, dict) and "sample_on_device_mode" in tt:
+                    del tt["sample_on_device_mode"]
+                    server[j + 1] = json.dumps(cfg)
     return out + server
 
 
@@ -391,7 +417,8 @@ def main() -> int:
                                 tt_cache=cache, hf_dir=hf_dir,
                                 name=f"orchard-{cfg['chips']}chip-{cfg['port']}", label=label,
                                 device_ids=ids, port=int(cfg["port"]), blobs=blob_dirs(model_dir),
-                                drafter_off=(has_mtp_tensors(model_dir) is False))
+                                drafter_off=(has_mtp_tensors(model_dir) is False or vocabulary_differs(STAGE_DIR)),
+                                explicit_off=vocabulary_differs(STAGE_DIR))
     except EditError as exc:
         fail(str(exc))
     evidence = STAGE_DIR / "evidence"

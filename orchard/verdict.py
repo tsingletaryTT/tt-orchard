@@ -201,6 +201,9 @@ def _config_item(c: dict, peers: list[dict]) -> dict | None:
 
 def _triage_item(t: dict) -> dict | None:
     cls = t.get("class")
+    if cls == "vocab-trim":
+        return _item("triage", "info", "The model is the nearest model with part of its vocabulary removed: the installed bundle serves it "
+                     "with the model's own vocab_size and the speculative drafter off.", f"Class {cls}.")
     if cls in ("weights-only", "weights+sidecar"):
         return _item("triage", "info", "Only the weights differ: the installed bundle can serve this model." if cls == "weights-only"
                      else "The weights differ and the model has a sidecar head the bundle does not serve.", f"Class {cls}.")

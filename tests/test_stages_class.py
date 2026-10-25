@@ -38,11 +38,22 @@ def test_a_path_alone_implies_a_class_for_a_run_that_predates_classes():
     assert classes.class_of_path("maybe") is None
 
 
-def test_the_class_set_is_the_documented_five():
-    assert classes.CLASSES == ("weights-only", "weights+sidecar", "restricted-head", "full-port", "unknown")
+def test_the_class_set_is_the_documented_six():
+    assert classes.CLASSES == ("weights-only", "weights+sidecar", "restricted-head", "vocab-trim", "full-port", "unknown")
+
+
+def test_a_vocabulary_trim_takes_the_weights_only_path():
+    assert classes.path_of("vocab-trim") == "weights-only"
+    assert "vocab-trim" not in classes.SIDECAR_CLASSES
 
 
 # ---- the stage 0 gate -------------------------------------------------------------------------
+
+TRIM = {"trimmed": True, "kept_subset": True, "model_vocab": 181760, "base_vocab": 248320,
+        "tensors": [{"name": "model.embed_tokens.weight", "rows": 181760, "base_rows": 248320, "rows_found_in_base": 181760}],
+        "explained_reasons": ["text config vocab_size differs: 181760 vs 248320"], "note": "every row is a row of the nearest model's"}
+TRIM_DELTA = {**GOOD_DELTA, "class": "vocab-trim", "sidecars": [], "vocab_trim": TRIM}
+
 
 def gate(tmp_path, delta):
     return gate_delta(*stage(tmp_path, 0, "delta.json", delta))
@@ -54,6 +65,7 @@ def gate(tmp_path, delta):
     {**GOOD_DELTA, "path": "full-port", "class": "full-port", "sidecars": []},
     {**GOOD_DELTA, "path": "full-port", "class": "unknown", "sidecars": []},
     GOOD_DELTA,                                                      # no class: a run from before classes
+    TRIM_DELTA,
 ])
 def test_the_gate_accepts_each_consistent_class(tmp_path, delta):
     g = gate(tmp_path, delta)
@@ -71,6 +83,16 @@ def test_the_gate_accepts_each_consistent_class(tmp_path, delta):
     ({**SIDE_DELTA, "sidecars": "joint_head.safetensors"}, "sidecars"),
     ({**SIDE_DELTA, "code_files": [{"file": "x.py"}]}, "code_files"),
     ({**SIDE_DELTA, "code_files": "x.py"}, "code_files"),
+    ({**TRIM_DELTA, "path": "full-port"}, "path"),
+    ({k: v for k, v in TRIM_DELTA.items() if k != "vocab_trim"}, "vocab_trim"),
+    ({**TRIM_DELTA, "vocab_trim": "yes"}, "vocab_trim"),
+    ({**TRIM_DELTA, "vocab_trim": {**TRIM, "kept_subset": False}}, "kept_subset"),
+    ({**TRIM_DELTA, "vocab_trim": {**TRIM, "kept_subset": None}}, "kept_subset"),
+    ({**TRIM_DELTA, "vocab_trim": {**TRIM, "trimmed": False}}, "trimmed"),
+    ({**TRIM_DELTA, "vocab_trim": {**TRIM, "model_vocab": 248320}}, "vocab"),
+    ({**TRIM_DELTA, "vocab_trim": {**TRIM, "model_vocab": True}}, "vocab"),
+    ({**TRIM_DELTA, "sidecars": [SIDECAR]}, "sidecars"),
+    ({**GOOD_DELTA, "class": "weights-only", "sidecars": [], "vocab_trim": TRIM}, "vocab_trim"),
 ])
 def test_the_gate_refuses_an_inconsistent_class(tmp_path, delta, word):
     g = gate(tmp_path, delta)
@@ -79,7 +101,7 @@ def test_the_gate_refuses_an_inconsistent_class(tmp_path, delta, word):
 
 # ---- reading the class back -------------------------------------------------------------------
 
-@pytest.mark.parametrize("cls", ["weights-only", "weights+sidecar", "full-port", "unknown"])
+@pytest.mark.parametrize("cls", ["weights-only", "weights+sidecar", "vocab-trim", "full-port", "unknown"])
 def test_the_class_is_read_from_stage_0s_passing_end(tmp_path, cls):
     assert run_class(stage0_pass(path=classes.path_of(cls), **{"class": cls}), tmp_path) == cls
 
@@ -283,3 +305,68 @@ def test_the_gate_refuses_malformed_mtp_counts(tmp_path, mtp):
 
 def test_a_delta_without_mtp_counts_still_passes(tmp_path):
     assert gate(tmp_path, GOOD_DELTA).ok
+
+
+def test_a_vocabulary_trim_runs_the_plain_weights_only_stages():
+    """No sidecar parity: the trim has no sidecar. Stage 2 is the swap check and its gate, as for weights-only."""
+    trim, plain = spec_for(2, "weights-only", cls="vocab-trim"), spec_for(2, "weights-only", cls="weights-only")
+    assert trim == plain
+    assert spec_for(2, "weights-only", cls="vocab-trim") != spec_for(2, "weights-only", cls="weights+sidecar")
+    for n in (3, 4, 5, 6):
+        assert spec_for(n, "weights-only", cls="vocab-trim") == spec_for(n, "weights-only", cls="weights-only")
+
+
+# ---- stage 2 on a vocabulary trim (issue 56) -------------------------------------------------------
+
+def trim_run(tmp_path, *, sources=..., serving=..., klass="vocab-trim"):
+    """A run whose stage 0 says `klass`, and a stage 2 holding result.json, model-dir-sources.json and swap-check.json."""
+    run = tmp_path / "run"
+    write(run, "stages/0/delta.json", {**TRIM_DELTA, "class": klass} if klass == "vocab-trim" else {**GOOD_DELTA, "class": klass, "sidecars": []})
+    if sources is not ...:
+        write(run, "stages/2/model-dir-sources.json", sources)
+    elif klass == "vocab-trim":
+        write(run, "stages/2/model-dir-sources.json", {"vocab": {"model": TRIM["model_vocab"], "base": TRIM["base_vocab"], "trimmed": True}})
+    write(run, "stages/2/evidence/swap-check.json", {"serving": {"drafter": "off", "sampling": "host"} if serving is ... else serving})
+    return gate_weights_swap(*stage(tmp_path, 2, "result.json", SWAP))
+
+
+def test_the_swap_gate_passes_a_trim_served_with_its_own_vocab_and_the_drafter_off(tmp_path):
+    g = trim_run(tmp_path)
+    assert g.ok, g.reasons
+
+
+def test_the_swap_gate_refuses_a_trim_whose_served_config_kept_the_nearest_models_vocab(tmp_path):
+    g = trim_run(tmp_path, sources={"vocab": {"model": 181760, "base": 248320, "trimmed": False}})
+    assert not g.ok and any("vocab" in r and "model-dir-sources.json" in r for r in g.reasons), g.reasons
+
+
+def test_the_swap_gate_refuses_a_trim_whose_record_names_another_vocabulary(tmp_path):
+    g = trim_run(tmp_path, sources={"vocab": {"model": 99, "base": 248320, "trimmed": True}})
+    assert not g.ok and any("181760" in r for r in g.reasons), g.reasons
+
+
+def test_the_swap_gate_refuses_a_trim_with_no_sources_record(tmp_path):
+    run = tmp_path / "run"
+    write(run, "stages/0/delta.json", TRIM_DELTA)
+    write(run, "stages/2/evidence/swap-check.json", {"serving": {"drafter": "off"}})
+    g = gate_weights_swap(*stage(tmp_path, 2, "result.json", SWAP))
+    assert not g.ok and any("model-dir-sources.json" in r and "cannot be checked" in r for r in g.reasons), g.reasons
+
+
+def test_the_swap_gate_refuses_a_trim_with_no_swap_check_record(tmp_path):
+    run = tmp_path / "run"
+    write(run, "stages/0/delta.json", TRIM_DELTA)
+    write(run, "stages/2/model-dir-sources.json", {"vocab": {"model": TRIM["model_vocab"], "trimmed": True}})
+    g = gate_weights_swap(*stage(tmp_path, 2, "result.json", SWAP))
+    assert not g.ok and any("drafter" in r for r in g.reasons), g.reasons
+
+
+def test_the_swap_gate_refuses_a_trim_served_with_the_drafter_on(tmp_path):
+    for serving in ({"drafter": "on", "sampling": "device"}, {"drafter": None}, {}, None, "off"):
+        g = trim_run(tmp_path / str(abs(hash(str(serving)))), serving=serving)
+        assert not g.ok and any("drafter" in r for r in g.reasons), (serving, g.reasons)
+
+
+def test_the_swap_gate_asks_nothing_extra_of_other_classes(tmp_path):
+    g = trim_run(tmp_path, klass="weights-only", sources={"vocab": {"trimmed": False}}, serving={"drafter": "on"})
+    assert g.ok, g.reasons

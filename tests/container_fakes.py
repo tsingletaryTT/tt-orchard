@@ -17,15 +17,18 @@ IMAGE = "tt-model/qwen3.8-27b-p300x2:0becf4834925"
 NEAREST = "Qwen/Qwen3.8-27B"
 REVISION = "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
 ADDITIONAL = '{"tt": {"fabric_config": "FABRIC_1D", "trace_region_size": 1073741824}}'
+ON_DEVICE = '{"tt": {"fabric_config": "FABRIC_1D", "trace_region_size": 1073741824, "sample_on_device_mode": "decode_only"}}'
 
 
 def printed_argv(*, hf, pkg_cache, port, device_ids, whole_dir=False, extra_options=(),
-                 extra_env=()) -> list[str]:
+                 extra_env=(), drafter=True, on_device_sampling=False) -> list[str]:
     devices = (["--device", "/dev/tenstorrent"] if whole_dir else
                [x for d in device_ids for x in ("--device", f"/dev/tenstorrent/{d}:/dev/tenstorrent/{d}")])
     env = {"ARCH_NAME": "blackhole", "HF_HUB_OFFLINE": "1", "HF_MODEL": NEAREST,
            "MESH_DEVICE": "P150x4", "QWEN36_DRAFTER": "mtp", "VLLM_RPC_TIMEOUT": "900000",
            **dict(extra_env)}
+    if not drafter:
+        del env["QWEN36_DRAFTER"]                  # a package whose printed command sets no drafter at all
     return (["docker", "run", "--name", "tt-model-qwen3.8-27b-p300x2-batch32", "--user", "1000:1000",
              "--label", "org.tenstorrent.tt-model=qwen3.8-27b-p300x2",
              "--label", "org.tenstorrent.tt-model.profile=batch32",
@@ -40,5 +43,5 @@ def printed_argv(*, hf, pkg_cache, port, device_ids, whole_dir=False, extra_opti
             + list(extra_options)
             + [x for k, v in sorted(env.items()) for x in ("--env", f"{k}={v}")]
             + [IMAGE, "vllm", "serve", NEAREST, "--revision", REVISION, "--max-model-len", "262144",
-               "--max-num-seqs", "32", "--block-size", "64", "--additional-config", ADDITIONAL,
+               "--max-num-seqs", "32", "--block-size", "64", "--additional-config", ON_DEVICE if on_device_sampling else ADDITIONAL,
                "--max-num-batched-tokens", "262144", "--port", str(port)])
