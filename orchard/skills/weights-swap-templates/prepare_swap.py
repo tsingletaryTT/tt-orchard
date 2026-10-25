@@ -413,6 +413,10 @@ def plan_mtp_graft(base: Path, new: Path) -> dict:
         # replaced by the graft and its own tensors would be missing; the package's launcher would write through the link.
         fail(f"the new model ships a file named {GRAFT_SHARD}, the name the graft uses for its shard; the graft would "
              "replace it, so this model cannot be grafted")
+    vocab = vocab_facts(base, new)
+    if vocab["trimmed"]:
+        fail(f"graft_mtp cannot be used: the new model's vocabulary ({vocab['model']}) differs from the nearest model's "
+             f"({vocab['base']}), and the speculative drafter works on the nearest model's token ids")
     has = has_mtp_tensors(new)
     if has is True:
         fail("graft_mtp is set, but the new model already has mtp.* tensors; there is nothing to graft")
@@ -536,7 +540,7 @@ def drop_device_sampling(text: str, bundle: Path) -> tuple[str, str]:
 
 
 def edit_run_script(text: str, bundle: Path, nearest: str, model_dir: Path,
-                    drafter_off: bool = False,
+                    drafter_off: bool = False, explicit_drafter_off: bool = False,
                     drafter_reason: str = "the new model has no mtp.* tensors, so the speculative drafter "
                                           "that needs the MTP head is switched off") -> tuple[str, list[str]]:
     """Apply the edits. Returns (new text, notes about optional edits that did not apply)."""
@@ -560,6 +564,14 @@ def edit_run_script(text: str, bundle: Path, nearest: str, model_dir: Path,
                           lambda m: f'{m.group(1)}export QWEN36_DRAFTER=""', text, flags=re.MULTILINE)
         if n > 1:
             fail(f"expected at most one export QWEN36_DRAFTER= line in {bundle / 'run.sh'}, found {n}")
+        if n == 0 and explicit_drafter_off:
+            # The gate and the card read the serving record from this line; "not set" is not "off". Put the line where the command is built.
+            text, placed = re.subn(r"^([ \t]*)CMD=\(", lambda m: f'{m.group(1)}export QWEN36_DRAFTER=""\n{m.group(0)}', text, count=1,
+                                   flags=re.MULTILINE)
+            if placed != 1:
+                fail(f"{bundle / 'run.sh'} has no export QWEN36_DRAFTER= line and no CMD=( line to put one before, so the drafter "
+                     "cannot be recorded as off")
+            n = 1
         notes.append(f'export QWEN36_DRAFTER="" ({drafter_reason})' if n else
                      "export QWEN36_DRAFTER=... was absent; nothing to clear")
         text, note = drop_device_sampling(text, bundle)
@@ -584,9 +596,6 @@ def main() -> int:
     model_dir = HERE_DIR / "model-dir"
     graft = cfg.get("graft_mtp") is True
     vocab = vocab_facts(base, new)
-    if graft and vocab["trimmed"]:
-        fail(f"graft_mtp cannot be used: the new model's vocabulary ({vocab['model']}) differs from the nearest model's "
-             f"({vocab['base']}), and the speculative drafter works on the nearest model's token ids")
     plan = plan_mtp_graft(base, new) if graft else None
     if bundle is not None:
         src_run = bundle / "run.sh"
@@ -601,6 +610,7 @@ def main() -> int:
         text, notes = edit_run_script(src_run.read_text(encoding="utf-8"), bundle,
                                       cfg["nearest_model_id"], model_dir,
                                       drafter_off=((mtp is False or bool(vocab["trimmed"])) and not graft),
+                                      explicit_drafter_off=bool(vocab["trimmed"]),
                                       **({"drafter_reason": no_drafter_why} if no_drafter_why else {}))
         if graft:
             notes.append("the drafter and on-device sampling stay on: the nearest model's mtp.* tensors are "

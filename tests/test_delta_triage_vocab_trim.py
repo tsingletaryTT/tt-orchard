@@ -254,6 +254,9 @@ def test_a_reason_the_trim_does_not_explain_keeps_the_class_from_being_a_trim(tm
     assert t.decide_class(c, tens, reasons, sc, vt) == "full-port"
 
 
-def test_the_sizes_are_read_from_the_config_comparison_and_not_guessed(tmp_path):
+def test_sizes_the_matrices_do_not_have_make_it_not_a_trim_and_are_still_reported(tmp_path):
+    """10-row and 16-row matrices under configs that say 11 and 17: preparation would write vocab_size 11 for a 10-row embedding
+    and recreate the load-time mismatch (Copilot, PR 57). The sizes come from the config comparison and are reported either way."""
     t, c, tens, sc, vt = analyse(World(tmp_path), c=cfg(model_vocab=11, base_vocab=17))
     assert (vt["model_vocab"], vt["base_vocab"]) == (11, 17)
+    assert vt["trimmed"] is False and vt["kept_subset"] is None

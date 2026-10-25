@@ -20,12 +20,14 @@ ADDITIONAL = '{"tt": {"fabric_config": "FABRIC_1D", "trace_region_size": 1073741
 
 
 def printed_argv(*, hf, pkg_cache, port, device_ids, whole_dir=False, extra_options=(),
-                 extra_env=()) -> list[str]:
+                 extra_env=(), drafter=True) -> list[str]:
     devices = (["--device", "/dev/tenstorrent"] if whole_dir else
                [x for d in device_ids for x in ("--device", f"/dev/tenstorrent/{d}:/dev/tenstorrent/{d}")])
     env = {"ARCH_NAME": "blackhole", "HF_HUB_OFFLINE": "1", "HF_MODEL": NEAREST,
            "MESH_DEVICE": "P150x4", "QWEN36_DRAFTER": "mtp", "VLLM_RPC_TIMEOUT": "900000",
            **dict(extra_env)}
+    if not drafter:
+        del env["QWEN36_DRAFTER"]                  # a package whose printed command sets no drafter at all
     return (["docker", "run", "--name", "tt-model-qwen3.8-27b-p300x2-batch32", "--user", "1000:1000",
              "--label", "org.tenstorrent.tt-model=qwen3.8-27b-p300x2",
              "--label", "org.tenstorrent.tt-model.profile=batch32",

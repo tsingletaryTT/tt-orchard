@@ -187,7 +187,7 @@ def serving_from_argv(argv: list[str]) -> dict:
 
 def edit_docker_argv(argv: list[str], *, image: str, nearest: str, model_dir, tt_cache, hf_dir,
                      name: str, label: str, device_ids: list[int], port: int,
-                     blobs: list[str], drafter_off: bool = False) -> list[str]:
+                     blobs: list[str], drafter_off: bool = False, explicit_off: bool = False) -> list[str]:
     """The edited `docker run` argv (see the module docstring). Raises EditError. With `drafter_off`,
     `--env QWEN36_DRAFTER=<x>` becomes `--env QWEN36_DRAFTER=` (at most one such option): the speculative
     drafter needs the model's mtp.* tensors, and the engine dies at start without them."""
@@ -259,6 +259,8 @@ def edit_docker_argv(argv: list[str], *, image: str, nearest: str, model_dir, tt
     _once(seen["/hf"], "--volume <dir>:/hf")
     _once(seen["TT_CACHE_PATH"], "--env TT_CACHE_PATH=/tensor-cache")
     _once(seen["HF_MODEL"], "--env HF_MODEL=<id>")
+    if drafter_off and explicit_off and seen["QWEN36_DRAFTER"] == 0:
+        out += ["--env", "QWEN36_DRAFTER="]       # the record must say "off", and "not set by the package" is not that (a vocabulary trim)
     if seen["QWEN36_DRAFTER"] > 1:
         raise EditError(f"expected at most one --env QWEN36_DRAFTER, found {seen['QWEN36_DRAFTER']}")
     if seen["MODEL_WEIGHTS_DIR"] > 1:
@@ -402,7 +404,8 @@ def main() -> int:
                                 tt_cache=cache, hf_dir=hf_dir,
                                 name=f"orchard-{cfg['chips']}chip-{cfg['port']}", label=label,
                                 device_ids=ids, port=int(cfg["port"]), blobs=blob_dirs(model_dir),
-                                drafter_off=(has_mtp_tensors(model_dir) is False or vocabulary_differs(STAGE_DIR)))
+                                drafter_off=(has_mtp_tensors(model_dir) is False or vocabulary_differs(STAGE_DIR)),
+                                explicit_off=vocabulary_differs(STAGE_DIR))
     except EditError as exc:
         fail(str(exc))
     evidence = STAGE_DIR / "evidence"

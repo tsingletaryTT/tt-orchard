@@ -1604,6 +1604,8 @@ def _row_digests(entry: dict, start_row: int, rows: int, row_bytes: int):
     with open(entry["file"], "rb") as f:
         f.seek(entry["start"] + start_row * row_bytes)
         buf = f.read(rows * row_bytes)
+    if len(buf) != rows * row_bytes:
+        raise ValueError(f"{entry['file']}: read {len(buf)} bytes where {rows * row_bytes} were expected (the file is shorter than its header says)")
     view = memoryview(buf)
     return [hashlib.blake2b(view[i * row_bytes:(i + 1) * row_bytes], digest_size=16).digest() for i in range(rows)]
 
@@ -1613,6 +1615,9 @@ def rows_found_in_base(m: dict, b: dict) -> int:
     nearest model's rows are kept as 16-byte digests."""
     size = ITEMSIZE[m["dtype"]]
     row_bytes = int(m["shape"][1]) * size
+    for e in (m, b):
+        if e["end"] - e["start"] != int(e["shape"][0]) * row_bytes:
+            raise ValueError(f"{e['file']}: the header's byte range does not hold {e['shape'][0]} rows of {row_bytes} bytes")
     per_chunk = max(1, VOCAB_CHUNK_BYTES // row_bytes)
     base_rows = set()
     for r in range(0, int(b["shape"][0]), per_chunk):
@@ -1649,6 +1654,10 @@ def detect_vocab_trim(c: dict, t: dict, sc: dict, model_dir: Path, base_dir: Pat
         if not (VOCAB_TENSOR.search(x["name"]) and len(m) == 2 and len(b) == 2 and m[1] == b[1] and m[0] < b[0]):
             out["note"] = f"{x['name']} differs in shape in a way a vocabulary trim does not"
             return out
+        if m[0] != mv or b[0] != bv:
+            out["note"] = (f"{x['name']} has {m[0]} rows and the nearest model's has {b[0]}, but the configs say the vocabularies are "
+                           f"{mv} and {bv}: the rows do not match the configured sizes")
+            return out
     if decide_path({**c, "decisive_keys_differing": []}, {**t, "shape_diffs_normalized": []}):
         out["note"] = "something besides the vocabulary differs"
         return out
@@ -1664,9 +1673,14 @@ def detect_vocab_trim(c: dict, t: dict, sc: dict, model_dir: Path, base_dir: Pat
     if unreadable:
         out["note"] = f"{unreadable[0]}: dtype {mi[unreadable[0]]['dtype']} is not one this check reads or differs from the nearest model's"
         return out
-    for m, b in chosen:
-        out["tensors"].append({"name": m, "rows": int(mi[m]["shape"][0]), "base_rows": int(bi[b]["shape"][0]),
-                               "rows_found_in_base": rows_found_in_base(mi[m], bi[b])})
+    try:
+        for m, b in chosen:
+            out["tensors"].append({"name": m, "rows": int(mi[m]["shape"][0]), "base_rows": int(bi[b]["shape"][0]),
+                                   "rows_found_in_base": rows_found_in_base(mi[m], bi[b])})
+    except (OSError, ValueError) as exc:
+        out["tensors"] = []
+        out["note"] = f"the tensor bodies could not be compared: {exc}"
+        return out
     out["kept_subset"] = all(x["rows_found_in_base"] == x["rows"] for x in out["tensors"])
     out["note"] = ("every row of " + ", ".join(x["name"] for x in out["tensors"]) + " is a row of the nearest model's" if out["kept_subset"]
                    else "a row of the new model's matrices is not a row of the nearest model's")
