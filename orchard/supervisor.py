@@ -1553,7 +1553,8 @@ class Supervisor:
             self._block(spec.number,
                         f"stage 4 requires {', '.join(f'{n}-chip' for n in short)} "
                         f"but no installed bundle or container package serves the nearest model on {'that count' if len(short) == 1 else 'those counts'}. "
-                        + (f"Run again with --required-chips {','.join(str(n) for n in rest)} to test only the counts that have one, "
+                        + (f"Set required_chips to {','.join(str(n) for n in rest)} in bringup.toml and run `tt-orchard bringup` again with "
+                           f"--change-required-chips (the run keeps the counts it started with otherwise), "
                            if rest else "No required count can be served; ")
                         + "or install a package for the missing count",
                         required=sorted(self.required_chips), missing=short)
@@ -1633,7 +1634,8 @@ class Supervisor:
     def _read_plan(self, spec, stage_dir: Path):
         tests, problems = read_plan(stage_dir, required=self.required_chips, max_chips=spec.boards * CHIPS_PER_BOARD,
                                     budget_s=spec.budget_s, home=self.home)
-        return tests, problems + swap_draft.stage4_nearest_problems(self.run_dir, stage_dir)
+        return tests, problems + swap_draft.stage4_nearest_problems(self.run_dir, stage_dir, tt_model_root=self.paths.tt_model_root,
+                                                                       operator_home=self.paths.operator_home)
 
     def _finished_check(self, spec, phase: str, stage_dir: Path):
         """What says a step's files are written and valid (AgentStep's `finished`): for one hardware
@@ -1659,7 +1661,8 @@ class Supervisor:
         d = test.get("deadline_s")
         if isinstance(d, bool) or not isinstance(d, (int, float)) or d <= 0:
             problems.append("hw_test.json needs a positive deadline_s")
-        if (wrong := swap_draft.nearest_problem(self.run_dir, stage_dir / "swap_config.json")):
+        if (wrong := swap_draft.nearest_problem(self.run_dir, stage_dir / "swap_config.json", tt_model_root=self.paths.tt_model_root,
+                                                operator_home=self.paths.operator_home)):
             problems.append(wrong)
         if not isinstance(note, dict) or any(note.get(k) in (None, "") for k in NOTE_KEYS):
             problems.append(f"handoff.json needs {', '.join(NOTE_KEYS)}")
@@ -2409,6 +2412,10 @@ def parse(argv=None):
                    help="skip stage 2's graft trial: with a graft candidate (the model has no mtp.* tensors and the nearest model has "
                         "a head that fits) stage 2 serves the grafted drafter once and keeps it when it is faster; this leaves the "
                         "safe configuration without that extra test (a cold boot adds 4 to 25 minutes). The run records the choice")
+    r.add_argument("--change-required-chips", action="store_true",
+                   help="resume with the --required-chips counts given now in place of the ones the run started with. The ledger records the old and "
+                        "new counts as a `required chips set` decision, and a later resume keeps the new ones. Refused once stage 4 has passed, "
+                        "because its results rest on the old counts. Without this flag a run keeps the counts it started with")
     r.add_argument("--resume-aborted", action="store_true",
                    help="go on with a run that an operator or a signal aborted: the ledger records `resume` after the abort and the run starts its coder again and continues from the ledger. Without this flag an aborted run stays aborted and running the command again starts nothing. An abort of any other kind, and a finished run, are left as they are")
     r.add_argument("--unattended", action="store_true",
@@ -2460,6 +2467,18 @@ def lab_problems(args, run_dir: Path, paths: RunPaths, inputs: dict) -> list[str
             if not (absolute_path(path) + "/").startswith(root)]
 
 
+REQUIRED_CHIPS_SET = "required chips set"
+
+
+def required_in_force(entries) -> tuple[int, ...] | None:
+    """The counts stage 4 must pass: the run start's, or the last `required chips set` decision (--change-required-chips)."""
+    counts = tuple((run_progress(entries).run_start or {}).get("required_chips") or ()) or None
+    for e in entries:
+        if e["event"] == "decision" and e["data"].get("decision") == REQUIRED_CHIPS_SET:
+            counts = tuple(e["data"].get("new") or ()) or None
+    return counts
+
+
 def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_json,
           probe=probe_model, clock=time.time, sleep=time.sleep, budgets=Budgets(),
           disk_usage=shutil.disk_usage, home=None, containers=None, environ=None, lab=None) -> Supervisor:
@@ -2492,11 +2511,17 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
     if versions is None and not progress.started:
         versions = resolve_versions(spec)       # a resumed run keeps the versions it started with
     required = args.required_chips
-    if progress.started:                        # a resumed run keeps the counts it started with
-        recorded = tuple((progress.run_start or {}).get("required_chips") or ()) or None
+    if progress.started:                        # a resumed run keeps the counts it started with, or the last it was told to use
+        recorded = required_in_force(entries)
         if required is not None and required != recorded:
-            raise ValueError(f"this run started with required chips {recorded}; --required-chips "
-                             f"{required} differs. Leave the option out to resume with the recorded value")
+            if not getattr(args, "change_required_chips", False):
+                raise ValueError(f"this run started with required chips {recorded}; --required-chips "
+                                 f"{required} differs. Leave the option out to resume with the recorded value, or add "
+                                 f"--change-required-chips to change them on purpose (the ledger records it)")
+            if any(e["event"] == "stage_end" and e["stage"] == 4 and e["data"].get("result") == "pass" for e in entries):
+                raise ValueError(f"required chips cannot change: stage 4 has passed, and its results rest on {recorded}")
+            ledger.append("decision", None, decision=REQUIRED_CHIPS_SET, old=list(recorded or ()), new=list(required))
+            recorded = required
         required = recorded
     graft_on = not getattr(args, "no_graft_trial", False)
     if progress.started and (progress.run_start or {}).get("graft_trial") is False:

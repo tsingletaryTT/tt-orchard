@@ -67,6 +67,7 @@ def test_stage_2_refuses_the_test_before_any_lease(tmp_path):
     (stage / "handoff.json").write_text(json.dumps({k: "x" for k in __import__("orchard.supervisor", fromlist=["NOTE_KEYS"]).NOTE_KEYS}))
     sup = Supervisor.__new__(Supervisor)
     sup.run_dir = tmp_path
+    sup.paths = type("P", (), {"tt_model_root": tmp_path / "models", "operator_home": tmp_path / "op"})()
     test, problems = sup._read_test(stage)
     assert any("Qwen/Qwen3.8-27B" in p and "nearest" in p for p in problems), problems
 
@@ -102,6 +103,92 @@ def test_the_stage_4_plan_the_supervisor_reads_carries_the_problem(tmp_path, mon
     monkeypatch.setattr(sup_mod, "read_plan", lambda *a, **k: ([], []))
     sup = Supervisor.__new__(Supervisor)
     sup.run_dir, sup.required_chips, sup.home = tmp_path, None, tmp_path
+    sup.paths = type("P", (), {"tt_model_root": tmp_path / "models", "operator_home": tmp_path / "op"})()
     spec = type("S", (), {"boards": 2, "budget_s": 60})()
     _, problems = sup._read_plan(spec, stage)
     assert len(problems) == 1 and "2-chip" in problems[0]
+
+
+# ---- the package or bundle itself must serve stage 0's nearest model (review of PR 70) ------------------------------------
+
+def write_installed(tmp_path, name, repo, container=True):
+    """An installed container package (installed.json plus its manifest) or a v6 bundle under a models root."""
+    home = tmp_path / "op"
+    if container:
+        mf = home / ".cache" / "tt-model" / "pulled" / name.replace("/", "__") / "tt_kernel_manifest.json"
+        mf.parent.mkdir(parents=True, exist_ok=True)
+        mf.write_text(json.dumps({"schema_version": "5.1", "device_count": 4, "weights": {"repo_id": repo}}))
+        inst = home / ".cache" / "tt-model" / "installed.json"
+        inst.write_text(json.dumps({name: {"container": True, "image": "x:y", "profile": "default", "manifest": str(mf)}}))
+        return home
+    root = tmp_path / "models"
+    b = root / name
+    b.mkdir(parents=True, exist_ok=True)
+    (b / "tt_kernel_manifest.json").write_text(json.dumps({"schema_version": "6", "device_count": 2, "weights": {"repo_id": repo}}))
+    return root
+
+
+def test_a_container_package_that_serves_another_repository_is_a_problem_even_with_the_right_label(tmp_path):
+    write_delta(tmp_path)
+    home = write_installed(tmp_path, "x/qwen38-p300x2", "Qwen/Qwen3.8-27B")
+    p = write_cfg(tmp_path / "stages" / "2" / "swap_config.json", "Qwen/Qwen3-Coder-30B-A3B-Instruct")
+    cfg = json.loads(p.read_text()); cfg["package"] = "x/qwen38-p300x2"; p.write_text(json.dumps(cfg))
+    msg = sd.nearest_problem(tmp_path, p, operator_home=home)
+    assert msg and "x/qwen38-p300x2" in msg and "Qwen/Qwen3.8-27B" in msg
+
+
+def test_a_container_package_that_serves_the_nearest_model_is_fine(tmp_path):
+    write_delta(tmp_path)
+    home = write_installed(tmp_path, "x/coder-p300x2", "Qwen/Qwen3-Coder-30B-A3B-Instruct")
+    p = write_cfg(tmp_path / "stages" / "2" / "swap_config.json", "Qwen/Qwen3-Coder-30B-A3B-Instruct")
+    cfg = json.loads(p.read_text()); cfg["package"] = "x/coder-p300x2"; p.write_text(json.dumps(cfg))
+    assert sd.nearest_problem(tmp_path, p, operator_home=home) is None
+
+
+def test_a_bundle_directory_that_serves_another_repository_is_a_problem(tmp_path):
+    write_delta(tmp_path)
+    root = write_installed(tmp_path, "org/q38", "Qwen/Qwen3.8-27B", container=False)
+    p = write_cfg(tmp_path / "stages" / "2" / "swap_config.json", "Qwen/Qwen3-Coder-30B-A3B-Instruct")
+    cfg = json.loads(p.read_text()); cfg["bundle_dir"] = str(root / "org" / "q38"); p.write_text(json.dumps(cfg))
+    msg = sd.nearest_problem(tmp_path, p, tt_model_root=root)
+    assert msg and "Qwen/Qwen3.8-27B" in msg and "org/q38" in msg
+
+
+def test_a_package_the_check_cannot_find_is_left_to_the_template(tmp_path):
+    write_delta(tmp_path)
+    p = write_cfg(tmp_path / "stages" / "2" / "swap_config.json", "Qwen/Qwen3-Coder-30B-A3B-Instruct")
+    cfg = json.loads(p.read_text()); cfg["package"] = "nobody/none"; p.write_text(json.dumps(cfg))
+    assert sd.nearest_problem(tmp_path, p, operator_home=tmp_path / "empty") is None
+
+
+def test_the_supervisor_passes_its_roots_to_the_check(tmp_path):
+    write_delta(tmp_path)
+    home = write_installed(tmp_path, "x/qwen38-p300x2", "Qwen/Qwen3.8-27B")
+    stage = tmp_path / "stages" / "2"
+    p = write_cfg(stage / "swap_config.json", "Qwen/Qwen3-Coder-30B-A3B-Instruct")
+    cfg = json.loads(p.read_text()); cfg["package"] = "x/qwen38-p300x2"; p.write_text(json.dumps(cfg))
+    (stage / "hw_test.json").write_text(json.dumps({"command": "true", "deadline_s": 60}))
+    from orchard.supervisor import NOTE_KEYS
+    (stage / "handoff.json").write_text(json.dumps({k: "x" for k in NOTE_KEYS}))
+    sup = Supervisor.__new__(Supervisor)
+    sup.run_dir = tmp_path
+    sup.paths = type("P", (), {"tt_model_root": tmp_path / "models", "operator_home": home})()
+    _, problems = sup._read_test(stage)
+    assert any("x/qwen38-p300x2" in m for m in problems), problems
+
+
+def test_the_named_package_is_the_one_checked_when_several_are_installed(tmp_path):
+    write_delta(tmp_path)
+    home = write_installed(tmp_path, "x/coder-p300x2", "Qwen/Qwen3-Coder-30B-A3B-Instruct")
+    inst = home / ".cache" / "tt-model" / "installed.json"
+    data = json.loads(inst.read_text())
+    mf2 = home / ".cache" / "tt-model" / "pulled" / "y__qwen38" / "tt_kernel_manifest.json"
+    mf2.parent.mkdir(parents=True)
+    mf2.write_text(json.dumps({"schema_version": "5.1", "device_count": 4, "weights": {"repo_id": "Qwen/Qwen3.8-27B"}}))
+    data["y/qwen38"] = {"container": True, "image": "x:y", "profile": "default", "manifest": str(mf2)}
+    inst.write_text(json.dumps(data))
+    p = write_cfg(tmp_path / "stages" / "2" / "swap_config.json", "Qwen/Qwen3-Coder-30B-A3B-Instruct")
+    cfg = json.loads(p.read_text()); cfg["package"] = "y/qwen38"; p.write_text(json.dumps(cfg))
+    assert sd.nearest_problem(tmp_path, p, operator_home=home)               # the second package serves the wrong model
+    cfg["package"] = "x/coder-p300x2"; p.write_text(json.dumps(cfg))
+    assert sd.nearest_problem(tmp_path, p, operator_home=home) is None

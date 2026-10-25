@@ -32,7 +32,7 @@ def _repo(model_id: str) -> str:
     return str(model_id).split("@", 1)[0]
 
 
-def nearest_problem(run_dir, config_path) -> str | None:
+def nearest_problem(run_dir, config_path, *, tt_model_root=None, operator_home=None) -> str | None:
     """Why an agent-written swap config does not serve stage 0's nearest model, or None. The weights are swapped into a bundle or package of
     the nearest model; a config that names another model serves the wrong architecture (issue 67: a Qwen3.8-27B bundle for a Qwen3-Coder model).
     Repository ids are compared exactly, without any `@revision`. A missing config, a config with no nearest_model_id (prepare_swap.py refuses that itself) or a run with no stage 0 record is no problem here."""
@@ -50,14 +50,37 @@ def nearest_problem(run_dir, config_path) -> str | None:
     if _repo(named) != want:
         return (f"{Path(config_path).name} names {_repo(named)} as the nearest model, but stage 0's nearest model is {want}. "
                 f"Weights are swapped into an installed bundle or package of {want}; one for another model serves the wrong architecture")
+    # The label alone proves nothing: the package or bundle the config points at must itself serve the nearest model.
+    served, what = _served_repo(cfg, tt_model_root, operator_home)
+    if served is not None and _repo(served) != want:
+        return (f"{Path(config_path).name} uses {what}, which serves {_repo(served)}, but stage 0's nearest model is {want}. "
+                f"Weights are swapped into an installed bundle or package of {want}")
     return None
 
 
-def stage4_nearest_problems(run_dir, stage_dir) -> list[str]:
+def _served_repo(cfg: dict, tt_model_root, operator_home) -> tuple[str | None, str]:
+    """The weights repository the config's container package or v6 bundle serves, read from its manifest, and a name for the message. (None, "")
+    when the config names neither or the manifest cannot be found (the template refuses a missing package itself)."""
+    pkg = cfg.get("package")
+    if isinstance(pkg, str) and pkg and operator_home is not None:
+        for c in installed_containers(operator_home):
+            if c["name"] == pkg:
+                return c["repo"], f"the container package {pkg}"
+    bundle = cfg.get("bundle_dir")
+    if isinstance(bundle, str) and bundle:
+        try:
+            m = json.loads((Path(bundle) / "tt_kernel_manifest.json").read_text(encoding="utf-8"))
+            return str(m["weights"]["repo_id"]), f"the bundle {Path(bundle).parent.name}/{Path(bundle).name}"
+        except (OSError, ValueError, KeyError, TypeError):
+            return None, ""
+    return None, ""
+
+
+def stage4_nearest_problems(run_dir, stage_dir, *, tt_model_root=None, operator_home=None) -> list[str]:
     """nearest_problem for each configs/<N>/swap_config.json of stage 4, each message led by its chip count."""
     out = []
     for path in sorted(Path(stage_dir).glob("configs/*/swap_config.json")):
-        msg = nearest_problem(run_dir, path)
+        msg = nearest_problem(run_dir, path, tt_model_root=tt_model_root, operator_home=operator_home)
         if msg:
             out.append(f"the {path.parent.name}-chip configuration: {msg}")
     return out
@@ -224,6 +247,8 @@ def draft_stage4(*, run_dir, tt_model_root, cache_root, hf_home, operator_home, 
             if pick is None:
                 notes.append(f"four_chip_package {four_chip_package} is not an installed container package that "
                              f"serves {want} on 4 chips")
+                if not cfit and missing is not None:      # nothing at all serves 4 chips: the count is missing, whatever was named
+                    missing.append(n)
                 continue
         elif len(cfit) == 1:
             pick = cfit[0]

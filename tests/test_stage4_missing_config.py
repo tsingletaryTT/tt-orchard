@@ -47,7 +47,7 @@ def test_a_required_count_nothing_serves_blocks_before_any_agent_step(tmp_path):
         notes = blocked_notices(r)
         why = [b["reason"] for b in notes if "2-chip" in b["reason"]]
         assert why, notes
-        assert "--required-chips 4" in why[0] and "no installed bundle or container package" in why[0]
+        assert "required_chips to 4" in why[0] and "--change-required-chips" in why[0] and "no installed bundle or container package" in why[0]
         stage4 = [e for e in r.entries() if e["stage"] == 4]
         assert not [e for e in stage4 if e["data"].get("decision") == "agent step"], "no agent step ran"
         assert not (r.run_dir / "stages" / "4" / "configs").exists()
@@ -81,3 +81,20 @@ def test_when_no_required_count_can_be_served_the_block_says_so(tmp_path):
         assert why and "No required count can be served" in why[0] and "--required-chips" not in why[0]
     finally:
         r.close()
+
+
+def test_an_explicit_four_chip_package_with_nothing_for_four_chips_is_missing(run, tmp_path):
+    """Review of PR 70: naming four_chip_package skipped the missing-count report when no package serves 4 chips at all."""
+    home = containers(tmp_path / "op", {"a/two": (NEAREST, 2, "default")})
+    missing: list[int] = []
+    configs, tests, notes = sd.draft_stage4(**{k: v for k, v in run.items() if k != "chips"}, operator_home=home, counts=[4],
+                                           four_chip_package="a/two", missing=missing)
+    assert missing == [4] and not configs
+
+
+def test_an_explicit_package_that_is_not_among_several_is_not_reported_as_missing(run, tmp_path):
+    home = containers(tmp_path / "op", {"a/four": (NEAREST, 4, "default")})
+    missing: list[int] = []
+    sd.draft_stage4(**{k: v for k, v in run.items() if k != "chips"}, operator_home=home, counts=[4], four_chip_package="b/other",
+                    missing=missing)
+    assert missing == []                      # a package exists for 4 chips; the named one is a mistake for the operator to fix
