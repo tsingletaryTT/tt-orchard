@@ -43,3 +43,13 @@ def test_ansi_colour_is_removed():
 def test_the_run_directory_becomes_a_label():
     out = rows("10:00:00  orchardist   wrote /runs/x/stages/1/f", run="/runs/x")
     assert "<run>/stages/1/f" in out[0]["text"]
+
+
+def test_timestamps_keep_advancing_across_several_days():
+    lines = [f"{h:02d}:00:00  orchardist   e{i}" for i, h in enumerate([0, 12, 0, 12, 0, 12])]
+    assert [r["t"] for r in rows(*lines)] == [0, 43200, 86400, 129600, 172800, 216000]
+
+
+def test_a_first_line_that_is_not_at_midnight_starts_at_zero():
+    out = rows("23:00:00  orchardist   a", "01:00:00  orchardist   b")
+    assert [r["t"] for r in out] == [0, 7200]

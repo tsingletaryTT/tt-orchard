@@ -37,7 +37,7 @@ def scrub_text(text: str, run: Path) -> str:
 def assemble(raw_lines: list[str], run: Path) -> list[dict]:
     """Narration lines to rows: ANSI removed, wrapped continuation lines joined to their line, seconds since the first, and the whole message scrubbed."""
     rows: list[dict] = []
-    t0, last = None, 0
+    t0, prev, days = None, None, 0
     for raw in raw_lines:
         line = ANSI.sub("", raw)
         m = LINE.match(line)
@@ -48,12 +48,11 @@ def assemble(raw_lines: list[str], run: Path) -> list[dict]:
         h, mi, s, actor, text = int(m[1]), int(m[2]), int(m[3]), m[4], m[5]
         sec = h * 3600 + mi * 60 + s
         if t0 is None:
-            t0, last = sec, 0
-        elapsed = (sec - t0) % 86400
-        if elapsed < last:             # a day boundary
-            elapsed += 86400
-        last = elapsed
-        rows.append({"t": elapsed, "actor": actor, "text": text.strip()})
+            t0 = sec
+        elif sec < prev:               # the clock wrapped past midnight (consecutive lines are less than a day apart)
+            days += 1
+        prev = sec
+        rows.append({"t": days * 86400 + sec - t0, "actor": actor, "text": text.strip()})
     for r in rows:                      # scrub the assembled message: a wrapped line may carry a name that the first line does not
         r["text"] = scrub_text(r["text"], run)
     return rows
