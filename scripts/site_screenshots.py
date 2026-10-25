@@ -9,9 +9,14 @@
 Before each shot the home directory, the host name and the user name are replaced in the page text, and the script stops if one is still visible.
 A shot is a picture of one real run in one style; nothing is mocked.
 """
+import re
 import socket
 import sys
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+from orchard import scrub  # noqa: E402
 
 from playwright.sync_api import expect, sync_playwright
 
@@ -23,6 +28,17 @@ SHOTS = [  # file, run directory name (exact), style
     ("ui-finished-operator.png", "proprietarylegal--qwen3.8-27b-cjk-trim", "operator"),
     ("ui-blocked-operator.png", "perplexity-ai--pplx-decider-v1.2", "operator"),
 ]
+SECRET_SHAPES = (re.compile(r"(?i)\b(secret|password|passwd|api[_-]?key|authorization|bearer)\b"), re.compile(r"(?i)\btokens?\b[\"']?\s*[:=]"),
+                 re.compile(r"\bsk-[A-Za-z0-9_-]{16,}"), re.compile(r"\bAKIA[0-9A-Z]{16}\b"))
+
+
+def credential_hits(text: str) -> list[str]:
+    """What in the visible page text looks like a credential: the scrub module's token and key patterns, plus secret words and shapes. A hit stops the script."""
+    hits = [what for what, pattern in scrub.TOKEN_PATTERNS if pattern.search(text)]
+    hits += [p.pattern for p in SECRET_SHAPES if p.search(text)]
+    return hits
+
+
 REDACT = """([host, user]) => {
   const re = [[/\\/home\\/[^\\s·"']*/g, "~"], [new RegExp(host, "gi"), "this-box"], [new RegExp("\\\\b" + user + "\\\\b", "g"), "user"]];
   const w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT); let n;
@@ -52,10 +68,19 @@ def main(url: str, out: str) -> int:
             expect(page.locator("#run")).to_contain_text(fragment)
             page.wait_for_timeout(2500)
             page.evaluate(REDACT, [host, user])
-            text = page.inner_text("body")
-            assert "/home/" not in text, f"a home path is visible in {name}"
-            assert host.lower() not in text.lower() or host.lower() in ("this-box", ""), f"the host name is visible in {name}"
+
+            def check() -> None:
+                text = page.inner_text("body")
+                assert "/home/" not in text, f"a home path is visible in {name}"
+                assert host.lower() not in text.lower() or host.lower() in ("this-box", ""), f"the host name is visible in {name}"
+                assert not credential_hits(text), f"{name}: the page text looks like it holds a credential: {credential_hits(text)}"
+            check()
             page.screenshot(path=str(out_dir / name), full_page=False)
+            try:
+                check()                       # the live page may have changed while the picture was taken: if it now fails, the picture is not kept
+            except AssertionError:
+                (out_dir / name).unlink(missing_ok=True)
+                raise
             print("wrote", name, flush=True)
             ctx.close()
         browser.close()
