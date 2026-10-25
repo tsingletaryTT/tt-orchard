@@ -223,3 +223,37 @@ def test_a_bundle_config_is_not_held_to_an_operator_home(tmp_path):
     p = write_cfg(tmp_path / "stages" / "2" / "swap_config.json", "Qwen/Qwen3-Coder-30B-A3B-Instruct")
     cfg = json.loads(p.read_text()); cfg["bundle_dir"] = str(root / "org" / "q"); cfg["operator_home"] = "/anywhere"; p.write_text(json.dumps(cfg))
     assert sd.nearest_problem(tmp_path, p, tt_model_root=root, operator_home=tmp_path / "op") is None
+
+
+# ---- review of PR 70, third round ---------------------------------------------------------------------------------------
+
+def test_a_relative_bundle_dir_is_read_from_the_run_directory(tmp_path):
+    """The hardware command runs from the run directory, so a relative bundle_dir means a path under it."""
+    write_delta(tmp_path)
+    b = tmp_path / "bundles" / "q38"
+    b.mkdir(parents=True)
+    (b / "tt_kernel_manifest.json").write_text(json.dumps({"schema_version": "6", "weights": {"repo_id": "Qwen/Qwen3.8-27B"}}))
+    p = write_cfg(tmp_path / "stages" / "2" / "swap_config.json", "Qwen/Qwen3-Coder-30B-A3B-Instruct")
+    cfg = json.loads(p.read_text()); cfg["bundle_dir"] = "bundles/q38"; p.write_text(json.dumps(cfg))
+    msg = sd.nearest_problem(tmp_path, p)
+    assert msg and "Qwen/Qwen3.8-27B" in msg
+
+
+def test_a_resumed_stage_4_checks_its_saved_plan_before_any_hardware(tmp_path):
+    """_run_test_list loaded tests/plan.json on a resume and never read the configurations again."""
+    import orchard.supervisor as sup_mod
+    write_delta(tmp_path)
+    stage = tmp_path / "stages" / "4"
+    write_cfg(stage / "configs" / "4" / "swap_config.json", "Qwen/Qwen3.8-27B")
+    sup = Supervisor.__new__(Supervisor)
+    sup.run_dir = tmp_path
+    sup.paths = type("P", (), {"tt_model_root": tmp_path / "models", "operator_home": tmp_path / "op"})()
+    sup.lab = None
+    spec = type("S", (), {"number": 4})()
+    sup_mod.load_plan = lambda d: ["a plan"]               # a saved plan exists
+    try:
+        status, reasons, gate = sup._run_test_list(spec, stage, False, True)
+    finally:
+        import importlib
+        importlib.reload(sup_mod)
+    assert status == "fail" and any("4-chip" in r and "Qwen/Qwen3.8-27B" in r for r in reasons), (status, reasons)

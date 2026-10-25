@@ -1553,8 +1553,8 @@ class Supervisor:
             self._block(spec.number,
                         f"stage 4 requires {', '.join(f'{n}-chip' for n in short)} "
                         f"but no installed bundle or container package serves the nearest model on {'that count' if len(short) == 1 else 'those counts'}. "
-                        + (f"A run keeps the counts it started with, so move this run's directory aside and start a new run with required_chips = "
-                           f"{','.join(str(n) for n in rest)} in bringup.toml (stages 0 to 2 run again), "
+                        + (f"A run keeps the counts it started with, so move this run's directory aside and start a new run with "
+                           f"required_chips = \"{','.join(str(n) for n in rest)}\" in bringup.toml (stages 0 to 2 run again), "
                            if rest else "No required count can be served; ")
                         + "or install a package for the missing count",
                         required=sorted(self.required_chips), missing=short)
@@ -2079,6 +2079,9 @@ class Supervisor:
         finish step should run."""
         n = spec.number
         tests = load_plan(stage_dir) if resumed else None
+        if tests is not None and (wrong := swap_draft.stage4_nearest_problems(self.run_dir, stage_dir, tt_model_root=self.paths.tt_model_root,
+                                                                              operator_home=self.paths.operator_home)):
+            return "fail", wrong, None             # a plan saved before the check existed can still name the wrong model's package
         if tests is None:
             self._draft(spec, stage_dir)
             out, prep = self._step(spec, "prepare", stage_dir, escalated, resumed)

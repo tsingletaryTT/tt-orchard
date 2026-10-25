@@ -58,14 +58,14 @@ def nearest_problem(run_dir, config_path, *, tt_model_root=None, operator_home=N
         # the container template reads installed.json and runs tt-model under the config's operator_home, so the registry checked here has to be that one
         return (f"{Path(config_path).name} names operator_home {named_home}, but the run's is {operator_home}; the package registry the test "
                 f"reads has to be the one that was checked")
-    served, what = _served_repo(cfg, tt_model_root, operator_home)
+    served, what = _served_repo(cfg, run_dir, operator_home)
     if served is not None and _repo(served) != want:
         return (f"{Path(config_path).name} uses {what}, which serves {_repo(served)}, but stage 0's nearest model is {want}. "
                 f"Weights are swapped into an installed bundle or package of {want}")
     return None
 
 
-def _served_repo(cfg: dict, tt_model_root, operator_home) -> tuple[str | None, str]:
+def _served_repo(cfg: dict, run_dir, operator_home) -> tuple[str | None, str]:
     """The weights repository the config's container package or v6 bundle serves, read from its manifest, and a name for the message. (None, "")
     when the config names neither or the manifest cannot be found (the template refuses a missing package itself)."""
     pkg = cfg.get("package")
@@ -76,8 +76,9 @@ def _served_repo(cfg: dict, tt_model_root, operator_home) -> tuple[str | None, s
     bundle = cfg.get("bundle_dir")
     if isinstance(bundle, str) and bundle:
         try:
-            m = json.loads((Path(bundle) / "tt_kernel_manifest.json").read_text(encoding="utf-8"))
-            return str(m["weights"]["repo_id"]), f"the bundle {Path(bundle).parent.name}/{Path(bundle).name}"
+            path = Path(bundle) if Path(bundle).is_absolute() else Path(run_dir) / bundle       # the test runs from the run directory
+            m = json.loads((path / "tt_kernel_manifest.json").read_text(encoding="utf-8"))
+            return str(m["weights"]["repo_id"]), f"the bundle {path.parent.name}/{path.name}"
         except (OSError, ValueError, KeyError, TypeError):
             return None, ""
     return None, ""
