@@ -1,0 +1,480 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>tt-orchard: bring a new model up on Tenstorrent chips</title>
+  <meta name="description" content="Give it a Hugging Face model id. It works out how the model differs from one that already runs, brings it up on Blackhole chips, checks it against a CPU, and stops at a bundle for a person to review.">
+  <meta property="og:title" content="tt-orchard: bring a new model up on Tenstorrent chips">
+  <meta property="og:description" content="A real bring-up, replayed line by line: 47 minutes on one QuietBox 2, from a model id to a review bundle.">
+  <meta property="og:image" content="assets/ui-finished-playful.png">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='%230a1420' stroke='%234fd1c5' stroke-width='2'/%3E%3Ccircle cx='16' cy='13' r='6' fill='%234fd1c5'/%3E%3Crect x='15' y='18' width='2' height='8' fill='%234fd1c5'/%3E%3C/svg%3E">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg0: #070d14; --bg1: #0a1420; --bg2: #0d2035; --bg3: #1a2a3a;
+      --border: rgba(50,147,178,.18); --border-hi: rgba(50,147,178,.45);
+      --teal: #4fd1c5; --teal-dim: #2c9a92; --teal-glow: rgba(79,209,197,.16);
+      --pink: #ec96b8; --yellow: #f4c471; --green: #68d391; --red: #fc8181; --blue: #63b3ed; --orange: #f6ad55;
+      --text: #e8f0f2; --muted: #8aa1ad; --muted2: #5c7482;
+      --mono: 'JetBrains Mono','Fira Mono','Cascadia Code',ui-monospace,monospace;
+      --sans: -apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;
+    }
+    html { scroll-behavior: smooth; }
+    body { background: var(--bg0); color: var(--text); font: 16px/1.6 var(--sans); -webkit-font-smoothing: antialiased; }
+    a { color: var(--teal); text-decoration: none; } a:hover { text-decoration: underline; }
+    code { font-family: var(--mono); background: rgba(79,209,197,.08); border: 1px solid var(--border); padding: .1em .4em; border-radius: 4px; font-size: .88em; }
+    .edge { padding-left: clamp(1.1rem, 6vw, 7rem); padding-right: clamp(1.1rem, 6vw, 7rem); }
+    .section { padding-top: 4.5rem; padding-bottom: 4.5rem; border-bottom: 1px solid var(--border); }
+    .label { font: .72rem var(--mono); text-transform: uppercase; letter-spacing: .12em; color: var(--teal-dim); margin-bottom: .5rem; }
+    h2 { font-size: clamp(1.6rem, 3vw, 2.5rem); font-weight: 300; letter-spacing: -.02em; line-height: 1.2; margin-bottom: .8rem; }
+    .sub { color: var(--muted); max-width: 52rem; margin-bottom: 2rem; }
+    .skiplink { position: absolute; left: -999px; } .skiplink:focus { left: 1rem; top: 1rem; background: var(--bg2); padding: .5rem 1rem; z-index: 99; }
+
+    nav { position: sticky; top: 0; z-index: 20; display: flex; align-items: center; gap: 1.2rem; padding-top: .7rem; padding-bottom: .7rem;
+          background: rgba(7,13,20,.9); backdrop-filter: blur(8px); border-bottom: 1px solid var(--border); }
+    nav .brand { font: 600 1.05rem var(--mono); color: var(--teal); }
+    nav .links { display: flex; gap: 1.1rem; margin-left: auto; font-size: .88rem; flex-wrap: wrap; }
+    nav .links a { color: var(--muted); } nav .links a:hover { color: var(--text); text-decoration: none; }
+    nav .gh { border: 1px solid var(--border-hi); border-radius: 6px; padding: .25rem .7rem; color: var(--teal) !important; }
+
+    /* hero */
+    .hero { padding-top: 4rem; padding-bottom: 3.5rem; border-bottom: 1px solid var(--border);
+            background: radial-gradient(1100px 420px at 70% -10%, rgba(79,209,197,.10), transparent 60%); }
+    .hero h1 { font-size: clamp(2.1rem, 5vw, 3.8rem); font-weight: 300; letter-spacing: -.03em; line-height: 1.08; max-width: 18ch; }
+    .hero h1 b { color: var(--teal); font-weight: 400; }
+    .hero p.lead { color: var(--muted); max-width: 46rem; margin: 1.1rem 0 1.8rem; font-size: 1.08rem; }
+    .cmd { display: inline-flex; align-items: center; gap: .8rem; font: 1rem var(--mono); background: var(--bg1); border: 1px solid var(--border-hi);
+           border-radius: 8px; padding: .65rem 1rem; margin-bottom: 2rem; max-width: 100%; overflow-x: auto; }
+    .cmd .p { color: var(--teal-dim); } .cmd button { all: unset; cursor: pointer; color: var(--muted); font-size: .78rem; border: 1px solid var(--border); border-radius: 4px; padding: .1rem .5rem; }
+    .cmd button:hover, .cmd button:focus-visible { color: var(--text); border-color: var(--teal); }
+
+    .stage-run { display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(0, 1fr); gap: 1.2rem; align-items: start; }
+    @media (max-width: 960px) { .stage-run { grid-template-columns: 1fr; } }
+    .term { background: #050a10; border: 1px solid var(--border-hi); border-radius: 10px; overflow: hidden; box-shadow: 0 10px 40px rgba(0,0,0,.45); }
+    .term .bar { display: flex; align-items: center; gap: .5rem; padding: .5rem .8rem; background: var(--bg2); border-bottom: 1px solid var(--border); font: .76rem var(--mono); color: var(--muted); }
+    .term .bar i { width: .65rem; height: .65rem; border-radius: 50%; background: #2b3b4b; display: inline-block; }
+    .term .bar span { margin-left: auto; color: var(--teal); }
+    #log { height: 27rem; overflow-y: auto; padding: .8rem 1rem; font: .8rem/1.55 var(--mono); scroll-behavior: auto; }
+    #log .l { display: grid; grid-template-columns: 4.2rem 6.6rem 1fr; gap: .6rem; padding: .05rem 0; }
+    #log .t { color: var(--muted2); text-align: right; } #log .a { color: var(--teal); } #log .a.grafter { color: var(--blue); } #log .a.sheepdog { color: var(--yellow); }
+    #log .x { color: #c6d5da; word-break: break-word; }
+    #log .l.key .x { color: var(--text); font-weight: 600; } #log .l.warn .x { color: var(--yellow); } #log .l.pass .x::before { content: "✓ "; color: var(--green); }
+    #log .l.new { animation: pop .35s ease-out; } @keyframes pop { from { background: var(--teal-glow); } to { background: transparent; } }
+    .controls { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; padding: .6rem .8rem; border-top: 1px solid var(--border); background: var(--bg1); font: .78rem var(--mono); }
+    .controls button { all: unset; cursor: pointer; padding: .22rem .65rem; border: 1px solid var(--border-hi); border-radius: 5px; color: var(--text); }
+    .controls button:hover, .controls button:focus-visible { border-color: var(--teal); background: var(--teal-glow); }
+    .controls button[aria-pressed="true"] { background: var(--teal); color: #05222a; border-color: var(--teal); }
+    .controls input[type=range] { flex: 1 1 8rem; accent-color: var(--teal); min-width: 6rem; }
+    .clock { color: var(--teal); min-width: 9.5rem; text-align: right; }
+
+    .side { display: grid; gap: 1rem; }
+    .card { background: var(--bg1); border: 1px solid var(--border); border-radius: 10px; padding: 1rem 1.1rem; }
+    .card h3 { font: .72rem var(--mono); letter-spacing: .1em; text-transform: uppercase; color: var(--teal-dim); margin-bottom: .6rem; }
+    .strip { display: grid; gap: .35rem; }
+    .st { display: grid; grid-template-columns: 1.4rem 1fr auto; gap: .5rem; align-items: center; font-size: .82rem; padding: .3rem .5rem; border-radius: 6px; border: 1px solid transparent; color: var(--muted2); }
+    .st b { font: .72rem var(--mono); color: var(--muted2); }
+    .st .d { font: .72rem var(--mono); } .st.run { border-color: var(--teal); color: var(--text); background: var(--teal-glow); } .st.run b { color: var(--teal); }
+    .st.done { color: var(--text); } .st.done .d { color: var(--green); } .st.skip { opacity: .55; } .st.skip .d { color: var(--muted); }
+    .chips { display: grid; grid-template-columns: repeat(4, 1fr); gap: .45rem; }
+    .chip { border: 1px solid var(--border); border-radius: 7px; padding: .5rem .3rem; text-align: center; font: .72rem var(--mono); color: var(--muted2); transition: all .3s; }
+    .chip b { display: block; font-size: .95rem; color: var(--muted); }
+    .chip.coder { border-color: var(--blue); color: var(--blue); background: rgba(99,179,237,.1); } .chip.coder b { color: var(--blue); }
+    .chip.test { border-color: var(--teal); color: var(--teal); background: var(--teal-glow); } .chip.test b { color: var(--teal); }
+    .chip.reset { border-color: var(--yellow); color: var(--yellow); background: rgba(244,196,113,.1); }
+    .chipnote { margin-top: .6rem; font-size: .8rem; color: var(--muted); min-height: 2.4em; }
+    .note { margin-top: 1rem; font-size: .82rem; color: var(--muted2); }
+
+    /* catalog grid */
+    .legend { display: flex; flex-wrap: wrap; gap: .5rem; margin-bottom: 1.2rem; }
+    .legend button { all: unset; cursor: pointer; font: .78rem var(--mono); padding: .25rem .7rem; border-radius: 999px; border: 1px solid var(--border-hi); color: var(--text); }
+    .legend button[aria-pressed="true"] { background: var(--teal); color: #05222a; border-color: var(--teal); }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(11.5rem, 1fr)); gap: .6rem; }
+    .tile { all: unset; cursor: pointer; display: block; box-sizing: border-box; border: 1px solid var(--border); border-left-width: 4px; border-radius: 8px; padding: .55rem .7rem; background: var(--bg1); }
+    .tile:hover, .tile:focus-visible { background: var(--bg2); border-color: var(--teal); }
+    .tile .id { font: .78rem var(--mono); color: var(--text); word-break: break-all; } .tile .c { font: .7rem var(--mono); margin-top: .15rem; }
+    .tile.weights-only { border-left-color: var(--green); } .tile.weights-only .c { color: var(--green); }
+    .tile.full-port { border-left-color: var(--orange); } .tile.full-port .c { color: var(--orange); }
+    .tile.unknown { border-left-color: var(--pink); } .tile.unknown .c { color: var(--pink); }
+    .tile.dim { opacity: .18; }
+    #why { margin-top: 1rem; min-height: 3.2em; font: .85rem var(--mono); color: var(--muted); border: 1px dashed var(--border-hi); border-radius: 8px; padding: .7rem 1rem; }
+    #why b { color: var(--text); }
+
+    /* shots */
+    .tabs { display: flex; gap: .5rem; flex-wrap: wrap; margin-bottom: 1rem; }
+    .tabs button { all: unset; cursor: pointer; padding: .3rem .9rem; border: 1px solid var(--border-hi); border-radius: 6px; font-size: .88rem; }
+    .tabs button[aria-pressed="true"] { background: var(--teal); color: #05222a; border-color: var(--teal); }
+    .tabs .gap { width: 1.2rem; }
+    figure.shot { border: 1px solid var(--border-hi); border-radius: 10px; overflow: hidden; background: #000; }
+    figure.shot img { display: block; width: 100%; height: auto; }
+    figure.shot figcaption { padding: .7rem 1rem; font-size: .86rem; color: var(--muted); background: var(--bg1); border-top: 1px solid var(--border); }
+
+    /* bars */
+    .bars { display: grid; gap: 1.1rem; max-width: 52rem; }
+    .bar-row .nm { display: flex; justify-content: space-between; font: .8rem var(--mono); color: var(--muted); margin-bottom: .25rem; }
+    .track { position: relative; height: 1.25rem; background: var(--bg1); border: 1px solid var(--border); border-radius: 5px; margin-bottom: .25rem; }
+    .fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 4px; width: 0; transition: width 1s cubic-bezier(.2,.8,.2,1); }
+    .fill.pi { background: var(--teal); } .fill.base { background: #3a6a80; }
+    .track .v { position: absolute; right: .4rem; top: 50%; transform: translateY(-50%); font: .72rem var(--mono); color: var(--text); text-shadow: 0 0 3px #000; }
+    .legend-b { display: flex; gap: 1.2rem; font: .78rem var(--mono); color: var(--muted); margin-bottom: 1rem; } .legend-b i { display: inline-block; width: .8rem; height: .8rem; border-radius: 3px; margin-right: .4rem; vertical-align: -1px; }
+    .callout { margin-top: 1.5rem; max-width: 52rem; border-left: 3px solid var(--yellow); background: rgba(244,196,113,.07); padding: .8rem 1.1rem; border-radius: 0 8px 8px 0; font-size: .9rem; color: #d8cfae; }
+
+    /* time bars */
+    .timeline { display: flex; height: 3.2rem; border-radius: 8px; overflow: hidden; border: 1px solid var(--border-hi); max-width: 60rem; }
+    .seg { position: relative; display: flex; align-items: flex-end; padding: .25rem .4rem; font: .7rem var(--mono); color: #05222a; min-width: 2px; cursor: default; }
+    .seg:nth-child(odd) { background: var(--teal); } .seg:nth-child(even) { background: #3fb5aa; } .seg.skip { background: transparent; }
+    .tl-legend { display: grid; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); gap: .4rem 1.5rem; max-width: 60rem; margin-top: 1rem; font: .8rem var(--mono); color: var(--muted); }
+    .tl-legend b { color: var(--text); font-weight: 500; }
+
+    /* stops */
+    .stops { display: grid; grid-template-columns: repeat(auto-fit, minmax(19rem, 1fr)); gap: 1rem; }
+    .stop { background: var(--bg1); border: 1px solid var(--border); border-radius: 10px; padding: 1rem 1.1rem; }
+    .stop .code { font: .74rem var(--mono); color: var(--red); letter-spacing: .06em; text-transform: uppercase; }
+    .stop pre { font: .76rem/1.5 var(--mono); color: #c6d5da; white-space: pre-wrap; word-break: break-word; margin: .6rem 0; background: #050a10; border: 1px solid var(--border); border-radius: 6px; padding: .6rem .8rem; }
+    .stop p { font-size: .85rem; color: var(--muted); }
+
+    table { border-collapse: collapse; width: 100%; max-width: 62rem; font-size: .88rem; }
+    th, td { text-align: left; padding: .5rem .7rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+    th { font: .72rem var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--teal-dim); }
+    td .m { font-family: var(--mono); font-size: .82rem; }
+
+    .install { display: grid; gap: .8rem; max-width: 52rem; }
+    .install .cmd { margin-bottom: 0; display: flex; }
+    .install .cmd span.t { flex: 1; white-space: pre; overflow-x: auto; }
+    footer { padding: 2.5rem 0 3.5rem; color: var(--muted2); font-size: .85rem; }
+    footer a { color: var(--muted); }
+    .limits { max-width: 52rem; }
+    .limits li { margin-left: 1.1rem; margin-bottom: .35rem; color: var(--muted); }
+    @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } html { scroll-behavior: auto; } }
+  </style>
+</head>
+<body>
+<a class="skiplink" href="#main">Skip to the content</a>
+<nav class="edge" aria-label="Sections">
+  <span class="brand">tt-orchard</span>
+  <div class="links">
+    <a href="#watch">Watch a run</a><a href="#sorting">Sorting</a><a href="#screens">The page</a><a href="#time">Time</a>
+    <a href="#bench">Measured</a><a href="#stops">Stops</a><a href="#published">Published</a><a href="#install">Install</a>
+    <a class="gh" href="https://github.com/tsingletaryTT/tt-orchard">GitHub</a>
+  </div>
+</nav>
+
+<main id="main">
+<section class="hero edge" id="watch">
+  <div class="label">A Tenstorrent QuietBox 2, four Blackhole chips</div>
+  <h1>A model lands on Hugging Face. <b>Watch it come up.</b></h1>
+  <p class="lead">Give tt-orchard a model id. It works out how the model differs from one that already runs on Tenstorrent chips, brings it up on the board, checks the output against a CPU, and stops at a bundle for a person to review. Below is a real run, replayed from its ledger.</p>
+  <div class="cmd"><span class="p">$</span><span id="cmdtext">tt-orchard bringup ProprietaryLegal/Qwen3.8-27B-CJK-Trim</span><button type="button" data-copy="tt-orchard bringup ProprietaryLegal/Qwen3.8-27B-CJK-Trim">copy</button></div>
+
+  <div class="stage-run">
+    <div class="term" role="region" aria-label="Replay of a real bring-up">
+      <div class="bar"><i></i><i></i><i></i><span>tt-orchard watch · replay of a real run</span></div>
+      <div id="log" aria-live="off"></div>
+      <div class="controls">
+        <button id="play" type="button" aria-pressed="false">▶ Play</button>
+        <button id="restart" type="button">↺</button>
+        <span>speed</span>
+        <button type="button" data-speed="30" aria-pressed="false">30×</button>
+        <button type="button" data-speed="120" aria-pressed="true">120×</button>
+        <button type="button" data-speed="600" aria-pressed="false">600×</button>
+        <input id="scrub" type="range" min="0" max="1000" value="0" aria-label="Position in the run">
+        <span class="clock" id="clock">00:00 / 00:00</span>
+      </div>
+    </div>
+    <div class="side">
+      <div class="card"><h3>Stages</h3><div class="strip" id="strip"></div></div>
+      <div class="card"><h3>The four chips</h3>
+        <div class="chips" id="chips"></div><div class="chipnote" id="chipnote">The coder model (the agent that writes the tests) holds the first board.</div>
+      </div>
+    </div>
+  </div>
+  <p class="note">The run is <code>ProprietaryLegal/Qwen3.8-27B-CJK-Trim</code>, a Qwen3.8-27B with 66,533 vocabulary rows removed. The replay is its own ledger, 47 minutes of it, with host paths removed. Nothing here is mocked. The 4-chip test failed at startup and was retried after a reset: that is in the log too.</p>
+</section>
+
+<section class="section edge" id="sorting">
+  <div class="label">Stage 0 reads the model before it touches a chip</div>
+  <h2>Twenty-nine catalog models, sorted from their headers</h2>
+  <p class="sub">Stage 0 compares a model's config and weight headers with the nearest model that already runs. It downloads no weights. Here it is run on 29 models from the tt-model-manager catalog, against Qwen3.8-27B. Every one of these already runs on Tenstorrent chips as a hand-built package, so <code>full-port</code> here means only that the model differs from Qwen3.8-27B in more than its weights. Select a tile to see the first reason stage 0 gave.</p>
+  <div class="legend" id="legend" role="group" aria-label="Filter by class">
+    <button type="button" data-f="all" aria-pressed="true">all 29</button>
+    <button type="button" data-f="weights-only" aria-pressed="false">weights-only</button>
+    <button type="button" data-f="full-port" aria-pressed="false">full-port</button>
+    <button type="button" data-f="unknown" aria-pressed="false">unknown</button>
+  </div>
+  <div class="grid" id="grid"></div>
+  <div id="why" aria-live="polite">Select a model.</div>
+</section>
+
+<section class="section edge" id="screens">
+  <div class="label">The control page, as it is</div>
+  <h2>Pick a run. See what it is doing and what to do next.</h2>
+  <p class="sub"><code>tt-orchard ui</code> is a page on the machine itself. These are screenshots of the real page, taken against real runs: one running as this site was written, one finished, one blocked. Two styles: the farm view and the operator view.</p>
+  <div class="tabs" id="shotTabs" role="group" aria-label="Choose a screenshot">
+    <button type="button" data-k="running" aria-pressed="true">Running</button>
+    <button type="button" data-k="finished" aria-pressed="false">Finished</button>
+    <button type="button" data-k="blocked" aria-pressed="false">Blocked</button>
+    <span class="gap"></span>
+    <button type="button" data-m="operator" aria-pressed="true">Operator</button>
+    <button type="button" data-m="playful" aria-pressed="false">Playful</button>
+  </div>
+  <figure class="shot"><img id="shotImg" src="assets/ui-running-operator.png" alt="The tt-orchard page showing a run" width="1440" height="1000"><figcaption id="shotCap"></figcaption></figure>
+</section>
+
+<section class="section edge" id="time">
+  <div class="label">Where the time goes</div>
+  <h2>47 minutes, half of it in the chip tests</h2>
+  <p class="sub">The same run, by stage. About half of it is stage 4, the two-chip and four-chip serve-and-compare tests, which build a tensor cache on first boot. Stages that do not apply to a weights-only model are skipped, and the ledger says why.</p>
+  <div class="timeline" id="timeline" aria-label="Time per stage"></div>
+  <div class="tl-legend" id="tlLegend"></div>
+</section>
+
+<section class="section edge" id="bench">
+  <div class="label">Measured against its base, on the same chips</div>
+  <h2>A fine-tune and its base, six benchmarks</h2>
+  <p class="sub"><code>bytkim/Qwen3.8-27B-pi</code> against <code>Qwen/Qwen3.8-27B</code>: same bundle, same server, same prompts, 9.8 hours of chip time. Bars are the fraction of items passed.</p>
+  <div class="legend-b"><span><i style="background:var(--teal)"></i>fine-tune</span><span><i style="background:#3a6a80"></i>base</span></div>
+  <div class="bars" id="bars"></div>
+  <div class="callout"><b>Read the GSM8K bar with care.</b> The GSM8K lead is mostly a measuring artefact: the harness's stop string cuts thinking models off, and the base was cut off more often. On the answered items both models score about 0.97. The other five are within noise or a small lead. The log says this in full.</div>
+</section>
+
+<section class="section edge" id="stops">
+  <div class="label">When it cannot go on, it stops and says why</div>
+  <h2>Real stops from real runs</h2>
+  <p class="sub">An unattended run ends in <code>blocked</code>, releases the chips and writes what it tried. The text in each box is quoted from a real run on this machine.</p>
+  <div class="stops">
+    <div class="stop"><div class="code">disk-full</div><pre>hf_home: needs 202 GB, 116 GB free</pre><p>From a preflight, before anything downloaded. The block now also lists the largest models and caches on the short disk.</p></div>
+    <div class="stop"><div class="code">agent-stuck</div><pre>watchdog: 3 identical responses in a row (18830 input, 186 output tokens)</pre><p>The agent wrote the same file three times and the watchdog stopped it. The cause was a missing 2-chip package; stage 4 now reports that before any agent runs.</p></div>
+    <div class="stop"><div class="code">a reference that said pass</div><pre>The reference's own check failed, but reference.json says pass (evidence/summary.json says fail). 851 of 851 model keys were not found in the checkpoint.</pre><p>An agent wrote a passing reference over a failed check. The gate now compares the two files, and the page shows the mismatch first, in red.</p></div>
+    <div class="stop"><div class="code">needs-new-model-code</div><pre>Needs new model code: class unknown, path full-port. An unattended run stops here; a full port is a person's decision.</pre><p>When the harness meets an architecture it has not seen, it stops, releases the chips, and says what it found.</p></div>
+  </div>
+  </section>
+
+<section class="section edge" id="published">
+  <div class="label">What came out</div>
+  <h2>Packages made from runs, public on Hugging Face</h2>
+  <p class="sub">Each one was staged by the harness and booted on chips before upload. The package gate checks every card against the files the package ships. Four were also pulled from the Hub on a clean install and booted.</p>
+  <table>
+    <thead><tr><th>Package</th><th>Base</th><th>What was checked</th></tr></thead>
+    <tbody>
+      <tr><td><a href="https://huggingface.co/episod/clef-p300"><span class="m">episod/clef-p300</span></a></td><td>Qwen3.8-27B + task head</td><td>31 of 32 tokens equal to the CPU; head agrees on 15 of 16 questions</td></tr>
+      <tr><td><a href="https://huggingface.co/episod/rag-gate-27b-p300"><span class="m">episod/rag-gate-27b-p300</span></a></td><td>Qwen3.8-27B</td><td>Gate accuracy 0.930 on 200 items; pulled and booted from the Hub</td></tr>
+      <tr><td><a href="https://huggingface.co/episod/qwen3.8-27b-pi-p300"><span class="m">episod/qwen3.8-27b-pi-p300</span></a></td><td>Qwen3.8-27B</td><td>Full benchmark against its base (above)</td></tr>
+      <tr><td><a href="https://huggingface.co/episod/arex-2-p300"><span class="m">episod/arex-2-p300</span></a></td><td>Qwen3.8-27B, no drafter head</td><td>Pulled and booted from the Hub; a by-hand graft kept the drafter on</td></tr>
+      <tr><td><a href="https://huggingface.co/episod/hemmingway-1-p300"><span class="m">episod/hemmingway-1-p300</span></a></td><td>Qwen3.8-27B</td><td>Pulled and booted from the Hub; 2-chip and 1-chip</td></tr>
+      <tr><td><a href="https://huggingface.co/episod/openthai2.0-qwen3.8-27b-p300"><span class="m">episod/openthai2.0-qwen3.8-27b-p300</span></a></td><td>Qwen3.8-27B</td><td>Pulled and booted from the Hub; 2-chip and 1-chip</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section class="section edge" id="limits">
+  <div class="label">What has not been shown</div>
+  <h2>The limits, plainly</h2>
+  <ul class="limits">
+    <li>Every run was on one QuietBox 2. Nothing has run on another machine.</li>
+    <li>No model that needs new model code has been brought up. The full-port stages have never run on a real model.</li>
+    <li>A run has not yet gone from start to end with nobody touching the machine. Disk space and a restart needed a person.</li>
+    <li>The fidelity bars are choices. Most numbers are single runs.</li>
+  </ul>
+  <p class="sub" style="margin-top:1rem">Each claim, its evidence and what is not shown are in <a href="https://github.com/tsingletaryTT/tt-orchard/blob/main/docs/proofs.md">docs/proofs.md</a>.</p>
+</section>
+
+<section class="section edge" id="install">
+  <div class="label">Try it</div>
+  <h2>Install</h2>
+  <p class="sub">On a QuietBox 2 the setup script checks each prerequisite, installs <a href="https://github.com/tsingletaryTT/tt-gozer">tt-gozer</a> (the chip lease manager) when it is missing, and writes the machine config. It never resets a chip, takes a lease or publishes anything.</p>
+  <div class="install">
+    <div class="cmd"><span class="p">$</span><span class="t">git clone https://github.com/tsingletaryTT/tt-orchard.git &amp;&amp; cd tt-orchard</span><button type="button" data-copy="git clone https://github.com/tsingletaryTT/tt-orchard.git && cd tt-orchard">copy</button></div>
+    <div class="cmd"><span class="p">$</span><span class="t">scripts/setup.sh --check        # report only</span><button type="button" data-copy="scripts/setup.sh --check">copy</button></div>
+    <div class="cmd"><span class="p">$</span><span class="t">tt-orchard bringup &lt;org/model&gt; --dry-run   # the preflight, nothing started</span><button type="button" data-copy="tt-orchard bringup <org/model> --dry-run">copy</button></div>
+    <div class="cmd"><span class="p">$</span><span class="t">tt-orchard ui                  # the page above, on this machine</span><button type="button" data-copy="tt-orchard ui">copy</button></div>
+  </div>
+</section>
+</main>
+
+<footer class="edge">
+  <p>tt-orchard is Apache-2.0. The harness never publishes, pushes or uploads anything: a person does that. <a href="https://github.com/tsingletaryTT/tt-orchard">Source</a> · <a href="https://github.com/tsingletaryTT/tt-orchard/issues">Issues</a> · <a href="https://github.com/tsingletaryTT/tt-orchard/blob/main/README.md">README</a></p>
+</footer>
+
+<script>
+(() => {
+  const $ = (s, r = document) => r.querySelector(s);
+  const fmt = (s) => { s = Math.round(s); const m = Math.floor(s / 60); return String(m).padStart(2, "0") + ":" + String(s % 60).padStart(2, "0"); };
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  // copy buttons
+  document.querySelectorAll("[data-copy]").forEach((b) => b.addEventListener("click", async () => {
+    try { await navigator.clipboard.writeText(b.dataset.copy); const t = b.textContent; b.textContent = "copied"; setTimeout(() => (b.textContent = t), 1200); } catch (e) { /* no clipboard */ }
+  }));
+
+  const get = (f) => fetch("assets/data/" + f).then((r) => r.json());
+
+  // ---------- replay ----------
+  const STAGE_NAMES = ["intake and delta triage", "environment and CPU reference", "functional decoder on one chip", "full model", "multichip, then shrink to fewer chips",
+    "serving integration", "qualitative check and benchmark", "package and container build", "operator bundle"];
+  Promise.all([get("replay.json"), get("stages.json")]).then(([rp, st]) => {
+    const lines = rp.lines, total = lines[lines.length - 1].t || 1;
+    const strip = $("#strip"), log = $("#log"), chips = $("#chips");
+    const stageRows = STAGE_NAMES.map((n, i) => { const d = document.createElement("div"); d.className = "st"; d.innerHTML = `<b>${i}</b><span>${n}</span><span class="d"></span>`; strip.append(d); return d; });
+    const chipEls = [0, 1, 2, 3].map((i) => { const c = document.createElement("div"); c.className = "chip"; c.innerHTML = `<b>${i}</b>idle`; chips.append(c); return c; });
+    $("#clock").textContent = "00:00 / " + fmt(total);
+    let shown = 0, clock = 0, speed = 120, playing = false, last = 0;
+
+    // per-line state derived from the text: stage start/end, chip roles
+    const info = lines.map((l) => {
+      const t = l.text, o = {};
+      let m;
+      if ((m = t.match(/^stage (\d) \([^)]*\): starting/))) o.start = +m[1];
+      if ((m = t.match(/^stage (\d) \([^)]*\): (pass|skipped)$/))) o.end = [+m[1], m[2]];
+      if (/hardware test started on/.test(t)) o.test = (t.match(/000\d:0(\d):00\.0/g) || []).map((x) => +x.match(/:0(\d):/)[1] - 1);
+      if (/hardware test passed|test lease released/.test(t)) o.testEnd = true;
+      if (/park: stop_sent|park: stopped/.test(t)) o.park = true;
+      if (/park: reset|test chips reset|resetting the test chips/.test(t)) o.reset = true;
+      if (/the coder is ready/.test(t)) o.coderReady = true;
+      if (/hardware released/.test(t)) o.released = true;
+      if (/restor|coder (re)?started|relaunch/.test(t)) o.back = true;
+      return o;
+    });
+
+    function paint(upto) {
+      // stages
+      const state = STAGE_NAMES.map(() => "");
+      const dur = {};
+      st.forEach((s) => (dur[s.n] = s));
+      let coder = "start", testChips = [], reset = false, note = "The coder model (the agent that writes the tests) holds the first board.";
+      for (let i = 0; i < upto; i++) {
+        const o = info[i];
+        if (o.start !== undefined) state[o.start] = "run";
+        if (o.end) state[o.end[0]] = o.end[1] === "pass" ? "done" : "skip";
+        if (o.coderReady) { coder = "up"; }
+        if (o.test) { testChips = o.test; note = "A hardware test is running on the free board; the coder keeps serving."; }
+        if (o.testEnd) { testChips = []; }
+        if (o.reset) { reset = true; note = "The test chips are being reset before the test runs."; }
+        if (o.park) { coder = "parked"; note = "The 4-chip test needs the coder's board. The coder is parked, then restored."; }
+        if (o.released) { coder = "off"; testChips = []; note = "The run is over and every chip is released."; }
+        if (o.testEnd || o.start !== undefined) reset = false;
+      }
+      stageRows.forEach((el, i) => {
+        el.className = "st " + state[i];
+        const d = el.lastElementChild; const s = dur[i];
+        d.textContent = state[i] === "done" && s ? fmt(s.seconds) : state[i] === "skip" ? "skipped" : state[i] === "run" ? "running" : "";
+      });
+      chipEls.forEach((c, i) => {
+        c.className = "chip"; c.innerHTML = `<b>${i}</b>idle`;
+        if (i < 2 && (coder === "up" || coder === "start")) { c.classList.add("coder"); c.innerHTML = `<b>${i}</b>${coder === "start" ? "coder booting" : "coder"}`; }
+        if (i < 2 && coder === "parked") { c.classList.add("test"); c.innerHTML = `<b>${i}</b>parked`; }
+        if (testChips.includes(i)) { c.className = "chip test"; c.innerHTML = `<b>${i}</b>test`; }
+        if (reset && (testChips.includes(i) || i >= 2)) { c.classList.add("reset"); }
+      });
+      $("#chipnote").textContent = note;
+    }
+
+    function render(upto, animate) {
+      if (upto < shown) { log.innerHTML = ""; shown = 0; }
+      for (let i = shown; i < upto; i++) {
+        const l = lines[i], d = document.createElement("div");
+        const cls = ["l"];
+        if (/ pass$|hardware test passed|ready for operator review|the coder is ready/.test(" " + l.text)) cls.push("pass");
+        if (/^stage \d \(/.test(l.text) && /starting/.test(l.text)) cls.push("key");
+        if (/failed|nudged|repeating|resetting/.test(l.text)) cls.push("warn");
+        if (animate) cls.push("new");
+        d.className = cls.join(" ");
+        d.innerHTML = `<span class="t">${fmt(l.t)}</span><span class="a ${l.actor.split(" ")[0]}">${l.actor}</span><span class="x"></span>`;
+        d.lastElementChild.textContent = l.text;
+        log.append(d);
+      }
+      shown = upto; log.scrollTop = log.scrollHeight; paint(upto);
+    }
+    function seek(sec) {
+      clock = Math.max(0, Math.min(total, sec));
+      let n = 0; while (n < lines.length && lines[n].t <= clock) n++;
+      render(n, false);
+      $("#clock").textContent = fmt(clock) + " / " + fmt(total);
+      $("#scrub").value = Math.round((clock / total) * 1000);
+    }
+    function tick(ts) {
+      if (!playing) return;
+      if (!last) last = ts;
+      clock += ((ts - last) / 1000) * speed; last = ts;
+      if (clock >= total) { clock = total; seek(total); stop(); return; }
+      let n = shown; while (n < lines.length && lines[n].t <= clock) n++;
+      if (n !== shown) render(n, true);
+      $("#clock").textContent = fmt(clock) + " / " + fmt(total);
+      $("#scrub").value = Math.round((clock / total) * 1000);
+      requestAnimationFrame(tick);
+    }
+    function start() { if (clock >= total) { clock = 0; seek(0); } playing = true; last = 0; $("#play").textContent = "❚❚ Pause"; $("#play").setAttribute("aria-pressed", "true"); requestAnimationFrame(tick); }
+    function stop() { playing = false; $("#play").textContent = "▶ Play"; $("#play").setAttribute("aria-pressed", "false"); }
+    $("#play").addEventListener("click", () => (playing ? stop() : start()));
+    $("#restart").addEventListener("click", () => { stop(); seek(0); start(); });
+    $("#scrub").addEventListener("input", (e) => { seek((e.target.value / 1000) * total); });
+    document.querySelectorAll("[data-speed]").forEach((b) => b.addEventListener("click", () => {
+      speed = +b.dataset.speed; document.querySelectorAll("[data-speed]").forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
+    }));
+    // start: reduced motion shows the finished log; otherwise play when the hero is in view
+    if (reduce) { seek(total); } else { seek(0); if ("IntersectionObserver" in window) { new IntersectionObserver((es, ob) => { if (es[0].isIntersecting) { ob.disconnect(); start(); } }, { threshold: .35 }).observe($(".term")); } else start(); }
+
+    // ---------- time bars ----------
+    const tl = $("#timeline"), leg = $("#tlLegend");
+    const sum = st.reduce((a, s) => a + s.seconds, 0) || 1;
+    st.forEach((s) => {
+      if (s.seconds > 0) { const d = document.createElement("div"); d.className = "seg"; d.style.flex = String(s.seconds); d.title = `${s.name}: ${fmt(s.seconds)}`; d.textContent = s.n; tl.append(d); }
+      const p = document.createElement("div");
+      p.innerHTML = `<b>${s.n} ${s.name}</b><br>${s.result === "skipped" ? "skipped by design" : fmt(s.seconds) + " (" + Math.round((s.seconds / sum) * 100) + "%)"}`;
+      leg.append(p);
+    });
+  });
+
+  // ---------- catalog ----------
+  get("catalog.json").then((rows) => {
+    const grid = $("#grid"), why = $("#why");
+    rows.forEach((r) => {
+      const b = document.createElement("button"); b.type = "button"; b.className = "tile " + r.class; b.dataset.c = r.class;
+      b.innerHTML = `<div class="id"></div><div class="c">${r.class}</div>`; b.firstChild.textContent = r.id;
+      b.addEventListener("click", () => { why.innerHTML = ""; const s = document.createElement("span"); s.innerHTML = "<b></b> → "; s.firstChild.textContent = r.id; why.append(s, document.createTextNode(r.class + (r.why ? ": " + r.why : "") + ". " + "")); });
+      grid.append(b);
+    });
+    document.querySelectorAll("#legend button").forEach((btn) => btn.addEventListener("click", () => {
+      document.querySelectorAll("#legend button").forEach((x) => x.setAttribute("aria-pressed", String(x === btn)));
+      grid.querySelectorAll(".tile").forEach((t) => t.classList.toggle("dim", btn.dataset.f !== "all" && t.dataset.c !== btn.dataset.f));
+    }));
+    const n = (c) => rows.filter((r) => r.class === c).length;
+    $("#legend [data-f=weights-only]").textContent = `weights-only ${n("weights-only")}`;
+    $("#legend [data-f=full-port]").textContent = `full-port ${n("full-port")}`;
+    $("#legend [data-f=unknown]").textContent = `unknown ${n("unknown")}`;
+    $("#legend [data-f=all]").textContent = `all ${rows.length}`;
+  });
+
+  // ---------- screenshots ----------
+  const CAP = {
+    running: "A run in progress: the coder model is booting (about 6 to 10 minutes cold). The page says what is happening now and what, if anything, to do next.",
+    finished: "A finished run: each stage with its wall time. Stages 3, 5 and 6 are skipped by design on a weights-only model.",
+    blocked: "A blocked run: the reason, what was tried, and a verdict line that sets the numbers against what they should be. This one found a reference check that failed while the agent's file said it passed.",
+  };
+  const shot = { k: "running", m: "operator" };
+  function updShot() {
+    const mode = shot.k === "blocked" ? "operator" : shot.m;
+    $("#shotImg").src = `assets/ui-${shot.k}-${mode}.png`; $("#shotCap").textContent = CAP[shot.k] + (shot.k === "blocked" ? " (Operator style only.)" : "");
+    document.querySelectorAll("#shotTabs [data-k]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.k === shot.k)));
+    document.querySelectorAll("#shotTabs [data-m]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.m === mode)));
+  }
+  document.querySelectorAll("#shotTabs button").forEach((b) => b.addEventListener("click", () => { if (b.dataset.k) shot.k = b.dataset.k; if (b.dataset.m) shot.m = b.dataset.m; updShot(); }));
+  updShot();
+
+  // ---------- bench ----------
+  get("bench.json").then((d) => {
+    const root = $("#bars");
+    Object.values(d.tasks).forEach((t) => {
+      const row = document.createElement("div"); row.className = "bar-row";
+      const sig = t.p !== null && t.p !== undefined ? (t.p < 0.001 ? "paired p < 0.001" : "paired p " + t.p.toFixed(2)) : "";
+      row.innerHTML = `<div class="nm"><span>${t.label} · ${t.n} items</span><span>${sig}</span></div>
+        <div class="track"><div class="fill pi" data-w="${t.pi}"></div><span class="v">${t.pi.toFixed(3)}</span></div>
+        <div class="track"><div class="fill base" data-w="${t.base}"></div><span class="v">${t.base.toFixed(3)}</span></div>`;
+      root.append(row);
+    });
+    const grow = () => root.querySelectorAll(".fill").forEach((f) => (f.style.width = (+f.dataset.w * 100).toFixed(1) + "%"));
+    if (reduce || !("IntersectionObserver" in window)) grow(); else new IntersectionObserver((es, ob) => { if (es[0].isIntersecting) { ob.disconnect(); grow(); } }, { threshold: .2 }).observe(root);
+  });
+})();
+</script>
+</body>
+</html>
