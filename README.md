@@ -329,7 +329,9 @@ model and your hardware:
 
 A container (v5.1) package can also be the nearest model for stage 2. Most catalog container packages report 4 chips (2 boards, as
 their `p300x2` names say), and stage 2 then serves the new weights on 4 chips (the coder's board is parked for the test). The
-preflight says whether exactly one installed package serves the base on the stage's chip count. Stage 4 does not yet handle a package that has no
+preflight only warns that a container base is used when exactly one installed package serves the base on the stage's chip count and has a
+default profile; it does not check that. The check happens when stage 2 drafts its config, after the coder has started, so a base with no
+fitting package leaves the stage to the agent (see issue 67). Stage 4 does not yet handle a package that has no
 smaller configuration (issue 68). A v6 bundle that fits is always preferred.
 
 ```bash
