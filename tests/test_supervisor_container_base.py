@@ -10,7 +10,7 @@ import pytest
 
 from orchard.supervisor import EXIT_READY, parse
 from run_fakes import FakeContainers, argv
-from test_supervisor import Rig
+from test_supervisor import Rig, Stop
 
 pytestmark = pytest.mark.usefixtures("stub_tools")
 
@@ -123,3 +123,174 @@ def test_only_a_config_object_that_names_a_package_is_a_container_config(tmp_pat
 def test_a_stage_with_no_swap_config_is_not_a_container_config(tmp_path):
     from orchard.supervisor import Supervisor
     assert Supervisor._container_config(tmp_path) is False
+
+
+# ---- a container package that needs more chips than stage 2's board (issue 60 validation, 2026-10-25) -------------------
+
+def wide_rig(tmp_path, *, device_count=4, **kw):
+    r = container_rig(tmp_path, **kw)
+    mf = tmp_path / "op" / ".cache" / "tt-model" / "pulled" / "someone__qwen3.8-27b-p300" / "tt_kernel_manifest.json"
+    mf.write_text(json.dumps({"schema_version": "5.1", "device_count": device_count, "weights": {"repo_id": NEAREST}}))
+    return r
+
+
+def stage2_tests(r):
+    return [e["data"] for e in r.entries() if e["stage"] == 2 and e["event"] == "decision"
+            and e["data"].get("decision") == "hardware test started"]
+
+
+def test_a_four_chip_container_is_tested_on_four_chips_in_stage_2(tmp_path):
+    """Catalog container packages report 2 boards. The first real run of issue 60 drafted nothing, because stage 2 asked for a package
+    on its own 2 chips. The package is now drafted with its own count and the test holds all four chips (the coder's board parked)."""
+    r = wide_rig(tmp_path)
+    try:
+        assert r.run() == EXIT_READY
+        assert drafted(r)["data"]["package"] == "someone/qwen3.8-27b-p300"
+        cfg = json.loads((r.run_dir / "stages" / "2" / "swap_config.json").read_text())
+        assert cfg["chips"] == 4
+        started = stage2_tests(r)
+        assert len(started) == 1 and len(started[0]["chips"]) == 4, started
+        phase = [d for d in r.decisions() if d.get("decision") == "hardware phase" and d.get("action") == "park"]
+        assert phase, "the coder's board was parked for the 4-chip test"
+    finally:
+        r.close()
+
+
+def test_a_two_chip_container_is_still_tested_on_two_chips(tmp_path):
+    r = wide_rig(tmp_path, device_count=2)
+    try:
+        assert r.run() == EXIT_READY
+        started = stage2_tests(r)
+        assert len(started) == 1 and len(started[0]["chips"]) == 2, started
+    finally:
+        r.close()
+
+
+def test_the_further_board_goes_back_and_the_coder_is_restored_after_the_wide_test(tmp_path):
+    r = wide_rig(tmp_path)
+    try:
+        assert r.run() == EXIT_READY
+        ds = r.decisions()
+        taken = [d for d in ds if d.get("decision") == "test lease taken" and d.get("config") == 4]
+        assert taken, "the further board was leased for the 4-chip test"
+        released = {d["lease_id"] for d in ds if d.get("decision") == "test lease released"}
+        assert taken[0]["test_lease"]["lease_id"] in released
+        # given back as stage 2's test ends, not left to the run's wind-down
+        end2 = next(e["seq"] for e in r.entries() if e["event"] == "stage_end" and e["stage"] == 2)
+        back = next(e["seq"] for e in r.entries() if e["data"].get("decision") == "test lease released"
+                    and e["data"].get("lease_id") == taken[0]["test_lease"]["lease_id"])
+        assert back < end2
+    finally:
+        r.close()
+
+
+def test_a_package_that_needs_more_chips_than_the_box_has_blocks_with_the_numbers(tmp_path):
+    r = wide_rig(tmp_path, device_count=8)
+    def stop():
+        raise Stop()
+    r.on_sleep = stop                                  # the attended run pauses and would wait for the operator
+    try:
+        with pytest.raises(Stop):
+            r.run()
+        blocks = [e for e in r.entries() if e["event"] in ("block", "pause", "notice") and "8 chips" in json.dumps(e["data"])]
+        assert any("this box has 4" in json.dumps(e["data"]) for e in blocks), [e["data"] for e in r.entries()][-3:]
+    finally:
+        r.close()
+
+
+def test_a_four_chip_coder_hands_the_whole_lease_to_the_four_chip_test(tmp_path):
+    """Review of PR 66: with the coder on both boards, parking supplies all four chips and there is no extra lease; the test
+    was cut back to stage 2's two chips and the container rejected the device count."""
+    r = wide_rig(tmp_path, chips=4)
+    try:
+        assert r.run() == EXIT_READY
+        started = stage2_tests(r)
+        assert len(started) == 1 and len(started[0]["chips"]) == 4, started
+    finally:
+        r.close()
+
+
+def test_a_blocked_pre_test_reset_does_not_leave_the_further_board_claimed(tmp_path, monkeypatch):
+    """Review of PR 66: the further board's lease stayed in test_lease after the reset blocked, so an attended resume saw the board
+    claimed and waited for ever. The retained lease goes back before availability is read."""
+    from orchard.adapters import Refused
+    from orchard.supervisor import Blocked  # noqa: F401
+    from test_supervisor import MachineAdapter
+    r = wide_rig(tmp_path)
+    calls = {"n": 0}
+    real = MachineAdapter.reset
+
+    def reset_once_refused(self, lease):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise Refused("device still open")
+        return real(self, lease)
+
+    monkeypatch.setattr(MachineAdapter, "reset", reset_once_refused)
+    pauses = {"n": 0}
+
+    def on_sleep():
+        pauses["n"] += 1
+        if pauses["n"] > 400:
+            raise Stop()
+        if pauses["n"] == 1:
+            from orchard.supervisor import Control
+            Control(r.run_dir).write("resume")
+    r.on_sleep = on_sleep
+    try:
+        assert r.run() == EXIT_READY
+        started = stage2_tests(r)
+        assert len(started) == 1 and len(started[0]["chips"]) == 4
+    finally:
+        r.close()
+
+
+def test_aborting_after_a_blocked_pre_test_reset_gives_back_the_further_board(tmp_path, monkeypatch):
+    """Review of PR 66: `_abort` released only the coder's lease, so a further board that a blocked reset left claimed
+    stayed leased after the supervisor exited."""
+    from orchard.adapters import Refused
+    from orchard.supervisor import Control, EXIT_ABORTED
+    from test_supervisor import MachineAdapter
+    r = wide_rig(tmp_path)
+
+    def refuse(self, lease):
+        raise Refused("device still open")
+
+    monkeypatch.setattr(MachineAdapter, "reset", refuse)
+    ticks = {"n": 0}
+
+    def abort_at_the_block():
+        ticks["n"] += 1
+        if ticks["n"] == 2:                      # the run is paused on the refused reset
+            Control(r.run_dir).write("abort")
+        assert ticks["n"] < 200
+    r.on_sleep = abort_at_the_block
+    try:
+        assert r.run() == EXIT_ABORTED
+        assert r.m.leases == {}
+    finally:
+        r.close()
+
+
+def test_a_second_board_held_by_someone_else_is_waited_for_not_blocked(tmp_path, monkeypatch):
+    """Review of PR 66: with the second board busy, decide_park says wait and the stage blocked at once. Stage 4 queues for the
+    board while the coder keeps serving (reacquire waits for the lease); stage 2 does the same."""
+    import orchard.supervisor as sup
+    from orchard.handoff import ParkDecision
+    real = sup.decide_park
+    seen = []
+
+    def busy_board(server_boards, chips, boards_needed):
+        d = real(server_boards, chips, boards_needed)
+        seen.append(d.action)
+        return ParkDecision("wait", (), d.server_boards, boards_needed) if boards_needed == 2 else d
+
+    monkeypatch.setattr(sup, "decide_park", busy_board)
+    r = wide_rig(tmp_path)
+    try:
+        assert r.run() == EXIT_READY
+        blocked = [e["data"] for e in r.entries() if e["event"] == "notice" and e["data"].get("blocked")]
+        assert not [b for b in blocked if "cannot get its boards" in str(b.get("reason"))]
+        assert len(stage2_tests(r)[0]["chips"]) == 4
+    finally:
+        r.close()
