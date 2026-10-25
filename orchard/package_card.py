@@ -119,6 +119,11 @@ class CardFacts:
     stage_2_without_graft: bool = False   # stage 2 and 4 served without the graft (the drafter off, host sampling)
     graft_decision: str | None = None     # "graft" or "safe" when stage 2's graft trial ran and decided (orchard/graft_trial.py)
     use: UseFacts | None = None           # what the model is for and how to call it, read from its own files (orchard/card_use.py)
+    vocab: tuple[int, int] | None = None  # (this model's vocabulary size, the nearest model's) when the model is a vocabulary trim
+
+
+def _count(n: int) -> str:
+    return f"{n:,}"
 
 
 def _value(n: Number) -> str:
@@ -264,9 +269,16 @@ def render_card(f: CardFacts) -> str:
         lines.append("- Stage 2 tried the nearest model's mtp.* head grafted onto this model (its graft trial) and kept the safe "
                      "configuration. The rows marked graft trial in the table below show what the trial measured, and "
                      "`graft-decision.json` in the evidence gives the reason.")
-    if f.drafter_off:
+    if f.drafter_off and f.vocab:
+        lines.append(f"- Speculative decoding is off. The drafter of {f.nearest_model} works on the token ids of {f.nearest_model}, "
+                     f"and the vocabulary of {f.model_id} has {_count(f.vocab[0])} entries against {_count(f.vocab[1])}.")
+    elif f.drafter_off:
         lines.append(f"- Speculative decoding is off. The drafter of {f.nearest_model} needs the MTP "
                      f"tensors of the model, and {f.model_id} has none.")
+    if f.vocab:
+        lines.append(f"- The vocabulary is a trim of {f.nearest_model}'s: every row of its embedding and lm_head is a row of "
+                     f"{f.nearest_model}'s, and the token ids are renumbered. The launcher writes {_count(f.vocab[0])} as `vocab_size` "
+                     "in the served `config.json`.")
     if f.host_sampling:
         lines.append("- Sampling runs on the host, because on-device sampling is not used with the "
                      "drafter off on this mesh.")
@@ -311,6 +323,9 @@ def render_card(f: CardFacts) -> str:
                       "and the stage 7 rows were measured with it.")
     if f.drafter_off:
         limits.append("Speculative decoding is off, so decode speed is that of plain decoding.")
+    if f.vocab:
+        limits.append(f"Token ids differ from {f.nearest_model}'s: a client that sends or reads token ids, or uses a tokenizer other than "
+                      f"this model's, gets different ids. {_count(f.vocab[1] - f.vocab[0])} entries of {f.nearest_model}'s vocabulary are absent.")
     if f.host_sampling:
         limits.append("Sampling runs on the host.")
     if f.sampling_from_base:
@@ -535,8 +550,22 @@ def use_problems(card: str, use: UseFacts | None) -> list[str]:
 
 def card_problems(card: str, *, license_id: str, run_dir, sidecars=(), base_files=(), reported=(), reported_source="", model_id="",
                   nearest_model="", graft: bool = False, graft_decision: str | None = None, trial_rows=(),
-                  use: UseFacts | None = None) -> list[str]:
+                  use: UseFacts | None = None, vocab: tuple[int, int] | None = None) -> list[str]:
     problems = use_problems(card, use)
+    if vocab:
+        flat_vocab = " ".join(card.split())
+        for size in vocab:
+            if _count(size) not in flat_vocab:
+                problems.append(f"the model is a vocabulary trim, so the card must give the vocabulary sizes; {_count(size)} is missing")
+        if "token ids are renumbered" not in flat_vocab:
+            problems.append("the model is a vocabulary trim, so the card must say the token ids are renumbered")
+        if "needs the MTP tensors of the model" in flat_vocab:
+            problems.append(f"the card says the model has no mtp.* tensors; the drafter is off because the vocabulary differs "
+                            f"({_count(vocab[0])} entries against {_count(vocab[1])})")
+        limits = card.split("## Limitations", 1)[1].split("\n## ", 1)[0] if "## Limitations" in card else ""
+        if "Token ids differ" not in limits:
+            problems.append("the model is a vocabulary trim, so the card must say under Limitations that token ids differ from the "
+                            "nearest model's")
     if graft_decision in GRAFT_DECISION_MARKERS:
         if GRAFT_DECISION_MARKERS[graft_decision] not in " ".join(card.split()):
             problems.append(f"stage 2's graft trial decided {graft_decision!r}, so the card must say that stage 2 "

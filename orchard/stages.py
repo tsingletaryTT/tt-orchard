@@ -899,7 +899,7 @@ def gate_package(stage_dir, run_dir) -> GateResult:
     # Imported here: orchard.package imports this module.
     from orchard.package import (GRAFT_FILE, PUBLISH_FILE, PackageError, graft_evidence_problems, graft_problems,
                                  graft_trial_numbers, publish_problems, read_reported, serving_problems,
-                                 split_model_id, stage_2_serving, weights_wiring_problems)
+                                 split_model_id, stage_2_serving, stage_2_vocab, weights_wiring_problems)
     from orchard.card_use import read_use_facts
     from orchard.package_card import card_evidence_paths, card_problems, read_license
     from orchard.scrub import scrub_package
@@ -983,7 +983,7 @@ def gate_package(stage_dir, run_dir) -> GateResult:
                         card_problems(card, license_id=license_id, run_dir=run, sidecars=sidecars,
                                       base_files=_shipped_names(out / "base_config"), reported=reported, reported_source=reported_source,
                                       model_id=new_repo, nearest_model=nearest_repo, graft=has_graft,
-                                      graft_decision=trial_decision,
+                                      graft_decision=trial_decision, vocab=stage_2_vocab(run),
                                       trial_rows=trial_rows if p.get("required") else (),
                                       use=read_use_facts(swap.get("new_snapshot") or "/nonexistent", run_sh, run,
                                                            identity=(new_repo, new_rev), measured=bool(p.get("required"))))]

@@ -202,6 +202,21 @@ def stage_2_serving(run_dir) -> tuple[bool, bool]:
     return bool(drafter) and drafter[-1] == "", bool(cfg) and "sample_on_device_mode" not in cfg.group(1)
 
 
+def stage_2_vocab(run_dir) -> tuple[int, int] | None:
+    """(the model's vocabulary size, the nearest model's) when stage 2's swap recorded a vocabulary trim (model-dir-sources.json's
+    `vocab` record, written by prepare_swap.py; issue 56), else None. Anything that is not whole numbers with the model's smaller and
+    `trimmed` true is no record."""
+    try:
+        rec = json.loads((Path(run_dir) / "stages/2/model-dir-sources.json").read_text(encoding="utf-8"))
+        v = rec["vocab"]
+        m, b = v["model"], v["base"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if v.get("trimmed") is not True or any(isinstance(x, bool) or not isinstance(x, int) for x in (m, b)) or not 0 < m < b:
+        return None
+    return m, b
+
+
 def _stage_2_grafted(run: Path) -> bool:
     """Did stage 2's swap graft the nearest model's mtp.* tensors? (model-dir-sources.json's mtp_graft record)"""
     try:
@@ -700,6 +715,7 @@ class RunFacts:
     graft: dict | None = None        # the graft.json this package carries (mtp.* tensors added at each start)
     stage_2_grafted: bool = False    # stage 2's own swap grafted them too
     graft_decision: str | None = None   # "graft" or "safe" when stage 2's graft trial ran and decided (orchard/graft_trial.py)
+    vocab: tuple[int, int] | None = None   # (the model's vocabulary size, the nearest model's) for a vocabulary trim
 
 
 def read_run(run_dir, graft_mtp: bool = False, no_graft_mtp: bool = False) -> RunFacts:
@@ -767,7 +783,7 @@ def read_run(run_dir, graft_mtp: bool = False, no_graft_mtp: bool = False) -> Ru
     facts = RunFacts(run, model_id, revision, nearest_model, snap,
                      Path(cfg.get("hf_home") or ""), source, base, passing, license_id,
                      drafter_off, host_sampling, tuple(delta.get("sidecars") or ()), reported, reported_source,
-                     Path(cfg.get("base_snapshot") or ""), model_has_mtp, None, _stage_2_grafted(run))
+                     Path(cfg.get("base_snapshot") or ""), model_has_mtp, None, _stage_2_grafted(run), vocab=stage_2_vocab(run))
     decision = read_decision(run / "stages/2")
     decided = decision is not None and decision["choice"] == "graft"
     if no_graft_mtp and (decided or facts.stage_2_grafted):
@@ -1239,7 +1255,7 @@ def write_card(out: Path, facts: RunFacts, profile: dict, *, namespace: str,
         base_files=tuple(sorted(f.name for f in facts.base_config)),
         sampling_from_base=any(f.name == "generation_config.json" for f in facts.base_config),
         reported=facts.reported, reported_source=facts.reported_source,
-        graft=facts.graft, graft_decision=facts.graft_decision, use=use,
+        graft=facts.graft, graft_decision=facts.graft_decision, use=use, vocab=facts.vocab,
         stage_2_without_graft=(facts.graft is not None and not facts.stage_2_grafted and facts.graft_decision != "graft"))
     (out / "README.md").write_text(render_card(facts_card), encoding="utf-8")
 
