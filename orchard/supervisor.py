@@ -661,10 +661,18 @@ class Supervisor:
             return True
         if self.surviving_containers:
             # A container the sweep could not remove still has the chips open. Releasing the lease would reset them under it and
-            # let another agent in, so the lease stays and the ledger says why; the next start sweeps again before it gives it back.
-            self.ledger.append("notice", None, what="the test lease was kept: a test container is still running",
-                               lease_id=lease.lease_id, containers=list(self.surviving_containers))
-            return False
+            # let another agent in, so the lease stays and the ledger says why. An operator may have cleaned up since (an attended
+            # run resumes after a pause), so docker is asked again, and the remembered state is cleared only when it answers with
+            # an empty list; an answer that cannot be had keeps the lease.
+            now = self.containers.list(self.run_label)
+            if now:
+                self.surviving_containers = list(now)
+            if now is None or now:
+                self.ledger.append("notice", None, what="the test lease was kept: a test container is still running"
+                                   if now else "the test lease was kept: docker could not be asked about the test containers",
+                                   lease_id=lease.lease_id, containers=list(self.surviving_containers))
+                return False
+            self.surviving_containers = []
         try:
             self.test_adapter.release(lease)
         except AdapterError as exc:
@@ -1628,7 +1636,7 @@ class Supervisor:
         trial uses it to stop the servers its helpers started, which a kill of the test's own session does not reach."""
         n = spec.number
         if self.lab is not None:
-            return self._lab_hardware_phase(spec, stage_dir, test)
+            return self._lab_hardware_phase(spec, stage_dir, test, after_test=after_test)
         chips = self.adapter.status()
         d = decide_park(self.coder_lease.units, chips, spec.boards)
         self.ledger.append("decision", n, decision="hardware phase", action=d.action,
@@ -1762,7 +1770,7 @@ class Supervisor:
         self.ledger.append("decision", 2, decision="graft decision", choice=decision["choice"], reason=decision["reason"],
                            numbers=decision["numbers"], decision_file=evidence_record(self.run_dir, path))
 
-    def _lab_hardware_phase(self, spec, stage_dir: Path, test: dict) -> None:
+    def _lab_hardware_phase(self, spec, stage_dir: Path, test: dict, after_test=None) -> None:
         """The hardware phase with a lab box: lease the chips there, run the test there, give the
         chips back. The coder on this box keeps serving the agents throughout."""
         n = spec.number
@@ -1774,7 +1782,11 @@ class Supervisor:
         self.test_lease = lease
         self.ledger.append("decision", n, decision="test lease taken", test_lease=lease.record(),
                            where=self._where())
-        self._run_test(spec, stage_dir, test, lease)
+        try:
+            self._run_test(spec, stage_dir, test, lease)
+        finally:
+            if after_test is not None:
+                after_test()           # before the lab lease goes back, as on this box (the sweep looks at this box's docker)
         self._audit_lab_caches(n, stage_dir, self._swap_cache(stage_dir))
         try:
             self.test_adapter.release(lease)
@@ -1801,9 +1813,10 @@ class Supervisor:
                     taken[rec["lease_id"]] = rec
             elif d.get("decision") == "test lease released":
                 released.add(d.get("lease_id"))
-        if self.lab is None and any(i not in released for i in taken):
-            # A container test the earlier supervisor started can still be running (its client died, the container did not). Stop it
-            # first, and block here when one survives: the lease is not given back, and the coder is not started over it.
+        if self.lab is None:
+            # A container test the earlier supervisor started can still be running (its client died, the container did not). That
+            # includes a test run under the coder's own lease after a park, which records no test lease. Stop it first, and block
+            # here when one survives: no lease is given back, and the coder is not recovered or started over it.
             self._sweep(None)
         for lease_id, rec in taken.items():
             if lease_id in released:
