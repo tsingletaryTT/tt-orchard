@@ -731,16 +731,20 @@ class Supervisor:
             # so every later resume is held to the same values.
             self.ledger.append("decision", None, decision=PATHS_RECORDED, paths=self.paths.record(),
                                note="the run_start entry predates the paths record")
-        if p.started:
+        while p.started:
             try:
                 self._recover_test_leases()
+                break
             except Blocked as exc:
-                # A container the earlier supervisor left is still running (_sweep wrote the notice). The run pauses before it starts the
-                # coder; an unattended run ends blocked, and running the command again sweeps once more.
+                # A container the earlier supervisor left is still running (_sweep wrote the notice). Nothing starts over it. An
+                # unattended run ends blocked (running the command again sweeps once more); an attended run waits for the operator
+                # and, on `resume`, goes through the recovery again, because a resume that went straight to the stages would skip
+                # the second sweep and the lease the first attempt never gave back.
                 self.ledger.append("decision", None, decision="pause", reason=f"blocked: {exc.reason}")
                 if self.unattended:
-                    # Not left for the retry below: running the command again is what sweeps once more, after the block is written.
                     return self._end_blocked(block_code(last_pause(self.ledger.read())) or "blocked", str(exc.reason))
+                if self._wait_for_operator() == "abort":
+                    return self._abort()
         if self.package_added and package_options(self.ledger.read()) != self.package:
             # Options given on a resume of a run that started without them (build checked that
             # stage 7 has not started). Recorded once; a later resume reads them from here.
@@ -2148,6 +2152,12 @@ class Supervisor:
         for cid in found:
             self.containers.remove(cid)
         left = self.containers.list(self.run_label)
+        if left is None:
+            # Docker found containers and then could not say whether they are gone. Nothing confirms the chips are free, so the
+            # originals stay remembered (_release_test_lease keeps the lease) and the run blocks.
+            self.surviving_containers = list(found)
+            self._block(n, "docker could not confirm that the test containers stopped after docker stop and rm; no test "
+                           "lease was released and the coder was not restored", containers=list(found))
         if left:
             self.surviving_containers = list(left)      # _release_test_lease keeps the lease they run under
             self._block(n, "test containers are still running after docker stop and rm; no test "

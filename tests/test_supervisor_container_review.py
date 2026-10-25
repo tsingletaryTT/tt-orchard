@@ -235,3 +235,81 @@ def test_the_kept_lease_notice_names_the_containers_docker_lists_now(tmp_path):
             assert kept and kept[-1]["data"]["containers"] == ["c2", "c3"]
     finally:
         r.close()
+
+
+# ---- the third look: an unconfirmed cleanup and an attended start ----------------------------------------------------------------------
+
+def bare_supervisor(r, led):
+    return supervisor.build(r.args, led, adapter=r.adapter_cls(r.m, owner_pid=100), coder=r.coder_cls(r.m),
+                            versions={"tt_model": "test"}, clock=r.clock, sleep=r.sleep, disk_usage=lambda p: r.usage(p),
+                            home=r.home, containers=r.containers)
+
+
+@pytest.mark.parametrize("after", [None, ["c1"]])
+def test_a_cleanup_docker_cannot_confirm_is_a_survivor_and_keeps_the_lease(tmp_path, after):
+    """Copilot (PR 64, third look): the first listing found c1, the re-listing returned None, and the sweep returned as if clean."""
+    r = container_rig(tmp_path, listings=[["c1"], after])
+    try:
+        with Ledger((r.run_dir.mkdir(parents=True, exist_ok=True) or r.run_dir) / "ledger.jsonl") as led:
+            sup = bare_supervisor(r, led)
+            sup.test_lease = sup.test_adapter.acquire(2, "orchard:supervisor", "stage 2 test")
+            with pytest.raises(supervisor.Blocked) as e:
+                sup._sweep(2)
+            assert sup.surviving_containers == ["c1"]
+            assert ("could not" in str(e.value) or "still running" in str(e.value))
+            if after is None:
+                assert "confirm" in str(e.value)
+            assert sup._release_test_lease() is False and sup.test_lease is not None
+    finally:
+        r.close()
+
+
+def test_a_sweep_that_finds_nothing_and_one_that_cleans_up_are_still_fine(tmp_path):
+    for i, listings in enumerate(([[]], [["c1"], []])):
+        d = tmp_path / str(i)
+        d.mkdir()
+        r = container_rig(d, listings=listings)
+        try:
+            with Ledger((r.run_dir.mkdir(parents=True, exist_ok=True) or r.run_dir) / "ledger.jsonl") as led:
+                sup = bare_supervisor(r, led)
+                sup._sweep(2)
+                assert sup.surviving_containers == []
+        finally:
+            r.close()
+
+
+def test_docker_that_cannot_list_at_all_keeps_the_old_notice_and_does_not_block(tmp_path):
+    r = container_rig(tmp_path, listings=[None])
+    try:
+        with Ledger((r.run_dir.mkdir(parents=True, exist_ok=True) or r.run_dir) / "ledger.jsonl") as led:
+            sup = bare_supervisor(r, led)
+            sup._sweep(2)
+            assert [e for e in led.read() if e["data"].get("what") == "docker could not be asked for test containers"]
+    finally:
+        r.close()
+
+
+def test_an_attended_start_blocked_by_a_container_retries_the_recovery_after_the_operator_resumes(plain):
+    """Copilot (PR 64, third look): after a pause at start, `resume` went into the stage loop without sweeping again or giving the old lease back."""
+    from orchard.supervisor import Control
+    plain.args.unattended = False
+    plain.containers = FakeContainers([["c1"], ["c1"], []])       # the sweep finds c1, cannot remove it; after the operator's cleanup it is gone
+    stale = seed_stale_lease(plain)
+    plain.on_sleep = lambda: Control(plain.run_dir).write("resume")
+    assert plain.run() == supervisor.EXIT_READY
+    es = plain.entries()
+    gave = [e for e in es if e["data"].get("decision") == "test lease released" and e["data"].get("lease_id") == stale.lease_id]
+    assert gave, "the lease the earlier supervisor left was never given back"
+    first_stage = next(i for i, e in enumerate(es) if e["event"] == "stage_start")
+    assert es.index(gave[0]) < first_stage
+    assert stale.lease_id not in plain.m.leases
+
+
+def test_an_attended_start_blocked_by_a_container_ends_aborted_when_the_operator_aborts(plain):
+    from orchard.supervisor import Control
+    plain.args.unattended = False
+    plain.containers = FakeContainers([["c1"]])
+    stale = seed_stale_lease(plain)
+    plain.on_sleep = lambda: Control(plain.run_dir).write("abort")
+    assert plain.run() == supervisor.EXIT_ABORTED
+    assert not [e for e in plain.entries() if e["event"] == "stage_start"]
