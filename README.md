@@ -257,11 +257,12 @@ All numbers are for a Qwen3.8-27B-sized model.
 | Free space before stage 4 on the weights-only path | 110 GB (choice), plus 40 GB again before each configuration's test (choice) |
 | Free space before stage 7 (packaging) | 80 GB (choice): an installed copy of the package, its venv and a fresh tensor cache |
 
-The preflight adds these up (the model, the nearest model's snapshot when it must be fetched, and the stage 4 margin) and blocks as
-`disk-full` when the disk is short. For a 30B-class model whose base is also missing the sum was 202 GB. The block message lists the largest hub
-models and tensor caches on the short disk so you can see what to remove; the harness removes none of the hub models.
-`bringup --prune-caches` removes only the oldest tensor caches that no unfinished run uses, and only enough to fit (issue 27 tracks
-deleting a configuration's cache after its test passes).
+The preflight adds up the model, the nearest model's snapshot when it must be fetched, and a 40 GB margin for the hub disk and another for
+the tensor-cache disk (the two margins add when they share a disk). It blocks as `disk-full` when the disk is short; for a 30B-class model whose base
+was also missing, the sum was 202 GB. The preflight does not include stage 4's own requirement of 110 GB free at entry, so a run can pass it and
+still block at stage 4 (the container validation run did, with 23.7 GB free). The block message lists the largest hub models and tensor caches
+on the short disk so you can see what to remove; the harness removes none of the hub models. `bringup --prune-caches` removes only the oldest
+tensor caches that no unfinished run uses, and only enough to fit (issue 27 tracks deleting a configuration's cache after its test passes).
 
 Each chip configuration needs its own tensor cache. The supervisor checks free space only on the
 filesystem that holds the run directory. On the development machine the root disk was 99% full, so
