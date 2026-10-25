@@ -257,3 +257,27 @@ def test_a_resumed_stage_4_checks_its_saved_plan_before_any_hardware(tmp_path):
         import importlib
         importlib.reload(sup_mod)
     assert status == "fail" and any("4-chip" in r and "Qwen/Qwen3.8-27B" in r for r in reasons), (status, reasons)
+
+
+# ---- review of PR 70, fourth round --------------------------------------------------------------------------------------
+
+def test_a_config_naming_both_a_package_and_a_bundle_is_a_problem(tmp_path):
+    """prepare_swap.py prefers the bundle, so a matching package could hide another model's bundle."""
+    write_delta(tmp_path)
+    home = write_installed(tmp_path, "x/coder-p300x2", "Qwen/Qwen3-Coder-30B-A3B-Instruct")
+    p = write_cfg(tmp_path / "stages" / "2" / "swap_config.json", "Qwen/Qwen3-Coder-30B-A3B-Instruct")
+    cfg = json.loads(p.read_text()); cfg["package"] = "x/coder-p300x2"; cfg["bundle_dir"] = "/some/bundle"; p.write_text(json.dumps(cfg))
+    msg = sd.nearest_problem(tmp_path, p, operator_home=home)
+    assert msg and "package" in msg and "bundle_dir" in msg and "both" in msg
+
+
+def test_a_relative_operator_home_is_read_from_the_run_directory(tmp_path):
+    """The container test runs from the run directory, so a relative operator_home means a path under it."""
+    write_delta(tmp_path)
+    home = tmp_path / "homes" / "op"
+    write_installed(tmp_path / "homes", "x/coder-p300x2", "Qwen/Qwen3-Coder-30B-A3B-Instruct")        # creates homes/op
+    p = write_cfg(tmp_path / "stages" / "2" / "swap_config.json", "Qwen/Qwen3-Coder-30B-A3B-Instruct")
+    cfg = json.loads(p.read_text()); cfg["package"] = "x/coder-p300x2"; cfg["operator_home"] = "homes/op"; p.write_text(json.dumps(cfg))
+    assert sd.nearest_problem(tmp_path, p, operator_home=home) is None                            # the same place, spelled from the run directory
+    cfg["operator_home"] = "homes/elsewhere"; p.write_text(json.dumps(cfg))
+    assert sd.nearest_problem(tmp_path, p, operator_home=home)

@@ -52,7 +52,12 @@ def nearest_problem(run_dir, config_path, *, tt_model_root=None, operator_home=N
         return (f"{Path(config_path).name} names {_repo(named)} as the nearest model, but stage 0's nearest model is {want}. "
                 f"Weights are swapped into an installed bundle or package of {want}; one for another model serves the wrong architecture")
     # The label alone proves nothing: the package or bundle the config points at must itself serve the nearest model.
+    if cfg.get("package") and cfg.get("bundle_dir"):
+        return (f"{Path(config_path).name} names both a package and a bundle_dir; prepare_swap.py builds from the bundle, so the package could hide "
+                f"another model's bundle. Name one")
     named_home = cfg.get("operator_home")
+    if named_home and not Path(str(named_home)).is_absolute():
+        named_home = str(Path(run_dir) / str(named_home))            # the container test runs from the run directory
     if (cfg.get("package") and operator_home is not None and named_home
             and os.path.realpath(str(named_home)) != os.path.realpath(str(operator_home))):
         # the container template reads installed.json and runs tt-model under the config's operator_home, so the registry checked here has to be that one
