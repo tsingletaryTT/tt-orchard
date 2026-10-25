@@ -112,8 +112,50 @@ def check_hub(hub: HubInfo | None, error: str | None, local: bool) -> Check:
     return Check("hub", OK, detail, data=hub)
 
 
+HINT_COUNT, HINT_MIN_GB = 6, 1.0
+
+
+def _dir_gb(d: Path) -> float:
+    total = 0
+    for top, _, files in os.walk(d):
+        for f in files:
+            try:
+                total += os.lstat(os.path.join(top, f)).st_size       # lstat: a snapshot's links are not counted twice
+            except OSError:
+                continue
+    return total / 1e9
+
+
+def disk_hints(hf_home, cache_root, exclude) -> list[tuple[str, float]]:
+    """The largest Hugging Face hub models and tensor caches, biggest first: (name, GB). Read only.
+    `exclude` holds the model ids this run needs (the model and its base), which are not offered for removal."""
+    skip = {m.replace("/", "--") for m in exclude}
+    found: list[tuple[str, float]] = []
+    hub = Path(hf_home) / "hub"
+    if hub.is_dir():
+        for d in hub.glob("models--*"):
+            name = d.name[len("models--"):]
+            if name in skip:
+                continue
+            found.append((name.replace("--", "/", 1), _dir_gb(d / "blobs") if (d / "blobs").is_dir() else _dir_gb(d)))
+    from orchard.caches import KERNEL_MODEL, local_caches
+    for c in local_caches(cache_root):
+        if c.model != KERNEL_MODEL:
+            found.append((f"tensor cache {c.model}", c.gb))
+    found = [(n, round(g, 1)) for n, g in found if g >= HINT_MIN_GB]
+    return sorted(found, key=lambda t: -t[1])[:HINT_COUNT]
+
+
+def safe_disk_hints(hf_home, cache_root, exclude) -> list[tuple[str, float]]:
+    """disk_hints for the preflight: a hint is a convenience, so a failure gives none and never blocks the check."""
+    try:
+        return disk_hints(hf_home, cache_root, [m for m in exclude if m])
+    except Exception:
+        return []
+
+
 def check_disk(*, free_gb: dict[str, float], model_gb: float, local: bool, min_free_gb: float,
-               same_device: bool) -> Check:
+               same_device: bool, hints: list[tuple[str, float]] | None = None) -> Check:
     """`free_gb` has the keys `hf_home` and `cache_root`. The download needs room on the hf_home disk
     unless the snapshot is already local; each cache disk needs the margin. Paths on one disk share it."""
     need = {"hf_home": (0.0 if local else model_gb) + min_free_gb, "cache_root": min_free_gb}
@@ -125,7 +167,11 @@ def check_disk(*, free_gb: dict[str, float], model_gb: float, local: bool, min_f
         # How far short each disk is, so `--prune-caches` knows how much to free and whether it can.
         data = {"short_gb": {label: round(need[label] - free_gb[label], 3) for label in need
                              if free_gb[label] < need[label]}, "same_device": same_device}
-        return Check("disk", BLOCK, "; ".join(short), "disk-full", data)
+        detail = "; ".join(short)
+        if hints:
+            detail += (". Largest on these disks: " + ", ".join(f"{n} {g:.0f} GB" for n, g in hints)
+                       + ". The harness removes none of the hub models; --prune-caches removes only tensor caches no unfinished run uses")
+        return Check("disk", BLOCK, detail, "disk-full", data)
     return Check("disk", OK, ", ".join(f"{label} {free_gb[label]:.0f} GB free (needs {need[label]:.0f})"
                                        for label in need))
 
@@ -551,7 +597,8 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
         return check_disk(free_gb={k: s.free_gb(p) for k, p in paths.items()},
                           model_gb=(hub.total_bytes / 1e9 if hub else 0.0) + base_gb, local=local,
                           min_free_gb=cfg.min_free_gb or TEST_DISK_GB,
-                          same_device=bool(s.same_device(paths["hf_home"], paths["cache_root"])))
+                          same_device=bool(s.same_device(paths["hf_home"], paths["cache_root"])),
+                          hints=safe_disk_hints(paths["hf_home"], paths["cache_root"], [model_id, (base_check.data or {}).get("base")]))
 
     guarded("disk", "disk-full", disk)
     guarded("credentials", "credentials-needed",
