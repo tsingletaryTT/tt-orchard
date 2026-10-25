@@ -286,6 +286,19 @@ def edit_docker_argv(argv: list[str], *, image: str, nearest: str, model_dir, tt
     ports = [server[j + 1] for j, a in enumerate(server[:-1]) if a == "--port"]
     if ports != [str(port)]:
         raise EditError(f"the server's --port is {ports}; the config's port is {port}")
+    if drafter_off:
+        # Plain decoding refuses on-device sampling on a 1x2 mesh (it is certified on 1x1, 1x4 and 1x8 only), as prepare_swap.py
+        # found for the bundle's run.sh, so the key goes with the drafter. Left in place it ends the server's start (issue 56).
+        for j, a in enumerate(server[:-1]):
+            if a == "--additional-config":
+                try:
+                    cfg = json.loads(server[j + 1])
+                    tt = cfg.get("tt") if isinstance(cfg, dict) else None
+                except ValueError as exc:
+                    raise EditError(f"the server's --additional-config is not JSON, so on-device sampling cannot be removed: {exc}") from exc
+                if isinstance(tt, dict) and "sample_on_device_mode" in tt:
+                    del tt["sample_on_device_mode"]
+                    server[j + 1] = json.dumps(cfg)
     return out + server
 
 

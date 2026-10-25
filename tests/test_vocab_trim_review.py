@@ -229,3 +229,59 @@ def test_the_same_package_without_a_trim_record_is_left_with_no_drafter_option(c
     assert r.returncode == 0, r.stdout + r.stderr
     assert run_env_values(crig, "QWEN36_DRAFTER") == []
     assert _swap_check(crig)["serving"]["drafter"] == "not set by the package"
+
+
+# ---- the container leaves on-device sampling on when the drafter goes off (Copilot, PR 57, second look) -------------------------------
+
+def additional(argv):
+    return json.loads(pairs(argv, "--additional-config")[0])
+
+
+def with_sampling(paths, drafter=True):
+    return printed(paths, on_device_sampling=True, **({} if drafter else {"drafter": False}))
+
+
+def test_the_container_drops_on_device_sampling_when_it_switches_the_drafter_off(paths):
+    """Plain decoding on a 1x2 mesh refuses sample_on_device_mode, and a 2-chip container can be chosen (Copilot, PR 57)."""
+    argv = edit(paths, printed=with_sampling(paths), drafter_off=True)
+    assert additional(argv) == {"tt": {"fabric_config": "FABRIC_1D", "trace_region_size": 1073741824}}
+    from test_container_template import sac
+    assert sac.serving_from_argv(argv)["sampling"] == "host"
+
+
+def test_the_container_keeps_on_device_sampling_while_the_drafter_stays_on(paths):
+    argv = edit(paths, printed=with_sampling(paths))
+    assert additional(argv)["tt"]["sample_on_device_mode"] == "decode_only"
+
+
+def test_dropping_the_sampling_key_changes_nothing_else_in_the_command(paths):
+    on, off = edit(paths, printed=with_sampling(paths), drafter_off=True), edit(paths, printed=printed(paths), drafter_off=True)
+    assert on == off
+
+
+def test_a_command_with_no_additional_config_is_unchanged_by_the_drafter_going_off(paths):
+    argv = without_drafter(paths)                           # no drafter option either, so only the sampling key is in question
+    k = argv.index("--additional-config")
+    bare = argv[:k] + argv[k + 2:]
+    assert edit(paths, printed=bare, drafter_off=True) == edit(paths, printed=bare)
+
+
+def test_an_additional_config_that_cannot_be_read_stops_the_edit_when_the_drafter_goes_off(paths):
+    argv = printed(paths)
+    k = argv.index("--additional-config")
+    broken = argv[:k + 1] + ["{not json"] + argv[k + 2:]
+    from test_container_template import sac
+    with pytest.raises(sac.EditError) as e:
+        edit(paths, printed=broken, drafter_off=True)
+    assert "additional-config" in str(e.value)
+    assert edit(paths, printed=broken)                      # left alone while the drafter stays
+
+
+def test_the_container_run_for_a_trim_carries_no_on_device_sampling(crig):
+    from test_container_template import docker_runs, set_vocab_record
+    set_vocab_record(crig, {"model": 181760, "base": 248320, "trimmed": True})
+    r = crig["start"](printed={"on_device_sampling": True})
+    assert r.returncode == 0, r.stdout + r.stderr
+    argv = docker_runs(crig)[0]
+    assert "sample_on_device_mode" not in pairs(argv, "--additional-config")[0]
+    assert _swap_check(crig)["serving"]["sampling"] == "host"
