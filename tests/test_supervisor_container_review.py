@@ -396,3 +396,87 @@ def test_a_failed_cleanup_does_not_replace_an_interrupt_when_the_coder_was_parke
         assert 2 in parked, "the test must have parked the coder"
     finally:
         r.close()
+
+
+# ---- the fifth look: the coder on the other board, and an aborted run's retained lease -------------------------------------------------
+
+def test_a_signal_with_a_surviving_container_still_stops_the_coder_on_the_other_board(tmp_path, monkeypatch):
+    """Copilot (PR 64): `release_test_lease() and release_all()` skipped the coder's release when the test lease had to stay held, so the supervisor
+    exited with the coder serving under its lease."""
+    from orchard.supervisor import Interrupted, Supervisor
+    r = container_rig(tmp_path, listings=[["c1"]])
+    try:
+        monkeypatch.setattr(Supervisor, "_run_test", lambda self, spec, stage_dir, test, lease, **kw: (_ for _ in ()).throw(Interrupted("SIGTERM")))
+        assert r.run() == supervisor.EXIT_ABORTED
+        assert r.m.coder_running is False, "the coder is on its own board and must be stopped"
+        held = r.m.leases
+        assert len(held) == 1, "only the test lease, which a live container still uses, stays held"
+        released = [e for e in r.entries() if e["data"].get("decision") == "test lease released"]
+        assert released == []
+    finally:
+        r.close()
+
+
+def test_an_error_with_a_surviving_container_also_stops_the_coder(tmp_path, monkeypatch):
+    from orchard.supervisor import Supervisor
+    r = container_rig(tmp_path, listings=[["c1"]])
+    try:
+        def boom(self, spec, stage_dir, test, lease, **kw):
+            raise RuntimeError("the test crashed")
+        monkeypatch.setattr(Supervisor, "_run_test", boom)
+        with pytest.raises(RuntimeError):
+            r.run()
+        assert r.m.coder_running is False
+        assert len(r.m.leases) == 1
+    finally:
+        r.close()
+
+
+def test_a_normal_signal_with_no_survivor_releases_both_leases(tmp_path, monkeypatch):
+    from orchard.supervisor import Interrupted, Supervisor
+    r = container_rig(tmp_path, listings=[[]])
+    try:
+        monkeypatch.setattr(Supervisor, "_run_test", lambda self, spec, stage_dir, test, lease, **kw: (_ for _ in ()).throw(Interrupted("SIGTERM")))
+        assert r.run() == supervisor.EXIT_ABORTED
+        assert r.m.coder_running is False and r.m.leases == {}
+    finally:
+        r.close()
+
+
+def seed_aborted_run(rig):
+    stale = seed_stale_lease(rig)
+    with Ledger(rig.run_dir / "ledger.jsonl") as led:
+        led.append("decision", None, decision="abort", by="signal SIGTERM")
+    return stale
+
+
+def test_an_aborted_run_started_again_gives_back_the_lease_a_container_kept_once_docker_is_clean(plain):
+    plain.containers = FakeContainers([[]])
+    stale = seed_aborted_run(plain)
+    plain.on_sleep = None
+    assert plain.run() == supervisor.EXIT_ABORTED
+    es = plain.entries()
+    assert [e for e in es if e["data"].get("decision") == "test lease released" and e["data"].get("lease_id") == stale.lease_id]
+    assert not [e for e in es if e["event"] == "stage_start"]
+    assert stale.lease_id not in plain.m.leases
+
+
+def test_an_aborted_run_with_a_container_still_there_keeps_the_lease_and_stays_aborted(plain):
+    plain.containers = FakeContainers([["c1"]])
+    stale = seed_aborted_run(plain)
+    assert plain.run() == supervisor.EXIT_ABORTED
+    es = plain.entries()
+    assert not [e for e in es if e["data"].get("decision") == "test lease released" and e["data"].get("lease_id") == stale.lease_id]
+    assert [e for e in es if e["event"] == "notice" and e["data"].get("blocked")]
+    assert not [e for e in es if e["event"] == "stage_start"]
+
+
+def test_a_finished_run_started_again_does_not_sweep(plain):
+    plain.containers = FakeContainers([["c1"]])
+    plain.run_dir.mkdir(parents=True, exist_ok=True)
+    with Ledger(plain.run_dir / "ledger.jsonl") as led:
+        led.append("run_start", None, model="Altworld/Hemmingway-1", versions={}, inputs={})
+        led.append("decision", None, decision="ready for operator review", bundle="stages/8/bundle")
+    plain.on_sleep = None
+    assert plain.run() == supervisor.EXIT_READY
+    assert plain.containers.calls == []

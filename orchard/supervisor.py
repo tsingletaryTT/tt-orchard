@@ -629,7 +629,7 @@ class Supervisor:
             # Recorded first, as in _abort: a crash during the release still leaves an aborted
             # run, and the next start finishes the release and refuses to go on.
             self.ledger.append("decision", None, decision="abort", by=f"signal {name}")
-            ok = self._release_test_lease() and self._release_all()
+            ok = self._release_everything()
         except Exception:
             ok = self._release_from_memory()
         self.stop_message = f"Aborted by {name}. " + self._release_summary(ok)
@@ -640,11 +640,19 @@ class Supervisor:
         try:
             self.ledger.append("notice", None, what="the supervisor stopped on an error",
                                error=f"{type(exc).__name__}: {exc}"[:500])
-            ok = self._release_test_lease() and self._release_all()
+            ok = self._release_everything()
         except Exception:
             ok = self._release_from_memory()
         self.stop_message = self._release_summary(ok) + (
             " Fix the cause, then run the same command again to resume." if ok else "")
+
+    def _release_everything(self) -> bool:
+        """Release the test lease and then the coder's, and report whether both went back. Both are tried whatever the first returns: a
+        test lease kept under a surviving container (_release_test_lease) must not leave the coder, which has a board of its own,
+        serving under the exiting supervisor's lease."""
+        test_lease_back = self._release_test_lease()
+        coder_back = self._release_all()
+        return test_lease_back and coder_back
 
     @staticmethod
     def _release_summary(ok: bool) -> str:
@@ -715,6 +723,13 @@ class Supervisor:
             self.actuator.clear()
             p = run_progress(self.ledger.read())
         if p.aborted or p.finished:
+            if p.aborted and p.started:
+                # The abort may have kept a test lease under a container that was still running. Sweep and give that lease back now if
+                # the container is gone; the run stays aborted and no stage starts, whatever the sweep finds.
+                try:
+                    self._recover_test_leases()
+                except Blocked:
+                    pass                  # the notice is in the ledger; the lease stays held
             self._release_all()           # finishes a release a crash interrupted; else does nothing
             return EXIT_ABORTED if p.aborted else EXIT_READY
         if not p.started:
