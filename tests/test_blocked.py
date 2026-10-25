@@ -28,6 +28,9 @@ def pause(reason, **extra):
     (pause("blocked: only 12 GB free on the run disk, the stage needs 40"), "disk-full"),
     (pause("blocked: the lease could not be released: chip hung"), "hardware-unhealthy"),
     (pause("blocked: gozer reset failed on board 0"), "hardware-unhealthy"),
+    (pause("blocked: stage 4 requires 2-chip but no installed bundle or container package serves the nearest model on that count. A run keeps "
+           "the counts it started with, so move this run's directory aside and start a new run with required_chips = \"4\" in bringup.toml"),
+     "package-missing"),
     (pause("blocked: the coder canary failed"), "coder-unusable"),
     (pause("blocked: server did not become healthy"), "coder-unusable"),
     (pause("blocked: something nobody wrote a rule for"), "blocked"),
@@ -43,7 +46,7 @@ def test_an_operator_pause_is_never_a_block():
 
 def test_every_code_is_in_the_documented_set():
     assert {"needs-new-model-code", "retry-budget-spent", "stage-failed", "agent-stuck", "disk-full",
-            "hardware-unhealthy", "coder-unusable", "blocked", "unclassified"} <= set(blocked.REASONS)
+            "hardware-unhealthy", "coder-unusable", "blocked", "unclassified", "package-missing"} <= set(blocked.REASONS)
 
 
 def entry(seq, event, stage, **data):
@@ -104,3 +107,9 @@ def test_a_pause_that_was_resumed_is_no_longer_the_last_pause():
     assert blocked.last_pause(resumed) is None
     again = resumed + [entry(11, "decision", 2, **pause("a later pause"))]
     assert blocked.last_pause(again) == pause("a later pause")
+
+
+def test_a_missing_package_is_never_retried_by_itself():
+    """Review of PR 70: the reason text said `chip`, so it was classed as hardware-unhealthy and retried twice, each retry booting the coder to
+    reach the same missing configuration."""
+    assert "package-missing" not in blocked.AUTO_RETRY

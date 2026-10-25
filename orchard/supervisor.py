@@ -1539,10 +1539,25 @@ class Supervisor:
             return
         cap = self._chip_cap(spec)
         counts = [n for n in (self.required_chips or (1, 2, 4)) if n <= cap]
+        missing: list[int] = []
         configs, tests, notes = swap_draft.draft_stage4(
             run_dir=self.run_dir, tt_model_root=self.paths.tt_model_root, cache_root=self.paths.cache_root,
             hf_home=self.paths.hf_home, operator_home=self.paths.operator_home, inputs=self.inputs,
-            counts=counts, four_chip_package=self.four_chip_package)
+            counts=counts, four_chip_package=self.four_chip_package, missing=missing)
+        # A required count that nothing serves cannot pass whatever an agent writes (issue 68: the agent wrote the same file three times
+        # and the run blocked 20 minutes of chip time later). Say so before any agent step.
+        short = list(missing) if self.required_chips else []        # counts holds only the required ones when they are set
+        if short:
+            rest = [n for n in self.required_chips if n not in short]
+            self.ledger.append("decision", spec.number, decision="stage 4 configs not drafted", counts=counts, problems=notes)
+            self._block(spec.number,
+                        f"stage 4 requires {', '.join(f'{n}-chip' for n in short)} "
+                        f"but no installed bundle or container package serves the nearest model on {'that count' if len(short) == 1 else 'those counts'}. "
+                        + (f"A run keeps the counts it started with, so move this run's directory aside and start a new run with "
+                           f"required_chips = \"{','.join(str(n) for n in rest)}\" in bringup.toml (stages 0 to 2 run again), "
+                           if rest else "No required count can be served; ")
+                        + "or install a package for the missing count",
+                        required=sorted(self.required_chips), missing=short)
         if not configs:
             self.ledger.append("decision", spec.number, decision="stage 4 configs not drafted", counts=counts,
                                problems=notes)
@@ -1617,8 +1632,10 @@ class Supervisor:
             path.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
 
     def _read_plan(self, spec, stage_dir: Path):
-        return read_plan(stage_dir, required=self.required_chips, max_chips=spec.boards * CHIPS_PER_BOARD,
-                         budget_s=spec.budget_s, home=self.home)
+        tests, problems = read_plan(stage_dir, required=self.required_chips, max_chips=spec.boards * CHIPS_PER_BOARD,
+                                    budget_s=spec.budget_s, home=self.home)
+        return tests, problems + swap_draft.stage4_nearest_problems(self.run_dir, stage_dir, tt_model_root=self.paths.tt_model_root,
+                                                                       operator_home=self.paths.operator_home, counts=[t.chips for t in tests])
 
     def _finished_check(self, spec, phase: str, stage_dir: Path):
         """What says a step's files are written and valid (AgentStep's `finished`): for one hardware
@@ -1644,6 +1661,9 @@ class Supervisor:
         d = test.get("deadline_s")
         if isinstance(d, bool) or not isinstance(d, (int, float)) or d <= 0:
             problems.append("hw_test.json needs a positive deadline_s")
+        if (wrong := swap_draft.nearest_problem(self.run_dir, stage_dir / "swap_config.json", tt_model_root=self.paths.tt_model_root,
+                                                operator_home=self.paths.operator_home)):
+            problems.append(wrong)
         if not isinstance(note, dict) or any(note.get(k) in (None, "") for k in NOTE_KEYS):
             problems.append(f"handoff.json needs {', '.join(NOTE_KEYS)}")
         try:
@@ -2059,6 +2079,10 @@ class Supervisor:
         finish step should run."""
         n = spec.number
         tests = load_plan(stage_dir) if resumed else None
+        if tests is not None and (wrong := swap_draft.stage4_nearest_problems(self.run_dir, stage_dir, tt_model_root=self.paths.tt_model_root,
+                                                                              operator_home=self.paths.operator_home,
+                                                                              counts=[t.chips for t in tests])):
+            return "fail", wrong, None             # a plan saved before the check existed can still name the wrong model's package
         if tests is None:
             self._draft(spec, stage_dir)
             out, prep = self._step(spec, "prepare", stage_dir, escalated, resumed)
@@ -2479,7 +2503,8 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
         recorded = tuple((progress.run_start or {}).get("required_chips") or ()) or None
         if required is not None and required != recorded:
             raise ValueError(f"this run started with required chips {recorded}; --required-chips "
-                             f"{required} differs. Leave the option out to resume with the recorded value")
+                             f"{required} differs. Leave the option out to resume with the recorded value, or move this run's directory "
+                             f"aside and start a new run with the counts you want")
         required = recorded
     graft_on = not getattr(args, "no_graft_trial", False)
     if progress.started and (progress.run_start or {}).get("graft_trial") is False:
