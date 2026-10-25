@@ -313,3 +313,86 @@ def test_an_attended_start_blocked_by_a_container_ends_aborted_when_the_operator
     plain.on_sleep = lambda: Control(plain.run_dir).write("abort")
     assert plain.run() == supervisor.EXIT_ABORTED
     assert not [e for e in plain.entries() if e["event"] == "stage_start"]
+
+
+# ---- the fourth look: a signal during a failed cleanup, and the graft trial on a container -------------------------------------------
+
+def test_a_failed_cleanup_does_not_replace_an_interrupt_that_is_already_in_flight(tmp_path, monkeypatch):
+    """Copilot (PR 64): the cleanup's Blocked, raised from a finally block, replaced Interrupted, so a SIGTERM during a container test
+    paused the run instead of aborting it."""
+    from orchard.supervisor import Interrupted, Supervisor
+    r = container_rig(tmp_path, listings=[["c1"]])
+    try:
+        def interrupted(self, spec, stage_dir, test, lease, **kw):
+            raise Interrupted("SIGTERM")
+        monkeypatch.setattr(Supervisor, "_run_test", interrupted)
+        code = r.run()
+        assert code == supervisor.EXIT_ABORTED
+        es = r.entries()
+        assert [e for e in es if e["data"].get("decision") == "abort" and "SIGTERM" in str(e["data"].get("by"))]
+        assert [e for e in es if e["event"] == "notice" and e["data"].get("blocked")], "the survivor must still be recorded"
+        assert not [e for e in es if e["data"].get("decision") == "test lease released"], "its lease must still be kept"
+    finally:
+        r.close()
+
+
+def test_a_failed_cleanup_after_a_normal_test_still_blocks(tmp_path):
+    r = container_rig(tmp_path, listings=[["c1"]])
+    r.args.unattended = True
+    try:
+        assert r.run() == supervisor.EXIT_BLOCKED
+    finally:
+        r.close()
+
+
+def graft_container_rig(tmp_path, *, bundle):
+    from test_supervisor_graft import GRAFT_DELTA
+    from run_fakes import bringup
+    r = container_rig(tmp_path, bundle=bundle)
+    r.script = lambda req: bringup(req, overrides=GRAFT_DELTA)
+    return r
+
+
+def test_a_container_only_stage_2_skips_the_graft_trial_and_records_the_safe_decision(tmp_path, monkeypatch):
+    """Copilot (PR 64): the trial's scripts need stage_dir/run.sh, which container staging never writes, so it would take the hardware, possibly park
+    the coder, and fail with no result."""
+    from test_supervisor_graft import DECISION_FILE, TrialSpy
+    r = graft_container_rig(tmp_path, bundle=False)
+    spy = TrialSpy(supervisor.spawn_checked)
+    monkeypatch.setattr(supervisor, "spawn_checked", spy)
+    try:
+        assert r.run() == supervisor.EXIT_READY
+        assert spy.trials == [], "the trial must not start"
+        d = json.loads((r.run_dir / "stages" / "2" / DECISION_FILE).read_text())
+        assert d["choice"] == "safe" and "container package" in d["reason"]
+        skipped = [e for e in r.entries() if e["data"].get("decision") == "graft trial skipped"]
+        assert skipped and "container package" in skipped[0]["data"]["reason"]
+    finally:
+        r.close()
+
+
+def test_a_bundle_stage_2_with_a_candidate_still_runs_the_trial(tmp_path, monkeypatch):
+    from test_supervisor_graft import TrialSpy
+    r = graft_container_rig(tmp_path, bundle=True)
+    spy = TrialSpy(supervisor.spawn_checked)
+    monkeypatch.setattr(supervisor, "spawn_checked", spy)
+    try:
+        assert r.run() == supervisor.EXIT_READY
+        assert len(spy.trials) == 1
+    finally:
+        r.close()
+
+
+def test_a_failed_cleanup_does_not_replace_an_interrupt_when_the_coder_was_parked_for_the_test(tmp_path, monkeypatch):
+    """The same finding on the park path: a 4-chip coder holds both boards, so stage 2's test parks it."""
+    from orchard.supervisor import Interrupted, Supervisor
+    r = container_rig(tmp_path, listings=[["c1"]], chips=4)
+    try:
+        monkeypatch.setattr(Supervisor, "_run_test", lambda self, spec, stage_dir, test, lease, **kw: (_ for _ in ()).throw(Interrupted("SIGTERM")))
+        parked = []
+        real = Supervisor._handoff
+        monkeypatch.setattr(Supervisor, "_handoff", lambda self, stage, lease: (parked.append(stage), real(self, stage, lease))[1])
+        assert r.run() == supervisor.EXIT_ABORTED
+        assert 2 in parked, "the test must have parked the coder"
+    finally:
+        r.close()

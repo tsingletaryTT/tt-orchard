@@ -1633,6 +1633,20 @@ class Supervisor:
             problems.append(f"the test command is refused: {exc}")
         return test, problems
 
+    @staticmethod
+    def _cleanup_after_test(after_test) -> None:
+        """Run the cleanup callback from a `finally`. When an exception is already on its way out (an Interrupted from SIGTERM, for
+        one) and the cleanup blocks, the original exception keeps going: the block is already in the ledger and the surviving container
+        keeps its lease (_sweep), and the run must still end the way the signal asked. With no exception in flight the block propagates."""
+        if after_test is None:
+            return
+        in_flight = sys.exc_info()[1]
+        try:
+            after_test()
+        except Blocked:
+            if in_flight is None:
+                raise
+
     def _hardware_phase(self, spec, stage_dir: Path, test: dict, *, after_test=None, **record) -> None:
         """Lease the chips (parking the coder when its board is needed), run `test`, give them back. `record` names where the run's record
         and output go (see _run_test); the graft trial uses it to leave stage 2's own test record alone. `after_test` runs when the test
@@ -1651,8 +1665,7 @@ class Supervisor:
             try:
                 self._run_test(spec, stage_dir, test, lease, **record)
             finally:
-                if after_test is not None:
-                    after_test()
+                self._cleanup_after_test(after_test)
             h.restore()
             self.coder_lease = h.lease
             return
@@ -1667,8 +1680,7 @@ class Supervisor:
         try:
             self._run_test(spec, stage_dir, test, lease, **record)
         finally:
-            if after_test is not None:
-                after_test()
+            self._cleanup_after_test(after_test)
         try:
             self.adapter.release(lease)        # the lease tool resets the board as it releases
         except AdapterError as exc:
@@ -1700,6 +1712,9 @@ class Supervisor:
             skip = "the graft trial was skipped: --no-graft-trial"
         elif self.lab is not None:
             skip = "the graft trial was skipped: it runs on this box's chips and this run's tests run on a lab"
+        elif self._container_config(stage_dir):
+            skip = ("the graft trial was skipped: stage 2 was served through a container package, and the trial's scripts "
+                    "build and run a bundle's run.sh, which a container package does not have")
         else:
             enough, free = check_disk(self.run_dir, GRAFT_TRIAL_DISK_GB, usage=self.disk_usage)
             if not enough:
@@ -1789,8 +1804,7 @@ class Supervisor:
         try:
             self._run_test(spec, stage_dir, test, lease)
         finally:
-            if after_test is not None:
-                after_test()           # before the lab lease goes back, as on this box (the sweep looks at this box's docker)
+            self._cleanup_after_test(after_test)           # before the lab lease goes back, as on this box (the sweep looks at this box's docker)
         self._audit_lab_caches(n, stage_dir, self._swap_cache(stage_dir))
         try:
             self.test_adapter.release(lease)

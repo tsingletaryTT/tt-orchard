@@ -17,10 +17,10 @@ pytestmark = pytest.mark.usefixtures("stub_tools")
 NEAREST = "Qwen/Qwen3.8-27B"
 
 
-def container_rig(tmp_path, *, bundle=False, listings=None):
-    r = Rig(tmp_path)
+def container_rig(tmp_path, *, bundle=False, listings=None, chips=2):
+    r = Rig(tmp_path, chips=chips)
     op, root = tmp_path / "op", tmp_path / "tt-models"
-    a = argv(tmp_path, r.tiers, r.chip_server.endpoint, chips=2)
+    a = argv(tmp_path, r.tiers, r.chip_server.endpoint, chips=chips)
     a[a.index("--input") + 1] = f"base={tmp_path}/hf/hub/models--Qwen--Qwen3.8-27B/snapshots/abc"
     a += ["--input", f"model={tmp_path}/hf/hub/models--Altworld--Hemmingway-1/snapshots/def", "--hf-home", f"{tmp_path}/hf",
           "--cache-root", f"{tmp_path}/cache", "--tt-model-root", str(root), "--operator-home", str(op)]
