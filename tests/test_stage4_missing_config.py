@@ -98,3 +98,18 @@ def test_an_explicit_package_that_is_not_among_several_is_not_reported_as_missin
     sd.draft_stage4(**{k: v for k, v in run.items() if k != "chips"}, operator_home=home, counts=[4], four_chip_package="b/other",
                     missing=missing)
     assert missing == []                      # a package exists for 4 chips; the named one is a mistake for the operator to fix
+
+
+def test_unattended_the_block_is_package_missing_and_is_not_retried(tmp_path):
+    """Review of PR 70: classed as hardware-unhealthy it was retried twice, each retry booting the coder for the same gap."""
+    from orchard import blocked
+    from orchard.supervisor import EXIT_BLOCKED
+    r = wide_rig(tmp_path)
+    r.args.required_chips = (2, 4)
+    r.args.unattended = True
+    try:
+        assert r.run() == EXIT_BLOCKED
+        codes = [d["code"] for d in r.decisions() if d.get("decision") == "blocked"]
+        assert codes and codes[-1] == "package-missing" and codes[-1] not in blocked.AUTO_RETRY
+    finally:
+        r.close()

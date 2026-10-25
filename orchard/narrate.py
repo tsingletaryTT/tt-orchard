@@ -628,6 +628,12 @@ UNBLOCK = {
         "abandoned attempts, then run `tt-orchard bringup <MODEL>` again.",
         "`tt-orchard bringup <MODEL> --prune-caches` removes the oldest tensor caches that no unfinished run uses, just "
         "enough to fit, when a full disk is the only block (`tt-orchard caches` lists what exists)."],
+    "package-missing": [
+        "A chip count that stage 4 requires has no installed bundle or container package for the nearest model. Repeating the command "
+        "does not change that, so `bringup` does not retry it.",
+        "Install a package for that count with `tt-model pull`, then run `tt-orchard bringup <MODEL>` again. Or, when the other counts are enough, "
+        "move this run's directory aside and start a new run with `required_chips = \"<the counts that have a package>\"` in bringup.toml: a "
+        "run keeps the counts it started with, so stages 0 to 2 run again."],
     "hardware-unhealthy": [
         "Run `gozer status`. tt-orchard never clears a lease or resets a chip that it does not hold.",
         "A STALE lease whose owner is gone is cleared with `gozer reconcile`. A chip held by another agent "
