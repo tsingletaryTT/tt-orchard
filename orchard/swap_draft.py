@@ -32,6 +32,37 @@ def _repo(model_id: str) -> str:
     return str(model_id).split("@", 1)[0]
 
 
+def nearest_problem(run_dir, config_path) -> str | None:
+    """Why an agent-written swap config does not serve stage 0's nearest model, or None. The weights are swapped into a bundle or package of
+    the nearest model; a config that names another model serves the wrong architecture (issue 67: a Qwen3.8-27B bundle for a Qwen3-Coder model).
+    Repository ids are compared exactly, without any `@revision`. A missing config, a config with no nearest_model_id (prepare_swap.py refuses that itself) or a run with no stage 0 record is no problem here."""
+    try:
+        cfg = json.loads(Path(config_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    try:
+        want = _repo(json.loads((Path(run_dir) / "stages" / "0" / "delta.json").read_text(encoding="utf-8"))["nearest_model"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    named = cfg.get("nearest_model_id") if isinstance(cfg, dict) else None
+    if not isinstance(named, str) or not named:
+        return None                      # prepare_swap.py requires the key and refuses a config without it
+    if _repo(named) != want:
+        return (f"{Path(config_path).name} names {_repo(named)} as the nearest model, but stage 0's nearest model is {want}. "
+                f"Weights are swapped into an installed bundle or package of {want}; one for another model serves the wrong architecture")
+    return None
+
+
+def stage4_nearest_problems(run_dir, stage_dir) -> list[str]:
+    """nearest_problem for each configs/<N>/swap_config.json of stage 4, each message led by its chip count."""
+    out = []
+    for path in sorted(Path(stage_dir).glob("configs/*/swap_config.json")):
+        msg = nearest_problem(run_dir, path)
+        if msg:
+            out.append(f"the {path.parent.name}-chip configuration: {msg}")
+    return out
+
+
 def _free_port() -> int | None:
     for port in range(FIRST_PORT, FIRST_PORT + PORT_TRIES):
         with socket.socket() as s:
@@ -151,12 +182,14 @@ def installed_containers(operator_home) -> list[dict]:
 
 
 def draft_stage4(*, run_dir, tt_model_root, cache_root, hf_home, operator_home, inputs: dict, counts,
-                 four_chip_package: str | None = None) -> tuple[dict[int, dict], dict | None, list[str]]:
+                 four_chip_package: str | None = None,
+                 missing: list[int] | None = None) -> tuple[dict[int, dict], dict | None, list[str]]:
     """Stage 4's configs/<N>/swap_config.json for each chip count, and hw_tests.json when every count got
     one. A count is served by the one v6 bundle of the nearest model with that many chips, or else by a
     container package (installed.json): `four_chip_package` when it names one, or the only one. The
     tensor cache of each is <cache_root>/<model slug>/<N>chip-<package slug>/tt_cache, the same in every
-    run, so a later run of the same model reuses it. Returns (configs, hw_tests or None, notes)."""
+    run, so a later run of the same model reuses it. Returns (configs, hw_tests or None, notes). `missing`, when given, receives the chip
+    counts that no installed bundle or container package serves at all (not the ones left to a choice between several), issue 68."""
     run_dir = Path(run_dir)
     model, nearest, snapshots, problems = _facts(run_dir, inputs)
     if problems:
@@ -201,6 +234,8 @@ def draft_stage4(*, run_dir, tt_model_root, cache_root, hf_home, operator_home, 
         else:
             notes.append(f"the {n}-chip configuration: no installed bundle or container package serves {want} "
                          f"on {n} chips")
+            if missing is not None:
+                missing.append(n)
             continue
         if not pick.get("profile"):
             notes.append(f"the {n}-chip configuration: {pick['name']} names no default profile")

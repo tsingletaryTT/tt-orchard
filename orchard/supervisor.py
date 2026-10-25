@@ -1539,10 +1539,24 @@ class Supervisor:
             return
         cap = self._chip_cap(spec)
         counts = [n for n in (self.required_chips or (1, 2, 4)) if n <= cap]
+        missing: list[int] = []
         configs, tests, notes = swap_draft.draft_stage4(
             run_dir=self.run_dir, tt_model_root=self.paths.tt_model_root, cache_root=self.paths.cache_root,
             hf_home=self.paths.hf_home, operator_home=self.paths.operator_home, inputs=self.inputs,
-            counts=counts, four_chip_package=self.four_chip_package)
+            counts=counts, four_chip_package=self.four_chip_package, missing=missing)
+        # A required count that nothing serves cannot pass whatever an agent writes (issue 68: the agent wrote the same file three times
+        # and the run blocked 20 minutes of chip time later). Say so before any agent step.
+        short = list(missing) if self.required_chips else []        # counts holds only the required ones when they are set
+        if short:
+            rest = [n for n in self.required_chips if n not in short]
+            self.ledger.append("decision", spec.number, decision="stage 4 configs not drafted", counts=counts, problems=notes)
+            self._block(spec.number,
+                        f"stage 4 requires {', '.join(f'{n}-chip' for n in short)} "
+                        f"but no installed bundle or container package serves the nearest model on {'that count' if len(short) == 1 else 'those counts'}. "
+                        + (f"Run again with --required-chips {','.join(str(n) for n in rest)} to test only the counts that have one, "
+                           if rest else "No required count can be served; ")
+                        + "or install a package for the missing count",
+                        required=sorted(self.required_chips), missing=short)
         if not configs:
             self.ledger.append("decision", spec.number, decision="stage 4 configs not drafted", counts=counts,
                                problems=notes)
@@ -1617,8 +1631,9 @@ class Supervisor:
             path.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
 
     def _read_plan(self, spec, stage_dir: Path):
-        return read_plan(stage_dir, required=self.required_chips, max_chips=spec.boards * CHIPS_PER_BOARD,
-                         budget_s=spec.budget_s, home=self.home)
+        tests, problems = read_plan(stage_dir, required=self.required_chips, max_chips=spec.boards * CHIPS_PER_BOARD,
+                                    budget_s=spec.budget_s, home=self.home)
+        return tests, problems + swap_draft.stage4_nearest_problems(self.run_dir, stage_dir)
 
     def _finished_check(self, spec, phase: str, stage_dir: Path):
         """What says a step's files are written and valid (AgentStep's `finished`): for one hardware
@@ -1644,6 +1659,8 @@ class Supervisor:
         d = test.get("deadline_s")
         if isinstance(d, bool) or not isinstance(d, (int, float)) or d <= 0:
             problems.append("hw_test.json needs a positive deadline_s")
+        if (wrong := swap_draft.nearest_problem(self.run_dir, stage_dir / "swap_config.json")):
+            problems.append(wrong)
         if not isinstance(note, dict) or any(note.get(k) in (None, "") for k in NOTE_KEYS):
             problems.append(f"handoff.json needs {', '.join(NOTE_KEYS)}")
         try:
