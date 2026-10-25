@@ -1,0 +1,92 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+"""The site's replay data (review of PR 71): the scrub covers the whole message, wrapped lines included."""
+import importlib.util
+import socket
+from pathlib import Path
+
+SPEC = importlib.util.spec_from_file_location("make_site_data", Path(__file__).resolve().parent.parent / "scripts" / "make_site_data.py")
+msd = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(msd)
+
+USER = Path.home().name
+PAD = " " * 24
+
+
+def rows(*lines, run="/runs/x"):
+    return msd.assemble(list(lines), Path(run))
+
+
+def test_a_wrapped_continuation_line_is_scrubbed_with_its_message():
+    out = rows("10:00:00  orchardist   reading the file", f"{PAD}owned by {USER} in {Path.home()}/cache and on {socket.gethostname()}")
+    text = out[0]["text"]
+    assert USER not in text.replace("user", "") or "owned by user" in text
+    assert str(Path.home()) not in text and socket.gethostname().lower() not in text.lower()
+    assert "owned by user" in text and "~/cache" in text and "this-box" in text
+
+
+def test_the_user_name_inside_another_word_is_left_alone():
+    out = rows(f"10:00:00  orchardist   a {USER}x b")
+    assert f"{USER}x" in out[0]["text"]
+
+
+def test_continuation_text_joins_its_line_and_times_are_seconds_since_the_first():
+    out = rows("23:59:50  orchardist   first", "00:00:10  grafter      second", f"{PAD}and more")
+    assert [r["t"] for r in out] == [0, 20] and out[1]["text"] == "second and more" and out[1]["actor"] == "grafter"
+
+
+def test_ansi_colour_is_removed():
+    out = rows("10:00:00  \x1b[38;5;73morchardist   \x1b[0m hello")
+    assert out[0]["actor"] == "orchardist" and out[0]["text"] == "hello"
+
+
+def test_the_run_directory_becomes_a_label():
+    out = rows("10:00:00  orchardist   wrote /runs/x/stages/1/f", run="/runs/x")
+    assert "<run>/stages/1/f" in out[0]["text"]
+
+
+def test_timestamps_keep_advancing_across_several_days():
+    lines = [f"{h:02d}:00:00  orchardist   e{i}" for i, h in enumerate([0, 12, 0, 12, 0, 12])]
+    assert [r["t"] for r in rows(*lines)] == [0, 43200, 86400, 129600, 172800, 216000]
+
+
+def test_a_first_line_that_is_not_at_midnight_starts_at_zero():
+    out = rows("23:00:00  orchardist   a", "01:00:00  orchardist   b")
+    assert [r["t"] for r in out] == [0, 7200]
+
+
+def withheld(*lines):
+    return rows(*lines)[0]["text"]
+
+
+def test_a_message_that_touches_a_credential_is_withheld_whole():
+    hf = "hf_" + "A" * 36
+    for text in (f"ran curl with token={hf}", f"saw {hf} in the output", "ghp_" + "b" * 40, "key sk-" + "x" * 24,
+                 "AKIA" + "A" * 16, "Authorization: Basic dXNlcjpwYXNz", 'password: "correct horse battery staple"',
+                 '{"api_key": "abc 123"}', "Bearer abc.def.ghi", "client secret was rotated"):
+        assert withheld(f"10:00:00  grafter   {text}") == msd.WITHHELD, text
+
+
+def test_a_pem_block_split_across_wrapped_lines_is_withheld_whole():
+    out = rows("10:00:00  grafter   found a key", f"{PAD}-----BEGIN RSA PRIVATE KEY-----", f"{PAD}MIIEowIBAAKCAQEA", f"{PAD}-----END RSA PRIVATE KEY-----")
+    assert out[0]["text"] == msd.WITHHELD and "MIIE" not in out[0]["text"]
+
+
+def test_a_token_split_across_wrapped_lines_is_withheld():
+    out = rows("10:00:00  grafter   used token=hf_" + "A" * 10, f"{PAD}" + "B" * 26)
+    assert out[0]["text"] == msd.WITHHELD
+
+
+def test_ordinary_words_that_contain_token_are_kept():
+    out = rows("10:00:00  orchardist   the tokenizer has 248320 tokens and a token budget")
+    assert out[0]["text"] == "the tokenizer has 248320 tokens and a token budget"
+
+
+def test_a_withheld_line_keeps_its_time_and_actor():
+    out = rows("10:00:00  orchardist   a", "10:00:07  grafter   password: x")
+    assert out[1]["t"] == 7 and out[1]["actor"] == "grafter" and out[1]["text"] == msd.WITHHELD
+
+
+def test_the_word_credentials_alone_is_kept():
+    out = rows("10:00:00  orchardist   operator accepted visible credentials: --accept-credentials-visible")
+    assert out[0]["text"] == "operator accepted visible credentials: --accept-credentials-visible"

@@ -1,0 +1,65 @@
+[
+ {
+  "n": 0,
+  "name": "intake and delta triage",
+  "orchard": null,
+  "seconds": 312,
+  "result": "pass"
+ },
+ {
+  "n": 1,
+  "name": "environment and CPU reference",
+  "orchard": null,
+  "seconds": 254,
+  "result": "pass"
+ },
+ {
+  "n": 2,
+  "name": "functional decoder on one chip",
+  "orchard": null,
+  "seconds": 358,
+  "result": "pass"
+ },
+ {
+  "n": 3,
+  "name": "full model",
+  "orchard": null,
+  "seconds": 0,
+  "result": "skipped"
+ },
+ {
+  "n": 4,
+  "name": "multichip, then shrink to fewer chips",
+  "orchard": null,
+  "seconds": 1466,
+  "result": "pass"
+ },
+ {
+  "n": 5,
+  "name": "serving integration",
+  "orchard": null,
+  "seconds": 0,
+  "result": "skipped"
+ },
+ {
+  "n": 6,
+  "name": "qualitative check and benchmark",
+  "orchard": null,
+  "seconds": 0,
+  "result": "skipped"
+ },
+ {
+  "n": 7,
+  "name": "package and container build",
+  "orchard": null,
+  "seconds": 0,
+  "result": "skipped"
+ },
+ {
+  "n": 8,
+  "name": "operator bundle",
+  "orchard": null,
+  "seconds": 0,
+  "result": "pass"
+ }
+]
