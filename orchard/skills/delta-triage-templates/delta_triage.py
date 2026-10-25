@@ -1654,16 +1654,21 @@ def detect_vocab_trim(c: dict, t: dict, sc: dict, model_dir: Path, base_dir: Pat
         if not (VOCAB_TENSOR.search(x["name"]) and len(m) == 2 and len(b) == 2 and m[1] == b[1] and m[0] < b[0]):
             out["note"] = f"{x['name']} differs in shape in a way a vocabulary trim does not"
             return out
-        if m[0] != mv or b[0] != bv:
-            out["note"] = (f"{x['name']} has {m[0]} rows and the nearest model's has {b[0]}, but the configs say the vocabularies are "
-                           f"{mv} and {bv}: the rows do not match the configured sizes")
-            return out
     if decide_path({**c, "decisive_keys_differing": []}, {**t, "shape_diffs_normalized": []}):
         out["note"] = "something besides the vocabulary differs"
         return out
+    mi, bi = tensor_index(model_dir), tensor_index(base_dir)
+    # Every vocabulary matrix the two models share, changed or not, must have the configured number of rows: staging writes the model's
+    # vocab_size into the served config, so one matrix left at the old size would recreate the load-time mismatch.
+    for m, b in sorted(pairs.items()):
+        if m in mi and b in bi and VOCAB_TENSOR.search(m):
+            for who, entry, want in (("new", mi[m], mv), ("nearest", bi[b], bv)):
+                rows = entry["shape"][0] if entry["shape"] else None
+                if rows != want:
+                    out["note"] = f"{m} has {rows} rows in the {who} model, but its config says the vocabulary is {want}"
+                    return out
     out["trimmed"] = True
     out["explained_reasons"] = decide_path(c, t)
-    mi, bi = tensor_index(model_dir), tensor_index(base_dir)
     chosen = sorted((m, b) for m, b in pairs.items() if m in mi and b in bi and VOCAB_TENSOR.search(m)
                     and mi[m]["shape"][:1] != bi[b]["shape"][:1])
     if len(chosen) != len(diffs):

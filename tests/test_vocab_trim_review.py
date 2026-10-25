@@ -84,6 +84,26 @@ def test_matrices_with_the_configured_rows_are_still_a_trim(tmp_path):
     assert analyse(World(tmp_path))[4]["trimmed"] is True
 
 
+def test_an_unchanged_16_row_head_beside_a_10_row_embedding_is_not_a_trim(tmp_path):
+    """Copilot (PR 57, second look): the filter checked only the matrices that differ, so an unchanged head conflicting with the staged
+    vocabulary size passed, and staging would write 10 for a matrix that still has 16 rows."""
+    w = World(tmp_path)
+    write_st(w.model / "model.safetensors", {**w.model_t, "lm_head.weight": w.head})
+    vt = analyse(w)[4]
+    assert vt["trimmed"] is False and "lm_head.weight" in vt["note"] and "16" in vt["note"]
+
+
+def test_an_unchanged_16_row_embedding_beside_a_10_row_head_is_not_a_trim(tmp_path):
+    w = World(tmp_path)
+    write_st(w.model / "model.safetensors", {**w.model_t, "model.embed_tokens.weight": w.embed})
+    vt = analyse(w)[4]
+    assert vt["trimmed"] is False and "embed_tokens" in vt["note"]
+
+
+def test_a_tied_model_with_no_lm_head_is_still_a_trim(tmp_path):
+    assert analyse(World(tmp_path, tied=True))[4]["trimmed"] is True
+
+
 # ---- 3. stage 7's graft planner refuses a different vocabulary too ----------------------------------------------------------------
 
 def snapshot(root: Path, name: str, config: dict, tensors: dict):
