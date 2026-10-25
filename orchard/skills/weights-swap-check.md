@@ -116,7 +116,10 @@ Four facts decide whether a swap works. Each was found by failing first.
    prints a summary. Exit 2 means an edit of `run.sh` did not apply or a fact does not fit; its
    message names it. Fix that value in `swap_config.json` and run it again.
 3. Check that `stages/2/model-dir` and `stages/2/run.sh` exist (`ls -l`).
-4. Write `hw_test.json`: `{"command": "python3 stages/2/serve_and_compare.py", "deadline_s": 3600}`.
+4. Write `hw_test.json`: `{"command": "python3 stages/2/serve_and_compare.py", "deadline_s": 3600}`. When `swap_config.json`
+   has a `package` key (a container package, not a `bundle_dir`), the supervisor drafted it for a nearest model that is served by a
+   container package: `prepare_swap.py` builds only `model-dir/` and writes no `run.sh`, so skip the `run.sh` check in step 3, and the command
+   is `python3 stages/2/serve_and_compare_container.py` with the same deadline.
 5. Write `handoff.json` and reply with a short summary.
 
 Do not run `serve_and_compare.py` yourself. The supervisor runs it on a leased board.

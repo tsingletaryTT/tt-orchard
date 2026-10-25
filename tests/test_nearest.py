@@ -85,6 +85,49 @@ def test_a_missing_models_root_is_an_empty_list(tmp_path):
     assert nearest.read_installed(tmp_path / "nope") == []
 
 
+def write_installed(home: Path, entries: dict) -> None:
+    """tt-model's installed.json under <home>/.cache/tt-model, with each container package's pulled manifest."""
+    root = home / ".cache" / "tt-model"
+    out = {}
+    for name, (repo, chips, container, schema) in entries.items():
+        out[name] = {"container": container, "image": f"tt-model/{name.split('/')[1]}:abc" if container else None, "profile": "default"}
+        if repo is not None:
+            mf = root / "pulled" / name.replace("/", "__") / "tt_kernel_manifest.json"
+            mf.parent.mkdir(parents=True)
+            mf.write_text(json.dumps({"schema_version": schema, "device_count": chips, "weights": {"repo_id": repo}}))
+            out[name]["manifest"] = str(mf)
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "installed.json").write_text(json.dumps(out))
+
+
+def test_container_packages_are_read_from_installed_json_and_their_pulled_manifests(tmp_path):
+    """Issue 60: they live outside the models root, so read_installed never listed them."""
+    write_installed(tmp_path, {"stisiTT/gemma-4-12b-it-p150": ("google/gemma-4-12B-it", 1, True, "5.1"),
+                               "tt-hous/qwen3.8-27b": ("Qwen/Qwen3.8-27B", 4, True, "5.1"),
+                               "episod/bundle-p300": ("Qwen/Qwen3.8-27B", 2, False, "6"),
+                               "x/no-manifest": (None, 0, True, "5.1")})
+    got = {i.name: i for i in nearest.read_containers(tmp_path)}
+    assert set(got) == {"stisiTT/gemma-4-12b-it-p150", "tt-hous/qwen3.8-27b"}
+    assert got["tt-hous/qwen3.8-27b"] == Installed("tt-hous/qwen3.8-27b", "Qwen/Qwen3.8-27B", "5.1", 4)
+
+
+def test_no_installed_json_or_an_unreadable_one_gives_no_containers(tmp_path):
+    assert nearest.read_containers(tmp_path) == []
+    (tmp_path / ".cache" / "tt-model").mkdir(parents=True)
+    for text in ("not json", "[]", "{}", '{"a/b": "x"}'):
+        (tmp_path / ".cache" / "tt-model" / "installed.json").write_text(text)
+        assert nearest.read_containers(tmp_path) == [], text
+
+
+def test_the_installed_list_holds_bundles_and_containers_once_each(tmp_path):
+    make_bundle(tmp_path / "models", "episod", "qwen3.8-27b-dflash2-p300", "Qwen/Qwen3.8-27B")
+    make_bundle(tmp_path / "models", "stisiTT", "gemma-4-12b-it-p150", "google/gemma-4-12B-it", schema="5.1", chips=1)
+    write_installed(tmp_path / "op", {"stisiTT/gemma-4-12b-it-p150": ("google/gemma-4-12B-it", 1, True, "5.1"),
+                                      "tt-hous/qwen3.8-27b": ("Qwen/Qwen3.8-27B", 4, True, "5.1")})
+    names = [i.name for i in nearest.read_all_installed(tmp_path / "models", tmp_path / "op")]
+    assert sorted(names) == ["episod/qwen3.8-27b-dflash2-p300", "stisiTT/gemma-4-12b-it-p150", "tt-hous/qwen3.8-27b"]
+
+
 # ---- the search -------------------------------------------------------------------------------
 
 TT_JSON = json.dumps({"query": "gemma", "bundles": [
@@ -211,10 +254,13 @@ def test_an_override_replaces_the_cards_base():
     assert c.status == "ok" and c.data["base"] == "Qwen/Qwen3.8-27B"
 
 
-def test_a_v5_1_container_bundle_is_a_warning_because_the_swap_template_wants_a_thin_bundle():
+def test_a_v5_1_container_bundle_is_a_warning_that_says_when_stages_2_and_4_can_use_it():
+    """Issue 60: stage 2 drafts a container configuration when exactly one installed package serves the base on the stage's chips."""
     inst = [Installed("stisiTT/gemma-4-12b-it-p150", GEMMA, "5.1", 1)]
     c = check(local=Path("/s"), inst=inst)
-    assert c.status == "warn" and "5.1" in c.detail and "thin" in c.detail
+    assert c.status == "warn" and "5.1" in c.detail and "container package" in c.detail
+    assert "stage 2 will probably not run" not in c.detail and "thin" not in c.detail
+    assert "exactly one" in c.detail and "default profile" in c.detail and "chip count" in c.detail
 
 
 def test_one_thin_bundle_among_containers_is_enough():
@@ -257,3 +303,14 @@ def test_a_failing_base_signal_is_a_block_not_a_crash(tmp_path):
                            signals=signals(installed_bundles=boom))
     base = next(c for c in out if c.name == "base")
     assert base.status == "block" and "manifest unreadable" in base.detail
+
+
+def test_the_preflights_installed_list_includes_the_operators_container_packages(tmp_path):
+    """Issue 60: the base check judges only what this list holds, so a pulled container package used to count as no bundle at all."""
+    import dataclasses
+    from orchard import preflight as pf
+    from test_bus_preflight import cfg
+    write_installed(tmp_path / "op", {"tt-hous/qwen3.8-27b": ("Qwen/Qwen3.8-27B", 4, True, "5.1")})
+    c = dataclasses.replace(cfg(tmp_path), operator_home=tmp_path / "op")
+    sig = pf.default_signals(c)
+    assert "tt-hous/qwen3.8-27b" in [i.name for i in sig.installed_bundles()]

@@ -287,3 +287,10 @@ def test_the_stage_4_skill_keeps_to_the_drafted_counts():
     assert "When `hw_tests.json` exists, its counts are the whole list. Do not add a count to it" in flat
     assert "2 chips, 4 chips, then 1 chip" not in flat
     assert "Only when `hw_tests.json` does not exist" in flat
+
+
+def test_the_swap_skill_names_the_container_command_for_a_container_config():
+    flat = " ".join((SKILLS / "weights-swap-check.md").read_text().split())
+    assert "has a `package` key" in flat and "python3 stages/2/serve_and_compare_container.py" in flat
+    assert "skip the `run.sh` check in step 3" in flat
+    assert (SKILLS / "weights-swap-templates" / "serve_and_compare_container.py").is_file()

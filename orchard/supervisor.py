@@ -1192,7 +1192,10 @@ class Supervisor:
                 test, problems = self._read_test(stage_dir)
                 if problems:
                     return "fail", problems, None
-                self._hardware_phase(spec, stage_dir, test)
+                # A container package's test leaves a container behind when its client is killed (a timeout, an abort): stop it by
+                # label before the chips are given back, and block when one survives (_sweep).
+                self._hardware_phase(spec, stage_dir, test,
+                                     after_test=(lambda: self._sweep(spec.number)) if self._container_config(stage_dir) else None)
             out, step = self._step(spec, "finish", stage_dir, escalated, resumed)
             out = self._wrap_up(spec, stage_dir, step, out)
             if out.status != "done":
@@ -1451,7 +1454,8 @@ class Supervisor:
             return
         cfg, problems = swap_draft.draft(run_dir=self.run_dir, tt_model_root=self.paths.tt_model_root,
                                          cache_root=self.paths.cache_root, hf_home=self.paths.hf_home,
-                                         inputs=self.inputs, chips=spec.boards * CHIPS_PER_BOARD)
+                                         inputs=self.inputs, chips=spec.boards * CHIPS_PER_BOARD,
+                                         operator_home=self.paths.operator_home)
         if cfg is None:
             self.ledger.append("decision", spec.number, decision="swap config not drafted", problems=problems)
             return
@@ -1459,12 +1463,21 @@ class Supervisor:
         target.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
         templates = Path(self.paths.orchard_dir) / "orchard" / "skills" / "weights-swap-templates"
         copied = []
-        for name in SWAP_TEMPLATES:
+        for name in (STAGE4_TEMPLATES if "package" in cfg else SWAP_TEMPLATES):      # a container package also needs its script
             shutil.copy2(templates / name, stage_dir / name)
             copied.append(name)
         self.ledger.append("decision", spec.number, decision="swap config drafted",
-                           config=evidence_record(self.run_dir, target), bundle_dir=cfg["bundle_dir"],
-                           copied=copied)
+                           config=evidence_record(self.run_dir, target), bundle_dir=cfg.get("bundle_dir"),
+                           copied=copied, **({"package": cfg["package"]} if "package" in cfg else {}))
+
+    @staticmethod
+    def _container_config(stage_dir: Path) -> bool:
+        """Does the stage's swap_config.json name a container package (issue 60)? An unreadable or missing config is not one."""
+        try:
+            cfg = json.loads((stage_dir / "swap_config.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
+        return isinstance(cfg, dict) and "package" in cfg
 
     def _draft_stage4(self, spec, stage_dir: Path) -> None:
         """Stage 4's configs (swap_draft.draft_stage4) for the counts this run plans: the required ones, or
