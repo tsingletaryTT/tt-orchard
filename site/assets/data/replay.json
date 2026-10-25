@@ -1,0 +1,440 @@
+{
+ "run": "qwen3.8-27b-cjk-trim",
+ "lines": [
+  {
+   "t": 0,
+   "actor": "orchardist",
+   "text": "run started for ProprietaryLegal/Qwen3.8-27B-CJK-Trim; coder raahemnabeel/qwen3-coder-next-blackhole"
+  },
+  {
+   "t": 0,
+   "actor": "orchardist",
+   "text": "operator accepted visible credentials: --accept-credentials-visible"
+  },
+  {
+   "t": 0,
+   "actor": "orchardist",
+   "text": "lease fcf2d2 granted on 0000:01:00.0, 0000:02:00.0 (waited 0.037s)"
+  },
+  {
+   "t": 0,
+   "actor": "orchardist",
+   "text": "measured queue_wait_seconds = 0.037 s"
+  },
+  {
+   "t": 0,
+   "actor": "orchardist",
+   "text": "starting the coder raahemnabeel/qwen3-coder-next-blackhole on port 8011; a cold boot can take 10 minutes or more"
+  },
+  {
+   "t": 1,
+   "actor": "orchardist",
+   "text": "coder container started"
+  },
+  {
+   "t": 412,
+   "actor": "orchardist",
+   "text": "the coder is ready (it answered the canary question)"
+  },
+  {
+   "t": 412,
+   "actor": "orchardist",
+   "text": "stage 0 (survey): starting"
+  },
+  {
+   "t": 412,
+   "actor": "grafter",
+   "text": "Qwen/Qwen3-Coder-Next starts the run step (delta-triage)"
+  },
+  {
+   "t": 724,
+   "actor": "orchardist",
+   "text": "agent step finished: done after 30 turns"
+  },
+  {
+   "t": 724,
+   "actor": "orchardist",
+   "text": "stage 0 (survey): pass"
+  },
+  {
+   "t": 725,
+   "actor": "orchardist",
+   "text": "stage 1 (soil test): starting"
+  },
+  {
+   "t": 725,
+   "actor": "grafter",
+   "text": "Qwen/Qwen3-Coder-Next starts the run step (reference-gate)"
+  },
+  {
+   "t": 979,
+   "actor": "orchardist",
+   "text": "agent step finished: done after 16 turns"
+  },
+  {
+   "t": 979,
+   "actor": "orchardist",
+   "text": "stage 1 (soil test): pass"
+  },
+  {
+   "t": 979,
+   "actor": "orchardist",
+   "text": "stage 2 (graft): starting"
+  },
+  {
+   "t": 979,
+   "actor": "orchardist",
+   "text": "swap config drafted"
+  },
+  {
+   "t": 979,
+   "actor": "grafter",
+   "text": "Qwen/Qwen3-Coder-Next starts the prepare step (weights-swap-check)"
+  },
+  {
+   "t": 1010,
+   "actor": "orchardist",
+   "text": "agent step finished: done after 6 turns"
+  },
+  {
+   "t": 1010,
+   "actor": "orchardist",
+   "text": "hardware phase: use_free"
+  },
+  {
+   "t": 1010,
+   "actor": "orchardist",
+   "text": "lease 3ee9da granted on 0000:03:00.0, 0000:04:00.0 (waited 0.037s)"
+  },
+  {
+   "t": 1010,
+   "actor": "orchardist",
+   "text": "measured queue_wait_seconds = 0.037 s"
+  },
+  {
+   "t": 1010,
+   "actor": "orchardist",
+   "text": "test lease taken: 0000:03:00.0, 0000:04:00.0"
+  },
+  {
+   "t": 1010,
+   "actor": "orchardist",
+   "text": "hardware test started on 0000:03:00.0, 0000:04:00.0: python3 stages/2/serve_and_compare.py (deadline 1h)"
+  },
+  {
+   "t": 1279,
+   "actor": "orchardist",
+   "text": "hardware test passed (exit 0)"
+  },
+  {
+   "t": 1320,
+   "actor": "orchardist",
+   "text": "test lease released"
+  },
+  {
+   "t": 1320,
+   "actor": "grafter",
+   "text": "Qwen/Qwen3-Coder-Next starts the finish step (weights-swap-check)"
+  },
+  {
+   "t": 1337,
+   "actor": "orchardist",
+   "text": "agent step finished: done after 3 turns"
+  },
+  {
+   "t": 1337,
+   "actor": "orchardist",
+   "text": "stage 2 (graft): pass"
+  },
+  {
+   "t": 1337,
+   "actor": "orchardist",
+   "text": "stage 3 (trunk): skipped"
+  },
+  {
+   "t": 1337,
+   "actor": "orchardist",
+   "text": "stage 3 (trunk): skipped: weights-only path: the stage 2 serve-and-compare covers the full model"
+  },
+  {
+   "t": 1337,
+   "actor": "orchardist",
+   "text": "stage 4 (rows): starting"
+  },
+  {
+   "t": 1337,
+   "actor": "orchardist",
+   "text": "stage 4 configs drafted"
+  },
+  {
+   "t": 1338,
+   "actor": "grafter",
+   "text": "Qwen/Qwen3-Coder-Next starts the prepare step (weights-swap-configs)"
+  },
+  {
+   "t": 1360,
+   "actor": "sheepdog",
+   "text": "nudged the agent: The supervisor stopped this step because it is repeating itself: - the same tool output (shell) 3 times in a row The model server decodes greedily, so the same request returns the same answer. Do s..."
+  },
+  {
+   "t": 1424,
+   "actor": "orchardist",
+   "text": "agent step finished: done after 12 turns"
+  },
+  {
+   "t": 1424,
+   "actor": "orchardist",
+   "text": "will test these chip counts: 2, 4"
+  },
+  {
+   "t": 1424,
+   "actor": "orchardist",
+   "text": "hardware phase: use_free"
+  },
+  {
+   "t": 1424,
+   "actor": "orchardist",
+   "text": "lease 66e172 granted on 0000:03:00.0, 0000:04:00.0 (waited 0.036s)"
+  },
+  {
+   "t": 1424,
+   "actor": "orchardist",
+   "text": "measured queue_wait_seconds = 0.036 s"
+  },
+  {
+   "t": 1424,
+   "actor": "orchardist",
+   "text": "test lease taken: 0000:03:00.0, 0000:04:00.0"
+  },
+  {
+   "t": 1424,
+   "actor": "orchardist",
+   "text": "hardware test started on 0000:03:00.0, 0000:04:00.0: python3 stages/4/configs/2/serve_and_compare.py (deadline 1h)"
+  },
+  {
+   "t": 1663,
+   "actor": "orchardist",
+   "text": "hardware test passed (exit 0)"
+  },
+  {
+   "t": 1705,
+   "actor": "orchardist",
+   "text": "test lease released"
+  },
+  {
+   "t": 1705,
+   "actor": "orchardist",
+   "text": "hardware phase: park"
+  },
+  {
+   "t": 1705,
+   "actor": "orchardist",
+   "text": "lease 9fc3b3 granted on 0000:03:00.0, 0000:04:00.0 (waited 0.037s)"
+  },
+  {
+   "t": 1705,
+   "actor": "orchardist",
+   "text": "measured queue_wait_seconds = 0.038 s"
+  },
+  {
+   "t": 1705,
+   "actor": "orchardist",
+   "text": "test lease taken: 0000:03:00.0, 0000:04:00.0"
+  },
+  {
+   "t": 1746,
+   "actor": "orchardist",
+   "text": "test chips reset"
+  },
+  {
+   "t": 1746,
+   "actor": "orchardist",
+   "text": "park: note"
+  },
+  {
+   "t": 1747,
+   "actor": "orchardist",
+   "text": "park: canary_before"
+  },
+  {
+   "t": 1747,
+   "actor": "orchardist",
+   "text": "park: standin_started"
+  },
+  {
+   "t": 1766,
+   "actor": "orchardist",
+   "text": "park: standin"
+  },
+  {
+   "t": 1777,
+   "actor": "orchardist",
+   "text": "park: stop_sent"
+  },
+  {
+   "t": 1777,
+   "actor": "orchardist",
+   "text": "other containers map the whole /dev/tenstorrent directory"
+  },
+  {
+   "t": 1777,
+   "actor": "orchardist",
+   "text": "park: stopped"
+  },
+  {
+   "t": 1818,
+   "actor": "orchardist",
+   "text": "park: reset"
+  },
+  {
+   "t": 1818,
+   "actor": "orchardist",
+   "text": "measured park_reset_seconds = 41.669 s"
+  },
+  {
+   "t": 1818,
+   "actor": "orchardist",
+   "text": "hardware test started on 0000:01:00.0, 0000:02:00.0, 0000:03:00.0, 0000:04:00.0: python3 stages/4/configs/4/serve_and_compare_container.py (deadline 1h)"
+  },
+  {
+   "t": 1872,
+   "actor": "orchardist",
+   "text": "test failed at startup; resetting the test chips and trying once more"
+  },
+  {
+   "t": 1914,
+   "actor": "orchardist",
+   "text": "test chips reset"
+  },
+  {
+   "t": 1955,
+   "actor": "orchardist",
+   "text": "test chips reset"
+  },
+  {
+   "t": 1955,
+   "actor": "orchardist",
+   "text": "hardware test started on 0000:01:00.0, 0000:02:00.0, 0000:03:00.0, 0000:04:00.0: python3 stages/4/configs/4/serve_and_compare_container.py (deadline 1h)"
+  },
+  {
+   "t": 2224,
+   "actor": "orchardist",
+   "text": "hardware test passed (exit 0)"
+  },
+  {
+   "t": 2265,
+   "actor": "orchardist",
+   "text": "test lease released"
+  },
+  {
+   "t": 2265,
+   "actor": "orchardist",
+   "text": "other containers map the whole /dev/tenstorrent directory"
+  },
+  {
+   "t": 2307,
+   "actor": "orchardist",
+   "text": "restore: reset"
+  },
+  {
+   "t": 2307,
+   "actor": "orchardist",
+   "text": "measured restore_reset_seconds = 41.66 s"
+  },
+  {
+   "t": 2308,
+   "actor": "orchardist",
+   "text": "restore: serve"
+  },
+  {
+   "t": 2738,
+   "actor": "orchardist",
+   "text": "restore: ready"
+  },
+  {
+   "t": 2738,
+   "actor": "orchardist",
+   "text": "measured coder_ready_wait_seconds = 430.65 s"
+  },
+  {
+   "t": 2739,
+   "actor": "orchardist",
+   "text": "restore: canary"
+  },
+  {
+   "t": 2739,
+   "actor": "orchardist",
+   "text": "restore: resumed"
+  },
+  {
+   "t": 2739,
+   "actor": "grafter",
+   "text": "Qwen/Qwen3-Coder-Next starts the finish step (weights-swap-configs)"
+  },
+  {
+   "t": 2803,
+   "actor": "orchardist",
+   "text": "agent step finished: done after 7 turns"
+  },
+  {
+   "t": 2803,
+   "actor": "orchardist",
+   "text": "stage 4 (rows): pass"
+  },
+  {
+   "t": 2803,
+   "actor": "orchardist",
+   "text": "stage 5 (farm gate): skipped"
+  },
+  {
+   "t": 2803,
+   "actor": "orchardist",
+   "text": "stage 5 (farm gate): skipped: weights-only path: stage 4's serve-and-compare tests boot each configuration, check the output against the CPU reference and check it is coherent (the black-box serving check)"
+  },
+  {
+   "t": 2803,
+   "actor": "orchardist",
+   "text": "stage 6 (taste test): skipped"
+  },
+  {
+   "t": 2803,
+   "actor": "orchardist",
+   "text": "stage 6 (taste test): skipped: weights-only path: the operator deferred the qualitative check and benchmark; stage 4 already shows the output is coherent"
+  },
+  {
+   "t": 2803,
+   "actor": "orchardist",
+   "text": "stage 7 (crate): skipped"
+  },
+  {
+   "t": 2803,
+   "actor": "orchardist",
+   "text": "stage 7 (crate): skipped: stage 7 builds a package only on the weights-only path of a run started with --package-format v6; this run builds none, and the operator bundle reports the package as not built"
+  },
+  {
+   "t": 2804,
+   "actor": "orchardist",
+   "text": "stage 8 (harvest): starting"
+  },
+  {
+   "t": 2804,
+   "actor": "orchardist",
+   "text": "stage 8 (harvest): pass"
+  },
+  {
+   "t": 2804,
+   "actor": "orchardist",
+   "text": "ready for operator review: the bundle is at stages/8/bundle"
+  },
+  {
+   "t": 2806,
+   "actor": "orchardist",
+   "text": "stopping the coder"
+  },
+  {
+   "t": 2848,
+   "actor": "orchardist",
+   "text": "hardware released"
+  }
+ ]
+}

@@ -1,0 +1,74 @@
+{
+ "models": {
+  "pi": "bytkim/Qwen3.8-27B-pi",
+  "base": "Qwen/Qwen3.8-27B"
+ },
+ "tasks": {
+  "humaneval": {
+   "label": "HumanEval",
+   "n": 164,
+   "pi": 0.957,
+   "base": 0.939,
+   "se_pi": 0.016,
+   "se_base": 0.019,
+   "p": 0.5078,
+   "cut_pi": 6,
+   "cut_base": 8
+  },
+  "mbpp": {
+   "label": "MBPP",
+   "n": 500,
+   "pi": 0.896,
+   "base": 0.864,
+   "se_pi": 0.014,
+   "se_base": 0.015,
+   "p": 0.0113,
+   "cut_pi": 44,
+   "cut_base": 54
+  },
+  "ifeval": {
+   "label": "IFEval",
+   "n": 541,
+   "pi": 0.874,
+   "base": 0.85,
+   "se_pi": 0.014,
+   "se_base": 0.015,
+   "p": 0.0854,
+   "cut_pi": 30,
+   "cut_base": 38
+  },
+  "gsm8k": {
+   "label": "GSM8K",
+   "n": 1319,
+   "pi": 0.839,
+   "base": 0.792,
+   "se_pi": 0.01,
+   "se_base": 0.011,
+   "p": 1.607e-07,
+   "cut_pi": 0,
+   "cut_base": 0
+  },
+  "bfcl_simple": {
+   "label": "BFCL simple",
+   "n": 400,
+   "pi": 0.932,
+   "base": 0.93,
+   "se_pi": 0.013,
+   "se_base": 0.013,
+   "p": null,
+   "cut_pi": null,
+   "cut_base": null
+  },
+  "bfcl_multiple": {
+   "label": "BFCL multiple",
+   "n": 200,
+   "pi": 0.955,
+   "base": 0.935,
+   "se_pi": 0.015,
+   "se_base": 0.017,
+   "p": null,
+   "cut_pi": null,
+   "cut_base": null
+  }
+ }
+}

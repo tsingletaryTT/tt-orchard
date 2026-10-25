@@ -1,5 +1,7 @@
 # tt-orchard
 
+[Watch a real run replayed on the project site](https://tsingletaryTT.github.io/tt-orchard/) (source in `site/`).
+
 A new model lands on Hugging Face. You own a QuietBox 2. You want to know whether it runs on your
 Blackhole chips, and you want a package other people can serve with one command.
 
