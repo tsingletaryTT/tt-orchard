@@ -76,6 +76,7 @@ request with an HTTP error.
 from __future__ import annotations
 
 import json
+import shutil
 import os
 import re
 import shlex
@@ -185,6 +186,29 @@ def serving_from_argv(argv: list[str]) -> dict:
     return {"drafter": drafter, "sampling": sampling}
 
 
+# The test container gets no route to the Hub. Its /hf is empty on purpose, so that a runtime which ignores MODEL_WEIGHTS_DIR cannot find the base model
+# there; with a network it fetched the base model instead and served that (issue 60 validation: raahemnabeel/qwen3-coder-30b-a3b hard-codes its repo id).
+OFFLINE_ENV = {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}
+FETCH_LINE = re.compile(r"Fetching \d+ files")
+
+
+def hub_fetches(hf_dir, log_path) -> list[str]:
+    """The repositories the container fetched from the Hub: every `models--<org>--<name>` in the isolated /hf that holds a non-empty blob, and
+    `Fetching N files` in the server log (a fetch whose repository could not be named is listed as `unknown repository`)."""
+    found = []
+    for repo in sorted(Path(hf_dir).glob("hub/models--*")):
+        blobs = repo / "blobs"
+        if blobs.is_dir() and any(f.is_file() and f.stat().st_size > 0 for f in blobs.iterdir()):
+            found.append(repo.name[len("models--"):].replace("--", "/", 1))
+    try:
+        text = Path(log_path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        text = ""
+    if FETCH_LINE.search(text) and not found:
+        found.append("unknown repository")
+    return found
+
+
 def edit_docker_argv(argv: list[str], *, image: str, nearest: str, model_dir, tt_cache, hf_dir,
                      name: str, label: str, device_ids: list[int], port: int,
                      blobs: list[str], drafter_off: bool = False, explicit_off: bool = False) -> list[str]:
@@ -250,6 +274,8 @@ def edit_docker_argv(argv: list[str], *, image: str, nearest: str, model_dir, tt
             elif key == "QWEN36_DRAFTER" and drafter_off:
                 seen[key] += 1
                 out += [opt, "QWEN36_DRAFTER="]
+            elif key in OFFLINE_ENV:
+                pass                                   # replaced below: a printed HF_HUB_OFFLINE=0 must not leave the Hub open
             elif key != "HF_TOKEN":
                 out += [opt, val]
         else:
@@ -273,6 +299,8 @@ def edit_docker_argv(argv: list[str], *, image: str, nearest: str, model_dir, tt
         out += ["--volume", f"{d}:{d}:ro"]
     if seen["MODEL_WEIGHTS_DIR"] == 0:
         out += ["--env", f"MODEL_WEIGHTS_DIR={md}"]
+    for key, value in OFFLINE_ENV.items():
+        out += ["--env", f"{key}={value}"]
     out.append(image)
     model_hits = [j for j, a in enumerate(server) if a == nearest]
     _once(len(model_hits), f"server argument {nearest!r}")
@@ -410,7 +438,8 @@ def main() -> int:
     guard_cache(cache, cfg["new_model_id"])
     image = package_image(cfg)
     hf_dir = STAGE_DIR / "hf-isolated"
-    hf_dir.mkdir(exist_ok=True)
+    shutil.rmtree(hf_dir, ignore_errors=True)         # empty at the start: what an earlier attempt fetched must not count as this one's
+    hf_dir.mkdir()
     try:
         argv = edit_docker_argv(printed_command(cfg, ids), image=image,
                                 nearest=cfg["nearest_model_id"], model_dir=model_dir,
@@ -445,11 +474,17 @@ def main() -> int:
             print(f"serve_and_compare_container: docker still lists container {container.cid} "
                   "after stop and rm; the supervisor looks for it by its label", file=sys.stderr)
     weights_env = {"MODEL_WEIGHTS_DIR": str(model_dir), "HF_MODEL": str(model_dir)}
+    fetched = hub_fetches(hf_dir, log_path)
     write_report(cfg, run_dir, cache, weights_env, m, tokenizer, reference, log_path,
                  extra={"kind": "container", "package": cfg["package"], "profile": cfg["profile"],
                         "chips": int(cfg["chips"]), "device_ids": ids, "docker_argv": argv,
-                        "hf_isolated": str(hf_dir), "container_stopped": stopped,
+                        "hf_isolated": str(hf_dir), "container_stopped": stopped, "hub_fetch": fetched,
                         "serving": serving_from_argv(argv)})
+    if fetched:
+        print(f"serve_and_compare_container: the container fetched {', '.join(fetched)} from the Hub, so it did not serve the model "
+              f"directory: the package ignores MODEL_WEIGHTS_DIR and HF_MODEL (it names its own repository). This test measured that model, "
+              f"not {cfg['new_model_id']}. The package cannot serve swapped weights as it is.")
+        return 6
     return 0
 
 

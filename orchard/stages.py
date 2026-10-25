@@ -642,12 +642,24 @@ def _nearest_model_of(run_dir) -> str | None:
     return value if isinstance(value, str) else None
 
 
+def _hub_fetch_reasons(report, where: str = "") -> list[str]:
+    """A container test whose report records a Hub fetch measured the fetched model, not the model directory (the package ignored MODEL_WEIGHTS_DIR).
+    A report with no such record, or an empty list, has none; a record that is not a list is a reason too."""
+    fetched = report.get("hub_fetch") if isinstance(report, dict) else None
+    if fetched is None or fetched == []:
+        return []
+    if not isinstance(fetched, list):
+        return [f"{where}swap-check.json hub_fetch must be a list, got {fetched!r}"]
+    return [f"{where}the container fetched {', '.join(str(r) for r in fetched)} from the Hub, so the test did not serve the model directory: "
+            f"the package ignores MODEL_WEIGHTS_DIR, and its numbers describe the fetched model"]
+
+
 def _suite_reasons(report, run_dir, where: str = "") -> list[str]:
     """The prompt-suite reasons (orchard/prompt_suite.py) in one swap-check.json report, each prefixed with `where`.
     A report without a suite record has none. The gates read the template's swap-check.json and not the agent's
     result.json: the record holds the raw replies, and the verdict is computed here from them. A control in the record has
     to have been served from the run's nearest model (stage 0's), which is checked here again whatever the template did."""
-    return [where + r for r in prompt_suite.evaluate(report, nearest_model=_nearest_model_of(run_dir)).reasons]
+    return _hub_fetch_reasons(report, where) + [where + r for r in prompt_suite.evaluate(report, nearest_model=_nearest_model_of(run_dir)).reasons]
 
 
 def _suite_reasons_in(path, run_dir, where: str = "") -> list[str]:
