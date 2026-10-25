@@ -2140,3 +2140,11 @@ Prompt (operator): "while you wait are there new issues to file or resolve?" dur
   the marker carries. (3) The six-entry limit was applied before the short disk was known, so hub models could hide every tensor-cache hint when only the cache disk was full; hints carry their disk and `check_disk` keeps the short
   disks' hints (one shared disk keeps both) before it limits to six. 8 mutations, all red (the limit mutation first used a wrong anchor and was rerun).
 - Second look (Copilot, PR 65): the hints were collected on every preflight (a recursive stat of every tensor cache) though only a block uses them. `check_disk` takes `hints` as a callable and calls it only when a disk is short; the preflight passes a lambda. 2 tests, a mutation that calls it on every check goes red.
+## 2026-10-25 (UTC): README, install guide and a proofs page brought up to date (branch `docs-refresh`)
+Prompt (operator): "review the docs and readme and install guide and make sure everything is up to date with capabilities and goals and proofs".
+- README: "What it has done" is now a table of the eight models brought up and how far each got; Status says what is shown and by what; the stage table's "On real hardware" column and the Parts table
+  were rewritten from the log (the old text still said two bring-ups, one model family, template stages never run on hardware, and that no real model had been parked); the class table gains `restricted-head`;
+  the prompt-suite note no longer says no chip has run it; the install guide covers a container package as the base (4 chips for most catalog packages), the `cpu` preflight row, the weights download with a progress
+  bar and a gated model, the disk sum and the hints in a `disk-full` block, and the test count (7,177 passed, 3 skipped, about 15 minutes; the three skips are opt-in).
+- New: `docs/proofs.md` (each claim, its evidence and where it is, what is shown only by fakes or a hand run, and what is not shown) and `docs/README.md` (an index). The README's section 7 links both.
+- Facts were taken from this log, not re-measured. The README says which results are single runs.

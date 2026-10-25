@@ -31,7 +31,7 @@ Bring up a model for a QuietBox 2, on a QuietBox 2, with only the compute the Qu
 - **One box, shared fairly.** Every chip is leased through [tt-gozer](https://github.com/tsingletaryTT/tt-gozer).
   The supervisor never touches a chip it does not hold, and it never clears another agent's lease.
 - **A model tells you what it needs.** Each model is sorted into a class: weights only, weights plus a
-  sidecar, or a full port. A weights-only model can finish in hours. A model that needs new code
+  sidecar, a trimmed vocabulary, a restricted head, a full port, or unknown. A weights-only model can finish in hours. A model that needs new code
   stops with a reason, and does not guess.
 - **It can be left alone.** Every step, decision and evidence file goes into an append-only ledger. A run
   can be paused, resumed, and recovered after a crash. When it cannot go on, it stops as `blocked`,
@@ -40,13 +40,28 @@ Bring up a model for a QuietBox 2, on a QuietBox 2, with only the compute the Qu
 
 ### What it has done
 
-`Cloudflare/clef` is a post-train of Qwen3.8-27B with a separate task head. One command took it to
-`ready for operator review`: about 3 hours of ledger time on one QuietBox 2, with the coder on one board.
-The run ended with a 2-chip package, `episod/clef-p300`, which passed a boot check on the chips and matched
-the CPU reference on 31 of 32 tokens. It is public on Hugging Face and listed in the tt-model catalog.
+Every run below happened on one QuietBox 2 (four Blackhole chips, two p300c boards). The log in `CLAUDE.md` has the
+details and the limits of each one. The evidence for each row is in `docs/run-logs/` or in the log.
 
-That run was not hands-off. It blocked twice and each time the cause was a bug in tt-orchard, fixed
-before the same command was run again. Section 1 has the details and the limits.
+| Model | What it is | Class | How far it got |
+|---|---|---|---|
+| `Altworld/Hemmingway-1` | Qwen3.8-27B fine-tune | `weights-only` | Attended run to `ready for operator review`; 2-chip and 1-chip packages published and the 2-chip one pulled and booted from the Hub |
+| `iapp/openthai2.0-qwen3.8-27b` | Qwen3.8-27B fine-tune | `weights-only` | Packages published, 2-chip one pulled and booted from the Hub |
+| `Cloudflare/clef` | Qwen3.8-27B post-train with a separate task head | `weights+sidecar` | One command to `ready for operator review` in about 3 hours of ledger time; `episod/clef-p300` is public (31 of 32 tokens equal to the CPU reference; not yet pulled and booted from the Hub) |
+| `ThakiCloud/RAG-Gate-27B` | Qwen3.8-27B fine-tune (a retrieval gate) | `weights-only` | Ready for review, then packaged by hand and measured against a labelled set (0.930 on 200 items); `episod/rag-gate-27b-p300` is public and was pulled and booted from the Hub (reply 42, ready in 2,841 s) |
+| `bytkim/Qwen3.8-27B-pi` | Qwen3.8-27B fine-tune | `weights-only` | First unattended run with the preflight and retry setup (six launches of one command, each stop explained); benchmarked at full size against its base; `episod/qwen3.8-27b-pi-p300` is public |
+| `BAAI/AREX-2` | Qwen3.8-27B fine-tune with no `mtp.*` tensors and no generation config | `weights-only` | Passed after the harness learned to copy the nearest model's generation config; the base's `mtp.*` head is grafted by a measurement (the graft trial); `episod/arex-2-p300` is public and was pulled and booted from the Hub |
+| `ProprietaryLegal/Qwen3.8-27B-CJK-Trim` | The nearest model with 66,533 vocabulary rows removed | `vocab-trim` | Supervised unattended run to `ready for operator review` in 2,804 s of ledger time (2 chips 30 of 32 tokens, 4 chips 30 of 32); packaged and boot-checked; not published |
+| `huihui-ai/Huihui-Qwen3-Coder-30B-A3B-Instruct-abliterated` | Weights-only fine-tune of a model whose only installed package is a container package | `weights-only` | Stage 2 served it through the 4-chip container package (32 of 32 tokens, top-1 1.0). Stage 4 stopped, because the package has no 2-chip configuration (issue 68) |
+
+Not brought up, and why: `perplexity-ai/pplx-decider-v1.2` is a `restricted-head` model, so the run stops after stage 0 and a
+person can ask for the parity report (14 of 14 answers agree); `nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB` stopped at the
+preflight (no installed bundle serves its base); `Plurato123/OctLLM` needs CUDA decoders. No model that needs new model code
+(the `full-port` path, stages 3, 5 and 6) has ever run. Issue 61 tracks a first pilot.
+
+Those runs were not all hands-off. The early ones blocked, and each cause was a bug in tt-orchard, fixed before the same
+command was run again. The later ones needed a person for disk space and for a restart after a power event, and each of those
+is now a preflight check or a block message. The harness has never run end to end with nobody touching the machine.
 
 ## Contents
 
@@ -105,39 +120,42 @@ that affects tool-call reliability over many runs is not measured. Check it on y
 
 ## 1. Status
 
-tt-orchard is early. It has run two bring-ups, both on one machine: a Tenstorrent QuietBox 2 with two
-p300c boards (four Blackhole chips). The first model was `Altworld/Hemmingway-1`, a fine-tune of
-`Qwen/Qwen3.8-27B`. The second was `Cloudflare/clef`, a post-train of the same model with a separate
-weights file for a task head (class `weights+sidecar`). Both are Qwen3.8-27B family models. Nothing has been
-run on any other machine.
+tt-orchard is early. It has brought up eight models, all on one machine: a Tenstorrent QuietBox 2 with two p300c boards (four
+Blackhole chips). Seven are Qwen3.8-27B-family models and one is a Qwen3-Coder-30B-A3B fine-tune; the table under
+[What it has done](#what-it-has-done) lists them. Nothing has been run on any other machine, and no model that needs new model code
+has been run.
 
-The Clef run was started with one command, `tt-orchard bringup Cloudflare/clef`, with Qwen3-Coder-Next on
-one board as the agent model, and it ended `ready for operator review` after 3 hours of wall time. It was
-not hands-off: it ended blocked twice and failed three times in stage 2, and each time the cause was a
-harness bug that was fixed in the code before the same command was run again (the run resumes from its
-ledger). Nobody edited a stage file or told an agent what to do. The fixes are listed in
-[the design spec](docs/superpowers/specs/2026-10-06-bringup-command-design.md) (section 12) and in `CLAUDE.md`.
-The shared Python environment on the development machine was changed by an agent's `pip install` before the
-runner refused those; see `CLAUDE.md`, 2026-10-06 (night).
+What is shown, and by what:
 
-The harness has reached "ready for operator review" once, on one model, with a person watching: stages 0, 1, 2, 4, 7 and 8 passed and
-stages 3, 5 and 6 were skipped by design. It has never run unattended from start to finish. During that run a person paused
-it, fixed the code, and restarted it many times. Each fix is described in
-[docs/run-logs/2026-10-hemmingway-1.md](docs/run-logs/2026-10-hemmingway-1.md).
+- **Weights-only, weights+sidecar and vocab-trim models reach `ready for operator review`.** Stages 0, 1, 2, 4 and 8 (and 7 when
+  `--package-format v6` is given) passed on real chips for Hemmingway-1, openthai, Clef, RAG-Gate-27B, bytkim, AREX-2 and CJK-Trim. Stages 3, 5
+  and 6 are skipped on that path by design.
+- **A package a run produced can be pulled and booted from the Hub.** Four published packages were checked from a clean install
+  (Hemmingway-1, openthai, RAG-Gate-27B and AREX-2). The Clef and bytkim packages are published and have not been pulled and booted (issue 24).
+- **The fidelity evidence is still thin.** Each configuration is compared with the CPU reference on 32 tokens of one prompt, and since
+  2026-10-23 on eight fixed prompts that are read for failure shapes. The prompt suite has run on real chips without a control, so its
+  bars are choices and not measurements (issue 15). Full benchmarks exist for bytkim only (HumanEval, MBPP, GSM8K, IFEval and BFCL against its base, with the
+  cut-off replies asked again at a larger token limit).
+- **An unattended run still stops for causes outside the model.** The ones seen: disk space (issue 27), a 4-chip fabric timeout that
+  a reset does not always clear (issue 26), a board that dropped off the bus (issue 25) and an agent that loops when the harness drafts nothing (issue 68).
+- **The container path (a v5.1 package as the nearest model) has run once.** Stage 2 passed through a 4-chip container package. Stage 4
+  for a container-only package did not (issue 68), and issue 60 stays open until it does.
+
+The suite has 7,177 passing tests and 3 skipped (measured with `python3 -m pytest -q`).
 
 ### Stages
 
 | # | Stage | On real hardware |
 |---|---|---|
-| 0 | Intake and delta triage against the nearest supported model | Passed on Hemmingway-1 (27 min, 59 agent turns, path `weights-only`) with an open-ended skill. Failed twice on the second model (iapp/openthai2.0-qwen3.8-27b): the agent explored and never wrote `delta.json`. Since 2026-10-04 a template script (`delta_triage.py`) measures and drafts `delta.json` and the agent reviews it; tested with fakes, not yet run on hardware. **Note:** See [122B Analysis](docs/analysis/qwen3-5-122b-analysis.md) for hardware requirements if using larger models like Qwen3.5-122B-A10B |
-| 1 | Environment and CPU reference | Passed on Hemmingway-1 on the fifth attempt (8 min, 25 turns), after fixes to the agent loop and with agent thinking turned off. Since 2026-10-04 a template script (`reference_gate.py`) loads the model, runs the four checks and drafts `reference.json`; tested on a tiny random model, not yet run on hardware |
-| 2 | Functional decoder on one chip; on the weights-only path, a weights swap on one board | Passed on Hemmingway-1 (weights-only path): the chip agreed with the CPU reference on 30 of 32 tokens (0.9375, measured, one prompt) |
+| 0 | Intake and delta triage against the nearest supported model | A template script (`delta_triage.py`) measures from safetensors headers and drafts `delta.json`; the agent reviews it. Ran on every model in the table above and decided the class each time: `weights-only` (most), `weights+sidecar` (Clef), `vocab-trim` (CJK-Trim) and `restricted-head` (pplx-decider). The vocabulary check takes about 8 seconds on a 27B model. A classification bench ran it on 42 models without downloading weights and matched three blind labelers on 39 of 40 |
+| 1 | Environment and CPU reference | A template script (`reference_gate.py`) loads the model on CPU, runs four checks and drafts `reference.json`. The gate compares the agent's file with the script's own evidence, so a reference whose weights did not load fails. Passed on every run in the table, in 4 to 11 minutes |
+| 2 | Functional decoder on one chip; on the weights-only path, a weights swap on one board | Passed for every weights-only, sidecar and vocab-trim model: the chips agreed with the CPU reference on 30 to 32 of 32 tokens (and, on runs since 2026-10-23, the eight-prompt suite found nothing blocking). For a model whose nearest model has only a container package, it serves through the container on the package's own chip count (4 chips in the one real run) |
 | 3 | Full model | Skipped by design on the weights-only path. Never run on the full-port path |
-| 4 | Multichip, then shrink to fewer chips; on the weights-only path, one test per chip configuration | In progress on Hemmingway-1 when this was written. No result yet |
-| 5 | Serving integration | Skipped by design on the weights-only path. Stage 4's serve-and-compare tests boot each configuration, compare the output with the CPU reference and check that it is coherent. Never run on the full-port path |
-| 6 | Qualitative check and benchmark | Skipped on the weights-only path, because the operator deferred it. Stage 4's coherence check is the only quality evidence there. Never run on the full-port path |
-| 7 | Package and container build | Passed once, on Hemmingway-1 (weights-only path, `--package-format v6`): staged a 2-chip and a 1-chip v6 thin bundle with the real `tt-model package-thin`, installed a copy of the 2-chip bundle and booted it from empty caches on a leased board (ready in 2034 s, top-1 agreement 0.9375 with the CPU reference). The 1-chip bundle is staged and not boot-checked. No 4-chip package is built, because the 4-chip packages on the development machine are container packages. Every other run records the stage as skipped |
-| 8 | Operator bundle | Passed once, on Hemmingway-1, with an open-ended skill: wrote `RESULTS.md`, `RISKS.md`, `card.md`, the packages and the publish commands as text, and the run ended at "ready for operator review". Nothing was published. Failed twice on the second model: the agent read stage 7's files with 33 `cat` commands and wrote nothing for 20 turns. Since 2026-10-04 a template script (`build_bundle.py`) builds the whole bundle from the run's files and the agent reviews it; tested with fakes, not yet run on a real run |
+| 4 | Multichip, then shrink to fewer chips; on the weights-only path, one test per chip configuration | Passed on 2 and 4 chips (1 chip optional) for Clef, RAG-Gate-27B, bytkim, AREX-2 and CJK-Trim. The 4-chip test has hit fabric timeouts that a reset does not always clear (issue 26). Did not pass for a container-only package with no 2-chip configuration (issue 68) |
+| 5 | Serving integration | Skipped by design on the weights-only path, because stage 4's tests boot each configuration and compare the output with the CPU reference. Never run on the full-port path |
+| 6 | Qualitative check and benchmark | Skipped on the weights-only path. The full benchmark that exists (bytkim) was run by hand with `orchard.bench_session` and is described in `docs/run-logs`. Never run on the full-port path |
+| 7 | Package and container build | Supervisor code, opt-in with `--package-format v6`, or run on a finished run with `tt-orchard package`. Staged and boot-checked packages for Hemmingway-1, openthai, Clef, RAG-Gate-27B, bytkim, AREX-2 and CJK-Trim, with a gate that checks the card against the package's files (drafter state, borrowed generation config, grafted head, reported scores kept apart from measured ones). A v5.1 container package is refused at start |
+| 8 | Operator bundle | A template script (`build_bundle.py`) builds `RESULTS.md`, `RISKS.md`, `card.md`, the packages and the publish commands as text from the run's files; the agent reviews it. Every run in the table that reached the end passed it. Nothing is published by the harness |
 
 The full-port path (a model that needs new model code) has never run. When stage 0 chooses it, the
 supervisor pauses before stage 2 for the operator.
@@ -167,11 +185,11 @@ against 0.47 for a runtime that applied a causal mask).
 | Tier config loader | `orchard/tiers.py` | Built and tested. Used on the real run |
 | Lease adapters (gozer, single tenant) | `orchard/adapters/` | Built and tested. The gozer adapter was used on the real run. The single-tenant adapter is tested with fakes only and the command line does not offer it |
 | Server control and canary | `orchard/server.py`, `orchard/canary.py` | Built and tested. Used on the real run |
-| Park and restore | `orchard/handoff.py` | Built and tested. The park check ran once on one real board with fake model servers. No real model has been parked during a run yet |
+| Park and restore | `orchard/handoff.py` | Built and tested. The park check ran on one real board with fake model servers, and real runs park and restore the coder for every 4-chip test (the first was Clef's) |
 | Watchdog | `orchard/watchdog.py`, `orchard/transcripts.py` | Built and tested. Fired on a real agent during the run. The near-duplicate command check (command shapes, 4 turns) was added after the second-model run and has not fired on a real agent yet |
 | Stage machine, agent loop, supervisor | `orchard/stages.py`, `orchard/agent.py`, `orchard/context.py`, `orchard/supervisor.py` | Built and tested. Ran stages 0 to 2 on the real run |
 | Crash recovery | `orchard/supervisor.py`, `orchard/handoff.py` | Tested with fakes by killing the supervisor after every ledger event. On hardware: `kill -9`, restart, resume worked at least four times on the real run |
-| Stage skills | `orchard/skills/` | Drafts. `delta-triage`, `reference-gate` and `weights-swap-check` have been used on the real run. `weights-swap-configs` has been used on the real run; stage 8 is now supervisor code that runs `operator-bundle-templates/build_bundle.py`. `serving-check` has never run. `delta-triage`, `reference-gate` and `operator-bundle` were rewritten on 2026-10-04 to run template scripts (`delta-triage-templates/`, `reference-gate-templates/`, `operator-bundle-templates/`); the rewritten versions have not run on a real run |
+| Stage skills | `orchard/skills/` | The skills for stages 0, 1, 2, 4, 7 and 8 and the template scripts they copy have run on real runs. `serving-check` (stage 5) has never run, because stage 5 is skipped on the weights-only path. Stage 8 and stage 7 are supervisor code that runs `operator-bundle-templates/build_bundle.py` and `package.py` |
 | Packaging (stage 7) | `orchard/package.py`, `orchard/package_card.py`, `orchard/package_cmd.py`, `orchard/package_templates/` | Built and tested with fakes, then run once on hardware (Hemmingway-1; see stage 7 above). Wired into the stage table as opt-in supervisor code. `tt-orchard package` and `package-card` run the same steps on a finished run and record them in its ledger. A v5.1 container package is refused at start |
 | Bundle and package scrub | `orchard/scrub.py` | Built and tested with fakes. The stage 8 gate calls it; it ran once on the real run |
 | CPU sizing tool | `orchard/sizing.py` | Built and tested against a fake server. It has not been run against a real ollama. The CPU numbers in this README come from the run log |
@@ -179,15 +197,24 @@ against 0.47 for a runtime that applied a causal mask).
 | Outcome classes, blocked end state | `orchard/classes.py`, `orchard/blocked.py` | Built and tested with fakes. Both were used by the Clef run: the class `weights+sidecar` through stages 0, 2, 4 and 8, and the blocked end state twice, with a retry each time |
 | Sidecar parity | `orchard/skills/sidecar-parity-templates/` | Built by a forked agent and run on one leased board with Clef (15 of 16 questions agree), then run inside the supervisor's stage 2 after a swap check in the same lease with the same numbers |
 | Role-fit test | `orchard/rolefit.py` | Built and tested with fakes, then run against Qwen3-Coder-Next on one board (result in `docs/run-logs`) |
+| Container package as the nearest model | `orchard/swap_draft.py`, `orchard/supervisor.py`, `orchard/nearest.py` | Built and tested with fakes, then run once on hardware: stage 2 served a fine-tune through a 4-chip container package. Stage 4 for such a package is issue 68 |
+| Vocabulary trim and dtype tolerance | `orchard/skills/delta-triage-templates/`, `orchard/skills/weights-swap-templates/prepare_swap.py` | Ran on real chips: CJK-Trim (supervised unattended run) and `sabi-noema` (a hand swap) |
+| Graft trial (a drafter for a model with no `mtp.*` tensors) | `orchard/graft_trial.py`, `orchard/skills/weights-swap-templates/` | Built and tested with fakes. The by-hand version of the same graft ran on AREX-2 and its package is public; the supervisor's trial has not run on hardware |
+| Prompt suite and fidelity gates | `orchard/prompt_suite.py`, `orchard/skills/weights-swap-templates/prompt_suite.json` | Built and tested. Run on real chips for CJK-Trim, `sabi-noema` and the container run, with no control; no bar is measured (issue 15) |
+| Benchmark tooling | `orchard/bench_session.py`, `orchard/bench_proxy.py`, `orchard/bench_control.py`, `orchard/bench_rerun.py`, `orchard/toolcall_bench.py`, `orchard/lm_eval_tasks/` | Ran for the bytkim and AREX-2 benchmarks (9.8 hours of chip time for bytkim). Run by hand, not by the supervisor |
+| Package cards and gates | `orchard/package_card.py`, `orchard/card_use.py`, `orchard/package_cmd.py` | Used for the published cards. The gate checks the card against the files the package ships |
+| Classification bench | `orchard/classify_bench.py`, `docs/classify-bench/` | Ran on 42 models without downloading weights; 39 of 40 agree with three blind labelers |
+| Preflight checks | `orchard/preflight.py`, `orchard/bus.py`, `orchard/sfpi.py`, `orchard/skillsfresh.py`, `orchard/dlprogress.py` | Tests with fakes; the disk, base and cpu rows blocked real runs correctly; the sfpi row is fitted to three observations. The bus row has run only on a healthy box |
+| Browser UI | `orchard/webui.py`, `orchard/web/` | Used against real runs in a browser; the browser tests run where `playwright` and Chrome exist |
+| Kernel probe (can the local coder write a tt-lang kernel) | `orchard/kernelprobe.py`, `orchard/opinventory.py`, `orchard/ttlang_env.py` | Ran on hardware for 4 ops: `add` and `silu_mul` passed, `rmsnorm` and `linear_scan` did not. Not part of a bring-up |
 | Hardware-check driver | `orchard/hardware_check.py` | Ran on both boards of the development machine, 22 to 24 checks passed per run |
 | Park-check driver | `orchard/park_check.py` | Ran once, on one board, with fake model servers. Exit 0, two resets of 41.7 s each (measured) |
 
 ### Tests
 
-The suite has 2515 passing tests and 1 skipped test (measured with
-`python3 -m pytest -q -p no:cacheprovider`). It needs no hardware and no network. The skipped test
-replays local agent transcripts and runs only when `ORCHARD_REPLAY=1` is set and those transcripts
-exist.
+The suite has 7,177 passing tests and 3 skipped tests (measured with `python3 -m pytest -q`, about 15 minutes). It needs no hardware and
+no network. The three skipped tests are opt-in: one replays local agent transcripts (`ORCHARD_REPLAY=1`), one asks the real Hugging Face hub and GitHub
+(`ORCHARD_LIVE_RESEARCH=1`), and the browser tests of the web page run only where the `playwright` package and Chrome are present (issue 31).
 
 ## 2. What you need
 
@@ -230,6 +257,12 @@ All numbers are for a Qwen3.8-27B-sized model.
 | Free space before stage 4 on the weights-only path | 110 GB (choice), plus 40 GB again before each configuration's test (choice) |
 | Free space before stage 7 (packaging) | 80 GB (choice): an installed copy of the package, its venv and a fresh tensor cache |
 
+The preflight adds these up (the model, the nearest model's snapshot when it must be fetched, and the stage 4 margin) and blocks as
+`disk-full` when the disk is short. For a 30B-class model whose base is also missing the sum was 202 GB. The block message lists the largest hub
+models and tensor caches on the short disk so you can see what to remove; the harness removes none of the hub models.
+`bringup --prune-caches` removes only the oldest tensor caches that no unfinished run uses, and only enough to fit (issue 27 tracks
+deleting a configuration's cache after its test passes).
+
 Each chip configuration needs its own tensor cache. The supervisor checks free space only on the
 filesystem that holds the run directory. On the development machine the root disk was 99% full, so
 the run directory, the tensor caches and the model weights all lived on a second, larger disk. Put
@@ -258,7 +291,7 @@ cd tt-orchard
 python3 -m pytest -q
 ```
 
-Expect every test to pass except 1 skipped. The suite took about 6 minutes on the development
+Expect every test to pass except 3 skipped (opt-in tests; see Tests above). The suite took about 15 minutes on the development
 machine (measured). The tests use fake hardware,
 fake model servers and fake gozer state. They touch no device and no network. If a test fails
 here, stop and find out why before going further.
@@ -294,6 +327,11 @@ model and your hardware:
 - 2 chips: the bundle `episod/qwen3.8-27b-dflash2-p300`.
 - 4 chips: the container package `changh95/qwen3.8-27b-p300x2` with profile `batch32`.
 
+A container (v5.1) package can also be the nearest model for stage 2. Most catalog container packages report 4 chips (2 boards, as
+their `p300x2` names say), and stage 2 then serves the new weights on 4 chips (the coder's board is parked for the test). The
+preflight says whether exactly one installed package serves the base on the stage's chip count. Stage 4 does not yet handle a package that has no
+smaller configuration (issue 68). A v6 bundle that fits is always preferred.
+
 ```bash
 tt-model pull <PACKAGE_ID>
 tt-model list
@@ -312,17 +350,23 @@ ollama pull qwen3-coder:30b
 curl -s http://127.0.0.1:11434/v1/models
 ```
 
-The second command must list `qwen3-coder:30b`. The supervisor never starts or stops ollama.
+The second command must list `qwen3-coder:30b`. The supervisor never starts or stops ollama. The preflight has a `cpu` row that
+blocks a run when ollama does not answer or does not list the tier's model (a machine that has been suspended often has ollama
+down). If the models live outside `~/.ollama`, start it with `OLLAMA_MODELS=<DIR> ollama serve`.
 
 ### 3.5 Download the new model's weights
 
-Download the model before the run. The agents get no Hugging Face token and should run offline.
+`tt-orchard bringup <MODEL_ID>` downloads the weights itself (and the nearest model's, when that snapshot is missing), shows a
+progress bar, and records the revision it fetched. The agents get no Hugging Face token and run offline. A gated model is a block, because
+the harness never uses your token: download it yourself, then run `bringup` again.
+
+To use the lower-level `run` command, or to fetch ahead of time, download by hand:
 
 ```bash
 hf download <MODEL_ID> --cache-dir <HF_HOME_DIR>/hub
 ```
 
-Note the snapshot directory it prints. You pass it to the run as `--input model=...`.
+Note the snapshot directory it prints. You pass it to `run` as `--input model=...`.
 
 ### 3.6 Write the tier config
 
@@ -961,6 +1005,7 @@ does not change.
 | `weights-only` | The nearest supported model's architecture; only the weights differ | `weights-only` | Nothing: the stages above |
 | `weights+sidecar` | `weights-only` for the backbone, plus a weights file outside the backbone shards that the nearest model lacks (a task head, for example) | `weights-only` | Stage 2 also measures the sidecar's parity (below) |
 | `vocab-trim` | The nearest model with vocabulary rows removed: a smaller `vocab_size`, embedding and `lm_head` whose rows are rows of the nearest model's, and nothing else different | `weights-only` | Stages 2 and 4 serve it with the model's own `vocab_size` in the served `config.json` and the speculative drafter off; the gates check both |
+| `restricted-head` | The backbone lines up and a sidecar matrix is a copy of rows of the nearest model's `lm_head` (the answer rows of a classifier-style model) | `full-port` | The run stops after stage 0 (block code `restricted-head`), because how the rows are read is in the model's own code. A person can ask for the parity report in [docs/restricted-head-parity.md](docs/restricted-head-parity.md) |
 | `full-port` | The model needs new model code | `full-port` | An unattended run ends blocked (`needs-new-model-code`); an attended run pauses before stage 2 |
 | `unknown` | Stage 0 could not decide: an unreadable or overlapping sidecar, or headers that would not parse | `full-port` | Nothing unproven runs as weights-only |
 
@@ -1021,8 +1066,9 @@ reading above applies, so a run with no control cannot show that the weights are
 and the control's prompt-suite hash have to match, or the control is refused.
 
 `python3 -m orchard.prompt_suite evidence/swap-check.json` prints what the gate reads, including the findings that
-do not fail anything. Every number in it is a provisional choice (`SUITE_*` in `orchard/defaults.py`): no chip has run
-the suite yet, and the bars have to be set from measured controls (issue 15).
+do not fail anything. Every number in it is a provisional choice (`SUITE_*` in `orchard/defaults.py`): the suite has run on real chips
+(CJK-Trim, `sabi-noema` and the container run, each with no control and no blocking finding), and the bars have not been set from
+measured controls (issue 15).
 
 ### 5.4 Recover after a crash
 
@@ -1531,6 +1577,7 @@ Each of these happened on the development machine. Details are in the
 | [`docs/superpowers/plans/`](docs/superpowers/plans/) | The implementation plans |
 | [`docs/runbooks/hardware-validation.md`](docs/runbooks/hardware-validation.md) | Runbook for the hardware checks, the park check, the first run and stage 4 |
 | [`docs/runbooks/driver-build-report.md`](docs/runbooks/driver-build-report.md), [`docs/runbooks/driver-review-findings.md`](docs/runbooks/driver-review-findings.md) | How the hardware-check driver was built and what its safety review found |
+| [`docs/README.md`](docs/README.md), [`docs/proofs.md`](docs/proofs.md) | The documentation index, and each claim in this README with its evidence and what has not been shown |
 | [`docs/run-logs/2026-10-hemmingway-1.md`](docs/run-logs/2026-10-hemmingway-1.md) | The log of the first real run |
 | [`docs/analysis/qwen3-5-122b-analysis.md`](docs/analysis/qwen3-5-122b-analysis.md) | Analysis: Using Qwen3.5-122B-A10B with tt-orchard |
 | [`docs/analysis/qwen3-5-122b-comparison.html`](docs/analysis/qwen3-5-122b-comparison.html) | Visual comparison: 27B vs 122B model requirements |
