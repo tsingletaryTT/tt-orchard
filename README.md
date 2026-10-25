@@ -147,9 +147,9 @@ The suite has 7,177 passing tests and 3 skipped (measured with `python3 -m pytes
 
 | # | Stage | On real hardware |
 |---|---|---|
-| 0 | Intake and delta triage against the nearest supported model | A template script (`delta_triage.py`) measures from safetensors headers and drafts `delta.json`; the agent reviews it. Ran on every model in the table above and decided the class each time: `weights-only` (most), `weights+sidecar` (Clef), `vocab-trim` (CJK-Trim) and `restricted-head` (pplx-decider). The vocabulary check takes about 8 seconds on a 27B model. A classification bench ran it on 42 models without downloading weights and matched the majority of three blind model labelers on 39 of 40 |
-| 1 | Environment and CPU reference | A template script (`reference_gate.py`) loads the model on CPU, runs four checks and drafts `reference.json`. The gate compares the agent's file with the script's own evidence, so a reference whose weights did not load fails. Passed on every run in the table, in 4 to 11 minutes |
-| 2 | Functional decoder on one chip; on the weights-only path, a weights swap on one board | Passed for every weights-only, sidecar and vocab-trim model: the chips agreed with the CPU reference on 30 to 32 of 32 tokens (and, on runs since 2026-10-23, the eight-prompt suite found nothing blocking). For a model whose nearest model has only a container package, it serves through the container on the package's own chip count (4 chips in the one real run) |
+| 0 | Intake and delta triage against the nearest supported model | A template script (`delta_triage.py`) measures from safetensors headers and drafts `delta.json`; the agent reviews it. Ran on every model in the table above except Hemmingway-1 (whose run used the earlier open-ended skill, with the agent writing its own comparison scripts) and decided the class each time: `weights-only` (most), `weights+sidecar` (Clef), `vocab-trim` (CJK-Trim) and `restricted-head` (pplx-decider). The vocabulary check takes about 8 seconds on a 27B model. A classification bench ran it on 42 models without downloading weights and matched the majority of three blind model labelers on 39 of 40 |
+| 1 | Environment and CPU reference | A template script (`reference_gate.py`) loads the model on CPU, runs four checks and drafts `reference.json`. The gate compares the agent's file with the script's own evidence, so a reference whose weights did not load fails. Passed on the runs since Hemmingway-1 (which used the earlier open-ended skill), in 4 to 11 minutes |
+| 2 | Functional decoder on one chip; on the weights-only path, a weights swap on one board | Passed for every weights-only, sidecar and vocab-trim model: the chips agreed with the CPU reference on 29 to 32 of 32 tokens (and, on runs since 2026-10-23, the eight-prompt suite found nothing blocking). For a model whose nearest model has only a container package, it serves through the container on the package's own chip count (4 chips in the one real run) |
 | 3 | Full model | Skipped by design on the weights-only path. Never run on the full-port path |
 | 4 | Multichip, then shrink to fewer chips; on the weights-only path, one test per chip configuration | Passed on 2 and 4 chips (1 chip optional) for Clef, RAG-Gate-27B, bytkim, AREX-2 and CJK-Trim. The 4-chip test has hit fabric timeouts that a reset does not always clear (issue 26). Did not pass for a container-only package with no 2-chip configuration (issue 68) |
 | 5 | Serving integration | Skipped by design on the weights-only path, because stage 4's tests boot each configuration and compare the output with the CPU reference. Never run on the full-port path |
@@ -241,7 +241,7 @@ Everything below was checked on the development machine only. Items marked
 | docker | Runs container packages |
 | ollama | Serves the CPU tier |
 | git | Getting the code |
-| Hugging Face access | Downloading the new model's weights before the run. The run itself works offline |
+| Hugging Face access | Downloading the new model's weights before the run. After the download the stages need no Hugging Face access; the harness does not isolate the network |
 
 ### Disk
 
@@ -360,7 +360,7 @@ down). If the models live outside `~/.ollama`, start it with `OLLAMA_MODELS=<DIR
 ### 3.5 Download the new model's weights
 
 `tt-orchard bringup <MODEL_ID>` downloads the weights itself (and the nearest model's, when that snapshot is missing), shows a
-progress bar, and records the revision it fetched. The agents get no Hugging Face token and run offline. A gated model is a block, because
+progress bar, and records the revision it fetched. The agents' environment carries no Hugging Face token or other credential. It is not network-isolated: the command runner refuses most network writes and allows read-only fetches. A gated model is a block, because
 the harness never uses your token. `bringup` blocks a gated model even when its weights are already cached, so download it yourself and use the lower-level `run` command with `--input model=<SNAPSHOT_DIR>` (section 4.2).
 
 To use the lower-level `run` command, or to fetch ahead of time, download by hand:
