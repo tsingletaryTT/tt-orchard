@@ -26,6 +26,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from unittest import mock
 
 from orchard.ledger import Ledger
 from orchard.package import publish_commands
@@ -222,8 +223,11 @@ def make_run(tmp_path: Path, *, shared_cache=False, marker=MODEL, stage7=True, p
         if publish:
             write(s / "7" / "PUBLISH_COMMANDS.txt",
                   publish_commands(profiles, namespace="episod", license_id="cc-by-nc-4.0"))
-    # the ledger
-    with Ledger(run / "ledger.jsonl") as led:
+    # the ledger. Every entry gets one fixed stamp: Ledger reads the real clock, and the wall-time row is last minus
+    # first, so a second boundary inside this block changed the golden text (issue 52).
+    import datetime
+    fixed = datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc).timetuple()
+    with mock.patch("orchard.ledger.time.gmtime", lambda *a: fixed), Ledger(run / "ledger.jsonl") as led:
         led.append("run_start", None, model=MODEL, required_chips=[2, 4],
                    package=({"format": "v6", "namespace": "episod",
                              "models_root": str(op / ".cache" / "tt-model" / "models")}
@@ -771,6 +775,17 @@ def test_text_copied_from_the_inventory_is_redacted(tmp_path):
 # ---- fix round 1: golden text, malformed inventories, row details ----------------------------------------
 
 GOLDEN = Path(__file__).parent / "fixtures" / "operator_bundle_results_golden.md"
+
+
+def test_the_golden_text_does_not_depend_on_the_clock_ticking_while_the_ledger_is_written(tmp_path, monkeypatch):
+    """Issue 52: the ledger stamps each entry with the real clock, the wall-time row is last minus first, and a
+    second boundary inside make_run turned "0 s" into "1 s". Here the clock gains a second at every stamp."""
+    import time as _time
+    import orchard.ledger as ledger_mod
+    real_gmtime = _time.gmtime
+    ticks = iter(range(10**6))
+    monkeypatch.setattr(ledger_mod.time, "gmtime", lambda *a: real_gmtime(1_700_000_000 + next(ticks)))
+    assert results_text(tmp_path) == GOLDEN.read_text()
 
 
 def test_results_for_a_run_with_no_inventory_match_the_golden_text_exactly(tmp_path):
