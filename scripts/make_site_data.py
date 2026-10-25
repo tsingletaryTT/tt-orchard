@@ -26,20 +26,27 @@ ANSI = re.compile(r"\x1b\[[0-9;]*m")
 LINE = re.compile(r"^(\d\d):(\d\d):(\d\d)\s+(orchardist|grafter|head grower|seasonal hand|sheepdog)\s+(.*)$")
 
 
-SECRETS = (                        # beyond orchard.scrub's token patterns: an assignment or header that carries a secret, and common key shapes
-    (re.compile(r"(?i)\bBearer\s+\S+"), "Bearer <redacted>"),
-    (re.compile(r"(?i)\b(token|secret|password|passwd|api[_-]?key|authorization)(\s*[:=]\s*)\S+"), r"\1\2<redacted>"),
-    (re.compile(r"\bsk-[A-Za-z0-9_-]{16,}"), "<redacted>"),
-    (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "<redacted>"),
+# A message that touches a credential is withheld whole. Redacting the value alone cannot be done safely: quoted passwords with spaces, JSON fields,
+# `Authorization` schemes and PEM bodies each have their own boundaries, and a token can be split across wrapped lines. The replay loses a line
+# and keeps its time and actor; nothing of the credential's neighbours is published.
+SENSITIVE = (
+    re.compile(r"(?i)\b(secret|password|passwd|api[_-]?key|authorization|bearer)\b"),
+    re.compile(r"(?i)\btokens?\b[\"']?\s*[:=]"),                 # an assignment, not the word in "248320 tokens"
+    re.compile(r"-----BEGIN [A-Z ]*(PRIVATE KEY|CERTIFICATE)-----"),
+    re.compile(r"\bsk-[A-Za-z0-9_-]{16,}"),
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
 )
+WITHHELD = "(line withheld: it mentioned a credential)"
+
+
+def is_sensitive(text: str) -> bool:
+    return any(p.search(text) for p in SENSITIVE) or any(p.search(text) for _, p in scrub.TOKEN_PATTERNS)
 
 
 def scrub_text(text: str, run: Path) -> str:
     host, user = socket.gethostname(), Path.home().name
-    for _, pattern in scrub.TOKEN_PATTERNS:
-        text = pattern.sub("<redacted>", text)
-    for pattern, repl in SECRETS:
-        text = pattern.sub(repl, text)
+    if is_sensitive(text):
+        return WITHHELD
     text = text.replace(str(run), "<run>").replace(str(Path.home()), "~")
     text = re.sub(r"/home/[^\s]*", "~", text)
     text = re.sub(re.escape(host), "this-box", text, flags=re.I)

@@ -55,16 +55,38 @@ def test_a_first_line_that_is_not_at_midnight_starts_at_zero():
     assert [r["t"] for r in out] == [0, 7200]
 
 
-def test_credentials_in_narration_are_redacted_whole_message_included():
+def withheld(*lines):
+    return rows(*lines)[0]["text"]
+
+
+def test_a_message_that_touches_a_credential_is_withheld_whole():
     hf = "hf_" + "A" * 36
-    gh = "ghp_" + "b" * 40
-    out = rows(f"10:00:00  grafter   ran curl with token={hf}", f"{PAD}and Authorization: Bearer abc.def.ghi then {gh} and sk-" + "x" * 24 + " api_key=hunter2")
-    text = out[0]["text"]
-    for leak in (hf, gh, "abc.def.ghi", "hunter2", "sk-" + "x" * 24):
-        assert leak not in text, leak
-    assert "<redacted>" in text
+    for text in (f"ran curl with token={hf}", f"saw {hf} in the output", "ghp_" + "b" * 40, "key sk-" + "x" * 24,
+                 "AKIA" + "A" * 16, "Authorization: Basic dXNlcjpwYXNz", 'password: "correct horse battery staple"',
+                 '{"api_key": "abc 123"}', "Bearer abc.def.ghi", "client secret was rotated"):
+        assert withheld(f"10:00:00  grafter   {text}") == msd.WITHHELD, text
 
 
-def test_ordinary_words_that_contain_token_are_not_redacted():
-    out = rows("10:00:00  orchardist   the tokenizer has 248320 tokens; no password was asked")
-    assert out[0]["text"] == "the tokenizer has 248320 tokens; no password was asked"
+def test_a_pem_block_split_across_wrapped_lines_is_withheld_whole():
+    out = rows("10:00:00  grafter   found a key", f"{PAD}-----BEGIN RSA PRIVATE KEY-----", f"{PAD}MIIEowIBAAKCAQEA", f"{PAD}-----END RSA PRIVATE KEY-----")
+    assert out[0]["text"] == msd.WITHHELD and "MIIE" not in out[0]["text"]
+
+
+def test_a_token_split_across_wrapped_lines_is_withheld():
+    out = rows("10:00:00  grafter   used token=hf_" + "A" * 10, f"{PAD}" + "B" * 26)
+    assert out[0]["text"] == msd.WITHHELD
+
+
+def test_ordinary_words_that_contain_token_are_kept():
+    out = rows("10:00:00  orchardist   the tokenizer has 248320 tokens and a token budget")
+    assert out[0]["text"] == "the tokenizer has 248320 tokens and a token budget"
+
+
+def test_a_withheld_line_keeps_its_time_and_actor():
+    out = rows("10:00:00  orchardist   a", "10:00:07  grafter   password: x")
+    assert out[1]["t"] == 7 and out[1]["actor"] == "grafter" and out[1]["text"] == msd.WITHHELD
+
+
+def test_the_word_credentials_alone_is_kept():
+    out = rows("10:00:00  orchardist   operator accepted visible credentials: --accept-credentials-visible")
+    assert out[0]["text"] == "operator accepted visible credentials: --accept-credentials-visible"
