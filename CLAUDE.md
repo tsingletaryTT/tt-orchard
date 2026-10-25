@@ -2115,3 +2115,7 @@ Prompt (operator): "while you wait are there new issues to file or resolve?" dur
   `disk-full` detail says they are the largest and that the harness removes none of the hub models. `safe_disk_hints` gives no hints when the listing fails, so a hint never blocks.
 - Tests first (`tests/test_disk_hints.py`, 9). 10 mutations, all red after one survivor (the 1 GB floor was masked by the cap of six) and one weak test (the failure path was read from source) were fixed.
 - Not done: the rest of issue 27 (delete a configuration's cache after its test passes; reuse stage 2's cache at 2 chips). That needs a setting the operator sees, as the issue says.
+- Review fixes (Copilot, PR 65), all three real, each reproduced by a failing test first: (1) a hub model's blobs are links into a shared store, and `lstat` counted only the links, so large models fell under the 1 GB floor;
+  sizes now follow links and count each file once by device and inode. (2) The exclusion applied to hub directories only; the model's and its base's tensor caches are left out too, comparing repository ids without the `@revision`
+  the marker carries. (3) The six-entry limit was applied before the short disk was known, so hub models could hide every tensor-cache hint when only the cache disk was full; hints carry their disk and `check_disk` keeps the short
+  disks' hints (one shared disk keeps both) before it limits to six. 8 mutations, all red (the limit mutation first used a wrong anchor and was rerun).

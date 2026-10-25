@@ -116,37 +116,46 @@ HINT_COUNT, HINT_MIN_GB = 6, 1.0
 
 
 def _dir_gb(d: Path) -> float:
-    total = 0
+    """Bytes under `d` in GB. A link counts as the file it reaches (a hub model's blobs are links into a shared store) and each
+    file counts once, by device and inode."""
+    total, seen = 0, set()
     for top, _, files in os.walk(d):
         for f in files:
             try:
-                total += os.lstat(os.path.join(top, f)).st_size       # lstat: a snapshot's links are not counted twice
+                st = os.stat(os.path.join(top, f))
             except OSError:
                 continue
+            if (st.st_dev, st.st_ino) not in seen:
+                seen.add((st.st_dev, st.st_ino))
+                total += st.st_size
     return total / 1e9
 
 
-def disk_hints(hf_home, cache_root, exclude) -> list[tuple[str, float]]:
-    """The largest Hugging Face hub models and tensor caches, biggest first: (name, GB). Read only.
-    `exclude` holds the model ids this run needs (the model and its base), which are not offered for removal."""
-    skip = {m.replace("/", "--") for m in exclude}
-    found: list[tuple[str, float]] = []
+def _repo_of(model: str) -> str:
+    return model.split("@", 1)[0].strip()
+
+
+def disk_hints(hf_home, cache_root, exclude) -> list[tuple[str, float, str]]:
+    """Every Hugging Face hub model and tensor cache of at least HINT_MIN_GB, biggest first: (name, GB, disk), where disk is
+    `hf_home` or `cache_root`. Read only. `exclude` holds the model ids this run needs (the model and its base); neither their hub
+    directories nor their tensor caches (whose marker may carry an `@revision`) are offered. check_disk keeps the hints of the short disks."""
+    skip = {_repo_of(m) for m in exclude}
+    found: list[tuple[str, float, str]] = []
     hub = Path(hf_home) / "hub"
     if hub.is_dir():
         for d in hub.glob("models--*"):
-            name = d.name[len("models--"):]
-            if name in skip:
+            repo = d.name[len("models--"):].replace("--", "/", 1)
+            if repo in skip:
                 continue
-            found.append((name.replace("--", "/", 1), _dir_gb(d / "blobs") if (d / "blobs").is_dir() else _dir_gb(d)))
+            found.append((repo, _dir_gb(d / "blobs") if (d / "blobs").is_dir() else _dir_gb(d), "hf_home"))
     from orchard.caches import KERNEL_MODEL, local_caches
     for c in local_caches(cache_root):
-        if c.model != KERNEL_MODEL:
-            found.append((f"tensor cache {c.model}", c.gb))
-    found = [(n, round(g, 1)) for n, g in found if g >= HINT_MIN_GB]
-    return sorted(found, key=lambda t: -t[1])[:HINT_COUNT]
+        if c.model != KERNEL_MODEL and _repo_of(c.model or "") not in skip:
+            found.append((f"tensor cache {c.model}", c.gb, "cache_root"))
+    return sorted(((n, round(g, 1), label) for n, g, label in found if g >= HINT_MIN_GB), key=lambda t: -t[1])
 
 
-def safe_disk_hints(hf_home, cache_root, exclude) -> list[tuple[str, float]]:
+def safe_disk_hints(hf_home, cache_root, exclude) -> list[tuple[str, float, str]]:
     """disk_hints for the preflight: a hint is a convenience, so a failure gives none and never blocks the check."""
     try:
         return disk_hints(hf_home, cache_root, [m for m in exclude if m])
@@ -155,7 +164,7 @@ def safe_disk_hints(hf_home, cache_root, exclude) -> list[tuple[str, float]]:
 
 
 def check_disk(*, free_gb: dict[str, float], model_gb: float, local: bool, min_free_gb: float,
-               same_device: bool, hints: list[tuple[str, float]] | None = None) -> Check:
+               same_device: bool, hints: list[tuple[str, float, str]] | None = None) -> Check:
     """`free_gb` has the keys `hf_home` and `cache_root`. The download needs room on the hf_home disk
     unless the snapshot is already local; each cache disk needs the margin. Paths on one disk share it."""
     need = {"hf_home": (0.0 if local else model_gb) + min_free_gb, "cache_root": min_free_gb}
@@ -168,8 +177,10 @@ def check_disk(*, free_gb: dict[str, float], model_gb: float, local: bool, min_f
         data = {"short_gb": {label: round(need[label] - free_gb[label], 3) for label in need
                              if free_gb[label] < need[label]}, "same_device": same_device}
         detail = "; ".join(short)
-        if hints:
-            detail += (". Largest on these disks: " + ", ".join(f"{n} {g:.0f} GB" for n, g in hints)
+        # Only what lives on a short disk can clear the block; one shared disk takes both kinds.
+        useful = [(n, g) for n, g, label in (hints or []) if same_device or label in data["short_gb"]][:HINT_COUNT]
+        if useful:
+            detail += (". Largest on these disks: " + ", ".join(f"{n} {g:.0f} GB" for n, g in useful)
                        + ". The harness removes none of the hub models; --prune-caches removes only tensor caches no unfinished run uses")
         return Check("disk", BLOCK, detail, "disk-full", data)
     return Check("disk", OK, ", ".join(f"{label} {free_gb[label]:.0f} GB free (needs {need[label]:.0f})"
