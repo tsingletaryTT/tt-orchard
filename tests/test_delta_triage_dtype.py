@@ -145,3 +145,16 @@ def test_the_class_is_weights_only_for_the_sabi_noema_shape_of_difference():
 def test_a_dtype_difference_on_a_tensor_whose_shape_also_changed_is_not_tolerated():
     mt, bt = {"x": info("F32", [48])}, {"x": info("BF16", [49])}
     assert [x["tolerated"] for x in compare(mt, bt)["dtype_diffs_normalized"]] == [False]
+
+
+def _flat(text):
+    return " ".join(text.split())
+
+
+def test_the_stage_0_skill_and_the_template_docstring_state_the_dtype_exception():
+    """The skill is in the stage 0 agent's system message, so it must not say the old rule (Copilot, PR 58)."""
+    skill = _flat((TEMPLATE.parents[1] / "delta-triage.md").read_text())
+    doc = _flat(template().__doc__)
+    for text in (skill, doc):
+        assert "BF16, F16 or F32" in text and "equal shape" in text and "1,048,576" in text, text[:200]
+    assert "same shape and dtype" not in skill and "same shape and dtype" not in doc
