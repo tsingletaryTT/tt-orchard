@@ -582,3 +582,56 @@ def test_survivors_the_ledger_shows_as_cleared_do_not_block_a_restart_when_docke
     plain.on_sleep = None
     assert plain.run() == supervisor.EXIT_READY
     assert [e for e in plain.entries() if e["data"].get("decision") == "test lease released" and e["data"].get("lease_id") == stale.lease_id]
+
+
+# ---- the seventh look: a signal while the sweep is removing a container ------------------------------------------------------------
+
+class RemoveInterrupts(FakeContainers):
+    def remove(self, cid):
+        self.calls.append(("remove", cid))
+        raise supervisor.Interrupted("SIGTERM")
+
+
+def test_the_survivors_are_recorded_before_the_sweep_removes_anything(tmp_path):
+    """Copilot (PR 64): a signal during containers.remove() left the survivor state unset, so the shutdown could release the lease."""
+    r = container_rig(tmp_path)
+    r.containers = RemoveInterrupts([["c1", "c2"]])
+    try:
+        with Ledger((r.run_dir.mkdir(parents=True, exist_ok=True) or r.run_dir) / "ledger.jsonl") as led:
+            sup = bare_supervisor(r, led)
+            sup.test_lease = sup.test_adapter.acquire(2, "orchard:supervisor", "stage 2 test")
+            with pytest.raises(supervisor.Interrupted):
+                sup._sweep(2)
+            assert sup.surviving_containers == ["c1", "c2"]
+            recorded = [e for e in led.read() if e["data"].get("decision") == "test containers survived"]
+            assert recorded and recorded[-1]["data"]["containers"] == ["c1", "c2"]
+            assert sup._release_test_lease() is False and sup.test_lease is not None
+    finally:
+        r.close()
+
+
+def test_a_signal_during_container_removal_aborts_the_run_and_keeps_only_the_test_lease(tmp_path):
+    r = container_rig(tmp_path)
+    r.containers = RemoveInterrupts([["c1"]])
+    try:
+        assert r.run() == supervisor.EXIT_ABORTED
+        assert r.m.coder_running is False
+        assert len(r.m.leases) == 1
+        es = r.entries()
+        assert not [e for e in es if e["data"].get("decision") == "test lease released"]
+        assert [e for e in es if e["data"].get("decision") == "test containers survived"]
+    finally:
+        r.close()
+
+
+def test_a_sweep_that_removes_everything_leaves_a_cleared_record_naming_what_it_found(tmp_path):
+    r = container_rig(tmp_path, listings=[["c1"], []])
+    try:
+        with Ledger((r.run_dir.mkdir(parents=True, exist_ok=True) or r.run_dir) / "ledger.jsonl") as led:
+            sup = bare_supervisor(r, led)
+            sup._sweep(2)
+            cleared = [e for e in led.read() if e["data"].get("decision") == "test containers cleared"]
+            assert cleared and cleared[-1]["data"]["containers"] == ["c1"]
+            assert sup.surviving_containers == [] and sup._ledger_survivors() == []
+    finally:
+        r.close()

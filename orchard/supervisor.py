@@ -2213,6 +2213,10 @@ class Supervisor:
             return
         self.ledger.append("notice", n, what="a hardware test left containers running; stopping them",
                            containers=found, label=self.run_label)
+        # Recorded before anything is removed: a signal that lands in the middle of the removal must still find these containers
+        # remembered, in memory and in the ledger, until docker confirms an empty listing (_cleared).
+        self.surviving_containers = list(found)
+        self.ledger.append("decision", n, decision="test containers survived", containers=list(found), label=self.run_label)
         for cid in found:
             self.containers.remove(cid)
         left = self.containers.list(self.run_label)
