@@ -480,3 +480,105 @@ def test_a_finished_run_started_again_does_not_sweep(plain):
     plain.on_sleep = None
     assert plain.run() == supervisor.EXIT_READY
     assert plain.containers.calls == []
+
+
+# ---- the sixth look: the ledger-free release, and survivors remembered across a restart --------------------------------------------------
+
+def test_the_ledger_free_release_keeps_a_test_lease_a_container_still_uses(tmp_path):
+    """Copilot (PR 64): when the ledger cannot be written, _release_from_memory released the test lease without looking at the survivors."""
+    r = container_rig(tmp_path, listings=[["c1"]])
+    try:
+        with Ledger((r.run_dir.mkdir(parents=True, exist_ok=True) or r.run_dir) / "ledger.jsonl") as led:
+            sup = bare_supervisor(r, led)
+            sup.test_lease = sup.test_adapter.acquire(2, "orchard:supervisor", "stage 2 test")
+            with pytest.raises(supervisor.Blocked):
+                sup._sweep(2)
+            assert sup._release_from_memory() is False
+            assert sup.test_lease is not None and sup.test_lease.lease_id in r.m.leases
+    finally:
+        r.close()
+
+
+def test_the_ledger_free_release_still_releases_a_test_lease_when_nothing_survives(tmp_path):
+    r = container_rig(tmp_path, listings=[[]])
+    try:
+        with Ledger((r.run_dir.mkdir(parents=True, exist_ok=True) or r.run_dir) / "ledger.jsonl") as led:
+            sup = bare_supervisor(r, led)
+            lease = sup.test_adapter.acquire(2, "orchard:supervisor", "stage 2 test")
+            sup.test_lease = lease
+            assert sup._release_from_memory() is True
+            assert lease.lease_id not in r.m.leases
+    finally:
+        r.close()
+
+
+def survivors_recorded(rig, stale):
+    with Ledger(rig.run_dir / "ledger.jsonl") as led:
+        led.append("decision", 2, decision="test containers survived", containers=["c1"])
+
+
+def test_a_restart_with_docker_unavailable_keeps_a_lease_the_ledger_says_a_container_still_used(plain):
+    """Copilot (PR 64): the survivor state started empty after a restart, and an unavailable docker listing let recovery release the lease."""
+    plain.containers = FakeContainers([None])
+    stale = seed_stale_lease(plain)
+    survivors_recorded(plain, stale)
+    assert plain.run() == supervisor.EXIT_BLOCKED
+    es = plain.entries()
+    assert not [e for e in es if e["data"].get("decision") == "test lease released" and e["data"].get("lease_id") == stale.lease_id]
+    assert any("could not be asked whether the test containers" in str(e["data"].get("reason", "")) for e in es
+               if e["event"] == "notice" and e["data"].get("blocked"))
+
+
+def test_a_restart_with_docker_unavailable_and_no_known_survivor_goes_on(plain):
+    plain.containers = FakeContainers([None])
+    stale = seed_stale_lease(plain)
+    plain.on_sleep = None
+    assert plain.run() == supervisor.EXIT_READY
+    assert [e for e in plain.entries() if e["data"].get("decision") == "test lease released" and e["data"].get("lease_id") == stale.lease_id]
+
+
+def test_a_restart_that_finds_docker_clean_records_the_survivors_as_cleared_and_releases(plain):
+    plain.containers = FakeContainers([[]])
+    stale = seed_stale_lease(plain)
+    survivors_recorded(plain, stale)
+    plain.on_sleep = None
+    assert plain.run() == supervisor.EXIT_READY
+    es = plain.entries()
+    cleared = next(i for i, e in enumerate(es) if e["data"].get("decision") == "test containers cleared")
+    gave = next(i for i, e in enumerate(es) if e["data"].get("decision") == "test lease released" and e["data"].get("lease_id") == stale.lease_id)
+    assert cleared < gave
+
+
+def test_a_clean_sweep_with_nothing_ever_recorded_writes_no_cleared_decision(plain):
+    plain.containers = FakeContainers([[]])
+    seed_stale_lease(plain)
+    plain.on_sleep = None
+    plain.run()
+    assert not [e for e in plain.entries() if e["data"].get("decision") == "test containers cleared"]
+
+
+def test_a_sweep_that_blocks_records_the_survivors_and_one_that_clears_them_records_that(tmp_path):
+    r = container_rig(tmp_path, listings=[["c1"], ["c1"], ["c1"], []])
+    try:
+        with Ledger((r.run_dir.mkdir(parents=True, exist_ok=True) or r.run_dir) / "ledger.jsonl") as led:
+            sup = bare_supervisor(r, led)
+            with pytest.raises(supervisor.Blocked):
+                sup._sweep(2)
+            surv = [e for e in led.read() if e["data"].get("decision") == "test containers survived"]
+            assert surv and surv[-1]["data"]["containers"] == ["c1"]
+            sup.surviving_containers = []
+            sup._sweep(2)                                        # docker now lists nothing (the last listing repeats)
+            assert [e for e in led.read() if e["data"].get("decision") == "test containers cleared"]
+    finally:
+        r.close()
+
+
+def test_survivors_the_ledger_shows_as_cleared_do_not_block_a_restart_when_docker_is_unavailable(plain):
+    plain.containers = FakeContainers([None])
+    stale = seed_stale_lease(plain)
+    with Ledger(plain.run_dir / "ledger.jsonl") as led:
+        led.append("decision", 2, decision="test containers survived", containers=["c1"])
+        led.append("decision", 2, decision="test containers cleared", containers=["c1"])
+    plain.on_sleep = None
+    assert plain.run() == supervisor.EXIT_READY
+    assert [e for e in plain.entries() if e["data"].get("decision") == "test lease released" and e["data"].get("lease_id") == stale.lease_id]

@@ -680,7 +680,7 @@ class Supervisor:
                                    if now else "the test lease was kept: docker could not be asked about the test containers",
                                    lease_id=lease.lease_id, containers=list(self.surviving_containers))
                 return False
-            self.surviving_containers = []
+            self._cleared(None, list(self.surviving_containers))
         try:
             self.test_adapter.release(lease)
         except AdapterError as exc:
@@ -697,6 +697,9 @@ class Supervisor:
         ok = True
         for lease, is_coder in ((self.test_lease, False), (self.coder_lease, True)):
             if lease is None:
+                continue
+            if not is_coder and self.surviving_containers:
+                ok = False             # a container still uses these chips: its lease stays, the coder's is still released
                 continue
             try:
                 if is_coder and not self.coder.confirm_stopped().stopped:
@@ -2165,16 +2168,48 @@ class Supervisor:
                            returncode=result["returncode"], timed_out=result["timed_out"],
                            **evidence_record(self.run_dir, path))
 
+    def _ledger_survivors(self) -> list[str]:
+        """The test containers an earlier sweep of this run could not remove and nothing has since cleared (the ledger's last
+        "test containers survived" / "test containers cleared" decision). It lets a restart keep the protection of a lease whose
+        container was known to be running, when docker cannot be asked again."""
+        ids: list[str] = []
+        for e in self.ledger.read():
+            if e["event"] != "decision":
+                continue
+            what = e["data"].get("decision")
+            if what == "test containers survived":
+                ids = [str(c) for c in (e["data"].get("containers") or [])]
+            elif what == "test containers cleared":
+                ids = []
+        return ids
+
+    def _survived(self, n, ids: list[str], reason: str) -> None:
+        self.surviving_containers = list(ids)      # _release_test_lease and _release_from_memory keep the lease they run under
+        self.ledger.append("decision", n, decision="test containers survived", containers=list(ids), label=self.run_label)
+        self._block(n, reason, containers=list(ids))
+
+    def _cleared(self, n, known: list[str]) -> None:
+        self.surviving_containers = []
+        if known:
+            self.ledger.append("decision", n, decision="test containers cleared", containers=list(known), label=self.run_label)
+
     def _sweep(self, n: int) -> None:
         """Stop and remove any container this run's tests left running. A container that is
         still listed afterwards blocks the stage: releasing or resetting chips under it is
-        refused, and the operator decides."""
+        refused, and the operator decides. Containers an earlier sweep could not remove are
+        remembered in the ledger, so a restart that cannot ask docker blocks on them instead
+        of releasing their lease."""
+        known = self._ledger_survivors()
         found = self.containers.list(self.run_label)
         if found is None:
+            if known:
+                self._survived(n, known, "docker could not be asked whether the test containers an earlier sweep could not remove are "
+                                         "gone; no test lease was released and the coder was not restored")
             self.ledger.append("notice", n, what="docker could not be asked for test containers",
                                label=self.run_label)
             return
         if not found:
+            self._cleared(n, known)
             return
         self.ledger.append("notice", n, what="a hardware test left containers running; stopping them",
                            containers=found, label=self.run_label)
@@ -2184,13 +2219,12 @@ class Supervisor:
         if left is None:
             # Docker found containers and then could not say whether they are gone. Nothing confirms the chips are free, so the
             # originals stay remembered (_release_test_lease keeps the lease) and the run blocks.
-            self.surviving_containers = list(found)
-            self._block(n, "docker could not confirm that the test containers stopped after docker stop and rm; no test "
-                           "lease was released and the coder was not restored", containers=list(found))
+            self._survived(n, list(found), "docker could not confirm that the test containers stopped after docker stop and rm; no "
+                                           "test lease was released and the coder was not restored")
         if left:
-            self.surviving_containers = list(left)      # _release_test_lease keeps the lease they run under
-            self._block(n, "test containers are still running after docker stop and rm; no test "
-                           "lease was released and the coder was not restored", containers=left)
+            self._survived(n, list(left), "test containers are still running after docker stop and rm; no test "
+                                          "lease was released and the coder was not restored")
+        self._cleared(n, known or list(found))
 
 
 # ---- the command line ---------------------------------------------------------------------------
