@@ -89,10 +89,13 @@ def _served_repo(cfg: dict, run_dir, operator_home) -> tuple[str | None, str]:
     return None, ""
 
 
-def stage4_nearest_problems(run_dir, stage_dir, *, tt_model_root=None, operator_home=None) -> list[str]:
-    """nearest_problem for each configs/<N>/swap_config.json of stage 4, each message led by its chip count."""
+def stage4_nearest_problems(run_dir, stage_dir, *, tt_model_root=None, operator_home=None, counts=None) -> list[str]:
+    """nearest_problem for each configs/<N>/swap_config.json of stage 4, each message led by its chip count. `counts`, when given, are the chip
+    counts of the hardware-test plan: a configuration that is not in the plan is never run, so a leftover directory is not judged."""
     out = []
     for path in sorted(Path(stage_dir).glob("configs/*/swap_config.json")):
+        if counts is not None and path.parent.name not in {str(c) for c in counts}:
+            continue
         msg = nearest_problem(run_dir, path, tt_model_root=tt_model_root, operator_home=operator_home)
         if msg:
             out.append(f"the {path.parent.name}-chip configuration: {msg}")

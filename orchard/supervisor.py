@@ -1635,7 +1635,7 @@ class Supervisor:
         tests, problems = read_plan(stage_dir, required=self.required_chips, max_chips=spec.boards * CHIPS_PER_BOARD,
                                     budget_s=spec.budget_s, home=self.home)
         return tests, problems + swap_draft.stage4_nearest_problems(self.run_dir, stage_dir, tt_model_root=self.paths.tt_model_root,
-                                                                       operator_home=self.paths.operator_home)
+                                                                       operator_home=self.paths.operator_home, counts=[t.chips for t in tests])
 
     def _finished_check(self, spec, phase: str, stage_dir: Path):
         """What says a step's files are written and valid (AgentStep's `finished`): for one hardware
@@ -2080,7 +2080,8 @@ class Supervisor:
         n = spec.number
         tests = load_plan(stage_dir) if resumed else None
         if tests is not None and (wrong := swap_draft.stage4_nearest_problems(self.run_dir, stage_dir, tt_model_root=self.paths.tt_model_root,
-                                                                              operator_home=self.paths.operator_home)):
+                                                                              operator_home=self.paths.operator_home,
+                                                                              counts=[t.chips for t in tests])):
             return "fail", wrong, None             # a plan saved before the check existed can still name the wrong model's package
         if tests is None:
             self._draft(spec, stage_dir)

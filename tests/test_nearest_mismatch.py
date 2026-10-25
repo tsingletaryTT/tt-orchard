@@ -100,7 +100,7 @@ def test_the_stage_4_plan_the_supervisor_reads_carries_the_problem(tmp_path, mon
     write_delta(tmp_path)
     stage = tmp_path / "stages" / "4"
     write_cfg(stage / "configs" / "2" / "swap_config.json", "Qwen/Qwen3.8-27B")
-    monkeypatch.setattr(sup_mod, "read_plan", lambda *a, **k: ([], []))
+    monkeypatch.setattr(sup_mod, "read_plan", lambda *a, **k: ([type("T", (), {"chips": 2})()], []))
     sup = Supervisor.__new__(Supervisor)
     sup.run_dir, sup.required_chips, sup.home = tmp_path, None, tmp_path
     sup.paths = type("P", (), {"tt_model_root": tmp_path / "models", "operator_home": tmp_path / "op"})()
@@ -250,7 +250,7 @@ def test_a_resumed_stage_4_checks_its_saved_plan_before_any_hardware(tmp_path):
     sup.paths = type("P", (), {"tt_model_root": tmp_path / "models", "operator_home": tmp_path / "op"})()
     sup.lab = None
     spec = type("S", (), {"number": 4})()
-    sup_mod.load_plan = lambda d: ["a plan"]               # a saved plan exists
+    sup_mod.load_plan = lambda d: [type("T", (), {"chips": 4})()]       # a saved plan with a 4-chip test exists
     try:
         status, reasons, gate = sup._run_test_list(spec, stage, False, True)
     finally:
@@ -281,3 +281,28 @@ def test_a_relative_operator_home_is_read_from_the_run_directory(tmp_path):
     assert sd.nearest_problem(tmp_path, p, operator_home=home) is None                            # the same place, spelled from the run directory
     cfg["operator_home"] = "homes/elsewhere"; p.write_text(json.dumps(cfg))
     assert sd.nearest_problem(tmp_path, p, operator_home=home)
+
+
+def test_a_configuration_that_is_not_in_the_plan_is_not_judged(tmp_path):
+    """Review of PR 70: an optional configuration dropped from hw_tests.json, its directory left behind, must not reject the plan."""
+    write_delta(tmp_path)
+    stage = tmp_path / "stages" / "4"
+    write_cfg(stage / "configs" / "2" / "swap_config.json", "Qwen/Qwen3.8-27B")                 # left over, unused
+    write_cfg(stage / "configs" / "4" / "swap_config.json", "Qwen/Qwen3-Coder-30B-A3B-Instruct")
+    assert sd.stage4_nearest_problems(tmp_path, stage, counts=[4]) == []
+    assert len(sd.stage4_nearest_problems(tmp_path, stage, counts=[2, 4])) == 1
+    assert len(sd.stage4_nearest_problems(tmp_path, stage)) == 1                                 # no plan given: every directory, as before
+
+
+def test_the_plan_the_supervisor_reads_judges_only_its_own_counts(tmp_path, monkeypatch):
+    import orchard.supervisor as sup_mod
+    write_delta(tmp_path)
+    stage = tmp_path / "stages" / "4"
+    write_cfg(stage / "configs" / "2" / "swap_config.json", "Qwen/Qwen3.8-27B")
+    write_cfg(stage / "configs" / "4" / "swap_config.json", "Qwen/Qwen3-Coder-30B-A3B-Instruct")
+    monkeypatch.setattr(sup_mod, "read_plan", lambda *a, **k: ([type("T", (), {"chips": 4})()], []))
+    sup = Supervisor.__new__(Supervisor)
+    sup.run_dir, sup.required_chips, sup.home = tmp_path, None, tmp_path
+    sup.paths = type("P", (), {"tt_model_root": tmp_path / "models", "operator_home": tmp_path / "op"})()
+    _, problems = sup._read_plan(type("S", (), {"boards": 2, "budget_s": 60})(), stage)
+    assert problems == []
