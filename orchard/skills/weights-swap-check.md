@@ -123,7 +123,9 @@ Four facts decide whether a swap works. Each was found by failing first.
 4. Write `hw_test.json`: `{"command": "python3 stages/2/serve_and_compare.py", "deadline_s": 3600}`. When `swap_config.json`
    has a `package` key (a container package, not a `bundle_dir`), the supervisor drafted it for a nearest model that is served by a
    container package: `prepare_swap.py` builds only `model-dir/` and writes no `run.sh`, so skip the `run.sh` check in step 3, and the command
-   is `python3 stages/2/serve_and_compare_container.py` with the same deadline.
+   is `python3 stages/2/serve_and_compare_container.py` with the same deadline. That script exits 6 when the container fetched a model from the
+   Hugging Face Hub (it runs with the Hub switched off, so a package that ignores `MODEL_WEIGHTS_DIR` fails or leaves a fetch behind): the test then
+   measured another model and the stage fails. Report that text; do not try to make it pass.
 5. Write `handoff.json` and reply with a short summary.
 
 Do not run `serve_and_compare.py` yourself. The supervisor runs it on a leased board.

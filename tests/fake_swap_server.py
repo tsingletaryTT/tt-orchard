@@ -152,6 +152,10 @@ def main() -> int:
     with open(cfg["pid_file"], "w", encoding="utf-8") as f:
         json.dump({"pid": os.getpid(), "pgid": os.getpgid(0),
                    "env": {k: os.environ.get(k) for k in ENV_KEYS}, "model_arg": args.model}, f)
+    for path, text in (cfg.get("write_files") or {}).items():     # a test that makes the server leave files behind (a Hub fetch into /hf)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
     if cfg["mode"] == "die":
         for i in range(70):
             print(f"fake server log line {i}", flush=True)
