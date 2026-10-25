@@ -139,7 +139,7 @@ What is shown, and by what:
 - **An unattended run still stops for causes outside the model.** The ones seen: disk space (issue 27), a 4-chip fabric timeout that
   a reset does not always clear (issue 26), a board that dropped off the bus (issue 25) and an agent that loops when the harness drafts nothing (issue 68).
 - **The container path (a v5.1 package as the nearest model) has run once.** Stage 2 passed through a 4-chip container package. Stage 4
-  for a container-only package did not (issue 68), and issue 60 stays open until it does.
+  for a container-only package did not pass; issue 68 tracks that. Issue 60 was closed by the merge of the stage 2 change, and it covers stage 2 only.
 
 The suite has 7,177 passing tests and 3 skipped (measured with `python3 -m pytest -q`).
 
