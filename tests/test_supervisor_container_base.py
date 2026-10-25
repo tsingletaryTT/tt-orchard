@@ -196,3 +196,50 @@ def test_a_package_that_needs_more_chips_than_the_box_has_blocks_with_the_number
         assert any("this box has 4" in json.dumps(e["data"]) for e in blocks), [e["data"] for e in r.entries()][-3:]
     finally:
         r.close()
+
+
+def test_a_four_chip_coder_hands_the_whole_lease_to_the_four_chip_test(tmp_path):
+    """Review of PR 66: with the coder on both boards, parking supplies all four chips and there is no extra lease; the test
+    was cut back to stage 2's two chips and the container rejected the device count."""
+    r = wide_rig(tmp_path, chips=4)
+    try:
+        assert r.run() == EXIT_READY
+        started = stage2_tests(r)
+        assert len(started) == 1 and len(started[0]["chips"]) == 4, started
+    finally:
+        r.close()
+
+
+def test_a_blocked_pre_test_reset_does_not_leave_the_further_board_claimed(tmp_path, monkeypatch):
+    """Review of PR 66: the further board's lease stayed in test_lease after the reset blocked, so an attended resume saw the board
+    claimed and waited for ever. The retained lease goes back before availability is read."""
+    from orchard.adapters import Refused
+    from orchard.supervisor import Blocked  # noqa: F401
+    from test_supervisor import MachineAdapter
+    r = wide_rig(tmp_path)
+    calls = {"n": 0}
+    real = MachineAdapter.reset
+
+    def reset_once_refused(self, lease):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise Refused("device still open")
+        return real(self, lease)
+
+    monkeypatch.setattr(MachineAdapter, "reset", reset_once_refused)
+    pauses = {"n": 0}
+
+    def on_sleep():
+        pauses["n"] += 1
+        if pauses["n"] > 400:
+            raise Stop()
+        if pauses["n"] == 1:
+            from orchard.supervisor import Control
+            Control(r.run_dir).write("resume")
+    r.on_sleep = on_sleep
+    try:
+        assert r.run() == EXIT_READY
+        started = stage2_tests(r)
+        assert len(started) == 1 and len(started[0]["chips"]) == 4
+    finally:
+        r.close()

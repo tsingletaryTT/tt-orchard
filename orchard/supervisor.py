@@ -1827,6 +1827,10 @@ class Supervisor:
         configurations: a further board is leased first (the coder is untouched when there is none), then the coder is parked and its
         board joins the test; afterwards the further board goes back and the coder is restored."""
         n = spec.number
+        # A test lease left from a block (a refused pre-test reset, a container that would not stop) goes back first, so an attended
+        # resume does not find its own further board still claimed.
+        if not self._release_test_lease():
+            self._block(n, "releasing a test lease left from an earlier test failed")
         chips = self.adapter.status()
         have = len({c.board for c in chips})
         if boards > have:
@@ -1843,7 +1847,7 @@ class Supervisor:
         if d.action == "use_free":
             lease = self._take_test_lease(spec, shape, boards, None)
             try:
-                self._run_test(spec, stage_dir, test, lease, **record)
+                self._run_test(spec, stage_dir, test, lease, boards=boards, **record)
             finally:
                 self._cleanup_after_test(after_test)
             self._give_back_test_lease(n, lease)
@@ -1859,7 +1863,7 @@ class Supervisor:
             self._release_test_lease()
             raise
         try:
-            self._run_test(spec, stage_dir, test, lease, extra=extra, **record)
+            self._run_test(spec, stage_dir, test, lease, extra=extra, boards=boards, **record)
         finally:
             self._cleanup_after_test(after_test)
         if extra is not None:
@@ -1957,9 +1961,9 @@ class Supervisor:
 
     def _run_test(self, spec, stage_dir: Path, test: dict, lease: Lease, *, record: str = "test-result.json",
                   output: str = "evidence/hw-test-output.txt", what: str = "hardware test", env_extra: dict | None = None,
-                  extra: Lease | None = None) -> dict:
+                  extra: Lease | None = None, boards: int | None = None) -> dict:
         n = spec.number
-        k = spec.boards * CHIPS_PER_BOARD
+        k = (boards or spec.boards) * CHIPS_PER_BOARD       # a wider test (issue 60) holds more chips than the stage's own
         deadline = min(float(test["deadline_s"]), spec.budget_s)
         out_path = stage_dir / output
         out_path.parent.mkdir(parents=True, exist_ok=True)
