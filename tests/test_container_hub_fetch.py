@@ -98,6 +98,7 @@ def test_the_gate_refuses_a_report_that_records_a_fetch():
     reasons = stages._hub_fetch_reasons(report, "the 4-chip configuration: ")
     assert reasons and "Qwen/Qwen3-Coder-30B-A3B-Instruct" in reasons[0] and reasons[0].startswith("the 4-chip configuration: ")
     assert stages._hub_fetch_reasons({"hub_fetch": []}, "") == [] and stages._hub_fetch_reasons({}, "") == []
+    assert "must be a list" in stages._hub_fetch_reasons({"hub_fetch": None}, "")[0]       # an explicit null is not "no record"
     assert "must be a list" in stages._hub_fetch_reasons({"hub_fetch": "yes"}, "")[0]   # a malformed record does not count as clean
 
 

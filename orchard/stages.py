@@ -644,9 +644,11 @@ def _nearest_model_of(run_dir) -> str | None:
 
 def _hub_fetch_reasons(report, where: str = "") -> list[str]:
     """A container test whose report records a Hub fetch measured the fetched model, not the model directory (the package ignored MODEL_WEIGHTS_DIR).
-    A report with no such record, or an empty list, has none; a record that is not a list is a reason too."""
-    fetched = report.get("hub_fetch") if isinstance(report, dict) else None
-    if fetched is None or fetched == []:
+    A report with no such key, or an empty list, has none; a record that is present and is not a list (null included) is a reason too."""
+    if not isinstance(report, dict) or "hub_fetch" not in report:
+        return []                                  # a report from before the record existed has none
+    fetched = report["hub_fetch"]
+    if fetched == []:
         return []
     if not isinstance(fetched, list):
         return [f"{where}swap-check.json hub_fetch must be a list, got {fetched!r}"]
