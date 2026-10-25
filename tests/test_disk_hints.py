@@ -74,7 +74,7 @@ def test_a_hint_failure_gives_no_hints_and_the_wiring_uses_it(monkeypatch):
     import inspect
     monkeypatch.setattr(pf, "disk_hints", lambda *a, **k: (_ for _ in ()).throw(OSError("boom")))
     assert pf.safe_disk_hints("h", "c", ["a/b", None]) == []
-    assert "hints=safe_disk_hints(" in inspect.getsource(pf.run_preflight)
+    assert "safe_disk_hints(" in inspect.getsource(pf.run_preflight)
 
 
 def test_the_exclude_list_drops_empty_entries(monkeypatch):
@@ -123,3 +123,20 @@ def test_one_shared_disk_offers_both_kinds():
     c = pf.check_disk(free_gb={"hf_home": 10.0, "cache_root": 10.0}, model_gb=10.0, local=False, min_free_gb=40.0,
                       same_device=True, hints=hints)
     assert "hub/m0" in c.detail and "tensor cache x" in c.detail
+
+
+def test_a_passing_check_never_scans_for_hints():
+    """Review of PR 65: the hints were collected on every preflight, though only a block uses them. `hints` may be a callable that
+    check_disk calls only when the disk is short."""
+    calls = []
+    ok = pf.check_disk(free_gb={"hf_home": 500.0, "cache_root": 500.0}, model_gb=1.0, local=False, min_free_gb=40.0,
+                       same_device=False, hints=lambda: calls.append(1) or [("x/y", 9.0, "hf_home")])
+    assert ok.status == "ok" and calls == []
+    blk = pf.check_disk(free_gb={"hf_home": 50.0, "cache_root": 500.0}, model_gb=100.0, local=False, min_free_gb=40.0,
+                        same_device=False, hints=lambda: calls.append(1) or [("x/y", 9.0, "hf_home")])
+    assert calls == [1] and "x/y 9 GB" in blk.detail
+
+
+def test_the_preflight_passes_check_disk_a_callable():
+    import inspect
+    assert "hints=lambda: safe_disk_hints(" in inspect.getsource(pf.run_preflight)

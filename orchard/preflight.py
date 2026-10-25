@@ -164,7 +164,7 @@ def safe_disk_hints(hf_home, cache_root, exclude) -> list[tuple[str, float, str]
 
 
 def check_disk(*, free_gb: dict[str, float], model_gb: float, local: bool, min_free_gb: float,
-               same_device: bool, hints: list[tuple[str, float, str]] | None = None) -> Check:
+               same_device: bool, hints=None) -> Check:
     """`free_gb` has the keys `hf_home` and `cache_root`. The download needs room on the hf_home disk
     unless the snapshot is already local; each cache disk needs the margin. Paths on one disk share it."""
     need = {"hf_home": (0.0 if local else model_gb) + min_free_gb, "cache_root": min_free_gb}
@@ -178,7 +178,8 @@ def check_disk(*, free_gb: dict[str, float], model_gb: float, local: bool, min_f
                              if free_gb[label] < need[label]}, "same_device": same_device}
         detail = "; ".join(short)
         # Only what lives on a short disk can clear the block; one shared disk takes both kinds.
-        useful = [(n, g) for n, g, label in (hints or []) if same_device or label in data["short_gb"]][:HINT_COUNT]
+        found = (hints() if callable(hints) else hints) or []           # a callable is asked only now, when the disk is short
+        useful = [(n, g) for n, g, label in found if same_device or label in data["short_gb"]][:HINT_COUNT]
         if useful:
             detail += (". Largest on these disks: " + ", ".join(f"{n} {g:.0f} GB" for n, g in useful)
                        + ". The harness removes none of the hub models; --prune-caches removes only tensor caches no unfinished run uses")
@@ -609,7 +610,7 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
                           model_gb=(hub.total_bytes / 1e9 if hub else 0.0) + base_gb, local=local,
                           min_free_gb=cfg.min_free_gb or TEST_DISK_GB,
                           same_device=bool(s.same_device(paths["hf_home"], paths["cache_root"])),
-                          hints=safe_disk_hints(paths["hf_home"], paths["cache_root"], [model_id, (base_check.data or {}).get("base")]))
+                          hints=lambda: safe_disk_hints(paths["hf_home"], paths["cache_root"], [model_id, (base_check.data or {}).get("base")]))
 
     guarded("disk", "disk-full", disk)
     guarded("credentials", "credentials-needed",
