@@ -13,15 +13,15 @@ import socket
 import sys
 from pathlib import Path
 
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import expect, sync_playwright
 
 CHROME = "/usr/bin/google-chrome"
-SHOTS = [  # file, run-name fragment, style
-    ("ui-running-playful.png", "huihui-ai--huihui-qwen3", "playful"),
-    ("ui-running-operator.png", "huihui-ai--huihui-qwen3", "operator"),
+SHOTS = [  # file, run directory name (exact), style
+    ("ui-running-playful.png", "huihui-ai--huihui-qwen3-coder-30b-a3b-instruct-abliterated", "playful"),
+    ("ui-running-operator.png", "huihui-ai--huihui-qwen3-coder-30b-a3b-instruct-abliterated", "operator"),
     ("ui-finished-playful.png", "proprietarylegal--qwen3.8-27b-cjk-trim", "playful"),
     ("ui-finished-operator.png", "proprietarylegal--qwen3.8-27b-cjk-trim", "operator"),
-    ("ui-blocked-operator.png", "perplexity-ai--pplx", "operator"),
+    ("ui-blocked-operator.png", "perplexity-ai--pplx-decider-v1.2", "operator"),
 ]
 REDACT = """([host, user]) => {
   const re = [[/\\/home\\/[^\\s·"']*/g, "~"], [new RegExp(host, "gi"), "this-box"], [new RegExp("\\\\b" + user + "\\\\b", "g"), "user"]];
@@ -44,11 +44,12 @@ def main(url: str, out: str) -> int:
             page.goto(f"{url}?mode={style}")
             page.wait_for_selector("#runs li")
             # pick the run by the name the list row carries (the row shows the model id; the run directory is in its title)
+            # the list row shows the run directory name on a line of its own: pick the one row where a line equals the name, and fail otherwise
             rows = page.locator("#runs li")
-            for i in range(rows.count()):
-                if fragment.split("--")[-1].split("-")[0] in (rows.nth(i).inner_text() + (rows.nth(i).get_attribute("title") or "")).lower():
-                    rows.nth(i).locator("button, a").first.click()
-                    break
+            hits = [i for i in range(rows.count()) if fragment in [ln.strip() for ln in rows.nth(i).inner_text().splitlines()]]
+            assert len(hits) == 1, f"{name}: {len(hits)} rows show the run {fragment!r}; need exactly one"
+            rows.nth(hits[0]).locator("button, a").first.click()
+            expect(page.locator("#run")).to_contain_text(fragment)
             page.wait_for_timeout(2500)
             page.evaluate(REDACT, [host, user])
             text = page.inner_text("body")

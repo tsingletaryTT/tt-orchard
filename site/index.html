@@ -281,10 +281,11 @@
 <section class="section edge" id="install">
   <div class="label">Try it</div>
   <h2>Install</h2>
-  <p class="sub">On a QuietBox 2 the setup script checks each prerequisite, installs <a href="https://github.com/tsingletaryTT/tt-gozer">tt-gozer</a> (the chip lease manager) when it is missing, and writes the machine config. It never resets a chip, takes a lease or publishes anything.</p>
+  <p class="sub">On a QuietBox 2 the setup script (run it after <code>--check</code>) checks each prerequisite, installs <a href="https://github.com/tsingletaryTT/tt-gozer">tt-gozer</a> (the chip lease manager) when it is missing, and writes the machine config. It never resets a chip, takes a lease or publishes anything.</p>
   <div class="install">
     <div class="cmd"><span class="p">$</span><span class="t">git clone https://github.com/tsingletaryTT/tt-orchard.git &amp;&amp; cd tt-orchard</span><button type="button" data-copy="git clone https://github.com/tsingletaryTT/tt-orchard.git && cd tt-orchard">copy</button></div>
-    <div class="cmd"><span class="p">$</span><span class="t">scripts/setup.sh --check        # report only</span><button type="button" data-copy="scripts/setup.sh --check">copy</button></div>
+    <div class="cmd"><span class="p">$</span><span class="t">scripts/setup.sh --check        # report only, changes nothing</span><button type="button" data-copy="scripts/setup.sh --check">copy</button></div>
+    <div class="cmd"><span class="p">$</span><span class="t">scripts/setup.sh                # asks before each step that changes the machine</span><button type="button" data-copy="scripts/setup.sh">copy</button></div>
     <div class="cmd"><span class="p">$</span><span class="t">tt-orchard bringup &lt;org/model&gt; --dry-run   # the preflight, nothing started</span><button type="button" data-copy="tt-orchard bringup <org/model> --dry-run">copy</button></div>
     <div class="cmd"><span class="p">$</span><span class="t">tt-orchard ui                  # the page above, on this machine</span><button type="button" data-copy="tt-orchard ui">copy</button></div>
   </div>
@@ -319,7 +320,7 @@
     $("#clock").textContent = "00:00 / " + fmt(total);
     let shown = 0, clock = 0, speed = 120, playing = false, last = 0;
 
-    // per-line state derived from the text: stage start/end, chip roles
+    // per-line state derived from the text: stage start/end, chip roles, park and restore
     const info = lines.map((l) => {
       const t = l.text, o = {};
       let m;
@@ -327,11 +328,14 @@
       if ((m = t.match(/^stage (\d) \([^)]*\): (pass|skipped)$/))) o.end = [+m[1], m[2]];
       if (/hardware test started on/.test(t)) o.test = (t.match(/000\d:0(\d):00\.0/g) || []).map((x) => +x.match(/:0(\d):/)[1] - 1);
       if (/hardware test passed|test lease released/.test(t)) o.testEnd = true;
+      if (/test failed at startup/.test(t)) o.failed = true;
       if (/park: stop_sent|park: stopped/.test(t)) o.park = true;
-      if (/park: reset|test chips reset|resetting the test chips/.test(t)) o.reset = true;
+      if (/^park: reset|test chips reset/.test(t)) o.reset = true;
+      if (/^restore: reset/.test(t)) o.restoreReset = true;
+      if (/^restore: serve/.test(t)) o.restoreServe = true;
+      if (/^restore: (ready|resumed)/.test(t)) o.restored = true;
       if (/the coder is ready/.test(t)) o.coderReady = true;
       if (/hardware released/.test(t)) o.released = true;
-      if (/restor|coder (re)?started|relaunch/.test(t)) o.back = true;
       return o;
     });
 
@@ -345,13 +349,20 @@
         const o = info[i];
         if (o.start !== undefined) state[o.start] = "run";
         if (o.end) state[o.end[0]] = o.end[1] === "pass" ? "done" : "skip";
-        if (o.coderReady) { coder = "up"; }
-        if (o.test) { testChips = o.test; note = "A hardware test is running on the free board; the coder keeps serving."; }
-        if (o.testEnd) { testChips = []; }
-        if (o.reset) { reset = true; note = "The test chips are being reset before the test runs."; }
-        if (o.park) { coder = "parked"; note = "The 4-chip test needs the coder's board. The coder is parked, then restored."; }
-        if (o.released) { coder = "off"; testChips = []; note = "The run is over and every chip is released."; }
-        if (o.testEnd || o.start !== undefined) reset = false;
+        if (o.coderReady) coder = "up";
+        if (o.reset) { reset = true; note = "The test chips are reset before the test runs."; }
+        if (o.test) {
+          testChips = o.test; reset = false;
+          note = coder === "parked" ? "The 4-chip test holds every chip: the coder is parked." : "A hardware test is running on the free board; the coder keeps serving.";
+        }
+        if (o.failed) { reset = true; note = "The test failed at startup. Every chip is reset and the test runs once more."; }
+        if (o.testEnd) { testChips = []; reset = false; }
+        if (o.park) { coder = "parked"; note = "The 4-chip test needs the coder's board, so the coder is stopped (parked) and restored afterwards."; }
+        if (o.restoreReset) { coder = "restoring"; reset = true; note = "The test is done. The coder's board is reset and the coder starts again."; }
+        if (o.restoreServe) { coder = "booting"; reset = false; note = "The coder is loading again; a cold start takes several minutes."; }
+        if (o.restored) { coder = "up"; note = "The coder answered its canary question and is back."; }
+        if (o.released) { coder = "off"; testChips = []; reset = false; note = "The run is over and every chip is released."; }
+        if (o.start !== undefined && !o.test) reset = false;
       }
       stageRows.forEach((el, i) => {
         el.className = "st " + state[i];
@@ -360,10 +371,11 @@
       });
       chipEls.forEach((c, i) => {
         c.className = "chip"; c.innerHTML = `<b>${i}</b>idle`;
-        if (i < 2 && (coder === "up" || coder === "start")) { c.classList.add("coder"); c.innerHTML = `<b>${i}</b>${coder === "start" ? "coder booting" : "coder"}`; }
+        if (i < 2 && (coder === "up" || coder === "start" || coder === "booting")) { c.classList.add("coder"); c.innerHTML = `<b>${i}</b>${coder === "up" ? "coder" : "coder booting"}`; }
         if (i < 2 && coder === "parked") { c.classList.add("test"); c.innerHTML = `<b>${i}</b>parked`; }
+        if (i < 2 && coder === "restoring") { c.innerHTML = `<b>${i}</b>reset`; }
         if (testChips.includes(i)) { c.className = "chip test"; c.innerHTML = `<b>${i}</b>test`; }
-        if (reset && (testChips.includes(i) || i >= 2)) { c.classList.add("reset"); }
+        if (reset && (testChips.includes(i) || i >= 2 || coder === "restoring")) { c.classList.add("reset"); }
       });
       $("#chipnote").textContent = note;
     }
@@ -446,7 +458,7 @@
 
   // ---------- screenshots ----------
   const CAP = {
-    running: "A run in progress: the coder model is booting (about 6 to 10 minutes cold). The page says what is happening now and what, if anything, to do next.",
+    running: "A run in progress, taken while a real validation run was in stage 2: the coder model is parked while a test uses its boards. The page says what is happening now and what, if anything, to do next, and sets each result against what it should be.",
     finished: "A finished run: each stage with its wall time. Stages 3, 5 and 6 are skipped by design on a weights-only model.",
     blocked: "A blocked run: the reason, what was tried, and a verdict line that sets the numbers against what they should be. This one found a reference check that failed while the agent's file said it passed.",
   };

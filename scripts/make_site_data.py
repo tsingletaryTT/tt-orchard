@@ -34,12 +34,11 @@ def scrub_text(text: str, run: Path) -> str:
     return re.sub(rf"\b{re.escape(user)}\b", "user", text)
 
 
-def replay(run: Path) -> list[dict]:
-    out = io.StringIO()
-    narrate.Narrator(run, ui.Style(color=False, emoji=False), out, replay=True, tz=datetime.timezone.utc).poll()
+def assemble(raw_lines: list[str], run: Path) -> list[dict]:
+    """Narration lines to rows: ANSI removed, wrapped continuation lines joined to their line, seconds since the first, and the whole message scrubbed."""
     rows: list[dict] = []
     t0, last = None, 0
-    for raw in out.getvalue().splitlines():
+    for raw in raw_lines:
         line = ANSI.sub("", raw)
         m = LINE.match(line)
         if not m:
@@ -54,8 +53,16 @@ def replay(run: Path) -> list[dict]:
         if elapsed < last:             # a day boundary
             elapsed += 86400
         last = elapsed
-        rows.append({"t": elapsed, "actor": actor, "text": scrub_text(text.strip(), run)})
+        rows.append({"t": elapsed, "actor": actor, "text": text.strip()})
+    for r in rows:                      # scrub the assembled message: a wrapped line may carry a name that the first line does not
+        r["text"] = scrub_text(r["text"], run)
     return rows
+
+
+def replay(run: Path) -> list[dict]:
+    out = io.StringIO()
+    narrate.Narrator(run, ui.Style(color=False, emoji=False), out, replay=True, tz=datetime.timezone.utc).poll()
+    return assemble(out.getvalue().splitlines(), run)
 
 
 def stages(run: Path) -> list[dict]:
@@ -124,6 +131,7 @@ def main() -> int:
     for f in a.out.glob("*.json"):
         text = f.read_text(encoding="utf-8")
         assert "/home/" not in text and socket.gethostname().lower() not in text.lower(), f"{f.name} still holds a path or the host name"
+        assert not re.search(rf"\b{re.escape(Path.home().name)}\b", text), f"{f.name} still holds the user name"
     print(f"replay {len(rp)} lines, {rp[-1]['t'] if rp else 0} s")
     return 0
 
