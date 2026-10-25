@@ -511,3 +511,33 @@ def test_the_container_report_carries_the_serving_record(crig):
     assert r.returncode == 0, r.stdout + r.stderr
     rep = json.loads((crig["cdir"] / "evidence" / "swap-check.json").read_text())
     assert rep["serving"]["drafter"] == "off"
+
+
+def set_vocab_record(rig, vocab):
+    path = rig["cdir"] / "model-dir-sources.json"
+    rec = json.loads(path.read_text()) if path.exists() else {}
+    if vocab is None:
+        rec.pop("vocab", None)
+    else:
+        rec["vocab"] = vocab
+    path.write_text(json.dumps(rec))
+
+
+def test_a_model_with_a_different_vocabulary_is_served_with_the_drafter_cleared_even_with_mtp_tensors(crig):
+    """Issue 56: the drafter works on the nearest model's token ids; a trimmed vocabulary renumbers them."""
+    set_index(crig, ["model.embed_tokens.weight", "mtp.fc.weight"])
+    set_vocab_record(crig, {"model": 181760, "base": 248320, "trimmed": True})
+    r = crig["start"]()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert run_env_values(crig, "QWEN36_DRAFTER") == [""]
+
+
+def test_the_drafter_stays_when_the_record_says_the_vocabulary_is_the_same_or_unknown(crig):
+    for vocab in ({"model": 5, "base": 5, "trimmed": False}, {"model": None, "base": 5, "trimmed": None}, None, "x", {"trimmed": "yes"}):
+        for rec in list((crig["state"]).glob("runs.jsonl")):
+            rec.unlink()
+        set_index(crig, ["model.embed_tokens.weight", "mtp.fc.weight"])
+        set_vocab_record(crig, vocab)
+        r = crig["start"]()
+        assert r.returncode == 0, (vocab, r.stdout + r.stderr)
+        assert run_env_values(crig, "QWEN36_DRAFTER") == ["mtp"], vocab

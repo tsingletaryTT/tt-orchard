@@ -123,7 +123,7 @@ must be files inside it.
 
 ## What the script decides
 
-The class is one of `weights-only`, `weights+sidecar`, `restricted-head`, `full-port` and `unknown`. A sidecar is a weights
+The class is one of `weights-only`, `weights+sidecar`, `restricted-head`, `vocab-trim`, `full-port` and `unknown`. A sidecar is a weights
 file the new model ships outside its backbone shards (the shards its index lists) that the nearest model
 does not have, for example a task head. `sidecars` lists each one with its size, sha256, tensor count and
 tensor names, and `code_files` lists each `.py` file in the repo with its sha256. The script reads headers
@@ -145,7 +145,9 @@ picture, add a difference with area `other` and cite the file.
 
 The path is `weights-only` when the text config values that matter (layers, hidden size, heads,
 KV heads, head_dim, layer types, vocabulary size) are equal, every tensor both models share has
-the same shape and dtype, and neither model has a text tensor the other lacks. Vision-tower,
+an equal shape, and the same dtype unless both dtypes are BF16, F16 or F32 and the tensor has at most 1,048,576
+elements (a small float tensor stored in another float dtype does not change the path and gets a hazard), and neither model has a
+text tensor the other lacks. Vision-tower,
 projector and `mtp.*` tensors may differ. Otherwise the path is `full-port`, and `path_reasons`
 lists each reason. A tokenizer difference does not change the path, because the runtime loads the
 new model's tokenizer.

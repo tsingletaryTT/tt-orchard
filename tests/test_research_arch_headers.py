@@ -189,10 +189,16 @@ def test_the_estimate_follows_the_template_rules():
     assert headers.estimate_class(CFG, model_data(other), CFG, model_data(T))["class"] == "full-port"
 
 
-def test_a_changed_dtype_is_full_port():
-    other = dict(T, **{"model.layers.0.q.weight": ("F32", [64, 64])})
+def test_a_changed_dtype_that_is_not_a_small_float_is_full_port():
+    other = dict(T, **{"model.layers.0.q.weight": ("I8", [64, 64])})
     r = headers.estimate_class(CFG, model_data(other), CFG, model_data(T))
     assert r["class"] == "full-port" and any("dtype" in x for x in r["reasons"])
+
+
+def test_a_small_float_dtype_change_is_weights_only_as_in_stage_0():
+    other = dict(T, **{"model.layers.0.q.weight": ("F32", [64, 64])})
+    r = headers.estimate_class(CFG, model_data(other), CFG, model_data(T))
+    assert r["class"] == "weights-only" and r["reasons"] == []
 
 
 def test_a_repo_with_extra_safetensors_files_flags_a_possible_sidecar():

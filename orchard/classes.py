@@ -10,6 +10,10 @@
                      model's answer codes, for example). The weights line up with the nearest model's; how the rows are read
                      (marker tokens, a different attention mask) is in the model's own code. The harness does not serve it:
                      the run stops after stage 0 and a person decides (orchard/supervisor.py, RESTRICTED_HEAD)
+    vocab-trim       the nearest model with some vocabulary rows removed: a smaller embedding and lm_head whose rows are rows of
+                     the nearest model's, and nothing else different. It takes the weights-only path. The served config.json must
+                     carry the model's own vocab_size and the speculative drafter must be off, because the drafter works on the
+                     nearest model's token ids (weights-swap-templates/prepare_swap.py does both)
     full-port        the model needs new model code
     unknown          stage 0 could not decide (an unreadable or overlapping sidecar, headers that would not
                      parse). Nothing unproven runs as weights-only, so it takes the full-port path
@@ -20,11 +24,11 @@ ledger entry, and a run from before classes (a path and no class) gets the class
 """
 from __future__ import annotations
 
-CLASSES = ("weights-only", "weights+sidecar", "restricted-head", "full-port", "unknown")
+CLASSES = ("weights-only", "weights+sidecar", "restricted-head", "vocab-trim", "full-port", "unknown")
 SIDECAR_CLASSES = ("weights+sidecar", "restricted-head")      # the classes whose delta.json may list sidecars
 
 _PATH_OF = {"weights-only": "weights-only", "weights+sidecar": "weights-only", "restricted-head": "full-port",
-            "full-port": "full-port", "unknown": "full-port"}
+            "vocab-trim": "weights-only", "full-port": "full-port", "unknown": "full-port"}
 
 
 def path_of(cls) -> str | None:
@@ -34,5 +38,5 @@ def path_of(cls) -> str | None:
 
 def class_of_path(path) -> str | None:
     """The class a path alone implies, for a run that recorded no class. Never `weights+sidecar`,
-    `restricted-head` or `unknown`: those only come from stage 0's own answer."""
+    `restricted-head`, `vocab-trim` or `unknown`: those only come from stage 0's own answer."""
     return path if path in ("weights-only", "full-port") else None
