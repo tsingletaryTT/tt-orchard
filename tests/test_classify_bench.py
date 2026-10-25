@@ -242,7 +242,8 @@ def _narrow(w):
     return make_repo(w.hub, "org/narrow", t, extra={"aux.safetensors": {"weight": np.zeros((4, H + 1))}})
 
 
-@case("small tensors stored in float32", "full-port")
+# Issue 29: a small float32 tensor where the base has BF16 no longer forces a full port (sabi-noema was served on hardware, 2026-10-24).
+@case("small tensors stored in float32", "weights-only")
 def _f32(w):
     t = {**backbone("model.", np.random.default_rng(23)), "lm_head.weight": w.head}
     t["model.norm.weight"] = ("F32", t["model.norm.weight"])

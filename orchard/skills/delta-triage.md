@@ -145,7 +145,9 @@ picture, add a difference with area `other` and cite the file.
 
 The path is `weights-only` when the text config values that matter (layers, hidden size, heads,
 KV heads, head_dim, layer types, vocabulary size) are equal, every tensor both models share has
-the same shape and dtype, and neither model has a text tensor the other lacks. Vision-tower,
+an equal shape, and the same dtype unless both dtypes are BF16, F16 or F32 and the tensor has at most 1,048,576
+elements (a small float tensor stored in another float dtype does not change the path and gets a hazard), and neither model has a
+text tensor the other lacks. Vision-tower,
 projector and `mtp.*` tensors may differ. Otherwise the path is `full-port`, and `path_reasons`
 lists each reason. A tokenizer difference does not change the path, because the runtime loads the
 new model's tokenizer.

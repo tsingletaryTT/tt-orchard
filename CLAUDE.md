@@ -2054,3 +2054,17 @@ Prompt (operator): "Keep knocking down issues." `tests/test_webui_browser.py` st
 - The page's content security policy forbids `eval`, so a Playwright `wait_for_function` given a string fails; the tests wait with locator expectations.
 - Mutations, each seen red: Abort not armed, Cancel treated as confirm, no confirmation, a link value used unchecked, the choice not stored, the chip not redrawn, Pause sending abort. One survivor is equivalent (the order of the list of style names).
 - Not covered: the new-bring-up dialog, the Models and Machine views, the scene, and the SSE feed.
+## 2026-10-24 (UTC): a small float dtype difference no longer makes a full port (issue 29, branch `dtype-tolerance`, version 0.8.37)
+Prompt (operator): "try the swap for #29. I want vocab size models to port easily." Issue 29: the classification bench found that stage 0 called `sabicap/sabi-noema`
+a full port because 96 small tensors (48 `A_log` and 48 linear-attention norm weights, at most 128 elements each) are F32 where Qwen3.8-27B has BF16. The rule was to
+change only after a hardware swap test.
+- Hardware test, by hand in a scratch run directory with my own lease: stage 1's reference template (CPU reference passed), then the shipped `prepare_swap.py` and
+  `serve_and_compare.py` on one 2-chip board with the nearest model's 2-chip bundle, the drafter off (the model has no `mtp.*` tensors). Served and ready in 212 s,
+  31 of 32 tokens equal to the CPU reference (top-1 0.96875), coherent, and all eight prompts of the suite gave no finding (no control run). The directory held the 96 F32
+  tensors as they are. Not checked: whether the runtime casts them or uses them in F32, other models, larger tensors, 1 or 4 chips, long generations.
+- Rule (`delta_triage.py`): a dtype difference is tolerated only when both dtypes are BF16, F16 or F32, the shapes are equal, and the tensor has at most
+  `DTYPE_TOLERANCE_ELEMENTS` (1,048,576) elements. The limit is a choice; the evidence covers tensors of 128 elements or fewer. Anything else (a quantized or integer
+  dtype, a larger tensor, a changed shape) still gives a path reason. A tolerated difference writes one `other` hazard that names the tensors and says what was and was not tested.
+  `tensor-compare.json` marks each difference `tolerated`. The research estimate uses the same code, so it agrees. `tensors_finding` still counts every dtype difference.
+- Tests first (16 in `tests/test_delta_triage_dtype.py`, two end-to-end tests replace the old one in `test_delta_triage_template.py`, and the bench case and the
+  research test changed expectation). 11 mutations; 2 survived the first table (dropping the equal-shape check, and the hazard wiring in the main flow) and each got a test.
