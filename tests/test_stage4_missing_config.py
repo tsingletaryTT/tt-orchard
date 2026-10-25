@@ -47,7 +47,7 @@ def test_a_required_count_nothing_serves_blocks_before_any_agent_step(tmp_path):
         notes = blocked_notices(r)
         why = [b["reason"] for b in notes if "2-chip" in b["reason"]]
         assert why, notes
-        assert "required_chips to 4" in why[0] and "--change-required-chips" in why[0] and "no installed bundle or container package" in why[0]
+        assert "required_chips = 4" in why[0] and "move this run" in why[0] and "no installed bundle or container package" in why[0]
         stage4 = [e for e in r.entries() if e["stage"] == 4]
         assert not [e for e in stage4 if e["data"].get("decision") == "agent step"], "no agent step ran"
         assert not (r.run_dir / "stages" / "4" / "configs").exists()

@@ -192,3 +192,34 @@ def test_the_named_package_is_the_one_checked_when_several_are_installed(tmp_pat
     assert sd.nearest_problem(tmp_path, p, operator_home=home)               # the second package serves the wrong model
     cfg["package"] = "x/coder-p300x2"; p.write_text(json.dumps(cfg))
     assert sd.nearest_problem(tmp_path, p, operator_home=home) is None
+
+
+def test_a_config_that_names_a_different_operator_home_is_a_problem(tmp_path):
+    """Review of PR 70: the container template reads installed.json and runs tt-model under cfg["operator_home"]. A different home can hold a
+    same-named package that serves another repository, so a config whose home differs from the run's is refused."""
+    write_delta(tmp_path)
+    home = write_installed(tmp_path, "x/coder-p300x2", "Qwen/Qwen3-Coder-30B-A3B-Instruct")
+    other = tmp_path / "other-home"
+    other.mkdir()
+    p = write_cfg(tmp_path / "stages" / "2" / "swap_config.json", "Qwen/Qwen3-Coder-30B-A3B-Instruct")
+    cfg = json.loads(p.read_text()); cfg["package"] = "x/coder-p300x2"; cfg["operator_home"] = str(other); p.write_text(json.dumps(cfg))
+    msg = sd.nearest_problem(tmp_path, p, operator_home=home)
+    assert msg and "operator_home" in msg
+
+
+def test_the_run_s_own_operator_home_is_accepted_even_when_spelled_through_a_link(tmp_path):
+    write_delta(tmp_path)
+    home = write_installed(tmp_path, "x/coder-p300x2", "Qwen/Qwen3-Coder-30B-A3B-Instruct")
+    link = tmp_path / "home-link"
+    link.symlink_to(home)
+    p = write_cfg(tmp_path / "stages" / "2" / "swap_config.json", "Qwen/Qwen3-Coder-30B-A3B-Instruct")
+    cfg = json.loads(p.read_text()); cfg["package"] = "x/coder-p300x2"; cfg["operator_home"] = str(link); p.write_text(json.dumps(cfg))
+    assert sd.nearest_problem(tmp_path, p, operator_home=home) is None
+
+
+def test_a_bundle_config_is_not_held_to_an_operator_home(tmp_path):
+    write_delta(tmp_path)
+    root = write_installed(tmp_path, "org/q", "Qwen/Qwen3-Coder-30B-A3B-Instruct", container=False)
+    p = write_cfg(tmp_path / "stages" / "2" / "swap_config.json", "Qwen/Qwen3-Coder-30B-A3B-Instruct")
+    cfg = json.loads(p.read_text()); cfg["bundle_dir"] = str(root / "org" / "q"); cfg["operator_home"] = "/anywhere"; p.write_text(json.dumps(cfg))
+    assert sd.nearest_problem(tmp_path, p, tt_model_root=root, operator_home=tmp_path / "op") is None

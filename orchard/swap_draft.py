@@ -15,6 +15,7 @@ input or a missing snapshot is a problem, and the agent then finds the facts as 
 from __future__ import annotations
 
 import json
+import os
 import socket
 from pathlib import Path
 
@@ -51,6 +52,12 @@ def nearest_problem(run_dir, config_path, *, tt_model_root=None, operator_home=N
         return (f"{Path(config_path).name} names {_repo(named)} as the nearest model, but stage 0's nearest model is {want}. "
                 f"Weights are swapped into an installed bundle or package of {want}; one for another model serves the wrong architecture")
     # The label alone proves nothing: the package or bundle the config points at must itself serve the nearest model.
+    named_home = cfg.get("operator_home")
+    if (cfg.get("package") and operator_home is not None and named_home
+            and os.path.realpath(str(named_home)) != os.path.realpath(str(operator_home))):
+        # the container template reads installed.json and runs tt-model under the config's operator_home, so the registry checked here has to be that one
+        return (f"{Path(config_path).name} names operator_home {named_home}, but the run's is {operator_home}; the package registry the test "
+                f"reads has to be the one that was checked")
     served, what = _served_repo(cfg, tt_model_root, operator_home)
     if served is not None and _repo(served) != want:
         return (f"{Path(config_path).name} uses {what}, which serves {_repo(served)}, but stage 0's nearest model is {want}. "
