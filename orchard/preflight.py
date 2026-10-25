@@ -354,9 +354,10 @@ def check_base(*, model_id: str, hub: HubInfo | None, base_override: str | None,
             return Check("base", WARN, f"base {base}: {_selection_basis(report)}; the card names none. Bundle "
                          f"{serving[0].name} is installed; {where}{note}. Pass --base to choose another", data=data)
         if not any(b.schema == "6" for b in serving):
-            return Check("base", WARN, f"base {base}: bundle {serving[0].name} is installed, but it is a "
-                         f"{serving[0].schema} container package and stage 2's swap check expects a v6 thin "
-                         f"bundle, so stage 2 will probably not run; {where}{note}", data=data)
+            return Check("base", WARN, f"base {base}: {serving[0].name} is installed, but it is a "
+                         f"{serving[0].schema} container package. Stages 2 and 4 serve the new weights through a container package's "
+                         "default profile, and only when exactly one installed package serves the base on the chip count of the "
+                         f"stage; {where}{note}", data=data)
         return Check("base", OK, f"base {base}: bundle {serving[0].name} is installed; {where}{note}", data=data)
     family = nearest.family_query(base)
     found = None
@@ -737,7 +738,8 @@ def default_signals(cfg, research_options=None) -> Signals:
 
     return Signals(
         cpu_standin=cpu_standin_problem, sfpi=sfpi_versions, lab_sfpi=lab_sfpi, skills_freshness=skills_freshness, bus=read_bus,
-        installed_bundles=lambda: nearest.read_installed(models_root()), search_bundles=nearest.search,
+        installed_bundles=lambda: nearest.read_all_installed(models_root(), cfg.operator_home or supervisor.operator_home()),
+        search_bundles=nearest.search,
         hub_info=hub_info, local_snapshot=local_snapshot,
         free_gb=lambda p: shutil.disk_usage(_nearest_existing(p)).free / 1e9,
         same_device=lambda a, b: os.stat(_nearest_existing(a)).st_dev == os.stat(_nearest_existing(b)).st_dev,

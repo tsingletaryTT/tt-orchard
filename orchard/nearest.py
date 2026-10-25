@@ -54,6 +54,34 @@ def read_installed(models_root) -> list[Installed]:
     return out
 
 
+def read_containers(operator_home) -> list[Installed]:
+    """Every installed container (v5.1) package: tt-model keeps them in <home>/.cache/tt-model/installed.json with a pulled
+    manifest, outside the models root that read_installed scans (issue 60). An entry that is not a container, or whose manifest
+    cannot be read, is skipped."""
+    try:
+        data = json.loads((Path(operator_home).expanduser() / ".cache" / "tt-model" / "installed.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    out = []
+    for name, e in (data.items() if isinstance(data, dict) else ()):
+        if not isinstance(e, dict) or not e.get("container") or not e.get("manifest"):
+            continue
+        try:
+            m = json.loads(Path(e["manifest"]).read_text(encoding="utf-8"))
+            out.append(Installed(str(name), str(m["weights"]["repo_id"]), str(m.get("schema_version", "")),
+                                 int(m.get("device_count") or 0)))
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    return out
+
+
+def read_all_installed(models_root, operator_home) -> list[Installed]:
+    """The bundles under `models_root` and the container packages of `operator_home`, each name once (the bundle's entry wins)."""
+    out = read_installed(models_root)
+    seen = {i.name for i in out}
+    return out + [c for c in read_containers(operator_home) if c.name not in seen]
+
+
 def parse_search(text: str) -> list[dict] | None:
     """[{"name", "installed"}] from `tt model search --json` ({"bundles": [...]}) or `tt-model search
     --json` ([{"id": ...}]). None when the text is neither."""

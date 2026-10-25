@@ -27,7 +27,7 @@ def test_the_skill_does_not_send_the_agent_to_result_json_and_a_stop_for_it():
 def test_the_supervisor_really_has_no_prepare_failure_outcome_the_skill_could_use():
     """The reason for the rule: if the supervisor ever reads a prepare-failure file, change the skill with it."""
     src = (Path(__file__).parent.parent / "orchard" / "supervisor.py").read_text(encoding="utf-8")
-    body = src.split("out, prep = self._step(spec, \"prepare\"", 1)[1].split("self._hardware_phase(spec, stage_dir, test)", 1)[0]
+    body = src.split("out, prep = self._step(spec, \"prepare\"", 1)[1].split("self._hardware_phase(spec, stage_dir, test", 1)[0]
     assert "result.json" not in body and "_read_test(stage_dir)" in body
 
 

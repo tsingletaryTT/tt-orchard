@@ -539,6 +539,7 @@ class Supervisor:
         self.paths = paths if paths is not None else RunPaths.resolve(self.run_dir, home=self.home)
         # The docker label every test container of this run carries (ORCHARD_TEST_LABEL).
         self.run_label = "orchard.test=" + hashlib.sha256(str(self.run_dir).encode()).hexdigest()[:12]
+        self.surviving_containers: list = []         # set by _sweep when a labelled container outlives docker stop and rm
         self.control = Control(self.run_dir)
         self.actuator = RunActuator(self.control)
         self.guard = RetryGuard()
@@ -628,7 +629,7 @@ class Supervisor:
             # Recorded first, as in _abort: a crash during the release still leaves an aborted
             # run, and the next start finishes the release and refuses to go on.
             self.ledger.append("decision", None, decision="abort", by=f"signal {name}")
-            ok = self._release_test_lease() and self._release_all()
+            ok = self._release_everything()
         except Exception:
             ok = self._release_from_memory()
         self.stop_message = f"Aborted by {name}. " + self._release_summary(ok)
@@ -639,11 +640,19 @@ class Supervisor:
         try:
             self.ledger.append("notice", None, what="the supervisor stopped on an error",
                                error=f"{type(exc).__name__}: {exc}"[:500])
-            ok = self._release_test_lease() and self._release_all()
+            ok = self._release_everything()
         except Exception:
             ok = self._release_from_memory()
         self.stop_message = self._release_summary(ok) + (
             " Fix the cause, then run the same command again to resume." if ok else "")
+
+    def _release_everything(self) -> bool:
+        """Release the test lease and then the coder's, and report whether both went back. Both are tried whatever the first returns: a
+        test lease kept under a surviving container (_release_test_lease) must not leave the coder, which has a board of its own,
+        serving under the exiting supervisor's lease."""
+        test_lease_back = self._release_test_lease()
+        coder_back = self._release_all()
+        return test_lease_back and coder_back
 
     @staticmethod
     def _release_summary(ok: bool) -> str:
@@ -658,6 +667,20 @@ class Supervisor:
         lease = self.test_lease
         if lease is None:
             return True
+        if self.surviving_containers:
+            # A container the sweep could not remove still has the chips open. Releasing the lease would reset them under it and
+            # let another agent in, so the lease stays and the ledger says why. An operator may have cleaned up since (an attended
+            # run resumes after a pause), so docker is asked again, and the remembered state is cleared only when it answers with
+            # an empty list; an answer that cannot be had keeps the lease.
+            now = self.containers.list(self.run_label)
+            if now:
+                self.surviving_containers = list(now)
+            if now is None or now:
+                self.ledger.append("notice", None, what="the test lease was kept: a test container is still running"
+                                   if now else "the test lease was kept: docker could not be asked about the test containers",
+                                   lease_id=lease.lease_id, containers=list(self.surviving_containers))
+                return False
+            self._cleared(None, list(self.surviving_containers))
         try:
             self.test_adapter.release(lease)
         except AdapterError as exc:
@@ -674,6 +697,9 @@ class Supervisor:
         ok = True
         for lease, is_coder in ((self.test_lease, False), (self.coder_lease, True)):
             if lease is None:
+                continue
+            if not is_coder and self.surviving_containers:
+                ok = False             # a container still uses these chips: its lease stays, the coder's is still released
                 continue
             try:
                 if is_coder and not self.coder.confirm_stopped().stopped:
@@ -700,6 +726,13 @@ class Supervisor:
             self.actuator.clear()
             p = run_progress(self.ledger.read())
         if p.aborted or p.finished:
+            if p.aborted and p.started:
+                # The abort may have kept a test lease under a container that was still running. Sweep and give that lease back now if
+                # the container is gone; the run stays aborted and no stage starts, whatever the sweep finds.
+                try:
+                    self._recover_test_leases()
+                except Blocked:
+                    pass                  # the notice is in the ledger; the lease stays held
             self._release_all()           # finishes a release a crash interrupted; else does nothing
             return EXIT_ABORTED if p.aborted else EXIT_READY
         if not p.started:
@@ -716,8 +749,20 @@ class Supervisor:
             # so every later resume is held to the same values.
             self.ledger.append("decision", None, decision=PATHS_RECORDED, paths=self.paths.record(),
                                note="the run_start entry predates the paths record")
-        if p.started:
-            self._recover_test_leases()
+        while p.started:
+            try:
+                self._recover_test_leases()
+                break
+            except Blocked as exc:
+                # A container the earlier supervisor left is still running (_sweep wrote the notice). Nothing starts over it. An
+                # unattended run ends blocked (running the command again sweeps once more); an attended run waits for the operator
+                # and, on `resume`, goes through the recovery again, because a resume that went straight to the stages would skip
+                # the second sweep and the lease the first attempt never gave back.
+                self.ledger.append("decision", None, decision="pause", reason=f"blocked: {exc.reason}")
+                if self.unattended:
+                    return self._end_blocked(block_code(last_pause(self.ledger.read())) or "blocked", str(exc.reason))
+                if self._wait_for_operator() == "abort":
+                    return self._abort()
         if self.package_added and package_options(self.ledger.read()) != self.package:
             # Options given on a resume of a run that started without them (build checked that
             # stage 7 has not started). Recorded once; a later resume reads them from here.
@@ -1192,7 +1237,10 @@ class Supervisor:
                 test, problems = self._read_test(stage_dir)
                 if problems:
                     return "fail", problems, None
-                self._hardware_phase(spec, stage_dir, test)
+                # A container package's test leaves a container behind when its client is killed (a timeout, an abort): stop it by
+                # label before the chips are given back, and block when one survives (_sweep).
+                self._hardware_phase(spec, stage_dir, test,
+                                     after_test=(lambda: self._sweep(spec.number)) if self._container_config(stage_dir) else None)
             out, step = self._step(spec, "finish", stage_dir, escalated, resumed)
             out = self._wrap_up(spec, stage_dir, step, out)
             if out.status != "done":
@@ -1451,7 +1499,8 @@ class Supervisor:
             return
         cfg, problems = swap_draft.draft(run_dir=self.run_dir, tt_model_root=self.paths.tt_model_root,
                                          cache_root=self.paths.cache_root, hf_home=self.paths.hf_home,
-                                         inputs=self.inputs, chips=spec.boards * CHIPS_PER_BOARD)
+                                         inputs=self.inputs, chips=spec.boards * CHIPS_PER_BOARD,
+                                         operator_home=self._container_home(spec))
         if cfg is None:
             self.ledger.append("decision", spec.number, decision="swap config not drafted", problems=problems)
             return
@@ -1459,12 +1508,27 @@ class Supervisor:
         target.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
         templates = Path(self.paths.orchard_dir) / "orchard" / "skills" / "weights-swap-templates"
         copied = []
-        for name in SWAP_TEMPLATES:
+        for name in (STAGE4_TEMPLATES if "package" in cfg else SWAP_TEMPLATES):      # a container package also needs its script
             shutil.copy2(templates / name, stage_dir / name)
             copied.append(name)
         self.ledger.append("decision", spec.number, decision="swap config drafted",
-                           config=evidence_record(self.run_dir, target), bundle_dir=cfg["bundle_dir"],
-                           copied=copied)
+                           config=evidence_record(self.run_dir, target), bundle_dir=cfg.get("bundle_dir"),
+                           copied=copied, **({"package": cfg["package"]} if "package" in cfg else {}))
+
+    def _container_home(self, spec):
+        """The operator home to look for container packages in, or None when stage 2 may not use one: the sidecar parity workflow
+        (its skill and scripts need a bundle), and a lab run (the containers would run on the lab, where this supervisor's label
+        search and sweep cannot see them)."""
+        return self.paths.operator_home if spec.skill == "weights-swap-check" and self.lab is None else None
+
+    @staticmethod
+    def _container_config(stage_dir: Path) -> bool:
+        """Does the stage's swap_config.json name a container package (issue 60)? An unreadable or missing config is not one."""
+        try:
+            cfg = json.loads((stage_dir / "swap_config.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
+        return isinstance(cfg, dict) and "package" in cfg
 
     def _draft_stage4(self, spec, stage_dir: Path) -> None:
         """Stage 4's configs (swap_draft.draft_stage4) for the counts this run plans: the required ones, or
@@ -1587,6 +1651,20 @@ class Supervisor:
             problems.append(f"the test command is refused: {exc}")
         return test, problems
 
+    @staticmethod
+    def _cleanup_after_test(after_test) -> None:
+        """Run the cleanup callback from a `finally`. When an exception is already on its way out (an Interrupted from SIGTERM, for
+        one) and the cleanup blocks, the original exception keeps going: the block is already in the ledger and the surviving container
+        keeps its lease (_sweep), and the run must still end the way the signal asked. With no exception in flight the block propagates."""
+        if after_test is None:
+            return
+        in_flight = sys.exc_info()[1]
+        try:
+            after_test()
+        except Blocked:
+            if in_flight is None:
+                raise
+
     def _hardware_phase(self, spec, stage_dir: Path, test: dict, *, after_test=None, **record) -> None:
         """Lease the chips (parking the coder when its board is needed), run `test`, give them back. `record` names where the run's record
         and output go (see _run_test); the graft trial uses it to leave stage 2's own test record alone. `after_test` runs when the test
@@ -1594,7 +1672,7 @@ class Supervisor:
         trial uses it to stop the servers its helpers started, which a kill of the test's own session does not reach."""
         n = spec.number
         if self.lab is not None:
-            return self._lab_hardware_phase(spec, stage_dir, test)
+            return self._lab_hardware_phase(spec, stage_dir, test, after_test=after_test)
         chips = self.adapter.status()
         d = decide_park(self.coder_lease.units, chips, spec.boards)
         self.ledger.append("decision", n, decision="hardware phase", action=d.action,
@@ -1605,8 +1683,7 @@ class Supervisor:
             try:
                 self._run_test(spec, stage_dir, test, lease, **record)
             finally:
-                if after_test is not None:
-                    after_test()
+                self._cleanup_after_test(after_test)
             h.restore()
             self.coder_lease = h.lease
             return
@@ -1621,8 +1698,7 @@ class Supervisor:
         try:
             self._run_test(spec, stage_dir, test, lease, **record)
         finally:
-            if after_test is not None:
-                after_test()
+            self._cleanup_after_test(after_test)
         try:
             self.adapter.release(lease)        # the lease tool resets the board as it releases
         except AdapterError as exc:
@@ -1654,6 +1730,9 @@ class Supervisor:
             skip = "the graft trial was skipped: --no-graft-trial"
         elif self.lab is not None:
             skip = "the graft trial was skipped: it runs on this box's chips and this run's tests run on a lab"
+        elif self._container_config(stage_dir):
+            skip = ("the graft trial was skipped: stage 2 was served through a container package, and the trial's scripts "
+                    "build and run a bundle's run.sh, which a container package does not have")
         else:
             enough, free = check_disk(self.run_dir, GRAFT_TRIAL_DISK_GB, usage=self.disk_usage)
             if not enough:
@@ -1728,7 +1807,7 @@ class Supervisor:
         self.ledger.append("decision", 2, decision="graft decision", choice=decision["choice"], reason=decision["reason"],
                            numbers=decision["numbers"], decision_file=evidence_record(self.run_dir, path))
 
-    def _lab_hardware_phase(self, spec, stage_dir: Path, test: dict) -> None:
+    def _lab_hardware_phase(self, spec, stage_dir: Path, test: dict, after_test=None) -> None:
         """The hardware phase with a lab box: lease the chips there, run the test there, give the
         chips back. The coder on this box keeps serving the agents throughout."""
         n = spec.number
@@ -1740,7 +1819,10 @@ class Supervisor:
         self.test_lease = lease
         self.ledger.append("decision", n, decision="test lease taken", test_lease=lease.record(),
                            where=self._where())
-        self._run_test(spec, stage_dir, test, lease)
+        try:
+            self._run_test(spec, stage_dir, test, lease)
+        finally:
+            self._cleanup_after_test(after_test)           # before the lab lease goes back, as on this box (the sweep looks at this box's docker)
         self._audit_lab_caches(n, stage_dir, self._swap_cache(stage_dir))
         try:
             self.test_adapter.release(lease)
@@ -1767,6 +1849,11 @@ class Supervisor:
                     taken[rec["lease_id"]] = rec
             elif d.get("decision") == "test lease released":
                 released.add(d.get("lease_id"))
+        if self.lab is None:
+            # A container test the earlier supervisor started can still be running (its client died, the container did not). That
+            # includes a test run under the coder's own lease after a park, which records no test lease. Stop it first, and block
+            # here when one survives: no lease is given back, and the coder is not recovered or started over it.
+            self._sweep(None)
         for lease_id, rec in taken.items():
             if lease_id in released:
                 continue
@@ -2081,25 +2168,67 @@ class Supervisor:
                            returncode=result["returncode"], timed_out=result["timed_out"],
                            **evidence_record(self.run_dir, path))
 
+    def _ledger_survivors(self) -> list[str]:
+        """The test containers an earlier sweep of this run could not remove and nothing has since cleared (the ledger's last
+        "test containers survived" / "test containers cleared" decision). It lets a restart keep the protection of a lease whose
+        container was known to be running, when docker cannot be asked again."""
+        ids: list[str] = []
+        for e in self.ledger.read():
+            if e["event"] != "decision":
+                continue
+            what = e["data"].get("decision")
+            if what == "test containers survived":
+                ids = [str(c) for c in (e["data"].get("containers") or [])]
+            elif what == "test containers cleared":
+                ids = []
+        return ids
+
+    def _survived(self, n, ids: list[str], reason: str) -> None:
+        self.surviving_containers = list(ids)      # _release_test_lease and _release_from_memory keep the lease they run under
+        self.ledger.append("decision", n, decision="test containers survived", containers=list(ids), label=self.run_label)
+        self._block(n, reason, containers=list(ids))
+
+    def _cleared(self, n, known: list[str]) -> None:
+        self.surviving_containers = []
+        if known:
+            self.ledger.append("decision", n, decision="test containers cleared", containers=list(known), label=self.run_label)
+
     def _sweep(self, n: int) -> None:
         """Stop and remove any container this run's tests left running. A container that is
         still listed afterwards blocks the stage: releasing or resetting chips under it is
-        refused, and the operator decides."""
+        refused, and the operator decides. Containers an earlier sweep could not remove are
+        remembered in the ledger, so a restart that cannot ask docker blocks on them instead
+        of releasing their lease."""
+        known = self._ledger_survivors()
         found = self.containers.list(self.run_label)
         if found is None:
+            if known:
+                self._survived(n, known, "docker could not be asked whether the test containers an earlier sweep could not remove are "
+                                         "gone; no test lease was released and the coder was not restored")
             self.ledger.append("notice", n, what="docker could not be asked for test containers",
                                label=self.run_label)
             return
         if not found:
+            self._cleared(n, known)
             return
         self.ledger.append("notice", n, what="a hardware test left containers running; stopping them",
                            containers=found, label=self.run_label)
+        # Recorded before anything is removed: a signal that lands in the middle of the removal must still find these containers
+        # remembered, in memory and in the ledger, until docker confirms an empty listing (_cleared).
+        self.surviving_containers = list(found)
+        self.ledger.append("decision", n, decision="test containers survived", containers=list(found), label=self.run_label)
         for cid in found:
             self.containers.remove(cid)
         left = self.containers.list(self.run_label)
+        if left is None:
+            # Docker found containers and then could not say whether they are gone. Nothing confirms the chips are free, so the
+            # originals stay remembered (_release_test_lease keeps the lease) and the run blocks.
+            self._survived(n, list(found), "docker could not confirm that the test containers stopped after docker stop and rm; no "
+                                           "test lease was released and the coder was not restored")
         if left:
-            self._block(n, "test containers are still running after docker stop and rm; no test "
-                           "lease was released and the coder was not restored", containers=left)
+            self._survived(n, list(left), "test containers are still running after docker stop and rm; no test "
+                                          "lease was released and the coder was not restored")
+        self._cleared(n, known or list(found))
 
 
 # ---- the command line ---------------------------------------------------------------------------

@@ -62,7 +62,12 @@ def _facts(run_dir: Path, inputs: dict) -> tuple[str | None, str | None, dict, l
     return model, nearest, snapshots, problems
 
 
-def draft(*, run_dir, tt_model_root, cache_root, hf_home, inputs: dict, chips: int) -> tuple[dict | None, list[str]]:
+def draft(*, run_dir, tt_model_root, cache_root, hf_home, inputs: dict, chips: int,
+          operator_home=None) -> tuple[dict | None, list[str]]:
+    """Stage 2's swap_config.json. The one v6 bundle that serves the nearest model on `chips` chips is used when there is one. When
+    there is none and `operator_home` is given, the one installed container (v5.1) package that serves it on that many chips is used
+    instead (issue 60), with the keys the container template reads (CONTAINER_KEYS). Two that fit, or a package with no default
+    profile, are left to the agent."""
     run_dir = Path(run_dir)
     model, nearest, snapshots, problems = _facts(run_dir, inputs)
     if model is None:
@@ -72,27 +77,38 @@ def draft(*, run_dir, tt_model_root, cache_root, hf_home, inputs: dict, chips: i
     fits = [b for b in read_installed(tt_model_root)
             if b.weights_repo == want and b.schema == "6" and b.chips == chips
             and (Path(tt_model_root) / b.name / "run.sh").is_file()]
-    if not fits:
-        problems.append(f"no installed v6 bundle under {tt_model_root} serves {want} on {chips} chips")
-    elif len(fits) > 1:
+    boxes = ([c for c in installed_containers(operator_home) if c["repo"] == want and c["chips"] == chips]
+             if operator_home is not None else [])
+    pick = None
+    if len(fits) > 1:
         problems.append(f"more than one bundle serves {want} on {chips} chips: "
                         + ", ".join(b.name for b in fits))
+    elif not fits and not boxes:
+        problems.append(f"no installed v6 bundle under {tt_model_root} serves {want} on {chips} chips"
+                        + (" and no installed container package does" if operator_home is not None else ""))
+    elif not fits and len(boxes) > 1:
+        problems.append(f"more than one container package serves {want} on {chips} chips: "
+                        + ", ".join(c["name"] for c in boxes))
+    elif not fits:
+        pick = boxes[0]
+        if not pick.get("profile"):
+            problems.append(f"the container package {pick['name']} names no default profile")
 
     port = _free_port()
     if port is None:
         problems.append(f"no free port from {FIRST_PORT} to {FIRST_PORT + PORT_TRIES - 1}")
     if problems:
         return None, problems
-    return {"run_dir": str(run_dir),
-            "bundle_dir": str(Path(tt_model_root) / fits[0].name),
-            "nearest_model_id": want,
-            "base_snapshot": snapshots["base"],
-            "new_snapshot": snapshots["model"],
-            "new_model_id": model,
-            "tt_cache": str(Path(cache_root) / slug(_repo(model)) / "tt_cache"),
-            "hf_home": str(hf_home),
-            "port": port,
-            "prompt_suite": True}, []        # the swap test sends the prompt suite too (issue 15)
+    common = {"run_dir": str(run_dir), "nearest_model_id": want, "base_snapshot": snapshots["base"],
+              "new_snapshot": snapshots["model"], "new_model_id": model, "hf_home": str(hf_home), "port": port,
+              "prompt_suite": True}        # the swap test sends the prompt suite too (issue 15)
+    if pick is not None:
+        name = pick["name"].lower().replace("/", "--")
+        return {**common, "package": pick["name"], "profile": pick["profile"], "chips": chips,
+                "operator_home": str(operator_home),
+                "tt_cache": str(Path(cache_root) / slug(_repo(model)) / f"{chips}chip-{name}" / "tt_cache")}, []
+    return {**common, "bundle_dir": str(Path(tt_model_root) / fits[0].name),
+            "tt_cache": str(Path(cache_root) / slug(_repo(model)) / "tt_cache")}, []
 
 
 # ---- stage 4: one configuration per chip count --------------------------------------------------------
