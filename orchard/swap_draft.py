@@ -62,6 +62,18 @@ def _facts(run_dir: Path, inputs: dict) -> tuple[str | None, str | None, dict, l
     return model, nearest, snapshots, problems
 
 
+def _container_fits(containers: list[dict], want: str, chips: int) -> list[dict]:
+    """The installed container packages for `want` that run on exactly `chips` chips; when none does, those at the smallest larger count.
+    Nearly every catalog package reports 2 boards (4 chips), so the stage's own chip count rarely matches; the supervisor leases the
+    package's chips for the test (parking the coder when it needs its board), as stage 4 does for its 4-chip test."""
+    mine = [c for c in containers if c["repo"] == want]
+    exact = [c for c in mine if c["chips"] == chips]
+    if exact:
+        return exact
+    larger = sorted({c["chips"] for c in mine if c["chips"] > chips})
+    return [c for c in mine if larger and c["chips"] == larger[0]]
+
+
 def draft(*, run_dir, tt_model_root, cache_root, hf_home, inputs: dict, chips: int,
           operator_home=None) -> tuple[dict | None, list[str]]:
     """Stage 2's swap_config.json. The one v6 bundle that serves the nearest model on `chips` chips is used when there is one. When
@@ -77,8 +89,8 @@ def draft(*, run_dir, tt_model_root, cache_root, hf_home, inputs: dict, chips: i
     fits = [b for b in read_installed(tt_model_root)
             if b.weights_repo == want and b.schema == "6" and b.chips == chips
             and (Path(tt_model_root) / b.name / "run.sh").is_file()]
-    boxes = ([c for c in installed_containers(operator_home) if c["repo"] == want and c["chips"] == chips]
-             if operator_home is not None else [])
+    boxes = _container_fits(installed_containers(operator_home), want, chips) if operator_home is not None else []
+    box_chips = boxes[0]["chips"] if boxes else chips
     pick = None
     if len(fits) > 1:
         problems.append(f"more than one bundle serves {want} on {chips} chips: "
@@ -87,7 +99,7 @@ def draft(*, run_dir, tt_model_root, cache_root, hf_home, inputs: dict, chips: i
         problems.append(f"no installed v6 bundle under {tt_model_root} serves {want} on {chips} chips"
                         + (" and no installed container package does" if operator_home is not None else ""))
     elif not fits and len(boxes) > 1:
-        problems.append(f"more than one container package serves {want} on {chips} chips: "
+        problems.append(f"more than one container package serves {want} on {box_chips} chips: "
                         + ", ".join(c["name"] for c in boxes))
     elif not fits:
         pick = boxes[0]
@@ -104,9 +116,9 @@ def draft(*, run_dir, tt_model_root, cache_root, hf_home, inputs: dict, chips: i
               "prompt_suite": True}        # the swap test sends the prompt suite too (issue 15)
     if pick is not None:
         name = pick["name"].lower().replace("/", "--")
-        return {**common, "package": pick["name"], "profile": pick["profile"], "chips": chips,
+        return {**common, "package": pick["name"], "profile": pick["profile"], "chips": box_chips,
                 "operator_home": str(operator_home),
-                "tt_cache": str(Path(cache_root) / slug(_repo(model)) / f"{chips}chip-{name}" / "tt_cache")}, []
+                "tt_cache": str(Path(cache_root) / slug(_repo(model)) / f"{box_chips}chip-{name}" / "tt_cache")}, []
     return {**common, "bundle_dir": str(Path(tt_model_root) / fits[0].name),
             "tt_cache": str(Path(cache_root) / slug(_repo(model)) / "tt_cache")}, []
 

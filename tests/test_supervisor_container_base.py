@@ -10,7 +10,7 @@ import pytest
 
 from orchard.supervisor import EXIT_READY, parse
 from run_fakes import FakeContainers, argv
-from test_supervisor import Rig
+from test_supervisor import Rig, Stop
 
 pytestmark = pytest.mark.usefixtures("stub_tools")
 
@@ -123,3 +123,76 @@ def test_only_a_config_object_that_names_a_package_is_a_container_config(tmp_pat
 def test_a_stage_with_no_swap_config_is_not_a_container_config(tmp_path):
     from orchard.supervisor import Supervisor
     assert Supervisor._container_config(tmp_path) is False
+
+
+# ---- a container package that needs more chips than stage 2's board (issue 60 validation, 2026-10-25) -------------------
+
+def wide_rig(tmp_path, *, device_count=4, **kw):
+    r = container_rig(tmp_path, **kw)
+    mf = tmp_path / "op" / ".cache" / "tt-model" / "pulled" / "someone__qwen3.8-27b-p300" / "tt_kernel_manifest.json"
+    mf.write_text(json.dumps({"schema_version": "5.1", "device_count": device_count, "weights": {"repo_id": NEAREST}}))
+    return r
+
+
+def stage2_tests(r):
+    return [e["data"] for e in r.entries() if e["stage"] == 2 and e["event"] == "decision"
+            and e["data"].get("decision") == "hardware test started"]
+
+
+def test_a_four_chip_container_is_tested_on_four_chips_in_stage_2(tmp_path):
+    """Catalog container packages report 2 boards. The first real run of issue 60 drafted nothing, because stage 2 asked for a package
+    on its own 2 chips. The package is now drafted with its own count and the test holds all four chips (the coder's board parked)."""
+    r = wide_rig(tmp_path)
+    try:
+        assert r.run() == EXIT_READY
+        assert drafted(r)["data"]["package"] == "someone/qwen3.8-27b-p300"
+        cfg = json.loads((r.run_dir / "stages" / "2" / "swap_config.json").read_text())
+        assert cfg["chips"] == 4
+        started = stage2_tests(r)
+        assert len(started) == 1 and len(started[0]["chips"]) == 4, started
+        phase = [d for d in r.decisions() if d.get("decision") == "hardware phase" and d.get("action") == "park"]
+        assert phase, "the coder's board was parked for the 4-chip test"
+    finally:
+        r.close()
+
+
+def test_a_two_chip_container_is_still_tested_on_two_chips(tmp_path):
+    r = wide_rig(tmp_path, device_count=2)
+    try:
+        assert r.run() == EXIT_READY
+        started = stage2_tests(r)
+        assert len(started) == 1 and len(started[0]["chips"]) == 2, started
+    finally:
+        r.close()
+
+
+def test_the_further_board_goes_back_and_the_coder_is_restored_after_the_wide_test(tmp_path):
+    r = wide_rig(tmp_path)
+    try:
+        assert r.run() == EXIT_READY
+        ds = r.decisions()
+        taken = [d for d in ds if d.get("decision") == "test lease taken" and d.get("config") == 4]
+        assert taken, "the further board was leased for the 4-chip test"
+        released = {d["lease_id"] for d in ds if d.get("decision") == "test lease released"}
+        assert taken[0]["test_lease"]["lease_id"] in released
+        # given back as stage 2's test ends, not left to the run's wind-down
+        end2 = next(e["seq"] for e in r.entries() if e["event"] == "stage_end" and e["stage"] == 2)
+        back = next(e["seq"] for e in r.entries() if e["data"].get("decision") == "test lease released"
+                    and e["data"].get("lease_id") == taken[0]["test_lease"]["lease_id"])
+        assert back < end2
+    finally:
+        r.close()
+
+
+def test_a_package_that_needs_more_chips_than_the_box_has_blocks_with_the_numbers(tmp_path):
+    r = wide_rig(tmp_path, device_count=8)
+    def stop():
+        raise Stop()
+    r.on_sleep = stop                                  # the attended run pauses and would wait for the operator
+    try:
+        with pytest.raises(Stop):
+            r.run()
+        blocks = [e for e in r.entries() if e["event"] in ("block", "pause", "notice") and "8 chips" in json.dumps(e["data"])]
+        assert any("this box has 4" in json.dumps(e["data"]) for e in blocks), [e["data"] for e in r.entries()][-3:]
+    finally:
+        r.close()

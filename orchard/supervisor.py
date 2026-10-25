@@ -112,6 +112,7 @@ import dataclasses
 import functools
 import hashlib
 import json
+from types import SimpleNamespace
 import os
 import pwd
 import shutil
@@ -1673,6 +1674,9 @@ class Supervisor:
         n = spec.number
         if self.lab is not None:
             return self._lab_hardware_phase(spec, stage_dir, test, after_test=after_test)
+        boards = self._phase_boards(spec, stage_dir)
+        if boards > spec.boards:
+            return self._wide_hardware_phase(spec, stage_dir, test, boards, after_test=after_test, **record)
         chips = self.adapter.status()
         d = decide_park(self.coder_lease.units, chips, spec.boards)
         self.ledger.append("decision", n, decision="hardware phase", action=d.action,
@@ -1807,6 +1811,62 @@ class Supervisor:
         self.ledger.append("decision", 2, decision="graft decision", choice=decision["choice"], reason=decision["reason"],
                            numbers=decision["numbers"], decision_file=evidence_record(self.run_dir, path))
 
+    def _phase_boards(self, spec, stage_dir: Path) -> int:
+        """Boards the stage's single test holds: the stage's own, or more when the drafted swap config names a container package that
+        needs more chips. Catalog container packages mostly report 2 boards (4 chips), so stage 2 serves them on that many, as
+        stage 4 does for its 4-chip test (issue 60)."""
+        try:
+            cfg = json.loads((stage_dir / "swap_config.json").read_text(encoding="utf-8"))
+            chips = int(cfg["chips"]) if cfg.get("package") else 0
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            return spec.boards
+        return max(spec.boards, -(-chips // CHIPS_PER_BOARD))
+
+    def _wide_hardware_phase(self, spec, stage_dir: Path, test: dict, boards: int, *, after_test=None, **record) -> None:
+        """The hardware phase of a single test that needs `boards` boards (more than the stage's), the way stage 4 runs its larger
+        configurations: a further board is leased first (the coder is untouched when there is none), then the coder is parked and its
+        board joins the test; afterwards the further board goes back and the coder is restored."""
+        n = spec.number
+        chips = self.adapter.status()
+        have = len({c.board for c in chips})
+        if boards > have:
+            self._block(n, f"the container package needs {boards * CHIPS_PER_BOARD} chips and this box has {have * CHIPS_PER_BOARD}",
+                        need_chips=boards * CHIPS_PER_BOARD)
+        d = decide_park(self.coder_lease.units, chips, boards)
+        self.ledger.append("decision", n, decision="hardware phase", action=d.action, chips=boards * CHIPS_PER_BOARD,
+                           free_boards=list(d.free_boards), server_boards=list(d.server_boards))
+        if d.action == "wait":
+            self._block(n, f"the {boards * CHIPS_PER_BOARD}-chip test cannot get its boards while the coder holds "
+                           f"{len(self.coder_lease.units)}", need_chips=boards * CHIPS_PER_BOARD)
+        shape = SimpleNamespace(chips=boards * CHIPS_PER_BOARD, boards=boards)
+        first_chip = {c.board: c.bdf for c in reversed(chips)}
+        if d.action == "use_free":
+            lease = self._take_test_lease(spec, shape, boards, None)
+            try:
+                self._run_test(spec, stage_dir, test, lease, **record)
+            finally:
+                self._cleanup_after_test(after_test)
+            self._give_back_test_lease(n, lease)
+            return
+        more = boards - len(self.coder_lease.units)
+        extra = None
+        if more > 0:
+            extra = self._take_test_lease(spec, shape, more, first_chip[d.free_boards[0]] if d.free_boards else None)
+        h = self._handoff(n, self.coder_lease)
+        try:
+            lease = h.park()
+        except Blocked:
+            self._release_test_lease()
+            raise
+        try:
+            self._run_test(spec, stage_dir, test, lease, extra=extra, **record)
+        finally:
+            self._cleanup_after_test(after_test)
+        if extra is not None:
+            self._give_back_test_lease(n, extra)
+        h.restore()
+        self.coder_lease = h.lease
+
     def _lab_hardware_phase(self, spec, stage_dir: Path, test: dict, after_test=None) -> None:
         """The hardware phase with a lab box: lease the chips there, run the test there, give the
         chips back. The coder on this box keeps serving the agents throughout."""
@@ -1896,14 +1956,21 @@ class Supervisor:
         path.write_text(json.dumps(known, indent=2, sort_keys=True))
 
     def _run_test(self, spec, stage_dir: Path, test: dict, lease: Lease, *, record: str = "test-result.json",
-                  output: str = "evidence/hw-test-output.txt", what: str = "hardware test", env_extra: dict | None = None) -> dict:
+                  output: str = "evidence/hw-test-output.txt", what: str = "hardware test", env_extra: dict | None = None,
+                  extra: Lease | None = None) -> dict:
         n = spec.number
         k = spec.boards * CHIPS_PER_BOARD
         deadline = min(float(test["deadline_s"]), spec.budget_s)
         out_path = stage_dir / output
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        result = self._spawn(n, test["command"], lease.chips[:k], lease.dev_indices[:k], deadline, out_path,
-                             env_extra=env_extra, lease_id=lease.lease_id)
+        if extra is None:
+            result = self._spawn(n, test["command"], lease.chips[:k], lease.dev_indices[:k], deadline, out_path,
+                                 env_extra=env_extra, lease_id=lease.lease_id)
+        else:
+            # A test on more boards than the stage's: every chip of both leases, in device order.
+            held = sorted((i, c) for each in (lease, extra) for c, i in zip(each.chips, each.dev_indices))
+            result = self._spawn(n, test["command"], [c for _, c in held], [i for i, _ in held], deadline, out_path,
+                                 env_extra=env_extra, lease_ids=[lease.lease_id, extra.lease_id])
         marker = stage_dir / record
         tmp = marker.with_name(marker.name + ".tmp")
         tmp.write_text(json.dumps(result, indent=2))

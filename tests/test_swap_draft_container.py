@@ -45,11 +45,35 @@ def test_without_an_operator_home_no_container_is_considered(run, tmp_path):
     assert cfg is None and any("no installed v6 bundle" in p for p in problems)
 
 
-def test_a_container_for_another_chip_count_or_another_model_is_not_chosen(run, tmp_path):
-    home = containers(tmp_path / "op", {"a/one-p300x2": (NEAREST, 4, "default"), "b/other-p300": ("other/Model", 2, "default")})
+def test_a_container_for_a_smaller_chip_count_or_another_model_is_not_chosen(run, tmp_path):
+    home = containers(tmp_path / "op", {"a/one-p150": (NEAREST, 1, "default"), "b/other-p300": ("other/Model", 4, "default")})
     cfg, problems = draft(run, home)
     assert cfg is None
     assert any("no installed v6 bundle" in p and "container package" in p and NEAREST in p and "2 chips" in p for p in problems), problems
+
+
+def test_a_container_that_needs_more_chips_than_the_stage_has_is_drafted_with_its_own_count(run, tmp_path):
+    """48 of the 49 installed catalog container packages report 4 chips (2 boards). Stage 2 serves a package on the chips the
+    package needs: the supervisor leases and parks for that count, as stage 4 does for its 4-chip test (issue 60 validation)."""
+    home = containers(tmp_path / "op", {"someone/qwen3-p300x2": (NEAREST, 4, "default")})
+    cfg, problems = draft(run, home)
+    assert problems == [] and cfg["chips"] == 4 and cfg["package"] == "someone/qwen3-p300x2"
+    assert cfg["tt_cache"].endswith("/4chip-someone--qwen3-p300x2/tt_cache")
+
+
+def test_the_smallest_larger_container_is_chosen_and_an_exact_one_wins(run, tmp_path):
+    home = containers(tmp_path / "op", {"a/four": (NEAREST, 4, "default"), "b/eight": (NEAREST, 8, "default")})
+    cfg, _ = draft(run, home)
+    assert cfg["package"] == "a/four"
+    home = containers(tmp_path / "op2", {"a/four": (NEAREST, 4, "default"), "c/two": (NEAREST, 2, "default")})
+    cfg, _ = draft(run, home)
+    assert cfg["package"] == "c/two" and cfg["chips"] == 2
+
+
+def test_two_larger_containers_of_the_same_size_are_left_to_the_agent(run, tmp_path):
+    home = containers(tmp_path / "op", {"a/one": (NEAREST, 4, "x"), "b/two": (NEAREST, 4, "y")})
+    cfg, problems = draft(run, home)
+    assert cfg is None and any("a/one" in p and "b/two" in p for p in problems), problems
 
 
 def test_two_container_packages_that_both_fit_are_left_to_the_agent(run, tmp_path):
