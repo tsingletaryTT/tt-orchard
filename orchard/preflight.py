@@ -112,8 +112,59 @@ def check_hub(hub: HubInfo | None, error: str | None, local: bool) -> Check:
     return Check("hub", OK, detail, data=hub)
 
 
+HINT_COUNT, HINT_MIN_GB = 6, 1.0
+
+
+def _dir_gb(d: Path) -> float:
+    """Bytes under `d` in GB. A link counts as the file it reaches (a hub model's blobs are links into a shared store) and each
+    file counts once, by device and inode."""
+    total, seen = 0, set()
+    for top, _, files in os.walk(d):
+        for f in files:
+            try:
+                st = os.stat(os.path.join(top, f))
+            except OSError:
+                continue
+            if (st.st_dev, st.st_ino) not in seen:
+                seen.add((st.st_dev, st.st_ino))
+                total += st.st_size
+    return total / 1e9
+
+
+def _repo_of(model: str) -> str:
+    return model.split("@", 1)[0].strip()
+
+
+def disk_hints(hf_home, cache_root, exclude) -> list[tuple[str, float, str]]:
+    """Every Hugging Face hub model and tensor cache of at least HINT_MIN_GB, biggest first: (name, GB, disk), where disk is
+    `hf_home` or `cache_root`. Read only. `exclude` holds the model ids this run needs (the model and its base); neither their hub
+    directories nor their tensor caches (whose marker may carry an `@revision`) are offered. check_disk keeps the hints of the short disks."""
+    skip = {_repo_of(m) for m in exclude}
+    found: list[tuple[str, float, str]] = []
+    hub = Path(hf_home) / "hub"
+    if hub.is_dir():
+        for d in hub.glob("models--*"):
+            repo = d.name[len("models--"):].replace("--", "/", 1)
+            if repo in skip:
+                continue
+            found.append((repo, _dir_gb(d / "blobs") if (d / "blobs").is_dir() else _dir_gb(d), "hf_home"))
+    from orchard.caches import KERNEL_MODEL, local_caches
+    for c in local_caches(cache_root):
+        if c.model != KERNEL_MODEL and _repo_of(c.model or "") not in skip:
+            found.append((f"tensor cache {c.model}", c.gb, "cache_root"))
+    return sorted(((n, round(g, 1), label) for n, g, label in found if g >= HINT_MIN_GB), key=lambda t: -t[1])
+
+
+def safe_disk_hints(hf_home, cache_root, exclude) -> list[tuple[str, float, str]]:
+    """disk_hints for the preflight: a hint is a convenience, so a failure gives none and never blocks the check."""
+    try:
+        return disk_hints(hf_home, cache_root, [m for m in exclude if m])
+    except Exception:
+        return []
+
+
 def check_disk(*, free_gb: dict[str, float], model_gb: float, local: bool, min_free_gb: float,
-               same_device: bool) -> Check:
+               same_device: bool, hints=None) -> Check:
     """`free_gb` has the keys `hf_home` and `cache_root`. The download needs room on the hf_home disk
     unless the snapshot is already local; each cache disk needs the margin. Paths on one disk share it."""
     need = {"hf_home": (0.0 if local else model_gb) + min_free_gb, "cache_root": min_free_gb}
@@ -125,7 +176,14 @@ def check_disk(*, free_gb: dict[str, float], model_gb: float, local: bool, min_f
         # How far short each disk is, so `--prune-caches` knows how much to free and whether it can.
         data = {"short_gb": {label: round(need[label] - free_gb[label], 3) for label in need
                              if free_gb[label] < need[label]}, "same_device": same_device}
-        return Check("disk", BLOCK, "; ".join(short), "disk-full", data)
+        detail = "; ".join(short)
+        # Only what lives on a short disk can clear the block; one shared disk takes both kinds.
+        found = (hints() if callable(hints) else hints) or []           # a callable is asked only now, when the disk is short
+        useful = [(n, g) for n, g, label in found if same_device or label in data["short_gb"]][:HINT_COUNT]
+        if useful:
+            detail += (". Largest on these disks: " + ", ".join(f"{n} {g:.0f} GB" for n, g in useful)
+                       + ". The harness removes none of the hub models; --prune-caches removes only tensor caches no unfinished run uses")
+        return Check("disk", BLOCK, detail, "disk-full", data)
     return Check("disk", OK, ", ".join(f"{label} {free_gb[label]:.0f} GB free (needs {need[label]:.0f})"
                                        for label in need))
 
@@ -551,7 +609,8 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
         return check_disk(free_gb={k: s.free_gb(p) for k, p in paths.items()},
                           model_gb=(hub.total_bytes / 1e9 if hub else 0.0) + base_gb, local=local,
                           min_free_gb=cfg.min_free_gb or TEST_DISK_GB,
-                          same_device=bool(s.same_device(paths["hf_home"], paths["cache_root"])))
+                          same_device=bool(s.same_device(paths["hf_home"], paths["cache_root"])),
+                          hints=lambda: safe_disk_hints(paths["hf_home"], paths["cache_root"], [model_id, (base_check.data or {}).get("base")]))
 
     guarded("disk", "disk-full", disk)
     guarded("credentials", "credentials-needed",
