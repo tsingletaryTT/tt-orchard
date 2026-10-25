@@ -243,3 +243,54 @@ def test_a_blocked_pre_test_reset_does_not_leave_the_further_board_claimed(tmp_p
         assert len(started) == 1 and len(started[0]["chips"]) == 4
     finally:
         r.close()
+
+
+def test_aborting_after_a_blocked_pre_test_reset_gives_back_the_further_board(tmp_path, monkeypatch):
+    """Review of PR 66: `_abort` released only the coder's lease, so a further board that a blocked reset left claimed
+    stayed leased after the supervisor exited."""
+    from orchard.adapters import Refused
+    from orchard.supervisor import Control, EXIT_ABORTED
+    from test_supervisor import MachineAdapter
+    r = wide_rig(tmp_path)
+
+    def refuse(self, lease):
+        raise Refused("device still open")
+
+    monkeypatch.setattr(MachineAdapter, "reset", refuse)
+    ticks = {"n": 0}
+
+    def abort_at_the_block():
+        ticks["n"] += 1
+        if ticks["n"] == 2:                      # the run is paused on the refused reset
+            Control(r.run_dir).write("abort")
+        assert ticks["n"] < 200
+    r.on_sleep = abort_at_the_block
+    try:
+        assert r.run() == EXIT_ABORTED
+        assert r.m.leases == {}
+    finally:
+        r.close()
+
+
+def test_a_second_board_held_by_someone_else_is_waited_for_not_blocked(tmp_path, monkeypatch):
+    """Review of PR 66: with the second board busy, decide_park says wait and the stage blocked at once. Stage 4 queues for the
+    board while the coder keeps serving (reacquire waits for the lease); stage 2 does the same."""
+    import orchard.supervisor as sup
+    from orchard.handoff import ParkDecision
+    real = sup.decide_park
+    seen = []
+
+    def busy_board(server_boards, chips, boards_needed):
+        d = real(server_boards, chips, boards_needed)
+        seen.append(d.action)
+        return ParkDecision("wait", (), d.server_boards, boards_needed) if boards_needed == 2 else d
+
+    monkeypatch.setattr(sup, "decide_park", busy_board)
+    r = wide_rig(tmp_path)
+    try:
+        assert r.run() == EXIT_READY
+        blocked = [e["data"] for e in r.entries() if e["event"] == "notice" and e["data"].get("blocked")]
+        assert not [b for b in blocked if "cannot get its boards" in str(b.get("reason"))]
+        assert len(stage2_tests(r)[0]["chips"]) == 4
+    finally:
+        r.close()

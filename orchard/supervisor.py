@@ -875,7 +875,7 @@ class Supervisor:
         # Recorded first: a crash during the release still leaves an aborted run, and a restart
         # finishes the release and refuses to go on.
         self.ledger.append("decision", None, decision="abort", by="operator")
-        self._release_all()
+        self._release_everything()                 # a test lease kept at a pause (a further board) goes back with the coder's
         return EXIT_ABORTED
 
     def _release_all(self) -> bool:
@@ -1839,9 +1839,6 @@ class Supervisor:
         d = decide_park(self.coder_lease.units, chips, boards)
         self.ledger.append("decision", n, decision="hardware phase", action=d.action, chips=boards * CHIPS_PER_BOARD,
                            free_boards=list(d.free_boards), server_boards=list(d.server_boards))
-        if d.action == "wait":
-            self._block(n, f"the {boards * CHIPS_PER_BOARD}-chip test cannot get its boards while the coder holds "
-                           f"{len(self.coder_lease.units)}", need_chips=boards * CHIPS_PER_BOARD)
         shape = SimpleNamespace(chips=boards * CHIPS_PER_BOARD, boards=boards)
         first_chip = {c.board: c.bdf for c in reversed(chips)}
         if d.action == "use_free":
