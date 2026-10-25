@@ -132,8 +132,8 @@ What is shown, and by what:
 - **Weights-only, weights+sidecar and vocab-trim models reach `ready for operator review`.** Stages 0, 1, 2, 4 and 8 (and 7 when
   `--package-format v6` is given) passed on real chips for Hemmingway-1, openthai, Clef, RAG-Gate-27B, bytkim, AREX-2 and CJK-Trim. Stages 3, 5
   and 6 are skipped on that path by design.
-- **A package a run produced can be pulled and booted from the Hub.** Four published packages were checked from a clean install
-  (Hemmingway-1, openthai, RAG-Gate-27B and AREX-2). The Clef and bytkim packages are published and have not been pulled and booted (issue 24).
+- **A package a run produced can be pulled and booted from the Hub.** Six published packages were checked from a clean install
+  (Hemmingway-1, openthai, RAG-Gate-27B, AREX-2, Clef and bytkim). The Clef and bytkim checks (2026-10-26, 2 chips, no token, empty caches) were ready after 2,540 s and 3,181 s and answered a short question correctly (issue 24).
 - **The fidelity evidence is still thin.** Each configuration is compared with the CPU reference on 32 tokens of one prompt, and since
   2026-10-23 on eight fixed prompts that are read for failure shapes. The prompt suite has run on real chips without a control, so its
   bars are choices and not measurements (issue 15). Full benchmarks exist for bytkim only (HumanEval, MBPP, GSM8K, IFEval and BFCL against its base, with the
