@@ -539,6 +539,7 @@ class Supervisor:
         self.paths = paths if paths is not None else RunPaths.resolve(self.run_dir, home=self.home)
         # The docker label every test container of this run carries (ORCHARD_TEST_LABEL).
         self.run_label = "orchard.test=" + hashlib.sha256(str(self.run_dir).encode()).hexdigest()[:12]
+        self.surviving_containers: list = []         # set by _sweep when a labelled container outlives docker stop and rm
         self.control = Control(self.run_dir)
         self.actuator = RunActuator(self.control)
         self.guard = RetryGuard()
@@ -658,6 +659,12 @@ class Supervisor:
         lease = self.test_lease
         if lease is None:
             return True
+        if self.surviving_containers:
+            # A container the sweep could not remove still has the chips open. Releasing the lease would reset them under it and
+            # let another agent in, so the lease stays and the ledger says why; the next start sweeps again before it gives it back.
+            self.ledger.append("notice", None, what="the test lease was kept: a test container is still running",
+                               lease_id=lease.lease_id, containers=list(self.surviving_containers))
+            return False
         try:
             self.test_adapter.release(lease)
         except AdapterError as exc:
@@ -717,7 +724,15 @@ class Supervisor:
             self.ledger.append("decision", None, decision=PATHS_RECORDED, paths=self.paths.record(),
                                note="the run_start entry predates the paths record")
         if p.started:
-            self._recover_test_leases()
+            try:
+                self._recover_test_leases()
+            except Blocked as exc:
+                # A container the earlier supervisor left is still running (_sweep wrote the notice). The run pauses before it starts the
+                # coder; an unattended run ends blocked, and running the command again sweeps once more.
+                self.ledger.append("decision", None, decision="pause", reason=f"blocked: {exc.reason}")
+                if self.unattended:
+                    # Not left for the retry below: running the command again is what sweeps once more, after the block is written.
+                    return self._end_blocked(block_code(last_pause(self.ledger.read())) or "blocked", str(exc.reason))
         if self.package_added and package_options(self.ledger.read()) != self.package:
             # Options given on a resume of a run that started without them (build checked that
             # stage 7 has not started). Recorded once; a later resume reads them from here.
@@ -1455,7 +1470,7 @@ class Supervisor:
         cfg, problems = swap_draft.draft(run_dir=self.run_dir, tt_model_root=self.paths.tt_model_root,
                                          cache_root=self.paths.cache_root, hf_home=self.paths.hf_home,
                                          inputs=self.inputs, chips=spec.boards * CHIPS_PER_BOARD,
-                                         operator_home=self.paths.operator_home)
+                                         operator_home=self._container_home(spec))
         if cfg is None:
             self.ledger.append("decision", spec.number, decision="swap config not drafted", problems=problems)
             return
@@ -1469,6 +1484,12 @@ class Supervisor:
         self.ledger.append("decision", spec.number, decision="swap config drafted",
                            config=evidence_record(self.run_dir, target), bundle_dir=cfg.get("bundle_dir"),
                            copied=copied, **({"package": cfg["package"]} if "package" in cfg else {}))
+
+    def _container_home(self, spec):
+        """The operator home to look for container packages in, or None when stage 2 may not use one: the sidecar parity workflow
+        (its skill and scripts need a bundle), and a lab run (the containers would run on the lab, where this supervisor's label
+        search and sweep cannot see them)."""
+        return self.paths.operator_home if spec.skill == "weights-swap-check" and self.lab is None else None
 
     @staticmethod
     def _container_config(stage_dir: Path) -> bool:
@@ -1780,6 +1801,10 @@ class Supervisor:
                     taken[rec["lease_id"]] = rec
             elif d.get("decision") == "test lease released":
                 released.add(d.get("lease_id"))
+        if self.lab is None and any(i not in released for i in taken):
+            # A container test the earlier supervisor started can still be running (its client died, the container did not). Stop it
+            # first, and block here when one survives: the lease is not given back, and the coder is not started over it.
+            self._sweep(None)
         for lease_id, rec in taken.items():
             if lease_id in released:
                 continue
@@ -2111,6 +2136,7 @@ class Supervisor:
             self.containers.remove(cid)
         left = self.containers.list(self.run_label)
         if left:
+            self.surviving_containers = list(left)      # _release_test_lease keeps the lease they run under
             self._block(n, "test containers are still running after docker stop and rm; no test "
                            "lease was released and the coder was not restored", containers=left)
 
