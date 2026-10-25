@@ -44,8 +44,9 @@ The path rule. `weights-only` needs all of these, otherwise the path is `full-po
 `path_reasons` says why:
 - the text config values in DECISIVE are equal (head_dim is taken as hidden_size divided by
   num_attention_heads when a config leaves it out);
-- the two models share at least one text tensor, and every shared tensor has the same shape and
-  dtype;
+- the two models share at least one text tensor, and every shared tensor has an equal shape and
+  the same dtype, except a tensor of equal shape and at most 1,048,576 elements whose two dtypes are both BF16, F16 or
+  F32 (that difference gets a hazard and does not change the path; DTYPE_TOLERANCE_ELEMENTS);
 - neither model has a tensor the other lacks, except vision-tower, projector and mtp tensors
   (EXPLAINED_EXTRA). A new text tensor means code the nearest model's implementation does not run.
 
