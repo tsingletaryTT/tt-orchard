@@ -53,3 +53,18 @@ def test_timestamps_keep_advancing_across_several_days():
 def test_a_first_line_that_is_not_at_midnight_starts_at_zero():
     out = rows("23:00:00  orchardist   a", "01:00:00  orchardist   b")
     assert [r["t"] for r in out] == [0, 7200]
+
+
+def test_credentials_in_narration_are_redacted_whole_message_included():
+    hf = "hf_" + "A" * 36
+    gh = "ghp_" + "b" * 40
+    out = rows(f"10:00:00  grafter   ran curl with token={hf}", f"{PAD}and Authorization: Bearer abc.def.ghi then {gh} and sk-" + "x" * 24 + " api_key=hunter2")
+    text = out[0]["text"]
+    for leak in (hf, gh, "abc.def.ghi", "hunter2", "sk-" + "x" * 24):
+        assert leak not in text, leak
+    assert "<redacted>" in text
+
+
+def test_ordinary_words_that_contain_token_are_not_redacted():
+    out = rows("10:00:00  orchardist   the tokenizer has 248320 tokens; no password was asked")
+    assert out[0]["text"] == "the tokenizer has 248320 tokens; no password was asked"

@@ -20,14 +20,26 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from orchard import narrate, ui  # noqa: E402
+from orchard import narrate, scrub, ui  # noqa: E402
 
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 LINE = re.compile(r"^(\d\d):(\d\d):(\d\d)\s+(orchardist|grafter|head grower|seasonal hand|sheepdog)\s+(.*)$")
 
 
+SECRETS = (                        # beyond orchard.scrub's token patterns: an assignment or header that carries a secret, and common key shapes
+    (re.compile(r"(?i)\bBearer\s+\S+"), "Bearer <redacted>"),
+    (re.compile(r"(?i)\b(token|secret|password|passwd|api[_-]?key|authorization)(\s*[:=]\s*)\S+"), r"\1\2<redacted>"),
+    (re.compile(r"\bsk-[A-Za-z0-9_-]{16,}"), "<redacted>"),
+    (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "<redacted>"),
+)
+
+
 def scrub_text(text: str, run: Path) -> str:
     host, user = socket.gethostname(), Path.home().name
+    for _, pattern in scrub.TOKEN_PATTERNS:
+        text = pattern.sub("<redacted>", text)
+    for pattern, repl in SECRETS:
+        text = pattern.sub(repl, text)
     text = text.replace(str(run), "<run>").replace(str(Path.home()), "~")
     text = re.sub(r"/home/[^\s]*", "~", text)
     text = re.sub(re.escape(host), "this-box", text, flags=re.I)
@@ -131,6 +143,8 @@ def main() -> int:
         text = f.read_text(encoding="utf-8")
         assert "/home/" not in text and socket.gethostname().lower() not in text.lower(), f"{f.name} still holds a path or the host name"
         assert not re.search(rf"\b{re.escape(Path.home().name)}\b", text), f"{f.name} still holds the user name"
+        hits = scrub.scrub_text(text, hostname=socket.gethostname(), home=str(Path.home()))
+        assert not hits, f"{f.name} still holds {', '.join(hits)}"
     print(f"replay {len(rp)} lines, {rp[-1]['t'] if rp else 0} s")
     return 0
 
