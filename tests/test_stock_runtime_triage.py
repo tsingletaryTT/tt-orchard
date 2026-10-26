@@ -311,7 +311,7 @@ def test_find_params_needs_a_config_in_the_directory(tmp_path):
 def test_support_row_reads_the_research_report_and_prefers_the_params_match(tmp_path):
     run_dir = tmp_path / "run"
     (run_dir / "research").mkdir(parents=True)
-    rows = [{"name": "Llama 3.1 8B", "via": "readme", "matched": "a/b", "boards": ["P150"], "blackhole": True},
+    rows = [{"name": "Llama 3.1 8B", "via": "readme", "matched": "unsloth/Llama-3.1-8B-Instruct", "boards": ["P150"], "blackhole": True},
             {"name": "Llama-3.1-8B-Instruct", "via": "model_params", "matched": "unsloth/Llama-3.1-8B-Instruct", "boards": [],
              "blackhole": None}]
     (run_dir / "research" / "base-candidates.json").write_text(json.dumps({"tt_transformers": rows}))
@@ -396,3 +396,17 @@ def test_the_tt_metal_tree_facts_are_none_when_the_tool_cannot_answer(monkeypatc
         raise OSError("no such program")
     monkeypatch.setattr(sr.subprocess, "run", boom)
     assert sr.tt_metal_tree("/t") == {"tag": None, "dirty": None}
+
+
+def test_support_row_takes_the_readme_boards_of_the_same_matched_model_only(tmp_path):
+    run_dir = tmp_path / "run"
+    (run_dir / "research").mkdir(parents=True)
+    rows = [{"name": "Llama 3.1 8B", "via": "readme", "matched": "m/eight", "boards": ["P150"], "blackhole": True},
+            {"name": "Llama-3.2-1B-Instruct", "via": "model_params", "matched": "m/one", "boards": [], "blackhole": None},
+            {"name": "Llama 3.2 1B", "via": "readme", "matched": "m/one", "boards": ["N150"], "blackhole": False}]
+    (run_dir / "research" / "base-candidates.json").write_text(json.dumps({"tt_transformers": rows}))
+    got = sr.support_row(run_dir, "Llama-3.2-1B-Instruct")
+    assert got["boards"] == ["N150"] and got["blackhole"] is False
+    (run_dir / "research" / "base-candidates.json").write_text(json.dumps({"tt_transformers": [rows[0], rows[1]]}))
+    got = sr.support_row(run_dir, "Llama-3.2-1B-Instruct")
+    assert got["boards"] == [] and got["blackhole"] is None

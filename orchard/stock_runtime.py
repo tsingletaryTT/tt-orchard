@@ -57,9 +57,11 @@ def support_row(run_dir, name: str) -> dict:
         return empty
     rows = [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
     params = next((r for r in rows if r.get("via") == "model_params" and r.get("name") == name), None)
-    readme = next((r for r in rows if r.get("via") == "readme" and r.get("boards")), None)
     if params is None:
         return empty
+    # a README row counts only when it was matched for the same model id as the selected row: research also records rows for the
+    # model's other stated bases, and their boards say nothing about this model
+    readme = next((r for r in rows if r.get("via") == "readme" and r.get("boards") and r.get("matched") == params.get("matched")), None)
     return {"via": "model_params", "matched": params.get("matched"),
             "boards": list(readme["boards"]) if readme else list(params.get("boards") or []),
             "blackhole": readme.get("blackhole") if readme else params.get("blackhole")}

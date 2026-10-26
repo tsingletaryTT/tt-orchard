@@ -395,7 +395,10 @@ def _stock_check(report, stock) -> Check | None:
         found = stock(row["name"])
         if not found:
             continue
-        readme = next((r for r in report["tt_transformers"] if isinstance(r, dict) and r.get("via") == "readme"), None)
+        # only the README row research matched for the same model id as the selected row: rows for the model's other bases say nothing
+        # about this model's boards
+        readme = next((r for r in report["tt_transformers"] if isinstance(r, dict) and r.get("via") == "readme"
+                       and r.get("matched") == row.get("matched")), None)
         blackhole = readme.get("blackhole") if readme else None
         boards = ", ".join(readme.get("boards") or []) if readme else ""
         if readme is None:

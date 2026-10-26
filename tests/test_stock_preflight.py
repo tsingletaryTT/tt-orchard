@@ -63,6 +63,17 @@ def test_a_readme_row_alone_is_not_enough():
     assert c.status == pf.BLOCK and seen == []
 
 
+def test_a_readme_row_matched_for_another_model_is_not_attached_to_the_selected_row():
+    other = {**ROW_README, "name": "Llama 3.1 8B", "matched": "meta-llama/Llama-3.1-8B-Instruct", "boards": ["P150"], "blackhole": True}
+    row = {**ROW_PARAMS, "name": "Llama-3.2-1B-Instruct"}
+    c, _ = stock_check(report(tt_transformers=[row, other]))
+    assert c.status == pf.WARN and "no README row" in c.detail and "P150" not in c.detail
+    assert c.data["stock_runtime"]["blackhole"] is None
+    own = {**ROW_README, "matched": "x/humanizer", "boards": ["N150"], "blackhole": False}
+    c, _ = stock_check(report(tt_transformers=[row, other, own]))
+    assert "N150" in c.detail and "names no Blackhole board" in c.detail and c.data["stock_runtime"]["blackhole"] is False
+
+
 def test_a_readme_row_with_a_plain_name_is_still_not_enough():
     c, seen = stock_check(report(tt_transformers=[{**ROW_README, "name": "Llama-3.1-8B"}]))
     assert c.status == pf.BLOCK and seen == []
