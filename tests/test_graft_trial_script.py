@@ -27,7 +27,7 @@ if b.get("exit"):
     print(b.get("say", "boom")); sys.exit(b["exit"])
 def prompt(d, t):
     return {"summary": {"decode_tok_s": {"median": d}, "ttft_s": {"median": t}, "completion_tokens": {"median": 100}}, "runs": []}
-rec = {"label": arg("--label"), "server_ready_s": b.get("ready", 100.0), "prompt_set_sha256": "abc", "reps": 3,
+rec = {"label": arg("--label"), "server_ready_s": b.get("ready", 100.0), "prompt_set_sha256": "abc", "reps": 3, "drafter": b.get("drafter"),
        "prompts": {"a": prompt(b["decode"][0], b.get("ttft", [0.3, 0.2, 0.4])[0]), "b": prompt(b["decode"][1], b.get("ttft", [0.3, 0.2, 0.4])[1]),
                    "c": prompt(b["decode"][2], b.get("ttft", [0.3, 0.2, 0.4])[2])}}
 pathlib.Path(arg("--out")).write_text(json.dumps(rec))
@@ -283,3 +283,18 @@ def test_every_child_stays_in_the_scripts_process_group_so_the_supervisors_stop_
     calls = rig.calls()
     assert [c["tool"] for c in calls] == ["measure", "prepare", "serve", "measure"]
     assert {c["pgrp"] for c in calls} == {os.getpgrp()}
+
+
+def test_the_variants_drafter_acceptance_reaches_the_result_and_the_decision(rig):
+    drafter = {"accept_rate": 0.31, "accepted_per_iter": 2.17, "draft_length": 7, "iters": 800, "sessions": 12, "histogram": [1]}
+    rig.set(measure={"safe": {"decode": [19, 20, 21]}, "variant": {"decode": [60, 62, 64], "drafter": drafter}})
+    rig.run()
+    res = rig.result()
+    assert res["variant"]["drafter"] == {k: v for k, v in drafter.items() if k != "histogram"}
+    assert res["safe"]["drafter"] is None
+    assert decide(res, safe_top1=0.96875)["numbers"]["variant_drafter_accept_rate"] == 0.31
+
+
+def test_a_variant_that_logged_no_drafter_lines_has_a_none_drafter(rig):
+    rig.run()
+    assert rig.result()["variant"]["drafter"] is None
