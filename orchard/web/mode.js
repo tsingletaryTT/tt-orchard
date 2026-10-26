@@ -3,7 +3,7 @@
 // The page style: "playful" (the farm look) or "operator" (plain type, state first, no scene).
 // This file is a plain script in <head>, with no defer, so the style is on <html> before the first paint and the page never
 // flashes the wrong look. The choice comes from `?mode=` (a link someone sends you), else from what this browser remembered,
-// else "playful". Anything that is not one of the two names is ignored, so a link or a stored value cannot inject a style.
+// else "operator" (the default since 2026-10-26). Anything that is not one of the two names is ignored, so a link or a stored value cannot inject a style.
 (function () {
   const MODES = ["playful", "operator"];
   const KEY = "orchard.mode";
@@ -18,7 +18,7 @@
 
   const fromLink = valid(new URLSearchParams(window.location.search).get("mode"));
   if (fromLink) remember(fromLink);
-  let current = fromLink || valid(stored()) || "playful";
+  let current = fromLink || valid(stored()) || "operator";
   document.documentElement.dataset.mode = current;
 
   function apply(mode) {

@@ -431,6 +431,9 @@ class WebApp:
             "actors": {k: {"icon": narrate.ACTOR_ICON.get(k, ""), "role": narrate.ACTOR_ROLE.get(k, "dim"),
                            "about": v} for k, v in lexicon.ACTORS.items()},
             "marks": dict(lexicon.STATUS_MARKS),
+            # the Operator style's small pictures; the page always prints the real word beside each one
+            "op": {"states": dict(lexicon.OPERATOR_STATES), "marks": dict(lexicon.OPERATOR_MARKS),
+                   "tones": dict(lexicon.OPERATOR_TONES), "buttons": dict(lexicon.OPERATOR_BUTTONS)},
             "toplike": {"available": bool(self.toplike_cmd), "modes": list(TOPLIKE_MODES),
                         "command": " ".join(self.toplike_cmd[-1:]) if self.toplike_cmd else None},
             "config": {"path": str(self.config_path), "runs_root": str(self.runs_root),

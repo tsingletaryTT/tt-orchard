@@ -87,7 +87,9 @@ function stateBadge(state) {
   if (!st) return h("span", { class: "badge", dataset: { tone: state === "unreadable" ? "alarm" : "dim" } },
     ...(state === "unreadable" ? [h("span", { class: "emoji", "aria-hidden": "true" }, "⚠ "), "unreadable"] : [state]));
   return h("span", { class: "badge", dataset: { tone: TONE[st.role] || "dim" }, title: `${st.word} (${state})` },
-    h("span", { "aria-hidden": "true", class: "emoji" }, st.emoji), h("span", { class: "word" }, st.word), h("span", { class: "name" }, state.replace(/-/g, " ")),
+    h("span", { "aria-hidden": "true", class: "emoji" }, st.emoji),
+    h("span", { class: "op-pic", "aria-hidden": "true" }, S.meta.op.states[state] || ""),      // the Operator style's picture; the real name stays beside it
+    h("span", { class: "word" }, st.word), h("span", { class: "name" }, state.replace(/-/g, " ")),
     h("span", { class: "real" }, `· ${state}`));      // "name" is the real state, shown instead of the orchard word in operator mode
 }
 
@@ -376,6 +378,7 @@ function renderVerdict(items) {
   const ul = clear($("verdict-list"));
   for (const i of list) {
     ul.append(h("li", { class: "verdict-item", dataset: { tone: i.tone, id: i.id } },
+      h("span", { class: "op-pic", "aria-hidden": "true" }, S.meta.op.tones[i.tone] || ""),
       h("strong", { class: "verdict-headline" }, i.headline), i.detail ? h("span", { class: "verdict-detail" }, i.detail) : null));
   }
 }
@@ -525,19 +528,21 @@ function renderActions(d) {
   const box = $("run-actions");
   if (!changed(box, [d.name, d.state, d.control_pending, d.launch && d.launch.pid])) return;
   clear(box);
-  const add = (label, cls, fn, title) => box.append(h("button", { type: "button", class: `btn ${cls}`, onclick: fn, title }, label));
+  // `pic` names an entry of the Operator style's button pictures; the label always stays as the button's text
+  const add = (label, cls, fn, title, pic) => box.append(h("button", { type: "button", class: `btn ${cls}`, onclick: fn, title },
+    pic ? h("span", { class: "op-pic", "aria-hidden": "true" }, `${S.meta.op.buttons[pic]} `) : null, label));
   if (d.control_pending) {
     box.append(h("span", { class: "badge", dataset: { tone: "warn" } }, `“${d.control_pending}” sent, waiting for the supervisor`));
   }
   if (d.state === "running") {
-    add("Pause", "btn-warn", () => doControl("pause"), "Pause at the next check; the chips stay leased");
-    add("Abort", "btn-danger btn-apart", () => doControl("abort"), "Stop the run and release the chips");
+    add("Pause", "btn-warn", () => doControl("pause"), "Pause at the next check; the chips stay leased", "pause");
+    add("Abort", "btn-danger btn-apart", () => doControl("abort"), "Stop the run and release the chips", "abort");
   } else if (d.state === "paused") {
-    add("Resume", "btn-primary", () => doControl("resume"));
-    add("Abort", "btn-danger btn-apart", () => doControl("abort"));
+    add("Resume", "btn-primary", () => doControl("resume"), undefined, "resume");
+    add("Abort", "btn-danger btn-apart", () => doControl("abort"), undefined, "abort");
   } else if (RETRY_STATES.includes(d.state)) {
     add(d.state === "aborted" ? "Resume run" : "Retry run", "btn-primary", doRetry,
-      "Run the same bring-up again; it resumes from the ledger");
+      "Run the same bring-up again; it resumes from the ledger", "retry");
   } else if (d.state === "ready-for-operator-review") {
     add("Open RESULTS.md", "btn-primary", openResults);
   }
@@ -573,6 +578,9 @@ function renderStepper(d) {
   const rows = new Map(d.stages.map((r) => [r.stage, r]));
   const live = d.state === "running";
   const going = d.state === "running" || d.state === "paused";
+  // what each stage was at the last draw of this same run: only a change to "pass" counts as fresh, so opening a finished run pops nothing
+  const prev = S.stepSeen && S.stepSeen.run === d.name ? S.stepSeen.status : null;
+  const seen = {};
   for (const s of S.meta.stages) {
     const r = rows.get(s.number);
     // A stage the ledger left open counts as running only while the run itself is going. In an aborted,
@@ -580,17 +588,22 @@ function renderStepper(d) {
     const stopped = r && r.status === "running" && !going;
     const status = r ? (stopped ? "stopped" : r.status) : "pending";
     const mark = h("span", { class: "emoji", "aria-hidden": "true" }, `${stopped ? "⏹" : S.meta.marks[status] || ""} `);
+    const opMark = h("span", { class: "op-pic", "aria-hidden": "true" }, `${S.meta.op.marks[status] || ""}`);
+    // a stage that passed since the last draw of this run pops once (Operator style, motion allowed only)
+    const fresh = Boolean(prev && prev[s.number] !== "pass" && status === "pass");
+    seen[s.number] = status;
     const isCur = d.stage && d.stage.current === s.number && !["ready-for-operator-review", "aborted"].includes(d.state);
     ol.append(h("li", {
-      class: "step", dataset: { status, current: String(Boolean(isCur)), live: String(live) },
+      class: "step", dataset: { status, current: String(Boolean(isCur)), live: String(live), fresh: String(fresh) },
       "aria-current": isCur ? "step" : null,
     },
       h("span", { class: "num" }, `${s.number}`),
       h("span", { class: "orchard" }, h("span", { "aria-hidden": "true" }, s.emoji + " "), s.name),
       h("span", { class: "real" }, s.real),
-      h("span", { class: "stat" }, ...(r ? [mark,
-        `${status}${r.wall_s && !stopped ? " · " + dur(r.wall_s) : ""}${r.attempts > 1 ? ` · ×${r.attempts}` : ""}`] : ["not yet"]))));
+      h("span", { class: "stat" }, ...(r ? [mark, opMark,
+        `${status}${r.wall_s && !stopped ? " · " + dur(r.wall_s) : ""}${r.attempts > 1 ? ` · ×${r.attempts}` : ""}`] : [opMark, "not yet"]))));
   }
+  S.stepSeen = { run: d.name, status: seen };
 }
 
 const WEATHER = {
