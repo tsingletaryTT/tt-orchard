@@ -391,14 +391,25 @@ def resolve_base(arg: str, sig, puller, out, style, *, dry_run: bool = False) ->
     return None, f"{arg} was pulled but is not among the installed bundles tt-orchard looks at"
 
 
-def _recorded_stock_params(run_dir: Path) -> str | None:
-    """The `stock_params` input in the run's run_start entry, or None (no ledger, an unreadable one, or a run that started without it)."""
+def _run_start_inputs(run_dir: Path) -> dict | None:
+    """The inputs in the run's run_start entry, or None when there is none: no ledger, an empty one, or one whose first
+    append failed so it holds no run_start (a ledger that cannot be read counts as started, with nothing recorded). Such a run never started, so there is nothing recorded to keep."""
     from orchard import ledger as ledger_mod
-    from orchard import stages as stages_mod
     try:
-        return stages_mod.stock_params(ledger_mod.read_entries(run_dir / "ledger.jsonl"))
+        entries = ledger_mod.read_entries(run_dir / "ledger.jsonl")
     except (OSError, ledger_mod.LedgerCorrupt):
-        return None
+        return {}               # a ledger that cannot be read belongs to a run that may have started: nothing is added to it
+    for e in entries:
+        if e.get("event") == "run_start":
+            inputs = e.get("data", {}).get("inputs")
+            return inputs if isinstance(inputs, dict) else {}
+    return None
+
+
+def _recorded_stock_params(run_dir: Path) -> str | None:
+    """The `stock_params` input in the run's run_start entry, or None."""
+    value = (_run_start_inputs(run_dir) or {}).get("stock_params")
+    return value if isinstance(value, str) and value else None
 
 
 def pick_base(candidates: list[dict], model: str, base: str, *, out, ask=input, inferred: bool = False) -> str | None:
@@ -778,7 +789,8 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
         if why:
             return _refuse(why)
 
-    recorded_stock = _recorded_stock_params(run_dir) if resuming else None
+    run_started = resuming and _run_start_inputs(run_dir) is not None       # a ledger with no run_start has nothing to keep
+    recorded_stock = _recorded_stock_params(run_dir) if run_started else None
 
     def preflight_page():
         got = preflight.run_preflight(cfg, args.model, accept_credentials=not args.refuse_credentials_visible,
@@ -858,7 +870,7 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
     # (orchard/stock_runtime.py). No flag is involved; the base row found the support.
     stock = base_data.get("stock_runtime")
     stock_dir = stock["params_dir"] if isinstance(stock, dict) and stock.get("params_dir") else None
-    if resuming:
+    if run_started:
         # A resume keeps the run's recorded choice. The supervisor picks the stock-runtime stages from the run_start entry, so a
         # preflight that now selects a bundle (or finds the parameters) must not change the input stage 2's draft reads.
         stock_dir = recorded_stock
