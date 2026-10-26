@@ -81,9 +81,15 @@ wheel) and whether it serves. `tt-model package-thin` itself says it is beta and
 Commands that would settle it. Step 1 needs no chip: copy the staged bundle, add `tt_py_test_utils_common` to `extra_code/`,
 pass `--plugin-wheel` (copy from an installed bundle) and `--constraints` from a resolved list, then `bash install.sh` in the
 copy and the import smoke test from the recipe (`import model` with `run.sh`'s `PYTHONPATH`, no device open). Step 2 needs one
-board: `gozer acquire --chips 1 --who "claude:stock-bundle" --reason "boot check of a tt-transformers thin bundle"`, then
-`gozer wait <ticket>`, then `TT_VISIBLE_DEVICES=<granted> bash <copy>/run.sh --port 20000`, one `temperature: 0` completion
-compared with the CPU reference, then `gozer release <lease>`. About 20 to 40 minutes, including a cold kernel build.
+board, run as one bounded driver under `gozer run`, so the lease lasts as long as the driver and no detached lease can expire
+(an idle acquired lease can lapse after 15 minutes without an open device, shorter than a cold boot):
+`gozer run --chips 1 --who "claude:stock-bundle" --reason "boot check of a tt-transformers thin bundle" -- timeout 3600
+python3 driver.py <copy>`. The driver starts `bash <copy>/run.sh --port 20000` in its own process group (`start_new_session`),
+polls the port until the server answers or a deadline passes, sends one `temperature: 0` completion and compares it with the
+reference, and in a `finally` sends SIGTERM to the server's process group, waits for it, and sends SIGKILL after a grace period,
+so the server is gone before `gozer run` releases the lease on success, failure and timeout. The driver is not written yet;
+`orchard/skills/weights-swap-templates/serve_and_compare.py` does the same job for the Qwen bundles and is the model for it.
+About 20 to 40 minutes, including a cold kernel build.
 
 ## 3. Question 2: which tt-transformers and demo models can run on Blackhole at v0.80.0
 
