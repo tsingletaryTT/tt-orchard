@@ -42,6 +42,7 @@ DEMO_CLAIM = re.compile(r"tt-metal has models/(demos|experimental)/([A-Za-z0-9_.
 # Board names in a README. This box has Blackhole boards; Wormhole is what most older demos name.
 BLACKHOLE = re.compile(r"\b(?:p100a?|p150[abc]?|p300[abc]?|blackhole)\b", re.I)
 WORMHOLE = re.compile(r"\b(?:n150|n300|t3k|tg|galaxy|loudbox)\b", re.I)
+ANY_BOARD = re.compile(BLACKHOLE.pattern + "|" + WORMHOLE.pattern, re.I)
 RAW_README = "https://raw.githubusercontent.com/" + METAL + "/main/models/{sub}/{name}/README.md"
 
 
@@ -199,11 +200,17 @@ def tt_transformers(fetch, t: dict, ids) -> Result:
     like one of `ids` is an exact match. (2) That directory's README table, which gives the boards each model
     runs on. (3) The standalone repo's `src/tt_transformers/models`, matched by the architecture terms the way
     the tt-metal demos are, because its names are code names (qwen25_7b)."""
-    res = Result()
-    keys = {_model_key(i) for i in ids if valid_id(i)}
+    res = Result(data={"supported": []})
+    # key -> the first id that has it, so a record says which id (the model or its base) the match was for
+    keys: dict[str, str] = {}
+    for i in ids:
+        if valid_id(i):
+            keys.setdefault(_model_key(i), i)
     listing = _listing(fetch, TT_PARAMS_URL, "models/tt_transformers/model_params", res)
     for name, item in (listing or {}).items():
         if _model_key(name) in keys:
+            res.data["supported"].append({"name": name, "via": "model_params", "matched": keys[_model_key(name)],
+                                          "boards": [], "blackhole": None})
             res.evidence.append(Evidence(
                 "tt-transformers", clean(f"tt-metal's models/tt_transformers/model_params has a config for {name}"),
                 _link(item, TT_README_PAGE), INFERRED, fetch.now()))
@@ -216,6 +223,11 @@ def tt_transformers(fetch, t: dict, ids) -> Result:
         m = TT_README_ROW.match(line)
         if m and _model_key(m.group(3)) in keys:
             boards = ' '.join(m.group(2).split())
+            named = _board_names(ANY_BOARD, boards)                 # in the order the README gives them
+            # blackhole: True when a Blackhole board is named, False when only other boards are, None when none is named
+            res.data["supported"].append({
+                "name": clean(m.group(1).strip()), "via": "readme", "matched": keys[_model_key(m.group(3))],
+                "boards": named, "blackhole": (True if _board_names(BLACKHOLE, boards) else False) if named else None})
             # the same phrase the demo claims use, so preflight warns about a row whose boards are all Wormhole
             lacks = (f"; {LACKS_BLACKHOLE} in that row"
                      if _board_names(WORMHOLE, boards) and not _board_names(BLACKHOLE, boards) else "")
@@ -348,7 +360,9 @@ def collect(fetch, config, *, family: str, run=subprocess.run, which=shutil.whic
     `no_github` (issues and code search) does not turn it off."""
     t = terms(config)
     res = Result()
-    res.extend(tt_transformers(fetch, t, ids))
+    tt = tt_transformers(fetch, t, ids)
+    res.extend(tt)
+    res.data["tt_transformers"] = tt.data.get("supported", [])
     res.extend(demo_facts(fetch, metal(fetch, t)))
     cat = catalog(family, run=run, which=which, now=fetch.now())
     res.extend(cat)

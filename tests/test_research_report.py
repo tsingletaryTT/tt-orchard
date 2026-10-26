@@ -126,7 +126,7 @@ def test_the_card_base_with_an_installed_v6_bundle_is_selected_with_its_class():
 def test_every_key_is_always_present():
     r = build(world())
     for key in ("model", "generated_at", "offline", "stated_bases", "candidates", "bundle_choices", "selected",
-                "ports", "evidence", "unavailable"):
+                "ports", "tt_transformers", "evidence", "unavailable"):
         assert key in r
 
 
@@ -645,3 +645,68 @@ def test_the_ports_step_gets_the_stated_bases_and_the_model_itself_as_ids_to_mat
     # an error inside the mock is caught by report._guard and recorded as an unavailable ports collector,
     # which would let the assertion above pass on the failure path
     assert not any(u["source"] == "ports" for u in r["unavailable"]), r["unavailable"]
+
+
+# ---- the tt-transformers support record (issue 61) -------------------------------------------------------------
+
+SUPPORT = [{"name": "Llama-3.2-1B-Instruct", "via": "model_params", "matched": "h/new", "boards": [], "blackhole": None},
+           {"name": "Llama 3.2 1B", "via": "readme", "matched": "h/new", "boards": ["N150"], "blackhole": False}]
+
+
+def test_the_report_carries_the_tt_transformers_support_record(monkeypatch):
+    monkeypatch.setattr(report.ports, "collect",
+                        lambda fetch, cfg, **kw: report.Result(data={"tt_transformers": [dict(r) for r in SUPPORT]}))
+    r = build(world())
+    assert r["tt_transformers"] == SUPPORT
+    json.dumps(r)
+
+
+def test_a_support_record_name_from_fetched_text_is_cleaned(monkeypatch):
+    bad = dict(SUPPORT[1], name="Llama\x07 3.2\u202e 1B " + "x" * 400)
+    monkeypatch.setattr(report.ports, "collect", lambda fetch, cfg, **kw: report.Result(data={"tt_transformers": [bad]}))
+    (row,) = build(world())["tt_transformers"]
+    assert "\x07" not in row["name"] and "\u202e" not in row["name"] and len(row["name"]) <= 300
+
+
+def test_a_failed_ports_collector_leaves_an_empty_support_record(monkeypatch):
+    monkeypatch.setattr(report.ports, "collect", _boom)
+    assert build(world())["tt_transformers"] == []
+
+
+def test_an_odd_support_record_is_dropped_and_not_raised(monkeypatch):
+    monkeypatch.setattr(report.ports, "collect", lambda fetch, cfg, **kw: report.Result(data={"tt_transformers": "x"}))
+    assert build(world())["tt_transformers"] == []
+
+
+def test_the_markdown_says_which_boards_tt_transformers_names_for_the_model():
+    r = build(world())
+    r["tt_transformers"] = SUPPORT
+    md = report.markdown(r)
+    assert "## tt-transformers support" in md
+    assert "Llama 3.2 1B (README): boards N150; no Blackhole board named" in md
+    assert "Llama-3.2-1B-Instruct (model_params)" in md
+
+
+def test_an_offline_report_has_an_empty_support_record():
+    r = report.build(model_id="h/new", hub=None, base_override=None, installed=[], search=NO_SEARCH,
+                     hub_info=HUBINFO, fetch=World(offline=True), run=RUN, which=lambda n: None)
+    assert r["offline"] is True and r["tt_transformers"] == []
+
+
+def test_a_row_with_an_unknown_source_is_dropped_from_the_support_record(monkeypatch):
+    rows = [dict(SUPPORT[0], via="somewhere"), dict(SUPPORT[1])]
+    monkeypatch.setattr(report.ports, "collect", lambda fetch, cfg, **kw: report.Result(data={"tt_transformers": rows}))
+    assert [r["via"] for r in build(world())["tt_transformers"]] == ["readme"]
+
+
+def test_the_matched_id_and_the_boards_are_cleaned_and_odd_values_are_dropped(monkeypatch):
+    row = dict(SUPPORT[1], matched="h/new\x07", boards=["N150\x07", 5, None], blackhole="yes")
+    monkeypatch.setattr(report.ports, "collect", lambda fetch, cfg, **kw: report.Result(data={"tt_transformers": [row]}))
+    (got,) = build(world())["tt_transformers"]
+    assert got["matched"] == "h/new" and got["boards"] == ["N150"] and got["blackhole"] is None
+
+
+def test_the_markdown_has_no_support_section_when_there_is_no_record():
+    r = build(world())
+    r["tt_transformers"] = []
+    assert "tt-transformers support" not in report.markdown(r)
