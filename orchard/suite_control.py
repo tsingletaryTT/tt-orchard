@@ -56,6 +56,12 @@ def scripts_for(cfg: dict) -> tuple[str, str]:
     return "prepare_swap.py", "serve_and_compare.py"
 
 
+def files_for(cfg: dict) -> list[str]:
+    """Every shipped file the control directory needs. The container script imports serve_and_compare.py, so both serving types copy it."""
+    prepare_name, serve_name = scripts_for(cfg)
+    return list(dict.fromkeys([prepare_name, serve_name, "serve_and_compare.py", SUITE_FILE]))
+
+
 def _repo(model_id: str) -> str:
     return str(model_id).split("@", 1)[0]
 
@@ -108,7 +114,7 @@ def prepare(stage_dir, *, orchard_dir=CHECKOUT, port=None, chips=None, run=subpr
     ccfg = control_config(cfg, port=port, drafter_off=off)
     prepare_name, serve_name = scripts_for(cfg)
     templates = Path(orchard_dir) / TEMPLATES
-    names = [prepare_name, serve_name, SUITE_FILE]
+    names = files_for(cfg)
     absent = [n for n in names if not (templates / n).is_file()]
     if absent:
         raise ControlError(f"the checkout's templates directory {templates} lacks {', '.join(absent)}")
