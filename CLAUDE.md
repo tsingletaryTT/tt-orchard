@@ -2241,3 +2241,13 @@ base and at least two fine-tunes and judge it (part 2, hardware). Part 1 is done
 - Slips: my retry loop for a busy board ran `gozer run` every minute; each attempt queued a ticket and the ticket stays in the queue after the command exits, leaving 53
   `claude:suite-control` tickets, which the auto mode classifier would not let me cancel. Use one `gozer acquire` and `gozer wait <ticket>` for a busy board, never a loop of `gozer run`. The
   full suite's first run stopped at one failure because my server held port 8150 (`test_swap_draft` binds a port); not a code problem.
+- Review fixes (Copilot, PR 80), all seven real, test first, one commit each (suite-control files: `tests/test_suite_control*.py`, `tests/test_container_forced_drafter.py`):
+  (1) a container stage's control copies `serve_and_compare.py`, which the container script imports (`files_for`); (6) inherited relative paths are made absolute against the run
+  directory (`run_dir_of` finds it from the stage path) because the control runs from `suite-control/`; (2) the chip count is read from the bundle's `tt_kernel_manifest.json` or the package's
+  config and written into the control's config, and a `--chips` that disagrees is refused (the old default of 2 leased a 4-chip bundle two chips); (5) a container stage served with the drafter
+  off is detected from its `evidence/swap-check.json` and `serve_and_compare_container.py` honours `"drafter": "off"`; (3) `launch`, the command that runs inside the lease, maps
+  `TT_VISIBLE_DEVICES` to device indices with `gozer status --json`, sets `ORCHARD_DEVICE_IDS`, a control-specific `ORCHARD_TEST_LABEL` and the marker `ORCHARD_CONTROL_DIR`; (4) it stops the serve script's
+  servers (by the marker) and removes its labelled containers on every exit, SIGTERM included, checks they are gone and exits 4 when it cannot confirm; (7) `run` uses `gozer acquire`, or
+  `gozer wait` for `--ticket`, then the launcher, then `gozer release`, and never starts a `gozer run`. `gozer wait` already takes the lease when it grants it, so the old advice to wait and then run the
+  printed `gozer run` queued behind the run's own lease. Mutations: 34 on the launcher and run flow (5 survivors, each given a test), 9 on chips, 10 on paths and files, 8 on the container template and drafter detection, 3 on the spawn helper (1 redundant
+  signal removed). Real-process tests cover SIGTERM to the launcher (the server grandchild is gone afterwards) and a server left behind by a finished script. Not run on hardware.
