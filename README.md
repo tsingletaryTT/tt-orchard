@@ -1524,6 +1524,27 @@ with their model, size, age and the unfinished runs that use them (`--lab` adds 
 `tt-orchard caches --prune --older-than DAYS` removes the ones no unfinished run uses and that have not been
 written for that long, after asking; it never removes the kernel cache or anything outside the cache root.
 
+### 5.11 A control for the prompt suite
+
+Stage 2 and stage 4 send the prompt suite (`orchard/skills/weights-swap-templates/prompt_suite.json`) to the new model and the
+gate reads the replies. A control is the same suite served by the nearest model on the same bundle. With a control the gate can
+tell a reply shape that the base also shows from one the new model introduced, and it can fail a run whose replies are identical
+to the base's on every prompt (the base weights served by mistake). A control costs one boot of the nearest model, so nothing
+makes one by itself.
+
+```bash
+tt-orchard suite-control prepare --stage-dir ~/orchard-runs/<run>/stages/2    # builds stages/2/suite-control/, opens no chip
+tt-orchard suite-control run     --stage-dir ~/orchard-runs/<run>/stages/2    # the same, then serves it under one gozer lease
+```
+
+`prepare` copies the shipped scripts into `suite-control/`, writes a config that names the nearest model as the model to serve
+(with its own tensor cache, `<tt_cache>-control`, and the drafter off when the stage's own `run.sh` serves with the drafter off),
+runs the shipped `prepare_swap.py` there and prints the `gozer run` command. `run` also runs that command. If gozer queues the
+request (exit 3 here), wait for the ticket with `gozer wait` and run the printed command. The result is
+`suite-control/evidence/swap-check.json`. To use it, put `"suite_control": "stages/2/suite-control/evidence/swap-check.json"` in
+the stage's `swap_config.json` before the stage's test runs. `--port` and `--chips` override the stage's values.
+Not built: a supervisor step that makes the control before stage 2's test.
+
 ## 6. Lessons that will bite you
 
 Each of these happened on the development machine. Details are in the
