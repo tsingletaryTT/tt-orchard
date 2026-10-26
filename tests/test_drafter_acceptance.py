@@ -107,7 +107,7 @@ def test_the_script_import_falls_back_to_the_checkout_when_there_is_no_package()
 def test_the_measured_prompts_are_bracketed_by_log_offsets():
     """main() reads the log from the offset taken after the warm-up, so the warm-up's session line is not counted."""
     text = Path(ms.__file__).read_text()
-    assert "drafter_log.size(log_path)" in text and "drafter_log.read_since(log_path" in text
+    assert "timed_window(a.port, served, log_path, a.reps)" in text
     assert "acceptance_fields(metrics_rate=acceptance(before=metrics0, after=metrics1), log_text=log_text)" in text and "**fields," in text
 
 
@@ -231,3 +231,30 @@ def test_the_authoritative_rate_overrides_the_log_rate_in_the_summary():
 def test_an_out_of_range_or_boolean_rate_is_ignored_by_the_summary():
     for bad in (True, 1.5, -1, "0.5"):
         assert gt.speed_summary({**record(None), "drafter_acceptance": bad})["drafter"] is None
+
+
+def test_both_acceptance_sources_cover_only_the_timed_prompts(tmp_path, monkeypatch):
+    """Counters and log both move during the warm-up. Neither source may include it."""
+    log = tmp_path / "server.log"
+    log.write_text("startup\n")
+    state = {"acc": 0, "dr": 0}
+
+    def fake_run_prompt(port, model, prompt):           # warm-up: 100 drafted, 90 accepted, and a log line
+        state["acc"] += 90
+        state["dr"] += 100
+        with open(log, "a") as f:
+            f.write(REAL.splitlines()[0] + "\n")
+
+    def fake_measure(port, model, prompts, reps):       # timed: 100 drafted, 10 accepted, no session line
+        state["acc"] += 10
+        state["dr"] += 100
+        return {}
+
+    monkeypatch.setattr(ms, "run_prompt", fake_run_prompt)
+    monkeypatch.setattr(ms, "measure", fake_measure)
+    monkeypatch.setattr(ms.time, "sleep", lambda s: None)
+    monkeypatch.setattr(ms, "get_text", lambda port, path, timeout=30.0: (
+        f"vllm:spec_decode_num_accepted_tokens_total {state['acc']}\nvllm:spec_decode_num_draft_tokens_total {state['dr']}\n"))
+    results, m0, m1, text = ms.timed_window(1, "m", log, 3)
+    assert ms.acceptance(before=m0, after=m1) == pytest.approx(0.1)
+    assert text == ""

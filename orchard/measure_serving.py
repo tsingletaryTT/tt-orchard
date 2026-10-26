@@ -253,6 +253,20 @@ def measure(port: int, model: str, prompts: list[dict], reps: int) -> dict:
     return out
 
 
+def timed_window(port: int, served: str, log_path, reps: int):
+    """Warm up, let the server settle, then take both acceptance sources around the timed prompts only: the /metrics scrape and the log offset
+    are both taken after the warm-up, so the counter-derived rate and the log-derived rate cover the same requests.
+    Returns (results, metrics before, metrics after, log text of the timed prompts)."""
+    run_prompt(port, served, warmup_prompt())                                       # warm-up: not recorded
+    time.sleep(LOG_SETTLE_S)                                                        # the warm-up's session line is written as it ends
+    metrics0 = spec_decode_counters(get_text(port, "/metrics"))
+    log_mark = drafter_log.size(log_path)
+    results = measure(port, served, PROMPTS, reps)
+    metrics1 = spec_decode_counters(get_text(port, "/metrics"))
+    time.sleep(LOG_SETTLE_S)
+    return results, metrics0, metrics1, drafter_log.read_since(log_path, log_mark)
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--label", required=True)
@@ -281,14 +295,7 @@ def main(argv=None) -> int:
         ready_s = sc.wait_healthy(proc, a.port, a.health_timeout, log_path)
         models = json.loads(get_text(a.port, "/v1/models") or "{}")
         served = (models.get("data") or [{}])[0].get("id") or a.model_dir
-        metrics0 = spec_decode_counters(get_text(a.port, "/metrics"))
-        run_prompt(a.port, served, warmup_prompt())                                       # warm-up: not recorded
-        time.sleep(LOG_SETTLE_S)                                                          # the warm-up's session line is written as it ends
-        log_mark = drafter_log.size(log_path)
-        results = measure(a.port, served, PROMPTS, a.reps)
-        metrics1 = spec_decode_counters(get_text(a.port, "/metrics"))
-        time.sleep(LOG_SETTLE_S)
-        log_text = drafter_log.read_since(log_path, log_mark)
+        results, metrics0, metrics1, log_text = timed_window(a.port, served, log_path, a.reps)
     finally:
         sc.stop_server(proc)
         log.close()
