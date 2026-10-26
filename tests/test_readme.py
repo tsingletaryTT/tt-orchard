@@ -110,8 +110,9 @@ def other_repo_flags() -> set[str]:
     flags |= _option_strings(_captured_parser(rolefit, lambda m: m.main([])))
     flags |= _option_strings(_captured_parser(setup_machine, lambda m: m.main([])))
     flags |= tt_orchard_flags()
-    from orchard import caches
+    from orchard import caches, suite_control
     flags |= _option_strings(caches.parser())
+    flags |= _option_strings(suite_control._parser())      # its options come after a REMAINDER in the tt-orchard parser
     return flags
 
 
