@@ -3711,3 +3711,12 @@ def test_a_run_the_watcher_killed_is_a_hang_even_if_its_exit_code_is_10(fake_ken
     with pytest.raises(kp.ProbeBlocked, match="hung"):
         kp.smoke_test(env=fake_kenv, shared_python="/p", run_watched=killed, cancel=cancel)
     assert cancel.tickets == []
+
+
+def test_the_skill_states_the_two_use_row_rule_without_a_solution():
+    """Pilot rms1 (2026-10-25): 2 of 3 rmsnorm attempts deadlocked (`Deadlock detected: all generators blocked`) because the
+    reader sent each tile once while the compute thread waited for the same tiles a second time. The general rule is in the
+    skill; the worked kernel is not (test_the_skill_holds_no_worked_solution_for_a_measured_op)."""
+    flat = " ".join(kp.SKILL.read_text().split())
+    assert "Deadlock detected: all generators blocked" in flat
+    assert "used twice" in flat

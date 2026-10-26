@@ -36,9 +36,10 @@ Rules from the specification and the examples:
   `ttl.math` functions), and `blk.store(expr)` writes an expression into a block whose shape it matches exactly. On a
   data movement thread a block is the source or destination of `ttl.copy`. Do not index a block element by element
   (`x_blk[i, j]`) or loop over its elements.
+- Data read once is delivered once: a row used twice (a sum, then a scale) must stay in one block across both uses or be
+  read again. `Deadlock detected: all generators blocked` means a thread waits for a tile no thread will send.
 - The decorator is `@ttl.operation(grid=...)`. The guide's `@ttl.kernel` is the old name.
-- `ttl.make_dataflow_buffer_like(tensor, shape=(R, C), block_count=2)`; the shape counts tiles. The guide's
-  `buffer_factor` is the old name.
+- `ttl.make_dataflow_buffer_like(tensor, shape=(R, C), block_count=2)`; the shape counts tiles. The guide's `buffer_factor` is the old name.
 - `ttl.math.reduce_sum(expr, dims=[...], shape=(...))`, and `ttl.math.reduce_max` the same way: `shape` is the
   result's shape, 1 in each reduced dimension. There is no scaler argument; the guide's `reduce_sum(x, s, dims=...)`
   is the old form.
@@ -94,7 +95,6 @@ Write it with write_file as a plain file.
 
 Other rules:
 - Write only `kernel.py`. Your result is judged afterwards by an unedited copy of the check.
-- Do not install packages, use the network, or touch any device. The check runs on a simulator.
-- Do not read the ledger or the log directory.
+- Do not install packages, use the network, or touch any device (the check runs on a simulator), or read the ledger or the log directory.
 - If the same failure comes back three times and you have no new idea, stop and say what you tried.
 - Finish with at most five lines: what the kernel does, and what the last check said.

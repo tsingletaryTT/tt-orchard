@@ -151,7 +151,7 @@ def test_the_wheel_is_built_with_the_version_override_in_its_environment(env):
     env.run.on(["uv", "pip", "install"])
     ke.step_wheel(env, False)
     builds = [e for a, e in env.run.calls if a[:2] == ["uv", "build"]]
-    assert builds and builds[0]["TTLANG_VERSION_OVERRIDE"] == "1.1.10+g1cd7d41" == want
+    assert builds and builds[0]["TTLANG_VERSION_OVERRIDE"] == "1.1.10+gfec38c6" == want
 
 
 def test_torch_comes_from_the_cpu_index_before_the_wheel(env):
