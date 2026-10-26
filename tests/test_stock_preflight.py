@@ -198,6 +198,60 @@ def test_a_run_with_no_stock_support_passes_no_stock_input(conf):
     assert "stock_params" not in out
 
 
+# ---- a resume keeps the run's recorded inputs (review of PR 78) ----------------------------------------------------
+
+def _started(conf, inputs):
+    from orchard.ledger import Ledger
+    run_dir = conf.parent / "runs" / "cloudflare--clef"
+    with Ledger(run_dir / "ledger.jsonl") as led:
+        led.append("run_start", None, model="Cloudflare/clef", inputs=inputs)
+    return run_dir
+
+
+def _bundle_signals(snap, **over):
+    from orchard.nearest import Installed
+    from test_cli import signals
+    rep = report(tt_transformers=[ROW_PARAMS, ROW_README])
+    return signals(research=lambda *a: rep, stock_params=lambda name: Path("/host/params") / name, local_snapshot=lambda m: snap,
+                   installed_bundles=lambda: [Installed("tt/base-p150", "g/base", "6", 1)],
+                   hub_info=lambda m: (hub(base_model="g/base"), None), **over)
+
+
+def _inputs(rec):
+    return [rec.argv[i + 1] for i, a in enumerate(rec.argv) if a == "--input"]
+
+
+def test_a_resume_keeps_the_recorded_stock_params_when_preflight_now_finds_a_bundle(conf, tmp_path):
+    from test_cli import Recorder, run
+    snap = tmp_path / "snap"
+    snap.mkdir()
+    (snap / "config.json").write_text("{}")
+    run_dir = _started(conf, {"model": str(snap), "stock_params": "/host/params/Llama-3.1-8B-Instruct"})
+    rec = Recorder()
+    code, out, rec = run(conf, ["bringup", "Cloudflare/clef", "--run-dir", str(run_dir)], rec=rec, sig=_bundle_signals(snap))
+    assert code == 0, out
+    assert "stock_params=/host/params/Llama-3.1-8B-Instruct" in _inputs(rec)
+
+
+def test_a_resume_of_a_run_that_started_without_stock_params_does_not_add_them(conf, tmp_path):
+    from test_cli import Recorder, run, signals
+    snap = tmp_path / "snap"
+    snap.mkdir()
+    (snap / "config.json").write_text("{}")
+    run_dir = _started(conf, {"model": str(snap)})
+    rep = report(tt_transformers=[ROW_PARAMS, ROW_README])
+    sig = signals(research=lambda *a: rep, stock_params=lambda name: Path("/host/params") / name, local_snapshot=lambda m: snap)
+    rec = Recorder()
+    code, out, rec = run(conf, ["bringup", "Cloudflare/clef", "--run-dir", str(run_dir)], rec=rec, sig=sig)
+    assert code == 0, out
+    assert not [i for i in _inputs(rec) if i.startswith("stock_params=")]
+
+
+def test_a_fresh_run_is_not_affected_by_the_resume_rule(conf):
+    code, out, rec, snap = _cli_run(conf)
+    assert "stock_params=/host/params/Llama-3.1-8B-Instruct" in _inputs(rec)
+
+
 # ---- lab mode (review of PR 78): the parameters directory is on this box, and a lab runs its tests elsewhere -----------
 
 def test_in_lab_mode_the_stock_path_is_not_offered(tmp_path):

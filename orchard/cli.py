@@ -836,8 +836,19 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
     # A model tt-transformers supports takes the stock-runtime path: the supervisor reads this input and runs stage 0 as code
     # (orchard/stock_runtime.py). No flag is involved; the base row found the support.
     stock = base_data.get("stock_runtime")
+    stock_dir = stock["params_dir"] if isinstance(stock, dict) and stock.get("params_dir") else None
+    if resuming:
+        # A resume keeps the run's recorded choice. The supervisor picks the stock-runtime stages from the run_start entry, so a
+        # preflight that now selects a bundle (or finds the parameters) must not change the input stage 2's draft reads.
+        from orchard import ledger as ledger_mod
+        from orchard import stages as stages_mod
+        try:
+            recorded = stages_mod.stock_params(ledger_mod.read_entries(run_dir / "ledger.jsonl"))
+        except (OSError, ledger_mod.LedgerCorrupt):
+            recorded = None
+        stock_dir = recorded
     inputs = {"model": str(snapshot), **({"base": str(base_snapshot)} if base_snapshot else {}),
-              **({"stock_params": stock["params_dir"]} if isinstance(stock, dict) and stock.get("params_dir") else {}),
+              **({"stock_params": stock_dir} if stock_dir else {}),
               **({"base_candidates": str(candidates_path)} if candidates_path else {})}
     argv_run = bringup_config.supervisor_argv(cfg, args.model, run_dir, inputs=inputs,
                                               accept_credentials=not args.refuse_credentials_visible,
