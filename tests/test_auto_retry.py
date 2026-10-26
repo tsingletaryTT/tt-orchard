@@ -17,9 +17,9 @@ from test_cli import Pipe, Recorder, conf, signals  # noqa: F401  (conf is a fix
 class Blocks(Recorder):
     """A supervisor that ends blocked with each code in turn, then with `then`."""
 
-    def __init__(self, codes, then=0):
+    def __init__(self, codes, then=0, reason="x"):
         super().__init__(0)
-        self.codes, self.then, self.calls = list(codes), then, 0
+        self.codes, self.then, self.calls, self.reason = list(codes), then, 0, reason
 
     def supervisor(self, argv):
         from pathlib import Path
@@ -28,7 +28,7 @@ class Blocks(Recorder):
         run_dir = Path(argv[argv.index("--run-dir") + 1])
         run_dir.mkdir(parents=True, exist_ok=True)
         if self.codes:
-            (run_dir / "blocked.json").write_text(json.dumps({"code": self.codes.pop(0), "reason": "x"}))
+            (run_dir / "blocked.json").write_text(json.dumps({"code": self.codes.pop(0), "reason": self.reason}))
             return 5
         (run_dir / "blocked.json").unlink(missing_ok=True)
         return self.then
@@ -87,3 +87,17 @@ def test_a_run_that_ends_ready_or_aborted_is_not_retried(conf):
         rec = Blocks([], then=code_out)
         code, out, naps = go(conf, rec)
         assert code == code_out and rec.calls == 1 and naps == []
+
+
+def test_a_board_off_the_bus_is_not_retried_though_its_code_is_hardware_unhealthy(conf):
+    from orchard import bus
+    rec = Blocks(["hardware-unhealthy"], reason=f"{bus.OFF_BUS}: 0000:01:00.0 is in PCIe power state D3cold")
+    code, out, naps = go(conf, rec)
+    assert code == 5 and rec.calls == 1 and naps == []
+    assert "retrying" not in out.lower()
+
+
+def test_a_hardware_block_that_names_no_missing_board_is_still_retried(conf):
+    rec = Blocks(["hardware-unhealthy"], reason="resetting the chips failed: device still open")
+    code, out, naps = go(conf, rec)
+    assert code == 0 and rec.calls == 2 and len(naps) == 1

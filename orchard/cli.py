@@ -651,6 +651,14 @@ def _supervisor_holds_lock(run_dir: Path) -> bool:
         fh.close()
 
 
+def _block_reason(run_dir: Path) -> str:
+    """The reason text in the run's blocked.json, or "" when it is missing or unreadable."""
+    try:
+        return str(json.loads((run_dir / "blocked.json").read_text(encoding="utf-8")).get("reason") or "")
+    except (OSError, ValueError, AttributeError):
+        return ""
+
+
 def _block_code(run_dir: Path) -> str:
     """The reason code in the run's blocked.json, or "blocked" when it is missing or unreadable."""
     try:
@@ -870,7 +878,7 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
         code = supervisor_main(argv_run)
         while code == EXIT_BLOCKED and retried < args.auto_retries:
             reason = _block_code(run_dir)
-            if reason not in blocked.AUTO_RETRY:
+            if not blocked.retryable(reason, _block_reason(run_dir)):
                 break
             retried += 1
             print(f"{style.icon('🔁')}blocked: {reason}. Retrying automatically ({retried} of {args.auto_retries}) "

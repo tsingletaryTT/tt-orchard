@@ -38,8 +38,11 @@ import sys
 import time
 from pathlib import Path
 
-from . import bench_control, bench_proxy, toolcall_bench
+from . import bench_control, bench_proxy, bus, toolcall_bench
 from .stallwatch import StallWatcher, run_watched
+
+EXIT_OFF_BUS = 7            # a chip the session holds is off the PCIe bus (orchard/bus.py); a person has to power-cycle the box
+_PCI_ADDRESS = re.compile(r"^[0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]$")
 
 HERE = Path(__file__).resolve().parent
 SWAP_TEMPLATE = HERE / "skills" / "weights-swap-templates" / "serve_and_compare.py"
@@ -167,6 +170,24 @@ def run_bfcl_phase(*, chat_url: str, served: str, bfcl_dir, out_dir, limit, conc
 
 
 # ---- the session ---------------------------------------------------------------------------------------------------------------------
+
+def _sleep(seconds: float) -> None:
+    time.sleep(seconds)
+
+
+def _clock() -> float:
+    return time.monotonic()
+
+
+def _bus_check() -> str | None:
+    """After a failure: a sentence naming each chip this session holds that is off the PCIe bus or unreadable, or None. The chips are
+    the PCI addresses in TT_VISIBLE_DEVICES, which `gozer run` sets to the leased chips. With none named the check cannot tell which
+    chips are this session's, so it gives no finding and the failure stays a model failure. Reads sysfs files only."""
+    held = [c.strip() for c in os.environ.get("TT_VISIBLE_DEVICES", "").split(",") if _PCI_ADDRESS.match(c.strip())]
+    if not held:
+        return None
+    return bus.diagnose(held=held, sleep=_sleep, clock=_clock)
+
 
 def _swap():
     spec = importlib.util.spec_from_file_location("serve_and_compare_for_bench", str(SWAP_TEMPLATE))
@@ -408,13 +429,27 @@ def main(argv=None) -> int:
             with open(log_path, "wb") as log:
                 proc = subprocess.Popen(["bash", a.run_sh, "--port", str(a.port)], env=env, stdout=log, stderr=subprocess.STDOUT,
                                         stdin=subprocess.DEVNULL, start_new_session=True)
-            summary["server_ready_s"] = round(sc.wait_healthy(proc, a.port, a.health_timeout, log_path), 1)
+            try:
+                summary["server_ready_s"] = round(sc.wait_healthy(proc, a.port, a.health_timeout, log_path), 1)
+            except SystemExit:
+                dead = _bus_check()
+                if not dead:
+                    raise
+                summary["off_bus"] = dead
+                print(f"bench_session: the server did not become healthy. {dead}", file=sys.stderr)
+                return EXIT_OFF_BUS
             base = f"http://127.0.0.1:{a.port}"
         summary["served_name"] = _served_name(base, a.model_dir or a.label)
         write()
         for name in phases:
             rec = _phase(name, a, upstream=base, served=summary["served_name"], out_dir=out_dir, server_log=None if a.url else out_dir / "server.log")
             summary["phases"].append(rec)
+            if not rec["ok"] and (dead := _bus_check()):
+                # A board that left the bus is not a model failure, and the phases after it would only fail the same way.
+                rec["problem"] = f"{dead}. The phase had failed with: {rec['problem']}"
+                summary["off_bus"] = dead
+                print(f"bench_session: phase {name}: {dead}", file=sys.stderr)
+                return EXIT_OFF_BUS
             if summary["lm_eval_version"] is None and rec.get("scores", {}).get("lm_eval_version"):
                 summary["lm_eval_version"] = rec["scores"]["lm_eval_version"]
             write()
