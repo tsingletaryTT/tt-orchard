@@ -521,7 +521,7 @@ until it ends, and `--once` prints the recent history and stops.
 
 #### In a browser: `tt-orchard ui`
 
-`tt-orchard ui` serves one page for the whole machine, dressed as a farm game: the chips and who holds them,
+`tt-orchard ui` serves one page for the whole machine, in two styles (Operator, the default, and Playful, dressed as a farm game): the chips and who holds them,
 every run under `runs_root` (runs that need you first), and for the run you pick an animated orchard, its stages,
 the same live lines as `watch`, the ledger, its files (gate results, evidence, the operator bundle,
 `BLOCKED.md`, the coder log) and what to do next. The new-run dialog runs the base-model research with the
@@ -537,16 +537,17 @@ tests run and who uses which model, and ends with **Save**.
 
 The **Style** switch in the top bar sets the page style. It is a small labelled pair, apart from the view tabs, because it
 changes how the whole page looks and no view. Beside it a chip says how many chips are free (and whether the coder is
-up) and opens the Machine view, so the machine's state is on screen without scrolling the run list. **Playful** is the farm look described above. **Operator**
+up) and opens the Machine view, so the machine's state is on screen without scrolling the run list. **Operator** is the default; **Playful** is the farm look described above. **Operator**
 is the same page, plain: system type, no orchard scene, and the run in two panes. On the left, a colour band that
 states the run's state in its real name (the only large block of colour on the page, pulsing while the run
 works), then what it is doing now and what to do next. On the right, the stages and the live feed, ledger, files
-and details. Orchard names and icons give way to the real stage and state names (the first tab reads **Runs**, and no emoji
-appears anywhere), and a command or path selects with one click. Between "Next" and the rest sits a **Verdict**: one sentence for each finding with its yardstick, worst
+and details. Orchard names and icons give way to the real stage and state names (the first tab reads **Runs**). A small fixed set of emoji
+stays as decoration beside the real words: one for each run state, stage mark, verdict tone and primary button (Pause, Resume,
+Retry, Abort). They are hidden from screen readers, and Playful never shows them. A command or path selects with one click. Between "Next" and the rest sits a **Verdict**: one sentence for each finding with its yardstick, worst
 news first. A swap or configuration result is set against the bar from the code and the other runs on the machine; a
 boot time is ranked only against earlier runs of the same package on the same chip count. The reference line reads the
 evidence the reference template wrote and says so when the agent's `reference.json` disagrees with it. A run with no
-timing says "not measured" instead of leaving the gap. The browser remembers the choice; a link ending in `?mode=operator` or `?mode=playful` sets it.
+timing says "not measured" instead of leaving the gap. The browser remembers the choice; a link ending in `?mode=operator` or `?mode=playful` sets it; with neither, the page opens in Operator.
 
 ![Operator style, a finished run: the state band, what is happening now and what to do next, a verdict for each finding with its yardstick, and the stages on the right](docs/ui/operator-finished-run.png)
 

@@ -65,6 +65,20 @@ ACTORS = {
 
 STATUS_MARKS = {"pass": "✅", "fail": "❌", "skipped": "⏭", "running": "⏳", "escalated": "⬆"}
 
+# The Operator style of the web page shows one small emoji beside each real state name, stage mark, verdict tone and
+# primary button. They are decoration: the page always prints the real word next to them and marks them aria-hidden.
+# One entry for each of status.STATES.
+OPERATOR_STATES = {
+    "running": "🏃", "paused": "⏸️", "blocked": "🛑", "ready-for-operator-review": "🎉",
+    "aborted": "⏹️", "stopped-or-crashed": "💥", "not-started": "🕓",
+}
+# One entry for each of STATUS_MARKS, plus the two a stepper shows that the ledger does not write.
+OPERATOR_MARKS = {"pass": "✅", "fail": "❌", "skipped": "⏭️", "running": "🔄", "escalated": "⬆️",
+                  "pending": "🕓", "stopped": "⏹️"}
+# The verdict lines' tones (orchard/verdict.py).
+OPERATOR_TONES = {"good": "✅", "warn": "⚠️", "bad": "❌", "info": "ℹ️"}
+OPERATOR_BUTTONS = {"pause": "⏸️", "resume": "▶️", "retry": "🔁", "abort": "⛔"}
+
 
 def stage_label(number: int, real_name: str, style: Style) -> str:
     """`3 full model` plain, `🌳 3 trunk · full model` with emoji. The real name is always there."""
