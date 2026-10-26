@@ -2222,3 +2222,34 @@ Prompt (parent session): prepare the pilot for issue 61 (the full-port stages ha
 - Tests first: 9 new in `tests/test_research_ports.py`, 9 in `tests/test_research_report.py`. 22 mutations, all red after the first run left 5 survivors (an unknown `via`, the cleaning of `matched` and `boards`, the type check on `blackhole`, the empty report's key) that each got a test; one more (the order of the two board patterns in one alternation) is equivalent, because the search runs left to right in the text, and was dropped.
 - Slip: the shared scratchpad directory held a mutation runner of another agent under the same file name as mine. My `mut.py` was overwritten, and I ran the other agent's script once. It names its own worktree and restores each file, and my tree was not touched. Mutation scripts now go in a directory named for this branch.
 - Not verified: whether tt-transformers at v0.80.0 serves either Llama model on this box; whether the host build runs it from orchard; the standalone tt-transformers repository's Blackhole support. No chip, lease or port was used.
+
+## 2026-10-26 (UTC, later): the stock-runtime class, wired in (issue 61, same branch, version 0.9.0)
+Prompt (operator, relayed): pilot = `unsloth/Llama-3.1-8B-Instruct` (1B as the fallback); build the `stock-runtime` class and its skill and wire it in so it is used
+automatically when research finds an exact tt-transformers match; scratch writes in `<run>/tt-metal-scratch/`; bars approved as proposed; the host v0.80.0 build may run
+under a lease; run T1 and T2 first; T3 is not started. The design note's section 10 lists what was built. Built test first, all without a chip.
+- Class and path `stock-runtime` (`classes.py`, `stages.py`). Stage 0 is supervisor code (`orchard/stock_runtime.py`) when the run's inputs hold `stock_params`: it compares
+  the model's config with `model_params/<name>/config.json` (decisive keys only) and its tensor names, shapes and dtypes with the Llama and Qwen2 layout, and the measurement
+  decides (`stock-runtime`, or `full-port` with reasons). On the real `unsloth/Llama-3.1-8B-Instruct` snapshot and the host tree: `stock-runtime`, 8.03 billion parameters,
+  tag v0.80.0, tree clean. Stage 2 (`stock-runtime-check` skill, `stock_check.py` template, `gate_stock_runtime`) is built and tested against a fake tree and a fake demo;
+  stages 3 to 7 are skipped with a reason, and stage 4's 2- and 4-chip checks are not built (the skip text says so).
+- No flag: the `base` preflight row is a warning when research recorded an exact `model_params` match and that directory exists on this box (`ORCHARD_TT_METAL_DIR`, else
+  tt-metal under the operator's home); `bringup` passes `--input stock_params=<dir>`. A bundle that serves the base still wins. `write_file` reaches `<run>/tt-metal-scratch/`
+  in stages 2 to 4 of this path only. Gate bars are `STOCK_*` in `defaults.py`, labelled as choices.
+- Tests first: about 200 new tests in eight files (`tests/test_stock_*.py`, `tests/test_supervisor_stock.py`). About 100 mutations; the first run left 17 survivors: three were
+  redundant code (`isfinite`, a sidecar check that `_class_reasons` already makes, `bool` tokens), removed or explained, and 14 got tests (name lookup, rope extras, a cut header,
+  unknown boards, dirty tree, the size limit, a README row with a plain name, the scratch directory offered to a stage, a resumed config, the template copy, a failed free run, a
+  patch without a final newline); all red now.
+- Hardware, one board, `unsloth/Llama-3.1-8B-Instruct`: NOT RUN to the end. The queue held both boards for hours (the kernel probe on board 1, another agent's runs on board 0, and a
+  long run of `suite-control` tickets ahead of mine). Two attempts started under a granted lease and failed before any device was opened, each at a first real error that the
+  template now catches in `prepare`: (1) `ImportError: numpy.core.multiarray failed to import` from `cv2` in the root `conftest.py`: the shared TT environment has numpy 2.5.3
+  (the pip upgrade of 2026-10-06 recorded above) while ttnn 0.80.0 requires numpy below 2; (2) `ModuleNotFoundError: No module named 'tests.scripts'`: the root conftest imports
+  a package outside `models/`, so the scratch copy now includes `tests/__init__.py` and `tests/scripts`. For the manual run I put numpy 1.26.4 in a scratch directory
+  (`pip install --target`, shared environment untouched, numpy still 2.5.3 afterwards) and put that directory on PYTHONPATH (`python_path_extra` in the template config).
+  Two demo runs started under a lease I had been granted from the queue; a third launch was refused by the auto-mode classifier ("Interfere With
+  Workloads") after the 900-second window of that detached lease may have run out, so I released the lease and queued again.
+- A mistake of mine, disclosed: I ran `pytest --collect-only` on the demo without a lease to check imports. The root conftest or the demo opened the chips: `gozer status`
+  showed chips 0 and 1 BUSY-UNTRACKED under my pid for about five minutes, and the call did not finish. I killed it by pid; both chips read FREE afterwards and no other agent's
+  lease was involved. Collecting the demo's tests needs a lease. No `tt-smi -r` was run.
+- T1 and T2 were not run: the coder on port 8011 was serving the kernel probe (`vllm:num_requests_running` was 1), so the replay waited, as instructed. T3 was not started.
+- Not done: the first number on a chip (tokens per second, top-1 and top-5 against the CPU reference); stage 4's per-board-count checks; a stage 8 section that shows the stock numbers
+  (the generic table prints the flat fields only); the ticket `6673` was cancelled so that no unused lease is granted later.

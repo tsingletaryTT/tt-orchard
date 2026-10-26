@@ -379,9 +379,43 @@ def _confirm_inferred(base: str, serving, report) -> Check:
                        "candidates": first + rest, "report": report})
 
 
+def _stock_check(report, stock) -> Check | None:
+    """tt-transformers supports the model, and no installed bundle serves its base. Research recorded an exact `model_params` match
+    (report["tt_transformers"]) and `stock(name)` finds that directory on this box: the run goes on as stock-runtime. The row is a
+    warning, because the README row may name no Blackhole board and only stage 2 can say whether the model runs here. A README row alone
+    is not enough: stage 0 compares the model's config with the `model_params` config, so the directory has to exist."""
+    if stock is None:
+        return None
+    for row in (report or {}).get("tt_transformers") or []:
+        if not (isinstance(row, dict) and row.get("via") == "model_params" and isinstance(row.get("name"), str)):
+            continue
+        from orchard import stock_runtime
+        if not stock_runtime.NAME_OK.fullmatch(row["name"]):
+            continue
+        found = stock(row["name"])
+        if not found:
+            continue
+        readme = next((r for r in report["tt_transformers"] if isinstance(r, dict) and r.get("via") == "readme"), None)
+        blackhole = readme.get("blackhole") if readme else None
+        boards = ", ".join(readme.get("boards") or []) if readme else ""
+        if readme is None:
+            hw = "there is no README row for it, so no board is named"
+        elif blackhole is True:
+            hw = f"its README row lists {boards} and names Blackhole boards"
+        else:
+            hw = (f"its README row lists {boards or 'no board'} and names no Blackhole board, and this box has Blackhole boards")
+        return Check("base", WARN, f"no installed bundle serves the base, but tt-transformers supports {row['name']} ({hw}). The run "
+                     "serves it through tt-transformers as it is: stage 0 compares the config and tensors with tt-transformers' own, "
+                     "and stage 2 measures whether it runs on this box's boards", data={
+                         "base": None, "snapshot": None, "bundle": None, "needs_fetch": False, "candidates": [], "report": report,
+                         "stock_runtime": {"name": row["name"], "params_dir": str(found), "matched": row.get("matched"),
+                                           "blackhole": blackhole if isinstance(blackhole, bool) else None}})
+    return None
+
+
 def check_base(*, model_id: str, hub: HubInfo | None, base_override: str | None, local_snapshot: Callable,
                installed: list, search: Callable | None, report: dict | None = None,
-               accept_inferred: bool = False) -> Check:
+               accept_inferred: bool = False, stock: Callable | None = None) -> Check:
     """The model this run is compared with and served through. It needs an installed bundle (stages 2 and
     4 serve the new weights with it) and a snapshot on disk (stage 0 compares tensors and configs). A missing
     snapshot is downloaded by the command. A missing bundle is a block that lists what `tt model search`
@@ -395,6 +429,8 @@ def check_base(*, model_id: str, hub: HubInfo | None, base_override: str | None,
     if not base and report and report.get("selected"):
         base, inferred = report["selected"]["repo"], True
     if not base:
+        if (found := _stock_check(report, stock)) is not None:
+            return found
         return Check("base", WARN, "the model card names no base_model, so stage 0 has nothing to compare it "
                      "with. Pass --base <bundle or model id> to name the model to start from"
                      + _closest(report) + _port_note(report),
@@ -417,6 +453,8 @@ def check_base(*, model_id: str, hub: HubInfo | None, base_override: str | None,
                          "default profile, and only when exactly one installed package serves the base on the chip count of the "
                          f"stage; {where}{note}", data=data)
         return Check("base", OK, f"base {base}: bundle {serving[0].name} is installed; {where}{note}", data=data)
+    if (stock_row := _stock_check(report, stock)) is not None:
+        return stock_row
     family = nearest.family_query(base)
     found = None
     if search is not None:
@@ -503,6 +541,7 @@ class Signals:
     lab_sfpi: Callable | None = None            # () -> the lab's installed SFPI version, or None (lab mode)
     skills_freshness: Callable | None = None    # () -> list[skillsfresh.Freshness] for the skills_dirs clones
     bus: Callable | None = None                 # () -> orchard.bus.Bus: the chips the kernel shows (sysfs and /dev; no lease)
+    stock_params: Callable | None = None        # (name) -> Path of tt-transformers' model_params/<name> on this box, or None
 
 
 def check_lab(lab, status) -> Check:
@@ -583,7 +622,7 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
                 report, failed = None, type(exc).__name__
         found = check_base(model_id=model_id, hub=hub, base_override=base_override,
                            local_snapshot=s.local_snapshot, installed=inst, search=s.search_bundles, report=report,
-                           accept_inferred=accept_inferred_base)
+                           accept_inferred=accept_inferred_base, stock=s.stock_params)
         if failed:
             from orchard.research.types import clean
             found.detail += f" (research failed: {clean(failed)})"
@@ -795,6 +834,13 @@ def default_signals(cfg, research_options=None) -> Signals:
         from orchard import bus as bus_check
         return bus_check.read_bus()
 
+    def stock_params(name: str):
+        """tt-transformers' parameters for `name` in the host tt-metal tree: $ORCHARD_TT_METAL_DIR, else tt-metal under the
+        operator's home. Read only."""
+        from orchard import stock_runtime
+        tree = os.environ.get("ORCHARD_TT_METAL_DIR") or str((cfg.operator_home or supervisor.operator_home()) / "tt-metal")
+        return stock_runtime.find_params(tree, name)
+
     return Signals(
         cpu_standin=cpu_standin_problem, sfpi=sfpi_versions, lab_sfpi=lab_sfpi, skills_freshness=skills_freshness, bus=read_bus,
         installed_bundles=lambda: nearest.read_all_installed(models_root(), cfg.operator_home or supervisor.operator_home()),
@@ -805,7 +851,7 @@ def default_signals(cfg, research_options=None) -> Signals:
         credentials=lambda: supervisor.visible_credentials(cfg.operator_home or supervisor.operator_home()),
         port_in_use=port_in_use, gozer_status=gozer_status, load_tiers=tiers.load,
         reference_problem=reference_problem, lab_status=(lambda: _lab_status(cfg.lab)) if getattr(cfg, "lab", None) else None,
-        research=research)
+        research=research, stock_params=stock_params)
 
 
 def _lab_status(lab) -> tuple[bool, str, str]:

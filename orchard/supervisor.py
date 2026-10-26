@@ -143,6 +143,7 @@ from orchard.hwtests import (failed_tests, load_plan, move_aside, pending, read_
 from orchard.ledger import Ledger, LedgerCorrupt, LedgerLocked
 from orchard.package import PackageError, stage_all
 from orchard.package import finish as package_finish
+from orchard import stock_runtime
 from orchard.paths import (PATHS_RECORDED, RunPaths, UnknownPlaceholder, absolute_path,
                            recorded_paths)
 from orchard.runner import Denied, check_string
@@ -152,7 +153,7 @@ from orchard.server import ServerControl, ServerError, ServerSpec, StopCheck
 from orchard.stages import (PACKAGE_OPTIONS_SET, GateResult, TierUnavailable, abort_can_resume, attempt_started_ts,
                             budget_cap, check_disk, coder_state, delta_class, delta_path, evidence_record,
                             open_stage_dir, package_format, package_options, resolve_endpoint,
-                            resolve_skill, run_class, run_path, run_progress, spec_for, tier_for)
+                            resolve_skill, run_class, run_path, run_progress, scratch_stage, spec_for, stock_params, tier_for)
 from orchard.tiers import TierConfigError, load
 from orchard.watchdog import (Event, IdenticalResponses, Ladder, NoFileWritten, NoNewEvidence,
                               RepeatedToolCall, RetryGuard, StageOverBudget, ThinkingWithoutAction,
@@ -806,7 +807,7 @@ class Supervisor:
             # resumed run picks the same skill and gate as the run that crashed.
             entries = self.ledger.read()
             spec = spec_for(p.next_stage, run_path(entries, self.run_dir), package_format(entries),
-                            run_class(entries, self.run_dir))
+                            run_class(entries, self.run_dir), stock=stock_params(entries) is not None)
             try:
                 self._ensure_coder()
                 result = self._run_stage(spec, resuming=p.open_stage == p.next_stage,
@@ -1216,6 +1217,8 @@ class Supervisor:
     def _stage_body(self, spec, stage_dir: Path, escalated: bool, resumed: bool):
         self._wrapup_used = False           # at most one wrap-up per run of the stage body
         if spec.harness:
+            if spec.number == 0:
+                return self._stock_triage_body(spec, stage_dir)
             if spec.number == 8:
                 return self._bundle_body(spec, stage_dir)
             return self._package_body(spec, stage_dir, resumed)
@@ -1333,6 +1336,29 @@ class Supervisor:
             package_finish(self.run_dir, stage_dir)
         except PackageError as exc:
             return "fail", [f"packaging: {exc}"], None
+        gate = self._check_gate(spec, stage_dir)
+        return ("pass", [], gate) if gate.ok else ("fail", list(gate.reasons), gate)
+
+    def _stock_triage_body(self, spec, stage_dir: Path):
+        """Stage 0 of a run started with stock parameters, as supervisor code (orchard/stock_runtime.py): compare the model's config
+        and tensor layout with tt-transformers' `model_params/<name>`, write delta.json and its evidence, run the gate. The class
+        is the measurement's: stock-runtime when they agree, full-port with the reasons when they do not."""
+        n = spec.number
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        entries = self.ledger.read()
+        params = Path(stock_params(entries) or "")
+        snapshot = self.inputs.get("model")
+        if not params.name or not snapshot:
+            return "fail", ["a stock-runtime run needs the inputs model and stock_params"], None
+        try:
+            delta = stock_runtime.triage(
+                stage_dir=stage_dir, run_dir=self.run_dir, model_id=self.model_id, snapshot=snapshot, params_dir=params,
+                support=stock_runtime.support_row(self.run_dir, params.name),
+                tt_metal=stock_runtime.tt_metal_tree(params.parents[3]))
+        except OSError as exc:
+            return "fail", [f"stock triage could not read its inputs: {exc}"], None
+        self.ledger.append("evidence", n, what="stock triage", delta_class=delta["class"],
+                           **evidence_record(self.run_dir, stage_dir / "delta.json"))
         gate = self._check_gate(spec, stage_dir)
         return ("pass", [], gate) if gate.ok else ("fail", list(gate.reasons), gate)
 
@@ -1478,7 +1504,9 @@ class Supervisor:
                            escalated=escalated, skill=str(skill))
         step = AgentStep(agent=AGENT, endpoint=endpoint, model=model,
                          tools=Tools(self.run_dir, stage_dir, agent_env(self.run_dir, extra={
-                             **self.extra_env, "TT_MODEL_MODELS_DIR": str(self.paths.tt_model_root)})),
+                             **self.extra_env, "TT_MODEL_MODELS_DIR": str(self.paths.tt_model_root)}),
+                             scratch=(self.run_dir / "tt-metal-scratch"
+                                      if scratch_stage(n, run_path(entries, self.run_dir)) else None)),
                          ledger=self.ledger, stage=n, phase=phase, feed=self.watchdog.feed,
                          control=self.actuator, run_dir=self.run_dir,
                          evidence_dir=stage_dir / "evidence",
@@ -1496,6 +1524,8 @@ class Supervisor:
         the ledger says why, and the agent finds the facts as its skill describes."""
         if spec.draft == "stage4":
             return self._draft_stage4(spec, stage_dir)
+        if spec.draft == "stock_config":
+            return self._draft_stock(spec, stage_dir)
         if spec.draft != "swap_config" or (stage_dir / "swap_config.json").exists():
             return
         cfg, problems = swap_draft.draft(run_dir=self.run_dir, tt_model_root=self.paths.tt_model_root,
@@ -1515,6 +1545,27 @@ class Supervisor:
         self.ledger.append("decision", spec.number, decision="swap config drafted",
                            config=evidence_record(self.run_dir, target), bundle_dir=cfg.get("bundle_dir"),
                            copied=copied, **({"package": cfg["package"]} if "package" in cfg else {}))
+
+    def _draft_stock(self, spec, stage_dir: Path) -> None:
+        """stock_config.json for stage 2 of a stock-runtime run (orchard/stock_runtime.py, draft_config), and the template that reads it.
+        A config already in the stage directory (a resumed stage) is kept."""
+        target = stage_dir / "stock_config.json"
+        if target.exists():
+            return
+        try:
+            delta = json.loads((self.run_dir / "stages" / "0" / "delta.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            delta = None
+        cfg, problems = stock_runtime.draft_config(run_dir=self.run_dir, delta=delta, inputs=self.inputs,
+                                                   chips=spec.boards * CHIPS_PER_BOARD, cache_root=self.paths.cache_root)
+        if cfg is None:
+            self.ledger.append("decision", spec.number, decision="stock config not drafted", problems=problems)
+            return
+        target.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
+        shutil.copy2(Path(self.paths.orchard_dir) / "orchard" / "skills" / "stock-runtime-templates" / "stock_check.py",
+                     stage_dir / "stock_check.py")
+        self.ledger.append("decision", spec.number, decision="stock config drafted", config=evidence_record(self.run_dir, target),
+                           copied=["stock_check.py"], mesh_device=cfg["mesh_device"])
 
     def _container_home(self, spec):
         """The operator home to look for container packages in, or None when stage 2 may not use one: the sidecar parity workflow

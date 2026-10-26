@@ -833,7 +833,11 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
         # Stage 0 reads the candidates-only view. The full report (base-candidates.json) holds text from the
         # internet and stays for the operator.
         candidates_path = run_dir / research_report.RESEARCH_DIR / research_report.STAGE0_FILE
+    # A model tt-transformers supports takes the stock-runtime path: the supervisor reads this input and runs stage 0 as code
+    # (orchard/stock_runtime.py). No flag is involved; the base row found the support.
+    stock = base_data.get("stock_runtime")
     inputs = {"model": str(snapshot), **({"base": str(base_snapshot)} if base_snapshot else {}),
+              **({"stock_params": stock["params_dir"]} if isinstance(stock, dict) and stock.get("params_dir") else {}),
               **({"base_candidates": str(candidates_path)} if candidates_path else {})}
     argv_run = bringup_config.supervisor_argv(cfg, args.model, run_dir, inputs=inputs,
                                               accept_credentials=not args.refuse_credentials_visible,

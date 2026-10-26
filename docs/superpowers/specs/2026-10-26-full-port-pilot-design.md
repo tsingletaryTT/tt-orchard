@@ -235,3 +235,34 @@ Research now records tt-transformers support as data, which section 4 needs and 
 
 Tests: 9 new in `tests/test_research_ports.py` and 9 in `tests/test_research_report.py`. The mutation table is in the
 CLAUDE.md entry for this branch.
+
+## 10. Decisions and what was built next (2026-10-26, same branch, version 0.9.0)
+
+The operator answered the questions in section 8:
+
+1. Pilot: `unsloth/Llama-3.1-8B-Instruct`, the 1B as the fallback.
+2. Build the `stock-runtime` class and its skill, wired in so that it is used with no flag when research finds an exact tt-transformers match.
+3. Scratch writes in `<run>/tt-metal-scratch/` are allowed. The host tree stays read only. No package, push or publish.
+4. The gate bars are approved (0.85 and 0.95 for the 8B, 0.75 and 0.95 for a model of 3 billion parameters or fewer), still labelled as choices in `orchard/defaults.py`.
+5. tt-transformers may run from the host v0.80.0 build under a lease.
+6. Run T1 and T2 first. 7. The T3 reviewer is decided later; T3 is not started.
+
+Built, all without a chip:
+
+- `orchard/stock_runtime.py`: stage 0 as supervisor code. The model's config is compared with `model_params/<name>/config.json` on the keys that decide
+  the architecture (a context length, a dtype and a library version are left out), its tensor names, shapes and dtypes are compared with the Hugging Face
+  Llama and Qwen2 layout, and the measurement decides: `stock-runtime` when both agree, `full-port` with the reasons when they do not. On the real files
+  (`unsloth/Llama-3.1-8B-Instruct` against the host tree) it answers `stock-runtime`, 8.03 billion parameters, tag v0.80.0, clean tree.
+- `orchard/classes.py`, `orchard/stages.py`: the class and the path `stock-runtime`; stage 0 is `STOCK_STAGE_0` when the run's inputs hold `stock_params`;
+  stage 2 is `STOCK_STAGE_2` (skill `stock-runtime-check`, gate `gate_stock_runtime`); stages 3 to 7 are skipped with a reason each (stage 4's 2-chip and
+  4-chip checks are not built, and the reason says so). `gate_delta_stock` checks stage 0's file; `gate_stock_runtime` re-reads the template's evidence and
+  judges it again.
+- `orchard/preflight.py`: when no bundle serves the base and research recorded an exact `model_params` match whose directory exists on this box, the `base`
+  row is a warning and the run goes on. `orchard/cli.py` passes `--input stock_params=<dir>` to the supervisor. `ORCHARD_TT_METAL_DIR` names the tree; the
+  default is `tt-metal` under the operator's home.
+- `orchard/agent.py`, `orchard/supervisor.py`: `write_file` reaches `<run>/tt-metal-scratch/` (and nowhere else outside the stage directory) in stages 2 to 4
+  of this path.
+- `orchard/skills/stock-runtime-check.md` and `orchard/skills/stock-runtime-templates/stock_check.py`: `prepare` copies the host tree's `models/`, the root
+  `conftest.py`, `pytest.ini` and `tests/scripts` into the scratch directory, builds a model directory named after the tt-transformers model, checks that the
+  interpreter can import numpy, cv2 and torch, makes a reference file if the tree has none, and writes `hw_test.json`; `run` runs tt-transformers' own token
+  accuracy test and a free run from the scratch copy and writes `evidence/stock-check.json`, the logs and `evidence/scratch.patch`.

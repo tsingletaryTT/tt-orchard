@@ -178,6 +178,14 @@ GRAFT_TRIAL_DEADLINE_S = 7200.0  # choice: one hardware test: a warm boot of the
                                 # (4 to 25 minutes measured for this bundle), a warm boot of the variant, and 12 timed requests per boot.
 SWAP_MIN_TOKENS = 16            # choice: the fewest compared tokens the weights-only gate accepts; the
                                 # skill's script compares 32
+STOCK_TOP1_MIN = 0.85           # choice (operator approved, 2026-10-26): the stock-runtime stage 2 bar for teacher-forced top-1 agreement
+                                # between tt-transformers on the chip and the stage 1 CPU reference. One published source: models/model_targets.yaml
+                                # in tt-metal gives Llama-3.1-8B 90 percent top-1 and 98 percent top-5 on `bh_p150`; the bars sit 0.05 and 0.03 below.
+STOCK_TOP5_MIN = 0.95           # choice: the matching top-5 bar (see STOCK_TOP1_MIN)
+STOCK_SMALL_TOP1_MIN = 0.75     # choice: the bars for a model of at most STOCK_SMALL_PARAMS_MAX_B billion parameters (the 1B fallback). Its
+STOCK_SMALL_TOP5_MIN = 0.95     # published figure is 79 to 80 percent top-1 and 97 top-5, on Wormhole only; no Blackhole figure exists.
+STOCK_SMALL_PARAMS_MAX_B = 3    # choice: where the small-model bars start to apply
+STOCK_MIN_TOKENS = 128          # choice: the fewest teacher-forced tokens the stock-runtime gate accepts (the published figures use 511)
 AGENT_MAX_TURNS = 60            # choice: model turns in one agent step before the step counts as failed
 AGENT_CONTINUATION_TURNS = 20   # choice: model turns for a step's gate-feedback continuation (at most one).
                                 # It only has to fix what the gate named, so it gets a third of a step.
