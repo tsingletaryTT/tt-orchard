@@ -40,7 +40,7 @@ def load_rows(path, n, skip=0):
     return rows[skip : skip + n]
 
 
-def encode(rows, tok, max_len):
+def encode(rows, tok, max_len, pad_id):
     """Tokenise prompt and completion; drop rows that do not fit in max_len."""
     out, dropped = [], 0
     for r in rows:
@@ -54,7 +54,14 @@ def encode(rows, tok, max_len):
         if len(p) + len(c) > max_len:
             dropped += 1
             continue
-        out.append({"input_ids": p + c, "labels": [-100] * len(p) + c})
+        # The SDPA kernel needs the sequence length to be a multiple of 32, and
+        # sft_collate_fn pads only to the longest example, so pad every example to max_len here.
+        pad_n = max_len - len(p) - len(c)
+        ids = p + c + [pad_id] * pad_n
+        # Labels must be shifted by one: position t predicts token t+1 (ttml does not shift for us).
+        # Only completion tokens count: label t is kept when token t+1 belongs to the completion.
+        labels = [-100] * (len(p) - 1) + c + [-100] * (pad_n + 1)
+        out.append({"input_ids": ids, "labels": labels})
     return out, dropped
 
 
@@ -102,15 +109,15 @@ def main():
     set_seed(42)
     tok = AutoTokenizer.from_pretrained(args.model)
     pad = tok.pad_token_id if tok.pad_token_id is not None else tok.eos_token_id
-    train, dropped = encode(load_rows(args.data, args.n), tok, args.max_len)
+    train, dropped = encode(load_rows(args.data, args.n), tok, args.max_len, pad)
     print(f"train examples {len(train)} (dropped {dropped} over {args.max_len} tokens)")
     evald = None
     if args.eval_data:
-        evald, d2 = encode(load_rows(args.eval_data, args.eval_n), tok, args.max_len)
+        evald, d2 = encode(load_rows(args.eval_data, args.eval_n), tok, args.max_len, pad)
         print(f"eval examples {len(evald)} (dropped {d2})")
 
     if args.memory:
-        MemoryUsageTracker.begin_capture()
+        guard = MemoryUsageTracker.begin_capture()  # keep the guard alive; dropping it ends the capture
     ttml.open_device_mesh(ttml.Mesh((1, 1), ("_0", "_1")))
     ctx = ttml.autograd.AutoContext.get_instance()
 
