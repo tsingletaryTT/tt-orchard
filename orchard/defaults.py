@@ -128,12 +128,23 @@ SIDECAR_NOISE_FACTOR = 4.0      # choice: the probability bar is at least this m
 SIDECAR_MIN_QUESTIONS = 10      # choice: fewest questions a parity result may rest on (the run had 16)
 # The prompt-suite check (issue 15): after the 32-token check, the stage 2 and stage 4 templates send a fixed set of
 # prompts (orchard/skills/weights-swap-templates/prompt_suite.json) and orchard/prompt_suite.py reads the replies for
-# the failure shapes the tenstorrent qualitative-check skill lists. Every number below is a choice. None was
-# calibrated on a measured model: no chip has run the suite yet, so each one is provisional and must be revisited
-# with the first measured controls (issue 15 asks for the bar to be set from them).
+# the failure shapes the tenstorrent qualitative-check skill lists. Every number below is a choice. The first chip data
+# is one run: the suite served by Qwen3.8-27B (the control for AREX-2's configuration: the 2-chip bundle, drafter off,
+# host sampling), 8 prompts, 2026-10-26 (docs/run-logs/2026-10-26-suite-control.md). That is one model and eight
+# replies, which cannot calibrate a threshold. It showed no finding of any kind on those replies, so no check is known
+# to give a false positive on a healthy base reply, and it showed that 6 of the 8 replies reached SUITE_MAX_TOKENS with
+# thinking on (see below). A second boot tried thinking on and off at several limits (same run log), still on one model. No fine-tune was served with the suite, so no number below was set from
+# data, and each one stays provisional until fine-tunes have been measured against controls.
 SUITE_MIN_PROMPTS = 5           # choice: issue 15 asks for at least five prompts of different kinds
-SUITE_MAX_TOKENS = 64           # choice: long enough for a loop or a drift to show, short enough that eight
-                                # requests cost about a minute at 20 tokens/s (more with thinking on)
+SUITE_MAX_TOKENS = 512          # choice: room for a thinking reply to reach its answer, and a loop or a drift still shows.
+                                # Measured on one model (Qwen3.8-27B, thinking on by default, 8 prompts, greedy):
+                                # at 64, 6 of 8 replies reached the limit (5 inside the reasoning with no answer, 1
+                                # inside its answer) and 3 of 8 had an answer; at 256 and at 1024 all 8 completed
+                                # with the same 841 tokens in 61 s. The longest reply at 256 was 253 tokens, so 256
+                                # leaves little room for a model that thinks longer; 512 costs the same on this
+                                # model and was not itself measured. Thinking stays on, because it is the model's
+                                # default mode. No check changed its verdict in any cell
+                                # (docs/run-logs/2026-10-26-suite-control.md).
 SUITE_BLOCKING_KINDS = ("control_token_leak", "cross_request_leak", "corrupt_first_token", "repeated_first_token",
                         "mechanical_repetition", "gibberish")
                                 # choice: the findings that fail a gate when the control does not show them. A

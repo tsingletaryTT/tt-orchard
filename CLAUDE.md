@@ -2214,6 +2214,56 @@ Prompt (operator): research tt-metal's recent fixes, then "go through all the st
 - Left untouched on request or by caution: `~/tt-metal-v0.78.0-pre-fabricfix` (124 unpushed commits, 2 stashes, tt-tnt files, a live `tt-vjepa2` worktree) and `~/tt-metal-qwen36-p150x2` (an unpushed DFlash commit and untracked `models/autoports/`, `packaging/`). Deleted: `~/code/tt-metal-fastmodels`, `~/tt-metal-55fd115`, `~/tt-metal-v0.75.0` (its 3 unpushed commits are in `~/archive-tt-metal/`).
 - Not done: a 2-chip swap run on this tree; a check of other agents' venvs for references to `~/tt-metal`; v0.81 model-support work (Gemma 4, Muse-Glimmer, the Qwen3.8 MTP vLLM class) is not available on this tree.
 
+## 2026-10-26 (UTC): `tt-orchard suite-control`, and the first chip data for the prompt suite (branch `suite-control`, version 0.8.44)
+Prompt (parent session): finish the open half of issue 15: make the control automatically available (part 1, no chip), then run the suite on the
+base and at least two fine-tunes and judge it (part 2, hardware). Part 1 is done. Part 2 got the base control only.
+- `orchard/suite_control.py`, `tt-orchard suite-control prepare|run --stage-dir DIR [--chips N] [--port P]`. It builds `<stage>/suite-control/` from the
+  stage's `swap_config.json` with the nearest model as the model served (`new_model_id` = `nearest_model_id`, `new_snapshot` = `base_snapshot`), its own tensor
+  cache (`<tt_cache>-control`), no graft and no `suite_control`, copies the shipped scripts from the checkout (never the stage's copies), runs the shipped
+  `prepare_swap.py` there (no chip) and prints the one `gozer run --chips N` line that serves it. `run` also executes it; a queued request (exit 10) exits 3
+  and says to wait. The result is `suite-control/evidence/swap-check.json`; the stage's config then names it in `suite_control`, and the existing identity
+  checks apply. A stage that already serves the nearest model is refused. Container packages use `serve_and_compare_container.py` (not run on hardware).
+  Not built: a supervisor step that makes the control before stage 2's test (a boot per configuration; the README says so). The default stays "off".
+- `prepare_swap.py` takes `"drafter": "off"` (any other value, or the key with `graft_mtp`, is refused). The control uses it when the stage's own run.sh
+  exports an empty `QWEN36_DRAFTER`, because the base has `mtp.*` tensors and would otherwise be served with the drafter on while the run is served with it off.
+- Tests first: 36 in `tests/test_suite_control.py` (the real `prepare_swap.py` on the template tests' fake snapshots), 10 in
+  `tests/test_prepare_swap_drafter_key.py`. Mutations: 27 on the command, 7 on the drafter mirror, 8 on `prepare_swap.py`; first-run survivors were the chips
+  default order and the bundle_dir refusal (masked by `prepare_swap.py`'s own error), a graft-refusal test that matched a different message, and the reason text;
+  each has a test. One equivalent mutant: dropping `and not graft` on the forced-off line (the config check already refuses that pair). The test for the base-weights-by-mistake case
+  already exists (`tests/test_prompt_suite_verdict.py`, the identical-replies tests), so none was added.
+- Measured (docs/run-logs/2026-10-26-suite-control.md): Qwen3.8-27B served the suite on one 2-chip board, drafter off, host sampling, ready in 1,942 s cold. All 8 replies
+  were judged clean by `orchard/prompt_suite.py` (no finding of any kind). 6 of 8 replies reached `max_tokens` 64 with thinking on (5 inside the reasoning with no answer, 1 inside its answer); one model. The base agreed with AREX-2's reference on 30 of 32 tokens, against AREX-2's own 31 of 32: the 0.85 bar does not separate them. Raw replies are in
+  `docs/run-logs/evidence/suite-control-qwen3.8-27b/`.
+- Not done: serving the suite on any fine-tune (AREX-2 and RAG-Gate-27B stages were prepared and not served: both boards were held by other agents for about 2 hours).
+  So no `SUITE_*` threshold changed; their comments now say what data exists (one model, 8 replies, not a calibration). Whether the identical-replies rule passes a real
+  fine-tune and whether the bar can be set from controls are open.
+- Slips: my retry loop for a busy board ran `gozer run` every minute; each attempt queued a ticket and the ticket stays in the queue after the command exits, leaving 53
+  `claude:suite-control` tickets, which the auto mode classifier would not let me cancel. Use one `gozer acquire` and `gozer wait <ticket>` for a busy board, never a loop of `gozer run`. The
+  full suite's first run stopped at one failure because my server held port 8150 (`test_swap_draft` binds a port); not a code problem.
+- Review fixes (Copilot, PR 80), all seven real, test first, one commit each (suite-control files: `tests/test_suite_control*.py`, `tests/test_container_forced_drafter.py`):
+  (1) a container stage's control copies `serve_and_compare.py`, which the container script imports (`files_for`); (6) inherited relative paths are made absolute against the run
+  directory (`run_dir_of` finds it from the stage path) because the control runs from `suite-control/`; (2) the chip count is read from the bundle's `tt_kernel_manifest.json` or the package's
+  config and written into the control's config, and a `--chips` that disagrees is refused (the old default of 2 leased a 4-chip bundle two chips); (5) a container stage served with the drafter
+  off is detected from its `evidence/swap-check.json` and `serve_and_compare_container.py` honours `"drafter": "off"`; (3) `launch`, the command that runs inside the lease, maps
+  `TT_VISIBLE_DEVICES` to device indices with `gozer status --json`, sets `ORCHARD_DEVICE_IDS`, a control-specific `ORCHARD_TEST_LABEL` and the marker `ORCHARD_CONTROL_DIR`; (4) it stops the serve script's
+  servers (by the marker) and removes its labelled containers on every exit, SIGTERM included, checks they are gone and exits 4 when it cannot confirm; (7) `run` uses `gozer acquire`, or
+  `gozer wait` for `--ticket`, then the launcher, then `gozer release`, and never starts a `gozer run`. `gozer wait` already takes the lease when it grants it, so the old advice to wait and then run the
+  printed `gozer run` queued behind the run's own lease. Mutations: 34 on the launcher and run flow (5 survivors, each given a test), 9 on chips, 10 on paths and files, 8 on the container template and drafter detection, 3 on the spawn helper (1 redundant
+  signal removed). Real-process tests cover SIGTERM to the launcher (the server grandchild is gone afterwards) and a server left behind by a finished script. Not run on hardware.
+- A/B of thinking and token limits (operator request, same server boot, greedy, seed 1234, 8 prompts; cells thinking on at 64, 256, 1024 and off at 64, 256): answers present 3, 8, 8, 8, 8 of 8; reached the limit 6, 0, 0, 2, 0;
+  wall time 40.1, 61.2, 61.6, 25.2, 30.9 s; no blocking or advisory finding in any cell, so no check changed its verdict. 256 and 1024 with thinking on gave identical tokens (longest reply 253 of 256). Cheapest complete
+  setting: thinking off at 256 (it leaves the default mode untested); thinking on at 256 has a thin margin. Defaults unchanged. One model, one run per cell. The first attempt of the driver used a wrong path and exited at once
+  (the lease was released); the second took the lease with one `gozer acquire` and ran. The 53 stale tickets had lapsed by themselves; the queue held only the A/B's own ticket while it waited (about 3 hours at position 1 behind two long-held boards).
+
+## 2026-10-26 (UTC): the prompt suite's token limit is 512 (branch `suite-tokens-256`, on `suite-control`, version 0.8.45)
+Prompt (operator): follow the recommendation from the A/B test. At 64 tokens with thinking on, 6 of 8 replies reached the limit and 3 had an answer; at 256 and 1024 all 8 completed with identical replies. `SUITE_MAX_TOKENS` in `orchard/defaults.py` and the swap template's copy are 512. 512 sits between two measured settings that gave the same replies and was not itself measured; 256 left 3 tokens of margin on the longest reply. Thinking stays on. Test first (`test_suite_limit_lets_thinking_replies_reach_an_answer` was red at 64). The equality test between the two copies still holds. Related suite files: 344 passed.
+- Second review of PR 80 (Copilot, four findings, all real; tests in `tests/test_suite_control_review2*.py`, written first; fixed in one commit, not four, because the changes share `_run` and `launch`): (1) `run` no longer releases the lease when the launcher exits 4, is killed by a signal, or
+  is terminated and its launcher did not report a confirmed cleanup (`Terminated.code`, set by `_spawn` from the launcher's exit status after SIGTERM, None when it had to be killed); it prints the lease id and leaves the chips leased. (2) A flock on
+  `<stage>/suite-control.lock`, outside the directory `prepare` deletes, is held by `prepare`, `run` (from `prepare` to the release; the launcher inherits the descriptor) and a directly started `launch`. A second one is refused before it touches the directory
+  or asks gozer. (3) A lease with at least the needed chips is accepted (gozer grants whole boards), and the launcher narrows `TT_VISIBLE_DEVICES` and the device ids to the first chips it needs. (4) A `--gozer` other than the default is made absolute and
+  passed to the launcher. 33 mutations on the new code: 28 red first time; the 5 survivors were a launcher exit code overwritten after SIGTERM, a descriptor of another file taken for the lock, the lock descriptor not handed on, the lock variable left in the serve
+  script's environment (each got a test) and `set_inheritable` (redundant with `pass_fds`, removed). Not run on hardware.
+
 ## 2026-10-26 (UTC): the drafter's acceptance is measured and shown; BFCL with and without the graft (branch `graft-acceptance`, version 0.8.46)
 Prompt (parent session): finish what is open on issue 14: drafter acceptance, IFEval and BFCL for graft against no graft, 4 chips, a second model.
 - Finding about the issue: "the server prints no counters" was wrong. The DFlash2 serving code writes a `[dflash2-serve] slot N session: ...` line per request, and
@@ -2300,6 +2350,10 @@ Prompt (operator): "would this project be helpful for running model distillation
 - To rerun: take one chip with `gozer acquire --chips 1 --who claude:ttml-sft --reason ...` and `gozer wait`, run the script with the shared venv's python, `PYTHONPATH` set to the numpy 1.26.4 directory, `--model` the snapshot directory, `--data` the Capybara parquet, `--n 200 --steps 20 --batch 4 --max-len 512 --mode lora` (then `--mode full --lr 1e-5`), release the lease. The script's argument list is at its top.
 - Next steps, none started: a teacher-data run (teacher pairs as `messages` in a JSONL file, which the script reads; the Qwen3-Coder-Next coder was stopped and needs about 11 minutes to boot on one board; about 1,000 pairs of 400 tokens is roughly 2 minutes per epoch at the measured rate; try sequence length 1,024 or 2,048 with gradient accumulation, since 139 of the first 200 rows were dropped at 512); more than 8 held-out conversations; a generation loop with a stop at `<|eot_id|>` (`ttml.common.generate.generate` has no stop token, and whether a LoRA-wrapped model accepts the KV-cache arguments is not known); logit distillation needs a KL loss built through `SFTTrainer`'s `compute_loss_func` from existing ops and a teacher with the student's vocabulary (a Qwen teacher and a Llama student have different vocabularies).
 - Division of labour agreed with the operator: tt-orchard serves the teacher, checks the student (benchmark session, prompt suite, CPU reference) and brings a same-shape student up as a weights-only swap; training itself would be tt-train's SFT or a GPU trainer elsewhere. A smaller student with different dimensions is a full port.
+- Third review of PR 80 (Copilot, three findings, all real; tests in `tests/test_suite_control_review3.py` and the changed `test_suite_control*.py`): (1) a control must have the run's token limit. The template's `load_control` (exit 2 before any server starts, against the run's `suite_max_tokens`
+  or `SUITE_MAX_TOKENS`) and the gate's `_control_problems` both refuse a control whose `max_tokens` differs or is missing, and say to regenerate it; the 64-token controls made before 0.8.45 are refused. Cut-off replies compared with longer ones could hide base weights served by mistake. (2) `prepare` no longer prints a
+  `gozer run` line, which releases the lease whatever the launcher reports; it prints the `run` command, the launcher command for a lease held by hand, and a note. (3) A serve script that exits 4 (a boot failure) is reported by the launcher as `EXIT_SERVE_FAILED` (70) after a confirmed cleanup, so `run` releases the lease;
+  4 stays for an unconfirmed cleanup. Mutations: 13 (survivors: the launcher's `--gozer` in the printed command, covered by a test in another file, and a control and run that both lack a limit, which got a test).
 
 ## 2026-10-26 (UTC): Operator is the default web style, with a few emoji and more colour (branch `ui-operator-default`, version 0.8.45)
 Prompt (operator): "operator view should probably become the default. but it could be made more fun still. just little emoji and a little more color to make it 'fun' to operate."

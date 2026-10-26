@@ -1535,6 +1535,42 @@ with their model, size, age and the unfinished runs that use them (`--lab` adds 
 `tt-orchard caches --prune --older-than DAYS` removes the ones no unfinished run uses and that have not been
 written for that long, after asking; it never removes the kernel cache or anything outside the cache root.
 
+### 5.11 A control for the prompt suite
+
+Stage 2 and stage 4 send the prompt suite (`orchard/skills/weights-swap-templates/prompt_suite.json`) to the new model and the
+gate reads the replies. A control is the same suite served by the nearest model on the same bundle, with the same `SUITE_MAX_TOKENS` (a control made with another token limit is refused by the template and the gate; regenerate it). With a control the gate can
+tell a reply shape that the base also shows from one the new model introduced, and it can fail a run whose replies are identical
+to the base's on every prompt (the base weights served by mistake). A control costs one boot of the nearest model, so nothing
+makes one by itself.
+
+```bash
+tt-orchard suite-control prepare --stage-dir ~/orchard-runs/<run>/stages/2    # builds stages/2/suite-control/, opens no chip
+tt-orchard suite-control run     --stage-dir ~/orchard-runs/<run>/stages/2    # the same, then takes a lease, serves, releases
+tt-orchard suite-control run     --stage-dir ~/orchard-runs/<run>/stages/2 --ticket <ticket>   # after a queued run
+```
+
+`prepare` copies the shipped scripts into `suite-control/` (a container stage also gets `serve_and_compare.py`, which its script
+imports), writes a config that names the nearest model as the model to serve, and runs the shipped `prepare_swap.py` there. The
+config has its own tensor cache (`<tt_cache>-control`), absolute paths (a relative path in the stage's config is read against the run
+directory), the chip count of the bundle's or package's own metadata (`--chips` must agree with it) and the drafter off when the stage
+was served with it off (its `run.sh`, or for a container its `evidence/swap-check.json`). It prints the launcher command
+(`python -m orchard.suite_control launch --control-dir ...`) and the `run` command. Use `run`: a `gozer run` line would release the lease even when the launcher reports that a container survived the cleanup.
+
+`run` takes a lease with `gozer acquire`, runs the launcher under it and releases the lease. If gozer queues the request, `run` exits 3,
+prints the ticket and its position, starts nothing and cancels nothing. Run it again with `--ticket <ticket>`: that waits for the
+ticket with `gozer wait`, which takes the lease when it is granted, and then runs and releases it. `run` never starts a `gozer run`,
+because a new `gozer run` made while its own lease is held would queue behind that lease. The launcher reads the leased chips from
+`TT_VISIBLE_DEVICES`, sets `ORCHARD_DEVICE_IDS` and a control-specific `ORCHARD_TEST_LABEL` for the container template, and when the
+serve script ends for any reason, SIGTERM included, it stops the servers it started and removes its labelled containers and checks
+that they are gone (exit 4 when it cannot confirm). When the launcher cannot confirm that (exit 4, or it had to be killed), `run` does not
+release the lease: it prints the lease id and leaves the chips leased for a person to check and release. gozer grants whole boards, so a lease
+with more chips than the control needs is accepted; the launcher narrows the visible chips and the device ids to the first ones it needs. One
+control runs per stage at a time: `prepare`, `run` and `launch` take a lock file beside the control directory (`suite-control.lock`) and a
+second one is refused. A `--gozer` executable other than the default is passed on to the launcher. The result is
+`suite-control/evidence/swap-check.json`. To use it, put `"suite_control": "stages/2/suite-control/evidence/swap-check.json"` in
+the stage's `swap_config.json` before the stage's test runs. `--port` overrides the stage's port.
+Not built: a supervisor step that makes the control before stage 2's test.
+
 ## 6. Lessons that will bite you
 
 Each of these happened on the development machine. Details are in the

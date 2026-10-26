@@ -159,6 +159,10 @@ def _parser() -> argparse.ArgumentParser:
                                                        "run there (`lab setup --help`)")
     lab.add_argument("action", choices=["setup"])
     lab.add_argument("rest", nargs=argparse.REMAINDER, help="options for the action")
+    sc = sub.add_parser("suite-control", parents=[common],
+                        help="build the prompt suite's control from the nearest model (`suite-control prepare --help`)")
+    sc.add_argument("action", choices=["prepare", "run"])
+    sc.add_argument("rest", nargs=argparse.REMAINDER, help="--stage-dir DIR and the other options")
     from orchard import caches as _caches
     sub.add_parser("caches", parents=[common, _caches.parser(add_help=False)],
                    help="list the tensor caches (here and on the lab) and prune the ones no run uses")
@@ -690,6 +694,9 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
     if args.cmd == "package-card":
         from orchard import package_cmd
         return package_cmd.card_main(args, out=out)
+    if args.cmd == "suite-control":
+        from orchard import suite_control
+        return suite_control.main([args.action, *args.rest], out=out)
     if args.cmd == "kernel-env":
         from orchard import ttlang_env
         return ttlang_env.main(args, out=out)

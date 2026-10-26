@@ -46,6 +46,9 @@ The weights-swap-check skill copies this file into the stage directory and runs 
      removes `"sample_on_device_mode"` from the command's single `--additional-config`, because plain
      decoding on a 1x2 mesh refuses on-device sampling ("Unset sample_on_device_mode for host sampling");
      the host samples instead.
+   - `"drafter": "off"` in swap_config.json does the same two edits whatever the model's tensors say. A
+     suite control (orchard/suite_control.py) uses it so that the nearest model is served the way a run
+     without `mtp.*` tensors is served. Any other value is refused, and so is the key with `graft_mtp`.
 
 3. `model-dir-sources.json`, next to `model-dir/` (not inside it, because vLLM reads that directory). It records
    where each file came from: the nearest model (copied) or the new model (linked), why a copy was made, the
@@ -120,6 +123,12 @@ def load_config() -> dict:
         fail(f"swap_config.json is missing {missing}")
     if "graft_mtp" in cfg and not isinstance(cfg["graft_mtp"], bool):
         fail(f"swap_config.json's graft_mtp must be true or false, not {cfg['graft_mtp']!r}")
+    if "drafter" in cfg:
+        # "off" is the only value. It makes a control serve the way a model without mtp.* tensors is served (suite control, issue 15).
+        if not isinstance(cfg["drafter"], str) or cfg["drafter"] != "off":
+            fail(f"swap_config.json's drafter must be \"off\" when present, not {cfg['drafter']!r}")
+        if cfg.get("graft_mtp") is True:
+            fail("swap_config.json has drafter \"off\" and graft_mtp true; a graft exists to keep the drafter on")
     return cfg
 
 
@@ -607,10 +616,14 @@ def main() -> int:
         if vocab["trimmed"]:
             no_drafter_why = (f"the new model's vocabulary ({vocab['model']}) differs from the nearest model's ({vocab['base']}), "
                               "and the speculative drafter works on the nearest model's token ids")
+        forced_off = cfg.get("drafter") == "off"
+        if forced_off and not no_drafter_why:
+            no_drafter_why = ("swap_config.json says drafter off: this directory serves the way a model without mtp.* "
+                              "tensors is served, so a control can be compared with such a run")
         text, notes = edit_run_script(src_run.read_text(encoding="utf-8"), bundle,
                                       cfg["nearest_model_id"], model_dir,
-                                      drafter_off=((mtp is False or bool(vocab["trimmed"])) and not graft),
-                                      explicit_drafter_off=bool(vocab["trimmed"]),
+                                      drafter_off=((mtp is False or bool(vocab["trimmed"]) or forced_off) and not graft),
+                                      explicit_drafter_off=bool(vocab["trimmed"]) or forced_off,
                                       **({"drafter_reason": no_drafter_why} if no_drafter_why else {}))
         if graft:
             notes.append("the drafter and on-device sampling stay on: the nearest model's mtp.* tensors are "
