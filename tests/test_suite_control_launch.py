@@ -354,12 +354,14 @@ def test_the_acquire_request_names_the_chip_count_and_the_run(prep):
 
 # ---- the printed commands ------------------------------------------------------------------------------------------------
 
-def test_prepare_prints_the_launcher_under_gozer_run_and_the_acquire_flow(prep):
+def test_prepare_prints_the_run_command_and_the_launcher_and_no_gozer_run(prep):
+    """`gozer run` releases its lease whatever the launcher reports, which would bypass the retention of `suite-control run` (review of PR 80)."""
     out = io.StringIO()
     assert sc.main(["prepare", "--stage-dir", str(prep["stage"]), "--orchard-dir", str(CHECKOUT)], out=out, run=ok_run) == 0
     printed = json.loads(out.getvalue())
-    g = printed["gozer"]
-    tail = g[g.index("--") + 1:]
+    tail = printed["launch"]
     assert "orchard.suite_control" in tail and "launch" in tail and "--control-dir" in tail
     assert any(a.startswith("PYTHONPATH=") for a in tail)
     assert printed["run"].startswith("tt-orchard suite-control run")
+    assert "gozer" not in printed and "gozer run" not in out.getvalue()
+    assert "release" in printed["note"] and "run" in printed["note"]

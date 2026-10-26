@@ -16,11 +16,11 @@ Three actions:
            gets `"drafter": "off"` so it serves the same way (a control with the drafter on could differ from the run for that reason
            alone). Paths in the stage's config are made absolute against the run directory. The chip count is read from the bundle's
            or package's own metadata. Runs the shipped `prepare_swap.py` there (it opens no chip) and prints the launcher command,
-           both as a `gozer run` line and as the `run` command. Refuses a stage whose config already serves the nearest model.
+           the `run` command and the launcher command (for a lease held by hand; not for `gozer run`, which releases the lease whatever the launcher reports). Refuses a stage whose config already serves the nearest model.
   run      `prepare`, then `gozer acquire` (a queued request exits 3 and names its ticket; nothing is cancelled), the launcher under
            that lease, and `gozer release`. `run --ticket T` claims a queued ticket with `gozer wait` and then does the same. It never
            starts a `gozer run`, which would queue behind a lease already held.
-  launch   What runs inside the lease (`gozer run ... -- python -m orchard.suite_control launch --control-dir D`). It reads the chips from
+  launch   What runs inside the lease (`python -m orchard.suite_control launch --control-dir D`, started by `run`). It reads the chips from
            TT_VISIBLE_DEVICES, sets ORCHARD_DEVICE_IDS and a control-specific ORCHARD_TEST_LABEL for the container template, runs the
            serve script, and on every exit (SIGTERM included) stops the servers it started and removes its labelled containers, and
            checks that they are gone (exit 4 when it cannot).
@@ -200,11 +200,6 @@ def prepare(stage_dir, *, orchard_dir=CHECKOUT, port=None, chips=None, run=subpr
             "evidence": str(evidence), "wire": wire, "config": ccfg, "mirrors_drafter_off": off}
 
 
-def gozer_argv(prepared: dict, *, who: str, reason: str, gozer: str = "gozer") -> list[str]:
-    """The lease command that runs the launcher. `--exact` is left out: gozer picks a free board of that size."""
-    return [gozer, "run", "--chips", str(prepared["chips"]), "--who", who, "--reason", reason, "--", *launcher_argv(prepared, gozer)]
-
-
 def launcher_argv(prepared: dict, gozer: str = "gozer") -> list[str]:
     """The launcher command. A gozer executable other than the default is passed on, so the launcher's `gozer status` is the same one."""
     return [*prepared["serve"], *(["--gozer", gozer] if gozer != "gozer" else [])]
@@ -214,6 +209,7 @@ def launcher_argv(prepared: dict, gozer: str = "gozer") -> list[str]:
 
 CONTROL_VAR = "ORCHARD_CONTROL_DIR"   # marks every process the control starts, so the cleanup can find a server that outlived its script
 EXIT_UNCLEAN = 4                      # the launcher could not confirm that every server and container is gone
+EXIT_SERVE_FAILED = 70                # the serve script itself exited 4 (a boot failure, for example) and the cleanup was confirmed; 4 is kept for an unconfirmed cleanup
 EXIT_TERMINATED = 143                 # 128 + SIGTERM
 STOP_GRACE_S = 30.0                   # how long the serve script gets after SIGTERM before SIGKILL
 
@@ -389,7 +385,7 @@ def _launch_locked(control_dir: Path, env: dict, gozer: str, docker, sweep) -> i
     if problems:
         print("suite-control launch: not everything the control started could be confirmed stopped: " + "; ".join(problems), file=sys.stderr)
         return EXIT_UNCLEAN
-    return code
+    return EXIT_SERVE_FAILED if code == EXIT_UNCLEAN else code
 
 
 # ---- run: acquire (or wait for a ticket), launch under the lease, release --------------------------------------------------
@@ -516,9 +512,12 @@ def main(argv=None, *, out=None, run=subprocess.run, gozer_call=None, spawn=None
     try:
         with stage_lock(Path(a.stage_dir).resolve()) as fd:
             prepared = prepare(a.stage_dir, orchard_dir=a.orchard_dir, port=a.port, chips=a.chips, run=run)
-            argv_g = gozer_argv(prepared, who=a.who, reason=a.reason, gozer=a.gozer)
             print(json.dumps({"control_dir": prepared["control_dir"], "evidence": prepared["evidence"], "suite_control": prepared["wire"],
-                              "gozer": argv_g, "run": f"tt-orchard suite-control run --stage-dir {a.stage_dir}"}, indent=1), file=out)
+                              "run": f"tt-orchard suite-control run --stage-dir {a.stage_dir}",
+                              "launch": launcher_argv(prepared, a.gozer),
+                              "note": "Use the run command: it takes the lease, runs the launcher, and releases the lease only when the launcher confirms "
+                                      "that its servers and containers are gone. The launch command is for a lease you already hold and release yourself; "
+                                      "do not start it through the gozer command that runs a command and then releases the lease, because that release happens whatever the launcher reports."}, indent=1), file=out)
             if a.action == "prepare":
                 return 0
             return _run(prepared, a, gozer_call=gozer_call or _gozer, spawn=spawn or _spawn, lock_fd=fd)

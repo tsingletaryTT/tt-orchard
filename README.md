@@ -1537,7 +1537,7 @@ written for that long, after asking; it never removes the kernel cache or anythi
 ### 5.11 A control for the prompt suite
 
 Stage 2 and stage 4 send the prompt suite (`orchard/skills/weights-swap-templates/prompt_suite.json`) to the new model and the
-gate reads the replies. A control is the same suite served by the nearest model on the same bundle. With a control the gate can
+gate reads the replies. A control is the same suite served by the nearest model on the same bundle, with the same `SUITE_MAX_TOKENS` (a control made with another token limit is refused by the template and the gate; regenerate it). With a control the gate can
 tell a reply shape that the base also shows from one the new model introduced, and it can fail a run whose replies are identical
 to the base's on every prompt (the base weights served by mistake). A control costs one boot of the nearest model, so nothing
 makes one by itself.
@@ -1553,7 +1553,7 @@ imports), writes a config that names the nearest model as the model to serve, an
 config has its own tensor cache (`<tt_cache>-control`), absolute paths (a relative path in the stage's config is read against the run
 directory), the chip count of the bundle's or package's own metadata (`--chips` must agree with it) and the drafter off when the stage
 was served with it off (its `run.sh`, or for a container its `evidence/swap-check.json`). It prints the launcher command
-(`python -m orchard.suite_control launch --control-dir ...`) as a `gozer run` line.
+(`python -m orchard.suite_control launch --control-dir ...`) and the `run` command. Use `run`: a `gozer run` line would release the lease even when the launcher reports that a container survived the cleanup.
 
 `run` takes a lease with `gozer acquire`, runs the launcher under it and releases the lease. If gozer queues the request, `run` exits 3,
 prints the ticket and its position, starts nothing and cancels nothing. Run it again with `--ticket <ticket>`: that waits for the

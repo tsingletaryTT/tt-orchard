@@ -172,13 +172,10 @@ def test_wire_value_is_relative_to_the_run_directory(prep):
     assert build(prep)["wire"] == "stages/2/suite-control/evidence/swap-check.json"
 
 
-def test_the_lease_command_is_one_gozer_run_with_the_serve_script(prep):
+def test_the_launcher_command_does_not_start_a_gozer_run(prep):
     out = build(prep)
-    argv = sc.gozer_argv(out, who="claude:suite-control", reason="why")
-    assert argv[:4] == ["gozer", "run", "--chips", "2"]
-    assert argv[argv.index("--who") + 1] == "claude:suite-control" and argv[argv.index("--reason") + 1] == "why"
-    assert argv[argv.index("--") + 1:] == out["serve"]
-    assert "reset" not in argv and "release" not in argv
+    argv = sc.launcher_argv(out)
+    assert "orchard.suite_control" in argv and "launch" in argv and "gozer" not in argv and "run" not in argv
 
 
 def run_main(prep, *args):
@@ -192,7 +189,7 @@ def test_prepare_prints_the_command_and_runs_nothing_on_a_chip(prep):
     code, text = run_main(prep, "prepare")
     assert code == 0
     printed = json.loads(text)
-    assert printed["gozer"][:2] == ["gozer", "run"] and printed["suite_control"].endswith("swap-check.json")
+    assert printed["suite_control"].endswith("swap-check.json") and "gozer" not in printed
 
 
 def test_a_refusal_exits_2_without_calling_gozer(prep, capsys):

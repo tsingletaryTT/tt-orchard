@@ -280,11 +280,11 @@ def test_the_default_gozer_is_not_added_to_the_launcher_command(prep):
     assert "--gozer" not in spawned[0]["argv"]
 
 
-def test_the_printed_gozer_run_line_carries_the_custom_executable_too(prep):
+def test_the_printed_launcher_command_carries_the_custom_executable_too(prep):
     out = io.StringIO()
     sc.main(["prepare", "--stage-dir", str(prep["stage"]), "--orchard-dir", str(CHECKOUT), "--gozer", "/opt/g/gozer"], out=out, run=ok_run)
-    printed = json.loads(out.getvalue())["gozer"]
-    assert printed[0] == "/opt/g/gozer" and printed[printed.index("--gozer") + 1] == "/opt/g/gozer"
+    printed = json.loads(out.getvalue())["launch"]
+    assert printed[printed.index("--gozer") + 1] == "/opt/g/gozer"
 
 
 def test_launch_uses_the_gozer_it_is_given(tmp_path, fakes):

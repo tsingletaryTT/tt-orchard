@@ -22,7 +22,6 @@ def test_a_four_chip_bundle_gets_a_four_chip_lease_and_config(prep):
     set_manifest(prep, 4)
     out = build(prep)
     assert out["chips"] == 4 and out["config"]["chips"] == 4
-    assert sc.gozer_argv(out, who="w", reason="r")[3] == "4"
 
 
 def test_a_two_chip_bundle_gets_two(prep):
