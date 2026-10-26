@@ -185,3 +185,25 @@ def test_a_run_with_no_stock_support_passes_no_stock_input(conf):
     rec = Recorder()
     code, out, rec = run(conf, ["bringup", "Cloudflare/clef", "--dry-run"], rec=rec, sig=signals())
     assert "stock_params" not in out
+
+
+# ---- lab mode (review of PR 78): the parameters directory is on this box, and a lab runs its tests elsewhere -----------
+
+def test_in_lab_mode_the_stock_path_is_not_offered(tmp_path):
+    from test_preflight import lab_cfg, signals
+    rep = report(tt_transformers=[ROW_PARAMS, ROW_README])
+    seen = []
+    s = signals(research=lambda *a: rep, stock_params=lambda name: seen.append(name) or Path("/host/params") / name,
+                lab_status=lambda: (True, "", ""))
+    out = pf.run_preflight(lab_cfg(tmp_path), "Cloudflare/clef", accept_credentials=False, signals=s)
+    base = next(c for c in out if c.name == "base")
+    assert base.status == pf.BLOCK and base.reason == "nearest-model-missing" and "stock_runtime" not in (base.data or {})
+    assert seen == []
+
+
+def test_in_local_mode_the_same_signals_take_the_stock_path(tmp_path):
+    from test_preflight import cfg, signals
+    rep = report(tt_transformers=[ROW_PARAMS, ROW_README])
+    s = signals(research=lambda *a: rep, stock_params=lambda name: Path("/host/params") / name)
+    base = next(c for c in pf.run_preflight(cfg(tmp_path), "Cloudflare/clef", accept_credentials=False, signals=s) if c.name == "base")
+    assert base.status == pf.WARN

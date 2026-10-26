@@ -622,7 +622,9 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
                 report, failed = None, type(exc).__name__
         found = check_base(model_id=model_id, hub=hub, base_override=base_override,
                            local_snapshot=s.local_snapshot, installed=inst, search=s.search_bundles, report=report,
-                           accept_inferred=accept_inferred_base, stock=s.stock_params)
+                           accept_inferred=accept_inferred_base,
+                           # the parameters directory is in this box's tt-metal tree; a lab runs its tests on another box
+                           stock=None if getattr(cfg, "mode", "local") == "lab" else s.stock_params)
         if failed:
             from orchard.research.types import clean
             found.detail += f" (research failed: {clean(failed)})"
