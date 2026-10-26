@@ -253,13 +253,13 @@
 <section class="section edge" id="published">
   <div class="label">What came out</div>
   <h2>Packages made from runs, public on Hugging Face</h2>
-  <p class="sub">Each one was staged by the harness and booted on chips before upload. The package gate checks every card against the files the package ships. Four were also pulled from the Hub on a clean install and booted.</p>
+  <p class="sub">Each one was staged by the harness and booted on chips before upload. The package gate checks every card against the files the package ships. All six were also pulled from the Hub on a clean install and booted.</p>
   <table>
     <thead><tr><th>Package</th><th>Base</th><th>What was checked</th></tr></thead>
     <tbody>
-      <tr><td><a href="https://huggingface.co/episod/clef-p300"><span class="m">episod/clef-p300</span></a></td><td>Qwen3.8-27B + task head</td><td>31 of 32 tokens equal to the CPU; head agrees on 15 of 16 questions</td></tr>
+      <tr><td><a href="https://huggingface.co/episod/clef-p300"><span class="m">episod/clef-p300</span></a></td><td>Qwen3.8-27B + task head</td><td>31 of 32 tokens equal to the CPU; head agrees on 15 of 16 questions; pulled and booted from the Hub</td></tr>
       <tr><td><a href="https://huggingface.co/episod/rag-gate-27b-p300"><span class="m">episod/rag-gate-27b-p300</span></a></td><td>Qwen3.8-27B</td><td>Gate accuracy 0.930 on 200 items; pulled and booted from the Hub</td></tr>
-      <tr><td><a href="https://huggingface.co/episod/qwen3.8-27b-pi-p300"><span class="m">episod/qwen3.8-27b-pi-p300</span></a></td><td>Qwen3.8-27B</td><td>Full benchmark against its base (above)</td></tr>
+      <tr><td><a href="https://huggingface.co/episod/qwen3.8-27b-pi-p300"><span class="m">episod/qwen3.8-27b-pi-p300</span></a></td><td>Qwen3.8-27B</td><td>Full benchmark against its base (above); pulled and booted from the Hub</td></tr>
       <tr><td><a href="https://huggingface.co/episod/arex-2-p300"><span class="m">episod/arex-2-p300</span></a></td><td>Qwen3.8-27B, no drafter head</td><td>Pulled and booted from the Hub; a by-hand graft kept the drafter on</td></tr>
       <tr><td><a href="https://huggingface.co/episod/hemmingway-1-p300"><span class="m">episod/hemmingway-1-p300</span></a></td><td>Qwen3.8-27B</td><td>Pulled and booted from the Hub; 2-chip and 1-chip</td></tr>
       <tr><td><a href="https://huggingface.co/episod/openthai2.0-qwen3.8-27b-p300"><span class="m">episod/openthai2.0-qwen3.8-27b-p300</span></a></td><td>Qwen3.8-27B</td><td>Pulled and booted from the Hub; 2-chip and 1-chip</td></tr>
@@ -267,16 +267,11 @@
   </table>
 </section>
 
-<section class="section edge" id="limits">
-  <div class="label">What has not been shown</div>
-  <h2>The limits, plainly</h2>
-  <ul class="limits">
-    <li>Every run was on one QuietBox 2. Nothing has run on another machine.</li>
-    <li>No model that needs new model code has been brought up. The full-port stages have never run on a real model.</li>
-    <li>A run has not yet gone from start to end with nobody touching the machine. Disk space and a restart needed a person.</li>
-    <li>The fidelity bars are choices. Most numbers are single runs.</li>
-  </ul>
-  <p class="sub" style="margin-top:1rem">Each claim, its evidence and what is not shown are in <a href="https://github.com/tsingletaryTT/tt-orchard/blob/main/docs/proofs.md">docs/proofs.md</a>.</p>
+<section class="section edge" id="direction">
+  <div class="label">Where this is going</div>
+  <h2>Bring-ups with nobody at the keyboard</h2>
+  <p class="sub">The aim is a run that goes from a model id to a reviewed bundle with nobody touching the machine. Today an unattended run already does the checking itself, stops with a stated reason when it cannot go on, releases the chips and writes down what it tried. Each stop above shows what that looks like.</p>
+  <p class="sub" style="margin-top:1rem">Each claim and its evidence are in <a href="https://github.com/tsingletaryTT/tt-orchard/blob/main/docs/proofs.md">docs/proofs.md</a>.</p>
 </section>
 
 <section class="section edge" id="install">

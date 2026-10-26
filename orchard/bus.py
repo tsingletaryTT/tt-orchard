@@ -17,6 +17,7 @@ the operator does (power the box off and on, or reboot) and stops the run before
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -179,3 +180,59 @@ def check_bus(bus: Bus, gozer_text: str, needed: int) -> Check:
         return Check("bus", WARN, "; ".join(warns))
     return Check("bus", OK, f"{len(bus.chips)} Tenstorrent chips on the PCIe bus, all in {AWAKE} with a readable serial "
                  f"and a device node (the configuration needs {needed})")
+
+
+# ---- after the run has started (issue 25, second half) --------------------------------------------------------------
+
+# A failed hardware test, coder boot or benchmark phase is checked against the bus before it is called a model failure. The
+# message starts with this phrase; `blocked.retryable` looks for it, because a board that has left the bus needs a person
+# and a retry 60 s later would fail on the same board.
+OFF_BUS = "a chip this run uses is off the PCIe bus or unreadable"
+
+# Right after a lease is released, gozer resets the board, and for part of that reset the board's `tt_serial` returns zeros or
+# cannot be read. It was seen to clear in under a minute. The check reads again every POLL_S seconds for up to SETTLE_S
+# seconds and calls a chip dead only when it is still bad at the end. Both numbers are choices: 90 s is the observed minute
+# plus half again, and 5 s keeps the reads cheap (a handful of small files each).
+SETTLE_S = 90.0
+POLL_S = 5.0
+
+
+def _default_read() -> Bus:
+    return read_bus()
+
+
+def runtime_findings(state: Bus, held=None, needed: int = 0) -> list[str]:
+    """What is wrong with the chips the run uses, from one read of the bus. Empty when nothing is wrong or when the bus could
+    not be listed (the check cannot tell, so the earlier failure stands). `held` is the PCI addresses the run holds; with it,
+    only those chips are judged. Without it, the bus must show `needed` chips and every chip it shows is judged."""
+    if not state.readable:
+        return []
+    if held is None:
+        found = check_bus(state, "", needed)
+        return [] if found.status != BLOCK else found.detail.split("; ")
+    held = list(held)
+    here = {c.bdf for c in state.chips}
+    out = [f"{b} is not on the PCIe bus" for b in held if b not in here]
+    mine = Bus(chips=[c for c in state.chips if c.bdf in held], nodes=state.nodes, nodes_readable=state.nodes_readable)
+    if mine.chips:
+        found = check_bus(mine, "", len(mine.chips))
+        if found.status == BLOCK:
+            out += found.detail.split("; ")
+    return out
+
+
+def diagnose(held=None, needed: int = 0, *, settle_s: float = SETTLE_S, poll_s: float = POLL_S, read=None,
+             sleep=time.sleep, clock=time.monotonic) -> str | None:
+    """None when the chips the run uses are on the bus and readable (or when that cannot be told). Otherwise a sentence that
+    starts with OFF_BUS and names each chip and cause. A bad reading is read again for up to `settle_s` seconds first, so the
+    brief unreadable serial of a board in reset is not taken for a dead board. Reads files only."""
+    read = read or _default_read
+    start = clock()
+    while True:
+        findings = runtime_findings(read(), held, needed)
+        if not findings:
+            return None
+        if clock() - start >= settle_s:
+            return (f"{OFF_BUS}: " + "; ".join(findings) + f" (still so after {settle_s:.0f} s of re-reading). "
+                    + RESET_DOES_NOT_HELP)
+        sleep(poll_s)
