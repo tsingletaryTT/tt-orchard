@@ -314,8 +314,11 @@ def render_card(f: CardFacts) -> str:
               "by this bundle.",
               "Accuracy was compared with the CPU reference on one short fixed prompt only."]
     if f.graft:
+        rate = ("The share of the drafter's guesses that are accepted on this model is in the table above (graft trial)."
+                if f.acceptance_measured else
+                "How often the drafter's guesses are accepted on this model was not measured.")
         limits.append(f"The drafter's MTP head is the nearest model's ({f.nearest_model}), added to {f.model_id} at "
-                      "start. How often the drafter's guesses are accepted on this model was not measured.")
+                      f"start. {rate}")
     if f.stage_2_without_graft:
         limits.append("The stage 2 and stage 4 numbers were measured without the graft (the drafter off and sampling "
                       "on the host). The stage 7 rows were measured with this package's settings.")

@@ -119,3 +119,25 @@ def test_the_bundle_hazard_text_quotes_the_rate_when_there_is_one(tmp_path):
 def test_the_bundle_hazard_text_says_not_measured_without_a_rate(tmp_path):
     block = risks_block(with_rate(tmp_path, "graft", None))
     assert "acceptance rate was not measured" in block
+
+
+def limits_of(card: str) -> str:
+    flat = " ".join(card.split())
+    return flat.split("## Limitations")[1].split("## ")[0]
+
+
+NOT_MEASURED_LIMIT = "How often the drafter's guesses are accepted on this model was not measured"
+
+
+def test_the_limitations_follow_a_measured_acceptance(world):
+    decided_with(world, DRAFTER)
+    _, _, pkg = finished_auto(world)
+    limits = limits_of((pkg / "README.md").read_text())
+    assert NOT_MEASURED_LIMIT not in limits
+    assert "is in the table above" in limits
+
+
+def test_the_limitations_keep_the_not_measured_sentence_without_a_rate(world):
+    decided_with(world, None)
+    _, _, pkg = finished_auto(world)
+    assert NOT_MEASURED_LIMIT in limits_of((pkg / "README.md").read_text())
