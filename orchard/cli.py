@@ -395,6 +395,27 @@ def resolve_base(arg: str, sig, puller, out, style, *, dry_run: bool = False) ->
     return None, f"{arg} was pulled but is not among the installed bundles tt-orchard looks at"
 
 
+def _run_start_inputs(run_dir: Path) -> dict | None:
+    """The inputs in the run's run_start entry, or None when there is none: no ledger, an empty one, or one whose first
+    append failed so it holds no run_start (a ledger that cannot be read counts as started, with nothing recorded). Such a run never started, so there is nothing recorded to keep."""
+    from orchard import ledger as ledger_mod
+    try:
+        entries = ledger_mod.read_entries(run_dir / "ledger.jsonl")
+    except (OSError, ledger_mod.LedgerCorrupt):
+        return {}               # a ledger that cannot be read belongs to a run that may have started: nothing is added to it
+    for e in entries:
+        if e.get("event") == "run_start":
+            inputs = e.get("data", {}).get("inputs")
+            return inputs if isinstance(inputs, dict) else {}
+    return None
+
+
+def _recorded_stock_params(run_dir: Path) -> str | None:
+    """The `stock_params` input in the run's run_start entry, or None."""
+    value = (_run_start_inputs(run_dir) or {}).get("stock_params")
+    return value if isinstance(value, str) and value else None
+
+
 def pick_base(candidates: list[dict], model: str, base: str, *, out, ask=input, inferred: bool = False) -> str | None:
     """Ask the operator which bundle to base the run on. Returns its name, or None for none. For a base the
     research inferred, the pick is the operator's confirmation."""
@@ -775,10 +796,14 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
         if why:
             return _refuse(why)
 
+    run_started = resuming and _run_start_inputs(run_dir) is not None       # a ledger with no run_start has nothing to keep
+    recorded_stock = _recorded_stock_params(run_dir) if run_started else None
+
     def preflight_page():
         got = preflight.run_preflight(cfg, args.model, accept_credentials=not args.refuse_credentials_visible,
                                       signals=sig, resuming=resuming, base_override=override,
-                                      accept_inferred_base=args.accept_inferred_base, progress=progress)
+                                      accept_inferred_base=args.accept_inferred_base, progress=progress,
+                                      stock_recorded=recorded_stock)
         print(orchard_view.render_preflight(args.model, run_dir, resuming, cfg_path, got, style), file=out)
         return got
 
@@ -848,7 +873,16 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
         # Stage 0 reads the candidates-only view. The full report (base-candidates.json) holds text from the
         # internet and stays for the operator.
         candidates_path = run_dir / research_report.RESEARCH_DIR / research_report.STAGE0_FILE
+    # A model tt-transformers supports takes the stock-runtime path: the supervisor reads this input and runs stage 0 as code
+    # (orchard/stock_runtime.py). No flag is involved; the base row found the support.
+    stock = base_data.get("stock_runtime")
+    stock_dir = stock["params_dir"] if isinstance(stock, dict) and stock.get("params_dir") else None
+    if run_started and resuming:       # `resuming` is false again when the earlier run was set aside above
+        # A resume keeps the run's recorded choice. The supervisor picks the stock-runtime stages from the run_start entry, so a
+        # preflight that now selects a bundle (or finds the parameters) must not change the input stage 2's draft reads.
+        stock_dir = recorded_stock
     inputs = {"model": str(snapshot), **({"base": str(base_snapshot)} if base_snapshot else {}),
+              **({"stock_params": stock_dir} if stock_dir else {}),
               **({"base_candidates": str(candidates_path)} if candidates_path else {})}
     argv_run = bringup_config.supervisor_argv(cfg, args.model, run_dir, inputs=inputs,
                                               accept_credentials=not args.refuse_credentials_visible,

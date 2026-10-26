@@ -38,8 +38,9 @@ def test_a_path_alone_implies_a_class_for_a_run_that_predates_classes():
     assert classes.class_of_path("maybe") is None
 
 
-def test_the_class_set_is_the_documented_six():
-    assert classes.CLASSES == ("weights-only", "weights+sidecar", "restricted-head", "vocab-trim", "full-port", "unknown")
+def test_the_class_set_is_the_documented_seven():
+    assert classes.CLASSES == ("weights-only", "weights+sidecar", "restricted-head", "vocab-trim", "stock-runtime", "full-port",
+                               "unknown")
 
 
 def test_a_vocabulary_trim_takes_the_weights_only_path():
