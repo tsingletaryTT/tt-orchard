@@ -57,7 +57,7 @@ cell's replies (the gate's reasons and the advisory list, and every finding of e
 Recommendation (a measurement on one model, not a rule): the cheapest setting that gives readable, complete answers for all eight prompts is thinking off at
 256 tokens (30.9 s, 338 tokens). It does not run the model in its default mode, so it cannot show a failure that only appears while reasoning (a loop in the
 reasoning, for example). The cheapest setting that keeps the default mode and gives complete answers is thinking on at 256 (61.2 s), with a thin margin on one prompt; 512 would be the
-safer value and was not measured. Thinking on at 64, the current default, costs 40.1 s and gives 2 complete replies. The `SUITE_*` defaults are unchanged. Not shown:
+safer value and was not measured. Thinking on at 64, the earlier default, cost 40.1 s and gave 2 complete replies. `SUITE_MAX_TOKENS` is now 512 (version 0.8.45), with thinking left on; 512 was not itself measured, and the other `SUITE_*` defaults are unchanged. Not shown:
 whether a fine-tune needs more room than its base for the same prompts; a model that reasons longer would need a larger limit.
 
 ## The base against AREX-2's reference

@@ -136,14 +136,15 @@ SIDECAR_MIN_QUESTIONS = 10      # choice: fewest questions a parity result may r
 # thinking on (see below). A second boot tried thinking on and off at several limits (same run log), still on one model. No fine-tune was served with the suite, so no number below was set from
 # data, and each one stays provisional until fine-tunes have been measured against controls.
 SUITE_MIN_PROMPTS = 5           # choice: issue 15 asks for at least five prompts of different kinds
-SUITE_MAX_TOKENS = 64           # choice: long enough for a loop or a drift to show, short enough that eight
-                                # requests cost about a minute at 20 tokens/s (more with thinking on). Measured on
-                                # one model (Qwen3.8-27B, thinking on by default): 6 of 8 replies reached this limit
-                                # (5 inside the reasoning with no answer, 1 inside its answer); 2 completed. At 256
-                                # all 8 completed in 61 s (thinking on; the longest reply was 253 tokens) or 31 s
-                                # (thinking off); 1024 gave the same tokens as 256. No check changed its verdict in
-                                # any of the five cells. Left at 64: the choice between thinking off and a larger
-                                # limit is open (docs/run-logs/2026-10-26-suite-control.md).
+SUITE_MAX_TOKENS = 512          # choice: room for a thinking reply to reach its answer, and a loop or a drift still shows.
+                                # Measured on one model (Qwen3.8-27B, thinking on by default, 8 prompts, greedy):
+                                # at 64, 6 of 8 replies reached the limit (5 inside the reasoning with no answer, 1
+                                # inside its answer) and 3 of 8 had an answer; at 256 and at 1024 all 8 completed
+                                # with the same 841 tokens in 61 s. The longest reply at 256 was 253 tokens, so 256
+                                # leaves little room for a model that thinks longer; 512 costs the same on this
+                                # model and was not itself measured. Thinking stays on, because it is the model's
+                                # default mode. No check changed its verdict in any cell
+                                # (docs/run-logs/2026-10-26-suite-control.md).
 SUITE_BLOCKING_KINDS = ("control_token_leak", "cross_request_leak", "corrupt_first_token", "repeated_first_token",
                         "mechanical_repetition", "gibberish")
                                 # choice: the findings that fail a gate when the control does not show them. A

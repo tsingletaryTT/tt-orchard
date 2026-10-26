@@ -397,3 +397,9 @@ def test_a_list_of_templates_with_none_named_default_uses_the_first_string(swap,
     stage_for_suite(swap, template=None, chat_template=[{"name": "a", "template": "first one"}, {"name": "b", "template": "second"}])
     assert run(swap, tmp_path).returncode == 0
     assert report(swap)["prompt_suite"]["chat_template"]["sha256"] == hashlib.sha256(b"first one").hexdigest()
+
+
+def test_suite_limit_lets_thinking_replies_reach_an_answer():
+    # 2026-10-26 A/B on Qwen3.8-27B with thinking on: 64 tokens left 6 of 8 replies cut off and 3 of 8 with an answer;
+    # 256 and 1024 gave all 8 answers with identical replies (docs/run-logs/2026-10-26-suite-control.md).
+    assert defaults.SUITE_MAX_TOKENS >= 256
