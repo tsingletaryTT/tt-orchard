@@ -562,9 +562,8 @@ class Supervisor:
         """A sentence naming each chip this run holds that has left the PCIe bus (or cannot be read) and why, or None when the
         chips are fine or the bus cannot be listed. Reads sysfs only, takes no lease and never opens a chip (orchard/bus.py).
         It re-reads for bus.SETTLE_S seconds first, because a board being reset is unreadable for part of a minute.
-        A lab run has none to read: the lab's chips are not on this box's bus."""
-        if self.lab is not None:
-            return None
+        The coder always runs on this box, lab run or not, so its chips are read here. A lab's own tests run on the lab's chips, which
+        are not on this bus: `_spawn` does not call this for them."""
         held = [c for c in (held or ()) if c]
         return bus.diagnose(held=held or None, needed=0 if held else int(self.coder_chips), read=self.bus_read,
                             sleep=self.sleep, clock=self.clock)
@@ -2055,7 +2054,7 @@ class Supervisor:
             except Denied as exc:
                 code, timed_out = None, False
                 out.write(f"refused: {exc}\n".encode("utf-8"))
-        if timed_out or code not in (0, None):
+        if (timed_out or code not in (0, None)) and self.lab is None:
             # A test that ran and did not succeed is checked against the bus before anyone calls it a model failure. A refused
             # command (code None and no timeout) never reached a chip.
             how = "timed out" if timed_out else f"exited {code}"

@@ -160,14 +160,47 @@ def test_a_board_that_comes_back_inside_the_window_is_not_dead(rig, fake_bus):
     assert not [d for d in decisions(rig, "blocked") if bus.OFF_BUS in d.get("reason", "")]
 
 
-def test_a_lab_run_never_reads_this_boxs_bus():
-    class Boom:
-        def __call__(self):
-            raise AssertionError("the lab's chips are not on this bus")
+# ---- Copilot review of PR 79, finding 2: in lab mode the coder is still local, so its chips are still checked -------------------
 
+@pytest.fixture
+def lab_rig(tmp_path):
+    from test_supervisor_lab import LabRig
+    r = LabRig(tmp_path)
+    r.args.unattended = True
+    r.on_sleep = None
+    yield r
+    r.close()
+
+
+def test_a_lab_runs_local_coder_that_does_not_start_on_a_dead_board_is_off_the_bus(lab_rig, fake_bus):
+    lab_rig.m.never_ready = True
+    fake_bus.bad = {c: "D3cold" for c in ALL_CHIPS}
+    assert lab_rig.run() == supervisor.EXIT_BLOCKED
+    end = decisions(lab_rig, "blocked")[-1]
+    assert end["code"] == "hardware-unhealthy" and bus.OFF_BUS in end["reason"]
+    assert blocked.retryable(end["code"], end["reason"]) is False
+
+
+def test_a_failed_test_on_the_lab_is_not_judged_by_this_boxs_bus(lab_rig, fake_bus):
+    lab_rig.script = test_fails_until_escalated(2, "exit")
+    fake_bus.bad = {c: "D3cold" for c in ALL_CHIPS}              # this box is dead, but the test ran on the lab
+    lab_rig.run()
+    assert fake_bus.reads == 0
+    assert not [d for d in decisions(lab_rig, "blocked") if bus.OFF_BUS in d.get("reason", "")]
+
+
+def test_off_bus_reads_the_local_chips_whether_or_not_there_is_a_lab():
     class Fake:
-        lab, bus_read, sleep, clock, coder_chips = object(), Boom(), None, None, 2
-    assert supervisor.Supervisor._off_bus(Fake(), ["x"]) is None
+        lab, coder_chips = object(), 2
+        now = [0.0]
+        sleep = staticmethod(lambda s: Fake.now.__setitem__(0, Fake.now[0] + s))
+        clock = staticmethod(lambda: Fake.now[0])
+
+        @staticmethod
+        def bus_read():
+            return FakeBus({ALL_CHIPS[0]: "D3cold"})()
+    msg = supervisor.Supervisor._off_bus(Fake(), [ALL_CHIPS[0]])
+    assert msg and ALL_CHIPS[0] in msg
 
 
 def test_a_test_command_the_runner_refuses_never_reached_a_chip_so_the_bus_is_not_blamed(rig, fake_bus, monkeypatch):
