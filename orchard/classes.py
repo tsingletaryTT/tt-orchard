@@ -14,6 +14,9 @@
                      the nearest model's, and nothing else different. It takes the weights-only path. The served config.json must
                      carry the model's own vocab_size and the speculative drafter must be off, because the drafter works on the
                      nearest model's token ids (weights-swap-templates/prepare_swap.py does both)
+    stock-runtime    tt-transformers already supports the model: its config equals a `model_params/<name>` config in tt-metal and
+                     its tensors are in the layout tt-transformers loads. No weights swap (there is no installed bundle) and no new
+                     model code: stage 2 serves it through tt-transformers on one board (orchard/stock_runtime.py)
     full-port        the model needs new model code
     unknown          stage 0 could not decide (an unreadable or overlapping sidecar, headers that would not
                      parse). Nothing unproven runs as weights-only, so it takes the full-port path
@@ -24,11 +27,11 @@ ledger entry, and a run from before classes (a path and no class) gets the class
 """
 from __future__ import annotations
 
-CLASSES = ("weights-only", "weights+sidecar", "restricted-head", "vocab-trim", "full-port", "unknown")
+CLASSES = ("weights-only", "weights+sidecar", "restricted-head", "vocab-trim", "stock-runtime", "full-port", "unknown")
 SIDECAR_CLASSES = ("weights+sidecar", "restricted-head")      # the classes whose delta.json may list sidecars
 
 _PATH_OF = {"weights-only": "weights-only", "weights+sidecar": "weights-only", "restricted-head": "full-port",
-            "vocab-trim": "weights-only", "full-port": "full-port", "unknown": "full-port"}
+            "vocab-trim": "weights-only", "stock-runtime": "stock-runtime", "full-port": "full-port", "unknown": "full-port"}
 
 
 def path_of(cls) -> str | None:
@@ -38,5 +41,5 @@ def path_of(cls) -> str | None:
 
 def class_of_path(path) -> str | None:
     """The class a path alone implies, for a run that recorded no class. Never `weights+sidecar`,
-    `restricted-head`, `vocab-trim` or `unknown`: those only come from stage 0's own answer."""
+    `restricted-head`, `vocab-trim`, `stock-runtime` or `unknown`: those only come from stage 0's own answer."""
     return path if path in ("weights-only", "full-port") else None

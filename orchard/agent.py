@@ -202,8 +202,11 @@ TOOL_SCHEMAS = [
 
 class Tools:
     def __init__(self, run_dir, stage_dir, env: dict, *, timeout: float = TOOL_TIMEOUT_S,
-                 limit: int = TOOL_OUTPUT_CHARS):
+                 limit: int = TOOL_OUTPUT_CHARS, scratch=None):
         self.run_dir, self.stage_dir = Path(run_dir), Path(stage_dir)
+        # <run>/tt-metal-scratch, offered only to stages 2 to 4 of a stock-runtime run (orchard.stages.scratch_stage): a copy of the
+        # host tt-metal tree's models/ that those stages may change. write_file reaches it by a path that starts with its name.
+        self.scratch = Path(scratch) if scratch is not None else None
         self.env, self.timeout, self.limit = env, timeout, limit
 
     def call(self, name: str, arguments: str) -> str:
@@ -244,6 +247,12 @@ class Tools:
         `stages/1/stages/1/evidence/a.txt`. A `stages/` path into another stage is refused."""
         if not isinstance(path, str) or not path.strip():
             return None
+        if self.scratch is not None:
+            sroot = os.path.realpath(self.scratch)
+            first = path.replace("\\", "/").split("/", 1)[0]
+            cand = os.path.realpath(os.path.join(os.path.realpath(self.run_dir), path) if first == self.scratch.name else path)
+            if (first == self.scratch.name or os.path.isabs(path)) and cand != sroot and os.path.commonpath([sroot, cand]) == sroot:
+                return Path(cand)
         root = os.path.realpath(self.stage_dir)
         base = os.path.realpath(self.run_dir) if path.replace("\\", "/").split("/", 1)[0] == "stages" else root
         p = os.path.realpath(os.path.join(base, path))

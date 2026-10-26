@@ -80,7 +80,7 @@ STOP_WAIT_S = 60.0
 REQUEST_TIMEOUT_S = 600.0
 N_TOKENS = 32
 SUITE_FILE_NAME = "prompt_suite.json"
-SUITE_MAX_TOKENS = 64         # the same number as SUITE_MAX_TOKENS in orchard/defaults.py (a test holds them equal)
+SUITE_MAX_TOKENS = 512        # the same number as SUITE_MAX_TOKENS in orchard/defaults.py (a test holds them equal)
 MARKER = ".orchard-model"
 LOG_TAIL_LINES = 60
 COHERENT_CHAR_SHARE = 0.8
@@ -276,6 +276,13 @@ def load_control(cfg: dict, run_dir: Path) -> dict | None:
     problem = control_identity_problem(cfg.get("nearest_model_id"), record.get("model_id"))
     if problem:
         print(f"serve_and_compare: the control {path} is not a control of the nearest model: {problem}.", file=sys.stderr)
+        sys.exit(2)
+    limit = int(cfg.get("suite_max_tokens", SUITE_MAX_TOKENS))
+    got = record.get("max_tokens")
+    if isinstance(got, bool) or got != limit:
+        print(f"serve_and_compare: the control {path} ran with a token limit of {got!r} and this run uses {limit}. Replies cut off at "
+              "different lengths cannot be compared, so regenerate the control with this run's limit (tt-orchard suite-control run).",
+              file=sys.stderr)
         sys.exit(2)
     record = {k: v for k, v in record.items() if k != "control"}
     try:

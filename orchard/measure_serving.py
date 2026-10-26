@@ -8,8 +8,9 @@ It starts the bundle's own run.sh the way the weights-swap test does (own proces
 the environment, a lease already held by the caller), waits for health, sends one warm-up request, then each prompt `--reps` times as a
 streamed chat completion with greedy decoding, and stops the server. Per run it records time to first token and the decode rate (tokens after
 the first, over the time after the first). The prompt set is fixed in this file and hashed, so two runs of two models can be compared only
-when their hashes match. The DFlash2 drafter's acceptance rate is read from the server's /metrics when it exports spec-decode counters; when
-it does not, the file says so. Nothing here runs without hardware held by the caller (`gozer run` around the command).
+when their hashes match. The DFlash2 drafter's acceptance rate (accepted over drafted tokens) is read from the server's /metrics when it exports
+spec-decode counters, and otherwise from the `[dflash2-serve]` session lines the server writes to its log while the measured prompts run
+(orchard/drafter_log.py); when neither exists, the file says so. Nothing here runs without hardware held by the caller (`gozer run` around the command).
 """
 from __future__ import annotations
 
@@ -26,9 +27,16 @@ import sys
 import time
 from pathlib import Path
 
+try:
+    from . import drafter_log
+except ImportError:             # the graft trial runs this file as a script from the checkout
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from orchard import drafter_log
+
 HERE = Path(__file__).resolve().parent
 SWAP_TEMPLATE = HERE / "skills" / "weights-swap-templates" / "serve_and_compare.py"
-MIN_TOKENS_ASKED = 100                  # the operator's floor: at least this many generated tokens per prompt
+LOG_SETTLE_S = 1.5                      # seconds to let the server write the last session line of a request before the log is read
+MIN_TOKENS_ASKED = 100                 # the operator's floor: at least this many generated tokens per prompt
 
 CODE_SAMPLE = '''def retry(fn, attempts=5, base=0.5):
     delay = base
@@ -176,6 +184,26 @@ def acceptance(*, before: dict, after: dict):
     return (acc1 - acc0) / (dr1 - dr0)
 
 
+def drafter_record(*, metrics_rate, log_text: str):
+    """(acceptance rate, note, log stats) for the measured prompts. The /metrics counters win when the server exports them. Otherwise the rate is
+    accepted over drafted tokens from the session lines in `log_text`, which holds only what the server logged during the measured prompts."""
+    stats = drafter_log.drafter_stats(log_text)
+    if metrics_rate is not None:
+        return metrics_rate, "computed from the server's /metrics spec-decode counters", stats
+    if stats and stats.get("accept_rate") is not None:
+        return (stats["accept_rate"], "accepted over drafted tokens, from the [dflash2-serve] session lines in the server log written while "
+                f"the measured prompts ran ({stats['sessions']} sessions, {stats['iters']} iterations, {stats['draft_length']} drafted per "
+                "iteration)", stats)
+    return None, ("not measured: the server logged no `[dflash2-serve]` session line while the measured prompts ran and exports no "
+                  "spec-decode counters on /metrics (the drafter is off, or this server does not report it)"), None
+
+
+def acceptance_fields(*, metrics_rate, log_text: str) -> dict:
+    """The three keys of the output record that describe the drafter: `drafter_acceptance`, its note and the `drafter` summary."""
+    rate, note, stats = drafter_record(metrics_rate=metrics_rate, log_text=log_text)
+    return {"drafter_acceptance": rate, "drafter_acceptance_note": note, "drafter": drafter_log.summary(stats)}
+
+
 # ---- talking to a server ------------------------------------------------------------------------------------------------------------
 
 def post_stream(port: int, body: dict, timeout: float = 900.0):
@@ -225,6 +253,20 @@ def measure(port: int, model: str, prompts: list[dict], reps: int) -> dict:
     return out
 
 
+def timed_window(port: int, served: str, log_path, reps: int):
+    """Warm up, let the server settle, then take both acceptance sources around the timed prompts only: the /metrics scrape and the log offset
+    are both taken after the warm-up, so the counter-derived rate and the log-derived rate cover the same requests.
+    Returns (results, metrics before, metrics after, log text of the timed prompts)."""
+    run_prompt(port, served, warmup_prompt())                                       # warm-up: not recorded
+    time.sleep(LOG_SETTLE_S)                                                        # the warm-up's session line is written as it ends
+    metrics0 = spec_decode_counters(get_text(port, "/metrics"))
+    log_mark = drafter_log.size(log_path)
+    results = measure(port, served, PROMPTS, reps)
+    metrics1 = spec_decode_counters(get_text(port, "/metrics"))
+    time.sleep(LOG_SETTLE_S)
+    return results, metrics0, metrics1, drafter_log.read_since(log_path, log_mark)
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--label", required=True)
@@ -253,19 +295,15 @@ def main(argv=None) -> int:
         ready_s = sc.wait_healthy(proc, a.port, a.health_timeout, log_path)
         models = json.loads(get_text(a.port, "/v1/models") or "{}")
         served = (models.get("data") or [{}])[0].get("id") or a.model_dir
-        metrics0 = spec_decode_counters(get_text(a.port, "/metrics"))
-        run_prompt(a.port, served, warmup_prompt())                                       # warm-up: not recorded
-        results = measure(a.port, served, PROMPTS, a.reps)
-        metrics1 = spec_decode_counters(get_text(a.port, "/metrics"))
+        results, metrics0, metrics1, log_text = timed_window(a.port, served, log_path, a.reps)
     finally:
         sc.stop_server(proc)
         log.close()
+    fields = acceptance_fields(metrics_rate=acceptance(before=metrics0, after=metrics1), log_text=log_text)
     record = {"label": a.label, "model_id": a.model_id, "served_name": served, "server_ready_s": round(ready_s, 1),
               "wall_s": round(time.time() - t0, 1), "prompt_set_sha256": prompt_set_hash(PROMPTS), "reps": a.reps,
               "greedy": True, "prompts": results,
-              "drafter_acceptance": acceptance(before=metrics0, after=metrics1),
-              "drafter_acceptance_note": ("computed from the server's /metrics spec-decode counters" if metrics1 else
-                                          "not measured: this server exports no spec-decode counters on /metrics and prints none in its log"),
+              **fields,
               "spec_decode_counters": metrics1, "run_sh": str(a.run_sh), "server_log": str(log_path),
               "unit_notes": {"ttft_s": "seconds from sending the request to the first content, reasoning or tool-call chunk",
                              "decode_tok_s": "(completion tokens - 1) / seconds from the first chunk to the last, per run"}}

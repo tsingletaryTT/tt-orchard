@@ -672,6 +672,7 @@ html[data-mode="operator"] #runs { display: none; }
 #runs-table tbody tr:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
 #runs-table .c-model { font-weight: 650; overflow-wrap: anywhere; user-select: text; }
 #runs-table .c-model-text { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; }
+#runs-table .c-dir { display: block; font-weight: 400; font-size: .7rem; color: var(--muted); overflow-wrap: anywhere; user-select: text; }
 #runs-table .badge { font-size: .66rem; padding: 1px 4px; gap: 3px; }
 #runs-table .badge .name { letter-spacing: 0; }
 #runs-table .badge .op-pic { margin-right: 0; }

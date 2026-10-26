@@ -45,7 +45,8 @@ from orchard.graft_trial import DECISION_FILE as GRAFT_DECISION_FILE
 from orchard.graft_trial import chosen as graft_chosen
 from orchard.graft_trial import read_decision as read_graft_decision
 from orchard.graft_trial import decision_problems
-from orchard.defaults import (COLD_START_S, LONG_STAGE_S, PACKAGE_FORMATS, RUN_COLD_BOOT_CAP,
+from orchard.defaults import (STOCK_MIN_TOKENS, STOCK_SMALL_PARAMS_MAX_B, STOCK_SMALL_TOP1_MIN,
+                              STOCK_SMALL_TOP5_MIN, STOCK_TOP1_MIN, STOCK_TOP5_MIN, SUITE_BLOCKING_KINDS, COLD_START_S, LONG_STAGE_S, PACKAGE_FORMATS, RUN_COLD_BOOT_CAP,
                               RUN_ESCALATION_CAP, RUN_WALL_CLOCK_S, STAGE2_PCC_MIN,
                               STAGE4_SWAP_DISK_GB, STAGE_BUDGET_S, STAGE_DISK_GB, SWAP_MIN_TOKENS,
                               SWAP_TOP1_MIN, SIDECAR_MIN_QUESTIONS, SIDECAR_NOISE_FACTOR,
@@ -155,10 +156,12 @@ def _done(reasons: list, seen: list) -> GateResult:
 
 # ---- the gates (one per stage) ------------------------------------------------------------------
 
+STOCK_OPTIMIZATIONS = ("accuracy", "performance")
+STOCK_MIN_FREE_CHARS = 20          # choice: the shortest free-run text the gate will judge
 DELTA_AREAS = ("config", "architecture", "tensors", "tensor_names", "tokenizer", "chat_template",
                "files", "generation_config", "license", "other")
 HAZARD_AREAS = ("tensor_cache", "drafter", "drafter_graft", "disk", "license", "generation_config", "stop_tokens", "sampling_defaults", "chat_template", "other")
-PATHS = ("weights-only", "full-port")
+PATHS = ("weights-only", "full-port", "stock-runtime")
 
 
 def gate_delta(stage_dir, run_dir) -> GateResult:
@@ -167,6 +170,14 @@ def gate_delta(stage_dir, run_dir) -> GateResult:
     if err:
         return GateResult(False, (err,))
     reasons, seen = [], []
+    _delta_reasons(d, run_dir, reasons, seen)
+    reasons += _template_reasons(Path(stage_dir), "delta_triage.py")
+    reasons += _stamp_reasons(d, "delta_triage.py", "delta.json")
+    return _done(reasons, seen)
+
+
+def _delta_reasons(d: dict, run_dir, reasons: list, seen: list) -> None:
+    """The checks of delta.json that do not depend on who wrote it (shared by the agent stage and the stock-runtime stage)."""
     for key in ("model", "nearest_model"):
         if not _text(d.get(key)):
             reasons.append(f"delta.json needs {key}")
@@ -189,8 +200,32 @@ def gate_delta(stage_dir, run_dir) -> GateResult:
     for i, item in enumerate(hazards):
         if not isinstance(item, dict) or item.get("area") not in HAZARD_AREAS or not _text(item.get("finding")):
             reasons.append(f"hazards[{i}] needs an area from {HAZARD_AREAS} and a finding")
-    reasons += _template_reasons(Path(stage_dir), "delta_triage.py")
-    reasons += _stamp_reasons(d, "delta_triage.py", "delta.json")
+
+
+def gate_delta_stock(stage_dir, run_dir) -> GateResult:
+    """Stage 0 of a run with stock parameters (orchard/stock_runtime.py). Supervisor code wrote delta.json, so there is no
+    template copy or stamp to check. The record has to support the class it names: `stock-runtime` needs equal configs and no layout
+    problem, and any other class (the measurement said full-port) is accepted as an answer."""
+    d, err = _load(stage_dir, "delta.json")
+    if err:
+        return GateResult(False, (err,))
+    reasons, seen = [], []
+    _delta_reasons(d, run_dir, reasons, seen)
+    rec = d.get("stock_runtime")
+    if not isinstance(rec, dict):
+        reasons.append("delta.json needs a stock_runtime record (stage 0 of a run with stock parameters writes one)")
+        return _done(reasons, seen)
+    if not _text(rec.get("name")):
+        reasons.append("stock_runtime.name must be the tt-transformers model name")
+    if d.get("class") == "stock-runtime":
+        if rec.get("config_equal") is not True:
+            reasons.append("class stock-runtime needs stock_runtime.config_equal to be true")
+        if rec.get("keys_differing"):
+            reasons.append(f"class stock-runtime needs stock_runtime.keys_differing to be empty, got {rec.get('keys_differing')!r}")
+        if rec.get("layout_problems"):
+            reasons.append(f"class stock-runtime needs stock_runtime.layout_problems to be empty, got {rec.get('layout_problems')!r}")
+        if not _number(rec.get("params_b")) or rec["params_b"] <= 0:
+            reasons.append(f"stock_runtime.params_b must be a positive number of billions, got {rec.get('params_b')!r}")
     return _done(reasons, seen)
 
 
@@ -283,6 +318,7 @@ EVIDENCE_MAX_BYTES = 2 * 1024 * 1024        # the reference template's evidence 
 _SKILLS_ROOT = Path(__file__).with_name("skills")
 # The template scripts whose output a gate trusts, and the shipped file each stage's copy must equal.
 SHIPPED_TEMPLATES = {"delta_triage.py": _SKILLS_ROOT / "delta-triage-templates" / "delta_triage.py",
+                     "stock_check.py": _SKILLS_ROOT / "stock-runtime-templates" / "stock_check.py",
                      "reference_gate.py": _SKILLS_ROOT / "reference-gate-templates" / "reference_gate.py"}
 
 
@@ -440,6 +476,92 @@ def vocab_trim_problems(stage_dir, run_dir) -> list[str]:
     sources, _ = _load(Path(stage_dir), "model-dir-sources.json")
     check, _ = _load(Path(stage_dir) / "evidence", "swap-check.json")
     return _trim_reasons(want, sources, check.get("serving") if isinstance(check, dict) else None)
+
+
+def _stock_record(run_dir) -> dict | None:
+    delta, err = _load(Path(run_dir) / "stages" / "0", "delta.json")
+    rec = delta.get("stock_runtime") if not err and isinstance(delta, dict) and delta.get("class") == "stock-runtime" else None
+    return rec if isinstance(rec, dict) else None
+
+
+def _unit_number(value) -> bool:
+    return _number(value) and 0 <= value <= 1        # a NaN or an infinity fails both comparisons
+
+
+def gate_stock_runtime(stage_dir, run_dir) -> GateResult:
+    """Stage 2 of the stock-runtime path: tt-transformers served the model on one board. The gate re-reads the template's
+    evidence/stock-check.json and judges it again: teacher-forced top-1 and top-5 against the stage 1 reference at the bars in
+    orchard/defaults.py (the small-model bars for a model of STOCK_SMALL_PARAMS_MAX_B billion parameters or fewer), enough compared
+    tokens, a recorded device name and tt-metal tag, the optimization mode, a free run with no blocking finding, a positive decode
+    speed, no model fetched from the Hub, and the scratch patch as evidence. The numbers come from the template; nothing here
+    trusts a result file the agent wrote."""
+    stage_dir = Path(stage_dir)
+    rec = _stock_record(run_dir)
+    if rec is None:
+        return GateResult(False, ("stage 0 did not record the class stock-runtime with a stock record, so there is nothing to check this against",))
+    reasons, seen = [], []
+    reasons += _template_reasons(stage_dir, "stock_check.py")
+    d = _evidence_json(stage_dir, "stock-check.json", required=True, reasons=reasons)
+    if d is None:
+        return _done(reasons, seen)
+    seen.append("stages/2/evidence/stock-check.json")
+    reasons += _stamp_reasons(d, "stock_check.py", "evidence/stock-check.json")
+    delta, _ = _load(Path(run_dir) / "stages" / "0", "delta.json")
+    want = str((delta or {}).get("model", "")).split("@", 1)[0]
+    if str(d.get("model_id", "")).split("@", 1)[0] != want:
+        reasons.append(f"model_id {d.get('model_id')!r} is not the model of this run ({want!r})")
+    if not _text(d.get("device_name")):
+        reasons.append("device_name must name the board type the runtime saw (P150, P300 ...)")
+    if d.get("chips") not in (1, 2):
+        reasons.append(f"chips must be 1 or 2 (one board), got {d.get('chips')!r}")
+    if d.get("optimizations") not in STOCK_OPTIMIZATIONS:
+        reasons.append(f"optimizations must be one of {STOCK_OPTIMIZATIONS}, got {d.get('optimizations')!r}")
+    tm = d.get("tt_metal")
+    if not isinstance(tm, dict) or not _text(tm.get("tag")) or not isinstance(tm.get("dirty"), bool):
+        reasons.append('tt_metal must be {"tag": <text>, "dirty": <true or false>}: the tree the runtime came from')
+    small = _number(rec.get("params_b")) and rec["params_b"] <= STOCK_SMALL_PARAMS_MAX_B
+    top1_min, top5_min = ((STOCK_SMALL_TOP1_MIN, STOCK_SMALL_TOP5_MIN) if small else (STOCK_TOP1_MIN, STOCK_TOP5_MIN))
+    t = d.get("teacher_forced") if isinstance(d.get("teacher_forced"), dict) else {}
+    if isinstance(t.get("tokens"), bool) or not isinstance(t.get("tokens"), int) or t["tokens"] < STOCK_MIN_TOKENS:
+        reasons.append(f"teacher_forced.tokens must be a whole number of at least {STOCK_MIN_TOKENS}, got {t.get('tokens')!r}")
+    for key, bar in (("top1", top1_min), ("top5", top5_min)):
+        v = t.get(key)
+        if not _unit_number(v):
+            reasons.append(f"teacher_forced.{key} must be a fraction from 0 to 1, got {v!r}")
+        elif v < bar:
+            reasons.append(f"teacher_forced.{key} {v} is below the bar {bar}")
+    f = d.get("free_run") if isinstance(d.get("free_run"), dict) else {}
+    text = f.get("text") if isinstance(f.get("text"), str) else ""
+    if len("".join(text.split())) < STOCK_MIN_FREE_CHARS:
+        reasons.append(f"free_run.text has fewer than {STOCK_MIN_FREE_CHARS} non-space characters, so there is nothing to judge")
+    else:
+        for finding in prompt_suite.findings({"content": text}):
+            if finding["kind"] in SUITE_BLOCKING_KINDS:
+                reasons.append(f"free_run: {finding['kind']}: {finding['detail']}")
+    sp = d.get("speed") if isinstance(d.get("speed"), dict) else {}
+    if not _number(sp.get("decode_tokens_per_s")) or not sp["decode_tokens_per_s"] > 0:
+        reasons.append(f"speed.decode_tokens_per_s must be a positive number, got {sp.get('decode_tokens_per_s')!r}")
+    ref = d.get("reference")
+    want_rev = str((delta or {}).get("model", "")).split("@", 1)[1] if "@" in str((delta or {}).get("model", "")) else None
+    if not isinstance(ref, dict) or ref.get("source") != "generated":
+        reasons.append("reference must record a reference made from this run's snapshot (source 'generated'): the file the host tree ships "
+                       f"for a model name belongs to the model the tree lists, got {ref!r}")
+    else:
+        if str(ref.get("model_id", "")).split("@", 1)[0] != want:
+            reasons.append(f"reference model_id {ref.get('model_id')!r} is not the model of this run ({want!r})")
+        if not _text(ref.get("snapshot")):
+            reasons.append("reference must name the snapshot it was made from")
+        elif want_rev and ref["snapshot"] != want_rev:
+            reasons.append(f"reference was made from snapshot {ref['snapshot']!r}, but stage 0 names revision {want_rev!r}")
+        if not re.fullmatch(r"[0-9a-f]{64}", str(ref.get("sha256", ""))):
+            reasons.append("reference needs the sha256 of the reference file (64 hex digits)")
+    reasons += _hub_fetch_reasons(d)
+    patch = d.get("scratch_patch")
+    if not _text(patch) or inside(run_dir, f"stages/2/{patch}") is None:
+        reasons.append(f"scratch_patch must name a file under the stage directory (the patch of tt-metal-scratch against the host tree), got {patch!r}")
+    else:
+        seen.append(f"stages/2/{patch}")
+    return _done(reasons, seen)
 
 
 def gate_weights_swap(stage_dir, run_dir) -> GateResult:
@@ -1138,6 +1260,38 @@ PACKAGE_STAGE_7 = dataclasses.replace(
 validate_table(tuple(PACKAGE_STAGE_7 if s.number == 7 else s for s in STAGES))
 
 
+# The stock-runtime path (issue 61). Stage 0 is supervisor code (orchard/stock_runtime.py), because the comparison is with a tt-metal
+# parameters directory and not with a weights snapshot. Stage 2 serves the model through tt-transformers on one board (the
+# stock-runtime-check skill). Nothing is swapped or ported, so the other stages are skipped with a reason.
+STOCK_STAGE_0 = dataclasses.replace(
+    STAGES[0], name="intake and stock-runtime triage", skill="", refs=(), gate=gate_delta_stock, marker=None, harness=True)
+STOCK_STAGE_2 = dataclasses.replace(
+    STAGES[2], name="serve through tt-transformers on one board", skill="stock-runtime-check", refs=("tt-device-usage",),
+    gate=gate_stock_runtime, gate_file="evidence/stock-check.json", draft="stock_config")
+SKIP_STOCK_3 = "stock-runtime path: stage 2 served the full model through tt-transformers and compared it with the CPU reference"
+SKIP_STOCK_4 = ("stock-runtime path: the 2-chip and 4-chip checks are not built yet (issue 61 pilot); stage 2 measured one board only, "
+                "and the n_kv_heads of the model divide 1, 2 and 4 chips only as a read of the config")
+SKIP_STOCK_5 = "stock-runtime path: stage 2 booted the runtime, compared its tokens with the CPU reference and judged a free run"
+SKIP_STOCK_6 = ("stock-runtime path: the qualitative check and benchmark are deferred, as on the weights-only path; stage 2's teacher-forced "
+                "agreement and free run are the only quality evidence")
+SKIP_STOCK_7 = "stock-runtime path: no package is built (the pilot writes no package, no push and no publish)"
+
+
+def scratch_stage(number: int, path) -> bool:
+    """Whether an agent in this stage may write to <run>/tt-metal-scratch: stages 2 to 4 of the stock-runtime path only."""
+    return path == "stock-runtime" and number in (2, 3, 4)
+
+
+def stock_params(entries: list[dict]) -> str | None:
+    """The tt-transformers parameters directory the run was started with (run_start's input `stock_params`), or None. Its presence is
+    what makes stage 0 supervisor code; a run with none keeps the agent's stage 0."""
+    for e in entries:
+        if e.get("event") == "run_start":
+            value = (e.get("data", {}).get("inputs") or {}).get("stock_params")
+            return value if isinstance(value, str) and value else None
+    return None
+
+
 def delta_path(run_dir) -> str | None:
     """The path in stages/0/delta.json, or None when the file is missing, unreadable or names
     another value. The stage 0 gate validated the file; this only reads it."""
@@ -1200,11 +1354,19 @@ def run_class(entries: list[dict], run_dir) -> str | None:
 
 
 def spec_for(number: int, path: str | None, package_format: str | None = None,
-             cls: str | None = None) -> StageSpec:
+             cls: str | None = None, *, stock: bool = False) -> StageSpec:
     """The stage spec for `number` on `path`. Only the weights-only path changes the table: stage 2
     gets the swap skill and gate, stage 4 runs one test per chip configuration, stages 3, 5 and 6
     are skipped (the supervisor records each as skipped), and when the run was started with
     --package-format v6, stage 7 packages the model. Every other run skips stage 7."""
+    if number == 0 and stock:
+        return STOCK_STAGE_0
+    if path == "stock-runtime":
+        stock_table = {2: STOCK_STAGE_2, 3: dataclasses.replace(STAGES[3], skip=SKIP_STOCK_3),
+                       4: dataclasses.replace(STAGES[4], skip=SKIP_STOCK_4), 5: dataclasses.replace(STAGES[5], skip=SKIP_STOCK_5),
+                       6: dataclasses.replace(STAGES[6], skip=SKIP_STOCK_6), 7: dataclasses.replace(STAGES[7], skip=SKIP_STOCK_7)}
+        if number in stock_table:
+            return stock_table[number]
     if path == "weights-only":
         weights_only = {2: SIDECAR_STAGE_2 if cls == "weights+sidecar" else WEIGHTS_ONLY_STAGE_2, 3: WEIGHTS_ONLY_STAGE_3, 4: WEIGHTS_ONLY_STAGE_4,
                         5: WEIGHTS_ONLY_STAGE_5, 6: WEIGHTS_ONLY_STAGE_6}

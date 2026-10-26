@@ -50,6 +50,12 @@ def _positive(v) -> bool:
     return _number(v) and v > 0
 
 
+def accept_rate(drafter):
+    """The drafter's accepted-over-drafted share from a trial side's `drafter` record, or None unless it is a number from 0 to 1."""
+    v = drafter.get("accept_rate") if isinstance(drafter, dict) else None
+    return v if _number(v) and 0 <= v <= 1 else None
+
+
 def _thresholds() -> dict:
     return {"min_speedup": GRAFT_MIN_SPEEDUP, "top1_margin": GRAFT_TOP1_MARGIN, "top1_min": SWAP_TOP1_MIN}
 
@@ -77,7 +83,11 @@ def decide(trial, *, safe_top1) -> dict:
                "speedup": speedup,
                "safe_ttft_s": safe.get("ttft_s") if _positive(safe.get("ttft_s")) else None,
                "variant_ttft_s": var.get("ttft_s") if _positive(var.get("ttft_s")) else None,
-               "variant_server_ready_s": var.get("server_ready_s") if _positive(var.get("server_ready_s")) else None}
+               "variant_server_ready_s": var.get("server_ready_s") if _positive(var.get("server_ready_s")) else None,
+               # Informational: the share of drafted tokens the model accepted. The choice never reads it (the output is checked by the
+               # model whatever the drafter proposes, and the speed ratio already shows what acceptance cost or gained).
+               "safe_drafter_accept_rate": accept_rate(safe.get("drafter")),
+               "variant_drafter_accept_rate": accept_rate(var.get("drafter"))}
     reason = None
     if not var:
         reason = "the graft trial wrote no result for the grafted variant"

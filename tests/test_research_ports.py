@@ -474,6 +474,79 @@ def test_every_link_is_a_github_link():
     assert r.evidence and all(e.url.startswith("https://github.com/") for e in r.evidence)
 
 
+# ---- the structured support record (full-port pilot, issue 61) --------------------------------------------
+# The rows above are text for a person. A later step that has to decide whether tt-transformers supports a model
+# needs the same facts as data: which id matched, through which source, and which boards the README names.
+
+def test_an_exact_params_match_is_recorded_as_data_with_the_id_that_matched():
+    r = ports.tt_transformers(FakeFetch(tt_routes()), ports.terms(QCFG), ["someone/Qwen2.5-VL-7B-Instruct"])
+    rec = [s for s in r.data["supported"] if s["via"] == "model_params"]
+    assert rec == [{"name": "Qwen2.5-VL-7B-Instruct", "via": "model_params", "matched": "someone/Qwen2.5-VL-7B-Instruct",
+                    "boards": [], "blackhole": None}]
+
+
+def test_a_readme_match_records_its_boards_and_whether_one_is_blackhole():
+    r = ports.tt_transformers(FakeFetch(tt_routes()), ports.terms({}), ["meta-llama/Llama-3.1-8B-Instruct", "Qwen/Qwen2.5-7B"])
+    rows = {s["name"]: s for s in r.data["supported"] if s["via"] == "readme"}
+    assert rows["Llama 3.1 8B"]["boards"] == ["N150", "P100", "P150"] and rows["Llama 3.1 8B"]["blackhole"] is True
+    assert rows["Llama 3.1 8B"]["matched"] == "meta-llama/Llama-3.1-8B-Instruct"
+    assert rows["Qwen 2.5 7B"]["boards"] == ["N300"] and rows["Qwen 2.5 7B"]["blackhole"] is False
+
+
+def test_a_readme_row_that_names_no_board_records_blackhole_as_unknown():
+    text = (b"| Model | Hardware | HF_MODEL |\n|---|---|---|\n"
+            b"| [Qwen 2.5 7B](https://huggingface.co/Qwen/Qwen2.5-7B) | see notes | ```Qwen/Qwen2.5-7B``` |\n")
+    r = ports.tt_transformers(FakeFetch(tt_routes(**{TT_README: text})), ports.terms({}), ["Qwen/Qwen2.5-7B"])
+    (row,) = [s for s in r.data["supported"] if s["via"] == "readme"]
+    assert row["boards"] == [] and row["blackhole"] is None
+
+
+def test_no_match_gives_an_empty_support_record_and_a_failed_read_does_not_invent_one():
+    r = ports.tt_transformers(FakeFetch(tt_routes()), ports.terms({}), ["acme/Unrelated-1B"])
+    assert r.data["supported"] == []
+    r = ports.tt_transformers(FakeFetch(tt_routes(**{PARAMS: FetchError("HTTP 403"), TT_README: FetchError("HTTP 500")})),
+                              ports.terms({}), [BASE])
+    assert r.data["supported"] == []
+
+
+def test_the_support_record_is_for_ids_and_not_for_family_matches_in_the_standalone_repo():
+    r = ports.tt_transformers(FakeFetch(tt_routes()), ports.terms(QCFG), [])
+    assert r.data["supported"] == []                      # the standalone repo's code names are only text rows
+
+
+def test_collect_passes_the_support_record_on(monkeypatch):
+    rec = [{"name": "x", "via": "model_params", "matched": "a/x", "boards": [], "blackhole": None}]
+    monkeypatch.setattr(ports, "tt_transformers", lambda fetch, t, ids: ports.Result(data={"supported": rec}))
+    monkeypatch.setattr(ports, "metal", lambda fetch, t: ports.Result())
+    monkeypatch.setattr(ports, "catalog", lambda *a, **kw: ports.Result(data={"bundles": []}))
+    r = ports.collect(FakeFetch({}), QCFG, family="qwen", ids=[BASE], no_github=True)
+    assert r.data["tt_transformers"] == rec
+
+
+def test_collect_gives_an_empty_record_when_tt_transformers_gave_no_data(monkeypatch):
+    monkeypatch.setattr(ports, "tt_transformers", lambda fetch, t, ids: ports.Result())
+    monkeypatch.setattr(ports, "metal", lambda fetch, t: ports.Result())
+    monkeypatch.setattr(ports, "catalog", lambda *a, **kw: ports.Result(data={"bundles": []}))
+    assert ports.collect(FakeFetch({}), QCFG, family="qwen", ids=[BASE], no_github=True).data["tt_transformers"] == []
+
+
+def test_when_the_model_and_its_base_share_a_name_the_record_says_the_first_id_matched():
+    # the report passes the stated bases first and the model itself last
+    ids = ["meta-llama/Llama-3.1-8B-Instruct", "unsloth/Llama-3.1-8B-Instruct"]
+    r = ports.tt_transformers(FakeFetch(tt_routes()), ports.terms({}), ids)
+    assert {s["matched"] for s in r.data["supported"]} == {"meta-llama/Llama-3.1-8B-Instruct"}
+    r = ports.tt_transformers(FakeFetch(tt_routes()), ports.terms({}), list(reversed(ids)))
+    assert {s["matched"] for s in r.data["supported"]} == {"unsloth/Llama-3.1-8B-Instruct"}
+
+
+def test_a_readme_name_from_fetched_text_is_cleaned_in_the_record():
+    text = (b"| Model | Hardware | HF_MODEL |\n|---|---|---|\n"
+            b"| [Qwen\x07 2.5 7B](https://huggingface.co/Qwen/Qwen2.5-7B) | n300 | ```Qwen/Qwen2.5-7B``` |\n")
+    r = ports.tt_transformers(FakeFetch(tt_routes(**{TT_README: text})), ports.terms({}), ["Qwen/Qwen2.5-7B"])
+    (row,) = [s for s in r.data["supported"] if s["via"] == "readme"]
+    assert "\x07" not in row["name"]
+
+
 def test_collect_puts_the_tt_transformers_rows_before_the_tt_metal_rows(monkeypatch):
     ev = lambda src: ports.Result(evidence=[ports.Evidence(src, src, "https://github.com/x", "inferred", NOW)])
     monkeypatch.setattr(ports, "tt_transformers", lambda fetch, t, ids: ev("tt-transformers"))

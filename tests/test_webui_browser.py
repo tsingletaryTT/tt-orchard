@@ -284,10 +284,10 @@ def test_a_very_long_model_id_is_clipped_in_the_cell_keeps_its_full_text_and_tit
     with Served(make_app(root, alive={LIVE})) as s:
         open_page(page, s)
         cell = page.locator('#runs-body tr[data-run-name="org--long"] .c-model')
-        assert cell.get_attribute("title") == LONG_ID
+        assert cell.get_attribute("title").split("\n")[0] == LONG_ID
         assert cell.locator(".c-model-text").text_content() == LONG_ID              # selectable and copyable in full
         box = cell.bounding_box()
-        assert box["width"] < 260 and box["height"] < 70
+        assert box["width"] < 260 and box["height"] < 110
         assert not page.evaluate("document.documentElement.scrollWidth > document.documentElement.clientWidth")
         assert page.evaluate("getComputedStyle(document.querySelector('#runs-body td.c-model')).userSelect") != "none"
 
@@ -374,3 +374,39 @@ def test_a_redraw_of_the_rows_keeps_the_keyboard_focus_on_the_same_run(root, pag
         write_ledger(root / "org--long", ("stage_end", 2, {"result": "pass"}), ("stage_start", 4, {}))      # changes a row, so the next poll redraws
         expect(page.locator('#runs-body tr[data-run-name="org--long"] .c-stage')).to_contain_text("4", timeout=15000)
         assert page.evaluate("document.activeElement.dataset.runName") == target
+
+
+def lab_run(path, model):
+    from orchard.ledger import Ledger
+    path.mkdir(parents=True, exist_ok=True)
+    with Ledger(path / "ledger.jsonl") as led:
+        led.append("run_start", None, model=model, versions={}, inputs={}, mode="lab", lab={"host": "labbox"})
+        led.append("stage_start", 2)
+
+
+def test_playful_list_keeps_its_lab_and_now_tags_when_the_table_is_drawn_too(root, page):
+    live = write_ledger(root / "org--live", ("stage_start", 3, {}), model="org/live-model")
+    with_supervisor(live, LIVE)
+    lab_run(root / "org--lab", "org/lab-model")
+    with Served(make_app(root, alive={LIVE})) as s:
+        open_page(page, s)
+        page.click("#mode-playful-btn")
+        tags = [t.strip() for t in page.locator("#runs li .mode-tag").all_text_contents()]
+        assert "now" in tags and "lab" in tags, tags
+        page.click("#mode-operator-btn")
+        cells = page.locator("#runs-body .mode-tag").all_text_contents()
+        assert "now" in [c.strip() for c in cells] and "lab" in [c.strip() for c in cells], cells
+        assert page.locator("#runs li .mode-tag").count() == 2          # still both in the list, with the table drawn beside it
+
+
+def test_two_runs_of_one_model_can_be_told_apart_in_the_table(root, page):
+    for d in ("org--same-a", "org--same-b"):
+        write_ledger(root / d, ("stage_start", 2, {}), model="org/same-model")
+    with Served(make_app(root)) as s:
+        open_page(page, s)
+        rows = page.locator("#runs-body tr[data-run-row]")
+        texts = [r.inner_text() for r in rows.all()]
+        assert len(texts) == 2 and texts[0] != texts[1]
+        assert {"org--same-a", "org--same-b"} == {r.locator(".c-dir").text_content().strip() for r in rows.all()}
+        assert page.evaluate("getComputedStyle(document.querySelector('#runs-body .c-dir')).userSelect") != "none"
+        assert "org--same" in rows.first.locator(".c-model").get_attribute("title")

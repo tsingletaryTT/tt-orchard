@@ -304,14 +304,15 @@ function renderRuns() {
   }
   const total = (S.meta && S.meta.stages ? S.meta.stages.length : 9) || 9;
   S.runs.forEach((r, i) => {
-    const tag = (r.mode || "").startsWith("lab") ? h("span", { class: "mode-tag", title: `hardware tests ran on ${r.mode.slice(5, -1)}` }, "lab") : null;
-    const first = r === S.runs[0] ? h("span", { class: "mode-tag", title: "the page opens this run first: the one in progress, or the most recent" },
+    // each view gets its own nodes: one DOM node can sit in only one place, so sharing them would move the tags out of the list
+    const tag = () => (r.mode || "").startsWith("lab") ? h("span", { class: "mode-tag", title: `hardware tests ran on ${r.mode.slice(5, -1)}` }, "lab") : null;
+    const first = () => r === S.runs[0] ? h("span", { class: "mode-tag", title: "the page opens this run first: the one in progress, or the most recent" },
       r.state === "running" || r.state === "paused" || r.launching ? "now" : "latest") : null;
     list.append(h("li", { "data-run-row": "1", "data-run-name": r.name }, h("button", {
       type: "button", class: "run-item", "aria-current": String(r.name === S.selected),
       onclick: () => select(r.name),
     }, stateBadge(r.state),
-      h("span", { class: "model" }, r.model || r.name, tag, first),
+      h("span", { class: "model" }, r.model || r.name, tag(), first()),
       h("span", { class: "meta mono" }, r.name),
       h("span", { class: "meta" },
         h("span", {}, r.stage && r.stage.current !== null ? `stage ${r.stage.current}` : ""),
@@ -320,6 +321,7 @@ function renderRuns() {
 
     // the Operator style's table row: state, model, stage, age. The full id, the stage name and the exact time are tooltips.
     const full = r.model || r.name;
+    const tip = full === r.name ? full : `${full}\n${r.name}`;
     const cur = r.stage && r.stage.current !== null && r.stage.current !== undefined ? r.stage.current : null;
     const when = parseTs(r.last_ts);
     const selected = r.name === S.selected;
@@ -333,8 +335,10 @@ function renderRuns() {
       },
     },
       h("td", { role: "gridcell", class: "c-state" }, stateBadge(r.state)),
-      h("td", { role: "gridcell", class: "c-model", title: full },
-        h("span", { class: "c-model-text" }, full), tag, first, r.launching ? h("span", { class: "mode-tag" }, "starting…") : null),
+      h("td", { role: "gridcell", class: "c-model", title: tip },
+        h("span", { class: "c-model-text" }, full), tag(), first(), r.launching ? h("span", { class: "mode-tag" }, "starting…") : null,
+        // the run directory tells apart runs of one model; it is plain selectable text and part of the tooltip
+        h("span", { class: "c-dir mono" }, r.name)),
       h("td", { role: "gridcell", class: "c-stage", title: cur === null ? "no stage yet" : `stage ${cur}${r.stage.name ? ` · ${r.stage.name}` : ""}` },
         cur === null ? "" : [h("span", { class: "c-stage-n" }, String(cur)),
           h("span", { class: "c-bar", "aria-hidden": "true" }, h("span", { style: `width:${Math.round(((cur + 1) / total) * 100)}%` }))]),

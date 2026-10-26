@@ -48,7 +48,7 @@ def test_each_row_is_a_gridrow_with_aria_selected_a_roving_tabindex_and_both_lis
 
 def test_cells_carry_the_full_model_id_the_stage_name_and_the_exact_time_as_tooltips():
     body = fn_body(JS(), "function renderRuns")
-    assert 'class: "c-model", title: full' in body
+    assert 'class: "c-model", title: tip' in body and "const tip = full === r.name ? full" in body
     assert "stage.name" in body                                       # the stage column's tooltip
     assert "toLocaleString" in body                                    # the age column's tooltip
 

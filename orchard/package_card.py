@@ -119,6 +119,7 @@ class CardFacts:
     stage_2_without_graft: bool = False   # stage 2 and 4 served without the graft (the drafter off, host sampling)
     graft_decision: str | None = None     # "graft" or "safe" when stage 2's graft trial ran and decided (orchard/graft_trial.py)
     use: UseFacts | None = None           # what the model is for and how to call it, read from its own files (orchard/card_use.py)
+    acceptance_measured: bool = False     # the Numbers table has the drafter's acceptance rate (stage 2's graft trial measured it)
     vocab: tuple[int, int] | None = None  # (this model's vocabulary size, the nearest model's) when the model is a vocabulary trim
 
 
@@ -250,9 +251,9 @@ def render_card(f: CardFacts) -> str:
     if f.sampling_from_base:
         lines.append(f"- {sampling_disclosures(f.model_id, f.nearest_model)[0]}")
     if f.drafter:
+        where = ("is in the table below (graft trial)" if f.acceptance_measured else "is listed under Not measured")
         lines.append(f"- Speculative decoding uses the drafter {f.drafter}, which was trained on "
-                     f"{f.nearest_model}. Its acceptance rate on this model is listed under Not "
-                     "measured.")
+                     f"{f.nearest_model}. Its acceptance rate on this model {where}.")
     if f.graft:
         g = f.graft
         lines.append(f"- {f.model_id} ships no mtp.* tensors, so the drafter has no MTP head of its own. The launcher "
@@ -313,8 +314,11 @@ def render_card(f: CardFacts) -> str:
               "by this bundle.",
               "Accuracy was compared with the CPU reference on one short fixed prompt only."]
     if f.graft:
+        rate = ("The share of the drafter's guesses that are accepted on this model is in the table above (graft trial)."
+                if f.acceptance_measured else
+                "How often the drafter's guesses are accepted on this model was not measured.")
         limits.append(f"The drafter's MTP head is the nearest model's ({f.nearest_model}), added to {f.model_id} at "
-                      "start. How often the drafter's guesses are accepted on this model was not measured.")
+                      f"start. {rate}")
     if f.stage_2_without_graft:
         limits.append("The stage 2 and stage 4 numbers were measured without the graft (the drafter off and sampling "
                       "on the host). The stage 7 rows were measured with this package's settings.")

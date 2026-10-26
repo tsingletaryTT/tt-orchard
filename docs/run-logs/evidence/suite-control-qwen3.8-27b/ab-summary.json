@@ -1,0 +1,62 @@
+[
+ {
+  "thinking": true,
+  "max_tokens": 64,
+  "wall_s": 40.1,
+  "limit": 6,
+  "answered": 3,
+  "errors": 0,
+  "completion_tokens": 495,
+  "reasons": [],
+  "advisory": [],
+  "findings": []
+ },
+ {
+  "thinking": true,
+  "max_tokens": 256,
+  "wall_s": 61.2,
+  "limit": 0,
+  "answered": 8,
+  "errors": 0,
+  "completion_tokens": 841,
+  "reasons": [],
+  "advisory": [],
+  "findings": []
+ },
+ {
+  "thinking": true,
+  "max_tokens": 1024,
+  "wall_s": 61.6,
+  "limit": 0,
+  "answered": 8,
+  "errors": 0,
+  "completion_tokens": 841,
+  "reasons": [],
+  "advisory": [],
+  "findings": []
+ },
+ {
+  "thinking": false,
+  "max_tokens": 64,
+  "wall_s": 25.2,
+  "limit": 2,
+  "answered": 8,
+  "errors": 0,
+  "completion_tokens": 240,
+  "reasons": [],
+  "advisory": [],
+  "findings": []
+ },
+ {
+  "thinking": false,
+  "max_tokens": 256,
+  "wall_s": 30.9,
+  "limit": 0,
+  "answered": 8,
+  "errors": 0,
+  "completion_tokens": 338,
+  "reasons": [],
+  "advisory": [],
+  "findings": []
+ }
+]

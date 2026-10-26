@@ -793,7 +793,7 @@ Flags of `package`:
 - `--namespace` ORG: the Hugging Face organisation the package is for. Needed to stage.
 - `--step`: `all` (default), `stage`, `boot` (needs a lease) or `finish`.
 - `--restage`: move an earlier `stages/7` aside and stage again.
-- `--graft-mtp`: for a model that ships no `mtp.*` tensors. The package adds the nearest model's `mtp.*` tensors (the drafter's head) to the served model directory at each start, from that model's pinned snapshot (only that file is downloaded; the package ships no weights, and `graft.json` names the file and the sha256 of the shard it must build), and keeps the speculative drafter and on-device sampling on. The boot check serves the package that way. A package is grafted without the flag when stage 2's graft trial chose the graft (section 5.5c), or when stage 2's own swap grafted (`"graft_mtp": true` in its `swap_config.json`); the flag forces a graft the trial did not choose, and the card then says stage 2 and 4 were measured without it. The drafter's acceptance rate on the model is not measured.
+- `--graft-mtp`: for a model that ships no `mtp.*` tensors. The package adds the nearest model's `mtp.*` tensors (the drafter's head) to the served model directory at each start, from that model's pinned snapshot (only that file is downloaded; the package ships no weights, and `graft.json` names the file and the sha256 of the shard it must build), and keeps the speculative drafter and on-device sampling on. The boot check serves the package that way. A package is grafted without the flag when stage 2's graft trial chose the graft (section 5.5c), or when stage 2's own swap grafted (`"graft_mtp": true` in its `swap_config.json`); the flag forces a graft the trial did not choose, and the card then says stage 2 and 4 were measured without it. The trial records the drafter's acceptance rate (see section 5.5c); a package whose run has no trial does not show one.
 - `--no-graft-mtp`: stage the package without the graft. It is refused when stage 2's graft trial chose the graft, because stage 4's bundle tests were built with it, and when stage 2 itself served with the graft. To decide against the graft from the start, run `--no-graft-trial`. The card of a package built from a trial shows the trial's rows (decode speed and time to first token of both configurations, and the grafted variant's agreement with the CPU reference).
 - `--exact` CHIP: pin the lease to the board that holds this chip.
 - `--models-root` DIR: where installed tt-model bundles live. Default: the path the run recorded.
@@ -1011,6 +1011,7 @@ does not change.
 | `weights+sidecar` | `weights-only` for the backbone, plus a weights file outside the backbone shards that the nearest model lacks (a task head, for example) | `weights-only` | Stage 2 also measures the sidecar's parity (below) |
 | `vocab-trim` | The nearest model with vocabulary rows removed: a smaller `vocab_size`, embedding and `lm_head` whose rows are rows of the nearest model's, and nothing else different | `weights-only` | Stages 2 and 4 serve it with the model's own `vocab_size` in the served `config.json` and the speculative drafter off; the gates check both |
 | `restricted-head` | The backbone lines up and a sidecar matrix is a copy of rows of the nearest model's `lm_head` (the answer rows of a classifier-style model) | `full-port` | The run stops after stage 0 (block code `restricted-head`), because how the rows are read is in the model's own code. A person can ask for the parity report in [docs/restricted-head-parity.md](docs/restricted-head-parity.md) |
+| `stock-runtime` | tt-transformers already supports the model: research found an exact `models/tt_transformers/model_params/<name>` for it (or its base) on this box, and no installed bundle serves the base. Chosen with no flag: the `base` preflight row warns, `bringup` passes `--input stock_params=<dir>`, and stage 0 is supervisor code that compares the config and the tensor layout with tt-transformers' own | `stock-runtime` | Stage 2 serves the model through tt-transformers on one board from a scratch copy of the host tt-metal tree's `models/` (`<run>/tt-metal-scratch`, the only place beyond the stage directory the `write_file` tool reaches; the template never writes the host tree, and shell commands are not confined by any mount) and checks teacher-forced top-1 and top-5 against the bars in `orchard/defaults.py` (`STOCK_*`, choices). Stages 3 to 7 are skipped (stage 4's 2-chip and 4-chip checks are not built). No package, no push, no publish |
 | `full-port` | The model needs new model code | `full-port` | An unattended run ends blocked (`needs-new-model-code`); an attended run pauses before stage 2 |
 | `unknown` | Stage 0 could not decide: an unreadable or overlapping sidecar, or headers that would not parse | `full-port` | Nothing unproven runs as weights-only |
 
@@ -1153,7 +1154,7 @@ entry. Stage 4's configurations, stage 7's package, the card and the stage 8 bun
 
 The extra test adds a warm boot of the safe configuration (2 to 4 minutes), a cold boot of the variant (4 to 25 minutes measured for the
 Qwen3.8 bundle) and a warm boot of the variant, plus 12 timed requests each. `--no-graft-trial` (on `tt-orchard bringup` and on
-`supervisor run`) leaves it out. The variant converts a second tensor cache, so the trial is skipped, with the reason recorded, when the run directory's disk has less than 40 GB free. It is also skipped on a lab run, whose tests do not run on this box's chips. The drafter's acceptance rate is not measured: the server prints no counters.
+`supervisor run`) leaves it out. The variant converts a second tensor cache, so the trial is skipped, with the reason recorded, when the run directory's disk has less than 40 GB free. It is also skipped on a lab run, whose tests do not run on this box's chips. The trial also records the drafter's acceptance rate for each configuration (accepted over drafted tokens), read from the `[dflash2-serve]` session lines the server writes to its log while the timed prompts run. It is shown on the card and in the stage 8 bundle and does not enter the choice. A configuration with the drafter off, or a server that writes no such line, has no number and the card and bundle say it was not measured.
 
 ### 5.6 The credentials preflight
 
@@ -1534,6 +1535,42 @@ every hardware test shares one tt-metal kernel cache, `<cache_root>/kernels`. `t
 with their model, size, age and the unfinished runs that use them (`--lab` adds the lab's).
 `tt-orchard caches --prune --older-than DAYS` removes the ones no unfinished run uses and that have not been
 written for that long, after asking; it never removes the kernel cache or anything outside the cache root.
+
+### 5.11 A control for the prompt suite
+
+Stage 2 and stage 4 send the prompt suite (`orchard/skills/weights-swap-templates/prompt_suite.json`) to the new model and the
+gate reads the replies. A control is the same suite served by the nearest model on the same bundle, with the same `SUITE_MAX_TOKENS` (a control made with another token limit is refused by the template and the gate; regenerate it). With a control the gate can
+tell a reply shape that the base also shows from one the new model introduced, and it can fail a run whose replies are identical
+to the base's on every prompt (the base weights served by mistake). A control costs one boot of the nearest model, so nothing
+makes one by itself.
+
+```bash
+tt-orchard suite-control prepare --stage-dir ~/orchard-runs/<run>/stages/2    # builds stages/2/suite-control/, opens no chip
+tt-orchard suite-control run     --stage-dir ~/orchard-runs/<run>/stages/2    # the same, then takes a lease, serves, releases
+tt-orchard suite-control run     --stage-dir ~/orchard-runs/<run>/stages/2 --ticket <ticket>   # after a queued run
+```
+
+`prepare` copies the shipped scripts into `suite-control/` (a container stage also gets `serve_and_compare.py`, which its script
+imports), writes a config that names the nearest model as the model to serve, and runs the shipped `prepare_swap.py` there. The
+config has its own tensor cache (`<tt_cache>-control`), absolute paths (a relative path in the stage's config is read against the run
+directory), the chip count of the bundle's or package's own metadata (`--chips` must agree with it) and the drafter off when the stage
+was served with it off (its `run.sh`, or for a container its `evidence/swap-check.json`). It prints the launcher command
+(`python -m orchard.suite_control launch --control-dir ...`) and the `run` command. Use `run`: a `gozer run` line would release the lease even when the launcher reports that a container survived the cleanup.
+
+`run` takes a lease with `gozer acquire`, runs the launcher under it and releases the lease. If gozer queues the request, `run` exits 3,
+prints the ticket and its position, starts nothing and cancels nothing. Run it again with `--ticket <ticket>`: that waits for the
+ticket with `gozer wait`, which takes the lease when it is granted, and then runs and releases it. `run` never starts a `gozer run`,
+because a new `gozer run` made while its own lease is held would queue behind that lease. The launcher reads the leased chips from
+`TT_VISIBLE_DEVICES`, sets `ORCHARD_DEVICE_IDS` and a control-specific `ORCHARD_TEST_LABEL` for the container template, and when the
+serve script ends for any reason, SIGTERM included, it stops the servers it started and removes its labelled containers and checks
+that they are gone (exit 4 when it cannot confirm). When the launcher cannot confirm that (exit 4, or it had to be killed), `run` does not
+release the lease: it prints the lease id and leaves the chips leased for a person to check and release. gozer grants whole boards, so a lease
+with more chips than the control needs is accepted; the launcher narrows the visible chips and the device ids to the first ones it needs. One
+control runs per stage at a time: `prepare`, `run` and `launch` take a lock file beside the control directory (`suite-control.lock`) and a
+second one is refused. A `--gozer` executable other than the default is passed on to the launcher. The result is
+`suite-control/evidence/swap-check.json`. To use it, put `"suite_control": "stages/2/suite-control/evidence/swap-check.json"` in
+the stage's `swap_config.json` before the stage's test runs. `--port` overrides the stage's port.
+Not built: a supervisor step that makes the control before stage 2's test.
 
 ## 6. Lessons that will bite you
 

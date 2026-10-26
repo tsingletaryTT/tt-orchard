@@ -41,8 +41,20 @@ def _unique(items) -> list[str]:
 def _empty(model_id: str, now: str, offline: bool, reason: str) -> dict:
     return {"model": model_id, "generated_at": now, "offline": offline, "new_model_gated": None,
             "stated_bases": [], "candidates": [],
-            "bundle_choices": [], "selected": None, "ports": [], "evidence": [],
+            "bundle_choices": [], "selected": None, "ports": [], "tt_transformers": [], "evidence": [],
             "unavailable": [Unavailable("research", reason).as_dict()]}
+
+
+def _support_record(raw) -> list[dict]:
+    """The tt-transformers support rows from the ports collector (orchard/research/ports.py), with the text fields cleaned
+    again here. Anything that is not a list of rows gives no rows."""
+    out = []
+    for r in raw if isinstance(raw, list) else []:
+        if isinstance(r, dict) and r.get("via") in ("model_params", "readme"):
+            out.append({"name": clean(r.get("name", "")), "via": r["via"], "matched": clean(r.get("matched", "")),
+                        "boards": [clean(b) for b in r.get("boards") or [] if isinstance(b, str)],
+                        "blackhole": r.get("blackhole") if isinstance(r.get("blackhole"), bool) else None})
+    return out
 
 
 def _guard(res: Result, source: str, call, fallback):
@@ -262,6 +274,7 @@ def build(*, model_id, hub, base_override, installed, search, hub_info, fetch, r
     return {"model": model_id, "generated_at": now, "offline": False, "new_model_gated": gated, "stated_bases": stated,
             "candidates": ordered, "bundle_choices": choices, "selected": selected,
             "ports": [e.as_dict() for e in port_res.evidence],
+            "tt_transformers": _support_record(port_res.data.get("tt_transformers")),
             "evidence": [e.as_dict() for e in res.evidence if e not in port_res.evidence],
             "unavailable": [u.as_dict() for u in res.unavailable]}
 
@@ -289,6 +302,14 @@ def markdown(report: dict) -> str:
         lines.append("- none found")
     lines += ["", "## Existing ports", ""]
     lines += [f"- [{p['confidence']}] {p['claim']} ({p['url']})" for p in report["ports"]] or ["- none found"]
+    support = report.get("tt_transformers") or []
+    if support:
+        lines += ["", "## tt-transformers support", ""]
+        for r in support:
+            boards = (f"boards {', '.join(r['boards'])}; " + ("a Blackhole board is named" if r["blackhole"]
+                                                               else "no Blackhole board named")) if r["boards"] else "no boards named"
+            lines.append(f"- {r['name']} ({'README' if r['via'] == 'readme' else 'model_params'}): {boards}. "
+                         f"Matched for {r['matched']}.")
     lines += ["", "## Unavailable", ""]
     lines += [f"- {u['source']}: {u['reason']}" for u in report["unavailable"]] or ["- nothing"]
     return "\n".join(lines) + "\n"
