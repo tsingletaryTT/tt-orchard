@@ -336,7 +336,7 @@ def test_the_blocked_panel_ends_its_unblock_list_with_a_retry_button():
     t = page()
     panel = by_id(t, "block-panel")
     btn = by_id(t, "block-retry")
-    assert btn.inside(panel) and btn.tag == "button" and btn.all_text() == "Retry run" and "btn-primary" in btn.classes
+    assert btn.inside(panel) and btn.tag == "button" and btn.all_text().replace("🔁", "").strip() == "Retry run" and "btn-primary" in btn.classes
     assert btn.parent is by_id(t, "block-unblock").parent, "the button sits in the same column as the unblock steps"
     assert order(t, "block-unblock", "block-retry") == ["block-unblock", "block-retry"]
 
@@ -406,8 +406,12 @@ def test_every_emoji_in_the_markup_is_inside_a_span_the_operator_style_hides():
     t = page()
     for n in t.root.walk():
         if pictures(n.text):
-            hidden = "emoji" in n.classes or "brand-mark" in n.classes or any("emoji" in a.classes for a in _ancestors(n))
+            # 2026-10-26: Operator style keeps a small set in op-pic spans (aria-hidden), which Playful never shows
+            deco = {"emoji", "op-pic"}
+            hidden = bool(deco & n.classes) or "brand-mark" in n.classes or any(deco & a.classes for a in _ancestors(n))
             assert hidden, f"<{n.tag} id={n.attrs.get('id')}> shows {pictures(n.text)} outside an .emoji span"
+            if "op-pic" in n.classes:                  # a picture Operator style shows must be decoration only
+                assert n.attrs.get("aria-hidden") == "true", f"{pictures(n.text)} in an op-pic span is not aria-hidden"
 
 
 def _ancestors(n):
@@ -441,7 +445,7 @@ def test_the_mode_chip_the_stepper_marks_and_the_unreadable_badge_put_their_pict
     assert mode.count('class: "emoji"') >= 2 and "replaceChildren" in mode
     step = fn_body(js, "function renderStepper")
     assert 'const mark = h("span", { class: "emoji", "aria-hidden": "true" }, `${stopped ? "⏹" : S.meta.marks[status] || ""} `);' in step
-    assert re.search(r'\.\.\.\(r \? \[mark,\s*`\$\{status\}', step)
+    assert re.search(r'\.\.\.\(r \? \[mark, opMark,\s*`\$\{status\}', step)
     assert 'h("span", { class: "emoji", "aria-hidden": "true" }, "⚠ "), "unreadable"' in fn_body(js, "function stateBadge")
 
 
