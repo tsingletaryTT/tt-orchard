@@ -602,7 +602,7 @@ html[data-mode="operator"] .step .stat .op-pic { font-size: 1.05em; }
 html[data-mode="operator"] .empty { background: var(--paper); border: 1px solid var(--line); border-radius: 6px; padding: 28px 24px; margin-top: 12px; }
 html[data-mode="operator"] .empty .op-pic { font-size: 1.6em; }
 html[data-mode="operator"] .run-head h1 { color: #fff; font-size: 1.05rem; font-weight: 600; }
-html[data-mode="operator"] .run-head .run-sub { color: rgba(255,255,255,.9); }
+html[data-mode="operator"] .run-head .run-sub { color: #fff; }
 html[data-mode="operator"] .run-head .btn { color: #092221; background: #fff; border-color: #fff; }
 html[data-mode="operator"] .run-head .mode-chip { color: #fff; background: transparent; border-color: rgba(255,255,255,.6); }
 @media (prefers-reduced-motion: no-preference) {

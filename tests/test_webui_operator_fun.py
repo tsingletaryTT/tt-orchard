@@ -187,3 +187,39 @@ def test_the_state_band_has_a_soft_gradient_accent_and_verdicts_use_the_stronger
     assert re.search(r'#run\[data-state="running"\] \.run-head \{[^}]*linear-gradient\([^}]*--band-running', css)
     assert re.search(r'#verdict \.verdict-item\[data-tone="good"\] \{[^}]*var\(--v-good-bg\)', css)
     assert re.search(r'#verdict \.verdict-item\[data-tone="info"\] \{[^}]*var\(--v-info-bg\)', css)
+
+
+def _composite(fg_rgba, bg_hex):
+    r, g, b, a = fg_rgba
+    h = bg_hex.lstrip("#")
+    bg = [int(h[i:i + 2], 16) for i in (0, 2, 4)]
+    return "#" + "".join(f"{round(c * a + k * (1 - a)):02x}" for c, k in zip((r, g, b), bg))
+
+
+def _band_text_colours():
+    """Every text colour the operator CSS puts on the state band, with its alpha: the real colour, not opaque white."""
+    css = CSS()
+    out = {}
+    for sel in (".run-head .run-sub", ".run-head h1", ".run-head .badge", ".run-head .mode-chip"):
+        m = re.search(r'html\[data-mode="operator"\] ' + re.escape(sel) + r' \{[^}]*?(?<![-\w])color:\s*([^;]+);', css)
+        assert m, sel
+        v = m.group(1).strip()
+        if v.startswith("rgba"):
+            r, g, b, a = [float(x) for x in re.findall(r"[\d.]+", v)]
+            out[sel] = (r, g, b, a)
+        else:
+            assert re.fullmatch(r"#[0-9a-fA-F]{6}|#fff", v), (sel, v)
+            h = v.lstrip("#") * (2 if len(v) == 4 else 1)
+            out[sel] = (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16), 1.0)
+    return out
+
+
+@pytest.mark.parametrize("scheme", ["light", "dark"])
+def test_text_on_the_state_band_is_aa_with_its_alpha_over_the_lightest_stop(scheme):
+    t = _tokens(scheme)
+    for sel, rgba in _band_text_colours().items():
+        for name in ("running", "good", "warn", "bad", "dim"):
+            for suffix in ("", "-2"):
+                bg = t[f"--band-{name}{suffix}"]
+                seen = _composite(rgba, bg)
+                assert ratio(seen, bg) >= 4.5, (scheme, sel, name, suffix, rgba, round(ratio(seen, bg), 2))
