@@ -126,6 +126,7 @@ from urllib.parse import urlparse
 
 from orchard.adapters import AdapterError, Lease
 from orchard.agent import AgentStep, Tools, agent_env, probe_model, spawn_checked
+from orchard import bus
 from orchard.blocked import block_code, last_pause
 from orchard.blocked import write_bundle as write_blocked_bundle
 from orchard.canary import CanaryError, compare, post_json
@@ -547,6 +548,7 @@ class Supervisor:
         self.coder_lease: Lease | None = None
         self.test_lease: Lease | None = None      # a stage's own test lease, while it is held
         self.watchdog: Watchdog | None = None
+        self.bus_read = None                       # the reader of the PCIe bus; None means orchard.bus's own (tests set one)
         self.stop_message = ""                     # what the shutdown did, for main to print
         agent_env(self.run_dir, extra=self.extra_env)     # refuse a credential before anything runs
 
@@ -555,6 +557,25 @@ class Supervisor:
     def _block(self, stage, reason: str, **evidence):
         self.ledger.append("notice", stage, blocked=True, reason=reason, evidence=evidence)
         raise Blocked(reason, **evidence)
+
+    def _off_bus(self, held) -> str | None:
+        """A sentence naming each chip this run holds that has left the PCIe bus (or cannot be read) and why, or None when the
+        chips are fine or the bus cannot be listed. Reads sysfs only, takes no lease and never opens a chip (orchard/bus.py).
+        It re-reads for bus.SETTLE_S seconds first, because a board being reset is unreadable for part of a minute.
+        A lab run has none to read: the lab's chips are not on this box's bus."""
+        if self.lab is not None:
+            return None
+        held = [c for c in (held or ()) if c]
+        return bus.diagnose(held=held or None, needed=0 if held else int(self.coder_chips), read=self.bus_read,
+                            sleep=self.sleep, clock=self.clock)
+
+    def _block_if_off_bus(self, stage, reason: str, held, **evidence) -> None:
+        """After a failure described by `reason`: block when a chip this run holds has left the bus, and return when none has.
+        A dead board is not a model failure and a retry would meet the same board, so that block says so, names the chip and
+        cause, and keeps `reason` as what came first."""
+        dead = self._off_bus(held)
+        if dead:
+            self._block(stage, f"{dead}. It was found after this failure: {reason}", off_bus=True, **evidence)
 
     def _evidence_file(self, stem: str, text: str) -> Path:
         d = self.run_dir / "evidence"
@@ -1088,6 +1109,7 @@ class Supervisor:
         try:
             self.coder.start(lease)
         except (ServerError, OSError) as exc:
+            self._block_if_off_bus(None, f"the coder did not start and answer; nothing is retried: {exc}", lease.chips)
             self._block(None, f"the coder did not start and answer; nothing is retried: {exc}")
         # The boot takes up to 45 minutes and is the likeliest time for a kill. This entry gives
         # the kill test a kill point while the container runs and has not answered.
@@ -1108,6 +1130,7 @@ class Supervisor:
             # noise still passes the canary, because the canary only needs some answer.
             sanity = self.coder.ask(FIRST_BOOT_PROMPT) if baseline is None else None
         except (ServerError, CanaryError, OSError) as exc:
+            self._block_if_off_bus(None, f"the coder did not start and answer; nothing is retried: {exc}", lease.chips)
             self._block(None, f"the coder did not start and answer; nothing is retried: {exc}")
         if sanity is not None and FIRST_BOOT_EXPECTED not in sanity:
             saved = evidence_record(self.run_dir, self._evidence_file("coder-sanity", sanity))
@@ -2032,6 +2055,11 @@ class Supervisor:
             except Denied as exc:
                 code, timed_out = None, False
                 out.write(f"refused: {exc}\n".encode("utf-8"))
+        if timed_out or code not in (0, None):
+            # A test that ran and did not succeed is checked against the bus before anyone calls it a model failure. A refused
+            # command (code None and no timeout) never reached a chip.
+            how = "timed out" if timed_out else f"exited {code}"
+            self._block_if_off_bus(n, f"the hardware test {how}", chips)
         return {"command": command, "returncode": code, "timed_out": timed_out,
                 "seconds": round(self.clock() - t0, 3), "chips": list(chips),
                 "output": evidence_record(self.run_dir, out_path)}
