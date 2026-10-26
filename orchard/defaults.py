@@ -128,12 +128,20 @@ SIDECAR_NOISE_FACTOR = 4.0      # choice: the probability bar is at least this m
 SIDECAR_MIN_QUESTIONS = 10      # choice: fewest questions a parity result may rest on (the run had 16)
 # The prompt-suite check (issue 15): after the 32-token check, the stage 2 and stage 4 templates send a fixed set of
 # prompts (orchard/skills/weights-swap-templates/prompt_suite.json) and orchard/prompt_suite.py reads the replies for
-# the failure shapes the tenstorrent qualitative-check skill lists. Every number below is a choice. None was
-# calibrated on a measured model: no chip has run the suite yet, so each one is provisional and must be revisited
-# with the first measured controls (issue 15 asks for the bar to be set from them).
+# the failure shapes the tenstorrent qualitative-check skill lists. Every number below is a choice. The first chip data
+# is one run: the suite served by Qwen3.8-27B (the control for AREX-2's configuration: the 2-chip bundle, drafter off,
+# host sampling), 8 prompts, 2026-10-26 (docs/run-logs/2026-10-26-suite-control.md). That is one model and eight
+# replies, which cannot calibrate a threshold. It showed no finding of any kind on those replies, so no check is known
+# to give a false positive on a healthy base reply, and it showed that 5 of the 8 replies were cut off inside the
+# reasoning at SUITE_MAX_TOKENS (see below). No fine-tune was served with the suite, so no number below was set from
+# data, and each one stays provisional until fine-tunes have been measured against controls.
 SUITE_MIN_PROMPTS = 5           # choice: issue 15 asks for at least five prompts of different kinds
 SUITE_MAX_TOKENS = 64           # choice: long enough for a loop or a drift to show, short enough that eight
-                                # requests cost about a minute at 20 tokens/s (more with thinking on)
+                                # requests cost about a minute at 20 tokens/s (more with thinking on). Measured on
+                                # one model (Qwen3.8-27B, thinking on by default): 5 of 8 replies ended at this limit
+                                # inside the reasoning, with no answer; 3 gave an answer or a tool call. The checks
+                                # then read the reasoning text. Whether to raise it, or to turn thinking off for the
+                                # suite, is open (it would change what the suite sees).
 SUITE_BLOCKING_KINDS = ("control_token_leak", "cross_request_leak", "corrupt_first_token", "repeated_first_token",
                         "mechanical_repetition", "gibberish")
                                 # choice: the findings that fail a gate when the control does not show them. A

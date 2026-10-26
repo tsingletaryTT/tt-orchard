@@ -2213,3 +2213,31 @@ Prompt (operator): research tt-metal's recent fixes, then "go through all the st
 - `silu_mul` on the v0.80.0 tree, three coder-written kernels from one probe round (T=0.7, Coder-Next on one board, pin `fec38c6`): 3 of 3 pass the simulator (12, 7 and 17 turns), and the probe's hardware phase passes the smoke test and all three kernels (PCC min 0.9999958, 0.9999963, 0.9999963). That matches the earlier round (3 of 3, PCC min 0.999996), but the two rounds differ in the tt-lang pin, the skill text and the host tree, so the match shows the new tree works and does not isolate any one change. The hardware phase was driven by a small script calling the probe's `run_hardware` on the saved attempts, because the coder held board 1 and another agent held board 0 at the time; the final run used the probe's own chip (chip 1).
 - Left untouched on request or by caution: `~/tt-metal-v0.78.0-pre-fabricfix` (124 unpushed commits, 2 stashes, tt-tnt files, a live `tt-vjepa2` worktree) and `~/tt-metal-qwen36-p150x2` (an unpushed DFlash commit and untracked `models/autoports/`, `packaging/`). Deleted: `~/code/tt-metal-fastmodels`, `~/tt-metal-55fd115`, `~/tt-metal-v0.75.0` (its 3 unpushed commits are in `~/archive-tt-metal/`).
 - Not done: a 2-chip swap run on this tree; a check of other agents' venvs for references to `~/tt-metal`; v0.81 model-support work (Gemma 4, Muse-Glimmer, the Qwen3.8 MTP vLLM class) is not available on this tree.
+
+## 2026-10-26 (UTC): `tt-orchard suite-control`, and the first chip data for the prompt suite (branch `suite-control`, version 0.8.44)
+Prompt (parent session): finish the open half of issue 15: make the control automatically available (part 1, no chip), then run the suite on the
+base and at least two fine-tunes and judge it (part 2, hardware). Part 1 is done. Part 2 got the base control only.
+- `orchard/suite_control.py`, `tt-orchard suite-control prepare|run --stage-dir DIR [--chips N] [--port P]`. It builds `<stage>/suite-control/` from the
+  stage's `swap_config.json` with the nearest model as the model served (`new_model_id` = `nearest_model_id`, `new_snapshot` = `base_snapshot`), its own tensor
+  cache (`<tt_cache>-control`), no graft and no `suite_control`, copies the shipped scripts from the checkout (never the stage's copies), runs the shipped
+  `prepare_swap.py` there (no chip) and prints the one `gozer run --chips N` line that serves it. `run` also executes it; a queued request (exit 10) exits 3
+  and says to wait. The result is `suite-control/evidence/swap-check.json`; the stage's config then names it in `suite_control`, and the existing identity
+  checks apply. A stage that already serves the nearest model is refused. Container packages use `serve_and_compare_container.py` (not run on hardware).
+  Not built: a supervisor step that makes the control before stage 2's test (a boot per configuration; the README says so). The default stays "off".
+- `prepare_swap.py` takes `"drafter": "off"` (any other value, or the key with `graft_mtp`, is refused). The control uses it when the stage's own run.sh
+  exports an empty `QWEN36_DRAFTER`, because the base has `mtp.*` tensors and would otherwise be served with the drafter on while the run is served with it off.
+- Tests first: 36 in `tests/test_suite_control.py` (the real `prepare_swap.py` on the template tests' fake snapshots), 10 in
+  `tests/test_prepare_swap_drafter_key.py`. Mutations: 27 on the command, 7 on the drafter mirror, 8 on `prepare_swap.py`; first-run survivors were the chips
+  default order and the bundle_dir refusal (masked by `prepare_swap.py`'s own error), a graft-refusal test that matched a different message, and the reason text;
+  each has a test. One equivalent mutant: dropping `and not graft` on the forced-off line (the config check already refuses that pair). The test for the base-weights-by-mistake case
+  already exists (`tests/test_prompt_suite_verdict.py`, the identical-replies tests), so none was added.
+- Measured (docs/run-logs/2026-10-26-suite-control.md): Qwen3.8-27B served the suite on one 2-chip board, drafter off, host sampling, ready in 1,942 s cold. All 8 replies
+  were judged clean by `orchard/prompt_suite.py` (no finding of any kind). 5 of 8 replies reached `max_tokens` 64 inside the reasoning with no answer; one model with
+  thinking on. The base agreed with AREX-2's reference on 30 of 32 tokens, against AREX-2's own 31 of 32: the 0.85 bar does not separate them. Raw replies are in
+  `docs/run-logs/evidence/suite-control-qwen3.8-27b/`.
+- Not done: serving the suite on any fine-tune (AREX-2 and RAG-Gate-27B stages were prepared and not served: both boards were held by other agents for about 2 hours).
+  So no `SUITE_*` threshold changed; their comments now say what data exists (one model, 8 replies, not a calibration). Whether the identical-replies rule passes a real
+  fine-tune and whether the bar can be set from controls are open.
+- Slips: my retry loop for a busy board ran `gozer run` every minute; each attempt queued a ticket and the ticket stays in the queue after the command exits, leaving 53
+  `claude:suite-control` tickets, which the auto mode classifier would not let me cancel. Use one `gozer acquire` and `gozer wait <ticket>` for a busy board, never a loop of `gozer run`. The
+  full suite's first run stopped at one failure because my server held port 8150 (`test_swap_draft` binds a port); not a code problem.
