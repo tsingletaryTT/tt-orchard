@@ -191,7 +191,7 @@ against 0.47 for a runtime that applied a causal mask).
 | Stage machine, agent loop, supervisor | `orchard/stages.py`, `orchard/agent.py`, `orchard/context.py`, `orchard/supervisor.py` | Built and tested. Ran stages 0 to 2 on the real run |
 | Crash recovery | `orchard/supervisor.py`, `orchard/handoff.py` | Tested with fakes by killing the supervisor after every ledger event. On hardware: `kill -9`, restart, resume worked at least four times on the real run |
 | Stage skills | `orchard/skills/` | The skills for stages 0, 1, 2, 4, 7 and 8 and the template scripts they copy have run on real runs. `serving-check` (stage 5) has never run, because stage 5 is skipped on the weights-only path. Stage 8 and stage 7 are supervisor code that runs `operator-bundle-templates/build_bundle.py` and `package.py` |
-| Packaging (stage 7) | `orchard/package.py`, `orchard/package_card.py`, `orchard/package_cmd.py`, `orchard/package_templates/` | Built and tested with fakes, then run once on hardware (Hemmingway-1; see stage 7 above). Wired into the stage table as opt-in supervisor code. `tt-orchard package` and `package-card` run the same steps on a finished run and record them in its ledger. A v5.1 container package is refused at start |
+| Packaging (stage 7) | `orchard/package.py`, `orchard/package_card.py`, `orchard/package_cmd.py`, `orchard/package_templates/` | Built and tested with fakes, then run once on hardware (Hemmingway-1; see stage 7 above). Wired into the stage table as opt-in supervisor code. `tt-orchard package` and `package-card` run the same steps on a finished run and record them in its ledger. `tt-orchard reported` (`orchard/reported_cmd.py`) accepts the author-reported scores that stage 0 drafts from the model card. A v5.1 container package is refused at start |
 | Bundle and package scrub | `orchard/scrub.py` | Built and tested with fakes. The stage 8 gate calls it; it ran once on the real run |
 | CPU sizing tool | `orchard/sizing.py` | Built and tested against a fake server. It has not been run against a real ollama. The CPU numbers in this README come from the run log |
 | `tt-orchard` command | `orchard/cli.py`, `orchard/bringup_config.py`, `orchard/preflight.py`, `orchard/fetch.py`, `bin/tt-orchard` | Built and tested with fakes, then used for the Clef run on the development machine (the preflight, the download check, the unattended end states and the retry path all ran for real) |
@@ -767,10 +767,26 @@ the weights-only path. Otherwise it is recorded as skipped.
 
 To show the scores a model's authors report on its package card, put `reported-results.json` in the run
 directory before stage 7: `{"source": "the model's card on Hugging Face", "rows": [{"name": "MLE-Lite",
-"value": "81.8", "note": "Any Medal, mean of 3 seeds"}]}`. A person writes it from the card; the harness does
-not parse cards. The card shows the rows in a "Reported by the authors" section that says they were not measured
-here, apart from the numbers the run measured, and `gate_package` refuses a card that drops the section, changes a
-value, or lists a reported score as measured.
+"value": "81.8", "note": "Any Medal, mean of 3 seeds"}]}`. The card shows the rows in a "Reported by the authors"
+section that says they were not measured here, apart from the numbers the run measured, and `gate_package` refuses a
+card that drops the section, changes a value, or lists a reported score as measured.
+
+Stage 0 drafts that file for you from the model card, and a person confirms it:
+
+    tt-orchard reported show RUN_DIR
+    tt-orchard reported accept RUN_DIR (--all | --rows NAME,NAME | --row NAME) [--replace]
+
+Stage 0 reads the card's front matter `model-index` block and its markdown and HTML tables. It never reads prose. A row
+counts only when the table row or column is the model's own (a comparison table's other models are ignored), the cell is
+a plain number (an optional sign and `%`; notes, ranges, footnote marks and confidence intervals are not read), the
+columns line up with the header, and the heading and name do not say the number was measured on Tenstorrent hardware.
+Each row quotes the card's line. The result is `stages/0/evidence/reported-results.draft.json`, which also lists every
+entry it left out with the reason, and one stage 0 hazard that says nobody has confirmed the rows. No package card shows
+a drafted row. `reported accept` reads the card again, accepts a row only when the card gives exactly that name, value
+and line, copies the chosen rows into `reported-results.json` after the same checks `package` applies, and writes who
+accepted what in the ledger. `package` and `package-card` accept nothing by themselves. The stage 8 bundle's RESULTS.md
+lists the accepted rows in a section marked as the authors' scores, not measured here, and says when a draft exists
+that nobody accepted.
 
 **Packaging a run that has already finished.** A run started without `--package-format` skips stage 7. When it
 has ended `ready-for-operator-review` you can package it afterwards:

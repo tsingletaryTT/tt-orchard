@@ -88,6 +88,7 @@ import random
 import re
 import struct
 import sys
+from html.parser import HTMLParser
 from pathlib import Path
 
 try:                                     # numpy is optional: only the restricted-head check needs it
@@ -1234,6 +1235,451 @@ def license_side(snapshot: Path) -> dict:
             "source": "model card front matter" if field else ("LICENSE file" if guess else None)}
 
 
+# ---- the scores the authors report (issue 19) ----------------------------------------------------------------------
+#
+# extract_reported reads the model card's own structured forms and nothing else: the front matter's `model-index`
+# block, markdown tables and HTML tables. It reads text it is given. It opens no connection and runs no model, and it
+# never reads prose ("reaches 84.2 on GSM8K" is not a table). A row counts only when it is about THIS model: in a
+# comparison table the row of another model is somebody else's score. Every row quotes the card's text and line.
+# Anything it will not read goes in `skipped` with the reason. The result is a draft: nobody has confirmed it, and no
+# card shows it until `tt-orchard reported accept` copies chosen rows into reported-results.json.
+
+MAX_README_BYTES = 1 << 20          # characters of the card that are read
+MAX_TABLES = 40                     # tables read from one card
+MAX_REPORTED_ROWS = 60              # the cap orchard/package.py puts on reported-results.json
+MAX_REPORTED_NAME, MAX_REPORTED_NOTE, MAX_REPORTED_VALUE = 100, 300, 40
+MAX_SKIPPED = 200                   # skipped entries listed (the rest are counted)
+MAX_QUOTE = 300                     # characters of a card line quoted in a row
+MAX_YAML_LINES, MAX_YAML_DEPTH = 4000, 12
+
+PLAIN_NUMBER = re.compile(r"^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)%?$")
+NO_RESULT = {"", "-", "--", "–", "—", "n/a", "na", "none"}
+# A table about the model's speed, or one measured on Tenstorrent hardware or by this harness, is not the authors' report.
+MEASURED_HERE = re.compile(r"measured|reproduc|tenstorrent|blackhole|wormhole|quietbox|orchard|\bp[0-9]{3}x?[0-9]*\b|"
+                           r"tok(?:en)?s?\s*/\s*s|tokens per second", re.I)
+GENERIC_FIRST = {"", "benchmark", "benchmarks", "metric", "metrics", "task", "tasks", "dataset", "datasets", "eval",
+                 "evals", "evaluation", "test", "name"}
+MODEL_FIRST = {"model", "models", "name", "system", "method", "variant"}
+GENERIC_SCORE = {"score", "scores", "result", "results", "reported"}
+# Headers of columns that say what a row measures. They belong to the row's name (a CER row is not a WER row).
+LABEL_HEADERS = {"benchmark", "benchmarks", "metric", "metrics", "task", "tasks", "dataset", "datasets", "category", "split",
+                 "shots", "shot", "nshots", "unit", "testset", "setting", "subset", "language", "measure", "suite"}
+
+
+class UnsupportedYaml(Exception):
+    pass
+
+
+def _norm(text: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", text.lower())
+
+
+def _clean_cell(text: str) -> str:
+    """A table cell without its markdown wrapping: links keep their text, emphasis and code marks are removed."""
+    text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", text.strip())
+    for _ in range(2):
+        text = text.strip()
+        for mark in ("**", "__", "`", "*", "_"):
+            if len(text) > 2 * len(mark) and text.startswith(mark) and text.endswith(mark):
+                text = text[len(mark):-len(mark)]
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _plain_number(text: str) -> bool:
+    if not PLAIN_NUMBER.match(text):
+        return False
+    try:
+        return math.isfinite(float(text.rstrip("%")))
+    except (ValueError, OverflowError):
+        return False
+
+
+def _quote(text: str) -> str:
+    return text.strip()[:MAX_QUOTE]
+
+
+class _Rows:
+    """The rows found so far, in order, with the checks every row passes however it was read."""
+
+    def __init__(self, model_id: str):
+        base = model_id.split("@")[0]
+        self.names = {_norm(base), _norm(base.split("/")[-1])} - {""}
+        self.rows: list[dict] = []
+        self.skipped: list[dict] = []
+        self.dropped = 0
+        self.other_model_rows = 0
+        self.seen: set[str] = set()
+
+    def is_model(self, label: str) -> bool:
+        return _norm(_clean_cell(label)) in self.names
+
+    def skip(self, reason: str, line: int, text: str) -> None:
+        if len(self.skipped) >= MAX_SKIPPED:
+            self.dropped += 1
+        else:
+            self.skipped.append({"reason": reason, "line": line, "text": _quote(text)})
+
+    def add(self, name: str, value: str, kind: str, line: int, text: str, *, heading: str = "", extra_note: str = "",
+            alt_name: str = "") -> None:
+        name = re.sub(r"\s+", " ", name).strip()
+        if not name:
+            return self.skip("the row has no name", line, text)
+        if MEASURED_HERE.search(name) or MEASURED_HERE.search(heading):
+            return self.skip("looks like a number measured on Tenstorrent hardware or by this harness (speed, a board, "
+                             "or a heading that says so), not the authors' report", line, text)
+        if len(name) > MAX_REPORTED_NAME:
+            return self.skip(f"the name is too long (over {MAX_REPORTED_NAME} characters)", line, text)
+        if len(value) > MAX_REPORTED_VALUE:
+            return self.skip(f"the value is too long (over {MAX_REPORTED_VALUE} characters)", line, text)
+        if name in self.seen and alt_name and alt_name not in self.seen:
+            name = alt_name
+        if name in self.seen:
+            return self.skip(f"{name!r} appears twice; the first one is kept", line, text)
+        if len(self.rows) >= MAX_REPORTED_ROWS:
+            return self.skip(f"over the {MAX_REPORTED_ROWS}-row cap of reported-results.json", line, text)
+        self.seen.add(name)
+        note = f"model card {'model-index' if kind == 'model-index' else 'table'}, line {line}" + extra_note
+        self.rows.append({"name": name, "value": value, "note": note[:MAX_REPORTED_NOTE],
+                          "extracted_from": {"kind": kind, "line": line, "text": _quote(text)}})
+
+
+# ---- the model-index block of the front matter ------------------------------------------------------------------------
+
+_KEY = re.compile(r"""^(?P<key>"[^"]*"|'[^']*'|[^\s'"\[{&*!|>#-][^:#]*?|-[^\s:][^:]*?)\s*:(?:\s+(?P<rest>.*))?$""")
+
+
+def _scalar(text: str) -> str:
+    text = text.strip()
+    if text[:1] in "[{&*!|>%@`":
+        raise UnsupportedYaml(f"a value starting with {text[:1]!r}")
+    if text[:1] in "'\"":
+        quote = text[0]
+        end = text.find(quote, 1)
+        after = text[end + 1:].strip() if end > 0 else "x"
+        if end < 0 or (after and not after.startswith("#")):
+            raise UnsupportedYaml("a quoted value that does not end on its line")
+        return text[1:end]
+    return re.sub(r"\s+#.*$", "", text).strip()
+
+
+def _tokens(lines: list[tuple[int, str]]) -> list[tuple[int, int, str]]:
+    out = []
+    for number, raw in lines:
+        if "\t" in raw[:len(raw) - len(raw.lstrip())]:
+            raise UnsupportedYaml("a tab in the indentation")
+        body = raw.strip()
+        if not body or body.startswith("#"):
+            continue
+        out.append((number, len(raw) - len(raw.lstrip(" ")), body))
+        if len(out) > MAX_YAML_LINES:
+            raise UnsupportedYaml("more lines than the limit")
+    return out
+
+
+def _is_dash(text: str) -> bool:
+    return text == "-" or text.startswith("- ")
+
+
+def _parse_yaml(toks, i, indent, depth):
+    if depth > MAX_YAML_DEPTH:
+        raise UnsupportedYaml("nested deeper than the limit")
+    return (_parse_seq if _is_dash(toks[i][2]) else _parse_map)(toks, i, indent, depth)
+
+
+def _child(toks, i, indent, depth):
+    """The value of a `key:` or `-` that has nothing after it: a block on the next lines (a sequence may sit at the key's own
+    indent), or an empty value."""
+    if i < len(toks):
+        _, n_indent, n_text = toks[i]
+        if n_indent > indent or (n_indent == indent and _is_dash(n_text)):
+            return _parse_yaml(toks, i, n_indent, depth + 1)
+    return None, i
+
+
+def _parse_seq(toks, i, indent, depth):
+    items = []
+    while i < len(toks) and toks[i][1] == indent and _is_dash(toks[i][2]):
+        line, _, text = toks[i]
+        rest = text[1:].lstrip()
+        if not rest:
+            item, i = _child(toks, i + 1, indent, depth)
+        elif _KEY.match(rest):
+            inner = indent + (len(text) - len(rest))
+            toks = toks[:i] + [(line, inner, rest)] + toks[i + 1:]
+            item, i = _parse_map(toks, i, inner, depth + 1)
+        else:
+            item, i = ("s", _scalar(rest), line), i + 1
+        items.append(item)
+    if i < len(toks) and toks[i][1] > indent:
+        raise UnsupportedYaml(f"line {toks[i][0]} is indented in a way this reader does not follow")
+    return items, i
+
+
+def _parse_map(toks, i, indent, depth):
+    out = {}
+    while i < len(toks) and toks[i][1] == indent and not _is_dash(toks[i][2]):
+        line, _, text = toks[i]
+        m = _KEY.match(text)
+        if not m:
+            raise UnsupportedYaml(f"line {line} is not a key")
+        key = m.group("key").strip("'\"")
+        rest = (m.group("rest") or "").strip()
+        if not rest or rest.startswith("#"):
+            node, i = _child(toks, i + 1, indent, depth)
+        else:
+            node, i = ("s", _scalar(rest), line), i + 1
+        out[key] = node
+    if i < len(toks) and toks[i][1] > indent:
+        raise UnsupportedYaml(f"line {toks[i][0]} is indented in a way this reader does not follow")
+    return out, i
+
+
+def _text(node) -> str:
+    return node[1] if isinstance(node, tuple) and node[0] == "s" else ""
+
+
+def _front_matter_lines(lines: list[str]) -> list[tuple[int, str]]:
+    if not lines or lines[0].strip() != "---":
+        return []
+    for k in range(1, len(lines)):
+        if lines[k].strip() == "---":
+            return [(n + 1, lines[n]) for n in range(1, k)]
+    return []
+
+
+def _read_model_index(lines: list[str], rows: _Rows) -> None:
+    fm = _front_matter_lines(lines)
+    start = next((k for k, (_, raw) in enumerate(fm) if re.match(r"^model-index:\s*(#.*)?$", raw)), None)
+    if start is None:
+        return
+    block = []
+    for number, raw in fm[start + 1:]:
+        if raw.strip() and not raw.startswith((" ", "\t", "-", "#")):
+            break                                           # the next top-level key
+        block.append((number, raw))
+    try:
+        toks = _tokens(block)
+        if not toks:
+            return
+        tree, _ = _parse_yaml(toks, 0, toks[0][1], 0)
+    except (UnsupportedYaml, RecursionError) as exc:
+        rows.skip(f"the model-index block was not read ({exc}); this reader follows plain block YAML only",
+                  fm[start][0], "model-index:")
+        return
+    for entry in tree if isinstance(tree, list) else []:
+        if not isinstance(entry, dict) or not isinstance(entry.get("results"), list):
+            continue
+        for result in entry["results"]:
+            if not isinstance(result, dict) or not isinstance(result.get("metrics"), list):
+                continue
+            dataset = result.get("dataset") if isinstance(result.get("dataset"), dict) else {}
+            data_name = _text(dataset.get("name")) or _text(dataset.get("type")) or "unnamed dataset"
+            where = ", ".join(x for x in (_text(dataset.get("config")), _text(dataset.get("split"))) if x)
+            src = result.get("source") if isinstance(result.get("source"), dict) else entry.get("source")
+            url = _text(src.get("url")) if isinstance(src, dict) else ""
+            extra = f"; the card's own source: {url}" if url.startswith("https://") and len(url) <= 120 else ""
+            for metric in result["metrics"]:
+                if not isinstance(metric, dict):
+                    continue
+                kind = _text(metric.get("name")) or _text(metric.get("type")) or "metric"
+                name = f"{data_name} / {kind}"
+                node = metric.get("value")
+                value, line = (_text(node), node[2]) if isinstance(node, tuple) else ("", fm[start][0])
+                text = f"value: {value}" if value else f"{name}: no value"
+                if not _plain_number(value):
+                    rows.skip(f"the value is not a plain number ({value or 'missing'})", line, text)
+                    continue
+                rows.add(name, value, "model-index", line, text, extra_note=extra,
+                         alt_name=f"{name} ({where})" if where else "")
+
+
+# ---- tables ---------------------------------------------------------------------------------------------------------
+
+class _Table:
+    def __init__(self, line: int, heading: str):
+        self.line, self.heading = line, heading
+        self.rows: list[tuple[int, str, list[str]]] = []      # (line, quoted text, cells)
+
+
+def _split_row(line: str) -> list[str]:
+    body = line.strip()
+    if body.startswith("|"):
+        body = body[1:]
+    if body.endswith("|") and not body.endswith("\\|"):
+        body = body[:-1]
+    return [c.replace("\\|", "|") for c in re.split(r"(?<!\\)\|", body)]
+
+
+def _markdown_tables(lines: list[str]) -> list[_Table]:
+    out, heading, i = [], "", 0
+    while i < len(lines):
+        raw = lines[i]
+        if re.match(r"^\s{0,3}#{1,6}\s", raw):
+            heading = raw.strip()
+        if raw.lstrip().startswith("|") and i + 1 < len(lines) and "|" in lines[i + 1] \
+                and re.match(r"^\s*\|?[\s:|-]*-[\s:|-]*\|?\s*$", lines[i + 1]):
+            table = _Table(i + 1, heading)
+            table.rows.append((i + 1, raw, _split_row(raw)))
+            i += 2
+            while i < len(lines) and lines[i].lstrip().startswith("|"):
+                table.rows.append((i + 1, lines[i], _split_row(lines[i])))
+                i += 1
+            out.append(table)
+            continue
+        i += 1
+    return out
+
+
+class _HtmlTables(HTMLParser):
+    """Collects the cells of every outermost <table> in the text it is fed. Script and style content is dropped."""
+
+    def __init__(self, line_offset: int, heading: str):
+        super().__init__(convert_charrefs=True)
+        self.line_offset, self.heading, self.tables = line_offset, heading, []
+        self.depth = self.skip = 0
+        self.cur_row = self.cur_cell = None
+        self.row_line = 0
+        self.table = None
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "table":
+            self.depth += 1
+            if self.depth == 1:
+                self.table = _Table(self.getpos()[0] + self.line_offset, self.heading)
+        elif self.depth == 1 and tag == "tr":
+            self.cur_row, self.row_line = [], self.getpos()[0] + self.line_offset
+        elif self.depth == 1 and tag in ("td", "th") and self.cur_row is not None:
+            self.cur_cell = []
+        elif tag in ("script", "style"):
+            self.skip += 1
+        elif self.cur_cell is not None:
+            self.cur_cell.append(" ")                        # elements inside a cell are separate words
+
+    def handle_endtag(self, tag):
+        if tag in ("script", "style"):
+            self.skip = max(0, self.skip - 1)
+        elif self.depth == 1 and tag in ("td", "th") and self.cur_cell is not None and self.cur_row is not None:
+            self.cur_row.append(re.sub(r"\s+", " ", "".join(self.cur_cell)).strip())
+            self.cur_cell = None
+        elif self.depth == 1 and tag == "tr" and self.cur_row is not None:
+            self.table.rows.append((self.row_line, "", self.cur_row))
+            self.cur_row = None
+        elif tag == "table" and self.depth:
+            self.depth -= 1
+            if self.depth == 0 and self.table is not None:
+                self.tables.append(self.table)
+                self.table = None
+
+    def handle_data(self, data):
+        if self.cur_cell is not None and not self.skip:
+            self.cur_cell.append(data)
+
+
+def _html_tables(text: str, lines: list[str], headings: list[tuple[int, str]]) -> list[_Table]:
+    out = []
+    for m in re.finditer(r"<table\b.*?</table\s*>", text, re.S | re.I):
+        offset = text.count("\n", 0, m.start())
+        heading = next((h for n, h in reversed(headings) if n <= offset + 1), "")
+        parser = _HtmlTables(offset, heading)
+        try:
+            parser.feed(m.group(0))
+            parser.close()
+        except Exception:                                  # a malformed table is skipped, never fatal
+            continue
+        for table in parser.tables:
+            # a row's quote is the card's own text on its first line (a row may span lines)
+            table.rows = [(n, lines[n - 1].strip()[:MAX_QUOTE] if 0 < n <= len(lines) else "", c) for n, _, c in table.rows]
+            out.append(table)
+    return out
+
+
+def _read_table(table: _Table, rows: _Rows) -> None:
+    if not table.rows:
+        return
+    head = [_clean_cell(c) for c in table.rows[0][2]]
+    data = [(n, q, cells) for n, q, cells in table.rows[1:]
+            if len(cells) >= 2 and any(c.strip() for c in cells[1:])]      # a one-cell (colspan) row is a section label
+    first = _norm(head[0]) if head else ""
+    width = len(head)
+    candidates = []                                                         # (name, cell, line, text, column)
+    model_rows = [d for d in data if rows.is_model(d[2][0])]
+    prefix = "" if first in {_norm(x) for x in GENERIC_FIRST} else f"{head[0]}: "
+    label_cols = [j for j in range(1, width) if _norm(head[j]) in LABEL_HEADERS]
+
+    def misaligned(n, q, cells) -> bool:
+        """Merged cells (rowspan, colspan) or missing ones shift the columns, so a value could come from the wrong one."""
+        if len(cells) == width:
+            return False
+        rows.skip(f"the row has {len(cells)} cells and the header has {width}: merged or missing cells shift the columns, "
+                  "so no value is taken from it", n, q or " | ".join(cells))
+        return True
+
+    if model_rows:
+        n, q, cells = model_rows[0]
+        if not misaligned(n, q, cells):
+            candidates += [(head[j], cells[j], n, q, j) for j in range(1, width) if head[j] and j not in label_cols]
+        rows.other_model_rows += len(data) - len(model_rows)
+    else:
+        col = next((j for j in range(1, width) if rows.is_model(head[j])), None)
+        if col is None and width == 2 and _norm(head[1]) in {_norm(x) for x in GENERIC_SCORE}:
+            col = 1
+        if col is not None:
+            before = [j for j in label_cols if j < col]
+            for n, q, cells in data:
+                if misaligned(n, q, cells):
+                    continue
+                parts = [_clean_cell(cells[0])] + [_clean_cell(cells[j]) for j in before]
+                name = " / ".join(p for p in parts if p)
+                if name:
+                    candidates.append(((name if before else prefix + name), cells[col], n, q, col))
+        elif first in {_norm(x) for x in MODEL_FIRST}:
+            rows.other_model_rows += len(data)                              # a comparison table with no row for this model
+    cooked = []
+    for name, cell, n, q, col in candidates:
+        value = _clean_cell(cell)
+        if value.lower() in NO_RESULT:
+            continue
+        if not _plain_number(value):
+            rows.skip(f"the cell is not a plain number ({value[:40]}); numbers with notes, ranges, units or "
+                      "footnote marks are not read", n, q or value)
+            continue
+        cooked.append((name, value, n, q, col))
+    for col in sorted({c[4] for c in cooked}):                              # percent and plain values in one column
+        group = [c for c in cooked if c[4] == col]
+        if len({v.endswith("%") for _, v, _, _, _ in group}) > 1:
+            for name, value, n, q, _ in group:
+                rows.skip("percent and plain numbers are mixed in one column, so the scale is not stated", n, q or value)
+            cooked = [c for c in cooked if c[4] != col]
+    for name, value, n, q, _ in sorted(cooked, key=lambda c: (c[2], c[4])):
+        rows.add(name, value, "table", n, q or f"{name}: {value}", heading=" ".join([table.heading] + head))
+
+
+def extract_reported(readme: str, model_id: str) -> dict:
+    """The scores a model card reports for the model, as a draft: {rows, skipped, other_model_rows, truncated, ...}. See above."""
+    truncated = len(readme) > MAX_README_BYTES
+    lines = readme[:MAX_README_BYTES].split("\n")
+    rows = _Rows(model_id)
+    _read_model_index(lines, rows)
+    plain, fenced = [], False
+    for raw in lines:                                       # a fenced block is an example, not the card's table
+        if raw.lstrip().startswith(("```", "~~~")):
+            fenced = not fenced
+            plain.append("")
+        else:
+            plain.append("" if fenced else raw)
+    headings = [(n + 1, raw.strip()) for n, raw in enumerate(plain) if re.match(r"^\s{0,3}#{1,6}\s", raw)]
+    tables = _markdown_tables(plain) + _html_tables("\n".join(plain), plain, headings)
+    tables.sort(key=lambda t: t.line)
+    for k, table in enumerate(tables):
+        if k >= MAX_TABLES:
+            rows.skip(f"only the first {MAX_TABLES} tables are read (the table limit); {len(tables) - k} more were not",
+                      table.line, "")
+            break
+        _read_table(table, rows)
+    return {"rows": rows.rows, "skipped": rows.skipped, "skipped_dropped": rows.dropped,
+            "other_model_rows": rows.other_model_rows, "truncated": truncated, "tables_read": min(len(tables), MAX_TABLES)}
+
+
 def eos_ids(gen: dict) -> list[int]:
     """The integer stop token ids of a generation config's top-level eos_token_id (an int or a list of ints).
     Empty when the key is absent or holds anything else: the bundle's serving code reads it only there."""
@@ -1978,6 +2424,47 @@ def hazards(model_id: str, nearest_id: str, t: dict, f: dict, g: dict, disk: dic
     return out
 
 
+REPORTED_DRAFT = "reported-results.draft.json"
+
+
+def reported_draft(model_dir: Path, model_id: str, ev) -> list[dict]:
+    """Write evidence/reported-results.draft.json from the model card's own tables and model-index, and return the one
+    hazard that says nobody has confirmed those scores. Nothing is written when the card has no README or nothing in it
+    reads as a table or model-index entry. The draft is not reported-results.json: a person accepts rows with
+    `tt-orchard reported accept`, and only accepted rows reach a package card."""
+    readme = model_dir / "README.md"
+    try:
+        with open(readme, "rb") as fh:
+            raw = fh.read(MAX_README_BYTES + 1)
+    except OSError:
+        return []
+    res = extract_reported(raw.decode("utf-8", errors="replace"), model_id)
+    if not res["rows"] and not res["skipped"]:
+        return []
+    repo, _, rev = model_id.partition("@")
+    res["truncated"] = bool(res["truncated"] or len(raw) > MAX_README_BYTES)
+    write_json(REPORTED_DRAFT, {
+        "model": model_id,
+        "source": f"the {repo} model card (README.md{', revision ' + rev[:12] if rev else ''})",
+        "extractor": 1, "readme_sha256": sha256_text(raw.decode("utf-8", errors="replace")),
+        **res,
+        "draft": ("Read from the model card by delta_triage.py. These are the authors' claims, quoted with their line. "
+                  "Nobody has confirmed them. A row reaches a package card only after `tt-orchard reported accept`."),
+    })
+    n, left = len(res["rows"]), len(res["skipped"]) + res["skipped_dropped"]
+    if not n:
+        return []
+    kinds = collections.Counter(r["extracted_from"]["kind"] for r in res["rows"])
+    plural = lambda k, one, many: one if k == 1 else many      # noqa: E731
+    return [{"area": "other", "evidence": [ev(REPORTED_DRAFT)],
+             "finding": (f"The model card reports {n} score{plural(n, '', 's')} for this model ({kinds['model-index']} from its "
+                         f"model-index, {kinds['table']} from tables), quoted with their lines in evidence/{REPORTED_DRAFT}. "
+                         "These are the authors' claims and nobody has confirmed them. No package card shows one until a "
+                         "person runs `tt-orchard reported accept RUN` for chosen rows."
+                         + (f" {left} more {plural(left, 'entry was', 'entries were')} left out, each with its reason in the draft."
+                            if left else ""))}]
+
+
 def main() -> int:
     cfg = load_config()
     run_dir = os.path.realpath(cfg["run_dir"])
@@ -2128,6 +2615,7 @@ def main() -> int:
                                              + ", ".join(f"{x['file']} (sha256 {x['sha256'][:12]})" for x in code)
                                              + ". It was not run. Read it before any run imports it, and "
                                              "record the hash of the file a check used.")})
+    delta["hazards"].extend(reported_draft(model_dir, model_id, ev))
     research = base_research(cfg, nearest_id, cls)
     if research is not None:
         delta["base_research"] = research
