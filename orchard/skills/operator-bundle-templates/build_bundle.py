@@ -603,12 +603,16 @@ def graft_section(run: Run, redact: Redactor) -> list[str]:
         lines.append(f"| {name} | {fmt(safe)} | {fmt(var)} | {label} | {where} |")
     if is_number(nums.get("speedup")):
         lines.append(f"| Decode speed ratio (grafted over safe) | - | {fmt(nums['speedup'])} | measured | {where} |")
+    rate_safe, rate_var = nums.get("safe_drafter_accept_rate"), nums.get("variant_drafter_accept_rate")
+    lines.append(f"| Drafter acceptance (accepted over drafted tokens) | {fmt(rate_safe) if is_number(rate_safe) else '-'} | {fmt(rate_var)} | "
+                 f"{'measured' if is_number(rate_var) else 'TODO'} | {where} |")
     th = d.get("thresholds") if isinstance(d.get("thresholds"), dict) else {}
     if th:
         lines += ["", "The graft is kept when the variant served, was coherent, agreed with the CPU reference at least as well as stage 2's bar "
                   f"({fmt(th.get('top1_min'))}), lost no more than {fmt(th.get('top1_margin'))} against the safe run, and decoded at least "
-                  f"{fmt(th.get('min_speedup'))} times as fast. These values are provisional (`orchard/defaults.py`). Drafter acceptance was "
-                  "not measured."]
+                  f"{fmt(th.get('min_speedup'))} times as fast. These values are provisional (`orchard/defaults.py`). "
+                  + ("Drafter acceptance is shown for information only and does not enter the choice."
+                     if is_number(rate_var) else "Drafter acceptance was not measured.")]
     return lines
 
 
@@ -661,9 +665,12 @@ def graft_hazard_dealt_with(run: Run) -> tuple[bool, list[str]]:
     nums = d.get("numbers") if isinstance(d.get("numbers"), dict) else {}
     speed = (f" Decode speed {fmt(nums.get('safe_decode_tok_s'))} tokens/s safe, {fmt(nums.get('variant_decode_tok_s'))} grafted." if
              is_number(nums.get("safe_decode_tok_s")) or is_number(nums.get("variant_decode_tok_s")) else "")
+    rate = nums.get("variant_drafter_accept_rate")
+    accept = (f"The grafted drafter's acceptance rate in the trial was {fmt(rate)} (accepted over drafted tokens)." if is_number(rate)
+              else "The drafter's acceptance rate was not measured.")
     return True, [f"Stage 2's graft trial measured both configurations and {'chose the graft' if want else 'kept the safe configuration'}; "
                   f"what was built after it has {follows}.{speed} Evidence: `stages/2/graft-decision.json`, "
-                  "`stages/2/graft-trial/trial-result.json`. The drafter's acceptance rate was not measured."]
+                  f"`stages/2/graft-trial/trial-result.json`. {accept}"]
 
 
 def chat_template_sentence(rec: dict, text) -> str | None:
