@@ -103,6 +103,11 @@ def speed_summary(record: dict) -> dict:
         return rounded(statistics.median(vals), key) if vals else None
     drafter = record.get("drafter")
     drafter = ({k: drafter.get(k) for k in DRAFTER_KEYS} if isinstance(drafter, dict) else None)
+    # measure_serving's `drafter_acceptance` is the authoritative rate (the /metrics counters win over the log). A server with counters and no
+    # DFlash2 log lines has no `drafter` record, so the rate alone makes one.
+    rate = record.get("drafter_acceptance")
+    if isinstance(rate, (int, float)) and not isinstance(rate, bool) and 0 <= rate <= 1:
+        drafter = {**(drafter or {k: None for k in DRAFTER_KEYS}), "accept_rate": rate}
     return {"decode_tok_s": med("decode_tok_s"), "ttft_s": med("ttft_s"), "server_ready_s": record.get("server_ready_s"), "drafter": drafter,
             "per_prompt": per, "prompt_set_sha256": record.get("prompt_set_sha256"), "reps": record.get("reps")}
 

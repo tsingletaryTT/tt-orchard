@@ -212,3 +212,22 @@ def test_measure_serving_runs_as_a_script_the_way_the_graft_trial_starts_it(tmp_
 
 def test_the_scripts_copy_of_the_key_list_equals_the_modules():
     assert gt.DRAFTER_KEYS == dl.SUMMARY_KEYS
+
+
+def test_a_metrics_only_rate_reaches_the_trial_summary_and_the_decision():
+    """A server with /metrics counters and no DFlash2 log lines has `drafter_acceptance` but no `drafter` record."""
+    rec = {**record(None), "drafter_acceptance": 0.5}
+    s = gt.speed_summary(rec)
+    assert s["drafter"]["accept_rate"] == 0.5
+    d = decide(_trial(var_drafter=s["drafter"]), safe_top1=0.96875)
+    assert d["numbers"]["variant_drafter_accept_rate"] == 0.5
+
+
+def test_the_authoritative_rate_overrides_the_log_rate_in_the_summary():
+    s = gt.speed_summary({**record(DRAFTER), "drafter_acceptance": 0.5})
+    assert s["drafter"]["accept_rate"] == 0.5 and s["drafter"]["iters"] == 800
+
+
+def test_an_out_of_range_or_boolean_rate_is_ignored_by_the_summary():
+    for bad in (True, 1.5, -1, "0.5"):
+        assert gt.speed_summary({**record(None), "drafter_acceptance": bad})["drafter"] is None
