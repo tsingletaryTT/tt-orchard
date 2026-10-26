@@ -67,15 +67,22 @@ def _repo(model_id: str) -> str:
 
 
 def stage_drafter_off(stage: Path) -> bool:
-    """True when the stage's own run.sh exports an empty QWEN36_DRAFTER (the last such line wins, as in bash; a comment does not
-    count). A stage with no run.sh (a container package) is taken as not off."""
+    """True when the stage was served with the drafter off. A bundle stage says so in its own run.sh (an empty QWEN36_DRAFTER export; the
+    last such line wins, as in bash; a comment does not count). A container stage has no run.sh, so the `serving.drafter` of its
+    evidence/swap-check.json is read ("off" is what the container template records from the docker command it ran). Anything else is False."""
+    stage = Path(stage)
     try:
-        text = (Path(stage) / "run.sh").read_text(encoding="utf-8")
+        text = (stage / "run.sh").read_text(encoding="utf-8")
     except OSError:
+        text = None
+    if text is not None:
+        values = [m.group(1).strip().strip("\"'") for ln in text.splitlines()
+                  if (m := re.match(r"\s*export\s+QWEN36_DRAFTER=(.*)$", ln))]
+        return bool(values) and values[-1] == ""
+    try:
+        return json.loads((stage / "evidence" / "swap-check.json").read_text(encoding="utf-8"))["serving"]["drafter"] == "off"
+    except (OSError, ValueError, KeyError, TypeError):
         return False
-    values = [m.group(1).strip().strip("\"'") for ln in text.splitlines()
-              if (m := re.match(r"\s*export\s+QWEN36_DRAFTER=(.*)$", ln))]
-    return bool(values) and values[-1] == ""
 
 
 PATH_KEYS = ("bundle_dir", "base_snapshot", "new_snapshot", "tt_cache", "hf_home", "operator_home")

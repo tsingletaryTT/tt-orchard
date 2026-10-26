@@ -415,6 +415,9 @@ def main() -> int:
     missing = [k for k in REQUIRED if cfg.get(k) in (None, "")]
     if missing:
         fail(f"swap_config.json is missing {missing}")
+    if "drafter" in cfg and cfg["drafter"] != "off":
+        fail(f"swap_config.json's drafter must be \"off\" when present, not {cfg['drafter']!r}")
+    forced_off = cfg.get("drafter") == "off"     # a suite control mirroring a run that was served with the drafter off
     label = os.environ.get("ORCHARD_TEST_LABEL", "")
     try:
         ids = [int(i) for i in os.environ.get("ORCHARD_DEVICE_IDS", "").split(",")]
@@ -446,8 +449,8 @@ def main() -> int:
                                 tt_cache=cache, hf_dir=hf_dir,
                                 name=f"orchard-{cfg['chips']}chip-{cfg['port']}", label=label,
                                 device_ids=ids, port=int(cfg["port"]), blobs=blob_dirs(model_dir),
-                                drafter_off=(has_mtp_tensors(model_dir) is False or vocabulary_differs(STAGE_DIR)),
-                                explicit_off=vocabulary_differs(STAGE_DIR))
+                                drafter_off=(has_mtp_tensors(model_dir) is False or vocabulary_differs(STAGE_DIR) or forced_off),
+                                explicit_off=vocabulary_differs(STAGE_DIR) or forced_off)
     except EditError as exc:
         fail(str(exc))
     evidence = STAGE_DIR / "evidence"
