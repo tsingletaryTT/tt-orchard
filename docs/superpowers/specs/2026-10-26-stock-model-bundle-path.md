@@ -11,7 +11,10 @@ serves a model. The later stages need a package: stage 4 tests 2 and 4 chips thr
 packages and boot-checks one.
 
 PR 78 (issue 61, branch `full-port-pilot-design`) adds the `stock-runtime` class. Its stage 2 runs tt-transformers' own token
-accuracy test from a copy of the host tree's `models/` directory and compares with the stage 1 CPU reference. It builds no
+accuracy test from a copy of the host tree's `models/` directory. It makes its own CPU reference: at the head of that branch
+`stock_check.py`'s `ensure_reference()` runs tt-transformers' `generate_reference_hf.py` on the run's snapshot, and the accuracy
+test consumes the resulting `.refpt` file. That reference does not share stage 1's prompts or token sequence, so a bundle check
+and the demo check compare with different references unless the bundle check is given the same `.refpt` tokens. It builds no
 package, and its stages 4 to 7 are skipped with a stated reason. The two pieces fit together:
 
 | | PR 78 `stock-runtime` | Issue 62 |
