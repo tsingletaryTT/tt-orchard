@@ -1534,15 +1534,26 @@ makes one by itself.
 
 ```bash
 tt-orchard suite-control prepare --stage-dir ~/orchard-runs/<run>/stages/2    # builds stages/2/suite-control/, opens no chip
-tt-orchard suite-control run     --stage-dir ~/orchard-runs/<run>/stages/2    # the same, then serves it under one gozer lease
+tt-orchard suite-control run     --stage-dir ~/orchard-runs/<run>/stages/2    # the same, then takes a lease, serves, releases
+tt-orchard suite-control run     --stage-dir ~/orchard-runs/<run>/stages/2 --ticket <ticket>   # after a queued run
 ```
 
-`prepare` copies the shipped scripts into `suite-control/`, writes a config that names the nearest model as the model to serve
-(with its own tensor cache, `<tt_cache>-control`, and the drafter off when the stage's own `run.sh` serves with the drafter off),
-runs the shipped `prepare_swap.py` there and prints the `gozer run` command. `run` also runs that command. If gozer queues the
-request (exit 3 here), wait for the ticket with `gozer wait` and run the printed command. The result is
+`prepare` copies the shipped scripts into `suite-control/` (a container stage also gets `serve_and_compare.py`, which its script
+imports), writes a config that names the nearest model as the model to serve, and runs the shipped `prepare_swap.py` there. The
+config has its own tensor cache (`<tt_cache>-control`), absolute paths (a relative path in the stage's config is read against the run
+directory), the chip count of the bundle's or package's own metadata (`--chips` must agree with it) and the drafter off when the stage
+was served with it off (its `run.sh`, or for a container its `evidence/swap-check.json`). It prints the launcher command
+(`python -m orchard.suite_control launch --control-dir ...`) as a `gozer run` line.
+
+`run` takes a lease with `gozer acquire`, runs the launcher under it and releases the lease. If gozer queues the request, `run` exits 3,
+prints the ticket and its position, starts nothing and cancels nothing. Run it again with `--ticket <ticket>`: that waits for the
+ticket with `gozer wait`, which takes the lease when it is granted, and then runs and releases it. `run` never starts a `gozer run`,
+because a new `gozer run` made while its own lease is held would queue behind that lease. The launcher reads the leased chips from
+`TT_VISIBLE_DEVICES`, sets `ORCHARD_DEVICE_IDS` and a control-specific `ORCHARD_TEST_LABEL` for the container template, and when the
+serve script ends for any reason, SIGTERM included, it stops the servers it started and removes its labelled containers and checks
+that they are gone (exit 4 when it cannot confirm). The result is
 `suite-control/evidence/swap-check.json`. To use it, put `"suite_control": "stages/2/suite-control/evidence/swap-check.json"` in
-the stage's `swap_config.json` before the stage's test runs. `--port` and `--chips` override the stage's values.
+the stage's `swap_config.json` before the stage's test runs. `--port` overrides the stage's port.
 Not built: a supervisor step that makes the control before stage 2's test.
 
 ## 6. Lessons that will bite you

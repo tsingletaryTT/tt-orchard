@@ -123,7 +123,7 @@ def test_a_container_package_uses_the_container_serve_script(prep):
     assert sc.scripts_for({"bundle_dir": "b"}) == ("prepare_swap.py", "serve_and_compare.py")
     calls = []
     out = sc.prepare(prep["stage"], orchard_dir=CHECKOUT, run=lambda argv, **k: calls.append(argv) or ok_run())
-    assert out["serve"][-1].endswith("serve_and_compare_container.py") and out["chips"] == 4
+    assert out["serve_script"].endswith("serve_and_compare_container.py") and out["chips"] == 4
     assert (Path(out["control_dir"]) / "serve_and_compare_container.py").is_file()
     assert calls and calls[0][1].endswith("prepare_swap.py")
 
@@ -181,10 +181,10 @@ def test_the_lease_command_is_one_gozer_run_with_the_serve_script(prep):
     assert "reset" not in argv and "release" not in argv
 
 
-def run_main(prep, *args, call=None):
+def run_main(prep, *args):
     out = io.StringIO()
-    code = sc.main(["--stage-dir", str(prep["stage"]), "--orchard-dir", str(CHECKOUT), *args], out=out,
-                   call=call or (lambda *a, **k: pytest.fail("a chip command ran")))
+    code = sc.main([args[0], "--stage-dir", str(prep["stage"]), "--orchard-dir", str(CHECKOUT), *args[1:]], out=out,
+                   gozer_call=lambda *a, **k: pytest.fail("gozer was called"), spawn=lambda *a, **k: pytest.fail("a chip command ran"))
     return code, out.getvalue()
 
 
@@ -193,22 +193,6 @@ def test_prepare_prints_the_command_and_runs_nothing_on_a_chip(prep):
     assert code == 0
     printed = json.loads(text)
     assert printed["gozer"][:2] == ["gozer", "run"] and printed["suite_control"].endswith("swap-check.json")
-
-
-def test_run_calls_gozer_in_the_control_directory_and_returns_its_status(prep):
-    seen = {}
-
-    def call(argv, cwd=None):
-        seen.update(argv=argv, cwd=cwd)
-        return 0
-    code, _ = run_main(prep, "run", call=call)
-    assert code == 0 and seen["argv"][:2] == ["gozer", "run"] and seen["cwd"].endswith("suite-control")
-    assert run_main(prep, "run", call=lambda *a, **k: 7)[0] == 7
-
-
-def test_a_queued_request_exits_3_and_says_to_wait(prep, capsys):
-    code, _ = run_main(prep, "run", call=lambda *a, **k: 10)
-    assert code == 3 and "gozer wait" in capsys.readouterr().err
 
 
 def test_a_refusal_exits_2_without_calling_gozer(prep, capsys):
