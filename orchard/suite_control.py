@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -78,13 +79,33 @@ def stage_drafter_off(stage: Path) -> bool:
     return bool(values) and values[-1] == ""
 
 
-def control_config(cfg: dict, *, port=None, drafter_off=False) -> dict:
+PATH_KEYS = ("bundle_dir", "base_snapshot", "new_snapshot", "tt_cache", "hf_home", "operator_home")
+
+
+def run_dir_of(stage: Path) -> Path:
+    """The run directory of a stage directory: the parent of the last `stages` component (stages/2, stages/4/configs/N)."""
+    parts = Path(stage).resolve().parts
+    for i in range(len(parts) - 1, 0, -1):
+        if parts[i] == "stages":
+            return Path(*parts[:i])
+    raise ControlError(f"{stage} is not under a `stages` directory, so the run directory cannot be found")
+
+
+def _absolute(value, run_dir: Path) -> str:
+    """A path the stage's config holds, made absolute against the run directory (the control runs from suite-control/, so a relative path would
+    point somewhere else there)."""
+    p = Path(str(value)).expanduser()
+    return str(p if p.is_absolute() else (Path(run_dir) / p).resolve())
+
+
+def control_config(cfg: dict, *, run_dir, port=None, drafter_off=False) -> dict:
     """The stage's config with the nearest model as the model served. Raises ControlError for a config that cannot make one."""
     missing = [k for k in REQUIRED if cfg.get(k) in (None, "")]
     if missing:
         raise ControlError(f"the stage's swap_config.json has no {', '.join(missing)}")
     if not cfg.get("bundle_dir") and not cfg.get("package"):
         raise ControlError("the stage's swap_config.json names neither a bundle_dir nor a package")
+    cfg = {**cfg, **{k: _absolute(cfg[k], run_dir) for k in PATH_KEYS if cfg.get(k)}}
     if _repo(cfg["new_model_id"]) == _repo(cfg["nearest_model_id"]) or cfg["new_snapshot"] == cfg["base_snapshot"]:
         raise ControlError("this stage already serves the nearest model, so it is a control and has none of its own")
     out = {k: v for k, v in cfg.items() if k not in ("graft_mtp", "suite_control")}
@@ -111,7 +132,9 @@ def prepare(stage_dir, *, orchard_dir=CHECKOUT, port=None, chips=None, run=subpr
     if not isinstance(cfg, dict):
         raise ControlError(f"{stage / 'swap_config.json'} is not a JSON object")
     off = stage_drafter_off(stage)
-    ccfg = control_config(cfg, port=port, drafter_off=off)
+    run_dir = Path(cfg["run_dir"]) if isinstance(cfg.get("run_dir"), str) and os.path.isabs(cfg["run_dir"]) else run_dir_of(stage)
+    ccfg = control_config(cfg, run_dir=run_dir, port=port, drafter_off=off)
+    ccfg["run_dir"] = str(run_dir)
     prepare_name, serve_name = scripts_for(cfg)
     templates = Path(orchard_dir) / TEMPLATES
     names = files_for(cfg)
