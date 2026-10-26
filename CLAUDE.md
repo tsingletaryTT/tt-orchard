@@ -2253,3 +2253,13 @@ under a lease; run T1 and T2 first; T3 is not started. The design note's section
 - T1 and T2 were not run: the coder on port 8011 was serving the kernel probe (`vllm:num_requests_running` was 1), so the replay waited, as instructed. T3 was not started.
 - Not done: the first number on a chip (tokens per second, top-1 and top-5 against the CPU reference); stage 4's per-board-count checks; a stage 8 section that shows the stock numbers
   (the generic table prints the flat fields only); the ticket `6673` was cancelled so that no unused lease is granted later.
+- Review of PR 78 (Copilot, second commit; five findings, all real, one commit each, a mutation table per code fix, 20 mutations all red after 2 survivors got tests):
+  (1) The reference: tt-transformers' accuracy test reads `<model name>.refpt`, and the name is shared by any organisation's copy, so a fine-tune matched through its base was
+  compared with the base's file from the tree. `stock_check.py` now always makes the reference on the CPU from the run's own snapshot (a record beside it names the model and
+  the snapshot; a second `prepare` reuses it only on a match, a failed generator leaves no stale file), `run` records `reference` (source, model, snapshot, sha256) in
+  `stock-check.json`, and `gate_stock_runtime` refuses a reference that is not generated, names another model, has no snapshot or hash, or (when stage 0 pins `@revision`)
+  names another revision. Cost: a CPU forward pass over 1,024 tokens per run (not timed). (2) A resume keeps the `stock_params` recorded in `run_start` (and adds none to a run
+  that started without), because the supervisor picks the stages from that entry and stage 2's draft reads the inputs. (3) README boards and the Blackhole fact are taken only from
+  the README row research matched for the same model id as the selected row (preflight and `stock_runtime.support_row`). (4) The stock path is not offered in lab mode: the
+  parameters directory is on this box and the lab runs its tests elsewhere. (5) The design note now says `write_file` confinement is one tool's rule, that shell commands and the host
+  tree are not protected by any mount, and that the scratch exception belongs in `Tools.target`, not the runner.

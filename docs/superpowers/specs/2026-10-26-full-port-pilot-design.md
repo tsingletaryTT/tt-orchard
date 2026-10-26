@@ -123,13 +123,18 @@ Default if the operator does not decide: keep the block. The block text already 
 
 ## 5. Question (b): what an unattended run may write
 
-Today an agent writes only inside its stage directory (the runner refuses other writes), and the supervisor never
-publishes or pushes. The upstream skills write to `models/autoports/<model>/` in a tt-metal checkout, which orchard
+Today the `write_file` tool writes only inside the agent's stage directory (`Tools.target` in `orchard/agent.py`). That is a
+restriction of one tool and not a filesystem protection: an agent's shell commands run as the operator, the command runner
+(`orchard/runner.py`) refuses named commands and not paths, and read-only mounts are not built (`orchard/agent.py` says so). The
+supervisor never publishes or pushes. The upstream skills write to `models/autoports/<model>/` in a tt-metal checkout, which orchard
 agents do not have.
 
 Proposal (default):
 
-- The host tree `~/tt-metal` stays read only. No stage edits, rebuilds or installs there.
+- The host tree `~/tt-metal` stays read only by convention and by checks, and nothing enforces it for shell commands. The template copies
+  from it and never writes to it; the stage 0 triage and the gate record its tag and whether it was dirty, so a change to it shows up
+  in the next run's evidence. Enforcing it (a read-only mount, or a different user for the agent's shell) is separate work and is not
+  built.
 - A stock-runtime run needs no tt-metal change. If a stage needs one (a model entry, a config), the agent writes it
   in `<run>/tt-metal-scratch/`, a copy of `models/` (tt_transformers and common are about 12 MB together) that is
   put in front of the host tree on `PYTHONPATH`. The kernels and the built `ttnn` come from the host build. A
@@ -140,10 +145,11 @@ Proposal (default):
 - No package, no push, no publish. Stage 7 stays skipped (it is for the weights-only path). The operator bundle
   gets the patch, the commit and dirty flag, and the measured numbers, and says in `RISKS.md` that a card built
   from this tree would come from an unpushed tree (the limit the Coder-Next spike already has).
-- The runner needs one change before this works: a write target under `tt-metal-scratch/` for stages 2 to 4 of this
-  class. The current rule that a path starting with `stages/` is run relative stays.
+- `write_file` needs one change before this works: a scoped exception in its path policy (`Tools.target`, not the command runner)
+  for `<run>/tt-metal-scratch/`, offered only to stages 2 to 4 of this class. The rule that a path starting with `stages/` is run
+  relative stays. Shell commands can already write there, so the exception only makes the tool match the shell.
 
-This is a decision for the operator (question 3). Nothing here was built.
+Decided by the operator (question 3, section 10) and built: see section 10.
 
 ## 6. Question (c): a measured gate per stage
 
