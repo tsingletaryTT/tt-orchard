@@ -13,6 +13,7 @@ interpreter, point PYTHONPATH at a virtualenv that has `playwright` (the package
 no browser). Set ORCHARD_CHROME to a different browser binary.
 """
 import os
+import re
 import shutil
 from pathlib import Path
 
@@ -64,7 +65,7 @@ def two_runs(root):
 
 def open_page(page, served, query=""):
     page.goto(f"http://127.0.0.1:{served.port}/{query}")
-    page.wait_for_selector("#runs li")
+    page.wait_for_selector("[data-run-row]:visible")
 
 
 def mode_of(page):
@@ -75,7 +76,7 @@ def test_the_live_run_is_first_in_the_list_and_selected(root, page):
     two_runs(root)
     with Served(make_app(root, alive={LIVE})) as s:
         open_page(page, s)
-        rows = page.locator("#runs li")
+        rows = page.locator("[data-run-row]:visible")
         assert rows.count() == 2
         assert "live-model" in rows.nth(0).inner_text()
         assert "old-model" in rows.nth(1).inner_text()
@@ -86,7 +87,7 @@ def test_choosing_another_run_shows_that_run(root, page):
     two_runs(root)
     with Served(make_app(root, alive={LIVE})) as s:
         open_page(page, s)
-        page.locator("#runs li").nth(1).locator("button, a").first.click()
+        page.locator("[data-run-row]:visible").nth(1).click()
         expect(page.locator("#run")).to_contain_text("old-model")
         expect(page.locator("#run")).not_to_contain_text("live-model")
 
@@ -101,7 +102,7 @@ def test_operator_is_the_default_and_the_style_switch_changes_the_page_and_is_re
         assert page.get_attribute("#mode-playful-btn", "aria-pressed") == "true"
         assert page.get_attribute("#mode-operator-btn", "aria-pressed") == "false"
         page.reload()
-        page.wait_for_selector("#runs li")
+        page.wait_for_selector("[data-run-row]:visible")
         assert mode_of(page) == "playful"             # the browser remembered it, and the remembered choice beats the default
 
 
@@ -199,3 +200,177 @@ def test_the_machine_chip_recovers_after_an_outage(root, page):
         expect(chip).to_contain_text("unknown", timeout=40000)
         page.unroute("**/api/**")
         expect(chip).not_to_contain_text("unknown", timeout=40000)
+
+
+# ---- the run table in Operator style (2026-10-26) ----------------------------------------------------------------------------
+
+LONG_ID = "some-organisation-with-a-long-name/an-extremely-long-model-identifier-that-would-never-fit-in-a-narrow-column-v2-final"
+
+
+def table_runs(root):
+    """A live run, a blocked one, a finished one and one with a very long id, with different stages."""
+    write_ledger(root / "org--old-blocked", ("stage_start", 1, {}),
+                 ("decision", 1, {"decision": "blocked", "code": "stage-failed", "reason": "x"}), model="org/blocked-model")
+    write_ledger(root / "org--ready", ("stage_start", 0, {}), ("stage_end", 0, {"result": "pass"}),
+                 ("decision", None, {"decision": "ready for operator review", "bundle": "stages/8/bundle"}), model="org/ready-model")
+    write_ledger(root / "org--long", ("stage_start", 2, {}), model=LONG_ID)
+    live = write_ledger(root / "org--live", ("stage_start", 3, {}), model="org/live-model")
+    with_supervisor(live, LIVE)
+    return live
+
+
+def row_names(page):
+    return [r.get_attribute("data-run-name") for r in page.locator("#runs-body tr[data-run-row]").all()]
+
+
+def test_operator_style_lists_runs_in_a_table_with_a_header_and_playful_keeps_its_list(root, page):
+    table_runs(root)
+    with Served(make_app(root, alive={LIVE})) as s:
+        open_page(page, s)
+        heads = [h.text_content().strip() for h in page.locator("#runs-table thead th").all()]
+        assert heads == ["State", "Model", "Stage", "Age"]
+        assert page.locator("#runs-table").is_visible() and not page.locator("#runs").is_visible()
+        first = page.locator("#runs-body tr").first
+        assert "live-model" in first.inner_text() and "now" in first.inner_text()
+        assert "RUNNING" in first.inner_text().upper()                      # the real state word beside the picture
+        assert first.locator(".c-stage").inner_text().strip() == "3"
+        assert page.locator("#runs-body tr").nth(1).get_attribute("data-state") in ("ready-for-operator-review", "stopped-or-crashed", "blocked", "running")
+        page.click("#mode-playful-btn")
+        assert page.locator("#runs").is_visible() and not page.locator("#runs-table").is_visible()
+
+
+def test_table_rows_keep_the_order_of_the_list_live_first_then_newest(root, page):
+    table_runs(root)
+    with Served(make_app(root, alive={LIVE})) as s:
+        open_page(page, s)
+        in_table = row_names(page)
+        page.click("#mode-playful-btn")
+        in_list = [li.get_attribute("data-run-name") for li in page.locator("#runs li[data-run-row]").all()]
+        assert in_table == in_list and in_table[0] == "org--live" and len(in_table) == 4
+
+
+def test_the_selected_row_is_aria_selected_and_the_table_is_a_grid_with_one_tab_stop(root, page):
+    table_runs(root)
+    with Served(make_app(root, alive={LIVE})) as s:
+        open_page(page, s)
+        assert page.get_attribute("#runs-table", "role") == "grid"
+        sel = page.locator('#runs-body tr[aria-selected="true"]')
+        assert sel.count() == 1 and sel.get_attribute("data-run-name") == "org--live"
+        assert page.locator('#runs-body tr[tabindex="0"]').count() == 1
+        assert page.locator('#runs-body tr[tabindex="-1"]').count() == 3
+
+
+def test_arrow_keys_move_the_selection_and_the_run_page_follows_and_enter_keeps_it(root, page):
+    table_runs(root)
+    with Served(make_app(root, alive={LIVE})) as s:
+        open_page(page, s)
+        page.locator("#runs-body tr").first.focus()
+        page.keyboard.press("ArrowDown")
+        second = row_names(page)[1]
+        assert page.locator('#runs-body tr[aria-selected="true"]').get_attribute("data-run-name") == second
+        assert page.evaluate("document.activeElement.dataset.runName") == second     # focus moved with the selection
+        expect(page.locator("#run")).not_to_contain_text("live-model")
+        page.keyboard.press("ArrowUp")
+        assert page.locator('#runs-body tr[aria-selected="true"]').get_attribute("data-run-name") == "org--live"
+        page.keyboard.press("ArrowUp")                                                 # the first row is the edge
+        assert page.locator('#runs-body tr[aria-selected="true"]').get_attribute("data-run-name") == "org--live"
+        page.keyboard.press("ArrowDown")
+        page.keyboard.press("Enter")
+        assert page.locator('#runs-body tr[aria-selected="true"]').get_attribute("data-run-name") == second
+
+
+def test_a_very_long_model_id_is_clipped_in_the_cell_keeps_its_full_text_and_title(root, page):
+    table_runs(root)
+    with Served(make_app(root, alive={LIVE})) as s:
+        open_page(page, s)
+        cell = page.locator('#runs-body tr[data-run-name="org--long"] .c-model')
+        assert cell.get_attribute("title") == LONG_ID
+        assert cell.locator(".c-model-text").text_content() == LONG_ID              # selectable and copyable in full
+        box = cell.bounding_box()
+        assert box["width"] < 260 and box["height"] < 70
+        assert not page.evaluate("document.documentElement.scrollWidth > document.documentElement.clientWidth")
+        assert page.evaluate("getComputedStyle(document.querySelector('#runs-body td.c-model')).userSelect") != "none"
+
+
+def test_clicking_a_row_selects_it_and_dragging_to_copy_text_does_not(root, page):
+    table_runs(root)
+    with Served(make_app(root, alive={LIVE})) as s:
+        open_page(page, s)
+        page.locator('#runs-body tr[data-run-name="org--ready"]').click()
+        assert page.locator('#runs-body tr[aria-selected="true"]').get_attribute("data-run-name") == "org--ready"
+        page.wait_for_timeout(1000)                              # let the page finish drawing the chosen run
+        cell = page.locator('#runs-body tr[data-run-name="org--live"] .c-model-text')
+        box = cell.bounding_box()
+        page.mouse.move(box["x"] + 1, box["y"] + 6)
+        page.mouse.down()
+        page.mouse.move(box["x"] + 60, box["y"] + 6, steps=5)
+        page.mouse.up()                                          # a drag across the text: a selection inside the table, then the click that ends it
+        assert page.evaluate("window.getSelection().toString().length") > 0
+        assert page.locator('#runs-body tr[aria-selected="true"]').get_attribute("data-run-name") == "org--ready"
+
+
+def test_the_tooltips_give_the_stage_name_and_the_exact_time(root, page):
+    table_runs(root)
+    with Served(make_app(root, alive={LIVE})) as s:
+        open_page(page, s)
+        row = page.locator('#runs-body tr[data-run-name="org--live"]')
+        assert row.locator(".c-stage").get_attribute("title").startswith("stage 3")
+        assert re.search(r"\d", row.locator(".c-age").get_attribute("title") or "")
+
+
+def test_a_narrow_screen_drops_the_age_column_and_never_scrolls_sideways(root, browser):
+    table_runs(root)
+    ctx = browser.new_context(viewport={"width": 320, "height": 800})
+    pg = ctx.new_page()
+    with Served(make_app(root, alive={LIVE})) as s:
+        open_page(pg, s)
+        assert not pg.locator("#runs-table th.c-age").is_visible()
+        assert pg.locator("#runs-table th.c-model").is_visible()
+        assert not pg.evaluate("document.documentElement.scrollWidth > document.documentElement.clientWidth")
+    ctx.close()
+    ctx = browser.new_context(viewport={"width": 1400, "height": 800})
+    pg = ctx.new_page()
+    with Served(make_app(root, alive={LIVE})) as s:
+        open_page(pg, s)
+        assert pg.locator("#runs-table th.c-age").is_visible()               # the 360 px rail has room for all four
+        assert 340 <= pg.locator(".rail").bounding_box()["width"] <= 380
+    ctx.close()
+
+
+def test_no_runs_says_so_in_the_table_with_a_way_to_start(root, page):
+    with Served(make_app(root)) as s:
+        page.goto(f"http://127.0.0.1:{s.port}/")
+        expect(page.locator("#runs-body")).to_contain_text("No runs here yet")
+        assert page.locator("#runs-body button").is_visible()
+
+
+def test_many_runs_stay_in_one_scrolling_page_table(root, page):
+    for i in range(40):
+        write_ledger(root / f"org--m{i:02d}", ("stage_start", i % 9, {}), model=f"org/model-{i}")
+    with Served(make_app(root)) as s:
+        page.goto(f"http://127.0.0.1:{s.port}/")
+        page.wait_for_selector("[data-run-row]:visible")
+        assert page.locator("#runs-body tr[data-run-row]").count() == 40
+        assert not page.evaluate("document.documentElement.scrollWidth > document.documentElement.clientWidth")
+
+
+def test_enter_opens_the_focused_row_even_when_it_is_not_the_selected_one(root, page):
+    table_runs(root)
+    with Served(make_app(root, alive={LIVE})) as s:
+        open_page(page, s)
+        names = row_names(page)
+        page.locator("#runs-body tr").nth(2).focus()                      # focus without selecting, as a Tab key would
+        assert page.locator('#runs-body tr[aria-selected="true"]').get_attribute("data-run-name") == "org--live"
+        page.keyboard.press("Enter")
+        assert page.locator('#runs-body tr[aria-selected="true"]').get_attribute("data-run-name") == names[2]
+
+
+def test_a_redraw_of_the_rows_keeps_the_keyboard_focus_on_the_same_run(root, page):
+    table_runs(root)
+    with Served(make_app(root, alive={LIVE})) as s:
+        open_page(page, s)
+        target = row_names(page)[1]
+        page.locator("#runs-body tr").nth(1).focus()
+        write_ledger(root / "org--long", ("stage_end", 2, {"result": "pass"}), ("stage_start", 4, {}))      # changes a row, so the next poll redraws
+        expect(page.locator('#runs-body tr[data-run-name="org--long"] .c-stage')).to_contain_text("4", timeout=15000)
+        assert page.evaluate("document.activeElement.dataset.runName") == target

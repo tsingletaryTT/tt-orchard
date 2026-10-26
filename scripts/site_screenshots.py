@@ -58,13 +58,13 @@ def main(url: str, out: str) -> int:
             page = ctx.new_page()
             page.set_default_timeout(20000)
             page.goto(f"{url}?mode={style}")
-            page.wait_for_selector("#runs li")
+            page.wait_for_selector("[data-run-row]:visible")
             # pick the run by the name the list row carries (the row shows the model id; the run directory is in its title)
             # the list row shows the run directory name on a line of its own: pick the one row where a line equals the name, and fail otherwise
-            rows = page.locator("#runs li")
-            hits = [i for i in range(rows.count()) if fragment in [ln.strip() for ln in rows.nth(i).inner_text().splitlines()]]
+            rows = page.locator("[data-run-row]:visible")
+            hits = [i for i in range(rows.count()) if rows.nth(i).get_attribute("data-run-name") == fragment]
             assert len(hits) == 1, f"{name}: {len(hits)} rows show the run {fragment!r}; need exactly one"
-            rows.nth(hits[0]).locator("button, a").first.click()
+            rows.nth(hits[0]).click()
             expect(page.locator("#run")).to_contain_text(fragment)
             page.wait_for_timeout(2500)
             page.evaluate(REDACT, [host, user])
