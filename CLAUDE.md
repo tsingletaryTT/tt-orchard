@@ -2253,3 +2253,9 @@ coder boot or benchmark phase was read as a model failure, and a `hardware-unhea
     stage 4 does not end), and a dead board the coder does not use (not blamed).
   - Mutations: 4 on the sweep (1 survived: the cleanup swallowing every block, which tests elsewhere cover), 3 on the lab change, 7 on the restore check (the swallow and the chips-not-passed mutants first survived and got tests). All red now.
   - Added tests: 12 in `tests/test_supervisor_offbus.py` (now 28).
+
+## 2026-10-26 (UTC): `episod/qwen3.8-27b-cjk-trim-p300` is public
+Prompt (operator): "let's publish while we wait: ProprietaryLegal/Qwen3.8-27B-CJK-Trim looks like it was a successful run".
+- The package is the one stage 7 staged on 2026-10-25 (2 chips, 96 MB, no weights, Apache 2.0 from the model's card). The ledger's package gate was ok twice, after the card was re-rendered with the vocabulary reason.
+- `hf upload --repo-type model --private` found the repo already holding the same 20 files (0 bytes transferred), so an earlier upload had put them there. `tt-model publish` then made it public and listed it in the community catalog. Delist with `tt-model unpublish`.
+- Claims on the card: 30 of 32 tokens against the CPU reference on one short prompt (stage 2 and the package's boot check), the drafter off and host sampling because the vocabulary is renumbered. Not measured: a pull and boot from the Hub, long outputs, tool calls, any benchmark.
