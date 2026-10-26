@@ -121,8 +121,9 @@ unverified. Targets with Blackhole rows and no `model_params` directory, listed 
 `gemma-4-e2b`, `gemma-4-e4b`, `gpt-oss-20b` (`bh_p150`, `p300x2`), `gpt-oss-120b`, `mistral-small-3.1-24b`
 (`bh_quietbox_2`), `qwen2.5-coder-32b` (`bh_quietbox_2`), `qwen38-27b-qb2` and `llama3.1-8b-qb2`.
 
-The only entry with rows for the single-chip and the two-board configurations a weights-only package ships for (1, 2 and 4
-chips) is Llama-3.1-8B-Instruct. That agrees with PR 78's choice of pilot.
+The only entry with active rows for more than one configuration is Llama-3.1-8B-Instruct: `bh_p100` and `bh_p150` (1 chip) and
+`p300x2` (two boards, 4 chips). Its `bh_p300` row (the 2-chip board) is `TODO`, so the active rows cover 1 and 4 chips and 2 chips
+is unverified. That agrees with PR 78's choice of pilot.
 
 ## 4. Question 3: is there an installed or published bundle for the two Llama models
 
@@ -177,4 +178,4 @@ its generator honours the model directory, which has to be checked the way issue
 - Whether the Blackhole target rows pass in CI at v0.80.0, and any Blackhole result for the models marked unverified.
 - Whether the published 3B container package serves swapped weights.
 - Whether the 8B runs on 1, 2 and 4 chips on this box. Its target rows are for one chip (`bh_p100`, `bh_p150`) and `p300x2`
-  (two boards, which the targets file equates with `bh_quietbox_2`, this box's layout); no two-chip (one board) row exists.
+  (two boards, which the targets file equates with `bh_quietbox_2`, this box's layout); the two-chip (one board) row, `bh_p300`, is `TODO`.
