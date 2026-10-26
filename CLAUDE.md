@@ -2442,7 +2442,7 @@ change covers the other two halves: reading the authors' scores from the model c
   neither file gets the same RESULTS.md as before. Copied text is redacted, pipes and line breaks cannot break the table, and a link or a file over 256 KiB is not read.
   Nothing reads RESULTS.md numbers: the gate checks hashes, and `run_view.results` and the verdict read only measured result files. A test sets a reported file with
   names like `top1_agreement` and shows the verdict is unchanged.
-- Run on the real cards in the Hugging Face cache (2026-10-26), 31 cached cards, 14 with at least one row or skipped entry. BAAI/AREX-2 (two HTML tables): 6 rows
+- Run on the real cards in the Hugging Face cache (2026-10-26), the cached cards, of which 14 gave at least one row or skipped entry (the script took the first snapshot of each model; 130 README files are cached). BAAI/AREX-2 (two HTML tables): 6 rows
   and all 6 equal the AREX-2 row of the card (Frontier-CS 70.7, MLE-Lite 81.8, BrowseComp 84.0, HLE 52.6, GAIA 92.2, DeepSearchQA 93.8); 42 other-model rows ignored; 2
   skipped (the `27B` parameter cell). Qwen/Qwen3.8-27B (an HTML table with the model in the first column): 20 rows, two checked by hand against the card (Terminal Bench
   2.1 73.0 and SWE-bench Pro 61.7 are column one, which is headed Qwen3.8-27B); 5 merged-cell rows skipped. ThakiCloud/RAG-Gate-27B: 5 rows (accuracy by evidence
