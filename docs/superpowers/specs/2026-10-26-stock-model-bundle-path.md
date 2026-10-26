@@ -86,8 +86,17 @@ board, run as one bounded driver under `gozer run`, so the lease lasts as long a
 `gozer run --chips 1 --who "claude:stock-bundle" --reason "boot check of a tt-transformers thin bundle" -- timeout 3600
 python3 driver.py <copy>`. The driver starts `bash <copy>/run.sh --port 20000` in its own process group (`start_new_session`),
 polls the port until the server answers or a deadline passes, sends one `temperature: 0` completion and compares it with the
-reference, and in a `finally` sends SIGTERM to the server's process group, waits for it, and sends SIGKILL after a grace period,
-so the server is gone before `gozer run` releases the lease on success, failure and timeout. The driver is not written yet;
+reference, and stops the server's process group however it ends. A `finally` block is not enough: the outer `timeout` sends
+SIGTERM, whose default action in Python ends the process without running `finally`, and because the server runs in its own
+session it would outlive the driver and the lease wrapper. The driver therefore has three requirements. (1) A SIGTERM and SIGINT
+handler that stops the server's process group (SIGTERM, wait for a grace period, SIGKILL) and then exits. (2) An internal
+deadline (for example 3,000 s) shorter than the outer `timeout 3600`, so a slow boot ends through the driver's own cleanup and
+the outer signal is only a backstop. (3) A check before it returns that the server's process group no longer exists
+(`os.killpg(pgid, 0)` raises `ProcessLookupError`), failing the driver with a clear message when it does. How it will be
+tested: a real-process test, as `suite_control` was tested in PR 80, with a stand-in server that ignores nothing and a child
+driver started in its own session. The test sends SIGTERM to the driver mid-boot, then asserts the stand-in server's process
+group is gone and the driver exited; further cases cover success, a failed probe and the internal deadline. Each guard is seen
+red by removing it (no handler, no deadline, no final check). The driver is not written yet;
 `orchard/skills/weights-swap-templates/serve_and_compare.py` does the same job for the Qwen bundles and is the model for it.
 About 20 to 40 minutes, including a cold kernel build.
 
