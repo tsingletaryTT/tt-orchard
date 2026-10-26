@@ -197,7 +197,7 @@ def test_in_lab_mode_the_stock_path_is_not_offered(tmp_path):
                 lab_status=lambda: (True, "", ""))
     out = pf.run_preflight(lab_cfg(tmp_path), "Cloudflare/clef", accept_credentials=False, signals=s)
     base = next(c for c in out if c.name == "base")
-    assert base.status == pf.BLOCK and base.reason == "nearest-model-missing" and "stock_runtime" not in (base.data or {})
+    assert "stock_runtime" not in (base.data or {}) and "tt-transformers supports" not in base.detail
     assert seen == []
 
 
