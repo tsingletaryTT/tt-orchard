@@ -379,21 +379,52 @@ def _confirm_inferred(base: str, serving, report) -> Check:
                        "candidates": first + rest, "report": report})
 
 
-def _stock_check(report, stock) -> Check | None:
+def _stock_compatible(found, model_id: str, hub, local_snapshot) -> bool:
+    """Whether the model can be the one tt-transformers' parameters in `found` describe, as far as this check can tell. The local
+    snapshot's config.json is compared on the decisive keys (orchard/stock_runtime.py); without one, the hub's architecture is compared with
+    the parameters'. When neither is known the row is kept, and stage 0 measures. Research also records rows for the model's bases and
+    ancestors, and the first of those must not stand in for the model."""
+    from orchard import stock_runtime
+    try:
+        pcfg = json.loads((Path(found) / "config.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return True
+    if not isinstance(pcfg, dict):
+        return True
+    snap = None
+    try:
+        snap = local_snapshot(model_id)
+    except Exception:
+        pass
+    if snap is not None:
+        try:
+            mcfg = json.loads((Path(snap) / "config.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            mcfg = None
+        if isinstance(mcfg, dict):
+            return not stock_runtime.compare_configs(mcfg, pcfg)
+    archs = getattr(hub, "architectures", None) or []
+    return not archs or archs[0] == stock_runtime.effective(pcfg, "architectures")
+
+
+def _stock_check(report, stock, model_id: str = "", hub=None, local_snapshot=lambda m: None) -> Check | None:
     """tt-transformers supports the model, and no installed bundle serves its base. Research recorded an exact `model_params` match
     (report["tt_transformers"]) and `stock(name)` finds that directory on this box: the run goes on as stock-runtime. The row is a
     warning, because the README row may name no Blackhole board and only stage 2 can say whether the model runs here. A README row alone
     is not enough: stage 0 compares the model's config with the `model_params` config, so the directory has to exist."""
     if stock is None:
         return None
-    for row in (report or {}).get("tt_transformers") or []:
-        if not (isinstance(row, dict) and row.get("via") == "model_params" and isinstance(row.get("name"), str)):
+    rows = [r for r in (report or {}).get("tt_transformers") or [] if isinstance(r, dict)]
+    # the requested model's own match first, then the rest in research's order
+    rows = [r for r in rows if r.get("matched") == model_id] + [r for r in rows if r.get("matched") != model_id]
+    for row in rows:
+        if not (row.get("via") == "model_params" and isinstance(row.get("name"), str)):
             continue
         from orchard import stock_runtime
         if not stock_runtime.NAME_OK.fullmatch(row["name"]):
             continue
         found = stock(row["name"])
-        if not found:
+        if not found or not _stock_compatible(found, model_id, hub, local_snapshot):
             continue
         # only the README row research matched for the same model id as the selected row: rows for the model's other bases say nothing
         # about this model's boards
@@ -432,7 +463,7 @@ def check_base(*, model_id: str, hub: HubInfo | None, base_override: str | None,
     if not base and report and report.get("selected"):
         base, inferred = report["selected"]["repo"], True
     if not base:
-        if (found := _stock_check(report, stock)) is not None:
+        if (found := _stock_check(report, stock, model_id, hub, local_snapshot)) is not None:
             return found
         return Check("base", WARN, "the model card names no base_model, so stage 0 has nothing to compare it "
                      "with. Pass --base <bundle or model id> to name the model to start from"
@@ -456,7 +487,7 @@ def check_base(*, model_id: str, hub: HubInfo | None, base_override: str | None,
                          "default profile, and only when exactly one installed package serves the base on the chip count of the "
                          f"stage; {where}{note}", data=data)
         return Check("base", OK, f"base {base}: bundle {serving[0].name} is installed; {where}{note}", data=data)
-    if (stock_row := _stock_check(report, stock)) is not None:
+    if (stock_row := _stock_check(report, stock, model_id, hub, local_snapshot)) is not None:
         return stock_row
     family = nearest.family_query(base)
     found = None

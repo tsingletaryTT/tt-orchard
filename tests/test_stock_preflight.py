@@ -268,6 +268,75 @@ def test_a_fresh_run_is_not_affected_by_the_resume_rule(conf):
     assert "stock_params=/host/params/Llama-3.1-8B-Instruct" in _inputs(rec)
 
 
+# ---- the requested model's row first, and a compatible one (second review of PR 78) ---------------------------------
+
+def _dirs(tmp_path, specs):
+    """{name: Path} of model_params directories with a config.json each."""
+    import json as _j
+    out = {}
+    for name, cfg in specs.items():
+        d = tmp_path / "params" / name
+        d.mkdir(parents=True)
+        (d / "config.json").write_text(_j.dumps(cfg))
+        out[name] = d
+    return out
+
+
+LLAMA_CFG = {"architectures": ["LlamaForCausalLM"], "model_type": "llama", "hidden_size": 64, "num_hidden_layers": 2,
+             "num_attention_heads": 4, "num_key_value_heads": 2, "intermediate_size": 128, "vocab_size": 100}
+QWEN_CFG = {**LLAMA_CFG, "architectures": ["Qwen2ForCausalLM"], "model_type": "qwen2"}
+ANCESTOR = {"name": "Qwen2.5-7B-Instruct", "via": "model_params", "matched": "ancestor/qwen", "boards": [], "blackhole": None}
+OWN = {"name": "Llama-3.1-8B-Instruct", "via": "model_params", "matched": "x/humanizer", "boards": [], "blackhole": None}
+
+
+def _pick(tmp_path, rows, *, hub_arch=None, snap_cfg=None, card=None):
+    import json as _j
+    dirs = _dirs(tmp_path, {"Qwen2.5-7B-Instruct": QWEN_CFG, "Llama-3.1-8B-Instruct": LLAMA_CFG})
+    snap = None
+    if snap_cfg is not None:
+        snap = tmp_path / "snap"
+        snap.mkdir()
+        (snap / "config.json").write_text(_j.dumps(snap_cfg))
+    h = pf.parse_hub({"id": "x/humanizer", "sha": "c0", "cardData": card if card is not None else {"license": "mit", "base_model": BASE},
+                      "config": {"architectures": [hub_arch]} if hub_arch else {}, "siblings": []})
+    c = pf.check_base(model_id="x/humanizer", hub=h, base_override=None, local_snapshot=lambda m: snap, installed=[], search=lambda q: [],
+                      report=report(tt_transformers=rows), stock=lambda name: dirs.get(name))
+    return c
+
+
+def test_the_requested_models_own_row_comes_before_a_row_for_an_ancestor(tmp_path):
+    c = _pick(tmp_path, [ANCESTOR, OWN])
+    assert c.status == pf.WARN and c.data["stock_runtime"]["name"] == "Llama-3.1-8B-Instruct"
+
+
+def test_a_row_whose_architecture_differs_from_the_models_is_skipped_for_a_compatible_one(tmp_path):
+    # the model is a Llama; the only own-model row is not offered, the ancestor's is Qwen, and the card's base row is Llama
+    c = _pick(tmp_path, [ANCESTOR, {**OWN, "matched": "meta-llama/Llama-3.1-8B-Instruct"}], hub_arch="LlamaForCausalLM")
+    assert c.status == pf.WARN and c.data["stock_runtime"]["name"] == "Llama-3.1-8B-Instruct"
+
+
+def test_a_card_with_no_base_also_takes_the_models_own_compatible_row(tmp_path):
+    c = _pick(tmp_path, [ANCESTOR, OWN], card={"license": "mit"})
+    assert c.status == pf.WARN and c.data["stock_runtime"]["name"] == "Llama-3.1-8B-Instruct"
+
+
+def test_when_no_row_is_compatible_the_block_stands(tmp_path):
+    c = _pick(tmp_path, [ANCESTOR], hub_arch="LlamaForCausalLM")
+    assert c.status == pf.BLOCK and c.reason == "nearest-model-missing"
+
+
+def test_the_local_snapshots_config_decides_when_it_is_there(tmp_path):
+    ok = _pick(tmp_path, [ANCESTOR, OWN], snap_cfg=LLAMA_CFG)
+    assert ok.data["stock_runtime"]["name"] == "Llama-3.1-8B-Instruct"
+    bad = _pick(tmp_path / "b", [OWN], snap_cfg={**LLAMA_CFG, "hidden_size": 128}) if (tmp_path / "b").mkdir() is None else None
+    assert bad.status == pf.BLOCK
+
+
+def test_with_no_config_to_compare_the_first_row_is_taken_and_stage_zero_measures(tmp_path):
+    c = _pick(tmp_path, [ANCESTOR, OWN])
+    assert c.status == pf.WARN                      # no hub architecture and no snapshot: unknown, not a reason to skip
+
+
 # ---- the recorded route is restored before the preflight (second review of PR 78) -----------------------------------
 
 def _params_dir(tmp_path):
