@@ -496,6 +496,17 @@ html[data-mode="operator"] {
   --stop: #b3290a;   --stop-dark: #7a1a05;
   --wood: #092221;   --wood-light: #c7d9d8; --wood-dark: #c7d9d8; --wood-shadow: transparent;
   --pixel: var(--font);                    /* every heading, tab and button that asked for the pixel face now uses the system face */
+  /* state band: each colour has a darker start and a lighter end for the soft gradient; white text is AA on both ends */
+  --band-running: #0f5c75; --band-running-2: #1a7f9f;
+  --band-good: #1d6b5b;    --band-good-2: #237a66;
+  --band-warn: #8a5a00;    --band-warn-2: #a06a00;
+  --band-bad: #b3290a;     --band-bad-2: #c8401c;
+  --band-dim: #46605d;     --band-dim-2: #587874;
+  /* verdict lines: a stronger tint per tone, and the tone's own text colour */
+  --v-good-bg: #c4ebdc; --v-good: #14594b;
+  --v-warn-bg: #ffe39a; --v-warn: #7a4f00;
+  --v-bad-bg: #f9cabc;  --v-bad: #9e2208;
+  --v-info-bg: #d3e8f1; --v-info: #0f5c75;
 }
 @media (prefers-color-scheme: dark) {
   html[data-mode="operator"] {
@@ -511,6 +522,10 @@ html[data-mode="operator"] {
     --btn: #17383a;    --btn-dark: #3f6664;  --btn-ink: #e4f1f0;
     --go: #1b8eb1;     --go-dark: #74c5df;
     --wood: #061615;   --wood-light: #2f4f4d; --wood-dark: #2f4f4d;
+    --v-good-bg: #1c4a3e; --v-good: #8fe0c8;
+    --v-warn-bg: #4a3a0c; --v-warn: #f7cf65;
+    --v-bad-bg: #592820;  --v-bad: #ffb3a2;
+    --v-info-bg: #1c4152; --v-info: #8fd3ea;
   }
 }
 
@@ -532,7 +547,11 @@ html[data-mode="operator"] .style-label { color: #a9c4c2; }
 html[data-mode="operator"] .style-btn { color: #e4f1f0; border-color: #3f6664; }
 html[data-mode="operator"] .style-btn[aria-pressed="true"] { background: #1c4a49; color: #fff; box-shadow: inset 0 -2px 0 #74c5df; }
 html[data-mode="operator"] .style-btn:hover { background: #17383a; }
-html[data-mode="operator"] .emoji { display: none; }                      /* every picture in the page sits in an .emoji span: the operator style is plain text */
+html[data-mode="operator"] .emoji { display: none; }                      /* the orchard's pictures sit in .emoji spans, which the operator style hides */
+/* The operator style's own small set of pictures (run states, stage marks, verdict tones, primary buttons) sits in .op-pic spans.
+   They are decoration: aria-hidden in the markup, and the real word is always printed beside each one. */
+.op-pic { display: none; }
+html[data-mode="operator"] .op-pic { display: inline; margin-right: .3em; font-style: normal; }
 /* the first tab names the view for the page style: the farm calls it the orchard, the operator page calls it the runs */
 html[data-mode="operator"] .lbl-playful { display: none; }
 html:not([data-mode="operator"]) .lbl-operator { display: none; }
@@ -558,12 +577,14 @@ html[data-mode="operator"] .hint-label { justify-self: start; }
 html[data-mode="operator"] .callout { border-left-width: 6px; }
 
 /* the state band: the one large block of colour on the page. Its colour is the run's state and means nothing else. */
-html[data-mode="operator"] .run-head { padding: 14px 16px; border-radius: 6px; color: #fff; background: #46605d; display: grid; gap: 10px; }
-html[data-mode="operator"] #run[data-tone="good"] .run-head { background: #1d6b5b; }
-html[data-mode="operator"] #run[data-tone="warn"] .run-head { background: #8a5a00; }
+html[data-mode="operator"] .run-head { padding: 14px 16px; border-radius: 6px; color: #fff; display: grid; gap: 10px;
+  background: linear-gradient(120deg, var(--band-dim), var(--band-dim-2)); }
+html[data-mode="operator"] #run[data-tone="good"] .run-head { background: linear-gradient(120deg, var(--band-good), var(--band-good-2)); }
+html[data-mode="operator"] #run[data-tone="warn"] .run-head { background: linear-gradient(120deg, var(--band-warn), var(--band-warn-2)); }
 html[data-mode="operator"] #run[data-tone="bad"] .run-head,
-html[data-mode="operator"] #run[data-tone="alarm"] .run-head { background: #b3290a; }
-html[data-mode="operator"] #run[data-state="running"] .run-head { background: #146d88; }
+html[data-mode="operator"] #run[data-tone="alarm"] .run-head { background: linear-gradient(120deg, var(--band-bad), var(--band-bad-2)); }
+html[data-mode="operator"] #run[data-state="running"] .run-head { background: linear-gradient(120deg, var(--band-running), var(--band-running-2)); }
+html[data-mode="operator"] .run-head .badge .op-pic { font-size: 1.35em; margin-right: .35em; }
 html[data-mode="operator"] .run-head .badge { background: transparent; color: #fff; padding: 0; font-size: 1.5rem; font-weight: 800; letter-spacing: .01em; }
 /* real names first: the state, the stage and the feed's role read as what they are; the orchard words and icons step aside */
 html[data-mode="operator"] .badge .word,
@@ -573,6 +594,13 @@ html[data-mode="operator"] .run-sub .orchard,
 html[data-mode="operator"] .who .icon { display: none; }
 html[data-mode="operator"] .badge .name { display: inline; text-transform: uppercase; letter-spacing: .03em; }
 html[data-mode="operator"] .step .real { font-weight: 700; color: var(--ink); font-size: .84rem; }
+/* a little colour on the stepper: a passed stage is green, a failed one red, an escalated one amber */
+html[data-mode="operator"] .step[data-status="pass"] { background: var(--good-bg); }
+html[data-mode="operator"] .step[data-status="fail"] { background: var(--bad-bg); }
+html[data-mode="operator"] .step[data-status="escalated"] { background: var(--warn-bg); }
+html[data-mode="operator"] .step .stat .op-pic { font-size: 1.05em; }
+html[data-mode="operator"] .empty { background: var(--paper); border: 1px solid var(--line); border-radius: 6px; padding: 28px 24px; margin-top: 12px; }
+html[data-mode="operator"] .empty .op-pic { font-size: 1.6em; }
 html[data-mode="operator"] .run-head h1 { color: #fff; font-size: 1.05rem; font-weight: 600; }
 html[data-mode="operator"] .run-head .run-sub { color: rgba(255,255,255,.9); }
 html[data-mode="operator"] .run-head .btn { color: #092221; background: #fff; border-color: #fff; }
@@ -582,6 +610,9 @@ html[data-mode="operator"] .run-head .mode-chip { color: #fff; background: trans
     content: ""; width: 14px; height: 14px; border-radius: 50%; background: #fff; display: inline-block; margin-right: 10px;
     animation: orchard-pulse 1.4s ease-in-out infinite; }
   @keyframes orchard-pulse { 50% { opacity: .25; transform: scale(.7); } }
+  /* a stage that has just passed pops once; nothing loops or strobes */
+  html[data-mode="operator"] .step[data-fresh="true"] .op-pic { display: inline-block; animation: orchard-pop .5s ease-out 1; }
+  @keyframes orchard-pop { 0% { transform: scale(.4); } 60% { transform: scale(1.35); } 100% { transform: scale(1); } }
 }
 
 @media (max-width: 900px) {
@@ -597,10 +628,14 @@ html[data-mode="operator"] .run-head .mode-chip { color: #fff; background: trans
 .verdict-detail { color: var(--muted); font-size: .88rem; }
 html[data-mode="operator"] #verdict { display: grid; gap: 4px; }
 html[data-mode="operator"] #verdict h2 { font-size: .8rem; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
-#verdict .verdict-item[data-tone="bad"] { border-left-color: var(--bad); background: var(--bad-bg); }
-#verdict .verdict-item[data-tone="warn"] { border-left-color: var(--warn); background: var(--warn-bg); }
-#verdict .verdict-item[data-tone="good"] { border-left-color: var(--good); background: var(--good-bg); }
-#verdict .verdict-item[data-tone="info"] { border-left-color: var(--dim); background: var(--paper-2); }
+#verdict .verdict-item[data-tone="bad"] { border-left-color: var(--v-bad); background: var(--v-bad-bg); }
+#verdict .verdict-item[data-tone="warn"] { border-left-color: var(--v-warn); background: var(--v-warn-bg); }
+#verdict .verdict-item[data-tone="good"] { border-left-color: var(--v-good); background: var(--v-good-bg); }
+#verdict .verdict-item[data-tone="info"] { border-left-color: var(--v-info); background: var(--v-info-bg); }
+#verdict .verdict-item { border-left-width: 6px; grid-template-columns: auto minmax(0, 1fr); column-gap: 8px; }
+#verdict .verdict-item .op-pic { grid-row: 1 / span 2; align-self: start; margin-right: 0; font-size: 1.15em; }
+#verdict .verdict-headline, #verdict .verdict-detail { grid-column: 2; }
+#verdict .verdict-headline { color: var(--ink); }
 
 /* the New bring-up dialog: the options that rarely change are folded under one line */
 .nr-options { margin: 4px 0 12px; border: 1px solid var(--line); border-radius: 4px; background: var(--paper-2); }
