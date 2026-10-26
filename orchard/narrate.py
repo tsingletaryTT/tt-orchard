@@ -641,6 +641,9 @@ UNBLOCK = {
         "If the `bus` preflight row blocked, a chip is off the PCIe bus, powered down (D3cold) or missing its serial or "
         "device node. A reset does not bring it back (`tt-smi -r` did not on 2026-10-22): power the box off and on, or "
         "reboot it, then check that `gozer status` lists every chip.",
+        "If the reason starts `a chip this run uses is off the PCIe bus or unreadable`, the same check found it after the run had "
+        "started (a failed hardware test or coder boot). It names the chip and the cause, and `bringup` does not retry it. Power "
+        "the box off and on (or reboot) before the next attempt.",
         "Then run `tt-orchard bringup <MODEL>` again."],
     "coder-unusable": [
         "The coder model did not serve or failed its canary question. Read stages/*/evidence/coder-canary-*.txt "

@@ -66,3 +66,13 @@ def no_skills_network(monkeypatch, tmp_path):
     yield
     if calls:
         pytest.fail(f"this test reached the real git or gh runner of the skills check: {calls[:3]}", pytrace=False)
+
+
+@pytest.fixture(autouse=True)
+def no_real_bus_reads(monkeypatch):
+    """The runtime bus check (orchard/bus.py `diagnose`) reads the real /sys/bus/pci when no reader is given. The fake chips in
+    the supervisor tests have made-up PCI addresses, so on a machine with Tenstorrent chips every failed test would look like a
+    board that left the bus. The default reader reports a bus that cannot be listed, which gives no finding. Tests of the check
+    pass their own reader."""
+    from orchard import bus
+    monkeypatch.setattr(bus, "_default_read", lambda: bus.Bus(readable=False))

@@ -33,6 +33,16 @@ REASONS = ("needs-new-model-code", "restricted-head", "retry-budget-spent", "sta
 # by repeating the command, so they wait for a person.
 AUTO_RETRY = ("coder-unusable", "hardware-unhealthy", "agent-stuck")
 
+# A hardware-unhealthy block whose text starts a chip-off-the-bus finding (orchard/bus.py `diagnose`) is not retried: the
+# board needs a power cycle or a reboot, and a retry 60 s later runs against the same board.
+OFF_BUS_MARK = "off the PCIe bus or unreadable"
+
+
+def retryable(code: str, reason: str = "") -> bool:
+    """Whether `tt-orchard bringup` may retry this block by itself."""
+    return code in AUTO_RETRY and OFF_BUS_MARK not in (reason or "")
+
+
 # Words in a "blocked: ..." reason that say what kind of block it is. The first matching row wins.
 _BLOCKED_WORDS = (
     ("package-missing", ("no installed bundle or container package",)),     # before the hardware words: its text says `chip`
