@@ -52,7 +52,7 @@ from pathlib import Path
 
 from orchard.defaults import (PACKAGE_HEALTH_TIMEOUT_S, PACKAGE_INSTALL_TIMEOUT_S,
                               PACKAGE_THIN_TIMEOUT_S, PACKAGE_VERIFY_DEADLINE_S)
-from orchard.graft_trial import DECISION_FILE, TRIAL_DIR, TRIAL_RESULT, read_decision
+from orchard.graft_trial import DECISION_FILE, TRIAL_DIR, TRIAL_RESULT, accept_rate, read_decision
 from orchard.card_use import read_use_facts
 from orchard.package_card import (CardFacts, Number, Reported, card_evidence_paths, inside, non_commercial,
                                   read_license, render_card)
@@ -1176,6 +1176,9 @@ GRAFT_TRIAL_ROWS = (("decode speed, safe configuration (graft trial, median of f
                     ("top1 agreement with the CPU reference, grafted drafter (graft trial)", "variant", "top1_agreement", "fraction"))
 
 
+ACCEPTANCE_ROW = "drafter acceptance, grafted drafter (graft trial: accepted over drafted tokens)"
+
+
 def graft_trial_numbers(run_dir) -> tuple[Number, ...]:
     """The rows stage 2's graft trial measured, for the card: the speed of the safe configuration and of the grafted variant, and the
     variant's agreement with the CPU reference. A row appears when the trial's result holds a positive number for it. The values are
@@ -1194,6 +1197,9 @@ def graft_trial_numbers(run_dir) -> tuple[Number, ...]:
         v = (trial.get(side) or {}).get(key) if isinstance(trial, dict) and isinstance(trial.get(side), dict) else None
         if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and v > 0:
             out.append(Number(name, v, unit, "measured", evidence))
+    rate = accept_rate((trial.get("variant") or {}).get("drafter")) if isinstance(trial, dict) and isinstance(trial.get("variant"), dict) else None
+    if rate is not None:              # 0 is a measurement here, so this row is not held to the "positive" rule above
+        out.append(Number(ACCEPTANCE_ROW, rate, "fraction", "measured", evidence))
     return tuple(out)
 
 
@@ -1237,7 +1243,9 @@ def write_card(out: Path, facts: RunFacts, profile: dict, *, namespace: str,
     drafters = aux_repos(m.get("env") or {}, nearest_model=facts.nearest_model)
     not_measured = ["a download of the weights through `tt-model pull`, and a boot of the package "
                     "from the Hub"]
-    if drafters:
+    numbers = tuple(card_numbers(facts, profile, verify))
+    acceptance_measured = any(n.name == ACCEPTANCE_ROW and n.label == "measured" for n in numbers)
+    if drafters and not acceptance_measured:
         not_measured.insert(0, "the drafter's acceptance rate on this model")
     run_sh_path = out / "run.sh"
     use = read_use_facts(facts.new_snapshot, run_sh_path.read_text(encoding="utf-8") if run_sh_path.is_file() else "",
@@ -1249,7 +1257,7 @@ def write_card(out: Path, facts: RunFacts, profile: dict, *, namespace: str,
         arch=m["arch"], max_model_len=m["resources"]["max_model_len"],
         max_num_seqs=m["resources"]["max_num_seqs"], drafter=drafters[0] if drafters else None,
         verified=verify is not None and profile["required"],
-        numbers=tuple(card_numbers(facts, profile, verify)), not_measured=tuple(not_measured),
+        numbers=numbers, not_measured=tuple(not_measured), acceptance_measured=acceptance_measured,
         drafter_off=facts.drafter_off, host_sampling=facts.host_sampling,
         sidecars=tuple(s["file"] for s in facts.sidecars),
         base_files=tuple(sorted(f.name for f in facts.base_config)),
