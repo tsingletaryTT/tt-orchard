@@ -73,6 +73,7 @@ CHECK = {"model_id": "unsloth/Llama-3.1-8B-Instruct", "chips": 2, "device_name":
          "teacher_forced": {"tokens": 511, "top1": 0.90, "top5": 0.98},
          "free_run": {"prompt": "What is the capital of France?", "text": GOOD_TEXT, "new_tokens": 32, "finish": "length"},
          "speed": {"decode_tokens_per_s": 40.0, "ttft_s": 0.2},
+         "reference": {"source": "generated", "model_id": "unsloth/Llama-3.1-8B-Instruct", "snapshot": "4699cc75", "sha256": "a" * 64},
          "hub_fetch": [], "scratch_patch": "evidence/scratch.patch"}
 
 
@@ -135,6 +136,12 @@ def tf(**kw):
     (change(speed={"decode_tokens_per_s": 0, "ttft_s": 0.2}), "speed"),
     (change(speed={"decode_tokens_per_s": "x", "ttft_s": 0.2}), "speed"),
     (change(model_id="other/model"), "model_id"),
+    # the reference must be made from this run's snapshot (review of PR 78)
+    (change(reference=None), "reference"),
+    (change(reference={**CHECK["reference"], "source": "tree"}), "reference"),
+    (change(reference={**CHECK["reference"], "model_id": "other/model"}), "reference"),
+    (change(reference={**CHECK["reference"], "snapshot": ""}), "reference"),
+    (change(reference={**CHECK["reference"], "sha256": "xyz"}), "reference"),
 ])
 def test_a_stage_two_check_that_does_not_meet_the_bars_fails(tmp_path, check, word):
     g = gate_stock_runtime(*stage2(tmp_path, check))
@@ -187,3 +194,13 @@ def test_the_patch_file_is_required_evidence(tmp_path):
     (sd / "evidence" / "scratch.patch").unlink()
     g = gate_stock_runtime(sd, run)
     assert not g.ok and any("scratch_patch" in r for r in g.reasons)
+
+
+def test_a_pinned_revision_in_stage_zero_must_be_the_snapshot_the_reference_was_made_from(tmp_path):
+    pinned = {**DELTA, "model": "unsloth/Llama-3.1-8B-Instruct@4699cc75"}
+    assert gate_stock_runtime(*stage2(tmp_path, delta=pinned)).ok
+    other = change(reference={**CHECK["reference"], "snapshot": "ffff0000"})
+    g = gate_stock_runtime(*stage2(tmp_path, other, delta=pinned))
+    assert not g.ok and any("reference" in r and "4699cc75" in r for r in g.reasons)
+    # an unpinned model id has no revision to compare
+    assert gate_stock_runtime(*stage2(tmp_path, other)).ok

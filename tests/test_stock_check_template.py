@@ -200,13 +200,60 @@ def test_a_directory_that_is_not_a_scratch_copy_is_refused(rig):
     assert done.returncode == 2 and "not a scratch copy" in done.stderr and (sc / "mine.txt").read_text() == "keep"
 
 
-def test_an_existing_reference_file_is_used_and_a_missing_one_is_generated(tmp_path):
+def ref_path(r):
+    return r.run_dir / "tt-metal-scratch/models/tt_transformers/tests/reference_outputs/Llama-3.1-8B-Instruct.refpt"
+
+
+def test_the_reference_is_always_made_from_the_runs_snapshot_even_when_the_tree_has_a_file_of_that_name(tmp_path):
+    # the tree's file belongs to the model the tree lists (any org's copy shares its name), not to this snapshot (review of PR 78)
     r = Rig(tmp_path)
-    assert "exists in the tree" in r.go("prepare").stdout
-    r2 = Rig(tmp_path / "second", refpt=False) if (tmp_path / "second").mkdir() is None else None
-    done = r2.go("prepare")
+    done = r.go("prepare")
     assert done.returncode == 0 and "generated" in done.stdout
-    assert (r2.run_dir / "tt-metal-scratch/models/tt_transformers/tests/reference_outputs/Llama-3.1-8B-Instruct.refpt").read_bytes() == b"made"
+    assert ref_path(r).read_bytes() == b"made"
+    side = json.loads(ref_path(r).with_name(ref_path(r).name + ".orchard.json").read_text())
+    assert side == {"model_id": "unsloth/Llama-3.1-8B-Instruct", "snapshot": "snap"}
+    assert (r.host / "models/tt_transformers/tests/reference_outputs/Llama-3.1-8B-Instruct.refpt").read_bytes() == b"refpt"   # host untouched
+
+
+def test_a_second_prepare_reuses_a_reference_made_for_the_same_snapshot_and_remakes_one_for_another(rig):
+    rig.go("prepare")
+    ref_path(rig).write_bytes(b"kept")
+    assert "already made" in rig.go("prepare").stdout and ref_path(rig).read_bytes() == b"kept"
+    side = ref_path(rig).with_name(ref_path(rig).name + ".orchard.json")
+    side.write_text(json.dumps({"model_id": "unsloth/Llama-3.1-8B-Instruct", "snapshot": "another"}))
+    assert "generated" in rig.go("prepare").stdout and ref_path(rig).read_bytes() == b"made"
+
+
+def test_a_generator_that_writes_nothing_does_not_leave_the_old_reference_in_place(rig):
+    rig.go("prepare")
+    side = ref_path(rig).with_name(ref_path(rig).name + ".orchard.json")
+    side.write_text(json.dumps({"model_id": "unsloth/Llama-3.1-8B-Instruct", "snapshot": "another"}))
+    (rig.run_dir / "tt-metal-scratch/models/tt_transformers/tests/generate_reference_hf.py").write_text("pass\n")
+    done = rig.go("prepare")
+    assert done.returncode == 2 and not ref_path(rig).exists()
+
+
+def test_a_reference_with_no_record_is_remade(rig):
+    rig.go("prepare")
+    ref_path(rig).with_name(ref_path(rig).name + ".orchard.json").unlink()
+    ref_path(rig).write_bytes(b"unknown origin")
+    assert "generated" in rig.go("prepare").stdout and ref_path(rig).read_bytes() == b"made"
+
+
+def test_run_records_the_reference_it_used_with_its_hash(rig):
+    rig.go("prepare")
+    rig.go("run")
+    ev = rig.evidence()
+    assert ev["reference"] == {"source": "generated", "model_id": "unsloth/Llama-3.1-8B-Instruct", "snapshot": "snap",
+                               "sha256": hashlib.sha256(b"made").hexdigest()}
+
+
+def test_run_refuses_a_reference_that_changed_after_prepare(rig):
+    rig.go("prepare")
+    side = ref_path(rig).with_name(ref_path(rig).name + ".orchard.json")
+    side.write_text(json.dumps({"model_id": "x/other", "snapshot": "snap"}))
+    done = rig.go("run")
+    assert done.returncode == 2 and "reference" in done.stderr
 
 
 def test_a_reference_that_cannot_be_generated_is_exit_2(tmp_path):

@@ -34,8 +34,8 @@ blocking finding, a positive decode speed, no model fetched from the Hub, and th
 
 1. Read `stages/2/stock_config.json` once.
 2. Run `python3 stages/2/stock_check.py prepare`. It copies the host tree's `models/` into the scratch directory (once), builds a model
-   directory named after the tt-transformers model from the snapshot's files, makes a reference file for the model when tt-transformers
-   has none, and writes `hw_test.json` and `handoff.json`. Exit 2 means a fact does not fit; its message names it.
+   directory named after the tt-transformers model from the snapshot's files, makes the reference file from the run's own snapshot on the CPU (the
+   file the host tree ships for a model name belongs to the model the tree lists, so it is not used), and writes `hw_test.json` and `handoff.json`. Exit 2 means a fact does not fit; its message names it.
 3. Check that `stages/2/hw_test.json` and `stages/2/handoff.json` exist (`ls -l`), and reply with a short summary.
 
 ## Finish phase

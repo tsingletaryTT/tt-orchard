@@ -165,14 +165,38 @@ def make_model_dir(cfg: dict, scratch: Path) -> Path:
     return target
 
 
+def snapshot_id(cfg: dict) -> str:
+    """The name of the snapshot directory, which is the revision in a Hugging Face cache."""
+    return Path(cfg["model_snapshot"]).resolve().name
+
+
+def reference_identity(cfg: dict) -> dict:
+    return {"model_id": cfg["model_id"].split("@", 1)[0], "snapshot": snapshot_id(cfg)}
+
+
+def reference_files(cfg: dict, scratch: Path) -> tuple[Path, Path]:
+    ref = scratch / REFERENCE_DIR / f"{cfg['model_name']}.refpt"
+    return ref, ref.with_name(ref.name + ".orchard.json")
+
+
 def ensure_reference(cfg: dict, scratch: Path, model_dir: Path) -> str:
     """tt-transformers' accuracy test reads `<reference_outputs>/<model name>.refpt`: reference tokens and the top-5 predictions of the
-    Hugging Face model on the same text. The host tree has one for the models it lists. For any other model it is made here, on the CPU,
-    with tt-transformers' own generator script."""
-    ref = scratch / REFERENCE_DIR / f"{cfg['model_name']}.refpt"
-    if ref.is_file():
-        return f"reference file {ref.name} exists in the tree"
-    say("no reference file for this model; generating one on the CPU (this takes a while)")
+    Hugging Face model on the same text. The file name is the tt-transformers model's name, which any organisation's copy shares, so a
+    file the host tree ships for that name is the reference of the model the tree lists and not of this run's snapshot (a fine-tune matched
+    through its base would be compared with its base's predictions). The reference is therefore always made here, on the CPU, from the run's
+    own snapshot with tt-transformers' generator script, and a record beside it (`<file>.orchard.json`: model id and snapshot name) lets a
+    second `prepare` reuse it. The host tree's file is never touched; the scratch copy of it is replaced."""
+    ref, record = reference_files(cfg, scratch)
+    want = reference_identity(cfg)
+    try:
+        have = json.loads(record.read_text(encoding="utf-8")) if ref.is_file() and record.is_file() else None
+    except (OSError, ValueError):
+        have = None
+    if have == want:
+        return f"reference file {ref.name} already made from this snapshot"
+    say("making the reference from this model's snapshot on the CPU (this takes a while)")
+    ref.unlink(missing_ok=True)
+    record.unlink(missing_ok=True)
     script = scratch / "models/tt_transformers/tests/generate_reference_hf.py"
     env = {**os.environ, "PYTHONPATH": python_path(cfg, scratch), "HF_HUB_OFFLINE": "1"}
     done = subprocess.run([sys.executable, str(script), "--total_length", "1024", "--output_file", str(ref), "--model", str(model_dir)],
@@ -181,7 +205,21 @@ def ensure_reference(cfg: dict, scratch: Path, model_dir: Path) -> str:
     (HERE / "log" / "generate-reference.log").write_text(done.stdout + done.stderr)
     if done.returncode != 0 or not ref.is_file():
         fail(2, "the reference file could not be generated; see log/generate-reference.log")
+    record.write_text(json.dumps(want) + "\n")
     return f"reference file {ref.name} generated"
+
+
+def reference_evidence(cfg: dict, scratch: Path) -> dict:
+    """The reference the run is about to use, read back from the record and the file (exit 2 when it is not this snapshot's)."""
+    ref, record = reference_files(cfg, scratch)
+    try:
+        have = json.loads(record.read_text(encoding="utf-8"))
+        digest = hashlib.sha256(ref.read_bytes()).hexdigest()
+    except (OSError, ValueError):
+        fail(2, "the reference file or its record is missing; run `prepare` first")
+    if have != reference_identity(cfg):
+        fail(2, f"the reference record {have!r} does not match this run's model and snapshot; run `prepare` again")
+    return {"source": "generated", **have, "sha256": digest}
 
 
 def prepare() -> None:
@@ -245,7 +283,7 @@ def hub_fetches(model_dir: Path, log_text: str) -> list[str]:
 def scratch_patch(cfg: dict, evidence: Path) -> str:
     """The change between the host tree's models/ and the scratch copy (what a stage changed), as a unified diff."""
     host, scratch = Path(cfg["tt_metal_dir"]) / "models", Path(cfg["scratch_dir"]) / "models"
-    done = subprocess.run(["diff", "-ruN", "-x", "__pycache__", "-x", "*.pyc", "-x", "*.refpt", str(host), str(scratch)],
+    done = subprocess.run(["diff", "-ruN", "-x", "__pycache__", "-x", "*.pyc", "-x", "*.refpt", "-x", "*.refpt.orchard.json", str(host), str(scratch)],
                           capture_output=True, text=True)
     lines = [ln.split("\t", 1)[0] if ln.startswith(("--- ", "+++ ")) else ln for ln in done.stdout.splitlines()
              if not ln.startswith("diff ")]                         # no command line, no timestamps, no machine path
@@ -263,6 +301,7 @@ def run() -> None:
     if not (scratch / MARKER).is_file():
         fail(2, "the scratch copy does not exist; run `prepare` first")
     model_dir = scratch / "hf-models" / cfg["model_name"]
+    reference = reference_evidence(cfg, scratch)
     (HERE / "log").mkdir(exist_ok=True)
     evidence = HERE / "evidence"
     evidence.mkdir(exist_ok=True)
@@ -286,6 +325,7 @@ def run() -> None:
                            "top5": accuracy[1] if accuracy else None},
         "free_run": {k: free[k] for k in ("prompt", "text", "new_tokens", "finish")},
         "speed": {"decode_tokens_per_s": free["decode_tokens_per_s"], "ttft_s": free["ttft_s"]}, "hub_fetch": fetched,
+        "reference": reference,
         "scratch_patch": scratch_patch(cfg, evidence), "exit_codes": {"token_accuracy": rc, "free_run": rc2},
         "seconds": round(time.time() - started, 1)}
     (evidence / "stock-check.json").write_text(json.dumps(result, indent=2) + "\n")

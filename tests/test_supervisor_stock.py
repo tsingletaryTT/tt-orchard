@@ -21,7 +21,8 @@ from test_stock_runtime_triage import LLAMA, params, snapshot, tensors_for
 
 pytestmark = pytest.mark.usefixtures("stub_tools")
 
-CHECK_RUN = {**CHECK, "model_id": "Altworld/Hemmingway-1", "template_sha256": TEMPLATE_SHA["stock_check.py"]}
+CHECK_RUN = {**CHECK, "model_id": "Altworld/Hemmingway-1", "template_sha256": TEMPLATE_SHA["stock_check.py"],
+             "reference": {**CHECK["reference"], "model_id": "Altworld/Hemmingway-1"}}
 STOCK_FILES = {
     (2, "prepare"): {"evidence/notes.txt": "plan", "stock_check.py": TEMPLATE_TEXT["stock_check.py"],
                      "fake_stock_run.py": ("import json, pathlib\nhere = pathlib.Path(__file__).resolve().parent\n"

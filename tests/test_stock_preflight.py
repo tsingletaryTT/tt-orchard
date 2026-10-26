@@ -247,6 +247,20 @@ def test_a_resume_of_a_run_that_started_without_stock_params_does_not_add_them(c
     assert not [i for i in _inputs(rec) if i.startswith("stock_params=")]
 
 
+def test_a_resume_with_an_unreadable_ledger_adds_no_stock_params(conf, tmp_path):
+    from test_cli import Recorder, run, signals
+    snap = tmp_path / "snap"
+    snap.mkdir()
+    (snap / "config.json").write_text("{}")
+    run_dir = conf.parent / "runs" / "cloudflare--clef"
+    run_dir.mkdir(parents=True)
+    (run_dir / "ledger.jsonl").write_text("not a ledger line\n")
+    rep = report(tt_transformers=[ROW_PARAMS, ROW_README])
+    sig = signals(research=lambda *a: rep, stock_params=lambda name: Path("/host/params") / name, local_snapshot=lambda m: snap)
+    code, out, rec = run(conf, ["bringup", "Cloudflare/clef", "--run-dir", str(run_dir)], rec=Recorder(), sig=sig)
+    assert not [i for i in _inputs(rec) if i.startswith("stock_params=")]
+
+
 def test_a_fresh_run_is_not_affected_by_the_resume_rule(conf):
     code, out, rec, snap = _cli_run(conf)
     assert "stock_params=/host/params/Llama-3.1-8B-Instruct" in _inputs(rec)

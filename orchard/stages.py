@@ -541,6 +541,20 @@ def gate_stock_runtime(stage_dir, run_dir) -> GateResult:
     sp = d.get("speed") if isinstance(d.get("speed"), dict) else {}
     if not _number(sp.get("decode_tokens_per_s")) or not sp["decode_tokens_per_s"] > 0:
         reasons.append(f"speed.decode_tokens_per_s must be a positive number, got {sp.get('decode_tokens_per_s')!r}")
+    ref = d.get("reference")
+    want_rev = str((delta or {}).get("model", "")).split("@", 1)[1] if "@" in str((delta or {}).get("model", "")) else None
+    if not isinstance(ref, dict) or ref.get("source") != "generated":
+        reasons.append("reference must record a reference made from this run's snapshot (source 'generated'): the file the host tree ships "
+                       f"for a model name belongs to the model the tree lists, got {ref!r}")
+    else:
+        if str(ref.get("model_id", "")).split("@", 1)[0] != want:
+            reasons.append(f"reference model_id {ref.get('model_id')!r} is not the model of this run ({want!r})")
+        if not _text(ref.get("snapshot")):
+            reasons.append("reference must name the snapshot it was made from")
+        elif want_rev and ref["snapshot"] != want_rev:
+            reasons.append(f"reference was made from snapshot {ref['snapshot']!r}, but stage 0 names revision {want_rev!r}")
+        if not re.fullmatch(r"[0-9a-f]{64}", str(ref.get("sha256", ""))):
+            reasons.append("reference needs the sha256 of the reference file (64 hex digits)")
     reasons += _hub_fetch_reasons(d)
     patch = d.get("scratch_patch")
     if not _text(patch) or inside(run_dir, f"stages/2/{patch}") is None:
