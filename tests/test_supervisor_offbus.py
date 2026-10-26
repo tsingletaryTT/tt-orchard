@@ -310,3 +310,107 @@ def test_a_container_that_survives_keeps_the_test_lease_when_the_block_is_off_bu
     assert rig.m.leases, "a lease a live container runs under was not given back"
     end = decisions(rig, "blocked")[-1]
     assert bus.OFF_BUS in end["reason"] or "still running" in end["reason"]
+
+
+# ---- Copilot review of PR 79, finding 3: a coder that does not come back after a park is checked against the bus too -------------
+
+def restore_fails_after_the_4_chip_test(rig, fake_bus, dead):
+    """The 4-chip test parks the coder. When it has run, the coder stops coming back (never ready), so the restore fails."""
+    from run_fakes import SWAP_SCRIPTS, bringup, swap_entry, swap_prepare
+    rig.script = lambda r: bringup(r, overrides={(4, "prepare"): swap_prepare(),
+                                                 (4, "finish"): {"result.json": {"configs": [swap_entry(n) for n in (1, 2, 4)]}}})
+    real = supervisor.spawn_checked
+    script = f"configs/4/{SWAP_SCRIPTS[4]}"
+
+    def spawn(command, run_dir, env, timeout, out):
+        got = real(command, run_dir, env, timeout, out)
+        if command.endswith(script):
+            rig.m.never_ready = True                                   # the restart that follows never answers
+            if dead:
+                fake_bus.bad = {c: "D3cold" for c in ALL_CHIPS}
+        return got
+    return spawn
+
+
+def test_a_coder_that_does_not_come_back_after_a_park_on_a_dead_board_is_off_the_bus(rig, fake_bus, monkeypatch):
+    monkeypatch.setattr(supervisor, "spawn_checked", restore_fails_after_the_4_chip_test(rig, fake_bus, dead=True))
+    assert rig.run() == supervisor.EXIT_BLOCKED
+    end = decisions(rig, "blocked")[-1]
+    assert end["code"] == "hardware-unhealthy" and bus.OFF_BUS in end["reason"]
+    assert "cold-boot budget" in end["reason"], "the failure that came first is kept"
+    assert blocked.retryable(end["code"], end["reason"]) is False
+
+
+def test_a_coder_that_does_not_come_back_after_a_park_on_a_healthy_bus_keeps_its_own_block(rig, fake_bus, monkeypatch):
+    monkeypatch.setattr(supervisor, "spawn_checked", restore_fails_after_the_4_chip_test(rig, fake_bus, dead=False))
+    assert rig.run() == supervisor.EXIT_BLOCKED
+    end = decisions(rig, "blocked")[-1]
+    assert bus.OFF_BUS not in end["reason"] and "cold-boot budget" in end["reason"]
+    assert fake_bus.reads >= 1
+    assert not rig.ends(4), "stage 4 did not end as if the restore had worked"
+
+
+def test_a_recovery_after_a_restart_checks_the_bus_when_the_coder_does_not_come_back(rig, fake_bus):
+    from run_fakes import Crash
+    with pytest.raises(Crash):
+        rig.run(crash_if=lambda e: e["event"] == "park" and e["data"].get("step") == "stopped")
+    rig.m.never_ready = True
+    fake_bus.bad = {c: "D3cold" for c in ALL_CHIPS}
+    assert rig.run(pid=200) == supervisor.EXIT_BLOCKED
+    end = decisions(rig, "blocked")[-1]
+    assert end["code"] == "hardware-unhealthy" and bus.OFF_BUS in end["reason"]
+
+
+def die_after_the_first_test(rig, fake_bus, monkeypatch):
+    """Stage 2's test is the first command the supervisor spawns. Once it has run, the coder stops coming back and the board is dead."""
+    real = supervisor.spawn_checked
+
+    def spawn(command, run_dir, env, timeout, out):
+        got = real(command, run_dir, env, timeout, out)
+        rig.m.never_ready = True
+        fake_bus.bad = {c: "D3cold" for c in ALL_CHIPS}
+        return got
+    monkeypatch.setattr(supervisor, "spawn_checked", spawn)
+
+
+def test_a_coder_that_does_not_come_back_after_the_stage_2_park_is_off_the_bus(tmp_path, fake_bus, monkeypatch):
+    r = Rig(tmp_path, chips=4)                   # a coder on both boards is parked for every hardware test
+    r.args.unattended = True
+    r.on_sleep = None
+    try:
+        die_after_the_first_test(r, fake_bus, monkeypatch)
+        assert r.run() == supervisor.EXIT_BLOCKED
+        assert [d for d in decisions(r, "hardware phase") if d.get("action") == "park"]
+        end = decisions(r, "blocked")[-1]
+        assert bus.OFF_BUS in end["reason"] and "cold-boot budget" in end["reason"]
+    finally:
+        r.close()
+
+
+def test_a_coder_that_does_not_come_back_after_a_wide_container_test_is_off_the_bus(tmp_path, fake_bus, monkeypatch):
+    from test_supervisor_container_base import wide_rig
+    r = wide_rig(tmp_path)
+    r.args.unattended = True
+    r.on_sleep = None
+    try:
+        die_after_the_first_test(r, fake_bus, monkeypatch)
+        assert r.run() == supervisor.EXIT_BLOCKED
+        end = decisions(r, "blocked")[-1]
+        assert bus.OFF_BUS in end["reason"] and "cold-boot budget" in end["reason"]
+    finally:
+        r.close()
+
+
+def test_only_the_coders_chips_are_judged_when_the_restore_fails(rig, fake_bus, monkeypatch):
+    from run_fakes import BOARDS
+    spawn = restore_fails_after_the_4_chip_test(rig, fake_bus, dead=False)
+
+    def with_the_other_board_dead(command, run_dir, env, timeout, out):
+        got = spawn(command, run_dir, env, timeout, out)
+        if rig.m.never_ready:
+            fake_bus.bad = {c: "D3cold" for c in BOARDS["B1"]}         # the board the coder does not use
+        return got
+    monkeypatch.setattr(supervisor, "spawn_checked", with_the_other_board_dead)
+    assert rig.run() == supervisor.EXIT_BLOCKED
+    end = decisions(rig, "blocked")[-1]
+    assert bus.OFF_BUS not in end["reason"], "a board the coder does not use is not why the coder did not return"

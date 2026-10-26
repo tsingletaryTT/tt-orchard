@@ -2242,3 +2242,14 @@ coder boot or benchmark phase was read as a model failure, and a `hardware-unhea
 - Not done: the chip a lease release's own reset leaves unreadable is judged only after a failure, so a run that loses a board while idle between tests is found at its next failure; the supervisor's own
   release of a lease on a dead board may itself fail (it reports a refused release as before); the trigger of the 2026-10-22 D3cold event is still not understood.
 - Full suite: 7294 passed, 3 skipped.
+- Review of PR 79 (Copilot, three findings, all real, each reproduced by a failing test first, one commit each):
+  - An off-bus block raised inside a listed stage 4 test skipped the labelled-container sweep in both paths (`_run_listed`: a free board, and a park), so a container could keep running while the lease went back. The sweep now runs from a
+    `finally` through `_cleanup_after_test`: the off-bus reason survives, and a container that cannot be removed keeps its lease (`surviving_containers`). Tests for 2 chips (free board) and 4 chips (park), each with a container that is
+    removed and one that never goes.
+  - The first version returned None from `_off_bus` in a lab run, which also switched off the check of the local coder's board (the coder runs on this box in a lab run). Now only a lab test's own failure is skipped (its chips are on the lab);
+    the coder's chips are always read. My earlier note calling the lab clause equivalent was wrong; it was not once the coder was considered.
+  - A coder that does not come back after a park (`Handoff.restore`, at three sites) or after a restart (`recover_and_restore`) was classed by the handoff's own block text, so it stayed retryable. `_restore_coder` and the recovery call now run
+    the held-chip diagnosis on a `Blocked` and re-raise with the off-bus text when a chip is gone. Tests: the stage 4 park, the stage 2 park (coder on four chips), the wide container test, a recovery after a crash, a healthy bus (keeps its own block and
+    stage 4 does not end), and a dead board the coder does not use (not blamed).
+  - Mutations: 4 on the sweep (1 survived: the cleanup swallowing every block, which tests elsewhere cover), 3 on the lab change, 7 on the restore check (the swallow and the chips-not-passed mutants first survived and got tests). All red now.
+  - Added tests: 12 in `tests/test_supervisor_offbus.py` (now 28).

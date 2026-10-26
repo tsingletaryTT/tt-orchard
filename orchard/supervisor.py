@@ -576,6 +576,15 @@ class Supervisor:
         if dead:
             self._block(stage, f"{dead}. It was found after this failure: {reason}", off_bus=True, **evidence)
 
+    def _restore_coder(self, stage, h) -> None:
+        """Bring the parked coder back (Handoff.restore). A failure is checked against the bus first, as a failed coder boot is
+        (_block_if_off_bus): the board that was reset may have left the bus, and a retry would meet the same board."""
+        try:
+            h.restore()
+        except Blocked as exc:
+            self._block_if_off_bus(stage, exc.reason, h.lease.chips)
+            raise
+
     def _evidence_file(self, stem: str, text: str) -> Path:
         d = self.run_dir / "evidence"
         d.mkdir(parents=True, exist_ok=True)
@@ -1061,8 +1070,12 @@ class Supervisor:
             # A park or restore was interrupted (a crash, or a block the operator resumed).
             rec = recover(entries, adapter=self.adapter, server=self.coder, standin=self.standin)
             h = self._handoff(hp.stage, Lease.from_record(hp.lease))
-            h.recover_and_restore(rec, chips=self.coder_chips, who=WHO, reason="coder",
-                                  wait_budget_s=COLD_BOOT_BUDGET_S)
+            try:
+                h.recover_and_restore(rec, chips=self.coder_chips, who=WHO, reason="coder",
+                                      wait_budget_s=COLD_BOOT_BUDGET_S)
+            except Blocked as exc:
+                self._block_if_off_bus(hp.stage, exc.reason, h.lease.chips)
+                raise
             if rec.action != "abandon":
                 self.coder_lease = h.lease
                 return
@@ -1730,7 +1743,7 @@ class Supervisor:
                 self._run_test(spec, stage_dir, test, lease, **record)
             finally:
                 self._cleanup_after_test(after_test)
-            h.restore()
+            self._restore_coder(n, h)
             self.coder_lease = h.lease
             return
         exact = None
@@ -1907,7 +1920,7 @@ class Supervisor:
             self._cleanup_after_test(after_test)
         if extra is not None:
             self._give_back_test_lease(n, extra)
-        h.restore()
+        self._restore_coder(n, h)
         self.coder_lease = h.lease
 
     def _lab_hardware_phase(self, spec, stage_dir: Path, test: dict, after_test=None) -> None:
@@ -2181,7 +2194,7 @@ class Supervisor:
             self._cleanup_after_test(lambda: self._sweep(n))
         if extra is not None:
             self._give_back_test_lease(n, extra)
-        h.restore()
+        self._restore_coder(n, h)
         self.coder_lease = h.lease
 
     def _run_listed_on_lab(self, spec, stage_dir: Path, test) -> None:
