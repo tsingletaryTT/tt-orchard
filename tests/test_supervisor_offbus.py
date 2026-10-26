@@ -12,7 +12,7 @@ import pytest
 
 from orchard import blocked, bus, supervisor
 from orchard.server import ServerError
-from run_fakes import MachineCoder, BOARDS, FAILING_TEST_SCRIPTS, SWAP_FAILED, hw_failing, test_fails_until_escalated  # noqa: F401
+from run_fakes import FakeContainers, MachineCoder, BOARDS, FAILING_TEST_SCRIPTS, SWAP_FAILED, hw_failing, test_fails_until_escalated  # noqa: F401
 from test_supervisor import Rig, Stop
 
 pytestmark = pytest.mark.usefixtures("stub_tools")
@@ -219,3 +219,61 @@ def test_a_coder_whose_start_call_fails_on_a_healthy_bus_keeps_its_own_block(rig
     end = decisions(rig, "blocked")[-1]
     assert bus.OFF_BUS not in end["reason"] and "docker run failed" in end["reason"]
     assert fake_bus.reads >= 1
+
+
+# ---- Copilot review of PR 79, finding 1: an off-bus block inside a listed test still sweeps the test containers -------------------
+
+FLAKY = "import sys\nprint('Fabric Router Sync: Timeout')\nsys.exit(4)\n"
+
+
+class ContainerAfterTest(FakeContainers):
+    """No container until the 4-chip test has run, then `c1` until it is removed (or for ever when `stubborn`)."""
+
+    def __init__(self, stubborn=False):
+        super().__init__()
+        self.armed, self.gone, self.stubborn = False, False, stubborn
+
+    def list(self, label):
+        self.calls.append(("list", label))
+        return ["c1"] if self.armed and not self.gone else []
+
+    def remove(self, cid):
+        self.calls.append(("remove", cid))
+        self.gone = not self.stubborn
+
+
+def stage4_failing_on_a_dead_board(rig, fake_bus, containers, chips=4):
+    from run_fakes import SWAP_SCRIPTS, bringup, swap_entry, swap_prepare
+    rig.containers = containers
+    files = swap_prepare()
+    script = f"configs/{chips}/{SWAP_SCRIPTS[chips]}"
+    files[script] = FLAKY
+    finish = {"result.json": {"configs": [swap_entry(n, ok=n != chips) for n in (1, 2, 4)]}}
+    rig.script = lambda r: bringup(r, overrides={(4, "prepare"): files, (4, "finish"): finish})
+    real = supervisor.spawn_checked
+
+    def spawn(command, run_dir, env, timeout, out):
+        got = real(command, run_dir, env, timeout, out)
+        if command.endswith(script):
+            fake_bus.bad = {c: "D3cold" for c in ALL_CHIPS}              # the board is gone once the 4-chip test has failed
+            containers.armed = True                                      # and the test left its container running
+        return got
+    return spawn
+
+
+@pytest.mark.parametrize("chips", [2, 4])          # 2 uses a free board, 4 parks the coder: two code paths
+def test_a_dead_board_found_after_a_listed_test_still_stops_its_containers(rig, fake_bus, monkeypatch, chips):
+    monkeypatch.setattr(supervisor, "spawn_checked", stage4_failing_on_a_dead_board(rig, fake_bus, ContainerAfterTest(), chips))
+    assert rig.run() == supervisor.EXIT_BLOCKED
+    assert ("remove", "c1") in rig.containers.calls, "the labelled containers were stopped before the block ended the stage"
+    end = decisions(rig, "blocked")[-1]
+    assert bus.OFF_BUS in end["reason"], "the off-bus reason is kept"
+
+
+@pytest.mark.parametrize("chips", [2, 4])
+def test_a_container_that_survives_keeps_the_test_lease_when_the_block_is_off_bus(rig, fake_bus, monkeypatch, chips):
+    monkeypatch.setattr(supervisor, "spawn_checked", stage4_failing_on_a_dead_board(rig, fake_bus, ContainerAfterTest(stubborn=True), chips))
+    assert rig.run() == supervisor.EXIT_BLOCKED
+    assert rig.m.leases, "a lease a live container runs under was not given back"
+    end = decisions(rig, "blocked")[-1]
+    assert bus.OFF_BUS in end["reason"] or "still running" in end["reason"]

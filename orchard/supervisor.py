@@ -2156,8 +2156,11 @@ class Supervisor:
         if d.action == "use_free":
             exact = first_chip[d.free_boards[0]] if test.boards == 1 else None
             lease = self._take_test_lease(spec, test, test.boards, exact)
-            self._run_listed_test(spec, stage_dir, test, [lease])
-            self._sweep(n)
+            try:
+                self._run_listed_test(spec, stage_dir, test, [lease])
+            finally:
+                # Also when the test ends in a block (a board off the PCIe bus found by _spawn): its container may still run.
+                self._cleanup_after_test(lambda: self._sweep(n))
             self._give_back_test_lease(n, lease)
             return
         # The coder's boards are needed. Further boards first: if one cannot be had, the coder
@@ -2173,8 +2176,10 @@ class Supervisor:
         except Blocked:
             self._release_test_lease()
             raise
-        self._run_listed_test(spec, stage_dir, test, [lease] + ([extra] if extra else []))
-        self._sweep(n)
+        try:
+            self._run_listed_test(spec, stage_dir, test, [lease] + ([extra] if extra else []))
+        finally:
+            self._cleanup_after_test(lambda: self._sweep(n))
         if extra is not None:
             self._give_back_test_lease(n, extra)
         h.restore()
