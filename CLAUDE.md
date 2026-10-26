@@ -2213,3 +2213,43 @@ Prompt (operator): research tt-metal's recent fixes, then "go through all the st
 - `silu_mul` on the v0.80.0 tree, three coder-written kernels from one probe round (T=0.7, Coder-Next on one board, pin `fec38c6`): 3 of 3 pass the simulator (12, 7 and 17 turns), and the probe's hardware phase passes the smoke test and all three kernels (PCC min 0.9999958, 0.9999963, 0.9999963). That matches the earlier round (3 of 3, PCC min 0.999996), but the two rounds differ in the tt-lang pin, the skill text and the host tree, so the match shows the new tree works and does not isolate any one change. The hardware phase was driven by a small script calling the probe's `run_hardware` on the saved attempts, because the coder held board 1 and another agent held board 0 at the time; the final run used the probe's own chip (chip 1).
 - Left untouched on request or by caution: `~/tt-metal-v0.78.0-pre-fabricfix` (124 unpushed commits, 2 stashes, tt-tnt files, a live `tt-vjepa2` worktree) and `~/tt-metal-qwen36-p150x2` (an unpushed DFlash commit and untracked `models/autoports/`, `packaging/`). Deleted: `~/code/tt-metal-fastmodels`, `~/tt-metal-55fd115`, `~/tt-metal-v0.75.0` (its 3 unpushed commits are in `~/archive-tt-metal/`).
 - Not done: a 2-chip swap run on this tree; a check of other agents' venvs for references to `~/tt-metal`; v0.81 model-support work (Gemma 4, Muse-Glimmer, the Qwen3.8 MTP vLLM class) is not available on this tree.
+
+## 2026-10-26 (UTC): a chip off the bus is told apart from a model failure after the run starts (branch `runtime-bus-check`, version 0.8.44)
+Prompt (parent session): finish the second half of issue 25. The preflight `bus` row (version 0.8.29) only looks before a run. Once a run had started, a failed hardware test,
+coder boot or benchmark phase was read as a model failure, and a `hardware-unhealthy` block was retried after 60 s against the same board.
+- `bus.diagnose(held=, needed=)` reads the same sysfs files as the preflight row (no lease, no chip opened, no reset) and returns None or a sentence that starts with
+  `bus.OFF_BUS` ("a chip this run uses is off the PCIe bus or unreadable") and names each chip and cause. With `held` (the PCI addresses the run holds) only those chips are judged,
+  and a held address missing from the bus is named; without it the bus must show `needed` chips. A bus that cannot be listed gives no finding, so the earlier failure stands.
+- Reset window: a bad reading is read again every `POLL_S` = 5 s for up to `SETTLE_S` = 90 s before the chip is called dead. Both numbers are choices (the unreadable serial after a
+  lease release was seen to clear in under a minute; 90 s adds half again). They are not measured against a real reset on this branch.
+- Supervisor: `_spawn` checks a test that timed out or exited non-zero (not a refused command, which never reached a chip) against the chips the test holds; `_start_coder` and
+  `_finish_boot` check a coder that did not start or answer against the coder lease's chips. A finding blocks with the chip, the cause and the failure that came first; a healthy bus
+  leaves the old path (escalation, `coder-unusable`) alone. A passing test never reads the bus. A lab run is not checked (its chips are not on this bus).
+- `bench_session`: after a failed phase, or a server that never became healthy, it checks the chips in `TT_VISIBLE_DEVICES` (only entries that are PCI addresses; with none it cannot judge).
+  A finding ends the session with exit 7 (`EXIT_OFF_BUS`), sets `off_bus` in summary.json and in the phase's `problem`, and runs no later phase.
+- No retry: `blocked.retryable(code, reason)` is false for a `hardware-unhealthy` reason that contains the OFF_BUS phrase, and `bringup`'s automatic retry uses it. The code stays
+  `hardware-unhealthy`. The phrase is matched in text, so `blocked.OFF_BUS_MARK` and `bus.OFF_BUS` are tied by a test.
+- Text: BLOCKED.md carries the reason (and so the chip and cause); the `hardware-unhealthy` unblock steps and README section 5.5a and the `bus` row say what the check does.
+- Tests first: 16 in `tests/test_bus_runtime.py`, 16 in `tests/test_supervisor_offbus.py`, 9 in `tests/test_bench_session_offbus.py`, 2 in `tests/test_auto_retry.py`. A conftest fixture
+  replaces the default bus reader, because the fake chips in the supervisor tests have made-up addresses and this box has real chips.
+- Mutations: 40 (11 on `bus.py`, 3 on `blocked.py`, 2 on `cli.py`, 14 on the supervisor, 10 on `bench_session.py`). One survived at first (the coder-start call site, `self.coder.start` raising); it
+  got two tests and is red. Two mutations (sleep unused in the supervisor and in the bench session) make the check spin, which the runner counted as detected by timeout. Two clauses I removed
+  as equivalent: a `self.lab is None` test beside `_off_bus`'s own lab guard, and a `write()` before a return that the `finally` repeats. I did not watch the cli test fail before writing the cli change,
+  but the `cli1` and `cli2` mutations show it red.
+- Shown only by fakes: everything. The sysfs tree, the bus states and the reset window are fakes; no chip, gozer, `tt-smi` or `/dev/tenstorrent` was touched. A real D3cold board, a real reset's
+  serial window and a real `gozer run` giving `TT_VISIBLE_DEVICES` as PCI addresses were not seen (the supervisor builds that variable from lease chip addresses, and the bench session expects the
+  same form from `gozer run`).
+- Not done: the chip a lease release's own reset leaves unreadable is judged only after a failure, so a run that loses a board while idle between tests is found at its next failure; the supervisor's own
+  release of a lease on a dead board may itself fail (it reports a refused release as before); the trigger of the 2026-10-22 D3cold event is still not understood.
+- Full suite: 7294 passed, 3 skipped.
+- Review of PR 79 (Copilot, three findings, all real, each reproduced by a failing test first, one commit each):
+  - An off-bus block raised inside a listed stage 4 test skipped the labelled-container sweep in both paths (`_run_listed`: a free board, and a park), so a container could keep running while the lease went back. The sweep now runs from a
+    `finally` through `_cleanup_after_test`: the off-bus reason survives, and a container that cannot be removed keeps its lease (`surviving_containers`). Tests for 2 chips (free board) and 4 chips (park), each with a container that is
+    removed and one that never goes.
+  - The first version returned None from `_off_bus` in a lab run, which also switched off the check of the local coder's board (the coder runs on this box in a lab run). Now only a lab test's own failure is skipped (its chips are on the lab);
+    the coder's chips are always read. My earlier note calling the lab clause equivalent was wrong; it was not once the coder was considered.
+  - A coder that does not come back after a park (`Handoff.restore`, at three sites) or after a restart (`recover_and_restore`) was classed by the handoff's own block text, so it stayed retryable. `_restore_coder` and the recovery call now run
+    the held-chip diagnosis on a `Blocked` and re-raise with the off-bus text when a chip is gone. Tests: the stage 4 park, the stage 2 park (coder on four chips), the wide container test, a recovery after a crash, a healthy bus (keeps its own block and
+    stage 4 does not end), and a dead board the coder does not use (not blamed).
+  - Mutations: 4 on the sweep (1 survived: the cleanup swallowing every block, which tests elsewhere cover), 3 on the lab change, 7 on the restore check (the swallow and the chips-not-passed mutants first survived and got tests). All red now.
+  - Added tests: 12 in `tests/test_supervisor_offbus.py` (now 28).
