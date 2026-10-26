@@ -132,16 +132,18 @@ SIDECAR_MIN_QUESTIONS = 10      # choice: fewest questions a parity result may r
 # is one run: the suite served by Qwen3.8-27B (the control for AREX-2's configuration: the 2-chip bundle, drafter off,
 # host sampling), 8 prompts, 2026-10-26 (docs/run-logs/2026-10-26-suite-control.md). That is one model and eight
 # replies, which cannot calibrate a threshold. It showed no finding of any kind on those replies, so no check is known
-# to give a false positive on a healthy base reply, and it showed that 5 of the 8 replies were cut off inside the
-# reasoning at SUITE_MAX_TOKENS (see below). No fine-tune was served with the suite, so no number below was set from
+# to give a false positive on a healthy base reply, and it showed that 6 of the 8 replies reached SUITE_MAX_TOKENS with
+# thinking on (see below). A second boot tried thinking on and off at several limits (same run log), still on one model. No fine-tune was served with the suite, so no number below was set from
 # data, and each one stays provisional until fine-tunes have been measured against controls.
 SUITE_MIN_PROMPTS = 5           # choice: issue 15 asks for at least five prompts of different kinds
 SUITE_MAX_TOKENS = 64           # choice: long enough for a loop or a drift to show, short enough that eight
                                 # requests cost about a minute at 20 tokens/s (more with thinking on). Measured on
-                                # one model (Qwen3.8-27B, thinking on by default): 5 of 8 replies ended at this limit
-                                # inside the reasoning, with no answer; 3 gave an answer or a tool call. The checks
-                                # then read the reasoning text. Whether to raise it, or to turn thinking off for the
-                                # suite, is open (it would change what the suite sees).
+                                # one model (Qwen3.8-27B, thinking on by default): 6 of 8 replies reached this limit
+                                # (5 inside the reasoning with no answer, 1 inside its answer); 2 completed. At 256
+                                # all 8 completed in 61 s (thinking on; the longest reply was 253 tokens) or 31 s
+                                # (thinking off); 1024 gave the same tokens as 256. No check changed its verdict in
+                                # any of the five cells. Left at 64: the choice between thinking off and a larger
+                                # limit is open (docs/run-logs/2026-10-26-suite-control.md).
 SUITE_BLOCKING_KINDS = ("control_token_leak", "cross_request_leak", "corrupt_first_token", "repeated_first_token",
                         "mechanical_repetition", "gibberish")
                                 # choice: the findings that fail a gate when the control does not show them. A

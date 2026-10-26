@@ -24,11 +24,41 @@ for that reason alone. This key is new in `prepare_swap.py` (version 0.8.44).
 one healthy model, no check fired. That is the whole false-positive evidence: it does not show that the checks are free of false
 positives on other prompts or other models.
 
-Finish reasons: five replies (`chat-capital`, `code-fizzbuzz`, `non-english`, `summarize`, `list-format`) ended at the 64-token limit
-inside the reasoning with an empty answer; `arithmetic` and `multi-turn` gave an answer; `tool-call` returned a call to `get_weather`
-with `{"city": "Lisbon"}`. With thinking on, which is this model's default, 64 tokens is not enough for most prompts to reach an answer.
-The checks then read the reasoning text. The identical-replies rule also compares the reasoning text when there is no answer, so it still
-has something to compare, but a comparison of reasoning that stops mid-sentence is weaker than a comparison of answers.
+Finish reasons: six replies reached the 64-token limit. Five (`chat-capital`, `code-fizzbuzz`, `non-english`, `summarize`, `list-format`) ended inside the
+reasoning with an empty answer, and `arithmetic` was cut inside its answer. `multi-turn` finished with an answer and `tool-call` returned a call to
+`get_weather` with `{"city": "Lisbon"}`. With thinking on, which is this model's default, 64 tokens is not enough for most prompts to reach an answer.
+The checks then read the reasoning text. The identical-replies rule also compares the reasoning text when there is no answer, so it still has something to
+compare, but a comparison of reasoning that stops mid-sentence is weaker than a comparison of answers. The next section measures other settings.
+
+## Thinking and token limits, one server boot (A/B)
+
+Same server, same 8 prompts, greedy (`temperature` 0, `seed` 1234), one boot of the control's directory (ready in 266 s on a warm cache), five cells
+run one after the other on one 2-chip board. Thinking is switched per request with `chat_template_kwargs: {"enable_thinking": false}`. Raw replies:
+`evidence/suite-control-qwen3.8-27b/ab-cells.json` (`ab-summary.json` holds the counts below). Findings are what `orchard/prompt_suite.py` reports on the
+cell's replies (the gate's reasons and the advisory list, and every finding of every kind); none of the cells had a control to compare with.
+
+| Thinking | max_tokens | Reached the limit | Answer or tool call present | Cut inside an answer | Findings (blocking / advisory) | Completion tokens | Wall time |
+|---|---|---|---|---|---|---|---|
+| on | 64 | 6 of 8 | 3 of 8 | 1 (arithmetic) | 0 / 0 | 495 | 40.1 s |
+| on | 256 | 0 of 8 | 8 of 8 | 0 | 0 / 0 | 841 | 61.2 s |
+| on | 1024 | 0 of 8 | 8 of 8 | 0 | 0 / 0 | 841 | 61.6 s |
+| off | 64 | 2 of 8 | 8 of 8 | 2 (code-fizzbuzz, arithmetic) | 0 / 0 | 240 | 25.2 s |
+| off | 256 | 0 of 8 | 8 of 8 | 0 | 0 / 0 | 338 | 30.9 s |
+
+- Thinking on at 256 and at 1024 gave token-for-token the same 841 tokens, so the extra room was not used. The longest reply at 256 was `code-fizzbuzz`
+  with 253 tokens, three below the limit, so 256 has almost no margin on that prompt. 512 was not tried.
+- Thinking off gives every prompt a complete reply at 256 in half the time. At 64 it cuts two code and arithmetic answers. The replies it gives are the
+  same answers the thinking-on cells give (same capital, same Russian sentence, same list, same tool call).
+- No check changed its verdict in any cell: no blocking and no advisory finding anywhere, including at 64 tokens with thinking on, where five replies had
+  an empty answer. The empty-answer check did not fire on them, because the check reads the reasoning text when the answer is empty (a reply that has
+  reasoning is not empty). So the 64-token cells do not show the thinking-on replies as failures, and they also do not show what the reply would
+  have said.
+
+Recommendation (a measurement on one model, not a rule): the cheapest setting that gives readable, complete answers for all eight prompts is thinking off at
+256 tokens (30.9 s, 338 tokens). It does not run the model in its default mode, so it cannot show a failure that only appears while reasoning (a loop in the
+reasoning, for example). The cheapest setting that keeps the default mode and gives complete answers is thinking on at 256 (61.2 s), with a thin margin on one prompt; 512 would be the
+safer value and was not measured. Thinking on at 64, the current default, costs 40.1 s and gives 2 complete replies. The `SUITE_*` defaults are unchanged. Not shown:
+whether a fine-tune needs more room than its base for the same prompts; a model that reasons longer would need a larger limit.
 
 ## The base against AREX-2's reference
 

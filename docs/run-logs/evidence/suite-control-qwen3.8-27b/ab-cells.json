@@ -1,0 +1,536 @@
+{
+ "model_id": "Qwen/Qwen3.8-27B",
+ "suite_sha256": "afc956d9d87a0d2a3c7ce1421773145b4bf2c780b3339075317e1c168d3739da",
+ "cells": [
+  {
+   "thinking": true,
+   "max_tokens": 64,
+   "wall_s": 40.1,
+   "entries": [
+    {
+     "id": "chat-capital",
+     "mode": "chat",
+     "content": "",
+     "reasoning": "We need answer user's simple request. Need final two sentences. Ensure exactly two sentences? \"What is the capital of France, and what is one famous building there? Answer in two sentences.\" We can say: \"The capital of France is Paris. One famous building there is the Eiffel Tower.\" Two sentences.",
+     "tool_calls": [],
+     "finish_reason": "length",
+     "error": null,
+     "completion_tokens": 64,
+     "seconds": 5.05
+    },
+    {
+     "id": "code-fizzbuzz",
+     "mode": "chat",
+     "content": "",
+     "reasoning": "We need answer user's request: \"Write a Python function fizzbuzz(n) that returns a list of strings for the numbers 1 to n: 'Fizz' for multiples of 3, 'Buzz' for multiples of 5, 'FizzBuzz' for both, otherwise the number. Reply with the code only",
+     "tool_calls": [],
+     "finish_reason": "length",
+     "error": null,
+     "completion_tokens": 64,
+     "seconds": 4.95
+    },
+    {
+     "id": "arithmetic",
+     "mode": "chat",
+     "content": "\n\n7 pens cost: \\(7 \\times 3 = 21\\) dollars  \n4 notebooks cost: \\(4 \\times ",
+     "reasoning": "We need answer simple arithmetic. Need final with brief steps. Compute 7*3=21, 4*5=20, total 41 dollars.\n",
+     "tool_calls": [],
+     "finish_reason": "length",
+     "error": null,
+     "completion_tokens": 64,
+     "seconds": 5.23
+    },
+    {
+     "id": "multi-turn",
+     "mode": "chat",
+     "content": "\n\nYour name is Zephyrine, and you like to drink green tea.",
+     "reasoning": "We need to answer user: \"What is my name, and what do I like to drink?\" Context: user said name Zephyrine and likes green tea. Need final concise.\n",
+     "tool_calls": [],
+     "finish_reason": "stop",
+     "error": null,
+     "completion_tokens": 56,
+     "seconds": 4.92
+    },
+    {
+     "id": "non-english",
+     "mode": "chat",
+     "content": "",
+     "reasoning": "The user asks: \"\u041a\u0430\u043a\u0430\u044f \u0441\u0442\u043e\u043b\u0438\u0446\u0430 \u0424\u0440\u0430\u043d\u0446\u0438\u0438? \u041e\u0442\u0432\u0435\u0442\u044c \u043e\u0434\u043d\u0438\u043c \u043f\u0440\u0435\u0434\u043b\u043e\u0436\u0435\u043d\u0438\u0435\u043c \u043f\u043e-\u0440\u0443\u0441\u0441\u043a\u0438.\" which means \"What is the capital of France? Answer in one sentence in Russian.\"\n\nThe capital of France is Paris. In Russian: \"\u0421\u0442\u043e\u043b\u0438\u0446\u0435\u0439 \u0424\u0440\u0430\u043d\u0446\u0438\u0438 \u044f\u0432\u043b\u044f\u0435\u0442\u0441\u044f \u041f\u0430\u0440\u0438\u0436.\" or \"\u0421\u0442\u043e\u043b\u0438\u0446\u0430 \u0424\u0440\u0430\u043d\u0446\u0438\u0438 \u2014",
+     "tool_calls": [],
+     "finish_reason": "length",
+     "error": null,
+     "completion_tokens": 64,
+     "seconds": 5.22
+    },
+    {
+     "id": "tool-call",
+     "mode": "chat",
+     "content": "",
+     "reasoning": "We need answer user asks weather in Lisbon right now, use tool. Need call get_weather. Then final with result.\n",
+     "tool_calls": [
+      {
+       "name": "get_weather",
+       "arguments": "{\"city\": \"Lisbon\"}"
+      }
+     ],
+     "finish_reason": "tool_calls",
+     "error": null,
+     "completion_tokens": 55,
+     "seconds": 4.38
+    },
+    {
+     "id": "summarize",
+     "mode": "chat",
+     "content": "",
+     "reasoning": "We need to answer user's request: \"Summarize in one sentence: The harbor town of Lindfors holds a fish market every Tuesday. Boats arrive before dawn, and the first buyers are the restaurant cooks. By nine the stalls are empty.\"\n\nNeed produce one sentence summary. Simple. Ensure one sentence.",
+     "tool_calls": [],
+     "finish_reason": "length",
+     "error": null,
+     "completion_tokens": 64,
+     "seconds": 5.17
+    },
+    {
+     "id": "list-format",
+     "mode": "chat",
+     "content": "",
+     "reasoning": "We need to respond to user: \"List three primary colors, one per line, with no other text.\" Need final exactly three lines, no other text. Primary colors could be red, blue, yellow (subtractive) or red green blue (additive). Likely common primary colors: red, blue, yellow.",
+     "tool_calls": [],
+     "finish_reason": "length",
+     "error": null,
+     "completion_tokens": 64,
+     "seconds": 5.23
+    }
+   ]
+  },
+  {
+   "thinking": true,
+   "max_tokens": 256,
+   "wall_s": 61.2,
+   "entries": [
+    {
+     "id": "chat-capital",
+     "mode": "chat",
+     "content": "\n\nThe capital of France is Paris. One famous building there is the Eiffel Tower.",
+     "reasoning": "We need answer user's simple request. Need final two sentences. Ensure exactly two sentences? \"What is the capital of France, and what is one famous building there? Answer in two sentences.\" We can say: \"The capital of France is Paris. One famous building there is the Eiffel Tower.\" Two sentences.\n",
+     "tool_calls": [],
+     "finish_reason": "stop",
+     "error": null,
+     "completion_tokens": 85,
+     "seconds": 6.27
+    },
+    {
+     "id": "code-fizzbuzz",
+     "mode": "chat",
+     "content": "\n\ndef fizzbuzz(n):\n    return [\n        'FizzBuzz' if i % 3 == 0 and i % 5 == 0\n        else 'Fizz' if i % 3 == 0\n        else 'Buzz' if i % 5 == 0\n        else str(i)\n        for i in range(1, n + 1)\n    ]",
+     "reasoning": "We need answer user's request: \"Write a Python function fizzbuzz(n) that returns a list of strings for the numbers 1 to n: 'Fizz' for multiples of 3, 'Buzz' for multiples of 5, 'FizzBuzz' for both, otherwise the number. Reply with the code only.\"\n\nNeed final code only. Need likely include function. Ensure strings. Could be:\ndef fizzbuzz(n):\n    return ['FizzBuzz' if i%3==0 and i%5==0 else 'Fizz' if i%3==0 else 'Buzz' if i%5==0 else str(i) for i in range(1, n+1)]\n\nNeed code only, no explanation. Could include type hints? fine. Ensure if n negative? range empty. Good.\n",
+     "tool_calls": [],
+     "finish_reason": "stop",
+     "error": null,
+     "completion_tokens": 253,
+     "seconds": 16.85
+    },
+    {
+     "id": "arithmetic",
+     "mode": "chat",
+     "content": "\n\n7 pens cost: \\(7 \\times 3 = 21\\) dollars  \n4 notebooks cost: \\(4 \\times 5 = 20\\) dollars  \n\nTotal cost: \\(21 + 20 = 41\\) dollars.",
+     "reasoning": "We need answer simple arithmetic. Need final with brief steps. Compute 7*3=21, 4*5=20, total 41 dollars.\n",
+     "tool_calls": [],
+     "finish_reason": "stop",
+     "error": null,
+     "completion_tokens": 90,
+     "seconds": 6.62
+    },
+    {
+     "id": "multi-turn",
+     "mode": "chat",
+     "content": "\n\nYour name is Zephyrine, and you like to drink green tea.",
+     "reasoning": "We need to answer user: \"What is my name, and what do I like to drink?\" Context: user said name Zephyrine and likes green tea. Need final concise.\n",
+     "tool_calls": [],
+     "finish_reason": "stop",
+     "error": null,
+     "completion_tokens": 56,
+     "seconds": 4.76
+    },
+    {
+     "id": "non-english",
+     "mode": "chat",
+     "content": "\n\n\u0421\u0442\u043e\u043b\u0438\u0446\u0435\u0439 \u0424\u0440\u0430\u043d\u0446\u0438\u0438 \u044f\u0432\u043b\u044f\u0435\u0442\u0441\u044f \u041f\u0430\u0440\u0438\u0436.",
+     "reasoning": "The user asks: \"\u041a\u0430\u043a\u0430\u044f \u0441\u0442\u043e\u043b\u0438\u0446\u0430 \u0424\u0440\u0430\u043d\u0446\u0438\u0438? \u041e\u0442\u0432\u0435\u0442\u044c \u043e\u0434\u043d\u0438\u043c \u043f\u0440\u0435\u0434\u043b\u043e\u0436\u0435\u043d\u0438\u0435\u043c \u043f\u043e-\u0440\u0443\u0441\u0441\u043a\u0438.\" which means \"What is the capital of France? Answer in one sentence in Russian.\"\n\nThe capital of France is Paris. In Russian: \"\u0421\u0442\u043e\u043b\u0438\u0446\u0435\u0439 \u0424\u0440\u0430\u043d\u0446\u0438\u0438 \u044f\u0432\u043b\u044f\u0435\u0442\u0441\u044f \u041f\u0430\u0440\u0438\u0436.\" or \"\u0421\u0442\u043e\u043b\u0438\u0446\u0430 \u0424\u0440\u0430\u043d\u0446\u0438\u0438 \u2014 \u041f\u0430\u0440\u0438\u0436.\"\n\nI need to answer in one sentence in Russian.\n",
+     "tool_calls": [],
+     "finish_reason": "stop",
+     "error": null,
+     "completion_tokens": 90,
+     "seconds": 6.74
+    },
+    {
+     "id": "tool-call",
+     "mode": "chat",
+     "content": "",
+     "reasoning": "We need answer user asks weather in Lisbon right now, use tool. Need call get_weather. Then final with result.\n",
+     "tool_calls": [
+      {
+       "name": "get_weather",
+       "arguments": "{\"city\": \"Lisbon\"}"
+      }
+     ],
+     "finish_reason": "tool_calls",
+     "error": null,
+     "completion_tokens": 55,
+     "seconds": 4.65
+    },
+    {
+     "id": "summarize",
+     "mode": "chat",
+     "content": "\n\nIn Lindfors, the Tuesday fish market begins before dawn with arriving boats and restaurant cooks, and the stalls are empty by nine.",
+     "reasoning": "We need to answer user's request: \"Summarize in one sentence: The harbor town of Lindfors holds a fish market every Tuesday. Boats arrive before dawn, and the first buyers are the restaurant cooks. By nine the stalls are empty.\"\n\nNeed produce one sentence summary. Simple. Ensure one sentence. Maybe: \"In Lindfors, a Tuesday fish market begins before dawn with boats and restaurant cooks, and the stalls are empty by nine.\" That's one sentence. Need final only.\n",
+     "tool_calls": [],
+     "finish_reason": "stop",
+     "error": null,
+     "completion_tokens": 131,
+     "seconds": 9.15
+    },
+    {
+     "id": "list-format",
+     "mode": "chat",
+     "content": "\n\nRed\nBlue\nYellow",
+     "reasoning": "We need to respond to user: \"List three primary colors, one per line, with no other text.\" Need final exactly three lines, no other text. Primary colors could be red, blue, yellow (subtractive) or red green blue (additive). Likely common primary colors: red, blue, yellow. Ensure one per line. No extra.\n",
+     "tool_calls": [],
+     "finish_reason": "stop",
+     "error": null,
+     "completion_tokens": 81,
+     "seconds": 6.16
+    }
+   ]
+  },
+  {
+   "thinking": true,
+   "max_tokens": 1024,
+   "wall_s": 61.6,
+   "entries": [
+    {
+     "id": "chat-capital",
+     "mode": "chat",
+     "content": "\n\nThe capital of France is Paris. One famous building there is the Eiffel Tower.",
+     "reasoning": "We need answer user's simple request. Need final two sentences. Ensure exactly two sentences? \"What is the capital of France, and what is one famous building there? Answer in two sentences.\" We can say: \"The capital of France is Paris. One famous building there is the Eiffel Tower.\" Two sentences.\n",
+     "tool_calls": [],
+     "finish_reason": "stop",
+     "error": null,
+     "completion_tokens": 85,
+     "seconds": 6.51
+    },
+    {
+     "id": "code-fizzbuzz",
+     "mode": "chat",
+     "content": "\n\ndef fizzbuzz(n):\n    return [\n        'FizzBuzz' if i % 3 == 0 and i % 5 == 0\n        else 'Fizz' if i % 3 == 0\n        else 'Buzz' if i % 5 == 0\n        else str(i)\n        for i in range(1, n + 1)\n    ]",
+     "reasoning": "We need answer user's request: \"Write a Python function fizzbuzz(n) that returns a list of strings for the numbers 1 to n: 'Fizz' for multiples of 3, 'Buzz' for multiples of 5, 'FizzBuzz' for both, otherwise the number. Reply with the code only.\"\n\nNeed final code only. Need likely include function. Ensure strings. Could be:\ndef fizzbuzz(n):\n    return ['FizzBuzz' if i%3==0 and i%5==0 else 'Fizz' if i%3==0 else 'Buzz' if i%5==0 else str(i) for i in range(1, n+1)]\n\nNeed code only, no explanation. Could include type hints? fine. Ensure if n negative? range empty. Good.\n",
+     "tool_calls": [],
+     "finish_reason": "stop",
+     "error": null,
+     "completion_tokens": 253,
+     "seconds": 16.59
+    },
+    {
+     "id": "arithmetic",
+     "mode": "chat",
+     "content": "\n\n7 pens cost: \\(7 \\times 3 = 21\\) dollars  \n4 notebooks cost: \\(4 \\times 5 = 20\\) dollars  \n\nTotal cost: \\(21 + 20 = 41\\) dollars.",
+     "reasoning": "We need answer simple arithmetic. Need final with brief steps. Compute 7*3=21, 4*5=20, total 41 dollars.\n",
+     "tool_calls": [],
+     "finish_reason": "stop",
+     "error": null,
+     "completion_tokens": 90,
+     "seconds": 6.8
+    },
+    {
+     "id": "multi-turn",
+     "mode": "chat",
+     "content": "\n\nYour name is Zephyrine, and you like to drink green tea.",
+     "reasoning": "We need to answer user: \"What is my name, and what do I like to drink?\" Context: user said name Zephyrine and likes green tea. Need final concise.\n",
+     "tool_calls": [],
+     "finish_reason": "stop",
+     "error": null,
+     "completion_tokens": 56,
+     "seconds": 4.78
+    },
+    {
+     "id": "non-english",
+     "mode": "chat",
+     "content": "\n\n\u0421\u0442\u043e\u043b\u0438\u0446\u0435\u0439 \u0424\u0440\u0430\u043d\u0446\u0438\u0438 \u044f\u0432\u043b\u044f\u0435\u0442\u0441\u044f \u041f\u0430\u0440\u0438\u0436.",
+     "reasoning": "The user asks: \"\u041a\u0430\u043a\u0430\u044f \u0441\u0442\u043e\u043b\u0438\u0446\u0430 \u0424\u0440\u0430\u043d\u0446\u0438\u0438? \u041e\u0442\u0432\u0435\u0442\u044c \u043e\u0434\u043d\u0438\u043c \u043f\u0440\u0435\u0434\u043b\u043e\u0436\u0435\u043d\u0438\u0435\u043c \u043f\u043e-\u0440\u0443\u0441\u0441\u043a\u0438.\" which means \"What is the capital of France? Answer in one sentence in Russian.\"\n\nThe capital of France is Paris. In Russian: \"\u0421\u0442\u043e\u043b\u0438\u0446\u0435\u0439 \u0424\u0440\u0430\u043d\u0446\u0438\u0438 \u044f\u0432\u043b\u044f\u0435\u0442\u0441\u044f \u041f\u0430\u0440\u0438\u0436.\" or \"\u0421\u0442\u043e\u043b\u0438\u0446\u0430 \u0424\u0440\u0430\u043d\u0446\u0438\u0438 \u2014 \u041f\u0430\u0440\u0438\u0436.\"\n\nI need to answer in one sentence in Russian.\n",
+     "tool_calls": [],
+     "finish_reason": "stop",
+     "error": null,
+     "completion_tokens": 90,
+     "seconds": 6.88
+    },
+    {
+     "id": "tool-call",
+     "mode": "chat",
+     "content": "",
+     "reasoning": "We need answer user asks weather in Lisbon right now, use tool. Need call get_weather. Then final with result.\n",
+     "tool_calls": [
+      {
+       "name": "get_weather",
+       "arguments": "{\"city\": \"Lisbon\"}"
+      }
+     ],
+     "finish_reason": "tool_calls",
+     "error": null,
+     "completion_tokens": 55,
+     "seconds": 4.62
+    },
+    {
+     "id": "summarize",
+     "mode": "chat",
+     "content": "\n\nIn Lindfors, the Tuesday fish market begins before dawn with arriving boats and restaurant cooks, and the stalls are empty by nine.",
+     "reasoning": "We need to answer user's request: \"Summarize in one sentence: The harbor town of Lindfors holds a fish market every Tuesday. Boats arrive before dawn, and the first buyers are the restaurant cooks. By nine the stalls are empty.\"\n\nNeed produce one sentence summary. Simple. Ensure one sentence. Maybe: \"In Lindfors, a Tuesday fish market begins before dawn with boats and restaurant cooks, and the stalls are empty by nine.\" That's one sentence. Need final only.\n",
+     "tool_calls": [],
+     "finish_reason": "stop",
+     "error": null,
+     "completion_tokens": 131,
+     "seconds": 9.25
+    },
+    {
+     "id": "list-format",
+     "mode": "chat",
+     "content": "\n\nRed\nBlue\nYellow",
+     "reasoning": "We need to respond to user: \"List three primary colors, one per line, with no other text.\" Need final exactly three lines, no other text. Primary colors could be red, blue, yellow (subtractive) or red green blue (additive). Likely common primary colors: red, blue, yellow. Ensure one per line. No extra.\n",
+     "tool_calls": [],
+     "finish_reason": "stop",
+     "error": null,
+     "completion_tokens": 81,
+     "seconds": 6.15
+    }
+   ]
+  },
+  {
+   "thinking": false,
+   "max_tokens": 64,
+   "wall_s": 25.2,
+   "entries": [
+    {
+     "id": "chat-capital",
+     "mode": "chat",
+     "content": "The capital of France is Paris. One of its most famous buildings is the Eiffel Tower.",
+     "reasoning": "",
+     "tool_calls": [],
+     "finish_reason": "stop",
+     "error": null,
+     "completion_tokens": 20,
+     "seconds": 2.39
+    },
+    {
+     "id": "code-fizzbuzz",
+     "mode": "chat",
+     "content": "```python\ndef fizzbuzz(n):\n    result = []\n    for i in range(1, n + 1):\n        if i % 3 == 0 and i % 5 == 0:\n            result.append('FizzBuzz')\n        elif i % 3 == 0",
+     "reasoning": "",
+     "tool_calls": [],
+     "finish_reason": "length",
+     "error": null,
+     "completion_tokens": 64,
+     "seconds": 5.22
+    },
+    {
+     "id": "arithmetic",
+     "mode": "chat",
+     "content": "Here are the steps to calculate the total cost:\n\n1.  **Calculate the cost of the pens:**\n    $7 \\text{ pens} \\times \\$3/\\text{pen} = \\$21$\n\n2.  **Calculate the cost of the notebooks:**\n    $4 \\text{",
+     "reasoning": "",
+     "tool_calls": [],
+     "finish_reason": "length",
+     "error": null,
+     "completion_tokens": 64,
+     "seconds": 5.28
+    },
+    {
+     "id": "multi-turn",
+     "mode": "chat",
+     "content": "Your name is Zephyrine, and you like to drink green tea.",
+     "reasoning": "",
+     "tool_calls": [],
+     "finish_reason": "stop",
+     "error": null,
+     "completion_tokens": 16,
+     "seconds": 2.19
+    },
+    {
+     "id": "non-english",
+     "mode": "chat",
+     "content": "\u0421\u0442\u043e\u043b\u0438\u0446\u0435\u0439 \u0424\u0440\u0430\u043d\u0446\u0438\u0438 \u044f\u0432\u043b\u044f\u0435\u0442\u0441\u044f \u041f\u0430\u0440\u0438\u0436.",
+     "reasoning": "",
+     "tool_calls": [],
+     "finish_reason": "stop",
+     "error": null,
+     "completion_tokens": 9,
+     "seconds": 1.95
+    },
+    {
+     "id": "tool-call",
+     "mode": "chat",
+     "content": "",
+     "reasoning": "",
+     "tool_calls": [
+      {
+       "name": "get_weather",
+       "arguments": "{\"city\": \"Lisbon\"}"
+      }
+     ],
+     "finish_reason": "tool_calls",
+     "error": null,
+     "completion_tokens": 28,
+     "seconds": 3.13
+    },
+    {
+     "id": "summarize",
+     "mode": "chat",
+     "content": "In the harbor town of Lindfors, the Tuesday fish market concludes by nine in the morning after restaurant cooks purchase the fresh catch from boats that arrive before dawn.",
+     "reasoning": "",
+     "tool_calls": [],
+     "finish_reason": "stop",
+     "error": null,
+     "completion_tokens": 33,
+     "seconds": 3.27
+    },
+    {
+     "id": "list-format",
+     "mode": "chat",
+     "content": "Red\nBlue\nYellow",
+     "reasoning": "",
+     "tool_calls": [],
+     "finish_reason": "stop",
+     "error": null,
+     "completion_tokens": 6,
+     "seconds": 1.72
+    }
+   ]
+  },
+  {
+   "thinking": false,
+   "max_tokens": 256,
+   "wall_s": 30.9,
+   "entries": [
+    {
+     "id": "chat-capital",
+     "mode": "chat",
+     "content": "The capital of France is Paris. One of its most famous buildings is the Eiffel Tower.",
+     "reasoning": "",
+     "tool_calls": [],
+     "finish_reason": "stop",
+     "error": null,
+     "completion_tokens": 20,
+     "seconds": 2.44
+    },
+    {
+     "id": "code-fizzbuzz",
+     "mode": "chat",
+     "content": "```python\ndef fizzbuzz(n):\n    result = []\n    for i in range(1, n + 1):\n        if i % 3 == 0 and i % 5 == 0:\n            result.append('FizzBuzz')\n        elif i % 3 == 0:\n            result.append('Fizz')\n        elif i % 5 == 0:\n            result.append('Buzz')\n        else:\n            result.append(str(i))\n    return result\n```",
+     "reasoning": "",
+     "tool_calls": [],
+     "finish_reason": "stop",
+     "error": null,
+     "completion_tokens": 108,
+     "seconds": 7.86
+    },
+    {
+     "id": "arithmetic",
+     "mode": "chat",
+     "content": "Here are the steps to calculate the total cost:\n\n1.  **Calculate the cost of the pens:**\n    $7 \\text{ pens} \\times \\$3/\\text{pen} = \\$21$\n\n2.  **Calculate the cost of the notebooks:**\n    $4 \\text{ notebooks} \\times \\$5/\\text{notebook} = \\$20$\n\n3.  **Add the two amounts together:**\n    $\\$21 + \\$20 = \\$41$\n\n**Total Cost:** **$41**",
+     "reasoning": "",
+     "tool_calls": [],
+     "finish_reason": "stop",
+     "error": null,
+     "completion_tokens": 118,
+     "seconds": 8.44
+    },
+    {
+     "id": "multi-turn",
+     "mode": "chat",
+     "content": "Your name is Zephyrine, and you like to drink green tea.",
+     "reasoning": "",
+     "tool_calls": [],
+     "finish_reason": "stop",
+     "error": null,
+     "completion_tokens": 16,
+     "seconds": 2.37
+    },
+    {
+     "id": "non-english",
+     "mode": "chat",
+     "content": "\u0421\u0442\u043e\u043b\u0438\u0446\u0435\u0439 \u0424\u0440\u0430\u043d\u0446\u0438\u0438 \u044f\u0432\u043b\u044f\u0435\u0442\u0441\u044f \u041f\u0430\u0440\u0438\u0436.",
+     "reasoning": "",
+     "tool_calls": [],
+     "finish_reason": "stop",
+     "error": null,
+     "completion_tokens": 9,
+     "seconds": 1.96
+    },
+    {
+     "id": "tool-call",
+     "mode": "chat",
+     "content": "",
+     "reasoning": "",
+     "tool_calls": [
+      {
+       "name": "get_weather",
+       "arguments": "{\"city\": \"Lisbon\"}"
+      }
+     ],
+     "finish_reason": "tool_calls",
+     "error": null,
+     "completion_tokens": 28,
+     "seconds": 3.03
+    },
+    {
+     "id": "summarize",
+     "mode": "chat",
+     "content": "In the harbor town of Lindfors, the Tuesday fish market concludes by nine in the morning after restaurant cooks purchase the fresh catch from boats that arrive before dawn.",
+     "reasoning": "",
+     "tool_calls": [],
+     "finish_reason": "stop",
+     "error": null,
+     "completion_tokens": 33,
+     "seconds": 3.26
+    },
+    {
+     "id": "list-format",
+     "mode": "chat",
+     "content": "Red\nBlue\nYellow",
+     "reasoning": "",
+     "tool_calls": [],
+     "finish_reason": "stop",
+     "error": null,
+     "completion_tokens": 6,
+     "seconds": 1.56
+    }
+   ]
+  }
+ ],
+ "server_ready_s": 266.1,
+ "chat_template": {
+  "present": true,
+  "source": "chat_template.jinja",
+  "sha256": "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041",
+  "mentions_tools": true
+ },
+ "special_tokens": [
+  "<|endoftext|>",
+  "<|im_start|>",
+  "<|im_end|>",
+  "<|object_ref_start|>",
+  "<|object_ref_end|>",
+  "<|box_start|>",
+  "<|box_end|>",
+  "<|quad_start|>",
+  "<|quad_end|>",
+  "<|vision_start|>",
+  "<|vision_end|>",
+  "<|vision_pad|>",
+  "<|image_pad|>",
+  "<|video_pad|>",
+  "<|audio_start|>",
+  "<|audio_end|>",
+  "<tts_pad>",
+  "<tts_text_bos>",
+  "<tts_text_eod>",
+  "<tts_text_bos_single>",
+  "<|audio_pad|>"
+ ]
+}

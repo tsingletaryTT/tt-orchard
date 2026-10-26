@@ -2232,8 +2232,7 @@ base and at least two fine-tunes and judge it (part 2, hardware). Part 1 is done
   each has a test. One equivalent mutant: dropping `and not graft` on the forced-off line (the config check already refuses that pair). The test for the base-weights-by-mistake case
   already exists (`tests/test_prompt_suite_verdict.py`, the identical-replies tests), so none was added.
 - Measured (docs/run-logs/2026-10-26-suite-control.md): Qwen3.8-27B served the suite on one 2-chip board, drafter off, host sampling, ready in 1,942 s cold. All 8 replies
-  were judged clean by `orchard/prompt_suite.py` (no finding of any kind). 5 of 8 replies reached `max_tokens` 64 inside the reasoning with no answer; one model with
-  thinking on. The base agreed with AREX-2's reference on 30 of 32 tokens, against AREX-2's own 31 of 32: the 0.85 bar does not separate them. Raw replies are in
+  were judged clean by `orchard/prompt_suite.py` (no finding of any kind). 6 of 8 replies reached `max_tokens` 64 with thinking on (5 inside the reasoning with no answer, 1 inside its answer); one model. The base agreed with AREX-2's reference on 30 of 32 tokens, against AREX-2's own 31 of 32: the 0.85 bar does not separate them. Raw replies are in
   `docs/run-logs/evidence/suite-control-qwen3.8-27b/`.
 - Not done: serving the suite on any fine-tune (AREX-2 and RAG-Gate-27B stages were prepared and not served: both boards were held by other agents for about 2 hours).
   So no `SUITE_*` threshold changed; their comments now say what data exists (one model, 8 replies, not a calibration). Whether the identical-replies rule passes a real
@@ -2251,3 +2250,7 @@ base and at least two fine-tunes and judge it (part 2, hardware). Part 1 is done
   `gozer wait` for `--ticket`, then the launcher, then `gozer release`, and never starts a `gozer run`. `gozer wait` already takes the lease when it grants it, so the old advice to wait and then run the
   printed `gozer run` queued behind the run's own lease. Mutations: 34 on the launcher and run flow (5 survivors, each given a test), 9 on chips, 10 on paths and files, 8 on the container template and drafter detection, 3 on the spawn helper (1 redundant
   signal removed). Real-process tests cover SIGTERM to the launcher (the server grandchild is gone afterwards) and a server left behind by a finished script. Not run on hardware.
+- A/B of thinking and token limits (operator request, same server boot, greedy, seed 1234, 8 prompts; cells thinking on at 64, 256, 1024 and off at 64, 256): answers present 3, 8, 8, 8, 8 of 8; reached the limit 6, 0, 0, 2, 0;
+  wall time 40.1, 61.2, 61.6, 25.2, 30.9 s; no blocking or advisory finding in any cell, so no check changed its verdict. 256 and 1024 with thinking on gave identical tokens (longest reply 253 of 256). Cheapest complete
+  setting: thinking off at 256 (it leaves the default mode untested); thinking on at 256 has a thin margin. Defaults unchanged. One model, one run per cell. The first attempt of the driver used a wrong path and exited at once
+  (the lease was released); the second took the lease with one `gozer acquire` and ran. The 53 stale tickets had lapsed by themselves; the queue held only the A/B's own ticket while it waited (about 3 hours at position 1 behind two long-held boards).
