@@ -39,6 +39,9 @@ REPS = 3
 TAIL_LINES = 12
 SHIPPED = ("prepare_swap.py", "serve_and_compare.py")
 SUITE_FILE = "prompt_suite.json"
+# The drafter's acceptance as measure_serving.py records it (accepted over drafted tokens, from the server log or /metrics; None when the drafter
+# is off or the server reports nothing). Same names as orchard/drafter_log.py SUMMARY_KEYS; a test keeps the two equal.
+DRAFTER_KEYS = ("accept_rate", "accepted_per_iter", "draft_length", "iters", "sessions")
 
 
 def shipped(cfg: dict) -> tuple[str, ...]:
@@ -98,7 +101,14 @@ def speed_summary(record: dict) -> dict:
     def med(key):
         vals = [v[key] for v in per.values() if isinstance(v[key], (int, float)) and not isinstance(v[key], bool)]
         return rounded(statistics.median(vals), key) if vals else None
-    return {"decode_tok_s": med("decode_tok_s"), "ttft_s": med("ttft_s"), "server_ready_s": record.get("server_ready_s"),
+    drafter = record.get("drafter")
+    drafter = ({k: drafter.get(k) for k in DRAFTER_KEYS} if isinstance(drafter, dict) else None)
+    # measure_serving's `drafter_acceptance` is the authoritative rate (the /metrics counters win over the log). A server with counters and no
+    # DFlash2 log lines has no `drafter` record, so the rate alone makes one.
+    rate = record.get("drafter_acceptance")
+    if isinstance(rate, (int, float)) and not isinstance(rate, bool) and 0 <= rate <= 1:
+        drafter = {**(drafter or {k: None for k in DRAFTER_KEYS}), "accept_rate": rate}
+    return {"decode_tok_s": med("decode_tok_s"), "ttft_s": med("ttft_s"), "server_ready_s": record.get("server_ready_s"), "drafter": drafter,
             "per_prompt": per, "prompt_set_sha256": record.get("prompt_set_sha256"), "reps": record.get("reps")}
 
 
@@ -190,7 +200,8 @@ def main() -> int:
                 if "failure" in speed:
                     v = {**v, "decode_tok_s": None, "ttft_s": None, "failure": speed["failure"]}
                 else:
-                    v = {**v, "decode_tok_s": speed["decode_tok_s"], "ttft_s": speed["ttft_s"], "per_prompt": speed["per_prompt"]}
+                    v = {**v, "decode_tok_s": speed["decode_tok_s"], "ttft_s": speed["ttft_s"], "per_prompt": speed["per_prompt"],
+                         "drafter": speed.get("drafter")}
             result["variant"] = {**v, "tt_cache": str(cache)}
     rel = lambda p: os.path.relpath(p, run_dir)
     result["evidence"] = sorted(rel(p) for p in (HERE / "speed-safe.json", HERE / "speed-variant.json",
