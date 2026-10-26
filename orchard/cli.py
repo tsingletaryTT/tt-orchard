@@ -870,7 +870,7 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
     # (orchard/stock_runtime.py). No flag is involved; the base row found the support.
     stock = base_data.get("stock_runtime")
     stock_dir = stock["params_dir"] if isinstance(stock, dict) and stock.get("params_dir") else None
-    if run_started:
+    if run_started and resuming:       # `resuming` is false again when the earlier run was set aside above
         # A resume keeps the run's recorded choice. The supervisor picks the stock-runtime stages from the run_start entry, so a
         # preflight that now selects a bundle (or finds the parameters) must not change the input stage 2's draft reads.
         stock_dir = recorded_stock

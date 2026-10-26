@@ -320,6 +320,33 @@ def test_a_run_start_with_no_inputs_counts_as_started(conf, tmp_path):
     assert not [i for i in _inputs(rec) if i.startswith("stock_params=")]
 
 
+def test_a_stale_ledger_moved_aside_for_missing_weights_does_not_drop_the_selected_route(conf, tmp_path):
+    # the earlier run read a snapshot with no weights and had no stock_params; it is set aside and a new run starts, which is a fresh run
+    from test_cli import Recorder, run, signals
+    run_dir = _started(conf, {"model": "/old/snapshot-with-no-weights"})
+    (run_dir / "stages" / "0").mkdir(parents=True)
+    rep = report(tt_transformers=[ROW_PARAMS, ROW_README])
+    sig = signals(research=lambda *a: rep, stock_params=lambda name: Path("/host/params") / name)       # the model is not cached
+    rec = Recorder()
+    code, out, rec = run(conf, ["bringup", "Cloudflare/clef", "--run-dir", str(run_dir)], rec=rec, sig=sig)
+    assert code == 0, out
+    assert rec.fetched and "set aside" in out
+    assert "stock_params=/host/params/Llama-3.1-8B-Instruct" in _inputs(rec)
+
+
+def test_a_stale_ledger_moved_aside_does_not_pass_its_own_recorded_route_on(conf, tmp_path):
+    # the opposite case: the stale run had recorded a route; the replacement run takes what the preflight selects now
+    from test_cli import Recorder, run, signals
+    run_dir = _started(conf, {"model": "/old/snapshot", "stock_params": "/old/params/Gone-1B"})
+    (run_dir / "stages" / "0").mkdir(parents=True)
+    rep = report(tt_transformers=[ROW_PARAMS, ROW_README])
+    sig = signals(research=lambda *a: rep, stock_params=lambda name: Path("/host/params") / name)
+    code, out, rec = run(conf, ["bringup", "Cloudflare/clef", "--run-dir", str(run_dir)], rec=Recorder(), sig=sig)
+    assert "set aside" in out
+    assert "stock_params=/host/params/Llama-3.1-8B-Instruct" in _inputs(rec)
+    assert not [i for i in _inputs(rec) if "/old/params" in i]
+
+
 def test_a_fresh_run_is_not_affected_by_the_resume_rule(conf):
     code, out, rec, snap = _cli_run(conf)
     assert "stock_params=/host/params/Llama-3.1-8B-Instruct" in _inputs(rec)
