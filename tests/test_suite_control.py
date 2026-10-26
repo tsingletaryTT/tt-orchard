@@ -27,6 +27,7 @@ def prep(_prep):
     """The template tests' stage, with the files a real nearest-model snapshot holds (a control is built from it)."""
     for name in LINKED:
         put(_prep["base"], name, f"base {name}")
+    (_prep["bundle"] / "tt_kernel_manifest.json").write_text(json.dumps({"device_count": 2, "weights": {"repo_id": NEAREST}}))
     return _prep
 
 
@@ -161,10 +162,10 @@ def test_an_earlier_control_directory_is_cleared_first(prep):
 
 
 def test_port_and_chips_can_be_set(prep):
-    out = build(prep, port=8150, chips=4)
-    assert out["config"]["port"] == 8150 and out["chips"] == 4
+    out = build(prep, port=8150, chips=2)
+    assert out["config"]["port"] == 8150 and out["chips"] == 2
     again = build(prep)
-    assert again["config"]["port"] == stage_cfg(prep)["port"] and again["chips"] == sc.DEFAULT_CHIPS
+    assert again["config"]["port"] == stage_cfg(prep)["port"] and again["chips"] == 2
 
 
 def test_wire_value_is_relative_to_the_run_directory(prep):
@@ -228,13 +229,6 @@ def test_the_module_runs_as_a_script(prep):
     assert r.returncode == 0, r.stderr
 
 
-def test_an_explicit_chip_count_beats_the_configs(prep):
-    c = stage_cfg(prep)
-    c.pop("bundle_dir")
-    c.update(package="org/pkg", profile="p", chips=4, operator_home="/x")
-    (prep["stage"] / "swap_config.json").write_text(json.dumps(c))
-    assert sc.prepare(prep["stage"], orchard_dir=CHECKOUT, chips=2, run=ok_run)["chips"] == 2
-    assert sc.prepare(prep["stage"], orchard_dir=CHECKOUT, run=ok_run)["chips"] == 4
 
 
 def stage_run_sh(prep, drafter_line):

@@ -41,7 +41,6 @@ TEMPLATES = Path("orchard") / "skills" / "weights-swap-templates"
 CONTROL_DIR = "suite-control"
 CACHE_SUFFIX = "-control"
 SUITE_FILE = "prompt_suite.json"
-DEFAULT_CHIPS = 2
 QUEUED_EXIT = 10            # gozer's exit status for a request that was queued
 REQUIRED = ("run_dir", "nearest_model_id", "base_snapshot", "new_snapshot", "new_model_id", "tt_cache", "hf_home", "port")
 
@@ -80,6 +79,23 @@ def stage_drafter_off(stage: Path) -> bool:
 
 
 PATH_KEYS = ("bundle_dir", "base_snapshot", "new_snapshot", "tt_cache", "hf_home", "operator_home")
+
+
+def config_chips(cfg: dict) -> int:
+    """How many chips the control's server needs: the container package's `chips`, or the bundle's own `device_count`
+    (tt_kernel_manifest.json). Never a guess, so a 4-chip bundle is not leased 2 chips."""
+    if cfg.get("package"):
+        n = cfg.get("chips")
+        where = "the stage's config"
+    else:
+        where = f"{cfg.get('bundle_dir')}/tt_kernel_manifest.json"
+        try:
+            n = json.loads((Path(str(cfg["bundle_dir"])) / "tt_kernel_manifest.json").read_text(encoding="utf-8")).get("device_count")
+        except (OSError, ValueError, AttributeError):
+            n = None
+    if isinstance(n, bool) or not isinstance(n, int) or n < 1:
+        raise ControlError(f"cannot tell the chip count the control needs: {where} has no whole number of chips")
+    return n
 
 
 def run_dir_of(stage: Path) -> Path:
@@ -134,6 +150,11 @@ def prepare(stage_dir, *, orchard_dir=CHECKOUT, port=None, chips=None, run=subpr
     off = stage_drafter_off(stage)
     run_dir = Path(cfg["run_dir"]) if isinstance(cfg.get("run_dir"), str) and os.path.isabs(cfg["run_dir"]) else run_dir_of(stage)
     ccfg = control_config(cfg, run_dir=run_dir, port=port, drafter_off=off)
+    n_chips = config_chips(ccfg)
+    if chips is not None and int(chips) != n_chips:
+        raise ControlError(f"the server needs {n_chips} chips (from {'the package' if cfg.get('package') else 'the bundle'}'s own metadata); "
+                           f"--chips {chips} would make the lease and the config disagree")
+    ccfg["chips"] = n_chips
     ccfg["run_dir"] = str(run_dir)
     prepare_name, serve_name = scripts_for(cfg)
     templates = Path(orchard_dir) / TEMPLATES
@@ -151,7 +172,6 @@ def prepare(stage_dir, *, orchard_dir=CHECKOUT, port=None, chips=None, run=subpr
     res = run([py, str(control / prepare_name)], cwd=str(control), capture_output=True, text=True, timeout=1800)
     if res.returncode != 0:
         raise ControlError(f"{prepare_name} exited with code {res.returncode}: {_tail((res.stdout or '') + (res.stderr or ''))}")
-    n_chips = int(chips or cfg.get("chips") or DEFAULT_CHIPS)
     run_dir = Path(ccfg["run_dir"]).resolve()
     evidence = control / "evidence" / "swap-check.json"
     try:
@@ -171,7 +191,7 @@ def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="tt-orchard suite-control", description=__doc__.split("\n\n")[0])
     p.add_argument("action", choices=("prepare", "run"))
     p.add_argument("--stage-dir", required=True, help="the stage directory (stages/2, or stages/4/configs/N) whose nearest model is served")
-    p.add_argument("--chips", type=int, help="chips to lease (default: the config's chips, else 2)")
+    p.add_argument("--chips", type=int, help="must equal the chips the bundle or package needs (read from its own metadata); a different number is refused")
     p.add_argument("--port", type=int, help="port for the control's server (default: the stage's port)")
     p.add_argument("--who", default="claude:suite-control")
     p.add_argument("--reason", default="serve the nearest model with the prompt suite (control)")
