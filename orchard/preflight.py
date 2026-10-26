@@ -589,7 +589,8 @@ def cache_root_for(cfg) -> Path:
 
 def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Signals | None = None,
                   resuming: bool = False, base_override: str | None = None,
-                  accept_inferred_base: bool = False, progress: Callable[[str], None] | None = None) -> list[Check]:
+                  accept_inferred_base: bool = False, progress: Callable[[str], None] | None = None,
+                  stock_recorded: str | None = None) -> list[Check]:
     """`progress(text)` is told what is about to run (the hub lookup, the research, the machine checks), so a
     terminal is not silent while the research reads weight headers for a minute or two."""
     from orchard.research.types import reporter
@@ -615,6 +616,17 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
     out.append(check_hub(hub, err, local))
 
     def base() -> Check:
+        if stock_recorded and getattr(cfg, "mode", "local") != "lab":
+            # A resumed stock-runtime run (orchard/stock_runtime.py): the route was chosen when the run started and is in its run_start
+            # entry. The research, the bundle search and a base download are not needed again, and an offline or failing research must
+            # not block the resume. The directory has to exist still; otherwise the normal check runs.
+            from orchard import stock_runtime
+            d = Path(stock_recorded)
+            if stock_runtime.find_params(d.parents[3] if len(d.parents) > 3 else d, d.name) == d:
+                return Check("base", WARN, f"resuming a stock-runtime run: tt-transformers' {d.name} was recorded when the run started and "
+                             "its parameters are still on this box", data={
+                                 "base": None, "snapshot": None, "bundle": None, "needs_fetch": False, "candidates": [], "report": None,
+                                 "stock_runtime": {"name": d.name, "params_dir": str(d), "matched": None, "blackhole": None}})
         inst = list(s.installed_bundles()) if s.installed_bundles else []
         report, failed = None, None
         if s.research is not None:

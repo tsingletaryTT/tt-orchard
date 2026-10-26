@@ -212,9 +212,11 @@ def _bundle_signals(snap, **over):
     from orchard.nearest import Installed
     from test_cli import signals
     rep = report(tt_transformers=[ROW_PARAMS, ROW_README])
-    return signals(research=lambda *a: rep, stock_params=lambda name: Path("/host/params") / name, local_snapshot=lambda m: snap,
-                   installed_bundles=lambda: [Installed("tt/base-p150", "g/base", "6", 1)],
-                   hub_info=lambda m: (hub(base_model="g/base"), None), **over)
+    base = dict(research=lambda *a: rep, stock_params=lambda name: Path("/host/params") / name, local_snapshot=lambda m: snap,
+                installed_bundles=lambda: [Installed("tt/base-p150", "g/base", "6", 1)],
+                hub_info=lambda m: (hub(base_model="g/base"), None))
+    base.update(over)
+    return signals(**base)
 
 
 def _inputs(rec):
@@ -264,6 +266,68 @@ def test_a_resume_with_an_unreadable_ledger_adds_no_stock_params(conf, tmp_path)
 def test_a_fresh_run_is_not_affected_by_the_resume_rule(conf):
     code, out, rec, snap = _cli_run(conf)
     assert "stock_params=/host/params/Llama-3.1-8B-Instruct" in _inputs(rec)
+
+
+# ---- the recorded route is restored before the preflight (second review of PR 78) -----------------------------------
+
+def _params_dir(tmp_path):
+    d = tmp_path / "tt-metal" / "models" / "tt_transformers" / "model_params" / "Llama-3.1-8B-Instruct"
+    d.mkdir(parents=True)
+    (d / "config.json").write_text("{}")
+    return d
+
+
+def test_a_recorded_route_makes_the_base_row_a_warning_without_research_or_a_bundle_search(tmp_path):
+    from test_preflight import cfg, signals
+    d = _params_dir(tmp_path)
+
+    def boom(*a):
+        raise AssertionError("research must not run")
+    s = signals(research=boom, installed_bundles=boom)
+    out = pf.run_preflight(cfg(tmp_path), "Cloudflare/clef", accept_credentials=False, signals=s, resuming=True, stock_recorded=str(d))
+    base = next(c for c in out if c.name == "base")
+    assert base.status == pf.WARN and "recorded" in base.detail and base.data["stock_runtime"]["params_dir"] == str(d)
+    assert base.data["stock_runtime"]["name"] == "Llama-3.1-8B-Instruct" and base.data["needs_fetch"] is False and base.data["base"] is None
+
+
+def test_a_recorded_directory_that_is_gone_falls_back_to_the_normal_check(tmp_path):
+    from test_preflight import cfg, signals
+    d = _params_dir(tmp_path)
+    (d / "config.json").unlink()
+    seen = []
+    s = signals(research=lambda *a: seen.append(1) or report())
+    out = pf.run_preflight(cfg(tmp_path), "Cloudflare/clef", accept_credentials=False, signals=s, resuming=True, stock_recorded=str(d))
+    assert seen == [1] and "stock_runtime" not in (next(c for c in out if c.name == "base").data or {})
+
+
+def test_a_recorded_route_is_ignored_in_lab_mode(tmp_path):
+    from test_preflight import lab_cfg, signals
+    d = _params_dir(tmp_path)
+    s = signals(lab_status=lambda: (True, "", ""))
+    out = pf.run_preflight(lab_cfg(tmp_path), "Cloudflare/clef", accept_credentials=False, signals=s, resuming=True, stock_recorded=str(d))
+    assert "stock_runtime" not in (next(c for c in out if c.name == "base").data or {})
+
+
+def test_resuming_a_stock_run_survives_research_failing_and_downloads_no_base(conf, tmp_path):
+    from test_cli import Recorder, run
+    snap = tmp_path / "snap"
+    snap.mkdir()
+    (snap / "config.json").write_text("{}")
+    d = _params_dir(tmp_path)
+    run_dir = _started(conf, {"model": str(snap), "stock_params": str(d)})
+
+    def boom(*a):
+        raise RuntimeError("offline")
+    sig = _bundle_signals(snap, research=boom, local_snapshot=lambda m: snap if m == "Cloudflare/clef" else None)
+    rec = Recorder()
+    code, out, rec = run(conf, ["bringup", "Cloudflare/clef", "--run-dir", str(run_dir)], rec=rec, sig=sig)
+    assert code == 0, out
+    assert f"stock_params={d}" in _inputs(rec) and rec.fetched == []
+
+
+def test_a_fresh_run_ignores_the_recorded_route_argument_path(conf):
+    code, out, rec, snap = _cli_run(conf)
+    assert code == 0 and "stock_params=/host/params/Llama-3.1-8B-Instruct" in _inputs(rec)
 
 
 # ---- lab mode (review of PR 78): the parameters directory is on this box, and a lab runs its tests elsewhere -----------

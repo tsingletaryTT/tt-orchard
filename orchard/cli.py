@@ -391,6 +391,16 @@ def resolve_base(arg: str, sig, puller, out, style, *, dry_run: bool = False) ->
     return None, f"{arg} was pulled but is not among the installed bundles tt-orchard looks at"
 
 
+def _recorded_stock_params(run_dir: Path) -> str | None:
+    """The `stock_params` input in the run's run_start entry, or None (no ledger, an unreadable one, or a run that started without it)."""
+    from orchard import ledger as ledger_mod
+    from orchard import stages as stages_mod
+    try:
+        return stages_mod.stock_params(ledger_mod.read_entries(run_dir / "ledger.jsonl"))
+    except (OSError, ledger_mod.LedgerCorrupt):
+        return None
+
+
 def pick_base(candidates: list[dict], model: str, base: str, *, out, ask=input, inferred: bool = False) -> str | None:
     """Ask the operator which bundle to base the run on. Returns its name, or None for none. For a base the
     research inferred, the pick is the operator's confirmation."""
@@ -760,10 +770,13 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
         if why:
             return _refuse(why)
 
+    recorded_stock = _recorded_stock_params(run_dir) if resuming else None
+
     def preflight_page():
         got = preflight.run_preflight(cfg, args.model, accept_credentials=not args.refuse_credentials_visible,
                                       signals=sig, resuming=resuming, base_override=override,
-                                      accept_inferred_base=args.accept_inferred_base, progress=progress)
+                                      accept_inferred_base=args.accept_inferred_base, progress=progress,
+                                      stock_recorded=recorded_stock)
         print(orchard_view.render_preflight(args.model, run_dir, resuming, cfg_path, got, style), file=out)
         return got
 
@@ -840,13 +853,7 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
     if resuming:
         # A resume keeps the run's recorded choice. The supervisor picks the stock-runtime stages from the run_start entry, so a
         # preflight that now selects a bundle (or finds the parameters) must not change the input stage 2's draft reads.
-        from orchard import ledger as ledger_mod
-        from orchard import stages as stages_mod
-        try:
-            recorded = stages_mod.stock_params(ledger_mod.read_entries(run_dir / "ledger.jsonl"))
-        except (OSError, ledger_mod.LedgerCorrupt):
-            recorded = None
-        stock_dir = recorded
+        stock_dir = recorded_stock
     inputs = {"model": str(snapshot), **({"base": str(base_snapshot)} if base_snapshot else {}),
               **({"stock_params": stock_dir} if stock_dir else {}),
               **({"base_candidates": str(candidates_path)} if candidates_path else {})}
