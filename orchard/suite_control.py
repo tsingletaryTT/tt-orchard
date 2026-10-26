@@ -34,6 +34,8 @@ The command never resets a chip or publishes anything. Only `run` and `launch` s
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -200,7 +202,12 @@ def prepare(stage_dir, *, orchard_dir=CHECKOUT, port=None, chips=None, run=subpr
 
 def gozer_argv(prepared: dict, *, who: str, reason: str, gozer: str = "gozer") -> list[str]:
     """The lease command that runs the launcher. `--exact` is left out: gozer picks a free board of that size."""
-    return [gozer, "run", "--chips", str(prepared["chips"]), "--who", who, "--reason", reason, "--", *prepared["serve"]]
+    return [gozer, "run", "--chips", str(prepared["chips"]), "--who", who, "--reason", reason, "--", *launcher_argv(prepared, gozer)]
+
+
+def launcher_argv(prepared: dict, gozer: str = "gozer") -> list[str]:
+    """The launcher command. A gozer executable other than the default is passed on, so the launcher's `gozer status` is the same one."""
+    return [*prepared["serve"], *(["--gozer", gozer] if gozer != "gozer" else [])]
 
 
 # ---- the launcher: what runs inside the lease ----------------------------------------------------------------------------
@@ -212,7 +219,51 @@ STOP_GRACE_S = 30.0                   # how long the serve script gets after SIG
 
 
 class Terminated(BaseException):
-    """SIGTERM arrived. A BaseException so that no `except Exception` in between swallows it."""
+    """SIGTERM arrived. A BaseException so that no `except Exception` in between swallows it. `code` is what the launcher exited with after it
+    was told to stop (EXIT_TERMINATED when its cleanup was confirmed), or None when that is not known (it had to be killed)."""
+
+    def __init__(self, code=None):
+        super().__init__(code)
+        self.code = code
+
+
+LOCK_FD_VAR = "ORCHARD_CONTROL_LOCK_FD"   # run hands its stage lock to the launcher through this inherited descriptor
+LOCK_NAME = "suite-control.lock"
+
+
+def lock_path(control_dir) -> Path:
+    """The lock file of the stage a control directory belongs to: beside the control directory, because `prepare` deletes the directory itself."""
+    return Path(control_dir).parent / LOCK_NAME
+
+
+@contextlib.contextmanager
+def stage_lock(stage_dir, inherited_fd=None):
+    """One control at a time per stage, from `prepare` to the release of the lease: an exclusive, non-blocking flock on `<stage>/suite-control.lock`.
+    A descriptor inherited from `run` is used when it is a descriptor of that same file (the launcher then shares `run`'s lock). Yields the
+    descriptor; raises ControlError when another process holds the lock."""
+    path = Path(stage_dir) / LOCK_NAME
+    if inherited_fd is not None:
+        try:
+            if os.path.samestat(os.fstat(inherited_fd), os.stat(path)):
+                yield inherited_fd
+                return
+        except OSError:
+            pass
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            raise ControlError(f"another suite-control run, prepare or launch for {stage_dir} is already in use (lock {path}); "
+                               "wait for it to end") from None
+        yield fd
+    finally:
+        os.close(fd)
+
+
+def narrow(visible: str, n: int) -> str:
+    """The first `n` of the leased chips, in the leased order. gozer grants whole boards, so a lease can hold more chips than the control needs."""
+    return ",".join([b.strip() for b in str(visible).split(",") if b.strip()][:n])
 
 
 def test_label(control_dir) -> str:
@@ -239,6 +290,7 @@ def device_ids(visible: str, status: dict) -> list[int]:
 def child_env(env: dict, control_dir, status: dict) -> dict:
     """The environment of the serve script: the variables the container template reads (Supervisor._spawn sets the same two) and the marker."""
     out = dict(env)
+    out.pop(LOCK_FD_VAR, None)
     out["ORCHARD_DEVICE_IDS"] = ",".join(str(i) for i in device_ids(env.get("TT_VISIBLE_DEVICES", ""), status))
     out["ORCHARD_TEST_LABEL"] = test_label(control_dir)
     out[CONTROL_VAR] = str(Path(control_dir).resolve())
@@ -286,17 +338,31 @@ def launch(control_dir, *, env=None, gozer: str = "gozer", docker=None, sweep=_s
     """Run the serve script of a control directory inside a lease and clean up after it. Needs TT_VISIBLE_DEVICES from the lease. Exit codes: the
     serve script's own; 2 refused before starting; 4 something it started could not be confirmed stopped; 143 terminated by SIGTERM."""
     env = dict(os.environ if env is None else env)
+    inherited = env.get(LOCK_FD_VAR, "")
+    try:
+        with stage_lock(Path(control_dir).resolve().parent, int(inherited) if inherited.isdigit() else None):
+            return _launch_locked(Path(control_dir).resolve(), env, gozer, docker, sweep)
+    except ControlError as exc:
+        print(f"suite-control launch: {exc}", file=sys.stderr)
+        return 2
+
+
+def _launch_locked(control_dir: Path, env: dict, gozer: str, docker, sweep) -> int:
     docker = docker or (lambda argv: _docker(argv, env))
-    control_dir = Path(control_dir).resolve()
     try:
         cfg = json.loads((control_dir / "swap_config.json").read_text(encoding="utf-8"))
+        need = int(cfg["chips"])
         r = subprocess.run([gozer, "status", "--json"], capture_output=True, text=True, timeout=120, env=env)
         if r.returncode != 0:
             raise ControlError(f"`{gozer} status --json` exited {r.returncode}")
-        ids = device_ids(env.get("TT_VISIBLE_DEVICES", ""), json.loads(r.stdout))
-        if len(ids) != int(cfg["chips"]):
-            raise ControlError(f"the control needs {cfg['chips']} chips and the lease has {len(ids)} ({env.get('TT_VISIBLE_DEVICES')})")
-        child = child_env(env, control_dir, json.loads(r.stdout))
+        status = json.loads(r.stdout)
+        ids = device_ids(env.get("TT_VISIBLE_DEVICES", ""), status)
+        if len(ids) < need:
+            raise ControlError(f"the control needs at least {need} chips and the lease has {len(ids)} ({env.get('TT_VISIBLE_DEVICES')})")
+        # gozer grants whole boards, so the lease can hold more chips than the control needs. The lease stays whole; the server sees only
+        # the first `need` chips and gets only their device ids.
+        env["TT_VISIBLE_DEVICES"] = narrow(env["TT_VISIBLE_DEVICES"], need)
+        child = child_env(env, control_dir, status)
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError, ControlError) as exc:
         print(f"suite-control launch: {exc}", file=sys.stderr)
         return 2
@@ -335,7 +401,8 @@ def _gozer(argv: list[str]) -> tuple[int, str]:
 
 def _spawn(argv: list[str], env: dict, cwd: str) -> int:
     """Run the launcher in its own session and wait. SIGTERM to this process goes to the launcher (which cleans up) and then raises Terminated here."""
-    proc = subprocess.Popen(argv, env=env, cwd=cwd, start_new_session=True)
+    fds = (int(env[LOCK_FD_VAR]),) if str(env.get(LOCK_FD_VAR, "")).isdigit() else ()
+    proc = subprocess.Popen(argv, env=env, cwd=cwd, start_new_session=True, pass_fds=fds)
 
     def forward(*_):
         raise Terminated()
@@ -343,15 +410,17 @@ def _spawn(argv: list[str], env: dict, cwd: str) -> int:
     try:
         return proc.wait()
     except (Terminated, KeyboardInterrupt):
+        seen = None            # what the launcher exited with after it was told to stop; None when it had to be killed
         try:
             os.killpg(proc.pid, signal.SIGTERM)
-            proc.wait(timeout=STOP_GRACE_S * 3)
+            seen = proc.wait(timeout=STOP_GRACE_S * 3)
         except (OSError, subprocess.TimeoutExpired):
             try:
                 os.killpg(proc.pid, signal.SIGKILL)
             except OSError:
                 pass
-        raise Terminated() from None
+            seen = None
+        raise Terminated(seen) from None
     finally:
         signal.signal(signal.SIGTERM, previous)
 
@@ -364,7 +433,7 @@ def _json(text: str) -> dict:
     return v if isinstance(v, dict) else {}
 
 
-def _run(prepared: dict, a, *, gozer_call, spawn) -> int:
+def _run(prepared: dict, a, *, gozer_call, spawn, lock_fd=None) -> int:
     """Take a lease (`gozer acquire`, or claim the ticket with `gozer wait`), run the launcher under it, always release it. No `gozer run`:
     a fresh `gozer run` behind a lease already held would queue behind that lease."""
     if a.ticket:
@@ -383,18 +452,30 @@ def _run(prepared: dict, a, *, gozer_call, spawn) -> int:
               f"is cancelled. Wait and take the lease with: tt-orchard suite-control run --stage-dir {a.stage_dir} --ticket {ticket}", file=sys.stderr)
         return 3
     lease, chips = grant.get("lease_id"), grant.get("chips")
+    unconfirmed = False
     try:
-        if not lease or not isinstance(chips, list) or not chips:
-            print("suite-control: gozer granted a lease with no lease id or chips; releasing it", file=sys.stderr)
+        need = int(prepared["chips"])
+        if not lease or not isinstance(chips, list) or len(chips) < need:
+            # gozer grants whole boards, so more chips than asked for is fine (the launcher narrows them); fewer is not
+            print(f"suite-control: gozer granted a lease with {len(chips) if isinstance(chips, list) else 0} chips and the control needs "
+                  f"{need}; releasing it", file=sys.stderr)
             return 2
         env = dict(os.environ, TT_VISIBLE_DEVICES=",".join(str(c) for c in chips))
         env.pop("TT_METAL_VISIBLE_DEVICES", None)
+        if lock_fd is not None:
+            env[LOCK_FD_VAR] = str(lock_fd)
         try:
-            return spawn(prepared["serve"], env, prepared["control_dir"])
-        except Terminated:
-            return EXIT_TERMINATED
+            code = spawn(launcher_argv(prepared, a.gozer), env, prepared["control_dir"])
+        except Terminated as exc:
+            unconfirmed = exc.code != EXIT_TERMINATED
+            return EXIT_UNCLEAN if unconfirmed else EXIT_TERMINATED
+        unconfirmed = code == EXIT_UNCLEAN or code < 0          # not confirmed clean, or the launcher was killed before it could say
+        return EXIT_UNCLEAN if unconfirmed else code
     finally:
-        if lease:
+        if lease and unconfirmed:
+            print(f"suite-control: lease {lease} was not released: the launcher could not confirm that the control's servers and containers are "
+                  f"stopped. The chips stay leased until a person checks (`gozer status`, `docker ps`) and runs `gozer release {lease}`.", file=sys.stderr)
+        elif lease:
             rcode, rtext = gozer_call([a.gozer, "release", str(lease)])
             if rcode != 0:
                 print(f"suite-control: gozer release {lease} exited {rcode}: {rtext.strip()[:200]}. The lease may still be held.", file=sys.stderr)
@@ -430,17 +511,20 @@ def main(argv=None, *, out=None, run=subprocess.run, gozer_call=None, spawn=None
     if not a.stage_dir:
         print("suite-control: --stage-dir is required", file=sys.stderr)
         return 2
+    if "/" in a.gozer:
+        a.gozer = os.path.abspath(a.gozer)         # the launcher runs from another directory
     try:
-        prepared = prepare(a.stage_dir, orchard_dir=a.orchard_dir, port=a.port, chips=a.chips, run=run)
+        with stage_lock(Path(a.stage_dir).resolve()) as fd:
+            prepared = prepare(a.stage_dir, orchard_dir=a.orchard_dir, port=a.port, chips=a.chips, run=run)
+            argv_g = gozer_argv(prepared, who=a.who, reason=a.reason, gozer=a.gozer)
+            print(json.dumps({"control_dir": prepared["control_dir"], "evidence": prepared["evidence"], "suite_control": prepared["wire"],
+                              "gozer": argv_g, "run": f"tt-orchard suite-control run --stage-dir {a.stage_dir}"}, indent=1), file=out)
+            if a.action == "prepare":
+                return 0
+            return _run(prepared, a, gozer_call=gozer_call or _gozer, spawn=spawn or _spawn, lock_fd=fd)
     except ControlError as exc:
         print(f"suite-control: {exc}", file=sys.stderr)
         return 2
-    argv_g = gozer_argv(prepared, who=a.who, reason=a.reason, gozer=a.gozer)
-    print(json.dumps({"control_dir": prepared["control_dir"], "evidence": prepared["evidence"], "suite_control": prepared["wire"],
-                      "gozer": argv_g, "run": f"tt-orchard suite-control run --stage-dir {a.stage_dir}"}, indent=1), file=out)
-    if a.action == "prepare":
-        return 0
-    return _run(prepared, a, gozer_call=gozer_call or _gozer, spawn=spawn or _spawn)
 
 
 if __name__ == "__main__":

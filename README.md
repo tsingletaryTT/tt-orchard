@@ -1551,7 +1551,11 @@ ticket with `gozer wait`, which takes the lease when it is granted, and then run
 because a new `gozer run` made while its own lease is held would queue behind that lease. The launcher reads the leased chips from
 `TT_VISIBLE_DEVICES`, sets `ORCHARD_DEVICE_IDS` and a control-specific `ORCHARD_TEST_LABEL` for the container template, and when the
 serve script ends for any reason, SIGTERM included, it stops the servers it started and removes its labelled containers and checks
-that they are gone (exit 4 when it cannot confirm). The result is
+that they are gone (exit 4 when it cannot confirm). When the launcher cannot confirm that (exit 4, or it had to be killed), `run` does not
+release the lease: it prints the lease id and leaves the chips leased for a person to check and release. gozer grants whole boards, so a lease
+with more chips than the control needs is accepted; the launcher narrows the visible chips and the device ids to the first ones it needs. One
+control runs per stage at a time: `prepare`, `run` and `launch` take a lock file beside the control directory (`suite-control.lock`) and a
+second one is refused. A `--gozer` executable other than the default is passed on to the launcher. The result is
 `suite-control/evidence/swap-check.json`. To use it, put `"suite_control": "stages/2/suite-control/evidence/swap-check.json"` in
 the stage's `swap_config.json` before the stage's test runs. `--port` overrides the stage's port.
 Not built: a supervisor step that makes the control before stage 2's test.

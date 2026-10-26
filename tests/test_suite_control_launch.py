@@ -327,7 +327,7 @@ def test_the_lease_is_released_when_the_run_is_terminated(prep):
     g = Gozer(acquire=GRANT)
 
     def spawn(argv, env, cwd):
-        raise sc.Terminated()
+        raise sc.Terminated(sc.EXIT_TERMINATED)
     out = io.StringIO()
     code = sc.main(["run", "--stage-dir", str(prep["stage"]), "--orchard-dir", str(CHECKOUT)], out=out, run=ok_run, gozer_call=g, spawn=spawn)
     assert code == sc.EXIT_TERMINATED and [c[1] for c in g.calls] == ["acquire", "release"]
