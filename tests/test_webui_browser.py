@@ -91,27 +91,54 @@ def test_choosing_another_run_shows_that_run(root, page):
         expect(page.locator("#run")).not_to_contain_text("live-model")
 
 
-def test_the_style_switch_changes_the_page_and_is_remembered(root, page):
+def test_operator_is_the_default_and_the_style_switch_changes_the_page_and_is_remembered(root, page):
     two_runs(root)
     with Served(make_app(root, alive={LIVE})) as s:
         open_page(page, s)
+        assert mode_of(page) == "operator"            # the default since 2026-10-26
+        page.click("#mode-playful-btn")
         assert mode_of(page) == "playful"
-        page.click("#mode-operator-btn")
-        assert mode_of(page) == "operator"
-        assert page.get_attribute("#mode-operator-btn", "aria-pressed") == "true"
-        assert page.get_attribute("#mode-playful-btn", "aria-pressed") == "false"
+        assert page.get_attribute("#mode-playful-btn", "aria-pressed") == "true"
+        assert page.get_attribute("#mode-operator-btn", "aria-pressed") == "false"
         page.reload()
         page.wait_for_selector("#runs li")
-        assert mode_of(page) == "operator"            # the browser remembered it
+        assert mode_of(page) == "playful"             # the browser remembered it, and the remembered choice beats the default
 
 
 def test_a_link_can_pick_a_style_and_nothing_else(root, page):
     two_runs(root)
     with Served(make_app(root, alive={LIVE})) as s:
-        open_page(page, s, "?mode=operator")
-        assert mode_of(page) == "operator"
+        open_page(page, s, "?mode=playful")
+        assert mode_of(page) == "playful"
         open_page(page, s, "?mode=%22%3E%3Cscript%3E")
-        assert mode_of(page) == "operator"                       # the stored choice stays; the link's value is ignored
+        assert mode_of(page) == "playful"                        # the stored choice stays; the link's value is ignored
+
+
+def test_operator_style_shows_small_pictures_beside_the_real_words_and_playful_shows_none_of_them(root, page):
+    two_runs(root)
+    with Served(make_app(root, alive={LIVE})) as s:
+        open_page(page, s)
+        band = page.locator("#run .run-head .badge")
+        expect(band).to_contain_text("running")                  # the real state name is always on the page
+        pic = band.locator(".op-pic")
+        expect(pic).to_be_visible()
+        assert pic.get_attribute("aria-hidden") == "true" and pic.inner_text().strip() == "🏃"
+        pause = page.get_by_role("button", name="Pause", exact=True)   # the picture is aria-hidden, so the name is still just "Pause"
+        expect(pause.locator(".op-pic")).to_be_visible()
+        assert page.locator("#stepper .step .stat .op-pic").first.is_visible()
+        page.click("#mode-playful-btn")
+        assert page.locator(".op-pic:visible").count() == 0
+
+
+def test_operator_pictures_do_not_animate_when_the_browser_asks_for_reduced_motion(root, browser):
+    two_runs(root)
+    ctx = browser.new_context(viewport={"width": 1400, "height": 900}, reduced_motion="reduce")
+    pg = ctx.new_page()
+    with Served(make_app(root, alive={LIVE})) as s:
+        open_page(pg, s)
+        names = pg.evaluate("[...document.querySelectorAll('#run *')].map(e => getComputedStyle(e).animationName).filter(n => n && n !== 'none')")
+        assert names == [], names
+    ctx.close()
 
 
 def test_cancelling_pause_sends_nothing(root, page):
