@@ -1628,6 +1628,7 @@ tt-orchard audio-reference-env --check     # check it; no device, no token
 python3 -m orchard.audio_reference check REFERENCE_RUN CANDIDATE_RUN    # PCC, relative L2 error and slope per saved array
 python3 -m orchard.audio_reference check REFERENCE_RUN BF16_RUN --cross-precision   # let the dtype setting differ (the noise floor)
 python3 -m orchard.audio_reference control FINE_TUNE_RUN BASE_RUN       # the base model's waveform must differ
+python3 -m orchard.audio_reference control FINE_TUNE_RUN BASE_RUN --unmatched   # allow runs whose settings differ (the report says so)
 ```
 
 This is step 0 of the Stable Audio runtime design (`docs/superpowers/specs/2026-10-28-stable-audio-runtime-design.md`). The environment is a venv with
@@ -1637,6 +1638,8 @@ removed, so the model files must already be in the local cache. It saves the enc
 network pass, every step's latent and denoised estimate, the final latent and the waveform, each as a float32 `.npy` file with its sha256 in `manifest.json`.
 `python3 -m orchard.audio_reference check` compares two such directories and needs all three numbers: PCC alone passes an output that is scaled. The bars in it
 are provisional until the reference's own bfloat16 noise floor has been measured (`bars_from_floor`).
+The `control` command requires the two runs to share the prompt, duration, steps, guidance scale, sampler, seed, dtype and sample size, so a difference in the
+waveform comes from the weights. `--unmatched` allows runs that differ in those settings; the report then says `matched: false` and carries a note.
 
 ### 5.9f The demo environment
 

@@ -11,6 +11,8 @@ from __future__ import annotations
 import copy
 import json
 import struct
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -1027,16 +1029,6 @@ def test_a_file_that_was_removed_after_it_was_read_is_reported(tmp_path):
     assert "model_config.json" in mod.audio_identity_problems()[0]
 
 
-def test_the_run_is_unknown_when_a_file_changes_while_stage_0_runs(audio_case, monkeypatch):
-    stage = audio_case()
-    model = model_snapshot(stage)
-    mod = template_module()
-    mod.audio_identity_reset()
-    mod.audio_tensors(model)
-    write_safetensors(model / "model.safetensors", TENSORS, 9.0)
-    assert mod.audio_identity_problems()
-
-
 def test_a_new_model_with_a_bad_layout_is_reported_once_whatever_its_weights_look_like(audio_case):
     """The layout problem is the finding. The weights of a directory already refused as a layout are not read, so they add no second reason."""
     stage = audio_case()
@@ -1065,3 +1057,70 @@ def test_a_dangling_config_json_link_keeps_a_snapshot_out_of_the_audio_branch(tm
     snap = make_audio(tmp_path, MODEL_REV, repo=MODEL_ID)
     (snap / "config.json").symlink_to(tmp_path / "nowhere")
     assert template_module().looks_like_audio(snap) is False
+
+
+# ---- the identity check and the descriptor's own size, each seen to matter ---------------------------------
+
+def _lying_fstat(monkeypatch, mod, extra):
+    """os.fstat as the template sees it, reporting `extra` more bytes than the file has (a file that grew after the open)."""
+    import os
+    from types import SimpleNamespace
+    real = os.fstat
+
+    def fake(fd):
+        r = real(fd)
+        return SimpleNamespace(st_mode=r.st_mode, st_size=r.st_size + extra, st_dev=r.st_dev, st_ino=r.st_ino, st_mtime_ns=r.st_mtime_ns)
+    monkeypatch.setattr(mod.os, "fstat", fake)
+
+
+def test_resetting_the_identity_record_forgets_earlier_files(tmp_path):
+    snap = make_audio(tmp_path, MODEL_REV, repo=MODEL_ID)
+    mod = template_module()
+    mod._audio_json(snap / "model_config.json")
+    assert mod.AUDIO_IDENTITY
+    mod.audio_identity_reset()
+    assert mod.AUDIO_IDENTITY == {}
+
+
+def test_a_weight_file_replaced_during_the_value_sample_makes_the_real_run_unknown(audio_case, tmp_path):
+    """End to end: the stage script runs, and the weight file is swapped (same bytes, new inode) while the value sample reads it."""
+    stage = audio_case()
+    model = model_snapshot(stage) / "model.safetensors"
+    driver = tmp_path / "driver.py"
+    driver.write_text(
+        "import importlib.util, os, sys\n"
+        f"spec = importlib.util.spec_from_file_location('dt', {str(stage / 'delta_triage.py')!r})\n"
+        "mod = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(mod)\n"
+        "orig = mod.sample_value_diffs\n"
+        "def patched(*a, **k):\n"
+        "    out = orig(*a, **k)\n"
+        f"    p = {str(model)!r}\n"
+        "    data = open(p, 'rb').read()\n"
+        "    open(p + '.new', 'wb').write(data)\n"
+        "    os.replace(p + '.new', p)\n"
+        "    return out\n"
+        "mod.sample_value_diffs = patched\n"
+        "sys.exit(mod.main())\n")
+    r = subprocess.run([sys.executable, str(driver)], capture_output=True, text=True, timeout=300)
+    assert r.returncode == 0, r.stdout + r.stderr
+    d = json.loads((stage / "delta.json").read_text())
+    assert d["class"] == "unknown" and "model.safetensors changed while stage 0 was reading it" in reasons(d)
+
+
+def test_a_config_that_grows_past_the_cap_after_it_was_opened_is_refused(tmp_path, monkeypatch):
+    mod = template_module()
+    path = tmp_path / "model_config.json"
+    path.write_text('{"a": "' + "x" * (mod.AUDIO_JSON_MAX + 10) + '"}')
+    _lying_fstat(monkeypatch, mod, -(mod.AUDIO_JSON_MAX + 100))          # the size taken at the open said it fits
+    data, err = mod._audio_json(path)
+    assert data is None and "larger than" in err
+
+
+def test_the_data_section_size_is_the_size_of_the_opened_file(tmp_path, monkeypatch):
+    mod = template_module()
+    snap = make_audio(tmp_path, MODEL_REV, repo=MODEL_ID)
+    assert mod.audio_header(snap / "model.safetensors")
+    _lying_fstat(monkeypatch, mod, 16)
+    with pytest.raises(ValueError, match="no tensor claims"):
+        mod.audio_header(snap / "model.safetensors")
