@@ -637,3 +637,52 @@ def test_the_spectrum_distance_matches_an_independent_calculation():
         return np.log1p(np.array(frames))
     expected = np.abs(spec(x) - spec(y)).mean() / spec(x).mean()
     assert ar.log_spectrum_distance(x, y) == pytest.approx(expected)
+
+
+# ---- cross-precision comparison (review of PR 123) ------------------------------------------------
+
+def test_runs_that_differ_only_in_dtype_are_refused_by_default_and_compared_when_asked(tmp_path):
+    make_run(tmp_path, "ref")
+    make_run(tmp_path, "low", settings={"dtype": "bfloat16"})
+    ref, low = load_run(tmp_path / "ref"), load_run(tmp_path / "low")
+    assert compare_runs(ref, low)["comparable"] is False
+    report = compare_runs(ref, low, cross_precision=True)
+    assert report["comparable"] is True and report["ok"] is True and report["cross_precision"] is True
+
+
+def test_a_strict_comparison_says_it_is_not_cross_precision(tmp_path):
+    make_run(tmp_path, "ref")
+    make_run(tmp_path, "cand")
+    assert compare_runs(load_run(tmp_path / "ref"), load_run(tmp_path / "cand"))["cross_precision"] is False
+
+
+@pytest.mark.parametrize("key,value", [("seed", 43), ("steps", 9), ("prompt", "other"), ("duration", 11), ("sampler", "euler"),
+                                       ("cfg_scale", 7.0), ("sample_size", 1)])
+def test_cross_precision_still_needs_every_other_setting_to_match(tmp_path, key, value):
+    make_run(tmp_path, "ref")
+    make_run(tmp_path, "low", settings={"dtype": "bfloat16", key: value})
+    report = compare_runs(load_run(tmp_path / "ref"), load_run(tmp_path / "low"), cross_precision=True)
+    assert report["comparable"] is False and key in report["problems"][0] and report["cross_precision"] is True
+
+
+def test_cross_precision_reports_the_numbers_that_feed_the_noise_floor(tmp_path):
+    make_run(tmp_path, "ref")
+    ref = load_run(tmp_path / "ref")
+    rec = Recorder(tmp_path / "low", model=MODEL, library=LIB, settings={**SETTINGS, "dtype": "bfloat16"}, seeds={"torch": 42})
+    rng = np.random.default_rng(5)
+    for (kind, nm) in ref.entries:
+        a = ref.array(kind, nm)
+        rec.record(kind, nm, a + 0.01 * rng.normal(size=a.shape))
+    rec.finish()
+    report = compare_runs(ref, load_run(tmp_path / "low"), cross_precision=True)
+    bars = ar.bars_from_floor(report, margin=3.0)
+    assert set(bars) >= {"layer", "latent", "waveform"}
+
+
+def test_the_check_command_takes_a_cross_precision_flag(tmp_path):
+    make_run(tmp_path, "ref")
+    make_run(tmp_path, "low", settings={"dtype": "bfloat16"})
+    code, text = run_cli("check", str(tmp_path / "ref"), str(tmp_path / "low"))
+    assert code == 1 and "dtype" in text
+    code, text = run_cli("check", str(tmp_path / "ref"), str(tmp_path / "low"), "--cross-precision")
+    assert code == 0 and text.strip().endswith("ok")

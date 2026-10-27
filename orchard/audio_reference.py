@@ -267,13 +267,16 @@ def settings_problems(a: Run, b: Run, keys=MATCH_KEYS) -> list[str]:
     return [f"settings.{k} differs: {a.settings.get(k)!r} and {b.settings.get(k)!r}" for k in keys if a.settings.get(k) != b.settings.get(k)]
 
 
-def compare_runs(ref: Run, cand: Run, bars: dict | None = None) -> dict:
+def compare_runs(ref: Run, cand: Run, bars: dict | None = None, *, cross_precision: bool = False) -> dict:
     """Compare every array both runs hold. The runs must have equal MATCH_KEYS settings. An array only one run holds is a failure: a
-    candidate that skipped a step has not been checked at that step. `ok` is true only when every shared array meets its bars and none is missing."""
+    candidate that skipped a step has not been checked at that step. `ok` is true only when every shared array meets its bars and none is missing.
+    By default the `dtype` setting must match too. `cross_precision=True` leaves `dtype` out of that check, for the comparison the design needs
+    (a float32 reference against a bfloat16 run of the same model, which is also how the noise floor is measured); every other setting must still match."""
     bars = {**DEFAULT_BARS, **(bars or {})}
-    problems = settings_problems(ref, cand)
+    keys = tuple(k for k in MATCH_KEYS if not (cross_precision and k == "dtype"))
+    problems = settings_problems(ref, cand, keys)
     if problems:
-        return {"ok": False, "comparable": False, "problems": problems, "results": []}
+        return {"ok": False, "comparable": False, "cross_precision": cross_precision, "problems": problems, "results": []}
     results, missing = [], []
     for key in sorted(set(ref.entries) | set(cand.entries)):
         kind, name = key
@@ -285,7 +288,8 @@ def compare_runs(ref: Run, cand: Run, bars: dict | None = None) -> dict:
         results.append({"kind": kind, "name": name, "ok": ok, "reasons": why, "bars": bars[kind].__dict__, **m})
     if not results:
         missing.append("the runs share no array")
-    return {"ok": not missing and all(r["ok"] for r in results), "comparable": True, "problems": missing, "results": results}
+    return {"ok": not missing and all(r["ok"] for r in results), "comparable": True, "cross_precision": cross_precision, "problems": missing,
+            "results": results}
 
 
 def log_spectrum_distance(ref: np.ndarray, cand: np.ndarray, n_fft: int = 1024, hop: int = 512) -> float | None:
@@ -355,6 +359,7 @@ def main(argv=None, out=None) -> int:
     c.add_argument("reference")
     c.add_argument("candidate")
     c.add_argument("--json", action="store_true")
+    c.add_argument("--cross-precision", action="store_true", help="let the dtype setting differ (float32 reference, bfloat16 candidate)")
     k = sub.add_parser("control", help="check that a base model's run differs from the fine-tune's")
     k.add_argument("fine_tune")
     k.add_argument("base")
@@ -370,7 +375,7 @@ def main(argv=None, out=None) -> int:
         if args.cmd == "control":
             report = compare_control(load_run(args.fine_tune), load_run(args.base), args.min_rel_l2)
         else:
-            report = compare_runs(load_run(args.reference), load_run(args.candidate))
+            report = compare_runs(load_run(args.reference), load_run(args.candidate), cross_precision=args.cross_precision)
     except ReferenceError as exc:
         print(f"refused: {exc}", file=out)
         return 2
