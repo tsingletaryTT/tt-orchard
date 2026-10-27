@@ -330,6 +330,9 @@ def _parser() -> argparse.ArgumentParser:
     kp.add_argument("--allow-slow-coder", action="store_true",
                     help="run even when the coder is decoding far below its best speed (the probe measures it before "
                          "each attempt and otherwise stops, exit 6); the report records each measurement")
+    kp.add_argument("--library", choices=("all", "others", "none"), default="all",
+                    help="the worked kernels put into each attempt's reference/: all (default), others (leave out the "
+                         "kernel for the op under test, so a pass is not a copy) or none; the report records the mode")
     kp.add_argument("--allow-stale-skills", action="store_true",
                     help="run even when the tt-lang checkout or the tt-lang skill is not the latest upstream has, or "
                          "could not be compared; the report records it with the shas")

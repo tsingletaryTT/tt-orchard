@@ -235,6 +235,16 @@ for j in range(8):
     for t in range(4):
         h = float(S[t, j]) * h + float(B[t, j])
         assert close(float(got[t, j]), h), ("linear_scan", t, j)
+got = REFERENCES["center"]({"x": A})
+for i in range(4):
+    mu = sum(float(A[i, j]) for j in range(8)) / 8
+    for j in range(8):
+        assert close(float(got[i, j]), float(A[i, j]) - mu), ("center", i, j)
+got = REFERENCES["softmax"]({"x": A})
+for i in range(4):
+    e = [math.exp(float(A[i, j]) - max(float(A[i, k]) for k in range(8))) for j in range(8)]
+    for j in range(8):
+        assert close(float(got[i, j]), e[j] / sum(e)), ("softmax", i, j)
 got = REFERENCES["add"]({"a": A, "b": B})
 assert torch.equal(got, A + B)
 print("REFERENCES OK")
@@ -244,7 +254,7 @@ print("REFERENCES OK")
     assert done.returncode == 0 and "REFERENCES OK" in done.stdout, done.stdout + done.stderr
 
 
-@pytest.mark.parametrize("op", ["silu_mul", "rmsnorm"])
+@pytest.mark.parametrize("op", ["silu_mul", "rmsnorm", "center", "softmax"])
 @needs_sim
 def test_the_good_kernels_pass_on_the_simulator(tmp_path, op):
     tdir, adir = _attempt(tmp_path, f"{op}_good", op=op)
@@ -261,7 +271,7 @@ def test_the_op_specs_name_only_known_references():
     table = next(n for n in tree.body if isinstance(n, ast.Assign) and n.targets[0].id == "REFERENCES")
     known = {k.value for k in table.value.keys}
     specs = sorted((TEMPLATES / "ops").glob("*.json"))
-    assert {p.stem for p in specs} == {"add", "silu_mul", "rmsnorm", "linear_scan"}
+    assert {p.stem for p in specs} == {"add", "silu_mul", "rmsnorm", "linear_scan", "center", "softmax"}
     for p in specs:
         spec = json.loads(p.read_text())
         assert spec["op"] == p.stem and spec["reference"] in known
@@ -1472,3 +1482,18 @@ def test_numbers_names_the_worst_first_and_keeps_the_order_the_harness_gave():
 def test_numbers_prints_nothing_for_a_non_finite_set_with_no_numbers_beyond_what_it_has():
     line = detail([{"name": "seed0", "finite": False, "pcc": None}])
     assert line.startswith("seed0: got is not finite") and "pcc" not in line and "rel_l2" not in line
+
+
+def test_the_probe_offers_exactly_the_ops_that_have_a_spec():
+    from orchard import defaults
+    assert set(defaults.KERNEL_PROBE_OPS) == {p.stem for p in (TEMPLATES / "ops").glob("*.json")}
+
+
+@pytest.mark.parametrize("op", ["center", "rmsnorm", "silu_mul", "softmax"])
+@needs_sim
+def test_every_library_kernel_passes_the_simulator_for_its_op(tmp_path, op):
+    tdir, adir = _attempt(tmp_path, None, op=op)
+    shutil.copy(TEMPLATES / 'library' / f"{op}.py", adir / "kernel.py")
+    done, check = _run_check(tdir, adir)
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert check["passed"] is True and len(check["sets"]) == 6

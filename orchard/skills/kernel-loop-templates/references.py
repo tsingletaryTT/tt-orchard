@@ -29,4 +29,13 @@ def linear_scan(x):
     return out
 
 
-REFERENCES = {"add": add, "silu_mul": silu_mul, "rmsnorm": rmsnorm, "linear_scan": linear_scan}
+def center(x):
+    return x["x"] - x["x"].mean(-1, keepdim=True)
+
+
+def softmax(x):
+    return torch.softmax(x["x"], dim=-1)
+
+
+REFERENCES = {"add": add, "silu_mul": silu_mul, "rmsnorm": rmsnorm, "linear_scan": linear_scan, "center": center,
+              "softmax": softmax}

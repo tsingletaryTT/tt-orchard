@@ -910,7 +910,7 @@ def _fake_probe_main(monkeypatch):
 def test_kernel_probe_refuses_an_unknown_op_and_calls_nothing(monkeypatch, tmp_path, capsys):
     calls = _fake_probe_main(monkeypatch)
     with pytest.raises(SystemExit) as info:
-        cli.main(["kernel-probe", "--op", "softmax"], env={"HOME": str(tmp_path)}, stdout=io.StringIO())
+        cli.main(["kernel-probe", "--op", "conv2d"], env={"HOME": str(tmp_path)}, stdout=io.StringIO())
     assert info.value.code == 2 and calls == []
     assert "invalid choice" in capsys.readouterr().err
 
@@ -953,6 +953,17 @@ def test_kernel_probe_defaults(monkeypatch, tmp_path):
     assert (args.attempts, args.phase, args.out, args.endpoint, args.model) == (5, "sim", "kernel-probe", None, None)
     assert args.shared_python == str(tmp_path / ".tenstorrent-venv" / "bin" / "python")
     assert kw["tier_config"] is None                       # no config: kernelprobe.main refuses, naming the flags
+    assert args.library == "all"                           # the worked kernels are offered unless asked otherwise
+
+
+def test_kernel_probe_takes_a_library_mode_and_refuses_an_unknown_one(monkeypatch, tmp_path):
+    calls = _fake_probe_main(monkeypatch)
+    cli.main(["kernel-probe", "--op", "add", "--library", "others", "--config", str(tmp_path / "missing.toml")],
+             env={"HOME": str(tmp_path)}, stdout=io.StringIO())
+    assert calls[0][0].library == "others"
+    with pytest.raises(SystemExit):
+        cli.main(["kernel-probe", "--op", "add", "--library", "some"], env={"HOME": str(tmp_path)},
+                 stdout=io.StringIO())
 
 
 # ---------------------------------------------------------------- package and package-card (issue 22)

@@ -1498,6 +1498,9 @@ Flags:
   `~/.tenstorrent-venv/bin/python`).
 - `--tt-lang-skill-dir`: the installed tt-lang skill whose `guide.md` and `examples.md` the coder gets (default
   `~/.claude/skills/ttm-tt-lang`, or `$ORCHARD_TTLANG_SKILL`).
+- `--library`: one of `all`, `others`, `none`. The worked kernels (`orchard/skills/kernel-loop-templates/library/`) copied into each attempt's
+  `reference/` as `library_<op>.py`. `all` is the default; `others` leaves out the kernel for the op under test, so a pass is not
+  a copy of a worked solution; `none` is the earlier behaviour. The report records the mode and says when the op's own kernel was offered.
 - `--allow-stale-skills`: run even when the tt-lang checkout or the tt-lang skill is not the latest upstream has, or
   could not be compared. The report records it, with each source's local and upstream shas.
 - `--allow-slow-coder`: run even when the coder is decoding far below its best speed. The report records each

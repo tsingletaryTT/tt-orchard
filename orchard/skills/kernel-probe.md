@@ -16,10 +16,11 @@ Reference files:
 - `reference/guide.md` and `reference/examples.md`: the tt-lang skill's guide and worked examples. They were written for specification 0.12,
   so take every name and signature from the two .py files and the specification.
 
+`reference/library_*.py` are worked kernels that pass the simulator. Read the one nearest your op first and adapt it.
 Read first, by kind of op:
 - Elementwise (`add`, `silu_mul`): eltwise_add.py, then the specification's row for each function you need
   (`grep -n "ttl.math.silu" reference/TTLangSpecification.md`).
-- A reduction (`rmsnorm`): eltwise_broadcast_reduce.py, then the rows for `ttl.math.reduce_sum`, `ttl.block.broadcast`, `ttl.block.fill`.
+- A reduction (`rmsnorm`, `center`, `softmax`): eltwise_broadcast_reduce.py, then the rows for `ttl.math.reduce_sum`, `ttl.block.broadcast`, `ttl.block.fill`.
 - A recurrence along a dimension (`linear_scan`): both .py files, then the specification's "Block" section. No upstream example has one.
 
 Rules from the specification and the examples:

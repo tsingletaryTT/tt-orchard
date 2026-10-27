@@ -1063,7 +1063,7 @@ def writes_good_kernel_once():
 
 
 def test_main_refuses_an_unknown_op_and_runs_nothing(tmp_path, fake_kenv, env_ready, capsys):
-    code = kp.main(probe_args(tmp_path, op="softmax"), env=fake_kenv, out=io.StringIO(),
+    code = kp.main(probe_args(tmp_path, op="conv2d"), env=fake_kenv, out=io.StringIO(),
                    probe=lambda e, m: True, run_watched_fn=no_run)
     assert code == 2 and env_ready == [] and not (tmp_path / "out").exists()
     assert "unknown op" in capsys.readouterr().err
@@ -2680,8 +2680,10 @@ def test_main_gives_every_attempt_the_references_and_records_them(tmp_path, fake
                        probe=lambda e, m: True, run_watched_fn=no_run)
     assert code == 0
     want = {f"reference/{r['name']}": r["sha256"] for r in ttlang_env.read_references(fake_kenv, ttlang_skill)[0]}
+    want.update({f"reference/{r['name']}": r["sha256"] for r in kp.library_references("add", "all")})
     data = json.loads((tmp_path / "out" / "kernel-probe-report.json").read_text())
     assert {r["name"]: r["sha256"] for r in data["header"]["references"]} == want
+    assert data["header"]["library"] == {"mode": "all", "note": None}
     assert data["header"]["tt_lang_skill_dir"] == str(ttlang_skill)
     for a in data["attempts"]:
         adir = tmp_path / "out" / "add" / f"attempt-{a['attempt']}"
@@ -3120,13 +3122,12 @@ def test_the_units_and_output_facts_hold_in_the_harness_and_the_simulator():
         assert "TILE_SHAPE: Shape = (_TILE_SIZE, _TILE_SIZE)" in (SRC / "python" / "sim" / "constants.py").read_text()
 
 
-def test_the_skill_holds_no_worked_solution_for_a_measured_op():
-    """The probe measures whether the coder can write rmsnorm and linear_scan; a worked solution would void it. The
-    skill may name those ops (which files to read) but holds no code beyond the skeleton."""
+def test_the_skill_keeps_one_fenced_skeleton_and_the_worked_kernels_live_in_the_library():
+    """Worked solutions are allowed (the operator's decision of 2026-10-27) but they go in reference/library_*.py, not in
+    the skill text, which keeps one fenced skeleton and stays short."""
     text = kp.SKILL.read_text()
-    assert len(re.findall(r"```", text)) == 2                     # one fenced block: the skeleton
-    for word in (r"\brsqrt\b", r"\bmean\(", r"\bh\[t", r"\ba\[t\]", r"1e-6", r"\beps\b", r"\bepsilon\b"):
-        assert not re.search(word, text), word
+    assert len(re.findall(r"```", text)) == 2
+    assert len(text.splitlines()) <= 100
 
 
 @needs_sim
@@ -3733,3 +3734,31 @@ def test_the_skill_states_the_general_facts_the_claude_rmsnorm_run_needed():
     assert "A block can be used in several statements inside one `with`" in flat
     assert "A buffer's shape may cover a whole row of tiles" in flat
     assert "Python arithmetic on shapes, such as `1.0 / x.shape[1]`" in flat and "captured by the thread functions" in flat
+
+
+def test_main_records_the_library_mode_and_leaves_out_the_op_under_test_for_others(tmp_path, fake_kenv, env_ready,
+                                                                                 ttlang_skill):
+    with FakeModel(lambda r: final("nothing")) as server:
+        code = kp.main(probe_args(tmp_path, op="rmsnorm", library="others", endpoint=server.endpoint), env=fake_kenv,
+                       out=io.StringIO(), probe=lambda e, m: True, run_watched_fn=no_run)
+    assert code == 0
+    data = json.loads((tmp_path / "out" / "kernel-probe-report.json").read_text())
+    names = {r["name"] for r in data["header"]["references"]}
+    assert "reference/library_softmax.py" in names and "reference/library_rmsnorm.py" not in names
+    assert data["header"]["library"] == {"mode": "others", "note": None}
+    assert (tmp_path / "out" / "rmsnorm" / "attempt-1" / "reference" / "library_center.py").is_file()
+    assert not (tmp_path / "out" / "rmsnorm" / "attempt-1" / "reference" / "library_rmsnorm.py").exists()
+
+
+def test_main_says_in_the_report_when_the_library_held_the_op(tmp_path, fake_kenv, env_ready, ttlang_skill):
+    with FakeModel(lambda r: final("nothing")) as server:
+        kp.main(probe_args(tmp_path, op="rmsnorm", endpoint=server.endpoint), env=fake_kenv, out=io.StringIO(),
+                probe=lambda e, m: True, run_watched_fn=no_run)
+    md = (tmp_path / "out" / "kernel-probe-report.md").read_text()
+    assert "Worked-kernel library mode: all." in md and "can adapt a worked kernel" in md
+
+
+def test_main_refuses_an_unknown_library_mode_and_starts_nothing(tmp_path, fake_kenv, env_ready, ttlang_skill, capsys):
+    code = kp.main(probe_args(tmp_path, library="some"), env=fake_kenv, out=io.StringIO(), probe=lambda e, m: True,
+                   run_watched_fn=no_run)
+    assert code == 2 and not (tmp_path / "out").exists() and "unknown --library" in capsys.readouterr().err
