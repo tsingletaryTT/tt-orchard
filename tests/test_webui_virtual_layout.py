@@ -192,3 +192,9 @@ def test_the_page_reports_runs_not_fully_read_runs_that_failed_and_an_unreadable
         assert key in guard, key
     assert "(not fully read)" in body, "an incomplete row is marked in the table"
     assert "v.runs_folder_unreadable" in body[body.index("tg-local-empty"):], "the empty-list message is not shown for an unreadable folder"
+
+
+def test_the_wrapper_is_invisible_in_the_top_bar_and_pins_both_figures_up_to_900_px():
+    css = CSS()
+    assert re.search(r"^\.meters \{ display: contents; \}", css, re.M), "above 900 px the two figures are laid out by the top bar as before"
+    assert re.search(r"@media \(max-width: 900px\) \{[^@]*\.meters \{[^}]*position: fixed[^}]*flex-direction: column", css)
