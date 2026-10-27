@@ -74,7 +74,7 @@ class Spender:
         self.runs_root, self.cfg, self.redact, self.clock = Path(runs_root), cfg, redact, clock
         self._lock = threading.Lock()
         self._cache = None                       # (time, rows, {name: path} of every listed directory, count scanned)
-        self._extra: dict = {}                   # name -> (time, row or None)
+        self._extra: dict = {}                   # name -> row or None, for selected runs past the scan cap
 
     def _scan_one(self, name, path):
         try:
@@ -102,11 +102,10 @@ class Spender:
 
     def _extra_row(self, name, path):
         with self._lock:
-            hit = self._extra.get(name)
-            if hit is not None and self.clock() - hit[0] < CACHE_S:
-                return hit[1]
+            if name in self._extra:                                  # cleared whenever the base scan refreshes, so never older than CACHE_S
+                return self._extra[name]
             row = self._scan_one(name, path)
-            self._extra[name] = (self.clock(), row)
+            self._extra[name] = row
             return row
 
     def build(self, run: str | None = None) -> dict:

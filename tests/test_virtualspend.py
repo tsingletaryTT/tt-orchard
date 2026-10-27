@@ -754,11 +754,11 @@ def test_an_attempt_record_that_is_a_link_is_not_followed_even_when_the_path_che
     assert s["agent_wall_s"] is None and s["turns"] == 1
 
 
-def test_an_attempt_record_over_the_cap_is_refused_by_the_bytes_read_not_by_an_earlier_size(root, monkeypatch):
+def test_an_attempt_record_over_the_cap_is_refused_by_the_bytes_read(root):
     write_log(root, "op/attempt-1/log/p.jsonl", [turn(1, 5, 1)])
     (root / "op" / "attempt-1" / "attempt.json").write_text(json.dumps({"agent_wall_s": 99}) + " " * (vs.MAX_ATTEMPT_BYTES + 10))
-    monkeypatch.setattr(vs.Path, "stat", lambda self, *a, **k: SimpleNamespace(st_size=10, st_mode=0o100644))   # a stale size
-    assert vs.scan(root)["agent_wall_s"] is None
+    s = vs.scan(root)
+    assert s["agent_wall_s"] is None and s["turns"] == 1, "the log was scanned and the oversize record gave no time"
 
 
 def test_an_attempt_record_exactly_at_the_cap_is_read(root):
@@ -776,3 +776,40 @@ def test_the_attempt_read_asks_for_at_most_the_cap_plus_one_byte(root, monkeypat
     monkeypatch.setattr(vs.os, "read", lambda fd, n: (asked.append(n), real_read(fd, n))[1])
     vs.scan(root)
     assert asked and max(asked) <= vs.MAX_ATTEMPT_BYTES + 1
+
+
+def test_a_log_is_read_through_the_descriptor_that_was_checked(root, tmp_path, monkeypatch):
+    """Swap the file for a link at the moment of the descriptor check: the handle must still read the file that was opened."""
+    outside = tmp_path / "outside.jsonl"
+    outside.write_text(turn(1, 999, 9) + "\n")
+    path = write_log(root, "log/run.jsonl", [turn(1, 5, 1)])
+    real_fstat = os.fstat
+
+    def swapping_fstat(fd):
+        result = real_fstat(fd)
+        if path.exists() and not path.is_symlink():
+            path.unlink()
+            path.symlink_to(outside)
+        return result
+    monkeypatch.setattr(vs.os, "fstat", swapping_fstat)
+    skipped = vs._skipped()
+    fh = vs._open_log(path, skipped)
+    assert fh is not None
+    with fh:
+        assert json.loads(fh.readline())["usage"]["prompt_tokens"] == 5
+
+
+def test_a_large_attempt_record_is_never_read_past_the_cap_plus_one_byte(root, monkeypatch):
+    write_log(root, "op/attempt-1/log/p.jsonl", [turn(1, 5, 1)])
+    (root / "op" / "attempt-1" / "attempt.json").write_text(json.dumps({"agent_wall_s": 5}) + " " * (3 * vs.MAX_ATTEMPT_BYTES))
+    returned = []
+    real_read = os.read
+
+    def counting_read(fd, n):
+        data = real_read(fd, n)
+        returned.append(len(data))
+        return data
+    monkeypatch.setattr(vs.os, "read", counting_read)
+    s = vs.scan(root)
+    assert sum(returned) == vs.MAX_ATTEMPT_BYTES + 1, "exactly the cap plus one byte is taken from a larger file"
+    assert s["agent_wall_s"] is None
