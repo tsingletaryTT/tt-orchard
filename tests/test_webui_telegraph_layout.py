@@ -147,6 +147,16 @@ def test_the_operator_meter_pairs_on_the_dark_top_bar_are_aa():
         assert ratio(fg, bg) >= 4.5, (tone, bg, fg, ratio(fg, bg))
 
 
+def test_up_to_900_px_the_meter_is_pinned_to_the_bottom_edge_with_a_solid_background_in_both_styles():
+    css = CSS()
+    media = re.search(r"@media \(max-width: 900px\) \{\n  \.spend-meter \{([^}]*)\}", css)
+    assert media and "position: fixed" in media.group(1) and "bottom: 8px" in media.group(1)
+    assert re.search(r"@media \(max-width: 900px\) \{[^}]*\n  html\[data-mode=\"operator\"\] \.spend-meter \{ background: #092221; \}", css)
+    assert re.search(r"body \.rail \{ padding-bottom: 6\.5rem; \}", css), "room under the pinned meter"
+    # the operator tone rules come first in the file order of specificity: warn and bad keep their own backgrounds
+    assert css.index('.spend-meter[data-tone="bad"] { background: #b3290a') < css.index("html[data-mode=\"operator\"] .spend-meter { background: #092221; }")
+
+
 def test_the_run_spend_line_is_white_on_the_operator_state_band_and_the_band_is_aa_for_white():
     css = CSS()
     assert re.search(r'^html\[data-mode="operator"\] \.run-head \.run-spend \{ color: #fff; \}', css, re.M)
