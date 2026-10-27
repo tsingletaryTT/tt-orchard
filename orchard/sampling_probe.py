@@ -51,6 +51,9 @@ def problems(record) -> list[str]:
             out.append(f"sampling_probe.requests.{name}.accepted must be true or false")
         if not isinstance(e.get("text"), str):
             out.append(f"sampling_probe.requests.{name}.text must be a string")
+        for key in ("drafter_log", "error", "finish_reason"):
+            if e.get(key) is not None and not isinstance(e[key], str):
+                out.append(f"sampling_probe.requests.{name}.{key} must be a string or null")
         for key in ("seconds", "completion_tokens"):
             if e.get(key) is not None and not _number(e[key]):
                 out.append(f"sampling_probe.requests.{name}.{key} must be a number or null")
@@ -95,7 +98,8 @@ CARD_SENTENCES = {
     "greedy-refused": "The server refused the greedy request of the sampling probe, so this configuration was not measured for sampling.",
     "sampled-refused": "The server refused a sampled request (temperature above 0, top-p below 1, with a seed). The error text is in the evidence file.",
     "sampled-incoherent": "The server accepted a sampled request, and its text repeats itself or is unreadable.",
-    "inconclusive": "A sampled reply was too short to say whether sampling was applied or how fast it ran.",
+    "inconclusive": ("The probe could not compare the speed of greedy and sampled requests: a request had no usable token count or timing, "
+                     "or a reply was too short."),
     "sampled-ignored": ("The server accepted sampled requests, but sampling was not applied: two requests that differ only in seed returned the "
                         "same text, so decoding is greedy."),
     "sampled-slower": "Sampled requests decoded more slowly than greedy requests. Both speeds are in the table above.",
@@ -149,6 +153,10 @@ def _summarize(record) -> dict:
         return {**out, "verdict": "sampled-ignored",
                 "sentence": ("The server accepted the sampled requests, but a sampled request returned the greedy text. "
                              f"Sampling was not applied, so decoding was greedy. Greedy decoded at {_fmt(gs)}.")}
+    if any(_speed(e) is None for e in (g, a, b)):
+        return {**out, "verdict": "inconclusive",
+                "sentence": ("The probe could not compare speeds: a request has no usable token count or timing, or a reply was shorter "
+                             f"than {MIN_TOKENS} tokens.")}
     if out["ratio"] is not None and out["ratio"] < SLOW_RATIO:
         return {**out, "verdict": "sampled-slower",
                 "sentence": (f"Sampled requests decoded at {_fmt(ss)} against {_fmt(gs)} for greedy requests, "

@@ -42,3 +42,19 @@ def test_a_faster_of_two_choice_is_packaged_drafter_off_and_the_card_says_it_doe
     stage_dir, pkg, card = stage_card(world)
     assert "does not do what the model needs" in " ".join(section(card).split())
     assert gate_package(stage_dir, world["run"]).ok
+
+
+def test_a_variant_whose_probe_is_inconclusive_gets_an_unverified_choice_and_a_card_that_claims_no_measurement(world):
+    """After the probe's own change (PR 109): a request with no usable token count or timing makes the verdict `inconclusive`."""
+    from test_sampling_probe import entry
+    rep = report(drafter="off", ignored=False, seconds=6.0)
+    rep["sampling_probe"]["requests"]["greedy"] = entry(tokens=None, seconds=None)
+    dec = drafter_on_run(world, variant=rep)
+    assert sc.variant_side(world["run"] / "stages/2", world["run"])["verdict"] == "inconclusive"
+    assert dec["choice"] == "drafter-off" and dec["flag"] == "unverified"
+    stage_dir, pkg, card = stage_card(world)
+    body = " ".join(section(card).split())
+    assert "could not compare speeds" in body or "documented host-sampling path" in body
+    assert "applies sampling and decodes above the usability floor" not in body
+    g = gate_package(stage_dir, world["run"])
+    assert g.ok, g.reasons

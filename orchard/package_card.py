@@ -456,6 +456,8 @@ def graft_markers(nearest_model: str) -> tuple[str, ...]:
 GRAFT_DECISION_MARKERS = {"graft": "chose the graft", "safe": "kept the safe configuration"}
 
 SAMPLING_HEAD = "## Sampling"
+SAMPLING_ROW_NAMES = ("decode speed, greedy request (stage 2 sampling probe)", "decode speed, sampled request (stage 2 sampling probe)",
+                      "drafter acceptance, greedy request (stage 2 sampling probe)", "drafter acceptance, sampled request (stage 2 sampling probe)")
 SAMPLING_TESTED = "top-k, penalties and logprobs were not tested"
 
 
@@ -589,7 +591,7 @@ def use_problems(card: str, use: UseFacts | None) -> list[str]:
 def card_problems(card: str, *, license_id: str, run_dir, sidecars=(), base_files=(), reported=(), reported_source="", model_id="",
                   nearest_model="", graft: bool = False, graft_decision: str | None = None, trial_rows=(),
                   use: UseFacts | None = None, vocab: tuple[int, int] | None = None, sampling: dict | None = None,
-                  sampling_rows=(), sampling_decision: dict | None = None, drafter_off_by_sampling: bool = False) -> list[str]:
+                  sampling_expected=(), sampling_decision: dict | None = None, drafter_off_by_sampling: bool = False) -> list[str]:
     problems = use_problems(card, use)
     if sampling_decision:
         body, _ = _section(card, SAMPLING_HEAD)
@@ -696,9 +698,24 @@ def card_problems(card: str, *, license_id: str, run_dir, sidecars=(), base_file
     for name in trial_rows:
         if name not in shown:
             problems.append(f"the Numbers table must show {name!r}: stage 2's graft trial measured it")
-    for name in sampling_rows:
-        if name not in shown:
-            problems.append(f"the Numbers table must show {name!r}: stage 2's sampling probe measured it")
+    table = {}
+    for r in section.splitlines():
+        cells = [c.strip() for c in r.strip().strip("|").split("|")]
+        if r.startswith("| ") and len(cells) == 4:
+            table[cells[0]] = cells[1:]
+    for want in sampling_expected:
+        if want.name not in table:
+            problems.append(f"the Numbers table must show {want.name!r}: stage 2's sampling probe measured it")
+            continue
+        value, label, evidence = table[want.name]
+        wanted = (f"{json.dumps(want.value)} {want.unit}", want.label, ", ".join(f"`{e}`" for e in want.evidence))
+        if (value, label, evidence) != wanted:
+            problems.append(f"the Numbers row {want.name!r} must be the sampling probe's measurement: value {wanted[0]!r}, label {wanted[1]!r}, "
+                            f"evidence {wanted[2]}")
+    expected_names = {w.name for w in sampling_expected}
+    for name in SAMPLING_ROW_NAMES:
+        if name in table and name not in expected_names:
+            problems.append(f"the Numbers table shows {name!r}, and stage 2's sampling probe made no such measurement")
     for row in (r for r in section.splitlines() if r.startswith("| ") and not r.startswith("| Number ")):
         first = row.strip().strip("|").split("|")[0].strip()
         if first in names:

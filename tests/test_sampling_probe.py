@@ -61,6 +61,29 @@ def test_a_sampled_text_equal_to_the_greedy_text_means_sampling_was_ignored_even
         assert "greedy text" in s["sentence"]
 
 
+@pytest.mark.parametrize("which", ["greedy", "sampled_a", "sampled_b"])
+@pytest.mark.parametrize("damage", [{"completion_tokens": None}, {"seconds": None}, {"completion_tokens": 4}, {"seconds": 0}])
+def test_a_missing_speed_in_any_of_the_three_requests_is_inconclusive_not_full_speed(which, damage):
+    rec = record()
+    rec["requests"][which].update(damage)
+    s = sp.summarize(rec)
+    assert s["verdict"] == "inconclusive", (which, damage, s["verdict"])
+    assert s["card_sentence"] == sp.CARD_SENTENCES["inconclusive"]
+    assert "speed" in s["card_sentence"]
+
+
+def test_a_missing_speed_does_not_hide_ignored_sampling():
+    rec = record(a=entry(text=GREEDY), b=entry(text=OTHER))
+    rec["requests"]["greedy"]["completion_tokens"] = None
+    assert sp.summarize(rec)["verdict"] == "sampled-ignored"
+
+
+def test_equal_seeds_texts_are_ignored_even_when_the_greedy_speed_is_missing():
+    rec = record(a=entry(text=STORY), b=entry(text=STORY))
+    rec["requests"]["greedy"]["completion_tokens"] = None
+    assert sp.summarize(rec)["verdict"] == "sampled-ignored"
+
+
 def test_ignored_wins_over_slower():
     s = sp.summarize(record(greedy=entry(seconds=1.0), a=entry(text=STORY, seconds=9.0), b=entry(text=STORY, seconds=9.0)))
     assert s["verdict"] == "sampled-ignored"
@@ -130,6 +153,22 @@ def test_a_malformed_record_gives_a_reason(mutate, fragment):
     mutate(rec)
     reasons = sp.problems(rec)
     assert reasons and any(fragment in r for r in reasons)
+
+
+@pytest.mark.parametrize("key, bad", [("drafter_log", 7), ("drafter_log", ["x"]), ("error", 7), ("error", {"a": 1}), ("finish_reason", 3)])
+def test_a_field_that_must_be_a_string_or_null_gives_a_reason_and_no_crash(key, bad):
+    rec = record(a=refused("HTTP 400: no"))
+    rec["requests"]["sampled_a"][key] = bad
+    reasons = sp.problems(rec)
+    assert any(key in r for r in reasons), reasons
+    assert sp.summarize(rec)["verdict"] == "malformed"
+
+
+def test_string_and_null_values_of_those_fields_are_fine():
+    rec = record()
+    for n in sp.ENTRY_NAMES:
+        rec["requests"][n].update({"drafter_log": None, "error": None, "finish_reason": None})
+    assert sp.problems(rec) == []
 
 
 def test_a_malformed_record_is_not_summarised_as_a_verdict():
