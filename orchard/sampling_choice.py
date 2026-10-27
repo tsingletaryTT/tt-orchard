@@ -412,8 +412,17 @@ def decision_problems(stage_dir, run_dir) -> list[str]:
     if current is None:
         return [f"{DECISION_FILE} cannot be checked: the swap check it was made from is missing or unreadable"]
     variant = variant_side(sd, run_dir)
-    again = decide(need(run_dir, override), current, variant)      # the note only words the reason; the choice and the flag do not read it
+    note = d.get("variant_note") if isinstance(d.get("variant_note"), str) else None
+    again = decide(need(run_dir, override), current, variant, variant_note=note)      # the note is free text; it only words the reason
     out = []
+    # Everything the card and the bundle read is derived, so every derived field is compared, not only the choice and the flag.
+    for key in ("needed", "need_source", "need_evidence", "thresholds", "reason", "variant_note"):
+        if d.get(key) != again.get(key):
+            out.append(f"{DECISION_FILE} has `{key}` {d.get(key)!r}, but the files on disk give {again.get(key)!r}")
+    saved_numbers = d.get("numbers") if isinstance(d.get("numbers"), dict) else {}
+    for key in sorted(set(saved_numbers) | set(again["numbers"])):
+        if saved_numbers.get(key) != again["numbers"].get(key):
+            out.append(f"{DECISION_FILE} has `numbers.{key}` {saved_numbers.get(key)!r}, but the files on disk give {again['numbers'].get(key)!r}")
     if again["choice"] != d["choice"]:
         out.append(f"{DECISION_FILE} chose {d['choice']!r}, but the files on disk give {again['choice']!r}: {again['reason']}")
     elif again["flag"] != d.get("flag"):

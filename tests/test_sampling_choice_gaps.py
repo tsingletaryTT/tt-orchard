@@ -150,7 +150,8 @@ def test_a_decision_with_no_probe_record_still_gets_a_sampling_section_and_the_g
     d = json.loads(swap.read_text())
     d.pop("sampling_probe")
     swap.write_text(json.dumps(d))
-    sc.write_decision(world["run"] / "stages/2", sc.decide(sc.need(world["run"]), sc.served_side(world["run"] / "stages/2"), None), trial=False)
+    s2 = world["run"] / "stages/2"
+    sc.write_decision(s2, sc.decide(sc.need(world["run"]), sc.served_side(s2), sc.variant_side(s2, world["run"])), trial=True)
     stage_dir, pkg, card = stage_card(world)
     assert "kept the configuration it served" in " ".join(section(card).split())
     assert gate_package(stage_dir, world["run"]).ok

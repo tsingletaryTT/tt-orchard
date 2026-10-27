@@ -59,7 +59,7 @@ def test_the_package_ships_the_decision_file_scrubbed_of_machine_paths(world):
     drafter_on_run(world)
     run = world["run"]
     d = json.loads((run / "stages/2" / sc.DECISION_FILE).read_text())
-    d["need_evidence"] = [f"the card said so (read from {run}/stages/2/evidence)"]
+    d["comment"] = f"read from {run}/stages/2/evidence"
     (run / "stages/2" / sc.DECISION_FILE).write_text(json.dumps(d))
     stage_dir, pkg, card = stage_card(world)
     shipped = pkg / PACKAGED
