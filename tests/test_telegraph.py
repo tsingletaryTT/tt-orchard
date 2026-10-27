@@ -731,3 +731,70 @@ def test_a_report_note_that_holds_the_key_is_not_written_to_the_ledger(tmp_path)
     got = tel.ask("p", "t", "f")
     tel.report(got.call_id, helped=False, note=f"the answer repeated {KEY} back")
     assert KEY not in (tmp_path / "tg" / "telegraph.jsonl").read_text()
+
+
+# ------------------------------------------------------------------------------------------------ review of PR 106, group B
+
+def test_a_changed_request_option_does_not_return_the_answer_cached_for_the_old_one(tmp_path):
+    tel, wire = make(tmp_path)
+    tel.ask("p", "t", "f")
+    tel2, wire2 = make(tmp_path, extra_body={"response_format": {"type": "json_object"}})
+    got = tel2.ask("p", "t", "f")
+    assert not got.cached and len(wire2.requests) == 1 and wire2.requests[0]["body"]["response_format"]
+
+
+def test_a_changed_endpoint_or_api_style_does_not_return_a_cached_answer(tmp_path):
+    tel, wire = make(tmp_path)
+    tel.ask("p", "t", "f")
+    tel2, wire2 = make(tmp_path, endpoint="https://other.example.org/v1")
+    assert not tel2.ask("p", "t", "f").cached and len(wire2.requests) == 1
+    tel3, wire3 = make(tmp_path, wire=Wire(lambda b: anthropic_reply("x", 5, 5)), api="anthropic")
+    assert not tel3.ask("p", "t", "f").cached and len(wire3.requests) == 1
+
+
+def test_the_same_configuration_still_hits_the_cache_across_processes(tmp_path):
+    tel, _ = make(tmp_path)
+    tel.ask("p", "t", "f")
+    tel2, wire2 = make(tmp_path)
+    assert tel2.ask("p", "t", "f").cached and wire2.requests == []
+
+
+def test_a_cached_answers_id_can_be_reported_and_the_verdict_counts_for_the_original_call(tmp_path):
+    tel, wire = make(tmp_path)
+    first = tel.ask("p", "t", "f")
+    again = tel.ask("p", "t", "f")
+    assert again.cached
+    tel.report(again.call_id, helped=False)                          # the CLI tells the user to report this id
+    s = tg.summarise(tmp_path / "tg")
+    assert (s["calls"], s["not_helped"], s["unreported"]) == (1, 1, 0)
+    nxt = tel.ask("p", "t", "different failure")
+    assert nxt.model == "big"                                        # the ladder moved on after the verdict
+    assert [r.get("origin") for r in records(tmp_path) if r.get("cached")] == [first.call_id]
+
+
+def test_reporting_a_cached_id_and_its_original_id_is_one_verdict_for_one_call(tmp_path):
+    tel, _ = make(tmp_path)
+    first = tel.ask("p", "t", "f")
+    again = tel.ask("p", "t", "f")
+    tel.report(first.call_id, helped=True)
+    tel.report(again.call_id, helped=False)                          # the latest verdict for the call wins
+    s = tg.summarise(tmp_path / "tg")
+    assert (s["helped"], s["not_helped"]) == (0, 1)
+
+
+def test_reporting_the_same_answer_twice_moves_the_ladder_one_step_only(tmp_path):
+    tel, wire = make(tmp_path, models=["small", "big", "third"])
+    first = tel.ask("p", "t", "f1")
+    tel.report(first.call_id, helped=False)
+    tel.report(first.call_id, helped=False)
+    tel.ask("p", "t", "f2")
+    assert [r["body"]["model"] for r in wire.requests] == ["small", "big"]
+
+
+def test_a_later_helped_verdict_for_a_call_undoes_its_earlier_not_helped(tmp_path):
+    tel, wire = make(tmp_path)
+    first = tel.ask("p", "t", "f1")
+    tel.report(first.call_id, helped=False)
+    tel.report(first.call_id, helped=True)
+    tel.ask("p", "t", "f2")
+    assert [r["body"]["model"] for r in wire.requests] == ["small", "small"]

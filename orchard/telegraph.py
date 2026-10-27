@@ -375,13 +375,16 @@ class Telegraph:
         sha = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
         recs = _read_ledger(self.dir)
         model = self._choose_model(problem, recs)
-        cache = self.dir / "cache" / (hashlib.sha256(f"{model}\0{sha}".encode()).hexdigest() + ".json")
+        url, _headers, body = self._request(model, prompt, None)
+        identity = json.dumps({"url": url, "body": body}, sort_keys=True)        # no credential in the identity
+        cache = self.dir / "cache" / (hashlib.sha256(identity.encode("utf-8")).hexdigest() + ".json")
         hit = self._cached(cache)
         base = {"call_id": uuid.uuid4().hex[:12], "problem": problem, "model": model,
                 "prompt_chars": len(prompt), "prompt_sha256": sha}
         if hit is not None:
-            self._append({**base, "ts": self.clock(), "outcome": "ok", "cached": True, "tokens_in": 0, "tokens_out": 0,
-                          "latency_s": 0.0, "cost_usd": 0.0, "reply_file": hit["reply_file"]})
+            self._append({**base, "ts": self.clock(), "outcome": "ok", "cached": True, "origin": hit.get("call_id"),
+                          "tokens_in": 0, "tokens_out": 0, "latency_s": 0.0, "cost_usd": 0.0,
+                          "reply_file": hit["reply_file"]})
             return Answer(True, hit["text"], call_id=base["call_id"], model=model, cached=True, cost_usd=0.0)
         if key_problem:
             return self._refuse(base, "no-key", key_problem)
@@ -393,7 +396,12 @@ class Telegraph:
     def report(self, call_id: str, helped: bool, note: str = "") -> None:
         """Say whether the answer to `call_id` helped. A helped answer keeps the cheap model for the next question; one
         that did not help moves the next question to the next model."""
-        if not any(r.get("call_id") == call_id and not r.get("cached") for r in _read_ledger(self.dir)):
+        recs = {r["call_id"]: r for r in _read_ledger(self.dir) if "call_id" in r}
+        rec = recs.get(call_id)
+        if rec is not None and rec.get("cached"):
+            call_id = rec.get("origin") or ""                    # a cache hit is reported against the call that made the answer
+            rec = recs.get(call_id)
+        if rec is None:
             raise KeyError(call_id)
         key, _ = self._key()
         self._append({"report": call_id, "helped": bool(helped), "ts": self.clock(),
@@ -414,12 +422,16 @@ class Telegraph:
         return None, None
 
     def _choose_model(self, problem: str, recs: list[dict]) -> str:
-        calls = {r["call_id"]: r for r in recs if "call_id" in r}
+        """The model for the next question on `problem`: each answered call counts once, by its latest verdict. A verdict of
+        not helped moves one step up the ladder and a verdict of helped goes back to the first model."""
+        verdict = {}
+        for r in recs:
+            if "report" in r:
+                verdict[r["report"]] = bool(r.get("helped"))
         steps = 0
         for r in recs:
-            if "report" not in r or calls.get(r["report"], {}).get("problem") != str(problem)[:80]:
-                continue
-            steps = 0 if r.get("helped") else steps + 1
+            if _sent(r) and r.get("problem") == str(problem)[:80] and r["call_id"] in verdict:
+                steps = 0 if verdict[r["call_id"]] else steps + 1
         return self.cfg.models[min(steps, len(self.cfg.models) - 1)]
 
     def _over_budget(self, model: str, prompt: str, used: dict, here: dict) -> str | None:
@@ -499,7 +511,7 @@ class Telegraph:
         cost = round(tin * price[0] / 1e6 + tout * price[1] / 1e6, 9) if price else None
         reply_file = f"replies/{base['call_id']}.txt"
         self._write(self.dir / reply_file, text)
-        self._write(cache, json.dumps({"text": text, "reply_file": reply_file}))
+        self._write(cache, json.dumps({"text": text, "reply_file": reply_file, "call_id": base["call_id"]}))
         self._append({**rec, "outcome": "ok", "tokens_in": tin, "tokens_out": tout, "cost_usd": cost,
                       "reply_file": reply_file, **({"usage_estimated": True} if estimated else {})})
         return Answer(True, text, call_id=base["call_id"], model=model, tokens_in=tin, tokens_out=tout,
