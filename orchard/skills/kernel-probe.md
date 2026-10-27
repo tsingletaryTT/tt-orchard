@@ -8,12 +8,10 @@ Your directory holds `kernel_spec.json` (the op), `kernel_check.py` (the check) 
 
 Reference files:
 - `reference/eltwise_add.py`: a working kernel for the tt-lang the check runs. Start here.
-- `reference/eltwise_broadcast_reduce.py`: a simulator example with `ttl.math.reduce_sum`, `ttl.block.broadcast` and `ttl.block.fill`.
-  It passes in the simulator; tt-lang's CI marks it `TTLANG_HARDWARE_CI: xfail-compiler` (expected to fail on the hardware compiler).
+- `reference/eltwise_broadcast_reduce.py`: a simulator example with `ttl.math.reduce_sum`, `ttl.block.broadcast` and `ttl.block.fill`. It passes in the simulator; tt-lang's CI marks it `TTLANG_HARDWARE_CI: xfail-compiler` (expected to fail on the hardware compiler).
 - `reference/TTLangSpecification.md`: the specification of that tt-lang (version 0.20). It is long: `grep -n "reduce_sum" <file>`
   finds a name's line N, `read_file` with offset N and limit 60 reads from there (offset and limit count lines).
-- `reference/guide.md` and `reference/examples.md`: the tt-lang skill's guide and worked examples. They were written for specification 0.12,
-  so take every name and signature from the two .py files and the specification.
+- `reference/guide.md` and `reference/examples.md`: the tt-lang skill's guide and worked examples. They were written for specification 0.12, so take every name and signature from the two .py files and the specification.
 
 `reference/library_*.py` are worked kernels that pass the simulator. Read the one nearest your op first and adapt it.
 Read first, by kind of op:
@@ -21,6 +19,11 @@ Read first, by kind of op:
   (`grep -n "ttl.math.silu" reference/TTLangSpecification.md`).
 - A reduction (`rmsnorm`, `center`, `softmax`): eltwise_broadcast_reduce.py, then the rows for `ttl.math.reduce_sum`, `ttl.block.broadcast`, `ttl.block.fill`.
 - A recurrence (`linear_scan`, `tile_scan`): both .py files, then the specification's "Block" section. A block expression kept in a Python variable carries a value between loop iterations (`z += ...` in eltwise_broadcast_reduce.py).
+
+Read before you write any kernel: three sections of `reference/TTLangSpecification.md`, each in full: "Dataflow buffer", "Block" and "Block states".
+`grep -n "^## " reference/TTLangSpecification.md` prints the first line of every section; a section ends where the next one begins. Read each with
+`read_file` (offset = its first line, limit = its length); a long section comes back in pages, so follow the offset each page ends with.
+When a check ends in a dataflow error (for example `pop(): not a valid next dataflow step`), read "Block states" again before you change the kernel.
 
 Rules from the specification and the examples:
 - Units: `kernel_spec.json` shapes count elements, and so does `x.shape` inside your operation; a tile is 32 x 32 elements, and every
@@ -53,10 +56,9 @@ Rules from the specification and the examples:
   refused `+`, `*`, `if` expressions and lists of values on them. Read from a `wait()` block, in a data movement thread.
 
 Steps:
-1. Read `kernel_spec.json` (inputs, shapes, output shape, what the op computes), then `reference/eltwise_add.py` once, then the files for your kind of op.
-2. Write `kernel.py` with write_file. It holds one function decorated with `@ttl.operation(...)`, with any name; that
-   function is the operation. It takes the inputs in the order of the keys under `inputs` in `kernel_spec.json`, then
-   the output tensor last; the parameter names are yours. The skeleton:
+1. Read `kernel_spec.json` (inputs, shapes, output shape, what the op computes), then `reference/eltwise_add.py` once, then the files for your kind of op, then the three specification sections named above.
+2. Write `kernel.py` with write_file. It holds one function decorated with `@ttl.operation(...)`, with any name; that function is the operation.
+   It takes the inputs in the order of the keys under `inputs` in `kernel_spec.json`, then the output tensor last; the parameter names are yours. The skeleton:
 
    ```python
    import ttl
@@ -81,20 +83,17 @@ Advice:
 
 Rules the check enforces. It reads `kernel.py` before running it and answers `FAIL: forbidden_code: ...` with every
 rule broken, its line, and what to do instead:
-- Imports: import only `ttl`, `ttnn` and `math`. `from __future__ import annotations` and type names such as `from typing import Any,
-  Optional` are also allowed. Do not import torch. A star import (`from X import *`) is refused.
+- Imports: import only `ttl`, `ttnn` and `math`. `from __future__ import annotations` and type names such as `from typing import Any, Optional` are also allowed. Do not import torch. A star import (`from X import *`) is refused.
 - Forbidden names, refused as a name, an attribute (`ttnn.os`) or an import (also under an alias): `open`, `exec`, `eval`,
   `compile`, `getattr`, `setattr`, `delattr`, `globals`, `locals`, `vars`, `sys`, `os`, `subprocess`, `importlib`, `builtins`,
   `breakpoint`, `atexit`, `references`, and calling `input()`.
 - Names and attributes with double underscores are refused, except `__name__` and `__all__`.
 - Read-back: `to_torch` and `from_torch` are refused, as a name, an attribute or an import.
 - The operation: exactly one plain top-level `def` with one decorator, `@ttl.operation(...)`, and any name except the forbidden
-  ones above. Two `@ttl.operation` functions are refused. `import ttl as tl` with `@tl.operation(...)`, and `from ttl import
-  operation` with `@operation(...)`, are accepted.
+  ones above. Two `@ttl.operation` functions are refused. `import ttl as tl` with `@tl.operation(...)`, and `from ttl import operation` with `@operation(...)`, are accepted.
 
 Other rules:
 - The probe also refuses a `kernel.py` that is a link or larger than 256 KiB, when it takes the file after you finish: write it with write_file.
 - Write only `kernel.py`. Your result is judged afterwards by an unedited copy of the check.
 - Do not install packages, use the network, or touch any device (the check runs on a simulator), or read the ledger or the log directory.
-- If the same failure comes back three times and you have no new idea, stop and say what you tried. Finish with at most five lines:
-  what the kernel does, and what the last check said.
+- If the same failure comes back three times and you have no new idea, stop and say what you tried. Finish with at most five lines: what the kernel does, and what the last check said.
