@@ -324,7 +324,9 @@ def supervisor_argv(cfg: BringupConfig, model_id: str, run_dir: Path | None = No
     all_inputs = dict(inputs or {})
     if cfg.reference_python is not None:
         all_inputs["reference_python"] = str(cfg.reference_python)     # listed in every agent's prompt
-    if cfg.demo_python is not None:
+    # A lab run has no stock-runtime route and no demo-env check, and `supervisor.lab_problems` wants every absolute input under the
+    # lab root, so a local interpreter in the home directory would reject an otherwise valid lab run.
+    if cfg.demo_python is not None and cfg.mode != "lab":
         all_inputs["demo_python"] = str(cfg.demo_python)               # read by the stock-runtime stage (stock_config.json)
     for name, value in all_inputs.items():
         argv += ["--input", f"{name}={value}"]
