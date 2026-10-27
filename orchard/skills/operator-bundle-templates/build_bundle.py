@@ -889,6 +889,34 @@ def inventory_section(run: Run, redact: Redactor) -> list[str]:
             count = o.get("scaled_count")
             shown = redact(fmt(count)) if is_number(count) else "count not recorded"
             lines.append(f"- `{redact(one_line(o['op']))}` ({shown})")
+    cands = [o for o in ops_in if isinstance(o, dict) and o.get("status") == "candidate" and isinstance(o.get("op"), str)]
+    cands.sort(key=lambda o: -(o["scaled_count"] if is_number(o.get("scaled_count")) else 0))
+    if cands:
+        lines += ["", "Candidate ops, most frequent first (at most 10). These have no mapping-table row. The ttnn names "
+                      "are guesses from the op's name, each with the reason it was proposed; they are not `mapped`:", ""]
+        for o in cands[:10]:
+            named = [c for c in (o.get("candidates") or []) if isinstance(c, dict) and isinstance(c.get("ttnn"), str)]
+            guess = ", ".join(f"`{redact(one_line(c['ttnn']))}` ({redact(one_line(str(c.get('why'))))})" for c in named[:3])
+            count = o.get("scaled_count")
+            shown = redact(fmt(count)) if is_number(count) else "count not recorded"
+            lines.append(f"- `{redact(one_line(o['op']))}` ({shown}): {guess or 'none recorded'}")
+    verified = [o for o in ops_in if isinstance(o, dict) and o.get("status") == "verified" and isinstance(o.get("op"), str)]
+    if verified:
+        lines += ["", "Verified ops (at most 10). Each agreed with a torch reference on the ttsim simulator at one small "
+                      "shape. That is not a run on hardware and the ops are not `mapped`:", ""]
+        for o in verified[:10]:
+            lines.append(f"- `{redact(one_line(o['op']))}` -> `{redact(one_line(str(o.get('ttnn'))))}`")
+    pats = inv.get("patterns")
+    pats = [f for f in pats if isinstance(f, dict) and isinstance(f.get("pattern"), str)] if isinstance(pats, list) else []
+    if pats:
+        lines += ["", "Groups of ops that one ttnn op does at once, recognised from the order of the traced ops "
+                      "(`pattern`; `pattern-verified` after the simulator check). The ops inside a group keep their own "
+                      "statuses:", ""]
+        for f in pats[:10]:
+            count = f.get("scaled_count")
+            shown = redact(fmt(count)) if is_number(count) else "count not recorded"
+            lines.append(f"- {redact(one_line(f['pattern']))} -> `{redact(one_line(str(f.get('ttnn'))))}` "
+                         f"({redact(one_line(str(f.get('status'))))}, {shown})")
     lines += ["", "`mapped` is a name match against a recorded ttnn dump. It does not say the op supports "
                   "the shape, dtype or layout the model needs."]
     return lines

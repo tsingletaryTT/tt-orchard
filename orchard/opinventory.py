@@ -7,10 +7,19 @@ Statuses, and what each claims:
     mapped      the mapping table names a ttnn op and the recorded dump for the installed ttnn contains that name.
                 This is a name match. It does not say the op supports the shape, dtype or layout the model needs.
     composable  a decomposition exists and every leaf is `mapped`.
-    unmapped    neither.
+    verified    no table row, but `tt-orchard inventory verify-candidates` ran the ttnn op against a torch reference on
+                the ttsim simulator with one small shape and it agreed (orchard/data/verified_mappings.json). It is
+                not `mapped`: a person still has to add the table row, and the simulator is not hardware.
+    candidate   no table row, but orchard/opvariants.py found up to three ttnn names that might do the job. A guess
+                about names; `candidates` on the row says why each was proposed. Not `mapped`.
+    unmapped    none of the above.
     ignored     the op is listed in ignored_ops.json: pure metadata that needs no ttnn op. It makes no ttnn claim,
                 so it is `ignored` with or without a dump.
     unchecked   there is no dump for the installed ttnn version, so nothing is claimed.
+
+A trace that carries an ordered op list (`sequence`) is also searched for groups of ops that one ttnn op does at once
+(orchard/oppatterns.py). Those are listed apart, in `patterns`, with status `pattern` (or `pattern-verified` after
+verify-candidates). The ops inside a group keep their own statuses.
 
 The dump comes from `tt-orchard inventory refresh-ttnn` (orchard/ttnn_dump.py), which imports ttnn under a lease,
 because ttnn's op names cannot be read without importing it. A dump for another ttnn version than the installed one is
@@ -29,16 +38,22 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from orchard import opvariants, oppatterns
+
 DATA_DIR = Path(__file__).resolve().parent / "data"
 TEMPLATE = Path(__file__).resolve().parent / "skills" / "ops-inventory-templates" / "ops_inventory.py"
 SCHEMA = 1
-STATUSES = ("mapped", "composable", "unmapped", "unchecked", "ignored")
+STATUSES = ("mapped", "composable", "verified", "candidate", "unmapped", "unchecked", "ignored")
 VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
 LABEL = {
     "traced": "measured: the op names, counts and one sample shape per op come from torch.export on the meta device",
     "status": "table plus dump: `mapped` is a name match against the recorded ttnn dump and does not say the op "
               "supports the model's shape, dtype or layout",
     "scaled_count": "estimate: ops inside layers are multiplied by layers in the config / layers traced",
+    "candidate": "guess: a ttnn name that resembles the aten op's name or its synonym; nothing says it does the same job",
+    "pattern": "recognised from the order and data flow of the traced ops; the ttnn op exists in the dump, and nothing "
+               "says it takes this model's shapes, dtype or layout",
+    "verified": "one small shape on the ttsim simulator against a torch reference; not run on a chip",
 }
 
 
@@ -79,9 +94,22 @@ def load_dump(version, data_dir=DATA_DIR):
     return d if d.get("ttnn_version") == version and isinstance(d.get("names"), list) else None
 
 
-def status_of(op, mapping, decomps, names, seen=(), ignored=frozenset()):
+def load_verified(path=None) -> dict:
+    """{aten op or `pattern:<kind>`: entry} from verified_mappings.json, or {} when there is none or it is unusable."""
+    p = Path(path) if path else DATA_DIR / "verified_mappings.json"
+    try:
+        d = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    ents = d.get("entries") if isinstance(d, dict) else None
+    return {k: v for k, v in ents.items() if isinstance(v, dict) and isinstance(v.get("ttnn"), str)} \
+        if isinstance(ents, dict) else {}
+
+
+def status_of(op, mapping, decomps, names, seen=(), ignored=frozenset(), verified=None):
     """(status, ttnn name, leaves). `names` is the set of names in the dump, or None for no usable dump.
-    `ignored` is the set of metadata-only ops; they are checked first because they make no ttnn claim."""
+    `ignored` is the set of metadata-only ops; they are checked first because they make no ttnn claim.
+    `verified` is {op: entry} from verified_mappings.json; an entry counts only while its ttnn name is in the dump."""
     if op in ignored:
         return "ignored", None, []
     entry = mapping.get(op)
@@ -104,11 +132,16 @@ def status_of(op, mapping, decomps, names, seen=(), ignored=frozenset()):
                 ok = False
         if ok:
             return "composable", None, leaves
+    v = (verified or {}).get(op)
+    if v and v["ttnn"] in names:
+        return "verified", v["ttnn"], []
     return "unmapped", (entry or {}).get("ttnn"), []
 
 
-def build(raw, *, mapping, decomps, dump, installed_ttnn=None, against=None, ignored=frozenset()) -> dict:
-    """The inventory dict for one raw trace. `against` is another inventory (the base model's) to compare with."""
+def build(raw, *, mapping, decomps, dump, installed_ttnn=None, against=None, ignored=frozenset(), verified=None,
+          variants=True) -> dict:
+    """The inventory dict for one raw trace. `against` is another inventory (the base model's) to compare with.
+    `variants` turns on the search for candidate ttnn names for ops with no table row."""
     inv = {"schema": SCHEMA, "model_dir": raw.get("model_dir"), "architectures": raw.get("architectures", []),
            "traced_class": raw.get("traced_class"), "torch": raw.get("torch"), "transformers": raw.get("transformers"),
            "traced": {"graph": "prefill", "seq_len": raw.get("seq_len"), "layers_in_config": raw.get("layers_in_config"),
@@ -141,20 +174,34 @@ def build(raw, *, mapping, decomps, dump, installed_ttnn=None, against=None, ign
     else:
         inv["scaling"] = f"in-layer ops scaled by {layers}/{traced}"
     base_ops = {o["op"] for o in against["ops"]} if against else None
+    index = opvariants.Index(names) if (variants and names is not None) else None
     rows, distinct, scaled_total = [], {s: 0 for s in STATUSES}, {s: 0 for s in STATUSES}
     for o in raw["ops"]:
-        status, ttnn_name, leaves = status_of(o["op"], mapping, decomps, names, ignored=ignored)
+        status, ttnn_name, leaves = status_of(o["op"], mapping, decomps, names, ignored=ignored, verified=verified)
+        cands = opvariants.candidates(o["op"], index) if (index is not None and status == "unmapped") else []
+        if cands:
+            status = "candidate"
         inl = o.get("count_in_layers", 0)
         scaled = round(inl * factor + max(o["count"] - inl, 0)) if factor else o["count"]
         row = {"op": o["op"], "count": o["count"], "scaled_count": scaled, "status": status, "ttnn": ttnn_name,
-               "leaves": leaves, "sample": o.get("sample"), "modules": o.get("modules", [])}
+               "leaves": leaves, "sample": o.get("sample"), "modules": o.get("modules", []), "candidates": cands}
+        if status == "verified":
+            row["verified"] = {k: v for k, v in (verified or {}).get(o["op"], {}).items() if k != "ttnn"}
         if base_ops is not None:
             row["in_base"] = o["op"] in base_ops
         rows.append(row)
         distinct[status] += 1
         scaled_total[status] += scaled
     inv["ops"] = rows
-    inv["summary"] = {"distinct": distinct, "scaled_total": scaled_total}
+    pat = oppatterns.recognise(raw.get("sequence"), names, layers) if names is not None else {"found": [], "unavailable": []}
+    found, unavailable = pat["found"], pat["unavailable"]
+    for f in found:
+        v = (verified or {}).get("pattern:" + f["pattern"])
+        f["status"] = "pattern-verified" if v and v["ttnn"] == f["ttnn"] else "pattern"
+        if f["status"] == "pattern-verified":
+            f["verified"] = {k: x for k, x in v.items() if k != "ttnn"}
+    inv["patterns"], inv["patterns_unavailable"] = found, unavailable
+    inv["summary"] = {"distinct": distinct, "scaled_total": scaled_total, "patterns": len(found)}
     return inv
 
 
@@ -182,10 +229,29 @@ def render_md(inv) -> str:
         lines += ["", f"The bodies of {hop_nodes} higher-order operations were traversed; their ops are counted."]
     if inv["failures"]:
         lines += ["", "Trace failures:"] + [f"- {f.get('stage')}: {f.get('error')}" for f in inv["failures"]]
-    lines += ["", "| op | count | scaled | status | ttnn |", "| --- | --- | --- | --- | --- |"]
-    order = {s: i for i, s in enumerate(("unmapped", "unchecked", "composable", "mapped", "ignored"))}
+    lines += ["", "`candidate` ops have no table row; the names in the last column are guesses made from the op's name "
+                  "(why in brackets). `verified` ops agreed with a torch reference on the ttsim simulator at one small "
+                  "shape. Neither is `mapped`.",
+              "", "| op | count | scaled | status | ttnn |", "| --- | --- | --- | --- | --- |"]
+    order = {s: i for i, s in enumerate(("unmapped", "unchecked", "candidate", "verified", "composable", "mapped",
+                                         "ignored"))}
     for r in sorted(inv["ops"], key=lambda r: (order[r["status"]], -r["scaled_count"], r["op"])):
-        lines.append(f"| `{r['op']}` | {r['count']} | {r['scaled_count']} | {r['status']} | {r['ttnn'] or ''} |")
+        shown = r["ttnn"] or ""
+        if r["status"] == "candidate":
+            shown = ", ".join(f"{c['ttnn']} ({c['why']})" for c in r.get("candidates") or [])
+        lines.append(f"| `{r['op']}` | {r['count']} | {r['scaled_count']} | {r['status']} | {shown} |")
+    pats = inv.get("patterns") or []
+    if pats or inv.get("patterns_unavailable"):
+        lines += ["", "Groups of ops that one ttnn op does at once, recognised from the order and data flow of the trace "
+                      "(`pattern`; `pattern-verified` after the simulator check). The ops inside a group keep their own "
+                      "statuses above.", "", "| group | ttnn | status | ops in a group | found | scaled |",
+                  "| --- | --- | --- | --- | --- | --- |"]
+        for f in pats:
+            lines.append(f"| {f['pattern']} | {f['ttnn']} | {f['status']} | {f['nodes']} | {f['occurrences']} | "
+                         f"{f['scaled_count']} |")
+        for u in inv.get("patterns_unavailable") or []:
+            lines.append(f"| {u['pattern']} | none of {', '.join(u['wanted'])} is in the dump | not claimed | | "
+                         f"{u['occurrences']} | |")
     return "\n".join(lines) + "\n"
 
 
@@ -215,9 +281,10 @@ def installed_ttnn_version(run, python):
 
 
 def run_inventory(model_dir, *, python, ttnn_python, out_dir, layers=2, seq=8, cls=None, against=None,
-                  run=_real_run, dump_dir=DATA_DIR, say=print) -> int:
+                  run=_real_run, dump_dir=DATA_DIR, say=print, verified_file=None) -> int:
     """Trace, map, write. 0 on success (a skipped model is a success), 2 when the template could not run or a
-    file it needs is unreadable. The tables always come from the package; `dump_dir` only says where the ttnn dump is."""
+    file it needs is unreadable. The tables always come from the package; `dump_dir` only says where the ttnn dump is.
+    `verified_file` is a verified_mappings.json to read instead of the package's."""
     base = None
     if against:
         try:
@@ -246,13 +313,20 @@ def run_inventory(model_dir, *, python, ttnn_python, out_dir, layers=2, seq=8, c
     version = installed_ttnn_version(run, ttnn_python)
     inv = build(raw, mapping=load_table(DATA_DIR / "aten_to_ttnn.json"),
                 decomps=load_table(DATA_DIR / "decompositions.json"), dump=load_dump(version, dump_dir),
-                installed_ttnn=version, against=base, ignored=load_ignored(DATA_DIR / "ignored_ops.json"))
+                installed_ttnn=version, against=base, ignored=load_ignored(DATA_DIR / "ignored_ops.json"),
+                verified=load_verified(verified_file))
     j, m = write_outputs(inv, out)
     say(f"wrote {j} and {m}")
     if inv.get("skipped"):
         say(f"skipped: {inv['skipped']}")
     else:
         say("distinct ops by status: " + ", ".join(f"{s} {n}" for s, n in inv["summary"]["distinct"].items()))
+        if inv["patterns"]:
+            say("op groups recognised: " + ", ".join(f"{f['pattern']} -> {f['ttnn']} ({f['scaled_count']})"
+                                                     for f in inv["patterns"]))
+        if inv["summary"]["distinct"]["candidate"]:
+            say("candidates are guesses and are not mapped; `tt-orchard inventory verify-candidates` tests them "
+                "on the simulator")
     return 0
 
 
@@ -263,7 +337,9 @@ def record_in_delta(stage_dir) -> bool:
     """Merge a short summary of `ops-inventory.json` into `delta.json`, both in `stage_dir`, under the key `inventory`.
 
     The summary holds the traced class, the skip reason (or None), the distinct-op counts by status, up to ten
-    `unmapped` op names (most frequent first, by scaled count) and the ttnn dump the statuses were checked against.
+    `unmapped` op names (most frequent first, by scaled count), the same for `candidate` ops with their proposed ttnn
+    names (labelled guesses, never `mapped`), the recognised op groups and the ttnn dump the statuses were checked
+    against.
     A skipped inventory records the reason and no counts. Every other key of delta.json is left as it was. The file
     is replaced through a temporary file in the same directory, so a reader never sees half a file. Returns False and
     changes nothing when either file is missing or is not a JSON object.
@@ -282,6 +358,14 @@ def record_in_delta(stage_dir) -> bool:
         rows.sort(key=lambda o: -(o.get("scaled_count") or 0))
         rec["distinct"] = (inv.get("summary") or {}).get("distinct")
         rec["unmapped_ops"] = [o.get("op") for o in rows[:UNMAPPED_LIST_MAX]]
+        cand = [o for o in inv.get("ops") or [] if isinstance(o, dict) and o.get("status") == "candidate"]
+        cand.sort(key=lambda o: -(o.get("scaled_count") or 0))
+        rec["candidate_ops"] = [{"op": o.get("op"), "candidates": [c.get("ttnn") for c in o.get("candidates") or []
+                                                                     if isinstance(c, dict)]}
+                                for o in cand[:UNMAPPED_LIST_MAX]]
+        rec["patterns"] = [{"pattern": f.get("pattern"), "ttnn": f.get("ttnn"), "status": f.get("status"),
+                            "scaled_count": f.get("scaled_count")}
+                           for f in inv.get("patterns") or [] if isinstance(f, dict)]
     rec["ttnn_dump"] = inv.get("ttnn_dump")
     delta["inventory"] = rec
     tmp = sd / f".delta.json.{os.getpid()}.tmp"

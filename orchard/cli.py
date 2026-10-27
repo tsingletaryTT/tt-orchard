@@ -14,6 +14,7 @@
     tt-orchard package-card RUN_DIR --benchmark FILE --model-key KEY [--base-key KEY] [--reported FILE] [--accept-unverified-identity]
     tt-orchard kernel-env [--check] [--src-dir DIR] [--venv-dir DIR] [--tt-lang-skill-dir DIR] [--allow-stale-skills]
     tt-orchard inventory TARGET [--python P] [--ttnn-python P] [--against F] [--layers N] [--seq N] [--class C] [--out DIR]
+    tt-orchard inventory verify-candidates --inventory FILE|DIR [--out DIR] [--image IMG] [--max-ops N] [--timeout S] [--record]
     tt-orchard coder-speed [--endpoint URL --model NAME | --tiers] [--samples N] [--watch SECONDS] [--json]
     tt-orchard kernel-probe --op NAME [--attempts N] [--phase sim|hw] [--out DIR] [--endpoint URL] [--model NAME]
                             [--temperature T | --temperatures T1,T2] [--top-p P] [--seed N]
@@ -227,8 +228,18 @@ def _parser() -> argparse.ArgumentParser:
                         "not fail the check")
     inv = sub.add_parser("inventory", parents=[common],
                          help="list the ops a model's reference code uses and which ones ttnn has; "
-                              "`inventory refresh-ttnn` records ttnn's op names (takes a one-chip lease)")
-    inv.add_argument("target", help="a model directory with a config.json, or the word refresh-ttnn")
+                              "`inventory refresh-ttnn` records ttnn's op names (takes a one-chip lease); "
+                              "`inventory verify-candidates` tests the proposed ttnn names on the ttsim simulator (no chip)")
+    inv.add_argument("target", help="a model directory with a config.json, or the word refresh-ttnn or verify-candidates")
+    inv.add_argument("--simulator", metavar="LIB",
+                     help="refresh-ttnn: list the names against this ttsim library (libttsim_bh.so, with its "
+                          "soc_descriptor.yaml beside it) and take no lease")
+    inv.add_argument("--inventory", metavar="FILE", help="verify-candidates: an ops-inventory.json, or the directory that holds it")
+    inv.add_argument("--image", default=None, help="verify-candidates: the ttsim simulator image (default ttsim-blackhole-space:local)")
+    inv.add_argument("--max-ops", type=int, default=None, help="verify-candidates: most candidate pairs to run (default 40)")
+    inv.add_argument("--timeout", type=int, default=None, help="verify-candidates: seconds before the simulator run is stopped (default 900)")
+    inv.add_argument("--record", action="store_true",
+                     help="verify-candidates: also merge the verified entries into the package's verified_mappings.json")
     inv.add_argument("--python", help="interpreter with torch and transformers (default $ORCHARD_REFERENCE_PYTHON, "
                                       "then reference_python in bringup.toml)")
     inv.add_argument("--ttnn-python", help="interpreter whose installed ttnn version is read, and that refresh-ttnn "
@@ -304,7 +315,16 @@ def _inventory(args, env, home, out) -> int:
     say = lambda line: print(line, file=out)
     ttnn_python = args.ttnn_python or str(home / ".tenstorrent-venv" / "bin" / "python")
     if args.target == "refresh-ttnn":
-        return ttnn_dump.main(ttnn_python, say=say)
+        return ttnn_dump.main(ttnn_python, say=say, simulator=args.simulator)
+    if args.target == "verify-candidates":
+        from orchard import opverify
+        if not args.inventory:
+            return _refuse("verify-candidates needs --inventory (an ops-inventory.json or the directory that holds it)")
+        return opverify.main(args.inventory, out_dir=args.out or "verify-candidates",
+                             image=args.image or opverify.DEFAULT_IMAGE,
+                             max_ops=args.max_ops if args.max_ops is not None else opverify.DEFAULT_MAX_OPS,
+                             timeout=args.timeout if args.timeout is not None else opverify.DEFAULT_TIMEOUT_S,
+                             record=args.record, say=say)
     python = args.python or env.get("ORCHARD_REFERENCE_PYTHON")
     if not python:
         try:
