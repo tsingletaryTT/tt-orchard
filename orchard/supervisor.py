@@ -1226,7 +1226,10 @@ class Supervisor:
             self.ledger.append("stage_start", n, skip=True)
             self.ledger.append("stage_end", n, result="skipped", reason=spec.skip)
             return "skipped"
-        ok, free = check_disk(self.run_dir, spec.disk_gb, usage=self.disk_usage)
+        # A resumed stage 2 whose sampling trial already ran only has results to read. The trial's own tensor cache may have taken the space the entry
+        # requirement asks for, and nothing is converted again, so the requirement is for a stage that still has a cache to make.
+        reads_finished_trial = (resuming and n == 2 and (self.run_dir / "stages" / "2" / sampling.TRIAL_DIR / "test-result.json").is_file())
+        ok, free = (True, None) if reads_finished_trial else check_disk(self.run_dir, spec.disk_gb, usage=self.disk_usage)
         if not ok:
             self._block(n, f"stage {n} needs {spec.disk_gb} GB free on the run directory's disk; "
                            f"{free} GB is free", need_gb=spec.disk_gb, free_gb=free)

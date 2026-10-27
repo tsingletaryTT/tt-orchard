@@ -107,6 +107,44 @@ def test_a_finished_trial_is_read_after_a_restart_even_when_its_own_cache_left_t
     assert len(spy.sampling_trials) == 1 and not stage2(rig, "sampling trial skipped")
 
 
+def test_a_restart_with_the_real_thresholds_reads_the_finished_trial_when_free_space_is_between_30_and_40_gb(rig, spy):
+    """Second review of PR 114, finding 3. The trial's cache leaves 35 GB free, which is under stage 2's own 40 GB entry requirement. The restart must still
+    reach the finished trial and read its result, without any threshold being replaced."""
+    from collections import namedtuple
+    with pytest.raises(Crash):
+        rig.run(crash_if=lambda e: e["event"] == "evidence" and e["data"].get("what") == "sampling trial test")
+    decision_path = sd(rig) / sc.DECISION_FILE
+    U = namedtuple("U", "total used free")
+    rig.usage = lambda path: U(0, 0, int(35e9)) if not decision_path.exists() else U(0, 0, 10 ** 15)
+    assert rig.run(pid=200) == EXIT_READY
+    d = decision_file(rig)
+    assert d["choice"] == "drafter-off" and len(spy.sampling_trials) == 1
+
+
+def test_a_later_stage_that_resumes_still_needs_its_disk_although_stage_2_left_a_trial_record(rig, spy):
+    from collections import namedtuple
+    U = namedtuple("U", "total used free")
+    with pytest.raises(Crash):
+        rig.run(crash_if=lambda e: e["event"] == "stage_start" and e["stage"] == 4)
+    assert (sd(rig) / sc.TRIAL_DIR / "test-result.json").is_file()
+    rig.usage = lambda path: U(0, 0, int(35e9))
+    with pytest.raises(AssertionError):                     # stage 4 needs 110 GB; the run waits and the fake clock gives up
+        rig.run(pid=200)
+    assert any("stage 4 needs" in json.dumps(e["data"]) for e in rig.entries())
+
+
+def test_stage_2_still_needs_its_disk_when_no_trial_has_run(rig, spy):
+    """The exemption is for a stage with a finished trial to read. A stage 2 that has done nothing still needs the space."""
+    from collections import namedtuple
+    U = namedtuple("U", "total used free")
+    rig.usage = lambda path: U(0, 0, int(35e9))
+    rig.on_sleep = None
+    with pytest.raises(AssertionError):                     # the run waits for space for a simulated day and the fake clock gives up
+        rig.run()
+    assert any("stage 2 needs 40.0 GB free" in json.dumps(e["data"]) for e in rig.entries())
+    assert spy.sampling_trials == []
+
+
 def test_a_trial_that_has_not_run_is_still_skipped_for_want_of_disk(rig, spy, monkeypatch):
     short_disk(monkeypatch)
     assert rig.run() == EXIT_READY
