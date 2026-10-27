@@ -31,7 +31,7 @@ Measurements, per attempt (taken from the attempt's report and its `log/probe-*.
 | Measurement | Definition |
 |---|---|
 | passed in the simulator | `passed_sim` in the attempt record, from the unedited check |
-| failure class at the end | deadlock, pop invalid step (`pop()` or `store()` "not a valid next dataflow step"), shape mismatch, numeric, wall-clock, other |
+| failure class at the end | deadlock, pop invalid step (any error whose text is "not a valid next dataflow step": `pop()`, `store()` or `copy`), shape mismatch, numeric, wall-clock (the attempt ended on the wall budget with no simulator result), other. The class comes from the first line of the unedited check's answer; how the attempt ended (`status`) is listed beside it |
 | turns to the first simulator result | the turn whose tool call produced the first `kernel_check.py` result |
 | "Block states" read | count of `read_file` calls on the specification whose returned lines cover lines 743 to 764 in full, plus shell calls (grep, sed, head) whose output prints the section's body |
 | `read_file` calls | all `read_file` calls in the attempt, any file |
@@ -48,3 +48,8 @@ class is inside what a rerun of the same arm could produce.
 
 Baseline for context only (not a control: earlier skill text, so not comparable): rms5, 5 attempts, 0 passed,
 failures deadlock 1, `pop()` 1, numeric 2, shape mismatch 1; rms4: 0 passed, deadlock 3, `pop()` 1, shape mismatch 1.
+
+Clarification added after the pilot and before arm A. The pilot (one arm B attempt, not counted) ended with
+`Cannot perform copy (as destination): not a valid next dataflow step`. The class "pop invalid step" is therefore
+every "not a valid next dataflow step" error, whatever operation it names, and the success criterion's "`pop()` /
+`store()` dataflow-step failures" means that class. The pilot ran with the same seed base and library mode as the arms.
