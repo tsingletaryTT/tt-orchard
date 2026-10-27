@@ -130,3 +130,19 @@ context, agent tasks). Nothing was uploaded, published or listed; `episod/qwen3.
   that do not concern the model, so the mixed row is the weakest of the four.
 - Free disk rose from 69 GB to 290 GB during the pilot (not by me), which made the side-by-side run possible. Each tensor cache is 30 to 31 GB and was left in place.
 - Files: `evidence/2026-10-27-cjk-trim-benchmark/` (`benchmark.json`, `cjk-trim.json`, `cjk-base.json`, speed and tokenizer files, the scripts). Paths are replaced by placeholders.
+
+## Driver defects found in review (the run used the earlier version)
+
+The benchmark ran with the first version of `session_all.py`. Copilot's review of the pull request found two defects in it, and the committed copy now has both fixes.
+1. A failed `orchard.bench_session` step was printed and the driver went on to the next step and exited 0, so `session.sh` could not see a failed phase (including exit 7, a board off the bus).
+   The fixed driver ends the session with the failing status; its `finally` stops the server and no later phase starts.
+2. `session.sh` runs the driver under `timeout`, and its SIGTERM ended Python without running the `finally`. The server runs in its own session, so it could outlive the timeout and keep the chips
+   while gozer released them. The fixed driver turns SIGTERM and SIGINT into `SystemExit`, so the `finally` stops the server's process group (SIGTERM, a grace period, SIGKILL, a check that the group is gone).
+
+Could either have affected the recorded numbers? No. Every `bench_session` step of all four sessions (two pilots, two full runs) logged `exit 0`, and every phase in the recorded summaries has `ok: true`
+with no request errors except the one timed-out BFCL request per set at 4 at a time that the results section already reports. No session was ended by `timeout`; all four finished by themselves and wrote `SESSION_ALL end`.
+So neither defect was triggered. The risk was to a later run, not to these numbers.
+
+Check of the fix, by hand with a fake checkout (a stub `orchard` package, a fake `run.sh` whose server sleeps, a fake `bench_session` that exits 7 or sleeps): the old driver exits 0 when the phase exits 7, and
+after `timeout 4` two server processes are left; the fixed driver exits 7 for the failing phase and leaves no process in the server's group in either case (exit 124 under `timeout`). The repository has no test pattern for
+evidence scripts, so this check is described here and not committed as a test.

@@ -9,7 +9,7 @@ Starts the model's run.sh the way orchard.measure_serving does, then, on that on
 The base control's run.sh is checked against its control record (`bench_session.control_summary`) before the server starts.
 --scale pilot cuts every set to a few items to measure time and cache size.
 """
-import argparse, json, os, subprocess, sys, time
+import argparse, json, os, signal, subprocess, sys, time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -45,6 +45,13 @@ def main():
         ctl = bs.control_summary(a.run_sh, json.loads(Path(a.control_record).read_text()), model_dir=a.model_dir)
         (out / "control.json").write_text(json.dumps(ctl, indent=1))
     cache = Path(a.tt_cache); sc.guard_cache(cache, a.model_id)
+    # `timeout` (session.sh) and gozer end this process with SIGTERM or SIGINT, which would skip the `finally` below and leave the server, which
+    # runs in its own session, holding the chips. Turn both into SystemExit so the `finally` stops the server's process group (SIGTERM, a grace
+    # period, SIGKILL, and a check that the group is gone: serve_and_compare.stop_server) before the leased command exits.
+    def _terminate(signum, _frame):
+        raise SystemExit(128 + signum)
+    signal.signal(signal.SIGTERM, _terminate)
+    signal.signal(signal.SIGINT, _terminate)
     log_path = out / "server.log"
     env = dict(os.environ, TT_CACHE_PATH=str(cache), TT_CACHE_HOME=str(cache), HF_HOME=a.hf_home, HF_HUB_OFFLINE="1",
                MODEL_WEIGHTS_DIR=a.model_dir, HF_MODEL=a.model_dir)
@@ -98,6 +105,9 @@ def main():
             r = subprocess.run([py, "-m", "orchard.bench_session", "--label", f"{a.label}-{name}", "--out-dir", str(out / name), "--phases", phases,
                                 "--limit", str(limit), "--concurrency", str(conc), *common], cwd=os.environ["ORCHARD_CHECKOUT"])
             print("STEP", name, "exit", r.returncode, round(time.time() - t), flush=True)
+            if r.returncode != 0:
+                # a failed phase ends the session with that status (exit 7 is an off-bus board): the `finally` below stops the server and no later phase starts
+                raise SystemExit(r.returncode)
         if "bfcl1" in steps:
             bench("bfcl-c1", "bfcl", 10 if pilot else 50, 1)
         if "main" in steps:
