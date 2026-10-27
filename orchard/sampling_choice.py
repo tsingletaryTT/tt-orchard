@@ -249,14 +249,20 @@ NEED_WORDS = {"operator": "the operator said so", "card-warning": "the model car
               "card-hints": "the model card recommends sampling settings", "none": "nothing in the model's files says it does"}
 
 
+def served_clause(verdict) -> str:
+    """What the probe established about the configuration stage 2 first served, as a clause for the card (no number): it ignored sampled requests, did
+    not apply sampling, or has no usable sampling verdict. Only `sampled-ignored` says the drafter ignored sampling."""
+    return ("ignored sampled requests" if verdict == "sampled-ignored" else
+            "did not apply sampling" if verdict in BAD else "has no usable sampling verdict")
+
+
 def card_sentence(decision: dict) -> str:
     """The package card's plain sentences for the choice. They carry the marker phrase the gate looks for and no number: the card's Numbers table is
     the only place for a measured speed (the card gate refuses one in prose), and this sentence points to the sampling rows in that table."""
     n = decision.get("numbers") or {}
     why = NEED_WORDS.get(decision.get("need_source"), "the sampling decision says so")
     verdict = n.get("served_verdict")
-    first = ("ignored sampled requests" if verdict == "sampled-ignored" else
-             "did not apply sampling" if verdict in BAD else "has no usable sampling verdict")
+    first = served_clause(verdict)
     flag = decision.get("flag")
     if decision.get("choice") == "drafter-off":
         s = (f"Stage 2 chose the drafter-off configuration. The model needs sampling ({why}), and the configuration stage 2 first served, with the "

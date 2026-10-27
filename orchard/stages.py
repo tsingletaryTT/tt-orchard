@@ -1148,6 +1148,7 @@ def gate_package(stage_dir, run_dir) -> GateResult:
                                       sampling=sampling if p.get("required") else None,
                                       sampling_decision=sampling_decision if p.get("required") else None,
                                       drafter_off_by_sampling=bool(sampling_decision and sampling_decision.get("choice") == "drafter-off"),
+                                      sampling_first_verdict=((sampling_decision or {}).get("numbers") or {}).get("served_verdict"),
                                       sampling_expected=sampling_expected if p.get("required") else (),
                                       use=read_use_facts(swap.get("new_snapshot") or "/nonexistent", run_sh, run,
                                                            identity=(new_repo, new_rev), measured=bool(p.get("required"))))]

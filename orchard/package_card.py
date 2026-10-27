@@ -123,6 +123,7 @@ class CardFacts:
     acceptance_measured: bool = False     # the Numbers table has the drafter's acceptance rate (stage 2's graft trial measured it)
     vocab: tuple[int, int] | None = None  # (this model's vocabulary size, the nearest model's) when the model is a vocabulary trim
     sampling_decision: dict | None = None   # stage 2's sampling decision (orchard/sampling_choice.py); only the required profile's card states it
+    sampling_first_verdict: str | None = None   # the probe's verdict for the configuration stage 2 first served (the bullet words only what it established)
     drafter_off_by_sampling: bool = False   # stage 2 chose the drafter-off configuration because the model needs sampling (every profile)
     sampling_trial_chips: int | None = None  # the chip count the sampling trial ran on (stage 2's), which may differ from this profile's
     sampling: dict | None = None     # what stage 2's sampling probe found (package.sampling_summary): card_sentence, serving; only the required profile
@@ -279,8 +280,7 @@ def render_card(f: CardFacts) -> str:
         lines.append(f"- Speculative decoding is off. The drafter of {f.nearest_model} works on the token ids of {f.nearest_model}, "
                      f"and the vocabulary of {f.model_id} has {_count(f.vocab[0])} entries against {_count(f.vocab[1])}.")
     elif f.drafter_off and f.drafter_off_by_sampling:
-        lines.append(f"- Speculative decoding is off. Stage 2 chose this configuration because {f.model_id} needs sampling and the speculative "
-                     "drafter ignores sampled requests (see Sampling).")
+        lines.append(sampling_bullet(f.model_id, f.sampling_first_verdict))
     elif f.drafter_off:
         lines.append(f"- Speculative decoding is off. The drafter of {f.nearest_model} needs the MTP "
                      f"tensors of the model, and {f.model_id} has none.")
@@ -372,6 +372,13 @@ def render_card(f: CardFacts) -> str:
                "This profile was not booted on hardware by the run. Boot it before publishing."),
               "", "## How to serve", "", f"    tt-model serve {f.namespace}/{f.name}", ""]
     return "\n".join(lines)
+
+
+def sampling_bullet(model_id: str, verdict) -> str:
+    """The bullet that says why speculative decoding is off after a sampling choice. It states what the probe established about the first configuration
+    and no more: a verdict that is not `sampled-ignored` does not say the drafter ignored anything."""
+    return (f"- Speculative decoding is off. Stage 2 chose this configuration because {model_id} needs sampling and the configuration it first served, "
+            f"with the speculative drafter on, {sampling_choice.served_clause(verdict)} (see Sampling).")
 
 
 def card_evidence_paths(card: str) -> list[str]:
@@ -599,13 +606,17 @@ def use_problems(card: str, use: UseFacts | None) -> list[str]:
 def card_problems(card: str, *, license_id: str, run_dir, sidecars=(), base_files=(), reported=(), reported_source="", model_id="",
                   nearest_model="", graft: bool = False, graft_decision: str | None = None, trial_rows=(),
                   use: UseFacts | None = None, vocab: tuple[int, int] | None = None, sampling: dict | None = None,
-                  sampling_expected=(), sampling_decision: dict | None = None, drafter_off_by_sampling: bool = False) -> list[str]:
+                  sampling_expected=(), sampling_decision: dict | None = None, drafter_off_by_sampling: bool = False,
+                  sampling_first_verdict: str | None = None) -> list[str]:
     problems = use_problems(card, use)
     if sampling_decision:
         body, _ = _section(card, SAMPLING_HEAD)
         if " ".join(sampling_choice.card_sentence(sampling_decision).split()) not in " ".join(body.split()):
             problems.append("the card must state stage 2's sampling decision in the Sampling section, unchanged: "
                             f"{sampling_choice.card_sentence(sampling_decision)}")
+    if drafter_off_by_sampling and not vocab and " ".join(sampling_bullet(model_id, sampling_first_verdict).split()) not in " ".join(card.split()):
+        problems.append("the card must explain why speculative decoding is off in words that follow the probe's verdict for the first configuration "
+                        f"({sampling_first_verdict}): {sampling_bullet(model_id, sampling_first_verdict)}")
     if drafter_off_by_sampling and "needs the MTP tensors of the model" in " ".join(card.split()):
         problems.append("the card says the model has no mtp.* tensors; stage 2 chose the drafter-off configuration because the model needs sampling")
     if sampling:
