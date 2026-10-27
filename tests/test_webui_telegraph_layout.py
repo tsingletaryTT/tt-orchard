@@ -66,6 +66,12 @@ def test_the_meter_is_redrawn_on_every_poll_and_says_unknown_after_an_outage():
     assert main.index("startTelegraphPolling()") < main.index('await api("/api/meta")'), "not even the metadata request may come first"
     meter_fn = fn_body(js, "function renderSpendMeter")
     assert "last known" in meter_fn and "S.telegraph" in meter_fn and "s ago" in meter_fn, "an outage keeps the last amount, marked as old"
+    assert "markTelegraphViewStale(true, age)" in meter_fn and "markTelegraphViewStale(false, null)" in meter_fn
+    stale_note = fn_body(js, "function markTelegraphViewStale")
+    assert "may be out of date" in stale_note and "data-stale" not in stale_note and "dataset.stale" in stale_note
+    t = page()
+    note = by_id(t, "tg-stale")
+    assert "hidden" in note.attrs and note.attrs.get("role") == "alert" and note.inside(by_id(t, "telegraph-view"))
     sentence = fn_body(js, "function costCapSentence")
     assert "per_problem.cost_usd" in sentence and "per-problem cost cap refuses" in sentence
     start = fn_body(js, "function startTelegraphPolling")

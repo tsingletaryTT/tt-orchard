@@ -244,6 +244,22 @@ function spendText(s) {
   return unknown ? `${usd(s.cost_usd)} + ${unknown} unknown` : usd(s.cost_usd);
 }
 
+// While the spend cannot be read, the Telegraph view keeps its last numbers but says they are old, so a screen of figures is never
+// taken for the current spend.
+function markTelegraphViewStale(stale, age) {
+  const note = $("tg-stale"), view = $("telegraph-view");
+  note.hidden = !stale;
+  if (stale) {
+    view.dataset.stale = "true";
+    note.textContent = S.tgOk
+      ? `The page cannot read the helper's spend right now. The numbers below were read ${age} s ago and may be out of date.`
+      : "The page cannot read the helper's spend right now, and no amount has been read yet.";
+  } else {
+    delete view.dataset.stale;
+    note.textContent = "";
+  }
+}
+
 function renderSpendMeter(t) {
   const el = $("spend-meter");
   if (!t) {
@@ -255,8 +271,10 @@ function renderSpendMeter(t) {
     el.dataset.state = "unknown";
     el.dataset.tone = "bad";
     el.title = "The page cannot read the helper's spend right now. Click for the Telegraph view.";
+    markTelegraphViewStale(true, age);
     return;
   }
+  markTelegraphViewStale(false, null);
   $("spend-text").textContent = t.meter.text;
   el.dataset.state = t.state;
   el.dataset.tone = t.tone;

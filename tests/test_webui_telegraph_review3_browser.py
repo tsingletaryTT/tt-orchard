@@ -42,6 +42,25 @@ def test_after_an_outage_the_meter_says_unknown_and_shows_the_last_known_amount(
     ctx.close()
 
 
+@pytest.mark.parametrize("mode", ["operator", "playful"])
+def test_the_telegraph_view_says_its_numbers_are_old_during_an_outage_and_clears_the_note_after(root, tmp_path, browser, mode):
+    ctx, pg = new_page(browser)
+    with Served(capped_app(root, tmp_path)) as s:
+        open_page(pg, s, mode)
+        meter(pg).click()
+        expect(pg.locator("#tg-numbers")).to_contain_text("$0.0070")
+        assert pg.locator("#tg-stale").is_hidden()
+        pg.route("**/api/telegraph", lambda route: route.abort())
+        expect(pg.locator("#tg-stale")).to_be_visible(timeout=40000)
+        expect(pg.locator("#tg-stale")).to_contain_text("cannot read the helper's spend right now")
+        expect(pg.locator("#tg-stale")).to_contain_text("s ago and may be out of date")
+        assert pg.locator("#telegraph-view").get_attribute("data-stale") == "true"
+        pg.unroute("**/api/telegraph")
+        expect(pg.locator("#tg-stale")).to_be_hidden(timeout=40000)
+        assert pg.locator("#telegraph-view").get_attribute("data-stale") is None
+    ctx.close()
+
+
 def test_with_no_amount_ever_read_the_meter_does_not_invent_a_last_known_one(root, tmp_path, browser):
     ctx, pg = new_page(browser)
     with Served(capped_app(root, tmp_path)) as s:
