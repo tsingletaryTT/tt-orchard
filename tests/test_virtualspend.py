@@ -7,6 +7,7 @@ The logs here have the shape `AgentStep._log` writes (one object per turn with `
 local and helper turns) each have a test that names what is counted and what is reported as left out."""
 import json
 import math
+import shutil
 import os
 
 import pytest
@@ -813,3 +814,83 @@ def test_a_large_attempt_record_is_never_read_past_the_cap_plus_one_byte(root, m
     s = vs.scan(root)
     assert sum(returned) == vs.MAX_ATTEMPT_BYTES + 1, "exactly the cap plus one byte is taken from a larger file"
     assert s["agent_wall_s"] is None
+
+
+# ---- review fix 1 (fourth round): every directory on the way to a file is opened without following links ------------------
+
+def _swap_dir_for_link_after_discovery(monkeypatch, victim, target):
+    real_find = vs._find_files
+
+    def find_then_swap(r, skipped):
+        found = real_find(r, skipped)
+        shutil.rmtree(victim)                                              # the swap happens after discovery
+        victim.symlink_to(target, target_is_directory=True)
+        return found
+    monkeypatch.setattr(vs, "_find_files", find_then_swap)
+
+
+def _outside_run(tmp_path):
+    outside = tmp_path / "outside"
+    write_log(outside, "log/run.jsonl", [turn(1, 999, 9)])
+    (outside / "attempt.json").write_text(json.dumps({"agent_wall_s": 777}))
+    return outside
+
+
+def test_a_run_folder_replaced_by_a_link_after_discovery_is_not_read(root, tmp_path, monkeypatch):
+    outside = _outside_run(tmp_path)
+    write_log(root, "a/log/run.jsonl", [turn(1, 5, 1)])
+    (root / "a" / "attempt.json").write_text(json.dumps({"agent_wall_s": 1}))
+    _swap_dir_for_link_after_discovery(monkeypatch, root / "a", outside)
+    s = vs.scan(root)
+    assert s["turns"] == 0 and s["prompt_tokens"] == 0 and s["agent_wall_s"] is None
+    assert s["skipped"]["links"] >= 1
+
+
+def test_the_log_folder_replaced_by_a_link_after_discovery_is_not_read(root, tmp_path, monkeypatch):
+    outside = tmp_path / "outside-log"
+    write_log(outside, "run.jsonl", [turn(1, 999, 9)])
+    write_log(root, "a/log/run.jsonl", [turn(1, 5, 1)])
+    _swap_dir_for_link_after_discovery(monkeypatch, root / "a" / "log", outside)
+    s = vs.scan(root)
+    assert s["turns"] == 0 and s["skipped"]["links"] >= 1
+
+
+def test_a_nested_folder_swapped_two_levels_down_is_not_read(root, tmp_path, monkeypatch):
+    outside = tmp_path / "outside-deep"
+    write_log(outside, "log/run.jsonl", [turn(1, 999, 9)])
+    write_log(root, "a/b/c/log/run.jsonl", [turn(1, 5, 1)])
+    _swap_dir_for_link_after_discovery(monkeypatch, root / "a" / "b", outside)
+    s = vs.scan(root)
+    assert s["turns"] == 0 and s["skipped"]["links"] >= 1
+
+
+def test_the_scan_root_is_pinned_when_the_scan_starts(root, tmp_path, monkeypatch):
+    """The root itself is replaced by a link after the scan has opened it: the pinned descriptor still reads the original."""
+    outside = tmp_path / "outside-root"
+    write_log(outside, "a/log/run.jsonl", [turn(1, 999, 9)])
+    write_log(root, "a/log/run.jsonl", [turn(1, 5, 1)])
+    real_find = vs._find_files
+
+    def find_then_swap_root(r, skipped):
+        found = real_find(r, skipped)
+        moved = r.parent / "moved-away"
+        r.rename(moved)
+        r.symlink_to(outside, target_is_directory=True)
+        return found
+    monkeypatch.setattr(vs, "_find_files", find_then_swap_root)
+    s = vs.scan(root)
+    assert (s["turns"], s["prompt_tokens"]) == (1, 5), "the pinned descriptor reads the original tree, not what the path now names"
+
+
+def test_an_untouched_tree_is_read_through_the_pinned_descriptors(root):
+    write_log(root, "a/b/log/run.jsonl", [turn(1, 5, 1), turn(2, 6, 2)])
+    (root / "a" / "b" / "attempt.json").write_text(json.dumps({"agent_wall_s": 2.5}))
+    s = vs.scan(root)
+    assert (s["turns"], s["prompt_tokens"], s["agent_wall_s"]) == (2, 11, 2.5) and not s["skipped"]["links"]
+
+
+def test_no_descriptor_is_left_open_after_a_scan(root):
+    write_log(root, "a/b/log/run.jsonl", [turn()])
+    before = set(os.listdir("/proc/self/fd"))
+    vs.scan(root)
+    assert set(os.listdir("/proc/self/fd")) == before

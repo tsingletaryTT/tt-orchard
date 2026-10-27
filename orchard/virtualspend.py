@@ -209,37 +209,87 @@ def _more(fh) -> bool:
 MAX_ATTEMPT_BYTES = 1024 * 1024      # an attempt.json larger than this is not read
 
 
-def _open_log(path: Path, skipped: dict):
-    """Open a log for reading without following a link, and keep it only if the opened descriptor is a regular file. The open is
-    the check: a file swapped for a link after discovery is refused here. Returns a binary file object, or None after counting
-    why (a link or a file that is not regular is a skipped link; anything else is an unreadable file)."""
-    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
-    try:
-        fd = os.open(path, flags)
-    except OSError as exc:
-        skipped["links" if exc.errno in (errno.ELOOP, errno.EMLINK) else "unreadable_files"] += 1
-        return None
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            os.close(fd)
-            skipped["links"] += 1
-            return None
-        return os.fdopen(fd, "rb")
-    except OSError:
+_FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
+_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+_LINK_ERRNOS = (errno.ELOOP, errno.EMLINK, errno.ENOTDIR)
+
+
+class _Pin:
+    """The scan root, opened once without following a link and held as a descriptor for the whole scan. Every file is then opened
+    relative to this descriptor, one directory component at a time, each with O_DIRECTORY | O_NOFOLLOW. A directory swapped for a
+    link after discovery is refused at its component, and a root swapped after the scan began is not followed."""
+
+    def __init__(self, root: Path):
+        self.root = Path(root)
+        self.fd = os.open(self.root, _DIR_FLAGS)
+
+    def close(self):
         try:
-            os.close(fd)
+            os.close(self.fd)
         except OSError:
             pass
+
+    def open(self, path: Path, flags: int) -> int:
+        """A descriptor for `path` (which must lie under the root), opened beneath the pinned root. Raises OSError."""
+        try:
+            parts = Path(path).relative_to(self.root).parts
+        except ValueError as exc:
+            raise OSError(errno.ELOOP, "outside the scan root") from exc
+        if not parts:
+            raise OSError(errno.EISDIR, "the scan root is not a file")
+        fd, owned = self.fd, False
+        try:
+            for part in parts[:-1]:
+                nxt = os.open(part, _DIR_FLAGS, dir_fd=fd)
+                if owned:
+                    os.close(fd)
+                fd, owned = nxt, True
+            return os.open(parts[-1], flags, dir_fd=fd)
+        finally:
+            if owned:
+                os.close(fd)
+
+
+def _open_log(path: Path, skipped: dict, pin: "_Pin | None" = None):
+    """Open a log for reading beneath the pinned scan root without following a link, and keep it only if the opened descriptor is a
+    regular file. The open is the check: a file or a directory swapped for a link after discovery is refused here. Returns a binary
+    file object, or None after counting why (a link, a swapped directory or a file that is not regular is a skipped link; anything
+    else is an unreadable file). With no pin, the log's own folder is pinned for this one open."""
+    own = pin is None
+    try:
+        if own:
+            pin = _Pin(Path(path).parent)
+        try:
+            fd = pin.open(path, _FILE_FLAGS)
+        except OSError as exc:
+            skipped["links" if exc.errno in _LINK_ERRNOS else "unreadable_files"] += 1
+            return None
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                os.close(fd)
+                skipped["links"] += 1
+                return None
+            return os.fdopen(fd, "rb")
+        except OSError:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            skipped["unreadable_files"] += 1
+            return None
+    except OSError:
         skipped["unreadable_files"] += 1
         return None
+    finally:
+        if own and pin is not None:
+            pin.close()
 
 
-def _read_capped(path: Path, cap: int) -> bytes | None:
-    """The bytes of a small regular file, read without following a link and with at most cap+1 bytes asked for. None when the file
-    is a link, is not regular, cannot be read or holds more than `cap` bytes."""
-    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
+def _read_capped(path: Path, cap: int, pin: "_Pin") -> bytes | None:
+    """The bytes of a small regular file, opened beneath the pinned root without following a link and read with at most cap+1 bytes
+    asked for. None when the file is a link, is not regular, cannot be read or holds more than `cap` bytes."""
     try:
-        fd = os.open(path, flags)
+        fd = pin.open(path, _FILE_FLAGS)
     except OSError:
         return None
     try:
@@ -258,12 +308,12 @@ def _read_capped(path: Path, cap: int) -> bytes | None:
         os.close(fd)
 
 
-def _lines(path: Path, skipped: dict, budget: list):
+def _lines(path: Path, skipped: dict, budget: list, pin: "_Pin | None" = None):
     """Yield ("rec", dict) for each line that parses, and ("tail", bytes) for a line over the cap. Every read is limited to
     what is left of the file budget and the scan budget. A record that a budget cuts off is dropped and counted in
     `oversize_files`, so its tail is never priced."""
     read = 0
-    fh = _open_log(path, skipped)
+    fh = _open_log(path, skipped, pin)
     if fh is None:
         return
     with fh:
@@ -380,10 +430,10 @@ def _find_files(root: Path, skipped: dict):
     return found
 
 
-def _attempt_wall(log_dir: Path) -> float:
+def _attempt_wall(log_dir: Path, pin: "_Pin") -> float:
     """The agent's wall seconds a kernel-probe attempt recorded beside its log directory (`attempt.json`), else 0. The file is opened
     without following links and read with a size limit, so a swapped link or a large file gives no time."""
-    raw = _read_capped(log_dir.parent / "attempt.json", MAX_ATTEMPT_BYTES)
+    raw = _read_capped(log_dir.parent / "attempt.json", MAX_ATTEMPT_BYTES, pin)
     if raw is None:
         return 0.0
     try:
@@ -403,11 +453,24 @@ def scan(root) -> dict:
     if root.is_symlink() or not root.is_dir():
         out["complete"] = False
         return out
+    try:
+        pin = _Pin(root)                                            # opened once; every file is opened beneath this descriptor
+    except OSError:
+        out["complete"] = False
+        return out
+    try:
+        _scan_tree(root, pin, out, skipped)
+    finally:
+        pin.close()
+    return out
+
+
+def _scan_tree(root: Path, pin: _Pin, out: dict, skipped: dict) -> None:
     budget = [MAX_TOTAL_BYTES]
     wall, wall_known, request_s, request_known, attempts = 0.0, False, 0.0, False, set()
     for path, kind in _find_files(root, skipped):
         out["files"] += 1
-        for what, payload in _lines(path, skipped, budget):
+        for what, payload in _lines(path, skipped, budget, pin):
             if what == "tail":
                 skipped["long_lines"] += 1
                 head, tail = payload
@@ -451,14 +514,13 @@ def scan(root) -> dict:
             request_s += lat
         if kind == "agent" and path.parent not in attempts:
             attempts.add(path.parent)
-            seconds = _attempt_wall(path.parent)
+            seconds = _attempt_wall(path.parent, pin)
             if seconds:
                 wall += seconds
                 wall_known = True
     out["agent_wall_s"] = round(wall, 1) if wall_known else None
     out["request_s"] = round(request_s, 1) if request_known else None
     out["complete"] = not (skipped["oversize_files"] or skipped["files_not_read"])
-    return out
 
 
 def priced(scanned: dict, cfg: Config) -> dict:
