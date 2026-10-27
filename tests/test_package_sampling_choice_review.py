@@ -48,7 +48,7 @@ def test_a_variant_whose_probe_is_inconclusive_gets_an_unverified_choice_and_a_c
     """After the probe's own change (PR 109): a request with no usable token count or timing makes the verdict `inconclusive`."""
     from test_sampling_probe import entry
     rep = report(drafter="off", ignored=False, seconds=6.0)
-    rep["sampling_probe"]["requests"]["greedy"] = entry(tokens=None, seconds=None)
+    rep["sampling_probe"]["requests"]["greedy"] = entry(tokens=None, seconds=None, params={"temperature": 0})
     dec = drafter_on_run(world, variant=rep)
     assert sc.variant_side(world["run"] / "stages/2", world["run"])["verdict"] == "inconclusive"
     assert dec["choice"] == "drafter-off" and dec["flag"] == "unverified"

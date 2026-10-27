@@ -14,8 +14,8 @@ STORY = "The lighthouse keeper climbed the long spiral stairs every evening, cou
 OTHER = "On the island there was a bell that rang by itself whenever the fog came in, and nobody remembered who had hung it there."
 
 
-def req(text, seconds):
-    return {"params": {}, "accepted": True, "error": None, "seconds": seconds, "completion_tokens": 96, "text": text,
+def req(text, seconds, params=None):
+    return {"params": params or {}, "accepted": True, "error": None, "seconds": seconds, "completion_tokens": 96, "text": text,
             "finish_reason": "length", "drafter_log": ""}
 
 
@@ -23,7 +23,9 @@ def probe(ignored: bool, seconds=2.0):
     """A sampling probe record: ignored means every sampled request returned the greedy text."""
     a, b = (GREEDY, GREEDY) if ignored else (STORY, OTHER)
     return {"ran": True, "prompt": "p", "max_tokens": 96,
-            "requests": {"greedy": req(GREEDY, seconds), "sampled_a": req(a, seconds), "sampled_b": req(b, seconds)}}
+            "requests": {"greedy": req(GREEDY, seconds, {"temperature": 0}),
+                         "sampled_a": req(a, seconds, {"temperature": 1.0, "top_p": 0.9, "seed": 1234}),
+                         "sampled_b": req(b, seconds, {"temperature": 1.0, "top_p": 0.9, "seed": 4321})}}
 
 
 HEALTHY_DRAFT = {"serves": True, "coherent": True, "top1_agreement": 0.96875, "n_tokens": 32, "server_ready_s": 120.0}
