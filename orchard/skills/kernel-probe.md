@@ -4,8 +4,7 @@ status: draft. For the kernel probe (spec 2026-10-15-kernel-attempt-design.md, s
 ---
 # Write a tt-lang kernel
 
-Your directory holds `kernel_spec.json` (the op), `kernel_check.py` (the check), reference files in `reference/` and a
-few support files. You write one file: `kernel.py`.
+Your directory holds `kernel_spec.json` (the op), `kernel_check.py` (the check) and reference files in `reference/`. You write one file: `kernel.py`.
 
 Reference files:
 - `reference/eltwise_add.py`: a working kernel for the tt-lang the check runs. Start here.
@@ -31,7 +30,8 @@ Rules from the specification and the examples:
   it back after the call, and the operation returns nothing. Write every tile of it with `ttl.copy(block, out[...])`.
 - A block is used whole. On a compute thread a block is an operand of a block expression (Python operators and `ttl.math` functions),
   and `blk.store(expr)` writes an expression into a block whose shape it matches exactly. On a data movement thread a block is the
-  source or destination of `ttl.copy`. Do not index a block element by element (`x_blk[i, j]`) or loop over its elements.
+  source or destination of `ttl.copy`. Do not index a block element by element in a compute thread (`x_blk[i, j]`); in a data
+  movement thread, loops over element positions with `ttl.raw_element_read` and `ttl.raw_element_write` are allowed (see below).
 - Data read once is delivered once: a row used twice (a sum, then a scale) must stay in one block across both uses or be
   read again. `Deadlock detected: all generators blocked` means a thread waits for a tile no thread will send.
 - The decorator is `@ttl.operation(grid=...)`. The guide's `@ttl.kernel` is the old name.

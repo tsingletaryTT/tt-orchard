@@ -1120,6 +1120,22 @@ def smoke_test(*, env, shared_python, run_watched=run_watched, record: dict | No
     return (got.returncode == 0 and "PASSED!" in text), tail
 
 
+def kernel_reached(text: str, result: dict | None = None) -> bool:
+    """True when the hardware run got as far as the kernel: the harness printed `PROGRESS run <set>` (it prints that
+    after the device is open and the inputs are built, just before it calls the operation), or its result file holds
+    measured sets or an error from the run phase. A gozer failure, a setup failure, a kernel that fails to import and
+    a stop before the harness reached the kernel give no such evidence. `text` is what this run wrote to the log."""
+    if any(line.strip().startswith("PROGRESS run ") for line in text.splitlines()):
+        return True
+    if isinstance(result, dict):
+        err = result.get("error")
+        if isinstance(result.get("sets"), list) and result["sets"]:
+            return True
+        if isinstance(err, dict) and err.get("phase") == "run":
+            return True
+    return False
+
+
 def hw_started(attempt: dict) -> bool:
     """True when the attempt has a hardware block from a run that started. A block with `started: false` records an
     attempt that never reached the chip (the checked copy failed a preflight check, or gozer queued the request). A
@@ -1200,7 +1216,7 @@ def _hw_run(adir: Path, vdir: Path, kernel: Path, *, op: str, reason: str, share
     if got.killed:
         # The first line is the watcher's own reason ("backstop: ..." or "stalled: ..." or "repeating: ..."), so a
         # watcher stop is not read as a device hang without saying which rule stopped it.
-        return ({"passed": False, "started": True, "category": "hang", "pcc_min": None, "sets": [], "violations": [],
+        return ({"passed": False, "started": kernel_reached(text), "category": "hang", "pcc_min": None, "sets": [], "violations": [],
                  "first_line": got.reason, "elapsed_s": round(got.elapsed_s, 1), "watch": _watch_facts(got), **extra},
                 "hang", text)
     try:
@@ -1216,7 +1232,7 @@ def _hw_run(adir: Path, vdir: Path, kernel: Path, *, op: str, reason: str, share
                                     diagnostics_present=None)
     sets = result.get("sets") if result and isinstance(result.get("sets"), list) else []
     device = result.get("device_s") if result else None
-    block = {"passed": category is None, "started": True, "category": category, "first_line": line,
+    block = {"passed": category is None, "started": kernel_reached(text, result), "category": category, "first_line": line,
              **set_measures(sets), "sets": sets, "violations": [],
              "elapsed_s": round(got.elapsed_s, 1), "watch": _watch_facts(got), **extra}
     if isinstance(device, (int, float)) and not isinstance(device, bool) and 0 <= device < 1e7:
@@ -1607,9 +1623,10 @@ def _sim_gap_lines(gap: list[dict]) -> list[str]:
         lines.append(f"hardware only: {n} attempt{'s' if n != 1 else ''} ({passed} passed on hardware); the simulator did "
                      "not check these, because it lacks a ttl function they use. Each result is a hardware result alone.")
     if unrun:
-        lines.append(f"{unrun} attempt{'s' if unrun != 1 else ''} used a function the simulator lacks a function for "
-                     "and was not run on hardware (the probe ran with --phase sim, or stopped first), so no check judged "
-                     "it.")
+        many = unrun != 1
+        lines.append(f"{unrun} attempt{'s' if many else ''} used a ttl function the simulator lacks and "
+                     f"{'were' if many else 'was'} not run on hardware (the probe ran with --phase sim, or stopped first), "
+                     f"so no check judged {'them' if many else 'it'}.")
     return lines
 
 

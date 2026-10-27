@@ -119,6 +119,11 @@ def test_the_check_prints_the_gap_on_its_fail_line(tmp_path):
 # ---- the probe ------------------------------------------------------------------------------------------------
 
 
+UNRUN_TAIL = " not run on hardware (the probe ran with --phase sim, or stopped first), so no check judged "
+UNRUN_ONE = "1 attempt used a ttl function the simulator lacks and was" + UNRUN_TAIL + "it."
+UNRUN_TWO = "2 attempts used a ttl function the simulator lacks and were" + UNRUN_TAIL + "them."
+
+
 def sim_gap_attempt(tmp_path, env, n=1):
     """An attempt the simulator could not run because of a sim gap: no simulator pass, the checked copy in place."""
     adir, attempt = _passed_attempt(tmp_path, env, n=n)
@@ -234,7 +239,7 @@ def test_a_report_with_no_sim_gap_attempt_has_no_hardware_only_text(tmp_path, fa
 def test_a_sim_gap_attempt_that_never_reached_hardware_is_listed_as_not_judged(tmp_path, fake_kenv):
     adir, attempt = sim_gap_attempt(tmp_path, fake_kenv)
     md = report_for(tmp_path, fake_kenv, [attempt])
-    assert "simulator lacks a function" in md and "not run on hardware" in md
+    assert UNRUN_ONE in md
 
 
 def test_a_record_that_says_both_a_simulator_pass_and_a_sim_gap_is_not_hardware_only():
@@ -270,7 +275,8 @@ def compile_failure_writer(calls):
         if "--out" in argv:
             Path(argv[argv.index("--out") + 1]).write_text(json.dumps(COMPILE_ERROR))
             with open(kw["log_path"], "a") as f:
-                f.write("error: list elements must be constants\n")
+                f.write("PROGRESS import\nPROGRESS open_device\nPROGRESS set seed0\nPROGRESS run seed0\n"
+                        "error: list elements must be constants\n")
             return kp.Watched(0, None, False, 1.0)
         with open(kw["log_path"], "a") as f:
             f.write("PASSED!\n")
@@ -325,3 +331,18 @@ def test_an_attempt_that_is_not_hardware_only_keeps_a_dash_for_simulator_detail(
     kp.run_hardware([attempt], probe_dir=tmp_path, env=fake_kenv, shared_python="/p",
                     run_watched=hw_writer([GOOD_HW_SET], []))
     assert row_of(report_for(tmp_path, fake_kenv, [attempt]))["simulator detail"] == "-"
+
+
+def test_two_attempts_that_were_not_run_use_plural_agreement(tmp_path, fake_kenv):
+    _, first = sim_gap_attempt(tmp_path, fake_kenv, n=1)
+    _, second = sim_gap_attempt(tmp_path, fake_kenv, n=2)
+    md = report_for(tmp_path, fake_kenv, [first, second])
+    assert UNRUN_TWO in md and UNRUN_ONE not in md
+    assert "a function the simulator lacks a function for" not in md
+
+
+def test_the_skill_says_element_loops_are_allowed_in_data_movement_threads_only():
+    flat = " ".join(kp.SKILL.read_text().split())
+    assert "Do not index a block element by element" in flat and "in a compute thread" in flat
+    assert "in a data movement thread, loops over element positions" in flat
+    assert "or loop over its elements" not in flat
