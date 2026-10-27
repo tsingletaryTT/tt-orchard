@@ -422,6 +422,6 @@ def test_a_clean_checkout_at_the_pin_is_accepted_in_check_mode_too(env):
     env.src_dir.mkdir(parents=True)
     (env.src_dir / ".git").mkdir()
     results = ae.ensure(env, check_only=True)
-    assert statuses(results)["source"] == ae.OK and "clean" in results[0].detail
+    assert statuses(results)["source"] == ae.OK and results[0].detail.endswith(", clean")
     env.run.dirty = "?? x\n"
     assert statuses(ae.ensure(env, check_only=True))["source"] == ae.FAIL
