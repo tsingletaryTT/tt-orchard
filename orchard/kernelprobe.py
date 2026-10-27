@@ -1256,18 +1256,24 @@ def _group_lines(g: dict, rows: list[dict]) -> list[str]:
     """One temperature group of an op: a heading, the attempts table and the distinct-kernel lines."""
     lines = ["", f"### temperature {g['temperature']:g}", "",
              "| attempt | simulator | hardware | status | PCC min (sim) | PCC min (hw) | turns | wall s | category | "
-             "first line | agent check |",
-             "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
+             "first line | agent check | simulator detail |",
+             "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
     for a in sorted(rows, key=lambda a: a["attempt"]):
         h = a.get("hw") if isinstance(a.get("hw"), dict) else None
         category = a.get("category") or (h or {}).get("category")
         first_line = a.get("first_line") if a.get("category") else (h or {}).get("first_line")
+        detail = "-"
+        if h is not None and hardware_only(a):
+            # The simulator could not judge this attempt, so its own category (`sim_gap`) is not the result. The
+            # hardware category and diagnostic are; the simulator's go in their own column.
+            category, first_line = h.get("category"), h.get("first_line")
+            detail = f"{a.get('category')}: {a.get('first_line')}"
         lines.append("| " + " | ".join([
             _cell(a["attempt"]), "yes" if a.get("passed_sim") else "no",
             "-" if h is None else ("yes" if h.get("passed") else "no") + (" (hardware only)" if h.get("hardware_only") else ""),
             _status_cell(a),
             _pcc_cell(a.get("pcc_min")), _pcc_cell((h or {}).get("pcc_min")), _cell(a.get("turns")),
-            _cell(a.get("agent_wall_s")), _cell(category), _cell(first_line), _agent_cell(a)]) + " |")
+            _cell(a.get("agent_wall_s")), _cell(category), _cell(first_line), _agent_cell(a), _cell(detail)]) + " |")
     return lines + [""] + _distinct_lines(g)
 
 
