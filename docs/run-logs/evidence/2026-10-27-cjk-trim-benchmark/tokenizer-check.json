@@ -1,0 +1,71 @@
+{
+ "trim_vocab": 181544,
+ "base_vocab": 248077,
+ "sets": {
+  "en": {
+   "strings": 500,
+   "chars": 90723,
+   "tokens_trim": 21036,
+   "tokens_base": 21036,
+   "ratio_total": 1.0,
+   "ratio_median_per_string": 1.0,
+   "ratio_max_per_string": 1.0,
+   "strings_with_more_tokens_in_trim": 0,
+   "strings_with_identical_pieces": 500,
+   "chars_per_token_trim": 4.313,
+   "chars_per_token_base": 4.313
+  },
+  "code": {
+   "strings": 500,
+   "chars": 289136,
+   "tokens_trim": 75172,
+   "tokens_base": 75172,
+   "ratio_total": 1.0,
+   "ratio_median_per_string": 1.0,
+   "ratio_max_per_string": 1.0,
+   "strings_with_more_tokens_in_trim": 0,
+   "strings_with_identical_pieces": 500,
+   "chars_per_token_trim": 3.846,
+   "chars_per_token_base": 3.846
+  },
+  "zh": {
+   "strings": 500,
+   "chars": 65038,
+   "tokens_trim": 149021,
+   "tokens_base": 35008,
+   "ratio_total": 4.2568,
+   "ratio_median_per_string": 4.4533,
+   "ratio_max_per_string": 6.613,
+   "strings_with_more_tokens_in_trim": 398,
+   "strings_with_identical_pieces": 102,
+   "chars_per_token_trim": 0.436,
+   "chars_per_token_base": 1.858
+  },
+  "ja": {
+   "strings": 500,
+   "chars": 80287,
+   "tokens_trim": 224685,
+   "tokens_base": 48618,
+   "ratio_total": 4.6214,
+   "ratio_median_per_string": 4.6946,
+   "ratio_max_per_string": 6.611,
+   "strings_with_more_tokens_in_trim": 470,
+   "strings_with_identical_pieces": 30,
+   "chars_per_token_trim": 0.357,
+   "chars_per_token_base": 1.651
+  },
+  "ko": {
+   "strings": 500,
+   "chars": 59488,
+   "tokens_trim": 129468,
+   "tokens_base": 33996,
+   "ratio_total": 3.8083,
+   "ratio_median_per_string": 3.7034,
+   "ratio_max_per_string": 6.314,
+   "strings_with_more_tokens_in_trim": 493,
+   "strings_with_identical_pieces": 7,
+   "chars_per_token_trim": 0.459,
+   "chars_per_token_base": 1.75
+  }
+ }
+}

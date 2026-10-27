@@ -1,0 +1,305 @@
+{
+ "label": "trim",
+ "served_name": "<RUN_DIR>/stages/2/model-dir",
+ "reps": 2,
+ "prompt_set_sha256": "bc3617f26c7e20ab8d300369a0572206483da20fea9ced80d8f5c151fa78877f",
+ "prompts": {
+  "pi-coding": {
+   "summary": {
+    "runs": 2,
+    "ttft_s": {
+     "median": 1.371540576015832,
+     "min": 0.32187174301361665,
+     "max": 2.421209409018047
+    },
+    "decode_tok_s": {
+     "median": 14.832395385530072,
+     "min": 13.003708633762162,
+     "max": 16.66108213729798
+    },
+    "completion_tokens": {
+     "median": 384.0,
+     "min": 384,
+     "max": 384
+    }
+   },
+   "runs": [
+    {
+     "ttft_s": 0.32187174301361665,
+     "decode_tok_s": 13.003708633762162,
+     "completion_tokens": 384,
+     "prompt_tokens": 193,
+     "tool_calls": [],
+     "text_head": "We need answer user's request. Need fix helper in src/utils/retry.py never re-raises last error and sleeps after final attempt. Add pytest test for fixed behaviour. Need likely provide code. Need insp",
+     "text_sha256": "3b86e6525c31ec647a62854ab145612831ad21846f472480d70808db669d13f9"
+    },
+    {
+     "ttft_s": 2.421209409018047,
+     "decode_tok_s": 16.66108213729798,
+     "completion_tokens": 384,
+     "prompt_tokens": 193,
+     "tool_calls": [],
+     "text_head": "We need answer user's request. Need fix helper in src/utils/retry.py never re-raises last error and sleeps after final attempt. Add pytest test for fixed behaviour. Need likely provide code. Need insp",
+     "text_sha256": "3b86e6525c31ec647a62854ab145612831ad21846f472480d70808db669d13f9"
+    }
+   ],
+   "meets_100_tokens": true
+  },
+  "tool-call": {
+   "summary": {
+    "runs": 2,
+    "ttft_s": {
+     "median": 1.4646757149894256,
+     "min": 1.3559854280319996,
+     "max": 1.5733660019468516
+    },
+    "decode_tok_s": {
+     "median": 16.74065382181964,
+     "min": 16.71882346696023,
+     "max": 16.762484176679056
+    },
+    "completion_tokens": {
+     "median": 55.0,
+     "min": 55,
+     "max": 55
+    }
+   },
+   "runs": [
+    {
+     "ttft_s": 1.3559854280319996,
+     "decode_tok_s": 16.71882346696023,
+     "completion_tokens": 55,
+     "prompt_tokens": 401,
+     "tool_calls": [
+      {
+       "name": "run_tests",
+       "arguments": "{\"path\": \"tests/utils\"}"
+      }
+     ],
+     "text_head": "The user wants to run the tests under tests/utils. First, let's check the repository structure to see what's there.\n",
+     "text_sha256": "dda8ab8eb3eaf8bf586b587711944ee009742bdf759f9bfd72161dee3bed49dd"
+    },
+    {
+     "ttft_s": 1.5733660019468516,
+     "decode_tok_s": 16.762484176679056,
+     "completion_tokens": 55,
+     "prompt_tokens": 401,
+     "tool_calls": [
+      {
+       "name": "run_tests",
+       "arguments": "{\"path\": \"tests/utils\"}"
+      }
+     ],
+     "text_head": "The user wants to run the tests under tests/utils. First, let's check the repository structure to see what's there.\n",
+     "text_sha256": "dda8ab8eb3eaf8bf586b587711944ee009742bdf759f9bfd72161dee3bed49dd"
+    }
+   ],
+   "meets_100_tokens": false
+  },
+  "tool-call-write": {
+   "summary": {
+    "runs": 2,
+    "ttft_s": {
+     "median": 1.694623989489628,
+     "min": 1.6602207479882054,
+     "max": 1.7290272309910506
+    },
+    "decode_tok_s": {
+     "median": 16.4280982609217,
+     "min": 16.0608800676982,
+     "max": 16.795316454145198
+    },
+    "completion_tokens": {
+     "median": 384.0,
+     "min": 384,
+     "max": 384
+    }
+   },
+   "runs": [
+    {
+     "ttft_s": 1.6602207479882054,
+     "decode_tok_s": 16.0608800676982,
+     "completion_tokens": 384,
+     "prompt_tokens": 399,
+     "tool_calls": [],
+     "text_head": "The user is asking me to create tests/test_retry.py containing 4 pytest tests for the retry helper in src/utils/retry.py. First, I need to check the existing retry helper to understand its API. Let me",
+     "text_sha256": "e1b3816769913b6b93d1bc6b3f4d16f02969b0ca38b06a2e920ecf76656d3ad1"
+    },
+    {
+     "ttft_s": 1.7290272309910506,
+     "decode_tok_s": 16.795316454145198,
+     "completion_tokens": 384,
+     "prompt_tokens": 399,
+     "tool_calls": [],
+     "text_head": "The user is asking me to create tests/test_retry.py containing 4 pytest tests for the retry helper in src/utils/retry.py. First, I need to check the existing retry helper to understand its API. Let me",
+     "text_sha256": "e1b3816769913b6b93d1bc6b3f4d16f02969b0ca38b06a2e920ecf76656d3ad1"
+    }
+   ],
+   "meets_100_tokens": true
+  },
+  "chat": {
+   "summary": {
+    "runs": 2,
+    "ttft_s": {
+     "median": 1.492320646008011,
+     "min": 1.3916460360051133,
+     "max": 1.5929952560109086
+    },
+    "decode_tok_s": {
+     "median": 16.98992402527955,
+     "min": 16.892808751138034,
+     "max": 17.08703929942106
+    },
+    "completion_tokens": {
+     "median": 219.0,
+     "min": 219,
+     "max": 219
+    }
+   },
+   "runs": [
+    {
+     "ttft_s": 1.3916460360051133,
+     "decode_tok_s": 17.08703929942106,
+     "completion_tokens": 219,
+     "prompt_tokens": 64,
+     "tool_calls": [],
+     "text_head": "We need to respond to user: \"Write the text I send my landlord about the broken boiler.\" Need produce final with a text message. Need likely concise, polite, include details? User didn't provide speci",
+     "text_sha256": "b9e77733302bd16d413421cff98b397dc4bb2ce44c9d054277e802f73b1cc7ff"
+    },
+    {
+     "ttft_s": 1.5929952560109086,
+     "decode_tok_s": 16.892808751138034,
+     "completion_tokens": 219,
+     "prompt_tokens": 64,
+     "tool_calls": [],
+     "text_head": "We need to respond to user: \"Write the text I send my landlord about the broken boiler.\" Need produce final with a text message. Need likely concise, polite, include details? User didn't provide speci",
+     "text_sha256": "b9e77733302bd16d413421cff98b397dc4bb2ce44c9d054277e802f73b1cc7ff"
+    }
+   ],
+   "meets_100_tokens": true
+  },
+  "length-700w": {
+   "summary": {
+    "runs": 2,
+    "ttft_s": {
+     "median": 1.5605516180221457,
+     "min": 1.5199931070092134,
+     "max": 1.601110129035078
+    },
+    "decode_tok_s": {
+     "median": 17.088096091589264,
+     "min": 17.055295981492037,
+     "max": 17.120896201686495
+    },
+    "completion_tokens": {
+     "median": 160.0,
+     "min": 160,
+     "max": 160
+    }
+   },
+   "runs": [
+    {
+     "ttft_s": 1.601110129035078,
+     "decode_tok_s": 17.120896201686495,
+     "completion_tokens": 160,
+     "prompt_tokens": 967,
+     "tool_calls": [],
+     "text_head": "We need to respond to user: \"The committee met on Tuesday ... repeated many times. Summarize the text above in about 150 words.\" Need produce summary about 150 words. Need likely count words. Need ens",
+     "text_sha256": "e9ba3149fbc4ea11c777e4d0132927e979a01578bdb83f2035dd5f07ea707ec5"
+    },
+    {
+     "ttft_s": 1.5199931070092134,
+     "decode_tok_s": 17.055295981492037,
+     "completion_tokens": 160,
+     "prompt_tokens": 967,
+     "tool_calls": [],
+     "text_head": "We need to respond to user: \"The committee met on Tuesday ... repeated many times. Summarize the text above in about 150 words.\" Need produce summary about 150 words. Need likely count words. Need ens",
+     "text_sha256": "e9ba3149fbc4ea11c777e4d0132927e979a01578bdb83f2035dd5f07ea707ec5"
+    }
+   ],
+   "meets_100_tokens": true
+  },
+  "length-3000w": {
+   "summary": {
+    "runs": 2,
+    "ttft_s": {
+     "median": 2.053703517507529,
+     "min": 2.022870476997923,
+     "max": 2.0845365580171347
+    },
+    "decode_tok_s": {
+     "median": 16.769060127885904,
+     "min": 16.72641502193668,
+     "max": 16.811705233835127
+    },
+    "completion_tokens": {
+     "median": 160.0,
+     "min": 160,
+     "max": 160
+    }
+   },
+   "runs": [
+    {
+     "ttft_s": 2.0845365580171347,
+     "decode_tok_s": 16.72641502193668,
+     "completion_tokens": 160,
+     "prompt_tokens": 3892,
+     "tool_calls": [],
+     "text_head": "We need to respond to user: \"The committee met on Tuesday ... [repeated many times] Summarize the text above in about 150 words.\"\n\nNeed produce summary about 150 words. The text is repetitive: committ",
+     "text_sha256": "e5469ff9195b4eb1499fee94282dc2d6c2881c3acb7bd702f38566e8bbbb6a95"
+    },
+    {
+     "ttft_s": 2.022870476997923,
+     "decode_tok_s": 16.811705233835127,
+     "completion_tokens": 160,
+     "prompt_tokens": 3892,
+     "tool_calls": [],
+     "text_head": "We need to respond to user: \"The committee met on Tuesday ... [repeated many times] Summarize the text above in about 150 words.\"\n\nNeed produce summary about 150 words. The text is repetitive: committ",
+     "text_sha256": "e5469ff9195b4eb1499fee94282dc2d6c2881c3acb7bd702f38566e8bbbb6a95"
+    }
+   ],
+   "meets_100_tokens": true
+  },
+  "length-12000w": {
+   "summary": {
+    "runs": 2,
+    "ttft_s": {
+     "median": 5.12245136348065,
+     "min": 5.027734656003304,
+     "max": 5.217168070957996
+    },
+    "decode_tok_s": {
+     "median": 15.688481085946274,
+     "min": 13.883448101588328,
+     "max": 17.49351407030422
+    },
+    "completion_tokens": {
+     "median": 160.0,
+     "min": 160,
+     "max": 160
+    }
+   },
+   "runs": [
+    {
+     "ttft_s": 5.027734656003304,
+     "decode_tok_s": 17.49351407030422,
+     "completion_tokens": 160,
+     "prompt_tokens": 15457,
+     "tool_calls": [],
+     "text_head": "We need to respond to user: \"The committee met on Tuesday... [repeated many times] Summarize the text above in about 150 words.\"\n\nNeed produce summary about 150 words. The text is repetitive: committe",
+     "text_sha256": "250ba18c3af8b148658096e5fa6ccb4102fd38f4777599d013769a8d341e061a"
+    },
+    {
+     "ttft_s": 5.217168070957996,
+     "decode_tok_s": 13.883448101588328,
+     "completion_tokens": 160,
+     "prompt_tokens": 15457,
+     "tool_calls": [],
+     "text_head": "We need to respond to user: \"The committee met on Tuesday... [repeated many times] Summarize the text above in about 150 words.\"\n\nNeed produce summary about 150 words. The text is repetitive: committe",
+     "text_sha256": "250ba18c3af8b148658096e5fa6ccb4102fd38f4777599d013769a8d341e061a"
+    }
+   ],
+   "meets_100_tokens": true
+  }
+ }
+}
