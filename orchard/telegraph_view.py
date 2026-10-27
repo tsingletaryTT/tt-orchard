@@ -63,8 +63,10 @@ def _ledger_facts(directory: Path) -> dict:
     try:
         st = path.stat()
         key = (st.st_mtime_ns, st.st_size)
-    except OSError:
+    except FileNotFoundError:                    # only a ledger that does not exist is an empty history
         return {"error": None, "records": [], "summary": _empty_summary(), "acct": _empty_acct()}
+    except OSError:                              # a permission error, a folder that is a file, ...: the spend is not known
+        return _unreadable("the ledger cannot be read")
     cached = _cache.get(str(directory))
     if cached and cached[0] == key:
         return cached[1]
@@ -73,11 +75,13 @@ def _ledger_facts(directory: Path) -> dict:
                  "acct": _empty_acct()}
     else:
         try:
-            records = tg.read_ledger(directory)
+            records = tg._read_ledger_strict(directory)         # raises LedgerUnavailable on any failure but a missing file
             summary = tg.summarise(directory)
             acct = tg.accounting(records)
             torn = sum(1 for r in records if "torn" in r)
             facts = {"error": None, "records": records, "summary": {**summary, "torn": torn}, "acct": acct}
+        except tg.LedgerUnavailable:
+            return _unreadable("the ledger cannot be read")        # not cached: the next poll tries again
         except Exception:                                           # noqa: BLE001 - a bad record must not break the page
             facts = {"error": "the ledger has a record this page cannot read", "records": [],
                      "summary": _empty_summary(), "acct": _empty_acct()}
@@ -85,6 +89,10 @@ def _ledger_facts(directory: Path) -> dict:
         _cache.clear()
     _cache[str(directory)] = (key, facts)
     return facts
+
+
+def _unreadable(message: str) -> dict:
+    return {"error": message, "records": [], "summary": _empty_summary(), "acct": _empty_acct()}
 
 
 def _empty_acct() -> dict:
@@ -256,9 +264,10 @@ def _latest_refusal(records: list[dict]) -> dict | None:
 def _meter(state: str, spend: str, calls: int, cap_text: str, reason: str | None, key_state: dict, error: str | None) -> dict:
     if state == "off":
         text = "Helper: off"
+    elif state == "problem" and error:
+        text = "Helper: ledger unreadable · spend unknown"        # nothing was read, so no amount and no count is shown
     elif state == "problem":
-        word = "key missing" if key_state["state"] == "missing" and not error else "ledger unreadable"
-        text = f"Helper: {word} · {spend} · {calls} {'call' if calls == 1 else 'calls'}"
+        text = f"Helper: key missing · {spend} · {calls} {'call' if calls == 1 else 'calls'}"
     else:
         text = f"Helper: {spend} · {calls} {'call' if calls == 1 else 'calls'}"
         if state == "capped":
@@ -288,7 +297,7 @@ def build(cfg: tg.Config, directory, *, environ, redact=lambda t: t, hostname: s
     facts = _ledger_facts(Path(directory))
     summary, records, error, acct = facts["summary"], facts["records"], facts["error"], facts["acct"]
     verdict = _verdicts(records)
-    caps = _caps(cfg, acct) if cfg.enabled else []
+    caps = _caps(cfg, acct) if cfg.enabled and not error else []     # an unread ledger shows no usage bars at 0 percent
     key = _key_state(cfg, environ) if cfg.enabled else {"state": "n/a", "source": "none", "reason": None}
     problems = _problem_rows(records, acct, verdict, cfg, redact) if cfg.enabled or records else []
     refusal = _latest_refusal(records)

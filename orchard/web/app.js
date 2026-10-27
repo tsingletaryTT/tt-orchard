@@ -302,7 +302,10 @@ function renderTelegraph() {
 
   const s = t.summary;
   const num = (k, v, note) => h("div", { class: "tg-num" }, h("span", { class: "k" }, k), h("span", { class: "v" }, v), note ? h("span", { class: "muted small" }, note) : null);
-  clear($("tg-numbers")).append(
+  if (t.error) {
+    // Nothing could be read, so no number is shown: a row of zeros would look like a spend of nothing.
+    clear($("tg-numbers")).append(num("Spend", "unknown", t.error), num("Calls counted", "unknown", "the ledger was not read"));
+  } else clear($("tg-numbers")).append(
     num("Spend", spendText(t.spend), t.spend.unknown_cost ? `${plural(t.spend.unknown_cost, "call")} with no known cost` : "known costs; reservations at their worst case"),
     num("Calls counted", String(t.spend.calls), `${s.calls} sent and recorded · ${s.ok} answered`),
     num("Unsettled", String(t.spend.unsettled), "no result recorded; counted at the worst case"),
