@@ -276,3 +276,16 @@ def test_a_non_object_request_entry_gives_no_summary_and_no_numbers_and_does_not
     assert package.sampling_summary(world["run"]) is None
     assert package.sampling_numbers(world["run"]) == ()
     assert package.sampling_summary_problems(world["run"]) == []
+
+
+def test_first_token_only_sampling_is_disclosed_on_the_card_and_the_gate_requires_the_wording(world):
+    from test_sampling_probe import with_session_lines
+    put_probe(world, with_session_lines(record()))
+    stage_dir, _, pkg = finished_auto(world)
+    card = (pkg / "README.md").read_text()
+    body = " ".join(section(card).split())
+    assert sampling_probe.CARD_SENTENCE_FIRST_TOKEN in body and "only the first token" in body
+    assert gate_package(stage_dir, world["run"]).ok
+    (pkg / "README.md").write_text(card.replace(sampling_probe.CARD_SENTENCE_FIRST_TOKEN, sampling_probe.CARD_SENTENCES["sampled-full-speed"]))
+    g = gate_package(stage_dir, world["run"])
+    assert not g.ok and any("verdict sentence" in r for r in g.reasons), g.reasons
