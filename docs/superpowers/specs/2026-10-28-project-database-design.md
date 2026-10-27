@@ -1,10 +1,27 @@
 # A project database for tt-orchard: what moves, what gets indexed, what stays a file
 
 Status: design note with a proof of the riskiest claim. No production module is changed. The proof is
-`orchard/_proofs/telegraph_sqlite.py` with `tests/test_proof_telegraph_sqlite.py`; the product does not import it.
-Date: 2026-10-28. Version of the repository when written: 0.9.35.
+`orchard/_proofs/telegraph_sqlite.py` with `tests/test_proof_telegraph_sqlite.py` and
+`tests/test_proof_telegraph_sqlite_invariants.py`; the product does not import it.
+Date: 2026-10-28. Version of the repository when written: 0.9.37.
 
 The operator's question: "if a little sqlite DB inside this project helps everything run smoothly THEN BY ALL MEANS let's do it."
+
+## 0. Invariants
+
+This note is the specification for the real migration. Each invariant below came out of the Copilot review of PR 132 (one
+review pass found 7 problems in the first version of this note) and is a requirement. Each has a named test in the proof
+(`tests/test_proof_telegraph_sqlite_invariants.py`, test names start with the invariant), and each test was seen to fail
+when its guard was removed (section 9). A change to the real migration that drops an invariant has to say so here.
+
+| # | Invariant | Named tests in the proof |
+|---|---|---|
+| I1 | `scope` is part of every key and every lookup. A cached answer, a call row, a cap and a total belong to one scope; an answer cached for one scope is never served to another. | `test_i1_a_cached_answer_is_served_only_to_its_own_scope`, `test_i1_the_same_request_in_two_scopes_keeps_two_cache_rows`, `test_i1_caps_and_totals_are_counted_per_scope` |
+| I2 | After any event that can lose history (a restore from a backup, a database moved aside, a new file next to existing backups) the ledger is unconfirmed: every reservation is refused until a person confirms. Reply files and an export can add conservative rows; they never confirm. | `test_i2_after_a_restore_from_an_older_backup_sending_is_refused_until_a_person_confirms`, `test_i2_a_moved_aside_database_starts_unconfirmed`, `test_i2_a_new_file_beside_existing_backups_starts_unconfirmed`, `test_i2_a_first_ever_open_is_not_unconfirmed`, `test_i2_the_unconfirmed_state_survives_reopening_and_is_cleared_only_by_confirming`, `test_i2_replies_without_a_row_are_counted_at_their_worst_case_and_do_not_confirm` |
+| I3 | After the migration an old writer cannot recreate `telegraph.jsonl` or build a second history, and new code refuses a directory that holds both the migration marker and a live `telegraph.jsonl`. The cutover is drained: it takes the old lock, compares totals inside the import transaction, and rolls back on any difference. | `test_i3_after_migration_an_old_telegraph_refuses_every_call_and_sends_nothing`, `test_i3_the_settlement_of_a_request_in_flight_during_the_cutover_cannot_recreate_the_ledger`, `test_i3_new_code_refuses_a_directory_that_holds_the_marker_and_a_live_jsonl`, `test_i3_a_migration_whose_totals_differ_changes_nothing`, `test_i3_migrating_twice_is_refused` |
+| I4 | The state directory is a real directory owned by the user and mode 0700; a loose mode on our own directory is tightened, a link or another user's directory is refused and left alone, the database file is not a link, and creating the directory is safe when two processes race (including the first switch to WAL). | `test_i4_an_existing_directory_with_loose_permissions_is_tightened`, `test_i4_a_directory_that_is_a_link_is_refused`, `test_i4_a_directory_owned_by_someone_else_is_refused_and_left_alone`, `test_i4_a_database_file_that_is_a_link_is_refused`, `test_i4_losing_the_race_to_create_the_directory_is_not_an_error`, `test_i4_four_processes_opening_a_missing_directory_at_once_all_succeed`, `test_i4_a_locked_answer_to_the_wal_switch_is_retried_until_the_timeout` |
+| I5 | Only confirmed corruption moves a database aside: a failed `integrity_check`, or SQLite's own "malformed" or "not a database" error. Busy, locked, disk-full, I/O, read-only and cannot-open errors raise a retryable `LedgerUnavailable`, leave the file and its siblings untouched, and make telegraph refuse the call. A moved-aside file starts unconfirmed (I2). | `test_i5_a_lock_or_io_error_is_retryable_and_leaves_the_file_untouched` (6 messages at 3 places), `test_i5_confirmed_corruption_moves_the_file_aside_and_starts_unconfirmed` (3 messages at 2 places), `test_i5_an_integrity_check_that_fails_moves_the_file_aside`, `test_i5_a_write_that_finds_the_database_locked_raises_a_retryable_error_and_changes_nothing` |
+| I6 | An offset index reuses a stored total only after validating the bytes it consumed: the tail chunk on every poll, every chunk on a full check; a half-written last line is not consumed. The residual (a same-size edit far behind the offset is seen only by a full check) is stated and tested. | `test_i6_an_appended_log_is_read_from_its_offset_and_the_total_is_kept`, `test_i6_a_half_written_last_line_is_not_consumed_until_it_is_whole`, `test_i6_a_truncate_and_regrow_that_keeps_the_start_is_detected`, `test_i6_a_same_size_edit_in_the_last_chunk_is_detected_by_an_ordinary_poll`, `test_i6_a_same_size_edit_in_an_early_chunk_is_missed_by_an_ordinary_poll_and_caught_by_a_full_check`, `test_i6_a_smaller_file_restarts_from_zero`, `test_i6_a_new_file_under_the_same_name_restarts_from_zero_even_when_it_is_larger` |
 
 ## 1. Answer and cost-benefit table
 
@@ -86,9 +103,26 @@ Authoritative or derived: derived. The logs are the record. Delete the index and
 Person needs a text tool: the logs, yes; the index, no.
 
 Verdict: index only. A table `log_files(path, dev, inode, size, mtime_ns, offset, turns, prompt_tokens, completion_tokens,
-skipped_helper, skipped_other)` lets a poll read only the bytes after `offset`, up to the last newline. A file whose inode
-changed, whose size is smaller than `offset`, or that has been rewritten (same size, newer mtime and a changed hash of its
-first 4 KiB) restarts from zero. The walk over directories stays, so the symlink and depth findings stay (section 11).
+skipped_helper, skipped_other, tail_digest, chunk_digests)` lets a poll read only the bytes after `offset`, up to the last
+newline. A stored total is reused only after the bytes it was built from are validated (invariant I6). The first version of
+this note used a hash of the first 4 KiB; the review showed that it cannot tell a same-size edit later in the file, or a
+truncate and regrow that keeps the start, from an unchanged file. The contract is now:
+
+* the index keeps a digest per 1 MiB chunk of the consumed prefix and a digest of the tail (from the start of the chunk that
+  holds `offset` up to `offset`);
+* every poll checks the inode and device, that the size is not below `offset`, and the tail digest. This reads at most one
+  chunk and catches a truncate and regrow and an edit in the last chunk. Any failure restarts from zero;
+* a full check re-hashes every chunk of the consumed prefix. It reads the whole prefix, so it runs on a slow schedule (the
+  default is once a day per file and on `--rebuild`) and does not run on each poll;
+* what a poll cannot see is an edit of the same size in an earlier chunk, between full checks. The index records when each
+  file was last fully checked, the view says so, and no budget decision reads the index. The proof tests this residual
+  as a documented miss;
+* a half-written last line is not consumed (the offset stops at the last newline).
+
+Agent logs are written by the harness and by agents. Where a log can be sealed (an attempt that has finished), sealing records
+its full digest once and the index can then trust it. That is an option for later and is outside this design.
+
+The walk over directories stays, so the symlink and depth findings stay (section 11).
 
 ### 2.3 Runs index for the web page and `status`
 
@@ -152,8 +186,17 @@ re-measure). Verdict: move; `INSERT ... ON CONFLICT (endpoint, model) DO UPDATE 
 * `project.db`: authoritative data (telegraph events and calls, cache index, speed baselines). Backed up.
 * `index.db`: derived data (log offsets, runs index, measurements). Not backed up. Deleted on any integrity failure or schema
   mismatch and rebuilt on demand.
-* The file is created with `os.open(..., 0o600)` and `fchmod`, so an older file with loose permissions is tightened. SQLite gives
-  `-wal` and `-shm` the permissions of the main file; the proof test checks all three are 0600. The directory is 0700.
+* The file is opened with `os.open(..., O_NOFOLLOW, 0o600)` and `fchmod`, so an older file with loose permissions is tightened
+  and a link in its place is refused. SQLite gives `-wal` and `-shm` the permissions of the main file; the proof test checks
+  all three are 0600.
+* The directory is not trusted because `mkdir` was given a mode (invariant I4). Every open does this, in order: create the
+  directory with `os.makedirs(..., exist_ok=True)` (two processes may both create it; losing the race is not an error); open it
+  with `O_DIRECTORY | O_NOFOLLOW` (a link or a file in its place is `UnsafeDirectory`); `fstat` the descriptor; refuse if the
+  owner is not the effective user (the directory is left as it is, since it is not ours to change); `fchmod` to 0700 when the mode
+  has any group or other bit set. A directory that other users can write could let them replace the database and its
+  sidecar files even though the files are 0600, so a loose mode on a directory we own is tightened and not tolerated. The
+  same function is used for the backup directory. The checks run on a descriptor, so a swap of the path after the check does
+  not change what was checked.
 * The database must be on a local disk. WAL needs shared memory and does not work over a network file system. After opening, the code reads
   back `PRAGMA journal_mode`; if it is not `wal` the open fails and telegraph refuses calls (the same fail-closed rule as
   "the budget ledger cannot be written or read" today).
@@ -207,7 +250,11 @@ and one more connection. The code treats them through the same `db.open(kind)` f
   `CHECK (has_reserve = 1 OR settled = 1)`. Written by `dbq/telegraph.py` in the same transaction as the event, never by a
   trigger and never by another module. A view `telegraph_effective` gives each call's counted tokens and cost.
 * `telegraph_torn(scope, name, tokens)`: imported sidecar notes. New data cannot produce a torn record.
-* `telegraph_cache(scope, identity_sha256 PRIMARY KEY, call_id, reply_file)`.
+* `telegraph_cache(scope, identity_sha256, call_id, reply_file, PRIMARY KEY (scope, identity_sha256))` (invariant I1). The
+  request identity (a hash of the URL and body) has no scope in it, so the same question in two ledger directories has the
+  same hash. With the scope in the key and in every lookup, the second scope neither hits a uniqueness error nor overwrites the
+  first scope's row, and an answer cached for one scope is never served to another. Every table that holds calls, torn
+  notes, events and cache rows has `scope` as the first column of its key.
 * `speed_baseline(endpoint, model, tok_s, at, PRIMARY KEY (endpoint, model))`.
 
 `scope` replaces the ledger directory. Today the caps are per directory, and a run can have its own `telegraph.jsonl` in its
@@ -245,15 +292,36 @@ A reader that takes two queries uses one read transaction, so the summary and th
 If `busy_timeout` expires the writer raises `LedgerUnavailable`, and telegraph returns "the budget ledger cannot be written
 or read" and sends nothing, the existing fail-closed path.
 
+A finding from the proof: when several processes open a new file at once, the switch to WAL can answer "database is locked"
+immediately, without waiting for `busy_timeout`. Four spawned processes opening a missing directory failed on most runs until
+the open retried that statement (and the integrity check) until the timeout passed. The real code needs the same retry.
+
 ## 8. Corruption, backups, and what can be rebuilt
 
-Open sequence: create the directory and file private, set pragmas, run `PRAGMA integrity_check`, run migrations. A failed
-check, or any `sqlite3.DatabaseError`, moves the file and its `-wal` and `-shm` to
-`<name>.corrupt-<timestamp>-<pid>` and starts a new file. For `index.db` that is the whole recovery. For `project.db` the
-open then restores the newest backup that passes the integrity check (if there is none, it starts empty and telegraph
-refuses to send until `tt-orchard db recover` has been run, because an empty ledger would let the caps be passed). The proof
-tests the move-aside with a file whose first page is intact and whose other pages are overwritten; only the integrity check
-finds that damage, and the mutation that skips the check goes red.
+Open sequence: make the directory private (section 3), open the file without following links, set pragmas, run
+`PRAGMA integrity_check`, run migrations.
+
+What moves a file aside (invariant I5). Only confirmed corruption: a failed `integrity_check`, or an error SQLite reports as
+SQLITE_CORRUPT (11) or SQLITE_NOTADB (26) ("database disk image is malformed", "file is not a database", "malformed database
+schema"). `sqlite3.OperationalError` is a subclass of `sqlite3.DatabaseError`, so catching `DatabaseError` would also move a
+healthy file aside on a lock, a full disk, an I/O error, a read-only file or a file that cannot be opened, and the next
+call would start from an empty ledger with every cap reset. Those errors raise a retryable `LedgerUnavailable` that leaves
+the file and its siblings untouched, and telegraph refuses the call. The proof injects six such messages at three places in the
+open sequence and checks that every byte of the directory is unchanged, and injects three corruption messages at two places and
+checks that the file is moved. A moved-aside file is moved with its `-wal` and `-shm` to `<name>.corrupt-<timestamp>-<pid>`.
+
+The unconfirmed state (invariant I2). A restored backup can lack reservations and settled calls committed after the backup was
+taken; restoring an older valid backup would make allowance that was spent available again. So any of these events makes the new
+database unconfirmed: a restore from a backup, a database moved aside, and a new file created next to existing backups
+(the file was deleted and the backups were not). The state is a row in `meta`, it survives reopening, and `reserve` refuses
+every call while it is set, with a message that names the cause and the command that clears it (`tt-orchard db confirm-restore`).
+Only a person's confirmation clears it. Two things help the person decide, and neither confirms by itself:
+`reconcile_replies` adds, for every reply file with no call row, an unsettled reservation at the worst case (so the counted
+spend only goes up), and an export of the archived jsonl (section 10) or the provider's usage page shows what is missing.
+Calls that failed or timed out left no reply file, so they cannot be found from the files; that is why the person confirms.
+For `index.db` none of this applies: it holds derived data, is deleted and rebuilt, and has no unconfirmed state. For
+`project.db` the open restores the newest backup that passes the integrity check, marks the result unconfirmed, and if there
+is none it starts empty, marked unconfirmed.
 
 Backups of `project.db`: `Connection.backup()` (the online backup API; `VACUUM INTO` also works) to
 `backups/project-<timestamp>.db`, mode 0600, taken when the newest backup is older than one hour and a write happens, and always
@@ -283,8 +351,10 @@ Keeping the old `telegraph.jsonl` as a read-only archive after the migration cos
 ## 9. The proof
 
 `orchard/_proofs/telegraph_sqlite.py` implements the reserve, settle, torn and import operations on SQLite with the
-accounting rules of `Telegraph._accounting` and `_over_budget`. It is not used by the product. 71 tests in
-`tests/test_proof_telegraph_sqlite.py` pass in about 3 seconds. Results:
+accounting rules of `Telegraph._accounting` and `_over_budget`, and, after the review of PR 132, the scope key, the
+unconfirmed state, the migration cutover, the directory checks, the corruption rule and an offset index. It is not used by
+the product. 125 tests (71 in `tests/test_proof_telegraph_sqlite.py`, 54 in `tests/test_proof_telegraph_sqlite_invariants.py`)
+pass in about 5 seconds, repeated six times without a failure after the retry described in section 7. Results:
 
 * Same totals. Ten scenarios taken from `tests/test_telegraph.py` run through the real `Telegraph` (two plain calls; a timeout
   with a token cap; an answer with no usage under a cost cap; a 401 before processing; a process that dies mid-request; a
@@ -304,13 +374,36 @@ accounting rules of `Telegraph._accounting` and `_over_budget`. It is not used b
   and a new writer succeeds within a 1 s timeout. Six children run a reserve-and-settle storm and are killed at different
   points: every reservation a child reported after its commit is in the file, every reported settlement is settled, no row
   is half written (`CHECK (has_reserve = 1 OR settled = 1)`), and the counted tokens equal the sum recomputed from the rows.
-* Mutations. 23 guards removed one at a time, each by a script that restores the file in a `finally`; all 23 turned the test
-  file red: deferred `BEGIN`; check and insert in separate transactions; unknown usage counted at the settlement; each of the
-  six caps removed; unknown cost taken as zero; torn records not counted; `busy_timeout` zero; the reservation not written
-  before the send; `synchronous = NORMAL`; no `chmod` of an existing file; the directory created 0755; the integrity check skipped;
-  a newer schema accepted; the settlement always marking usage known; the settled problem ignored; a bool taken as a number; imported
-  lines not kept; a legacy settlement ignored. The first run left the skipped-integrity-check mutation green, because the
-  damaged file used in the test also failed on open; the test now keeps page 1 intact.
+* Invariant tests (section 0), each seen red when its guard was removed. The cutover test runs the real, unchanged
+  `Telegraph` against a migrated directory: every call is refused, no request is sent, and `telegraph.jsonl` is not
+  recreated; a request in flight during the cutover returns and its settlement cannot be written, and the database counts
+  its reservation at the worst case (3 calls: two settled before, one reserved). A restore from a backup that lacks five
+  reservations refuses a call that a cap of 3 would otherwise allow, until `confirm_reconciled`. Errors injected as
+  `sqlite3.OperationalError` ("database is locked", "disk I/O error", "database or disk is full", "unable to open database
+  file", "attempt to write a readonly database", "database table is locked") at connect, at the WAL pragma and at the integrity
+  check leave every file of the directory byte-identical; a real lock held by another connection makes `reserve` raise the
+  retryable error and changes nothing. The log index test set includes the miss that the review pointed out (a same-size edit
+  in an early chunk) as a test that expects the ordinary poll to miss it and a full check to catch it.
+* Mutations, first file. 22 guards removed one at a time, each by a script that restores the file in a `finally`; all 22
+  turned the tests red: deferred `BEGIN`; check and insert in separate transactions; unknown usage counted at the settlement;
+  each of the six caps removed; unknown cost taken as zero; torn records not counted; `busy_timeout` zero; the reservation
+  not written before the send; `synchronous = NORMAL`; no `chmod` of an existing file; the integrity check skipped; a newer
+  schema accepted; the settlement always marking usage known; the settled problem ignored; a bool taken as a number; imported
+  lines not kept; a legacy settlement ignored. The first run of this set left the skipped-integrity-check mutation green,
+  because the damaged file used in the test also failed on open; the test now keeps page 1 intact.
+* Mutations, invariants. 28 more: the cache lookup ignoring the scope; the cache key without the scope; totals not filtered by
+  scope; `reserve` ignoring the unconfirmed state; a moved-aside file, a restore, and a new file beside backups not marked;
+  confirming not clearing; reply files not reconciled; no sentinel after the rename; a live jsonl beside the marker accepted;
+  totals not compared before the cutover; a second migration allowed; a loose directory mode not tightened; a linked directory
+  followed; another user's directory accepted; a linked database file followed; non-idempotent directory creation; the WAL
+  switch not retried; every database error treated as corruption; corruption not moved aside; a busy database not converted
+  to the retryable error; the tail chunk not checked; the full check never run; a half-written line consumed. 26 turned the
+  tests red. Two survived: removing the inode check and removing the "file smaller than the offset" check of the index. Both
+  are covered by the tail-chunk digest (a replaced or shortened file fails it too), so they are cheap early exits and not
+  independent guards. They stay in the design for that reason. The mutation that removed the 0700 `mode` argument of
+  `makedirs` was dropped, because the tightening step makes the mode correct whatever `makedirs` did; the tightening has its
+  own mutation. Two of my mutations first targeted the wrong place (one hit the retry helper and not `BEGIN IMMEDIATE`; the
+  WAL retry mutation survived a probabilistic test) and the test set was strengthened until each mutation went red.
 * Migration check on the real data. `python -m orchard._proofs.telegraph_sqlite import-check <telegraph dir> --db <file>`
   read the backfilled ledger without changing it: 77 records imported; 40 calls, 1,101,006 tokens in, 99,570 tokens out,
   $1.2106117, per-problem numbers (17 problems) equal before and after; exit status 0.
@@ -323,14 +416,37 @@ write cache). A network file system was not tested. Threads in one process, whic
 
 Step 0, before any code: copy the telegraph directory aside (read only, with `sha256` recorded).
 
-Step 1, migration command: `tt-orchard db migrate-telegraph [--dir <telegraph dir>]`.
-1. Take an exclusive `flock` on the old `telegraph.lock` for the whole import, so no old-style writer runs meanwhile.
-2. Parse `telegraph.jsonl` as today (a malformed line is skipped and counted, and the count is printed).
-3. Insert every record into `telegraph_events` in order, verbatim, and project calls, torn notes and the cache index
-   (`cache/*.json`) in the same transaction. Sidecar `telegraph.jsonl.torn-*` files without a note get one, as `_quarantine_torn_tail` would.
-4. Run the equality check (below). If it fails, roll back, leave the old files alone, exit non-zero.
-5. Write `MIGRATED-TO-SQLITE` (a text file with the date, the sha256 of the ledger, the row counts) in the old directory and
-   rename `telegraph.jsonl` to `telegraph.jsonl.archived`. The reply files stay where they are. Nothing is deleted.
+The cutover must be drained and must stop old writers for good (invariant I3). The first version of this note held the old
+lock only while importing. An old process, or a stale checkout, could then append to `telegraph.jsonl` (the old code opens it
+with `O_CREAT`, so it recreates a missing file) and build a second, incomplete budget history; so could the settlement of a
+request that was in flight during the import. The migration therefore replaces the file with something the old code cannot
+write to, and the proof runs the real old `Telegraph` against the result.
+
+Step 1, migration command: `tt-orchard db migrate-telegraph [--dir <telegraph dir>]`. Stop the harness first. The command should
+refuse while a supervisor has an open run that uses this directory (that check is a requirement for the real command; the
+proof does not test it). A request that is in flight anyway is covered by step 5.
+1. Take an exclusive `flock` on the old `telegraph.lock` (the lock the old code takes) for the whole command.
+2. In one `BEGIN IMMEDIATE` transaction: refuse if this scope was imported before (a `meta` row `migrated:<scope>`);
+   parse `telegraph.jsonl` as today (a malformed line is skipped and counted, and the count is printed); insert every record
+   into `telegraph_events` in order, verbatim, and project calls, torn notes and the cache index (`cache/*.json`).
+   Sidecar `telegraph.jsonl.torn-*` files without a note get one, as `_quarantine_torn_tail` would.
+3. In the same transaction run the equality check (below). If it fails, roll back (the proof checks that the database has no
+   rows and the old directory is byte for byte as it was) and exit non-zero.
+4. Commit. Compute the sha256 of the ledger, then `rename` `telegraph.jsonl` to `telegraph.jsonl.archived` (atomic).
+5. Make a directory named `telegraph.jsonl` in its place, with a short `README.txt` inside. An old process that opens it
+   for appending gets `EISDIR`; the old code's reads fail the same way. The old code treats both as "the budget ledger cannot
+   be written or read" and sends nothing (the test `test_a_ledger_that_cannot_take_a_record_refuses_the_call` of the old code
+   relies on the same behaviour). A request that was already in flight can still return, and its settlement cannot be
+   written; the old code says "the ledger could not record this call". The reservation of that request is in the import and
+   counts at its worst case, so no spend is lost.
+6. Write `MIGRATED-TO-SQLITE` (date, archive name, sha256, record count, scope). The reply files stay where they are. Nothing
+   is deleted.
+
+New code calls `refuse_if_legacy_present(directory)` before it uses a telegraph directory. If the marker exists and
+`telegraph.jsonl` is a regular file or a link again, an old writer got through: the new code refuses to run against the
+directory, and a person stops the writer and reconciles before any call. A migration run a second time is refused. Old
+writers must stay stopped until SQLite-aware code is installed; the sentinel makes a forgotten one fail closed and not
+quietly.
 
 The equality check, written and tested in the proof (`compare` and `import_and_compare`): the jsonl accounting and summary
 (`telegraph.accounting` and `summarise_records`) and the SQLite accounting and totals must be equal for calls, tokens
@@ -400,5 +516,9 @@ in a 0700 directory, outside the repository, and `.gitignore` is not needed beca
 * Whether a per-run telegraph ledger should live in the run directory (travels with the run) or in the shared database under
   a scope. The note assumes a scope and keeps the choice open.
 * How PR 115 changes before it merges. The index design depends on its scanner returning per-file totals.
+* How often a full chunk check of the offset index should run. The note says once a day per file; I measured nothing about log
+  sizes or the time to hash them.
+* Whether the check "no supervisor has an open run that uses this directory" before a migration can be made reliable. The proof
+  tests the sentinel, which holds even when that check is missed.
 * The count of review findings by class is my reading of the inline comments; no tool produced them. Counts are 14 of 42 (PR 106),
   about 8 of 23 (PR 111), about 11 of 18 (PR 115).
