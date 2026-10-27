@@ -37,5 +37,18 @@ def softmax(x):
     return torch.softmax(x["x"], dim=-1)
 
 
+def tile_scan(x):
+    # The recurrence of linear_scan, taken across tile rows (32 rows at a time): out[T] = a[T] * out[T-1] + b[T] for every
+    # element of tile row T, with out[-1] = 0. Rows inside one tile do not feed each other.
+    a, b = x["a"], x["b"]
+    rows, cols = b.shape
+    a, b = a.reshape(rows // 32, 32, cols), b.reshape(rows // 32, 32, cols)
+    h, out = torch.zeros_like(b[0]), torch.empty_like(b)
+    for t in range(b.shape[0]):
+        h = a[t] * h + b[t]
+        out[t] = h
+    return out.reshape(rows, cols)
+
+
 REFERENCES = {"add": add, "silu_mul": silu_mul, "rmsnorm": rmsnorm, "linear_scan": linear_scan, "center": center,
-              "softmax": softmax}
+              "softmax": softmax, "tile_scan": tile_scan}

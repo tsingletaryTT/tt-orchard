@@ -21,7 +21,7 @@ Read first, by kind of op:
 - Elementwise (`add`, `silu_mul`): eltwise_add.py, then the specification's row for each function you need
   (`grep -n "ttl.math.silu" reference/TTLangSpecification.md`).
 - A reduction (`rmsnorm`, `center`, `softmax`): eltwise_broadcast_reduce.py, then the rows for `ttl.math.reduce_sum`, `ttl.block.broadcast`, `ttl.block.fill`.
-- A recurrence along a dimension (`linear_scan`): both .py files, then the specification's "Block" section. No upstream example has one.
+- A recurrence (`linear_scan`, `tile_scan`): both .py files, then the specification's "Block" section. A block expression kept in a Python variable carries a value between loop iterations (`z += ...` in eltwise_broadcast_reduce.py).
 
 Rules from the specification and the examples:
 - Units: `kernel_spec.json` shapes count elements, and so does `x.shape` inside your operation; a tile is 32 x 32 elements, and every
