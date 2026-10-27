@@ -75,12 +75,36 @@ written with placeholders (`<HF_CACHE>`, `<TT_METAL>`).
 - Whether serving the fine-tune needs anything from the base's `svd_bases.pt`. The README's inference example loads the fine-tune alone.
 - How much of the diffusion transformer and autoencoder `tt_dit` layers can be reused.
 
-## Stage 0 on the pair: not run yet
+## Stage 0 on the real pair (2026-10-28, after the base finished downloading)
 
-On 2026-10-28 the base's snapshot in the cache held only its small files (config, card, licences); `model.safetensors` and `svd_bases.pt` were still `.incomplete`
-blobs, so the operator's download was running. The stage 0 comparison needs the base's weight header, so the class and path for the pair are not recorded here.
-The harness never fetches a gated model. When the download is complete, run the template on the pair (the template reads headers, configs and a few KB of values)
-and add the class, path and reasons to this section.
+The base's files were complete: no `.incomplete` blob, and the sizes equal the public file list (`model.safetensors` 2,270,384,940 bytes, `svd_bases.pt`
+1,270,378,123, the text encoder's `model.safetensors` 1,183,022,944, `model_config.json` 8,452). The stage 0 template ran on the fine-tune (revision
+`8bdfb53c6b0f`) against the base (revision `4249e9179cd6`), headers and configs only, plus a few KB of sampled values:
 
-Built and tested without the base: facts (form, serving, modality), the audio branch of the stage 0 template (58 tests on fake snapshots, 55 mutations, one
-equivalent survivor: skipping the value sample when a header problem exists changes nothing because the sampler tolerates unreadable files).
+- Class `full-port`, path `full-port`, facts `form: full`, `modality: audio`. Two reasons, both in `model_config.json`:
+  - `sample_size` is 5,292,032 in the fine-tune and 5,324,800 in the base (120.0 s and 120.75 s at 44,100 Hz).
+  - `model.diffusion.diffusion_objective` is `rf_denoiser` in the fine-tune and `rectified_flow` in the base.
+- Everything else matches: both have 685 tensors with the same names, shapes and dtypes (F32), the same three components (diffusion transformer 459,130,896
+  parameters, autoencoder 108,244,721, conditioner 198,144), and equal text-encoder directories (config and tensor headers).
+- The weights are related and not copies. Of 8 sampled tensors, 2 are identical (autoencoder parts), 5 are near (cosine 0.99994 to 1.0, diffusion
+  transformer) and 1 is changed (the conditioner's padding embedding, cosine 0.96). That fits a fine-tune that trains the diffusion transformer and leaves
+  the autoencoder alone.
+- The `training` section differs by an `arc` block (adversarial post-training with a discriminator); the template lists it and ignores it. The base ships
+  `svd_bases.pt` (1.27 GB) and the fine-tune does not. What it holds is still not known.
+- The library's code (`stable_audio_3/inference/sampling.py`) shows what the two config differences mean at run time: the sampler defaults to `pingpong`
+  for `rf_denoiser` and to `euler` for `rectified_flow`, and `generate` uses its own `sample_size` argument (5,292,032). The weights have the same layout, so one
+  runtime serves both. The harness's rule (any difference in the `model` section or a top-level key is a full port) files the pair as a full port. Whether that
+  rule is too strict for a sampler-parameterisation difference is the operator's decision; the harness does not relax it on its own. For this model it changes
+  nothing yet, because the run stops after stage 0 either way (`audio-path-unbuilt`).
+
+## Built since: the CPU reference tooling (step 0 of the runtime design)
+
+`orchard/audio_reference.py` (a recorder and a checker), `orchard/skills/audio-reference-templates/make_reference.py` (runs the library's own `generate` on
+the CPU and saves every intermediate) and `tt-orchard audio-reference-env` (the environment). 109, 24 and 42 tests; mutation tables of 89, 47 and 59 mutations
+with no survivor at the end. The library checkout at the pinned commit `77e0398c26f7` exists (a read-only `--dry-run` of the environment command confirms it).
+The environment itself (CPU torch and the library installed in `~/orchard-venvs/stable-audio`) was not built: the permission system refused the command that
+installs external code. No real reference clip has been made and no timing is measured.
+
+Estimate, not measured: the diffusion transformer does about 0.22 TFLOP per pass at 237 tokens (a 10 s clip), so a pass should take seconds on 16 CPU cores
+and the fine-tune's 8 steps a minute or so; the base control at 50 steps with CFG scale 7 is about 100 passes. Loading the 2.3 GB checkpoint and decoding 16 s of
+audio are the other costs. The pair should fit well inside 30 minutes. The first run measures it.
