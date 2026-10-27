@@ -126,7 +126,8 @@ from urllib.parse import urlparse
 
 from orchard.adapters import AdapterError, Lease
 from orchard.agent import AgentStep, Tools, agent_env, probe_model, spawn_checked
-from orchard import bus
+from orchard import bus, nearest
+from orchard.audio_facts import serving_of
 from orchard.blocked import block_code, last_pause
 from orchard.blocked import write_bundle as write_blocked_bundle
 from orchard.canary import CanaryError, compare, post_json
@@ -152,7 +153,7 @@ from orchard import graft_trial as graft
 from orchard import kept_coder, kernelprobe, swap_draft
 from orchard.server import ServerControl, ServerError, ServerSpec, StopCheck
 from orchard.stages import (PACKAGE_OPTIONS_SET, GateResult, TierUnavailable, abort_can_resume, attempt_started_ts,
-                            budget_cap, check_disk, coder_state, delta_class, delta_path, evidence_record,
+                            budget_cap, check_disk, coder_state, delta_class, delta_facts, delta_path, evidence_record,
                             open_stage_dir, package_format, package_options, resolve_endpoint,
                             resolve_skill, run_class, run_path, run_progress, scratch_stage, spec_for, stock_params, tier_for)
 from orchard.tiers import TierConfigError, load
@@ -1466,6 +1467,21 @@ class Supervisor:
         log = stage_dir / "log" / f"{step.phase}-continuation-{entry['seq']:05d}.jsonl"
         return step.continue_with(text, max_turns=AGENT_CONTINUATION_TURNS, log_path=log)
 
+    def _stage_0_facts(self) -> dict:
+        """`{"facts": {...}}` for stage 0's passing end, or {} when delta.json holds none (a text model: the default applies).
+        The template decides form and modality from the files; `serving` is a property of this machine, so it comes from the
+        installed bundles and container packages (orchard/audio_facts.py)."""
+        facts, delta = delta_facts(self.run_dir), None
+        if facts is None:
+            return {}
+        try:
+            delta = json.loads((self.run_dir / "stages" / "0" / "delta.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        installed = nearest.read_all_installed(self.paths.tt_model_root, self.paths.operator_home)
+        return {"facts": {"form": facts.get("form"), "serving": serving_of(delta.get("nearest_model"), installed),
+                          "modality": facts.get("modality")}}
+
     def _end_stage(self, spec, stage_dir: Path, status: str, reasons: list, gate, escalated: bool) -> str:
         n = spec.number
         if status == "pass":
@@ -1475,7 +1491,7 @@ class Supervisor:
                 self._record_numbers(stage_dir)
             # Stage 0's pass records the path it chose. Later stages read it from here
             # (orchard/stages.py, run_path), so an edit to delta.json cannot change the run's path.
-            extra = ({"path": delta_path(self.run_dir), "class": delta_class(self.run_dir)}
+            extra = ({"path": delta_path(self.run_dir), "class": delta_class(self.run_dir), **self._stage_0_facts()}
                      if n == 0 else {})
             self.ledger.append("stage_end", n, result="pass", evidence=ev, **extra)
             return "pass"
