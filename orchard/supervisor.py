@@ -1929,7 +1929,10 @@ class Supervisor:
                 skip = ("the sampling trial was skipped: stage 2 was served through a container package, and the trial's scripts build and "
                         "run a bundle's run.sh, which a container package does not have")
             else:
-                enough, free = check_disk(self.run_dir, SAMPLING_TRIAL_DISK_GB, usage=self.disk_usage)
+                # The disk is a prerequisite for a trial that still has to run. One that already ran (its test record exists) may itself have
+                # filled the disk with its new tensor cache, and a restart must read its result and not skip it for that.
+                already_ran = (stage_dir / sampling.TRIAL_DIR / "test-result.json").is_file()
+                enough, free = (True, None) if already_ran else check_disk(self.run_dir, SAMPLING_TRIAL_DISK_GB, usage=self.disk_usage)
                 if not enough:
                     skip = (f"the sampling trial was skipped: the drafter-off variant converts a second tensor cache and needs "
                             f"{SAMPLING_TRIAL_DISK_GB:g} GB free on the run directory's disk; {free} GB is free")

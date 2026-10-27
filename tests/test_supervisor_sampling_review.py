@@ -88,6 +88,42 @@ def test_a_server_the_killed_supervisor_left_in_the_sampling_trial_is_stopped_on
             os.kill(proc.pid, signal.SIGKILL)
 
 
+def short_disk(monkeypatch):
+    """After this, only the sampling trial's own disk check sees a short disk (its threshold is made distinct)."""
+    real = supervisor.check_disk
+    monkeypatch.setattr(supervisor, "SAMPLING_TRIAL_DISK_GB", 12345.0)
+    monkeypatch.setattr(supervisor, "check_disk", lambda path, gb, usage=None: (False, 7.0) if gb == 12345.0 else real(path, gb, usage=usage))
+
+
+# ---- finding 8: the disk prerequisite is for a trial that still has to run ----------------------------------------------------------------
+
+def test_a_finished_trial_is_read_after_a_restart_even_when_its_own_cache_left_the_disk_short(rig, spy, monkeypatch):
+    with pytest.raises(Crash):
+        rig.run(crash_if=lambda e: e["event"] == "evidence" and e["data"].get("what") == "sampling trial test")
+    short_disk(monkeypatch)                         # the variant's new tensor cache now fills the disk
+    assert rig.run(pid=200) == EXIT_READY
+    d = decision_file(rig)
+    assert d["choice"] == "drafter-off" and d["flag"] is None and d["trial"] == f"{sc.TRIAL_DIR}/{sc.TRIAL_RESULT}"
+    assert len(spy.sampling_trials) == 1 and not stage2(rig, "sampling trial skipped")
+
+
+def test_a_trial_that_has_not_run_is_still_skipped_for_want_of_disk(rig, spy, monkeypatch):
+    short_disk(monkeypatch)
+    assert rig.run() == EXIT_READY
+    d = decision_file(rig)
+    assert d["flag"] == "variant-not-tried" and "12345 GB" in d["reason"] and spy.sampling_trials == []
+
+
+def test_a_failed_trial_marker_is_not_a_reason_to_run_again_and_still_says_it_failed(rig, spy, monkeypatch):
+    spy.s_code = 3
+    with pytest.raises(Crash):
+        rig.run(crash_if=lambda e: e["event"] == "evidence" and e["data"].get("what") == "sampling trial test")
+    short_disk(monkeypatch)
+    assert rig.run(pid=200) == EXIT_READY
+    d = decision_file(rig)
+    assert "did not finish" in d["reason"] and len(spy.sampling_trials) == 1
+
+
 def test_the_real_sweep_runs_on_both_directories_without_error(rig, spy):
     """The real sweep (no servers here) must not fail on the sampling trial directory."""
     with pytest.raises(Crash):
