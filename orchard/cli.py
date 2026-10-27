@@ -255,6 +255,14 @@ def _parser() -> argparse.ArgumentParser:
     tpick.add_argument("--not-helped", dest="not_helped", action="store_true", help="the answer did not help")
     _tele("usage", "show calls, tokens, cost and how often the help worked") \
         .add_argument("--json", action="store_true", help="print the summary as JSON")
+    sp_ = sub.add_parser("spend", parents=[common],
+                         help="the real helper spend and the virtual spend of the local models, side by side "
+                              "(the virtual figure is never added to the real one)")
+    sp_.add_argument("dirs", nargs="*", metavar="DIR",
+                     help="a kernel-probe output, run or benchmark directory (default: every run under runs_root)")
+    sp_.add_argument("--json", action="store_true", help="print the figures as JSON")
+    sp_.add_argument("--dir", metavar="DIR", help="the telegraph ledger directory (default: the config's, else ~/.cache/tt-orchard/telegraph)")
+    sp_.add_argument("--telegraph-config", metavar="FILE", help="a TOML file with the [telegraph] and [virtual_spend] tables (default: the bringup config's)")
     k = sub.add_parser("kernel-env", parents=[common],
                        help="build or check the tt-lang simulator environment that kernel-probe uses")
     k.add_argument("--check", action="store_true",
@@ -794,6 +802,9 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
     if args.cmd == "telegraph":
         from orchard import telegraph_cmd
         return telegraph_cmd.main(args, out=out, environ=env)
+    if args.cmd == "spend":
+        from orchard import spend_cmd
+        return spend_cmd.main(args, out=out, environ=env)
     if args.cmd == "reported":
         from orchard import reported_cmd
         return reported_cmd.main(args, out=out)

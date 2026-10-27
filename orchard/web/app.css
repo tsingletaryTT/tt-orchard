@@ -134,6 +134,15 @@ code, .mono { font-family: var(--mono); font-size: .88em; }
 .spend-meter:hover { filter: brightness(1.06); }
 @media (max-width: 900px) { .spend-meter { max-width: 100%; } .spend-meter .spend-text { white-space: normal; } }
 
+/* the local meter: the virtual spend of the local models, beside the real helper meter. It is a comparison figure and never money,
+   so it has no tone: a dashed outline, the muted ink and no dot, and it never takes the helper meter's amber or red. */
+.local-meter { display: inline-flex; align-items: center; font: 600 .82rem/1.2 var(--pixel); color: var(--muted); background: var(--paper);
+  border: 2px dashed var(--muted); border-radius: 4px; padding: 5px 8px; cursor: pointer; max-width: 46ch; }
+.local-meter[hidden] { display: none; }
+.local-meter .local-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.local-meter:hover { filter: brightness(1.06); }
+@media (max-width: 900px) { .local-meter { max-width: 100%; } .local-meter .local-text { white-space: normal; } }
+
 /* the page style: a setting of the whole page, so it is a small labelled pair and not another tab */
 .style-switch { display: inline-flex; align-items: center; gap: 0; }
 .style-label { font: .72rem var(--font); letter-spacing: .06em; text-transform: uppercase; color: #f6dfb0; margin-right: 8px; }
@@ -563,6 +572,7 @@ html[data-mode="operator"] .machine-chip { font: 600 .82rem/1 var(--font); backg
 /* the spend meter sits on the dark top bar in both colour schemes, so its colours are fixed pairs (checked at 4.5:1 in tests) */
 html[data-mode="operator"] .spend-meter { font: 600 .82rem/1 var(--font); background: transparent; color: #e4f1f0; border: 1px solid #3f6664; box-shadow: none; }
 html[data-mode="operator"] .spend-meter::before { box-shadow: none; }
+html[data-mode="operator"] .local-meter { font: 600 .82rem/1.2 var(--font); background: transparent; color: #cfe3e1; border: 1px dashed #6f8f8c; }
 html[data-mode="operator"] .spend-meter[data-tone="dim"] { color: #a9c4c2; }
 html[data-mode="operator"] .spend-meter[data-tone="warn"] { background: #f2c14e; color: #2b1f00; border-color: #f2c14e; }
 html[data-mode="operator"] .spend-meter[data-tone="bad"] { background: #b3290a; color: #ffffff; border-color: #ff9e8a; }

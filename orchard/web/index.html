@@ -33,6 +33,7 @@
   </nav>
   <div class="topbar-right">
     <button type="button" class="spend-meter" id="spend-meter" data-state="unknown" data-tone="unknown" title="What the outside helper model has cost. Opens the Telegraph view."><span class="emoji" aria-hidden="true">📡 </span><span class="spend-text" id="spend-text">Helper: reading…</span></button>
+    <button type="button" class="local-meter" id="local-meter" hidden title="Virtual spend of the local models. Opens the Telegraph view."><span class="local-text" id="local-text"></span></button>
     <button type="button" class="machine-chip" id="machine-chip" data-tone="unknown" title="The chips on this box. Opens the Machine view.">Chips: reading…</button>
     <div class="clock" aria-label="Machine time and connection">
       <span class="clock-day" id="clock-day"></span>
@@ -190,6 +191,18 @@
         <h2 id="tg-spend-h">Spend and caps</h2>
         <div class="tg-numbers" id="tg-numbers"></div>
         <div class="tg-caps" id="tg-caps"></div>
+      </section>
+
+      <section aria-labelledby="tg-local-h" class="tg-block" id="tg-local">
+        <h2 id="tg-local-h">Local (virtual) <span class="muted small">never added to the helper spend above</span></h2>
+        <p class="muted small" id="tg-local-note"></p>
+        <div class="table-wrap">
+          <table class="tg-table" id="tg-local-table">
+            <thead id="tg-local-head"></thead>
+            <tbody id="tg-local-body"></tbody>
+          </table>
+        </div>
+        <p class="muted small" id="tg-local-empty" hidden>No local agent logs with token counts were found under the runs folder.</p>
       </section>
 
       <section aria-labelledby="tg-recent-h" class="tg-block">

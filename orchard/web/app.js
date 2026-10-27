@@ -214,6 +214,56 @@ function renderMachineChip(m, all, free) {
   chip.dataset.tone = free === all.length ? "good" : stale ? "bad" : "warn";
 }
 
+// ---- virtual spend: the local models' token use at a hosted model's price (orchard/virtualspend_view.py) ----------------
+// A comparison figure, never money and never added to the helper spend. It has its own request and its own failure handling.
+// It is shown only when local logs with token counts exist for the selected run (or for the listed runs when none is
+// selected); after STALE_MS without an answer it is hidden, so an old amount never stays on screen. It does not touch the
+// helper meter's state or colour.
+async function pollVirtual() {
+  const asked = S.selected;
+  try {
+    const answer = await api("/api/virtual-spend" + (asked ? `?run=${encodeURIComponent(asked)}` : ""));
+    if (S.selected !== asked) return;            // an answer about the run that was selected a moment ago
+    S.virtual = answer;
+    S.vsOk = Date.now();
+    renderLocalMeter(S.virtual);
+    renderLocalTable();
+  } catch (err) {
+    if (Date.now() - (S.vsOk || 0) > STALE_MS) renderLocalMeter(null);
+  }
+}
+
+function renderLocalMeter(v) {
+  const el = $("local-meter");
+  const meter = v && v.meter;
+  el.hidden = !meter;
+  if (!meter) { $("local-text").textContent = ""; return; }
+  $("local-text").textContent = meter.text;
+  el.title = meter.title;
+}
+
+function renderLocalTable() {
+  const v = S.virtual;
+  if (!v || !changed($("tg-local"), v.rows.concat([v.references]))) return;
+  $("tg-local-note").textContent = v.label + ". The prompt count is large because every turn re-sends the whole conversation; " +
+    "a hosted provider with prompt caching would bill most of it for much less.";
+  const head = clear($("tg-local-head"));
+  const hr = h("tr", {});
+  for (const [t, cls] of [["Run or probe directory", null], ["Turns", "num"], ["Prompt tokens", "num"], ["Completion tokens", "num"], ["Agent time", "num"]]) {
+    hr.append(h("th", { scope: "col", class: cls }, t));
+  }
+  for (const r of v.references) hr.append(h("th", { scope: "col", class: "num" }, `Virtual $ at ${r.name}`));
+  head.append(hr);
+  const body = clear($("tg-local-body"));
+  for (const r of v.rows) {
+    const cells = [[r.name, "wrap", r.left_out || null], [String(r.turns), "num"], [String(r.prompt_tokens), "num"], [String(r.completion_tokens), "num"],
+      [r.agent_wall_s ? `${(r.agent_wall_s / 3600).toFixed(2)} h` : "not recorded", "num"]];
+    for (const c of r.virtual) cells.push([usd(c.cost_usd), "num"]);
+    body.append(tgRow(cells));
+  }
+  $("tg-local-empty").hidden = v.rows.length > 0;
+}
+
 // ---- telegraph: the spend meter in the top bar (always on screen) and the Telegraph view ----------------------------
 // The server builds the meter's words (orchard/telegraph_view.py). The page only shows them. The meter is redrawn on every
 // poll, outside any change guard, so an outage cannot leave a stale amount on screen: after STALE_MS without an answer it says the
@@ -493,6 +543,7 @@ function renderRuns() {
 
 async function refreshRuns() {
   pollTelegraph();                       // its own request and its own failure handling: spend is never hidden by another call's failure
+  pollVirtual();                         // the local models' virtual figure: its own request, kept apart from the real spend
   try {
     const [runs, machine, launches] = await Promise.all([api("/api/runs"), api("/api/machine"), api("/api/launches")]);
     S.runs = runs.runs;
@@ -517,6 +568,8 @@ function select(name, { push = true } = {}) {
   if (S.selected === name) return;
   S.selected = name;
   S.detail = null;
+  renderLocalMeter(null);                      // the figure of the run just left must not stay beside the new one
+  pollVirtual();
   S.ledgerAfter = 0; S.ledgerRows = []; S.file = null;
   if (push) history.replaceState(null, "", `#run/${encodeURIComponent(name)}`);
   renderRuns();
@@ -1262,6 +1315,7 @@ function wire() {
   $("view-settings-btn").addEventListener("click", () => setView("settings"));
   $("view-telegraph-btn").addEventListener("click", () => setView("telegraph"));
   $("spend-meter").addEventListener("click", () => setView("telegraph"));
+  $("local-meter").addEventListener("click", () => setView("telegraph"));
   $("settings-form").addEventListener("submit", saveSettings);
   $("checks-run").addEventListener("click", startChecks);
   $("caches-run").addEventListener("click", loadCaches);
