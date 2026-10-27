@@ -215,7 +215,7 @@ def _summarize(record) -> dict:
                 "sentence": f"A sampled reply was shorter than {MIN_TOKENS} tokens, which says too little about speed or about whether sampling was applied."}
     matched_by_seeds, matched_greedy = a["text"] == b["text"], g["text"] in (a["text"], b["text"])
     evidence = _served_by_greedy_only_loop((a, b))        # read from the log, independently of what the texts say
-    if evidence and not (matched_by_seeds or matched_greedy):
+    if evidence and not matched_by_seeds:
         return {**out, "verdict": "sampled-ignored", "first_token_only": True, "card_sentence": CARD_SENTENCE_FIRST_TOKEN,
                 "sentence": ("The two seeds gave different text, but the drafter's own session line is in the log of each sampled request, so the "
                              "DFlash2 speculative loop served them. That loop samples the first token and verifies every later token by argmax, so "

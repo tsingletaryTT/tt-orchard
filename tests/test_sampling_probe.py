@@ -165,7 +165,7 @@ def test_a_hot_request_that_matches_greedy_is_not_evidence_a_peaked_distribution
         assert s["verdict"] == "sampled-matches-greedy", (a, b, s["verdict"])
 
 
-@pytest.mark.parametrize("a, b", [(STORY, STORY), (GREEDY, OTHER), (OTHER, GREEDY), (GREEDY, GREEDY)])
+@pytest.mark.parametrize("a, b", [(STORY, STORY), (GREEDY, GREEDY)])
 def test_matching_text_with_the_drafters_session_line_on_both_sampled_requests_is_ignored_sampling(a, b):
     s = sp.summarize(with_session_lines(record(a=entry(text=a), b=entry(text=b))))
     assert s["verdict"] == "sampled-ignored", (a, b, s["verdict"])
@@ -585,3 +585,24 @@ def test_a_run_with_no_record_has_no_card_sentence():
 
 def test_a_greedy_reply_of_a_few_tokens_has_no_speed():
     assert sp.summarize(record(greedy=entry(tokens=4, seconds=0.001)))["greedy"]["tokens_per_s"] is None
+
+
+@pytest.mark.parametrize("a, b", [(GREEDY, OTHER), (OTHER, GREEDY), (STORY, OTHER), (GREEDY, STORY)])
+def test_with_the_session_lines_and_different_sampled_replies_first_token_only_is_set_whatever_greedy_says(a, b):
+    """One sampled reply may equal the greedy reply and the other differ (a first token that matched greedy, and one that did not)."""
+    s = sp.summarize(with_session_lines(record(a=entry(text=a), b=entry(text=b))))
+    assert s["verdict"] == "sampled-ignored" and s["first_token_only"] is True, (a, b)
+    assert s["card_sentence"] == sp.CARD_SENTENCE_FIRST_TOKEN and "only the first token" in s["sentence"]
+
+
+def test_equal_sampled_replies_are_still_not_first_token_only_even_when_they_equal_the_greedy_reply():
+    for text in (STORY, GREEDY):
+        s = sp.summarize(with_session_lines(record(a=entry(text=text), b=entry(text=text))))
+        assert s["verdict"] == "sampled-ignored" and s["first_token_only"] is False
+        assert s["card_sentence"] == sp.CARD_SENTENCES["sampled-ignored"]
+
+
+def test_the_mixed_match_without_the_session_lines_is_only_a_suspected_match():
+    for a, b in ((GREEDY, OTHER), (OTHER, GREEDY)):
+        s = sp.summarize(record(a=entry(text=a), b=entry(text=b)))
+        assert s["verdict"] == "sampled-matches-greedy" and s["first_token_only"] is False
