@@ -257,3 +257,14 @@ def test_speeds_are_rounded_to_one_decimal_place_in_the_rows(world):
     put_probe(world, record(greedy=entry(seconds=1.995), a=entry(text=STORY, seconds=2.0), b=entry(text=OTHER, seconds=2.0)))
     _, _, card = card_of(world)
     assert rows(card)[SPEED_ROWS[0]][0] == "48.1 tokens/s"
+
+
+@pytest.mark.parametrize("name", ["greedy", "sampled_a", "sampled_b"])
+@pytest.mark.parametrize("bad", ["invalid", [], 5, None])
+def test_a_non_object_request_entry_gives_no_summary_and_no_numbers_and_does_not_raise(world, name, bad):
+    rec = record()
+    rec["requests"][name] = bad
+    put_probe(world, rec)
+    assert package.sampling_summary(world["run"]) is None
+    assert package.sampling_numbers(world["run"]) == ()
+    assert package.sampling_summary_problems(world["run"]) == []

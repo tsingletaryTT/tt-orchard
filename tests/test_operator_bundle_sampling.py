@@ -137,3 +137,16 @@ def test_stage_4_rows_come_with_the_larger_chip_count_first(tmp_path):
     block = section(results(run), HEAD)
     order = [block.index(f"| stage 4, {n} chips") for n in (4, 2, 1)]
     assert order == sorted(order)
+
+
+import pytest  # noqa: E402
+
+
+@pytest.mark.parametrize("name", ["greedy", "sampled_a", "sampled_b"])
+@pytest.mark.parametrize("bad", ["invalid", [], 5, None])
+def test_a_non_object_request_entry_does_not_stop_the_bundle_and_is_shown_as_malformed(tmp_path, name, bad):
+    run = make_run(tmp_path)
+    rec = record()
+    rec["requests"][name] = bad
+    put(run, "stages/2/evidence", rec)
+    assert "malformed" in section(results(run), HEAD)

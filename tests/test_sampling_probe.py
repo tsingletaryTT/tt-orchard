@@ -251,6 +251,68 @@ def test_the_recorded_request_parameters_must_say_what_the_probe_claims(name, pa
     assert sp.summarize(rec)["verdict"] == "malformed"
 
 
+BAD_ENTRIES = ["invalid", [], [1], 5, 1.5, None, True]
+
+
+@pytest.mark.parametrize("name", ["greedy", "sampled_a", "sampled_b"])
+@pytest.mark.parametrize("bad", BAD_ENTRIES)
+def test_a_request_entry_that_is_not_an_object_gives_reasons_and_never_raises(name, bad):
+    rec = record()
+    rec["requests"][name] = bad
+    reasons = sp.problems(rec)
+    assert any(name in r for r in reasons), reasons
+    s = sp.summarize(rec)
+    assert s["verdict"] == "malformed" and s["card_sentence"] is None
+
+
+@pytest.mark.parametrize("bad", BAD_ENTRIES)
+def test_a_params_value_that_is_not_an_object_never_raises_in_the_seed_check(bad):
+    rec = record()
+    rec["requests"]["sampled_a"]["params"] = bad
+    rec["requests"]["sampled_b"]["params"] = bad
+    assert any("params" in r for r in sp.problems(rec))
+
+
+def test_both_sampled_entries_broken_in_different_ways_still_reports_both():
+    rec = record()
+    rec["requests"]["sampled_a"] = "invalid"
+    rec["requests"]["sampled_b"] = None
+    reasons = sp.problems(rec)
+    assert any("sampled_a" in r for r in reasons) and any("sampled_b" in r for r in reasons)
+
+
+@pytest.mark.parametrize("name, params", [
+    ("sampled_b", {"temperature": 0.5, "top_p": 0.9, "seed": 4321}),                              # another temperature
+    ("sampled_b", {"temperature": 1.0, "top_p": 0.8, "seed": 4321}),                              # another top-p
+    ("sampled_b", {"temperature": 1.0, "top_p": 0.9, "seed": 4321, "prompt": "something else"}),   # an extra key
+    ("sampled_a", {"temperature": 1.0, "top_p": 0.9, "seed": 1234, "max_tokens": 1}),
+    ("sampled_a", {"temperature": 1.0, "top_p": 0.9, "seed": 1234, "top_k": 5}),
+    ("sampled_a", {"temperature": 1.0, "top_p": 0.9}),                                            # no seed
+])
+def test_the_two_sampled_requests_may_differ_only_in_seed_and_carry_no_extra_keys(name, params):
+    rec = record()
+    rec["requests"][name]["params"] = params
+    reasons = sp.problems(rec)
+    assert any("params" in r or "seed" in r for r in reasons), reasons
+    assert sp.summarize(rec)["verdict"] == "malformed"
+
+
+@pytest.mark.parametrize("extra", [{"prompt": "x"}, {"top_k": 5}, {"max_tokens": 1}, {"presence_penalty": 0.5}])
+def test_an_extra_key_present_in_both_sampled_requests_is_still_refused(extra):
+    rec = record()
+    for n, seed in (("sampled_a", 1234), ("sampled_b", 4321)):
+        rec["requests"][n]["params"] = {"temperature": 1.0, "top_p": 0.9, "seed": seed, **extra}
+    reasons = sp.problems(rec)
+    assert any(next(iter(extra)) in r for r in reasons), reasons
+
+
+def test_both_sampled_requests_with_the_same_other_parameters_and_different_seeds_are_fine():
+    rec = record()
+    for n, seed in (("sampled_a", 7), ("sampled_b", 8)):
+        rec["requests"][n]["params"] = {"temperature": 0.7, "top_p": 0.5, "seed": seed}
+    assert sp.problems(rec) == []
+
+
 def test_the_real_probe_parameters_are_valid():
     assert sp.problems(record()) == []
 

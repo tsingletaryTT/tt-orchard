@@ -120,7 +120,8 @@ class CardFacts:
     stage_2_without_graft: bool = False   # stage 2 and 4 served without the graft (the drafter off, host sampling)
     graft_decision: str | None = None     # "graft" or "safe" when stage 2's graft trial ran and decided (orchard/graft_trial.py)
     use: UseFacts | None = None           # what the model is for and how to call it, read from its own files (orchard/card_use.py)
-    acceptance_measured: bool = False     # the Numbers table has the drafter's acceptance rate (stage 2's graft trial measured it)
+    acceptance_measured: bool = False     # the Numbers table has the drafter's acceptance rate (stage 2's graft trial or the sampling probe measured it)
+    acceptance_from: str = "graft trial"  # which step measured it, for the sentences: "graft trial", "sampling probe" or "graft trial and sampling probe"
     vocab: tuple[int, int] | None = None  # (this model's vocabulary size, the nearest model's) when the model is a vocabulary trim
     sampling_decision: dict | None = None   # stage 2's sampling decision (orchard/sampling_choice.py); only the required profile's card states it
     sampling_first_verdict: str | None = None   # the probe's verdict for the configuration stage 2 first served (the bullet words only what it established)
@@ -257,7 +258,7 @@ def render_card(f: CardFacts) -> str:
     if f.sampling_from_base:
         lines.append(f"- {sampling_disclosures(f.model_id, f.nearest_model)[0]}")
     if f.drafter:
-        where = ("is in the table below (graft trial)" if f.acceptance_measured else "is listed under Not measured")
+        where = (f"is in the table below ({f.acceptance_from})" if f.acceptance_measured else "is listed under Not measured")
         lines.append(f"- Speculative decoding uses the drafter {f.drafter}, which was trained on "
                      f"{f.nearest_model}. Its acceptance rate on this model {where}.")
     if f.graft:
@@ -328,7 +329,7 @@ def render_card(f: CardFacts) -> str:
               "by this bundle.",
               "Accuracy was compared with the CPU reference on one short fixed prompt only."]
     if f.graft:
-        rate = ("The share of the drafter's guesses that are accepted on this model is in the table above (graft trial)."
+        rate = (f"The share of the drafter's guesses that are accepted on this model is in the table above ({f.acceptance_from})."
                 if f.acceptance_measured else
                 "How often the drafter's guesses are accepted on this model was not measured.")
         limits.append(f"The drafter's MTP head is the nearest model's ({f.nearest_model}), added to {f.model_id} at "
@@ -606,9 +607,11 @@ def use_problems(card: str, use: UseFacts | None) -> list[str]:
 def card_problems(card: str, *, license_id: str, run_dir, sidecars=(), base_files=(), reported=(), reported_source="", model_id="",
                   nearest_model="", graft: bool = False, graft_decision: str | None = None, trial_rows=(),
                   use: UseFacts | None = None, vocab: tuple[int, int] | None = None, sampling: dict | None = None,
-                  sampling_expected=(), sampling_decision: dict | None = None, drafter_off_by_sampling: bool = False,
-                  sampling_first_verdict: str | None = None) -> list[str]:
+                  sampling_expected=(), acceptance_measured: bool = False, sampling_decision: dict | None = None,
+                  drafter_off_by_sampling: bool = False, sampling_first_verdict: str | None = None) -> list[str]:
     problems = use_problems(card, use)
+    if acceptance_measured and "acceptance rate" in (card.split("## Not measured", 1)[1].split("\n## ", 1)[0] if "## Not measured" in card else ""):
+        problems.append("the Numbers table has the drafter's acceptance rate, so the card must not list it under Not measured")
     if sampling_decision:
         body, _ = _section(card, SAMPLING_HEAD)
         if " ".join(sampling_choice.card_sentence(sampling_decision).split()) not in " ".join(body.split()):

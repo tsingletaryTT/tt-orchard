@@ -58,3 +58,15 @@ def test_the_stage_4_gate_reads_the_probe_too_and_names_the_configuration(tmp_pa
     assert not g.ok
     assert any(r.startswith("the 4-chip configuration: ") and "sampling_probe" in r for r in g.reasons)
     assert not any(r.startswith("the 2-chip configuration: ") and "sampling_probe" in r for r in g.reasons)
+
+
+import pytest  # noqa: E402
+
+
+@pytest.mark.parametrize("name", ["greedy", "sampled_a", "sampled_b"])
+@pytest.mark.parametrize("bad", ["invalid", [], 5, None])
+def test_a_non_object_request_entry_fails_the_gate_with_a_reason_and_does_not_raise(tmp_path, name, bad):
+    rec = copy.deepcopy(record())
+    rec["requests"][name] = bad
+    g = stage2(tmp_path, with_probe(rec))
+    assert not g.ok and any("sampling_probe" in r and name in r for r in g.reasons), g.reasons
