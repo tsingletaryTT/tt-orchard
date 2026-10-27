@@ -74,3 +74,13 @@ written with placeholders (`<HF_CACHE>`, `<TT_METAL>`).
 - What `svd_bases.pt` is used for.
 - Whether serving the fine-tune needs anything from the base's `svd_bases.pt`. The README's inference example loads the fine-tune alone.
 - How much of the diffusion transformer and autoencoder `tt_dit` layers can be reused.
+
+## Stage 0 on the pair: not run yet
+
+On 2026-10-28 the base's snapshot in the cache held only its small files (config, card, licences); `model.safetensors` and `svd_bases.pt` were still `.incomplete`
+blobs, so the operator's download was running. The stage 0 comparison needs the base's weight header, so the class and path for the pair are not recorded here.
+The harness never fetches a gated model. When the download is complete, run the template on the pair (the template reads headers, configs and a few KB of values)
+and add the class, path and reasons to this section.
+
+Built and tested without the base: facts (form, serving, modality), the audio branch of the stage 0 template (58 tests on fake snapshots, 55 mutations, one
+equivalent survivor: skipping the value sample when a header problem exists changes nothing because the sampler tolerates unreadable files).
