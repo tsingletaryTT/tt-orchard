@@ -114,6 +114,25 @@ def test_equal_seeds_texts_are_ignored_even_when_the_greedy_speed_is_missing():
     assert sp.summarize(rec)["verdict"] == "sampled-ignored"
 
 
+def test_the_card_sentence_for_ignored_sampling_is_true_for_both_ways_it_is_found():
+    """One sampled reply equal to the greedy reply and the other different is ignored sampling, and the card must not say the two sampled replies were
+    identical. The sentence is the same for both branches, so it names both."""
+    by_seeds = sp.summarize(record(a=entry(text=STORY), b=entry(text=STORY)))
+    by_greedy = sp.summarize(record(a=entry(text=GREEDY), b=entry(text=OTHER)))
+    assert by_seeds["verdict"] == by_greedy["verdict"] == "sampled-ignored"
+    assert by_seeds["card_sentence"] == by_greedy["card_sentence"]
+    text = by_greedy["card_sentence"]
+    assert "greedy text" in text and "different seeds" in text and "not applied" in text
+    assert "two requests" not in text and "the two sampled replies" not in text
+
+
+def test_the_detailed_sentence_names_the_branch_that_was_found():
+    by_seeds = sp.summarize(record(a=entry(text=STORY), b=entry(text=STORY)))["sentence"]
+    by_greedy = sp.summarize(record(a=entry(text=GREEDY), b=entry(text=OTHER)))["sentence"]
+    assert "differ only in seed returned the same text" in by_seeds and "greedy text" not in by_seeds
+    assert "returned the greedy text" in by_greedy and "differ only in seed" not in by_greedy
+
+
 def test_ignored_wins_over_slower():
     s = sp.summarize(record(greedy=entry(seconds=1.0), a=entry(text=STORY, seconds=9.0), b=entry(text=STORY, seconds=9.0)))
     assert s["verdict"] == "sampled-ignored"

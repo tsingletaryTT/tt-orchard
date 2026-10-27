@@ -132,8 +132,8 @@ CARD_SENTENCES = {
     "sampled-incoherent": "The server accepted a sampled request, and its text repeats itself or is unreadable.",
     "inconclusive": ("The probe could not compare the speed of greedy and sampled requests: a request had no usable token count or timing, "
                      "a reply was too short, or a reply was empty."),
-    "sampled-ignored": ("The server accepted sampled requests, but sampling was not applied: two requests that differ only in seed returned the "
-                        "same text, so decoding is greedy."),
+    "sampled-ignored": ("The server accepted sampled requests, but sampling was not applied: a sampled request returned the greedy text, or "
+                        "requests with different seeds returned the same text, so decoding is greedy."),
     "sampled-slower": "Sampled requests decoded more slowly than greedy requests. Both speeds are in the table above.",
     "sampled-full-speed": ("Sampled requests (temperature above 0, top-p below 1, with a seed) were served and two seeds gave different text. "
                            "Their speed is in the table above next to the speed of greedy requests."),
