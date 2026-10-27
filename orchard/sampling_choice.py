@@ -137,6 +137,16 @@ def speed(side) -> float | None:
     return None
 
 
+def speed_basis(side) -> str | None:
+    """Which request `speed` read: "sampled" (the sampled requests' mean), "greedy" (no sampled speed exists, for example a refused sampled request),
+    or None (no speed). The decision records it so a reader knows a figure is a fallback."""
+    for key, name in (("sampled_tok_s", "sampled"), ("greedy_tok_s", "greedy")):
+        v = side.get(key) if isinstance(side, dict) else None
+        if _number(v) and v > 0:
+            return name
+    return None
+
+
 def needs_variant(need_: dict, current: dict) -> bool:
     """Can the rule not be settled without serving the drafter-off variant? Sampling is needed, the served configuration has the drafter on,
     and its probe does not show that sampling is applied."""
@@ -159,7 +169,8 @@ def decide(need_: dict, current: dict, variant: dict | None = None, *, variant_n
                "served_tok_s": cur_speed, "served_greedy_tok_s": current.get("greedy_tok_s"),
                "variant_served": variant.get("served") if variant else None,
                "variant_verdict": variant.get("verdict") if variant else None,
-               "variant_tok_s": var_speed, "variant_greedy_tok_s": variant.get("greedy_tok_s") if variant else None}
+               "variant_tok_s": var_speed, "variant_greedy_tok_s": variant.get("greedy_tok_s") if variant else None,
+               "served_speed_basis": speed_basis(current), "variant_speed_basis": speed_basis(variant) if variant else None}
 
     def out(choice, flag, reason):
         return {"choice": choice, "flag": flag, "reason": reason, "numbers": numbers, "thresholds": {"min_tok_s": floor},

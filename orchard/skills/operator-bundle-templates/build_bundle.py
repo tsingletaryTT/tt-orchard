@@ -642,9 +642,18 @@ def sampling_choice_section(run: Run, redact: Redactor) -> list[str]:
         lines += ["", f"Flag: `{redact(str(d['flag']))}`. " + SAMPLING_FLAG_RISKS.get(d["flag"], "")]
     where = ev(["stages/2/sampling-decision.json"])
     label = lambda *keys: "measured" if any(is_number(nums.get(k)) for k in keys) else "TODO"        # noqa: E731
+
+    def used(speed_key, basis_key):
+        """The speed the rule used, with which request it came from. A greedy figure is a fallback (no usable sampled speed) and is named as one."""
+        text = fmt(nums.get(speed_key))
+        if not is_number(nums.get(speed_key)):
+            return text
+        basis = nums.get(basis_key)
+        return text + {"sampled": " (sampled requests)", "greedy": " (greedy request; no sampled speed)"}.get(basis, " (basis not recorded)")
     lines += ["", "| Measure | Served configuration | Drafter-off variant | Label | Evidence |", "|---|---|---|---|---|",
               f"| Probe verdict | {redact(str(nums.get('served_verdict')))} | {redact(str(nums.get('variant_verdict')))} | recorded | {where} |",
-              f"| Decode speed of a sampled request (tokens/s) | {fmt(nums.get('served_tok_s'))} | {fmt(nums.get('variant_tok_s'))} | "
+              f"| Decode speed used for the decision (tokens/s) | {used('served_tok_s', 'served_speed_basis')} | "
+              f"{used('variant_tok_s', 'variant_speed_basis')} | "
               f"{label('served_tok_s', 'variant_tok_s')} | {where} |",
               f"| Usability floor (tokens/s) | {fmt(floor)} | {fmt(floor)} | choice | `orchard/defaults.py` |"]
     return lines
