@@ -658,3 +658,24 @@ def test_the_last_usage_key_wins_over_an_earlier_nested_one(root, monkeypatch):
     write_log(root, "log/run.jsonl", [line])
     s = vs.scan(root)
     assert (s["turns"], s["prompt_tokens"], s["completion_tokens"]) == (1, 900, 90)
+
+
+
+# ---- review fix 2 (second round): the source counts add up to the turn count ------------------------------------------------
+
+def test_sources_add_up_to_the_turns_for_short_recovered_long_and_benchmark_records(root, monkeypatch):
+    monkeypatch.setattr(vs, "MAX_LINE_BYTES", 2000)
+    write_log(root, "a/log/run.jsonl", [turn(1, 10, 1), turn(2, 20, 2)])                        # short agent turns
+    write_log(root, "b/log/run.jsonl", [_big()])                                                # a recovered long turn
+    write_log(root, "c/requests.jsonl", [req(5, 1), req(6, 1)])                                 # benchmark requests
+    s = vs.scan(root)
+    assert s["turns"] == 5
+    assert s["sources"] == {"agent": 3, "benchmark": 2}
+    assert sum(s["sources"].values()) == s["turns"]
+
+
+def test_a_recovered_long_turn_alone_counts_as_one_agent_source(root, monkeypatch):
+    monkeypatch.setattr(vs, "MAX_LINE_BYTES", 2000)
+    write_log(root, "log/run.jsonl", [_big()])
+    s = vs.scan(root)
+    assert s["turns"] == 1 and s["sources"] == {"agent": 1, "benchmark": 0}

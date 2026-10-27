@@ -374,6 +374,7 @@ def scan(root) -> dict:
                 out["turns"] += 1
                 out["prompt_tokens"] += got[0]
                 out["completion_tokens"] += got[1]
+                out["sources"]["agent"] += 1
                 continue
             if _is_helper(payload):
                 skipped["helper_turns"] += 1
