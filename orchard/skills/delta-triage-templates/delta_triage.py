@@ -2468,10 +2468,498 @@ def reported_draft(model_dir: Path, model_id: str, ev) -> list[dict]:
                             if left else ""))}]
 
 
+# ---- audio models in the stable-audio-tools layout (plan docs/superpowers/plans/2026-10-28-audio-bringup.md, task A2) ----------------
+#
+# A model of this layout has no top-level config.json. Its architecture is in `model_config.json`, its weights are one top-level
+# safetensors file that holds several components under name prefixes (a diffusion transformer, an autoencoder, a conditioner), and a
+# text encoder may sit in a subdirectory of its own. The text rules above (config.json keys such as hidden_size) do not apply, so
+# `main` hands such a pair to `audio_main`. The comparison reads configs and tensor headers only, and a few values for the copy check.
+# Every read is bounded. A config or header that does not parse leaves the class `unknown`.
+
+AUDIO_CONFIG = "model_config.json"
+AUDIO_JSON_MAX = 1 << 20                  # a config larger than this is not read
+AUDIO_HEADER_MAX = 8 << 20                # a safetensors header larger than this is refused (the research code uses the same bound)
+AUDIO_ROLES = {"model.model": "diffusion transformer", "pretransform.model": "autoencoder", "conditioner.conditioners": "conditioner"}
+AUDIO_POINTER_KEYS = ("repo_id",)         # a config leaf that says where to load from; naming another repository is not an architecture change
+# Bytes per element of the safetensors dtypes this script knows. A tensor of one of these must occupy exactly shape-product times that many
+# bytes; a dtype not listed (a packed or newer format) is checked for a valid range only.
+AUDIO_DTYPE_BYTES = {"F64": 8, "F32": 4, "F16": 2, "BF16": 2, "I64": 8, "I32": 4, "I16": 2, "I8": 1, "U64": 8, "U32": 4, "U16": 2, "U8": 1,
+                     "BOOL": 1, "F8_E4M3": 1, "F8_E5M2": 1}
+AUDIO_MAX_LISTED = 50                    # differences listed per kind in the record (the counts are exact)
+
+
+AUDIO_MAX_DEPTH = 32                      # containers nested deeper than this are refused
+AUDIO_MAX_INT_DIGITS = 30                 # an integer longer than this is refused
+
+
+def _strict_pairs(pairs):
+    """A JSON object with a repeated key is refused: json.loads would keep the last value and hide the first."""
+    out = {}
+    for key, value in pairs:
+        if key in out:
+            raise ValueError(f"duplicate key {key!r}")
+        out[key] = value
+    return out
+
+
+def _no_constant(name):
+    raise ValueError(f"the non-finite number {name} is not allowed")
+
+
+def _strict_float(text):
+    value = float(text)
+    if not math.isfinite(value):
+        raise ValueError(f"the number {text} is not finite")
+    return value
+
+
+def _strict_int(text):
+    if len(text.lstrip("-")) > AUDIO_MAX_INT_DIGITS:
+        raise ValueError(f"an integer of more than {AUDIO_MAX_INT_DIGITS} digits is not allowed")
+    return int(text)
+
+
+def _depth(obj) -> int:
+    """The nesting depth of parsed JSON, counted without recursion."""
+    deepest, stack = 0, [(obj, 1)]
+    while stack:
+        item, d = stack.pop()
+        if isinstance(item, dict):
+            children = item.values()
+        elif isinstance(item, list):
+            children = item
+        else:
+            continue
+        deepest = max(deepest, d)
+        stack.extend((c, d + 1) for c in children)
+    return deepest
+
+
+def audio_loads(text: str):
+    """json.loads with the limits above: no repeated key, no NaN or infinity, no huge integer, no deep nesting. Raises ValueError."""
+    try:
+        data = json.loads(text, object_pairs_hook=_strict_pairs, parse_constant=_no_constant, parse_float=_strict_float, parse_int=_strict_int)
+    except RecursionError:
+        raise ValueError("nested too deeply") from None
+    if _depth(data) > AUDIO_MAX_DEPTH:
+        raise ValueError(f"nested more than {AUDIO_MAX_DEPTH} levels deep")
+    return data
+
+
+def _audio_json(path: Path):
+    """(object, error): a JSON file of at most AUDIO_JSON_MAX bytes. A missing, oversized, unreadable or non-object file is an error, and so is
+    one with a repeated key, a non-finite or huge number, or deep nesting (audio_loads)."""
+    try:
+        if path.stat().st_size > AUDIO_JSON_MAX:
+            return None, f"{path.name} is larger than {AUDIO_JSON_MAX} bytes"
+        data = audio_loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return None, f"{path.name} is not readable JSON: {exc}"
+    return (data, None) if isinstance(data, dict) else (None, f"{path.name} is not a JSON object")
+
+
+def detect_audio(snapshot: Path) -> bool:
+    """True for a snapshot in the stable-audio-tools layout: a readable `model_config.json` with a string `model_type` and a `model`
+    object, no top-level config.json, and at least one top-level safetensors file."""
+    if (snapshot / "config.json").exists():
+        return False
+    cfg, err = _audio_json(snapshot / AUDIO_CONFIG)
+    if err or not isinstance(cfg.get("model_type"), str) or not isinstance(cfg.get("model"), dict):
+        return False
+    return any(p.is_file() and p.name.endswith(".safetensors") for p in snapshot.iterdir())
+
+
+ENTRY_KEYS = {"dtype", "shape", "data_offsets"}
+
+
+def audio_header(path: Path) -> dict:
+    """{name: {"dtype", "shape", "shard"}} for one safetensors file, header only. The header is refused when it is over AUDIO_HEADER_MAX, repeats a
+    name or any key, holds a non-finite number, has `__metadata__` that is not an object of text values, or has an entry with other keys than
+    dtype, shape and data_offsets, a dtype that is not text, a shape that is not a list of non-negative whole numbers, or a byte range that is
+    not two whole numbers with 0 <= start <= end <= the data section. For a dtype this script knows, the range must be exactly the shape product
+    times the element size. The non-empty ranges must tile the data section: no overlap (two tensors cannot share bytes), no gap (bytes no
+    tensor claims could hide data) and no bytes left over after the last one."""
+    with open(path, "rb") as f:
+        raw = f.read(8)
+        if len(raw) != 8:
+            raise ValueError("shorter than 8 bytes")
+        length = struct.unpack("<Q", raw)[0]
+        if length > AUDIO_HEADER_MAX:
+            raise ValueError(f"header length {length} is larger than {AUDIO_HEADER_MAX}")
+        blob = f.read(length)
+    if len(blob) != length:
+        raise ValueError(f"header is cut short ({len(blob)} of {length} bytes)")
+    header = audio_loads(blob.decode("utf-8"))
+    if not isinstance(header, dict):
+        raise ValueError("header is not a JSON object")
+    data_size = path.stat().st_size - 8 - length
+    meta = header.get("__metadata__", {})
+    if not isinstance(meta, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in meta.items()):
+        raise ValueError("__metadata__ is not an object of text values")
+    out, spans = {}, []
+    for name, v in header.items():
+        if name == "__metadata__":
+            continue
+        shape = v.get("shape") if isinstance(v, dict) else None
+        offsets = v.get("data_offsets") if isinstance(v, dict) else None
+        if (not isinstance(v, dict) or set(v) != ENTRY_KEYS
+                or not isinstance(shape, list) or not all(isinstance(d, int) and not isinstance(d, bool) and d >= 0 for d in shape)
+                or not isinstance(v.get("dtype"), str)
+                or not isinstance(offsets, list) or len(offsets) != 2
+                or not all(isinstance(o, int) and not isinstance(o, bool) for o in offsets)
+                or not 0 <= offsets[0] <= offsets[1] <= data_size):
+            raise ValueError(f"tensor {name} has a malformed entry")
+        size = AUDIO_DTYPE_BYTES.get(v["dtype"])
+        if size is not None:
+            expected = _numel(shape) * size
+            if offsets[1] - offsets[0] != expected:
+                raise ValueError(f"tensor {name} has a malformed entry: its byte span is {offsets[1] - offsets[0]}, but shape {shape} "
+                                 f"of {v['dtype']} needs {expected}")
+        if offsets[1] > offsets[0]:
+            spans.append((offsets[0], offsets[1], name))
+        out[name] = {"dtype": v["dtype"], "shape": shape, "shard": path.name}
+    spans.sort()
+    cursor = 0
+    for start, end, name in spans:
+        if start < cursor:
+            raise ValueError(f"tensor {name} has a byte range [{start}, {end}) that overlaps the one before it (a tensor cannot share bytes)")
+        if start > cursor:
+            raise ValueError(f"the data section has {start - cursor} bytes before tensor {name} that no tensor claims (they could hide data)")
+        cursor = end
+    if cursor != data_size:
+        raise ValueError(f"the data section has {data_size - cursor} bytes after the last tensor that no tensor claims (they could hide data)")
+    return out
+
+
+def audio_tensors(directory: Path) -> tuple[dict, list[str]]:
+    """({name: {"dtype", "shape", "shard"}}, errors) over the top-level safetensors files of `directory`. A tensor name that appears in two
+    files is an error (the second would otherwise replace the first and could hide an incompatible shape); the first one is kept."""
+    tensors, errors = {}, []
+    for p in sorted(directory.iterdir()):
+        if p.is_file() and p.name.endswith(".safetensors"):
+            try:
+                header = audio_header(p)
+            except (OSError, ValueError, UnicodeDecodeError) as exc:
+                errors.append(f"{p.name}: {exc}")
+                continue
+            for name, info in header.items():
+                if name in tensors:
+                    errors.append(f"tensor {name} appears in both {tensors[name]['shard']} and {p.name}")
+                else:
+                    tensors[name] = info
+    return tensors, errors
+
+
+def _numel(shape: list) -> int:
+    n = 1
+    for d in shape:
+        n *= d
+    return n
+
+
+def audio_components(tensors: dict) -> list[dict]:
+    """The tensors grouped by their first two name parts: count, parameters, dtypes and a role when the prefix is a known one."""
+    out: dict[str, dict] = {}
+    for name, t in tensors.items():
+        prefix = ".".join(name.split(".")[:2])
+        c = out.setdefault(prefix, {"prefix": prefix, "role": AUDIO_ROLES.get(prefix), "tensors": 0, "parameters": 0, "dtypes": {}})
+        c["tensors"] += 1
+        c["parameters"] += _numel(t["shape"])
+        c["dtypes"][t["dtype"]] = c["dtypes"].get(t["dtype"], 0) + 1
+    return [out[k] for k in sorted(out)]
+
+
+_MISSING = object()
+
+
+def _audio_flatten(obj, prefix: str = "") -> dict:
+    """{dotted path: value}, with an empty dict or list kept as a leaf of its own, so a key whose value is `{}` or `[]` is still a key."""
+    out = {}
+    if isinstance(obj, dict) and obj:
+        for k, v in obj.items():
+            out.update(_audio_flatten(v, f"{prefix}.{k}" if prefix else str(k)))
+    elif isinstance(obj, list) and obj:
+        for i, v in enumerate(obj):
+            out.update(_audio_flatten(v, f"{prefix}[{i}]"))
+    else:
+        out[prefix] = obj
+    return out
+
+
+def _same_json(a, b) -> bool:
+    """Equal in JSON terms: the same type and value (Python's 1 == True == 1.0 is not enough), and empty containers of one kind."""
+    return type(a) is type(b) and a == b          # the _MISSING sentinel has a type no JSON value has
+
+
+def audio_field_diffs(a, b) -> dict:
+    """{dotted path: {"model": value, "base": value}} for every leaf that differs, with `<absent>` for a missing key. Unlike field_diffs it keeps
+    empty containers (a key whose value is {} is not the same as a missing key) and tells True from 1 from 1.0."""
+    fa, fb = _audio_flatten(a), _audio_flatten(b)
+    out = {}
+    for k in sorted(set(fa) | set(fb)):
+        x, y = fa.get(k, _MISSING), fb.get(k, _MISSING)
+        if not _same_json(x, y):
+            out[k] = {"model": ABSENT if x is _MISSING else x, "base": ABSENT if y is _MISSING else y}
+    return out
+
+
+def compare_audio_configs(mcfg: dict, bcfg: dict) -> dict:
+    """The two model_config.json files. Differences in the `model` section and in the top-level keys (sample rate, channels, sample size,
+    model type) are architecture differences. A `repo_id` leaf is a pointer. The `training` section is listed and does not count."""
+    def rest(c):
+        return {k: v for k, v in c.items() if k not in ("model", "training")}
+    top = audio_field_diffs(rest(mcfg), rest(bcfg))
+    model = {f"model.{k}": v for k, v in audio_field_diffs(mcfg.get("model"), bcfg.get("model")).items()}
+    training = {f"training.{k}": v for k, v in audio_field_diffs(mcfg.get("training", {}), bcfg.get("training", {})).items()}
+    pointers = {k: v for k, v in model.items() if k.rsplit(".", 1)[-1] in AUDIO_POINTER_KEYS}
+    return {"top_level_differences": top,
+            "model_differences": {k: v for k, v in model.items() if k not in pointers},
+            "pointer_differences": pointers, "training_differences": training}
+
+
+def compare_audio_tensors(mt: dict, bt: dict) -> dict:
+    only_m, only_b = sorted(set(mt) - set(bt)), sorted(set(bt) - set(mt))
+    shape, dtype = [], []
+    for name in sorted(set(mt) & set(bt)):
+        m, b = mt[name], bt[name]
+        if m["shape"] != b["shape"]:
+            shape.append({"name": name, "model": m["shape"], "base": b["shape"]})
+        elif m["dtype"] != b["dtype"]:
+            dtype.append({"name": name, "model": m["dtype"], "base": b["dtype"], "tolerated": _dtype_difference_tolerated(m, b)})
+    return {"model_tensors": len(mt), "base_tensors": len(bt), "common": len(set(mt) & set(bt)), "only_in_model": only_m,
+            "only_in_base": only_b, "shape_differences": shape, "dtype_differences": dtype}
+
+
+def audio_text_encoders(mcfg: dict, bcfg: dict, model_dir: Path, base_dir: Path, model_repo: str, base_repo: str) -> tuple[list[dict], list[str]]:
+    """One row per conditioner that loads from a subdirectory. When both configs point at their own repository the two subdirectories
+    are compared (config.json, tensor names, shapes and dtypes; the weights may differ). A pointer to another repository is not
+    compared: its files are not in either snapshot. Returns (rows, problems): a conditioning section that is not an object, a `configs` that is
+    not a list, an entry that is not an object, a `config` that is not an object, or a `subfolder` that is not text is a problem (class unknown)."""
+    problems: list[str] = []
+
+    def subs(cfg, who):
+        out = {}
+        cond = (cfg.get("model") or {}).get("conditioning")
+        if cond is None:
+            return out
+        if not isinstance(cond, dict):
+            problems.append(f"{who} model_config.json model.conditioning is not an object")
+            return out
+        confs = cond.get("configs")
+        if confs is None:
+            return out
+        if not isinstance(confs, list):
+            problems.append(f"{who} model_config.json model.conditioning.configs is not a list")
+            return out
+        for i, c in enumerate(confs):
+            if not isinstance(c, dict):
+                problems.append(f"{who} model_config.json model.conditioning.configs[{i}] is not an object")
+                continue
+            inner = c.get("config")
+            if inner is not None and not isinstance(inner, dict):
+                problems.append(f"{who} model_config.json model.conditioning.configs[{i}].config is not an object")
+                continue
+            sub = inner.get("subfolder") if inner else None
+            if sub is not None and not isinstance(sub, str):
+                problems.append(f"{who} model_config.json model.conditioning.configs[{i}].config.subfolder is not text")
+            elif isinstance(sub, str) and sub and not os.path.isabs(sub) and ".." not in Path(sub).parts:
+                out[sub] = inner.get("repo_id")
+        return out
+    ms, bs = subs(mcfg, "new model"), subs(bcfg, "nearest model")
+    rows = []
+    for sub in sorted(set(ms) | set(bs)):
+        row = {"subfolder": sub, "compared": False, "equal": None, "problems": [], "differences": []}
+        rows.append(row)
+        if sub not in ms or sub not in bs:
+            row["differences"].append(f"{sub} is named by the {'nearest' if sub in bs else 'new'} model's config only")
+            continue
+        if ms[sub] not in (model_repo, base_repo) or bs[sub] not in (model_repo, base_repo):    # a repo_id naming either of the two is local
+            row["note"] = f"loads from another repository ({ms[sub]!r} and {bs[sub]!r}); not in either snapshot, so not compared"
+            continue
+        row["compared"] = True
+        mdir, bdir = model_dir / sub, base_dir / sub
+        mc, merr = _audio_json(mdir / "config.json")
+        bc, berr = _audio_json(bdir / "config.json")
+        row["problems"] += [f"{sub}: {e}" for e in (merr, berr) if e]
+        mt, e1 = audio_tensors(mdir) if mdir.is_dir() else ({}, [f"{sub} is not a directory in the new model"])
+        bt, e2 = audio_tensors(bdir) if bdir.is_dir() else ({}, [f"{sub} is not a directory in the nearest model"])
+        row["problems"] += [f"{sub}: {e}" for e in e1 + e2]
+        if not mt or not bt:
+            row["problems"].append(f"{sub} holds no readable safetensors file in " + ("the new model" if not mt else "the nearest model"))
+        if row["problems"]:
+            continue
+        config_diff = audio_field_diffs(mc, bc)
+        if config_diff:
+            row["differences"].append(f"{sub}/config.json differs: " + short(list(config_diff), 5))
+        diff = compare_audio_tensors(mt, bt)
+        for kind, key in (("only in the new model", "only_in_model"), ("only in the nearest model", "only_in_base")):
+            if diff[key]:
+                row["differences"].append(f"{len(diff[key])} {sub} tensors exist {kind}: {short(diff[key], 3)}")
+        for x in diff["shape_differences"]:
+            row["differences"].append(f"{sub} tensor {x['name']} has shape {x['model']} and {x['base']}")
+        for x in diff["dtype_differences"]:
+            if not x["tolerated"]:
+                row["differences"].append(f"{sub} tensor {x['name']} has dtype {x['model']} and {x['base']}")
+        row["equal"] = not row["differences"]
+    return rows, problems
+
+
+def _int_or_none(cfg, key):
+    value = cfg.get(key) if isinstance(cfg, dict) else None
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def audio_main(cfg: dict) -> int:
+    """The stage 0 comparison for a model in the stable-audio-tools layout (see the block comment above)."""
+    run_dir = os.path.realpath(cfg["run_dir"])
+    model_dir, base_dir = Path(cfg["model_snapshot"]), Path(cfg["nearest_snapshot"])
+    model_id = with_revision(cfg["model_id"].strip(), cfg["model_snapshot"])
+    nearest_id = with_revision(cfg["nearest_model_id"].strip(), cfg["nearest_snapshot"])
+    model_repo, base_repo = model_id.split("@", 1)[0], nearest_id.split("@", 1)[0]
+
+    def ev(name: str) -> str:
+        return os.path.relpath(EVIDENCE / name, run_dir)
+
+    say(f"comparing {model_id} with {nearest_id} (audio layout: model_config.json and combined safetensors)")
+    reasons: list[str] = []          # differences that make this a full port
+    problems: list[str] = []         # things that could not be read or compared: the class is unknown
+    base_is_audio = detect_audio(base_dir)
+    if not base_is_audio:
+        problems.append("the nearest model is not in the stable-audio-tools layout (it needs a readable model_config.json, no config.json "
+                        "and a top-level safetensors file), so the two cannot be compared")
+    # detect_audio read both configs successfully, so these reads cannot fail here
+    mcfg = _audio_json(model_dir / AUDIO_CONFIG)[0]
+    bcfg = _audio_json(base_dir / AUDIO_CONFIG)[0] if base_is_audio else None
+    mt, merrs = audio_tensors(model_dir)
+    bt, berrs = audio_tensors(base_dir) if base_is_audio else ({}, [])
+    problems += [f"new model {e}" for e in merrs] + [f"nearest model {e}" for e in berrs]
+    # A header with no tensor entry reads without an error. Two empty maps would otherwise look equal, and one empty map would look like a
+    # full port; neither says anything about the model, so the class is unknown.
+    if not merrs and not mt:
+        problems.append("the new model holds no tensors: its safetensors header is empty")
+    if base_is_audio and not berrs and not bt:
+        problems.append("the nearest model holds no tensors: its safetensors header is empty")
+    config = {"top_level_differences": {}, "model_differences": {}, "pointer_differences": {}, "training_differences": {}}
+    tensors = compare_audio_tensors(mt, bt)
+    encoders: list[dict] = []
+    if not problems:
+        config = compare_audio_configs(mcfg, bcfg)
+        for k, v in {**config["top_level_differences"], **config["model_differences"]}.items():
+            reasons.append(f"model_config.json {k} differs: {fmt(v['model'])} vs {fmt(v['base'])}")
+        for k in ("only_in_model", "only_in_base"):
+            if tensors[k]:
+                who = "the new model" if k == "only_in_model" else "the nearest model"
+                reasons.append(f"{len(tensors[k])} tensors exist only in {who}: {short(tensors[k], 5)}")
+        for x in tensors["shape_differences"]:
+            reasons.append(f"tensor {x['name']} has shape {x['model']} in the new model and {x['base']} in the nearest model")
+        for x in tensors["dtype_differences"]:
+            if not x["tolerated"]:
+                reasons.append(f"tensor {x['name']} has dtype {x['model']} in the new model and {x['base']} in the nearest model")
+        encoders, encoder_problems = audio_text_encoders(mcfg, bcfg, model_dir, base_dir, model_repo, base_repo)
+        problems += encoder_problems
+        for row in encoders:
+            problems += row["problems"]
+            reasons += row["differences"]
+    cls = "unknown" if problems else "full-port" if reasons else "weights-only"
+    path = "weights-only" if cls == "weights-only" else "full-port"
+    all_reasons = problems + reasons
+    f = compare_files(model_dir, base_dir)
+    write_json("files-compare.json", f)
+    values = ({"samples": [], "summary": {}, "skipped": [], "note": "not run: the headers could not be read"} if problems
+              else sample_value_diffs(model_dir, base_dir, {k: k for k in sorted(set(mt) & set(bt))}))
+    write_json("value-compare.json", values)
+    components = audio_components(mt)
+    audio = {"model_type": mcfg.get("model_type") if mcfg else None, "sample_rate": _int_or_none(mcfg, "sample_rate"),
+             "audio_channels": _int_or_none(mcfg, "audio_channels"), "sample_size": _int_or_none(mcfg, "sample_size"),
+             "components": components, "base_components": audio_components(bt),
+             "config": {k: dict(list(v.items())[:AUDIO_MAX_LISTED]) for k, v in config.items()},
+             "tensors": {"model_tensors": tensors["model_tensors"], "base_tensors": tensors["base_tensors"], "common": tensors["common"],
+                         "only_in_model": tensors["only_in_model"][:AUDIO_MAX_LISTED], "only_in_base": tensors["only_in_base"][:AUDIO_MAX_LISTED],
+                         "shape_differences": tensors["shape_differences"][:AUDIO_MAX_LISTED],
+                         "dtype_differences": tensors["dtype_differences"][:AUDIO_MAX_LISTED]},
+             "text_encoders": encoders, "files_only_in_base": f["files_only_in_base"] + f["shards_only_in_base"],
+             "files_only_in_model": f["files_only_in_model"] + f["shards_only_in_model"]}
+    write_json("audio-compare.json", {**audio, "problems": problems, "reasons": reasons})
+    ml, bl = license_side(model_dir), license_side(base_dir)
+    say(f"wrote evidence/audio-compare.json, files-compare.json and value-compare.json ({len(mt)} and {len(bt)} tensors; "
+        f"{len(components)} components)")
+    code = code_files(model_dir)
+    comp_text = ", ".join(f"{c['prefix']} ({c['role'] or 'no known role'}, {c['tensors']} tensors, {c['parameters']:,} parameters)"
+                          for c in components) or "none"
+    cd = (config["model_differences"], config["top_level_differences"], config["pointer_differences"], config["training_differences"])
+    delta = {
+        "model": model_id, "nearest_model": nearest_id, "path": path, "class": cls, "template_sha256": THIS_SHA256,
+        "path_reasons": all_reasons, "sidecars": [], "code_files": code,
+        "facts": {"form": "full", "modality": "audio"},
+        "values": {"summary": values["summary"], "samples": [{k: x[k] for k in ("model_tensor", "relation", "cosine")}
+                                                              for x in values["samples"]]},
+        "audio": audio,
+        "draft": "written by delta_triage.py from the evidence files; the agent reviews each finding and adds hazards it can justify",
+        "differences": [
+            {"area": "config", "evidence": [ev("audio-compare.json")],
+             "finding": (f"model_config.json: {len(cd[0])} differences in the model section, {len(cd[1])} in the top-level keys "
+                         f"(sample rate, channels, sample size, model type), {len(cd[2])} pointers to another repository (ignored) and "
+                         f"{len(cd[3])} in the training section (listed, ignored).")},
+            {"area": "architecture", "evidence": [ev("audio-compare.json")],
+             "finding": f"The new model's components: {comp_text}."},
+            {"area": "tensors", "evidence": [ev("audio-compare.json")],
+             "finding": (f"{tensors['common']} tensors are in both models; {len(tensors['only_in_model'])} only in the new model, "
+                         f"{len(tensors['only_in_base'])} only in the nearest model, {len(tensors['shape_differences'])} with another "
+                         f"shape and {len(tensors['dtype_differences'])} with another dtype.")},
+            {"area": "tensor_names", "evidence": [ev("audio-compare.json")],
+             "finding": ("The names are compared as written (no prefix rewrite is applied to this layout): "
+                         + ("all shared names match." if not tensors["only_in_model"] and not tensors["only_in_base"]
+                            else f"{len(tensors['only_in_model'])} and {len(tensors['only_in_base'])} names do not match."))},
+            {"area": "files", "evidence": [ev("files-compare.json")], "finding": files_finding(f)},
+            {"area": "license", "evidence": [ev("files-compare.json")],
+             "finding": (f"The new model's license is {ml['license'] or 'unknown'} (name {ml['readme_license_name'] or 'none'}); the nearest "
+                         f"model's is {bl['license'] or 'unknown'} (name {bl['readme_license_name'] or 'none'}).")},
+        ],
+        "hazards": [
+            {"area": "other", "evidence": [ev("audio-compare.json")],
+             "finding": ("No stage listens to the output. Whether the generated audio sounds right is a person's judgment; a check that "
+                         "the sound exists (duration, level, no clipping) says nothing about quality or about the prompt being followed.")},
+            {"area": "license", "evidence": [ev("files-compare.json")],
+             "finding": (f"The model card's license is {ml['license'] or 'unknown'}"
+                         + (f" ({ml['readme_license_name']})" if ml["readme_license_name"] else "")
+                         + ". Read the LICENSE files in the snapshot before anything is packaged or published; a text encoder may be "
+                           "redistributed under its own terms.")},
+        ],
+    }
+    if values["summary"].get("identical") and values["summary"]["identical"] == sum(values["summary"].values()):
+        delta["hazards"].append({"area": "other", "evidence": [ev("value-compare.json")],
+                                 "finding": ("Every sampled tensor is identical to the nearest model's. The new model may be a copy of it, "
+                                             "so a bring-up of it would measure the nearest model. Compare the files' hashes before going on.")})
+    if f["files_only_in_base"] or f["shards_only_in_base"]:
+        delta["hazards"].append({"area": "other", "evidence": [ev("files-compare.json")],
+                                 "finding": ("The nearest model has files the new model lacks: "
+                                             + short(f["files_only_in_base"] + f["shards_only_in_base"]) + ". They were not read; whether "
+                                             "serving the base needs them is not known.")})
+    for row in encoders:
+        if row.get("note"):
+            delta["hazards"].append({"area": "other", "evidence": [ev("audio-compare.json")],
+                                     "finding": f"Text encoder {row['subfolder']}: {row['note']}."})
+    if code:
+        delta["hazards"].append({"area": "other", "evidence": [ev("files-compare.json")],
+                                 "finding": ("The model repository ships code: " + ", ".join(f"{x['file']} (sha256 {x['sha256'][:12]})" for x in code)
+                                             + ". It was not run. Read it before any run imports it.")})
+    delta["hazards"].extend(reported_draft(model_dir, model_id, ev))
+    research = base_research(cfg, nearest_id, cls)
+    if research is not None:
+        delta["base_research"] = research
+    (HERE_DIR / "delta.json").write_text(json.dumps(delta, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    say(f"wrote delta.json: audio layout, path {path}, class {cls}")
+    for r in all_reasons:
+        say(f"  {'unknown' if r in problems else 'full-port'} because {r}")
+    return 0
+
+
 def main() -> int:
     cfg = load_config()
     run_dir = os.path.realpath(cfg["run_dir"])
     model_dir, base_dir = Path(cfg["model_snapshot"]), Path(cfg["nearest_snapshot"])
+    if detect_audio(model_dir):
+        return audio_main(cfg)
     model_id = with_revision(cfg["model_id"].strip(), cfg["model_snapshot"])
     nearest_id = with_revision(cfg["nearest_model_id"].strip(), cfg["nearest_snapshot"])
 

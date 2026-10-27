@@ -16,6 +16,7 @@
     tt-orchard reported accept RUN_DIR (--all | --rows NAME,NAME | --row NAME) [--replace]
     tt-orchard kernel-env [--check] [--src-dir DIR] [--venv-dir DIR] [--tt-lang-skill-dir DIR] [--allow-stale-skills]
     tt-orchard demo-env [--check] [--dry-run] [--venv-dir DIR] [--tt-metal-dir DIR]
+    tt-orchard audio-reference-env [--check] [--dry-run] [--venv-dir DIR] [--src-dir DIR]
     tt-orchard inventory TARGET [--python P] [--ttnn-python P] [--against F] [--layers N] [--seq N] [--class C] [--out DIR]
     tt-orchard inventory verify-candidates --inventory FILE|DIR [--out DIR] [--image IMG] [--max-ops N] [--timeout S] [--record]
     tt-orchard coder-speed [--endpoint URL --model NAME | --tiers] [--samples N] [--watch SECONDS] [--json]
@@ -287,6 +288,13 @@ def _parser() -> argparse.ArgumentParser:
     d.add_argument("--venv-dir", help="where the venv lives (default ~/orchard-venvs/tt-demo, or $ORCHARD_DEMO_VENV)")
     d.add_argument("--tt-metal-dir", help="the host tt-metal tree, built and at a release tag (default ~/tt-metal, or "
                                           "$ORCHARD_TT_METAL_DIR)")
+    ar = sub.add_parser("audio-reference-env", parents=[common],
+                        help="build or check the CPU-only environment and pinned checkout of the stable-audio-3 library that run the "
+                             "audio reference (no chip, no Hugging Face token)")
+    ar.add_argument("--check", action="store_true", help="change nothing; report each rule and exit 2 if one failed")
+    ar.add_argument("--dry-run", action="store_true", help="say what the build would do and change nothing")
+    ar.add_argument("--venv-dir", help="where the venv lives (default ~/orchard-venvs/stable-audio, or $ORCHARD_AUDIO_VENV)")
+    ar.add_argument("--src-dir", help="where the pinned stable-audio-3 checkout lives (default ~/orchard-src/stable-audio-3, or $ORCHARD_AUDIO_SRC)")
     inv = sub.add_parser("inventory", parents=[common],
                          help="list the ops a model's reference code uses and which ones ttnn has; "
                               "`inventory refresh-ttnn` records ttnn's op names (takes a one-chip lease); "
@@ -814,6 +822,9 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
     if args.cmd == "kernel-env":
         from orchard import ttlang_env
         return ttlang_env.main(args, out=out)
+    if args.cmd == "audio-reference-env":
+        from orchard import audio_reference_env
+        return audio_reference_env.main(args, env=audio_reference_env.env_from_args(args, environ=env, home=home), out=out)
     if args.cmd == "demo-env":
         from orchard import demo_env
         return demo_env.main(args, env=demo_env.env_from_args(args, environ=env, home=home), out=out)
