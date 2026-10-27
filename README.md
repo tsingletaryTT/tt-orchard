@@ -191,7 +191,7 @@ against 0.47 for a runtime that applied a causal mask).
 | Stage machine, agent loop, supervisor | `orchard/stages.py`, `orchard/agent.py`, `orchard/context.py`, `orchard/supervisor.py` | Built and tested. Ran stages 0 to 2 on the real run |
 | Crash recovery | `orchard/supervisor.py`, `orchard/handoff.py` | Tested with fakes by killing the supervisor after every ledger event. On hardware: `kill -9`, restart, resume worked at least four times on the real run |
 | Stage skills | `orchard/skills/` | The skills for stages 0, 1, 2, 4, 7 and 8 and the template scripts they copy have run on real runs. `serving-check` (stage 5) has never run, because stage 5 is skipped on the weights-only path. Stage 8 and stage 7 are supervisor code that runs `operator-bundle-templates/build_bundle.py` and `package.py` |
-| Packaging (stage 7) | `orchard/package.py`, `orchard/package_card.py`, `orchard/package_cmd.py`, `orchard/package_templates/` | Built and tested with fakes, then run once on hardware (Hemmingway-1; see stage 7 above). Wired into the stage table as opt-in supervisor code. `tt-orchard package` and `package-card` run the same steps on a finished run and record them in its ledger. A v5.1 container package is refused at start |
+| Packaging (stage 7) | `orchard/package.py`, `orchard/package_card.py`, `orchard/package_cmd.py`, `orchard/package_templates/` | Built and tested with fakes, then run once on hardware (Hemmingway-1; see stage 7 above). Wired into the stage table as opt-in supervisor code. `tt-orchard package` and `package-card` run the same steps on a finished run and record them in its ledger. `tt-orchard reported` (`orchard/reported_cmd.py`) accepts the author-reported scores that stage 0 drafts from the model card. A v5.1 container package is refused at start |
 | Bundle and package scrub | `orchard/scrub.py` | Built and tested with fakes. The stage 8 gate calls it; it ran once on the real run |
 | CPU sizing tool | `orchard/sizing.py` | Built and tested against a fake server. It has not been run against a real ollama. The CPU numbers in this README come from the run log |
 | `tt-orchard` command | `orchard/cli.py`, `orchard/bringup_config.py`, `orchard/preflight.py`, `orchard/fetch.py`, `bin/tt-orchard` | Built and tested with fakes, then used for the Clef run on the development machine (the preflight, the download check, the unattended end states and the retry path all ran for real) |
@@ -783,10 +783,26 @@ the weights-only path. Otherwise it is recorded as skipped.
 
 To show the scores a model's authors report on its package card, put `reported-results.json` in the run
 directory before stage 7: `{"source": "the model's card on Hugging Face", "rows": [{"name": "MLE-Lite",
-"value": "81.8", "note": "Any Medal, mean of 3 seeds"}]}`. A person writes it from the card; the harness does
-not parse cards. The card shows the rows in a "Reported by the authors" section that says they were not measured
-here, apart from the numbers the run measured, and `gate_package` refuses a card that drops the section, changes a
-value, or lists a reported score as measured.
+"value": "81.8", "note": "Any Medal, mean of 3 seeds"}]}`. The card shows the rows in a "Reported by the authors"
+section that says they were not measured here, apart from the numbers the run measured, and `gate_package` refuses a
+card that drops the section, changes a value, or lists a reported score as measured.
+
+Stage 0 drafts that file for you from the model card, and a person confirms it:
+
+    tt-orchard reported show RUN_DIR
+    tt-orchard reported accept RUN_DIR (--all | --rows NAME,NAME | --row NAME) [--replace]
+
+Stage 0 reads the card's front matter `model-index` block and its markdown and HTML tables. It never reads prose. A row
+counts only when the table row or column is the model's own (a comparison table's other models are ignored), the cell is
+a plain number (an optional sign and `%`; notes, ranges, footnote marks and confidence intervals are not read), the
+columns line up with the header, and the heading and name do not say the number was measured on Tenstorrent hardware.
+Each row quotes the card's line. The result is `stages/0/evidence/reported-results.draft.json`, which also lists every
+entry it left out with the reason, and one stage 0 hazard that says nobody has confirmed the rows. No package card shows
+a drafted row. `reported accept` reads the card again, accepts a row only when the card gives exactly that name, value
+and line, copies the chosen rows into `reported-results.json` after the same checks `package` applies, and writes who
+accepted what in the ledger. `package` and `package-card` accept nothing by themselves. The stage 8 bundle's RESULTS.md
+lists the accepted rows in a section marked as the authors' scores, not measured here, and says when a draft exists
+that nobody accepted.
 
 **Packaging a run that has already finished.** A run started without `--package-format` skips stage 7. When it
 has ended `ready-for-operator-review` you can package it afterwards:
@@ -1336,6 +1352,7 @@ nothing.
 ```bash
 tt-orchard inventory /path/to/model-dir      # trace the model's reference code, write ops-inventory/
 tt-orchard inventory refresh-ttnn            # record ttnn's op names; takes a one-chip gozer lease
+tt-orchard inventory verify-candidates --inventory ops-inventory/   # test the proposed ttnn names on the ttsim simulator, no chip
 ```
 
 `inventory DIR` traces the model's reference code on the meta device with torch (2 layers by default) and
@@ -1345,10 +1362,28 @@ supports the model's shape, dtype or layout. `composable` means a decomposition 
 `mapped`. `unmapped` means neither. `ignored` marks metadata-only ops. `unchecked` means no dump exists for the
 installed ttnn version, so nothing is claimed.
 
+Two more statuses are guesses and never count as `mapped`. `candidate` means the table has no row for the op, but
+`orchard/opvariants.py` found up to three ttnn names in the dump that might do the job, each with the reason it was
+proposed (`normalised-equal`, `synonym`, `token-subset`, `near` or `affix`; tables in `orchard/data/op_variants.json`).
+`verified` means `verify-candidates` ran the ttnn op on the ttsim simulator against a torch reference and it agreed
+(`orchard/data/verified_mappings.json`). A person still adds the table row that makes an op `mapped`.
+
+A trace also carries an ordered op list. `orchard/oppatterns.py` finds groups that one ttnn op does at once (RMSNorm,
+LayerNorm, SiLU gate multiply, an unfused attention, the Hugging Face rotary embedding). They are listed apart under
+`patterns` with the status `pattern` (`pattern-verified` after the simulator check), and only when the ttnn op is in
+the dump. The ops inside a group keep their own statuses.
+
 `refresh-ttnn` imports ttnn, which opens the device, so it runs under a one-chip gozer lease and writes
 `orchard/data/ttnn_ops-<version>.json`. Run it once per ttnn version. The supervisor never runs it.
 
-- The word `refresh-ttnn` is reserved. To trace a directory with that name, pass it as `./refresh-ttnn`.
+- `verify-candidates` starts the operator's simulator image (`ttsim-blackhole-space:local`) with no network and no chip,
+  builds one small tile-aligned tensor per candidate from the traced shape, and compares the ttnn op with torch by PCC
+  (at least 0.99), relative L2 (at most 0.05) and slope (0.95 to 1.05); integer and mask ops must be equal. Three controls
+  run every time (one right op, two wrong ops); if one misbehaves no result of the run is believed. The check is one shape,
+  one seed and the image's own ttnn wheel (named in the output). It is not a run on hardware. It writes
+  `verify-candidates.json`, `verify-candidates.md` (with rows to paste into `aten_to_ttnn.json`) and
+  `verified-mappings.json`. Pairs the script has no torch reference for are reported `not-tested`.
+- The words `refresh-ttnn` and `verify-candidates` are reserved. To trace a directory with such a name, pass it as `./refresh-ttnn`.
 - The dump is written into the package's own `orchard/data` directory, which must be writable (an editable checkout is).
 - Counts are per static node of the traced graph, so a loop body that runs many times counts once. The report
   scales in-layer ops by the layers in the config over the layers traced, and says when it cannot scale.
@@ -1366,7 +1401,15 @@ Flags:
 - `--layers`: layers to trace (default 2).
 - `--seq`: sequence length to trace (default 8).
 - `--class`: the transformers class to trace, when it is not the first architecture in `config.json`.
-- `--out`: output directory (default `./ops-inventory`).
+- `--out`: output directory (default `./ops-inventory`; `./verify-candidates` for `verify-candidates`).
+- `--simulator`: for `refresh-ttnn`, the ttsim library (for example `libttsim_bh.so` from the simulator image, with its
+  `soc_descriptor.yaml` beside it). The names are listed against it and no gozer lease is taken, because the script
+  opens no device. The dump for ttnn 0.80.0 was made this way.
+- `--inventory`: for `verify-candidates`, an `ops-inventory.json` or the directory that holds it.
+- `--image`: for `verify-candidates`, the simulator image (default `ttsim-blackhole-space:local`).
+- `--max-ops`: for `verify-candidates`, the most candidate pairs to run (default 40).
+- `--timeout`: for `verify-candidates`, seconds before the container is stopped (default 900).
+- `--record`: for `verify-candidates`, also merge the verified entries into `orchard/data/verified_mappings.json`.
 
 ### 5.9c Kernel probe
 

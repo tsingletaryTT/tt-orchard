@@ -851,6 +851,65 @@ def run_fact_rows(run: Run, redact: Redactor) -> list[str]:
     return rows
 
 
+REPORTED_FILE = "reported-results.json"
+REPORTED_DRAFT = "stages/0/evidence/reported-results.draft.json"
+REPORTED_HEADING = "Reported by the authors (not measured here)"
+REPORTED_MAX_BYTES = 256 * 1024
+
+
+def reported_cell(redact: Redactor, text) -> str:
+    """A table cell from copied text: on one line, with a pipe replaced so the cell cannot end early."""
+    return redact(one_line(text)).replace("|", "¦")
+
+
+def draft_row_count(run: Run) -> int | None:
+    """The number of rows in stage 0's draft of the reported scores, None when there is no readable draft."""
+    path = run.dir / REPORTED_DRAFT
+    try:
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > REPORTED_MAX_BYTES:
+            return None
+        rows = json.loads(path.read_text(encoding="utf-8")).get("rows")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return len(rows) if isinstance(rows, list) else None
+
+
+def reported_section(run: Run, redact: Redactor) -> list[str]:
+    """The scores the model's authors report, as a person accepted them into `reported-results.json`. They are the authors'
+    claims: every row is labelled "reported, not measured here", and nothing else in the bundle, no gate and no verdict reads
+    them. A draft that nobody accepted gets one line and no rows. A run with neither file gets no section, so its RESULTS.md
+    is the same as before. Every copied string goes through the redactor."""
+    from orchard.package import PackageError, read_reported_file         # the checkout is on the path by now
+    path = run.dir / REPORTED_FILE
+    drafted = draft_row_count(run)
+    head = ["", f"## {REPORTED_HEADING}", ""]
+    if not (path.exists() or path.is_symlink()):
+        if not drafted:
+            return []
+        return head + [f"Stage 0 drafted {drafted} {'row' if drafted == 1 else 'rows'} from the model card "
+                       f"(`{REPORTED_DRAFT}`). Nobody accepted any, so none is in this bundle or on a package card. "
+                       "`tt-orchard reported show RUN` lists them and `tt-orchard reported accept RUN` accepts chosen rows."]
+    try:
+        if path.is_symlink() or not path.is_file():
+            raise PackageError("it is not a regular file")
+        if path.stat().st_size > REPORTED_MAX_BYTES:
+            raise PackageError(f"it is over {REPORTED_MAX_BYTES // 1024} KiB")
+        rows, source = read_reported_file(path)
+    except (PackageError, OSError) as exc:
+        return head + [f"`{REPORTED_FILE}` is not valid ({end(redact(one_line(exc)))}) No row is listed."]
+    lines = head + [f"Source: {reported_cell(redact, source)}.", "",
+                    "These are the scores the model's authors report, copied from `reported-results.json` as a person accepted "
+                    "them. They were not measured in this run: the protocol, tools and judge are the authors', and nothing here "
+                    "reproduces them. No pass bar and no verdict uses them.", "",
+                    "| Name | Value | Label | Note |", "|---|---|---|---|"]
+    for r in rows:
+        lines.append(f"| {reported_cell(redact, r.name)} | {reported_cell(redact, r.value)} | reported, not measured here | "
+                     f"{reported_cell(redact, r.note) or '-'} |")
+    if drafted and drafted != len(rows):
+        lines += ["", f"Stage 0 drafted {drafted} rows from the model card; {len(rows)} were accepted."]
+    return lines
+
+
 def inventory_section(run: Run, redact: Redactor) -> list[str]:
     """The "Ops and kernels" section, from stage 0's `ops-inventory.json`. Returns no lines when the
     file is missing or is not a JSON object, so a run without an inventory gets the same RESULTS.md as
@@ -889,6 +948,35 @@ def inventory_section(run: Run, redact: Redactor) -> list[str]:
             count = o.get("scaled_count")
             shown = redact(fmt(count)) if is_number(count) else "count not recorded"
             lines.append(f"- `{redact(one_line(o['op']))}` ({shown})")
+    cands = [o for o in ops_in if isinstance(o, dict) and o.get("status") == "candidate" and isinstance(o.get("op"), str)]
+    cands.sort(key=lambda o: -(o["scaled_count"] if is_number(o.get("scaled_count")) else 0))
+    if cands:
+        lines += ["", "Candidate ops, most frequent first (at most 10). These have no mapping-table row. The ttnn names "
+                      "are guesses from the op's name, each with the reason it was proposed; they are not `mapped`:", ""]
+        for o in cands[:10]:
+            cl = o.get("candidates")
+            named = [c for c in (cl if isinstance(cl, list) else []) if isinstance(c, dict) and isinstance(c.get("ttnn"), str)]
+            guess = ", ".join(f"`{redact(one_line(c['ttnn']))}` ({redact(one_line(str(c.get('why'))))})" for c in named[:3])
+            count = o.get("scaled_count")
+            shown = redact(fmt(count)) if is_number(count) else "count not recorded"
+            lines.append(f"- `{redact(one_line(o['op']))}` ({shown}): {guess or 'none recorded'}")
+    verified = [o for o in ops_in if isinstance(o, dict) and o.get("status") == "verified" and isinstance(o.get("op"), str)]
+    if verified:
+        lines += ["", "Verified ops (at most 10). Each agreed with a torch reference on the ttsim simulator at one small "
+                      "shape. That is not a run on hardware and the ops are not `mapped`:", ""]
+        for o in verified[:10]:
+            lines.append(f"- `{redact(one_line(o['op']))}` -> `{redact(one_line(str(o.get('ttnn'))))}`")
+    pats = inv.get("patterns")
+    pats = [f for f in pats if isinstance(f, dict) and isinstance(f.get("pattern"), str)] if isinstance(pats, list) else []
+    if pats:
+        lines += ["", "Groups of ops that one ttnn op does at once, recognised from the order of the traced ops "
+                      "(`pattern`; `pattern-verified` after the simulator check). The ops inside a group keep their own "
+                      "statuses:", ""]
+        for f in pats[:10]:
+            count = f.get("scaled_count")
+            shown = redact(fmt(count)) if is_number(count) else "count not recorded"
+            lines.append(f"- {redact(one_line(f['pattern']))} -> `{redact(one_line(str(f.get('ttnn'))))}` "
+                         f"({redact(one_line(str(f.get('status'))))}, {shown})")
     lines += ["", "`mapped` is a name match against a recorded ttnn dump. It does not say the op supports "
                   "the shape, dtype or layout the model needs."]
     return lines
@@ -915,6 +1003,7 @@ def render_results(run: Run, redact: Redactor, n_todo: int, n_hazards: int, skip
     lines += inventory_section(run, redact)
     lines += served_dir_section(run, redact)
     lines += graft_section(run, redact)
+    lines += reported_section(run, redact)
     body = stage_results(run, redact)
     for n in range(9):
         spec = run.specs[n]

@@ -52,8 +52,9 @@ def test_record_merges_the_summary_and_keeps_every_other_key(tmp_path):
     inv = got.pop("inventory")
     assert got == DELTA
     assert inv == {"traced_class": "Qwen3ForCausalLM", "skipped": None,
-                   "distinct": {"mapped": 1, "composable": 0, "unmapped": 1, "unchecked": 0, "ignored": 0},
-                   "unmapped_ops": ["aten.weird"], "ttnn_dump": {"ttnn_version": "0.1", "sha256": "ab"}}
+                   "distinct": {"mapped": 1, "composable": 0, "verified": 0, "candidate": 0, "unmapped": 1,
+                                "unchecked": 0, "ignored": 0},
+                   "unmapped_ops": ["aten.weird"], "candidate_ops": [], "patterns": [], "ttnn_dump": {"ttnn_version": "0.1", "sha256": "ab"}}
     assert [p.name for p in sd.iterdir() if p.name.startswith(("tmp", ".")) or p.suffix == ".tmp"] == []
 
 

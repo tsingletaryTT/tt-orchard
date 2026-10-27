@@ -5,6 +5,10 @@
 ttnn's ops are bound from compiled code, so their names are in no Python file, and importing ttnn opens the device.
 The import therefore runs under a one-chip gozer lease, once per ttnn version, and the names are written to
 orchard/data/ttnn_ops-<version>.json. The operator runs this command. The supervisor never does.
+
+With `--simulator PATH` (the ttsim library, for example libttsim_bh.so from the simulator image, with its
+soc_descriptor.yaml beside it) the import runs against the simulator and takes no lease: the script only lists names and
+never opens a device, and the simulator gives the import nothing to open.
 """
 from __future__ import annotations
 
@@ -59,8 +63,15 @@ print("\n" + "ORCHARD_TTNN_DUMP " + json.dumps({"ttnn_version": m.version("ttnn"
 '''
 
 
-def dump_command(python, who: str = "claude:orchard-inventory") -> list[str]:
-    """The full command line. It always goes through `gozer run`, so the import holds a one-chip lease."""
+SIMULATOR_ENV = {"TT_METAL_ARCH_NAME": "blackhole", "TT_METAL_SLOW_DISPATCH_MODE": "1"}
+
+
+def dump_command(python, who: str = "claude:orchard-inventory", simulator=None) -> list[str]:
+    """The full command line. It goes through `gozer run`, so the import holds a one-chip lease, unless `simulator`
+    names a ttsim library: then it is `env TT_METAL_SIMULATOR=... python -c script` and no chip is involved."""
+    if simulator:
+        return ["env", f"TT_METAL_SIMULATOR={simulator}"] + [f"{k}={v}" for k, v in SIMULATOR_ENV.items()] + \
+            [str(python), "-c", SCRIPT]
     return ["gozer", "run", "--chips", "1", "--exact", "1", "--who", who,
             "--reason", "dump ttnn op names for tt-orchard inventory", "--", str(python), "-c", SCRIPT]
 
@@ -124,10 +135,17 @@ def _real_run(argv, timeout, term_grace_s: float = GOZER_TERM_GRACE_S):
     return proc.returncode, out, err
 
 
-def main(python, *, run=_real_run, data_dir=opinventory.DATA_DIR, say=print, cancel=cancel_ticket) -> int:
-    """Show the command, run it, write the file. 0 on success, 2 when the dump failed or could not be read."""
-    argv = dump_command(python)
-    say("running (it takes a one-chip lease): " + " ".join(argv[:12]) + " -c <script>")
+def main(python, *, run=_real_run, data_dir=opinventory.DATA_DIR, say=print, cancel=cancel_ticket, simulator=None) -> int:
+    """Show the command, run it, write the file. 0 on success, 2 when the dump failed or could not be read.
+    With `simulator` the import runs against that ttsim library and no lease is taken."""
+    if simulator and not os.path.isfile(simulator):
+        say(f"the simulator library {simulator} does not exist")
+        return 2
+    argv = dump_command(python, simulator=simulator)
+    if simulator:
+        say("running against the simulator (no lease, no chip): " + " ".join(argv[:5]) + " -c <script>")
+    else:
+        say("running (it takes a one-chip lease): " + " ".join(argv[:12]) + " -c <script>")
     rc, out, err = run(argv, 1800)
     if rc == 10:
         # `gozer wait` is not suggested: it grants a lease that has no owner pid (see orchard/handoff.py).

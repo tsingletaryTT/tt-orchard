@@ -103,7 +103,8 @@ def test_against_marks_ops_the_base_model_also_uses():
 
 def test_the_summary_counts_ops_by_status():
     inv = oi.build(raw(), mapping=MAPPING, decomps=DECOMPS, dump=DUMP, installed_ttnn="0.65.1")
-    assert inv["summary"]["distinct"] == {"mapped": 2, "composable": 1, "unmapped": 2, "unchecked": 0, "ignored": 0}
+    assert inv["summary"]["distinct"] == {"mapped": 2, "composable": 1, "verified": 0, "candidate": 0, "unmapped": 2, "unchecked": 0,
+                                           "ignored": 0}
 
 
 def test_a_nested_decomposition_is_composable_and_lists_the_final_leaves():
@@ -395,7 +396,8 @@ def test_fixtures_against_the_real_dump_have_no_python_nodes_or_wrappers_and_pin
     inv = oi.build(json.loads((FIXTURES / f"raw-{name}.json").read_text()),
                    mapping=oi.load_table(oi.DATA_DIR / "aten_to_ttnn.json"),
                    decomps=oi.load_table(oi.DATA_DIR / "decompositions.json"), dump=REAL_DUMP,
-                   installed_ttnn=REAL_DUMP_VERSION, ignored=oi.load_ignored(oi.DATA_DIR / "ignored_ops.json"))
+                   installed_ttnn=REAL_DUMP_VERSION, ignored=oi.load_ignored(oi.DATA_DIR / "ignored_ops.json"),
+                   variants=False)   # the pinned counts are the table-only statuses
     ops = [r["op"] for r in inv["ops"]]
     assert "<built-in function getitem>" not in ops
     assert not any("wrap_with_set_grad_enabled" in o or o.startswith("<built-in") for o in ops), ops

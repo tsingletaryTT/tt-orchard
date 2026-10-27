@@ -12,9 +12,12 @@
     tt-orchard coder    [status | stop [--yes]]
     tt-orchard package  RUN_DIR --namespace ORG [--step stage|boot|finish|all] [--restage] [--graft-mtp | --no-graft-mtp] [--exact CHIP]
     tt-orchard package-card RUN_DIR --benchmark FILE --model-key KEY [--base-key KEY] [--reported FILE] [--accept-unverified-identity]
+    tt-orchard reported show RUN_DIR
+    tt-orchard reported accept RUN_DIR (--all | --rows NAME,NAME | --row NAME) [--replace]
     tt-orchard kernel-env [--check] [--src-dir DIR] [--venv-dir DIR] [--tt-lang-skill-dir DIR] [--allow-stale-skills]
     tt-orchard demo-env [--check] [--dry-run] [--venv-dir DIR] [--tt-metal-dir DIR]
     tt-orchard inventory TARGET [--python P] [--ttnn-python P] [--against F] [--layers N] [--seq N] [--class C] [--out DIR]
+    tt-orchard inventory verify-candidates --inventory FILE|DIR [--out DIR] [--image IMG] [--max-ops N] [--timeout S] [--record]
     tt-orchard coder-speed [--endpoint URL --model NAME | --tiers] [--samples N] [--watch SECONDS] [--json]
     tt-orchard kernel-probe --op NAME [--attempts N] [--phase sim|hw] [--out DIR] [--endpoint URL] [--model NAME]
                             [--temperature T | --temperatures T1,T2] [--top-p P] [--seed N]
@@ -212,6 +215,20 @@ def _parser() -> argparse.ArgumentParser:
                     help="go on when the benchmark file does not say which model (and revision) each key is, so the "
                          "scores cannot be shown to be this package's. A file that names another model is always "
                          "refused. The ledger records what was not verified")
+    rp = sub.add_parser("reported", parents=[common],
+                        help="show or accept the scores the model card reports for the model (drafted by stage 0)")
+    rsub = rp.add_subparsers(dest="action", required=True)
+    rsub.add_parser("show", parents=[common], help="list the drafted rows and what was left out (read-only)") \
+        .add_argument("run_dir", help="the run directory")
+    ra = rsub.add_parser("accept", parents=[common],
+                         help="copy chosen draft rows into the run's reported-results.json and record who did it")
+    ra.add_argument("run_dir", help="the run directory")
+    pick = ra.add_mutually_exclusive_group(required=True)
+    pick.add_argument("--all", action="store_true", help="accept every drafted row")
+    pick.add_argument("--rows", metavar="NAME,NAME", help="accept the rows with these names (comma separated)")
+    pick.add_argument("--row", action="append", metavar="NAME",
+                      help="accept one row by its exact name (a name with a comma); repeat for more")
+    ra.add_argument("--replace", action="store_true", help="replace a reported-results.json the run already holds")
     k = sub.add_parser("kernel-env", parents=[common],
                        help="build or check the tt-lang simulator environment that kernel-probe uses")
     k.add_argument("--check", action="store_true",
@@ -238,8 +255,18 @@ def _parser() -> argparse.ArgumentParser:
                                           "$ORCHARD_TT_METAL_DIR)")
     inv = sub.add_parser("inventory", parents=[common],
                          help="list the ops a model's reference code uses and which ones ttnn has; "
-                              "`inventory refresh-ttnn` records ttnn's op names (takes a one-chip lease)")
-    inv.add_argument("target", help="a model directory with a config.json, or the word refresh-ttnn")
+                              "`inventory refresh-ttnn` records ttnn's op names (takes a one-chip lease); "
+                              "`inventory verify-candidates` tests the proposed ttnn names on the ttsim simulator (no chip)")
+    inv.add_argument("target", help="a model directory with a config.json, or the word refresh-ttnn or verify-candidates")
+    inv.add_argument("--simulator", metavar="LIB",
+                     help="refresh-ttnn: list the names against this ttsim library (libttsim_bh.so, with its "
+                          "soc_descriptor.yaml beside it) and take no lease")
+    inv.add_argument("--inventory", metavar="FILE", help="verify-candidates: an ops-inventory.json, or the directory that holds it")
+    inv.add_argument("--image", default=None, help="verify-candidates: the ttsim simulator image (default ttsim-blackhole-space:local)")
+    inv.add_argument("--max-ops", type=int, default=None, help="verify-candidates: most candidate pairs to run (default 40)")
+    inv.add_argument("--timeout", type=int, default=None, help="verify-candidates: seconds before the simulator run is stopped (default 900)")
+    inv.add_argument("--record", action="store_true",
+                     help="verify-candidates: also merge the verified entries into the package's verified_mappings.json")
     inv.add_argument("--python", help="interpreter with torch and transformers (default $ORCHARD_REFERENCE_PYTHON, "
                                       "then reference_python in bringup.toml)")
     inv.add_argument("--ttnn-python", help="interpreter whose installed ttnn version is read, and that refresh-ttnn "
@@ -315,7 +342,16 @@ def _inventory(args, env, home, out) -> int:
     say = lambda line: print(line, file=out)
     ttnn_python = args.ttnn_python or str(home / ".tenstorrent-venv" / "bin" / "python")
     if args.target == "refresh-ttnn":
-        return ttnn_dump.main(ttnn_python, say=say)
+        return ttnn_dump.main(ttnn_python, say=say, simulator=args.simulator)
+    if args.target == "verify-candidates":
+        from orchard import opverify
+        if not args.inventory:
+            return _refuse("verify-candidates needs --inventory (an ops-inventory.json or the directory that holds it)")
+        return opverify.main(args.inventory, out_dir=args.out or "verify-candidates",
+                             image=args.image or opverify.DEFAULT_IMAGE,
+                             max_ops=args.max_ops if args.max_ops is not None else opverify.DEFAULT_MAX_OPS,
+                             timeout=args.timeout if args.timeout is not None else opverify.DEFAULT_TIMEOUT_S,
+                             record=args.record, say=say)
     python = args.python or env.get("ORCHARD_REFERENCE_PYTHON")
     if not python:
         try:
@@ -726,6 +762,9 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
     if args.cmd == "package-card":
         from orchard import package_cmd
         return package_cmd.card_main(args, out=out)
+    if args.cmd == "reported":
+        from orchard import reported_cmd
+        return reported_cmd.main(args, out=out)
     if args.cmd == "suite-control":
         from orchard import suite_control
         return suite_control.main([args.action, *args.rest], out=out)
