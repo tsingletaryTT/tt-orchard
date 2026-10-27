@@ -86,7 +86,19 @@ def _card_text(run: Path) -> str | None:
         return None
 
 
-def _check_rows(chosen: list[dict], draft: dict, run: Path) -> bool:
+def _recorded_model(entries: list[dict]) -> str:
+    """The model the run was started for, from its ledger. The draft's own `model` field is an agent-writable claim."""
+    for e in entries:
+        if e["event"] == "run_start" and isinstance(e["data"].get("model"), str) and e["data"]["model"].strip():
+            return e["data"]["model"].strip()
+    raise Refused("the ledger records no model (no run_start with a model), so the draft cannot be checked against the card")
+
+
+def _repo(model: str) -> str:
+    return model.split("@")[0].strip().lower()
+
+
+def _check_rows(chosen: list[dict], draft: dict, run: Path, model: str) -> bool:
     """Refuse a row that is not a plain number, or that the model card on disk does not give. True when every row was
     checked against the card, False when the card is not on disk."""
     tpl = _template()
@@ -100,7 +112,7 @@ def _check_rows(chosen: list[dict], draft: dict, run: Path) -> bool:
     text = _card_text(run)
     if text is None:
         return False
-    found = {(r["name"], r["value"], r["extracted_from"]["line"]) for r in tpl.extract_reported(text, draft["model"])["rows"]}
+    found = {(r["name"], r["value"], r["extracted_from"]["line"]) for r in tpl.extract_reported(text, model)["rows"]}
     for row in chosen:
         line = (row.get("extracted_from") or {}).get("line")
         if (row["name"], row["value"], line) not in found:
@@ -135,10 +147,13 @@ def _file_text(source: str, chosen: list[dict]) -> str:
 
 def accept(args, out) -> int:
     run = Path(args.run_dir).resolve()
-    _entries(run)                                                  # refuses a directory with no readable ledger
+    model = _recorded_model(_entries(run))                         # refuses a directory with no readable ledger
     draft, draft_path, raw = _load_draft(run)
+    if _repo(draft["model"]) != _repo(model):
+        raise Refused(f"the draft names {draft['model']}, and this run is for {model}. Scores of another model are not "
+                      "accepted")
     chosen = _choose(draft, args)
-    verified = _check_rows(chosen, draft, run)
+    verified = _check_rows(chosen, draft, run, model)
     text = _file_text(draft["source"], chosen)
     installed = run / REPORTED_FILE
     with tempfile.TemporaryDirectory(dir=run) as tmp:              # judged by the card's own rules before it is installed
@@ -148,15 +163,17 @@ def accept(args, out) -> int:
             read_reported_file(probe)
         except PackageError as exc:
             raise Refused(f"the rows are refused by the card's rules: {exc}") from None
-    replaced = installed.exists() and installed.read_text(encoding="utf-8") != text
-    if replaced and not args.replace:
-        raise Refused(f"{installed} already holds other reported scores. Pass --replace to replace them")
     try:
         led = Ledger(run / "ledger.jsonl")
     except LedgerLocked:
         raise Refused(f"a supervisor holds {run / 'ledger.jsonl'}: the run is still going. Stop it first, or wait for it "
                       "to finish") from None
     with led:
+        # Looked at under the ledger lock, so the file and the ledger entry describe the same selection even when two
+        # accepts run at once.
+        replaced = installed.exists() and installed.read_text(encoding="utf-8") != text
+        if replaced and not args.replace:
+            raise Refused(f"{installed} already holds other reported scores. Pass --replace to replace them")
         if not installed.exists() or replaced:
             _replace_file(installed, text)
         led.append("decision", 0, decision="reported scores accepted", by=_who(), names=[r["name"] for r in chosen],

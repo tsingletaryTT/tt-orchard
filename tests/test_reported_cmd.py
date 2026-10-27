@@ -351,3 +351,87 @@ def test_show_says_how_many_comparison_rows_were_ignored(tmp_path):
     d["other_model_rows"] = 42
     p.write_text(json.dumps(d))
     assert "42 comparison-table rows were about other models" in go(run, "show")[1]
+
+
+# ---- review of PR 100 --------------------------------------------------------------------------------------------
+
+COMPARISON = "| Model | MMLU |\n|---|---|\n| Wren-7B | 71.5 |\n| Other-9B | 99 |\n"
+
+
+def test_a_draft_naming_another_model_is_refused_even_when_the_card_gives_its_rows(tmp_path):
+    other = [{"name": "MMLU", "value": "99", "note": "model card table, line 5",
+              "extracted_from": {"kind": "table", "line": 5, "text": "| Other-9B | 99 |"}}]
+    run = make_run(tmp_path, rows=other, card=COMPARISON)
+    p = run / "stages/0/evidence/reported-results.draft.json"
+    d = json.loads(p.read_text())
+    d["model"] = "Acme/Other-9B"
+    p.write_text(json.dumps(d))
+    code, out = go(run, all=True)
+    assert code == 2 and "Other-9B" in out and "Wren-7B" in out
+    assert not (run / REPORTED_FILE).exists() and decisions(run) == []
+
+
+def test_the_card_is_read_again_for_the_model_the_run_recorded(tmp_path):
+    """The draft's own `model` field is not trusted: a row that only another model's line gives is refused."""
+    run = make_run(tmp_path, card=COMPARISON, rows=[{**ROWS[0], "value": "99",
+                                                    "extracted_from": {"kind": "table", "line": 5, "text": "| Other-9B | 99 |"}}])
+    code, out = go(run, all=True)
+    assert code == 2 and "model card on disk does not give" in out
+
+
+def test_a_draft_model_with_a_revision_is_the_same_repository(tmp_path):
+    run = make_run(tmp_path)
+    p = run / "stages/0/evidence/reported-results.draft.json"
+    d = json.loads(p.read_text())
+    d["model"] = "Acme/Wren-7B@" + "a" * 40
+    p.write_text(json.dumps(d))
+    assert go(run, all=True)[0] == 0
+
+
+def test_a_run_that_records_no_model_is_refused(tmp_path):
+    run = make_run(tmp_path)
+    (run / "ledger.jsonl").unlink()
+    with Ledger(run / "ledger.jsonl") as led:
+        led.append("decision", None, decision="start without a model")
+    code, out = go(run, all=True)
+    assert code == 2 and "records no model" in out
+
+
+def _race(monkeypatch, run, other_text):
+    """Another `accept` finishes between this one's first look at the installed file and its taking of the ledger."""
+    real = reported_cmd.Ledger
+
+    class Racing(real):
+        def __init__(self, path):
+            (run / REPORTED_FILE).write_text(other_text)
+            super().__init__(path)
+    monkeypatch.setattr(reported_cmd, "Ledger", Racing)
+
+
+OTHER = json.dumps({"source": "someone else", "rows": [{"name": "X", "value": "1"}]})
+
+
+def test_a_file_another_accept_wrote_before_this_one_took_the_ledger_is_not_overwritten_silently(tmp_path, monkeypatch):
+    run = make_run(tmp_path)
+    _race(monkeypatch, run, OTHER)
+    code, out = go(run, all=True)
+    assert code == 2 and "--replace" in out
+    assert read_reported(run)[1] == "someone else" and decisions(run) == []
+
+
+def test_with_replace_the_racing_file_is_replaced_and_the_ledger_says_so(tmp_path, monkeypatch):
+    run = make_run(tmp_path)
+    _race(monkeypatch, run, OTHER)
+    assert go(run, all=True, replace=True)[0] == 0
+    assert read_reported(run)[1] == "the Acme/Wren-7B model card (README.md)"
+    assert decisions(run)[0]["data"]["replaced"] is True
+
+
+def test_the_same_rows_written_by_a_racing_accept_are_not_a_replacement(tmp_path, monkeypatch):
+    run = make_run(tmp_path)
+    go(run, all=True)
+    same = (run / REPORTED_FILE).read_text()
+    (run / REPORTED_FILE).unlink()
+    _race(monkeypatch, run, same)
+    assert go(run, all=True)[0] == 0
+    assert decisions(run)[-1]["data"]["replaced"] is False
