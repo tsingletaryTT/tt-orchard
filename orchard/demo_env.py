@@ -231,6 +231,19 @@ def _dist_info(site: Path, name: str, version: str, tree: Path) -> Path:
     return d
 
 
+def _other_version_installed(site: Path, version: str) -> bool:
+    """True when this command's complete ttnn and ttml dist-infos exist at one other version, and none at `version`."""
+    for name in ("ttnn", "ttml"):
+        if (site / f"{name}-{version}.dist-info").exists():
+            return False
+        found = [d for d in site.glob(f"{name}-*.dist-info")
+                 if all((d / f).is_file() for f in ("INSTALLER", "WHEEL", "METADATA"))
+                 and (d / "INSTALLER").read_text(encoding="utf-8").strip() == INSTALLER]
+        if not found:
+            return False
+    return True
+
+
 def step_host_tree(env: DEnv, check_only: bool, facts: dict | None, problem: str | None) -> Result:
     if facts is None:
         return Result("host-tree", FAIL, problem or "the host tree cannot be used")
@@ -246,6 +259,11 @@ def step_host_tree(env: DEnv, check_only: bool, facts: dict | None, problem: str
     if check_only:
         if have is not None and have != want:
             return Result("host-tree", FAIL, f"{pth} lists {have}; the host tree needs {want}. Run `{fix_command(env)}`")
+        if have == want and _other_version_installed(site, version):
+            # Everything is in place and only the version differs from the tree's tag. `ttnn-version` and `record-tag` report that
+            # drift (the preflight turns them into a warning); it is not a missing distribution.
+            return Result("host-tree", OK, f"{len(want)} directories of {env.tt_metal_dir}; the distributions are for another tag than "
+                                           f"{facts['tag']}")
         return Result("host-tree", TODO, f"would write {PTH_NAME} and the ttnn and ttml distributions for {facts['tag']}")
     # A ttnn or ttml distribution this command did not write belongs to someone else: it is left alone.
     for name in ("ttnn", "ttml"):

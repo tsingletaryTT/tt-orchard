@@ -489,6 +489,36 @@ def test_a_record_for_another_tag_is_reported_and_names_both_tags(world):
     assert r.status == de.FAIL and "v0.79.0" in r.detail and TAG in r.detail
 
 
+def test_a_host_tree_that_moved_to_another_tag_is_version_drift_and_not_a_missing_distribution(world):
+    """The directories and distributions are all there; only their version differs from the tree's tag. `host-tree` stays ok, and
+    `ttnn-version` (which the preflight turns into a warning) says what drifted."""
+    healthy(world)
+    world.run.rules.insert(0, (lambda a: "--exact-match" in a, (0, "v0.81.1\n", ""), None))
+    got = names(check(world))
+    assert got["host-tree"].status == de.OK
+    assert got["ttnn-version"].status == de.FAIL and "0.81.1" in got["ttnn-version"].detail
+    from orchard import preflight as pf
+    row = pf.check_demo_env(world.venv / "bin" / "python", check(world), de.fix_command(world.env()))
+    assert row.status == pf.WARN and "0.81.1" in row.detail
+
+
+def test_a_missing_distribution_is_not_version_drift(world):
+    healthy(world)
+    import shutil
+    shutil.rmtree(world.site / "ttml-0.80.0.dist-info")
+    world.run.rules.insert(0, (lambda a: "--exact-match" in a, (0, "v0.81.1\n", ""), None))
+    assert names(check(world))["host-tree"].status != de.OK
+
+
+def test_a_pth_for_another_directory_set_is_still_a_failure_when_the_tag_also_moved(world):
+    healthy(world)
+    (world.site / de.PTH_NAME).write_text("/somewhere/else\n")
+    world.run.rules.insert(0, (lambda a: "--exact-match" in a, (0, "v0.81.1\n", ""), None))
+    from orchard import preflight as pf
+    row = pf.check_demo_env(world.venv / "bin" / "python", check(world), "cmd")
+    assert row.status == pf.BLOCK
+
+
 def test_a_record_with_another_requirements_hash_is_to_do(world, monkeypatch):
     healthy(world)
     monkeypatch.setattr(de, "REQUIREMENTS", de.REQUIREMENTS[:-1] + ("numpy==1.26.3",))
