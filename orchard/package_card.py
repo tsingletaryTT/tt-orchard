@@ -124,6 +124,7 @@ class CardFacts:
     vocab: tuple[int, int] | None = None  # (this model's vocabulary size, the nearest model's) when the model is a vocabulary trim
     sampling_decision: dict | None = None   # stage 2's sampling decision (orchard/sampling_choice.py); only the required profile's card states it
     drafter_off_by_sampling: bool = False   # stage 2 chose the drafter-off configuration because the model needs sampling (every profile)
+    sampling_trial_chips: int | None = None  # the chip count the sampling trial ran on (stage 2's), which may differ from this profile's
     sampling: dict | None = None     # what stage 2's sampling probe found (package.sampling_summary): card_sentence, serving; only the required profile
 
 
@@ -339,8 +340,15 @@ def render_card(f: CardFacts) -> str:
         limits.append("The stage 2 rows were measured without the graft (the drafter off and sampling on the host). The graft trial "
                       "and the stage 7 rows were measured with it.")
     if f.drafter_off_by_sampling:
+        # Which checks covered this package: the trial ran on stage 2's chip count, stage 4 checked this profile's, and only a package that stage 7
+        # booted (`verified`) can claim the boot check.
+        if f.sampling_trial_chips in (None, f.chips):
+            seen = f"the sampling trial and stage 4 on {f.chips} chips" if f.sampling_trial_chips == f.chips else f"stage 4 on {f.chips} chips"
+        else:
+            seen = f"the sampling trial, which ran on {f.sampling_trial_chips} chips, and by stage 4 on this package's {f.chips} chips"
+        booted = ("and by the stage 7 boot check of this package" if f.verified else "Stage 7 did not boot this package")
         limits.append("Stage 2's own check served the configuration with the drafter on. The drafter-off configuration this package serves was "
-                      "checked by the sampling trial, stage 4 and stage 7.")
+                      f"checked by {seen}" + (f", {booted}." if f.verified else f". {booted}."))
     if f.drafter_off:
         limits.append("Speculative decoding is off, so decode speed is that of plain decoding.")
     if f.vocab:

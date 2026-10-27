@@ -1363,6 +1363,7 @@ def write_card(out: Path, facts: RunFacts, profile: dict, *, namespace: str,
         graft=facts.graft, graft_decision=facts.graft_decision, use=use, vocab=facts.vocab, sampling=sampling,
         sampling_decision=facts.sampling_decision if profile["required"] else None,
         drafter_off_by_sampling=bool(facts.sampling_decision and facts.sampling_decision.get("choice") == "drafter-off"),
+        sampling_trial_chips=facts.source.chips,
         stage_2_without_graft=(facts.graft is not None and not facts.stage_2_grafted and facts.graft_decision != "graft"))
     (out / "README.md").write_text(render_card(facts_card), encoding="utf-8")
 
