@@ -284,3 +284,20 @@ def test_a_crash_partial_attempt_is_in_the_report_too(tmp_path, monkeypatch, fak
     assert code == kp.EXIT_ERROR
     data = json.loads((tmp_path / "out" / "kernel-probe-report.json").read_text())
     assert [a["attempt"] for a in data["attempts"]] == [1]
+
+
+def test_a_failing_record_callback_never_ends_the_call():
+    w = World()
+
+    def broken(summary):
+        raise OSError("the disk is full")
+    c = hwtool.HardwareCheck(hwtool.HwPolicy(), prepare=w.prepare, run=w.run, clock=w.clock, sleep=w.sleep,
+                             on_record=broken)
+    assert c.call({}).startswith("hardware_check 1 of 6: PASS")
+    assert c.summary()["calls_counted"] == 1
+
+
+def test_the_calls_file_is_named_by_the_op_and_the_attempt(tmp_path):
+    a = kp.hwcheck_calls_path(tmp_path, "add", 1)
+    assert a != kp.hwcheck_calls_path(tmp_path, "silu_mul", 1) and a != kp.hwcheck_calls_path(tmp_path, "add", 2)
+    assert a.parent == tmp_path / ".hwcheck"

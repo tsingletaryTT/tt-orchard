@@ -183,9 +183,8 @@ class HardwareCheck:
                     break
                 polls += 1
                 q = hw.get("queued") if isinstance(hw.get("queued"), dict) else {}
-                ok = bool(q.get("ticket")) and q.get("cancel_error") is None
-                cancelled = cancelled and ok
-                if not ok:
+                if not (bool(q.get("ticket")) and q.get("cancel_error") is None):
+                    cancelled = False
                     break                           # keep this ticket in the answer: it is the one that needs cleanup
                 remaining = p.wait_s - (self.clock() - start)
                 if remaining <= 0:
