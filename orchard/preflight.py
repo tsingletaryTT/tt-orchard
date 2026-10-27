@@ -603,7 +603,7 @@ class Signals:
     skills_freshness: Callable | None = None    # () -> list[skillsfresh.Freshness] for the skills_dirs clones
     bus: Callable | None = None                 # () -> orchard.bus.Bus: the chips the kernel shows (sysfs and /dev; no lease)
     stock_params: Callable | None = None        # (name) -> Path of tt-transformers' model_params/<name> on this box, or None
-    demo_env: Callable | None = None            # (python | None) -> (orchard.demo_env results or None, the command that builds it)
+    demo_env: Callable | None = None            # (python | None, tree | None) -> (orchard.demo_env results or None, the command that builds it)
 
 
 def check_lab(lab, status) -> Check:
@@ -797,7 +797,15 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
     if s.demo_env is not None and not in_lab and (stock_route or cfg.demo_python is not None):
         def demo() -> Check:
             python = cfg.demo_python
-            results, command = s.demo_env(python)
+            # The tree the demo will run from: the stock route's own (tt-metal/models/tt_transformers/model_params/<name>). Without a
+            # stock route the signal uses the tree the venv's record names, so an environment built with --tt-metal-dir is judged
+            # against the tree it was built from.
+            params = Path((base_check.data or {}).get("stock_runtime", {}).get("params_dir") or "") if stock_route else None
+            tree = None
+            if params is not None and params.parent.name == "model_params" and params.parent.parent.name == "tt_transformers" \
+                    and params.parent.parent.parent.name == "models" and len(params.parents) > 3:
+                tree = params.parents[3]
+            results, command = s.demo_env(python, tree)
             return check_demo_env(python, results, command)
         guarded("demo-env", "config-invalid", demo)
     if s.skills_freshness is not None:
@@ -926,8 +934,9 @@ def default_signals(cfg, research_options=None) -> Signals:
         tree = os.environ.get("ORCHARD_TT_METAL_DIR") or str((cfg.operator_home or supervisor.operator_home()) / "tt-metal")
         return stock_runtime.find_params(tree, name)
 
-    def demo_env(python):
-        """(results of `demo-env --check`, the command that builds the venv). No python or an unknown layout runs no check."""
+    def demo_env(python, tree=None):
+        """(results of `demo-env --check`, the command that builds the venv). No python or an unknown layout runs no check.
+        The tree is `tree`, else the one the venv's record names, else $ORCHARD_TT_METAL_DIR, else tt-metal under the operator home."""
         import argparse
         from orchard import demo_env as de
         home = Path(cfg.operator_home or supervisor.operator_home())
@@ -937,7 +946,13 @@ def default_signals(cfg, research_options=None) -> Signals:
         if python is not None and Path(python).parent.name == "bin":
             top = Path(python).parent.parent
             venv = top if not Path(python).exists() or (top / "pyvenv.cfg").is_file() else None
-        env = de.env_from_args(argparse.Namespace(venv_dir=str(venv) if venv else None, tt_metal_dir=None), environ=os.environ, home=home)
+        if tree is None and venv is not None:
+            import types
+            rec = de.read_record(types.SimpleNamespace(venv_dir=venv))
+            recorded = rec.get("host_tree", {}).get("path") if rec and isinstance(rec.get("host_tree"), dict) else None
+            tree = recorded if isinstance(recorded, str) and recorded else None
+        env = de.env_from_args(argparse.Namespace(venv_dir=str(venv) if venv else None, tt_metal_dir=str(tree) if tree else None),
+                               environ=os.environ, home=home)
         return (de.ensure(env, check_only=True) if venv else None), de.fix_command(env)
 
     return Signals(

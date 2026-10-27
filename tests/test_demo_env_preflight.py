@@ -85,7 +85,7 @@ def test_a_python_that_is_not_in_a_venv_bin_directory_is_a_warning_that_could_no
 def stock_signals(**over):
     rep = report(tt_transformers=[ROW_PARAMS, ROW_README])
     base = dict(research=lambda *a: rep, stock_params=lambda name: Path("/host/params") / name,
-                demo_env=lambda python: (HEALTHY if python else None, CMD))
+                demo_env=lambda python, tree=None: (HEALTHY if python else None, CMD))
     base.update(over)
     return signals(**base)
 
@@ -111,13 +111,13 @@ def test_a_broken_demo_python_blocks_the_run_before_anything_starts(tmp_path):
     c = cfg(tmp_path)
     c.demo_python = PY
     bad = [de.Result("numpy", de.FAIL, "numpy 2.5.3") if r.name == "numpy" else r for r in HEALTHY]
-    out = pf.run_preflight(c, "Cloudflare/clef", accept_credentials=False, signals=stock_signals(demo_env=lambda p: (bad, CMD)))
+    out = pf.run_preflight(c, "Cloudflare/clef", accept_credentials=False, signals=stock_signals(demo_env=lambda p, t=None: (bad, CMD)))
     assert [x.name for x in pf.blocked(out)] == ["demo-env"]
 
 
 def test_a_run_that_is_not_stock_runtime_has_no_row_unless_demo_python_is_configured(tmp_path):
     called = []
-    sig = signals(demo_env=lambda p: called.append(p) or (HEALTHY, CMD))
+    sig = signals(demo_env=lambda p, t=None: called.append(p) or (HEALTHY, CMD))
     out = pf.run_preflight(cfg(tmp_path), "Cloudflare/clef", accept_credentials=False, signals=sig)
     assert "demo-env" not in names(out) and called == []
     c = cfg(tmp_path)
@@ -135,7 +135,7 @@ def test_a_lab_run_has_no_demo_row_because_its_tests_do_not_run_here(tmp_path):
     c = cfg(tmp_path)
     c.demo_python = PY
     c.mode = "lab"
-    out = pf.run_preflight(c, "Cloudflare/clef", accept_credentials=False, signals=signals(demo_env=lambda p: (HEALTHY, CMD)))
+    out = pf.run_preflight(c, "Cloudflare/clef", accept_credentials=False, signals=signals(demo_env=lambda p, t=None: (HEALTHY, CMD)))
     assert "demo-env" not in names(out)
 
 
@@ -143,7 +143,7 @@ def test_a_failing_signal_blocks_instead_of_raising(tmp_path):
     c = cfg(tmp_path)
     c.demo_python = PY
 
-    def boom(p):
+    def boom(p, t=None):
         raise OSError("no such file")
     out = pf.run_preflight(c, "Cloudflare/clef", accept_credentials=False, signals=signals(demo_env=boom))
     row_ = next(x for x in out if x.name == "demo-env")
@@ -155,7 +155,7 @@ def test_a_resumed_stock_run_keeps_the_row(tmp_path):
     params = tmp_path / "tt-metal" / "models" / "tt_transformers" / "model_params" / "X-1B"
     params.mkdir(parents=True)
     (params / "config.json").write_text("{}")
-    out = pf.run_preflight(cfg(tmp_path), "Cloudflare/clef", accept_credentials=False, signals=signals(demo_env=lambda p: (None, CMD)),
+    out = pf.run_preflight(cfg(tmp_path), "Cloudflare/clef", accept_credentials=False, signals=signals(demo_env=lambda p, t=None: (None, CMD)),
                            stock_recorded=str(params))
     assert "demo-env" in names(out)
 
@@ -190,3 +190,79 @@ def test_default_signal_with_a_python_outside_a_bin_directory_runs_no_check(tmp_
     monkeypatch.setattr(de, "ensure", lambda *a, **k: pytest.fail("no check for an unknown layout"))
     results, _ = pf.default_signals(cfg(tmp_path)).demo_env(Path("/usr/bin/python3"))
     assert results is None
+
+
+# ---- which host tree the environment is checked against (review of PR 101) -------------------------------------------------
+
+TREE_PARAMS = Path("/work/tt-metal/models/tt_transformers/model_params")
+
+
+def test_a_stock_route_checks_the_environment_against_the_tree_the_demo_will_run_from(tmp_path):
+    seen = []
+    c = cfg(tmp_path)
+    c.demo_python = PY
+    sig = stock_signals(stock_params=lambda name: TREE_PARAMS / name, demo_env=lambda p, tree=None: seen.append(tree) or (HEALTHY, CMD))
+    pf.run_preflight(c, "Cloudflare/clef", accept_credentials=False, signals=sig)
+    assert seen == [Path("/work/tt-metal")]
+
+
+def test_a_params_directory_outside_the_tt_transformers_layout_names_no_tree(tmp_path):
+    seen = []
+    c = cfg(tmp_path)
+    c.demo_python = PY
+    sig = stock_signals(stock_params=lambda name: Path("/host/params") / name,
+                        demo_env=lambda p, tree=None: seen.append(tree) or (HEALTHY, CMD))
+    pf.run_preflight(c, "Cloudflare/clef", accept_credentials=False, signals=sig)
+    assert seen == [None]
+
+
+def test_without_a_stock_route_no_tree_is_named_and_the_signal_decides(tmp_path):
+    seen = []
+    c = cfg(tmp_path)
+    c.demo_python = PY
+    pf.run_preflight(c, "Cloudflare/clef", accept_credentials=False,
+                     signals=signals(demo_env=lambda p, tree=None: seen.append(tree) or (HEALTHY, CMD)))
+    assert seen == [None]
+
+
+def _record(venv, tree):
+    import json
+    venv.mkdir(parents=True)
+    (venv / "bin").mkdir()
+    (venv / "bin" / "python").write_text("")
+    (venv / "pyvenv.cfg").write_text("")
+    (venv / de.RECORD).write_text(json.dumps({"host_tree": {"path": str(tree), "tag": "v0.80.0", "sha": "x"}}))
+
+
+def test_the_default_signal_uses_the_tree_the_venv_was_built_from_when_no_tree_is_named(tmp_path, monkeypatch):
+    seen = []
+    monkeypatch.setattr(de, "ensure", lambda env, check_only, say=None: seen.append(env) or HEALTHY)
+    monkeypatch.delenv("ORCHARD_TT_METAL_DIR", raising=False)
+    venv = tmp_path / "venvs" / "demo"
+    _record(venv, tmp_path / "work" / "tt-metal")
+    c = cfg(tmp_path)
+    c.operator_home = tmp_path / "op"
+    results, command = pf.default_signals(c).demo_env(venv / "bin" / "python")
+    assert seen[0].tt_metal_dir == tmp_path / "work" / "tt-metal"
+    assert f"--tt-metal-dir {tmp_path / 'work' / 'tt-metal'}" in command
+
+
+def test_a_named_tree_beats_the_record_and_the_variable(tmp_path, monkeypatch):
+    seen = []
+    monkeypatch.setattr(de, "ensure", lambda env, check_only, say=None: seen.append(env) or HEALTHY)
+    monkeypatch.setenv("ORCHARD_TT_METAL_DIR", str(tmp_path / "from-env"))
+    venv = tmp_path / "venvs" / "demo"
+    _record(venv, tmp_path / "from-record")
+    _, command = pf.default_signals(cfg(tmp_path)).demo_env(venv / "bin" / "python", tmp_path / "from-stock")
+    assert seen[0].tt_metal_dir == tmp_path / "from-stock" and f"--tt-metal-dir {tmp_path / 'from-stock'}" in command
+
+
+def test_a_record_that_cannot_be_read_falls_back_to_the_variable(tmp_path, monkeypatch):
+    seen = []
+    monkeypatch.setattr(de, "ensure", lambda env, check_only, say=None: seen.append(env) or HEALTHY)
+    monkeypatch.setenv("ORCHARD_TT_METAL_DIR", str(tmp_path / "from-env"))
+    venv = tmp_path / "venvs" / "demo"
+    _record(venv, tmp_path / "x")
+    (venv / de.RECORD).write_text("{not json")
+    pf.default_signals(cfg(tmp_path)).demo_env(venv / "bin" / "python")
+    assert seen[0].tt_metal_dir == tmp_path / "from-env"
