@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import stat
 import tomllib
 from pathlib import Path
@@ -78,6 +79,9 @@ def main(args, *, out, environ=None, transport=None, getter=None, home=None) -> 
             tel.report(args.call_id, helped=bool(args.helped))
         except KeyError:
             say(f"telegraph: no call {args.call_id} in {directory}")
+            return EXIT_PROBLEM
+        except tg.LedgerUnavailable:
+            say(f"telegraph: the verdict could not be written to {directory}")
             return EXIT_PROBLEM
         say(f"recorded: call {args.call_id} {'helped' if args.helped else 'did not help'}")
         return EXIT_OK
@@ -144,6 +148,16 @@ def _ping(cfg: tg.Config, key, say, getter) -> int:
     return 1 if missing else 0
 
 
+def _report_command(tel: tg.Telegraph, args, call_id: str) -> str:
+    """The command that reports this answer: it carries the directory and any explicit config the ask used."""
+    parts = ["tt-orchard", "telegraph", "report", call_id, "--helped|--not-helped", "--dir", shlex.quote(str(tel.dir))]
+    for flag, value in (("--telegraph-config", getattr(args, "telegraph_config", None)),
+                        ("--config", getattr(args, "config", None))):
+        if value:
+            parts += [flag, shlex.quote(str(value))]
+    return " ".join(parts)
+
+
 def _ask(tel: tg.Telegraph, args, say) -> int:
     try:
         task, failure = _read(args.task_file, "task"), _read(args.failure_file, "failure")
@@ -158,7 +172,7 @@ def _ask(tel: tg.Telegraph, args, say) -> int:
     where = "cache" if got.cached else got.model
     say(f"call {got.call_id}: {where}, {got.tokens_in} in, {got.tokens_out} out, {got.latency_s:.1f}s"
         + (f", ${got.cost_usd:.6f}" if got.cost_usd is not None else ", cost unknown")
-        + f". Tell the ledger whether it helped: tt-orchard telegraph report {got.call_id} --helped|--not-helped")
+        + f". Tell the ledger whether it helped: {_report_command(tel, args, got.call_id)}")
     return EXIT_OK
 
 

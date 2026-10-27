@@ -147,6 +147,9 @@ def load(table: dict | None, *, base: Path) -> Config:
     if api not in APIS:
         raise ConfigError(f"telegraph.api must be one of {', '.join(APIS)}")
     key_env, key_file = table.get("key_env"), table.get("key_file")
+    for name, value in (("key_env", key_env), ("key_file", key_file)):
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            raise ConfigError(f"telegraph.{name} must be a non-empty string")
     if key_env and key_file:
         raise ConfigError("telegraph: set only one of key_env and key_file")
     if key_file:
@@ -155,7 +158,10 @@ def load(table: dict | None, *, base: Path) -> Config:
         if key_file == REPO or REPO in key_file.parents:
             raise ConfigError("telegraph.key_file is inside the checkout; keep the key outside any repository")
     prices = {}
-    for model, pair in (table.get("prices") or {}).items():
+    raw_prices = table.get("prices", {})
+    if not isinstance(raw_prices, dict):
+        raise ConfigError("telegraph.prices must be a table of model names to [input, output] dollars per million tokens")
+    for model, pair in raw_prices.items():
         if (not isinstance(pair, list) or len(pair) != 2 or
                 not all(isinstance(x, (int, float)) and not isinstance(x, bool) and x >= 0 for x in pair)):
             raise ConfigError(f"telegraph.prices.{model} must be [input, output] dollars per million tokens")
@@ -320,21 +326,24 @@ def _accounting(recs: list[dict]) -> dict:
             reserves[r["reserve"]] = r
         elif _sent(r):
             settled[r["call_id"]] = r
-    total = {"calls": 0, "tokens": 0, "cost": 0.0, "problems": {}}
+    total = {"calls": 0, "tokens": 0, "cost": 0.0, "unknown_cost": 0, "problems": {}}
     for call_id in dict.fromkeys(list(reserves) + list(settled)):
         st, rs = settled.get(call_id), reserves.get(call_id)
         if st is not None and (st.get("usage_known") is not False or rs is None):
             tokens = int(st.get("tokens_in") or 0) + int(st.get("tokens_out") or 0)
-            cost = st.get("cost_usd") if isinstance(st.get("cost_usd"), (int, float)) else 0.0
+            source = st.get("cost_usd")
         else:
             tokens = int(rs.get("tokens") or 0)
-            cost = rs.get("cost_usd") if isinstance(rs.get("cost_usd"), (int, float)) else 0.0
+            source = rs.get("cost_usd")
+        known = isinstance(source, (int, float)) and not isinstance(source, bool)
+        cost = source if known else 0.0                    # an unknown cost is counted apart; it is never taken as zero
         name = (st or rs).get("problem")
-        here = total["problems"].setdefault(name, {"calls": 0, "tokens": 0, "cost": 0.0})
+        here = total["problems"].setdefault(name, {"calls": 0, "tokens": 0, "cost": 0.0, "unknown_cost": 0})
         for t in (total, here):
             t["calls"] += 1
             t["tokens"] += tokens
             t["cost"] += cost
+            t["unknown_cost"] += 0 if known else 1
     return total
 
 
@@ -447,8 +456,10 @@ class Telegraph:
         if rec is None:
             raise KeyError(call_id)
         key, _ = self._key()
-        self._append({"report": call_id, "helped": bool(helped), "ts": self.clock(),
-                      "note": redact(note, hostname=self.hostname, home=self.home, secrets=(key,) if key else ())[:300]})
+        if not self._append({"report": call_id, "helped": bool(helped), "ts": self.clock(),
+                             "note": redact(note, hostname=self.hostname, home=self.home,
+                                            secrets=(key,) if key else ())[:300]}):
+            raise LedgerUnavailable("the verdict could not be written")
 
     # ------------------------------------------------------------------------------------------- parts
 
@@ -481,13 +492,16 @@ class Telegraph:
         """Why this call may not be sent, or None. `worst` is what the call could cost at most (its input bounded by the
         request's size in bytes, its output by max_output_tokens); `acct` is `_accounting` of the ledger."""
         cfg = self.cfg
-        here = acct["problems"].get(problem, {"calls": 0, "tokens": 0, "cost": 0.0})
+        here = acct["problems"].get(problem, {"calls": 0, "tokens": 0, "cost": 0.0, "unknown_cost": 0})
         name = f"problem {problem}"
         if here["calls"] >= cfg.max_calls_per_problem:
             return f"the call cap for {name} is reached ({here['calls']} of {cfg.max_calls_per_problem})"
         if cfg.max_tokens_per_problem is not None and here["tokens"] >= cfg.max_tokens_per_problem:
             return f"the token cap for {name} is reached ({here['tokens']} of {cfg.max_tokens_per_problem})"
         if cfg.max_cost_per_problem_usd is not None:
+            if here["unknown_cost"]:
+                return (f"{here['unknown_cost']} earlier calls for {name} have no known cost (they were made without a price), "
+                        "so the cost cap cannot be checked; price them or use a new ledger directory")
             if worst["cost"] is None:
                 return f"the cost cap for {name} needs a price, and there is no price for {model}"
             if here["cost"] + worst["cost"] > cfg.max_cost_per_problem_usd:
@@ -498,6 +512,9 @@ class Telegraph:
         if acct["tokens"] >= cfg.max_total_tokens:
             return f"the token cap is reached ({acct['tokens']} of {cfg.max_total_tokens})"
         if cfg.max_cost_usd is not None:
+            if acct["unknown_cost"]:
+                return (f"{acct['unknown_cost']} earlier calls have no known cost (they were made without a price), so the "
+                        "cost cap cannot be checked; price them or use a new ledger directory")
             if worst["cost"] is None:
                 return f"the cost cap needs a price, and there is no price for {model}"
             if acct["cost"] + worst["cost"] > cfg.max_cost_usd:
@@ -530,7 +547,7 @@ class Telegraph:
         try:
             status, raw = self.transport(url, headers, json.dumps(body).encode(), self.cfg.timeout_s)
             if status != 200:
-                error = f"HTTP {status}: " + raw[:160].decode("utf-8", "replace")
+                error = f"HTTP {status}: " + raw.decode("utf-8", "replace")
                 usage_known = 400 <= status < 500 and status != 408    # refused before any processing
             else:
                 text, usage, error = self._parse(raw)
@@ -544,7 +561,10 @@ class Telegraph:
             reason = clean(error)[:200]
             tin, tout = usage if usage else (0, 0)
             price = self.cfg.prices.get(model)
-            cost = round(tin * price[0] / 1e6 + tout * price[1] / 1e6, 9) if price and usage else None
+            if usage:
+                cost = round(tin * price[0] / 1e6 + tout * price[1] / 1e6, 9) if price else None
+            else:
+                cost = 0.0 if usage_known else None          # refused before processing: free. Otherwise the cost is unknown
             self._append({**rec, "outcome": "error", "reason": reason, "tokens_in": tin, "tokens_out": tout,
                           "cost_usd": cost, "usage_known": usage_known or usage is not None})
             return Answer(False, reason=reason, call_id=base["call_id"], model=model, latency_s=t1 - t0)
@@ -556,12 +576,15 @@ class Telegraph:
         cost = round(tin * price[0] / 1e6 + tout * price[1] / 1e6, 9) if price else None
         reply_file = f"replies/{base['call_id']}.txt"
         self._write(self.dir / reply_file, text)
-        self._write(cache, json.dumps({"text": text, "reply_file": reply_file, "call_id": base["call_id"]}))
-        self._append({**rec, "outcome": "ok", "tokens_in": tin, "tokens_out": tout, "cost_usd": cost,
-                      "usage_known": not estimated, "reply_file": reply_file,
-                      **({"usage_estimated": True} if estimated else {})})
+        recorded = self._append({**rec, "outcome": "ok", "tokens_in": tin, "tokens_out": tout, "cost_usd": cost,
+                                 "usage_known": not estimated, "reply_file": reply_file,
+                                 **({"usage_estimated": True} if estimated else {})})
+        if recorded:                                    # the cache is published only once the call can be reported
+            self._write(cache, json.dumps({"text": text, "reply_file": reply_file, "call_id": base["call_id"]}))
         return Answer(True, text, call_id=base["call_id"], model=model, tokens_in=tin, tokens_out=tout,
-                      latency_s=t1 - t0, cost_usd=cost)
+                      latency_s=t1 - t0, cost_usd=cost,
+                      reason="" if recorded else ("the answer arrived but the ledger could not record this call, so it is "
+                                                  "not cached and cannot be reported"))
 
     def _parse(self, raw: bytes) -> tuple[str, tuple | None, str]:
         """(text, usage, error). The usage is returned with an error too, because a failed answer was still paid for."""
@@ -614,6 +637,7 @@ class Telegraph:
         try:
             self.dir.mkdir(parents=True, exist_ok=True, mode=0o700)
             fd = os.open(self.dir / LOCK, os.O_WRONLY | os.O_CREAT, 0o600)
+            os.fchmod(fd, 0o600)
         except OSError as exc:
             raise LedgerUnavailable(type(exc).__name__) from exc
         try:
@@ -632,9 +656,12 @@ class Telegraph:
             self.dir.mkdir(parents=True, exist_ok=True, mode=0o700)
             fd = os.open(self.dir / LEDGER, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o600)
             try:
+                os.fchmod(fd, 0o600)
                 size = os.fstat(fd).st_size
                 torn = size > 0 and os.pread(fd, 1, size - 1) != b"\n"
-                os.write(fd, (b"\n" if torn else b"") + (json.dumps(rec, sort_keys=True) + "\n").encode("utf-8"))
+                data = (b"\n" if torn else b"") + (json.dumps(rec, sort_keys=True) + "\n").encode("utf-8")
+                if os.write(fd, data) != len(data):
+                    return False                     # a short write leaves a record nobody can read
             finally:
                 os.close(fd)
             return True
@@ -646,6 +673,7 @@ class Telegraph:
             path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             try:
+                os.fchmod(fd, 0o600)
                 os.write(fd, text.encode("utf-8"))
             finally:
                 os.close(fd)

@@ -274,3 +274,41 @@ def test_ping_of_an_anthropic_configuration_uses_that_apis_headers(tmp_path):
     assert code == 0 and seen["url"] == "https://llm.example.org/v1/models"
     assert seen["headers"]["x-api-key"] == KEY and seen["headers"]["anthropic-version"] == tg.ANTHROPIC_VERSION
     assert "Authorization" not in seen["headers"]
+
+
+def test_report_that_cannot_write_exits_with_an_error_and_does_not_say_recorded(tmp_path, monkeypatch):
+    d, cfg = str(tmp_path / "d"), str(write(tmp_path))
+    run(["ask", "--problem", "p", *files(tmp_path), "--dir", d, "--telegraph-config", cfg], tmp_path,
+        transport=ok_transport())
+    call_id = first_call_id(tmp_path / "d")
+    monkeypatch.setattr(tg.Telegraph, "_append", lambda self, rec: False)
+    code, text = run(["report", call_id, "--helped", "--dir", d, "--telegraph-config", cfg], tmp_path)
+    assert code == 2 and "recorded" not in text and "could not" in text
+
+
+def test_the_suggested_report_command_carries_the_directory_and_the_config(tmp_path):
+    d, cfg = str(tmp_path / "my dir"), str(write(tmp_path))
+    code, text = run(["ask", "--problem", "p", *files(tmp_path), "--dir", d, "--telegraph-config", cfg], tmp_path,
+                     transport=ok_transport())
+    line = next(l for l in text.splitlines() if "telegraph report" in l)
+    import shlex
+    assert f"--dir {shlex.quote(d)}" in line and f"--telegraph-config {shlex.quote(cfg)}" in line
+
+
+def test_the_suggested_report_command_names_the_default_directory_when_none_was_given(tmp_path):
+    cfg = str(write(tmp_path))
+    code, text = run(["ask", "--problem", "p", *files(tmp_path), "--telegraph-config", cfg], tmp_path,
+                     transport=ok_transport())
+    line = next(l for l in text.splitlines() if "telegraph report" in l)
+    assert f"--dir {cmd.default_dir(tmp_path)}" in line
+
+
+def test_a_config_path_with_a_space_is_quoted_in_the_suggested_command(tmp_path):
+    sub = tmp_path / "my cfg"
+    sub.mkdir()
+    cfg = str(write(sub))
+    code, text = run(["ask", "--problem", "p", *files(tmp_path), "--telegraph-config", cfg], tmp_path,
+                     transport=ok_transport())
+    line = next(l for l in text.splitlines() if "telegraph report" in l)
+    import shlex
+    assert f"--telegraph-config {shlex.quote(cfg)}" in line and "'" in line
