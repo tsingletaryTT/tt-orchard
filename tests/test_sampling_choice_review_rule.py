@@ -19,7 +19,7 @@ from orchard.card_use import PERF_IN_PROSE  # noqa: E402
 # ---- finding 3: the faster configuration is the one used ------------------------------------------------------------------------------
 
 def test_a_variant_that_applies_sampling_below_the_floor_beats_a_slower_ignoring_original():
-    d = sc.decide(NEEDED, side(verdict="sampled-ignored", greedy=5.0, sampled=5.0), variant(greedy=8.0, sampled=8.0))
+    d = sc.decide(NEEDED, side(verdict="sampled-ignored", greedy=5.0, sampled=5.0), variant(verdict="sampled-ignored", greedy=8.0, sampled=8.0))
     assert d["choice"] == "drafter-off" and d["flag"] == "no-variant-serves-purpose"
     assert "8.0 tokens/s" in d["reason"] and "5.0 tokens/s" in d["reason"] and "faster" in d["reason"]
 
@@ -30,16 +30,16 @@ def test_when_both_ignore_sampling_the_faster_one_is_chosen():
 
 
 def test_a_variant_that_is_slower_than_the_original_leaves_the_original():
-    d = sc.decide(NEEDED, side(greedy=59.0, sampled=59.0), variant(greedy=8.0, sampled=8.0))
+    d = sc.decide(NEEDED, side(greedy=59.0, sampled=59.0), variant(verdict="sampled-ignored", greedy=8.0, sampled=8.0))
     assert d["choice"] == "keep" and d["flag"] == "no-variant-serves-purpose" and "at least as fast" in d["reason"]
 
 
 def test_equal_speeds_leave_the_original():
-    d = sc.decide(NEEDED, side(greedy=8.0, sampled=8.0), variant(greedy=8.0, sampled=8.0))
+    d = sc.decide(NEEDED, side(greedy=8.0, sampled=8.0), variant(verdict="sampled-ignored", greedy=8.0, sampled=8.0))
     assert d["choice"] == "keep"
 
 
-@pytest.mark.parametrize("cur,var,verdict", [((None, None), (8.0, 8.0), "sampled-full-speed"), ((5.0, 5.0), (None, None), "sampled-ignored")])
+@pytest.mark.parametrize("cur,var,verdict", [((None, None), (8.0, 8.0), "sampled-ignored"), ((5.0, 5.0), (None, None), "sampled-ignored")])
 def test_a_missing_speed_leaves_the_original_and_says_the_speeds_could_not_be_compared(cur, var, verdict):
     d = sc.decide(NEEDED, side(greedy=cur[0], sampled=cur[1]), variant(verdict=verdict, greedy=var[0], sampled=var[1]))
     assert d["choice"] == "keep" and d["flag"] == "no-variant-serves-purpose" and "not measured" in d["reason"]
@@ -56,7 +56,7 @@ def test_a_variant_that_did_not_serve_is_never_chosen_however_the_speeds_compare
 
 
 def test_the_gate_recomputes_the_faster_choice_from_the_files(tmp_path):
-    run, s2 = make_run(tmp_path, stage2=report(ignored=True, seconds=19.2), variant=report(drafter="off", ignored=False, seconds=12.0))
+    run, s2 = make_run(tmp_path, stage2=report(ignored=True, seconds=19.2), variant=report(drafter="off", ignored=True, seconds=12.0))
     d = save(run, s2)
     assert d["choice"] == "drafter-off" and d["flag"] == "no-variant-serves-purpose"
     assert sc.decision_problems(s2, run) == []
@@ -65,7 +65,7 @@ def test_the_gate_recomputes_the_faster_choice_from_the_files(tmp_path):
 
 
 def test_the_card_sentence_names_the_faster_configuration_that_was_chosen():
-    d = sc.decide(NEEDED, side(greedy=5.0, sampled=5.0), variant(greedy=8.0, sampled=8.0))
+    d = sc.decide(NEEDED, side(greedy=5.0, sampled=5.0), variant(verdict="sampled-ignored", greedy=8.0, sampled=8.0))
     s = sc.card_sentence(d)
     assert "chose the drafter-off configuration" in s and "faster" in s and "does not do what the model needs" in s
     assert "The drafter-off configuration applies sampling and decodes above" not in s

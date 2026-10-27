@@ -39,18 +39,24 @@ The choice is `keep` (the configuration stage 2 served stays) or `drafter-off` (
 |---|---|---|---|---|
 | no | any | not tried | keep | none |
 | yes | applies sampling, at or above the floor | not tried | keep | none |
-| yes | applies sampling, below the floor | not tried | keep | `below-floor` |
+| yes | applies sampling, below the floor | not tried | keep | `sampling-applied-below-floor` |
 | yes | ignores sampling, drafter on | serves, applies sampling, at or above the floor | drafter-off | none |
-| yes | ignores sampling, drafter on | serves, applies sampling, below the floor | keep | `no-variant-serves-purpose` |
-| yes | ignores sampling, drafter on | does not serve, or does not apply sampling | keep | `no-variant-serves-purpose` |
+| yes | ignores sampling or not shown, drafter on | serves, applies sampling, below the floor | drafter-off | `sampling-applied-below-floor` |
+| yes | ignores sampling, drafter on | does not serve, or does not apply sampling | the faster measured one (equal or unmeasured: keep) | `no-variant-serves-purpose` |
 | yes | probe missing or inconclusive, drafter on | serves, at or above the floor (or speed unknown) | drafter-off | `unverified` when no probe verdict backs it |
 | yes | probe missing or inconclusive, drafter on | does not serve | keep | `unverified` |
 | yes | ignores sampling or unknown, drafter off or not known | not possible | keep | `unverified` or `no-variant-serves-purpose` |
 
-When the flag is `no-variant-serves-purpose` the run continues with the faster configuration, the decision file says in plain words that neither
-configuration does what the model needs, and the stage 8 bundle lists it under the risks the operator must read. A flag never fails the stage:
-the operator decides. A configuration that ignores sampling is kept in that case because the alternative (a variant that is too slow to use)
-is no better, and the record says which of the two problems was chosen.
+Operator decision: when sampling is needed and no configuration both applies it and clears the floor, the configuration that applies sampling is
+preferred even when it is below the floor and even when a faster one ignores sampling, because a configuration that cannot do what the model is for
+has no value. The decision is flagged `sampling-applied-below-floor` so the operator sees that the package is slow, and the card and bundle say it
+is slow (a measured speed is given only where one was measured). Only when neither configuration applies sampling, or applying is not shown for
+either, does the faster measured one win, flagged `no-variant-serves-purpose`; speeds are compared only when both exist on the same basis (sampled or
+greedy), and equal or unmeasured speeds keep the configuration stage 2 served. A flag never fails the stage: the operator decides.
+
+The probe's verdict `sampled-matches-greedy` (sampled replies equal the greedy text or each other, with no high-temperature request that confirms
+it) is suspected, not confirmed. For the choice it counts as "sampling not shown to apply", like `sampled-ignored`; every record words it as
+suspected, and only `sampled-ignored` is worded as ignored sampling.
 
 The variant is measured by `sampling_trial.py`, a hardware test under the same lease rules as the graft trial. It builds the stage's
 configuration with `"drafter": "off"` in `sampling-trial/variant/` (own tensor cache), runs the stage 2 check (which includes the sampling

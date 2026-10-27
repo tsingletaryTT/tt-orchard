@@ -1205,8 +1205,12 @@ When sampling is needed, the served configuration has the drafter on and its sam
 runs one more hardware test (`sampling_trial.py`, in `stages/2/sampling-trial/`, with its own tensor cache). It serves the drafter-off
 variant and runs the stage 2 check on it, probe included. The variant is chosen when it applies sampling and decodes at least
 10 tokens/s (`SAMPLING_MIN_TOKS_PER_S`, a choice taken from one measurement). When no configuration both applies sampling and clears the
-floor, the faster one is kept, the decision file says so in plain words (`no-variant-serves-purpose`), and the card and the stage 8 bundle
-repeat it. A failed trial is not a stage failure.
+floor, the operator's rule applies: a configuration that cannot do what the model is for has no value, however fast it is. The configuration
+that applies sampling is chosen even when it is slow and even when a faster one ignores sampling, and the decision is flagged
+`sampling-applied-below-floor`. Only when neither applies sampling (or applying is not shown for either) does the faster measured one win, with the
+flag `no-variant-serves-purpose`. The probe's `sampled-matches-greedy` verdict is suspected, not confirmed, and is treated like `sampled-ignored`
+for the choice; only `sampled-ignored` is worded as ignored sampling. The decision file, the card and the stage 8 bundle say all of this in plain
+sentences. A failed trial is not a stage failure.
 
 The graft trial comes first. A grafted drafter is chosen for a model that needs sampling only when its own probe shows sampling applied.
 The sampling decision then judges the configuration that is served. The decision is `stages/2/sampling-decision.json` and a

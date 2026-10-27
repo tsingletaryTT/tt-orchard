@@ -254,8 +254,16 @@ def test_a_lab_run_skips_the_trial_and_says_why(tmp_path, monkeypatch):
 
 # ---- the trial does not decide a stage ---------------------------------------------------------------------------------------------------
 
-def test_a_variant_below_the_floor_keeps_the_fast_configuration_flags_it_and_the_stage_still_passes(rig, spy):
+def test_a_slow_variant_that_applies_sampling_is_chosen_and_flagged_slow_and_the_stage_still_passes(rig, spy):
     spy.variant = variant_files(seconds=12.0)                    # 96 tokens in 12 s is 8 tokens/s, below the floor of 10
+    assert rig.run() == EXIT_READY
+    d = decision_file(rig)
+    assert d["choice"] == "drafter-off" and d["flag"] == "sampling-applied-below-floor" and "slow" in d["reason"]
+    assert [e["result"] for e in rig.ends(2)] == ["pass"] and [e["result"] for e in rig.ends(8)] == ["pass"]
+
+
+def test_a_slow_variant_that_ignores_sampling_keeps_the_fast_configuration_and_flags_it(rig, spy):
+    spy.variant = variant_files(ignored=True, seconds=12.0)
     assert rig.run() == EXIT_READY
     d = decision_file(rig)
     assert d["choice"] == "keep" and d["flag"] == "no-variant-serves-purpose" and "neither" in d["reason"]

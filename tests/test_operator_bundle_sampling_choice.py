@@ -66,7 +66,8 @@ def test_a_flagged_choice_is_in_risks_in_plain_words(tmp_path):
 
 
 def test_each_flag_gets_a_risk_and_an_unflagged_choice_gets_none(tmp_path):
-    for variant, flag in ((side(drafter="off", verdict="sampled-full-speed", greedy=7.0, sampled=7.0), "no-variant-serves-purpose"),
+    for variant, flag in ((side(drafter="off", verdict="sampled-full-speed", greedy=7.0, sampled=7.0), "sampling-applied-below-floor"),
+                          (side(drafter="off", verdict="sampled-ignored", greedy=7.0, sampled=7.0), "no-variant-serves-purpose"),
                           (None, "variant-not-tried"), (side(drafter="off", verdict="inconclusive", greedy=18.0, sampled=None), "unverified")):
         run = make_run(tmp_path / flag)
         d = sc.decide(NEEDED, side(), variant, variant_note="skipped" if variant is None else None)

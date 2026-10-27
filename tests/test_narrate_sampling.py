@@ -36,7 +36,7 @@ def test_a_keep_decision_is_narrated_as_the_served_configuration_staying(tmp_pat
     assert "configuration stage 2 served stays" in line and "not needed" in line
 
 
-@pytest.mark.parametrize("flag", ["no-variant-serves-purpose", "below-floor", "unverified", "variant-not-tried"])
+@pytest.mark.parametrize("flag", ["no-variant-serves-purpose", "sampling-applied-below-floor", "unverified", "variant-not-tried"])
 def test_a_flagged_decision_is_marked_and_names_the_flag(tmp_path, flag):
     run = run_with(tmp_path, ("decision", 2, {"decision": "sampling decision", "choice": "keep", "flag": flag, "reason": "neither works",
                                               "needed": True}))

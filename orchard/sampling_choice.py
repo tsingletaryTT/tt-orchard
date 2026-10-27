@@ -30,7 +30,8 @@ TRIAL_RESULT = "trial-result.json"            # in TRIAL_DIR, written by the tem
 GRAFT_TRIAL_DIR = "graft-trial"               # the grafted variant's own swap check, read for its sampling verdict
 OVERRIDES = ("auto", "needed", "not-needed")
 CHOICES = ("keep", "drafter-off")
-FLAGS = ("below-floor", "no-variant-serves-purpose", "unverified", "variant-not-tried")
+SLOW = "sampling-applied-below-floor"      # the chosen configuration applies sampling but decodes below the floor (the operator preferred it to a fast one that does not)
+FLAGS = (SLOW, "no-variant-serves-purpose", "unverified", "variant-not-tried")
 APPLIED = ("sampled-full-speed", "sampled-slower")          # the verdicts that show sampling is applied
 BAD = ("sampled-ignored", "sampled-refused", "sampled-incoherent", "greedy-refused")   # the verdicts that show it is not
 # The probe's suspicion: sampled replies equal the greedy text or each other, with no high-temperature request that confirms it. That fits ignored sampling
@@ -196,9 +197,9 @@ def decide(need_: dict, current: dict, variant: dict | None = None, *, variant_n
             return out("keep", "unverified", "the served configuration applies sampling, but its speed was not measured, so the floor "
                                              f"of {floor:g} tokens/s could not be checked")
         if cur_speed < floor:
-            return out("keep", "below-floor", f"the served configuration applies sampling, but it decodes at {_fmt(cur_speed)}, below the floor "
-                                              f"of {floor:g} tokens/s, and no other configuration is available; it is kept and needs the "
-                                              "operator's attention")
+            return out("keep", SLOW, f"the served configuration applies sampling but is slow: it decodes at {_fmt(cur_speed)}, below the floor "
+                                     f"of {floor:g} tokens/s, and no other configuration is available; it is kept and needs the "
+                                     "operator's attention")
         return out("keep", None, f"the served configuration applies sampling and decodes at {_fmt(cur_speed)}, at or above the floor of "
                                  f"{floor:g} tokens/s, and the model needs sampling ({need_.get('source')})")
     # Sampling is needed and the served configuration does not show that it applies it.
@@ -238,6 +239,12 @@ def decide(need_: dict, current: dict, variant: dict | None = None, *, variant_n
 
     if v_verdict in BAD:
         return neither(f"the served configuration {why_current}, and the drafter-off variant's probe verdict is {v_verdict}")
+    if v_verdict in APPLIED and var_speed is not None and var_speed < floor:
+        # The operator's rule: a configuration that cannot do what the model is for has no value however fast it is, so the one that applies sampling
+        # is chosen even though it is slow, and the decision is flagged so the operator sees it.
+        return out("drafter-off", SLOW, f"the model needs sampling and the served configuration {why_current}; the drafter-off variant applies sampling "
+                                        f"but is slow: it decodes at {_fmt(var_speed)}, below the floor of {floor:g} tokens/s. It is chosen because a "
+                                        "configuration that does not apply sampling cannot do what the model is for, and it needs the operator's attention")
     if var_speed is not None and var_speed < floor:
         return neither(f"the served configuration {why_current} ({_fmt(cur_speed)}), and the drafter-off variant decodes at {_fmt(var_speed)}, "
                        f"below the floor of {floor:g} tokens/s")
@@ -284,6 +291,10 @@ def card_sentence(decision: dict) -> str:
         if flag is None:
             s += (" The drafter-off configuration applies sampling and decodes above the usability floor in `orchard/defaults.py`. Its speeds are "
                   "in the Numbers table, in the rows marked sampling probe.")
+        elif flag == SLOW:
+            s += (" The drafter-off configuration applies sampling but is slow: it decodes below the usability floor in `orchard/defaults.py`. It is "
+                  "chosen because a configuration that does not apply sampling cannot do what the model is for. Its speeds are in the Numbers table, "
+                  "in the rows marked sampling probe.")
         elif flag == "no-variant-serves-purpose":
             s += (" Neither configuration that stage 2 measured both applies sampling and decodes above the usability floor, so this package serves "
                   "the drafter-off configuration, which does not do what the model needs.")
@@ -305,8 +316,10 @@ def card_sentence(decision: dict) -> str:
         if comparable(n) and n["served_tok_s"] >= n["variant_tok_s"]:
             s += " It decodes at least as fast as the drafter-off variant."
         s += " Read the decision file before relying on it."
-    elif flag == "below-floor":
-        s += " This package applies sampling but decodes below the usability floor. Read the decision file before relying on it."
+    elif flag == SLOW and decision.get("choice") == "keep":
+        s += " This package applies sampling but is slow: it decodes below the usability floor. Read the decision file before relying on it."
+    elif flag == SLOW:
+        s += " Read the decision file before relying on it."
     elif flag in ("unverified", "variant-not-tried"):
         s += " This choice is not fully verified: a verdict or a speed was not measured. The decision file says which."
     return s + f" The decision and the numbers behind it are in `evidence/{DECISION_PATH}`."

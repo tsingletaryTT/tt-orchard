@@ -27,7 +27,7 @@ def test_an_unverified_choice_gets_a_card_without_the_unsupported_claims_and_the
 
 
 def test_a_faster_of_two_choice_is_packaged_drafter_off_and_the_card_says_it_does_not_do_what_the_model_needs(world):
-    dec = drafter_on_run(world, variant=report(drafter="off", ignored=False, seconds=12.0))      # 8 tokens/s, below the floor; the first run is slower
+    dec = drafter_on_run(world, variant=report(drafter="off", ignored=True, seconds=12.0))      # 8 tokens/s, below the floor and also ignoring; the first run is slower
     # Make the first configuration slower than the variant, so the variant is the faster of the two.
     import json
     swap = world["run"] / "stages/2/evidence/swap-check.json"

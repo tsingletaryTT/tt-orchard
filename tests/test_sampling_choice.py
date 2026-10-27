@@ -68,7 +68,7 @@ def test_a_drafter_off_configuration_above_the_floor_is_kept_without_a_flag():
 
 def test_a_configuration_that_applies_sampling_below_the_floor_is_kept_and_flagged():
     d = sc.decide(NEEDED, side(drafter="off", verdict="sampled-full-speed", greedy=9.0, sampled=8.0))
-    assert d["choice"] == "keep" and d["flag"] == "below-floor"
+    assert d["choice"] == "keep" and d["flag"] == "sampling-applied-below-floor"
     assert "8" in d["reason"] and "10" in d["reason"]
 
 
@@ -79,7 +79,7 @@ def test_a_speed_exactly_at_the_floor_clears_it():
 
 def test_the_floor_reads_the_sampled_speed_and_falls_back_to_the_greedy_one():
     low_sampled = sc.decide(NEEDED, side(drafter="off", verdict="sampled-full-speed", greedy=18.0, sampled=9.0))
-    assert low_sampled["flag"] == "below-floor"
+    assert low_sampled["flag"] == "sampling-applied-below-floor"
     no_sampled = sc.decide(NEEDED, side(drafter="off", verdict="sampled-full-speed", greedy=18.0, sampled=None))
     assert no_sampled["flag"] is None and no_sampled["numbers"]["served_tok_s"] == 18.0
 
@@ -114,8 +114,13 @@ def test_ignored_sampling_with_a_variant_that_applies_it_above_the_floor_chooses
     assert "ignored" in d["reason"] and "17.2" in d["reason"]
 
 
-def test_ignored_sampling_and_a_variant_below_the_floor_keeps_the_fast_one_and_says_neither_serves_the_purpose():
+def test_ignored_sampling_and_a_slow_variant_that_applies_it_chooses_the_slow_variant_and_flags_it():
     d = sc.decide(NEEDED, side(), variant(greedy=9.0, sampled=8.0))
+    assert d["choice"] == "drafter-off" and d["flag"] == "sampling-applied-below-floor" and "slow" in d["reason"]
+
+
+def test_ignored_sampling_and_a_slow_variant_that_ignores_it_keeps_the_fast_one_and_says_neither_serves_the_purpose():
+    d = sc.decide(NEEDED, side(), variant(verdict="sampled-ignored", greedy=9.0, sampled=8.0))
     assert d["choice"] == "keep" and d["flag"] == "no-variant-serves-purpose"
     assert "neither" in d["reason"]
 
@@ -200,7 +205,7 @@ def test_the_card_sentence_states_the_choice_and_the_reason_without_a_number_in_
     assert "kept the configuration it served" in sc.card_sentence(kept) and "not needed" in sc.card_sentence(kept)
     applied = sc.decide(NEEDED, side(drafter="off", verdict="sampled-full-speed", greedy=18, sampled=17))
     assert "applies it" in sc.card_sentence(applied)
-    flagged = sc.decide(NEEDED, side(), variant(greedy=9.0, sampled=8.0))
+    flagged = sc.decide(NEEDED, side(), variant(verdict="sampled-ignored", greedy=9.0, sampled=8.0))
     assert "does not do what the model needs" in sc.card_sentence(flagged)
     for d in (chosen, kept, applied, flagged, sc.decide(NEEDED, side(), None, variant_note="x")):
         assert not PERF_IN_PROSE.search(sc.card_sentence(d)), sc.card_sentence(d)
