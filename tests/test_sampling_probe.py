@@ -150,11 +150,54 @@ def test_matching_text_alone_is_suspected_and_not_confirmed_as_ignored_sampling(
         assert "sampling was not applied" not in s["card_sentence"].lower().replace("not applied:", "")
 
 
-def test_a_high_temperature_request_that_also_matched_greedy_confirms_ignored_sampling():
+def with_session_lines(rec, names=("sampled_a", "sampled_b")):
+    """The drafter's own session line in the log slice of these requests: independent runtime evidence that the DFlash2 speculative loop served them."""
+    for n in names:
+        rec["requests"][n]["drafter_log"] = LINE
+    return rec
+
+
+def test_a_hot_request_that_matches_greedy_is_not_evidence_a_peaked_distribution_gives_the_same_text():
+    """A logit gap of 20 at temperature 2.0 leaves the leading token a probability of about 0.99995, so top-p 0.99 keeps only that token and correctly
+    applied sampling returns the greedy text at the hot temperature too."""
     for a, b in ((STORY, STORY), (GREEDY, OTHER)):
         s = sp.summarize(with_hot(record(a=entry(text=a), b=entry(text=b))))
-        assert s["verdict"] == "sampled-ignored", (a, b, s["verdict"])
-        assert "high-temperature" in s["sentence"] or "temperature 2.0" in s["sentence"]
+        assert s["verdict"] == "sampled-matches-greedy", (a, b, s["verdict"])
+
+
+@pytest.mark.parametrize("a, b", [(STORY, STORY), (GREEDY, OTHER), (OTHER, GREEDY), (GREEDY, GREEDY)])
+def test_matching_text_with_the_drafters_session_line_on_both_sampled_requests_is_ignored_sampling(a, b):
+    s = sp.summarize(with_session_lines(record(a=entry(text=a), b=entry(text=b))))
+    assert s["verdict"] == "sampled-ignored", (a, b, s["verdict"])
+    assert "session line" in s["sentence"] and "argmax" in s["sentence"] and "greedy" in s["sentence"]
+    assert "not applied" in s["card_sentence"] and "argmax" in s["card_sentence"]
+
+
+def test_the_evidence_does_not_depend_on_a_hot_request():
+    with_one = sp.summarize(with_hot(with_session_lines(record(a=entry(text=STORY), b=entry(text=STORY))), text=OTHER))
+    without = sp.summarize(with_session_lines(record(a=entry(text=STORY), b=entry(text=STORY))))
+    assert with_one["verdict"] == without["verdict"] == "sampled-ignored"
+
+
+@pytest.mark.parametrize("names", [("sampled_a",), ("sampled_b",), ()])
+def test_the_session_line_on_only_some_of_the_sampled_requests_is_not_enough(names):
+    s = sp.summarize(with_session_lines(record(a=entry(text=STORY), b=entry(text=STORY)), names))
+    assert s["verdict"] == "sampled-matches-greedy"
+
+
+def test_a_log_line_that_is_not_the_drafters_session_line_is_not_evidence():
+    rec = with_session_lines(record(a=entry(text=STORY), b=entry(text=STORY)))
+    rec["requests"]["sampled_b"]["drafter_log"] = "[dflash2-serve] step: rows=[0] iters=1 12.0 ms carry=[3]"
+    assert sp.summarize(rec)["verdict"] == "sampled-matches-greedy"
+
+
+def test_a_session_line_on_the_greedy_request_alone_is_not_evidence_about_sampled_requests():
+    rec = record(greedy=entry(log=LINE), a=entry(text=STORY), b=entry(text=STORY))
+    assert sp.summarize(rec)["verdict"] == "sampled-matches-greedy"
+
+
+def test_the_session_lines_do_not_make_different_texts_ignored_sampling():
+    assert sp.summarize(with_session_lines(record()))["verdict"] == "sampled-full-speed"
 
 
 def test_a_high_temperature_request_that_differs_from_greedy_leaves_matching_text_unconfirmed():
@@ -198,7 +241,7 @@ def test_the_high_temperature_seed_may_equal_a_sampled_seed_without_error_and_is
 def test_a_match_with_greedy_wins_over_slower():
     s = sp.summarize(record(greedy=entry(seconds=1.0), a=entry(text=STORY, seconds=9.0), b=entry(text=STORY, seconds=9.0)))
     assert s["verdict"] == "sampled-matches-greedy"
-    s = sp.summarize(with_hot(record(greedy=entry(seconds=1.0), a=entry(text=STORY, seconds=9.0), b=entry(text=STORY, seconds=9.0))))
+    s = sp.summarize(with_session_lines(record(greedy=entry(seconds=1.0), a=entry(text=STORY, seconds=9.0), b=entry(text=STORY, seconds=9.0))))
     assert s["verdict"] == "sampled-ignored"
 
 
@@ -468,7 +511,7 @@ def test_every_sentence_is_one_plain_line_without_the_forbidden_framing():
 def card_sentences():
     return {
         "full": sp.summarize(record()),
-        "ignored": sp.summarize(with_hot(record(a=entry(text=STORY), b=entry(text=STORY)))),
+        "ignored": sp.summarize(with_session_lines(record(a=entry(text=STORY), b=entry(text=STORY)))),
         "matches": sp.summarize(record(a=entry(text=STORY), b=entry(text=STORY))),
         "refused": sp.summarize(record(a=refused("HTTP 400: no sampling here"))),
         "slower": sp.summarize(record(a=entry(text=STORY, seconds=9.0), b=entry(text=OTHER, seconds=9.0))),

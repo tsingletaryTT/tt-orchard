@@ -78,21 +78,28 @@ def test_the_record_holds_the_raw_numbers_and_the_judge_calls_applied_sampling_f
     assert sp.summarize(rec)["verdict"] == "sampled-full-speed"
 
 
-def test_a_server_that_ignores_the_seed_is_recorded_and_judged_ignored(swap, tmp_path):
+def test_a_server_that_ignores_the_seed_but_logs_no_session_line_is_only_a_suspected_match(swap, tmp_path):
     r = run(swap, tmp_path, sampling="ignored")
     assert r.returncode == 0, r.stdout + r.stderr
     rec = report(swap)["sampling_probe"]
     assert rec["requests"]["sampled_a"]["text"] == rec["requests"]["sampled_b"]["text"]
-    assert sp.summarize(rec)["verdict"] == "sampled-ignored"
+    assert sp.summarize(rec)["verdict"] == "sampled-matches-greedy"
 
 
-def test_the_high_temperature_request_is_recorded_and_confirms_a_server_that_ignores_sampling(swap, tmp_path):
+def test_a_server_that_ignores_the_seed_and_logs_the_drafters_session_line_per_request_is_judged_ignored(swap, tmp_path):
+    r = run(swap, tmp_path, sampling="ignored", server_extra={"session_line": SESSION_LINE})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert sp.summarize(report(swap)["sampling_probe"])["verdict"] == "sampled-ignored"
+
+
+def test_the_high_temperature_request_is_recorded_and_the_judge_does_not_use_it_as_evidence(swap, tmp_path):
     r = run(swap, tmp_path, sampling="ignored")
     assert r.returncode == 0, r.stdout + r.stderr
     rec = report(swap)["sampling_probe"]
     hot = rec["requests"]["sampled_hot"]
     assert hot["accepted"] is True and hot["params"] == {"temperature": 2.0, "top_p": 0.99, "seed": 2468}
-    assert sp.problems(rec) == [] and sp.summarize(rec)["verdict"] == "sampled-ignored"
+    assert hot["text"] == rec["requests"]["greedy"]["text"]               # it matched greedy, and that is not enough
+    assert sp.problems(rec) == [] and sp.summarize(rec)["verdict"] == "sampled-matches-greedy"
 
 
 def test_a_server_whose_output_is_peaked_but_samples_at_high_temperature_is_only_a_suspected_match(swap, tmp_path):

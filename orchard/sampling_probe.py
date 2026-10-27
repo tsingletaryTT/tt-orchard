@@ -131,6 +131,15 @@ def _loops(text: str) -> bool:
     return any(f["kind"] in defaults.SUITE_BLOCKING_KINDS for f in found)
 
 
+def _served_by_greedy_only_loop(entries) -> bool:
+    """Independent runtime evidence that sampling was bypassed, which the text of the replies cannot give: every one of these requests left the drafter's
+    session line (`[dflash2-serve] slot N session: ...`, read by orchard/drafter_log.py) in the server log. That line is written by the DFlash2 serving
+    code, whose decoder verifies drafted tokens by argmax and never reads a request's sampling parameters (`DFlash2Decoder` asserts `sampling is None`;
+    `decode_forward` reads no sampling field; read in the `tt_metal_models` wheel of `episod/qwen3.8-27b-dflash2-p300`, 2026-10-27). A bundle whose
+    speculative loop verifies sampled tokens would write the same line, so this rule is tied to that code and has to be revisited when such a bundle exists."""
+    return all(drafter_log.drafter_stats(e.get("drafter_log") or "") is not None for e in entries)
+
+
 def _settings(entry: dict) -> str:
     """The sampling settings a request carried, from its recorded params: "temperature 0.7, top-p 0.5, seed 1234"."""
     p = entry.get("params") if isinstance(entry.get("params"), dict) else {}
@@ -149,10 +158,10 @@ CARD_SENTENCES = {
     "sampled-incoherent": "The server accepted a sampled request, and its text repeats itself or is unreadable.",
     "inconclusive": ("The probe could not compare the speed of greedy and sampled requests: a request had no usable token count or timing, "
                      "a reply was too short, or a reply was empty."),
-    "sampled-ignored": ("The server accepted sampled requests, but sampling was not applied: sampled requests, including one at a high temperature, "
-                        "returned the greedy text, so decoding is greedy."),
+    "sampled-ignored": ("The server accepted sampled requests, but sampling was not applied: the drafter's log shows the sampled requests were served by "
+                        "the speculative loop that verifies by argmax, so decoding is greedy."),
     "sampled-matches-greedy": ("Sampled requests returned the greedy text or the same text for different seeds. That fits sampling not being applied, "
-                               "and it also happens when one token is eligible at every step. The probe did not confirm which."),
+                               "and it also happens when one token is eligible at every step. The probe found no sign in the log of a greedy-only decode path, so it did not confirm which."),
     "sampled-slower": "Sampled requests decoded more slowly than greedy requests. Both speeds are in the table above.",
     "sampled-full-speed": ("Sampled requests (temperature above 0, top-p below 1, with a seed) were served and two seeds gave different text. "
                            "Their speed is in the table above next to the speed of greedy requests."),
@@ -202,16 +211,15 @@ def _summarize(record) -> dict:
     if matched_by_seeds or matched_greedy:
         how = ("two requests that differ only in seed returned the same text" if matched_by_seeds
                else "a sampled request returned the greedy text")
-        hot = reqs.get("sampled_hot")
-        if isinstance(hot, dict) and hot["accepted"] and hot["text"] == g["text"]:
+        if _served_by_greedy_only_loop((a, b)):
             return {**out, "verdict": "sampled-ignored",
-                    "sentence": (f"The server accepted the sampled requests, but {how}, and a request at temperature "
-                                 f"{hot['params'].get('temperature')} also returned the greedy text. Sampling was not applied, so decoding was greedy. "
-                                 f"Greedy decoded at {_fmt(gs)}.")}
+                    "sentence": (f"The server accepted the sampled requests, but {how}. The drafter's own session line is in the log of each sampled "
+                                 "request, so the DFlash2 speculative loop served them, and that loop verifies drafted tokens by argmax. "
+                                 f"Sampling was not applied, so decoding was greedy. Greedy decoded at {_fmt(gs)}.")}
         return {**out, "verdict": "sampled-matches-greedy",
                 "sentence": (f"The server accepted the sampled requests, but {how}. That fits sampling not being applied. It also happens when "
-                             "the most likely token is above the top-p cut at every step, so one token is eligible. The probe did not confirm which: "
-                             f"no high-temperature request returned the greedy text. Greedy decoded at {_fmt(gs)}.")}
+                             "the most likely token is above the top-p cut at every step, so one token is eligible, at any temperature. The probe did not "
+                             f"confirm which: the log of the sampled requests has no sign of a greedy-only decode path. Greedy decoded at {_fmt(gs)}.")}
     if any(_speed(e) is None for e in (g, a, b)):
         return {**out, "verdict": "inconclusive",
                 "sentence": ("The probe could not compare speeds: a request has no usable token count or timing, or a reply was shorter "

@@ -13,7 +13,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_package_graft import world  # noqa: E402,F401  (the fixture)
 from test_package_graft_auto import finished_auto, rows  # noqa: E402
-from test_sampling_probe import LINE, OTHER, STORY, entry, record, refused, with_hot  # noqa: E402
+from test_sampling_probe import LINE, OTHER, STORY, entry, record, refused, with_session_lines  # noqa: E402
 from package_fakes import write  # noqa: E402
 
 from orchard import package, sampling_probe  # noqa: E402
@@ -66,7 +66,7 @@ def test_a_healthy_probe_gives_a_section_and_rows_that_cite_the_derived_file_fir
 
 
 def test_confirmed_ignored_sampling_is_on_the_card_and_the_sampled_speed_row_is_still_there(world):
-    put_probe(world, with_hot(record(a=entry(text=STORY), b=entry(text=STORY))))
+    put_probe(world, with_session_lines(record(a=entry(text=STORY), b=entry(text=STORY))))
     stage_dir, pkg, card = card_of(world)
     assert sampling_probe.CARD_SENTENCES["sampled-ignored"] in " ".join(section(card).split())
     assert gate_package(stage_dir, world["run"]).ok
