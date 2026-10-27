@@ -683,7 +683,7 @@ def test_the_schema_takes_only_a_note_and_states_the_cost_and_the_use(tmp_path, 
     assert list(params["properties"]) == ["note"] and params.get("required", []) == []
     assert params.get("additionalProperties") is False
     desc = schema["function"]["description"]
-    assert "45 s" in desc and "simulator" in desc and "6" in desc
+    assert "47 s" in desc and "simulator" in desc and "6" in desc
 
 
 def test_calling_the_tool_through_the_tools_object(tmp_path, fake_kenv):
