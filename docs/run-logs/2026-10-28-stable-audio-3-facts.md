@@ -150,3 +150,17 @@ percussion, 100 BPM"), duration 10 s, seed 42. Runs and clips are under `<HOME>/
 - Not done: a bfloat16 CPU run for the noise floor (the script has no dtype option yet), so the checker's bars are still provisional.
 - A slip while running it: I ran a helper script from the scratch directory with the venv's python, and a file named `inspect.py` in that shared directory shadowed the standard library
   and broke the numpy import. Running it with `-I` fixed that. Scripts that read model data are run in isolated mode.
+
+## The class rule for serving-only differences (branch audio-class-inference, 2026-10-28)
+
+The operator approved relaxing the strict rule for differences in serving or sampler settings, with a way to let smarter inference decide later. Stage 0's audio branch now sorts each
+difference in `model_config.json` into serving, structural or unknown by an allow-list table, and returns a decision object (class, path, the path the strict rule would choose, a
+confidence, the evidence for each difference, and any override with its source). `"audio_strict": true` in `triage_config.json` keeps the old rule.
+
+The real pair, re-classified on the same files as above (headers and configs only):
+- class `weights-only`, path `weights-only`, alternative path `full-port`, confidence `medium`;
+- two differences, both `serving`, both decided by the allow-list: `sample_size` (5,324,800 in the base, 5,292,032 in the fine-tune; the rule cites the library's `generate`) and
+  `model.diffusion.diffusion_objective` (`rectified_flow` in the base, `rf_denoiser` in the fine-tune; the rule cites `models/dit.py` lines 452-456, 575-580 and 610-613, which treat
+  the two values identically, and `inference/sampling.py` line 434, which uses the objective only to pick the default sampler);
+- a hazard says the serving configuration must carry the model's own values for those two keys and that no stage checks it yet.
+The audio-path-unbuilt stop still applies whatever the path, so nothing runs on the relaxed class: the run stops after stage 0.

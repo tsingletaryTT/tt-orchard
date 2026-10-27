@@ -359,7 +359,7 @@ def gate_reasons(stage):
 
 
 @pytest.mark.parametrize("edit,match", [
-    (lambda d: d["audio"]["decision"].update(path="full-port"), "decision path"),
+    (lambda d: d["audio"]["decision"].update(path="full-port", alternative_path=None), "decision path"),
     (lambda d: d["audio"]["decision"].update(**{"class": "full-port"}), "decision class"),
     (lambda d: d["audio"]["decision"].update(confidence="certain"), "confidence"),
     (lambda d: d["audio"]["decision"].update(alternative_path="weights-only"), "alternative"),
@@ -372,7 +372,7 @@ def gate_reasons(stage):
     (lambda d: d["audio"]["decision"]["differences"][0].update(category="structural"), "weights-only"),
     (lambda d: d["audio"]["decision"]["differences"][0].update(category="unknown"), "weights-only"),
     (lambda d: d["audio"]["decision"]["differences"][0].pop("key"), "key"),
-    (lambda d: d["audio"]["decision"]["differences"][0].update(decided_by="override"), "source"),
+    (lambda d: (d["audio"]["decision"]["differences"][0].pop("source"), d["audio"]["decision"]["differences"][0].update(decided_by="override")), "source"),
     (lambda d: d["audio"]["decision"].pop("class"), "class"),
 ])
 def test_the_gate_refuses_an_inconsistent_or_malformed_decision(audio_case, edit, match):
@@ -428,3 +428,123 @@ def test_the_template_is_still_stamped_so_the_gate_accepts_it(audio_case):
     d = run_ok(stage)
     import hashlib
     assert d["template_sha256"] == hashlib.sha256((Path(__file__).resolve().parent.parent / "orchard/skills/delta-triage-templates/delta_triage.py").read_bytes()).hexdigest()
+
+
+# ---- cases the first mutation table found unguarded -------------------------------------------------------------
+
+@pytest.mark.parametrize("base,model", [("<absent>", "pingpong"), ("euler", "<absent>")])
+def test_a_text_setting_missing_from_one_config_is_not_a_serving_difference(base, model):
+    assert tm().audio_category("model.sampler_type", base, model)[0] == "unknown"
+
+
+def test_a_rule_with_a_constraint_this_script_does_not_know_never_matches_a_value():
+    rules = [{"key": "k", "category": "serving", "values": "weird", "why": "w", "source": "s"}]
+    assert tm().audio_category("k", "a", "b", rules=rules)[0] == "unknown"
+    rules = [{"key": "k", "category": "serving", "why": "w", "source": "s"}]
+    assert tm().audio_category("k", "a", "b", rules=rules)[0] == "unknown"
+
+
+def test_the_override_messages_say_what_is_wrong(audio_case):
+    stage = audio_case(base_kw={"config": changed_model_config(**UNKNOWN_KEY_CFG)})
+    write_overrides(stage, {"categories": {"model.extra.a": "serving"}})
+    assert "categories must be a list" in reasons(run_ok(stage))
+    write_overrides(stage, {"categories": [{"key": 3, "category": "serving", "source": "s"}]})
+    assert "needs a key" in reasons(run_ok(stage))
+    write_overrides(stage, {"categories": [{"key": "model.extra.a", "category": "serving", "source": "s"}, {"key": "model.extra.a", "category": "serving", "source": "s"}]})
+    assert "overridden twice" in reasons(run_ok(stage))
+    write_overrides(stage, {"categories": [{"key": "not.a.key", "category": "serving", "source": "s"}]})
+    assert "does not differ" in reasons(run_ok(stage))
+
+
+def test_a_path_override_to_full_port_is_accepted_even_when_tensor_differences_exist(audio_case):
+    t = {**TENSORS, "model.model.layers.0.attn.weight": ("F32", [8, 9])}
+    stage = audio_case(model_kw={"tensors": t})
+    write_overrides(stage, {"path": {"path": "full-port", "source": "already a full port"}})
+    d = run_ok(stage)
+    dec = decision(d)
+    assert d["class"] == "full-port" and dec["overrides"][0]["kind"] == "path" and dec["confidence"] == "medium"
+    assert "overridden to full-port: already a full port" in reasons(d)
+
+
+def test_a_path_override_with_unreadable_evidence_says_it_was_not_applied(audio_case):
+    stage = audio_case()
+    (model_snapshot(stage) / "model.safetensors").write_bytes(b"\xff" * 16)
+    write_overrides(stage, {"path": {"path": "full-port", "source": "s"}})
+    d = run_ok(stage)
+    assert d["class"] == "unknown" and "was not applied" in reasons(d) and decision(d)["overrides"] == []
+
+
+def test_a_weights_only_path_override_has_no_path_reasons_and_no_serving_hazard_when_it_is_the_only_difference(audio_case):
+    cfg = changed_model_config(model__diffusion__config__depth=24)
+    stage = audio_case(base_kw={"config": cfg})
+    write_overrides(stage, {"path": {"path": "weights-only", "source": "operator: unused key"}})
+    d = run_ok(stage)
+    assert d["path"] == "weights-only" and d["path_reasons"] == []
+    assert not any("serving or sampler settings" in h["finding"] for h in d["hazards"])
+    assert any("uses overrides" in h["finding"] and "operator: unused key" in h["finding"] for h in d["hazards"])
+
+
+def test_a_path_override_to_full_port_removes_the_settings_hazard(audio_case):
+    stage = serving_pair(audio_case)
+    write_overrides(stage, {"path": {"path": "full-port", "source": "s"}})
+    d = run_ok(stage)
+    assert d["path"] == "full-port" and not any("serving or sampler settings" in h["finding"] for h in d["hazards"])
+
+
+def test_a_category_override_writes_an_override_hazard_naming_the_source(audio_case):
+    stage = audio_case(base_kw={"config": changed_model_config(**UNKNOWN_KEY_CFG)})
+    write_overrides(stage, {"categories": [{"key": "model.extra.a", "category": "serving", "source": "read foo.py"}]})
+    d = run_ok(stage)
+    assert any("uses overrides" in h["finding"] and "model.extra.a" in h["finding"] and "read foo.py" in h["finding"] for h in d["hazards"])
+    assert any("serving or sampler settings" in h["finding"] and "model.extra.a" in h["finding"] for h in d["hazards"])
+
+
+# ---- decision_problems on its own ----------------------------------------------------------------------------
+
+GOOD = {"class": "weights-only", "path": "weights-only", "alternative_path": "full-port", "confidence": "medium", "strict": False,
+        "differences": [{"key": "sample_size", "base": 1, "model": 2, "category": "serving", "decided_by": "allow-list"}], "overrides": []}
+
+
+def problems_of(**change):
+    dec = {**copy.deepcopy(GOOD), **change}
+    return audio_decision.decision_problems({"class": dec["class"] if dec["class"] in audio_decision.CLASSES else "weights-only",
+                                             "path": dec["path"] if dec["path"] in audio_decision.PATHS else "weights-only", "audio": {"decision": dec}})
+
+
+def test_a_good_decision_has_no_problems():
+    assert problems_of() == []
+
+
+@pytest.mark.parametrize("delta", [None, [], "x", 3, {"audio": 3}, {"audio": {}}, {"audio": []}])
+def test_a_delta_without_a_usable_audio_record_has_nothing_to_check(delta):
+    assert audio_decision.decision_problems(delta) == []
+
+
+@pytest.mark.parametrize("change,match", [
+    ({"class": "nonsense"}, "class must be one of"), ({"path": "nonsense"}, "path must be one of"), ({"strict": "no"}, "strict must be"),
+    ({"differences": {}}, "differences must be a list"), ({"overrides": {}}, "overrides must be a list"),
+    ({"alternative_path": "nonsense"}, "alternative_path"), ({"alternative_path": "weights-only"}, "alternative_path"),
+    ({"confidence": None}, "confidence must be"),
+])
+def test_each_field_check_gives_its_own_message(change, match):
+    assert any(match in x for x in problems_of(**change)), problems_of(**change)
+
+
+def test_a_non_dict_decision_is_refused():
+    assert audio_decision.decision_problems({"audio": {"decision": 3}}) == ["delta.json audio.decision must be an object"]
+
+
+@pytest.mark.parametrize("override,match", [(3, "needs a kind"), ({"kind": "mystery", "source": "s"}, "needs a kind"), ({"kind": "path"}, "needs a source"),
+                                           ({"kind": "category", "source": " "}, "needs a source")])
+def test_each_override_check_gives_its_own_message(override, match):
+    assert any(match in x for x in problems_of(overrides=[override]))
+
+
+def test_an_unknown_class_needs_the_full_port_path_and_low_confidence():
+    base = {"class": "unknown", "path": "full-port", "alternative_path": None, "confidence": "low", "strict": False, "differences": [], "overrides": []}
+    ok = {"class": "unknown", "path": "full-port", "audio": {"decision": base}}
+    assert audio_decision.decision_problems(ok) == []
+    for change in ({"confidence": "high"}, {"path": "weights-only"}):
+        dec = {**base, **change}
+        delta = {"class": "unknown", "path": dec["path"], "audio": {"decision": dec}}
+        assert any("unknown needs path full-port and confidence low" in x for x in audio_decision.decision_problems(delta))

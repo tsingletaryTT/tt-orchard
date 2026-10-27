@@ -1050,7 +1050,7 @@ does not change.
 **Audio models.** A model in the stable-audio-tools layout (`model_config.json`, one combined `model.safetensors`, no `config.json`) is read by an
 audio branch of the stage 0 template. Stage 0 records three facts in its ledger entry: `form` (`adapter` or `full`), `serving` (`thin-bundle`,
 `container` or `none`, from the installed bundles and container packages) and `modality` (`text` or `audio`); a ledger without them means a text run on
-a thin bundle. The class follows the same rules as above (`weights-only`, `full-port` or `unknown`). An audio run stops before stage 1 with the block code
+a thin bundle. The class is `weights-only`, `full-port` or `unknown`: each difference in `model_config.json` is sorted by an allow-list table into serving settings (the longest audio asked for, the default sampler), structural keys or unknown keys, and only serving differences leave the path `weights-only` (with a hazard that names the keys and both values, because no stage yet checks that the serving configuration carries the model's own settings). `audio_strict` in `triage_config.json` keeps the stricter rule, and `audio.decision` in `delta.json` records the evidence for each difference and any override from a later inference step. An audio run stops before stage 1 with the block code
 `audio-path-unbuilt`, because the audio stages are not built (plan [docs/superpowers/plans/2026-10-28-audio-bringup.md](docs/superpowers/plans/2026-10-28-audio-bringup.md)).
 `stabilityai/stable-audio-3-small-music` is the first target. There is no runtime for Stable Audio 3 on a Tenstorrent chip (no bundle, container package or
 tt-metal pipeline), so even a `weights-only` result leaves nothing to serve it with; the facts note is

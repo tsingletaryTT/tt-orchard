@@ -29,7 +29,7 @@ CONFIG = {
         "conditioning": {"cond_dim": 768, "configs": [
             {"id": "prompt", "type": "t5gemma", "config": {"max_length": 256, "repo_id": MODEL_ID, "subfolder": "t5gemma-b-b-ul2"}},
             {"id": "seconds_total", "type": "number", "config": {"min_val": 0, "max_val": 384}}]},
-        "diffusion": {"type": "dit", "config": {"embed_dim": 1024, "depth": 20, "num_heads": 16}},
+        "diffusion": {"type": "dit", "diffusion_objective": "rf_denoiser", "config": {"embed_dim": 1024, "depth": 20, "num_heads": 16}},
         "io_channels": 256},
     "training": {"use_ema": True, "arc": {"disc_update_interval": 2}},
 }
