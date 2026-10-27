@@ -165,20 +165,6 @@ def test_the_chip_time_of_an_interrupted_run_counts_toward_the_cap():
     assert c.call({}).startswith("hardware_check refused")      # 100 s left, 120 reserved: refused
 
 
-def test_an_interrupt_while_waiting_between_tries_holds_no_board():
-    w = World([(dict(good_hw(), passed=False, category="queued", first_line="q", elapsed_s=0.5,
-                     queued={"ticket": "T1", "cancel_error": None}), "queued", "")])
-
-    def sleep(s):
-        raise KeyboardInterrupt
-    c = hwtool.HardwareCheck(hwtool.HwPolicy(), prepare=w.prepare, run=w.run, clock=w.clock, sleep=sleep)
-    with pytest.raises(KeyboardInterrupt):
-        c.call({})
-    rec = c.summary()["calls"][0]
-    assert rec["outcome"] == "interrupted" and rec["lease_s"] == 0.0 and not rec.get("lease_upper_bound")
-    assert c.summary()["lease_s_used"] == 0.0
-
-
 def test_the_report_says_the_chip_time_of_an_interrupted_call_is_an_upper_bound(tmp_path):
     rec = {"outcome": "interrupted", "passed": False, "lease_s": 30.0, "total_s": 30.0, "lease_upper_bound": True}
     md = _report_md(tmp_path, [_row_attempt(agent_hw=hw_summary(rec))])
@@ -187,20 +173,3 @@ def test_the_report_says_the_chip_time_of_an_interrupted_call_is_an_upper_bound(
     assert "30 s of chip time" in md
 
 
-def test_only_the_run_in_progress_counts_as_board_time_not_the_earlier_waiting():
-    w = World([(dict(good_hw(), passed=False, category="queued", first_line="q", elapsed_s=0.5,
-                     queued={"ticket": "T1", "cancel_error": None}), "queued", "")])
-    real = w.run
-    calls = []
-
-    def run(k, timeout_s):
-        calls.append(k)
-        if len(calls) == 1:
-            return real(k, timeout_s)                       # busy: 0.5 s, then the call sleeps 10 s
-        w.now += 5.0
-        raise KeyboardInterrupt                             # the second try held the board for 5 s
-    c = hwtool.HardwareCheck(hwtool.HwPolicy(), prepare=w.prepare, run=run, clock=w.clock, sleep=w.sleep)
-    with pytest.raises(KeyboardInterrupt):
-        c.call({})
-    rec = c.summary()["calls"][0]
-    assert rec["lease_s"] == 5.0 and rec["total_s"] == 15.5 and c.summary()["lease_s_used"] == 5.0

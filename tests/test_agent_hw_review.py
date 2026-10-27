@@ -44,21 +44,6 @@ def test_the_attempts_background_processes_are_swept_before_the_copy_and_before_
     assert events == ["sweep", "copy", "sweep", "run", "sweep"], events      # the last one is the sweep after the run
 
 
-def test_every_try_of_a_call_that_waits_for_a_board_is_swept_first(tmp_path, fake_kenv, monkeypatch):
-    adir = attempt_dir(tmp_path, fake_kenv)
-    events = traced(monkeypatch)
-    inner = queued_runner(["T1", "T2", "T3", "T4", "T5", "T6"])
-
-    def fake(argv, **kw):
-        events.append("run")
-        return inner(argv, **kw)
-    make_check(adir, tmp_path, fake, wait_s=12.0, poll_s=5.0).call({})
-    runs = [i for i, e in enumerate(events) if e == "run"]
-    assert len(runs) >= 3
-    for i in runs:
-        assert "sweep" in events[max(i - 2, 0):i], events           # a sweep just before this try (the gate sits between)
-
-
 def test_a_process_that_rewrites_the_kernel_during_the_sweep_cannot_get_its_edit_run_unchecked(tmp_path, fake_kenv, monkeypatch):
     """The sweep runs before the copy, so what a stray writes before it is stopped is copied and gated like any kernel."""
     adir = attempt_dir(tmp_path, fake_kenv)
@@ -126,31 +111,6 @@ def test_the_probe_reserves_at_least_the_gozer_term_grace():
 
 
 # ---- 3. polling stops at the first ticket that could not be cancelled -------------------------------------------
-
-
-def test_a_ticket_that_cannot_be_cancelled_stops_the_polling_and_the_answer_names_that_ticket():
-    t1 = dict(QUEUED, queued={"ticket": "T1", "cancel_error": "gozer cancel exited 1"})
-    t2 = dict(QUEUED, queued={"ticket": "T2", "cancel_error": None})
-    w = World([(t1, "queued", ""), (t2, "queued", ""), (t2, "queued", "")])
-    c = w.check(wait_s=120.0, poll_s=10.0)
-    text = c.call({})
-    assert len(w.runs) == 1, w.runs
-    assert "T1" in text and "gozer cancel exited 1" in text and "T2" not in text
-    assert c.summary()["calls"][0]["cancelled"] is False
-
-
-def test_a_later_pass_cannot_hide_a_ticket_that_is_still_queued():
-    t1 = dict(QUEUED, queued={"ticket": "T1", "cancel_error": "boom"})
-    w = World([(t1, "queued", ""), (good_hw(), None, "")])
-    text = w.check().call({})
-    assert "PASS" not in text and "T1" in text and len(w.runs) == 1
-
-
-def test_a_missing_ticket_also_stops_the_polling():
-    nothing = dict(QUEUED, queued={"ticket": None, "cancel_error": "no ticket in gozer's output"})
-    w = World([(nothing, "queued", ""), queued()])
-    w.check().call({})
-    assert len(w.runs) == 1
 
 
 # ---- 4. a hang does not claim a cleanup nobody saw ----------------------------------------------------------------

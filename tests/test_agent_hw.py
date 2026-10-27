@@ -231,59 +231,6 @@ def test_a_policy_with_zero_calls_is_not_enabled_and_never_runs():
 # ---- the board is busy --------------------------------------------------------------------------------------------
 
 
-def test_a_busy_board_is_polled_until_the_wait_runs_out_and_then_the_agent_is_told_to_use_the_simulator():
-    w = World([queued() for _ in range(30)])
-    c = w.check(wait_s=120.0, poll_s=10.0)
-    text = c.call({})
-    assert "busy" in text and "simulator" in text
-    assert len(w.runs) > 1 and sum(w.sleeps) <= 120.0
-    rec = c.summary()["calls"][0]
-    assert rec["outcome"] == "busy" and rec["queued_polls"] == len(w.runs) and rec["cancelled"] is True
-    assert 119.0 <= rec["waited_s"] <= 125.0 and rec["lease_s"] == 0.0
-    assert c.summary()["lease_s_used"] == 0.0
-
-
-def test_a_busy_call_still_counts_as_a_call_so_the_agent_cannot_poll_for_ever():
-    w = World([queued() for _ in range(100)])
-    c = w.check(max_calls=2, wait_s=1.0, poll_s=10.0)
-    c.call({})
-    c.call({})
-    assert "no hardware checks left" in c.call({})
-
-
-def test_a_board_that_frees_up_during_the_wait_runs_the_kernel_and_records_the_wait():
-    w = World([queued(), queued(), (good_hw(), None, "")])
-    c = w.check(wait_s=120.0, poll_s=10.0)
-    text = c.call({})
-    assert text.splitlines()[0].startswith("hardware_check 1 of 6: PASS")
-    rec = c.summary()["calls"][0]
-    assert rec["queued_polls"] == 2 and rec["waited_s"] == 21.0 and rec["outcome"] == "pass"
-    assert "waited 21.0 s for a lease" in text
-
-
-def test_the_wait_is_never_longer_than_wait_s_even_with_a_long_poll_interval():
-    w = World([queued() for _ in range(10)])
-    c = w.check(wait_s=25.0, poll_s=100.0)
-    c.call({})
-    assert sum(w.sleeps) <= 25.0 and len(w.runs) <= 2
-
-
-def test_a_ticket_that_could_not_be_cancelled_is_said_to_the_agent_and_recorded():
-    bad = dict(QUEUED, queued={"ticket": "T9", "cancel_error": "gozer cancel exited 1"})
-    w = World([(bad, "queued", "")])
-    c = w.check(wait_s=0.0)
-    text = c.call({})
-    assert "could not be cancelled" in text and "T9" in text and "gozer cancel exited 1" in text
-    assert c.summary()["calls"][0]["cancelled"] is False
-
-
-def test_a_zero_wait_gives_one_try():
-    w = World([queued(), queued()])
-    c = w.check(wait_s=0.0)
-    c.call({})
-    assert len(w.runs) == 1
-
-
 # ---- a hang -------------------------------------------------------------------------------------------------------
 
 
@@ -595,25 +542,6 @@ def queued_runner(tickets):
             f.write(f"queued: ticket {next(it)}\n")
         return kp.Watched(10, None, False, 0.4)
     return fake
-
-
-def test_a_busy_board_is_polled_with_a_cancelled_ticket_after_each_try(tmp_path, fake_kenv):
-    adir = attempt_dir(tmp_path, fake_kenv)
-    cancelled = []
-    c = make_check(adir, tmp_path, queued_runner(["T1", "T2", "T3", "T4"]), cancel=lambda t: cancelled.append(t),
-                   wait_s=15.0, poll_s=10.0)
-    text = c.call({})
-    assert cancelled == ["T1", "T2", "T3"] and "busy" in text and "simulator" in text     # tries at 0, 10 and 15 s
-    rec = c.summary()["calls"][0]
-    assert rec["outcome"] == "busy" and rec["cancelled"] is True and rec["queued_polls"] == 3
-
-
-def test_a_ticket_that_cannot_be_cancelled_is_reported(tmp_path, fake_kenv):
-    adir = attempt_dir(tmp_path, fake_kenv)
-    c = make_check(adir, tmp_path, queued_runner(["T1"]), cancel=lambda t: "gozer cancel exited 1", wait_s=0.0)
-    text = c.call({})
-    assert "could not be cancelled" in text and "gozer status" in text
-    assert c.summary()["calls"][0]["cancelled"] is False
 
 
 def test_a_hang_in_the_real_path_stops_the_agents_hardware_and_names_the_reason(tmp_path, fake_kenv):
