@@ -37,7 +37,7 @@ def drafter_on_run(w, *, needed=True, variant=None, choose=True):
     write(s2 / sc.TRIAL_DIR / "variant/evidence/swap-check.json", variant or report(drafter="off", ignored=False, seconds=6.0))
     write(s2 / sc.TRIAL_DIR / sc.TRIAL_RESULT, {"variant": {"served": True}})
     if choose:
-        dec = sc.decide(sc.need(run), sc.served_side(s2), sc.variant_side(s2))
+        dec = sc.decide(sc.need(run), sc.served_side(s2), sc.variant_side(s2, run))
         sc.write_decision(s2, dec, trial=True)
         return dec
 

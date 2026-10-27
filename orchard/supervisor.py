@@ -1972,7 +1972,7 @@ class Supervisor:
         except (OSError, ValueError):
             record = {}
         if record.get("returncode") == 0 and not record.get("timed_out"):
-            variant = sampling.variant_side(stage_dir)
+            variant = sampling.variant_side(stage_dir, self.run_dir)
             if variant is not None:
                 return variant, None
             return None, f"the sampling trial wrote no {sampling.TRIAL_RESULT}"

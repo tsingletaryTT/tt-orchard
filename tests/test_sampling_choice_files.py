@@ -26,8 +26,12 @@ def probe(ignored: bool, seconds=2.0):
             "requests": {"greedy": req(GREEDY, seconds), "sampled_a": req(a, seconds), "sampled_b": req(b, seconds)}}
 
 
-def report(drafter="on (dflash2)", ignored=True, seconds=2.0, serves=True, with_probe=True):
-    r = {"serving": {"drafter": drafter, "sampling": "host"}, "result_draft": {"serves": serves}}
+HEALTHY_DRAFT = {"serves": True, "coherent": True, "top1_agreement": 0.96875, "n_tokens": 32, "server_ready_s": 120.0}
+
+
+def report(drafter="on (dflash2)", ignored=True, seconds=2.0, serves=True, with_probe=True, draft=None):
+    """A swap check: a healthy result_draft (the variant is admitted only when its own swap checks pass) and a sampling probe."""
+    r = {"serving": {"drafter": drafter, "sampling": "host"}, "result_draft": {**HEALTHY_DRAFT, "serves": serves, **(draft or {})}}
     if with_probe:
         r["sampling_probe"] = probe(ignored, seconds)
     return r
@@ -57,7 +61,7 @@ def make_run(tmp_path, *, needed=True, stage2=None, variant=None, override="auto
 
 def save(run, s2, override="auto"):
     cur = sc.served_side(s2)
-    var = sc.variant_side(s2)
+    var = sc.variant_side(s2, run)
     d = sc.decide(sc.need(run, override), cur, var)
     sc.write_decision(s2, d, trial=var is not None)
     return d

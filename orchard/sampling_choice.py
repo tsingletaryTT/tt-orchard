@@ -195,8 +195,9 @@ def decide(need_: dict, current: dict, variant: dict | None = None, *, variant_n
     v_verdict = variant.get("verdict")
     if variant.get("served") is not True:
         flag = "no-variant-serves-purpose" if measured_bad else "unverified"
-        return out("keep", flag, f"the model needs sampling and the served configuration {why_current}; the drafter-off variant did not serve, so "
-                                 "the served configuration is kept and needs the operator's attention")
+        failed = f" or failed its checks ({variant['failure']})" if variant.get("failure") else ""
+        return out("keep", flag, f"the model needs sampling and the served configuration {why_current}; the drafter-off variant did not serve{failed}, "
+                                 "so the served configuration is kept and needs the operator's attention")
     if v_verdict in BAD:
         return out("keep", "no-variant-serves-purpose",
                    f"the model needs sampling; neither configuration does what it is for: the served configuration {why_current}, and the "
@@ -307,10 +308,24 @@ def probe_source(stage_dir) -> str:
     return served_source(stage_dir)
 
 
-def variant_side(stage_dir) -> dict | None:
+def _correctness_failures(report, run_dir) -> list[str]:
+    """Why a swap check does not pass the checks every swap check must pass (stage 2's swap fields, and the prompt suite when `run_dir` is given)."""
+    from orchard import stages          # imported here: orchard.stages imports this module
+    draft = report.get("result_draft") if isinstance(report, dict) else None
+    out = stages._swap_reasons(draft if isinstance(draft, dict) else {})
+    if run_dir is not None and isinstance(report, dict):
+        out += stages._suite_reasons(report, run_dir)
+    return out
+
+
+def variant_side(stage_dir, run_dir=None) -> dict | None:
     """The drafter-off variant's side, None when the trial left nothing. A trial result that says the variant did not serve gives a side that did not
     serve (a server that never started writes no swap check). Otherwise the side comes from the variant's own swap check, and a result that says it
-    served with no swap check gives a side with no verdict and no speed."""
+    served with no swap check gives a side with no verdict and no speed.
+
+    The variant is admitted only when it passes the checks any swap check must pass: stage 2's swap fields (coherent text, top-1 agreement at the bar,
+    enough tokens, a ready time) and, when `run_dir` is given, the prompt suite (orchard/prompt_suite.py, read the way the stage gates read it). A
+    variant that fails them is a side that did not serve, with the reasons in `failure` and no speeds, so a healthy sampling probe cannot select it."""
     sd = Path(stage_dir)
     # The supervisor's record of the trial's test comes first. A test that timed out or exited non-zero can still have left a swap check, and the
     # supervisor discards that variant, so this reader must too.
@@ -325,6 +340,10 @@ def variant_side(stage_dir) -> dict | None:
     if isinstance(v, dict) and v.get("served") is False:
         return {"drafter": "off", "verdict": "not-run", "greedy_tok_s": None, "sampled_tok_s": None, "served": False}
     if from_report is not None:
+        failures = _correctness_failures(_read_json(sd / TRIAL_DIR / "variant" / "evidence" / "swap-check.json"), run_dir)
+        if failures:
+            return {"drafter": "off", "verdict": "not-run", "greedy_tok_s": None, "sampled_tok_s": None, "served": False,
+                    "failure": "; ".join(failures)[:400]}
         return from_report
     if isinstance(v, dict) and v.get("served") is True:
         return {"drafter": "off", "verdict": "not-run", "greedy_tok_s": None, "sampled_tok_s": None, "served": True}
@@ -352,7 +371,7 @@ def decision_problems(stage_dir, run_dir) -> list[str]:
     current = served_side(sd)
     if current is None:
         return [f"{DECISION_FILE} cannot be checked: the swap check it was made from is missing or unreadable"]
-    variant = variant_side(sd)
+    variant = variant_side(sd, run_dir)
     again = decide(need(run_dir, override), current, variant)      # the note only words the reason; the choice and the flag do not read it
     out = []
     if again["choice"] != d["choice"]:
