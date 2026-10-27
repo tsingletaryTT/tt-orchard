@@ -312,3 +312,16 @@ def test_a_config_path_with_a_space_is_quoted_in_the_suggested_command(tmp_path)
     line = next(l for l in text.splitlines() if "telegraph report" in l)
     import shlex
     assert f"--telegraph-config {shlex.quote(cfg)}" in line and "'" in line
+
+
+def test_a_paid_answer_that_could_not_be_recorded_shows_the_warning_and_no_report_command(tmp_path, monkeypatch):
+    real = tg.Telegraph._append
+
+    def fail_settle(self, rec):
+        return False if rec.get("outcome") == "ok" else real(self, rec)
+    monkeypatch.setattr(tg.Telegraph, "_append", fail_settle)
+    d, cfg = str(tmp_path / "d"), str(write(tmp_path))
+    code, text = run(["ask", "--problem", "p", *files(tmp_path), "--dir", d, "--telegraph-config", cfg], tmp_path,
+                     transport=ok_transport())
+    assert code == 0 and "try fill" in text and "could not record" in text
+    assert "telegraph report" not in text

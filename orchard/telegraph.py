@@ -294,12 +294,29 @@ class Answer:
                 + self.text)
 
 
-def _read_ledger(directory: Path) -> list[dict]:
+def _read_ledger_strict(directory: Path) -> list[dict]:
+    """The ledger's records. A missing ledger is an empty history; any other read failure raises LedgerUnavailable, so a
+    transient I/O error cannot look like an empty history and let the caps be passed."""
     path = Path(directory) / LEDGER
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
         return []
+    except OSError as exc:
+        raise LedgerUnavailable(type(exc).__name__) from exc
+    return _parse_ledger(text)
+
+
+def _read_ledger(directory: Path) -> list[dict]:
+    """The same for display: any read failure shows an empty ledger."""
+    try:
+        return _read_ledger_strict(directory)
+    except LedgerUnavailable:
+        return []
+
+
+def _parse_ledger(text: str) -> list[dict]:
+    lines = text.splitlines()
     out = []
     for line in lines:
         try:
@@ -327,6 +344,11 @@ def _accounting(recs: list[dict]) -> dict:
         elif _sent(r):
             settled[r["call_id"]] = r
     total = {"calls": 0, "tokens": 0, "cost": 0.0, "unknown_cost": 0, "problems": {}}
+    for r in recs:                                      # a quarantined torn record: one call of unknown cost
+        if "torn" in r:
+            total["calls"] += 1
+            total["tokens"] += int(r.get("tokens") or 0)
+            total["unknown_cost"] += 1
     for call_id in dict.fromkeys(list(reserves) + list(settled)):
         st, rs = settled.get(call_id), reserves.get(call_id)
         if st is not None and (st.get("usage_known") is not False or rs is None):
@@ -412,9 +434,12 @@ class Telegraph:
         prompt = cut(f"Problem: {problem}\n\nTask:\n{clean(task)}\n\nWhat failed:\n{clean(failure)}",
                      self.cfg.max_prompt_chars - len(SYSTEM))
         sha = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
-        recs = _read_ledger(self.dir)
+        try:
+            recs = _read_ledger_strict(self.dir)
+        except LedgerUnavailable as exc:
+            return Answer(False, reason=f"the budget ledger cannot be written or read ({exc}), so no outside call was made")
         model = self._choose_model(problem, recs)
-        url, _headers, body = self._request(model, prompt, None)
+        url, _headers, body = self._request(model, prompt, key)
         identity = json.dumps({"url": url, "body": body}, sort_keys=True)        # no credential in the identity
         cache = self.dir / "cache" / (hashlib.sha256(identity.encode("utf-8")).hexdigest() + ".json")
         hit = self._cached(cache)
@@ -433,7 +458,8 @@ class Telegraph:
                  "cost": (worst_in * price[0] + self.cfg.max_output_tokens * price[1]) / 1e6 if price else None}
         try:
             with self._ledger_lock():
-                acct = _accounting(_read_ledger(self.dir))                 # fresh: another process may have spent since
+                self._quarantine_torn_tail()
+                acct = _accounting(_read_ledger_strict(self.dir))           # fresh: another process may have spent since
                 why = self._over_budget(model, worst, acct, problem)
                 if why:
                     return self._refuse(base, "budget", why)
@@ -441,7 +467,7 @@ class Telegraph:
                                      "tokens": worst["tokens"], "cost_usd": worst["cost"]}):
                     raise LedgerUnavailable("the reservation could not be written")
         except LedgerUnavailable as exc:
-            return Answer(False, reason=f"the budget ledger cannot be written ({exc}), so no outside call was made",
+            return Answer(False, reason=f"the budget ledger cannot be written or read ({exc}), so no outside call was made",
                           call_id=base["call_id"], model=model)
         return self._send(base, model, prompt, key, secrets, cache)
 
@@ -522,20 +548,31 @@ class Telegraph:
                         f"{worst['cost']:.6f}, cap {cfg.max_cost_usd})")
         return None
 
+    def _clean_tree(self, value, key: str | None):
+        """`value` with every string redacted (the key, token shapes, home paths, the host name), through dicts and lists."""
+        if isinstance(value, str):
+            return redact(value, hostname=self.hostname, home=self.home, secrets=(key,) if key else ())
+        if isinstance(value, dict):
+            return {k: self._clean_tree(v, key) for k, v in value.items()}
+        if isinstance(value, list):
+            return [self._clean_tree(v, key) for v in value]
+        return value
+
     def _request(self, model: str, prompt: str, key: str | None) -> tuple[str, dict, dict]:
         cfg = self.cfg
+        extra = self._clean_tree(cfg.extra_body, key)
         headers = {"Content-Type": "application/json"}
         if cfg.api == "anthropic":
             base = cfg.endpoint[:-3] if cfg.endpoint.endswith("/v1") else cfg.endpoint
             if key:
                 headers["x-api-key"] = key
             headers["anthropic-version"] = ANTHROPIC_VERSION
-            body = {**cfg.extra_body, "model": model, "max_tokens": cfg.max_output_tokens, "temperature": 0,
+            body = {**extra, "model": model, "max_tokens": cfg.max_output_tokens, "temperature": 0,
                     "system": SYSTEM, "messages": [{"role": "user", "content": prompt}]}
             return base + "/v1/messages", headers, body
         if key:
             headers["Authorization"] = f"Bearer {key}"
-        body = {**cfg.extra_body, "model": model, "max_tokens": cfg.max_output_tokens, "temperature": 0,
+        body = {**extra, "model": model, "max_tokens": cfg.max_output_tokens, "temperature": 0,
                 "messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt}]}
         return cfg.endpoint + "/chat/completions", headers, body
 
@@ -649,6 +686,34 @@ class Telegraph:
             finally:
                 os.close(fd)
 
+    def _quarantine_torn_tail(self) -> None:
+        """Called with the lock held. A last line with no line break is a write that was cut short. It moves to a private
+        sidecar file, the ledger is cut back to its last whole line, and a note record counts the fragment as one call of
+        unknown cost until a person reconciles it. Raises LedgerUnavailable when this cannot be done."""
+        path = self.dir / LEDGER
+        try:
+            data = path.read_bytes()
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise LedgerUnavailable(type(exc).__name__) from exc
+        if not data or data.endswith(b"\n"):
+            return
+        cut = data.rfind(b"\n") + 1
+        name = f"{LEDGER}.torn-{uuid.uuid4().hex[:8]}"
+        try:
+            fd = os.open(self.dir / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                os.write(fd, data[cut:])
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.truncate(path, cut)
+        except OSError as exc:
+            raise LedgerUnavailable(type(exc).__name__) from exc
+        if not self._append({"torn": name, "tokens": self.cfg.max_output_tokens}):
+            raise LedgerUnavailable("the note for a torn record could not be written")
+
     def _append(self, rec: dict) -> bool:
         """Append one record as one write. A last line that was cut short gets a line break first, so it cannot swallow this
         record. True when the record was written."""
@@ -662,6 +727,7 @@ class Telegraph:
                 data = (b"\n" if torn else b"") + (json.dumps(rec, sort_keys=True) + "\n").encode("utf-8")
                 if os.write(fd, data) != len(data):
                     return False                     # a short write leaves a record nobody can read
+                os.fsync(fd)                         # the record must survive a crash before a request depends on it
             finally:
                 os.close(fd)
             return True

@@ -170,9 +170,13 @@ def _ask(tel: tg.Telegraph, args, say) -> int:
         return EXIT_NO_ANSWER
     say(got.as_hint())
     where = "cache" if got.cached else got.model
-    say(f"call {got.call_id}: {where}, {got.tokens_in} in, {got.tokens_out} out, {got.latency_s:.1f}s"
-        + (f", ${got.cost_usd:.6f}" if got.cost_usd is not None else ", cost unknown")
-        + f". Tell the ledger whether it helped: {_report_command(tel, args, got.call_id)}")
+    line = (f"call {got.call_id}: {where}, {got.tokens_in} in, {got.tokens_out} out, {got.latency_s:.1f}s"
+            + (f", ${got.cost_usd:.6f}" if got.cost_usd is not None else ", cost unknown"))
+    if got.reason:                                       # the answer arrived but its record could not be written
+        say(f"warning: {got.reason}")
+        say(line + ".")
+    else:
+        say(line + f". Tell the ledger whether it helped: {_report_command(tel, args, got.call_id)}")
     return EXIT_OK
 
 

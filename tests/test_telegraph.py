@@ -1000,11 +1000,11 @@ def test_a_reservation_written_after_a_torn_line_is_not_lost(tmp_path):
         raise SystemExit(1)
     (tmp_path / "tg").mkdir()
     (tmp_path / "tg" / "telegraph.jsonl").write_text('{"call_id": "half')          # a write cut short, no line break
-    cfg = tg.load(table(max_calls=1), base=tmp_path)
+    cfg = tg.load(table(max_calls=2), base=tmp_path)                # the torn fragment counts as one call
     tel = tg.Telegraph(cfg, tmp_path / "tg", transport=dies, environ={"TG_KEY": KEY})
     with pytest.raises(SystemExit):
         tel.ask("p", "t", "f1")                                      # leaves only a reservation behind
-    tel2, wire2 = make(tmp_path, max_calls=1)
+    tel2, wire2 = make(tmp_path, max_calls=2)
     got = tel2.ask("p", "t", "f2")
     assert not got.ok and "call cap" in got.reason and wire2.requests == []
 
@@ -1127,3 +1127,115 @@ def test_existing_files_are_made_private_before_anything_is_written(tmp_path):
     victim.chmod(0o644)
     tel._write(victim, '{"text": "x"}')
     assert stat.S_IMODE(victim.stat().st_mode) == 0o600
+
+
+# ------------------------------------------------------------------------------------------------ review of PR 106, round 3
+
+def test_a_ledger_that_cannot_be_read_refuses_the_call_and_is_not_an_empty_history(tmp_path, monkeypatch):
+    tel, wire = make(tmp_path, max_calls=1)
+    assert tel.ask("p", "t", "f1").ok
+    real = tg.Path.read_text
+
+    def broken(self, *a, **kw):
+        if self.name == "telegraph.jsonl":
+            raise PermissionError("denied")
+        return real(self, *a, **kw)
+    monkeypatch.setattr(tg.Path, "read_text", broken)
+    got = tel.ask("p", "t", "f2")
+    assert not got.ok and "cannot be written or read" in got.reason and len(wire.requests) == 1
+
+
+def test_a_missing_ledger_is_an_empty_history(tmp_path):
+    tel, wire = make(tmp_path)
+    assert tel.ask("p", "t", "f").ok and len(wire.requests) == 1
+
+
+def test_a_credential_in_extra_body_is_removed_from_the_outbound_request(tmp_path):
+    extra = {"metadata": {"note": f"key {KEY} here", "list": [f"x{KEY}", {"deep": KEY}]}, "user": "/home/someone/me"}
+    tel, wire = make(tmp_path, extra_body=extra)
+    tel.ask("p", "t", "f")
+    sent = json.dumps(wire.requests[0]["body"])
+    assert KEY not in sent and "/home/someone" not in sent and "metadata" in sent
+    assert KEY not in "".join(p.read_text() for p in (tmp_path / "tg").rglob("*") if p.is_file())
+
+
+def test_the_reservation_is_flushed_to_disk_before_the_request_is_sent(tmp_path, monkeypatch):
+    synced = []
+    real = os.fsync
+    monkeypatch.setattr(tg.os, "fsync", lambda fd: (synced.append(fd), real(fd))[1])
+    seen = {}
+
+    def transport(url, headers, body, timeout):
+        seen["synced_before_send"] = len(synced)
+        return 200, json.dumps(openai_reply("ok", 10, 10)).encode()
+    cfg = tg.load(table(), base=tmp_path)
+    tel = tg.Telegraph(cfg, tmp_path / "tg", transport=transport, environ={"TG_KEY": KEY})
+    assert tel.ask("p", "t", "f").ok
+    assert seen["synced_before_send"] >= 1 and len(synced) >= 2
+
+
+def test_a_reservation_that_cannot_be_flushed_refuses_the_call(tmp_path, monkeypatch):
+    def failing(fd):
+        raise OSError("disk full")
+    monkeypatch.setattr(tg.os, "fsync", failing)
+    tel, wire = make(tmp_path)
+    got = tel.ask("p", "t", "f")
+    assert not got.ok and "cannot be written" in got.reason and wire.requests == []
+
+
+def test_an_earlier_call_and_a_torn_fragment_both_count_toward_the_call_cap(tmp_path):
+    (tmp_path / "tg").mkdir()
+    (tmp_path / "tg" / "telegraph.jsonl").write_text(json.dumps(
+        {"call_id": "old", "problem": "p", "outcome": "ok", "cached": False, "tokens_in": 1, "tokens_out": 1,
+         "cost_usd": 0.0, "usage_known": True}) + '\n{"reserve": "half')
+    tel, wire = make(tmp_path, max_calls=2)
+    got = tel.ask("p", "t", "f")                                     # old call + torn fragment = 2 of 2
+    assert not got.ok and "call cap" in got.reason and wire.requests == []
+
+
+def test_a_torn_tail_is_moved_to_a_private_sidecar_file_and_the_ledger_is_whole_again(tmp_path):
+    import stat
+    (tmp_path / "tg").mkdir()
+    (tmp_path / "tg" / "telegraph.jsonl").write_text('{"reserve": "half')
+    tel, _ = make(tmp_path)
+    tel.ask("p", "t", "f")
+    sidecars = list((tmp_path / "tg").glob("telegraph.jsonl.torn-*"))
+    assert len(sidecars) == 1 and sidecars[0].read_text() == '{"reserve": "half'
+    assert stat.S_IMODE(sidecars[0].stat().st_mode) == 0o600
+    for line in (tmp_path / "tg" / "telegraph.jsonl").read_text().splitlines():
+        json.loads(line)                                             # every line parses now
+
+
+def test_a_quarantined_fragment_counts_against_the_call_cap(tmp_path):
+    (tmp_path / "tg").mkdir()
+    (tmp_path / "tg" / "telegraph.jsonl").write_text('{"reserve": "half')
+    tel, wire = make(tmp_path, max_calls=1)
+    got = tel.ask("p", "t", "f")
+    assert not got.ok and "call cap" in got.reason and wire.requests == []
+
+
+def test_a_quarantined_fragment_blocks_a_cost_cap_until_it_is_reconciled(tmp_path):
+    (tmp_path / "tg").mkdir()
+    (tmp_path / "tg" / "telegraph.jsonl").write_text('{"reserve": "half')
+    tel, wire = make(tmp_path, max_cost_usd=100.0, prices={"small": [1.0, 3.0], "big": [5.0, 15.0]})
+    got = tel.ask("p", "t", "f")
+    assert not got.ok and "no known cost" in got.reason and wire.requests == []
+
+
+def test_a_torn_tail_whose_note_cannot_be_written_refuses_the_call(tmp_path, monkeypatch):
+    (tmp_path / "tg").mkdir()
+    (tmp_path / "tg" / "telegraph.jsonl").write_text('{"reserve": "half')
+    tel, wire = make(tmp_path)
+    real = tel._append
+    monkeypatch.setattr(tel, "_append", lambda rec: False if "torn" in rec else real(rec))
+    got = tel.ask("p", "t", "f")
+    assert not got.ok and "cannot be written" in got.reason and wire.requests == []
+
+
+def test_an_append_after_a_torn_line_starts_on_its_own_line(tmp_path):
+    (tmp_path / "tg").mkdir()
+    (tmp_path / "tg" / "telegraph.jsonl").write_text('{"call_id": "half')   # another process died mid-write
+    tel, _ = make(tmp_path)
+    assert tel._append({"report": "x", "helped": True})
+    lines = (tmp_path / "tg" / "telegraph.jsonl").read_text().splitlines()
+    assert lines[-1] == '{"helped": true, "report": "x"}' and lines[0] == '{"call_id": "half'
