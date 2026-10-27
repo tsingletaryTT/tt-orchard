@@ -14,6 +14,7 @@ import hashlib
 import io
 import json
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -106,11 +107,11 @@ def test_a_pass_says_pass_the_numbers_the_times_and_what_is_left():
 
 
 def test_a_numeric_failure_gives_the_first_line_and_the_numbers_line():
-    w = World([(bad_hw(numbers="seed0: got is about 3x expected, pcc 0.2"), None, "")])
+    w = World([(bad_hw(numbers="seed0: got is about 3x expected, pcc 0.2"), None, "some output\nmore output")])
     text = w.check().call({})
     assert "FAIL: hw_numeric_mismatch: set seed0: pcc 0.2 is below 0.99" in text
     assert "numbers: seed0: got is about 3x expected, pcc 0.2" in text
-    assert "output (last lines)" not in text          # a numeric failure has no compile output worth showing
+    assert "output (last lines)" not in text and "more output" not in text      # no compile output for a numeric failure
 
 
 def test_a_compile_error_shows_the_tail_of_the_output_and_is_bounded():
@@ -121,7 +122,15 @@ def test_a_compile_error_shows_the_tail_of_the_output_and_is_bounded():
     assert "FAIL: compile_error: RuntimeError: list elements must be constants" in text
     assert "output (last lines):" in text and "RuntimeError: list elements must be constants" in text.splitlines()[-3]
     assert "line 0\n" not in text                 # only the tail is shown
+    assert "line 380" not in text and "line 390" in text            # the last 15 lines, not the last 1200 characters
     assert len(text) < 2500
+
+
+def test_a_device_time_that_is_not_a_number_is_not_shown_or_recorded():
+    for bad in ("soon", True, float("nan"), None):
+        c = World([(good_hw(device_s=bad), None, "")]).check()
+        text = c.call({})
+        assert "device time not reported" in text and c.summary()["calls"][0]["device_s"] is None
 
 
 def test_the_text_says_the_probe_judges_and_the_agents_claim_counts_for_nothing():
@@ -264,7 +273,7 @@ def test_a_ticket_that_could_not_be_cancelled_is_said_to_the_agent_and_recorded(
     w = World([(bad, "queued", "")])
     c = w.check(wait_s=0.0)
     text = c.call({})
-    assert "could not be cancelled" in text and "T9" in text
+    assert "could not be cancelled" in text and "T9" in text and "gozer cancel exited 1" in text
     assert c.summary()["calls"][0]["cancelled"] is False
 
 
@@ -373,10 +382,12 @@ def test_a_second_call_while_one_runs_is_answered_at_once_and_does_not_queue():
     th = threading.Thread(target=lambda: first.append(c.call({})))
     th.start()
     assert started.wait(20)
+    t0 = time.monotonic()
     second = c.call({})
+    answered_in = time.monotonic() - t0
     release.set()
     th.join(20)
-    assert "already running" in second
+    assert "already running" in second and answered_in < 1.0          # answered at once, not after a wait
     assert first and first[0].startswith("hardware_check 1")
     assert c.summary()["calls_counted"] == 1
 
@@ -496,6 +507,18 @@ def test_a_missing_kernel_is_never_run(tmp_path, fake_kenv):
     assert calls == [] and "kernel.py does not exist" in text
 
 
+def test_a_file_planted_in_the_calls_directory_is_removed_before_the_copy(tmp_path, fake_kenv):
+    """The harness runs with the copy's directory as its working directory, so a planted ttnn.py there would be imported."""
+    adir = attempt_dir(tmp_path, fake_kenv)
+    planted = kp.hwcheck_dir(tmp_path / "probe", "add", 1, 1) / kp.CLEAN_DIR / "ttnn.py"
+    planted.parent.mkdir(parents=True)
+    planted.write_text("raise SystemExit('planted')\n")
+    calls = []
+    make_check(adir, tmp_path, hw_writer([GOOD_HW_SET], calls)).call({})
+    assert calls and not planted.exists()
+    assert sorted(p.name for p in planted.parent.iterdir()) == ["kernel.py"]
+
+
 def test_a_kernel_that_is_a_link_is_never_run(tmp_path, fake_kenv):
     adir = attempt_dir(tmp_path, fake_kenv, kernel=None)
     target = tmp_path / "elsewhere.py"
@@ -504,6 +527,7 @@ def test_a_kernel_that_is_a_link_is_never_run(tmp_path, fake_kenv):
     calls = []
     text = make_check(adir, tmp_path, hw_writer([GOOD_HW_SET], calls)).call({})
     assert calls == [] and "forbidden_code" in text
+    assert "file at line 0" in text and "plain file of at most 256 KiB" in text      # the rule and its remedy are shown
 
 
 def test_a_clean_copy_that_changes_before_the_run_is_not_run(tmp_path, fake_kenv, monkeypatch):
@@ -551,12 +575,13 @@ def test_a_result_with_no_device_seconds_says_so(tmp_path, fake_kenv):
     assert "device time not reported" in text
 
 
-def test_a_device_seconds_value_that_is_not_a_number_is_ignored(tmp_path, fake_kenv):
+@pytest.mark.parametrize("raw", ['"soon"', "true", "NaN", "-1", "1e9", "null"])
+def test_a_device_seconds_value_that_is_not_a_plausible_number_is_ignored(tmp_path, fake_kenv, raw):
     adir = attempt_dir(tmp_path, fake_kenv)
 
     def fake(argv, **kw):
         Path(argv[argv.index("--out") + 1]).write_text(
-            json.dumps({"phase": "hw", "sets": [GOOD_HW_SET], "error": None, "device_s": "soon"}))
+            '{"phase": "hw", "sets": [' + json.dumps(GOOD_HW_SET) + '], "error": null, "device_s": ' + raw + "}")
         return kp.Watched(0, None, False, 1.0)
     assert "device time not reported" in make_check(adir, tmp_path, fake).call({})
 
@@ -915,6 +940,29 @@ def test_a_note_with_a_pipe_or_a_line_break_cannot_break_the_table(tmp_path):
     section = md.split("## Hardware checks called by the coder")[1]
     row = next(l for l in section.splitlines() if l.startswith("| silu_mul |"))
     assert "\n" not in row and row.count(" | ") == next(l for l in section.splitlines() if l.startswith("| op ")).count(" | ")
+
+
+def test_the_column_and_the_totals_count_only_the_calls_that_reached_the_lease(tmp_path):
+    refused = {"counted": False, "outcome": "refused", "passed": False, "lease_s": 0.0, "k": None}
+    md = _report_md(tmp_path, [_row_attempt(agent_hw=hw_summary({}, refused, refused))])
+    row = next(l for l in md.splitlines() if l.startswith("| 1 |"))
+    assert row.rstrip().endswith("1 call (1 passed), 47 s |"), row
+    assert "1 call in 1 attempt" in md
+
+
+def test_the_totals_say_how_long_the_agents_waited_for_boards(tmp_path):
+    busy = {"outcome": "busy", "passed": False, "lease_s": 0.0, "total_s": 121.0, "waited_s": 120.0, "queued_polls": 12,
+            "cancelled": True}
+    md = _report_md(tmp_path, [_row_attempt(agent_hw=hw_summary(busy))])
+    assert "120 s waited for a board" in md
+
+
+def test_a_call_row_shows_the_agents_note_and_a_ticket_that_was_not_cancelled(tmp_path):
+    busy = {"outcome": "busy", "passed": False, "lease_s": 0.0, "waited_s": 120.0, "queued_polls": 3, "cancelled": False,
+            "note": "waiting for the board"}
+    md = _report_md(tmp_path, [_row_attempt(agent_hw=hw_summary(busy))])
+    row = next(l for l in md.splitlines() if "| busy |" in l)
+    assert "note: waiting for the board" in row and "NOT all cancelled" in row
 
 
 def test_the_report_json_keeps_the_calls(tmp_path):

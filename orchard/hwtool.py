@@ -254,8 +254,6 @@ class HardwareCheck:
             lines.append(", ".join(measures))
         if not passed and hw.get("numbers"):
             lines.append(f"numbers: {hw['numbers']}")
-        for v in [v for v in hw.get("violations") or [] if isinstance(v, dict)][:VIOLATIONS_SHOWN]:
-            lines.append(f"  {v.get('rule')} at line {v.get('line')}: {v.get('detail')}. {v.get('remedy')}")
         if not passed and hw.get("category") != "hw_numeric_mismatch" and text.strip():
             tail = "\n".join([l for l in text.splitlines() if l.strip()][-TAIL_LINES:])[-TAIL_CHARS:]
             lines.append("output (last lines):\n" + tail)

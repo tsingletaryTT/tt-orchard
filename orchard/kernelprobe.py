@@ -1164,7 +1164,7 @@ def _hw_run(adir: Path, vdir: Path, kernel: Path, *, op: str, reason: str, share
     block = {"passed": category is None, "category": category, "first_line": line,
              **set_measures(sets), "sets": sets, "violations": [],
              "elapsed_s": round(got.elapsed_s, 1), "watch": _watch_facts(got), **extra}
-    if isinstance(device, (int, float)) and not isinstance(device, bool) and device == device and 0 <= device < 1e7:
+    if isinstance(device, (int, float)) and not isinstance(device, bool) and 0 <= device < 1e7:
         block["device_s"] = round(float(device), 2)
     return block, None, text
 
