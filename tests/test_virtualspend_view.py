@@ -287,3 +287,75 @@ def test_the_cache_is_dated_when_the_scan_ends_so_a_slow_scan_is_still_reused(ro
     app.virtual_spend()
     app.virtual_spend()
     assert calls == ["org--a"], "the second request must reuse the result for the full cache lifetime"
+
+
+
+# ---- review fix 3 (third round): a selected run is always scanned, and directories left unscanned are reported ---------------
+
+def _many(root, n=6):
+    for i in range(n):
+        write_log(root, f"org--{i:02d}/log/run.jsonl", [turn(1, 1_000_000 * (i + 1), 0)])
+
+
+def test_a_selected_run_past_the_scan_cap_is_still_scanned(root, monkeypatch):
+    monkeypatch.setattr(view, "MAX_CANDIDATES", 3)
+    _many(root)
+    code, data = get(app_with(root), "/api/virtual-spend?run=org--05")
+    assert code == 200 and data["scope"] == "run"
+    assert data["total"]["prompt_tokens"] == 6_000_000
+    assert data["meter"]["text"] == "Local ≈ $0.60 (virtual, at claude-haiku-5-5)"
+    assert "org--05" in [r["name"] for r in data["rows"]], "its row is in the table too"
+
+
+def test_an_unlisted_run_name_is_never_scanned(root, monkeypatch):
+    monkeypatch.setattr(view, "MAX_CANDIDATES", 3)
+    _many(root)
+    scanned = []
+    real = vs.scan
+    monkeypatch.setattr(vs, "scan", lambda p: (scanned.append(p.name), real(p))[1])
+    code, data = get(app_with(root), "/api/virtual-spend?run=../org--05")
+    assert code == 200 and data["total"]["turns"] == 0 and data["meter"] is None
+    assert sorted(scanned) == ["org--00", "org--01", "org--02"]
+
+
+def test_directories_left_unscanned_are_reported(root, monkeypatch):
+    monkeypatch.setattr(view, "MAX_CANDIDATES", 3)
+    _many(root)
+    data = get(app_with(root))[1]
+    assert data["not_scanned"] == 3 and len(data["rows"]) == 3
+    assert "3 runs were not scanned" in data["meter"]["title"]
+
+
+def test_a_scanned_extra_run_is_not_counted_as_unscanned(root, monkeypatch):
+    monkeypatch.setattr(view, "MAX_CANDIDATES", 3)
+    _many(root)
+    data = get(app_with(root), "/api/virtual-spend?run=org--05")[1]
+    assert data["not_scanned"] == 2
+
+
+def test_nothing_unscanned_when_every_directory_fits(root):
+    _many(root, 3)
+    data = get(app_with(root))[1]
+    assert data["not_scanned"] == 0 and "not scanned" not in data["meter"]["title"]
+
+
+def test_the_extra_run_is_cached_like_the_others(root, monkeypatch):
+    monkeypatch.setattr(view, "MAX_CANDIDATES", 3)
+    _many(root)
+    t = [1000.0]
+    app = app_with(root, clock=lambda: t[0])
+    scanned = []
+    real = vs.scan
+    monkeypatch.setattr(vs, "scan", lambda p: (scanned.append(p.name), real(p))[1])
+    app.virtual_spend("org--05")
+    app.virtual_spend("org--05")
+    assert scanned.count("org--05") == 1
+    t[0] += view.CACHE_S + 1
+    app.virtual_spend("org--05")
+    assert scanned.count("org--05") == 2
+
+
+def test_the_hard_cap_on_enumerated_directories_applies(root, monkeypatch):
+    monkeypatch.setattr(view, "MAX_NAMES", 4)
+    _many(root, 8)
+    assert len(view.candidates(root)) == 4

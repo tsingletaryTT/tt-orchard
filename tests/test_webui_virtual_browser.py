@@ -276,3 +276,18 @@ def test_both_meters_stay_on_screen_at_the_bottom_of_a_tall_page(tmp_path, brows
         expect(local(pg)).to_be_in_viewport()
         expect(pg.locator("#spend-meter")).to_be_in_viewport()
     ctx.close()
+
+
+
+def test_the_page_names_the_runs_that_were_not_scanned(tmp_path, browser, monkeypatch):
+    from orchard import virtualspend_view as view
+    monkeypatch.setattr(view, "MAX_CANDIDATES", 2)
+    r = tmp_path / "orchard-runs"
+    for i in range(5):
+        write_log(r, f"kprobe/p{i}/op/attempt-1/log/p.jsonl", [turn(1, 1_000_000 * (i + 1), 0)])
+    ctx, pg = new_page(browser)
+    with Served(app_for(r)) as s:
+        pg.goto(f"http://127.0.0.1:{s.port}/?mode=operator#telegraph")
+        expect(pg.locator("#tg-local-note")).to_contain_text("3 runs not scanned")
+        expect(local(pg)).to_have_attribute("title", __import__("re").compile("3 runs were not scanned"))
+    ctx.close()

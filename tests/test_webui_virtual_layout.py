@@ -136,4 +136,12 @@ def test_operator_local_meter_is_aa_on_the_dark_top_bar():
 
 def test_the_local_table_is_redrawn_only_when_its_data_changes():
     body = fn_body(JS(), "function renderLocalTable")
-    assert 'changed($("tg-local"), v.rows.concat([v.references]))' in body
+    assert 'changed($("tg-local"), [v.rows, v.references, v.not_scanned])' in body
+
+
+
+def test_the_page_says_how_many_runs_were_not_scanned():
+    body = fn_body(JS(), "function renderLocalTable")
+    assert 'plural(v.not_scanned, "run")} not scanned' in body
+    guard = next(line for line in body.splitlines() if "changed(" in line)
+    assert "v.not_scanned" in guard, "a change in the count must redraw the note"
