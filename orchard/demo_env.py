@@ -291,19 +291,22 @@ def _clean_environ(env: DEnv) -> dict:
 
 
 def step_packages(env: DEnv, check_only: bool) -> Result:
-    rec = read_record(env)
-    if env.py.exists() and rec and rec.get("requirements_sha256") == requirements_sha256():
-        return Result("packages", OK, f"{TORCH} and {len(REQUIREMENTS)} pinned packages (record {requirements_sha256()[:12]})")
+    """A build installs the pins every time: uv does nothing for a package that is already right, and puts back one that was upgraded or
+    removed after the last build (numpy 2 after a stray `pip install`, for example), which the record's hash of the pins cannot see.
+    `--check` and `--dry-run` change nothing: they take the record's word for the install and the rules judge the result."""
     py = str(env.py)
     torch = ["uv", "pip", "install", "--quiet", "--python", py, "--index-url", TORCH_CPU_INDEX, TORCH]
     pins = ["uv", "pip", "install", "--quiet", "--python", py, "--index-url", PYPI_INDEX, *REQUIREMENTS]
     if check_only:
+        rec = read_record(env)
+        if env.py.exists() and rec and rec.get("requirements_sha256") == requirements_sha256():
+            return Result("packages", OK, f"{TORCH} and {len(REQUIREMENTS)} pinned packages (record {requirements_sha256()[:12]})")
         return Result("packages", TODO, f"would run: {' '.join(torch)}, then uv pip install of {len(REQUIREMENTS)} pins from {PYPI_INDEX}")
     for argv in (torch, pins):
         rc, _, err = env.run(argv, 1800, _clean_environ(env))
         if rc != 0:
             return _fail("packages", argv, err)
-    return Result("packages", OK, f"installed {TORCH} and {len(REQUIREMENTS)} pinned packages")
+    return Result("packages", OK, f"{TORCH} and {len(REQUIREMENTS)} pinned packages are in place")
 
 
 def step_record(env: DEnv, check_only: bool, facts: dict | None, upstream_ok: bool) -> Result:

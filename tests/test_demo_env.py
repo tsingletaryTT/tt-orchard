@@ -76,7 +76,12 @@ class World:
         self.run.on(["git", "-C", t, "describe", "--tags", "--exact-match"], (0, TAG + "\n", ""))
         self.run.on(["git", "-C", t, "rev-parse", "HEAD"], (0, SHA + "\n", ""))
         self.run.on(["uv", "venv"], effect=self._make_venv)
-        self.run.on(["uv", "pip"])
+        self.run.on(["uv", "pip"], effect=self._pip)
+
+    def _pip(self, argv):
+        """An install of the pins puts numpy back to the pinned version, as uv does."""
+        if "numpy==1.26.4" in argv:
+            self.numpy = "1.26.4"
 
     def _make_venv(self, argv):
         (self.venv / "bin").mkdir(parents=True, exist_ok=True)
@@ -279,14 +284,38 @@ def test_the_record_holds_the_tag_the_sha_the_requirements_hash_and_the_resolved
     assert rec["installed"] == {"numpy": "1.26.4", "ttnn": "0.80.0"}
 
 
-def test_a_second_build_changes_nothing_and_installs_nothing(world):
+def test_a_second_build_rewrites_no_file(world):
     build(world)
-    n_installs, rec = len(world.run.installs()), (world.venv / de.RECORD).read_text()
-    pth_stat = (world.site / de.PTH_NAME).stat().st_mtime_ns
+    rec = (world.venv / de.RECORD).read_text()
+    stats = {p: p.stat().st_mtime_ns for p in (world.site / de.PTH_NAME, world.venv / de.RECORD)}
     env, results = build(world)
     assert all(r.status == de.OK for r in results)
-    assert len(world.run.installs()) == n_installs
-    assert (world.venv / de.RECORD).read_text() == rec and (world.site / de.PTH_NAME).stat().st_mtime_ns == pth_stat
+    assert (world.venv / de.RECORD).read_text() == rec and {p: p.stat().st_mtime_ns for p in stats} == stats
+
+
+def test_every_build_runs_the_pin_install_again_instead_of_trusting_the_record(world):
+    """The record says what was installed once. numpy can be upgraded or a package removed afterwards, and the hash of the pins does not change."""
+    build(world)
+    before = len(world.run.installs())
+    build(world)
+    again = world.run.installs()[before:]
+    assert any("numpy==1.26.4" in a for a in again) and any(de.TORCH in a for a in again)
+
+
+def test_a_build_repairs_a_numpy_that_was_upgraded_after_the_first_build(world):
+    healthy(world)
+    world.numpy = "2.5.3"
+    assert names(check(world))["numpy"].status == de.FAIL
+    _, results = build(world)
+    assert all(r.status == de.OK for r in results), [(r.name, r.detail) for r in results]
+    assert world.numpy == "1.26.4"
+
+
+def test_check_and_dry_run_still_install_nothing_when_the_record_matches(world):
+    healthy(world)
+    check(world)
+    de.ensure(world.env(), check_only=True, say=lambda s: None)
+    assert world.run.installs() == []
 
 
 def test_a_host_tree_that_is_not_built_fails_and_nothing_is_written_into_the_venv(world):

@@ -1556,7 +1556,7 @@ repository (default `~/orchard-venvs/tt-demo`) with Python 3.12, CPU torch, nump
 with datasets 4.8.5 (the datasets 2.x line imports `HfFolder`, which huggingface_hub 1.x dropped), transformers 5.19.0,
 opencv-python-headless and the packages tt-transformers' demo and tt-metal's root `conftest.py` import. Every package is pinned in
 `orchard/demo_env.py` and installed from an explicit index. The pins were resolved together on 2026-10-26 on this box; a later pin change
-shows up in `orchard-demo-env.json`'s requirements hash and the next build installs the new pins.
+shows up in `orchard-demo-env.json`'s requirements hash. Every build runs the pin install again (uv leaves a right package alone and puts back one that was upgraded or removed since, such as numpy 2), so `tt-orchard demo-env` repairs a venv that `--check` fails.
 
 The host tree's `ttnn` and `ttml` are put on the venv's path by a `tt-host-tree.pth` file and a small dist-info for each at the tree's tag,
 the same shape the shared venv has. `pip install -e` on tt-metal runs its `setup.py`, which can start a CMake build and writes into the tree, so
