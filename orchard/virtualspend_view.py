@@ -97,9 +97,10 @@ class Spender:
         self._cache = None                       # (time, rows, {name: path} of every listed directory, count scanned, cut short)
         self._extra: dict = {}                   # name -> row or None, for selected runs past the scan cap
 
-    def _scan_one(self, name, path):
+    def _scan_one(self, name, path, pin):
+        """One folder, read beneath the pinned runs folder (a link anywhere between the two is refused)."""
         try:
-            return {"name": name, **vs.priced(vs.scan(path), self.cfg)}
+            return {"name": name, **vs.priced(vs.scan(path, beneath=pin), self.cfg)}
         except Exception:                                           # noqa: BLE001 - one bad folder must not hide the others
             return None
 
@@ -109,12 +110,17 @@ class Spender:
         with self._lock:
             if self._cache is not None and self.clock() - self._cache[0] < CACHE_S:
                 return self._cache[1], self._cache[2], self._cache[3], self._cache[4]
+            pin = vs.open_pin(self.runs_root)                       # pinned before the listing: every scan is beneath this descriptor
             listed, cut = discover(self.runs_root)
             rows = []
-            for name, path in listed[:MAX_CANDIDATES]:
-                row = self._scan_one(name, path)
-                if row is not None:
-                    rows.append(row)
+            try:
+                for name, path in listed[:MAX_CANDIDATES]:
+                    row = self._scan_one(name, path, pin) if pin is not None else None
+                    if row is not None:
+                        rows.append(row)
+            finally:
+                if pin is not None:
+                    pin.close()
             names = dict(listed)
             scanned = min(len(listed), MAX_CANDIDATES)
             self._cache = (self.clock(), rows, names, scanned, cut)
@@ -125,7 +131,12 @@ class Spender:
         with self._lock:
             if name in self._extra:                                  # cleared whenever the base scan refreshes, so never older than CACHE_S
                 return self._extra[name]
-            row = self._scan_one(name, path)
+            pin = vs.open_pin(self.runs_root)
+            try:
+                row = self._scan_one(name, path, pin) if pin is not None else None
+            finally:
+                if pin is not None:
+                    pin.close()
             self._extra[name] = row
             return row
 

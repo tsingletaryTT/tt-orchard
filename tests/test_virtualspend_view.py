@@ -6,6 +6,7 @@ Fake agent logs under a fake runs folder. The route is read only, answers on loo
 the virtual figure apart from the helper spend, and gives an empty answer (never a 500) for a folder it cannot read."""
 import json
 import os
+import shutil
 from types import SimpleNamespace
 
 import pytest
@@ -130,10 +131,10 @@ def test_a_scan_that_raises_leaves_that_folder_out_and_keeps_the_rest(root, monk
     write_log(root, "org--b/log/run.jsonl", [turn(1, 20, 2)])
     real = vs.scan
 
-    def flaky(p):
+    def flaky(p, **kw):
         if p.name == "org--a":
             raise RuntimeError("boom")
-        return real(p)
+        return real(p, **kw)
     monkeypatch.setattr(vs, "scan", flaky)
     code, data = get(app_with(root))
     assert code == 200 and [r["name"] for r in data["rows"]] == ["org--b"]
@@ -256,11 +257,11 @@ def test_overlapping_requests_share_one_scan(root, monkeypatch):
     real = vs.scan
     calls, guard = [], threading.Lock()
 
-    def slow(path):
+    def slow(path, **kw):
         with guard:
             calls.append(path.name)
         _time.sleep(0.15)
-        return real(path)
+        return real(path, **kw)
     monkeypatch.setattr(vs, "scan", slow)
     app = app_with(root)
     results = []
@@ -279,10 +280,10 @@ def test_the_cache_is_dated_when_the_scan_ends_so_a_slow_scan_is_still_reused(ro
     real = vs.scan
     calls = []
 
-    def slow(path):
+    def slow(path, **kw):
         calls.append(path.name)
         t[0] += view.CACHE_S + 5                                             # the scan takes longer than the cache lifetime
-        return real(path)
+        return real(path, **kw)
     monkeypatch.setattr(vs, "scan", slow)
     app = app_with(root, clock=lambda: t[0])
     app.virtual_spend()
@@ -313,7 +314,7 @@ def test_an_unlisted_run_name_is_never_scanned(root, monkeypatch):
     _many(root)
     scanned = []
     real = vs.scan
-    monkeypatch.setattr(vs, "scan", lambda p: (scanned.append(p.name), real(p))[1])
+    monkeypatch.setattr(vs, "scan", lambda p, **kw: (scanned.append(p.name), real(p, **kw))[1])
     code, data = get(app_with(root), "/api/virtual-spend?run=../org--05")
     assert code == 200 and data["total"]["turns"] == 0 and data["meter"] is None
     assert sorted(scanned) == ["org--00", "org--01", "org--02"]
@@ -347,7 +348,7 @@ def test_the_extra_run_is_cached_like_the_others(root, monkeypatch):
     app = app_with(root, clock=lambda: t[0])
     scanned = []
     real = vs.scan
-    monkeypatch.setattr(vs, "scan", lambda p: (scanned.append(p.name), real(p))[1])
+    monkeypatch.setattr(vs, "scan", lambda p, **kw: (scanned.append(p.name), real(p, **kw))[1])
     app.virtual_spend("org--05")
     app.virtual_spend("org--05")
     assert scanned.count("org--05") == 1
@@ -474,3 +475,104 @@ def test_a_cached_answer_still_says_the_listing_was_cut_short(root, monkeypatch)
     app = app_with(root)
     first, second = app.virtual_spend(), app.virtual_spend()                 # the second answer comes from the cache
     assert first["discovery_truncated"] is True and second["discovery_truncated"] is True
+
+
+# ---- review (fifth round): the runs folder is pinned too, so no ancestor of a scanned folder is followed ----------------------
+
+def test_the_probe_folder_swapped_for_a_link_after_discovery_is_not_read(root, tmp_path, monkeypatch):
+    write_log(root, "kprobe/rms5/op/attempt-1/log/p.jsonl", [turn(1, 5, 1)])
+    outside = tmp_path / "outside"
+    write_log(outside, "rms5/op/attempt-1/log/p.jsonl", [turn(1, 999, 9)])
+    real = view.discover
+
+    def discover_then_swap(r):
+        found = real(r)
+        shutil.rmtree(root / "kprobe")
+        (root / "kprobe").symlink_to(outside, target_is_directory=True)      # the ancestor of a listed folder is swapped
+        return found
+    monkeypatch.setattr(view, "discover", discover_then_swap)
+    data = get(app_with(root))[1]
+    assert data["total"]["turns"] == 0 and "999" not in json.dumps(data)
+
+
+def test_a_run_folder_swapped_for_a_link_after_discovery_is_not_read(root, tmp_path, monkeypatch):
+    write_log(root, "org--a/stages/1/log/run.jsonl", [turn(1, 5, 1)])
+    outside = tmp_path / "outside-run"
+    write_log(outside, "stages/1/log/run.jsonl", [turn(1, 999, 9)])
+    real = view.discover
+
+    def discover_then_swap(r):
+        found = real(r)
+        shutil.rmtree(root / "org--a")
+        (root / "org--a").symlink_to(outside, target_is_directory=True)
+        return found
+    monkeypatch.setattr(view, "discover", discover_then_swap)
+    data = get(app_with(root))[1]
+    assert data["total"]["turns"] == 0 and "999" not in json.dumps(data)
+
+
+def test_the_runs_folder_itself_swapped_after_the_scan_began_is_not_followed(root, tmp_path, monkeypatch):
+    write_log(root, "org--a/stages/1/log/run.jsonl", [turn(1, 5, 1)])
+    outside = tmp_path / "outside-all"
+    write_log(outside, "org--a/stages/1/log/run.jsonl", [turn(1, 999, 9)])
+    real = view.discover
+
+    def discover_then_swap_root(r):
+        found = real(r)
+        moved = r.parent / "moved-runs"
+        r.rename(moved)
+        r.symlink_to(outside, target_is_directory=True)
+        return found
+    monkeypatch.setattr(view, "discover", discover_then_swap_root)
+    data = get(app_with(root))[1]
+    assert "999" not in json.dumps(data)
+    assert data["total"]["prompt_tokens"] == 5, "the pinned original is what was read"
+
+
+def test_a_selected_run_past_the_cap_is_also_read_beneath_the_pinned_runs_folder(root, tmp_path, monkeypatch):
+    monkeypatch.setattr(view, "MAX_CANDIDATES", 1)
+    write_log(root, "org--a/log/run.jsonl", [turn(1, 5, 1)])
+    write_log(root, "org--b/log/run.jsonl", [turn(1, 6, 1)])
+    outside = tmp_path / "outside-b"
+    write_log(outside, "log/run.jsonl", [turn(1, 999, 9)])
+    app = app_with(root)
+    app.virtual_spend()                                                         # the base scan lists both
+    shutil.rmtree(root / "org--b")
+    (root / "org--b").symlink_to(outside, target_is_directory=True)
+    data = app.virtual_spend("org--b")
+    assert "999" not in json.dumps(data) and data["total"]["turns"] == 0
+
+
+def test_scan_beneath_a_pin_refuses_a_swapped_component_and_reads_an_intact_one(root, tmp_path):
+    write_log(root, "a/b/log/run.jsonl", [turn(1, 5, 1)])
+    pin = vs.open_pin(root)
+    try:
+        assert vs.scan(root / "a" / "b", beneath=pin)["turns"] == 1
+        shutil.rmtree(root / "a")
+        outside = tmp_path / "out"
+        write_log(outside, "b/log/run.jsonl", [turn(1, 999, 9)])
+        (root / "a").symlink_to(outside, target_is_directory=True)
+        s = vs.scan(root / "a" / "b", beneath=pin)
+        assert s["turns"] == 0 and s["complete"] is False and s["skipped"]["links"] == 1
+    finally:
+        pin.close()
+
+
+def test_a_folder_that_is_not_under_the_pin_cannot_be_scanned_beneath_it(root, tmp_path):
+    (tmp_path / "elsewhere").mkdir()
+    pin = vs.open_pin(root)
+    try:
+        s = vs.scan(tmp_path / "elsewhere", beneath=pin)
+        assert s["turns"] == 0 and s["complete"] is False
+    finally:
+        pin.close()
+
+
+def test_no_descriptor_is_left_open_after_a_pinned_refresh(root):
+    write_log(root, "kprobe/p/op/attempt-1/log/p.jsonl", [turn()])
+    write_log(root, "org--a/log/run.jsonl", [turn()])
+    app = app_with(root)
+    before = set(os.listdir("/proc/self/fd"))
+    app.virtual_spend()
+    app.virtual_spend("org--a")
+    assert set(os.listdir("/proc/self/fd")) == before

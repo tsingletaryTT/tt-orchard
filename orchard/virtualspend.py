@@ -229,6 +229,26 @@ class _Pin:
         except OSError:
             pass
 
+    def child(self, rel: tuple) -> "_Pin":
+        """A pin on the folder `rel` (path components) beneath this one. Each component is opened with O_DIRECTORY | O_NOFOLLOW
+        relative to the descriptor before it, so a link anywhere on the way is refused and no ancestor is followed. Raises OSError."""
+        fd, owned = self.fd, False
+        try:
+            for part in rel:
+                nxt = os.open(part, _DIR_FLAGS, dir_fd=fd)
+                if owned:
+                    os.close(fd)
+                fd, owned = nxt, True
+            if not owned:
+                fd = os.dup(self.fd)
+        except OSError:
+            if owned:
+                os.close(fd)
+            raise
+        pin = _Pin.__new__(_Pin)
+        pin.root, pin.fd = self.root.joinpath(*rel), fd
+        return pin
+
     def open(self, path: Path, flags: int) -> int:
         """A descriptor for `path` (which must lie under the root), opened beneath the pinned root. Raises OSError."""
         try:
@@ -248,6 +268,15 @@ class _Pin:
         finally:
             if owned:
                 os.close(fd)
+
+
+def open_pin(root) -> "_Pin | None":
+    """Pin a folder (a runs folder) without following a link, for `scan(..., beneath=pin)`. None when it cannot be opened. The caller
+    closes it. A scan of each folder beneath one pin follows no link on the way from the pinned folder down."""
+    try:
+        return _Pin(Path(root))
+    except OSError:
+        return None
 
 
 def _open_log(path: Path, skipped: dict, pin: "_Pin | None" = None):
@@ -443,20 +472,26 @@ def _attempt_wall(log_dir: Path, pin: "_Pin") -> float:
     return _seconds(v) or 0.0
 
 
-def scan(root) -> dict:
-    """Count the local turns under `root` (a directory). Raises nothing. `agent_wall_s` (from a kernel-probe attempt.json) and
+def scan(root, beneath: "_Pin | None" = None) -> dict:
+    """Count the local turns under `root` (a directory). With `beneath` (a pin from `open_pin` on an ancestor of `root`), the folder is
+    opened relative to that descriptor one component at a time, so no ancestor of `root` is followed. Raises nothing. `agent_wall_s` (from a kernel-probe attempt.json) and
     `request_s` (the benchmark proxy's request times, summed across concurrent requests, so not wall time) are None when unknown."""
     root = Path(root)
     skipped = _skipped()
     out = {"turns": 0, "prompt_tokens": 0, "completion_tokens": 0, "agent_wall_s": None, "request_s": None, "files": 0,
            "skipped": skipped, "sources": {"agent": 0, "benchmark": 0}, "complete": True}
-    if root.is_symlink() or not root.is_dir():
-        out["complete"] = False
-        return out
     try:
-        pin = _Pin(root)                                            # opened once; every file is opened beneath this descriptor
-    except OSError:
+        if beneath is not None:
+            pin = beneath.child(root.relative_to(beneath.root).parts)
+        else:
+            if root.is_symlink() or not root.is_dir():
+                out["complete"] = False
+                return out
+            pin = _Pin(root)                                        # opened once; every file is opened beneath this descriptor
+    except (OSError, ValueError) as exc:
         out["complete"] = False
+        if isinstance(exc, OSError) and exc.errno in _LINK_ERRNOS:
+            skipped["links"] += 1
         return out
     try:
         _scan_tree(root, pin, out, skipped)
