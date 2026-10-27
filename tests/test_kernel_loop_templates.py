@@ -1487,3 +1487,13 @@ def test_numbers_prints_nothing_for_a_non_finite_set_with_no_numbers_beyond_what
 def test_the_probe_offers_exactly_the_ops_that_have_a_spec():
     from orchard import defaults
     assert set(defaults.KERNEL_PROBE_OPS) == {p.stem for p in (TEMPLATES / "ops").glob("*.json")}
+
+
+@pytest.mark.parametrize("op", ["center", "rmsnorm", "silu_mul", "softmax"])
+@needs_sim
+def test_every_library_kernel_passes_the_simulator_for_its_op(tmp_path, op):
+    tdir, adir = _attempt(tmp_path, None, op=op)
+    shutil.copy(TEMPLATES / 'library' / f"{op}.py", adir / "kernel.py")
+    done, check = _run_check(tdir, adir)
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert check["passed"] is True and len(check["sets"]) == 6

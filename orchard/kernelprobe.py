@@ -153,6 +153,37 @@ def tt_lang_facts(env) -> dict:
             "diagnostics_patched": patched, "patch_sha256": defaults.TTLANG_DIAGNOSTICS_SHA256}
 
 
+LIBRARY = TEMPLATES / "library"
+LIBRARY_SOURCE = "orchard worked-kernel library"
+LIBRARY_MODES = ("all", "others", "none")
+
+
+def library_references(op: str, mode: str = "all") -> list[dict]:
+    """The worked kernels that go into an attempt's reference/ as `library_<op>.py`, in the shape of
+    ttlang_env.read_references. `all` gives every kernel, `others` leaves out the one for `op` (so a pass measures
+    writing a kernel from other worked kernels), `none` gives nothing."""
+    if mode not in LIBRARY_MODES:
+        raise ValueError(f"unknown library mode {mode!r}; the modes are {', '.join(LIBRARY_MODES)}")
+    if mode == "none":
+        return []
+    out = []
+    for path in sorted(LIBRARY.glob("*.py")):
+        if mode == "others" and path.stem == op:
+            continue
+        data = path.read_bytes()
+        out.append({"name": f"library_{path.name}", "source": LIBRARY_SOURCE, "path": str(path),
+                    "sha256": hashlib.sha256(data).hexdigest(), "data": data})
+    return out
+
+
+def library_note(op: str, mode: str) -> str | None:
+    """The sentence the report carries when the coder was given a worked kernel for the op it was asked to write."""
+    if mode == "all" and (LIBRARY / f"{op}.py").is_file():
+        return (f"The library held a worked kernel for {op}, so a pass here shows that the coder can adapt a worked "
+                "kernel. It does not show that the coder can write the kernel from the specification alone.")
+    return None
+
+
 def write_references(adir: Path, references: list[dict]) -> list[dict]:
     """Write the reference files (ttlang_env.read_references) into `adir/reference/` as new regular files and return
     what was written: [{"name": "reference/<name>", "source", "path", "sha256"}], the sha256 of the bytes written."""
@@ -1334,6 +1365,11 @@ def _reference_lines(header: dict) -> list[str]:
     for r in refs:
         if isinstance(r, dict):
             lines.append(f"- {r.get('name')}: from the {r.get('source')}, {r.get('path')}, sha256 {r.get('sha256')}")
+    lib = header.get("library")
+    if isinstance(lib, dict):
+        lines += ["", f"Worked-kernel library mode: {lib.get('mode')}."]
+        if lib.get("note"):
+            lines.append(str(lib["note"]))
     return lines + [""]
 
 
@@ -1746,6 +1782,11 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
         return refuse("the tt-lang simulator environment is not ready: run `tt-orchard kernel-env`")
     skill_dir = ttlang_env.skill_dir_from(args)
     references, problems = ttlang_env.read_references(env, skill_dir)
+    library_mode = getattr(args, "library", None) or "all"
+    if library_mode not in LIBRARY_MODES:
+        return refuse(f"unknown --library {library_mode!r}; the modes are {', '.join(LIBRARY_MODES)}")
+    if not problems:
+        references = references + library_references(args.op, library_mode)
     if problems:
         return refuse("the coder's reference files are not ready: " + "; ".join(problems) + ". The tt-lang skill is "
                       "installed by `tt-warp fastmodels sync`; name another directory with --tt-lang-skill-dir or "
@@ -1861,6 +1902,7 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
             header["sampling"] = sampling
             header["tt_lang_skill_dir"] = str(skill_dir)
             header["references"] = reference_record
+            header["library"] = {"mode": library_mode, "note": library_note(args.op, library_mode)}
             header["skills"] = skills_record
             write_report(probe_dir, records, header)
             say(f"report: {probe_dir / 'kernel-probe-report.md'}")
