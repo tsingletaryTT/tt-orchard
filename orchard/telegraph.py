@@ -22,8 +22,10 @@ Nothing here opens a chip or uses a lease.
 """
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import difflib
+import fcntl
 import hashlib
 import ipaddress
 import json
@@ -43,10 +45,12 @@ from orchard.scrub import HOME_PATH, TOKEN_PATTERNS
 
 REPO = Path(__file__).resolve().parents[1]
 LEDGER = "telegraph.jsonl"
+LOCK = "telegraph.lock"
+REQUEST_FRAMING_TOKENS = 32      # added to the request size for the provider's message framing
 KEYS = {"enabled", "endpoint", "models", "api", "key_env", "key_file", "after_failures", "max_calls",
         "max_total_tokens", "max_cost_usd", "prices", "max_output_tokens", "max_prompt_chars", "timeout_s",
         "extra_body", "max_calls_per_problem", "max_tokens_per_problem", "max_cost_per_problem_usd", "dir"}
-RESERVED_BODY = ("model", "messages", "max_tokens", "temperature", "system", "stream")
+RESERVED_BODY = ("model", "messages", "max_tokens", "temperature", "system", "stream", "stream_options", "n", "best_of")
 APIS = ("openai", "anthropic")
 ANTHROPIC_VERSION = "2023-06-01"
 MIN_PROMPT_CHARS = 500
@@ -54,6 +58,10 @@ MAX_BODY = 2 * 1024 * 1024
 SYSTEM = ("A harness is bringing a model up on Tenstorrent hardware. A smaller local model has failed at the task below "
           "more than once. Say what is wrong in a few sentences and give the smallest working change or a short "
           "example. Do not ask questions. If the task cannot be done as described, say why.")
+
+
+class LedgerUnavailable(Exception):
+    """The budget ledger or its lock cannot be written."""
 
 
 class ConfigError(ValueError):
@@ -92,8 +100,9 @@ def _int(table: dict, key: str, default: int, lowest: int) -> int:
 
 def _http_ok(host: str) -> bool:
     """Plain http is for this machine and the private network: a name with no dot, or a loopback or private address."""
-    if host in ("localhost",) or "." not in host and ":" not in host:
-        return True
+    if "." not in host and ":" not in host:
+        # a machine name starts with a letter; digits and "0x" forms are legacy spellings of public IPv4 addresses
+        return re.fullmatch(r"[A-Za-z][A-Za-z0-9-]*", host) is not None
     try:
         addr = ipaddress.ip_address(host)
     except ValueError:
@@ -109,9 +118,16 @@ def _dir(value: str, base: Path) -> Path:
 def load(table: dict | None, *, base: Path) -> Config:
     """The `[telegraph]` table as a Config. None, an empty table or `enabled = false` is off and is not checked further.
     A relative key_file is relative to `base`, the config file's directory."""
-    if not table or not table.get("enabled", False):
+    if table is None:
+        return Config()
+    if not isinstance(table, dict):
+        raise ConfigError("telegraph must be a table")
+    enabled = table.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise ConfigError("telegraph.enabled must be true or false")
+    if not enabled:
         # Off: nothing else is checked, but a usable `dir` is kept so the web page can still show what was spent before.
-        off_dir = table.get("dir") if isinstance(table, dict) else None
+        off_dir = table.get("dir")
         return Config(dir=_dir(off_dir, base) if isinstance(off_dir, str) and off_dir else None)
     for key in table:
         if key not in KEYS:
@@ -140,6 +156,9 @@ def load(table: dict | None, *, base: Path) -> Config:
     if api not in APIS:
         raise ConfigError(f"telegraph.api must be one of {', '.join(APIS)}")
     key_env, key_file = table.get("key_env"), table.get("key_file")
+    for name, value in (("key_env", key_env), ("key_file", key_file)):
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            raise ConfigError(f"telegraph.{name} must be a non-empty string")
     if key_env and key_file:
         raise ConfigError("telegraph: set only one of key_env and key_file")
     if key_file:
@@ -148,7 +167,10 @@ def load(table: dict | None, *, base: Path) -> Config:
         if key_file == REPO or REPO in key_file.parents:
             raise ConfigError("telegraph.key_file is inside the checkout; keep the key outside any repository")
     prices = {}
-    for model, pair in (table.get("prices") or {}).items():
+    raw_prices = table.get("prices", {})
+    if not isinstance(raw_prices, dict):
+        raise ConfigError("telegraph.prices must be a table of model names to [input, output] dollars per million tokens")
+    for model, pair in raw_prices.items():
         if (not isinstance(pair, list) or len(pair) != 2 or
                 not all(isinstance(x, (int, float)) and not isinstance(x, bool) and x >= 0 for x in pair)):
             raise ConfigError(f"telegraph.prices.{model} must be [input, output] dollars per million tokens")
@@ -195,11 +217,15 @@ _BEARER = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{6,}")
 _SK = re.compile(r"\bsk-[A-Za-z0-9_-]{16,}")
 
 
+_PEM = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|\Z)", re.DOTALL)
+
+
 def redact(text: str, *, hostname: str = "", home: str = "", secrets: tuple = ()) -> str:
     """`text` without the key, token shapes, private key markers, the host name and the home directory."""
     for secret in secrets:
         if secret:
             text = text.replace(secret, "[redacted]")
+    text = _PEM.sub("[redacted private key]", text)
     for _what, pattern in TOKEN_PATTERNS:
         text = pattern.sub("[redacted]", text)
     text = _BEARER.sub("Bearer [redacted]", text)
@@ -281,14 +307,29 @@ class Answer:
                 + self.text)
 
 
-def read_ledger(directory) -> list[dict]:
-    """Every record in `telegraph.jsonl` that parses as an object, oldest first. A missing or unreadable file gives [];
-    bytes that are not UTF-8 and lines that are not JSON are skipped."""
+def _read_ledger_strict(directory: Path) -> list[dict]:
+    """The ledger's records. A missing ledger is an empty history; any other read failure raises LedgerUnavailable, so a
+    transient I/O error cannot look like an empty history and let the caps be passed."""
     path = Path(directory) / LEDGER
     try:
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
         return []
+    except OSError as exc:
+        raise LedgerUnavailable(type(exc).__name__) from exc
+    return _parse_ledger(text)
+
+
+def _read_ledger(directory: Path) -> list[dict]:
+    """The same for display: any read failure shows an empty ledger."""
+    try:
+        return _read_ledger_strict(directory)
+    except LedgerUnavailable:
+        return []
+
+
+def _parse_ledger(text: str) -> list[dict]:
+    lines = text.splitlines()
     out = []
     for line in lines:
         try:
@@ -300,12 +341,51 @@ def read_ledger(directory) -> list[dict]:
     return out
 
 
-_read_ledger = read_ledger
+read_ledger = _read_ledger            # public names for the web page (orchard/telegraph_view.py)
 
 
 def _sent(rec: dict) -> bool:
     """A record of a request that was sent (answered or failed), not a refusal or a cache hit."""
     return "call_id" in rec and not rec.get("cached") and rec.get("outcome") in ("ok", "error")
+
+
+def _accounting(recs: list[dict]) -> dict:
+    """What the ledger says has been spent or may have been: for every call, the settled numbers when the provider reported
+    them, and otherwise the worst case that was reserved before the request was sent (a request that timed out, a process that
+    died, or an answer with no usage). Records written before reservations existed count as settled."""
+    reserves, settled = {}, {}
+    for r in recs:
+        if "reserve" in r:
+            reserves[r["reserve"]] = r
+        elif _sent(r):
+            settled[r["call_id"]] = r
+    total = {"calls": 0, "tokens": 0, "cost": 0.0, "unknown_cost": 0, "problems": {}}
+    for r in recs:                                      # a quarantined torn record: one call of unknown cost
+        if "torn" in r:
+            total["calls"] += 1
+            total["tokens"] += int(r.get("tokens") or 0)
+            total["unknown_cost"] += 1
+    for call_id in dict.fromkeys(list(reserves) + list(settled)):
+        st, rs = settled.get(call_id), reserves.get(call_id)
+        if st is not None and (st.get("usage_known") is not False or rs is None):
+            tokens = int(st.get("tokens_in") or 0) + int(st.get("tokens_out") or 0)
+            source = st.get("cost_usd")
+        else:
+            tokens = int(rs.get("tokens") or 0)
+            source = rs.get("cost_usd")
+        known = isinstance(source, (int, float)) and not isinstance(source, bool)
+        cost = source if known else 0.0                    # an unknown cost is counted apart; it is never taken as zero
+        name = (st or rs).get("problem")
+        here = total["problems"].setdefault(name, {"calls": 0, "tokens": 0, "cost": 0.0, "unknown_cost": 0})
+        for t in (total, here):
+            t["calls"] += 1
+            t["tokens"] += tokens
+            t["cost"] += cost
+            t["unknown_cost"] += 0 if known else 1
+    return total
+
+
+accounting = _accounting
 
 
 def summarise(directory) -> dict:
@@ -325,7 +405,10 @@ def summarise(directory) -> dict:
         p["helped"] += 1 if verdict.get(r["call_id"]) else 0
     helped = sum(1 for r in ok if verdict.get(r["call_id"]) is True)
     not_helped = sum(1 for r in ok if verdict.get(r["call_id"]) is False)
+    reserved = {r["reserve"] for r in recs if "reserve" in r}
     return {"calls": len(calls), "ok": len(ok), "helped": helped, "not_helped": not_helped,
+            "unsettled": len(reserved - {r["call_id"] for r in calls}),
+            "unknown_usage_calls": sum(1 for r in calls if r.get("usage_known") is False),
             "unreported": sum(1 for r in ok if r["call_id"] not in verdict),
             "cache_hits": sum(1 for r in recs if "call_id" in r and r.get("cached")),
             "refused": sum(1 for r in recs if "call_id" in r and r.get("outcome") in ("budget", "no-key")),
@@ -335,15 +418,6 @@ def summarise(directory) -> dict:
             "cost_unknown_calls": sum(1 for r in calls if r.get("cost_usd") is None),
             "latency_s": sum(float(r.get("latency_s") or 0) for r in calls),
             "by_model": by_model, "by_problem": by_problem}
-
-
-def _problem_usage(recs: list[dict], problem: str) -> dict:
-    """Calls, tokens and known cost the ledger holds for requests sent for `problem`."""
-    name = str(problem)[:80]
-    mine = [r for r in recs if _sent(r) and r.get("problem") == name]
-    return {"name": name, "calls": len(mine),
-            "tokens": sum(int(r.get("tokens_in") or 0) + int(r.get("tokens_out") or 0) for r in mine),
-            "cost": sum(r["cost_usd"] for r in mine if isinstance(r.get("cost_usd"), (int, float)))}
 
 
 class Telegraph:
@@ -375,33 +449,62 @@ class Telegraph:
         key, key_problem = self._key()
         secrets = (key,) if key else ()
         clean = lambda t: redact(str(t), hostname=self.hostname, home=self.home, secrets=secrets)   # noqa: E731
-        prompt = cut(f"Problem: {clean(problem)}\n\nTask:\n{clean(task)}\n\nWhat failed:\n{clean(failure)}",
+        problem = clean(problem)[:80]
+        prompt = cut(f"Problem: {problem}\n\nTask:\n{clean(task)}\n\nWhat failed:\n{clean(failure)}",
                      self.cfg.max_prompt_chars - len(SYSTEM))
         sha = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
-        recs = _read_ledger(self.dir)
+        try:
+            recs = _read_ledger_strict(self.dir)
+        except LedgerUnavailable as exc:
+            return Answer(False, reason=f"the budget ledger cannot be written or read ({exc}), so no outside call was made")
         model = self._choose_model(problem, recs)
-        cache = self.dir / "cache" / (hashlib.sha256(f"{model}\0{sha}".encode()).hexdigest() + ".json")
+        url, _headers, body = self._request(model, prompt, key)
+        identity = json.dumps({"url": url, "body": body}, sort_keys=True)        # no credential in the identity
+        cache = self.dir / "cache" / (hashlib.sha256(identity.encode("utf-8")).hexdigest() + ".json")
         hit = self._cached(cache)
-        base = {"call_id": uuid.uuid4().hex[:12], "problem": str(problem)[:80], "model": model,
+        base = {"call_id": uuid.uuid4().hex[:12], "problem": problem, "model": model,
                 "prompt_chars": len(prompt), "prompt_sha256": sha}
         if hit is not None:
-            self._append({**base, "ts": self.clock(), "outcome": "ok", "cached": True, "tokens_in": 0, "tokens_out": 0,
-                          "latency_s": 0.0, "cost_usd": 0.0, "reply_file": hit["reply_file"]})
+            self._append({**base, "ts": self.clock(), "outcome": "ok", "cached": True, "origin": hit.get("call_id"),
+                          "tokens_in": 0, "tokens_out": 0, "latency_s": 0.0, "cost_usd": 0.0,
+                          "reply_file": hit["reply_file"]})
             return Answer(True, hit["text"], call_id=base["call_id"], model=model, cached=True, cost_usd=0.0)
         if key_problem:
             return self._refuse(base, "no-key", key_problem)
-        why = self._over_budget(model, prompt, summarise(self.dir), _problem_usage(recs, problem))
-        if why:
-            return self._refuse(base, "budget", why)
+        worst_in = len(json.dumps(body).encode("utf-8")) + REQUEST_FRAMING_TOKENS     # a token is at least one byte
+        price = self.cfg.prices.get(model)
+        worst = {"tokens": worst_in + self.cfg.max_output_tokens,
+                 "cost": (worst_in * price[0] + self.cfg.max_output_tokens * price[1]) / 1e6 if price else None}
+        try:
+            with self._ledger_lock():
+                self._quarantine_torn_tail()
+                acct = _accounting(_read_ledger_strict(self.dir))           # fresh: another process may have spent since
+                why = self._over_budget(model, worst, acct, problem)
+                if why:
+                    return self._refuse(base, "budget", why, held=True)
+                if not self._append({"reserve": base["call_id"], "problem": problem, "model": model,
+                                     "tokens": worst["tokens"], "cost_usd": worst["cost"]}, held=True):
+                    raise LedgerUnavailable("the reservation could not be written")
+        except LedgerUnavailable as exc:
+            return Answer(False, reason=f"the budget ledger cannot be written or read ({exc}), so no outside call was made",
+                          call_id=base["call_id"], model=model)
         return self._send(base, model, prompt, key, secrets, cache)
 
     def report(self, call_id: str, helped: bool, note: str = "") -> None:
         """Say whether the answer to `call_id` helped. A helped answer keeps the cheap model for the next question; one
         that did not help moves the next question to the next model."""
-        if not any(r.get("call_id") == call_id and not r.get("cached") for r in _read_ledger(self.dir)):
+        recs = {r["call_id"]: r for r in _read_ledger(self.dir) if "call_id" in r}
+        rec = recs.get(call_id)
+        if rec is not None and rec.get("cached"):
+            call_id = rec.get("origin") or ""                    # a cache hit is reported against the call that made the answer
+            rec = recs.get(call_id)
+        if rec is None:
             raise KeyError(call_id)
-        self._append({"report": call_id, "helped": bool(helped), "ts": self.clock(),
-                      "note": redact(note, hostname=self.hostname, home=self.home)[:300]})
+        key, _ = self._key()
+        if not self._append({"report": call_id, "helped": bool(helped), "ts": self.clock(),
+                             "note": redact(note, hostname=self.hostname, home=self.home,
+                                            secrets=(key,) if key else ())[:300]}):
+            raise LedgerUnavailable("the verdict could not be written")
 
     # ------------------------------------------------------------------------------------------- parts
 
@@ -418,57 +521,77 @@ class Telegraph:
         return None, None
 
     def _choose_model(self, problem: str, recs: list[dict]) -> str:
-        calls = {r["call_id"]: r for r in recs if "call_id" in r}
+        """The model for the next question on `problem`: each answered call counts once, by its latest verdict. A verdict of
+        not helped moves one step up the ladder and a verdict of helped goes back to the first model."""
+        verdict = {}
+        for r in recs:
+            if "report" in r:
+                verdict[r["report"]] = bool(r.get("helped"))
         steps = 0
         for r in recs:
-            if "report" not in r or calls.get(r["report"], {}).get("problem") != str(problem)[:80]:
-                continue
-            steps = 0 if r.get("helped") else steps + 1
+            if _sent(r) and r.get("problem") == str(problem)[:80] and r["call_id"] in verdict:
+                steps = 0 if verdict[r["call_id"]] else steps + 1
         return self.cfg.models[min(steps, len(self.cfg.models) - 1)]
 
-    def _over_budget(self, model: str, prompt: str, used: dict, here: dict) -> str | None:
+    def _over_budget(self, model: str, worst: dict, acct: dict, problem: str) -> str | None:
+        """Why this call may not be sent, or None. `worst` is what the call could cost at most (its input bounded by the
+        request's size in bytes, its output by max_output_tokens); `acct` is `_accounting` of the ledger."""
         cfg = self.cfg
-        name = f"problem {here['name']}"
+        here = acct["problems"].get(problem, {"calls": 0, "tokens": 0, "cost": 0.0, "unknown_cost": 0})
+        name = f"problem {problem}"
         if here["calls"] >= cfg.max_calls_per_problem:
             return f"the call cap for {name} is reached ({here['calls']} of {cfg.max_calls_per_problem})"
         if cfg.max_tokens_per_problem is not None and here["tokens"] >= cfg.max_tokens_per_problem:
             return f"the token cap for {name} is reached ({here['tokens']} of {cfg.max_tokens_per_problem})"
         if cfg.max_cost_per_problem_usd is not None:
-            price = cfg.prices.get(model)
-            if price is None:
+            if here["unknown_cost"]:
+                return (f"{here['unknown_cost']} earlier calls for {name} have no known cost (they were made without a price), "
+                        "so the cost cap cannot be checked; price them or use a new ledger directory")
+            if worst["cost"] is None:
                 return f"the cost cap for {name} needs a price, and there is no price for {model}"
-            worst = (len(prompt) + len(SYSTEM)) / 3 * price[0] / 1e6 + cfg.max_output_tokens * price[1] / 1e6
-            if here["cost"] + worst > cfg.max_cost_per_problem_usd:
+            if here["cost"] + worst["cost"] > cfg.max_cost_per_problem_usd:
                 return (f"the cost cap for {name} would be passed (spent {here['cost']:.6f}, this call could cost up "
-                        f"to {worst:.6f}, cap {cfg.max_cost_per_problem_usd})")
-        if used["calls"] >= cfg.max_calls:
-            return f"the call cap is reached ({used['calls']} of {cfg.max_calls})"
-        if used["tokens_in"] + used["tokens_out"] >= cfg.max_total_tokens:
-            return f"the token cap is reached ({used['tokens_in'] + used['tokens_out']} of {cfg.max_total_tokens})"
+                        f"to {worst['cost']:.6f}, cap {cfg.max_cost_per_problem_usd})")
+        if acct["calls"] >= cfg.max_calls:
+            return f"the call cap is reached ({acct['calls']} of {cfg.max_calls})"
+        if acct["tokens"] >= cfg.max_total_tokens:
+            return f"the token cap is reached ({acct['tokens']} of {cfg.max_total_tokens})"
         if cfg.max_cost_usd is not None:
-            price = cfg.prices.get(model)
-            if price is None:
+            if acct["unknown_cost"]:
+                return (f"{acct['unknown_cost']} earlier calls have no known cost (they were made without a price), so the "
+                        "cost cap cannot be checked; price them or use a new ledger directory")
+            if worst["cost"] is None:
                 return f"the cost cap needs a price, and there is no price for {model}"
-            worst = (len(prompt) + len(SYSTEM)) / 3 * price[0] / 1e6 + cfg.max_output_tokens * price[1] / 1e6
-            if used["cost_usd"] + worst > cfg.max_cost_usd:
-                return (f"the cost cap would be passed (spent {used['cost_usd']:.6f}, this call could cost up to "
-                        f"{worst:.6f}, cap {cfg.max_cost_usd})")
+            if acct["cost"] + worst["cost"] > cfg.max_cost_usd:
+                return (f"the cost cap would be passed (spent {acct['cost']:.6f}, this call could cost up to "
+                        f"{worst['cost']:.6f}, cap {cfg.max_cost_usd})")
         return None
+
+    def _clean_tree(self, value, key: str | None):
+        """`value` with every string redacted (the key, token shapes, home paths, the host name), through dicts and lists."""
+        if isinstance(value, str):
+            return redact(value, hostname=self.hostname, home=self.home, secrets=(key,) if key else ())
+        if isinstance(value, dict):
+            return {k: self._clean_tree(v, key) for k, v in value.items()}
+        if isinstance(value, list):
+            return [self._clean_tree(v, key) for v in value]
+        return value
 
     def _request(self, model: str, prompt: str, key: str | None) -> tuple[str, dict, dict]:
         cfg = self.cfg
+        extra = self._clean_tree(cfg.extra_body, key)
         headers = {"Content-Type": "application/json"}
         if cfg.api == "anthropic":
             base = cfg.endpoint[:-3] if cfg.endpoint.endswith("/v1") else cfg.endpoint
             if key:
                 headers["x-api-key"] = key
             headers["anthropic-version"] = ANTHROPIC_VERSION
-            body = {**cfg.extra_body, "model": model, "max_tokens": cfg.max_output_tokens, "temperature": 0,
+            body = {**extra, "model": model, "max_tokens": cfg.max_output_tokens, "temperature": 0,
                     "system": SYSTEM, "messages": [{"role": "user", "content": prompt}]}
             return base + "/v1/messages", headers, body
         if key:
             headers["Authorization"] = f"Bearer {key}"
-        body = {**cfg.extra_body, "model": model, "max_tokens": cfg.max_output_tokens, "temperature": 0,
+        body = {**extra, "model": model, "max_tokens": cfg.max_output_tokens, "temperature": 0,
                 "messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt}]}
         return cfg.endpoint + "/chat/completions", headers, body
 
@@ -476,12 +599,15 @@ class Telegraph:
         url, headers, body = self._request(model, prompt, key)
         t0 = self.clock()
         text, usage, error = "", None, ""
+        usage_known = False                      # a timeout or a server error may still have been processed and billed
         try:
             status, raw = self.transport(url, headers, json.dumps(body).encode(), self.cfg.timeout_s)
             if status != 200:
-                error = f"HTTP {status}: " + raw[:160].decode("utf-8", "replace")
+                error = f"HTTP {status}: " + raw.decode("utf-8", "replace")
+                usage_known = 400 <= status < 500 and status != 408    # refused before any processing
             else:
                 text, usage, error = self._parse(raw)
+                usage_known = usage is not None
         except Exception as exc:                                    # noqa: BLE001 - nothing may reach the harness
             error = f"{type(exc).__name__}: {exc}"
         t1 = self.clock()
@@ -491,9 +617,12 @@ class Telegraph:
             reason = clean(error)[:200]
             tin, tout = usage if usage else (0, 0)
             price = self.cfg.prices.get(model)
-            cost = round(tin * price[0] / 1e6 + tout * price[1] / 1e6, 9) if price and usage else None
+            if usage:
+                cost = round(tin * price[0] / 1e6 + tout * price[1] / 1e6, 9) if price else None
+            else:
+                cost = 0.0 if usage_known else None          # refused before processing: free. Otherwise the cost is unknown
             self._append({**rec, "outcome": "error", "reason": reason, "tokens_in": tin, "tokens_out": tout,
-                          "cost_usd": cost})
+                          "cost_usd": cost, "usage_known": usage_known or usage is not None})
             return Answer(False, reason=reason, call_id=base["call_id"], model=model, latency_s=t1 - t0)
         text = clean(text)
         estimated = usage is None
@@ -503,11 +632,15 @@ class Telegraph:
         cost = round(tin * price[0] / 1e6 + tout * price[1] / 1e6, 9) if price else None
         reply_file = f"replies/{base['call_id']}.txt"
         self._write(self.dir / reply_file, text)
-        self._write(cache, json.dumps({"text": text, "reply_file": reply_file}))
-        self._append({**rec, "outcome": "ok", "tokens_in": tin, "tokens_out": tout, "cost_usd": cost,
-                      "reply_file": reply_file, **({"usage_estimated": True} if estimated else {})})
+        recorded = self._append({**rec, "outcome": "ok", "tokens_in": tin, "tokens_out": tout, "cost_usd": cost,
+                                 "usage_known": not estimated, "reply_file": reply_file,
+                                 **({"usage_estimated": True} if estimated else {})})
+        if recorded:                                    # the cache is published only once the call can be reported
+            self._write(cache, json.dumps({"text": text, "reply_file": reply_file, "call_id": base["call_id"]}))
         return Answer(True, text, call_id=base["call_id"], model=model, tokens_in=tin, tokens_out=tout,
-                      latency_s=t1 - t0, cost_usd=cost)
+                      latency_s=t1 - t0, cost_usd=cost,
+                      reason="" if recorded else ("the answer arrived but the ledger could not record this call, so it is "
+                                                  "not cached and cannot be reported"))
 
     def _parse(self, raw: bytes) -> tuple[str, tuple | None, str]:
         """(text, usage, error). The usage is returned with an error too, because a failed answer was still paid for."""
@@ -538,9 +671,9 @@ class Telegraph:
             return "", usage, "the answer was empty (only reasoning, no answer)"
         return text, usage, ""
 
-    def _refuse(self, base: dict, outcome: str, reason: str) -> Answer:
+    def _refuse(self, base: dict, outcome: str, reason: str, held: bool = False) -> Answer:
         self._append({**base, "ts": self.clock(), "outcome": outcome, "reason": reason, "cached": False,
-                      "tokens_in": 0, "tokens_out": 0, "cost_usd": 0.0})
+                      "tokens_in": 0, "tokens_out": 0, "cost_usd": 0.0}, held=held)
         return Answer(False, reason=reason, call_id=base["call_id"], model=base["model"])
 
     def _cached(self, path: Path) -> dict | None:
@@ -553,22 +686,90 @@ class Telegraph:
 
     # ------------------------------------------------------------------------------------------- files (private)
 
-    def _append(self, rec: dict) -> None:
+    @contextlib.contextmanager
+    def _ledger_lock(self):
+        """An exclusive lock on the ledger directory, held while the budget is checked and a reservation is written, so two
+        processes cannot both spend the same allowance. Raises LedgerUnavailable when the directory or the lock cannot be used."""
         try:
             self.dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-            fd = os.open(self.dir / LEDGER, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+            fd = os.open(self.dir / LOCK, os.O_WRONLY | os.O_CREAT, 0o600)
+            os.fchmod(fd, 0o600)
+        except OSError as exc:
+            raise LedgerUnavailable(type(exc).__name__) from exc
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
             try:
-                os.write(fd, (json.dumps(rec, sort_keys=True) + "\n").encode("utf-8"))
+                fcntl.flock(fd, fcntl.LOCK_UN)
             finally:
                 os.close(fd)
+
+    def _quarantine_torn_tail(self) -> None:
+        """Called with the lock held. A last line with no line break is a write that was cut short. It moves to a private
+        sidecar file, the ledger is cut back to its last whole line, and a note record counts the fragment as one call of
+        unknown cost until a person reconciles it. Raises LedgerUnavailable when this cannot be done."""
+        path = self.dir / LEDGER
+        try:
+            data = path.read_bytes()
+        except FileNotFoundError:
+            data = b""
+        except OSError as exc:
+            raise LedgerUnavailable(type(exc).__name__) from exc
+        if data and not data.endswith(b"\n"):
+            cut = data.rfind(b"\n") + 1
+            name = f"{LEDGER}.torn-{uuid.uuid4().hex[:8]}"
+            try:
+                fd = os.open(self.dir / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                try:
+                    os.write(fd, data[cut:])
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+                os.truncate(path, cut)
+            except OSError as exc:
+                raise LedgerUnavailable(type(exc).__name__) from exc
+        # Every sidecar gets exactly one note. A crash between the cut and the note leaves a sidecar with no note, and the
+        # next call writes it here, so recovery can be replayed.
+        noted = {r.get("torn") for r in _read_ledger_strict(self.dir) if "torn" in r}
+        for sidecar in sorted(self.dir.glob(LEDGER + ".torn-*")):
+            if sidecar.name not in noted:
+                if not self._append({"torn": sidecar.name, "tokens": self.cfg.max_output_tokens}, held=True):
+                    raise LedgerUnavailable("the note for a torn record could not be written")
+
+    def _append(self, rec: dict, *, held: bool = False) -> bool:
+        """Append one record as one write, under the ledger lock (`held` says the caller already holds it, since the lock
+        is not re-entrant). Recovery of a torn tail also runs under this lock, so no record can land between its read and its
+        cut. A last line that was cut short gets a line break first, so it cannot swallow this record. True when written."""
+        if not held:
+            try:
+                with self._ledger_lock():
+                    return self._append(rec, held=True)
+            except LedgerUnavailable:
+                return False
+        try:
+            self.dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            fd = os.open(self.dir / LEDGER, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o600)
+            try:
+                os.fchmod(fd, 0o600)
+                size = os.fstat(fd).st_size
+                torn = size > 0 and os.pread(fd, 1, size - 1) != b"\n"
+                data = (b"\n" if torn else b"") + (json.dumps(rec, sort_keys=True) + "\n").encode("utf-8")
+                if os.write(fd, data) != len(data):
+                    return False                     # a short write leaves a record nobody can read
+                os.fsync(fd)                         # the record must survive a crash before a request depends on it
+            finally:
+                os.close(fd)
+            return True
         except OSError:
-            pass
+            return False
 
     def _write(self, path: Path, text: str) -> None:
         try:
             path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             try:
+                os.fchmod(fd, 0o600)
                 os.write(fd, text.encode("utf-8"))
             finally:
                 os.close(fd)

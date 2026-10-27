@@ -1702,7 +1702,7 @@ max_calls_per_problem = 3                    # one problem (the id passed to ask
 The key is read when a call is made and is never written to a prompt, ledger, cache, reply file or error. A `key_file` inside the
 checkout is refused. Requests hold only the task and the failure, with home paths, host names and token shapes removed, cut to
 `max_prompt_chars`. The same question to the same model is answered from the cache. A stronger model is used only after an answer
-was reported as not helping. Keep the problem id the same across rounds of one problem, so the per-problem caps see the whole spend. On ops where a stronger
+was reported as not helping. Before a request is sent, its worst-case cost is reserved in the ledger under a lock, so two processes cannot spend the same allowance and a process that dies mid-request still counts. A request whose usage is unknown (a timeout, a server error, an answer with no usage) counts at that worst case. If the ledger cannot be written, no outside call is made. Keep the problem id the same across rounds of one problem, so the per-problem caps see the whole spend. On ops where a stronger
 model does not help (earlier runs on `linear_scan` spent $0.83 on one model without a fix), these caps stop the spending. A reply's `<think>` block is removed before it is stored, and an answer cut off inside its reasoning is a failed call (its tokens still
 count against the caps and it is not cached); `extra_body` is how to turn thinking off for a model that thinks by default. The reply is advice from another model and is shown marked as untrusted text; nothing runs it.
 
