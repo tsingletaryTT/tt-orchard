@@ -1315,9 +1315,10 @@ def _sim_gap_lines(gap: list[dict]) -> list[str]:
         lines.append(f"hardware only: {n} attempt{'s' if n != 1 else ''} ({passed} passed on hardware); the simulator did "
                      "not check these, because it lacks a ttl function they use. Each result is a hardware result alone.")
     if unrun:
-        lines.append(f"{unrun} attempt{'s' if unrun != 1 else ''} used a function the simulator lacks a function for "
-                     "and was not run on hardware (the probe ran with --phase sim, or stopped first), so no check judged "
-                     "it.")
+        many = unrun != 1
+        lines.append(f"{unrun} attempt{'s' if many else ''} used a ttl function the simulator lacks and "
+                     f"{'were' if many else 'was'} not run on hardware (the probe ran with --phase sim, or stopped first), "
+                     f"so no check judged {'them' if many else 'it'}.")
     return lines
 
 
