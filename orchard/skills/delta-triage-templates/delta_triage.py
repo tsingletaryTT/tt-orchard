@@ -2481,7 +2481,11 @@ AUDIO_JSON_MAX = 1 << 20                  # a config larger than this is not rea
 AUDIO_HEADER_MAX = 8 << 20                # a safetensors header larger than this is refused (the research code uses the same bound)
 AUDIO_ROLES = {"model.model": "diffusion transformer", "pretransform.model": "autoencoder", "conditioner.conditioners": "conditioner"}
 AUDIO_POINTER_KEYS = ("repo_id",)         # a config leaf that says where to load from; naming another repository is not an architecture change
-AUDIO_MAX_LISTED = 50                     # differences listed per kind in the record (the counts are exact)
+# Bytes per element of the safetensors dtypes this script knows. A tensor of one of these must occupy exactly shape-product times that many
+# bytes; a dtype not listed (a packed or newer format) is checked for a valid range only.
+AUDIO_DTYPE_BYTES = {"F64": 8, "F32": 4, "F16": 2, "BF16": 2, "I64": 8, "I32": 4, "I16": 2, "I8": 1, "U64": 8, "U32": 4, "U16": 2, "U8": 1,
+                     "BOOL": 1, "F8_E4M3": 1, "F8_E5M2": 1}
+AUDIO_MAX_LISTED = 50                    # differences listed per kind in the record (the counts are exact)
 
 
 def _audio_json(path: Path):
@@ -2530,6 +2534,12 @@ def audio_header(path: Path) -> dict:
                 or not all(isinstance(o, int) and not isinstance(o, bool) for o in offsets)
                 or not 0 <= offsets[0] <= offsets[1] <= data_size):
             raise ValueError(f"tensor {name} has a malformed entry")
+        size = AUDIO_DTYPE_BYTES.get(v["dtype"])
+        if size is not None:
+            expected = _numel(shape) * size
+            if offsets[1] - offsets[0] != expected:
+                raise ValueError(f"tensor {name} has a malformed entry: its byte span is {offsets[1] - offsets[0]}, but shape {shape} "
+                                 f"of {v['dtype']} needs {expected}")
         out[name] = {"dtype": v["dtype"], "shape": shape, "shard": path.name}
     return out
 

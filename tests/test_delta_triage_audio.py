@@ -593,3 +593,50 @@ def test_a_configs_value_that_is_not_a_list_is_named(audio_case):
     cfg["model"]["conditioning"]["configs"] = {"a": 1}
     d = run_ok(audio_case(model_kw={"config": cfg}, base_kw={"config": changed_model_config()}))
     assert d["class"] == "unknown" and "configs is not a list" in reasons(d)
+
+
+# ---- round three: a tensor's byte span must match its dtype and shape --------------------------------
+
+def one_tensor_file(path, dtype, shape, span, payload=None):
+    entry = {"dtype": dtype, "shape": shape, "data_offsets": [0, span]}
+    blob = json.dumps({"model.model.layers.0.attn.weight": entry}).encode()
+    blob += b" " * (-len(blob) % 8)
+    path.write_bytes(struct.pack("<Q", len(blob)) + blob + b"\0" * (span if payload is None else payload))
+
+
+@pytest.mark.parametrize("dtype,shape,span", [("F32", [8, 8], 4), ("F32", [8, 8], 255), ("F32", [8, 8], 257), ("BF16", [4], 7), ("F16", [3], 5),
+                                              ("F64", [2], 8), ("I64", [2], 8 + 1), ("I32", [5], 4), ("U8", [3], 4), ("BOOL", [3], 2), ("I8", [3], 4), ("F8_E4M3", [3], 2),
+                                              ("F32", [0], 4), ("F32", [2, 0], 4), ("F32", [], 8)])
+def test_a_tensor_whose_byte_span_does_not_fit_its_dtype_and_shape_is_malformed(audio_case, dtype, shape, span):
+    stage = audio_case()
+    one_tensor_file(model_snapshot(stage) / "model.safetensors", dtype, shape, span)
+    d = run_ok(stage)
+    assert d["class"] == "unknown" and "malformed entry" in reasons(d) and "byte span" in reasons(d)
+    assert gate(stage).ok
+
+
+@pytest.mark.parametrize("dtype,shape,span", [("F32", [8, 8], 256), ("BF16", [4], 8), ("F16", [3], 6), ("F64", [2], 16), ("I64", [2], 16),
+                                              ("I32", [5], 20), ("U8", [3], 3), ("BOOL", [3], 3), ("F32", [0], 0), ("F32", [], 4),
+                                              ("F8_E4M3", [5], 5), ("I8", [3], 3), ("F8_E5M2", [4], 4), ("I16", [3], 6), ("U16", [3], 6), ("U32", [2], 8), ("U64", [2], 16)])
+def test_a_tensor_whose_span_is_exactly_its_size_is_accepted(audio_case, dtype, shape, span):
+    stage = audio_case()
+    model = model_snapshot(stage)
+    one_tensor_file(model / "model.safetensors", dtype, shape, span)
+    cfg = json.loads((stage / "triage_config.json").read_text())
+    one_tensor_file(Path(cfg["nearest_snapshot"]) / "model.safetensors", dtype, shape, span)
+    d = run_ok(stage)
+    assert "byte span" not in reasons(d) and "malformed" not in reasons(d)
+
+
+def test_a_dtype_this_script_does_not_know_is_accepted_with_a_valid_range(audio_case):
+    stage = audio_case()
+    cfg = json.loads((stage / "triage_config.json").read_text())
+    for snap in (model_snapshot(stage), Path(cfg["nearest_snapshot"])):
+        one_tensor_file(snap / "model.safetensors", "F6_E2M3", [5], 4)
+    assert "malformed" not in reasons(run_ok(stage))
+
+
+def test_the_span_check_names_the_expected_size(audio_case):
+    stage = audio_case()
+    one_tensor_file(model_snapshot(stage) / "model.safetensors", "F32", [8, 8], 4)
+    assert "256" in reasons(run_ok(stage))
