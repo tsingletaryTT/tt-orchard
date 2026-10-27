@@ -21,7 +21,7 @@ Each call does what the probe's own hardware phase does, on the attempt's curren
 1. `copy_kernel` copies the file into a fresh probe-owned directory, `DIR/.hwcheck/<op>-<attempt>-<call>/` (a regular file of at most
    256 KiB; a link, a directory or a larger file is `forbidden_code`, a missing file is `no_kernel`). `.hwcheck` is not under
    `.verdict`, because the authoritative check empties its directory and `load_attempts` reads it.
-2. `_hw_gate` runs the static gate on the copy and compares its sha256 with the one taken at copy time.
+2. `_hw_gate` runs the static gate on the copy and compares its sha256 with the sha256 taken at copy time.
 3. `_hw_run` runs the shipped `kernel_harness.py` with the shipped spec through `gozer run --chips 1 --exact 1` (the probe's own
    chip selection), under the stall watcher, with the probe's hardware environment, and judges the result with the hardware bars
    (`kernel_check.classify`).
@@ -90,7 +90,32 @@ the same and this attempt's limits.
 
 ## Measured on hardware
 
-MEASURED_TABLE
+One chip, the library kernel `orchard/skills/kernel-loop-templates/library/silu_mul.py` and two edits of it, through the tool's own
+path (the real gozer, the real harness, the host tt-metal v0.80.0 and the shared virtual environment). The board was free, so no
+queue wait was needed first; the tool took its own lease for each call. 2026-10-27.
+
+| Call | Kernel | Answer | Seconds in all | Device seconds |
+|---|---|---|---|---|
+| 1 | library `silu_mul` | PASS, pcc_min 0.999996, 6 input sets | 47.5 | 0.5 |
+| 2 | `*` turned into `+` | FAIL hw_numeric_mismatch, pcc_min 0.128, "got is about 0.499x expected", worst places shown | 47.6 | 0.6 |
+| 3 | unknown function `ttl.math.not_a_real_function` | FAIL compile_error, the compiler's line and caret shown | 5.2 | 0.0 |
+| 4 (second session) | the same compile error | FAIL compile_error | 46.9 | not reached |
+| 5 | library `silu_mul` after call 4 | PASS | 47.4 | 0.5 |
+| 6 | board held by another lease (20 s wait, 5 s poll) | BUSY after 20 s, 5 tries, tickets cancelled, queue empty | 20.1 | none |
+
+- A call takes about 47 s in all. The kernel itself takes under a second with the device open. The rest is `gozer run`: the lease,
+  the interpreter start, the compile and the reset that the release makes. The skill's "about 3 seconds to run" is from the earlier
+  measurement in the project log (about 3 s for a run); here the part with the device open was 0.5 s.
+- Call 3 took 5.2 s and `gozer run` printed `chips [0, 1] still open by [pid] -- let the work finish, or pass --force`: the release
+  was refused because the harness process still held the device when gozer looked, so the chip was not reset and the lease was left
+  as STALE under a dead pid. I cleared it with `gozer reconcile` and took one more lease to reset the chip. The same command line
+  in a second session (call 4) took 46.9 s and released normally. So this is a race in gozer's release check and not a rule of
+  the compile error path. The tool does not handle it: the next call's `gozer run` reaps a stale lease of the dead pid. The
+  probe's own hardware phase has the same exposure.
+- The busy path worked against the real gozer: the script held the board with a lease, the tool tried 5 times, cancelled every
+  ticket and answered BUSY; `gozer queue` was empty afterwards. (My script read the wrong key of `gozer acquire --json`, so it did not
+  release its lease at the end; I released it by its id. It was the script's own lease.)
+- The hang and the timeout paths were tested with fakes only. No hang was provoked on the chip.
 
 ## Not done
 

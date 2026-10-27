@@ -1512,7 +1512,7 @@ Flags:
   could not be compared. The report records it, with each source's local and upstream shas.
 - `--allow-slow-coder`: run even when the coder is decoding far below its best speed. The report records each
   measurement.
-- `--hw-checks N`, `--no-agent-hw`, `--hw-lease-s S`, `--hw-call-timeout-s S`, `--hw-wait-s S`: the limits of the agent's
+- `--hw-checks` (N), `--no-agent-hw`, `--hw-lease-s` (S), `--hw-call-timeout-s` (S), `--hw-wait-s` (S): the limits of the agent's
   `hardware_check` tool (next paragraph). Defaults: 6 calls, 300 lease seconds, 240 s per call, 120 s of waiting for a
   busy board. `--hw-checks 0` and `--no-agent-hw` offer no tool, which measures the coder alone.
 
