@@ -51,8 +51,9 @@ def test_one_greedy_and_two_sampled_requests_are_sent_after_the_32_token_check(s
     r = run(swap, tmp_path)
     assert r.returncode == 0, r.stdout + r.stderr
     bodies = probe_requests(tmp_path)
-    assert len(bodies) == 3
-    greedy, a, b = bodies
+    assert len(bodies) == 4
+    greedy, a, b, hot = bodies
+    assert hot["temperature"] == 2.0 and hot["top_p"] == 0.99 and isinstance(hot["seed"], int) and hot["prompt"] == greedy["prompt"]
     assert greedy["temperature"] == 0
     assert a["temperature"] == b["temperature"] == 1.0 and a["top_p"] == b["top_p"] == 0.9
     assert isinstance(a["seed"], int) and isinstance(b["seed"], int) and a["seed"] != b["seed"]
@@ -83,6 +84,24 @@ def test_a_server_that_ignores_the_seed_is_recorded_and_judged_ignored(swap, tmp
     rec = report(swap)["sampling_probe"]
     assert rec["requests"]["sampled_a"]["text"] == rec["requests"]["sampled_b"]["text"]
     assert sp.summarize(rec)["verdict"] == "sampled-ignored"
+
+
+def test_the_high_temperature_request_is_recorded_and_confirms_a_server_that_ignores_sampling(swap, tmp_path):
+    r = run(swap, tmp_path, sampling="ignored")
+    assert r.returncode == 0, r.stdout + r.stderr
+    rec = report(swap)["sampling_probe"]
+    hot = rec["requests"]["sampled_hot"]
+    assert hot["accepted"] is True and hot["params"] == {"temperature": 2.0, "top_p": 0.99, "seed": 2468}
+    assert sp.problems(rec) == [] and sp.summarize(rec)["verdict"] == "sampled-ignored"
+
+
+def test_a_server_whose_output_is_peaked_but_samples_at_high_temperature_is_only_a_suspected_match(swap, tmp_path):
+    r = run(swap, tmp_path, sampling="peaked")
+    assert r.returncode == 0, r.stdout + r.stderr
+    rec = report(swap)["sampling_probe"]
+    assert rec["requests"]["sampled_a"]["text"] == rec["requests"]["sampled_b"]["text"] == rec["requests"]["greedy"]["text"]
+    assert rec["requests"]["sampled_hot"]["text"] != rec["requests"]["greedy"]["text"]
+    assert sp.summarize(rec)["verdict"] == "sampled-matches-greedy"
 
 
 def test_a_refused_sampled_request_is_recorded_with_its_error_and_the_run_goes_on(swap, tmp_path):

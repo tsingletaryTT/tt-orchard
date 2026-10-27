@@ -569,7 +569,8 @@ def test_the_script_sends_only_the_fields_the_server_accepts():
     funcs = {n.name: ast.get_source_segment(text, n) for n in ast.walk(ast.parse(text)) if isinstance(n, ast.FunctionDef)}
     for name in ("complete", "ask_suite_prompt", "run_suite"):
         assert "top_p" not in funcs[name] and "seed" not in funcs[name], name
-    assert not re.search(r'["\']top_p["\']\s*:', text.replace(funcs["run_sampling_probe"], ""))
+    outside = "\n".join(ln for ln in text.replace(funcs["run_sampling_probe"], "").splitlines() if not ln.startswith("PROBE_HOT"))
+    assert not re.search(r'["\']top_p["\']\s*:', outside)
 
 
 def test_the_server_is_told_to_load_the_model_dir_weights(swap):

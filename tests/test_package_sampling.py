@@ -13,7 +13,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_package_graft import world  # noqa: E402,F401  (the fixture)
 from test_package_graft_auto import finished_auto, rows  # noqa: E402
-from test_sampling_probe import LINE, OTHER, STORY, entry, record, refused  # noqa: E402
+from test_sampling_probe import LINE, OTHER, STORY, entry, record, refused, with_hot  # noqa: E402
 from package_fakes import write  # noqa: E402
 
 from orchard import package, sampling_probe  # noqa: E402
@@ -65,10 +65,18 @@ def test_a_healthy_probe_gives_a_section_and_rows_that_cite_the_derived_file_fir
     assert (pkg / "evidence" / SUMMARY).is_file() and (pkg / "evidence" / SWAP).is_file()        # the cited files ship with the package
 
 
-def test_ignored_sampling_is_on_the_card_and_the_sampled_speed_row_is_still_there(world):
-    put_probe(world, record(a=entry(text=STORY), b=entry(text=STORY)))
+def test_confirmed_ignored_sampling_is_on_the_card_and_the_sampled_speed_row_is_still_there(world):
+    put_probe(world, with_hot(record(a=entry(text=STORY), b=entry(text=STORY))))
     stage_dir, pkg, card = card_of(world)
     assert sampling_probe.CARD_SENTENCES["sampled-ignored"] in " ".join(section(card).split())
+    assert gate_package(stage_dir, world["run"]).ok
+
+
+def test_matching_text_without_a_high_temperature_match_is_on_the_card_as_suspected_not_confirmed(world):
+    put_probe(world, record(a=entry(text=STORY), b=entry(text=STORY)))
+    stage_dir, pkg, card = card_of(world)
+    body = " ".join(section(card).split())
+    assert sampling_probe.CARD_SENTENCES["sampled-matches-greedy"] in body and sampling_probe.CARD_SENTENCES["sampled-ignored"] not in body
     assert gate_package(stage_dir, world["run"]).ok
 
 
@@ -110,7 +118,7 @@ def test_the_gate_refuses_a_card_that_changed_the_verdict_sentence(world):
     put_probe(world, record(a=entry(text=STORY), b=entry(text=STORY)))
     stage_dir, _, pkg = finished_auto(world)
     card = (pkg / "README.md").read_text()
-    (pkg / "README.md").write_text(card.replace(sampling_probe.CARD_SENTENCES["sampled-ignored"],
+    (pkg / "README.md").write_text(card.replace(sampling_probe.CARD_SENTENCES["sampled-matches-greedy"],
                                                 sampling_probe.CARD_SENTENCES["sampled-full-speed"]))
     g = gate_package(stage_dir, world["run"])
     assert not g.ok and any("sampling probe" in r and "verdict" in r for r in g.reasons), g.reasons

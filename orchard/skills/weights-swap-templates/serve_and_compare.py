@@ -46,7 +46,7 @@ Steps:
     A request the server refuses is recorded as that prompt's error and the run goes on.
 (i) The sampling probe (issue 107), only when swap_config.json has `"sampling_probe": true`. After the 32-token
     check, and after the prompt suite when that ran, the script sends one greedy request and two sampled requests
-    (temperature 1.0, top-p 0.9, seeds that differ) with one short plain prompt to /v1/completions, and records each
+    (temperature 1.0, top-p 0.9, seeds that differ) and one hot request (temperature 2.0, top-p 0.99) with one short plain prompt to /v1/completions, and records each
     one raw under `sampling_probe`: whether the server accepted it, its error text when it refused, the seconds the
     script measured, the completion tokens the server reported, the text, and the drafter's session lines that
     the request added to server.log. The script judges nothing; orchard/sampling_probe.py reads the record. A refused
@@ -95,6 +95,7 @@ PROBE_MAX_TOKENS = 96         # long enough for a speed figure that is mostly de
 PROBE_TEMPERATURE = 1.0
 PROBE_TOP_P = 0.9
 PROBE_SEEDS = (1234, 4321)    # two seeds: a server that applies sampling gives different text for them
+PROBE_HOT = {"temperature": 2.0, "top_p": 0.99, "seed": 2468}   # one hot request: matching the greedy text at this temperature confirms sampling is ignored
 PROBE_LOG_SETTLE_S = 0.5      # the drafter logs a session line when a request ends; wait this long before reading the log
 PROBE_LOG_LINES = 4           # keep at most this many session lines per request
 PROBE_LOG_LINE_CHARS = 600
@@ -475,12 +476,13 @@ def ask_probe(port: int, model: str, params: dict, log_path: Path, settle_s: flo
 
 
 def run_sampling_probe(cfg: dict, port: int, model: str, log_path: Path, refresh=None) -> dict:
-    """Step (i): one greedy and two sampled requests; the record that goes under `sampling_probe` in swap-check.json."""
+    """Step (i): one greedy, two sampled and one hot request; the record that goes under `sampling_probe` in swap-check.json."""
     settle = float(cfg.get("sampling_log_settle_s", PROBE_LOG_SETTLE_S))
     sampled = {"temperature": PROBE_TEMPERATURE, "top_p": PROBE_TOP_P}
     requests = {"greedy": ask_probe(port, model, {"temperature": 0}, log_path, settle, refresh),
                 "sampled_a": ask_probe(port, model, {**sampled, "seed": PROBE_SEEDS[0]}, log_path, settle, refresh),
-                "sampled_b": ask_probe(port, model, {**sampled, "seed": PROBE_SEEDS[1]}, log_path, settle, refresh)}
+                "sampled_b": ask_probe(port, model, {**sampled, "seed": PROBE_SEEDS[1]}, log_path, settle, refresh),
+                "sampled_hot": ask_probe(port, model, dict(PROBE_HOT), log_path, settle, refresh)}
     return {"ran": True, "model_id": cfg.get("new_model_id"), "prompt": PROBE_PROMPT, "max_tokens": PROBE_MAX_TOKENS,
             "requests": requests}
 

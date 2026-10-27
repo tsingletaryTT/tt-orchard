@@ -9,7 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_operator_bundle_template import build, bundle_of, make_run, section, write_json  # noqa: E402
-from test_sampling_probe import GREEDY, LINE, OTHER, STORY, entry, record, refused  # noqa: E402
+from test_sampling_probe import GREEDY, LINE, OTHER, STORY, entry, record, refused, with_hot  # noqa: E402
 
 HEAD = "## Sampling"
 
@@ -40,18 +40,25 @@ def test_the_stage_2_record_gives_a_row_with_speeds_the_verdict_and_the_evidence
     assert "Sampled requests decoded at 40.0 tokens/s against 48.0 tokens/s for greedy requests" in block
 
 
-def test_ignored_sampling_is_stated_in_a_sentence(tmp_path):
+def test_confirmed_ignored_sampling_is_stated_in_a_sentence(tmp_path):
+    run = make_run(tmp_path)
+    put(run, "stages/2/evidence", with_hot(record(a=entry(text=STORY), b=entry(text=STORY))))
+    block = section(results(run), HEAD)
+    assert "sampled-ignored" in block and "Sampling was not applied, so decoding was greedy" in block and "temperature 2.0" in block
+
+
+def test_matching_text_is_stated_as_suspected_and_not_confirmed(tmp_path):
     run = make_run(tmp_path)
     put(run, "stages/2/evidence", record(a=entry(text=STORY), b=entry(text=STORY)))
     block = section(results(run), HEAD)
-    assert "sampled-ignored" in block and "Sampling was not applied, so decoding was greedy" in block
+    assert "sampled-matches-greedy" in block and "did not confirm which" in block and "Sampling was not applied, so decoding" not in block
 
 
-def test_ignored_sampling_found_by_the_greedy_text_says_so_in_the_bundle(tmp_path):
+def test_a_match_found_by_the_greedy_text_says_so_in_the_bundle(tmp_path):
     run = make_run(tmp_path)
     put(run, "stages/2/evidence", record(a=entry(text=GREEDY), b=entry(text=OTHER)))
     block = section(results(run), HEAD)
-    assert "sampled-ignored" in block and "returned the greedy text" in block and "differ only in seed" not in block
+    assert "sampled-matches-greedy" in block and "a sampled request returned the greedy text" in block and "differ only in seed" not in block
 
 
 def test_a_refused_sampled_request_is_stated_with_its_error(tmp_path):
@@ -69,7 +76,7 @@ def test_each_stage_4_configuration_has_its_own_row(tmp_path):
     block = section(results(run), HEAD)
     rows = [ln for ln in block.splitlines() if ln.startswith("| ") and "swap-check.json" in ln]
     assert len(rows) == 3
-    assert any(ln.startswith("| stage 4, 4 chips ") and "sampled-ignored" in ln for ln in rows)
+    assert any(ln.startswith("| stage 4, 4 chips ") and "sampled-matches-greedy" in ln for ln in rows)
     assert any(ln.startswith("| stage 4, 2 chips ") and "sampled-full-speed" in ln for ln in rows)
 
 

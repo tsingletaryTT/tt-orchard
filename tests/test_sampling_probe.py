@@ -54,17 +54,17 @@ def test_a_summary_written_into_the_record_is_not_believed():
     assert s["verdict"] == "sampled-full-speed" and s["greedy"]["tokens_per_s"] == pytest.approx(48.0)
 
 
-def test_two_seeds_with_the_same_text_mean_sampling_was_ignored():
+def test_two_seeds_with_the_same_text_are_a_suspected_match_with_greedy_decoding():
     s = sp.summarize(record(a=entry(text=STORY), b=entry(text=STORY)))
-    assert s["verdict"] == "sampled-ignored"
+    assert s["verdict"] == "sampled-matches-greedy"
     assert "greedy" in s["sentence"] and "seed" in s["sentence"]
 
 
-def test_a_sampled_text_equal_to_the_greedy_text_means_sampling_was_ignored_even_when_the_seeds_differ_in_text():
+def test_a_sampled_text_equal_to_the_greedy_text_is_a_suspected_match_even_when_the_seeds_differ_in_text():
     """Measured on the DFlash2 bundle with the drafter on (2026-10-27): every sampled request returned the greedy text."""
     for a, b in ((GREEDY, OTHER), (OTHER, GREEDY)):
         s = sp.summarize(record(a=entry(text=a), b=entry(text=b)))
-        assert s["verdict"] == "sampled-ignored", (a, b)
+        assert s["verdict"] == "sampled-matches-greedy", (a, b)
         assert "greedy text" in s["sentence"]
 
 
@@ -102,39 +102,103 @@ def test_a_missing_speed_in_any_of_the_three_requests_is_inconclusive_not_full_s
     assert "speed" in s["card_sentence"]
 
 
-def test_a_missing_speed_does_not_hide_ignored_sampling():
+def test_a_missing_speed_does_not_hide_a_match_with_greedy():
     rec = record(a=entry(text=GREEDY), b=entry(text=OTHER))
     rec["requests"]["greedy"]["completion_tokens"] = None
-    assert sp.summarize(rec)["verdict"] == "sampled-ignored"
+    assert sp.summarize(rec)["verdict"] == "sampled-matches-greedy"
 
 
-def test_equal_seeds_texts_are_ignored_even_when_the_greedy_speed_is_missing():
+def test_equal_seeds_texts_are_a_match_even_when_the_greedy_speed_is_missing():
     rec = record(a=entry(text=STORY), b=entry(text=STORY))
     rec["requests"]["greedy"]["completion_tokens"] = None
-    assert sp.summarize(rec)["verdict"] == "sampled-ignored"
+    assert sp.summarize(rec)["verdict"] == "sampled-matches-greedy"
 
 
-def test_the_card_sentence_for_ignored_sampling_is_true_for_both_ways_it_is_found():
-    """One sampled reply equal to the greedy reply and the other different is ignored sampling, and the card must not say the two sampled replies were
+def test_the_card_sentence_for_a_suspected_match_is_true_for_both_ways_it_is_found():
+    """One sampled reply equal to the greedy reply and the other different is a match, and the card must not say the two sampled replies were
     identical. The sentence is the same for both branches, so it names both."""
     by_seeds = sp.summarize(record(a=entry(text=STORY), b=entry(text=STORY)))
     by_greedy = sp.summarize(record(a=entry(text=GREEDY), b=entry(text=OTHER)))
-    assert by_seeds["verdict"] == by_greedy["verdict"] == "sampled-ignored"
+    assert by_seeds["verdict"] == by_greedy["verdict"] == "sampled-matches-greedy"
     assert by_seeds["card_sentence"] == by_greedy["card_sentence"]
     text = by_greedy["card_sentence"]
-    assert "greedy text" in text and "different seeds" in text and "not applied" in text
+    assert "greedy text" in text and "different seeds" in text and "did not confirm" in text
     assert "two requests" not in text and "the two sampled replies" not in text
 
 
 def test_the_detailed_sentence_names_the_branch_that_was_found():
     by_seeds = sp.summarize(record(a=entry(text=STORY), b=entry(text=STORY)))["sentence"]
     by_greedy = sp.summarize(record(a=entry(text=GREEDY), b=entry(text=OTHER)))["sentence"]
-    assert "differ only in seed returned the same text" in by_seeds and "greedy text" not in by_seeds
-    assert "returned the greedy text" in by_greedy and "differ only in seed" not in by_greedy
+    assert "differ only in seed returned the same text" in by_seeds and "a sampled request returned the greedy text" not in by_seeds
+    assert "a sampled request returned the greedy text" in by_greedy and "differ only in seed" not in by_greedy
 
 
-def test_ignored_wins_over_slower():
+HOT_PARAMS = {"temperature": 2.0, "top_p": 0.99, "seed": 2468}
+
+
+def with_hot(rec, text=GREEDY, **kw):
+    rec["requests"]["sampled_hot"] = entry(text=text, params=dict(HOT_PARAMS), **kw)
+    return rec
+
+
+def test_matching_text_alone_is_suspected_and_not_confirmed_as_ignored_sampling():
+    """With top-p 0.9 and a most likely token above 0.9 at every step, one token is eligible, so correctly applied sampling also returns the greedy text."""
+    for a, b in ((STORY, STORY), (GREEDY, OTHER), (OTHER, GREEDY), (GREEDY, GREEDY)):
+        s = sp.summarize(record(a=entry(text=a), b=entry(text=b)))
+        assert s["verdict"] == "sampled-matches-greedy", (a, b, s["verdict"])
+        assert "did not confirm" in s["card_sentence"] and "did not confirm" in s["sentence"]
+        assert "sampling was not applied" not in s["card_sentence"].lower().replace("not applied:", "")
+
+
+def test_a_high_temperature_request_that_also_matched_greedy_confirms_ignored_sampling():
+    for a, b in ((STORY, STORY), (GREEDY, OTHER)):
+        s = sp.summarize(with_hot(record(a=entry(text=a), b=entry(text=b))))
+        assert s["verdict"] == "sampled-ignored", (a, b, s["verdict"])
+        assert "high-temperature" in s["sentence"] or "temperature 2.0" in s["sentence"]
+
+
+def test_a_high_temperature_request_that_differs_from_greedy_leaves_matching_text_unconfirmed():
+    s = sp.summarize(with_hot(record(a=entry(text=STORY), b=entry(text=STORY)), text=OTHER))
+    assert s["verdict"] == "sampled-matches-greedy"
+
+
+@pytest.mark.parametrize("hot", [dict(accepted=False, error="HTTP 400: no", text=""), dict(accepted=False, error="HTTP 500: x", text=GREEDY), dict(text="")])
+def test_a_refused_or_blank_high_temperature_request_confirms_nothing(hot):
+    rec = record(a=entry(text=STORY), b=entry(text=STORY))
+    rec["requests"]["sampled_hot"] = entry(params=dict(HOT_PARAMS), **hot)
+    assert sp.summarize(rec)["verdict"] == "sampled-matches-greedy"
+
+
+def test_a_high_temperature_request_does_not_change_a_verdict_when_the_replies_differ():
+    s = sp.summarize(with_hot(record(), text=GREEDY))
+    assert s["verdict"] == "sampled-full-speed"
+
+
+@pytest.mark.parametrize("params", [{"temperature": 1.0, "top_p": 0.99, "seed": 1}, {"temperature": 2.0, "top_p": 1.0, "seed": 1},
+                                    {"temperature": 2.0, "top_p": 0.99}, {"temperature": 2.0, "top_p": 0.99, "seed": 1, "prompt": "x"}, "hot", None])
+def test_a_present_high_temperature_entry_is_validated(params):
+    rec = with_hot(record())
+    rec["requests"]["sampled_hot"]["params"] = params
+    assert sp.problems(rec) and sp.summarize(rec)["verdict"] == "malformed"
+
+
+def test_a_high_temperature_entry_that_is_not_an_object_never_raises():
+    for bad in ("x", [], 5, None):
+        rec = record()
+        rec["requests"]["sampled_hot"] = bad
+        assert sp.problems(rec) and sp.summarize(rec)["verdict"] == "malformed"
+
+
+def test_the_high_temperature_seed_may_equal_a_sampled_seed_without_error_and_is_not_part_of_the_seed_rule():
+    rec = with_hot(record())
+    rec["requests"]["sampled_hot"]["params"]["seed"] = 1234
+    assert sp.problems(rec) == []
+
+
+def test_a_match_with_greedy_wins_over_slower():
     s = sp.summarize(record(greedy=entry(seconds=1.0), a=entry(text=STORY, seconds=9.0), b=entry(text=STORY, seconds=9.0)))
+    assert s["verdict"] == "sampled-matches-greedy"
+    s = sp.summarize(with_hot(record(greedy=entry(seconds=1.0), a=entry(text=STORY, seconds=9.0), b=entry(text=STORY, seconds=9.0))))
     assert s["verdict"] == "sampled-ignored"
 
 
@@ -404,7 +468,8 @@ def test_every_sentence_is_one_plain_line_without_the_forbidden_framing():
 def card_sentences():
     return {
         "full": sp.summarize(record()),
-        "ignored": sp.summarize(record(a=entry(text=STORY), b=entry(text=STORY))),
+        "ignored": sp.summarize(with_hot(record(a=entry(text=STORY), b=entry(text=STORY)))),
+        "matches": sp.summarize(record(a=entry(text=STORY), b=entry(text=STORY))),
         "refused": sp.summarize(record(a=refused("HTTP 400: no sampling here"))),
         "slower": sp.summarize(record(a=entry(text=STORY, seconds=9.0), b=entry(text=OTHER, seconds=9.0))),
         "incoherent": sp.summarize(record(a=entry(text="the " * 40), b=entry(text=OTHER))),
@@ -425,6 +490,7 @@ def test_the_card_sentences_state_what_the_verdict_means():
     s = card_sentences()
     assert "different text" in s["full"]["card_sentence"]
     assert "not applied" in s["ignored"]["card_sentence"] and "greedy" in s["ignored"]["card_sentence"]
+    assert "did not confirm" in s["matches"]["card_sentence"] and s["matches"]["card_sentence"] != s["ignored"]["card_sentence"]
     assert "refused" in s["refused"]["card_sentence"]
     assert "more slowly" in s["slower"]["card_sentence"]
     assert "repeats itself" in s["incoherent"]["card_sentence"]

@@ -68,7 +68,7 @@ def test_the_log_is_refreshed_before_each_start_offset_and_after_each_request(sc
     log = tmp_path / "server.log"
     c = state["container"] = FakeContainer(log)
     mod.run_sampling_probe({"sampling_log_settle_s": 0}, 1, "m", log, refresh=c.save_log)
-    assert c.saves == 6            # three requests, a refresh before and after each
+    assert c.saves == 8            # four requests, a refresh before and after each
 
 
 def test_a_refresh_that_fails_is_ignored_and_the_probe_still_records_the_requests(sc, tmp_path):
