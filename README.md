@@ -1512,6 +1512,22 @@ Flags:
   could not be compared. The report records it, with each source's local and upstream shas.
 - `--allow-slow-coder`: run even when the coder is decoding far below its best speed. The report records each
   measurement.
+- `--hw-checks N`, `--no-agent-hw`, `--hw-lease-s S`, `--hw-call-timeout-s S`, `--hw-wait-s S`: the limits of the agent's
+  `hardware_check` tool (next paragraph). Defaults: 6 calls, 300 lease seconds, 240 s per call, 120 s of waiting for a
+  busy board. `--hw-checks 0` and `--no-agent-hw` offer no tool, which measures the coder alone.
+
+Every attempt can call a tool, `hardware_check`, that runs its current `kernel.py` on one chip. The agent's shell cannot
+run gozer, so the probe does it: each call copies the file into a probe-owned directory (`DIR/.hwcheck/`), runs the static
+gate and the sha256 check on the copy, and runs the shipped harness through `gozer run --chips 1` under the stall watcher,
+the way the probe's own hardware phase does. The tool takes at most a short `note`; the agent supplies no command and no
+path, and the probe judges the result. The answer gives PASS or FAIL, the first error, the numbers, the seconds in all
+and the device seconds, and the calls and lease seconds left. A run takes about 3 s on the chip and about 45 s with the
+lease and the reset the release makes, so the simulator stays the cheap path. A board that is busy is retried for
+`--hw-wait-s` seconds (each queued ticket is cancelled) and then the agent is told to go on with the simulator. A hang
+stops the call (the lease release resets the chip) and turns the tool off for the rest of the attempt. Calls are recorded in
+each `attempt.json` under `agent_hw` and listed in the report with the chip time they cost. The lease is taken for each
+call and released after it; there is no mode that holds a board for a whole attempt. The device seconds are the harness's
+time with the device open, for every input set, not a benchmark of the kernel.
 
 ### 5.9d The latest skills
 

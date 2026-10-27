@@ -67,7 +67,7 @@ import time
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
-from orchard import defaults, ttlang_env
+from orchard import defaults, hwtool, ttlang_env
 from orchard.agent import DEVICE_VARS, SECRET_NAME, TOOL_SCHEMAS, AgentStep, Tools, agent_env, probe_model
 from orchard.canary import post_json
 from orchard.ledger import Ledger
@@ -257,7 +257,11 @@ class ProbeTools(Tools):
                                    "grep -n prints); default 1"}
                 props["limit"] = {"type": "integer", "description": "how many lines to read (default: as many as fit)"}
             out.append(schema)
+        if self.hardware is not None:
+            out.append(self.hardware.schema())
         return out
+
+    hardware = None                      # the attempt's hwtool.HardwareCheck, or None when the tool is not offered
 
     def call(self, name: str, arguments: str) -> str:
         if name == "read_file":
@@ -267,6 +271,14 @@ class ProbeTools(Tools):
                 return "error: the arguments are not JSON"
             if isinstance(args, dict):
                 return self.read_lines(args.get("path"), args.get("offset"), args.get("limit"))
+        if name == "hardware_check" and self.hardware is not None:
+            try:
+                args = json.loads(arguments or "{}")
+            except ValueError:
+                return "error: the arguments are not JSON"
+            if not isinstance(args, dict):
+                return "error: the arguments must be a JSON object"
+            return self.hardware.call(args)
         return super().call(name, arguments)
 
     def read_lines(self, path, offset=None, limit=None) -> str:
@@ -327,13 +339,16 @@ class ProbeTools(Tools):
         return f"{result}\nkernel_check.py ran after this write:\n{shown[:CHECK_AFTER_WRITE_CHARS]}"
 
 
-def attempt_tools(adir: Path) -> Tools:
+def attempt_tools(adir: Path, hardware=None) -> Tools:
     """The agent's tools. The attempt directory is both the run and the stage directory, so the agent reads and writes
     only there. The environment is agent_env's: the no-chip device mask, no credentials, HOME inside the attempt. Every
     shell command goes through the runner's rules (no pip, no gozer writes, no resets, no uploads). A shell command may
-    run as long as one simulator check plus a margin."""
+    run as long as one simulator check plus a margin. `hardware` (make_hardware_check) adds the `hardware_check` tool,
+    the one way an attempt reaches a chip."""
     adir = Path(adir)
-    return ProbeTools(adir, adir, agent_env(adir), timeout=AGENT_TOOL_TIMEOUT_S)
+    tools = ProbeTools(adir, adir, agent_env(adir), timeout=AGENT_TOOL_TIMEOUT_S)
+    tools.hardware = hardware
+    return tools
 
 
 class ProbeControl:
@@ -888,8 +903,12 @@ def run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_id
                 wall_s=BUDGET["wall_s"], http=post_json, clock=time.time, watchdog=None, run_watched=run_watched,
                 tt_lang: dict | None = None, temperature: float = 0.0, top_p: float | None = None,
                 seed: int | None = None, references: list[dict] | None = None, skills: dict | None = None,
-                coder_speed: dict | None = None) -> dict:
+                coder_speed: dict | None = None, hw_policy: hwtool.HwPolicy | None = None, shared_python=None,
+                cancel=None) -> dict:
     """One attempt: prepare the directory, run the agent, run the authoritative check, write and return attempt.json.
+    `hw_policy` (hwtool.HwPolicy) offers the agent the `hardware_check` tool, which runs its current kernel.py on one
+    leased chip under the policy's limits with `shared_python`; None or a policy with 0 calls offers no tool. The calls
+    are recorded under `agent_hw`. They are not the attempt's hardware verdict (`hw`).
     `coder_speed` is the decode-speed check made just before the attempt (speedwatch.probe_check), kept in the record.
     The sampling (temperature, top_p, seed) goes to the coder and into the record as `sampling`; the reference files
     written into the attempt (with their sha256) go into the provenance block."""
@@ -899,10 +918,16 @@ def run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_id
     copied = prepare_attempt(adir, op=op, env=env, tt_lang=facts, references=references)
     control = ProbeControl(wall_s=wall_s)
     ledger = Ledger(adir / "ledger.jsonl")
+    hwcheck = None
+    if hw_policy is not None and hw_policy.enabled:
+        hwcheck = make_hardware_check(adir, op=op, n=n, shared_python=shared_python or default_shared_python(),
+                                      policy=hw_policy, run_watched=run_watched,
+                                      cancel=cancel if cancel is not None else cancel_ticket)
     started = time.monotonic()
     try:
         dog = watchdog if watchdog is not None else build_watchdog(control, ledger)
-        step = AgentStep(agent=AGENT, endpoint=endpoint, model=model, tools=attempt_tools(adir), ledger=ledger,
+        step = AgentStep(agent=AGENT, endpoint=endpoint, model=model, tools=attempt_tools(adir, hardware=hwcheck),
+                         ledger=ledger,
                          stage=0, phase="probe", feed=dog.feed, control=control, run_dir=adir,
                          evidence_dir=adir / "evidence", log_path=adir / "log" / "probe-00001.jsonl", http=http,
                          clock=clock, guard=RetryGuard(), max_turns=max_turns, temperature=temperature, top_p=top_p,
@@ -932,6 +957,7 @@ def run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_id
         **measures, "violations": check.get("violations") or [], "sets": sets, "hw": None,
         "agent_check_untrusted": agent_check_untrusted(_read_agent_check(adir / "check.json"), check, op),
         "swept": swept, "sampling": dict(sampling), "coder_speed": coder_speed,
+        "agent_hw": hwcheck.summary() if hwcheck is not None else {"enabled": False},
         "provenance": provenance(kernel_sha256=check.get("kernel_sha256"), tt_lang=facts,
                                  coder_model=coder_model, probe_id=probe_id, simulator_pcc_min=measures["pcc_min"],
                                  sampling=dict(sampling), references=copied or None, skills=skills),
@@ -1064,6 +1090,85 @@ def _record_hw(adir: Path, attempt: dict, hw: dict) -> dict:
     return hw
 
 
+def _hw_gate(kernel: Path, recorded) -> dict | None:
+    """The checks that come before any gozer command, on the copy of kernel.py that will run. None when the copy may run,
+    else the hw block that says why not: no kernel, a rule of the static gate broken (`forbidden_code`), or a copy whose
+    sha256 differs from `recorded`, the one taken when it was copied (`harness_error`)."""
+    check = _template("kernel_check")
+    if not kernel.is_file() or kernel.is_symlink():
+        return {"passed": False, "category": "no_kernel", "pcc_min": None, "sets": [],
+                "violations": [], "first_line": "the checked copy of kernel.py is missing"}
+    violations = check.kernel_source_violations(kernel)
+    ok, reason = check.check_kernel_source(kernel)
+    if violations or not ok:
+        category = "no_kernel" if reason.startswith("no-operation") else "forbidden_code"
+        # The same first line the simulator check gives (kernel_check.py strips the gate's "no-operation: " tag).
+        return {"passed": False, "category": category, "pcc_min": None, "sets": [],
+                "violations": violations, "first_line": reason.removeprefix("no-operation: ")}
+    data = _read_regular(kernel, MAX_KERNEL_BYTES)
+    if data is None or recorded is None or hashlib.sha256(data).hexdigest() != recorded:
+        return {"passed": False, "category": "harness_error", "pcc_min": None, "sets": [],
+                "violations": [], "first_line": "the clean kernel copy changed since the simulator check; it was not run"}
+    return None
+
+
+def _hw_run(adir: Path, vdir: Path, kernel: Path, *, op: str, reason: str, shared_python, run_watched, cancel,
+            backstop_s: float = BUDGET["hw_backstop_s"]) -> tuple[dict, str | None, str]:
+    """One gozer run of the shipped harness on the clean copy `kernel` (already through _hw_gate), judged with the
+    hardware bars. Returns (hw block, event, output). `event` is None for a run that finished, "queued" when the chips
+    were busy (the ticket is cancelled and the kernel never ran) and "hang" when the stall watcher or the backstop
+    stopped it. The results and the output log are written in `vdir`. A process the kernel left behind is stopped
+    (finding 5)."""
+    check = _template("kernel_check")
+    spec = load_spec(op)
+    out = vdir / "hw-result.json"
+    _remove(out)
+    log = vdir / "hw-output.txt"
+    start = _size(log)
+    argv = _gozer(reason, str(shared_python), str(TEMPLATES / "kernel_harness.py"),
+                  "--spec", str(TEMPLATES / "ops" / f"{op}.json"), "--kernel", str(kernel), "--out", str(out),
+                  "--phase", "hw")
+    try:
+        got = run_watched(argv, cwd=Path(kernel).parent, env=child_env(vdir, adir, hardware=True), log_path=log,
+                          watcher=_hw_watcher(), backstop_s=backstop_s, term_grace_s=GOZER_TERM_GRACE_S)
+    finally:
+        # gozer has released the lease by now. A process the kernel left behind is stopped here (finding 5).
+        swept = sweep_strays(adir)
+    extra = {"swept": swept} if swept else {}
+    text = _new_text(log, start)
+    queued = _queued(got, text, cancel)
+    if queued is not None:
+        # The chips were busy and the kernel never ran: not a failure of the kernel.
+        return ({"passed": False, "category": "queued", "pcc_min": None, "sets": [], "violations": [],
+                 "first_line": _queued_text(queued), "queued": queued, "watch": _watch_facts(got),
+                 "elapsed_s": round(got.elapsed_s, 1), **extra}, "queued", text)
+    if got.killed:
+        # The first line is the watcher's own reason ("backstop: ..." or "stalled: ..." or "repeating: ..."), so a
+        # watcher stop is not read as a device hang without saying which rule stopped it.
+        return ({"passed": False, "category": "hang", "pcc_min": None, "sets": [], "violations": [],
+                 "first_line": got.reason, "elapsed_s": round(got.elapsed_s, 1), "watch": _watch_facts(got), **extra},
+                "hang", text)
+    try:
+        raw = _read_regular(out, 64 * 1024 * 1024)
+        result = json.loads(raw.decode("utf-8", errors="replace")) if raw is not None else None
+    except ValueError:
+        result = None
+    if not isinstance(result, dict):
+        result = None                                   # classify reads a missing or broken result file the same way
+    category, line = check.classify(kernel_present=True, timed_out=False, returncode=got.returncode,
+                                    text=text, result=result,
+                                    bar=spec["pcc_bar_hw"], phase="hw", bars=check.bars_from_spec(spec, "hw"),
+                                    diagnostics_present=None)
+    sets = result.get("sets") if result and isinstance(result.get("sets"), list) else []
+    device = result.get("device_s") if result else None
+    block = {"passed": category is None, "category": category, "first_line": line,
+             **set_measures(sets), "sets": sets, "violations": [],
+             "elapsed_s": round(got.elapsed_s, 1), "watch": _watch_facts(got), **extra}
+    if isinstance(device, (int, float)) and not isinstance(device, bool) and device == device and 0 <= device < 1e7:
+        block["device_s"] = round(float(device), 2)
+    return block, None, text
+
+
 def hardware_phase(adir: Path, attempt: dict, *, env, shared_python, run_watched=run_watched,
                    cancel=cancel_ticket) -> dict:
     """Run one attempt's checked kernel on one chip and judge it with the hardware bars. Call it only for an attempt
@@ -1077,69 +1182,126 @@ def hardware_phase(adir: Path, attempt: dict, *, env, shared_python, run_watched
     adir = Path(adir)
     vdir = _verdict_dir_of(adir)
     op, n = attempt["op"], attempt["attempt"]
-    spec = load_spec(op)
-    check = _template("kernel_check")
+    load_spec(op)
     kernel = vdir / CLEAN_DIR / "kernel.py"
-    if not kernel.is_file() or kernel.is_symlink():
-        return _record_hw(adir, attempt, {"passed": False, "category": "no_kernel", "pcc_min": None, "sets": [],
-                                          "violations": [], "first_line": "the checked copy of kernel.py is missing"})
-    violations = check.kernel_source_violations(kernel)
-    ok, reason = check.check_kernel_source(kernel)
-    if violations or not ok:
-        category = "no_kernel" if reason.startswith("no-operation") else "forbidden_code"
-        # The same first line the simulator check gives (kernel_check.py strips the gate's "no-operation: " tag).
-        return _record_hw(adir, attempt, {"passed": False, "category": category, "pcc_min": None, "sets": [],
-                                          "violations": violations, "first_line": reason.removeprefix("no-operation: ")})
-    recorded = (attempt.get("provenance") or {}).get("kernel_sha256")
-    data = _read_regular(kernel, MAX_KERNEL_BYTES)
-    if data is None or recorded is None or hashlib.sha256(data).hexdigest() != recorded:
-        return _record_hw(adir, attempt, {"passed": False, "category": "harness_error", "pcc_min": None, "sets": [],
-                                          "violations": [], "first_line": "the clean kernel copy changed since the "
-                                                                          "simulator check; it was not run"})
-    out = vdir / "hw-result.json"
-    _remove(out)
-    log = vdir / "hw-output.txt"
-    start = _size(log)
-    argv = _gozer(f"kernel-probe {op} attempt {n}", str(shared_python), str(TEMPLATES / "kernel_harness.py"),
-                  "--spec", str(TEMPLATES / "ops" / f"{op}.json"), "--kernel", str(kernel), "--out", str(out),
-                  "--phase", "hw")
-    try:
-        got = run_watched(argv, cwd=vdir / CLEAN_DIR, env=child_env(vdir, adir, hardware=True), log_path=log,
-                          watcher=_hw_watcher(), backstop_s=BUDGET["hw_backstop_s"], term_grace_s=GOZER_TERM_GRACE_S)
-    finally:
-        # gozer has released the lease by now. A process the kernel left behind is stopped here (finding 5).
-        swept = sweep_strays(adir)
-    extra = {"swept": swept} if swept else {}
-    queued = _queued(got, _new_text(log, start), cancel)
-    if queued is not None:
+    blocked = _hw_gate(kernel, (attempt.get("provenance") or {}).get("kernel_sha256"))
+    if blocked is not None:
+        return _record_hw(adir, attempt, blocked)
+    hw, event, _ = _hw_run(adir, vdir, kernel, op=op, reason=f"kernel-probe {op} attempt {n}",
+                           shared_python=shared_python, run_watched=run_watched, cancel=cancel)
+    if event == "queued":
         # The chips were busy and the kernel never ran: not a failure of the kernel, and the later attempts would be
         # queued too, so the probe stops.
-        _record_hw(adir, attempt, {"passed": False, "category": "queued", "pcc_min": None, "sets": [],
-                                   "violations": [], "first_line": _queued_text(queued), "queued": queued,
-                                   "watch": _watch_facts(got), **extra})
-        raise ProbeBlocked(f"{op} attempt {n}: {_queued_text(queued)}")
-    if got.killed:
-        # The first line is the watcher's own reason ("backstop: ..." or "stalled: ..." or "repeating: ..."), so a
-        # watcher stop is not read as a device hang without saying which rule stopped it.
-        _record_hw(adir, attempt, {"passed": False, "category": "hang", "pcc_min": None, "sets": [], "violations": [],
-                                   "first_line": got.reason, "elapsed_s": round(got.elapsed_s, 1),
-                                   "watch": _watch_facts(got), **extra})
-        raise ProbeBlocked(f"{op} attempt {n}: {got.reason}")
+        _record_hw(adir, attempt, hw)
+        raise ProbeBlocked(f"{op} attempt {n}: {_queued_text(hw['queued'])}")
+    if event == "hang":
+        _record_hw(adir, attempt, hw)
+        raise ProbeBlocked(f"{op} attempt {n}: {hw['first_line']}")
+    return _record_hw(adir, attempt, hw)
+
+
+# ---- the agent's hardware check ---------------------------------------------------------------------------------
+
+HWCHECK_DIR = ".hwcheck"
+
+
+def default_shared_python() -> str:
+    return str(Path.home() / ".tenstorrent-venv" / "bin" / "python")
+
+
+def hwcheck_dir(probe_dir, op: str, n, k) -> Path:
+    """The probe-owned directory of call `k` of attempt `n` of `op`: DIR/.hwcheck/<op>-<n>-<k>/. It is not under
+    `.verdict`, which the authoritative check empties and load_attempts reads."""
+    return Path(probe_dir) / HWCHECK_DIR / f"{op}-{n}-{k}"
+
+
+def make_hardware_check(adir: Path, *, op: str, n, shared_python, policy: hwtool.HwPolicy, run_watched=run_watched,
+                        cancel=cancel_ticket, clock=time.monotonic, sleep=time.sleep) -> hwtool.HardwareCheck:
+    """The attempt's `hardware_check` tool (hwtool.HardwareCheck) wired to the probe's own hardware path.
+
+    Each call copies the attempt's current kernel.py into a fresh probe-owned directory (copy_kernel: a regular file of
+    at most 256 KiB), runs the static gate and the sha256 check on the copy (_hw_gate), and runs the shipped harness on it
+    through `gozer run --chips 1` under the stall watcher (_hw_run), the way the probe's own hardware phase does. The
+    gate and the sha256 check run again just before every gozer try, because the agent can write anywhere the operator
+    can. The agent supplies no command text and no path."""
+    adir = Path(adir)
+    probe_dir = adir.parent.parent
+    state: dict = {}
+
+    def prepare(k):
+        vdir = hwcheck_dir(probe_dir, op, n, k)
+        _real_dir(vdir.parent)
+        _fresh_dir(vdir)
+        clean = vdir / CLEAN_DIR
+        clean.mkdir()
+        category, sha, line = copy_kernel(adir, clean)
+        if category is not None:
+            rule = [{"rule": "file", "line": 0, "detail": line, "remedy": FILE_RULE_REMEDY}] \
+                if category == "forbidden_code" else []
+            return {"passed": False, "category": category, "first_line": line, "pcc_min": None, "sets": [],
+                    "violations": rule}, None
+        blocked = _hw_gate(clean / "kernel.py", sha)
+        if blocked is not None:
+            return blocked, sha
+        state.update(vdir=vdir, kernel=clean / "kernel.py", sha=sha)
+        return None, sha
+
+    def run(k, timeout_s):
+        blocked = _hw_gate(state["kernel"], state["sha"])
+        if blocked is not None:                         # the copy changed after prepare: no gozer command runs
+            return {**blocked, "elapsed_s": 0.0}, None, ""
+        hw, event, text = _hw_run(adir, state["vdir"], state["kernel"], op=op,
+                                  reason=f"kernel-probe {op} attempt {n} agent check {k}", shared_python=shared_python,
+                                  run_watched=run_watched, cancel=cancel, backstop_s=timeout_s)
+        if event is None and not hw.get("passed") and hw.get("sets"):
+            spec = load_spec(op)
+            check = _template("kernel_check")
+            line = check.numeric_detail(hw["sets"], spec["pcc_bar_hw"], check.bars_from_spec(spec, "hw"))
+            if line:
+                hw["numbers"] = line
+        return hw, event, text
+    return hwtool.HardwareCheck(policy, prepare=prepare, run=run, clock=clock, sleep=sleep)
+
+
+def _hw_int(args, name: str, default: int, low: int, high: int) -> int:
+    v = getattr(args, name, None)
+    if v is None:
+        return default
     try:
-        raw = _read_regular(out, 64 * 1024 * 1024)
-        result = json.loads(raw.decode("utf-8", errors="replace")) if raw is not None else None
-    except ValueError:
-        result = None
-    if not isinstance(result, dict):
-        result = None                                   # classify reads a missing or broken result file the same way
-    category, line = check.classify(kernel_present=True, timed_out=False, returncode=got.returncode,
-                                    text=_new_text(log, start), result=result,
-                                    bar=spec["pcc_bar_hw"], phase="hw", bars=check.bars_from_spec(spec, "hw"),
-                                    diagnostics_present=None)
-    sets = result.get("sets") if result and isinstance(result.get("sets"), list) else []
-    return _record_hw(adir, attempt, {"passed": category is None, "category": category, "first_line": line,
-                                      **set_measures(sets), "sets": sets, "violations": [],
-                                      "elapsed_s": round(got.elapsed_s, 1), "watch": _watch_facts(got), **extra})
+        n = int(v) if not isinstance(v, bool) and float(v) == int(float(v)) else None
+    except (TypeError, ValueError, OverflowError):
+        n = None
+    if n is None or not low <= n <= high:
+        raise _Refused(f"--{name.replace('_', '-')} must be a whole number from {low} to {high}")
+    return n
+
+
+def _hw_float(args, name: str, default: float, low: float, high: float, *, open_low: bool) -> float:
+    v = getattr(args, name, None)
+    if v is None:
+        return default
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        x = None
+    if x is None or isinstance(v, bool) or x != x or x > high or (x <= low if open_low else x < low):
+        bound = f"more than {low:g}" if open_low else f"at least {low:g}"
+        raise _Refused(f"--{name.replace('_', '-')} must be {bound} and at most {high:g}")
+    return x
+
+
+def hw_policy_from_args(args) -> hwtool.HwPolicy:
+    """The agent's hardware-check policy from the command line (defaults: 6 calls, 300 lease seconds, 240 s per call,
+    120 s of waiting for a busy board). `--no-agent-hw` and `--hw-checks 0` turn the tool off. A value out of range is
+    refused (_Refused). The ranges are choices: a larger number is more likely a typo."""
+    base = hwtool.HwPolicy()
+    checks = _hw_int(args, "hw_checks", base.max_calls, 0, 50)
+    lease = _hw_float(args, "hw_lease_s", base.lease_s, 0.0, 3600.0, open_low=True)
+    timeout = _hw_float(args, "hw_call_timeout_s", base.call_timeout_s, 0.0, 1800.0, open_low=True)
+    wait = _hw_float(args, "hw_wait_s", base.wait_s, 0.0, 3600.0, open_low=False)
+    if getattr(args, "no_agent_hw", False):
+        checks = 0
+    return hwtool.HwPolicy(max_calls=checks, lease_s=lease, call_timeout_s=timeout, wait_s=wait)
 
 
 def run_hardware(attempts: list[dict], *, probe_dir, env, shared_python, run_watched=run_watched,
@@ -1240,6 +1402,91 @@ def _agent_cell(a: dict) -> str:
     return _cell("; ".join(parts))
 
 
+def _agent_hw(a: dict) -> dict | None:
+    """The attempt's record of the agent's hardware checks when the tool was offered, else None (off, or a record from
+    before the tool existed)."""
+    rec = a.get("agent_hw")
+    return rec if isinstance(rec, dict) and rec.get("enabled") is True and isinstance(rec.get("calls"), list) else None
+
+
+def _counted_calls(rec: dict) -> list[dict]:
+    return [c for c in rec["calls"] if isinstance(c, dict) and c.get("counted") is True]
+
+
+def _num(v) -> float:
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and v == v else 0.0
+
+
+def _agent_hw_cell(a: dict) -> str:
+    """The agent hw column: how many hardware checks the agent called, how many passed, and the chip seconds they took."""
+    rec = _agent_hw(a)
+    if rec is None:
+        return _cell(None)
+    calls = _counted_calls(rec)
+    passed = sum(1 for c in calls if c.get("outcome") == "pass")
+    seconds = sum(_num(c.get("lease_s")) for c in calls)
+    return _cell(f"{len(calls)} call{'s' if len(calls) != 1 else ''} ({passed} passed), {seconds:.0f} s")
+
+
+def _call_note(c: dict) -> str:
+    parts = []
+    if c.get("timed_out"):
+        parts.append("timed out")
+    if c.get("queued_polls"):
+        parts.append(f"{c['queued_polls']} tries, tickets " + ("cancelled" if c.get("cancelled") else "NOT all cancelled"))
+    if c.get("outcome") not in ("pass", "busy") and c.get("first_line"):
+        parts.append(str(c["first_line"]))
+    if c.get("note"):
+        parts.append(f"note: {c['note']}")
+    return "; ".join(parts)
+
+
+def _agent_hw_lines(attempts: list[dict]) -> list[str]:
+    """The report's section on the hardware checks the agents called: the policy, every call, and the chip time they cost.
+    Left out when no record has an `agent_hw` field (a report of attempts from before the tool)."""
+    recorded = [a for a in attempts if isinstance(a.get("agent_hw"), dict)]
+    if not recorded:
+        return []
+    on = [a for a in recorded if _agent_hw(a) is not None]
+    if not on:
+        return ["## Hardware checks called by the coder", "",
+                "Hardware checks called by the coder: off (the tool was not offered, so these attempts used the "
+                "simulator alone).", ""]
+    pol = on[0]["agent_hw"].get("policy") or {}
+    lines = ["## Hardware checks called by the coder", "",
+             f"Each attempt could call `hardware_check`: up to {pol.get('max_calls')} calls and "
+             f"{_num(pol.get('lease_s')):.0f} lease seconds, {_num(pol.get('call_timeout_s')):.0f} s per call, "
+             f"{_num(pol.get('wait_s')):.0f} s of waiting for a busy board. The probe judges each call; the coder's "
+             "claim counts for nothing. These runs are not the attempt's hardware result (the `hardware` column).", "",
+             "| op | attempt | call | outcome | total s | device s | chip s | waited s | notes |",
+             "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
+    counted, chip, waited = [], 0.0, 0.0
+    for a in sorted(on, key=lambda a: (str(a.get("op")), a.get("attempt") or 0)):
+        for c in a["agent_hw"]["calls"]:
+            if not isinstance(c, dict):
+                continue
+            lines.append("| " + " | ".join([
+                _cell(a.get("op")), _cell(a.get("attempt")), _cell(c.get("k")), _cell(c.get("outcome")),
+                _cell(c.get("total_s")), _cell(c.get("device_s")), _cell(c.get("lease_s")), _cell(c.get("waited_s")),
+                _cell(_call_note(c))]) + " |")
+            if c.get("counted") is True:
+                counted.append(c)
+            chip += _num(c.get("lease_s"))
+            waited += _num(c.get("waited_s"))
+    n_att = sum(1 for a in on if _counted_calls(a["agent_hw"]))
+    by = {k: sum(1 for c in counted if c.get("outcome") == k) for k in ("pass", "busy", "hang")}
+    failed = len(counted) - sum(by.values())
+    n = len(counted)
+    lines += ["", f"{n} call{'s' if n != 1 else ''} in {n_att} attempt{'s' if n_att != 1 else ''} "
+                  f"({by['pass']} passed, {failed} failed, {by['busy']} busy, {by['hang']} hang); "
+                  f"{chip:.0f} s of chip time (the seconds gozer held a lease, the reset included), "
+                  f"{waited:.0f} s waited for a board.",
+              ""]
+    if len(on) != len(recorded):
+        lines += [f"{len(recorded) - len(on)} attempt(s) had the tool off.", ""]
+    return lines
+
+
 def _sampling_text(sp: dict) -> str:
     """The run's sampling in one sentence, with the seed base needed to repeat a sampled run."""
     temps = ", ".join(f"{t:g}" for t in sp.get("temperatures") or [])
@@ -1256,8 +1503,8 @@ def _group_lines(g: dict, rows: list[dict]) -> list[str]:
     """One temperature group of an op: a heading, the attempts table and the distinct-kernel lines."""
     lines = ["", f"### temperature {g['temperature']:g}", "",
              "| attempt | simulator | hardware | status | PCC min (sim) | PCC min (hw) | turns | wall s | category | "
-             "first line | agent check |",
-             "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
+             "first line | agent check | agent hw |",
+             "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
     for a in sorted(rows, key=lambda a: a["attempt"]):
         h = a.get("hw") if isinstance(a.get("hw"), dict) else None
         category = a.get("category") or (h or {}).get("category")
@@ -1267,7 +1514,8 @@ def _group_lines(g: dict, rows: list[dict]) -> list[str]:
             "-" if h is None else ("yes" if h.get("passed") else "no") + (" (hardware only)" if h.get("hardware_only") else ""),
             _status_cell(a),
             _pcc_cell(a.get("pcc_min")), _pcc_cell((h or {}).get("pcc_min")), _cell(a.get("turns")),
-            _cell(a.get("agent_wall_s")), _cell(category), _cell(first_line), _agent_cell(a)]) + " |")
+            _cell(a.get("agent_wall_s")), _cell(category), _cell(first_line), _agent_cell(a),
+            _agent_hw_cell(a)]) + " |")
     return lines + [""] + _distinct_lines(g)
 
 
@@ -1466,6 +1714,9 @@ def write_report(probe_dir, attempts: list[dict], header: dict) -> dict:
     else:
         lines += ["hw: unavailable. The smoke test (upstream's eltwise_add.py on one chip) failed. Its last lines:", "",
                   "```", *[str(x) for x in hw.get("smoke_tail") or []], "```"]
+    section = _agent_hw_lines(attempts)
+    if section:
+        lines += [""] + section
     for op, rows in by_op.items():
         lines += ["", f"## {op}"]
         for g in (g for g in groups if g["op"] == op):
@@ -1804,8 +2055,10 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
         return refuse("--attempts must be at least 1")
     try:
         plan = parse_sampling(args, attempts)
+        hw_policy = hw_policy_from_args(args)
     except _Refused as exc:
         return refuse(str(exc))
+    shared = getattr(args, "shared_python", None) or default_shared_python()
     env = env or default_env(args)
     results = ttlang_env.ensure(env, check_only=True, say=say)
     if not results or any(r.status != ttlang_env.OK for r in results):
@@ -1890,13 +2143,12 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
                                          model=model, coder_model=model, probe_id=probe_id, http=http,
                                          run_watched=run_watched_fn, tt_lang=facts, temperature=temperature,
                                          top_p=plan["top_p"], seed=attempt_seed(base, n, temperature),
-                                         references=references, skills=skills_record, coder_speed=speed)
+                                         references=references, skills=skills_record, coder_speed=speed,
+                                         hw_policy=hw_policy, shared_python=shared)
                     records.append(record)
                     say(_attempt_line(record))
                 if getattr(args, "phase", "sim") == "hw" and not stopped:
                     where, hw_started = "the hardware phase", True
-                    shared = (getattr(args, "shared_python", None)
-                              or str(Path.home() / ".tenstorrent-venv" / "bin" / "python"))
                     try:
                         hw = run_hardware(records, probe_dir=probe_dir, env=env, shared_python=shared,
                                           run_watched=run_watched_fn, state=state)
@@ -1934,6 +2186,7 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
             header["references"] = reference_record
             header["library"] = {"mode": library_mode, "note": library_note(args.op, library_mode)}
             header["skills"] = skills_record
+            header["agent_hw_policy"] = hw_policy.as_dict() | {"enabled": hw_policy.enabled}
             write_report(probe_dir, records, header)
             say(f"report: {probe_dir / 'kernel-probe-report.md'}")
             if stopped:

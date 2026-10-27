@@ -22,7 +22,6 @@ Read first, by kind of op:
   (`grep -n "ttl.math.silu" reference/TTLangSpecification.md`).
 - A reduction (`rmsnorm`, `center`, `softmax`): eltwise_broadcast_reduce.py, then the rows for `ttl.math.reduce_sum`, `ttl.block.broadcast`, `ttl.block.fill`.
 - A recurrence along a dimension (`linear_scan`): both .py files, then the specification's "Block" section. No upstream example has one.
-
 Rules from the specification and the examples:
 - Units: `kernel_spec.json` shapes count elements, and so does `x.shape` inside your operation; a tile is 32 x 32 elements, and every
   input is bf16 in tile layout. Buffer shapes and tensor slices count tiles: the tiles along a dimension are `x.shape[0] // TILE_SIZE`
@@ -51,7 +50,6 @@ Rules from the specification and the examples:
 - `ttl.raw_element_read(blk, i, j)` and `ttl.raw_element_write(blk, i, j, value)` are documented and the simulator lacks them, so a kernel that
   uses them ends `FAIL: sim_gap` and is judged on hardware only. On hardware they copied elements, wrote constants and shifted rows; the compiler
   refused `+`, `*`, `if` expressions and lists of values on them. Read from a `wait()` block, in a data movement thread.
-
 Steps:
 1. Read `kernel_spec.json` (inputs, shapes, output shape, what the op computes), then `reference/eltwise_add.py` once, then the files for your kind of op.
 2. Write `kernel.py` with write_file. It holds one function decorated with `@ttl.operation(...)`, with any name; that
@@ -78,7 +76,10 @@ Advice:
   `from sim import ttl, ttnn` is refused, and so are their `import torch` and their host code with `ttnn.from_torch` and `ttnn.to_torch`.
 - Delete the example's `main()` and its `if __name__ == "__main__":` block. Do not open a device: the check opens it, builds the
   inputs and reads the result back. The guide's advice to add a main block does not apply here.
-
+Hardware: the tool `hardware_check` (an optional `note`; no command, no path) runs your current kernel.py on a chip and answers PASS or FAIL
+with the numbers, the seconds and the calls left. It takes about 3 seconds to run and about 45 seconds with the lease and the chip reset; each
+attempt has a few calls, and a busy board is reported after two minutes. Use it for a kernel the simulator cannot run (`FAIL: sim_gap`), a numeric
+check at hardware precision once the simulator passes, or a performance question (it reports device seconds); the simulator is much cheaper for everything else.
 Rules the check enforces. It reads `kernel.py` before running it and answers `FAIL: forbidden_code: ...` with every
 rule broken, its line, and what to do instead:
 - Imports: import only `ttl`, `ttnn` and `math`. `from __future__ import annotations` and type names such as `from typing import Any,
@@ -91,10 +92,9 @@ rule broken, its line, and what to do instead:
 - The operation: exactly one plain top-level `def` with one decorator, `@ttl.operation(...)`, and any name except the forbidden
   ones above. Two `@ttl.operation` functions are refused. `import ttl as tl` with `@tl.operation(...)`, and `from ttl import
   operation` with `@operation(...)`, are accepted.
-
 Other rules:
 - The probe also refuses a `kernel.py` that is a link or larger than 256 KiB, when it takes the file after you finish: write it with write_file.
 - Write only `kernel.py`. Your result is judged afterwards by an unedited copy of the check.
-- Do not install packages, use the network, or touch any device (the check runs on a simulator), or read the ledger or the log directory.
+- Do not install packages, use the network, or open a device yourself (`hardware_check` is the way to the chip), or read the ledger or the log directory.
 - If the same failure comes back three times and you have no new idea, stop and say what you tried. Finish with at most five lines:
   what the kernel does, and what the last check said.
