@@ -136,7 +136,7 @@ from orchard.context import build_messages, facts_from
 from orchard.defaults import (AGENT_CONTINUATION_TURNS, AGENT_WRAPUP_TURNS, CHIPS_PER_BOARD, CMD_TIMEOUT_S,
                               COLD_BOOT_BUDGET_S, CONTROL_POLL_S, FIRST_BOOT_EXPECTED,
                               FIRST_BOOT_PROMPT, PACKAGE_DEFERRED, PACKAGE_FORMATS,
-                              GRAFT_TRIAL_DEADLINE_S, GRAFT_TRIAL_DISK_GB, RUN_CANARY_PROMPT, SAMPLING_TRIAL_DEADLINE_S, SAMPLING_TRIAL_DISK_GB, STOP_TIMEOUT_S, TEST_DISK_GB, FAST_FAIL_S)
+                              GRAFT_TRIAL_DEADLINE_S, GRAFT_TRIAL_DISK_GB, RUN_CANARY_PROMPT, SAMPLING_TRIAL_DEADLINE_S, SAMPLING_TRIAL_DISK_GB, SAMPLING_TRIAL_RUN_DISK_GB, STOP_TIMEOUT_S, TEST_DISK_GB, FAST_FAIL_S)
 from orchard.handoff import (NOTE_KEYS, Blocked, Budgets, Handoff, decide_park, progress, reacquire,
                              recover, wait_stopped)
 from orchard.hwtests import (failed_tests, load_plan, move_aside, pending, read_plan, suspect_caches,
@@ -1935,10 +1935,21 @@ class Supervisor:
                 # The disk is a prerequisite for a trial that still has to run. One that already ran (its test record exists) may itself have
                 # filled the disk with its new tensor cache, and a restart must read its result and not skip it for that.
                 already_ran = (stage_dir / sampling.TRIAL_DIR / "test-result.json").is_file()
-                enough, free = (True, None) if already_ran else check_disk(self.run_dir, SAMPLING_TRIAL_DISK_GB, usage=self.disk_usage)
-                if not enough:
-                    skip = (f"the sampling trial was skipped: the drafter-off variant converts a second tensor cache and needs "
-                            f"{SAMPLING_TRIAL_DISK_GB:g} GB free on the run directory's disk; {free} GB is free")
+                if not already_ran:
+                    # The new tensor cache is written beside the configured `tt_cache`, which can be on another filesystem than the run
+                    # directory, so the conversion is checked there (the nearest existing parent of that path), and the run directory is
+                    # checked apart for the trial's evidence.
+                    cache_path = self._cache_check_path(stage_dir)
+                    enough, free = check_disk(cache_path, SAMPLING_TRIAL_DISK_GB, usage=self.disk_usage)
+                    if not enough:
+                        where = "the configured tensor cache's disk" if cache_path != self.run_dir else "the run directory's disk"
+                        skip = (f"the sampling trial was skipped: the drafter-off variant converts a second tensor cache and needs "
+                                f"{SAMPLING_TRIAL_DISK_GB:g} GB free on {where}; {free} GB is free")
+                    else:
+                        enough, free = check_disk(self.run_dir, SAMPLING_TRIAL_RUN_DISK_GB, usage=self.disk_usage)
+                        if not enough:
+                            skip = (f"the sampling trial was skipped: its evidence needs {SAMPLING_TRIAL_RUN_DISK_GB:g} GB free on the run "
+                                    f"directory's disk; {free} GB is free")
             if skip:
                 self.ledger.append("decision", n, decision="sampling trial skipped", reason=skip)
                 note = skip
@@ -1952,6 +1963,20 @@ class Supervisor:
                            needed=decision["needed"], need_source=decision["need_source"], numbers=decision["numbers"],
                            decision_file=evidence_record(self.run_dir, path), trial=ran)
         return True
+
+    def _cache_check_path(self, stage_dir: Path) -> Path:
+        """The path whose filesystem the sampling trial's new tensor cache lands on: the nearest existing parent of the stage's configured `tt_cache`
+        (the cache is made later, so the path itself may not exist). The run directory when the config names none."""
+        try:
+            cfg = json.loads((stage_dir / "swap_config.json").read_text(encoding="utf-8"))
+            cache = Path(str(cfg["tt_cache"]))
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            return self.run_dir
+        if not cache.is_absolute():
+            cache = self.run_dir / cache
+        while not cache.exists() and cache != cache.parent:
+            cache = cache.parent
+        return cache if cache.exists() else self.run_dir
 
     def _run_sampling_trial(self, spec, stage_dir: Path, need: dict, current: dict):
         """Run (or, after a kill, read) the drafter-off trial. Returns (the variant's side or None, a note saying why there is none)."""

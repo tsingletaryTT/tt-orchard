@@ -191,6 +191,7 @@ GRAFT_TRIAL_DEADLINE_S = 7200.0  # choice: one hardware test: a warm boot of the
 SAMPLING_MIN_TOKS_PER_S = 10.0  # choice: the usability floor for a configuration that must apply sampling. Measured drafter-off decode speeds on 2 chips were
                                 # 16.5 to 19.1 tokens/s (one run, 2026-10-27), so 10 sits at 60 percent of the slowest. A 1,000-token reply then takes
                                 # 100 s, which a person waiting for a chat reply tolerates. One measurement; replace it when a second model is measured.
+SAMPLING_TRIAL_RUN_DISK_GB = 1.0   # choice: the run directory needs this much for the trial's evidence (logs, swap check, result), checked apart from the cache's volume.
 SAMPLING_TRIAL_DISK_GB = 40.0   # choice: the drafter-off variant converts a second tensor cache, as the graft variant does (GRAFT_TRIAL_DISK_GB).
 SAMPLING_TRIAL_DEADLINE_S = 5400.0  # choice: one cold boot of the variant (4 to 25 minutes measured for this bundle) and the swap check with its probe.
 SWAP_MIN_TOKENS = 16            # choice: the fewest compared tokens the weights-only gate accepts; the
