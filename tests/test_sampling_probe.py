@@ -25,11 +25,18 @@ def refused(error="HTTP 400: no"):
     return entry(text="", tokens=None, seconds=None, accepted=False, error=error)
 
 
+GREEDY_PARAMS = {"temperature": 0}
+SAMPLED_PARAMS = ({"temperature": 1.0, "top_p": 0.9, "seed": 1234}, {"temperature": 1.0, "top_p": 0.9, "seed": 4321})
+
+
 def record(greedy=None, a=None, b=None):
-    return {"ran": True, "prompt": "p", "max_tokens": 96,
-            "requests": {"greedy": greedy or entry(text=GREEDY, seconds=2.0),
-                         "sampled_a": a or entry(text=STORY, seconds=2.0),
-                         "sampled_b": b or entry(text=OTHER, seconds=2.0)}}
+    """A record shaped like the template's: the greedy request has temperature 0 and the two sampled requests carry temperature, top-p and different seeds."""
+    reqs = {"greedy": greedy or entry(text=GREEDY, seconds=2.0), "sampled_a": a or entry(text=STORY, seconds=2.0),
+            "sampled_b": b or entry(text=OTHER, seconds=2.0)}
+    for name, params in zip(sp.ENTRY_NAMES, (GREEDY_PARAMS, *SAMPLED_PARAMS)):
+        if not reqs[name]["params"]:
+            reqs[name]["params"] = dict(params)
+    return {"ran": True, "prompt": "p", "max_tokens": 96, "requests": reqs}
 
 
 def test_a_healthy_pair_is_full_speed_and_the_speeds_are_tokens_over_seconds():
@@ -169,6 +176,48 @@ def test_string_and_null_values_of_those_fields_are_fine():
     for n in sp.ENTRY_NAMES:
         rec["requests"][n].update({"drafter_log": None, "error": None, "finish_reason": None})
     assert sp.problems(rec) == []
+
+
+def damaged(name, params):
+    rec = record()
+    if params is _MISSING:
+        del rec["requests"][name]["params"]
+    else:
+        rec["requests"][name]["params"] = params
+    return rec
+
+
+_MISSING = object()
+
+
+@pytest.mark.parametrize("name, params", [
+    ("greedy", {"temperature": 0.7}), ("greedy", {"temperature": 0, "seed": 1}), ("greedy", {"temperature": "0"}), ("greedy", {}),
+    ("greedy", _MISSING), ("greedy", "greedy"), ("greedy", {"temperature": True}),
+    ("sampled_a", {"temperature": 0, "seed": 1234}), ("sampled_a", {"temperature": 0, "top_p": 0.9, "seed": 1234}),
+    ("sampled_a", {"temperature": float("inf"), "top_p": 0.9, "seed": 1234}), ("sampled_a", {"temperature": 1.0, "seed": 1234}),
+    ("sampled_a", {"temperature": 1.0, "top_p": 1.0, "seed": 1234}), ("sampled_a", {"temperature": 1.0, "top_p": 0.9}),
+    ("sampled_a", {"temperature": 1.0, "top_p": 0.9, "seed": "1234"}), ("sampled_a", {"temperature": 1.0, "top_p": 0.9, "seed": 1.5}),
+    ("sampled_a", {"temperature": 1.0, "top_p": 0.9, "seed": True}), ("sampled_a", {"temperature": -1.0, "top_p": 0.9, "seed": 1}),
+    ("sampled_a", {"temperature": 1.0, "top_p": 0.0, "seed": 1}), ("sampled_b", _MISSING), ("sampled_b", {}),
+    ("sampled_b", {"temperature": float("nan"), "top_p": 0.9, "seed": 4321}),
+    ("sampled_b", {"temperature": 1.0, "top_p": 0.9, "seed": 1234}),                 # the same seed as sampled_a
+])
+def test_the_recorded_request_parameters_must_say_what_the_probe_claims(name, params):
+    rec = damaged(name, params)
+    reasons = sp.problems(rec)
+    assert reasons and any("params" in r or "seed" in r for r in reasons), (name, params, reasons)
+    assert sp.summarize(rec)["verdict"] == "malformed"
+
+
+def test_the_real_probe_parameters_are_valid():
+    assert sp.problems(record()) == []
+
+
+def test_all_three_requests_at_temperature_zero_with_different_texts_are_not_a_sampling_result():
+    rec = record()
+    for n in sp.ENTRY_NAMES:
+        rec["requests"][n]["params"] = {"temperature": 0}
+    assert sp.summarize(rec)["verdict"] == "malformed"
 
 
 @pytest.mark.parametrize("ran", [0, [], "false", "true", "", None, 1])

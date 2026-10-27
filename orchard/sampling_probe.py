@@ -61,6 +61,34 @@ def problems(record) -> list[str]:
         for key in ("seconds", "completion_tokens"):
             if e.get(key) is not None and not _number(e[key]):
                 out.append(f"sampling_probe.requests.{name}.{key} must be a number or null")
+        out += _params_problems(name, e.get("params"))
+    seeds = [(reqs.get(n) or {}).get("params", {}).get("seed") for n in ("sampled_a", "sampled_b")
+             if isinstance((reqs.get(n) or {}).get("params"), dict)]
+    if len(seeds) == 2 and all(isinstance(x, int) and not isinstance(x, bool) for x in seeds) and seeds[0] == seeds[1]:
+        out.append("sampling_probe.requests.sampled_a and sampled_b must carry different seeds (params.seed)")
+    return out
+
+
+def _params_problems(name: str, params) -> list[str]:
+    """The request parameters the template recorded must be the ones the probe claims: temperature 0 and nothing else for the greedy request;
+    temperature above 0, top_p above 0 and below 1, and an integer seed for each sampled request."""
+    where = f"sampling_probe.requests.{name}.params"
+    if not isinstance(params, dict):
+        return [f"{where} must be an object"]
+    t = params.get("temperature")
+    if name == "greedy":
+        if not (_number(t) and t == 0 and set(params) == {"temperature"}):
+            return [f"{where} must be exactly temperature 0 for the greedy request, got {params!r}"]
+        return []
+    out = []
+    if not (_number(t) and t > 0):
+        out.append(f"{where}.temperature must be a number above 0 for a sampled request, got {t!r}")
+    p = params.get("top_p")
+    if not (_number(p) and 0 < p < 1):
+        out.append(f"{where}.top_p must be a number above 0 and below 1 for a sampled request, got {p!r}")
+    seed = params.get("seed")
+    if not (isinstance(seed, int) and not isinstance(seed, bool)):
+        out.append(f"{where}.seed must be an integer for a sampled request, got {seed!r}")
     return out
 
 
