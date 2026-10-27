@@ -35,3 +35,61 @@ def test_a_variant_that_is_incoherent_is_not_shipped(rig, spy):
     assert rig.run() == EXIT_READY
     d = decision_file(rig)
     assert d["choice"] == "keep" and "coherent" in d["reason"]
+
+
+# ---- finding 2: a restart sweeps the sampling trial's servers too ---------------------------------------------------------------------
+
+def test_a_restart_stops_the_sampling_trials_servers_before_it_recovers_leases(rig, spy, monkeypatch):
+    with pytest.raises(Crash):
+        rig.run(crash_if=lambda e: e["event"] == "evidence" and e["data"].get("what") == "sampling trial test")
+    calls = []
+    monkeypatch.setattr(supervisor.Supervisor, "_stop_trial_servers",
+                        lambda self, n, d, when: calls.append((n, d.name, when)))
+    assert rig.run(pid=200) == EXIT_READY
+    assert (2, "sampling-trial", "when the run started again") in calls
+
+
+def test_a_restart_sweeps_the_graft_trial_directory_as_before(rig, spy, monkeypatch):
+    with pytest.raises(Crash):
+        rig.run(crash_if=lambda e: e["event"] == "evidence" and e["data"].get("what") == "sampling trial test")
+    (sd(rig) / "graft-trial").mkdir(exist_ok=True)
+    calls = []
+    monkeypatch.setattr(supervisor.Supervisor, "_stop_trial_servers",
+                        lambda self, n, d, when: calls.append((n, d.name, when)))
+    rig.run(pid=200)
+    assert (2, "graft-trial", "when the run started again") in calls
+
+
+def test_a_restart_with_no_trial_directory_sweeps_nothing(rig, spy, monkeypatch):
+    with pytest.raises(Crash):
+        rig.run(crash_if=lambda e: e["event"] == "stage_end" and e["stage"] == 1)
+    assert not (sd(rig) / "sampling-trial").exists() and not (sd(rig) / "graft-trial").exists()
+    calls = []
+    monkeypatch.setattr(supervisor.Supervisor, "_stop_trial_servers", lambda self, n, d, when: calls.append((d.name, when)))
+    rig.run(pid=200)
+    assert [c for c in calls if c[1] == "when the run started again"] == []
+
+
+def test_a_server_the_killed_supervisor_left_in_the_sampling_trial_is_stopped_on_restart(rig, spy):
+    import os
+    import signal
+    import subprocess
+    with pytest.raises(Crash):
+        rig.run(crash_if=lambda e: e["event"] == "evidence" and e["data"].get("what") == "sampling trial test")
+    proc = subprocess.Popen(["sleep", "300"], start_new_session=True,
+                            env={**os.environ, supervisor.GRAFT_TRIAL_ENV: str((sd(rig) / "sampling-trial").resolve())})
+    try:
+        assert rig.run(pid=200) == EXIT_READY
+        assert proc.wait(timeout=20) is not None                 # stopped by the sweep at the restart
+        stopped = [e["data"] for e in rig.entries() if e["event"] == "decision" and e["data"].get("decision") == "graft trial servers stopped"]
+        assert stopped and stopped[0]["when"] == "when the run started again" and stopped[0]["servers"][0]["pid"] == proc.pid
+    finally:
+        if proc.poll() is None:
+            os.kill(proc.pid, signal.SIGKILL)
+
+
+def test_the_real_sweep_runs_on_both_directories_without_error(rig, spy):
+    """The real sweep (no servers here) must not fail on the sampling trial directory."""
+    with pytest.raises(Crash):
+        rig.run(crash_if=lambda e: e["event"] == "evidence" and e["data"].get("what") == "sampling trial test")
+    assert rig.run(pid=200) == EXIT_READY

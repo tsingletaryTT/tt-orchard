@@ -2086,9 +2086,12 @@ class Supervisor:
         """Give back test leases an earlier supervisor of this run took and never released (it died, and nothing
         released them). Only leases this run's ledger records, and only those taken where this supervisor runs: a lab
         run gives back the lab's, a local run this box's. A lease that is already gone is noted as not released."""
-        trial_dir = self.run_dir / "stages" / "2" / graft.TRIAL_DIR
-        if self.lab is None and trial_dir.is_dir():
-            self._stop_trial_servers(2, trial_dir, "when the run started again")
+        # Both trials start servers in sessions of their own, so a SIGKILL of the supervisor (which skips the after-test sweep) can leave either one
+        # holding the chips. Stop them before any lease is given back or the coder is recovered.
+        for name in (graft.TRIAL_DIR, sampling.TRIAL_DIR):
+            trial_dir = self.run_dir / "stages" / "2" / name
+            if self.lab is None and trial_dir.is_dir():
+                self._stop_trial_servers(2, trial_dir, "when the run started again")
         taken, released = {}, set()
         for e in self.ledger.read():
             d = e["data"]
