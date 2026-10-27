@@ -281,6 +281,38 @@ def test_both_sampled_entries_broken_in_different_ways_still_reports_both():
     assert any("sampled_a" in r for r in reasons) and any("sampled_b" in r for r in reasons)
 
 
+@pytest.mark.parametrize("name, params", [
+    ("sampled_b", {"temperature": 0.5, "top_p": 0.9, "seed": 4321}),                              # another temperature
+    ("sampled_b", {"temperature": 1.0, "top_p": 0.8, "seed": 4321}),                              # another top-p
+    ("sampled_b", {"temperature": 1.0, "top_p": 0.9, "seed": 4321, "prompt": "something else"}),   # an extra key
+    ("sampled_a", {"temperature": 1.0, "top_p": 0.9, "seed": 1234, "max_tokens": 1}),
+    ("sampled_a", {"temperature": 1.0, "top_p": 0.9, "seed": 1234, "top_k": 5}),
+    ("sampled_a", {"temperature": 1.0, "top_p": 0.9}),                                            # no seed
+])
+def test_the_two_sampled_requests_may_differ_only_in_seed_and_carry_no_extra_keys(name, params):
+    rec = record()
+    rec["requests"][name]["params"] = params
+    reasons = sp.problems(rec)
+    assert any("params" in r or "seed" in r for r in reasons), reasons
+    assert sp.summarize(rec)["verdict"] == "malformed"
+
+
+@pytest.mark.parametrize("extra", [{"prompt": "x"}, {"top_k": 5}, {"max_tokens": 1}, {"presence_penalty": 0.5}])
+def test_an_extra_key_present_in_both_sampled_requests_is_still_refused(extra):
+    rec = record()
+    for n, seed in (("sampled_a", 1234), ("sampled_b", 4321)):
+        rec["requests"][n]["params"] = {"temperature": 1.0, "top_p": 0.9, "seed": seed, **extra}
+    reasons = sp.problems(rec)
+    assert any(next(iter(extra)) in r for r in reasons), reasons
+
+
+def test_both_sampled_requests_with_the_same_other_parameters_and_different_seeds_are_fine():
+    rec = record()
+    for n, seed in (("sampled_a", 7), ("sampled_b", 8)):
+        rec["requests"][n]["params"] = {"temperature": 0.7, "top_p": 0.5, "seed": seed}
+    assert sp.problems(rec) == []
+
+
 def test_the_real_probe_parameters_are_valid():
     assert sp.problems(record()) == []
 

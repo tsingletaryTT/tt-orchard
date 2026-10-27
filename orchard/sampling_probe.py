@@ -64,6 +64,9 @@ def problems(record) -> list[str]:
         out += _params_problems(name, e.get("params"))
     seeds = [reqs[n]["params"].get("seed") for n in ("sampled_a", "sampled_b")
              if isinstance(reqs.get(n), dict) and isinstance(reqs[n].get("params"), dict)]
+    pa, pb = ((reqs.get(n) or {}).get("params") if isinstance(reqs.get(n), dict) else None for n in ("sampled_a", "sampled_b"))
+    if isinstance(pa, dict) and isinstance(pb, dict) and {k: v for k, v in pa.items() if k != "seed"} != {k: v for k, v in pb.items() if k != "seed"}:
+        out.append("sampling_probe.requests.sampled_a and sampled_b must differ only in seed (params): another parameter differs")
     if len(seeds) == 2 and all(isinstance(x, int) and not isinstance(x, bool) for x in seeds) and seeds[0] == seeds[1]:
         out.append("sampling_probe.requests.sampled_a and sampled_b must carry different seeds (params.seed)")
     return out
@@ -81,6 +84,9 @@ def _params_problems(name: str, params) -> list[str]:
             return [f"{where} must be exactly temperature 0 for the greedy request, got {params!r}"]
         return []
     out = []
+    extra = sorted(set(params) - {"temperature", "top_p", "seed"})
+    if extra:
+        out.append(f"{where} has keys the probe does not send for a sampled request: {', '.join(map(str, extra))}")
     if not (_number(t) and t > 0):
         out.append(f"{where}.temperature must be a number above 0 for a sampled request, got {t!r}")
     p = params.get("top_p")
