@@ -69,6 +69,29 @@ def test_a_sampled_text_equal_to_the_greedy_text_means_sampling_was_ignored_even
 
 
 @pytest.mark.parametrize("which", ["greedy", "sampled_a", "sampled_b"])
+@pytest.mark.parametrize("blank", ["", "   ", "\n\n", " \n \t"])
+def test_a_reply_with_no_visible_text_is_inconclusive_whatever_the_token_count(which, blank):
+    rec = record()
+    rec["requests"][which]["text"] = blank
+    s = sp.summarize(rec)
+    assert s["verdict"] == "inconclusive", (which, blank, s["verdict"])
+    assert "empty" in s["card_sentence"] and "empty" in s["sentence"]
+
+
+def test_two_different_blank_sampled_replies_are_not_a_sampling_result():
+    s = sp.summarize(record(a=entry(text="  "), b=entry(text="\n\n")))
+    assert s["verdict"] == "inconclusive"
+
+
+def test_two_equal_blank_sampled_replies_are_not_called_ignored_sampling():
+    assert sp.summarize(record(a=entry(text="\n"), b=entry(text="\n")))["verdict"] == "inconclusive"
+
+
+def test_a_blank_reply_does_not_hide_a_refusal():
+    assert sp.summarize(record(a=refused("HTTP 400: no"), b=entry(text="")))["verdict"] == "sampled-refused"
+
+
+@pytest.mark.parametrize("which", ["greedy", "sampled_a", "sampled_b"])
 @pytest.mark.parametrize("damage", [{"completion_tokens": None}, {"seconds": None}, {"completion_tokens": 4}, {"seconds": 0}])
 def test_a_missing_speed_in_any_of_the_three_requests_is_inconclusive_not_full_speed(which, damage):
     rec = record()

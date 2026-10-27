@@ -131,7 +131,7 @@ CARD_SENTENCES = {
     "sampled-refused": "The server refused a sampled request (temperature above 0, top-p below 1, with a seed). The error text is in the evidence file.",
     "sampled-incoherent": "The server accepted a sampled request, and its text repeats itself or is unreadable.",
     "inconclusive": ("The probe could not compare the speed of greedy and sampled requests: a request had no usable token count or timing, "
-                     "or a reply was too short."),
+                     "a reply was too short, or a reply was empty."),
     "sampled-ignored": ("The server accepted sampled requests, but sampling was not applied: two requests that differ only in seed returned the "
                         "same text, so decoding is greedy."),
     "sampled-slower": "Sampled requests decoded more slowly than greedy requests. Both speeds are in the table above.",
@@ -169,6 +169,9 @@ def _summarize(record) -> dict:
     if refused:
         return {**out, "verdict": "sampled-refused",
                 "sentence": f"The server refused a sampled request (temperature 1.0, top-p 0.9, with a seed): {(refused[0].get('error') or 'no error text')[:200]}"}
+    if any(not e["text"].strip() for e in (g, a, b)):
+        return {**out, "verdict": "inconclusive",
+                "sentence": "A reply had no visible text (it was empty or only white space), so the probe could not say whether sampling was applied or how fast it ran."}
     if any(_loops(e["text"]) for e in (a, b)):
         return {**out, "verdict": "sampled-incoherent",
                 "sentence": "The sampled request was accepted and its text repeats itself or is unreadable."}
