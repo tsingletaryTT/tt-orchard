@@ -339,7 +339,7 @@ function renderTelegraph() {
       [r.ts === null ? "" : new Date(r.ts * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }), "when"],
       [r.problem, "wrap"], [r.model, "wrap"], [r.held ? "–" : String(r.tokens_in), "num"], [r.held ? "–" : String(r.tokens_out), "num"],
       [r.held ? "–" : r.latency_s.toFixed(1), "num"],
-      [r.cost_usd === null ? "unknown" : r.held ? `up to ${usd(r.cost_usd)}` : r.usage_known === false ? `${usd(r.cost_usd)} (worst case)` : usd(r.cost_usd), "num"],
+      [r.cost_usd === null ? "unknown" : r.held ? `up to ${usd(r.cost_usd)}` : r.usage_known === false ? `${usd(r.cost_usd)} (${r.cost_basis})` : usd(r.cost_usd), "num"],
       [r.outcome, "outcome", r.reason || null],
       [r.helped === true ? "yes" : r.helped === false ? "no" : r.outcome === "ok" ? "not reported" : "", null]], TG_OUTCOME_TONE[r.outcome] || null));
     if (r.reason) rec.lastChild.lastChild.previousSibling.append(h("div", { class: "tg-reason" }, r.reason));

@@ -217,6 +217,7 @@ def _recent(records: list[dict], verdict: dict, redact) -> list[dict]:
     """Calls, refusals and cache hits, newest first, and every reservation that was never settled (shown as `unsettled`).
     `reserve` and `torn` lines are not calls of their own and never appear as rows."""
     settled = {r.get("call_id") for r in records if "call_id" in r and not r.get("cached")}
+    reserves = {r["reserve"]: r for r in records if "reserve" in r}
     rows = []
     for r in records:
         if "reserve" in r:
@@ -227,7 +228,7 @@ def _recent(records: list[dict], verdict: dict, redact) -> list[dict]:
                 "ts": None, "call_id": _clean(r["reserve"], redact, 32), "problem": _clean(r.get("problem"), redact, TEXT_MAX),
                 "model": _clean(r.get("model"), redact, TEXT_MAX), "tokens_in": 0, "tokens_out": 0, "latency_s": 0.0,
                 "cost_usd": float(cost) if isinstance(cost, (int, float)) and not isinstance(cost, bool) else None,
-                "outcome": "unsettled", "held": True, "usage_known": None, "helped": None,
+                "outcome": "unsettled", "held": True, "usage_known": None, "helped": None, "cost_basis": "worst case",
                 "reason": "No result was recorded: the call is in flight or the process stopped. It counts at its worst case."})
             continue
         if "call_id" not in r:
@@ -236,9 +237,17 @@ def _recent(records: list[dict], verdict: dict, redact) -> list[dict]:
         outcome = "cache hit" if cached else str(r.get("outcome"))
         cost = r.get("cost_usd")
         unknown_usage = r.get("usage_known") is False and not cached
+        basis, reserved = "recorded", reserves.get(r.get("call_id"))
+        if unknown_usage:
+            # The caps count this call at its reservation (a bound), not at the settlement's estimate; with no reservation
+            # (a ledger from before reservations) they count the recorded estimate.
+            basis = "worst case" if reserved is not None else "estimate"
+            cost = reserved.get("cost_usd") if reserved is not None else cost
         reason = _clean(r.get("reason"), redact) if r.get("reason") else None
         if unknown_usage and not reason:
-            reason = "The provider reported no usage; the caps count this call at its reserved worst case."
+            reason = ("The provider reported no usage. The caps count this call at its reserved worst case, not at the "
+                      "estimate in the recorded numbers." if basis == "worst case" else
+                      "The provider reported no usage. The numbers are an estimate, and the caps count them as recorded.")
         rows.append({
             "ts": _num(r.get("ts"), None), "call_id": _clean(r.get("call_id"), redact, 32),
             "problem": _clean(r.get("problem"), redact, TEXT_MAX), "model": _clean(r.get("model"), redact, TEXT_MAX),
@@ -246,6 +255,7 @@ def _recent(records: list[dict], verdict: dict, redact) -> list[dict]:
             "latency_s": float(_num(r.get("latency_s"))), "held": False,
             "cost_usd": float(cost) if isinstance(cost, (int, float)) and not isinstance(cost, bool) else None,
             "outcome": _clean(outcome, redact, 20), "usage_known": False if unknown_usage else None, "reason": reason,
+            "cost_basis": basis,
             "helped": verdict.get(r.get("call_id")) if r.get("outcome") == "ok" and not cached else None,
         })
     return rows[::-1][:RECENT_MAX]
