@@ -287,3 +287,18 @@ def test_a_full_bringup_config_given_only_as_the_tables_file_still_gives_runs_ro
     out = io.StringIO()
     code = cli.main(["spend", "--telegraph-config", str(cfg), "--dir", str(tmp_path / "none")], env={}, stdout=out)
     assert code == 0 and "org--c: 1 turns" in out.getvalue() and "at x" in out.getvalue()
+
+
+def test_runs_root_comes_from_the_bringup_config_even_when_the_tables_file_is_a_full_config_too(tmp_path):
+    good, other = tmp_path / "good-runs", tmp_path / "other-runs"
+    write_log(good, "org--good/stages/1/log/run-1.jsonl", [turn(1, 10, 1)])
+    write_log(other, "org--other/stages/1/log/run-1.jsonl", [turn(1, 10, 1)])
+    bringup = tmp_path / "bringup.toml"
+    bringup.write_text(BASE.replace('runs_root = "runs"', 'runs_root = "good-runs"'))
+    tables = tmp_path / "tables.toml"
+    tables.write_text(BASE.replace('runs_root = "runs"', 'runs_root = "other-runs"') + '[virtual_spend]\nreference = "t"\n')
+    out = io.StringIO()
+    code = cli.main(["spend", "--config", str(bringup), "--telegraph-config", str(tables), "--dir", str(tmp_path / "none")],
+                    env={}, stdout=out)
+    text = out.getvalue()
+    assert code == 0 and "org--good" in text and "org--other" not in text and "at t" in text

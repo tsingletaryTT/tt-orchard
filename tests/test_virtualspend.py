@@ -894,3 +894,27 @@ def test_no_descriptor_is_left_open_after_a_scan(root):
     before = set(os.listdir("/proc/self/fd"))
     vs.scan(root)
     assert set(os.listdir("/proc/self/fd")) == before
+
+
+def test_a_scan_root_swapped_for_a_link_just_before_it_is_pinned_is_refused(root, tmp_path, monkeypatch):
+    outside = tmp_path / "outside-root"
+    write_log(outside, "log/run.jsonl", [turn(1, 999, 9)])
+    link = tmp_path / "root-link"
+    link.symlink_to(outside, target_is_directory=True)
+    monkeypatch.setattr(vs.Path, "is_symlink", lambda self: False)            # the earlier check was passed before the swap
+    s = vs.scan(link)
+    assert s["turns"] == 0 and s["complete"] is False
+
+
+def test_a_path_outside_the_pinned_root_cannot_be_opened(root, tmp_path):
+    (root).mkdir(parents=True, exist_ok=True)
+    other = tmp_path / "elsewhere.jsonl"
+    other.write_text("x")
+    pin = vs._Pin(root)
+    try:
+        with pytest.raises(OSError):
+            pin.open(other, vs._FILE_FLAGS)
+        with pytest.raises(OSError):
+            pin.open(root, vs._FILE_FLAGS)                                      # the root itself is not a file
+    finally:
+        pin.close()

@@ -465,3 +465,12 @@ def test_discovery_leaves_out_links_and_survives_an_unreadable_folder(root, tmp_
     (root / "plain").mkdir()
     assert [n for n, _ in view.discover(root)[0]] == ["plain"]
     assert view.discover(tmp_path / "missing") == ([], False)
+
+
+def test_a_cached_answer_still_says_the_listing_was_cut_short(root, monkeypatch):
+    monkeypatch.setattr(view, "MAX_NAMES", 3)
+    for i in range(8):
+        write_log(root, f"org--{i}/log/run.jsonl", [turn(1, 1_000_000, 0)])
+    app = app_with(root)
+    first, second = app.virtual_spend(), app.virtual_spend()                 # the second answer comes from the cache
+    assert first["discovery_truncated"] is True and second["discovery_truncated"] is True
