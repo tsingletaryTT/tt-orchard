@@ -251,6 +251,25 @@ def _recent(records: list[dict], verdict: dict, redact) -> list[dict]:
     return rows[::-1][:RECENT_MAX]
 
 
+def _model_rows(records: list[dict], redact) -> list[dict]:
+    """Totals for each model, by the accounting the caps use: the same `telegraph.accounting`, run with each record's model in
+    the place of its problem. A reservation counts at its reserved bound until a result settles it, a reply with no usage
+    counts at its reservation, and a torn record is one call of unknown cost under its own row."""
+    moved = []
+    for r in records:
+        if "reserve" in r or tg._sent(r):
+            moved.append({**r, "problem": r.get("model")})
+    acct = tg.accounting(moved)
+    rows = [{"model": _clean(m, redact, TEXT_MAX), "calls": p["calls"], "tokens": p["tokens"], "cost_usd": p["cost"],
+             "cost_unknown_calls": p["unknown_cost"]} for m, p in acct["problems"].items()]
+    torn = [r for r in records if "torn" in r]
+    if torn:
+        rows.append({"model": "(torn records)", "calls": len(torn), "tokens": sum(int(_num(r.get("tokens"))) for r in torn),
+                     "cost_usd": 0.0, "cost_unknown_calls": len(torn)})
+    rows.sort(key=lambda r: (-r["calls"], r["model"]))
+    return rows
+
+
 def _latest_refusal(records: list[dict]) -> dict | None:
     """The newest call record, when it is a refusal for a budget reason."""
     for r in reversed(records):
@@ -319,14 +338,7 @@ def build(cfg: tg.Config, directory, *, environ, redact=lambda t: t, hostname: s
     else:
         cap_text = _cap_phrase(closest) if closest else ""
     meter = _meter(state, _spend_text(acct["cost"], acct["unknown_cost"]), acct["calls"], cap_text, reason, key, error)
-    by_model = sorted(({"model": _clean(m, redact, TEXT_MAX), "calls": v["calls"],
-                        "cost_usd": sum(r["cost_usd"] for r in records if tg._sent(r) and r.get("model") == m
-                                        and isinstance(r.get("cost_usd"), (int, float)) and not isinstance(r.get("cost_usd"), bool)),
-                        "cost_unknown_calls": sum(1 for r in records if tg._sent(r) and r.get("model") == m
-                                                  and not isinstance(r.get("cost_usd"), (int, float))),
-                        "tokens": sum(int(_num(r.get("tokens_in"))) + int(_num(r.get("tokens_out")))
-                                      for r in records if tg._sent(r) and r.get("model") == m)}
-                       for m, v in summary["by_model"].items()), key=lambda r: (-r["calls"], r["model"]))
+    by_model = _model_rows(records, redact)
     config = {
         "endpoint_host": _host(cfg.endpoint, redact) if cfg.enabled else None, "api": cfg.api if cfg.enabled else None,
         "models": [{"name": _clean(m, redact, TEXT_MAX),

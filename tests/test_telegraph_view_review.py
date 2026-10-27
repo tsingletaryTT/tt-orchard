@@ -29,6 +29,76 @@ def write_records(d, records):
     (d / "telegraph.jsonl").write_text("".join(json.dumps(r) + "\n" for r in records))
 
 
+# ---- 7. a reply with no usage shows the bound the caps count, and says which number it is ------------------------------------
+
+def test_a_reply_with_no_usage_shows_its_reserved_bound_as_the_worst_case(root, tmp_path):
+    cfg, d, _ = setup(tmp_path)
+    settled = {**ok_record("c3", "p", 10, 5, cost=0.0001), "usage_known": False}
+    write_records(d, [reserve_record("c3", "p", "small", 2000, 0.02), settled])
+    out = app_for(root, cfg).telegraph()
+    (row,) = out["recent"]
+    assert row["cost_usd"] == pytest.approx(0.02) and row["cost_basis"] == "worst case"
+    assert row["cost_usd"] == pytest.approx(out["spend"]["cost_usd"])           # the row and the meter agree
+    assert "worst case" in row["reason"]
+
+
+def test_a_reply_with_no_usage_and_no_reservation_is_labelled_an_estimate(root, tmp_path):
+    cfg, d, _ = setup(tmp_path)
+    write_records(d, [{**ok_record("c3", "p", 10, 5, cost=0.0001), "usage_known": False}])     # a ledger from before reservations
+    out = app_for(root, cfg).telegraph()
+    (row,) = out["recent"]
+    assert row["cost_usd"] == pytest.approx(0.0001) and row["cost_basis"] == "estimate"
+    assert "estimate" in row["reason"] and "worst case" not in row["reason"]
+    assert out["spend"]["cost_usd"] == pytest.approx(0.0001)                      # what the caps count for such a record
+
+
+def test_the_cost_basis_of_other_rows(root, tmp_path):
+    cfg, d, _ = setup(tmp_path)
+    write_records(d, [ok_record("a1", "p", 10, 5), reserve_record("b2", "q", "small", 100, 0.01)])
+    rows = {r["call_id"]: r for r in app_for(root, cfg).telegraph()["recent"]}
+    assert rows["a1"]["cost_basis"] == "recorded" and rows["b2"]["cost_basis"] == "worst case"
+
+
+# ---- 4. model totals use the caps' accounting --------------------------------------------------------------------------
+
+def reserve_record(call_id, problem, model, tokens, cost):
+    return {"reserve": call_id, "problem": problem, "model": model, "tokens": tokens, "cost_usd": cost}
+
+
+def test_a_model_with_only_an_unsettled_reservation_is_in_the_table(root, tmp_path):
+    cfg, d, _ = setup(tmp_path)
+    write_records(d, [ok_record("a1", "p", 100, 50, cost=0.0015), reserve_record("b2", "p", "big", 900, 0.05)])
+    rows = {m["model"]: m for m in app_for(root, cfg).telegraph()["by_model"]}
+    assert rows["big"]["calls"] == 1 and rows["big"]["tokens"] == 900 and rows["big"]["cost_usd"] == pytest.approx(0.05)
+    assert rows["small"]["calls"] == 1 and rows["small"]["tokens"] == 150
+
+
+def test_a_reply_with_no_usage_counts_at_its_reservation_in_the_model_table(root, tmp_path):
+    cfg, d, _ = setup(tmp_path)
+    settled = {**ok_record("c3", "p", 10, 5, cost=0.0001), "usage_known": False}
+    write_records(d, [reserve_record("c3", "p", "small", 2000, 0.02), settled])
+    (row,) = app_for(root, cfg).telegraph()["by_model"]
+    assert row["tokens"] == 2000 and row["cost_usd"] == pytest.approx(0.02)     # the reserved bound, as the caps count it
+
+
+def test_the_model_table_adds_up_to_what_the_meter_counts(root, tmp_path):
+    cfg, d, _ = setup(tmp_path)
+    write_records(d, [
+        ok_record("a1", "p", 100, 50, cost=0.0015),
+        reserve_record("b2", "p", "big", 900, 0.05),
+        {**ok_record("c3", "q", 10, 5, model="big", cost=None), "usage_known": True},
+        {**ok_record("d4", "q", 10, 5, cost=0.0001), "usage_known": False}, reserve_record("d4", "q", "small", 2000, 0.02),
+        {"torn": "telegraph.jsonl.torn-1", "tokens": 7},
+    ])
+    out = app_for(root, cfg).telegraph()
+    rows = out["by_model"]
+    assert sum(m["calls"] for m in rows) == out["spend"]["calls"]
+    assert sum(m["tokens"] for m in rows) == out["spend"]["tokens"]
+    assert sum(m["cost_usd"] for m in rows) == pytest.approx(out["spend"]["cost_usd"])
+    assert sum(m["cost_unknown_calls"] for m in rows) == out["spend"]["unknown_cost"]
+    assert any("torn" in m["model"] for m in rows)
+
+
 # ---- 3. problems beyond the table's limit still count for the state ----------------------------------------------------
 
 def sixty_problems(tmp_path, hot_tokens=850):
