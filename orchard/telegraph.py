@@ -99,8 +99,9 @@ def _int(table: dict, key: str, default: int, lowest: int) -> int:
 
 def _http_ok(host: str) -> bool:
     """Plain http is for this machine and the private network: a name with no dot, or a loopback or private address."""
-    if host in ("localhost",) or "." not in host and ":" not in host:
-        return True
+    if "." not in host and ":" not in host:
+        # a machine name starts with a letter; digits and "0x" forms are legacy spellings of public IPv4 addresses
+        return re.fullmatch(r"[A-Za-z][A-Za-z0-9-]*", host) is not None
     try:
         addr = ipaddress.ip_address(host)
     except ValueError:
@@ -462,9 +463,9 @@ class Telegraph:
                 acct = _accounting(_read_ledger_strict(self.dir))           # fresh: another process may have spent since
                 why = self._over_budget(model, worst, acct, problem)
                 if why:
-                    return self._refuse(base, "budget", why)
+                    return self._refuse(base, "budget", why, held=True)
                 if not self._append({"reserve": base["call_id"], "problem": problem, "model": model,
-                                     "tokens": worst["tokens"], "cost_usd": worst["cost"]}):
+                                     "tokens": worst["tokens"], "cost_usd": worst["cost"]}, held=True):
                     raise LedgerUnavailable("the reservation could not be written")
         except LedgerUnavailable as exc:
             return Answer(False, reason=f"the budget ledger cannot be written or read ({exc}), so no outside call was made",
@@ -652,9 +653,9 @@ class Telegraph:
             return "", usage, "the answer was empty (only reasoning, no answer)"
         return text, usage, ""
 
-    def _refuse(self, base: dict, outcome: str, reason: str) -> Answer:
+    def _refuse(self, base: dict, outcome: str, reason: str, held: bool = False) -> Answer:
         self._append({**base, "ts": self.clock(), "outcome": outcome, "reason": reason, "cached": False,
-                      "tokens_in": 0, "tokens_out": 0, "cost_usd": 0.0})
+                      "tokens_in": 0, "tokens_out": 0, "cost_usd": 0.0}, held=held)
         return Answer(False, reason=reason, call_id=base["call_id"], model=base["model"])
 
     def _cached(self, path: Path) -> dict | None:
@@ -694,29 +695,40 @@ class Telegraph:
         try:
             data = path.read_bytes()
         except FileNotFoundError:
-            return
+            data = b""
         except OSError as exc:
             raise LedgerUnavailable(type(exc).__name__) from exc
-        if not data or data.endswith(b"\n"):
-            return
-        cut = data.rfind(b"\n") + 1
-        name = f"{LEDGER}.torn-{uuid.uuid4().hex[:8]}"
-        try:
-            fd = os.open(self.dir / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        if data and not data.endswith(b"\n"):
+            cut = data.rfind(b"\n") + 1
+            name = f"{LEDGER}.torn-{uuid.uuid4().hex[:8]}"
             try:
-                os.write(fd, data[cut:])
-                os.fsync(fd)
-            finally:
-                os.close(fd)
-            os.truncate(path, cut)
-        except OSError as exc:
-            raise LedgerUnavailable(type(exc).__name__) from exc
-        if not self._append({"torn": name, "tokens": self.cfg.max_output_tokens}):
-            raise LedgerUnavailable("the note for a torn record could not be written")
+                fd = os.open(self.dir / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                try:
+                    os.write(fd, data[cut:])
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+                os.truncate(path, cut)
+            except OSError as exc:
+                raise LedgerUnavailable(type(exc).__name__) from exc
+        # Every sidecar gets exactly one note. A crash between the cut and the note leaves a sidecar with no note, and the
+        # next call writes it here, so recovery can be replayed.
+        noted = {r.get("torn") for r in _read_ledger_strict(self.dir) if "torn" in r}
+        for sidecar in sorted(self.dir.glob(LEDGER + ".torn-*")):
+            if sidecar.name not in noted:
+                if not self._append({"torn": sidecar.name, "tokens": self.cfg.max_output_tokens}, held=True):
+                    raise LedgerUnavailable("the note for a torn record could not be written")
 
-    def _append(self, rec: dict) -> bool:
-        """Append one record as one write. A last line that was cut short gets a line break first, so it cannot swallow this
-        record. True when the record was written."""
+    def _append(self, rec: dict, *, held: bool = False) -> bool:
+        """Append one record as one write, under the ledger lock (`held` says the caller already holds it, since the lock
+        is not re-entrant). Recovery of a torn tail also runs under this lock, so no record can land between its read and its
+        cut. A last line that was cut short gets a line break first, so it cannot swallow this record. True when written."""
+        if not held:
+            try:
+                with self._ledger_lock():
+                    return self._append(rec, held=True)
+            except LedgerUnavailable:
+                return False
         try:
             self.dir.mkdir(parents=True, exist_ok=True, mode=0o700)
             fd = os.open(self.dir / LEDGER, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o600)

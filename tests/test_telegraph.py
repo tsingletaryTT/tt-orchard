@@ -1088,7 +1088,7 @@ def test_prices_must_be_a_table(prices):
 def test_a_verdict_that_cannot_be_written_is_an_error(tmp_path, monkeypatch):
     tel, _ = make(tmp_path)
     got = tel.ask("p", "t", "f")
-    monkeypatch.setattr(tel, "_append", lambda rec: False)
+    monkeypatch.setattr(tel, "_append", lambda rec, **kw: False)
     with pytest.raises(tg.LedgerUnavailable):
         tel.report(got.call_id, helped=True)
 
@@ -1097,10 +1097,10 @@ def test_the_cache_is_published_only_after_the_call_is_recorded(tmp_path, monkey
     tel, wire = make(tmp_path)
     real = tel._append
 
-    def fail_settle(rec):
+    def fail_settle(rec, **kw):
         if rec.get("outcome") == "ok":
             return False
-        return real(rec)
+        return real(rec, **kw)
     monkeypatch.setattr(tel, "_append", fail_settle)
     got = tel.ask("p", "t", "f")
     assert got.ok and "could not record" in got.reason               # the paid answer is returned with a note
@@ -1227,7 +1227,7 @@ def test_a_torn_tail_whose_note_cannot_be_written_refuses_the_call(tmp_path, mon
     (tmp_path / "tg" / "telegraph.jsonl").write_text('{"reserve": "half')
     tel, wire = make(tmp_path)
     real = tel._append
-    monkeypatch.setattr(tel, "_append", lambda rec: False if "torn" in rec else real(rec))
+    monkeypatch.setattr(tel, "_append", lambda rec, **kw: False if "torn" in rec else real(rec, **kw))
     got = tel.ask("p", "t", "f")
     assert not got.ok and "cannot be written" in got.reason and wire.requests == []
 
@@ -1239,3 +1239,83 @@ def test_an_append_after_a_torn_line_starts_on_its_own_line(tmp_path):
     assert tel._append({"report": "x", "helped": True})
     lines = (tmp_path / "tg" / "telegraph.jsonl").read_text().splitlines()
     assert lines[-1] == '{"helped": true, "report": "x"}' and lines[0] == '{"call_id": "half'
+
+
+# ------------------------------------------------------------------------------------------------ review of PR 106, round 4
+
+@pytest.mark.parametrize("url", ["http://134744072/v1", "http://2130706433/v1", "http://0x7f000001/v1",
+                                 "http://0177.0.0.1/v1", "http://127.1/v1", "http://1/v1", "http://0/v1"])
+def test_legacy_numeric_ipv4_forms_are_not_a_private_host_name(url):
+    with pytest.raises(tg.ConfigError, match="https"):
+        tg.load(table(endpoint=url), base=Path("/x"))
+
+
+@pytest.mark.parametrize("url", ["http://gpu-box:8000/v1", "http://localhost/v1", "http://node4/v1", "http://a1/v1"])
+def test_a_plain_machine_name_that_starts_with_a_letter_is_still_allowed(url):
+    assert tg.load(table(endpoint=url), base=Path("/x")).endpoint == url
+
+
+def test_an_orphaned_torn_sidecar_is_accounted_for_exactly_once(tmp_path):
+    (tmp_path / "tg").mkdir()
+    (tmp_path / "tg" / "telegraph.jsonl.torn-abc12345").write_text('{"reserve": "half')    # a crash after the cut
+    (tmp_path / "tg" / "telegraph.jsonl").write_text("")
+    tel, wire = make(tmp_path, max_calls=1)
+    got = tel.ask("p", "t", "f")
+    assert not got.ok and "call cap" in got.reason and wire.requests == []
+    tel2, wire2 = make(tmp_path, max_calls=2)
+    assert tel2.ask("p", "t", "f").ok                                # one note for the sidecar, not one per process
+    notes = [json.loads(l) for l in (tmp_path / "tg" / "telegraph.jsonl").read_text().splitlines()
+             if '"torn"' in l]
+    assert [n["torn"] for n in notes] == ["telegraph.jsonl.torn-abc12345"]
+
+
+def test_a_sidecar_whose_note_was_written_is_not_counted_again(tmp_path):
+    (tmp_path / "tg").mkdir()
+    (tmp_path / "tg" / "telegraph.jsonl.torn-abc12345").write_text("x")
+    (tmp_path / "tg" / "telegraph.jsonl").write_text(json.dumps({"torn": "telegraph.jsonl.torn-abc12345", "tokens": 10}) + "\n")
+    tel, wire = make(tmp_path, max_calls=2)
+    assert tel.ask("p", "t", "f").ok                                 # the fragment is one call of the two, and this is the other
+
+
+def test_every_ledger_append_waits_for_the_recovery_lock(tmp_path):
+    import threading, time
+    tel, _ = make(tmp_path)
+    tel.ask("p", "t", "f0")
+    done = threading.Event()
+
+    def other():
+        tel._append({"report": "nope", "helped": True})
+        done.set()
+    with tel._ledger_lock():
+        t = threading.Thread(target=other)
+        t.start()
+        time.sleep(0.15)
+        assert not done.is_set()                                     # blocked while the lock is held
+    t.join(timeout=5)
+    assert done.is_set()
+
+
+def test_a_locked_caller_can_append_without_waiting_on_its_own_lock(tmp_path):
+    tel, _ = make(tmp_path)
+    with tel._ledger_lock():
+        assert tel._append({"report": "x", "helped": True}, held=True)
+
+
+def test_a_settlement_cannot_slip_in_between_recovery_reading_and_cutting_the_ledger(tmp_path, monkeypatch):
+    import threading
+    (tmp_path / "tg").mkdir()
+    (tmp_path / "tg" / "telegraph.jsonl").write_text('{"call_id": "half')
+    tel, _ = make(tmp_path)
+    appended_during_recovery = []
+    real_truncate = os.truncate
+
+    def slow_truncate(path, length):
+        t = threading.Thread(target=lambda: tel._append({"report": "late", "helped": False}))
+        t.start()
+        t.join(timeout=0.2)                                          # the other writer must still be waiting
+        appended_during_recovery.append(t.is_alive())
+        return real_truncate(path, length)
+    monkeypatch.setattr(tg.os, "truncate", slow_truncate)
+    tel.ask("p", "t", "f")
+    assert appended_during_recovery == [True]
+    assert '"late"' in (tmp_path / "tg" / "telegraph.jsonl").read_text()    # and it landed after the recovery

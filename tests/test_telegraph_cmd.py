@@ -281,7 +281,7 @@ def test_report_that_cannot_write_exits_with_an_error_and_does_not_say_recorded(
     run(["ask", "--problem", "p", *files(tmp_path), "--dir", d, "--telegraph-config", cfg], tmp_path,
         transport=ok_transport())
     call_id = first_call_id(tmp_path / "d")
-    monkeypatch.setattr(tg.Telegraph, "_append", lambda self, rec: False)
+    monkeypatch.setattr(tg.Telegraph, "_append", lambda self, rec, **kw: False)
     code, text = run(["report", call_id, "--helped", "--dir", d, "--telegraph-config", cfg], tmp_path)
     assert code == 2 and "recorded" not in text and "could not" in text
 
@@ -317,8 +317,8 @@ def test_a_config_path_with_a_space_is_quoted_in_the_suggested_command(tmp_path)
 def test_a_paid_answer_that_could_not_be_recorded_shows_the_warning_and_no_report_command(tmp_path, monkeypatch):
     real = tg.Telegraph._append
 
-    def fail_settle(self, rec):
-        return False if rec.get("outcome") == "ok" else real(self, rec)
+    def fail_settle(self, rec, **kw):
+        return False if rec.get("outcome") == "ok" else real(self, rec, **kw)
     monkeypatch.setattr(tg.Telegraph, "_append", fail_settle)
     d, cfg = str(tmp_path / "d"), str(write(tmp_path))
     code, text = run(["ask", "--problem", "p", *files(tmp_path), "--dir", d, "--telegraph-config", cfg], tmp_path,
