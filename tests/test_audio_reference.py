@@ -124,7 +124,7 @@ def test_an_array_that_changed_after_it_was_recorded_is_refused(tmp_path):
 
 def test_verify_can_be_skipped_but_the_shape_is_still_checked_on_read(tmp_path):
     root = make_run(tmp_path)
-    np.save(root / "arrays" / "layer__0.npy", np.zeros((3,), dtype=np.float32))
+    edit_manifest(root, lambda m: [e.update(shape=[3]) for e in m["artifacts"] if (e["kind"], e["name"]) == ("layer", "0")])
     run = load_run(root, verify=False)
     with pytest.raises(ReferenceError, match="shape"):
         run.array("layer", "0")
@@ -168,7 +168,7 @@ def test_an_array_path_that_leaves_the_arrays_directory_is_refused(tmp_path):
     outside = root / "elsewhere.npy"
     np.save(outside, np.zeros(2, dtype=np.float32))
     edit_manifest(root, lambda m: m["artifacts"][0].update(file="elsewhere.npy"))
-    with pytest.raises(ReferenceError, match="outside"):
+    with pytest.raises(ReferenceError, match="must be"):
         load_run(root, verify=False)
 
 
@@ -402,7 +402,7 @@ def test_the_report_names_the_bars_each_result_used(tmp_path):
 
 def test_bars_come_from_the_worst_floor_result_loosened_by_the_margin(tmp_path):
     make_run(tmp_path, "ref")
-    floor = compare_runs(load_run(tmp_path / "ref"), perturbed(tmp_path, "low", noise=0.01))
+    floor = compare_runs(load_run(tmp_path / "ref"), perturbed(tmp_path, "low", noise=0.01), cross_precision=True)
     bars = ar.bars_from_floor(floor, margin=3.0)
     layer = [r for r in floor["results"] if r["kind"] == "layer"][0]
     assert bars["layer"].rel_l2 == pytest.approx(3.0 * layer["rel_l2"])
@@ -413,11 +413,11 @@ def test_bars_come_from_the_worst_floor_result_loosened_by_the_margin(tmp_path):
 
 def test_a_floor_run_that_could_not_be_compared_gives_no_bars(tmp_path):
     with pytest.raises(ReferenceError):
-        ar.bars_from_floor({"comparable": False, "results": []})
+        ar.bars_from_floor({"comparable": False, "cross_precision": True, "results": []})
     with pytest.raises(ReferenceError):
-        ar.bars_from_floor({"comparable": True, "results": []})
+        ar.bars_from_floor({"comparable": True, "cross_precision": True, "results": []})
     with pytest.raises(ReferenceError, match="not comparable"):
-        ar.bars_from_floor({"comparable": True, "results": [{"kind": "layer", "name": "0", "comparable": False}]})
+        ar.bars_from_floor({"comparable": True, "cross_precision": True, "results": [{"kind": "layer", "name": "0", "comparable": False}]})
 
 
 def test_a_margin_below_one_is_refused():
@@ -618,13 +618,13 @@ def test_a_slope_below_one_fails_too():
 
 
 def test_floor_bars_take_the_worst_of_each_number_across_results():
-    floor = {"comparable": True, "results": [
+    floor = {"comparable": True, "cross_precision": True, "results": [
         {"kind": "layer", "name": "0", "comparable": True, "pcc": 0.999, "rel_l2": 0.02, "slope": 1.02},
         {"kind": "layer", "name": "1", "comparable": True, "pcc": 0.9995, "rel_l2": 0.05, "slope": 0.97},
         {"kind": "layer", "name": "2", "comparable": True, "pcc": 0.9999, "rel_l2": 0.01, "slope": 0.995}]}
     bar = ar.bars_from_floor(floor, margin=2.0)["layer"]
     assert bar.pcc == pytest.approx(1.0 - 2.0 * 0.001) and bar.rel_l2 == pytest.approx(0.1) and bar.slope_tol == pytest.approx(0.06)
-    flipped = ar.bars_from_floor({"comparable": True, "results": floor["results"][::-1]}, margin=2.0)["layer"]
+    flipped = ar.bars_from_floor({"comparable": True, "cross_precision": True, "results": floor["results"][::-1]}, margin=2.0)["layer"]
     assert flipped == bar
 
 
@@ -686,3 +686,211 @@ def test_the_check_command_takes_a_cross_precision_flag(tmp_path):
     assert code == 1 and "dtype" in text
     code, text = run_cli("check", str(tmp_path / "ref"), str(tmp_path / "low"), "--cross-precision")
     assert code == 0 and text.strip().endswith("ok")
+
+
+# ---- review of PR 123, round three: concurrent runs, floor reports, reading what was verified -----------
+
+def test_a_second_recorder_on_the_same_directory_is_refused_even_before_a_manifest_exists(tmp_path):
+    Recorder(tmp_path / "r", model=MODEL, library=LIB, settings=SETTINGS)
+    with pytest.raises(ReferenceError, match="never overwritten"):
+        Recorder(tmp_path / "r", model=MODEL, library=LIB, settings=SETTINGS)
+
+
+def test_an_existing_empty_directory_is_refused_too(tmp_path):
+    (tmp_path / "r").mkdir()
+    with pytest.raises(ReferenceError, match="never overwritten"):
+        Recorder(tmp_path / "r", model=MODEL, library=LIB, settings=SETTINGS)
+
+
+def test_an_interrupted_runs_files_are_left_alone(tmp_path):
+    rec = Recorder(tmp_path / "r", model=MODEL, library=LIB, settings=SETTINGS)
+    rec.record("layer", "0", np.arange(3.0))
+    with pytest.raises(ReferenceError):
+        Recorder(tmp_path / "r", model=MODEL, library=LIB, settings=SETTINGS)
+    assert (tmp_path / "r" / "arrays" / "layer__0.npy").is_file()
+
+
+def test_exactly_one_of_many_concurrent_recorders_gets_the_directory(tmp_path):
+    import threading
+    results, barrier = [], threading.Barrier(8)
+
+    def go():
+        barrier.wait()
+        try:
+            Recorder(tmp_path / "race", model=MODEL, library=LIB, settings=SETTINGS)
+            results.append("won")
+        except ReferenceError:
+            results.append("refused")
+    threads = [threading.Thread(target=go) for _ in range(8)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    assert results.count("won") == 1 and results.count("refused") == 7
+
+
+def test_settings_are_checked_before_any_directory_is_made(tmp_path):
+    with pytest.raises(ReferenceError):
+        Recorder(tmp_path / "r", model={}, library=LIB, settings=SETTINGS)
+    assert not (tmp_path / "r").exists()
+
+
+def floor_report(tmp_path, noise_ok=True):
+    make_run(tmp_path, "ref", arrays={("noise", "0"): np.arange(8.0), ("layer", "0"): np.arange(8.0)})
+    make_run(tmp_path, "low", settings={"dtype": "bfloat16"},
+             arrays={("noise", "0"): np.arange(8.0) + (0.0 if noise_ok else 0.5), ("layer", "0"): np.arange(8.0) + 0.01})
+    return compare_runs(load_run(tmp_path / "ref"), load_run(tmp_path / "low"), cross_precision=True)
+
+
+def test_a_floor_whose_noise_draws_differ_gives_no_bars(tmp_path):
+    with pytest.raises(ReferenceError, match="noise"):
+        ar.bars_from_floor(floor_report(tmp_path, noise_ok=False))
+
+
+def test_noise_bars_are_never_loosened_by_a_floor(tmp_path):
+    bars = ar.bars_from_floor(floor_report(tmp_path, noise_ok=True))
+    assert "noise" not in bars and "layer" in bars
+    assert ar.DEFAULT_BARS["noise"].rel_l2 == 1e-6
+
+
+def test_a_floor_report_with_missing_arrays_gives_no_bars(tmp_path):
+    report = floor_report(tmp_path)
+    report["problems"] = ["layer/1 is only in the reference"]
+    with pytest.raises(ReferenceError, match="problems"):
+        ar.bars_from_floor(report)
+
+
+@pytest.mark.parametrize("report", [None, [], "x", {"comparable": True, "results": "x"}, {"comparable": True, "results": [1]},
+                                    {"comparable": True, "results": [{"kind": "layer"}]},
+                                    {"comparable": True, "results": [{"kind": "layer", "name": "0", "comparable": True, "pcc": "x", "rel_l2": 0.1, "slope": 1.0}]},
+                                    {"comparable": True, "results": [{"kind": "layer", "name": "0", "comparable": True, "pcc": 1.0, "rel_l2": float("nan"), "slope": 1.0}]},
+                                    {"comparable": True, "results": [{"kind": "layer", "name": "0", "comparable": True, "pcc": 1.0, "rel_l2": 0.1, "slope": None}]},
+                                    {"comparable": True, "results": [{"kind": "mystery", "name": "0", "comparable": True, "pcc": 1.0, "rel_l2": 0.1, "slope": 1.0}]}])
+def test_a_malformed_floor_report_is_refused_without_an_exception_of_another_kind(report):
+    with pytest.raises(ReferenceError):
+        ar.bars_from_floor(report)
+
+
+def test_a_floor_that_is_not_cross_precision_gives_no_bars(tmp_path):
+    make_run(tmp_path, "ref")
+    make_run(tmp_path, "cand")
+    strict = compare_runs(load_run(tmp_path / "ref"), load_run(tmp_path / "cand"))
+    with pytest.raises(ReferenceError, match="cross-precision"):
+        ar.bars_from_floor(strict)
+
+
+def test_an_array_changed_after_the_run_was_loaded_is_refused_when_it_is_read(tmp_path):
+    root = make_run(tmp_path)
+    run = load_run(root)
+    np.save(root / "arrays" / "layer__0.npy", np.zeros((1, 20, 16), dtype=np.float32))
+    with pytest.raises(ReferenceError, match="sha256"):
+        run.array("layer", "0")
+
+
+def test_an_array_replaced_by_a_link_after_the_run_was_loaded_is_refused_when_it_is_read(tmp_path):
+    root = make_run(tmp_path)
+    run = load_run(root)
+    target = root / "arrays" / "layer__0.npy"
+    copy = tmp_path / "copy.npy"
+    copy.write_bytes(target.read_bytes())
+    target.unlink()
+    target.symlink_to(copy)
+    with pytest.raises(ReferenceError, match="link"):
+        run.array("layer", "0")
+
+
+def test_a_manifest_file_name_must_be_the_one_the_kind_and_name_give(tmp_path):
+    import shutil
+    root = make_run(tmp_path)
+    shutil.copy(root / "arrays" / "layer__0.npy", root / "arrays" / "other.npy")
+    edit_manifest(root, lambda m: m["artifacts"][0].update(file="arrays/other.npy"))
+    with pytest.raises(ReferenceError, match="must be"):
+        load_run(root, verify=False)
+
+
+def test_reading_an_array_without_verification_at_load_still_checks_it_at_read(tmp_path):
+    root = make_run(tmp_path)
+    run = load_run(root, verify=False)
+    np.save(root / "arrays" / "layer__0.npy", np.zeros((1, 20, 16), dtype=np.float32))
+    with pytest.raises(ReferenceError, match="sha256"):
+        run.array("layer", "0")
+
+
+def good_result(**change):
+    return {"kind": "layer", "name": "0", "comparable": True, "pcc": 0.999, "rel_l2": 0.05, "slope": 1.01, **change}
+
+
+def floor_of(*results, **change):
+    return {"comparable": True, "cross_precision": True, "problems": [], "results": list(results), **change}
+
+
+@pytest.mark.parametrize("report,match", [
+    (None, "must be a comparison report"), ([], "must be a comparison report"), ("x", "must be a comparison report"),
+    (floor_of(good_result(), comparable=False) | {"comparable": False}, "not comparable or lists problems"),
+    (floor_of(good_result()) | {"results": "x"}, "no results"),
+    (floor_of(good_result()) | {"results": []}, "no results"),
+    (floor_of(1), "malformed"), (floor_of({"kind": "layer"}), "malformed"),
+    (floor_of({**good_result(), "kind": "mystery"}), "malformed"),
+    (floor_of({**good_result(), "name": 3}), "malformed"),
+    (floor_of(good_result(comparable=False)), "not comparable in the floor run"),
+    (floor_of({k: v for k, v in good_result().items() if k != "comparable"}), "not comparable in the floor run"),
+    (floor_of(good_result(pcc="x")), "not comparable in the floor run"),
+    (floor_of(good_result(pcc=True)), "not comparable in the floor run"),
+    (floor_of(good_result(rel_l2=float("nan"))), "not comparable in the floor run"),
+    (floor_of(good_result(slope=float("inf"))), "not comparable in the floor run"),
+    (floor_of(good_result(slope=None)), "not comparable in the floor run"),
+    (floor_of(good_result()) | {"cross_precision": False}, "not a cross-precision"),
+    (floor_of(good_result()) | {"problems": ["x"]}, "not comparable or lists problems"),
+])
+def test_each_kind_of_bad_floor_report_is_refused_for_its_own_reason(report, match):
+    with pytest.raises(ReferenceError, match=match):
+        ar.bars_from_floor(report)
+
+
+@pytest.mark.parametrize("margin", [0.5, float("nan"), True, "3", None])
+def test_a_bad_margin_is_refused(margin):
+    with pytest.raises(ReferenceError, match="margin"):
+        ar.bars_from_floor(floor_of(good_result()), margin=margin)
+
+
+def test_a_failed_noise_result_is_refused_and_a_passing_one_is_skipped():
+    noise_ok = {"kind": "noise", "name": "0", "comparable": True, "pcc": 1.0, "rel_l2": 0.0, "slope": 1.0, "ok": True}
+    assert set(ar.bars_from_floor(floor_of(good_result(), noise_ok))) == {"layer"}
+    with pytest.raises(ReferenceError, match="noise"):
+        ar.bars_from_floor(floor_of(good_result(), {**noise_ok, "ok": False}))
+    with pytest.raises(ReferenceError, match="noise"):
+        ar.bars_from_floor(floor_of(good_result(), {k: v for k, v in noise_ok.items() if k != "ok"}))
+
+
+def test_the_bytes_that_were_hashed_are_the_bytes_that_are_parsed(tmp_path, monkeypatch):
+    run = load_run(make_run(tmp_path))
+    seen = []
+    real = np.load
+    monkeypatch.setattr(ar.np, "load", lambda f, **kw: (seen.append(type(f).__name__), real(f, **kw))[1])
+    run.array("layer", "0")
+    assert seen == ["BytesIO"]
+
+
+def test_an_array_over_the_cap_is_refused_before_it_is_hashed_or_parsed(tmp_path, monkeypatch):
+    run = load_run(make_run(tmp_path))
+    monkeypatch.setattr(ar, "MAX_ARRAY_BYTES", 10)
+    monkeypatch.setattr(ar.np, "load", lambda *a, **k: pytest.fail("parsed an oversized array"))
+    with pytest.raises(ReferenceError, match="larger than 10 bytes"):
+        run.array("layer", "0")
+
+
+def test_an_array_exactly_at_the_cap_is_read(tmp_path, monkeypatch):
+    root = make_run(tmp_path, arrays={("layer", "0"): np.arange(4.0)})
+    size = (root / "arrays" / "layer__0.npy").stat().st_size
+    run = load_run(root)
+    monkeypatch.setattr(ar, "MAX_ARRAY_BYTES", size)
+    assert run.array("layer", "0").shape == (4,)
+    monkeypatch.setattr(ar, "MAX_ARRAY_BYTES", size - 1)
+    with pytest.raises(ReferenceError, match="larger"):
+        run.array("layer", "0")
+
+
+def test_a_missing_array_file_is_a_reference_error_at_read(tmp_path):
+    root = make_run(tmp_path)
+    run = load_run(root)
+    (root / "arrays" / "layer__0.npy").unlink()
+    with pytest.raises(ReferenceError, match="cannot be opened"):
+        run.array("layer", "0")

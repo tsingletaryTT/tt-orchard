@@ -23,6 +23,7 @@ differ. Serving the wrong weights gives equal outputs, and a numerical compariso
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import math
 import os
@@ -76,9 +77,13 @@ class Recorder:
         for key, value in (("model", model), ("library", library)):
             if not isinstance(value, dict) or not value:
                 raise ReferenceError(f"{key} must be a non-empty object")
-        if (self.root / MANIFEST).exists():
-            raise ReferenceError(f"{self.root / MANIFEST} exists; a run is never overwritten")
-        (self.root / ARRAYS).mkdir(parents=True, exist_ok=True)
+        # The directory is created here and must not exist: two commands with the same --out cannot both get it (mkdir is atomic), and the
+        # files of an interrupted run are never mixed with a new one's.
+        try:
+            self.root.mkdir(parents=True, exist_ok=False)
+        except FileExistsError:
+            raise ReferenceError(f"{self.root} exists; a run is never overwritten") from None
+        (self.root / ARRAYS).mkdir()
         self.model, self.library, self.settings, self.seeds = model, library, dict(settings), dict(seeds or {})
         self.artifacts: list[dict] = []
         self._seen: set[tuple[str, str]] = set()
@@ -145,11 +150,21 @@ class Run:
         return self.manifest["settings"]
 
     def array(self, kind: str, name: str) -> np.ndarray:
+        """The array, read once: the bytes are opened without following a link, capped in size, hashed against the manifest and only then parsed,
+        so a file that changed or was swapped for a link after `load_run` is refused and what was hashed is what is parsed."""
         e = self.entries[(kind, name)]
         path = self.root / e["file"]
-        if path.stat().st_size > MAX_ARRAY_BYTES:
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        except OSError as exc:
+            raise ReferenceError(f"{e['file']} cannot be opened (a link, or missing): {exc}") from exc
+        with os.fdopen(fd, "rb") as f:
+            data = f.read(MAX_ARRAY_BYTES + 1)            # one byte more than the cap, so a file over it (or one that grew) is seen
+        if len(data) > MAX_ARRAY_BYTES:
             raise ReferenceError(f"{e['file']} is larger than {MAX_ARRAY_BYTES} bytes")
-        arr = np.load(path, allow_pickle=False)
+        if hashlib.sha256(data).hexdigest() != e["sha256"]:
+            raise ReferenceError(f"{e['file']} does not match its sha256 in the manifest")
+        arr = np.load(io.BytesIO(data), allow_pickle=False)
         if list(arr.shape) != e["shape"] or str(arr.dtype) != e["dtype"]:
             raise ReferenceError(f"{e['file']} has shape {list(arr.shape)} and dtype {arr.dtype}; the manifest says {e['shape']} and {e['dtype']}")
         return arr
@@ -191,6 +206,8 @@ def load_run(directory, *, verify: bool = True) -> Run:
             raise ReferenceError(f"a manifest entry is malformed: {str(e)[:120]}")
         if (e["kind"], e["name"]) in entries:
             raise ReferenceError(f"{e['kind']}/{e['name']} appears twice in the manifest")
+        if e["file"] != f"{ARRAYS}/{e['kind']}__{e['name']}.npy":
+            raise ReferenceError(f"{e['file']} must be {ARRAYS}/{e['kind']}__{e['name']}.npy")
         path = root / e["file"]
         if path.is_symlink() or not path.is_file() or path.resolve().parent != arrays_dir:
             raise ReferenceError(f"{e['file']} is missing, a link, or outside {ARRAYS}/")
@@ -311,16 +328,38 @@ def log_spectrum_distance(ref: np.ndarray, cand: np.ndarray, n_fft: int = 1024, 
     return float(np.abs(a - b).mean() / base) if base > 0 else None
 
 
+def _number(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
 def bars_from_floor(floor_report: dict, margin: float = 3.0) -> dict:
-    """Bars from a comparison of the reference against itself in a lower precision (`compare_runs` on a float32 run and a bfloat16 run). Each
-    kind gets the worst numbers seen for it, loosened by `margin` (3 means three times the error). A kind with no result keeps the default.
-    The source says where the numbers came from."""
-    if not floor_report.get("comparable") or not floor_report.get("results") or margin < 1:
-        raise ReferenceError("the floor report has no comparable results, or the margin is below 1")
+    """Bars from a comparison of the reference against itself in a lower precision (`compare_runs(..., cross_precision=True)` on a float32 run
+    and a bfloat16 run). Each kind gets the worst numbers seen for it, loosened by `margin` (3 means three times the error). A kind with no
+    result keeps the default. The source says where the numbers came from.
+
+    The report is refused when it is malformed, was not a cross-precision comparison, lists a missing or extra array, holds a result that could
+    not be compared, or holds a `noise` result that failed: the two runs then did not use the same noise draws, so their differences say nothing
+    about precision, and every other number in the report is suspect. Noise bars are never derived from a floor; they stay at their defaults."""
+    if not isinstance(floor_report, dict) or not _number(margin) or margin < 1:
+        raise ReferenceError("the floor report must be a comparison report and the margin a number of at least 1")
+    if floor_report.get("cross_precision") is not True:
+        raise ReferenceError("the floor report is not a cross-precision comparison (compare_runs(..., cross_precision=True))")
+    if not floor_report.get("comparable") or floor_report.get("problems"):
+        raise ReferenceError(f"the floor report is not comparable or lists problems: {str(floor_report.get('problems'))[:200]}")
+    results = floor_report.get("results")
+    if not isinstance(results, list) or not results:
+        raise ReferenceError("the floor report has no results")
     worst: dict[str, dict] = {}
-    for r in floor_report["results"]:
-        if not r.get("comparable") or r.get("pcc") is None:
-            raise ReferenceError(f"{r['kind']}/{r['name']} is not comparable in the floor run, so no bar can come from it")
+    for r in results:
+        if not isinstance(r, dict) or r.get("kind") not in KINDS or not isinstance(r.get("name"), str):
+            raise ReferenceError(f"a floor result is malformed: {str(r)[:120]}")
+        label = f"{r['kind']}/{r['name']}"
+        if r.get("comparable") is not True or not all(_number(r.get(k)) for k in ("pcc", "rel_l2", "slope")):
+            raise ReferenceError(f"{label} is not comparable in the floor run, so no bar can come from it")
+        if r["kind"] == "noise":
+            if r.get("ok") is not True:
+                raise ReferenceError(f"{label} failed its noise check: the two floor runs did not use the same noise draws")
+            continue
         w = worst.setdefault(r["kind"], {"pcc": 1.0, "rel_l2": 0.0, "slope": 0.0})
         w["pcc"], w["rel_l2"] = min(w["pcc"], r["pcc"]), max(w["rel_l2"], r["rel_l2"])
         w["slope"] = max(w["slope"], abs(r["slope"] - 1.0))
