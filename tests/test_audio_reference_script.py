@@ -272,7 +272,7 @@ def test_the_default_sampler_follows_the_models_objective(tmp_path, monkeypatch)
 def test_a_non_positive_duration_or_steps_is_refused_before_the_model_loads(tmp_path, monkeypatch, duration, steps):
     argv = ["--model", "m", "--out", str(tmp_path / "o"), "--prompt", "p", "--duration", duration, "--steps", steps, "--cfg-scale", "1", "--seed", "1"]
     monkeypatch.setattr(mr, "load_model", lambda *a, **k: pytest.fail("the model was loaded"))
-    with pytest.raises(SystemExit, match="duration must be positive"):
+    with pytest.raises(SystemExit, match="duration must be a positive number"):
         mr.main(argv)
 
 
@@ -401,3 +401,109 @@ def test_the_revision_is_the_snapshot_directory_name_even_when_the_checkpoint_is
     mr.main(["--model", "m", "--out", str(tmp_path / "out"), "--prompt", "p", "--steps", "3", "--cfg-scale", "1", "--seed", "1"])
     m = json.loads((tmp_path / "out" / "manifest.json").read_text())
     assert m["model"]["revision"] == "c" * 40 and m["model"]["checkpoint_bytes"] == 4
+
+
+# ---- round three: numeric arguments and the library's source ---------------------------------------------
+
+@pytest.mark.parametrize("extra,match", [(["--duration", "nan"], "duration"), (["--duration", "inf"], "duration"), (["--duration=-inf"], "duration"),
+                                         (["--cfg-scale", "nan"], "cfg-scale"), (["--cfg-scale", "inf"], "cfg-scale"),
+                                         (["--sample-size", "0"], "sample-size"), (["--sample-size", "-4"], "sample-size"),
+                                         (["--threads", "-1"], "threads")])
+def test_a_non_finite_or_out_of_range_number_is_refused_before_the_model_loads(tmp_path, monkeypatch, extra, match):
+    monkeypatch.setattr(mr, "load_model", lambda *a, **k: pytest.fail("the model was loaded"))
+    argv = ["--model", "m", "--out", str(tmp_path / "o"), "--prompt", "p", "--steps", "3", "--seed", "1"]
+    if "--cfg-scale" not in extra:
+        argv += ["--cfg-scale", "1"]
+    argv = [a for a in argv if a not in ("--duration",)] if False else argv
+    with pytest.raises(SystemExit, match=match):
+        mr.main(argv + extra)
+    assert not (tmp_path / "o").exists()
+
+
+def test_a_negative_cfg_scale_is_accepted(tmp_path, monkeypatch):
+    monkeypatch.setattr(mr, "load_model", lambda *a, **k: pytest.fail("the model was loaded"))
+    with pytest.raises(pytest.fail.Exception, match="the model was loaded"):
+        mr.main(["--model", "m", "--out", str(tmp_path / "o"), "--prompt", "p", "--steps", "3", "--seed", "1", "--cfg-scale", "0"])
+
+
+def fake_library(monkeypatch, tmp_path, where):
+    import types
+    mod = types.ModuleType("stable_audio_3")
+    mod.__file__ = str(where / "stable_audio_3" / "__init__.py")
+    mod.__spec__ = importlib.util.spec_from_file_location("stable_audio_3", mod.__file__)
+    monkeypatch.setitem(sys.modules, "stable_audio_3", mod)
+
+
+def test_expect_src_accepts_a_library_found_inside_that_tree_without_importing_it(tmp_path, monkeypatch):
+    src = tmp_path / "src"
+    (src / "stable_audio_3").mkdir(parents=True)
+    (src / "stable_audio_3" / "__init__.py").write_text("raise RuntimeError('imported')")
+    monkeypatch.setattr(sys, "path", [str(src)] + sys.path)
+    monkeypatch.delitem(sys.modules, "stable_audio_3", raising=False)
+    mr.check_library_source(src)                      # must not execute the package's __init__
+
+
+def test_expect_src_refuses_a_library_found_elsewhere(tmp_path, monkeypatch):
+    other = tmp_path / "other"
+    (other / "stable_audio_3").mkdir(parents=True)
+    (other / "stable_audio_3" / "__init__.py").write_text("")
+    src = tmp_path / "src"
+    src.mkdir()
+    monkeypatch.setattr(sys, "path", [str(other)] + sys.path)
+    monkeypatch.delitem(sys.modules, "stable_audio_3", raising=False)
+    with pytest.raises(SystemExit, match="not from the expected source"):
+        mr.check_library_source(src)
+
+
+def test_expect_src_refuses_when_the_library_cannot_be_found(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "path", [str(tmp_path)])
+    monkeypatch.delitem(sys.modules, "stable_audio_3", raising=False)
+    with pytest.raises(SystemExit, match="cannot find"):
+        mr.check_library_source(tmp_path)
+
+
+def test_a_sibling_directory_with_the_same_prefix_is_not_the_expected_source(tmp_path, monkeypatch):
+    other = Path(str(tmp_path / "src") + "-old")
+    (other / "stable_audio_3").mkdir(parents=True)
+    (other / "stable_audio_3" / "__init__.py").write_text("")
+    (tmp_path / "src").mkdir()
+    monkeypatch.setattr(sys, "path", [str(other)] + sys.path)
+    monkeypatch.delitem(sys.modules, "stable_audio_3", raising=False)
+    with pytest.raises(SystemExit):
+        mr.check_library_source(tmp_path / "src")
+
+
+def test_main_checks_the_source_before_loading_and_records_that_it_did(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(mr, "check_library_source", lambda d: calls.append(Path(d)))
+    snap = tmp_path / "snapshots" / ("c" * 40)
+    snap.mkdir(parents=True)
+    (snap / "model_config.json").write_text("{}")
+    (snap / "model.safetensors").write_bytes(b"1234")
+    monkeypatch.setattr(mr, "load_model", lambda name, device="cpu": (calls.append("loaded"), (FakeModel(), snap / "model_config.json", snap / "model.safetensors"))[1])
+    monkeypatch.setattr(mr, "library_commit", lambda: {"name": "x", "commit": "y"})
+    monkeypatch.setattr(mr, "run_reference", lambda model, settings, rec, torch_: rec.record("waveform", "audio", np.zeros((2, 4))))
+    base = ["--model", "m", "--prompt", "p", "--steps", "3", "--cfg-scale", "1", "--seed", "1"]
+    mr.main([*base, "--out", str(tmp_path / "a"), "--expect-src", str(tmp_path / "src")])
+    assert calls == [tmp_path / "src", "loaded"]
+    assert json.loads((tmp_path / "a" / "manifest.json").read_text())["library"]["source_verified"] is True
+    mr.main([*base, "--out", str(tmp_path / "b")])
+    assert json.loads((tmp_path / "b" / "manifest.json").read_text())["library"]["source_verified"] is False
+
+
+def test_an_existing_output_directory_is_refused_before_the_model_loads(tmp_path, monkeypatch):
+    (tmp_path / "o").mkdir()
+    monkeypatch.setattr(mr, "load_model", lambda *a, **k: pytest.fail("the model was loaded"))
+    with pytest.raises(SystemExit, match="never overwritten"):
+        mr.main(["--model", "m", "--out", str(tmp_path / "o"), "--prompt", "p", "--steps", "3", "--cfg-scale", "1", "--seed", "1"])
+
+
+def test_expect_src_given_through_a_link_is_compared_by_where_it_leads(tmp_path, monkeypatch):
+    src = tmp_path / "src"
+    (src / "stable_audio_3").mkdir(parents=True)
+    (src / "stable_audio_3" / "__init__.py").write_text("")
+    link = tmp_path / "link"
+    link.symlink_to(src)
+    monkeypatch.setattr(sys, "path", [str(src)] + sys.path)
+    monkeypatch.delitem(sys.modules, "stable_audio_3", raising=False)
+    mr.check_library_source(link)

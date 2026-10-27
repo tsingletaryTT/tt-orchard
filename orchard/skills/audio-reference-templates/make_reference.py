@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import math
 import os
 import sys
 import time
@@ -205,7 +206,25 @@ def parse(argv=None):
     p.add_argument("--sampler", default=None, help="pingpong, euler, rk4 or dpmpp; default: the library's choice for the model's objective")
     p.add_argument("--sample-size", type=int, default=DEFAULT_SAMPLE_SIZE)
     p.add_argument("--threads", type=int, default=0, help="torch CPU threads (0: leave the default)")
+    p.add_argument("--expect-src", default=None, help="the checkout the library must come from (the one `tt-orchard audio-reference-env` pins); "
+                                                      "the run is refused when `stable_audio_3` would be imported from anywhere else")
     return p.parse_args(argv)
+
+
+def check_library_source(expect) -> None:
+    """Refuse to go on unless `stable_audio_3` would be imported from inside `expect`. It looks the package up without importing it, so code in a
+    shadowing copy never runs."""
+    import importlib.util
+    try:
+        spec = importlib.util.find_spec("stable_audio_3")
+    except (ImportError, ValueError):
+        spec = None
+    origin = getattr(spec, "origin", None)
+    if not origin:
+        raise SystemExit("cannot find the stable_audio_3 package on the import path")
+    root, found = Path(expect).resolve(), Path(origin).resolve()
+    if root != found and root not in found.parents:
+        raise SystemExit(f"stable_audio_3 would be imported from {found.parent.parent}, not from the expected source {root}")
 
 
 def main(argv=None) -> int:
@@ -214,13 +233,23 @@ def main(argv=None) -> int:
     sys.path.insert(0, str(REPO))
     import torch
     from orchard.audio_reference import Recorder
-    if args.duration <= 0 or args.steps < 1:
-        raise SystemExit("duration must be positive and steps at least 1")
+    if not math.isfinite(args.duration) or args.duration <= 0 or args.steps < 1:
+        raise SystemExit("duration must be a positive number and steps at least 1")
+    if not math.isfinite(args.cfg_scale):
+        raise SystemExit("cfg-scale must be a finite number")
+    if args.sample_size < 1:
+        raise SystemExit("sample-size must be at least 1")
+    if args.threads < 0:
+        raise SystemExit("threads must be 0 or more")
+    if Path(args.out).exists():
+        raise SystemExit(f"{args.out} exists; a run is never overwritten (checked again, atomically, when the run starts)")
     if args.seed < 0:
         # The library treats -1 as "pick a random seed" and the manifest would then record a seed that was never used.
         raise SystemExit("seed must be 0 or more (the library treats -1 as a request for a random seed)")
     if args.threads:
         torch.set_num_threads(args.threads)
+    if args.expect_src:
+        check_library_source(args.expect_src)
     model, config_path, ckpt_path = load_model(args.model)
     sampler = args.sampler or ("pingpong" if model.model.diffusion_objective == "rf_denoiser" else "euler")
     settings = {"prompt": args.prompt, "duration": args.duration, "steps": args.steps, "cfg_scale": args.cfg_scale, "sampler": sampler,
@@ -228,7 +257,7 @@ def main(argv=None) -> int:
     revision = ckpt_path.parent.name       # the snapshot directory; resolving the checkpoint link would give `blobs`
     recorder = Recorder(args.out, model={"name": args.model, "revision": revision, "config_sha256": sha256_file(config_path),
                                          "diffusion_objective": str(model.model.diffusion_objective), "checkpoint_bytes": ckpt_path.stat().st_size},
-                        library=library_commit(), settings=settings, seeds={"torch": args.seed, "numpy": None})
+                        library={**library_commit(), "source_verified": bool(args.expect_src)}, settings=settings, seeds={"torch": args.seed, "numpy": None})
     run_reference(model, settings, recorder, torch)
     path = recorder.finish()
     print(f"wrote {path} with {len(recorder.artifacts)} arrays; timings {recorder.timings}")
