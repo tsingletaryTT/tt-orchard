@@ -1229,6 +1229,9 @@ def make_hardware_check(adir: Path, *, op: str, n, shared_python, policy: hwtool
     state: dict = {}
 
     def prepare(k):
+        # The agent's shell can leave a process running that edits files. Stop every process of this attempt before the
+        # kernel is copied, as run_attempt does before its authoritative check.
+        sweep_strays(adir)
         vdir = hwcheck_dir(probe_dir, op, n, k)
         _real_dir(vdir.parent)
         _fresh_dir(vdir)
@@ -1247,6 +1250,7 @@ def make_hardware_check(adir: Path, *, op: str, n, shared_python, policy: hwtool
         return None, sha
 
     def run(k, timeout_s):
+        sweep_strays(adir)                              # again before every gozer try: a call can wait for a board
         blocked = _hw_gate(state["kernel"], state["sha"])
         if blocked is not None:                         # the copy changed after prepare: no gozer command runs
             return {**blocked, "elapsed_s": 0.0}, None, ""
