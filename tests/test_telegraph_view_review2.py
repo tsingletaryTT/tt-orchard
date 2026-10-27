@@ -60,6 +60,20 @@ def test_a_list_for_call_id_in_a_refusal_is_http_200_with_a_problem_state(root, 
     assert code == 200 and json.loads(body)["state"] == "problem"
 
 
+def test_a_record_that_breaks_a_later_derivation_is_found_while_the_ledger_is_read(root, tmp_path, monkeypatch):
+    cfg, d, _ = setup(tmp_path)
+    write_records(d, [ok_record("a1", "p", 10, 5), {**ok_record("boom", "p", 1, 1), "reason": "BOOM"}])
+    real = view._recent
+
+    def recent(records, verdict, redact):
+        if any(r.get("reason") == "BOOM" for r in records):
+            raise TypeError("a record the rows cannot handle")
+        return real(records, verdict, redact)
+    monkeypatch.setattr(view, "_recent", recent)
+    out = app_for(root, cfg).telegraph()                       # must not raise
+    assert out["state"] == "problem" and out["meter"]["text"] == "Helper: ledger unreadable · spend unknown"
+
+
 # ---- 2. one read, one snapshot -------------------------------------------------------------------------------------------
 
 def test_the_summary_comes_from_the_same_records_as_the_accounting_and_the_rows(root, tmp_path, monkeypatch):

@@ -65,6 +65,7 @@ def test_the_meter_is_redrawn_on_every_poll_and_says_unknown_after_an_outage():
     assert main.index("startTelegraphPolling()") < main.index("await refreshRuns()"), "timers first, so a hung request cannot stop them"
     start = fn_body(js, "function startTelegraphPolling")
     assert "setInterval(" in start and "markTelegraphStale" in start and "POLL_TELEGRAPH_MS" in start and "2000" in start
+    assert start.strip().splitlines()[1].strip() == "pollTelegraph();", "the first poll is immediate, not one tick later"
     assert "pollTelegraph" not in fn_body(js, "function renderTelegraph")
 
 
