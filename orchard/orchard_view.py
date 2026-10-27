@@ -30,7 +30,12 @@ def _label(label: str, style: Style, role: str, width: int = LABEL) -> str:
 def _wrap(label: str, text: str, style: Style, role: str = "dim", width: int = LABEL) -> list[str]:
     """`║  label  text`, wrapped so no line passes WIDTH columns; continuation lines align under the text."""
     indent = len(BAR) + width
-    lines = textwrap.wrap(text, WIDTH - indent, break_long_words=True, break_on_hyphens=False) or [""]
+    room = WIDTH - indent
+    # textwrap counts characters, and an emoji is one character in two columns. Narrow the wrap until every line fits.
+    for limit in range(room, 0, -1):
+        lines = textwrap.wrap(text, limit, break_long_words=True, break_on_hyphens=False) or [""]
+        if all(visible_width(line) <= room for line in lines):
+            break
     out = [BAR + _label(label, style, role, width) + lines[0]]
     out += [" " * indent + ln for ln in lines[1:]]
     return out
