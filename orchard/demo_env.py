@@ -232,16 +232,16 @@ def _dist_info(site: Path, name: str, version: str, tree: Path) -> Path:
 
 
 def _other_version_installed(site: Path, version: str) -> bool:
-    """True when this command's complete ttnn and ttml dist-infos exist at one other version, and none at `version`."""
+    """True when this command's complete ttnn and ttml dist-infos exist at ONE other version (the same for both), and none at `version`."""
+    versions = []
     for name in ("ttnn", "ttml"):
         if (site / f"{name}-{version}.dist-info").exists():
             return False
-        found = [d for d in site.glob(f"{name}-*.dist-info")
+        found = {d.name[len(name) + 1:-len(".dist-info")] for d in site.glob(f"{name}-*.dist-info")
                  if all((d / f).is_file() for f in ("INSTALLER", "WHEEL", "METADATA"))
-                 and (d / "INSTALLER").read_text(encoding="utf-8").strip() == INSTALLER]
-        if not found:
-            return False
-    return True
+                 and (d / "INSTALLER").read_text(encoding="utf-8").strip() == INSTALLER}
+        versions.append(found)
+    return len(versions[0]) == 1 and versions[0] == versions[1]
 
 
 def step_host_tree(env: DEnv, check_only: bool, facts: dict | None, problem: str | None) -> Result:
