@@ -2542,3 +2542,5 @@ Three more findings, all real; each reproduced by a failing test first, one comm
 - `no-variant-serves-purpose` also covers missing speeds, variants that failed their checks and speeds from different requests, so the card and bundle no longer name a speed winner. The card says the configuration stage 2 served is kept, or that the package serves the drafter-off configuration; the bundle says the selected configuration is shipped. A speed relation is stated only when both speeds exist on the same basis (`comparable`), and the decision no longer compares a greedy speed with a sampled one.
 - Mutations: 12 on the first (4 first survivors got tests), 10 on the second (one first survivor, a vocabulary trim, got a test), 13 on the third; all red at the end.
 - Merged `origin/sampling-107` again (its validator for the sampled parameters, the acceptance check); verdict names are unchanged.
+
+- After the merge, a run whose graft was chosen but whose graft variant holds no sampling probe is read from stage 2's own swap check (PR 109's acceptance-source tests need it); a variant with a probe that ran is still read from the variant. 4 mutations, all red.

@@ -348,7 +348,11 @@ def served_source(stage_dir) -> str:
     decision is graft, else stage 2's own."""
     g = _read_json(Path(stage_dir) / "graft-decision.json")
     if isinstance(g, dict) and g.get("choice") == "graft":
-        return f"{GRAFT_TRIAL_DIR}/variant/evidence/swap-check.json"
+        variant = f"{GRAFT_TRIAL_DIR}/variant/evidence/swap-check.json"
+        report = _read_json(Path(stage_dir) / variant)
+        probe = report.get("sampling_probe") if isinstance(report, dict) else None
+        if isinstance(probe, dict) and probe.get("ran"):          # a variant with no probe leaves stage 2's own swap check as the only one
+            return variant
     return "evidence/swap-check.json"
 
 
