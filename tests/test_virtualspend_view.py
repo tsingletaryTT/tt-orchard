@@ -576,3 +576,21 @@ def test_no_descriptor_is_left_open_after_a_pinned_refresh(root):
     app.virtual_spend()
     app.virtual_spend("org--a")
     assert set(os.listdir("/proc/self/fd")) == before
+
+
+def test_a_selected_run_past_the_cap_leaves_no_descriptor_open(root, monkeypatch):
+    monkeypatch.setattr(view, "MAX_CANDIDATES", 1)
+    write_log(root, "org--a/log/run.jsonl", [turn()])
+    write_log(root, "org--b/log/run.jsonl", [turn()])
+    app = app_with(root)
+    app.virtual_spend()
+    before = set(os.listdir("/proc/self/fd"))
+    assert app.virtual_spend("org--b")["total"]["turns"] == 1
+    assert set(os.listdir("/proc/self/fd")) == before
+
+
+def test_nothing_is_scanned_when_the_runs_folder_cannot_be_pinned(root, monkeypatch):
+    write_log(root, "org--a/log/run.jsonl", [turn()])
+    monkeypatch.setattr(vs, "open_pin", lambda path: None)
+    data = get(app_with(root))[1]
+    assert data["total"]["turns"] == 0 and data["rows"] == [] and data["meter"] is None

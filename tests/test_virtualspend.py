@@ -7,8 +7,8 @@ The logs here have the shape `AgentStep._log` writes (one object per turn with `
 local and helper turns) each have a test that names what is counted and what is reported as left out."""
 import json
 import math
-import shutil
 import os
+import shutil
 
 import pytest
 
@@ -1007,3 +1007,32 @@ def test_the_walk_reads_folders_in_name_order(root):
     for name in ("c", "a", "b"):
         write_log(root, f"{name}/log/run.jsonl", [turn(1, ord(name), 0)])
     assert [p.parts[-3] for p, _ in vs._find_files(root, vs._skipped())] == ["a", "b", "c"]
+
+
+def test_scanning_the_pinned_folder_itself_leaves_the_pin_usable(root):
+    write_log(root, "log/run.jsonl", [turn(1, 5, 1)])
+    pin = vs.open_pin(root)
+    try:
+        assert vs.scan(root, beneath=pin)["turns"] == 1
+        assert vs.scan(root, beneath=pin)["turns"] == 1, "the first scan must not have closed the pin's own descriptor"
+    finally:
+        pin.close()
+
+
+def test_a_component_refused_after_earlier_ones_were_opened_leaks_no_descriptor(root, tmp_path):
+    write_log(root, "a/b/log/run.jsonl", [turn(1, 5, 1)])
+    outside = tmp_path / "out"
+    outside.mkdir()
+    shutil.rmtree(root / "a" / "b")
+    (root / "a" / "b").symlink_to(outside, target_is_directory=True)           # the second component is the link
+    pin = vs.open_pin(root)
+    try:
+        before = set(os.listdir("/proc/self/fd"))
+        s = vs.scan(root / "a" / "b", beneath=pin)
+        assert s["skipped"]["links"] == 1 and set(os.listdir("/proc/self/fd")) == before
+    finally:
+        pin.close()
+
+
+def test_the_default_walk_budget_is_large_but_bounded():
+    assert 10_000 <= vs.MAX_WALK_ENTRIES <= 1_000_000
