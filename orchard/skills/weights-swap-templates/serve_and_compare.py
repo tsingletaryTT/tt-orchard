@@ -50,7 +50,8 @@ Steps:
     one raw under `sampling_probe`: whether the server accepted it, its error text when it refused, the seconds the
     script measured, the completion tokens the server reported, the text, and the drafter's session lines that
     the request added to server.log. The script judges nothing; orchard/sampling_probe.py reads the record. A refused
-    or cut-off request is that request's error and the run goes on. These requests carry `top_p` and `seed`, which
+    or cut-off request is that request's error and the run goes on. For a container, whose log reaches server.log only
+    when `save_log()` runs, the probe calls it before it takes each starting offset and after each request. These requests carry `top_p` and `seed`, which
     the 32-token check does not send.
 
 Exit codes: 0 when the measurements completed, whatever they say. 3 cache guard. 4 the server
@@ -433,11 +434,23 @@ def session_lines_since(path: Path, offset: int) -> str:
     return "\n".join(lines[:PROBE_LOG_LINES])
 
 
-def ask_probe(port: int, model: str, params: dict, log_path: Path, settle_s: float) -> dict:
+def refresh_log(refresh) -> None:
+    """Copy the server's log to server.log now, when the process can (a container: docker logs are saved to the file only by Container.save_log).
+    A failure is ignored: the probe then reads whatever the file holds."""
+    if refresh is None:
+        return
+    try:
+        refresh()
+    except Exception:                                  # noqa: BLE001  docker can fail in many ways; the request itself must still be recorded
+        pass
+
+
+def ask_probe(port: int, model: str, params: dict, log_path: Path, settle_s: float, refresh=None) -> dict:
     """One probe request, recorded raw. `seconds` is the time the script measured around the request; `completion_tokens` is the count the
     server reports in `usage`, or None when it reports none."""
     entry = {"params": params, "accepted": False, "error": None, "seconds": None, "completion_tokens": None, "text": "",
              "finish_reason": None, "drafter_log": ""}
+    refresh_log(refresh)
     offset = log_size(log_path)
     started = time.monotonic()
     try:
@@ -456,17 +469,18 @@ def ask_probe(port: int, model: str, params: dict, log_path: Path, settle_s: flo
     except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError, KeyError, IndexError, TypeError) as exc:
         entry["error"] = f"{type(exc).__name__}: {exc}"[:300]
     time.sleep(settle_s)
+    refresh_log(refresh)
     entry["drafter_log"] = session_lines_since(log_path, offset)
     return entry
 
 
-def run_sampling_probe(cfg: dict, port: int, model: str, log_path: Path) -> dict:
+def run_sampling_probe(cfg: dict, port: int, model: str, log_path: Path, refresh=None) -> dict:
     """Step (i): one greedy and two sampled requests; the record that goes under `sampling_probe` in swap-check.json."""
     settle = float(cfg.get("sampling_log_settle_s", PROBE_LOG_SETTLE_S))
     sampled = {"temperature": PROBE_TEMPERATURE, "top_p": PROBE_TOP_P}
-    requests = {"greedy": ask_probe(port, model, {"temperature": 0}, log_path, settle),
-                "sampled_a": ask_probe(port, model, {**sampled, "seed": PROBE_SEEDS[0]}, log_path, settle),
-                "sampled_b": ask_probe(port, model, {**sampled, "seed": PROBE_SEEDS[1]}, log_path, settle)}
+    requests = {"greedy": ask_probe(port, model, {"temperature": 0}, log_path, settle, refresh),
+                "sampled_a": ask_probe(port, model, {**sampled, "seed": PROBE_SEEDS[0]}, log_path, settle, refresh),
+                "sampled_b": ask_probe(port, model, {**sampled, "seed": PROBE_SEEDS[1]}, log_path, settle, refresh)}
     return {"ran": True, "model_id": cfg.get("new_model_id"), "prompt": PROBE_PROMPT, "max_tokens": PROBE_MAX_TOKENS,
             "requests": requests}
 
@@ -507,7 +521,7 @@ def measure(cfg: dict, proc, log_path: Path, tokenizer, prompt_ids, generated_id
     if suite_setup is not None:
         out["prompt_suite"] = run_suite(cfg, port, model, STAGE_DIR / "model-dir", suite_setup)
     if cfg.get("sampling_probe"):
-        out["sampling_probe"] = run_sampling_probe(cfg, port, model, log_path)
+        out["sampling_probe"] = run_sampling_probe(cfg, port, model, log_path, refresh=getattr(proc, "save_log", None))
     return out
 
 
