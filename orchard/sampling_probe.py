@@ -20,6 +20,7 @@ from . import defaults, drafter_log, prompt_suite
 
 ENTRY_NAMES = ("greedy", "sampled_a", "sampled_b")
 VERDICTS = ("not-run", "malformed", "greedy-refused", "sampled-refused", "sampled-incoherent", "inconclusive", "sampled-ignored",
+            "sampled-matches-greedy",
             "sampled-slower", "sampled-full-speed")
 
 SLOW_RATIO = 0.7        # choice: a sampled request that decodes at less than this share of the greedy speed is called slower. 1 would call
@@ -46,7 +47,7 @@ def problems(record) -> list[str]:
     if not isinstance(reqs, dict):
         return [f"sampling_probe.requests must be an object, got {reqs!r}"]
     out = []
-    for name in ENTRY_NAMES:
+    for name in (*ENTRY_NAMES, *(("sampled_hot",) if "sampled_hot" in reqs else ())):
         e = reqs.get(name)
         if not isinstance(e, dict):
             out.append(f"sampling_probe.requests.{name} is missing")
@@ -58,10 +59,14 @@ def problems(record) -> list[str]:
         for key in ("drafter_log", "error", "finish_reason"):
             if e.get(key) is not None and not isinstance(e[key], str):
                 out.append(f"sampling_probe.requests.{name}.{key} must be a string or null")
-        for key in ("seconds", "completion_tokens"):
-            if e.get(key) is not None and not _number(e[key]):
-                out.append(f"sampling_probe.requests.{name}.{key} must be a number or null")
+        if e.get("seconds") is not None and not _number(e["seconds"]):
+            out.append(f"sampling_probe.requests.{name}.seconds must be a number or null")
+        tokens = e.get("completion_tokens")
+        if tokens is not None and not (isinstance(tokens, int) and not isinstance(tokens, bool) and tokens >= 0):
+            out.append(f"sampling_probe.requests.{name}.completion_tokens must be a non-negative integer or null")
         out += _params_problems(name, e.get("params"))
+        if name == "sampled_hot" and isinstance(e.get("params"), dict) and _number(e["params"].get("temperature")) and e["params"]["temperature"] <= 1:
+            out.append("sampling_probe.requests.sampled_hot.params.temperature must be above 1 for the high-temperature request")
     seeds = [reqs[n]["params"].get("seed") for n in ("sampled_a", "sampled_b")
              if isinstance(reqs.get(n), dict) and isinstance(reqs[n].get("params"), dict)]
     pa, pb = ((reqs.get(n) or {}).get("params") if isinstance(reqs.get(n), dict) else None for n in ("sampled_a", "sampled_b"))
@@ -126,6 +131,12 @@ def _loops(text: str) -> bool:
     return any(f["kind"] in defaults.SUITE_BLOCKING_KINDS for f in found)
 
 
+def _settings(entry: dict) -> str:
+    """The sampling settings a request carried, from its recorded params: "temperature 0.7, top-p 0.5, seed 1234"."""
+    p = entry.get("params") if isinstance(entry.get("params"), dict) else {}
+    return f"temperature {p.get('temperature')}, top-p {p.get('top_p')}, seed {p.get('seed')}"
+
+
 def _fmt(speed) -> str:
     return "an unmeasured speed" if speed is None else f"{speed:.1f} tokens/s"
 
@@ -138,8 +149,10 @@ CARD_SENTENCES = {
     "sampled-incoherent": "The server accepted a sampled request, and its text repeats itself or is unreadable.",
     "inconclusive": ("The probe could not compare the speed of greedy and sampled requests: a request had no usable token count or timing, "
                      "a reply was too short, or a reply was empty."),
-    "sampled-ignored": ("The server accepted sampled requests, but sampling was not applied: a sampled request returned the greedy text, or "
-                        "requests with different seeds returned the same text, so decoding is greedy."),
+    "sampled-ignored": ("The server accepted sampled requests, but sampling was not applied: sampled requests, including one at a high temperature, "
+                        "returned the greedy text, so decoding is greedy."),
+    "sampled-matches-greedy": ("Sampled requests returned the greedy text or the same text for different seeds. That fits sampling not being applied, "
+                               "and it also happens when one token is eligible at every step. The probe did not confirm which."),
     "sampled-slower": "Sampled requests decoded more slowly than greedy requests. Both speeds are in the table above.",
     "sampled-full-speed": ("Sampled requests (temperature above 0, top-p below 1, with a seed) were served and two seeds gave different text. "
                            "Their speed is in the table above next to the speed of greedy requests."),
@@ -174,7 +187,7 @@ def _summarize(record) -> dict:
     refused = [e for e in (a, b) if not e["accepted"]]
     if refused:
         return {**out, "verdict": "sampled-refused",
-                "sentence": f"The server refused a sampled request (temperature 1.0, top-p 0.9, with a seed): {(refused[0].get('error') or 'no error text')[:200]}"}
+                "sentence": f"The server refused a sampled request ({_settings(refused[0])}): {(refused[0].get('error') or 'no error text')[:200]}"}
     if any(not e["text"].strip() for e in (g, a, b)):
         return {**out, "verdict": "inconclusive",
                 "sentence": "A reply had no visible text (it was empty or only white space), so the probe could not say whether sampling was applied or how fast it ran."}
@@ -185,15 +198,20 @@ def _summarize(record) -> dict:
     if not long_enough:
         return {**out, "verdict": "inconclusive",
                 "sentence": f"A sampled reply was shorter than {MIN_TOKENS} tokens, which says too little about speed or about whether sampling was applied."}
-    if a["text"] == b["text"]:
-        return {**out, "verdict": "sampled-ignored",
-                "sentence": ("The server accepted the sampled requests, but two requests that differ only in seed returned the same text. "
-                             f"Sampling was not applied, so decoding was greedy. Greedy decoded at {_fmt(gs)}.")}
-    if g["text"] in (a["text"], b["text"]):
-        # At temperature 1 and top-p 0.9 over about 96 tokens, a sampled text that equals the greedy text is not a chance event.
-        return {**out, "verdict": "sampled-ignored",
-                "sentence": ("The server accepted the sampled requests, but a sampled request returned the greedy text. "
-                             f"Sampling was not applied, so decoding was greedy. Greedy decoded at {_fmt(gs)}.")}
+    matched_by_seeds, matched_greedy = a["text"] == b["text"], g["text"] in (a["text"], b["text"])
+    if matched_by_seeds or matched_greedy:
+        how = ("two requests that differ only in seed returned the same text" if matched_by_seeds
+               else "a sampled request returned the greedy text")
+        hot = reqs.get("sampled_hot")
+        if isinstance(hot, dict) and hot["accepted"] and hot["text"] == g["text"]:
+            return {**out, "verdict": "sampled-ignored",
+                    "sentence": (f"The server accepted the sampled requests, but {how}, and a request at temperature "
+                                 f"{hot['params'].get('temperature')} also returned the greedy text. Sampling was not applied, so decoding was greedy. "
+                                 f"Greedy decoded at {_fmt(gs)}.")}
+        return {**out, "verdict": "sampled-matches-greedy",
+                "sentence": (f"The server accepted the sampled requests, but {how}. That fits sampling not being applied. It also happens when "
+                             "the most likely token is above the top-p cut at every step, so one token is eligible. The probe did not confirm which: "
+                             f"no high-temperature request returned the greedy text. Greedy decoded at {_fmt(gs)}.")}
     if any(_speed(e) is None for e in (g, a, b)):
         return {**out, "verdict": "inconclusive",
                 "sentence": ("The probe could not compare speeds: a request has no usable token count or timing, or a reply was shorter "

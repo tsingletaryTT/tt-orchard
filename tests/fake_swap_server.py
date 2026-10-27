@@ -117,7 +117,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _sampling_probe(self, req):
         """The sampling probe's requests (issue 107), answered only when the config has a "sampling" mode: "applied" (the text depends on the seed),
-        "ignored" (the same text for every seed), "refuse" (HTTP 400 for temperature above 0) and "cutoff" (a truncated body for temperature above
+        "ignored" (the same text for every seed), "peaked" (the same text unless the temperature is above 1: a most likely token above the top-p cut), "refuse" (HTTP 400 for temperature above 0) and "cutoff" (a truncated body for temperature above
         0). "usage_tokens" adds a usage record, "sampled_delay_s" slows a sampled request and "session_line" is printed to the server log once per request."""
         cfg = self.cfg
         sampled = req.get("temperature", 0) > 0
@@ -136,7 +136,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         time.sleep(float(cfg.get("probe_delay_s", 0)) + (float(cfg.get("sampled_delay_s", 0)) if sampled else 0))
         text = "The lighthouse keeper climbed the long spiral stairs every evening, counting the steps."
-        if sampled and mode == "applied":
+        if sampled and (mode == "applied" or (mode == "peaked" and req.get("temperature", 0) > 1)):
             text += f" Seed {req.get('seed')} chose a different ending: the sea was calm and the lamp burned until morning."
         if cfg.get("session_line"):
             print(cfg["session_line"], flush=True)

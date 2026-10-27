@@ -601,7 +601,7 @@ def sampling_section(run: Run, redact: Redactor) -> list[str]:
         return []
     return ["", "## Sampling", "",
             "What the served configuration does with a request that has temperature above 0. Each stage's swap check sends one greedy request and two sampled "
-            "requests (temperature 1.0, top-p 0.9, different seeds) to the server and records them raw; the verdict, speeds and drafter acceptance are "
+            "requests (temperature above 0, top-p below 1, different seeds) to the server and records them raw; the verdict, speeds and drafter acceptance are "
             "computed from those records. A refused or slow sampled request is a fact about the configuration and does not fail a stage. "
             "The drafter column is the accepted share of drafted tokens for the greedy and sampled requests (TODO when the server logs none).", "",
             "| Configuration | Verdict | Greedy tokens/s | Sampled tokens/s | Drafter acceptance (greedy / sampled) | Label | Evidence |",
