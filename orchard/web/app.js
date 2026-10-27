@@ -214,6 +214,149 @@ function renderMachineChip(m, all, free) {
   chip.dataset.tone = free === all.length ? "good" : stale ? "bad" : "warn";
 }
 
+// ---- telegraph: the spend meter in the top bar (always on screen) and the Telegraph view ----------------------------
+// The server builds the meter's words (orchard/telegraph_view.py). The page only shows them. The meter is redrawn on every
+// poll, outside any change guard, so an outage cannot leave a stale amount on screen: after STALE_MS without an answer it says the
+// spend is unknown. The view only reads; nothing on it sends a request to the helper.
+
+// Dollars with enough digits that a small cost never shows as zero (the same rule as telegraph_view.usd).
+function usd(value) {
+  const v = Number(value) || 0;
+  if (v === 0) return "$0.00";
+  return v < 0.01 ? `$${v.toFixed(4)}` : `$${v.toFixed(2)}`;
+}
+
+function plural(n, word) { return `${n} ${word}${n === 1 ? "" : "s"}`; }
+
+function spendText(s) {
+  const unknown = s.cost_unknown_calls || 0;
+  if (s.calls && unknown === s.calls) return "unknown cost";
+  return unknown ? `${usd(s.cost_usd)} + ${unknown} unknown` : usd(s.cost_usd);
+}
+
+function renderSpendMeter(t) {
+  const el = $("spend-meter");
+  if (!t) {
+    $("spend-text").textContent = "Helper: spend unknown";
+    el.dataset.state = "unknown";
+    el.dataset.tone = "bad";
+    el.title = "The page cannot read the helper's spend right now. Click for the Telegraph view.";
+    return;
+  }
+  $("spend-text").textContent = t.meter.text;
+  el.dataset.state = t.state;
+  el.dataset.tone = t.tone;
+  el.title = t.meter.title;
+}
+
+async function pollTelegraph() {
+  try {
+    S.telegraph = await api("/api/telegraph");
+    S.tgOk = Date.now();
+    renderSpendMeter(S.telegraph);
+    if (S.view === "telegraph") renderTelegraph();
+  } catch (err) {
+    if (Date.now() - (S.tgOk || 0) > STALE_MS) renderSpendMeter(null);
+  }
+}
+
+const TG_BANNER = {
+  off: "Telegraph is off. The harness runs without an outside helper. How to turn it on is at the bottom of this page.",
+  ok: "Telegraph is on. No cap is near its limit.",
+  near: "Telegraph is on, and a cap is at 80 percent or more.",
+  capped: "Telegraph is on, and a cap has stopped it.",
+  problem: "Telegraph is on, and something needs attention.",
+};
+const TG_OUTCOME_TONE = { ok: "good", error: "bad", budget: "bad", "no-key": "warn", "cache hit": "dim" };
+
+function tgCapText(c) {
+  const used = c.unit === "usd" ? usd(c.used) : String(c.used), limit = c.unit === "usd" ? usd(c.limit) : String(c.limit);
+  return `${used} of ${limit} (${c.percent}%)`;
+}
+
+function tgRow(cells, tone) {
+  const tr = h("tr", tone ? { dataset: { tone } } : {});
+  for (const [text, cls, tip] of cells) tr.append(h("td", { class: cls || null, title: tip || null }, text));
+  return tr;
+}
+
+function renderTelegraph() {
+  const t = S.telegraph;
+  if (!t) return;
+  const { now, ...rest } = t;                         // the clock changes on every answer; the rest decides whether to redraw
+  if (!changed($("telegraph-view"), rest)) return;
+  const banner = clear($("tg-banner"));
+  banner.dataset.tone = t.tone;
+  banner.append(h("strong", {}, TG_BANNER[t.state] || ""));
+  if (t.capped) banner.append(h("span", {}, ` Reason: ${t.capped.reason}.`));
+  if (t.error) banner.append(h("span", {}, ` ${t.error}.`));
+  if (t.key.state === "missing") banner.append(h("span", {}, ` The key is missing: ${t.key.reason}.`));
+
+  const s = t.summary;
+  const num = (k, v, note) => h("div", { class: "tg-num" }, h("span", { class: "k" }, k), h("span", { class: "v" }, v), note ? h("span", { class: "muted small" }, note) : null);
+  clear($("tg-numbers")).append(
+    num("Spend", spendText(s), s.cost_unknown_calls ? `${plural(s.cost_unknown_calls, "call")} with no price` : ""),
+    num("Calls sent", String(s.calls), `${s.ok} answered`),
+    num("Helped", String(s.helped), `${s.not_helped} did not help · ${s.unreported} not reported`),
+    num("Cache hits", String(s.cache_hits), "cost nothing"),
+    num("Refused", String(s.refused), "a cap or a missing key"),
+    num("Tokens", `${s.tokens_in + s.tokens_out}`, `${s.tokens_in} in · ${s.tokens_out} out`),
+    num("Time", `${Math.round(s.latency_s)} s`, "waiting for the helper"));
+
+  const caps = clear($("tg-caps"));
+  for (const c of t.caps) {
+    caps.append(h("div", { class: "tg-cap", dataset: { tone: c.tone } },
+      h("span", { class: "k" }, `${c.label} cap`), h("span", { class: "v" }, tgCapText(c)),
+      h("div", { class: "tg-bar", role: "progressbar", "aria-label": `${c.label} cap used`, "aria-valuemin": "0", "aria-valuemax": "100", "aria-valuenow": String(Math.min(100, c.percent)) },
+        h("span", { style: `width:${Math.min(100, c.percent)}%` }))));
+  }
+  const pp = t.config.per_problem;
+  if (t.enabled) {
+    caps.append(h("p", { class: "muted small tg-pp" }, `Each problem may use up to ${plural(pp.calls, "call")}` +
+      (pp.tokens !== null ? `, ${pp.tokens} tokens` : "") + (pp.cost_usd !== null ? `, ${usd(pp.cost_usd)}` : "") + ". See By problem."));
+  }
+
+  const rec = clear($("tg-recent"));
+  for (const r of t.recent) {
+    rec.append(tgRow([
+      [r.ts === null ? "" : new Date(r.ts * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }), "when"],
+      [r.problem, "wrap"], [r.model, "wrap"], [String(r.tokens_in), "num"], [String(r.tokens_out), "num"],
+      [r.latency_s.toFixed(1), "num"], [r.cost_usd === null ? "unknown" : usd(r.cost_usd), "num"],
+      [r.outcome, "outcome", r.reason || null],
+      [r.helped === true ? "yes" : r.helped === false ? "no" : r.outcome === "ok" ? "not reported" : "", null]], TG_OUTCOME_TONE[r.outcome] || null));
+    if (r.reason) rec.lastChild.lastChild.previousSibling.append(h("div", { class: "tg-reason" }, r.reason));
+  }
+  $("tg-recent-empty").hidden = t.recent.length > 0;
+  $("tg-recent-note").textContent = t.recent.length ? `newest first, up to ${t.recent.length}` : "";
+
+  const bm = clear($("tg-by-model"));
+  for (const m of t.by_model) bm.append(tgRow([[m.model, "wrap"], [String(m.calls), "num"], [String(m.tokens), "num"], [usd(m.cost_usd), "num"]]));
+  if (!t.by_model.length) bm.append(tgRow([["No calls yet", "muted"], ["", ""], ["", ""], ["", ""]]));
+  const bp = clear($("tg-by-problem"));
+  for (const p of t.problems) {
+    bp.append(tgRow([[p.name, "wrap"], [String(p.calls), "num"], [String(p.tokens), "num"],
+      [p.cost_unknown_calls ? `${usd(p.cost_usd)} + ${p.cost_unknown_calls} unknown` : usd(p.cost_usd), "num"],
+      [`${p.helped} yes · ${p.not_helped} no`, null], [`${p.percent}%${p.at_cap ? " (at its cap)" : ""}`, "num cap"]], p.at_cap ? "bad" : p.near ? "warn" : null));
+  }
+  if (!t.problems.length) bp.append(tgRow([["No calls yet", "muted"], ["", ""], ["", ""], ["", ""], ["", ""], ["", ""]]));
+
+  const c = t.config;
+  const keyWords = { present: `present (from ${t.key.source === "file" ? "a file" : "an environment variable"})`,
+    missing: `missing: ${t.key.reason || ""}`, "not-needed": "not needed (the endpoint takes no key)", "n/a": "not used while telegraph is off" };
+  const dl = clear($("tg-config"));
+  for (const [k, v] of [
+    ["Enabled", t.enabled ? "yes" : "no"], ["Endpoint host", c.endpoint_host || "none"], ["API style", c.api || "none"],
+    ["Asks after", t.enabled ? `${plural(c.after_failures, "repeated failure")}` : "none"],
+    ["Limits per call", t.enabled ? `${c.max_output_tokens} output tokens, ${c.max_prompt_chars} prompt characters, ${c.timeout_s} s` : "none"],
+    ["Key", keyWords[t.key.state] || t.key.state], ["Ledger folder", c.ledger_dir]]) {
+    dl.append(h("div", { class: "tg-kv" }, h("dt", {}, k), h("dd", { class: k === "Ledger folder" ? "mono wrap" : null }, v)));
+  }
+  const ms = clear($("tg-models"));
+  c.models.forEach((m, i) => ms.append(tgRow([[String(i + 1), "num"], [m.name, "wrap"],
+    [m.input_per_mtok === null ? "no price" : `$${m.input_per_mtok}`, "num"], [m.output_per_mtok === null ? "no price" : `$${m.output_per_mtok}`, "num"]])));
+  if (!c.models.length) ms.append(tgRow([["", ""], ["No models: telegraph is off", "muted"], ["", ""], ["", ""]]));
+}
+
 // ---- machine health: the scene's weather and how hard the farmer works --------------------------------
 
 const WEATHER_WORD = { clear: "☀ clear skies", heatwave: "🔥 heatwave", overcast: "☁ overcast", storm: "⛈ storm", unknown: "· weather unknown" };
@@ -349,6 +492,7 @@ function renderRuns() {
 }
 
 async function refreshRuns() {
+  pollTelegraph();                       // its own request and its own failure handling: spend is never hidden by another call's failure
   try {
     const [runs, machine, launches] = await Promise.all([api("/api/runs"), api("/api/machine"), api("/api/launches")]);
     S.runs = runs.runs;
@@ -439,6 +583,9 @@ function renderRun() {
     h("span", {}, d.supervisor.alive ? `supervisor pid ${d.supervisor.pid}` : "no supervisor running"),
     h("span", {}, d.last_events.length ? `last activity ${ago(d.last_events[d.last_events.length - 1].ts)}` : ""));
   $("run-hint-text").textContent = d.next_step || d.hint || "";
+  const spend = $("run-spend");                       // this run's own helper spend, when it kept a telegraph ledger
+  spend.hidden = !d.telegraph;
+  spend.textContent = d.telegraph ? `Helper spend for this run: ${spendText(d.telegraph)} · ${plural(d.telegraph.calls, "call")}` : "";
   const mode = $("run-mode");
   mode.hidden = !d.mode;
   // the pictures sit in .emoji spans: the operator style hides them
@@ -1113,6 +1260,8 @@ function wire() {
   $("view-orchard-btn").addEventListener("click", () => setView("orchard"));
   $("view-hardware-btn").addEventListener("click", () => setView("hardware"));
   $("view-settings-btn").addEventListener("click", () => setView("settings"));
+  $("view-telegraph-btn").addEventListener("click", () => setView("telegraph"));
+  $("spend-meter").addEventListener("click", () => setView("telegraph"));
   $("settings-form").addEventListener("submit", saveSettings);
   $("checks-run").addEventListener("click", startChecks);
   $("caches-run").addEventListener("click", loadCaches);
@@ -1192,8 +1341,10 @@ function setView(view, { push = true } = {}) {
   $("view-orchard-btn").setAttribute("aria-pressed", String(view === "orchard"));
   $("view-hardware-btn").setAttribute("aria-pressed", String(view === "hardware"));
   $("view-settings-btn").setAttribute("aria-pressed", String(view === "settings"));
+  $("view-telegraph-btn").setAttribute("aria-pressed", String(view === "telegraph"));
   $("hardware-view").hidden = view !== "hardware";
   $("settings-view").hidden = view !== "settings";
+  $("telegraph-view").hidden = view !== "telegraph";
   const runShown = view === "orchard" && S.selected;
   $("run").hidden = !runShown;
   $("run-empty").hidden = view !== "orchard" || Boolean(S.selected);
@@ -1206,7 +1357,11 @@ function setView(view, { push = true } = {}) {
   stopToplike();
   document.body.classList.remove("wide");
   $("hw-wide").setAttribute("aria-pressed", "false");
-  if (view === "settings") {
+  if (view === "telegraph") {
+    if (push) history.replaceState(null, "", "#telegraph");
+    renderTelegraph();
+    pollTelegraph();
+  } else if (view === "settings") {
     if (push) history.replaceState(null, "", "#models");
     loadSettings();
   } else if (push) {
@@ -1541,6 +1696,7 @@ function routeFromHash() {
   // #machine and #models are the names now; #hardware and #settings are what earlier links and bookmarks carry
   if (location.hash === "#machine" || location.hash === "#hardware") { setView("hardware", { push: false }); return; }
   if (location.hash === "#models" || location.hash === "#settings") { setView("settings", { push: false }); return; }
+  if (location.hash === "#telegraph") { setView("telegraph", { push: false }); return; }
   const m = location.hash.match(/^#run\/(.+)$/);
   if (m) select(decodeURIComponent(m[1]), { push: false });
 }

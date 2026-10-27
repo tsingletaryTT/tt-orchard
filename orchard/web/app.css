@@ -16,7 +16,7 @@
   --wood: #b5793a;   --wood-light: #dca15a;  --wood-dark: #6e4522;  --wood-shadow: #4a2e16;
   --ink: #3b2414;    --muted: #74553a;      --line: #d9bb7c;
   --good: #3a7a22;   --good-bg: #dcefc0;
-  --warn: #8a5f00;   --warn-bg: #fbe39a;
+  --warn: #8a5f00;   --warn-bg: #fbe39a;   --warn-ink: #6b4a00;     /* text on --warn-bg: --warn alone is 4.45:1 there */
   --bad: #a8321f;    --bad-bg: #f8d2c4;
   --alarm: #b53a0a;  --alarm-bg: #fbd0b0;
   --dim: #7d6d55;    --dim-bg: #eadcb8;
@@ -38,7 +38,7 @@
     --wood: #7a4c26;   --wood-light: #a8703c;  --wood-dark: #3a2412;  --wood-shadow: #0d0703;
     --ink: #f3e6c8;    --muted: #c9b48f;      --line: #54456a;
     --good: #95d46e;   --good-bg: #24331f;
-    --warn: #f2c84b;   --warn-bg: #3a3014;
+    --warn: #f2c84b;   --warn-bg: #3a3014;   --warn-ink: #f2c84b;
     --bad: #ffa08c;    --bad-bg: #40211c;
     --alarm: #ff9152;  --alarm-bg: #44220f;
     --dim: #b0a284;    --dim-bg: #2f283a;
@@ -91,7 +91,7 @@ code, .mono { font-family: var(--mono); font-size: .88em; }
 .brand-name { font: 700 1.4rem/1 var(--pixel); color: #fff3c4; text-shadow: 0 2px 0 var(--wood-dark); white-space: nowrap; }
 .brand-host { color: #f6dfb0; font-size: .82rem; }
 @media (max-width: 1520px) { .brand-host { max-width: 15ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } }
-.views { display: flex; gap: 6px; }
+.views { display: flex; gap: 6px; flex-wrap: wrap; }
 .view-btn { font: 700 .95rem/1 var(--pixel); color: #fdf0c8; background: var(--wood-dark); border: 3px solid var(--wood-shadow);
   border-radius: 4px; padding: 8px 12px; cursor: pointer; box-shadow: inset 0 -3px 0 rgba(0,0,0,.25); }
 .view-btn[aria-pressed="true"] { background: var(--paper); color: var(--ink); border-color: var(--wood-dark); box-shadow: inset 0 0 0 2px var(--wood-light); }
@@ -116,6 +116,23 @@ code, .mono { font-family: var(--mono); font-size: .88em; }
 .machine-chip[data-tone="bad"]::before { background: #c0392b; }
 .machine-chip[data-tone="unknown"]::before { background: var(--dim); }
 .machine-chip:hover { filter: brightness(1.06); }
+
+/* the spend meter: what the outside helper has cost, always in the top bar. The words carry the meaning; the dot and the tint
+   repeat it. Amber is a cap at 80 percent or more, red is a cap used up or a refused call, grey is telegraph off. */
+.spend-meter { display: inline-flex; align-items: center; gap: 8px; font: 700 .82rem/1 var(--pixel); color: var(--ink); background: var(--paper);
+  border: 3px solid var(--wood-dark); border-radius: 4px; padding: 5px 8px; cursor: pointer; box-shadow: inset 0 0 0 2px var(--wood-light); max-width: 46ch; }
+.spend-meter::before { content: ""; flex: none; width: 9px; height: 9px; background: var(--dim); box-shadow: 0 0 0 1px var(--wood-dark); }
+.spend-meter .spend-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.spend-meter[data-tone="good"]::before { background: #5da130; }
+.spend-meter[data-tone="warn"] { background: var(--warn-bg); color: var(--warn-ink); border-color: var(--warn); }
+.spend-meter[data-tone="warn"]::before { background: currentColor; }
+.spend-meter[data-tone="bad"] { background: var(--bad-bg); color: var(--bad); border-color: var(--bad); }
+.spend-meter[data-tone="bad"]::before { background: currentColor; }
+.spend-meter[data-tone="bad"] { max-width: 64ch; }                                /* a refusal or a used-up cap shows its whole reason */
+.spend-meter[data-tone="bad"] .spend-text { white-space: normal; line-height: 1.25; }
+.spend-meter[data-tone="dim"] { color: var(--muted); }
+.spend-meter:hover { filter: brightness(1.06); }
+@media (max-width: 900px) { .spend-meter { max-width: 100%; } .spend-meter .spend-text { white-space: normal; } }
 
 /* the page style: a setting of the whole page, so it is a small labelled pair and not another tab */
 .style-switch { display: inline-flex; align-items: center; gap: 0; }
@@ -543,6 +560,12 @@ html[data-mode="operator"] .brand-host { color: #a9c4c2; }
 html[data-mode="operator"] .view-btn { background: transparent; color: #e4f1f0; border: 1px solid #3f6664; box-shadow: none; font-weight: 600; }
 html[data-mode="operator"] .view-btn[aria-pressed="true"] { background: #e4f1f0; color: #092221; border-color: #e4f1f0; box-shadow: none; }
 html[data-mode="operator"] .machine-chip { font: 600 .82rem/1 var(--font); background: transparent; color: #e4f1f0; border: 1px solid #3f6664; box-shadow: none; }
+/* the spend meter sits on the dark top bar in both colour schemes, so its colours are fixed pairs (checked at 4.5:1 in tests) */
+html[data-mode="operator"] .spend-meter { font: 600 .82rem/1 var(--font); background: transparent; color: #e4f1f0; border: 1px solid #3f6664; box-shadow: none; }
+html[data-mode="operator"] .spend-meter::before { box-shadow: none; }
+html[data-mode="operator"] .spend-meter[data-tone="dim"] { color: #a9c4c2; }
+html[data-mode="operator"] .spend-meter[data-tone="warn"] { background: #f2c14e; color: #2b1f00; border-color: #f2c14e; }
+html[data-mode="operator"] .spend-meter[data-tone="bad"] { background: #b3290a; color: #ffffff; border-color: #ff9e8a; }
 html[data-mode="operator"] .style-label { color: #a9c4c2; }
 html[data-mode="operator"] .style-btn { color: #e4f1f0; border-color: #3f6664; }
 html[data-mode="operator"] .style-btn[aria-pressed="true"] { background: #1c4a49; color: #fff; box-shadow: inset 0 -2px 0 #74c5df; }
@@ -689,3 +712,44 @@ html[data-mode="operator"] #runs { display: none; }
   #runs-table .c-bar { display: none; }
   #runs-table col.k-state { width: 5.6rem; }
 }
+
+/* ---- the Telegraph view: the outside helper's configuration, caps and ledger (read only) ---- */
+.telegraph { display: grid; gap: 20px; max-width: 1100px; min-width: 0; }
+.tg-block { display: grid; gap: 10px; min-width: 0; align-content: start; }
+.tg-banner { padding: 10px 14px; border-left: 6px solid var(--dim); background: var(--dim-bg); color: var(--ink); border-radius: 3px; }
+.tg-banner[data-tone="good"] { background: var(--good-bg); border-color: var(--good); }
+.tg-banner[data-tone="warn"] { background: var(--warn-bg); border-color: var(--warn); }
+.tg-banner[data-tone="bad"] { background: var(--bad-bg); border-color: var(--bad); }
+.tg-numbers { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(150px, 100%), 1fr)); gap: 10px; }
+.tg-num { display: grid; gap: 2px; align-content: start; padding: 8px 10px; background: var(--paper-2); border: 2px solid var(--line); border-radius: 4px; min-width: 0; }
+.tg-num .k, .tg-cap .k { font-size: .78rem; color: var(--muted); }
+.tg-num .v { font: 700 1.3rem/1.2 var(--pixel); overflow-wrap: anywhere; }
+.tg-caps { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); gap: 10px 18px; }
+.tg-cap { display: grid; gap: 4px; }
+.tg-cap .v { font-weight: 700; font-variant-numeric: tabular-nums; }
+.tg-cap[data-tone="warn"] .v { color: var(--warn); }
+.tg-cap[data-tone="bad"] .v { color: var(--bad); }
+.tg-bar { height: 10px; background: var(--dim-bg); border: 1px solid var(--line); border-radius: 2px; overflow: hidden; }
+.tg-bar > span { display: block; height: 100%; background: var(--good); }
+.tg-cap[data-tone="warn"] .tg-bar > span { background: var(--warn); }
+.tg-cap[data-tone="bad"] .tg-bar > span { background: var(--bad); }
+.tg-pp { grid-column: 1 / -1; margin: 0; }
+.tg-two { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(340px, 100%), 1fr)); gap: 20px; }
+.tg-table { border-collapse: collapse; width: 100%; font-size: .82rem; font-variant-numeric: tabular-nums; }
+.tg-table caption { text-align: left; padding-bottom: 6px; }
+.tg-table th, .tg-table td { text-align: left; padding: 6px 10px 6px 0; border-bottom: 1px dashed var(--line); vertical-align: top; }
+.tg-table th { position: sticky; top: 0; background: var(--paper); font: 700 .82rem var(--pixel); color: var(--muted); border-bottom: 2px solid var(--line); }
+.tg-table .num { text-align: right; padding-right: 12px; white-space: nowrap; }
+.tg-table .wrap { overflow-wrap: anywhere; }
+.tg-table td.when { white-space: nowrap; color: var(--muted); }
+.tg-table tr[data-tone="bad"] td.outcome, .tg-table tr[data-tone="bad"] td.cap { color: var(--bad); font-weight: 700; }
+.tg-table tr[data-tone="warn"] td.outcome, .tg-table tr[data-tone="warn"] td.cap { color: var(--warn); font-weight: 700; }
+.tg-table tr[data-tone="good"] td.outcome { color: var(--good); }
+.tg-table tr[data-tone="dim"] td.outcome { color: var(--muted); }
+.tg-reason { font-weight: 400; font-size: .76rem; color: var(--muted); overflow-wrap: anywhere; max-width: 36ch; }
+.tg-config { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); gap: 8px 18px; margin: 0; }
+.tg-kv dt { font-size: .78rem; color: var(--muted); }
+.tg-kv dd { margin: 0; overflow-wrap: anywhere; }
+.tg-how p { margin: 0; max-width: 78ch; }
+.run-spend { margin: 2px 0 0; font-size: .85rem; color: var(--muted); }
+html[data-mode="operator"] .run-head .run-spend { color: #fff; }

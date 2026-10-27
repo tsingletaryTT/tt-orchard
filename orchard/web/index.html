@@ -29,8 +29,10 @@
     <button type="button" class="view-btn" id="view-orchard-btn" aria-pressed="true"><span class="emoji" aria-hidden="true">🧺 </span><span class="lbl-playful">Orchard</span><span class="lbl-operator">Runs</span></button>
     <button type="button" class="view-btn" id="view-hardware-btn" aria-pressed="false"><span class="emoji" aria-hidden="true">📺 </span>Machine</button>
     <button type="button" class="view-btn" id="view-settings-btn" aria-pressed="false"><span class="emoji" aria-hidden="true">🧰 </span>Models</button>
+    <button type="button" class="view-btn" id="view-telegraph-btn" aria-pressed="false"><span class="emoji" aria-hidden="true">📡 </span>Telegraph</button>
   </nav>
   <div class="topbar-right">
+    <button type="button" class="spend-meter" id="spend-meter" data-state="unknown" data-tone="unknown" title="What the outside helper model has cost. Opens the Telegraph view."><span class="emoji" aria-hidden="true">📡 </span><span class="spend-text" id="spend-text">Helper: reading…</span></button>
     <button type="button" class="machine-chip" id="machine-chip" data-tone="unknown" title="The chips on this box. Opens the Machine view.">Chips: reading…</button>
     <div class="clock" aria-label="Machine time and connection">
       <span class="clock-day" id="clock-day"></span>
@@ -176,6 +178,68 @@
       </form>
     </section>
 
+    <section id="telegraph-view" class="telegraph" hidden aria-labelledby="tg-h">
+      <div>
+        <h1 id="tg-h"><span class="emoji" aria-hidden="true">📡 </span>Telegraph</h1>
+        <p class="muted">The outside helper model that the harness may ask when the local models keep failing. This page only
+          reads: it never sends a request to the helper and never spends anything.</p>
+      </div>
+      <div class="tg-banner" id="tg-banner" data-tone="dim" role="status"></div>
+
+      <section aria-labelledby="tg-spend-h" class="tg-block">
+        <h2 id="tg-spend-h">Spend and caps</h2>
+        <div class="tg-numbers" id="tg-numbers"></div>
+        <div class="tg-caps" id="tg-caps"></div>
+      </section>
+
+      <section aria-labelledby="tg-recent-h" class="tg-block">
+        <h2 id="tg-recent-h">Recent calls <span class="muted small" id="tg-recent-note"></span></h2>
+        <div class="table-wrap">
+          <table class="tg-table" id="tg-recent-table">
+            <thead><tr><th scope="col">Time</th><th scope="col">Problem</th><th scope="col">Model</th><th scope="col" class="num">Tokens in</th><th scope="col" class="num">Tokens out</th><th scope="col" class="num">Seconds</th><th scope="col" class="num">Cost</th><th scope="col">Outcome</th><th scope="col">Helped</th></tr></thead>
+            <tbody id="tg-recent"></tbody>
+          </table>
+        </div>
+        <p class="muted small" id="tg-recent-empty" hidden>No calls yet. The ledger gets one line for every call, refusal and cache hit.</p>
+      </section>
+
+      <div class="tg-two">
+        <section aria-labelledby="tg-model-h" class="tg-block">
+          <h2 id="tg-model-h">By model</h2>
+          <div class="table-wrap"><table class="tg-table">
+            <thead><tr><th scope="col">Model</th><th scope="col" class="num">Calls</th><th scope="col" class="num">Tokens</th><th scope="col" class="num">Cost</th></tr></thead>
+            <tbody id="tg-by-model"></tbody></table></div>
+        </section>
+        <section aria-labelledby="tg-problem-h" class="tg-block">
+          <h2 id="tg-problem-h">By problem</h2>
+          <div class="table-wrap"><table class="tg-table">
+            <thead><tr><th scope="col">Problem</th><th scope="col" class="num">Calls</th><th scope="col" class="num">Tokens</th><th scope="col" class="num">Cost</th><th scope="col">Helped</th><th scope="col">Of its cap</th></tr></thead>
+            <tbody id="tg-by-problem"></tbody></table></div>
+        </section>
+      </div>
+
+      <section aria-labelledby="tg-config-h" class="tg-block">
+        <h2 id="tg-config-h">Configuration <span class="muted small">read only; set in the <code>[telegraph]</code> table of the bringup config</span></h2>
+        <dl class="tg-config" id="tg-config"></dl>
+        <div class="table-wrap"><table class="tg-table" id="tg-models-table">
+          <caption class="muted small">Models, cheapest first. The harness moves to the next one only after an answer was reported as not helping.</caption>
+          <thead><tr><th scope="col">Order</th><th scope="col">Model</th><th scope="col" class="num">Input $ per million tokens</th><th scope="col" class="num">Output $ per million tokens</th></tr></thead>
+          <tbody id="tg-models"></tbody></table></div>
+      </section>
+
+      <section aria-labelledby="tg-how-h" class="tg-block tg-how">
+        <h2 id="tg-how-h">How to turn it on</h2>
+        <p>Telegraph is off unless the bringup config has a <code>[telegraph]</code> table with <code>enabled = true</code>, an
+          <code>endpoint</code>, a list of <code>models</code>, and a key from a variable (<code>key_env</code>) or a file
+          (<code>key_file</code>). Add caps (<code>max_calls</code>, <code>max_total_tokens</code>, <code>max_cost_usd</code> with
+          <code>prices</code>) so the spend stops by itself. The full list of settings and the commands are in README section 5.9g.
+          The page reads the config when it starts and after a save on the Models view, so restart <code>tt-orchard ui</code> after
+          you edit the file. The meter at the top then shows the new state.</p>
+        <p class="muted small">The meter in the top bar is always on screen. Amber means a cap is at 80 percent or more. Red means a cap
+          is used up or the latest call was refused; the reason is in the meter.</p>
+      </section>
+    </section>
+
     <div id="run-empty" class="empty">
       <h1><span class="op-pic" aria-hidden="true">🌱</span>Pick a run</h1>
       <p class="muted">Runs that need you are listed first. Start a new one with <strong>New bring-up</strong>.</p>
@@ -190,6 +254,7 @@
           <span class="mode-chip" id="run-mode" hidden></span>
           <h1 id="run-model"></h1>
           <p class="run-sub" id="run-sub"></p>
+          <p class="run-spend" id="run-spend" hidden></p>
         </div>
         <div class="actions" id="run-actions" role="group" aria-label="Run actions"></div>
       </header>
