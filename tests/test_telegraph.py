@@ -1430,3 +1430,72 @@ def test_extra_body_nested_to_twenty_levels_is_accepted():
         cur["x"] = {}
         cur = cur["x"]
     assert tg.load(table(extra_body=deep), base=Path("/x")).enabled
+
+
+# ------------------------------------------------------------------------------------------------ review of PR 106, round 6
+
+@pytest.mark.parametrize("secret", ["abc\ndef", "abc\r\ndef", "abc\x00def", "abc\x1fdef", "café中"])
+def test_a_key_that_cannot_be_sent_in_a_header_is_refused_without_echoing_it(tmp_path, secret):
+    tel, wire = make(tmp_path, environ={"TG_KEY": secret}, wire=Wire(status=401))
+    got = tel.ask("p", "t", "f")
+    assert not got.ok and wire.requests == [] and "header" in got.reason
+    for fragment in ("abc", "def"):
+        assert fragment not in got.reason
+    assert "abc" not in "".join(p.read_text() for p in (tmp_path / "tg").rglob("*") if p.is_file())
+
+
+def test_a_key_with_a_trailing_newline_from_a_file_is_still_fine(tmp_path):
+    keyfile = tmp_path / "k"
+    keyfile.write_text(KEY + "\n")
+    tel, wire = make(tmp_path, key_env=None, key_file=str(keyfile), environ={})
+    assert tel.ask("p", "t", "f").ok and wire.requests[0]["headers"]["Authorization"] == f"Bearer {KEY}"
+
+
+def test_check_ping_of_a_bad_key_does_not_print_it(tmp_path):
+    from orchard import telegraph_cmd as cmd_mod                     # the key check is shared with ask
+    tel, _ = make(tmp_path, environ={"TG_KEY": "abc\ndef"})
+    key, why = tel._key()
+    assert key is None and "header" in why and "abc" not in why
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), -1.0, 0.0])
+@pytest.mark.parametrize("name", ["max_cost_usd", "max_cost_per_problem_usd"])
+def test_a_money_cap_must_be_finite_and_positive(name, bad):
+    with pytest.raises(tg.ConfigError, match=name):
+        tg.load(table(**{name: bad, "prices": {"small": [1, 1], "big": [1, 1]}}), base=Path("/x"))
+
+
+@pytest.mark.parametrize("pair", [[float("nan"), 1.0], [1.0, float("inf")], [float("-inf"), 1.0]])
+def test_a_price_must_be_finite(pair):
+    with pytest.raises(tg.ConfigError, match="prices.small"):
+        tg.load(table(prices={"small": pair, "big": [1, 1]}), base=Path("/x"))
+
+
+@pytest.mark.parametrize("extra", [{"cache_control": {"type": "ephemeral"}}, {"a": [{"cache_control": 1}]},
+                                   {"nested": {"deeper": {"cache_control": None}}}])
+def test_prompt_caching_in_extra_body_is_refused_because_it_cannot_be_priced(extra):
+    with pytest.raises(tg.ConfigError, match="cache_control"):
+        tg.load(table(extra_body=extra), base=Path("/x"))
+
+
+@pytest.mark.parametrize("field", ["cache_read_input_tokens", "cache_creation_input_tokens"])
+def test_an_anthropic_answer_that_used_a_prompt_cache_counts_as_unknown_usage(tmp_path, field):
+    reply = {"content": [{"type": "text", "text": "ok"}],
+             "usage": {"input_tokens": 5, "output_tokens": 5, field: 9000}}
+    tel, wire = make(tmp_path, wire=Wire(lambda b: reply), api="anthropic", max_total_tokens=1000)
+    assert tel.ask("p", "t", "f1").ok
+    s = tg.summarise(tmp_path / "tg")
+    assert s["unknown_usage_calls"] == 1                              # the reservation is what counts, not 5 + 5
+    got = tel.ask("p", "t", "f2")
+    assert not got.ok and "token cap" in got.reason
+
+
+def test_an_answer_with_a_lone_surrogate_is_a_failed_result_and_keeps_its_usage(tmp_path):
+    body = b'{"choices": [{"message": {"content": "bad \\ud800 text"}, "finish_reason": "stop"}], ' \
+           b'"usage": {"prompt_tokens": 40, "completion_tokens": 12}}'
+    tel, _ = make(tmp_path, wire=Wire(lambda b: body))
+    got = tel.ask("p", "t", "f")                                      # must not raise
+    assert not got.ok and "cannot be stored" in got.reason
+    rec = records(tmp_path)[0]
+    assert rec["outcome"] == "error" and (rec["tokens_in"], rec["tokens_out"]) == (40, 12)
+    assert not (tmp_path / "tg" / "cache").exists()

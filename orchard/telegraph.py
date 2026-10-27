@@ -29,6 +29,7 @@ import fcntl
 import hashlib
 import ipaddress
 import json
+import math
 import os
 import re
 import socket
@@ -136,6 +137,20 @@ def _plain_json(value, where: str, depth: int = 0) -> None:
                       f"not {type(value).__name__}")
 
 
+def _refuse_prompt_caching(value, where: str) -> None:
+    """Prompt caching bills cached tokens at other rates and reports them apart from the input count, so telegraph cannot price
+    it. A `cache_control` key anywhere in extra_body is refused by name."""
+    if isinstance(value, dict):
+        for k, v in value.items():
+            if k == "cache_control":
+                raise ConfigError(f"{where} holds cache_control: prompt caching is not supported, because telegraph cannot "
+                                  "price cached tokens")
+            _refuse_prompt_caching(v, f"{where}.{k}")
+    elif isinstance(value, list):
+        for i, item in enumerate(value):
+            _refuse_prompt_caching(item, f"{where}[{i}]")
+
+
 def load(table: dict | None, *, base: Path) -> Config:
     """The `[telegraph]` table as a Config. None, an empty table or `enabled = false` is off and is not checked further.
     A relative key_file is relative to `base`, the config file's directory."""
@@ -191,20 +206,21 @@ def load(table: dict | None, *, base: Path) -> Config:
         raise ConfigError("telegraph.prices must be a table of model names to [input, output] dollars per million tokens")
     for model, pair in raw_prices.items():
         if (not isinstance(pair, list) or len(pair) != 2 or
-                not all(isinstance(x, (int, float)) and not isinstance(x, bool) and x >= 0 for x in pair)):
+                not all(isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) and x >= 0 for x in pair)):
             raise ConfigError(f"telegraph.prices.{model} must be [input, output] dollars per million tokens")
         prices[model] = (float(pair[0]), float(pair[1]))
     cap = table.get("max_cost_usd")
     if cap is not None:
-        if isinstance(cap, bool) or not isinstance(cap, (int, float)) or cap <= 0:
-            raise ConfigError("telegraph.max_cost_usd must be a number above zero")
+        if isinstance(cap, bool) or not isinstance(cap, (int, float)) or not math.isfinite(cap) or cap <= 0:
+            raise ConfigError("telegraph.max_cost_usd must be a finite number above zero")
         if not prices:
             raise ConfigError("telegraph.max_cost_usd needs telegraph.prices for the models it may call")
         cap = float(cap)
     per_cost = table.get("max_cost_per_problem_usd")
     if per_cost is not None:
-        if isinstance(per_cost, bool) or not isinstance(per_cost, (int, float)) or per_cost <= 0:
-            raise ConfigError("telegraph.max_cost_per_problem_usd must be a number above zero")
+        if (isinstance(per_cost, bool) or not isinstance(per_cost, (int, float)) or not math.isfinite(per_cost)
+                or per_cost <= 0):
+            raise ConfigError("telegraph.max_cost_per_problem_usd must be a finite number above zero")
         if not prices:
             raise ConfigError("telegraph.max_cost_per_problem_usd needs telegraph.prices for the models it may call")
         per_cost = float(per_cost)
@@ -213,6 +229,7 @@ def load(table: dict | None, *, base: Path) -> Config:
     if not isinstance(extra, dict):
         raise ConfigError("telegraph.extra_body must be a table")
     _plain_json(extra, "telegraph.extra_body")
+    _refuse_prompt_caching(extra, "telegraph.extra_body")
     for name in RESERVED_BODY:
         if name in extra:
             raise ConfigError(f"telegraph.extra_body cannot set {name}; telegraph sets it")
@@ -521,16 +538,25 @@ class Telegraph:
     # ------------------------------------------------------------------------------------------- parts
 
     def _key(self) -> tuple[str | None, str | None]:
+        """(key, problem). A key with a newline, a control character or a character outside Latin-1 is refused here, before
+        any use: it cannot be sent in a header, and an HTTP library would show it in an escaped form that redaction misses."""
         if self.cfg.key_env:
             value = str(self.environ.get(self.cfg.key_env, "")).strip()
-            return (value, None) if value else (None, f"the key variable {self.cfg.key_env} is not set")
-        if self.cfg.key_file:
+            if not value:
+                return None, f"the key variable {self.cfg.key_env} is not set"
+        elif self.cfg.key_file:
             try:
                 value = self.cfg.key_file.read_text(encoding="utf-8").strip()
             except (OSError, UnicodeDecodeError):
                 return None, "cannot read the key file"
-            return (value, None) if value else (None, "the key file is empty")
-        return None, None
+            if not value:
+                return None, "the key file is empty"
+        else:
+            return None, None
+        if any(ord(c) < 0x20 or ord(c) == 0x7F or ord(c) > 0xFF for c in value):
+            return None, ("the key has a character that cannot be sent in an HTTP header (a newline, a control character or a "
+                          "character outside Latin-1); check the key source")
+        return value, None
 
     def _choose_model(self, problem: str, recs: list[dict]) -> str:
         """The model for the next question on `problem`: each answered call counts once, by its latest verdict. A verdict of
@@ -664,6 +690,9 @@ class Telegraph:
                 text = "".join(b.get("text", "") for b in obj.get("content", []) if isinstance(b, dict))
                 u = obj.get("usage") or {}
                 usage = (int(u["input_tokens"]), int(u["output_tokens"])) if "input_tokens" in u else None
+                if any(isinstance(u.get(k), (int, float)) and u.get(k) > 0
+                       for k in ("cache_creation_input_tokens", "cache_read_input_tokens")):
+                    usage = None               # cached input is reported apart and billed at other rates: unknown usage
                 finish = obj.get("stop_reason")
             else:
                 choice = obj["choices"][0]
@@ -682,6 +711,10 @@ class Telegraph:
                                "extra_body = { chat_template_kwargs = { enable_thinking = false } }")
         if not text.strip():
             return "", usage, "the answer was empty (only reasoning, no answer)"
+        try:
+            text.encode("utf-8")
+        except UnicodeEncodeError:
+            return "", usage, "the answer contains characters that cannot be stored (a lone surrogate)"
         return text, usage, ""
 
     def _refuse(self, base: dict, outcome: str, reason: str, held: bool = False) -> Answer:
