@@ -287,7 +287,7 @@ TTLANG_NEGATIVE_EXAMPLES = (
 
 # The ops the kernel probe can ask for (orchard/kernelprobe.py re-exports this as OPS). It lives here so the CLI can
 # offer the choices without importing the probe and the agent machinery behind it.
-KERNEL_PROBE_OPS = ("add", "silu_mul", "rmsnorm", "linear_scan", "center", "softmax")
+KERNEL_PROBE_OPS = ("add", "silu_mul", "rmsnorm", "linear_scan", "center", "softmax", "tile_scan")
 
 # ---- decode speed watch (orchard/speedwatch.py) ------------------------------------------------------------------
 # Measured 2026-10-17 on this Quietbox 2, Qwen3-Coder-Next on one board: one 400-token greedy answer 38.7 tok/s idle;
