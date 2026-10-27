@@ -1,0 +1,351 @@
+{
+  "config": "on",
+  "serving": {
+    "drafter": "on (dflash2)",
+    "sampling": "on device (decode_only)"
+  },
+  "ready_s": 260.1,
+  "probes": [
+    {
+      "ran": true,
+      "model_id": "Qwen/Qwen3.8-27B",
+      "prompt": "Write the opening paragraph of a short story about a lighthouse keeper who finds an unmarked boat on the rocks.",
+      "max_tokens": 96,
+      "requests": {
+        "greedy": {
+          "params": {
+            "temperature": 0
+          },
+          "accepted": true,
+          "error": null,
+          "seconds": 1.5992,
+          "completion_tokens": 96,
+          "text": "\n\n<think>\nThe user wants me to write the opening paragraph of a short story about a lighthouse keeper who finds an unmarked boat on the rocks. Let me think about what makes a compelling opening paragraph.\n\nKey elements to consider:\n- The lighthouse keeper as a character - I should give them a sense of place, routine, isolation\n- The discovery of the boat - this should feel sudden, unexpected, jarring against the normalcy\n- The \"un",
+          "finish_reason": "length",
+          "drafter_log": "(EngineCore pid=3469700) 2026-10-27 09:54:16.419 | INFO     | models.demos.blackhole.qwen36.tt.dflash2_serving:end:907 - [dflash2-serve] slot 0 session: 19 iters, 96 committed tokens, accept 4.11/7 -> 5.05 tok/iter, 66.7 tok/s in-model (incl. seed); histogram [1, 4, 0, 4, 2, 1, 0, 7]"
+        },
+        "sampled_a": {
+          "params": {
+            "temperature": 1.0,
+            "top_p": 0.9,
+            "seed": 1234
+          },
+          "accepted": true,
+          "error": null,
+          "seconds": 1.6377,
+          "completion_tokens": 96,
+          "text": "\n\n<think>\nThe user wants me to write the opening paragraph of a short story about a lighthouse keeper who finds an unmarked boat on the rocks. Let me think about what makes a compelling opening paragraph.\n\nKey elements to consider:\n- The lighthouse keeper as a character - I should give them a sense of place, routine, isolation\n- The discovery of the boat - this should feel sudden, unexpected, jarring against the normalcy\n- The \"un",
+          "finish_reason": "length",
+          "drafter_log": "(EngineCore pid=3469700) 2026-10-27 09:54:18.558 | INFO     | models.demos.blackhole.qwen36.tt.dflash2_serving:end:907 - [dflash2-serve] slot 0 session: 19 iters, 96 committed tokens, accept 4.11/7 -> 5.05 tok/iter, 65.5 tok/s in-model (incl. seed); histogram [1, 4, 0, 4, 2, 1, 0, 7]"
+        },
+        "sampled_b": {
+          "params": {
+            "temperature": 1.0,
+            "top_p": 0.9,
+            "seed": 4321
+          },
+          "accepted": true,
+          "error": null,
+          "seconds": 1.6045,
+          "completion_tokens": 96,
+          "text": "\n\n<think>\nThe user wants me to write the opening paragraph of a short story about a lighthouse keeper who finds an unmarked boat on the rocks. Let me think about what makes a compelling opening paragraph.\n\nKey elements to consider:\n- The lighthouse keeper as a character - I should give them a sense of place, routine, isolation\n- The discovery of the boat - this should feel sudden, unexpected, jarring against the normalcy\n- The \"un",
+          "finish_reason": "length",
+          "drafter_log": "(EngineCore pid=3469700) 2026-10-27 09:54:20.662 | INFO     | models.demos.blackhole.qwen36.tt.dflash2_serving:end:907 - [dflash2-serve] slot 0 session: 19 iters, 96 committed tokens, accept 4.11/7 -> 5.05 tok/iter, 66.8 tok/s in-model (incl. seed); histogram [1, 4, 0, 4, 2, 1, 0, 7]"
+        }
+      }
+    },
+    {
+      "ran": true,
+      "model_id": "Qwen/Qwen3.8-27B",
+      "prompt": "Write the opening paragraph of a short story about a lighthouse keeper who finds an unmarked boat on the rocks.",
+      "max_tokens": 96,
+      "requests": {
+        "greedy": {
+          "params": {
+            "temperature": 0
+          },
+          "accepted": true,
+          "error": null,
+          "seconds": 1.5881,
+          "completion_tokens": 96,
+          "text": "\n\n<think>\nThe user wants me to write the opening paragraph of a short story about a lighthouse keeper who finds an unmarked boat on the rocks. Let me think about what makes a compelling opening paragraph.\n\nKey elements to consider:\n- The lighthouse keeper as a character - I should give them a sense of place, routine, isolation\n- The discovery of the boat - this should feel sudden, unexpected, jarring against the normalcy\n- The \"un",
+          "finish_reason": "length",
+          "drafter_log": "(EngineCore pid=3469700) 2026-10-27 09:54:22.751 | INFO     | models.demos.blackhole.qwen36.tt.dflash2_serving:end:907 - [dflash2-serve] slot 0 session: 19 iters, 96 committed tokens, accept 4.11/7 -> 5.05 tok/iter, 66.9 tok/s in-model (incl. seed); histogram [1, 4, 0, 4, 2, 1, 0, 7]"
+        },
+        "sampled_a": {
+          "params": {
+            "temperature": 1.0,
+            "top_p": 0.9,
+            "seed": 1234
+          },
+          "accepted": true,
+          "error": null,
+          "seconds": 1.5973,
+          "completion_tokens": 96,
+          "text": "\n\n<think>\nThe user wants me to write the opening paragraph of a short story about a lighthouse keeper who finds an unmarked boat on the rocks. Let me think about what makes a compelling opening paragraph.\n\nKey elements to consider:\n- The lighthouse keeper as a character - I should give them a sense of place, routine, isolation\n- The discovery of the boat - this should feel sudden, unexpected, jarring against the normalcy\n- The \"un",
+          "finish_reason": "length",
+          "drafter_log": "(EngineCore pid=3469700) 2026-10-27 09:54:24.849 | INFO     | models.demos.blackhole.qwen36.tt.dflash2_serving:end:907 - [dflash2-serve] slot 0 session: 19 iters, 96 committed tokens, accept 4.11/7 -> 5.05 tok/iter, 67.0 tok/s in-model (incl. seed); histogram [1, 4, 0, 4, 2, 1, 0, 7]"
+        },
+        "sampled_b": {
+          "params": {
+            "temperature": 1.0,
+            "top_p": 0.9,
+            "seed": 4321
+          },
+          "accepted": true,
+          "error": null,
+          "seconds": 1.5933,
+          "completion_tokens": 96,
+          "text": "\n\n<think>\nThe user wants me to write the opening paragraph of a short story about a lighthouse keeper who finds an unmarked boat on the rocks. Let me think about what makes a compelling opening paragraph.\n\nKey elements to consider:\n- The lighthouse keeper as a character - I should give them a sense of place, routine, isolation\n- The discovery of the boat - this should feel sudden, unexpected, jarring against the normalcy\n- The \"un",
+          "finish_reason": "length",
+          "drafter_log": "(EngineCore pid=3469700) 2026-10-27 09:54:26.942 | INFO     | models.demos.blackhole.qwen36.tt.dflash2_serving:end:907 - [dflash2-serve] slot 0 session: 19 iters, 96 committed tokens, accept 4.11/7 -> 5.05 tok/iter, 67.3 tok/s in-model (incl. seed); histogram [1, 4, 0, 4, 2, 1, 0, 7]"
+        }
+      }
+    },
+    {
+      "ran": true,
+      "model_id": "Qwen/Qwen3.8-27B",
+      "prompt": "Write the opening paragraph of a short story about a lighthouse keeper who finds an unmarked boat on the rocks.",
+      "max_tokens": 96,
+      "requests": {
+        "greedy": {
+          "params": {
+            "temperature": 0
+          },
+          "accepted": true,
+          "error": null,
+          "seconds": 1.5855,
+          "completion_tokens": 96,
+          "text": "\n\n<think>\nThe user wants me to write the opening paragraph of a short story about a lighthouse keeper who finds an unmarked boat on the rocks. Let me think about what makes a compelling opening paragraph.\n\nKey elements to consider:\n- The lighthouse keeper as a character - I should give them a sense of place, routine, isolation\n- The discovery of the boat - this should feel sudden, unexpected, jarring against the normalcy\n- The \"un",
+          "finish_reason": "length",
+          "drafter_log": "(EngineCore pid=3469700) 2026-10-27 09:54:29.027 | INFO     | models.demos.blackhole.qwen36.tt.dflash2_serving:end:907 - [dflash2-serve] slot 0 session: 19 iters, 96 committed tokens, accept 4.11/7 -> 5.05 tok/iter, 67.1 tok/s in-model (incl. seed); histogram [1, 4, 0, 4, 2, 1, 0, 7]"
+        },
+        "sampled_a": {
+          "params": {
+            "temperature": 1.0,
+            "top_p": 0.9,
+            "seed": 1234
+          },
+          "accepted": true,
+          "error": null,
+          "seconds": 1.6015,
+          "completion_tokens": 96,
+          "text": "\n\n<think>\nThe user wants me to write the opening paragraph of a short story about a lighthouse keeper who finds an unmarked boat on the rocks. Let me think about what makes a compelling opening paragraph.\n\nKey elements to consider:\n- The lighthouse keeper as a character - I should give them a sense of place, routine, isolation\n- The discovery of the boat - this should feel sudden, unexpected, jarring against the normalcy\n- The \"un",
+          "finish_reason": "length",
+          "drafter_log": "(EngineCore pid=3469700) 2026-10-27 09:54:31.130 | INFO     | models.demos.blackhole.qwen36.tt.dflash2_serving:end:907 - [dflash2-serve] slot 0 session: 19 iters, 96 committed tokens, accept 4.11/7 -> 5.05 tok/iter, 67.0 tok/s in-model (incl. seed); histogram [1, 4, 0, 4, 2, 1, 0, 7]"
+        },
+        "sampled_b": {
+          "params": {
+            "temperature": 1.0,
+            "top_p": 0.9,
+            "seed": 4321
+          },
+          "accepted": true,
+          "error": null,
+          "seconds": 1.6255,
+          "completion_tokens": 96,
+          "text": "\n\n<think>\nThe user wants me to write the opening paragraph of a short story about a lighthouse keeper who finds an unmarked boat on the rocks. Let me think about what makes a compelling opening paragraph.\n\nKey elements to consider:\n- The lighthouse keeper as a character - I should give them a sense of place, routine, isolation\n- The discovery of the boat - this should feel sudden, unexpected, jarring against the normalcy\n- The \"un",
+          "finish_reason": "length",
+          "drafter_log": "(EngineCore pid=3469700) 2026-10-27 09:54:33.255 | INFO     | models.demos.blackhole.qwen36.tt.dflash2_serving:end:907 - [dflash2-serve] slot 0 session: 19 iters, 96 committed tokens, accept 4.11/7 -> 5.05 tok/iter, 65.7 tok/s in-model (incl. seed); histogram [1, 4, 0, 4, 2, 1, 0, 7]"
+        }
+      }
+    }
+  ],
+  "extras": {
+    "temperature_0.7_only": {
+      "params": {
+        "temperature": 0.7,
+        "seed": 7
+      },
+      "accepted": true,
+      "error": null,
+      "seconds": 1.5891,
+      "completion_tokens": 96,
+      "text": "\n\n<think>\nThe user wants me to write the opening paragraph of a short story about a lighthouse keeper who finds an unmarked boat on the rocks. Let me think about what makes a compelling opening paragraph.\n\nKey elements to consider:\n- The lighthouse keeper as a character - I should give them a sense of place, routine, isolation\n- The discovery of the boat - this should feel sudden, unexpected, jarring against the normalcy\n- The \"un",
+      "finish_reason": "length",
+      "drafter_log": "(EngineCore pid=3469700) 2026-10-27 09:54:35.344 | INFO     | models.demos.blackhole.qwen36.tt.dflash2_serving:end:907 - [dflash2-serve] slot 0 session: 19 iters, 96 committed tokens, accept 4.11/7 -> 5.05 tok/iter, 67.4 tok/s in-model (incl. seed); histogram [1, 4, 0, 4, 2, 1, 0, 7]"
+    },
+    "top_k_40": {
+      "params": {
+        "temperature": 1.0,
+        "top_k": 40,
+        "seed": 7
+      },
+      "accepted": true,
+      "error": null,
+      "seconds": 1.5851,
+      "completion_tokens": 96,
+      "text": "\n\n<think>\nThe user wants me to write the opening paragraph of a short story about a lighthouse keeper who finds an unmarked boat on the rocks. Let me think about what makes a compelling opening paragraph.\n\nKey elements to consider:\n- The lighthouse keeper as a character - I should give them a sense of place, routine, isolation\n- The discovery of the boat - this should feel sudden, unexpected, jarring against the normalcy\n- The \"un",
+      "finish_reason": "length",
+      "drafter_log": "(EngineCore pid=3469700) 2026-10-27 09:54:37.429 | INFO     | models.demos.blackhole.qwen36.tt.dflash2_serving:end:907 - [dflash2-serve] slot 0 session: 19 iters, 96 committed tokens, accept 4.11/7 -> 5.05 tok/iter, 67.3 tok/s in-model (incl. seed); histogram [1, 4, 0, 4, 2, 1, 0, 7]"
+    },
+    "top_p_only_temp1": {
+      "params": {
+        "temperature": 1.0,
+        "top_p": 0.9
+      },
+      "accepted": true,
+      "error": null,
+      "seconds": 1.628,
+      "completion_tokens": 96,
+      "text": "\n\n<think>\nThe user wants me to write the opening paragraph of a short story about a lighthouse keeper who finds an unmarked boat on the rocks. Let me think about what makes a compelling opening paragraph.\n\nKey elements to consider:\n- The lighthouse keeper as a character - I should give them a sense of place, routine, isolation\n- The discovery of the boat - this should feel sudden, unexpected, jarring against the normalcy\n- The \"un",
+      "finish_reason": "length",
+      "drafter_log": "(EngineCore pid=3469700) 2026-10-27 09:54:39.557 | INFO     | models.demos.blackhole.qwen36.tt.dflash2_serving:end:907 - [dflash2-serve] slot 0 session: 19 iters, 96 committed tokens, accept 4.11/7 -> 5.05 tok/iter, 65.7 tok/s in-model (incl. seed); histogram [1, 4, 0, 4, 2, 1, 0, 7]"
+    },
+    "no_seed_temp1": {
+      "params": {
+        "temperature": 1.0
+      },
+      "accepted": true,
+      "error": null,
+      "seconds": 1.6128,
+      "completion_tokens": 96,
+      "text": "\n\n<think>\nThe user wants me to write the opening paragraph of a short story about a lighthouse keeper who finds an unmarked boat on the rocks. Let me think about what makes a compelling opening paragraph.\n\nKey elements to consider:\n- The lighthouse keeper as a character - I should give them a sense of place, routine, isolation\n- The discovery of the boat - this should feel sudden, unexpected, jarring against the normalcy\n- The \"un",
+      "finish_reason": "length",
+      "drafter_log": "(EngineCore pid=3469700) 2026-10-27 09:54:41.670 | INFO     | models.demos.blackhole.qwen36.tt.dflash2_serving:end:907 - [dflash2-serve] slot 0 session: 19 iters, 96 committed tokens, accept 4.11/7 -> 5.05 tok/iter, 66.4 tok/s in-model (incl. seed); histogram [1, 4, 0, 4, 2, 1, 0, 7]"
+    },
+    "presence_penalty_0.5": {
+      "params": {
+        "temperature": 0.0,
+        "presence_penalty": 0.5
+      },
+      "accepted": true,
+      "error": null,
+      "seconds": 1.5896,
+      "completion_tokens": 96,
+      "text": "\n\n<think>\nThe user wants me to write the opening paragraph of a short story about a lighthouse keeper who finds an unmarked boat on the rocks. Let me think about what makes a compelling opening paragraph.\n\nKey elements to consider:\n- The lighthouse keeper as a character - I should give them a sense of place, routine, isolation\n- The discovery of the boat - this should feel sudden, unexpected, jarring against the normalcy\n- The \"un",
+      "finish_reason": "length",
+      "drafter_log": "(EngineCore pid=3469700) 2026-10-27 09:54:43.762 | INFO     | models.demos.blackhole.qwen36.tt.dflash2_serving:end:907 - [dflash2-serve] slot 0 session: 19 iters, 96 committed tokens, accept 4.11/7 -> 5.05 tok/iter, 66.8 tok/s in-model (incl. seed); histogram [1, 4, 0, 4, 2, 1, 0, 7]"
+    },
+    "frequency_penalty_0.5": {
+      "params": {
+        "temperature": 0.0,
+        "frequency_penalty": 0.5
+      },
+      "accepted": true,
+      "error": null,
+      "seconds": 1.6234,
+      "completion_tokens": 96,
+      "text": "\n\n<think>\nThe user wants me to write the opening paragraph of a short story about a lighthouse keeper who finds an unmarked boat on the rocks. Let me think about what makes a compelling opening paragraph.\n\nKey elements to consider:\n- The lighthouse keeper as a character - I should give them a sense of place, routine, isolation\n- The discovery of the boat - this should feel sudden, unexpected, jarring against the normalcy\n- The \"un",
+      "finish_reason": "length",
+      "drafter_log": "(EngineCore pid=3469700) 2026-10-27 09:54:45.883 | INFO     | models.demos.blackhole.qwen36.tt.dflash2_serving:end:907 - [dflash2-serve] slot 0 session: 19 iters, 96 committed tokens, accept 4.11/7 -> 5.05 tok/iter, 65.3 tok/s in-model (incl. seed); histogram [1, 4, 0, 4, 2, 1, 0, 7]"
+    },
+    "repetition_penalty_1.1": {
+      "params": {
+        "temperature": 0.0,
+        "repetition_penalty": 1.1
+      },
+      "accepted": true,
+      "error": null,
+      "seconds": 1.588,
+      "completion_tokens": 96,
+      "text": "\n\n<think>\nThe user wants me to write the opening paragraph of a short story about a lighthouse keeper who finds an unmarked boat on the rocks. Let me think about what makes a compelling opening paragraph.\n\nKey elements to consider:\n- The lighthouse keeper as a character - I should give them a sense of place, routine, isolation\n- The discovery of the boat - this should feel sudden, unexpected, jarring against the normalcy\n- The \"un",
+      "finish_reason": "length",
+      "drafter_log": "(EngineCore pid=3469700) 2026-10-27 09:54:47.971 | INFO     | models.demos.blackhole.qwen36.tt.dflash2_serving:end:907 - [dflash2-serve] slot 0 session: 19 iters, 96 committed tokens, accept 4.11/7 -> 5.05 tok/iter, 67.2 tok/s in-model (incl. seed); histogram [1, 4, 0, 4, 2, 1, 0, 7]"
+    },
+    "min_p_0.05": {
+      "params": {
+        "temperature": 1.0,
+        "min_p": 0.05,
+        "seed": 7
+      },
+      "accepted": true,
+      "error": null,
+      "seconds": 1.6325,
+      "completion_tokens": 96,
+      "text": "\n\n<think>\nThe user wants me to write the opening paragraph of a short story about a lighthouse keeper who finds an unmarked boat on the rocks. Let me think about what makes a compelling opening paragraph.\n\nKey elements to consider:\n- The lighthouse keeper as a character - I should give them a sense of place, routine, isolation\n- The discovery of the boat - this should feel sudden, unexpected, jarring against the normalcy\n- The \"un",
+      "finish_reason": "length",
+      "drafter_log": "(EngineCore pid=3469700) 2026-10-27 09:54:50.104 | INFO     | models.demos.blackhole.qwen36.tt.dflash2_serving:end:907 - [dflash2-serve] slot 0 session: 19 iters, 96 committed tokens, accept 4.11/7 -> 5.05 tok/iter, 65.5 tok/s in-model (incl. seed); histogram [1, 4, 0, 4, 2, 1, 0, 7]"
+    },
+    "logprobs_1": {
+      "params": {
+        "temperature": 0.0,
+        "logprobs": 1
+      },
+      "accepted": false,
+      "error": "HTTP 400: {\"error\":{\"message\":\"This block-output model owns its Gumbel sampling and does not support these request parameters: logprobs=1 (accepted: None)\",\"type\":\"BadRequestError\",\"param\":null,\"code\":400}}",
+      "seconds": null,
+      "completion_tokens": null,
+      "text": "",
+      "finish_reason": null,
+      "drafter_log": ""
+    },
+    "temperature_2.0": {
+      "params": {
+        "temperature": 2.0,
+        "seed": 7
+      },
+      "accepted": true,
+      "error": null,
+      "seconds": 2.4448,
+      "completion_tokens": 96,
+      "text": "的节日\n\n<think>\nThe user is asking me to write the opening paragraph of a short story about a lighthouse keeper who finds an unmarked boat on the rocks. The last part \"的节日\" seems to be Chinese for \"holiday/festival\" - it might be a stray addition or the user might want the story to be set during a holiday/festival. Let me incorporate that element - perhaps the lighthouse keeper is alone during a holiday season, which adds to the isolation and",
+      "finish_reason": "length",
+      "drafter_log": "(EngineCore pid=3469700) 2026-10-27 09:54:53.552 | INFO     | models.demos.blackhole.qwen36.tt.dflash2_serving:end:907 - [dflash2-serve] slot 0 session: 30 iters, 101 committed tokens, accept 2.40/7 -> 3.37 tok/iter, 44.3 tok/s in-model (incl. seed); histogram [4, 9, 6, 4, 3, 0, 1, 3]"
+    }
+  },
+  "seed_sweep": [
+    {
+      "params": {
+        "seed": 11
+      },
+      "accepted": true,
+      "error": null,
+      "seconds": 1.5918,
+      "completion_tokens": 96,
+      "text": "\n\n<think>\nThe user wants me to write the opening paragraph of a short story about a lighthouse keeper who finds an unmarked boat on the rocks. Let me think about what makes a compelling opening paragraph.\n\nKey elements to consider:\n- The lighthouse keeper as a character - I should give them a sense of place, routine, isolation\n- The discovery of the boat - this should feel sudden, unexpected, jarring against the normalcy\n- The \"un",
+      "finish_reason": "length",
+      "drafter_log": "(EngineCore pid=3469700) 2026-10-27 09:54:55.644 | INFO     | models.demos.blackhole.qwen36.tt.dflash2_serving:end:907 - [dflash2-serve] slot 0 session: 19 iters, 96 committed tokens, accept 4.11/7 -> 5.05 tok/iter, 67.4 tok/s in-model (incl. seed); histogram [1, 4, 0, 4, 2, 1, 0, 7]"
+    },
+    {
+      "params": {
+        "seed": 12
+      },
+      "accepted": true,
+      "error": null,
+      "seconds": 1.6081,
+      "completion_tokens": 96,
+      "text": "\n\n<think>\nThe user wants me to write the opening paragraph of a short story about a lighthouse keeper who finds an unmarked boat on the rocks. Let me think about what makes a compelling opening paragraph.\n\nKey elements to consider:\n- The lighthouse keeper as a character - I should give them a sense of place, routine, isolation\n- The discovery of the boat - this should feel sudden, unexpected, jarring against the normalcy\n- The \"un",
+      "finish_reason": "length",
+      "drafter_log": "(EngineCore pid=3469700) 2026-10-27 09:54:57.753 | INFO     | models.demos.blackhole.qwen36.tt.dflash2_serving:end:907 - [dflash2-serve] slot 0 session: 19 iters, 96 committed tokens, accept 4.11/7 -> 5.05 tok/iter, 66.6 tok/s in-model (incl. seed); histogram [1, 4, 0, 4, 2, 1, 0, 7]"
+    },
+    {
+      "params": {
+        "seed": 13
+      },
+      "accepted": true,
+      "error": null,
+      "seconds": 1.5979,
+      "completion_tokens": 96,
+      "text": "\n\n<think>\nThe user wants me to write the opening paragraph of a short story about a lighthouse keeper who finds an unmarked boat on the rocks. Let me think about what makes a compelling opening paragraph.\n\nKey elements to consider:\n- The lighthouse keeper as a character - I should give them a sense of place, routine, isolation\n- The discovery of the boat - this should feel sudden, unexpected, jarring against the normalcy\n- The \"un",
+      "finish_reason": "length",
+      "drafter_log": "(EngineCore pid=3469700) 2026-10-27 09:54:59.851 | INFO     | models.demos.blackhole.qwen36.tt.dflash2_serving:end:907 - [dflash2-serve] slot 0 session: 19 iters, 96 committed tokens, accept 4.11/7 -> 5.05 tok/iter, 67.1 tok/s in-model (incl. seed); histogram [1, 4, 0, 4, 2, 1, 0, 7]"
+    },
+    {
+      "params": {
+        "seed": 14
+      },
+      "accepted": true,
+      "error": null,
+      "seconds": 1.6066,
+      "completion_tokens": 96,
+      "text": "\n\n<think>\nThe user wants me to write the opening paragraph of a short story about a lighthouse keeper who finds an unmarked boat on the rocks. Let me think about what makes a compelling opening paragraph.\n\nKey elements to consider:\n- The lighthouse keeper as a character - I should give them a sense of place, routine, isolation\n- The discovery of the boat - this should feel sudden, unexpected, jarring against the normalcy\n- The \"un",
+      "finish_reason": "length",
+      "drafter_log": "(EngineCore pid=3469700) 2026-10-27 09:55:01.957 | INFO     | models.demos.blackhole.qwen36.tt.dflash2_serving:end:907 - [dflash2-serve] slot 0 session: 19 iters, 96 committed tokens, accept 4.11/7 -> 5.05 tok/iter, 66.7 tok/s in-model (incl. seed); histogram [1, 4, 0, 4, 2, 1, 0, 7]"
+    },
+    {
+      "params": {
+        "seed": 15
+      },
+      "accepted": true,
+      "error": null,
+      "seconds": 1.6416,
+      "completion_tokens": 96,
+      "text": "\n\n<think>\nThe user wants me to write the opening paragraph of a short story about a lighthouse keeper who finds an unmarked boat on the rocks. Let me think about what makes a compelling opening paragraph.\n\nKey elements to consider:\n- The lighthouse keeper as a character - I should give them a sense of place, routine, isolation\n- The discovery of the boat - this should feel sudden, unexpected, jarring against the normalcy\n- The \"un",
+      "finish_reason": "length",
+      "drafter_log": "(EngineCore pid=3469700) 2026-10-27 09:55:04.092 | INFO     | models.demos.blackhole.qwen36.tt.dflash2_serving:end:907 - [dflash2-serve] slot 0 session: 19 iters, 96 committed tokens, accept 4.11/7 -> 5.05 tok/iter, 65.4 tok/s in-model (incl. seed); histogram [1, 4, 0, 4, 2, 1, 0, 7]"
+    }
+  ],
+  "finished": true,
+  "elapsed_s": 312.8
+}

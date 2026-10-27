@@ -1680,6 +1680,53 @@ second one is refused. A `--gozer` executable other than the default is passed o
 the stage's `swap_config.json` before the stage's test runs. `--port` overrides the stage's port.
 Not built: a supervisor step that makes the control before stage 2's test.
 
+### 5.9g Telegraph: an outside helper for when the local models keep failing
+
+Off by default. When a `[telegraph]` table enables it, the harness can ask one model outside this box (a cloud model, another
+machine on your network, a hosted proxy) for help after the local models have failed the same way more than once. Everything
+works without it: if the key is missing, a cap is reached or the network is down, the call returns a reason and the run goes on.
+
+```toml
+[telegraph]
+enabled = true
+endpoint = "https://llm.example.org/v1"      # https; plain http only for this machine or a private address
+api = "openai"                               # or "anthropic" (POST /v1/messages)
+models = ["cheap-model", "strong-model"]     # cheapest first
+key_env = "MY_HELPER_KEY"                    # or key_file = "/path/outside/any/repo"; neither for a keyless endpoint
+after_failures = 2                           # ask after this many repeated failures
+max_calls = 5                                # caps across the whole ledger, so they hold across processes
+max_total_tokens = 40000
+max_output_tokens = 1500
+max_prompt_chars = 12000
+# extra_body = { chat_template_kwargs = { enable_thinking = false } }   # added to every request; here, thinking off for a Qwen3 server
+max_calls_per_problem = 3                    # one problem (the id passed to ask) may use at most this many calls
+# max_tokens_per_problem = 60000             # and at most this many tokens
+# max_cost_per_problem_usd = 0.50            # and at most this much money (needs prices; the next call's worst case counts)
+# max_cost_usd = 2.0                         # needs prices for the models it may call
+# prices = { "cheap-model" = [0.25, 1.25], "strong-model" = [5.0, 25.0] }   # dollars per million tokens, input and output
+```
+
+The key is read when a call is made and is never written to a prompt, ledger, cache, reply file or error. A `key_file` inside the
+checkout is refused. Requests hold only the task and the failure, with home paths, host names and token shapes removed, cut to
+`max_prompt_chars`. The same question to the same model is answered from the cache. A stronger model is used only after an answer
+was reported as not helping. Before a request is sent, its worst-case cost is reserved in the ledger under a lock, so two processes cannot spend the same allowance and a process that dies mid-request still counts. A request whose usage is unknown (a timeout, a server error, an answer with no usage) counts at that worst case. If the ledger cannot be written, no outside call is made. Keep the problem id the same across rounds of one problem, so the per-problem caps see the whole spend. On ops where a stronger
+model does not help (earlier runs on `linear_scan` spent $0.83 on one model without a fix), these caps stop the spending. A reply's `<think>` block is removed before it is stored, and an answer cut off inside its reasoning is a failed call (its tokens still
+count against the caps and it is not cached); `extra_body` is how to turn thinking off for a model that thinks by default. The reply is advice from another model and is shown marked as untrusted text; nothing runs it.
+
+Every call, refusal and cache hit is one line in `telegraph.jsonl` (model, tokens, seconds, cost when a price is known, outcome).
+`telegraph report` records whether the answer helped, and `telegraph usage` shows what the help cost and how often it worked.
+
+- `tt-orchard telegraph check`: the setting and whether the key is present (never the key). Exit 2 on a problem.
+  - `--ping`: also ask the endpoint for its model list, which spends no tokens, and mark each configured model listed or not.
+- `tt-orchard telegraph ask`: one question by hand. Exit 3 when there is no answer.
+  - `--problem`: a short id for the problem; the model ladder and the summary group by it.
+  - `--task-file`: a file saying what was being attempted.
+  - `--failure-file`: a file saying what went wrong.
+- `tt-orchard telegraph report CALL_ID`: record whether an answer helped, with `--helped` or `--not-helped`.
+- `tt-orchard telegraph usage`: calls, tokens, cost and how often the help worked (`--json` for the raw summary).
+- `--telegraph-config`: read the table from another TOML file (default: the bringup config). `--dir`: where the ledger,
+  cache and reply files live (default `~/.cache/tt-orchard/telegraph`).
+
 ## 6. Lessons that will bite you
 
 Each of these happened on the development machine. Details are in the

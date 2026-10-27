@@ -339,3 +339,10 @@ def test_two_attempts_that_were_not_run_use_plural_agreement(tmp_path, fake_kenv
     md = report_for(tmp_path, fake_kenv, [first, second])
     assert UNRUN_TWO in md and UNRUN_ONE not in md
     assert "a function the simulator lacks a function for" not in md
+
+
+def test_the_skill_says_element_loops_are_allowed_in_data_movement_threads_only():
+    flat = " ".join(kp.SKILL.read_text().split())
+    assert "Do not index a block element by element" in flat and "in a compute thread" in flat
+    assert "in a data movement thread, loops over element positions" in flat
+    assert "or loop over its elements" not in flat
