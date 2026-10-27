@@ -2488,12 +2488,71 @@ AUDIO_DTYPE_BYTES = {"F64": 8, "F32": 4, "F16": 2, "BF16": 2, "I64": 8, "I32": 4
 AUDIO_MAX_LISTED = 50                    # differences listed per kind in the record (the counts are exact)
 
 
+AUDIO_MAX_DEPTH = 32                      # containers nested deeper than this are refused
+AUDIO_MAX_INT_DIGITS = 30                 # an integer longer than this is refused
+
+
+def _strict_pairs(pairs):
+    """A JSON object with a repeated key is refused: json.loads would keep the last value and hide the first."""
+    out = {}
+    for key, value in pairs:
+        if key in out:
+            raise ValueError(f"duplicate key {key!r}")
+        out[key] = value
+    return out
+
+
+def _no_constant(name):
+    raise ValueError(f"the non-finite number {name} is not allowed")
+
+
+def _strict_float(text):
+    value = float(text)
+    if not math.isfinite(value):
+        raise ValueError(f"the number {text} is not finite")
+    return value
+
+
+def _strict_int(text):
+    if len(text.lstrip("-")) > AUDIO_MAX_INT_DIGITS:
+        raise ValueError(f"an integer of more than {AUDIO_MAX_INT_DIGITS} digits is not allowed")
+    return int(text)
+
+
+def _depth(obj) -> int:
+    """The nesting depth of parsed JSON, counted without recursion."""
+    deepest, stack = 0, [(obj, 1)]
+    while stack:
+        item, d = stack.pop()
+        if isinstance(item, dict):
+            children = item.values()
+        elif isinstance(item, list):
+            children = item
+        else:
+            continue
+        deepest = max(deepest, d)
+        stack.extend((c, d + 1) for c in children)
+    return deepest
+
+
+def audio_loads(text: str):
+    """json.loads with the limits above: no repeated key, no NaN or infinity, no huge integer, no deep nesting. Raises ValueError."""
+    try:
+        data = json.loads(text, object_pairs_hook=_strict_pairs, parse_constant=_no_constant, parse_float=_strict_float, parse_int=_strict_int)
+    except RecursionError:
+        raise ValueError("nested too deeply") from None
+    if _depth(data) > AUDIO_MAX_DEPTH:
+        raise ValueError(f"nested more than {AUDIO_MAX_DEPTH} levels deep")
+    return data
+
+
 def _audio_json(path: Path):
-    """(object, error): a JSON file of at most AUDIO_JSON_MAX bytes. A missing, oversized, unreadable or non-object file is an error."""
+    """(object, error): a JSON file of at most AUDIO_JSON_MAX bytes. A missing, oversized, unreadable or non-object file is an error, and so is
+    one with a repeated key, a non-finite or huge number, or deep nesting (audio_loads)."""
     try:
         if path.stat().st_size > AUDIO_JSON_MAX:
             return None, f"{path.name} is larger than {AUDIO_JSON_MAX} bytes"
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = audio_loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         return None, f"{path.name} is not readable JSON: {exc}"
     return (data, None) if isinstance(data, dict) else (None, f"{path.name} is not a JSON object")
@@ -2510,25 +2569,41 @@ def detect_audio(snapshot: Path) -> bool:
     return any(p.is_file() and p.name.endswith(".safetensors") for p in snapshot.iterdir())
 
 
+ENTRY_KEYS = {"dtype", "shape", "data_offsets"}
+
+
 def audio_header(path: Path) -> dict:
-    """{name: {"dtype", "shape", "shard"}} for one safetensors file, header only, refusing a header over AUDIO_HEADER_MAX and any entry
-    whose dtype is not text or whose shape is not a list of non-negative whole numbers."""
+    """{name: {"dtype", "shape", "shard"}} for one safetensors file, header only. The header is refused when it is over AUDIO_HEADER_MAX, repeats a
+    name or any key, holds a non-finite number, has `__metadata__` that is not an object of text values, or has an entry with other keys than
+    dtype, shape and data_offsets, a dtype that is not text, a shape that is not a list of non-negative whole numbers, or a byte range that is
+    not two whole numbers with 0 <= start <= end <= the data section. For a dtype this script knows, the range must be exactly the shape product
+    times the element size. The non-empty ranges must tile the data section: no overlap (two tensors cannot share bytes), no gap (bytes no
+    tensor claims could hide data) and no bytes left over after the last one."""
     with open(path, "rb") as f:
         raw = f.read(8)
-    if len(raw) != 8:
-        raise ValueError("shorter than 8 bytes")
-    length = struct.unpack("<Q", raw)[0]
-    if length > AUDIO_HEADER_MAX:
-        raise ValueError(f"header length {length} is larger than {AUDIO_HEADER_MAX}")
-    header, data_start = raw_header(path)
-    data_size = path.stat().st_size - data_start
-    out = {}
+        if len(raw) != 8:
+            raise ValueError("shorter than 8 bytes")
+        length = struct.unpack("<Q", raw)[0]
+        if length > AUDIO_HEADER_MAX:
+            raise ValueError(f"header length {length} is larger than {AUDIO_HEADER_MAX}")
+        blob = f.read(length)
+    if len(blob) != length:
+        raise ValueError(f"header is cut short ({len(blob)} of {length} bytes)")
+    header = audio_loads(blob.decode("utf-8"))
+    if not isinstance(header, dict):
+        raise ValueError("header is not a JSON object")
+    data_size = path.stat().st_size - 8 - length
+    meta = header.get("__metadata__", {})
+    if not isinstance(meta, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in meta.items()):
+        raise ValueError("__metadata__ is not an object of text values")
+    out, spans = {}, []
     for name, v in header.items():
         if name == "__metadata__":
             continue
         shape = v.get("shape") if isinstance(v, dict) else None
         offsets = v.get("data_offsets") if isinstance(v, dict) else None
-        if (not isinstance(shape, list) or not all(isinstance(d, int) and not isinstance(d, bool) and d >= 0 for d in shape)
+        if (not isinstance(v, dict) or set(v) != ENTRY_KEYS
+                or not isinstance(shape, list) or not all(isinstance(d, int) and not isinstance(d, bool) and d >= 0 for d in shape)
                 or not isinstance(v.get("dtype"), str)
                 or not isinstance(offsets, list) or len(offsets) != 2
                 or not all(isinstance(o, int) and not isinstance(o, bool) for o in offsets)
@@ -2540,19 +2615,38 @@ def audio_header(path: Path) -> dict:
             if offsets[1] - offsets[0] != expected:
                 raise ValueError(f"tensor {name} has a malformed entry: its byte span is {offsets[1] - offsets[0]}, but shape {shape} "
                                  f"of {v['dtype']} needs {expected}")
+        if offsets[1] > offsets[0]:
+            spans.append((offsets[0], offsets[1], name))
         out[name] = {"dtype": v["dtype"], "shape": shape, "shard": path.name}
+    spans.sort()
+    cursor = 0
+    for start, end, name in spans:
+        if start < cursor:
+            raise ValueError(f"tensor {name} has a byte range [{start}, {end}) that overlaps the one before it (a tensor cannot share bytes)")
+        if start > cursor:
+            raise ValueError(f"the data section has {start - cursor} bytes before tensor {name} that no tensor claims (they could hide data)")
+        cursor = end
+    if cursor != data_size:
+        raise ValueError(f"the data section has {data_size - cursor} bytes after the last tensor that no tensor claims (they could hide data)")
     return out
 
 
 def audio_tensors(directory: Path) -> tuple[dict, list[str]]:
-    """({name: {"dtype", "shape", "shard"}}, errors) over the top-level safetensors files of `directory`."""
+    """({name: {"dtype", "shape", "shard"}}, errors) over the top-level safetensors files of `directory`. A tensor name that appears in two
+    files is an error (the second would otherwise replace the first and could hide an incompatible shape); the first one is kept."""
     tensors, errors = {}, []
     for p in sorted(directory.iterdir()):
         if p.is_file() and p.name.endswith(".safetensors"):
             try:
-                tensors.update(audio_header(p))
+                header = audio_header(p)
             except (OSError, ValueError, UnicodeDecodeError) as exc:
                 errors.append(f"{p.name}: {exc}")
+                continue
+            for name, info in header.items():
+                if name in tensors:
+                    errors.append(f"tensor {name} appears in both {tensors[name]['shard']} and {p.name}")
+                else:
+                    tensors[name] = info
     return tensors, errors
 
 
@@ -2575,14 +2669,48 @@ def audio_components(tensors: dict) -> list[dict]:
     return [out[k] for k in sorted(out)]
 
 
+_MISSING = object()
+
+
+def _audio_flatten(obj, prefix: str = "") -> dict:
+    """{dotted path: value}, with an empty dict or list kept as a leaf of its own, so a key whose value is `{}` or `[]` is still a key."""
+    out = {}
+    if isinstance(obj, dict) and obj:
+        for k, v in obj.items():
+            out.update(_audio_flatten(v, f"{prefix}.{k}" if prefix else str(k)))
+    elif isinstance(obj, list) and obj:
+        for i, v in enumerate(obj):
+            out.update(_audio_flatten(v, f"{prefix}[{i}]"))
+    else:
+        out[prefix] = obj
+    return out
+
+
+def _same_json(a, b) -> bool:
+    """Equal in JSON terms: the same type and value (Python's 1 == True == 1.0 is not enough), and empty containers of one kind."""
+    return type(a) is type(b) and a == b          # the _MISSING sentinel has a type no JSON value has
+
+
+def audio_field_diffs(a, b) -> dict:
+    """{dotted path: {"model": value, "base": value}} for every leaf that differs, with `<absent>` for a missing key. Unlike field_diffs it keeps
+    empty containers (a key whose value is {} is not the same as a missing key) and tells True from 1 from 1.0."""
+    fa, fb = _audio_flatten(a), _audio_flatten(b)
+    out = {}
+    for k in sorted(set(fa) | set(fb)):
+        x, y = fa.get(k, _MISSING), fb.get(k, _MISSING)
+        if not _same_json(x, y):
+            out[k] = {"model": ABSENT if x is _MISSING else x, "base": ABSENT if y is _MISSING else y}
+    return out
+
+
 def compare_audio_configs(mcfg: dict, bcfg: dict) -> dict:
     """The two model_config.json files. Differences in the `model` section and in the top-level keys (sample rate, channels, sample size,
     model type) are architecture differences. A `repo_id` leaf is a pointer. The `training` section is listed and does not count."""
     def rest(c):
         return {k: v for k, v in c.items() if k not in ("model", "training")}
-    top = field_diffs(rest(mcfg), rest(bcfg))
-    model = {f"model.{k}": v for k, v in field_diffs(mcfg.get("model"), bcfg.get("model")).items()}
-    training = {f"training.{k}": v for k, v in field_diffs(mcfg.get("training", {}), bcfg.get("training", {})).items()}
+    top = audio_field_diffs(rest(mcfg), rest(bcfg))
+    model = {f"model.{k}": v for k, v in audio_field_diffs(mcfg.get("model"), bcfg.get("model")).items()}
+    training = {f"training.{k}": v for k, v in audio_field_diffs(mcfg.get("training", {}), bcfg.get("training", {})).items()}
     pointers = {k: v for k, v in model.items() if k.rsplit(".", 1)[-1] in AUDIO_POINTER_KEYS}
     return {"top_level_differences": top,
             "model_differences": {k: v for k, v in model.items() if k not in pointers},
@@ -2660,8 +2788,9 @@ def audio_text_encoders(mcfg: dict, bcfg: dict, model_dir: Path, base_dir: Path,
             row["problems"].append(f"{sub} holds no readable safetensors file in " + ("the new model" if not mt else "the nearest model"))
         if row["problems"]:
             continue
-        if mc != bc:
-            row["differences"].append(f"{sub}/config.json differs: " + short(list(field_diffs(mc, bc)), 5))
+        config_diff = audio_field_diffs(mc, bc)
+        if config_diff:
+            row["differences"].append(f"{sub}/config.json differs: " + short(list(config_diff), 5))
         diff = compare_audio_tensors(mt, bt)
         for kind, key in (("only in the new model", "only_in_model"), ("only in the nearest model", "only_in_base")):
             if diff[key]:
