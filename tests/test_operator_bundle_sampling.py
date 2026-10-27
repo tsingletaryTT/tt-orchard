@@ -9,7 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_operator_bundle_template import build, bundle_of, make_run, section, write_json  # noqa: E402
-from test_sampling_probe import GREEDY, LINE, OTHER, STORY, entry, record, refused, with_hot  # noqa: E402
+from test_sampling_probe import GREEDY, LINE, OTHER, STORY, entry, record, refused, with_session_lines  # noqa: E402
 
 HEAD = "## Sampling"
 
@@ -42,9 +42,9 @@ def test_the_stage_2_record_gives_a_row_with_speeds_the_verdict_and_the_evidence
 
 def test_confirmed_ignored_sampling_is_stated_in_a_sentence(tmp_path):
     run = make_run(tmp_path)
-    put(run, "stages/2/evidence", with_hot(record(a=entry(text=STORY), b=entry(text=STORY))))
+    put(run, "stages/2/evidence", with_session_lines(record(a=entry(text=STORY), b=entry(text=STORY))))
     block = section(results(run), HEAD)
-    assert "sampled-ignored" in block and "Sampling was not applied, so decoding was greedy" in block and "temperature 2.0" in block
+    assert "sampled-ignored" in block and "Sampling was not applied, so decoding was greedy" in block and "session line" in block
 
 
 def test_matching_text_is_stated_as_suspected_and_not_confirmed(tmp_path):
