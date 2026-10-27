@@ -219,10 +219,24 @@ class Tools:
         if name == "shell":
             return self.shell(args.get("command"))
         if name == "read_file":
+            unknown = self.unknown_read_args(args, ("path", "offset"),
+                                             "read_file takes path and offset (offset counts characters)")
+            if unknown:
+                return unknown
             return self.read_file(args.get("path"), args.get("offset", 0))
         if name == "write_file":
             return self.write_file(args.get("path"), args.get("content"))
         return f"error: there is no tool named {name!r}; the tools are shell, read_file and write_file"
+
+    @staticmethod
+    def unknown_read_args(args: dict, accepted: tuple, accepts: str):
+        """An error text when `args` holds a name `accepted` lacks, else None. read_file used to drop such an argument
+        without a word, so a model that sent `limit` (a count of lines) to a reader in characters was never told."""
+        unknown = sorted(k for k in args if k not in accepted)
+        if not unknown:
+            return None
+        names = ", ".join(repr(k) for k in unknown)
+        return f"error: {accepts}; it has no argument named {names}"
 
     def shell(self, command) -> str:
         if not isinstance(command, str) or not command.strip():
