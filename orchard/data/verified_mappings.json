@@ -1,0 +1,284 @@
+{
+  "entries": {
+    "aten.__and__.Tensor": {
+      "also_passed": [
+        "logical_and"
+      ],
+      "compared": "exact",
+      "date": "2026-10-27",
+      "dtype": "torch.bool",
+      "image": "ttsim-blackhole-space:local",
+      "label": "verified on the ttsim simulator with one small shape and one seed, with the image's ttnn wheel; not run on hardware and not a claim about this model's shapes, dtypes or layouts",
+      "pcc": 0.9999999999999999,
+      "rel_l2": 0.0,
+      "shape": [
+        32,
+        32
+      ],
+      "slope": 1.0,
+      "torch": "2.14.0+cpu",
+      "ttnn": "bitwise_and",
+      "ttnn_wheel": "0.1.dev1+g89e1256",
+      "why": "synonym"
+    },
+    "aten.bitwise_not.default": {
+      "also_passed": [],
+      "compared": "exact",
+      "date": "2026-10-27",
+      "dtype": "torch.bool",
+      "image": "ttsim-blackhole-space:local",
+      "label": "verified on the ttsim simulator with one small shape and one seed, with the image's ttnn wheel; not run on hardware and not a claim about this model's shapes, dtypes or layouts",
+      "pcc": 1.0,
+      "rel_l2": 0.0,
+      "shape": [
+        64,
+        64
+      ],
+      "slope": 1.0,
+      "torch": "2.14.0+cpu",
+      "ttnn": "bitwise_not",
+      "ttnn_wheel": "0.1.dev1+g89e1256",
+      "why": "normalised-equal"
+    },
+    "aten.copy_.default": {
+      "also_passed": [
+        "assign",
+        "clone"
+      ],
+      "compared": "float",
+      "date": "2026-10-27",
+      "dtype": "torch.float32",
+      "image": "ttsim-blackhole-space:local",
+      "label": "verified on the ttsim simulator with one small shape and one seed, with the image's ttnn wheel; not run on hardware and not a claim about this model's shapes, dtypes or layouts",
+      "pcc": 0.9999999999999998,
+      "rel_l2": 0.0,
+      "shape": [
+        32,
+        64
+      ],
+      "slope": 1.0,
+      "torch": "2.14.0+cpu",
+      "ttnn": "copy",
+      "ttnn_wheel": "0.1.dev1+g89e1256",
+      "why": "normalised-equal"
+    },
+    "aten.div_.Tensor": {
+      "also_passed": [
+        "div",
+        "divide_"
+      ],
+      "compared": "float",
+      "date": "2026-10-27",
+      "dtype": "torch.float32",
+      "image": "ttsim-blackhole-space:local",
+      "label": "verified on the ttsim simulator with one small shape and one seed, with the image's ttnn wheel; not run on hardware and not a claim about this model's shapes, dtypes or layouts",
+      "pcc": 0.9999986354194311,
+      "rel_l2": 0.0016532883958248717,
+      "shape": [
+        64,
+        64
+      ],
+      "slope": 1.000061848454832,
+      "torch": "2.14.0+cpu",
+      "ttnn": "div_",
+      "ttnn_wheel": "0.1.dev1+g89e1256",
+      "why": "normalised-equal"
+    },
+    "aten.index.Tensor": {
+      "also_passed": [],
+      "compared": "float",
+      "date": "2026-10-27",
+      "dtype": "torch.int64",
+      "image": "ttsim-blackhole-space:local",
+      "label": "verified on the ttsim simulator with one small shape and one seed, with the image's ttnn wheel; not run on hardware and not a claim about this model's shapes, dtypes or layouts",
+      "pcc": 1.0,
+      "rel_l2": 0.0,
+      "shape": [
+        32,
+        32
+      ],
+      "slope": 1.0,
+      "torch": "2.14.0+cpu",
+      "ttnn": "embedding",
+      "ttnn_wheel": "0.1.dev1+g89e1256",
+      "why": "synonym"
+    },
+    "aten.masked_fill.Scalar": {
+      "also_passed": [],
+      "compared": "float",
+      "date": "2026-10-27",
+      "dtype": "torch.float32",
+      "image": "ttsim-blackhole-space:local",
+      "label": "verified on the ttsim simulator with one small shape and one seed, with the image's ttnn wheel; not run on hardware and not a claim about this model's shapes, dtypes or layouts",
+      "pcc": 0.9999999999999998,
+      "rel_l2": 0.0,
+      "shape": [
+        64,
+        64
+      ],
+      "slope": 1.0,
+      "torch": "2.14.0+cpu",
+      "ttnn": "where",
+      "ttnn_wheel": "0.1.dev1+g89e1256",
+      "why": "synonym"
+    },
+    "aten.new_ones.default": {
+      "also_passed": [
+        "full"
+      ],
+      "compared": "exact",
+      "date": "2026-10-27",
+      "dtype": "torch.bool",
+      "image": "ttsim-blackhole-space:local",
+      "label": "verified on the ttsim simulator with one small shape and one seed, with the image's ttnn wheel; not run on hardware and not a claim about this model's shapes, dtypes or layouts",
+      "pcc": 1.0,
+      "rel_l2": 0.0,
+      "shape": [
+        32,
+        64
+      ],
+      "slope": 1.0,
+      "torch": "2.14.0+cpu",
+      "ttnn": "ones",
+      "ttnn_wheel": "0.1.dev1+g89e1256",
+      "why": "synonym"
+    },
+    "aten.split_with_sizes.default": {
+      "also_passed": [
+        "chunk"
+      ],
+      "compared": "float",
+      "date": "2026-10-27",
+      "dtype": "torch.float32",
+      "image": "ttsim-blackhole-space:local",
+      "label": "verified on the ttsim simulator with one small shape and one seed, with the image's ttnn wheel; not run on hardware and not a claim about this model's shapes, dtypes or layouts",
+      "pcc": 0.9999999999999998,
+      "rel_l2": 0.0,
+      "shape": [
+        32,
+        64
+      ],
+      "slope": 1.0,
+      "torch": "2.14.0+cpu",
+      "ttnn": "split",
+      "ttnn_wheel": "0.1.dev1+g89e1256",
+      "why": "synonym"
+    },
+    "aten.to.device": {
+      "also_passed": [],
+      "compared": "exact",
+      "date": "2026-10-27",
+      "dtype": "torch.float32",
+      "image": "ttsim-blackhole-space:local",
+      "label": "verified on the ttsim simulator with one small shape and one seed, with the image's ttnn wheel; not run on hardware and not a claim about this model's shapes, dtypes or layouts",
+      "pcc": 0.9999999999999998,
+      "rel_l2": 0.0,
+      "shape": [
+        32,
+        64
+      ],
+      "slope": 1.0,
+      "torch": "2.14.0+cpu",
+      "ttnn": "to_device",
+      "ttnn_wheel": "0.1.dev1+g89e1256",
+      "why": "synonym"
+    },
+    "aten.to.dtype_layout": {
+      "also_passed": [],
+      "compared": "float",
+      "date": "2026-10-27",
+      "dtype": "torch.bool",
+      "image": "ttsim-blackhole-space:local",
+      "label": "verified on the ttsim simulator with one small shape and one seed, with the image's ttnn wheel; not run on hardware and not a claim about this model's shapes, dtypes or layouts",
+      "pcc": 1.0,
+      "rel_l2": 0.0,
+      "shape": [
+        32,
+        32
+      ],
+      "slope": 1.0,
+      "torch": "2.14.0+cpu",
+      "ttnn": "typecast",
+      "ttnn_wheel": "0.1.dev1+g89e1256",
+      "why": "synonym"
+    },
+    "aten.type_as.default": {
+      "also_passed": [],
+      "compared": "float",
+      "date": "2026-10-27",
+      "dtype": "torch.float32",
+      "image": "ttsim-blackhole-space:local",
+      "label": "verified on the ttsim simulator with one small shape and one seed, with the image's ttnn wheel; not run on hardware and not a claim about this model's shapes, dtypes or layouts",
+      "pcc": 0.9999999999999998,
+      "rel_l2": 0.0,
+      "shape": [
+        32,
+        64
+      ],
+      "slope": 1.0,
+      "torch": "2.14.0+cpu",
+      "ttnn": "typecast",
+      "ttnn_wheel": "0.1.dev1+g89e1256",
+      "why": "synonym"
+    },
+    "pattern:rms_norm": {
+      "also_passed": [],
+      "compared": "float",
+      "date": "2026-10-27",
+      "dtype": null,
+      "image": "ttsim-blackhole-space:local",
+      "label": "verified on the ttsim simulator with one small shape and one seed, with the image's ttnn wheel; not run on hardware and not a claim about this model's shapes, dtypes or layouts",
+      "pcc": 0.9999908788328433,
+      "rel_l2": 0.004771571434307378,
+      "shape": [
+        32,
+        32
+      ],
+      "slope": 1.002108965747169,
+      "torch": "2.14.0+cpu",
+      "ttnn": "rms_norm",
+      "ttnn_wheel": "0.1.dev1+g89e1256",
+      "why": null
+    },
+    "pattern:rotary": {
+      "also_passed": [],
+      "compared": "float",
+      "date": "2026-10-27",
+      "dtype": null,
+      "image": "ttsim-blackhole-space:local",
+      "label": "verified on the ttsim simulator with one small shape and one seed, with the image's ttnn wheel; not run on hardware and not a claim about this model's shapes, dtypes or layouts",
+      "pcc": 0.9999953946583758,
+      "rel_l2": 0.0036459629797562375,
+      "shape": [
+        32,
+        32
+      ],
+      "slope": 1.0020124292233377,
+      "torch": "2.14.0+cpu",
+      "ttnn": "experimental.rotary_embedding_hf",
+      "ttnn_wheel": "0.1.dev1+g89e1256",
+      "why": null
+    },
+    "pattern:silu_mul": {
+      "also_passed": [],
+      "compared": "float",
+      "date": "2026-10-27",
+      "dtype": null,
+      "image": "ttsim-blackhole-space:local",
+      "label": "verified on the ttsim simulator with one small shape and one seed, with the image's ttnn wheel; not run on hardware and not a claim about this model's shapes, dtypes or layouts",
+      "pcc": 0.9999972774071872,
+      "rel_l2": 0.0023611503127836824,
+      "shape": [
+        32,
+        64
+      ],
+      "slope": 0.9996343692158295,
+      "torch": "2.14.0+cpu",
+      "ttnn": "swiglu",
+      "ttnn_wheel": "0.1.dev1+g89e1256",
+      "why": null
+    }
+  },
+  "label": "verified on the ttsim simulator with one small shape and one seed, with the image's ttnn wheel; not run on hardware and not a claim about this model's shapes, dtypes or layouts",
+  "schema": 1
+}

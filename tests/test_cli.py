@@ -863,6 +863,41 @@ def test_inventory_with_no_interpreter_anywhere_refuses_and_calls_neither(monkey
     assert code == 2 and calls == {"dump": [], "inv": []}
 
 
+def test_inventory_verify_candidates_calls_the_verifier_with_its_options_and_never_the_trace_or_the_dump(monkeypatch, tmp_path):
+    from orchard import opverify
+    calls = _fake_inventory(monkeypatch)
+    seen = []
+    monkeypatch.setattr(opverify, "main", lambda inventory, **kw: seen.append((inventory, kw)) or 0)
+    code = cli.main(["inventory", "verify-candidates", "--inventory", "inv-dir", "--out", "o", "--image", "img:2",
+                     "--max-ops", "7", "--timeout", "33", "--record"], env={"HOME": str(tmp_path)}, stdout=io.StringIO())
+    assert code == 0 and calls == {"dump": [], "inv": []}
+    inventory, kw = seen[0]
+    assert inventory == "inv-dir" and kw["out_dir"] == "o" and kw["image"] == "img:2" and kw["max_ops"] == 7
+    assert kw["timeout"] == 33 and kw["record"] is True
+
+
+def test_inventory_verify_candidates_defaults(monkeypatch, tmp_path):
+    from orchard import opverify
+    _fake_inventory(monkeypatch)
+    seen = []
+    monkeypatch.setattr(opverify, "main", lambda inventory, **kw: seen.append(kw) or 3)
+    code = cli.main(["inventory", "verify-candidates", "--inventory", "x"], env={"HOME": str(tmp_path)},
+                    stdout=io.StringIO())
+    assert code == 3                                  # the verifier's exit code is the command's
+    kw = seen[0]
+    assert kw["out_dir"] == "verify-candidates" and kw["image"] == opverify.DEFAULT_IMAGE
+    assert kw["max_ops"] == opverify.DEFAULT_MAX_OPS and kw["timeout"] == opverify.DEFAULT_TIMEOUT_S and kw["record"] is False
+
+
+def test_inventory_verify_candidates_without_an_inventory_refuses(monkeypatch, tmp_path):
+    from orchard import opverify
+    _fake_inventory(monkeypatch)
+    monkeypatch.setattr(opverify, "main", lambda *a, **k: pytest.fail("must not run"))
+    out = io.StringIO()
+    code = cli.main(["inventory", "verify-candidates"], env={"HOME": str(tmp_path)}, stdout=out)
+    assert code == 2
+
+
 # ---------------------------------------------------------------- kernel-probe
 
 def _fake_probe_main(monkeypatch):

@@ -1,0 +1,2805 @@
+{
+  "architectures": [
+    "Qwen3ForCausalLM"
+  ],
+  "failures": [],
+  "higher_order_nodes": {
+    "wrap_with_set_grad_enabled": 1
+  },
+  "layers_in_config": 4,
+  "layers_traced": 2,
+  "model_dir": "<fixture qwen3-tiny-sequence>",
+  "note": "prefill graph from torch.export(strict=False, use_cache=False) on the meta device; cache and state updates of decoding are not traced. Bodies of higher-order operations (for example wrap_with_set_grad_enabled) were traversed, so the ops inside them are counted; the wrapper itself is not an op",
+  "ops": [
+    {
+      "count": 31,
+      "count_in_layers": 26,
+      "modules": [
+        "model.layers.0.input_layernorm",
+        "model.layers.0.self_attn.q_norm",
+        "model.layers.0.self_attn.k_norm",
+        "model.layers.0.self_attn",
+        "model.layers.0.post_attention_layernorm"
+      ],
+      "op": "aten.mul.Tensor",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            8,
+            32
+          ]
+        ]
+      }
+    },
+    {
+      "count": 21,
+      "count_in_layers": 16,
+      "modules": [
+        "model.layers.0.input_layernorm",
+        "model.layers.0.self_attn.q_norm",
+        "model.layers.0.self_attn.k_norm",
+        "model.layers.0.post_attention_layernorm",
+        "model.layers.1.input_layernorm"
+      ],
+      "op": "aten.to.dtype",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            8,
+            32
+          ]
+        ]
+      }
+    },
+    {
+      "count": 20,
+      "count_in_layers": 16,
+      "modules": [
+        "model",
+        "model.layers.0.input_layernorm",
+        "model.layers.0.self_attn.q_norm",
+        "model.layers.0.self_attn.k_norm",
+        "model.layers.0.self_attn"
+      ],
+      "op": "aten.add.Tensor",
+      "sample": {
+        "dtype": "torch.int64",
+        "output_shapes": [
+          [
+            8
+          ]
+        ]
+      }
+    },
+    {
+      "count": 18,
+      "count_in_layers": 4,
+      "modules": [
+        "model",
+        "model.layers.0.self_attn",
+        "model.layers.1.self_attn",
+        "model.rotary_emb"
+      ],
+      "op": "aten.unsqueeze.default",
+      "sample": {
+        "dtype": "torch.int64",
+        "output_shapes": [
+          [
+            1,
+            8
+          ]
+        ]
+      }
+    },
+    {
+      "count": 17,
+      "count_in_layers": 8,
+      "modules": [
+        "model",
+        "model.layers.0.self_attn",
+        "model.layers.1.self_attn"
+      ],
+      "op": "aten.slice.Tensor",
+      "sample": {
+        "dtype": "torch.int64",
+        "output_shapes": [
+          [
+            1,
+            8
+          ]
+        ]
+      }
+    },
+    {
+      "count": 15,
+      "count_in_layers": 14,
+      "modules": [
+        "model.layers.0.self_attn.q_proj",
+        "model.layers.0.self_attn.k_proj",
+        "model.layers.0.self_attn.v_proj",
+        "model.layers.0.self_attn.o_proj",
+        "model.layers.0.mlp.gate_proj"
+      ],
+      "op": "aten.linear.default",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            8,
+            32
+          ]
+        ]
+      }
+    },
+    {
+      "count": 9,
+      "count_in_layers": 8,
+      "modules": [
+        "model.layers.0.input_layernorm",
+        "model.layers.0.self_attn.q_norm",
+        "model.layers.0.self_attn.k_norm",
+        "model.layers.0.post_attention_layernorm",
+        "model.layers.1.input_layernorm"
+      ],
+      "op": "aten.mean.dim",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            8,
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "count": 9,
+      "count_in_layers": 8,
+      "modules": [
+        "model.layers.0.input_layernorm",
+        "model.layers.0.self_attn.q_norm",
+        "model.layers.0.self_attn.k_norm",
+        "model.layers.0.post_attention_layernorm",
+        "model.layers.1.input_layernorm"
+      ],
+      "op": "aten.pow.Tensor_Scalar",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            8,
+            32
+          ]
+        ]
+      }
+    },
+    {
+      "count": 9,
+      "count_in_layers": 8,
+      "modules": [
+        "model.layers.0.input_layernorm",
+        "model.layers.0.self_attn.q_norm",
+        "model.layers.0.self_attn.k_norm",
+        "model.layers.0.post_attention_layernorm",
+        "model.layers.1.input_layernorm"
+      ],
+      "op": "aten.rsqrt.default",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            8,
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "count": 8,
+      "count_in_layers": 8,
+      "modules": [
+        "model.layers.0.self_attn",
+        "model.layers.1.self_attn"
+      ],
+      "op": "aten.transpose.int",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            2,
+            8,
+            16
+          ]
+        ]
+      }
+    },
+    {
+      "count": 6,
+      "count_in_layers": 6,
+      "modules": [
+        "model.layers.0.self_attn",
+        "model.layers.1.self_attn"
+      ],
+      "op": "aten.view.default",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            8,
+            2,
+            16
+          ]
+        ]
+      }
+    },
+    {
+      "count": 5,
+      "count_in_layers": 0,
+      "modules": [
+        "model"
+      ],
+      "op": "aten.arange.default",
+      "sample": {
+        "dtype": "torch.int64",
+        "output_shapes": [
+          [
+            8
+          ]
+        ]
+      }
+    },
+    {
+      "count": 5,
+      "count_in_layers": 4,
+      "modules": [
+        "model.layers.0.self_attn",
+        "model.layers.1.self_attn",
+        "model.rotary_emb"
+      ],
+      "op": "aten.cat.default",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            2,
+            8,
+            16
+          ]
+        ]
+      }
+    },
+    {
+      "count": 4,
+      "count_in_layers": 4,
+      "modules": [
+        "model.layers.0.self_attn",
+        "model.layers.1.self_attn"
+      ],
+      "op": "aten.neg.default",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            2,
+            8,
+            8
+          ]
+        ]
+      }
+    },
+    {
+      "count": 2,
+      "count_in_layers": 0,
+      "modules": [
+        "model"
+      ],
+      "op": "aten.__and__.Tensor",
+      "sample": {
+        "dtype": "torch.bool",
+        "output_shapes": [
+          [
+            1,
+            1,
+            8,
+            8
+          ]
+        ]
+      }
+    },
+    {
+      "count": 2,
+      "count_in_layers": 2,
+      "modules": [
+        "model.layers.0.self_attn",
+        "model.layers.1.self_attn"
+      ],
+      "op": "aten.contiguous.default",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            8,
+            2,
+            16
+          ]
+        ]
+      }
+    },
+    {
+      "count": 2,
+      "count_in_layers": 0,
+      "modules": [
+        "model"
+      ],
+      "op": "aten.index.Tensor",
+      "sample": {
+        "dtype": "torch.int64",
+        "output_shapes": [
+          [
+            1,
+            1,
+            8,
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "count": 2,
+      "count_in_layers": 2,
+      "modules": [
+        "model.layers.0.self_attn",
+        "model.layers.1.self_attn"
+      ],
+      "op": "aten.reshape.default",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            8,
+            32
+          ]
+        ]
+      }
+    },
+    {
+      "count": 2,
+      "count_in_layers": 2,
+      "modules": [
+        "model.layers.0.self_attn",
+        "model.layers.1.self_attn"
+      ],
+      "op": "aten.scaled_dot_product_attention.default",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            2,
+            8,
+            16
+          ]
+        ]
+      }
+    },
+    {
+      "count": 2,
+      "count_in_layers": 2,
+      "modules": [
+        "model.layers.0.mlp.act_fn",
+        "model.layers.1.mlp.act_fn"
+      ],
+      "op": "aten.silu.default",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            8,
+            64
+          ]
+        ]
+      }
+    },
+    {
+      "count": 2,
+      "count_in_layers": 0,
+      "modules": [
+        "model"
+      ],
+      "op": "aten.to.dtype_layout",
+      "sample": {
+        "dtype": "torch.bool",
+        "output_shapes": [
+          [
+            1,
+            1,
+            8,
+            8
+          ]
+        ]
+      }
+    },
+    {
+      "count": 1,
+      "count_in_layers": 0,
+      "modules": [
+        "model.rotary_emb"
+      ],
+      "op": "aten.cos.default",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            8,
+            16
+          ]
+        ]
+      }
+    },
+    {
+      "count": 1,
+      "count_in_layers": 0,
+      "modules": [
+        "model"
+      ],
+      "op": "aten.cumsum.default",
+      "sample": {
+        "dtype": "torch.int64",
+        "output_shapes": [
+          [
+            1,
+            8
+          ]
+        ]
+      }
+    },
+    {
+      "count": 1,
+      "count_in_layers": 0,
+      "modules": [
+        "model"
+      ],
+      "op": "aten.diff.default",
+      "sample": {
+        "dtype": "torch.int64",
+        "output_shapes": [
+          [
+            1,
+            8
+          ]
+        ]
+      }
+    },
+    {
+      "count": 1,
+      "count_in_layers": 0,
+      "modules": [
+        "model.embed_tokens"
+      ],
+      "op": "aten.embedding.default",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            8,
+            32
+          ]
+        ]
+      }
+    },
+    {
+      "count": 1,
+      "count_in_layers": 0,
+      "modules": [
+        "model"
+      ],
+      "op": "aten.eq.Tensor",
+      "sample": {
+        "dtype": "torch.bool",
+        "output_shapes": [
+          [
+            1,
+            1,
+            8,
+            8
+          ]
+        ]
+      }
+    },
+    {
+      "count": 1,
+      "count_in_layers": 0,
+      "modules": [
+        "model"
+      ],
+      "op": "aten.expand.default",
+      "sample": {
+        "dtype": "torch.bool",
+        "output_shapes": [
+          [
+            1,
+            1,
+            8,
+            8
+          ]
+        ]
+      }
+    },
+    {
+      "count": 1,
+      "count_in_layers": 0,
+      "modules": [
+        "model"
+      ],
+      "op": "aten.le.Tensor",
+      "sample": {
+        "dtype": "torch.bool",
+        "output_shapes": [
+          [
+            1,
+            1,
+            8,
+            8
+          ]
+        ]
+      }
+    },
+    {
+      "count": 1,
+      "count_in_layers": 0,
+      "modules": [
+        "model"
+      ],
+      "op": "aten.ne.Scalar",
+      "sample": {
+        "dtype": "torch.bool",
+        "output_shapes": [
+          [
+            1,
+            8
+          ]
+        ]
+      }
+    },
+    {
+      "count": 1,
+      "count_in_layers": 0,
+      "modules": [
+        "model"
+      ],
+      "op": "aten.new_ones.default",
+      "sample": {
+        "dtype": "torch.bool",
+        "output_shapes": [
+          []
+        ]
+      }
+    },
+    {
+      "count": 1,
+      "count_in_layers": 0,
+      "modules": [
+        "model.rotary_emb"
+      ],
+      "op": "aten.sin.default",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            8,
+            16
+          ]
+        ]
+      }
+    },
+    {
+      "count": 1,
+      "count_in_layers": 0,
+      "modules": [
+        "model"
+      ],
+      "op": "aten.sub.Tensor",
+      "sample": {
+        "dtype": "torch.int64",
+        "output_shapes": [
+          [
+            1,
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "count": 1,
+      "count_in_layers": 0,
+      "modules": [
+        "model.rotary_emb"
+      ],
+      "op": "aten.to.device",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            8
+          ]
+        ]
+      }
+    }
+  ],
+  "python_nodes": {
+    "<built-in function getitem>": 2
+  },
+  "schema": 1,
+  "seq_len": 8,
+  "sequence": [
+    {
+      "const": [],
+      "id": "g0:embedding",
+      "in": [
+        "g0:p_model_embed_tokens_weight",
+        "g0:input_ids"
+      ],
+      "module": "model.embed_tokens",
+      "op": "aten.embedding.default",
+      "shape": [
+        1,
+        8,
+        32
+      ]
+    },
+    {
+      "const": [
+        8,
+        false
+      ],
+      "id": "g0:arange",
+      "in": [],
+      "module": "model",
+      "op": "aten.arange.default",
+      "shape": [
+        8
+      ]
+    },
+    {
+      "const": [
+        0
+      ],
+      "id": "g0:add",
+      "in": [
+        "g0:arange"
+      ],
+      "module": "model",
+      "op": "aten.add.Tensor",
+      "shape": [
+        8
+      ]
+    },
+    {
+      "const": [
+        0
+      ],
+      "id": "g0:unsqueeze",
+      "in": [
+        "g0:add"
+      ],
+      "module": "model",
+      "op": "aten.unsqueeze.default",
+      "shape": [
+        1,
+        8
+      ]
+    },
+    {
+      "const": [
+        0,
+        0,
+        9223372036854775807
+      ],
+      "id": "g0:slice_1",
+      "in": [
+        "g0:unsqueeze"
+      ],
+      "module": "model",
+      "op": "aten.slice.Tensor",
+      "shape": [
+        1,
+        8
+      ]
+    },
+    {
+      "const": [
+        1,
+        0,
+        1
+      ],
+      "id": "g0:slice_2",
+      "in": [
+        "g0:slice_1"
+      ],
+      "module": "model",
+      "op": "aten.slice.Tensor",
+      "shape": [
+        1,
+        1
+      ]
+    },
+    {
+      "const": [
+        1
+      ],
+      "id": "g0:sub",
+      "in": [
+        "g0:slice_2"
+      ],
+      "module": "model",
+      "op": "aten.sub.Tensor",
+      "shape": [
+        1,
+        1
+      ]
+    },
+    {
+      "const": [
+        1,
+        -1
+      ],
+      "id": "g0:diff",
+      "in": [
+        "g0:unsqueeze",
+        "g0:sub"
+      ],
+      "module": "model",
+      "op": "aten.diff.default",
+      "shape": [
+        1,
+        8
+      ]
+    },
+    {
+      "const": [
+        1
+      ],
+      "id": "g0:ne",
+      "in": [
+        "g0:diff"
+      ],
+      "module": "model",
+      "op": "aten.ne.Scalar",
+      "shape": [
+        1,
+        8
+      ]
+    },
+    {
+      "const": [
+        -1
+      ],
+      "id": "g0:cumsum",
+      "in": [
+        "g0:ne"
+      ],
+      "module": "model",
+      "op": "aten.cumsum.default",
+      "shape": [
+        1,
+        8
+      ]
+    },
+    {
+      "const": [
+        1,
+        false
+      ],
+      "id": "g0:arange_1",
+      "in": [],
+      "module": "model",
+      "op": "aten.arange.default",
+      "shape": [
+        1
+      ]
+    },
+    {
+      "const": [
+        1,
+        false
+      ],
+      "id": "g0:arange_2",
+      "in": [],
+      "module": "model",
+      "op": "aten.arange.default",
+      "shape": [
+        1
+      ]
+    },
+    {
+      "const": [
+        8,
+        false
+      ],
+      "id": "g0:arange_3",
+      "in": [],
+      "module": "model",
+      "op": "aten.arange.default",
+      "shape": [
+        8
+      ]
+    },
+    {
+      "const": [
+        0
+      ],
+      "id": "g0:add_1",
+      "in": [
+        "g0:arange_3"
+      ],
+      "module": "model",
+      "op": "aten.add.Tensor",
+      "shape": [
+        8
+      ]
+    },
+    {
+      "const": [
+        8,
+        false
+      ],
+      "id": "g0:arange_4",
+      "in": [],
+      "module": "model",
+      "op": "aten.arange.default",
+      "shape": [
+        8
+      ]
+    },
+    {
+      "const": [
+        0
+      ],
+      "id": "g0:add_2",
+      "in": [
+        "g0:arange_4"
+      ],
+      "module": "model",
+      "op": "aten.add.Tensor",
+      "shape": [
+        8
+      ]
+    },
+    {
+      "const": [
+        0,
+        0,
+        9223372036854775807
+      ],
+      "id": "g0:slice_3",
+      "in": [
+        "g0:arange_1"
+      ],
+      "module": "model",
+      "op": "aten.slice.Tensor",
+      "shape": [
+        1
+      ]
+    },
+    {
+      "const": [
+        1
+      ],
+      "id": "g0:unsqueeze_1",
+      "in": [
+        "g0:slice_3"
+      ],
+      "module": "model",
+      "op": "aten.unsqueeze.default",
+      "shape": [
+        1,
+        1
+      ]
+    },
+    {
+      "const": [
+        2
+      ],
+      "id": "g0:unsqueeze_2",
+      "in": [
+        "g0:unsqueeze_1"
+      ],
+      "module": "model",
+      "op": "aten.unsqueeze.default",
+      "shape": [
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "const": [
+        3
+      ],
+      "id": "g0:unsqueeze_3",
+      "in": [
+        "g0:unsqueeze_2"
+      ],
+      "module": "model",
+      "op": "aten.unsqueeze.default",
+      "shape": [
+        1,
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "const": [
+        0
+      ],
+      "id": "g0:unsqueeze_4",
+      "in": [
+        "g0:arange_2"
+      ],
+      "module": "model",
+      "op": "aten.unsqueeze.default",
+      "shape": [
+        1,
+        1
+      ]
+    },
+    {
+      "const": [
+        1,
+        0,
+        9223372036854775807
+      ],
+      "id": "g0:slice_4",
+      "in": [
+        "g0:unsqueeze_4"
+      ],
+      "module": "model",
+      "op": "aten.slice.Tensor",
+      "shape": [
+        1,
+        1
+      ]
+    },
+    {
+      "const": [
+        2
+      ],
+      "id": "g0:unsqueeze_5",
+      "in": [
+        "g0:slice_4"
+      ],
+      "module": "model",
+      "op": "aten.unsqueeze.default",
+      "shape": [
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "const": [
+        3
+      ],
+      "id": "g0:unsqueeze_6",
+      "in": [
+        "g0:unsqueeze_5"
+      ],
+      "module": "model",
+      "op": "aten.unsqueeze.default",
+      "shape": [
+        1,
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "const": [
+        0
+      ],
+      "id": "g0:unsqueeze_7",
+      "in": [
+        "g0:add_1"
+      ],
+      "module": "model",
+      "op": "aten.unsqueeze.default",
+      "shape": [
+        1,
+        8
+      ]
+    },
+    {
+      "const": [
+        1
+      ],
+      "id": "g0:unsqueeze_8",
+      "in": [
+        "g0:unsqueeze_7"
+      ],
+      "module": "model",
+      "op": "aten.unsqueeze.default",
+      "shape": [
+        1,
+        1,
+        8
+      ]
+    },
+    {
+      "const": [
+        2,
+        0,
+        9223372036854775807
+      ],
+      "id": "g0:slice_5",
+      "in": [
+        "g0:unsqueeze_8"
+      ],
+      "module": "model",
+      "op": "aten.slice.Tensor",
+      "shape": [
+        1,
+        1,
+        8
+      ]
+    },
+    {
+      "const": [
+        3
+      ],
+      "id": "g0:unsqueeze_9",
+      "in": [
+        "g0:slice_5"
+      ],
+      "module": "model",
+      "op": "aten.unsqueeze.default",
+      "shape": [
+        1,
+        1,
+        8,
+        1
+      ]
+    },
+    {
+      "const": [
+        0
+      ],
+      "id": "g0:unsqueeze_10",
+      "in": [
+        "g0:add_2"
+      ],
+      "module": "model",
+      "op": "aten.unsqueeze.default",
+      "shape": [
+        1,
+        8
+      ]
+    },
+    {
+      "const": [
+        1
+      ],
+      "id": "g0:unsqueeze_11",
+      "in": [
+        "g0:unsqueeze_10"
+      ],
+      "module": "model",
+      "op": "aten.unsqueeze.default",
+      "shape": [
+        1,
+        1,
+        8
+      ]
+    },
+    {
+      "const": [
+        2
+      ],
+      "id": "g0:unsqueeze_12",
+      "in": [
+        "g0:unsqueeze_11"
+      ],
+      "module": "model",
+      "op": "aten.unsqueeze.default",
+      "shape": [
+        1,
+        1,
+        1,
+        8
+      ]
+    },
+    {
+      "const": [
+        3,
+        0,
+        9223372036854775807
+      ],
+      "id": "g0:slice_6",
+      "in": [
+        "g0:unsqueeze_12"
+      ],
+      "module": "model",
+      "op": "aten.slice.Tensor",
+      "shape": [
+        1,
+        1,
+        1,
+        8
+      ]
+    },
+    {
+      "const": [
+        false
+      ],
+      "id": "g0:new_ones",
+      "in": [
+        "g0:unsqueeze_9"
+      ],
+      "module": "model",
+      "op": "aten.new_ones.default",
+      "shape": []
+    },
+    {
+      "const": [],
+      "id": "g0:le",
+      "in": [
+        "g0:slice_6",
+        "g0:unsqueeze_9"
+      ],
+      "module": "model",
+      "op": "aten.le.Tensor",
+      "shape": [
+        1,
+        1,
+        8,
+        8
+      ]
+    },
+    {
+      "const": [],
+      "id": "g0:to",
+      "in": [
+        "g0:le"
+      ],
+      "module": "model",
+      "op": "aten.to.dtype_layout",
+      "shape": [
+        1,
+        1,
+        8,
+        8
+      ]
+    },
+    {
+      "const": [],
+      "id": "g0:and_1",
+      "in": [
+        "g0:new_ones",
+        "g0:to"
+      ],
+      "module": "model",
+      "op": "aten.__and__.Tensor",
+      "shape": [
+        1,
+        1,
+        8,
+        8
+      ]
+    },
+    {
+      "const": [],
+      "id": "g0:index",
+      "in": [
+        "g0:cumsum",
+        "g0:unsqueeze_3",
+        "g0:unsqueeze_9"
+      ],
+      "module": "model",
+      "op": "aten.index.Tensor",
+      "shape": [
+        1,
+        1,
+        8,
+        1
+      ]
+    },
+    {
+      "const": [],
+      "id": "g0:index_1",
+      "in": [
+        "g0:cumsum",
+        "g0:unsqueeze_3",
+        "g0:slice_6"
+      ],
+      "module": "model",
+      "op": "aten.index.Tensor",
+      "shape": [
+        1,
+        1,
+        1,
+        8
+      ]
+    },
+    {
+      "const": [],
+      "id": "g0:eq",
+      "in": [
+        "g0:index",
+        "g0:index_1"
+      ],
+      "module": "model",
+      "op": "aten.eq.Tensor",
+      "shape": [
+        1,
+        1,
+        8,
+        8
+      ]
+    },
+    {
+      "const": [],
+      "id": "g0:to_1",
+      "in": [
+        "g0:eq"
+      ],
+      "module": "model",
+      "op": "aten.to.dtype_layout",
+      "shape": [
+        1,
+        1,
+        8,
+        8
+      ]
+    },
+    {
+      "const": [],
+      "id": "g0:and_2",
+      "in": [
+        "g0:and_1",
+        "g0:to_1"
+      ],
+      "module": "model",
+      "op": "aten.__and__.Tensor",
+      "shape": [
+        1,
+        1,
+        8,
+        8
+      ]
+    },
+    {
+      "const": [
+        [
+          1,
+          -1,
+          8,
+          8
+        ]
+      ],
+      "id": "g0:expand",
+      "in": [
+        "g0:and_2"
+      ],
+      "module": "model",
+      "op": "aten.expand.default",
+      "shape": [
+        1,
+        1,
+        8,
+        8
+      ]
+    },
+    {
+      "const": [],
+      "id": "g0:to_6",
+      "in": [
+        "g0:embedding"
+      ],
+      "module": "model.layers.0.input_layernorm",
+      "op": "aten.to.dtype",
+      "shape": [
+        1,
+        8,
+        32
+      ]
+    },
+    {
+      "const": [
+        2
+      ],
+      "id": "g0:pow_1",
+      "in": [
+        "g0:to_6"
+      ],
+      "module": "model.layers.0.input_layernorm",
+      "op": "aten.pow.Tensor_Scalar",
+      "shape": [
+        1,
+        8,
+        32
+      ]
+    },
+    {
+      "const": [
+        [
+          -1
+        ],
+        true
+      ],
+      "id": "g0:mean",
+      "in": [
+        "g0:pow_1"
+      ],
+      "module": "model.layers.0.input_layernorm",
+      "op": "aten.mean.dim",
+      "shape": [
+        1,
+        8,
+        1
+      ]
+    },
+    {
+      "const": [
+        1e-06
+      ],
+      "id": "g0:add_3",
+      "in": [
+        "g0:mean"
+      ],
+      "module": "model.layers.0.input_layernorm",
+      "op": "aten.add.Tensor",
+      "shape": [
+        1,
+        8,
+        1
+      ]
+    },
+    {
+      "const": [],
+      "id": "g0:rsqrt",
+      "in": [
+        "g0:add_3"
+      ],
+      "module": "model.layers.0.input_layernorm",
+      "op": "aten.rsqrt.default",
+      "shape": [
+        1,
+        8,
+        1
+      ]
+    },
+    {
+      "const": [],
+      "id": "g0:mul_3",
+      "in": [
+        "g0:to_6",
+        "g0:rsqrt"
+      ],
+      "module": "model.layers.0.input_layernorm",
+      "op": "aten.mul.Tensor",
+      "shape": [
+        1,
+        8,
+        32
+      ]
+    },
+    {
+      "const": [],
+      "id": "g0:to_7",
+      "in": [
+        "g0:mul_3"
+      ],
+      "module": "model.layers.0.input_layernorm",
+      "op": "aten.to.dtype",
+      "shape": [
+        1,
+        8,
+        32
+      ]
+    },
+    {
+      "const": [],
+      "id": "g0:mul_4",
+      "in": [
+        "g0:p_model_layers_0_input_layernorm_weight",
+        "g0:to_7"
+      ],
+      "module": "model.layers.0.input_layernorm",
+      "op": "aten.mul.Tensor",
+      "shape": [
+        1,
+        8,
+        32
+      ]
+    },
+    {
+      "const": [],
+      "id": "g0:linear",
+      "in": [
+        "g0:mul_4",
+        "g0:p_model_layers_0_self_attn_q_proj_weight"
+      ],
+      "module": "model.layers.0.self_attn.q_proj",
+      "op": "aten.linear.default",
+      "shape": [
+        1,
+        8,
+        32
+      ]
+    },
+    {
+      "const": [
+        [
+          1,
+          8,
+          -1,
+          16
+        ]
+      ],
+      "id": "g0:view",
+      "in": [
+        "g0:linear"
+      ],
+      "module": "model.layers.0.self_attn",
+      "op": "aten.view.default",
+      "shape": [
+        1,
+        8,
+        2,
+        16
+      ]
+    },
+    {
+      "const": [],
+      "id": "g0:to_8",
+      "in": [
+        "g0:view"
+      ],
+      "module": "model.layers.0.self_attn.q_norm",
+      "op": "aten.to.dtype",
+      "shape": [
+        1,
+        8,
+        2,
+        16
+      ]
+    },
+    {
+      "const": [
+        2
+      ],
+      "id": "g0:pow_2",
+      "in": [
+        "g0:to_8"
+      ],
+      "module": "model.layers.0.self_attn.q_norm",
+      "op": "aten.pow.Tensor_Scalar",
+      "shape": [
+        1,
+        8,
+        2,
+        16
+      ]
+    },
+    {
+      "const": [
+        [
+          -1
+        ],
+        true
+      ],
+      "id": "g0:mean_1",
+      "in": [
+        "g0:pow_2"
+      ],
+      "module": "model.layers.0.self_attn.q_norm",
+      "op": "aten.mean.dim",
+      "shape": [
+        1,
+        8,
+        2,
+        1
+      ]
+    },
+    {
+      "const": [
+        1e-06
+      ],
+      "id": "g0:add_4",
+      "in": [
+        "g0:mean_1"
+      ],
+      "module": "model.layers.0.self_attn.q_norm",
+      "op": "aten.add.Tensor",
+      "shape": [
+        1,
+        8,
+        2,
+        1
+      ]
+    },
+    {
+      "const": [],
+      "id": "g0:rsqrt_1",
+      "in": [
+        "g0:add_4"
+      ],
+      "module": "model.layers.0.self_attn.q_norm",
+      "op": "aten.rsqrt.default",
+      "shape": [
+        1,
+        8,
+        2,
+        1
+      ]
+    },
+    {
+      "const": [],
+      "id": "g0:mul_5",
+      "in": [
+        "g0:to_8",
+        "g0:rsqrt_1"
+      ],
+      "module": "model.layers.0.self_attn.q_norm",
+      "op": "aten.mul.Tensor",
+      "shape": [
+        1,
+        8,
+        2,
+        16
+      ]
+    },
+    {
+      "const": [],
+      "id": "g0:to_9",
+      "in": [
+        "g0:mul_5"
+      ],
+      "module": "model.layers.0.self_attn.q_norm",
+      "op": "aten.to.dtype",
+      "shape": [
+        1,
+        8,
+        2,
+        16
+      ]
+    },
+    {
+      "const": [],
+      "id": "g0:mul_6",
+      "in": [
+        "g0:p_model_layers_0_self_attn_q_norm_weight",
+        "g0:to_9"
+      ],
+      "module": "model.layers.0.self_attn.q_norm",
+      "op": "aten.mul.Tensor",
+      "shape": [
+        1,
+        8,
+        2,
+        16
+      ]
+    },
+    {
+      "const": [
+        1,
+        2
+      ],
+      "id": "g0:transpose",
+      "in": [
+        "g0:mul_6"
+      ],
+      "module": "model.layers.0.self_attn",
+      "op": "aten.transpose.int",
+      "shape": [
+        1,
+        2,
+        8,
+        16
+      ]
+    },
+    {
+      "const": [],
+      "id": "g0:linear_1",
+      "in": [
+        "g0:mul_4",
+        "g0:p_model_layers_0_self_attn_k_proj_weight"
+      ],
+      "module": "model.layers.0.self_attn.k_proj",
+      "op": "aten.linear.default",
+      "shape": [
+        1,
+        8,
+        32
+      ]
+    },
+    {
+      "const": [
+        [
+          1,
+          8,
+          -1,
+          16
+        ]
+      ],
+      "id": "g0:view_1",
+      "in": [
+        "g0:linear_1"
+      ],
+      "module": "model.layers.0.self_attn",
+      "op": "aten.view.default",
+      "shape": [
+        1,
+        8,
+        2,
+        16
+      ]
+    },
+    {
+      "const": [],
+      "id": "g0:to_10",
+      "in": [
+        "g0:view_1"
+      ],
+      "module": "model.layers.0.self_attn.k_norm",
+      "op": "aten.to.dtype",
+      "shape": [
+        1,
+        8,
+        2,
+        16
+      ]
+    },
+    {
+      "const": [
+        2
+      ],
+      "id": "g0:pow_3",
+      "in": [
+        "g0:to_10"
+      ],
+      "module": "model.layers.0.self_attn.k_norm",
+      "op": "aten.pow.Tensor_Scalar",
+      "shape": [
+        1,
+        8,
+        2,
+        16
+      ]
+    },
+    {
+      "const": [
+        [
+          -1
+        ],
+        true
+      ],
+      "id": "g0:mean_2",
+      "in": [
+        "g0:pow_3"
+      ],
+      "module": "model.layers.0.self_attn.k_norm",
+      "op": "aten.mean.dim",
+      "shape": [
+        1,
+        8,
+        2,
+        1
+      ]
+    },
+    {
+      "const": [
+        1e-06
+      ],
+      "id": "g0:add_5",
+      "in": [
+        "g0:mean_2"
+      ],
+      "module": "model.layers.0.self_attn.k_norm",
+      "op": "aten.add.Tensor",
+      "shape": [
+        1,
+        8,
+        2,
+        1
+      ]
+    },
+    {
+      "const": [],
+      "id": "g0:rsqrt_2",
+      "in": [
+        "g0:add_5"
+      ],
+      "module": "model.layers.0.self_attn.k_norm",
+      "op": "aten.rsqrt.default",
+      "shape": [
+        1,
+        8,
+        2,
+        1
+      ]
+    },
+    {
+      "const": [],
+      "id": "g0:mul_7",
+      "in": [
+        "g0:to_10",
+        "g0:rsqrt_2"
+      ],
+      "module": "model.layers.0.self_attn.k_norm",
+      "op": "aten.mul.Tensor",
+      "shape": [
+        1,
+        8,
+        2,
+        16
+      ]
+    },
+    {
+      "const": [],
+      "id": "g0:to_11",
+      "in": [
+        "g0:mul_7"
+      ],
+      "module": "model.layers.0.self_attn.k_norm",
+      "op": "aten.to.dtype",
+      "shape": [
+        1,
+        8,
+        2,
+        16
+      ]
+    },
+    {
+      "const": [],
+      "id": "g0:mul_8",
+      "in": [
+        "g0:p_model_layers_0_self_attn_k_norm_weight",
+        "g0:to_11"
+      ],
+      "module": "model.layers.0.self_attn.k_norm",
+      "op": "aten.mul.Tensor",
+      "shape": [
+        1,
+        8,
+        2,
+        16
+      ]
+    },
+    {
+      "const": [
+        1,
+        2
+      ],
+      "id": "g0:transpose_1",
+      "in": [
+        "g0:mul_8"
+      ],
+      "module": "model.layers.0.self_attn",
+      "op": "aten.transpose.int",
+      "shape": [
+        1,
+        2,
+        8,
+        16
+      ]
+    },
+    {
+      "const": [],
+      "id": "g0:linear_2",
+      "in": [
+        "g0:mul_4",
+        "g0:p_model_layers_0_self_attn_v_proj_weight"
+      ],
+      "module": "model.layers.0.self_attn.v_proj",
+      "op": "aten.linear.default",
+      "shape": [
+        1,
+        8,
+        32
+      ]
+    },
+    {
+      "const": [
+        [
+          1,
+          8,
+          -1,
+          16
+        ]
+      ],
+      "id": "g0:view_2",
+      "in": [
+        "g0:linear_2"
+      ],
+      "module": "model.layers.0.self_attn",
+      "op": "aten.view.default",
+      "shape": [
+        1,
+        8,
+        2,
+        16
+      ]
+    },
+    {
+      "const": [
+        1,
+        2
+      ],
+      "id": "g0:transpose_2",
+      "in": [
+        "g0:view_2"
+      ],
+      "module": "model.layers.0.self_attn",
+      "op": "aten.transpose.int",
+      "shape": [
+        1,
+        2,
+        8,
+        16
+      ]
+    },
+    {
+      "const": [
+        1
+      ],
+      "id": "g0:unsqueeze_14",
+      "in": [
+        "g0:wrap_with_set_grad_enabled"
+      ],
+      "module": "model.layers.0.self_attn",
+      "op": "aten.unsqueeze.default",
+      "shape": [
+        1,
+        1,
+        8,
+        16
+      ]
+    },
+    {
+      "const": [
+        1
+      ],
+      "id": "g0:unsqueeze_15",
+      "in": [
+        "g0:wrap_with_set_grad_enabled"
+      ],
+      "module": "model.layers.0.self_attn",
+      "op": "aten.unsqueeze.default",
+      "shape": [
+        1,
+        1,
+        8,
+        16
+      ]
+    },
+    {
+      "const": [],
+      "id": "g0:mul_9",
+      "in": [
+        "g0:transpose",
+        "g0:unsqueeze_14"
+      ],
+      "module": "model.layers.0.self_attn",
+      "op": "aten.mul.Tensor",
+      "shape": [
+        1,
+        2,
+        8,
+        16
+      ]
+    },
+    {
+      "const": [
+        3,
+        0,
+        8
+      ],
+      "id": "g0:slice_7",
+      "in": [
+        "g0:transpose"
+      ],
+      "module": "model.layers.0.self_attn",
+      "op": "aten.slice.Tensor",
+      "shape": [
+        1,
+        2,
+        8,
+        8
+      ]
+    },
+    {
+      "const": [
+        3,
+        8,
+        9223372036854775807
+      ],
+      "id": "g0:slice_8",
+      "in": [
+        "g0:transpose"
+      ],
+      "module": "model.layers.0.self_attn",
+      "op": "aten.slice.Tensor",
+      "shape": [
+        1,
+        2,
+        8,
+        8
+      ]
+    },
+    {
+      "const": [],
+      "id": "g0:neg",
+      "in": [
+        "g0:slice_8"
+      ],
+      "module": "model.layers.0.self_attn",
+      "op": "aten.neg.default",
+      "shape": [
+        1,
+        2,
+        8,
+        8
+      ]
+    },
+    {
+      "const": [
+        -1
+      ],
+      "id": "g0:cat_1",
+      "in": [
+        "g0:neg",
+        "g0:slice_7"
+      ],
+      "module": "model.layers.0.self_attn",
+      "op": "aten.cat.default",
+      "shape": [
+        1,
+        2,
+        8,
+        16
+      ]
+    },
+    {
+      "const": [],
+      "id": "g0:mul_10",
+      "in": [
+        "g0:cat_1",
+        "g0:unsqueeze_15"
+      ],
+      "module": "model.layers.0.self_attn",
+      "op": "aten.mul.Tensor",
+      "shape": [
+        1,
+        2,
+        8,
+        16
+      ]
+    },
+    {
+      "const": [],
+      "id": "g0:add_6",
+      "in": [
+        "g0:mul_9",
+        "g0:mul_10"
+      ],
+      "module": "model.layers.0.self_attn",
+      "op": "aten.add.Tensor",
+      "shape": [
+        1,
+        2,
+        8,
+        16
+      ]
+    },
+    {
+      "const": [],
+      "id": "g0:mul_11",
+      "in": [
+        "g0:transpose_1",
+        "g0:unsqueeze_14"
+      ],
+      "module": "model.layers.0.self_attn",
+      "op": "aten.mul.Tensor",
+      "shape": [
+        1,
+        2,
+        8,
+        16
+      ]
+    },
+    {
+      "const": [
+        3,
+        0,
+        8
+      ],
+      "id": "g0:slice_9",
+      "in": [
+        "g0:transpose_1"
+      ],
+      "module": "model.layers.0.self_attn",
+      "op": "aten.slice.Tensor",
+      "shape": [
+        1,
+        2,
+        8,
+        8
+      ]
+    },
+    {
+      "const": [
+        3,
+        8,
+        9223372036854775807
+      ],
+      "id": "g0:slice_10",
+      "in": [
+        "g0:transpose_1"
+      ],
+      "module": "model.layers.0.self_attn",
+      "op": "aten.slice.Tensor",
+      "shape": [
+        1,
+        2,
+        8,
+        8
+      ]
+    },
+    {
+      "const": [],
+      "id": "g0:neg_1",
+      "in": [
+        "g0:slice_10"
+      ],
+      "module": "model.layers.0.self_attn",
+      "op": "aten.neg.default",
+      "shape": [
+        1,
+        2,
+        8,
+        8
+      ]
+    },
+    {
+      "const": [
+        -1
+      ],
+      "id": "g0:cat_2",
+      "in": [
+        "g0:neg_1",
+        "g0:slice_9"
+      ],
+      "module": "model.layers.0.self_attn",
+      "op": "aten.cat.default",
+      "shape": [
+        1,
+        2,
+        8,
+        16
+      ]
+    },
+    {
+      "const": [],
+      "id": "g0:mul_12",
+      "in": [
+        "g0:cat_2",
+        "g0:unsqueeze_15"
+      ],
+      "module": "model.layers.0.self_attn",
+      "op": "aten.mul.Tensor",
+      "shape": [
+        1,
+        2,
+        8,
+        16
+      ]
+    },
+    {
+      "const": [],
+      "id": "g0:add_7",
+      "in": [
+        "g0:mul_11",
+        "g0:mul_12"
+      ],
+      "module": "model.layers.0.self_attn",
+      "op": "aten.add.Tensor",
+      "shape": [
+        1,
+        2,
+        8,
+        16
+      ]
+    },
+    {
+      "const": [
+        0.25
+      ],
+      "id": "g0:scaled_dot_product_attention",
+      "in": [
+        "g0:add_6",
+        "g0:add_7",
+        "g0:transpose_2",
+        "g0:expand"
+      ],
+      "module": "model.layers.0.self_attn",
+      "op": "aten.scaled_dot_product_attention.default",
+      "shape": [
+        1,
+        2,
+        8,
+        16
+      ]
+    },
+    {
+      "const": [
+        1,
+        2
+      ],
+      "id": "g0:transpose_3",
+      "in": [
+        "g0:scaled_dot_product_attention"
+      ],
+      "module": "model.layers.0.self_attn",
+      "op": "aten.transpose.int",
+      "shape": [
+        1,
+        8,
+        2,
+        16
+      ]
+    },
+    {
+      "const": [],
+      "id": "g0:contiguous",
+      "in": [
+        "g0:transpose_3"
+      ],
+      "module": "model.layers.0.self_attn",
+      "op": "aten.contiguous.default",
+      "shape": [
+        1,
+        8,
+        2,
+        16
+      ]
+    },
+    {
+      "const": [
+        [
+          1,
+          8,
+          -1
+        ]
+      ],
+      "id": "g0:reshape",
+      "in": [
+        "g0:contiguous"
+      ],
+      "module": "model.layers.0.self_attn",
+      "op": "aten.reshape.default",
+      "shape": [
+        1,
+        8,
+        32
+      ]
+    },
+    {
+      "const": [],
+      "id": "g0:linear_3",
+      "in": [
+        "g0:reshape",
+        "g0:p_model_layers_0_self_attn_o_proj_weight"
+      ],
+      "module": "model.layers.0.self_attn.o_proj",
+      "op": "aten.linear.default",
+      "shape": [
+        1,
+        8,
+        32
+      ]
+    },
+    {
+      "const": [],
+      "id": "g0:add_8",
+      "in": [
+        "g0:to_6",
+        "g0:linear_3"
+      ],
+      "module": "model.layers.0",
+      "op": "aten.add.Tensor",
+      "shape": [
+        1,
+        8,
+        32
+      ]
+    },
+    {
+      "const": [],
+      "id": "g0:to_12",
+      "in": [
+        "g0:add_8"
+      ],
+      "module": "model.layers.0.post_attention_layernorm",
+      "op": "aten.to.dtype",
+      "shape": [
+        1,
+        8,
+        32
+      ]
+    },
+    {
+      "const": [
+        2
+      ],
+      "id": "g0:pow_4",
+      "in": [
+        "g0:to_12"
+      ],
+      "module": "model.layers.0.post_attention_layernorm",
+      "op": "aten.pow.Tensor_Scalar",
+      "shape": [
+        1,
+        8,
+        32
+      ]
+    },
+    {
+      "const": [
+        [
+          -1
+        ],
+        true
+      ],
+      "id": "g0:mean_3",
+      "in": [
+        "g0:pow_4"
+      ],
+      "module": "model.layers.0.post_attention_layernorm",
+      "op": "aten.mean.dim",
+      "shape": [
+        1,
+        8,
+        1
+      ]
+    },
+    {
+      "const": [
+        1e-06
+      ],
+      "id": "g0:add_9",
+      "in": [
+        "g0:mean_3"
+      ],
+      "module": "model.layers.0.post_attention_layernorm",
+      "op": "aten.add.Tensor",
+      "shape": [
+        1,
+        8,
+        1
+      ]
+    },
+    {
+      "const": [],
+      "id": "g0:rsqrt_3",
+      "in": [
+        "g0:add_9"
+      ],
+      "module": "model.layers.0.post_attention_layernorm",
+      "op": "aten.rsqrt.default",
+      "shape": [
+        1,
+        8,
+        1
+      ]
+    },
+    {
+      "const": [],
+      "id": "g0:mul_13",
+      "in": [
+        "g0:to_12",
+        "g0:rsqrt_3"
+      ],
+      "module": "model.layers.0.post_attention_layernorm",
+      "op": "aten.mul.Tensor",
+      "shape": [
+        1,
+        8,
+        32
+      ]
+    },
+    {
+      "const": [],
+      "id": "g0:to_13",
+      "in": [
+        "g0:mul_13"
+      ],
+      "module": "model.layers.0.post_attention_layernorm",
+      "op": "aten.to.dtype",
+      "shape": [
+        1,
+        8,
+        32
+      ]
+    },
+    {
+      "const": [],
+      "id": "g0:mul_14",
+      "in": [
+        "g0:p_model_layers_0_post_attention_layernorm_weight",
+        "g0:to_13"
+      ],
+      "module": "model.layers.0.post_attention_layernorm",
+      "op": "aten.mul.Tensor",
+      "shape": [
+        1,
+        8,
+        32
+      ]
+    },
+    {
+      "const": [],
+      "id": "g0:linear_4",
+      "in": [
+        "g0:mul_14",
+        "g0:p_model_layers_0_mlp_gate_proj_weight"
+      ],
+      "module": "model.layers.0.mlp.gate_proj",
+      "op": "aten.linear.default",
+      "shape": [
+        1,
+        8,
+        64
+      ]
+    },
+    {
+      "const": [],
+      "id": "g0:silu",
+      "in": [
+        "g0:linear_4"
+      ],
+      "module": "model.layers.0.mlp.act_fn",
+      "op": "aten.silu.default",
+      "shape": [
+        1,
+        8,
+        64
+      ]
+    },
+    {
+      "const": [],
+      "id": "g0:linear_5",
+      "in": [
+        "g0:mul_14",
+        "g0:p_model_layers_0_mlp_up_proj_weight"
+      ],
+      "module": "model.layers.0.mlp.up_proj",
+      "op": "aten.linear.default",
+      "shape": [
+        1,
+        8,
+        64
+      ]
+    },
+    {
+      "const": [],
+      "id": "g0:mul_15",
+      "in": [
+        "g0:silu",
+        "g0:linear_5"
+      ],
+      "module": "model.layers.0.mlp",
+      "op": "aten.mul.Tensor",
+      "shape": [
+        1,
+        8,
+        64
+      ]
+    },
+    {
+      "const": [],
+      "id": "g0:linear_6",
+      "in": [
+        "g0:mul_15",
+        "g0:p_model_layers_0_mlp_down_proj_weight"
+      ],
+      "module": "model.layers.0.mlp.down_proj",
+      "op": "aten.linear.default",
+      "shape": [
+        1,
+        8,
+        32
+      ]
+    },
+    {
+      "const": [],
+      "id": "g0:add_10",
+      "in": [
+        "g0:to_12",
+        "g0:linear_6"
+      ],
+      "module": "model.layers.0",
+      "op": "aten.add.Tensor",
+      "shape": [
+        1,
+        8,
+        32
+      ]
+    },
+    {
+      "const": [],
+      "id": "g0:to_22",
+      "in": [
+        "g0:add_18"
+      ],
+      "module": "model.norm",
+      "op": "aten.to.dtype",
+      "shape": [
+        1,
+        8,
+        32
+      ]
+    },
+    {
+      "const": [
+        2
+      ],
+      "id": "g0:pow_9",
+      "in": [
+        "g0:to_22"
+      ],
+      "module": "model.norm",
+      "op": "aten.pow.Tensor_Scalar",
+      "shape": [
+        1,
+        8,
+        32
+      ]
+    },
+    {
+      "const": [
+        [
+          -1
+        ],
+        true
+      ],
+      "id": "g0:mean_8",
+      "in": [
+        "g0:pow_9"
+      ],
+      "module": "model.norm",
+      "op": "aten.mean.dim",
+      "shape": [
+        1,
+        8,
+        1
+      ]
+    },
+    {
+      "const": [
+        1e-06
+      ],
+      "id": "g0:add_19",
+      "in": [
+        "g0:mean_8"
+      ],
+      "module": "model.norm",
+      "op": "aten.add.Tensor",
+      "shape": [
+        1,
+        8,
+        1
+      ]
+    },
+    {
+      "const": [],
+      "id": "g0:rsqrt_8",
+      "in": [
+        "g0:add_19"
+      ],
+      "module": "model.norm",
+      "op": "aten.rsqrt.default",
+      "shape": [
+        1,
+        8,
+        1
+      ]
+    },
+    {
+      "const": [],
+      "id": "g0:mul_29",
+      "in": [
+        "g0:to_22",
+        "g0:rsqrt_8"
+      ],
+      "module": "model.norm",
+      "op": "aten.mul.Tensor",
+      "shape": [
+        1,
+        8,
+        32
+      ]
+    },
+    {
+      "const": [],
+      "id": "g0:to_23",
+      "in": [
+        "g0:mul_29"
+      ],
+      "module": "model.norm",
+      "op": "aten.to.dtype",
+      "shape": [
+        1,
+        8,
+        32
+      ]
+    },
+    {
+      "const": [],
+      "id": "g0:mul_30",
+      "in": [
+        "g0:p_model_norm_weight",
+        "g0:to_23"
+      ],
+      "module": "model.norm",
+      "op": "aten.mul.Tensor",
+      "shape": [
+        1,
+        8,
+        32
+      ]
+    },
+    {
+      "const": [
+        0,
+        0,
+        9223372036854775807
+      ],
+      "id": "g0:slice_15",
+      "in": [
+        "g0:mul_30"
+      ],
+      "module": "",
+      "op": "aten.slice.Tensor",
+      "shape": [
+        1,
+        8,
+        32
+      ]
+    },
+    {
+      "const": [
+        1,
+        0,
+        9223372036854775807
+      ],
+      "id": "g0:slice_16",
+      "in": [
+        "g0:slice_15"
+      ],
+      "module": "",
+      "op": "aten.slice.Tensor",
+      "shape": [
+        1,
+        8,
+        32
+      ]
+    },
+    {
+      "const": [
+        2,
+        0,
+        9223372036854775807
+      ],
+      "id": "g0:slice_17",
+      "in": [
+        "g0:slice_16"
+      ],
+      "module": "",
+      "op": "aten.slice.Tensor",
+      "shape": [
+        1,
+        8,
+        32
+      ]
+    },
+    {
+      "const": [],
+      "id": "g0:linear_14",
+      "in": [
+        "g0:slice_17",
+        "g0:p_lm_head_weight"
+      ],
+      "module": "lm_head",
+      "op": "aten.linear.default",
+      "shape": [
+        1,
+        8,
+        128
+      ]
+    },
+    {
+      "const": [
+        2
+      ],
+      "id": "g1:unsqueeze_13",
+      "in": [
+        "g1:unsqueeze"
+      ],
+      "module": "model.rotary_emb",
+      "op": "aten.unsqueeze.default",
+      "shape": [
+        1,
+        8,
+        1
+      ]
+    },
+    {
+      "const": [],
+      "id": "g1:to_2",
+      "in": [
+        "g1:unsqueeze_13"
+      ],
+      "module": "model.rotary_emb",
+      "op": "aten.to.dtype",
+      "shape": [
+        1,
+        8,
+        1
+      ]
+    },
+    {
+      "const": [],
+      "id": "g1:to_3",
+      "in": [
+        "g1:b_model_rotary_emb_inv_freq"
+      ],
+      "module": "model.rotary_emb",
+      "op": "aten.to.device",
+      "shape": [
+        8
+      ]
+    },
+    {
+      "const": [],
+      "id": "g1:mul",
+      "in": [
+        "g1:to_2",
+        "g1:to_3"
+      ],
+      "module": "model.rotary_emb",
+      "op": "aten.mul.Tensor",
+      "shape": [
+        1,
+        8,
+        8
+      ]
+    },
+    {
+      "const": [
+        -1
+      ],
+      "id": "g1:cat",
+      "in": [
+        "g1:mul"
+      ],
+      "module": "model.rotary_emb",
+      "op": "aten.cat.default",
+      "shape": [
+        1,
+        8,
+        16
+      ]
+    },
+    {
+      "const": [],
+      "id": "g1:cos",
+      "in": [
+        "g1:cat"
+      ],
+      "module": "model.rotary_emb",
+      "op": "aten.cos.default",
+      "shape": [
+        1,
+        8,
+        16
+      ]
+    },
+    {
+      "const": [
+        1.0
+      ],
+      "id": "g1:mul_1",
+      "in": [
+        "g1:cos"
+      ],
+      "module": "model.rotary_emb",
+      "op": "aten.mul.Tensor",
+      "shape": [
+        1,
+        8,
+        16
+      ]
+    },
+    {
+      "const": [],
+      "id": "g1:sin",
+      "in": [
+        "g1:cat"
+      ],
+      "module": "model.rotary_emb",
+      "op": "aten.sin.default",
+      "shape": [
+        1,
+        8,
+        16
+      ]
+    },
+    {
+      "const": [
+        1.0
+      ],
+      "id": "g1:mul_2",
+      "in": [
+        "g1:sin"
+      ],
+      "module": "model.rotary_emb",
+      "op": "aten.mul.Tensor",
+      "shape": [
+        1,
+        8,
+        16
+      ]
+    },
+    {
+      "const": [],
+      "id": "g1:to_4",
+      "in": [
+        "g1:mul_1"
+      ],
+      "module": "model.rotary_emb",
+      "op": "aten.to.dtype",
+      "shape": [
+        1,
+        8,
+        16
+      ]
+    },
+    {
+      "const": [],
+      "id": "g1:to_5",
+      "in": [
+        "g1:mul_2"
+      ],
+      "module": "model.rotary_emb",
+      "op": "aten.to.dtype",
+      "shape": [
+        1,
+        8,
+        16
+      ]
+    }
+  ],
+  "sequence_note": "`sequence` lists the ops of the first layer and of everything outside the layers in graph order, with the ids of the nodes each one reads (a read through operator.getitem is followed to its source). A read of a weight or an input has an id that is not in the list. It is capped at 6000 records.",
+  "torch": "2.7.0+cpu",
+  "traced_class": "Qwen3ForCausalLM",
+  "transformers": "5.19.0"
+}
