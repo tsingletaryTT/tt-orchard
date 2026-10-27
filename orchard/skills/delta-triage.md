@@ -86,7 +86,9 @@ You do not write a comparison script.
    cites the evidence file. The operator reads it.
 7. The draft has the standing hazards: `tensor_cache`, `drafter`, `disk`, and `license` when the
    license changed. Add any further hazard you can justify from the evidence, with an area from
-   the list below, a finding and the evidence path.
+   the list below, a finding and the evidence path. The draft may also carry one `other` hazard about the scores the model
+   card reports (`evidence/reported-results.draft.json`). Keep it as it is. Do not copy those rows into any other file and do
+   not edit the draft: they are the authors' claims, and a person accepts rows later.
 8. Write the reviewed `delta.json` with write_file (the whole file).
 9. The op inventory. Do this only when the run facts list an input `reference_python`. Without it, skip this step
    and reply with a short summary and no tool call. Run it with that interpreter and the new model's snapshot
