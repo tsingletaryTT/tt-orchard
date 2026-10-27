@@ -171,6 +171,26 @@ def test_string_and_null_values_of_those_fields_are_fine():
     assert sp.problems(rec) == []
 
 
+@pytest.mark.parametrize("ran", [0, [], "false", "true", "", None, 1])
+def test_a_ran_marker_that_is_not_a_boolean_is_malformed_and_never_skipped(ran):
+    rec = record()
+    rec["ran"] = ran
+    assert any("ran" in r for r in sp.problems(rec)), ran
+    s = sp.summarize(rec)
+    assert s["verdict"] == "malformed" and s["card_sentence"] is None
+
+
+def test_a_present_record_with_no_ran_marker_is_malformed():
+    rec = record()
+    del rec["ran"]
+    assert sp.summarize(rec)["verdict"] == "malformed"
+    assert sp.problems({}) and sp.summarize({})["verdict"] == "malformed"
+
+
+def test_only_an_explicit_false_skips_a_present_record():
+    assert sp.problems({"ran": False}) == [] and sp.summarize({"ran": False})["verdict"] == "not-run"
+
+
 def test_a_malformed_record_is_not_summarised_as_a_verdict():
     rec = record()
     rec["requests"]["greedy"]["seconds"] = "fast"

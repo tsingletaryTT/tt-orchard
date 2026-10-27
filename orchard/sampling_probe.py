@@ -34,10 +34,14 @@ def _number(v) -> bool:
 
 def problems(record) -> list[str]:
     """Why the record is not well formed, or [] for a record that is well formed or absent."""
-    if record is None or (isinstance(record, dict) and not record.get("ran")):
+    if record is None:
         return []
     if not isinstance(record, dict):
         return [f"sampling_probe must be an object, got {record!r}"]
+    if not isinstance(record.get("ran"), bool):
+        return [f"sampling_probe.ran must be true or false, got {record.get('ran')!r}"]
+    if record["ran"] is False:
+        return []
     reqs = record.get("requests")
     if not isinstance(reqs, dict):
         return [f"sampling_probe.requests must be an object, got {reqs!r}"]
@@ -119,7 +123,7 @@ def _summarize(record) -> dict:
     request, a refused sampled request, incoherent sampled text, replies too short to judge, two seeds that gave the same text, a
     slower sampled speed, and otherwise full speed."""
     empty = {"greedy": None, "sampled": None, "ratio": None, "reasons": []}
-    if record is None or (isinstance(record, dict) and not record.get("ran")):
+    if record is None or (isinstance(record, dict) and record.get("ran") is False):
         return {**empty, "verdict": "not-run", "sentence": "The sampling probe did not run."}
     reasons = problems(record)
     if reasons:
