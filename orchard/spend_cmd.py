@@ -18,10 +18,12 @@ from pathlib import Path
 
 from orchard import telegraph as tg
 from orchard import telegraph_cmd
+from orchard import telegraph_view
 from orchard import virtualspend as vs
 from orchard import virtualspend_view as vsview
 
 EXIT_OK, EXIT_PROBLEM = 0, 2
+DAMAGED = "a derived amount is not finite, so this folder cannot be priced and is left out of the totals"
 NOTE = ("Local spend is virtual. The agent logs re-send the whole conversation on every turn, so the prompt count is large; "
         "a hosted provider with prompt caching would bill most of those tokens for much less. Use it as a comparison figure only.")
 
@@ -137,6 +139,12 @@ def main(args, *, out, environ=None, home=None) -> int:
     try:
         for d in dirs:
             s = vs.priced(vs.scan(d, beneath=pin), vcfg)
+            try:                                                     # the helper view's own check: every derived number is finite and >= 0
+                telegraph_view._check_derived({k: s[k] for k in ("turns", "prompt_tokens", "completion_tokens", "agent_wall_s", "request_s", "files")},
+                                              [c["cost_usd"] for c in s["virtual"]])
+            except ValueError:
+                rows.append({"dir": str(d), "error": DAMAGED, "complete": s["complete"], "skipped": s["skipped"]})
+                continue                                             # left out of the totals
             if not s["turns"] and not args.dirs and s["complete"]:
                 continue                                             # a folder under runs_root with no local turns is not listed
             rows.append({"dir": str(d), **s})
@@ -146,12 +154,16 @@ def main(args, *, out, environ=None, home=None) -> int:
         if pin is not None:
             pin.close()
     all_local = vs.priced({**total, "agent_wall_s": None, "request_s": None, "skipped": {}, "files": 0, "sources": {}, "complete": True}, vcfg)
+    try:
+        telegraph_view._check_derived(total, [c["cost_usd"] for c in all_local["virtual"]])
+    except ValueError:
+        all_local["virtual"] = [{**c, "cost_usd": None} for c in all_local["virtual"]]      # unknown, never a made-up number
     real = _real(Path(ledger_dir))
     if args.json:
         say(json.dumps({"real_helper_spend": real,
                         "local_virtual_spend": {"label": vs.LABEL, "note": NOTE, "directories": rows, "listing_cut_short": listing_cut,
                                                 "all_directories": {k: all_local[k] for k in ("turns", "prompt_tokens", "completion_tokens", "virtual")}}},
-                       indent=2, sort_keys=True))
+                       indent=2, sort_keys=True, allow_nan=False))
         return EXIT_OK
     say("REAL helper spend (what the outside helper charged; telegraph ledger)")
     if "error" in real:
@@ -167,6 +179,9 @@ def main(args, *, out, environ=None, home=None) -> int:
     if not rows:
         say("  no local agent logs with token counts were found")
     for r in rows:
+        if "error" in r:
+            say(f"  {r['dir']}: cannot be priced ({r['error']})")
+            continue
         wall = f" · {r['agent_wall_s'] / 3600:.2f} h of agent time" if r["agent_wall_s"] else ""
         say(f"  {r['dir']}: {r['turns']} turns · {r['prompt_tokens']} prompt, {r['completion_tokens']} completion tokens{wall}")
         for ref in r["virtual"]:
@@ -180,7 +195,7 @@ def main(args, *, out, environ=None, home=None) -> int:
         say(f"  all {len(rows)} directories: {all_local['turns']} turns · {all_local['prompt_tokens']} prompt, "
             f"{all_local['completion_tokens']} completion tokens")
         for ref in all_local["virtual"]:
-            say(f"      at {ref['name']}: ${ref['cost_usd']:.4f}")
+            say(f"      at {ref['name']}: " + (f"${ref['cost_usd']:.4f}" if ref["cost_usd"] is not None else "unknown (not finite)"))
     if listing_cut:
         say("  The folder listing was cut short, so some folders are not listed at all.")
     say()

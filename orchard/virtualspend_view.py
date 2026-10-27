@@ -17,6 +17,7 @@ import threading
 import time
 from pathlib import Path
 
+from orchard import telegraph_view
 from orchard import virtualspend as vs
 
 CACHE_S = 30.0
@@ -122,7 +123,12 @@ class Spender:
     def _scan_one(self, name, path, pin):
         """One folder, read beneath the pinned runs folder (a link anywhere between the two is refused). None when the scan failed."""
         try:
-            return {"name": name, **vs.priced(vs.scan(path, beneath=pin), self.cfg)}
+            row = {"name": name, **vs.priced(vs.scan(path, beneath=pin), self.cfg)}
+            # The same check the helper view makes before it caches anything (orchard/telegraph_view.py): every derived number is
+            # finite and not below zero. A price can overflow a cost to infinity, so a row that fails it is a failed scan.
+            telegraph_view._check_derived({k: row[k] for k in ("turns", "prompt_tokens", "completion_tokens", "agent_wall_s", "request_s", "files")},
+                                          [c["cost_usd"] for c in row["virtual"]])
+            return row
         except Exception:                                           # noqa: BLE001 - one bad folder must not hide the others
             return None
 
@@ -187,6 +193,14 @@ class Spender:
                  "cost_usd": vs.cost(total["prompt_tokens"], total["completion_tokens"], pi, po)}
                 for n, pi, po in self.cfg.references()]
         total["virtual"] = refs
+        error = None
+        try:
+            telegraph_view._check_derived(total)                    # sums of sound rows can still be too large
+        except ValueError:
+            error = "a derived amount is not finite, so the local figures are not shown"
+            total = {"turns": 0, "prompt_tokens": 0, "completion_tokens": 0,
+                     "virtual": [{**r, "cost_usd": 0.0} for r in refs]}
+            rows, total_rows = [], []
         head = refs[0]
         not_fully_read = sum(1 for r in all_rows if not r["complete"])
         meter_not_fully_read = sum(1 for r in total_rows if not r["complete"])
@@ -209,4 +223,4 @@ class Spender:
                 "references": [{"name": r["name"], "price_in": r["price_in"], "price_out": r["price_out"]} for r in refs],
                 "total": total, "meter": meter, "rows": shown, "not_scanned": not_scanned, "discovery_truncated": bool(cut),
                 "more_rows": max(0, len(rows) - MAX_ROWS), "not_fully_read": not_fully_read, "scan_failures": failures,
-                "runs_folder_unreadable": base["unreadable"]}
+                "runs_folder_unreadable": base["unreadable"], "error": error}

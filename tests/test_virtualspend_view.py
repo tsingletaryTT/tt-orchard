@@ -749,3 +749,60 @@ def test_a_failed_scan_of_the_selected_run_past_the_cap_is_counted(root, monkeyp
     monkeypatch.setattr(vs, "scan", flaky)
     data = get(app_with(root), "/api/virtual-spend?run=org--b")[1]
     assert data["scan_failures"] == 1
+
+
+# ---- merge with main: derived numbers are checked with the helper view's own check before anything is cached ---------------
+
+def _json_is_strict(data) -> None:
+    json.dumps(data, allow_nan=False)                                  # raises on NaN or infinity
+
+
+def test_a_price_that_overflows_a_cost_makes_that_run_a_failed_scan_not_an_infinite_figure(root):
+    write_log(root, "org--a/log/run.jsonl", [turn(1, 1_000_000, 0)])
+    write_log(root, "org--b/log/run.jsonl", [turn(1, 10, 0)])
+    cfg = vs.load({"price_in": 1e307})                                # 1,000,000 tokens times this overflows; 10 tokens do not
+    data = get(app_with(root, cfg))[1]
+    _json_is_strict(data)
+    assert [r["name"] for r in data["rows"]] == ["org--b"] and data["scan_failures"] == 1
+    assert data["total"]["virtual"][0]["cost_usd"] == pytest.approx(10 * 1e307 / 1e6)
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), -1.0], ids=["nan", "inf", "negative"])
+def test_a_derived_cost_that_is_not_finite_or_is_below_zero_is_never_cached(root, monkeypatch, bad):
+    write_log(root, "org--a/log/run.jsonl", [turn(1, 10, 1)])
+    t = [1000.0]
+    app = app_with(root, clock=lambda: t[0])
+    monkeypatch.setattr(vs, "cost", lambda *a, **k: bad)
+    first = app.virtual_spend()
+    _json_is_strict(first)
+    assert first["rows"] == [] and first["scan_failures"] == 1 and first["meter"] is None
+    assert app._spender._cache[1]["rows"] == [], "the damaged row is not in the cache"
+    monkeypatch.undo()                                                  # the cost is sound again
+    t[0] += view.CACHE_S + 1
+    again = app.virtual_spend()
+    assert [r["name"] for r in again["rows"]] == ["org--a"] and again["scan_failures"] == 0
+
+
+def test_a_total_that_is_not_finite_is_an_error_in_the_answer_and_no_meter(root, monkeypatch):
+    write_log(root, "org--a/log/run.jsonl", [turn(1, 10, 1)])
+    app = app_with(root)
+    real = view.vs.cost
+    calls = []
+
+    def cost_then_nan(p, c, pi, po):
+        calls.append(1)
+        return real(p, c, pi, po) if len(calls) <= 1 else float("nan")        # the row's own cost is sound; the total's is not
+    monkeypatch.setattr(vs, "cost", cost_then_nan)
+    data = app.virtual_spend()
+    _json_is_strict(data)
+    assert data["meter"] is None and "not finite" in data["error"] and data["rows"] == []
+
+
+def test_a_sound_answer_has_no_error_key_value(root):
+    write_log(root, "org--a/log/run.jsonl", [turn()])
+    assert get(app_with(root))[1]["error"] is None
+
+
+def test_the_check_is_the_helper_views_own_function():
+    from orchard import telegraph_view
+    assert view.telegraph_view._check_derived is telegraph_view._check_derived, "one copy of the check, shared"

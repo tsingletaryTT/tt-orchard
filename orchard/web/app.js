@@ -254,7 +254,7 @@ function renderLocalMeter(v) {
 
 function renderLocalTable() {
   const v = S.virtual;
-  if (!v || !changed($("tg-local"), [v.rows, v.references, v.not_scanned, v.discovery_truncated, v.more_rows, v.scope, v.not_fully_read, v.scan_failures, v.runs_folder_unreadable])) return;
+  if (!v || !changed($("tg-local"), [v.rows, v.references, v.not_scanned, v.discovery_truncated, v.more_rows, v.scope, v.not_fully_read, v.scan_failures, v.runs_folder_unreadable, v.error])) return;
   $("tg-local-note").textContent = v.label + ". The prompt count is large because every turn re-sends the whole conversation; " +
     "a hosted provider with prompt caching would bill most of it for much less." +
     (v.not_scanned ? ` ${plural(v.not_scanned, "run")} not scanned (the scan reads the first listed folders; select a run to scan it).` : "") +
@@ -263,7 +263,8 @@ function renderLocalTable() {
     (v.discovery_truncated ? " The folder listing was cut short, so some folders are not listed at all." : "") +
     (v.not_fully_read ? ` ${plural(v.not_fully_read, "run")} not fully read (marked in the table), so their figures are low.` : "") +
     (v.scan_failures ? ` ${plural(v.scan_failures, "run")} could not be read.` : "") +
-    (v.runs_folder_unreadable ? " The runs folder cannot be read." : "");
+    (v.runs_folder_unreadable ? " The runs folder cannot be read." : "") +
+    (v.error ? ` ${v.error}.` : "");
   const head = clear($("tg-local-head"));
   const hr = h("tr", {});
   for (const [t, cls] of [["Run or probe directory", null], ["Turns", "num"], ["Prompt tokens", "num"], ["Completion tokens", "num"], ["Agent time", "num"]]) {

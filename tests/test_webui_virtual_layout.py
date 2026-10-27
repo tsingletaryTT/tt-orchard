@@ -138,7 +138,7 @@ def test_operator_local_meter_is_aa_on_the_dark_top_bar():
 
 def test_the_local_table_is_redrawn_only_when_its_data_changes():
     body = fn_body(JS(), "function renderLocalTable")
-    assert 'changed($("tg-local"), [v.rows, v.references, v.not_scanned, v.discovery_truncated, v.more_rows, v.scope, v.not_fully_read, v.scan_failures, v.runs_folder_unreadable])' in body
+    assert 'changed($("tg-local"), [v.rows, v.references, v.not_scanned, v.discovery_truncated, v.more_rows, v.scope, v.not_fully_read, v.scan_failures, v.runs_folder_unreadable, v.error])' in body
 
 
 
@@ -198,3 +198,10 @@ def test_the_wrapper_is_invisible_in_the_top_bar_and_pins_both_figures_up_to_900
     css = CSS()
     assert re.search(r"^\.meters \{ display: contents; \}", css, re.M), "above 900 px the two figures are laid out by the top bar as before"
     assert re.search(r"@media \(max-width: 900px\) \{[^@]*\.meters \{[^}]*position: fixed[^}]*flex-direction: column", css)
+
+
+def test_the_page_shows_the_answers_error_and_redraws_when_it_changes():
+    body = fn_body(JS(), "function renderLocalTable")
+    assert "v.error" in body and "(v.error ?" in body
+    guard = next(line for line in body.splitlines() if "changed(" in line)
+    assert "v.error" in guard

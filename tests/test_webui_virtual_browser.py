@@ -433,3 +433,17 @@ def test_the_page_says_the_runs_folder_cannot_be_read_instead_of_listing_nothing
         expect(pg.locator("#tg-local-note")).to_contain_text("The runs folder cannot be read")
         expect(pg.locator("#tg-local-empty")).to_be_hidden()
     ctx.close()
+
+
+def test_the_page_says_a_run_failed_when_a_price_overflows_its_cost(tmp_path, browser):
+    r = tmp_path / "orchard-runs"
+    write_log(r, "kprobe/big/op/attempt-1/log/p.jsonl", [turn(1, 1_000_000, 0)])
+    write_log(r, "kprobe/small/op/attempt-1/log/p.jsonl", [turn(1, 10, 0)])
+    ctx, pg = new_page(browser)
+    with Served(app_for(r, vcfg=vs.load({"price_in": 1e307}))) as s:
+        pg.goto(f"http://127.0.0.1:{s.port}/?mode=operator#telegraph")
+        expect(pg.locator("#tg-local-note")).to_contain_text("1 run could not be read")
+        expect(pg.locator("#tg-local-body tr")).to_have_count(1)
+        text = pg.inner_text("#telegraph-view")
+        assert "Infinity" not in text and "NaN" not in text
+    ctx.close()

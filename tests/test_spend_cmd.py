@@ -547,3 +547,40 @@ def test_the_default_listing_leaves_no_descriptor_open(tmp_path):
     before = set(os.listdir("/proc/self/fd"))
     cli.main(["spend", "--config", str(config), "--dir", str(tmp_path / "none")], env={}, stdout=io.StringIO())
     assert set(os.listdir("/proc/self/fd")) == before
+
+
+def test_a_cost_that_overflows_is_reported_for_that_folder_and_left_out_of_the_totals(tmp_path):
+    big, small = tmp_path / "big", tmp_path / "small"
+    write_log(big, "log/run.jsonl", [turn(1, 1_000_000, 0)])
+    write_log(small, "log/run.jsonl", [turn(1, 10, 0)])
+    code, text = run(tmp_path, [str(big), str(small), "--dir", str(tmp_path / "none")], "[virtual_spend]\nprice_in = 1e307\n")
+    assert code == 0
+    assert "cannot be priced" in text and "not finite" in text
+    assert "inf" not in text.lower().replace("information", "") and "nan" not in text.lower()
+    code, js = run(tmp_path, [str(big), str(small), "--json", "--dir", str(tmp_path / "none")], "[virtual_spend]\nprice_in = 1e307\n")
+    data = json.loads(js)                                                    # strict: no NaN or Infinity in the output
+    rows = {Path(r["dir"]).name: r for r in data["local_virtual_spend"]["directories"]}
+    assert "not finite" in rows["big"]["error"] and "error" not in rows["small"]
+    assert data["local_virtual_spend"]["all_directories"]["turns"] == 1
+
+
+def test_sound_folders_have_no_error_key(tmp_path, probe):
+    code, js = run(tmp_path, [str(probe), "--json", "--dir", str(tmp_path / "none")])
+    assert "error" not in json.loads(js)["local_virtual_spend"]["directories"][0]
+
+
+def test_a_total_that_is_not_finite_is_unknown_in_the_text_and_the_json(tmp_path, probe, monkeypatch):
+    from orchard import virtualspend as virtual
+    real = virtual.cost
+    calls = []
+
+    def cost_then_nan(p, c, pi, po):
+        calls.append(1)
+        return real(p, c, pi, po) if len(calls) == 1 else float("nan")      # the folder's own cost is sound; the total's is not
+    monkeypatch.setattr(virtual, "cost", cost_then_nan)
+    code, text = run(tmp_path, [str(probe), "--dir", str(tmp_path / "none")])
+    assert code == 0 and "$0.1500" in text and "nan" not in text.lower()
+    calls.clear()
+    code, js = run(tmp_path, [str(probe), "--json", "--dir", str(tmp_path / "none")])
+    data = json.loads(js)                                                    # strict JSON
+    assert data["local_virtual_spend"]["all_directories"]["virtual"][0]["cost_usd"] is None
