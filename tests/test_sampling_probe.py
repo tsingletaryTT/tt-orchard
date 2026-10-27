@@ -328,6 +328,21 @@ def test_a_zero_positive_or_null_token_count_is_well_formed(ok):
     assert not any("completion_tokens" in r for r in sp.problems(rec))
 
 
+def test_the_refusal_sentence_reports_the_settings_the_refused_request_carried():
+    rec = record(a=refused("HTTP 400: no"))
+    rec["requests"]["sampled_a"]["params"] = {"temperature": 0.7, "top_p": 0.5, "seed": 1234}
+    rec["requests"]["sampled_b"]["params"] = {"temperature": 0.7, "top_p": 0.5, "seed": 4321}
+    text = sp.summarize(rec)["sentence"]
+    assert "temperature 0.7" in text and "top-p 0.5" in text and "seed 1234" in text
+    assert "temperature 1.0" not in text and "top-p 0.9" not in text
+
+
+def test_the_refusal_sentence_names_the_request_that_was_refused_when_only_the_second_was():
+    rec = record(b=refused("HTTP 400: no"))
+    text = sp.summarize(rec)["sentence"]
+    assert "seed 4321" in text and "seed 1234" not in text
+
+
 def test_the_real_probe_parameters_are_valid():
     assert sp.problems(record()) == []
 

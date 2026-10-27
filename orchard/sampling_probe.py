@@ -128,6 +128,12 @@ def _loops(text: str) -> bool:
     return any(f["kind"] in defaults.SUITE_BLOCKING_KINDS for f in found)
 
 
+def _settings(entry: dict) -> str:
+    """The sampling settings a request carried, from its recorded params: "temperature 0.7, top-p 0.5, seed 1234"."""
+    p = entry.get("params") if isinstance(entry.get("params"), dict) else {}
+    return f"temperature {p.get('temperature')}, top-p {p.get('top_p')}, seed {p.get('seed')}"
+
+
 def _fmt(speed) -> str:
     return "an unmeasured speed" if speed is None else f"{speed:.1f} tokens/s"
 
@@ -176,7 +182,7 @@ def _summarize(record) -> dict:
     refused = [e for e in (a, b) if not e["accepted"]]
     if refused:
         return {**out, "verdict": "sampled-refused",
-                "sentence": f"The server refused a sampled request (temperature 1.0, top-p 0.9, with a seed): {(refused[0].get('error') or 'no error text')[:200]}"}
+                "sentence": f"The server refused a sampled request ({_settings(refused[0])}): {(refused[0].get('error') or 'no error text')[:200]}"}
     if any(not e["text"].strip() for e in (g, a, b)):
         return {**out, "verdict": "inconclusive",
                 "sentence": "A reply had no visible text (it was empty or only white space), so the probe could not say whether sampling was applied or how fast it ran."}

@@ -150,3 +150,11 @@ def test_a_non_object_request_entry_does_not_stop_the_bundle_and_is_shown_as_mal
     rec["requests"][name] = bad
     put(run, "stages/2/evidence", rec)
     assert "malformed" in section(results(run), HEAD)
+
+
+def test_the_bundle_introduction_describes_ranges_and_not_fixed_settings(tmp_path):
+    run = make_run(tmp_path)
+    put(run, "stages/2/evidence", record())
+    intro = " ".join(section(results(run), HEAD).split("| Configuration")[0].split())
+    assert "temperature above 0" in intro and "top-p below 1" in intro and "different seeds" in intro
+    assert "1.0" not in intro and "0.9" not in intro
