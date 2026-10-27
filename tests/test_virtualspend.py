@@ -433,3 +433,15 @@ def test_a_huge_integer_latency_is_no_time_and_the_tokens_are_kept(root):
     s = vs.scan(root)
     assert (s["turns"], s["prompt_tokens"], s["completion_tokens"]) == (2, 105, 11)
     assert s["request_s"] == 2.0
+
+
+
+# ---- review fix 5: a hostile attempt.json gives no time and the log counts stay -----------------------------------------
+
+@pytest.mark.parametrize("content", ["[" * 100000 + "]" * 100000, '{"agent_wall_s": 1' + "0" * 400 + "}",
+                                     '{"a": ' * 50000 + "1" + "}" * 50000], ids=["deep-list", "big-int", "deep-object"])
+def test_a_hostile_attempt_record_gives_no_time_and_the_turn_counts_stay(root, content):
+    write_log(root, "op/attempt-1/log/probe-00001.jsonl", [turn(1, 70, 7)])
+    (root / "op" / "attempt-1" / "attempt.json").write_text(content)
+    s = vs.scan(root)
+    assert s["agent_wall_s"] is None and (s["turns"], s["prompt_tokens"], s["completion_tokens"]) == (1, 70, 7)

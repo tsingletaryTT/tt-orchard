@@ -285,9 +285,9 @@ def _attempt_wall(log_dir: Path) -> float:
         if p.is_symlink() or not p.is_file() or p.stat().st_size > 1024 * 1024:
             return 0.0
         v = json.loads(p.read_text(encoding="utf-8")).get("agent_wall_s")
-    except (OSError, ValueError, AttributeError, UnicodeDecodeError):
+    except (OSError, ValueError, AttributeError, UnicodeDecodeError, RecursionError):
         return 0.0
-    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and v >= 0 else 0.0
+    return _seconds(v) or 0.0
 
 
 def scan(root) -> dict:
