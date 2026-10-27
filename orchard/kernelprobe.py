@@ -270,6 +270,10 @@ class ProbeTools(Tools):
             except ValueError:
                 return "error: the arguments are not JSON"
             if isinstance(args, dict):
+                unknown = self.unknown_read_args(args, ("path", "offset", "limit"), "read_file takes path, offset "
+                                                 "(the first line, from 1) and limit (a number of lines)")
+                if unknown:
+                    return unknown
                 return self.read_lines(args.get("path"), args.get("offset"), args.get("limit"))
         if name == "hardware_check" and self.hardware is not None:
             try:
