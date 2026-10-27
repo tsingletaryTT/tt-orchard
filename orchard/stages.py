@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from orchard import audio_facts
+from orchard import audio_decision, audio_facts
 from orchard.classes import CLASSES, SIDECAR_CLASSES, class_of_path, path_of
 from orchard import prompt_suite, sampling_probe
 from orchard.graft_trial import DECISION_FILE as GRAFT_DECISION_FILE
@@ -186,6 +186,7 @@ def _delta_reasons(d: dict, run_dir, reasons: list, seen: list) -> None:
     if d.get("path") not in PATHS:
         reasons.append(f"delta.json path must be one of {PATHS}")
     reasons += _class_reasons(d)
+    reasons += audio_decision.decision_problems(d)
     diffs = d.get("differences")
     if not isinstance(diffs, list) or not diffs:
         reasons.append("delta.json differences must be a non-empty list")
