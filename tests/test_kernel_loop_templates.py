@@ -245,6 +245,14 @@ for i in range(4):
     e = [math.exp(float(A[i, j]) - max(float(A[i, k]) for k in range(8))) for j in range(8)]
     for j in range(8):
         assert close(float(got[i, j]), e[j] / sum(e)), ("softmax", i, j)
+S2 = torch.sigmoid(torch.randn(64, 3, generator=g)); B2 = torch.randn(64, 3, generator=g)
+got = REFERENCES["tile_scan"]({"a": S2, "b": B2})
+for j in range(3):
+    for i in range(32):                                       # row i of each tile row feeds row i of the next one
+        h = 0.0
+        for T in range(2):
+            h = float(S2[32 * T + i, j]) * h + float(B2[32 * T + i, j])
+            assert close(float(got[32 * T + i, j]), h), ("tile_scan", T, i, j)
 got = REFERENCES["add"]({"a": A, "b": B})
 assert torch.equal(got, A + B)
 print("REFERENCES OK")
@@ -254,7 +262,7 @@ print("REFERENCES OK")
     assert done.returncode == 0 and "REFERENCES OK" in done.stdout, done.stdout + done.stderr
 
 
-@pytest.mark.parametrize("op", ["silu_mul", "rmsnorm", "center", "softmax"])
+@pytest.mark.parametrize("op", ["silu_mul", "rmsnorm", "center", "softmax", "tile_scan"])
 @needs_sim
 def test_the_good_kernels_pass_on_the_simulator(tmp_path, op):
     tdir, adir = _attempt(tmp_path, f"{op}_good", op=op)
@@ -271,7 +279,7 @@ def test_the_op_specs_name_only_known_references():
     table = next(n for n in tree.body if isinstance(n, ast.Assign) and n.targets[0].id == "REFERENCES")
     known = {k.value for k in table.value.keys}
     specs = sorted((TEMPLATES / "ops").glob("*.json"))
-    assert {p.stem for p in specs} == {"add", "silu_mul", "rmsnorm", "linear_scan", "center", "softmax"}
+    assert {p.stem for p in specs} == {"add", "silu_mul", "rmsnorm", "linear_scan", "center", "softmax", "tile_scan"}
     for p in specs:
         spec = json.loads(p.read_text())
         assert spec["op"] == p.stem and spec["reference"] in known
@@ -1489,7 +1497,7 @@ def test_the_probe_offers_exactly_the_ops_that_have_a_spec():
     assert set(defaults.KERNEL_PROBE_OPS) == {p.stem for p in (TEMPLATES / "ops").glob("*.json")}
 
 
-@pytest.mark.parametrize("op", ["center", "rmsnorm", "silu_mul", "softmax"])
+@pytest.mark.parametrize("op", ["center", "rmsnorm", "silu_mul", "softmax", "tile_scan"])
 @needs_sim
 def test_every_library_kernel_passes_the_simulator_for_its_op(tmp_path, op):
     tdir, adir = _attempt(tmp_path, None, op=op)
@@ -1497,3 +1505,14 @@ def test_every_library_kernel_passes_the_simulator_for_its_op(tmp_path, op):
     done, check = _run_check(tdir, adir)
     assert done.returncode == 0, done.stdout + done.stderr
     assert check["passed"] is True and len(check["sets"]) == 6
+
+
+@needs_sim
+def test_a_tile_scan_kernel_that_does_not_carry_the_value_down_fails_the_check(tmp_path):
+    """The op must separate a kernel that scans from one that only adds b: the carry is the point of the op."""
+    tdir, adir = _attempt(tmp_path, "tile_scan_good", op="tile_scan")
+    text = (adir / "kernel.py").read_text()
+    assert "h = a_blk * h + b_blk" in text
+    (adir / "kernel.py").write_text(text.replace("h = a_blk * h + b_blk", "h = b_blk + a_blk * ttl.block.fill(0.0, shape=(1, 1))"))
+    done, check = _run_check(tdir, adir)
+    assert done.returncode != 0 and check["passed"] is False and check["category"] == "numeric_mismatch"
