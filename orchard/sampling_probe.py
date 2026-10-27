@@ -51,6 +51,9 @@ def problems(record) -> list[str]:
             out.append(f"sampling_probe.requests.{name}.accepted must be true or false")
         if not isinstance(e.get("text"), str):
             out.append(f"sampling_probe.requests.{name}.text must be a string")
+        for key in ("drafter_log", "error", "finish_reason"):
+            if e.get(key) is not None and not isinstance(e[key], str):
+                out.append(f"sampling_probe.requests.{name}.{key} must be a string or null")
         for key in ("seconds", "completion_tokens"):
             if e.get(key) is not None and not _number(e[key]):
                 out.append(f"sampling_probe.requests.{name}.{key} must be a number or null")

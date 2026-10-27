@@ -132,6 +132,22 @@ def test_a_malformed_record_gives_a_reason(mutate, fragment):
     assert reasons and any(fragment in r for r in reasons)
 
 
+@pytest.mark.parametrize("key, bad", [("drafter_log", 7), ("drafter_log", ["x"]), ("error", 7), ("error", {"a": 1}), ("finish_reason", 3)])
+def test_a_field_that_must_be_a_string_or_null_gives_a_reason_and_no_crash(key, bad):
+    rec = record(a=refused("HTTP 400: no"))
+    rec["requests"]["sampled_a"][key] = bad
+    reasons = sp.problems(rec)
+    assert any(key in r for r in reasons), reasons
+    assert sp.summarize(rec)["verdict"] == "malformed"
+
+
+def test_string_and_null_values_of_those_fields_are_fine():
+    rec = record()
+    for n in sp.ENTRY_NAMES:
+        rec["requests"][n].update({"drafter_log": None, "error": None, "finish_reason": None})
+    assert sp.problems(rec) == []
+
+
 def test_a_malformed_record_is_not_summarised_as_a_verdict():
     rec = record()
     rec["requests"]["greedy"]["seconds"] = "fast"
