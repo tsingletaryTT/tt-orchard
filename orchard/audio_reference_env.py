@@ -16,6 +16,7 @@ links resolved) and passes no Hugging Face token to any command. Importing the l
 """
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -38,7 +39,9 @@ REQUIREMENTS = ("einops>=0.8.2", "einops-exts>=0.0.4", "numpy>=2.2.6", "packagin
                 "huggingface_hub>=1.7.1", "transformers>=5.8.0", "soundfile>=0.13.1")
 RECORD = "orchard-audio-env.json"
 RECORDED = ("torch", "torchaudio", "numpy", "transformers", "huggingface_hub", "safetensors", "einops", "soundfile")
-TOKEN_PREFIXES = ("HF_", "HUGGING", "UV_INDEX", "UV_EXTRA_INDEX", "PIP_INDEX", "PIP_EXTRA_INDEX", "GITHUB_TOKEN", "GH_TOKEN")
+# Variables that authenticate or redirect git, uv and pip: tokens, GIT_DIR and its relatives (they point git at another repository), UV_PYTHON and
+# UV_PROJECT_ENVIRONMENT (they point uv at another interpreter or environment), extra indexes, and Python's own variables.
+TOKEN_PREFIXES = ("HF_", "HUGGING", "UV_", "PIP_", "GIT_", "GITHUB_TOKEN", "GH_TOKEN", "PYTHON")
 
 
 @dataclass
@@ -74,7 +77,8 @@ def requirements_sha256() -> str:
 
 
 def _clean(env: AEnv) -> dict:
-    """The environment for git and uv: no Hugging Face or GitHub token and no extra package index from the operator's shell."""
+    """The environment for git and uv: nothing from the operator's shell that authenticates them or points them at another repository,
+    interpreter, environment or package index (TOKEN_PREFIXES)."""
     source = env.environ if env.environ is not None else os.environ
     out = {k: v for k, v in source.items() if not k.startswith(TOKEN_PREFIXES)}
     out["GIT_TERMINAL_PROMPT"] = "0"
@@ -100,9 +104,18 @@ def refusal(env: AEnv) -> Result | None:
     return None
 
 
+def lock_path(env: AEnv) -> Path:
+    return env.venv_dir.parent / f"{env.venv_dir.name}.lock"
+
+
 def step_source(env: AEnv, check_only: bool) -> Result:
     git = ["git", "-C", str(env.src_dir)]
-    if (env.src_dir / ".git").exists():
+    dot_git = env.src_dir / ".git"
+    if dot_git.is_symlink() or (dot_git.exists() and not dot_git.is_dir()):
+        # A `.git` file or link names another git directory (`gitdir: ...`), so the commit and the status would describe some other place.
+        return Result("source", FAIL, f"{dot_git} is a link or a file, not a directory; this command trusts only a plain checkout. "
+                                      "Pass another --src-dir")
+    if dot_git.exists():
         rc, out, err = env.run([*git, "rev-parse", "HEAD"], 60, _clean(env))
         head = out.strip()
         if rc != 0:
@@ -175,9 +188,19 @@ def _ask(env: AEnv, code: str, timeout: int = 300):
 
 def rules(env: AEnv) -> list[Result]:
     out = []
-    rc, text, err = _ask(env, "import stable_audio_3.model; print('ok')")
-    out.append(Result("import", OK if rc == 0 and "ok" in text else FAIL,
-                      "stable_audio_3.model imports" if rc == 0 and "ok" in text else f"import stable_audio_3 failed: {err.strip()[-300:]}"))
+    rc, text, err = _ask(env, "import stable_audio_3, stable_audio_3.model; print(stable_audio_3.__file__)")
+    where = text.strip().splitlines()[-1].strip() if rc == 0 and text.strip() else ""
+    if rc != 0:
+        out.append(Result("import", FAIL, f"import stable_audio_3 failed: {err.strip()[-300:]}"))
+    elif not where or not os.path.isabs(where):
+        out.append(Result("import", FAIL, f"stable_audio_3 did not say where it was imported from (got {where!r})"))
+    elif not _inside(Path(where), env.src_dir):
+        # The install is editable, so it follows whichever checkout it was built from. Another checkout that is clean and at the pin does not
+        # vouch for the code that actually runs.
+        out.append(Result("import", FAIL, f"stable_audio_3 is imported from {Path(where).resolve().parent.parent}, not from the checked source "
+                                          f"tree {env.src_dir}; run `tt-orchard audio-reference-env --src-dir {env.src_dir}` to rebuild the install"))
+    else:
+        out.append(Result("import", OK, f"stable_audio_3 imports from {env.src_dir}"))
     rc, text, err = _ask(env, "import torch; print(torch.__version__, torch.cuda.is_available())")
     parts = text.split()
     cpu = rc == 0 and len(parts) == 2 and parts[0] == "2.7.1+cpu" and parts[1] == "False"
@@ -214,11 +237,30 @@ def step_record(env: AEnv, check_only: bool, upstream_ok: bool) -> Result:
 
 
 def ensure(env: AEnv, *, check_only: bool, say=lambda s: None) -> list[Result]:
-    """The steps in order, a failure ending the build, then the rules. A refusal ends it before anything runs."""
+    """The steps in order, a failure ending the build, then the rules. A refusal ends it before anything runs. A build takes an exclusive lock
+    beside the venv directory, so two builds cannot clone, create the venv and install at once; `--check` and `--dry-run` take none."""
     bad = refusal(env)
     if bad:
         say(f"{bad.status:5s} {bad.name}: {bad.detail}")
         return [bad]
+    if check_only:
+        return _ensure(env, check_only, say)
+    try:
+        lock_path(env).parent.mkdir(parents=True, exist_ok=True)
+        handle = open(lock_path(env), "w")
+    except OSError as exc:
+        return [Result("lock", FAIL, f"cannot open {lock_path(env)}: {exc}")]
+    with handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            r = Result("lock", FAIL, f"another audio-reference-env is already running ({lock_path(env)} is locked)")
+            say(f"{r.status:5s} {r.name}: {r.detail}")
+            return [r]
+        return _ensure(env, check_only, say)
+
+
+def _ensure(env: AEnv, check_only: bool, say) -> list[Result]:
     results: list[Result] = []
 
     def add(r: Result) -> Result:

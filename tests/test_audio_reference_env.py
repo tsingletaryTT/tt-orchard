@@ -19,6 +19,7 @@ class Fake:
     def __init__(self, tmp_path, head=PIN, import_ok=True, cuda="False", dirty=""):
         self.calls, self.tmp, self.head, self.import_ok, self.cuda = [], tmp_path, head, import_ok, cuda
         self.dirty = dirty
+        self.module_file = None          # where the fake interpreter says stable_audio_3 was imported from; the env fixture sets it
 
     def __call__(self, argv, timeout, env=None):
         argv = [str(a) for a in argv]
@@ -39,7 +40,7 @@ class Fake:
         if argv and argv[0].endswith("bin/python"):
             code = argv[-1]
             if "stable_audio_3" in code:
-                return (0, "ok\n", "") if self.import_ok else (1, "", "ModuleNotFoundError: No module named 'stable_audio_3'")
+                return (0, (self.module_file or "") + "\n", "") if self.import_ok else (1, "", "ModuleNotFoundError: No module named 'stable_audio_3'")
             if "torch.version" in code or "torch.cuda" in code:
                 return 0, f"2.7.1+cpu {self.cuda}\n", ""
             if "importlib.metadata" in code:
@@ -54,6 +55,7 @@ def env(tmp_path):
     run = Fake(tmp_path)
     e = ae.env_from_args(type("A", (), {"venv_dir": None, "src_dir": None})(), environ={"HF_TOKEN": "secret", "UV_INDEX_URL": "x", "PATH": "/bin"},
                          home=home, repo_dir=tmp_path / "repo", run=run)
+    run.module_file = str(e.src_dir / "stable_audio_3" / "__init__.py")
     return e
 
 
@@ -425,3 +427,142 @@ def test_a_clean_checkout_at_the_pin_is_accepted_in_check_mode_too(env):
     assert statuses(results)["source"] == ae.OK and results[0].detail.endswith(", clean")
     env.run.dirty = "?? x\n"
     assert statuses(ae.ensure(env, check_only=True))["source"] == ae.FAIL
+
+
+# ---- round three: the imported library is the checked source; git and uv environments; a second build ---
+
+def test_the_library_must_be_imported_from_the_checked_source_tree(env, tmp_path):
+    other = tmp_path / "other-checkout" / "stable_audio_3" / "__init__.py"
+    other.parent.mkdir(parents=True)
+    other.write_text("")
+    env.run.module_file = str(other)
+    results = ae.ensure(env, check_only=False)
+    bad = [r for r in results if r.name == "import"][0]
+    assert bad.status == ae.FAIL and str(other.parent.parent) in bad.detail and str(env.src_dir) in bad.detail
+    assert not (env.venv_dir / ae.RECORD).exists()
+
+
+def test_check_mode_against_another_clean_checkout_fails_when_the_install_still_points_at_the_first(env, tmp_path):
+    ae.ensure(env, check_only=False)
+    other = (tmp_path / "second" / "stable-audio-3").resolve()
+    other.mkdir(parents=True)
+    (other / ".git").mkdir()
+    env.src_dir = other
+    results = ae.ensure(env, check_only=True)
+    assert statuses(results)["source"] == ae.OK and statuses(results)["import"] == ae.FAIL
+
+
+@pytest.mark.parametrize("answer", ["", "not a path\n", "relative/stable_audio_3/__init__.py\n", "None\n"])
+def test_an_import_answer_that_is_not_an_absolute_path_fails(env, answer):
+    env.run.module_file = answer.strip()
+    real = env.run
+
+    def run(argv, timeout, e=None):
+        if argv[-1].startswith("import stable_audio_3"):
+            return 0, answer, ""
+        return real(argv, timeout, e)
+    env.run = run
+    assert statuses(ae.ensure(env, check_only=False))["import"] == ae.FAIL
+
+
+def test_a_module_reached_through_a_link_into_the_source_tree_counts_as_inside(env, tmp_path):
+    ae.ensure(env, check_only=False)
+    (env.src_dir / "stable_audio_3").mkdir(parents=True, exist_ok=True)
+    (env.src_dir / "stable_audio_3" / "__init__.py").write_text("")
+    link = tmp_path / "link"
+    link.symlink_to(env.src_dir)
+    env.run.module_file = str(link / "stable_audio_3" / "__init__.py")
+    assert statuses(ae.ensure(env, check_only=True))["import"] == ae.OK
+
+
+def test_a_module_in_a_sibling_directory_with_the_same_prefix_is_not_inside(env, tmp_path):
+    sibling = Path(str(env.src_dir) + "-old") / "stable_audio_3" / "__init__.py"
+    sibling.parent.mkdir(parents=True)
+    sibling.write_text("")
+    env.run.module_file = str(sibling)
+    assert statuses(ae.ensure(env, check_only=False))["import"] == ae.FAIL
+
+
+def test_the_import_rule_reads_the_module_file_and_not_a_marker_word(env):
+    ae.ensure(env, check_only=False)
+    [(argv, _)] = [c for c in env.run.calls if c[0][-1].startswith("import stable_audio_3")][:1]
+    assert "__file__" in argv[-1] and argv[1] == "-I"
+
+
+@pytest.mark.parametrize("name", ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_CONFIG_GLOBAL", "GIT_SSH_COMMAND", "GIT_EXEC_PATH",
+                                  "UV_PYTHON", "UV_PROJECT_ENVIRONMENT", "UV_INDEX_URL", "PIP_INDEX_URL", "HF_HOME", "HUGGING_FACE_HUB_TOKEN",
+                                  "GITHUB_TOKEN", "GH_TOKEN", "PYTHONPATH", "PYTHONHOME"])
+def test_the_environment_for_git_and_uv_drops_variables_that_redirect_or_authenticate_them(tmp_path, name):
+    e = ae.AEnv(tmp_path / "v", tmp_path / "s", tmp_path / "shared", tmp_path / "repo", environ={name: "x", "PATH": "/bin", "HOME": "/h"})
+    cleaned = ae._clean(e)
+    assert name not in cleaned and cleaned["PATH"] == "/bin" and cleaned["HOME"] == "/h" and cleaned["GIT_TERMINAL_PROMPT"] == "0"
+
+
+def test_a_git_entry_that_is_a_file_or_a_link_is_not_a_checkout_we_trust(env, tmp_path):
+    env.src_dir.mkdir(parents=True)
+    (env.src_dir / ".git").write_text("gitdir: /somewhere/else\n")
+    results = ae.ensure(env, check_only=False)
+    assert statuses(results)["source"] == ae.FAIL and "directory" in results[0].detail
+    assert not any("rev-parse" in a for a, _ in env.run.calls)
+    (env.src_dir / ".git").unlink()
+    (tmp_path / "elsewhere").mkdir()
+    (env.src_dir / ".git").symlink_to(tmp_path / "elsewhere")
+    assert statuses(ae.ensure(env, check_only=False))["source"] == ae.FAIL
+
+
+def test_a_second_build_while_one_is_running_is_refused_and_runs_nothing(env):
+    import fcntl
+    env.venv_dir.parent.mkdir(parents=True, exist_ok=True)
+    with open(ae.lock_path(env), "w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        results = ae.ensure(env, check_only=False)
+    assert results[0].status == ae.FAIL and "already running" in results[0].detail and env.run.calls == []
+
+
+def test_the_lock_is_released_after_a_build_and_after_a_failed_one(env):
+    ae.ensure(env, check_only=False)
+    env.run.import_ok = False
+    ae.ensure(env, check_only=False)
+    import fcntl
+    with open(ae.lock_path(env), "w") as f:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def test_check_and_dry_run_do_not_take_the_lock(env):
+    import fcntl
+    env.venv_dir.parent.mkdir(parents=True, exist_ok=True)
+    with open(ae.lock_path(env), "w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        assert ae.ensure(env, check_only=True)[0].name != "lock"
+
+
+def import_answer(env, answer, rc=0, err=""):
+    real = env.run
+
+    def run(argv, timeout, e=None):
+        if argv[-1].startswith("import stable_audio_3"):
+            return rc, answer, err
+        return real(argv, timeout, e)
+    env.run = run
+    return [r for r in ae.ensure(env, check_only=False) if r.name == "import"][0]
+
+
+def test_each_way_the_import_rule_can_fail_says_why(env):
+    assert "failed" in import_answer(env, "", rc=1, err="ModuleNotFoundError").detail
+    assert "did not say where" in import_answer(env, "", rc=0).detail
+    assert "did not say where" in import_answer(env, "relative/x.py\n").detail
+    assert "did not say where" in import_answer(env, "\n\n").detail
+
+
+def test_the_import_rule_reads_the_last_line_of_the_answer(env):
+    module = env.run.module_file
+    ok = import_answer(env, "a warning from the library\n" + module + "\n")
+    assert ok.status == ae.OK
+    bad = import_answer(env, module + "\nlater noise\n")
+    assert bad.status == ae.FAIL
+
+
+def test_each_venv_directory_has_its_own_lock_beside_it(env, tmp_path):
+    assert ae.lock_path(env) == env.venv_dir.parent / (env.venv_dir.name + ".lock")
+    other = ae.AEnv(tmp_path / "x" / "other-venv", env.src_dir, env.shared_venv, env.repo_dir)
+    assert ae.lock_path(other) != ae.lock_path(env)
