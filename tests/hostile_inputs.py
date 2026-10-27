@@ -191,6 +191,8 @@ def run_limited(code: str, *, timeout: float = 60, address_space: int = 2 << 30)
 
 
 
+
+
 # ------------------------------------------------------------------------------------------------------------ the registry
 
 @dataclass(frozen=True)
@@ -783,7 +785,6 @@ KNOWN_DEFECTS: dict[int, dict[str, list[str]]] = {
         'research.http.Fetcher.json': ['nest_1000', 'nest_1000_object', 'nest_100000'],
         'run_view._read': ['nest_1000', 'nest_1000_object', 'nest_100000'],
         'skillsfresh.Cache': ['nest_1000_object'],
-        'speedwatch.Baselines._read': ['nest_100000'],
         'stages._evidence_json': ['nest_1000_object', 'nest_100000'],
         'stages._load': ['nest_1000_object', 'nest_100000'],
         'stages._read_json': ['nest_1000', 'nest_1000_object', 'nest_100000'],
@@ -818,7 +819,6 @@ KNOWN_DEFECTS: dict[int, dict[str, list[str]]] = {
         'package.stage_2_vocab': ['big_string_50mb', 'link_to_dev_zero'],
         'prompt_suite.load_suite': ['big_string_50mb', 'link_to_dev_zero'],
         'run_view._read': ['big_string_50mb', 'link_to_dev_zero'],
-        'speedwatch.Baselines._read': ['big_string_50mb', 'link_to_dev_zero'],
         'stages._load': ['big_string_50mb', 'link_to_dev_zero'],
         'stages._read_json': ['big_string_50mb', 'link_to_dev_zero'],
         'stages._suite_reasons_in': ['big_string_50mb', 'link_to_dev_zero'],
@@ -853,7 +853,6 @@ KNOWN_DEFECTS: dict[int, dict[str, list[str]]] = {
         'package.stage_2_vocab': ['fifo'],
         'prompt_suite.load_suite': ['fifo'],
         'run_view._read': ['fifo'],
-        'speedwatch.Baselines._read': ['fifo'],
         'stages._evidence_json': ['fifo'],
         'stages._load': ['fifo'],
         'stages._read_json': ['fifo'],
