@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "about": "How stage 0 sorts a difference in model_config.json between an audio model and its nearest model. serving: a setting that only chooses how the model is run (the maximum length, the default sampler); the weights and the network are the same. structural: a key that shapes the network, the audio format or the conditioning. unknown: every key not listed. Only `serving` differences can leave the path weights-only. The same table is copied into delta_triage.py (AUDIO_CATEGORY_RULES); tests/test_audio_class_inference.py fails when the two differ. Sources are the library commit named in each rule, read on 2026-10-28.",
+  "rules": [
+    {"key": "sample_size", "category": "serving", "values": "positive-int",
+     "why": "the longest audio the model is asked for; generate() takes its own sample_size argument and the network has no length parameter",
+     "source": "stable-audio-3 77e0398: stable_audio_3/model.py generate(sample_size=5292032), _adapt_sample_size"},
+    {"key": "model.diffusion.diffusion_objective", "category": "serving", "values": ["rectified_flow", "rf_denoiser"],
+     "why": "between these two values the network treats the objective identically; the value only picks the default sampler (pingpong for rf_denoiser, euler for rectified_flow). Any other value (v) is not covered",
+     "source": "stable-audio-3 77e0398: models/dit.py lines 455 and 579 (one branch for both values), inference/sampling.py line 434 (default sampler)"},
+    {"key": "model.sampler_type", "category": "serving", "values": "text",
+     "why": "named by the operator as a sampler setting; no cached config uses this key",
+     "source": "operator decision 2026-10-28; not seen in a real config"},
+    {"key": "model.diffusion.sampler_type", "category": "serving", "values": "text",
+     "why": "named by the operator as a sampler setting; no cached config uses this key",
+     "source": "operator decision 2026-10-28; not seen in a real config"},
+    {"key": "model.default_steps", "category": "serving", "values": "positive-int",
+     "why": "a default step count is a run-time choice; no cached config uses this key",
+     "source": "operator decision 2026-10-28; not seen in a real config"},
+    {"key": "model.default_cfg_scale", "category": "serving", "values": "number",
+     "why": "a default guidance scale is a run-time choice; no cached config uses this key",
+     "source": "operator decision 2026-10-28; not seen in a real config"},
+    {"key": "sample_rate", "category": "structural", "why": "the audio format the autoencoder produces"},
+    {"key": "audio_channels", "category": "structural", "why": "the number of audio channels the autoencoder produces"},
+    {"key": "model_type", "category": "structural", "why": "which pipeline class the library builds"},
+    {"key": "model.io_channels", "category": "structural", "why": "the latent width the network reads and writes"},
+    {"prefix": "model.diffusion.config.", "category": "structural", "why": "the diffusion transformer's shape"},
+    {"prefix": "model.pretransform.", "category": "structural", "why": "the autoencoder's shape"},
+    {"prefix": "model.conditioning.", "category": "structural", "why": "the text and number conditioners"}
+  ]
+}
