@@ -561,9 +561,15 @@ def test_a_server_that_exits_before_it_is_healthy_exits_4(swap):
 
 
 def test_the_script_sends_only_the_fields_the_server_accepts():
+    """The 32-token check and the prompt suite send no top_p, seed or logprobs. Only the sampling probe (issue 107) sends top_p and seed, to find out
+    what the server does with them."""
+    import ast
     text = (TEMPLATES / "serve_and_compare.py").read_text()
     assert not re.search(r'["\']logprobs["\']\s*:', text)
-    assert not re.search(r'["\']top_p["\']\s*:', text)
+    funcs = {n.name: ast.get_source_segment(text, n) for n in ast.walk(ast.parse(text)) if isinstance(n, ast.FunctionDef)}
+    for name in ("complete", "ask_suite_prompt", "run_suite"):
+        assert "top_p" not in funcs[name] and "seed" not in funcs[name], name
+    assert not re.search(r'["\']top_p["\']\s*:', text.replace(funcs["run_sampling_probe"], ""))
 
 
 def test_the_server_is_told_to_load_the_model_dir_weights(swap):

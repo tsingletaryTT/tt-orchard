@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import Callable
 
 from orchard.classes import CLASSES, SIDECAR_CLASSES, class_of_path, path_of
-from orchard import prompt_suite
+from orchard import prompt_suite, sampling_probe
 from orchard.graft_trial import DECISION_FILE as GRAFT_DECISION_FILE
 from orchard.graft_trial import chosen as graft_chosen
 from orchard.graft_trial import read_decision as read_graft_decision
@@ -783,7 +783,9 @@ def _suite_reasons(report, run_dir, where: str = "") -> list[str]:
     A report without a suite record has none. The gates read the template's swap-check.json and not the agent's
     result.json: the record holds the raw replies, and the verdict is computed here from them. A control in the record has
     to have been served from the run's nearest model (stage 0's), which is checked here again whatever the template did."""
-    return _hub_fetch_reasons(report, where) + [where + r for r in prompt_suite.evaluate(report, nearest_model=_nearest_model_of(run_dir)).reasons]
+    probe = [where + r for r in sampling_probe.problems(report.get("sampling_probe") if isinstance(report, dict) else None)]
+    return (_hub_fetch_reasons(report, where) + probe
+            + [where + r for r in prompt_suite.evaluate(report, nearest_model=_nearest_model_of(run_dir)).reasons])
 
 
 def _suite_reasons_in(path, run_dir, where: str = "") -> list[str]:

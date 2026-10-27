@@ -567,6 +567,43 @@ def served_dir_section(run: Run, redact: Redactor) -> list[str]:
     return lines
 
 
+def sampling_section(run: Run, redact: Redactor) -> list[str]:
+    """The "Sampling" section (issue 107): for stage 2 and for each stage 4 configuration whose `swap-check.json` holds a `sampling_probe` record, what
+    the server did with a request that has temperature above 0. The verdict, the speeds and the drafter's accepted share are computed here from the
+    raw requests by orchard/sampling_probe.py, so a summary written into the file is never read. No lines when no record exists, so a run from before
+    the probe gets the same RESULTS.md as before. Every copied string goes through the redactor."""
+    from orchard import sampling_probe
+    where = [("stage 2", "stages/2/evidence/swap-check.json")]
+    configs = run.dir / "stages" / "4" / "configs"
+    if configs.is_dir():
+        for d in sorted((p for p in configs.iterdir() if p.name.isdigit()), key=lambda p: int(p.name), reverse=True):
+            where.append((f"stage 4, {int(d.name)} chips", f"stages/4/configs/{d.name}/evidence/swap-check.json"))
+    rows, sentences = [], []
+    for label, rel in where:
+        report = read_json(run.dir / rel, rel, required=False)
+        if not isinstance(report, dict) or report.get("sampling_probe") is None:
+            continue
+        s = sampling_probe.summarize(report["sampling_probe"])
+        if s["verdict"] == "not-run":
+            continue
+        speed = lambda side: fmt(round(side["tokens_per_s"], 1)) if side and side.get("tokens_per_s") else "TODO"      # noqa: E731
+        rate = lambda side: fmt(round(side["drafter_accept_rate"], 3)) if side and side.get("drafter_accept_rate") is not None else "TODO"   # noqa: E731
+        rows.append(f"| {label} | {s['verdict']} | {speed(s['greedy'])} | {speed(s['sampled'])} | {rate(s['greedy'])} / {rate(s['sampled'])} | "
+                    f"{'measured' if s['verdict'] != 'malformed' else 'TODO'} | `{rel}` |")
+        text = redact(one_line(s["sentence"]))
+        sentences.append(f"- {label}: {text}" + ("" if text.endswith(".") else "."))
+        sentences += [f"  - {redact(one_line(r))}" for r in s["reasons"][:3]]
+    if not rows:
+        return []
+    return ["", "## Sampling", "",
+            "What the served configuration does with a request that has temperature above 0. Each stage's swap check sends one greedy request and two sampled "
+            "requests (temperature 1.0, top-p 0.9, different seeds) to the server and records them raw; the verdict, speeds and drafter acceptance are "
+            "computed from those records. A refused or slow sampled request is a fact about the configuration and does not fail a stage. "
+            "The drafter column is the accepted share of drafted tokens for the greedy and sampled requests (TODO when the server logs none).", "",
+            "| Configuration | Verdict | Greedy tokens/s | Sampled tokens/s | Drafter acceptance (greedy / sampled) | Label | Evidence |",
+            "|---|---|---|---|---|---|---|", *rows, "", *sentences]
+
+
 def graft_section(run: Run, redact: Redactor) -> list[str]:
     """The "The graft trial" section, from stage 2's `graft-decision.json`: which variant the run ships, why, and both measurements. No lines when
     the run has no decision file, so a run from before the trial gets the same RESULTS.md as before. Every copied string goes through the redactor."""
@@ -1003,6 +1040,7 @@ def render_results(run: Run, redact: Redactor, n_todo: int, n_hazards: int, skip
     lines += inventory_section(run, redact)
     lines += served_dir_section(run, redact)
     lines += graft_section(run, redact)
+    lines += sampling_section(run, redact)
     lines += reported_section(run, redact)
     body = stage_results(run, redact)
     for n in range(9):
