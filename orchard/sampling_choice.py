@@ -165,9 +165,13 @@ def _fmt(v) -> str:
 
 
 def comparable(numbers: dict) -> bool:
-    """Were both speeds measured, on the same basis (both sampled or both greedy)? Only then may a decision, a card or a bundle say one is faster."""
-    return (_number(numbers.get("served_tok_s")) and _number(numbers.get("variant_tok_s"))
-            and numbers.get("served_speed_basis") is not None and numbers.get("served_speed_basis") == numbers.get("variant_speed_basis"))
+    """Were both speeds measured, on the same basis (both sampled or both greedy)? Only then may a decision, a card or a bundle say one is faster. A
+    measurement is a finite number above zero (a zero or negative speed is not one), and a basis is one of the two the probe records and the same on
+    both sides."""
+    served, var = numbers.get("served_tok_s"), numbers.get("variant_tok_s")
+    basis = numbers.get("served_speed_basis")
+    return (_number(served) and served > 0 and _number(var) and var > 0
+            and basis in ("sampled", "greedy") and basis == numbers.get("variant_speed_basis"))
 
 
 def decide(need_: dict, current: dict, variant: dict | None = None, *, variant_note: str | None = None, floor: float | None = None) -> dict:
