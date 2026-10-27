@@ -1,0 +1,41 @@
+PROGRESS import
+PROGRESS open_device
+PROGRESS set seed0
+PROGRESS run seed0
+Traceback (most recent call last):
+  File "<TTLANG_VENV>/lib/python3.12/site-packages/ttl/sim/greenlet_scheduler.py", line 483, in run
+    state.g.switch()
+  File "<TTLANG_VENV>/lib/python3.12/site-packages/ttl/sim/greenlet_scheduler.py", line 192, in wrapped_func
+    func()
+  File "<TTLANG_VENV>/lib/python3.12/site-packages/ttl/sim/program.py", line 454, in _tagged
+    fn()
+  File "kernel.py", line 34, in read
+    av = ttl.raw_element_read(a_blk, i, j)
+         ^^^^^^^^^^^^^^^^^^^^
+AttributeError: '_TTLNamespace' object has no attribute 'raw_element_read'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "<TEMPLATES>/kernel_harness.py", line 156, in main
+    operation(*tt_ins, out)
+  File "<TTLANG_VENV>/lib/python3.12/site-packages/ttl/sim/operation.py", line 172, in wrapper
+    run_operation(modified_func, actual_grid, args, kwargs)
+  File "<TTLANG_VENV>/lib/python3.12/site-packages/ttl/sim/program.py", line 277, in run_operation
+    _schedule_and_run(
+  File "<TTLANG_VENV>/lib/python3.12/site-packages/ttl/sim/program.py", line 485, in _schedule_and_run
+    scheduler.run()
+  File "<TTLANG_VENV>/lib/python3.12/site-packages/ttl/sim/greenlet_scheduler.py", line 511, in run
+    self._format_and_raise_kernel_error(
+  File "<TTLANG_VENV>/lib/python3.12/site-packages/ttl/sim/greenlet_scheduler.py", line 338, in _format_and_raise_kernel_error
+    raise RuntimeError(error_msg) from exception
+RuntimeError: node0-read: AttributeError: '_TTLNamespace' object has no attribute 'raw_element_read'
+
+❌ Error in kernel node0-read:
+error: AttributeError: '_TTLNamespace' object has no attribute 'raw_element_read'
+  --> kernel.py:34:33
+   |
+34 |                             av = ttl.raw_element_read(a_blk, i, j)
+   |                                 ^
+   |
+--------------------------------------------------

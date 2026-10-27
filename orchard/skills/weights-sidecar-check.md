@@ -154,7 +154,8 @@ Only then. The supervisor writes it whenever it can.
         "tt_cache": "<a new directory whose name contains the model's slug>",
         "hf_home": "{{HF_HOME}}",
         "port": 8100,
-        "prompt_suite": true}
+        "prompt_suite": true,
+        "sampling_probe": true}
 
    Copy the `model` value from `stages/0/delta.json` verbatim, including the `@revision`, into
    `new_model_id`. Stage 7 compares this label with stage 0's model and the revision of the weights

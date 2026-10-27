@@ -230,6 +230,32 @@ def _parser() -> argparse.ArgumentParser:
     pick.add_argument("--row", action="append", metavar="NAME",
                       help="accept one row by its exact name (a name with a comma); repeat for more")
     ra.add_argument("--replace", action="store_true", help="replace a reported-results.json the run already holds")
+    tp = sub.add_parser("telegraph", parents=[common],
+                        help="the opt-in outside helper model: check it, ask it by hand, record whether it helped, "
+                             "show what it cost (off unless a [telegraph] table enables it)")
+    tsub = tp.add_subparsers(dest="action", required=True)
+
+    def _tele(name, help_text):
+        sp = tsub.add_parser(name, parents=[common], help=help_text)
+        sp.add_argument("--telegraph-config", metavar="FILE",
+                        help="a TOML file with the [telegraph] table (default: the bringup config's)")
+        sp.add_argument("--dir", metavar="DIR", help="the ledger, cache and reply directory "
+                                                      "(default ~/.cache/tt-orchard/telegraph)")
+        return sp
+
+    _tele("check", "show the setting and whether the key is present (never the key)") \
+        .add_argument("--ping", action="store_true", help="also ask the endpoint for its model list (no tokens spent)")
+    ta = _tele("ask", "send one question by hand")
+    ta.add_argument("--problem", required=True, help="a short id for the problem (the ladder and the summary use it)")
+    ta.add_argument("--task-file", required=True, metavar="FILE", help="what was being attempted")
+    ta.add_argument("--failure-file", required=True, metavar="FILE", help="what went wrong")
+    tr = _tele("report", "record whether the answer to a call helped")
+    tr.add_argument("call_id")
+    tpick = tr.add_mutually_exclusive_group(required=True)
+    tpick.add_argument("--helped", action="store_true", help="the answer helped")
+    tpick.add_argument("--not-helped", dest="not_helped", action="store_true", help="the answer did not help")
+    _tele("usage", "show calls, tokens, cost and how often the help worked") \
+        .add_argument("--json", action="store_true", help="print the summary as JSON")
     k = sub.add_parser("kernel-env", parents=[common],
                        help="build or check the tt-lang simulator environment that kernel-probe uses")
     k.add_argument("--check", action="store_true",
@@ -773,6 +799,9 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
     if args.cmd == "package-card":
         from orchard import package_cmd
         return package_cmd.card_main(args, out=out)
+    if args.cmd == "telegraph":
+        from orchard import telegraph_cmd
+        return telegraph_cmd.main(args, out=out, environ=env, home=home)
     if args.cmd == "reported":
         from orchard import reported_cmd
         return reported_cmd.main(args, out=out)
