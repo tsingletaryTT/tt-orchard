@@ -194,7 +194,7 @@ def bounded_str(x, *, max_len: int, min_len: int = 0, what: str = "value") -> st
 def _check_parts(parts) -> tuple[str, ...]:
     """The parts as a tuple of plain names. A `..`, `.`, empty, absolute (contains `/`) or null-holding part is refused."""
     if isinstance(parts, (str, bytes)):
-        raise PathRefused("parts must be a sequence of names, not one string")
+        raise PathRefused("parts must be a sequence of names; a single string is refused")
     out = []
     for part in parts:
         if not isinstance(part, str) or part in ("", ".", "..") or "/" in part or "\0" in part:
@@ -245,7 +245,7 @@ def open_beneath(root_fd: int, parts: Sequence[str], *, file_flags: int | None =
 
 class Pin:
     """A directory held open by descriptor. Everything opened through it is opened beneath it, so a directory swapped for a
-    link after the pin was taken is refused instead of followed. Use `pinned_root` to make one."""
+    link after the pin was taken is refused and never followed. Use `pinned_root` to make one."""
 
     def __init__(self, fd: int, name: str):
         self.fd = fd
@@ -522,7 +522,7 @@ def scan_beneath(pin: Pin, visit: Callable[[ScanEntry], None] | None = None, *, 
     Guarantees: directories are listed with `os.scandir` on a descriptor, which streams and never reads a whole directory
     into memory; each subdirectory is opened beneath its parent with `O_DIRECTORY | O_NOFOLLOW`, so one swapped for a
     link after it was listed is refused (it appears in `unreadable`, never followed); a link is reported with kind `link`
-    and never entered; every entry taken counts against the one `max_entries` budget shared by all directories, and when
+    and never entered; every entry taken counts against a single `max_entries` budget shared by all directories, and when
     it is spent the walk stops with `entries_cut` set; a directory found at level `max_depth` (the pinned root is level 1)
     is not entered and sets `depth_cut`; a directory that cannot be listed or opened is recorded in `unreadable` with an
     errno name. The result is `incomplete` when any of those happened, and `require_complete()` turns that into an error.
@@ -663,8 +663,10 @@ def atomic_write(path, data: bytes | str, *, mode: int = 0o600, replace: bool = 
         raise IsADirectoryError(errno.EISDIR, "no file name in the path")
     tmp = os.path.join(directory, f".{base}.{uuid.uuid4().hex}.tmp")
     fd = -1
+    created = False                 # only a name this call created is ever removed
     try:
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | _O_CLOEXEC, mode)
+        created = True
         os.fchmod(fd, mode)
         _write_all(fd, payload)
         os.fsync(fd)
@@ -681,10 +683,11 @@ def atomic_write(path, data: bytes | str, *, mode: int = 0o600, replace: bool = 
             except OSError:
                 pass
         # After os.replace the temporary name is gone; after os.link it is a second name that must go.
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass                    # a stranded temporary name is harmless and must not hide the real error
+        if created:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass                # a stranded temporary name is harmless and must not hide the real error
     _fsync_dir(directory)
 
 
@@ -735,7 +738,7 @@ def append_line(fd: int, line: bytes | str, *, heal_torn: bool = False, max_byte
 # ---------------------------------------------------------------------------------------------------- safetensors
 
 # Bits per element of each dtype the safetensors format defines. A dtype not listed is refused: when the format gains a
-# dtype, add it here (and its test) rather than loosening the check.
+# dtype, add it here (and its test); do not loosen the check.
 DTYPE_BITS = {
     "BOOL": 8, "U8": 8, "I8": 8, "F8_E5M2": 8, "F8_E4M3": 8, "F8_E8M0": 8,
     "I16": 16, "U16": 16, "F16": 16, "BF16": 16,

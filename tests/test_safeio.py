@@ -135,7 +135,7 @@ def test_the_read_never_asks_for_more_than_the_cap_plus_one(tmp_path, monkeypatc
         return real_read(fd, n)
 
     monkeypatch.setattr(safeio.os, "read", read)
-    with pytest.raises(SafeReadError):
+    with pytest.raises(TooLarge):
         safeio.read_json(path, max_bytes=100)
     assert sum(asked) <= 101, asked
 
@@ -176,6 +176,68 @@ def test_a_file_rewritten_to_the_same_size_during_the_read_is_refused(tmp_path, 
         safeio.read_json(path, max_bytes=CAP)
 
 
+def test_a_size_change_is_caught_even_when_the_modification_time_is_put_back(tmp_path, monkeypatch):
+    path = write(tmp_path / "f.json", b"12")
+    real_read, state = os.read, {"n": 0}
+
+    def read(fd, n):
+        data = real_read(fd, n)
+        state["n"] += 1
+        if state["n"] == 1:
+            st = os.stat(path)
+            with open(path, "ab") as f:
+                f.write(b"3")
+            os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
+        return data
+
+    monkeypatch.setattr(safeio.os, "read", read)
+    with pytest.raises(ChangedWhileReading):
+        safeio.read_json(path, max_bytes=CAP)
+
+
+def test_a_short_read_is_caught_even_when_the_file_looks_unchanged(tmp_path, monkeypatch):
+    """The descriptor returns half the bytes and then end of file, as a file truncated and restored would."""
+    path = write(tmp_path / "f.json", b'["abcdef"]')
+    real_read, state = os.read, {"n": 0}
+
+    def read(fd, n):
+        state["n"] += 1
+        data = real_read(fd, n)
+        return data[:3] if state["n"] == 1 else b""
+
+    monkeypatch.setattr(safeio.os, "read", read)
+    with pytest.raises(ChangedWhileReading):
+        safeio.read_json(path, max_bytes=CAP)
+
+
+def test_a_read_error_is_a_read_failure(tmp_path, monkeypatch):
+    path = write(tmp_path / "f.json", b"{}")
+    monkeypatch.setattr(safeio.os, "read", lambda fd, n: (_ for _ in ()).throw(OSError(errno.EIO, "injected")))
+    with pytest.raises(ReadFailed) as info:
+        safeio.read_json(path, max_bytes=CAP)
+    assert "EIO" in info.value.reason
+
+
+def test_a_bytes_path_is_read(tmp_path):
+    path = write(tmp_path / "f.json", b"[1]")
+    assert safeio.read_json(os.fsencode(path), max_bytes=CAP) == [1]
+
+
+def test_a_json_error_from_the_parser_is_one_safe_error_with_a_position(tmp_path, monkeypatch):
+    with pytest.raises(NotJson, match="character"):
+        safeio.parse_json_bytes(b"[1,", max_bytes=CAP)
+    monkeypatch.setattr(safeio.json, "loads", lambda *a, **k: (_ for _ in ()).throw(ValueError("injected")))
+    with pytest.raises(NotJson):
+        safeio.parse_json_bytes(b"[1]", max_bytes=CAP)
+
+
+def test_an_object_nest_is_read_at_the_limit_and_refused_one_deeper():
+    ok = safeio.parse_json_bytes(hi._deep_object(64), max_bytes=CAP)
+    assert isinstance(ok, dict)
+    with pytest.raises(NotJson):
+        safeio.parse_json_bytes(hi._deep_object(65), max_bytes=CAP)
+
+
 def test_a_link_in_the_last_component_is_refused(tmp_path):
     (tmp_path / "real.json").write_text("{}")
     (tmp_path / "link.json").symlink_to("real.json")
@@ -196,7 +258,7 @@ def test_a_fifo_is_refused_and_does_not_block(tmp_path):
     def timed_out(signum, frame):
         raise TimeoutError("the open of a FIFO blocked")
 
-    old = signal.signal(signal.SIGALRM, timed_out)        # a blocking open is interrupted instead of hanging the suite
+    old = signal.signal(signal.SIGALRM, timed_out)        # a blocking open is interrupted so that it cannot hang the suite
     signal.alarm(5)
     try:
         with pytest.raises(NotRegular):
@@ -381,9 +443,21 @@ def test_open_beneath_refuses_bad_parts_before_opening_anything(tmp_path, parts)
     assert fd_count() == before
 
 
-def test_open_beneath_refuses_one_string_for_the_parts(tmp_path):
+@pytest.mark.parametrize("text", ["a/b", "ab", "a"])
+def test_open_beneath_refuses_one_string_for_the_parts(tmp_path, text):
+    (tmp_path / "a" / "b").mkdir(parents=True)
     with safeio.pinned_root(tmp_path) as pin, pytest.raises(PathRefused):
-        safeio.open_beneath(pin.fd, "a/b")
+        safeio.open_beneath(pin.fd, text)
+
+
+def test_open_beneath_closes_every_directory_it_passed_through(tmp_path):
+    (tmp_path / "a" / "b" / "c").mkdir(parents=True)
+    (tmp_path / "a" / "b" / "c" / "f").write_text("x")
+    with safeio.pinned_root(tmp_path) as pin:
+        before = fd_count()
+        os.close(safeio.open_beneath(pin.fd, ("a", "b", "c")))
+        os.close(safeio.open_beneath(pin.fd, ("a", "b", "c", "f"), file_flags=os.O_RDONLY))
+        assert fd_count() == before
 
 
 def test_open_beneath_opens_nested_directories_and_returns_a_new_descriptor(tmp_path):
@@ -560,7 +634,50 @@ def test_the_depth_limit_stops_the_walk_and_says_so(tmp_path):
         full = safeio.scan_beneath(pin, max_depth=4)
         assert not full.depth_cut and ("a", "b", "c", "deep.json") in {e.parts for e in full.entries}
         assert safeio.scan_beneath(pin, max_depth=1).depth_cut
-        assert safeio.scan_beneath(pin, max_depth=0).depth_cut
+
+
+def test_a_depth_of_zero_lists_nothing_and_says_so(tmp_path):
+    tree(tmp_path, files=["a", "b"])
+    with safeio.pinned_root(tmp_path) as pin:
+        res = safeio.scan_beneath(pin, max_depth=0)
+    assert res.entries == [] and res.depth_cut and res.incomplete
+
+
+def test_a_directory_that_fails_to_open_for_listing_or_during_listing_is_reported(tmp_path, monkeypatch):
+    tree(tmp_path, dirs=["a", "b"], files=["a/f", "b/g", "top"])
+    real = os.scandir
+    calls = {"n": 0}
+
+    class Breaks:
+        def __init__(self, it):
+            self.it, self.n = it, 0
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            self.n += 1
+            if self.n > 1:
+                raise OSError(errno.EIO, "injected")
+            return next(self.it)
+
+        def close(self):
+            self.it.close()
+
+    def scandir(fd):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return real(fd)                                   # the root lists normally
+        if calls["n"] == 2:
+            raise OSError(errno.EIO, "injected")              # the first subdirectory cannot be listed
+        return Breaks(real(fd))                               # the second fails part way through
+
+    monkeypatch.setattr(safeio.os, "scandir", scandir)
+    with safeio.pinned_root(tmp_path) as pin:
+        before = fd_count()
+        res = safeio.scan_beneath(pin)
+        assert fd_count() == before
+    assert len(res.unreadable) == 2 and {r for _, r in res.unreadable} == {"EIO"} and res.incomplete
 
 
 def test_a_directory_at_the_last_level_with_no_subdirectory_is_not_a_cut(tmp_path):
@@ -680,6 +797,22 @@ def test_atomic_write_cleans_up_when_a_step_fails(tmp_path, monkeypatch):
             safeio.atomic_write(target, b"new")
         monkeypatch.setattr(safeio.os, name, real)
         assert target.read_bytes() == b"old" and stray(tmp_path) == [], name
+    before = fd_count()
+    monkeypatch.setattr(safeio.os, "write", lambda *a: (_ for _ in ()).throw(OSError(errno.EIO, "injected")))
+    with pytest.raises(OSError):
+        safeio.atomic_write(target, b"new")
+    assert fd_count() == before                               # the descriptor of the temporary file is closed on failure
+
+
+def test_atomic_write_never_reuses_an_existing_temporary_name(tmp_path, monkeypatch):
+    import types
+    fixed = types.SimpleNamespace(hex="abc123")
+    monkeypatch.setattr(safeio.uuid, "uuid4", lambda: fixed)
+    squatter = tmp_path / ".f.abc123.tmp"
+    squatter.write_text("someone else's file")
+    with pytest.raises(FileExistsError):
+        safeio.atomic_write(tmp_path / "f", b"x")
+    assert squatter.read_text() == "someone else's file" and not (tmp_path / "f").exists()
 
 
 def test_atomic_write_cleans_up_when_the_link_step_fails(tmp_path, monkeypatch):
@@ -789,6 +922,21 @@ def test_append_line_needs_a_regular_file_opened_for_append(tmp_path):
             safeio.append_line(dfd, "x")
     finally:
         os.close(dfd)
+
+
+def test_append_line_refuses_a_pipe_even_with_append_set(tmp_path):
+    import fcntl
+    r, w = os.pipe()
+    try:
+        fcntl.fcntl(w, fcntl.F_SETFL, fcntl.fcntl(w, fcntl.F_GETFL) | os.O_APPEND)
+        with pytest.raises(ValueError):
+            safeio.append_line(w, "x")
+        os.set_blocking(r, False)
+        with pytest.raises(BlockingIOError):
+            os.read(r, 10)                                    # nothing was written
+    finally:
+        os.close(r)
+        os.close(w)
 
 
 def test_append_line_heals_a_torn_tail_only_when_asked(tmp_path):
@@ -1062,51 +1210,91 @@ def test_an_empty_header_object_is_valid(tmp_path):
     assert h.entries == {} and h.data_size == 0
 
 
+def entry(dtype="F32", shape=(1,), offsets=(0, 4), **extra):
+    return {"dtype": dtype, "shape": list(shape), "data_offsets": list(offsets), **extra}
+
+
+# (header, size of the data section). Each header has one fault, and the data section is sized so that no other check would refuse it:
+# without the guard named by the case, the header would be accepted.
 BAD_HEADERS = {
-    "array_header": [],
-    "metadata_not_object": {"__metadata__": []},
-    "metadata_value_not_string": {"__metadata__": {"a": 1}},
-    "entry_not_object": {"a": []},
-    "entry_missing_dtype": {"a": {"shape": [1], "data_offsets": [0, 4]}},
-    "entry_missing_shape": {"a": {"dtype": "F32", "data_offsets": [0, 4]}},
-    "entry_missing_offsets": {"a": {"dtype": "F32", "shape": [1]}},
-    "entry_extra_key": {"a": {"dtype": "F32", "shape": [1], "data_offsets": [0, 4], "x": 1}},
-    "unknown_dtype": {"a": {"dtype": "F33", "shape": [1], "data_offsets": [0, 4]}},
-    "dtype_not_text": {"a": {"dtype": 7, "shape": [1], "data_offsets": [0, 4]}},
-    "shape_not_list": {"a": {"dtype": "F32", "shape": 1, "data_offsets": [0, 4]}},
-    "negative_dim": {"a": {"dtype": "F32", "shape": [-1], "data_offsets": [0, 4]}},
-    "float_dim": {"a": {"dtype": "F32", "shape": [1.0], "data_offsets": [0, 4]}},
-    "bool_dim": {"a": {"dtype": "F32", "shape": [True], "data_offsets": [0, 4]}},
-    "string_dim": {"a": {"dtype": "F32", "shape": ["1"], "data_offsets": [0, 4]}},
-    "rank_65": {"a": {"dtype": "F32", "shape": [1] * 65, "data_offsets": [0, 4]}},
-    "product_overflow": {"a": {"dtype": "U8", "shape": [2 ** 40, 2 ** 40], "data_offsets": [0, 4]}},
-    "dimension_too_large_with_zero": {"a": {"dtype": "U8", "shape": [0, 2 ** 70], "data_offsets": [0, 0]}},
-    "three_offsets": {"a": {"dtype": "F32", "shape": [1], "data_offsets": [0, 4, 4]}},
-    "float_offsets": {"a": {"dtype": "F32", "shape": [1], "data_offsets": [0.0, 4.0]}},
-    "bool_offsets": {"a": {"dtype": "U8", "shape": [1], "data_offsets": [False, True]}},
-    "negative_start": {"a": {"dtype": "F32", "shape": [1], "data_offsets": [-4, 0]}},
-    "start_after_end": {"a": {"dtype": "F32", "shape": [1], "data_offsets": [4, 0]}},
-    "end_past_data": {"a": {"dtype": "F32", "shape": [1], "data_offsets": [0, 8]}},
-    "span_too_small": {"a": {"dtype": "F32", "shape": [2], "data_offsets": [0, 4]}},
-    "span_too_large": {"a": {"dtype": "F32", "shape": [1], "data_offsets": [0, 8]}},
-    "packed_dtype_odd_count": {"a": {"dtype": "F4", "shape": [3], "data_offsets": [0, 2]}},
+    "array_header": ([], 0),
+    "metadata_not_object": ({"__metadata__": []}, 0),
+    "metadata_value_not_string": ({"__metadata__": {"a": 1}}, 0),
+    "entry_not_object": ({"a": []}, 0),
+    "entry_missing_dtype": ({"a": {"shape": [1], "data_offsets": [0, 4]}}, 4),
+    "entry_missing_shape": ({"a": {"dtype": "F32", "data_offsets": [0, 4]}}, 4),
+    "entry_missing_offsets": ({"a": {"dtype": "F32", "shape": [1]}}, 4),
+    "entry_extra_key": ({"a": entry(x=1)}, 4),
+    "unknown_dtype": ({"a": entry(dtype="F33")}, 4),
+    "dtype_not_text": ({"a": entry(dtype=7)}, 4),
+    "shape_not_list": ({"a": {"dtype": "F32", "shape": 1, "data_offsets": [0, 4]}}, 4),
+    "negative_dims_with_a_positive_product": ({"a": entry(shape=(-1, -1))}, 4),
+    "float_dim": ({"a": entry(shape=(1.0,))}, 4),
+    "bool_dim": ({"a": entry(shape=(True,))}, 4),
+    "string_dim": ({"a": entry(shape=("1",))}, 4),
+    "rank_65": ({"a": entry(shape=[1] * 65)}, 4),
+    "dimension_too_large_beside_a_zero": ({"a": entry(dtype="U8", shape=(0, 2 ** 70), offsets=(0, 0))}, 0),
+    "three_offsets": ({"a": {"dtype": "F32", "shape": [1], "data_offsets": [0, 4, 4]}}, 4),
+    "one_offset": ({"a": {"dtype": "F32", "shape": [1], "data_offsets": [4]}}, 4),
+    "float_offsets": ({"a": entry(offsets=(0.0, 4.0))}, 4),
+    "bool_offsets": ({"a": entry(dtype="U8", offsets=(False, True))}, 1),
+    "span_too_small": ({"a": entry(shape=(2,), offsets=(0, 4))}, 4),
+    "span_too_large": ({"a": entry(shape=(1,), offsets=(0, 8))}, 8),
+    "span_for_an_empty_shape": ({"a": entry(shape=(0,), offsets=(0, 4))}, 4),
+    "packed_dtype_odd_count": ({"a": entry(dtype="F4", shape=(3,), offsets=(0, 1))}, 1),
+    "offsets_past_the_data": ({"a": entry(offsets=(0, 4))}, 3),
+    "start_after_end": ({"a": entry(dtype="U8", shape=(0,), offsets=(2, 1))}, 4),
 }
 
 
+@pytest.mark.parametrize("contiguous", [True, False])
 @pytest.mark.parametrize("name", sorted(BAD_HEADERS))
-def test_a_malformed_header_is_refused(tmp_path, name):
+def test_a_malformed_header_is_refused(tmp_path, name, contiguous):
+    header, size = BAD_HEADERS[name]
     with pytest.raises(BadHeader):
-        safeio.safetensors_header(build_safetensors(tmp_path / "m", header=BAD_HEADERS[name], data=b"\0" * 8), max_header_bytes=1 << 20)
+        safeio.safetensors_header(build_safetensors(tmp_path / "m", header=header, data=b"\0" * size), max_header_bytes=1 << 20,
+                                  contiguous=contiguous)
 
 
-def test_a_zero_dimension_may_sit_beside_a_huge_one_only_within_the_dimension_cap(tmp_path):
-    ok = {"a": {"dtype": "U8", "shape": [0, 2 ** 40], "data_offsets": [0, 0]}}
-    assert safeio.safetensors_header(build_safetensors(tmp_path / "m", header=ok, data=b""), max_header_bytes=1 << 20).entries["a"].end == 0
+def test_the_good_version_of_each_bad_header_is_accepted(tmp_path):
+    """The bad cases are one fault away from this: it shows that each case differs from a valid header by one fault."""
+    assert safeio.safetensors_header(build_safetensors(tmp_path / "m", header={"a": entry()}, data=b"\0" * 4), max_header_bytes=1 << 20)
+
+
+def test_a_zero_dimension_decides_the_count_whatever_the_other_dimensions_are(tmp_path):
+    for shape in ((0, 2 ** 40), (2 ** 40, 2 ** 40, 0), (0,), (3, 0, 5)):
+        hdr = {"a": entry(dtype="U8", shape=shape, offsets=(0, 0))}
+        assert safeio.safetensors_header(build_safetensors(tmp_path / "m", header=hdr, data=b""), max_header_bytes=1 << 20).entries["a"].end == 0
+
+
+def test_a_header_holding_an_enormous_element_count_is_refused(tmp_path):
+    hdr = {"a": entry(dtype="U8", shape=(2 ** 40, 2 ** 40), offsets=(0, 4))}
+    with pytest.raises(BadHeader):
+        safeio.safetensors_header(build_safetensors(tmp_path / "m", header=hdr, data=b"\0" * 4), max_header_bytes=1 << 20)
 
 
 def test_a_packed_dtype_that_fills_whole_bytes_is_accepted(tmp_path):
-    good = {"a": {"dtype": "F4", "shape": [4], "data_offsets": [0, 2]}}
+    good = {"a": entry(dtype="F4", shape=(4,), offsets=(0, 2))}
     assert safeio.safetensors_header(build_safetensors(tmp_path / "m", header=good, data=b"\0\0"), max_header_bytes=1 << 20)
+
+
+def test_metadata_over_a_megabyte_is_refused(tmp_path):
+    big = {"__metadata__": {"k": "v" * (1 << 20)}}
+    with pytest.raises(BadHeader, match="__metadata__"):
+        safeio.safetensors_header(build_safetensors(tmp_path / "m", header=big), max_header_bytes=1 << 22)
+
+
+def test_a_failure_leaves_no_descriptor_open_and_a_read_error_is_a_read_failure(tmp_path, monkeypatch):
+    path = build_safetensors(tmp_path / "m", ok_tensors())
+    bad = build_safetensors(tmp_path / "bad", header=[], data=b"")
+    before = fd_count()
+    with pytest.raises(BadHeader):
+        safeio.safetensors_header(bad, max_header_bytes=1 << 20)
+    assert fd_count() == before
+    monkeypatch.setattr(safeio.os, "pread", lambda *a: (_ for _ in ()).throw(OSError(errno.EIO, "injected")))
+    with pytest.raises(ReadFailed):
+        safeio.safetensors_header(path, max_header_bytes=1 << 20)
+    assert fd_count() == before
 
 
 def test_the_length_prefix_is_checked(tmp_path):

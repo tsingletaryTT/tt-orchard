@@ -217,6 +217,14 @@ The suite has 7,177 passing tests and 3 skipped tests (measured with `python3 -m
 no network. The three skipped tests are opt-in: one replays local agent transcripts (`ORCHARD_REPLAY=1`), one asks the real Hugging Face hub and GitHub
 (`ORCHARD_LIVE_RESEARCH=1`), and the browser tests of the web page run only where the `playwright` package and Chrome are present (issue 31).
 
+### Development notes
+
+Code that reads a file or a record that something else wrote (a model's output, an earlier run, a download) uses `orchard/safeio.py`, which holds the
+guards for the failures that reviews keep finding: a link swapped in after a check, a read with no size limit, NaN, repeated keys, deep nesting, a safetensors
+header that does not add up, an atomic write that can be raced. [docs/safe-reading.md](docs/safe-reading.md) says when to use each function and what it does not cover,
+and gives a checklist for reviewing a new reader. `tests/hostile_inputs.py` holds a corpus of hostile inputs and a registry of the readers tested
+against it. `hypothesis` drives the property tests in `tests/test_safeio.py`, with a fixed seed so that a failure reproduces.
+
 ## 2. What you need
 
 Everything below was checked on the development machine only. Items marked
@@ -235,7 +243,7 @@ Everything below was checked on the development machine only. Items marked
 | Software | What it is for |
 |---|---|
 | Linux | The only operating system used |
-| Python 3.12 or newer and pytest | Runs tt-orchard and its tests. tt-orchard has no runtime pip dependencies. `tests/test_lm_eval_code_tasks.py` also needs PyYAML (`pip install pyyaml`) |
+| Python 3.12 or newer, pytest and hypothesis | Runs tt-orchard and its tests. tt-orchard has no runtime pip dependencies; pytest and hypothesis are for the tests only (`pip install pytest hypothesis`; the `dev` extra in `pyproject.toml` lists the same two). `tests/test_lm_eval_code_tasks.py` also needs PyYAML (`pip install pyyaml`) |
 | [tt-gozer](https://github.com/tsingletaryTT/tt-gozer) with the `reset` command (version 0.3.2 or newer) | Chip leases. The supervisor holds every board under a gozer lease |
 | `tt-model` ([tt-model-manager](https://github.com/tenstorrent/tt-model-manager)) | Serves the models the agents use and the models under test |
 | `tt-smi`, the Tenstorrent kernel driver and firmware | Device access. The supervisor reads `tt-smi -s` once at the start of a run to record firmware versions |
@@ -290,6 +298,7 @@ To set up by hand:
 ```bash
 git clone https://github.com/tsingletaryTT/tt-orchard.git tt-orchard
 cd tt-orchard
+python3 -m pip install pytest hypothesis    # the test tools (the `dev` extra in pyproject.toml lists the same two)
 python3 -m pytest -q
 ```
 
