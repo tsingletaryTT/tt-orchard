@@ -279,33 +279,73 @@ function renderLaunches(force) {
   }
 }
 
+// Which run holds the table's single tab stop: the selected one, or the first row when nothing (or a vanished run) is selected.
+function rovingStop(r, i) {
+  return r.name === S.selected || (i === 0 && !S.runs.some((x) => x.name === S.selected));
+}
+
 function renderRuns() {
   const list = $("runs");
-  if (!changed(list, [S.selected, S.runs.map((r) => [r.name, r.state, r.model, r.mode, r.stage && r.stage.current, r.last_ts,
+  if (!changed(list, [S.selected, S.runs.map((r) => [r.name, r.state, r.model, r.mode, r.stage && r.stage.current, r.stage && r.stage.name, r.last_ts,
     r.launching, Math.floor((Date.now() - (parseTs(r.last_ts) || 0)) / 60000)])])) return;
   clear(list);
+  // a poll that redraws the rows must not take the keyboard focus away from the row the person is on
+  const focusName = $("runs-body").contains(document.activeElement) ? (document.activeElement.closest("tr") || {}).dataset?.runName : null;
+  const body = clear($("runs-body"));
   $("runs-note").textContent = S.runs.length ? `${S.runs.length}` : "";
   if (!S.runs.length) {
     list.append(h("li", { class: "empty-small" },
       h("span", { class: "muted" }, "No runs here yet."),
       h("button", { type: "button", class: "btn btn-small", onclick: openNewRun }, "Start a bring-up")));
+    body.append(h("tr", { role: "row" }, h("td", { role: "gridcell", colspan: "4", class: "c-empty" },
+      h("span", { class: "muted" }, "No runs here yet. "),
+      h("button", { type: "button", class: "btn btn-small", onclick: openNewRun }, "Start a bring-up"))));
     return;
   }
-  for (const r of S.runs) {
-    list.append(h("li", {}, h("button", {
+  const total = (S.meta && S.meta.stages ? S.meta.stages.length : 9) || 9;
+  S.runs.forEach((r, i) => {
+    // each view gets its own nodes: one DOM node can sit in only one place, so sharing them would move the tags out of the list
+    const tag = () => (r.mode || "").startsWith("lab") ? h("span", { class: "mode-tag", title: `hardware tests ran on ${r.mode.slice(5, -1)}` }, "lab") : null;
+    const first = () => r === S.runs[0] ? h("span", { class: "mode-tag", title: "the page opens this run first: the one in progress, or the most recent" },
+      r.state === "running" || r.state === "paused" || r.launching ? "now" : "latest") : null;
+    list.append(h("li", { "data-run-row": "1", "data-run-name": r.name }, h("button", {
       type: "button", class: "run-item", "aria-current": String(r.name === S.selected),
       onclick: () => select(r.name),
     }, stateBadge(r.state),
-      h("span", { class: "model" }, r.model || r.name,
-        (r.mode || "").startsWith("lab") ? h("span", { class: "mode-tag", title: `hardware tests ran on ${r.mode.slice(5, -1)}` }, "lab") : null,
-        r === S.runs[0] ? h("span", { class: "mode-tag", title: "the page opens this run first: the one in progress, or the most recent" },
-          r.state === "running" || r.state === "paused" || r.launching ? "now" : "latest") : null),
+      h("span", { class: "model" }, r.model || r.name, tag(), first()),
       h("span", { class: "meta mono" }, r.name),
       h("span", { class: "meta" },
         h("span", {}, r.stage && r.stage.current !== null ? `stage ${r.stage.current}` : ""),
         h("span", {}, r.last_ts ? ago(r.last_ts) : ""),
         r.launching ? h("span", {}, "starting…") : null))));
-  }
+
+    // the Operator style's table row: state, model, stage, age. The full id, the stage name and the exact time are tooltips.
+    const full = r.model || r.name;
+    const tip = full === r.name ? full : `${full}\n${r.name}`;
+    const cur = r.stage && r.stage.current !== null && r.stage.current !== undefined ? r.stage.current : null;
+    const when = parseTs(r.last_ts);
+    const selected = r.name === S.selected;
+    const row = h("tr", {
+      role: "row", "data-run-row": "1", "data-run-name": r.name, "data-state": r.state, "aria-selected": String(selected),
+      tabindex: String(rovingStop(r, i) ? 0 : -1),
+      onclick: () => {
+        const sel = window.getSelection && window.getSelection().toString();
+        if (sel && body.contains(window.getSelection().anchorNode)) return;      // a drag to copy text is not a click on the row
+        select(r.name);
+      },
+    },
+      h("td", { role: "gridcell", class: "c-state" }, stateBadge(r.state)),
+      h("td", { role: "gridcell", class: "c-model", title: tip },
+        h("span", { class: "c-model-text" }, full), tag(), first(), r.launching ? h("span", { class: "mode-tag" }, "starting…") : null,
+        // the run directory tells apart runs of one model; it is plain selectable text and part of the tooltip
+        h("span", { class: "c-dir mono" }, r.name)),
+      h("td", { role: "gridcell", class: "c-stage", title: cur === null ? "no stage yet" : `stage ${cur}${r.stage.name ? ` · ${r.stage.name}` : ""}` },
+        cur === null ? "" : [h("span", { class: "c-stage-n" }, String(cur)),
+          h("span", { class: "c-bar", "aria-hidden": "true" }, h("span", { style: `width:${Math.round(((cur + 1) / total) * 100)}%` }))]),
+      h("td", { role: "gridcell", class: "c-age", title: when === null ? "" : new Date(when).toLocaleString() }, r.last_ts ? ago(r.last_ts) : ""));
+    body.append(row);
+  });
+  if (focusName) { const again = body.querySelector(`tr[data-run-name="${CSS.escape(focusName)}"]`); if (again) again.focus(); }
 }
 
 async function refreshRuns() {
@@ -1100,6 +1140,22 @@ function wire() {
   for (const id of ["nr-model", "nr-base"]) $(id).addEventListener("input", () => { setStartReady(false); updateOptionsSummary(); });
 
   for (const t of TABS) $(`tab-${t}`).addEventListener("click", () => setTab(t));
+  $("runs-body").addEventListener("keydown", (ev) => {
+    // Up and Down move the selection through the rows (and the focus with it); Enter opens the selected run's page.
+    const rows = [...$("runs-body").querySelectorAll("tr[data-run-row]")];
+    const at = rows.indexOf(document.activeElement.closest ? document.activeElement.closest("tr") : null);
+    if (at < 0) return;
+    let to = null;
+    if (ev.key === "ArrowDown") to = Math.min(rows.length - 1, at + 1);
+    else if (ev.key === "ArrowUp") to = Math.max(0, at - 1);
+    else if (ev.key === "Enter") { select(rows[at].dataset.runName); const run = $("run"); if (!run.hidden) { run.scrollIntoView({ block: "start" }); } return; }
+    else return;
+    ev.preventDefault();
+    const name = rows[to].dataset.runName;
+    select(name);
+    const next = $("runs-body").querySelector(`tr[data-run-name="${CSS.escape(name)}"]`);
+    if (next) next.focus();
+  });
   $("tabs").addEventListener("keydown", (ev) => {
     const i = TABS.indexOf(S.tab);
     if (ev.key === "ArrowRight") { ev.preventDefault(); setTab(TABS[(i + 1) % TABS.length], true); }
