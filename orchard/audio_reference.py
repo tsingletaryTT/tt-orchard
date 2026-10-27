@@ -28,11 +28,12 @@ import json
 import math
 import os
 import re
-import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
+
+from orchard import pinned_files as pf
 
 SCHEMA = 1
 MANIFEST = "manifest.json"
@@ -58,26 +59,6 @@ def _sha256(path: Path) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def _sha256_capped(path: Path, label: str) -> str:
-    """The sha256 of an array file, opened without following a link and read in chunks that are counted, so a file over MAX_ARRAY_BYTES is refused
-    before any more of it is hashed, even when it grows after the size check."""
-    try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-    except OSError as exc:
-        raise ReferenceError(f"{label} cannot be opened (a link, or missing): {exc}") from exc
-    total = 0
-    with os.fdopen(fd, "rb") as f:
-        if os.fstat(f.fileno()).st_size > MAX_ARRAY_BYTES:
-            raise ReferenceError(f"{label} is larger than {MAX_ARRAY_BYTES} bytes")
-        h = hashlib.sha256()
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            total += len(chunk)
-            if total > MAX_ARRAY_BYTES:
-                raise ReferenceError(f"{label} is larger than {MAX_ARRAY_BYTES} bytes")
             h.update(chunk)
     return h.hexdigest()
 
@@ -134,7 +115,12 @@ def strict_loads(text: str):
 
 class Recorder:
     """Writes arrays and the manifest of one run. Nothing is overwritten: a second array with the same kind and name is an error, and an
-    existing manifest is never replaced."""
+    existing manifest is never replaced.
+
+    The run directory is created by this object and opened once; the `arrays/` directory is created and opened relative to it. Every later write goes
+    through those two descriptors (orchard/pinned_files.py), so replacing the path afterwards cannot redirect a file. A file is written under a
+    temporary name and published with a hard link that fails when the final name exists, so a file or a manifest that appeared in the meantime is
+    never replaced."""
 
     def __init__(self, out_dir, *, model: dict, library: dict, settings: dict, seeds: dict | None = None):
         self.root = Path(out_dir)
@@ -153,14 +139,37 @@ class Recorder:
             self.root.mkdir(parents=True, exist_ok=False)
         except FileExistsError:
             raise ReferenceError(f"{self.root} exists; a run is never overwritten") from None
-        (self.root / ARRAYS).mkdir()
+        self._root_fd = self._arrays_fd = None
+        try:
+            self._root_fd = pf.open_dir(self.root, follow=False)
+            os.mkdir(ARRAYS, dir_fd=self._root_fd)
+            self._arrays_fd = pf.open_dir(ARRAYS, dir_fd=self._root_fd, follow=False)
+        except (pf.PinnedError, OSError) as exc:
+            self.close()
+            raise ReferenceError(f"cannot set up {self.root}: {exc}") from exc
         self.model, self.library, self.settings, self.seeds = model, library, dict(settings), dict(seeds or {})
         self.artifacts: list[dict] = []
         self._seen: set[tuple[str, str]] = set()
         self.timings: dict[str, float] = {}
+        self._finished = False
+
+    def close(self) -> None:
+        for attr in ("_arrays_fd", "_root_fd"):
+            fd = getattr(self, attr, None)
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+                setattr(self, attr, None)
+
+    def __del__(self):
+        self.close()
 
     def record(self, kind: str, name: str, array, note: str | None = None) -> dict:
         """Save `array` (anything numpy can read as a float array) as float32 and note it in the manifest."""
+        if self._finished or self._arrays_fd is None:
+            raise ReferenceError("the recorder is finished; a run is never extended")
         if kind not in KINDS:
             raise ReferenceError(f"unknown kind {kind!r}; allowed: {KINDS}")
         if not isinstance(name, str) or not NAME.fullmatch(name):
@@ -173,18 +182,23 @@ class Recorder:
         if arr.dtype.kind not in "fiu" and arr.dtype.name != "bfloat16":
             raise ReferenceError(f"{kind}/{name} has dtype {arr.dtype}, which is not numeric")
         arr = np.ascontiguousarray(arr.astype(np.float32))
-        rel = f"{ARRAYS}/{kind}__{name}.npy"
-        fd, tmp = tempfile.mkstemp(dir=self.root / ARRAYS, suffix=".tmp")
+        final = f"{kind}__{name}.npy"
+        tmp = f".{final}.tmp"
         try:
+            fd = pf.create_exclusive(self._arrays_fd, tmp)
             with os.fdopen(fd, "wb") as f:
                 np.save(f, arr, allow_pickle=False)
-            if os.path.getsize(tmp) > MAX_ARRAY_BYTES:
-                raise ReferenceError(f"{kind}/{name} would be a file larger than {MAX_ARRAY_BYTES} bytes, which the loader refuses")
-            os.replace(tmp, self.root / rel)
+                f.flush()
+                if os.fstat(f.fileno()).st_size > MAX_ARRAY_BYTES:
+                    raise ReferenceError(f"{kind}/{name} would be a file larger than {MAX_ARRAY_BYTES} bytes, which the loader refuses")
+                os.fsync(f.fileno())
+            pf.publish_no_replace(self._arrays_fd, tmp, final)
+            digest = pf.sha256_regular(self._arrays_fd, final, MAX_ARRAY_BYTES)[0]
+        except pf.PinnedError as exc:
+            raise ReferenceError(f"{ARRAYS}/{final}: {exc}") from exc
         finally:
-            if os.path.exists(tmp):
-                os.unlink(tmp)
-        entry = {"kind": kind, "name": name, "file": rel, "sha256": _sha256(self.root / rel), "shape": list(arr.shape),
+            pf.unlink_quietly(self._arrays_fd, tmp)
+        entry = {"kind": kind, "name": name, "file": f"{ARRAYS}/{final}", "sha256": digest, "shape": list(arr.shape),
                  "dtype": "float32", "finite": bool(np.isfinite(arr).all())}
         if note:
             entry["note"] = str(note)[:300]
@@ -193,47 +207,75 @@ class Recorder:
         return entry
 
     def finish(self) -> Path:
-        """Write the manifest, last, so a directory with a manifest holds a complete run."""
+        """Write the manifest, last, so a directory with a manifest holds a complete run. The manifest is published with a hard link that fails when
+        one already exists: a second call, or a manifest someone else made, is a `ReferenceError` and leaves the existing file as it is."""
+        if self._finished:
+            raise ReferenceError(f"{self.root / MANIFEST} already exists; a manifest is never replaced")
         manifest = {"schema": SCHEMA, "model": self.model, "library": self.library, "settings": self.settings,
                     "seeds": self.seeds, "timings": self.timings, "artifacts": self.artifacts}
-        path = self.root / MANIFEST
-        fd, tmp = tempfile.mkstemp(dir=self.root, suffix=".tmp")
+        tmp = f".{MANIFEST}.tmp"
         try:
+            fd = pf.create_exclusive(self._root_fd, tmp)
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(manifest, f, indent=1, sort_keys=True)
                 f.write("\n")
-            os.replace(tmp, path)
+                f.flush()
+                os.fsync(f.fileno())
+            pf.publish_no_replace(self._root_fd, tmp, MANIFEST)
+            pf.fsync_dir(self._root_fd)
+        except pf.PinnedError as exc:
+            raise ReferenceError(f"{self.root / MANIFEST}: {exc}; a manifest is never replaced") from exc
         finally:
-            if os.path.exists(tmp):
-                os.unlink(tmp)
-        return path
+            pf.unlink_quietly(self._root_fd, tmp)
+        self._finished = True
+        self.close()
+        return self.root / MANIFEST
 
 
 # ---- reading ----------------------------------------------------------------------------------------
 
-@dataclass
 class Run:
-    root: Path
-    manifest: dict
-    entries: dict = field(default_factory=dict)     # (kind, name) -> entry
+    """A loaded run. It holds the run directory and `arrays/` open (as descriptors, `arrays/` opened without following a link), and every read is
+    relative to them: replacing either path after `load_run` cannot redirect a read. `close()` (or a `with` block) releases them."""
+
+    def __init__(self, root: Path, manifest: dict, entries: dict, root_fd: int, arrays_fd: int):
+        self.root, self.manifest, self.entries = root, manifest, entries
+        self._root_fd, self._arrays_fd = root_fd, arrays_fd
 
     @property
     def settings(self) -> dict:
         return self.manifest["settings"]
 
+    def close(self) -> None:
+        for attr in ("_arrays_fd", "_root_fd"):
+            fd = getattr(self, attr, None)
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+                setattr(self, attr, None)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+    def __del__(self):
+        self.close()
+
     def array(self, kind: str, name: str) -> np.ndarray:
-        """The array, read once: the bytes are opened without following a link, capped in size, hashed against the manifest and only then parsed,
-        so a file that changed or was swapped for a link after `load_run` is refused and what was hashed is what is parsed."""
+        """The array, read once: the bytes are opened relative to the pinned `arrays/` descriptor without following a link, capped in size, hashed
+        against the manifest and only then parsed, so a file that changed or was swapped for a link after `load_run` is refused and what was hashed
+        is what is parsed."""
+        if self._arrays_fd is None:
+            raise ReferenceError("the run is closed")
         e = self.entries[(kind, name)]
-        path = self.root / e["file"]
         try:
-            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-        except OSError as exc:
-            raise ReferenceError(f"{e['file']} cannot be opened (a link, or missing): {exc}") from exc
-        with os.fdopen(fd, "rb") as f:
-            data = f.read(MAX_ARRAY_BYTES + 1)            # one byte more than the cap, so a file over it (or one that grew) is seen
-        if len(data) > MAX_ARRAY_BYTES:
-            raise ReferenceError(f"{e['file']} is larger than {MAX_ARRAY_BYTES} bytes")
+            data = pf.read_regular(self._arrays_fd, Path(e["file"]).name, MAX_ARRAY_BYTES)
+        except pf.PinnedError as exc:
+            raise ReferenceError(f"{e['file']}: {exc}") from exc
         if hashlib.sha256(data).hexdigest() != e["sha256"]:
             raise ReferenceError(f"{e['file']} does not match its sha256 in the manifest")
         try:
@@ -248,50 +290,61 @@ class Run:
 
 
 def load_run(directory, *, verify: bool = True) -> Run:
-    """Read a run directory. Refuses a manifest that is not an object of the expected shape, an array path outside `arrays/`, a link, a missing
-    file and (with `verify`) a file whose sha256 differs from the manifest's."""
+    """Read a run directory. The directory is opened once (it may be reached through a link: the operator named it) and `arrays/` is opened relative to it
+    and must not be a link; the manifest and every array are read relative to those descriptors. Refuses a manifest that is not an object of the
+    expected shape, a link, a missing file and (with `verify`) a file whose sha256 differs from the manifest's or that is over the size cap."""
     root = Path(directory)
-    mpath = root / MANIFEST
+    root_fd = arrays_fd = None
     try:
-        if mpath.is_symlink() or mpath.stat().st_size > MAX_MANIFEST_BYTES:
-            raise ReferenceError(f"{mpath} is a link or larger than {MAX_MANIFEST_BYTES} bytes")
-        manifest = strict_loads(mpath.read_text(encoding="utf-8"))
-    except OSError as exc:
-        raise ReferenceError(f"cannot read {mpath}: {exc}") from exc
-    except ValueError as exc:
-        raise ReferenceError(f"{mpath} is not JSON: {exc}") from exc
-    if not isinstance(manifest, dict) or manifest.get("schema") != SCHEMA:
-        raise ReferenceError(f"{mpath} is not a schema {SCHEMA} manifest")
-    for key in ("model", "library", "settings"):
-        if not isinstance(manifest.get(key), dict):
-            raise ReferenceError(f"manifest {key} must be an object")
-    if not isinstance(manifest.get("seeds", {}), dict):
-        raise ReferenceError("manifest seeds must be an object")
-    missing = [k for k in MATCH_KEYS if k not in manifest["settings"]]
-    if missing:
-        raise ReferenceError(f"manifest settings are missing {missing}")
-    items = manifest.get("artifacts")
-    if not isinstance(items, list) or len(items) > MAX_ARTIFACTS:
-        raise ReferenceError("manifest artifacts must be a list of at most %d entries" % MAX_ARTIFACTS)
-    entries = {}
-    arrays_dir = (root / ARRAYS).resolve()
-    for e in items:
-        if (not isinstance(e, dict) or e.get("kind") not in KINDS or not isinstance(e.get("name"), str) or not NAME.fullmatch(e["name"])
-                or not isinstance(e.get("file"), str) or not re.fullmatch(r"[0-9a-f]{64}", str(e.get("sha256", "")))
-                or not isinstance(e.get("shape"), list) or not all(isinstance(d, int) and not isinstance(d, bool) and d >= 0 for d in e["shape"])
-                or e.get("dtype") != "float32"):
-            raise ReferenceError(f"a manifest entry is malformed: {str(e)[:120]}")
-        if (e["kind"], e["name"]) in entries:
-            raise ReferenceError(f"{e['kind']}/{e['name']} appears twice in the manifest")
-        if e["file"] != f"{ARRAYS}/{e['kind']}__{e['name']}.npy":
-            raise ReferenceError(f"{e['file']} must be {ARRAYS}/{e['kind']}__{e['name']}.npy")
-        path = root / e["file"]
-        if path.is_symlink() or not path.is_file() or path.resolve().parent != arrays_dir:
-            raise ReferenceError(f"{e['file']} is missing, a link, or outside {ARRAYS}/")
-        if verify and _sha256_capped(path, e["file"]) != e["sha256"]:
-            raise ReferenceError(f"{e['file']} does not match its sha256 in the manifest")
-        entries[(e["kind"], e["name"])] = e
-    return Run(root, manifest, entries)
+        try:
+            root_fd = pf.open_dir(root, follow=True)
+            raw = pf.read_regular(root_fd, MANIFEST, MAX_MANIFEST_BYTES)
+            arrays_fd = pf.open_dir(ARRAYS, dir_fd=root_fd, follow=False)
+        except pf.PinnedError as exc:
+            raise ReferenceError(f"cannot read {root}: {exc}") from exc
+        try:
+            manifest = strict_loads(raw.decode("utf-8"))
+        except ValueError as exc:                 # UnicodeDecodeError is a ValueError
+            raise ReferenceError(f"{root / MANIFEST} is not JSON: {exc}") from exc
+        if not isinstance(manifest, dict) or manifest.get("schema") != SCHEMA:
+            raise ReferenceError(f"{root / MANIFEST} is not a schema {SCHEMA} manifest")
+        for key in ("model", "library", "settings"):
+            if not isinstance(manifest.get(key), dict):
+                raise ReferenceError(f"manifest {key} must be an object")
+        if not isinstance(manifest.get("seeds", {}), dict):
+            raise ReferenceError("manifest seeds must be an object")
+        missing = [k for k in MATCH_KEYS if k not in manifest["settings"]]
+        if missing:
+            raise ReferenceError(f"manifest settings are missing {missing}")
+        items = manifest.get("artifacts")
+        if not isinstance(items, list) or len(items) > MAX_ARTIFACTS:
+            raise ReferenceError("manifest artifacts must be a list of at most %d entries" % MAX_ARTIFACTS)
+        entries = {}
+        for e in items:
+            if (not isinstance(e, dict) or e.get("kind") not in KINDS or not isinstance(e.get("name"), str) or not NAME.fullmatch(e["name"])
+                    or not isinstance(e.get("file"), str) or not re.fullmatch(r"[0-9a-f]{64}", str(e.get("sha256", "")))
+                    or not isinstance(e.get("shape"), list) or not all(isinstance(d, int) and not isinstance(d, bool) and d >= 0 for d in e["shape"])
+                    or e.get("dtype") != "float32"):
+                raise ReferenceError(f"a manifest entry is malformed: {str(e)[:120]}")
+            if (e["kind"], e["name"]) in entries:
+                raise ReferenceError(f"{e['kind']}/{e['name']} appears twice in the manifest")
+            if e["file"] != f"{ARRAYS}/{e['kind']}__{e['name']}.npy":
+                raise ReferenceError(f"{e['file']} must be {ARRAYS}/{e['kind']}__{e['name']}.npy")
+            if verify:
+                try:
+                    digest = pf.sha256_regular(arrays_fd, Path(e["file"]).name, MAX_ARRAY_BYTES)[0]
+                except pf.PinnedError as exc:
+                    raise ReferenceError(f"{e['file']}: {exc}") from exc
+                if digest != e["sha256"]:
+                    raise ReferenceError(f"{e['file']} does not match its sha256 in the manifest")
+            entries[(e["kind"], e["name"])] = e
+        run = Run(root, manifest, entries, root_fd, arrays_fd)
+        root_fd = arrays_fd = None                # now owned by the run
+        return run
+    finally:
+        for fd in (arrays_fd, root_fd):
+            if fd is not None:
+                os.close(fd)
 
 
 # ---- comparing --------------------------------------------------------------------------------------
@@ -445,22 +498,38 @@ def bars_from_floor(floor_report: dict, margin: float = 3.0) -> dict:
             for kind, w in worst.items()}
 
 
-def compare_control(fine_tune: Run, base: Run, min_rel_l2: float = 0.05) -> dict:
+def compare_control(fine_tune: Run, base: Run, min_rel_l2: float = 0.05, *, require_matched: bool = True) -> dict:
     """The waveforms of two different models run with the same prompt, duration and seed must differ by at least `min_rel_l2` (relative L2).
-    Equal waveforms mean the same weights were served twice. `min_rel_l2` is a choice."""
+    Equal waveforms mean the same weights were served twice. `min_rel_l2` is a choice.
+
+    By default every MATCH_KEYS setting must be equal too (steps, sampler, guidance scale, dtype and sample size, as well as prompt, duration and
+    seed): the base run is the base weights with the fine-tune's settings. With different settings a wrong checkpoint cannot be told from a right
+    one, because a fine-tune accidentally loaded with the base weights still differs from a base run made with the base's own recommended settings.
+    `require_matched=False` allows that second kind of comparison (prompt, duration and seed must still be equal) and says in the report that it cannot
+    show a wrong checkpoint."""
     problems = settings_problems(fine_tune, base, CONTROL_KEYS)
+    matched_problems = settings_problems(fine_tune, base, MATCH_KEYS)
+    matched = not matched_problems
     if problems:
-        return {"ok": False, "comparable": False, "problems": problems}
+        return {"ok": False, "comparable": False, "matched": matched, "problems": problems}
+    if require_matched and not matched:
+        return {"ok": False, "comparable": False, "matched": False,
+                "problems": matched_problems + ["a control needs matched settings: run the base weights with the fine-tune's settings (or ask for an "
+                                                "unmatched comparison, which cannot show a wrong checkpoint)"]}
     for run, who in ((fine_tune, "fine-tune"), (base, "base")):
         if ("waveform", "audio") not in run.entries:
-            return {"ok": False, "comparable": False, "problems": [f"the {who} run has no waveform/audio array"]}
+            return {"ok": False, "comparable": False, "matched": matched, "problems": [f"the {who} run has no waveform/audio array"]}
     m = metrics(fine_tune.array("waveform", "audio"), base.array("waveform", "audio"))
     if not m.get("comparable"):
-        return {"ok": False, "comparable": False, "problems": [m["reason"]], **m}
+        return {"ok": False, "comparable": False, "matched": matched, "problems": [m["reason"]], **m}
     ok = m["rel_l2"] >= min_rel_l2
-    return {"ok": ok, "comparable": True, "problems": [] if ok else [f"the waveforms differ by only {m['rel_l2']:.5f} (relative L2); "
-                                                                      f"the bar is {min_rel_l2}: the same weights may have run twice"],
-            "min_rel_l2": min_rel_l2, **m}
+    out = {"ok": ok, "comparable": True, "matched": matched,
+           "problems": [] if ok else [f"the waveforms differ by only {m['rel_l2']:.5f} (relative L2); the bar is {min_rel_l2}: the same weights may have run twice"],
+           "min_rel_l2": min_rel_l2, **m}
+    if not matched:
+        out["note"] = ("the settings differ between the two runs (" + "; ".join(matched_problems)
+                       + "), so this comparison cannot show that the right checkpoint was served")
+    return out
 
 
 # ---- command line -----------------------------------------------------------------------------------
@@ -480,18 +549,21 @@ def main(argv=None, out=None) -> int:
     k.add_argument("fine_tune")
     k.add_argument("base")
     k.add_argument("--min-rel-l2", type=float, default=0.05)
+    k.add_argument("--unmatched", action="store_true", help="allow different steps, sampler or guidance scale (cannot show a wrong checkpoint)")
     v = sub.add_parser("verify", help="re-hash a run's arrays against its manifest")
     v.add_argument("run")
     args = p.parse_args(argv)
     try:
         if args.cmd == "verify":
-            run = load_run(args.run)
-            print(f"ok: {len(run.entries)} arrays match their sha256", file=out)
+            with load_run(args.run) as run:
+                print(f"ok: {len(run.entries)} arrays match their sha256", file=out)
             return 0
         if args.cmd == "control":
-            report = compare_control(load_run(args.fine_tune), load_run(args.base), args.min_rel_l2)
+            with load_run(args.fine_tune) as ft, load_run(args.base) as base:
+                report = compare_control(ft, base, args.min_rel_l2, require_matched=not args.unmatched)
         else:
-            report = compare_runs(load_run(args.reference), load_run(args.candidate), cross_precision=args.cross_precision)
+            with load_run(args.reference) as ref, load_run(args.candidate) as cand:
+                report = compare_runs(ref, cand, cross_precision=args.cross_precision)
     except ReferenceError as exc:
         print(f"refused: {exc}", file=out)
         return 2
@@ -505,6 +577,8 @@ def main(argv=None, out=None) -> int:
             print(line + ("" if r["ok"] else "  " + "; ".join(r["reasons"])), file=out)
         for problem in report.get("problems", []):
             print("problem: " + problem, file=out)
+        if report.get("note"):
+            print("note: " + report["note"], file=out)
         print("ok" if report["ok"] else "not ok", file=out)
     return 0 if report["ok"] else 1
 

@@ -895,3 +895,173 @@ def test_a_header_that_is_not_an_object_is_unknown_and_does_not_crash(audio_case
     (model_snapshot(stage) / "model.safetensors").write_bytes(struct.pack("<Q", len(blob)) + blob)
     d = run_ok(stage)
     assert d["class"] == "unknown" and "not a JSON object" in reasons(d)
+
+
+# ---- round five: an audio candidate with an unreadable config stays audio; one descriptor per file ------------------
+
+UNREADABLE_CONFIGS = ["not json", "[]", '{"model_type": "x", "model": {"a": 1, "a": 2}}', '{"model_type": "x"}', '{"model": {}}', "",
+                      '{"model_type": "x", "model": {"a": NaN}}']
+
+
+@pytest.mark.parametrize("text", UNREADABLE_CONFIGS)
+def test_a_model_config_that_is_present_but_unreadable_is_still_an_audio_run_with_class_unknown(audio_case, text):
+    stage = audio_case()
+    (model_snapshot(stage) / "model_config.json").write_text(text)
+    d = run_ok(stage)
+    assert d["class"] == "unknown" and d["path"] == "full-port" and d["facts"] == {"form": "full", "modality": "audio"}
+    assert "new model" in reasons(d) and "model_config.json" in reasons(d)
+    assert gate(stage).ok, gate(stage).reasons
+
+
+def test_an_oversized_model_config_is_still_an_audio_run_with_class_unknown(audio_case):
+    stage = audio_case()
+    (model_snapshot(stage) / "model_config.json").write_text(json.dumps({**CONFIG, "pad": "x" * (2 << 20)}))
+    d = run_ok(stage)
+    assert d["class"] == "unknown" and d["facts"]["modality"] == "audio"
+
+
+def test_a_model_config_that_is_a_directory_or_a_dangling_link_is_still_audio(audio_case, tmp_path):
+    import shutil
+    stage = audio_case()
+    cfg = model_snapshot(stage) / "model_config.json"
+    cfg.unlink()
+    cfg.mkdir()
+    assert run_ok(stage)["facts"]["modality"] == "audio"
+    shutil.rmtree(cfg)
+    cfg.symlink_to(tmp_path / "nowhere.json")
+    d = run_ok(stage)
+    assert d["class"] == "unknown" and d["facts"]["modality"] == "audio"
+
+
+def test_a_snapshot_with_a_model_config_and_no_weights_is_audio_with_class_unknown(audio_case):
+    stage = audio_case()
+    (model_snapshot(stage) / "model.safetensors").unlink()
+    d = run_ok(stage)
+    assert d["class"] == "unknown" and d["facts"]["modality"] == "audio"
+
+
+def test_an_unreadable_nearest_model_config_is_unknown_and_names_the_nearest_model(audio_case):
+    stage = audio_case()
+    cfg = json.loads((stage / "triage_config.json").read_text())
+    (Path(cfg["nearest_snapshot"]) / "model_config.json").write_text("not json")
+    d = run_ok(stage)
+    assert d["class"] == "unknown" and "nearest model" in reasons(d) and d["facts"]["modality"] == "audio"
+
+
+def test_a_snapshot_with_a_config_json_is_never_an_audio_candidate(tmp_path):
+    snap = make_audio(tmp_path, MODEL_REV, repo=MODEL_ID, extra={"config.json": "{}"})
+    (snap / "model_config.json").write_text("not json")
+    assert template_module().looks_like_audio(snap) is False
+
+
+@pytest.mark.parametrize("make,expected", [("none", False), ("file", True), ("dir", True)])
+def test_looks_like_audio_needs_a_model_config_entry_and_no_config_json(tmp_path, make, expected):
+    snap = tmp_path / "s"
+    snap.mkdir()
+    if make == "file":
+        (snap / "model_config.json").write_text("not json")
+    elif make == "dir":
+        (snap / "model_config.json").mkdir()
+    assert template_module().looks_like_audio(snap) is expected
+
+
+def test_the_unknown_audio_result_stops_the_supervisor_run_because_it_records_the_facts(audio_case):
+    stage = audio_case()
+    (model_snapshot(stage) / "model_config.json").write_text("not json")
+    run_ok(stage)
+    d = json.loads((stage / "delta.json").read_text())
+    from orchard.stages import delta_facts
+    assert delta_facts(stage.parent.parent) == {"form": "full", "modality": "audio"} and d["class"] == "unknown"
+
+
+# ---- one descriptor per file: header and size from the same open ---------------------------------------------
+
+def test_a_header_and_its_size_come_from_one_open_file(tmp_path, monkeypatch):
+    snap = make_audio(tmp_path, MODEL_REV, repo=MODEL_ID)
+    mod = template_module()
+    real_stat = Path.stat
+
+    def stat_guard(self, *a, **k):
+        if self.name.endswith((".safetensors", ".json")):
+            raise AssertionError(f"{self.name} was looked at by name")
+        return real_stat(self, *a, **k)
+    monkeypatch.setattr(Path, "stat", stat_guard)
+    assert mod.audio_header(snap / "model.safetensors")
+    assert mod._audio_json(snap / "model_config.json")[1] is None
+
+
+def test_a_config_is_read_with_one_open_and_no_second_look_at_the_name(tmp_path, monkeypatch):
+    snap = make_audio(tmp_path, MODEL_REV, repo=MODEL_ID)
+    mod = template_module()
+    monkeypatch.setattr(Path, "read_text", lambda *a, **k: (_ for _ in ()).throw(AssertionError("read_text by name")))
+    assert mod._audio_json(snap / "model_config.json")[1] is None
+
+
+def test_a_fifo_is_not_a_regular_file_and_is_not_opened_for_reading(tmp_path):
+    import os
+    snap = make_audio(tmp_path, MODEL_REV, repo=MODEL_ID)
+    (snap / "model_config.json").unlink()
+    os.mkfifo(snap / "model_config.json")
+    data, err = template_module()._audio_json(snap / "model_config.json")
+    assert data is None and "not a regular file" in err
+
+
+def test_a_file_that_changes_after_it_was_read_is_reported(tmp_path):
+    snap = make_audio(tmp_path, MODEL_REV, repo=MODEL_ID)
+    mod = template_module()
+    mod.audio_identity_reset()
+    mod.audio_tensors(snap)
+    mod._audio_json(snap / "model_config.json")
+    assert mod.audio_identity_problems() == []
+    write_safetensors(snap / "model.safetensors", TENSORS, 9.0)          # same size, new inode and time
+    problems = mod.audio_identity_problems()
+    assert problems and "model.safetensors" in problems[0] and "changed while" in problems[0]
+
+
+def test_a_file_that_was_removed_after_it_was_read_is_reported(tmp_path):
+    snap = make_audio(tmp_path, MODEL_REV, repo=MODEL_ID)
+    mod = template_module()
+    mod.audio_identity_reset()
+    mod._audio_json(snap / "model_config.json")
+    (snap / "model_config.json").unlink()
+    assert "model_config.json" in mod.audio_identity_problems()[0]
+
+
+def test_the_run_is_unknown_when_a_file_changes_while_stage_0_runs(audio_case, monkeypatch):
+    stage = audio_case()
+    model = model_snapshot(stage)
+    mod = template_module()
+    mod.audio_identity_reset()
+    mod.audio_tensors(model)
+    write_safetensors(model / "model.safetensors", TENSORS, 9.0)
+    assert mod.audio_identity_problems()
+
+
+def test_a_new_model_with_a_bad_layout_is_reported_once_whatever_its_weights_look_like(audio_case):
+    """The layout problem is the finding. The weights of a directory already refused as a layout are not read, so they add no second reason."""
+    stage = audio_case()
+    snap = model_snapshot(stage)
+    (snap / "model_config.json").write_text("{}")
+    write_header_only(snap / "model.safetensors", {})
+    d = run_ok(stage)
+    text = reasons(d)
+    assert d["class"] == "unknown" and "not a usable stable-audio-tools layout" in text and "holds no tensors" not in text
+    (snap / "model.safetensors").write_bytes(b"\xff" * 16)
+    text = reasons(run_ok(stage))
+    assert "not a usable stable-audio-tools layout" in text and "new model model.safetensors" not in text
+
+
+def test_a_new_model_with_a_bad_layout_and_no_weights_file_is_reported_once(audio_case):
+    stage = audio_case()
+    snap = model_snapshot(stage)
+    (snap / "model_config.json").write_text("{}")
+    (snap / "model.safetensors").unlink()
+    text = reasons(run_ok(stage))
+    assert "not a usable stable-audio-tools layout" in text and "holds no tensors" not in text
+
+
+def test_a_dangling_config_json_link_keeps_a_snapshot_out_of_the_audio_branch(tmp_path):
+    """A top-level config.json that exists as a name (here a dangling link) marks a text model; looks_like_audio must not use a following check."""
+    snap = make_audio(tmp_path, MODEL_REV, repo=MODEL_ID)
+    (snap / "config.json").symlink_to(tmp_path / "nowhere")
+    assert template_module().looks_like_audio(snap) is False

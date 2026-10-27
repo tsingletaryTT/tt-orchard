@@ -190,3 +190,42 @@ def test_a_file_opened_as_a_directory_without_following_links_says_it_is_not_a_d
             pf.open_dir("f", dir_fd=fd, follow=False)
     finally:
         os.close(fd)
+
+
+def test_a_file_that_grows_past_the_limit_while_it_is_hashed_is_refused(d, monkeypatch):
+    """The size reported up front says the file fits; the counted read still stops it."""
+    from types import SimpleNamespace
+    path, fd = d
+    (path / "a.bin").write_bytes(b"x" * 50)
+    real = os.fstat
+    monkeypatch.setattr(pf.os, "fstat", lambda f: SimpleNamespace(st_mode=real(f).st_mode, st_size=0))
+    with pytest.raises(pf.PinnedError, match="larger than 10"):
+        pf.sha256_regular(fd, "a.bin", 10)
+
+
+@pytest.mark.parametrize("tmp,final", [("a/b", "final"), ("tmp1", "a/b"), ("", "final"), ("tmp1", ".."), ("tmp1", 3)])
+def test_publishing_takes_plain_names_only(d, tmp, final):
+    path, fd = d
+    (path / "tmp1").write_bytes(b"x")
+    with pytest.raises(pf.PinnedError, match="plain file name"):
+        pf.publish_no_replace(fd, tmp, final)
+
+
+def test_the_already_exists_message_names_the_final_file_and_a_missing_temporary_file_names_itself(d):
+    path, fd = d
+    (path / "tmp1").write_bytes(b"x")
+    (path / "final").write_bytes(b"old")
+    with pytest.raises(pf.PinnedError) as e:
+        pf.publish_no_replace(fd, "tmp1", "final")
+    assert str(e.value).startswith("final ")
+    with pytest.raises(pf.PinnedError) as e:
+        pf.publish_no_replace(fd, "gone-tmp", "other")
+    assert str(e.value).startswith("gone-tmp ")
+
+
+def test_unlink_quietly_removes_a_file_and_ignores_a_missing_one(d):
+    path, fd = d
+    (path / "x").write_bytes(b"x")
+    pf.unlink_quietly(fd, "x")
+    assert not (path / "x").exists()
+    pf.unlink_quietly(fd, "x")

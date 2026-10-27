@@ -655,3 +655,196 @@ def test_a_directory_that_cannot_hold_a_lock_file_is_a_failed_step_not_an_except
     env.src_dir = (blocker / "src").resolve()
     results = ae.ensure(env, check_only=False)
     assert results[0].status == ae.FAIL and results[0].name == "lock"
+
+
+# ---- round five: descriptor-anchored reads and writes in the environment module --------------------------------
+
+def test_the_record_is_read_through_the_venv_directory_descriptor_and_a_link_is_not_followed(env, tmp_path):
+    ae.ensure(env, check_only=False)
+    good = ae.read_record(env)
+    assert good and good["library_commit"] == PIN
+    rec = env.venv_dir / ae.RECORD
+    real = tmp_path / "elsewhere.json"
+    real.write_text(rec.read_text())
+    rec.unlink()
+    rec.symlink_to(real)
+    assert ae.read_record(env) is None
+
+
+def test_an_oversized_or_malformed_record_is_ignored(env):
+    ae.ensure(env, check_only=False)
+    rec = env.venv_dir / ae.RECORD
+    rec.write_text("x" * (2 << 20))
+    assert ae.read_record(env) is None
+    rec.write_text("[]")
+    assert ae.read_record(env) is None
+    rec.write_text('{"a": 1, "a": 2}')
+    assert ae.read_record(env) is None
+
+
+def test_the_record_is_written_without_following_a_link_at_its_name(env, tmp_path):
+    ae.ensure(env, check_only=False)
+    rec = env.venv_dir / ae.RECORD
+    target = tmp_path / "must-not-be-written"
+    rec.unlink()
+    rec.symlink_to(target)
+    results = ae.ensure(env, check_only=False)
+    assert statuses(results)["record"] == ae.OK and not target.exists()
+    assert not rec.is_symlink() and json.loads(rec.read_text())["library_commit"] == PIN
+
+
+def test_a_record_write_leaves_no_temporary_file(env):
+    ae.ensure(env, check_only=False)
+    assert not [p for p in env.venv_dir.iterdir() if p.name.endswith(".tmp")]
+
+
+def test_a_lock_file_that_is_a_link_is_refused_and_not_followed(env, tmp_path):
+    first, _ = ae.lock_paths(env)
+    first.parent.mkdir(parents=True, exist_ok=True)
+    target = tmp_path / "lock-target"
+    first.symlink_to(target)
+    results = ae.ensure(env, check_only=False)
+    assert results[0].status == ae.FAIL and results[0].name == "lock" and "link" in results[0].detail
+    assert not target.exists() and env.run.calls == []
+
+
+def test_a_lock_file_that_is_not_a_regular_file_is_refused(env):
+    first, _ = ae.lock_paths(env)
+    first.mkdir(parents=True)
+    results = ae.ensure(env, check_only=False)
+    assert results[0].status == ae.FAIL and results[0].name == "lock"
+
+
+def test_the_source_directory_replaced_during_the_build_fails_the_identity_rule(env, tmp_path):
+    real = env.run
+
+    def run(argv, timeout, e=None):
+        if argv[:3] == ["uv", "pip", "install"] and "-e" in argv:
+            env.src_dir.rename(tmp_path / "moved-away")
+            (env.src_dir / ".git").mkdir(parents=True)
+        return real(argv, timeout, e)
+    env.run = run
+    results = ae.ensure(env, check_only=False)
+    assert statuses(results)["source-identity"] == ae.FAIL and "replaced" in [r for r in results if r.name == "source-identity"][0].detail
+    assert statuses(results)["record"] == ae.FAIL and not (env.venv_dir / ae.RECORD).exists()
+
+
+def test_the_git_directory_replaced_during_the_build_fails_the_identity_rule(env, tmp_path):
+    real = env.run
+
+    def run(argv, timeout, e=None):
+        if argv[:3] == ["uv", "pip", "install"] and "-e" in argv:
+            (env.src_dir / ".git").rename(tmp_path / "old-git")
+            (env.src_dir / ".git").mkdir()
+        return real(argv, timeout, e)
+    env.run = run
+    assert statuses(ae.ensure(env, check_only=False))["source-identity"] == ae.FAIL
+
+
+def test_an_untouched_source_directory_passes_the_identity_rule_in_build_and_check_mode(env):
+    assert statuses(ae.ensure(env, check_only=False))["source-identity"] == ae.OK
+    assert statuses(ae.ensure(env, check_only=True))["source-identity"] == ae.OK
+
+
+def test_no_identity_rule_runs_when_the_source_step_failed(env):
+    env.src_dir.mkdir(parents=True)
+    (env.src_dir / "file").write_text("x")
+    assert "source-identity" not in statuses(ae.ensure(env, check_only=False))
+
+
+# ---- descriptor anchoring: the record, the locks and the identity ---------------------------------------
+
+def _fds():
+    import os
+    return {int(n) for n in os.listdir("/proc/self/fd")}
+
+
+GOOD_RECORD = {"library_commit": "x", "k": 1}
+
+
+def test_a_record_inside_a_venv_directory_that_is_a_link_is_not_read(env, tmp_path):
+    real = tmp_path / "real-venv"
+    real.mkdir()
+    (real / ae.RECORD).write_text(json.dumps(GOOD_RECORD))
+    env.venv_dir.parent.mkdir(parents=True, exist_ok=True)
+    env.venv_dir.symlink_to(real)
+    assert ae.read_record(env) is None
+
+
+def test_reading_a_record_closes_what_it_opened(env):
+    env.venv_dir.mkdir(parents=True)
+    (env.venv_dir / ae.RECORD).write_text(json.dumps(GOOD_RECORD))
+    before = _fds()
+    assert ae.read_record(env) == GOOD_RECORD
+    (env.venv_dir / ae.RECORD).write_text("not json")
+    assert ae.read_record(env) is None
+    assert _fds() <= before
+
+
+def test_writing_a_record_replaces_a_stale_temporary_file(env):
+    env.venv_dir.mkdir(parents=True)
+    (env.venv_dir / f".{ae.RECORD}.tmp").write_text("stale")
+    ae.write_record(env, GOOD_RECORD)
+    assert json.loads((env.venv_dir / ae.RECORD).read_text()) == GOOD_RECORD
+    assert not (env.venv_dir / f".{ae.RECORD}.tmp").exists()
+
+
+def test_a_temporary_record_name_that_appears_after_the_cleanup_is_not_followed(env, tmp_path, monkeypatch):
+    """The stale-file cleanup runs first. A link planted right after it must still not be written through."""
+    env.venv_dir.mkdir(parents=True)
+    victim = tmp_path / "victim"
+    victim.write_text("keep me")
+    real = ae.pf.unlink_quietly
+    state = []
+
+    def unlink_then_plant(fd, name):
+        real(fd, name)
+        if not state:
+            state.append(1)
+            (env.venv_dir / name).symlink_to(victim)
+    monkeypatch.setattr(ae.pf, "unlink_quietly", unlink_then_plant)
+    with pytest.raises(ae.pf.PinnedError):
+        ae.write_record(env, GOOD_RECORD)
+    assert victim.read_text() == "keep me"
+
+
+def test_a_record_that_cannot_be_written_leaves_no_temporary_file_and_no_open_descriptor(env):
+    env.venv_dir.mkdir(parents=True)
+    before = _fds()
+    with pytest.raises(TypeError):
+        ae.write_record(env, {"x": object()})
+    assert not (env.venv_dir / f".{ae.RECORD}.tmp").exists()
+    assert _fds() <= before
+
+
+def test_a_record_that_cannot_be_written_fails_the_record_step_with_the_reason(env):
+    env.venv_dir.mkdir(parents=True)
+    (env.venv_dir / ae.RECORD).mkdir()                 # a directory where the file goes: the rename fails
+    r = ae.step_record(env, check_only=False, upstream_ok=True)
+    assert r.status == ae.FAIL and "could not write" in r.detail
+
+
+def test_a_lock_file_that_is_a_link_says_it_is_a_link(env, tmp_path):
+    first, _ = ae.lock_paths(env)
+    first.parent.mkdir(parents=True, exist_ok=True)
+    first.symlink_to(tmp_path / "nowhere")
+    results = ae.ensure(env, check_only=False)
+    assert "is a link" in results[0].detail
+
+
+def test_a_lock_file_that_is_a_fifo_is_refused_as_not_regular(env):
+    import os
+    first, _ = ae.lock_paths(env)
+    first.parent.mkdir(parents=True, exist_ok=True)
+    os.mkfifo(first)
+    results = ae.ensure(env, check_only=False)
+    assert results[0].name == "lock" and "not a regular file" in results[0].detail
+
+
+def test_the_source_identity_is_missing_when_either_directory_is_missing(env):
+    assert ae.source_identity(env) is None
+    env.src_dir.mkdir(parents=True)
+    assert ae.source_identity(env) is None
+    (env.src_dir / ".git").mkdir()
+    ident = ae.source_identity(env)
+    assert ident is not None and len(ident) == 4 and ident[1] != 0 and ident[3] != 0 and ident[1] != ident[3]
