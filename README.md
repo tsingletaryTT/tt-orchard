@@ -553,7 +553,7 @@ tests run and who uses which model, and ends with **Save**.
 The **Style** switch in the top bar sets the page style. It is a small labelled pair, apart from the view tabs, because it
 changes how the whole page looks and no view. Beside it a chip says how many chips are free (and whether the coder is
 up) and opens the Machine view, so the machine's state is on screen without scrolling the run list. **Operator** is the default; **Playful** is the farm look described above. **Operator**
-is the same page, plain: system type, no orchard scene, and the run in two panes. On the left, a colour band that
+is the same page, plain: system type, no orchard scene, the run list as a table (state, model, stage, age; arrow keys move the selection), and the run in two panes. On the left, a colour band that
 states the run's state in its real name (the only large block of colour on the page, pulsing while the run
 works), then what it is doing now and what to do next. On the right, the stages and the live feed, ledger, files
 and details. Orchard names and icons give way to the real stage and state names (the first tab reads **Runs**). A small fixed set of emoji

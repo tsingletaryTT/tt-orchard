@@ -651,3 +651,41 @@ html[data-mode="operator"] #verdict h2 { font-size: .8rem; letter-spacing: .08em
 /* a run's actions: Abort stands apart from the routine ones, and the Blocked panel's own Retry sits under the steps it follows */
 .actions .btn-apart { margin-left: 18px; }
 #block-retry { margin-top: 12px; }
+
+/* ---- the run list as a table (Operator style only; Playful keeps the list above) ---- */
+.runs-table-wrap { display: none; }
+html[data-mode="operator"] .runs-table-wrap { display: block; container-type: inline-size; }
+html[data-mode="operator"] #runs { display: none; }
+@media (min-width: 901px) {
+  html[data-mode="operator"] body:not(.wide) .sheet { grid-template-columns: 360px minmax(0, 1fr); }
+}
+#runs-table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: .84rem; }
+#runs-table col.k-state { width: 6.8rem; }
+#runs-table col.k-stage { width: 2.9rem; }
+#runs-table col.k-age { width: 3.7rem; }
+#runs-table th { text-align: left; font: 700 .7rem var(--font); letter-spacing: .08em; text-transform: uppercase; color: var(--muted);
+  padding: 4px 6px; border-bottom: 2px solid var(--line); }
+#runs-table td { padding: 6px; border-bottom: 1px solid var(--line); vertical-align: middle; overflow: hidden; }
+#runs-table tbody tr { cursor: pointer; }
+#runs-table tbody tr:hover { background: var(--paper-2); }
+#runs-table tr[aria-selected="true"] { background: var(--paper-3); box-shadow: inset 5px 0 0 var(--title); }
+#runs-table tbody tr:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+#runs-table .c-model { font-weight: 650; overflow-wrap: anywhere; user-select: text; }
+#runs-table .c-model-text { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; }
+#runs-table .c-dir { display: block; font-weight: 400; font-size: .7rem; color: var(--muted); overflow-wrap: anywhere; user-select: text; }
+#runs-table .badge { font-size: .66rem; padding: 1px 4px; gap: 3px; }
+#runs-table .badge .name { letter-spacing: 0; }
+#runs-table .badge .op-pic { margin-right: 0; }
+#runs-table .c-stage-n { font-variant-numeric: tabular-nums; font-weight: 700; margin-right: 4px; }
+#runs-table .c-bar { display: block; height: 4px; margin-top: 3px; background: var(--line); border-radius: 2px; overflow: hidden; }
+#runs-table .c-bar > span { display: block; height: 100%; background: var(--accent); }
+#runs-table .c-age { color: var(--muted); font-size: .76rem; }
+#runs-table .c-empty { padding: 12px 6px; }
+/* when the box is narrow, the age column goes first and then the stage bar, so the table never scrolls sideways */
+@container (max-width: 300px) {
+  #runs-table col.k-age, #runs-table .c-age { display: none; }
+}
+@container (max-width: 240px) {
+  #runs-table .c-bar { display: none; }
+  #runs-table col.k-state { width: 5.6rem; }
+}
