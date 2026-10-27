@@ -382,6 +382,11 @@ def card_evidence_paths(card: str) -> list[str]:
     cited = re.search(r"In the runs recorded in `([^`]+)` the tool-use prompts", " ".join(intended.split()))
     if cited and cited.group(1) not in seen:
         seen.append(cited.group(1))
+    # The Sampling section's sentence cites the sampling decision, which the package ships (its warnings point readers to it).
+    sampling_body, _ = _section(card, SAMPLING_HEAD)
+    decision = re.search(r"are in `evidence/(" + re.escape(sampling_choice.DECISION_PATH) + r")`", " ".join(sampling_body.split()))
+    if decision and decision.group(1) not in seen:
+        seen.append(decision.group(1))
     return seen
 
 

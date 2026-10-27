@@ -24,6 +24,7 @@ from pathlib import Path
 from orchard import defaults, sampling_probe
 
 DECISION_FILE = "sampling-decision.json"      # in stages/2/
+DECISION_PATH = "stages/2/" + DECISION_FILE   # run-relative; the package ships a scrubbed copy at evidence/<this>
 TRIAL_DIR = "sampling-trial"                  # in stages/2/
 TRIAL_RESULT = "trial-result.json"            # in TRIAL_DIR, written by the template script
 GRAFT_TRIAL_DIR = "graft-trial"               # the grafted variant's own swap check, read for its sampling verdict
@@ -267,12 +268,12 @@ def card_sentence(decision: dict) -> str:
         s = f"Stage 2 kept the configuration it served. The model needs sampling ({why})."
     if decision.get("choice") == "keep" and flag == "no-variant-serves-purpose":
         s += (" This package does not do what the model needs: no configuration that stage 2 measured both applies sampling and decodes above the "
-              "usability floor, so the faster one is kept. Read `sampling-decision.json` in the evidence before relying on it.")
+              "usability floor, so the faster one is kept. Read the decision file before relying on it.")
     elif flag == "below-floor":
-        s += " This package applies sampling but decodes below the usability floor. Read `sampling-decision.json` in the evidence before relying on it."
+        s += " This package applies sampling but decodes below the usability floor. Read the decision file before relying on it."
     elif flag in ("unverified", "variant-not-tried"):
-        s += " This choice is not fully verified: a verdict or a speed was not measured. `sampling-decision.json` in the evidence says which."
-    return s
+        s += " This choice is not fully verified: a verdict or a speed was not measured. The decision file says which."
+    return s + f" The decision and the numbers behind it are in `evidence/{DECISION_PATH}`."
 
 
 # ---- the files -----------------------------------------------------------------------------------------------------------------------
