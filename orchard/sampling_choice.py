@@ -33,6 +33,10 @@ CHOICES = ("keep", "drafter-off")
 FLAGS = ("below-floor", "no-variant-serves-purpose", "unverified", "variant-not-tried")
 APPLIED = ("sampled-full-speed", "sampled-slower")          # the verdicts that show sampling is applied
 BAD = ("sampled-ignored", "sampled-refused", "sampled-incoherent", "greedy-refused")   # the verdicts that show it is not
+# The probe's suspicion: sampled replies equal the greedy text or each other, with no high-temperature request that confirms it. That fits ignored sampling
+# and also correct sampling where one token is eligible at every step. For a model that needs sampling it is treated like `sampled-ignored` for the choice
+# (try the drafter-off variant; trusting it wrongly ships a greedy-only server), and every record says it is suspected and not confirmed.
+SUSPECT = ("sampled-matches-greedy",)
 CARD_MARKERS = {"keep": "kept the configuration it served", "drafter-off": "chose the drafter-off configuration"}
 
 
@@ -200,6 +204,7 @@ def decide(need_: dict, current: dict, variant: dict | None = None, *, variant_n
     # Sampling is needed and the served configuration does not show that it applies it.
     measured_bad = verdict in BAD
     why_current = ("ignores sampling (the probe's verdict is sampled-ignored)" if verdict == "sampled-ignored" else
+                   "may not apply sampling: the probe's verdict is sampled-matches-greedy (suspected, not confirmed)" if verdict in SUSPECT else
                    f"does not apply sampling (the probe's verdict is {verdict})" if measured_bad else
                    f"has no usable sampling verdict (the probe's verdict is {verdict})")
     if current.get("drafter") != "on":
@@ -236,7 +241,7 @@ def decide(need_: dict, current: dict, variant: dict | None = None, *, variant_n
     if var_speed is not None and var_speed < floor:
         return neither(f"the served configuration {why_current} ({_fmt(cur_speed)}), and the drafter-off variant decodes at {_fmt(var_speed)}, "
                        f"below the floor of {floor:g} tokens/s")
-    verified = measured_bad and v_verdict in APPLIED and var_speed is not None
+    verified = (measured_bad or verdict in SUSPECT) and v_verdict in APPLIED and var_speed is not None
     flag = None if verified else "unverified"
     served = f"the served configuration {why_current}" + (f" at {_fmt(cur_speed)}" if cur_speed is not None else "")
     if v_verdict in APPLIED and var_speed is not None:
@@ -260,6 +265,8 @@ def served_clause(verdict) -> str:
     """What the probe established about the configuration stage 2 first served, as a clause for the card (no number): it ignored sampled requests, did
     not apply sampling, or has no usable sampling verdict. Only `sampled-ignored` says the drafter ignored sampling."""
     return ("ignored sampled requests" if verdict == "sampled-ignored" else
+            "gave sampled replies equal to the greedy text or to each other, which suggests sampling was not applied (suspected, not confirmed)"
+            if verdict in SUSPECT else
             "did not apply sampling" if verdict in BAD else "has no usable sampling verdict")
 
 

@@ -638,6 +638,10 @@ def sampling_choice_section(run: Run, redact: Redactor) -> list[str]:
              + f"{reason}.", "",
              f"Sampling needed: {'yes' if d.get('needed') else 'no'} ({redact(str(d.get('need_source')))}; override {redact(str(d.get('override')))}).",
              *[f"- {w}" for w in why]]
+    if nums.get("served_verdict") == "sampled-matches-greedy":
+        lines += ["", "The probe's verdict for the configuration stage 2 first served is `sampled-matches-greedy`: suspected, not confirmed. Its sampled replies "
+                      "equal the greedy text or each other, which fits sampling not being applied and also happens when one token is eligible at every "
+                      "step. The choice treats it like ignored sampling and tries the drafter-off variant."]
     if d.get("flag"):
         lines += ["", f"Flag: `{redact(str(d['flag']))}`. " + SAMPLING_FLAG_RISKS.get(d["flag"], "")]
     where = ev(["stages/2/sampling-decision.json"])

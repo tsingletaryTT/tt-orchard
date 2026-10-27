@@ -2545,3 +2545,11 @@ Three more findings, all real; each reproduced by a failing test first, one comm
 - Merged `origin/sampling-107` again (its validator for the sampled parameters, the acceptance check); verdict names are unchanged.
 
 - After the merge, a run whose graft was chosen but whose graft variant holds no sampling probe is read from stage 2's own swap check (PR 109's acceptance-source tests need it); a variant with a probe that ran is still read from the variant. 4 mutations, all red.
+
+## 2026-10-27 (UTC): the probe's `sampled-matches-greedy` verdict in the sampling choice (issue 107, branch `sampling-choice`, version 0.9.20)
+PR 109's probe now says `sampled-ignored` only when a fourth request at temperature 2.0 also returns the greedy text; sampled replies that equal the greedy text or each other without it give `sampled-matches-greedy` (suspected, not confirmed). The 2026-10-27 hardware records have no hot request, so they now read that way.
+- The choice treats it like `sampled-ignored`: for a model that needs sampling the drafter-off variant is tried (`sampling_choice.SUSPECT`), because trusting it wrongly ships a greedy-only server. A good variant after it is a verified choice with no flag. With no variant, or a variant that failed, the flag is `unverified`, not `no-variant-serves-purpose`, because the failure of the first configuration is not established.
+- Every record says suspected, not confirmed: the decision's reason, the card sentence and its bullet (`served_clause`), and a line in the stage 8 bundle. None says the drafter ignored sampled requests; only `sampled-ignored` does.
+- The gate recomputation needed no change (the verdict is read from the raw requests). My test fixtures now carry the hot request when they mean `sampled-ignored`.
+- Mutations: 12 (one no-op mutant removed from the count; two bundle survivors got a stricter assertion); all red.
+- Merged `origin/sampling-107` again.

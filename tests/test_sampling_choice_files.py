@@ -19,23 +19,27 @@ def req(text, seconds, params=None):
             "finish_reason": "length", "drafter_log": ""}
 
 
-def probe(ignored: bool, seconds=2.0):
-    """A sampling probe record: ignored means every sampled request returned the greedy text."""
+def probe(ignored: bool, seconds=2.0, hot=True):
+    """A sampling probe record: ignored means every sampled request returned the greedy text. `hot` adds the fourth request (temperature 2.0, top-p 0.99,
+    seed 2468) that confirms it; a record without it reads as `sampled-matches-greedy` (suspected, not confirmed)."""
     a, b = (GREEDY, GREEDY) if ignored else (STORY, OTHER)
-    return {"ran": True, "prompt": "p", "max_tokens": 96,
-            "requests": {"greedy": req(GREEDY, seconds, {"temperature": 0}),
-                         "sampled_a": req(a, seconds, {"temperature": 1.0, "top_p": 0.9, "seed": 1234}),
-                         "sampled_b": req(b, seconds, {"temperature": 1.0, "top_p": 0.9, "seed": 4321})}}
+    rec = {"ran": True, "prompt": "p", "max_tokens": 96,
+           "requests": {"greedy": req(GREEDY, seconds, {"temperature": 0}),
+                        "sampled_a": req(a, seconds, {"temperature": 1.0, "top_p": 0.9, "seed": 1234}),
+                        "sampled_b": req(b, seconds, {"temperature": 1.0, "top_p": 0.9, "seed": 4321})}}
+    if ignored and hot:
+        rec["requests"]["sampled_hot"] = req(GREEDY, seconds, {"temperature": 2.0, "top_p": 0.99, "seed": 2468})
+    return rec
 
 
 HEALTHY_DRAFT = {"serves": True, "coherent": True, "top1_agreement": 0.96875, "n_tokens": 32, "server_ready_s": 120.0}
 
 
-def report(drafter="on (dflash2)", ignored=True, seconds=2.0, serves=True, with_probe=True, draft=None):
+def report(drafter="on (dflash2)", ignored=True, seconds=2.0, serves=True, with_probe=True, draft=None, hot=True):
     """A swap check: a healthy result_draft (the variant is admitted only when its own swap checks pass) and a sampling probe."""
     r = {"serving": {"drafter": drafter, "sampling": "host"}, "result_draft": {**HEALTHY_DRAFT, "serves": serves, **(draft or {})}}
     if with_probe:
-        r["sampling_probe"] = probe(ignored, seconds)
+        r["sampling_probe"] = probe(ignored, seconds, hot)
     return r
 
 
