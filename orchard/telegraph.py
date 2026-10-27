@@ -50,7 +50,7 @@ LOCK = "telegraph.lock"
 REQUEST_FRAMING_TOKENS = 32      # added to the request size for the provider's message framing
 KEYS = {"enabled", "endpoint", "models", "api", "key_env", "key_file", "after_failures", "max_calls",
         "max_total_tokens", "max_cost_usd", "prices", "max_output_tokens", "max_prompt_chars", "timeout_s",
-        "extra_body", "max_calls_per_problem", "max_tokens_per_problem", "max_cost_per_problem_usd"}
+        "extra_body", "max_calls_per_problem", "max_tokens_per_problem", "max_cost_per_problem_usd", "dir"}
 UNPRICED_BODY = ("tools", "tool_choice", "web_search_options", "plugins")
 RESERVED_BODY = ("model", "messages", "max_tokens", "temperature", "system", "stream", "stream_options", "n", "best_of")
 APIS = ("openai", "anthropic")
@@ -90,6 +90,7 @@ class Config:
     max_calls_per_problem: int = 3                      # one problem (the id the caller passes) may not use more than this
     max_tokens_per_problem: int | None = None
     max_cost_per_problem_usd: float | None = None
+    dir: Path | None = None                             # where the ledger, cache and reply files live (None: the default)
 
 
 def _int(table: dict, key: str, default: int, lowest: int) -> int:
@@ -110,6 +111,10 @@ def _http_ok(host: str) -> bool:
         return False
     return addr.is_loopback or addr.is_private
 
+
+def _dir(value: str, base: Path) -> Path:
+    path = Path(value).expanduser()
+    return path if path.is_absolute() else Path(base) / path
 
 def _plain_json(value, where: str, depth: int = 0) -> None:
     """Raise ConfigError unless `value` is plain JSON data: strings, finite numbers, booleans, null, lists, and tables with string
@@ -163,7 +168,9 @@ def load(table: dict | None, *, base: Path) -> Config:
     if not isinstance(enabled, bool):
         raise ConfigError("telegraph.enabled must be true or false")
     if not enabled:
-        return Config()
+        # Off: nothing else is checked, but a usable `dir` is kept so the web page can still show what was spent before.
+        off_dir = table.get("dir")
+        return Config(dir=_dir(off_dir, base) if isinstance(off_dir, str) and off_dir else None)
     for key in table:
         if key not in KEYS:
             near = difflib.get_close_matches(key, sorted(KEYS), n=1)
@@ -238,7 +245,11 @@ def load(table: dict | None, *, base: Path) -> Config:
     for name in RESERVED_BODY:
         if name in extra:
             raise ConfigError(f"telegraph.extra_body cannot set {name}; telegraph sets it")
+    directory = table.get("dir")
+    if "dir" in table and (not isinstance(directory, str) or not directory):
+        raise ConfigError("telegraph.dir must be a directory path")
     return Config(
+        dir=_dir(directory, base) if directory else None,
         enabled=True, endpoint=endpoint.rstrip("/"), models=tuple(models), api=api, key_env=key_env or None,
         key_file=key_file or None, after_failures=_int(table, "after_failures", 2, 1),
         max_calls=_int(table, "max_calls", 5, 0), max_total_tokens=_int(table, "max_total_tokens", 40000, 0),
@@ -396,6 +407,9 @@ def _parse_ledger(text: str) -> list[dict]:
     return out
 
 
+read_ledger = _read_ledger            # public names for the web page (orchard/telegraph_view.py)
+
+
 def _sent(rec: dict) -> bool:
     """A record of a request that was sent (answered or failed), not a refusal or a cache hit."""
     return "call_id" in rec and not rec.get("cached") and rec.get("outcome") in ("ok", "error")
@@ -437,9 +451,16 @@ def _accounting(recs: list[dict]) -> dict:
     return total
 
 
+accounting = _accounting
+
+
 def summarise(directory) -> dict:
     """What the help cost and bought: counts, tokens, cost (known calls only), and per model and problem."""
-    recs = _read_ledger(Path(directory))
+    return summarise_records(_read_ledger(Path(directory)))
+
+
+def summarise_records(recs: list[dict]) -> dict:
+    """`summarise` for records that were already read, so one snapshot of the ledger can serve the summary and the accounting."""
     calls = [r for r in recs if _sent(r)]
     verdict = {}
     for r in recs:
