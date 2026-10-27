@@ -111,7 +111,7 @@ TEMPLATE_FILES = ("kernel_check.py", "kernel_harness.py", "references.py")
 # Every category an attempt can end in. The check and the harness produce all but `hang`, which the probe sets when
 # the stall watcher kills a hardware run.
 CATEGORIES = ("no_kernel", "import_error", "tt_lang_error", "shape_mismatch", "numeric_mismatch", "timeout",
-              "compile_error", "hang", "hw_numeric_mismatch", "harness_error", "forbidden_code", "queued")
+              "compile_error", "hang", "hw_numeric_mismatch", "harness_error", "forbidden_code", "queued", "sim_gap")
 SMOKE_TAIL_LINES = 20
 
 
@@ -1048,7 +1048,39 @@ def smoke_test(*, env, shared_python, run_watched=run_watched, record: dict | No
     return (got.returncode == 0 and "PASSED!" in text), tail
 
 
+def kernel_reached(text: str, result: dict | None = None) -> bool:
+    """True when the hardware run got as far as the kernel: the harness printed `PROGRESS run <set>` (it prints that
+    after the device is open and the inputs are built, just before it calls the operation), or its result file holds
+    measured sets or an error from the run phase. A gozer failure, a setup failure, a kernel that fails to import and
+    a stop before the harness reached the kernel give no such evidence. `text` is what this run wrote to the log."""
+    if any(line.strip().startswith("PROGRESS run ") for line in text.splitlines()):
+        return True
+    if isinstance(result, dict):
+        err = result.get("error")
+        if isinstance(result.get("sets"), list) and result["sets"]:
+            return True
+        if isinstance(err, dict) and err.get("phase") == "run":
+            return True
+    return False
+
+
+def hw_started(attempt: dict) -> bool:
+    """True when the attempt has a hardware block from a run that started. A block with `started: false` records an
+    attempt that never reached the chip (the checked copy failed a preflight check, or gozer queued the request). A
+    block from before the key existed came from a run."""
+    hw = attempt.get("hw")
+    return isinstance(hw, dict) and hw.get("started") is not False
+
+
+def hardware_only(attempt: dict) -> bool:
+    """True for an attempt the simulator could not judge because it lacks a documented `ttl` function (the check's
+    category `sim_gap`). Such a kernel goes to hardware without a simulator pass, and its hardware result says so."""
+    return attempt.get("passed_sim") is not True and attempt.get("category") == "sim_gap"
+
+
 def _record_hw(adir: Path, attempt: dict, hw: dict) -> dict:
+    if hardware_only(attempt):
+        hw = {**hw, "hardware_only": True}
     attempt["hw"] = hw
     if isinstance(attempt.get("provenance"), dict):
         attempt["provenance"]["hardware_pcc_min"] = hw.get("pcc_min")
@@ -1073,19 +1105,19 @@ def hardware_phase(adir: Path, attempt: dict, *, env, shared_python, run_watched
     check = _template("kernel_check")
     kernel = vdir / CLEAN_DIR / "kernel.py"
     if not kernel.is_file() or kernel.is_symlink():
-        return _record_hw(adir, attempt, {"passed": False, "category": "no_kernel", "pcc_min": None, "sets": [],
+        return _record_hw(adir, attempt, {"passed": False, "started": False, "category": "no_kernel", "pcc_min": None, "sets": [],
                                           "violations": [], "first_line": "the checked copy of kernel.py is missing"})
     violations = check.kernel_source_violations(kernel)
     ok, reason = check.check_kernel_source(kernel)
     if violations or not ok:
         category = "no_kernel" if reason.startswith("no-operation") else "forbidden_code"
         # The same first line the simulator check gives (kernel_check.py strips the gate's "no-operation: " tag).
-        return _record_hw(adir, attempt, {"passed": False, "category": category, "pcc_min": None, "sets": [],
+        return _record_hw(adir, attempt, {"passed": False, "started": False, "category": category, "pcc_min": None, "sets": [],
                                           "violations": violations, "first_line": reason.removeprefix("no-operation: ")})
     recorded = (attempt.get("provenance") or {}).get("kernel_sha256")
     data = _read_regular(kernel, MAX_KERNEL_BYTES)
     if data is None or recorded is None or hashlib.sha256(data).hexdigest() != recorded:
-        return _record_hw(adir, attempt, {"passed": False, "category": "harness_error", "pcc_min": None, "sets": [],
+        return _record_hw(adir, attempt, {"passed": False, "started": False, "category": "harness_error", "pcc_min": None, "sets": [],
                                           "violations": [], "first_line": "the clean kernel copy changed since the "
                                                                           "simulator check; it was not run"})
     out = vdir / "hw-result.json"
@@ -1106,14 +1138,14 @@ def hardware_phase(adir: Path, attempt: dict, *, env, shared_python, run_watched
     if queued is not None:
         # The chips were busy and the kernel never ran: not a failure of the kernel, and the later attempts would be
         # queued too, so the probe stops.
-        _record_hw(adir, attempt, {"passed": False, "category": "queued", "pcc_min": None, "sets": [],
+        _record_hw(adir, attempt, {"passed": False, "started": False, "category": "queued", "pcc_min": None, "sets": [],
                                    "violations": [], "first_line": _queued_text(queued), "queued": queued,
                                    "watch": _watch_facts(got), **extra})
         raise ProbeBlocked(f"{op} attempt {n}: {_queued_text(queued)}")
     if got.killed:
         # The first line is the watcher's own reason ("backstop: ..." or "stalled: ..." or "repeating: ..."), so a
         # watcher stop is not read as a device hang without saying which rule stopped it.
-        _record_hw(adir, attempt, {"passed": False, "category": "hang", "pcc_min": None, "sets": [], "violations": [],
+        _record_hw(adir, attempt, {"passed": False, "started": kernel_reached(_new_text(log, start)), "category": "hang", "pcc_min": None, "sets": [], "violations": [],
                                    "first_line": got.reason, "elapsed_s": round(got.elapsed_s, 1),
                                    "watch": _watch_facts(got), **extra})
         raise ProbeBlocked(f"{op} attempt {n}: {got.reason}")
@@ -1129,7 +1161,8 @@ def hardware_phase(adir: Path, attempt: dict, *, env, shared_python, run_watched
                                     bar=spec["pcc_bar_hw"], phase="hw", bars=check.bars_from_spec(spec, "hw"),
                                     diagnostics_present=None)
     sets = result.get("sets") if result and isinstance(result.get("sets"), list) else []
-    return _record_hw(adir, attempt, {"passed": category is None, "category": category, "first_line": line,
+    return _record_hw(adir, attempt, {"passed": category is None,
+                                      "started": kernel_reached(_new_text(log, start), result), "category": category, "first_line": line,
                                       **set_measures(sets), "sets": sets, "violations": [],
                                       "elapsed_s": round(got.elapsed_s, 1), "watch": _watch_facts(got), **extra})
 
@@ -1153,7 +1186,7 @@ def run_hardware(attempts: list[dict], *, probe_dir, env, shared_python, run_wat
     if not ok:
         return {"available": False, "smoke_tail": tail, "watch": seen.get("watch"), **extra}
     for attempt in attempts:
-        if attempt.get("passed_sim") is True:
+        if attempt.get("passed_sim") is True or hardware_only(attempt):
             adir = Path(probe_dir) / attempt["op"] / f"attempt-{attempt['attempt']}"
             hardware_phase(adir, attempt, env=env, shared_python=shared_python, run_watched=run_watched,
                            cancel=cancel)
@@ -1248,18 +1281,45 @@ def _group_lines(g: dict, rows: list[dict]) -> list[str]:
     """One temperature group of an op: a heading, the attempts table and the distinct-kernel lines."""
     lines = ["", f"### temperature {g['temperature']:g}", "",
              "| attempt | simulator | hardware | status | PCC min (sim) | PCC min (hw) | turns | wall s | category | "
-             "first line | agent check |",
-             "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
+             "first line | agent check | simulator detail |",
+             "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
     for a in sorted(rows, key=lambda a: a["attempt"]):
         h = a.get("hw") if isinstance(a.get("hw"), dict) else None
         category = a.get("category") or (h or {}).get("category")
         first_line = a.get("first_line") if a.get("category") else (h or {}).get("first_line")
+        detail = "-"
+        if h is not None and hardware_only(a):
+            # The simulator could not judge this attempt, so its own category (`sim_gap`) is not the result. The
+            # hardware category and diagnostic are; the simulator's go in their own column.
+            category, first_line = h.get("category"), h.get("first_line")
+            detail = f"{a.get('category')}: {a.get('first_line')}"
         lines.append("| " + " | ".join([
             _cell(a["attempt"]), "yes" if a.get("passed_sim") else "no",
-            "-" if h is None else ("yes" if h.get("passed") else "no"), _status_cell(a),
+            "-" if h is None else (("yes" if h.get("passed") else "no") if hw_started(a) else "not run")
+            + (" (hardware only)" if h.get("hardware_only") else ""),
+            _status_cell(a),
             _pcc_cell(a.get("pcc_min")), _pcc_cell((h or {}).get("pcc_min")), _cell(a.get("turns")),
-            _cell(a.get("agent_wall_s")), _cell(category), _cell(first_line), _agent_cell(a)]) + " |")
+            _cell(a.get("agent_wall_s")), _cell(category), _cell(first_line), _agent_cell(a), _cell(detail)]) + " |")
     return lines + [""] + _distinct_lines(g)
+
+
+def _sim_gap_lines(gap: list[dict]) -> list[str]:
+    """What the report says about attempts the simulator could not judge (category `sim_gap`): a hardware result is
+    the only check they got, and a simulator pass is not claimed for them."""
+    ran = [a for a in gap if hw_started(a)]
+    unrun = len(gap) - len(ran)
+    lines = []
+    if ran:
+        n = len(ran)
+        passed = sum(1 for a in ran if _hw_passed(a))
+        lines.append(f"hardware only: {n} attempt{'s' if n != 1 else ''} ({passed} passed on hardware); the simulator did "
+                     "not check these, because it lacks a ttl function they use. Each result is a hardware result alone.")
+    if unrun:
+        many = unrun != 1
+        lines.append(f"{unrun} attempt{'s' if many else ''} used a ttl function the simulator lacks and "
+                     f"{'were' if many else 'was'} not run on hardware (the probe ran with --phase sim, or stopped first), "
+                     f"so no check judged {'them' if many else 'it'}.")
+    return lines
 
 
 def _bars_text(b: dict) -> str:
@@ -1447,11 +1507,18 @@ def write_report(probe_dir, attempts: list[dict], header: dict) -> dict:
         lines.append("")
         lines.append(f"attempts to first pass in the simulator: {f['sim']}" if f["sim"] is not None
                      else f"none of {len(rows)} attempts passed in the simulator")
-        ran = [a for a in rows if isinstance(a.get("hw"), dict)]
+        ran = [a for a in rows if hw_started(a)]
+        gap = [a for a in rows if hardware_only(a)]
+        if gap:
+            lines += _sim_gap_lines(gap)
+        for a in sorted(rows, key=lambda a: a["attempt"]):
+            h = a.get("hw")
+            if isinstance(h, dict) and h.get("started") is False:
+                lines.append(f"attempt {a['attempt']} was not judged on hardware: {h.get('category')}: {h.get('first_line')}")
         if ran:
             # Count only the attempts that ran on hardware. When the probe stopped early, simulator passes that never
             # reached a chip are said to be left out.
-            left = [a for a in rows if a.get("passed_sim") is True and not isinstance(a.get("hw"), dict)]
+            left = [a for a in rows if a.get("passed_sim") is True and not hw_started(a)]
             count = f"{sum(1 for a in ran if _hw_passed(a))} of {len(ran)} attempts that ran on hardware passed"
             if left and (header.get("stopped") or header.get("blocked")):
                 count += "; the probe stopped before the rest"

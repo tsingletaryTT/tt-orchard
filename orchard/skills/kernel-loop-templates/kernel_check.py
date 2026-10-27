@@ -47,6 +47,12 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 SHAPE_RE = re.compile(r"Tensor shape .*does not match Block shape")
+# Functions of the `ttl` namespace that the tt-lang specification documents and the pinned simulator lacks (it fails
+# with "AttributeError: '_TTLNamespace' object has no attribute '<name>'"). The compiler has them, so a kernel that uses
+# one can only be judged on hardware. The list is closed on purpose: a misspelled name is still the kernel's mistake.
+# tests/test_sim_gap.py checks that each name is in the specification text of the tt-lang checkout.
+SIM_GAP_NAMES = ("raw_element_read", "raw_element_write")
+SIM_GAP_RE = re.compile(r"AttributeError: '_TTLNamespace' object has no attribute '(\w+)'")
 # The harness prints `PROGRESS import` just before it loads kernel.py and `PROGRESS run <set>` just before it calls
 # OPERATION. When one of these is the last marker, the kernel had control when the process ended.
 KERNEL_MARKS = ("PROGRESS import", "PROGRESS run ")
@@ -484,6 +490,12 @@ def numeric_detail(sets: list, bar: float, bars: dict) -> str:
     return line
 
 
+def sim_gap_name(error_text: str) -> str | None:
+    """The documented `ttl` function the simulator lacks, when the recorded error says so; else None."""
+    m = SIM_GAP_RE.search(error_text)
+    return m.group(1) if m and m.group(1) in SIM_GAP_NAMES else None
+
+
 def classify(*, kernel_present, timed_out, returncode, text, result, bar, phase="sim", bars=None,
              diagnostics_present=None):
     """(category or None, first line). None means the kernel passed.
@@ -514,8 +526,13 @@ def classify(*, kernel_present, timed_out, returncode, text, result, bar, phase=
     m = SHAPE_RE.search(blob)
     if m:
         return "shape_mismatch", first_line(blob) or m.group(0)[:200]
+    gap = sim_gap_name((err or {}).get("text") or "") if phase == "sim" else None
+    if gap:
+        # Read from the error the harness recorded, never from the printed text, which the kernel can write.
+        return "sim_gap", (f"the simulator has no ttl.{gap}, which the specification documents; this kernel can be "
+                           "judged only on hardware, where the probe runs it")
     if err or "Deadlock detected" in blob:
-        return runtime, first_line(blob) or ((err or {}).get("text") or "")[:200]
+        return runtime,first_line(blob) or ((err or {}).get("text") or "")[:200]
     if result is None:
         # The last marker says who had control. After `PROGRESS import` or `PROGRESS run <set>` it was the kernel.
         # After `open_device` or `set <name>` it was the harness, building inputs. (A kernel that prints a marker

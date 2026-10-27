@@ -1448,7 +1448,8 @@ it likes. The ops are `add` (a calibration op whose working kernel is upstream's
   Attempts then often repeat each other but are not guaranteed to be identical, so for each op and temperature the
   report counts the distinct kernels and warns when every attempt that wrote a kernel wrote the same one.
 - `--phase hw` takes one chip at a time: each hardware run is a `gozer run` that leases exactly one chip. It first
-  runs a smoke test (upstream's `eltwise_add.py`). When that passes, it runs each attempt that passed the simulator.
+  runs a smoke test (upstream's `eltwise_add.py`). When that passes, it runs each attempt that passed the simulator, and each
+  attempt that ended `sim_gap` (see the next item).
   The lease's release resets the chip; the probe never resets one itself. A hardware run that stops making progress
   is stopped by the stall watcher (SIGTERM to the whole process group first, then SIGKILL after a grace period of
   120 s), the probe stops, and the command exits 5 with the report written for what ran. The grace covers gozer's
@@ -1459,6 +1460,12 @@ it likes. The ops are `add` (a calibration op whose working kernel is upstream's
   CPU use, 20 repeats of one line) are not measured. For the smoke test and each hardware run the report gives the
   longest quiet stretch and the longest repeat the watcher saw, and a stopped run's first line names the rule
   that stopped it (`backstop`, `stalled` or `repeating`).
+- `sim_gap`: the pinned simulator lacks `ttl.raw_element_read` and `ttl.raw_element_write`, which the specification documents
+  (the compiler has them). A kernel whose simulator run fails with `AttributeError: '_TTLNamespace' object has no attribute` and
+  one of those two names ends `FAIL: sim_gap`, and the check line says it can be judged only on hardware. The list of names is closed:
+  a misspelled name stays a `tt_lang_error`. With `--phase hw` the probe runs such a kernel on hardware like any other, from the same
+  checked copy and under the same lease and stall watcher, and the report marks its result `hardware only` and says the simulator did not
+  check it. A hardware-only pass is never counted as a simulator pass. With `--phase sim` these attempts are listed as not judged.
 - Exit 0 means a report was written (`kernel-probe-report.md` and `.json` in the output directory), whatever the
   attempts' results.
 - A run that stops early still writes its report from the attempts that finished, with the reason. An exception
