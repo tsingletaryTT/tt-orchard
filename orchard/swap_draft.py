@@ -24,7 +24,7 @@ from orchard.bringup_config import slug
 from orchard.nearest import read_installed
 
 KEYS = ("run_dir", "bundle_dir", "nearest_model_id", "base_snapshot", "new_snapshot", "new_model_id",
-        "tt_cache", "hf_home", "port", "prompt_suite")
+        "tt_cache", "hf_home", "port", "prompt_suite", "sampling_probe")
 FIRST_PORT = 8100            # the skills' example port; the next free one is used when it is taken
 PORT_TRIES = 100
 
@@ -183,7 +183,8 @@ def draft(*, run_dir, tt_model_root, cache_root, hf_home, inputs: dict, chips: i
         return None, problems
     common = {"run_dir": str(run_dir), "nearest_model_id": want, "base_snapshot": snapshots["base"],
               "new_snapshot": snapshots["model"], "new_model_id": model, "hf_home": str(hf_home), "port": port,
-              "prompt_suite": True}        # the swap test sends the prompt suite too (issue 15)
+              "prompt_suite": True,        # the swap test sends the prompt suite too (issue 15)
+              "sampling_probe": True}      # and the sampling probe (issue 107)
     if pick is not None:
         name = pick["name"].lower().replace("/", "--")
         return {**common, "package": pick["name"], "profile": pick["profile"], "chips": box_chips,
@@ -196,7 +197,7 @@ def draft(*, run_dir, tt_model_root, cache_root, hf_home, inputs: dict, chips: i
 # ---- stage 4: one configuration per chip count --------------------------------------------------------
 
 CONTAINER_KEYS = ("run_dir", "package", "profile", "chips", "nearest_model_id", "base_snapshot", "new_snapshot",
-                  "new_model_id", "tt_cache", "hf_home", "operator_home", "port", "prompt_suite")
+                  "new_model_id", "tt_cache", "hf_home", "operator_home", "port", "prompt_suite", "sampling_probe")
 TEST_DEADLINE_S = 3600
 
 
@@ -238,7 +239,7 @@ def draft_stage4(*, run_dir, tt_model_root, cache_root, hf_home, operator_home, 
     home = Path(cache_root) / slug(_repo(model))
     common = {"run_dir": str(run_dir), "nearest_model_id": want, "base_snapshot": snapshots["base"],
               "new_snapshot": snapshots["model"], "new_model_id": model, "hf_home": str(hf_home),
-              "prompt_suite": True}
+              "prompt_suite": True, "sampling_probe": True}
     bundles = [b for b in read_installed(tt_model_root) if b.weights_repo == want and b.schema == "6"
                and (Path(tt_model_root) / b.name / "run.sh").is_file()]
     containers = [c for c in installed_containers(operator_home) if c["repo"] == want]

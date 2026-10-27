@@ -87,7 +87,8 @@ class Handler(BaseHTTPRequestHandler):
         if cfg["mode"] == "slow":
             time.sleep(float(cfg.get("delay_s", 1)))
         chat = self.path == "/v1/chat/completions"
-        extra = set(req) - (CHAT_ALLOWED_KEYS if chat else ALLOWED_KEYS)
+        allowed = CHAT_ALLOWED_KEYS if chat else ALLOWED_KEYS | ({"top_p", "seed"} if cfg.get("sampling") else set())
+        extra = set(req) - allowed
         if extra:
             self._send(400, json.dumps({"error": f"unsupported keys {sorted(extra)}"}).encode())
             return
@@ -99,6 +100,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         vocab, prompt_ids, gen = cfg["vocab"], cfg["prompt_ids"], cfg["generated_ids"]
         prompt = req["prompt"]
+        if isinstance(prompt, str) and cfg.get("sampling"):
+            self._sampling_probe(req)
+            return
         if isinstance(prompt, str):
             text = next((r for sub, r in cfg.get("text_replies", []) if sub in prompt), cfg.get("text_default", " Paris is the capital."))
         elif req["max_tokens"] > 1:
@@ -110,6 +114,36 @@ class Handler(BaseHTTPRequestHandler):
                 wanted = (wanted + 1) % len(vocab)
             text = " " + vocab[wanted]
         self._send(200, json.dumps({"choices": [{"text": text, "index": 0}]}).encode())
+
+    def _sampling_probe(self, req):
+        """The sampling probe's requests (issue 107), answered only when the config has a "sampling" mode: "applied" (the text depends on the seed),
+        "ignored" (the same text for every seed), "peaked" (the same text unless the temperature is above 1: a most likely token above the top-p cut), "refuse" (HTTP 400 for temperature above 0) and "cutoff" (a truncated body for temperature above
+        0). "usage_tokens" adds a usage record, "sampled_delay_s" slows a sampled request and "session_line" is printed to the server log once per request."""
+        cfg = self.cfg
+        sampled = req.get("temperature", 0) > 0
+        mode = cfg["sampling"]
+        if sampled and mode == "refuse":
+            self._send(400, json.dumps({"error": "sampling parameters are not supported with the speculative drafter"}).encode())
+            return
+        if sampled and mode == "cutoff":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", "500")
+            self.end_headers()
+            self.wfile.write(b'{"choices": [')
+            self.wfile.flush()
+            self.close_connection = True
+            return
+        time.sleep(float(cfg.get("probe_delay_s", 0)) + (float(cfg.get("sampled_delay_s", 0)) if sampled else 0))
+        text = "The lighthouse keeper climbed the long spiral stairs every evening, counting the steps."
+        if sampled and (mode == "applied" or (mode == "peaked" and req.get("temperature", 0) > 1)):
+            text += f" Seed {req.get('seed')} chose a different ending: the sea was calm and the lamp burned until morning."
+        if cfg.get("session_line"):
+            print(cfg["session_line"], flush=True)
+        body = {"choices": [{"text": text, "index": 0, "finish_reason": "length"}]}
+        if cfg.get("usage_tokens") is not None:
+            body["usage"] = {"completion_tokens": cfg["usage_tokens"]}
+        self._send(200, json.dumps(body).encode())
 
     def _chat(self, req):
         cfg = self.cfg

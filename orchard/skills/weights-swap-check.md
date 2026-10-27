@@ -156,7 +156,8 @@ Only then. The supervisor writes it whenever it can.
         "tt_cache": "<a new directory whose name contains the model's slug>",
         "hf_home": "{{HF_HOME}}",
         "port": 8100,
-        "prompt_suite": true}
+        "prompt_suite": true,
+        "sampling_probe": true}
 
    Copy the `model` value from `stages/0/delta.json` verbatim, including the `@revision`, into
    `new_model_id`. Stage 7 compares this label with stage 0's model and the revision of the weights
@@ -196,6 +197,12 @@ not served the new weights. Do not edit
 `prompt_suite.json`: the gate compares its sha256 with the shipped file. `"prompt_suite": true` in
 `swap_config.json` turns the suite on; the supervisor writes it. To read a control, set
 `"suite_control"` to the `swap-check.json` of a run of the same suite on the nearest model.
+
+`"sampling_probe": true` makes the script send one greedy and two sampled requests after the checks above
+and record them under `sampling_probe` in `swap-check.json`. It records what the server did with a request
+that has temperature above 0: accepted or refused, how fast, and whether two seeds gave different text.
+You do not judge it. A refused or slow sampled request is a fact about the configuration and not a failed
+test, so do not change the configuration to make it pass.
 
 ## Finish phase
 

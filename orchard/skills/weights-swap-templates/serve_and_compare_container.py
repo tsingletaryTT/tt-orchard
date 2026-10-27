@@ -349,8 +349,11 @@ class Container:
         self.cid, self.log_path, self.returncode = cid, log_path, None
 
     def save_log(self) -> None:
-        r = docker(["logs", self.cid])
-        self.log_path.write_text(r.stdout + r.stderr, encoding="utf-8")
+        """Write `docker logs` to server.log with the container's stdout and stderr merged into one stream, in the order docker replays them. The
+        merged text only grows at its end, so a byte offset taken earlier (the sampling probe takes one before each request) still marks the same place.
+        Writing stdout and then stderr, as this once did, pushed saved stderr down whenever new stdout arrived."""
+        r = subprocess.run(["docker", "logs", self.cid], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=DOCKER_TIMEOUT_S)
+        self.log_path.write_text(r.stdout, encoding="utf-8")
 
     def poll(self):
         r = docker(["inspect", "--format", "{{.State.Running}} {{.State.ExitCode}}", self.cid])
