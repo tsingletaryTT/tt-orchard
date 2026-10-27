@@ -2516,14 +2516,19 @@ def audio_header(path: Path) -> dict:
     length = struct.unpack("<Q", raw)[0]
     if length > AUDIO_HEADER_MAX:
         raise ValueError(f"header length {length} is larger than {AUDIO_HEADER_MAX}")
-    header, _ = raw_header(path)
+    header, data_start = raw_header(path)
+    data_size = path.stat().st_size - data_start
     out = {}
     for name, v in header.items():
         if name == "__metadata__":
             continue
         shape = v.get("shape") if isinstance(v, dict) else None
+        offsets = v.get("data_offsets") if isinstance(v, dict) else None
         if (not isinstance(shape, list) or not all(isinstance(d, int) and not isinstance(d, bool) and d >= 0 for d in shape)
-                or not isinstance(v.get("dtype"), str)):
+                or not isinstance(v.get("dtype"), str)
+                or not isinstance(offsets, list) or len(offsets) != 2
+                or not all(isinstance(o, int) and not isinstance(o, bool) for o in offsets)
+                or not 0 <= offsets[0] <= offsets[1] <= data_size):
             raise ValueError(f"tensor {name} has a malformed entry")
         out[name] = {"dtype": v["dtype"], "shape": shape, "shard": path.name}
     return out
@@ -2587,20 +2592,42 @@ def compare_audio_tensors(mt: dict, bt: dict) -> dict:
             "only_in_base": only_b, "shape_differences": shape, "dtype_differences": dtype}
 
 
-def audio_text_encoders(mcfg: dict, bcfg: dict, model_dir: Path, base_dir: Path, model_repo: str, base_repo: str) -> list[dict]:
+def audio_text_encoders(mcfg: dict, bcfg: dict, model_dir: Path, base_dir: Path, model_repo: str, base_repo: str) -> tuple[list[dict], list[str]]:
     """One row per conditioner that loads from a subdirectory. When both configs point at their own repository the two subdirectories
     are compared (config.json, tensor names, shapes and dtypes; the weights may differ). A pointer to another repository is not
-    compared: its files are not in either snapshot."""
-    def subs(cfg):
+    compared: its files are not in either snapshot. Returns (rows, problems): a conditioning section that is not an object, a `configs` that is
+    not a list, an entry that is not an object, a `config` that is not an object, or a `subfolder` that is not text is a problem (class unknown)."""
+    problems: list[str] = []
+
+    def subs(cfg, who):
         out = {}
-        confs = ((cfg.get("model") or {}).get("conditioning") or {}).get("configs")
-        for c in confs if isinstance(confs, list) else []:
-            inner = c.get("config") if isinstance(c, dict) else None
-            sub = inner.get("subfolder") if isinstance(inner, dict) else None
-            if isinstance(sub, str) and sub and not os.path.isabs(sub) and ".." not in Path(sub).parts:
+        cond = (cfg.get("model") or {}).get("conditioning")
+        if cond is None:
+            return out
+        if not isinstance(cond, dict):
+            problems.append(f"{who} model_config.json model.conditioning is not an object")
+            return out
+        confs = cond.get("configs")
+        if confs is None:
+            return out
+        if not isinstance(confs, list):
+            problems.append(f"{who} model_config.json model.conditioning.configs is not a list")
+            return out
+        for i, c in enumerate(confs):
+            if not isinstance(c, dict):
+                problems.append(f"{who} model_config.json model.conditioning.configs[{i}] is not an object")
+                continue
+            inner = c.get("config")
+            if inner is not None and not isinstance(inner, dict):
+                problems.append(f"{who} model_config.json model.conditioning.configs[{i}].config is not an object")
+                continue
+            sub = inner.get("subfolder") if inner else None
+            if sub is not None and not isinstance(sub, str):
+                problems.append(f"{who} model_config.json model.conditioning.configs[{i}].config.subfolder is not text")
+            elif isinstance(sub, str) and sub and not os.path.isabs(sub) and ".." not in Path(sub).parts:
                 out[sub] = inner.get("repo_id")
         return out
-    ms, bs = subs(mcfg), subs(bcfg)
+    ms, bs = subs(mcfg, "new model"), subs(bcfg, "nearest model")
     rows = []
     for sub in sorted(set(ms) | set(bs)):
         row = {"subfolder": sub, "compared": False, "equal": None, "problems": [], "differences": []}
@@ -2635,7 +2662,7 @@ def audio_text_encoders(mcfg: dict, bcfg: dict, model_dir: Path, base_dir: Path,
             if not x["tolerated"]:
                 row["differences"].append(f"{sub} tensor {x['name']} has dtype {x['model']} and {x['base']}")
         row["equal"] = not row["differences"]
-    return rows
+    return rows, problems
 
 
 def _int_or_none(cfg, key):
@@ -2667,6 +2694,12 @@ def audio_main(cfg: dict) -> int:
     mt, merrs = audio_tensors(model_dir)
     bt, berrs = audio_tensors(base_dir) if base_is_audio else ({}, [])
     problems += [f"new model {e}" for e in merrs] + [f"nearest model {e}" for e in berrs]
+    # A header with no tensor entry reads without an error. Two empty maps would otherwise look equal, and one empty map would look like a
+    # full port; neither says anything about the model, so the class is unknown.
+    if not merrs and not mt:
+        problems.append("the new model holds no tensors: its safetensors header is empty")
+    if base_is_audio and not berrs and not bt:
+        problems.append("the nearest model holds no tensors: its safetensors header is empty")
     config = {"top_level_differences": {}, "model_differences": {}, "pointer_differences": {}, "training_differences": {}}
     tensors = compare_audio_tensors(mt, bt)
     encoders: list[dict] = []
@@ -2683,7 +2716,8 @@ def audio_main(cfg: dict) -> int:
         for x in tensors["dtype_differences"]:
             if not x["tolerated"]:
                 reasons.append(f"tensor {x['name']} has dtype {x['model']} in the new model and {x['base']} in the nearest model")
-        encoders = audio_text_encoders(mcfg, bcfg, model_dir, base_dir, model_repo, base_repo)
+        encoders, encoder_problems = audio_text_encoders(mcfg, bcfg, model_dir, base_dir, model_repo, base_repo)
+        problems += encoder_problems
         for row in encoders:
             problems += row["problems"]
             reasons += row["differences"]

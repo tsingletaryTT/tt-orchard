@@ -471,3 +471,125 @@ def test_the_recorded_differences_are_capped_but_the_class_counts_all(audio_case
     assert len(d["audio"]["config"]["training_differences"]) == 50
     config = next(x for x in d["differences"] if x["area"] == "config")
     assert "80 in the training section" in config["finding"] or "81 in the training section" in config["finding"]
+
+
+# ---- Copilot's review of PR 123: empty maps, offset pairs, the conditioning section --------------------
+
+def write_header_only(path, header):
+    blob = json.dumps(header).encode()
+    blob += b" " * (-len(blob) % 8)
+    path.write_bytes(struct.pack("<Q", len(blob)) + blob)
+
+
+@pytest.mark.parametrize("header", [{}, {"__metadata__": {"format": "pt"}}])
+def test_an_empty_tensor_map_in_the_new_model_is_unknown(audio_case, header):
+    stage = audio_case()
+    write_header_only(model_snapshot(stage) / "model.safetensors", header)
+    d = run_ok(stage)
+    assert d["class"] == "unknown" and "new model holds no tensors" in reasons(d)
+    assert gate(stage).ok
+
+
+@pytest.mark.parametrize("header", [{}, {"__metadata__": {"format": "pt"}}])
+def test_an_empty_tensor_map_in_the_nearest_model_is_unknown(audio_case, header):
+    stage = audio_case()
+    cfg = json.loads((stage / "triage_config.json").read_text())
+    write_header_only(Path(cfg["nearest_snapshot"]) / "model.safetensors", header)
+    d = run_ok(stage)
+    assert d["class"] == "unknown" and "nearest model holds no tensors" in reasons(d)
+
+
+def test_two_empty_tensor_maps_are_not_a_weights_only_pair(audio_case):
+    stage = audio_case()
+    cfg = json.loads((stage / "triage_config.json").read_text())
+    write_header_only(Path(cfg["nearest_snapshot"]) / "model.safetensors", {})
+    write_header_only(model_snapshot(stage) / "model.safetensors", {})
+    assert run_ok(stage)["class"] == "unknown"
+
+
+@pytest.mark.parametrize("offsets", [[0], [], [0, 4, 8], [4, 0], [-1, 4], ["a", 4], [0, True], "0-4", None, [0, 10 ** 9]])
+def test_a_tensor_offset_pair_that_is_not_a_valid_range_is_a_header_problem(audio_case, offsets):
+    stage = audio_case()
+    entry = {"dtype": "F32", "shape": [1], "data_offsets": offsets}
+    blob = json.dumps({"model.model.layers.0.attn.weight": entry}).encode()
+    blob += b" " * (-len(blob) % 8)
+    (model_snapshot(stage) / "model.safetensors").write_bytes(struct.pack("<Q", len(blob)) + blob + b"\0" * 4)
+    d = run_ok(stage)
+    assert d["class"] == "unknown" and "malformed entry" in reasons(d)
+    assert gate(stage).ok
+
+
+def test_a_missing_offset_pair_is_a_header_problem(audio_case):
+    stage = audio_case()
+    blob = json.dumps({"model.model.layers.0.attn.weight": {"dtype": "F32", "shape": [1]}}).encode()
+    blob += b" " * (-len(blob) % 8)
+    (model_snapshot(stage) / "model.safetensors").write_bytes(struct.pack("<Q", len(blob)) + blob + b"\0" * 4)
+    assert run_ok(stage)["class"] == "unknown"
+
+
+def test_an_offset_pair_at_the_end_of_the_data_is_valid(audio_case):
+    stage = audio_case()
+    write_safetensors(model_snapshot(stage) / "model.safetensors", TENSORS, 2.0)
+    assert run_ok(stage)["class"] == "weights-only"
+
+
+@pytest.mark.parametrize("conditioning", [[1], ["x"], "text", 3, [{"id": "prompt"}], {"configs": "x"}, {"configs": [1, "x", None]},
+                                          {"configs": [{"config": "x"}]}, {"configs": [{"config": {"subfolder": 5}}]}])
+def test_a_malformed_conditioning_section_is_unknown_and_does_not_crash(audio_case, conditioning):
+    cfg = changed_model_config()
+    cfg["model"]["conditioning"] = conditioning
+    base = changed_model_config()
+    stage = audio_case(model_kw={"config": cfg}, base_kw={"config": base})
+    d = run_ok(stage)
+    assert gate(stage).ok
+    assert d["class"] == "unknown" and "new model" in reasons(d) and "model.conditioning" in reasons(d)
+
+
+def test_a_malformed_conditioning_section_in_the_nearest_model_is_unknown(audio_case):
+    base = changed_model_config()
+    base["model"]["conditioning"] = [{"id": "prompt"}]
+    d = run_ok(audio_case(base_kw={"config": base}))
+    assert d["class"] == "unknown" and "nearest model" in reasons(d) and "conditioning" in reasons(d)
+
+
+def test_a_model_without_a_conditioning_section_has_no_text_encoder_and_is_not_a_problem(audio_case):
+    cfg = changed_model_config()
+    del cfg["model"]["conditioning"]
+    base = copy.deepcopy(cfg)
+    d = run_ok(audio_case(model_kw={"config": cfg}, base_kw={"config": base}))
+    assert d["class"] == "weights-only" and d["audio"]["text_encoders"] == []
+
+
+def test_a_conditioning_entry_without_a_config_is_not_a_problem(audio_case):
+    cfg = changed_model_config()
+    cfg["model"]["conditioning"]["configs"].append({"id": "extra", "type": "number"})
+    base = copy.deepcopy(cfg)
+    assert run_ok(audio_case(model_kw={"config": cfg}, base_kw={"config": base}))["class"] == "weights-only"
+
+
+def test_an_unreadable_header_is_not_also_reported_as_an_empty_map(audio_case):
+    stage = audio_case()
+    (model_snapshot(stage) / "model.safetensors").write_bytes(b"\xff" * 16)
+    assert "holds no tensors" not in reasons(run_ok(stage))
+
+
+def test_a_nearest_model_that_is_not_an_audio_layout_is_not_also_reported_as_an_empty_map(tmp_path):
+    model = make_audio(tmp_path / "new", MODEL_REV, repo=MODEL_ID)
+    base = make_audio(tmp_path / "base", BASE_REV, repo=BASE_ID, extra={"config.json": "{}"})
+    d = run_ok(stage_for(tmp_path, model, base, model_id=MODEL_ID, nearest_id=BASE_ID))
+    assert "holds no tensors" not in reasons(d)
+
+
+def test_a_conditioning_section_without_configs_is_not_a_problem(audio_case):
+    cfg = changed_model_config()
+    cfg["model"]["conditioning"] = {"cond_dim": 768}
+    base = copy.deepcopy(cfg)
+    d = run_ok(audio_case(model_kw={"config": cfg}, base_kw={"config": base}))
+    assert d["class"] == "weights-only" and d["audio"]["text_encoders"] == []
+
+
+def test_a_configs_value_that_is_not_a_list_is_named(audio_case):
+    cfg = changed_model_config()
+    cfg["model"]["conditioning"]["configs"] = {"a": 1}
+    d = run_ok(audio_case(model_kw={"config": cfg}, base_kw={"config": changed_model_config()}))
+    assert d["class"] == "unknown" and "configs is not a list" in reasons(d)
