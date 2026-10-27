@@ -44,9 +44,15 @@ MAX_FILE_BYTES = 128 * 1024 * 1024   # a larger file is read up to this many byt
 MAX_TOTAL_BYTES = 1024 * 1024 * 1024
 MAX_LINE_BYTES = 2 * 1024 * 1024     # a longer line is not parsed; its usage is looked for in its last bytes
 TAIL_BYTES = 8192
+HEAD_BYTES = 4096                    # the start of an over-long line, searched for helper markers and the agent's turn shape
 MAX_TOKENS_PER_TURN = 10 ** 9        # a bigger number is a corrupt record
 
 HELPER_NAMES = {"telegraph", "helper", "hosted", "outside"}
+# The helper markers `_is_helper` reads, as byte patterns for the first and last bytes of an over-long line.
+_HELPER_BYTES = re.compile(
+    rb'"call_id"\s*:|"(?:origin|source)"\s*:\s*"(?:' + b"|".join(n.encode() for n in sorted(HELPER_NAMES)) + rb')"'
+    rb'|"helper"\s*:\s*(?:true|[1-9"\[{])', re.IGNORECASE)
+AGENT_TURN_START = b'{"turn"'
 
 
 class ConfigError(ValueError):
@@ -132,7 +138,7 @@ def cost(prompt_tokens: int, completion_tokens: int, price_in: float, price_out:
 # ------------------------------------------------------------------------------------------------------ reading
 
 def _skipped() -> dict:
-    return {"malformed_lines": 0, "no_usage": 0, "helper_turns": 0, "long_lines": 0, "not_utf8_lines": 0,
+    return {"malformed_lines": 0, "no_usage": 0, "helper_turns": 0, "long_lines": 0, "long_unverified": 0, "not_utf8_lines": 0,
             "unreadable_files": 0, "oversize_files": 0, "files_not_read": 0, "links": 0}
 
 
@@ -149,6 +155,10 @@ def _is_helper(rec: dict) -> bool:
         if isinstance(rec.get(key), str) and rec[key].lower() in HELPER_NAMES:
             return True
     return bool(rec.get("helper"))
+
+
+def _long_is_helper(head: bytes, tail: bytes) -> bool:
+    return bool(_HELPER_BYTES.search(head) or _HELPER_BYTES.search(tail))
 
 
 def _agent_turn(rec: dict):
@@ -226,7 +236,7 @@ def _lines(path: Path, skipped: dict, budget: list):
                 skipped["oversize_files"] += 1                   # a budget ended in the middle of this line
                 return
             if len(line) > MAX_LINE_BYTES and not complete:
-                tail = line[-TAIL_BYTES:]
+                head, tail = line[:HEAD_BYTES], line[-TAIL_BYTES:]
                 ended = False
                 while True:                                      # drain the rest of the line, keeping only its end
                     room = _room(read, budget, MAX_LINE_BYTES)
@@ -249,7 +259,7 @@ def _lines(path: Path, skipped: dict, budget: list):
                 if not ended:
                     skipped["oversize_files"] += 1
                     return
-                yield "tail", tail
+                yield "tail", (head, tail)
                 continue
             if not line.strip():
                 continue
@@ -347,7 +357,17 @@ def scan(root) -> dict:
         for what, payload in _lines(path, skipped, budget):
             if what == "tail":
                 skipped["long_lines"] += 1
-                got = _tail_usage(payload) if kind == "agent" else None
+                head, tail = payload
+                if kind != "agent":
+                    skipped["no_usage"] += 1
+                    continue
+                if _long_is_helper(head, tail):                  # the same filter a line under the cap gets, from its ends
+                    skipped["helper_turns"] += 1
+                    continue
+                if not head.lstrip().startswith(AGENT_TURN_START):
+                    skipped["long_unverified"] += 1               # its source cannot be established: not priced
+                    continue
+                got = _tail_usage(tail)
                 if got is None:
                     skipped["no_usage"] += 1
                     continue
@@ -398,7 +418,7 @@ def priced(scanned: dict, cfg: Config) -> dict:
 def skipped_text(skipped: dict) -> str:
     """One plain sentence about what the scan left out, or an empty string."""
     names = {"malformed_lines": "lines that are not JSON", "no_usage": "turns with no token counts",
-             "helper_turns": "turns from an outside helper", "long_lines": "lines over the size cap",
+             "helper_turns": "turns from an outside helper", "long_lines": "lines over the size cap", "long_unverified": "lines over the size cap that do not start like an agent turn",
              "not_utf8_lines": "lines with bytes that are not UTF-8", "unreadable_files": "files that could not be read",
              "oversize_files": "files or folders over the read cap", "files_not_read": "files past the file cap",
              "links": "links that were not followed"}

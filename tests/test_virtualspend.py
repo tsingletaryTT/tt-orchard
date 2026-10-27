@@ -565,3 +565,77 @@ def test_a_deeply_nested_usage_suffix_is_not_a_crash(root, monkeypatch):
     write_log(root, "log/run.jsonl", [line])
     s = vs.scan(root)
     assert s["turns"] == 0 and s["skipped"]["no_usage"] == 1
+
+
+
+# ---- review fix 6: an over-long record gets the helper filter from its first and last bytes ---------------------------------
+# Choice: the first 4 KiB and the last 8 KiB of an over-long line are searched for helper markers, and the line must start the way
+# the agent writes a turn (`{"turn"`). A line that does not is skipped and counted as `long_unverified`. A marker in the middle of
+# a record over the line cap cannot be seen.
+
+def _big(before=None, after=None, lead="turn"):
+    """An over-long turn: `lead` key first, optional extra keys before the big value, and optional keys after `usage`."""
+    rec = {lead: 1}
+    rec.update(before or {})
+    rec["sent"] = ["x" * 30000]
+    rec["received"] = {"role": "assistant"}
+    rec["finish_reason"] = "stop"
+    rec["usage"] = {"prompt_tokens": 900, "completion_tokens": 90}
+    rec.update(after or {})
+    return json.dumps(rec)
+
+
+@pytest.mark.parametrize("before,after", [
+    ({"call_id": "c-1"}, None),
+    ({"origin": "telegraph"}, None),
+    ({"source": "Helper"}, None),
+    ({"helper": True}, None),
+    (None, {"call_id": "c-1"}),
+    (None, {"origin": "telegraph"}),
+    (None, {"helper": True}),
+], ids=["call_id-head", "origin-head", "source-head", "helper-head", "call_id-tail", "origin-tail", "helper-tail"])
+def test_an_over_long_helper_record_is_not_priced(root, monkeypatch, before, after):
+    monkeypatch.setattr(vs, "MAX_LINE_BYTES", 2000)
+    write_log(root, "log/run.jsonl", [_big(before, after), _big()])
+    s = vs.scan(root)
+    assert (s["turns"], s["prompt_tokens"]) == (1, 900)                  # only the plain record
+    assert s["skipped"]["helper_turns"] == 1 and s["skipped"]["long_lines"] == 2
+
+
+def test_false_or_local_markers_never_make_an_over_long_record_a_helper_turn(root, monkeypatch):
+    monkeypatch.setattr(vs, "MAX_LINE_BYTES", 2000)
+    write_log(root, "log/run.jsonl", [_big({"helper": False}), _big({"source": "local"}), _big({"helper": None}),
+                                      _big({"origin": "agent"})])
+    s = vs.scan(root)
+    assert s["skipped"]["helper_turns"] == 0 and (s["turns"], s["prompt_tokens"]) == (4, 3600)
+
+
+def test_an_over_long_line_that_does_not_start_like_an_agent_turn_is_unverified_and_not_priced(root, monkeypatch):
+    monkeypatch.setattr(vs, "MAX_LINE_BYTES", 2000)
+    write_log(root, "log/run.jsonl", [_big(lead="note")])
+    s = vs.scan(root)
+    assert s["turns"] == 0 and s["skipped"]["long_unverified"] == 1 and s["skipped"]["long_lines"] == 1
+
+
+def test_the_same_record_is_treated_alike_below_and_above_the_line_cap(root, monkeypatch):
+    short = json.dumps({"turn": 1, "call_id": "c-1", "usage": {"prompt_tokens": 900, "completion_tokens": 90}})
+    monkeypatch.setattr(vs, "MAX_LINE_BYTES", 2000)
+    write_log(root, "a/log/run.jsonl", [short])
+    write_log(root, "b/log/run.jsonl", [_big({"call_id": "c-1"})])
+    a, b = vs.scan(root / "a"), vs.scan(root / "b")
+    assert a["turns"] == b["turns"] == 0 and a["skipped"]["helper_turns"] == b["skipped"]["helper_turns"] == 1
+
+
+def test_a_marker_in_the_middle_of_an_over_long_record_is_not_seen(root, monkeypatch):
+    """The documented limit of the choice: only the first 4 KiB and the last 8 KiB are searched."""
+    monkeypatch.setattr(vs, "MAX_LINE_BYTES", 2000)
+    rec = {"turn": 1, "sent": ["x" * 20000], "call_id": "mid", "more": ["y" * 20000],
+           "usage": {"prompt_tokens": 900, "completion_tokens": 90}}
+    write_log(root, "log/run.jsonl", [json.dumps(rec)])
+    assert vs.scan(root)["turns"] == 1
+
+
+def test_left_out_text_names_unverified_long_records():
+    s = vs._skipped()
+    s["long_unverified"] = 2
+    assert "2 lines over the size cap that do not start like an agent turn" in vs.skipped_text(s)
