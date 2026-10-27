@@ -583,6 +583,15 @@ the research setting are under **Options**, and the line says what they are now.
 
 ![New bring-up: the model field, the closed Options line, Run checks as the main button](docs/ui/operator-new-bringup.png)
 
+The Telegraph view (section 5.9g) shows what the outside helper has cost: spend against each cap, every call, and the totals by model
+and by problem. This one reads the ledger of 43 real helper calls made while comparing outside models on failing kernels ($1.21 in all).
+It is capped because three earlier calls, made to a wrong endpoint, have no known cost, and a cost cap cannot be checked while any call
+has an unknown cost. The configuration is a placeholder with an example host and no key.
+
+![Operator style, the Telegraph view: spend and caps, recent calls, totals by model and by problem](docs/ui/operator-telegraph.png)
+
+![Playful style, the Telegraph view](docs/ui/playful-telegraph.png)
+
 The screenshots are of this repository's page on its development machine, with the host name and home directory blanked out.
 
 ```bash
