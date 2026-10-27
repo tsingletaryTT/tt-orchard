@@ -194,6 +194,7 @@ def run_limited(code: str, *, timeout: float = 60, address_space: int = 2 << 30)
 
 
 
+
 # ------------------------------------------------------------------------------------------------------------ the registry
 
 @dataclass(frozen=True)
@@ -331,7 +332,7 @@ def child_main(reader_name: str, group: str, registry: dict | None = None) -> No
             else:
                 arg = big_string() if item.kind == "big" else item.content
             out[item.name] = _verdict(reader, item, arg)
-        except BaseException as exc:                           # building the item failed: say so instead of passing
+        except BaseException as exc:                           # building the item failed: say so and do not pass
             out[item.name] = {"ok": False, "why": f"the harness could not build the item: {type(exc).__name__}", "peak_mb": 0}
         finally:
             restore_permissions(base)
@@ -732,6 +733,11 @@ def _selftest_recurses(base: Path):
 
 from orchard.safeio import SafeReadError as _SafeReadError  # noqa: E402
 
+def _selftest_crashes(base: Path):
+    import os
+    os._exit(7)                                               # the child dies without a word
+
+
 # These prove that the instrument can report a failure (and a pass). They are not in READERS.
 SELFTEST = {r.name: r for r in [
     Reader("selftest.safeio", _selftest_safeio, documented=(_SafeReadError,)),
@@ -740,6 +746,7 @@ SELFTEST = {r.name: r for r in [
     Reader("selftest.hangs_on_a_fifo", _selftest_hangs_on_a_fifo),
     Reader("selftest.reads_without_a_cap", _selftest_reads_without_a_cap),
     Reader("selftest.recurses", _selftest_recurses),
+    Reader("selftest.crashes", _selftest_crashes),
 ]}
 
 # The defects this registry found, by the GitHub issue that tracks each one. A (reader, item) pair listed here is marked

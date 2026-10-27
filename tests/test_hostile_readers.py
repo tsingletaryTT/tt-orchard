@@ -120,3 +120,8 @@ def test_a_reader_built_on_safeio_passes_every_item():
 def test_a_reader_that_is_wrong_on_purpose_is_reported(name, items):
     got = _selftest(name)
     assert items <= {k for k, v in got.items() if not v["ok"]}, {k: v for k, v in got.items() if k in items}
+
+
+def test_a_child_process_that_dies_is_a_failure_for_every_item():
+    got = _selftest("selftest.crashes")
+    assert got and all(not v["ok"] and "child process failed" in v["why"] for v in got.values())
