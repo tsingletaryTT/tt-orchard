@@ -215,7 +215,7 @@ def test_a_boundary_of_exactly_the_minimum_runs_the_call():
 
 def test_the_text_of_every_answer_states_the_remaining_budget():
     w = World([(good_hw(elapsed_s=47.0), None, ""), queued(), queued(), queued()])
-    c = w.check(wait_s=1.0, poll_s=10.0)
+    c = w.check(wait_s=1.0)
     first = c.call({})
     assert "5 calls left" in first
     busy = c.call({})
@@ -890,7 +890,7 @@ def test_a_call_row_shows_the_agents_note_and_a_ticket_that_was_not_cancelled(tm
             "note": "waiting for the board"}
     md = _report_md(tmp_path, [_row_attempt(agent_hw=hw_summary(busy))])
     row = next(l for l in md.splitlines() if "| busy |" in l)
-    assert "note: waiting for the board" in row and "NOT all cancelled" in row
+    assert "note: waiting for the board" in row and "NOT cancelled" in row
 
 
 def test_the_report_json_keeps_the_calls(tmp_path):

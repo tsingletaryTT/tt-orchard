@@ -264,10 +264,10 @@ def test_a_busy_board_asks_gozer_once_waits_on_the_ticket_and_runs_the_harness_u
     assert g.events == ["gozer-run", "wait", "harness", "release"], g.events
     assert g.waited == [("T1", pytest.approx(120.0, abs=1.0))] and g.cancelled == [] and g.released == ["L1"]
     assert text.splitlines()[0].startswith("hardware_check 1 of 6: PASS"), text
-    harness = g.argvs[2]
+    harness = g.argvs[1]
     assert harness[0] == "/shared/python" and "gozer" not in harness[0]               # no second gozer run
     assert sum(1 for a in g.argvs if a[0] == "gozer") == 1
-    assert g.envs[2]["TT_VISIBLE_DEVICES"] == "0000:01:00.0,0000:02:00.0"
+    assert g.envs[1]["TT_VISIBLE_DEVICES"] == "0000:01:00.0,0000:02:00.0"
     assert Path(harness[harness.index("--kernel") + 1]).is_absolute()
 
 
@@ -393,7 +393,7 @@ def test_a_relative_python_path_is_made_absolute_for_the_child_whose_directory_c
                            run_watched=g.run_watched, cancel=g.cancel, gozer_wait=g.gozer_wait,
                            gozer_release=g.gozer_release, clock=lambda: CLOCK["now"], sleep=lambda s: None).call({})
     assert Path(g.argvs[0][g.argvs[0].index("--") + 1]).is_absolute()
-    assert Path(g.argvs[2][0]).is_absolute() and g.argvs[2][0] == str(tmp_path / "venv" / "bin" / "python")
+    assert Path(g.argvs[1][0]).is_absolute() and g.argvs[1][0] == str(tmp_path / "venv" / "bin" / "python")
 
 
 def test_a_bare_python_name_is_left_for_the_path_lookup():

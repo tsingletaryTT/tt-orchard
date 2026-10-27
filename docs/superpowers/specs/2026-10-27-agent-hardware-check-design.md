@@ -44,7 +44,6 @@ kernel.
 | chip seconds per attempt | 600 (120 reserved for the stop and the reset) | `--hw-lease-s S` |
 | one run's hard timeout | 240 s | `--hw-call-timeout-s S` |
 | wait for a busy board | 120 s | `--hw-wait-s S` |
-| between tries while busy | 10 s | not a flag |
 | run seconds that must be left for a call, after the 120 s cleanup reserve | 60 | not a flag |
 
 The numbers are choices. No population of attempts was measured.
@@ -55,11 +54,13 @@ The numbers are choices. No population of attempts was measured.
   (60 s of silence). A hung run is stopped by SIGTERM to the process group first, and gozer's lease release resets the chip. After a
   hang the tool is off for the rest of the attempt.
 - One call at a time. A second call while one runs is answered at once and starts nothing.
-- A busy board: `gozer run` queues a ticket and exits 10 when no board is free. The probe cancels the ticket (`gozer cancel`, the
-  existing `cancel_ticket`) and tries again after 10 s until `--hw-wait-s` has passed, then tells the agent the board is busy and to
-  go on with the simulator. Every ticket is cancelled, so none stays in the queue. The cost is that the call gives up its place
-  in line each time; the alternative, one queued ticket and `gozer wait`, takes the lease for the caller and then needs a second
-  acquire path with its own release. On a box with one user, as today, that is not needed.
+- A busy board: `gozer run` queues a ticket and exits 10 when no board is free. The probe keeps that ticket and waits on it with
+  `gozer wait --json` for at most `--hw-wait-s` seconds, so the call keeps its place in the queue and never asks again in a loop (an
+  earlier version cancelled and asked again every 10 s, which gave up the place each time). The probe stops the waiter itself at the
+  deadline, because gozer's own `--timeout` was seen not to return in 25 s for 5 s. A grant prints JSON with the lease id and
+  `TT_VISIBLE_DEVICES`; the probe runs the shipped harness under that environment (no second `gozer run`) and releases the lease with
+  `gozer release` on every path, an interrupt included. When the wait runs out, or the answer is not a grant, the ticket is cancelled and
+  the agent is told the board is busy and to go on with the simulator. An interrupt during the wait cancels the ticket.
 - The lease is taken per call and released after it. The release resets the chip (about 40 s).
 
 ### Hold mode
@@ -101,7 +102,7 @@ queue wait was needed first; the tool took its own lease for each call. 2026-10-
 | 3 | unknown function `ttl.math.not_a_real_function` | FAIL compile_error, the compiler's line and caret shown | 5.2 | 0.0 |
 | 4 (second session) | the same compile error | FAIL compile_error | 46.9 | not reached |
 | 5 | library `silu_mul` after call 4 | PASS | 47.4 | 0.5 |
-| 6 | board held by another lease (20 s wait, 5 s poll) | BUSY after 20 s, 5 tries, tickets cancelled, queue empty | 20.1 | none |
+| 6 | board held by another lease (20 s wait; measured with the earlier polling version) | BUSY after 20 s, tickets cancelled, queue empty | 20.1 | none |
 
 - A call takes about 47 s in all. The kernel itself takes under a second with the device open. The rest is `gozer run`: the lease,
   the interpreter start, the compile and the reset that the release makes. The skill's "about 3 seconds to run" is from the earlier
@@ -124,3 +125,14 @@ queue wait was needed first; the tool took its own lease for each call. 2026-10-
 - A kernel that hangs the device is stopped by the watcher and the lease release resets the chip, but a hang that the watcher
   cannot see (a process that keeps writing) runs until the call timeout.
 - The probe's own end-of-attempt hardware phase (`--phase hw`) is unchanged and still needs a simulator pass or a `sim_gap`.
+
+## The wait on a ticket, measured (2026-10-27)
+
+With one board held by a lease of my own: `gozer acquire --json` with queueing answers `{"queued": true, "ticket": ..., "position": 1}`
+and exit 10. `gozer wait --json --timeout 5 TICKET` did not return within 25 s, so the probe bounds the wait itself. When the holder
+released, `gozer wait` returned the grant (`{"granted": true, "lease_id": ..., "env": {"TT_VISIBLE_DEVICES": ...}}`) after the
+holder's reset, and `gozer release LEASE` on that lease reset the chips and freed them. The probe's own wait path then ran against the real
+gozer with the board held by a lease of mine: with `--hw-wait-s 12` the call answered BUSY after 12.0 s, cancelled its one ticket and the
+queue was empty; with the holder released after 8 s the call was granted, waited 50.6 s (the holder's 42 s reset included), ran the
+library `silu_mul` (PASS, 0.6 s with the device open), released the lease itself (48.6 s from grant to the end of the release) and left all
+four chips free. The tests of the other paths use fakes of `gozer wait` and `gozer release`.

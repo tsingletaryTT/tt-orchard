@@ -1070,16 +1070,21 @@ def cancel_ticket(ticket: str, run=subprocess.run) -> str | None:
 def _queued(got, text: str, cancel) -> dict | None:
     """When `gozer run` did not run the command because the chips were busy (it queued a ticket and exited 10), cancel
     the ticket and return {"ticket", "cancel_error"}. None for any other result. A ticket left in the queue would be
-    granted to a process that is not there, and the queue would wait on it until it expired."""
+    granted to a process that is not there, and the queue would wait on it until it expired. With `cancel` None the
+    ticket is kept, for a caller that waits on it (`kept` is True and `cancel_error` None; the caller cancels it)."""
     if got.killed or got.returncode != GOZER_QUEUED_EXIT:
         return None
     m = _TICKET.search(text)
     if m is None:
         return {"ticket": None, "cancel_error": "no ticket in gozer's output, so nothing was cancelled"}
+    if cancel is None:
+        return {"ticket": m.group(1), "cancel_error": None, "kept": True}
     return {"ticket": m.group(1), "cancel_error": cancel(m.group(1))}
 
 
 def _queued_text(q: dict) -> str:
+    if q.get("kept"):
+        return f"gozer queued the request because the chips were busy; the ticket {q['ticket']} is kept to wait on"
     cancelled = (f"the ticket {q['ticket']} was cancelled" if q["ticket"] and q["cancel_error"] is None
                  else f"the ticket could not be cancelled: {q['cancel_error']}; look with `gozer status`")
     return f"gozer queued the request because the chips were busy, so the command was queued, not run; {cancelled}"
@@ -1182,8 +1187,16 @@ def _hw_gate(kernel: Path, recorded) -> dict | None:
     return None
 
 
+def _abs_executable(path) -> str:
+    """`path` for a child that runs in another directory: a path with a directory part is made absolute (the child's
+    working directory is the copy's, so a relative path would be read from there); a bare command name is left for the
+    path lookup."""
+    path = str(path)
+    return os.path.abspath(path) if "/" in path and not os.path.isabs(path) else path
+
+
 def _hw_run(adir: Path, vdir: Path, kernel: Path, *, op: str, reason: str, shared_python, run_watched, cancel,
-            backstop_s: float = BUDGET["hw_backstop_s"]) -> tuple[dict, str | None, str]:
+            backstop_s: float = BUDGET["hw_backstop_s"], leased_env: dict | None = None) -> tuple[dict, str | None, str]:
     """One gozer run of the shipped harness on the clean copy `kernel` (already through _hw_gate), judged with the
     hardware bars. Returns (hw block, event, output). `event` is None for a run that finished, "queued" when the chips
     were busy (the ticket is cancelled and the kernel never ran) and "hang" when the stall watcher or the backstop
@@ -1196,18 +1209,24 @@ def _hw_run(adir: Path, vdir: Path, kernel: Path, *, op: str, reason: str, share
     _remove(out)
     log = vdir / "hw-output.txt"
     start = _size(log)
-    argv = _gozer(reason, str(shared_python), str(TEMPLATES / "kernel_harness.py"),
-                  "--spec", str(TEMPLATES / "ops" / f"{op}.json"), "--kernel", str(kernel), "--out", str(out),
-                  "--phase", "hw")
+    harness = [str(TEMPLATES / "kernel_harness.py"), "--spec", str(TEMPLATES / "ops" / f"{op}.json"),
+               "--kernel", str(kernel), "--out", str(out), "--phase", "hw"]
+    env = child_env(vdir, adir, hardware=True)
+    if leased_env is None:
+        argv = _gozer(reason, _abs_executable(shared_python), *harness)
+    else:
+        # Under a lease that `gozer wait` granted: no `gozer run`, the chips come through the environment the lease names.
+        argv = [_abs_executable(shared_python), *harness]
+        env.update(leased_env)
     try:
-        got = run_watched(argv, cwd=Path(kernel).parent, env=child_env(vdir, adir, hardware=True), log_path=log,
+        got = run_watched(argv, cwd=Path(kernel).parent, env=env, log_path=log,
                           watcher=_hw_watcher(), backstop_s=backstop_s, term_grace_s=GOZER_TERM_GRACE_S)
     finally:
         # gozer has released the lease by now. A process the kernel left behind is stopped here (finding 5).
         swept = sweep_strays(adir)
     extra = {"swept": swept} if swept else {}
     text = _new_text(log, start)
-    queued = _queued(got, text, cancel)
+    queued = _queued(got, text, cancel) if leased_env is None else None
     if queued is not None:
         # The chips were busy and the kernel never ran: not a failure of the kernel.
         return ({"passed": False, "started": False, "category": "queued", "pcc_min": None, "sets": [], "violations": [],
@@ -1291,8 +1310,51 @@ def hwcheck_dir(probe_dir, op: str, n, k) -> Path:
     return Path(probe_dir) / HWCHECK_DIR / f"{op}-{n}-{k}"
 
 
+_LEASE_OR_TICKET = re.compile(r"[0-9A-Za-z]+")
+
+
+def gozer_wait(ticket: str, wait_s: float, *, popen=subprocess.Popen) -> tuple[int | None, str]:
+    """`gozer wait --json --timeout N TICKET`, stopped by the probe when `wait_s` has passed: gozer's own `--timeout` was
+    seen to run over (it did not return within 25 s for a 5 s timeout). Returns (exit code, stdout), or (None, "") when
+    the wait was stopped, the ticket could not pass as a ticket name, or gozer could not be started. A grant prints
+    JSON with the lease id and the environment (`TT_VISIBLE_DEVICES`) of the chips. The waiter is killed on any
+    interrupt."""
+    if not _LEASE_OR_TICKET.fullmatch(ticket or ""):
+        return None, ""
+    try:
+        proc = popen(["gozer", "wait", "--json", "--timeout", str(max(int(wait_s), 1)), ticket], stdout=subprocess.PIPE,
+                     stderr=subprocess.PIPE, text=True)
+    except OSError:
+        return None, ""
+    try:
+        out, _ = proc.communicate(timeout=wait_s)
+        return proc.returncode, out or ""
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
+        return None, ""
+    except BaseException:
+        proc.kill()
+        raise
+
+
+def gozer_release(lease: str, *, run=subprocess.run) -> tuple[int | None, str]:
+    """`gozer release LEASE` (it resets the chips). (exit code, its output), or (None, the reason) when gozer did not
+    answer. A lease id that could pass as an option is not handed to gozer."""
+    if not _LEASE_OR_TICKET.fullmatch(lease or ""):
+        return None, f"not a lease id: {lease!r}"
+    try:
+        got = run(["gozer", "release", lease], capture_output=True, text=True, timeout=GOZER_TERM_GRACE_S + 60)
+    except subprocess.TimeoutExpired:
+        return None, "gozer release did not answer in time"
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, str(exc)
+    return got.returncode, ((got.stdout or "") + (got.stderr or "")).strip()
+
+
 def make_hardware_check(adir: Path, *, op: str, n, shared_python, policy: hwtool.HwPolicy, run_watched=run_watched,
-                        cancel=cancel_ticket, clock=time.monotonic, sleep=time.sleep) -> hwtool.HardwareCheck:
+                        cancel=cancel_ticket, clock=time.monotonic, sleep=time.sleep, gozer_wait=gozer_wait,
+                        gozer_release=gozer_release) -> hwtool.HardwareCheck:
     """The attempt's `hardware_check` tool (hwtool.HardwareCheck) wired to the probe's own hardware path.
 
     Each call copies the attempt's current kernel.py into a fresh probe-owned directory (copy_kernel: a regular file of
@@ -1332,18 +1394,75 @@ def make_hardware_check(adir: Path, *, op: str, n, shared_python, policy: hwtool
             return {**blocked, "elapsed_s": 0.0}, None, ""
         hw, event, text = _hw_run(adir, state["vdir"], state["kernel"], op=op,
                                   reason=f"kernel-probe {op} attempt {n} agent check {k}", shared_python=shared_python,
-                                  run_watched=run_watched, cancel=cancel, backstop_s=timeout_s)
+                                  run_watched=run_watched, cancel=None, backstop_s=timeout_s)   # a busy ticket is kept
+        return (*judged(hw, event), text)
+
+    def judged(hw, event):
         if event is None and not hw.get("passed") and hw.get("sets"):
             spec = load_spec(op)
             check = _template("kernel_check")
             line = check.numeric_detail(hw["sets"], spec["pcc_bar_hw"], check.bars_from_spec(spec, "hw"))
             if line:
                 hw["numbers"] = line
-        return hw, event, text
+        return hw, event
+
+    def wait_for(k, queued, wait_s, timeout_s, on_grant):
+        """Wait on the kept ticket for at most `wait_s`. A grant runs the harness under that lease and releases it;
+        anything else cancels the ticket and answers busy. The ticket is cancelled and a lease released on every path,
+        an interrupt included."""
+        ticket, began = queued["ticket"], clock()
+        lease, granted = None, None
+        try:
+            code, out = gozer_wait(ticket, wait_s) if wait_s > 0 else (None, "")
+            if code == 0:
+                try:
+                    data = json.loads(out)
+                except ValueError:
+                    data = None
+                if (isinstance(data, dict) and data.get("granted") is True and isinstance(data.get("lease_id"), str)
+                        and _LEASE_OR_TICKET.fullmatch(data["lease_id"])):
+                    granted = data
+                    lease = data["lease_id"]
+            if granted is None:
+                error = cancel(ticket)
+                return ({"passed": False, "started": False, "category": "queued", "pcc_min": None, "sets": [],
+                         "violations": [], "first_line": f"the board stayed busy for {clock() - began:.0f} s",
+                         "queued": {"ticket": ticket, "cancel_error": error}, "elapsed_s": 0.0}, "queued", "")
+            on_grant()
+            waited = clock() - began
+            devices = (granted.get("env") or {}).get("TT_VISIBLE_DEVICES")
+            leased_env = {"TT_VISIBLE_DEVICES": devices} if isinstance(devices, str) and devices else {}
+            held = clock()
+            try:
+                sweep_strays(adir)                       # a wait can last two minutes: sweep again before the run
+                hw, event, text = None, None, ""
+                blocked = _hw_gate(state["kernel"], state["sha"])
+                if blocked is not None:
+                    hw = {**blocked}
+                else:
+                    hw, event, text = _hw_run(adir, state["vdir"], state["kernel"], op=op,
+                                              reason=f"kernel-probe {op} attempt {n} agent check {k}",
+                                              shared_python=shared_python, run_watched=run_watched, cancel=None,
+                                              backstop_s=timeout_s, leased_env=leased_env)
+                    hw, event = judged(hw, event)
+            finally:
+                code, text_out = gozer_release(lease)
+                lease = None
+            hw["waited_s"] = round(waited, 1)
+            hw["elapsed_s"] = round(clock() - held, 1)
+            if code != 0:
+                hw["release_error"] = text_out or "gozer release did not succeed"
+            return hw, event, text
+        except BaseException:
+            if granted is None and ticket:
+                cancel(ticket)                           # still waiting: do not leave the ticket in the queue
+            raise
+
     def keep(summary):
         _real_dir(probe_dir / HWCHECK_DIR)
         _write_json(hwcheck_calls_path(probe_dir, op, n), summary)
-    return hwtool.HardwareCheck(policy, prepare=prepare, run=run, clock=clock, sleep=sleep, on_record=keep)
+    return hwtool.HardwareCheck(policy, prepare=prepare, run=run, wait_for=wait_for, clock=clock, sleep=sleep,
+                                on_record=keep)
 
 
 def _hw_int(args, name: str, default: int, low: int, high: int) -> int:
@@ -1518,7 +1637,10 @@ def _call_note(c: dict) -> str:
     if c.get("lease_upper_bound"):
         parts.append("chip time is an upper bound (interrupted while the run held the board)")
     if c.get("queued_polls"):
-        parts.append(f"{c['queued_polls']} tries, tickets " + ("cancelled" if c.get("cancelled") else "NOT all cancelled"))
+        state = "granted" if c.get("cancelled") is None else ("cancelled" if c["cancelled"] else "NOT cancelled")
+        parts.append(f"{c['queued_polls']} ticket{'s' if c['queued_polls'] != 1 else ''}, {state}")
+    if c.get("release_error"):
+        parts.append(f"release failed: {c['release_error']}")
     if c.get("outcome") not in ("pass", "busy") and c.get("first_line"):
         parts.append(str(c["first_line"]))
     if c.get("note"):
