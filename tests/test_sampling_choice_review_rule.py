@@ -31,7 +31,7 @@ def test_when_both_ignore_sampling_the_faster_one_is_chosen():
 
 def test_a_variant_that_is_slower_than_the_original_leaves_the_original():
     d = sc.decide(NEEDED, side(greedy=59.0, sampled=59.0), variant(greedy=8.0, sampled=8.0))
-    assert d["choice"] == "keep" and d["flag"] == "no-variant-serves-purpose" and "faster" in d["reason"]
+    assert d["choice"] == "keep" and d["flag"] == "no-variant-serves-purpose" and "at least as fast" in d["reason"]
 
 
 def test_equal_speeds_leave_the_original():
@@ -46,7 +46,7 @@ def test_a_missing_speed_leaves_the_original_and_says_the_speeds_could_not_be_co
 
 
 def test_a_variant_with_an_unknown_verdict_below_the_floor_that_is_faster_is_chosen_flagged():
-    d = sc.decide(NEEDED, side(greedy=5.0, sampled=5.0), variant(verdict="inconclusive", greedy=8.0, sampled=None))
+    d = sc.decide(NEEDED, side(greedy=5.0, sampled=5.0), variant(verdict="inconclusive", greedy=8.0, sampled=8.0))
     assert d["choice"] == "drafter-off" and d["flag"] == "no-variant-serves-purpose"
 
 

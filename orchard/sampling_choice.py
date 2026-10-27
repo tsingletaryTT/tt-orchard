@@ -159,6 +159,12 @@ def _fmt(v) -> str:
     return "an unmeasured speed" if v is None else f"{v:.1f} tokens/s"
 
 
+def comparable(numbers: dict) -> bool:
+    """Were both speeds measured, on the same basis (both sampled or both greedy)? Only then may a decision, a card or a bundle say one is faster."""
+    return (_number(numbers.get("served_tok_s")) and _number(numbers.get("variant_tok_s"))
+            and numbers.get("served_speed_basis") is not None and numbers.get("served_speed_basis") == numbers.get("variant_speed_basis"))
+
+
 def decide(need_: dict, current: dict, variant: dict | None = None, *, variant_note: str | None = None, floor: float | None = None) -> dict:
     """The choice and why. `current` is the configuration stage 2 serves, `variant` the drafter-off variant when it was served (None when it
     was not tried; `variant_note` says why). See the design note's table for every row."""
@@ -210,17 +216,18 @@ def decide(need_: dict, current: dict, variant: dict | None = None, *, variant_n
         failed = f" or failed its checks ({variant['failure']})" if variant.get("failure") else ""
         return out("keep", flag, f"the model needs sampling and the served configuration {why_current}; the drafter-off variant did not serve{failed}, "
                                  "so the served configuration is kept and needs the operator's attention")
-    both = cur_speed is not None and var_speed is not None
+    both = comparable(numbers)
 
     def neither(why: str) -> dict:
-        """Neither configuration applies sampling and clears the floor. The faster measured one is used and the choice is flagged. Equal speeds, or a
-        speed that was not measured on either side, leave the configuration stage 2 served: nothing shows the variant is faster."""
+        """Neither configuration applies sampling and clears the floor. When both speeds were measured on the same basis (both from sampled requests,
+        or both from greedy ones) the faster one is used and the choice is flagged. Equal speeds, a speed that was not measured, or speeds from
+        different requests leave the configuration stage 2 served: nothing shows the variant is faster."""
         if both and var_speed > cur_speed:
             return out("drafter-off", "no-variant-serves-purpose",
                        f"the model needs sampling; neither configuration does what it is for: {why}. The drafter-off variant is the faster of the two "
                        f"({_fmt(var_speed)} against {_fmt(cur_speed)}), so it is chosen and needs the operator's attention")
-        faster = ("The served configuration is the faster of the two" if both else
-                  "A speed was not measured, so the two cannot be compared and the served configuration stays")
+        faster = ("The served configuration decodes at least as fast as the variant" if both else
+                  "The two speeds could not be compared (one was not measured, or they come from different requests), so the served configuration stays")
         return out("keep", "no-variant-serves-purpose",
                    f"the model needs sampling; neither configuration does what it is for: {why}. {faster}, and it needs the operator's attention")
 
@@ -271,8 +278,10 @@ def card_sentence(decision: dict) -> str:
             s += (" The drafter-off configuration applies sampling and decodes above the usability floor in `orchard/defaults.py`. Its speeds are "
                   "in the Numbers table, in the rows marked sampling probe.")
         elif flag == "no-variant-serves-purpose":
-            s += (" Neither configuration that stage 2 measured both applies sampling and decodes above the usability floor, and the drafter-off "
-                  "configuration was the faster of the two, so it is the one this package serves. This package does not do what the model needs.")
+            s += (" Neither configuration that stage 2 measured both applies sampling and decodes above the usability floor, so this package serves "
+                  "the drafter-off configuration, which does not do what the model needs.")
+            if comparable(n) and n["variant_tok_s"] > n["served_tok_s"]:
+                s += " It decodes faster than the configuration stage 2 first served."
         else:
             s += (" This choice relies on the documented host-sampling path of the drafter-off configuration. A sampling verdict or a speed was not "
                   "measured for it, so this card does not claim that sampling was shown to apply or that the usability floor was cleared.")
@@ -285,7 +294,10 @@ def card_sentence(decision: dict) -> str:
         s = f"Stage 2 kept the configuration it served. The model needs sampling ({why})."
     if decision.get("choice") == "keep" and flag == "no-variant-serves-purpose":
         s += (" This package does not do what the model needs: no configuration that stage 2 measured both applies sampling and decodes above the "
-              "usability floor, so the faster one is kept. Read the decision file before relying on it.")
+              "usability floor, so the configuration stage 2 served is kept.")
+        if comparable(n) and n["served_tok_s"] >= n["variant_tok_s"]:
+            s += " It decodes at least as fast as the drafter-off variant."
+        s += " Read the decision file before relying on it."
     elif flag == "below-floor":
         s += " This package applies sampling but decodes below the usability floor. Read the decision file before relying on it."
     elif flag in ("unverified", "variant-not-tried"):

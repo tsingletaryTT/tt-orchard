@@ -610,7 +610,7 @@ def sampling_section(run: Run, redact: Redactor) -> list[str]:
 
 SAMPLING_FLAG_RISKS = {
     "no-variant-serves-purpose": "The model needs sampling, and no configuration that stage 2 measured both applies sampling and decodes above the "
-                                 "usability floor. The run ships the faster one, which does not do what the model needs.",
+                                 "usability floor. The run ships the selected configuration, which does not do what the model needs.",
     "below-floor": "The model needs sampling. The configuration that applies it decodes below the usability floor, and no other configuration is "
                    "available, so it is kept.",
     "unverified": "The model needs sampling, and a verdict or a speed that the choice rests on was not measured.",
