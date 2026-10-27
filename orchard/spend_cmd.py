@@ -19,6 +19,7 @@ from pathlib import Path
 from orchard import telegraph as tg
 from orchard import telegraph_cmd
 from orchard import virtualspend as vs
+from orchard import virtualspend_view as vsview
 
 EXIT_OK, EXIT_PROBLEM = 0, 2
 NOTE = ("Local spend is virtual. The agent logs re-send the whole conversation on every turn, so the prompt count is large; "
@@ -121,28 +122,34 @@ def main(args, *, out, environ=None, home=None) -> int:
     if getattr(args, "dir", None):
         ledger_dir = Path(args.dir)
     dirs = [Path(d) for d in (args.dirs or [])]
+    pin, listing_cut = None, False
     if not dirs:
         if runs_root is None or not Path(runs_root).is_dir():
             say("spend: name at least one directory, or set runs_root in the bringup config" + (f" ({problem})" if problem else ""))
             return EXIT_PROBLEM
-        try:
-            dirs = sorted(p for p in Path(runs_root).iterdir() if p.is_dir() and not p.is_symlink())
-        except OSError:
-            say("spend: the runs folder cannot be listed")
+        pin = vs.open_pin(runs_root)                                 # the runs folder is pinned: no link below it is followed
+        if pin is None:
+            say("spend: the runs folder cannot be opened")
             return EXIT_PROBLEM
+        listed, listing_cut = vsview.discover(Path(runs_root), pin)
+        dirs = [path for _, path in listed]
     rows, total = [], {"turns": 0, "prompt_tokens": 0, "completion_tokens": 0}
-    for d in dirs:
-        s = vs.priced(vs.scan(d), vcfg)
-        if not s["turns"] and not args.dirs:
-            continue                                                 # a folder under runs_root with no local turns is not listed
-        rows.append({"dir": str(d), **s})
-        for k in total:
-            total[k] += s[k]
+    try:
+        for d in dirs:
+            s = vs.priced(vs.scan(d, beneath=pin), vcfg)
+            if not s["turns"] and not args.dirs and s["complete"]:
+                continue                                             # a folder under runs_root with no local turns is not listed
+            rows.append({"dir": str(d), **s})
+            for k in total:
+                total[k] += s[k]
+    finally:
+        if pin is not None:
+            pin.close()
     all_local = vs.priced({**total, "agent_wall_s": None, "request_s": None, "skipped": {}, "files": 0, "sources": {}, "complete": True}, vcfg)
     real = _real(Path(ledger_dir))
     if args.json:
         say(json.dumps({"real_helper_spend": real,
-                        "local_virtual_spend": {"label": vs.LABEL, "note": NOTE, "directories": rows,
+                        "local_virtual_spend": {"label": vs.LABEL, "note": NOTE, "directories": rows, "listing_cut_short": listing_cut,
                                                 "all_directories": {k: all_local[k] for k in ("turns", "prompt_tokens", "completion_tokens", "virtual")}}},
                        indent=2, sort_keys=True))
         return EXIT_OK
@@ -164,6 +171,8 @@ def main(args, *, out, environ=None, home=None) -> int:
         say(f"  {r['dir']}: {r['turns']} turns · {r['prompt_tokens']} prompt, {r['completion_tokens']} completion tokens{wall}")
         for ref in r["virtual"]:
             say(f"      at {ref['name']} (${ref['price_in']:g} in, ${ref['price_out']:g} out per million): ${ref['cost_usd']:.4f}")
+        if not r["complete"]:
+            say("      INCOMPLETE: some logs were not read, so these figures are lower than the real use.")
         text = vs.skipped_text(r["skipped"])
         if text:
             say(f"      {text}")
@@ -172,6 +181,8 @@ def main(args, *, out, environ=None, home=None) -> int:
             f"{all_local['completion_tokens']} completion tokens")
         for ref in all_local["virtual"]:
             say(f"      at {ref['name']}: ${ref['cost_usd']:.4f}")
+    if listing_cut:
+        say("  The folder listing was cut short, so some folders are not listed at all.")
     say()
     say(NOTE)
     say("Chip lease time is not recorded in these logs, so it is not shown.")

@@ -391,3 +391,75 @@ def test_a_clean_ledger_has_no_pending_lines(tmp_path, probe):
     _write_records(ledger, [{"call_id": "c1", "outcome": "ok", "tokens_in": 100, "tokens_out": 50, "cost_usd": 0.01, "model": "m", "problem": "p"}])
     code, text = run(tmp_path, [str(probe), "--dir", str(ledger)])
     assert "unsettled" not in text and "torn" not in text and "unknown usage" not in text
+
+
+# ---- review (sixth round, sweep): the default run listing is read beneath a pinned runs folder ----------------------------------
+
+def test_the_default_listing_does_not_follow_a_run_folder_swapped_for_a_link_after_discovery(tmp_path, monkeypatch):
+    from orchard import virtualspend_view as view
+    runs = tmp_path / "runs"
+    write_log(runs, "org--a/stages/1/log/run-1.jsonl", [turn(1, 5, 1)])
+    outside = tmp_path / "outside"
+    write_log(outside, "stages/1/log/run-1.jsonl", [turn(1, 999, 9)])
+    real = view.discover
+
+    def discover_then_swap(root, *a):
+        found = real(root, *a)
+        import shutil
+        shutil.rmtree(runs / "org--a")
+        (runs / "org--a").symlink_to(outside, target_is_directory=True)
+        return found
+    monkeypatch.setattr(view, "discover", discover_then_swap)
+    bringup = tmp_path / "bringup.toml"
+    bringup.write_text(BASE)
+    out = io.StringIO()
+    code = cli.main(["spend", "--config", str(bringup), "--dir", str(tmp_path / "none")], env={}, stdout=out)
+    text = out.getvalue()
+    assert code == 0 and "999" not in text and "1 turns" not in text
+
+
+def test_the_default_listing_includes_the_kernel_probe_outputs_and_reads_them_beneath_the_pin(tmp_path):
+    runs = tmp_path / "runs"
+    write_log(runs, "org--a/stages/1/log/run-1.jsonl", [turn(1, 5, 1)])
+    write_log(runs, "kprobe/p1/op/attempt-1/log/probe-1.jsonl", [turn(1, 7, 1)])
+    bringup = tmp_path / "bringup.toml"
+    bringup.write_text(BASE)
+    out = io.StringIO()
+    code = cli.main(["spend", "--config", str(bringup), "--dir", str(tmp_path / "none")], env={}, stdout=out)
+    text = out.getvalue()
+    assert code == 0 and "org--a: 1 turns" in text and "kprobe/p1: 1 turns" in text
+    assert "all 2 directories: 2 turns" in text
+
+
+def test_the_default_listing_says_when_the_folder_listing_was_cut_short(tmp_path, monkeypatch):
+    from orchard import virtualspend_view as view
+    monkeypatch.setattr(view, "MAX_NAMES", 2)
+    runs = tmp_path / "runs"
+    for i in range(6):
+        write_log(runs, f"org--{i}/log/run.jsonl", [turn()])
+    bringup = tmp_path / "bringup.toml"
+    bringup.write_text(BASE)
+    out = io.StringIO()
+    cli.main(["spend", "--config", str(bringup), "--dir", str(tmp_path / "none")], env={}, stdout=out)
+    assert "The folder listing was cut short" in out.getvalue()
+    out = io.StringIO()
+    cli.main(["spend", "--json", "--config", str(bringup), "--dir", str(tmp_path / "none")], env={}, stdout=out)
+    assert json.loads(out.getvalue())["local_virtual_spend"]["listing_cut_short"] is True
+
+
+def test_an_unreadable_runs_folder_is_a_setup_error_not_an_empty_listing(tmp_path):
+    bringup = tmp_path / "bringup.toml"
+    bringup.write_text(BASE)                                                # runs_root = "runs" does not exist
+    out = io.StringIO()
+    code = cli.main(["spend", "--config", str(bringup), "--dir", str(tmp_path / "none")], env={}, stdout=out)
+    assert code == 2 and "name at least one directory" in out.getvalue()
+
+
+def test_an_incomplete_scan_is_marked_in_the_text_and_the_json(tmp_path, monkeypatch, probe):
+    from orchard import virtualspend as virtual
+    monkeypatch.setattr(virtual, "MAX_DEPTH", 1)
+    write_log(probe, "op/attempt-2/log/probe-1.jsonl", [turn(1, 5, 1)])      # below the depth limit
+    code, text = run(tmp_path, [str(probe), "--dir", str(tmp_path / "none")])
+    assert "INCOMPLETE" in text and "folders below the depth limit" in text
+    code, js = run(tmp_path, [str(probe), "--json", "--dir", str(tmp_path / "none")])
+    assert json.loads(js)["local_virtual_spend"]["directories"][0]["complete"] is False
