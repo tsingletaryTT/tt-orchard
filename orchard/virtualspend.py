@@ -630,7 +630,7 @@ def _scan_tree(root: Path, pin: _Pin, out: dict, skipped: dict) -> None:
     out["agent_wall_s"] = round(wall, 1) if wall_known else None
     out["request_s"] = round(request_s, 1) if request_known else None
     out["complete"] = not (skipped["oversize_files"] or skipped["files_not_read"] or skipped["walk_cut"]
-                         or skipped["depth_cut"])
+                         or skipped["depth_cut"] or skipped["unreadable_files"])
 
 
 def priced(scanned: dict, cfg: Config) -> dict:

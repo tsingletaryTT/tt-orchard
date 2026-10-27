@@ -670,3 +670,18 @@ def test_a_zero_virtual_cost_is_still_zero(tmp_path):
     write_log(empty, "log/run.jsonl", ["{bad"])
     code, text = run(tmp_path, [str(empty), "--dir", str(tmp_path / "none")])
     assert "$0.0000" in text.split("LOCAL virtual spend")[1]
+
+
+def test_a_folder_with_only_unreadable_logs_is_listed_and_marked_incomplete(tmp_path):
+    runs = tmp_path / "runs"
+    dead = write_log(runs, "org--dead/log/run.jsonl", [turn(1, 7, 1)])
+    os.chmod(dead, 0)
+    try:
+        if os.access(dead, os.R_OK):
+            pytest.skip("running as a user that can read mode 0 files")
+        out = io.StringIO()
+        cli.main(["spend", "--config", str(_runs_config(tmp_path)), "--dir", str(tmp_path / "none")], env={}, stdout=out)
+    finally:
+        os.chmod(dead, 0o644)
+    text = out.getvalue()
+    assert "org--dead: 0 turns" in text and "INCOMPLETE" in text and "files that could not be read" in text

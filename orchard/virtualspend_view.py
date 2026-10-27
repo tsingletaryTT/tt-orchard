@@ -28,12 +28,7 @@ NAME_MAX = 80
 PROBE_PARENT = "kprobe"              # kernel-probe outputs live in <runs>/kprobe/<name>
 
 
-def usd(value) -> str:
-    """Dollars with enough digits that a small cost never shows as zero (the same rule as telegraph_view.usd)."""
-    value = float(value or 0)
-    if value == 0:
-        return "$0.00"
-    return f"${value:.4f}" if value < 0.01 else f"${value:.2f}"
+usd = telegraph_view.usd              # one copy of the money format, shared with the helper meter (a tiny cost is "<$0.0001")
 
 
 def _is_dir(p: Path) -> bool:

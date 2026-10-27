@@ -1188,3 +1188,17 @@ def test_a_link_to_a_file_with_an_ordinary_name_is_not_counted(root, tmp_path):
     target.write_text("x")
     (root / "notes.txt").symlink_to(target)
     assert vs.scan(root)["skipped"]["links"] == 0
+
+
+def test_an_unreadable_file_makes_the_scan_incomplete_and_the_other_logs_still_count(root):
+    write_log(root, "a/log/run.jsonl", [turn(1, 5, 1)])
+    dead = write_log(root, "b/log/run.jsonl", [turn(1, 7, 1)])
+    os.chmod(dead, 0)
+    try:
+        if os.access(dead, os.R_OK):
+            pytest.skip("running as a user that can read mode 0 files")
+        s = vs.scan(root)
+    finally:
+        os.chmod(dead, 0o644)
+    assert (s["turns"], s["prompt_tokens"]) == (1, 5)
+    assert s["skipped"]["unreadable_files"] == 1 and s["complete"] is False

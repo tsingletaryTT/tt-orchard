@@ -806,3 +806,34 @@ def test_a_sound_answer_has_no_error_key_value(root):
 def test_the_check_is_the_helper_views_own_function():
     from orchard import telegraph_view
     assert view.telegraph_view._check_derived is telegraph_view._check_derived, "one copy of the check, shared"
+
+
+# ---- review (seventh round): a tiny virtual cost is not shown as zero in the meter, and unreadable files make a scan incomplete -----
+
+def test_the_meter_shows_a_tiny_nonzero_cost_as_less_than_a_hundredth_of_a_cent(root):
+    write_log(root, "org--a/log/run.jsonl", [turn(1, 100, 0)])                # $0.00001 at the default input price
+    data = get(app_with(root))[1]
+    assert data["meter"]["text"] == "Local ≈ <$0.0001 (virtual, at claude-haiku-5-5)"
+    assert data["total"]["virtual"][0]["cost_usd"] > 0
+
+
+def test_the_view_uses_the_helper_views_money_format():
+    from orchard import telegraph_view
+    assert view.usd is telegraph_view.usd, "one copy of the format, shared with the helper meter"
+    assert view.usd(0) == "$0.00" and view.usd(0.00001) == "<$0.0001" and view.usd(0.5) == "$0.50"
+
+
+def test_a_run_with_only_unreadable_logs_is_kept_and_marked_incomplete(root):
+    write_log(root, "org--a/log/run.jsonl", [turn(1, 5, 1)])
+    path = write_log(root, "org--b/log/run.jsonl", [turn(1, 7, 1)])
+    os.chmod(path, 0)
+    try:
+        if os.access(path, os.R_OK):
+            pytest.skip("running as a user that can read mode 0 files")
+        data = get(app_with(root))[1]
+    finally:
+        os.chmod(path, 0o644)
+    rows = {r["name"]: r for r in data["rows"]}
+    assert "org--b" in rows and rows["org--b"]["complete"] is False and rows["org--b"]["turns"] == 0
+    assert "files that could not be read" in rows["org--b"]["left_out"] and data["not_fully_read"] == 1
+    assert rows["org--a"]["complete"] is True
