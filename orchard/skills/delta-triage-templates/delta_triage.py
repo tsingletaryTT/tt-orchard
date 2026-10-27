@@ -1621,7 +1621,10 @@ def _read_table(table: _Table, rows: _Rows) -> None:
         rows.other_model_rows += len(data) - len(model_rows)
     else:
         col = next((j for j in range(1, width) if rows.is_model(head[j])), None)
-        if col is None and width == 2 and _norm(head[1]) in {_norm(x) for x in GENERIC_SCORE}:
+        # A two-column `Benchmark | Score` table is the model's own. A `Model | Score` table lists models, so its rows are
+        # somebody's scores and stay unread (they are counted below).
+        if col is None and width == 2 and _norm(head[1]) in {_norm(x) for x in GENERIC_SCORE} \
+                and first not in {_norm(x) for x in MODEL_FIRST}:
             col = 1
         if col is not None:
             before = [j for j in label_cols if j < col]

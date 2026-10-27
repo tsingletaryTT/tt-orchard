@@ -170,3 +170,16 @@ def test_a_linked_model_name_and_an_escaped_pipe_in_a_cell_are_read():
     assert by_name(extract(card))["MMLU"]["value"] == "71"
     card = "| Benchmark | Wren-7B |\n|---|---|\n| a \\| b | 5 |\n"
     assert set(by_name(extract(card))) == {"a | b"}
+
+
+def test_a_two_column_comparison_table_of_other_models_is_not_this_models_score():
+    """Review of PR 100: `| Model | Score |` holding only `Other-9B | 99` came out as a score for the requested model."""
+    for head in ("Model", "Models", "Name", "System", "Method", "Variant"):
+        r = extract(f"| {head} | Score |\n|---|---|\n| Other-9B | 99 |\n| Other-4B | 80 |\n")
+        assert r["rows"] == [], head
+        assert r["other_model_rows"] == 2, head
+
+
+def test_the_two_column_score_table_still_reads_when_the_first_column_names_benchmarks():
+    assert len(extract("| Benchmark | Score |\n|---|---|\n| MMLU | 71 |\n")["rows"]) == 1
+    assert len(extract("| Task | Result |\n|---|---|\n| ARC | 5 |\n")["rows"]) == 1
