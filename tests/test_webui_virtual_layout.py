@@ -87,7 +87,7 @@ def test_polling_asks_with_every_refresh_and_when_a_run_is_selected():
     assert "pollVirtual()" in runs and runs.index("pollVirtual()") < runs.index("Promise.all"), "its own request, before the others"
     assert "pollTelegraph()" not in runs, "the helper meter has its own timers on this branch; the local figure does not depend on them"
     sel = fn_body(js, "function select")
-    assert sel.index("S.selected = name") < sel.index("renderLocalMeter(null)") < sel.index("pollVirtual()"), "the old figure goes first"
+    assert sel.index("S.selected = name") < sel.index("renderLocalMeter(null)") < sel.index("pollVirtual({ force: true })"), "the old figure goes first"
 
 
 def test_the_table_has_a_column_for_every_reference_and_marks_them_virtual():
@@ -205,3 +205,35 @@ def test_the_page_shows_the_answers_error_and_redraws_when_it_changes():
     assert "v.error" in body and "(v.error ?" in body
     guard = next(line for line in body.splitlines() if "changed(" in line)
     assert "v.error" in guard
+
+
+# ---- review (seventh round): virtual polling is bounded, one request at a time, cancelled when stale, and backs off ------------
+
+def test_virtual_polling_has_a_timeout_an_in_flight_guard_cancellation_and_backoff():
+    js = JS()
+    poll = fn_body(js, "async function pollVirtual")
+    assert "new AbortController()" in poll and "signal: ctl.signal" in poll and "quiet: true" in poll
+    assert "VS_TIMEOUT_MS" in poll and "setTimeout(() => ctl.abort(), VS_TIMEOUT_MS)" in poll
+    assert "if (S.vsInflight) { if (!force) return; S.vsInflight.abort(); }" in poll, "one at a time; a forced poll cancels the older request"
+    assert "S.vsNextAt" in poll and "S.vsBackoff" in poll and "VS_BACKOFF_MAX_MS" in poll
+    assert "S.vsInflight !== ctl" in poll, "an answer or failure of a cancelled request is ignored"
+    assert "clearTimeout(timer)" in poll
+    assert "force = false" in poll
+
+
+def test_choosing_a_run_cancels_the_older_virtual_request_and_asks_again_at_once():
+    sel = fn_body(JS(), "function select")
+    assert "pollVirtual({ force: true })" in sel
+
+
+def test_the_api_helper_takes_a_signal_and_a_quiet_flag_so_a_side_request_cannot_mark_the_connection_offline():
+    api = fn_body(JS(), "async function api")
+    assert "opts.signal" in api and "opts.quiet" in api
+    assert 'if (!quiet) setConn("offline")' in api
+    assert "if (!quiet) {\n    S.lastOk = Date.now();" in api, "a quiet request does not renew the page's own liveness either"
+
+
+def test_the_polling_constants_are_bounded():
+    js = JS()
+    assert re.search(r"const VS_TIMEOUT_MS = (\d+);", js) and 3000 <= int(re.search(r"const VS_TIMEOUT_MS = (\d+);", js).group(1)) <= 15000
+    assert re.search(r"const VS_BACKOFF_MAX_MS = (\d+);", js) and int(re.search(r"const VS_BACKOFF_MAX_MS = (\d+);", js).group(1)) <= 60000

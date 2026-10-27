@@ -447,3 +447,89 @@ def test_the_page_says_a_run_failed_when_a_price_overflows_its_cost(tmp_path, br
         text = pg.inner_text("#telegraph-view")
         assert "Infinity" not in text and "NaN" not in text
     ctx.close()
+
+
+def _watch_virtual_requests(pg):
+    """Records when each /api/virtual-spend request starts and ends, and the most that were open at once."""
+    seen = {"started": 0, "open": 0, "max_open": 0, "failed": 0, "urls": []}
+
+    def started(r):
+        if "/api/virtual-spend" in r.url:
+            seen["started"] += 1
+            seen["open"] += 1
+            seen["max_open"] = max(seen["max_open"], seen["open"])
+            seen["urls"].append(r.url)
+
+    def ended(r):
+        if "/api/virtual-spend" in r.url:
+            seen["open"] = max(0, seen["open"] - 1)
+
+    def failed(r):
+        if "/api/virtual-spend" in r.url:
+            seen["failed"] += 1
+    pg.on("request", started)
+    pg.on("requestfinished", ended)
+    pg.on("requestfailed", lambda r: (failed(r), ended(r)))
+    return seen
+
+
+def test_a_hung_endpoint_gets_one_request_at_a_time_a_timeout_and_a_backoff(root, browser):
+    ctx, pg = new_page(browser)
+    seen = _watch_virtual_requests(pg)
+    with Served(app_for(root)) as s:
+        pg.route("**/api/virtual-spend*", lambda route: None)                  # every request stays pending
+        pg.goto(f"http://127.0.0.1:{s.port}/?mode=operator")
+        pg.wait_for_timeout(22000)
+        assert 1 <= seen["started"] <= 3, f"{seen['started']} requests in 22 s against a hung endpoint"
+        assert seen["failed"] >= 1, "the first request was aborted at its timeout"
+        expect(local(pg)).to_be_hidden()
+    ctx.close()
+
+
+def test_a_failing_endpoint_is_asked_less_and_less_often(root, browser):
+    ctx, pg = new_page(browser)
+    seen = _watch_virtual_requests(pg)
+    with Served(app_for(root)) as s:
+        pg.route("**/api/virtual-spend*", lambda route: route.fulfill(status=500, body="{}", content_type="application/json"))
+        pg.goto(f"http://127.0.0.1:{s.port}/?mode=operator")
+        pg.wait_for_timeout(16000)
+        assert 1 <= seen["started"] <= 4, f"{seen['started']} requests in 16 s against a failing endpoint"
+    ctx.close()
+
+
+def test_choosing_another_run_cancels_the_older_request_and_asks_for_the_new_run_at_once(root, browser):
+    ctx, pg = new_page(browser)
+    seen = _watch_virtual_requests(pg)
+    with Served(app_for(root)) as s:
+        pg.route("**/api/virtual-spend*", lambda route: None)
+        pg.goto(f"http://127.0.0.1:{s.port}/?mode=operator")
+        pg.wait_for_selector("[data-run-row]:visible")
+        pg.wait_for_timeout(1500)
+        before = seen["started"]
+        pg.locator('[data-run-name="org--idle"]:visible').click()
+        pg.wait_for_timeout(1500)
+        assert seen["started"] == before + 1, "a request for the newly selected run starts at once"
+        assert "run=org--idle" in seen["urls"][-1]
+        assert seen["failed"] >= 1, "the request for the run that was selected before is cancelled"
+    ctx.close()
+
+
+def test_the_figure_returns_after_a_hung_endpoint_recovers(root, browser):
+    ctx, pg = new_page(browser)
+    with Served(app_for(root)) as s:
+        pg.route("**/api/virtual-spend*", lambda route: None)
+        pg.goto(f"http://127.0.0.1:{s.port}/?mode=operator")
+        pg.wait_for_timeout(3000)
+        pg.unroute("**/api/virtual-spend*")
+        expect(local(pg)).to_have_text(FIRST, timeout=60000)
+    ctx.close()
+
+
+def test_aborting_a_virtual_request_does_not_mark_the_page_offline(root, browser):
+    ctx, pg = new_page(browser)
+    with Served(app_for(root)) as s:
+        pg.route("**/api/virtual-spend*", lambda route: None)
+        pg.goto(f"http://127.0.0.1:{s.port}/?mode=operator")
+        pg.wait_for_timeout(11000)                                             # past the request timeout
+        assert pg.locator("#conn").get_attribute("data-state") == "live"
+    ctx.close()

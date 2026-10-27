@@ -117,6 +117,8 @@ async function api(path, opts) {
     init.headers["X-Orchard-Token"] = S.meta ? S.meta.token : "";
     init.body = JSON.stringify(opts.body);
   }
+  const quiet = !!(opts && opts.quiet);  // a side request (the virtual figure): its failure does not mark the page offline
+  if (opts && opts.signal) init.signal = opts.signal;
   let timer = null;
   if (opts && opts.timeout) {            // an optional limit: the request is aborted and counts as a failure
     const ctl = new AbortController();
@@ -128,11 +130,13 @@ async function api(path, opts) {
     resp = await fetch(path, init);
   } catch (err) {
     if (timer) clearTimeout(timer);
-    setConn("offline");
+    if (!quiet) setConn("offline");
     throw new Error("The UI server cannot be reached. Is `tt-orchard ui` still running?");
   }
-  S.lastOk = Date.now();
-  setConn("live");
+  if (!quiet) {
+    S.lastOk = Date.now();
+    setConn("live");
+  }
   const isJson = (resp.headers.get("Content-Type") || "").includes("application/json");
   const data = isJson ? await resp.json() : await resp.text();      // the limit covers the body too
   if (timer) clearTimeout(timer);
@@ -228,16 +232,36 @@ function renderMachineChip(m, all, free) {
 // selected); it is hidden by its own timer STALE_MS after the last answer, so an old amount never stays on screen even when a
 // request never completes. It does not touch the
 // helper meter's state or colour.
-async function pollVirtual() {
+const VS_TIMEOUT_MS = 8000;            // a request that has not answered by then is aborted
+const VS_BACKOFF_START_MS = 2000;      // after a failure the next request waits this long, then twice as long, up to the cap
+const VS_BACKOFF_MAX_MS = 30000;
+
+// One request at a time. A request is aborted at VS_TIMEOUT_MS. A failure (a timeout, an error answer) delays the next request,
+// longer after each one. A forced poll (a different run was selected) aborts the older request and asks at once; the answer or
+// failure of an aborted request is ignored. Side requests never mark the page offline (`quiet`).
+async function pollVirtual({ force = false } = {}) {
+  if (S.vsInflight) { if (!force) return; S.vsInflight.abort(); }
+  if (!force && Date.now() < (S.vsNextAt || 0)) return;
+  const ctl = new AbortController();
+  S.vsInflight = ctl;
+  const timer = setTimeout(() => ctl.abort(), VS_TIMEOUT_MS);
   const asked = S.selected;
   try {
-    const answer = await api("/api/virtual-spend" + (asked ? `?run=${encodeURIComponent(asked)}` : ""));
-    if (S.selected !== asked) return;            // an answer about the run that was selected a moment ago
+    const answer = await api("/api/virtual-spend" + (asked ? `?run=${encodeURIComponent(asked)}` : ""), { signal: ctl.signal, quiet: true });
+    if (S.vsInflight !== ctl || S.selected !== asked) return;      // cancelled, or an answer about the run selected a moment ago
+    S.vsBackoff = 0;
+    S.vsNextAt = 0;
     S.virtual = answer;
     renderLocalMeter(S.virtual);
     renderLocalTable();
   } catch (err) {
-    // Nothing to do: the figure expires on its own timer (renderLocalMeter), whether a request fails or never answers.
+    if (S.vsInflight !== ctl) return;                              // cancelled by a newer poll: not a failure
+    S.vsBackoff = Math.min(VS_BACKOFF_MAX_MS, (S.vsBackoff || VS_BACKOFF_START_MS / 2) * 2);
+    S.vsNextAt = Date.now() + S.vsBackoff;
+    // The figure expires on its own timer (renderLocalMeter), whether a request fails or never answers.
+  } finally {
+    clearTimeout(timer);
+    if (S.vsInflight === ctl) S.vsInflight = null;
   }
 }
 
@@ -666,7 +690,7 @@ function select(name, { push = true } = {}) {
   S.selected = name;
   S.detail = null;
   renderLocalMeter(null);                      // the figure of the run just left must not stay beside the new one
-  pollVirtual();
+  pollVirtual({ force: true });
   S.ledgerAfter = 0; S.ledgerRows = []; S.file = null;
   if (push) history.replaceState(null, "", `#run/${encodeURIComponent(name)}`);
   renderRuns();
