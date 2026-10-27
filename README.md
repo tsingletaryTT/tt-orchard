@@ -1483,7 +1483,9 @@ it likes. The ops are `add` (a calibration op whose working kernel is upstream's
 
 Flags:
 
-- `--op`: the op to write a kernel for (`add`, `silu_mul`, `rmsnorm`, `linear_scan`). Required.
+- `--op`: the op to write a kernel for (`add`, `silu_mul`, `rmsnorm`, `linear_scan`, `center`, `softmax`, `tile_scan`). Required.
+  `tile_scan` is `linear_scan` taken across tile rows, with elementwise math inside each tile. It can be written and checked in the
+  simulator. `linear_scan` scans down all rows inside a tile, which needs single-element access that the simulator does not have.
 - `--attempts`: attempts per temperature, each a fresh conversation (default 5).
 - `--temperature`: the sampling temperature, 0 to 2 (default 0). Temperature 0 asks the server for greedy decoding.
   Attempts then often repeat each other but are not guaranteed to be identical (the live probe at temperature 0

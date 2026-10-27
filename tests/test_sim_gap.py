@@ -256,3 +256,72 @@ def test_the_skill_says_what_the_hardware_measurement_showed_about_the_two_funct
     assert "copied elements, wrote constants and shifted rows" in flat
     assert "refused `+`, `*`, `if` expressions and lists of values" in flat
     assert "`wait()` block" in flat
+
+
+# ---- review of PR 112: the hardware diagnostic and whether hardware really ran ----------------------------------
+
+COMPILE_ERROR = {"phase": "hw", "sets": [], "error": {"phase": "run", "type": "TTLangCompileError",
+                                                      "text": "error: list elements must be constants\n  --> kernel.py:21:18"}}
+
+
+def compile_failure_writer(calls):
+    def fake(argv, **kw):
+        calls.append(list(argv))
+        if "--out" in argv:
+            Path(argv[argv.index("--out") + 1]).write_text(json.dumps(COMPILE_ERROR))
+            with open(kw["log_path"], "a") as f:
+                f.write("error: list elements must be constants\n")
+            return kp.Watched(0, None, False, 1.0)
+        with open(kw["log_path"], "a") as f:
+            f.write("PASSED!\n")
+        return kp.Watched(0, None, False, 1.0)
+    return fake
+
+
+def row_cells(md, n=1):
+    row = next(l for l in md.splitlines() if l.startswith(f"| {n} |"))
+    return [c.strip() for c in row.strip("|").split("|")]
+
+
+def header_cells(md):
+    return [c.strip() for c in next(l for l in md.splitlines() if l.startswith("| attempt |")).strip("|").split("|")]
+
+
+def row_of(md, n=1):
+    return dict(zip(header_cells(md), row_cells(md, n)))
+
+
+def test_a_hardware_compile_error_shows_in_the_report_beside_the_simulator_detail(tmp_path, fake_kenv):
+    adir, attempt = sim_gap_attempt(tmp_path, fake_kenv)
+    kp.run_hardware([attempt], probe_dir=tmp_path, env=fake_kenv, shared_python="/p",
+                    run_watched=compile_failure_writer([]))
+    cells = row_of(report_for(tmp_path, fake_kenv, [attempt]))
+    assert cells["hardware"] == "no (hardware only)"
+    assert cells["category"] == "compile_error"
+    assert "list elements must be constants" in cells["first line"]
+    assert "sim_gap" in cells["simulator detail"] and "no ttl.raw_element_read" in cells["simulator detail"]
+    # the record keeps the simulator's category and line
+    assert attempt["category"] == "sim_gap" and attempt["first_line"].startswith("the simulator has no")
+
+
+def test_a_hardware_numeric_failure_also_shows_its_own_category(tmp_path, fake_kenv):
+    adir, attempt = sim_gap_attempt(tmp_path, fake_kenv)
+    kp.run_hardware([attempt], probe_dir=tmp_path, env=fake_kenv, shared_python="/p",
+                    run_watched=hw_writer([dict(GOOD_HW_SET, pcc=0.2)], []))
+    assert row_of(report_for(tmp_path, fake_kenv, [attempt]))["category"] == "hw_numeric_mismatch"
+
+
+def test_a_hardware_pass_of_a_sim_gap_attempt_shows_no_failure_category(tmp_path, fake_kenv):
+    adir, attempt = sim_gap_attempt(tmp_path, fake_kenv)
+    kp.run_hardware([attempt], probe_dir=tmp_path, env=fake_kenv, shared_python="/p",
+                    run_watched=hw_writer([GOOD_HW_SET], []))
+    cells = row_of(report_for(tmp_path, fake_kenv, [attempt]))
+    assert cells["category"] == "-" and cells["hardware"] == "yes (hardware only)"
+    assert "sim_gap" in cells["simulator detail"]
+
+
+def test_an_attempt_that_is_not_hardware_only_keeps_a_dash_for_simulator_detail(tmp_path, fake_kenv):
+    adir, attempt = _passed_attempt(tmp_path, fake_kenv)
+    kp.run_hardware([attempt], probe_dir=tmp_path, env=fake_kenv, shared_python="/p",
+                    run_watched=hw_writer([GOOD_HW_SET], []))
+    assert row_of(report_for(tmp_path, fake_kenv, [attempt]))["simulator detail"] == "-"

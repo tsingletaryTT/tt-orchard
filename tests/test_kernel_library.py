@@ -5,7 +5,7 @@ import pytest
 from orchard import kernelprobe as kp
 
 LIBRARY = kp.TEMPLATES / "library"
-OPS_WITH_A_KERNEL = ["center", "rmsnorm", "silu_mul", "softmax"]
+OPS_WITH_A_KERNEL = ["center", "rmsnorm", "silu_mul", "softmax", "tile_scan"]
 
 
 def test_the_library_holds_one_kernel_per_op_and_nothing_else():
@@ -27,8 +27,8 @@ def test_mode_all_offers_every_library_kernel():
 
 def test_mode_others_leaves_out_the_op_under_test_only():
     assert _names(kp.library_references("rmsnorm", "others")) == ["library_center.py", "library_silu_mul.py",
-                                                                    "library_softmax.py"]
-    assert len(kp.library_references("add", "others")) == 4          # an op with no kernel of its own loses nothing
+                                                                    "library_softmax.py", "library_tile_scan.py"]
+    assert len(kp.library_references("add", "others")) == 5          # an op with no kernel of its own loses nothing
 
 
 def test_mode_none_offers_nothing_and_an_unknown_mode_is_refused():
