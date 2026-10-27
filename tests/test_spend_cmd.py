@@ -175,3 +175,26 @@ def test_the_command_writes_nothing(tmp_path, probe):
 def test_one_directory_gets_no_all_directories_line(tmp_path, probe):
     code, text = run(tmp_path, [str(probe), "--dir", str(tmp_path / "none")])
     assert code == 0 and "all 1 directories" not in text and "directories:" not in text
+
+
+
+# ---- review fix 1: a config that was named and is missing is a setup error ------------------------------------------
+
+def test_a_named_config_that_is_missing_is_a_setup_error_not_a_silent_default(tmp_path, probe, monkeypatch):
+    monkeypatch.setattr(cli, "CHECKOUT", tmp_path / "no-checkout")
+    missing = tmp_path / "gone.toml"
+    for argv, env in ((["spend", str(probe), "--config", str(missing)], {}),
+                      (["spend", str(probe)], {cli.CONFIG_ENV: str(missing)})):
+        out = io.StringIO()
+        code = cli.main(argv, env=env, stdout=out)
+        text = out.getvalue()
+        assert code == 2 and "does not exist" in text, (argv, text)
+        assert "REAL" not in text and "claude-haiku" not in text, "no figures from default settings"
+
+
+def test_a_missing_config_found_by_discovery_still_falls_back_to_the_defaults(tmp_path, probe, monkeypatch):
+    monkeypatch.setattr(cli, "CHECKOUT", tmp_path / "no-checkout")
+    out = io.StringIO()
+    args = cli._parser().parse_args(["spend", str(probe)])
+    assert spend_cmd.main(args, out=out, environ={}, home=tmp_path / "home") == 0
+    assert "at claude-haiku-5-5" in out.getvalue()

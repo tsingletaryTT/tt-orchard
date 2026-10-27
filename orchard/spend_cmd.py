@@ -41,6 +41,9 @@ def _config(args, environ, home):
     try:
         path = telegraph_cmd._config_path(args, environ, home)
     except cli.NoConfig as exc:
+        named = getattr(args, "config", None) or environ.get(cli.CONFIG_ENV)
+        if named:                                                    # a config the person named and that is missing is a setup error
+            return None, None, None, str(exc)
         return vs.Config(), telegraph_cmd.default_dir(home), None, str(exc)
     try:
         vcfg = vs.load_file(path)
