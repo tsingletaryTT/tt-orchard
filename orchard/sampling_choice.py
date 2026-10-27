@@ -312,6 +312,13 @@ def variant_side(stage_dir) -> dict | None:
     serve (a server that never started writes no swap check). Otherwise the side comes from the variant's own swap check, and a result that says it
     served with no swap check gives a side with no verdict and no speed."""
     sd = Path(stage_dir)
+    # The supervisor's record of the trial's test comes first. A test that timed out or exited non-zero can still have left a swap check, and the
+    # supervisor discards that variant, so this reader must too.
+    marker_path = sd / TRIAL_DIR / "test-result.json"
+    if marker_path.exists():
+        marker = _read_json(marker_path)
+        if not (isinstance(marker, dict) and marker.get("returncode") == 0 and not marker.get("timed_out")):
+            return None
     trial = _read_json(sd / TRIAL_DIR / TRIAL_RESULT)
     v = trial.get("variant") if isinstance(trial, dict) else None
     from_report = side_from_report(_read_json(sd / TRIAL_DIR / "variant" / "evidence" / "swap-check.json"))
