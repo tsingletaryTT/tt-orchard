@@ -531,7 +531,8 @@ def test_write_report_counts_attempts_to_first_pass_per_op(tmp_path):
 
 def test_the_category_list_includes_forbidden_code_and_hang():
     assert {"no_kernel", "import_error", "tt_lang_error", "shape_mismatch", "numeric_mismatch", "timeout",
-            "compile_error", "hang", "hw_numeric_mismatch", "harness_error", "forbidden_code", "queued"} == set(kp.CATEGORIES)
+            "compile_error", "hang", "hw_numeric_mismatch", "harness_error", "forbidden_code", "queued",
+            "sim_gap"} == set(kp.CATEGORIES)
 
 
 # ---- the probe-owned verdict directory (fix round 1) ------------------------------------------------------------
@@ -1380,6 +1381,8 @@ def test_importing_the_cli_does_not_import_the_kernel_probe():
 def test_after_a_kernel_hang_the_report_counts_only_attempts_that_ran_on_hardware(tmp_path, fake_kenv, env_ready):
     def kernel_run_hangs(argv, **kw):
         if "--out" in argv:
+            with open(kw["log_path"], "a") as f:
+                f.write("PROGRESS import\nPROGRESS open_device\nPROGRESS set seed0\nPROGRESS run seed0\n")
             return kp.Watched(-9, "stalled: no output and no CPU use for 60 s", True, 70.0)
         with open(kw["log_path"], "a") as f:
             f.write("PASSED!\n")
