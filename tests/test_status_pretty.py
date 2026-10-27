@@ -28,7 +28,9 @@ def facts(tmp_path, **override):
         led.append("stage_start", 1)
     f = status.collect(run, now=1_800_000_000, pid_alive=lambda p: True, lock_holder=lambda p: None,
                        disk_free_gb=lambda p: 200.0, gozer_status=lambda: "")
-    f.update(override)
+    # The page prints the run directory on one unbreakable line. pytest's temporary path is much longer under xdist workers
+    # (popen-gw0/...), which made the 80-column test fail only in parallel runs, so the page is shown a short fixed path.
+    f.update({"run_dir": "/r/run", **override})
     return f, run
 
 

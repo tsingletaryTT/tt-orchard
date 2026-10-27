@@ -2477,3 +2477,9 @@ recommended approval after seeing only the two version files, so the instruction
 - Not known: which file Copilot counts. The error names `.github/copilot-instructions.md`, `AGENTS.md` and similar, and none of those exist here. `CLAUDE.md` is the only large
   instruction-like file, and the failure and the thin reviews fit it. If the next review still fails, the cause is elsewhere (an organisation setting).
 - Open branches that append to `CLAUDE.md` will conflict. Their entries belong at the end of `docs/project-log.md`.
+
+## 2026-10-28 (UTC): the three `test_status_pretty` failures under parallel runs have a cause (branch `fix-status-pretty-flaky`, version 0.9.20)
+Every agent in the review rounds of PRs 106 to 116 reported three `tests/test_status_pretty.py` failures that appear only with `pytest -n 4` and pass alone. Copilot's review of PR 112 called them unexplained.
+- Cause: the test helper built the run directory under pytest's temporary path, and the status page prints that path on one unbreakable line. Under xdist the path is longer (`.../popen-gw0/...`), so one line passed 80 columns in the 80-column test and in the closing-line test. It reproduced on `main` with `-n 4`.
+- Fix: the helper shows the page a short fixed run path (`/r/run`); the files it reads still live under `tmp_path`. A test file run alone and with `-n 4` passes (46 tests). Reverting the change turns the same three red under `-n 4`.
+- Not changed: the page itself still prints a long path on one line. A narrower terminal wraps it where the terminal allows.
