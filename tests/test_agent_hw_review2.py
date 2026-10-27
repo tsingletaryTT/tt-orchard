@@ -185,3 +185,22 @@ def test_the_report_says_the_chip_time_of_an_interrupted_call_is_an_upper_bound(
     row = next(l for l in md.splitlines() if "| interrupted |" in l)
     assert "upper bound" in row and "30" in row
     assert "30 s of chip time" in md
+
+
+def test_only_the_run_in_progress_counts_as_board_time_not_the_earlier_waiting():
+    w = World([(dict(good_hw(), passed=False, category="queued", first_line="q", elapsed_s=0.5,
+                     queued={"ticket": "T1", "cancel_error": None}), "queued", "")])
+    real = w.run
+    calls = []
+
+    def run(k, timeout_s):
+        calls.append(k)
+        if len(calls) == 1:
+            return real(k, timeout_s)                       # busy: 0.5 s, then the call sleeps 10 s
+        w.now += 5.0
+        raise KeyboardInterrupt                             # the second try held the board for 5 s
+    c = hwtool.HardwareCheck(hwtool.HwPolicy(), prepare=w.prepare, run=run, clock=w.clock, sleep=w.sleep)
+    with pytest.raises(KeyboardInterrupt):
+        c.call({})
+    rec = c.summary()["calls"][0]
+    assert rec["lease_s"] == 5.0 and rec["total_s"] == 15.5 and c.summary()["lease_s_used"] == 5.0
