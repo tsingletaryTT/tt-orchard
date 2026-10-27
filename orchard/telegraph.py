@@ -45,7 +45,7 @@ REPO = Path(__file__).resolve().parents[1]
 LEDGER = "telegraph.jsonl"
 KEYS = {"enabled", "endpoint", "models", "api", "key_env", "key_file", "after_failures", "max_calls",
         "max_total_tokens", "max_cost_usd", "prices", "max_output_tokens", "max_prompt_chars", "timeout_s",
-        "extra_body"}
+        "extra_body", "max_calls_per_problem", "max_tokens_per_problem", "max_cost_per_problem_usd"}
 RESERVED_BODY = ("model", "messages", "max_tokens", "temperature", "system", "stream")
 APIS = ("openai", "anthropic")
 ANTHROPIC_VERSION = "2023-06-01"
@@ -77,6 +77,9 @@ class Config:
     max_prompt_chars: int = 12000
     timeout_s: int = 120
     extra_body: dict = field(default_factory=dict)      # added to every request body, for example to turn thinking off
+    max_calls_per_problem: int = 3                      # one problem (the id the caller passes) may not use more than this
+    max_tokens_per_problem: int | None = None
+    max_cost_per_problem_usd: float | None = None
 
 
 def _int(table: dict, key: str, default: int, lowest: int) -> int:
@@ -149,6 +152,14 @@ def load(table: dict | None, *, base: Path) -> Config:
         if not prices:
             raise ConfigError("telegraph.max_cost_usd needs telegraph.prices for the models it may call")
         cap = float(cap)
+    per_cost = table.get("max_cost_per_problem_usd")
+    if per_cost is not None:
+        if isinstance(per_cost, bool) or not isinstance(per_cost, (int, float)) or per_cost <= 0:
+            raise ConfigError("telegraph.max_cost_per_problem_usd must be a number above zero")
+        if not prices:
+            raise ConfigError("telegraph.max_cost_per_problem_usd needs telegraph.prices for the models it may call")
+        per_cost = float(per_cost)
+    per_tokens = _int(table, "max_tokens_per_problem", 0, 1) if "max_tokens_per_problem" in table else None
     extra = table.get("extra_body", {})
     if not isinstance(extra, dict):
         raise ConfigError("telegraph.extra_body must be a table")
@@ -161,7 +172,9 @@ def load(table: dict | None, *, base: Path) -> Config:
         max_calls=_int(table, "max_calls", 5, 0), max_total_tokens=_int(table, "max_total_tokens", 40000, 0),
         max_cost_usd=cap, prices=prices, max_output_tokens=_int(table, "max_output_tokens", 1500, 1),
         max_prompt_chars=_int(table, "max_prompt_chars", 12000, MIN_PROMPT_CHARS),
-        timeout_s=_int(table, "timeout_s", 120, 1), extra_body=dict(extra))
+        timeout_s=_int(table, "timeout_s", 120, 1), extra_body=dict(extra),
+        max_calls_per_problem=_int(table, "max_calls_per_problem", 3, 1), max_tokens_per_problem=per_tokens,
+        max_cost_per_problem_usd=per_cost)
 
 
 # ----------------------------------------------------------------------------------------------------- redaction
@@ -307,6 +320,15 @@ def summarise(directory) -> dict:
             "by_model": by_model, "by_problem": by_problem}
 
 
+def _problem_usage(recs: list[dict], problem: str) -> dict:
+    """Calls, tokens and known cost the ledger holds for requests sent for `problem`."""
+    name = str(problem)[:80]
+    mine = [r for r in recs if _sent(r) and r.get("problem") == name]
+    return {"name": name, "calls": len(mine),
+            "tokens": sum(int(r.get("tokens_in") or 0) + int(r.get("tokens_out") or 0) for r in mine),
+            "cost": sum(r["cost_usd"] for r in mine if isinstance(r.get("cost_usd"), (int, float)))}
+
+
 class Telegraph:
     """One configured helper. `directory` holds the ledger, the cache and the reply files (mode 0600)."""
 
@@ -351,7 +373,7 @@ class Telegraph:
             return Answer(True, hit["text"], call_id=base["call_id"], model=model, cached=True, cost_usd=0.0)
         if key_problem:
             return self._refuse(base, "no-key", key_problem)
-        why = self._over_budget(model, prompt, summarise(self.dir))
+        why = self._over_budget(model, prompt, summarise(self.dir), _problem_usage(recs, problem))
         if why:
             return self._refuse(base, "budget", why)
         return self._send(base, model, prompt, key, secrets, cache)
@@ -387,8 +409,21 @@ class Telegraph:
             steps = 0 if r.get("helped") else steps + 1
         return self.cfg.models[min(steps, len(self.cfg.models) - 1)]
 
-    def _over_budget(self, model: str, prompt: str, used: dict) -> str | None:
+    def _over_budget(self, model: str, prompt: str, used: dict, here: dict) -> str | None:
         cfg = self.cfg
+        name = f"problem {here['name']}"
+        if here["calls"] >= cfg.max_calls_per_problem:
+            return f"the call cap for {name} is reached ({here['calls']} of {cfg.max_calls_per_problem})"
+        if cfg.max_tokens_per_problem is not None and here["tokens"] >= cfg.max_tokens_per_problem:
+            return f"the token cap for {name} is reached ({here['tokens']} of {cfg.max_tokens_per_problem})"
+        if cfg.max_cost_per_problem_usd is not None:
+            price = cfg.prices.get(model)
+            if price is None:
+                return f"the cost cap for {name} needs a price, and there is no price for {model}"
+            worst = (len(prompt) + len(SYSTEM)) / 3 * price[0] / 1e6 + cfg.max_output_tokens * price[1] / 1e6
+            if here["cost"] + worst > cfg.max_cost_per_problem_usd:
+                return (f"the cost cap for {name} would be passed (spent {here['cost']:.6f}, this call could cost up "
+                        f"to {worst:.6f}, cap {cfg.max_cost_per_problem_usd})")
         if used["calls"] >= cfg.max_calls:
             return f"the call cap is reached ({used['calls']} of {cfg.max_calls})"
         if used["tokens_in"] + used["tokens_out"] >= cfg.max_total_tokens:

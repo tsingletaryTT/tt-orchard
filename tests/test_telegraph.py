@@ -585,3 +585,85 @@ def test_a_cache_entry_that_still_holds_reasoning_is_not_used(tmp_path):
     entry.write_text(json.dumps(data))
     got = tel.ask("p", "t", "f")
     assert len(wire.requests) == 2 and not got.cached and "<think>" not in got.text
+
+
+# ------------------------------------------------------------------------------------------------ a cap for one problem
+
+def test_defaults_for_one_problem_are_a_few_calls_and_no_other_cap():
+    cfg = tg.load(table(), base=Path("/x"))
+    assert cfg.max_calls_per_problem == 3 and cfg.max_tokens_per_problem is None and cfg.max_cost_per_problem_usd is None
+    assert tg.Config().max_calls_per_problem == 3
+
+
+@pytest.mark.parametrize("bad, text", [({"max_calls_per_problem": 0}, "max_calls_per_problem"),
+                                       ({"max_calls_per_problem": True}, "max_calls_per_problem"),
+                                       ({"max_tokens_per_problem": 0}, "max_tokens_per_problem"),
+                                       ({"max_cost_per_problem_usd": 0.5}, "prices"),
+                                       ({"max_cost_per_problem_usd": -1, "prices": {"small": [1, 1], "big": [1, 1]}},
+                                        "max_cost_per_problem_usd")])
+def test_a_bad_per_problem_setting_is_refused(bad, text):
+    with pytest.raises(tg.ConfigError, match=text):
+        tg.load(table(**bad), base=Path("/x"))
+
+
+def test_the_calls_for_one_problem_stop_at_the_cap_while_another_problem_is_still_served(tmp_path):
+    tel, wire = make(tmp_path, max_calls_per_problem=2, max_calls=10)
+    tel.ask("scan", "t", "f1")
+    tel.ask("scan", "t", "f2")
+    got = tel.ask("scan", "t", "f3")
+    assert not got.ok and "problem scan" in got.reason and "call cap" in got.reason and len(wire.requests) == 2
+    assert tel.ask("other", "t", "f1").ok and len(wire.requests) == 3
+    assert records(tmp_path)[2]["outcome"] == "budget"
+
+
+def test_a_cache_hit_and_a_failed_request_are_counted_as_the_ledger_counts_them(tmp_path):
+    tel, wire = make(tmp_path, max_calls_per_problem=2)
+    tel.ask("p", "t", "same")
+    tel.ask("p", "t", "same")                                       # a cache hit: not a call
+    assert tel.ask("p", "t", "other").ok                            # the second call
+    assert not tel.ask("p", "t", "third").ok and len(wire.requests) == 2
+
+
+def test_the_token_cap_for_one_problem_counts_that_problems_tokens_only(tmp_path):
+    tel, wire = make(tmp_path, max_tokens_per_problem=200, max_calls_per_problem=10)    # 150 tokens a call
+    tel.ask("a", "t", "f1")
+    assert tel.ask("a", "t", "f2").ok                               # 150 < 200 before the call
+    got = tel.ask("a", "t", "f3")
+    assert not got.ok and "problem a" in got.reason and "token cap" in got.reason
+    assert tel.ask("b", "t", "f1").ok
+
+
+def test_the_token_cap_for_a_problem_stops_when_the_total_equals_it(tmp_path):
+    tel, wire = make(tmp_path, max_tokens_per_problem=300, max_calls_per_problem=10)
+    tel.ask("a", "t", "f1")
+    tel.ask("a", "t", "f2")
+    assert not tel.ask("a", "t", "f3").ok and len(wire.requests) == 2
+
+
+def test_the_cost_cap_for_one_problem_looks_at_the_worst_case_of_the_next_call(tmp_path):
+    tel, wire = make(tmp_path, max_cost_per_problem_usd=0.0005, max_output_tokens=100, max_calls_per_problem=10,
+                     prices={"small": [1.0, 3.0], "big": [5.0, 15.0]})
+    assert tel.ask("a", "t", "f1").ok                               # 210 micro-dollars; the next could cost up to 350
+    got = tel.ask("a", "t", "f2")
+    assert not got.ok and "problem a" in got.reason and "cost cap" in got.reason and len(wire.requests) == 1
+    assert tel.ask("b", "t", "f1").ok
+
+
+def test_a_model_with_no_price_is_refused_under_a_per_problem_cost_cap(tmp_path):
+    tel, wire = make(tmp_path, max_cost_per_problem_usd=1.0, prices={"big": [5.0, 15.0]})
+    got = tel.ask("a", "t", "f")
+    assert not got.ok and "no price for small" in got.reason and wire.requests == []
+
+
+def test_the_per_problem_cap_is_kept_across_processes(tmp_path):
+    tel, _ = make(tmp_path, max_calls_per_problem=1)
+    tel.ask("a", "t", "f1")
+    tel2, wire2 = make(tmp_path, max_calls_per_problem=1)
+    assert not tel2.ask("a", "t", "f2").ok and wire2.requests == []
+
+
+def test_the_summary_counts_refusals_for_a_problem_cap(tmp_path):
+    tel, _ = make(tmp_path, max_calls_per_problem=1)
+    tel.ask("a", "t", "f1")
+    tel.ask("a", "t", "f2")
+    assert tg.summarise(tmp_path / "tg")["refused"] == 1
