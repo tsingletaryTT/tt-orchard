@@ -76,9 +76,11 @@ def _ledger_facts(directory: Path) -> dict:
     else:
         try:
             records = tg._read_ledger_strict(directory)         # raises LedgerUnavailable on any failure but a missing file
-            summary = tg.summarise(directory)
-            acct = tg.accounting(records)
+            _check_records(records)
+            summary = tg.summarise_records(records)                # one read: the summary, the accounting and the rows
+            acct = tg.accounting(records)                          # all describe this one snapshot
             torn = sum(1 for r in records if "torn" in r)
+            _dry_run(records, acct)
             facts = {"error": None, "records": records, "summary": {**summary, "torn": torn}, "acct": acct}
         except tg.LedgerUnavailable:
             return _unreadable("the ledger cannot be read")        # not cached: the next poll tries again
@@ -89,6 +91,28 @@ def _ledger_facts(directory: Path) -> dict:
         _cache.clear()
     _cache[str(directory)] = (key, facts)
     return facts
+
+
+ID_KEYS = ("call_id", "origin", "problem", "model", "reserve", "report")
+
+
+def _check_records(records: list[dict]) -> None:
+    """A record whose id, problem or model is a list or a table is damaged: it cannot be a name or a key. Raising here puts the
+    whole ledger in the `problem` state with an unknown spend, inside the guarded read, so no later step meets it."""
+    for r in records:
+        for key in ID_KEYS:
+            if isinstance(r.get(key), (list, dict)):
+                raise ValueError(f"record field {key} is not a name")
+
+
+def _dry_run(records: list[dict], acct: dict) -> None:
+    """Run every derivation the page makes on these records once, with nothing redacted, so a record that breaks one of them
+    is found here (and cached as an error) and not while an answer is being built."""
+    ident = lambda t: t                                          # noqa: E731
+    _recent(records, _verdicts(records), ident)
+    _model_rows(records, ident)
+    _problem_rows(records, acct, _verdicts(records), tg.Config(), ident)
+    _latest_refusal(records)
 
 
 def _unreadable(message: str) -> dict:

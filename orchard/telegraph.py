@@ -434,7 +434,11 @@ accounting = _accounting
 
 def summarise(directory) -> dict:
     """What the help cost and bought: counts, tokens, cost (known calls only), and per model and problem."""
-    recs = _read_ledger(Path(directory))
+    return summarise_records(_read_ledger(Path(directory)))
+
+
+def summarise_records(recs: list[dict]) -> dict:
+    """`summarise` for records that were already read, so one snapshot of the ledger can serve the summary and the accounting."""
     calls = [r for r in recs if _sent(r)]
     verdict = {}
     for r in recs:
