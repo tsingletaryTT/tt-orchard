@@ -271,7 +271,11 @@ def test_both_meters_stay_on_screen_at_the_bottom_of_a_tall_page(tmp_path, brows
     with Served(app_for(r)) as s:
         pg.goto(f"http://127.0.0.1:{s.port}/?mode={mode}#telegraph")
         expect(pg.locator("#tg-local-body tr")).to_have_count(45)
-        pg.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        for _ in range(50):                                              # the page grows as its parts render: wait until it is tall
+            if pg.evaluate("document.body.scrollHeight") > 1500:
+                break
+            pg.wait_for_timeout(100)
+        pg.evaluate("window.scrollTo({top: document.body.scrollHeight, behavior: 'instant'})")
         assert pg.evaluate("window.scrollY") > 500, "the page must be taller than the window for this test to mean anything"
         expect(local(pg)).to_be_in_viewport()
         expect(pg.locator("#spend-meter")).to_be_in_viewport()
@@ -290,4 +294,26 @@ def test_the_page_names_the_runs_that_were_not_scanned(tmp_path, browser, monkey
         pg.goto(f"http://127.0.0.1:{s.port}/?mode=operator#telegraph")
         expect(pg.locator("#tg-local-note")).to_contain_text("3 runs not scanned")
         expect(local(pg)).to_have_attribute("title", __import__("re").compile("3 runs were not scanned"))
+    ctx.close()
+
+
+
+def test_the_figure_expires_even_when_a_request_never_answers(root, browser):
+    ctx, pg = new_page(browser)
+    with Served(app_for(root)) as s:
+        pg.goto(f"http://127.0.0.1:{s.port}/?mode=operator")
+        expect(local(pg)).to_have_text(FIRST)
+        pg.route("**/api/virtual-spend*", lambda route: None)           # every later request stays pending: no response, no failure
+        expect(local(pg)).to_be_hidden(timeout=30000)
+        pg.unroute("**/api/virtual-spend*")
+    ctx.close()
+
+
+def test_a_fresh_answer_keeps_the_figure_beyond_the_expiry_time(root, browser):
+    ctx, pg = new_page(browser)
+    with Served(app_for(root)) as s:
+        pg.goto(f"http://127.0.0.1:{s.port}/?mode=operator")
+        expect(local(pg)).to_have_text(FIRST)
+        pg.wait_for_timeout(20000)                                       # longer than the 15 s expiry; polls keep renewing it
+        expect(local(pg)).to_have_text(FIRST)
     ctx.close()

@@ -72,10 +72,10 @@ def test_an_answer_for_a_run_that_is_no_longer_selected_is_dropped():
     assert "encodeURIComponent(asked)" in poll
 
 
-def test_the_figure_is_hidden_after_an_outage_and_when_there_is_nothing_to_show():
+def test_the_figure_is_hidden_when_there_is_nothing_to_show_and_by_its_own_timer():
     js = JS()
     poll = fn_body(js, "async function pollVirtual")
-    assert "renderLocalMeter(null)" in poll and "STALE_MS" in poll and "S.vsOk" in poll
+    assert "renderLocalMeter(null)" not in poll.split("catch")[1], "a failed request does not decide the expiry"
     meter = fn_body(js, "function renderLocalMeter")
     assert "el.hidden = !meter" in meter and "textContent" in meter
 
@@ -145,3 +145,13 @@ def test_the_page_says_how_many_runs_were_not_scanned():
     assert 'plural(v.not_scanned, "run")} not scanned' in body
     guard = next(line for line in body.splitlines() if "changed(" in line)
     assert "v.not_scanned" in guard, "a change in the count must redraw the note"
+
+
+
+def test_the_local_figure_has_its_own_expiry_timer_that_each_answer_renews():
+    js = JS()
+    meter = fn_body(js, "function renderLocalMeter")
+    assert "clearTimeout(S.vsTimer)" in meter and "setTimeout(" in meter and "STALE_MS" in meter
+    assert meter.index("clearTimeout(S.vsTimer)") < meter.index("setTimeout(")
+    poll = fn_body(js, "async function pollVirtual")
+    assert "S.vsOk" not in poll, "no timer may depend on the next response arriving"

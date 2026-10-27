@@ -217,7 +217,8 @@ function renderMachineChip(m, all, free) {
 // ---- virtual spend: the local models' token use at a hosted model's price (orchard/virtualspend_view.py) ----------------
 // A comparison figure, never money and never added to the helper spend. It has its own request and its own failure handling.
 // It is shown only when local logs with token counts exist for the selected run (or for the listed runs when none is
-// selected); after STALE_MS without an answer it is hidden, so an old amount never stays on screen. It does not touch the
+// selected); it is hidden by its own timer STALE_MS after the last answer, so an old amount never stays on screen even when a
+// request never completes. It does not touch the
 // helper meter's state or colour.
 async function pollVirtual() {
   const asked = S.selected;
@@ -225,19 +226,20 @@ async function pollVirtual() {
     const answer = await api("/api/virtual-spend" + (asked ? `?run=${encodeURIComponent(asked)}` : ""));
     if (S.selected !== asked) return;            // an answer about the run that was selected a moment ago
     S.virtual = answer;
-    S.vsOk = Date.now();
     renderLocalMeter(S.virtual);
     renderLocalTable();
   } catch (err) {
-    if (Date.now() - (S.vsOk || 0) > STALE_MS) renderLocalMeter(null);
+    // Nothing to do: the figure expires on its own timer (renderLocalMeter), whether a request fails or never answers.
   }
 }
 
 function renderLocalMeter(v) {
   const el = $("local-meter");
   const meter = v && v.meter;
+  clearTimeout(S.vsTimer);                     // each answer renews the expiry; no later response has to arrive for it to fire
   el.hidden = !meter;
   if (!meter) { $("local-text").textContent = ""; return; }
+  S.vsTimer = setTimeout(() => renderLocalMeter(null), STALE_MS);
   $("local-text").textContent = meter.text;
   el.title = meter.title;
 }
