@@ -25,7 +25,7 @@ def run(tmp_path, argv, config_text=None):
     cfg = tmp_path / "bringup.toml"
     cfg.write_text(BASE + (config_text or ""))
     out = io.StringIO()
-    code = cli.main(["spend", *argv, "--telegraph-config", str(cfg)], env={}, stdout=out)
+    code = cli.main(["spend", *argv, "--config", str(cfg), "--telegraph-config", str(cfg)], env={}, stdout=out)
     return code, out.getvalue()
 
 
@@ -228,3 +228,62 @@ def test_a_disabled_telegraph_table_with_a_dir_still_shows_that_ledger(tmp_path,
     real_ledger(tmp_path / "ledger-here", cost=1.5)
     code, text = run(tmp_path, [str(probe)], '[telegraph]\nenabled = false\ndir = "ledger-here"\n')
     assert code == 0 and "$1.5000" in text
+
+
+# ---- review fix 2 (fourth round): the tables file and the bringup config are chosen separately ------------------------------
+
+def test_a_prices_file_with_only_the_tables_does_not_hide_runs_root_of_the_bringup_config(tmp_path):
+    runs = tmp_path / "runs"
+    write_log(runs, "org--a/stages/1/log/run-1.jsonl", [turn(1, 1_000_000, 0)])
+    bringup = tmp_path / "bringup.toml"
+    bringup.write_text(BASE)
+    prices = tmp_path / "prices.toml"
+    prices.write_text('[virtual_spend]\nreference = "other-model"\nprice_in = 4\nprice_out = 8\n')
+    out = io.StringIO()
+    code = cli.main(["spend", "--config", str(bringup), "--telegraph-config", str(prices), "--dir", str(tmp_path / "none")],
+                    env={}, stdout=out)
+    text = out.getvalue()
+    assert code == 0, text
+    assert "org--a: 1 turns" in text, "runs come from the bringup config's runs_root"
+    assert "at other-model ($4 in, $8 out per million): $4.0000" in text, "prices come from the tables file"
+
+
+def test_the_tables_file_alone_still_serves_a_named_directory(tmp_path, probe, monkeypatch):
+    monkeypatch.setattr(cli, "CHECKOUT", tmp_path / "no-checkout")
+    prices = tmp_path / "prices.toml"
+    prices.write_text('[virtual_spend]\nreference = "other-model"\nprice_in = 4\nprice_out = 8\n')
+    out = io.StringIO()
+    assert cli.main(["spend", str(probe), "--telegraph-config", str(prices), "--dir", str(tmp_path / "none")], env={}, stdout=out) == 0
+    assert "at other-model" in out.getvalue()
+
+
+def test_the_runs_root_comes_from_the_environment_config_when_a_tables_file_is_given(tmp_path):
+    runs = tmp_path / "runs"
+    write_log(runs, "org--b/stages/1/log/run-1.jsonl", [turn(1, 10, 1)])
+    bringup = tmp_path / "bringup.toml"
+    bringup.write_text(BASE)
+    prices = tmp_path / "prices.toml"
+    prices.write_text('[virtual_spend]\nreference = "x"\n')
+    out = io.StringIO()
+    code = cli.main(["spend", "--telegraph-config", str(prices), "--dir", str(tmp_path / "none")],
+                    env={cli.CONFIG_ENV: str(bringup)}, stdout=out)
+    assert code == 0 and "org--b: 1 turns" in out.getvalue()
+
+
+def test_a_tables_file_that_is_missing_is_still_a_setup_error(tmp_path, probe):
+    out = io.StringIO()
+    code = cli.main(["spend", str(probe), "--telegraph-config", str(tmp_path / "gone.toml")], env={}, stdout=out)
+    assert code == 2 and "cannot read" in out.getvalue()
+
+
+def test_a_full_bringup_config_given_only_as_the_tables_file_still_gives_runs_root(tmp_path, monkeypatch):
+    """With no bringup config to be found, the tables file is tried as one (a single file that holds everything)."""
+    monkeypatch.setattr(cli, "CHECKOUT", tmp_path / "no-checkout")
+    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+    runs = tmp_path / "runs"
+    write_log(runs, "org--c/stages/1/log/run-1.jsonl", [turn(1, 10, 1)])
+    cfg = tmp_path / "everything.toml"
+    cfg.write_text(BASE + '[virtual_spend]\nreference = "x"\n')
+    out = io.StringIO()
+    code = cli.main(["spend", "--telegraph-config", str(cfg), "--dir", str(tmp_path / "none")], env={}, stdout=out)
+    assert code == 0 and "org--c: 1 turns" in out.getvalue() and "at x" in out.getvalue()

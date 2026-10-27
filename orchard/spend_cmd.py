@@ -36,29 +36,42 @@ def _real(directory: Path) -> dict:
 
 
 def _config(args, environ, home):
-    """(virtual Config, telegraph ledger dir, runs_root or None, problem text or None)."""
+    """(virtual Config, telegraph ledger dir, runs_root or None, problem text or None).
+
+    Two files can be involved. The bringup config is found the usual way (`--config`, the environment, the checkout, the home
+    folder) and gives `runs_root`. The tables file is `--telegraph-config` when it is given, otherwise the bringup config; it gives
+    the `[telegraph]` and `[virtual_spend]` tables. A tables file that holds only those tables therefore never decides `runs_root`."""
     from orchard import bringup_config, cli
+    named = getattr(args, "config", None) or environ.get(cli.CONFIG_ENV)
     try:
-        path = telegraph_cmd._config_path(args, environ, home)
+        bringup_path = cli.find_config(getattr(args, "config", None), environ, cli.CHECKOUT, Path(home))
+        problem = None
     except cli.NoConfig as exc:
-        named = getattr(args, "config", None) or environ.get(cli.CONFIG_ENV)
         if named:                                                    # a config the person named and that is missing is a setup error
             return None, None, None, str(exc)
-        return vs.Config(), telegraph_cmd.default_dir(home), None, str(exc)
+        bringup_path, problem = None, str(exc)
+    explicit = getattr(args, "telegraph_config", None)
+    tables_path = Path(explicit) if explicit else bringup_path
+    if tables_path is None:
+        return vs.Config(), telegraph_cmd.default_dir(home), None, problem
     try:
-        vcfg = vs.load_file(path)
+        vcfg = vs.load_file(tables_path)
     except vs.ConfigError as exc:
         return None, None, None, str(exc)
     try:
-        tcfg = telegraph_cmd.load_config(path)
+        tcfg = telegraph_cmd.load_config(tables_path)
     except tg.ConfigError as exc:                                    # a bad table must not send the real spend to another ledger
         return None, None, None, str(exc)
     runs_root = None
-    try:
-        runs_root = bringup_config.load(path).runs_root
-    except Exception:                                                # noqa: BLE001 - a config that does not load has no runs root
-        pass
-    return vcfg, (tcfg.dir or telegraph_cmd.default_dir(home)), runs_root, None
+    for candidate in (bringup_path, tables_path if bringup_path is None else None):    # the tables file is a bringup config only as a last resort
+        if candidate is None:
+            continue
+        try:
+            runs_root = bringup_config.load(candidate).runs_root
+        except Exception:                                            # noqa: BLE001 - a config that does not load has no runs root
+            continue
+        break
+    return vcfg, (tcfg.dir or telegraph_cmd.default_dir(home)), runs_root, problem
 
 
 def main(args, *, out, environ=None, home=None) -> int:
