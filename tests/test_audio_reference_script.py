@@ -324,3 +324,80 @@ def test_sha256_file(tmp_path):
     p = tmp_path / "f"
     p.write_bytes(b"abc")
     assert mr.sha256_file(p) == hashlib.sha256(b"abc").hexdigest()
+
+
+# ---- review of PR 123: cleanup when conditioning fails, the sentinel seed, the snapshot revision ---------
+
+class RaisingConditioner:
+    def __call__(self, conditioning, device):
+        raise RuntimeError("encoder failed")
+
+
+def hooks_left(model):
+    return [l for l in model.model.model.model.transformer.layers if l._forward_hooks] + ([model.model.model.model] if model.model.model.model._forward_hooks else [])
+
+
+def test_a_failing_encoder_removes_the_hooks_and_restores_the_decoder(tmp_path):
+    model = FakeModel()
+    model.model.conditioner = RaisingConditioner()
+    original_decode = model.model.pretransform.decode
+    before = (torch.randn, torch.randn_like)
+    rec = Recorder(tmp_path / "r", model={"name": "fake"}, library={"name": "fake"}, settings=SETTINGS)
+    with pytest.raises(RuntimeError, match="encoder failed"):
+        mr.run_reference(model, SETTINGS, rec, torch)
+    assert not hooks_left(model) and model.model.pretransform.decode == original_decode and (torch.randn, torch.randn_like) == before
+
+
+def test_a_failure_while_recording_the_conditioning_removes_the_hooks_and_restores_the_decoder(tmp_path):
+    model = FakeModel()
+    original_decode = model.model.pretransform.decode
+    rec = Recorder(tmp_path / "r", model={"name": "fake"}, library={"name": "fake"}, settings=SETTINGS)
+    rec.record("conditioning", "prompt.0", np.zeros(2))                 # the run's first conditioning array is now a duplicate
+    with pytest.raises(ReferenceError, match="already recorded"):
+        mr.run_reference(model, SETTINGS, rec, torch)
+    assert not hooks_left(model) and model.model.pretransform.decode == original_decode
+
+
+def test_the_same_model_can_be_run_again_after_a_failure_without_duplicate_layers(tmp_path):
+    model = FakeModel()
+    good_conditioner = model.model.conditioner
+    model.model.conditioner = RaisingConditioner()
+    with pytest.raises(RuntimeError):
+        mr.run_reference(model, SETTINGS, Recorder(tmp_path / "a", model={"name": "fake"}, library={"name": "fake"}, settings=SETTINGS), torch)
+    model.model.conditioner = good_conditioner
+    run, _ = record(tmp_path, model=model, name="b")
+    assert names(run, "layer") == ["dit_output", "layer_00", "layer_01", "layer_02"]
+
+
+def run_main(tmp_path, monkeypatch, *extra, seed="1"):
+    monkeypatch.setattr(mr, "load_model", lambda *a, **k: pytest.fail("the model was loaded"))
+    argv = ["--model", "m", "--out", str(tmp_path / "o"), "--prompt", "p", "--steps", "3", "--cfg-scale", "1", "--seed", seed, *extra]
+    return mr.main(argv)
+
+
+@pytest.mark.parametrize("seed", ["-1", "-5"])
+def test_a_negative_seed_is_refused_because_the_library_would_pick_a_random_one(tmp_path, monkeypatch, seed):
+    with pytest.raises(SystemExit, match="seed must be 0 or more"):
+        run_main(tmp_path, monkeypatch, seed=seed)
+
+
+def test_seed_zero_is_accepted_by_the_argument_check(tmp_path, monkeypatch):
+    with pytest.raises(pytest.fail.Exception, match="the model was loaded"):
+        run_main(tmp_path, monkeypatch, seed="0")
+
+
+def test_the_revision_is_the_snapshot_directory_name_even_when_the_checkpoint_is_a_link_into_blobs(tmp_path, monkeypatch):
+    blobs = tmp_path / "blobs"
+    blobs.mkdir()
+    (blobs / "abc123").write_bytes(b"1234")
+    (blobs / "cfg123").write_text("{}")
+    snap = tmp_path / "snapshots" / ("c" * 40)
+    snap.mkdir(parents=True)
+    (snap / "model.safetensors").symlink_to(blobs / "abc123")
+    (snap / "model_config.json").symlink_to(blobs / "cfg123")
+    monkeypatch.setattr(mr, "load_model", lambda name, device="cpu": (FakeModel(), snap / "model_config.json", snap / "model.safetensors"))
+    monkeypatch.setattr(mr, "library_commit", lambda: {"name": "x", "commit": "y"})
+    monkeypatch.setattr(mr, "run_reference", lambda model, settings, rec, torch_: rec.record("waveform", "audio", np.zeros((2, 4))))
+    mr.main(["--model", "m", "--out", str(tmp_path / "out"), "--prompt", "p", "--steps", "3", "--cfg-scale", "1", "--seed", "1"])
+    m = json.loads((tmp_path / "out" / "manifest.json").read_text())
+    assert m["model"]["revision"] == "c" * 40 and m["model"]["checkpoint_bytes"] == 4

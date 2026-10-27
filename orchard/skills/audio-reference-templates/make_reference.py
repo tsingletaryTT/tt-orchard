@@ -113,7 +113,8 @@ def run_reference(model, settings: dict, recorder, torch, *, layers=None) -> Non
     sample_size. The recorder is an orchard.audio_reference.Recorder."""
     state = {"first_pass": True}
     handles = []
-    layer_list = layers if layers is not None else resolve_attr(model, LAYERS_PATH)
+    pretransform = model.model.pretransform
+    original_decode = pretransform.decode
 
     def hook(name):
         def fn(_module, _inputs, output):
@@ -122,18 +123,10 @@ def run_reference(model, settings: dict, recorder, torch, *, layers=None) -> Non
                 if hasattr(first, "detach"):
                     recorder.record("layer", name, _numpy(first))
         return fn
-    for i, layer in enumerate(layer_list):
-        handles.append(layer.register_forward_hook(hook(f"layer_{i:02d}")))
-    dit = model.model.model.model               # the network that the layers sit in
-    handles.append(dit.register_forward_hook(hook("dit_output")))
-
-    pretransform = model.model.pretransform
-    original_decode = pretransform.decode
 
     def decode(latent, *args, **kwargs):
         recorder.record("latent", "final", _numpy(latent))
         return original_decode(latent, *args, **kwargs)
-    pretransform.decode = decode
 
     def callback(info):
         i = int(info["i"])
@@ -142,15 +135,24 @@ def run_reference(model, settings: dict, recorder, torch, *, layers=None) -> Non
             recorder.record("step_denoised", str(i), _numpy(info["denoised"]))
         state["first_pass"] = False
 
-    conditioning = [{"prompt": settings["prompt"], "seconds_total": settings["duration"]}]
-    t0 = time.time()
-    with torch.inference_mode():
-        tensors = model.model.conditioner(conditioning, model.device)
-    recorder.timings["conditioning_s"] = round(time.time() - t0, 3)
-    for key, value in tensors.items():
-        for name, arr in _tensors_of(value, str(key)):
-            recorder.record("conditioning", name, arr)
+    # Everything that changes the model sits inside this try, so a failure at any point (a missing layer, the encoder, recording the
+    # conditioning, the sampler) removes the hooks and puts the decoder back. A model that is run again then records each layer once.
     try:
+        layer_list = layers if layers is not None else resolve_attr(model, LAYERS_PATH)
+        for i, layer in enumerate(layer_list):
+            handles.append(layer.register_forward_hook(hook(f"layer_{i:02d}")))
+        dit = model.model.model.model               # the network that the layers sit in
+        handles.append(dit.register_forward_hook(hook("dit_output")))
+        pretransform.decode = decode
+
+        conditioning = [{"prompt": settings["prompt"], "seconds_total": settings["duration"]}]
+        t0 = time.time()
+        with torch.inference_mode():
+            tensors = model.model.conditioner(conditioning, model.device)
+        recorder.timings["conditioning_s"] = round(time.time() - t0, 3)
+        for key, value in tensors.items():
+            for name, arr in _tensors_of(value, str(key)):
+                recorder.record("conditioning", name, arr)
         t0 = time.time()
         with recording_noise(torch, lambda kind, name, t: recorder.record(kind, name, _numpy(t))):
             audio = model.generate(conditioning=conditioning, conditioning_tensors=dict(tensors), duration=settings["duration"],
@@ -214,13 +216,16 @@ def main(argv=None) -> int:
     from orchard.audio_reference import Recorder
     if args.duration <= 0 or args.steps < 1:
         raise SystemExit("duration must be positive and steps at least 1")
+    if args.seed < 0:
+        # The library treats -1 as "pick a random seed" and the manifest would then record a seed that was never used.
+        raise SystemExit("seed must be 0 or more (the library treats -1 as a request for a random seed)")
     if args.threads:
         torch.set_num_threads(args.threads)
     model, config_path, ckpt_path = load_model(args.model)
     sampler = args.sampler or ("pingpong" if model.model.diffusion_objective == "rf_denoiser" else "euler")
     settings = {"prompt": args.prompt, "duration": args.duration, "steps": args.steps, "cfg_scale": args.cfg_scale, "sampler": sampler,
                 "seed": args.seed, "dtype": "float32", "sample_size": args.sample_size, "device": "cpu"}
-    revision = ckpt_path.resolve().parent.name
+    revision = ckpt_path.parent.name       # the snapshot directory; resolving the checkpoint link would give `blobs`
     recorder = Recorder(args.out, model={"name": args.model, "revision": revision, "config_sha256": sha256_file(config_path),
                                          "diffusion_objective": str(model.model.diffusion_objective), "checkpoint_bytes": ckpt_path.stat().st_size},
                         library=library_commit(), settings=settings, seeds={"torch": args.seed, "numpy": None})
