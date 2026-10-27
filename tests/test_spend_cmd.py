@@ -584,3 +584,89 @@ def test_a_total_that_is_not_finite_is_unknown_in_the_text_and_the_json(tmp_path
     code, js = run(tmp_path, [str(probe), "--json", "--dir", str(tmp_path / "none")])
     data = json.loads(js)                                                    # strict JSON
     assert data["local_virtual_spend"]["all_directories"]["virtual"][0]["cost_usd"] is None
+
+
+# ---- review (seventh round): damaged ledger numbers are unknown spend, and estimates are not confirmed charges ---------------
+
+def _write_raw(directory, lines):
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "telegraph.jsonl").write_text("".join(l + "\n" for l in lines))
+
+
+@pytest.mark.parametrize("cost", ["NaN", "Infinity", "-Infinity", "-0.5"], ids=["nan", "inf", "-inf", "negative"])
+def test_a_damaged_cost_in_the_ledger_is_unknown_spend_not_a_number(tmp_path, probe, cost):
+    ledger = tmp_path / "tg"
+    _write_raw(ledger, ['{"call_id": "c1", "outcome": "ok", "tokens_in": 10, "tokens_out": 5, "cost_usd": %s, "model": "m", "problem": "p"}' % cost])
+    code, text = run(tmp_path, [str(probe), "--dir", str(ledger)])
+    real = text[text.index("REAL helper spend"):text.index("LOCAL virtual spend")]
+    assert code == 0 and "unknown" in real.lower() and "cannot be read" in real
+    assert "nan" not in real.lower() and "inf" not in real.lower() and "$-" not in real
+    code, js = run(tmp_path, [str(probe), "--json", "--dir", str(ledger)])
+    data = json.loads(js)                                                    # strict JSON: no NaN or Infinity literal
+    assert "error" in data["real_helper_spend"] and "cost_usd" not in data["real_helper_spend"]
+
+
+def test_a_damaged_token_count_in_the_reservation_is_unknown_spend(tmp_path, probe):
+    ledger = tmp_path / "tg"
+    _write_raw(ledger, ['{"reserve": "r1", "tokens": NaN, "cost_usd": 0.01, "problem": "p"}'])
+    code, text = run(tmp_path, [str(probe), "--dir", str(ledger)])
+    assert "cannot be read" in text and "nan" not in text.lower()
+
+
+def test_a_sound_ledger_is_not_refused_by_the_check(tmp_path, probe):
+    ledger = tmp_path / "tg"
+    _write_raw(ledger, ['{"call_id": "c1", "outcome": "ok", "tokens_in": 10, "tokens_out": 5, "cost_usd": 0.5, "model": "m", "problem": "p"}'])
+    code, text = run(tmp_path, [str(probe), "--dir", str(ledger)])
+    assert "confirmed: $0.5000" in text and "cannot be read" not in text
+
+
+def test_an_estimate_for_a_call_with_unknown_usage_is_not_a_confirmed_charge(tmp_path, probe):
+    ledger = tmp_path / "tg"
+    _write_records(ledger, [
+        {"call_id": "u1", "outcome": "ok", "usage_known": False, "tokens_in": 7, "tokens_out": 3, "cost_usd": 0.0001, "model": "m", "problem": "p"}])
+    code, text = run(tmp_path, [str(probe), "--dir", str(ledger)])
+    real = text[text.index("REAL helper spend"):text.index("LOCAL virtual spend")]
+    assert "confirmed: $0.0000 · 0 calls" in real, real
+    assert "1 call with unknown usage" in real and "up to $0.0001" in real
+    code, js = run(tmp_path, [str(probe), "--json", "--dir", str(ledger)])
+    data = json.loads(js)["real_helper_spend"]
+    assert data["cost_usd"] == 0 and data["calls"] == 0 and data["tokens_in"] == 0
+    assert data["unknown_usage_calls"] == 1 and data["worst_case_cost_usd"] == pytest.approx(0.0001)
+
+
+def test_an_estimate_beside_its_reservation_counts_at_the_reservation_and_not_as_confirmed(tmp_path, probe):
+    ledger = tmp_path / "tg"
+    _write_records(ledger, [
+        {"reserve": "u1", "tokens": 800, "cost_usd": 0.03, "problem": "p"},
+        {"call_id": "u1", "outcome": "ok", "usage_known": False, "tokens_in": 7, "tokens_out": 3, "cost_usd": 0.0001, "model": "m", "problem": "p"},
+        {"call_id": "c2", "outcome": "ok", "tokens_in": 100, "tokens_out": 50, "cost_usd": 0.01, "model": "m", "problem": "p"}])
+    code, text = run(tmp_path, [str(probe), "--dir", str(ledger)])
+    real = text[text.index("REAL helper spend"):text.index("LOCAL virtual spend")]
+    assert "confirmed: $0.0100 · 1 calls" in real
+    assert "1 call with unknown usage" in real and "up to $0.0400" in real, real
+
+
+def test_calls_with_known_usage_stay_confirmed_when_another_call_is_unknown(tmp_path, probe):
+    ledger = tmp_path / "tg"
+    _write_records(ledger, [
+        {"call_id": "c1", "outcome": "ok", "tokens_in": 100, "tokens_out": 50, "cost_usd": 0.01, "model": "m", "problem": "p"},
+        {"call_id": "u1", "outcome": "ok", "usage_known": False, "cost_usd": 0.02, "model": "m", "problem": "p"}])
+    code, js = run(tmp_path, [str(probe), "--json", "--dir", str(ledger)])
+    data = json.loads(js)["real_helper_spend"]
+    assert data["calls"] == 1 and data["cost_usd"] == 0.01 and data["tokens_in"] == 100
+
+
+# ---- small virtual costs stay visible -----------------------------------------------------------------------------------------
+
+def test_a_tiny_nonzero_virtual_cost_is_not_shown_as_zero(tmp_path):
+    tiny = tmp_path / "tiny"
+    write_log(tiny, "log/run.jsonl", [turn(1, 100, 0)])                       # 100 prompt tokens at $0.10 per million = $0.00001
+    code, text = run(tmp_path, [str(tiny), "--dir", str(tmp_path / "none")])
+    assert "<$0.0001" in text and "$0.0000" not in text.split("LOCAL virtual spend")[1]
+
+
+def test_a_zero_virtual_cost_is_still_zero(tmp_path):
+    empty = tmp_path / "empty"
+    write_log(empty, "log/run.jsonl", ["{bad"])
+    code, text = run(tmp_path, [str(empty), "--dir", str(tmp_path / "none")])
+    assert "$0.0000" in text.split("LOCAL virtual spend")[1]

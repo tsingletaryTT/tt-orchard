@@ -28,6 +28,11 @@ NOTE = ("Local spend is virtual. The agent logs re-send the whole conversation o
         "a hosted provider with prompt caching would bill most of those tokens for much less. Use it as a comparison figure only.")
 
 
+def _money(value: float) -> str:
+    """Dollars with four decimals. A positive amount under a hundredth of a cent is "<$0.0001" so it is never shown as zero."""
+    return "<$0.0001" if 0 < value < 0.0001 else f"${value:.4f}"
+
+
 def _plural(n: int, word: str) -> str:
     return f"{n} {word}{'' if n == 1 else 's'}"
 
@@ -40,15 +45,21 @@ def _real(directory: Path) -> dict:
         recs = tg._read_ledger_strict(Path(directory))
     except tg.LedgerUnavailable as exc:
         return {"dir": str(directory), "error": f"the telegraph ledger cannot be read ({exc}); the helper spend is unknown"}
+    damaged = {"dir": str(directory), "error": "the telegraph ledger has a record that cannot be read; the helper spend is unknown"}
     try:
-        s = tg.summarise_records(recs)
+        telegraph_view._check_records(recs)                         # the helper view's own check: finite, not below zero, names are names
+        # A call whose provider reported no usage was settled with an estimate. The estimate is not a confirmed charge: those calls
+        # are left out of the confirmed figures and counted in the exposure (at their reservation when there is one).
+        confirmed = [r for r in recs if not (tg._sent(r) and r.get("usage_known") is False)]
+        full, s = tg.summarise_records(recs), tg.summarise_records(confirmed)
         acct = tg.accounting(recs)
+        telegraph_view._check_derived(s, acct)
     except Exception:                                               # noqa: BLE001 - a bad record must not stop the command
-        return {"dir": str(directory), "error": "the telegraph ledger has a record that cannot be read; the helper spend is unknown"}
+        return damaged
     return {"dir": str(directory), "calls": s["calls"], "ok": s["ok"], "cache_hits": s["cache_hits"],
             "refused": s["refused"], "tokens_in": s["tokens_in"], "tokens_out": s["tokens_out"],
             "cost_usd": s["cost_usd"], "cost_unknown_calls": s["cost_unknown_calls"],
-            "unsettled_reservations": s["unsettled"], "unknown_usage_calls": s["unknown_usage_calls"],
+            "unsettled_reservations": full["unsettled"], "unknown_usage_calls": full["unknown_usage_calls"],
             "torn_records": sum(1 for r in recs if "torn" in r),
             "worst_case_cost_usd": acct["cost"], "worst_case_unknown_cost_calls": acct["unknown_cost"]}
 
@@ -65,7 +76,7 @@ def _not_confirmed_line(real: dict) -> str:
     if not parts:
         return ""
     line = (f"  not confirmed (may still be billed): {', '.join(parts)}; worst case, up to "
-            f"${real['worst_case_cost_usd']:.4f} in all")
+            f"{_money(real['worst_case_cost_usd'])} in all")
     if real["worst_case_unknown_cost_calls"]:
         line += f", plus {_plural(real['worst_case_unknown_cost_calls'], 'call')} of unknown cost"
     return line
@@ -170,7 +181,7 @@ def main(args, *, out, environ=None, home=None) -> int:
         say(f"  {real['error']}")
     else:
         unknown = f" (+ {real['cost_unknown_calls']} calls with no price)" if real["cost_unknown_calls"] else ""
-        say(f"  confirmed: ${real['cost_usd']:.4f}{unknown} · {real['calls']} calls · {real['tokens_in']} in, {real['tokens_out']} out")
+        say(f"  confirmed: {_money(real['cost_usd'])}{unknown} · {real['calls']} calls · {real['tokens_in']} in, {real['tokens_out']} out")
         pending = _not_confirmed_line(real)
         if pending:
             say(pending)
@@ -185,7 +196,7 @@ def main(args, *, out, environ=None, home=None) -> int:
         wall = f" · {r['agent_wall_s'] / 3600:.2f} h of agent time" if r["agent_wall_s"] else ""
         say(f"  {r['dir']}: {r['turns']} turns · {r['prompt_tokens']} prompt, {r['completion_tokens']} completion tokens{wall}")
         for ref in r["virtual"]:
-            say(f"      at {ref['name']} (${ref['price_in']:g} in, ${ref['price_out']:g} out per million): ${ref['cost_usd']:.4f}")
+            say(f"      at {ref['name']} (${ref['price_in']:g} in, ${ref['price_out']:g} out per million): {_money(ref['cost_usd'])}")
         if not r["complete"]:
             say("      INCOMPLETE: some logs were not read, so these figures are lower than the real use.")
         text = vs.skipped_text(r["skipped"])
@@ -195,7 +206,7 @@ def main(args, *, out, environ=None, home=None) -> int:
         say(f"  all {len(rows)} directories: {all_local['turns']} turns · {all_local['prompt_tokens']} prompt, "
             f"{all_local['completion_tokens']} completion tokens")
         for ref in all_local["virtual"]:
-            say(f"      at {ref['name']}: " + (f"${ref['cost_usd']:.4f}" if ref["cost_usd"] is not None else "unknown (not finite)"))
+            say(f"      at {ref['name']}: " + (_money(ref["cost_usd"]) if ref["cost_usd"] is not None else "unknown (not finite)"))
     if listing_cut:
         say("  The folder listing was cut short, so some folders are not listed at all.")
     say()
