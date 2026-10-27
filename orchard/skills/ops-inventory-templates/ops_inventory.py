@@ -124,6 +124,56 @@ def aggregate(nodes):
     return sorted(ops.values(), key=lambda r: (-r["count"], r["op"])), python_nodes, hops
 
 
+SEQUENCE_MAX = 6000
+SEQUENCE_NOTE = ("`sequence` lists the ops of the first layer and of everything outside the layers in graph order, with the "
+                 "ids of the nodes each one reads (a read through operator.getitem is followed to its source). A read "
+                 "of a weight or an input has an id that is not in the list. It is capped at %d records." % SEQUENCE_MAX)
+NOT_FIRST_LAYER = re.compile(r"(?:^|\.)(?:layers|blocks|h)\.(?:[1-9]\d*)(?:\.|$)")
+
+
+def _consts(node):
+    """The numbers and short integer lists a node was called with (an epsilon, an exponent, a dimension), at most 6."""
+    out = []
+    for a in list(node.args) + list(node.kwargs.values()):
+        if isinstance(a, bool) or isinstance(a, (int, float)):
+            out.append(a)
+        elif isinstance(a, (list, tuple)) and 0 < len(a) <= 4 and all(isinstance(v, int) and not isinstance(v, bool) for v in a):
+            out.append(list(a))
+    return out[:6]
+
+
+def _source(node):
+    """Follow getitem nodes back to the node that produced the tuple."""
+    import operator
+    while node.op == "call_function" and node.target is operator.getitem and node.args and hasattr(node.args[0], "op"):
+        node = node.args[0]
+    return node
+
+
+def sequence(gms):
+    """Ordered op records with data flow, for the subgraph matcher: {id, op, in, module, shape, const}.
+    Only the first layer and the nodes outside the layers are recorded; layers alike repeat it."""
+    import torch
+    records = []
+    for gi, gm in enumerate(gms):
+        for n in gm.graph.nodes:
+            if n.op != "call_function" or not isinstance(n.target, torch._ops.OpOverload):
+                continue
+            path = module_path(n)
+            if NOT_FIRST_LAYER.search(path):
+                continue
+            ins = []
+            for a in n.all_input_nodes:
+                src = _source(a)
+                ins.append(f"g{gi}:{src.name}")
+            s = sample_of(n.meta.get("val"))
+            records.append({"id": f"g{gi}:{n.name}", "op": str(n.target), "in": ins, "module": path,
+                            "shape": s["output_shapes"][0] if s else None, "const": _consts(n)})
+            if len(records) >= SEQUENCE_MAX:
+                return records
+    return records
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--model-dir", required=True)
@@ -194,9 +244,11 @@ def main(argv=None) -> int:
     except Exception as exc:
         write(a.out, {**base, "ops": [], "failures": [{"stage": "export", "error": f"{type(exc).__name__}: {str(exc)[:500]}"}]})
         return 3
-    nodes = [n for gm in graph_modules(ep) for n in gm.graph.nodes]
+    gms = graph_modules(ep)
+    nodes = [n for gm in gms for n in gm.graph.nodes]
     ops, python_nodes, hops = aggregate(nodes)
-    write(a.out, {**base, "ops": ops, "python_nodes": python_nodes, "higher_order_nodes": hops})
+    write(a.out, {**base, "ops": ops, "python_nodes": python_nodes, "higher_order_nodes": hops,
+                  "sequence": sequence(gms), "sequence_note": SEQUENCE_NOTE})
     return 0
 
 
