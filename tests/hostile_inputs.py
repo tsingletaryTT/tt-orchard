@@ -190,6 +190,7 @@ def run_limited(code: str, *, timeout: float = 60, address_space: int = 2 << 30)
 
 
 
+
 # ------------------------------------------------------------------------------------------------------------ the registry
 
 @dataclass(frozen=True)
@@ -743,7 +744,6 @@ SELFTEST = {r.name: r for r in [
 KNOWN_DEFECTS: dict[int, dict[str, list[str]]] = {
     135: {          # NaN, Infinity, 1e999 and lone surrogates are accepted and returned
         'bench_rerun.read_samples': ['huge_exponent', 'nan', 'infinity', 'negative_infinity', 'nan_in_object', 'lone_surrogate', 'lone_surrogate_key'],
-        'kept_coder.read': ['nan_in_object', 'lone_surrogate_key'],
         'kernelprobe._read_agent_check': ['nan_in_object', 'lone_surrogate_key'],
         'opvariants.load_data': ['huge_exponent', 'nan', 'infinity', 'negative_infinity', 'nan_in_object', 'lone_surrogate', 'lone_surrogate_key'],
         'package._json': ['nan_in_object', 'lone_surrogate_key'],
@@ -764,7 +764,6 @@ KNOWN_DEFECTS: dict[int, dict[str, list[str]]] = {
         'bench_session.load_items': ['nest_100000'],
         'card_use.tool_call_evidence': ['nest_100000'],
         'classify_bench.load_corpus': ['nest_100000'],
-        'kept_coder.read': ['nest_1000_object', 'nest_100000'],
         'kernelprobe._read_agent_check': ['nest_1000_object', 'nest_100000'],
         'ledger.read_entries': ['nest_100000', 'huge_integer'],
         'nearest.read_containers': ['nest_100000'],
@@ -807,7 +806,6 @@ KNOWN_DEFECTS: dict[int, dict[str, list[str]]] = {
         'bench_rerun.read_samples': ['big_string_50mb', 'link_to_dev_zero'],
         'bench_session.load_items': ['big_string_50mb', 'link_to_dev_zero'],
         'classify_bench.load_corpus': ['big_string_50mb', 'link_to_dev_zero'],
-        'kept_coder.read': ['big_string_50mb', 'link_to_dev_zero'],
         'ledger.read_entries': ['big_string_50mb', 'link_to_dev_zero'],
         'nearest.read_containers': ['big_string_50mb', 'link_to_dev_zero'],
         'opinventory.load_ignored': ['big_string_50mb', 'link_to_dev_zero'],
@@ -843,7 +841,6 @@ KNOWN_DEFECTS: dict[int, dict[str, list[str]]] = {
         'bench_rerun.read_samples': ['fifo'],
         'bench_session.load_items': ['fifo'],
         'classify_bench.load_corpus': ['fifo'],
-        'kept_coder.read': ['fifo'],
         'ledger.read_entries': ['fifo'],
         'nearest.read_containers': ['fifo'],
         'opinventory.load_ignored': ['fifo'],
