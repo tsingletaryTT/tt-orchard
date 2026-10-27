@@ -698,8 +698,8 @@ def test_a_log_replaced_by_a_link_after_discovery_is_refused_when_it_is_opened(r
     write_log(root, "a/log/run.jsonl", [turn(1, 5, 1)])
     real_find = vs._find_files
 
-    def find_then_swap(r, skipped):
-        found = real_find(r, skipped)
+    def find_then_swap(r, skipped, *a):
+        found = real_find(r, skipped, *a)
         for p, _ in found:                                                 # the swap happens after discovery
             p.unlink()
             p.symlink_to(outside)
@@ -733,8 +733,8 @@ def test_a_missing_log_is_unreadable_not_a_link(root, monkeypatch):
     write_log(root, "log/run.jsonl", [turn()])
     real_find = vs._find_files
 
-    def find_then_delete(r, skipped):
-        found = real_find(r, skipped)
+    def find_then_delete(r, skipped, *a):
+        found = real_find(r, skipped, *a)
         for p, _ in found:
             p.unlink()
         return found
@@ -821,8 +821,8 @@ def test_a_large_attempt_record_is_never_read_past_the_cap_plus_one_byte(root, m
 def _swap_dir_for_link_after_discovery(monkeypatch, victim, target):
     real_find = vs._find_files
 
-    def find_then_swap(r, skipped):
-        found = real_find(r, skipped)
+    def find_then_swap(r, skipped, *a):
+        found = real_find(r, skipped, *a)
         shutil.rmtree(victim)                                              # the swap happens after discovery
         victim.symlink_to(target, target_is_directory=True)
         return found
@@ -871,8 +871,8 @@ def test_the_scan_root_is_pinned_when_the_scan_starts(root, tmp_path, monkeypatc
     write_log(root, "a/log/run.jsonl", [turn(1, 5, 1)])
     real_find = vs._find_files
 
-    def find_then_swap_root(r, skipped):
-        found = real_find(r, skipped)
+    def find_then_swap_root(r, skipped, *a):
+        found = real_find(r, skipped, *a)
         moved = r.parent / "moved-away"
         r.rename(moved)
         r.symlink_to(outside, target_is_directory=True)
@@ -1036,3 +1036,58 @@ def test_a_component_refused_after_earlier_ones_were_opened_leaks_no_descriptor(
 
 def test_the_default_walk_budget_is_large_but_bounded():
     assert 10_000 <= vs.MAX_WALK_ENTRIES <= 1_000_000
+
+
+# ---- review (sixth round): folders are listed through the pinned descriptor too ----------------------------------------------
+
+def test_a_root_replaced_by_a_tree_with_other_names_after_pinning_is_still_listed_from_the_original(root, tmp_path, monkeypatch):
+    write_log(root, "a/log/run.jsonl", [turn(1, 5, 1)])
+    other = tmp_path / "other-tree"
+    write_log(other, "z/log/different.jsonl", [turn(1, 999, 9)])
+    real = vs._scan_tree
+
+    def swap_then_scan(r, pin, out, skipped):
+        moved = r.parent / "moved-away"
+        r.rename(moved)
+        r.symlink_to(other, target_is_directory=True)               # after the pin, before any listing
+        return real(r, pin, out, skipped)
+    monkeypatch.setattr(vs, "_scan_tree", swap_then_scan)
+    s = vs.scan(root)
+    assert (s["turns"], s["prompt_tokens"]) == (1, 5) and s["complete"] is True
+    assert s["files"] == 1
+
+
+def test_find_files_lists_through_the_pin_and_names_files_by_their_paths(root):
+    write_log(root, "a/log/run.jsonl", [turn()])
+    write_log(root, "b/requests.jsonl", [req(1, 1)])
+    pin = vs.open_pin(root)
+    try:
+        found = vs._find_files(root, vs._skipped(), pin)
+    finally:
+        pin.close()
+    assert sorted((p.relative_to(root).as_posix(), k) for p, k in found) == [("a/log/run.jsonl", "agent"), ("b/requests.jsonl", "bench")]
+
+
+def test_a_folder_swapped_for_a_link_between_listing_and_descending_is_refused(root, tmp_path, monkeypatch):
+    write_log(root, "a/b/log/run.jsonl", [turn(1, 5, 1)])
+    outside = tmp_path / "out"
+    write_log(outside, "log/run.jsonl", [turn(1, 999, 9)])
+    real_list = vs._list_dir
+
+    def list_then_swap(source, budget):
+        result = real_list(source, budget)
+        victim = root / "a" / "b"
+        if victim.exists() and not victim.is_symlink() and any(n == "b" for n, *_ in result[0]):
+            shutil.rmtree(victim)
+            victim.symlink_to(outside, target_is_directory=True)
+        return result
+    monkeypatch.setattr(vs, "_list_dir", list_then_swap)
+    s = vs.scan(root)
+    assert s["turns"] == 0 and s["skipped"]["links"] >= 1
+
+
+def test_find_files_without_a_pin_pins_the_root_itself(root):
+    write_log(root, "a/log/run.jsonl", [turn()])
+    before = set(os.listdir("/proc/self/fd"))
+    assert len(vs._find_files(root, vs._skipped())) == 1
+    assert set(os.listdir("/proc/self/fd")) == before

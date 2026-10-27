@@ -7,6 +7,7 @@ the virtual figure apart from the helper spend, and gives an empty answer (never
 import json
 import os
 import shutil
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -485,8 +486,8 @@ def test_the_probe_folder_swapped_for_a_link_after_discovery_is_not_read(root, t
     write_log(outside, "rms5/op/attempt-1/log/p.jsonl", [turn(1, 999, 9)])
     real = view.discover
 
-    def discover_then_swap(r):
-        found = real(r)
+    def discover_then_swap(r, *a):
+        found = real(r, *a)
         shutil.rmtree(root / "kprobe")
         (root / "kprobe").symlink_to(outside, target_is_directory=True)      # the ancestor of a listed folder is swapped
         return found
@@ -501,8 +502,8 @@ def test_a_run_folder_swapped_for_a_link_after_discovery_is_not_read(root, tmp_p
     write_log(outside, "stages/1/log/run.jsonl", [turn(1, 999, 9)])
     real = view.discover
 
-    def discover_then_swap(r):
-        found = real(r)
+    def discover_then_swap(r, *a):
+        found = real(r, *a)
         shutil.rmtree(root / "org--a")
         (root / "org--a").symlink_to(outside, target_is_directory=True)
         return found
@@ -517,8 +518,8 @@ def test_the_runs_folder_itself_swapped_after_the_scan_began_is_not_followed(roo
     write_log(outside, "org--a/stages/1/log/run.jsonl", [turn(1, 999, 9)])
     real = view.discover
 
-    def discover_then_swap_root(r):
-        found = real(r)
+    def discover_then_swap_root(r, *a):
+        found = real(r, *a)
         moved = r.parent / "moved-runs"
         r.rename(moved)
         r.symlink_to(outside, target_is_directory=True)
@@ -594,3 +595,46 @@ def test_nothing_is_scanned_when_the_runs_folder_cannot_be_pinned(root, monkeypa
     monkeypatch.setattr(vs, "open_pin", lambda path: None)
     data = get(app_with(root))[1]
     assert data["total"]["turns"] == 0 and data["rows"] == [] and data["meter"] is None
+
+
+def test_discovery_after_pinning_lists_the_original_folder_not_a_replacement_with_other_names(root, tmp_path, monkeypatch):
+    write_log(root, "org--a/log/run.jsonl", [turn(1, 5, 1)])
+    other = tmp_path / "other-runs"
+    write_log(other, "org--z/log/run.jsonl", [turn(1, 999, 9)])
+    real_pin = vs.open_pin
+
+    def pin_then_swap(path):
+        pin = real_pin(path)
+        moved = Path(path).parent / "moved-runs"
+        Path(path).rename(moved)
+        Path(path).symlink_to(other, target_is_directory=True)           # right after the pin
+        return pin
+    monkeypatch.setattr(vs, "open_pin", pin_then_swap)
+    data = get(app_with(root))[1]
+    assert [r["name"] for r in data["rows"]] == ["org--a"] and "999" not in json.dumps(data)
+    assert data["total"]["prompt_tokens"] == 5
+
+
+def test_discover_through_a_pin_lists_the_probe_outputs_too(root):
+    write_log(root, "kprobe/p1/op/attempt-1/log/p.jsonl", [turn()])
+    write_log(root, "org--a/log/run.jsonl", [turn()])
+    pin = vs.open_pin(root)
+    try:
+        found, cut = view.discover(root, pin)
+    finally:
+        pin.close()
+    assert sorted(n for n, _ in found) == ["kprobe/p1", "org--a"] and cut is False
+
+
+def test_discover_through_a_pin_takes_entries_from_the_descriptor(root, monkeypatch):
+    for i in range(6):
+        (root / f"d{i}").mkdir()
+    seen = []
+    real = os.scandir
+    monkeypatch.setattr(view.os, "scandir", lambda target: (seen.append(type(target).__name__), real(target))[1])
+    pin = vs.open_pin(root)
+    try:
+        view.discover(root, pin)
+    finally:
+        pin.close()
+    assert seen and set(seen) == {"int"}, "every listing is of a descriptor, never of a path"

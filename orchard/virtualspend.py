@@ -431,12 +431,13 @@ def _tail_usage(tail: bytes):
     return _agent_turn({"usage": usage})
 
 
-def _list_dir(path: Path, budget: list) -> tuple[list, bool]:
-    """([(name, is_link, is_dir, is_regular)], cut): the entries of one folder, taken while streaming os.scandir. Every entry taken
-    is counted against the shared budget; when it is spent the listing stops and `cut` is True. An unreadable folder is empty."""
+def _list_dir(source, budget: list) -> tuple[list, bool]:
+    """([(name, is_link, is_dir, is_regular)], cut): the entries of one folder (a path, or a directory descriptor), taken while
+    streaming os.scandir. Every entry taken is counted against the shared budget; when it is spent the listing stops and `cut` is
+    True. An unreadable folder is empty."""
     out, cut = [], False
     try:
-        with os.scandir(path) as listing:
+        with os.scandir(source) as listing:
             for entry in listing:
                 if budget[0] <= 0:
                     cut = True
@@ -453,23 +454,47 @@ def _list_dir(path: Path, budget: list) -> tuple[list, bool]:
     return sorted(out), cut
 
 
-def _find_files(root: Path, skipped: dict):
-    """(path, kind) for each local log file under root, kind 'agent' or 'bench'. Links are not followed. The tree is walked as a
-    stream: one entry budget (MAX_WALK_ENTRIES) is shared by every folder, a folder is sorted only after its own entries were taken,
-    and the walk stops opening folders once more than MAX_FILES log files were found. A spent budget is counted in `walk_cut`."""
+def _find_files(root: Path, skipped: dict, pin: "_Pin | None" = None):
+    """(path, kind) for each local log file under root, kind 'agent' or 'bench'. Links are not followed. Folders are listed through
+    descriptors opened beneath the pinned root (`pin`, or a pin made here), one component at a time, so the listing and the later
+    reads see the same tree whatever happens to the path names. The tree is walked as a stream: one entry budget (MAX_WALK_ENTRIES) is
+    shared by every folder, a folder is sorted only after its own entries were taken, and the walk stops opening folders once more
+    than MAX_FILES log files were seen. A spent budget is counted in `walk_cut`."""
+    own = pin is None
+    if own:
+        try:
+            pin = _Pin(Path(root))
+        except OSError:
+            return []
+    try:
+        return _walk(pin, skipped)
+    finally:
+        if own:
+            pin.close()
+
+
+def _walk(pin: "_Pin", skipped: dict):
     found, seen = [], 0
     budget = [MAX_WALK_ENTRIES]
-    stack = [(Path(root), 0)]
+    stack = [((), 0)]
     while stack:
-        dirpath, depth = stack.pop()
-        entries, cut = _list_dir(dirpath, budget)
+        rel, depth = stack.pop()
+        try:
+            here = pin.child(rel)
+        except OSError as exc:                                       # a folder swapped for a link, or gone, since it was listed
+            skipped["links" if exc.errno in _LINK_ERRNOS else "unreadable_files"] += 1
+            continue
+        try:
+            entries, cut = _list_dir(here.fd, budget)
+        finally:
+            here.close()
         if cut:
             skipped["walk_cut"] += 1
-        in_log = dirpath.name == "log"
+        in_log = (rel[-1] if rel else pin.root.name) == "log"
         subdirs = []
         for name, link, is_dir, is_regular in entries:
             if link and not _is_log_name(name, in_log):
-                if _is_dir_link(dirpath / name):
+                if _is_dir_link(pin.root.joinpath(*rel, name)):
                     skipped["links"] += 1
                 continue
             if is_dir:
@@ -486,11 +511,11 @@ def _find_files(root: Path, skipped: dict):
             if seen > MAX_FILES:
                 skipped["files_not_read"] += 1
                 continue
-            found.append((dirpath / name, kind))
+            found.append((pin.root.joinpath(*rel, name), kind))
         if seen > MAX_FILES:
             break                                                    # no folder is opened after the file cap
         for name in reversed(subdirs):                               # popped in name order
-            stack.append((dirpath / name, depth + 1))
+            stack.append((rel + (name,), depth + 1))
     return found
 
 
@@ -554,7 +579,7 @@ def scan(root, beneath: "_Pin | None" = None) -> dict:
 def _scan_tree(root: Path, pin: _Pin, out: dict, skipped: dict) -> None:
     budget = [MAX_TOTAL_BYTES]
     wall, wall_known, request_s, request_known, attempts = 0.0, False, 0.0, False, set()
-    for path, kind in _find_files(root, skipped):
+    for path, kind in _find_files(root, skipped, pin):
         out["files"] += 1
         for what, payload in _lines(path, skipped, budget, pin):
             if what == "tail":

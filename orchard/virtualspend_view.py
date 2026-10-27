@@ -42,11 +42,12 @@ def _is_dir(p: Path) -> bool:
         return False
 
 
-def _entries(path: Path, budget: list):
-    """The directories directly under `path`, as (name, entry path), read while streaming `os.scandir` and counting every entry (a
-    file counts too). Stops when the shared budget is spent. Yields nothing for a folder that cannot be read."""
+def _entries(source, budget: list, base: Path):
+    """The directories directly in `source` (a path, or a directory descriptor), as (name, base / name), read while streaming
+    `os.scandir` and counting every entry (a file counts too). Stops when the shared budget is spent. Yields nothing for a folder that
+    cannot be read."""
     try:
-        with os.scandir(path) as listing:
+        with os.scandir(source) as listing:
             for entry in listing:
                 if budget[0] <= 0:
                     budget.append("cut")                             # at least one more entry exists: the listing was cut short
@@ -54,30 +55,42 @@ def _entries(path: Path, budget: list):
                 budget[0] -= 1
                 try:
                     if entry.is_dir(follow_symlinks=False):
-                        yield entry.name, Path(entry.path)
+                        yield entry.name, base / entry.name
                 except OSError:
                     continue
     except OSError:
         return
 
 
-def discover(runs_root: Path) -> tuple[list[tuple[str, Path]], bool]:
+def discover(runs_root: Path, pin=None) -> tuple[list[tuple[str, Path]], bool]:
     """((row name, directory) for each run folder and each kernel-probe output, True when the listing was cut short). Links are left
-    out. The entry budget MAX_NAMES is applied while the folders are streamed, before anything is sorted, so it bounds the work and
-    the memory of discovery. Which entries make it in when the budget runs out is the order the file system lists them in; what is
-    kept is then sorted by name."""
+    out. With a `pin` (see `virtualspend.open_pin`) the folders are listed through descriptors opened beneath it, so a runs folder
+    replaced after it was pinned does not change what is listed; without one the path is used. The entry budget MAX_NAMES is applied
+    while the folders are streamed, before anything is sorted, so it bounds the work and the memory of discovery. Which entries make it
+    in when the budget runs out is the order the file system lists them in; what is kept is then sorted by name."""
     root = Path(runs_root)
-    if not _is_dir(root):
+    if pin is None and not _is_dir(root):
         return [], False
     budget = [MAX_NAMES]
-    top = sorted(_entries(root, budget))
+    top_source, close = (pin.fd, None) if pin is not None else (root, None)
+    top = sorted(_entries(top_source, budget, root))
     out: list[tuple[str, Path]] = []
     for name, path in top:
         if name != PROBE_PARENT:                                     # the kernel-probe folder is a container: its outputs are the rows
             out.append((name, path))
     for name, path in top:
         if name == PROBE_PARENT:
-            out.extend((f"{PROBE_PARENT}/{n}", p) for n, p in sorted(_entries(path, budget)))
+            if pin is not None:
+                try:
+                    inner = pin.child((PROBE_PARENT,))
+                except OSError:
+                    continue
+                try:
+                    out.extend((f"{PROBE_PARENT}/{n}", p) for n, p in sorted(_entries(inner.fd, budget, path)))
+                finally:
+                    inner.close()
+            else:
+                out.extend((f"{PROBE_PARENT}/{n}", p) for n, p in sorted(_entries(path, budget, path)))
     return out, len(budget) > 1
 
 
@@ -111,7 +124,7 @@ class Spender:
             if self._cache is not None and self.clock() - self._cache[0] < CACHE_S:
                 return self._cache[1], self._cache[2], self._cache[3], self._cache[4]
             pin = vs.open_pin(self.runs_root)                       # pinned before the listing: every scan is beneath this descriptor
-            listed, cut = discover(self.runs_root)
+            listed, cut = discover(self.runs_root, pin) if pin is not None else ([], False)
             rows = []
             try:
                 for name, path in listed[:MAX_CANDIDATES]:
