@@ -39,6 +39,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from orchard import audio_facts
 from orchard.classes import CLASSES, SIDECAR_CLASSES, class_of_path, path_of
 from orchard import prompt_suite, sampling_probe
 from orchard.graft_trial import DECISION_FILE as GRAFT_DECISION_FILE
@@ -162,6 +163,7 @@ DELTA_AREAS = ("config", "architecture", "tensors", "tensor_names", "tokenizer",
                "files", "generation_config", "license", "other")
 HAZARD_AREAS = ("tensor_cache", "drafter", "drafter_graft", "disk", "license", "generation_config", "stop_tokens", "sampling_defaults", "chat_template", "other")
 PATHS = ("weights-only", "full-port", "stock-runtime")
+AUDIO_CLASSES = ("weights-only", "full-port", "unknown")     # the classes an audio model can take (orchard/audio_facts.py)
 
 
 def gate_delta(stage_dir, run_dir) -> GateResult:
@@ -239,6 +241,11 @@ def _class_reasons(d: dict) -> list[str]:
         elif path_of(d["class"]) != d.get("path"):
             reasons.append(f"delta.json class {d['class']!r} takes the path {path_of(d['class'])!r}, "
                            f"but its path is {d.get('path')!r}")
+    if "facts" in d:
+        reasons += ["delta.json " + r for r in audio_facts.facts_problems(d["facts"], required=("form", "modality"))]
+        if (isinstance(d["facts"], dict) and d["facts"].get("modality") == "audio" and d.get("class") in CLASSES
+                and d["class"] not in AUDIO_CLASSES):
+            reasons.append(f"delta.json class {d['class']!r} is a text class; an audio model is {' or '.join(AUDIO_CLASSES)}")
     sidecars = d.get("sidecars", [])
     if not isinstance(sidecars, list):
         reasons.append("delta.json sidecars must be a list")
@@ -1313,6 +1320,17 @@ def delta_path(run_dir) -> str | None:
     return path if path in PATHS else None
 
 
+def delta_facts(run_dir) -> dict | None:
+    """The `facts` record of stages/0/delta.json (form and modality; orchard/audio_facts.py), or None when the file has none or
+    is unreadable. The stage 0 gate validated it; this only reads it."""
+    try:
+        data = json.loads((Path(run_dir) / "stages" / "0" / "delta.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    facts = data.get("facts") if isinstance(data, dict) else None
+    return dict(facts) if isinstance(facts, dict) else None
+
+
 def run_path(entries: list[dict], run_dir) -> str | None:
     """The path this run follows: "weights-only", "full-port", or None when it is not known.
 
@@ -1361,6 +1379,22 @@ def run_class(entries: list[dict], run_dir) -> str | None:
     if "path" in end:
         return class_of_path(end["path"])
     return delta_class(run_dir)
+
+
+def run_facts(entries: list[dict], run_dir) -> dict | None:
+    """The run's form, serving and modality (orchard/audio_facts.py), read the way run_class reads the class: from stage 0's passing
+    `stage_end`, so a resume uses what the first attempt decided. A ledger whose stage 0 passed without them is a run from before the
+    facts and gets the default (full weights, a thin bundle, text). None before stage 0 passes, or when the record fails the check."""
+    end = None
+    for e in entries:
+        if e["event"] == "stage_end" and e["stage"] == 0 and e["data"].get("result") == "pass":
+            end = e["data"]
+    if end is None:
+        return None
+    if "facts" not in end:
+        return dict(audio_facts.DEFAULT_FACTS)
+    facts = end["facts"]
+    return dict(facts) if not audio_facts.facts_problems(facts) else None
 
 
 def spec_for(number: int, path: str | None, package_format: str | None = None,
