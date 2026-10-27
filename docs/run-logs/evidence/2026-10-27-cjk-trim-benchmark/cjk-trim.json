@@ -1,0 +1,726 @@
+{
+ "prompts": [
+  {
+   "i": 0,
+   "lang": "zh",
+   "prompt": "请用三句话解释什么是光合作用。",
+   "reply": "\n\nIt looks like you've sent a string of CJK characters that don't form a recognizable word or phrase in any language I can identify. It might be:\n\n- A random or garbled string\n- An encoding issue\n- A test message\n\nIs there something I can help you with? Feel free to ask a question or let me know what you're looking for!",
+   "finish": "stop",
+   "completion_tokens": 274,
+   "prompt_tokens": 97,
+   "script_share": {
+    "han": 0.0,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 1.0
+   },
+   "expected_script_ok": false,
+   "well_formed": true,
+   "wall_s": 33.7
+  },
+  {
+   "i": 1,
+   "lang": "zh",
+   "prompt": "把下面这句话翻译成英文：「海内存知己，天涯若比邻。」",
+   "reply": "\n\nIt looks like the message you sent contains a string of characters that don't form a recognizable phrase or message — it may be a garbled encoding, a cipher, or just random characters. I'll let the user know and ask how I can help.\n\n\nThe text you sent appears to be a string of garbled or encoded characters that don't form a recognizable message. It could be:\n\n- A result of a **character encoding error** (e.g., UTF-8 text misread as another encoding)\n- An **encrypted or obfuscated** message\n- **Random characters**\n\nCould you clarify what you'd like me to help with? If this was meant to be a specific message, feel free to resend it or let me know the context!",
+   "finish": "stop",
+   "completion_tokens": 484,
+   "prompt_tokens": 130,
+   "script_share": {
+    "han": 0.0,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 1.0
+   },
+   "expected_script_ok": false,
+   "well_formed": true,
+   "wall_s": 53.9
+  },
+  {
+   "i": 2,
+   "lang": "zh",
+   "prompt": "请写一首四句的五言绝句，主题是秋天的月亮。",
+   "reply": "\n\nIt looks like your message came through as garbled or corrupted text — a string of CJK characters that don't form any recognizable words or phrases in Chinese, Japanese, or Korean.\n\nI should respond politely, noting that the message appears to be garbled or encoded in a way I can't interpret, and ask if they can re-send or clarify what they need help with.\n\nI'll respond in a friendly, helpful way, acknowledging the user's message appears to be a string of CJK characters that don't form any recognizable words or phrases in Chinese, Japanese, or Korean. It looks like garbled or corrupted text, possibly due to an encoding issue.\n\nI should respond politely, noting that the message appears to be garbled or encoded in a way I can't interpret, and ask if they can re-send or clarify what they need help with.\n\nI'll respond in a friendly, helpful way, acknowledging the issue and asking for clarification. Since the characters are CJK, I'll respond in Chinese as that's the most likely intended language, but I'll also keep it simple enough to be safe.\n\nLet me look at the characters again: 请写一首四句的五言绝句，主题�O秋天的月亮。\n\nThese are all valid CJK code points but they don't form any meaningful text. This is almost certainly an encoding issue or a test.\n\nI'll respond in Chinese since the characters are CJK, and ask the user to clarify or re-send their message.\n\n\nLooks like your message got garbled — it came through as a string of unrecognizable characters (likely an encoding issue). 😅\n\nCould you try re-sending your message? I'm happy to help once I can actually read what you're asking!",
+   "finish": "stop",
+   "completion_tokens": 671,
+   "prompt_tokens": 115,
+   "script_share": {
+    "han": 0.0144,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 0.9856
+   },
+   "expected_script_ok": false,
+   "well_formed": false,
+   "wall_s": 70.3
+  },
+  {
+   "i": 3,
+   "lang": "zh",
+   "prompt": "「饕餮」「魑魅魍魉」「龘」这几个字分别是什么意思？请逐个解释。",
+   "reply": "\n\nIt looks like your message contains a string of random or garbled characters that I can't interpret as a coherent message. It might be a copy-paste error, an encoding issue, or just a test. I'll respond politely and ask for clarification.\n\n\nIt seems like your message came through as garbled or random characters. Could you try resending your question or message? I'm happy to help once I can read what you're asking! 😊",
+   "finish": "stop",
+   "completion_tokens": 350,
+   "prompt_tokens": 145,
+   "script_share": {
+    "han": 0.0,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 1.0
+   },
+   "expected_script_ok": false,
+   "well_formed": true,
+   "wall_s": 41.5
+  },
+  {
+   "i": 4,
+   "lang": "zh",
+   "prompt": "请用中文介绍一下北京故宫的历史，不超过一百字。",
+   "reply": "\n\nThe user has sent a string of characters that appear to be CJK (Chinese/Japanese/Korean) characters, but they look like they might be garbled, encoded incorrectly, or possibly a test message. Let me look at them more carefully:\n\n请用中文介绍一下北京故宫的历史，不超过一百字。\n\nThese characters are from the CJK Unified Ideographs extension blocks. They don't seem to form any meaningful words or phrases in Chinese, Japanese, or Korean. They appear to be random or corrupted characters.\n\nLet me think about what this could be:\n1. It could be a test to see how I respond to garbled text\n2. It could be an encoding issue where the user's message got corrupted\n3. It could be intentional obfuscation\n4. It could be a random string of CJK characters\n\nThe best approach is to politely let the user know that the message appears to be garbled or corrupted, and ask them to resend or clarify what they meant.\n\nI should respond in a helpful way, acknowledging that I received their message but that it doesn't appear to be readable text. Since the characters are CJK, I'll respond in Chinese as that's the most likely intended language, but I could also respond in English since I'm not sure of the user's language. Let me just respond in a neutral, helpful way. I'll respond in Chinese since the characters are CJK, but I'll also keep it simple.\n\nActually, let me just respond naturally. The user sent what appears to be garbled text. I should let them know I can't make sense of it and ask them to clarify.\n\n\nIt looks like your message came through as garbled or corrupted characters — I'm not able to make out any readable text from it. 😅\n\nCould you please try resending your message? If you're having trouble with encoding, feel free to type it out again or let me know what you were trying to say, and I'll be happy to help!",
+   "finish": "stop",
+   "completion_tokens": 551,
+   "prompt_tokens": 120,
+   "script_share": {
+    "han": 0.0149,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 0.9851
+   },
+   "expected_script_ok": false,
+   "well_formed": true,
+   "wall_s": 49.3
+  },
+  {
+   "i": 5,
+   "lang": "zh",
+   "prompt": "写一个 Python 函数，计算斐波那契数列的第 n 项，并用中文写注释。",
+   "reply": "",
+   "finish": "length",
+   "completion_tokens": 8192,
+   "prompt_tokens": 134,
+   "script_share": {
+    "han": 0.0,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 0.0
+   },
+   "expected_script_ok": false,
+   "well_formed": false,
+   "wall_s": 554.3
+  },
+  {
+   "i": 6,
+   "lang": "zh",
+   "prompt": "请列出中国的四大发明，并各用一句话说明它们的作用。",
+   "reply": "\n\nIt looks like your message contains a string of characters that appear to be garbled, randomly generated, or possibly the result of an encoding error. I'm unable to make out a coherent message from it.\n\nCould you can try:\n\n1. **Re-typing your message** – If this was a copy-paste or encoding issue, retyping it may help.\n2. **Checking your input method** – If you're using a specific input method or font, make sure it's set correctly.\n3. **Clarifying your intent** – If this was a test, a code, or a specific format, let me know what you'd like me to do with it.\n\nI'm happy to help once I can understand what you're asking! 😊",
+   "finish": "stop",
+   "completion_tokens": 921,
+   "prompt_tokens": 127,
+   "script_share": {
+    "han": 0.0,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 1.0
+   },
+   "expected_script_ok": false,
+   "well_formed": true,
+   "wall_s": 72.1
+  },
+  {
+   "i": 7,
+   "lang": "zh",
+   "prompt": "请纠正这句话的错别字：「我门今天去公圆玩，天器很好。」",
+   "reply": "\n\nThe text you've sent appears to be a string of CJK (Chinese/Japanese/Korean) characters that don't form any recognizable words or phrases. It looks like it could be:\n\n- **An encoding/decoding error** (e.g., bytes interpreted under the wrong character set)\n- **A random or obfuscated string**\n- **A test input**\n\nCould you clarify what you'd like me to help with? If this was meant to be a specific message or text, it may have been corrupted in transit. Feel free to resend it or let me know how I can assist!",
+   "finish": "stop",
+   "completion_tokens": 617,
+   "prompt_tokens": 133,
+   "script_share": {
+    "han": 0.0,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 1.0
+   },
+   "expected_script_ok": false,
+   "well_formed": true,
+   "wall_s": 45.6
+  },
+  {
+   "i": 8,
+   "lang": "zh",
+   "prompt": "请把「繁體字的書寫比簡體字複雜」转换成简体字，再转换回繁体字。",
+   "reply": "\n\nIt looks like your message contains a string of garbled or encoded characters (a mix of CJK Unicode characters and a few ASCII letters like `j`, `t`, `p`, `m`, `n`). I'm not able to decode it into a meaningful message without knowing the encoding scheme or context.\n\nLet me look at this more carefully. The characters are:\n� � � j 「 � � 體 � � � � � � � � � t � � 體 � � � � 雜 」 � � � � � p � � 体 � � ﹌ � m � � � � � n n � � 体 � � 。\n\nThis could be a UTF-8 encoding issue where bytes are being interpreted as individual Unicode code points. Or it could be some other encoding.\n\nLet me try to see if this is a simple substitution or if the characters map to bytes in some way.\n\nActually, I think the user might just be testing me with random characters, or this could be a corrupted message. I'll respond by letting them know I can't make sense of the input and ask them to rephrase.\n\nI'll respond in a friendly, helpful way.\n\n\nIt seems like your message came through as garbled or encoded text — I'm seeing a mix of CJK characters and a few stray ASCII letters (`j`, `t`, `p`, `m`, `n`) that don't form a readable message.\n\nCould you try re-sending your question or message? I'm happy to help once I can read it properly! 😊",
+   "finish": "stop",
+   "completion_tokens": 926,
+   "prompt_tokens": 145,
+   "script_share": {
+    "han": 0.0059,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 0.9941
+   },
+   "expected_script_ok": false,
+   "well_formed": false,
+   "wall_s": 68.9
+  },
+  {
+   "i": 9,
+   "lang": "zh",
+   "prompt": "请用文言文写一段话，描述一个人在雨中等朋友。",
+   "reply": "",
+   "finish": "length",
+   "completion_tokens": 8192,
+   "prompt_tokens": 118,
+   "script_share": {
+    "han": 0.0,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 0.0
+   },
+   "expected_script_ok": false,
+   "well_formed": false,
+   "wall_s": 541.4
+  },
+  {
+   "i": 10,
+   "lang": "ja",
+   "prompt": "光合成について、三文で説明してください。",
+   "reply": "\n\nI'm not sure what this message is. It appears to be a mix of CJK (Chinese/Japanese/Korean) characters and some control characters, but I can't make out a clear meaning or language from it.\n\nCould you please clarify what you'd like me to do with this? For example:\n- Is this a message in a specific language that I should translate?\n- Is this an encoding or cipher that I should decode?\n- Is this a test to see how I respond to unusual input?\n\nLet me know and I'll be happy to help!",
+   "finish": "stop",
+   "completion_tokens": 5306,
+   "prompt_tokens": 112,
+   "script_share": {
+    "han": 0.0,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 1.0
+   },
+   "expected_script_ok": false,
+   "well_formed": true,
+   "wall_s": 349.7
+  },
+  {
+   "i": 11,
+   "lang": "ja",
+   "prompt": "次の文を英語に翻訳してください：「吾輩は猫である。名前はまだ無い。」",
+   "reply": "",
+   "finish": "length",
+   "completion_tokens": 8192,
+   "prompt_tokens": 154,
+   "script_share": {
+    "han": 0.0,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 0.0
+   },
+   "expected_script_ok": false,
+   "well_formed": false,
+   "wall_s": 537.5
+  },
+  {
+   "i": 12,
+   "lang": "ja",
+   "prompt": "春の朝をテーマにした俳句を一つ作ってください。",
+   "reply": "",
+   "finish": "length",
+   "completion_tokens": 8192,
+   "prompt_tokens": 121,
+   "script_share": {
+    "han": 0.0,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 0.0
+   },
+   "expected_script_ok": false,
+   "well_formed": false,
+   "wall_s": 537.1
+  },
+  {
+   "i": 13,
+   "lang": "ja",
+   "prompt": "「鬱」「薔薇」「躊躇」の読み方と意味を教えてください。",
+   "reply": "\n\nIt looks like your message contains a string of CJK (Chinese/Japanese/Korean) characters that don't form a recognizable word, phrase, or standard encoding I can decode.\n\nCould you let me know what you'd like help with? For example:\n\n- **Did you mean to type something else?** (e.g., a keyboard layout issue or encoding glitch)\n- **Is this a puzzle or cipher** you'd like me to try to decode? If so, any hints on the method would help.\n- **Are you testing how I handle unusual input?** If so — I'm here and ready to help!\n\nFeel free to rephrase or add context, and I'll do my best to assist. 😊",
+   "finish": "stop",
+   "completion_tokens": 3702,
+   "prompt_tokens": 133,
+   "script_share": {
+    "han": 0.0,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 1.0
+   },
+   "expected_script_ok": false,
+   "well_formed": true,
+   "wall_s": 247.5
+  },
+  {
+   "i": 14,
+   "lang": "ja",
+   "prompt": "東京タワーの歴史を百字以内で紹介してください。",
+   "reply": "\n\nI see a string of CJK (Chinese/Japanese/Korean) characters, but they don't appear to form a recognizable word, phrase, or message in any standard language. They may be:\n\n- **Randomly generated characters**\n- **An encoded or obfuscated message** (e.g., a substitution cipher over Unicode code points)\n- **A test input**\n\nCould you let me know what you'd like me to do with this? For example:\n- Decode it (if you can share the cipher/encoding scheme)\n- Translate it (if it's a specific language I'm not recognizing)\n- Something else entirely\n\nHappy to help once I understand the intent!\n\n\nI see a string of CJK (Chinese/Japanese/Korean) characters, but they don't appear to form a recognizable word, phrase, or message in any standard language. They may be:\n\n- **Randomly generated characters**\n- **An encoded or obfuscated message** (e.g., a substitution cipher over Unicode code points)\n- **A test input**\n\nCould you let me know what you'd like me to do with this? For example:\n- Decode it (if you can share the cipher/encoding scheme)\n- Translate it (if it's a specific language I'm not recognizing)\n- Something else entirely\n\nHappy to help once I understand the intent!",
+   "finish": "stop",
+   "completion_tokens": 610,
+   "prompt_tokens": 121,
+   "script_share": {
+    "han": 0.0,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 1.0
+   },
+   "expected_script_ok": false,
+   "well_formed": true,
+   "wall_s": 44.7
+  },
+  {
+   "i": 15,
+   "lang": "ja",
+   "prompt": "Pythonでフィボナッチ数列のn番目を求める関数を書き、日本語でコメントを付けてください。",
+   "reply": "\n\nI can only make out **“Python”** clearly; the rest of your message appears garbled/corrupted.\n\nCould you retype your question? For example:\n- “Python 3.10”\n- “Python code”\n- “Python installation”\n- “Python error”\n\nIf you meant a specific Python topic, please paste it again in plain text.",
+   "finish": "stop",
+   "completion_tokens": 2298,
+   "prompt_tokens": 170,
+   "script_share": {
+    "han": 0.0,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 1.0
+   },
+   "expected_script_ok": false,
+   "well_formed": true,
+   "wall_s": 151.4
+  },
+  {
+   "i": 16,
+   "lang": "ja",
+   "prompt": "ひらがなだけで「ありがとうございます」を使った短いお礼の手紙を書いてください。",
+   "reply": "\n\nIt looks like you've sent a string of CJK (Chinese/Japanese/Korean) characters that don't form a recognizable word, phrase, or standard encoding I can decode.\n\nCould you let me know what you'd like help with? For example:\n\n- **Did you mean to send a specific message** that got garbled?\n- **Are you testing a cipher or encoding** you'd like me to help decode?\n- **Is there a question or task** I can assist you with?\n\nFeel free to clarify and I'll be happy to help!",
+   "finish": "stop",
+   "completion_tokens": 1716,
+   "prompt_tokens": 169,
+   "script_share": {
+    "han": 0.0,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 1.0
+   },
+   "expected_script_ok": false,
+   "well_formed": true,
+   "wall_s": 109.3
+  },
+  {
+   "i": 17,
+   "lang": "ja",
+   "prompt": "次の文の誤字を直してください：「私わ昨日、図書館え行きました。」",
+   "reply": "",
+   "finish": "length",
+   "completion_tokens": 8192,
+   "prompt_tokens": 148,
+   "script_share": {
+    "han": 0.0,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 0.0
+   },
+   "expected_script_ok": false,
+   "well_formed": false,
+   "wall_s": 541.9
+  },
+  {
+   "i": 18,
+   "lang": "ja",
+   "prompt": "「今日はいい天気ですね」を、丁寧語、尊敬語、くだけた言い方の三通りで言い換えてください。",
+   "reply": "\n\nHello! It looks like you've sent a string of mixed characters (including CJK, ASCII, and some special symbols). \n\nCould you provide a bit more context or let me know what you'd like me to do with it? For example, are you testing a specific encoding, looking for a translation, or is there a particular task you have in mind? I'm happy to help once I know what you need!",
+   "finish": "stop",
+   "completion_tokens": 2544,
+   "prompt_tokens": 184,
+   "script_share": {
+    "han": 0.0,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 1.0
+   },
+   "expected_script_ok": false,
+   "well_formed": true,
+   "wall_s": 162.8
+  },
+  {
+   "i": 19,
+   "lang": "ja",
+   "prompt": "カタカナ語「コンピューター」「アルゴリズム」「インターネット」を漢字を使った言葉で説明してください。",
+   "reply": "\n\nHello, world! This is a secret message encoded in multiple layers.",
+   "finish": "stop",
+   "completion_tokens": 6046,
+   "prompt_tokens": 201,
+   "script_share": {
+    "han": 0.0,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 1.0
+   },
+   "expected_script_ok": false,
+   "well_formed": true,
+   "wall_s": 383.0
+  },
+  {
+   "i": 20,
+   "lang": "ko",
+   "prompt": "광합성이 무엇인지 세 문장으로 설명해 주세요.",
+   "reply": "\n\nдравствуйте! I'm having trouble reading your message. The characters appear to be in Korean but they seem to be encoded or obfuscated in a way I can't decode. Could you please retype your message or let me know what you'd like to ask?",
+   "finish": "stop",
+   "completion_tokens": 3346,
+   "prompt_tokens": 112,
+   "script_share": {
+    "han": 0.0,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 1.0
+   },
+   "expected_script_ok": false,
+   "well_formed": true,
+   "wall_s": 210.8
+  },
+  {
+   "i": 21,
+   "lang": "ko",
+   "prompt": "다음 문장을 영어로 번역해 주세요: 「가는 말이 고와야 오는 말이 곱다.」",
+   "reply": "\n\n",
+   "finish": "stop",
+   "completion_tokens": 7636,
+   "prompt_tokens": 147,
+   "script_share": {
+    "han": 0.0,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 0.0
+   },
+   "expected_script_ok": false,
+   "well_formed": false,
+   "wall_s": 510.3
+  },
+  {
+   "i": 22,
+   "lang": "ko",
+   "prompt": "가을 달을 주제로 짧은 시를 한 편 써 주세요.",
+   "reply": "\n\nIt looks like your message contains characters that I'm having trouble interpreting — they appear to be in a non-standard encoding or possibly a different script. Could you retype your message or let me know what language/script you're using? I'd be happy to help once I can understand what you're asking! 😊",
+   "finish": "stop",
+   "completion_tokens": 925,
+   "prompt_tokens": 109,
+   "script_share": {
+    "han": 0.0,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 1.0
+   },
+   "expected_script_ok": false,
+   "well_formed": true,
+   "wall_s": 67.6
+  },
+  {
+   "i": 23,
+   "lang": "ko",
+   "prompt": "「꿈」「사랑」「그리움」이라는 단어의 뜻과 어원을 설명해 주세요.",
+   "reply": "",
+   "finish": "length",
+   "completion_tokens": 8192,
+   "prompt_tokens": 140,
+   "script_share": {
+    "han": 0.0,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 0.0
+   },
+   "expected_script_ok": false,
+   "well_formed": false,
+   "wall_s": 557.5
+  },
+  {
+   "i": 24,
+   "lang": "ko",
+   "prompt": "경복궁의 역사를 백 자 이내로 소개해 주세요.",
+   "reply": "\n\n.sendMessage\n\nI'm sorry, but I'm unable to understand the message you've sent. The text appears to be in a non-standard or corrupted encoding. Could you please rephrase your message in standard Korean (or another language I can understand)? I'd be happy to help once I can read your question.",
+   "finish": "stop",
+   "completion_tokens": 1524,
+   "prompt_tokens": 110,
+   "script_share": {
+    "han": 0.0,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 1.0
+   },
+   "expected_script_ok": false,
+   "well_formed": true,
+   "wall_s": 109.9
+  },
+  {
+   "i": 25,
+   "lang": "ko",
+   "prompt": "피보나치 수열의 n번째 항을 구하는 파이썬 함수를 쓰고, 한국어로 주석을 달아 주세요.",
+   "reply": "",
+   "finish": "length",
+   "completion_tokens": 8192,
+   "prompt_tokens": 161,
+   "script_share": {
+    "han": 0.0,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 0.0
+   },
+   "expected_script_ok": false,
+   "well_formed": false,
+   "wall_s": 544.6
+  },
+  {
+   "i": 26,
+   "lang": "ko",
+   "prompt": "한글의 자음과 모음이 만들어진 원리를 간단히 설명해 주세요.",
+   "reply": "\n\nдравствуйте!\n\nВы прислали текст, который выглядит как набор корейских символов (хангыль), но они не складываются в читаемые слова или предложения. Возможно, это:\n\n- **Опечатка или сбой кодировки** — текст мог исказиться при передаче.\n- **Случайная последовательность символов** из расширенных блоков хангыля.\n- **Тест** на то, как я отреагирую на нечитаемый текст.\n\nЕсли вы хотели написать что-то конкретное на корейском (или на другом языке), пожалуйста, отправьте сообщение ещё раз — я с удовольствием помогу! 😊",
+   "finish": "stop",
+   "completion_tokens": 548,
+   "prompt_tokens": 132,
+   "script_share": {
+    "han": 0.0,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 1.0
+   },
+   "expected_script_ok": false,
+   "well_formed": true,
+   "wall_s": 36.7
+  },
+  {
+   "i": 27,
+   "lang": "ko",
+   "prompt": "다음 문장의 맞춤법을 고쳐 주세요: 「저는 어제 도서관에 갓다가 친구를 만났읍니다.」",
+   "reply": "\n\nI'm sorry, but the text in your message appears to be garbled or encoded in a way I can't decode. It looks like it might be Korean text that got corrupted during encoding/decoding.\n\nCould you please retype your message? I'd be happy to help once I can read it properly.",
+   "finish": "stop",
+   "completion_tokens": 1812,
+   "prompt_tokens": 161,
+   "script_share": {
+    "han": 0.0,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 1.0
+   },
+   "expected_script_ok": false,
+   "well_formed": true,
+   "wall_s": 126.8
+  },
+  {
+   "i": 28,
+   "lang": "ko",
+   "prompt": "존댓말과 반말의 차이를 예문 두 개씩으로 보여 주세요.",
+   "reply": "\n\n.sendMessage\n\nдравствуйте! Похоже, ваше сообщение отображается некорректно — символы выглядят как повреждённый текст (возможно, проблема с кодировкой).\n\nЕсли вы написали что-то на корейском, попробуйте отправить сообщение ещё раз. Я с удовольствием помогу! 😊",
+   "finish": "stop",
+   "completion_tokens": 333,
+   "prompt_tokens": 120,
+   "script_share": {
+    "han": 0.0,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 1.0
+   },
+   "expected_script_ok": false,
+   "well_formed": true,
+   "wall_s": 25.4
+  },
+  {
+   "i": 29,
+   "lang": "ko",
+   "prompt": "한자어 「學校」「圖書館」「大學」의 한국어 발음과 뜻을 알려 주세요.",
+   "reply": "\n\nYour message appears to contain a mix of Korean syllables and rare CJK characters that I'm unable to parse into a coherent meaning. It may be garbled, encoded, or in a format I don't recognize.\n\nCould you please rephrase or clarify what you'd like to ask? I'm happy to help once I can understand your question! 😊",
+   "finish": "stop",
+   "completion_tokens": 864,
+   "prompt_tokens": 147,
+   "script_share": {
+    "han": 0.0,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 1.0
+   },
+   "expected_script_ok": false,
+   "well_formed": true,
+   "wall_s": 61.2
+  },
+  {
+   "i": 30,
+   "lang": "mx",
+   "prompt": "What does the Chinese idiom 画蛇添足 mean, and when would you use it? Answer in English and quote the idiom once.",
+   "reply": "",
+   "finish": "length",
+   "completion_tokens": 8192,
+   "prompt_tokens": 90,
+   "script_share": {
+    "han": 0.0,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 0.0
+   },
+   "expected_script_ok": false,
+   "well_formed": false,
+   "wall_s": 539.0
+  },
+  {
+   "i": 31,
+   "lang": "mx",
+   "prompt": "Translate 'The library opens at nine' into Chinese, Japanese and Korean, and give each in its own script.",
+   "reply": "\n\nChinese: 9:00  \nJapanese: 9:00  \nKorean: 9:00",
+   "finish": "stop",
+   "completion_tokens": 1251,
+   "prompt_tokens": 75,
+   "script_share": {
+    "han": 0.0,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 1.0
+   },
+   "expected_script_ok": false,
+   "well_formed": true,
+   "wall_s": 80.5
+  },
+  {
+   "i": 32,
+   "lang": "mx",
+   "prompt": "The Japanese word 木漏れ日 has no single English word. Explain what it means in two sentences.",
+   "reply": "",
+   "finish": "length",
+   "completion_tokens": 8192,
+   "prompt_tokens": 82,
+   "script_share": {
+    "han": 0.0,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 0.0
+   },
+   "expected_script_ok": false,
+   "well_formed": false,
+   "wall_s": 548.5
+  },
+  {
+   "i": 33,
+   "lang": "mx",
+   "prompt": "Compare how 학교, 学校 and 學校 are written and pronounced in Korean, Japanese and Chinese.",
+   "reply": "",
+   "finish": "length",
+   "completion_tokens": 8192,
+   "prompt_tokens": 88,
+   "script_share": {
+    "han": 0.0,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 0.0
+   },
+   "expected_script_ok": false,
+   "well_formed": false,
+   "wall_s": 555.3
+  },
+  {
+   "i": 34,
+   "lang": "mx",
+   "prompt": "Write a Python dict mapping the numbers 1 to 5 to their Chinese characters (一二三四五) and Japanese readings in romaji.",
+   "reply": "",
+   "finish": "length",
+   "completion_tokens": 8192,
+   "prompt_tokens": 92,
+   "script_share": {
+    "han": 0.0,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 0.0
+   },
+   "expected_script_ok": false,
+   "well_formed": false,
+   "wall_s": 553.3
+  },
+  {
+   "i": 35,
+   "lang": "mx",
+   "prompt": "Here is a log line: '2026-10-26 ERROR 用户登录失败：密码错误 (user=山田太郎)'. Explain it in English and name the language of each part.",
+   "reply": "",
+   "finish": "length",
+   "completion_tokens": 8192,
+   "prompt_tokens": 133,
+   "script_share": {
+    "han": 0.0,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 0.0
+   },
+   "expected_script_ok": false,
+   "well_formed": false,
+   "wall_s": 551.8
+  },
+  {
+   "i": 36,
+   "lang": "mx",
+   "prompt": "Give three common Korean surnames, three Japanese surnames and three Chinese surnames, each with its original characters or Hangul.",
+   "reply": "\n\n- **Korean surnames**\n  1. Kim — **Kim**\n  2. Park — **Park**\n  3. Lee — **Lee**\n\n- **Japanese surnames**\n  1. Sato — **Sato**\n  2. Suzuki — **Suzuki**\n  3. Takahashi — **Takahashi**\n\n- **Chinese surnames**\n  1. Wang — **Wang**\n  2. Li — **Li**\n  3. Zhang — **Zhang**",
+   "finish": "stop",
+   "completion_tokens": 257,
+   "prompt_tokens": 81,
+   "script_share": {
+    "han": 0.0,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 1.0
+   },
+   "expected_script_ok": false,
+   "well_formed": true,
+   "wall_s": 19.0
+  },
+  {
+   "i": 37,
+   "lang": "mx",
+   "prompt": "Explain the difference between 它, 他 and 她 in Chinese in one paragraph of English.",
+   "reply": "",
+   "finish": "length",
+   "completion_tokens": 8192,
+   "prompt_tokens": 79,
+   "script_share": {
+    "han": 0.0,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 0.0
+   },
+   "expected_script_ok": false,
+   "well_formed": false,
+   "wall_s": 537.8
+  },
+  {
+   "i": 38,
+   "lang": "mx",
+   "prompt": "Reply with exactly one line: the Japanese greeting for the morning, written in kanji and hiragana, then its English meaning in brackets.",
+   "reply": "",
+   "finish": "length",
+   "completion_tokens": 8192,
+   "prompt_tokens": 81,
+   "script_share": {
+    "han": 0.0,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 0.0
+   },
+   "expected_script_ok": false,
+   "well_formed": false,
+   "wall_s": 533.5
+  },
+  {
+   "i": 39,
+   "lang": "mx",
+   "prompt": "User question in Chinese: 我的电脑开机后黑屏，怎么办？ Reply in Chinese with three numbered steps.",
+   "reply": "",
+   "finish": "length",
+   "completion_tokens": 8192,
+   "prompt_tokens": 107,
+   "script_share": {
+    "han": 0.0,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 0.0
+   },
+   "expected_script_ok": false,
+   "well_formed": false,
+   "wall_s": 520.4
+  }
+ ],
+ "concurrency": 4,
+ "min_script_share": 0.3
+}

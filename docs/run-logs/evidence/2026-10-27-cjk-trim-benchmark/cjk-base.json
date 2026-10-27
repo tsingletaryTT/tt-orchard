@@ -1,0 +1,726 @@
+{
+ "prompts": [
+  {
+   "i": 0,
+   "lang": "zh",
+   "prompt": "请用三句话解释什么是光合作用。",
+   "reply": "\n\n光合作用是植物、藻类和某些细菌利用光能的过程。它们将二氧化碳和水转化为葡萄糖和氧气。这一过程为大多数生命提供能量和氧气。",
+   "finish": "stop",
+   "completion_tokens": 58,
+   "prompt_tokens": 59,
+   "script_share": {
+    "han": 1.0,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 0.0
+   },
+   "expected_script_ok": true,
+   "well_formed": true,
+   "wall_s": 13.8
+  },
+  {
+   "i": 1,
+   "lang": "zh",
+   "prompt": "把下面这句话翻译成英文：「海内存知己，天涯若比邻。」",
+   "reply": "\n\nHere’s a natural and poetic English translation:\n\n**“As long as we have a kindred spirit, even the farthest corner of the world feels like a neighbor.”**\n\nA more concise, literary version could be:\n\n**“With a true friend by our side, even distant lands feel near.”**",
+   "finish": "stop",
+   "completion_tokens": 138,
+   "prompt_tokens": 68,
+   "script_share": {
+    "han": 0.0,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 1.0
+   },
+   "expected_script_ok": false,
+   "well_formed": true,
+   "wall_s": 23.1
+  },
+  {
+   "i": 2,
+   "lang": "zh",
+   "prompt": "请写一首四句的五言绝句，主题是秋天的月亮。",
+   "reply": "\n\n秋空悬皓月，  \n清影落寒塘。  \n冷露湿庭树，  \n孤光满故乡。",
+   "finish": "stop",
+   "completion_tokens": 216,
+   "prompt_tokens": 66,
+   "script_share": {
+    "han": 1.0,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 0.0
+   },
+   "expected_script_ok": true,
+   "well_formed": true,
+   "wall_s": 31.4
+  },
+  {
+   "i": 3,
+   "lang": "zh",
+   "prompt": "「饕餮」「魑魅魍魉」「龘」这几个字分别是什么意思？请逐个解释。",
+   "reply": "\n\n- **饕餮**：古代神话传说中的一种凶兽，传说它贪吃、吞食万物，后来也用来比喻贪吃的人，或象征贪婪、贪欲。常见于青铜器纹饰，如“饕餮纹”。\n\n- **魑魅魍魉**：原指古代传说中的各种鬼怪。  \n  “魑”“魅”“魍”“魉”都是鬼怪名，合起来泛指妖魔鬼怪。\n- 龘：龙腾飞的样子，形容龙飞腾、气势盛大。\n\n\n- **饕餮**：古代神话传说中的一种凶兽，传说它贪吃、吞食万物，后来也用来比喻贪吃的人，或象征贪婪、贪欲。常见于青铜器纹饰，如“饕餮纹”。\n\n- **魑魅魍魉**：原指古代传说中的各种鬼怪。  \n  “魑”“魅”“魍”“魉”都是鬼怪名，合起来泛指妖魔鬼怪；后来也比喻各种坏人、邪恶势力或阴险狡诈的人。\n\n- **龘**：形容龙腾飞的样子，形容龙飞腾、气势盛大。\n\n\n- **饕餮**：古代神话传说中的一种凶兽，传说它贪吃、吞食万物，后来也用来比喻贪吃的人，或象征贪婪、贪欲。常见于青铜器纹饰，如“饕餮纹”。\n\n- **魑魅魍魉**：原指古代传说中的各种鬼怪。  \n  “魑”“魅”“魍”“魍”“魉”都是鬼怪名，合起来泛指妖魔鬼怪；后来也比喻各种坏人、邪恶势力或阴险狡诈的人。\n\n- **龘**：形容龙腾飞的样子，形容龙飞腾、气势盛大。",
+   "finish": "stop",
+   "completion_tokens": 522,
+   "prompt_tokens": 78,
+   "script_share": {
+    "han": 1.0,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 0.0
+   },
+   "expected_script_ok": true,
+   "well_formed": true,
+   "wall_s": 60.4
+  },
+  {
+   "i": 4,
+   "lang": "zh",
+   "prompt": "请用中文介绍一下北京故宫的历史，不超过一百字。",
+   "reply": "\n\n北京故宫始建于明永乐四年，1420年建成，是明清两代皇宫，共有二十四位皇帝在此执政。它集中国古代建筑艺术之大成，现为故宫博物院，展示丰富历史文物。",
+   "finish": "stop",
+   "completion_tokens": 512,
+   "prompt_tokens": 63,
+   "script_share": {
+    "han": 1.0,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 0.0
+   },
+   "expected_script_ok": true,
+   "well_formed": true,
+   "wall_s": 53.1
+  },
+  {
+   "i": 5,
+   "lang": "zh",
+   "prompt": "写一个 Python 函数，计算斐波那契数列的第 n 项，并用中文写注释。",
+   "reply": "\n\n```python\ndef fibonacci(n: int) -> int:\n    \"\"\"\n    计算斐波那契数列的第 n 项。\n\n    参数:\n        n: 非负整数，表示要计算的项数（从 0 开始计数）\n\n    返回:\n        斐波那契数列的第 n 项\n\n    说明:\n        斐波那契数列定义为：\n        F(0) = 0\n        F(1) = 1\n        F(n) = F(n-1) + F(n-2)，当 n >= 2\n    \"\"\"\n    # 如果 n 是负数，则抛出异常\n    if n < 0:\n        raise ValueError(\"n 必须是非负数，则抛出异常\n    if n < 0:\n        raise ValueError(\"n 必须是非负整数\")\n\n    # 前两项直接返回\n    if n == 0:\n        return 0\n    if n == 1:\n        return 1\n\n    # 使用两个变量保存前两项\n    a, b = 0, 1\n\n    # 从第 2 项开始循环计算到第 n 项\n    # 每次循环中，b 表示当前项，a 表示前一项\n    for _ in range(2, n + 1):\n        a, b = b, a + b\n\n    # 循环结束后，b 就是第 n 项\n\n\n```python\ndef fibonacci(n: int) -> int:\n    \"\"\"\n    计算斐波那契数列的第 n 项。\n\n    参数:\n        n: 非负整数，表示要计算的项数（从 0 开始计数）\n\n    返回:\n        斐波那契数列的第 n 项\n\n    说明:\n        斐波那契数列定义为：\n        F(0) = 0\n        F(1) = 1\n        F(n) = F(n-1) + F(n-2)，当 n >= 2\n    \"\"\"\n    # 如果 n 是负数，则抛出异常\n    if n < 0:\n        raise ValueError(\"n 必须是非负整数\")\n\n    # 前两项直接返回\n    if n == 0:\n        return 0\n    if n == 1:\n        return 1\n\n    # 使用两个变量保存前两项\n    a, b = 0, 1\n\n    # 从第 n 项。\n\n    参数:\n        n: 非负整数，表示要计算的项数（从 0 开始计数）\n\n    返回:\n        斐波那契数列的第 n 项\n\n    说明:\n        斐波那契数列定义为：\n        F(0) = 0\n        F(1) = 1\n        F(n) = F(n-1. 如果 n 是负数，则抛出异常\n    if n < 0:\n        raise ValueError(\"n 必须是非负整数\")\n\n    # 前两项直接返回\n    if n == 0:\n        return 0\n    if n == 1:\n        return 1\n\n    # 使用两个变量保存前两项\n    a, b = 0, 1\n\n    # 从第 2 项开始循环计算到第 n 项\n    for _ in range(2, n + 1):\n        a, b = b, a + b\n\n    # 循环结束后，b 就是第 n 项\n    return b\n```",
+   "finish": "stop",
+   "completion_tokens": 855,
+   "prompt_tokens": 74,
+   "script_share": {
+    "han": 0.5456,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 0.4544
+   },
+   "expected_script_ok": true,
+   "well_formed": false,
+   "wall_s": 88.3
+  },
+  {
+   "i": 6,
+   "lang": "zh",
+   "prompt": "请列出中国的四大发明，并各用一句话说明它们的作用。",
+   "reply": "\n\n中国的四大发明是：\n\n1. **造纸术**：用植物纤维制成纸张，使书写和记录更加轻便、普及。  \n2. **印刷术**：通过刻版或活字复制文字，大大提高了书籍和知识的传播效率。  \n3. **火药**：利用化学反应产生爆炸，最初用于烟火、采矿，后来也用于军事。  \n4. **指南针**：利用磁针指示方向，帮助人们辨别方位，促进了航海和交通发展。",
+   "finish": "stop",
+   "completion_tokens": 149,
+   "prompt_tokens": 66,
+   "script_share": {
+    "han": 1.0,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 0.0
+   },
+   "expected_script_ok": true,
+   "well_formed": true,
+   "wall_s": 13.3
+  },
+  {
+   "i": 7,
+   "lang": "zh",
+   "prompt": "请纠正这句话的错别字：「我门今天去公圆玩，天器很好。」",
+   "reply": "\n\n纠正后：「我们今天去公园玩，天气很好。」",
+   "finish": "stop",
+   "completion_tokens": 100,
+   "prompt_tokens": 73,
+   "script_share": {
+    "han": 1.0,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 0.0
+   },
+   "expected_script_ok": true,
+   "well_formed": true,
+   "wall_s": 10.0
+  },
+  {
+   "i": 8,
+   "lang": "zh",
+   "prompt": "请把「繁體字的書寫比簡體字複雜」转换成简体字，再转换回繁体字。",
+   "reply": "\n\n转换成简体字：\n\n**繁体字的书写比简体字复杂**\n\n再转换回繁体字：\n\n**繁體字的書寫比簡體字複雜**",
+   "finish": "stop",
+   "completion_tokens": 220,
+   "prompt_tokens": 74,
+   "script_share": {
+    "han": 1.0,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 0.0
+   },
+   "expected_script_ok": true,
+   "well_formed": true,
+   "wall_s": 22.0
+  },
+  {
+   "i": 9,
+   "lang": "zh",
+   "prompt": "请用文言文写一段话，描述一个人在雨中等朋友。",
+   "reply": "\n\n暮雨初歇，余独立檐下，候友不至。径湿苔痕，烟迷远树，灯影摇于阶前。风过竹梢，声如碎玉，心亦微凉。遥望街角，影未现，唯闻雨打芭蕉，声声入耳。忽闻履声近，乃友也，相视而笑，雨意遂消。",
+   "finish": "stop",
+   "completion_tokens": 319,
+   "prompt_tokens": 64,
+   "script_share": {
+    "han": 1.0,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 0.0
+   },
+   "expected_script_ok": true,
+   "well_formed": true,
+   "wall_s": 36.6
+  },
+  {
+   "i": 10,
+   "lang": "ja",
+   "prompt": "光合成について、三文で説明してください。",
+   "reply": "\n\n光合成は、植物などが光エネルギーを使って二酸化炭素と水から糖類を合成する反応です。この過程で酸素が放出され、生物の呼吸や生態系の基盤になります。つまり、光合成は地球上の生命を支える重要なエネルギー変換プロセスです。",
+   "finish": "stop",
+   "completion_tokens": 180,
+   "prompt_tokens": 61,
+   "script_share": {
+    "han": 0.4653,
+    "kana": 0.5347,
+    "hangul": 0.0,
+    "other": 0.0
+   },
+   "expected_script_ok": true,
+   "well_formed": true,
+   "wall_s": 18.8
+  },
+  {
+   "i": 11,
+   "lang": "ja",
+   "prompt": "次の文を英語に翻訳してください：「吾輩は猫である。名前はまだ無い。」",
+   "reply": "\n\nI am a cat. I have no name yet.",
+   "finish": "stop",
+   "completion_tokens": 127,
+   "prompt_tokens": 71,
+   "script_share": {
+    "han": 0.0,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 1.0
+   },
+   "expected_script_ok": false,
+   "well_formed": true,
+   "wall_s": 15.7
+  },
+  {
+   "i": 12,
+   "lang": "ja",
+   "prompt": "春の朝をテーマにした俳句を一つ作ってください。",
+   "reply": "\n\n春の朝\n桜の露\n光るかな",
+   "finish": "stop",
+   "completion_tokens": 1588,
+   "prompt_tokens": 65,
+   "script_share": {
+    "han": 0.5,
+    "kana": 0.5,
+    "hangul": 0.0,
+    "other": 0.0
+   },
+   "expected_script_ok": true,
+   "well_formed": true,
+   "wall_s": 131.2
+  },
+  {
+   "i": 13,
+   "lang": "ja",
+   "prompt": "「鬱」「薔薇」「躊躇」の読み方と意味を教えてください。",
+   "reply": "\n\nご質問ありがとうございます。「鬱」「薔薇」「躊躇」の読み方と意味をまとめました。\n\n---\n\n### 1. 鬱（うつ / いく）\n**読み方：**\n*   **うつ**（訓読み）\n*   **いく**（音読み）\n\n**意味：**\n*   **うつ：** 気分が沈んでいること。また、精神疾患の「うつ病」などを指す。\n    *   例：鬱々（うつうつ）としている、鬱病（うつびょう）\n*   **いく：** 草木が茂って暗いこと。また、気配や雰囲気が重く感じられること。\n    *   例：鬱々（いくく）とした森、鬱陶（うっとう）しい\n*   **うっとうしい：** 蒸し暑くて不快なこと。また、気が滅入ること。\n\n---\n\n### 2. 薔薇（ばら / しょうび）\n**読み方：**\n*   **ばら**（訓読み）\n*   **しょうび**（音読み）\n\n**意味：**\n*   **ばら：** バラ科の植物。花の美しさや愛の象徴として知られる。\n    *   例：薔薇（ばら）の花、薔薇色（ばらいろ）\n*   **しょうび：** 漢語や固有名詞、あるいは文学的な表現で使われる。\n    *   例：薔薇（しょうび）の園（※一般的には「ばら」が主流）\n\n---\n\n### 3. 躊躇（ちゅうちょ）\n**読み方：**\n*   **ちゅうちょ**（音読み）\n\n**意味：**\n*   **ためらうこと。** 決断ができず、進退をきめられないこと。\n    *   例：躊躇なく（ためらわずに）、躊躇する（ためらう）\n\n---\n\n**補足：**\n*   「鬱」は現代では「うつ病」の「うつ」で使われることが非常に多いです。\n*   「薔薇」は日常会話や一般的な文章では「ばら」と読みます。\n*   「躊躇」は「ためらう」という意味で、ビジネスや小説などでよく使われます。\n\nご不明な点があれば、お気軽にお聞きください。",
+   "finish": "stop",
+   "completion_tokens": 1218,
+   "prompt_tokens": 70,
+   "script_share": {
+    "han": 0.3491,
+    "kana": 0.6464,
+    "hangul": 0.0,
+    "other": 0.0045
+   },
+   "expected_script_ok": true,
+   "well_formed": true,
+   "wall_s": 93.0
+  },
+  {
+   "i": 14,
+   "lang": "ja",
+   "prompt": "東京タワーの歴史を百字以内で紹介してください。",
+   "reply": "\n\n1958年完成、59年開塔の東京タワーは戦後復興の象徴。高さ333mで当時世界一を誇り、2012年の東京スカイツリー完成まで日本の最高塔でした。現在も親しまれています。",
+   "finish": "stop",
+   "completion_tokens": 7678,
+   "prompt_tokens": 63,
+   "script_share": {
+    "han": 0.5152,
+    "kana": 0.4697,
+    "hangul": 0.0,
+    "other": 0.0152
+   },
+   "expected_script_ok": true,
+   "well_formed": true,
+   "wall_s": 549.9
+  },
+  {
+   "i": 15,
+   "lang": "ja",
+   "prompt": "Pythonでフィボナッチ数列のn番目を求める関数を書き、日本語でコメントを付けてください。",
+   "reply": "\n\n```python\ndef fibonacci(n: int) -> int:\n    \"\"\"\n    フィボナッチ数列の n 番目を返す関数です。\n\n    数列は 0 番目から数えます。\n    例:\n        0 番目: 0\n        1 番目: 1\n        2 番目: 1\n        3 番目: 2\n        4 番目: 3\n    \"\"\"\n\n    # n が負の数の場合はエラーにします\n    if n < 0:\n        raise ValueError(\"n は 0 以上の整数である必要があります\")\n\n    # 0 番目は 0 です\n    if n == 0:\n        return 0\n\n    # 1 番目は 1 です\n    if n == 1:\n        return 1\n\n    # 直前の 2 値を保持する変数\n    prev = 0  # 1 つ前のフィボナッチ数\n    curr = 1  # 現在のフィボナッチ数\n\n    # 2 番目から n 番目まで計算します\n    for _ in range(2, n + 1):\n        # 次の値は直前の 2 値の和です\n        prev, curr = curr, prev + curr\n\n    # n 番目の値を返します\n    return curr\n```\n\n使用例:\n\n```python\nprint(fibonacci(0))  # 0\nprint(fibonacci(1))  # 1\nprint(fibonacci(5))  # 5\n```\n\n※ 1 番目を `0` と数えたい場合は、`fibonacci(n - 1)` を呼べばよいです。",
+   "finish": "stop",
+   "completion_tokens": 473,
+   "prompt_tokens": 76,
+   "script_share": {
+    "han": 0.217,
+    "kana": 0.2757,
+    "hangul": 0.0,
+    "other": 0.5073
+   },
+   "expected_script_ok": true,
+   "well_formed": false,
+   "wall_s": 33.8
+  },
+  {
+   "i": 16,
+   "lang": "ja",
+   "prompt": "ひらがなだけで「ありがとうございます」を使った短いお礼の手紙を書いてください。",
+   "reply": "\n\nきょうはたいへんおつかさまでしたありがとうございます",
+   "finish": "stop",
+   "completion_tokens": 857,
+   "prompt_tokens": 68,
+   "script_share": {
+    "han": 0.0,
+    "kana": 1.0,
+    "hangul": 0.0,
+    "other": 0.0
+   },
+   "expected_script_ok": true,
+   "well_formed": true,
+   "wall_s": 68.0
+  },
+  {
+   "i": 17,
+   "lang": "ja",
+   "prompt": "次の文の誤字を直してください：「私わ昨日、図書館え行きました。」",
+   "reply": "\n\n「私は昨日、図書館に行きました。」",
+   "finish": "stop",
+   "completion_tokens": 95,
+   "prompt_tokens": 71,
+   "script_share": {
+    "han": 0.5385,
+    "kana": 0.4615,
+    "hangul": 0.0,
+    "other": 0.0
+   },
+   "expected_script_ok": true,
+   "well_formed": true,
+   "wall_s": 10.6
+  },
+  {
+   "i": 18,
+   "lang": "ja",
+   "prompt": "「今日はいい天気ですね」を、丁寧語、尊敬語、くだけた言い方の三通りで言い換えてください。",
+   "reply": "\n\n「今日はいい天気ですね」はもともと丁寧な表現です。\n\n- **丁寧語**：今日はいい天気ですね。  \n- **尊敬語**：※天気の尊敬語は通常ありません。相手を立てる表現として「今日はいいお天気ですね」（美化語）とします。  \n- **くだけた言い方**：今日はいい天気だ。／天気いいな。",
+   "finish": "stop",
+   "completion_tokens": 2895,
+   "prompt_tokens": 78,
+   "script_share": {
+    "han": 0.4455,
+    "kana": 0.5545,
+    "hangul": 0.0,
+    "other": 0.0
+   },
+   "expected_script_ok": true,
+   "well_formed": true,
+   "wall_s": 215.0
+  },
+  {
+   "i": 19,
+   "lang": "ja",
+   "prompt": "カタカナ語「コンピューター」「アルゴリズム」「インターネット」を漢字を使った言葉で説明してください。",
+   "reply": "\n\n「コンピューター」：計算機。情報を処理し、計算や制御を行う機械。\n\n「アルゴリズム」：手順。問題を解くための一連の規則・方法。\n\n「インターネット」：相互接続網。多数の計算機を結び、情報を交換する網。",
+   "finish": "stop",
+   "completion_tokens": 1427,
+   "prompt_tokens": 74,
+   "script_share": {
+    "han": 0.519,
+    "kana": 0.481,
+    "hangul": 0.0,
+    "other": 0.0
+   },
+   "expected_script_ok": true,
+   "well_formed": true,
+   "wall_s": 103.0
+  },
+  {
+   "i": 20,
+   "lang": "ko",
+   "prompt": "광합성이 무엇인지 세 문장으로 설명해 주세요.",
+   "reply": "\n\n광합성은 식물이 빛 에너지를 이용해 이산화탄소와 물을 포도당과 산소로 바꾸는 과정입니다. 이 과정은 엽록체의 엽록소에서 일어나며, 빛 에너지가 화학 에너지로 저장됩니다. 광합성은 지구 생태계의 에너지 흐름과 산소 공급의 기초가 됩니다.",
+   "finish": "stop",
+   "completion_tokens": 192,
+   "prompt_tokens": 64,
+   "script_share": {
+    "han": 0.0,
+    "kana": 0.0,
+    "hangul": 1.0,
+    "other": 0.0
+   },
+   "expected_script_ok": true,
+   "well_formed": true,
+   "wall_s": 15.8
+  },
+  {
+   "i": 21,
+   "lang": "ko",
+   "prompt": "다음 문장을 영어로 번역해 주세요: 「가는 말이 고와야 오는 말이 곱다.」",
+   "reply": "\n\n**As you speak, so shall you be answered.**\n\n또는 더 자연스러운 영어 표현으로:\n\n**If you speak kindly, you will be answered kindly.**",
+   "finish": "stop",
+   "completion_tokens": 1268,
+   "prompt_tokens": 74,
+   "script_share": {
+    "han": 0.0,
+    "kana": 0.0,
+    "hangul": 0.1687,
+    "other": 0.8313
+   },
+   "expected_script_ok": false,
+   "well_formed": true,
+   "wall_s": 89.6
+  },
+  {
+   "i": 22,
+   "lang": "ko",
+   "prompt": "가을 달을 주제로 짧은 시를 한 편 써 주세요.",
+   "reply": "\n\n**가을 달**가을 달**\n\n하늘에 걸린\n은빛 접시 하나\n가을이 조용히\n차려 놓은 밥상\n\n달빛이 이슬을 깨우면\n밤은 더 깊어지고\n고요한 바람이\n단풍을 흔들며\n달에게 인사한다",
+   "finish": "stop",
+   "completion_tokens": 113,
+   "prompt_tokens": 65,
+   "script_share": {
+    "han": 0.0,
+    "kana": 0.0,
+    "hangul": 1.0,
+    "other": 0.0
+   },
+   "expected_script_ok": true,
+   "well_formed": true,
+   "wall_s": 14.0
+  },
+  {
+   "i": 23,
+   "lang": "ko",
+   "prompt": "「꿈」「사랑」「그리움」이라는 단어의 뜻과 어원을 설명해 주세요.",
+   "reply": "",
+   "finish": "length",
+   "completion_tokens": 8192,
+   "prompt_tokens": 72,
+   "script_share": {
+    "han": 0.0,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 0.0
+   },
+   "expected_script_ok": false,
+   "well_formed": false,
+   "wall_s": 553.8
+  },
+  {
+   "i": 24,
+   "lang": "ko",
+   "prompt": "경복궁의 역사를 백 자 이내로 소개해 주세요.",
+   "reply": "\n\n경복궁은 1395년 조선 첫 궁궐로 건립, 임진왜란 소실 후 1867년 중건된 서울 대표 궁궐입니다.",
+   "finish": "stop",
+   "completion_tokens": 985,
+   "prompt_tokens": 65,
+   "script_share": {
+    "han": 0.0,
+    "kana": 0.0,
+    "hangul": 1.0,
+    "other": 0.0
+   },
+   "expected_script_ok": true,
+   "well_formed": true,
+   "wall_s": 67.0
+  },
+  {
+   "i": 25,
+   "lang": "ko",
+   "prompt": "피보나치 수열의 n번째 항을 구하는 파이썬 함수를 쓰고, 한국어로 주석을 달아 주세요.",
+   "reply": "\n\n```python\ndef fibonacci(n: int) -> int:\n    \"\"\"\n    피보나치 수열의 n번째 항을 반환합니다.\n\n    정의:\n        F(0) = 0\n        F(1) = 1\n        F(n) = F(n - 1) + F(n - 2)  (n >= 2)\n\n    예:\n        fibonacci(0) -> 0\n        fibonacci(1) -> 1\n        fibonacci(5) -> 5\n    \"\"\"\n    # n이 음수이면 오류를 발생시킵니다.\n    if n < 0:\n        raise ValueError(\"n은 음수일 수 없습니다.\")\n\n    # 0번째 항은 0입니다.\n    if n == 0:\n        return 0\n\n    # 1번째 항은 1입니다.\n    if n == 1:\n        return 1\n\n    # 이전 두 항을 저장할 변수입니다.\n    prev = 0  # F(n - 2)\n    curr = 1  # F(n - 1)\n\n    # 2번째 항부터 n번째 항까지 반복적으로 계산합니다.\n    for _ in range(2, n + 1):\n        # 현재 항은 이전 두 항의 합입니다.\n        next_value = prev + curr\n\n        # 다음 반복을 위해 변수를 갱신합니다.\n        prev = curr\n        curr = next_value\n\n    # 계산된 n번째 항을 반환합니다.\n    return curr\n```\n\n사용 예시:\n\n```python\nprint(fibonacci(0))  # 0\nprint(fibonacci(1))  # 1\nprint(fibonacci(5))  # 5\nprint(fibonacci(10)) # 55\n```",
+   "finish": "stop",
+   "completion_tokens": 609,
+   "prompt_tokens": 81,
+   "script_share": {
+    "han": 0.0,
+    "kana": 0.0,
+    "hangul": 0.3614,
+    "other": 0.6386
+   },
+   "expected_script_ok": true,
+   "well_formed": false,
+   "wall_s": 45.5
+  },
+  {
+   "i": 26,
+   "lang": "ko",
+   "prompt": "한글의 자음과 모음이 만들어진 원리를 간단히 설명해 주세요.",
+   "reply": "",
+   "finish": "length",
+   "completion_tokens": 8192,
+   "prompt_tokens": 69,
+   "script_share": {
+    "han": 0.0,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 0.0
+   },
+   "expected_script_ok": false,
+   "well_formed": false,
+   "wall_s": 550.5
+  },
+  {
+   "i": 27,
+   "lang": "ko",
+   "prompt": "다음 문장의 맞춤법을 고쳐 주세요: 「저는 어제 도서관에 갓다가 친구를 만났읍니다.」",
+   "reply": "\n\n고친 문장:\n\n**저는 어제 도서관에 가다가 친구를 만났습니다.**\n\n- **갓다가 → 가다가**\n- **만났읍니다 → 만났습니다**",
+   "finish": "stop",
+   "completion_tokens": 217,
+   "prompt_tokens": 78,
+   "script_share": {
+    "han": 0.0,
+    "kana": 0.0,
+    "hangul": 1.0,
+    "other": 0.0
+   },
+   "expected_script_ok": true,
+   "well_formed": true,
+   "wall_s": 15.9
+  },
+  {
+   "i": 28,
+   "lang": "ko",
+   "prompt": "존댓말과 반말의 차이를 예문 두 개씩으로 보여 주세요.",
+   "reply": "\n\n**존댓말 (격식체/공손체)**\n1. “밥을 드셨어요?”\n2. “여기 앉으세요.”\n\n**반말 (비격식체)**\n1. “밥 먹었어?”\n2. “여기 앉아.”",
+   "finish": "stop",
+   "completion_tokens": 117,
+   "prompt_tokens": 70,
+   "script_share": {
+    "han": 0.0,
+    "kana": 0.0,
+    "hangul": 1.0,
+    "other": 0.0
+   },
+   "expected_script_ok": true,
+   "well_formed": true,
+   "wall_s": 10.3
+  },
+  {
+   "i": 29,
+   "lang": "ko",
+   "prompt": "한자어 「學校」「圖書館」「大學」의 한국어 발음과 뜻을 알려 주세요.",
+   "reply": "",
+   "finish": "length",
+   "completion_tokens": 8192,
+   "prompt_tokens": 71,
+   "script_share": {
+    "han": 0.0,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 0.0
+   },
+   "expected_script_ok": false,
+   "well_formed": false,
+   "wall_s": 548.2
+  },
+  {
+   "i": 30,
+   "lang": "mx",
+   "prompt": "What does the Chinese idiom 画蛇添足 mean, and when would you use it? Answer in English and quote the idiom once.",
+   "reply": "\n\nThe idiom 画蛇添足 means adding unnecessary details or actions that spoil something, like drawing a snake and then giving it feet. Use it when someone overdoes it or makes a situation worse by doing something superfluous.",
+   "finish": "stop",
+   "completion_tokens": 283,
+   "prompt_tokens": 82,
+   "script_share": {
+    "han": 0.0223,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 0.9777
+   },
+   "expected_script_ok": true,
+   "well_formed": true,
+   "wall_s": 21.0
+  },
+  {
+   "i": 31,
+   "lang": "mx",
+   "prompt": "Translate 'The library opens at nine' into Chinese, Japanese and Korean, and give each in its own script.",
+   "reply": "\n\nChinese: 图书馆九点开门。  \nJapanese: 図書館は九時に開きます。  \nKorean: 도서관은 아홉 시에 열립니다。",
+   "finish": "stop",
+   "completion_tokens": 719,
+   "prompt_tokens": 75,
+   "script_share": {
+    "han": 0.2549,
+    "kana": 0.098,
+    "hangul": 0.2353,
+    "other": 0.4118
+   },
+   "expected_script_ok": true,
+   "well_formed": true,
+   "wall_s": 49.2
+  },
+  {
+   "i": 32,
+   "lang": "mx",
+   "prompt": "The Japanese word 木漏れ日 has no single English word. Explain what it means in two sentences.",
+   "reply": "\n\nIt refers to sunlight filtering through the leaves of trees. The light appears as soft, dappled patches on the ground or objects below.",
+   "finish": "stop",
+   "completion_tokens": 170,
+   "prompt_tokens": 74,
+   "script_share": {
+    "han": 0.0,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 1.0
+   },
+   "expected_script_ok": false,
+   "well_formed": true,
+   "wall_s": 14.2
+  },
+  {
+   "i": 33,
+   "lang": "mx",
+   "prompt": "Compare how 학교, 学校 and 學校 are written and pronounced in Korean, Japanese and Chinese.",
+   "reply": "",
+   "finish": "length",
+   "completion_tokens": 8192,
+   "prompt_tokens": 72,
+   "script_share": {
+    "han": 0.0,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 0.0
+   },
+   "expected_script_ok": false,
+   "well_formed": false,
+   "wall_s": 527.8
+  },
+  {
+   "i": 34,
+   "lang": "mx",
+   "prompt": "Write a Python dict mapping the numbers 1 to 5 to their Chinese characters (一二三四五) and Japanese readings in romaji.",
+   "reply": "\n\n```python\nnumbers = {\n    1: {\"chinese\": \"一\", \"japanese_romaji\": \"ichi\"},\n    2: {\"chinese\": \"二\", \"japanese_romaji\": \"ni\"},\n    3: {\"chinese\": \"三\", \"japanese_romaji\": \"san\"},\n    4: {\"chinese\": \"四\", \"japanese_romaji\": \"shi\"},\n    5: {\"chinese\": \"五\", \"japanese_romaji\": \"go\"},\n}\n```",
+   "finish": "stop",
+   "completion_tokens": 552,
+   "prompt_tokens": 80,
+   "script_share": {
+    "han": 0.0365,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 0.9635
+   },
+   "expected_script_ok": true,
+   "well_formed": true,
+   "wall_s": 37.7
+  },
+  {
+   "i": 35,
+   "lang": "mx",
+   "prompt": "Here is a log line: '2026-10-26 ERROR 用户登录失败：密码错误 (user=山田太郎)'. Explain it in English and name the language of each part.",
+   "reply": "\n\nThe log line means:\n\n**“2026-10-26 ERROR User login failed: wrong password (user=Yamada Taro).”**\n\nBreakdown by part:\n\n| Part | Meaning | Language / type |\n|---|---|---|\n| `2026-10-26` | The date: October 26, 2026 | Not a natural language; ISO 8601 date format |\n| `ERROR` | Log severity level | English |\n| `用户登录失败：密码错误` | “User login failed: wrong password” | Chinese, specifically Simplified Chinese |\n| `(user=山田太郎)` | “(user=Yamada Taro)” | Mixed: `user=` is English/technical syntax; `山田太郎` is a Japanese name written in Japanese kanji |",
+   "finish": "stop",
+   "completion_tokens": 602,
+   "prompt_tokens": 97,
+   "script_share": {
+    "han": 0.0523,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 0.9477
+   },
+   "expected_script_ok": true,
+   "well_formed": true,
+   "wall_s": 40.9
+  },
+  {
+   "i": 36,
+   "lang": "mx",
+   "prompt": "Give three common Korean surnames, three Japanese surnames and three Chinese surnames, each with its original characters or Hangul.",
+   "reply": "\n\nKorean:  \n- Kim — 김  \n- Lee — 이  \n- Park — 박  \n\nJapanese:  \n- Sato — 佐藤  \n- Suzuki — 鈴木  \n- Takahashi — 高橋  \n\nChinese:  \n- Wang — 王  \n- Li — 李  \n- Zhang — 张 (traditional: 張)",
+   "finish": "stop",
+   "completion_tokens": 227,
+   "prompt_tokens": 81,
+   "script_share": {
+    "han": 0.1176,
+    "kana": 0.0,
+    "hangul": 0.0353,
+    "other": 0.8471
+   },
+   "expected_script_ok": true,
+   "well_formed": true,
+   "wall_s": 19.9
+  },
+  {
+   "i": 37,
+   "lang": "mx",
+   "prompt": "Explain the difference between 它, 他 and 她 in Chinese in one paragraph of English.",
+   "reply": "\n\nIn Mandarin Chinese, 他, 她, and 它 are all pronounced “tā,” but they differ in meaning and use: 他 refers to a male person, meaning “he” or “him”; 她 refers to a female person, meaning “she” or “her”; and 它 refers to non-human things, such as animals, objects, or abstract entities, meaning “it.” In spoken Chinese, they sound the same, so context is needed to tell them apart, but in writing, the different characters make the distinction clear.",
+   "finish": "stop",
+   "completion_tokens": 241,
+   "prompt_tokens": 73,
+   "script_share": {
+    "han": 0.018,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 0.982
+   },
+   "expected_script_ok": true,
+   "well_formed": true,
+   "wall_s": 20.3
+  },
+  {
+   "i": 38,
+   "lang": "mx",
+   "prompt": "Reply with exactly one line: the Japanese greeting for the morning, written in kanji and hiragana, then its English meaning in brackets.",
+   "reply": "\n\nおはようございます [good morning]",
+   "finish": "stop",
+   "completion_tokens": 673,
+   "prompt_tokens": 81,
+   "script_share": {
+    "han": 0.0,
+    "kana": 0.45,
+    "hangul": 0.0,
+    "other": 0.55
+   },
+   "expected_script_ok": true,
+   "well_formed": true,
+   "wall_s": 46.4
+  },
+  {
+   "i": 39,
+   "lang": "mx",
+   "prompt": "User question in Chinese: 我的电脑开机后黑屏，怎么办？ Reply in Chinese with three numbered steps.",
+   "reply": "\n\n1. 先检查电源和显示器连接是否正常，确认电源线、视频线（如 HDMI/DP）插紧，并尝试更换视频线或接口。  \n2. 重启电脑，进入 BIOS 或安全模式，查看是否能识别硬盘、内存和显卡，排除硬件接触不良或系统启动问题。  \n3. 如果仍黑屏，尝试重新插拔内存和显卡，或联系专业维修人员检测主板、显卡等硬件故障。",
+   "finish": "stop",
+   "completion_tokens": 145,
+   "prompt_tokens": 75,
+   "script_share": {
+    "han": 0.9187,
+    "kana": 0.0,
+    "hangul": 0.0,
+    "other": 0.0813
+   },
+   "expected_script_ok": true,
+   "well_formed": true,
+   "wall_s": 10.9
+  }
+ ],
+ "concurrency": 4,
+ "min_script_share": 0.3
+}

@@ -2365,6 +2365,18 @@ Prompt (operator): "operator view should probably become the default. but it cou
 - Looked at in headless Chrome against the fake runs (running, blocked, finished; Machine and Models) at 1440 and 820 wide, light and dark: no horizontal scroll. The running band still shows its pulsing dot beside the new picture. Playful was not changed.
 - Review fix (Copilot, PR 88): the band's sub-line text was rgba(255,255,255,.9), about 4.04:1 on the lighter gradient end (running, warn, bad and dim were all under 4.5:1), and my contrast test used opaque white. The test now reads every text colour the CSS puts on the band, with its alpha, composites it over both gradient stops in light and dark, and was red on the old CSS (both schemes). The sub-line is now opaque white. 3 mutations (alpha back, a grey chip text, a lighter warn end) are red.
 
+## 2026-10-27 (UTC): benchmark of `ProprietaryLegal/Qwen3.8-27B-CJK-Trim` against its base (branch `cjk-trim-benchmark`, docs only, issue 85)
+Prompt (operator, through the controller): benchmark the trim on this box and put numbers on its card; then cut the plan to about 3 hours: tokenizer check, a 40-prompt CJK check,
+BFCL (100 items per set at 4 at a time, 50 at 1 at a time), GSM8K 100 items, a speed sweep; skip IFEval, HumanEval and MBPP. Log: `docs/run-logs/2026-10-27-cjk-trim-benchmark.md`.
+- Both models ran side by side, one boot each (one driver, `session_all.py`, under one `gozer run` per model); the base control's `run.sh` was built with `bench_control build`.
+  About 4.3 hours of chip time including two pilots.
+- Result: English and code tokenize to identical pieces; CJK text costs 3.8 to 4.6 times the tokens. In 40 CJK prompts the trim wrote the asked script 0 times (base 32) and
+  mostly answered that the text looked garbled; 15 replies hit the 8192-token limit (base 4). GSM8K (100) 95 against 94; BFCL within noise; decode speed at parity within 3 percent
+  except a 15,000-token prompt (15.7 against 13.3 tokens/s). BFCL at 4 requests at a time drops for the base too (issue 83 is not specific to the trim).
+- `tt-orchard package-card` wrote 25 rows and passed the identity check; I then edited the card (benchmark section, speed rows, CJK limitation, not-measured list). The gate passes.
+  Prose numbers with units must be Numbers-table rows, or the gate refuses the card. Nothing uploaded or published.
+- Notes: the first pilot used port 8102 (listed off limits; free); the classifier refused the first launch of the session wrapper until the operator added an allow rule.
+
 ## 2026-10-26 (UTC): the run list is a table in Operator style (branch `ui-operator-run-table`, version 0.8.46)
 Prompt (operator): "the list of runs on the left in operator view should be a little more table like so you can browse at a glance better."
 - Operator style shows the runs as a table with a header row: State (the Operator emoji, the real state word and the state colour), Model, Stage (the stage number and a small bar) and Age. Playful keeps its list; both are drawn from the same `/api/runs` rows, in the same order (runs in progress first, then newest). No API fields were added. A class or path column was left out because the run list does not carry it; adding it means reading each ledger for every row.
