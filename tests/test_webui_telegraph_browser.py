@@ -153,7 +153,10 @@ def test_the_meter_says_unknown_during_an_outage_and_recovers(root, tmp_path, br
         expect(meter(pg)).to_contain_text("spend unknown", timeout=40000)
         assert meter(pg).get_attribute("data-tone") == "bad"
         pg.unroute("**/api/**")
-        expect(meter(pg)).to_contain_text("$0.0035", timeout=40000)
+        # The stale text keeps the old amount ("spend unknown · last known $0.0035"), so wait for it to go before asserting recovery.
+        expect(meter(pg)).not_to_contain_text("spend unknown", timeout=40000)
+        expect(meter(pg)).not_to_contain_text("last known")
+        expect(meter(pg)).to_contain_text("$0.0035")
     ctx.close()
 
 

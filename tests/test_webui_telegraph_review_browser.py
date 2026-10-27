@@ -179,6 +179,9 @@ def test_a_poll_that_hung_does_not_block_later_polls_once_the_server_answers_aga
         open_page(pg, s)
         expect(meter(pg)).to_contain_text("$0.0070")
         expect(meter(pg)).to_contain_text("spend unknown", timeout=23000)
-        expect(meter(pg)).to_contain_text("$0.0070", timeout=30000)      # the hung request was dropped and the next poll answered
+        # The stale text keeps the old amount, so first wait for "spend unknown" to go: only then has a poll really answered.
+        expect(meter(pg)).not_to_contain_text("spend unknown", timeout=30000)      # the hung request was dropped and the next poll answered
+        expect(meter(pg)).to_contain_text("$0.0070")
+        assert len(calls) >= 3                                       # the first poll, the hung one and at least one later poll
         never.set()
     ctx.close()

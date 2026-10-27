@@ -120,16 +120,15 @@ code, .mono { font-family: var(--mono); font-size: .88em; }
 /* the spend meter: what the outside helper has cost, always in the top bar. The words carry the meaning; the dot and the tint
    repeat it. Amber is a cap at 80 percent or more, red is a cap used up or a refused call, grey is telegraph off. */
 .spend-meter { display: inline-flex; align-items: center; gap: 8px; font: 700 .82rem/1 var(--pixel); color: var(--ink); background: var(--paper);
-  border: 3px solid var(--wood-dark); border-radius: 4px; padding: 5px 8px; cursor: pointer; box-shadow: inset 0 0 0 2px var(--wood-light); max-width: 46ch; }
+  border: 3px solid var(--wood-dark); border-radius: 4px; padding: 5px 8px; cursor: pointer; box-shadow: inset 0 0 0 2px var(--wood-light); max-width: min(64ch, 100%); text-align: left; }
 .spend-meter::before { content: ""; flex: none; width: 9px; height: 9px; background: var(--dim); box-shadow: 0 0 0 1px var(--wood-dark); }
-.spend-meter .spend-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The text wraps, and a long problem name breaks anywhere, so the closest cap's percentage is never cut off. */
+.spend-meter .spend-text { white-space: normal; overflow-wrap: anywhere; min-width: 0; line-height: 1.25; }
 .spend-meter[data-tone="good"]::before { background: #5da130; }
 .spend-meter[data-tone="warn"] { background: var(--warn-bg); color: var(--warn-ink); border-color: var(--warn); }
 .spend-meter[data-tone="warn"]::before { background: currentColor; }
 .spend-meter[data-tone="bad"] { background: var(--bad-bg); color: var(--bad); border-color: var(--bad); }
 .spend-meter[data-tone="bad"]::before { background: currentColor; }
-.spend-meter[data-tone="bad"] { max-width: 64ch; }                                /* a refusal or a used-up cap shows its whole reason */
-.spend-meter[data-tone="bad"] .spend-text { white-space: normal; line-height: 1.25; }
 .spend-meter[data-tone="dim"] { color: var(--muted); }
 .spend-meter:hover { filter: brightness(1.06); }
 /* Up to 900 px the top bar scrolls away with the page, so the meter is pinned along the bottom edge instead. The page gets
@@ -137,7 +136,6 @@ code, .mono { font-family: var(--mono); font-size: .88em; }
 @media (max-width: 900px) {
   .spend-meter { position: fixed; left: 8px; right: 8px; bottom: 8px; z-index: 40; max-width: none; justify-content: flex-start;
     box-shadow: 0 2px 10px rgba(0, 0, 0, .35); }
-  .spend-meter .spend-text { white-space: normal; line-height: 1.25; }
   body .rail { padding-bottom: 6.5rem; }          /* the rail is the last block here; body has a fixed height, so the room is made inside the sheet */
 }
 
