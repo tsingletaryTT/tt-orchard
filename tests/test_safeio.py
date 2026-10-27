@@ -237,8 +237,12 @@ def test_a_link_to_dev_zero_is_refused_without_reading_it(tmp_path):
 
 
 def test_dev_zero_opened_directly_is_not_a_regular_file():
-    with pytest.raises(NotRegular):
-        safeio.read_json("/dev/zero", max_bytes=CAP)
+    """In a limited child: a reader that did not check the file type would read the device without end."""
+    done = hi.run_limited("from orchard import safeio\n"
+                          "try:\n    safeio.read_json('/dev/zero', max_bytes=1 << 20)\n"
+                          "except safeio.NotRegular:\n    print('not regular')\n")
+    assert done.returncode == 0, done.stderr[-500:]
+    assert done.stdout.strip() == "not regular"
 
 
 @pytest.mark.parametrize("bad", [-1, True, 1.5, "7", None])
