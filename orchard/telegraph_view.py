@@ -13,6 +13,7 @@ call was refused for a budget reason) and `problem` (the key is missing, or the 
 """
 from __future__ import annotations
 
+import math
 import urllib.parse
 from pathlib import Path
 
@@ -103,6 +104,23 @@ def _check_records(records: list[dict]) -> None:
         for key in ID_KEYS:
             if isinstance(r.get(key), (list, dict)):
                 raise ValueError(f"record field {key} is not a name")
+        _finite(r)
+
+
+def _finite(value, depth: int = 0) -> None:
+    """Raise unless every number in `value` is finite. Python's JSON reader accepts NaN and Infinity, and either one would turn
+    the spend, the caps and the answer itself into values a browser cannot read, so such a ledger is a damaged ledger."""
+    if depth > 20:
+        raise ValueError("record is nested too deeply")
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("record holds a number that is not finite")
+    elif isinstance(value, dict):
+        for v in value.values():
+            _finite(v, depth + 1)
+    elif isinstance(value, list):
+        for v in value:
+            _finite(v, depth + 1)
 
 
 def _dry_run(records: list[dict], acct: dict) -> None:
