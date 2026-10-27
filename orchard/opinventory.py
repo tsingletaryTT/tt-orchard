@@ -360,12 +360,14 @@ def record_in_delta(stage_dir) -> bool:
         rec["unmapped_ops"] = [o.get("op") for o in rows[:UNMAPPED_LIST_MAX]]
         cand = [o for o in inv.get("ops") or [] if isinstance(o, dict) and o.get("status") == "candidate"]
         cand.sort(key=lambda o: -(o.get("scaled_count") or 0))
-        rec["candidate_ops"] = [{"op": o.get("op"), "candidates": [c.get("ttnn") for c in o.get("candidates") or []
-                                                                     if isinstance(c, dict)]}
+        rec["candidate_ops"] = [{"op": o.get("op"),
+                                 "candidates": [c.get("ttnn") for c in (o.get("candidates") if isinstance(
+                                     o.get("candidates"), list) else []) if isinstance(c, dict) and isinstance(c.get("ttnn"), str)]}
                                 for o in cand[:UNMAPPED_LIST_MAX]]
         rec["patterns"] = [{"pattern": f.get("pattern"), "ttnn": f.get("ttnn"), "status": f.get("status"),
                             "scaled_count": f.get("scaled_count")}
-                           for f in inv.get("patterns") or [] if isinstance(f, dict)]
+                           for f in (inv.get("patterns") if isinstance(inv.get("patterns"), list) else [])
+                           if isinstance(f, dict)]
     rec["ttnn_dump"] = inv.get("ttnn_dump")
     delta["inventory"] = rec
     tmp = sd / f".delta.json.{os.getpid()}.tmp"

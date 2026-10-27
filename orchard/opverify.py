@@ -89,20 +89,25 @@ def select_cases(inv: dict, max_ops: int = DEFAULT_MAX_OPS):
     `max_ops`. `left_out` counts the pairs over the cap."""
     cases = []
     for r in inv.get("ops") or []:
-        if not isinstance(r, dict) or r.get("status") != "candidate":
+        if not isinstance(r, dict) or r.get("status") != "candidate" or not isinstance(r.get("op"), str):
             continue
         sample = r.get("sample") if isinstance(r.get("sample"), dict) else {}
-        shapes = sample.get("output_shapes") or [None]
-        rows, cols = small_shape(shapes[0])
-        for c in r.get("candidates") or []:
+        shapes = sample.get("output_shapes")
+        rows, cols = small_shape(shapes[0] if isinstance(shapes, list) and shapes else None)
+        cands = r.get("candidates") if isinstance(r.get("candidates"), list) else []
+        for c in cands:
+            if not isinstance(c, dict) or not isinstance(c.get("ttnn"), str):
+                continue
             cases.append({"id": f"{r['op']}->{c['ttnn']}", "kind": "op", "aten": r["op"], "ttnn": c["ttnn"],
                           "why": c.get("why"), "rows": rows, "cols": cols, "dtype": sample.get("dtype")})
-    for f in inv.get("patterns") or []:
-        if not isinstance(f, dict) or f.get("status") != "pattern":
+    pats = inv.get("patterns") if isinstance(inv.get("patterns"), list) else []
+    for f in pats:
+        if (not isinstance(f, dict) or f.get("status") != "pattern" or not isinstance(f.get("pattern"), str)
+                or not isinstance(f.get("ttnn"), str)):
             continue
-        rows, cols = small_shape(f.get("shape"))
+        rows, cols = small_shape(f.get("shape") if isinstance(f.get("shape"), list) else None)
         cases.append({"id": f"pattern:{f['pattern']}", "kind": "pattern", "pattern": f["pattern"], "ttnn": f["ttnn"],
-                      "rows": rows, "cols": cols, "const": [f["eps"]] if f.get("eps") else []})
+                      "rows": rows, "cols": cols, "const": [f["eps"]] if isinstance(f.get("eps"), float) and 0 < f["eps"] <= 1e-2 else []})
     return cases[:max_ops], max(0, len(cases) - max_ops)
 
 

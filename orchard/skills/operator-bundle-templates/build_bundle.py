@@ -895,7 +895,8 @@ def inventory_section(run: Run, redact: Redactor) -> list[str]:
         lines += ["", "Candidate ops, most frequent first (at most 10). These have no mapping-table row. The ttnn names "
                       "are guesses from the op's name, each with the reason it was proposed; they are not `mapped`:", ""]
         for o in cands[:10]:
-            named = [c for c in (o.get("candidates") or []) if isinstance(c, dict) and isinstance(c.get("ttnn"), str)]
+            cl = o.get("candidates")
+            named = [c for c in (cl if isinstance(cl, list) else []) if isinstance(c, dict) and isinstance(c.get("ttnn"), str)]
             guess = ", ".join(f"`{redact(one_line(c['ttnn']))}` ({redact(one_line(str(c.get('why'))))})" for c in named[:3])
             count = o.get("scaled_count")
             shown = redact(fmt(count)) if is_number(count) else "count not recorded"
