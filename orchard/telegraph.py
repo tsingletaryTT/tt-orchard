@@ -45,7 +45,7 @@ REPO = Path(__file__).resolve().parents[1]
 LEDGER = "telegraph.jsonl"
 KEYS = {"enabled", "endpoint", "models", "api", "key_env", "key_file", "after_failures", "max_calls",
         "max_total_tokens", "max_cost_usd", "prices", "max_output_tokens", "max_prompt_chars", "timeout_s",
-        "extra_body", "max_calls_per_problem", "max_tokens_per_problem", "max_cost_per_problem_usd"}
+        "extra_body", "max_calls_per_problem", "max_tokens_per_problem", "max_cost_per_problem_usd", "dir"}
 RESERVED_BODY = ("model", "messages", "max_tokens", "temperature", "system", "stream")
 APIS = ("openai", "anthropic")
 ANTHROPIC_VERSION = "2023-06-01"
@@ -80,6 +80,7 @@ class Config:
     max_calls_per_problem: int = 3                      # one problem (the id the caller passes) may not use more than this
     max_tokens_per_problem: int | None = None
     max_cost_per_problem_usd: float | None = None
+    dir: Path | None = None                             # where the ledger, cache and reply files live (None: the default)
 
 
 def _int(table: dict, key: str, default: int, lowest: int) -> int:
@@ -100,11 +101,18 @@ def _http_ok(host: str) -> bool:
     return addr.is_loopback or addr.is_private
 
 
+def _dir(value: str, base: Path) -> Path:
+    path = Path(value).expanduser()
+    return path if path.is_absolute() else Path(base) / path
+
+
 def load(table: dict | None, *, base: Path) -> Config:
     """The `[telegraph]` table as a Config. None, an empty table or `enabled = false` is off and is not checked further.
     A relative key_file is relative to `base`, the config file's directory."""
     if not table or not table.get("enabled", False):
-        return Config()
+        # Off: nothing else is checked, but a usable `dir` is kept so the web page can still show what was spent before.
+        off_dir = table.get("dir") if isinstance(table, dict) else None
+        return Config(dir=_dir(off_dir, base) if isinstance(off_dir, str) and off_dir else None)
     for key in table:
         if key not in KEYS:
             near = difflib.get_close_matches(key, sorted(KEYS), n=1)
@@ -166,7 +174,11 @@ def load(table: dict | None, *, base: Path) -> Config:
     for name in RESERVED_BODY:
         if name in extra:
             raise ConfigError(f"telegraph.extra_body cannot set {name}; telegraph sets it")
+    directory = table.get("dir")
+    if "dir" in table and (not isinstance(directory, str) or not directory):
+        raise ConfigError("telegraph.dir must be a directory path")
     return Config(
+        dir=_dir(directory, base) if directory else None,
         enabled=True, endpoint=endpoint.rstrip("/"), models=tuple(models), api=api, key_env=key_env or None,
         key_file=key_file or None, after_failures=_int(table, "after_failures", 2, 1),
         max_calls=_int(table, "max_calls", 5, 0), max_total_tokens=_int(table, "max_total_tokens", 40000, 0),
@@ -269,10 +281,12 @@ class Answer:
                 + self.text)
 
 
-def _read_ledger(directory: Path) -> list[dict]:
+def read_ledger(directory) -> list[dict]:
+    """Every record in `telegraph.jsonl` that parses as an object, oldest first. A missing or unreadable file gives [];
+    bytes that are not UTF-8 and lines that are not JSON are skipped."""
     path = Path(directory) / LEDGER
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
         return []
     out = []
@@ -284,6 +298,9 @@ def _read_ledger(directory: Path) -> list[dict]:
         if isinstance(item, dict):
             out.append(item)
     return out
+
+
+_read_ledger = read_ledger
 
 
 def _sent(rec: dict) -> bool:
