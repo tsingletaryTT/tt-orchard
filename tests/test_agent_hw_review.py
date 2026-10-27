@@ -242,7 +242,8 @@ def test_a_crash_of_the_agent_step_keeps_the_calls_too(tmp_path, fake_kenv):
 def test_an_interrupt_with_no_hardware_call_adds_no_partial_attempt(tmp_path, fake_kenv):
     def interrupt(argv, **kw):
         raise KeyboardInterrupt
-    with FakeModel(lambda r: final("done")) as server:
+    good = (KERNELS / "add_good.py").read_text()
+    with FakeModel(lambda r: call("write_file", path="kernel.py", content=good) if turn(r) == 0 else final("done")) as server:
         with pytest.raises(KeyboardInterrupt) as info:
             run_attempt(tmp_path, fake_kenv, server, interrupt, hw_policy=hwtool.HwPolicy(), shared_python="/p")
     assert not hasattr(info.value, "partial_attempt")

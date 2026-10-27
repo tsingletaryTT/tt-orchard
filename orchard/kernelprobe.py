@@ -899,12 +899,53 @@ def build_watchdog(control: ProbeControl, ledger) -> Watchdog:
                     Ladder(control, ledger, {AGENT}))
 
 
-def run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_id, max_turns=BUDGET["max_turns"],
-                wall_s=BUDGET["wall_s"], http=post_json, clock=time.time, watchdog=None, run_watched=run_watched,
-                tt_lang: dict | None = None, temperature: float = 0.0, top_p: float | None = None,
-                seed: int | None = None, references: list[dict] | None = None, skills: dict | None = None,
-                coder_speed: dict | None = None, hw_policy: hwtool.HwPolicy | None = None, shared_python=None,
-                cancel=None) -> dict:
+def _partial_attempt(box: dict, kw: dict, exc: BaseException) -> dict | None:
+    """The record of an attempt that was cut short (an interrupt or a crash) after the agent called `hardware_check`, so
+    that those calls stay on disk and in the report. None when the agent made no call. It says only what is known: the
+    agent's hardware calls. The record is saved like any attempt; a failure to save it does not hide the exception."""
+    hwcheck = box.get("hwcheck")
+    if hwcheck is None or not hwcheck.records:
+        return None
+    sampling = {"temperature": kw.get("temperature", 0.0), "top_p": kw.get("top_p"), "seed": kw.get("seed")}
+    attempt = {
+        "op": kw["op"], "attempt": kw["n"], "status": "interrupted",
+        "status_detail": f"{type(exc).__name__} before the attempt finished; the agent's hardware calls so far are kept",
+        "turns": None, "agent_wall_s": None, "passed_sim": False, "category": None, "first_line": "",
+        "pcc_min": None, "sets": [], "violations": [], "hw": None, "agent_check_untrusted": False, "swept": [],
+        "sampling": sampling, "coder_speed": kw.get("coder_speed"), "agent_hw": hwcheck.summary(),
+        "provenance": provenance(kernel_sha256=None, tt_lang=box.get("facts"), coder_model=kw.get("coder_model"),
+                                 probe_id=kw.get("probe_id"), simulator_pcc_min=None, sampling=dict(sampling),
+                                 skills=kw.get("skills"))}
+    try:
+        _save_attempt(Path(kw["probe_dir"]) / kw["op"] / f"attempt-{kw['n']}", attempt)
+    except Exception:
+        pass
+    return attempt
+
+
+def run_attempt(**kw) -> dict:
+    """One attempt (see _run_attempt for the arguments). When an interrupt or a crash ends it after the agent called
+    `hardware_check`, the exception carries `partial_attempt`, the saved record of what is known, so the caller can put
+    it in the report."""
+    box: dict = {}
+    try:
+        return _run_attempt(_box=box, **kw)
+    except BaseException as exc:
+        partial = _partial_attempt(box, kw, exc)
+        if partial is not None:
+            try:
+                exc.partial_attempt = partial
+            except Exception:
+                pass
+        raise
+
+
+def _run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_id, max_turns=BUDGET["max_turns"],
+                 wall_s=BUDGET["wall_s"], http=post_json, clock=time.time, watchdog=None, run_watched=run_watched,
+                 tt_lang: dict | None = None, temperature: float = 0.0, top_p: float | None = None,
+                 seed: int | None = None, references: list[dict] | None = None, skills: dict | None = None,
+                 coder_speed: dict | None = None, hw_policy: hwtool.HwPolicy | None = None, shared_python=None,
+                 cancel=None, _box: dict | None = None) -> dict:
     """One attempt: prepare the directory, run the agent, run the authoritative check, write and return attempt.json.
     `hw_policy` (hwtool.HwPolicy) offers the agent the `hardware_check` tool, which runs its current kernel.py on one
     leased chip under the policy's limits with `shared_python`; None or a policy with 0 calls offers no tool. The calls
@@ -923,6 +964,8 @@ def run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_id
         hwcheck = make_hardware_check(adir, op=op, n=n, shared_python=shared_python or default_shared_python(),
                                       policy=hw_policy, run_watched=run_watched,
                                       cancel=cancel if cancel is not None else cancel_ticket)
+        if _box is not None:
+            _box["hwcheck"], _box["facts"] = hwcheck, facts
     started = time.monotonic()
     try:
         dog = watchdog if watchdog is not None else build_watchdog(control, ledger)
@@ -1209,6 +1252,11 @@ def default_shared_python() -> str:
     return str(Path.home() / ".tenstorrent-venv" / "bin" / "python")
 
 
+def hwcheck_calls_path(probe_dir, op: str, n) -> Path:
+    """Where the calls of attempt `n` are written as they finish: DIR/.hwcheck/<op>-<n>-calls.json."""
+    return Path(probe_dir) / HWCHECK_DIR / f"{op}-{n}-calls.json"
+
+
 def hwcheck_dir(probe_dir, op: str, n, k) -> Path:
     """The probe-owned directory of call `k` of attempt `n` of `op`: DIR/.hwcheck/<op>-<n>-<k>/. It is not under
     `.verdict`, which the authoritative check empties and load_attempts reads."""
@@ -1264,7 +1312,10 @@ def make_hardware_check(adir: Path, *, op: str, n, shared_python, policy: hwtool
             if line:
                 hw["numbers"] = line
         return hw, event, text
-    return hwtool.HardwareCheck(policy, prepare=prepare, run=run, clock=clock, sleep=sleep)
+    def keep(summary):
+        _real_dir(probe_dir / HWCHECK_DIR)
+        _write_json(hwcheck_calls_path(probe_dir, op, n), summary)
+    return hwtool.HardwareCheck(policy, prepare=prepare, run=run, clock=clock, sleep=sleep, on_record=keep)
 
 
 def _hw_int(args, name: str, default: int, low: int, high: int) -> int:
@@ -2162,10 +2213,14 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
                         # A hung smoke test carries its own hardware block. A kernel hang came after a passing
                         # smoke test.
                         hw = exc.hw if exc.hw is not None else state.get("smoke")
-            except KeyboardInterrupt:
+            except KeyboardInterrupt as exc:
                 stopped, code = f"interrupted during {where}", EXIT_ABORTED
+                if isinstance(getattr(exc, "partial_attempt", None), dict):
+                    records.append(exc.partial_attempt)
             except Exception as exc:
                 stopped, code = _crash(where, exc), EXIT_ERROR
+                if isinstance(getattr(exc, "partial_attempt", None), dict):
+                    records.append(exc.partial_attempt)
         finally:
             if previous is not None:
                 signal.signal(signal.SIGTERM, previous)

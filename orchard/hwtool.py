@@ -93,8 +93,10 @@ class HardwareCheck:
     backstop stopped it). `hw` carries `elapsed_s`, the whole gozer run including the lease and the reset, and may carry
     `device_s`, `numbers` and the judging fields; `text` is the run's output."""
 
-    def __init__(self, policy: HwPolicy, *, prepare, run, clock=time.monotonic, sleep=time.sleep, stamp=_utc_stamp):
+    def __init__(self, policy: HwPolicy, *, prepare, run, clock=time.monotonic, sleep=time.sleep, stamp=_utc_stamp,
+                 on_record=None):
         self.policy, self.prepare, self.run = policy, prepare, run
+        self.on_record = on_record          # called with summary() each time a call is recorded; its errors are ignored
         self.clock, self.sleep, self.stamp = clock, sleep, stamp
         self._lock = threading.Lock()
         self.records: list[dict] = []
@@ -139,6 +141,11 @@ class HardwareCheck:
                "kernel_sha256": None}
         rec.update(fields)
         self.records.append(rec)
+        if self.on_record is not None:
+            try:
+                self.on_record(self.summary())
+            except Exception:
+                pass                                # keeping the record on disk must never end the call
         return rec
 
     def _refuse(self, note: str, why: str) -> str:
