@@ -119,8 +119,10 @@ class CardFacts:
     stage_2_without_graft: bool = False   # stage 2 and 4 served without the graft (the drafter off, host sampling)
     graft_decision: str | None = None     # "graft" or "safe" when stage 2's graft trial ran and decided (orchard/graft_trial.py)
     use: UseFacts | None = None           # what the model is for and how to call it, read from its own files (orchard/card_use.py)
-    acceptance_measured: bool = False     # the Numbers table has the drafter's acceptance rate (stage 2's graft trial measured it)
+    acceptance_measured: bool = False     # the Numbers table has the drafter's acceptance rate (stage 2's graft trial or the sampling probe measured it)
+    acceptance_from: str = "graft trial"  # which step measured it, for the sentences: "graft trial", "sampling probe" or "graft trial and sampling probe"
     vocab: tuple[int, int] | None = None  # (this model's vocabulary size, the nearest model's) when the model is a vocabulary trim
+    sampling: dict | None = None     # what stage 2's sampling probe found (package.sampling_summary): card_sentence, serving; only the required profile
 
 
 def _count(n: int) -> str:
@@ -251,7 +253,7 @@ def render_card(f: CardFacts) -> str:
     if f.sampling_from_base:
         lines.append(f"- {sampling_disclosures(f.model_id, f.nearest_model)[0]}")
     if f.drafter:
-        where = ("is in the table below (graft trial)" if f.acceptance_measured else "is listed under Not measured")
+        where = (f"is in the table below ({f.acceptance_from})" if f.acceptance_measured else "is listed under Not measured")
         lines.append(f"- Speculative decoding uses the drafter {f.drafter}, which was trained on "
                      f"{f.nearest_model}. Its acceptance rate on this model {where}.")
     if f.graft:
@@ -310,11 +312,13 @@ def render_card(f: CardFacts) -> str:
         lines.append(f"| {n.name} | {_value(n)} | {n.label} | {ev} |")
     if f.reported:
         lines += ["", REPORTED_HEAD, "", *reported_lines(f.reported, f.reported_source)]
+    if f.sampling:
+        lines += ["", SAMPLING_HEAD, "", *sampling_lines(f.sampling)]
     limits = [f"Tested on {f.chips} chips (mesh {f.mesh}) only; other configurations are not claimed "
               "by this bundle.",
               "Accuracy was compared with the CPU reference on one short fixed prompt only."]
     if f.graft:
-        rate = ("The share of the drafter's guesses that are accepted on this model is in the table above (graft trial)."
+        rate = (f"The share of the drafter's guesses that are accepted on this model is in the table above ({f.acceptance_from})."
                 if f.acceptance_measured else
                 "How often the drafter's guesses are accepted on this model was not measured.")
         limits.append(f"The drafter's MTP head is the nearest model's ({f.nearest_model}), added to {f.model_id} at "
@@ -433,6 +437,21 @@ def graft_markers(nearest_model: str) -> tuple[str, ...]:
 
 
 GRAFT_DECISION_MARKERS = {"graft": "chose the graft", "safe": "kept the safe configuration"}
+
+SAMPLING_HEAD = "## Sampling"
+SAMPLING_ROW_NAMES = ("decode speed, greedy request (stage 2 sampling probe)", "decode speed, sampled request (stage 2 sampling probe)",
+                      "drafter acceptance, greedy request (stage 2 sampling probe)", "drafter acceptance, sampled request (stage 2 sampling probe)")
+SAMPLING_TESTED = "top-k, penalties and logprobs were not tested"
+
+
+def sampling_lines(sampling: dict) -> list[str]:
+    """The lines of the Sampling section (issue 107): the verdict's sentence, then the configuration stage 2 served when it measured, then what was
+    tested. `sampling` is package.sampling_summary's dict. No number is written here; the Numbers table has them."""
+    serving = sampling.get("serving") if isinstance(sampling.get("serving"), dict) else {}
+    return [sampling["card_sentence"],
+            f"Stage 2's swap check measured this on one short prompt, served with its own configuration (drafter: {serving.get('drafter', 'not recorded')}, "
+            f"sampling: {serving.get('sampling', 'not recorded')}). It sent greedy requests and sampled requests with temperature above 0, top-p below 1 "
+            f"and a seed. The speeds are in the Numbers table, in the rows marked sampling probe. Other sampling settings such as {SAMPLING_TESTED}."]
 
 
 CUTOFF_MARKER = "reaches `max_tokens` while the model is still thinking"
@@ -554,8 +573,20 @@ def use_problems(card: str, use: UseFacts | None) -> list[str]:
 
 def card_problems(card: str, *, license_id: str, run_dir, sidecars=(), base_files=(), reported=(), reported_source="", model_id="",
                   nearest_model="", graft: bool = False, graft_decision: str | None = None, trial_rows=(),
-                  use: UseFacts | None = None, vocab: tuple[int, int] | None = None) -> list[str]:
+                  use: UseFacts | None = None, vocab: tuple[int, int] | None = None, sampling: dict | None = None,
+                  sampling_expected=(), acceptance_measured: bool = False) -> list[str]:
     problems = use_problems(card, use)
+    if acceptance_measured and "acceptance rate" in (card.split("## Not measured", 1)[1].split("\n## ", 1)[0] if "## Not measured" in card else ""):
+        problems.append("the Numbers table has the drafter's acceptance rate, so the card must not list it under Not measured")
+    if sampling:
+        body, _ = _section(card, SAMPLING_HEAD)
+        if not body:
+            problems.append(f"the card must have the section {SAMPLING_HEAD!r}: stage 2's sampling probe recorded a result")
+        elif " ".join(sampling["card_sentence"].split()) not in " ".join(body.split()):
+            problems.append("the sampling section must give the sampling probe's verdict sentence unchanged: "
+                            f"{sampling['card_sentence']}")
+    elif SAMPLING_HEAD in card:
+        problems.append(f"the card has the section {SAMPLING_HEAD!r}, and the run has no sampling probe record to support it")
     if vocab:
         flat_vocab = " ".join(card.split())
         for size in vocab:
@@ -645,6 +676,24 @@ def card_problems(card: str, *, license_id: str, run_dir, sidecars=(), base_file
     for name in trial_rows:
         if name not in shown:
             problems.append(f"the Numbers table must show {name!r}: stage 2's graft trial measured it")
+    table = {}
+    for r in section.splitlines():
+        cells = [c.strip() for c in r.strip().strip("|").split("|")]
+        if r.startswith("| ") and len(cells) == 4:
+            table[cells[0]] = cells[1:]
+    for want in sampling_expected:
+        if want.name not in table:
+            problems.append(f"the Numbers table must show {want.name!r}: stage 2's sampling probe measured it")
+            continue
+        value, label, evidence = table[want.name]
+        wanted = (f"{json.dumps(want.value)} {want.unit}", want.label, ", ".join(f"`{e}`" for e in want.evidence))
+        if (value, label, evidence) != wanted:
+            problems.append(f"the Numbers row {want.name!r} must be the sampling probe's measurement: value {wanted[0]!r}, label {wanted[1]!r}, "
+                            f"evidence {wanted[2]}")
+    expected_names = {w.name for w in sampling_expected}
+    for name in SAMPLING_ROW_NAMES:
+        if name in table and name not in expected_names:
+            problems.append(f"the Numbers table shows {name!r}, and stage 2's sampling probe made no such measurement")
     for row in (r for r in section.splitlines() if r.startswith("| ") and not r.startswith("| Number ")):
         first = row.strip().strip("|").split("|")[0].strip()
         if first in names:

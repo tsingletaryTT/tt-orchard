@@ -116,7 +116,8 @@ To check a row, run `tt-model list` and read `{{OPERATOR_HOME}}/.cache/tt-model/
         "tt_cache": "{{CACHE_ROOT}}/<slug>/<N>chip-<package name>/tt_cache",
         "hf_home": "{{HF_HOME}}",
         "port": <8100 + N>,
-        "prompt_suite": true}
+        "prompt_suite": true,
+        "sampling_probe": true}
 
    For the container package (4 chips): no `bundle_dir`; add the package, its profile, the chip
    count and the operator's home:
@@ -133,7 +134,8 @@ To check a row, run `tt-model list` and read `{{OPERATOR_HOME}}/.cache/tt-model/
         "hf_home": "{{HF_HOME}}",
         "operator_home": "{{OPERATOR_HOME}}",
         "port": 8104,
-        "prompt_suite": true}
+        "prompt_suite": true,
+        "sampling_probe": true}
 
    Copy the `model` value from `stages/0/delta.json` verbatim, including the `@revision`, into
    `new_model_id`. Stage 7 compares this label with stage 0's model and the revision of the weights

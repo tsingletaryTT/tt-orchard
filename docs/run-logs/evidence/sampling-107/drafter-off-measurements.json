@@ -1,0 +1,351 @@
+{
+  "config": "off",
+  "serving": {
+    "drafter": "off",
+    "sampling": "host"
+  },
+  "ready_s": 124.0,
+  "probes": [
+    {
+      "ran": true,
+      "model_id": "Qwen/Qwen3.8-27B",
+      "prompt": "Write the opening paragraph of a short story about a lighthouse keeper who finds an unmarked boat on the rocks.",
+      "max_tokens": 96,
+      "requests": {
+        "greedy": {
+          "params": {
+            "temperature": 0
+          },
+          "accepted": true,
+          "error": null,
+          "seconds": 5.0257,
+          "completion_tokens": 96,
+          "text": "\n\n<think>\nThe user wants me to write the opening paragraph of a short story about a lighthouse keeper who finds an unmarked boat on the rocks. Let me think about what makes a compelling opening paragraph.\n\nKey elements to consider:\n- The lighthouse keeper as a character - I should give them a sense of place, routine, isolation\n- The discovery of the boat - this should feel sudden, unexpected, jarring against the normalcy\n- The \"un",
+          "finish_reason": "length",
+          "drafter_log": ""
+        },
+        "sampled_a": {
+          "params": {
+            "temperature": 1.0,
+            "top_p": 0.9,
+            "seed": 1234
+          },
+          "accepted": true,
+          "error": null,
+          "seconds": 5.3258,
+          "completion_tokens": 96,
+          "text": "\n\n<think>\nThe user wants me to write an opening paragraph for a short story about a lighthouse keeper finding an unmarked boat on the rocks. Let me think about what makes a compelling opening paragraph:\n\n- It should establish setting, character, and a sense of mystery\n- The \"unmarked boat on the rocks\" is the hook - it's unusual because boats are usually in water, not on rocks\n- I want to evoke the sensory world of a lighthouse",
+          "finish_reason": "length",
+          "drafter_log": ""
+        },
+        "sampled_b": {
+          "params": {
+            "temperature": 1.0,
+            "top_p": 0.9,
+            "seed": 4321
+          },
+          "accepted": true,
+          "error": null,
+          "seconds": 5.4479,
+          "completion_tokens": 96,
+          "text": "\n\n<think>\nThe user wants me to write the opening paragraph of a short story. Let me think about what makes a strong opening paragraph for this specific premise: a lighthouse keeper who finds an unmarked boat on the rocks.\n\nKey elements to consider:\n- Establish the character (lighthouse keeper) quickly but through action/sense, not exposition\n- Create atmosphere — lighthouses evoke isolation, wind, darkness, the sea\n- The discovery should feel organic,",
+          "finish_reason": "length",
+          "drafter_log": ""
+        }
+      }
+    },
+    {
+      "ran": true,
+      "model_id": "Qwen/Qwen3.8-27B",
+      "prompt": "Write the opening paragraph of a short story about a lighthouse keeper who finds an unmarked boat on the rocks.",
+      "max_tokens": 96,
+      "requests": {
+        "greedy": {
+          "params": {
+            "temperature": 0
+          },
+          "accepted": true,
+          "error": null,
+          "seconds": 5.3984,
+          "completion_tokens": 96,
+          "text": "\n\n<think>\nThe user wants me to write the opening paragraph of a short story about a lighthouse keeper who finds an unmarked boat on the rocks. Let me think about what makes a compelling opening paragraph.\n\nKey elements to consider:\n- The lighthouse keeper as a character - I should give them a sense of place, routine, isolation\n- The discovery of the boat - this should feel sudden, unexpected, jarring against the normalcy\n- The \"un",
+          "finish_reason": "length",
+          "drafter_log": ""
+        },
+        "sampled_a": {
+          "params": {
+            "temperature": 1.0,
+            "top_p": 0.9,
+            "seed": 1234
+          },
+          "accepted": true,
+          "error": null,
+          "seconds": 5.8311,
+          "completion_tokens": 96,
+          "text": "\n\n<think>\nThe user wants me to write an opening paragraph for a short story about a lighthouse keeper finding an unmarked boat on the rocks. Let me think about what makes a compelling opening paragraph:\n\n- It should establish setting, character, and a sense of mystery\n- The \"unmarked boat on the rocks\" is the hook - it's unusual because boats are usually in water, not on rocks\n- I want to evoke the sensory world of a lighthouse",
+          "finish_reason": "length",
+          "drafter_log": ""
+        },
+        "sampled_b": {
+          "params": {
+            "temperature": 1.0,
+            "top_p": 0.9,
+            "seed": 4321
+          },
+          "accepted": true,
+          "error": null,
+          "seconds": 5.8049,
+          "completion_tokens": 96,
+          "text": "\n\n<think>\nThe user wants me to write the opening paragraph of a short story. Let me think about what makes a strong opening paragraph for this specific premise: a lighthouse keeper who finds an unmarked boat on the rocks.\n\nKey elements to consider:\n- Establish the character (lighthouse keeper) quickly but through action/sense, not exposition\n- Create atmosphere — lighthouses evoke isolation, wind, darkness, the sea\n- The discovery should feel organic,",
+          "finish_reason": "length",
+          "drafter_log": ""
+        }
+      }
+    },
+    {
+      "ran": true,
+      "model_id": "Qwen/Qwen3.8-27B",
+      "prompt": "Write the opening paragraph of a short story about a lighthouse keeper who finds an unmarked boat on the rocks.",
+      "max_tokens": 96,
+      "requests": {
+        "greedy": {
+          "params": {
+            "temperature": 0
+          },
+          "accepted": true,
+          "error": null,
+          "seconds": 5.2726,
+          "completion_tokens": 96,
+          "text": "\n\n<think>\nThe user wants me to write the opening paragraph of a short story about a lighthouse keeper who finds an unmarked boat on the rocks. Let me think about what makes a compelling opening paragraph.\n\nKey elements to consider:\n- The lighthouse keeper as a character - I should give them a sense of place, routine, isolation\n- The discovery of the boat - this should feel sudden, unexpected, jarring against the normalcy\n- The \"un",
+          "finish_reason": "length",
+          "drafter_log": ""
+        },
+        "sampled_a": {
+          "params": {
+            "temperature": 1.0,
+            "top_p": 0.9,
+            "seed": 1234
+          },
+          "accepted": true,
+          "error": null,
+          "seconds": 5.6776,
+          "completion_tokens": 96,
+          "text": "\n\n<think>\nThe user wants me to write an opening paragraph for a short story about a lighthouse keeper finding an unmarked boat on the rocks. Let me think about what makes a compelling opening paragraph:\n\n- It should establish setting, character, and a sense of mystery\n- The \"unmarked boat on the rocks\" is the hook - it's unusual because boats are usually in water, not on rocks\n- I want to evoke the sensory world of a lighthouse",
+          "finish_reason": "length",
+          "drafter_log": ""
+        },
+        "sampled_b": {
+          "params": {
+            "temperature": 1.0,
+            "top_p": 0.9,
+            "seed": 4321
+          },
+          "accepted": true,
+          "error": null,
+          "seconds": 5.4915,
+          "completion_tokens": 96,
+          "text": "\n\n<think>\nThe user wants me to write the opening paragraph of a short story. Let me think about what makes a strong opening paragraph for this specific premise: a lighthouse keeper who finds an unmarked boat on the rocks.\n\nKey elements to consider:\n- Establish the character (lighthouse keeper) quickly but through action/sense, not exposition\n- Create atmosphere — lighthouses evoke isolation, wind, darkness, the sea\n- The discovery should feel organic,",
+          "finish_reason": "length",
+          "drafter_log": ""
+        }
+      }
+    }
+  ],
+  "extras": {
+    "temperature_0.7_only": {
+      "params": {
+        "temperature": 0.7,
+        "seed": 7
+      },
+      "accepted": true,
+      "error": null,
+      "seconds": 5.4624,
+      "completion_tokens": 96,
+      "text": "\n\n<think>\nThe user wants me to write the opening paragraph of a short story about a lighthouse keeper who finds an unmarked boat on the rocks. Let me think about what makes a compelling opening paragraph for this specific scenario.\n\nKey elements to consider:\n- The lighthouse keeper as a character - I should establish their isolation, routine, or relationship with the sea\n- The unmarked boat on the rocks - this is the inciting incident, the disruption of normal",
+      "finish_reason": "length",
+      "drafter_log": ""
+    },
+    "top_k_40": {
+      "params": {
+        "temperature": 1.0,
+        "top_k": 40,
+        "seed": 7
+      },
+      "accepted": true,
+      "error": null,
+      "seconds": 5.39,
+      "completion_tokens": 96,
+      "text": "\n\n<think>\nThe user wants me to write the opening paragraph of a short story about a lighthouse keeper who finds an unmarked boat on the rocks. Let me think about what makes a compelling opening paragraph here.\n\nKey elements to include:\n- A lighthouse keeper (should feel lived-in, specific, maybe a bit solitary)\n- An unmarked boat (the discovery, the strangeness of it)\n- On the rocks (the setting, the danger,",
+      "finish_reason": "length",
+      "drafter_log": ""
+    },
+    "top_p_only_temp1": {
+      "params": {
+        "temperature": 1.0,
+        "top_p": 0.9
+      },
+      "accepted": true,
+      "error": null,
+      "seconds": 5.0979,
+      "completion_tokens": 96,
+      "text": "\n\n<think>\n\n</think>\n\nThe fog had been pressing against the glass of the lantern room for three days, a thick, suffocating veil that turned the world into a grayscale ghost, but it was the silence that truly unnerved Elias. He expected the roar of the sea against the basalt cliffs, the rhythmic groan of the iron tower, even the distant cry of gulls, but tonight, as the heavy iron wheel of the light spun its slow, hypnotic",
+      "finish_reason": "length",
+      "drafter_log": ""
+    },
+    "no_seed_temp1": {
+      "params": {
+        "temperature": 1.0
+      },
+      "accepted": true,
+      "error": null,
+      "seconds": 5.1126,
+      "completion_tokens": 96,
+      "text": "\n\n<think>\n\n</think>\n\nThe salt-crusted air bit at Elias’s lungs as he descended the spiral iron stairs, his lantern swinging in a slow, heavy arc against the dark. It was past midnight, the hour when the fog usually swallowed the headland whole, yet a pale, unnatural shape sat wedged between the jagged teeth of the black rocks below, utterly still and devoid of the usual rust or graffiti that marred the derelict vessels stranded by tides.",
+      "finish_reason": "length",
+      "drafter_log": ""
+    },
+    "presence_penalty_0.5": {
+      "params": {
+        "temperature": 0.0,
+        "presence_penalty": 0.5
+      },
+      "accepted": true,
+      "error": null,
+      "seconds": 5.4817,
+      "completion_tokens": 96,
+      "text": "\n\n<think>\nThe user wants me to write the opening paragraph of a short story about a lighthouse keeper who finds an unmarked boat on the rocks. Let me think about what makes a compelling opening paragraph for this specific scenario.\n\nKey elements to consider:\n- The lighthouse keeper as a character - I should give them a sense of place, routine, isolation\n- The discovery of the boat - this should feel sudden, unexpected, jarring against the normalcy\n",
+      "finish_reason": "length",
+      "drafter_log": ""
+    },
+    "frequency_penalty_0.5": {
+      "params": {
+        "temperature": 0.0,
+        "frequency_penalty": 0.5
+      },
+      "accepted": true,
+      "error": null,
+      "seconds": 5.2358,
+      "completion_tokens": 96,
+      "text": "\n\n<think>\nThe user wants me to write the opening paragraph of a short story about a lighthouse keeper who finds an unmarked boat on the rocks. Let me think about what makes a compelling opening paragraph for this specific scenario.\n\nKey elements to consider:\n- The lighthouse keeper as protagonist - I should give them a sense of place, routine, isolation\n- The unmarked boat on the rocks - this is the inciting incident, the thing that disrupts normal",
+      "finish_reason": "length",
+      "drafter_log": ""
+    },
+    "repetition_penalty_1.1": {
+      "params": {
+        "temperature": 0.0,
+        "repetition_penalty": 1.1
+      },
+      "accepted": true,
+      "error": null,
+      "seconds": 5.3826,
+      "completion_tokens": 96,
+      "text": "\n\n<think>\nThe user wants me to write the opening paragraph of a short story about a lighthouse keeper finding an unmarked boat on the rocks. Let me think about what makes a compelling opening paragraph for this specific scenario.\n\nKey elements to consider:\n- The lighthouse keeper as protagonist - I should give them some texture, make them feel real\n- The discovery of the boat - this is the inciting incident\n- \"Unmarked\" is important - no name",
+      "finish_reason": "length",
+      "drafter_log": ""
+    },
+    "min_p_0.05": {
+      "params": {
+        "temperature": 1.0,
+        "min_p": 0.05,
+        "seed": 7
+      },
+      "accepted": true,
+      "error": null,
+      "seconds": 5.5398,
+      "completion_tokens": 96,
+      "text": "\n\n<think>\nThe user wants me to write the opening paragraph of a short story about a lighthouse keeper who finds an unmarked boat on the rocks. Let me think about what makes a compelling opening paragraph here.\n\nKey elements to include:\n- A lighthouse keeper (character)\n- An unmarked boat (the discovery)\n- On the rocks (setting)\n- It should be the OPENING, so it needs to hook the reader\n- \"Short",
+      "finish_reason": "length",
+      "drafter_log": ""
+    },
+    "logprobs_1": {
+      "params": {
+        "temperature": 0.0,
+        "logprobs": 1
+      },
+      "accepted": true,
+      "error": null,
+      "seconds": 5.2249,
+      "completion_tokens": 96,
+      "text": "\n\n<think>\nThe user wants me to write the opening paragraph of a short story about a lighthouse keeper who finds an unmarked boat on the rocks. Let me think about what makes a compelling opening paragraph.\n\nKey elements to consider:\n- The lighthouse keeper as a character - I should give them a sense of place, routine, isolation\n- The discovery of the boat - this should feel sudden, unexpected, jarring against the normalcy\n- The \"un",
+      "finish_reason": "length",
+      "drafter_log": ""
+    },
+    "temperature_2.0": {
+      "params": {
+        "temperature": 2.0,
+        "seed": 7
+      },
+      "accepted": true,
+      "error": null,
+      "seconds": 5.4395,
+      "completion_tokens": 96,
+      "text": "\n\n<think>\nThe user wants me to write an opening paragraph for a short story about a lighthouse keeper who finds an unmarked boat on the rocks. Let me think about what makes a compelling opening:\n\n- I need to establish the setting: a lighthouse, remote, stormy or at least rough-sea environment, rocky shoreline\n- Introduce the character: the keeper - what are they like, what routine do they have\n- The inciting incident: spotting",
+      "finish_reason": "length",
+      "drafter_log": ""
+    }
+  },
+  "seed_sweep": [
+    {
+      "params": {
+        "seed": 11
+      },
+      "accepted": true,
+      "error": null,
+      "seconds": 5.5215,
+      "completion_tokens": 96,
+      "text": "\n\n<think>\nThe user wants me to write the opening paragraph of a short story about a lighthouse keeper who finds an unmarked boat on the rocks. Let me think about what makes a compelling opening paragraph.\n\nI want to:\n- Establish the lighthouse keeper as a character (give them a sense of routine, isolation, identity)\n- Create atmosphere (weather, time, sensory details)\n- Introduce the discovery of the boat naturally but with weight\n-",
+      "finish_reason": "length",
+      "drafter_log": ""
+    },
+    {
+      "params": {
+        "seed": 12
+      },
+      "accepted": true,
+      "error": null,
+      "seconds": 5.5069,
+      "completion_tokens": 96,
+      "text": "\n\n<think>\nThe user wants me to write the opening paragraph of a short story. Let me think about what makes a compelling opening paragraph for this specific premise: a lighthouse keeper finding an unmarked boat on the rocks.\n\nKey elements to nail:\n- Establish the lighthouse keeper character (or at least the setting from their perspective)\n- The discovery of the boat\n- \"Unmarked\" is important — no name, no registry, no flags\n- The",
+      "finish_reason": "length",
+      "drafter_log": ""
+    },
+    {
+      "params": {
+        "seed": 13
+      },
+      "accepted": true,
+      "error": null,
+      "seconds": 5.5171,
+      "completion_tokens": 96,
+      "text": "\n\n<think>\nThe user wants me to write the opening paragraph of a short story about a lighthouse keeper finding an unmarked boat on the rocks. Let me think about what makes a compelling opening paragraph.\n\nI want to:\n- Establish the character (lighthouse keeper) with specific, sensory detail\n- Set the scene (the rocks, the lighthouse, the coast)\n- Introduce the central image (the unmarked boat)\n- Create atmosphere and tension",
+      "finish_reason": "length",
+      "drafter_log": ""
+    },
+    {
+      "params": {
+        "seed": 14
+      },
+      "accepted": true,
+      "error": null,
+      "seconds": 5.6446,
+      "completion_tokens": 96,
+      "text": "\n\n<think>\nThe user wants me to write the opening paragraph of a short story about a lighthouse keeper who finds an unmarked boat on the rocks. Let me think about what makes a compelling opening paragraph for this specific scenario.\n\nKey elements to consider:\n- The lighthouse keeper as a character - I should establish their solitude, their routine, their relationship with the sea\n- The discovery of the boat on the rocks - this should feel sudden, jarring against the",
+      "finish_reason": "length",
+      "drafter_log": ""
+    },
+    {
+      "params": {
+        "seed": 15
+      },
+      "accepted": true,
+      "error": null,
+      "seconds": 5.7119,
+      "completion_tokens": 96,
+      "text": "\n\n<think>\nThe user wants me to write the opening paragraph of a short story. Let me think about what makes a compelling opening paragraph for this specific scenario.\n\nKey elements to include:\n- A lighthouse keeper (character)\n- An unmarked boat found on the rocks (inciting incident)\n- It should be an opening, so it needs to set tone, atmosphere, and hook the reader\n\nLet me think about approach. I could go:\n-",
+      "finish_reason": "length",
+      "drafter_log": ""
+    }
+  ],
+  "finished": true,
+  "elapsed_s": 274.8
+}
