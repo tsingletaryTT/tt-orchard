@@ -150,6 +150,9 @@ Facts measured against the real gozer on 2026-10-27 (the tool is built on these)
   wait` does, and the lease is owned by the probe's pid. `gozer wait` grants a detached lease (the owner pid is lost), so it is not used.
 - A queue entry has `pid` and `who`; a `granted` event has `lease_id`, `pid`, `who`, `chips`; a `released` event has `lease_id` and
   `duration_s` (the seconds gozer held it, reset included).
+- One claim of the ticket answered with an error while another lease's reset was starting (seen once on the real gozer). The wait
+  therefore treats an answer that is neither a ticket nor a grant as a moment's trouble: it looks for a lease granted to the pid, and it
+  keeps claiming while the queue still shows the ticket. The ticket is cancelled whenever the wait ends without a grant.
 - `gozer wait --timeout 5` meant five minutes (bare digits are minutes in gozer); this is why an earlier note here said it ran over.
 
 Comparison on the paths Copilot raised:

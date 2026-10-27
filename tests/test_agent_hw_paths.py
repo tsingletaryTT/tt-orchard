@@ -363,7 +363,9 @@ def test_p10_an_interrupt_in_the_harness_run_releases_the_lease(rig):
     with pytest.raises(KeyboardInterrupt):
         rig.call()
     assert rig.sim.released() == ["L1"] and rig.check.summary()["calls"][0]["outcome"] == "interrupted"
-    assert rig.check.summary()["calls"][0]["lease_incomplete"] is False       # settled from gozer's duration
+    rec = rig.check.summary()["calls"][0]
+    assert rec["lease_id"] == "L1" and rec["lease_incomplete"] is False and rec["lease_reconciled"] is True
+    assert rec["lease_s"] == 42.0                                             # gozer's duration for the lease replaced the estimate
 
 
 def test_p10b_an_error_in_the_harness_run_releases_the_lease_and_propagates(rig):
@@ -564,3 +566,23 @@ def test_the_cleanup_reserve_covers_the_harness_stop_and_the_separate_release():
     p = hwtool.HwPolicy()
     assert p.cleanup_s >= kp.GOZER_TERM_GRACE_S + hwlease.RELEASE_TIMEOUT_S
     assert (p.lease_s - p.cleanup_s) + kp.GOZER_TERM_GRACE_S + hwlease.RELEASE_TIMEOUT_S <= p.lease_s
+
+
+def test_the_chip_time_of_a_call_is_the_time_from_the_grant_to_the_end_of_the_release(rig):
+    def harness(argv, kw):
+        CLOCK["now"] += 47.0
+        Path(argv[argv.index("--out") + 1]).write_text(
+            json.dumps({"phase": "hw", "sets": [GOOD_HW_SET], "error": None, "device_s": 1.0}))
+        return kp.Watched(0, None, False, 47.0)
+    rig.harness = harness
+    rig.call()
+    rec = rig.check.summary()["calls"][0]
+    assert rec["lease_s"] == 47.0 and rig.check.summary()["lease_s_used"] == 47.0
+
+
+def test_p1c_a_claim_that_errs_for_a_moment_does_not_end_the_wait_or_leak_the_ticket(tmp_path, fake_kenv):
+    """Seen on the real gozer: one claim answered with an error while another lease's reset was starting."""
+    rig = busy_rig(tmp_path, fake_kenv, busy_calls=3)
+    rig.sim.acquire_fail_at = {3: res(1, "", "gozer is busy for a moment")}
+    text = rig.call()
+    assert "PASS" in text and rig.sim.cancelled() == [] and rig.sim.queue == [] and rig.leases.unresolved() is None

@@ -265,3 +265,14 @@ def test_the_report_row_shows_a_failed_release():
            "release_error": "chips [0, 1] still open by [123]"}
     md = _report_md(Path(tempfile.mkdtemp()), [_row_attempt(agent_hw=hw_summary(rec))])
     assert "release failed: chips [0, 1] still open by [123]" in md
+
+
+def test_a_duration_that_gozer_writes_between_calls_counts_before_the_next_call_is_admitted():
+    w = World([incomplete_pass(60.0)])
+    durations = {}
+    c = make(w, durations, lease_s=600.0)
+    c.call({})
+    assert c.summary()["lease_s_used"] == 60.0                # nothing known yet: the estimate stands
+    durations["L1"] = 500.0                                   # gozer finished the long reset between the calls
+    assert c.call({}).startswith("hardware_check refused") and len(w.runs) == 1
+    assert c.summary()["lease_s_used"] == 500.0

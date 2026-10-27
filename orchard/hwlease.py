@@ -118,14 +118,26 @@ class GozerLeases:
             answer = self.claim(ticket, reason)
             if answer.grant is not None:
                 return answer.grant, None
-            if answer.ticket is None:                        # not queued any more, or gozer did not answer
-                return self._found_lease(), None
+            if answer.ticket is None:
+                # Not a ticket and not a grant: gozer erred for a moment (seen on the real gozer while another lease's reset was
+                # starting) or the ticket is gone. A lease granted to this pid whose answer was lost is taken; otherwise the wait
+                # goes on while the queue still shows the ticket (or cannot be read) and ends, with the ticket cancelled, when
+                # the queue shows it gone.
+                found = self._found_lease()
+                if found is not None:
+                    return found, None
+                if self._ticket_queued(ticket) is False:
+                    break
             if self.clock() >= end:
                 break
             self.sleep(min(CLAIM_POLL_S, max(end - self.clock(), 0.0)))
         error = self.cancel(ticket)
         found = self._found_lease()
         return found, (error if found is None else None)
+
+    def _ticket_queued(self, ticket: str) -> bool | None:
+        queue = self._records("queue", [self.gozer, "queue", "--json"], "queue")
+        return None if queue is None else any(str(q.get("ticket")) == ticket for q in queue)
 
     def _found_lease(self) -> dict | None:
         found = self.mine()
@@ -178,7 +190,10 @@ class GozerLeases:
                 self.release(lease["lease_id"])
         except Exception:
             pass
-        return self.unresolved()
+        try:
+            return self.unresolved()
+        except Exception:
+            return "cannot confirm that nothing is held (gozer could not be read)"
 
     # ---- what gozer shows ------------------------------------------------------------------------------------------
 

@@ -108,6 +108,8 @@ def test_a_busy_board_answers_with_the_ticket():
 @pytest.mark.parametrize("answer", [res(12, json.dumps({"granted": False, "error": "no"})), res(1, "", "boom"),
                                     res(0, "not json"), res(0, json.dumps({"granted": False})),
                                     res(0, json.dumps({"granted": True})), res(0, json.dumps({"granted": True, "lease_id": "bad id"})),
+                                    res(0, json.dumps({"granted": False, "lease_id": "L1"})), res(1, GRANT),
+                                    res(0, QUEUED),
                                     res(10, "not json"), res(10, json.dumps({"queued": True, "ticket": "bad id"}))])
 def test_anything_that_is_not_a_complete_grant_or_a_ticket_is_an_error(answer):
     cmd = FakeCmd()
@@ -370,3 +372,72 @@ def test_reclaim_says_what_it_could_not_give_back_and_never_raises():
 
 def test_reclaim_with_nothing_held_is_quiet():
     assert leases(FakeCmd()).reclaim() is None
+
+
+def test_a_queue_entry_of_this_pid_but_another_who_is_not_ours():
+    cmd = FakeCmd()
+    cmd.queue = [{"ticket": "T1", "pid": PID, "who": "claude:other"}]
+    assert leases(cmd).unresolved() is None
+
+
+def test_reclaim_never_raises_even_when_gozer_cannot_be_read_at_all():
+    led = leases(FakeCmd())
+
+    def boom():
+        raise RuntimeError("history exploded")
+    led.mine = boom
+    assert "cannot confirm" in led.reclaim()
+
+
+# ---- a claim that fails for a moment must not end the wait or leak the ticket (seen on the real gozer: 2026-10-27) ----------
+
+
+def test_a_claim_that_errs_while_the_ticket_is_still_queued_is_tried_again():
+    cmd = FakeCmd()
+    cmd.queue = [{"ticket": "T1", "pid": PID, "who": WHO}]
+    cmd.say("acquire", res(1, "", "gozer is busy for a moment"), res(10, QUEUED), res(0, GRANT))
+    led = leases(cmd)
+    grant, error = led.wait("T1", "why", 60.0)
+    assert grant["lease_id"] == "L1" and error is None and led.time.sleeps == [2.0, 2.0]
+    assert "cancel" not in cmd.subs()
+
+
+def test_claims_that_keep_erring_with_the_ticket_queued_end_at_the_deadline_with_the_ticket_cancelled():
+    cmd = FakeCmd()
+    cmd.queue = [{"ticket": "T1", "pid": PID, "who": WHO}]
+    cmd.say("acquire", res(1, "", "boom"))
+    led = leases(cmd)
+    assert led.wait("T1", "why", 6.0) == (None, None)
+    assert cmd.subs().count("cancel") == 1 and sum(led.time.sleeps) == pytest.approx(6.0)
+
+
+def test_claims_with_an_unreadable_queue_are_not_taken_to_mean_the_ticket_is_gone():
+    cmd = FakeCmd()
+    cmd.queue_fails = True
+    cmd.say("acquire", res(1, "", "boom"), res(0, GRANT))
+    grant, _ = leases(cmd).wait("T1", "why", 60.0)
+    assert grant["lease_id"] == "L1"
+
+
+def test_a_ticket_that_is_gone_from_the_queue_with_no_lease_ends_the_wait_at_once_and_is_cancelled():
+    cmd = FakeCmd()
+    cmd.say("acquire", res(1, "", "boom"))
+    led = leases(cmd)
+    assert led.wait("T1", "why", 60.0) == (None, None) and led.time.sleeps == []
+    assert cmd.subs().count("cancel") == 1
+
+
+def test_a_wait_that_ends_for_any_reason_other_than_a_grant_cancels_the_ticket():
+    for answer in (res(12, json.dumps({"granted": False, "queued": False})), OSError("killed"), res(0, "not json")):
+        cmd = FakeCmd()
+        cmd.say("acquire", answer)
+        leases(cmd).wait("T1", "why", 60.0)
+        assert "cancel" in cmd.subs()
+
+
+def test_another_ticket_in_the_queue_does_not_keep_this_wait_going():
+    cmd = FakeCmd()
+    cmd.queue = [{"ticket": "T9", "pid": PID + 1, "who": "claude:other"}]
+    cmd.say("acquire", res(1, "", "boom"))
+    led = leases(cmd)
+    assert led.wait("T1", "why", 60.0) == (None, None) and led.time.sleeps == []
