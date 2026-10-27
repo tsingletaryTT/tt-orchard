@@ -153,7 +153,7 @@ from orchard import graft_trial as graft
 from orchard import kept_coder, kernelprobe, swap_draft
 from orchard.server import ServerControl, ServerError, ServerSpec, StopCheck
 from orchard.stages import (PACKAGE_OPTIONS_SET, GateResult, TierUnavailable, abort_can_resume, attempt_started_ts,
-                            budget_cap, check_disk, coder_state, delta_class, delta_facts, delta_path, evidence_record,
+                            budget_cap, check_disk, coder_state, delta_class, delta_facts, delta_path, run_facts, evidence_record,
                             open_stage_dir, package_format, package_options, resolve_endpoint,
                             resolve_skill, run_class, run_path, run_progress, scratch_stage, spec_for, stock_params, tier_for)
 from orchard.tiers import TierConfigError, load
@@ -169,6 +169,8 @@ FULL_PORT = ("stage 0 found a full port (new model code is needed); plan 4 runs 
              "bring-ups, so the operator decides whether to go on")
 RESTRICTED_HEAD = ("stage 0 found the nearest model's backbone with a restricted head (its lm_head is replaced by sidecar "
                    "rows); the harness does not serve that, so a person decides whether to go on")
+AUDIO_UNBUILT = ("stage 0 found an audio model; the audio path (its stage 1 and stage 2) is not built yet, and the text stages would "
+                 "measure the wrong thing, so a person decides whether to go on")
 SKILLS_DIR = Path(__file__).with_name("skills")
 
 
@@ -827,6 +829,9 @@ class Supervisor:
             if cap:
                 self.ledger.append("decision", p.next_stage, decision="pause", reason=cap)
                 continue
+            if p.next_stage == 1 and self._audio_unacknowledged():
+                self.ledger.append("decision", 1, decision="pause", reason=AUDIO_UNBUILT)
+                continue
             if p.next_stage == 1 and self._restricted_head_unacknowledged():
                 self.ledger.append("decision", 1, decision="pause", reason=RESTRICTED_HEAD)
                 continue
@@ -867,6 +872,16 @@ class Supervisor:
         # counts as the same acknowledgement, so one resume is enough.
         return self.unattended or not any(
             e["event"] == "decision" and e["data"].get("reason") in (FULL_PORT, RESTRICTED_HEAD) for e in entries)
+
+    def _audio_unacknowledged(self) -> bool:
+        """Stage 0 recorded modality audio, and the run has not yet paused for it. The audio stages are not built (plan
+        docs/superpowers/plans/2026-10-28-audio-bringup.md), so the run stops before stage 1. Unattended, it always blocks."""
+        entries = self.ledger.read()
+        facts = run_facts(entries, self.run_dir)
+        if not facts or facts.get("modality") != "audio":
+            return False
+        return self.unattended or not any(
+            e["event"] == "decision" and e["data"].get("reason") == AUDIO_UNBUILT for e in entries)
 
     def _restricted_head_unacknowledged(self) -> bool:
         """Stage 0 filed the model as a restricted head, and the run has not yet paused for it. The harness does not serve

@@ -184,6 +184,8 @@ def classify_pause(data: dict) -> tuple[str, str | None]:
         return "blocked", None
     if "failed after escalation" in reason or "is not escalated" in reason:
         return "stage_failed", None
+    if "audio path" in reason:
+        return "audio_unbuilt", None
     if "restricted head" in reason:
         return "restricted_head", None
     if "full port" in reason:
@@ -313,7 +315,7 @@ HINT_RULES = (
      "a control word is waiting; wait 30 seconds and run status again."),
     ("same stage twice", lambda f: _paused(f) and f["pauses_at_stage"] >= 2,
      "the same stage has paused {pauses_at_stage} times; stop and ask a human."),
-    ("needs a human", lambda f: _paused(f, "full_port", "restricted_head", "blocked", "budget", "operator"),
+    ("needs a human", lambda f: _paused(f, "full_port", "restricted_head", "audio_unbuilt", "blocked", "budget", "operator"),
      "this pause needs a decision; stop and ask a human."),
     ("resume once", lambda f: f["state"] == "paused",
      "resume once; if it pauses again at the same stage, stop and ask a human."),
