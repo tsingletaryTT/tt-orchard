@@ -12,10 +12,11 @@ from orchard import sampling_probe as sp
 LINE = ("[dflash2-serve] slot 0 session: 4 iters, 18 committed tokens, accept 3.75/7 -> 4.50 tok/iter, 21.3 tok/s in-model (incl. seed); "
         "histogram [0, 2, 0, 0, 0, 0, 1, 1]\n")
 STORY = "The lighthouse keeper climbed the long spiral stairs every evening, counting the steps and listening to the sea below him."
+GREEDY = "The lighthouse keeper climbed the stairs one more time that night and found the lamp already burning, though nobody had lit it."
 OTHER = "On the island there was a bell that rang by itself whenever the fog came in, and nobody remembered who had hung it there."
 
 
-def entry(text=STORY, tokens=96, seconds=2.0, error=None, accepted=True, log="", finish="length", params=None):
+def entry(text=GREEDY, tokens=96, seconds=2.0, error=None, accepted=True, log="", finish="length", params=None):
     return {"params": params or {}, "accepted": accepted, "error": error, "seconds": seconds, "completion_tokens": tokens,
             "text": text, "finish_reason": finish, "drafter_log": log}
 
@@ -26,7 +27,7 @@ def refused(error="HTTP 400: no"):
 
 def record(greedy=None, a=None, b=None):
     return {"ran": True, "prompt": "p", "max_tokens": 96,
-            "requests": {"greedy": greedy or entry(text=STORY, seconds=2.0),
+            "requests": {"greedy": greedy or entry(text=GREEDY, seconds=2.0),
                          "sampled_a": a or entry(text=STORY, seconds=2.0),
                          "sampled_b": b or entry(text=OTHER, seconds=2.0)}}
 
@@ -50,6 +51,14 @@ def test_two_seeds_with_the_same_text_mean_sampling_was_ignored():
     s = sp.summarize(record(a=entry(text=STORY), b=entry(text=STORY)))
     assert s["verdict"] == "sampled-ignored"
     assert "greedy" in s["sentence"] and "seed" in s["sentence"]
+
+
+def test_a_sampled_text_equal_to_the_greedy_text_means_sampling_was_ignored_even_when_the_seeds_differ_in_text():
+    """Measured on the DFlash2 bundle with the drafter on (2026-10-27): every sampled request returned the greedy text."""
+    for a, b in ((GREEDY, OTHER), (OTHER, GREEDY)):
+        s = sp.summarize(record(a=entry(text=a), b=entry(text=b)))
+        assert s["verdict"] == "sampled-ignored", (a, b)
+        assert "greedy text" in s["sentence"]
 
 
 def test_ignored_wins_over_slower():
@@ -141,7 +150,7 @@ def test_every_sentence_is_one_plain_line_without_the_forbidden_framing():
     sentences = [sp.summarize(record())["sentence"],
                  sp.summarize(record(a=entry(text=STORY), b=entry(text=STORY)))["sentence"],
                  sp.summarize(record(a=refused()))["sentence"],
-                 sp.summarize(record(a=entry(seconds=9.0), b=entry(text=OTHER, seconds=9.0)))["sentence"]]
+                 sp.summarize(record(a=entry(text=STORY, seconds=9.0), b=entry(text=OTHER, seconds=9.0)))["sentence"]]
     for text in sentences:
         assert text and text == " ".join(text.split())
         for bad in (", not ", "honest", "reads as"):
@@ -155,7 +164,7 @@ def card_sentences():
         "full": sp.summarize(record()),
         "ignored": sp.summarize(record(a=entry(text=STORY), b=entry(text=STORY))),
         "refused": sp.summarize(record(a=refused("HTTP 400: no sampling here"))),
-        "slower": sp.summarize(record(a=entry(seconds=9.0), b=entry(text=OTHER, seconds=9.0))),
+        "slower": sp.summarize(record(a=entry(text=STORY, seconds=9.0), b=entry(text=OTHER, seconds=9.0))),
         "incoherent": sp.summarize(record(a=entry(text="the " * 40), b=entry(text=OTHER))),
         "short": sp.summarize(record(a=entry(text="Yes.", tokens=2), b=entry(text="No.", tokens=2))),
         "greedy": sp.summarize(record(greedy=refused("HTTP 500: boom"))),
@@ -185,3 +194,7 @@ def test_the_card_sentence_of_a_refusal_does_not_copy_the_error_text():
 
 def test_a_run_with_no_record_has_no_card_sentence():
     assert sp.summarize(None).get("card_sentence") is None
+
+
+def test_a_greedy_reply_of_a_few_tokens_has_no_speed():
+    assert sp.summarize(record(greedy=entry(tokens=4, seconds=0.001)))["greedy"]["tokens_per_s"] is None

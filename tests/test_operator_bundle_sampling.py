@@ -89,3 +89,35 @@ def test_a_path_or_home_directory_in_an_error_text_is_redacted(tmp_path):
     put(run, "stages/2/evidence", record(a=refused("HTTP 400: /home/someone/secret/path failed"), b=refused()))
     text = results(run)
     assert "/home/someone" not in text
+
+
+def test_a_record_that_did_not_run_has_no_row(tmp_path):
+    run = make_run(tmp_path)
+    put(run, "stages/2/evidence", {"ran": False})
+    assert HEAD not in results(run)
+
+
+def test_a_malformed_record_row_is_labelled_todo(tmp_path):
+    run = make_run(tmp_path)
+    rec = record()
+    rec["requests"]["greedy"]["seconds"] = "fast"
+    put(run, "stages/2/evidence", rec)
+    row = [ln for ln in section(results(run), HEAD).splitlines() if ln.startswith("| stage 2")][0]
+    assert "| TODO | `stages/2" in row and "measured" not in row
+
+
+def test_a_drafter_share_of_zero_is_shown_and_not_called_todo(tmp_path):
+    run = make_run(tmp_path)
+    zero = LINE.replace("accept 3.75/7", "accept 0.00/7").replace("histogram [0, 2, 0, 0, 0, 0, 1, 1]", "histogram [4, 0, 0, 0, 0, 0, 0, 0]")
+    put(run, "stages/2/evidence", record(greedy=entry(log=zero), a=entry(text=STORY, log=zero), b=entry(text=OTHER)))
+    row = [ln for ln in section(results(run), HEAD).splitlines() if ln.startswith("| stage 2")][0]
+    assert "| 0.0 / 0.0 |" in row
+
+
+def test_stage_4_rows_come_with_the_larger_chip_count_first(tmp_path):
+    run = make_run(tmp_path)
+    for n in (2, 4, 1):
+        put(run, f"stages/4/configs/{n}/evidence", record())
+    block = section(results(run), HEAD)
+    order = [block.index(f"| stage 4, {n} chips") for n in (4, 2, 1)]
+    assert order == sorted(order)

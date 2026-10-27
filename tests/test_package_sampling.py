@@ -168,3 +168,18 @@ def test_the_card_names_the_serving_state_stage_2_recorded(world, serving, phras
     put_probe(world, record(), serving=serving)
     _, _, card = card_of(world)
     assert phrase in " ".join(section(card).split())
+
+
+ZERO_LINE = LINE.replace("accept 3.75/7", "accept 0.00/7").replace("histogram [0, 2, 0, 0, 0, 0, 1, 1]", "histogram [4, 0, 0, 0, 0, 0, 0, 0]")
+
+
+def test_a_drafter_that_accepted_nothing_is_a_measurement_and_gets_its_rows(world):
+    put_probe(world, record(greedy=entry(log=ZERO_LINE), a=entry(text=STORY, log=ZERO_LINE), b=entry(text=OTHER)))
+    _, _, card = card_of(world)
+    assert rows(card)[RATE_ROWS[0]][0] == "0.0 fraction" and rows(card)[RATE_ROWS[1]][0] == "0.0 fraction"
+
+
+def test_speeds_are_rounded_to_one_decimal_place_in_the_rows(world):
+    put_probe(world, record(greedy=entry(seconds=1.995), a=entry(text=STORY, seconds=2.0), b=entry(text=OTHER, seconds=2.0)))
+    _, _, card = card_of(world)
+    assert rows(card)[SPEED_ROWS[0]][0] == "48.1 tokens/s"

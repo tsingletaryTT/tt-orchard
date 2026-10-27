@@ -144,6 +144,11 @@ def _summarize(record) -> dict:
         return {**out, "verdict": "sampled-ignored",
                 "sentence": ("The server accepted the sampled requests, but two requests that differ only in seed returned the same text. "
                              f"Sampling was not applied, so decoding was greedy. Greedy decoded at {_fmt(gs)}.")}
+    if g["text"] in (a["text"], b["text"]):
+        # At temperature 1 and top-p 0.9 over about 96 tokens, a sampled text that equals the greedy text is not a chance event.
+        return {**out, "verdict": "sampled-ignored",
+                "sentence": ("The server accepted the sampled requests, but a sampled request returned the greedy text. "
+                             f"Sampling was not applied, so decoding was greedy. Greedy decoded at {_fmt(gs)}.")}
     if out["ratio"] is not None and out["ratio"] < SLOW_RATIO:
         return {**out, "verdict": "sampled-slower",
                 "sentence": (f"Sampled requests decoded at {_fmt(ss)} against {_fmt(gs)} for greedy requests, "
