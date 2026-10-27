@@ -346,3 +346,23 @@ def test_the_cli_forwards_its_injected_home_to_the_telegraph_command(tmp_path):
     code = cli.main(["telegraph", "usage", "--telegraph-config", str(write(tmp_path))],
                     env={"HOME": str(tmp_path / "fakehome")}, stdout=out)
     assert code == 0 and "not settled: 1 reservations" in out.getvalue()
+
+
+def test_the_command_redacts_paths_under_the_injected_home(tmp_path):
+    seen = []
+
+    def transport(url, headers, body, timeout):
+        seen.append(body.decode())
+        return 200, json.dumps({"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+                                "usage": {"prompt_tokens": 5, "completion_tokens": 5}}).encode()
+    home = tmp_path / "srv" / "operators" / "alice"
+    home.mkdir(parents=True)
+    task = tmp_path / "task.txt"
+    task.write_text(f"file {home}/work/x.py")
+    fail = tmp_path / "fail.txt"
+    fail.write_text("boom")
+    out = io.StringIO()
+    cmd.main(cli._parser().parse_args(["telegraph", "ask", "--telegraph-config", str(write(tmp_path)), "--dir", str(tmp_path / "d"),
+                                       "--problem", "p", "--task-file", str(task), "--failure-file", str(fail)]),
+             out=out, environ={"TG_KEY": "k" * 20, **{}}, transport=transport, home=home)
+    assert seen and str(home) not in seen[0]

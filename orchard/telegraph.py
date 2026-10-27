@@ -51,6 +51,7 @@ REQUEST_FRAMING_TOKENS = 32      # added to the request size for the provider's 
 KEYS = {"enabled", "endpoint", "models", "api", "key_env", "key_file", "after_failures", "max_calls",
         "max_total_tokens", "max_cost_usd", "prices", "max_output_tokens", "max_prompt_chars", "timeout_s",
         "extra_body", "max_calls_per_problem", "max_tokens_per_problem", "max_cost_per_problem_usd"}
+UNPRICED_BODY = ("tools", "tool_choice", "web_search_options", "plugins")
 RESERVED_BODY = ("model", "messages", "max_tokens", "temperature", "system", "stream", "stream_options", "n", "best_of")
 APIS = ("openai", "anthropic")
 ANTHROPIC_VERSION = "2023-06-01"
@@ -230,6 +231,10 @@ def load(table: dict | None, *, base: Path) -> Config:
         raise ConfigError("telegraph.extra_body must be a table")
     _plain_json(extra, "telegraph.extra_body")
     _refuse_prompt_caching(extra, "telegraph.extra_body")
+    for name in UNPRICED_BODY:
+        if name in extra:
+            raise ConfigError(f"telegraph.extra_body cannot set {name}: tools and web search can add charges per use that "
+                              "telegraph does not account for")
     for name in RESERVED_BODY:
         if name in extra:
             raise ConfigError(f"telegraph.extra_body cannot set {name}; telegraph sets it")

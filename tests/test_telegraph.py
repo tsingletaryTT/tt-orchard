@@ -1550,3 +1550,11 @@ def test_a_failed_answer_reports_its_tokens_and_cost(tmp_path):
     got = tel.ask("p", "t", "f")
     assert not got.ok and (got.tokens_in, got.tokens_out) == (40, 12)
     assert got.cost_usd == pytest.approx((40 * 1 + 12 * 2) / 1e6)
+
+
+# ------------------------------------------------------------------------------------------------ review of PR 106, round 9
+
+@pytest.mark.parametrize("name", ["tools", "tool_choice", "web_search_options", "plugins"])
+def test_extra_body_cannot_enable_tools_or_search_whose_charges_are_not_accounted(name):
+    with pytest.raises(tg.ConfigError, match=name):
+        tg.load(table(extra_body={name: [{"type": "web_search_20250305"}]}), base=Path("/x"))
