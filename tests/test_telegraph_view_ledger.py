@@ -56,7 +56,7 @@ def test_an_unsettled_reservation_is_shown_plainly_and_counts_at_its_worst_case(
     (row,) = out["recent"]
     assert row["outcome"] == "unsettled" and row["held"] is True and row["cost_usd"] > 0
     assert "worst case" in row["reason"]
-    assert "calls 1 of 5" in out["meter"]["text"] and out["meter"]["text"].startswith("Helper: $0.")
+    assert "problem stuck at 33% of its cap" in out["meter"]["text"] and out["meter"]["text"].startswith("Helper: $0.")
     assert "· 1 call ·" in out["meter"]["text"]                # the meter counts what the caps count
     cap = next(c for c in out["caps"] if c["id"] == "calls")
     assert cap["used"] == 1

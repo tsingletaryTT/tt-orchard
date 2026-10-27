@@ -165,6 +165,7 @@ def _problem_rows(records: list[dict], acct: dict, verdict: dict, cfg: tg.Config
             percent = max(percent, 100 if limit <= 0 else int(used * 100 / limit))
         if cfg.max_cost_per_problem_usd is not None and row["cost_unknown_calls"]:
             full = near = True                    # the producer refuses this problem's calls while a cost is unknown
+            percent = 100                         # so it counts as fully used, like the global cost cap does
         row["percent"], row["near"], row["at_cap"] = percent, near, full
         rows.append(row)
     # Every problem is returned: the state and the closest cap are worked out over all of them, and only the table is cut.
@@ -365,9 +366,11 @@ def build(cfg: tg.Config, directory, *, environ, redact=lambda t: t, hostname: s
         state, reason = "near", None
     else:
         state, reason = "ok", None
+    # The meter names the cap that is closest to its limit, whether it is a global cap or one problem's, even below the amber
+    # threshold. A global cap wins a tie, and the first of equal global caps is the one named.
     closest = max(caps, key=lambda c: (c["percent"], -caps.index(c)), default=None)
-    if state == "near" and not any(c["tone"] == "warn" for c in caps):
-        hot = max(problems, key=lambda p: p["percent"])
+    hot = max(problems, key=lambda p: (p["percent"], p["calls"]), default=None)
+    if hot is not None and (closest is None or hot["percent"] > closest["percent"]):
         cap_text = f"problem {_clean(hot['name'], redact, TEXT_MAX)} at {hot['percent']}% of its cap"
     else:
         cap_text = _cap_phrase(closest) if closest else ""
