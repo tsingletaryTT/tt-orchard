@@ -102,46 +102,54 @@ def candidates(runs_root: Path) -> list[tuple[str, Path]]:
     return discover(runs_root)[0]
 
 
+def _runs_phrase(n: int, what: str) -> str:
+    return f"{n} run{'' if n == 1 else 's'} {what}"
+
+
 class Spender:
     """Scans the first MAX_CANDIDATES directories once per CACHE_S seconds and answers requests from that. A selected run that is
     among the listed directories but past the cap is scanned on its own (and cached on its own), so its figure is never lost to the
-    cap. The selected name is only compared with the listed names; it is never turned into a path."""
+    cap. The selected name is only compared with the listed names; it is never turned into a path. Whatever limits the figure is
+    reported with it: runs not scanned, runs not fully read, runs that could not be read, a runs folder that cannot be opened and a
+    listing that was cut short. None of them is shown as zero."""
 
     def __init__(self, runs_root, cfg: vs.Config, *, redact=lambda t: t, clock=time.time):
         self.runs_root, self.cfg, self.redact, self.clock = Path(runs_root), cfg, redact, clock
         self._lock = threading.Lock()
-        self._cache = None                       # (time, rows, {name: path} of every listed directory, count scanned, cut short)
+        self._cache = None                       # (time, base) with base a dict, see _refresh
         self._extra: dict = {}                   # name -> row or None, for selected runs past the scan cap
 
     def _scan_one(self, name, path, pin):
-        """One folder, read beneath the pinned runs folder (a link anywhere between the two is refused)."""
+        """One folder, read beneath the pinned runs folder (a link anywhere between the two is refused). None when the scan failed."""
         try:
             return {"name": name, **vs.priced(vs.scan(path, beneath=pin), self.cfg)}
         except Exception:                                           # noqa: BLE001 - one bad folder must not hide the others
             return None
 
-    def _rows(self):
-        """(rows, listed names, number scanned, listing cut short). One refresh runs at a time: a request that arrives during a scan waits for it and then
-        reuses its result. The cache is dated when the scan ends, so a slow scan is still reused for the full cache lifetime."""
+    def _base(self) -> dict:
+        """The scanned rows and what limited them. One refresh runs at a time: a request that arrives during a scan waits for it and
+        then reuses its result. The cache is dated when the scan ends, so a slow scan is still reused for the full cache lifetime."""
         with self._lock:
             if self._cache is not None and self.clock() - self._cache[0] < CACHE_S:
-                return self._cache[1], self._cache[2], self._cache[3], self._cache[4]
+                return self._cache[1]
             pin = vs.open_pin(self.runs_root)                       # pinned before the listing: every scan is beneath this descriptor
             listed, cut = discover(self.runs_root, pin) if pin is not None else ([], False)
-            rows = []
+            rows, failures = [], 0
             try:
                 for name, path in listed[:MAX_CANDIDATES]:
-                    row = self._scan_one(name, path, pin) if pin is not None else None
-                    if row is not None:
+                    row = self._scan_one(name, path, pin)
+                    if row is None:
+                        failures += 1
+                    else:
                         rows.append(row)
             finally:
                 if pin is not None:
                     pin.close()
-            names = dict(listed)
-            scanned = min(len(listed), MAX_CANDIDATES)
-            self._cache = (self.clock(), rows, names, scanned, cut)
+            base = {"rows": rows, "names": dict(listed), "scanned": min(len(listed), MAX_CANDIDATES), "cut": cut,
+                    "failures": failures, "unreadable": pin is None}
+            self._cache = (self.clock(), base)
             self._extra = {}
-            return rows, names, scanned, cut
+            return base
 
     def _extra_row(self, name, path):
         with self._lock:
@@ -157,16 +165,19 @@ class Spender:
             return row
 
     def build(self, run: str | None = None) -> dict:
-        base_rows, names, scanned, cut = self._rows()
-        all_rows, extra_scanned = list(base_rows), 0
-        listed_past_cap = run is not None and run in names and run not in {r["name"] for r in base_rows}
+        base = self._base()
+        names, cut = base["names"], base["cut"]
+        all_rows, extra_scanned, failures = list(base["rows"]), 0, base["failures"]
+        listed_past_cap = run is not None and run in names and run not in {r["name"] for r in base["rows"]}
         if listed_past_cap and list(names).index(run) >= MAX_CANDIDATES:
             extra = self._extra_row(run, names[run])
             extra_scanned = 1
             if extra is not None:
                 all_rows.append(extra)
-        not_scanned = max(0, len(names) - scanned - extra_scanned)
-        rows = [r for r in all_rows if r["turns"] > 0]
+            else:
+                failures += 1
+        not_scanned = max(0, len(names) - base["scanned"] - extra_scanned)
+        rows = [r for r in all_rows if r["turns"] > 0 or not r["complete"]]    # a run read in part is listed even with no turns yet
         rows.sort(key=lambda r: (-r["virtual"][0]["cost_usd"], r["name"]))
         total_rows = rows if run is None else [r for r in all_rows if r["name"] == run]
         total = {"turns": sum(r["turns"] for r in total_rows),
@@ -177,6 +188,8 @@ class Spender:
                 for n, pi, po in self.cfg.references()]
         total["virtual"] = refs
         head = refs[0]
+        not_fully_read = sum(1 for r in all_rows if not r["complete"])
+        meter_not_fully_read = sum(1 for r in total_rows if not r["complete"])
         meter = None
         if total["turns"]:
             meter = {"text": f"Local ≈ {usd(head['cost_usd'])} (virtual, at {head['name']})",
@@ -184,11 +197,16 @@ class Spender:
                                f"{total['completion_tokens']} completion tokens priced at {head['name']}. Nobody was charged and "
                                "this is not part of the helper spend. "
                                + (f"{not_scanned} runs were not scanned. " if not_scanned else "")
+                               + (f"{_runs_phrase(meter_not_fully_read, 'was not fully read' if meter_not_fully_read == 1 else 'were not fully read')}, so the figure is low. "
+                                  if meter_not_fully_read else "")
+                               + (f"{_runs_phrase(failures, 'could not be read')}. " if failures else "")
                                + ("The folder listing was cut short. " if cut else "") + "Click for the table.")}
         shown = [{"name": self.redact(r["name"])[:NAME_MAX], "turns": r["turns"], "prompt_tokens": r["prompt_tokens"],
-                  "completion_tokens": r["completion_tokens"], "agent_wall_s": r["agent_wall_s"],
+                  "completion_tokens": r["completion_tokens"], "agent_wall_s": r["agent_wall_s"], "complete": r["complete"],
                   "virtual": [{"name": self.redact(v["name"])[:NAME_MAX], "cost_usd": v["cost_usd"]} for v in r["virtual"]],
                   "left_out": self.redact(vs.skipped_text(r["skipped"]))[:300]} for r in rows[:MAX_ROWS]]
         return {"label": vs.LABEL, "virtual": True, "scope": "run" if run is not None else "all", "run": self.redact(run)[:NAME_MAX] if run is not None else None,
                 "references": [{"name": r["name"], "price_in": r["price_in"], "price_out": r["price_out"]} for r in refs],
-                "total": total, "meter": meter, "rows": shown, "not_scanned": not_scanned, "discovery_truncated": bool(cut), "more_rows": max(0, len(rows) - MAX_ROWS)}
+                "total": total, "meter": meter, "rows": shown, "not_scanned": not_scanned, "discovery_truncated": bool(cut),
+                "more_rows": max(0, len(rows) - MAX_ROWS), "not_fully_read": not_fully_read, "scan_failures": failures,
+                "runs_folder_unreadable": base["unreadable"]}

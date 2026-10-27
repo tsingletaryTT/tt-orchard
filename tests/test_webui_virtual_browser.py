@@ -403,3 +403,29 @@ def test_the_hidden_rows_note_claims_the_meter_total_when_the_meter_covers_every
         expect(pg.locator("#tg-local-note")).to_contain_text("2 more runs not shown in this table; their tokens are in the meter's total")
         expect(local(pg)).to_have_text("Local ≈ $0.40 (virtual, at claude-haiku-5-5)")
     ctx.close()
+
+
+def test_the_page_marks_a_run_that_was_not_fully_read_and_says_so(tmp_path, browser, monkeypatch):
+    from orchard import virtualspend as virtual
+    monkeypatch.setattr(virtual, "MAX_DEPTH", 2)
+    r = tmp_path / "orchard-runs"
+    write_log(r, "kprobe/p0/log/run.jsonl", [turn(1, 1_000_000, 0)])
+    write_log(r, "kprobe/p1/x/y/log/run.jsonl", [turn(1, 5, 0)])             # below the depth limit
+    write_log(r, "kprobe/p1/log/run.jsonl", [turn(1, 1_000_000, 0)])
+    ctx, pg = new_page(browser)
+    with Served(app_for(r)) as s:
+        pg.goto(f"http://127.0.0.1:{s.port}/?mode=operator#telegraph")
+        expect(pg.locator("#tg-local-note")).to_contain_text("1 run not fully read")
+        expect(pg.locator("#tg-local-body tr", has_text="kprobe/p1")).to_contain_text("(not fully read)")
+        expect(pg.locator("#tg-local-body tr", has_text="kprobe/p0")).not_to_contain_text("(not fully read)")
+        expect(local(pg)).to_have_attribute("title", __import__("re").compile("was not fully read"))
+    ctx.close()
+
+
+def test_the_page_says_the_runs_folder_cannot_be_read_instead_of_listing_nothing(tmp_path, browser):
+    ctx, pg = new_page(browser)
+    with Served(app_for(tmp_path / "gone")) as s:
+        pg.goto(f"http://127.0.0.1:{s.port}/?mode=operator#telegraph")
+        expect(pg.locator("#tg-local-note")).to_contain_text("The runs folder cannot be read")
+        expect(pg.locator("#tg-local-empty")).to_be_hidden()
+    ctx.close()

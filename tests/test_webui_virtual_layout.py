@@ -138,7 +138,7 @@ def test_operator_local_meter_is_aa_on_the_dark_top_bar():
 
 def test_the_local_table_is_redrawn_only_when_its_data_changes():
     body = fn_body(JS(), "function renderLocalTable")
-    assert 'changed($("tg-local"), [v.rows, v.references, v.not_scanned, v.discovery_truncated, v.more_rows, v.scope])' in body
+    assert 'changed($("tg-local"), [v.rows, v.references, v.not_scanned, v.discovery_truncated, v.more_rows, v.scope, v.not_fully_read, v.scan_failures, v.runs_folder_unreadable])' in body
 
 
 
@@ -180,3 +180,15 @@ def test_the_hidden_rows_note_claims_the_meter_total_only_for_the_all_runs_scope
     assert note.index('v.scope === "all"') < note.index("their tokens are in the meter's total"), "the claim sits behind the scope test"
     guard = next(line for line in body.splitlines() if "changed(" in line)
     assert "v.scope" in guard, "a change of scope must redraw the note"
+
+
+def test_the_page_reports_runs_not_fully_read_runs_that_failed_and_an_unreadable_runs_folder():
+    body = fn_body(JS(), "function renderLocalTable")
+    assert 'plural(v.not_fully_read, "run")} not fully read' in body
+    assert 'plural(v.scan_failures, "run")} could not be read' in body
+    assert "The runs folder cannot be read" in body and "v.runs_folder_unreadable" in body
+    guard = next(line for line in body.splitlines() if "changed(" in line)
+    for key in ("v.not_fully_read", "v.scan_failures", "v.runs_folder_unreadable"):
+        assert key in guard, key
+    assert "(not fully read)" in body, "an incomplete row is marked in the table"
+    assert "v.runs_folder_unreadable" in body[body.index("tg-local-empty"):], "the empty-list message is not shown for an unreadable folder"

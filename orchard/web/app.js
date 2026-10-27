@@ -254,13 +254,16 @@ function renderLocalMeter(v) {
 
 function renderLocalTable() {
   const v = S.virtual;
-  if (!v || !changed($("tg-local"), [v.rows, v.references, v.not_scanned, v.discovery_truncated, v.more_rows, v.scope])) return;
+  if (!v || !changed($("tg-local"), [v.rows, v.references, v.not_scanned, v.discovery_truncated, v.more_rows, v.scope, v.not_fully_read, v.scan_failures, v.runs_folder_unreadable])) return;
   $("tg-local-note").textContent = v.label + ". The prompt count is large because every turn re-sends the whole conversation; " +
     "a hosted provider with prompt caching would bill most of it for much less." +
     (v.not_scanned ? ` ${plural(v.not_scanned, "run")} not scanned (the scan reads the first listed folders; select a run to scan it).` : "") +
     (v.more_rows ? ` ${plural(v.more_rows, "more run")} not shown in this table` +
       (v.scope === "all" ? "; their tokens are in the meter's total." : " (the meter shows the selected run only).") : "") +
-    (v.discovery_truncated ? " The folder listing was cut short, so some folders are not listed at all." : "");
+    (v.discovery_truncated ? " The folder listing was cut short, so some folders are not listed at all." : "") +
+    (v.not_fully_read ? ` ${plural(v.not_fully_read, "run")} not fully read (marked in the table), so their figures are low.` : "") +
+    (v.scan_failures ? ` ${plural(v.scan_failures, "run")} could not be read.` : "") +
+    (v.runs_folder_unreadable ? " The runs folder cannot be read." : "");
   const head = clear($("tg-local-head"));
   const hr = h("tr", {});
   for (const [t, cls] of [["Run or probe directory", null], ["Turns", "num"], ["Prompt tokens", "num"], ["Completion tokens", "num"], ["Agent time", "num"]]) {
@@ -270,12 +273,12 @@ function renderLocalTable() {
   head.append(hr);
   const body = clear($("tg-local-body"));
   for (const r of v.rows) {
-    const cells = [[r.name, "wrap", r.left_out || null], [String(r.turns), "num"], [String(r.prompt_tokens), "num"], [String(r.completion_tokens), "num"],
+    const cells = [[r.complete ? r.name : `${r.name} (not fully read)`, "wrap", r.left_out || null], [String(r.turns), "num"], [String(r.prompt_tokens), "num"], [String(r.completion_tokens), "num"],
       [r.agent_wall_s ? `${(r.agent_wall_s / 3600).toFixed(2)} h` : "not recorded", "num"]];
     for (const c of r.virtual) cells.push([usd(c.cost_usd), "num"]);
     body.append(tgRow(cells));
   }
-  $("tg-local-empty").hidden = v.rows.length > 0;
+  $("tg-local-empty").hidden = v.rows.length > 0 || v.runs_folder_unreadable;
 }
 
 // ---- telegraph: the spend meter in the top bar (always on screen) and the Telegraph view ----------------------------

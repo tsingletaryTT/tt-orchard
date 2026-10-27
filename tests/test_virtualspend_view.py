@@ -657,3 +657,57 @@ def test_the_probe_folder_is_not_opened_when_the_budget_is_already_spent(root, m
         pin.close()
     assert len(opened) == 1 and cut is True
     assert all(not n.startswith("kprobe/") for n, _ in found)
+
+
+# ---- sweep: a limit that leaves logs unread, or a folder that cannot be read, is reported, never shown as zero -----------------
+
+def test_a_run_whose_scan_was_incomplete_is_counted_and_named_in_the_answer(root, monkeypatch):
+    monkeypatch.setattr(vs, "MAX_DEPTH", 2)
+    write_log(root, "org--a/log/run.jsonl", [turn(1, 5, 1)])
+    write_log(root, "org--b/x/y/log/run.jsonl", [turn(1, 7, 1)])             # below the depth limit: org--b is read in part
+    write_log(root, "org--b/log/run.jsonl", [turn(1, 7, 1)])
+    data = get(app_with(root))[1]
+    assert data["not_fully_read"] == 1
+    assert "1 runs were not fully read" in data["meter"]["title"] or "1 run was not fully read" in data["meter"]["title"]
+    row = [r for r in data["rows"] if r["name"] == "org--b"][0]
+    assert row["complete"] is False and "folders below the depth limit" in row["left_out"]
+    assert [r for r in data["rows"] if r["name"] == "org--a"][0]["complete"] is True
+
+
+def test_every_run_fully_read_reports_none_not_fully_read(root):
+    write_log(root, "org--a/log/run.jsonl", [turn()])
+    data = get(app_with(root))[1]
+    assert data["not_fully_read"] == 0 and "not fully read" not in data["meter"]["title"]
+
+
+def test_a_folder_whose_scan_fails_is_counted_not_dropped_silently(root, monkeypatch):
+    write_log(root, "org--a/log/run.jsonl", [turn(1, 10, 1)])
+    write_log(root, "org--b/log/run.jsonl", [turn(1, 20, 2)])
+    real = vs.scan
+
+    def flaky(p, **kw):
+        if p.name == "org--a":
+            raise RuntimeError("boom")
+        return real(p, **kw)
+    monkeypatch.setattr(vs, "scan", flaky)
+    data = get(app_with(root))[1]
+    assert [r["name"] for r in data["rows"]] == ["org--b"] and data["scan_failures"] == 1
+    assert "1 run could not be read" in data["meter"]["title"]
+
+
+def test_a_runs_folder_that_cannot_be_pinned_is_an_error_in_the_answer_not_an_empty_list(root, monkeypatch):
+    write_log(root, "org--a/log/run.jsonl", [turn()])
+    monkeypatch.setattr(vs, "open_pin", lambda path: None)
+    data = get(app_with(root))[1]
+    assert data["runs_folder_unreadable"] is True and data["rows"] == []
+
+
+def test_a_readable_runs_folder_reports_no_error(root):
+    write_log(root, "org--a/log/run.jsonl", [turn()])
+    data = get(app_with(root))[1]
+    assert data["runs_folder_unreadable"] is False and data["scan_failures"] == 0
+
+
+def test_a_missing_runs_folder_is_unreadable_not_empty(tmp_path):
+    data = get(app_with(tmp_path / "gone"))[1]
+    assert data["runs_folder_unreadable"] is True
