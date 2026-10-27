@@ -1055,7 +1055,7 @@ def gate_package(stage_dir, run_dir) -> GateResult:
     from orchard.package import (GRAFT_FILE, PUBLISH_FILE, PackageError, graft_evidence_problems, graft_problems,
                                  graft_trial_numbers, publish_problems, read_reported, sampling_numbers,
                                  sampling_summary, sampling_summary_problems, serving_problems,
-                                 split_model_id, stage_2_serving, stage_2_vocab, weights_wiring_problems)
+                                 served_drafter_state, split_model_id, stage_2_serving, stage_2_vocab, weights_wiring_problems)
     from orchard.card_use import read_use_facts
     from orchard.package_card import card_evidence_paths, card_problems, read_license
     from orchard.scrub import scrub_package
@@ -1079,7 +1079,8 @@ def gate_package(stage_dir, run_dir) -> GateResult:
         reasons.append(f"package.json says the license is {d.get('license')!r}; the model's is "
                        f"{license_id!r}")
     reasons += sampling_summary_problems(run)
-    drafter_off, host_sampling = stage_2_serving(run)
+    drafter_off, host_sampling = served_drafter_state(run)
+    sampling_decision = sampling_choice.read_decision(run / "stages" / "2")
     model_has_mtp = delta_model_has_mtp(delta)
     # A grafted package serves with the drafter and on-device sampling on, whatever stage 2's run.sh says.
     graft_expected = isinstance(d.get("mtp_graft"), dict)
@@ -1145,6 +1146,8 @@ def gate_package(stage_dir, run_dir) -> GateResult:
                                       graft_decision=trial_decision, vocab=stage_2_vocab(run),
                                       trial_rows=trial_rows if p.get("required") else (),
                                       sampling=sampling if p.get("required") else None,
+                                      sampling_decision=sampling_decision if p.get("required") else None,
+                                      drafter_off_by_sampling=bool(sampling_decision and sampling_decision.get("choice") == "drafter-off"),
                                       sampling_rows=sampling_rows if p.get("required") else (),
                                       use=read_use_facts(swap.get("new_snapshot") or "/nonexistent", run_sh, run,
                                                            identity=(new_repo, new_rev), measured=bool(p.get("required"))))]

@@ -53,7 +53,7 @@ from pathlib import Path
 from orchard.defaults import (PACKAGE_HEALTH_TIMEOUT_S, PACKAGE_INSTALL_TIMEOUT_S,
                               PACKAGE_THIN_TIMEOUT_S, PACKAGE_VERIFY_DEADLINE_S)
 from orchard.graft_trial import DECISION_FILE, TRIAL_DIR, TRIAL_RESULT, accept_rate, read_decision
-from orchard import sampling_probe
+from orchard import sampling_choice, sampling_probe
 from orchard.card_use import read_use_facts
 from orchard.package_card import (CardFacts, Number, Reported, card_evidence_paths, inside, non_commercial,
                                   read_license, render_card)
@@ -201,6 +201,14 @@ def stage_2_serving(run_dir) -> tuple[bool, bool]:
                if (m := re.match(r"\s*export\s+QWEN36_DRAFTER=(.*)$", ln))]
     cfg = ADDITIONAL.search(text)
     return bool(drafter) and drafter[-1] == "", bool(cfg) and "sample_on_device_mode" not in cfg.group(1)
+
+
+def served_drafter_state(run_dir) -> tuple[bool, bool]:
+    """(drafter_off, host_sampling) of the package: stage 2's run script says, and stage 2's sampling decision overrides it when it chose the
+    drafter-off configuration (orchard/sampling_choice.py): that variant was served with the drafter off and the host sampling."""
+    if sampling_choice.drafter_off_chosen(run_dir):
+        return True, True
+    return stage_2_serving(run_dir)
 
 
 def stage_2_vocab(run_dir) -> tuple[int, int] | None:
@@ -717,6 +725,7 @@ class RunFacts:
     stage_2_grafted: bool = False    # stage 2's own swap grafted them too
     graft_decision: str | None = None   # "graft" or "safe" when stage 2's graft trial ran and decided (orchard/graft_trial.py)
     vocab: tuple[int, int] | None = None   # (the model's vocabulary size, the nearest model's) for a vocabulary trim
+    sampling_decision: dict | None = None  # stage 2's sampling decision (orchard/sampling_choice.py), None when it made none
 
 
 def read_run(run_dir, graft_mtp: bool = False, no_graft_mtp: bool = False) -> RunFacts:
@@ -778,7 +787,7 @@ def read_run(run_dir, graft_mtp: bool = False, no_graft_mtp: bool = False) -> Ru
     if not license_id:
         raise PackageError(f"the new model's license is not in {snap}/README.md; stage 7 stages no "
                            "package without it")
-    drafter_off, host_sampling = stage_2_serving(run)
+    drafter_off, host_sampling = served_drafter_state(run)
     reported, reported_source = read_reported(run)
     model_has_mtp = delta_model_has_mtp(delta)
     facts = RunFacts(run, model_id, revision, nearest_model, snap,
@@ -794,7 +803,11 @@ def read_run(run_dir, graft_mtp: bool = False, no_graft_mtp: bool = False) -> Ru
                "stage 2 itself served with the graft, so its numbers describe a grafted package")
         raise PackageError(f"--no-graft-mtp: {why}")
     trial_ran = decision is not None and decision.get("trial") is not None
-    facts = replace(facts, graft_decision=decision["choice"] if trial_ran else None)
+    facts = replace(facts, graft_decision=decision["choice"] if trial_ran else None,
+                    sampling_decision=sampling_choice.read_decision(run / "stages/2"))
+    if sampling_choice.drafter_off_chosen(run) and (graft_mtp or decided or facts.stage_2_grafted or _package_grafted(run)):
+        raise PackageError("stage 2's sampling decision chose the drafter-off configuration (the model needs sampling), and a graft keeps the "
+                           "drafter on; the two ask for opposite packages. Run again with --no-graft-trial, or with --sampling not-needed")
     if not no_graft_mtp and (graft_mtp or decided or facts.stage_2_grafted or _package_grafted(run)):
         # The drafter and on-device sampling are on in a grafted package, whatever stage 2's run.sh says.
         facts = replace(facts, drafter_off=False, host_sampling=False,
@@ -1204,12 +1217,18 @@ def graft_trial_numbers(run_dir) -> tuple[Number, ...]:
     return tuple(out)
 
 
-SAMPLING_SWAP_CHECK = "stages/2/evidence/swap-check.json"
+SAMPLING_SWAP_CHECK = "stages/2/evidence/swap-check.json"       # the default source; `sampling_source` follows stage 2's decisions
 SAMPLING_SUMMARY = "stages/2/sampling-summary.json"
 SAMPLING_ROWS = (("decode speed, greedy request (stage 2 sampling probe)", "greedy_tokens_per_s", "tokens/s"),
                  ("decode speed, sampled request (stage 2 sampling probe)", "sampled_tokens_per_s", "tokens/s"),
                  ("drafter acceptance, greedy request (stage 2 sampling probe)", "greedy_drafter_accept_rate", "fraction"),
                  ("drafter acceptance, sampled request (stage 2 sampling probe)", "sampled_drafter_accept_rate", "fraction"))
+
+
+def sampling_source(run_dir) -> str:
+    """The run-relative path of the swap check the card's sampling rows are derived from: the configuration the package serves
+    (sampling_choice.probe_source)."""
+    return "stages/2/" + sampling_choice.probe_source(Path(run_dir) / "stages" / "2")
 
 
 def _rounded(value, places):
@@ -1221,7 +1240,7 @@ def sampling_summary(run_dir) -> dict | None:
     no probe record, the record was not run, or it is malformed. Speeds and the drafter's accepted share are recomputed here
     (orchard/sampling_probe.py) and rounded to what the card shows; a summary field written into the record is never read."""
     try:
-        report = json.loads((Path(run_dir) / SAMPLING_SWAP_CHECK).read_text(encoding="utf-8"))
+        report = json.loads((Path(run_dir) / sampling_source(run_dir)).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     if not isinstance(report, dict):
@@ -1231,7 +1250,7 @@ def sampling_summary(run_dir) -> dict | None:
         return None
     g, sm = s["greedy"] or {}, s["sampled"] or {}
     serving = report.get("serving") if isinstance(report.get("serving"), dict) else {}
-    return {"label": "measured", "derived_from": SAMPLING_SWAP_CHECK, "verdict": s["verdict"], "card_sentence": s["card_sentence"],
+    return {"label": "measured", "derived_from": sampling_source(run_dir), "verdict": s["verdict"], "card_sentence": s["card_sentence"],
             "greedy_tokens_per_s": _rounded(g.get("tokens_per_s"), 1), "sampled_tokens_per_s": _rounded(sm.get("tokens_per_s"), 1),
             "greedy_drafter_accept_rate": _rounded(g.get("drafter_accept_rate"), 3),
             "sampled_drafter_accept_rate": _rounded(sm.get("drafter_accept_rate"), 3),
@@ -1257,7 +1276,7 @@ def sampling_summary_problems(run_dir) -> list[str]:
     except (OSError, ValueError):
         return [f"{SAMPLING_SUMMARY} is missing or unreadable; the card's sampling rows cite it"]
     if have != expected:
-        return [f"{SAMPLING_SUMMARY} is not the summary derived from the sampling probe's raw requests in {SAMPLING_SWAP_CHECK}"]
+        return [f"{SAMPLING_SUMMARY} is not the summary derived from the sampling probe's raw requests in {sampling_source(run_dir)}"]
     return []
 
 
@@ -1267,7 +1286,7 @@ def sampling_numbers(run_dir) -> tuple[Number, ...]:
     summary = sampling_summary(run_dir)
     if summary is None:
         return ()
-    evidence = (SAMPLING_SUMMARY, SAMPLING_SWAP_CHECK)
+    evidence = (SAMPLING_SUMMARY, sampling_source(run_dir))
     out = []
     for name, key, unit in SAMPLING_ROWS:
         v = summary.get(key)
@@ -1339,6 +1358,8 @@ def write_card(out: Path, facts: RunFacts, profile: dict, *, namespace: str,
         sampling_from_base=any(f.name == "generation_config.json" for f in facts.base_config),
         reported=facts.reported, reported_source=facts.reported_source,
         graft=facts.graft, graft_decision=facts.graft_decision, use=use, vocab=facts.vocab, sampling=sampling,
+        sampling_decision=facts.sampling_decision if profile["required"] else None,
+        drafter_off_by_sampling=bool(facts.sampling_decision and facts.sampling_decision.get("choice") == "drafter-off"),
         stage_2_without_graft=(facts.graft is not None and not facts.stage_2_grafted and facts.graft_decision != "graft"))
     (out / "README.md").write_text(render_card(facts_card), encoding="utf-8")
 

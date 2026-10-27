@@ -285,13 +285,27 @@ def read_override(run_dir) -> str:
     return "auto"
 
 
-def served_side(stage_dir) -> dict | None:
-    """The configuration stage 2 serves now: the grafted variant's swap check when the graft decision is graft, else stage 2's own."""
-    sd = Path(stage_dir)
-    g = _read_json(sd / "graft-decision.json")
+def served_source(stage_dir) -> str:
+    """The swap check, relative to stage 2's directory, that describes the configuration stage 2 serves now: the grafted variant's when the graft
+    decision is graft, else stage 2's own."""
+    g = _read_json(Path(stage_dir) / "graft-decision.json")
     if isinstance(g, dict) and g.get("choice") == "graft":
-        return side_from_report(_read_json(sd / GRAFT_TRIAL_DIR / "variant" / "evidence" / "swap-check.json"))
-    return side_from_report(_read_json(sd / "evidence" / "swap-check.json"))
+        return f"{GRAFT_TRIAL_DIR}/variant/evidence/swap-check.json"
+    return "evidence/swap-check.json"
+
+
+def served_side(stage_dir) -> dict | None:
+    """The configuration stage 2 serves now (see `served_source`)."""
+    return side_from_report(_read_json(Path(stage_dir) / served_source(stage_dir)))
+
+
+def probe_source(stage_dir) -> str:
+    """The swap check, relative to stage 2's directory, that describes the configuration the package serves: the drafter-off variant's when stage 2
+    chose it, else `served_source`. The package card's sampling rows and the stage 7 gate read the probe from there."""
+    d = read_decision(stage_dir)
+    if d is not None and d["choice"] == "drafter-off":
+        return f"{TRIAL_DIR}/variant/evidence/swap-check.json"
+    return served_source(stage_dir)
 
 
 def variant_side(stage_dir) -> dict | None:
