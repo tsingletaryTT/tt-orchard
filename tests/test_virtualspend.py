@@ -163,7 +163,7 @@ def test_too_many_files_are_counted_not_read(root, monkeypatch):
     for i in range(5):
         write_log(root, f"a{i}/log/run.jsonl", [turn(1, 10, 1)])
     s = vs.scan(root)
-    assert s["files"] == 3 and s["turns"] == 3 and s["skipped"]["files_not_read"] == 2 and s["complete"] is False
+    assert s["files"] == 3 and s["turns"] == 3 and s["skipped"]["files_not_read"] >= 1 and s["complete"] is False
 
 
 def test_a_deep_folder_is_not_walked_past_the_depth_limit(root, monkeypatch):
@@ -918,3 +918,92 @@ def test_a_path_outside_the_pinned_root_cannot_be_opened(root, tmp_path):
             pin.open(root, vs._FILE_FLAGS)                                      # the root itself is not a file
     finally:
         pin.close()
+
+
+# ---- review (fifth round): discovery of log files streams under an entry budget and stops at the file cap ---------------------
+
+class _WalkSpy:
+    """Counts the entries taken from, and the folders opened by, os.scandir inside the reader."""
+
+    def __init__(self, monkeypatch):
+        self.entries = 0
+        self.opened = 0
+        real = os.scandir
+        spy = self
+
+        def scandir(path):
+            spy.opened += 1
+            inner = real(path)
+
+            class Wrapped:
+                def __enter__(self_inner):
+                    inner.__enter__()
+                    return self_inner
+
+                def __exit__(self_inner, *a):
+                    return inner.__exit__(*a)
+
+                def __iter__(self_inner):
+                    return self_inner
+
+                def __next__(self_inner):
+                    entry = next(inner)
+                    spy.entries += 1
+                    return entry
+            return Wrapped()
+        monkeypatch.setattr(vs.os, "scandir", scandir)
+
+
+def test_the_walk_takes_no_more_entries_than_its_budget_and_says_the_scan_is_incomplete(root, monkeypatch):
+    monkeypatch.setattr(vs, "MAX_WALK_ENTRIES", 10)
+    for i in range(30):
+        (root / f"d{i:02d}").mkdir(parents=True, exist_ok=True)
+        (root / f"f{i:02d}.txt").write_text("x")
+    write_log(root, "zz/log/run.jsonl", [turn()])
+    spy = _WalkSpy(monkeypatch)
+    s = vs.scan(root)
+    assert spy.entries <= 10 + 1, spy.entries
+    assert s["complete"] is False and s["skipped"]["walk_cut"] >= 1
+    assert "directory entries past the walk budget" in vs.skipped_text(s["skipped"])
+
+
+def test_a_tree_that_fits_the_walk_budget_is_complete(root, monkeypatch):
+    monkeypatch.setattr(vs, "MAX_WALK_ENTRIES", 50)
+    write_log(root, "a/log/run.jsonl", [turn()])
+    s = vs.scan(root)
+    assert s["complete"] is True and s["skipped"]["walk_cut"] == 0 and s["turns"] == 1
+
+
+def test_a_tree_exactly_at_the_walk_budget_is_complete(root, monkeypatch):
+    write_log(root, "a/log/run.jsonl", [turn()])                              # entries: a, log, run.jsonl = 3
+    monkeypatch.setattr(vs, "MAX_WALK_ENTRIES", 3)
+    s = vs.scan(root)
+    assert s["complete"] is True and s["turns"] == 1
+
+
+def test_the_walk_stops_opening_folders_after_the_file_cap(root, monkeypatch):
+    monkeypatch.setattr(vs, "MAX_FILES", 2)
+    for i in range(20):
+        write_log(root, f"d{i:02d}/log/run.jsonl", [turn()])
+    spy = _WalkSpy(monkeypatch)
+    s = vs.scan(root)
+    assert s["files"] == 2 and s["skipped"]["files_not_read"] >= 1 and s["complete"] is False
+    assert spy.opened <= 1 + 3 * 4, f"{spy.opened} folders opened after the cap was reached"
+
+
+def test_the_walk_still_skips_links_and_respects_the_depth_limit(root, tmp_path, monkeypatch):
+    monkeypatch.setattr(vs, "MAX_DEPTH", 2)
+    outside = tmp_path / "outside"
+    write_log(outside, "log/run.jsonl", [turn(1, 999, 9)])
+    (root).mkdir(parents=True)
+    (root / "linked").symlink_to(outside, target_is_directory=True)
+    write_log(root, "a/log/run.jsonl", [turn(1, 5, 1)])
+    write_log(root, "a/b/c/log/run.jsonl", [turn(1, 7, 1)])
+    s = vs.scan(root)
+    assert (s["turns"], s["prompt_tokens"]) == (1, 5) and s["skipped"]["links"] == 1
+
+
+def test_the_walk_reads_folders_in_name_order(root):
+    for name in ("c", "a", "b"):
+        write_log(root, f"{name}/log/run.jsonl", [turn(1, ord(name), 0)])
+    assert [p.parts[-3] for p, _ in vs._find_files(root, vs._skipped())] == ["a", "b", "c"]

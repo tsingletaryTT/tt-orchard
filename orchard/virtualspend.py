@@ -42,6 +42,7 @@ LABEL = "This is a virtual figure: local tokens priced at a hosted model's list 
 
 MAX_FILES = 5000                     # log files read in one scan
 MAX_DEPTH = 8
+MAX_WALK_ENTRIES = 200_000        # directory entries taken in one scan of one folder tree, across every folder in it
 MAX_FILE_BYTES = 128 * 1024 * 1024   # a larger file is read up to this many bytes and the rest is counted as not read
 MAX_TOTAL_BYTES = 1024 * 1024 * 1024
 MAX_LINE_BYTES = 2 * 1024 * 1024     # a longer line is not parsed; its usage is looked for in its last bytes
@@ -141,7 +142,7 @@ def cost(prompt_tokens: int, completion_tokens: int, price_in: float, price_out:
 
 def _skipped() -> dict:
     return {"malformed_lines": 0, "no_usage": 0, "helper_turns": 0, "long_lines": 0, "long_unverified": 0, "not_utf8_lines": 0,
-            "unreadable_files": 0, "oversize_files": 0, "files_not_read": 0, "links": 0}
+            "unreadable_files": 0, "oversize_files": 0, "files_not_read": 0, "walk_cut": 0, "links": 0}
 
 
 def _count(value) -> int | None:
@@ -430,33 +431,83 @@ def _tail_usage(tail: bytes):
     return _agent_turn({"usage": usage})
 
 
+def _list_dir(path: Path, budget: list) -> tuple[list, bool]:
+    """([(name, is_link, is_dir, is_regular)], cut): the entries of one folder, taken while streaming os.scandir. Every entry taken
+    is counted against the shared budget; when it is spent the listing stops and `cut` is True. An unreadable folder is empty."""
+    out, cut = [], False
+    try:
+        with os.scandir(path) as listing:
+            for entry in listing:
+                if budget[0] <= 0:
+                    cut = True
+                    break
+                budget[0] -= 1
+                try:
+                    link = entry.is_symlink()
+                    out.append((entry.name, link, (not link) and entry.is_dir(follow_symlinks=False),
+                                (not link) and entry.is_file(follow_symlinks=False)))
+                except OSError:
+                    continue
+    except OSError:
+        pass
+    return sorted(out), cut
+
+
 def _find_files(root: Path, skipped: dict):
-    """(path, kind) for each local log file under root, kind 'agent' or 'bench'. Links are not followed."""
+    """(path, kind) for each local log file under root, kind 'agent' or 'bench'. Links are not followed. The tree is walked as a
+    stream: one entry budget (MAX_WALK_ENTRIES) is shared by every folder, a folder is sorted only after its own entries were taken,
+    and the walk stops opening folders once more than MAX_FILES log files were found. A spent budget is counted in `walk_cut`."""
     found, seen = [], 0
-    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
-        depth = len(Path(dirpath).relative_to(root).parts)
-        keep = []
-        for d in sorted(dirnames):
-            if (Path(dirpath) / d).is_symlink():
-                skipped["links"] += 1
-            elif depth < MAX_DEPTH:
-                keep.append(d)
-        dirnames[:] = keep
-        in_log = Path(dirpath).name == "log"
-        for name in sorted(filenames):
-            kind = "bench" if name == "requests.jsonl" else "agent" if in_log and name.endswith(".jsonl") else None
+    budget = [MAX_WALK_ENTRIES]
+    stack = [(Path(root), 0)]
+    while stack:
+        dirpath, depth = stack.pop()
+        entries, cut = _list_dir(dirpath, budget)
+        if cut:
+            skipped["walk_cut"] += 1
+        in_log = dirpath.name == "log"
+        subdirs = []
+        for name, link, is_dir, is_regular in entries:
+            if link and not _is_log_name(name, in_log):
+                if _is_dir_link(dirpath / name):
+                    skipped["links"] += 1
+                continue
+            if is_dir:
+                if depth < MAX_DEPTH:
+                    subdirs.append(name)
+                continue
+            kind = _log_kind(name, in_log)
             if kind is None:
                 continue
-            p = Path(dirpath) / name
-            if p.is_symlink() or not p.is_file():
+            if link or not is_regular:
                 skipped["links"] += 1
                 continue
             seen += 1
             if seen > MAX_FILES:
                 skipped["files_not_read"] += 1
                 continue
-            found.append((p, kind))
+            found.append((dirpath / name, kind))
+        if seen > MAX_FILES:
+            break                                                    # no folder is opened after the file cap
+        for name in reversed(subdirs):                               # popped in name order
+            stack.append((dirpath / name, depth + 1))
     return found
+
+
+def _log_kind(name: str, in_log: bool):
+    return "bench" if name == "requests.jsonl" else "agent" if in_log and name.endswith(".jsonl") else None
+
+
+def _is_log_name(name: str, in_log: bool) -> bool:
+    return _log_kind(name, in_log) is not None
+
+
+def _is_dir_link(path: Path) -> bool:
+    """True for a link that points at a folder (a link to a file that is not a log name is not worth counting)."""
+    try:
+        return path.is_dir()
+    except OSError:
+        return False
 
 
 def _attempt_wall(log_dir: Path, pin: "_Pin") -> float:
@@ -555,7 +606,7 @@ def _scan_tree(root: Path, pin: _Pin, out: dict, skipped: dict) -> None:
                 wall_known = True
     out["agent_wall_s"] = round(wall, 1) if wall_known else None
     out["request_s"] = round(request_s, 1) if request_known else None
-    out["complete"] = not (skipped["oversize_files"] or skipped["files_not_read"])
+    out["complete"] = not (skipped["oversize_files"] or skipped["files_not_read"] or skipped["walk_cut"])
 
 
 def priced(scanned: dict, cfg: Config) -> dict:
@@ -571,7 +622,7 @@ def skipped_text(skipped: dict) -> str:
     names = {"malformed_lines": "lines that are not JSON", "no_usage": "turns with no token counts",
              "helper_turns": "turns from an outside helper", "long_lines": "lines over the size cap", "long_unverified": "lines over the size cap that do not start like an agent turn",
              "not_utf8_lines": "lines with bytes that are not UTF-8", "unreadable_files": "files that could not be read",
-             "oversize_files": "files or folders over the read cap", "files_not_read": "files past the file cap",
+             "oversize_files": "files or folders over the read cap", "files_not_read": "files past the file cap", "walk_cut": "directory entries past the walk budget",
              "links": "links that were not followed"}
     parts = [f"{skipped[k]} {names[k]}" for k in names if skipped.get(k)]
     return ("Left out: " + ", ".join(parts) + ".") if parts else ""
