@@ -285,8 +285,20 @@ def served_side(stage_dir) -> dict | None:
 
 
 def variant_side(stage_dir) -> dict | None:
-    """The drafter-off variant's swap check, None when the trial left none."""
-    return side_from_report(_read_json(Path(stage_dir) / TRIAL_DIR / "variant" / "evidence" / "swap-check.json"))
+    """The drafter-off variant's side, None when the trial left nothing. A trial result that says the variant did not serve gives a side that did not
+    serve (a server that never started writes no swap check). Otherwise the side comes from the variant's own swap check, and a result that says it
+    served with no swap check gives a side with no verdict and no speed."""
+    sd = Path(stage_dir)
+    trial = _read_json(sd / TRIAL_DIR / TRIAL_RESULT)
+    v = trial.get("variant") if isinstance(trial, dict) else None
+    from_report = side_from_report(_read_json(sd / TRIAL_DIR / "variant" / "evidence" / "swap-check.json"))
+    if isinstance(v, dict) and v.get("served") is False:
+        return {"drafter": "off", "verdict": "not-run", "greedy_tok_s": None, "sampled_tok_s": None, "served": False}
+    if from_report is not None:
+        return from_report
+    if isinstance(v, dict) and v.get("served") is True:
+        return {"drafter": "off", "verdict": "not-run", "greedy_tok_s": None, "sampled_tok_s": None, "served": True}
+    return None
 
 
 def decision_problems(stage_dir, run_dir) -> list[str]:
