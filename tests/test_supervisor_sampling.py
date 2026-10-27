@@ -11,7 +11,7 @@ import pytest
 from orchard import defaults, sampling_choice as sc, supervisor
 from orchard.supervisor import EXIT_READY
 from fakes import Crash
-from run_fakes import DELTA, FILES, bringup, hw
+from run_fakes import DELTA, FAKE_SWAP_TEST, FILES, bringup, hw, swap_prepare
 from test_sampling_choice_files import report
 from test_supervisor import Rig
 from test_supervisor_graft import CANDIDATE, GRAFT_DELTA, TrialSpy as GraftSpy, trial_result
@@ -28,7 +28,12 @@ def overrides(*, genconfig=GENCONFIG_NEEDED, stage2_report=None, delta=None, ext
     f0 = {**FILES[(0, "run")], "evidence/genconfig-license.json": genconfig, **({"delta.json": delta} if delta else {})}
     prep = {**hw(2), "evidence/swap-check.json": stage2_report if stage2_report is not None else report(drafter="on (dflash2)", ignored=True, seconds=1.6),
             **(extra2 or {})}
-    return {(0, "run"): f0, (2, "prepare"): prep}
+    # Stage 4's fake tests write a swap check with no `serving` record. When stage 2 chooses the drafter-off configuration, the stage 4 gate asks each
+    # configuration for `serving.drafter: off`, so the fake tests say it (a keep decision asks nothing, and the extra key does no harm).
+    off = FAKE_SWAP_TEST.replace('{"result_draft": {"top1_agreement": 0.94}}', '{"result_draft": {"top1_agreement": 0.94}, "serving": {"drafter": "off"}}')
+    assert off != FAKE_SWAP_TEST
+    prep4 = {k: (off if v == FAKE_SWAP_TEST else v) for k, v in swap_prepare().items()}
+    return {(0, "run"): f0, (2, "prepare"): prep, (4, "prepare"): prep4}
 
 
 def variant_files(*, drafter="off", ignored=False, seconds=6.0, serves=True):

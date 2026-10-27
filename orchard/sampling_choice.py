@@ -208,8 +208,7 @@ def decide(need_: dict, current: dict, variant: dict | None = None, *, variant_n
                    "The faster configuration is kept and needs the operator's attention")
     verified = verdict == "sampled-ignored" and v_verdict in APPLIED and var_speed is not None
     flag = None if verified else "unverified"
-    tail = ("" if verified else "; a verdict or a speed is missing, so this choice rests on the drafter-off path being the one the bundle documents "
-                                "for host sampling")
+    tail = ("" if verified else "; a verdict or a speed is missing, so this choice rests on the documented host-sampling path of the drafter-off configuration")
     return out("drafter-off", flag, f"the model needs sampling ({need_.get('source')}) and the served configuration {why_current} at "
                                    f"{_fmt(cur_speed)}; the drafter-off variant decodes at {_fmt(var_speed)}, at or above the floor of "
                                    f"{floor:g} tokens/s, so it is chosen{tail}")
@@ -222,7 +221,7 @@ NEED_WORDS = {"operator": "the operator said so", "card-warning": "the model car
 
 def card_sentence(decision: dict) -> str:
     """The package card's plain sentences for the choice. They carry the marker phrase the gate looks for and no number: the card's Numbers table is
-    the only place for a measured speed (the card gate refuses one in prose), and the sampling rows in that table are the ones this sentence points to."""
+    the only place for a measured speed (the card gate refuses one in prose), and this sentence points to the sampling rows in that table."""
     n = decision.get("numbers") or {}
     why = NEED_WORDS.get(decision.get("need_source"), "the sampling decision says so")
     if decision.get("choice") == "drafter-off":
