@@ -633,7 +633,10 @@ def _write_json(path: Path, data) -> None:
 def _save_attempt(adir: Path, attempt: dict) -> None:
     """Write the attempt record. The verdict lives in the probe-owned directory; the copy in the attempt directory is a
     convenience for a person reading it, written after whatever was at that path is removed, and is never read back."""
-    _write_json(_verdict_dir_of(adir) / "attempt.json", attempt)
+    vdir = _verdict_dir_of(adir)
+    _real_dir(vdir.parent)                              # a fresh run has no .verdict yet; a link there is replaced
+    _real_dir(vdir)
+    _write_json(vdir / "attempt.json", attempt)
     try:
         _write_json(Path(adir) / "attempt.json", attempt)
     except OSError:
