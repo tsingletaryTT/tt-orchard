@@ -894,3 +894,210 @@ def test_a_missing_array_file_is_a_reference_error_at_read(tmp_path):
     (root / "arrays" / "layer__0.npy").unlink()
     with pytest.raises(ReferenceError, match="cannot be opened"):
         run.array("layer", "0")
+
+
+# ---- round four: payloads that do not decode, size limits before hashing, strict manifest JSON --------------
+
+def replace_payload(root, kind, name, data: bytes):
+    """Overwrite an array file with `data` and make the manifest's sha256 match, so only decoding can notice."""
+    import hashlib
+    path = root / "arrays" / f"{kind}__{name}.npy"
+    path.write_bytes(data)
+    edit_manifest(root, lambda m: [e.update(sha256=hashlib.sha256(data).hexdigest()) for e in m["artifacts"] if (e["kind"], e["name"]) == (kind, name)])
+
+
+@pytest.mark.parametrize("payload", [b"not numpy at all", b"", b"\x93NUMPY\x01\x00", b"\x93NUMPY\x01\x00\x05\x00{bad}\n" + b"\0" * 8, b"PK\x03\x04" + b"\0" * 20])
+def test_a_payload_that_does_not_decode_is_a_reference_error_even_with_a_matching_digest(tmp_path, payload):
+    root = make_run(tmp_path)
+    replace_payload(root, "layer", "0", payload)
+    run = load_run(root)
+    with pytest.raises(ReferenceError, match="not a readable array"):
+        run.array("layer", "0")
+
+
+def test_a_renamed_npz_archive_is_refused_instead_of_returning_a_non_array(tmp_path):
+    import io as _io
+    root = make_run(tmp_path)
+    buf = _io.BytesIO()
+    np.savez(buf, a=np.zeros(2))
+    replace_payload(root, "layer", "0", buf.getvalue())
+    with pytest.raises(ReferenceError, match="not a readable array|not an array"):
+        load_run(root).array("layer", "0")
+
+
+def test_an_object_array_with_a_matching_digest_is_refused_without_unpickling(tmp_path):
+    root = make_run(tmp_path)
+    marker = tmp_path / "ran"
+
+    class Evil:
+        def __reduce__(self):
+            return (marker.write_text, ("x",))
+    obj = np.empty(1, dtype=object)
+    obj[0] = Evil()
+    import io as _io
+    buf = _io.BytesIO()
+    np.save(buf, obj, allow_pickle=True)
+    replace_payload(root, "layer", "0", buf.getvalue())
+    with pytest.raises(ReferenceError):
+        load_run(root).array("layer", "0")
+    assert not marker.exists()
+
+
+def test_the_cli_reports_an_undecodable_array_and_does_not_raise(tmp_path):
+    make_run(tmp_path, "ref")
+    root = make_run(tmp_path, "cand")
+    replace_payload(root, "layer", "0", b"garbage")
+    code, text = run_cli("check", str(tmp_path / "ref"), str(root))
+    assert code == 2 and text.startswith("refused:") and "not a readable array" in text
+
+
+def test_the_control_command_reports_an_undecodable_waveform(tmp_path):
+    make_run(tmp_path, "ft")
+    root = make_run(tmp_path, "base", settings={"steps": 50})
+    replace_payload(root, "waveform", "audio", b"garbage")
+    code, text = run_cli("control", str(tmp_path / "ft"), str(root))
+    assert code == 2 and text.startswith("refused:")
+
+
+def test_an_oversized_array_is_refused_before_it_is_hashed_when_a_run_is_loaded(tmp_path, monkeypatch):
+    root = make_run(tmp_path)
+    monkeypatch.setattr(ar, "MAX_ARRAY_BYTES", 100)
+    monkeypatch.setattr(ar.hashlib, "sha256", lambda *a, **k: pytest.fail("hashed an oversized array"))
+    with pytest.raises(ReferenceError, match="larger than 100 bytes"):
+        load_run(root)
+
+
+def test_the_verify_command_refuses_an_oversized_array_without_reading_it_to_the_end(tmp_path, monkeypatch):
+    root = make_run(tmp_path)
+    monkeypatch.setattr(ar, "MAX_ARRAY_BYTES", 100)
+    code, text = run_cli("verify", str(root))
+    assert code == 2 and "larger than 100 bytes" in text
+
+
+def test_hashing_stops_at_the_cap_even_when_the_size_changes_after_the_size_check(tmp_path, monkeypatch):
+    root = make_run(tmp_path, arrays={("layer", "0"): np.arange(4.0)})
+    size = (root / "arrays" / "layer__0.npy").stat().st_size
+    monkeypatch.setattr(ar, "MAX_ARRAY_BYTES", size)
+    real_fstat = ar.os.fstat
+
+    class Faked:
+        def __init__(self, st):
+            self.st_size = 1                      # claims to be tiny, as a file that grows after the check would
+    monkeypatch.setattr(ar.os, "fstat", lambda fd: Faked(real_fstat(fd)))
+    # the file is exactly at the cap, so it still loads; one byte more must not
+    load_run(root)
+    with open(root / "arrays" / "layer__0.npy", "ab") as f:
+        f.write(b"\0")
+    with pytest.raises(ReferenceError, match="larger"):
+        load_run(root)
+
+
+def test_a_symlinked_array_is_refused_by_the_hashing_pass_too(tmp_path):
+    root = make_run(tmp_path)
+    target = root / "arrays" / "layer__0.npy"
+    copy = root / "arrays" / "copy.npy"
+    copy.write_bytes(target.read_bytes())
+    target.unlink()
+    target.symlink_to(copy)
+    with pytest.raises(ReferenceError, match="link"):
+        load_run(root)
+
+
+def test_the_recorder_refuses_an_array_the_loader_would_refuse(tmp_path, monkeypatch):
+    monkeypatch.setattr(ar, "MAX_ARRAY_BYTES", 1000)
+    rec = Recorder(tmp_path / "r", model=MODEL, library=LIB, settings=SETTINGS)
+    rec.record("layer", "small", np.zeros(4))
+    with pytest.raises(ReferenceError, match="larger than"):
+        rec.record("layer", "big", np.zeros(1000))
+    assert not (tmp_path / "r" / "arrays" / "layer__big.npy").exists()
+
+
+@pytest.mark.parametrize("text", ['{"schema": 1, "schema": 1, "model": {"a": 1}, "library": {"a": 1}, "settings": {}, "artifacts": []}',
+                                  '{"schema": 1, "model": {"a": NaN}, "library": {"a": 1}, "settings": {}, "artifacts": []}',
+                                  '{"schema": 1, "model": {"a": Infinity}, "library": {"a": 1}, "settings": {}, "artifacts": []}'])
+def test_a_manifest_with_a_repeated_key_or_a_non_finite_number_is_refused(tmp_path, text):
+    root = make_run(tmp_path)
+    (root / "manifest.json").write_text(text)
+    with pytest.raises(ReferenceError, match="not JSON"):
+        load_run(root)
+
+
+def test_a_manifest_nested_absurdly_deep_is_refused(tmp_path):
+    root = make_run(tmp_path)
+    (root / "manifest.json").write_text('{"schema": 1, "x": ' + "[" * 100000)
+    with pytest.raises(ReferenceError):
+        load_run(root)
+
+
+def test_a_manifest_artifact_list_with_a_repeated_key_in_an_entry_is_refused(tmp_path):
+    root = make_run(tmp_path)
+    text = (root / "manifest.json").read_text()
+    assert '"kind": "conditioning",' in text
+    (root / "manifest.json").write_text(text.replace('"kind": "conditioning",', '"kind": "conditioning", "kind": "conditioning",', 1))
+    with pytest.raises(ReferenceError, match="not JSON"):
+        load_run(root)
+
+
+# ---- boundaries the first mutation table found unguarded (reference) ------------------------------------------
+
+def test_the_capped_hash_refuses_a_link_and_a_missing_file_on_its_own(tmp_path):
+    target = tmp_path / "t.npy"
+    target.write_bytes(b"abc")
+    link = tmp_path / "l.npy"
+    link.symlink_to(target)
+    with pytest.raises(ReferenceError, match="cannot be opened"):
+        ar._sha256_capped(link, "l.npy")
+    with pytest.raises(ReferenceError, match="cannot be opened"):
+        ar._sha256_capped(tmp_path / "missing.npy", "missing.npy")
+    assert ar._sha256_capped(target, "t.npy") == ar._sha256(target)
+
+
+def test_the_capped_hash_accepts_a_file_exactly_at_the_cap(tmp_path, monkeypatch):
+    f = tmp_path / "f.npy"
+    f.write_bytes(b"x" * 50)
+    monkeypatch.setattr(ar, "MAX_ARRAY_BYTES", 50)
+    assert ar._sha256_capped(f, "f") == ar._sha256(f)
+    monkeypatch.setattr(ar, "MAX_ARRAY_BYTES", 49)
+    with pytest.raises(ReferenceError, match="larger than 49"):
+        ar._sha256_capped(f, "f")
+
+
+def test_the_recorder_accepts_a_file_exactly_at_the_cap_and_refuses_one_byte_more(tmp_path, monkeypatch):
+    rec = Recorder(tmp_path / "r", model=MODEL, library=LIB, settings=SETTINGS)
+    rec.record("layer", "probe", np.zeros(4))
+    size = (tmp_path / "r" / "arrays" / "layer__probe.npy").stat().st_size
+    monkeypatch.setattr(ar, "MAX_ARRAY_BYTES", size)
+    rec.record("layer", "exact", np.zeros(4))
+    monkeypatch.setattr(ar, "MAX_ARRAY_BYTES", size - 1)
+    with pytest.raises(ReferenceError, match="larger than"):
+        rec.record("layer", "over", np.zeros(4))
+
+
+def manifest_with(root, extra_json):
+    (root / "manifest.json").write_text('{"schema": 1, "model": {"a": 1}, "library": {"a": 1}, "settings": {}, "artifacts": [], "x": ' + extra_json + "}")
+
+
+@pytest.mark.parametrize("extra,ok", [("1e999", False), ("-1e999", False), ("9" * 31, False), ("-" + "9" * 31, False), ("9" * 30, True),
+                                      ("-" + "9" * 30, True), ("1.5", True)])
+def test_manifest_numbers_must_be_finite_and_not_huge(tmp_path, extra, ok):
+    root = make_run(tmp_path)
+    manifest_with(root, extra)
+    if ok:
+        with pytest.raises(ReferenceError, match="settings are missing|artifacts"):
+            load_run(root)                     # parsed fine; refused later for its own reasons
+    else:
+        with pytest.raises(ReferenceError, match="not JSON"):
+            load_run(root)
+
+
+@pytest.mark.parametrize("opening,closing", [("[", "]"), ('{"a": ', "}")])
+def test_manifest_nesting_is_limited_whether_the_containers_are_lists_or_objects(tmp_path, opening, closing):
+    root = make_run(tmp_path)
+    for levels, ok in ((31, True), (32, False)):          # the manifest object is level 1, so 31 inner levels make 32
+        manifest_with(root, opening * levels + "1" + closing * levels)
+        if ok:
+            with pytest.raises(ReferenceError, match="settings are missing|artifacts"):
+                load_run(root)
+        else:
+            with pytest.raises(ReferenceError, match="not JSON"):
+                load_run(root)

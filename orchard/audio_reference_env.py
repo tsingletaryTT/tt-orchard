@@ -16,6 +16,7 @@ links resolved) and passes no Hugging Face token to any command. Importing the l
 """
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import hashlib
 import json
@@ -236,27 +237,41 @@ def step_record(env: AEnv, check_only: bool, upstream_ok: bool) -> Result:
     return Result("record", OK, f"wrote {env.venv_dir / RECORD}")
 
 
+def src_lock_path(env: AEnv) -> Path:
+    return env.src_dir.parent / f"{env.src_dir.name}.lock"
+
+
+def lock_paths(env: AEnv) -> list[Path]:
+    """The lock files a build needs, each once and always in the same (sorted) order, so two builds that share only one directory cannot hold
+    one lock each and wait for the other."""
+    return sorted({lock_path(env), src_lock_path(env)})
+
+
 def ensure(env: AEnv, *, check_only: bool, say=lambda s: None) -> list[Result]:
-    """The steps in order, a failure ending the build, then the rules. A refusal ends it before anything runs. A build takes an exclusive lock
-    beside the venv directory, so two builds cannot clone, create the venv and install at once; `--check` and `--dry-run` take none."""
+    """The steps in order, a failure ending the build, then the rules. A refusal ends it before anything runs. A build takes an exclusive lock on
+    the venv directory and on the source directory (lock files beside each, taken in sorted order), so two builds that differ in only one of them
+    cannot clone, fetch, create the venv or install at once; `--check` and `--dry-run` take none."""
     bad = refusal(env)
     if bad:
         say(f"{bad.status:5s} {bad.name}: {bad.detail}")
         return [bad]
     if check_only:
         return _ensure(env, check_only, say)
-    try:
-        lock_path(env).parent.mkdir(parents=True, exist_ok=True)
-        handle = open(lock_path(env), "w")
-    except OSError as exc:
-        return [Result("lock", FAIL, f"cannot open {lock_path(env)}: {exc}")]
-    with handle:
-        try:
-            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            r = Result("lock", FAIL, f"another audio-reference-env is already running ({lock_path(env)} is locked)")
-            say(f"{r.status:5s} {r.name}: {r.detail}")
-            return [r]
+    with contextlib.ExitStack() as stack:
+        for path in lock_paths(env):
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                handle = stack.enter_context(open(path, "w"))
+            except OSError as exc:
+                r = Result("lock", FAIL, f"cannot open {path}: {exc}")
+                say(f"{r.status:5s} {r.name}: {r.detail}")
+                return [r]
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                r = Result("lock", FAIL, f"another audio-reference-env is already running ({path} is locked)")
+                say(f"{r.status:5s} {r.name}: {r.detail}")
+                return [r]
         return _ensure(env, check_only, say)
 
 

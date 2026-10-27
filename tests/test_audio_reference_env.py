@@ -566,3 +566,92 @@ def test_each_venv_directory_has_its_own_lock_beside_it(env, tmp_path):
     assert ae.lock_path(env) == env.venv_dir.parent / (env.venv_dir.name + ".lock")
     other = ae.AEnv(tmp_path / "x" / "other-venv", env.src_dir, env.shared_venv, env.repo_dir)
     assert ae.lock_path(other) != ae.lock_path(env)
+
+
+# ---- round four: the source directory is locked too, in a fixed order -------------------------------------
+
+def test_the_source_directory_has_its_own_lock_beside_it(env, tmp_path):
+    assert ae.src_lock_path(env) == env.src_dir.parent / (env.src_dir.name + ".lock")
+    assert ae.src_lock_path(env) != ae.lock_path(env)
+
+
+def test_a_build_with_another_venv_but_the_same_source_directory_is_refused_while_the_source_is_locked(env, tmp_path):
+    import fcntl
+    env.src_dir.parent.mkdir(parents=True, exist_ok=True)
+    with open(ae.src_lock_path(env), "w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        env.venv_dir = (tmp_path / "other-home" / "venv").resolve()
+        results = ae.ensure(env, check_only=False)
+    assert results[0].status == ae.FAIL and "already running" in results[0].detail and str(ae.src_lock_path(env)) in results[0].detail
+    assert env.run.calls == []
+
+
+def test_a_build_that_cannot_take_the_second_lock_gives_back_the_first(env):
+    import fcntl
+    first, second = ae.lock_paths(env)
+    second.parent.mkdir(parents=True, exist_ok=True)
+    with open(second, "w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        results = ae.ensure(env, check_only=False)
+    assert results[0].status == ae.FAIL and str(second) in results[0].detail
+    with open(first, "w") as f:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def test_both_locks_are_held_during_the_build_and_released_after(env):
+    import fcntl
+    seen = {}
+    real = env.run
+
+    def run(argv, timeout, e=None):
+        if "locked" not in seen:
+            for name, path in (("venv", ae.lock_path(env)), ("src", ae.src_lock_path(env))):
+                with open(path, "w") as f:
+                    try:
+                        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        seen[name] = "free"
+                    except OSError:
+                        seen[name] = "held"
+            seen["locked"] = True
+        return real(argv, timeout, e)
+    env.run = run
+    ae.ensure(env, check_only=False)
+    assert seen["venv"] == "held" and seen["src"] == "held"
+    for path in (ae.lock_path(env), ae.src_lock_path(env)):
+        with open(path, "w") as f:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def test_the_locks_are_taken_in_one_fixed_order_whatever_the_directories_are_called(env, tmp_path):
+    order = []
+    real_flock = ae.fcntl.flock
+    import fcntl
+
+    def spy(handle, op):
+        order.append(handle.name)
+        return real_flock(handle, op)
+    for venv_name, src_name in (("a-venv", "z-src"), ("z-venv", "a-src")):
+        env.venv_dir = (tmp_path / "x" / venv_name).resolve()
+        env.src_dir = (tmp_path / "y" / src_name).resolve()
+        order.clear()
+        orig = ae.fcntl.flock
+        ae.fcntl.flock = spy
+        try:
+            ae.ensure(env, check_only=False)
+        finally:
+            ae.fcntl.flock = orig
+        assert order[:2] == sorted(order[:2])
+
+
+def test_the_lock_list_is_sorted_and_has_each_file_once(env, monkeypatch):
+    assert ae.lock_paths(env) == sorted([ae.lock_path(env), ae.src_lock_path(env)])
+    monkeypatch.setattr(ae, "src_lock_path", lambda e: ae.lock_path(e))
+    assert ae.lock_paths(env) == [ae.lock_path(env)]
+
+
+def test_a_directory_that_cannot_hold_a_lock_file_is_a_failed_step_not_an_exception(env, tmp_path):
+    blocker = tmp_path / "blocked"
+    blocker.write_text("a file where a directory should be")
+    env.src_dir = (blocker / "src").resolve()
+    results = ae.ensure(env, check_only=False)
+    assert results[0].status == ae.FAIL and results[0].name == "lock"

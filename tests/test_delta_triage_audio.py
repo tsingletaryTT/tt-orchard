@@ -640,3 +640,258 @@ def test_the_span_check_names_the_expected_size(audio_case):
     stage = audio_case()
     one_tensor_file(model_snapshot(stage) / "model.safetensors", "F32", [8, 8], 4)
     assert "256" in reasons(run_ok(stage))
+
+
+# ---- round four: overlapping and gapped ranges, duplicate names, empty containers, strict JSON ------------------
+
+def raw_file(path, entries, payload_size, metadata=None, extra_header=None):
+    header = dict(entries)
+    if metadata is not None:
+        header["__metadata__"] = metadata
+    if extra_header:
+        header.update(extra_header)
+    blob = json.dumps(header).encode()
+    blob += b" " * (-len(blob) % 8)
+    path.write_bytes(struct.pack("<Q", len(blob)) + blob + b"\0" * payload_size)
+
+
+def entry(offsets, dtype="F32", shape=(1,), **extra):
+    return {"dtype": dtype, "shape": list(shape), "data_offsets": list(offsets), **extra}
+
+
+def head_text(stage):
+    return reasons(run_ok(stage))
+
+
+NAME_A, NAME_B = "model.model.layers.0.attn.weight", "model.model.layers.0.ff.weight"
+
+
+@pytest.mark.parametrize("a,b,size,why", [
+    ((0, 4), (0, 4), 4, "overlap"), ((0, 8), (4, 8), 8, "overlap"), ((0, 8), (4, 12), 12, "overlap"),
+    ((0, 4), (8, 12), 12, "gap"), ((4, 8), (8, 12), 12, "gap"), ((0, 4), (4, 8), 12, "gap"), ((0, 4), (4, 8), 6, "past"),
+])
+def test_tensor_ranges_must_tile_the_data_section_without_overlap_or_gap(audio_case, a, b, size, why):
+    stage = audio_case()
+    raw_file(model_snapshot(stage) / "model.safetensors", {NAME_A: entry(a, shape=(((a[1] - a[0]) // 4,))), NAME_B: entry(b, shape=(((b[1] - b[0]) // 4,)))}, size)
+    text = head_text(stage)
+    assert {"overlap": "overlaps", "gap": "no tensor claims", "past": "malformed"}[why] in text
+    assert run_ok(stage)["class"] == "unknown"
+
+
+def test_contiguous_ranges_in_any_header_order_are_accepted(audio_case):
+    stage = audio_case()
+    raw_file(model_snapshot(stage) / "model.safetensors", {NAME_B: entry((4, 8)), NAME_A: entry((0, 4))}, 8)
+    cfg = json.loads((stage / "triage_config.json").read_text())
+    raw_file(Path(cfg["nearest_snapshot"]) / "model.safetensors", {NAME_A: entry((0, 4)), NAME_B: entry((4, 8))}, 8)
+    assert run_ok(stage)["class"] == "weights-only"
+
+
+def test_empty_ranges_may_sit_anywhere_but_the_data_must_still_be_covered(audio_case):
+    stage = audio_case()
+    raw_file(model_snapshot(stage) / "model.safetensors", {NAME_A: entry((0, 4)), NAME_B: entry((4, 4), shape=(0,)), "x.empty": entry((0, 0), shape=(0,))}, 4)
+    cfg = json.loads((stage / "triage_config.json").read_text())
+    raw_file(Path(cfg["nearest_snapshot"]) / "model.safetensors", {NAME_A: entry((0, 4)), NAME_B: entry((4, 4), shape=(0,)), "x.empty": entry((0, 0), shape=(0,))}, 4)
+    assert run_ok(stage)["class"] == "weights-only"
+
+
+def test_trailing_data_no_tensor_claims_is_hidden_data_and_malformed(audio_case):
+    stage = audio_case()
+    raw_file(model_snapshot(stage) / "model.safetensors", {NAME_A: entry((0, 4))}, 64)
+    assert "malformed" in head_text(stage) or "hid" in head_text(stage)
+
+
+def test_data_with_no_tensor_at_all_is_not_an_empty_checkpoint_either(audio_case):
+    stage = audio_case()
+    raw_file(model_snapshot(stage) / "model.safetensors", {}, 16)
+    assert run_ok(stage)["class"] == "unknown"
+
+
+@pytest.mark.parametrize("extra", [{"surprise": 1}, {"strides": [1]}])
+def test_a_header_entry_with_an_unknown_key_is_malformed(audio_case, extra):
+    stage = audio_case()
+    raw_file(model_snapshot(stage) / "model.safetensors", {NAME_A: entry((0, 4), **extra)}, 4)
+    assert "malformed entry" in head_text(stage)
+
+
+@pytest.mark.parametrize("drop", ["dtype", "shape", "data_offsets"])
+def test_a_header_entry_missing_a_key_is_malformed(audio_case, drop):
+    stage = audio_case()
+    e = entry((0, 4))
+    del e[drop]
+    raw_file(model_snapshot(stage) / "model.safetensors", {NAME_A: e}, 4)
+    assert "malformed entry" in head_text(stage)
+
+
+@pytest.mark.parametrize("meta", ["text", 3, ["a"], None])
+def test_a_metadata_entry_that_is_not_an_object_is_malformed(audio_case, meta):
+    stage = audio_case()
+    raw_file(model_snapshot(stage) / "model.safetensors", {NAME_A: entry((0, 4))}, 4, extra_header={"__metadata__": meta})
+    assert "__metadata__" in head_text(stage)
+
+
+def test_metadata_values_must_be_text(audio_case):
+    stage = audio_case()
+    raw_file(model_snapshot(stage) / "model.safetensors", {NAME_A: entry((0, 4))}, 4, metadata={"format": 3})
+    assert "__metadata__" in head_text(stage)
+
+
+def test_the_same_tensor_name_in_two_files_is_a_problem_not_a_silent_replacement(audio_case):
+    stage = audio_case()
+    model = model_snapshot(stage)
+    write_safetensors(model / "z-extra.safetensors", {"model.model.layers.0.attn.weight": ("F32", [8, 8])}, 5.0)
+    d = run_ok(stage)
+    assert d["class"] == "unknown" and "appears in both" in reasons(d) and "model.model.layers.0.attn.weight" in reasons(d)
+    assert gate(stage).ok
+
+
+def test_the_same_name_in_two_files_of_the_nearest_model_is_a_problem(audio_case):
+    stage = audio_case()
+    cfg = json.loads((stage / "triage_config.json").read_text())
+    write_safetensors(Path(cfg["nearest_snapshot"]) / "z-extra.safetensors", {"model.model.layers.0.attn.weight": ("F32", [8, 8])}, 5.0)
+    d = run_ok(stage)
+    assert d["class"] == "unknown" and "nearest model" in reasons(d) and "appears in both" in reasons(d)
+
+
+def test_two_files_with_distinct_names_are_both_read(audio_case):
+    stage = audio_case()
+    model = model_snapshot(stage)
+    write_safetensors(model / "z-extra.safetensors", {"model.model.extra.weight": ("F32", [2])}, 5.0)
+    d = run_ok(stage)
+    assert d["class"] == "full-port" and "only in the new model" in reasons(d)
+
+
+@pytest.mark.parametrize("empty", [{}, []])
+def test_an_empty_container_added_to_the_model_section_is_a_difference(audio_case, empty):
+    cfg = changed_model_config(model__diffusion__sampling_distribution_shift_options=empty)
+    d = run_ok(audio_case(model_kw={"config": cfg}))
+    assert d["class"] == "full-port" and "sampling_distribution_shift_options" in reasons(d)
+
+
+def test_an_empty_container_in_both_configs_is_not_a_difference(audio_case):
+    cfg = changed_model_config(model__diffusion__sampling_distribution_shift_options={})
+    assert run_ok(audio_case(model_kw={"config": cfg}, base_kw={"config": copy.deepcopy(cfg)}))["class"] == "weights-only"
+
+
+def test_an_empty_list_against_an_empty_object_is_a_difference(audio_case):
+    a = changed_model_config(model__x={})
+    b = changed_model_config(model__x=[])
+    assert run_ok(audio_case(model_kw={"config": a}, base_kw={"config": b}))["class"] == "full-port"
+
+
+def test_an_empty_container_at_the_top_level_is_a_difference(audio_case):
+    cfg = changed_model_config()
+    cfg["extras"] = {}
+    assert run_ok(audio_case(model_kw={"config": cfg}))["class"] == "full-port"
+
+
+def test_a_list_that_is_longer_by_empty_members_is_a_difference(audio_case):
+    a = changed_model_config(model__x=[1])
+    b = changed_model_config(model__x=[1, {}])
+    assert run_ok(audio_case(model_kw={"config": a}, base_kw={"config": b}))["class"] == "full-port"
+
+
+@pytest.mark.parametrize("a,b", [(1, True), (0, False), (1, 1.0), (2, "2")])
+def test_values_that_python_calls_equal_but_json_types_differ_are_differences(audio_case, a, b):
+    ca, cb = changed_model_config(model__x=a), changed_model_config(model__x=b)
+    d = run_ok(audio_case(model_kw={"config": ca}, base_kw={"config": cb}))
+    assert d["class"] == "full-port" and "model.x" in reasons(d)
+
+
+def test_a_boolean_and_an_integer_in_a_text_encoder_config_are_different(audio_case):
+    d = run_ok(audio_case(model_kw={"text_config": {**TEXT_ENCODER_CONFIG, "flag": 1}}, base_kw={"text_config": {**TEXT_ENCODER_CONFIG, "flag": True}}))
+    assert d["class"] == "full-port" and "config.json differs" in reasons(d)
+
+
+def test_a_text_encoder_config_with_an_empty_container_added_differs(audio_case):
+    d = run_ok(audio_case(model_kw={"text_config": {**TEXT_ENCODER_CONFIG, "extra": {}}}))
+    assert d["class"] == "full-port"
+
+
+@pytest.mark.parametrize("text", ['{"model_type": "x", "model": {"a": 1, "a": 2}}', '{"model_type": "x", "model": {}, "model_type": "y"}',
+                                  '{"model_type": "x", "model": {"a": NaN}}', '{"model_type": "x", "model": {"a": Infinity}}',
+                                  '{"model_type": "x", "model": {"a": -Infinity}}', '{"model_type": "x", "model": {"a": 1e999}}',
+                                  '{"model_type": "x", "model": {"a": ' + "9" * 40 + "}}"])
+def test_a_config_with_duplicate_keys_non_finite_numbers_or_huge_numbers_is_not_read(tmp_path, text):
+    snap = make_audio(tmp_path, MODEL_REV, repo=MODEL_ID)
+    (snap / "model_config.json").write_text(text)
+    assert template_module().detect_audio(snap) is False
+
+
+def test_a_config_nested_deeper_than_the_limit_is_not_read(tmp_path):
+    snap = make_audio(tmp_path, MODEL_REV, repo=MODEL_ID)
+    deep = "[" * 200 + "1" + "]" * 200
+    (snap / "model_config.json").write_text('{"model_type": "x", "model": {"a": ' + deep + "}}")
+    assert template_module().detect_audio(snap) is False
+
+
+def test_a_config_just_inside_the_depth_limit_is_read(tmp_path):
+    snap = make_audio(tmp_path, MODEL_REV, repo=MODEL_ID)
+    deep = "[" * 20 + "1" + "]" * 20
+    (snap / "model_config.json").write_text('{"model_type": "x", "model": {"a": ' + deep + "}}")
+    assert template_module().detect_audio(snap) is True
+
+
+def test_a_pathologically_deep_config_does_not_crash_the_reader(tmp_path):
+    snap = make_audio(tmp_path, MODEL_REV, repo=MODEL_ID)
+    (snap / "model_config.json").write_text('{"model_type": "x", "model": {"a": ' + "[" * 100000 + "}}")
+    assert template_module().detect_audio(snap) is False
+
+
+def test_a_header_with_a_duplicate_tensor_name_is_malformed(audio_case):
+    stage = audio_case()
+    e = json.dumps(entry((0, 4)))
+    blob = ('{"%s": %s, "%s": %s}' % (NAME_A, e, NAME_A, e)).encode()
+    blob += b" " * (-len(blob) % 8)
+    (model_snapshot(stage) / "model.safetensors").write_bytes(struct.pack("<Q", len(blob)) + blob + b"\0" * 4)
+    assert "duplicate" in head_text(stage)
+
+
+def test_a_header_with_a_non_finite_number_is_malformed(audio_case):
+    stage = audio_case()
+    blob = ('{"%s": {"dtype": "F32", "shape": [NaN], "data_offsets": [0, 4]}}' % NAME_A).encode()
+    blob += b" " * (-len(blob) % 8)
+    (model_snapshot(stage) / "model.safetensors").write_bytes(struct.pack("<Q", len(blob)) + blob + b"\0" * 4)
+    assert run_ok(stage)["class"] == "unknown"
+
+
+# ---- boundaries the first mutation table found unguarded --------------------------------------------------
+
+@pytest.mark.parametrize("digits,minus,ok", [(30, "", True), (31, "", False), (30, "-", True), (31, "-", False)])
+def test_an_integer_of_more_than_thirty_digits_is_refused_with_or_without_a_sign(tmp_path, digits, minus, ok):
+    snap = make_audio(tmp_path, MODEL_REV, repo=MODEL_ID)
+    (snap / "model_config.json").write_text('{"model_type": "x", "model": {"a": ' + minus + "9" * digits + "}}")
+    assert template_module().detect_audio(snap) is ok
+
+
+@pytest.mark.parametrize("levels,ok", [(32, True), (33, False)])
+def test_nesting_is_limited_to_thirty_two_containers(tmp_path, levels, ok):
+    snap = make_audio(tmp_path, MODEL_REV, repo=MODEL_ID)
+    inner = levels - 2                               # the top object and "model" are the first two levels
+    deep = "[" * inner + "1" + "]" * inner
+    (snap / "model_config.json").write_text('{"model_type": "x", "model": {"a": ' + deep + "}}")
+    assert template_module().detect_audio(snap) is ok
+
+
+def test_a_header_that_claims_more_bytes_than_the_file_holds_is_malformed(audio_case):
+    stage = audio_case()
+    (model_snapshot(stage) / "model.safetensors").write_bytes(struct.pack("<Q", 100) + b"{}" + b" " * 8)
+    assert "cut short" in head_text(stage)
+
+
+def test_an_empty_range_inside_another_tensors_bytes_is_still_an_empty_range(audio_case):
+    stage = audio_case()
+    entries = {NAME_A: entry((0, 8), shape=(2,)), "x.empty": entry((2, 2), shape=(0,))}
+    raw_file(model_snapshot(stage) / "model.safetensors", entries, 8)
+    cfg = json.loads((stage / "triage_config.json").read_text())
+    raw_file(Path(cfg["nearest_snapshot"]) / "model.safetensors", entries, 8)
+    assert run_ok(stage)["class"] == "weights-only"
+
+
+@pytest.mark.parametrize("text", ["[]", "3", '"x"', "null"])
+def test_a_header_that_is_not_an_object_is_unknown_and_does_not_crash(audio_case, text):
+    stage = audio_case()
+    blob = text.encode()
+    blob += b" " * (-len(blob) % 8)
+    (model_snapshot(stage) / "model.safetensors").write_bytes(struct.pack("<Q", len(blob)) + blob)
+    d = run_ok(stage)
+    assert d["class"] == "unknown" and "not a JSON object" in reasons(d)
