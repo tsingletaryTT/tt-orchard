@@ -261,7 +261,7 @@ def test_release_refuses_to_overwrite_existing_notes(repo):
     sh(repo, "git", "add", "-A")
     sh(repo, *GIT, "commit", "-q", "-m", "notes")
     code, _, err = run(repo, "release")
-    assert code != 0 and (repo / "docs" / "releases" / "1.1.0.md").read_text() == "old"
+    assert code != 0 and "refusing to overwrite" in err and (repo / "docs" / "releases" / "1.1.0.md").read_text() == "old"
     assert V.load_fragments(repo / "changes")
 
 
@@ -289,13 +289,21 @@ def test_migrate_pr_prints_the_fragment_and_writes_nothing(repo):
     code, out, _ = run(repo, "migrate-pr", "--from-ref", "old-feature")
     assert code == 0 and tree(repo) == before
     assert "changes/old-feature.toml" in out and 'target = "1.0.4"' in out and "Adds the old feature" in out
-    assert "(version" not in out.split("summary")[1].splitlines()[0]
+    (summary_line,) = [l for l in out.splitlines() if l.startswith("summary = ")]
+    assert summary_line == 'summary = "Adds the old feature"'
 
 
 def test_migrate_pr_strips_a_remote_prefix_and_takes_a_pr_number(repo):
     old_style_branch(repo, "feat/Odd_Name")
     code, out, _ = run(repo, "migrate-pr", "--from-ref", "feat/Odd_Name", "--pr", "77")
     assert code == 0 and "changes/feat-odd-name.toml" in out and "pr = 77" in out
+
+
+def test_migrate_pr_reads_a_remote_tracking_ref_and_names_the_slug_without_origin(repo):
+    old_style_branch(repo, "feat-x")
+    sh(repo, "git", "update-ref", "refs/remotes/origin/feat-x", "feat-x")
+    code, out, _ = run(repo, "migrate-pr", "--from-ref", "origin/feat-x")
+    assert code == 0 and "changes/feat-x.toml" in out and "origin-feat-x" not in out
 
 
 def test_migrate_pr_reports_a_branch_that_already_uses_fragments(repo):
@@ -334,3 +342,22 @@ def test_the_script_check_passes_on_this_repository():
 def test_a_bad_command_line_exits_2():
     r = subprocess.run([sys.executable, str(ROOT / "scripts" / "version.py"), "frobnicate"], capture_output=True, text=True, timeout=60)
     assert r.returncode == 2
+
+
+def test_atomic_write_goes_through_a_temp_file_fsync_and_replace(tmp_path, monkeypatch):
+    calls = []
+    real_fsync, real_replace = os.fsync, os.replace
+    monkeypatch.setattr(os, "fsync", lambda fd: (calls.append("fsync"), real_fsync(fd))[1])
+    monkeypatch.setattr(os, "replace", lambda a, b: (calls.append(("replace", Path(a).parent == Path(b).parent, Path(a) != Path(b))), real_replace(a, b))[1])
+    C.atomic_write(tmp_path / "f.txt", "hello")
+    assert (tmp_path / "f.txt").read_text() == "hello"
+    assert calls[0] == "fsync" and ("replace", True, True) in calls
+    assert [p.name for p in tmp_path.iterdir()] == ["f.txt"]
+
+
+def test_atomic_write_that_fails_leaves_the_old_file_and_no_temp_file(tmp_path, monkeypatch):
+    (tmp_path / "f.txt").write_text("old")
+    monkeypatch.setattr(os, "fsync", lambda fd: (_ for _ in ()).throw(OSError("disk")))
+    with pytest.raises(OSError):
+        C.atomic_write(tmp_path / "f.txt", "new")
+    assert (tmp_path / "f.txt").read_text() == "old" and [p.name for p in tmp_path.iterdir()] == ["f.txt"]

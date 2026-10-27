@@ -43,7 +43,7 @@ def test_a_valid_version_parses_to_a_tuple_of_numbers(s, t):
 
 @pytest.mark.parametrize("s", ["01.2.3", "1.02.3", "1.2.03", "1.2", "1.2.3.4", "1.2.3-rc1", "1.2.3\n", " 1.2.3", "1.2.3 ",
                                "", "v1.2.3", "1.2.x", "-1.2.3", "1000000.0.0", "0.1000000.0", "0.0.1000000",
-                               "١.٢.٣", "1.2.3\x00", "+1.2.3"])
+                               "١.٢.٣", "1.٢.3", "1.2.3٣", "1.2٣.3","0.9.١","1.2.3\x00", "+1.2.3"])
 def test_a_malformed_version_is_refused(s):
     assert V.parse(s) is None
 
@@ -141,6 +141,7 @@ def bad_cases(ch: Path):
         "bad_slug_upper": lambda: frag(ch, "Bad"),
         "bad_slug_underscore": lambda: frag(ch, "bad_slug"),
         "slug_too_long": lambda: frag(ch, "a" * 61),
+        "no_extension": lambda: (ch.mkdir(exist_ok=True), (ch / "notes").write_text('target = "9.0.0"\nsummary = "x"\n')),
         "not_toml_file": lambda: (ch.mkdir(exist_ok=True), (ch / "notes.txt").write_text("hi")),
     }
 
@@ -311,3 +312,22 @@ def test_pip_metadata_reports_the_release_literal(tmp_path, editable):
         raise AssertionError(tail)
     shown = subprocess.run([py, "-m", "pip", "show", "tt-orchard"], capture_output=True, text=True).stdout
     assert f"Version: {V.read_release(ROOT / 'orchard' / '__init__.py')}" in shown, shown
+
+
+def test_skipped_is_cleared_at_the_start_of_every_call(ch):
+    frag(ch, "bad", extra='colour = "red"\n')
+    V.current(ch, release="1.0.0")
+    assert len(V.SKIPPED) == 1
+    V.current(ch, release="1.0.0")
+    assert len(V.SKIPPED) == 1                                 # not 2
+    (ch / "bad.toml").unlink()
+    V.current(ch, release="1.0.0")
+    assert V.SKIPPED == []
+
+
+def test_read_release_refuses_a_missing_or_invalid_literal(tmp_path):
+    p = tmp_path / "__init__.py"
+    for text in ['x = 1\n', 'RELEASE = "1.2"\n', 'RELEASE = "01.2.3"\n', '__version__ = "1.2.3"\n']:
+        p.write_text(text)
+        with pytest.raises(ValueError):
+            V.read_release(p)

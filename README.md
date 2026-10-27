@@ -1807,6 +1807,7 @@ Each of these happened on the development machine. Details are in the
 | [`docs/run-logs/2026-10-hemmingway-1.md`](docs/run-logs/2026-10-hemmingway-1.md) | The log of the first real run |
 | [`docs/analysis/qwen3-5-122b-analysis.md`](docs/analysis/qwen3-5-122b-analysis.md) | Analysis: Using Qwen3.5-122B-A10B with tt-orchard |
 | [`docs/analysis/qwen3-5-122b-comparison.html`](docs/analysis/qwen3-5-122b-comparison.html) | Visual comparison: 27B vs 122B model requirements |
+| [`docs/releases.md`](docs/releases.md), [`changes/`](changes/) | How the version number is computed from change fragments, and how a release is cut |
 | [`CLAUDE.md`](CLAUDE.md) | The decisions and standing rules |
 | [`docs/project-log.md`](docs/project-log.md) | The dated project log: what was done, found and left open |
 
@@ -1822,6 +1823,22 @@ Keep skills short and concrete. Give the agent tested scripts to copy and a smal
 fill in. A skill longer than 40,000 characters is cut (`SKILL_CHARS`). A running supervisor keeps
 the code and skills it loaded at start; to load a change into a paused run, use `kill -9` and
 restart (see [5.4](#54-recover-after-a-crash)).
+
+### Versions and releases
+
+A pull request does not edit a version field. It adds one file, `changes/<branch-slug>.toml`, that names the
+version the feature claims and says in one sentence what it does:
+
+```bash
+python3 scripts/version.py new my-feature --summary "Adds my feature." --kind feature
+python3 scripts/version.py check
+```
+
+The version that `tt-orchard --version` and the web page report is the highest target in `changes/`, or `RELEASE`
+(the last released version, one line in `orchard/__init__.py`) when there is none. Two features may claim the same
+number. A release is cut with `python3 scripts/version.py release`, which writes the release notes and prints the
+tag commands for a person to run. See [`docs/releases.md`](docs/releases.md) for the steps and for moving an open
+pull request to fragments.
 
 ### Run the tests
 
