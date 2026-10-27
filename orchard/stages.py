@@ -1071,7 +1071,7 @@ def gate_package(stage_dir, run_dir) -> GateResult:
     trial_decision = decision["choice"] if decision is not None and decision.get("trial") is not None else None
     trial_rows = tuple(n.name for n in graft_trial_numbers(run))
     sampling = sampling_summary(run)
-    sampling_rows = tuple(n.name for n in sampling_numbers(run))
+    sampling_expected = tuple(sampling_numbers(run))
     try:
         reported, reported_source = read_reported(run)
     except PackageError as exc:
@@ -1128,7 +1128,7 @@ def gate_package(stage_dir, run_dir) -> GateResult:
                                       graft_decision=trial_decision, vocab=stage_2_vocab(run),
                                       trial_rows=trial_rows if p.get("required") else (),
                                       sampling=sampling if p.get("required") else None,
-                                      sampling_rows=sampling_rows if p.get("required") else (),
+                                      sampling_expected=sampling_expected if p.get("required") else (),
                                       use=read_use_facts(swap.get("new_snapshot") or "/nonexistent", run_sh, run,
                                                            identity=(new_repo, new_rev), measured=bool(p.get("required"))))]
         reasons += [f"profile {name}: the card cites {e}, which is missing at evidence/{e}"

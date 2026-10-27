@@ -125,6 +125,69 @@ def test_the_gate_refuses_a_card_that_lost_a_speed_row(world):
     assert not g.ok and any(SPEED_ROWS[1] in r for r in g.reasons), g.reasons
 
 
+def edit_row(card, name, **cells):
+    """Rewrite the Numbers row called `name`: value, label or evidence replaced."""
+    out = []
+    for ln in card.splitlines():
+        parts = [c.strip() for c in ln.strip().strip("|").split("|")]
+        if ln.startswith("| ") and len(parts) == 4 and parts[0] == name:
+            parts = [name, cells.get("value", parts[1]), cells.get("label", parts[2]), cells.get("evidence", parts[3])]
+            ln = "| " + " | ".join(parts) + " |"
+        out.append(ln)
+    return "\n".join(out) + "\n"
+
+
+def refuse_after(world, rec, edit, fragment):
+    put_probe(world, rec)
+    stage_dir, _, pkg = finished_auto(world)
+    assert gate_package(stage_dir, world["run"]).ok
+    (pkg / "README.md").write_text(edit((pkg / "README.md").read_text()))
+    g = gate_package(stage_dir, world["run"])
+    assert not g.ok and any(fragment in r for r in g.reasons), g.reasons
+
+
+FIRST = record(greedy=entry(seconds=2.0), a=entry(text=STORY, seconds=3.0), b=entry(text=OTHER, seconds=3.0))      # 48.0 greedy, 32.0 sampled
+
+
+def test_the_gate_refuses_swapped_greedy_and_sampled_speeds(world):
+    def swap(card):
+        card = edit_row(card, SPEED_ROWS[0], value="32.0 tokens/s")
+        return edit_row(card, SPEED_ROWS[1], value="48.0 tokens/s")
+    refuse_after(world, FIRST, swap, SPEED_ROWS[0])
+
+
+def test_the_gate_refuses_a_measured_row_turned_into_todo(world):
+    refuse_after(world, FIRST, lambda c: edit_row(c, SPEED_ROWS[1], value="TODO", label="TODO", evidence="-"), "must be the sampling probe's measurement")
+
+
+def test_the_gate_refuses_a_row_whose_evidence_changed(world):
+    refuse_after(world, FIRST, lambda c: edit_row(c, SPEED_ROWS[0], evidence=f"`{SWAP}`"), "must be the sampling probe's measurement")
+
+
+def test_the_gate_refuses_a_row_relabelled_todo_with_its_value_kept(world):
+    refuse_after(world, FIRST, lambda c: edit_row(c, SPEED_ROWS[0], label="TODO"), "must be the sampling probe's measurement")
+
+
+def test_the_gate_refuses_a_row_whose_unit_changed(world):
+    refuse_after(world, FIRST, lambda c: edit_row(c, SPEED_ROWS[0], value="48.0 ms"), SPEED_ROWS[0])
+
+
+def test_the_gate_refuses_a_sampling_row_for_a_measurement_the_probe_did_not_make(world):
+    rec = record(a=refused("HTTP 400: nope"), b=refused("HTTP 400: nope"))
+    extra = f"| {SPEED_ROWS[1]} | 30.0 tokens/s | measured | `{SUMMARY}`, `{SWAP}` |\n"
+    refuse_after(world, rec, lambda c: c.replace("\n## Sampling", "\n" + extra + "\n## Sampling", 1), "made no such measurement")
+
+
+def test_the_gate_refuses_a_drafter_row_for_a_probe_that_logged_no_session(world):
+    extra = f"| {RATE_ROWS[0]} | 0.5 fraction | measured | `{SUMMARY}`, `{SWAP}` |\n"
+    refuse_after(world, record(), lambda c: c.replace("\n## Sampling", "\n" + extra + "\n## Sampling", 1), "made no such measurement")
+
+
+def test_the_row_names_in_the_card_module_are_the_ones_package_writes():
+    from orchard import package_card
+    assert package_card.SAMPLING_ROW_NAMES == tuple(n for n, _, _ in package.SAMPLING_ROWS)
+
+
 def test_the_gate_derives_the_summary_again_so_an_edited_summary_file_is_refused(world):
     put_probe(world, record())
     stage_dir, _, pkg = finished_auto(world)
