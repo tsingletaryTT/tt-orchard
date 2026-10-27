@@ -51,6 +51,7 @@ REQUEST_FRAMING_TOKENS = 32      # added to the request size for the provider's 
 KEYS = {"enabled", "endpoint", "models", "api", "key_env", "key_file", "after_failures", "max_calls",
         "max_total_tokens", "max_cost_usd", "prices", "max_output_tokens", "max_prompt_chars", "timeout_s",
         "extra_body", "max_calls_per_problem", "max_tokens_per_problem", "max_cost_per_problem_usd", "dir"}
+UNPRICED_BODY = ("tools", "tool_choice", "web_search_options", "plugins")
 RESERVED_BODY = ("model", "messages", "max_tokens", "temperature", "system", "stream", "stream_options", "n", "best_of")
 APIS = ("openai", "anthropic")
 ANTHROPIC_VERSION = "2023-06-01"
@@ -237,6 +238,10 @@ def load(table: dict | None, *, base: Path) -> Config:
         raise ConfigError("telegraph.extra_body must be a table")
     _plain_json(extra, "telegraph.extra_body")
     _refuse_prompt_caching(extra, "telegraph.extra_body")
+    for name in UNPRICED_BODY:
+        if name in extra:
+            raise ConfigError(f"telegraph.extra_body cannot set {name}: tools and web search can add charges per use that "
+                              "telegraph does not account for")
     for name in RESERVED_BODY:
         if name in extra:
             raise ConfigError(f"telegraph.extra_body cannot set {name}; telegraph sets it")
@@ -280,7 +285,12 @@ def redact(text: str, *, hostname: str = "", home: str = "", secrets: tuple = ()
     """`text` without the key, token shapes, private key markers, the host name and the home directory."""
     for secret in secrets:
         if secret:
-            text = text.replace(secret, "[redacted]")
+            # a server that echoes the key inside a JSON body (or a Python repr) writes quotes and non-ASCII characters
+            # escaped, so each spelling is removed, longest first
+            spellings = {secret, json.dumps(secret)[1:-1], json.dumps(secret, ensure_ascii=False)[1:-1], repr(secret)[1:-1]}
+            for spelling in sorted(spellings, key=len, reverse=True):
+                if spelling:
+                    text = text.replace(spelling, "[redacted]")
     text = _PEM.sub("[redacted private key]", text)
     for _what, pattern in TOKEN_PATTERNS:
         text = pattern.sub("[redacted]", text)
@@ -702,7 +712,8 @@ class Telegraph:
                 cost = 0.0 if usage_known else None          # refused before processing: free. Otherwise the cost is unknown
             self._append({**rec, "outcome": "error", "reason": reason, "tokens_in": tin, "tokens_out": tout,
                           "cost_usd": cost, "usage_known": usage_known or usage is not None})
-            return Answer(False, reason=reason, call_id=base["call_id"], model=model, latency_s=t1 - t0)
+            return Answer(False, reason=reason, call_id=base["call_id"], model=model, latency_s=t1 - t0,
+                          tokens_in=tin, tokens_out=tout, cost_usd=cost)
         text = clean(text)
         estimated = usage is None
         tin = usage[0] if usage else (len(prompt) + len(SYSTEM)) // 3

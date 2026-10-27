@@ -68,7 +68,7 @@ def main(args, *, out, environ=None, transport=None, getter=None, home=None) -> 
         say(f"telegraph: {exc}")
         return EXIT_PROBLEM
     directory = Path(args.dir) if getattr(args, "dir", None) else (cfg.dir or default_dir(home))
-    tel = tg.Telegraph(cfg, directory, transport=transport, environ=environ)
+    tel = tg.Telegraph(cfg, directory, transport=transport, environ=environ, home=str(home))
     action = args.action
     if action == "check":
         return _check(cfg, tel, args, say, getter)
