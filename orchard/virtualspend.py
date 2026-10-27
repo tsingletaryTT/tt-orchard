@@ -163,14 +163,23 @@ def _agent_turn(rec: dict):
     return p, c
 
 
+def _seconds(value) -> float | None:
+    """A non-negative finite number of seconds, or None. A JSON integer too large for a float is no time."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        seconds = float(value)
+    except OverflowError:
+        return None
+    return seconds if math.isfinite(seconds) and seconds >= 0 else None
+
+
 def _request(rec: dict):
     """(prompt, completion, latency) of a benchmark proxy record."""
     p, c = _count(rec.get("prompt_tokens")), _count(rec.get("completion_tokens"))
     if p is None or c is None:
         return None
-    lat = rec.get("latency_s")
-    lat = float(lat) if isinstance(lat, (int, float)) and not isinstance(lat, bool) and math.isfinite(lat) and lat >= 0 else 0.0
-    return p, c, lat
+    return p, c, _seconds(rec.get("latency_s")) or 0.0
 
 
 def _lines(path: Path, skipped: dict, budget: list):

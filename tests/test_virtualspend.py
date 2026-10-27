@@ -422,3 +422,14 @@ def test_a_benchmark_file_with_no_usable_request_has_no_request_seconds(root):
     write_log(root, "bench/requests.jsonl", [req(None, 5), req(5, None)])
     s = vs.scan(root)
     assert s["turns"] == 0 and s["request_s"] is None and s["skipped"]["no_usage"] == 2
+
+
+
+# ---- review fix 2: a huge integer latency keeps the request's tokens -------------------------------------------------
+
+def test_a_huge_integer_latency_is_no_time_and_the_tokens_are_kept(root):
+    huge = '{"prompt_tokens": 100, "completion_tokens": 10, "latency_s": 1' + "0" * 400 + "}"
+    write_log(root, "bench/requests.jsonl", [huge, req(5, 1, 2.0)])
+    s = vs.scan(root)
+    assert (s["turns"], s["prompt_tokens"], s["completion_tokens"]) == (2, 105, 11)
+    assert s["request_s"] == 2.0
