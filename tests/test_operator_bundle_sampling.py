@@ -91,6 +91,15 @@ def test_a_path_or_home_directory_in_an_error_text_is_redacted(tmp_path):
     assert "/home/someone" not in text
 
 
+def test_a_probe_with_a_missing_timing_is_shown_as_inconclusive(tmp_path):
+    run = make_run(tmp_path)
+    rec = record()
+    rec["requests"]["sampled_b"]["seconds"] = None
+    put(run, "stages/2/evidence", rec)
+    block = section(results(run), HEAD)
+    assert "inconclusive" in block and "sampled-full-speed" not in block
+
+
 def test_a_record_that_did_not_run_has_no_row(tmp_path):
     run = make_run(tmp_path)
     put(run, "stages/2/evidence", {"ran": False})

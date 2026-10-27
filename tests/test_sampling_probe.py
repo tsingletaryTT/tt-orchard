@@ -61,6 +61,29 @@ def test_a_sampled_text_equal_to_the_greedy_text_means_sampling_was_ignored_even
         assert "greedy text" in s["sentence"]
 
 
+@pytest.mark.parametrize("which", ["greedy", "sampled_a", "sampled_b"])
+@pytest.mark.parametrize("damage", [{"completion_tokens": None}, {"seconds": None}, {"completion_tokens": 4}, {"seconds": 0}])
+def test_a_missing_speed_in_any_of_the_three_requests_is_inconclusive_not_full_speed(which, damage):
+    rec = record()
+    rec["requests"][which].update(damage)
+    s = sp.summarize(rec)
+    assert s["verdict"] == "inconclusive", (which, damage, s["verdict"])
+    assert s["card_sentence"] == sp.CARD_SENTENCES["inconclusive"]
+    assert "speed" in s["card_sentence"]
+
+
+def test_a_missing_speed_does_not_hide_ignored_sampling():
+    rec = record(a=entry(text=GREEDY), b=entry(text=OTHER))
+    rec["requests"]["greedy"]["completion_tokens"] = None
+    assert sp.summarize(rec)["verdict"] == "sampled-ignored"
+
+
+def test_equal_seeds_texts_are_ignored_even_when_the_greedy_speed_is_missing():
+    rec = record(a=entry(text=STORY), b=entry(text=STORY))
+    rec["requests"]["greedy"]["completion_tokens"] = None
+    assert sp.summarize(rec)["verdict"] == "sampled-ignored"
+
+
 def test_ignored_wins_over_slower():
     s = sp.summarize(record(greedy=entry(seconds=1.0), a=entry(text=STORY, seconds=9.0), b=entry(text=STORY, seconds=9.0)))
     assert s["verdict"] == "sampled-ignored"

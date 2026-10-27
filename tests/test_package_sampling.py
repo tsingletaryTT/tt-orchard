@@ -179,6 +179,17 @@ def test_a_drafter_that_accepted_nothing_is_a_measurement_and_gets_its_rows(worl
     assert rows(card)[RATE_ROWS[0]][0] == "0.0 fraction" and rows(card)[RATE_ROWS[1]][0] == "0.0 fraction"
 
 
+def test_a_probe_with_no_usable_greedy_count_gives_the_inconclusive_sentence_and_the_gate_passes(world):
+    rec = record()
+    rec["requests"]["greedy"]["completion_tokens"] = None
+    put_probe(world, rec)
+    stage_dir, _, card = card_of(world)
+    assert sampling_probe.CARD_SENTENCES["inconclusive"] in " ".join(section(card).split())
+    assert SPEED_ROWS[0] not in rows(card)
+    g = gate_package(stage_dir, world["run"])
+    assert g.ok, g.reasons
+
+
 def test_speeds_are_rounded_to_one_decimal_place_in_the_rows(world):
     put_probe(world, record(greedy=entry(seconds=1.995), a=entry(text=STORY, seconds=2.0), b=entry(text=OTHER, seconds=2.0)))
     _, _, card = card_of(world)
