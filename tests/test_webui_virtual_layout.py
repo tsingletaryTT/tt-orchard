@@ -44,7 +44,7 @@ def test_the_view_has_a_local_virtual_table_before_the_recent_calls_and_says_it_
     nodes = [n for n in view.walk()]
     assert nodes.index(section) < nodes.index(by_id(t, "tg-recent-h")), "the real calls follow; the two are different blocks"
     assert "hidden" in by_id(t, "tg-local-empty").attrs
-    assert not section.inside(by_id(t, "tg-spend-h").parent), "its own section, not inside the real spend block"
+    assert not section.inside(by_id(t, "tg-spend-h").parent), "its own section, outside the real spend block"
 
 
 def test_the_local_script_reads_one_endpoint_sends_nothing_and_builds_text_with_text_nodes():
@@ -131,3 +131,9 @@ def test_operator_local_meter_is_aa_on_the_dark_top_bar():
     border = re.search(r"border: 1px dashed (#[0-9a-fA-F]{6})", rule).group(1)
     assert "background: transparent" in rule
     assert ratio(color, bar) >= 4.5 and ratio(border, bar) >= 3.0
+
+
+
+def test_the_local_table_is_redrawn_only_when_its_data_changes():
+    body = fn_body(JS(), "function renderLocalTable")
+    assert 'changed($("tg-local"), v.rows.concat([v.references]))' in body

@@ -247,3 +247,32 @@ def test_no_horizontal_page_scroll_with_the_figure_and_a_capped_helper_meter(roo
         expect(local(pg)).to_be_in_viewport()
         expect(pg.locator("#spend-meter")).to_be_in_viewport()
     ctx.close()
+
+
+
+def test_the_hover_text_says_the_figure_is_virtual_and_not_part_of_the_helper_spend(root, browser):
+    ctx, pg = new_page(browser)
+    with Served(app_for(root)) as s:
+        pg.goto(f"http://127.0.0.1:{s.port}/?mode=operator")
+        expect(local(pg)).to_have_text(FIRST)
+        title = local(pg).get_attribute("title")
+        assert "Virtual spend" in title and "Nobody was charged" in title and "not part of the helper spend" in title
+    ctx.close()
+
+
+
+@pytest.mark.parametrize("mode", ["operator", "playful"])
+def test_both_meters_stay_on_screen_at_the_bottom_of_a_tall_page(tmp_path, browser, mode):
+    r = tmp_path / "orchard-runs"
+    r.mkdir()
+    for i in range(45):
+        write_log(r, f"kprobe/probe-{i:02d}/op/attempt-1/log/p.jsonl", [turn(1, 1_000_000 + i, 10)])
+    ctx, pg = new_page(browser)
+    with Served(app_for(r)) as s:
+        pg.goto(f"http://127.0.0.1:{s.port}/?mode={mode}#telegraph")
+        expect(pg.locator("#tg-local-body tr")).to_have_count(45)
+        pg.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        assert pg.evaluate("window.scrollY") > 500, "the page must be taller than the window for this test to mean anything"
+        expect(local(pg)).to_be_in_viewport()
+        expect(pg.locator("#spend-meter")).to_be_in_viewport()
+    ctx.close()

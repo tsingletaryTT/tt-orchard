@@ -482,8 +482,6 @@ class WebApp:
         if self._spender is None:
             vcfg = getattr(self.cfg, "virtual_spend", None) or _virtualspend.Config()
             self._spender = virtualspend_view.Spender(self.runs_root, vcfg, redact=self.redact, clock=self.clock)
-        if run is not None and (not isinstance(run, str) or not run):
-            run = None
         return self._spender.build(run)
 
     def _lab_group(self) -> dict:

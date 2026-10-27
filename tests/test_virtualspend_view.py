@@ -219,3 +219,26 @@ def test_the_figure_is_labelled_virtual_in_every_place_it_appears(root):
     write_log(root, "org--a/log/run.jsonl", [turn()])
     data = get(app_with(root))[1]
     assert "virtual" in data["label"] and "virtual" in data["meter"]["text"] and "never added" in data["label"]
+
+
+
+# ---- cases added after the first mutation table ----------------------------------------------------------------------
+
+def test_candidates_leave_out_links_before_any_scan(root, tmp_path):
+    (tmp_path / "real").mkdir()
+    (root / "linked").symlink_to(tmp_path / "real")
+    (root / "plain").mkdir()
+    assert [n for n, _ in view.candidates(root)] == ["plain"]
+
+
+def test_a_run_name_in_the_answer_is_redacted(root):
+    write_log(root, "org--a/log/run.jsonl", [turn()])
+    code, data = get(app_with(root), "/api/virtual-spend?run=hf_" + "b" * 30)
+    assert code == 200 and "b" * 30 not in json.dumps(data) and data["run"] == "<token>"
+
+
+def test_a_small_cost_keeps_four_digits_in_the_meter_text(root):
+    write_log(root, "org--a/log/run.jsonl", [turn(1, 1000, 10)])
+    data = get(app_with(root))[1]
+    assert data["meter"]["text"] == "Local ≈ $0.0001 (virtual, at claude-haiku-5-5)"
+    assert view.usd(0) == "$0.00" and view.usd(0.5) == "$0.50"

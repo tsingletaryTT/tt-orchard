@@ -6,7 +6,7 @@ The number is for comparison with the real spend on the outside helper (orchard/
 
   * the agent logs hold the prompt tokens of the whole conversation on every turn, so the prompt count is large. A
     hosted provider with prompt caching bills most of those repeated tokens for much less, so the figure is an upper
-    bound for a cache-less price and a comparison figure, not a bill;
+    bound at a cache-less price. Use it as a comparison figure only;
   * it is never added to the real spend, and nothing here writes a file, opens a chip or sends a request.
 
 Sources that count as local (each is a file the local harness wrote):
@@ -44,7 +44,7 @@ MAX_FILE_BYTES = 128 * 1024 * 1024   # a larger file is read up to this many byt
 MAX_TOTAL_BYTES = 1024 * 1024 * 1024
 MAX_LINE_BYTES = 2 * 1024 * 1024     # a longer line is not parsed; its usage is looked for in its last bytes
 TAIL_BYTES = 4096
-MAX_TOKENS_PER_TURN = 10 ** 9        # a bigger number is a corrupt record, not a turn
+MAX_TOKENS_PER_TURN = 10 ** 9        # a bigger number is a corrupt record
 
 HELPER_NAMES = {"telegraph", "helper", "hosted", "outside"}
 _USAGE_TAIL = re.compile(rb'"usage"\s*:\s*\{[^{}]*\}')
@@ -339,7 +339,7 @@ def scan(root) -> dict:
 
 
 def priced(scanned: dict, cfg: Config) -> dict:
-    """`scanned` plus the virtual cost at each reference price. The costs are comparison figures, not a bill."""
+    """`scanned` plus the virtual cost at each reference price. The costs are comparison figures only."""
     p, c = scanned["prompt_tokens"], scanned["completion_tokens"]
     refs = [{"name": name, "price_in": pi, "price_out": po, "cost_usd": cost(p, c, pi, po)}
             for name, pi, po in cfg.references()]

@@ -328,7 +328,7 @@ def test_a_bad_table_is_refused_with_the_key_named(table, needle):
 
 
 def test_a_table_that_is_not_a_table_is_refused():
-    with pytest.raises(vs.ConfigError):
+    with pytest.raises(vs.ConfigError, match="must be a table"):
         vs.load([1])
 
 
@@ -384,3 +384,41 @@ def test_skipped_text_names_each_kind_and_is_empty_when_nothing_was_left_out():
 
 def test_a_non_finite_total_is_not_possible_from_the_bounds():
     assert math.isfinite(vs.cost(vs.MAX_TOKENS_PER_TURN, vs.MAX_TOKENS_PER_TURN, 1e6, 1e6))
+
+
+
+# ---- cases added after the first mutation table ----------------------------------------------------------------------
+
+def test_a_huge_benchmark_line_is_skipped_even_when_it_holds_a_usage_object(root, monkeypatch):
+    monkeypatch.setattr(vs, "MAX_LINE_BYTES", 5000)
+    big = json.dumps({"prompt_tokens": 5, "note": "x" * 40000, "usage": {"prompt_tokens": 999, "completion_tokens": 9}})
+    write_log(root, "bench/requests.jsonl", [req(10, 1), big])
+    s = vs.scan(root)
+    assert (s["turns"], s["prompt_tokens"]) == (1, 10) and s["skipped"]["long_lines"] == 1
+
+
+def test_usage_that_straddles_the_chunks_of_a_huge_line_is_still_found(root, monkeypatch):
+    cap = 1000
+    monkeypatch.setattr(vs, "MAX_LINE_BYTES", cap)
+    head, tail = turn(1, 424242, 4242, sent=["@@"]).split("@@")
+    # The first read takes cap+1 bytes and each later read takes cap, so a chunk boundary falls at 2*cap+1.
+    # Pad so that boundary lands inside the usage object, which is the end of the line.
+    pad = (2 * cap + 1) - 10 - len(head) - tail.index('"usage"')
+    line = head + "x" * pad + tail
+    start = line.index('"usage"')
+    assert start < 2 * cap + 1 < len(line) - 5, "the test line must put a chunk boundary inside usage"
+    write_log(root, "log/run.jsonl", [line])
+    s = vs.scan(root)
+    assert (s["turns"], s["prompt_tokens"], s["completion_tokens"]) == (1, 424242, 4242)
+
+
+def test_only_a_file_named_requests_jsonl_is_a_benchmark_log(root):
+    write_log(root, "bench/old-requests.jsonl", [req(10, 1)])
+    write_log(root, "bench/requests.jsonl.bak", [req(10, 1)])
+    assert vs.scan(root)["turns"] == 0
+
+
+def test_a_benchmark_file_with_no_usable_request_has_no_request_seconds(root):
+    write_log(root, "bench/requests.jsonl", [req(None, 5), req(5, None)])
+    s = vs.scan(root)
+    assert s["turns"] == 0 and s["request_s"] is None and s["skipped"]["no_usage"] == 2

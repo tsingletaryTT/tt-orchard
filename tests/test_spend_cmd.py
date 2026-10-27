@@ -169,3 +169,9 @@ def test_the_command_writes_nothing(tmp_path, probe):
     run(tmp_path, [str(probe), "--dir", str(tmp_path / "tg")])
     after = sorted(p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*"))
     assert set(after) - set(before) == {"bringup.toml"} and set(before) <= set(after)    # only the test's own config file is new
+
+
+
+def test_one_directory_gets_no_all_directories_line(tmp_path, probe):
+    code, text = run(tmp_path, [str(probe), "--dir", str(tmp_path / "none")])
+    assert code == 0 and "all 1 directories" not in text and "directories:" not in text
