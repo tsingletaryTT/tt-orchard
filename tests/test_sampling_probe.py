@@ -196,8 +196,44 @@ def test_a_session_line_on_the_greedy_request_alone_is_not_evidence_about_sample
     assert sp.summarize(rec)["verdict"] == "sampled-matches-greedy"
 
 
-def test_the_session_lines_do_not_make_different_texts_ignored_sampling():
-    assert sp.summarize(with_session_lines(record()))["verdict"] == "sampled-full-speed"
+def test_different_texts_with_the_session_lines_are_first_token_only_sampling_and_never_full_speed_or_slower():
+    """The DFlash2 loop samples the first token (the anchor) and verifies the rest by argmax, so two seeds can differ in their first token and then
+    continue differently without sampling being applied to the continuation. Equal text is not needed to see that."""
+    for rec in (with_session_lines(record()),
+                with_session_lines(record(a=entry(text=STORY, seconds=9.0), b=entry(text=OTHER, seconds=9.0)))):    # slower would otherwise apply
+        s = sp.summarize(rec)
+        assert s["verdict"] == "sampled-ignored" and s["first_token_only"] is True, s["verdict"]
+        assert "only the first token" in s["sentence"] and "only the first token" in s["card_sentence"]
+        assert s["card_sentence"] != sp.CARD_SENTENCES["sampled-ignored"]
+
+
+def test_different_texts_without_the_session_lines_keep_the_speed_verdicts():
+    assert sp.summarize(record())["verdict"] == "sampled-full-speed"
+    assert sp.summarize(record(a=entry(text=STORY, seconds=9.0), b=entry(text=OTHER, seconds=9.0)))["verdict"] == "sampled-slower"
+    assert sp.summarize(record())["first_token_only"] is False
+
+
+@pytest.mark.parametrize("names", [("sampled_a",), ("sampled_b",)])
+def test_different_texts_with_the_session_line_on_only_one_sampled_request_are_not_first_token_only(names):
+    assert sp.summarize(with_session_lines(record(), names))["verdict"] == "sampled-full-speed"
+
+
+def test_matching_text_with_the_session_lines_is_not_marked_first_token_only():
+    s = sp.summarize(with_session_lines(record(a=entry(text=STORY), b=entry(text=STORY))))
+    assert s["verdict"] == "sampled-ignored" and s["first_token_only"] is False
+    assert s["card_sentence"] == sp.CARD_SENTENCES["sampled-ignored"]
+
+
+def test_first_token_only_wins_over_the_missing_speed_check_as_matching_text_did():
+    rec = with_session_lines(record())
+    rec["requests"]["greedy"]["completion_tokens"] = None
+    assert sp.summarize(rec)["verdict"] == "sampled-ignored"
+
+
+def test_first_token_only_does_not_hide_a_refusal_a_blank_reply_or_a_loop():
+    assert sp.summarize(with_session_lines(record(a=refused("HTTP 400: no"))))["verdict"] == "sampled-refused"
+    assert sp.summarize(with_session_lines(record(a=entry(text=" "))))["verdict"] == "inconclusive"
+    assert sp.summarize(with_session_lines(record(a=entry(text="the " * 40))))["verdict"] == "sampled-incoherent"
 
 
 def test_a_high_temperature_request_that_differs_from_greedy_leaves_matching_text_unconfirmed():
