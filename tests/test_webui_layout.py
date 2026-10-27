@@ -109,7 +109,7 @@ def test_the_view_tabs_are_the_only_view_buttons():
     t = page()
     views = by_id(t, "view-orchard-btn").parent
     tabs = [n for n in t.root.walk() if "view-btn" in n.classes]
-    assert {n.attrs["id"] for n in tabs} == {"view-orchard-btn", "view-hardware-btn", "view-settings-btn"}
+    assert {n.attrs["id"] for n in tabs} == {"view-orchard-btn", "view-hardware-btn", "view-settings-btn", "view-telegraph-btn"}
     assert all(n.inside(views) for n in tabs)
 
 
@@ -130,7 +130,7 @@ def test_the_top_bar_order_is_chip_clock_style_then_the_primary_action():
     assert "topbar-right" in right.classes
     kids = [k for k in right.kids]
     ids_or_classes = [k.attrs.get("id") or sorted(k.classes)[0] for k in kids]
-    assert ids_or_classes == ["machine-chip", "clock", "mode-switch", "new-run-btn"]
+    assert ids_or_classes == ["spend-meter", "machine-chip", "clock", "mode-switch", "new-run-btn"]
 
 
 def test_the_style_switch_has_its_own_rules_in_both_styles():
