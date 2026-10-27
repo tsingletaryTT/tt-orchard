@@ -34,10 +34,14 @@ def _number(v) -> bool:
 
 def problems(record) -> list[str]:
     """Why the record is not well formed, or [] for a record that is well formed or absent."""
-    if record is None or (isinstance(record, dict) and not record.get("ran")):
+    if record is None:
         return []
     if not isinstance(record, dict):
         return [f"sampling_probe must be an object, got {record!r}"]
+    if not isinstance(record.get("ran"), bool):
+        return [f"sampling_probe.ran must be true or false, got {record.get('ran')!r}"]
+    if record["ran"] is False:
+        return []
     reqs = record.get("requests")
     if not isinstance(reqs, dict):
         return [f"sampling_probe.requests must be an object, got {reqs!r}"]
@@ -57,6 +61,34 @@ def problems(record) -> list[str]:
         for key in ("seconds", "completion_tokens"):
             if e.get(key) is not None and not _number(e[key]):
                 out.append(f"sampling_probe.requests.{name}.{key} must be a number or null")
+        out += _params_problems(name, e.get("params"))
+    seeds = [(reqs.get(n) or {}).get("params", {}).get("seed") for n in ("sampled_a", "sampled_b")
+             if isinstance((reqs.get(n) or {}).get("params"), dict)]
+    if len(seeds) == 2 and all(isinstance(x, int) and not isinstance(x, bool) for x in seeds) and seeds[0] == seeds[1]:
+        out.append("sampling_probe.requests.sampled_a and sampled_b must carry different seeds (params.seed)")
+    return out
+
+
+def _params_problems(name: str, params) -> list[str]:
+    """The request parameters the template recorded must be the ones the probe claims: temperature 0 and nothing else for the greedy request;
+    temperature above 0, top_p above 0 and below 1, and an integer seed for each sampled request."""
+    where = f"sampling_probe.requests.{name}.params"
+    if not isinstance(params, dict):
+        return [f"{where} must be an object"]
+    t = params.get("temperature")
+    if name == "greedy":
+        if not (_number(t) and t == 0 and set(params) == {"temperature"}):
+            return [f"{where} must be exactly temperature 0 for the greedy request, got {params!r}"]
+        return []
+    out = []
+    if not (_number(t) and t > 0):
+        out.append(f"{where}.temperature must be a number above 0 for a sampled request, got {t!r}")
+    p = params.get("top_p")
+    if not (_number(p) and 0 < p < 1):
+        out.append(f"{where}.top_p must be a number above 0 and below 1 for a sampled request, got {p!r}")
+    seed = params.get("seed")
+    if not (isinstance(seed, int) and not isinstance(seed, bool)):
+        out.append(f"{where}.seed must be an integer for a sampled request, got {seed!r}")
     return out
 
 
@@ -99,9 +131,9 @@ CARD_SENTENCES = {
     "sampled-refused": "The server refused a sampled request (temperature above 0, top-p below 1, with a seed). The error text is in the evidence file.",
     "sampled-incoherent": "The server accepted a sampled request, and its text repeats itself or is unreadable.",
     "inconclusive": ("The probe could not compare the speed of greedy and sampled requests: a request had no usable token count or timing, "
-                     "or a reply was too short."),
-    "sampled-ignored": ("The server accepted sampled requests, but sampling was not applied: two requests that differ only in seed returned the "
-                        "same text, so decoding is greedy."),
+                     "a reply was too short, or a reply was empty."),
+    "sampled-ignored": ("The server accepted sampled requests, but sampling was not applied: a sampled request returned the greedy text, or "
+                        "requests with different seeds returned the same text, so decoding is greedy."),
     "sampled-slower": "Sampled requests decoded more slowly than greedy requests. Both speeds are in the table above.",
     "sampled-full-speed": ("Sampled requests (temperature above 0, top-p below 1, with a seed) were served and two seeds gave different text. "
                            "Their speed is in the table above next to the speed of greedy requests."),
@@ -119,7 +151,7 @@ def _summarize(record) -> dict:
     request, a refused sampled request, incoherent sampled text, replies too short to judge, two seeds that gave the same text, a
     slower sampled speed, and otherwise full speed."""
     empty = {"greedy": None, "sampled": None, "ratio": None, "reasons": []}
-    if record is None or (isinstance(record, dict) and not record.get("ran")):
+    if record is None or (isinstance(record, dict) and record.get("ran") is False):
         return {**empty, "verdict": "not-run", "sentence": "The sampling probe did not run."}
     reasons = problems(record)
     if reasons:
@@ -137,6 +169,9 @@ def _summarize(record) -> dict:
     if refused:
         return {**out, "verdict": "sampled-refused",
                 "sentence": f"The server refused a sampled request (temperature 1.0, top-p 0.9, with a seed): {(refused[0].get('error') or 'no error text')[:200]}"}
+    if any(not e["text"].strip() for e in (g, a, b)):
+        return {**out, "verdict": "inconclusive",
+                "sentence": "A reply had no visible text (it was empty or only white space), so the probe could not say whether sampling was applied or how fast it ran."}
     if any(_loops(e["text"]) for e in (a, b)):
         return {**out, "verdict": "sampled-incoherent",
                 "sentence": "The sampled request was accepted and its text repeats itself or is unreadable."}

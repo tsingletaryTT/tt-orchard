@@ -103,6 +103,65 @@ def test_measure_hands_a_container_s_save_log_to_the_probe(sc, tmp_path, monkeyp
         assert m["sampling_probe"]["requests"][name]["drafter_log"].count("[dflash2-serve]") == 1
 
 
+# ---- the real Container.save_log against a fake `docker` whose stdout and stderr interleave over time ---------------------------------
+
+FAKE_DOCKER = """#!/usr/bin/env bash
+# `docker logs <cid>`: replay LOG (lines "out<TAB>text" or "err<TAB>text") to the stream each names, in order, like the real CLI.
+[ "$1" = "logs" ] || exit 0
+while IFS=$'\\t' read -r stream text; do
+  if [ "$stream" = "err" ]; then echo "$text" >&2; else echo "$text"; fi
+done < "$FAKE_DOCKER_LOG"
+"""
+
+
+@pytest.fixture
+def real_container(tmp_path, monkeypatch):
+    import importlib.util
+    from test_container_template import TEMPLATES
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    exe = bin_dir / "docker"
+    exe.write_text(FAKE_DOCKER)
+    exe.chmod(0o755)
+    docker_log = tmp_path / "docker-log.tsv"
+    docker_log.write_text("out\tboot one\nerr\tboot warning\n")
+    monkeypatch.setenv("PATH", f"{bin_dir}:{__import__('os').environ['PATH']}")
+    monkeypatch.setenv("FAKE_DOCKER_LOG", str(docker_log))
+    spec = importlib.util.spec_from_file_location("serve_and_compare_container_under_test", TEMPLATES / "serve_and_compare_container.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod, docker_log
+
+
+def test_the_saved_log_keeps_stdout_and_stderr_in_the_order_the_container_wrote_them(real_container, tmp_path):
+    mod, docker_log = real_container
+    docker_log.write_text("out\ta\nerr\tb\nout\tc\nerr\td\n")
+    log = tmp_path / "server.log"
+    mod.Container("abc", log).save_log()
+    assert log.read_text().splitlines() == ["a", "b", "c", "d"]
+
+
+def test_a_log_that_grows_in_both_streams_stays_append_stable_for_the_probe(sc, real_container, tmp_path):
+    """Each request makes the container write the drafter's session line on stdout, then a long warning on stderr, then another stdout line. With the streams written one
+    after the other, new stdout pushed the saved stderr down, so a starting offset taken earlier pointed into the wrong place."""
+    mod, state = sc
+    cmod, docker_log = real_container
+    log = tmp_path / "server.log"
+    c = cmod.Container("abc", log)
+
+    def fake_post(port, path, body):
+        with open(docker_log, "a", encoding="utf-8") as f:
+            f.write(f"out\t(EngineCore) INFO {LINE}\n" + "err\t" + "warning from a library, a long line of text " * 3 + "\n" + "out\trequest answered\n")
+        return {"choices": [{"text": "word " * 60, "finish_reason": "length"}], "usage": {"completion_tokens": 96}}
+
+    mod.post_json = fake_post
+    rec = mod.run_sampling_probe({"sampling_log_settle_s": 0}, 1, "m", log, refresh=c.save_log)
+    for name in sp.ENTRY_NAMES:
+        text = rec["requests"][name]["drafter_log"]
+        assert text.count("[dflash2-serve]") == 1, (name, text)
+    assert sp.summarize(rec)["greedy"]["drafter_accept_rate"] == pytest.approx(15 / 28)
+
+
 def test_a_plain_popen_has_no_save_log_and_measure_still_works(sc, tmp_path, monkeypatch):
     mod, state = sc
     log = tmp_path / "server.log"

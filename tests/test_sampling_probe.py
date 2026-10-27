@@ -25,11 +25,18 @@ def refused(error="HTTP 400: no"):
     return entry(text="", tokens=None, seconds=None, accepted=False, error=error)
 
 
+GREEDY_PARAMS = {"temperature": 0}
+SAMPLED_PARAMS = ({"temperature": 1.0, "top_p": 0.9, "seed": 1234}, {"temperature": 1.0, "top_p": 0.9, "seed": 4321})
+
+
 def record(greedy=None, a=None, b=None):
-    return {"ran": True, "prompt": "p", "max_tokens": 96,
-            "requests": {"greedy": greedy or entry(text=GREEDY, seconds=2.0),
-                         "sampled_a": a or entry(text=STORY, seconds=2.0),
-                         "sampled_b": b or entry(text=OTHER, seconds=2.0)}}
+    """A record shaped like the template's: the greedy request has temperature 0 and the two sampled requests carry temperature, top-p and different seeds."""
+    reqs = {"greedy": greedy or entry(text=GREEDY, seconds=2.0), "sampled_a": a or entry(text=STORY, seconds=2.0),
+            "sampled_b": b or entry(text=OTHER, seconds=2.0)}
+    for name, params in zip(sp.ENTRY_NAMES, (GREEDY_PARAMS, *SAMPLED_PARAMS)):
+        if not reqs[name]["params"]:
+            reqs[name]["params"] = dict(params)
+    return {"ran": True, "prompt": "p", "max_tokens": 96, "requests": reqs}
 
 
 def test_a_healthy_pair_is_full_speed_and_the_speeds_are_tokens_over_seconds():
@@ -62,6 +69,29 @@ def test_a_sampled_text_equal_to_the_greedy_text_means_sampling_was_ignored_even
 
 
 @pytest.mark.parametrize("which", ["greedy", "sampled_a", "sampled_b"])
+@pytest.mark.parametrize("blank", ["", "   ", "\n\n", " \n \t"])
+def test_a_reply_with_no_visible_text_is_inconclusive_whatever_the_token_count(which, blank):
+    rec = record()
+    rec["requests"][which]["text"] = blank
+    s = sp.summarize(rec)
+    assert s["verdict"] == "inconclusive", (which, blank, s["verdict"])
+    assert "empty" in s["card_sentence"] and "empty" in s["sentence"]
+
+
+def test_two_different_blank_sampled_replies_are_not_a_sampling_result():
+    s = sp.summarize(record(a=entry(text="  "), b=entry(text="\n\n")))
+    assert s["verdict"] == "inconclusive"
+
+
+def test_two_equal_blank_sampled_replies_are_not_called_ignored_sampling():
+    assert sp.summarize(record(a=entry(text="\n"), b=entry(text="\n")))["verdict"] == "inconclusive"
+
+
+def test_a_blank_reply_does_not_hide_a_refusal():
+    assert sp.summarize(record(a=refused("HTTP 400: no"), b=entry(text="")))["verdict"] == "sampled-refused"
+
+
+@pytest.mark.parametrize("which", ["greedy", "sampled_a", "sampled_b"])
 @pytest.mark.parametrize("damage", [{"completion_tokens": None}, {"seconds": None}, {"completion_tokens": 4}, {"seconds": 0}])
 def test_a_missing_speed_in_any_of_the_three_requests_is_inconclusive_not_full_speed(which, damage):
     rec = record()
@@ -82,6 +112,25 @@ def test_equal_seeds_texts_are_ignored_even_when_the_greedy_speed_is_missing():
     rec = record(a=entry(text=STORY), b=entry(text=STORY))
     rec["requests"]["greedy"]["completion_tokens"] = None
     assert sp.summarize(rec)["verdict"] == "sampled-ignored"
+
+
+def test_the_card_sentence_for_ignored_sampling_is_true_for_both_ways_it_is_found():
+    """One sampled reply equal to the greedy reply and the other different is ignored sampling, and the card must not say the two sampled replies were
+    identical. The sentence is the same for both branches, so it names both."""
+    by_seeds = sp.summarize(record(a=entry(text=STORY), b=entry(text=STORY)))
+    by_greedy = sp.summarize(record(a=entry(text=GREEDY), b=entry(text=OTHER)))
+    assert by_seeds["verdict"] == by_greedy["verdict"] == "sampled-ignored"
+    assert by_seeds["card_sentence"] == by_greedy["card_sentence"]
+    text = by_greedy["card_sentence"]
+    assert "greedy text" in text and "different seeds" in text and "not applied" in text
+    assert "two requests" not in text and "the two sampled replies" not in text
+
+
+def test_the_detailed_sentence_names_the_branch_that_was_found():
+    by_seeds = sp.summarize(record(a=entry(text=STORY), b=entry(text=STORY)))["sentence"]
+    by_greedy = sp.summarize(record(a=entry(text=GREEDY), b=entry(text=OTHER)))["sentence"]
+    assert "differ only in seed returned the same text" in by_seeds and "greedy text" not in by_seeds
+    assert "returned the greedy text" in by_greedy and "differ only in seed" not in by_greedy
 
 
 def test_ignored_wins_over_slower():
@@ -169,6 +218,68 @@ def test_string_and_null_values_of_those_fields_are_fine():
     for n in sp.ENTRY_NAMES:
         rec["requests"][n].update({"drafter_log": None, "error": None, "finish_reason": None})
     assert sp.problems(rec) == []
+
+
+def damaged(name, params):
+    rec = record()
+    if params is _MISSING:
+        del rec["requests"][name]["params"]
+    else:
+        rec["requests"][name]["params"] = params
+    return rec
+
+
+_MISSING = object()
+
+
+@pytest.mark.parametrize("name, params", [
+    ("greedy", {"temperature": 0.7}), ("greedy", {"temperature": 0, "seed": 1}), ("greedy", {"temperature": "0"}), ("greedy", {}),
+    ("greedy", _MISSING), ("greedy", "greedy"), ("greedy", {"temperature": True}),
+    ("sampled_a", {"temperature": 0, "seed": 1234}), ("sampled_a", {"temperature": 0, "top_p": 0.9, "seed": 1234}),
+    ("sampled_a", {"temperature": float("inf"), "top_p": 0.9, "seed": 1234}), ("sampled_a", {"temperature": 1.0, "seed": 1234}),
+    ("sampled_a", {"temperature": 1.0, "top_p": 1.0, "seed": 1234}), ("sampled_a", {"temperature": 1.0, "top_p": 0.9}),
+    ("sampled_a", {"temperature": 1.0, "top_p": 0.9, "seed": "1234"}), ("sampled_a", {"temperature": 1.0, "top_p": 0.9, "seed": 1.5}),
+    ("sampled_a", {"temperature": 1.0, "top_p": 0.9, "seed": True}), ("sampled_a", {"temperature": -1.0, "top_p": 0.9, "seed": 1}),
+    ("sampled_a", {"temperature": 1.0, "top_p": 0.0, "seed": 1}), ("sampled_b", _MISSING), ("sampled_b", {}),
+    ("sampled_b", {"temperature": float("nan"), "top_p": 0.9, "seed": 4321}),
+    ("sampled_b", {"temperature": 1.0, "top_p": 0.9, "seed": 1234}),                 # the same seed as sampled_a
+])
+def test_the_recorded_request_parameters_must_say_what_the_probe_claims(name, params):
+    rec = damaged(name, params)
+    reasons = sp.problems(rec)
+    assert reasons and any("params" in r or "seed" in r for r in reasons), (name, params, reasons)
+    assert sp.summarize(rec)["verdict"] == "malformed"
+
+
+def test_the_real_probe_parameters_are_valid():
+    assert sp.problems(record()) == []
+
+
+def test_all_three_requests_at_temperature_zero_with_different_texts_are_not_a_sampling_result():
+    rec = record()
+    for n in sp.ENTRY_NAMES:
+        rec["requests"][n]["params"] = {"temperature": 0}
+    assert sp.summarize(rec)["verdict"] == "malformed"
+
+
+@pytest.mark.parametrize("ran", [0, [], "false", "true", "", None, 1])
+def test_a_ran_marker_that_is_not_a_boolean_is_malformed_and_never_skipped(ran):
+    rec = record()
+    rec["ran"] = ran
+    assert any("ran" in r for r in sp.problems(rec)), ran
+    s = sp.summarize(rec)
+    assert s["verdict"] == "malformed" and s["card_sentence"] is None
+
+
+def test_a_present_record_with_no_ran_marker_is_malformed():
+    rec = record()
+    del rec["ran"]
+    assert sp.summarize(rec)["verdict"] == "malformed"
+    assert sp.problems({}) and sp.summarize({})["verdict"] == "malformed"
+
+
+def test_only_an_explicit_false_skips_a_present_record():
+    assert sp.problems({"ran": False}) == [] and sp.summarize({"ran": False})["verdict"] == "not-run"
 
 
 def test_a_malformed_record_is_not_summarised_as_a_verdict():
