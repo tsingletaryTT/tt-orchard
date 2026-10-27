@@ -8,9 +8,9 @@ seconds (ledger timestamps are whole seconds, UTC).
 """
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
+from orchard import safeio
 from orchard.narrate import TIER_ACTOR
 from orchard.stages import STAGES, ledger_ts
 
@@ -125,10 +125,15 @@ def next_step(state: str) -> str:
     return NEXT.get(state, "")
 
 
+MAX_RESULT_BYTES = 8 * 1024 * 1024    # results files are small; a larger one is not read
+
+
 def _read(path: Path):
+    """The JSON in a results file, or None when it is missing or cannot be used (a link, a FIFO, a file over MAX_RESULT_BYTES, NaN or
+    Infinity, a repeated key, very deep nesting; see orchard/safeio.py)."""
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        return safeio.read_json(path, max_bytes=MAX_RESULT_BYTES)
+    except safeio.SafeReadError:
         return None
 
 

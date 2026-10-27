@@ -193,6 +193,7 @@ def run_limited(code: str, *, timeout: float = 60, address_space: int = 2 << 30)
 
 
 
+
 # ------------------------------------------------------------------------------------------------------------ the registry
 
 @dataclass(frozen=True)
@@ -750,7 +751,6 @@ KNOWN_DEFECTS: dict[int, dict[str, list[str]]] = {
         'opvariants.load_data': ['huge_exponent', 'nan', 'infinity', 'negative_infinity', 'nan_in_object', 'lone_surrogate', 'lone_surrogate_key'],
         'package._json': ['nan_in_object', 'lone_surrogate_key'],
         'research.http.Fetcher.json': ['huge_exponent', 'nan', 'infinity', 'negative_infinity', 'nan_in_object', 'lone_surrogate', 'lone_surrogate_key'],
-        'run_view._read': ['huge_exponent', 'nan', 'infinity', 'negative_infinity', 'nan_in_object', 'lone_surrogate', 'lone_surrogate_key'],
         'skillsfresh.Cache': ['nan_in_object', 'lone_surrogate_key'],
         'stages._evidence_json': ['nan_in_object', 'lone_surrogate_key'],
         'stages._load': ['nan_in_object', 'lone_surrogate_key'],
@@ -783,7 +783,6 @@ KNOWN_DEFECTS: dict[int, dict[str, list[str]]] = {
         'research.headers.read_model (hostile index)': ['nest_100000'],
         'research.headers.shard_header': ['nest_100000'],
         'research.http.Fetcher.json': ['nest_1000', 'nest_1000_object', 'nest_100000'],
-        'run_view._read': ['nest_1000', 'nest_1000_object', 'nest_100000'],
         'skillsfresh.Cache': ['nest_1000_object'],
         'stages._evidence_json': ['nest_1000_object', 'nest_100000'],
         'stages._load': ['nest_1000_object', 'nest_100000'],
@@ -818,7 +817,6 @@ KNOWN_DEFECTS: dict[int, dict[str, list[str]]] = {
         'package.read_reported': ['big_string_50mb', 'link_to_dev_zero'],
         'package.stage_2_vocab': ['big_string_50mb', 'link_to_dev_zero'],
         'prompt_suite.load_suite': ['big_string_50mb', 'link_to_dev_zero'],
-        'run_view._read': ['big_string_50mb', 'link_to_dev_zero'],
         'stages._load': ['big_string_50mb', 'link_to_dev_zero'],
         'stages._read_json': ['big_string_50mb', 'link_to_dev_zero'],
         'stages._suite_reasons_in': ['big_string_50mb', 'link_to_dev_zero'],
@@ -852,7 +850,6 @@ KNOWN_DEFECTS: dict[int, dict[str, list[str]]] = {
         'package.read_reported': ['fifo'],
         'package.stage_2_vocab': ['fifo'],
         'prompt_suite.load_suite': ['fifo'],
-        'run_view._read': ['fifo'],
         'stages._evidence_json': ['fifo'],
         'stages._load': ['fifo'],
         'stages._read_json': ['fifo'],
