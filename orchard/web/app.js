@@ -223,6 +223,7 @@ function renderMachineChip(m, all, free) {
 function usd(value) {
   const v = Number(value) || 0;
   if (v === 0) return "$0.00";
+  if (v < 0.0001) return "<$0.0001";                // four decimals would show $0.0000 for a real cost
   return v < 0.01 ? `$${v.toFixed(4)}` : `$${v.toFixed(2)}`;
 }
 

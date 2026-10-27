@@ -29,10 +29,13 @@ TONE = {"off": "dim", "ok": "good", "near": "warn", "capped": "bad", "problem": 
 
 
 def usd(value) -> str:
-    """Dollars with enough digits that a small cost never shows as zero."""
+    """Dollars. Zero is "$0.00", a positive amount under a hundredth of a cent is "<$0.0001" (four decimals would round it
+    to $0.0000 and hide the spend), and the rest has four decimals under a cent and two above."""
     value = float(value or 0)
     if value == 0:
         return "$0.00"
+    if value < 0.0001:
+        return "<$0.0001"
     return f"${value:.4f}" if value < 0.01 else f"${value:.2f}"
 
 

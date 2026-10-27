@@ -488,7 +488,8 @@ def test_a_linked_run_ledger_is_not_followed(root, tmp_path):
 # ---- money formatting ---------------------------------------------------------------------------------------------
 
 @pytest.mark.parametrize("value,text", [(0, "$0.00"), (0.0035, "$0.0035"), (0.004, "$0.0040"), (0.5, "$0.50"),
-                                        (12.349, "$12.35"), (0.01, "$0.01")])
+                                        (12.349, "$12.35"), (0.01, "$0.01"), (0.0001, "$0.0001"),
+                                        (0.00009999, "<$0.0001"), (0.00004, "<$0.0001"), (1e-9, "<$0.0001")])
 def test_dollars_are_written_with_enough_digits_to_be_nonzero(value, text):
     assert view.usd(value) == text
 

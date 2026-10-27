@@ -89,6 +89,8 @@ def test_a_cap_in_a_cost_unit_matches_the_servers_dollar_rule():
     js = JS()
     body = fn_body(js, "function usd")
     assert "v === 0" in body and "v < 0.01" in body and "toFixed(4)" in body and "toFixed(2)" in body
+    assert 'if (v < 0.0001) return "<$0.0001";' in body, "a real cost under 0.0001 must not show as $0.0000"
+    assert body.index("v < 0.0001") < body.index("v < 0.01")
 
 
 # ---- colour: both styles, light and dark, 4.5:1 -------------------------------------------------------------------------------
