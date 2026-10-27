@@ -796,7 +796,10 @@ def read_run(run_dir, graft_mtp: bool = False, no_graft_mtp: bool = False) -> Ru
                      Path(cfg.get("base_snapshot") or ""), model_has_mtp, None, _stage_2_grafted(run), vocab=stage_2_vocab(run))
     decision = read_decision(run / "stages/2")
     decided = decision is not None and decision["choice"] == "graft"
-    if no_graft_mtp and (decided or facts.stage_2_grafted):
+    # A drafter-off sampling decision supersedes what stage 2's own build suggests: the sampling trial builds its variant without the graft, so
+    # a stage 2 that grafted (or an earlier staged package that did) no longer describes the package. Only an explicit request conflicts with it.
+    off = sampling_choice.drafter_off_chosen(run)
+    if no_graft_mtp and (decided or (facts.stage_2_grafted and not off)):
         why = ("stage 2's graft trial chose the graft and stage 4's bundle configurations were built with it, so a package without it "
                "would not be the configuration those results describe; run again with --no-graft-trial to skip the trial and decide "
                "on the safe configuration from the start" if decided else
@@ -805,10 +808,10 @@ def read_run(run_dir, graft_mtp: bool = False, no_graft_mtp: bool = False) -> Ru
     trial_ran = decision is not None and decision.get("trial") is not None
     facts = replace(facts, graft_decision=decision["choice"] if trial_ran else None,
                     sampling_decision=sampling_choice.read_decision(run / "stages/2"))
-    if sampling_choice.drafter_off_chosen(run) and (graft_mtp or decided or facts.stage_2_grafted or _package_grafted(run)):
+    if off and (graft_mtp or decided):
         raise PackageError("stage 2's sampling decision chose the drafter-off configuration (the model needs sampling), and a graft keeps the "
                            "drafter on; the two ask for opposite packages. Run again with --no-graft-trial, or with --sampling not-needed")
-    if not no_graft_mtp and (graft_mtp or decided or facts.stage_2_grafted or _package_grafted(run)):
+    if not no_graft_mtp and not off and (graft_mtp or decided or facts.stage_2_grafted or _package_grafted(run)):
         # The drafter and on-device sampling are on in a grafted package, whatever stage 2's run.sh says.
         facts = replace(facts, drafter_off=False, host_sampling=False,
                         graft=plan_graft(nearest_model, facts.base_snapshot, snap))
