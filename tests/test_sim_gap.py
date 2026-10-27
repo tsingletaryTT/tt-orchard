@@ -270,7 +270,8 @@ def compile_failure_writer(calls):
         if "--out" in argv:
             Path(argv[argv.index("--out") + 1]).write_text(json.dumps(COMPILE_ERROR))
             with open(kw["log_path"], "a") as f:
-                f.write("error: list elements must be constants\n")
+                f.write("PROGRESS import\nPROGRESS open_device\nPROGRESS set seed0\nPROGRESS run seed0\n"
+                        "error: list elements must be constants\n")
             return kp.Watched(0, None, False, 1.0)
         with open(kw["log_path"], "a") as f:
             f.write("PASSED!\n")
