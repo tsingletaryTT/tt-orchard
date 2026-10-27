@@ -251,6 +251,36 @@ def test_the_recorded_request_parameters_must_say_what_the_probe_claims(name, pa
     assert sp.summarize(rec)["verdict"] == "malformed"
 
 
+BAD_ENTRIES = ["invalid", [], [1], 5, 1.5, None, True]
+
+
+@pytest.mark.parametrize("name", ["greedy", "sampled_a", "sampled_b"])
+@pytest.mark.parametrize("bad", BAD_ENTRIES)
+def test_a_request_entry_that_is_not_an_object_gives_reasons_and_never_raises(name, bad):
+    rec = record()
+    rec["requests"][name] = bad
+    reasons = sp.problems(rec)
+    assert any(name in r for r in reasons), reasons
+    s = sp.summarize(rec)
+    assert s["verdict"] == "malformed" and s["card_sentence"] is None
+
+
+@pytest.mark.parametrize("bad", BAD_ENTRIES)
+def test_a_params_value_that_is_not_an_object_never_raises_in_the_seed_check(bad):
+    rec = record()
+    rec["requests"]["sampled_a"]["params"] = bad
+    rec["requests"]["sampled_b"]["params"] = bad
+    assert any("params" in r for r in sp.problems(rec))
+
+
+def test_both_sampled_entries_broken_in_different_ways_still_reports_both():
+    rec = record()
+    rec["requests"]["sampled_a"] = "invalid"
+    rec["requests"]["sampled_b"] = None
+    reasons = sp.problems(rec)
+    assert any("sampled_a" in r for r in reasons) and any("sampled_b" in r for r in reasons)
+
+
 def test_the_real_probe_parameters_are_valid():
     assert sp.problems(record()) == []
 

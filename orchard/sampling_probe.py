@@ -62,8 +62,8 @@ def problems(record) -> list[str]:
             if e.get(key) is not None and not _number(e[key]):
                 out.append(f"sampling_probe.requests.{name}.{key} must be a number or null")
         out += _params_problems(name, e.get("params"))
-    seeds = [(reqs.get(n) or {}).get("params", {}).get("seed") for n in ("sampled_a", "sampled_b")
-             if isinstance((reqs.get(n) or {}).get("params"), dict)]
+    seeds = [reqs[n]["params"].get("seed") for n in ("sampled_a", "sampled_b")
+             if isinstance(reqs.get(n), dict) and isinstance(reqs[n].get("params"), dict)]
     if len(seeds) == 2 and all(isinstance(x, int) and not isinstance(x, bool) for x in seeds) and seeds[0] == seeds[1]:
         out.append("sampling_probe.requests.sampled_a and sampled_b must carry different seeds (params.seed)")
     return out
