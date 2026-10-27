@@ -313,6 +313,21 @@ def test_both_sampled_requests_with_the_same_other_parameters_and_different_seed
     assert sp.problems(rec) == []
 
 
+@pytest.mark.parametrize("bad", [96.5, -1, -0.5, 96.0, True, "96", float("nan")])
+def test_a_completion_token_count_must_be_a_non_negative_integer_or_null(bad):
+    rec = record()
+    rec["requests"]["sampled_a"]["completion_tokens"] = bad
+    assert any("completion_tokens" in r for r in sp.problems(rec)), bad
+    assert sp.summarize(rec)["verdict"] == "malformed"
+
+
+@pytest.mark.parametrize("ok", [0, 1, 96, None])
+def test_a_zero_positive_or_null_token_count_is_well_formed(ok):
+    rec = record()
+    rec["requests"]["sampled_a"]["completion_tokens"] = ok
+    assert not any("completion_tokens" in r for r in sp.problems(rec))
+
+
 def test_the_real_probe_parameters_are_valid():
     assert sp.problems(record()) == []
 

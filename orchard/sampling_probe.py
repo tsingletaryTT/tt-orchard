@@ -58,9 +58,11 @@ def problems(record) -> list[str]:
         for key in ("drafter_log", "error", "finish_reason"):
             if e.get(key) is not None and not isinstance(e[key], str):
                 out.append(f"sampling_probe.requests.{name}.{key} must be a string or null")
-        for key in ("seconds", "completion_tokens"):
-            if e.get(key) is not None and not _number(e[key]):
-                out.append(f"sampling_probe.requests.{name}.{key} must be a number or null")
+        if e.get("seconds") is not None and not _number(e["seconds"]):
+            out.append(f"sampling_probe.requests.{name}.seconds must be a number or null")
+        tokens = e.get("completion_tokens")
+        if tokens is not None and not (isinstance(tokens, int) and not isinstance(tokens, bool) and tokens >= 0):
+            out.append(f"sampling_probe.requests.{name}.completion_tokens must be a non-negative integer or null")
         out += _params_problems(name, e.get("params"))
     seeds = [reqs[n]["params"].get("seed") for n in ("sampled_a", "sampled_b")
              if isinstance(reqs.get(n), dict) and isinstance(reqs[n].get("params"), dict)]
