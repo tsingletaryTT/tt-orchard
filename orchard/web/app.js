@@ -356,6 +356,7 @@ function renderTelegraph() {
       [spendText({ cost_usd: p.cost_usd, unknown_cost: p.cost_unknown_calls }), "num"],
       [`${p.helped} yes · ${p.not_helped} no`, null], [`${p.percent}%${p.at_cap ? " (at its cap)" : ""}`, "num cap"]], p.at_cap ? "bad" : p.near ? "warn" : null));
   }
+  if (t.problems_hidden) bp.append(tgRow([[`${plural(t.problems_hidden, "more problem")} not shown. The state and the closest cap count every problem.`, "muted"], ["", ""], ["", ""], ["", ""], ["", ""], ["", ""]]));
   if (!t.problems.length) bp.append(tgRow([["No calls yet", "muted"], ["", ""], ["", ""], ["", ""], ["", ""], ["", ""]]));
 
   const c = t.config;

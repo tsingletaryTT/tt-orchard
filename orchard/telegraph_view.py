@@ -143,10 +143,9 @@ def _problem_rows(records: list[dict], acct: dict, verdict: dict, cfg: tg.Config
             full = near = True                    # the producer refuses this problem's calls while a cost is unknown
         row["percent"], row["near"], row["at_cap"] = percent, near, full
         rows.append(row)
-    rows.sort(key=lambda r: (-r["calls"], r["name"]))
-    rows = rows[:PROBLEMS_MAX]
-    for row in rows:
-        row["name"] = _clean(row["name"], redact, TEXT_MAX)
+    # Every problem is returned: the state and the closest cap are worked out over all of them, and only the table is cut.
+    # Problems at their cap come first, then the ones at 80 percent or more, then the busiest.
+    rows.sort(key=lambda r: (not r["at_cap"], not r["near"], -r["calls"], r["name"]))
     return rows
 
 
@@ -316,7 +315,7 @@ def build(cfg: tg.Config, directory, *, environ, redact=lambda t: t, hostname: s
     closest = max(caps, key=lambda c: (c["percent"], -caps.index(c)), default=None)
     if state == "near" and not any(c["tone"] == "warn" for c in caps):
         hot = max(problems, key=lambda p: p["percent"])
-        cap_text = f"problem {hot['name']} at {hot['percent']}% of its cap"
+        cap_text = f"problem {_clean(hot['name'], redact, TEXT_MAX)} at {hot['percent']}% of its cap"
     else:
         cap_text = _cap_phrase(closest) if closest else ""
     meter = _meter(state, _spend_text(acct["cost"], acct["unknown_cost"]), acct["calls"], cap_text, reason, key, error)
@@ -341,7 +340,8 @@ def build(cfg: tg.Config, directory, *, environ, redact=lambda t: t, hostname: s
     }
     return {
         "state": state, "tone": TONE[state], "enabled": cfg.enabled, "meter": meter, "config": config, "key": key,
-        "caps": caps, "problems": problems, "by_model": by_model,
+        "caps": caps, "problems": [{**p, "name": _clean(p["name"], redact, TEXT_MAX)} for p in problems[:PROBLEMS_MAX]],
+        "problems_hidden": max(0, len(problems) - PROBLEMS_MAX), "by_model": by_model,
         "summary": {k: v for k, v in summary.items() if k not in ("by_model", "by_problem")},
         "spend": {"cost_usd": acct["cost"], "unknown_cost": acct["unknown_cost"], "calls": acct["calls"],
                   "tokens": acct["tokens"], "unsettled": summary["unsettled"], "torn": summary["torn"],
