@@ -19,7 +19,7 @@ import os
 import socket
 from pathlib import Path
 
-from orchard import graft_trial
+from orchard import graft_trial, sampling_choice
 from orchard.bringup_config import slug
 from orchard.nearest import read_installed
 
@@ -236,6 +236,8 @@ def draft_stage4(*, run_dir, tt_model_root, cache_root, hf_home, operator_home, 
         return {}, None, problems
     want = _repo(nearest)
     grafted = graft_trial.chosen(run_dir)
+    # Stage 2's sampling decision (orchard/sampling_choice.py): when it chose the drafter-off configuration, every configuration is served that way.
+    drafter = {"drafter": "off"} if sampling_choice.drafter_off_chosen(run_dir) else {}
     home = Path(cache_root) / slug(_repo(model))
     common = {"run_dir": str(run_dir), "nearest_model_id": want, "base_snapshot": snapshots["base"],
               "new_snapshot": snapshots["model"], "new_model_id": model, "hf_home": str(hf_home),
@@ -252,7 +254,7 @@ def draft_stage4(*, run_dir, tt_model_root, cache_root, hf_home, operator_home, 
                           "tt_cache": cache(fit[0].name), "port": FIRST_PORT + n,
                           # Stage 2's graft decision (orchard/graft_trial.py) covers the nearest model's own bundle, the server the trial
                           # measured. A container package below is another server and keeps its configuration.
-                          **({"graft_mtp": True} if grafted else {})}
+                          **({"graft_mtp": True} if grafted else {}), **drafter}
             continue
         if len(fit) > 1:
             notes.append(f"the {n}-chip configuration: more than one bundle serves {want}: "
@@ -283,7 +285,7 @@ def draft_stage4(*, run_dir, tt_model_root, cache_root, hf_home, operator_home, 
             notes.append(f"the {n}-chip configuration: {pick['name']} names no default profile")
             continue
         configs[n] = {**common, "package": pick["name"], "profile": pick["profile"], "chips": n,
-                      "operator_home": str(operator_home), "tt_cache": cache(pick["name"]), "port": FIRST_PORT + n}
+                      "operator_home": str(operator_home), "tt_cache": cache(pick["name"]), "port": FIRST_PORT + n, **drafter}
     tests = None
     if configs and not notes:
         tests = {"tests": [{"chips": n, "script": "serve_and_compare.py" if "bundle_dir" in c

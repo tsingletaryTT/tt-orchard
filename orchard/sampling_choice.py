@@ -215,25 +215,35 @@ def decide(need_: dict, current: dict, variant: dict | None = None, *, variant_n
                                    f"{floor:g} tokens/s, so it is chosen{tail}")
 
 
+NEED_WORDS = {"operator": "the operator said so", "card-warning": "the model card warns against greedy decoding",
+              "generation_config": "the model's own generation_config.json sets sampling defaults",
+              "card-hints": "the model card recommends sampling settings", "none": "nothing in the model's files says it does"}
+
+
 def card_sentence(decision: dict) -> str:
-    """The package card's plain sentence for the choice, built from the recorded numbers. It carries the marker phrase the gate looks for."""
+    """The package card's plain sentences for the choice. They carry the marker phrase the gate looks for and no number: the card's Numbers table is
+    the only place for a measured speed (the card gate refuses one in prose), and the sampling rows in that table are the ones this sentence points to."""
     n = decision.get("numbers") or {}
-    floor = (decision.get("thresholds") or {}).get("min_tok_s")
+    why = NEED_WORDS.get(decision.get("need_source"), "the sampling decision says so")
     if decision.get("choice") == "drafter-off":
-        s = (f"Stage 2 chose the drafter-off configuration because the model needs sampling and the configuration it first served ignores it "
-             f"(speed {_fmt(n.get('served_tok_s'))}). The drafter-off configuration decodes at {_fmt(n.get('variant_tok_s'))}.")
+        s = (f"Stage 2 chose the drafter-off configuration. The model needs sampling ({why}), and the configuration stage 2 first served, with the "
+             "speculative drafter on, ignored sampled requests. The drafter-off configuration applies sampling and decodes above the usability floor "
+             "in `orchard/defaults.py`. Its speeds are in the Numbers table, in the rows marked sampling probe.")
+    elif not decision.get("needed"):
+        s = f"Stage 2 kept the configuration it served. Sampling is not needed for this model ({why})."
+    elif n.get("served_verdict") in APPLIED:
+        s = (f"Stage 2 kept the configuration it served. The model needs sampling ({why}) and this configuration applies it. "
+             "The speeds are in the Numbers table, in the rows marked sampling probe.")
     else:
-        s = f"Stage 2 kept the configuration it served ({_fmt(n.get('served_tok_s'))})."
-        s += (" Sampling is not needed for this model." if not decision.get("needed") else
-              " The model needs sampling and this configuration applies it." if n.get("served_verdict") in APPLIED else
-              " The model needs sampling.")
+        s = f"Stage 2 kept the configuration it served. The model needs sampling ({why})."
     flag = decision.get("flag")
-    if flag in ("no-variant-serves-purpose", "below-floor"):
-        s += (f" This package does not do what the model needs: {decision.get('reason')}.")
+    if flag == "no-variant-serves-purpose":
+        s += (" This package does not do what the model needs: no configuration that stage 2 measured both applies sampling and decodes above the "
+              "usability floor, so the faster one is kept. Read `sampling-decision.json` in the evidence before relying on it.")
+    elif flag == "below-floor":
+        s += " This package applies sampling but decodes below the usability floor. Read `sampling-decision.json` in the evidence before relying on it."
     elif flag in ("unverified", "variant-not-tried"):
-        s += f" This choice is not fully verified: {decision.get('reason')}."
-    if floor is not None and decision.get("choice") == "drafter-off":
-        s += f" The usability floor was {floor:g} tokens/s."
+        s += " This choice is not fully verified: a verdict or a speed was not measured. `sampling-decision.json` in the evidence says which."
     return s
 
 

@@ -189,14 +189,40 @@ def test_the_decision_carries_need_numbers_thresholds_and_the_evidence_it_read()
     assert d["numbers"]["served_drafter"] == "on"
 
 
-def test_the_card_sentence_states_the_choice_and_the_numbers():
+def test_the_card_sentence_states_the_choice_and_the_reason_without_a_number_in_prose():
+    """The card's Numbers table is the only place for a measured number, and the card gate refuses a speed in prose."""
+    from orchard.card_use import PERF_IN_PROSE
     chosen = sc.decide(NEEDED, side(), variant())
     s = sc.card_sentence(chosen)
-    assert "chose the drafter-off configuration" in s and "17.2" in s and "59" in s
+    assert "chose the drafter-off configuration" in s and "needs sampling" in s and "ignored" in s
+    assert "generation_config.json" in s and "Numbers table" in s
     kept = sc.decide(NOT_NEEDED, side())
-    assert "kept the configuration it served" in sc.card_sentence(kept)
+    assert "kept the configuration it served" in sc.card_sentence(kept) and "not needed" in sc.card_sentence(kept)
+    applied = sc.decide(NEEDED, side(drafter="off", verdict="sampled-full-speed", greedy=18, sampled=17))
+    assert "applies it" in sc.card_sentence(applied)
     flagged = sc.decide(NEEDED, side(), variant(greedy=9.0, sampled=8.0))
-    assert "does not do what" in sc.card_sentence(flagged) or "neither" in sc.card_sentence(flagged)
+    assert "does not do what the model needs" in sc.card_sentence(flagged)
+    for d in (chosen, kept, applied, flagged, sc.decide(NEEDED, side(), None, variant_note="x")):
+        assert not PERF_IN_PROSE.search(sc.card_sentence(d)), sc.card_sentence(d)
+
+
+def test_each_need_source_is_named_in_plain_words_in_the_card_sentence():
+    for source, words in (("operator", "operator"), ("card-warning", "warns against greedy"), ("generation_config", "generation_config.json"),
+                          ("card-hints", "recommends")):
+        n = {**NEEDED, "source": source}
+        assert words in sc.card_sentence(sc.decide(n, side(), variant()))
+
+
+def test_an_unverified_or_untried_choice_says_so_in_the_card_sentence():
+    unverified = sc.decide(NEEDED, side(), variant(verdict="inconclusive"))
+    assert "not fully verified" in sc.card_sentence(unverified)
+    untried = sc.decide(NEEDED, side(), None, variant_note="skipped")
+    assert "not fully verified" in sc.card_sentence(untried)
+
+
+def test_a_below_floor_keep_says_the_configuration_decodes_below_the_floor():
+    s = sc.card_sentence(sc.decide(NEEDED, side(drafter="off", verdict="sampled-full-speed", greedy=9.0, sampled=8.0)))
+    assert "below the usability floor" in s
 
 
 def test_the_marker_phrases_are_the_ones_the_card_sentence_uses():

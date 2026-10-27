@@ -846,6 +846,7 @@ def gate_mesh_swap(stage_dir, run_dir, required=None) -> GateResult:
         if isinstance(report, dict):
             reasons += _suite_reasons(report, run_dir, f"{where}: ")
         reasons += _graft_reasons(stage_dir, run_dir, n, where)
+        reasons += _sampling_reasons(report, run_dir, where)
         if trim is not None:
             cdir = Path(stage_dir) / "configs" / str(n)
             reasons += _trim_reasons(trim, _read_json(cdir / "model-dir-sources.json"),
@@ -878,6 +879,20 @@ def _graft_reasons(stage_dir, run_dir, n: int, where: str) -> list[str]:
     if built and not chose:
         return [f"{where}: configs/{n}/model-dir-sources.json records a grafted head, but stage 2 did not choose the graft"]
     return []
+
+
+def _sampling_reasons(report, run_dir, where: str) -> list[str]:
+    """A configuration was served the way stage 2's sampling decision says (issue 107). When stage 2 chose the drafter-off configuration, the swap
+    check's `serving` record (written by the template from the run script it served with) must say the drafter was off. A decision of keep, or none,
+    asks nothing."""
+    if not sampling_choice.drafter_off_chosen(run_dir):
+        return []
+    serving = report.get("serving") if isinstance(report, dict) else None
+    got = serving.get("drafter") if isinstance(serving, dict) else None
+    if got == "off":
+        return []
+    return [f"{where}: stage 2 chose the drafter-off configuration because the model needs sampling ({sampling_choice.DECISION_FILE}), so "
+            f"swap-check.json serving.drafter must be 'off', got {got!r}"]
 
 
 def _serving_type(cfg) -> str | None:
