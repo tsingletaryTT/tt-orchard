@@ -1491,6 +1491,8 @@ def _call_note(c: dict) -> str:
     parts = []
     if c.get("timed_out"):
         parts.append("timed out")
+    if c.get("lease_upper_bound"):
+        parts.append("chip time is an upper bound (interrupted while the run held the board)")
     if c.get("queued_polls"):
         parts.append(f"{c['queued_polls']} tries, tickets " + ("cancelled" if c.get("cancelled") else "NOT all cancelled"))
     if c.get("outcome") not in ("pass", "busy") and c.get("first_line"):

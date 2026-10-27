@@ -174,11 +174,14 @@ class HardwareCheck:
         start = self.clock()
         polls, cancelled = 0, True
         started = False
+        run_began = None                            # the clock when a run began, while one is in progress
         try:
             while True:
                 timeout = min(p.call_timeout_s, p.lease_s - self.lease_used - p.cleanup_s)
                 waited = self.clock() - start
+                run_began = self.clock()
                 hw, event, text = self.run(k, timeout)
+                run_began = None
                 if event != "queued":
                     break
                 polls += 1
@@ -193,8 +196,13 @@ class HardwareCheck:
             started = True
         finally:
             if not started:                         # an interrupt or an error inside run: keep what is known
+                # A run that was in progress may have held the board until now: count that time, as an upper bound
+                # (the run may have stopped earlier, and the lease release may still be going on).
+                held = max(self.clock() - run_began, 0.0) if run_began is not None else 0.0
+                self.lease_used += held
                 self._record(k=k, counted=True, outcome="interrupted", note=note, kernel_sha256=sha,
-                             total_s=round(self.clock() - start, 1), queued_polls=polls,
+                             total_s=round(self.clock() - start, 1), queued_polls=polls, lease_s=round(held, 1),
+                             lease_upper_bound=True if run_began is not None else None,
                              cancelled=cancelled if polls else None)
         total = round(self.clock() - start, 1)
         if event == "queued":
