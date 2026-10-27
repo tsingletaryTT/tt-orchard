@@ -330,3 +330,35 @@ def test_the_page_says_the_folder_listing_was_cut_short(tmp_path, browser, monke
         pg.goto(f"http://127.0.0.1:{s.port}/?mode=operator#telegraph")
         expect(pg.locator("#tg-local-note")).to_contain_text("The folder listing was cut short")
     ctx.close()
+
+
+def test_the_page_says_how_many_runs_the_table_leaves_out(tmp_path, browser, monkeypatch):
+    from orchard import virtualspend_view as view
+    monkeypatch.setattr(view, "MAX_ROWS", 2)
+    r = tmp_path / "orchard-runs"
+    for i in range(5):
+        write_log(r, f"kprobe/p{i}/op/attempt-1/log/p.jsonl", [turn(1, 1_000_000 * (i + 1), 0)])
+    ctx, pg = new_page(browser)
+    with Served(app_for(r)) as s:
+        pg.goto(f"http://127.0.0.1:{s.port}/?mode=operator#telegraph")
+        expect(pg.locator("#tg-local-body tr")).to_have_count(2)
+        expect(pg.locator("#tg-local-note")).to_contain_text("3 more runs not shown in this table")
+        expect(pg.locator("#tg-local-note")).not_to_contain_text("not scanned")      # every directory was scanned
+        expect(local(pg)).to_have_text("Local ≈ $1.50 (virtual, at claude-haiku-5-5)")   # the meter still counts all five
+    ctx.close()
+
+
+def test_the_note_follows_a_change_in_the_hidden_rows(tmp_path, browser, monkeypatch):
+    from orchard import virtualspend_view as view
+    monkeypatch.setattr(view, "MAX_ROWS", 2)
+    monkeypatch.setattr(view, "CACHE_S", 1.0)
+    r = tmp_path / "orchard-runs"
+    for i in range(3):
+        write_log(r, f"kprobe/p{i}/op/attempt-1/log/p.jsonl", [turn(1, 1_000_000 * (i + 1), 0)])
+    ctx, pg = new_page(browser)
+    with Served(app_for(r)) as s:
+        pg.goto(f"http://127.0.0.1:{s.port}/?mode=operator#telegraph")
+        expect(pg.locator("#tg-local-note")).to_contain_text("1 more run not shown in this table")
+        write_log(r, "kprobe/p9/op/attempt-1/log/p.jsonl", [turn(1, 100, 0)])        # ranks below the shown rows: only the note changes
+        expect(pg.locator("#tg-local-note")).to_contain_text("2 more runs not shown in this table", timeout=30000)
+    ctx.close()

@@ -136,7 +136,7 @@ def test_operator_local_meter_is_aa_on_the_dark_top_bar():
 
 def test_the_local_table_is_redrawn_only_when_its_data_changes():
     body = fn_body(JS(), "function renderLocalTable")
-    assert 'changed($("tg-local"), [v.rows, v.references, v.not_scanned, v.discovery_truncated])' in body
+    assert 'changed($("tg-local"), [v.rows, v.references, v.not_scanned, v.discovery_truncated, v.more_rows])' in body
 
 
 
@@ -162,3 +162,10 @@ def test_the_page_says_when_the_folder_listing_was_cut_short():
     assert "v.discovery_truncated" in body and "folder listing was cut short" in body
     guard = next(line for line in body.splitlines() if "changed(" in line)
     assert "v.discovery_truncated" in guard, "a change in this flag must redraw the note"
+
+
+def test_the_page_says_how_many_more_runs_the_table_leaves_out_and_redraws_when_that_changes():
+    body = fn_body(JS(), "function renderLocalTable")
+    assert 'plural(v.more_rows, "more run")' in body and "not shown in this table" in body
+    guard = next(line for line in body.splitlines() if "changed(" in line)
+    assert "v.more_rows" in guard, "a change in the hidden rows must redraw the note"
