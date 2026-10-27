@@ -269,7 +269,12 @@ def redact(text: str, *, hostname: str = "", home: str = "", secrets: tuple = ()
     """`text` without the key, token shapes, private key markers, the host name and the home directory."""
     for secret in secrets:
         if secret:
-            text = text.replace(secret, "[redacted]")
+            # a server that echoes the key inside a JSON body (or a Python repr) writes quotes and non-ASCII characters
+            # escaped, so each spelling is removed, longest first
+            spellings = {secret, json.dumps(secret)[1:-1], json.dumps(secret, ensure_ascii=False)[1:-1], repr(secret)[1:-1]}
+            for spelling in sorted(spellings, key=len, reverse=True):
+                if spelling:
+                    text = text.replace(spelling, "[redacted]")
     text = _PEM.sub("[redacted private key]", text)
     for _what, pattern in TOKEN_PATTERNS:
         text = pattern.sub("[redacted]", text)
@@ -681,7 +686,8 @@ class Telegraph:
                 cost = 0.0 if usage_known else None          # refused before processing: free. Otherwise the cost is unknown
             self._append({**rec, "outcome": "error", "reason": reason, "tokens_in": tin, "tokens_out": tout,
                           "cost_usd": cost, "usage_known": usage_known or usage is not None})
-            return Answer(False, reason=reason, call_id=base["call_id"], model=model, latency_s=t1 - t0)
+            return Answer(False, reason=reason, call_id=base["call_id"], model=model, latency_s=t1 - t0,
+                          tokens_in=tin, tokens_out=tout, cost_usd=cost)
         text = clean(text)
         estimated = usage is None
         tin = usage[0] if usage else (len(prompt) + len(SYSTEM)) // 3

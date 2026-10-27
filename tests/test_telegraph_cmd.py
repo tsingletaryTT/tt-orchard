@@ -336,3 +336,13 @@ def test_the_usage_line_names_calls_with_no_known_cost_not_only_missing_prices(t
     run(["ask", "--problem", "p", *files(tmp_path), "--dir", d, "--telegraph-config", cfg], tmp_path, transport=send)
     code, text = run(["usage", "--dir", d, "--telegraph-config", cfg], tmp_path)
     assert "no known cost" in text and "no price" not in text.replace("no price, or", "")
+
+
+def test_the_cli_forwards_its_injected_home_to_the_telegraph_command(tmp_path):
+    ledger = tmp_path / "fakehome" / ".cache" / "tt-orchard" / "telegraph"
+    ledger.mkdir(parents=True)
+    (ledger / "telegraph.jsonl").write_text(json.dumps({"reserve": "c1", "problem": "p", "tokens": 5, "cost_usd": None}) + "\n")
+    out = io.StringIO()
+    code = cli.main(["telegraph", "usage", "--telegraph-config", str(write(tmp_path))],
+                    env={"HOME": str(tmp_path / "fakehome")}, stdout=out)
+    assert code == 0 and "not settled: 1 reservations" in out.getvalue()

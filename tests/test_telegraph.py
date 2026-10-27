@@ -1529,3 +1529,24 @@ def test_the_usage_display_shows_unsettled_reservations_and_unknown_usage(tmp_pa
     lines = []
     cmd_mod._usage(d, type("A", (), {"json": False})(), lines.append)
     assert any("not settled: 1 reservations" in l for l in lines)
+
+
+# ------------------------------------------------------------------------------------------------ review of PR 106, round 8
+
+@pytest.mark.parametrize("key", ['ab"cd-KEYSECRET1', "abc\\def-KEYSECRET2", "café-KEYSECRET3"])
+def test_a_key_echoed_in_json_escaped_form_in_an_error_body_is_redacted(tmp_path, key):
+    for ascii_only in (True, False):
+        body = json.dumps({"error": f"bad key {key}"}, ensure_ascii=ascii_only).encode()
+        tel, _ = make(tmp_path / str(ascii_only), environ={"TG_KEY": key}, wire=Wire(lambda b, body=body: body, status=401))
+        got = tel.ask("p", "t", "f")
+        stored = "".join(p.read_text() for p in (tmp_path / str(ascii_only) / "tg").rglob("*") if p.is_file())
+        assert "KEYSECRET" not in got.reason + stored
+
+
+def test_a_failed_answer_reports_its_tokens_and_cost(tmp_path):
+    body = b'{"choices": [{"message": {"content": "<think>never closed"}, "finish_reason": "length"}], ' \
+           b'"usage": {"prompt_tokens": 40, "completion_tokens": 12}}'
+    tel, _ = make(tmp_path, wire=Wire(lambda b: body), prices={"small": [1, 2], "big": [1, 2]})
+    got = tel.ask("p", "t", "f")
+    assert not got.ok and (got.tokens_in, got.tokens_out) == (40, 12)
+    assert got.cost_usd == pytest.approx((40 * 1 + 12 * 2) / 1e6)
