@@ -259,7 +259,7 @@ def _meter(state: str, spend: str, calls: int, cap_text: str, reason: str | None
     else:
         text = f"Helper: {spend} · {calls} {'call' if calls == 1 else 'calls'}"
         if state == "capped":
-            text += f" · CAPPED: {(reason or 'a cap is used up')[:90]}"
+            text += f" · CAPPED: {(reason or 'a cap is used up')[:140]}"
         elif state == "near":
             text += f" · near cap: {cap_text}"
         elif cap_text:

@@ -57,6 +57,7 @@ def test_an_unsettled_reservation_is_shown_plainly_and_counts_at_its_worst_case(
     assert row["outcome"] == "unsettled" and row["held"] is True and row["cost_usd"] > 0
     assert "worst case" in row["reason"]
     assert "calls 1 of 5" in out["meter"]["text"] and out["meter"]["text"].startswith("Helper: $0.")
+    assert "· 1 call ·" in out["meter"]["text"]                # the meter counts what the caps count
     cap = next(c for c in out["caps"] if c["id"] == "calls")
     assert cap["used"] == 1
 
@@ -108,6 +109,7 @@ def test_a_cost_cap_refuses_new_calls_while_a_cost_is_unknown_and_the_page_says_
     cost = next(c for c in out["caps"] if c["id"] == "cost")
     assert cost["blocked"] is True and cost["tone"] == "bad"
     assert "CAPPED" in out["meter"]["text"] and "no known cost" in out["meter"]["text"]
+    assert out["meter"]["text"].endswith("new calls are refused")      # the whole reason fits in the meter
     # the producer refuses for the same reason
     refused = tg.Telegraph(capped, d, transport=reply(), environ={"TG_KEY": KEY}).ask("p3", "task three " * 80, "failed")
     assert not refused.ok and "no known cost" in refused.reason
@@ -194,3 +196,12 @@ def test_the_route_returns_the_new_fields_as_json(root, tmp_path):
         code, _, body = s.request("GET", "/api/telegraph")
     data = json.loads(body)
     assert code == 200 and data["spend"]["unsettled"] == 1
+
+
+def test_the_by_model_table_counts_calls_with_no_known_cost(root, tmp_path):
+    cfg, d, tel = setup(tmp_path, prices={"small": [1.0, 5.0]}, max_calls=9, max_calls_per_problem=9)
+    first = tel.ask("p", "task " * 80, "failed")
+    tel.report(first.call_id, helped=False)
+    tel.ask("p", "task two " * 80, "failed")
+    models = {m["model"]: m for m in app_for(root, cfg).telegraph()["by_model"]}
+    assert models["small"]["cost_unknown_calls"] == 0 and models["big"]["cost_unknown_calls"] == 1
