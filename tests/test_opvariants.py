@@ -327,6 +327,42 @@ def test_a_legacy_prefix_loses_to_the_plain_name_and_is_used_when_alone():
     assert got("aten.dot.default", ix("moreh_dot")) == [("moreh_dot", EQ)]
 
 
+def test_a_legacy_name_ranks_below_a_namespaced_one():
+    assert got("aten.mean.default", ix("experimental.mean", "moreh_mean")) == [("experimental.mean", EQ)]
+
+
+def test_a_blocked_token_keeps_a_near_name_out_too():
+    assert got("aten.sigmoidb", ix("sigmoid_bw")) == []
+    assert got("aten.sigmoidb", ix("sigmoid_bw", "sigmoid")) == [("sigmoid", NE)]
+
+
+def test_near_needs_five_letters_on_the_aten_side_as_well():
+    assert got("aten.flip", ix("flipp")) == []
+
+
+def test_two_synonym_targets_each_with_an_in_place_spelling_alternate_in_the_answer():
+    out = got("aten.copy_.default", ix("assign", "assign_", "clone", "clone_"))
+    assert out == [("assign_", SY), ("clone_", SY), ("assign", SY)]
+
+
+def test_an_empty_name_proposes_nothing_even_for_names_made_of_qualifiers():
+    assert got("aten.", ix("default", "scalar")) == []
+    assert ov.candidates("", ix("default")) == []
+
+
+def test_a_tier_three_hit_is_not_topped_up_with_near_names():
+    assert got("aten.new_thing.default", ix("thing", "newthingx")) == [("thing", TS)]
+
+
+def test_reverse_subset_needs_a_ttnn_key_of_three_letters():
+    assert got("aten.new_ab.default", ix("ab")) == []
+    assert got("aten.new_abc.default", ix("abc")) == [("abc", TS)]
+
+
+def test_a_leading_underscore_is_dropped_to_find_a_synonym():
+    assert got("aten._clip.default", ix("clamp")) == [("clamp", SY)]
+
+
 def test_a_plain_name_beats_a_namespaced_one():
     assert got("aten.typecast", ix("experimental.typecast", "typecast")) == [("typecast", EQ)]
     assert got("aten.typecast", ix("experimental.typecast")) == [("experimental.typecast", EQ)]

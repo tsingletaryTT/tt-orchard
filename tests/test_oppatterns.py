@@ -77,6 +77,14 @@ def test_silu_mul_and_rotary_are_found_and_sdpa_is_not_because_the_trace_has_the
     assert "sdpa" not in f and "layer_norm" not in f
 
 
+def test_a_group_reports_the_shape_of_its_anchor_and_a_norm_its_epsilon(real):
+    _, res = real
+    f = kinds(res)
+    assert f["rms_norm"]["eps"] == 1e-6 and f["rms_norm"]["shape"] == [1, 8, 1]
+    assert f["silu_mul"]["eps"] is None and f["rotary"]["eps"] is None
+    assert f["rotary"]["shape"] == [1, 2, 8, 16]
+
+
 def test_modules_are_listed_without_more_than_three(real):
     _, res = real
     assert 1 <= len(kinds(res)["rms_norm"]["modules"]) <= 3
@@ -246,10 +254,15 @@ def test_softmax_without_the_two_matmuls_is_not_attention():
     assert "sdpa" not in kinds(op.recognise(recs, NAMES))
 
 
-def test_the_same_matmul_cannot_be_both_halves():
+def test_scores_and_softmax_without_a_second_matmul_are_not_attention():
     recs = [n("qk", "matmul.default", ["q", "k"]), n("sm", "softmax.int", ["qk"], [-1]),
             n("t", "contiguous.default", ["sm"])]
     assert "sdpa" not in kinds(op.recognise(recs, NAMES))
+
+
+def test_a_reshape_between_softmax_and_the_second_matmul_is_looked_through():
+    recs = attention(second_matmul=False) + [n("vw", "view.default", ["sm"], [[1, 2]]), n("av", "matmul.default", ["vw", "v"])]
+    assert "sdpa" in kinds(op.recognise(recs, NAMES))
 
 
 # --- rotary embedding ----------------------------------------------------------------------------------------------
@@ -275,6 +288,15 @@ def test_a_rotation_that_is_not_rotate_half_is_not_recognised(kw):
 def test_the_plain_product_must_read_the_same_x():
     recs = rotary()
     recs[0]["in"] = ["y", "cos"]
+    assert "rotary" not in kinds(op.recognise(recs, NAMES))
+
+
+def test_a_cat_on_another_dimension_or_of_three_parts_is_not_rotate_half():
+    recs = rotary()
+    recs[4]["const"] = [1]
+    assert "rotary" not in kinds(op.recognise(recs, NAMES))
+    recs = rotary()
+    recs[4]["in"] = ["ng", "lo", "lo"]
     assert "rotary" not in kinds(op.recognise(recs, NAMES))
 
 

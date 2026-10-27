@@ -63,7 +63,7 @@ def test_a_table_row_beats_a_candidate_search_and_a_mapped_op_has_no_candidates(
 def test_a_table_row_whose_name_is_missing_from_the_dump_is_a_candidate_search_not_a_mapping():
     # aten.sub.Tensor maps to `subtract`, which this dump lacks; the search may offer names, `mapped` it is not
     r = rows(build(raw(op("aten.sub.Tensor"))))["aten.sub.Tensor"]
-    assert r["status"] != "mapped"
+    assert r["status"] == "unmapped"
 
 
 def test_the_search_can_be_turned_off():
@@ -76,6 +76,9 @@ def test_without_a_dump_nothing_is_a_candidate_and_nothing_is_claimed():
     inv = oi.build(raw(op("aten.__and__.Tensor")), mapping=MAPPING, decomps=DECOMPS, dump=None, ignored=IGNORED)
     assert rows(inv)["aten.__and__.Tensor"]["status"] == "unchecked"
     assert inv["patterns"] == [] and inv["summary"]["patterns"] == 0
+    # a trace that holds groups still claims none without a dump
+    inv = oi.build(fixture("qwen3-tiny-seq"), mapping=MAPPING, decomps=DECOMPS, dump=None, ignored=IGNORED)
+    assert inv["patterns"] == [] and inv["patterns_unavailable"] == [] and inv["summary"]["patterns"] == 0
 
 
 def test_a_dump_for_another_ttnn_version_gives_no_candidates_either():

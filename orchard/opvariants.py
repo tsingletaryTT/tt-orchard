@@ -182,7 +182,7 @@ def candidates(op: str, index: Index) -> list:
     k = a["key"]
     if len(k) >= d["near_min_length"]:
         bound = d["near_max_distance_long"] if len(k) >= d["near_long_from_length"] else d["near_max_distance_short"]
-        near = [e for e in live if len(e["key"]) >= d["near_min_length"] and 0 < distance(k, e["key"]) <= bound]
+        near = [e for e in live if len(e["key"]) >= d["near_min_length"] and distance(k, e["key"]) <= bound]
         if done(near, "near"):
             return out
     # tier 5

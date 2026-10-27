@@ -114,7 +114,7 @@ def _is_square(g, n):
     if b == "square":
         return True
     if b == "pow":
-        return any(c in (2, 2.0) and not isinstance(c, bool) for c in _consts(n) if not isinstance(c, list))
+        return any(c in (2, 2.0) for c in _consts(n) if not isinstance(c, list))
     if b == "mul":
         ins = [g.resolve(i) for i in n.get("in") or []]
         return len(ins) == 2 and ins[0] == ins[1]
@@ -229,7 +229,7 @@ def _sdpa(g):
             continue
         av = None
         for c in g.readers(sm["id"], SHAPE | {"dropout"}):
-            if base(c["op"]) in ("matmul", "bmm", "mm") and c["id"] != qk["id"]:
+            if base(c["op"]) in ("matmul", "bmm", "mm"):
                 av = c
                 break
         if av is None:

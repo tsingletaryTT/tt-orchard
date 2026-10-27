@@ -386,6 +386,34 @@ def test_real_run_stops_a_command_that_outlives_its_timeout():
     assert rc == 124 and "timed out" in out and time.time() - t0 < 15
 
 
+def test_real_run_removes_the_named_container_after_a_timeout(monkeypatch):
+    calls = []
+    real = ov.subprocess.run
+    monkeypatch.setattr(ov.subprocess, "run", lambda argv, **kw: calls.append(argv))
+    rc, _ = ov._real_run(["sleep", "30"], 1, "orchard-verify-x")
+    assert rc == 124 and calls == [["docker", "rm", "-f", "orchard-verify-x"]]
+
+
+def test_real_run_removes_the_named_container_when_it_is_interrupted(monkeypatch):
+    calls = []
+    real = ov.subprocess.run
+
+    class Interrupted:
+        pid = 0
+
+        def __init__(self, *a, **k):
+            pass
+
+        def communicate(self, timeout=None):
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(ov.subprocess, "Popen", Interrupted)
+    monkeypatch.setattr(ov.subprocess, "run", lambda argv, **kw: calls.append(argv))
+    with pytest.raises(KeyboardInterrupt):
+        ov._real_run(["x"], 5, "orchard-verify-y")
+    assert calls == [["docker", "rm", "-f", "orchard-verify-y"]]
+
+
 def test_real_run_returns_output_and_exit_code_and_a_missing_command():
     assert ov._real_run([sys.executable, "-c", "print('hi')"], 20) == (0, "hi\n")
     rc, out = ov._real_run(["/nonexistent-binary-xyz"], 5)
@@ -471,6 +499,40 @@ def test_integer_ops_must_be_equal_and_two_operands_are_never_the_same_tensor():
     assert not torch.equal(a, b)
 
 
+def test_a_case_gives_the_same_numbers_when_it_is_run_twice():
+    """The seed counter restarts with each case, so a result does not depend on which cases ran before it."""
+    m = load_script()
+    c = FakeCtx({"exp2": lambda x: torch.exp2(x.float()) + 0.01 * x.float()})
+    first = m.run_case(c, case("aten.exp2.default", "exp2"))
+    second = m.run_case(c, case("aten.exp2.default", "exp2"))
+    assert first["rel_l2"] == second["rel_l2"] and first["pcc"] == second["pcc"] and first["rel_l2"] > 0
+
+
+def test_or_and_xor_are_compared_with_their_own_torch_op():
+    m = load_script()
+    ops = {"bitwise_or": torch.bitwise_or, "bitwise_xor": torch.bitwise_xor, "bitwise_and": torch.bitwise_and}
+    c = FakeCtx(ops)
+    ints = {"dtype": "torch.int32"}
+    assert m.run_case(c, case("aten.__or__.Tensor", "bitwise_or", **ints))["outcome"] == "pass"
+    assert m.run_case(c, case("aten.__xor__.Tensor", "bitwise_xor", **ints))["outcome"] == "pass"
+    assert m.run_case(c, case("aten.__or__.Tensor", "bitwise_and", **ints, **{"as": ["__or__", "bitwise_or"]}))["outcome"] == "fail"
+
+
+def test_the_norm_references_pass_the_cases_epsilon_to_the_op():
+    m = load_script()
+    seen = {}
+    F = torch.nn.functional
+
+    def rms_norm(x, epsilon, weight):
+        seen["eps"] = epsilon
+        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + epsilon) * weight.reshape(-1)
+
+    c = group_ctx(rms_norm=rms_norm)
+    r = m.run_case(c, {"id": "g", "kind": "pattern", "pattern": "rms_norm", "ttnn": "rms_norm", "rows": 32, "cols": 64,
+                       "const": [1e-3]})
+    assert r["outcome"] == "pass" and seen["eps"] == 1e-3
+
+
 def test_seeds_are_reproducible_per_case():
     m = load_script()
     m._DRAWS[0] = 0
@@ -527,6 +589,77 @@ def test_the_pairs_the_recorded_traces_propose_are_covered_or_declared_untested(
                     missing.add((r["op"], c["ttnn"]))
     # gather is not a stand-in for advanced indexing without a dimension and an index of the same rank
     assert missing == {("aten.index.Tensor", "gather")}
+
+
+def fake_ttnn_groups(**broken):
+    """A torch stand-in for the four ttnn ops the group references call, with the semantics their ttnn documentation
+    states (swiglu: first half times silu of the second half). `broken` replaces one of them."""
+    F = torch.nn.functional
+
+    def rms_norm(x, epsilon, weight):
+        w = weight.reshape(-1)
+        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + epsilon) * w
+
+    def layer_norm(x, epsilon, weight, bias):
+        return F.layer_norm(x, (x.shape[-1],), weight.reshape(-1), bias.reshape(-1), epsilon)
+
+    def swiglu(x, dim=-1):
+        a, b = x.chunk(2, dim=-1)
+        return a * F.silu(b)
+
+    def rotary(x, cos, sin, is_decode_mode=False):
+        half = x.shape[-1] // 2
+        return x * cos + torch.cat([-x[..., half:], x[..., :half]], dim=-1) * sin
+
+    fns = {"rms_norm": rms_norm, "layer_norm": layer_norm, "swiglu": swiglu}
+    fns.update(broken)
+    rot = broken.get("rotary", rotary)
+    ns = types.SimpleNamespace(**fns)
+    ns.experimental = types.SimpleNamespace(rotary_embedding_hf=rot)
+    return ns
+
+
+def group_ctx(**broken):
+    c = FakeCtx()
+    ns = fake_ttnn_groups(**broken)
+    for k in ("bfloat16", "int32", "float32", "uint32", "TILE_LAYOUT", "ROW_MAJOR_LAYOUT"):
+        setattr(ns, k, getattr(c.ttnn, k))
+    c.ttnn = ns
+    return c
+
+
+GROUPS = [("rms_norm", "rms_norm"), ("layer_norm", "layer_norm"), ("silu_mul", "swiglu"),
+          ("rotary", "experimental.rotary_embedding_hf")]
+
+
+@pytest.mark.parametrize("group,ttnn_name", GROUPS)
+def test_each_group_reference_passes_a_faithful_op(group, ttnn_name):
+    m = load_script()
+    r = m.run_case(group_ctx(), {"id": group, "kind": "pattern", "pattern": group, "ttnn": ttnn_name, "rows": 32,
+                                  "cols": 64, "const": [1e-6]})
+    assert r["outcome"] == "pass", r
+
+
+@pytest.mark.parametrize("group,ttnn_name,key,wrong", [
+    ("rms_norm", "rms_norm", "rms_norm", lambda x, epsilon, weight: x * weight.reshape(-1)),
+    ("layer_norm", "layer_norm", "layer_norm", lambda x, epsilon, weight, bias: 2 * x),
+    ("silu_mul", "swiglu", "swiglu", lambda x, dim=-1: x.chunk(2, dim=-1)[0] * torch.nn.functional.silu(x.chunk(2, dim=-1)[0])),
+    ("silu_mul", "swiglu", "swiglu", lambda x, dim=-1: torch.nn.functional.silu(x.chunk(2, dim=-1)[0]) * x.chunk(2, dim=-1)[1]),
+    ("rotary", "experimental.rotary_embedding_hf", "rotary", lambda x, cos, sin, is_decode_mode=False: x * cos),
+])
+def test_each_group_reference_fails_a_wrong_op(group, ttnn_name, key, wrong):
+    """The second swiglu case has the gate on the first half, which is the order the ttnn documentation does not use:
+    the reference must tell the two apart."""
+    m = load_script()
+    r = m.run_case(group_ctx(**{key: wrong}), {"id": group, "kind": "pattern", "pattern": group, "ttnn": ttnn_name,
+                                               "rows": 32, "cols": 64, "const": [1e-6]})
+    assert r["outcome"] == "fail", r
+
+
+def test_the_norm_references_use_the_epsilon_of_the_case():
+    m = load_script()
+    assert m.eps_of({"const": [1e-6]}) == 1e-6 and m.eps_of({"const": [0.5, 3, [1]]}) == 1e-6 and m.eps_of({}, 1e-5) == 1e-5
+    assert m.eps_of({"const": [1e-3]}) == 1e-3 and m.eps_of({"const": [0.0]}) == 1e-6
 
 
 def test_stats_and_judge_use_the_stated_bars():
