@@ -50,16 +50,21 @@ def test_the_meter_is_redrawn_on_every_poll_and_says_unknown_after_an_outage():
     js = JS()
     poll = fn_body(js, "async function pollTelegraph")
     assert poll.index("renderSpendMeter(S.telegraph)") < poll.index("renderTelegraph()")     # outside the view's change guard
-    assert "renderSpendMeter(null)" in poll and "STALE_MS" in poll and "S.tgOk" in poll
+    stale = fn_body(js, "function markTelegraphStale")
+    assert "renderSpendMeter(null)" in stale and "STALE_MS" in stale and "S.tgOk" in stale and "S.tgStart" in stale
     # staleness is judged before the request is awaited, so a request that never answers cannot keep an old amount on screen
-    assert poll.index("renderSpendMeter(null)") < poll.index("await api(")
+    assert poll.index("markTelegraphStale()") < poll.index("await api(")
     assert "timeout: TG_TIMEOUT_MS" in poll and "if (S.tgPending) return;" in poll
     assert "(${r.cost_basis})" in js, "a row with no reported usage says whether its cost is a worst case or an estimate"
     assert "AbortController" in fn_body(js, "async function api") and "ctl.abort()" in fn_body(js, "async function api")
     meter = fn_body(js, "function renderSpendMeter")
     assert "spend unknown" in meter and 'dataset.tone = "bad"' in meter
     runs = fn_body(js, "async function refreshRuns")
-    assert runs.index("pollTelegraph()") < runs.index("Promise.all"), "its own request, before the others"
+    assert "pollTelegraph" not in runs, "polling must not depend on, or be repeated by, the run list's refresh"
+    main = fn_body(js, "async function main")
+    assert main.index("startTelegraphPolling()") < main.index("await refreshRuns()"), "timers first, so a hung request cannot stop them"
+    start = fn_body(js, "function startTelegraphPolling")
+    assert "setInterval(" in start and "markTelegraphStale" in start and "POLL_TELEGRAPH_MS" in start and "2000" in start
     assert "pollTelegraph" not in fn_body(js, "function renderTelegraph")
 
 

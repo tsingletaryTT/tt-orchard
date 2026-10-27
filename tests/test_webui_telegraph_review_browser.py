@@ -124,6 +124,32 @@ def test_the_view_shows_small_costs_unreadable_ledgers_hidden_problems_and_cost_
     ctx.close()
 
 
+@pytest.mark.parametrize("mode", ["operator", "playful"])
+def test_telegraph_polling_does_not_wait_for_the_first_run_list_to_answer(root, tmp_path, browser, mode):
+    import re
+    ctx, pg = new_page(browser)
+    with Served(capped_app(root, tmp_path)) as s:
+        pg.route(re.compile(r".*/api/(runs|machine|launches)(\?.*)?$"), lambda route: None)     # the first refresh never answers
+        pg.goto(f"http://127.0.0.1:{s.port}/?mode={mode}")
+        expect(meter(pg)).to_contain_text("$0.0070")               # the first Telegraph poll does not depend on it
+        pg.route("**/api/telegraph", lambda route: None)           # and when Telegraph stops answering...
+        expect(meter(pg)).to_contain_text("spend unknown", timeout=23000)       # ...its own timers still mark the amount unknown
+        assert meter(pg).get_attribute("data-tone") == "bad"
+    ctx.close()
+
+
+def test_telegraph_is_polled_once_per_tick_not_once_for_each_timer(root, tmp_path, browser):
+    ctx, pg = new_page(browser)
+    seen = []
+    pg.on("request", lambda r: seen.append(r.url) if r.url.endswith("/api/telegraph") else None)
+    with Served(capped_app(root, tmp_path)) as s:
+        open_page(pg, s)
+        seen.clear()
+        pg.wait_for_timeout(11000)                                 # two ticks of five seconds
+        assert 1 <= len(seen) <= 3, seen
+    ctx.close()
+
+
 def test_a_pending_poll_is_not_joined_by_more_requests(root, tmp_path, browser):
     ctx, pg = new_page(browser)
     seen = []

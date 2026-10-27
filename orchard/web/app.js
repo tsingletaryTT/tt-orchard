@@ -259,12 +259,33 @@ function renderSpendMeter(t) {
   el.title = t.meter.title;
 }
 
-const TG_TIMEOUT_MS = 25000;            // a poll that has not answered by now is dropped, so a hung server cannot block later polls
+const POLL_TELEGRAPH_MS = 5000;
+
+// The amount on screen is unknown once it is older than STALE_MS, however that came about.
+function markTelegraphStale() {
+  if (Date.now() - (S.tgOk || S.tgStart) > STALE_MS) renderSpendMeter(null);
+}
+
+// Telegraph has its own timers, so no other request (the run list, the machine, the launches) can stop it: one poll every five
+// seconds (every 30 s in a hidden tab) and a separate check every two seconds that the amount is not stale.
+function startTelegraphPolling() {
+  pollTelegraph();
+  let last = Date.now();
+  setInterval(() => {
+    if (document.hidden && Date.now() - last < HIDDEN_POLL_MS) { markTelegraphStale(); return; }
+    last = Date.now();
+    pollTelegraph();
+  }, POLL_TELEGRAPH_MS);
+  setInterval(markTelegraphStale, 2000);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) pollTelegraph(); });
+}
+
+const TG_TIMEOUT_MS = 25000;           // a poll that has not answered by now is dropped, so a hung server cannot block later polls
 
 async function pollTelegraph() {
   // Staleness is judged first, before any waiting: a request that never answers would never reach a catch block, and the last
   // dollar amount would stay on screen. Every poll tick therefore checks how old the amount is.
-  if (Date.now() - (S.tgOk || S.tgStart) > STALE_MS) renderSpendMeter(null);
+  markTelegraphStale();
   if (S.tgPending) return;               // one request at a time
   S.tgPending = true;
   try {
@@ -528,7 +549,6 @@ function renderRuns() {
 }
 
 async function refreshRuns() {
-  pollTelegraph();                       // its own request and its own failure handling: spend is never hidden by another call's failure
   try {
     const [runs, machine, launches] = await Promise.all([api("/api/runs"), api("/api/machine"), api("/api/launches")]);
     S.runs = runs.runs;
@@ -1755,6 +1775,7 @@ async function main() {
   pollHealth();
   setInterval(() => { if (!document.hidden) pollHealth(); }, 2000);
   buildChannels();
+  startTelegraphPolling();               // before the first run refresh: if that request hangs, the spend meter must still be polled
   await refreshRuns();
   routeFromHash();
   if (!S.selected && S.runs.length && S.view === "orchard") select(S.runs[0].name);
