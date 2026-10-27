@@ -17,7 +17,8 @@ lines; the gate (orchard/stages.py, gate_stock_runtime) judges them again agains
 
 stock_config.json keys: run_dir, model_id, model_name, model_snapshot, tt_metal_dir, scratch_dir, mesh_device, chips, optimizations,
 tt_cache, deadline_s; optional python_path_extra (directories put after the scratch copy on PYTHONPATH) and import_check (modules `prepare`
-must be able to import, default numpy, cv2 and torch). Exit codes: 0 done, 2 the config or an input does not fit (the message names it), 3 a run step failed (the log says
+must be able to import, default numpy, cv2 and torch) and demo_python (the interpreter every child runs under, from `tt-orchard demo-env`;
+default: the interpreter running this script). Exit codes: 0 done, 2 the config or an input does not fit (the message names it), 3 a run step failed (the log says
 which), 6 a model was fetched from the Hub."""
 from __future__ import annotations
 
@@ -37,6 +38,8 @@ KEYS = ("run_dir", "model_id", "model_name", "model_snapshot", "tt_metal_dir", "
 # The root conftest.py imports `tests.scripts.common`, so the package that holds it is copied too (about 700 KB).
 COPIED = ("models", "conftest.py", "pytest.ini", "tests/__init__.py", "tests/scripts")
 OPTIONAL_KEYS = {"python_path_extra": [], "import_check": ["numpy", "cv2", "torch"]}
+# `demo_python` (optional): the interpreter every child runs under, built by `tt-orchard demo-env`. Without it the children use the
+# interpreter that runs this script, which is what the shared environment gave on 2026-10-26 (numpy 2 with ttnn needing numpy below 2).
 MARKER = ".orchard-scratch.json"
 DEMO = "models/tt_transformers/demo/simple_text_demo.py"
 REFERENCE_DIR = "models/tt_transformers/tests/reference_outputs"
@@ -86,7 +89,18 @@ def load_config() -> dict:
         fail(2, "python_path_extra must hold absolute paths")
     if any(not re.fullmatch(r"[A-Za-z0-9_]+", m) for m in cfg["import_check"]):
         fail(2, "import_check must hold module names")
+    if "demo_python" in cfg:
+        py = cfg["demo_python"]
+        if not isinstance(py, str) or not Path(py).is_absolute():
+            fail(2, "demo_python must be an absolute path to an interpreter (build one with `tt-orchard demo-env`)")
+        if not os.access(py, os.X_OK) or not Path(py).is_file():
+            fail(2, f"demo_python {py} is not an executable file (build it with `tt-orchard demo-env`)")
     return cfg
+
+
+def interpreter(cfg: dict) -> str:
+    """The python every child runs under: the demo venv when the config names one, else the interpreter running this script."""
+    return cfg.get("demo_python") or sys.executable
 
 
 def python_path(cfg: dict, scratch: Path) -> str:
@@ -99,7 +113,7 @@ def check_imports(cfg: dict, scratch: Path) -> None:
     while ttnn needs numpy below 2 and cv2 was built for it, so the demo died at its first import. This is checked in `prepare`, where
     it costs seconds and needs no chip. `torch` and `numpy` import no device code; ttnn is never imported here."""
     for module in cfg["import_check"]:
-        done = subprocess.run([sys.executable, "-c", f"import {module}"], capture_output=True, text=True,
+        done = subprocess.run([interpreter(cfg), "-c", f"import {module}"], capture_output=True, text=True,
                               env={**os.environ, "PYTHONPATH": python_path(cfg, scratch)})
         if done.returncode != 0:
             last = (done.stderr.strip().splitlines() or ["no message"])[-1]
@@ -199,7 +213,7 @@ def ensure_reference(cfg: dict, scratch: Path, model_dir: Path) -> str:
     record.unlink(missing_ok=True)
     script = scratch / "models/tt_transformers/tests/generate_reference_hf.py"
     env = {**os.environ, "PYTHONPATH": python_path(cfg, scratch), "HF_HUB_OFFLINE": "1"}
-    done = subprocess.run([sys.executable, str(script), "--total_length", "1024", "--output_file", str(ref), "--model", str(model_dir)],
+    done = subprocess.run([interpreter(cfg), str(script), "--total_length", "1024", "--output_file", str(ref), "--model", str(model_dir)],
                           cwd=scratch, env=env, capture_output=True, text=True)
     (HERE / "log").mkdir(exist_ok=True)
     (HERE / "log" / "generate-reference.log").write_text(done.stdout + done.stderr)
@@ -245,7 +259,7 @@ def pytest_run(cfg: dict, scratch: Path, model_dir: Path, test: str, log: Path, 
     env = {k: v for k, v in os.environ.items()}
     env.update({"HF_MODEL": str(model_dir), "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", "MESH_DEVICE": cfg["mesh_device"],
                 "PYTHONPATH": python_path(cfg, scratch), "TT_CACHE_PATH": cfg["tt_cache"]})
-    argv = [sys.executable, "-m", "pytest", DEMO, "-k", test, "-s", "-x", "-p", "no:cacheprovider"]
+    argv = [interpreter(cfg), "-m", "pytest", DEMO, "-k", test, "-s", "-x", "-p", "no:cacheprovider"]
     say(f"running: pytest {DEMO} -k {test!r} (mesh {cfg['mesh_device']})")
     with open(log, "wb") as out:
         try:

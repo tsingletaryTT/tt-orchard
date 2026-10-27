@@ -13,6 +13,7 @@
     tt-orchard package  RUN_DIR --namespace ORG [--step stage|boot|finish|all] [--restage] [--graft-mtp | --no-graft-mtp] [--exact CHIP]
     tt-orchard package-card RUN_DIR --benchmark FILE --model-key KEY [--base-key KEY] [--reported FILE] [--accept-unverified-identity]
     tt-orchard kernel-env [--check] [--src-dir DIR] [--venv-dir DIR] [--tt-lang-skill-dir DIR] [--allow-stale-skills]
+    tt-orchard demo-env [--check] [--dry-run] [--venv-dir DIR] [--tt-metal-dir DIR]
     tt-orchard inventory TARGET [--python P] [--ttnn-python P] [--against F] [--layers N] [--seq N] [--class C] [--out DIR]
     tt-orchard coder-speed [--endpoint URL --model NAME | --tiers] [--samples N] [--watch SECONDS] [--json]
     tt-orchard kernel-probe --op NAME [--attempts N] [--phase sim|hw] [--out DIR] [--endpoint URL] [--model NAME]
@@ -225,6 +226,16 @@ def _parser() -> argparse.ArgumentParser:
     k.add_argument("--allow-stale-skills", action="store_true",
                    help="with --check: a tt-lang checkout or tt-lang skill that is not the latest upstream has does "
                         "not fail the check")
+    d = sub.add_parser("demo-env", parents=[common],
+                       help="build or check the interpreter that runs tt-metal demos and tt-train (numpy below 2, cv2, datasets, "
+                            "the host tree's ttnn and ttml)")
+    d.add_argument("--check", action="store_true",
+                   help="change nothing; report each rule (numpy, cv2, datasets, torch, ttnn and ttml as distributions, the ttnn "
+                        "version against the host tree's tag) and exit 2 if one is missing or failed. Imports no ttnn")
+    d.add_argument("--dry-run", action="store_true", help="say what the build would do and change nothing")
+    d.add_argument("--venv-dir", help="where the venv lives (default ~/orchard-venvs/tt-demo, or $ORCHARD_DEMO_VENV)")
+    d.add_argument("--tt-metal-dir", help="the host tt-metal tree, built and at a release tag (default ~/tt-metal, or "
+                                          "$ORCHARD_TT_METAL_DIR)")
     inv = sub.add_parser("inventory", parents=[common],
                          help="list the ops a model's reference code uses and which ones ttnn has; "
                               "`inventory refresh-ttnn` records ttnn's op names (takes a one-chip lease)")
@@ -721,6 +732,9 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
     if args.cmd == "kernel-env":
         from orchard import ttlang_env
         return ttlang_env.main(args, out=out)
+    if args.cmd == "demo-env":
+        from orchard import demo_env
+        return demo_env.main(args, env=demo_env.env_from_args(args, environ=env, home=home), out=out)
     if args.cmd == "inventory":
         return _inventory(args, env, home, out)
     if args.cmd == "kernel-probe":

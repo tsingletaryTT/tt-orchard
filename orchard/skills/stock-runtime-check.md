@@ -24,6 +24,9 @@ blocking finding, a positive decode speed, no model fetched from the Hub, and th
 
 - The supervisor wrote `stages/2/stock_config.json` and copied `stock_check.py` into your stage directory. Every fact in the config
   is one the run already holds. Use it as it is. Do not look for the tt-metal tree, the snapshot or a board name yourself.
+- When the config has `demo_python`, `stock_check.py` runs every child under that interpreter (a venv from `tt-orchard demo-env` with numpy
+  below 2 and the host tree's `ttnn`). Do not install packages, set `PYTHONPATH` or look for another interpreter. If the import check
+  fails, the failure text names the module, and that is the result.
 - Do not edit `stock_check.py`. The gate compares your copy with the shipped file and fails the stage if they differ.
 - Do not read tt-metal model code, and do not write model code. If the check fails, the failure text is the result.
 - The host tt-metal tree is read only. A copy of its `models/` directory is `<run>/tt-metal-scratch/`; `write_file` can write there

@@ -358,6 +358,21 @@ The second command must list `qwen3-coder:30b`. The supervisor never starts or s
 blocks a run when ollama does not answer or does not list the tier's model (a machine that has been suspended often has ollama
 down). If the models live outside `~/.ollama`, start it with `OLLAMA_MODELS=<DIR> ollama serve`.
 
+### 3.4a Build the demo interpreter (stock-runtime runs)
+
+A run that tt-transformers already supports (class `stock-runtime`) runs tt-transformers' own demo from the host tt-metal tree. The
+shared TT venv cannot run it: numpy 2.5.3 against ttnn's `numpy<2`, a `cv2` that does not import and a `datasets` that does not import.
+Build a dedicated interpreter once and name it in `bringup.toml`:
+
+```bash
+tt-orchard demo-env --dry-run      # say what it would do
+tt-orchard demo-env                # build ~/orchard-venvs/tt-demo (about 5 to 10 GB, needs the network)
+tt-orchard demo-env --check        # check it; imports no ttnn and opens no device
+# then in config/bringup.toml:  demo_python = "<HOME>/orchard-venvs/tt-demo/bin/python"
+```
+
+Section 5.9f describes what it installs and checks. The host tree must be built and at a release tag (for example v0.80.0).
+
 ### 3.5 Download the new model's weights
 
 `tt-orchard bringup <MODEL_ID>` downloads the weights itself (and the nearest model's, when that snapshot is missing), shows a
@@ -637,6 +652,7 @@ its reason; a `warn` is information.
 | base | no installed tt-model bundle serves the model this one is based on (the card's `base_model`, or the model named with `--base`). It then runs `tt model search` for the model's family and lists what it finds. When research found code for the base in tt-metal or tt-transformers, the message names that code first and says whether it ships a vLLM generator and whether its README names a Blackhole board. Code is not a bundle, so a bundle still has to be built or installed. At a terminal it asks which bundle to base the run on and installs the pick with `tt-model pull`. In a script it stops and prints the `--base` commands. A base snapshot that is not on disk is downloaded. A card with no `base_model` is a warning. If an installed v6 bundle has the model's architecture, it becomes an inferred base. An inferred base blocks until the operator confirms it: the bundle picked at a terminal or in the new-run dialog, `--base <bundle>`, or `--accept-inferred-base` (then it is a warning and its snapshot is downloaded). See "How the base model is found" | `nearest-model-missing`, `inferred-base-unconfirmed` |
 | sfpi | the box's SFPI compiler (`dpkg-query -W sfpi`) is older than the version the chosen bundle pins in its ttnn wheel (`ttnn/tt_metal/sfpi-version`). Kernel compiles then fail with `'vLut8si' is not a member of 'sfpi'` (7.67.0 against a pin of 7.73.0, 2026-10-13). tt-orchard does not install system packages; the row names the release to install. A version it cannot read is a warning | `hardware-unhealthy` |
 | reference | `reference_python` is set and cannot import torch, transformers, tokenizers and safetensors. Not set is a warning: the stage 1 agent then looks for an interpreter itself | `config-invalid` |
+| demo-env | a stock-runtime run (or any run with `demo_python` set) when `demo_python` fails `tt-orchard demo-env --check`: numpy 2 or newer, `cv2` or `datasets` that do not import, no `ttnn` or `ttml` distribution, a missing interpreter, or a venv directory the command refuses. The detail names each failed rule and the exact `tt-orchard demo-env --venv-dir ... --tt-metal-dir ...` command. A venv built for another tag of the host tree than the tree is at, a missing record, no `demo_python` at all, or a `demo_python` that is not `<venv>/bin/python` is a warning. Nothing is imported on a chip. A lab run has no row | `config-invalid` |
 | skills | never. Each tenstorrent/skills clone that `skills_dirs` points into is compared with upstream main (read only: `git ls-remote`, nothing is pulled). A clone that is behind, differs, could not be compared, has uncommitted changes or is on a branch other than main is a warning that says how to update. No `skills_dirs` is a warning. A check of the same commit from the last 10 minutes is reused | none |
 
 The model is downloaded with `hf download`, pinned to the revision the preflight saw. The harness never
@@ -1526,6 +1542,43 @@ server decoded at 38.7 tok/s.
 - `--reset-baseline`: forget the stored best for these servers first.
 - `--baseline-file`: where the best speeds are kept.
 - `--json`: print one JSON list instead of lines.
+
+### 5.9f The demo environment
+
+```bash
+tt-orchard demo-env --check     # report each rule; change nothing; exit 2 if one is missing or failed
+tt-orchard demo-env --dry-run   # say what the build would do; change nothing
+tt-orchard demo-env             # build whatever is missing
+```
+
+This builds the interpreter that runs tt-metal demos and tt-train (issue 92). It needs no `bringup.toml`. It makes a venv outside the
+repository (default `~/orchard-venvs/tt-demo`) with Python 3.12, CPU torch, numpy 1.26.4 (ttnn declares `numpy<2`), huggingface_hub 1.33.0
+with datasets 4.8.5 (the datasets 2.x line imports `HfFolder`, which huggingface_hub 1.x dropped), transformers 5.19.0,
+opencv-python-headless and the packages tt-transformers' demo and tt-metal's root `conftest.py` import. Every package is pinned in
+`orchard/demo_env.py` and installed from an explicit index. The pins were resolved together on 2026-10-26 on this box; a later pin change
+shows up in `orchard-demo-env.json`'s requirements hash and the next build installs the new pins.
+
+The host tree's `ttnn` and `ttml` are put on the venv's path by a `tt-host-tree.pth` file and a small dist-info for each at the tree's tag,
+the same shape the shared venv has. `pip install -e` on tt-metal runs its `setup.py`, which can start a CMake build and writes into the tree, so
+the command does not use it. The tree must be built (`ttnn/ttnn/_ttnn.so`) and at a release tag; nothing in it is changed. The venv records the
+tree's path, tag and sha in `<venv>/orchard-demo-env.json`.
+
+`--check` reports these rules: `numpy` below 2, `cv2` imports, `datasets` imports, `torch` (with transformers, tokenizers and safetensors)
+imports, `ttnn` and `ttml` installed as distributions, the `ttnn` version equals the host tree's tag, the `.pth` lists directories the tree has,
+and the recorded tag equals the tree's tag. It imports `ttnn` and `ttml` never, because that opens a device. The import checks run with the
+venv's python in isolated mode.
+
+It refuses a `--venv-dir` that is, or is inside, the shared venv (`~/.tenstorrent-venv`, links resolved) or the tt-orchard checkout, and a
+directory that holds other files and no interpreter.
+
+- `--check`: change nothing, exit 2 if a rule fails or a step is still to do.
+- `--dry-run`: say what the build would do and change nothing.
+- `--venv-dir`: where the venv lives (default `~/orchard-venvs/tt-demo`, or `$ORCHARD_DEMO_VENV`).
+- `--tt-metal-dir`: the host tt-metal tree (default `~/tt-metal`, or `$ORCHARD_TT_METAL_DIR`).
+
+Set `demo_python` in `bringup.toml` to the venv's `bin/python`. `bringup` hands it to the run as the input `demo_python`; the stock-runtime
+stage writes it into `stock_config.json`, and `stock_check.py` runs its import check, the reference generator and the demo under it. The
+preflight `demo-env` row (the preflight table in section 4.0) appears for a stock-runtime run, or when `demo_python` is set.
 
 ### 5.10 Tensor caches and disk
 

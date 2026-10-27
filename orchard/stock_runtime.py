@@ -298,10 +298,16 @@ def draft_config(*, run_dir, delta, inputs: dict, chips, cache_root) -> tuple[di
         problems.append("the run has no stock_params input")
     elif Path(params).parent.name != "model_params" or Path(params).parent.parent.name != "tt_transformers":
         problems.append(f"stock_params {params!r} is not a models/tt_transformers/model_params/<name> directory")
+    demo = inputs.get("demo_python")
+    if "demo_python" in inputs and (not isinstance(demo, str) or not Path(demo).is_absolute()):
+        problems.append(f"demo_python {demo!r} is not an absolute path to an interpreter (`tt-orchard demo-env` builds one)")
     if problems:
         return None, problems
     name = rec["name"]
-    return {"run_dir": str(run_dir), "model_id": delta.get("model"), "model_name": name, "model_snapshot": str(snapshot),
+    cfg = {"run_dir": str(run_dir), "model_id": delta.get("model"), "model_name": name, "model_snapshot": str(snapshot),
             "tt_metal_dir": str(Path(params).parents[3]), "scratch_dir": str(Path(run_dir) / "tt-metal-scratch"),
             "mesh_device": MESH_DEVICE[chips], "chips": chips, "optimizations": "accuracy",
-            "tt_cache": str(Path(cache_root) / "stock" / name.lower() / MESH_DEVICE[chips]), "deadline_s": STOCK_DEADLINE_S}, []
+            "tt_cache": str(Path(cache_root) / "stock" / name.lower() / MESH_DEVICE[chips]), "deadline_s": STOCK_DEADLINE_S}
+    if "demo_python" in inputs:
+        cfg["demo_python"] = demo        # the interpreter every child of stock_check.py runs under (issue 92)
+    return cfg, []

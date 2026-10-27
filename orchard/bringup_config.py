@@ -26,7 +26,7 @@ from orchard.tiers import SENTINEL, _unknown_key_message
 
 TOP_KEYS = {"runs_root", "tiers", "cache_root", "hf_home", "operator_home", "gozer", "required_chips",
             "skills_dirs", "package_format", "package_namespace", "package_models_root", "min_free_gb",
-            "reference_python", "env", "coder", "tt_model_root", "lab", "mode", "four_chip_package"}
+            "reference_python", "demo_python", "env", "coder", "tt_model_root", "lab", "mode", "four_chip_package"}
 # Where a run's hardware tests run: "local" (this box; the coder is parked when a test needs its boards) or
 # "lab" (the [lab] box; the coder is never parked). `tt-orchard bringup --mode` overrides it per run.
 MODES = ("local", "lab")
@@ -91,6 +91,7 @@ class BringupConfig:
     package_models_root: Path | None = None
     min_free_gb: float | None = None
     reference_python: Path | None = None    # the interpreter stage 1 runs the CPU reference with
+    demo_python: Path | None = None         # the interpreter that runs tt-metal demos (stock-runtime stage; `tt-orchard demo-env`)
     env: dict[str, str] = field(default_factory=dict)
     tt_model_root: Path | None = None
     lab: Lab | None = None
@@ -247,6 +248,7 @@ def load(path) -> BringupConfig:
         package_models_root=opt("package_models_root"),
         min_free_gb=float(min_free) if min_free is not None else None,
         reference_python=opt("reference_python"),
+        demo_python=opt("demo_python"),
         env=dict(env),
         tt_model_root=opt("tt_model_root"),
         lab=lab,
@@ -322,6 +324,8 @@ def supervisor_argv(cfg: BringupConfig, model_id: str, run_dir: Path | None = No
     all_inputs = dict(inputs or {})
     if cfg.reference_python is not None:
         all_inputs["reference_python"] = str(cfg.reference_python)     # listed in every agent's prompt
+    if cfg.demo_python is not None:
+        all_inputs["demo_python"] = str(cfg.demo_python)               # read by the stock-runtime stage (stock_config.json)
     for name, value in all_inputs.items():
         argv += ["--input", f"{name}={value}"]
     argv.append("--unattended")        # a bring-up started here never waits for a person

@@ -39,6 +39,12 @@ required_chips = "2,4"
 # runner refuses pip, uv pip and conda installs outside the run directory).
 # reference_python = "CHANGE-ME/venvs/reference/bin/python"
 
+# The interpreter that runs tt-metal demos and tt-train (the stock-runtime stage runs tt-transformers' own demo with it):
+# numpy below 2, an importable cv2 and datasets, and the host tt-metal tree's ttnn and ttml. Build it with
+# `tt-orchard demo-env` (default ~/orchard-venvs/tt-demo) and check it with `tt-orchard demo-env --check`. The shared TT venv
+# does not pass that check. The preflight shows a `demo-env` row for a stock-runtime run, or when this is set.
+# demo_python = "CHANGE-ME/orchard-venvs/tt-demo/bin/python"
+
 # Variables for agent shells. Names that look like credentials are refused.
 [env]
 HF_HUB_OFFLINE = "1"
