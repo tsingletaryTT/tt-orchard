@@ -1165,3 +1165,26 @@ def test_a_folder_exactly_at_the_depth_limit_with_no_subfolders_is_complete(root
 
 def test_the_default_depth_limit_is_eight():
     assert vs.MAX_DEPTH == 8
+
+
+def test_a_link_to_a_folder_is_counted_from_the_listing_without_touching_the_path_again(root, tmp_path, monkeypatch):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    root.mkdir(parents=True)
+    (root / "linked").symlink_to(outside, target_is_directory=True)
+    write_log(root, "a/log/run.jsonl", [turn()])
+
+    def forbidden(self, *a, **k):
+        raise AssertionError("a path was looked up by name after the folder was listed")
+    monkeypatch.setattr(vs.Path, "is_dir", forbidden)
+    monkeypatch.setattr(vs.Path, "is_symlink", forbidden)
+    s = vs.scan(root, beneath=vs.open_pin(root))
+    assert s["skipped"]["links"] == 1 and s["turns"] == 1
+
+
+def test_a_link_to_a_file_with_an_ordinary_name_is_not_counted(root, tmp_path):
+    root.mkdir(parents=True)
+    target = tmp_path / "f.txt"
+    target.write_text("x")
+    (root / "notes.txt").symlink_to(target)
+    assert vs.scan(root)["skipped"]["links"] == 0

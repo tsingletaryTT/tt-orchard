@@ -432,7 +432,7 @@ def _tail_usage(tail: bytes):
 
 
 def _list_dir(source, budget: list) -> tuple[list, bool]:
-    """([(name, is_link, is_dir, is_regular)], cut): the entries of one folder (a path, or a directory descriptor), taken while
+    """([(name, is_link, is_dir, is_regular, link_to_dir)], cut): the entries of one folder (a path, or a directory descriptor), taken while
     streaming os.scandir. Every entry taken is counted against the shared budget; when it is spent the listing stops and `cut` is
     True. An unreadable folder is empty."""
     out, cut = [], False
@@ -446,7 +446,8 @@ def _list_dir(source, budget: list) -> tuple[list, bool]:
                 try:
                     link = entry.is_symlink()
                     out.append((entry.name, link, (not link) and entry.is_dir(follow_symlinks=False),
-                                (not link) and entry.is_file(follow_symlinks=False)))
+                                (not link) and entry.is_file(follow_symlinks=False),
+                                link and entry.is_dir()))               # a link that points at a folder, decided here, not by path later
                 except OSError:
                     continue
     except OSError:
@@ -495,9 +496,9 @@ def _walk(pin: "_Pin", skipped: dict):
             skipped["walk_cut"] += 1
         in_log = (rel[-1] if rel else pin.root.name) == "log"
         subdirs = []
-        for name, link, is_dir, is_regular in entries:
+        for name, link, is_dir, is_regular, link_to_dir in entries:
             if link and not _is_log_name(name, in_log):
-                if _is_dir_link(pin.root.joinpath(*rel, name)):
+                if link_to_dir:
                     skipped["links"] += 1
                 continue
             if is_dir:
@@ -530,14 +531,6 @@ def _log_kind(name: str, in_log: bool):
 
 def _is_log_name(name: str, in_log: bool) -> bool:
     return _log_kind(name, in_log) is not None
-
-
-def _is_dir_link(path: Path) -> bool:
-    """True for a link that points at a folder (a link to a file that is not a log name is not worth counting)."""
-    try:
-        return path.is_dir()
-    except OSError:
-        return False
 
 
 def _attempt_wall(log_dir: Path, pin: "_Pin") -> float:
