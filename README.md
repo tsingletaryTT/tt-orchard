@@ -1830,7 +1830,7 @@ A pull request does not edit a version field. It adds one file, `changes/<branch
 version the feature claims and says in one sentence what it does:
 
 ```bash
-python3 scripts/version.py new my-feature --summary "Adds my feature." --kind feature
+python3 scripts/version.py new my-feature      # writes changes/my-feature.toml; edit its summary
 python3 scripts/version.py check
 ```
 
