@@ -639,3 +639,22 @@ def test_left_out_text_names_unverified_long_records():
     s = vs._skipped()
     s["long_unverified"] = 2
     assert "2 lines over the size cap that do not start like an agent turn" in vs.skipped_text(s)
+
+
+
+def test_usage_must_be_the_last_key_of_an_over_long_record(root, monkeypatch):
+    """Only the closing brace may follow the usage object. A record with another key after it is not priced from its end."""
+    monkeypatch.setattr(vs, "MAX_LINE_BYTES", 2000)
+    line = json.dumps({"turn": 1, "sent": ["x" * 30000], "usage": {"prompt_tokens": 900, "completion_tokens": 90}, "note": "late"})
+    write_log(root, "log/run.jsonl", [line])
+    s = vs.scan(root)
+    assert s["turns"] == 0 and s["skipped"]["no_usage"] == 1
+
+
+def test_the_last_usage_key_wins_over_an_earlier_nested_one(root, monkeypatch):
+    monkeypatch.setattr(vs, "MAX_LINE_BYTES", 2000)
+    line = json.dumps({"turn": 1, "sent": ["x" * 30000], "received": {"role": "assistant", "usage": {"prompt_tokens": 1, "completion_tokens": 1}},
+                       "finish_reason": "stop", "usage": {"prompt_tokens": 900, "completion_tokens": 90}})
+    write_log(root, "log/run.jsonl", [line])
+    s = vs.scan(root)
+    assert (s["turns"], s["prompt_tokens"], s["completion_tokens"]) == (1, 900, 90)
