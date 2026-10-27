@@ -1,0 +1,325 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+"""Stage 2 chooses the served configuration by what the model is for (issue 107).
+
+A fast decoding path can be greedy only. The Qwen3.8 DFlash2 bundle with its drafter on accepts a request with temperature above 0 and samples
+only the first token (docs/run-logs/2026-10-27-greedy-only-sampling.md). That is the right trade for a model that is used greedily and the wrong one
+for a model that is used with sampling. This module holds the rule that picks between the configuration stage 2 served and a drafter-off variant:
+
+  * `need` reads whether the model's purpose needs sampling, from files (the operator's flag, the card's warning against greedy decoding, the
+    model's own generation_config.json, the card's recommended settings);
+  * `side_from_report` reads a swap check's sampling probe (orchard/sampling_probe.py) into the numbers the rule uses;
+  * `decide` is the rule: the table in docs/superpowers/specs/2026-10-27-sampling-choice-design.md;
+  * `decision_problems` recomputes a decision from the files on disk, for the stage 2 gate.
+
+Every number is recomputed from the probe's raw requests. A summary written into a record is never read.
+"""
+from __future__ import annotations
+
+import json
+import math
+import os
+from pathlib import Path
+
+from orchard import defaults, sampling_probe
+
+DECISION_FILE = "sampling-decision.json"      # in stages/2/
+TRIAL_DIR = "sampling-trial"                  # in stages/2/
+TRIAL_RESULT = "trial-result.json"            # in TRIAL_DIR, written by the template script
+GRAFT_TRIAL_DIR = "graft-trial"               # the grafted variant's own swap check, read for its sampling verdict
+OVERRIDES = ("auto", "needed", "not-needed")
+CHOICES = ("keep", "drafter-off")
+FLAGS = ("below-floor", "no-variant-serves-purpose", "unverified", "variant-not-tried")
+APPLIED = ("sampled-full-speed", "sampled-slower")          # the verdicts that show sampling is applied
+BAD = ("sampled-ignored", "sampled-refused", "sampled-incoherent", "greedy-refused")   # the verdicts that show it is not
+CARD_MARKERS = {"keep": "kept the configuration it served", "drafter-off": "chose the drafter-off configuration"}
+
+
+def _number(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
+def _read_json(path):
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+# ---- is sampling needed? ------------------------------------------------------------------------------------------------------
+
+def _sampling_value(name, value) -> bool:
+    """Is this generation-config or card value a setting that makes decoding sample?"""
+    if not _number(value):
+        return False
+    if name == "temperature":
+        return value > 0
+    if name == "top_p":
+        return 0 < value < 1
+    if name == "top_k":
+        return value > 0                  # 0 and -1 both turn top-k filtering off
+    if name == "min_p":
+        return value > 0
+    return False
+
+
+def need(run_dir, override: str = "auto") -> dict:
+    """{needed, source, override, evidence}: does this model's purpose need sampling? In order: the operator's flag, a card warning against greedy
+    decoding, the model's own generation_config.json (not the nearest model's copy that staging adds), the card's recommended settings, and
+    otherwise no. `evidence` quotes the file and the value or line that decided it; it says so when there was none."""
+    if override not in OVERRIDES:
+        raise ValueError(f"sampling override must be one of {', '.join(OVERRIDES)}, got {override!r}")
+    if override != "auto":
+        return {"needed": override == "needed", "source": "operator", "override": override,
+                "evidence": [f"the operator passed --sampling {override}"]}
+    g = _read_json(Path(run_dir) / "stages" / "0" / "evidence" / "genconfig-license.json")
+    if not isinstance(g, dict):
+        return {"needed": False, "source": "none", "override": override,
+                "evidence": ["no evidence: stage 0's evidence/genconfig-license.json is missing or unreadable"]}
+    warns = [w for w in g.get("card_warns_greedy") or [] if isinstance(w, dict) and isinstance(w.get("quote"), str)]
+    if warns:
+        w = warns[0]
+        return {"needed": True, "source": "card-warning", "override": override,
+                "evidence": [f"the model card warns against greedy decoding (line {w.get('line')}): {w['quote'][:200]}"]}
+    own = g.get("model_generation_config") if g.get("model_generation_config_present") is True else None
+    own = own if isinstance(own, dict) else None
+    if own is not None:
+        found = [f"{k} {own[k]}" for k in ("temperature", "top_p", "top_k", "min_p") if _sampling_value(k, own.get(k))]
+        if own.get("do_sample") is True:
+            found.insert(0, "do_sample true")
+        if found:
+            return {"needed": True, "source": "generation_config", "override": override,
+                    "evidence": ["the model's own generation_config.json sets " + ", ".join(found)]}
+    hints = g.get("card_sampling_hints") if isinstance(g.get("card_sampling_hints"), dict) else {}
+    found = [f"{k} {v}" for k in ("temperature", "top_p", "top_k", "min_p") for v in (hints.get(k) or []) if _sampling_value(k, v)]
+    if found:
+        return {"needed": True, "source": "card-hints", "override": override,
+                "evidence": ["the model card recommends " + ", ".join(found)]}
+    if own is not None and own.get("do_sample") is False:
+        return {"needed": False, "source": "generation_config", "override": override,
+                "evidence": ["the model's own generation_config.json sets do_sample false"]}
+    return {"needed": False, "source": "none", "override": override,
+            "evidence": ["no evidence that the model needs sampling: its own generation_config.json sets no sampling default and its card "
+                         "recommends no sampling setting and does not warn against greedy decoding"]}
+
+
+# ---- what a configuration does with a sampled request ------------------------------------------------------------------------------
+
+def drafter_of(serving) -> str | None:
+    """"on" or "off" from a swap check's `serving.drafter` text, None when the run script does not say."""
+    text = serving.get("drafter") if isinstance(serving, dict) else None
+    if not isinstance(text, str):
+        return None
+    if text.strip() == "off":
+        return "off"
+    return "on" if text.strip().startswith("on") else None
+
+
+def side_from_report(report) -> dict | None:
+    """{drafter, verdict, greedy_tok_s, sampled_tok_s, served} from one swap-check.json, or None when it is not an object. The speeds are
+    recomputed from the probe's tokens and seconds."""
+    if not isinstance(report, dict):
+        return None
+    s = sampling_probe.summarize(report.get("sampling_probe"))
+    draft = report.get("result_draft")
+    return {"drafter": drafter_of(report.get("serving")), "verdict": s["verdict"],
+            "greedy_tok_s": (s["greedy"] or {}).get("tokens_per_s"), "sampled_tok_s": (s["sampled"] or {}).get("tokens_per_s"),
+            "served": draft.get("serves") is True if isinstance(draft, dict) else None}
+
+
+def speed(side) -> float | None:
+    """The speed a request is served at: the sampled requests' mean, else the greedy request's."""
+    for key in ("sampled_tok_s", "greedy_tok_s"):
+        v = side.get(key) if isinstance(side, dict) else None
+        if _number(v) and v > 0:
+            return float(v)
+    return None
+
+
+def needs_variant(need_: dict, current: dict) -> bool:
+    """Can the rule not be settled without serving the drafter-off variant? Sampling is needed, the served configuration has the drafter on,
+    and its probe does not show that sampling is applied."""
+    return bool(need_.get("needed")) and current.get("drafter") == "on" and current.get("verdict") not in APPLIED
+
+
+# ---- the rule -------------------------------------------------------------------------------------------------------------------------
+
+def _fmt(v) -> str:
+    return "an unmeasured speed" if v is None else f"{v:.1f} tokens/s"
+
+
+def decide(need_: dict, current: dict, variant: dict | None = None, *, variant_note: str | None = None, floor: float | None = None) -> dict:
+    """The choice and why. `current` is the configuration stage 2 serves, `variant` the drafter-off variant when it was served (None when it
+    was not tried; `variant_note` says why). See the design note's table for every row."""
+    floor = defaults.SAMPLING_MIN_TOKS_PER_S if floor is None else floor
+    cur_speed = speed(current)
+    var_speed = speed(variant) if variant else None
+    numbers = {"served_drafter": current.get("drafter"), "served_verdict": current.get("verdict"),
+               "served_tok_s": cur_speed, "served_greedy_tok_s": current.get("greedy_tok_s"),
+               "variant_served": variant.get("served") if variant else None,
+               "variant_verdict": variant.get("verdict") if variant else None,
+               "variant_tok_s": var_speed, "variant_greedy_tok_s": variant.get("greedy_tok_s") if variant else None}
+
+    def out(choice, flag, reason):
+        return {"choice": choice, "flag": flag, "reason": reason, "numbers": numbers, "thresholds": {"min_tok_s": floor},
+                "needed": bool(need_.get("needed")), "need_source": need_.get("source"), "need_evidence": list(need_.get("evidence") or []),
+                "override": need_.get("override"), "variant_note": variant_note}
+
+    verdict = current.get("verdict")
+    if not need_.get("needed"):
+        return out("keep", None, f"sampling is not needed for this model ({need_.get('source')}), so the configuration stage 2 served stays "
+                                 f"({_fmt(cur_speed)})")
+    if verdict in APPLIED:
+        if cur_speed is None:
+            return out("keep", "unverified", "the served configuration applies sampling, but its speed was not measured, so the floor "
+                                             f"of {floor:g} tokens/s could not be checked")
+        if cur_speed < floor:
+            return out("keep", "below-floor", f"the served configuration applies sampling, but it decodes at {_fmt(cur_speed)}, below the floor "
+                                              f"of {floor:g} tokens/s, and no other configuration is available; it is kept and needs the "
+                                              "operator's attention")
+        return out("keep", None, f"the served configuration applies sampling and decodes at {_fmt(cur_speed)}, at or above the floor of "
+                                 f"{floor:g} tokens/s, and the model needs sampling ({need_.get('source')})")
+    # Sampling is needed and the served configuration does not show that it applies it.
+    measured_bad = verdict in BAD
+    why_current = ("ignores sampling (the probe's verdict is sampled-ignored)" if verdict == "sampled-ignored" else
+                   f"does not apply sampling (the probe's verdict is {verdict})" if measured_bad else
+                   f"has no usable sampling verdict (the probe's verdict is {verdict})")
+    if current.get("drafter") != "on":
+        flag = "no-variant-serves-purpose" if measured_bad else "unverified"
+        return out("keep", flag, f"the model needs sampling, and the served configuration {why_current}. It has no drafter to switch off, so "
+                                 "no drafter-off variant exists; it is kept and needs the operator's attention")
+    if variant is None:
+        note = f": {variant_note}" if variant_note else ""
+        return out("keep", "variant-not-tried", f"the model needs sampling and the served configuration {why_current}, but the drafter-off "
+                                                f"variant was not tried{note}; the served configuration is kept and needs the operator's attention")
+    v_verdict = variant.get("verdict")
+    if variant.get("served") is not True:
+        flag = "no-variant-serves-purpose" if measured_bad else "unverified"
+        return out("keep", flag, f"the model needs sampling and the served configuration {why_current}; the drafter-off variant did not serve, so "
+                                 "the served configuration is kept and needs the operator's attention")
+    if v_verdict in BAD:
+        return out("keep", "no-variant-serves-purpose",
+                   f"the model needs sampling; neither configuration does what it is for: the served configuration {why_current}, and the "
+                   f"drafter-off variant's probe verdict is {v_verdict}")
+    if var_speed is not None and var_speed < floor:
+        return out("keep", "no-variant-serves-purpose",
+                   f"the model needs sampling; neither configuration does what it is for: the served configuration {why_current} "
+                   f"({_fmt(cur_speed)}), and the drafter-off variant decodes at {_fmt(var_speed)}, below the floor of {floor:g} tokens/s. "
+                   "The faster configuration is kept and needs the operator's attention")
+    verified = verdict == "sampled-ignored" and v_verdict in APPLIED and var_speed is not None
+    flag = None if verified else "unverified"
+    tail = ("" if verified else "; a verdict or a speed is missing, so this choice rests on the drafter-off path being the one the bundle documents "
+                                "for host sampling")
+    return out("drafter-off", flag, f"the model needs sampling ({need_.get('source')}) and the served configuration {why_current} at "
+                                   f"{_fmt(cur_speed)}; the drafter-off variant decodes at {_fmt(var_speed)}, at or above the floor of "
+                                   f"{floor:g} tokens/s, so it is chosen{tail}")
+
+
+def card_sentence(decision: dict) -> str:
+    """The package card's plain sentence for the choice, built from the recorded numbers. It carries the marker phrase the gate looks for."""
+    n = decision.get("numbers") or {}
+    floor = (decision.get("thresholds") or {}).get("min_tok_s")
+    if decision.get("choice") == "drafter-off":
+        s = (f"Stage 2 chose the drafter-off configuration because the model needs sampling and the configuration it first served ignores it "
+             f"(speed {_fmt(n.get('served_tok_s'))}). The drafter-off configuration decodes at {_fmt(n.get('variant_tok_s'))}.")
+    else:
+        s = f"Stage 2 kept the configuration it served ({_fmt(n.get('served_tok_s'))})."
+        s += (" Sampling is not needed for this model." if not decision.get("needed") else
+              " The model needs sampling and this configuration applies it." if n.get("served_verdict") in APPLIED else
+              " The model needs sampling.")
+    flag = decision.get("flag")
+    if flag in ("no-variant-serves-purpose", "below-floor"):
+        s += (f" This package does not do what the model needs: {decision.get('reason')}.")
+    elif flag in ("unverified", "variant-not-tried"):
+        s += f" This choice is not fully verified: {decision.get('reason')}."
+    if floor is not None and decision.get("choice") == "drafter-off":
+        s += f" The usability floor was {floor:g} tokens/s."
+    return s
+
+
+# ---- the files -----------------------------------------------------------------------------------------------------------------------
+
+def write_decision(stage_dir, decision: dict, *, trial: bool) -> Path:
+    """Write stages/2/sampling-decision.json whole or not at all. `trial` says whether the drafter-off variant was served."""
+    sd = Path(stage_dir)
+    record = {**decision, "trial": f"{TRIAL_DIR}/{TRIAL_RESULT}" if trial else None}
+    path = sd / DECISION_FILE
+    tmp = sd / (DECISION_FILE + ".tmp")
+    tmp.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+    return path
+
+
+def read_decision(stage_dir) -> dict | None:
+    d = _read_json(Path(stage_dir) / DECISION_FILE)
+    return d if isinstance(d, dict) and d.get("choice") in CHOICES else None
+
+
+def drafter_off_chosen(run_dir) -> bool:
+    """Did stage 2 choose the drafter-off variant? False for a missing or malformed decision, so nothing downstream changes without a record."""
+    d = read_decision(Path(run_dir) / "stages" / "2")
+    return d is not None and d["choice"] == "drafter-off"
+
+
+def read_override(run_dir) -> str:
+    """The run's `--sampling` value from its ledger's run_start, "auto" when there is none."""
+    from orchard import ledger
+    try:
+        entries = ledger.read_entries(Path(run_dir) / "ledger.jsonl")
+    except (ledger.LedgerCorrupt, OSError):
+        return "auto"
+    for e in entries:
+        if e["event"] == "run_start":
+            v = e["data"].get("sampling")
+            return v if v in OVERRIDES else "auto"
+    return "auto"
+
+
+def served_side(stage_dir) -> dict | None:
+    """The configuration stage 2 serves now: the grafted variant's swap check when the graft decision is graft, else stage 2's own."""
+    sd = Path(stage_dir)
+    g = _read_json(sd / "graft-decision.json")
+    if isinstance(g, dict) and g.get("choice") == "graft":
+        return side_from_report(_read_json(sd / GRAFT_TRIAL_DIR / "variant" / "evidence" / "swap-check.json"))
+    return side_from_report(_read_json(sd / "evidence" / "swap-check.json"))
+
+
+def variant_side(stage_dir) -> dict | None:
+    """The drafter-off variant's swap check, None when the trial left none."""
+    return side_from_report(_read_json(Path(stage_dir) / TRIAL_DIR / "variant" / "evidence" / "swap-check.json"))
+
+
+def decision_problems(stage_dir, run_dir) -> list[str]:
+    """What is wrong with stage 2's sampling decision, for the stage 2 gate. No file is no problem (older runs, and runs where stage 2 is not a
+    swap check). The decision is recomputed from the files on disk: the need from stage 0's evidence and the override the ledger recorded, the
+    sides from the swap checks. A file whose choice or flag differs from the recomputation is refused."""
+    sd = Path(stage_dir)
+    path = sd / DECISION_FILE
+    if not path.exists():
+        return []
+    d = _read_json(path)
+    if not isinstance(d, dict):
+        return [f"{DECISION_FILE} is not a JSON object"]
+    if d.get("choice") not in CHOICES:
+        return [f"{DECISION_FILE} choice must be one of {', '.join(CHOICES)}, got {d.get('choice')!r}"]
+    if d.get("flag") is not None and d.get("flag") not in FLAGS:
+        return [f"{DECISION_FILE} flag must be null or one of {', '.join(FLAGS)}, got {d.get('flag')!r}"]
+    if not isinstance(d.get("reason"), str) or not d["reason"].strip():
+        return [f"{DECISION_FILE} needs a reason for the choice"]
+    override = read_override(run_dir)
+    if d.get("override") != override:
+        return [f"{DECISION_FILE} records the sampling override {d.get('override')!r}; the run's ledger records {override!r}"]
+    current = served_side(sd)
+    if current is None:
+        return [f"{DECISION_FILE} cannot be checked: the swap check it was made from is missing or unreadable"]
+    variant = variant_side(sd)
+    again = decide(need(run_dir, override), current, variant,
+                   variant_note=d.get("variant_note") if isinstance(d.get("variant_note"), str) else None)
+    out = []
+    if again["choice"] != d["choice"]:
+        out.append(f"{DECISION_FILE} chose {d['choice']!r}, but the files on disk give {again['choice']!r}: {again['reason']}")
+    elif again["flag"] != d.get("flag"):
+        out.append(f"{DECISION_FILE} has the flag {d.get('flag')!r}, but the files on disk give {again['flag']!r}: {again['reason']}")
+    if d["choice"] == "drafter-off" and (variant is None or variant.get("served") is not True):
+        out.append(f"{DECISION_FILE} chose the drafter-off variant, but {TRIAL_DIR}/variant/evidence/swap-check.json does not show it serving")
+    return out
