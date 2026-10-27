@@ -6,6 +6,8 @@ The real spend comes from a ledger written in the producer's shape; the local fi
 on separate lines and no figure adds them."""
 import io
 import json
+import os
+from pathlib import Path
 
 import pytest
 
@@ -463,3 +465,85 @@ def test_an_incomplete_scan_is_marked_in_the_text_and_the_json(tmp_path, monkeyp
     assert "INCOMPLETE" in text and "folders below the depth limit" in text
     code, js = run(tmp_path, [str(probe), "--json", "--dir", str(tmp_path / "none")])
     assert json.loads(js)["local_virtual_spend"]["directories"][0]["complete"] is False
+
+
+# ---- cases added after the sixth mutation table ----------------------------------------------------------------------------
+
+def test_a_clean_ledger_prints_no_not_confirmed_line_at_all(tmp_path, probe):
+    ledger = tmp_path / "tg"
+    _write_records(ledger, [{"call_id": "c1", "outcome": "ok", "tokens_in": 100, "tokens_out": 50, "cost_usd": 0.01, "model": "m", "problem": "p"}])
+    code, text = run(tmp_path, [str(probe), "--dir", str(ledger)])
+    assert "not confirmed" not in text and "worst case" not in text
+
+
+def _runs_config(tmp_path):
+    bringup = tmp_path / "bringup.toml"
+    bringup.write_text(BASE)
+    return bringup
+
+
+def test_a_probe_folder_swapped_for_a_link_after_discovery_is_not_read_by_the_default_listing(tmp_path, monkeypatch):
+    import shutil
+    from orchard import virtualspend_view as view
+    runs = tmp_path / "runs"
+    write_log(runs, "kprobe/p1/op/attempt-1/log/probe-1.jsonl", [turn(1, 5, 1)])
+    outside = tmp_path / "outside"
+    write_log(outside, "p1/op/attempt-1/log/probe-1.jsonl", [turn(1, 999, 9)])
+    real = view.discover
+
+    def discover_then_swap(root, *a):
+        found = real(root, *a)
+        shutil.rmtree(runs / "kprobe")
+        (runs / "kprobe").symlink_to(outside, target_is_directory=True)
+        return found
+    monkeypatch.setattr(view, "discover", discover_then_swap)
+    out = io.StringIO()
+    cli.main(["spend", "--config", str(_runs_config(tmp_path)), "--dir", str(tmp_path / "none")], env={}, stdout=out)
+    assert "999" not in out.getvalue() and "1 turns" not in out.getvalue()
+
+
+def test_the_default_listing_lists_the_pinned_original_when_the_runs_folder_is_replaced_after_pinning(tmp_path, monkeypatch):
+    runs = tmp_path / "runs"
+    write_log(runs, "org--a/log/run.jsonl", [turn(1, 5, 1)])
+    other = tmp_path / "other-runs"
+    write_log(other, "org--z/log/run.jsonl", [turn(1, 999, 9)])
+    real_pin = spend_cmd.vs.open_pin
+
+    def pin_then_swap(path):
+        pin = real_pin(path)
+        Path(path).rename(Path(path).parent / "moved-runs")
+        Path(path).symlink_to(other, target_is_directory=True)
+        return pin
+    monkeypatch.setattr(spend_cmd.vs, "open_pin", pin_then_swap)
+    out = io.StringIO()
+    cli.main(["spend", "--config", str(_runs_config(tmp_path)), "--dir", str(tmp_path / "none")], env={}, stdout=out)
+    text = out.getvalue()
+    assert "org--a: 1 turns" in text and "org--z" not in text and "999" not in text
+
+
+def test_a_runs_folder_that_cannot_be_pinned_is_a_setup_error(tmp_path, monkeypatch):
+    (tmp_path / "runs").mkdir()
+    monkeypatch.setattr(spend_cmd.vs, "open_pin", lambda path: None)
+    out = io.StringIO()
+    code = cli.main(["spend", "--config", str(_runs_config(tmp_path)), "--dir", str(tmp_path / "none")], env={}, stdout=out)
+    assert code == 2 and "cannot be opened" in out.getvalue()
+
+
+def test_a_folder_read_in_part_is_listed_even_with_no_turns(tmp_path, monkeypatch):
+    from orchard import virtualspend as virtual
+    monkeypatch.setattr(virtual, "MAX_DEPTH", 2)
+    runs = tmp_path / "runs"
+    write_log(runs, "org--deep/x/y/log/run.jsonl", [turn(1, 5, 1)])         # everything is below the depth limit
+    out = io.StringIO()
+    cli.main(["spend", "--config", str(_runs_config(tmp_path)), "--dir", str(tmp_path / "none")], env={}, stdout=out)
+    assert "org--deep: 0 turns" in out.getvalue() and "INCOMPLETE" in out.getvalue()
+
+
+def test_the_default_listing_leaves_no_descriptor_open(tmp_path):
+    runs = tmp_path / "runs"
+    write_log(runs, "org--a/log/run.jsonl", [turn()])
+    write_log(runs, "kprobe/p/op/attempt-1/log/p.jsonl", [turn()])
+    config = _runs_config(tmp_path)
+    before = set(os.listdir("/proc/self/fd"))
+    cli.main(["spend", "--config", str(config), "--dir", str(tmp_path / "none")], env={}, stdout=io.StringIO())
+    assert set(os.listdir("/proc/self/fd")) == before

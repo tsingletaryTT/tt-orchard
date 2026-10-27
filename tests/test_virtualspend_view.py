@@ -711,3 +711,41 @@ def test_a_readable_runs_folder_reports_no_error(root):
 def test_a_missing_runs_folder_is_unreadable_not_empty(tmp_path):
     data = get(app_with(tmp_path / "gone"))[1]
     assert data["runs_folder_unreadable"] is True
+
+
+def test_the_probe_folder_swapped_for_a_link_after_the_pin_is_not_listed(root, tmp_path, monkeypatch):
+    write_log(root, "kprobe/p1/op/attempt-1/log/p.jsonl", [turn(1, 5, 1)])
+    outside = tmp_path / "outside"
+    write_log(outside, "zz/op/attempt-1/log/p.jsonl", [turn(1, 999, 9)])
+    real_pin = vs.open_pin
+
+    def pin_then_swap(path):
+        pin = real_pin(path)
+        os.rename(Path(path) / "kprobe", Path(path) / "moved-kprobe")
+        (Path(path) / "kprobe").symlink_to(outside, target_is_directory=True)
+        return pin
+    monkeypatch.setattr(vs, "open_pin", pin_then_swap)
+    data = get(app_with(root))[1]
+    assert "999" not in json.dumps(data)
+
+
+def test_a_zero_turn_run_read_in_part_is_in_the_rows(root, monkeypatch):
+    monkeypatch.setattr(vs, "MAX_DEPTH", 2)
+    write_log(root, "org--deep/x/y/log/run.jsonl", [turn(1, 5, 1)])
+    data = get(app_with(root))[1]
+    assert [r["name"] for r in data["rows"]] == ["org--deep"] and data["rows"][0]["complete"] is False and data["not_fully_read"] == 1
+
+
+def test_a_failed_scan_of_the_selected_run_past_the_cap_is_counted(root, monkeypatch):
+    monkeypatch.setattr(view, "MAX_CANDIDATES", 1)
+    write_log(root, "org--a/log/run.jsonl", [turn()])
+    write_log(root, "org--b/log/run.jsonl", [turn()])
+    real = vs.scan
+
+    def flaky(p, **kw):
+        if p.name == "org--b":
+            raise RuntimeError("boom")
+        return real(p, **kw)
+    monkeypatch.setattr(vs, "scan", flaky)
+    data = get(app_with(root), "/api/virtual-spend?run=org--b")[1]
+    assert data["scan_failures"] == 1

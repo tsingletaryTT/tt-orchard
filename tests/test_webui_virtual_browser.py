@@ -284,6 +284,10 @@ def test_both_meters_stay_on_screen_at_the_bottom_of_a_tall_page(tmp_path, brows
         apart_y = a["y"] + a["height"] <= b["y"] + 1 or b["y"] + b["height"] <= a["y"] + 1
         apart_x = a["x"] + a["width"] <= b["x"] + 1 or b["x"] + b["width"] <= a["x"] + 1
         assert apart_x or apart_y, "the two meters must not overlap"
+        if width <= 900:
+            assert a["y"] + a["height"] <= b["y"] + 1, "pinned along the bottom, the local figure sits above the helper meter"
+        else:
+            assert abs(a["y"] - b["y"]) < 40, "in the top bar the two figures sit side by side"
         if width <= 900:                                                 # pinned along the bottom edge: nothing may hide under them
             top_of_meters = min(a["y"], b["y"])
             last = pg.evaluate("(() => { const r = document.querySelector('#tg-local-body tr:last-child').getBoundingClientRect(); return r.bottom; })()")
