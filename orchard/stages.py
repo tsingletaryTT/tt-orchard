@@ -1084,6 +1084,12 @@ def gate_package(stage_dir, run_dir) -> GateResult:
     model_has_mtp = delta_model_has_mtp(delta)
     # A grafted package serves with the drafter and on-device sampling on, whatever stage 2's run.sh says.
     graft_expected = isinstance(d.get("mtp_graft"), dict)
+    # A drafter-off sampling decision conflicts with any graft: a graft keeps the drafter on. The gate does not rely on read_run's check, so it refuses
+    # package-level and per-profile graft metadata itself, and the graft exemption below no longer switches the serving checks off for that decision.
+    off_by_sampling = sampling_choice.drafter_off_chosen(run)
+    if off_by_sampling and graft_expected:
+        reasons.append("package.json records an mtp_graft, but stage 2's sampling decision chose the drafter-off configuration, and a graft keeps the "
+                       "drafter on")
     decision = read_graft_decision(run / "stages" / "2")
     graft_chosen_by_stage_2 = decision is not None and decision["choice"] == "graft"
     trial_decision = decision["choice"] if decision is not None and decision.get("trial") is not None else None
@@ -1125,6 +1131,10 @@ def gate_package(stage_dir, run_dir) -> GateResult:
         reasons += [f"profile {name}: {x}" for x in
                     weights_wiring_problems(run_sh, nearest_model=nearest_repo)]
         has_graft = (out / GRAFT_FILE).exists()
+        grafted = (graft_expected or has_graft) and not off_by_sampling         # the exemption from the serving checks
+        if off_by_sampling and has_graft:
+            reasons.append(f"profile {name}: {GRAFT_FILE} is present, but stage 2's sampling decision chose the drafter-off configuration, and a graft "
+                           "keeps the drafter on")
         if graft_chosen_by_stage_2 and not has_graft:
             reasons.append(f"profile {name}: stage 2's graft trial chose the graft, so the package needs {GRAFT_FILE}")
         if graft_expected or has_graft:
@@ -1134,8 +1144,8 @@ def gate_package(stage_dir, run_dir) -> GateResult:
         reasons += [f"profile {name}: {x}" for x in graft_evidence_problems(out, boot_check)]
         reasons += [f"profile {name}: {x}" for x in
                     serving_problems(run_sh, m.get("env") or {},
-                                     drafter_off=drafter_off and not (graft_expected or has_graft),
-                                     host_sampling=host_sampling and not (graft_expected or has_graft),
+                                     drafter_off=drafter_off and not grafted,
+                                     host_sampling=host_sampling and not grafted,
                                      model_has_mtp=model_has_mtp, graft=has_graft)]
         reasons += [f"profile {name}: scrub: {x}" for x in
                     scrub_package(out, namespace=d.get("namespace"))]
