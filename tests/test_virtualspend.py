@@ -445,3 +445,77 @@ def test_a_hostile_attempt_record_gives_no_time_and_the_turn_counts_stay(root, c
     (root / "op" / "attempt-1" / "attempt.json").write_text(content)
     s = vs.scan(root)
     assert s["agent_wall_s"] is None and (s["turns"], s["prompt_tokens"], s["completion_tokens"]) == (1, 70, 7)
+
+
+
+# ---- review fix 3: every read stays inside the remaining file and scan budgets -----------------------------------------
+
+class _Spy:
+    """Counts the bytes a scan takes from the files it opens."""
+
+    def __init__(self):
+        self.bytes = 0
+
+    def install(self, monkeypatch):
+        real_open = open
+        spy = self
+
+        class Wrapped:
+            def __init__(self, fh):
+                self._fh = fh
+
+            def readline(self, size=-1):
+                data = self._fh.readline(size)
+                spy.bytes += len(data)
+                return data
+
+            def peek(self, n=1):
+                return self._fh.peek(n)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                self._fh.close()
+
+        monkeypatch.setattr(vs, "open", lambda *a, **k: Wrapped(real_open(*a, **k)), raising=False)
+
+
+def test_one_long_line_cannot_make_a_scan_read_past_the_file_budget(root, monkeypatch):
+    monkeypatch.setattr(vs, "MAX_LINE_BYTES", 1000)
+    monkeypatch.setattr(vs, "MAX_FILE_BYTES", 3000)
+    write_log(root, "log/run.jsonl", [turn(1, 5, 1, sent=["x" * 200000])])
+    spy = _Spy()
+    spy.install(monkeypatch)
+    s = vs.scan(root)
+    assert spy.bytes <= 3000, spy.bytes
+    assert s["turns"] == 0 and s["skipped"]["oversize_files"] == 1, "a record cut off by the budget is not priced"
+
+
+def test_one_long_line_cannot_make_a_scan_read_past_the_total_budget(root, monkeypatch):
+    monkeypatch.setattr(vs, "MAX_LINE_BYTES", 1000)
+    monkeypatch.setattr(vs, "MAX_TOTAL_BYTES", 4000)
+    write_log(root, "a/log/run.jsonl", [turn(1, 5, 1, sent=["x" * 3000])])         # fits, as a long line
+    write_log(root, "b/log/run.jsonl", [turn(1, 7, 1, sent=["x" * 200000])])       # cut off by the budget
+    spy = _Spy()
+    spy.install(monkeypatch)
+    s = vs.scan(root)
+    assert spy.bytes <= 4000, spy.bytes
+    assert (s["turns"], s["prompt_tokens"]) == (1, 5) and s["skipped"]["oversize_files"] == 1 and s["complete"] is False
+
+
+def test_a_last_line_without_a_newline_that_ends_exactly_at_the_budget_is_kept(root, monkeypatch):
+    line = turn(1, 11, 1)
+    monkeypatch.setattr(vs, "MAX_FILE_BYTES", len(line))
+    (root / "log").mkdir(parents=True)
+    (root / "log" / "run.jsonl").write_text(line)                                    # no trailing newline
+    s = vs.scan(root)
+    assert s["turns"] == 1 and s["skipped"]["oversize_files"] == 0
+
+
+def test_a_short_line_cut_by_the_budget_is_not_priced(root, monkeypatch):
+    one = turn(1, 10, 1)
+    monkeypatch.setattr(vs, "MAX_FILE_BYTES", len(one) + 1 + 20)                      # the second line is cut after 20 bytes
+    write_log(root, "log/run.jsonl", [one, one])
+    s = vs.scan(root)
+    assert s["turns"] == 1 and s["skipped"]["oversize_files"] == 1 and s["skipped"]["malformed_lines"] == 0

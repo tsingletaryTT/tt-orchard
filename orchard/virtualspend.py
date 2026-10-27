@@ -182,8 +182,23 @@ def _request(rec: dict):
     return p, c, _seconds(rec.get("latency_s")) or 0.0
 
 
+def _room(read: int, budget: list, want: int) -> int:
+    """How many bytes may still be read: the wanted size, cut to what is left of the file and the scan budgets."""
+    return min(want, MAX_FILE_BYTES - read, budget[0])
+
+
+def _more(fh) -> bool:
+    """True when the file has more bytes after the current position (the position does not move)."""
+    try:
+        return bool(fh.peek(1))
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
 def _lines(path: Path, skipped: dict, budget: list):
-    """Yield (kind, payload) for each line of a file: ("rec", dict), ("tail", bytes) for a line over the cap. Bounded."""
+    """Yield ("rec", dict) for each line that parses, and ("tail", bytes) for a line over the cap. Every read is limited to
+    what is left of the file budget and the scan budget. A record that a budget cuts off is dropped and counted in
+    `oversize_files`, so its tail is never priced."""
     read = 0
     try:
         fh = open(path, "rb")
@@ -192,11 +207,14 @@ def _lines(path: Path, skipped: dict, budget: list):
         return
     with fh:
         while True:
-            if read >= MAX_FILE_BYTES or budget[0] <= 0:
-                skipped["oversize_files"] += 1
+            want = MAX_LINE_BYTES + 1
+            room = _room(read, budget, want)
+            if room <= 0:
+                if _more(fh):
+                    skipped["oversize_files"] += 1
                 return
             try:
-                line = fh.readline(MAX_LINE_BYTES + 1)
+                line = fh.readline(room)
             except OSError:
                 skipped["unreadable_files"] += 1
                 return
@@ -204,20 +222,34 @@ def _lines(path: Path, skipped: dict, budget: list):
                 return
             read += len(line)
             budget[0] -= len(line)
-            if len(line) > MAX_LINE_BYTES and not line.endswith(b"\n"):
+            complete = line.endswith(b"\n")
+            if not complete and len(line) == room and room < want and _more(fh):
+                skipped["oversize_files"] += 1                   # a budget ended in the middle of this line
+                return
+            if len(line) > MAX_LINE_BYTES and not complete:
                 tail = line[-TAIL_BYTES:]
-                while True:                              # drain the rest of the line, keeping only its end
+                ended = False
+                while True:                                      # drain the rest of the line, keeping only its end
+                    room = _room(read, budget, MAX_LINE_BYTES)
+                    if room <= 0:
+                        ended = not _more(fh)                    # a line that ends with the file is whole
+                        break
                     try:
-                        more = fh.readline(MAX_LINE_BYTES)
+                        more = fh.readline(room)
                     except OSError:
                         break
                     if not more:
+                        ended = True
                         break
                     read += len(more)
                     budget[0] -= len(more)
                     tail = (tail + more)[-TAIL_BYTES:]
                     if more.endswith(b"\n"):
+                        ended = True
                         break
+                if not ended:
+                    skipped["oversize_files"] += 1
+                    return
                 yield "tail", tail
                 continue
             if not line.strip():
