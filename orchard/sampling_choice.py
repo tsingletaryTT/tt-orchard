@@ -198,22 +198,39 @@ def decide(need_: dict, current: dict, variant: dict | None = None, *, variant_n
         failed = f" or failed its checks ({variant['failure']})" if variant.get("failure") else ""
         return out("keep", flag, f"the model needs sampling and the served configuration {why_current}; the drafter-off variant did not serve{failed}, "
                                  "so the served configuration is kept and needs the operator's attention")
-    if v_verdict in BAD:
-        return out("keep", "no-variant-serves-purpose",
-                   f"the model needs sampling; neither configuration does what it is for: the served configuration {why_current}, and the "
-                   f"drafter-off variant's probe verdict is {v_verdict}")
-    if var_speed is not None and var_speed < floor:
-        return out("keep", "no-variant-serves-purpose",
-                   f"the model needs sampling; neither configuration does what it is for: the served configuration {why_current} "
-                   f"({_fmt(cur_speed)}), and the drafter-off variant decodes at {_fmt(var_speed)}, below the floor of {floor:g} tokens/s. "
-                   "The faster configuration is kept and needs the operator's attention")
-    verified = verdict == "sampled-ignored" and v_verdict in APPLIED and var_speed is not None
-    flag = None if verified else "unverified"
-    tail = ("" if verified else "; a verdict or a speed is missing, so this choice rests on the documented host-sampling path of the drafter-off configuration")
-    return out("drafter-off", flag, f"the model needs sampling ({need_.get('source')}) and the served configuration {why_current} at "
-                                   f"{_fmt(cur_speed)}; the drafter-off variant decodes at {_fmt(var_speed)}, at or above the floor of "
-                                   f"{floor:g} tokens/s, so it is chosen{tail}")
+    both = cur_speed is not None and var_speed is not None
 
+    def neither(why: str) -> dict:
+        """Neither configuration applies sampling and clears the floor. The faster measured one is used and the choice is flagged. Equal speeds, or a
+        speed that was not measured on either side, leave the configuration stage 2 served: nothing shows the variant is faster."""
+        if both and var_speed > cur_speed:
+            return out("drafter-off", "no-variant-serves-purpose",
+                       f"the model needs sampling; neither configuration does what it is for: {why}. The drafter-off variant is the faster of the two "
+                       f"({_fmt(var_speed)} against {_fmt(cur_speed)}), so it is chosen and needs the operator's attention")
+        faster = ("The served configuration is the faster of the two" if both else
+                  "A speed was not measured, so the two cannot be compared and the served configuration stays")
+        return out("keep", "no-variant-serves-purpose",
+                   f"the model needs sampling; neither configuration does what it is for: {why}. {faster}, and it needs the operator's attention")
+
+    if v_verdict in BAD:
+        return neither(f"the served configuration {why_current}, and the drafter-off variant's probe verdict is {v_verdict}")
+    if var_speed is not None and var_speed < floor:
+        return neither(f"the served configuration {why_current} ({_fmt(cur_speed)}), and the drafter-off variant decodes at {_fmt(var_speed)}, "
+                       f"below the floor of {floor:g} tokens/s")
+    verified = measured_bad and v_verdict in APPLIED and var_speed is not None
+    flag = None if verified else "unverified"
+    served = f"the served configuration {why_current}" + (f" at {_fmt(cur_speed)}" if cur_speed is not None else "")
+    if v_verdict in APPLIED and var_speed is not None:
+        said = f"the drafter-off variant applies sampling and decodes at {_fmt(var_speed)}, at or above the floor of {floor:g} tokens/s"
+    elif v_verdict in APPLIED:
+        said = "the drafter-off variant applies sampling, but its speed was not measured, so the floor was not checked"
+    elif var_speed is not None:
+        said = (f"the drafter-off variant has no sampling verdict ({v_verdict}) and decodes at {_fmt(var_speed)}, at or above the floor of "
+                f"{floor:g} tokens/s")
+    else:
+        said = f"the drafter-off variant has no sampling verdict ({v_verdict}) and no measured speed"
+    tail = "" if verified else "; this choice rests on the documented host-sampling path of the drafter-off configuration"
+    return out("drafter-off", flag, f"the model needs sampling ({need_.get('source')}) and {served}; {said}, so it is chosen{tail}")
 
 NEED_WORDS = {"operator": "the operator said so", "card-warning": "the model card warns against greedy decoding",
               "generation_config": "the model's own generation_config.json sets sampling defaults",
@@ -225,19 +242,30 @@ def card_sentence(decision: dict) -> str:
     the only place for a measured speed (the card gate refuses one in prose), and this sentence points to the sampling rows in that table."""
     n = decision.get("numbers") or {}
     why = NEED_WORDS.get(decision.get("need_source"), "the sampling decision says so")
+    verdict = n.get("served_verdict")
+    first = ("ignored sampled requests" if verdict == "sampled-ignored" else
+             "did not apply sampling" if verdict in BAD else "has no usable sampling verdict")
+    flag = decision.get("flag")
     if decision.get("choice") == "drafter-off":
         s = (f"Stage 2 chose the drafter-off configuration. The model needs sampling ({why}), and the configuration stage 2 first served, with the "
-             "speculative drafter on, ignored sampled requests. The drafter-off configuration applies sampling and decodes above the usability floor "
-             "in `orchard/defaults.py`. Its speeds are in the Numbers table, in the rows marked sampling probe.")
+             f"speculative drafter on, {first}.")
+        if flag is None:
+            s += (" The drafter-off configuration applies sampling and decodes above the usability floor in `orchard/defaults.py`. Its speeds are "
+                  "in the Numbers table, in the rows marked sampling probe.")
+        elif flag == "no-variant-serves-purpose":
+            s += (" Neither configuration that stage 2 measured both applies sampling and decodes above the usability floor, and the drafter-off "
+                  "configuration was the faster of the two, so it is the one this package serves. This package does not do what the model needs.")
+        else:
+            s += (" This choice relies on the documented host-sampling path of the drafter-off configuration. A sampling verdict or a speed was not "
+                  "measured for it, so this card does not claim that sampling was shown to apply or that the usability floor was cleared.")
     elif not decision.get("needed"):
         s = f"Stage 2 kept the configuration it served. Sampling is not needed for this model ({why})."
-    elif n.get("served_verdict") in APPLIED:
+    elif verdict in APPLIED:
         s = (f"Stage 2 kept the configuration it served. The model needs sampling ({why}) and this configuration applies it. "
              "The speeds are in the Numbers table, in the rows marked sampling probe.")
     else:
         s = f"Stage 2 kept the configuration it served. The model needs sampling ({why})."
-    flag = decision.get("flag")
-    if flag == "no-variant-serves-purpose":
+    if decision.get("choice") == "keep" and flag == "no-variant-serves-purpose":
         s += (" This package does not do what the model needs: no configuration that stage 2 measured both applies sampling and decodes above the "
               "usability floor, so the faster one is kept. Read `sampling-decision.json` in the evidence before relying on it.")
     elif flag == "below-floor":
