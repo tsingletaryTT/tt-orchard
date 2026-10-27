@@ -1616,6 +1616,7 @@ tt-orchard audio-reference-env --check     # check it; no device, no token
 ~/orchard-venvs/stable-audio/bin/python orchard/skills/audio-reference-templates/make_reference.py \
     --model small-music --out RUN_DIR --prompt "..." --duration 10 --steps 8 --cfg-scale 1.0 --seed 42
 python3 -m orchard.audio_reference check REFERENCE_RUN CANDIDATE_RUN    # PCC, relative L2 error and slope per saved array
+python3 -m orchard.audio_reference check REFERENCE_RUN BF16_RUN --cross-precision   # let the dtype setting differ (the noise floor)
 python3 -m orchard.audio_reference control FINE_TUNE_RUN BASE_RUN       # the base model's waveform must differ
 ```
 
