@@ -115,6 +115,20 @@ def _decision(e: dict, d: dict) -> list[Line]:
         kept = d.get("choice") == "graft"
         return [Line(o, ("graft decision: the grafted drafter is kept: " if kept else "graft decision: the safe configuration stays: ")
                         + _clip(d.get("reason", "?"), 260))]
+    if what == "sampling trial started":
+        return [Line(o, "sampling trial: serving this model with the speculative drafter off and host sampling, beside the configuration stage 2 "
+                        f"served, because the model needs sampling ({d.get('need_source', '?')}) and that configuration does not show it applied "
+                        "(this test can take 5 to 30 minutes on the chips)")]
+    if what == "sampling decision":
+        flag = d.get("flag")
+        head = ("sampling decision: the drafter-off configuration is chosen: " if d.get("choice") == "drafter-off" else
+                "sampling decision: the configuration stage 2 served stays: ")
+        text = head + _clip(d.get("reason", "?"), 260)
+        if flag:
+            text += f" [{flag}: this needs the operator's attention]"
+        return [Line(o, text, bool(flag))]
+    if what == "sampling trial skipped":
+        return [Line(o, f"sampling trial skipped: {_clip(d.get('reason', '?'), 200)}")]
     if what == "graft trial skipped":
         return [Line(o, f"graft trial skipped: {_clip(d.get('reason', '?'), 200)}")]
     if what == "copying files to the lab":
@@ -165,6 +179,11 @@ def _evidence(e: dict, d: dict) -> list[Line]:
         if d.get("timed_out"):
             return [Line(o, "graft trial test failed: it timed out and was stopped", True)]
         return [Line(o, "graft trial test passed (exit 0)")] if rc == 0 else [Line(o, f"graft trial test failed (exit {rc})", True)]
+    if what == "sampling trial test":
+        rc = d.get("returncode")
+        if d.get("timed_out"):
+            return [Line(o, "sampling trial test failed: it timed out and was stopped", True)]
+        return [Line(o, "sampling trial test passed (exit 0)")] if rc == 0 else [Line(o, f"sampling trial test failed (exit {rc})", True)]
     if what == "hardware test list":
         return [Line(o, "will test these chip counts: " + ", ".join(str(c) for c in d.get("configs") or []))]
     if what == "transcript":
@@ -342,7 +361,7 @@ class Narrator:
             self._activity = (f"waiting for the coder {s.get('target', '?')} to boot", now, None, False)
         elif ev == "decision" and what == "hardware test started":
             self._activity = (f"hardware test running: {_clip(d.get('command', ''), 80)}", now, st, True)
-        elif (ev == "evidence" and what in ("hardware test", "graft trial test", "transcript")) or ev == "stage_end" \
+        elif (ev == "evidence" and what in ("hardware test", "graft trial test", "sampling trial test", "transcript")) or ev == "stage_end" \
                 or (ev == "decision" and what in ("coder started", "pause", "blocked", "hardware released",
                                                   "ready for operator review")):
             self._activity = None
