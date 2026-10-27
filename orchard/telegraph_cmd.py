@@ -67,7 +67,7 @@ def main(args, *, out, environ=None, transport=None, getter=None, home=None) -> 
     except (tg.ConfigError, Exception) as exc:                      # a missing config file is the same kind of problem
         say(f"telegraph: {exc}")
         return EXIT_PROBLEM
-    directory = Path(args.dir) if getattr(args, "dir", None) else default_dir(home)
+    directory = Path(args.dir) if getattr(args, "dir", None) else (cfg.dir or default_dir(home))
     tel = tg.Telegraph(cfg, directory, transport=transport, environ=environ, home=str(home))
     action = args.action
     if action == "check":
