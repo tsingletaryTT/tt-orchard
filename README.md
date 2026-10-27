@@ -1056,6 +1056,15 @@ does not change.
 | `full-port` | The model needs new model code | `full-port` | An unattended run ends blocked (`needs-new-model-code`); an attended run pauses before stage 2 |
 | `unknown` | Stage 0 could not decide: an unreadable or overlapping sidecar, or headers that would not parse | `full-port` | Nothing unproven runs as weights-only |
 
+**Audio models.** A model in the stable-audio-tools layout (`model_config.json`, one combined `model.safetensors`, no `config.json`) is read by an
+audio branch of the stage 0 template. Stage 0 records three facts in its ledger entry: `form` (`adapter` or `full`), `serving` (`thin-bundle`,
+`container` or `none`, from the installed bundles and container packages) and `modality` (`text` or `audio`); a ledger without them means a text run on
+a thin bundle. The class follows the same rules as above (`weights-only`, `full-port` or `unknown`). An audio run stops before stage 1 with the block code
+`audio-path-unbuilt`, because the audio stages are not built (plan [docs/superpowers/plans/2026-10-28-audio-bringup.md](docs/superpowers/plans/2026-10-28-audio-bringup.md)).
+`stabilityai/stable-audio-3-small-music` is the first target. There is no runtime for Stable Audio 3 on a Tenstorrent chip (no bundle, container package or
+tt-metal pipeline), so even a `weights-only` result leaves nothing to serve it with; the facts note is
+[docs/run-logs/2026-10-28-stable-audio-3-facts.md](docs/run-logs/2026-10-28-stable-audio-3-facts.md).
+
 A sidecar is found by name: the backbone is the shards the model's `model.safetensors.index.json` lists (or
 `model*.safetensors` without an index; an index that cannot be read, or that lists a shard the repository does not have, is reported and the class estimate is `unknown`), and any other weights file the nearest model does not have is a
 sidecar. `delta.json` lists each sidecar with its size, sha256, tensor count and tensor names, and each
@@ -1606,6 +1615,28 @@ server decoded at 38.7 tok/s.
 - `--reset-baseline`: forget the stored best for these servers first.
 - `--baseline-file`: where the best speeds are kept.
 - `--json`: print one JSON list instead of lines.
+
+### 5.9fa The audio reference environment and the CPU reference
+
+```bash
+tt-orchard audio-reference-env --dry-run   # say what it would do
+tt-orchard audio-reference-env             # build ~/orchard-venvs/stable-audio and ~/orchard-src/stable-audio-3 (needs the network)
+tt-orchard audio-reference-env --check     # check it; no device, no token
+~/orchard-venvs/stable-audio/bin/python orchard/skills/audio-reference-templates/make_reference.py \
+    --model small-music --out RUN_DIR --prompt "..." --duration 10 --steps 8 --cfg-scale 1.0 --seed 42 \
+    --expect-src ~/orchard-src/stable-audio-3     # refuse a library imported from anywhere else; RUN_DIR must not exist yet
+python3 -m orchard.audio_reference check REFERENCE_RUN CANDIDATE_RUN    # PCC, relative L2 error and slope per saved array
+python3 -m orchard.audio_reference check REFERENCE_RUN BF16_RUN --cross-precision   # let the dtype setting differ (the noise floor)
+python3 -m orchard.audio_reference control FINE_TUNE_RUN BASE_RUN       # the base model's waveform must differ
+```
+
+This is step 0 of the Stable Audio runtime design (`docs/superpowers/specs/2026-10-28-stable-audio-runtime-design.md`). The environment is a venv with
+CPU-only torch 2.7.1 and a checkout of Stability AI's `stable-audio-3` library at one pinned commit, both outside the repository; the shared Tenstorrent
+venv is refused. `make_reference.py` runs the library's own `generate` on the CPU with the Hugging Face Hub set to offline mode and every token variable
+removed, so the model files must already be in the local cache. It saves the encoder output, the noise draws, the output of each transformer layer for the first
+network pass, every step's latent and denoised estimate, the final latent and the waveform, each as a float32 `.npy` file with its sha256 in `manifest.json`.
+`python3 -m orchard.audio_reference check` compares two such directories and needs all three numbers: PCC alone passes an output that is scaled. The bars in it
+are provisional until the reference's own bfloat16 noise floor has been measured (`bars_from_floor`).
 
 ### 5.9f The demo environment
 
