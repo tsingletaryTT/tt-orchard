@@ -2457,3 +2457,4 @@ change covers the other two halves: reading the authors' scores from the model c
   cut; the not-checked note). Each got a test and is red. The bounded README read in stage 0 is not observable (the extractor cuts at the same limit), so it has no test.
 - Not done: the model-index entry's own `name` is not compared with the model; a bracketed confidence interval after a number is not read; a number in prose is never read;
   `accept` compares nothing with the run's measured numbers (the package gate already refuses a reported score in the measured table); not run on hardware (none needed).
+- Full suite: 7,963 passed, 3 skipped, and one failure that the README flag test gave on its first run: it read only one level of `tt-orchard` subcommands, so `reported accept`'s flags counted as unknown. The test now walks nested subcommands; that and `tests/test_cli.py` pass.
