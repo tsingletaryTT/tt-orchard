@@ -136,7 +136,7 @@ def test_calls_with_no_price_say_the_cost_is_unknown_and_never_show_zero_dollars
 def test_a_mix_of_priced_and_unpriced_calls_shows_the_known_part_and_the_unknown_count(root, tmp_path):
     cfg, d, tel = setup(tmp_path, prices={"small": [1.0, 5.0]}, max_calls=10, max_calls_per_problem=9)
     tel.ask("a", "task " * 80, "failed")
-    tel.report(json.loads((d / "telegraph.jsonl").read_text().splitlines()[0])["call_id"], helped=False)
+    tel.report(next(r["call_id"] for r in tg.read_ledger(d) if "call_id" in r), helped=False)
     tel.ask("a", "task " * 80, "failed")                        # the second model has no price
     out = app_for(root, cfg).telegraph()
     assert out["summary"]["cost_unknown_calls"] == 1
@@ -467,7 +467,7 @@ def test_a_run_with_a_telegraph_ledger_shows_its_spend(root, tmp_path):
     tel2.ask("p", "task " * 80, "failed")
     detail = app_for(root, cfg).run_detail("org--a")
     assert detail["telegraph"]["calls"] == 1 and detail["telegraph"]["cost_usd"] == pytest.approx(0.0035)
-    assert detail["telegraph"]["cost_unknown_calls"] == 0
+    assert detail["telegraph"]["unknown_cost"] == 0
 
 
 def test_a_run_without_a_ledger_has_no_telegraph_field_value(root, tmp_path):
@@ -488,7 +488,8 @@ def test_a_linked_run_ledger_is_not_followed(root, tmp_path):
 # ---- money formatting ---------------------------------------------------------------------------------------------
 
 @pytest.mark.parametrize("value,text", [(0, "$0.00"), (0.0035, "$0.0035"), (0.004, "$0.0040"), (0.5, "$0.50"),
-                                        (12.349, "$12.35"), (0.01, "$0.01")])
+                                        (12.349, "$12.35"), (0.01, "$0.01"), (0.0001, "$0.0001"),
+                                        (0.00009999, "<$0.0001"), (0.00004, "<$0.0001"), (1e-9, "<$0.0001")])
 def test_dollars_are_written_with_enough_digits_to_be_nonzero(value, text):
     assert view.usd(value) == text
 

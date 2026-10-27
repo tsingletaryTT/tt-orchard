@@ -801,10 +801,10 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
         return package_cmd.card_main(args, out=out)
     if args.cmd == "telegraph":
         from orchard import telegraph_cmd
-        return telegraph_cmd.main(args, out=out, environ=env)
+        return telegraph_cmd.main(args, out=out, environ=env, home=home)
     if args.cmd == "spend":
         from orchard import spend_cmd
-        return spend_cmd.main(args, out=out, environ=env)
+        return spend_cmd.main(args, out=out, environ=env, home=home)
     if args.cmd == "reported":
         from orchard import reported_cmd
         return reported_cmd.main(args, out=out)

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import stat
 import tomllib
 from pathlib import Path
@@ -67,7 +68,7 @@ def main(args, *, out, environ=None, transport=None, getter=None, home=None) -> 
         say(f"telegraph: {exc}")
         return EXIT_PROBLEM
     directory = Path(args.dir) if getattr(args, "dir", None) else (cfg.dir or default_dir(home))
-    tel = tg.Telegraph(cfg, directory, transport=transport, environ=environ)
+    tel = tg.Telegraph(cfg, directory, transport=transport, environ=environ, home=str(home))
     action = args.action
     if action == "check":
         return _check(cfg, tel, args, say, getter)
@@ -78,6 +79,9 @@ def main(args, *, out, environ=None, transport=None, getter=None, home=None) -> 
             tel.report(args.call_id, helped=bool(args.helped))
         except KeyError:
             say(f"telegraph: no call {args.call_id} in {directory}")
+            return EXIT_PROBLEM
+        except tg.LedgerUnavailable:
+            say(f"telegraph: the verdict could not be written to {directory}")
             return EXIT_PROBLEM
         say(f"recorded: call {args.call_id} {'helped' if args.helped else 'did not help'}")
         return EXIT_OK
@@ -119,7 +123,11 @@ def _ping(cfg: tg.Config, key, say, getter) -> int:
     base = cfg.endpoint[:-3] if cfg.api == "anthropic" and cfg.endpoint.endswith("/v1") else cfg.endpoint
     url = (base + "/v1/models") if cfg.api == "anthropic" and not cfg.endpoint.endswith("/v1") else cfg.endpoint + "/models"
     headers = {}
-    if key:
+    if cfg.api == "anthropic":
+        headers["anthropic-version"] = tg.ANTHROPIC_VERSION
+        if key:
+            headers["x-api-key"] = key
+    elif key:
         headers["Authorization"] = f"Bearer {key}"
     try:
         status, raw = getter(url, headers, cfg.timeout_s)
@@ -140,6 +148,16 @@ def _ping(cfg: tg.Config, key, say, getter) -> int:
     return 1 if missing else 0
 
 
+def _report_command(tel: tg.Telegraph, args, call_id: str) -> str:
+    """The command that reports this answer: it carries the directory and any explicit config the ask used."""
+    parts = ["tt-orchard", "telegraph", "report", call_id, "--helped|--not-helped", "--dir", shlex.quote(str(tel.dir))]
+    for flag, value in (("--telegraph-config", getattr(args, "telegraph_config", None)),
+                        ("--config", getattr(args, "config", None))):
+        if value:
+            parts += [flag, shlex.quote(str(value))]
+    return " ".join(parts)
+
+
 def _ask(tel: tg.Telegraph, args, say) -> int:
     try:
         task, failure = _read(args.task_file, "task"), _read(args.failure_file, "failure")
@@ -152,9 +170,13 @@ def _ask(tel: tg.Telegraph, args, say) -> int:
         return EXIT_NO_ANSWER
     say(got.as_hint())
     where = "cache" if got.cached else got.model
-    say(f"call {got.call_id}: {where}, {got.tokens_in} in, {got.tokens_out} out, {got.latency_s:.1f}s"
-        + (f", ${got.cost_usd:.6f}" if got.cost_usd is not None else ", cost unknown")
-        + f". Tell the ledger whether it helped: tt-orchard telegraph report {got.call_id} --helped|--not-helped")
+    line = (f"call {got.call_id}: {where}, {got.tokens_in} in, {got.tokens_out} out, {got.latency_s:.1f}s"
+            + (f", ${got.cost_usd:.6f}" if got.cost_usd is not None else ", cost unknown"))
+    if got.reason:                                       # the answer arrived but its record could not be written
+        say(f"warning: {got.reason}")
+        say(line + ".")
+    else:
+        say(line + f". Tell the ledger whether it helped: {_report_command(tel, args, got.call_id)}")
     return EXIT_OK
 
 
@@ -165,8 +187,11 @@ def _usage(directory: Path, args, say) -> int:
         return EXIT_OK
     say(f"calls: {s['calls']} ({s['ok']} answered), cache hits: {s['cache_hits']}, refused: {s['refused']}")
     say(f"helped: {s['helped']}, did not help: {s['not_helped']}, not yet reported: {s['unreported']}")
+    if s["unsettled"] or s["unknown_usage_calls"]:
+        say(f"not settled: {s['unsettled']} reservations with no result (a crash or a kill), "
+            f"{s['unknown_usage_calls']} answers with no usable token count; their worst case counts against the caps")
     say(f"tokens: {s['tokens_in']} in, {s['tokens_out']} out; time: {s['latency_s']:.1f}s")
-    say(f"cost: ${s['cost_usd']:.6f}" + (f" (+ {s['cost_unknown_calls']} calls with no price)" if s["cost_unknown_calls"] else ""))
+    say(f"cost: ${s['cost_usd']:.6f}" + (f" (+ {s['cost_unknown_calls']} calls with no known cost: no price, or the provider sent no usage)" if s["cost_unknown_calls"] else ""))
     for model, v in sorted(s["by_model"].items()):
         say(f"  model {model}: {v['calls']} calls")
     for problem, v in sorted(s["by_problem"].items()):

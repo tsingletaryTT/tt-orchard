@@ -1476,7 +1476,9 @@ it likes. The ops are `add` (a calibration op whose working kernel is upstream's
 
 Flags:
 
-- `--op`: the op to write a kernel for (`add`, `silu_mul`, `rmsnorm`, `linear_scan`). Required.
+- `--op`: the op to write a kernel for (`add`, `silu_mul`, `rmsnorm`, `linear_scan`, `center`, `softmax`, `tile_scan`). Required.
+  `tile_scan` is `linear_scan` taken across tile rows, with elementwise math inside each tile. It can be written and checked in the
+  simulator. `linear_scan` scans down all rows inside a tile, which needs single-element access that the simulator does not have.
 - `--attempts`: attempts per temperature, each a fresh conversation (default 5).
 - `--temperature`: the sampling temperature, 0 to 2 (default 0). Temperature 0 asks the server for greedy decoding.
   Attempts then often repeat each other but are not guaranteed to be identical (the live probe at temperature 0
@@ -1700,7 +1702,7 @@ max_calls_per_problem = 3                    # one problem (the id passed to ask
 The key is read when a call is made and is never written to a prompt, ledger, cache, reply file or error. A `key_file` inside the
 checkout is refused. Requests hold only the task and the failure, with home paths, host names and token shapes removed, cut to
 `max_prompt_chars`. The same question to the same model is answered from the cache. A stronger model is used only after an answer
-was reported as not helping. Keep the problem id the same across rounds of one problem, so the per-problem caps see the whole spend. On ops where a stronger
+was reported as not helping. Before a request is sent, its worst-case cost is reserved in the ledger under a lock, so two processes cannot spend the same allowance and a process that dies mid-request still counts. A request whose usage is unknown (a timeout, a server error, an answer with no usage) counts at that worst case. If the ledger cannot be written, no outside call is made. Keep the problem id the same across rounds of one problem, so the per-problem caps see the whole spend. On ops where a stronger
 model does not help (earlier runs on `linear_scan` spent $0.83 on one model without a fix), these caps stop the spending. A reply's `<think>` block is removed before it is stored, and an answer cut off inside its reasoning is a failed call (its tokens still
 count against the caps and it is not cached); `extra_body` is how to turn thinking off for a model that thinks by default. The reply is advice from another model and is shown marked as untrusted text; nothing runs it.
 
@@ -1719,7 +1721,7 @@ Every call, refusal and cache hit is one line in `telegraph.jsonl` (model, token
   cache and reply files live (default `~/.cache/tt-orchard/telegraph`).
 - `dir` in the `[telegraph]` table sets that folder for the commands and for the web page (a relative path is against the
   config file's folder). `--dir` on a command still wins.
-- In the web page (`tt-orchard ui`) a spend meter sits in the top bar in every view and both styles: the dollars spent, the number
+- In the web page (`tt-orchard ui`) a spend meter sits in the top bar in every view and both styles (pinned along the bottom edge on screens up to 900 px wide): the dollars spent, the number
   of calls and the cap that is closest to its limit. It is grey when telegraph is off, amber when any cap is at 80 percent or more, and
   red when a cap is used up or the latest call was refused, with the reason. A call with no known price shows as unknown cost, and
   the meter says "spend unknown" when the page cannot read it. Clicking the meter opens the Telegraph view: the settings (the endpoint's

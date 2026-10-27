@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import Callable
 
 from orchard.classes import CLASSES, SIDECAR_CLASSES, class_of_path, path_of
-from orchard import prompt_suite
+from orchard import prompt_suite, sampling_probe
 from orchard.graft_trial import DECISION_FILE as GRAFT_DECISION_FILE
 from orchard.graft_trial import chosen as graft_chosen
 from orchard.graft_trial import read_decision as read_graft_decision
@@ -783,7 +783,9 @@ def _suite_reasons(report, run_dir, where: str = "") -> list[str]:
     A report without a suite record has none. The gates read the template's swap-check.json and not the agent's
     result.json: the record holds the raw replies, and the verdict is computed here from them. A control in the record has
     to have been served from the run's nearest model (stage 0's), which is checked here again whatever the template did."""
-    return _hub_fetch_reasons(report, where) + [where + r for r in prompt_suite.evaluate(report, nearest_model=_nearest_model_of(run_dir)).reasons]
+    probe = [where + r for r in sampling_probe.problems(report.get("sampling_probe") if isinstance(report, dict) else None)]
+    return (_hub_fetch_reasons(report, where) + probe
+            + [where + r for r in prompt_suite.evaluate(report, nearest_model=_nearest_model_of(run_dir)).reasons])
 
 
 def _suite_reasons_in(path, run_dir, where: str = "") -> list[str]:
@@ -1033,8 +1035,9 @@ def gate_package(stage_dir, run_dir) -> GateResult:
     weights, the card, the boot check's verify.json and the publish commands. package.json only
     says where to look."""
     # Imported here: orchard.package imports this module.
-    from orchard.package import (GRAFT_FILE, PUBLISH_FILE, PackageError, graft_evidence_problems, graft_problems,
-                                 graft_trial_numbers, publish_problems, read_reported, serving_problems,
+    from orchard.package import (GRAFT_FILE, PUBLISH_FILE, PackageError, acceptance_sources, graft_evidence_problems, graft_problems,
+                                 graft_trial_numbers, publish_problems, read_reported, sampling_numbers,
+                                 sampling_summary, sampling_summary_problems, serving_problems,
                                  split_model_id, stage_2_serving, stage_2_vocab, weights_wiring_problems)
     from orchard.card_use import read_use_facts
     from orchard.package_card import card_evidence_paths, card_problems, read_license
@@ -1058,6 +1061,7 @@ def gate_package(stage_dir, run_dir) -> GateResult:
     elif d.get("license") != license_id:
         reasons.append(f"package.json says the license is {d.get('license')!r}; the model's is "
                        f"{license_id!r}")
+    reasons += sampling_summary_problems(run)
     drafter_off, host_sampling = stage_2_serving(run)
     model_has_mtp = delta_model_has_mtp(delta)
     # A grafted package serves with the drafter and on-device sampling on, whatever stage 2's run.sh says.
@@ -1066,6 +1070,9 @@ def gate_package(stage_dir, run_dir) -> GateResult:
     graft_chosen_by_stage_2 = decision is not None and decision["choice"] == "graft"
     trial_decision = decision["choice"] if decision is not None and decision.get("trial") is not None else None
     trial_rows = tuple(n.name for n in graft_trial_numbers(run))
+    sampling = sampling_summary(run)
+    sampling_expected = tuple(sampling_numbers(run))
+    acceptance_measured = bool(acceptance_sources(tuple(graft_trial_numbers(run)) + sampling_expected))
     try:
         reported, reported_source = read_reported(run)
     except PackageError as exc:
@@ -1121,6 +1128,9 @@ def gate_package(stage_dir, run_dir) -> GateResult:
                                       model_id=new_repo, nearest_model=nearest_repo, graft=has_graft,
                                       graft_decision=trial_decision, vocab=stage_2_vocab(run),
                                       trial_rows=trial_rows if p.get("required") else (),
+                                      sampling=sampling if p.get("required") else None,
+                                      sampling_expected=sampling_expected if p.get("required") else (),
+                                      acceptance_measured=acceptance_measured if p.get("required") else False,
                                       use=read_use_facts(swap.get("new_snapshot") or "/nonexistent", run_sh, run,
                                                            identity=(new_repo, new_rev), measured=bool(p.get("required"))))]
         reasons += [f"profile {name}: the card cites {e}, which is missing at evidence/{e}"

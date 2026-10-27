@@ -158,6 +158,14 @@ def test_check_ping_of_a_transport_error_exits_2_without_a_traceback(tmp_path):
 
 # ------------------------------------------------------------------------------------------------ ask, report, usage
 
+def first_call_id(directory):
+    """The id of the first call in a ledger (the lines before it are budget reservations)."""
+    for line in (Path(directory) / "telegraph.jsonl").read_text().splitlines():
+        row = json.loads(line)
+        if "call_id" in row:
+            return row["call_id"]
+
+
 def files(tmp_path):
     (tmp_path / "task.txt").write_text("write a softmax kernel")
     (tmp_path / "fail.txt").write_text("Deadlock detected")
@@ -196,7 +204,7 @@ def test_report_and_usage_round_trip(tmp_path):
     d, cfg = str(tmp_path / "d"), str(write(tmp_path))
     run(["ask", "--problem", "p", *files(tmp_path), "--dir", d, "--telegraph-config", cfg], tmp_path,
         transport=ok_transport())
-    call_id = json.loads((tmp_path / "d" / "telegraph.jsonl").read_text().splitlines()[0])["call_id"]
+    call_id = first_call_id(tmp_path / "d")
     assert run(["report", call_id, "--helped", "--dir", d, "--telegraph-config", cfg], tmp_path)[0] == 0
     code, text = run(["usage", "--dir", d, "--telegraph-config", cfg], tmp_path)
     assert code == 0 and "calls: 1" in text and "helped: 1" in text and "tokens: 100 in, 20 out" in text
@@ -229,7 +237,7 @@ def test_report_not_helped_is_recorded_as_not_helped(tmp_path):
     d, cfg = str(tmp_path / "d"), str(write(tmp_path))
     run(["ask", "--problem", "p", *files(tmp_path), "--dir", d, "--telegraph-config", cfg], tmp_path,
         transport=ok_transport())
-    call_id = json.loads((tmp_path / "d" / "telegraph.jsonl").read_text().splitlines()[0])["call_id"]
+    call_id = first_call_id(tmp_path / "d")
     assert run(["report", call_id, "--not-helped", "--dir", d, "--telegraph-config", cfg], tmp_path)[0] == 0
     text = run(["usage", "--dir", d, "--telegraph-config", cfg], tmp_path)[1]
     assert "helped: 0, did not help: 1" in text and "problem p: 1 calls, 0 helped" in text
@@ -253,3 +261,108 @@ def test_the_command_is_reachable_from_the_cli_entry_point(tmp_path):
     code = cli.main(["telegraph", "usage", "--telegraph-config", str(write(tmp_path)), "--dir", str(tmp_path / "d")],
                     env={"HOME": str(tmp_path)}, stdout=out)
     assert code == 0 and "calls: 0" in out.getvalue()
+
+
+def test_ping_of_an_anthropic_configuration_uses_that_apis_headers(tmp_path):
+    toml = TOML.replace('endpoint = "https://llm.example.org/v1"', 'endpoint = "https://llm.example.org"\napi = "anthropic"')
+    seen = {}
+
+    def getter(url, headers, timeout):
+        seen.update(url=url, headers=headers)
+        return 200, json.dumps({"data": [{"id": "small"}, {"id": "big"}]}).encode()
+    code, _ = run(["check", "--ping", "--telegraph-config", str(write(tmp_path, toml))], tmp_path, getter=getter)
+    assert code == 0 and seen["url"] == "https://llm.example.org/v1/models"
+    assert seen["headers"]["x-api-key"] == KEY and seen["headers"]["anthropic-version"] == tg.ANTHROPIC_VERSION
+    assert "Authorization" not in seen["headers"]
+
+
+def test_report_that_cannot_write_exits_with_an_error_and_does_not_say_recorded(tmp_path, monkeypatch):
+    d, cfg = str(tmp_path / "d"), str(write(tmp_path))
+    run(["ask", "--problem", "p", *files(tmp_path), "--dir", d, "--telegraph-config", cfg], tmp_path,
+        transport=ok_transport())
+    call_id = first_call_id(tmp_path / "d")
+    monkeypatch.setattr(tg.Telegraph, "_append", lambda self, rec, **kw: False)
+    code, text = run(["report", call_id, "--helped", "--dir", d, "--telegraph-config", cfg], tmp_path)
+    assert code == 2 and "recorded" not in text and "could not" in text
+
+
+def test_the_suggested_report_command_carries_the_directory_and_the_config(tmp_path):
+    d, cfg = str(tmp_path / "my dir"), str(write(tmp_path))
+    code, text = run(["ask", "--problem", "p", *files(tmp_path), "--dir", d, "--telegraph-config", cfg], tmp_path,
+                     transport=ok_transport())
+    line = next(l for l in text.splitlines() if "telegraph report" in l)
+    import shlex
+    assert f"--dir {shlex.quote(d)}" in line and f"--telegraph-config {shlex.quote(cfg)}" in line
+
+
+def test_the_suggested_report_command_names_the_default_directory_when_none_was_given(tmp_path):
+    cfg = str(write(tmp_path))
+    code, text = run(["ask", "--problem", "p", *files(tmp_path), "--telegraph-config", cfg], tmp_path,
+                     transport=ok_transport())
+    line = next(l for l in text.splitlines() if "telegraph report" in l)
+    assert f"--dir {cmd.default_dir(tmp_path)}" in line
+
+
+def test_a_config_path_with_a_space_is_quoted_in_the_suggested_command(tmp_path):
+    sub = tmp_path / "my cfg"
+    sub.mkdir()
+    cfg = str(write(sub))
+    code, text = run(["ask", "--problem", "p", *files(tmp_path), "--telegraph-config", cfg], tmp_path,
+                     transport=ok_transport())
+    line = next(l for l in text.splitlines() if "telegraph report" in l)
+    import shlex
+    assert f"--telegraph-config {shlex.quote(cfg)}" in line and "'" in line
+
+
+def test_a_paid_answer_that_could_not_be_recorded_shows_the_warning_and_no_report_command(tmp_path, monkeypatch):
+    real = tg.Telegraph._append
+
+    def fail_settle(self, rec, **kw):
+        return False if rec.get("outcome") == "ok" else real(self, rec, **kw)
+    monkeypatch.setattr(tg.Telegraph, "_append", fail_settle)
+    d, cfg = str(tmp_path / "d"), str(write(tmp_path))
+    code, text = run(["ask", "--problem", "p", *files(tmp_path), "--dir", d, "--telegraph-config", cfg], tmp_path,
+                     transport=ok_transport())
+    assert code == 0 and "try fill" in text and "could not record" in text
+    assert "telegraph report" not in text
+
+
+def test_the_usage_line_names_calls_with_no_known_cost_not_only_missing_prices(tmp_path):
+    no_usage = {"choices": [{"message": {"content": "fine"}, "finish_reason": "stop"}]}
+    d, cfg = str(tmp_path / "d"), str(write(tmp_path))
+
+    def send(url, headers, body, timeout):
+        return 200, json.dumps(no_usage).encode()
+    run(["ask", "--problem", "p", *files(tmp_path), "--dir", d, "--telegraph-config", cfg], tmp_path, transport=send)
+    code, text = run(["usage", "--dir", d, "--telegraph-config", cfg], tmp_path)
+    assert "no known cost" in text and "no price" not in text.replace("no price, or", "")
+
+
+def test_the_cli_forwards_its_injected_home_to_the_telegraph_command(tmp_path):
+    ledger = tmp_path / "fakehome" / ".cache" / "tt-orchard" / "telegraph"
+    ledger.mkdir(parents=True)
+    (ledger / "telegraph.jsonl").write_text(json.dumps({"reserve": "c1", "problem": "p", "tokens": 5, "cost_usd": None}) + "\n")
+    out = io.StringIO()
+    code = cli.main(["telegraph", "usage", "--telegraph-config", str(write(tmp_path))],
+                    env={"HOME": str(tmp_path / "fakehome")}, stdout=out)
+    assert code == 0 and "not settled: 1 reservations" in out.getvalue()
+
+
+def test_the_command_redacts_paths_under_the_injected_home(tmp_path):
+    seen = []
+
+    def transport(url, headers, body, timeout):
+        seen.append(body.decode())
+        return 200, json.dumps({"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+                                "usage": {"prompt_tokens": 5, "completion_tokens": 5}}).encode()
+    home = tmp_path / "srv" / "operators" / "alice"
+    home.mkdir(parents=True)
+    task = tmp_path / "task.txt"
+    task.write_text(f"file {home}/work/x.py")
+    fail = tmp_path / "fail.txt"
+    fail.write_text("boom")
+    out = io.StringIO()
+    cmd.main(cli._parser().parse_args(["telegraph", "ask", "--telegraph-config", str(write(tmp_path)), "--dir", str(tmp_path / "d"),
+                                       "--problem", "p", "--task-file", str(task), "--failure-file", str(fail)]),
+             out=out, environ={"TG_KEY": "k" * 20, **{}}, transport=transport, home=home)
+    assert seen and str(home) not in seen[0]

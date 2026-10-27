@@ -14,7 +14,7 @@ const S = {
   meta: null, runs: [], launches: [], machine: null, selected: null, detail: null,
   tab: "feed", source: null, feedSeen: new Set(), feedFilter: "", follow: true,
   ledgerAfter: 0, ledgerRows: [], ledgerFilter: "", ledgerFirst: {}, file: null, lastOk: 0, startingRun: null,
-  scene: null, view: "orchard", hw: null, health: null, leases: null,
+  scene: null, view: "orchard", hw: null, health: null, leases: null, tgStart: Date.now(), tgOk: 0, tgPending: false,
 };
 
 // ---- small helpers ------------------------------------------------------------------------------
@@ -117,17 +117,25 @@ async function api(path, opts) {
     init.headers["X-Orchard-Token"] = S.meta ? S.meta.token : "";
     init.body = JSON.stringify(opts.body);
   }
+  let timer = null;
+  if (opts && opts.timeout) {            // an optional limit: the request is aborted and counts as a failure
+    const ctl = new AbortController();
+    init.signal = ctl.signal;
+    timer = setTimeout(() => ctl.abort(), opts.timeout);
+  }
   let resp;
   try {
     resp = await fetch(path, init);
   } catch (err) {
+    if (timer) clearTimeout(timer);
     setConn("offline");
     throw new Error("The UI server cannot be reached. Is `tt-orchard ui` still running?");
   }
   S.lastOk = Date.now();
   setConn("live");
   const isJson = (resp.headers.get("Content-Type") || "").includes("application/json");
-  const data = isJson ? await resp.json() : await resp.text();
+  const data = isJson ? await resp.json() : await resp.text();      // the limit covers the body too
+  if (timer) clearTimeout(timer);
   if (!resp.ok) throw new Error((data && data.error) || `${resp.status} ${resp.statusText}`);
   return data;
 }
@@ -278,21 +286,27 @@ function renderLocalTable() {
 function usd(value) {
   const v = Number(value) || 0;
   if (v === 0) return "$0.00";
+  if (v < 0.0001) return "<$0.0001";                // four decimals would show $0.0000 for a real cost
   return v < 0.01 ? `$${v.toFixed(4)}` : `$${v.toFixed(2)}`;
 }
 
 function plural(n, word) { return `${n} ${word}${n === 1 ? "" : "s"}`; }
 
 function spendText(s) {
-  const unknown = s.cost_unknown_calls || 0;
-  if (s.calls && unknown === s.calls) return "unknown cost";
+  // The same rule as telegraph_view._spend_text: an unknown cost is counted apart and never shown as zero dollars.
+  const unknown = s.unknown_cost || 0;
+  if (unknown && !s.cost_usd) return "unknown cost";
   return unknown ? `${usd(s.cost_usd)} + ${unknown} unknown` : usd(s.cost_usd);
 }
 
 function renderSpendMeter(t) {
   const el = $("spend-meter");
   if (!t) {
-    $("spend-text").textContent = "Helper: spend unknown";
+    // The current spend cannot be read. The last amount that was read stays visible, marked as old, so an outage never hides
+    // a spend that was already high; before any amount was read, nothing is invented.
+    const last = S.telegraph && S.telegraph.meter ? S.telegraph.meter.text.replace(/^Helper: /, "") : null;
+    const age = S.tgOk ? Math.round((Date.now() - S.tgOk) / 1000) : null;
+    $("spend-text").textContent = last ? `Helper: spend unknown · last known ${last} (${age} s ago)` : "Helper: spend unknown";
     el.dataset.state = "unknown";
     el.dataset.tone = "bad";
     el.title = "The page cannot read the helper's spend right now. Click for the Telegraph view.";
@@ -304,14 +318,44 @@ function renderSpendMeter(t) {
   el.title = t.meter.title;
 }
 
+const POLL_TELEGRAPH_MS = 5000;
+
+// The amount on screen is unknown once it is older than STALE_MS, however that came about.
+function markTelegraphStale() {
+  if (Date.now() - (S.tgOk || S.tgStart) > STALE_MS) renderSpendMeter(null);
+}
+
+// Telegraph has its own timers, so no other request (the run list, the machine, the launches) can stop it: one poll every five
+// seconds (every 30 s in a hidden tab) and a separate check every two seconds that the amount is not stale.
+function startTelegraphPolling() {
+  pollTelegraph();
+  let last = Date.now();
+  setInterval(() => {
+    if (document.hidden && Date.now() - last < HIDDEN_POLL_MS) { markTelegraphStale(); return; }
+    last = Date.now();
+    pollTelegraph();
+  }, POLL_TELEGRAPH_MS);
+  setInterval(markTelegraphStale, 2000);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) pollTelegraph(); });
+}
+
+const TG_TIMEOUT_MS = 25000;           // a poll that has not answered by now is dropped, so a hung server cannot block later polls
+
 async function pollTelegraph() {
+  // Staleness is judged first, before any waiting: a request that never answers would never reach a catch block, and the last
+  // dollar amount would stay on screen. Every poll tick therefore checks how old the amount is.
+  markTelegraphStale();
+  if (S.tgPending) return;               // one request at a time
+  S.tgPending = true;
   try {
-    S.telegraph = await api("/api/telegraph");
+    S.telegraph = await api("/api/telegraph", { timeout: TG_TIMEOUT_MS });
     S.tgOk = Date.now();
     renderSpendMeter(S.telegraph);
     if (S.view === "telegraph") renderTelegraph();
   } catch (err) {
-    if (Date.now() - (S.tgOk || 0) > STALE_MS) renderSpendMeter(null);
+    // the next tick's check above marks the amount unknown once it is old enough
+  } finally {
+    S.tgPending = false;
   }
 }
 
@@ -322,11 +366,21 @@ const TG_BANNER = {
   capped: "Telegraph is on, and a cap has stopped it.",
   problem: "Telegraph is on, and something needs attention.",
 };
-const TG_OUTCOME_TONE = { ok: "good", error: "bad", budget: "bad", "no-key": "warn", "cache hit": "dim" };
+const TG_OUTCOME_TONE = { ok: "good", error: "bad", budget: "bad", "no-key": "warn", "cache hit": "dim", unsettled: "warn" };
+
+// What an unknown cost does, which depends on the cost caps that are set: a global cost cap refuses every new call, a per-problem
+// cost cap refuses new calls for a problem that has one, and with neither the calls still go out.
+function costCapSentence(t, long) {
+  if (t.caps.some((c) => c.id === "cost")) return long ? "A cost cap refuses new calls while any exist." : "a cost cap refuses new calls while any exist";
+  if (t.config.per_problem.cost_usd !== null) {
+    return long ? "A per-problem cost cap refuses new calls for a problem while it has any." : "a per-problem cost cap refuses new calls for a problem while it has any";
+  }
+  return long ? "No cost cap is set, so new calls still go out." : "no cost cap is set, so calls still go out";
+}
 
 function tgCapText(c) {
   const used = c.unit === "usd" ? usd(c.used) : String(c.used), limit = c.unit === "usd" ? usd(c.limit) : String(c.limit);
-  return `${used} of ${limit} (${c.percent}%)`;
+  return c.blocked ? `${used} known of ${limit}: blocked, a call has no known cost` : `${used} of ${limit} (${c.percent}%)`;
 }
 
 function tgRow(cells, tone) {
@@ -344,19 +398,33 @@ function renderTelegraph() {
   banner.dataset.tone = t.tone;
   banner.append(h("strong", {}, TG_BANNER[t.state] || ""));
   if (t.capped) banner.append(h("span", {}, ` Reason: ${t.capped.reason}.`));
+  if (t.spend.unknown_cost) {
+    banner.append(h("span", {}, ` ${plural(t.spend.unknown_cost, "call")} ${t.spend.unknown_cost === 1 ? "has" : "have"} no known cost. ` +
+      costCapSentence(t, true)));
+  }
+  if (t.spend.unsettled) banner.append(h("span", {}, ` ${plural(t.spend.unsettled, "reservation")} ${t.spend.unsettled === 1 ? "has" : "have"} no recorded result and counts at its worst case.`));
   if (t.error) banner.append(h("span", {}, ` ${t.error}.`));
   if (t.key.state === "missing") banner.append(h("span", {}, ` The key is missing: ${t.key.reason}.`));
 
   const s = t.summary;
   const num = (k, v, note) => h("div", { class: "tg-num" }, h("span", { class: "k" }, k), h("span", { class: "v" }, v), note ? h("span", { class: "muted small" }, note) : null);
-  clear($("tg-numbers")).append(
-    num("Spend", spendText(s), s.cost_unknown_calls ? `${plural(s.cost_unknown_calls, "call")} with no price` : ""),
-    num("Calls sent", String(s.calls), `${s.ok} answered`),
+  if (t.error) {
+    // Nothing could be read, so no number is shown: a row of zeros would look like a spend of nothing.
+    clear($("tg-numbers")).append(num("Spend", "unknown", t.error), num("Calls counted", "unknown", "the ledger was not read"));
+  } else clear($("tg-numbers")).append(
+    num("Spend", spendText(t.spend), t.spend.unknown_cost ? `${plural(t.spend.unknown_cost, "call")} with no known cost` : "known costs; reservations at their worst case"),
+    num("Calls counted", String(t.spend.calls), `${s.calls} sent and recorded · ${s.ok} answered`),
+    num("Unsettled", String(t.spend.unsettled), "no result recorded; counted at the worst case"),
+    num("Unknown cost", String(t.spend.unknown_cost),
+      t.spend.unknown_cost ? costCapSentence(t, false)
+        : "every counted call has a known cost"),
     num("Helped", String(s.helped), `${s.not_helped} did not help · ${s.unreported} not reported`),
     num("Cache hits", String(s.cache_hits), "cost nothing"),
     num("Refused", String(s.refused), "a cap or a missing key"),
     num("Tokens", `${s.tokens_in + s.tokens_out}`, `${s.tokens_in} in · ${s.tokens_out} out`),
-    num("Time", `${Math.round(s.latency_s)} s`, "waiting for the helper"));
+    num("Time", `${Math.round(s.latency_s)} s`, "waiting for the helper"),
+    num("Damaged or unreported", String(t.spend.torn + t.spend.unknown_usage_calls),
+      `${plural(t.spend.torn, "torn record")} · ${plural(t.spend.unknown_usage_calls, "call")} with no usage reported`));
 
   const caps = clear($("tg-caps"));
   for (const c of t.caps) {
@@ -375,8 +443,9 @@ function renderTelegraph() {
   for (const r of t.recent) {
     rec.append(tgRow([
       [r.ts === null ? "" : new Date(r.ts * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }), "when"],
-      [r.problem, "wrap"], [r.model, "wrap"], [String(r.tokens_in), "num"], [String(r.tokens_out), "num"],
-      [r.latency_s.toFixed(1), "num"], [r.cost_usd === null ? "unknown" : usd(r.cost_usd), "num"],
+      [r.problem, "wrap"], [r.model, "wrap"], [r.held ? "–" : String(r.tokens_in), "num"], [r.held ? "–" : String(r.tokens_out), "num"],
+      [r.held ? "–" : r.latency_s.toFixed(1), "num"],
+      [r.cost_usd === null ? "unknown" : r.held ? `up to ${usd(r.cost_usd)}` : r.usage_known === false ? `${usd(r.cost_usd)} (${r.cost_basis})` : usd(r.cost_usd), "num"],
       [r.outcome, "outcome", r.reason || null],
       [r.helped === true ? "yes" : r.helped === false ? "no" : r.outcome === "ok" ? "not reported" : "", null]], TG_OUTCOME_TONE[r.outcome] || null));
     if (r.reason) rec.lastChild.lastChild.previousSibling.append(h("div", { class: "tg-reason" }, r.reason));
@@ -385,14 +454,15 @@ function renderTelegraph() {
   $("tg-recent-note").textContent = t.recent.length ? `newest first, up to ${t.recent.length}` : "";
 
   const bm = clear($("tg-by-model"));
-  for (const m of t.by_model) bm.append(tgRow([[m.model, "wrap"], [String(m.calls), "num"], [String(m.tokens), "num"], [usd(m.cost_usd), "num"]]));
+  for (const m of t.by_model) bm.append(tgRow([[m.model, "wrap"], [String(m.calls), "num"], [String(m.tokens), "num"], [spendText({ cost_usd: m.cost_usd, unknown_cost: m.cost_unknown_calls }), "num"]]));
   if (!t.by_model.length) bm.append(tgRow([["No calls yet", "muted"], ["", ""], ["", ""], ["", ""]]));
   const bp = clear($("tg-by-problem"));
   for (const p of t.problems) {
     bp.append(tgRow([[p.name, "wrap"], [String(p.calls), "num"], [String(p.tokens), "num"],
-      [p.cost_unknown_calls ? `${usd(p.cost_usd)} + ${p.cost_unknown_calls} unknown` : usd(p.cost_usd), "num"],
+      [spendText({ cost_usd: p.cost_usd, unknown_cost: p.cost_unknown_calls }), "num"],
       [`${p.helped} yes · ${p.not_helped} no`, null], [`${p.percent}%${p.at_cap ? " (at its cap)" : ""}`, "num cap"]], p.at_cap ? "bad" : p.near ? "warn" : null));
   }
+  if (t.problems_hidden) bp.append(tgRow([[`${plural(t.problems_hidden, "more problem")} not shown. The state and the closest cap count every problem.`, "muted"], ["", ""], ["", ""], ["", ""], ["", ""], ["", ""]]));
   if (!t.problems.length) bp.append(tgRow([["No calls yet", "muted"], ["", ""], ["", ""], ["", ""], ["", ""], ["", ""]]));
 
   const c = t.config;
@@ -547,7 +617,6 @@ function renderRuns() {
 }
 
 async function refreshRuns() {
-  pollTelegraph();                       // its own request and its own failure handling: spend is never hidden by another call's failure
   pollVirtual();                         // the local models' virtual figure: its own request, kept apart from the real spend
   try {
     const [runs, machine, launches] = await Promise.all([api("/api/runs"), api("/api/machine"), api("/api/launches")]);
@@ -1762,6 +1831,7 @@ function routeFromHash() {
 
 async function main() {
   wire();
+  startTelegraphPolling();               // first: neither the metadata request nor the run list may stop the spend meter being polled
   try {
     S.meta = await api("/api/meta");
   } catch (err) {

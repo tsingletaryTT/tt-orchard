@@ -85,6 +85,11 @@ def squash(text):
     return " ".join(text.split())
 
 
+def bare(text):
+    """The characters of a page without the bar, the spaces and the line breaks: only the words and their order remain."""
+    return "".join(ANSI.sub("", text).replace("\u2551", "").split())
+
+
 def test_the_page_carries_the_next_step_and_the_model(tmp_path):
     f, _ = facts(tmp_path)
     page = orchard_view.render_pretty(f, STYLES["emoji"])
@@ -109,7 +114,8 @@ def test_a_finished_run_ends_with_the_closing_line(tmp_path):
     f, run = facts(tmp_path, state="ready-for-operator-review")
     page = orchard_view.render_pretty(f, STYLES["emoji"])
     closing = lexicon.closing_line("ready-for-operator-review", STYLES["emoji"], where=f["run_dir"])
-    assert squash(closing) in squash(page)
+    # A long path may be split anywhere (the wrapper breaks long words), so compare the text without layout at all.
+    assert bare(closing) in bare(page)
 
 
 def test_the_gate_section_shows_each_lease_line(tmp_path):
@@ -186,3 +192,22 @@ def test_every_escape_code_is_closed_on_the_same_line(tmp_path):
 def test_a_run_with_no_model_yet_does_not_print_none(tmp_path):
     f, _ = facts(tmp_path, model=None, state="not-started")
     assert "None" not in orchard_view.render_pretty(f, STYLES["emoji"])
+
+
+LONG_RUN_DIR = "/tmp/pytest-of-someone/pytest-1234/popen-gw0/test_a_run_directory_with_a_long_name_0/run"
+
+
+@pytest.mark.parametrize("name", STYLES)
+def test_a_long_run_path_after_an_emoji_never_makes_a_line_wider_than_80_columns(tmp_path, name):
+    """The closing line starts with a wide emoji (two columns, one character). A wrapper that counts characters let a
+    wrapped line reach 81 columns. The path is explicit so the test does not depend on where pytest puts tmp_path."""
+    f, _ = facts(tmp_path, state="ready-for-operator-review", run_dir=LONG_RUN_DIR)
+    lines = orchard_view.render_pretty(f, STYLES[name]).splitlines()
+    assert max(ui.visible_width(line) for line in lines) <= 80
+    assert "".join(ANSI.sub("", l).strip(" \u2551") for l in lines).count("popen-gw0") == 1
+
+
+def test_wrapped_text_keeps_its_words_and_starts_every_line_under_the_bar(tmp_path):
+    f, _ = facts(tmp_path, state="ready-for-operator-review", run_dir=LONG_RUN_DIR)
+    page = orchard_view.render_pretty(f, STYLES["emoji"])
+    assert "(ready-for-operator-review)" in squash(page) and "test_a_run_directory_with_a_long_name_0/run" in squash(page)

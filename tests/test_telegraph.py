@@ -52,8 +52,29 @@ def make(tmp_path, wire=None, environ=None, now=None, **kw):
 
 
 def records(tmp_path):
+    """The ledger's call, refusal and report lines. Budget reservations are internal and are left out."""
     p = tmp_path / "tg" / "telegraph.jsonl"
-    return [json.loads(x) for x in p.read_text().splitlines()] if p.exists() else []
+    rows = []
+    for line in (p.read_text().splitlines() if p.exists() else []):
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if "reserve" not in row:
+            rows.append(row)
+    return rows
+
+
+def worst_cost(body, price, max_out):
+    """The ceiling telegraph reserves for a request: its size in bytes plus framing as input, max_out as output."""
+    return ((len(json.dumps(body).encode()) + tg.REQUEST_FRAMING_TOKENS) * price[0] + max_out * price[1]) / 1e6
+
+
+def request_body_of(tmp_path, **kw):
+    """The body telegraph sends for ("p", "t", "f1") under these settings, taken from an uncapped run."""
+    probe, wire = make(tmp_path / "probe", **kw)
+    probe.ask("p", "t", "f1")
+    return wire.requests[0]["body"]
 
 
 # ------------------------------------------------------------------------------------------------ configuration
@@ -353,8 +374,12 @@ def test_the_token_cap_stops_the_next_call_once_the_total_is_reached(tmp_path):
 
 
 def test_the_cost_cap_needs_a_price_and_stops_when_spent(tmp_path):
-    tel, wire = make(tmp_path, max_cost_usd=0.0005, max_output_tokens=100, prices={"small": [1.0, 3.0], "big": [5.0, 15.0]})
-    assert tel.ask("p", "t", "f1").ok                               # 210 micro-dollars spent, up to 360 more
+    prices = {"small": [1.0, 3.0], "big": [5.0, 15.0]}
+    w = worst_cost(request_body_of(tmp_path, max_output_tokens=100, prices=prices), prices["small"], 100)
+    first_cost = 120e-6 + 90e-6
+    cap = w + first_cost / 2                                        # room for the first call, not for a second
+    tel, wire = make(tmp_path, max_cost_usd=cap, max_output_tokens=100, prices=prices)
+    assert tel.ask("p", "t", "f1").ok
     got = tel.ask("p", "t", "f2")
     assert not got.ok and "cost cap" in got.reason and len(wire.requests) == 1
 
@@ -401,15 +426,6 @@ def test_the_error_reason_never_echoes_the_key_even_if_the_server_does(tmp_path)
     got = tel.ask("p", "t", "f")
     assert KEY not in got.reason and "401" in got.reason
     assert KEY not in (tmp_path / "tg" / "telegraph.jsonl").read_text()
-
-
-def test_an_unwritable_ledger_directory_does_not_stop_the_answer(tmp_path):
-    blocker = tmp_path / "file"
-    blocker.write_text("x")
-    cfg = tg.load(table(), base=tmp_path)
-    tel = tg.Telegraph(cfg, blocker / "tg", transport=Wire(), environ={"TG_KEY": KEY})
-    got = tel.ask("p", "t", "f")
-    assert got.ok and got.text
 
 
 def test_the_reply_is_data_with_a_marker_that_says_it_is_not_to_be_run(tmp_path):
@@ -641,9 +657,11 @@ def test_the_token_cap_for_a_problem_stops_when_the_total_equals_it(tmp_path):
 
 
 def test_the_cost_cap_for_one_problem_looks_at_the_worst_case_of_the_next_call(tmp_path):
-    tel, wire = make(tmp_path, max_cost_per_problem_usd=0.0005, max_output_tokens=100, max_calls_per_problem=10,
-                     prices={"small": [1.0, 3.0], "big": [5.0, 15.0]})
-    assert tel.ask("a", "t", "f1").ok                               # 210 micro-dollars; the next could cost up to 350
+    prices = {"small": [1.0, 3.0], "big": [5.0, 15.0]}
+    w = worst_cost(request_body_of(tmp_path, max_output_tokens=100, prices=prices), prices["small"], 100)
+    cap = w + (120e-6 + 90e-6) / 2
+    tel, wire = make(tmp_path, max_cost_per_problem_usd=cap, max_output_tokens=100, max_calls_per_problem=10, prices=prices)
+    assert tel.ask("a", "t", "f1").ok                               # 210 micro-dollars spent; the next could cost up to w
     got = tel.ask("a", "t", "f2")
     assert not got.ok and "problem a" in got.reason and "cost cap" in got.reason and len(wire.requests) == 1
     assert tel.ask("b", "t", "f1").ok
@@ -667,3 +685,876 @@ def test_the_summary_counts_refusals_for_a_problem_cap(tmp_path):
     tel.ask("a", "t", "f1")
     tel.ask("a", "t", "f2")
     assert tg.summarise(tmp_path / "tg")["refused"] == 1
+
+
+# ------------------------------------------------------------------------------------------------ review of PR 106, group A
+
+@pytest.mark.parametrize("key", ["n", "best_of", "stream_options"])
+def test_extra_body_cannot_ask_for_more_than_one_completion(key):
+    with pytest.raises(tg.ConfigError, match=f"extra_body cannot set {key}"):
+        tg.load(table(extra_body={key: 10}), base=Path("/x"))
+
+
+@pytest.mark.parametrize("value", ["false", "true", 1, 0, "yes", [True]])
+def test_enabled_must_be_a_toml_boolean(value):
+    with pytest.raises(tg.ConfigError, match="enabled must be true or false"):
+        tg.load({"enabled": value, "endpoint": "https://llm.example.org/v1", "models": ["a"], "key_env": "K"},
+                base=Path("/x"))
+
+
+@pytest.mark.parametrize("bad", ["on", 3, ["enabled"]])
+def test_the_telegraph_table_must_be_a_table(bad):
+    with pytest.raises(tg.ConfigError, match="telegraph must be a table"):
+        tg.load(bad, base=Path("/x"))
+
+
+def test_a_complete_pem_block_is_removed_before_anything_is_sent(tmp_path):
+    pem = ("-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAxyz0123456789abcdefABCDEF\nsecondline0123456789\n"
+           "-----END RSA PRIVATE KEY-----")
+    tel, wire = make(tmp_path)
+    tel.ask("p", f"before\n{pem}\nafter", "f")
+    sent = wire.requests[0]["body"]["messages"][-1]["content"]
+    for leak in ("MIIEowIBAAKCAQEAxyz", "secondline0123456789", "END RSA PRIVATE KEY", "BEGIN RSA PRIVATE KEY"):
+        assert leak not in sent, leak
+    assert "before" in sent and "after" in sent
+
+
+def test_an_unterminated_pem_block_is_removed_to_the_end_of_the_text(tmp_path):
+    tel, wire = make(tmp_path)
+    tel.ask("p", "task\n-----BEGIN PRIVATE KEY-----\nMIIBVQIBADANBgkqhkiG9w0BAQEFAASCAT8wggE7", "f")
+    sent = wire.requests[0]["body"]["messages"][-1]["content"]
+    assert "MIIBVQIBADANBgkq" not in sent and "BEGIN PRIVATE KEY" not in sent and "task" in sent
+
+
+def test_a_problem_id_that_holds_the_key_is_cleaned_before_the_ledger_and_the_budget(tmp_path):
+    tel, wire = make(tmp_path, max_calls_per_problem=1)
+    problem = f"scan-{KEY}"
+    tel.ask(problem, "t", "f1")
+    for path in (tmp_path / "tg").rglob("*"):
+        if path.is_file():
+            assert KEY not in path.read_text(), path
+    got = tel.ask(problem, "t", "f2")                              # the cap still applies to the cleaned id
+    assert not got.ok and "call cap" in got.reason and KEY not in got.reason and len(wire.requests) == 1
+
+
+def test_a_problem_id_with_a_home_path_is_cleaned_in_the_ledger(tmp_path):
+    tel, _ = make(tmp_path)
+    tel.ask("fix /home/someone/orchard-runs/x", "t", "f")
+    rec = records(tmp_path)[0]
+    assert "/home/someone" not in rec["problem"] and rec["problem"].startswith("fix ~/")
+
+
+def test_a_report_note_that_holds_the_key_is_not_written_to_the_ledger(tmp_path):
+    tel, _ = make(tmp_path)
+    got = tel.ask("p", "t", "f")
+    tel.report(got.call_id, helped=False, note=f"the answer repeated {KEY} back")
+    assert KEY not in (tmp_path / "tg" / "telegraph.jsonl").read_text()
+
+
+# ------------------------------------------------------------------------------------------------ review of PR 106, group B
+
+def test_a_changed_request_option_does_not_return_the_answer_cached_for_the_old_one(tmp_path):
+    tel, wire = make(tmp_path)
+    tel.ask("p", "t", "f")
+    tel2, wire2 = make(tmp_path, extra_body={"response_format": {"type": "json_object"}})
+    got = tel2.ask("p", "t", "f")
+    assert not got.cached and len(wire2.requests) == 1 and wire2.requests[0]["body"]["response_format"]
+
+
+def test_a_changed_endpoint_or_api_style_does_not_return_a_cached_answer(tmp_path):
+    tel, wire = make(tmp_path)
+    tel.ask("p", "t", "f")
+    tel2, wire2 = make(tmp_path, endpoint="https://other.example.org/v1")
+    assert not tel2.ask("p", "t", "f").cached and len(wire2.requests) == 1
+    tel3, wire3 = make(tmp_path, wire=Wire(lambda b: anthropic_reply("x", 5, 5)), api="anthropic")
+    assert not tel3.ask("p", "t", "f").cached and len(wire3.requests) == 1
+
+
+def test_the_same_configuration_still_hits_the_cache_across_processes(tmp_path):
+    tel, _ = make(tmp_path)
+    tel.ask("p", "t", "f")
+    tel2, wire2 = make(tmp_path)
+    assert tel2.ask("p", "t", "f").cached and wire2.requests == []
+
+
+def test_a_cached_answers_id_can_be_reported_and_the_verdict_counts_for_the_original_call(tmp_path):
+    tel, wire = make(tmp_path)
+    first = tel.ask("p", "t", "f")
+    again = tel.ask("p", "t", "f")
+    assert again.cached
+    tel.report(again.call_id, helped=False)                          # the CLI tells the user to report this id
+    s = tg.summarise(tmp_path / "tg")
+    assert (s["calls"], s["not_helped"], s["unreported"]) == (1, 1, 0)
+    nxt = tel.ask("p", "t", "different failure")
+    assert nxt.model == "big"                                        # the ladder moved on after the verdict
+    assert [r.get("origin") for r in records(tmp_path) if r.get("cached")] == [first.call_id]
+
+
+def test_reporting_a_cached_id_and_its_original_id_is_one_verdict_for_one_call(tmp_path):
+    tel, _ = make(tmp_path)
+    first = tel.ask("p", "t", "f")
+    again = tel.ask("p", "t", "f")
+    tel.report(first.call_id, helped=True)
+    tel.report(again.call_id, helped=False)                          # the latest verdict for the call wins
+    s = tg.summarise(tmp_path / "tg")
+    assert (s["helped"], s["not_helped"]) == (0, 1)
+
+
+def test_reporting_the_same_answer_twice_moves_the_ladder_one_step_only(tmp_path):
+    tel, wire = make(tmp_path, models=["small", "big", "third"])
+    first = tel.ask("p", "t", "f1")
+    tel.report(first.call_id, helped=False)
+    tel.report(first.call_id, helped=False)
+    tel.ask("p", "t", "f2")
+    assert [r["body"]["model"] for r in wire.requests] == ["small", "big"]
+
+
+def test_a_later_helped_verdict_for_a_call_undoes_its_earlier_not_helped(tmp_path):
+    tel, wire = make(tmp_path)
+    first = tel.ask("p", "t", "f1")
+    tel.report(first.call_id, helped=False)
+    tel.report(first.call_id, helped=True)
+    tel.ask("p", "t", "f2")
+    assert [r["body"]["model"] for r in wire.requests] == ["small", "small"]
+
+
+# ------------------------------------------------------------------------------------------------ review of PR 106, group C
+
+def test_a_call_in_flight_is_counted_against_the_caps_of_a_second_process(tmp_path):
+    other = {}
+
+    def transport(url, headers, body, timeout):
+        # while this request is in flight, a second process asks: the first call's reservation must already count
+        other["got"] = other["tel"].ask("p", "t", "second question")
+        return 200, json.dumps(openai_reply("ok", 10, 10)).encode()
+    wire_b = Wire()
+    tel_b, _ = make(tmp_path, wire=wire_b, max_calls=1)
+    other["tel"] = tel_b
+    cfg = tg.load(table(max_calls=1), base=tmp_path)
+    tel_a = tg.Telegraph(cfg, tmp_path / "tg", transport=transport, environ={"TG_KEY": KEY})
+    assert tel_a.ask("p", "t", "first question").ok
+    assert not other["got"].ok and "call cap" in other["got"].reason and wire_b.requests == []
+
+
+def test_a_process_that_dies_during_a_request_still_leaves_its_reservation(tmp_path):
+    def dies(url, headers, body, timeout):
+        raise SystemExit(1)
+    cfg = tg.load(table(max_calls=1), base=tmp_path)
+    tel = tg.Telegraph(cfg, tmp_path / "tg", transport=dies, environ={"TG_KEY": KEY})
+    with pytest.raises(SystemExit):
+        tel.ask("p", "t", "f")
+    tel2, wire2 = make(tmp_path, max_calls=1)
+    got = tel2.ask("p", "t", "f2")
+    assert not got.ok and "call cap" in got.reason and wire2.requests == []
+    s = tg.summarise(tmp_path / "tg")
+    assert s["unsettled"] == 1
+
+
+def test_a_request_with_unknown_usage_counts_its_worst_case_against_a_cost_cap(tmp_path):
+    def times_out(url, headers, body, timeout):
+        raise TimeoutError("slow")
+    cfg = tg.load(table(max_cost_usd=0.005, max_output_tokens=1000, prices={"small": [1.0, 3.0], "big": [5.0, 15.0]}),
+                  base=tmp_path)
+    tel = tg.Telegraph(cfg, tmp_path / "tg", transport=times_out, environ={"TG_KEY": KEY})
+    assert not tel.ask("p", "t", "f1").ok                           # the provider may have processed it and billed it
+    got = tel.ask("p", "t", "f2")
+    assert not got.ok and "cost cap" in got.reason
+    assert tg.summarise(tmp_path / "tg")["unknown_usage_calls"] == 1
+
+
+def test_a_request_the_provider_rejected_before_processing_does_not_use_up_the_budget(tmp_path):
+    tel, wire = make(tmp_path, wire=Wire(status=401), max_cost_usd=0.005, max_output_tokens=1000,
+                     prices={"small": [1.0, 3.0], "big": [5.0, 15.0]})
+    assert not tel.ask("p", "t", "f1").ok
+    wire.status = 200
+    assert tel.ask("p", "t", "f2").ok
+
+
+def test_the_token_cap_counts_a_calls_reservation_when_its_usage_is_unknown(tmp_path):
+    def times_out(url, headers, body, timeout):
+        raise TimeoutError("slow")
+    cfg = tg.load(table(max_total_tokens=500, max_output_tokens=1000), base=tmp_path)
+    tel = tg.Telegraph(cfg, tmp_path / "tg", transport=times_out, environ={"TG_KEY": KEY})
+    tel.ask("p", "t", "f1")
+    got = tel.ask("p", "t", "f2")
+    assert not got.ok and "token cap" in got.reason
+
+
+def test_a_torn_last_line_is_not_glued_to_the_next_record(tmp_path):
+    tel, _ = make(tmp_path)
+    tel.ask("p", "t", "f1")
+    with open(tmp_path / "tg" / "telegraph.jsonl", "a") as f:
+        f.write('{"call_id": "half')                                # a write cut short
+    got = tel.ask("p", "t", "f2")
+    assert got.ok
+    s = tg.summarise(tmp_path / "tg")
+    assert s["calls"] == 2                                          # the call after the torn line is counted
+
+
+def test_an_unwritable_ledger_refuses_the_call_before_any_request(tmp_path):
+    blocker = tmp_path / "file"
+    blocker.write_text("x")
+    wire = Wire()
+    cfg = tg.load(table(), base=tmp_path)
+    tel = tg.Telegraph(cfg, blocker / "tg", transport=wire, environ={"TG_KEY": KEY})
+    got = tel.ask("p", "t", "f")
+    assert not got.ok and "cannot be written" in got.reason and wire.requests == []
+
+
+def test_a_read_only_ledger_directory_refuses_the_call(tmp_path):
+    import os
+    d = tmp_path / "tg"
+    d.mkdir()
+    d.chmod(0o500)
+    try:
+        if os.access(d, os.W_OK):
+            pytest.skip("this user can write to a read-only directory")
+        wire = Wire()
+        tel = tg.Telegraph(tg.load(table(), base=tmp_path), d, transport=wire, environ={"TG_KEY": KEY})
+        got = tel.ask("p", "t", "f")
+        assert not got.ok and "cannot be written" in got.reason and wire.requests == []
+    finally:
+        d.chmod(0o700)
+
+
+def test_the_input_bound_for_cost_counts_bytes_so_non_english_text_cannot_slip_under_the_cap(tmp_path):
+    # 3,000 four-byte characters: characters divided by three is about 1,000 tokens, the real bound is the 12,000 bytes
+    tel, wire = make(tmp_path, max_cost_usd=5.0, max_output_tokens=1, prices={"small": [1000.0, 0.0], "big": [1.0, 1.0]})
+    got = tel.ask("p", "\U0001F600" * 3000, "f")
+    assert not got.ok and "cost cap" in got.reason and wire.requests == []
+
+
+def test_the_input_bound_counts_extra_body_too(tmp_path):
+    tel, wire = make(tmp_path, max_cost_usd=0.01, max_output_tokens=1, prices={"small": [1000.0, 0.0], "big": [1.0, 1.0]},
+                     extra_body={"metadata": {"note": "x" * 4000}})
+    got = tel.ask("p", "t", "f")
+    assert not got.ok and "cost cap" in got.reason and wire.requests == []
+
+
+def test_reservations_and_settlements_are_one_call_in_the_summary(tmp_path):
+    tel, _ = make(tmp_path)
+    tel.ask("p", "t", "f1")
+    tel.ask("p", "t", "f2")
+    s = tg.summarise(tmp_path / "tg")
+    assert (s["calls"], s["unsettled"], s["unknown_usage_calls"]) == (2, 0, 0)
+    assert s["tokens_in"] == 240 and s["tokens_out"] == 60
+
+
+def test_two_processes_racing_for_the_last_allowed_call_cannot_both_send(tmp_path):
+    import threading, time
+
+    class Slow(tg.Telegraph):
+        def _over_budget(self, *a, **kw):                           # widen the window between the check and the reservation
+            out = super()._over_budget(*a, **kw)
+            time.sleep(0.05)
+            return out
+    wire = Wire()
+    cfg = tg.load(table(max_calls=1), base=tmp_path)
+    results = []
+
+    def go(i):
+        t = Slow(cfg, tmp_path / "tg", transport=wire, environ={"TG_KEY": KEY})
+        results.append(t.ask("p", "t", f"question {i}").ok)
+    threads = [threading.Thread(target=go, args=(i,)) for i in range(4)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+    assert results.count(True) == 1 and len(wire.requests) == 1
+
+
+def test_a_ledger_that_cannot_take_a_record_refuses_the_call(tmp_path):
+    (tmp_path / "tg").mkdir()
+    (tmp_path / "tg" / "telegraph.jsonl").mkdir()                   # the file the ledger needs is a directory
+    wire = Wire()
+    tel = tg.Telegraph(tg.load(table(), base=tmp_path), tmp_path / "tg", transport=wire, environ={"TG_KEY": KEY})
+    got = tel.ask("p", "t", "f")
+    assert not got.ok and "cannot be written" in got.reason and wire.requests == []
+
+
+def test_records_from_before_reservations_count_by_their_own_numbers(tmp_path):
+    (tmp_path / "tg").mkdir()
+    old = {"call_id": "old1", "problem": "p", "model": "small", "outcome": "ok", "cached": False,
+           "tokens_in": 100, "tokens_out": 50, "cost_usd": 0.001, "ts": 1.0, "latency_s": 1.0}
+    (tmp_path / "tg" / "telegraph.jsonl").write_text(json.dumps(old) + "\n")
+    tel, wire = make(tmp_path, max_calls=1)
+    got = tel.ask("p", "t", "f")
+    assert not got.ok and "call cap" in got.reason and wire.requests == []
+    tel2, _ = make(tmp_path, max_total_tokens=150, max_calls=5)
+    assert not tel2.ask("p", "t", "f").ok                           # 100 + 50 tokens are counted as they were written
+
+
+def test_an_answer_with_no_usage_counts_its_worst_case_against_a_cost_cap(tmp_path):
+    prices = {"small": [1.0, 3.0], "big": [5.0, 15.0]}
+    no_usage = {"choices": [{"message": {"content": "fine"}, "finish_reason": "stop"}]}
+    w = worst_cost(request_body_of(tmp_path, max_output_tokens=100, prices=prices), prices["small"], 100)
+    tel, wire = make(tmp_path, wire=Wire(lambda b: no_usage), max_cost_usd=w * 1.5, max_output_tokens=100, prices=prices)
+    assert tel.ask("p", "t", "f1").ok
+    assert tg.summarise(tmp_path / "tg")["unknown_usage_calls"] == 1
+    got = tel.ask("p", "t", "f2")                                    # the server billed something; w is the safe amount
+    assert not got.ok and "cost cap" in got.reason and len(wire.requests) == 1
+
+
+def test_a_reservation_written_after_a_torn_line_is_not_lost(tmp_path):
+    def dies(url, headers, body, timeout):
+        raise SystemExit(1)
+    (tmp_path / "tg").mkdir()
+    (tmp_path / "tg" / "telegraph.jsonl").write_text('{"call_id": "half')          # a write cut short, no line break
+    cfg = tg.load(table(max_calls=2), base=tmp_path)                # the torn fragment counts as one call
+    tel = tg.Telegraph(cfg, tmp_path / "tg", transport=dies, environ={"TG_KEY": KEY})
+    with pytest.raises(SystemExit):
+        tel.ask("p", "t", "f1")                                      # leaves only a reservation behind
+    tel2, wire2 = make(tmp_path, max_calls=2)
+    got = tel2.ask("p", "t", "f2")
+    assert not got.ok and "call cap" in got.reason and wire2.requests == []
+
+
+def test_an_unreadable_answer_to_a_processed_request_counts_its_worst_case(tmp_path):
+    prices = {"small": [1.0, 3.0], "big": [5.0, 15.0]}
+    w = worst_cost(request_body_of(tmp_path, max_output_tokens=100, prices=prices), prices["small"], 100)
+    tel, wire = make(tmp_path, wire=Wire(lambda b: b"not json at all"), max_cost_usd=w * 1.5, max_output_tokens=100,
+                     prices=prices)
+    assert not tel.ask("p", "t", "f1").ok                            # the provider answered, so it may have billed
+    assert tg.summarise(tmp_path / "tg")["unknown_usage_calls"] == 1
+    got = tel.ask("p", "t", "f2")
+    assert not got.ok and "cost cap" in got.reason and len(wire.requests) == 1
+
+
+# ------------------------------------------------------------------------------------------------ review of PR 106, round 2
+
+def _unpriced_ledger(tmp_path, problem="p"):
+    (tmp_path / "tg").mkdir(parents=True, exist_ok=True)
+    old = {"call_id": "old1", "problem": problem, "model": "small", "outcome": "ok", "cached": False, "tokens_in": 9000,
+           "tokens_out": 900, "cost_usd": None, "usage_known": True, "ts": 1.0, "latency_s": 1.0}
+    with open(tmp_path / "tg" / "telegraph.jsonl", "a") as f:
+        f.write(json.dumps(old) + "\n")
+
+
+def test_earlier_calls_with_no_known_cost_block_a_later_cost_cap(tmp_path):
+    _unpriced_ledger(tmp_path)
+    tel, wire = make(tmp_path, max_cost_usd=100.0, prices={"small": [1.0, 3.0], "big": [5.0, 15.0]})
+    got = tel.ask("other", "t", "f")
+    assert not got.ok and "no known cost" in got.reason and wire.requests == []
+
+
+def test_earlier_calls_with_no_known_cost_block_a_per_problem_cost_cap_for_that_problem_only(tmp_path):
+    _unpriced_ledger(tmp_path, problem="p")
+    tel, wire = make(tmp_path, max_cost_per_problem_usd=100.0, prices={"small": [1.0, 3.0], "big": [5.0, 15.0]})
+    got = tel.ask("p", "t", "f")
+    assert not got.ok and "no known cost" in got.reason and "problem p" in got.reason
+    assert tel.ask("another", "t", "f").ok
+
+
+def test_unknown_costs_do_not_matter_when_no_cost_cap_is_set(tmp_path):
+    _unpriced_ledger(tmp_path)
+    tel, _ = make(tmp_path)
+    assert tel.ask("p", "t", "f").ok
+
+
+def test_a_response_body_that_echoes_the_key_across_the_old_cut_point_is_fully_redacted(tmp_path):
+    body = ("x" * 155 + KEY + " given").encode()                   # the old 160-byte cut left five characters of the key
+    tel, _ = make(tmp_path, wire=Wire(lambda b: body, status=401))
+    got = tel.ask("p", "t", "f")
+    assert KEY[:4] not in got.reason and "401" in got.reason
+    assert KEY[:4] not in (tmp_path / "tg" / "telegraph.jsonl").read_text()
+
+
+def test_a_short_write_of_the_reservation_refuses_the_call(tmp_path, monkeypatch):
+    real = os.write
+
+    def half(fd, data):
+        return real(fd, data[: len(data) // 2])
+    wire = Wire()
+    tel, wire = make(tmp_path, wire=wire)
+    monkeypatch.setattr(tg.os, "write", half)
+    got = tel.ask("p", "t", "f")
+    assert not got.ok and "cannot be written" in got.reason and wire.requests == []
+
+
+@pytest.mark.parametrize("bad, text", [({"key_env": ["TG_KEY"]}, "key_env"), ({"key_env": ""}, "key_env"),
+                                       ({"key_env": None, "key_file": 1}, "key_file"),
+                                       ({"key_env": None, "key_file": ""}, "key_file")])
+def test_a_credential_source_of_the_wrong_type_is_a_config_error(bad, text):
+    with pytest.raises(tg.ConfigError, match=text):
+        tg.load(table(**bad), base=Path("/x"))
+
+
+@pytest.mark.parametrize("prices", [[1, 2], "cheap", 3])
+def test_prices_must_be_a_table(prices):
+    with pytest.raises(tg.ConfigError, match="telegraph.prices must be a table"):
+        tg.load(table(prices=prices), base=Path("/x"))
+
+
+def test_a_verdict_that_cannot_be_written_is_an_error(tmp_path, monkeypatch):
+    tel, _ = make(tmp_path)
+    got = tel.ask("p", "t", "f")
+    monkeypatch.setattr(tel, "_append", lambda rec, **kw: False)
+    with pytest.raises(tg.LedgerUnavailable):
+        tel.report(got.call_id, helped=True)
+
+
+def test_the_cache_is_published_only_after_the_call_is_recorded(tmp_path, monkeypatch):
+    tel, wire = make(tmp_path)
+    real = tel._append
+
+    def fail_settle(rec, **kw):
+        if rec.get("outcome") == "ok":
+            return False
+        return real(rec, **kw)
+    monkeypatch.setattr(tel, "_append", fail_settle)
+    got = tel.ask("p", "t", "f")
+    assert got.ok and "could not record" in got.reason               # the paid answer is returned with a note
+    assert not (tmp_path / "tg" / "cache").exists()
+    monkeypatch.setattr(tel, "_append", real)
+    again = tel.ask("p", "t", "f")
+    assert not again.cached and len(wire.requests) == 2              # nothing cached, so the question was asked again
+
+
+def test_existing_files_are_made_private_before_anything_is_written(tmp_path):
+    import stat
+    (tmp_path / "tg").mkdir()
+    ledger = tmp_path / "tg" / "telegraph.jsonl"
+    ledger.write_text("")
+    ledger.chmod(0o644)
+    (tmp_path / "tg" / "telegraph.lock").write_text("")
+    (tmp_path / "tg" / "telegraph.lock").chmod(0o644)
+    tel, _ = make(tmp_path)
+    got = tel.ask("p", "t", "f")
+    for path in [ledger, tmp_path / "tg" / "telegraph.lock", tmp_path / "tg" / "replies" / f"{got.call_id}.txt"]:
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600, path
+    victim = tmp_path / "tg" / "cache" / "old.json"                  # an existing file is rewritten in place
+    victim.write_text("{}")
+    victim.chmod(0o644)
+    tel._write(victim, '{"text": "x"}')
+    assert stat.S_IMODE(victim.stat().st_mode) == 0o600
+
+
+# ------------------------------------------------------------------------------------------------ review of PR 106, round 3
+
+def test_a_ledger_that_cannot_be_read_refuses_the_call_and_is_not_an_empty_history(tmp_path, monkeypatch):
+    tel, wire = make(tmp_path, max_calls=1)
+    assert tel.ask("p", "t", "f1").ok
+    real = tg.Path.read_text
+
+    def broken(self, *a, **kw):
+        if self.name == "telegraph.jsonl":
+            raise PermissionError("denied")
+        return real(self, *a, **kw)
+    monkeypatch.setattr(tg.Path, "read_text", broken)
+    got = tel.ask("p", "t", "f2")
+    assert not got.ok and "cannot be written or read" in got.reason and len(wire.requests) == 1
+
+
+def test_a_missing_ledger_is_an_empty_history(tmp_path):
+    tel, wire = make(tmp_path)
+    assert tel.ask("p", "t", "f").ok and len(wire.requests) == 1
+
+
+def test_a_credential_in_extra_body_is_removed_from_the_outbound_request(tmp_path):
+    extra = {"metadata": {"note": f"key {KEY} here", "list": [f"x{KEY}", {"deep": KEY}]}, "user": "/home/someone/me"}
+    tel, wire = make(tmp_path, extra_body=extra)
+    tel.ask("p", "t", "f")
+    sent = json.dumps(wire.requests[0]["body"])
+    assert KEY not in sent and "/home/someone" not in sent and "metadata" in sent
+    assert KEY not in "".join(p.read_text() for p in (tmp_path / "tg").rglob("*") if p.is_file())
+
+
+def test_the_reservation_is_flushed_to_disk_before_the_request_is_sent(tmp_path, monkeypatch):
+    synced = []
+    real = os.fsync
+    monkeypatch.setattr(tg.os, "fsync", lambda fd: (synced.append(fd), real(fd))[1])
+    seen = {}
+
+    def transport(url, headers, body, timeout):
+        seen["synced_before_send"] = len(synced)
+        return 200, json.dumps(openai_reply("ok", 10, 10)).encode()
+    cfg = tg.load(table(), base=tmp_path)
+    tel = tg.Telegraph(cfg, tmp_path / "tg", transport=transport, environ={"TG_KEY": KEY})
+    assert tel.ask("p", "t", "f").ok
+    assert seen["synced_before_send"] >= 1 and len(synced) >= 2
+
+
+def test_a_reservation_that_cannot_be_flushed_refuses_the_call(tmp_path, monkeypatch):
+    def failing(fd):
+        raise OSError("disk full")
+    monkeypatch.setattr(tg.os, "fsync", failing)
+    tel, wire = make(tmp_path)
+    got = tel.ask("p", "t", "f")
+    assert not got.ok and "cannot be written" in got.reason and wire.requests == []
+
+
+def test_an_earlier_call_and_a_torn_fragment_both_count_toward_the_call_cap(tmp_path):
+    (tmp_path / "tg").mkdir()
+    (tmp_path / "tg" / "telegraph.jsonl").write_text(json.dumps(
+        {"call_id": "old", "problem": "p", "outcome": "ok", "cached": False, "tokens_in": 1, "tokens_out": 1,
+         "cost_usd": 0.0, "usage_known": True}) + '\n{"reserve": "half')
+    tel, wire = make(tmp_path, max_calls=2)
+    got = tel.ask("p", "t", "f")                                     # old call + torn fragment = 2 of 2
+    assert not got.ok and "call cap" in got.reason and wire.requests == []
+
+
+def test_a_torn_tail_is_moved_to_a_private_sidecar_file_and_the_ledger_is_whole_again(tmp_path):
+    import stat
+    (tmp_path / "tg").mkdir()
+    (tmp_path / "tg" / "telegraph.jsonl").write_text('{"reserve": "half')
+    tel, _ = make(tmp_path)
+    tel.ask("p", "t", "f")
+    sidecars = list((tmp_path / "tg").glob("telegraph.jsonl.torn-*"))
+    assert len(sidecars) == 1 and sidecars[0].read_text() == '{"reserve": "half'
+    assert stat.S_IMODE(sidecars[0].stat().st_mode) == 0o600
+    for line in (tmp_path / "tg" / "telegraph.jsonl").read_text().splitlines():
+        json.loads(line)                                             # every line parses now
+
+
+def test_a_quarantined_fragment_counts_against_the_call_cap(tmp_path):
+    (tmp_path / "tg").mkdir()
+    (tmp_path / "tg" / "telegraph.jsonl").write_text('{"reserve": "half')
+    tel, wire = make(tmp_path, max_calls=1)
+    got = tel.ask("p", "t", "f")
+    assert not got.ok and "call cap" in got.reason and wire.requests == []
+
+
+def test_a_quarantined_fragment_blocks_a_cost_cap_until_it_is_reconciled(tmp_path):
+    (tmp_path / "tg").mkdir()
+    (tmp_path / "tg" / "telegraph.jsonl").write_text('{"reserve": "half')
+    tel, wire = make(tmp_path, max_cost_usd=100.0, prices={"small": [1.0, 3.0], "big": [5.0, 15.0]})
+    got = tel.ask("p", "t", "f")
+    assert not got.ok and "no known cost" in got.reason and wire.requests == []
+
+
+def test_a_torn_tail_whose_note_cannot_be_written_refuses_the_call(tmp_path, monkeypatch):
+    (tmp_path / "tg").mkdir()
+    (tmp_path / "tg" / "telegraph.jsonl").write_text('{"reserve": "half')
+    tel, wire = make(tmp_path)
+    real = tel._append
+    monkeypatch.setattr(tel, "_append", lambda rec, **kw: False if "torn" in rec else real(rec, **kw))
+    got = tel.ask("p", "t", "f")
+    assert not got.ok and "cannot be written" in got.reason and wire.requests == []
+
+
+def test_an_append_after_a_torn_line_starts_on_its_own_line(tmp_path):
+    (tmp_path / "tg").mkdir()
+    (tmp_path / "tg" / "telegraph.jsonl").write_text('{"call_id": "half')   # another process died mid-write
+    tel, _ = make(tmp_path)
+    assert tel._append({"report": "x", "helped": True})
+    lines = (tmp_path / "tg" / "telegraph.jsonl").read_text().splitlines()
+    assert lines[-1] == '{"helped": true, "report": "x"}' and lines[0] == '{"call_id": "half'
+
+
+# ------------------------------------------------------------------------------------------------ review of PR 106, round 4
+
+@pytest.mark.parametrize("url", ["http://134744072/v1", "http://2130706433/v1", "http://0x7f000001/v1",
+                                 "http://0177.0.0.1/v1", "http://127.1/v1", "http://1/v1", "http://0/v1"])
+def test_legacy_numeric_ipv4_forms_are_not_a_private_host_name(url):
+    with pytest.raises(tg.ConfigError, match="https"):
+        tg.load(table(endpoint=url), base=Path("/x"))
+
+
+@pytest.mark.parametrize("url", ["http://gpu-box:8000/v1", "http://localhost/v1", "http://node4/v1", "http://a1/v1"])
+def test_a_plain_machine_name_that_starts_with_a_letter_is_still_allowed(url):
+    assert tg.load(table(endpoint=url), base=Path("/x")).endpoint == url
+
+
+def test_an_orphaned_torn_sidecar_is_accounted_for_exactly_once(tmp_path):
+    (tmp_path / "tg").mkdir()
+    (tmp_path / "tg" / "telegraph.jsonl.torn-abc12345").write_text('{"reserve": "half')    # a crash after the cut
+    (tmp_path / "tg" / "telegraph.jsonl").write_text("")
+    tel, wire = make(tmp_path, max_calls=1)
+    got = tel.ask("p", "t", "f")
+    assert not got.ok and "call cap" in got.reason and wire.requests == []
+    tel2, wire2 = make(tmp_path, max_calls=2)
+    assert tel2.ask("p", "t", "f").ok                                # one note for the sidecar, not one per process
+    notes = [json.loads(l) for l in (tmp_path / "tg" / "telegraph.jsonl").read_text().splitlines()
+             if '"torn"' in l]
+    assert [n["torn"] for n in notes] == ["telegraph.jsonl.torn-abc12345"]
+
+
+def test_a_sidecar_whose_note_was_written_is_not_counted_again(tmp_path):
+    (tmp_path / "tg").mkdir()
+    (tmp_path / "tg" / "telegraph.jsonl.torn-abc12345").write_text("x")
+    (tmp_path / "tg" / "telegraph.jsonl").write_text(json.dumps({"torn": "telegraph.jsonl.torn-abc12345", "tokens": 10}) + "\n")
+    tel, wire = make(tmp_path, max_calls=2)
+    assert tel.ask("p", "t", "f").ok                                 # the fragment is one call of the two, and this is the other
+
+
+def test_every_ledger_append_waits_for_the_recovery_lock(tmp_path):
+    import threading, time
+    tel, _ = make(tmp_path)
+    tel.ask("p", "t", "f0")
+    done = threading.Event()
+
+    def other():
+        tel._append({"report": "nope", "helped": True})
+        done.set()
+    with tel._ledger_lock():
+        t = threading.Thread(target=other)
+        t.start()
+        time.sleep(0.15)
+        assert not done.is_set()                                     # blocked while the lock is held
+    t.join(timeout=5)
+    assert done.is_set()
+
+
+def test_a_locked_caller_can_append_without_waiting_on_its_own_lock(tmp_path):
+    tel, _ = make(tmp_path)
+    with tel._ledger_lock():
+        assert tel._append({"report": "x", "helped": True}, held=True)
+
+
+def test_a_settlement_cannot_slip_in_between_recovery_reading_and_cutting_the_ledger(tmp_path, monkeypatch):
+    import threading
+    (tmp_path / "tg").mkdir()
+    (tmp_path / "tg" / "telegraph.jsonl").write_text('{"call_id": "half')
+    tel, _ = make(tmp_path)
+    workers, blocked = [], []
+    real_truncate = os.truncate
+
+    def slow_truncate(path, length):
+        t = threading.Thread(target=lambda: tel._append({"report": "late", "helped": False}))
+        t.start()
+        workers.append(t)
+        t.join(timeout=0.2)                                          # the other writer must still be waiting
+        blocked.append(t.is_alive())
+        return real_truncate(path, length)
+    monkeypatch.setattr(tg.os, "truncate", slow_truncate)
+    tel.ask("p", "t", "f")
+    for t in workers:                                                # wait for the worker outside the recovery lock
+        t.join(timeout=5)
+    assert blocked == [True]
+    assert '"late"' in (tmp_path / "tg" / "telegraph.jsonl").read_text()    # and it landed after the recovery
+
+
+# ------------------------------------------------------------------------------------------------ review of PR 106, round 5
+
+def test_a_credential_or_path_used_as_a_property_name_is_removed_too(tmp_path):
+    extra = {"metadata": {f"owner-{KEY}": "x", "/home/someone/where": 1, "node9": True}}
+    tel, wire = make(tmp_path, extra_body=extra)
+    tel.ask("p", "t", "f")
+    sent = json.dumps(wire.requests[0]["body"])
+    assert KEY not in sent and "/home/someone" not in sent and "node9" not in sent and "metadata" in sent
+
+
+def test_a_short_write_of_the_torn_tail_leaves_the_original_ledger_intact(tmp_path, monkeypatch):
+    (tmp_path / "tg").mkdir()
+    ledger = tmp_path / "tg" / "telegraph.jsonl"
+    ledger.write_text('{"call_id": "whole"}\n{"reserve": "half')
+    before = ledger.read_bytes()
+    real = os.write
+
+    def half(fd, data):
+        return real(fd, data[: max(1, len(data) // 2)])
+    monkeypatch.setattr(tg.os, "write", half)
+    tel, wire = make(tmp_path)
+    got = tel.ask("p", "t", "f")
+    assert not got.ok and "cannot be written" in got.reason and wire.requests == []
+    assert ledger.read_bytes() == before                             # nothing was cut
+    assert list((tmp_path / "tg").glob("telegraph.jsonl.torn-*")) == []   # and no partial sidecar is left to count
+
+
+def test_a_lock_that_cannot_be_taken_refuses_the_call_instead_of_raising(tmp_path, monkeypatch):
+    import errno
+
+    def no_locks(fd, op):
+        raise OSError(errno.ENOLCK, "no locks available")
+    monkeypatch.setattr(tg.fcntl, "flock", no_locks)
+    tel, wire = make(tmp_path)
+    got = tel.ask("p", "t", "f")
+    assert not got.ok and "cannot be written" in got.reason and wire.requests == []
+    assert tel._append({"report": "x", "helped": True}) is False     # a direct append returns False and does not raise
+
+
+def test_a_lock_that_cannot_be_released_does_not_leak_the_descriptor(tmp_path, monkeypatch):
+    opened, closed = [], []
+    real_open, real_close = os.open, os.close
+    monkeypatch.setattr(tg.os, "open", lambda *a, **kw: (opened.append(real_open(*a, **kw)), opened[-1])[1])
+    monkeypatch.setattr(tg.os, "close", lambda fd: (closed.append(fd), real_close(fd))[1])
+    real_flock = tg.fcntl.flock
+
+    def flaky(fd, op):
+        if op == tg.fcntl.LOCK_UN:
+            raise OSError("unlock failed")
+        return real_flock(fd, op)
+    monkeypatch.setattr(tg.fcntl, "flock", flaky)
+    tel, _ = make(tmp_path)
+    tel.ask("p", "t", "f")
+    assert set(opened) <= set(closed)
+
+
+@pytest.mark.parametrize("bad", [{"when": __import__("datetime").datetime(2026, 1, 1)},
+                                 {"d": __import__("datetime").date(2026, 1, 1)},
+                                 {"t": __import__("datetime").time(1, 2)}, {"x": {1: "int key"}}, {"x": {"y": {"z": object()}}},
+                                 {"x": float("nan")}])
+def test_extra_body_must_be_plain_json_data(bad):
+    with pytest.raises(tg.ConfigError, match="extra_body"):
+        tg.load(table(extra_body=bad), base=Path("/x"))
+
+
+def test_extra_body_with_nested_plain_values_is_accepted():
+    cfg = tg.load(table(extra_body={"a": {"b": [1, 2.5, "x", None, True, {"c": "d"}]}}), base=Path("/x"))
+    assert cfg.extra_body["a"]["b"][3] is None
+
+
+def test_a_cache_hit_whose_record_cannot_be_written_warns_and_has_no_reportable_id(tmp_path, monkeypatch):
+    tel, _ = make(tmp_path)
+    tel.ask("p", "t", "f")
+    real = tel._append
+    monkeypatch.setattr(tel, "_append", lambda rec, **kw: False if rec.get("cached") else real(rec, **kw))
+    got = tel.ask("p", "t", "f")
+    assert got.ok and got.cached and "could not record" in got.reason
+
+
+def test_an_answer_without_usage_has_an_unknown_cost_not_an_estimated_one(tmp_path):
+    prices = {"small": [1.0, 3.0], "big": [5.0, 15.0]}
+    no_usage = {"choices": [{"message": {"content": "fine"}, "finish_reason": "stop"}]}
+    tel, _ = make(tmp_path, wire=Wire(lambda b: no_usage), prices=prices)
+    got = tel.ask("p", "t", "f")
+    assert got.cost_usd is None
+    rec = records(tmp_path)[0]
+    assert rec["cost_usd"] is None and rec["usage_known"] is False
+    s = tg.summarise(tmp_path / "tg")
+    assert s["cost_unknown_calls"] == 1 and s["cost_usd"] == 0.0
+
+
+def test_extra_body_nested_beyond_twenty_levels_is_refused_by_name():
+    deep = cur = {}
+    for _ in range(25):
+        cur["x"] = {}
+        cur = cur["x"]
+    with pytest.raises(tg.ConfigError, match="nested too deeply"):
+        tg.load(table(extra_body=deep), base=Path("/x"))
+
+
+def test_extra_body_nested_to_twenty_levels_is_accepted():
+    deep = cur = {}
+    for _ in range(19):
+        cur["x"] = {}
+        cur = cur["x"]
+    assert tg.load(table(extra_body=deep), base=Path("/x")).enabled
+
+
+# ------------------------------------------------------------------------------------------------ review of PR 106, round 6
+
+@pytest.mark.parametrize("secret", ["abc\ndef", "abc\r\ndef", "abc\x00def", "abc\x1fdef", "café中"])
+def test_a_key_that_cannot_be_sent_in_a_header_is_refused_without_echoing_it(tmp_path, secret):
+    tel, wire = make(tmp_path, environ={"TG_KEY": secret}, wire=Wire(status=401))
+    got = tel.ask("p", "t", "f")
+    assert not got.ok and wire.requests == [] and "header" in got.reason
+    for fragment in ("abc", "def"):
+        assert fragment not in got.reason
+    assert "abc" not in "".join(p.read_text() for p in (tmp_path / "tg").rglob("*") if p.is_file())
+
+
+def test_a_key_with_a_trailing_newline_from_a_file_is_still_fine(tmp_path):
+    keyfile = tmp_path / "k"
+    keyfile.write_text(KEY + "\n")
+    tel, wire = make(tmp_path, key_env=None, key_file=str(keyfile), environ={})
+    assert tel.ask("p", "t", "f").ok and wire.requests[0]["headers"]["Authorization"] == f"Bearer {KEY}"
+
+
+def test_check_ping_of_a_bad_key_does_not_print_it(tmp_path):
+    from orchard import telegraph_cmd as cmd_mod                     # the key check is shared with ask
+    tel, _ = make(tmp_path, environ={"TG_KEY": "abc\ndef"})
+    key, why = tel._key()
+    assert key is None and "header" in why and "abc" not in why
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), -1.0, 0.0])
+@pytest.mark.parametrize("name", ["max_cost_usd", "max_cost_per_problem_usd"])
+def test_a_money_cap_must_be_finite_and_positive(name, bad):
+    with pytest.raises(tg.ConfigError, match=name):
+        tg.load(table(**{name: bad, "prices": {"small": [1, 1], "big": [1, 1]}}), base=Path("/x"))
+
+
+@pytest.mark.parametrize("pair", [[float("nan"), 1.0], [1.0, float("inf")], [float("-inf"), 1.0]])
+def test_a_price_must_be_finite(pair):
+    with pytest.raises(tg.ConfigError, match="prices.small"):
+        tg.load(table(prices={"small": pair, "big": [1, 1]}), base=Path("/x"))
+
+
+@pytest.mark.parametrize("extra", [{"cache_control": {"type": "ephemeral"}}, {"a": [{"cache_control": 1}]},
+                                   {"nested": {"deeper": {"cache_control": None}}}])
+def test_prompt_caching_in_extra_body_is_refused_because_it_cannot_be_priced(extra):
+    with pytest.raises(tg.ConfigError, match="cache_control"):
+        tg.load(table(extra_body=extra), base=Path("/x"))
+
+
+@pytest.mark.parametrize("field", ["cache_read_input_tokens", "cache_creation_input_tokens"])
+def test_an_anthropic_answer_that_used_a_prompt_cache_counts_as_unknown_usage(tmp_path, field):
+    reply = {"content": [{"type": "text", "text": "ok"}],
+             "usage": {"input_tokens": 5, "output_tokens": 5, field: 9000}}
+    tel, wire = make(tmp_path, wire=Wire(lambda b: reply), api="anthropic", max_total_tokens=1000)
+    assert tel.ask("p", "t", "f1").ok
+    s = tg.summarise(tmp_path / "tg")
+    assert s["unknown_usage_calls"] == 1                              # the reservation is what counts, not 5 + 5
+    got = tel.ask("p", "t", "f2")
+    assert not got.ok and "token cap" in got.reason
+
+
+def test_an_answer_with_a_lone_surrogate_is_a_failed_result_and_keeps_its_usage(tmp_path):
+    body = b'{"choices": [{"message": {"content": "bad \\ud800 text"}, "finish_reason": "stop"}], ' \
+           b'"usage": {"prompt_tokens": 40, "completion_tokens": 12}}'
+    tel, _ = make(tmp_path, wire=Wire(lambda b: body))
+    got = tel.ask("p", "t", "f")                                      # must not raise
+    assert not got.ok and "cannot be stored" in got.reason
+    rec = records(tmp_path)[0]
+    assert rec["outcome"] == "error" and (rec["tokens_in"], rec["tokens_out"]) == (40, 12)
+    assert not (tmp_path / "tg" / "cache").exists()
+
+
+# ------------------------------------------------------------------------------------------------ review of PR 106, round 7
+
+def test_a_refused_key_is_still_removed_from_what_is_stored(tmp_path):
+    secret = "abc\ndefghij-SECRET"
+    tel, wire = make(tmp_path, environ={"TG_KEY": secret})
+    tel.ask("prob abc\ndefghij-SECRET", "t", "f")
+    text = "".join(p.read_text() for p in (tmp_path / "tg").rglob("*") if p.is_file())
+    assert "defghij-SECRET" not in text and wire.requests == []
+
+
+@pytest.mark.parametrize("usage", [{"prompt_tokens": -5, "completion_tokens": 3}, {"prompt_tokens": 5, "completion_tokens": -3},
+                                   {"prompt_tokens": 5.5, "completion_tokens": 3}, {"prompt_tokens": "5", "completion_tokens": 3},
+                                   {"prompt_tokens": True, "completion_tokens": 3}, {"prompt_tokens": 5}])
+def test_a_token_count_that_is_negative_or_not_whole_is_unknown_usage(tmp_path, usage):
+    reply = {"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}], "usage": usage}
+    tel, _ = make(tmp_path, wire=Wire(lambda b: reply), max_total_tokens=100000)
+    assert tel.ask("p", "t", "f").ok
+    assert tg.summarise(tmp_path / "tg")["unknown_usage_calls"] == 1
+
+
+def test_the_usage_display_shows_unsettled_reservations_and_unknown_usage(tmp_path):
+    from orchard import telegraph_cmd as cmd_mod
+    d = tmp_path / "tg"
+    d.mkdir()
+    (d / "telegraph.jsonl").write_text(json.dumps({"reserve": "c1", "problem": "p", "tokens": 900, "cost_usd": None}) + "\n")
+    lines = []
+    cmd_mod._usage(d, type("A", (), {"json": False})(), lines.append)
+    assert any("not settled: 1 reservations" in l for l in lines)
+
+
+# ------------------------------------------------------------------------------------------------ review of PR 106, round 8
+
+@pytest.mark.parametrize("key", ['ab"cd-KEYSECRET1', "abc\\def-KEYSECRET2", "café-KEYSECRET3"])
+def test_a_key_echoed_in_json_escaped_form_in_an_error_body_is_redacted(tmp_path, key):
+    for ascii_only in (True, False):
+        body = json.dumps({"error": f"bad key {key}"}, ensure_ascii=ascii_only).encode()
+        tel, _ = make(tmp_path / str(ascii_only), environ={"TG_KEY": key}, wire=Wire(lambda b, body=body: body, status=401))
+        got = tel.ask("p", "t", "f")
+        stored = "".join(p.read_text() for p in (tmp_path / str(ascii_only) / "tg").rglob("*") if p.is_file())
+        assert "KEYSECRET" not in got.reason + stored
+
+
+def test_a_failed_answer_reports_its_tokens_and_cost(tmp_path):
+    body = b'{"choices": [{"message": {"content": "<think>never closed"}, "finish_reason": "length"}], ' \
+           b'"usage": {"prompt_tokens": 40, "completion_tokens": 12}}'
+    tel, _ = make(tmp_path, wire=Wire(lambda b: body), prices={"small": [1, 2], "big": [1, 2]})
+    got = tel.ask("p", "t", "f")
+    assert not got.ok and (got.tokens_in, got.tokens_out) == (40, 12)
+    assert got.cost_usd == pytest.approx((40 * 1 + 12 * 2) / 1e6)
+
+
+# ------------------------------------------------------------------------------------------------ review of PR 106, round 9
+
+@pytest.mark.parametrize("name", ["tools", "tool_choice", "web_search_options", "plugins"])
+def test_extra_body_cannot_enable_tools_or_search_whose_charges_are_not_accounted(name):
+    with pytest.raises(tg.ConfigError, match=name):
+        tg.load(table(extra_body={name: [{"type": "web_search_20250305"}]}), base=Path("/x"))

@@ -50,11 +50,27 @@ def test_the_meter_is_redrawn_on_every_poll_and_says_unknown_after_an_outage():
     js = JS()
     poll = fn_body(js, "async function pollTelegraph")
     assert poll.index("renderSpendMeter(S.telegraph)") < poll.index("renderTelegraph()")     # outside the view's change guard
-    assert "renderSpendMeter(null)" in poll and "STALE_MS" in poll and "S.tgOk" in poll
+    stale = fn_body(js, "function markTelegraphStale")
+    assert "renderSpendMeter(null)" in stale and "STALE_MS" in stale and "S.tgOk" in stale and "S.tgStart" in stale
+    # staleness is judged before the request is awaited, so a request that never answers cannot keep an old amount on screen
+    assert poll.index("markTelegraphStale()") < poll.index("await api(")
+    assert "timeout: TG_TIMEOUT_MS" in poll and "if (S.tgPending) return;" in poll
+    assert "(${r.cost_basis})" in js, "a row with no reported usage says whether its cost is a worst case or an estimate"
+    assert "AbortController" in fn_body(js, "async function api") and "ctl.abort()" in fn_body(js, "async function api")
     meter = fn_body(js, "function renderSpendMeter")
     assert "spend unknown" in meter and 'dataset.tone = "bad"' in meter
     runs = fn_body(js, "async function refreshRuns")
-    assert runs.index("pollTelegraph()") < runs.index("Promise.all"), "its own request, before the others"
+    assert "pollTelegraph" not in runs, "polling must not depend on, or be repeated by, the run list's refresh"
+    main = fn_body(js, "async function main")
+    assert main.index("startTelegraphPolling()") < main.index("await refreshRuns()"), "timers first, so a hung request cannot stop them"
+    assert main.index("startTelegraphPolling()") < main.index('await api("/api/meta")'), "not even the metadata request may come first"
+    meter_fn = fn_body(js, "function renderSpendMeter")
+    assert "last known" in meter_fn and "S.telegraph" in meter_fn and "s ago" in meter_fn, "an outage keeps the last amount, marked as old"
+    sentence = fn_body(js, "function costCapSentence")
+    assert "per_problem.cost_usd" in sentence and "per-problem cost cap refuses" in sentence
+    start = fn_body(js, "function startTelegraphPolling")
+    assert "setInterval(" in start and "markTelegraphStale" in start and "POLL_TELEGRAPH_MS" in start and "2000" in start
+    assert start.strip().splitlines()[1].strip() == "pollTelegraph();", "the first poll is immediate, not one tick later"
     assert "pollTelegraph" not in fn_body(js, "function renderTelegraph")
 
 
@@ -64,7 +80,7 @@ def test_the_view_never_sends_anything_and_builds_text_with_text_nodes():
     block = js[start:js.index("// ---- machine health")]
     assert "body:" not in block and "method" not in block and "POST" not in block
     assert "innerHTML" not in block and "insertAdjacentHTML" not in block and "eval(" not in block
-    assert block.count('api("') == 1 and 'api("/api/telegraph")' in block
+    assert block.count('api("') == 1 and 'api("/api/telegraph", { timeout: TG_TIMEOUT_MS })' in block
 
 
 def test_every_emoji_the_telegraph_script_adds_is_none():
@@ -89,6 +105,8 @@ def test_a_cap_in_a_cost_unit_matches_the_servers_dollar_rule():
     js = JS()
     body = fn_body(js, "function usd")
     assert "v === 0" in body and "v < 0.01" in body and "toFixed(4)" in body and "toFixed(2)" in body
+    assert 'if (v < 0.0001) return "<$0.0001";' in body, "a real cost under 0.0001 must not show as $0.0000"
+    assert body.index("v < 0.0001") < body.index("v < 0.01")
 
 
 # ---- colour: both styles, light and dark, 4.5:1 -------------------------------------------------------------------------------
@@ -143,6 +161,16 @@ def test_the_operator_meter_pairs_on_the_dark_top_bar_are_aa():
     for tone in ("dim", "warn", "bad"):
         bg, fg = colours(tone)
         assert ratio(fg, bg) >= 4.5, (tone, bg, fg, ratio(fg, bg))
+
+
+def test_up_to_900_px_the_meter_is_pinned_to_the_bottom_edge_with_a_solid_background_in_both_styles():
+    css = CSS()
+    media = re.search(r"@media \(max-width: 900px\) \{\n  \.spend-meter \{([^}]*)\}", css)
+    assert media and "position: fixed" in media.group(1) and "bottom: 8px" in media.group(1)
+    assert re.search(r"@media \(max-width: 900px\) \{[^}]*\n  html\[data-mode=\"operator\"\] \.spend-meter \{ background: #092221; \}", css)
+    assert re.search(r"body \.rail \{ padding-bottom: 6\.5rem; \}", css), "room under the pinned meter"
+    # the operator tone rules come first in the file order of specificity: warn and bad keep their own backgrounds
+    assert css.index('.spend-meter[data-tone="bad"] { background: #b3290a') < css.index("html[data-mode=\"operator\"] .spend-meter { background: #092221; }")
 
 
 def test_the_run_spend_line_is_white_on_the_operator_state_band_and_the_band_is_aa_for_white():
