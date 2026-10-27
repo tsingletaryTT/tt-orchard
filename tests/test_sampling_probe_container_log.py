@@ -182,3 +182,49 @@ def test_a_plain_popen_has_no_save_log_and_measure_still_works(sc, tmp_path, mon
     monkeypatch.setattr(mod, "STAGE_DIR", tmp_path)
     m = mod.measure({"port": 1, "sampling_probe": True, "sampling_log_settle_s": 0}, Plain(), log, Tok(), [1], [1] * 32)
     assert all(m["sampling_probe"]["requests"][n]["accepted"] for n in sp.ENTRY_NAMES)
+
+
+# ---- the log filter keeps session lines when step lines come first (follow-up to PR 109) -------------------------------------------
+
+STEP = "(EngineCore) INFO [dflash2-serve] step: rows=[0] iters=1 12.0 ms carry=[3]"
+SESSION = f"(EngineCore) INFO {LINE}"
+
+
+def test_step_lines_before_the_session_line_do_not_use_up_the_limit(tmp_path):
+    mod = load_swap_template()
+    log = tmp_path / "server.log"
+    log.write_text("boot\n" + "\n".join([STEP] * 9 + [SESSION]) + "\n")
+    text = mod.session_lines_since(log, 0)
+    assert text.count("session:") == 1 and "step:" not in text
+
+
+def test_more_session_lines_than_the_limit_are_still_capped(tmp_path):
+    mod = load_swap_template()
+    log = tmp_path / "server.log"
+    log.write_text("\n".join([SESSION] * (mod.PROBE_LOG_LINES + 3)) + "\n")
+    assert mod.session_lines_since(log, 0).count("session:") == mod.PROBE_LOG_LINES
+
+
+def test_only_the_lines_after_the_offset_are_read(tmp_path):
+    mod = load_swap_template()
+    log = tmp_path / "server.log"
+    first = SESSION + "\n"
+    log.write_text(first + STEP + "\n" + SESSION.replace("slot 0", "slot 1") + "\n")
+    text = mod.session_lines_since(log, len(first.encode()))
+    assert "slot 1" in text and "slot 0" not in text
+
+
+def test_a_session_line_of_another_component_is_not_kept(tmp_path):
+    mod = load_swap_template()
+    log = tmp_path / "server.log"
+    log.write_text("(Worker) INFO http session: opened for client 7\n" + SESSION + "\n")
+    text = mod.session_lines_since(log, 0)
+    assert "client 7" not in text and text.count("session:") == 1
+
+
+def test_the_cap_keeps_the_first_session_lines_the_request_wrote(tmp_path):
+    mod = load_swap_template()
+    log = tmp_path / "server.log"
+    log.write_text("\n".join(SESSION.replace("slot 0", f"slot {i}") for i in range(mod.PROBE_LOG_LINES + 3)) + "\n")
+    text = mod.session_lines_since(log, 0)
+    assert "slot 0 " in text and f"slot {mod.PROBE_LOG_LINES + 2} " not in text

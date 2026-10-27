@@ -168,10 +168,16 @@ CARD_SENTENCES = {
 }
 
 
+CARD_SENTENCE_FIRST_TOKEN = ("The server accepted sampled requests, but sampling reached only the first token: the drafter's log shows the sampled requests "
+                             "were served by the speculative loop that verifies by argmax, so the rest of each reply is the greedy continuation of its first token.")
+
+
 def summarize(record) -> dict:
-    """`_summarize` plus `card_sentence`: the verdict's card wording, or None when the record is absent or malformed."""
+    """`_summarize` plus `card_sentence` (the verdict's card wording, or None when the record is absent or malformed) and `first_token_only`
+    (true when the log shows the greedy-only loop served the sampled requests and the texts still differ)."""
     out = _summarize(record)
-    return {**out, "card_sentence": CARD_SENTENCES.get(out["verdict"])}
+    return {**out, "first_token_only": out.get("first_token_only", False),
+            "card_sentence": out.get("card_sentence") or CARD_SENTENCES.get(out["verdict"])}
 
 
 def _summarize(record) -> dict:
@@ -208,10 +214,17 @@ def _summarize(record) -> dict:
         return {**out, "verdict": "inconclusive",
                 "sentence": f"A sampled reply was shorter than {MIN_TOKENS} tokens, which says too little about speed or about whether sampling was applied."}
     matched_by_seeds, matched_greedy = a["text"] == b["text"], g["text"] in (a["text"], b["text"])
+    evidence = _served_by_greedy_only_loop((a, b))        # read from the log, independently of what the texts say
+    if evidence and not matched_by_seeds:
+        return {**out, "verdict": "sampled-ignored", "first_token_only": True, "card_sentence": CARD_SENTENCE_FIRST_TOKEN,
+                "sentence": ("The two seeds gave different text, but the drafter's own session line is in the log of each sampled request, so the "
+                             "DFlash2 speculative loop served them. That loop samples the first token and verifies every later token by argmax, so "
+                             "sampling reached only the first token and the rest of each reply is the greedy continuation of it. "
+                             f"Greedy decoded at {_fmt(gs)}.")}
     if matched_by_seeds or matched_greedy:
         how = ("two requests that differ only in seed returned the same text" if matched_by_seeds
                else "a sampled request returned the greedy text")
-        if _served_by_greedy_only_loop((a, b)):
+        if evidence:
             return {**out, "verdict": "sampled-ignored",
                     "sentence": (f"The server accepted the sampled requests, but {how}. The drafter's own session line is in the log of each sampled "
                                  "request, so the DFlash2 speculative loop served them, and that loop verifies drafted tokens by argmax. "
