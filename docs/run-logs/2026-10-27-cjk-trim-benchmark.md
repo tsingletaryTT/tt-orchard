@@ -146,3 +146,9 @@ So neither defect was triggered. The risk was to a later run, not to these numbe
 Check of the fix, by hand with a fake checkout (a stub `orchard` package, a fake `run.sh` whose server sleeps, a fake `bench_session` that exits 7 or sleeps): the old driver exits 0 when the phase exits 7, and
 after `timeout 4` two server processes are left; the fixed driver exits 7 for the failing phase and leaves no process in the server's group in either case (exit 124 under `timeout`). The repository has no test pattern for
 evidence scripts, so this check is described here and not committed as a test.
+
+Evidence note: `peek.py` (the helper that prints a session's phases) first crashed on a phase with no `scores` (lm-eval failed, timed out or wrote nothing). It now prints each phase's
+`ok` and `problem` and goes on, and guards `scores`, `proxy` and `wall_s` the same way. Checked by hand on copies of the recorded trim summaries: one with `scores` removed (prints
+`scores none`, keeps the proxy counts), one with `scores`, `proxy` and `wall_s` removed and `problem` set to a timeout message (prints `ok False`, the problem, and `none` for the rest),
+and a missing summary file (prints `summary unreadable`); the real summaries print as before. `peek.py` only prints; no number in this log or on the card came from it
+(they come from `compile_bench.py` and the summaries).
