@@ -117,12 +117,13 @@ def other_repo_flags() -> set[str]:
 
 
 def tt_orchard_flags() -> set[str]:
-    """The flags of `tt-orchard` and each of its subcommands."""
-    top = cli._parser()
-    flags = _option_strings(top)
-    for sub in _subparsers(top).values():
-        flags |= _option_strings(sub)
-    return flags
+    """The flags of `tt-orchard` and each of its subcommands, including a subcommand's own subcommands (`reported accept`)."""
+    def walk(parser: argparse.ArgumentParser) -> set[str]:
+        flags = _option_strings(parser)
+        for sub in _subparsers(parser).values():
+            flags |= walk(sub)
+        return flags
+    return walk(cli._parser())
 
 
 def supervisor_shown_flags(text: str) -> set[str]:

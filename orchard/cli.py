@@ -12,6 +12,8 @@
     tt-orchard coder    [status | stop [--yes]]
     tt-orchard package  RUN_DIR --namespace ORG [--step stage|boot|finish|all] [--restage] [--graft-mtp | --no-graft-mtp] [--exact CHIP]
     tt-orchard package-card RUN_DIR --benchmark FILE --model-key KEY [--base-key KEY] [--reported FILE] [--accept-unverified-identity]
+    tt-orchard reported show RUN_DIR
+    tt-orchard reported accept RUN_DIR (--all | --rows NAME,NAME | --row NAME) [--replace]
     tt-orchard kernel-env [--check] [--src-dir DIR] [--venv-dir DIR] [--tt-lang-skill-dir DIR] [--allow-stale-skills]
     tt-orchard inventory TARGET [--python P] [--ttnn-python P] [--against F] [--layers N] [--seq N] [--class C] [--out DIR]
     tt-orchard coder-speed [--endpoint URL --model NAME | --tiers] [--samples N] [--watch SECONDS] [--json]
@@ -211,6 +213,20 @@ def _parser() -> argparse.ArgumentParser:
                     help="go on when the benchmark file does not say which model (and revision) each key is, so the "
                          "scores cannot be shown to be this package's. A file that names another model is always "
                          "refused. The ledger records what was not verified")
+    rp = sub.add_parser("reported", parents=[common],
+                        help="show or accept the scores the model card reports for the model (drafted by stage 0)")
+    rsub = rp.add_subparsers(dest="action", required=True)
+    rsub.add_parser("show", parents=[common], help="list the drafted rows and what was left out (read-only)") \
+        .add_argument("run_dir", help="the run directory")
+    ra = rsub.add_parser("accept", parents=[common],
+                         help="copy chosen draft rows into the run's reported-results.json and record who did it")
+    ra.add_argument("run_dir", help="the run directory")
+    pick = ra.add_mutually_exclusive_group(required=True)
+    pick.add_argument("--all", action="store_true", help="accept every drafted row")
+    pick.add_argument("--rows", metavar="NAME,NAME", help="accept the rows with these names (comma separated)")
+    pick.add_argument("--row", action="append", metavar="NAME",
+                      help="accept one row by its exact name (a name with a comma); repeat for more")
+    ra.add_argument("--replace", action="store_true", help="replace a reported-results.json the run already holds")
     k = sub.add_parser("kernel-env", parents=[common],
                        help="build or check the tt-lang simulator environment that kernel-probe uses")
     k.add_argument("--check", action="store_true",
@@ -715,6 +731,9 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
     if args.cmd == "package-card":
         from orchard import package_cmd
         return package_cmd.card_main(args, out=out)
+    if args.cmd == "reported":
+        from orchard import reported_cmd
+        return reported_cmd.main(args, out=out)
     if args.cmd == "suite-control":
         from orchard import suite_control
         return suite_control.main([args.action, *args.rest], out=out)
