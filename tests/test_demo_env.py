@@ -510,6 +510,22 @@ def test_a_missing_distribution_is_not_version_drift(world):
     assert names(check(world))["host-tree"].status != de.OK
 
 
+def test_distributions_at_two_different_versions_are_not_one_drift(world):
+    healthy(world)
+    import shutil
+    shutil.copytree(world.site / "ttml-0.80.0.dist-info", world.site / "ttml-0.79.0.dist-info")
+    shutil.rmtree(world.site / "ttml-0.80.0.dist-info")
+    assert names(check(world))["host-tree"].status != de.OK
+
+
+def test_distributions_somebody_else_installed_are_not_drift_this_command_may_repair(world):
+    healthy(world)
+    for n in ("ttnn", "ttml"):
+        (world.site / f"{n}-0.80.0.dist-info" / "INSTALLER").write_text("pip\n")
+    world.run.rules.insert(0, (lambda a: "--exact-match" in a, (0, "v0.81.1\n", ""), None))
+    assert names(check(world))["host-tree"].status != de.OK
+
+
 def test_a_pth_for_another_directory_set_is_still_a_failure_when_the_tag_also_moved(world):
     healthy(world)
     (world.site / de.PTH_NAME).write_text("/somewhere/else\n")

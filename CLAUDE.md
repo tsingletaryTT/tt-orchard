@@ -2453,6 +2453,14 @@ worked around it with numpy 1.26.4 on `PYTHONPATH`, which lasts for one run. Bui
   hiding behind a printed tag, a message's wording and one equivalent (`repo_dir` passed explicitly equals the default, so the argument was removed). Each got a test and is red now.
 - Not done: the stock-runtime demo itself was not run in this interpreter (that opens a device); whether tt-transformers' demo or tt-train's lora_llama need packages beyond the imports read here is not known;
   other consumers of the shared environment that depend on numpy 2 were not looked for; `setup` does not build this venv.
+- Review fixes (Copilot, PR 101; main merged in, version 0.9.4), five findings, all real, each reproduced by a failing test first: (1) the preflight checked the environment against
+  `<operator home>/tt-metal` unless `ORCHARD_TT_METAL_DIR` was set, so one built with `--tt-metal-dir` could block although healthy; it now uses the stock route's own tree, else the tree in the venv's
+  record, else the variable and the home default, and the printed repair command carries the same tree. (2) A tree that moved to another tag made `host-tree` report `todo` for the old distributions, so
+  the row blocked instead of warning; complete distributions at another version are now version drift (a warning), while a missing or foreign distribution or a wrong `.pth` still blocks. (3) A build
+  trusted the record's hash of the pins, so numpy 2 or a removed package after the first build was never put right; every build now runs the pin install again (`--check` and `--dry-run` still change
+  nothing). (4) A venv inside the host tree was accepted (only the other direction was refused); both are refused, with links resolved before uv runs. (5) A relative `--tt-metal-dir` went into the
+  `.pth` unchanged and Python reads a relative line against site-packages; both directories are made absolute and link-free when the environment is created. 15 mutations, 5 survived the first pass
+  (distributions at two versions, a foreign installer, the params layout, an unusable record path) and each got a test; one equivalent condition was removed.
 
 
 ## 2026-10-27 (UTC): a Claude agent wrote the `rmsnorm` kernel with the coder's materials (branch `rmsnorm-by-claude`, docs only)

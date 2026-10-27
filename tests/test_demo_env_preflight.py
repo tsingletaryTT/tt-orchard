@@ -266,3 +266,26 @@ def test_a_record_that_cannot_be_read_falls_back_to_the_variable(tmp_path, monke
     (venv / de.RECORD).write_text("{not json")
     pf.default_signals(cfg(tmp_path)).demo_env(venv / "bin" / "python")
     assert seen[0].tt_metal_dir == tmp_path / "from-env"
+
+
+def test_a_params_directory_under_another_package_names_no_tree(tmp_path):
+    seen = []
+    c = cfg(tmp_path)
+    c.demo_python = PY
+    sig = stock_signals(stock_params=lambda name: Path("/work/tt-metal/models/other/model_params") / name,
+                        demo_env=lambda p, tree=None: seen.append(tree) or (HEALTHY, CMD))
+    pf.run_preflight(c, "Cloudflare/clef", accept_credentials=False, signals=sig)
+    assert seen == [None]
+
+
+@pytest.mark.parametrize("path", ["", 5, ["x"]])
+def test_a_record_with_no_usable_tree_path_falls_back_to_the_variable(tmp_path, monkeypatch, path):
+    import json
+    seen = []
+    monkeypatch.setattr(de, "ensure", lambda env, check_only, say=None: seen.append(env) or HEALTHY)
+    monkeypatch.setenv("ORCHARD_TT_METAL_DIR", str(tmp_path / "from-env"))
+    venv = tmp_path / "venvs" / "demo"
+    _record(venv, tmp_path / "x")
+    (venv / de.RECORD).write_text(json.dumps({"host_tree": {"path": path}}))
+    pf.default_signals(cfg(tmp_path)).demo_env(venv / "bin" / "python")
+    assert seen[0].tt_metal_dir == tmp_path / "from-env"

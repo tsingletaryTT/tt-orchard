@@ -800,9 +800,9 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
             # The tree the demo will run from: the stock route's own (tt-metal/models/tt_transformers/model_params/<name>). Without a
             # stock route the signal uses the tree the venv's record names, so an environment built with --tt-metal-dir is judged
             # against the tree it was built from.
-            params = Path((base_check.data or {}).get("stock_runtime", {}).get("params_dir") or "") if stock_route else None
+            params = Path(((base_check.data or {}).get("stock_runtime") or {}).get("params_dir") or "")
             tree = None
-            if params is not None and params.parent.name == "model_params" and params.parent.parent.name == "tt_transformers" \
+            if params.parent.name == "model_params" and params.parent.parent.name == "tt_transformers" \
                     and params.parent.parent.parent.name == "models" and len(params.parents) > 3:
                 tree = params.parents[3]
             results, command = s.demo_env(python, tree)
