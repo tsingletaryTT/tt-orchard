@@ -47,3 +47,59 @@ def serving_of(base_repo, installed) -> str:
     if any(i.schema == "6" for i in serving):
         return "thin-bundle"
     return "container" if serving else "none"
+
+
+# ---- is this model audio? (the preflight's rule) ---------------------------------------------------
+#
+# Stage 0 decides modality from the snapshot's files (`detect_audio` in skills/delta-triage-templates/delta_triage.py). The preflight has to
+# decide earlier, before anything is downloaded, from what the Hub says. The two must not disagree, so the layout half of the rule is one
+# function here and the template's copy is pinned to it by tests/test_audio_preflight.py. (The template runs as a script in a run
+# directory and cannot import orchard, so it keeps a copy.)
+#
+# The rule. A model counts as audio when BOTH hold:
+#   1. Tag evidence: the Hub's `pipeline_tag` is `text-to-audio` or `audio-to-audio`. When the Hub gives no usable pipeline tag (absent, or
+#      not a string), a tag with one of those names decides instead. A pipeline tag that is present and says anything else (for example
+#      `text-to-speech`, which is out of scope) decides alone: the model is not audio for this rule.
+#   2. Layout evidence: every file list available (the Hub's, and the local snapshot's top level) shows `model_config.json`, no `config.json`
+#      and at least one `.safetensors` file at the top level. If two lists disagree, the model is not audio.
+# Limits. Anything unclear is "not audio", which keeps the old behaviour (the base row asks for an installed bundle): unknown tags, a file list
+# that cannot be read, both config files present, a hub lookup that failed. The rule says nothing about whether the files are valid:
+# stage 0 reads `model_config.json` and refuses what it cannot parse. Speech models (`text-to-speech`, `automatic-speech-recognition`) are
+# not in scope and are served by other paths.
+
+AUDIO_PIPELINE_TAGS = ("text-to-audio", "audio-to-audio")
+AUDIO_CONFIG, TEXT_CONFIG = "model_config.json", "config.json"
+
+
+def _strings(items) -> list[str]:
+    """The strings of a list. Anything else (not a list, or a list with numbers, None or objects in it) contributes nothing."""
+    return [i for i in items if isinstance(i, str)] if isinstance(items, list) else []
+
+
+def audio_layout(names) -> bool:
+    """True when the top level of a file list is the stable-audio-tools layout: `model_config.json`, no `config.json`, and a top-level
+    `.safetensors` file. `names` is a list of repository-relative paths; non-strings are ignored."""
+    root = {n for n in _strings(names) if "/" not in n}
+    return AUDIO_CONFIG in root and TEXT_CONFIG not in root and any(n.endswith(".safetensors") for n in root)
+
+
+def audio_tag(pipeline_tag, tags) -> bool:
+    """Tag evidence (rule 1 above). Only the exact strings in AUDIO_PIPELINE_TAGS count."""
+    if isinstance(pipeline_tag, str) and pipeline_tag:
+        return pipeline_tag in AUDIO_PIPELINE_TAGS
+    return any(t in AUDIO_PIPELINE_TAGS for t in _strings(tags))
+
+
+def audio_evidence(pipeline_tag, tags, *name_lists) -> str | None:
+    """A sentence saying why the model counts as audio, or None. Each of `name_lists` is a list of file names from one source (the Hub's
+    file list, a local snapshot's top level); an empty one holds no evidence and is skipped, a non-empty one must show the layout."""
+    if not audio_tag(pipeline_tag, tags):
+        return None
+    lists = [n for n in name_lists if isinstance(n, list) and n]
+    if not lists or not all(audio_layout(n) for n in lists):
+        return None
+    if isinstance(pipeline_tag, str) and pipeline_tag:
+        how = f"pipeline tag {pipeline_tag}"
+    else:
+        how = f"tag {next(t for t in _strings(tags) if t in AUDIO_PIPELINE_TAGS)}"
+    return f"{how}; {AUDIO_CONFIG} and no {TEXT_CONFIG} at the repository root"

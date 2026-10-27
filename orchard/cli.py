@@ -456,6 +456,30 @@ def _installed(sig) -> list:
     return list(sig.installed_bundles()) if sig.installed_bundles else []
 
 
+def audio_base_refusal(arg: str, model: str, sig) -> str | None:
+    """A reason to refuse `--base <arg>`, or None. An audio model (orchard/audio_facts.py) is compared with its base repository directly,
+    and no bundle serves audio, so `--base` has to name a model id. A name that an installed bundle has, or that `tt model search` lists
+    as a bundle, is refused before anything is installed."""
+    try:
+        hub, _ = sig.hub_info(model)
+        local = sig.local_snapshot(model)
+    except Exception:
+        return None
+    if preflight.audio_evidence_for(hub, local) is None:
+        return None
+    named = any(b.name == arg for b in _installed(sig))
+    if not named and not any(b.weights_repo == arg for b in _installed(sig)) and sig.search_bundles:
+        try:
+            named = arg in {c.get("name") for c in sig.search_bundles(nearest.family_query(arg)) or [] if isinstance(c, dict)}
+        except Exception:
+            named = False
+    if not named:
+        return None
+    return (f"{model} is an audio model, and --base {arg} names a bundle. No bundle serves an audio model; stage 0 compares the two "
+            "repositories directly. Name the base as a model id instead (the card's base_model, for example "
+            "stabilityai/stable-audio-3-small-music-base)")
+
+
 def resolve_base(arg: str, sig, puller, out, style, *, dry_run: bool = False) -> tuple[str | None, str | None]:
     """(the weights repo to base the run on, an error text). `arg` is an installed bundle, a model id that
     an installed bundle serves, a published bundle (installed here with `tt-model pull`), or any other
@@ -525,6 +549,8 @@ def pick_base(candidates: list[dict], model: str, base: str, *, out, ask=input, 
 
 
 def _base_help(check, model: str, out) -> None:
+    if (check.data or {}).get("audio"):
+        return              # the bundle help does not apply: an audio model needs no bundle, and its row says what it needs
     cands = (check.data or {}).get("candidates") or []
     print("╔══ How to choose a base", file=out)
     if cands:
@@ -633,6 +659,9 @@ def _ui_preflight(cfg, memo=None):
             sig = dataclasses.replace(sig, research=remembered)
         override = None
         if base:
+            why = audio_base_refusal(base, model, sig)
+            if why:
+                return [preflight.Check("base", preflight.BLOCK, why, "nearest-model-missing", data={"audio": True, "candidates": []})]
             override, why = resolve_base(base, sig, None, io.StringIO(), ui.Style("none", False), dry_run=True)
             if why:
                 return [preflight.Check("base", preflight.BLOCK, why, "nearest-model-missing")]
@@ -888,6 +917,8 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
     sig = signals or preflight.default_signals(cfg, research_options=research_options)
     override = None
     if args.base:
+        if (why := audio_base_refusal(args.base, args.model, sig)):
+            return _refuse(why)
         override, why = resolve_base(args.base, sig, puller, out, style, dry_run=args.dry_run)
         if why:
             return _refuse(why)
