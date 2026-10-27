@@ -108,3 +108,45 @@ installs external code. No real reference clip has been made and no timing is me
 Estimate, not measured: the diffusion transformer does about 0.22 TFLOP per pass at 237 tokens (a 10 s clip), so a pass should take seconds on 16 CPU cores
 and the fine-tune's 8 steps a minute or so; the base control at 50 steps with CFG scale 7 is about 100 passes. Loading the 2.3 GB checkpoint and decoding 16 s of
 audio are the other costs. The pair should fit well inside 30 minutes. The first run measures it.
+
+## Does either repository ship code that the library would run? (checked 2026-10-28, read only)
+
+- Neither snapshot holds a Python file, a pickle or a custom loader. The file lists are: `model.safetensors`, `model_config.json`, the text-encoder directory (`config.json`,
+  `generation_config.json`, tokenizer files, `model.safetensors`), licences, the card and a picture. The base also has `svd_bases.pt` (1.27 GB).
+- No config names a custom class: `model_config.json` and the text encoder's `config.json` contain no `auto_map` or `custom_pipelines` key, and the library does not
+  call `from_pretrained` with `trust_remote_code` anywhere (a search of the library outside its training code).
+- The library reads the weights with `safetensors.load_file`, the text encoder through `transformers`, and the config as JSON. It builds the model classes from its own
+  code, selected by the `type` strings in the config (`dit`, `taae_v2`, `t5gemma`, `number`), so a config can only choose among classes the library already has.
+- `svd_bases.pt` is read by the library only when a LoRA adapter is applied (`models/lora/loader.py`, with `torch.load(..., weights_only=True)`); `generate` never reads it,
+  and `make_reference.py` loads no adapter. The same module has one `torch.load(..., weights_only=False)` for a LoRA checkpoint path, which is not reached either.
+- Conclusion: running the reference executes the pinned library's code and `transformers`' T5Gemma code, and no code from either model repository.
+
+## The first real CPU reference runs (2026-10-28)
+
+The environment was built with `tt-orchard audio-reference-env` (the command passed every step: source clean at `77e0398c26f7`, CPU torch 2.7.1, the library imported from the
+checked tree) and `make_reference.py` ran twice on the 16-core host CPU, float32, Hub offline, no token, `--expect-src` set. Same prompt ("A warm acoustic guitar melody with soft
+percussion, 100 BPM"), duration 10 s, seed 42. Runs and clips are under `<HOME>/orchard-runs/stable-audio-ref/`.
+
+| run | settings | wall time (whole process) | `generate` and decode | arrays |
+|---|---|---|---|---|
+| `small-music` (fine-tune) | 8 steps, CFG 1.0, `pingpong` | 31 s | 24.8 s | 56 |
+| `small-music-base` (control) | 50 steps, CFG 7.0, `euler` | 64 s | 57.1 s | 132 |
+| `small-music-repeat` (fine-tune again) | as the first | about 45 s | 36.9 s | 56 |
+
+- The two process wall times include loading the 2.3 GB checkpoint and the text encoder; the library's own timer covers sampling and decoding. The pair needed about 95 s, far below the
+  45 minute limit, so nothing was cut. The encoder took 0.2 s.
+- Reproducibility: the fine-tune run repeated gives a bit-identical result: `python3 -m orchard.audio_reference check` reports PCC 1.0, relative L2 error 0 and slope 1.0 for all 56
+  arrays (the noise draws, the layer outputs, every step's latent and denoised estimate, the final latent and the waveform). A CPU float32 run is deterministic here, so a chip
+  run can be compared with this reference without a repeat-to-repeat noise term.
+- The control passes: `python3 -m orchard.audio_reference control` finds the base's waveform different from the fine-tune's (relative L2 error 1.85, PCC 0.0005, log-spectrum
+  distance 0.97). The two use different samplers and step counts, so they are different pieces of music for one seed; that is the control's intent (it catches serving the wrong
+  weights), and it does not say anything about quality.
+- Clip checks with the spec's sound bars (computed on the saved waveform): both clips are 10.00 s, 44.1 kHz stereo; 97 percent of 100 ms windows are above -40 dBFS in each; the
+  fine-tune clips 0.0008 percent of samples at full scale and the base 0.14 percent (the spec's bar is at most 1 percent). Nobody has listened to them.
+  - `<HOME>/orchard-runs/stable-audio-ref/small-music/clips/audio.flac` (fine-tune, 0.9 MB)
+  - `<HOME>/orchard-runs/stable-audio-ref/small-music-base/clips/audio.flac` (base, 1.0 MB)
+- Each run holds `manifest.json` (settings, seeds, model revision and config hash, library commit, per-array sha256; `python3 -m orchard.audio_reference verify` re-hashes them) and
+  `arrays/*.npy`: 41 MB for the fine-tune and 73 MB for the base.
+- Not done: a bfloat16 CPU run for the noise floor (the script has no dtype option yet), so the checker's bars are still provisional.
+- A slip while running it: I ran a helper script from the scratch directory with the venv's python, and a file named `inspect.py` in that shared directory shadowed the standard library
+  and broke the numpy import. Running it with `-I` fixed that. Scripts that read model data are run in isolated mode.
