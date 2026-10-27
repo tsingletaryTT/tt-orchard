@@ -195,7 +195,6 @@ class HardwareCheck:
                         wait_began, run_began = None, self.clock()
                     remaining = max(p.wait_s - (wait_began - start), 0.0)
                     hw, event, text = self.wait_for(k, q, remaining, timeout, on_grant)
-                    wait_began = run_began = None
             started = True
         finally:
             if not started:                         # an interrupt or an error inside run or wait: keep what is known

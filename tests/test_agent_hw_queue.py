@@ -66,6 +66,7 @@ def test_a_busy_board_waits_on_the_one_ticket_and_never_runs_gozer_again():
     assert len(w.runs) == 1 and len(w.wait_calls) == 1 and w.sleeps == []          # one try, one wait, no loop
     assert w.wait_calls[0]["ticket"] == "T1"
     assert "BUSY" in text and "simulator" in text and "were cancelled" in text
+    assert "waited on 1 queue ticket" in text
 
 
 def test_the_wait_gets_what_is_left_of_wait_s_after_the_first_try():
@@ -289,7 +290,8 @@ def test_a_zero_wait_cancels_at_once_without_waiting(tmp_path, fake_kenv):
 
 def test_a_wait_that_answers_with_something_that_is_not_a_grant_cancels_the_ticket(tmp_path, fake_kenv):
     for answer in [(0, "not json"), (0, json.dumps({"granted": False})), (0, json.dumps({"granted": True})),
-                   (1, GRANTED[1]), (0, json.dumps({"granted": True, "lease_id": "bad id"}))]:
+                   (1, GRANTED[1]), (0, json.dumps({"granted": True, "lease_id": "bad id"})),
+                   (0, json.dumps({"granted": False, "lease_id": "L1"}))]:
         adir = attempt_dir(tmp_path / str(abs(hash(answer))), fake_kenv)
         g = FakeGozer(wait_answer=answer)
         text = build(adir, g).call({})
@@ -318,7 +320,7 @@ def test_the_lease_is_released_when_the_harness_run_is_interrupted(tmp_path, fak
     c = build(adir, g)
     with pytest.raises(KeyboardInterrupt):
         c.call({})
-    assert g.released == ["L1"]
+    assert g.released == ["L1"] and g.cancelled == []                 # a granted ticket is spent: nothing to cancel
     assert c.summary()["calls"][0]["outcome"] == "interrupted"
 
 
@@ -476,3 +478,32 @@ def test_gozer_release_reports_a_timeout_and_an_os_error():
         raise OSError("no gozer")
     assert kp.gozer_release("L1", run=slow)[0] is None
     assert kp.gozer_release("L1", run=gone)[0] is None
+
+
+def test_the_wait_and_the_lease_time_are_measured_from_the_clock(tmp_path, fake_kenv):
+    adir = attempt_dir(tmp_path, fake_kenv)
+    g = FakeGozer(wait_answer=GRANTED)
+    real_wait, real_run = g.gozer_wait, g.run_watched
+
+    def wait(ticket, wait_s):
+        CLOCK["now"] += 21.0
+        return real_wait(ticket, wait_s)
+
+    def run(argv, **kw):
+        if argv[0] != "gozer":
+            CLOCK["now"] += 47.0
+        return real_run(argv, **kw)
+    g.gozer_wait, g.run_watched = wait, run
+    c = build(adir, g)
+    text = c.call({})
+    rec = c.summary()["calls"][0]
+    assert rec["waited_s"] == 21.0 and rec["lease_s"] == 47.0 and rec["total_s"] == 68.0, rec
+    assert "waited 21.0 s for a lease" in text and c.summary()["lease_s_used"] == 47.0
+
+
+def test_the_report_row_shows_a_failed_release():
+    from test_agent_hw import _report_md, _row_attempt, hw_summary
+    rec = {"outcome": "pass", "waited_s": 21.0, "queued_polls": 1, "cancelled": None,
+           "release_error": "chips [0, 1] still open by [123]"}
+    md = _report_md(Path(__import__("tempfile").mkdtemp()), [_row_attempt(agent_hw=hw_summary(rec))])
+    assert "release failed: chips [0, 1] still open by [123]" in md
