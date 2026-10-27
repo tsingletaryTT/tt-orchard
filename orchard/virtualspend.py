@@ -43,11 +43,10 @@ MAX_DEPTH = 8
 MAX_FILE_BYTES = 128 * 1024 * 1024   # a larger file is read up to this many bytes and the rest is counted as not read
 MAX_TOTAL_BYTES = 1024 * 1024 * 1024
 MAX_LINE_BYTES = 2 * 1024 * 1024     # a longer line is not parsed; its usage is looked for in its last bytes
-TAIL_BYTES = 4096
+TAIL_BYTES = 8192
 MAX_TOKENS_PER_TURN = 10 ** 9        # a bigger number is a corrupt record
 
 HELPER_NAMES = {"telegraph", "helper", "hosted", "outside"}
-_USAGE_TAIL = re.compile(rb'"usage"\s*:\s*\{[^{}]*\}')
 
 
 class ConfigError(ValueError):
@@ -271,12 +270,21 @@ def _lines(path: Path, skipped: dict, budget: list):
 
 
 def _tail_usage(tail: bytes):
-    m = _USAGE_TAIL.search(tail)
-    if not m:
+    """(prompt, completion) from the last `"usage"` key in the end of an over-long line, or None. The agent writes `usage` as the
+    last key of a turn, so after the usage object only the closing brace of the record may follow. The object is parsed with a
+    JSON decoder, so nested details (`completion_tokens_details`) are read; a suffix that was cut off is not."""
+    at = tail.rfind(b'"usage"')
+    if at < 0:
         return None
+    rest = tail[at + len(b'"usage"'):].decode("utf-8", errors="replace").lstrip()
+    if not rest.startswith(":"):
+        return None
+    rest = rest[1:].lstrip()
     try:
-        usage = json.loads(m.group(0).split(b":", 1)[1])
-    except ValueError:
+        usage, end = json.JSONDecoder().raw_decode(rest)
+    except (ValueError, RecursionError):
+        return None
+    if rest[end:].strip() != "}":
         return None
     return _agent_turn({"usage": usage})
 

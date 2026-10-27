@@ -519,3 +519,49 @@ def test_a_short_line_cut_by_the_budget_is_not_priced(root, monkeypatch):
     write_log(root, "log/run.jsonl", [one, one])
     s = vs.scan(root)
     assert s["turns"] == 1 and s["skipped"]["oversize_files"] == 1 and s["skipped"]["malformed_lines"] == 0
+
+
+
+# ---- review fix 4: the bounded suffix is parsed with a JSON decoder, so nested usage details stay included -------------
+
+def _long(usage, monkeypatch):
+    monkeypatch.setattr(vs, "MAX_LINE_BYTES", 2000)
+    return turn(1, 0, 0, sent=["x" * 30000], usage=usage)
+
+
+@pytest.mark.parametrize("usage", [
+    {"prompt_tokens": 900, "completion_tokens": 90, "completion_tokens_details": {"reasoning_tokens": 40}},
+    {"completion_tokens_details": {"reasoning_tokens": 40, "audio": {"n": 1}}, "prompt_tokens": 900, "completion_tokens": 90},
+    {"prompt_tokens": 900, "prompt_tokens_details": {"cached_tokens": {"a": [1, 2, {"b": 3}]}}, "completion_tokens": 90,
+     "completion_tokens_details": None},
+], ids=["details-after", "details-before", "nested-both-sides"])
+def test_a_huge_turn_with_nested_usage_details_is_still_priced(root, monkeypatch, usage):
+    write_log(root, "log/run.jsonl", [_long(usage, monkeypatch)])
+    s = vs.scan(root)
+    assert (s["turns"], s["prompt_tokens"], s["completion_tokens"]) == (1, 900, 90)
+    assert s["skipped"]["long_lines"] == 1 and s["skipped"]["no_usage"] == 0
+
+
+def test_a_huge_turn_whose_usage_is_cut_off_is_not_priced(root, monkeypatch):
+    line = _long({"prompt_tokens": 900, "completion_tokens": 90, "completion_tokens_details": {"reasoning_tokens": 40}}, monkeypatch)
+    cut = line[:line.index('"reasoning_tokens"') + 5]                    # ends inside the nested object
+    write_log(root, "log/run.jsonl", [cut])
+    s = vs.scan(root)
+    assert s["turns"] == 0 and s["skipped"]["no_usage"] == 1
+
+
+def test_a_usage_key_inside_an_earlier_value_does_not_count_for_the_record(root, monkeypatch):
+    monkeypatch.setattr(vs, "MAX_LINE_BYTES", 2000)
+    inner = '\\"usage\\": {\\"prompt_tokens\\": 1, \\"completion_tokens\\": 1}'      # inside a string, with more text after it
+    line = '{"turn": 1, "sent": ["' + "x" * 30000 + inner + '"], "received": {"role": "assistant"}, "finish_reason": "stop"}'
+    write_log(root, "log/run.jsonl", [line])
+    s = vs.scan(root)
+    assert s["turns"] == 0 and s["skipped"]["no_usage"] == 1
+
+
+def test_a_deeply_nested_usage_suffix_is_not_a_crash(root, monkeypatch):
+    monkeypatch.setattr(vs, "MAX_LINE_BYTES", 2000)
+    line = '{"turn": 1, "sent": "' + "x" * 30000 + '", "usage": ' + "[" * 3000 + "]" * 3000 + "}"
+    write_log(root, "log/run.jsonl", [line])
+    s = vs.scan(root)
+    assert s["turns"] == 0 and s["skipped"]["no_usage"] == 1
