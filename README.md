@@ -1689,6 +1689,7 @@ max_calls = 5                                # caps across the whole ledger, so 
 max_total_tokens = 40000
 max_output_tokens = 1500
 max_prompt_chars = 12000
+# extra_body = { chat_template_kwargs = { enable_thinking = false } }   # added to every request; here, thinking off for a Qwen3 server
 # max_cost_usd = 2.0                         # needs prices for the models it may call
 # prices = { "cheap-model" = [0.25, 1.25], "strong-model" = [5.0, 25.0] }   # dollars per million tokens, input and output
 ```
@@ -1696,7 +1697,8 @@ max_prompt_chars = 12000
 The key is read when a call is made and is never written to a prompt, ledger, cache, reply file or error. A `key_file` inside the
 checkout is refused. Requests hold only the task and the failure, with home paths, host names and token shapes removed, cut to
 `max_prompt_chars`. The same question to the same model is answered from the cache. A stronger model is used only after an answer
-was reported as not helping. The reply is advice from another model and is shown marked as untrusted text; nothing runs it.
+was reported as not helping. A reply's `<think>` block is removed before it is stored, and an answer cut off inside its reasoning is a failed call (its tokens still
+count against the caps and it is not cached); `extra_body` is how to turn thinking off for a model that thinks by default. The reply is advice from another model and is shown marked as untrusted text; nothing runs it.
 
 Every call, refusal and cache hit is one line in `telegraph.jsonl` (model, tokens, seconds, cost when a price is known, outcome).
 `telegraph report` records whether the answer helped, and `telegraph usage` shows what the help cost and how often it worked.

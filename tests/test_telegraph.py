@@ -500,3 +500,88 @@ def test_an_anthropic_answer_with_no_text_is_a_failed_result(tmp_path):
 def test_a_malformed_price_is_refused(prices):
     with pytest.raises(tg.ConfigError, match="prices.small"):
         tg.load(table(prices=prices), base=Path("/x"))
+
+
+# ------------------------------------------------------------------------------------------------ thinking models
+
+def test_a_think_block_is_removed_from_the_answer(tmp_path):
+    wire = Wire(lambda b: openai_reply("<think>\nlet me see\n</think>\n\nUse ttl.block.fill.", 50, 40))
+    tel, _ = make(tmp_path, wire=wire)
+    got = tel.ask("p", "t", "f")
+    assert got.ok and got.text == "Use ttl.block.fill." and "think" not in got.as_hint().split("\n", 1)[1]
+    assert (tmp_path / "tg" / records(tmp_path)[0]["reply_file"]).read_text() == "Use ttl.block.fill."
+    assert records(tmp_path)[0]["tokens_out"] == 40                 # the reasoning was paid for and is counted
+
+
+def test_an_answer_cut_off_inside_its_reasoning_is_a_failed_call_and_is_not_cached(tmp_path):
+    cut_off = {"choices": [{"message": {"content": "<think>\nOkay, let's see. The user"}, "finish_reason": "length"}],
+               "usage": {"prompt_tokens": 188, "completion_tokens": 400}}
+    wire = Wire(lambda b: cut_off)
+    tel, wire = make(tmp_path, wire=wire)
+    got = tel.ask("p", "t", "f")
+    assert not got.ok and "cut off inside its reasoning" in got.reason and "extra_body" in got.reason
+    rec = records(tmp_path)[0]
+    assert rec["outcome"] == "error" and (rec["tokens_in"], rec["tokens_out"]) == (188, 400)
+    assert not (tmp_path / "tg" / "cache").exists()
+    tel.ask("p", "t", "f")
+    assert len(wire.requests) == 2                                  # nothing was cached, so it asked again
+
+
+def test_the_tokens_of_a_failed_answer_count_against_the_token_cap(tmp_path):
+    cut_off = {"choices": [{"message": {"content": "<think>x"}, "finish_reason": "length"}],
+               "usage": {"prompt_tokens": 188, "completion_tokens": 400}}
+    tel, wire = make(tmp_path, wire=Wire(lambda b: cut_off), max_total_tokens=500)
+    tel.ask("p", "t", "f1")
+    got = tel.ask("p", "t", "f2")
+    assert not got.ok and "token cap" in got.reason and len(wire.requests) == 1
+
+
+def test_a_think_block_with_nothing_after_it_is_an_empty_answer(tmp_path):
+    wire = Wire(lambda b: openai_reply("<think>only thoughts</think>", 10, 10))
+    tel, _ = make(tmp_path, wire=wire)
+    got = tel.ask("p", "t", "f")
+    assert not got.ok and "only reasoning, no answer" in got.reason
+
+
+def test_a_failed_answer_is_costed_when_the_model_has_a_price(tmp_path):
+    cut_off = {"choices": [{"message": {"content": "<think>x"}, "finish_reason": "length"}],
+               "usage": {"prompt_tokens": 100, "completion_tokens": 400}}
+    tel, _ = make(tmp_path, wire=Wire(lambda b: cut_off), prices={"small": [1.0, 3.0], "big": [5.0, 15.0]})
+    tel.ask("p", "t", "f")
+    assert records(tmp_path)[0]["cost_usd"] == pytest.approx(100e-6 + 1200e-6)
+    assert tg.summarise(tmp_path / "tg")["cost_usd"] == pytest.approx(1300e-6)
+
+
+def test_extra_body_is_sent_with_the_request_for_both_api_styles(tmp_path):
+    extra = {"chat_template_kwargs": {"enable_thinking": False}}
+    tel, wire = make(tmp_path, extra_body=extra)
+    tel.ask("p", "t", "f")
+    assert wire.requests[0]["body"]["chat_template_kwargs"] == {"enable_thinking": False}
+    assert wire.requests[0]["body"]["model"] == "small" and wire.requests[0]["body"]["max_tokens"] == 1500
+    tel2, wire2 = make(tmp_path / "b", wire=Wire(lambda b: anthropic_reply("ok", 5, 5)), api="anthropic",
+                       extra_body={"thinking": {"type": "disabled"}})
+    tel2.ask("p", "t", "f")
+    assert wire2.requests[0]["body"]["thinking"] == {"type": "disabled"}
+
+
+@pytest.mark.parametrize("key", ["model", "messages", "max_tokens", "temperature", "system", "stream"])
+def test_extra_body_cannot_replace_what_telegraph_sets(key):
+    with pytest.raises(tg.ConfigError, match=f"extra_body.*{key}"):
+        tg.load(table(extra_body={key: 1}), base=Path("/x"))
+
+
+@pytest.mark.parametrize("bad", ["x", [1], 3])
+def test_extra_body_must_be_a_table(bad):
+    with pytest.raises(tg.ConfigError, match="extra_body must be a table"):
+        tg.load(table(extra_body=bad), base=Path("/x"))
+
+
+def test_a_cache_entry_that_still_holds_reasoning_is_not_used(tmp_path):
+    tel, wire = make(tmp_path)
+    tel.ask("p", "t", "f")
+    entry = next((tmp_path / "tg" / "cache").glob("*.json"))
+    data = json.loads(entry.read_text())
+    data["text"] = "<think>an entry written by an earlier version"
+    entry.write_text(json.dumps(data))
+    got = tel.ask("p", "t", "f")
+    assert len(wire.requests) == 2 and not got.cached and "<think>" not in got.text

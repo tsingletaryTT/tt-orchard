@@ -44,7 +44,9 @@ from orchard.scrub import HOME_PATH, TOKEN_PATTERNS
 REPO = Path(__file__).resolve().parents[1]
 LEDGER = "telegraph.jsonl"
 KEYS = {"enabled", "endpoint", "models", "api", "key_env", "key_file", "after_failures", "max_calls",
-        "max_total_tokens", "max_cost_usd", "prices", "max_output_tokens", "max_prompt_chars", "timeout_s"}
+        "max_total_tokens", "max_cost_usd", "prices", "max_output_tokens", "max_prompt_chars", "timeout_s",
+        "extra_body"}
+RESERVED_BODY = ("model", "messages", "max_tokens", "temperature", "system", "stream")
 APIS = ("openai", "anthropic")
 ANTHROPIC_VERSION = "2023-06-01"
 MIN_PROMPT_CHARS = 500
@@ -74,6 +76,7 @@ class Config:
     max_output_tokens: int = 1500
     max_prompt_chars: int = 12000
     timeout_s: int = 120
+    extra_body: dict = field(default_factory=dict)      # added to every request body, for example to turn thinking off
 
 
 def _int(table: dict, key: str, default: int, lowest: int) -> int:
@@ -146,13 +149,19 @@ def load(table: dict | None, *, base: Path) -> Config:
         if not prices:
             raise ConfigError("telegraph.max_cost_usd needs telegraph.prices for the models it may call")
         cap = float(cap)
+    extra = table.get("extra_body", {})
+    if not isinstance(extra, dict):
+        raise ConfigError("telegraph.extra_body must be a table")
+    for name in RESERVED_BODY:
+        if name in extra:
+            raise ConfigError(f"telegraph.extra_body cannot set {name}; telegraph sets it")
     return Config(
         enabled=True, endpoint=endpoint.rstrip("/"), models=tuple(models), api=api, key_env=key_env or None,
         key_file=key_file or None, after_failures=_int(table, "after_failures", 2, 1),
         max_calls=_int(table, "max_calls", 5, 0), max_total_tokens=_int(table, "max_total_tokens", 40000, 0),
         max_cost_usd=cap, prices=prices, max_output_tokens=_int(table, "max_output_tokens", 1500, 1),
         max_prompt_chars=_int(table, "max_prompt_chars", 12000, MIN_PROMPT_CHARS),
-        timeout_s=_int(table, "timeout_s", 120, 1))
+        timeout_s=_int(table, "timeout_s", 120, 1), extra_body=dict(extra))
 
 
 # ----------------------------------------------------------------------------------------------------- redaction
@@ -176,6 +185,17 @@ def redact(text: str, *, hostname: str = "", home: str = "", secrets: tuple = ()
     if hostname and hostname != "localhost":
         text = re.sub(rf"\b{re.escape(hostname)}\b", "<host>", text)
     return text
+
+
+_THINK = re.compile(r"<think>.*?</think>", re.DOTALL)
+
+
+def strip_thinking(text: str) -> tuple[str, bool]:
+    """(`text` without its <think> blocks, whether a block was never closed). Reasoning is paid for but is not advice."""
+    text = _THINK.sub("", text)
+    if "<think>" in text:
+        return text.split("<think>", 1)[0], True
+    return text.strip(), False
 
 
 def cut(text: str, limit: int) -> str:
@@ -391,12 +411,12 @@ class Telegraph:
             if key:
                 headers["x-api-key"] = key
             headers["anthropic-version"] = ANTHROPIC_VERSION
-            body = {"model": model, "max_tokens": cfg.max_output_tokens, "temperature": 0, "system": SYSTEM,
-                    "messages": [{"role": "user", "content": prompt}]}
+            body = {**cfg.extra_body, "model": model, "max_tokens": cfg.max_output_tokens, "temperature": 0,
+                    "system": SYSTEM, "messages": [{"role": "user", "content": prompt}]}
             return base + "/v1/messages", headers, body
         if key:
             headers["Authorization"] = f"Bearer {key}"
-        body = {"model": model, "max_tokens": cfg.max_output_tokens, "temperature": 0,
+        body = {**cfg.extra_body, "model": model, "max_tokens": cfg.max_output_tokens, "temperature": 0,
                 "messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt}]}
         return cfg.endpoint + "/chat/completions", headers, body
 
@@ -415,9 +435,13 @@ class Telegraph:
         t1 = self.clock()
         clean = lambda t: redact(str(t), hostname=self.hostname, home=self.home, secrets=secrets)   # noqa: E731
         rec = {**base, "ts": t0, "cached": False, "latency_s": round(t1 - t0, 3)}
-        if error or not text.strip():
-            reason = clean(error or "the answer was empty")[:200]
-            self._append({**rec, "outcome": "error", "reason": reason, "tokens_in": 0, "tokens_out": 0, "cost_usd": None})
+        if error:
+            reason = clean(error)[:200]
+            tin, tout = usage if usage else (0, 0)
+            price = self.cfg.prices.get(model)
+            cost = round(tin * price[0] / 1e6 + tout * price[1] / 1e6, 9) if price and usage else None
+            self._append({**rec, "outcome": "error", "reason": reason, "tokens_in": tin, "tokens_out": tout,
+                          "cost_usd": cost})
             return Answer(False, reason=reason, call_id=base["call_id"], model=model, latency_s=t1 - t0)
         text = clean(text)
         estimated = usage is None
@@ -434,22 +458,33 @@ class Telegraph:
                       latency_s=t1 - t0, cost_usd=cost)
 
     def _parse(self, raw: bytes) -> tuple[str, tuple | None, str]:
+        """(text, usage, error). The usage is returned with an error too, because a failed answer was still paid for."""
+        usage = None
         try:
             obj = json.loads(raw)
             if self.cfg.api == "anthropic":
                 text = "".join(b.get("text", "") for b in obj.get("content", []) if isinstance(b, dict))
                 u = obj.get("usage") or {}
                 usage = (int(u["input_tokens"]), int(u["output_tokens"])) if "input_tokens" in u else None
+                finish = obj.get("stop_reason")
             else:
                 choice = obj["choices"][0]
                 text = choice["message"].get("content")
                 u = obj.get("usage") or {}
                 usage = (int(u["prompt_tokens"]), int(u["completion_tokens"])) if "prompt_tokens" in u else None
-                if not isinstance(text, str) or not text.strip():
-                    return "", None, f"the answer was empty (finish_reason {choice.get('finish_reason')})"
-            return text, usage, ""
+                finish = choice.get("finish_reason")
         except (ValueError, KeyError, IndexError, TypeError, AttributeError) as exc:
             return "", None, f"the answer could not be read ({type(exc).__name__})"
+        if not isinstance(text, str) or not text.strip():
+            return "", usage, f"the answer was empty (finish_reason {finish})"
+        text, unclosed = strip_thinking(text)
+        if unclosed:
+            return "", usage, ("the answer was cut off inside its reasoning (finish_reason "
+                               f"{finish}); raise max_output_tokens or turn thinking off with extra_body, for example "
+                               "extra_body = { chat_template_kwargs = { enable_thinking = false } }")
+        if not text.strip():
+            return "", usage, "the answer was empty (only reasoning, no answer)"
+        return text, usage, ""
 
     def _refuse(self, base: dict, outcome: str, reason: str) -> Answer:
         self._append({**base, "ts": self.clock(), "outcome": outcome, "reason": reason, "cached": False,
@@ -461,7 +496,8 @@ class Telegraph:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return None
-        return data if isinstance(data, dict) and isinstance(data.get("text"), str) and data.get("reply_file") else None
+        ok = isinstance(data, dict) and isinstance(data.get("text"), str) and data.get("reply_file")
+        return data if ok and "<think>" not in data["text"] else None
 
     # ------------------------------------------------------------------------------------------- files (private)
 
