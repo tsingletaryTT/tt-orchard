@@ -5,6 +5,7 @@
 Fake agent logs under a fake runs folder. The route is read only, answers on loopback names only, returns no path, keeps
 the virtual figure apart from the helper spend, and gives an empty answer (never a 500) for a folder it cannot read."""
 import json
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -359,3 +360,108 @@ def test_the_hard_cap_on_enumerated_directories_applies(root, monkeypatch):
     monkeypatch.setattr(view, "MAX_NAMES", 4)
     _many(root, 8)
     assert len(view.candidates(root)) == 4
+
+
+# ---- review fix 3 (fourth round): discovery is bounded while it streams, and a cut-short listing is reported -----------------
+
+class _CountingScandir:
+    """Counts the entries a listing takes from os.scandir."""
+
+    def __init__(self, monkeypatch):
+        self.taken = 0
+        real = os.scandir
+        spy = self
+
+        def scandir(path):
+            inner = real(path)
+
+            class Wrapped:
+                def __enter__(self_inner):
+                    inner.__enter__()
+                    return self_inner
+
+                def __exit__(self_inner, *a):
+                    return inner.__exit__(*a)
+
+                def __iter__(self_inner):
+                    return self_inner
+
+                def __next__(self_inner):
+                    entry = next(inner)
+                    spy.taken += 1
+                    return entry
+
+                def close(self_inner):
+                    inner.close()
+            return Wrapped()
+        monkeypatch.setattr(view.os, "scandir", scandir)
+
+
+def test_discovery_stops_taking_entries_at_the_budget_and_says_it_was_cut_short(root, monkeypatch):
+    monkeypatch.setattr(view, "MAX_NAMES", 5)
+    for i in range(40):
+        (root / f"d{i:02d}").mkdir()
+        (root / f"f{i:02d}.txt").write_text("x")
+    spy = _CountingScandir(monkeypatch)
+    found, truncated = view.discover(root)
+    assert truncated is True and len(found) <= 5
+    assert spy.taken <= 5 + 1, f"{spy.taken} entries were taken from a listing with a budget of 5"
+
+
+def test_files_count_against_the_entry_budget(root, monkeypatch):
+    monkeypatch.setattr(view, "MAX_NAMES", 3)
+    for i in range(10):
+        (root / f"f{i}.txt").write_text("x")
+    (root / "zz-dir").mkdir()
+    found, truncated = view.discover(root)
+    assert truncated is True
+
+
+def test_the_probe_folder_shares_the_same_budget(root, monkeypatch):
+    monkeypatch.setattr(view, "MAX_NAMES", 6)
+    for i in range(5):
+        (root / f"d{i}").mkdir()
+    (root / "kprobe").mkdir()
+    for i in range(30):
+        (root / "kprobe" / f"p{i:02d}").mkdir()
+    spy = _CountingScandir(monkeypatch)
+    found, truncated = view.discover(root)
+    assert truncated is True and spy.taken <= 6 + 2
+
+
+def test_a_listing_that_fits_is_not_truncated(root):
+    for i in range(4):
+        (root / f"d{i}").mkdir()
+    found, truncated = view.discover(root)
+    assert truncated is False and len(found) == 4
+
+
+def test_a_listing_exactly_at_the_budget_is_not_truncated(root, monkeypatch):
+    monkeypatch.setattr(view, "MAX_NAMES", 4)
+    for i in range(4):
+        (root / f"d{i}").mkdir()
+    found, truncated = view.discover(root)
+    assert truncated is False and len(found) == 4
+
+
+def test_the_answer_and_the_meter_say_when_discovery_was_cut_short(root, monkeypatch):
+    monkeypatch.setattr(view, "MAX_NAMES", 3)
+    for i in range(8):
+        write_log(root, f"org--{i}/log/run.jsonl", [turn(1, 1_000_000, 0)])
+    data = get(app_with(root))[1]
+    assert data["discovery_truncated"] is True
+    assert "folder listing was cut short" in data["meter"]["title"]
+
+
+def test_the_answer_says_discovery_was_complete_when_it_was(root):
+    write_log(root, "org--a/log/run.jsonl", [turn()])
+    data = get(app_with(root))[1]
+    assert data["discovery_truncated"] is False and "cut short" not in data["meter"]["title"]
+
+
+def test_discovery_leaves_out_links_and_survives_an_unreadable_folder(root, tmp_path):
+    (tmp_path / "real").mkdir()
+    (root / "linked").symlink_to(tmp_path / "real")
+    (root / "plain").mkdir()
+    assert [n for n, _ in view.discover(root)[0]] == ["plain"]
+    assert view.discover(tmp_path / "missing") == ([], False)

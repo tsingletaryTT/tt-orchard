@@ -136,7 +136,7 @@ def test_operator_local_meter_is_aa_on_the_dark_top_bar():
 
 def test_the_local_table_is_redrawn_only_when_its_data_changes():
     body = fn_body(JS(), "function renderLocalTable")
-    assert 'changed($("tg-local"), [v.rows, v.references, v.not_scanned])' in body
+    assert 'changed($("tg-local"), [v.rows, v.references, v.not_scanned, v.discovery_truncated])' in body
 
 
 
@@ -155,3 +155,10 @@ def test_the_local_figure_has_its_own_expiry_timer_that_each_answer_renews():
     assert meter.index("clearTimeout(S.vsTimer)") < meter.index("setTimeout(")
     poll = fn_body(js, "async function pollVirtual")
     assert "S.vsOk" not in poll, "no timer may depend on the next response arriving"
+
+
+def test_the_page_says_when_the_folder_listing_was_cut_short():
+    body = fn_body(JS(), "function renderLocalTable")
+    assert "v.discovery_truncated" in body and "folder listing was cut short" in body
+    guard = next(line for line in body.splitlines() if "changed(" in line)
+    assert "v.discovery_truncated" in guard, "a change in this flag must redraw the note"

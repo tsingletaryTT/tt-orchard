@@ -246,10 +246,11 @@ function renderLocalMeter(v) {
 
 function renderLocalTable() {
   const v = S.virtual;
-  if (!v || !changed($("tg-local"), [v.rows, v.references, v.not_scanned])) return;
+  if (!v || !changed($("tg-local"), [v.rows, v.references, v.not_scanned, v.discovery_truncated])) return;
   $("tg-local-note").textContent = v.label + ". The prompt count is large because every turn re-sends the whole conversation; " +
     "a hosted provider with prompt caching would bill most of it for much less." +
-    (v.not_scanned ? ` ${plural(v.not_scanned, "run")} not scanned (the scan reads the first listed folders; select a run to scan it).` : "");
+    (v.not_scanned ? ` ${plural(v.not_scanned, "run")} not scanned (the scan reads the first listed folders; select a run to scan it).` : "") +
+    (v.discovery_truncated ? " The folder listing was cut short, so some folders are not listed at all." : "");
   const head = clear($("tg-local-head"));
   const hr = h("tr", {});
   for (const [t, cls] of [["Run or probe directory", null], ["Turns", "num"], ["Prompt tokens", "num"], ["Completion tokens", "num"], ["Agent time", "num"]]) {

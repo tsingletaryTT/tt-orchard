@@ -317,3 +317,16 @@ def test_a_fresh_answer_keeps_the_figure_beyond_the_expiry_time(root, browser):
         pg.wait_for_timeout(20000)                                       # longer than the 15 s expiry; polls keep renewing it
         expect(local(pg)).to_have_text(FIRST)
     ctx.close()
+
+
+def test_the_page_says_the_folder_listing_was_cut_short(tmp_path, browser, monkeypatch):
+    from orchard import virtualspend_view as view
+    monkeypatch.setattr(view, "MAX_NAMES", 3)
+    r = tmp_path / "orchard-runs"
+    for i in range(8):
+        write_log(r, f"org--{i}/log/run.jsonl", [turn(1, 1_000_000, 0)])
+    ctx, pg = new_page(browser)
+    with Served(app_for(r)) as s:
+        pg.goto(f"http://127.0.0.1:{s.port}/?mode=operator#telegraph")
+        expect(pg.locator("#tg-local-note")).to_contain_text("The folder listing was cut short")
+    ctx.close()
