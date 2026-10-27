@@ -83,7 +83,8 @@ def test_the_figure_is_hidden_when_there_is_nothing_to_show_and_by_its_own_timer
 def test_polling_asks_with_every_refresh_and_when_a_run_is_selected():
     js = JS()
     runs = fn_body(js, "async function refreshRuns")
-    assert "pollVirtual()" in runs and runs.index("pollTelegraph()") < runs.index("pollVirtual()") < runs.index("Promise.all")
+    assert "pollVirtual()" in runs and runs.index("pollVirtual()") < runs.index("Promise.all"), "its own request, before the others"
+    assert "pollTelegraph()" not in runs, "the helper meter has its own timers on this branch; the local figure does not depend on them"
     sel = fn_body(js, "function select")
     assert sel.index("S.selected = name") < sel.index("renderLocalMeter(null)") < sel.index("pollVirtual()"), "the old figure goes first"
 
