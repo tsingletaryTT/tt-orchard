@@ -83,6 +83,17 @@ def test_a_poll_that_never_answers_marks_the_amount_unknown_without_waiting_for_
     ctx.close()
 
 
+def test_a_pending_poll_is_not_joined_by_more_requests(root, tmp_path, browser):
+    ctx, pg = new_page(browser)
+    seen = []
+    with Served(capped_app(root, tmp_path)) as s:
+        open_page(pg, s)
+        pg.route("**/api/telegraph", lambda route: seen.append(route.request.url))
+        pg.wait_for_timeout(13000)                                 # two or three poll ticks pass
+        assert len(seen) == 1, seen
+    ctx.close()
+
+
 def test_a_poll_that_hung_does_not_block_later_polls_once_the_server_answers_again(root, tmp_path, browser):
     ctx, pg = new_page(browser)
     with Served(capped_app(root, tmp_path)) as s:
