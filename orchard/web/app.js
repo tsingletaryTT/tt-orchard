@@ -229,8 +229,9 @@ function usd(value) {
 function plural(n, word) { return `${n} ${word}${n === 1 ? "" : "s"}`; }
 
 function spendText(s) {
-  const unknown = s.cost_unknown_calls || 0;
-  if (s.calls && unknown === s.calls) return "unknown cost";
+  // The same rule as telegraph_view._spend_text: an unknown cost is counted apart and never shown as zero dollars.
+  const unknown = s.unknown_cost || 0;
+  if (unknown && !s.cost_usd) return "unknown cost";
   return unknown ? `${usd(s.cost_usd)} + ${unknown} unknown` : usd(s.cost_usd);
 }
 
@@ -267,11 +268,11 @@ const TG_BANNER = {
   capped: "Telegraph is on, and a cap has stopped it.",
   problem: "Telegraph is on, and something needs attention.",
 };
-const TG_OUTCOME_TONE = { ok: "good", error: "bad", budget: "bad", "no-key": "warn", "cache hit": "dim" };
+const TG_OUTCOME_TONE = { ok: "good", error: "bad", budget: "bad", "no-key": "warn", "cache hit": "dim", unsettled: "warn" };
 
 function tgCapText(c) {
   const used = c.unit === "usd" ? usd(c.used) : String(c.used), limit = c.unit === "usd" ? usd(c.limit) : String(c.limit);
-  return `${used} of ${limit} (${c.percent}%)`;
+  return c.blocked ? `${used} known of ${limit}: blocked, a call has no known cost` : `${used} of ${limit} (${c.percent}%)`;
 }
 
 function tgRow(cells, tone) {
@@ -289,19 +290,31 @@ function renderTelegraph() {
   banner.dataset.tone = t.tone;
   banner.append(h("strong", {}, TG_BANNER[t.state] || ""));
   if (t.capped) banner.append(h("span", {}, ` Reason: ${t.capped.reason}.`));
+  if (t.spend.unknown_cost) {
+    const capSet = t.caps.some((c) => c.id === "cost");
+    banner.append(h("span", {}, ` ${plural(t.spend.unknown_cost, "call")} ${t.spend.unknown_cost === 1 ? "has" : "have"} no known cost.` +
+      (capSet ? " A cost cap refuses new calls while any exist." : " No cost cap is set, so new calls still go out.")));
+  }
+  if (t.spend.unsettled) banner.append(h("span", {}, ` ${plural(t.spend.unsettled, "reservation")} ${t.spend.unsettled === 1 ? "has" : "have"} no recorded result and counts at its worst case.`));
   if (t.error) banner.append(h("span", {}, ` ${t.error}.`));
   if (t.key.state === "missing") banner.append(h("span", {}, ` The key is missing: ${t.key.reason}.`));
 
   const s = t.summary;
   const num = (k, v, note) => h("div", { class: "tg-num" }, h("span", { class: "k" }, k), h("span", { class: "v" }, v), note ? h("span", { class: "muted small" }, note) : null);
   clear($("tg-numbers")).append(
-    num("Spend", spendText(s), s.cost_unknown_calls ? `${plural(s.cost_unknown_calls, "call")} with no price` : ""),
-    num("Calls sent", String(s.calls), `${s.ok} answered`),
+    num("Spend", spendText(t.spend), t.spend.unknown_cost ? `${plural(t.spend.unknown_cost, "call")} with no known cost` : "known costs; reservations at their worst case"),
+    num("Calls counted", String(t.spend.calls), `${s.calls} sent and recorded · ${s.ok} answered`),
+    num("Unsettled", String(t.spend.unsettled), "no result recorded; counted at the worst case"),
+    num("Unknown cost", String(t.spend.unknown_cost),
+      t.spend.unknown_cost ? (t.caps.some((c) => c.id === "cost") ? "a cost cap refuses new calls while any exist" : "no cost cap is set, so calls still go out")
+        : "every counted call has a known cost"),
     num("Helped", String(s.helped), `${s.not_helped} did not help · ${s.unreported} not reported`),
     num("Cache hits", String(s.cache_hits), "cost nothing"),
     num("Refused", String(s.refused), "a cap or a missing key"),
     num("Tokens", `${s.tokens_in + s.tokens_out}`, `${s.tokens_in} in · ${s.tokens_out} out`),
-    num("Time", `${Math.round(s.latency_s)} s`, "waiting for the helper"));
+    num("Time", `${Math.round(s.latency_s)} s`, "waiting for the helper"),
+    num("Damaged or unreported", String(t.spend.torn + t.spend.unknown_usage_calls),
+      `${plural(t.spend.torn, "torn record")} · ${plural(t.spend.unknown_usage_calls, "call")} with no usage reported`));
 
   const caps = clear($("tg-caps"));
   for (const c of t.caps) {
@@ -320,8 +333,9 @@ function renderTelegraph() {
   for (const r of t.recent) {
     rec.append(tgRow([
       [r.ts === null ? "" : new Date(r.ts * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }), "when"],
-      [r.problem, "wrap"], [r.model, "wrap"], [String(r.tokens_in), "num"], [String(r.tokens_out), "num"],
-      [r.latency_s.toFixed(1), "num"], [r.cost_usd === null ? "unknown" : usd(r.cost_usd), "num"],
+      [r.problem, "wrap"], [r.model, "wrap"], [r.held ? "–" : String(r.tokens_in), "num"], [r.held ? "–" : String(r.tokens_out), "num"],
+      [r.held ? "–" : r.latency_s.toFixed(1), "num"],
+      [r.cost_usd === null ? "unknown" : r.held ? `up to ${usd(r.cost_usd)}` : r.usage_known === false ? `${usd(r.cost_usd)} (worst case)` : usd(r.cost_usd), "num"],
       [r.outcome, "outcome", r.reason || null],
       [r.helped === true ? "yes" : r.helped === false ? "no" : r.outcome === "ok" ? "not reported" : "", null]], TG_OUTCOME_TONE[r.outcome] || null));
     if (r.reason) rec.lastChild.lastChild.previousSibling.append(h("div", { class: "tg-reason" }, r.reason));
@@ -330,12 +344,12 @@ function renderTelegraph() {
   $("tg-recent-note").textContent = t.recent.length ? `newest first, up to ${t.recent.length}` : "";
 
   const bm = clear($("tg-by-model"));
-  for (const m of t.by_model) bm.append(tgRow([[m.model, "wrap"], [String(m.calls), "num"], [String(m.tokens), "num"], [usd(m.cost_usd), "num"]]));
+  for (const m of t.by_model) bm.append(tgRow([[m.model, "wrap"], [String(m.calls), "num"], [String(m.tokens), "num"], [spendText({ cost_usd: m.cost_usd, unknown_cost: m.cost_unknown_calls }), "num"]]));
   if (!t.by_model.length) bm.append(tgRow([["No calls yet", "muted"], ["", ""], ["", ""], ["", ""]]));
   const bp = clear($("tg-by-problem"));
   for (const p of t.problems) {
     bp.append(tgRow([[p.name, "wrap"], [String(p.calls), "num"], [String(p.tokens), "num"],
-      [p.cost_unknown_calls ? `${usd(p.cost_usd)} + ${p.cost_unknown_calls} unknown` : usd(p.cost_usd), "num"],
+      [spendText({ cost_usd: p.cost_usd, unknown_cost: p.cost_unknown_calls }), "num"],
       [`${p.helped} yes · ${p.not_helped} no`, null], [`${p.percent}%${p.at_cap ? " (at its cap)" : ""}`, "num cap"]], p.at_cap ? "bad" : p.near ? "warn" : null));
   }
   if (!t.problems.length) bp.append(tgRow([["No calls yet", "muted"], ["", ""], ["", ""], ["", ""], ["", ""], ["", ""]]));
