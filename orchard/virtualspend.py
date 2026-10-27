@@ -479,6 +479,9 @@ def _walk(pin: "_Pin", skipped: dict):
     stack = [((), 0)]
     while stack:
         rel, depth = stack.pop()
+        if budget[0] <= 0:                                           # no folder is opened once the entry budget is spent
+            skipped["walk_cut"] += 1                                 # the rest of the traversal is abandoned, so the scan is incomplete
+            break
         try:
             here = pin.child(rel)
         except OSError as exc:                                       # a folder swapped for a link, or gone, since it was listed

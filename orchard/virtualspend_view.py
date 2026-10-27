@@ -80,6 +80,9 @@ def discover(runs_root: Path, pin=None) -> tuple[list[tuple[str, Path]], bool]:
             out.append((name, path))
     for name, path in top:
         if name == PROBE_PARENT:
+            if budget[0] <= 0:                                       # the probe folder is not opened with the budget spent
+                budget.append("cut")
+                break
             if pin is not None:
                 try:
                     inner = pin.child((PROBE_PARENT,))

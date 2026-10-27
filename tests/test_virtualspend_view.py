@@ -638,3 +638,22 @@ def test_discover_through_a_pin_takes_entries_from_the_descriptor(root, monkeypa
     finally:
         pin.close()
     assert seen and set(seen) == {"int"}, "every listing is of a descriptor, never of a path"
+
+
+def test_the_probe_folder_is_not_opened_when_the_budget_is_already_spent(root, monkeypatch):
+    for i in range(3):
+        (root / f"d{i}").mkdir()
+    (root / "kprobe").mkdir()
+    for i in range(5):
+        (root / "kprobe" / f"p{i}").mkdir()
+    monkeypatch.setattr(view, "MAX_NAMES", 4)                                  # the root listing takes the whole budget
+    opened = []
+    real = os.scandir
+    monkeypatch.setattr(view.os, "scandir", lambda target: (opened.append(target), real(target))[1])
+    pin = vs.open_pin(root)
+    try:
+        found, cut = view.discover(root, pin)
+    finally:
+        pin.close()
+    assert len(opened) == 1 and cut is True
+    assert all(not n.startswith("kprobe/") for n, _ in found)

@@ -1091,3 +1091,40 @@ def test_find_files_without_a_pin_pins_the_root_itself(root):
     before = set(os.listdir("/proc/self/fd"))
     assert len(vs._find_files(root, vs._skipped())) == 1
     assert set(os.listdir("/proc/self/fd")) == before
+
+
+# ---- review (sixth round): no folder is opened after the entry budget is spent ------------------------------------------------
+
+def test_queued_folders_are_not_opened_after_the_budget_is_spent(root, monkeypatch):
+    for name in ("a", "b", "c"):
+        write_log(root, f"{name}/log/run.jsonl", [turn()])
+    monkeypatch.setattr(vs, "MAX_WALK_ENTRIES", 3)                           # the root listing takes exactly the budget
+    opened = []
+    real = os.scandir
+    monkeypatch.setattr(vs.os, "scandir", lambda target: (opened.append(target), real(target))[1])
+    s = vs.scan(root)
+    assert len(opened) == 1, f"{len(opened)} folders were opened with the budget spent"
+    assert s["complete"] is False and s["skipped"]["walk_cut"] >= 1 and s["turns"] == 0
+
+
+def test_a_spent_budget_takes_no_entry_from_any_further_folder(root, monkeypatch):
+    for name in ("a", "b", "c", "d"):
+        write_log(root, f"{name}/log/run.jsonl", [turn()])
+    monkeypatch.setattr(vs, "MAX_WALK_ENTRIES", 6)
+    spy = _WalkSpy(monkeypatch)
+    vs.scan(root)
+    assert spy.entries <= 6, f"{spy.entries} entries were taken with a budget of 6"
+
+
+def test_the_walk_counts_the_abandoned_traversal_once(root, monkeypatch):
+    for name in ("a", "b", "c"):
+        write_log(root, f"{name}/log/run.jsonl", [turn()])
+    monkeypatch.setattr(vs, "MAX_WALK_ENTRIES", 3)
+    assert vs.scan(root)["skipped"]["walk_cut"] == 1
+
+
+def test_a_budget_that_covers_every_folder_listing_is_complete(root, monkeypatch):
+    write_log(root, "a/log/run.jsonl", [turn()])                              # a, log and run.jsonl = 3 entries
+    monkeypatch.setattr(vs, "MAX_WALK_ENTRIES", 3)
+    s = vs.scan(root)
+    assert s["complete"] is True and s["turns"] == 1 and s["skipped"]["walk_cut"] == 0
