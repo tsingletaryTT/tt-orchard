@@ -1164,6 +1164,7 @@ def _hw_run(adir: Path, vdir: Path, kernel: Path, *, op: str, reason: str, share
     (finding 5)."""
     check = _template("kernel_check")
     spec = load_spec(op)
+    adir, vdir, kernel = (Path(os.path.abspath(x)) for x in (adir, vdir, kernel))     # cwd is the copy's directory
     out = vdir / "hw-result.json"
     _remove(out)
     log = vdir / "hw-output.txt"
@@ -1222,7 +1223,7 @@ def hardware_phase(adir: Path, attempt: dict, *, env, shared_python, run_watched
     no gozer command runs. Then the copy is hashed again: when it differs from the sha256 recorded at copy time, the
     attempt ends `harness_error` and no gozer command runs. A run the stall watcher kills is a hang: it is recorded,
     and ProbeBlocked names the attempt. Returns the `hw` block, which is also written into attempt.json."""
-    adir = Path(adir)
+    adir = Path(os.path.abspath(adir))              # the child runs in another directory: every path it gets is absolute
     vdir = _verdict_dir_of(adir)
     op, n = attempt["op"], attempt["attempt"]
     load_spec(op)
@@ -1272,7 +1273,7 @@ def make_hardware_check(adir: Path, *, op: str, n, shared_python, policy: hwtool
     through `gozer run --chips 1` under the stall watcher (_hw_run), the way the probe's own hardware phase does. The
     gate and the sha256 check run again just before every gozer try, because the agent can write anywhere the operator
     can. The agent supplies no command text and no path."""
-    adir = Path(adir)
+    adir = Path(os.path.abspath(adir))              # absolute before any call directory is derived from it
     probe_dir = adir.parent.parent
     state: dict = {}
 
