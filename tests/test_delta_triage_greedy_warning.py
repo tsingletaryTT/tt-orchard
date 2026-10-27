@@ -82,3 +82,32 @@ def test_a_missing_card_writes_an_empty_list(text_case):
     (Path(cfg["model_snapshot"]) / "README.md").unlink()
     assert run_triage(stage).returncode == 0
     assert evidence(stage, "genconfig-license.json")["card_warns_greedy"] == []
+
+
+@pytest.mark.parametrize("line", [
+    "- **Do not use greedy decoding**.",
+    "* Do not use greedy decoding.",
+    "+ Avoid greedy decoding.",
+    "1. **Avoid greedy decoding**, it repeats itself.",
+    "2) Do not use greedy decoding.",
+    "  - Never use greedy sampling here.",
+    "> - **Do not use greedy decoding.**",
+    "- _Please avoid greedy decoding_",
+    "10. DO NOT use greedy decoding.",
+    "- [ ] Do not use greedy decoding.",
+    "1. - Do not use greedy decoding.",
+])
+def test_a_warning_inside_a_list_item_or_emphasis_is_found(line):
+    found = template_module().card_greedy_warnings("# Tips\n\n" + line + "\n")
+    assert len(found) == 1 and found[0]["line"] == 3, line
+    assert found[0]["quote"][0].isalpha(), found[0]["quote"]            # the list marker is not part of the quote
+
+
+@pytest.mark.parametrize("line", [
+    "- We do not use greedy decoding in the evaluation.",
+    "1. Greedy decoding gives deterministic output.",
+    "- Set temperature to 0 for greedy decoding.",
+    "- **Note**: the benchmark used greedy decoding.",
+])
+def test_a_list_item_that_only_mentions_greedy_decoding_is_still_no_warning(line):
+    assert template_module().card_greedy_warnings(line + "\n") == []

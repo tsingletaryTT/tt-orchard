@@ -1788,6 +1788,9 @@ def card_greedy_warnings(text: str) -> list[dict]:
     out = []
     for number, line in enumerate(text[:CARD_READ_CHARS].splitlines(), start=1):
         plain = re.sub(r"[*_>`]", "", line).strip()
+        # A warning is often a list item: "- **Do not use greedy decoding**." or "1. Avoid greedy decoding". The marker (and a task-list box) is
+        # not part of the sentence, so the imperative pattern, which wants the verb at the start of a sentence, would miss it.
+        plain = re.sub(r"^(?:(?:[-+]|\d+[.)])\s+(?:\[[ xX]\]\s+)?)+", "", plain)
         if "greedy" in plain.lower() and any(p.search(plain) for p in _GREEDY_PATTERNS):
             out.append({"line": number, "quote": plain[:GREEDY_QUOTE_CHARS]})
             if len(out) == GREEDY_WARNING_MAX:
