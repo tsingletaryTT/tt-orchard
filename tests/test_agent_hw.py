@@ -297,7 +297,7 @@ def test_a_hang_is_reported_with_the_watchers_reason_and_charged_to_the_lease_bu
     c = w.check()
     text = c.call({})
     assert "stopped" in text and "stalled: no output and no CPU use for 60 s" in text
-    assert "released" in text and "reset" in text
+    assert "gozer status" in text and "no evidence" in text
     rec = c.summary()["calls"][0]
     assert rec["outcome"] == "hang" and rec["lease_s"] == 66.0 and rec["timed_out"] is True
     assert c.summary()["lease_s_used"] == 66.0

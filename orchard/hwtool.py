@@ -205,9 +205,13 @@ class HardwareCheck:
                          lease_s=round(elapsed, 1), waited_s=round(waited, 1), queued_polls=polls,
                          cancelled=cancelled if polls else None, timed_out=True,
                          first_line=str(hw.get("first_line") or ""))
-            return (f"hardware_check {k} of {p.max_calls}: HANG: the run was stopped ({hw.get('first_line')}). gozer "
-                    f"released the lease and reset the chip; the run took {elapsed:.1f} s. Hardware checks are off for "
-                    f"the rest of this attempt; the simulator still works.\n{self._left()}")
+            return (f"hardware_check {k} of {p.max_calls}: HANG: the run was stopped ({hw.get('first_line')}) after "
+                    f"{elapsed:.1f} s. gozer normally releases the lease and resets the chip when the run stops, but "
+                    "this call has no evidence that it did: the stop can end in a kill of gozer itself, which leaves "
+                    "the lease under a dead process. Look with `gozer status`; a lease marked stale is cleared with "
+                    "`gozer reconcile` (the gozer-gatekeeper skill says how), and a chip is never reset by hand. "
+                    "Hardware checks are off for the rest of this attempt; the simulator still works."
+                    f"\n{self._left()}")
         passed = hw.get("passed") is True
         category = None if passed else hw.get("category")
         self._record(k=k, counted=True, outcome="pass" if passed else str(category), category=category, passed=passed,
