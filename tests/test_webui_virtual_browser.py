@@ -261,13 +261,14 @@ def test_the_hover_text_says_the_figure_is_virtual_and_not_part_of_the_helper_sp
 
 
 
+@pytest.mark.parametrize("width", [1400, 820, 400])
 @pytest.mark.parametrize("mode", ["operator", "playful"])
-def test_both_meters_stay_on_screen_at_the_bottom_of_a_tall_page(tmp_path, browser, mode):
+def test_both_meters_stay_on_screen_at_the_bottom_of_a_tall_page(tmp_path, browser, mode, width):
     r = tmp_path / "orchard-runs"
     r.mkdir()
     for i in range(45):
         write_log(r, f"kprobe/probe-{i:02d}/op/attempt-1/log/p.jsonl", [turn(1, 1_000_000 + i, 10)])
-    ctx, pg = new_page(browser)
+    ctx, pg = new_page(browser, width)
     with Served(app_for(r)) as s:
         pg.goto(f"http://127.0.0.1:{s.port}/?mode={mode}#telegraph")
         expect(pg.locator("#tg-local-body tr")).to_have_count(45)
@@ -279,8 +280,15 @@ def test_both_meters_stay_on_screen_at_the_bottom_of_a_tall_page(tmp_path, brows
         assert pg.evaluate("window.scrollY") > 500, "the page must be taller than the window for this test to mean anything"
         expect(local(pg)).to_be_in_viewport()
         expect(pg.locator("#spend-meter")).to_be_in_viewport()
+        a, b = local(pg).bounding_box(), pg.locator("#spend-meter").bounding_box()
+        apart_y = a["y"] + a["height"] <= b["y"] + 1 or b["y"] + b["height"] <= a["y"] + 1
+        apart_x = a["x"] + a["width"] <= b["x"] + 1 or b["x"] + b["width"] <= a["x"] + 1
+        assert apart_x or apart_y, "the two meters must not overlap"
+        if width <= 900:                                                 # pinned along the bottom edge: nothing may hide under them
+            top_of_meters = min(a["y"], b["y"])
+            last = pg.evaluate("(() => { const r = document.querySelector('#tg-local-body tr:last-child').getBoundingClientRect(); return r.bottom; })()")
+            assert last <= top_of_meters + 1, f"the last table row ends at {last}, under the meters at {top_of_meters}"
     ctx.close()
-
 
 
 def test_the_page_names_the_runs_that_were_not_scanned(tmp_path, browser, monkeypatch):

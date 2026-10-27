@@ -16,8 +16,9 @@ def test_the_local_meter_is_a_hidden_button_in_the_top_bar_right_after_the_helpe
     local, helper = by_id(t, "local-meter"), by_id(t, "spend-meter")
     assert local.tag == "button" and local.attrs.get("type") == "button" and "local-meter" in local.classes
     assert "hidden" in local.attrs, "no figure until the first answer says there are local logs"
-    right = helper.parent
-    assert local.parent is right and right.kids.index(local) == right.kids.index(helper) + 1
+    meters = helper.parent
+    assert "meters" in meters.classes and local.parent is meters and meters.kids.index(local) == meters.kids.index(helper) + 1
+    assert meters.parent.attrs.get("class") == "topbar-right"
     assert not local.inside(by_id(t, "run-view")), "outside every view, so no view can hide it"
     assert by_id(t, "local-text").inside(local)
     assert "data-tone" not in local.attrs and "data-state" not in local.attrs
@@ -109,7 +110,7 @@ def test_the_local_meter_has_its_own_rules_in_both_styles_and_no_tone_rules():
 
 def test_the_local_meter_wraps_on_a_narrow_screen():
     css = CSS()
-    assert re.search(r"@media \(max-width: 900px\) \{[^}]*\.local-meter \{ max-width: 100%; \}[^}]*\.local-text \{ white-space: normal; \}", css)
+    assert re.search(r"@media \(max-width: 900px\) \{[^}]*\.local-meter \{ max-width: 100%;[^}]*\}[^}]*\.local-text \{ white-space: normal; \}", css)
 
 
 # ---- colour: both styles, light and dark, 4.5:1 text and 3:1 outline ---------------------------------------------------------

@@ -32,8 +32,10 @@
     <button type="button" class="view-btn" id="view-telegraph-btn" aria-pressed="false"><span class="emoji" aria-hidden="true">📡 </span>Telegraph</button>
   </nav>
   <div class="topbar-right">
+    <div class="meters" id="meters">
     <button type="button" class="spend-meter" id="spend-meter" data-state="unknown" data-tone="unknown" title="What the outside helper model has cost. Opens the Telegraph view."><span class="emoji" aria-hidden="true">📡 </span><span class="spend-text" id="spend-text">Helper: reading…</span></button>
     <button type="button" class="local-meter" id="local-meter" hidden title="Virtual spend of the local models. Opens the Telegraph view."><span class="local-text" id="local-text"></span></button>
+    </div>
     <button type="button" class="machine-chip" id="machine-chip" data-tone="unknown" title="The chips on this box. Opens the Machine view.">Chips: reading…</button>
     <div class="clock" aria-label="Machine time and connection">
       <span class="clock-day" id="clock-day"></span>
