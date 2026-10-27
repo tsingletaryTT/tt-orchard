@@ -1721,7 +1721,7 @@ Every call, refusal and cache hit is one line in `telegraph.jsonl` (model, token
   cache and reply files live (default `~/.cache/tt-orchard/telegraph`).
 - `dir` in the `[telegraph]` table sets that folder for the commands and for the web page (a relative path is against the
   config file's folder). `--dir` on a command still wins.
-- In the web page (`tt-orchard ui`) a spend meter sits in the top bar in every view and both styles: the dollars spent, the number
+- In the web page (`tt-orchard ui`) a spend meter sits in the top bar in every view and both styles (pinned along the bottom edge on screens up to 900 px wide): the dollars spent, the number
   of calls and the cap that is closest to its limit. It is grey when telegraph is off, amber when any cap is at 80 percent or more, and
   red when a cap is used up or the latest call was refused, with the reason. A call with no known price shows as unknown cost, and
   the meter says "spend unknown" when the page cannot read it. Clicking the meter opens the Telegraph view: the settings (the endpoint's
