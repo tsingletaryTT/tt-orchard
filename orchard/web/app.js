@@ -14,7 +14,7 @@ const S = {
   meta: null, runs: [], launches: [], machine: null, selected: null, detail: null,
   tab: "feed", source: null, feedSeen: new Set(), feedFilter: "", follow: true,
   ledgerAfter: 0, ledgerRows: [], ledgerFilter: "", ledgerFirst: {}, file: null, lastOk: 0, startingRun: null,
-  scene: null, view: "orchard", hw: null, health: null, leases: null,
+  scene: null, view: "orchard", hw: null, health: null, leases: null, tgStart: Date.now(), tgOk: 0, tgPending: false,
 };
 
 // ---- small helpers ------------------------------------------------------------------------------
@@ -117,17 +117,25 @@ async function api(path, opts) {
     init.headers["X-Orchard-Token"] = S.meta ? S.meta.token : "";
     init.body = JSON.stringify(opts.body);
   }
+  let timer = null;
+  if (opts && opts.timeout) {            // an optional limit: the request is aborted and counts as a failure
+    const ctl = new AbortController();
+    init.signal = ctl.signal;
+    timer = setTimeout(() => ctl.abort(), opts.timeout);
+  }
   let resp;
   try {
     resp = await fetch(path, init);
   } catch (err) {
+    if (timer) clearTimeout(timer);
     setConn("offline");
     throw new Error("The UI server cannot be reached. Is `tt-orchard ui` still running?");
   }
   S.lastOk = Date.now();
   setConn("live");
   const isJson = (resp.headers.get("Content-Type") || "").includes("application/json");
-  const data = isJson ? await resp.json() : await resp.text();
+  const data = isJson ? await resp.json() : await resp.text();      // the limit covers the body too
+  if (timer) clearTimeout(timer);
   if (!resp.ok) throw new Error((data && data.error) || `${resp.status} ${resp.statusText}`);
   return data;
 }
@@ -212,6 +220,229 @@ function renderMachineChip(m, all, free) {
   chip.textContent = free === all.length ? `${free} of ${all.length} chips free`
     : `${free} of ${all.length} chips free · coder ${m.coder.up ? "up" : "down"}`;
   chip.dataset.tone = free === all.length ? "good" : stale ? "bad" : "warn";
+}
+
+// ---- telegraph: the spend meter in the top bar (always on screen) and the Telegraph view ----------------------------
+// The server builds the meter's words (orchard/telegraph_view.py). The page only shows them. The meter is redrawn on every
+// poll, outside any change guard, so an outage cannot leave a stale amount on screen: after STALE_MS without an answer it says the
+// spend is unknown. The view only reads; nothing on it sends a request to the helper.
+
+// Dollars with enough digits that a small cost never shows as zero (the same rule as telegraph_view.usd).
+function usd(value) {
+  const v = Number(value) || 0;
+  if (v === 0) return "$0.00";
+  if (v < 0.0001) return "<$0.0001";                // four decimals would show $0.0000 for a real cost
+  return v < 0.01 ? `$${v.toFixed(4)}` : `$${v.toFixed(2)}`;
+}
+
+function plural(n, word) { return `${n} ${word}${n === 1 ? "" : "s"}`; }
+
+function spendText(s) {
+  // The same rule as telegraph_view._spend_text: an unknown cost is counted apart and never shown as zero dollars.
+  const unknown = s.unknown_cost || 0;
+  if (unknown && !s.cost_usd) return "unknown cost";
+  return unknown ? `${usd(s.cost_usd)} + ${unknown} unknown` : usd(s.cost_usd);
+}
+
+// While the spend cannot be read, the Telegraph view keeps its last numbers but says they are old, so a screen of figures is never
+// taken for the current spend.
+function markTelegraphViewStale(stale, age) {
+  const note = $("tg-stale"), view = $("telegraph-view");
+  note.hidden = !stale;
+  if (stale) {
+    view.dataset.stale = "true";
+    note.textContent = S.tgOk
+      ? `The page cannot read the helper's spend right now. The numbers below were read ${age} s ago and may be out of date.`
+      : "The page cannot read the helper's spend right now, and no amount has been read yet.";
+  } else {
+    delete view.dataset.stale;
+    note.textContent = "";
+  }
+}
+
+function renderSpendMeter(t) {
+  const el = $("spend-meter");
+  if (!t) {
+    // The current spend cannot be read. The last amount that was read stays visible, marked as old, so an outage never hides
+    // a spend that was already high; before any amount was read, nothing is invented.
+    const last = S.telegraph && S.telegraph.meter ? S.telegraph.meter.text.replace(/^Helper: /, "") : null;
+    const age = S.tgOk ? Math.round((Date.now() - S.tgOk) / 1000) : null;
+    $("spend-text").textContent = last ? `Helper: spend unknown · last known ${last} (${age} s ago)` : "Helper: spend unknown";
+    el.dataset.state = "unknown";
+    el.dataset.tone = "bad";
+    el.title = "The page cannot read the helper's spend right now. Click for the Telegraph view.";
+    markTelegraphViewStale(true, age);
+    return;
+  }
+  markTelegraphViewStale(false, null);
+  $("spend-text").textContent = t.meter.text;
+  el.dataset.state = t.state;
+  el.dataset.tone = t.tone;
+  el.title = t.meter.title;
+}
+
+const POLL_TELEGRAPH_MS = 5000;
+
+// The amount on screen is unknown once it is older than STALE_MS, however that came about.
+function markTelegraphStale() {
+  if (Date.now() - (S.tgOk || S.tgStart) > STALE_MS) renderSpendMeter(null);
+}
+
+// Telegraph has its own timers, so no other request (the run list, the machine, the launches) can stop it: one poll every five
+// seconds (every 30 s in a hidden tab) and a separate check every two seconds that the amount is not stale.
+function startTelegraphPolling() {
+  pollTelegraph();
+  let last = Date.now();
+  setInterval(() => {
+    if (document.hidden && Date.now() - last < HIDDEN_POLL_MS) { markTelegraphStale(); return; }
+    last = Date.now();
+    pollTelegraph();
+  }, POLL_TELEGRAPH_MS);
+  setInterval(markTelegraphStale, 2000);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) pollTelegraph(); });
+}
+
+const TG_TIMEOUT_MS = 25000;           // a poll that has not answered by now is dropped, so a hung server cannot block later polls
+
+async function pollTelegraph() {
+  // Staleness is judged first, before any waiting: a request that never answers would never reach a catch block, and the last
+  // dollar amount would stay on screen. Every poll tick therefore checks how old the amount is.
+  markTelegraphStale();
+  if (S.tgPending) return;               // one request at a time
+  S.tgPending = true;
+  try {
+    S.telegraph = await api("/api/telegraph", { timeout: TG_TIMEOUT_MS });
+    S.tgOk = Date.now();
+    renderSpendMeter(S.telegraph);
+    if (S.view === "telegraph") renderTelegraph();
+  } catch (err) {
+    // the next tick's check above marks the amount unknown once it is old enough
+  } finally {
+    S.tgPending = false;
+  }
+}
+
+const TG_BANNER = {
+  off: "Telegraph is off. The harness runs without an outside helper. How to turn it on is at the bottom of this page.",
+  ok: "Telegraph is on. No cap is near its limit.",
+  near: "Telegraph is on, and a cap is at 80 percent or more.",
+  capped: "Telegraph is on, and a cap has stopped it.",
+  problem: "Telegraph is on, and something needs attention.",
+};
+const TG_OUTCOME_TONE = { ok: "good", error: "bad", budget: "bad", "no-key": "warn", "cache hit": "dim", unsettled: "warn" };
+
+// What an unknown cost does, which depends on the cost caps that are set: a global cost cap refuses every new call, a per-problem
+// cost cap refuses new calls for a problem that has one, and with neither the calls still go out.
+function costCapSentence(t, long) {
+  if (t.caps.some((c) => c.id === "cost")) return long ? "A cost cap refuses new calls while any exist." : "a cost cap refuses new calls while any exist";
+  if (t.config.per_problem.cost_usd !== null) {
+    return long ? "A per-problem cost cap refuses new calls for a problem while it has any." : "a per-problem cost cap refuses new calls for a problem while it has any";
+  }
+  return long ? "No cost cap is set, so new calls still go out." : "no cost cap is set, so calls still go out";
+}
+
+function tgCapText(c) {
+  const used = c.unit === "usd" ? usd(c.used) : String(c.used), limit = c.unit === "usd" ? usd(c.limit) : String(c.limit);
+  return c.blocked ? `${used} known of ${limit}: blocked, a call has no known cost` : `${used} of ${limit} (${c.percent}%)`;
+}
+
+function tgRow(cells, tone) {
+  const tr = h("tr", tone ? { dataset: { tone } } : {});
+  for (const [text, cls, tip] of cells) tr.append(h("td", { class: cls || null, title: tip || null }, text));
+  return tr;
+}
+
+function renderTelegraph() {
+  const t = S.telegraph;
+  if (!t) return;
+  const { now, ...rest } = t;                         // the clock changes on every answer; the rest decides whether to redraw
+  if (!changed($("telegraph-view"), rest)) return;
+  const banner = clear($("tg-banner"));
+  banner.dataset.tone = t.tone;
+  banner.append(h("strong", {}, TG_BANNER[t.state] || ""));
+  if (t.capped) banner.append(h("span", {}, ` Reason: ${t.capped.reason}.`));
+  if (t.spend.unknown_cost) {
+    banner.append(h("span", {}, ` ${plural(t.spend.unknown_cost, "call")} ${t.spend.unknown_cost === 1 ? "has" : "have"} no known cost. ` +
+      costCapSentence(t, true)));
+  }
+  if (t.spend.unsettled) banner.append(h("span", {}, ` ${plural(t.spend.unsettled, "reservation")} ${t.spend.unsettled === 1 ? "has" : "have"} no recorded result and counts at its worst case.`));
+  if (t.error) banner.append(h("span", {}, ` ${t.error}.`));
+  if (t.key.state === "missing") banner.append(h("span", {}, ` The key is missing: ${t.key.reason}.`));
+
+  const s = t.summary;
+  const num = (k, v, note) => h("div", { class: "tg-num" }, h("span", { class: "k" }, k), h("span", { class: "v" }, v), note ? h("span", { class: "muted small" }, note) : null);
+  if (t.error) {
+    // Nothing could be read, so no number is shown: a row of zeros would look like a spend of nothing.
+    clear($("tg-numbers")).append(num("Spend", "unknown", t.error), num("Calls counted", "unknown", "the ledger was not read"));
+  } else clear($("tg-numbers")).append(
+    num("Spend", spendText(t.spend), t.spend.unknown_cost ? `${plural(t.spend.unknown_cost, "call")} with no known cost` : "known costs; reservations at their worst case"),
+    num("Calls counted", String(t.spend.calls), `${s.calls} sent and recorded · ${s.ok} answered`),
+    num("Unsettled", String(t.spend.unsettled), "no result recorded; counted at the worst case"),
+    num("Unknown cost", String(t.spend.unknown_cost),
+      t.spend.unknown_cost ? costCapSentence(t, false)
+        : "every counted call has a known cost"),
+    num("Helped", String(s.helped), `${s.not_helped} did not help · ${s.unreported} not reported`),
+    num("Cache hits", String(s.cache_hits), "cost nothing"),
+    num("Refused", String(s.refused), "a cap or a missing key"),
+    num("Tokens", `${s.tokens_in + s.tokens_out}`, `${s.tokens_in} in · ${s.tokens_out} out`),
+    num("Time", `${Math.round(s.latency_s)} s`, "waiting for the helper"),
+    num("Damaged or unreported", String(t.spend.torn + t.spend.unknown_usage_calls),
+      `${plural(t.spend.torn, "torn record")} · ${plural(t.spend.unknown_usage_calls, "call")} with no usage reported`));
+
+  const caps = clear($("tg-caps"));
+  for (const c of t.caps) {
+    caps.append(h("div", { class: "tg-cap", dataset: { tone: c.tone } },
+      h("span", { class: "k" }, `${c.label} cap`), h("span", { class: "v" }, tgCapText(c)),
+      h("div", { class: "tg-bar", role: "progressbar", "aria-label": `${c.label} cap used`, "aria-valuemin": "0", "aria-valuemax": "100", "aria-valuenow": String(Math.min(100, c.percent)) },
+        h("span", { style: `width:${Math.min(100, c.percent)}%` }))));
+  }
+  const pp = t.config.per_problem;
+  if (t.enabled) {
+    caps.append(h("p", { class: "muted small tg-pp" }, `Each problem may use up to ${plural(pp.calls, "call")}` +
+      (pp.tokens !== null ? `, ${pp.tokens} tokens` : "") + (pp.cost_usd !== null ? `, ${usd(pp.cost_usd)}` : "") + ". See By problem."));
+  }
+
+  const rec = clear($("tg-recent"));
+  for (const r of t.recent) {
+    rec.append(tgRow([
+      [r.ts === null ? "" : new Date(r.ts * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }), "when"],
+      [r.problem, "wrap"], [r.model, "wrap"], [r.held ? "–" : String(r.tokens_in), "num"], [r.held ? "–" : String(r.tokens_out), "num"],
+      [r.held ? "–" : r.latency_s.toFixed(1), "num"],
+      [r.cost_usd === null ? "unknown" : r.held ? `up to ${usd(r.cost_usd)}` : r.usage_known === false ? `${usd(r.cost_usd)} (${r.cost_basis})` : usd(r.cost_usd), "num"],
+      [r.outcome, "outcome", r.reason || null],
+      [r.helped === true ? "yes" : r.helped === false ? "no" : r.outcome === "ok" ? "not reported" : "", null]], TG_OUTCOME_TONE[r.outcome] || null));
+    if (r.reason) rec.lastChild.lastChild.previousSibling.append(h("div", { class: "tg-reason" }, r.reason));
+  }
+  $("tg-recent-empty").hidden = t.recent.length > 0;
+  $("tg-recent-note").textContent = t.recent.length ? `newest first, up to ${t.recent.length}` : "";
+
+  const bm = clear($("tg-by-model"));
+  for (const m of t.by_model) bm.append(tgRow([[m.model, "wrap"], [String(m.calls), "num"], [String(m.tokens), "num"], [spendText({ cost_usd: m.cost_usd, unknown_cost: m.cost_unknown_calls }), "num"]]));
+  if (!t.by_model.length) bm.append(tgRow([["No calls yet", "muted"], ["", ""], ["", ""], ["", ""]]));
+  const bp = clear($("tg-by-problem"));
+  for (const p of t.problems) {
+    bp.append(tgRow([[p.name, "wrap"], [String(p.calls), "num"], [String(p.tokens), "num"],
+      [spendText({ cost_usd: p.cost_usd, unknown_cost: p.cost_unknown_calls }), "num"],
+      [`${p.helped} yes · ${p.not_helped} no`, null], [`${p.percent}%${p.at_cap ? " (at its cap)" : ""}`, "num cap"]], p.at_cap ? "bad" : p.near ? "warn" : null));
+  }
+  if (t.problems_hidden) bp.append(tgRow([[`${plural(t.problems_hidden, "more problem")} not shown. The state and the closest cap count every problem.`, "muted"], ["", ""], ["", ""], ["", ""], ["", ""], ["", ""]]));
+  if (!t.problems.length) bp.append(tgRow([["No calls yet", "muted"], ["", ""], ["", ""], ["", ""], ["", ""], ["", ""]]));
+
+  const c = t.config;
+  const keyWords = { present: `present (from ${t.key.source === "file" ? "a file" : "an environment variable"})`,
+    missing: `missing: ${t.key.reason || ""}`, "not-needed": "not needed (the endpoint takes no key)", "n/a": "not used while telegraph is off" };
+  const dl = clear($("tg-config"));
+  for (const [k, v] of [
+    ["Enabled", t.enabled ? "yes" : "no"], ["Endpoint host", c.endpoint_host || "none"], ["API style", c.api || "none"],
+    ["Asks after", t.enabled ? `${plural(c.after_failures, "repeated failure")}` : "none"],
+    ["Limits per call", t.enabled ? `${c.max_output_tokens} output tokens, ${c.max_prompt_chars} prompt characters, ${c.timeout_s} s` : "none"],
+    ["Key", keyWords[t.key.state] || t.key.state], ["Ledger folder", c.ledger_dir]]) {
+    dl.append(h("div", { class: "tg-kv" }, h("dt", {}, k), h("dd", { class: k === "Ledger folder" ? "mono wrap" : null }, v)));
+  }
+  const ms = clear($("tg-models"));
+  c.models.forEach((m, i) => ms.append(tgRow([[String(i + 1), "num"], [m.name, "wrap"],
+    [m.input_per_mtok === null ? "no price" : `$${m.input_per_mtok}`, "num"], [m.output_per_mtok === null ? "no price" : `$${m.output_per_mtok}`, "num"]])));
+  if (!c.models.length) ms.append(tgRow([["", ""], ["No models: telegraph is off", "muted"], ["", ""], ["", ""]]));
 }
 
 // ---- machine health: the scene's weather and how hard the farmer works --------------------------------
@@ -439,6 +670,11 @@ function renderRun() {
     h("span", {}, d.supervisor.alive ? `supervisor pid ${d.supervisor.pid}` : "no supervisor running"),
     h("span", {}, d.last_events.length ? `last activity ${ago(d.last_events[d.last_events.length - 1].ts)}` : ""));
   $("run-hint-text").textContent = d.next_step || d.hint || "";
+  const spend = $("run-spend");                       // this run's own helper spend, when it kept a telegraph ledger
+  spend.hidden = !d.telegraph;
+  // An unreadable ledger is an explicit unknown, never a missing line or a zero.
+  spend.textContent = !d.telegraph ? "" : d.telegraph.error ? `Helper spend for this run: unknown (${d.telegraph.error})`
+    : `Helper spend for this run: ${spendText(d.telegraph)} · ${plural(d.telegraph.calls, "call")}`;
   const mode = $("run-mode");
   mode.hidden = !d.mode;
   // the pictures sit in .emoji spans: the operator style hides them
@@ -1113,6 +1349,8 @@ function wire() {
   $("view-orchard-btn").addEventListener("click", () => setView("orchard"));
   $("view-hardware-btn").addEventListener("click", () => setView("hardware"));
   $("view-settings-btn").addEventListener("click", () => setView("settings"));
+  $("view-telegraph-btn").addEventListener("click", () => setView("telegraph"));
+  $("spend-meter").addEventListener("click", () => setView("telegraph"));
   $("settings-form").addEventListener("submit", saveSettings);
   $("checks-run").addEventListener("click", startChecks);
   $("caches-run").addEventListener("click", loadCaches);
@@ -1192,8 +1430,10 @@ function setView(view, { push = true } = {}) {
   $("view-orchard-btn").setAttribute("aria-pressed", String(view === "orchard"));
   $("view-hardware-btn").setAttribute("aria-pressed", String(view === "hardware"));
   $("view-settings-btn").setAttribute("aria-pressed", String(view === "settings"));
+  $("view-telegraph-btn").setAttribute("aria-pressed", String(view === "telegraph"));
   $("hardware-view").hidden = view !== "hardware";
   $("settings-view").hidden = view !== "settings";
+  $("telegraph-view").hidden = view !== "telegraph";
   const runShown = view === "orchard" && S.selected;
   $("run").hidden = !runShown;
   $("run-empty").hidden = view !== "orchard" || Boolean(S.selected);
@@ -1206,7 +1446,11 @@ function setView(view, { push = true } = {}) {
   stopToplike();
   document.body.classList.remove("wide");
   $("hw-wide").setAttribute("aria-pressed", "false");
-  if (view === "settings") {
+  if (view === "telegraph") {
+    if (push) history.replaceState(null, "", "#telegraph");
+    renderTelegraph();
+    pollTelegraph();
+  } else if (view === "settings") {
     if (push) history.replaceState(null, "", "#models");
     loadSettings();
   } else if (push) {
@@ -1541,12 +1785,14 @@ function routeFromHash() {
   // #machine and #models are the names now; #hardware and #settings are what earlier links and bookmarks carry
   if (location.hash === "#machine" || location.hash === "#hardware") { setView("hardware", { push: false }); return; }
   if (location.hash === "#models" || location.hash === "#settings") { setView("settings", { push: false }); return; }
+  if (location.hash === "#telegraph") { setView("telegraph", { push: false }); return; }
   const m = location.hash.match(/^#run\/(.+)$/);
   if (m) select(decodeURIComponent(m[1]), { push: false });
 }
 
 async function main() {
   wire();
+  startTelegraphPolling();               // first: neither the metadata request nor the run list may stop the spend meter being polled
   try {
     S.meta = await api("/api/meta");
   } catch (err) {
