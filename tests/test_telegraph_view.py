@@ -491,3 +491,12 @@ def test_a_linked_run_ledger_is_not_followed(root, tmp_path):
                                         (12.349, "$12.35"), (0.01, "$0.01")])
 def test_dollars_are_written_with_enough_digits_to_be_nonzero(value, text):
     assert view.usd(value) == text
+
+
+def test_only_an_answered_call_shows_a_helped_verdict_even_if_a_refusal_was_reported(root, tmp_path):
+    cfg, d, tel = setup(tmp_path, max_calls=1, max_calls_per_problem=9)
+    fill(tel, 1)
+    refused = tel.ask("later", "another task " * 80, "failed")
+    tel.report(refused.call_id, helped=True)                    # the producer accepts a report for any sent or refused call
+    rows = app_for(root, cfg).telegraph()["recent"]
+    assert rows[0]["outcome"] == "budget" and rows[0]["helped"] is None

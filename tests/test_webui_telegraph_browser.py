@@ -214,5 +214,6 @@ def test_a_run_with_its_own_ledger_shows_its_spend_in_the_header(root, tmp_path,
     tg.Telegraph(cfg, run, transport=reply(), environ={"TG_KEY": KEY}, clock=Clock()).ask("p", "task " * 80, "failed")
     with Served(app_for(root, cfg)) as s:
         open_page(pg, s)
+        expect(pg.locator("#run-spend")).to_be_visible()
         expect(pg.locator("#run-spend")).to_contain_text("Helper spend for this run: $0.0035 · 1 call")
     ctx.close()

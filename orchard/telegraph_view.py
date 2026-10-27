@@ -7,7 +7,7 @@ facts for `GET /api/telegraph`. It sends no request to the helper, spends nothin
 or a prompt. The key is never returned: only whether one is present and whether it comes from a variable or a file. The key
 file is not opened (its size is checked), and neither its path nor the variable's name is returned.
 
-The meter is the one line that stays in the top bar. Its text is built here, so a test can check what a person reads.
+The meter is a single line in the top bar that is always shown. Its text is built here, so a test can check what a person reads.
 States: `off` (telegraph disabled), `ok`, `near` (any cap at 80 percent or more), `capped` (a cap is used up, or the latest
 call was refused for a budget reason) and `problem` (the key is missing, or the ledger cannot be read).
 """
@@ -306,7 +306,7 @@ def build(cfg: tg.Config, directory, *, environ, redact=lambda t: t, hostname: s
 
 
 def run_spend(run_dir: Path) -> dict | None:
-    """One run's own spend, from `<run>/telegraph.jsonl` when the run has one (a regular file, not a link)."""
+    """One run's own spend, from `<run>/telegraph.jsonl` when the run has one (it must be a regular file; a link is ignored)."""
     path = Path(run_dir) / tg.LEDGER
     try:
         if path.is_symlink() or not path.is_file():

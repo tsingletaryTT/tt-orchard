@@ -1717,6 +1717,16 @@ Every call, refusal and cache hit is one line in `telegraph.jsonl` (model, token
 - `tt-orchard telegraph usage`: calls, tokens, cost and how often the help worked (`--json` for the raw summary).
 - `--telegraph-config`: read the table from another TOML file (default: the bringup config). `--dir`: where the ledger,
   cache and reply files live (default `~/.cache/tt-orchard/telegraph`).
+- `dir` in the `[telegraph]` table sets that folder for the commands and for the web page (a relative path is against the
+  config file's folder). `--dir` on a command still wins.
+- In the web page (`tt-orchard ui`) a spend meter sits in the top bar in every view and both styles: the dollars spent, the number
+  of calls and the cap that is closest to its limit. It is grey when telegraph is off, amber when any cap is at 80 percent or more, and
+  red when a cap is used up or the latest call was refused, with the reason. A call with no known price shows as unknown cost, and
+  the meter says "spend unknown" when the page cannot read it. Clicking the meter opens the Telegraph view: the settings (the endpoint's
+  host only, the models with prices, the caps and how much of each is used, whether the key is present but never the key), the recent
+  calls with their outcome and whether they helped, and the totals by model and by problem. The view only reads the ledger
+  (`GET /api/telegraph`). It sends nothing to the helper and spends nothing. A run directory that holds its own `telegraph.jsonl`
+  shows that run's spend under its title.
 
 ## 6. Lessons that will bite you
 
