@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import Callable
 
 from orchard.classes import CLASSES, SIDECAR_CLASSES, class_of_path, path_of
-from orchard import prompt_suite, sampling_probe
+from orchard import prompt_suite, sampling_choice, sampling_probe
 from orchard.graft_trial import DECISION_FILE as GRAFT_DECISION_FILE
 from orchard.graft_trial import chosen as graft_chosen
 from orchard.graft_trial import read_decision as read_graft_decision
@@ -578,6 +578,7 @@ def gate_weights_swap(stage_dir, run_dir) -> GateResult:
     reasons, seen = _swap_reasons(d), []
     reasons += _suite_reasons_in(Path(stage_dir) / "evidence" / "swap-check.json", run_dir)
     reasons += decision_problems(stage_dir, run_dir)         # the graft trial's decision, when stage 2 made one
+    reasons += sampling_choice.decision_problems(stage_dir, run_dir)       # the sampling choice (issue 107), when stage 2 made one
     reasons += vocab_trim_problems(stage_dir, run_dir)
     _evidence(run_dir, d.get("evidence"), "result.json", reasons, seen)
     return _done(reasons, seen)
@@ -638,6 +639,7 @@ def gate_weights_swap_sidecar(stage_dir, run_dir) -> GateResult:
     reasons, seen = _swap_reasons(d), []
     reasons += _suite_reasons_in(Path(stage_dir) / "evidence" / "swap-check.json", run_dir)
     reasons += decision_problems(stage_dir, run_dir)
+    reasons += sampling_choice.decision_problems(stage_dir, run_dir)
     delta, derr = _load(Path(run_dir) / "stages" / "0", "delta.json")
     if derr:
         reasons.append(f"stage 0's {derr}, so the sidecar parity cannot be tied to the files stage 0 recorded")
