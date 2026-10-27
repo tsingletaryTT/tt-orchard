@@ -165,3 +165,11 @@ def test_the_bundle_introduction_describes_ranges_and_not_fixed_settings(tmp_pat
     intro = " ".join(section(results(run), HEAD).split("| Configuration")[0].split())
     assert "temperature above 0" in intro and "top-p below 1" in intro and "different seeds" in intro
     assert "1.0" not in intro and "0.9" not in intro
+
+
+def test_first_token_only_sampling_is_stated_in_the_bundle(tmp_path):
+    from test_sampling_probe import with_session_lines
+    run = make_run(tmp_path)
+    put(run, "stages/2/evidence", with_session_lines(record()))
+    block = section(results(run), HEAD)
+    assert "sampled-ignored" in block and "sampling reached only the first token" in block
