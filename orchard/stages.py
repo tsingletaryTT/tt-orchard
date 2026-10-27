@@ -1035,7 +1035,7 @@ def gate_package(stage_dir, run_dir) -> GateResult:
     weights, the card, the boot check's verify.json and the publish commands. package.json only
     says where to look."""
     # Imported here: orchard.package imports this module.
-    from orchard.package import (GRAFT_FILE, PUBLISH_FILE, PackageError, graft_evidence_problems, graft_problems,
+    from orchard.package import (GRAFT_FILE, PUBLISH_FILE, PackageError, acceptance_sources, graft_evidence_problems, graft_problems,
                                  graft_trial_numbers, publish_problems, read_reported, sampling_numbers,
                                  sampling_summary, sampling_summary_problems, serving_problems,
                                  split_model_id, stage_2_serving, stage_2_vocab, weights_wiring_problems)
@@ -1072,6 +1072,7 @@ def gate_package(stage_dir, run_dir) -> GateResult:
     trial_rows = tuple(n.name for n in graft_trial_numbers(run))
     sampling = sampling_summary(run)
     sampling_expected = tuple(sampling_numbers(run))
+    acceptance_measured = bool(acceptance_sources(tuple(graft_trial_numbers(run)) + sampling_expected))
     try:
         reported, reported_source = read_reported(run)
     except PackageError as exc:
@@ -1129,6 +1130,7 @@ def gate_package(stage_dir, run_dir) -> GateResult:
                                       trial_rows=trial_rows if p.get("required") else (),
                                       sampling=sampling if p.get("required") else None,
                                       sampling_expected=sampling_expected if p.get("required") else (),
+                                      acceptance_measured=acceptance_measured if p.get("required") else False,
                                       use=read_use_facts(swap.get("new_snapshot") or "/nonexistent", run_sh, run,
                                                            identity=(new_repo, new_rev), measured=bool(p.get("required"))))]
         reasons += [f"profile {name}: the card cites {e}, which is missing at evidence/{e}"

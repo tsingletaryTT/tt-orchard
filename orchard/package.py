@@ -1276,6 +1276,21 @@ def sampling_numbers(run_dir) -> tuple[Number, ...]:
     return tuple(out)
 
 
+PROBE_RATE_ROWS = tuple(name for name, _, unit in SAMPLING_ROWS if "drafter acceptance" in name)
+
+
+def acceptance_sources(numbers) -> tuple[str, ...]:
+    """Which steps measured the drafter's acceptance, from the measured rows in `numbers`: the graft trial's grafted-drafter row, and the sampling
+    probe's greedy and sampled request rows. The card's Not measured list and its limitation lines follow this."""
+    measured = {n.name for n in numbers if n.label == "measured"}
+    out = []
+    if ACCEPTANCE_ROW in measured:
+        out.append("graft trial")
+    if measured & set(PROBE_RATE_ROWS):
+        out.append("sampling probe")
+    return tuple(out)
+
+
 def card_numbers(facts: RunFacts, profile: dict, verify: dict | None) -> list[Number]:
     """The numbers one package's card may show. Only the boot-checked profile shows the run's
     measurements, because they were taken on that profile's chip count."""
@@ -1319,7 +1334,8 @@ def write_card(out: Path, facts: RunFacts, profile: dict, *, namespace: str,
                     "from the Hub"]
     sampling = write_sampling_summary(facts.run_dir) if profile["required"] else None      # before the numbers: the rows cite this file
     numbers = tuple(card_numbers(facts, profile, verify))
-    acceptance_measured = any(n.name == ACCEPTANCE_ROW and n.label == "measured" for n in numbers)
+    acceptance_from = " and ".join(acceptance_sources(numbers))
+    acceptance_measured = bool(acceptance_from)
     if drafters and not acceptance_measured:
         not_measured.insert(0, "the drafter's acceptance rate on this model")
     run_sh_path = out / "run.sh"
@@ -1332,7 +1348,7 @@ def write_card(out: Path, facts: RunFacts, profile: dict, *, namespace: str,
         arch=m["arch"], max_model_len=m["resources"]["max_model_len"],
         max_num_seqs=m["resources"]["max_num_seqs"], drafter=drafters[0] if drafters else None,
         verified=verify is not None and profile["required"],
-        numbers=numbers, not_measured=tuple(not_measured), acceptance_measured=acceptance_measured,
+        numbers=numbers, not_measured=tuple(not_measured), acceptance_measured=acceptance_measured, acceptance_from=acceptance_from,
         drafter_off=facts.drafter_off, host_sampling=facts.host_sampling,
         sidecars=tuple(s["file"] for s in facts.sidecars),
         base_files=tuple(sorted(f.name for f in facts.base_config)),
