@@ -229,3 +229,152 @@ def test_the_pins_are_what_the_library_asks_for():
 
 def test_the_pinned_commit_is_a_full_hash():
     assert len(ae.LIBRARY_COMMIT) == 40 and all(c in "0123456789abcdef" for c in ae.LIBRARY_COMMIT)
+
+
+# ---- guards found by the first mutation table -----------------------------------------------------
+
+def fail_on(env, word):
+    real = env.run
+
+    def run(argv, timeout, e=None):
+        if word in list(map(str, argv)):
+            return 1, "", f"{word} broke"
+        return real(argv, timeout, e)
+    env.run = run
+    env.real = real
+    return real
+
+
+def test_git_never_prompts_for_credentials(env):
+    ae.ensure(env, check_only=False)
+    git_envs = [e for a, e in env.run.calls if a[0] == "git"]
+    assert git_envs and all(e["GIT_TERMINAL_PROMPT"] == "0" for e in git_envs)
+
+
+def test_a_source_directory_inside_the_shared_venv_or_the_checkout_is_refused(env, tmp_path):
+    env.src_dir = (tmp_path / "home" / ".tenstorrent-venv" / "src").resolve()
+    assert ae.ensure(env, check_only=False)[0].status == ae.FAIL
+    env.src_dir = (tmp_path / "repo" / "src").resolve()
+    assert ae.ensure(env, check_only=False)[0].status == ae.FAIL
+
+
+def test_a_venv_directory_inside_the_checkout_alone_is_refused(env, tmp_path):
+    env.venv_dir = (tmp_path / "repo" / "v").resolve()
+    assert ae.ensure(env, check_only=False)[0].status == ae.FAIL
+
+
+def test_a_checkout_whose_head_cannot_be_read_fails_the_source_step(env):
+    env.src_dir.mkdir(parents=True)
+    (env.src_dir / ".git").mkdir()
+    real = env.run
+
+    def run(argv, timeout, e=None):
+        if "rev-parse" in list(map(str, argv)):
+            return 128, "", "fatal: not a git repository"
+        return real(argv, timeout, e)
+    env.run = run
+    results = ae.ensure(env, check_only=False)
+    assert results[0].status == ae.FAIL and "not a git repository" in results[0].detail
+
+
+def test_the_venv_is_made_with_python_3_12(env):
+    ae.ensure(env, check_only=False)
+    [argv] = [a for a, _ in env.run.calls if a[:2] == ["uv", "venv"]]
+    assert argv[argv.index("--python") + 1] == "3.12"
+
+
+def test_a_failed_torch_install_stops_the_later_installs_and_the_record(env):
+    fail_on(env, ae.TORCH_PINS[0])
+    results = ae.ensure(env, check_only=False)
+    assert statuses(results)["torch"] == ae.FAIL and "packages" not in statuses(results) and "library" not in statuses(results)
+    assert "torch==2.7.1 broke" in [r for r in results if r.name == "torch"][0].detail
+    assert not (env.venv_dir / ae.RECORD).exists()
+
+
+def test_a_failed_package_install_stops_the_library_install_and_the_record(env):
+    fail_on(env, ae.REQUIREMENTS[0])
+    results = ae.ensure(env, check_only=False)
+    assert statuses(results)["packages"] == ae.FAIL and "library" not in statuses(results)
+    assert not (env.venv_dir / ae.RECORD).exists()
+
+
+def test_a_failed_library_install_writes_no_record(env):
+    fail_on(env, "--no-deps")
+    results = ae.ensure(env, check_only=False)
+    assert statuses(results)["library"] == ae.FAIL and statuses(results)["record"] == ae.FAIL
+    assert not (env.venv_dir / ae.RECORD).exists()
+
+
+def test_a_failed_rule_writes_no_record(env):
+    env.run.import_ok = False
+    results = ae.ensure(env, check_only=False)
+    assert statuses(results)["record"] == ae.FAIL and not (env.venv_dir / ae.RECORD).exists()
+
+
+def test_unreadable_installed_versions_fail_the_record(env):
+    real = env.run
+
+    def run(argv, timeout, e=None):
+        if "importlib.metadata" in str(argv[-1]):
+            return 0, "not json", ""
+        return real(argv, timeout, e)
+    env.run = run
+    results = ae.ensure(env, check_only=False)
+    assert statuses(results)["record"] == ae.FAIL and not (env.venv_dir / ae.RECORD).exists()
+
+
+@pytest.mark.parametrize("version,cuda", [("2.7.1", "False"), ("2.8.0+cpu", "False"), ("2.7.1+cpu", "True")])
+def test_only_the_pinned_cpu_build_without_cuda_passes(env, version, cuda):
+    real = env.run
+
+    def run(argv, timeout, e=None):
+        if "torch.cuda" in str(argv[-1]):
+            return 0, f"{version} {cuda}\n", ""
+        return real(argv, timeout, e)
+    env.run = run
+    assert statuses(ae.ensure(env, check_only=False))["cpu-only"] == ae.FAIL
+
+
+def test_extra_words_in_the_torch_answer_fail_the_rule(env):
+    real = env.run
+
+    def run(argv, timeout, e=None):
+        if "torch.cuda" in str(argv[-1]):
+            return 0, "2.7.1+cpu False extra\n", ""
+        return real(argv, timeout, e)
+    env.run = run
+    assert statuses(ae.ensure(env, check_only=False))["cpu-only"] == ae.FAIL
+
+
+def test_a_record_for_other_pins_or_another_commit_is_stale_in_check_mode(env):
+    ae.ensure(env, check_only=False)
+    path = env.venv_dir / ae.RECORD
+    good = json.loads(path.read_text())
+    for change in ({"requirements_sha256": "0" * 64}, {"library_commit": "1" * 40}):
+        path.write_text(json.dumps({**good, **change}))
+        results = ae.ensure(env, check_only=True)
+        assert statuses(results)["record"] == ae.TODO and statuses(results)["packages"] == ae.TODO
+
+
+def test_check_mode_with_no_record_is_not_ok(env):
+    ae.ensure(env, check_only=False)
+    (env.venv_dir / ae.RECORD).unlink()
+    assert statuses(ae.ensure(env, check_only=True))["record"] == ae.TODO
+
+
+def test_the_pin_hash_depends_on_the_commit(monkeypatch):
+    before = ae.requirements_sha256()
+    monkeypatch.setattr(ae, "LIBRARY_COMMIT", "2" * 40)
+    assert ae.requirements_sha256() != before
+
+
+def test_a_dry_run_asks_nothing_of_the_venv_interpreter(env):
+    ae.ensure(env, check_only=True)
+    assert not [a for a, _ in env.run.calls if a[0].endswith("bin/python")]
+
+
+def test_main_with_dry_run_builds_nothing_and_exits_0_and_with_check_exits_2_on_a_missing_build(env):
+    out = io.StringIO()
+    assert ae.main(type("A", (), {"check": False, "dry_run": True})(), env=env, out=out) == 0
+    assert not [a for a, _ in env.run.calls if a[:2] in (["uv", "venv"], ["uv", "pip"])] and not env.venv_dir.exists()
+    assert ae.main(type("A", (), {"check": True, "dry_run": False})(), env=env, out=out) == 2
