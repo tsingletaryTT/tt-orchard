@@ -1036,7 +1036,8 @@ def gate_package(stage_dir, run_dir) -> GateResult:
     says where to look."""
     # Imported here: orchard.package imports this module.
     from orchard.package import (GRAFT_FILE, PUBLISH_FILE, PackageError, graft_evidence_problems, graft_problems,
-                                 graft_trial_numbers, publish_problems, read_reported, serving_problems,
+                                 graft_trial_numbers, publish_problems, read_reported, sampling_numbers,
+                                 sampling_summary, sampling_summary_problems, serving_problems,
                                  split_model_id, stage_2_serving, stage_2_vocab, weights_wiring_problems)
     from orchard.card_use import read_use_facts
     from orchard.package_card import card_evidence_paths, card_problems, read_license
@@ -1060,6 +1061,7 @@ def gate_package(stage_dir, run_dir) -> GateResult:
     elif d.get("license") != license_id:
         reasons.append(f"package.json says the license is {d.get('license')!r}; the model's is "
                        f"{license_id!r}")
+    reasons += sampling_summary_problems(run)
     drafter_off, host_sampling = stage_2_serving(run)
     model_has_mtp = delta_model_has_mtp(delta)
     # A grafted package serves with the drafter and on-device sampling on, whatever stage 2's run.sh says.
@@ -1068,6 +1070,8 @@ def gate_package(stage_dir, run_dir) -> GateResult:
     graft_chosen_by_stage_2 = decision is not None and decision["choice"] == "graft"
     trial_decision = decision["choice"] if decision is not None and decision.get("trial") is not None else None
     trial_rows = tuple(n.name for n in graft_trial_numbers(run))
+    sampling = sampling_summary(run)
+    sampling_rows = tuple(n.name for n in sampling_numbers(run))
     try:
         reported, reported_source = read_reported(run)
     except PackageError as exc:
@@ -1123,6 +1127,8 @@ def gate_package(stage_dir, run_dir) -> GateResult:
                                       model_id=new_repo, nearest_model=nearest_repo, graft=has_graft,
                                       graft_decision=trial_decision, vocab=stage_2_vocab(run),
                                       trial_rows=trial_rows if p.get("required") else (),
+                                      sampling=sampling if p.get("required") else None,
+                                      sampling_rows=sampling_rows if p.get("required") else (),
                                       use=read_use_facts(swap.get("new_snapshot") or "/nonexistent", run_sh, run,
                                                            identity=(new_repo, new_rev), measured=bool(p.get("required"))))]
         reasons += [f"profile {name}: the card cites {e}, which is missing at evidence/{e}"

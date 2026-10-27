@@ -53,6 +53,7 @@ from pathlib import Path
 from orchard.defaults import (PACKAGE_HEALTH_TIMEOUT_S, PACKAGE_INSTALL_TIMEOUT_S,
                               PACKAGE_THIN_TIMEOUT_S, PACKAGE_VERIFY_DEADLINE_S)
 from orchard.graft_trial import DECISION_FILE, TRIAL_DIR, TRIAL_RESULT, accept_rate, read_decision
+from orchard import sampling_probe
 from orchard.card_use import read_use_facts
 from orchard.package_card import (CardFacts, Number, Reported, card_evidence_paths, inside, non_commercial,
                                   read_license, render_card)
@@ -1203,6 +1204,78 @@ def graft_trial_numbers(run_dir) -> tuple[Number, ...]:
     return tuple(out)
 
 
+SAMPLING_SWAP_CHECK = "stages/2/evidence/swap-check.json"
+SAMPLING_SUMMARY = "stages/2/sampling-summary.json"
+SAMPLING_ROWS = (("decode speed, greedy request (stage 2 sampling probe)", "greedy_tokens_per_s", "tokens/s"),
+                 ("decode speed, sampled request (stage 2 sampling probe)", "sampled_tokens_per_s", "tokens/s"),
+                 ("drafter acceptance, greedy request (stage 2 sampling probe)", "greedy_drafter_accept_rate", "fraction"),
+                 ("drafter acceptance, sampled request (stage 2 sampling probe)", "sampled_drafter_accept_rate", "fraction"))
+
+
+def _rounded(value, places):
+    return round(value, places) if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) else None
+
+
+def sampling_summary(run_dir) -> dict | None:
+    """What stage 2's sampling probe found, derived from the raw requests in `stages/2/evidence/swap-check.json` (issue 107), or None when the file has
+    no probe record, the record was not run, or it is malformed. Speeds and the drafter's accepted share are recomputed here
+    (orchard/sampling_probe.py) and rounded to what the card shows; a summary field written into the record is never read."""
+    try:
+        report = json.loads((Path(run_dir) / SAMPLING_SWAP_CHECK).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(report, dict):
+        return None
+    s = sampling_probe.summarize(report.get("sampling_probe"))
+    if s["card_sentence"] is None or s["verdict"] in ("not-run", "malformed"):
+        return None
+    g, sm = s["greedy"] or {}, s["sampled"] or {}
+    serving = report.get("serving") if isinstance(report.get("serving"), dict) else {}
+    return {"label": "measured", "derived_from": SAMPLING_SWAP_CHECK, "verdict": s["verdict"], "card_sentence": s["card_sentence"],
+            "greedy_tokens_per_s": _rounded(g.get("tokens_per_s"), 1), "sampled_tokens_per_s": _rounded(sm.get("tokens_per_s"), 1),
+            "greedy_drafter_accept_rate": _rounded(g.get("drafter_accept_rate"), 3),
+            "sampled_drafter_accept_rate": _rounded(sm.get("drafter_accept_rate"), 3),
+            "serving": {"drafter": str(serving.get("drafter") or "not recorded"), "sampling": str(serving.get("sampling") or "not recorded")}}
+
+
+def write_sampling_summary(run_dir) -> dict | None:
+    """Write `stages/2/sampling-summary.json`, the file the card's sampling rows cite first, and return its content (None: nothing is written)."""
+    summary = sampling_summary(run_dir)
+    if summary is not None:
+        _write_json(Path(run_dir) / SAMPLING_SUMMARY, summary)
+    return summary
+
+
+def sampling_summary_problems(run_dir) -> list[str]:
+    """Why the summary file is not what the raw record gives, for the gate: the file is missing or differs from `sampling_summary`. Nothing when the
+    run has no usable probe record."""
+    expected = sampling_summary(run_dir)
+    if expected is None:
+        return []
+    try:
+        have = json.loads((Path(run_dir) / SAMPLING_SUMMARY).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return [f"{SAMPLING_SUMMARY} is missing or unreadable; the card's sampling rows cite it"]
+    if have != expected:
+        return [f"{SAMPLING_SUMMARY} is not the summary derived from the sampling probe's raw requests in {SAMPLING_SWAP_CHECK}"]
+    return []
+
+
+def sampling_numbers(run_dir) -> tuple[Number, ...]:
+    """The card's sampling rows: decode speed and the drafter's accepted share of a greedy and of a sampled request, from the derived summary. A row
+    appears when the summary holds a number for it; a share of 0 is a measurement, a speed of 0 is not."""
+    summary = sampling_summary(run_dir)
+    if summary is None:
+        return ()
+    evidence = (SAMPLING_SUMMARY, SAMPLING_SWAP_CHECK)
+    out = []
+    for name, key, unit in SAMPLING_ROWS:
+        v = summary.get(key)
+        if v is not None and (v > 0 or unit == "fraction"):
+            out.append(Number(name, v, unit, "measured", evidence))
+    return tuple(out)
+
+
 def card_numbers(facts: RunFacts, profile: dict, verify: dict | None) -> list[Number]:
     """The numbers one package's card may show. Only the boot-checked profile shows the run's
     measurements, because they were taken on that profile's chip count."""
@@ -1233,6 +1306,7 @@ def card_numbers(facts: RunFacts, profile: dict, verify: dict | None) -> list[Nu
                  Number("server ready after start, this package (stage 7, fresh install, empty "
                         "tensor cache)", verify["server_ready_s"], "s", "measured", ev7)]
     nums += graft_trial_numbers(run)
+    nums += sampling_numbers(run)
     nums += read_benchmark_numbers(run)
     return nums
 
@@ -1243,6 +1317,7 @@ def write_card(out: Path, facts: RunFacts, profile: dict, *, namespace: str,
     drafters = aux_repos(m.get("env") or {}, nearest_model=facts.nearest_model)
     not_measured = ["a download of the weights through `tt-model pull`, and a boot of the package "
                     "from the Hub"]
+    sampling = write_sampling_summary(facts.run_dir) if profile["required"] else None      # before the numbers: the rows cite this file
     numbers = tuple(card_numbers(facts, profile, verify))
     acceptance_measured = any(n.name == ACCEPTANCE_ROW and n.label == "measured" for n in numbers)
     if drafters and not acceptance_measured:
@@ -1263,7 +1338,7 @@ def write_card(out: Path, facts: RunFacts, profile: dict, *, namespace: str,
         base_files=tuple(sorted(f.name for f in facts.base_config)),
         sampling_from_base=any(f.name == "generation_config.json" for f in facts.base_config),
         reported=facts.reported, reported_source=facts.reported_source,
-        graft=facts.graft, graft_decision=facts.graft_decision, use=use, vocab=facts.vocab,
+        graft=facts.graft, graft_decision=facts.graft_decision, use=use, vocab=facts.vocab, sampling=sampling,
         stage_2_without_graft=(facts.graft is not None and not facts.stage_2_grafted and facts.graft_decision != "graft"))
     (out / "README.md").write_text(render_card(facts_card), encoding="utf-8")
 

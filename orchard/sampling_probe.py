@@ -89,7 +89,28 @@ def _fmt(speed) -> str:
     return "an unmeasured speed" if speed is None else f"{speed:.1f} tokens/s"
 
 
+# The card's wording for each verdict. It has no number: the card's Numbers table is the only place for one, and the error text of a refusal
+# stays in the evidence file.
+CARD_SENTENCES = {
+    "greedy-refused": "The server refused the greedy request of the sampling probe, so this configuration was not measured for sampling.",
+    "sampled-refused": "The server refused a sampled request (temperature above 0, top-p below 1, with a seed). The error text is in the evidence file.",
+    "sampled-incoherent": "The server accepted a sampled request, and its text repeats itself or is unreadable.",
+    "inconclusive": "A sampled reply was too short to say whether sampling was applied or how fast it ran.",
+    "sampled-ignored": ("The server accepted sampled requests, but sampling was not applied: two requests that differ only in seed returned the "
+                        "same text, so decoding is greedy."),
+    "sampled-slower": "Sampled requests decoded more slowly than greedy requests. Both speeds are in the table above.",
+    "sampled-full-speed": ("Sampled requests (temperature above 0, top-p below 1, with a seed) were served and two seeds gave different text. "
+                           "Their speed is in the table above next to the speed of greedy requests."),
+}
+
+
 def summarize(record) -> dict:
+    """`_summarize` plus `card_sentence`: the verdict's card wording, or None when the record is absent or malformed."""
+    out = _summarize(record)
+    return {**out, "card_sentence": CARD_SENTENCES.get(out["verdict"])}
+
+
+def _summarize(record) -> dict:
     """The verdict for one record: {verdict, sentence, greedy, sampled, ratio, reasons}. Checks run in this order: a refused greedy
     request, a refused sampled request, incoherent sampled text, replies too short to judge, two seeds that gave the same text, a
     slower sampled speed, and otherwise full speed."""

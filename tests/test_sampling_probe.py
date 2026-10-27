@@ -146,3 +146,42 @@ def test_every_sentence_is_one_plain_line_without_the_forbidden_framing():
         assert text and text == " ".join(text.split())
         for bad in (", not ", "honest", "reads as"):
             assert bad not in text
+
+
+# ---- the card's sentence: the same verdict with no number in it (the card's Numbers table is the only place for one) -----------------
+
+def card_sentences():
+    return {
+        "full": sp.summarize(record()),
+        "ignored": sp.summarize(record(a=entry(text=STORY), b=entry(text=STORY))),
+        "refused": sp.summarize(record(a=refused("HTTP 400: no sampling here"))),
+        "slower": sp.summarize(record(a=entry(seconds=9.0), b=entry(text=OTHER, seconds=9.0))),
+        "incoherent": sp.summarize(record(a=entry(text="the " * 40), b=entry(text=OTHER))),
+        "short": sp.summarize(record(a=entry(text="Yes.", tokens=2), b=entry(text="No.", tokens=2))),
+        "greedy": sp.summarize(record(greedy=refused("HTTP 500: boom"))),
+    }
+
+
+def test_every_verdict_has_a_card_sentence_with_no_performance_number():
+    from orchard.card_use import PERF_IN_PROSE
+    for name, s in card_sentences().items():
+        text = s["card_sentence"]
+        assert text and text == " ".join(text.split()), name
+        assert not PERF_IN_PROSE.search(text), (name, text)
+
+
+def test_the_card_sentences_state_what_the_verdict_means():
+    s = card_sentences()
+    assert "different text" in s["full"]["card_sentence"]
+    assert "not applied" in s["ignored"]["card_sentence"] and "greedy" in s["ignored"]["card_sentence"]
+    assert "refused" in s["refused"]["card_sentence"]
+    assert "more slowly" in s["slower"]["card_sentence"]
+    assert "repeats itself" in s["incoherent"]["card_sentence"]
+
+
+def test_the_card_sentence_of_a_refusal_does_not_copy_the_error_text():
+    assert "no sampling here" not in card_sentences()["refused"]["card_sentence"]     # the error text is in the evidence file
+
+
+def test_a_run_with_no_record_has_no_card_sentence():
+    assert sp.summarize(None).get("card_sentence") is None
