@@ -139,7 +139,7 @@ def test_a_bad_virtual_spend_table_is_a_problem_with_the_key_named(tmp_path, pro
 def test_an_unreadable_real_ledger_does_not_stop_the_local_figure(tmp_path, probe, monkeypatch):
     def boom(_):
         raise ValueError("bad record")
-    monkeypatch.setattr(spend_cmd.tg, "summarise", boom)
+    monkeypatch.setattr(spend_cmd.tg, "summarise_records", boom)
     code, text = run(tmp_path, [str(probe), "--dir", str(tmp_path / "tg")])
     assert code == 0 and "the telegraph ledger has a record that cannot be read" in text and "$0.1500" in text
 
@@ -302,3 +302,92 @@ def test_runs_root_comes_from_the_bringup_config_even_when_the_tables_file_is_a_
                     env={}, stdout=out)
     text = out.getvalue()
     assert code == 0 and "org--good" in text and "org--other" not in text and "at t" in text
+
+
+# ---- review (sixth round): a ledger that cannot be read is unknown spend, and unsettled spend is shown apart ----------------
+
+def _write_records(directory, records):
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "telegraph.jsonl").write_text("".join(json.dumps(r) + "\n" for r in records))
+
+
+def test_an_unreadable_ledger_is_unknown_helper_spend_not_zero(tmp_path, probe):
+    ledger = tmp_path / "tg"
+    ledger.mkdir()
+    (ledger / "telegraph.jsonl").mkdir()                                  # a read raises IsADirectoryError
+    code, text = run(tmp_path, [str(probe), "--dir", str(ledger)])
+    real = text[text.index("REAL helper spend"):text.index("LOCAL virtual spend")]
+    assert code == 0
+    assert "cannot be read" in real and "unknown" in real.lower()
+    assert "$0.0000" not in real and "0 calls" not in real
+    assert "$0.1500" in text, "the local figures stay usable"
+
+
+def test_an_unreadable_ledger_is_unknown_in_the_json_too(tmp_path, probe):
+    ledger = tmp_path / "tg"
+    ledger.mkdir()
+    (ledger / "telegraph.jsonl").mkdir()
+    code, text = run(tmp_path, [str(probe), "--json", "--dir", str(ledger)])
+    data = json.loads(text)
+    assert code == 0 and "cannot be read" in data["real_helper_spend"]["error"]
+    assert "cost_usd" not in data["real_helper_spend"] and data["local_virtual_spend"]["directories"][0]["turns"] == 1
+
+
+def test_a_missing_ledger_is_still_an_empty_history(tmp_path, probe):
+    code, text = run(tmp_path, [str(probe), "--dir", str(tmp_path / "never-written")])
+    assert code == 0 and "$0.0000 · 0 calls" in text and "cannot be read" not in text
+
+
+def test_pending_reservations_are_disclosed_apart_from_confirmed_charges(tmp_path, probe):
+    ledger = tmp_path / "tg"
+    _write_records(ledger, [
+        {"reserve": "r1", "tokens": 4000, "cost_usd": 0.08, "problem": "p"},             # a request whose result was never recorded
+        {"reserve": "r2", "tokens": 1000, "cost_usd": 0.02, "problem": "p"},
+        {"call_id": "r2", "outcome": "ok", "tokens_in": 100, "tokens_out": 50, "cost_usd": 0.01, "model": "m", "problem": "p"}])
+    code, text = run(tmp_path, [str(probe), "--dir", str(ledger)])
+    real = text[text.index("REAL helper spend"):text.index("LOCAL virtual spend")]
+    assert "confirmed" in real and "$0.0100" in real
+    assert "1 unsettled reservation" in real and "up to $0.0900" in real, real
+    assert "may still be billed" in real
+
+
+def test_a_ledger_with_only_a_reservation_still_shows_its_exposure(tmp_path, probe):
+    ledger = tmp_path / "tg"
+    _write_records(ledger, [{"reserve": "r1", "tokens": 4000, "cost_usd": 0.08, "problem": "p"}])
+    code, text = run(tmp_path, [str(probe), "--dir", str(ledger)])
+    real = text[text.index("REAL helper spend"):text.index("LOCAL virtual spend")]
+    assert "1 unsettled reservation" in real and "up to $0.0800" in real
+    assert "confirmed: $0.0000" in real, "the confirmed charge is still zero; the exposure is stated apart"
+
+
+def test_quarantined_torn_records_and_unknown_usage_are_disclosed(tmp_path, probe):
+    ledger = tmp_path / "tg"
+    _write_records(ledger, [
+        {"torn": "abc123", "tokens": 500},
+        {"reserve": "u1", "tokens": 800, "cost_usd": 0.03, "problem": "p"},
+        {"call_id": "u1", "outcome": "ok", "usage_known": False, "tokens_in": 0, "tokens_out": 0, "model": "m", "problem": "p"}])
+    code, text = run(tmp_path, [str(probe), "--dir", str(ledger)])
+    real = text[text.index("REAL helper spend"):text.index("LOCAL virtual spend")]
+    assert "1 torn record" in real and "1 call with unknown usage" in real
+    assert "of unknown cost" in real
+
+
+def test_the_json_keeps_confirmed_and_possible_spend_in_separate_keys(tmp_path, probe):
+    ledger = tmp_path / "tg"
+    _write_records(ledger, [
+        {"reserve": "r1", "tokens": 4000, "cost_usd": 0.08, "problem": "p"},
+        {"call_id": "c1", "outcome": "ok", "tokens_in": 100, "tokens_out": 50, "cost_usd": 0.01, "model": "m", "problem": "p"},
+        {"torn": "t1", "tokens": 10}])
+    code, text = run(tmp_path, [str(probe), "--json", "--dir", str(ledger)])
+    real = json.loads(text)["real_helper_spend"]
+    assert real["cost_usd"] == 0.01 and real["calls"] == 1                 # confirmed charges only
+    assert real["unsettled_reservations"] == 1 and real["torn_records"] == 1
+    assert real["worst_case_cost_usd"] == pytest.approx(0.09)
+    assert real["worst_case_unknown_cost_calls"] == 1
+
+
+def test_a_clean_ledger_has_no_pending_lines(tmp_path, probe):
+    ledger = tmp_path / "tg"
+    _write_records(ledger, [{"call_id": "c1", "outcome": "ok", "tokens_in": 100, "tokens_out": 50, "cost_usd": 0.01, "model": "m", "problem": "p"}])
+    code, text = run(tmp_path, [str(probe), "--dir", str(ledger)])
+    assert "unsettled" not in text and "torn" not in text and "unknown usage" not in text

@@ -25,14 +25,47 @@ NOTE = ("Local spend is virtual. The agent logs re-send the whole conversation o
         "a hosted provider with prompt caching would bill most of those tokens for much less. Use it as a comparison figure only.")
 
 
+def _plural(n: int, word: str) -> str:
+    return f"{n} {word}{'' if n == 1 else 's'}"
+
+
 def _real(directory: Path) -> dict:
+    """The helper's spend from one snapshot of its ledger. Confirmed charges (`cost_usd` and the counts beside it) are kept apart from
+    what is not confirmed: reservations with no recorded result, torn records that were quarantined, and calls whose provider reported
+    no usage. A ledger that cannot be read is unknown spend and is never shown as an empty history (a missing file is empty)."""
     try:
-        s = tg.summarise(directory)
+        recs = tg._read_ledger_strict(Path(directory))
+    except tg.LedgerUnavailable as exc:
+        return {"dir": str(directory), "error": f"the telegraph ledger cannot be read ({exc}); the helper spend is unknown"}
+    try:
+        s = tg.summarise_records(recs)
+        acct = tg.accounting(recs)
     except Exception:                                               # noqa: BLE001 - a bad record must not stop the command
-        return {"error": "the telegraph ledger has a record that cannot be read", "dir": str(directory)}
+        return {"dir": str(directory), "error": "the telegraph ledger has a record that cannot be read; the helper spend is unknown"}
     return {"dir": str(directory), "calls": s["calls"], "ok": s["ok"], "cache_hits": s["cache_hits"],
             "refused": s["refused"], "tokens_in": s["tokens_in"], "tokens_out": s["tokens_out"],
-            "cost_usd": s["cost_usd"], "cost_unknown_calls": s["cost_unknown_calls"]}
+            "cost_usd": s["cost_usd"], "cost_unknown_calls": s["cost_unknown_calls"],
+            "unsettled_reservations": s["unsettled"], "unknown_usage_calls": s["unknown_usage_calls"],
+            "torn_records": sum(1 for r in recs if "torn" in r),
+            "worst_case_cost_usd": acct["cost"], "worst_case_unknown_cost_calls": acct["unknown_cost"]}
+
+
+def _not_confirmed_line(real: dict) -> str:
+    """One line about spend that is not confirmed, or an empty string when the ledger has none."""
+    parts = []
+    if real["unsettled_reservations"]:
+        parts.append(f"{_plural(real['unsettled_reservations'], 'unsettled reservation')}")
+    if real["torn_records"]:
+        parts.append(_plural(real["torn_records"], "torn record"))
+    if real["unknown_usage_calls"]:
+        parts.append(f"{_plural(real['unknown_usage_calls'], 'call')} with unknown usage")
+    if not parts:
+        return ""
+    line = (f"  not confirmed (may still be billed): {', '.join(parts)}; worst case, up to "
+            f"${real['worst_case_cost_usd']:.4f} in all")
+    if real["worst_case_unknown_cost_calls"]:
+        line += f", plus {_plural(real['worst_case_unknown_cost_calls'], 'call')} of unknown cost"
+    return line
 
 
 def _config(args, environ, home):
@@ -118,7 +151,10 @@ def main(args, *, out, environ=None, home=None) -> int:
         say(f"  {real['error']}")
     else:
         unknown = f" (+ {real['cost_unknown_calls']} calls with no price)" if real["cost_unknown_calls"] else ""
-        say(f"  ${real['cost_usd']:.4f}{unknown} · {real['calls']} calls · {real['tokens_in']} in, {real['tokens_out']} out")
+        say(f"  confirmed: ${real['cost_usd']:.4f}{unknown} · {real['calls']} calls · {real['tokens_in']} in, {real['tokens_out']} out")
+        pending = _not_confirmed_line(real)
+        if pending:
+            say(pending)
     say()
     say("LOCAL virtual spend (nobody was charged; local tokens at a hosted model's list price)")
     if not rows:
