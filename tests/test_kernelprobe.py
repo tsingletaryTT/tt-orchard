@@ -3720,3 +3720,16 @@ def test_the_skill_states_the_two_use_row_rule_without_a_solution():
     flat = " ".join(kp.SKILL.read_text().split())
     assert "Deadlock detected: all generators blocked" in flat
     assert "used twice" in flat
+
+
+def test_the_skill_states_the_general_facts_the_claude_rmsnorm_run_needed():
+    """2026-10-27: a Claude agent passed rmsnorm in 2 attempts with the coder's materials; its one failure was a Python number
+    combined with a block, and it listed six facts the skill left out (docs/run-logs/2026-10-27-rmsnorm-by-claude.md). The
+    skill states them as general facts, not as a solution."""
+    flat = " ".join(kp.SKILL.read_text().split())
+    assert "A Python number cannot be an operand of a block expression" in flat and "`ttl.block.fill(value, shape=(1, 1))`" in flat
+    assert "column 0 of each tile" in flat and "`ttl.block.broadcast(..., dims=[-1], shape=...)`" in flat
+    assert "an element count (`x.shape[1]`) and a tile count" in flat
+    assert "A block can be used in several statements inside one `with`" in flat
+    assert "A buffer's shape may cover a whole row of tiles" in flat
+    assert "Python arithmetic on shapes, such as `1.0 / x.shape[1]`" in flat and "captured by the thread functions" in flat

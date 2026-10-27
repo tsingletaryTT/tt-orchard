@@ -347,6 +347,10 @@ def _control_problems(record: dict, ctl, nearest_model=_UNSET) -> tuple[dict | N
     if other.get("mode") != record.get("mode"):
         bad.append(f"the control was rendered in another prompt format ({other.get('mode')!r} against "
                    f"{record.get('mode')!r}), so it explains nothing")
+    if other.get("max_tokens") != record.get("max_tokens") or isinstance(other.get("max_tokens"), bool) or not isinstance(other.get("max_tokens"), int):
+        bad.append(f"the control ran with another token limit ({other.get('max_tokens')!r} against {record.get('max_tokens')!r}), so a cut-off reply "
+                   "is compared with a longer one and the comparison explains nothing; regenerate the control with the run's limit "
+                   "(tt-orchard suite-control run)")
     if bad:
         return None, bad, []
     notes = []

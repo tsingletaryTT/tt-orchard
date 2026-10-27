@@ -128,12 +128,23 @@ SIDECAR_NOISE_FACTOR = 4.0      # choice: the probability bar is at least this m
 SIDECAR_MIN_QUESTIONS = 10      # choice: fewest questions a parity result may rest on (the run had 16)
 # The prompt-suite check (issue 15): after the 32-token check, the stage 2 and stage 4 templates send a fixed set of
 # prompts (orchard/skills/weights-swap-templates/prompt_suite.json) and orchard/prompt_suite.py reads the replies for
-# the failure shapes the tenstorrent qualitative-check skill lists. Every number below is a choice. None was
-# calibrated on a measured model: no chip has run the suite yet, so each one is provisional and must be revisited
-# with the first measured controls (issue 15 asks for the bar to be set from them).
+# the failure shapes the tenstorrent qualitative-check skill lists. Every number below is a choice. The first chip data
+# is one run: the suite served by Qwen3.8-27B (the control for AREX-2's configuration: the 2-chip bundle, drafter off,
+# host sampling), 8 prompts, 2026-10-26 (docs/run-logs/2026-10-26-suite-control.md). That is one model and eight
+# replies, which cannot calibrate a threshold. It showed no finding of any kind on those replies, so no check is known
+# to give a false positive on a healthy base reply, and it showed that 6 of the 8 replies reached SUITE_MAX_TOKENS with
+# thinking on (see below). A second boot tried thinking on and off at several limits (same run log), still on one model. No fine-tune was served with the suite, so no number below was set from
+# data, and each one stays provisional until fine-tunes have been measured against controls.
 SUITE_MIN_PROMPTS = 5           # choice: issue 15 asks for at least five prompts of different kinds
-SUITE_MAX_TOKENS = 64           # choice: long enough for a loop or a drift to show, short enough that eight
-                                # requests cost about a minute at 20 tokens/s (more with thinking on)
+SUITE_MAX_TOKENS = 512          # choice: room for a thinking reply to reach its answer, and a loop or a drift still shows.
+                                # Measured on one model (Qwen3.8-27B, thinking on by default, 8 prompts, greedy):
+                                # at 64, 6 of 8 replies reached the limit (5 inside the reasoning with no answer, 1
+                                # inside its answer) and 3 of 8 had an answer; at 256 and at 1024 all 8 completed
+                                # with the same 841 tokens in 61 s. The longest reply at 256 was 253 tokens, so 256
+                                # leaves little room for a model that thinks longer; 512 costs the same on this
+                                # model and was not itself measured. Thinking stays on, because it is the model's
+                                # default mode. No check changed its verdict in any cell
+                                # (docs/run-logs/2026-10-26-suite-control.md).
 SUITE_BLOCKING_KINDS = ("control_token_leak", "cross_request_leak", "corrupt_first_token", "repeated_first_token",
                         "mechanical_repetition", "gibberish")
                                 # choice: the findings that fail a gate when the control does not show them. A
@@ -178,6 +189,14 @@ GRAFT_TRIAL_DEADLINE_S = 7200.0  # choice: one hardware test: a warm boot of the
                                 # (4 to 25 minutes measured for this bundle), a warm boot of the variant, and 12 timed requests per boot.
 SWAP_MIN_TOKENS = 16            # choice: the fewest compared tokens the weights-only gate accepts; the
                                 # skill's script compares 32
+STOCK_TOP1_MIN = 0.85           # choice (operator approved, 2026-10-26): the stock-runtime stage 2 bar for teacher-forced top-1 agreement
+                                # between tt-transformers on the chip and the stage 1 CPU reference. One published source: models/model_targets.yaml
+                                # in tt-metal gives Llama-3.1-8B 90 percent top-1 and 98 percent top-5 on `bh_p150`; the bars sit 0.05 and 0.03 below.
+STOCK_TOP5_MIN = 0.95           # choice: the matching top-5 bar (see STOCK_TOP1_MIN)
+STOCK_SMALL_TOP1_MIN = 0.75     # choice: the bars for a model of at most STOCK_SMALL_PARAMS_MAX_B billion parameters (the 1B fallback). Its
+STOCK_SMALL_TOP5_MIN = 0.95     # published figure is 79 to 80 percent top-1 and 97 top-5, on Wormhole only; no Blackhole figure exists.
+STOCK_SMALL_PARAMS_MAX_B = 3    # choice: where the small-model bars start to apply
+STOCK_MIN_TOKENS = 128          # choice: the fewest teacher-forced tokens the stock-runtime gate accepts (the published figures use 511)
 AGENT_MAX_TURNS = 60            # choice: model turns in one agent step before the step counts as failed
 AGENT_CONTINUATION_TURNS = 20   # choice: model turns for a step's gate-feedback continuation (at most one).
                                 # It only has to fix what the gate named, so it gets a third of a step.
