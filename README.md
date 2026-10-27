@@ -1600,6 +1600,26 @@ server decoded at 38.7 tok/s.
 - `--baseline-file`: where the best speeds are kept.
 - `--json`: print one JSON list instead of lines.
 
+### 5.9fa The audio reference environment and the CPU reference
+
+```bash
+tt-orchard audio-reference-env --dry-run   # say what it would do
+tt-orchard audio-reference-env             # build ~/orchard-venvs/stable-audio and ~/orchard-src/stable-audio-3 (needs the network)
+tt-orchard audio-reference-env --check     # check it; no device, no token
+~/orchard-venvs/stable-audio/bin/python orchard/skills/audio-reference-templates/make_reference.py \
+    --model small-music --out RUN_DIR --prompt "..." --duration 10 --steps 8 --cfg-scale 1.0 --seed 42
+python3 -m orchard.audio_reference check REFERENCE_RUN CANDIDATE_RUN    # PCC, relative L2 error and slope per saved array
+python3 -m orchard.audio_reference control FINE_TUNE_RUN BASE_RUN       # the base model's waveform must differ
+```
+
+This is step 0 of the Stable Audio runtime design (`docs/superpowers/specs/2026-10-28-stable-audio-runtime-design.md`). The environment is a venv with
+CPU-only torch 2.7.1 and a checkout of Stability AI's `stable-audio-3` library at one pinned commit, both outside the repository; the shared Tenstorrent
+venv is refused. `make_reference.py` runs the library's own `generate` on the CPU with the Hugging Face Hub set to offline mode and every token variable
+removed, so the model files must already be in the local cache. It saves the encoder output, the noise draws, the output of each transformer layer for the first
+network pass, every step's latent and denoised estimate, the final latent and the waveform, each as a float32 `.npy` file with its sha256 in `manifest.json`.
+`python3 -m orchard.audio_reference check` compares two such directories and needs all three numbers: PCC alone passes an output that is scaled. The bars in it
+are provisional until the reference's own bfloat16 noise floor has been measured (`bars_from_floor`).
+
 ### 5.9f The demo environment
 
 ```bash
