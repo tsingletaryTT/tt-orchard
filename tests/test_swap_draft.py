@@ -61,7 +61,7 @@ def test_the_draft_names_every_fact_the_swap_templates_need(run):
     assert cfg["hf_home"] == str(run["hf_home"])
     assert isinstance(cfg["port"], int) and 1024 < cfg["port"] < 65536
     # The swap tests send the prompt suite (issue 15) because the supervisor's draft asks for it.
-    assert cfg["prompt_suite"] is True
+    assert cfg["prompt_suite"] is True and cfg["sampling_probe"] is True
 
 
 def test_the_keys_are_the_ones_the_skills_tell_the_agent_to_write():
@@ -154,7 +154,7 @@ def test_stage_4_gets_a_bundle_config_per_count_and_the_named_container_for_four
     assert configs[4]["tt_cache"] == str(run["cache_root"] / slug / "4chip-changh95--qwen3.8-27b-p300x2" / "tt_cache")
     assert [configs[n]["port"] for n in (1, 2, 4)] == [8101, 8102, 8104]
     assert all(c["new_model_id"] == MODEL and c["nearest_model_id"] == NEAREST for c in configs.values())
-    assert all(c["prompt_suite"] is True for c in configs.values())      # bundles and the container package alike
+    assert all(c["prompt_suite"] is True and c["sampling_probe"] is True for c in configs.values())      # bundles and the container package alike
     assert tests == {"tests": [{"chips": 1, "script": "serve_and_compare.py", "deadline_s": 3600},
                                {"chips": 2, "script": "serve_and_compare.py", "deadline_s": 3600},
                                {"chips": 4, "script": "serve_and_compare_container.py", "deadline_s": 3600}]}
@@ -201,15 +201,16 @@ def test_every_drafted_key_of_both_kinds_of_config_is_listed(run, tmp_path):
     bundle(run["tt_model_root"], "episod/qwen3.8-27b-dflash2-p300", NEAREST, 2)
     cfg, _ = sd.draft(**run)
     assert set(cfg) == set(sd.KEYS) and "prompt_suite" in sd.KEYS and "prompt_suite" in sd.CONTAINER_KEYS
+    assert "sampling_probe" in sd.KEYS and "sampling_probe" in sd.CONTAINER_KEYS
 
 
 def test_every_swap_config_example_in_the_skills_turns_the_prompt_suite_on():
     skills = Path(sd.__file__).parent / "skills"
     for name in ("weights-swap-check.md", "weights-sidecar-check.md"):
-        assert '"port": 8100,\n        "prompt_suite": true}' in (skills / name).read_text(), name
+        assert '"port": 8100,\n        "prompt_suite": true,\n        "sampling_probe": true}' in (skills / name).read_text(), name
     configs = (skills / "weights-swap-configs.md").read_text()
-    assert '"port": <8100 + N>,\n        "prompt_suite": true}' in configs
-    assert '"port": 8104,\n        "prompt_suite": true}' in configs
+    assert '"port": <8100 + N>,\n        "prompt_suite": true,\n        "sampling_probe": true}' in configs
+    assert '"port": 8104,\n        "prompt_suite": true,\n        "sampling_probe": true}' in configs
 
 
 def test_the_skills_say_to_copy_the_suite_file_with_the_templates():

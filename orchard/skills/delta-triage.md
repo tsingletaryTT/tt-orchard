@@ -154,6 +154,20 @@ projector and `mtp.*` tensors may differ. Otherwise the path is `full-port`, and
 lists each reason. A tokenizer difference does not change the path, because the runtime loads the
 new model's tokenizer.
 
+## Audio models
+
+A model in the stable-audio-tools layout has no `config.json`. It has `model_config.json`, one top-level `model.safetensors` that holds several
+components under name prefixes, and sometimes a text-encoder directory. The template detects that layout and runs an audio branch. It writes
+`evidence/audio-compare.json`, `files-compare.json` and `value-compare.json`, and `delta.json` gets a `facts` record and an `audio` record.
+
+- `facts.form` is `full` here (an `adapter` repository has no `model_config.json` and is not read by this branch). `facts.modality` is `audio` (`text` for a model in the usual layout, which writes no `facts`). The
+  supervisor adds `facts.serving` (`thin-bundle`, `container` or `none`) to the ledger from the installed bundles; you do not write it.
+- A `repo_id` difference in the config is a pointer and does not count. The `training` section is listed and does not count. Any other config
+  difference, a tensor with another shape, a tensor in only one model, or a text-encoder header difference makes the class `full-port`. A header or config
+  that cannot be read makes it `unknown`. Otherwise the class is `weights-only`.
+- Do not edit the script and do not change `class`, `path` or `facts`. Keep the hazard that says no stage listens to the output. A run whose
+  modality is `audio` stops after this stage: the audio stages are not built, so a person decides.
+
 ## Resume notes
 
 Write progress notes to `RESUME.md` in your stage directory as you go. If the run restarts, the

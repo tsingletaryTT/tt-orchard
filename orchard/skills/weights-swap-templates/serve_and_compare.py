@@ -44,14 +44,23 @@ Steps:
     model (a path, relative to the run directory or absolute). Its record is embedded, and the gate reads the
     new model's findings against it. A missing suite file or an unusable control exits 2 before any server starts.
     A request the server refuses is recorded as that prompt's error and the run goes on.
+(i) The sampling probe (issue 107), only when swap_config.json has `"sampling_probe": true`. After the 32-token
+    check, and after the prompt suite when that ran, the script sends one greedy request and two sampled requests
+    (temperature 1.0, top-p 0.9, seeds that differ) and one hot request (temperature 2.0, top-p 0.99) with one short plain prompt to /v1/completions, and records each
+    one raw under `sampling_probe`: whether the server accepted it, its error text when it refused, the seconds the
+    script measured, the completion tokens the server reported, the text, and the drafter's session lines that
+    the request added to server.log. The script judges nothing; orchard/sampling_probe.py reads the record. A refused
+    or cut-off request is that request's error and the run goes on. For a container, whose log reaches server.log only
+    when `save_log()` runs, the probe calls it before it takes each starting offset and after each request. These requests carry `top_p` and `seed`, which
+    the 32-token check does not send.
 
 Exit codes: 0 when the measurements completed, whatever they say. 3 cache guard. 4 the server
 exited, or never became healthy. 5 the server answered a request with an HTTP error (its body is
 printed). Any other error in this script exits non-zero through Python's traceback; the finally
 still stops the server.
 
-The server rejects logprobs and sampling parameters, so requests carry only model, prompt,
-max_tokens and temperature.
+The 32-token check carries only model, prompt, max_tokens and temperature. Only the sampling probe (i)
+sends top_p and seed, and records what the server did with them.
 
 serve_and_compare_container.py (stage 4) is copied next to this file and imports guard_cache,
 load_reference, measure, write_report and ServerHTTPError from it, so both templates measure the
@@ -81,6 +90,15 @@ REQUEST_TIMEOUT_S = 600.0
 N_TOKENS = 32
 SUITE_FILE_NAME = "prompt_suite.json"
 SUITE_MAX_TOKENS = 512        # the same number as SUITE_MAX_TOKENS in orchard/defaults.py (a test holds them equal)
+PROBE_PROMPT = "Write the opening paragraph of a short story about a lighthouse keeper who finds an unmarked boat on the rocks."
+PROBE_MAX_TOKENS = 96         # long enough for a speed figure that is mostly decoding, short enough to cost a few seconds
+PROBE_TEMPERATURE = 1.0
+PROBE_TOP_P = 0.9
+PROBE_SEEDS = (1234, 4321)    # two seeds: a server that applies sampling gives different text for them
+PROBE_HOT = {"temperature": 2.0, "top_p": 0.99, "seed": 2468}   # one hot request, recorded for a person to read; the judge does not use it (a peaked distribution matches greedy even at this temperature)
+PROBE_LOG_SETTLE_S = 0.5      # the drafter logs a session line when a request ends; wait this long before reading the log
+PROBE_LOG_LINES = 4           # keep at most this many session lines per request
+PROBE_LOG_LINE_CHARS = 600
 MARKER = ".orchard-model"
 LOG_TAIL_LINES = 60
 COHERENT_CHAR_SHARE = 0.8
@@ -398,6 +416,78 @@ def run_suite(cfg: dict, port: int, model: str, model_dir: Path, setup: dict) ->
             "skipped": skipped, "control": setup["control"]}
 
 
+def log_size(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+def session_lines_since(path: Path, offset: int) -> str:
+    """The drafter's `[dflash2-serve] ... session:` lines the server wrote after byte `offset`, at most PROBE_LOG_LINES of them."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(max(offset, 0))
+            text = f.read().decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+    # Only the session summaries count (the judge reads nothing else). Per-step lines come first and would use up the limit before the summary.
+    lines = [ln[:PROBE_LOG_LINE_CHARS] for ln in text.splitlines() if "[dflash2-serve]" in ln and " session: " in ln]
+    return "\n".join(lines[:PROBE_LOG_LINES])
+
+
+def refresh_log(refresh) -> None:
+    """Copy the server's log to server.log now, when the process can (a container: docker logs are saved to the file only by Container.save_log).
+    A failure is ignored: the probe then reads whatever the file holds."""
+    if refresh is None:
+        return
+    try:
+        refresh()
+    except Exception:                                  # noqa: BLE001  docker can fail in many ways; the request itself must still be recorded
+        pass
+
+
+def ask_probe(port: int, model: str, params: dict, log_path: Path, settle_s: float, refresh=None) -> dict:
+    """One probe request, recorded raw. `seconds` is the time the script measured around the request; `completion_tokens` is the count the
+    server reports in `usage`, or None when it reports none."""
+    entry = {"params": params, "accepted": False, "error": None, "seconds": None, "completion_tokens": None, "text": "",
+             "finish_reason": None, "drafter_log": ""}
+    refresh_log(refresh)
+    offset = log_size(log_path)
+    started = time.monotonic()
+    try:
+        body = {"model": model, "prompt": PROBE_PROMPT, "max_tokens": PROBE_MAX_TOKENS, **params}
+        data = post_json(port, "/v1/completions", body)
+        entry["seconds"] = round(time.monotonic() - started, 4)
+        choice = data["choices"][0]
+        entry["text"] = choice["text"]
+        entry["finish_reason"] = choice.get("finish_reason")
+        usage = data.get("usage")
+        tokens = usage.get("completion_tokens") if isinstance(usage, dict) else None
+        entry["completion_tokens"] = tokens if isinstance(tokens, int) and not isinstance(tokens, bool) else None
+        entry["accepted"] = True
+    except ServerHTTPError as exc:
+        entry["error"] = str(exc)[:300]
+    except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError, KeyError, IndexError, TypeError) as exc:
+        entry["error"] = f"{type(exc).__name__}: {exc}"[:300]
+    time.sleep(settle_s)
+    refresh_log(refresh)
+    entry["drafter_log"] = session_lines_since(log_path, offset)
+    return entry
+
+
+def run_sampling_probe(cfg: dict, port: int, model: str, log_path: Path, refresh=None) -> dict:
+    """Step (i): one greedy, two sampled and one hot request; the record that goes under `sampling_probe` in swap-check.json."""
+    settle = float(cfg.get("sampling_log_settle_s", PROBE_LOG_SETTLE_S))
+    sampled = {"temperature": PROBE_TEMPERATURE, "top_p": PROBE_TOP_P}
+    requests = {"greedy": ask_probe(port, model, {"temperature": 0}, log_path, settle, refresh),
+                "sampled_a": ask_probe(port, model, {**sampled, "seed": PROBE_SEEDS[0]}, log_path, settle, refresh),
+                "sampled_b": ask_probe(port, model, {**sampled, "seed": PROBE_SEEDS[1]}, log_path, settle, refresh),
+                "sampled_hot": ask_probe(port, model, dict(PROBE_HOT), log_path, settle, refresh)}
+    return {"ran": True, "model_id": cfg.get("new_model_id"), "prompt": PROBE_PROMPT, "max_tokens": PROBE_MAX_TOKENS,
+            "requests": requests}
+
+
 def coherence(text: str) -> dict:
     """Step (f). Returns the numbers and the verdict."""
     ok_chars = sum(1 for c in text if c.isalpha() or c.isdigit() or c.isspace() or c in PUNCTUATION)
@@ -433,6 +523,8 @@ def measure(cfg: dict, proc, log_path: Path, tokenizer, prompt_ids, generated_id
            "matches": matches, "forced": forced, "mismatches": mismatches}
     if suite_setup is not None:
         out["prompt_suite"] = run_suite(cfg, port, model, STAGE_DIR / "model-dir", suite_setup)
+    if cfg.get("sampling_probe"):
+        out["sampling_probe"] = run_sampling_probe(cfg, port, model, log_path, refresh=getattr(proc, "save_log", None))
     return out
 
 
@@ -503,6 +595,8 @@ def write_report(cfg: dict, run_dir: Path, cache: Path, weights_env: dict, m: di
               "result_draft": draft}
     if "prompt_suite" in m:
         report["prompt_suite"] = m["prompt_suite"]
+    if "sampling_probe" in m:
+        report["sampling_probe"] = m["sampling_probe"]
     swap_json.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
     print(json.dumps(draft, indent=2, ensure_ascii=False))
     return draft

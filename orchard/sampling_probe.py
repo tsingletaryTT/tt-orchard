@@ -1,0 +1,245 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+"""What a served configuration does with a sampled request (issue 107).
+
+Some fast decoding paths only work with greedy decoding: the speculative drafter of the Qwen3.8 bundles verifies by argmax, and the
+plugin neutralises or ignores sampling controls on those steps. A request with temperature above 0 is then slower, refused, or
+silently answered greedily. The swap template (`serve_and_compare.py`, step i) sends one greedy request and two sampled requests that
+differ only in seed, to the server that has just passed the 32-token check, and records each one raw under `sampling_probe` in
+swap-check.json. This module reads that record. It recomputes every speed from the recorded tokens and seconds and never reads a
+summary field, so a record that somebody edited cannot say more than its raw numbers do.
+
+The record is a capability statement. A sampled request that is refused or slow does not fail a stage. `problems` is only the check
+that the record is well formed.
+"""
+from __future__ import annotations
+
+import math
+
+from . import defaults, drafter_log, prompt_suite
+
+ENTRY_NAMES = ("greedy", "sampled_a", "sampled_b")
+VERDICTS = ("not-run", "malformed", "greedy-refused", "sampled-refused", "sampled-incoherent", "inconclusive", "sampled-ignored",
+            "sampled-matches-greedy",
+            "sampled-slower", "sampled-full-speed")
+
+SLOW_RATIO = 0.7        # choice: a sampled request that decodes at less than this share of the greedy speed is called slower. 1 would call
+                        # every 5 % wobble slower; the AREX-2 safe configuration against the grafted one differed by 2.95 times, so 0.7
+                        # leaves room for noise of one short request and still separates a path that falls back to the host.
+MIN_TOKENS = 16         # choice: a reply shorter than this says too little about speed, or about whether two seeds gave different text.
+
+
+def _number(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
+def problems(record) -> list[str]:
+    """Why the record is not well formed, or [] for a record that is well formed or absent."""
+    if record is None:
+        return []
+    if not isinstance(record, dict):
+        return [f"sampling_probe must be an object, got {record!r}"]
+    if not isinstance(record.get("ran"), bool):
+        return [f"sampling_probe.ran must be true or false, got {record.get('ran')!r}"]
+    if record["ran"] is False:
+        return []
+    reqs = record.get("requests")
+    if not isinstance(reqs, dict):
+        return [f"sampling_probe.requests must be an object, got {reqs!r}"]
+    out = []
+    for name in (*ENTRY_NAMES, *(("sampled_hot",) if "sampled_hot" in reqs else ())):
+        e = reqs.get(name)
+        if not isinstance(e, dict):
+            out.append(f"sampling_probe.requests.{name} is missing")
+            continue
+        if not isinstance(e.get("accepted"), bool):
+            out.append(f"sampling_probe.requests.{name}.accepted must be true or false")
+        if not isinstance(e.get("text"), str):
+            out.append(f"sampling_probe.requests.{name}.text must be a string")
+        for key in ("drafter_log", "error", "finish_reason"):
+            if e.get(key) is not None and not isinstance(e[key], str):
+                out.append(f"sampling_probe.requests.{name}.{key} must be a string or null")
+        if e.get("seconds") is not None and not _number(e["seconds"]):
+            out.append(f"sampling_probe.requests.{name}.seconds must be a number or null")
+        tokens = e.get("completion_tokens")
+        if tokens is not None and not (isinstance(tokens, int) and not isinstance(tokens, bool) and tokens >= 0):
+            out.append(f"sampling_probe.requests.{name}.completion_tokens must be a non-negative integer or null")
+        out += _params_problems(name, e.get("params"))
+        if name == "sampled_hot" and isinstance(e.get("params"), dict) and _number(e["params"].get("temperature")) and e["params"]["temperature"] <= 1:
+            out.append("sampling_probe.requests.sampled_hot.params.temperature must be above 1 for the high-temperature request")
+    seeds = [reqs[n]["params"].get("seed") for n in ("sampled_a", "sampled_b")
+             if isinstance(reqs.get(n), dict) and isinstance(reqs[n].get("params"), dict)]
+    pa, pb = ((reqs.get(n) or {}).get("params") if isinstance(reqs.get(n), dict) else None for n in ("sampled_a", "sampled_b"))
+    if isinstance(pa, dict) and isinstance(pb, dict) and {k: v for k, v in pa.items() if k != "seed"} != {k: v for k, v in pb.items() if k != "seed"}:
+        out.append("sampling_probe.requests.sampled_a and sampled_b must differ only in seed (params): another parameter differs")
+    if len(seeds) == 2 and all(isinstance(x, int) and not isinstance(x, bool) for x in seeds) and seeds[0] == seeds[1]:
+        out.append("sampling_probe.requests.sampled_a and sampled_b must carry different seeds (params.seed)")
+    return out
+
+
+def _params_problems(name: str, params) -> list[str]:
+    """The request parameters the template recorded must be the ones the probe claims: temperature 0 and nothing else for the greedy request;
+    temperature above 0, top_p above 0 and below 1, and an integer seed for each sampled request."""
+    where = f"sampling_probe.requests.{name}.params"
+    if not isinstance(params, dict):
+        return [f"{where} must be an object"]
+    t = params.get("temperature")
+    if name == "greedy":
+        if not (_number(t) and t == 0 and set(params) == {"temperature"}):
+            return [f"{where} must be exactly temperature 0 for the greedy request, got {params!r}"]
+        return []
+    out = []
+    extra = sorted(set(params) - {"temperature", "top_p", "seed"})
+    if extra:
+        out.append(f"{where} has keys the probe does not send for a sampled request: {', '.join(map(str, extra))}")
+    if not (_number(t) and t > 0):
+        out.append(f"{where}.temperature must be a number above 0 for a sampled request, got {t!r}")
+    p = params.get("top_p")
+    if not (_number(p) and 0 < p < 1):
+        out.append(f"{where}.top_p must be a number above 0 and below 1 for a sampled request, got {p!r}")
+    seed = params.get("seed")
+    if not (isinstance(seed, int) and not isinstance(seed, bool)):
+        out.append(f"{where}.seed must be an integer for a sampled request, got {seed!r}")
+    return out
+
+
+def _speed(e: dict):
+    tokens, seconds = e.get("completion_tokens"), e.get("seconds")
+    if _number(tokens) and _number(seconds) and seconds > 0 and tokens >= MIN_TOKENS:
+        return tokens / seconds
+    return None
+
+
+def _rate(entries):
+    """The drafter's accepted share over the log slices of these requests, or None when none of them holds a session line."""
+    stats = drafter_log.drafter_stats("\n".join(e.get("drafter_log") or "" for e in entries))
+    return stats["accept_rate"] if stats else None
+
+
+def _mean(values):
+    values = [v for v in values if v is not None]
+    return sum(values) / len(values) if values else None
+
+
+def _side(entries: list[dict]) -> dict:
+    return {"tokens_per_s": _mean([_speed(e) for e in entries]), "drafter_accept_rate": _rate(entries),
+            "requests": len(entries)}
+
+
+def _loops(text: str) -> bool:
+    found = prompt_suite.findings({"id": "sampled", "content": text, "error": None})
+    return any(f["kind"] in defaults.SUITE_BLOCKING_KINDS for f in found)
+
+
+def _served_by_greedy_only_loop(entries) -> bool:
+    """Independent runtime evidence that sampling was bypassed, which the text of the replies cannot give: every one of these requests left the drafter's
+    session line (`[dflash2-serve] slot N session: ...`, read by orchard/drafter_log.py) in the server log. That line is written by the DFlash2 serving
+    code, whose decoder verifies drafted tokens by argmax and never reads a request's sampling parameters (`DFlash2Decoder` asserts `sampling is None`;
+    `decode_forward` reads no sampling field; read in the `tt_metal_models` wheel of `episod/qwen3.8-27b-dflash2-p300`, 2026-10-27). A bundle whose
+    speculative loop verifies sampled tokens would write the same line, so this rule is tied to that code and has to be revisited when such a bundle exists."""
+    return all(drafter_log.drafter_stats(e.get("drafter_log") or "") is not None for e in entries)
+
+
+def _settings(entry: dict) -> str:
+    """The sampling settings a request carried, from its recorded params: "temperature 0.7, top-p 0.5, seed 1234"."""
+    p = entry.get("params") if isinstance(entry.get("params"), dict) else {}
+    return f"temperature {p.get('temperature')}, top-p {p.get('top_p')}, seed {p.get('seed')}"
+
+
+def _fmt(speed) -> str:
+    return "an unmeasured speed" if speed is None else f"{speed:.1f} tokens/s"
+
+
+# The card's wording for each verdict. It has no number: the card's Numbers table is the only place for one, and the error text of a refusal
+# stays in the evidence file.
+CARD_SENTENCES = {
+    "greedy-refused": "The server refused the greedy request of the sampling probe, so this configuration was not measured for sampling.",
+    "sampled-refused": "The server refused a sampled request (temperature above 0, top-p below 1, with a seed). The error text is in the evidence file.",
+    "sampled-incoherent": "The server accepted a sampled request, and its text repeats itself or is unreadable.",
+    "inconclusive": ("The probe could not compare the speed of greedy and sampled requests: a request had no usable token count or timing, "
+                     "a reply was too short, or a reply was empty."),
+    "sampled-ignored": ("The server accepted sampled requests, but sampling was not applied: the drafter's log shows the sampled requests were served by "
+                        "the speculative loop that verifies by argmax, so decoding is greedy."),
+    "sampled-matches-greedy": ("Sampled requests returned the greedy text or the same text for different seeds. That fits sampling not being applied, "
+                               "and it also happens when one token is eligible at every step. The probe found no sign in the log of a greedy-only decode path, so it did not confirm which."),
+    "sampled-slower": "Sampled requests decoded more slowly than greedy requests. Both speeds are in the table above.",
+    "sampled-full-speed": ("Sampled requests (temperature above 0, top-p below 1, with a seed) were served and two seeds gave different text. "
+                           "Their speed is in the table above next to the speed of greedy requests."),
+}
+
+
+CARD_SENTENCE_FIRST_TOKEN = ("The server accepted sampled requests, but sampling reached only the first token: the drafter's log shows the sampled requests "
+                             "were served by the speculative loop that verifies by argmax, so the rest of each reply is the greedy continuation of its first token.")
+
+
+def summarize(record) -> dict:
+    """`_summarize` plus `card_sentence` (the verdict's card wording, or None when the record is absent or malformed) and `first_token_only`
+    (true when the log shows the greedy-only loop served the sampled requests and the texts still differ)."""
+    out = _summarize(record)
+    return {**out, "first_token_only": out.get("first_token_only", False),
+            "card_sentence": out.get("card_sentence") or CARD_SENTENCES.get(out["verdict"])}
+
+
+def _summarize(record) -> dict:
+    """The verdict for one record: {verdict, sentence, greedy, sampled, ratio, reasons}. Checks run in this order: a refused greedy
+    request, a refused sampled request, incoherent sampled text, replies too short to judge, two seeds that gave the same text, a
+    slower sampled speed, and otherwise full speed."""
+    empty = {"greedy": None, "sampled": None, "ratio": None, "reasons": []}
+    if record is None or (isinstance(record, dict) and record.get("ran") is False):
+        return {**empty, "verdict": "not-run", "sentence": "The sampling probe did not run."}
+    reasons = problems(record)
+    if reasons:
+        return {**empty, "verdict": "malformed", "sentence": "The sampling probe record is malformed.", "reasons": reasons}
+    reqs = record["requests"]
+    g, a, b = (reqs[n] for n in ENTRY_NAMES)
+    sampled = [e for e in (a, b) if e["accepted"]]
+    out = {"greedy": _side([g]) if g["accepted"] else None, "sampled": _side(sampled) if sampled else None, "ratio": None, "reasons": []}
+    gs, ss = (out["greedy"] or {}).get("tokens_per_s"), (out["sampled"] or {}).get("tokens_per_s")
+    if gs and ss:
+        out["ratio"] = ss / gs
+    if not g["accepted"]:
+        return {**out, "verdict": "greedy-refused", "sentence": f"The server refused the greedy request: {(g.get('error') or 'no error text')[:200]}"}
+    refused = [e for e in (a, b) if not e["accepted"]]
+    if refused:
+        return {**out, "verdict": "sampled-refused",
+                "sentence": f"The server refused a sampled request ({_settings(refused[0])}): {(refused[0].get('error') or 'no error text')[:200]}"}
+    if any(not e["text"].strip() for e in (g, a, b)):
+        return {**out, "verdict": "inconclusive",
+                "sentence": "A reply had no visible text (it was empty or only white space), so the probe could not say whether sampling was applied or how fast it ran."}
+    if any(_loops(e["text"]) for e in (a, b)):
+        return {**out, "verdict": "sampled-incoherent",
+                "sentence": "The sampled request was accepted and its text repeats itself or is unreadable."}
+    long_enough = all(_number(e.get("completion_tokens")) and e["completion_tokens"] >= MIN_TOKENS for e in (a, b))
+    if not long_enough:
+        return {**out, "verdict": "inconclusive",
+                "sentence": f"A sampled reply was shorter than {MIN_TOKENS} tokens, which says too little about speed or about whether sampling was applied."}
+    matched_by_seeds, matched_greedy = a["text"] == b["text"], g["text"] in (a["text"], b["text"])
+    evidence = _served_by_greedy_only_loop((a, b))        # read from the log, independently of what the texts say
+    if evidence and not matched_by_seeds:
+        return {**out, "verdict": "sampled-ignored", "first_token_only": True, "card_sentence": CARD_SENTENCE_FIRST_TOKEN,
+                "sentence": ("The two seeds gave different text, but the drafter's own session line is in the log of each sampled request, so the "
+                             "DFlash2 speculative loop served them. That loop samples the first token and verifies every later token by argmax, so "
+                             "sampling reached only the first token and the rest of each reply is the greedy continuation of it. "
+                             f"Greedy decoded at {_fmt(gs)}.")}
+    if matched_by_seeds or matched_greedy:
+        how = ("two requests that differ only in seed returned the same text" if matched_by_seeds
+               else "a sampled request returned the greedy text")
+        if evidence:
+            return {**out, "verdict": "sampled-ignored",
+                    "sentence": (f"The server accepted the sampled requests, but {how}. The drafter's own session line is in the log of each sampled "
+                                 "request, so the DFlash2 speculative loop served them, and that loop verifies drafted tokens by argmax. "
+                                 f"Sampling was not applied, so decoding was greedy. Greedy decoded at {_fmt(gs)}.")}
+        return {**out, "verdict": "sampled-matches-greedy",
+                "sentence": (f"The server accepted the sampled requests, but {how}. That fits sampling not being applied. It also happens when "
+                             "the most likely token is above the top-p cut at every step, so one token is eligible, at any temperature. The probe did not "
+                             f"confirm which: the log of the sampled requests has no sign of a greedy-only decode path. Greedy decoded at {_fmt(gs)}.")}
+    if any(_speed(e) is None for e in (g, a, b)):
+        return {**out, "verdict": "inconclusive",
+                "sentence": ("The probe could not compare speeds: a request has no usable token count or timing, or a reply was shorter "
+                             f"than {MIN_TOKENS} tokens.")}
+    if out["ratio"] is not None and out["ratio"] < SLOW_RATIO:
+        return {**out, "verdict": "sampled-slower",
+                "sentence": (f"Sampled requests decoded at {_fmt(ss)} against {_fmt(gs)} for greedy requests, "
+                             f"{1 / out['ratio']:.2f} times slower.")}
+    return {**out, "verdict": "sampled-full-speed",
+            "sentence": f"Sampled requests decoded at {_fmt(ss)} against {_fmt(gs)} for greedy requests, and two seeds gave different text."}

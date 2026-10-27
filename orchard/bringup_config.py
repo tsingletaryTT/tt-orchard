@@ -21,12 +21,14 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from orchard import telegraph as _telegraph
 from orchard.agent import SECRET_NAME
 from orchard.tiers import SENTINEL, _unknown_key_message
 
 TOP_KEYS = {"runs_root", "tiers", "cache_root", "hf_home", "operator_home", "gozer", "required_chips",
             "skills_dirs", "package_format", "package_namespace", "package_models_root", "min_free_gb",
-            "reference_python", "demo_python", "env", "coder", "tt_model_root", "lab", "mode", "four_chip_package"}
+            "reference_python", "demo_python", "env", "coder", "tt_model_root", "lab", "mode", "four_chip_package",
+            "telegraph"}
 # Where a run's hardware tests run: "local" (this box; the coder is parked when a test needs its boards) or
 # "lab" (the [lab] box; the coder is never parked). `tt-orchard bringup --mode` overrides it per run.
 MODES = ("local", "lab")
@@ -97,6 +99,7 @@ class BringupConfig:
     lab: Lab | None = None
     mode: str = "local"
     four_chip_package: str | None = None     # stage 4's 4-chip container, when several installed ones fit
+    telegraph: _telegraph.Config = field(default_factory=_telegraph.Config)   # the opt-in outside helper (off by default)
 
 
 def _strings(value, out: list[str]) -> list[str]:
@@ -235,6 +238,11 @@ def load(path) -> BringupConfig:
     if mode == "lab" and lab is None:
         raise BringupConfigError('mode = "lab" needs a [lab] table (host and root of the lab box)')
 
+    try:
+        tele = _telegraph.load(raw.get("telegraph"), base=base)
+    except _telegraph.ConfigError as exc:
+        raise BringupConfigError(str(exc)) from exc
+
     return BringupConfig(
         runs_root=where(_required(raw, "runs_root"), "runs_root"),
         coder=coder,
@@ -254,6 +262,7 @@ def load(path) -> BringupConfig:
         lab=lab,
         mode=mode,
         four_chip_package=_package_id(raw["four_chip_package"]) if "four_chip_package" in raw else None,
+        telegraph=tele,
     )
 
 
