@@ -51,6 +51,10 @@ def test_the_meter_is_redrawn_on_every_poll_and_says_unknown_after_an_outage():
     poll = fn_body(js, "async function pollTelegraph")
     assert poll.index("renderSpendMeter(S.telegraph)") < poll.index("renderTelegraph()")     # outside the view's change guard
     assert "renderSpendMeter(null)" in poll and "STALE_MS" in poll and "S.tgOk" in poll
+    # staleness is judged before the request is awaited, so a request that never answers cannot keep an old amount on screen
+    assert poll.index("renderSpendMeter(null)") < poll.index("await api(")
+    assert "timeout: TG_TIMEOUT_MS" in poll and "S.tgPending" in poll
+    assert "AbortController" in fn_body(js, "async function api") and "ctl.abort()" in fn_body(js, "async function api")
     meter = fn_body(js, "function renderSpendMeter")
     assert "spend unknown" in meter and 'dataset.tone = "bad"' in meter
     runs = fn_body(js, "async function refreshRuns")
@@ -64,7 +68,7 @@ def test_the_view_never_sends_anything_and_builds_text_with_text_nodes():
     block = js[start:js.index("// ---- machine health")]
     assert "body:" not in block and "method" not in block and "POST" not in block
     assert "innerHTML" not in block and "insertAdjacentHTML" not in block and "eval(" not in block
-    assert block.count('api("') == 1 and 'api("/api/telegraph")' in block
+    assert block.count('api("') == 1 and 'api("/api/telegraph", { timeout: TG_TIMEOUT_MS })' in block
 
 
 def test_every_emoji_the_telegraph_script_adds_is_none():

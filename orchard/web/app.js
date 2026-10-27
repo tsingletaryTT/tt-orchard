@@ -14,7 +14,7 @@ const S = {
   meta: null, runs: [], launches: [], machine: null, selected: null, detail: null,
   tab: "feed", source: null, feedSeen: new Set(), feedFilter: "", follow: true,
   ledgerAfter: 0, ledgerRows: [], ledgerFilter: "", ledgerFirst: {}, file: null, lastOk: 0, startingRun: null,
-  scene: null, view: "orchard", hw: null, health: null, leases: null,
+  scene: null, view: "orchard", hw: null, health: null, leases: null, tgStart: Date.now(), tgOk: 0, tgPending: false,
 };
 
 // ---- small helpers ------------------------------------------------------------------------------
@@ -117,17 +117,25 @@ async function api(path, opts) {
     init.headers["X-Orchard-Token"] = S.meta ? S.meta.token : "";
     init.body = JSON.stringify(opts.body);
   }
+  let timer = null;
+  if (opts && opts.timeout) {            // an optional limit: the request is aborted and counts as a failure
+    const ctl = new AbortController();
+    init.signal = ctl.signal;
+    timer = setTimeout(() => ctl.abort(), opts.timeout);
+  }
   let resp;
   try {
     resp = await fetch(path, init);
   } catch (err) {
+    if (timer) clearTimeout(timer);
     setConn("offline");
     throw new Error("The UI server cannot be reached. Is `tt-orchard ui` still running?");
   }
   S.lastOk = Date.now();
   setConn("live");
   const isJson = (resp.headers.get("Content-Type") || "").includes("application/json");
-  const data = isJson ? await resp.json() : await resp.text();
+  const data = isJson ? await resp.json() : await resp.text();      // the limit covers the body too
+  if (timer) clearTimeout(timer);
   if (!resp.ok) throw new Error((data && data.error) || `${resp.status} ${resp.statusText}`);
   return data;
 }
@@ -251,14 +259,23 @@ function renderSpendMeter(t) {
   el.title = t.meter.title;
 }
 
+const TG_TIMEOUT_MS = 25000;            // a poll that has not answered by now is dropped, so a hung server cannot block later polls
+
 async function pollTelegraph() {
+  // Staleness is judged first, before any waiting: a request that never answers would never reach a catch block, and the last
+  // dollar amount would stay on screen. Every poll tick therefore checks how old the amount is.
+  if (Date.now() - (S.tgOk || S.tgStart) > STALE_MS) renderSpendMeter(null);
+  if (S.tgPending) return;               // one request at a time
+  S.tgPending = true;
   try {
-    S.telegraph = await api("/api/telegraph");
+    S.telegraph = await api("/api/telegraph", { timeout: TG_TIMEOUT_MS });
     S.tgOk = Date.now();
     renderSpendMeter(S.telegraph);
     if (S.view === "telegraph") renderTelegraph();
   } catch (err) {
-    if (Date.now() - (S.tgOk || 0) > STALE_MS) renderSpendMeter(null);
+    // the next tick's check above marks the amount unknown once it is old enough
+  } finally {
+    S.tgPending = false;
   }
 }
 
