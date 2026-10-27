@@ -41,11 +41,11 @@ kernel.
 | Setting | Default | Flag |
 |---|---|---|
 | calls per attempt | 6 | `--hw-checks N` (0 turns the tool off), `--no-agent-hw` (the same as 0) |
-| chip seconds per attempt | 300 | `--hw-lease-s S` |
+| chip seconds per attempt | 600 (120 reserved for the stop and the reset) | `--hw-lease-s S` |
 | one run's hard timeout | 240 s | `--hw-call-timeout-s S` |
 | wait for a busy board | 120 s | `--hw-wait-s S` |
 | between tries while busy | 10 s | not a flag |
-| lease seconds that must be left for a call | 60 | not a flag |
+| run seconds that must be left for a call, after the 120 s cleanup reserve | 60 | not a flag |
 
 The numbers are choices. No population of attempts was measured.
 

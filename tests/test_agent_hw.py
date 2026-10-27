@@ -90,7 +90,7 @@ def queued(**kw):
 def test_the_defaults_are_six_calls_a_lease_cap_a_call_timeout_and_a_120_s_wait():
     p = hwtool.HwPolicy()
     assert (p.max_calls, p.wait_s) == (6, 120.0)
-    assert p.lease_s == 300.0 and p.call_timeout_s == 240.0 and p.enabled is True
+    assert p.lease_s == 600.0 and p.call_timeout_s == 240.0 and p.enabled is True
     assert hwtool.HwPolicy(max_calls=0).enabled is False
 
 
@@ -103,7 +103,7 @@ def test_a_pass_says_pass_the_numbers_the_times_and_what_is_left():
     assert text.splitlines()[0].startswith("hardware_check 1 of 6: PASS")
     assert "pcc_min 0.99995" in text
     assert "47.0 s in all" in text and "device 3.2 s" in text
-    assert "5 calls left" in text and "253 lease seconds left" in text      # 300 - 47
+    assert "5 calls left" in text and "553 lease seconds left" in text      # 600 - 47
 
 
 def test_a_numeric_failure_gives_the_first_line_and_the_numbers_line():
@@ -152,7 +152,7 @@ def test_a_call_waits_no_longer_than_the_policy_allows_for_the_run():
 
 def test_the_run_timeout_is_cut_to_the_lease_seconds_that_are_left():
     w = World([(good_hw(elapsed_s=200.0), None, "")])
-    c = w.check(lease_s=300.0, call_timeout_s=240.0)
+    c = w.check(lease_s=300.0, call_timeout_s=240.0, cleanup_s=0.0)
     c.call({})
     c.call({})
     assert w.runs[1] == (2, 100.0)                  # 300 - 200 is less than 240
@@ -187,7 +187,7 @@ def test_the_cap_on_calls_refuses_the_next_one_and_runs_nothing():
 
 def test_the_cap_on_lease_seconds_refuses_the_next_call_and_runs_nothing():
     w = World([(good_hw(elapsed_s=250.0), None, "")])
-    c = w.check(lease_s=300.0, min_call_s=60.0)
+    c = w.check(lease_s=300.0, min_call_s=60.0, cleanup_s=0.0)
     c.call({})
     text = c.call({})
     assert "lease seconds" in text and "50" in text and "simulator" in text
@@ -196,18 +196,18 @@ def test_the_cap_on_lease_seconds_refuses_the_next_call_and_runs_nothing():
 
 def test_a_call_needs_the_minimum_call_time_to_be_left_of_the_lease_cap():
     w = World([(good_hw(elapsed_s=240.0), None, "")])
-    c = w.check(lease_s=300.0, min_call_s=60.0)
+    c = w.check(lease_s=300.0, min_call_s=60.0, cleanup_s=0.0)
     c.call({})
     assert len(w.runs) == 1 and "lease seconds" in c.call({})              # 60 s left is enough: it is not refused
     w2 = World([(good_hw(elapsed_s=241.0), None, "")])
-    c2 = w2.check(lease_s=300.0, min_call_s=60.0)
+    c2 = w2.check(lease_s=300.0, min_call_s=60.0, cleanup_s=0.0)
     c2.call({})
     assert "lease seconds" in c2.call({}) and len(w2.runs) == 1            # 59 s left is not
 
 
 def test_a_boundary_of_exactly_the_minimum_runs_the_call():
     w = World([(good_hw(elapsed_s=240.0), None, "")])
-    c = w.check(lease_s=300.0, min_call_s=60.0)
+    c = w.check(lease_s=300.0, min_call_s=60.0, cleanup_s=0.0)
     c.call({})
     text = c.call({})
     assert len(w.runs) == 2 and text.startswith("hardware_check 2 of 6")
@@ -816,7 +816,7 @@ def test_a_call_that_ends_the_attempt_by_interrupt_still_leaves_a_record(tmp_pat
 def test_the_policy_comes_from_the_flags_with_the_defaults():
     ns = argparse.Namespace()
     p = kp.hw_policy_from_args(ns)
-    assert (p.max_calls, p.lease_s, p.call_timeout_s, p.wait_s) == (6, 300.0, 240.0, 120.0)
+    assert (p.max_calls, p.lease_s, p.call_timeout_s, p.wait_s) == (6, 600.0, 240.0, 120.0)
     p = kp.hw_policy_from_args(argparse.Namespace(hw_checks=2, hw_lease_s=100, hw_call_timeout_s=90, hw_wait_s=30))
     assert (p.max_calls, p.lease_s, p.call_timeout_s, p.wait_s) == (2, 100.0, 90.0, 30.0)
 

@@ -341,7 +341,7 @@ def _parser() -> argparse.ArgumentParser:
     kp.add_argument("--no-agent-hw", dest="no_agent_hw", action="store_true",
                     help="offer the agent no hardware tool: the same as --hw-checks 0, for measuring the coder alone")
     kp.add_argument("--hw-lease-s", dest="hw_lease_s", type=float, metavar="S",
-                    help="chip seconds one attempt's hardware checks may use in all (default 300)")
+                    help="chip seconds one attempt's hardware checks may use in all (default 600; 120 s of it are reserved for the stop and the reset)")
     kp.add_argument("--hw-call-timeout-s", dest="hw_call_timeout_s", type=float, metavar="S",
                     help="the longest one hardware check may run before the probe stops it (default 240; the stall "
                          "watcher usually stops a hang sooner)")

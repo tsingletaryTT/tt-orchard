@@ -10,9 +10,10 @@ and stall watcher (orchard/kernelprobe.py, `make_hardware_check`).
 Rules, each tested in tests/test_agent_hw.py:
 - The tool takes at most a short `note`. Any other argument is an error and nothing runs.
 - At most `max_calls` calls per attempt (a call that waits for a busy board counts, so the agent cannot poll for ever;
-  a call refused before it reached the lease does not) and at most `lease_s` seconds of chip time in all. A call
-  needs `min_call_s` seconds of the lease budget to be left, and its run is stopped at `call_timeout_s` or at the
-  seconds left, whichever is less.
+  a call refused before it reached the lease does not) and at most `lease_s` seconds of chip time in all. `cleanup_s`
+  (gozer's term grace, which the stop and the chip reset can use in full) is reserved: a run is stopped at
+  `call_timeout_s` or at the seconds left minus `cleanup_s`, whichever is less, and a call needs `min_call_s` seconds of
+  run time left after that reserve. So the worst call (the run until its deadline, then the cleanup) fits the cap.
 - One call at a time. A second call while one runs is answered at once.
 - A busy board is retried for at most `wait_s` seconds. Each try that the probe's gozer call queued has its ticket
   cancelled by that call, so no ticket stays in the queue. The agent is then told to go on with the simulator.
@@ -39,11 +40,12 @@ VIOLATIONS_SHOWN = 5
 class HwPolicy:
     """The limits of one attempt's hardware checks. `max_calls` 0 turns the tool off."""
     max_calls: int = 6
-    lease_s: float = 300.0          # chip seconds in all: the seconds the probe's gozer runs took, reset included
+    lease_s: float = 600.0          # chip seconds in all: the seconds the probe's gozer runs took, reset included
     call_timeout_s: float = 240.0   # a run's backstop; the stall watcher usually stops a hang sooner
     wait_s: float = 120.0           # how long one call waits for a busy board
     poll_s: float = 10.0            # between tries while the board is busy
-    min_call_s: float = 60.0        # lease seconds that must be left for a call to start
+    min_call_s: float = 60.0        # seconds of run time that must be left, after the cleanup reserve, for a call to start
+    cleanup_s: float = 120.0        # reserved for the stop and the release: gozer's term grace, which the reset can fill
 
     @property
     def enabled(self) -> bool:
@@ -51,7 +53,8 @@ class HwPolicy:
 
     def as_dict(self) -> dict:
         return {"max_calls": self.max_calls, "lease_s": self.lease_s, "call_timeout_s": self.call_timeout_s,
-                "wait_s": self.wait_s, "poll_s": self.poll_s, "min_call_s": self.min_call_s}
+                "wait_s": self.wait_s, "poll_s": self.poll_s, "min_call_s": self.min_call_s,
+                "cleanup_s": self.cleanup_s}
 
 
 def schema(policy: HwPolicy) -> dict:
@@ -150,10 +153,12 @@ class HardwareCheck:
         if self.counted >= p.max_calls:
             return self._refuse(note, f"no hardware checks left: {self.counted} of {p.max_calls} used in this attempt. "
                                       "Use the simulator (the check after each write).")
-        left = p.lease_s - self.lease_used
+        left = p.lease_s - self.lease_used - p.cleanup_s        # run time that is left once the release is reserved
         if left < p.min_call_s:
-            return self._refuse(note, f"only {max(left, 0):.0f} lease seconds are left of {p.lease_s:.0f} and a call "
-                                      f"needs at least {p.min_call_s:.0f}. Use the simulator (the check after each write).")
+            return self._refuse(note, f"only {max(p.lease_s - self.lease_used, 0):.0f} lease seconds are left of "
+                                      f"{p.lease_s:.0f}; {p.cleanup_s:.0f} are reserved for the cleanup (the stop and the "
+                                      f"chip reset) and a call needs at least {p.min_call_s:.0f} to run. Use the "
+                                      "simulator (the check after each write).")
         blocked, sha = self.prepare(self.counted + 1)
         if blocked is not None:
             return self._blocked(note, blocked, sha)
@@ -164,7 +169,7 @@ class HardwareCheck:
         started = False
         try:
             while True:
-                timeout = min(p.call_timeout_s, p.lease_s - self.lease_used)
+                timeout = min(p.call_timeout_s, p.lease_s - self.lease_used - p.cleanup_s)
                 waited = self.clock() - start
                 hw, event, text = self.run(k, timeout)
                 if event != "queued":

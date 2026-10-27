@@ -1513,7 +1513,7 @@ Flags:
 - `--allow-slow-coder`: run even when the coder is decoding far below its best speed. The report records each
   measurement.
 - `--hw-checks` (N), `--no-agent-hw`, `--hw-lease-s` (S), `--hw-call-timeout-s` (S), `--hw-wait-s` (S): the limits of the agent's
-  `hardware_check` tool (next paragraph). Defaults: 6 calls, 300 lease seconds, 240 s per call, 120 s of waiting for a
+  `hardware_check` tool (next paragraph). Defaults: 6 calls, 600 lease seconds (120 of them reserved for the stop and the chip reset), 240 s per call, 120 s of waiting for a
   busy board. `--hw-checks 0` and `--no-agent-hw` offer no tool, which measures the coder alone.
 
 Every attempt can call a tool, `hardware_check`, that runs its current `kernel.py` on one chip. The agent's shell cannot
