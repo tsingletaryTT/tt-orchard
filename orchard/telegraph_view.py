@@ -308,6 +308,15 @@ def _host(endpoint: str, redact) -> str:
     return redact(host)
 
 
+TS_MAX = 4e10                         # year 3200: a larger number is not a time stamp a browser can show
+
+
+def _time(value):
+    """A time stamp in seconds, or None when it is not a number in a range a date can show (the page would print Invalid Date)."""
+    v = _num(value, None)
+    return v if v is not None and math.isfinite(v) and 0 <= v <= TS_MAX else None
+
+
 def _reservation_row(r: dict, redact) -> dict:
     cost = r.get("cost_usd")
     return {
@@ -335,7 +344,7 @@ def _call_row(r: dict, reserves: dict, verdict: dict, redact) -> dict:
                   "estimate in the recorded numbers." if basis == "worst case" else
                   "The provider reported no usage. The numbers are an estimate, and the caps count them as recorded.")
     return {
-        "ts": _num(r.get("ts"), None), "call_id": _clean(r.get("call_id"), redact, 32),
+        "ts": _time(r.get("ts")), "call_id": _clean(r.get("call_id"), redact, 32),
         "problem": _clean(r.get("problem"), redact, TEXT_MAX), "model": _clean(r.get("model"), redact, TEXT_MAX),
         "tokens_in": int(_num(r.get("tokens_in"))), "tokens_out": int(_num(r.get("tokens_out"))),
         "latency_s": float(_num(r.get("latency_s"))), "held": False,

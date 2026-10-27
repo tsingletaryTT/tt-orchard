@@ -180,3 +180,39 @@ def test_the_meter_title_starts_with_the_meters_own_text(root, tmp_path):
     out = app_for(root, cfg).telegraph()
     assert out["state"] == "near"
     assert out["meter"]["title"].startswith(out["meter"]["text"])
+
+
+def test_a_negative_amount_written_as_a_string_is_refused_even_when_the_sum_stays_positive(root, tmp_path):
+    cfg, d, _ = setup(tmp_path)
+    write_records(d, [{**ok_record("a1", "p", 1, 1), "latency_s": 10.0}, {**ok_record("a2", "p", 1, 1), "latency_s": "-5"}])
+    assert app_for(root, cfg).telegraph()["state"] == "problem"
+
+
+def test_a_derived_number_below_zero_is_refused_before_it_is_cached(root, tmp_path, monkeypatch):
+    cfg, d, _ = setup(tmp_path)
+    write_records(d, [ok_record("a1", "p", 1, 1)])
+    real = tg.accounting
+    monkeypatch.setattr(tg, "accounting", lambda recs: {**real(recs), "tokens": -4})
+    assert app_for(root, cfg).telegraph()["state"] == "problem"
+
+
+def test_a_run_path_that_cannot_be_looked_at_is_an_error_and_not_a_missing_ledger(tmp_path):
+    not_a_directory = tmp_path / "file"
+    not_a_directory.write_text("x")
+    assert view.run_spend(not_a_directory) == {"error": "the run's ledger cannot be read"}
+    assert view.run_spend(tmp_path / "missing") is None
+
+
+@pytest.mark.parametrize("ts", [-5.0, 1e300, 4e12])
+def test_a_time_stamp_outside_a_sane_range_is_not_shown_as_a_time(root, tmp_path, ts):
+    cfg, d, _ = setup(tmp_path)
+    write_records(d, [{**ok_record("a1", "p", 1, 1), "ts": ts}])
+    out = app_for(root, cfg).telegraph()
+    assert out["recent"][0]["ts"] is None                      # the page would print "Invalid Date" for these
+    strict_json(out)
+
+
+def test_an_ordinary_time_stamp_is_kept(root, tmp_path):
+    cfg, d, _ = setup(tmp_path)
+    write_records(d, [{**ok_record("a1", "p", 1, 1), "ts": 1_800_000_000.5}])
+    assert app_for(root, cfg).telegraph()["recent"][0]["ts"] == 1_800_000_000.5
