@@ -337,8 +337,6 @@ def decision_problems(stage_dir, run_dir) -> list[str]:
         return [f"{DECISION_FILE} is not a JSON object"]
     if d.get("choice") not in CHOICES:
         return [f"{DECISION_FILE} choice must be one of {', '.join(CHOICES)}, got {d.get('choice')!r}"]
-    if d.get("flag") is not None and d.get("flag") not in FLAGS:
-        return [f"{DECISION_FILE} flag must be null or one of {', '.join(FLAGS)}, got {d.get('flag')!r}"]
     if not isinstance(d.get("reason"), str) or not d["reason"].strip():
         return [f"{DECISION_FILE} needs a reason for the choice"]
     override = read_override(run_dir)
@@ -348,8 +346,7 @@ def decision_problems(stage_dir, run_dir) -> list[str]:
     if current is None:
         return [f"{DECISION_FILE} cannot be checked: the swap check it was made from is missing or unreadable"]
     variant = variant_side(sd)
-    again = decide(need(run_dir, override), current, variant,
-                   variant_note=d.get("variant_note") if isinstance(d.get("variant_note"), str) else None)
+    again = decide(need(run_dir, override), current, variant)      # the note only words the reason; the choice and the flag do not read it
     out = []
     if again["choice"] != d["choice"]:
         out.append(f"{DECISION_FILE} chose {d['choice']!r}, but the files on disk give {again['choice']!r}: {again['reason']}")

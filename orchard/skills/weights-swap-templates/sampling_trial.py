@@ -121,9 +121,6 @@ def main() -> int:
         if not path.exists():
             fail(f"{path} does not exist")
     run_dir = Path(cfg["run_dir"]).resolve()
-    # A killed earlier run can leave files that this run's evidence list would name without having made them.
-    shutil.rmtree(HERE / "variant", ignore_errors=True)
-    (HERE / RESULT).unlink(missing_ok=True)
     steps: list = []
     cache = Path(cfg["tt_cache"])
     cache = cache.with_name(cache.name + CACHE_SUFFIX)
