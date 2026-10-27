@@ -20,8 +20,8 @@ Rules, each tested in tests/test_agent_hw.py:
 - Every call is recorded, and the probe writes the record into attempt.json and the report.
 
 The choices (6 calls, 300 lease seconds, 240 s per call, 120 s of waiting, 10 s between tries, 60 s minimum) are not
-measured against a population of attempts. A run takes about 3 s on the chip and about 45 s with the lease and the
-reset that its release makes (docs/superpowers/specs/2026-10-27-agent-hardware-check-design.md)."""
+measured against a population of attempts. A whole call took about 47 s when measured (the device was open for about
+0.5 s; the rest is the lease and the reset that its release makes) (docs/superpowers/specs/2026-10-27-agent-hardware-check-design.md)."""
 from __future__ import annotations
 
 import threading
@@ -59,7 +59,7 @@ def schema(policy: HwPolicy) -> dict:
     return {"type": "function", "function": {
         "name": "hardware_check",
         "description": ("Run your current kernel.py on a Tenstorrent chip and get the result of the probe's hardware check. "
-                        "It takes about 3 s to run and about 45 s with the lease and the chip reset, and each attempt has "
+                        "A whole call takes about 47 s (the kernel runs in under a second; the rest is the lease and the chip reset), and each attempt has "
                         f"a limited number of calls ({policy.max_calls} in this attempt; every answer says how many are "
                         "left). The simulator check after each write is much cheaper: use this for a kernel the "
                         "simulator cannot run (a FAIL: sim_gap), for a numeric check at hardware precision after the "

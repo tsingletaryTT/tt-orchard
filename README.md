@@ -1521,8 +1521,8 @@ run gozer, so the probe does it: each call copies the file into a probe-owned di
 gate and the sha256 check on the copy, and runs the shipped harness through `gozer run --chips 1` under the stall watcher,
 the way the probe's own hardware phase does. The tool takes at most a short `note`; the agent supplies no command and no
 path, and the probe judges the result. The answer gives PASS or FAIL, the first error, the numbers, the seconds in all
-and the device seconds, and the calls and lease seconds left. A run takes about 3 s on the chip and about 45 s with the
-lease and the reset the release makes, so the simulator stays the cheap path. A board that is busy is retried for
+and the device seconds, and the calls and lease seconds left. A whole call took about 47 s when measured (the device was open for about
+0.5 s; the rest is the lease and the reset the release makes), so the simulator stays the cheap path. A board that is busy is retried for
 `--hw-wait-s` seconds (each queued ticket is cancelled) and then the agent is told to go on with the simulator. A hang
 stops the call (the lease release resets the chip) and turns the tool off for the rest of the attempt. Calls are recorded in
 each `attempt.json` under `agent_hw` and listed in the report with the chip time they cost. The lease is taken for each

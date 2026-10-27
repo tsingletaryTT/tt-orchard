@@ -988,7 +988,7 @@ def test_the_skill_stays_at_100_lines_with_one_fenced_block():
 def test_the_skill_names_the_tool_its_cost_its_uses_and_the_simulator_as_the_cheap_path():
     flat = skill_flat()
     assert "`hardware_check`" in flat
-    assert "about 3 seconds to run" in flat and "about 45 seconds" in flat
+    assert "about 47 seconds" in flat and "about 3 seconds" not in flat      # measured: a whole call, chip reset included
     assert "ttl.raw_element_read" in flat
     assert "hardware precision" in flat and "performance" in flat
     assert "the simulator is much cheaper" in flat
@@ -1006,3 +1006,9 @@ def test_the_skill_no_longer_tells_the_agent_that_no_device_may_be_touched():
 def test_the_harness_writes_device_seconds_into_its_result():
     src = (kp.TEMPLATES / "kernel_harness.py").read_text()
     assert 'result["device_s"]' in src and "time.monotonic()" in src
+
+
+def test_the_tools_own_description_states_the_measured_cost_of_a_call():
+    desc = hwtool.schema(hwtool.HwPolicy())["description"] if "description" in hwtool.schema(hwtool.HwPolicy()) else \
+        hwtool.schema(hwtool.HwPolicy())["function"]["description"]
+    assert "about 47 s" in desc and "about 3 s" not in desc
