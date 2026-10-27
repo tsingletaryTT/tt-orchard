@@ -109,6 +109,33 @@ def _http_ok(host: str) -> bool:
     return addr.is_loopback or addr.is_private
 
 
+def _plain_json(value, where: str, depth: int = 0) -> None:
+    """Raise ConfigError unless `value` is plain JSON data: strings, finite numbers, booleans, null, lists, and tables with string
+    keys. TOML dates and times, other objects, and a table nested too deeply are refused by name."""
+    if depth > 20:
+        raise ConfigError(f"{where} is nested too deeply")
+    if value is None or isinstance(value, (str, bool)):
+        return
+    if isinstance(value, int):
+        return
+    if isinstance(value, float):
+        if value != value or value in (float("inf"), float("-inf")):
+            raise ConfigError(f"{where} holds a number that is not finite")
+        return
+    if isinstance(value, list):
+        for i, item in enumerate(value):
+            _plain_json(item, f"{where}[{i}]", depth + 1)
+        return
+    if isinstance(value, dict):
+        for k, v in value.items():
+            if not isinstance(k, str):
+                raise ConfigError(f"{where} has a key that is not a string")
+            _plain_json(v, f"{where}.{k}", depth + 1)
+        return
+    raise ConfigError(f"{where} must be plain JSON data (strings, numbers, booleans, null, lists and tables), "
+                      f"not {type(value).__name__}")
+
+
 def load(table: dict | None, *, base: Path) -> Config:
     """The `[telegraph]` table as a Config. None, an empty table or `enabled = false` is off and is not checked further.
     A relative key_file is relative to `base`, the config file's directory."""
@@ -185,6 +212,7 @@ def load(table: dict | None, *, base: Path) -> Config:
     extra = table.get("extra_body", {})
     if not isinstance(extra, dict):
         raise ConfigError("telegraph.extra_body must be a table")
+    _plain_json(extra, "telegraph.extra_body")
     for name in RESERVED_BODY:
         if name in extra:
             raise ConfigError(f"telegraph.extra_body cannot set {name}; telegraph sets it")
@@ -447,10 +475,12 @@ class Telegraph:
         base = {"call_id": uuid.uuid4().hex[:12], "problem": problem, "model": model,
                 "prompt_chars": len(prompt), "prompt_sha256": sha}
         if hit is not None:
-            self._append({**base, "ts": self.clock(), "outcome": "ok", "cached": True, "origin": hit.get("call_id"),
-                          "tokens_in": 0, "tokens_out": 0, "latency_s": 0.0, "cost_usd": 0.0,
-                          "reply_file": hit["reply_file"]})
-            return Answer(True, hit["text"], call_id=base["call_id"], model=model, cached=True, cost_usd=0.0)
+            recorded = self._append({**base, "ts": self.clock(), "outcome": "ok", "cached": True,
+                                     "origin": hit.get("call_id"), "tokens_in": 0, "tokens_out": 0, "latency_s": 0.0,
+                                     "cost_usd": 0.0, "reply_file": hit["reply_file"]})
+            return Answer(True, hit["text"], call_id=base["call_id"], model=model, cached=True, cost_usd=0.0,
+                          reason="" if recorded else ("the answer came from the cache but the ledger could not record "
+                                                      "this use, so it cannot be reported"))
         if key_problem:
             return self._refuse(base, "no-key", key_problem)
         worst_in = len(json.dumps(body).encode("utf-8")) + REQUEST_FRAMING_TOKENS     # a token is at least one byte
@@ -554,7 +584,8 @@ class Telegraph:
         if isinstance(value, str):
             return redact(value, hostname=self.hostname, home=self.home, secrets=(key,) if key else ())
         if isinstance(value, dict):
-            return {k: self._clean_tree(v, key) for k, v in value.items()}
+            return {(self._clean_tree(k, key) if isinstance(k, str) else k): self._clean_tree(v, key)
+                    for k, v in value.items()}
         if isinstance(value, list):
             return [self._clean_tree(v, key) for v in value]
         return value
@@ -611,7 +642,7 @@ class Telegraph:
         tin = usage[0] if usage else (len(prompt) + len(SYSTEM)) // 3
         tout = usage[1] if usage else len(text) // 3
         price = self.cfg.prices.get(model)
-        cost = round(tin * price[0] / 1e6 + tout * price[1] / 1e6, 9) if price else None
+        cost = None if estimated else (round(tin * price[0] / 1e6 + tout * price[1] / 1e6, 9) if price else None)
         reply_file = f"replies/{base['call_id']}.txt"
         self._write(self.dir / reply_file, text)
         recorded = self._append({**rec, "outcome": "ok", "tokens_in": tin, "tokens_out": tout, "cost_usd": cost,
@@ -671,21 +702,26 @@ class Telegraph:
     @contextlib.contextmanager
     def _ledger_lock(self):
         """An exclusive lock on the ledger directory, held while the budget is checked and a reservation is written, so two
-        processes cannot both spend the same allowance. Raises LedgerUnavailable when the directory or the lock cannot be used."""
+        processes cannot both spend the same allowance. Raises LedgerUnavailable when the directory or the lock cannot be used
+        (a lock that cannot be taken included); the descriptor is always closed."""
         try:
             self.dir.mkdir(parents=True, exist_ok=True, mode=0o700)
             fd = os.open(self.dir / LOCK, os.O_WRONLY | os.O_CREAT, 0o600)
-            os.fchmod(fd, 0o600)
         except OSError as exc:
             raise LedgerUnavailable(type(exc).__name__) from exc
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            try:
+                os.fchmod(fd, 0o600)
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            except OSError as exc:
+                raise LedgerUnavailable(type(exc).__name__) from exc
             yield
         finally:
             try:
-                fcntl.flock(fd, fcntl.LOCK_UN)
-            finally:
-                os.close(fd)
+                fcntl.flock(fd, fcntl.LOCK_UN)          # closing the descriptor releases the lock if this fails
+            except OSError:
+                pass
+            os.close(fd)
 
     def _quarantine_torn_tail(self) -> None:
         """Called with the lock held. A last line with no line break is a write that was cut short. It moves to a private
@@ -701,15 +737,21 @@ class Telegraph:
         if data and not data.endswith(b"\n"):
             cut = data.rfind(b"\n") + 1
             name = f"{LEDGER}.torn-{uuid.uuid4().hex[:8]}"
+            fragment = data[cut:]
             try:
                 fd = os.open(self.dir / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                 try:
-                    os.write(fd, data[cut:])
+                    if os.write(fd, fragment) != len(fragment):
+                        raise OSError("short write of the torn tail")
                     os.fsync(fd)
                 finally:
                     os.close(fd)
-                os.truncate(path, cut)
+                os.truncate(path, cut)                   # only after the whole fragment is safe in the sidecar
             except OSError as exc:
+                try:
+                    (self.dir / name).unlink()           # the ledger is intact, so the partial sidecar must not be counted
+                except OSError:
+                    pass
                 raise LedgerUnavailable(type(exc).__name__) from exc
         # Every sidecar gets exactly one note. A crash between the cut and the note leaves a sidecar with no note, and the
         # next call writes it here, so recovery can be replayed.

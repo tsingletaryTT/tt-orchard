@@ -1306,16 +1306,127 @@ def test_a_settlement_cannot_slip_in_between_recovery_reading_and_cutting_the_le
     (tmp_path / "tg").mkdir()
     (tmp_path / "tg" / "telegraph.jsonl").write_text('{"call_id": "half')
     tel, _ = make(tmp_path)
-    appended_during_recovery = []
+    workers, blocked = [], []
     real_truncate = os.truncate
 
     def slow_truncate(path, length):
         t = threading.Thread(target=lambda: tel._append({"report": "late", "helped": False}))
         t.start()
+        workers.append(t)
         t.join(timeout=0.2)                                          # the other writer must still be waiting
-        appended_during_recovery.append(t.is_alive())
+        blocked.append(t.is_alive())
         return real_truncate(path, length)
     monkeypatch.setattr(tg.os, "truncate", slow_truncate)
     tel.ask("p", "t", "f")
-    assert appended_during_recovery == [True]
+    for t in workers:                                                # wait for the worker outside the recovery lock
+        t.join(timeout=5)
+    assert blocked == [True]
     assert '"late"' in (tmp_path / "tg" / "telegraph.jsonl").read_text()    # and it landed after the recovery
+
+
+# ------------------------------------------------------------------------------------------------ review of PR 106, round 5
+
+def test_a_credential_or_path_used_as_a_property_name_is_removed_too(tmp_path):
+    extra = {"metadata": {f"owner-{KEY}": "x", "/home/someone/where": 1, "node9": True}}
+    tel, wire = make(tmp_path, extra_body=extra)
+    tel.ask("p", "t", "f")
+    sent = json.dumps(wire.requests[0]["body"])
+    assert KEY not in sent and "/home/someone" not in sent and "node9" not in sent and "metadata" in sent
+
+
+def test_a_short_write_of_the_torn_tail_leaves_the_original_ledger_intact(tmp_path, monkeypatch):
+    (tmp_path / "tg").mkdir()
+    ledger = tmp_path / "tg" / "telegraph.jsonl"
+    ledger.write_text('{"call_id": "whole"}\n{"reserve": "half')
+    before = ledger.read_bytes()
+    real = os.write
+
+    def half(fd, data):
+        return real(fd, data[: max(1, len(data) // 2)])
+    monkeypatch.setattr(tg.os, "write", half)
+    tel, wire = make(tmp_path)
+    got = tel.ask("p", "t", "f")
+    assert not got.ok and "cannot be written" in got.reason and wire.requests == []
+    assert ledger.read_bytes() == before                             # nothing was cut
+    assert list((tmp_path / "tg").glob("telegraph.jsonl.torn-*")) == []   # and no partial sidecar is left to count
+
+
+def test_a_lock_that_cannot_be_taken_refuses_the_call_instead_of_raising(tmp_path, monkeypatch):
+    import errno
+
+    def no_locks(fd, op):
+        raise OSError(errno.ENOLCK, "no locks available")
+    monkeypatch.setattr(tg.fcntl, "flock", no_locks)
+    tel, wire = make(tmp_path)
+    got = tel.ask("p", "t", "f")
+    assert not got.ok and "cannot be written" in got.reason and wire.requests == []
+    assert tel._append({"report": "x", "helped": True}) is False     # a direct append returns False and does not raise
+
+
+def test_a_lock_that_cannot_be_released_does_not_leak_the_descriptor(tmp_path, monkeypatch):
+    opened, closed = [], []
+    real_open, real_close = os.open, os.close
+    monkeypatch.setattr(tg.os, "open", lambda *a, **kw: (opened.append(real_open(*a, **kw)), opened[-1])[1])
+    monkeypatch.setattr(tg.os, "close", lambda fd: (closed.append(fd), real_close(fd))[1])
+    real_flock = tg.fcntl.flock
+
+    def flaky(fd, op):
+        if op == tg.fcntl.LOCK_UN:
+            raise OSError("unlock failed")
+        return real_flock(fd, op)
+    monkeypatch.setattr(tg.fcntl, "flock", flaky)
+    tel, _ = make(tmp_path)
+    tel.ask("p", "t", "f")
+    assert set(opened) <= set(closed)
+
+
+@pytest.mark.parametrize("bad", [{"when": __import__("datetime").datetime(2026, 1, 1)},
+                                 {"d": __import__("datetime").date(2026, 1, 1)},
+                                 {"t": __import__("datetime").time(1, 2)}, {"x": {1: "int key"}}, {"x": {"y": {"z": object()}}},
+                                 {"x": float("nan")}])
+def test_extra_body_must_be_plain_json_data(bad):
+    with pytest.raises(tg.ConfigError, match="extra_body"):
+        tg.load(table(extra_body=bad), base=Path("/x"))
+
+
+def test_extra_body_with_nested_plain_values_is_accepted():
+    cfg = tg.load(table(extra_body={"a": {"b": [1, 2.5, "x", None, True, {"c": "d"}]}}), base=Path("/x"))
+    assert cfg.extra_body["a"]["b"][3] is None
+
+
+def test_a_cache_hit_whose_record_cannot_be_written_warns_and_has_no_reportable_id(tmp_path, monkeypatch):
+    tel, _ = make(tmp_path)
+    tel.ask("p", "t", "f")
+    real = tel._append
+    monkeypatch.setattr(tel, "_append", lambda rec, **kw: False if rec.get("cached") else real(rec, **kw))
+    got = tel.ask("p", "t", "f")
+    assert got.ok and got.cached and "could not record" in got.reason
+
+
+def test_an_answer_without_usage_has_an_unknown_cost_not_an_estimated_one(tmp_path):
+    prices = {"small": [1.0, 3.0], "big": [5.0, 15.0]}
+    no_usage = {"choices": [{"message": {"content": "fine"}, "finish_reason": "stop"}]}
+    tel, _ = make(tmp_path, wire=Wire(lambda b: no_usage), prices=prices)
+    got = tel.ask("p", "t", "f")
+    assert got.cost_usd is None
+    rec = records(tmp_path)[0]
+    assert rec["cost_usd"] is None and rec["usage_known"] is False
+    s = tg.summarise(tmp_path / "tg")
+    assert s["cost_unknown_calls"] == 1 and s["cost_usd"] == 0.0
+
+
+def test_extra_body_nested_beyond_twenty_levels_is_refused_by_name():
+    deep = cur = {}
+    for _ in range(25):
+        cur["x"] = {}
+        cur = cur["x"]
+    with pytest.raises(tg.ConfigError, match="nested too deeply"):
+        tg.load(table(extra_body=deep), base=Path("/x"))
+
+
+def test_extra_body_nested_to_twenty_levels_is_accepted():
+    deep = cur = {}
+    for _ in range(19):
+        cur["x"] = {}
+        cur = cur["x"]
+    assert tg.load(table(extra_body=deep), base=Path("/x")).enabled
