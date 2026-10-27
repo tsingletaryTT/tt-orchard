@@ -242,3 +242,48 @@ def test_a_small_cost_keeps_four_digits_in_the_meter_text(root):
     data = get(app_with(root))[1]
     assert data["meter"]["text"] == "Local ≈ $0.0001 (virtual, at claude-haiku-5-5)"
     assert view.usd(0) == "$0.00" and view.usd(0.5) == "$0.50"
+
+
+
+# ---- review fix 7: one refresh at a time, and the cache is dated when the scan finishes ---------------------------------
+
+def test_overlapping_requests_share_one_scan(root, monkeypatch):
+    import threading
+    import time as _time
+    for i in range(3):
+        write_log(root, f"org--{i}/log/run.jsonl", [turn(1, 100, 1)])
+    real = vs.scan
+    calls, guard = [], threading.Lock()
+
+    def slow(path):
+        with guard:
+            calls.append(path.name)
+        _time.sleep(0.15)
+        return real(path)
+    monkeypatch.setattr(vs, "scan", slow)
+    app = app_with(root)
+    results = []
+    threads = [threading.Thread(target=lambda: results.append(app.virtual_spend()["total"]["turns"])) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert results == [3] * 8
+    assert sorted(calls) == ["org--0", "org--1", "org--2"], calls            # each folder scanned once, not once per request
+
+
+def test_the_cache_is_dated_when_the_scan_ends_so_a_slow_scan_is_still_reused(root, monkeypatch):
+    write_log(root, "org--a/log/run.jsonl", [turn(1, 100, 1)])
+    t = [1000.0]
+    real = vs.scan
+    calls = []
+
+    def slow(path):
+        calls.append(path.name)
+        t[0] += view.CACHE_S + 5                                             # the scan takes longer than the cache lifetime
+        return real(path)
+    monkeypatch.setattr(vs, "scan", slow)
+    app = app_with(root, clock=lambda: t[0])
+    app.virtual_spend()
+    app.virtual_spend()
+    assert calls == ["org--a"], "the second request must reuse the result for the full cache lifetime"

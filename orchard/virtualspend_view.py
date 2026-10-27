@@ -73,20 +73,20 @@ class Spender:
         self._cache = None                       # (time, rows)
 
     def _rows(self) -> list[dict]:
-        now = self.clock()
+        """The scanned rows. One refresh runs at a time: a request that arrives during a scan waits for it and then reuses its
+        result. The cache is dated when the scan ends, so a slow scan is still reused for the full cache lifetime."""
         with self._lock:
-            if self._cache is not None and now - self._cache[0] < CACHE_S:
+            if self._cache is not None and self.clock() - self._cache[0] < CACHE_S:
                 return self._cache[1]
-        rows = []
-        for name, path in candidates(self.runs_root):
-            try:
-                s = vs.priced(vs.scan(path), self.cfg)
-            except Exception:                                       # noqa: BLE001 - one bad folder must not hide the others
-                continue
-            rows.append({"name": name, **s})
-        with self._lock:
-            self._cache = (now, rows)
-        return rows
+            rows = []
+            for name, path in candidates(self.runs_root):
+                try:
+                    s = vs.priced(vs.scan(path), self.cfg)
+                except Exception:                                   # noqa: BLE001 - one bad folder must not hide the others
+                    continue
+                rows.append({"name": name, **s})
+            self._cache = (self.clock(), rows)
+            return rows
 
     def build(self, run: str | None = None) -> dict:
         all_rows = self._rows()
