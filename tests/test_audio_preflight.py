@@ -61,6 +61,7 @@ def snap(root: Path, repo: str, rev: str, names=("model.safetensors", "model_con
     (None, False),
     ("model_config.json", False),                                                  # a string is not a list of names
     ({"model_config.json": 1}, False),
+    ({"model_config.json": 1, "model.safetensors": 1}, False),
 ])
 def test_the_layout_rule_reads_the_root_of_the_file_list(names, expected):
     assert audio_facts.audio_layout(names) is expected
@@ -75,6 +76,8 @@ def test_the_layout_rule_reads_the_root_of_the_file_list(names, expected):
     (["text-to-audio"], ["text-to-audio"], True),       # a pipeline tag that is not a string is absent: the tags decide
     (7, ["text-to-audio"], True), (7, [], False),
     ("Text-To-Audio", [], False), ("text-to-audio ", [], False), ("", [], False),
+    ("", ["text-to-audio"], True),                       # an empty pipeline tag is an absent one
+    (None, {"text-to-audio": 1}, False),                 # a dict of tags is not a list of tags
     (None, "text-to-audio", False),                      # tags must be a list
     (None, [7, None, ["text-to-audio"]], False),
 ])
@@ -149,7 +152,7 @@ def test_tags_that_are_not_a_list_of_strings_keep_only_the_strings(bad):
     assert t == (["ok"] if isinstance(bad, list) else [])
 
 
-@pytest.mark.parametrize("sib", [None, [], "model.safetensors", [None, 3, "x", {"rfilename": 7}, {"rfilename": "a.safetensors", "size": "big"}]])
+@pytest.mark.parametrize("sib", [None, [], 7, {"a": {"rfilename": "x"}}, "model.safetensors", [None, 3, "x", {"rfilename": 7}, {"rfilename": "a.safetensors", "size": "big"}]])
 def test_a_hostile_file_list_gives_an_empty_or_filtered_list_and_no_exception(sib):
     h = pf.parse_hub(audio_payload(siblings=sib))
     assert h.files in ([], ["a.safetensors"]) and h.total_bytes >= 0
@@ -230,7 +233,7 @@ def test_a_public_base_that_is_not_on_disk_is_downloaded():
 
 
 def test_a_private_base_blocks_even_when_local(tmp_path):
-    s = snap(tmp_path / "hf", BASE, BASE_REV)
+    s = snap(tmp_path / "hf", BASE, BASE_REV, names=AUDIO_FILES + ["svd_bases.pt"])      # complete, so only privacy can block it
     c = audio_base(base_info=(base_hub(private=True, gated=False), None), local={BASE: s})
     assert (c.status, c.reason) == ("block", "credentials-needed")
 
@@ -270,6 +273,12 @@ def test_a_base_that_is_not_in_the_audio_layout_leaves_the_audio_path():
 def test_a_local_base_in_the_text_layout_leaves_the_audio_path(tmp_path):
     s = snap(tmp_path / "hf", BASE, BASE_REV, names=("model.safetensors", "config.json"))
     c = audio_base(base_info=(None, "x"), local={BASE: s})
+    assert c.status == "block" and c.reason == "nearest-model-missing"
+
+
+def test_a_base_whose_hub_list_says_audio_but_whose_snapshot_says_text_leaves_the_audio_path(tmp_path):
+    s = snap(tmp_path / "hf", BASE, BASE_REV, names=AUDIO_FILES + ["config.json"])
+    c = audio_base(base_info=(base_hub(gated=False), None), local={BASE: s})
     assert c.status == "block" and c.reason == "nearest-model-missing"
 
 
@@ -331,6 +340,31 @@ def test_the_two_downloaded_gated_models_pass_the_whole_preflight(tmp_path):
     by = rows(tmp_path, world(local=full_snaps(tmp_path)))
     assert not [n for n, c in by.items() if c.status == "block"], {n: c.detail for n, c in by.items() if c.status == "block"}
     assert by["base"].status == "warn" and by["hub"].status == "warn"
+
+
+def test_a_model_whose_hub_list_says_audio_but_whose_snapshot_says_text_is_not_audio(tmp_path):
+    snaps = full_snaps(tmp_path)
+    (snaps[MODEL] / "config.json").write_text("{}")
+    by = rows(tmp_path, world(local=snaps))
+    assert by["base"].reason == "nearest-model-missing"
+
+
+def test_tag_evidence_alone_is_enough_when_the_hub_gives_no_pipeline_tag(tmp_path):
+    def hub_info(m):
+        p = audio_payload(m, sha=REV if m == MODEL else BASE_REV, files=AUDIO_FILES)
+        del p["pipeline_tag"]
+        return pf.parse_hub(p), None
+    by = rows(tmp_path, world(local=full_snaps(tmp_path), hub_info=hub_info))
+    assert by["base"].status == "warn" and by["base"].data["audio"] is True
+
+
+def test_the_base_is_looked_up_once_for_the_row_and_the_disk(tmp_path):
+    asked = []
+    local = {MODEL: full_snaps(tmp_path)[MODEL]}
+    inner = world(local=local, base_gated=False).hub_info
+    sig = world(local=local, base_gated=False, hub_info=lambda m: asked.append(m) or inner(m))
+    rows(tmp_path, sig)
+    assert asked.count(BASE) == 1
 
 
 def test_a_text_to_speech_model_is_not_audio_for_this_rule(tmp_path):
@@ -415,6 +449,14 @@ def test_base_naming_a_published_bundle_is_refused_for_audio_and_never_pulled(co
     code = cli.main(["--config", str(conf), "bringup", MODEL, "--base", "eps/audio8-p150"], env={}, stdout=Pipe(), signals=s,
                     supervisor_main=Recorder().supervisor, fetcher=Recorder().fetcher, puller=lambda b: pulled.append(b) or (True, ""))
     assert code == 2 and pulled == [] and "bundle" in capsys.readouterr().err
+
+
+def test_base_naming_a_model_id_that_a_bundle_serves_is_accepted_without_a_search(conf, tmp_path):
+    searched = []
+    s = world(local=full_snaps(tmp_path), installed_bundles=lambda: [Installed("eps/base-p150", BASE, "6", 1)],
+              search_bundles=lambda q: searched.append(q) or [{"name": BASE, "installed": False}])
+    code, out, rec = run(conf, ["bringup", MODEL, "--base", BASE, "--dry-run"], sig=s)
+    assert code == 0 and searched == []
 
 
 def test_base_naming_a_model_id_is_accepted_for_audio(conf, tmp_path):

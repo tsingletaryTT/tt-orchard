@@ -658,7 +658,7 @@ its reason; a `warn` is information.
 | cpu | the CPU tier's server (ollama) does not answer, or does not list the tier's model. Stage 4's 4-chip test parks the coder behind it, so a run without it would stop hours in | `coder-unusable` |
 | gozer | gozer gives no usable status. Stale leases and chips in use are warnings, and nothing is cleared | `hardware-unhealthy` |
 | bus | a chip the configuration needs is not on the PCIe bus, is not awake (`power_state` other than D0, for example D3cold, the state both chips of one board fell into on 2026-10-22), has no readable serial (gozer refuses every lease while one cannot be read), has no driver or no `/dev/tenstorrent/N` node, finds `/dev/tenstorrent` itself missing or unlistable, or is listed by gozer but missing from the bus. The configuration needs the coder's chips plus a test board, or the whole box when the coder holds four chips (a lab run needs only the coder's chips here). Extra device nodes, a power state the kernel does not report, a gozer that lists fewer chips than the bus shows and a board listing fewer chips than another are warnings. The row reads files only (sysfs and `/dev/tenstorrent`): no lease, no device open, no reset. A board that has left the bus needs a power cycle or reboot. After the run starts, a failed test, coder boot or benchmark phase gets the same check on the chips it holds (section 5.5a) | `hardware-unhealthy` |
-| base | no installed tt-model bundle serves the model this one is based on (the card's `base_model`, or the model named with `--base`). It then runs `tt model search` for the model's family and lists what it finds. When research found code for the base in tt-metal or tt-transformers, the message names that code first and says whether it ships a vLLM generator and whether its README names a Blackhole board. Code is not a bundle, so a bundle still has to be built or installed. At a terminal it asks which bundle to base the run on and installs the pick with `tt-model pull`. In a script it stops and prints the `--base` commands. A base snapshot that is not on disk is downloaded. A card with no `base_model` is a warning. If an installed v6 bundle has the model's architecture, it becomes an inferred base. An inferred base blocks until the operator confirms it: the bundle picked at a terminal or in the new-run dialog, `--base <bundle>`, or `--accept-inferred-base` (then it is a warning and its snapshot is downloaded). See "How the base model is found" | `nearest-model-missing`, `inferred-base-unconfirmed` |
+| base | no installed tt-model bundle serves the model this one is based on (the card's `base_model`, or the model named with `--base`). It then runs `tt model search` for the model's family and lists what it finds. When research found code for the base in tt-metal or tt-transformers, the message names that code first and says whether it ships a vLLM generator and whether its README names a Blackhole board. Code is not a bundle, so a bundle still has to be built or installed. At a terminal it asks which bundle to base the run on and installs the pick with `tt-model pull`. In a script it stops and prints the `--base` commands. A base snapshot that is not on disk is downloaded. An audio model needs no bundle (see "Audio models in the preflight" below). A card with no `base_model` is a warning. If an installed v6 bundle has the model's architecture, it becomes an inferred base. An inferred base blocks until the operator confirms it: the bundle picked at a terminal or in the new-run dialog, `--base <bundle>`, or `--accept-inferred-base` (then it is a warning and its snapshot is downloaded). See "How the base model is found" | `nearest-model-missing`, `inferred-base-unconfirmed` |
 | sfpi | the box's SFPI compiler (`dpkg-query -W sfpi`) is older than the version the chosen bundle pins in its ttnn wheel (`ttnn/tt_metal/sfpi-version`). Kernel compiles then fail with `'vLut8si' is not a member of 'sfpi'` (7.67.0 against a pin of 7.73.0, 2026-10-13). tt-orchard does not install system packages; the row names the release to install. A version it cannot read is a warning | `hardware-unhealthy` |
 | reference | `reference_python` is set and cannot import torch, transformers, tokenizers and safetensors. Not set is a warning: the stage 1 agent then looks for an interpreter itself | `config-invalid` |
 | demo-env | a stock-runtime run (or any run with `demo_python` set) when `demo_python` fails `tt-orchard demo-env --check`: numpy 2 or newer, `cv2` or `datasets` that do not import, no `ttnn` or `ttml` distribution, a missing interpreter, or a venv directory the command refuses. The detail names each failed rule and the exact `tt-orchard demo-env --venv-dir ... --tt-metal-dir ...` command. A venv built for another tag of the host tree than the tree is at, a missing record, no `demo_python` at all, or a `demo_python` that is not `<venv>/bin/python` is a warning. Nothing is imported on a chip. A lab run has no row | `config-invalid` |
@@ -685,6 +685,28 @@ resuming starts the bar a little low, because a partly downloaded file left by t
 with a suggestion. The file is found from `--config`, then `$ORCHARD_BRINGUP_CONFIG`, then
 `<checkout>/config/bringup.toml`, then `~/.config/tt-orchard/bringup.toml`. The tier config stays in
 `tiers.toml`, because the tier loader refuses tables it does not know.
+
+#### Audio models in the preflight
+
+The preflight decides that a model is audio from evidence, before anything is downloaded (the rule is written in `orchard/audio_facts.py`).
+Both of these must hold:
+
+- The Hub's `pipeline_tag` is `text-to-audio` or `audio-to-audio`. When the Hub gives no pipeline tag, a tag with one of those names counts.
+  A pipeline tag that says anything else (for example `text-to-speech`) decides alone, and the model is not audio for this rule.
+- The top level of the file list shows `model_config.json`, no `config.json` and a `.safetensors` file. The Hub's list is checked, and so is
+  the top level of the local snapshot when there is one. If the two disagree, the model is not audio.
+
+Anything unclear keeps the old behaviour: an unknown tag, a failed Hub lookup, both config files present. The layout half of the rule is
+also what stage 0's template uses (`detect_audio`), and a test pins the two copies to the same snapshots.
+
+For an audio model the `base` row needs no installed bundle. Stage 0 compares the two repositories directly, and nothing serves an audio model on
+a chip yet, so the row is a warning that names the base, says the run will stop after stage 0 as `audio-path-unbuilt`, and points to the run's
+`BLOCKED.md`. The base is the card's `base_model` or `--base <model id>`; a base that research inferred still waits for `--accept-inferred-base`.
+The base snapshot is still needed. It is used from the cache when it is complete there, downloaded when the Hub lets it be downloaded without a
+token, and the `disk` row counts it. A gated or private base blocks with `credentials-needed` unless a complete copy is already on disk, which
+is the rule the `hub` row applies to the model. `--base` with the name of a bundle is refused for an audio model before anything is installed.
+The row's block codes are the existing ones: `credentials-needed`, `model-unavailable` (the base cannot be looked up and is not on disk) and
+`inferred-base-unconfirmed`.
 
 #### How the base model is found
 
@@ -1061,7 +1083,7 @@ audio branch of the stage 0 template. Stage 0 records three facts in its ledger 
 `container` or `none`, from the installed bundles and container packages) and `modality` (`text` or `audio`); a ledger without them means a text run on
 a thin bundle. The class follows the same rules as above (`weights-only`, `full-port` or `unknown`). An audio run stops before stage 1 with the block code
 `audio-path-unbuilt`, because the audio stages are not built (plan [docs/superpowers/plans/2026-10-28-audio-bringup.md](docs/superpowers/plans/2026-10-28-audio-bringup.md)).
-`stabilityai/stable-audio-3-small-music` is the first target. There is no runtime for Stable Audio 3 on a Tenstorrent chip (no bundle, container package or
+A run for an audio model starts the coder before stage 0 as every run does, although the run stops after stage 0 (issue 143). `stabilityai/stable-audio-3-small-music` is the first target. There is no runtime for Stable Audio 3 on a Tenstorrent chip (no bundle, container package or
 tt-metal pipeline), so even a `weights-only` result leaves nothing to serve it with; the facts note is
 [docs/run-logs/2026-10-28-stable-audio-3-facts.md](docs/run-logs/2026-10-28-stable-audio-3-facts.md).
 
