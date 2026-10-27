@@ -734,7 +734,9 @@ function renderRun() {
   $("run-hint-text").textContent = d.next_step || d.hint || "";
   const spend = $("run-spend");                       // this run's own helper spend, when it kept a telegraph ledger
   spend.hidden = !d.telegraph;
-  spend.textContent = d.telegraph ? `Helper spend for this run: ${spendText(d.telegraph)} · ${plural(d.telegraph.calls, "call")}` : "";
+  // An unreadable ledger is an explicit unknown, never a missing line or a zero.
+  spend.textContent = !d.telegraph ? "" : d.telegraph.error ? `Helper spend for this run: unknown (${d.telegraph.error})`
+    : `Helper spend for this run: ${spendText(d.telegraph)} · ${plural(d.telegraph.calls, "call")}`;
   const mode = $("run-mode");
   mode.hidden = !d.mode;
   // the pictures sit in .emoji spans: the operator style hides them

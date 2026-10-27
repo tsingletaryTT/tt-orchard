@@ -214,6 +214,7 @@
     <button type="button" data-k="running" aria-pressed="true">Running</button>
     <button type="button" data-k="finished" aria-pressed="false">Finished</button>
     <button type="button" data-k="blocked" aria-pressed="false">Blocked</button>
+    <button type="button" data-k="telegraph" aria-pressed="false">Telegraph</button>
     <span class="gap"></span>
     <button type="button" data-m="operator" aria-pressed="true">Operator</button>
     <button type="button" data-m="playful" aria-pressed="false">Playful</button>
@@ -456,6 +457,7 @@
   const CAP = {
     running: "A run in progress, taken while a real validation run was in stage 2: the coder model is parked while a test uses its boards. The page says what is happening now and what, if anything, to do next, and sets each result against what it should be.",
     finished: "A finished run: each stage with its wall time. Stages 3, 5 and 6 are skipped by design on a weights-only model.",
+    telegraph: "The Telegraph view, reading the ledger of 40 real helper calls made while testing which outside model fixes a failing kernel fastest ($1.21 in all). The page only reads the ledger and spends nothing. The meter is amber because one problem has used 5 of the 6 calls the configuration allows it. The configuration shown is a placeholder: an example host and a dummy key variable.",
     blocked: "A blocked run: the reason, what was tried, and a verdict line that sets the numbers against what they should be. This one found a reference check that failed while the agent's file said it passed.",
   };
   const shot = { k: "running", m: "operator" };

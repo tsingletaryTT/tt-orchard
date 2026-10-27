@@ -81,6 +81,7 @@ def _ledger_facts(directory: Path) -> dict:
             summary = tg.summarise_records(records)                # one read: the summary, the accounting and the rows
             acct = tg.accounting(records)                          # all describe this one snapshot
             torn = sum(1 for r in records if "torn" in r)
+            _check_derived(summary, acct)
             _dry_run(records, acct)
             facts = {"error": None, "records": records, "summary": {**summary, "torn": torn}, "acct": acct}
         except tg.LedgerUnavailable:
@@ -105,6 +106,57 @@ def _check_records(records: list[dict]) -> None:
             if isinstance(r.get(key), (list, dict)):
                 raise ValueError(f"record field {key} is not a name")
         _finite(r)
+        for key in NUMBER_KEYS:
+            _non_negative(key, r.get(key))
+
+
+NUMBER_KEYS = ("cost_usd", "tokens_in", "tokens_out", "tokens", "latency_s")
+
+
+def _non_negative(key: str, value) -> None:
+    """An amount below zero would lower the spend, and a string such as "NaN" reads as a number in `float()`; both make a ledger a
+    damaged ledger."""
+    if isinstance(value, str):
+        try:
+            value = float(value)
+        except ValueError:
+            return                                              # not a number at all: the accounting refuses it
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return
+    if not math.isfinite(value) or value < 0:
+        raise ValueError(f"record field {key} is not a finite amount of zero or more")
+
+
+def _check_derived(*parts) -> None:
+    """Every number the page derives (sums, counts, per-model and per-problem totals) must be finite and not negative. Two finite
+    costs can add up to infinity, so this checks what is derived and not only what was read. It runs before anything is cached."""
+    def walk(v, depth=0):
+        if depth > 20:
+            raise ValueError("derived value is nested too deeply")
+        if isinstance(v, bool):
+            return
+        if isinstance(v, (int, float)):
+            if not math.isfinite(v) or v < 0:
+                raise ValueError("a derived amount is not finite or is below zero")
+        elif isinstance(v, dict):
+            for x in v.values():
+                walk(x, depth + 1)
+        elif isinstance(v, list):
+            for x in v:
+                walk(x, depth + 1)
+    for part in parts:
+        walk(part)
+
+
+def _percent(used, limit) -> int:
+    """`used` as a whole percent of `limit`, never raising and never above PERCENT_MAX (a huge ratio would overflow to infinity)."""
+    if limit <= 0:
+        return 100
+    ratio = used * 100 / limit
+    return PERCENT_MAX if not math.isfinite(ratio) or ratio > PERCENT_MAX else int(ratio)
+
+
+PERCENT_MAX = 10 ** 9
 
 
 def _finite(value, depth: int = 0) -> None:
@@ -180,7 +232,7 @@ def _problem_rows(records: list[dict], acct: dict, verdict: dict, cfg: tg.Config
                 full = True
             if used * NEAR_DEN >= limit * NEAR_NUM:
                 near = True
-            percent = max(percent, 100 if limit <= 0 else int(used * 100 / limit))
+            percent = max(percent, _percent(used, limit))
         if cfg.max_cost_per_problem_usd is not None and row["cost_unknown_calls"]:
             full = near = True                    # the producer refuses this problem's calls while a cost is unknown
             percent = 100                         # so it counts as fully used, like the global cost cap does
@@ -205,7 +257,7 @@ def _caps(cfg: tg.Config, acct: dict) -> list[dict]:
         blocked = cid == "cost" and acct["unknown_cost"] > 0
         full = limit <= 0 or used >= limit or blocked
         near = used * NEAR_DEN >= limit * NEAR_NUM
-        percent = 100 if limit <= 0 or blocked else int(used * 100 / limit)
+        percent = 100 if blocked else _percent(used, limit)
         caps.append({"id": cid, "label": label, "used": used, "limit": limit, "unit": unit, "percent": percent,
                      "blocked": blocked, "tone": "bad" if full else "warn" if near else "good"})
     return caps
@@ -256,6 +308,15 @@ def _host(endpoint: str, redact) -> str:
     return redact(host)
 
 
+TS_MAX = 4e10                         # year 3200: a larger number is not a time stamp a browser can show
+
+
+def _time(value):
+    """A time stamp in seconds, or None when it is not a number in a range a date can show (the page would print Invalid Date)."""
+    v = _num(value, None)
+    return v if v is not None and math.isfinite(v) and 0 <= v <= TS_MAX else None
+
+
 def _reservation_row(r: dict, redact) -> dict:
     cost = r.get("cost_usd")
     return {
@@ -283,7 +344,7 @@ def _call_row(r: dict, reserves: dict, verdict: dict, redact) -> dict:
                   "estimate in the recorded numbers." if basis == "worst case" else
                   "The provider reported no usage. The numbers are an estimate, and the caps count them as recorded.")
     return {
-        "ts": _num(r.get("ts"), None), "call_id": _clean(r.get("call_id"), redact, 32),
+        "ts": _time(r.get("ts")), "call_id": _clean(r.get("call_id"), redact, 32),
         "problem": _clean(r.get("problem"), redact, TEXT_MAX), "model": _clean(r.get("model"), redact, TEXT_MAX),
         "tokens_in": int(_num(r.get("tokens_in"))), "tokens_out": int(_num(r.get("tokens_out"))),
         "latency_s": float(_num(r.get("latency_s"))), "held": False,
@@ -355,11 +416,12 @@ def _meter(state: str, spend: str, calls: int, cap_text: str, reason: str | None
             text += f" · near cap: {cap_text}"
         elif cap_text:
             text += f" · {cap_text}"
-    title = {"off": "Telegraph is off. Click for how to turn it on.",
-             "ok": "What the outside helper has cost. Click for the calls.",
-             "near": "A cap is almost used up. Click for the calls and caps.",
-             "capped": f"A cap stopped the helper: {reason}. Click for the calls and caps.",
-             "problem": (error or key_state.get("reason") or "Check the setup") + ". Click for details."}[state]
+    more = {"off": "Telegraph is off. Click for how to turn it on.",
+            "ok": "What the outside helper has cost. Click for the calls.",
+            "near": "A cap is almost used up. Click for the calls and caps.",
+            "capped": f"A cap stopped the helper: {reason}. Click for the calls and caps.",
+            "problem": (error or key_state.get("reason") or "Check the setup") + ". Click for details."}[state]
+    title = f"{text}. {more}"                                    # the title carries everything the (wrapped or cut) text shows
     return {"text": text, "title": title}
 
 
@@ -427,16 +489,21 @@ def build(cfg: tg.Config, directory, *, environ, redact=lambda t: t, hostname: s
 
 
 def run_spend(run_dir: Path) -> dict | None:
-    """One run's own spend, from `<run>/telegraph.jsonl` when the run has one (it must be a regular file; a link is ignored)."""
+    """One run's own spend, from `<run>/telegraph.jsonl`. None means the run has no usable ledger path (no file, or a link, which
+    is not followed). A ledger that exists but cannot be read, is damaged or is too large gives {"error": ...}, so the page can
+    say the run's spend is unknown instead of showing nothing."""
     path = Path(run_dir) / tg.LEDGER
     try:
-        if path.is_symlink() or not path.is_file():
+        if path.is_symlink():
             return None
-    except OSError:
+        path.lstat()
+    except FileNotFoundError:
         return None
+    except OSError:
+        return {"error": "the run's ledger cannot be read"}
     facts = _ledger_facts(Path(run_dir))
     if facts["error"]:
-        return None
+        return {"error": facts["error"].replace("the ledger", "the run's ledger", 1)}
     s, a = facts["summary"], facts["acct"]
     return {"calls": a["calls"], "cost_usd": a["cost"], "unknown_cost": a["unknown_cost"], "tokens": a["tokens"],
             "unsettled": s["unsettled"], "cache_hits": s["cache_hits"], "refused": s["refused"]}
