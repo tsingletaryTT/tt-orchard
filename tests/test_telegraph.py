@@ -1499,3 +1499,33 @@ def test_an_answer_with_a_lone_surrogate_is_a_failed_result_and_keeps_its_usage(
     rec = records(tmp_path)[0]
     assert rec["outcome"] == "error" and (rec["tokens_in"], rec["tokens_out"]) == (40, 12)
     assert not (tmp_path / "tg" / "cache").exists()
+
+
+# ------------------------------------------------------------------------------------------------ review of PR 106, round 7
+
+def test_a_refused_key_is_still_removed_from_what_is_stored(tmp_path):
+    secret = "abc\ndefghij-SECRET"
+    tel, wire = make(tmp_path, environ={"TG_KEY": secret})
+    tel.ask("prob abc\ndefghij-SECRET", "t", "f")
+    text = "".join(p.read_text() for p in (tmp_path / "tg").rglob("*") if p.is_file())
+    assert "defghij-SECRET" not in text and wire.requests == []
+
+
+@pytest.mark.parametrize("usage", [{"prompt_tokens": -5, "completion_tokens": 3}, {"prompt_tokens": 5, "completion_tokens": -3},
+                                   {"prompt_tokens": 5.5, "completion_tokens": 3}, {"prompt_tokens": "5", "completion_tokens": 3},
+                                   {"prompt_tokens": True, "completion_tokens": 3}, {"prompt_tokens": 5}])
+def test_a_token_count_that_is_negative_or_not_whole_is_unknown_usage(tmp_path, usage):
+    reply = {"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}], "usage": usage}
+    tel, _ = make(tmp_path, wire=Wire(lambda b: reply), max_total_tokens=100000)
+    assert tel.ask("p", "t", "f").ok
+    assert tg.summarise(tmp_path / "tg")["unknown_usage_calls"] == 1
+
+
+def test_the_usage_display_shows_unsettled_reservations_and_unknown_usage(tmp_path):
+    from orchard import telegraph_cmd as cmd_mod
+    d = tmp_path / "tg"
+    d.mkdir()
+    (d / "telegraph.jsonl").write_text(json.dumps({"reserve": "c1", "problem": "p", "tokens": 900, "cost_usd": None}) + "\n")
+    lines = []
+    cmd_mod._usage(d, type("A", (), {"json": False})(), lines.append)
+    assert any("not settled: 1 reservations" in l for l in lines)

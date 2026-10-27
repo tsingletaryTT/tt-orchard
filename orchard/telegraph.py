@@ -264,6 +264,18 @@ _SK = re.compile(r"\bsk-[A-Za-z0-9_-]{16,}")
 _PEM = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|\Z)", re.DOTALL)
 
 
+def _usage_pair(u, name_in: str, name_out: str) -> tuple | None:
+    """(input, output) token counts, or None when either is missing, is not a whole number (a bool, a float, a string) or is
+    negative: a count the provider got wrong cannot be added to a budget, so the call counts as unknown usage."""
+    if not isinstance(u, dict):
+        return None
+    a, b = u.get(name_in), u.get(name_out)
+    for v in (a, b):
+        if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+            return None
+    return a, b
+
+
 def redact(text: str, *, hostname: str = "", home: str = "", secrets: tuple = ()) -> str:
     """`text` without the key, token shapes, private key markers, the host name and the home directory."""
     for secret in secrets:
@@ -495,7 +507,7 @@ class Telegraph:
         if not self.cfg.enabled:
             return Answer(False, reason="telegraph is not enabled")
         key, key_problem = self._key()
-        secrets = (key,) if key else ()
+        secrets = self._secrets(key)
         clean = lambda t: redact(str(t), hostname=self.hostname, home=self.home, secrets=secrets)   # noqa: E731
         problem = clean(problem)[:80]
         prompt = cut(f"Problem: {problem}\n\nTask:\n{clean(task)}\n\nWhat failed:\n{clean(failure)}",
@@ -553,10 +565,15 @@ class Telegraph:
         key, _ = self._key()
         if not self._append({"report": call_id, "helped": bool(helped), "ts": self.clock(),
                              "note": redact(note, hostname=self.hostname, home=self.home,
-                                            secrets=(key,) if key else ())[:300]}):
+                                            secrets=self._secrets(key))[:300]}):
             raise LedgerUnavailable("the verdict could not be written")
 
     # ------------------------------------------------------------------------------------------- parts
+
+    def _secrets(self, key: str | None) -> tuple:
+        """What redaction must remove: the key in use, and a key that was refused for its characters (it is a credential too,
+        and a prompt or an answer could still contain it)."""
+        return tuple(s for s in (key, getattr(self, "_refused_key", None)) if s)
 
     def _key(self) -> tuple[str | None, str | None]:
         """(key, problem). A key with a newline, a control character or a character outside Latin-1 is refused here, before
@@ -574,7 +591,9 @@ class Telegraph:
                 return None, "the key file is empty"
         else:
             return None, None
+        self._refused_key = None
         if any(ord(c) < 0x20 or ord(c) == 0x7F or ord(c) > 0xFF for c in value):
+            self._refused_key = value
             return None, ("the key has a character that cannot be sent in an HTTP header (a newline, a control character or a "
                           "character outside Latin-1); check the key source")
         return value, None
@@ -629,7 +648,7 @@ class Telegraph:
     def _clean_tree(self, value, key: str | None):
         """`value` with every string redacted (the key, token shapes, home paths, the host name), through dicts and lists."""
         if isinstance(value, str):
-            return redact(value, hostname=self.hostname, home=self.home, secrets=(key,) if key else ())
+            return redact(value, hostname=self.hostname, home=self.home, secrets=self._secrets(key))
         if isinstance(value, dict):
             return {(self._clean_tree(k, key) if isinstance(k, str) else k): self._clean_tree(v, key)
                     for k, v in value.items()}
@@ -710,7 +729,7 @@ class Telegraph:
             if self.cfg.api == "anthropic":
                 text = "".join(b.get("text", "") for b in obj.get("content", []) if isinstance(b, dict))
                 u = obj.get("usage") or {}
-                usage = (int(u["input_tokens"]), int(u["output_tokens"])) if "input_tokens" in u else None
+                usage = _usage_pair(u, "input_tokens", "output_tokens")
                 if any(isinstance(u.get(k), (int, float)) and u.get(k) > 0
                        for k in ("cache_creation_input_tokens", "cache_read_input_tokens")):
                     usage = None               # cached input is reported apart and billed at other rates: unknown usage
@@ -719,7 +738,7 @@ class Telegraph:
                 choice = obj["choices"][0]
                 text = choice["message"].get("content")
                 u = obj.get("usage") or {}
-                usage = (int(u["prompt_tokens"]), int(u["completion_tokens"])) if "prompt_tokens" in u else None
+                usage = _usage_pair(u, "prompt_tokens", "completion_tokens")
                 finish = choice.get("finish_reason")
         except (ValueError, KeyError, IndexError, TypeError, AttributeError) as exc:
             return "", None, f"the answer could not be read ({type(exc).__name__})"

@@ -187,6 +187,9 @@ def _usage(directory: Path, args, say) -> int:
         return EXIT_OK
     say(f"calls: {s['calls']} ({s['ok']} answered), cache hits: {s['cache_hits']}, refused: {s['refused']}")
     say(f"helped: {s['helped']}, did not help: {s['not_helped']}, not yet reported: {s['unreported']}")
+    if s["unsettled"] or s["unknown_usage_calls"]:
+        say(f"not settled: {s['unsettled']} reservations with no result (a crash or a kill), "
+            f"{s['unknown_usage_calls']} answers with no usable token count; their worst case counts against the caps")
     say(f"tokens: {s['tokens_in']} in, {s['tokens_out']} out; time: {s['latency_s']:.1f}s")
     say(f"cost: ${s['cost_usd']:.6f}" + (f" (+ {s['cost_unknown_calls']} calls with no known cost: no price, or the provider sent no usage)" if s["cost_unknown_calls"] else ""))
     for model, v in sorted(s["by_model"].items()):
