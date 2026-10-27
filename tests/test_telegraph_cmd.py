@@ -325,3 +325,14 @@ def test_a_paid_answer_that_could_not_be_recorded_shows_the_warning_and_no_repor
                      transport=ok_transport())
     assert code == 0 and "try fill" in text and "could not record" in text
     assert "telegraph report" not in text
+
+
+def test_the_usage_line_names_calls_with_no_known_cost_not_only_missing_prices(tmp_path):
+    no_usage = {"choices": [{"message": {"content": "fine"}, "finish_reason": "stop"}]}
+    d, cfg = str(tmp_path / "d"), str(write(tmp_path))
+
+    def send(url, headers, body, timeout):
+        return 200, json.dumps(no_usage).encode()
+    run(["ask", "--problem", "p", *files(tmp_path), "--dir", d, "--telegraph-config", cfg], tmp_path, transport=send)
+    code, text = run(["usage", "--dir", d, "--telegraph-config", cfg], tmp_path)
+    assert "no known cost" in text and "no price" not in text.replace("no price, or", "")

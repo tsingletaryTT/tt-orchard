@@ -29,6 +29,7 @@ import fcntl
 import hashlib
 import ipaddress
 import json
+import math
 import os
 import re
 import socket
@@ -114,6 +115,46 @@ def _dir(value: str, base: Path) -> Path:
     path = Path(value).expanduser()
     return path if path.is_absolute() else Path(base) / path
 
+def _plain_json(value, where: str, depth: int = 0) -> None:
+    """Raise ConfigError unless `value` is plain JSON data: strings, finite numbers, booleans, null, lists, and tables with string
+    keys. TOML dates and times, other objects, and a table nested too deeply are refused by name."""
+    if depth > 20:
+        raise ConfigError(f"{where} is nested too deeply")
+    if value is None or isinstance(value, (str, bool)):
+        return
+    if isinstance(value, int):
+        return
+    if isinstance(value, float):
+        if value != value or value in (float("inf"), float("-inf")):
+            raise ConfigError(f"{where} holds a number that is not finite")
+        return
+    if isinstance(value, list):
+        for i, item in enumerate(value):
+            _plain_json(item, f"{where}[{i}]", depth + 1)
+        return
+    if isinstance(value, dict):
+        for k, v in value.items():
+            if not isinstance(k, str):
+                raise ConfigError(f"{where} has a key that is not a string")
+            _plain_json(v, f"{where}.{k}", depth + 1)
+        return
+    raise ConfigError(f"{where} must be plain JSON data (strings, numbers, booleans, null, lists and tables), "
+                      f"not {type(value).__name__}")
+
+
+def _refuse_prompt_caching(value, where: str) -> None:
+    """Prompt caching bills cached tokens at other rates and reports them apart from the input count, so telegraph cannot price
+    it. A `cache_control` key anywhere in extra_body is refused by name."""
+    if isinstance(value, dict):
+        for k, v in value.items():
+            if k == "cache_control":
+                raise ConfigError(f"{where} holds cache_control: prompt caching is not supported, because telegraph cannot "
+                                  "price cached tokens")
+            _refuse_prompt_caching(v, f"{where}.{k}")
+    elif isinstance(value, list):
+        for i, item in enumerate(value):
+            _refuse_prompt_caching(item, f"{where}[{i}]")
+
 
 def load(table: dict | None, *, base: Path) -> Config:
     """The `[telegraph]` table as a Config. None, an empty table or `enabled = false` is off and is not checked further.
@@ -172,20 +213,21 @@ def load(table: dict | None, *, base: Path) -> Config:
         raise ConfigError("telegraph.prices must be a table of model names to [input, output] dollars per million tokens")
     for model, pair in raw_prices.items():
         if (not isinstance(pair, list) or len(pair) != 2 or
-                not all(isinstance(x, (int, float)) and not isinstance(x, bool) and x >= 0 for x in pair)):
+                not all(isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) and x >= 0 for x in pair)):
             raise ConfigError(f"telegraph.prices.{model} must be [input, output] dollars per million tokens")
         prices[model] = (float(pair[0]), float(pair[1]))
     cap = table.get("max_cost_usd")
     if cap is not None:
-        if isinstance(cap, bool) or not isinstance(cap, (int, float)) or cap <= 0:
-            raise ConfigError("telegraph.max_cost_usd must be a number above zero")
+        if isinstance(cap, bool) or not isinstance(cap, (int, float)) or not math.isfinite(cap) or cap <= 0:
+            raise ConfigError("telegraph.max_cost_usd must be a finite number above zero")
         if not prices:
             raise ConfigError("telegraph.max_cost_usd needs telegraph.prices for the models it may call")
         cap = float(cap)
     per_cost = table.get("max_cost_per_problem_usd")
     if per_cost is not None:
-        if isinstance(per_cost, bool) or not isinstance(per_cost, (int, float)) or per_cost <= 0:
-            raise ConfigError("telegraph.max_cost_per_problem_usd must be a number above zero")
+        if (isinstance(per_cost, bool) or not isinstance(per_cost, (int, float)) or not math.isfinite(per_cost)
+                or per_cost <= 0):
+            raise ConfigError("telegraph.max_cost_per_problem_usd must be a finite number above zero")
         if not prices:
             raise ConfigError("telegraph.max_cost_per_problem_usd needs telegraph.prices for the models it may call")
         per_cost = float(per_cost)
@@ -193,6 +235,8 @@ def load(table: dict | None, *, base: Path) -> Config:
     extra = table.get("extra_body", {})
     if not isinstance(extra, dict):
         raise ConfigError("telegraph.extra_body must be a table")
+    _plain_json(extra, "telegraph.extra_body")
+    _refuse_prompt_caching(extra, "telegraph.extra_body")
     for name in RESERVED_BODY:
         if name in extra:
             raise ConfigError(f"telegraph.extra_body cannot set {name}; telegraph sets it")
@@ -465,10 +509,12 @@ class Telegraph:
         base = {"call_id": uuid.uuid4().hex[:12], "problem": problem, "model": model,
                 "prompt_chars": len(prompt), "prompt_sha256": sha}
         if hit is not None:
-            self._append({**base, "ts": self.clock(), "outcome": "ok", "cached": True, "origin": hit.get("call_id"),
-                          "tokens_in": 0, "tokens_out": 0, "latency_s": 0.0, "cost_usd": 0.0,
-                          "reply_file": hit["reply_file"]})
-            return Answer(True, hit["text"], call_id=base["call_id"], model=model, cached=True, cost_usd=0.0)
+            recorded = self._append({**base, "ts": self.clock(), "outcome": "ok", "cached": True,
+                                     "origin": hit.get("call_id"), "tokens_in": 0, "tokens_out": 0, "latency_s": 0.0,
+                                     "cost_usd": 0.0, "reply_file": hit["reply_file"]})
+            return Answer(True, hit["text"], call_id=base["call_id"], model=model, cached=True, cost_usd=0.0,
+                          reason="" if recorded else ("the answer came from the cache but the ledger could not record "
+                                                      "this use, so it cannot be reported"))
         if key_problem:
             return self._refuse(base, "no-key", key_problem)
         worst_in = len(json.dumps(body).encode("utf-8")) + REQUEST_FRAMING_TOKENS     # a token is at least one byte
@@ -509,16 +555,25 @@ class Telegraph:
     # ------------------------------------------------------------------------------------------- parts
 
     def _key(self) -> tuple[str | None, str | None]:
+        """(key, problem). A key with a newline, a control character or a character outside Latin-1 is refused here, before
+        any use: it cannot be sent in a header, and an HTTP library would show it in an escaped form that redaction misses."""
         if self.cfg.key_env:
             value = str(self.environ.get(self.cfg.key_env, "")).strip()
-            return (value, None) if value else (None, f"the key variable {self.cfg.key_env} is not set")
-        if self.cfg.key_file:
+            if not value:
+                return None, f"the key variable {self.cfg.key_env} is not set"
+        elif self.cfg.key_file:
             try:
                 value = self.cfg.key_file.read_text(encoding="utf-8").strip()
             except (OSError, UnicodeDecodeError):
                 return None, "cannot read the key file"
-            return (value, None) if value else (None, "the key file is empty")
-        return None, None
+            if not value:
+                return None, "the key file is empty"
+        else:
+            return None, None
+        if any(ord(c) < 0x20 or ord(c) == 0x7F or ord(c) > 0xFF for c in value):
+            return None, ("the key has a character that cannot be sent in an HTTP header (a newline, a control character or a "
+                          "character outside Latin-1); check the key source")
+        return value, None
 
     def _choose_model(self, problem: str, recs: list[dict]) -> str:
         """The model for the next question on `problem`: each answered call counts once, by its latest verdict. A verdict of
@@ -572,7 +627,8 @@ class Telegraph:
         if isinstance(value, str):
             return redact(value, hostname=self.hostname, home=self.home, secrets=(key,) if key else ())
         if isinstance(value, dict):
-            return {k: self._clean_tree(v, key) for k, v in value.items()}
+            return {(self._clean_tree(k, key) if isinstance(k, str) else k): self._clean_tree(v, key)
+                    for k, v in value.items()}
         if isinstance(value, list):
             return [self._clean_tree(v, key) for v in value]
         return value
@@ -629,7 +685,7 @@ class Telegraph:
         tin = usage[0] if usage else (len(prompt) + len(SYSTEM)) // 3
         tout = usage[1] if usage else len(text) // 3
         price = self.cfg.prices.get(model)
-        cost = round(tin * price[0] / 1e6 + tout * price[1] / 1e6, 9) if price else None
+        cost = None if estimated else (round(tin * price[0] / 1e6 + tout * price[1] / 1e6, 9) if price else None)
         reply_file = f"replies/{base['call_id']}.txt"
         self._write(self.dir / reply_file, text)
         recorded = self._append({**rec, "outcome": "ok", "tokens_in": tin, "tokens_out": tout, "cost_usd": cost,
@@ -651,6 +707,9 @@ class Telegraph:
                 text = "".join(b.get("text", "") for b in obj.get("content", []) if isinstance(b, dict))
                 u = obj.get("usage") or {}
                 usage = (int(u["input_tokens"]), int(u["output_tokens"])) if "input_tokens" in u else None
+                if any(isinstance(u.get(k), (int, float)) and u.get(k) > 0
+                       for k in ("cache_creation_input_tokens", "cache_read_input_tokens")):
+                    usage = None               # cached input is reported apart and billed at other rates: unknown usage
                 finish = obj.get("stop_reason")
             else:
                 choice = obj["choices"][0]
@@ -669,6 +728,10 @@ class Telegraph:
                                "extra_body = { chat_template_kwargs = { enable_thinking = false } }")
         if not text.strip():
             return "", usage, "the answer was empty (only reasoning, no answer)"
+        try:
+            text.encode("utf-8")
+        except UnicodeEncodeError:
+            return "", usage, "the answer contains characters that cannot be stored (a lone surrogate)"
         return text, usage, ""
 
     def _refuse(self, base: dict, outcome: str, reason: str, held: bool = False) -> Answer:
@@ -689,21 +752,26 @@ class Telegraph:
     @contextlib.contextmanager
     def _ledger_lock(self):
         """An exclusive lock on the ledger directory, held while the budget is checked and a reservation is written, so two
-        processes cannot both spend the same allowance. Raises LedgerUnavailable when the directory or the lock cannot be used."""
+        processes cannot both spend the same allowance. Raises LedgerUnavailable when the directory or the lock cannot be used
+        (a lock that cannot be taken included); the descriptor is always closed."""
         try:
             self.dir.mkdir(parents=True, exist_ok=True, mode=0o700)
             fd = os.open(self.dir / LOCK, os.O_WRONLY | os.O_CREAT, 0o600)
-            os.fchmod(fd, 0o600)
         except OSError as exc:
             raise LedgerUnavailable(type(exc).__name__) from exc
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            try:
+                os.fchmod(fd, 0o600)
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            except OSError as exc:
+                raise LedgerUnavailable(type(exc).__name__) from exc
             yield
         finally:
             try:
-                fcntl.flock(fd, fcntl.LOCK_UN)
-            finally:
-                os.close(fd)
+                fcntl.flock(fd, fcntl.LOCK_UN)          # closing the descriptor releases the lock if this fails
+            except OSError:
+                pass
+            os.close(fd)
 
     def _quarantine_torn_tail(self) -> None:
         """Called with the lock held. A last line with no line break is a write that was cut short. It moves to a private
@@ -719,15 +787,21 @@ class Telegraph:
         if data and not data.endswith(b"\n"):
             cut = data.rfind(b"\n") + 1
             name = f"{LEDGER}.torn-{uuid.uuid4().hex[:8]}"
+            fragment = data[cut:]
             try:
                 fd = os.open(self.dir / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                 try:
-                    os.write(fd, data[cut:])
+                    if os.write(fd, fragment) != len(fragment):
+                        raise OSError("short write of the torn tail")
                     os.fsync(fd)
                 finally:
                     os.close(fd)
-                os.truncate(path, cut)
+                os.truncate(path, cut)                   # only after the whole fragment is safe in the sidecar
             except OSError as exc:
+                try:
+                    (self.dir / name).unlink()           # the ledger is intact, so the partial sidecar must not be counted
+                except OSError:
+                    pass
                 raise LedgerUnavailable(type(exc).__name__) from exc
         # Every sidecar gets exactly one note. A crash between the cut and the note leaves a sidecar with no note, and the
         # next call writes it here, so recovery can be replayed.
