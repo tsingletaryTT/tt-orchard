@@ -553,6 +553,50 @@ def test_the_default_venv_is_under_orchard_venvs_in_the_home_and_an_environment_
     assert e.venv_dir == Path("/y/v") and e.tt_metal_dir == Path("/y/t")
 
 
+def test_a_relative_tree_is_stored_as_an_absolute_path_in_the_pth_and_the_record(world, monkeypatch):
+    """Python resolves a relative .pth line against site-packages, so `../tt-metal` would pass --check and fail the import."""
+    (world.tmp / "venvs").mkdir(exist_ok=True)
+    monkeypatch.chdir(world.tmp / "venvs")
+    env = world.env(tt_metal_dir=Path("../tt-metal"))
+    assert env.tt_metal_dir == world.tree
+    results = de.ensure(env, check_only=False, say=lambda s: None)
+    assert all(r.status == de.OK for r in results), [(r.name, r.detail) for r in results]
+    assert all(Path(line).is_absolute() for line in (world.site / de.PTH_NAME).read_text().splitlines())
+    assert json.loads((world.venv / de.RECORD).read_text())["host_tree"]["path"] == str(world.tree)
+    assert de.fix_command(env) == f"tt-orchard demo-env --venv-dir {world.venv} --tt-metal-dir {world.tree}"
+
+
+def test_a_relative_venv_dir_is_made_absolute_before_uv_sees_it(world, monkeypatch):
+    monkeypatch.chdir(world.tmp)
+    env = world.env(venv_dir=Path("venvs/tt-demo"))
+    de.ensure(env, check_only=False, say=lambda s: None)
+    assert world.run.installs()[0][-1] == str(world.venv)
+
+
+def test_a_symlinked_tree_is_resolved_before_it_is_stored(world):
+    link = world.tmp / "link-to-tree"
+    link.symlink_to(world.tree)
+    env = world.env(tt_metal_dir=link)
+    de.ensure(env, check_only=False, say=lambda s: None)
+    assert str(world.tree) in (world.site / de.PTH_NAME).read_text().splitlines()
+    assert str(link) not in (world.site / de.PTH_NAME).read_text()
+
+
+def test_a_venv_inside_the_host_tree_is_refused_and_nothing_runs(world):
+    env = world.env(venv_dir=world.tree / ".venv")
+    results = de.ensure(env, check_only=False, say=lambda s: None)
+    assert results[0].name == "venv-dir" and results[0].status == de.FAIL and "host tt-metal tree" in results[0].detail
+    assert world.run.calls == [] and not (world.tree / ".venv").exists()
+
+
+def test_a_venv_that_reaches_the_host_tree_through_a_link_is_refused(world):
+    link = world.tmp / "elsewhere"
+    link.symlink_to(world.tree)
+    results = de.ensure(world.env(venv_dir=link / "venv"), check_only=False, say=lambda s: None)
+    assert results[0].name == "venv-dir" and results[0].status == de.FAIL and world.run.calls == []
+    assert not (world.tree / "venv").exists()
+
+
 def test_the_fix_command_names_the_venv_and_the_tree(world):
     cmd = de.fix_command(world.env())
     assert cmd == f"tt-orchard demo-env --venv-dir {world.venv} --tt-metal-dir {world.tree}"

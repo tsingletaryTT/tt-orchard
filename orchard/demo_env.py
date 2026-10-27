@@ -128,6 +128,12 @@ class DEnv:
     run: Callable = real_run          # (argv, timeout, env=None) -> (returncode, stdout, stderr)
     environ: dict | None = None
 
+    def __post_init__(self):
+        # Absolute and link-free before anything uses them. A relative tree would go into tt-host-tree.pth unchanged, and Python
+        # resolves a relative .pth line against site-packages, so the check could pass while the import fails.
+        self.venv_dir = Path(self.venv_dir).expanduser().resolve()
+        self.tt_metal_dir = Path(self.tt_metal_dir).expanduser().resolve()
+
     @property
     def py(self) -> Path:
         return self.venv_dir / "bin" / "python"
@@ -167,6 +173,9 @@ def refusal(env: DEnv) -> Result | None:
                                             "pass another --venv-dir")
     if _inside(env.tt_metal_dir, venv):
         return Result("venv-dir", FAIL, f"the host tt-metal tree {env.tt_metal_dir} is inside the venv directory {venv}")
+    if _inside(venv, env.tt_metal_dir):
+        return Result("venv-dir", FAIL, f"the venv directory {venv} is inside the host tt-metal tree {env.tt_metal_dir}; "
+                                        "this command never writes into the host tree. Pass another --venv-dir")
     return None
 
 
