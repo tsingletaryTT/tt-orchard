@@ -457,7 +457,7 @@ class _Spy:
         self.bytes = 0
 
     def install(self, monkeypatch):
-        real_open = open
+        real_open = vs._open_log
         spy = self
 
         class Wrapped:
@@ -478,7 +478,7 @@ class _Spy:
             def __exit__(self, *a):
                 self._fh.close()
 
-        monkeypatch.setattr(vs, "open", lambda *a, **k: Wrapped(real_open(*a, **k)), raising=False)
+        monkeypatch.setattr(vs, "_open_log", lambda *a, **k: (lambda fh: Wrapped(fh) if fh is not None else None)(real_open(*a, **k)))
 
 
 def test_one_long_line_cannot_make_a_scan_read_past_the_file_budget(root, monkeypatch):
@@ -679,3 +679,100 @@ def test_a_recovered_long_turn_alone_counts_as_one_agent_source(root, monkeypatc
     write_log(root, "log/run.jsonl", [_big()])
     s = vs.scan(root)
     assert s["turns"] == 1 and s["sources"] == {"agent": 1, "benchmark": 0}
+from types import SimpleNamespace  # noqa: E402
+
+
+
+# ---- review fix 1 (third round): logs are opened without following links, and the open is the check -------------------------
+
+def _lie_about_links(monkeypatch):
+    """Make the earlier path checks (`is_symlink`, `is_file`) answer as they would before a file was swapped for a link."""
+    monkeypatch.setattr(vs.Path, "is_symlink", lambda self: False)
+    monkeypatch.setattr(vs.Path, "is_file", lambda self: True)
+
+
+def test_a_log_replaced_by_a_link_after_discovery_is_refused_when_it_is_opened(root, tmp_path, monkeypatch):
+    outside = tmp_path / "outside.jsonl"
+    outside.write_text(turn(1, 999, 9) + "\n")
+    write_log(root, "a/log/run.jsonl", [turn(1, 5, 1)])
+    real_find = vs._find_files
+
+    def find_then_swap(r, skipped):
+        found = real_find(r, skipped)
+        for p, _ in found:                                                 # the swap happens after discovery
+            p.unlink()
+            p.symlink_to(outside)
+        return found
+    monkeypatch.setattr(vs, "_find_files", find_then_swap)
+    s = vs.scan(root)
+    assert s["turns"] == 0 and s["prompt_tokens"] == 0
+    assert s["skipped"]["links"] == 1
+
+
+def test_a_link_is_refused_even_when_the_path_checks_are_fooled(root, tmp_path, monkeypatch):
+    outside = tmp_path / "outside.jsonl"
+    outside.write_text(turn(1, 999, 9) + "\n")
+    (root / "log").mkdir(parents=True)
+    (root / "log" / "run.jsonl").symlink_to(outside)
+    _lie_about_links(monkeypatch)
+    s = vs.scan(root)
+    assert s["turns"] == 0 and s["skipped"]["links"] >= 1
+
+
+def test_a_log_that_is_not_a_regular_file_is_refused_when_it_is_opened(root, monkeypatch):
+    (root / "log").mkdir(parents=True)
+    fifo = root / "log" / "run.jsonl"
+    os.mkfifo(fifo)                                                         # opening a fifo for reading would block
+    _lie_about_links(monkeypatch)
+    s = vs.scan(root)
+    assert s["turns"] == 0 and s["skipped"]["links"] == 1
+
+
+def test_a_missing_log_is_unreadable_not_a_link(root, monkeypatch):
+    write_log(root, "log/run.jsonl", [turn()])
+    real_find = vs._find_files
+
+    def find_then_delete(r, skipped):
+        found = real_find(r, skipped)
+        for p, _ in found:
+            p.unlink()
+        return found
+    monkeypatch.setattr(vs, "_find_files", find_then_delete)
+    s = vs.scan(root)
+    assert s["skipped"]["unreadable_files"] == 1 and s["skipped"]["links"] == 0
+
+
+# ---- review fix 2 (third round): attempt.json is opened without following links and read with a limit -------------------------
+
+def test_an_attempt_record_that_is_a_link_is_not_followed_even_when_the_path_checks_are_fooled(root, tmp_path, monkeypatch):
+    write_log(root, "op/attempt-1/log/p.jsonl", [turn(1, 5, 1)])
+    real = tmp_path / "real.json"
+    real.write_text(json.dumps({"agent_wall_s": 99}))
+    (root / "op" / "attempt-1" / "attempt.json").symlink_to(real)
+    _lie_about_links(monkeypatch)
+    s = vs.scan(root)
+    assert s["agent_wall_s"] is None and s["turns"] == 1
+
+
+def test_an_attempt_record_over_the_cap_is_refused_by_the_bytes_read_not_by_an_earlier_size(root, monkeypatch):
+    write_log(root, "op/attempt-1/log/p.jsonl", [turn(1, 5, 1)])
+    (root / "op" / "attempt-1" / "attempt.json").write_text(json.dumps({"agent_wall_s": 99}) + " " * (vs.MAX_ATTEMPT_BYTES + 10))
+    monkeypatch.setattr(vs.Path, "stat", lambda self, *a, **k: SimpleNamespace(st_size=10, st_mode=0o100644))   # a stale size
+    assert vs.scan(root)["agent_wall_s"] is None
+
+
+def test_an_attempt_record_exactly_at_the_cap_is_read(root):
+    write_log(root, "op/attempt-1/log/p.jsonl", [turn(1, 5, 1)])
+    body = json.dumps({"agent_wall_s": 99})
+    (root / "op" / "attempt-1" / "attempt.json").write_text(body + " " * (vs.MAX_ATTEMPT_BYTES - len(body)))
+    assert vs.scan(root)["agent_wall_s"] == 99.0
+
+
+def test_the_attempt_read_asks_for_at_most_the_cap_plus_one_byte(root, monkeypatch):
+    write_log(root, "op/attempt-1/log/p.jsonl", [turn(1, 5, 1)])
+    (root / "op" / "attempt-1" / "attempt.json").write_text(json.dumps({"agent_wall_s": 1}))
+    asked = []
+    real_read = os.read
+    monkeypatch.setattr(vs.os, "read", lambda fd, n: (asked.append(n), real_read(fd, n))[1])
+    vs.scan(root)
+    assert asked and max(asked) <= vs.MAX_ATTEMPT_BYTES + 1

@@ -21,10 +21,12 @@ usage and a file that cannot be read are counted in `skipped`, and the summary s
 from __future__ import annotations
 
 import difflib
+import errno
 import json
 import math
 import os
 import re
+import stat
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -204,15 +206,65 @@ def _more(fh) -> bool:
         return False
 
 
+MAX_ATTEMPT_BYTES = 1024 * 1024      # an attempt.json larger than this is not read
+
+
+def _open_log(path: Path, skipped: dict):
+    """Open a log for reading without following a link, and keep it only if the opened descriptor is a regular file. The open is
+    the check: a file swapped for a link after discovery is refused here. Returns a binary file object, or None after counting
+    why (a link or a file that is not regular is a skipped link; anything else is an unreadable file)."""
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        skipped["links" if exc.errno in (errno.ELOOP, errno.EMLINK) else "unreadable_files"] += 1
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            os.close(fd)
+            skipped["links"] += 1
+            return None
+        return os.fdopen(fd, "rb")
+    except OSError:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        skipped["unreadable_files"] += 1
+        return None
+
+
+def _read_capped(path: Path, cap: int) -> bytes | None:
+    """The bytes of a small regular file, read without following a link and with at most cap+1 bytes asked for. None when the file
+    is a link, is not regular, cannot be read or holds more than `cap` bytes."""
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        data = b""
+        while len(data) <= cap:
+            chunk = os.read(fd, min(65536, cap + 1 - len(data)))
+            if not chunk:
+                break
+            data += chunk
+        return data if len(data) <= cap else None
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
 def _lines(path: Path, skipped: dict, budget: list):
     """Yield ("rec", dict) for each line that parses, and ("tail", bytes) for a line over the cap. Every read is limited to
     what is left of the file budget and the scan budget. A record that a budget cuts off is dropped and counted in
     `oversize_files`, so its tail is never priced."""
     read = 0
-    try:
-        fh = open(path, "rb")
-    except OSError:
-        skipped["unreadable_files"] += 1
+    fh = _open_log(path, skipped)
+    if fh is None:
         return
     with fh:
         while True:
@@ -329,13 +381,14 @@ def _find_files(root: Path, skipped: dict):
 
 
 def _attempt_wall(log_dir: Path) -> float:
-    """The agent's wall seconds a kernel-probe attempt recorded beside its log directory (`attempt.json`), else 0."""
-    p = log_dir.parent / "attempt.json"
+    """The agent's wall seconds a kernel-probe attempt recorded beside its log directory (`attempt.json`), else 0. The file is opened
+    without following links and read with a size limit, so a swapped link or a large file gives no time."""
+    raw = _read_capped(log_dir.parent / "attempt.json", MAX_ATTEMPT_BYTES)
+    if raw is None:
+        return 0.0
     try:
-        if p.is_symlink() or not p.is_file() or p.stat().st_size > 1024 * 1024:
-            return 0.0
-        v = json.loads(p.read_text(encoding="utf-8")).get("agent_wall_s")
-    except (OSError, ValueError, AttributeError, UnicodeDecodeError, RecursionError):
+        v = json.loads(raw.decode("utf-8")).get("agent_wall_s")
+    except (ValueError, AttributeError, UnicodeDecodeError, RecursionError):
         return 0.0
     return _seconds(v) or 0.0
 
