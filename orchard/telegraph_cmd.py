@@ -119,7 +119,11 @@ def _ping(cfg: tg.Config, key, say, getter) -> int:
     base = cfg.endpoint[:-3] if cfg.api == "anthropic" and cfg.endpoint.endswith("/v1") else cfg.endpoint
     url = (base + "/v1/models") if cfg.api == "anthropic" and not cfg.endpoint.endswith("/v1") else cfg.endpoint + "/models"
     headers = {}
-    if key:
+    if cfg.api == "anthropic":
+        headers["anthropic-version"] = tg.ANTHROPIC_VERSION
+        if key:
+            headers["x-api-key"] = key
+    elif key:
         headers["Authorization"] = f"Bearer {key}"
     try:
         status, raw = getter(url, headers, cfg.timeout_s)

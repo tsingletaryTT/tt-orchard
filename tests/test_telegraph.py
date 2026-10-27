@@ -667,3 +667,67 @@ def test_the_summary_counts_refusals_for_a_problem_cap(tmp_path):
     tel.ask("a", "t", "f1")
     tel.ask("a", "t", "f2")
     assert tg.summarise(tmp_path / "tg")["refused"] == 1
+
+
+# ------------------------------------------------------------------------------------------------ review of PR 106, group A
+
+@pytest.mark.parametrize("key", ["n", "best_of", "stream_options"])
+def test_extra_body_cannot_ask_for_more_than_one_completion(key):
+    with pytest.raises(tg.ConfigError, match=f"extra_body cannot set {key}"):
+        tg.load(table(extra_body={key: 10}), base=Path("/x"))
+
+
+@pytest.mark.parametrize("value", ["false", "true", 1, 0, "yes", [True]])
+def test_enabled_must_be_a_toml_boolean(value):
+    with pytest.raises(tg.ConfigError, match="enabled must be true or false"):
+        tg.load({"enabled": value, "endpoint": "https://llm.example.org/v1", "models": ["a"], "key_env": "K"},
+                base=Path("/x"))
+
+
+@pytest.mark.parametrize("bad", ["on", 3, ["enabled"]])
+def test_the_telegraph_table_must_be_a_table(bad):
+    with pytest.raises(tg.ConfigError, match="telegraph must be a table"):
+        tg.load(bad, base=Path("/x"))
+
+
+def test_a_complete_pem_block_is_removed_before_anything_is_sent(tmp_path):
+    pem = ("-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAxyz0123456789abcdefABCDEF\nsecondline0123456789\n"
+           "-----END RSA PRIVATE KEY-----")
+    tel, wire = make(tmp_path)
+    tel.ask("p", f"before\n{pem}\nafter", "f")
+    sent = wire.requests[0]["body"]["messages"][-1]["content"]
+    for leak in ("MIIEowIBAAKCAQEAxyz", "secondline0123456789", "END RSA PRIVATE KEY", "BEGIN RSA PRIVATE KEY"):
+        assert leak not in sent, leak
+    assert "before" in sent and "after" in sent
+
+
+def test_an_unterminated_pem_block_is_removed_to_the_end_of_the_text(tmp_path):
+    tel, wire = make(tmp_path)
+    tel.ask("p", "task\n-----BEGIN PRIVATE KEY-----\nMIIBVQIBADANBgkqhkiG9w0BAQEFAASCAT8wggE7", "f")
+    sent = wire.requests[0]["body"]["messages"][-1]["content"]
+    assert "MIIBVQIBADANBgkq" not in sent and "BEGIN PRIVATE KEY" not in sent and "task" in sent
+
+
+def test_a_problem_id_that_holds_the_key_is_cleaned_before_the_ledger_and_the_budget(tmp_path):
+    tel, wire = make(tmp_path, max_calls_per_problem=1)
+    problem = f"scan-{KEY}"
+    tel.ask(problem, "t", "f1")
+    for path in (tmp_path / "tg").rglob("*"):
+        if path.is_file():
+            assert KEY not in path.read_text(), path
+    got = tel.ask(problem, "t", "f2")                              # the cap still applies to the cleaned id
+    assert not got.ok and "call cap" in got.reason and KEY not in got.reason and len(wire.requests) == 1
+
+
+def test_a_problem_id_with_a_home_path_is_cleaned_in_the_ledger(tmp_path):
+    tel, _ = make(tmp_path)
+    tel.ask("fix /home/someone/orchard-runs/x", "t", "f")
+    rec = records(tmp_path)[0]
+    assert "/home/someone" not in rec["problem"] and rec["problem"].startswith("fix ~/")
+
+
+def test_a_report_note_that_holds_the_key_is_not_written_to_the_ledger(tmp_path):
+    tel, _ = make(tmp_path)
+    got = tel.ask("p", "t", "f")
+    tel.report(got.call_id, helped=False, note=f"the answer repeated {KEY} back")
+    assert KEY not in (tmp_path / "tg" / "telegraph.jsonl").read_text()

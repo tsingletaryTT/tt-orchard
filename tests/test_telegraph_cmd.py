@@ -253,3 +253,16 @@ def test_the_command_is_reachable_from_the_cli_entry_point(tmp_path):
     code = cli.main(["telegraph", "usage", "--telegraph-config", str(write(tmp_path)), "--dir", str(tmp_path / "d")],
                     env={"HOME": str(tmp_path)}, stdout=out)
     assert code == 0 and "calls: 0" in out.getvalue()
+
+
+def test_ping_of_an_anthropic_configuration_uses_that_apis_headers(tmp_path):
+    toml = TOML.replace('endpoint = "https://llm.example.org/v1"', 'endpoint = "https://llm.example.org"\napi = "anthropic"')
+    seen = {}
+
+    def getter(url, headers, timeout):
+        seen.update(url=url, headers=headers)
+        return 200, json.dumps({"data": [{"id": "small"}, {"id": "big"}]}).encode()
+    code, _ = run(["check", "--ping", "--telegraph-config", str(write(tmp_path, toml))], tmp_path, getter=getter)
+    assert code == 0 and seen["url"] == "https://llm.example.org/v1/models"
+    assert seen["headers"]["x-api-key"] == KEY and seen["headers"]["anthropic-version"] == tg.ANTHROPIC_VERSION
+    assert "Authorization" not in seen["headers"]

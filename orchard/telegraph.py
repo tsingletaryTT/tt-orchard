@@ -46,7 +46,7 @@ LEDGER = "telegraph.jsonl"
 KEYS = {"enabled", "endpoint", "models", "api", "key_env", "key_file", "after_failures", "max_calls",
         "max_total_tokens", "max_cost_usd", "prices", "max_output_tokens", "max_prompt_chars", "timeout_s",
         "extra_body", "max_calls_per_problem", "max_tokens_per_problem", "max_cost_per_problem_usd"}
-RESERVED_BODY = ("model", "messages", "max_tokens", "temperature", "system", "stream")
+RESERVED_BODY = ("model", "messages", "max_tokens", "temperature", "system", "stream", "stream_options", "n", "best_of")
 APIS = ("openai", "anthropic")
 ANTHROPIC_VERSION = "2023-06-01"
 MIN_PROMPT_CHARS = 500
@@ -103,7 +103,14 @@ def _http_ok(host: str) -> bool:
 def load(table: dict | None, *, base: Path) -> Config:
     """The `[telegraph]` table as a Config. None, an empty table or `enabled = false` is off and is not checked further.
     A relative key_file is relative to `base`, the config file's directory."""
-    if not table or not table.get("enabled", False):
+    if table is None:
+        return Config()
+    if not isinstance(table, dict):
+        raise ConfigError("telegraph must be a table")
+    enabled = table.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise ConfigError("telegraph.enabled must be true or false")
+    if not enabled:
         return Config()
     for key in table:
         if key not in KEYS:
@@ -183,11 +190,15 @@ _BEARER = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{6,}")
 _SK = re.compile(r"\bsk-[A-Za-z0-9_-]{16,}")
 
 
+_PEM = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|\Z)", re.DOTALL)
+
+
 def redact(text: str, *, hostname: str = "", home: str = "", secrets: tuple = ()) -> str:
     """`text` without the key, token shapes, private key markers, the host name and the home directory."""
     for secret in secrets:
         if secret:
             text = text.replace(secret, "[redacted]")
+    text = _PEM.sub("[redacted private key]", text)
     for _what, pattern in TOKEN_PATTERNS:
         text = pattern.sub("[redacted]", text)
     text = _BEARER.sub("Bearer [redacted]", text)
@@ -358,14 +369,15 @@ class Telegraph:
         key, key_problem = self._key()
         secrets = (key,) if key else ()
         clean = lambda t: redact(str(t), hostname=self.hostname, home=self.home, secrets=secrets)   # noqa: E731
-        prompt = cut(f"Problem: {clean(problem)}\n\nTask:\n{clean(task)}\n\nWhat failed:\n{clean(failure)}",
+        problem = clean(problem)[:80]
+        prompt = cut(f"Problem: {problem}\n\nTask:\n{clean(task)}\n\nWhat failed:\n{clean(failure)}",
                      self.cfg.max_prompt_chars - len(SYSTEM))
         sha = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
         recs = _read_ledger(self.dir)
         model = self._choose_model(problem, recs)
         cache = self.dir / "cache" / (hashlib.sha256(f"{model}\0{sha}".encode()).hexdigest() + ".json")
         hit = self._cached(cache)
-        base = {"call_id": uuid.uuid4().hex[:12], "problem": str(problem)[:80], "model": model,
+        base = {"call_id": uuid.uuid4().hex[:12], "problem": problem, "model": model,
                 "prompt_chars": len(prompt), "prompt_sha256": sha}
         if hit is not None:
             self._append({**base, "ts": self.clock(), "outcome": "ok", "cached": True, "tokens_in": 0, "tokens_out": 0,
@@ -383,8 +395,9 @@ class Telegraph:
         that did not help moves the next question to the next model."""
         if not any(r.get("call_id") == call_id and not r.get("cached") for r in _read_ledger(self.dir)):
             raise KeyError(call_id)
+        key, _ = self._key()
         self._append({"report": call_id, "helped": bool(helped), "ts": self.clock(),
-                      "note": redact(note, hostname=self.hostname, home=self.home)[:300]})
+                      "note": redact(note, hostname=self.hostname, home=self.home, secrets=(key,) if key else ())[:300]})
 
     # ------------------------------------------------------------------------------------------- parts
 
