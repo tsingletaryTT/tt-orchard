@@ -247,7 +247,11 @@ function spendText(s) {
 function renderSpendMeter(t) {
   const el = $("spend-meter");
   if (!t) {
-    $("spend-text").textContent = "Helper: spend unknown";
+    // The current spend cannot be read. The last amount that was read stays visible, marked as old, so an outage never hides
+    // a spend that was already high; before any amount was read, nothing is invented.
+    const last = S.telegraph && S.telegraph.meter ? S.telegraph.meter.text.replace(/^Helper: /, "") : null;
+    const age = S.tgOk ? Math.round((Date.now() - S.tgOk) / 1000) : null;
+    $("spend-text").textContent = last ? `Helper: spend unknown · last known ${last} (${age} s ago)` : "Helper: spend unknown";
     el.dataset.state = "unknown";
     el.dataset.tone = "bad";
     el.title = "The page cannot read the helper's spend right now. Click for the Telegraph view.";
@@ -309,6 +313,16 @@ const TG_BANNER = {
 };
 const TG_OUTCOME_TONE = { ok: "good", error: "bad", budget: "bad", "no-key": "warn", "cache hit": "dim", unsettled: "warn" };
 
+// What an unknown cost does, which depends on the cost caps that are set: a global cost cap refuses every new call, a per-problem
+// cost cap refuses new calls for a problem that has one, and with neither the calls still go out.
+function costCapSentence(t, long) {
+  if (t.caps.some((c) => c.id === "cost")) return long ? "A cost cap refuses new calls while any exist." : "a cost cap refuses new calls while any exist";
+  if (t.config.per_problem.cost_usd !== null) {
+    return long ? "A per-problem cost cap refuses new calls for a problem while it has any." : "a per-problem cost cap refuses new calls for a problem while it has any";
+  }
+  return long ? "No cost cap is set, so new calls still go out." : "no cost cap is set, so calls still go out";
+}
+
 function tgCapText(c) {
   const used = c.unit === "usd" ? usd(c.used) : String(c.used), limit = c.unit === "usd" ? usd(c.limit) : String(c.limit);
   return c.blocked ? `${used} known of ${limit}: blocked, a call has no known cost` : `${used} of ${limit} (${c.percent}%)`;
@@ -330,9 +344,8 @@ function renderTelegraph() {
   banner.append(h("strong", {}, TG_BANNER[t.state] || ""));
   if (t.capped) banner.append(h("span", {}, ` Reason: ${t.capped.reason}.`));
   if (t.spend.unknown_cost) {
-    const capSet = t.caps.some((c) => c.id === "cost");
-    banner.append(h("span", {}, ` ${plural(t.spend.unknown_cost, "call")} ${t.spend.unknown_cost === 1 ? "has" : "have"} no known cost.` +
-      (capSet ? " A cost cap refuses new calls while any exist." : " No cost cap is set, so new calls still go out.")));
+    banner.append(h("span", {}, ` ${plural(t.spend.unknown_cost, "call")} ${t.spend.unknown_cost === 1 ? "has" : "have"} no known cost. ` +
+      costCapSentence(t, true)));
   }
   if (t.spend.unsettled) banner.append(h("span", {}, ` ${plural(t.spend.unsettled, "reservation")} ${t.spend.unsettled === 1 ? "has" : "have"} no recorded result and counts at its worst case.`));
   if (t.error) banner.append(h("span", {}, ` ${t.error}.`));
@@ -348,7 +361,7 @@ function renderTelegraph() {
     num("Calls counted", String(t.spend.calls), `${s.calls} sent and recorded · ${s.ok} answered`),
     num("Unsettled", String(t.spend.unsettled), "no result recorded; counted at the worst case"),
     num("Unknown cost", String(t.spend.unknown_cost),
-      t.spend.unknown_cost ? (t.caps.some((c) => c.id === "cost") ? "a cost cap refuses new calls while any exist" : "no cost cap is set, so calls still go out")
+      t.spend.unknown_cost ? costCapSentence(t, false)
         : "every counted call has a known cost"),
     num("Helped", String(s.helped), `${s.not_helped} did not help · ${s.unreported} not reported`),
     num("Cache hits", String(s.cache_hits), "cost nothing"),
@@ -1759,6 +1772,7 @@ function routeFromHash() {
 
 async function main() {
   wire();
+  startTelegraphPolling();               // first: neither the metadata request nor the run list may stop the spend meter being polled
   try {
     S.meta = await api("/api/meta");
   } catch (err) {
@@ -1775,7 +1789,6 @@ async function main() {
   pollHealth();
   setInterval(() => { if (!document.hidden) pollHealth(); }, 2000);
   buildChannels();
-  startTelegraphPolling();               // before the first run refresh: if that request hangs, the spend meter must still be polled
   await refreshRuns();
   routeFromHash();
   if (!S.selected && S.runs.length && S.view === "orchard") select(S.runs[0].name);

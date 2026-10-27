@@ -63,6 +63,11 @@ def test_the_meter_is_redrawn_on_every_poll_and_says_unknown_after_an_outage():
     assert "pollTelegraph" not in runs, "polling must not depend on, or be repeated by, the run list's refresh"
     main = fn_body(js, "async function main")
     assert main.index("startTelegraphPolling()") < main.index("await refreshRuns()"), "timers first, so a hung request cannot stop them"
+    assert main.index("startTelegraphPolling()") < main.index('await api("/api/meta")'), "not even the metadata request may come first"
+    meter_fn = fn_body(js, "function renderSpendMeter")
+    assert "last known" in meter_fn and "S.telegraph" in meter_fn and "s ago" in meter_fn, "an outage keeps the last amount, marked as old"
+    sentence = fn_body(js, "function costCapSentence")
+    assert "per_problem.cost_usd" in sentence and "per-problem cost cap refuses" in sentence
     start = fn_body(js, "function startTelegraphPolling")
     assert "setInterval(" in start and "markTelegraphStale" in start and "POLL_TELEGRAPH_MS" in start and "2000" in start
     assert start.strip().splitlines()[1].strip() == "pollTelegraph();", "the first poll is immediate, not one tick later"
