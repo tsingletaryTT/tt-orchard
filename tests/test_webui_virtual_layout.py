@@ -237,3 +237,12 @@ def test_the_polling_constants_are_bounded():
     js = JS()
     assert re.search(r"const VS_TIMEOUT_MS = (\d+);", js) and 3000 <= int(re.search(r"const VS_TIMEOUT_MS = (\d+);", js).group(1)) <= 15000
     assert re.search(r"const VS_BACKOFF_MAX_MS = (\d+);", js) and int(re.search(r"const VS_BACKOFF_MAX_MS = (\d+);", js).group(1)) <= 60000
+
+
+def test_the_poll_resets_its_backoff_on_success_caps_it_and_drops_stale_answers():
+    poll = fn_body(JS(), "async function pollVirtual")
+    assert poll.index("S.vsBackoff = 0;") < poll.index("S.virtual = answer;"), "a good answer clears the delay before it is used"
+    assert "S.vsNextAt = 0;" in poll
+    assert "Math.min(VS_BACKOFF_MAX_MS, (S.vsBackoff" in poll
+    assert poll.count("S.vsInflight !== ctl") == 2, "both the answer and the failure of a cancelled request are ignored"
+    assert "S.selected !== asked" in poll, "an answer about the run selected a moment ago is dropped"

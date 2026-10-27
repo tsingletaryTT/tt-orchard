@@ -685,3 +685,20 @@ def test_a_folder_with_only_unreadable_logs_is_listed_and_marked_incomplete(tmp_
         os.chmod(dead, 0o644)
     text = out.getvalue()
     assert "org--dead: 0 turns" in text and "INCOMPLETE" in text and "files that could not be read" in text
+
+
+def test_a_cost_written_as_the_string_nan_is_a_damaged_record(tmp_path, probe):
+    ledger = tmp_path / "tg"
+    _write_raw(ledger, ['{"call_id": "c1", "outcome": "ok", "tokens_in": 10, "tokens_out": 5, "cost_usd": "NaN", "model": "m", "problem": "p"}'])
+    code, text = run(tmp_path, [str(probe), "--dir", str(ledger)])
+    assert "cannot be read" in text and "confirmed:" not in text
+
+
+def test_two_sound_costs_that_add_up_to_infinity_are_damaged_not_printed(tmp_path, probe):
+    ledger = tmp_path / "tg"
+    big = "1.7e308"
+    _write_raw(ledger, [
+        '{"call_id": "c1", "outcome": "ok", "tokens_in": 1, "tokens_out": 1, "cost_usd": %s, "model": "m", "problem": "p"}' % big,
+        '{"call_id": "c2", "outcome": "ok", "tokens_in": 1, "tokens_out": 1, "cost_usd": %s, "model": "m", "problem": "p"}' % big])
+    code, text = run(tmp_path, [str(probe), "--dir", str(ledger)])
+    assert "cannot be read" in text and "inf" not in text.lower().replace("information", "")
