@@ -138,7 +138,7 @@ def test_operator_local_meter_is_aa_on_the_dark_top_bar():
 
 def test_the_local_table_is_redrawn_only_when_its_data_changes():
     body = fn_body(JS(), "function renderLocalTable")
-    assert 'changed($("tg-local"), [v.rows, v.references, v.not_scanned, v.discovery_truncated, v.more_rows])' in body
+    assert 'changed($("tg-local"), [v.rows, v.references, v.not_scanned, v.discovery_truncated, v.more_rows, v.scope])' in body
 
 
 
@@ -171,3 +171,12 @@ def test_the_page_says_how_many_more_runs_the_table_leaves_out_and_redraws_when_
     assert 'plural(v.more_rows, "more run")' in body and "not shown in this table" in body
     guard = next(line for line in body.splitlines() if "changed(" in line)
     assert "v.more_rows" in guard, "a change in the hidden rows must redraw the note"
+
+
+def test_the_hidden_rows_note_claims_the_meter_total_only_for_the_all_runs_scope():
+    body = fn_body(JS(), "function renderLocalTable")
+    assert 'v.scope === "all"' in body and "their tokens are in the meter's total" in body
+    note = body[body.index("more run"):body.index("discovery_truncated ?")]
+    assert note.index('v.scope === "all"') < note.index("their tokens are in the meter's total"), "the claim sits behind the scope test"
+    guard = next(line for line in body.splitlines() if "changed(" in line)
+    assert "v.scope" in guard, "a change of scope must redraw the note"
