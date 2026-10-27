@@ -14,21 +14,26 @@ STORY = "The lighthouse keeper climbed the long spiral stairs every evening, cou
 OTHER = "On the island there was a bell that rang by itself whenever the fog came in, and nobody remembered who had hung it there."
 
 
-def req(text, seconds, params=None):
+LINE = ("[dflash2-serve] slot 0 session: 4 iters, 18 committed tokens, accept 3.75/7 -> 4.50 tok/iter, 21.3 tok/s in-model (incl. seed); "
+        "histogram [0, 2, 0, 0, 0, 0, 1, 1]\n")
+
+
+def req(text, seconds, params=None, log=""):
     return {"params": params or {}, "accepted": True, "error": None, "seconds": seconds, "completion_tokens": 96, "text": text,
-            "finish_reason": "length", "drafter_log": ""}
+            "finish_reason": "length", "drafter_log": log}
 
 
 def probe(ignored: bool, seconds=2.0, hot=True):
     """A sampling probe record: ignored means every sampled request returned the greedy text. `hot` adds the fourth request (temperature 2.0, top-p 0.99,
     seed 2468) that confirms it; a record without it reads as `sampled-matches-greedy` (suspected, not confirmed)."""
     a, b = (GREEDY, GREEDY) if ignored else (STORY, OTHER)
+    log = LINE if ignored and hot else ""          # `sampled-ignored` needs the drafter's session line on every request: independent runtime evidence
     rec = {"ran": True, "prompt": "p", "max_tokens": 96,
-           "requests": {"greedy": req(GREEDY, seconds, {"temperature": 0}),
-                        "sampled_a": req(a, seconds, {"temperature": 1.0, "top_p": 0.9, "seed": 1234}),
-                        "sampled_b": req(b, seconds, {"temperature": 1.0, "top_p": 0.9, "seed": 4321})}}
+           "requests": {"greedy": req(GREEDY, seconds, {"temperature": 0}, log),
+                        "sampled_a": req(a, seconds, {"temperature": 1.0, "top_p": 0.9, "seed": 1234}, log),
+                        "sampled_b": req(b, seconds, {"temperature": 1.0, "top_p": 0.9, "seed": 4321}, log)}}
     if ignored and hot:
-        rec["requests"]["sampled_hot"] = req(GREEDY, seconds, {"temperature": 2.0, "top_p": 0.99, "seed": 2468})
+        rec["requests"]["sampled_hot"] = req(GREEDY, seconds, {"temperature": 2.0, "top_p": 0.99, "seed": 2468}, log)
     return rec
 
 
