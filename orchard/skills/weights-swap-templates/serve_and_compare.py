@@ -424,14 +424,15 @@ def log_size(path: Path) -> int:
 
 
 def session_lines_since(path: Path, offset: int) -> str:
-    """The drafter's `[dflash2-serve]` lines the server wrote after byte `offset`, at most PROBE_LOG_LINES of them."""
+    """The drafter's `[dflash2-serve] ... session:` lines the server wrote after byte `offset`, at most PROBE_LOG_LINES of them."""
     try:
         with open(path, "rb") as f:
             f.seek(max(offset, 0))
             text = f.read().decode("utf-8", errors="replace")
     except OSError:
         return ""
-    lines = [ln[:PROBE_LOG_LINE_CHARS] for ln in text.splitlines() if "[dflash2-serve]" in ln]
+    # Only the session summaries count (the judge reads nothing else). Per-step lines come first and would use up the limit before the summary.
+    lines = [ln[:PROBE_LOG_LINE_CHARS] for ln in text.splitlines() if "[dflash2-serve]" in ln and " session: " in ln]
     return "\n".join(lines[:PROBE_LOG_LINES])
 
 
