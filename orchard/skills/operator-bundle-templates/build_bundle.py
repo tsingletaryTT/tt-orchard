@@ -290,6 +290,10 @@ class Run:
         self.graft_decision = read_json(decision_path, "", required=False)
         if self.graft_decision is not None and self.graft_decision.get("choice") not in ("graft", "safe"):
             self.graft_decision = None
+        # Stage 2's sampling decision (orchard/sampling_choice.py, issue 107): None when there is none or it names no known choice.
+        self.sampling_decision = read_json(s / "2" / "sampling-decision.json", "", required=False)
+        if not isinstance(self.sampling_decision, dict) or self.sampling_decision.get("choice") not in ("keep", "drafter-off"):
+            self.sampling_decision = None
         rec2 = read_json(s / "2" / "model-dir-sources.json", "", required=False) or {}
         self.stage_2_grafted = isinstance(rec2.get("mtp_graft"), dict)       # stage 2's own swap grafted (a person set graft_mtp)
         self.graft_built = {}
@@ -602,6 +606,48 @@ def sampling_section(run: Run, redact: Redactor) -> list[str]:
             "The drafter column is the accepted share of drafted tokens for the greedy and sampled requests (TODO when the server logs none).", "",
             "| Configuration | Verdict | Greedy tokens/s | Sampled tokens/s | Drafter acceptance (greedy / sampled) | Label | Evidence |",
             "|---|---|---|---|---|---|---|", *rows, "", *sentences]
+
+
+SAMPLING_FLAG_RISKS = {
+    "no-variant-serves-purpose": "The model needs sampling, and no configuration that stage 2 measured both applies sampling and decodes above the "
+                                 "usability floor. The run ships the faster one, which does not do what the model needs.",
+    "below-floor": "The model needs sampling. The configuration that applies it decodes below the usability floor, and no other configuration is "
+                   "available, so it is kept.",
+    "unverified": "The model needs sampling, and a verdict or a speed that the choice rests on was not measured.",
+    "variant-not-tried": "The model needs sampling, and the served configuration does not show sampling applied. The drafter-off variant was not "
+                         "tried, so the served configuration is kept.",
+}
+
+
+def sampling_choice_section(run: Run, redact: Redactor) -> list[str]:
+    """The "The sampling choice" section, from stage 2's `sampling-decision.json` (orchard/sampling_choice.py): which configuration the run ships,
+    why, and the numbers it used. No lines when the run has no decision file, so a run from before the choice gets the same RESULTS.md as before.
+    Every copied string goes through the redactor."""
+    d = run.sampling_decision
+    if d is None:
+        return []
+    reason = redact(one_line(d.get("reason"))) if isinstance(d.get("reason"), str) and d["reason"].strip() else "no reason recorded"
+    why = [redact(one_line(x)) for x in d.get("need_evidence") or [] if isinstance(x, str)][:3]
+    nums = d.get("numbers") if isinstance(d.get("numbers"), dict) else {}
+    floor = (d.get("thresholds") or {}).get("min_tok_s") if isinstance(d.get("thresholds"), dict) else None
+    lines = ["", "## The sampling choice", "",
+             "A speculative drafter can ignore sampling: the Qwen3.8 drafter accepts a request with temperature above 0 and samples only its first "
+             "token. Stage 2 therefore chooses the served configuration by what the model is for. It reads whether the model needs sampling from files, "
+             "the sampling probe's verdict for the served configuration, and the speed of each configuration. From `stages/2/sampling-decision.json`.", "",
+             ("Result: stage 2 chose the drafter-off configuration. " if d["choice"] == "drafter-off" else "Result: stage 2 kept the configuration it served. ")
+             + f"{reason}.", "",
+             f"Sampling needed: {'yes' if d.get('needed') else 'no'} ({redact(str(d.get('need_source')))}; override {redact(str(d.get('override')))}).",
+             *[f"- {w}" for w in why]]
+    if d.get("flag"):
+        lines += ["", f"Flag: `{redact(str(d['flag']))}`. " + SAMPLING_FLAG_RISKS.get(d["flag"], "")]
+    where = ev(["stages/2/sampling-decision.json"])
+    label = lambda *keys: "measured" if any(is_number(nums.get(k)) for k in keys) else "TODO"        # noqa: E731
+    lines += ["", "| Measure | Served configuration | Drafter-off variant | Label | Evidence |", "|---|---|---|---|---|",
+              f"| Probe verdict | {redact(str(nums.get('served_verdict')))} | {redact(str(nums.get('variant_verdict')))} | recorded | {where} |",
+              f"| Decode speed of a sampled request (tokens/s) | {fmt(nums.get('served_tok_s'))} | {fmt(nums.get('variant_tok_s'))} | "
+              f"{label('served_tok_s', 'variant_tok_s')} | {where} |",
+              f"| Usability floor (tokens/s) | {fmt(floor)} | {fmt(floor)} | choice | `orchard/defaults.py` |"]
+    return lines
 
 
 def graft_section(run: Run, redact: Redactor) -> list[str]:
@@ -1041,6 +1087,7 @@ def render_results(run: Run, redact: Redactor, n_todo: int, n_hazards: int, skip
     lines += served_dir_section(run, redact)
     lines += graft_section(run, redact)
     lines += sampling_section(run, redact)
+    lines += sampling_choice_section(run, redact)
     lines += reported_section(run, redact)
     body = stage_results(run, redact)
     for n in range(9):
@@ -1323,6 +1370,10 @@ def render_risks(run: Run, redact: Redactor, todo: list[str], hazards) -> str:
                   f"- Dealt with: {'yes' if ok else 'Not shown'}. {' '.join(why)}", ""]
     if not hazards:
         lines += ["Stage 0 listed no hazards.", ""]
+    d = run.sampling_decision
+    if d is not None and d.get("flag"):
+        lines += ["## Sampling choice", "",
+                  SAMPLING_FLAG_RISKS.get(d["flag"], "The sampling decision is flagged.") + " Evidence: `stages/2/sampling-decision.json`.", ""]
     lines += ["## Thin evidence", ""] + [f"- {t}" for t in thin_evidence(run, redact)]
     lic, nc = run.license()
     lines += ["", "## License", ""]
