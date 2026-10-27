@@ -282,6 +282,33 @@ def check_reference(python: Path | None, problem: str | None) -> Check:
     return Check("reference", OK, f"{python} imports torch, transformers, tokenizers and safetensors")
 
 
+# Rules of `tt-orchard demo-env --check` that only say the venv was built for another tag of the host tree, or has no record of
+# the build. The interpreter may still work, so they are a warning (issue 92). Every other failing rule blocks.
+DEMO_ENV_SOFT_RULES = ("ttnn-version", "record-tag", "record")
+
+
+def check_demo_env(python: Path | None, results: list | None, command: str) -> Check:
+    """The interpreter that runs tt-metal demos and tt-train (orchard/demo_env.py), for a stock-runtime run or a configured
+    `demo_python`. The shared TT venv fails these rules: numpy 2.5.3 with ttnn needing numpy below 2, cv2 and datasets that do not
+    import. A rule that fails blocks and the detail gives the exact command. A host tree at another tag than the venv's is a warning."""
+    if python is None:
+        return Check("demo-env", WARN, "no demo_python is configured, so the stock-runtime stage runs tt-transformers' demo with the "
+                     "supervisor's own interpreter, which has no ttnn from the host tree. Build one with "
+                     f"`{command}` and set demo_python in bringup.toml")
+    if results is None:
+        return Check("demo-env", WARN, f"could not check {python}: it is not <venv>/bin/python, so the venv is unknown. "
+                     f"`{command}` builds and checks the usual one")
+    bad = [r for r in results if r.status != "ok" and r.name not in DEMO_ENV_SOFT_RULES]
+    soft = [r for r in results if r.status != "ok" and r.name in DEMO_ENV_SOFT_RULES]
+    if bad:
+        return Check("demo-env", BLOCK, f"demo_python {python} does not pass `demo-env --check`: "
+                     + "; ".join(f"{r.name}: {r.detail}" for r in bad) + f". Run `{command}`", "config-invalid")
+    if soft:
+        return Check("demo-env", WARN, f"demo_python {python}: " + "; ".join(f"{r.name}: {r.detail}" for r in soft)
+                     + f". Run `{command}` to rebuild it for the host tree")
+    return Check("demo-env", OK, f"{python} passes `demo-env --check`: numpy below 2, cv2 and datasets import, the host tree's ttnn and ttml are installed")
+
+
 def check_skills(results: list) -> Check:
     """The tenstorrent/skills clone(s) that skills_dirs point into, compared with upstream main (orchard/skillsfresh).
 
@@ -576,6 +603,7 @@ class Signals:
     skills_freshness: Callable | None = None    # () -> list[skillsfresh.Freshness] for the skills_dirs clones
     bus: Callable | None = None                 # () -> orchard.bus.Bus: the chips the kernel shows (sysfs and /dev; no lease)
     stock_params: Callable | None = None        # (name) -> Path of tt-transformers' model_params/<name> on this box, or None
+    demo_env: Callable | None = None            # (python | None, tree | None) -> (orchard.demo_env results or None, the command that builds it)
 
 
 def check_lab(lab, status) -> Check:
@@ -763,6 +791,23 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
     ref = cfg.reference_python
     guarded("reference", "config-invalid", lambda: check_reference(
         ref, s.reference_problem(ref) if ref is not None and s.reference_problem else None))
+    # The demo interpreter matters when the stock-runtime stage will run tt-transformers' demo (the base row found the support, or a
+    # resumed run recorded it) or when the operator configured one. A lab runs its tests elsewhere.
+    stock_route = bool((base_check.data or {}).get("stock_runtime"))
+    if s.demo_env is not None and not in_lab and (stock_route or cfg.demo_python is not None):
+        def demo() -> Check:
+            python = cfg.demo_python
+            # The tree the demo will run from: the stock route's own (tt-metal/models/tt_transformers/model_params/<name>). Without a
+            # stock route the signal uses the tree the venv's record names, so an environment built with --tt-metal-dir is judged
+            # against the tree it was built from.
+            params = Path(((base_check.data or {}).get("stock_runtime") or {}).get("params_dir") or "")
+            tree = None
+            if params.parent.name == "model_params" and params.parent.parent.name == "tt_transformers" \
+                    and params.parent.parent.parent.name == "models" and len(params.parents) > 3:
+                tree = params.parents[3]
+            results, command = s.demo_env(python, tree)
+            return check_demo_env(python, results, command)
+        guarded("demo-env", "config-invalid", demo)
     if s.skills_freshness is not None:
         try:
             out.append(check_skills(list(s.skills_freshness())))
@@ -889,6 +934,27 @@ def default_signals(cfg, research_options=None) -> Signals:
         tree = os.environ.get("ORCHARD_TT_METAL_DIR") or str((cfg.operator_home or supervisor.operator_home()) / "tt-metal")
         return stock_runtime.find_params(tree, name)
 
+    def demo_env(python, tree=None):
+        """(results of `demo-env --check`, the command that builds the venv). No python or an unknown layout runs no check.
+        The tree is `tree`, else the one the venv's record names, else $ORCHARD_TT_METAL_DIR, else tt-metal under the operator home."""
+        import argparse
+        from orchard import demo_env as de
+        home = Path(cfg.operator_home or supervisor.operator_home())
+        # <venv>/bin/python. A python that exists but sits in no venv (a system interpreter) has no venv to check; one that does not
+        # exist yet is taken as the venv the command would build.
+        venv = None
+        if python is not None and Path(python).parent.name == "bin":
+            top = Path(python).parent.parent
+            venv = top if not Path(python).exists() or (top / "pyvenv.cfg").is_file() else None
+        if tree is None and venv is not None:
+            import types
+            rec = de.read_record(types.SimpleNamespace(venv_dir=venv))
+            recorded = rec.get("host_tree", {}).get("path") if rec and isinstance(rec.get("host_tree"), dict) else None
+            tree = recorded if isinstance(recorded, str) and recorded else None
+        env = de.env_from_args(argparse.Namespace(venv_dir=str(venv) if venv else None, tt_metal_dir=str(tree) if tree else None),
+                               environ=os.environ, home=home)
+        return (de.ensure(env, check_only=True) if venv else None), de.fix_command(env)
+
     return Signals(
         cpu_standin=cpu_standin_problem, sfpi=sfpi_versions, lab_sfpi=lab_sfpi, skills_freshness=skills_freshness, bus=read_bus,
         installed_bundles=lambda: nearest.read_all_installed(models_root(), cfg.operator_home or supervisor.operator_home()),
@@ -899,7 +965,7 @@ def default_signals(cfg, research_options=None) -> Signals:
         credentials=lambda: supervisor.visible_credentials(cfg.operator_home or supervisor.operator_home()),
         port_in_use=port_in_use, gozer_status=gozer_status, load_tiers=tiers.load,
         reference_problem=reference_problem, lab_status=(lambda: _lab_status(cfg.lab)) if getattr(cfg, "lab", None) else None,
-        research=research, stock_params=stock_params)
+        research=research, stock_params=stock_params, demo_env=demo_env)
 
 
 def _lab_status(lab) -> tuple[bool, str, str]:

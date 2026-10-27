@@ -2482,6 +2482,47 @@ change covers the other two halves: reading the authors' scores from the model c
 
 - Review fixes (Copilot, PR 91; main merged in, version 0.9.1): (1) the table row showed no run directory, so runs of one model in one state and stage looked the same; each model cell now has the run directory as small selectable text and in the tooltip. (2) The lab and now/latest tags were built once and appended to both the list and the table, so the table took them from the list and Playful lost them; each view now builds its own nodes. Both were red in a browser test first (a Playful list with a lab run and a live run; two runs of one model); 4 mutations are red.
 
+## 2026-10-26 (UTC): `tt-orchard demo-env`, a dedicated interpreter for tt-metal demos (issue 92, branch `tt-demo-venv`, version 0.9.4)
+Prompt (operator context): the stock-runtime class (PR 78) runs tt-transformers' demo from the host tt-metal tree (v0.80.0). The shared TT venv cannot run it: numpy 2.5.3 against ttnn's
+`numpy<2`, `cv2` fails to import in tt-metal's root conftest, and `import datasets` fails (`HfFolder` is gone from huggingface_hub 1.33.0), which also breaks tt-train's lora_llama example. Two agents
+worked around it with numpy 1.26.4 on `PYTHONPATH`, which lasts for one run. Built test first, a mutation per guard. No chip was opened and no lease taken; the check imports no ttnn.
+- `orchard/demo_env.py` and `tt-orchard demo-env [--check] [--dry-run] [--venv-dir D] [--tt-metal-dir D]`. It builds a venv under `~/orchard-venvs/tt-demo` (or `$ORCHARD_DEMO_VENV`): Python 3.12, CPU torch
+  2.7.0 installed alone from the CPU index, then 22 pinned packages from PyPI (numpy 1.26.4, huggingface_hub 1.33.0, datasets 4.8.5, transformers 5.19.0, opencv-python-headless and the packages ttnn and
+  tt-transformers' demo import). The pins are `REQUIREMENTS` in the module; a test lists the package names, so a name change shows up in review. uv gets no extra index from the operator's shell.
+- The host tree's `ttnn` and `ttml` reach the venv as `tt-host-tree.pth` (the tree, `ttnn`, `tools`, ttml's source and build directories) and a small dist-info for each at the tree's tag, the shape the
+  shared venv has. I did not use `pip install -e` on tt-metal, because its `setup.py` can start a CMake build and writes into the tree, and the task was not to change the tree. The tree must be at an
+  exact release tag (`git describe --exact-match`) and have `ttnn/ttnn/_ttnn.so`. `<venv>/orchard-demo-env.json` records the tag, sha, pins, a hash of them and every installed version.
+- `--check` rules: numpy below 2, cv2, datasets and torch import (venv python in isolated mode), `ttnn` and `ttml` are installed distributions (read from metadata, never imported), the ttnn version equals the
+  tree's tag, the `.pth` matches the tree, the recorded tag equals the tree's. The command refuses a venv directory that is or is inside the shared venv or the checkout (links resolved), a tree inside the venv, and a
+  directory that holds other files and no interpreter. A ttnn dist-info this command did not write is left alone and fails the step.
+- The real build found two mistakes in my first pins, each fixed with a test: pyarrow 26 (the newest, pulled in by datasets) refuses to import with numpy 1, so `datasets` failed `--check` on the first run;
+  `pyarrow==21.0.0` imports. The dist-info had no `WHEEL` file, so `uv pip check` called both distributions broken; they have one now and a build repairs the old ones.
+- `demo_python` in `bringup.toml` (like `reference_python`) is handed to the run as the input `demo_python`; the stock-runtime stage writes it into `stock_config.json`; `stock_check.py` `prepare` and `run`
+  run the import check, the reference generator and pytest under it (default: the interpreter running the script, as before). A bad value is exit 2 before any copy.
+- Preflight row `demo-env`: appears for a stock-runtime run (including a resume) or when `demo_python` is set, never in lab mode. A failed rule blocks as `config-invalid` and names the exact
+  `tt-orchard demo-env --venv-dir ... --tt-metal-dir ...` command. A venv built for another tag, a missing record, no `demo_python` and an interpreter that is not `<venv>/bin/python` are warnings.
+- Built here: `tt-orchard demo-env` took 7.5 s with a warm uv cache and made a 1.4 GB venv. `--check` passes every rule against the host tree at v0.80.0, `uv pip check` is clean, and
+  `importlib.util.find_spec` finds `ttnn`, `ttml`, `tracy` and `triage` in the tree. The shared venv's numpy files and directory listing and `git status` of ~/tt-metal were identical before and after.
+- 73 mutations over the module, the preflight row, the stock template, the config and the CLI. Five survivors on the first pass: the record's tag compare, a failed install still writing the record, a git failure
+  hiding behind a printed tag, a message's wording and one equivalent (`repo_dir` passed explicitly equals the default, so the argument was removed). Each got a test and is red now.
+- Not done: the stock-runtime demo itself was not run in this interpreter (that opens a device); whether tt-transformers' demo or tt-train's lora_llama need packages beyond the imports read here is not known;
+  other consumers of the shared environment that depend on numpy 2 were not looked for; `setup` does not build this venv.
+- Review fixes (Copilot, PR 101; main merged in, version 0.9.4), five findings, all real, each reproduced by a failing test first: (1) the preflight checked the environment against
+  `<operator home>/tt-metal` unless `ORCHARD_TT_METAL_DIR` was set, so one built with `--tt-metal-dir` could block although healthy; it now uses the stock route's own tree, else the tree in the venv's
+  record, else the variable and the home default, and the printed repair command carries the same tree. (2) A tree that moved to another tag made `host-tree` report `todo` for the old distributions, so
+  the row blocked instead of warning; complete distributions at another version are now version drift (a warning), while a missing or foreign distribution or a wrong `.pth` still blocks. (3) A build
+  trusted the record's hash of the pins, so numpy 2 or a removed package after the first build was never put right; every build now runs the pin install again (`--check` and `--dry-run` still change
+  nothing). (4) A venv inside the host tree was accepted (only the other direction was refused); both are refused, with links resolved before uv runs. (5) A relative `--tt-metal-dir` went into the
+  `.pth` unchanged and Python reads a relative line against site-packages; both directories are made absolute and link-free when the environment is created. 15 mutations, 5 survived the first pass
+  (distributions at two versions, a foreign installer, the params layout, an unusable record path) and each got a test; one equivalent condition was removed.
+- Second review of PR 101 (Copilot): (a) with `demo_python` set, `--mode lab` was rejected by `supervisor.lab_problems`, which wants every absolute input under the lab root, though a lab run has no
+  stock-runtime route and no demo-env row; `supervisor_argv` now passes no `demo_python` in lab mode (3 mutations red). (b) Checking the five earlier findings against the head found one gap: `--check` read the
+  record's hash for the pinned packages and judged only numpy, cv2, datasets, torch and the two distributions, so a removed `loguru` or a changed `pytest` passed `--check` and the preflight and only a
+  build repaired it. A `pins` rule now compares every pinned package (and torch's pin, which reports `2.7.0+cpu`) with its installed metadata version and its detail carries the repair command. 12 mutations,
+  2 survived the first pass (a prefix match on the version, a JSON answer that is not an object) and each got a test. The other four findings were already covered on every path I could find: a resumed
+  stock run carries its recorded `params_dir`, a lab run has no row, and the repair command carries the stock tree even with no `demo_python` (test added).
+
+
 ## 2026-10-27 (UTC): a Claude agent wrote the `rmsnorm` kernel with the coder's materials (branch `rmsnorm-by-claude`, docs only)
 Prompt (operator, through the controller): show whether the op is writable from the probe's materials, after the coder's 0 of 9. A Claude agent copied a probe attempt directory (templates and spec byte-identical to the shipped ones,
 same `reference/` files), wrote `kernel.py` and ran the shipped `kernel_check.py` (phase `sim`), with no chip. It did not use any existing RMSNorm kernel.
