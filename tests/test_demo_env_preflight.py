@@ -289,3 +289,25 @@ def test_a_record_with_no_usable_tree_path_falls_back_to_the_variable(tmp_path, 
     (venv / de.RECORD).write_text(json.dumps({"host_tree": {"path": path}}))
     pf.default_signals(cfg(tmp_path)).demo_env(venv / "bin" / "python")
     assert seen[0].tt_metal_dir == tmp_path / "from-env"
+
+
+def test_the_repair_command_for_a_stock_route_with_no_demo_python_carries_the_stock_tree(tmp_path):
+    cmds = []
+    sig = stock_signals(stock_params=lambda name: TREE_PARAMS / name, demo_env=None)
+    out = pf.run_preflight(cfg(tmp_path), "Cloudflare/clef", accept_credentials=False, signals=sig)
+    assert "demo-env" not in [c.name for c in out]
+
+    def real(python, tree=None):
+        cmds.append(tree)
+        return None, f"tt-orchard demo-env --tt-metal-dir {tree}"
+    sig = stock_signals(stock_params=lambda name: TREE_PARAMS / name, demo_env=real)
+    out = pf.run_preflight(cfg(tmp_path), "Cloudflare/clef", accept_credentials=False, signals=sig)
+    row = next(c for c in out if c.name == "demo-env")
+    assert cmds == [Path("/work/tt-metal")] and "--tt-metal-dir /work/tt-metal" in row.detail
+
+
+def test_the_default_signal_with_no_python_names_the_given_tree_in_its_command(tmp_path, monkeypatch):
+    monkeypatch.delenv("ORCHARD_DEMO_VENV", raising=False)
+    monkeypatch.delenv("ORCHARD_TT_METAL_DIR", raising=False)
+    results, command = pf.default_signals(cfg(tmp_path)).demo_env(None, tmp_path / "stock-tree")
+    assert results is None and f"--tt-metal-dir {tmp_path / 'stock-tree'}" in command

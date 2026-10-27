@@ -365,6 +365,33 @@ def _import_rule(env: DEnv, name: str, code: str) -> Result:
     return Result(name, FAIL, f"cannot import: {last}")
 
 
+def _norm(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def pin_rule(env: DEnv) -> Result:
+    """Every pinned package, not only the ones with a rule of their own: a package removed or changed after the build must show here, and
+    the command in the detail repairs it because a build installs the pins again. Reads metadata only."""
+    rc, out, _ = _ask(env, VERSIONS_CODE, 120)
+    try:
+        installed = {_norm(k): str(v) for k, v in json.loads(out).items()} if rc == 0 else None
+    except (ValueError, AttributeError):
+        installed = None
+    if installed is None:
+        return Result("pins", FAIL, f"the installed versions could not be listed. Run `{fix_command(env)}`")
+    bad = []
+    for pin in (TORCH, *REQUIREMENTS):
+        name, want = pin.split("==")
+        have = installed.get(_norm(name))
+        if have is None:
+            bad.append(f"{name} missing (want {want})")
+        elif have != want and not have.startswith(want + "+"):          # torch reports 2.7.0+cpu
+            bad.append(f"{name} {have} (want {want})")
+    if bad:
+        return Result("pins", FAIL, "; ".join(bad) + f". Run `{fix_command(env)}`")
+    return Result("pins", OK, f"{TORCH} and {len(REQUIREMENTS)} pinned packages are at their pinned versions")
+
+
 def rules(env: DEnv, facts: dict | None) -> list[Result]:
     """What the demo needs. Needs the venv's python. Never imports ttnn or ttml."""
     out: list[Result] = []
@@ -380,6 +407,7 @@ def rules(env: DEnv, facts: dict | None) -> list[Result]:
         out.append(Result("numpy", FAIL, f"numpy {ver}: ttnn declares numpy below 2 and cv2 needs it. Run `{fix_command(env)}`"))
     else:
         out.append(Result("numpy", OK, f"numpy {ver}, below 2"))
+    out.append(pin_rule(env))
     out.append(_import_rule(env, "cv2", CV2_CODE))
     out.append(_import_rule(env, "datasets", DATASETS_CODE))
     out.append(_import_rule(env, "torch", TORCH_CODE))

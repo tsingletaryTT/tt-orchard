@@ -67,6 +67,8 @@ class World:
         self.run = FakeRun()
         self.numpy = "1.26.4"
         self.broken = set()           # import names that fail
+        self.missing = set()          # pinned distributions that are not installed
+        self.other_versions = {}      # distribution -> a version that is not the pin
         self.dists = {}               # distribution -> version the venv's metadata reports (set by the build effect)
         self.install_rules()
 
@@ -108,7 +110,12 @@ class World:
                         return 1, "", f"Traceback (most recent call last):\nImportError: {name} is broken here"
                     return 0, "", ""
             if code == de.VERSIONS_CODE:
-                return 0, json.dumps({"numpy": self.numpy, "ttnn": "0.80.0"}), ""
+                have = {r.split("==")[0]: r.split("==")[1] for r in de.REQUIREMENTS}
+                have.update({"torch": "2.7.0+cpu", "ttnn": "0.80.0", "numpy": self.numpy})
+                for gone in self.missing:
+                    have.pop(gone, None)
+                have.update(self.other_versions)
+                return 0, json.dumps(have), ""
             if code == de.dist_code("numpy"):
                 return 0, f"{self.numpy}\n", ""
             for dist in ("ttnn", "ttml"):
@@ -281,7 +288,7 @@ def test_the_record_holds_the_tag_the_sha_the_requirements_hash_and_the_resolved
     assert rec["host_tree"] == {"path": str(world.tree), "tag": TAG, "sha": SHA}
     assert rec["requirements"] == list(de.REQUIREMENTS) and rec["torch"] == de.TORCH
     assert rec["requirements_sha256"] == de.requirements_sha256()
-    assert rec["installed"] == {"numpy": "1.26.4", "ttnn": "0.80.0"}
+    assert rec["installed"]["numpy"] == "1.26.4" and rec["installed"]["ttnn"] == "0.80.0" and rec["installed"]["torch"] == "2.7.0+cpu"
 
 
 def test_a_second_build_rewrites_no_file(world):
@@ -449,6 +456,73 @@ def test_an_import_that_fails_is_reported_with_its_last_line(world, module):
     assert r.status == de.FAIL and f"ImportError: {module} is broken here" in r.detail
     others = [x for x in check(world) if x.name in {"cv2", "datasets", "torch"} - {module}]
     assert all(x.status == de.OK for x in others)
+
+
+def test_every_pinned_package_is_checked_and_not_only_the_ones_with_their_own_rule(world):
+    healthy(world)
+    assert names(check(world))["pins"].status == de.OK
+    world.missing = {"loguru"}
+    r = names(check(world))["pins"]
+    assert r.status == de.FAIL and "loguru" in r.detail and "missing" in r.detail and de.fix_command(world.env()) in r.detail
+
+
+def test_a_pinned_package_at_another_version_fails_the_pins_rule_and_names_both_versions(world):
+    healthy(world)
+    world.other_versions = {"pytest": "8.0.0"}
+    r = names(check(world))["pins"]
+    assert r.status == de.FAIL and "pytest 8.0.0" in r.detail and "9.1.1" in r.detail
+
+
+def test_torch_with_a_local_version_suffix_matches_its_pin_and_another_torch_does_not(world):
+    healthy(world)
+    assert names(check(world))["pins"].status == de.OK               # the fake reports 2.7.0+cpu
+    world.other_versions = {"torch": "2.8.0+cpu"}
+    assert names(check(world))["pins"].status == de.FAIL
+
+
+def test_package_names_are_compared_the_way_pip_does(world):
+    """The metadata name of PyYAML is `PyYAML`, of huggingface_hub is `huggingface-hub` on some installs; the pins say pyyaml and huggingface_hub."""
+    healthy(world)
+    world.run.calls.clear()
+    orig = world.dynamic
+
+    def renamed(argv, timeout, env=None):
+        rc, out, err = orig(argv, timeout, env)
+        if argv[3:] == [de.VERSIONS_CODE]:
+            data = json.loads(out)
+            data = {{"pyyaml": "PyYAML", "huggingface_hub": "huggingface-hub", "opencv-python-headless": "opencv_python_headless"}.get(k, k): v
+                    for k, v in data.items()}
+            return rc, json.dumps(data), err
+        return rc, out, err
+    results = de.ensure(world.env(run=renamed), check_only=True, say=lambda s: None)
+    assert names(results)["pins"].status == de.OK
+
+
+@pytest.mark.parametrize("answer", ["not json", "[1, 2]", '"text"', "null"])
+def test_an_unreadable_version_listing_fails_the_pins_rule(world, answer):
+    healthy(world)
+    orig = world.dynamic
+
+    def broken(argv, timeout, env=None):
+        if argv[3:] == [de.VERSIONS_CODE]:
+            return 0, answer, ""
+        return orig(argv, timeout, env)
+    results = de.ensure(world.env(run=broken), check_only=True, say=lambda s: None)
+    assert names(results)["pins"].status == de.FAIL
+
+
+def test_a_version_that_only_starts_like_the_pin_is_another_version(world):
+    healthy(world)
+    world.other_versions = {"pytest": "9.1.10"}
+    assert names(check(world))["pins"].status == de.FAIL
+
+
+def test_a_relative_tree_variable_is_made_absolute_too(tmp_path, monkeypatch):
+    (tmp_path / "tt-metal").mkdir()
+    monkeypatch.chdir(tmp_path)
+    e = de.env_from_args(Args(), environ={"ORCHARD_TT_METAL_DIR": "tt-metal", "ORCHARD_DEMO_VENV": "venv"}, home=tmp_path / "h",
+                         repo_dir=tmp_path / "repo")
+    assert e.tt_metal_dir == tmp_path / "tt-metal" and e.venv_dir == tmp_path / "venv"
 
 
 def test_a_missing_ttnn_distribution_fails(world):

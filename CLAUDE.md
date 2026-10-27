@@ -2461,6 +2461,12 @@ worked around it with numpy 1.26.4 on `PYTHONPATH`, which lasts for one run. Bui
   nothing). (4) A venv inside the host tree was accepted (only the other direction was refused); both are refused, with links resolved before uv runs. (5) A relative `--tt-metal-dir` went into the
   `.pth` unchanged and Python reads a relative line against site-packages; both directories are made absolute and link-free when the environment is created. 15 mutations, 5 survived the first pass
   (distributions at two versions, a foreign installer, the params layout, an unusable record path) and each got a test; one equivalent condition was removed.
+- Second review of PR 101 (Copilot): (a) with `demo_python` set, `--mode lab` was rejected by `supervisor.lab_problems`, which wants every absolute input under the lab root, though a lab run has no
+  stock-runtime route and no demo-env row; `supervisor_argv` now passes no `demo_python` in lab mode (3 mutations red). (b) Checking the five earlier findings against the head found one gap: `--check` read the
+  record's hash for the pinned packages and judged only numpy, cv2, datasets, torch and the two distributions, so a removed `loguru` or a changed `pytest` passed `--check` and the preflight and only a
+  build repaired it. A `pins` rule now compares every pinned package (and torch's pin, which reports `2.7.0+cpu`) with its installed metadata version and its detail carries the repair command. 12 mutations,
+  2 survived the first pass (a prefix match on the version, a JSON answer that is not an object) and each got a test. The other four findings were already covered on every path I could find: a resumed
+  stock run carries its recorded `params_dir`, a lab run has no row, and the repair command carries the stock tree even with no `demo_python` (test added).
 
 
 ## 2026-10-27 (UTC): a Claude agent wrote the `rmsnorm` kernel with the coder's materials (branch `rmsnorm-by-claude`, docs only)

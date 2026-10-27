@@ -1563,7 +1563,7 @@ the same shape the shared venv has. `pip install -e` on tt-metal runs its `setup
 the command does not use it. The tree must be built (`ttnn/ttnn/_ttnn.so`) and at a release tag; nothing in it is changed. The venv records the
 tree's path, tag and sha in `<venv>/orchard-demo-env.json`.
 
-`--check` reports these rules: `numpy` below 2, `cv2` imports, `datasets` imports, `torch` (with transformers, tokenizers and safetensors)
+`--check` reports these rules: `numpy` below 2, every pinned package at its pinned version (`pins`), `cv2` imports, `datasets` imports, `torch` (with transformers, tokenizers and safetensors)
 imports, `ttnn` and `ttml` installed as distributions, the `ttnn` version equals the host tree's tag, the `.pth` lists directories the tree has,
 and the recorded tag equals the tree's tag. It imports `ttnn` and `ttml` never, because that opens a device. The import checks run with the
 venv's python in isolated mode.
@@ -1578,7 +1578,7 @@ directory that holds other files and no interpreter.
 
 Set `demo_python` in `bringup.toml` to the venv's `bin/python`. `bringup` hands it to the run as the input `demo_python`; the stock-runtime
 stage writes it into `stock_config.json`, and `stock_check.py` runs its import check, the reference generator and the demo under it. The
-preflight `demo-env` row (the preflight table in section 4.0) appears for a stock-runtime run, or when `demo_python` is set.
+preflight `demo-env` row (the preflight table in section 4.0) appears for a stock-runtime run, or when `demo_python` is set. A lab run (`mode = "lab"`) is passed no `demo_python` input and has no row, because the lab-root rule would reject a home-directory interpreter and the stock-runtime route is off there.
 
 ### 5.10 Tensor caches and disk
 
