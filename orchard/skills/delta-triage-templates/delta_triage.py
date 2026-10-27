@@ -1771,13 +1771,15 @@ def card_hints_of(snapshot: Path) -> dict:
 
 GREEDY_WARNING_MAX = 3              # lines kept
 GREEDY_QUOTE_CHARS = 300
+# `greedy` as its own word. A preceding hyphen, letter or `non ` means another word ("non-greedy", "nongreedy", "semi-greedy"), and a card that
+# warns against non-greedy decoding recommends greedy decoding, so it is not a warning against it.
 _GREEDY_PATTERNS = tuple(re.compile(p, re.IGNORECASE) for p in (
     # An imperative that starts a sentence: "Do not use greedy decoding", "Avoid greedy decoding". "We do not use greedy decoding" (a statement about
     # the authors' own evaluation) does not start a sentence with the verb, so it is left out.
-    r"(?:^|[.!?:]\s+)(?:please\s+)?(?:do\s*not|don't|never|avoid)\b[^.\n]{0,40}?\bgreedy\b",
-    r"\bgreedy\b[^.\n]{0,40}?\b(?:is|are)\s+(?:not\s+(?:recommended|advised)|discouraged)\b",
-    r"\b(?:not\s+recommend(?:ed)?|discourage[sd]?|(?:advise|advised)\s+against)\b[^.\n]{0,30}?\bgreedy\b",
-    r"\bgreedy\b[^.\n]{0,60}?\b(?:can|may|might|will|often)\b[^.\n]{0,40}?\b(?:lead|cause|result)\b[^.\n]{0,40}?\b(?:repetition|loop|degrad)",
+    r"(?:^|[.!?:]\s+)(?:please\s+)?(?:do\s*not|don't|never|avoid)\b[^.\n]{0,40}?(?<![\w-])(?<!non\s)greedy\b",
+    r"(?<![\w-])(?<!non\s)greedy\b[^.\n]{0,40}?\b(?:is|are)\s+(?:not\s+(?:recommended|advised)|discouraged)\b",
+    r"\b(?:not\s+recommend(?:ed)?|discourage[sd]?|(?:advise|advised)\s+against)\b[^.\n]{0,30}?(?<![\w-])(?<!non\s)greedy\b",
+    r"(?<![\w-])(?<!non\s)greedy\b[^.\n]{0,60}?\b(?:can|may|might|will|often)\b[^.\n]{0,40}?\b(?:lead|cause|result)\b[^.\n]{0,40}?\b(?:repetition|loop|degrad)",
 ))
 
 
