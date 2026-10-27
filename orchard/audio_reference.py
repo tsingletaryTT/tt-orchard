@@ -211,6 +211,8 @@ class Recorder:
         one already exists: a second call, or a manifest someone else made, is a `ReferenceError` and leaves the existing file as it is."""
         if self._finished:
             raise ReferenceError(f"{self.root / MANIFEST} already exists; a manifest is never replaced")
+        if self._root_fd is None:
+            raise ReferenceError(f"the recorder for {self.root} is closed; nothing was written")
         manifest = {"schema": SCHEMA, "model": self.model, "library": self.library, "settings": self.settings,
                     "seeds": self.seeds, "timings": self.timings, "artifacts": self.artifacts}
         tmp = f".{MANIFEST}.tmp"
@@ -330,13 +332,16 @@ def load_run(directory, *, verify: bool = True) -> Run:
                 raise ReferenceError(f"{e['kind']}/{e['name']} appears twice in the manifest")
             if e["file"] != f"{ARRAYS}/{e['kind']}__{e['name']}.npy":
                 raise ReferenceError(f"{e['file']} must be {ARRAYS}/{e['kind']}__{e['name']}.npy")
-            if verify:
-                try:
+            # Existence and type are checked whether or not the digest is: only the hashing depends on `verify`.
+            try:
+                if verify:
                     digest = pf.sha256_regular(arrays_fd, Path(e["file"]).name, MAX_ARRAY_BYTES)[0]
-                except pf.PinnedError as exc:
-                    raise ReferenceError(f"{e['file']}: {exc}") from exc
-                if digest != e["sha256"]:
-                    raise ReferenceError(f"{e['file']} does not match its sha256 in the manifest")
+                else:
+                    pf.check_regular(arrays_fd, Path(e["file"]).name)
+            except pf.PinnedError as exc:
+                raise ReferenceError(f"{e['file']}: {exc}") from exc
+            if verify and digest != e["sha256"]:
+                raise ReferenceError(f"{e['file']} does not match its sha256 in the manifest")
             entries[(e["kind"], e["name"])] = e
         run = Run(root, manifest, entries, root_fd, arrays_fd)
         root_fd = arrays_fd = None                # now owned by the run

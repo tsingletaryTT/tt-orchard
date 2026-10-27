@@ -1385,3 +1385,53 @@ def test_a_failed_load_closes_the_descriptors_it_opened(tmp_path):
     with pytest.raises(ReferenceError, match="sha256"):
         load_run(root)
     assert _open_fds() <= before
+
+
+# ---- review of PR 142 -----------------------------------------------------------------------------
+
+def test_a_recorder_closed_before_finish_publishes_nothing_anywhere(tmp_path, monkeypatch):
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    rec = Recorder(tmp_path / "r", model=MODEL, library=LIB, settings=SETTINGS)
+    rec.close()
+    monkeypatch.chdir(cwd)
+    with pytest.raises(ReferenceError, match="closed"):
+        rec.finish()
+    assert list(cwd.iterdir()) == [] and not (tmp_path / "r" / "manifest.json").exists()
+
+
+def test_a_run_loaded_without_verification_still_refuses_missing_linked_and_non_regular_arrays(tmp_path):
+    import os
+    root = make_run(tmp_path)
+    arr = root / "arrays" / "layer__0.npy"
+    saved = arr.read_bytes()
+    arr.unlink()
+    with pytest.raises(ReferenceError, match="layer__0.npy"):
+        load_run(root, verify=False)
+    other = tmp_path / "elsewhere.npy"
+    other.write_bytes(saved)
+    arr.symlink_to(other)
+    with pytest.raises(ReferenceError, match="is a link"):
+        load_run(root, verify=False)
+    arr.unlink()
+    os.mkfifo(arr)
+    with pytest.raises(ReferenceError, match="not a regular file"):
+        load_run(root, verify=False)
+    arr.unlink()
+    arr.mkdir()
+    with pytest.raises(ReferenceError, match="not a regular file"):
+        load_run(root, verify=False)
+    arr.rmdir()
+    arr.write_bytes(saved)
+    assert load_run(root, verify=False).array("layer", "0").shape == (1, 20, 16)
+
+
+def test_loading_without_verification_does_not_hash_the_arrays(tmp_path, monkeypatch):
+    root = make_run(tmp_path)
+    calls = []
+    real = ar.pf.sha256_regular
+    monkeypatch.setattr(ar.pf, "sha256_regular", lambda *a, **k: (calls.append(1), real(*a, **k))[1])
+    load_run(root, verify=False)
+    assert calls == []
+    load_run(root)
+    assert calls

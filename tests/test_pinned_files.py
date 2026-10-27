@@ -229,3 +229,19 @@ def test_unlink_quietly_removes_a_file_and_ignores_a_missing_one(d):
     pf.unlink_quietly(fd, "x")
     assert not (path / "x").exists()
     pf.unlink_quietly(fd, "x")
+
+
+def test_check_regular_accepts_a_file_and_refuses_the_rest_without_reading(d):
+    path, fd = d
+    (path / "a").write_bytes(b"x")
+    pf.check_regular(fd, "a")
+    (path / "l").symlink_to(path / "a")
+    for name, match in (("l", "is a link"), ("nope", "is missing")):
+        with pytest.raises(pf.PinnedError, match=match):
+            pf.check_regular(fd, name)
+    (path / "sub").mkdir()
+    with pytest.raises(pf.PinnedError, match="not a regular file"):
+        pf.check_regular(fd, "sub")
+    before = {int(n) for n in os.listdir("/proc/self/fd")}
+    pf.check_regular(fd, "a")
+    assert {int(n) for n in os.listdir("/proc/self/fd")} <= before
