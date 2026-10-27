@@ -14,6 +14,11 @@ from test_webui import Served
 pytestmark = pytest.mark.skipif(not CHROME, reason="no Chrome or Chromium on this machine")
 
 
+def _mk(base, name):
+    (base / name).mkdir()
+    return base / name
+
+
 def capped_app(root, tmp_path):
     cfg, d, tel = setup(tmp_path, max_calls=2, max_calls_per_problem=9)
     fill(tel, 2)
@@ -83,6 +88,42 @@ def test_a_poll_that_never_answers_marks_the_amount_unknown_without_waiting_for_
     ctx.close()
 
 
+def test_the_view_shows_small_costs_unreadable_ledgers_hidden_problems_and_cost_bases(root, tmp_path, browser):
+    import json
+    from test_telegraph_view_review import ok_record, reserve_record, sixty_problems, write_records
+    ctx, pg = new_page(browser)
+    # a cost under $0.0001 and a reply with no usage
+    cfg, d, _ = setup(_mk(tmp_path, "a"))
+    write_records(d, [ok_record("a1", "p", 10, 5, cost=0.000004),
+                      reserve_record("c3", "q", "small", 2000, 0.02), {**ok_record("c3", "q", 10, 5, cost=0.0001), "usage_known": False}])
+    with Served(app_for(root, cfg)) as s:
+        open_page(pg, s)
+        meter(pg).click()
+        expect(pg.locator("#tg-recent")).to_contain_text("<$0.0001")
+        expect(pg.locator("#tg-recent")).to_contain_text("$0.02 (worst case)")
+        assert "$0.0000" not in pg.inner_text("#telegraph-view")
+    # an unreadable ledger
+    cfg2, d2, _ = setup(_mk(tmp_path, "b"))
+    d2.mkdir(parents=True)
+    (d2 / "telegraph.jsonl").mkdir()
+    with Served(app_for(root, cfg2)) as s:
+        pg.goto(f"http://127.0.0.1:{s.port}/?mode=operator")
+        pg.wait_for_selector("[data-run-row]:visible")
+        expect(pg.locator("#spend-text")).to_have_text("Helper: ledger unreadable · spend unknown")
+        meter(pg).click()
+        expect(pg.locator("#tg-numbers")).to_contain_text("unknown")
+        assert pg.locator("#tg-caps .tg-cap").count() == 0
+    # sixty problems
+    with Served(app_for(root, sixty_problems(_mk(tmp_path, "c")))) as s:
+        pg.goto(f"http://127.0.0.1:{s.port}/?mode=operator")
+        pg.wait_for_selector("[data-run-row]:visible")
+        expect(meter(pg)).to_contain_text("near cap: problem zzz at 85% of its cap")
+        meter(pg).click()
+        expect(pg.locator("#tg-by-problem")).to_contain_text("10 more problems not shown")
+        expect(pg.locator("#tg-by-problem tr").first).to_contain_text("zzz")
+    ctx.close()
+
+
 def test_a_pending_poll_is_not_joined_by_more_requests(root, tmp_path, browser):
     ctx, pg = new_page(browser)
     seen = []
@@ -95,11 +136,23 @@ def test_a_pending_poll_is_not_joined_by_more_requests(root, tmp_path, browser):
 
 
 def test_a_poll_that_hung_does_not_block_later_polls_once_the_server_answers_again(root, tmp_path, browser):
+    """The server itself hangs on one request (it never answers it) and answers every later one. Only the page's own time limit
+    frees the poll, so without it the amount would stay unknown for ever."""
+    import threading
     ctx, pg = new_page(browser)
-    with Served(capped_app(root, tmp_path)) as s:
+    app = capped_app(root, tmp_path)
+    real, calls, never = app.telegraph, [], threading.Event()
+
+    def telegraph():
+        calls.append(1)
+        if len(calls) == 2:                                        # the first call is the page's first poll
+            never.wait(120)
+        return real()
+    app.telegraph = telegraph
+    with Served(app) as s:
         open_page(pg, s)
-        pg.route("**/api/telegraph", lambda route: None)
+        expect(meter(pg)).to_contain_text("$0.0070")
         expect(meter(pg)).to_contain_text("spend unknown", timeout=23000)
-        pg.unroute("**/api/telegraph")
-        expect(meter(pg)).to_contain_text("$0.0070", timeout=45000)
+        expect(meter(pg)).to_contain_text("$0.0070", timeout=30000)      # the hung request was dropped and the next poll answered
+        never.set()
     ctx.close()
