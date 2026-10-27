@@ -178,7 +178,7 @@ function renderMachine() {
   }
   for (const b of m.boards) box.append(boardEl(b, true));
   // gozer marks a chip HELD-FOREIGN when a process outside the lease owner's tree has it open. A tt-model
-  // container serving under the supervisor's lease is such a process (CLAUDE.md, 2026-10-02), so say so.
+  // container serving under the supervisor's lease is such a process (docs/project-log.md, 2026-10-02), so say so.
   const all = m.boards.flatMap((b) => b.chips);
   const foreign = all.filter((c) => c.state === "HELD-FOREIGN");
   if (foreign.length && foreign.every((c) => c.owner.startsWith("orchard:"))) {

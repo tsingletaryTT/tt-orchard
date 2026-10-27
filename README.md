@@ -42,7 +42,7 @@ Bring up a model for a QuietBox 2, on a QuietBox 2, with only the compute the Qu
 
 ### What it has done
 
-Every run below happened on one QuietBox 2 (four Blackhole chips, two p300c boards). The log in `CLAUDE.md` has the
+Every run below happened on one QuietBox 2 (four Blackhole chips, two p300c boards). The log in `docs/project-log.md` has the
 details and the limits of each one. The evidence for each row is in `docs/run-logs/` or in the log.
 
 | Model | What it is | Class | How far it got |
@@ -112,7 +112,7 @@ parks it.
 Evidence, from [the role-fit run](docs/run-logs/2026-10-06-rolefit-qwen3-coder-next.md): 50 of 50 replayed
 agent turns were well formed, none of the 35 replays of the 27B's failure turns repeated a failure, and decode
 ran at 41.8 tok/s at an 8K prompt and 38.4 at 32K. The first full Clef bring-up used it and reached
-`ready for operator review` (see the log in CLAUDE.md).
+`ready for operator review` (see the log in docs/project-log.md).
 
 Limits: these are single measurements. The package was built from a tt-metal tree that was dirty and not
 pushed, so it cannot be rebuilt from public sources. The `p300` profile uses bfp4 routed experts, and whether
@@ -1779,7 +1779,8 @@ Each of these happened on the development machine. Details are in the
 | [`docs/run-logs/2026-10-hemmingway-1.md`](docs/run-logs/2026-10-hemmingway-1.md) | The log of the first real run |
 | [`docs/analysis/qwen3-5-122b-analysis.md`](docs/analysis/qwen3-5-122b-analysis.md) | Analysis: Using Qwen3.5-122B-A10B with tt-orchard |
 | [`docs/analysis/qwen3-5-122b-comparison.html`](docs/analysis/qwen3-5-122b-comparison.html) | Visual comparison: 27B vs 122B model requirements |
-| [`CLAUDE.md`](CLAUDE.md) | The project log: decisions and notable moments |
+| [`CLAUDE.md`](CLAUDE.md) | The decisions and standing rules |
+| [`docs/project-log.md`](docs/project-log.md) | The dated project log: what was done, found and left open |
 
 ### Add or change a stage skill
 
