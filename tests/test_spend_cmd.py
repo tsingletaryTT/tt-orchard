@@ -198,3 +198,33 @@ def test_a_missing_config_found_by_discovery_still_falls_back_to_the_defaults(tm
     args = cli._parser().parse_args(["spend", str(probe)])
     assert spend_cmd.main(args, out=out, environ={}, home=tmp_path / "home") == 0
     assert "at claude-haiku-5-5" in out.getvalue()
+
+
+
+# ---- review fix 1 (second round): a telegraph table that fails validation is a setup error ---------------------------------
+
+@pytest.mark.parametrize("table,needle", [
+    ('[telegraph]\nenabled = true\nmodels = ["a"]\ndir = "ledger-here"\n', "telegraph.endpoint"),                       # no endpoint
+    ('[telegraph]\nenabled = true\nendpoint = "https://llm.example.org/v1"\nmodels = ["a"]\ndir = 7\n', "telegraph.dir"),
+    ('[telegraph]\nenabled = true\nendpoint = "ftp://x"\nmodels = ["a"]\ndir = "ledger-here"\n', "telegraph.endpoint"),
+    ('[telegraph]\nenabled = true\nendpoint = "https://llm.example.org/v1"\nmodels = ["a"]\ndir = "ledger-here"\nbogus = 1\n', "unknown key"),
+], ids=["no-endpoint", "bad-dir", "bad-scheme", "unknown-key"])
+def test_an_invalid_telegraph_table_does_not_fall_back_to_the_default_ledger(tmp_path, probe, table, needle):
+    real_ledger(tmp_path / "ledger-here", cost=1.5)                  # paid calls in the configured ledger
+    code, text = run(tmp_path, [str(probe)], table)
+    assert code == 2 and needle in text, text
+    assert "REAL helper spend" not in text and "$0.00" not in text
+
+
+def test_a_config_that_cannot_be_parsed_is_a_setup_error(tmp_path, probe):
+    cfg = tmp_path / "bad.toml"
+    cfg.write_text("[[[")
+    out = io.StringIO()
+    assert cli.main(["spend", str(probe), "--telegraph-config", str(cfg)], env={}, stdout=out) == 2
+    assert "cannot parse" in out.getvalue() and "REAL" not in out.getvalue()
+
+
+def test_a_disabled_telegraph_table_with_a_dir_still_shows_that_ledger(tmp_path, probe):
+    real_ledger(tmp_path / "ledger-here", cost=1.5)
+    code, text = run(tmp_path, [str(probe)], '[telegraph]\nenabled = false\ndir = "ledger-here"\n')
+    assert code == 0 and "$1.5000" in text

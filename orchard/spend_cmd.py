@@ -51,8 +51,8 @@ def _config(args, environ, home):
         return None, None, None, str(exc)
     try:
         tcfg = telegraph_cmd.load_config(path)
-    except Exception:                                                # noqa: BLE001 - the ledger folder falls back to the default
-        tcfg = tg.Config()
+    except tg.ConfigError as exc:                                    # a bad table must not send the real spend to another ledger
+        return None, None, None, str(exc)
     runs_root = None
     try:
         runs_root = bringup_config.load(path).runs_root
