@@ -41,7 +41,7 @@ def test_the_attempts_background_processes_are_swept_before_the_copy_and_before_
         Path(argv[argv.index("--out") + 1]).write_text(json.dumps({"phase": "hw", "sets": [GOOD_HW_SET], "error": None}))
         return kp.Watched(0, None, False, 1.0)
     make_check(adir, tmp_path, fake).call({})
-    assert events == ["sweep", "copy", "sweep", "run", "sweep"], events      # the last one is the sweep after the run
+    assert events == ["sweep", "copy", "sweep", "sweep", "run", "sweep"], events      # prepare, before the request, under the lease, after the run
 
 
 def test_a_process_that_rewrites_the_kernel_during_the_sweep_cannot_get_its_edit_run_unchecked(tmp_path, fake_kenv, monkeypatch):
@@ -164,7 +164,7 @@ def hw_agent_then_interrupt(calls):
     """run_watched: the hardware harness works; the simulator check (run after the agent step) is interrupted."""
     def fake(argv, **kw):
         calls.append(list(argv))
-        if argv[0] == "gozer":
+        if any(str(a).endswith("kernel_harness.py") and "--phase" in argv and argv[argv.index("--phase") + 1] == "hw" for a in argv):
             Path(argv[argv.index("--out") + 1]).write_text(
                 json.dumps({"phase": "hw", "sets": [GOOD_HW_SET], "error": None, "device_s": 1.0}))
             return kp.Watched(0, None, False, 45.0)
@@ -190,7 +190,7 @@ def test_a_crash_of_the_agent_step_keeps_the_calls_too(tmp_path, fake_kenv):
     good = (KERNELS / "add_good.py").read_text()
 
     def crash(argv, **kw):
-        if argv[0] == "gozer":
+        if any(str(a).endswith("kernel_harness.py") and "--phase" in argv and argv[argv.index("--phase") + 1] == "hw" for a in argv):
             return hw_agent_then_interrupt([])(argv, **kw)
         raise RuntimeError("the simulator check crashed")
     with FakeModel(scripted_hw_agent(good)) as server:

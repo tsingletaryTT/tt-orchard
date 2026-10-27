@@ -54,13 +54,12 @@ The numbers are choices. No population of attempts was measured.
   (60 s of silence). A hung run is stopped by SIGTERM to the process group first, and gozer's lease release resets the chip. After a
   hang the tool is off for the rest of the attempt.
 - One call at a time. A second call while one runs is answered at once and starts nothing.
-- A busy board: `gozer run` queues a ticket and exits 10 when no board is free. The probe keeps that ticket and waits on it with
-  `gozer wait --json` for at most `--hw-wait-s` seconds, so the call keeps its place in the queue and never asks again in a loop (an
-  earlier version cancelled and asked again every 10 s, which gave up the place each time). gozer ends the wait itself (`--timeout 12s`; bare digits mean minutes to gozer);
-  the probe stops the waiter only if it runs 10 s past that. A grant prints JSON with the lease id and
-  `TT_VISIBLE_DEVICES`; the probe runs the shipped harness under that environment (no second `gozer run`) and releases the lease with
-  `gozer release` on every path, an interrupt included. When the wait runs out, or the answer is not a grant, the ticket is cancelled and
-  the agent is told the board is busy and to go on with the simulator. An interrupt during the wait cancels the ticket.
+- A busy board: the probe asks with `gozer acquire --owner-pid <its pid>`. When no board is free gozer queues one ticket and the probe
+  claims that same ticket every 2 s (`gozer acquire --ticket`) for at most `--hw-wait-s` seconds, so the call keeps its place in the
+  queue and never asks again in a loop. A grant runs the shipped harness under the lease's `TT_VISIBLE_DEVICES` and the probe releases
+  the lease in a `finally`. When the wait runs out the ticket is cancelled and the agent is told the board is busy and to go on with
+  the simulator. gozer owns the lease by the probe's pid, so gozer reaps it if the probe dies. See the comparison near the end of
+  this note.
 - The lease is taken per call and released after it. The release resets the chip (about 40 s).
 
 ### Hold mode
@@ -102,7 +101,7 @@ queue wait was needed first; the tool took its own lease for each call. 2026-10-
 | 3 | unknown function `ttl.math.not_a_real_function` | FAIL compile_error, the compiler's line and caret shown | 5.2 | 0.0 |
 | 4 (second session) | the same compile error | FAIL compile_error | 46.9 | not reached |
 | 5 | library `silu_mul` after call 4 | PASS | 47.4 | 0.5 |
-| 6 | board held by another lease (20 s wait; measured with the earlier polling version) | BUSY after 20 s, tickets cancelled, queue empty | 20.1 | none |
+| 6 | board held by another lease (20 s wait; measured with an earlier version of the wait) | BUSY after 20 s, tickets cancelled, queue empty | 20.1 | none |
 
 - A call takes about 47 s in all. The kernel itself takes under a second with the device open. The rest is `gozer run`: the lease,
   the interpreter start, the compile and the reset that the release makes. The skill's "about 3 seconds to run" is from the earlier
@@ -126,49 +125,74 @@ queue wait was needed first; the tool took its own lease for each call. 2026-10-
   cannot see (a process that keeps writing) runs until the call timeout.
 - The probe's own end-of-attempt hardware phase (`--phase hw`) is unchanged and still needs a simulator pass or a `sim_gap`.
 
-## The wait on a ticket, measured (2026-10-27)
+## Can the probe lean on gozer instead of tracking its own state? (round 4, 2026-10-27)
 
-With one board held by a lease of my own: `gozer acquire --json` with queueing answers `{"queued": true, "ticket": ..., "position": 1}`
-and exit 10. `gozer wait --json --timeout 5 TICKET` did not return within 25 s because gozer reads `5` as five minutes (`12s` is a 12 s wait). When the holder
-released, `gozer wait` returned the grant (`{"granted": true, "lease_id": ..., "env": {"TT_VISIBLE_DEVICES": ...}}`) after the
-holder's reset, and `gozer release LEASE` on that lease reset the chips and freed them. The probe's own wait path then ran against the real
-gozer with the board held by a lease of mine: with `--hw-wait-s 12` the call answered BUSY after 12.0 s, cancelled its one ticket and the
-queue was empty; with the holder released after 8 s the call was granted, waited 50.6 s (the holder's 42 s reset included), ran the
-library `silu_mul` (PASS, 0.6 s with the device open), released the lease itself (48.6 s from grant to the end of the release) and left all
-four chips free. The tests of the other paths use fakes of `gozer wait` and `gozer release`.
+Three review rounds in a row found a new hole in the same place: a lease or ticket that survives an exception, an interrupt or a
+timeout. Each time the bookkeeping module grew (an in-memory ledger of tickets and leases, a token in the request's reason to find
+a grant in history, a record of overrunning releases, a plan to persist it all). Before patching a fourth time I compared two designs
+on the failure paths the reviews raised.
 
-## Every path between a queue ticket and the final release
+**Design A, the ledger (previous round).** The probe keeps lists of pending tickets and leases in memory, registers each before it
+acts, finds an orphaned grant by a token in the request's reason, and asks gozer only to confirm things are gone. To be correct it
+also has to be shared across attempts, persisted to the output directory (a restart loses a list), and reconciled with the time
+accounting. Its state can disagree with gozer's, and every path that updates it is another place to be interrupted between the
+action and the update.
 
-`orchard/hwlease.py` keeps one rule for all of them: register before acting. A ticket is registered when the probe keeps it, a lease
-the moment it is granted (or found in gozer's history by a token in the request's reason), and each is dropped only when gozer
-confirms it is gone. A new call does not start while one is pending (`HardwareCheck.health`). The tests are in
-`tests/test_hwlease.py` (the bookkeeping) and `tests/test_agent_hw_paths.py` (the same paths through the probe's wiring).
+**Design B, gozer keeps the books.** The lease is taken with `gozer acquire --owner-pid <the probe's pid>` and the probe holds
+nothing in memory. What the probe holds is whatever gozer shows for that pid: the leases in `gozer history` that were granted to the
+pid and not released, and the tickets in `gozer queue` that carry the pid. gozer already reaps a lease whose owner pid is dead, so a
+crash or a kill of the probe needs no code at all.
 
-| Id | Path | What happens | Test |
-|---|---|---|---|
-| P1 | `gozer run` queues, the wait is granted, the harness runs, the lease is released | PASS; one release; nothing pending | `test_p1_...` |
-| P2 | gozer ends the wait by its own timeout | ticket cancelled once, nothing runs, BUSY | `test_p2_...` |
-| P3 | the cancel fails | the answer names the ticket and the error; the ticket stays pending; the next call is refused while the queue still shows it | `test_p3_...`, `test_p3b_...` |
-| P4 | the probe has to stop the waiter (it ran 10 s past gozer's timeout) and the grant is in the output it drained | the grant is used and released | `test_p4_...` |
-| P5 | the same, but the grant is only in `gozer history` (granted before it was printed) | found by the token in the reason; used and released | `test_p5_...` |
-| P6 | an interrupt during the wait | waiter killed; a grant that arrived meanwhile is released, otherwise the ticket is cancelled; the interrupt goes on | `test_p6_...`, `test_p6b_...` |
-| P7 | the waiter cannot start | ticket cancelled, BUSY | `test_p7_...` |
-| P8 | a grant with no device list | released, never run | `test_p8_...` |
-| P9 | an error or interrupt in the grant callback | released (the callback is inside the release) | `test_p9_...`, `test_p9b_...` |
-| P10 | an error in the sweep or the gate after the grant | released | `test_p10_...` |
-| P11 | an interrupt or an error in the harness run | released | `test_p11_...`, `test_p11b_...` |
-| P12 | the harness hangs (watcher stop) | released; the tool is off for the rest of the attempt | `test_p12_...` |
-| P13 | `gozer release` exits 0 but its reset failed (`NOT marked clean`, `not resetting`) | `release_error` for the agent and the record; not held, so the next call may start | `test_p13_...` |
-| P14 | the release is refused or fails | lease pending, error told to the agent; the next call is refused until history shows it released | `test_p14_...`, `test_p14b_...` |
-| P15 | the release overruns 90 s | left running, never killed (a reset must finish); pending; refused while its process runs; resolved by history | `test_p15_...` |
-| P16 | an interrupt during the release | the lease was registered before the command, so it stays pending and blocks the next call | `test_p16_...` |
-| P17 | gozer's history or queue cannot be read | cannot confirm, so the next call is refused and says so | `test_p17_...`, `test_hwlease.py` |
-| P18, P19 | anything unresolved after a call | in the call record on disk, the attempt record and the report (`UNRESOLVED`) | `test_p18_...`, `test_p19_...` |
-| P20 | an interrupt between the kept ticket and the wait | the ticket is already registered | `test_p20_...` |
+Facts measured against the real gozer on 2026-10-27 (the tool is built on these):
+- `gozer acquire --ticket T --owner-pid P` claims the probe's own ticket. While the claim is not yet possible it answers exit 10 with
+  the same ticket and position, and it makes no second ticket (the queue shows one entry); when it is possible it grants the lease with
+  `owner_pid` P, and `history` shows `detached: false, pid: P`. So polling the same ticket every 2 s keeps the queue place, as `gozer
+  wait` does, and the lease is owned by the probe's pid. `gozer wait` grants a detached lease (the owner pid is lost), so it is not used.
+- A queue entry has `pid` and `who`; a `granted` event has `lease_id`, `pid`, `who`, `chips`; a `released` event has `lease_id` and
+  `duration_s` (the seconds gozer held it, reset included).
+- `gozer wait --timeout 5` meant five minutes (bare digits are minutes in gozer); this is why an earlier note here said it ran over.
 
-The reserve for cleanup in the budget is now 210 s: gozer's 120 s grace to stop the harness plus 90 s for the separate release and
-reset (`test_the_cleanup_reserve_covers_...`). A call's worst case, its run deadline plus both phases, fits the lease cap.
+Comparison on the paths Copilot raised:
 
-Correction (2026-10-27): an earlier version of this note said gozer's `--timeout` was seen to run over. It did not: gozer reads bare
-digits as minutes, so `--timeout 5` meant five minutes. The probe now writes seconds (`12s`), gozer ends the wait itself, and the
-probe stops the waiter only if it runs 10 s past that.
+| Failure path | Design A | Design B |
+|---|---|---|
+| A grant whose output was lost (waiter killed, answer cut off) | find it by a token in the reason, in a special timeout branch and an interrupt branch | it is a lease with the probe's pid in history; `mine()` finds it on every path, no token |
+| A second attempt, or a restarted probe | the ledger is per call or per process; has to be shared and persisted | gozer's record is the state: all attempts share one pid; a restarted probe's old lease is gozer's to reap |
+| A ticket kept before an interruptible step | register it first, cancel on exceptions | nothing to register: the ticket is in `gozer queue` with the pid, and `reclaim()` cancels whatever is there; the request is followed by no interruptible work before the claim loop |
+| A release that overruns | track the pid of the left-running command, reconcile the time | not killed; the lease stays in history unreleased, so it blocks the next call; when gozer writes the `released` event its `duration_s` replaces the estimate |
+| A recovered grant's chip time | pass timing with the exception | the interrupted call's record carries the lease id; `duration_s` from history settles it at the end of the call |
+| Probe crash, SIGKILL | nothing (a leaked lease lives to the grace window) | the lease is owned by the pid: gozer reaps it |
+
+Design B removes the in-memory lists, the token, the persistence and the special timeout and interrupt branches, and it makes the
+attempts share state without a shared object. It costs a `gozer history` and a `gozer queue` read per call (about 0.1 s). Its limits
+are stated in the code: the history window is the last 200 events, and an overrunning release is judged by gozer's own record. I chose B and replaced the module.
+
+### Every path from the first request to the final release
+
+Each row has a test in `tests/test_agent_hw_paths.py` (through the probe's wiring and a simulated gozer that keeps a queue, a history
+and leases by pid), `tests/test_hwlease.py` (the gozer side) or `tests/test_agent_hw_queue.py` (the policy side).
+
+| Id | Path | What happens |
+|---|---|---|
+| P1 | a free board | `gozer acquire --owner-pid`, the harness under the lease's `TT_VISIBLE_DEVICES`, one release; nothing pending |
+| P1b | a busy board | one ticket, claimed every 2 s with `--ticket`, never a second request; granted; run; released |
+| P2, P2b | the wait runs out, or the wait is zero | the ticket is cancelled once; BUSY; nothing runs |
+| P3, P3b | the cancel fails | the answer names the ticket and the error; the ticket is in `gozer queue` for the pid, so the next call is refused until it is gone |
+| P4 | a claim granted but its answer lost | found by the pid in history; used and released |
+| P4b | the first request granted but its answer lost | the error path reclaims what gozer shows for the pid (found by this table: the lease leaked before) |
+| P5, P5b | an interrupt during the wait | the ticket is cancelled, or a lease granted meanwhile is released; the interrupt goes on |
+| P6 | gozer refuses the request | harness_error; nothing held |
+| P7 | a grant with no devices | released, never run |
+| P8 | an error or an interrupt in the grant callback | released (the callback is inside the release) |
+| P9 | an error in the sweep or gate after the grant | released |
+| P10, P10b, P10c | an interrupt or error in the harness run, or a hang | released; a hang turns the tool off |
+| P11 | `gozer release` exits 0 but did not reset the chips | `release_error` for the agent and the record; the lease is gone, so nothing blocks |
+| P12 | the release is refused | the lease is unreleased in history: the answer says so and the next call is refused until history shows it released |
+| P13 | the release overruns 90 s | left running, never killed; the call's chip time is an estimate marked incomplete; the next call is refused; when gozer writes `released`, its `duration_s` replaces the estimate and can exhaust the budget |
+| P14, P14b | an interrupt during the release | `reclaim()` releases what gozer still shows; if that fails the lease stays visible and blocks |
+| P15 | history cannot be read | "cannot confirm": the next call is refused |
+| P16, P16b-d | an attempt leaves something | the next attempt's first call is refused (one pid); `main` asks gozer after any attempt that called the tool and stops the probe (exit 5) when something is unresolved; it passes one `GozerLeases` to every attempt |
+| P17, P18, P19 | anything unresolved | in the call file on disk, the attempt record and the report (`UNRESOLVED`); a failing check refuses the call |
+
+The budget: the reserve for cleanup is 210 s, gozer's 120 s to stop the harness plus 90 s for the separate release and reset
+(`test_the_cleanup_reserve_covers_...`), so a call's worst case, its run deadline plus both phases, fits the lease cap.

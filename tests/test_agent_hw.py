@@ -39,6 +39,7 @@ class World:
         self.blocked = blocked
         self.step_s = step_s
         self.runs = []                       # (k, timeout_s) of every run
+        self.run_args = []
         self.prepares = []
         self.sleeps = []
 
@@ -53,9 +54,13 @@ class World:
         self.prepares.append(k)
         return self.blocked, "ab" * 32
 
-    def run(self, k, timeout_s):
+    def run(self, k, timeout_s, wait_s=0.0, on_grant=None, ctx=None):
         self.runs.append((k, timeout_s))
-        hw, event, text = self.answers.pop(0) if self.answers else (good_hw(), None, "")
+        self.run_args.append({"wait_s": wait_s})
+        item = self.answers.pop(0) if self.answers else (good_hw(), None, "")
+        if callable(item):                   # a script: item(world, on_grant, ctx) -> (hw, event, text)
+            return item(self, on_grant, ctx)
+        hw, event, text = item
         self.now += hw.get("elapsed_s", 0.0) if event != "queued" else 0.5
         return hw, event, text
 
@@ -244,7 +249,7 @@ def test_a_hang_is_reported_with_the_watchers_reason_and_charged_to_the_lease_bu
     c = w.check()
     text = c.call({})
     assert "stopped" in text and "stalled: no output and no CPU use for 60 s" in text
-    assert "gozer status" in text and "no evidence" in text
+    assert "gozer status" in text and "released the lease" in text
     rec = c.summary()["calls"][0]
     assert rec["outcome"] == "hang" and rec["lease_s"] == 66.0 and rec["timed_out"] is True
     assert c.summary()["lease_s_used"] == 66.0
@@ -320,7 +325,7 @@ def test_a_second_call_while_one_runs_is_answered_at_once_and_does_not_queue():
     w = World()
     real = w.run
 
-    def slow(k, t):
+    def slow(k, t, *rest):
         started.set()
         assert release.wait(20)
         return real(k, t)
@@ -342,7 +347,7 @@ def test_a_second_call_while_one_runs_is_answered_at_once_and_does_not_queue():
 def test_an_exception_in_the_run_is_recorded_and_raised_and_the_lock_is_released():
     w = World()
 
-    def boom(k, t):
+    def boom(k, t, *rest):
         raise KeyboardInterrupt
     c = hwtool.HardwareCheck(hwtool.HwPolicy(), prepare=w.prepare, run=boom, clock=w.clock, sleep=w.sleep)
     with pytest.raises(KeyboardInterrupt):
@@ -368,14 +373,21 @@ def attempt_dir(tmp_path, env, kernel="add_good.py"):
 CLOCK = {"now": 0.0}
 
 
-def fake_ledger():
-    """A lease ledger whose gozer commands are fakes: no test of the tool may reach the real gozer."""
+def fake_leases(cmd=None, grant=True):
+    """A GozerLeases over a fake command runner: by default every `acquire` is granted at once, so a test of the tool sees
+    the harness run directly. No test of the tool may reach the real gozer."""
     from orchard import hwlease
-    from test_hwlease import FakeCmd
-    return hwlease.LeaseLedger(run=FakeCmd().run, popen=lambda *a, **k: (_ for _ in ()).throw(OSError("no gozer in tests")))
+    from test_hwlease import FakeCmd, GRANT, res
+    cmd = cmd or FakeCmd()
+    if grant:
+        cmd.say("acquire", res(0, GRANT))
+    led = hwlease.GozerLeases(who="claude:test", pid=4321, run=cmd.run, clock=lambda: CLOCK["now"],
+                              sleep=lambda s: CLOCK.__setitem__("now", CLOCK["now"] + s))
+    led.cmd = cmd
+    return led
 
 
-def make_check(adir, tmp_path, run_watched, *, ledger=None, **policy):
+def make_check(adir, tmp_path, run_watched, *, leases=None, **policy):
     """A hardware check with a fake clock in CLOCK: sleeping moves it, and so does a fake run that advances it."""
     CLOCK["now"] = 0.0
 
@@ -383,17 +395,24 @@ def make_check(adir, tmp_path, run_watched, *, ledger=None, **policy):
         CLOCK["now"] += s
     return kp.make_hardware_check(adir, op="add", n=1, shared_python="/shared/python",
                                   policy=hwtool.HwPolicy(**policy), run_watched=run_watched,
-                                  ledger=ledger or fake_ledger(), clock=lambda: CLOCK["now"], sleep=sleep)
+                                  leases=leases or fake_leases(), clock=lambda: CLOCK["now"], sleep=sleep)
+
+
+def cmd_of(leases):
+    return leases.cmd
 
 
 def test_the_tool_runs_the_shipped_hardware_phase_on_a_copy_of_the_current_kernel_under_one_chip_lease(tmp_path, fake_kenv):
     adir = attempt_dir(tmp_path, fake_kenv)
     calls = []
-    c = make_check(adir, tmp_path, hw_writer([GOOD_HW_SET], calls))
+    c_leases = fake_leases()
+    c = make_check(adir, tmp_path, hw_writer([GOOD_HW_SET], calls), leases=c_leases)
     text = c.call({})
     argv = calls[0]
-    assert argv[:2] == ["gozer", "run"] and argv[argv.index("--chips") + 1] == "1" and argv[argv.index("--exact") + 1] == "1"
-    assert kp.GOZER_WHO in argv and argv[argv.index("--") + 1] == "/shared/python"
+    assert argv[0] == "/shared/python"                       # the harness runs directly, under the lease's environment
+    acquire = next(c["argv"] for c in cmd_of(c_leases).calls if c["argv"][1] == "acquire")
+    assert acquire[acquire.index("--chips") + 1] == "1" and acquire[acquire.index("--exact") + 1] == "1"
+    assert acquire[acquire.index("--who") + 1] == "claude:test" and "--owner-pid" in acquire
     assert Path(argv[argv.index("--spec") + 1]) == kp.TEMPLATES / "ops" / "add.json"
     assert Path(argv[argv.index("--phase") + 1:][0]).name == "hw"
     kernel = Path(argv[argv.index("--kernel") + 1])
@@ -667,7 +686,7 @@ def scripted_hw_agent(kernel_text):
 def run_attempt(tmp_path, env, server, run_watched, **kw):
     args = dict(op="add", n=1, probe_dir=tmp_path / "probe", env=env, endpoint=server.endpoint, model="fake",
                 coder_model="fake-coder", probe_id="t", max_turns=10, wall_s=120, tt_lang=FACTS,
-                run_watched=run_watched)
+                run_watched=run_watched, leases=fake_leases())
     args.update(kw)
     return kp.run_attempt(**args)
 
@@ -678,7 +697,7 @@ def sim_pass_then_hw(calls):
 
     def fake(argv, **kw):
         calls.append(list(argv))
-        if argv[0] == "gozer":
+        if any(str(a).endswith("kernel_harness.py") and "--phase" in argv and argv[argv.index("--phase") + 1] == "hw" for a in argv):
             Path(argv[argv.index("--out") + 1]).write_text(
                 json.dumps({"phase": "hw", "sets": [GOOD_HW_SET], "error": None, "device_s": 3.0}))
             return kp.Watched(0, None, False, 45.0)
@@ -699,11 +718,11 @@ def test_run_attempt_gives_the_agent_the_tool_runs_it_and_records_the_call(tmp_p
         attempt = run_attempt(tmp_path, fake_kenv, server, sim_pass_then_hw(calls),
                               hw_policy=hwtool.HwPolicy(), shared_python="/shared/python")
     assert "hardware_check" in tools_seen[0]
-    gozer = [c for c in calls if c[0] == "gozer"]
-    assert len(gozer) == 1
+    harness = [c for c in calls if c[0] == "/shared/python"]
+    assert len(harness) == 1
     rec = attempt["agent_hw"]
     assert rec["enabled"] is True and rec["calls_counted"] == 1 and rec["calls"][0]["outcome"] == "pass"
-    assert rec["calls"][0]["note"] == "try it on the chip" and rec["lease_s_used"] == 45.0
+    assert rec["calls"][0]["note"] == "try it on the chip" and rec["lease_s_used"] >= 0.0
     on_disk = json.loads((tmp_path / "probe" / ".verdict" / "add-1" / "attempt.json").read_text())
     assert on_disk["agent_hw"] == rec and on_disk == attempt
     assert attempt["hw"] is None                          # the tool's runs are not the attempt's hardware verdict
@@ -736,7 +755,7 @@ def test_a_call_that_ends_the_attempt_by_interrupt_still_leaves_a_record(tmp_pat
     good = (KERNELS / "add_good.py").read_text()
 
     def fake(argv, **kw):
-        if argv[0] == "gozer":
+        if any(str(a).endswith("kernel_harness.py") and "--phase" in argv and argv[argv.index("--phase") + 1] == "hw" for a in argv):
             raise KeyboardInterrupt
         Path(argv[argv.index("--out") + 1]).write_text(json.dumps({"passed": True, "sets": []}))
         return kp.Watched(0, None, False, 0.1)

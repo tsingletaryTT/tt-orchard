@@ -76,3 +76,16 @@ def no_real_bus_reads(monkeypatch):
     pass their own reader."""
     from orchard import bus
     monkeypatch.setattr(bus, "_default_read", lambda: bus.Bus(readable=False))
+
+
+@pytest.fixture(autouse=True)
+def no_real_gozer_leases(monkeypatch):
+    """No test may reach the real gozer through the agent hardware tool's lease code (orchard/hwlease.py): a real `gozer acquire`
+    takes a lease and the release resets the chips. A test passes a fake command runner (tests/test_hwlease.py FakeCmd)."""
+    from orchard import hwlease
+    calls = []
+
+    def refused(argv, timeout, **kw):
+        calls.append(list(argv))
+        pytest.fail(f"this test reached the real gozer through hwlease: {calls[:3]}", pytrace=False)
+    monkeypatch.setattr(hwlease, "run_command", refused)

@@ -15,13 +15,16 @@ Rules, each tested in tests/test_agent_hw.py:
   `call_timeout_s` or at the seconds left minus `cleanup_s`, whichever is less, and a call needs `min_call_s` seconds of
   run time left after that reserve. So the worst call (the run until its deadline, then the cleanup) fits the cap.
 - One call at a time. A second call while one runs is answered at once.
-- A busy board is waited for on one queue ticket, for at most `wait_s` seconds: `gozer run` queued the ticket, the probe
-  keeps it and waits on it (`gozer wait`), so the call keeps its place in the queue and never asks again in a loop. When
-  the wait runs out the ticket is cancelled and the agent is told the board is busy and to go on with the simulator.
+- A busy board is waited for on one queue ticket, for at most `wait_s` seconds: the lease is requested with `gozer acquire
+  --owner-pid`, and when gozer queues the request the probe claims that same ticket every few seconds, so the call keeps its
+  place in the queue and never asks again in a loop. When the wait runs out the ticket is cancelled and the agent is told the board
+  is busy and to go on with the simulator (orchard/hwlease.py).
+- What a call leaves behind is read from gozer, not remembered (`health`): while a lease or ticket of this probe is still shown, no
+  new call starts. The chip time of a call whose release was not seen is replaced by gozer's own duration for the lease (`settle`).
 - After a hang, hardware checks are off for the rest of the attempt.
 - Every call is recorded, and the probe writes the record into attempt.json and the report.
 
-The choices (6 calls, 600 lease seconds, 240 s per call, 120 s of waiting, 120 s of cleanup reserve, 60 s minimum) are not
+The choices (6 calls, 600 lease seconds, 240 s per call, 120 s of waiting, 210 s of cleanup reserve, 60 s minimum) are not
 measured against a population of attempts. A whole call took about 47 s when measured (the device was open for about
 0.5 s; the rest is the lease and the reset that its release makes) (docs/superpowers/specs/2026-10-27-agent-hardware-check-design.md)."""
 from __future__ import annotations
@@ -93,10 +96,10 @@ class HardwareCheck:
     backstop stopped it). `hw` carries `elapsed_s`, the whole gozer run including the lease and the reset, and may carry
     `device_s`, `numbers` and the judging fields; `text` is the run's output."""
 
-    def __init__(self, policy: HwPolicy, *, prepare, run, wait_for=None, clock=time.monotonic, sleep=time.sleep,
-                 stamp=_utc_stamp, on_record=None, health=None):
+    def __init__(self, policy: HwPolicy, *, prepare, run, clock=time.monotonic, sleep=time.sleep,
+                 stamp=_utc_stamp, on_record=None, health=None, settle=None):
         self.policy, self.prepare, self.run = policy, prepare, run
-        self.wait_for = wait_for
+        self.settle = settle                # (lease_id) -> the seconds gozer says the lease was held, or None
         self._pending = None                # the last answer of `health`, kept for summary()
         self.health = health                # () -> None, or a sentence about a lease or ticket an earlier call left
         self.on_record = on_record          # called with summary() each time a call is recorded; its errors are ignored
@@ -134,13 +137,34 @@ class HardwareCheck:
             return self._call(note[:NOTE_MAX])
         finally:
             before = self._pending
+            settled = self._settle()
             self._refresh()                 # what this call left behind, for the record and the next call
-            if self._pending != before and self.on_record is not None:
+            if (settled or self._pending != before) and self.on_record is not None:
                 try:
                     self.on_record(self.summary())
                 except Exception:
                     pass
             self._lock.release()
+
+    def _settle(self) -> bool:
+        """Replace the estimated chip time of a call whose lease was not seen released (an interrupt, an overrunning
+        release) by the duration gozer records for the lease, as soon as gozer has one. True when a record changed."""
+        changed = False
+        if self.settle is None:
+            return False
+        for rec in self.records:
+            if rec.get("lease_incomplete") and rec.get("lease_id"):
+                try:
+                    seconds = self.settle(rec["lease_id"])
+                except Exception:
+                    seconds = None
+                if _number(seconds):
+                    self.lease_used += max(seconds - rec["lease_s"], 0.0)
+                    rec["lease_s"] = round(float(seconds), 1)
+                    rec["lease_incomplete"], rec["lease_reconciled"] = False, True
+                    rec.pop("lease_upper_bound", None)
+                    changed = True
+        return changed
 
     def _refresh(self):
         try:
@@ -157,7 +181,7 @@ class HardwareCheck:
         rec = {"at": self.stamp(), "k": None, "counted": False, "outcome": None, "category": None, "passed": False,
                "total_s": 0.0, "device_s": None, "lease_s": 0.0, "waited_s": 0.0, "queued_polls": 0,
                "cancelled": None, "timed_out": False, "note": "", "first_line": "", "pcc_min": None,
-               "kernel_sha256": None}
+               "kernel_sha256": None, "lease_id": None, "lease_incomplete": False}
         rec.update(fields)
         self.records.append(rec)
         if self.on_record is not None:
@@ -173,6 +197,7 @@ class HardwareCheck:
 
     def _call(self, note: str) -> str:
         p = self.policy
+        self._settle()                              # an earlier call's overlong release may have finished since
         if self.hung:
             return self._refuse(note, "an earlier hardware run of this attempt hung, so hardware checks are off for the "
                                       "rest of it. Use the simulator (the check after each write).")
@@ -195,48 +220,34 @@ class HardwareCheck:
         self.counted += 1
         k = self.counted
         start = self.clock()
-        polls, cancelled = 0, None
-        started = False
-        run_began = None                            # the clock when a run began, while one holds the board
-        wait_began = None                           # the clock while the call waits on its queue ticket
+        phase = {"wait_began": start, "run_began": None}   # the call waits for a lease from its start; a grant starts the run
+        ctx: dict = {}                              # the run closure puts the lease id here the moment it is granted
+        finished = False
+
+        def on_grant():
+            phase["wait_began"], phase["run_began"] = None, self.clock()
         try:
             timeout = min(p.call_timeout_s, p.lease_s - self.lease_used - p.cleanup_s)
-            run_began = self.clock()
-            hw, event, text = self.run(k, timeout)
-            run_began = None
-            if event == "queued":
-                # The board is busy. gozer queued one ticket and the probe kept it: wait on that ticket, so the call
-                # keeps its place in the queue, and never ask again in a loop.
-                polls = 1
-                q = hw.get("queued") if isinstance(hw.get("queued"), dict) else {}
-                if self.wait_for is not None and q.get("ticket"):
-                    wait_began = self.clock()
-
-                    def on_grant():
-                        nonlocal wait_began, run_began
-                        wait_began, run_began = None, self.clock()
-                    remaining = max(p.wait_s - (wait_began - start), 0.0)
-                    hw, event, text = self.wait_for(k, q, remaining, timeout, on_grant)
-            started = True
+            hw, event, text = self.run(k, timeout, max(p.wait_s, 0.0), on_grant, ctx)
+            finished = True
         finally:
-            if not started:                         # an interrupt or an error inside run or wait: keep what is known
+            if not finished:                        # an interrupt or an error: keep what is known
                 now = self.clock()
                 # A run that was in progress may have held the board until now: count that time, as an upper bound
-                # (the run may have stopped earlier, and the lease release may still be going on). Time spent waiting
-                # on the ticket before the grant (or all the time, when no grant came) is the wait.
+                # (the run may have stopped earlier, and the lease release may still be going on; the duration gozer
+                # reports for the lease replaces it when it is known, see _settle). Time spent waiting for the lease is
+                # the wait.
+                run_began = phase["run_began"]
                 held = max(now - run_began, 0.0) if run_began is not None else 0.0
-                if run_began is not None:
-                    waited_so_far = max(run_began - start, 0.0)
-                elif wait_began is not None:
-                    waited_so_far = max(now - start, 0.0)
-                else:
-                    waited_so_far = 0.0
+                waited_so_far = max((run_began if run_began is not None else now) - start, 0.0)
                 self.lease_used += held
                 self._record(k=k, counted=True, outcome="interrupted", note=note, kernel_sha256=sha,
-                             total_s=round(now - start, 1), queued_polls=polls, lease_s=round(held, 1),
-                             waited_s=round(waited_so_far, 1),
+                             total_s=round(now - start, 1), queued_polls=1 if ctx.get("queued") else 0,
+                             lease_s=round(held, 1), waited_s=round(waited_so_far, 1), lease_id=ctx.get("lease_id"),
+                             lease_incomplete=bool(ctx.get("lease_id")),
                              lease_upper_bound=True if run_began is not None else None)
         total = round(self.clock() - start, 1)
+        polls = 1 if (ctx.get("queued") or event == "queued") else 0
         if event == "queued":
             q = hw.get("queued") if isinstance(hw.get("queued"), dict) else {}
             cancelled = bool(q.get("ticket")) and q.get("cancel_error") is None
@@ -244,30 +255,31 @@ class HardwareCheck:
                          total_s=total, waited_s=total, queued_polls=polls, cancelled=cancelled,
                          first_line=str(hw.get("first_line") or ""))
             return self._busy_text(k, total, polls, cancelled, hw)
+        cancelled = None
         waited = float(hw["waited_s"]) if _number(hw.get("waited_s")) else 0.0
         elapsed = float(hw["elapsed_s"]) if _number(hw.get("elapsed_s")) else total - waited
         self.lease_used += elapsed
         device = hw.get("device_s") if _number(hw.get("device_s")) else None
         release_error = str(hw["release_error"]) if hw.get("release_error") else None
+        lease_id = hw.get("lease_id") if isinstance(hw.get("lease_id"), str) else None
+        incomplete = bool(lease_id and hw.get("lease_incomplete"))
         if event == "hang":
             self.hung = True
             self._record(k=k, counted=True, outcome="hang", category="hang", note=note, kernel_sha256=sha, total_s=total,
                          lease_s=round(elapsed, 1), waited_s=round(waited, 1), queued_polls=polls,
-                         cancelled=cancelled, timed_out=True, release_error=release_error,
-                         first_line=str(hw.get("first_line") or ""))
+                         cancelled=cancelled, timed_out=True, release_error=release_error, lease_id=lease_id,
+                         lease_incomplete=incomplete, first_line=str(hw.get("first_line") or ""))
             return (f"hardware_check {k} of {p.max_calls}: HANG: the run was stopped ({hw.get('first_line')}) after "
-                    f"{elapsed:.1f} s. gozer normally releases the lease and resets the chip when the run stops, but "
-                    "this call has no evidence that it did: the stop can end in a kill of gozer itself, which leaves "
-                    "the lease under a dead process. Look with `gozer status`; a lease marked stale is cleared with "
-                    "`gozer reconcile` (the gozer-gatekeeper skill says how), and a chip is never reset by hand. "
+                    f"{elapsed:.1f} s. The probe then released the lease with `gozer release`, which resets the chip. Look with `gozer status` if in doubt (a lease marked stale is cleared "
+                    "with `gozer reconcile`, the gozer-gatekeeper skill says how), and never reset a chip by hand. "
                     "Hardware checks are off for the rest of this attempt; the simulator still works."
                     f"{self._release_note(release_error)}\n{self._left()}")
         passed = hw.get("passed") is True
         category = None if passed else hw.get("category")
         self._record(k=k, counted=True, outcome="pass" if passed else str(category), category=category, passed=passed,
                      note=note, kernel_sha256=sha, total_s=total, device_s=device, lease_s=round(elapsed, 1),
-                     waited_s=round(waited, 1), queued_polls=polls, cancelled=cancelled,
-                     release_error=release_error, first_line=str(hw.get("first_line") or ""),
+                     waited_s=round(waited, 1), queued_polls=polls, cancelled=cancelled, lease_id=lease_id,
+                     lease_incomplete=incomplete, release_error=release_error, first_line=str(hw.get("first_line") or ""),
                      pcc_min=hw.get("pcc_min") if _number(hw.get("pcc_min")) else None)
         return self._result_text(k, hw, text, total, waited, device, passed) + (
             "\n" + self._release_note(release_error).strip() if release_error else "")

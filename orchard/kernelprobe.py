@@ -948,7 +948,7 @@ def _run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_i
                  tt_lang: dict | None = None, temperature: float = 0.0, top_p: float | None = None,
                  seed: int | None = None, references: list[dict] | None = None, skills: dict | None = None,
                  coder_speed: dict | None = None, hw_policy: hwtool.HwPolicy | None = None, shared_python=None,
-                 lease_ledger: hwlease.LeaseLedger | None = None, _box: dict | None = None) -> dict:
+                 leases: hwlease.GozerLeases | None = None, _box: dict | None = None) -> dict:
     """One attempt: prepare the directory, run the agent, run the authoritative check, write and return attempt.json.
     `hw_policy` (hwtool.HwPolicy) offers the agent the `hardware_check` tool, which runs its current kernel.py on one
     leased chip under the policy's limits with `shared_python`; None or a policy with 0 calls offers no tool. The calls
@@ -966,7 +966,7 @@ def _run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_i
     if hw_policy is not None and hw_policy.enabled:
         hwcheck = make_hardware_check(adir, op=op, n=n, shared_python=shared_python or default_shared_python(),
                                       policy=hw_policy, run_watched=run_watched,
-                                      ledger=lease_ledger)
+                                      leases=leases)
         if _box is not None:
             _box["hwcheck"], _box["facts"] = hwcheck, facts
     started = time.monotonic()
@@ -1070,21 +1070,16 @@ def cancel_ticket(ticket: str, run=subprocess.run) -> str | None:
 def _queued(got, text: str, cancel) -> dict | None:
     """When `gozer run` did not run the command because the chips were busy (it queued a ticket and exited 10), cancel
     the ticket and return {"ticket", "cancel_error"}. None for any other result. A ticket left in the queue would be
-    granted to a process that is not there, and the queue would wait on it until it expired. With `cancel` None the
-    ticket is kept, for a caller that waits on it (`kept` is True and `cancel_error` None; the caller cancels it)."""
+    granted to a process that is not there, and the queue would wait on it until it expired."""
     if got.killed or got.returncode != GOZER_QUEUED_EXIT:
         return None
     m = _TICKET.search(text)
     if m is None:
         return {"ticket": None, "cancel_error": "no ticket in gozer's output, so nothing was cancelled"}
-    if cancel is None:
-        return {"ticket": m.group(1), "cancel_error": None, "kept": True}
     return {"ticket": m.group(1), "cancel_error": cancel(m.group(1))}
 
 
 def _queued_text(q: dict) -> str:
-    if q.get("kept"):
-        return f"gozer queued the request because the chips were busy; the ticket {q['ticket']} is kept to wait on"
     cancelled = (f"the ticket {q['ticket']} was cancelled" if q["ticket"] and q["cancel_error"] is None
                  else f"the ticket could not be cancelled: {q['cancel_error']}; look with `gozer status`")
     return f"gozer queued the request because the chips were busy, so the command was queued, not run; {cancelled}"
@@ -1311,22 +1306,22 @@ def hwcheck_dir(probe_dir, op: str, n, k) -> Path:
 
 
 def make_hardware_check(adir: Path, *, op: str, n, shared_python, policy: hwtool.HwPolicy, run_watched=run_watched,
-                        ledger: hwlease.LeaseLedger | None = None, clock=time.monotonic,
+                        leases: hwlease.GozerLeases | None = None, clock=time.monotonic,
                         sleep=time.sleep) -> hwtool.HardwareCheck:
     """The attempt's `hardware_check` tool (hwtool.HardwareCheck) wired to the probe's own hardware path.
 
     Each call copies the attempt's current kernel.py into a fresh probe-owned directory (copy_kernel: a regular file of
-    at most 256 KiB), runs the static gate and the sha256 check on the copy (_hw_gate), and runs the shipped harness on it
-    through `gozer run --chips 1` under the stall watcher (_hw_run), the way the probe's own hardware phase does. The
-    gate and the sha256 check run again just before every gozer try, because the agent can write anywhere the operator
-    can. The agent supplies no command text and no path.
+    at most 256 KiB) and runs the static gate and the sha256 check on the copy (_hw_gate). It then takes a lease with
+    `gozer acquire --owner-pid <the probe's pid>` (hwlease.GozerLeases), so gozer reaps the lease if the probe dies, waits
+    on its one queue ticket when the board is busy, runs the shipped harness on the copy under the lease's environment
+    (_hw_run, under the stall watcher) and releases the lease in a `finally`. The gate and the sha256 check run again after
+    the wait, because the agent can write anywhere the operator can. The agent supplies no command text and no path.
 
-    A busy board is waited for on the one ticket `gozer run` queued (hwlease.LeaseLedger.wait_for_grant), and the harness
-    runs under the lease that wait granted; the lease is released on every path. `ledger` holds what a call leaves
-    pending, and a new call does not start while anything is (hwtool's `health`)."""
+    What the probe holds is read back from gozer (`leases.unresolved`), not remembered: a new call does not start while gozer
+    shows a lease or ticket of this probe, and that holds across attempts because they share one pid."""
     adir = Path(os.path.abspath(adir))              # absolute before any call directory is derived from it
     probe_dir = adir.parent.parent
-    ledger = ledger if ledger is not None else hwlease.LeaseLedger()
+    leases = leases if leases is not None else hwlease.GozerLeases(who=GOZER_WHO, clock=clock, sleep=sleep)
     state: dict = {}
 
     def prepare(k):
@@ -1347,12 +1342,8 @@ def make_hardware_check(adir: Path, *, op: str, n, shared_python, policy: hwtool
         blocked = _hw_gate(clean / "kernel.py", sha)
         if blocked is not None:
             return blocked, sha
-        state.update(vdir=vdir, kernel=clean / "kernel.py", sha=sha, token=secrets.token_hex(4))
+        state.update(vdir=vdir, kernel=clean / "kernel.py", sha=sha)
         return None, sha
-
-    def reason(k):
-        # The token is in the request's reason, so a grant that a stopped waiter did not print can be found in gozer's history.
-        return f"kernel-probe {op} attempt {n} agent check {k} #{state['token']}"
 
     def judged(hw, event):
         if event is None and not hw.get("passed") and hw.get("sets"):
@@ -1363,62 +1354,67 @@ def make_hardware_check(adir: Path, *, op: str, n, shared_python, policy: hwtool
                 hw["numbers"] = line
         return hw, event
 
-    def run(k, timeout_s):
-        sweep_strays(adir)                              # again before every gozer try
-        blocked = _hw_gate(state["kernel"], state["sha"])
-        if blocked is not None:                         # the copy changed after prepare: no gozer command runs
-            return {**blocked, "elapsed_s": 0.0}, None, ""
-        hw, event, text = _hw_run(adir, state["vdir"], state["kernel"], op=op, reason=reason(k),
-                                  shared_python=shared_python, run_watched=run_watched, cancel=None,
-                                  backstop_s=timeout_s)   # a busy ticket is kept for the wait
-        if event == "queued" and (hw.get("queued") or {}).get("ticket"):
-            ledger.add_ticket(hw["queued"]["ticket"])
-        return (*judged(hw, event), text)
-
-    def busy(ticket, began, error):
-        return {"passed": False, "started": False, "category": "queued", "pcc_min": None, "sets": [], "violations": [],
-                "first_line": f"the board stayed busy for {clock() - began:.0f} s",
-                "queued": {"ticket": ticket, "cancel_error": error}, "elapsed_s": 0.0}
+    def not_run(category, line, **extra):
+        return {"passed": False, "started": False, "category": category, "pcc_min": None, "sets": [], "violations": [],
+                "first_line": line, "elapsed_s": 0.0, **extra}
 
     def under_lease(k, grant, timeout_s):
         devices = (grant.get("env") or {}).get("TT_VISIBLE_DEVICES")
         if not devices:
-            return ({"passed": False, "started": False, "category": "harness_error", "pcc_min": None, "sets": [],
-                     "violations": [], "first_line": "gozer granted the lease with no device list, so the kernel was not "
-                                                     "run"}, None, "")
+            return not_run("harness_error", "gozer granted the lease with no device list, so the kernel was not run"), None, ""
         sweep_strays(adir)                           # a wait can last two minutes: sweep again before the run
         blocked = _hw_gate(state["kernel"], state["sha"])
         if blocked is not None:
             return {**blocked}, None, ""
-        hw, event, text = _hw_run(adir, state["vdir"], state["kernel"], op=op, reason=reason(k),
+        hw, event, text = _hw_run(adir, state["vdir"], state["kernel"], op=op, reason="",
                                   shared_python=shared_python, run_watched=run_watched, cancel=None,
                                   backstop_s=timeout_s, leased_env={"TT_VISIBLE_DEVICES": devices})
         return (*judged(hw, event), text)
 
-    def wait_for(k, queued, wait_s, timeout_s, on_grant):
-        """Wait on the kept ticket for at most `wait_s`. A grant runs the harness under that lease and releases it, on
-        every path: the callback, the checks, the run and an interrupt are all inside the release. Anything else cancels
-        the ticket and answers busy."""
-        ticket, began = queued["ticket"], clock()
-        grant = ledger.wait_for_grant(ticket, wait_s, state["token"]) if wait_s > 0 else None
-        if grant is None:
-            return busy(ticket, began, ledger.cancel(ticket)), "queued", ""
-        held = clock()
+    def run(k, timeout_s, wait_s, on_grant, ctx):
+        """Take the lease, run the harness under it, release it. The callback, the checks, the run and every interrupt are
+        inside the release; an exception gives back whatever gozer still shows for this pid before it goes on."""
+        sweep_strays(adir)                              # before the request, so nothing interruptible follows a ticket
+        blocked = _hw_gate(state["kernel"], state["sha"])
+        if blocked is not None:                         # the copy changed after prepare: nothing is requested
+            return {**blocked, "elapsed_s": 0.0}, None, ""
+        reason = f"kernel-probe {op} attempt {n} agent check {k}"
+        began = clock()
         try:
-            on_grant()
-            waited = held - began
-            hw, event, text = under_lease(k, grant, timeout_s)
-        finally:
-            released = ledger.release(grant["lease_id"])
-        hw["waited_s"] = round(waited, 1)
+            answer = leases.request(reason)
+            if answer.error:
+                leases.reclaim()                        # gozer may have granted it before its answer was lost
+                return not_run("harness_error", f"gozer could not give a lease: {answer.error}"), None, ""
+            grant, cancel_error = answer.grant, None
+            if grant is None:
+                ctx["queued"] = True
+                grant, cancel_error = leases.wait(answer.ticket, reason, wait_s)
+            if grant is None:
+                return ({"passed": False, "started": False, "category": "queued", "pcc_min": None, "sets": [],
+                         "violations": [], "first_line": f"the board stayed busy for {clock() - began:.0f} s",
+                         "queued": {"ticket": answer.ticket, "cancel_error": cancel_error}, "elapsed_s": 0.0}, "queued", "")
+            ctx["lease_id"] = grant["lease_id"]
+            held = clock()
+            try:
+                on_grant()
+                hw, event, text = under_lease(k, grant, timeout_s)
+            finally:
+                released = leases.release(grant["lease_id"])
+        except BaseException:
+            leases.reclaim()
+            raise
+        hw["waited_s"] = round(held - began, 1)
         hw["elapsed_s"] = round(clock() - held, 1)
+        hw["lease_id"] = grant["lease_id"]
         if not released.ok:
             hw["release_error"] = released.text or "gozer release did not succeed"
+        if released.held:
+            hw["lease_incomplete"] = True               # the release is not confirmed: gozer's duration settles the time later
         return hw, event, text
-    return hwtool.HardwareCheck(policy, prepare=prepare, run=run, wait_for=wait_for, clock=clock, sleep=sleep,
+    return hwtool.HardwareCheck(policy, prepare=prepare, run=run, clock=clock, sleep=sleep,
                                 on_record=lambda summary: (_real_dir(probe_dir / HWCHECK_DIR),
                                                            _write_json(hwcheck_calls_path(probe_dir, op, n), summary)),
-                                health=ledger.unresolved)
+                                health=leases.unresolved, settle=leases.duration)
 
 
 def _hw_int(args, name: str, default: int, low: int, high: int) -> int:
@@ -2237,6 +2233,7 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
     except _Refused as exc:
         return refuse(str(exc))
     shared = getattr(args, "shared_python", None) or default_shared_python()
+    leases = hwlease.GozerLeases(who=GOZER_WHO)        # one pid for the whole probe: gozer's record is shared by its attempts
     env = env or default_env(args)
     results = ttlang_env.ensure(env, check_only=True, say=say)
     if not results or any(r.status != ttlang_env.OK for r in results):
@@ -2322,9 +2319,15 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
                                          run_watched=run_watched_fn, tt_lang=facts, temperature=temperature,
                                          top_p=plan["top_p"], seed=attempt_seed(base, n, temperature),
                                          references=references, skills=skills_record, coder_speed=speed,
-                                         hw_policy=hw_policy, shared_python=shared)
+                                         hw_policy=hw_policy, shared_python=shared, leases=leases)
                     records.append(record)
                     say(_attempt_line(record))
+                    # What gozer shows for this probe's pid is shared by every attempt: stop when an attempt left a lease
+                    # or a ticket that gozer still shows, rather than start another hardware request beside it.
+                    pending = leases.unresolved() if (record.get("agent_hw") or {}).get("calls") else None
+                    if pending:
+                        stopped, code = f"an agent's hardware call left something unresolved: {pending}", EXIT_BLOCKED
+                        break
                 if getattr(args, "phase", "sim") == "hw" and not stopped:
                     where, hw_started = "the hardware phase", True
                     try:

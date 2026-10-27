@@ -1,142 +1,88 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
-"""A busy board is waited for on ONE queue ticket (`gozer acquire`'s ticket and `gozer wait`), never by asking again in a
-loop (PR 116, Copilot's review: the old loop gave up its place in the queue on every try). The probe runs the harness
-under the lease that `gozer wait` grants and releases it itself. Interrupted waits and runs record the time spent.
-
-Fakes only: no gozer, no chip."""
+"""The policy object's side of waiting for a lease and of leases that are not seen released (orchard/hwtool.py): the wait is
+part of one run, interrupts record the wait and the board time apart, and the time of a lease whose release was not seen is
+replaced by the duration gozer records. Fakes only: no gozer, no chip."""
 from __future__ import annotations
 
-import json
-import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
 
-from orchard import hwtool, kernelprobe as kp
-from test_agent_hw import (FACTS, GOOD_HW_SET, KERNELS, QUEUED, World, attempt_dir, fake_kenv, good_hw,  # noqa: F401
-                           hw_writer, make_check, queued, queued_runner, skills_current, ttlang_skill, CLOCK)
+from orchard import hwtool
+from test_agent_hw import QUEUED, World, good_hw, queued, skills_current, ttlang_skill  # noqa: F401
 
 
-# ---- the policy object ----------------------------------------------------------------------------------------------
+def busy_answer(ticket="T1", cancel_error=None):
+    return (dict(QUEUED, queued={"ticket": ticket, "cancel_error": cancel_error}), "queued", "")
 
 
-class QWorld(World):
-    """A World whose busy answer keeps its ticket and whose wait_for is scripted: `waits` holds callables or answers."""
-
-    def __init__(self, answers=None, waits=None):
-        super().__init__(answers)
-        self.waits = list(waits or [])
-        self.wait_calls = []
-
-    def wait_for(self, k, q, wait_s, timeout_s, on_grant):
-        self.wait_calls.append({"k": k, "ticket": q.get("ticket"), "wait_s": wait_s, "timeout_s": timeout_s})
-        item = self.waits.pop(0)
-        return item(self, on_grant) if callable(item) else item
-
-    def check(self, **policy):
-        return hwtool.HardwareCheck(hwtool.HwPolicy(**policy), prepare=self.prepare, run=self.run, wait_for=self.wait_for,
-                                    clock=self.clock, sleep=self.sleep, stamp=lambda: "2026-10-27T00:00:00Z")
-
-
-def kept_ticket(ticket="T1"):
-    return (dict(QUEUED, queued={"ticket": ticket, "cancel_error": None, "kept": True}), "queued", "")
-
-
-def timed_out_wait(cancel_error=None, ticket="T1", took=120.0):
-    def wait(world, on_grant):
-        world.now += took
-        return (dict(QUEUED, elapsed_s=0.0, queued={"ticket": ticket, "cancel_error": cancel_error}), "queued", "")
-    return wait
-
-
-def granted_pass(waited=21.0, elapsed=47.0):
-    def wait(world, on_grant):
+def granted_script(waited=21.0, elapsed=47.0, **extra):
+    def script(world, on_grant, ctx):
         world.now += waited
+        ctx["lease_id"] = "L1"
         on_grant()
         world.now += elapsed
-        return (dict(good_hw(), elapsed_s=elapsed, waited_s=waited), None, "")
-    return wait
+        return (dict(good_hw(), elapsed_s=elapsed, waited_s=waited, lease_id="L1", **extra), None, "")
+    return script
 
 
-def test_a_busy_board_waits_on_the_one_ticket_and_never_runs_gozer_again():
-    w = QWorld([kept_ticket()], [timed_out_wait()])
-    c = w.check()
-    text = c.call({})
-    assert len(w.runs) == 1 and len(w.wait_calls) == 1 and w.sleeps == []          # one try, one wait, no loop
-    assert w.wait_calls[0]["ticket"] == "T1"
-    assert "BUSY" in text and "simulator" in text and "were cancelled" in text
-    assert "waited on 1 queue ticket" in text
-
-
-def test_the_wait_gets_what_is_left_of_wait_s_after_the_first_try():
-    w = QWorld([kept_ticket()], [timed_out_wait()])
+def test_the_run_is_given_the_whole_wait_to_use():
+    w = World([busy_answer()])
     w.check(wait_s=120.0).call({})
-    assert w.wait_calls[0]["wait_s"] == 119.5                                      # the busy try itself took 0.5 s
+    assert w.run_args == [{"wait_s": 120.0}] and len(w.runs) == 1
 
 
-def test_the_wait_also_gets_the_runs_timeout_with_the_cleanup_reserved():
-    w = QWorld([kept_ticket()], [timed_out_wait()])
-    w.check(lease_s=300.0, call_timeout_s=240.0, cleanup_s=120.0).call({})
-    assert w.wait_calls[0]["timeout_s"] == 180.0
+def test_a_negative_wait_is_passed_as_zero():
+    w = World([busy_answer()])
+    w.check(wait_s=-5.0).call({})
+    assert w.run_args == [{"wait_s": 0.0}]
 
 
-def test_a_zero_wait_still_hands_the_ticket_to_wait_for_so_that_it_is_cancelled():
-    w = QWorld([kept_ticket()], [timed_out_wait(took=0.0)])
-    w.check(wait_s=0.0).call({})
-    assert w.wait_calls[0]["wait_s"] == 0.0
-
-
-def test_a_board_granted_during_the_wait_runs_the_kernel_and_records_the_wait_and_the_lease_time():
-    w = QWorld([kept_ticket()], [granted_pass(waited=21.0, elapsed=47.0)])
+def test_a_busy_answer_is_a_counted_call_that_uses_no_lease_time_and_says_one_ticket():
+    w = World([busy_answer()])
     c = w.check()
     text = c.call({})
-    assert text.splitlines()[0].startswith("hardware_check 1 of 6: PASS")
     rec = c.summary()["calls"][0]
-    assert rec["waited_s"] == 21.0 and rec["lease_s"] == 47.0 and rec["queued_polls"] == 1 and rec["cancelled"] is None
-    assert rec["outcome"] == "pass" and c.summary()["lease_s_used"] == 47.0
-    assert "waited 21.0 s for a lease" in text
-
-
-def test_a_wait_that_ran_out_is_a_busy_call_that_uses_no_lease_time_and_counts():
-    w = QWorld([kept_ticket()], [timed_out_wait()])
-    c = w.check()
-    c.call({})
-    rec = c.summary()["calls"][0]
+    assert "BUSY" in text and "simulator" in text and "were cancelled" in text and "waited on 1 queue ticket" in text
     assert rec["outcome"] == "busy" and rec["cancelled"] is True and rec["lease_s"] == 0.0 and rec["counted"] is True
-    assert rec["queued_polls"] == 1 and rec["waited_s"] >= 119.0 and c.summary()["lease_s_used"] == 0.0
-    assert c.summary()["calls_counted"] == 1
+    assert rec["queued_polls"] == 1 and c.summary()["lease_s_used"] == 0.0 and c.summary()["calls_counted"] == 1
 
 
 def test_a_ticket_that_could_not_be_cancelled_is_named_in_the_answer():
-    w = QWorld([kept_ticket("T9")], [timed_out_wait(cancel_error="gozer cancel exited 1", ticket="T9")])
+    w = World([busy_answer("T9", "gozer cancel exited 1")])
     c = w.check()
     text = c.call({})
     assert "could not be cancelled" in text and "T9" in text and "gozer cancel exited 1" in text
     assert c.summary()["calls"][0]["cancelled"] is False
 
 
-def test_a_busy_answer_without_a_ticket_is_not_waited_on():
-    nothing = dict(QUEUED, queued={"ticket": None, "cancel_error": "no ticket in gozer's output"})
-    w = QWorld([(nothing, "queued", "")], [])
-    text = w.check().call({})
-    assert w.wait_calls == [] and "BUSY" in text and "no ticket" in text
+def test_a_busy_answer_without_a_ticket_says_so():
+    nothing = dict(QUEUED, queued={"ticket": None, "cancel_error": "no ticket"})
+    text = World([(nothing, "queued", "")]).check().call({})
+    assert "BUSY" in text and "no ticket" in text
 
 
-def test_without_a_wait_function_a_busy_answer_is_final():
-    w = World([queued()])
+def test_a_grant_during_the_wait_records_the_wait_and_the_lease_time_apart():
+    w = World([granted_script(waited=21.0, elapsed=47.0)])
     c = w.check()
-    assert "BUSY" in c.call({}) and len(w.runs) == 1
+    text = c.call({})
+    rec = c.summary()["calls"][0]
+    assert text.splitlines()[0].startswith("hardware_check 1 of 6: PASS") and "waited 21.0 s for a lease" in text
+    assert rec["waited_s"] == 21.0 and rec["lease_s"] == 47.0 and rec["queued_polls"] == 0 and rec["cancelled"] is None
+    assert rec["lease_id"] == "L1" and rec["lease_incomplete"] is False and c.summary()["lease_s_used"] == 47.0
 
 
 def test_a_hang_after_the_grant_is_charged_and_turns_the_tool_off():
-    def hang(world, on_grant):
+    def hang(world, on_grant, ctx):
         world.now += 10.0
+        ctx["lease_id"] = "L1"
         on_grant()
         world.now += 66.0
         return ({"passed": False, "category": "hang", "first_line": "stalled: x", "pcc_min": None, "sets": [],
-                 "violations": [], "elapsed_s": 66.0, "waited_s": 10.0}, "hang", "")
-    w = QWorld([kept_ticket()], [hang])
+                 "violations": [], "elapsed_s": 66.0, "waited_s": 10.0, "lease_id": "L1"}, "hang", "")
+    w = World([hang])
     c = w.check()
     text = c.call({})
     assert "HANG" in text and c.summary()["lease_s_used"] == 66.0 and c.summary()["calls"][0]["waited_s"] == 10.0
@@ -147,54 +93,169 @@ def test_a_hang_after_the_grant_is_charged_and_turns_the_tool_off():
 
 
 def test_an_interrupt_while_waiting_records_the_wait_and_no_board_time():
-    def interrupted(world, on_grant):
+    def interrupted(world, on_grant, ctx):
         world.now += 30.0
         raise KeyboardInterrupt
-    w = QWorld([kept_ticket()], [interrupted])
+    w = World([interrupted])
     c = w.check()
     with pytest.raises(KeyboardInterrupt):
         c.call({})
     rec = c.summary()["calls"][0]
-    assert rec["outcome"] == "interrupted" and rec["waited_s"] == 30.5 and rec["total_s"] == 30.5
-    assert rec["lease_s"] == 0.0 and not rec.get("lease_upper_bound") and rec["queued_polls"] == 1
+    assert rec["outcome"] == "interrupted" and rec["waited_s"] == 30.0 and rec["total_s"] == 30.0
+    assert rec["lease_s"] == 0.0 and not rec.get("lease_upper_bound") and rec["lease_incomplete"] is False
     assert c.summary()["lease_s_used"] == 0.0
 
 
 def test_an_interrupt_after_the_grant_records_the_wait_and_the_board_time_as_an_upper_bound():
-    def interrupted(world, on_grant):
+    def interrupted(world, on_grant, ctx):
         world.now += 20.0
+        ctx["lease_id"] = "L1"
         on_grant()
         world.now += 5.0
         raise KeyboardInterrupt
-    w = QWorld([kept_ticket()], [interrupted])
+    w = World([interrupted])
     c = w.check()
     with pytest.raises(KeyboardInterrupt):
         c.call({})
     rec = c.summary()["calls"][0]
-    assert rec["waited_s"] == 20.5 and rec["lease_s"] == 5.0 and rec["lease_upper_bound"] is True
-    assert c.summary()["lease_s_used"] == 5.0
+    assert rec["waited_s"] == 20.0 and rec["lease_s"] == 5.0 and rec["lease_upper_bound"] is True
+    assert rec["lease_id"] == "L1" and rec["lease_incomplete"] is True and c.summary()["lease_s_used"] == 5.0
 
 
-def test_an_interrupt_in_the_first_try_records_no_wait():
-    w = QWorld()
-
-    def boom(k, t):
-        w.now += 7.0
+def test_an_interrupt_before_any_wait_records_no_wait_and_the_run_time():
+    def interrupted(world, on_grant, ctx):
+        on_grant()
+        world.now += 7.0
         raise KeyboardInterrupt
-    c = hwtool.HardwareCheck(hwtool.HwPolicy(), prepare=w.prepare, run=boom, wait_for=w.wait_for, clock=w.clock,
-                             sleep=w.sleep)
+    w = World([interrupted])
+    c = w.check()
     with pytest.raises(KeyboardInterrupt):
         c.call({})
     rec = c.summary()["calls"][0]
     assert rec["waited_s"] == 0.0 and rec["lease_s"] == 7.0 and rec["lease_upper_bound"] is True
 
 
+def test_the_wait_is_not_counted_as_board_time_when_the_grant_came_late():
+    def interrupted(world, on_grant, ctx):
+        world.now += 100.0
+        on_grant()
+        world.now += 2.0
+        raise KeyboardInterrupt
+    w = World([interrupted])
+    c = w.check()
+    with pytest.raises(KeyboardInterrupt):
+        c.call({})
+    rec = c.summary()["calls"][0]
+    assert rec["waited_s"] == 100.0 and rec["lease_s"] == 2.0
+
+
+# ---- the time of a lease whose release was not seen -----------------------------------------------------------------------
+
+
+def make(w, durations, **policy):
+    seen = []
+
+    def settle(lease_id):
+        seen.append(lease_id)
+        return durations.get(lease_id)
+    c = hwtool.HardwareCheck(hwtool.HwPolicy(**policy), prepare=w.prepare, run=w.run, clock=w.clock, sleep=w.sleep,
+                             settle=settle)
+    c.settled = seen
+    return c
+
+
+def incomplete_pass(elapsed=60.0, lease="L1"):
+    return (dict(good_hw(), elapsed_s=elapsed, lease_id=lease, lease_incomplete=True,
+                 release_error="gozer release L1 is still running"), None, "")
+
+
+def test_a_call_whose_release_was_not_confirmed_is_settled_by_the_duration_gozer_records_later():
+    w = World([incomplete_pass(60.0)])
+    durations = {}
+    c = make(w, durations, lease_s=1000.0)
+    c.call({})
+    assert c.summary()["lease_s_used"] == 60.0 and c.summary()["calls"][0]["lease_incomplete"] is True
+    durations["L1"] = 500.0                                   # the reset ran long; gozer wrote the release at last
+    c.call({})                                                # the next call settles it first
+    rec = c.summary()["calls"][0]
+    assert rec["lease_s"] == 500.0 and rec["lease_incomplete"] is False and rec["lease_reconciled"] is True
+    assert c.summary()["lease_s_used"] == 500.0 + 47.0
+
+
+def test_an_overlong_release_can_exhaust_the_budget_before_the_next_call_is_admitted():
+    w = World([incomplete_pass(60.0)])
+    durations = {"L1": 500.0}
+    c = make(w, durations, lease_s=600.0)
+    c.call({})                                                # 60 s charged, then settled to 500 s at the end of the call
+    assert c.summary()["lease_s_used"] == 500.0
+    assert c.call({}).startswith("hardware_check refused") and len(w.runs) == 1
+
+
+def test_a_lease_that_gozer_has_no_duration_for_keeps_the_estimate_and_stays_incomplete():
+    w = World([incomplete_pass(60.0)])
+    c = make(w, {})
+    c.call({})
+    c.call({})
+    rec = c.summary()["calls"][0]
+    assert rec["lease_s"] == 60.0 and rec["lease_incomplete"] is True and c.summary()["lease_s_used"] == 60.0 + 47.0
+
+
+def test_a_duration_shorter_than_the_estimate_never_lowers_the_charge():
+    w = World([incomplete_pass(60.0)])
+    c = make(w, {"L1": 30.0})
+    c.call({})
+    assert c.summary()["lease_s_used"] == 60.0 and c.summary()["calls"][0]["lease_s"] == 30.0
+
+
+def test_an_interrupted_call_is_settled_when_its_call_ends():
+    def interrupted(world, on_grant, ctx):
+        ctx["lease_id"] = "L1"
+        on_grant()
+        world.now += 5.0
+        raise KeyboardInterrupt
+    w = World([interrupted])
+    c = make(w, {"L1": 44.0})
+    with pytest.raises(KeyboardInterrupt):
+        c.call({})
+    rec = c.summary()["calls"][0]
+    assert rec["lease_s"] == 44.0 and rec["lease_incomplete"] is False and c.summary()["lease_s_used"] == 44.0
+    assert "lease_upper_bound" not in rec
+
+
+def test_a_settle_that_raises_changes_nothing():
+    w = World([incomplete_pass(60.0)])
+
+    def boom(lease_id):
+        raise RuntimeError("history unreadable")
+    c = hwtool.HardwareCheck(hwtool.HwPolicy(), prepare=w.prepare, run=w.run, clock=w.clock, sleep=w.sleep, settle=boom)
+    c.call({})
+    assert c.summary()["calls"][0]["lease_s"] == 60.0 and c.summary()["calls"][0]["lease_incomplete"] is True
+
+
+def test_a_settled_duration_that_is_not_a_number_is_ignored():
+    w = World([incomplete_pass(60.0)])
+    c = make(w, {"L1": "soon"})
+    c.call({})
+    assert c.summary()["calls"][0]["lease_incomplete"] is True
+
+
+def test_the_settled_record_is_written_to_disk():
+    w = World([incomplete_pass(60.0)])
+    saved = []
+    c = hwtool.HardwareCheck(hwtool.HwPolicy(), prepare=w.prepare, run=w.run, clock=w.clock, sleep=w.sleep,
+                             settle=lambda lease: 500.0, on_record=saved.append)
+    c.call({})
+    assert saved[-1]["calls"][0]["lease_s"] == 500.0
+
+
+# ---- the report -----------------------------------------------------------------------------------------------------
+
+
 def test_the_report_row_of_a_waited_call_says_one_ticket_and_whether_it_was_cancelled():
     from test_agent_hw import _report_md, _row_attempt, hw_summary
     busy = {"outcome": "busy", "passed": False, "lease_s": 0.0, "waited_s": 120.0, "queued_polls": 1, "cancelled": True}
     granted = {"outcome": "pass", "waited_s": 21.0, "queued_polls": 1, "cancelled": None}
-    md = _report_md(__import__("pathlib").Path(__import__("tempfile").mkdtemp()),
-                    [_row_attempt(agent_hw=hw_summary(busy, granted))])
+    md = _report_md(Path(tempfile.mkdtemp()), [_row_attempt(agent_hw=hw_summary(busy, granted))])
     assert "1 ticket, cancelled" in md and "1 ticket, granted" in md
 
 
@@ -202,5 +263,5 @@ def test_the_report_row_shows_a_failed_release():
     from test_agent_hw import _report_md, _row_attempt, hw_summary
     rec = {"outcome": "pass", "waited_s": 21.0, "queued_polls": 1, "cancelled": None,
            "release_error": "chips [0, 1] still open by [123]"}
-    md = _report_md(Path(__import__("tempfile").mkdtemp()), [_row_attempt(agent_hw=hw_summary(rec))])
+    md = _report_md(Path(tempfile.mkdtemp()), [_row_attempt(agent_hw=hw_summary(rec))])
     assert "release failed: chips [0, 1] still open by [123]" in md

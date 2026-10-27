@@ -1,27 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
-"""The lease and ticket bookkeeping behind the agent's `hardware_check` tool (orchard/hwlease.py).
+"""The gozer side of the agent's `hardware_check` tool (orchard/hwlease.py): the probe asks for the lease with
+`gozer acquire --owner-pid`, claims its own ticket, releases, and reads back from gozer what it still holds.
 
-Every path between taking a queue ticket and the final release has a test here or in test_agent_hw_queue.py; the table
-of paths is in docs/superpowers/specs/2026-10-27-agent-hardware-check-design.md. Fakes only: no gozer, no chip."""
+The paths from the ticket to the final release and their tests are in the design note
+(docs/superpowers/specs/2026-10-27-agent-hardware-check-design.md). Fakes only: no gozer, no chip."""
 from __future__ import annotations
 
 import json
-import os
-import subprocess
 
 import pytest
 
 from orchard import hwlease
 from orchard.commands import CommandResult
 
+PID, WHO = 4321, "claude:test"
+
 
 class FakeCmd:
-    """A fake command runner for gozer: scripted answers per subcommand, every call recorded."""
+    """A fake command runner for gozer: scripted answers per subcommand (the last repeats), history and queue as data."""
 
     def __init__(self):
         self.calls = []
-        self.answers = {}            # subcommand -> list of CommandResult or Exception (popped in order; the last repeats)
+        self.answers = {}
         self.history = []
         self.queue = []
         self.history_fails = False
@@ -35,16 +36,12 @@ class FakeCmd:
         self.calls.append({"argv": argv, "timeout": timeout, "kill_on_timeout": kill_on_timeout})
         sub = argv[1]
         if sub == "history":
-            if self.history_fails:
-                return CommandResult(tuple(argv), 1, "", "boom")
-            return CommandResult(tuple(argv), 0, json.dumps({"history": self.history}))
+            return res(1, "", "boom") if self.history_fails else res(0, json.dumps({"history": self.history}))
         if sub == "queue":
-            if self.queue_fails:
-                return CommandResult(tuple(argv), 1, "", "boom")
-            return CommandResult(tuple(argv), 0, json.dumps({"queue": self.queue}))
+            return res(1, "", "boom") if self.queue_fails else res(0, json.dumps({"queue": self.queue}))
         items = self.answers.get(sub)
         if not items:
-            return CommandResult(tuple(argv), 0, json.dumps({"message": "ok"}))
+            return res(0, json.dumps({"message": "ok"}))
         item = items.pop(0) if len(items) > 1 else items[0]
         if isinstance(item, BaseException):
             raise item
@@ -58,426 +55,318 @@ def res(code=0, out="", err="", **kw):
     return CommandResult(("gozer",), code, out, err, **kw)
 
 
-def ledger(cmd, **kw):
-    return hwlease.LeaseLedger(run=cmd.run, **kw)
+class Clock:
+    def __init__(self):
+        self.now, self.sleeps = 0.0, []
+
+    def clock(self):
+        return self.now
+
+    def sleep(self, s):
+        self.sleeps.append(s)
+        self.now += s
 
 
-GRANT_JSON = json.dumps({"granted": True, "lease_id": "L1", "chips": ["0000:01:00.0", "0000:02:00.0"],
-                         "env": {"TT_VISIBLE_DEVICES": "0000:01:00.0,0000:02:00.0"}})
+def leases(cmd, **kw):
+    c = Clock()
+    led = hwlease.GozerLeases(who=WHO, pid=PID, run=cmd.run, clock=c.clock, sleep=c.sleep, **kw)
+    led.time = c
+    return led
 
 
-# ---- release: every way `gozer release` can end ------------------------------------------------------------------
+GRANT = json.dumps({"granted": True, "lease_id": "L1", "chips": ["0000:01:00.0", "0000:02:00.0"], "owner_pid": PID,
+                    "env": {"TT_VISIBLE_DEVICES": "0000:01:00.0,0000:02:00.0"}})
+QUEUED = json.dumps({"queued": True, "granted": False, "ticket": "T1", "position": 1, "ahead": []})
 
 
-def test_a_clean_release_is_ok_and_leaves_nothing_pending():
+def granted_event(lease, pid=PID, who=WHO, ts="2026-10-27T10:00:00Z"):
+    return {"event": "granted", "lease_id": lease, "pid": pid, "who": who, "ts": ts, "chips": ["0000:01:00.0", "0000:02:00.0"]}
+
+
+# ---- asking ---------------------------------------------------------------------------------------------------------
+
+
+def test_the_request_is_an_acquire_owned_by_the_probes_pid_for_one_chip_with_json():
     cmd = FakeCmd()
-    led = ledger(cmd)
-    out = led.release("L1")
-    assert out == hwlease.ReleaseResult(True, False, "") and led.pending_leases == {}
+    cmd.say("acquire", res(0, GRANT))
+    out = leases(cmd).request("why #1")
     argv = cmd.calls[0]["argv"]
-    assert argv == ["gozer", "release", "L1", "--json"]
+    assert argv == ["gozer", "acquire", "--json", "--chips", "1", "--exact", "1", "--who", WHO, "--reason", "why #1",
+                    "--owner-pid", str(PID)]
+    assert out.grant == {"lease_id": "L1", "chips": ["0000:01:00.0", "0000:02:00.0"],
+                         "env": {"TT_VISIBLE_DEVICES": "0000:01:00.0,0000:02:00.0"}}
+    assert out.ticket is None and out.error is None
 
 
-def test_the_release_is_not_killed_when_it_overruns_because_its_reset_must_not_be_cut_short():
+def test_a_busy_board_answers_with_the_ticket():
+    cmd = FakeCmd()
+    cmd.say("acquire", res(10, QUEUED))
+    out = leases(cmd).request("why")
+    assert out.grant is None and out.ticket == "T1" and out.error is None
+
+
+@pytest.mark.parametrize("answer", [res(12, json.dumps({"granted": False, "error": "no"})), res(1, "", "boom"),
+                                    res(0, "not json"), res(0, json.dumps({"granted": False})),
+                                    res(0, json.dumps({"granted": True})), res(0, json.dumps({"granted": True, "lease_id": "bad id"})),
+                                    res(10, "not json"), res(10, json.dumps({"queued": True, "ticket": "bad id"}))])
+def test_anything_that_is_not_a_complete_grant_or_a_ticket_is_an_error(answer):
+    cmd = FakeCmd()
+    cmd.say("acquire", answer)
+    out = leases(cmd).request("why")
+    assert out.grant is None and out.ticket is None and out.error
+
+
+def test_a_gozer_that_cannot_start_is_an_error():
+    cmd = FakeCmd()
+    cmd.say("acquire", OSError("no gozer"))
+    assert "no gozer" in leases(cmd).request("why").error
+
+
+def test_a_grant_without_a_device_list_takes_it_from_the_chips():
+    cmd = FakeCmd()
+    cmd.say("acquire", res(0, json.dumps({"granted": True, "lease_id": "L1", "chips": ["0000:01:00.0"]})))
+    assert leases(cmd).request("why").grant["env"] == {"TT_VISIBLE_DEVICES": "0000:01:00.0"}
+
+
+def test_a_grant_with_neither_devices_nor_chips_has_an_empty_environment():
+    cmd = FakeCmd()
+    cmd.say("acquire", res(0, json.dumps({"granted": True, "lease_id": "L1"})))
+    assert leases(cmd).request("why").grant == {"lease_id": "L1", "chips": [], "env": {}}
+
+
+def test_the_claim_is_the_same_acquire_with_the_ticket_and_the_same_pid():
+    cmd = FakeCmd()
+    cmd.say("acquire", res(10, QUEUED))
+    out = leases(cmd).claim("T1", "why")
+    argv = cmd.calls[0]["argv"]
+    assert argv[-2:] == ["--ticket", "T1"] and "--owner-pid" in argv and argv[argv.index("--owner-pid") + 1] == str(PID)
+    assert out.ticket == "T1"
+
+
+def test_a_ticket_that_could_pass_as_an_option_is_never_claimed_cancelled_or_released():
+    cmd = FakeCmd()
+    led = leases(cmd)
+    assert led.claim("--force", "w").error and "not a ticket" in led.cancel("--force")
+    assert led.release("--force").held is False and cmd.calls == []
+
+
+# ---- the wait on the one ticket ------------------------------------------------------------------------------------------
+
+
+def test_the_wait_claims_the_same_ticket_every_two_seconds_and_never_asks_for_a_new_one():
+    cmd = FakeCmd()
+    cmd.say("acquire", res(10, QUEUED), res(10, QUEUED), res(0, GRANT))
+    led = leases(cmd)
+    grant, error = led.wait("T1", "why", 60.0)
+    assert grant["lease_id"] == "L1" and error is None and led.time.sleeps == [2.0, 2.0]
+    for c in cmd.calls:
+        assert c["argv"][1] == "acquire" and c["argv"][-2:] == ["--ticket", "T1"]
+    assert "cancel" not in cmd.subs()
+
+
+def test_a_wait_that_runs_out_cancels_the_ticket_once_and_gives_none():
+    cmd = FakeCmd()
+    cmd.say("acquire", res(10, QUEUED))
+    led = leases(cmd)
+    assert led.wait("T1", "why", 6.0) == (None, None)
+    assert cmd.subs().count("cancel") == 1 and sum(led.time.sleeps) == pytest.approx(6.0)
+
+
+def test_a_zero_wait_claims_once_and_cancels():
+    cmd = FakeCmd()
+    cmd.say("acquire", res(10, QUEUED))
+    led = leases(cmd)
+    assert led.wait("T1", "why", 0.0) == (None, None) and cmd.subs() == ["acquire", "cancel", "history", "queue"]
+
+
+def test_the_last_sleep_never_overruns_the_deadline():
+    cmd = FakeCmd()
+    cmd.say("acquire", res(10, QUEUED))
+    led = leases(cmd)
+    led.wait("T1", "why", 3.0)
+    assert led.time.sleeps == [2.0, 1.0]
+
+
+def test_a_claim_that_cannot_be_answered_looks_in_gozers_record_before_giving_up():
+    """The claim may have been granted just before its output was lost: the lease is found by the probe's pid."""
+    cmd = FakeCmd()
+    cmd.say("acquire", OSError("killed"))
+    cmd.history = [granted_event("L7")]
+    grant, _ = leases(cmd).wait("T1", "why", 60.0)
+    assert grant["lease_id"] == "L7" and grant["env"] == {"TT_VISIBLE_DEVICES": "0000:01:00.0,0000:02:00.0"}
+    assert "cancel" not in cmd.subs()                        # not queued any more: nothing to cancel
+
+
+def test_a_claim_that_says_the_ticket_is_gone_with_no_lease_anywhere_gives_none():
+    cmd = FakeCmd()
+    cmd.say("acquire", res(12, json.dumps({"granted": False, "queued": False})))
+    assert leases(cmd).wait("T1", "why", 60.0) == (None, None)
+
+
+def test_a_grant_that_lands_while_the_ticket_is_being_cancelled_is_found():
+    cmd = FakeCmd()
+    cmd.say("acquire", res(10, QUEUED))
+    cmd.say("cancel", res(13, "no such ticket: T1"))
+    cmd.history = [granted_event("L7")]
+    assert leases(cmd).wait("T1", "why", 0.0)[0]["lease_id"] == "L7"
+
+
+def test_a_lease_of_another_pid_or_who_is_not_found_by_the_wait():
+    cmd = FakeCmd()
+    cmd.say("acquire", res(10, QUEUED))
+    cmd.history = [granted_event("L7", pid=PID + 1), granted_event("L8", who="claude:other")]
+    assert leases(cmd).wait("T1", "why", 0.0) == (None, None)
+
+
+def test_a_cancel_that_fails_is_returned_with_the_missing_grant():
+    cmd = FakeCmd()
+    cmd.say("acquire", res(10, QUEUED))
+    cmd.say("cancel", res(1, "", "boom"))
+    grant, error = leases(cmd).wait("T1", "why", 0.0)
+    assert grant is None and "boom" in error
+
+
+# ---- giving back ----------------------------------------------------------------------------------------------------
+
+
+def test_a_clean_release_is_ok():
+    cmd = FakeCmd()
+    out = leases(cmd).release("L1")
+    assert out == hwlease.ReleaseResult(True, False, "") and cmd.calls[0]["argv"] == ["gozer", "release", "L1", "--json"]
+
+
+def test_the_release_is_not_killed_when_it_overruns():
     cmd = FakeCmd()
     cmd.say("release", res(None, timed_out=True, left_running=True, pid=4242))
-    led = ledger(cmd)
-    out = led.release("L1")
+    out = leases(cmd).release("L1")
     assert cmd.calls[0]["kill_on_timeout"] is False and cmd.calls[0]["timeout"] == hwlease.RELEASE_TIMEOUT_S
     assert out.ok is False and out.held is True and "still running" in out.text
-    assert led.pending_leases["L1"]["pid"] == 4242
 
 
 @pytest.mark.parametrize("message", ["released; NOT marked clean", "released but not resetting: no longer locked"])
 def test_a_release_that_exits_0_but_did_not_reset_is_a_failure_that_is_not_held(message):
     cmd = FakeCmd()
     cmd.say("release", res(0, json.dumps({"message": message})))
-    led = ledger(cmd)
-    out = led.release("L1")
-    assert out.ok is False and out.held is False and message in out.text and led.pending_leases == {}
+    out = leases(cmd).release("L1")
+    assert out.ok is False and out.held is False and message in out.text
 
 
-def test_a_release_that_finds_no_lease_is_fine_because_it_is_already_gone():
+def test_a_release_that_finds_no_lease_is_fine():
     cmd = FakeCmd()
     cmd.say("release", res(13, "", "no such lease"))
-    out = ledger(cmd).release("L1")
+    out = leases(cmd).release("L1")
     assert out.ok is True and out.held is False
 
 
 @pytest.mark.parametrize("code", [15, 1, 12])
-def test_a_refused_or_failed_release_leaves_the_lease_pending_and_held(code):
+def test_a_refused_or_failed_release_is_held(code):
     cmd = FakeCmd()
     cmd.say("release", res(code, "", "device still open"))
-    led = ledger(cmd)
-    out = led.release("L1")
+    out = leases(cmd).release("L1")
     assert out.ok is False and out.held is True and "device still open" in out.text
-    assert "L1" in led.pending_leases
 
 
-def test_a_release_that_could_not_start_leaves_the_lease_pending():
+def test_a_release_that_could_not_start_is_held():
     cmd = FakeCmd()
     cmd.say("release", OSError("no gozer"))
-    led = ledger(cmd)
-    out = led.release("L1")
-    assert out.held is True and "no gozer" in out.text and "L1" in led.pending_leases
+    out = leases(cmd).release("L1")
+    assert out.held is True and "no gozer" in out.text
 
 
-def test_the_lease_is_registered_before_the_release_runs_so_an_interrupt_cannot_lose_it():
+@pytest.mark.parametrize("code,ok", [(0, True), (13, True)])
+def test_a_cancel_that_finds_the_ticket_gone_is_no_error(code, ok):
     cmd = FakeCmd()
-    cmd.say("release", KeyboardInterrupt())
-    led = ledger(cmd)
-    with pytest.raises(KeyboardInterrupt):
-        led.release("L1")
-    assert "L1" in led.pending_leases
+    cmd.say("cancel", res(code, "x"))
+    assert leases(cmd).cancel("T1") is None
 
 
-def test_a_lease_id_that_could_pass_as_an_option_is_never_handed_to_gozer():
-    cmd = FakeCmd()
-    out = ledger(cmd).release("--force")
-    assert cmd.calls == [] and out.held is False and "lease id" in out.text
-
-
-# ---- cancel ---------------------------------------------------------------------------------------------------------
-
-
-def test_a_cancelled_ticket_is_no_error_and_nothing_pending():
-    cmd = FakeCmd()
-    led = ledger(cmd)
-    led.add_ticket("T1")
-    assert led.cancel("T1") is None and led.pending_tickets == {}
-    assert cmd.calls[0]["argv"] == ["gozer", "cancel", "T1"]
-
-
-def test_a_ticket_that_is_already_gone_is_no_error():
-    cmd = FakeCmd()
-    cmd.say("cancel", res(13, "no such ticket: T1"))
-    led = ledger(cmd)
-    led.add_ticket("T1")
-    assert led.cancel("T1") is None and led.pending_tickets == {}
-
-
-def test_a_cancel_that_fails_returns_the_text_and_keeps_the_ticket_pending():
+def test_a_cancel_that_fails_returns_the_text():
     cmd = FakeCmd()
     cmd.say("cancel", res(1, "", "boom"))
-    led = ledger(cmd)                                        # not registered before: a failure registers it
-    assert "boom" in led.cancel("T1") and "T1" in led.pending_tickets
-
-
-def test_a_cancel_that_cannot_run_keeps_the_ticket_pending():
-    cmd = FakeCmd()
+    assert "boom" in leases(cmd).cancel("T1")
     cmd.say("cancel", OSError("no gozer"))
-    led = ledger(cmd)
-    assert "no gozer" in led.cancel("T1") and "T1" in led.pending_tickets
+    assert "no gozer" in leases(cmd).cancel("T1")
 
 
-def test_a_ticket_that_could_pass_as_an_option_is_never_handed_to_gozer():
+# ---- what gozer shows -----------------------------------------------------------------------------------------------
+
+
+def test_nothing_granted_and_nothing_queued_is_resolved():
+    assert leases(FakeCmd()).unresolved() is None
+
+
+def test_a_lease_granted_to_this_pid_and_not_released_is_unresolved_and_named():
     cmd = FakeCmd()
-    assert "not a ticket" in ledger(cmd).cancel("--force") and cmd.calls == []
+    cmd.history = [granted_event("L1")]
+    text = leases(cmd).unresolved()
+    assert "L1" in text and "gozer status" in text
 
 
-# ---- unresolved: what an earlier call left behind -----------------------------------------------------------------
-
-
-def test_nothing_pending_is_resolved_and_asks_gozer_nothing():
+@pytest.mark.parametrize("ending", ["released", "reaped"])
+def test_a_released_or_reaped_lease_is_resolved(ending):
     cmd = FakeCmd()
-    assert ledger(cmd).unresolved() is None and cmd.calls == []
+    cmd.history = [granted_event("L1"), {"event": ending, "lease_id": "L1"}]
+    assert leases(cmd).unresolved() is None
 
 
-def test_a_pending_lease_that_history_shows_released_is_resolved_and_dropped():
+def test_leases_of_other_pids_or_whos_are_not_ours():
     cmd = FakeCmd()
-    cmd.history = [{"event": "granted", "lease_id": "L1"}, {"event": "released", "lease_id": "L1"}]
-    led = ledger(cmd)
-    led.add_lease("L1", why="x")
-    assert led.unresolved() is None and led.pending_leases == {}
+    cmd.history = [granted_event("L1", pid=PID + 1), granted_event("L2", who="claude:other")]
+    assert leases(cmd).unresolved() is None
 
 
-def test_a_pending_lease_that_history_shows_reaped_is_resolved_too():
+def test_a_ticket_queued_by_this_pid_is_unresolved_and_named():
     cmd = FakeCmd()
-    cmd.history = [{"event": "reaped", "lease_id": "L1"}]
-    led = ledger(cmd)
-    led.add_lease("L1", why="x")
-    assert led.unresolved() is None
+    cmd.queue = [{"ticket": "T1", "pid": PID, "who": WHO}, {"ticket": "T2", "pid": PID + 1, "who": WHO}]
+    text = leases(cmd).unresolved()
+    assert "T1" in text and "T2" not in text
 
 
-def test_a_pending_lease_with_no_release_event_is_unresolved_and_named():
-    cmd = FakeCmd()
-    cmd.history = [{"event": "granted", "lease_id": "L1"}]
-    led = ledger(cmd)
-    led.add_lease("L1", why="x")
-    text = led.unresolved()
-    assert "L1" in text and "gozer status" in text and "L1" in led.pending_leases
-
-
-def test_a_release_that_is_still_running_is_said_to_be_running():
-    cmd = FakeCmd()
-    led = ledger(cmd, alive=lambda pid: pid == 4242)
-    led.add_lease("L1", why="x", pid=4242)
-    assert "still running" in led.unresolved()
-
-
-def test_a_release_whose_process_is_gone_with_no_release_event_is_unresolved():
-    cmd = FakeCmd()
-    led = ledger(cmd, alive=lambda pid: False)
-    led.add_lease("L1", why="x", pid=4242)
-    text = led.unresolved()
-    assert "L1" in text and "still running" not in text
-
-
-def test_history_that_cannot_be_read_leaves_the_lease_unresolved_and_says_so():
-    cmd = FakeCmd()
-    cmd.history_fails = True
-    led = ledger(cmd)
-    led.add_lease("L1", why="x")
-    assert "cannot confirm" in led.unresolved()
-
-
-def test_a_pending_ticket_that_is_no_longer_queued_is_resolved():
-    cmd = FakeCmd()
-    led = ledger(cmd)
-    led.add_ticket("T1")
-    assert led.unresolved() is None and led.pending_tickets == {}
-
-
-def test_a_pending_ticket_that_is_still_queued_is_unresolved_and_named():
-    cmd = FakeCmd()
-    cmd.queue = [{"ticket": "T1"}]
-    led = ledger(cmd)
-    led.add_ticket("T1")
-    assert "T1" in led.unresolved() and "T1" in led.pending_tickets
-
-
-def test_a_queue_that_cannot_be_read_leaves_the_ticket_unresolved():
-    cmd = FakeCmd()
-    cmd.queue_fails = True
-    led = ledger(cmd)
-    led.add_ticket("T1")
-    assert "cannot confirm" in led.unresolved()
-
-
-# ---- orphan grants --------------------------------------------------------------------------------------------------
-
-
-def granted(lease, reason, chips=("0000:01:00.0", "0000:02:00.0")):
-    return {"event": "granted", "lease_id": lease, "reason": reason, "chips": list(chips), "who": "claude:x"}
-
-
-def test_a_grant_whose_reason_carries_the_token_and_was_never_released_is_found():
-    cmd = FakeCmd()
-    cmd.history = [granted("L9", "kernel-probe add attempt 1 agent check 1 #abcd1234")]
-    grant = ledger(cmd).orphan_grant("abcd1234")
-    assert grant == {"lease_id": "L9", "chips": ["0000:01:00.0", "0000:02:00.0"],
-                     "env": {"TT_VISIBLE_DEVICES": "0000:01:00.0,0000:02:00.0"}}
-
-
-def test_a_grant_that_was_released_or_reaped_is_not_an_orphan():
-    for ending in ("released", "reaped"):
+def test_history_or_a_queue_that_cannot_be_read_is_unresolved_and_says_so():
+    for attr in ("history_fails", "queue_fails"):
         cmd = FakeCmd()
-        cmd.history = [granted("L9", "x #abcd1234"), {"event": ending, "lease_id": "L9"}]
-        assert ledger(cmd).orphan_grant("abcd1234") is None
+        setattr(cmd, attr, True)
+        assert "cannot confirm" in leases(cmd).unresolved()
 
 
-def test_a_grant_with_another_token_is_not_ours():
+def test_the_duration_of_a_lease_is_what_gozer_says_it_was_held():
     cmd = FakeCmd()
-    cmd.history = [granted("L9", "x #other999")]
-    assert ledger(cmd).orphan_grant("abcd1234") is None
+    cmd.history = [{"event": "released", "lease_id": "L1", "duration_s": 88.0}, {"event": "released", "lease_id": "L2", "duration_s": 5.0}]
+    led = leases(cmd)
+    assert led.duration("L1") == 88.0 and led.duration("L3") is None
 
 
-def test_a_token_that_is_too_short_matches_nothing():
+@pytest.mark.parametrize("value", ["soon", True, -1, None])
+def test_a_duration_that_is_not_a_plausible_number_is_none(value):
     cmd = FakeCmd()
-    cmd.history = [granted("L9", "x #a")]
-    assert ledger(cmd).orphan_grant("a") is None
+    cmd.history = [{"event": "released", "lease_id": "L1", "duration_s": value}]
+    assert leases(cmd).duration("L1") is None
 
 
-def test_history_that_cannot_be_read_finds_no_orphan():
+def test_the_duration_is_none_when_history_cannot_be_read():
     cmd = FakeCmd()
     cmd.history_fails = True
-    assert ledger(cmd).orphan_grant("abcd1234") is None
+    assert leases(cmd).duration("L1") is None
 
 
-# ---- the waiter ---------------------------------------------------------------------------------------------------
+# ---- reclaim: the exception path ------------------------------------------------------------------------------------------
 
 
-class FakeProc:
-    def __init__(self, out="", code=0, hang_first=False, interrupt=False, pid=777):
-        self.out, self.returncode, self.hang_first, self.interrupt = out, code, hang_first, interrupt
-        self.killed, self.timeouts, self.pid = False, [], pid
-
-    def communicate(self, timeout=None):
-        self.timeouts.append(timeout)
-        if self.interrupt and not self.killed:
-            raise KeyboardInterrupt
-        if self.hang_first and not self.killed:
-            raise subprocess.TimeoutExpired("gozer wait", timeout)
-        return self.out, ""
-
-    def kill(self):
-        self.killed = True
-
-
-def waiter(cmd, proc, **kw):
-    seen = {}
-
-    def popen(argv, **k):
-        seen["argv"] = list(argv)
-        if isinstance(proc, BaseException):
-            raise proc
-        return proc
-    return hwlease.LeaseLedger(run=cmd.run, popen=popen, **kw), seen
-
-
-def test_the_waiter_asks_for_the_ticket_in_seconds_as_json():
-    """Bare digits mean minutes to gozer: a 12 s wait must be written `12s`."""
+def test_reclaim_cancels_the_tickets_and_releases_the_leases_gozer_shows_for_this_pid():
     cmd = FakeCmd()
-    led, seen = waiter(cmd, FakeProc(GRANT_JSON))
-    grant = led.wait_for_grant("T1", 12.0, "tok12345")
-    assert seen["argv"] == ["gozer", "wait", "--json", "--timeout", "12s", "T1"]
-    assert grant["lease_id"] == "L1" and grant["env"]["TT_VISIBLE_DEVICES"] == "0000:01:00.0,0000:02:00.0"
-    assert "L1" in led.pending_leases                       # registered the moment it is granted
-    assert "T1" not in led.pending_tickets
-
-
-def test_the_waiter_rounds_a_fractional_wait_up_and_never_asks_for_zero():
-    led, seen = waiter(FakeCmd(), FakeProc(GRANT_JSON))
-    led.wait_for_grant("T1", 0.4, "tok12345")
-    assert seen["argv"][4] == "1s"
-    led, seen = waiter(FakeCmd(), FakeProc(GRANT_JSON))
-    led.wait_for_grant("T1", 12.2, "tok12345")
-    assert seen["argv"][4] == "13s"
-
-
-def test_the_waiter_is_stopped_by_the_probe_only_after_gozers_own_timeout_plus_a_slack():
-    proc = FakeProc(GRANT_JSON)
-    led, _ = waiter(FakeCmd(), proc)
-    led.wait_for_grant("T1", 20.0, "tok12345")
-    assert proc.timeouts == [20.0 + hwlease.WAIT_SLACK_S]
-
-
-def test_a_wait_that_gozer_ended_by_its_own_timeout_is_not_a_grant_and_nothing_is_killed():
-    proc = FakeProc(json.dumps({"granted": False, "ticket": "T1", "position": 1}), code=14)
-    led, _ = waiter(FakeCmd(), proc)
-    assert led.wait_for_grant("T1", 10.0, "tok12345") is None and proc.killed is False
-
-
-@pytest.mark.parametrize("out,code", [("not json", 0), (json.dumps({"granted": False}), 0), (json.dumps({"granted": True}), 0),
-                                      (GRANT_JSON, 1), (json.dumps({"granted": True, "lease_id": "bad id"}), 0),
-                                      ("", 0)])
-def test_an_answer_that_is_not_a_complete_grant_is_not_a_grant(out, code):
-    led, _ = waiter(FakeCmd(), FakeProc(out, code=code))
-    assert led.wait_for_grant("T1", 10.0, "tok12345") is None and led.pending_leases == {}
-
-
-def test_a_grant_without_a_device_list_is_still_returned_and_registered_so_that_it_gets_released():
-    led, _ = waiter(FakeCmd(), FakeProc(json.dumps({"granted": True, "lease_id": "L1"})))
-    grant = led.wait_for_grant("T1", 10.0, "tok12345")
-    assert grant == {"lease_id": "L1", "chips": [], "env": {}} and "L1" in led.pending_leases
-
-
-def test_a_grant_that_arrives_while_the_waiter_is_being_killed_at_the_deadline_is_kept():
-    """communicate() after the kill can return the grant JSON that gozer printed just before it was killed."""
-    proc = FakeProc(GRANT_JSON, hang_first=True)
-    led, _ = waiter(FakeCmd(), proc)
-    grant = led.wait_for_grant("T1", 10.0, "tok12345")
-    assert proc.killed is True and grant["lease_id"] == "L1" and "L1" in led.pending_leases
-
-
-def test_a_grant_made_before_its_output_was_printed_is_found_in_history_after_the_kill():
-    cmd = FakeCmd()
-    cmd.history = [granted("L7", "agent check #tok12345")]
-    proc = FakeProc("", hang_first=True)
-    led, _ = waiter(cmd, proc)
-    grant = led.wait_for_grant("T1", 10.0, "tok12345")
-    assert grant["lease_id"] == "L7" and "L7" in led.pending_leases
-
-
-def test_a_killed_waiter_with_no_grant_anywhere_gives_none():
-    cmd = FakeCmd()
-    led, _ = waiter(cmd, FakeProc("", hang_first=True))
-    assert led.wait_for_grant("T1", 10.0, "tok12345") is None and led.pending_leases == {}
-
-
-def test_an_interrupt_during_the_wait_kills_the_waiter_and_cancels_the_ticket():
-    cmd = FakeCmd()
-    proc = FakeProc("", interrupt=True)
-    led, _ = waiter(cmd, proc)
-    led.add_ticket("T1")
-    with pytest.raises(KeyboardInterrupt):
-        led.wait_for_grant("T1", 10.0, "tok12345")
-    assert proc.killed is True and "cancel" in cmd.subs() and "release" not in cmd.subs()
-
-
-def test_an_interrupt_during_the_wait_releases_a_grant_that_arrived_meanwhile():
-    cmd = FakeCmd()
-    cmd.history = [granted("L7", "agent check #tok12345")]
-    proc = FakeProc("", interrupt=True)
-    led, _ = waiter(cmd, proc)
-    led.add_ticket("T1")
-    with pytest.raises(KeyboardInterrupt):
-        led.wait_for_grant("T1", 10.0, "tok12345")
-    release = [c["argv"] for c in cmd.calls if c["argv"][1] == "release"]
-    assert release == [["gozer", "release", "L7", "--json"]]
-
-
-def test_an_interrupt_with_a_grant_in_the_drained_output_releases_it():
-    cmd = FakeCmd()
-
-    class Late(FakeProc):
-        def communicate(self, timeout=None):
-            if not self.killed:
-                raise KeyboardInterrupt
-            return GRANT_JSON, ""
-    led, _ = waiter(cmd, Late())
-    with pytest.raises(KeyboardInterrupt):
-        led.wait_for_grant("T1", 10.0, "tok12345")
+    cmd.history = [granted_event("L1")]
+    cmd.queue = [{"ticket": "T1", "pid": PID, "who": WHO}]
+    leases(cmd).reclaim()
+    assert [c["argv"][2] for c in cmd.calls if c["argv"][1] == "cancel"] == ["T1"]
     assert [c["argv"][2] for c in cmd.calls if c["argv"][1] == "release"] == ["L1"]
 
 
-def test_a_waiter_that_cannot_start_gives_none_and_leaves_the_ticket_to_the_caller():
-    led, _ = waiter(FakeCmd(), OSError("no gozer"))
-    assert led.wait_for_grant("T1", 10.0, "tok12345") is None
-
-
-def test_a_ticket_that_could_pass_as_an_option_is_never_waited_on():
-    led, seen = waiter(FakeCmd(), FakeProc(GRANT_JSON))
-    assert led.wait_for_grant("--force", 10.0, "tok12345") is None and "argv" not in seen
-
-
-def test_the_waiter_is_also_killed_when_the_drain_itself_is_interrupted():
+def test_reclaim_says_what_it_could_not_give_back_and_never_raises():
     cmd = FakeCmd()
-
-    class Stubborn(FakeProc):
-        def communicate(self, timeout=None):
-            if self.killed:
-                raise KeyboardInterrupt
-            raise subprocess.TimeoutExpired("gozer wait", timeout)
-    led, _ = waiter(cmd, Stubborn())
-    with pytest.raises(KeyboardInterrupt):
-        led.wait_for_grant("T1", 10.0, "tok12345")
+    cmd.history = [granted_event("L1")]
+    cmd.say("release", OSError("no gozer"))
+    assert "L1" in leases(cmd).reclaim()
 
 
-def test_the_release_budget_is_inside_the_policys_cleanup_reserve():
-    from orchard import hwtool, kernelprobe as kp
-    assert hwtool.HwPolicy().cleanup_s >= kp.GOZER_TERM_GRACE_S + hwlease.RELEASE_TIMEOUT_S
-    assert os.getpid() > 0
-
-
-def test_a_zero_wait_still_asks_for_one_second_because_gozer_reads_zero_as_no_time():
-    led, seen = waiter(FakeCmd(), FakeProc(GRANT_JSON))
-    led.wait_for_grant("T1", 0.0, "tok12345")
-    assert seen["argv"][4] == "1s"
-
-
-def test_an_interrupt_between_the_parse_and_the_registration_still_releases_the_grant():
-    cmd = FakeCmd()
-    led, _ = waiter(cmd, FakeProc(GRANT_JSON))
-    real = led.add_lease
-    calls = []
-
-    def add_lease(lease_id, **kw):
-        calls.append(lease_id)
-        if len(calls) == 1:
-            raise KeyboardInterrupt                           # before the lease was recorded
-        return real(lease_id, **kw)
-    led.add_lease = add_lease
-    with pytest.raises(KeyboardInterrupt):
-        led.wait_for_grant("T1", 10.0, "tok12345")
-    assert [c["argv"][2] for c in cmd.calls if c["argv"][1] == "release"] == ["L1"]
+def test_reclaim_with_nothing_held_is_quiet():
+    assert leases(FakeCmd()).reclaim() is None
