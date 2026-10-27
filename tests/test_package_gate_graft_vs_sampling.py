@@ -50,9 +50,10 @@ def test_graft_metadata_does_not_switch_off_the_serving_checks_for_a_drafter_off
     p = stage_dir / "package.json"
     p.write_text(json.dumps({**json.loads(p.read_text()), "mtp_graft": RECORD}))
     run_sh = pkg / "run.sh"
-    run_sh.write_text(run_sh.read_text().replace("CMD=(", 'export QWEN36_DRAFTER="dflash2"\nCMD=(', 1))
+    run_sh.write_text(run_sh.read_text().replace("CMD=(", 'export QWEN36_DRAFTER="dflash2"\n# sample_on_device_mode\nCMD=(', 1))
     g = gate_package(stage_dir, world["run"])
     assert any("turns the drafter on" in r for r in g.reasons), g.reasons
+    assert any("sample_on_device_mode" in r for r in g.reasons), g.reasons
 
 
 def test_a_keep_decision_still_allows_graft_metadata(world):
