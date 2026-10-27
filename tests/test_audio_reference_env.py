@@ -16,8 +16,9 @@ PIN = ae.LIBRARY_COMMIT
 class Fake:
     """A runner that records each command and answers from a table keyed by the command's first words."""
 
-    def __init__(self, tmp_path, head=PIN, import_ok=True, cuda="False"):
+    def __init__(self, tmp_path, head=PIN, import_ok=True, cuda="False", dirty=""):
         self.calls, self.tmp, self.head, self.import_ok, self.cuda = [], tmp_path, head, import_ok, cuda
+        self.dirty = dirty
 
     def __call__(self, argv, timeout, env=None):
         argv = [str(a) for a in argv]
@@ -28,6 +29,8 @@ class Fake:
             return 0, "", ""
         if "rev-parse" in argv:
             return 0, self.head + "\n", ""
+        if "status" in argv:
+            return 0, self.dirty, ""
         if argv[:2] == ["uv", "venv"]:
             py = Path(argv[-1]) / "bin" / "python"
             py.parent.mkdir(parents=True, exist_ok=True)
@@ -378,3 +381,47 @@ def test_main_with_dry_run_builds_nothing_and_exits_0_and_with_check_exits_2_on_
     assert ae.main(type("A", (), {"check": False, "dry_run": True})(), env=env, out=out) == 0
     assert not [a for a, _ in env.run.calls if a[:2] in (["uv", "venv"], ["uv", "pip"])] and not env.venv_dir.exists()
     assert ae.main(type("A", (), {"check": True, "dry_run": False})(), env=env, out=out) == 2
+
+
+# ---- a checkout with local changes is not the pinned source (review of PR 123) ----------------------
+
+@pytest.mark.parametrize("status", [" M stable_audio_3/model.py\n", "?? stable_audio_3/extra.py\n", "A  new.py\n D old.py\n"])
+def test_a_checkout_with_tracked_edits_or_untracked_files_is_refused(env, status):
+    env.src_dir.mkdir(parents=True)
+    (env.src_dir / ".git").mkdir()
+    env.run.dirty = status
+    results = ae.ensure(env, check_only=False)
+    assert statuses(results)["source"] == ae.FAIL and "local changes" in results[0].detail
+    assert "venv" not in statuses(results)
+    assert not any(a[:3] == ["uv", "pip", "install"] for a, _ in env.run.calls)
+
+
+def test_the_status_check_lists_untracked_files_and_does_not_prompt(env):
+    env.src_dir.mkdir(parents=True)
+    (env.src_dir / ".git").mkdir()
+    ae.ensure(env, check_only=True)
+    [(argv, e)] = [c for c in env.run.calls if "status" in c[0]]
+    assert "--porcelain" in argv and "--untracked-files=all" in argv and e["GIT_TERMINAL_PROMPT"] == "0"
+
+
+def test_a_failed_status_command_fails_the_source_step(env):
+    env.src_dir.mkdir(parents=True)
+    (env.src_dir / ".git").mkdir()
+    real = env.run
+
+    def run(argv, timeout, e=None):
+        if "status" in list(map(str, argv)):
+            return 128, "", "fatal: bad index"
+        return real(argv, timeout, e)
+    env.run = run
+    results = ae.ensure(env, check_only=False)
+    assert results[0].status == ae.FAIL and "bad index" in results[0].detail
+
+
+def test_a_clean_checkout_at_the_pin_is_accepted_in_check_mode_too(env):
+    env.src_dir.mkdir(parents=True)
+    (env.src_dir / ".git").mkdir()
+    results = ae.ensure(env, check_only=True)
+    assert statuses(results)["source"] == ae.OK and "clean" in results[0].detail
+    env.run.dirty = "?? x\n"
+    assert statuses(ae.ensure(env, check_only=True))["source"] == ae.FAIL

@@ -110,7 +110,17 @@ def step_source(env: AEnv, check_only: bool) -> Result:
         if head != LIBRARY_COMMIT:
             return Result("source", FAIL, f"{env.src_dir} is at {head[:12]}, not the pinned {LIBRARY_COMMIT[:12]}. It is left alone; "
                                           "pass another --src-dir or move it away")
-        return Result("source", OK, f"{env.src_dir} at {LIBRARY_COMMIT[:12]}")
+        # The commit alone does not say the files are the pinned ones: a tracked edit or an untracked file leaves HEAD where it is, and the
+        # checkout is installed editable, so changed code would run under the pin's name.
+        status = [*git, "status", "--porcelain", "--untracked-files=all"]
+        rc, out, err = env.run(status, 120, _clean(env))
+        if rc != 0:
+            return _fail("source", status, err)
+        if out.strip():
+            changed = [line for line in out.splitlines() if line.strip()]
+            return Result("source", FAIL, f"{env.src_dir} is at the pinned commit but has local changes ({len(changed)} paths, for example "
+                                          f"{changed[0].strip()[:80]!r}). It is left alone; pass another --src-dir or clean it")
+        return Result("source", OK, f"{env.src_dir} at {LIBRARY_COMMIT[:12]}, clean")
     if env.src_dir.exists() and any(env.src_dir.iterdir()):
         return Result("source", FAIL, f"{env.src_dir} holds files and is not a git checkout; it is left alone. Pass another --src-dir")
     if check_only:
