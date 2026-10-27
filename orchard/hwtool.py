@@ -45,7 +45,7 @@ class HwPolicy:
     call_timeout_s: float = 240.0   # a run's backstop; the stall watcher usually stops a hang sooner
     wait_s: float = 120.0           # how long one call waits for a busy board
     min_call_s: float = 60.0        # seconds of run time that must be left, after the cleanup reserve, for a call to start
-    cleanup_s: float = 120.0        # reserved for the stop and the release: gozer's term grace, which the reset can fill
+    cleanup_s: float = 210.0        # reserved for the stop (gozer's term grace, 120 s) and the separate release and reset (90 s)
 
     @property
     def enabled(self) -> bool:
@@ -94,9 +94,11 @@ class HardwareCheck:
     `device_s`, `numbers` and the judging fields; `text` is the run's output."""
 
     def __init__(self, policy: HwPolicy, *, prepare, run, wait_for=None, clock=time.monotonic, sleep=time.sleep,
-                 stamp=_utc_stamp, on_record=None):
+                 stamp=_utc_stamp, on_record=None, health=None):
         self.policy, self.prepare, self.run = policy, prepare, run
         self.wait_for = wait_for
+        self._pending = None                # the last answer of `health`, kept for summary()
+        self.health = health                # () -> None, or a sentence about a lease or ticket an earlier call left
         self.on_record = on_record          # called with summary() each time a call is recorded; its errors are ignored
         self.clock, self.sleep, self.stamp = clock, sleep, stamp
         self._lock = threading.Lock()
@@ -112,9 +114,11 @@ class HardwareCheck:
     # ---- what the probe writes into attempt.json ----------------------------------------------------------------
 
     def summary(self) -> dict:
-        return {"enabled": self.policy.enabled, "policy": self.policy.as_dict(), "calls": [dict(r) for r in self.records],
-                "calls_counted": self.counted, "bad_calls": self.bad_calls,
-                "lease_s_used": round(self.lease_used, 1)}
+        out = {"enabled": self.policy.enabled, "policy": self.policy.as_dict(), "calls": [dict(r) for r in self.records],
+               "calls_counted": self.counted, "bad_calls": self.bad_calls, "lease_s_used": round(self.lease_used, 1)}
+        if self._pending:
+            out["unresolved"] = self._pending
+        return out
 
     # ---- the call -----------------------------------------------------------------------------------------------
 
@@ -129,7 +133,21 @@ class HardwareCheck:
         try:
             return self._call(note[:NOTE_MAX])
         finally:
+            before = self._pending
+            self._refresh()                 # what this call left behind, for the record and the next call
+            if self._pending != before and self.on_record is not None:
+                try:
+                    self.on_record(self.summary())
+                except Exception:
+                    pass
             self._lock.release()
+
+    def _refresh(self):
+        try:
+            self._pending = self.health() if self.health is not None else None
+        except Exception:
+            self._pending = "the lease check failed"
+        return self._pending
 
     def _left(self) -> str:
         return (f"budget: {max(self.policy.max_calls - self.counted, 0)} calls left, "
@@ -167,6 +185,10 @@ class HardwareCheck:
                                       f"{p.lease_s:.0f}; {p.cleanup_s:.0f} are reserved for the cleanup (the stop and the "
                                       f"chip reset) and a call needs at least {p.min_call_s:.0f} to run. Use the "
                                       "simulator (the check after each write).")
+        pending = self._refresh()
+        if pending:
+            return self._refuse(note, f"an earlier call left something unresolved ({pending}). No new hardware call starts "
+                                      "until gozer shows it is gone. Use the simulator (the check after each write).")
         blocked, sha = self.prepare(self.counted + 1)
         if blocked is not None:
             return self._blocked(note, blocked, sha)

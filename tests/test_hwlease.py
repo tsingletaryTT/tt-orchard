@@ -159,8 +159,7 @@ def test_a_ticket_that_is_already_gone_is_no_error():
 def test_a_cancel_that_fails_returns_the_text_and_keeps_the_ticket_pending():
     cmd = FakeCmd()
     cmd.say("cancel", res(1, "", "boom"))
-    led = ledger(cmd)
-    led.add_ticket("T1")
+    led = ledger(cmd)                                        # not registered before: a failure registers it
     assert "boom" in led.cancel("T1") and "T1" in led.pending_tickets
 
 
@@ -168,7 +167,6 @@ def test_a_cancel_that_cannot_run_keeps_the_ticket_pending():
     cmd = FakeCmd()
     cmd.say("cancel", OSError("no gozer"))
     led = ledger(cmd)
-    led.add_ticket("T1")
     assert "no gozer" in led.cancel("T1") and "T1" in led.pending_tickets
 
 
@@ -460,3 +458,26 @@ def test_the_release_budget_is_inside_the_policys_cleanup_reserve():
     from orchard import hwtool, kernelprobe as kp
     assert hwtool.HwPolicy().cleanup_s >= kp.GOZER_TERM_GRACE_S + hwlease.RELEASE_TIMEOUT_S
     assert os.getpid() > 0
+
+
+def test_a_zero_wait_still_asks_for_one_second_because_gozer_reads_zero_as_no_time():
+    led, seen = waiter(FakeCmd(), FakeProc(GRANT_JSON))
+    led.wait_for_grant("T1", 0.0, "tok12345")
+    assert seen["argv"][4] == "1s"
+
+
+def test_an_interrupt_between_the_parse_and_the_registration_still_releases_the_grant():
+    cmd = FakeCmd()
+    led, _ = waiter(cmd, FakeProc(GRANT_JSON))
+    real = led.add_lease
+    calls = []
+
+    def add_lease(lease_id, **kw):
+        calls.append(lease_id)
+        if len(calls) == 1:
+            raise KeyboardInterrupt                           # before the lease was recorded
+        return real(lease_id, **kw)
+    led.add_lease = add_lease
+    with pytest.raises(KeyboardInterrupt):
+        led.wait_for_grant("T1", 10.0, "tok12345")
+    assert [c["argv"][2] for c in cmd.calls if c["argv"][1] == "release"] == ["L1"]

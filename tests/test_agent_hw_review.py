@@ -65,7 +65,7 @@ def test_a_process_that_rewrites_the_kernel_during_the_sweep_cannot_get_its_edit
 
 def test_the_default_policy_reserves_the_release_time_and_has_room_for_six_calls():
     p = hwtool.HwPolicy()
-    assert p.cleanup_s == 120.0 and p.lease_s == 600.0
+    assert p.cleanup_s == 210.0 and p.lease_s == 600.0
     assert p.max_calls * 47 + p.cleanup_s <= p.lease_s
 
 
@@ -103,7 +103,7 @@ def test_a_call_needs_the_minimum_run_time_after_the_cleanup_reserve():
 
 
 def test_the_policy_reports_the_reserve():
-    assert hwtool.HwPolicy().as_dict()["cleanup_s"] == 120.0
+    assert hwtool.HwPolicy().as_dict()["cleanup_s"] == 210.0
 
 
 def test_the_probe_reserves_at_least_the_gozer_term_grace():

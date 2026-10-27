@@ -162,33 +162,34 @@ class LeaseLedger:
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         except OSError:
             return None
-        out, stopped, grant = "", False, None
+        grant = None
         try:
-            out, _ = proc.communicate(timeout=wait_s + WAIT_SLACK_S)
-            grant = _parse_grant(out) if proc.returncode == 0 else None
-        except subprocess.TimeoutExpired:
-            stopped = True
-            proc.kill()
-            out = self._drain(proc)
-            grant = _parse_grant(out)
-        except BaseException:
-            proc.kill()
             try:
-                grant = _parse_grant(self._drain(proc))
+                out, _ = proc.communicate(timeout=wait_s + WAIT_SLACK_S)
+                grant = _parse_grant(out) if proc.returncode == 0 else None
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                grant = _parse_grant(self._drain(proc)) or self.orphan_grant(token)
+            if grant is not None:
+                self.add_lease(grant["lease_id"], why="granted")
+                self.pending_tickets.pop(ticket, None)
+            return grant
+        except BaseException:
+            # An interrupt (or any error) at any point: stop the waiter, find a grant it made (in the output it printed, in
+            # what was already registered, or in gozer's history), release it, and otherwise cancel the ticket.
+            proc.kill()
+            found = grant
+            try:
+                found = found or _parse_grant(self._drain(proc))
             finally:
-                found = grant or self.orphan_grant(token)
-                if found:
-                    self.add_lease(found["lease_id"], why="granted during an interrupt")
-                    self.release(found["lease_id"])
+                found = found or self.orphan_grant(token)
+                lease_id = (found or {}).get("lease_id")
+                if lease_id:
+                    self.add_lease(lease_id, why="granted during an interrupt")
+                    self.release(lease_id)
                 else:
                     self.cancel(ticket)
             raise
-        if grant is None and stopped:
-            grant = self.orphan_grant(token)
-        if grant is not None:
-            self.add_lease(grant["lease_id"], why="granted")
-            self.pending_tickets.pop(ticket, None)
-        return grant
 
     @staticmethod
     def _drain(proc) -> str:

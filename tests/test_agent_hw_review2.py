@@ -13,7 +13,7 @@ import pytest
 
 from fake_model import FakeModel
 from orchard import hwtool, kernelprobe as kp
-from test_agent_hw import (CLOCK, FACTS, GOOD_HW_SET, KERNELS, World, _report_md, _row_attempt, attempt_dir,  # noqa: F401
+from test_agent_hw import (CLOCK, fake_ledger, FACTS, GOOD_HW_SET, KERNELS, World, _report_md, _row_attempt, attempt_dir,  # noqa: F401
                            fake_kenv, good_hw, hw_summary, make_check, run_attempt, scripted_hw_agent,
                            skills_current, ttlang_skill)
 
@@ -43,7 +43,7 @@ def test_the_tool_works_with_the_default_relative_output_directory(tmp_path, fak
     (adir / "kernel.py").write_text((KERNELS / "add_good.py").read_text())
     seen = []
     text = kp.make_hardware_check(adir, op="add", n=1, shared_python="/p", policy=hwtool.HwPolicy(),
-                                  run_watched=strict_harness(seen), cancel=lambda t: None).call({})
+                                  run_watched=strict_harness(seen), ledger=fake_ledger()).call({})
     assert text.splitlines()[0].startswith("hardware_check 1 of 6: PASS"), text
     argv = seen[0]["argv"]
     assert Path(argv[argv.index("--kernel") + 1]).is_absolute() and Path(argv[argv.index("--out") + 1]).is_absolute()
@@ -81,7 +81,7 @@ def test_the_child_environment_names_an_absolute_attempt_directory(tmp_path, fak
         Path(argv[argv.index("--out") + 1]).write_text(json.dumps({"phase": "hw", "sets": [GOOD_HW_SET], "error": None}))
         return kp.Watched(0, None, False, 1.0)
     kp.make_hardware_check(adir, op="add", n=1, shared_python="/p", policy=hwtool.HwPolicy(), run_watched=fake,
-                           cancel=lambda t: None).call({})
+                           ledger=fake_ledger()).call({})
     assert seen[0]["env"]["ORCHARD_RUN_DIR"] == str((tmp_path / adir).resolve())
     assert Path(seen[0]["log_path"]).is_absolute()
 

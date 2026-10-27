@@ -6,7 +6,7 @@ The agent cannot run gozer, so the probe offers a tool that runs the agent's cur
 and gives back a short text. The probe owns the lease, the copy of the kernel, the static gate, the stall watcher and
 the judgement. The tool takes at most a short note: no command and no path.
 
-Every test uses a fake `run_watched`, a fake `cancel` and a fake clock. No test runs gozer or opens a chip."""
+Every test uses a fake `run_watched`, a fake gozer (hwlease.LeaseLedger over a fake command runner) and a fake clock. No test runs gozer or opens a chip."""
 from __future__ import annotations
 
 import argparse
@@ -368,7 +368,14 @@ def attempt_dir(tmp_path, env, kernel="add_good.py"):
 CLOCK = {"now": 0.0}
 
 
-def make_check(adir, tmp_path, run_watched, *, cancel=None, **policy):
+def fake_ledger():
+    """A lease ledger whose gozer commands are fakes: no test of the tool may reach the real gozer."""
+    from orchard import hwlease
+    from test_hwlease import FakeCmd
+    return hwlease.LeaseLedger(run=FakeCmd().run, popen=lambda *a, **k: (_ for _ in ()).throw(OSError("no gozer in tests")))
+
+
+def make_check(adir, tmp_path, run_watched, *, ledger=None, **policy):
     """A hardware check with a fake clock in CLOCK: sleeping moves it, and so does a fake run that advances it."""
     CLOCK["now"] = 0.0
 
@@ -376,7 +383,7 @@ def make_check(adir, tmp_path, run_watched, *, cancel=None, **policy):
         CLOCK["now"] += s
     return kp.make_hardware_check(adir, op="add", n=1, shared_python="/shared/python",
                                   policy=hwtool.HwPolicy(**policy), run_watched=run_watched,
-                                  cancel=cancel or (lambda t: None), clock=lambda: CLOCK["now"], sleep=sleep)
+                                  ledger=ledger or fake_ledger(), clock=lambda: CLOCK["now"], sleep=sleep)
 
 
 def test_the_tool_runs_the_shipped_hardware_phase_on_a_copy_of_the_current_kernel_under_one_chip_lease(tmp_path, fake_kenv):

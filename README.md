@@ -1526,7 +1526,8 @@ path, and the probe judges the result. The answer gives PASS or FAIL, the first 
 and the device seconds, and the calls and lease seconds left. A whole call took about 47 s when measured (the device was open for about
 0.5 s; the rest is the lease and the reset the release makes), so the simulator stays the cheap path. When no board is free, `gozer run`
 queues a ticket; the probe keeps it and waits on it with `gozer wait` for at most `--hw-wait-s` seconds, so the call keeps its place in
-the queue. A grant runs the harness under that lease and the probe releases it. When the wait runs out the ticket is cancelled and the
+the queue. A grant runs the harness under that lease and the probe releases it, on every path. A lease or ticket that an earlier call
+could not settle (a refused or overrunning release, a cancel that failed) blocks the next hardware call until gozer shows it gone. When the wait runs out the ticket is cancelled and the
 agent is told to go on with the simulator. A hang
 stops the call (the lease release resets the chip) and turns the tool off for the rest of the attempt. Calls are recorded in
 each `attempt.json` under `agent_hw` and listed in the report with the chip time they cost. The lease is taken for each
