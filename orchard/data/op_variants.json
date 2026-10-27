@@ -1,0 +1,246 @@
+{
+  "_about": "Tables for orchard/opvariants.py. A candidate is a guess that a person or a simulator run must confirm; nothing here makes an op `mapped`.",
+  "ttnn_namespaces": [
+    "experimental",
+    "transformer"
+  ],
+  "ttnn_noise_prefixes": [
+    "moreh_",
+    "fused_",
+    "dit_",
+    "wan_"
+  ],
+  "ttnn_blocked_tokens": [
+    "bw",
+    "backward",
+    "async",
+    "create",
+    "prepare",
+    "get",
+    "set",
+    "all",
+    "fill",
+    "distributed",
+    "context",
+    "mesh",
+    "device",
+    "devices",
+    "program",
+    "config",
+    "trace",
+    "profiler",
+    "prefetcher",
+    "socket",
+    "send",
+    "recv",
+    "corerange",
+    "cores",
+    "shard",
+    "sharded",
+    "interleaved",
+    "host",
+    "buffer",
+    "semaphore",
+    "queue",
+    "dump",
+    "pcie",
+    "close",
+    "open",
+    "attach",
+    "allocate",
+    "deallocate",
+    "register",
+    "tosa",
+    "program",
+    "factory",
+    "hash",
+    "stats"
+  ],
+  "ttnn_qualifier_tokens": [
+    "bitwise",
+    "logical",
+    "scalar",
+    "tensor",
+    "dim",
+    "like",
+    "unary",
+    "binary",
+    "eltwise",
+    "default",
+    "in",
+    "place",
+    "inplace",
+    "hw",
+    "rm",
+    "composite"
+  ],
+  "aten_qualifier_tokens": [
+    "with",
+    "sizes",
+    "size",
+    "new",
+    "dim",
+    "int",
+    "tensor",
+    "scalar",
+    "self",
+    "other",
+    "list",
+    "default",
+    "out",
+    "copy",
+    "correction",
+    "min",
+    "max",
+    "dtype",
+    "layout",
+    "intlist",
+    "int"
+  ],
+  "near_min_length": 5,
+  "near_max_distance_short": 1,
+  "near_max_distance_long": 2,
+  "near_long_from_length": 9,
+  "affix_min_length": 5,
+  "affix_max_extra": 2,
+  "max_candidates": 3,
+  "synonyms": {
+    "sub": [
+      "subtract"
+    ],
+    "rsub": [
+      "rsub",
+      "subtract"
+    ],
+    "mul": [
+      "multiply"
+    ],
+    "div": [
+      "divide"
+    ],
+    "truediv": [
+      "divide"
+    ],
+    "floor_divide": [
+      "floor_div"
+    ],
+    "clamp": [
+      "clip"
+    ],
+    "clip": [
+      "clamp"
+    ],
+    "masked_fill": [
+      "where"
+    ],
+    "to": [
+      "typecast"
+    ],
+    "to.dtype": [
+      "typecast"
+    ],
+    "to.dtype_layout": [
+      "typecast"
+    ],
+    "to.device": [
+      "to_device"
+    ],
+    "to.other": [
+      "typecast"
+    ],
+    "type_as": [
+      "typecast"
+    ],
+    "_to_copy": [
+      "typecast"
+    ],
+    "index_select": [
+      "embedding",
+      "gather"
+    ],
+    "index": [
+      "gather",
+      "embedding"
+    ],
+    "split_with_sizes": [
+      "split",
+      "chunk"
+    ],
+    "split": [
+      "split",
+      "chunk"
+    ],
+    "copy": [
+      "copy",
+      "assign",
+      "clone"
+    ],
+    "new_ones": [
+      "ones",
+      "full"
+    ],
+    "new_zeros": [
+      "zeros",
+      "full"
+    ],
+    "new_full": [
+      "full"
+    ],
+    "__and__": [
+      "bitwise_and",
+      "logical_and"
+    ],
+    "__or__": [
+      "bitwise_or",
+      "logical_or"
+    ],
+    "__xor__": [
+      "bitwise_xor",
+      "logical_xor"
+    ],
+    "__invert__": [
+      "bitwise_not",
+      "logical_not"
+    ],
+    "__lshift__": [
+      "bitwise_left_shift"
+    ],
+    "__rshift__": [
+      "bitwise_right_shift"
+    ],
+    "bmm": [
+      "matmul"
+    ],
+    "mm": [
+      "matmul"
+    ],
+    "addmm": [
+      "addmm",
+      "linear"
+    ],
+    "_softmax": [
+      "softmax"
+    ],
+    "log_softmax": [
+      "logsoftmax"
+    ],
+    "native_layer_norm": [
+      "layer_norm"
+    ],
+    "t": [
+      "transpose"
+    ],
+    "flatten": [
+      "reshape"
+    ],
+    "tile": [
+      "repeat"
+    ],
+    "where": [
+      "where"
+    ],
+    "embedding": [
+      "embedding"
+    ]
+  }
+}
