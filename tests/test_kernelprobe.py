@@ -531,7 +531,8 @@ def test_write_report_counts_attempts_to_first_pass_per_op(tmp_path):
 
 def test_the_category_list_includes_forbidden_code_and_hang():
     assert {"no_kernel", "import_error", "tt_lang_error", "shape_mismatch", "numeric_mismatch", "timeout",
-            "compile_error", "hang", "hw_numeric_mismatch", "harness_error", "forbidden_code", "queued"} == set(kp.CATEGORIES)
+            "compile_error", "hang", "hw_numeric_mismatch", "harness_error", "forbidden_code", "queued",
+            "sim_gap"} == set(kp.CATEGORIES)
 
 
 # ---- the probe-owned verdict directory (fix round 1) ------------------------------------------------------------

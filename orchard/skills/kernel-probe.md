@@ -48,10 +48,12 @@ Rules from the specification and the examples:
   arithmetic on shapes, such as `1.0 / x.shape[1]`, runs when the kernel is built and may be captured by the thread functions.
 - A block can be used in several statements inside one `with` (a sum, then a scale) while the `with` stays open. A buffer's
   shape may cover a whole row of tiles, `(1, col_tiles)`, and be reduced in one call.
+- `ttl.raw_element_read(blk, i, j)` and `ttl.raw_element_write(blk, i, j, value)` are documented and the simulator lacks them, so a kernel that
+  uses them ends `FAIL: sim_gap` and is judged on hardware only. On hardware they copied elements, wrote constants and shifted rows; the compiler
+  refused `+`, `*`, `if` expressions and lists of values on them. Read from a `wait()` block, in a data movement thread.
 
 Steps:
-1. Read `kernel_spec.json` (inputs, shapes, output shape, what the op computes), then `reference/eltwise_add.py` once, then
-   the files listed above for your kind of op.
+1. Read `kernel_spec.json` (inputs, shapes, output shape, what the op computes), then `reference/eltwise_add.py` once, then the files for your kind of op.
 2. Write `kernel.py` with write_file. It holds one function decorated with `@ttl.operation(...)`, with any name; that
    function is the operation. It takes the inputs in the order of the keys under `inputs` in `kernel_spec.json`, then
    the output tensor last; the parameter names are yours. The skeleton:
@@ -68,7 +70,6 @@ Steps:
 3. Each write of `kernel.py` runs `python3 kernel_check.py` and shows its output below the write's result. It prints
    `PASS`, or `FAIL: <category>: <first line>`, then `where:` (the failing line) and sometimes `hint:` or `numbers:`.
 4. Read that line. Change one thing. Run it again.
-
 Advice:
 - Copy the example's three thread functions into your operation: a reader with `@ttl.datamovement()`, a compute
   function with `@ttl.compute()`, and a writer with `@ttl.datamovement()`. Without them the simulator fails with
@@ -91,10 +92,9 @@ rule broken, its line, and what to do instead:
   ones above. Two `@ttl.operation` functions are refused. `import ttl as tl` with `@tl.operation(...)`, and `from ttl import
   operation` with `@operation(...)`, are accepted.
 
-The probe also refuses a `kernel.py` that is a link or larger than 256 KiB, when it takes the file after you finish: write it with write_file.
-
 Other rules:
+- The probe also refuses a `kernel.py` that is a link or larger than 256 KiB, when it takes the file after you finish: write it with write_file.
 - Write only `kernel.py`. Your result is judged afterwards by an unedited copy of the check.
 - Do not install packages, use the network, or touch any device (the check runs on a simulator), or read the ledger or the log directory.
-- If the same failure comes back three times and you have no new idea, stop and say what you tried.
-- Finish with at most five lines: what the kernel does, and what the last check said.
+- If the same failure comes back three times and you have no new idea, stop and say what you tried. Finish with at most five lines:
+  what the kernel does, and what the last check said.

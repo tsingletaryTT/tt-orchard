@@ -111,7 +111,7 @@ TEMPLATE_FILES = ("kernel_check.py", "kernel_harness.py", "references.py")
 # Every category an attempt can end in. The check and the harness produce all but `hang`, which the probe sets when
 # the stall watcher kills a hardware run.
 CATEGORIES = ("no_kernel", "import_error", "tt_lang_error", "shape_mismatch", "numeric_mismatch", "timeout",
-              "compile_error", "hang", "hw_numeric_mismatch", "harness_error", "forbidden_code", "queued")
+              "compile_error", "hang", "hw_numeric_mismatch", "harness_error", "forbidden_code", "queued", "sim_gap")
 SMOKE_TAIL_LINES = 20
 
 
@@ -1048,7 +1048,15 @@ def smoke_test(*, env, shared_python, run_watched=run_watched, record: dict | No
     return (got.returncode == 0 and "PASSED!" in text), tail
 
 
+def hardware_only(attempt: dict) -> bool:
+    """True for an attempt the simulator could not judge because it lacks a documented `ttl` function (the check's
+    category `sim_gap`). Such a kernel goes to hardware without a simulator pass, and its hardware result says so."""
+    return attempt.get("passed_sim") is not True and attempt.get("category") == "sim_gap"
+
+
 def _record_hw(adir: Path, attempt: dict, hw: dict) -> dict:
+    if hardware_only(attempt):
+        hw = {**hw, "hardware_only": True}
     attempt["hw"] = hw
     if isinstance(attempt.get("provenance"), dict):
         attempt["provenance"]["hardware_pcc_min"] = hw.get("pcc_min")
@@ -1153,7 +1161,7 @@ def run_hardware(attempts: list[dict], *, probe_dir, env, shared_python, run_wat
     if not ok:
         return {"available": False, "smoke_tail": tail, "watch": seen.get("watch"), **extra}
     for attempt in attempts:
-        if attempt.get("passed_sim") is True:
+        if attempt.get("passed_sim") is True or hardware_only(attempt):
             adir = Path(probe_dir) / attempt["op"] / f"attempt-{attempt['attempt']}"
             hardware_phase(adir, attempt, env=env, shared_python=shared_python, run_watched=run_watched,
                            cancel=cancel)
@@ -1256,10 +1264,29 @@ def _group_lines(g: dict, rows: list[dict]) -> list[str]:
         first_line = a.get("first_line") if a.get("category") else (h or {}).get("first_line")
         lines.append("| " + " | ".join([
             _cell(a["attempt"]), "yes" if a.get("passed_sim") else "no",
-            "-" if h is None else ("yes" if h.get("passed") else "no"), _status_cell(a),
+            "-" if h is None else ("yes" if h.get("passed") else "no") + (" (hardware only)" if h.get("hardware_only") else ""),
+            _status_cell(a),
             _pcc_cell(a.get("pcc_min")), _pcc_cell((h or {}).get("pcc_min")), _cell(a.get("turns")),
             _cell(a.get("agent_wall_s")), _cell(category), _cell(first_line), _agent_cell(a)]) + " |")
     return lines + [""] + _distinct_lines(g)
+
+
+def _sim_gap_lines(gap: list[dict]) -> list[str]:
+    """What the report says about attempts the simulator could not judge (category `sim_gap`): a hardware result is
+    the only check they got, and a simulator pass is not claimed for them."""
+    ran = [a for a in gap if isinstance(a.get("hw"), dict)]
+    unrun = len(gap) - len(ran)
+    lines = []
+    if ran:
+        n = len(ran)
+        passed = sum(1 for a in ran if _hw_passed(a))
+        lines.append(f"hardware only: {n} attempt{'s' if n != 1 else ''} ({passed} passed on hardware); the simulator did "
+                     "not check these, because it lacks a ttl function they use. Each result is a hardware result alone.")
+    if unrun:
+        lines.append(f"{unrun} attempt{'s' if unrun != 1 else ''} used a function the simulator lacks a function for "
+                     "and was not run on hardware (the probe ran with --phase sim, or stopped first), so no check judged "
+                     "it.")
+    return lines
 
 
 def _bars_text(b: dict) -> str:
@@ -1448,6 +1475,9 @@ def write_report(probe_dir, attempts: list[dict], header: dict) -> dict:
         lines.append(f"attempts to first pass in the simulator: {f['sim']}" if f["sim"] is not None
                      else f"none of {len(rows)} attempts passed in the simulator")
         ran = [a for a in rows if isinstance(a.get("hw"), dict)]
+        gap = [a for a in rows if hardware_only(a)]
+        if gap:
+            lines += _sim_gap_lines(gap)
         if ran:
             # Count only the attempts that ran on hardware. When the probe stopped early, simulator passes that never
             # reached a chip are said to be left out.
