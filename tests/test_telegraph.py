@@ -52,8 +52,29 @@ def make(tmp_path, wire=None, environ=None, now=None, **kw):
 
 
 def records(tmp_path):
+    """The ledger's call, refusal and report lines. Budget reservations are internal and are left out."""
     p = tmp_path / "tg" / "telegraph.jsonl"
-    return [json.loads(x) for x in p.read_text().splitlines()] if p.exists() else []
+    rows = []
+    for line in (p.read_text().splitlines() if p.exists() else []):
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if "reserve" not in row:
+            rows.append(row)
+    return rows
+
+
+def worst_cost(body, price, max_out):
+    """The ceiling telegraph reserves for a request: its size in bytes plus framing as input, max_out as output."""
+    return ((len(json.dumps(body).encode()) + tg.REQUEST_FRAMING_TOKENS) * price[0] + max_out * price[1]) / 1e6
+
+
+def request_body_of(tmp_path, **kw):
+    """The body telegraph sends for ("p", "t", "f1") under these settings, taken from an uncapped run."""
+    probe, wire = make(tmp_path / "probe", **kw)
+    probe.ask("p", "t", "f1")
+    return wire.requests[0]["body"]
 
 
 # ------------------------------------------------------------------------------------------------ configuration
@@ -353,8 +374,12 @@ def test_the_token_cap_stops_the_next_call_once_the_total_is_reached(tmp_path):
 
 
 def test_the_cost_cap_needs_a_price_and_stops_when_spent(tmp_path):
-    tel, wire = make(tmp_path, max_cost_usd=0.0005, max_output_tokens=100, prices={"small": [1.0, 3.0], "big": [5.0, 15.0]})
-    assert tel.ask("p", "t", "f1").ok                               # 210 micro-dollars spent, up to 360 more
+    prices = {"small": [1.0, 3.0], "big": [5.0, 15.0]}
+    w = worst_cost(request_body_of(tmp_path, max_output_tokens=100, prices=prices), prices["small"], 100)
+    first_cost = 120e-6 + 90e-6
+    cap = w + first_cost / 2                                        # room for the first call, not for a second
+    tel, wire = make(tmp_path, max_cost_usd=cap, max_output_tokens=100, prices=prices)
+    assert tel.ask("p", "t", "f1").ok
     got = tel.ask("p", "t", "f2")
     assert not got.ok and "cost cap" in got.reason and len(wire.requests) == 1
 
@@ -401,15 +426,6 @@ def test_the_error_reason_never_echoes_the_key_even_if_the_server_does(tmp_path)
     got = tel.ask("p", "t", "f")
     assert KEY not in got.reason and "401" in got.reason
     assert KEY not in (tmp_path / "tg" / "telegraph.jsonl").read_text()
-
-
-def test_an_unwritable_ledger_directory_does_not_stop_the_answer(tmp_path):
-    blocker = tmp_path / "file"
-    blocker.write_text("x")
-    cfg = tg.load(table(), base=tmp_path)
-    tel = tg.Telegraph(cfg, blocker / "tg", transport=Wire(), environ={"TG_KEY": KEY})
-    got = tel.ask("p", "t", "f")
-    assert got.ok and got.text
 
 
 def test_the_reply_is_data_with_a_marker_that_says_it_is_not_to_be_run(tmp_path):
@@ -641,9 +657,11 @@ def test_the_token_cap_for_a_problem_stops_when_the_total_equals_it(tmp_path):
 
 
 def test_the_cost_cap_for_one_problem_looks_at_the_worst_case_of_the_next_call(tmp_path):
-    tel, wire = make(tmp_path, max_cost_per_problem_usd=0.0005, max_output_tokens=100, max_calls_per_problem=10,
-                     prices={"small": [1.0, 3.0], "big": [5.0, 15.0]})
-    assert tel.ask("a", "t", "f1").ok                               # 210 micro-dollars; the next could cost up to 350
+    prices = {"small": [1.0, 3.0], "big": [5.0, 15.0]}
+    w = worst_cost(request_body_of(tmp_path, max_output_tokens=100, prices=prices), prices["small"], 100)
+    cap = w + (120e-6 + 90e-6) / 2
+    tel, wire = make(tmp_path, max_cost_per_problem_usd=cap, max_output_tokens=100, max_calls_per_problem=10, prices=prices)
+    assert tel.ask("a", "t", "f1").ok                               # 210 micro-dollars spent; the next could cost up to w
     got = tel.ask("a", "t", "f2")
     assert not got.ok and "problem a" in got.reason and "cost cap" in got.reason and len(wire.requests) == 1
     assert tel.ask("b", "t", "f1").ok
@@ -798,3 +816,205 @@ def test_a_later_helped_verdict_for_a_call_undoes_its_earlier_not_helped(tmp_pat
     tel.report(first.call_id, helped=True)
     tel.ask("p", "t", "f2")
     assert [r["body"]["model"] for r in wire.requests] == ["small", "small"]
+
+
+# ------------------------------------------------------------------------------------------------ review of PR 106, group C
+
+def test_a_call_in_flight_is_counted_against_the_caps_of_a_second_process(tmp_path):
+    other = {}
+
+    def transport(url, headers, body, timeout):
+        # while this request is in flight, a second process asks: the first call's reservation must already count
+        other["got"] = other["tel"].ask("p", "t", "second question")
+        return 200, json.dumps(openai_reply("ok", 10, 10)).encode()
+    wire_b = Wire()
+    tel_b, _ = make(tmp_path, wire=wire_b, max_calls=1)
+    other["tel"] = tel_b
+    cfg = tg.load(table(max_calls=1), base=tmp_path)
+    tel_a = tg.Telegraph(cfg, tmp_path / "tg", transport=transport, environ={"TG_KEY": KEY})
+    assert tel_a.ask("p", "t", "first question").ok
+    assert not other["got"].ok and "call cap" in other["got"].reason and wire_b.requests == []
+
+
+def test_a_process_that_dies_during_a_request_still_leaves_its_reservation(tmp_path):
+    def dies(url, headers, body, timeout):
+        raise SystemExit(1)
+    cfg = tg.load(table(max_calls=1), base=tmp_path)
+    tel = tg.Telegraph(cfg, tmp_path / "tg", transport=dies, environ={"TG_KEY": KEY})
+    with pytest.raises(SystemExit):
+        tel.ask("p", "t", "f")
+    tel2, wire2 = make(tmp_path, max_calls=1)
+    got = tel2.ask("p", "t", "f2")
+    assert not got.ok and "call cap" in got.reason and wire2.requests == []
+    s = tg.summarise(tmp_path / "tg")
+    assert s["unsettled"] == 1
+
+
+def test_a_request_with_unknown_usage_counts_its_worst_case_against_a_cost_cap(tmp_path):
+    def times_out(url, headers, body, timeout):
+        raise TimeoutError("slow")
+    cfg = tg.load(table(max_cost_usd=0.005, max_output_tokens=1000, prices={"small": [1.0, 3.0], "big": [5.0, 15.0]}),
+                  base=tmp_path)
+    tel = tg.Telegraph(cfg, tmp_path / "tg", transport=times_out, environ={"TG_KEY": KEY})
+    assert not tel.ask("p", "t", "f1").ok                           # the provider may have processed it and billed it
+    got = tel.ask("p", "t", "f2")
+    assert not got.ok and "cost cap" in got.reason
+    assert tg.summarise(tmp_path / "tg")["unknown_usage_calls"] == 1
+
+
+def test_a_request_the_provider_rejected_before_processing_does_not_use_up_the_budget(tmp_path):
+    tel, wire = make(tmp_path, wire=Wire(status=401), max_cost_usd=0.005, max_output_tokens=1000,
+                     prices={"small": [1.0, 3.0], "big": [5.0, 15.0]})
+    assert not tel.ask("p", "t", "f1").ok
+    wire.status = 200
+    assert tel.ask("p", "t", "f2").ok
+
+
+def test_the_token_cap_counts_a_calls_reservation_when_its_usage_is_unknown(tmp_path):
+    def times_out(url, headers, body, timeout):
+        raise TimeoutError("slow")
+    cfg = tg.load(table(max_total_tokens=500, max_output_tokens=1000), base=tmp_path)
+    tel = tg.Telegraph(cfg, tmp_path / "tg", transport=times_out, environ={"TG_KEY": KEY})
+    tel.ask("p", "t", "f1")
+    got = tel.ask("p", "t", "f2")
+    assert not got.ok and "token cap" in got.reason
+
+
+def test_a_torn_last_line_is_not_glued_to_the_next_record(tmp_path):
+    tel, _ = make(tmp_path)
+    tel.ask("p", "t", "f1")
+    with open(tmp_path / "tg" / "telegraph.jsonl", "a") as f:
+        f.write('{"call_id": "half')                                # a write cut short
+    got = tel.ask("p", "t", "f2")
+    assert got.ok
+    s = tg.summarise(tmp_path / "tg")
+    assert s["calls"] == 2                                          # the call after the torn line is counted
+
+
+def test_an_unwritable_ledger_refuses_the_call_before_any_request(tmp_path):
+    blocker = tmp_path / "file"
+    blocker.write_text("x")
+    wire = Wire()
+    cfg = tg.load(table(), base=tmp_path)
+    tel = tg.Telegraph(cfg, blocker / "tg", transport=wire, environ={"TG_KEY": KEY})
+    got = tel.ask("p", "t", "f")
+    assert not got.ok and "cannot be written" in got.reason and wire.requests == []
+
+
+def test_a_read_only_ledger_directory_refuses_the_call(tmp_path):
+    import os
+    d = tmp_path / "tg"
+    d.mkdir()
+    d.chmod(0o500)
+    try:
+        if os.access(d, os.W_OK):
+            pytest.skip("this user can write to a read-only directory")
+        wire = Wire()
+        tel = tg.Telegraph(tg.load(table(), base=tmp_path), d, transport=wire, environ={"TG_KEY": KEY})
+        got = tel.ask("p", "t", "f")
+        assert not got.ok and "cannot be written" in got.reason and wire.requests == []
+    finally:
+        d.chmod(0o700)
+
+
+def test_the_input_bound_for_cost_counts_bytes_so_non_english_text_cannot_slip_under_the_cap(tmp_path):
+    # 3,000 four-byte characters: characters divided by three is about 1,000 tokens, the real bound is the 12,000 bytes
+    tel, wire = make(tmp_path, max_cost_usd=5.0, max_output_tokens=1, prices={"small": [1000.0, 0.0], "big": [1.0, 1.0]})
+    got = tel.ask("p", "\U0001F600" * 3000, "f")
+    assert not got.ok and "cost cap" in got.reason and wire.requests == []
+
+
+def test_the_input_bound_counts_extra_body_too(tmp_path):
+    tel, wire = make(tmp_path, max_cost_usd=0.01, max_output_tokens=1, prices={"small": [1000.0, 0.0], "big": [1.0, 1.0]},
+                     extra_body={"metadata": {"note": "x" * 4000}})
+    got = tel.ask("p", "t", "f")
+    assert not got.ok and "cost cap" in got.reason and wire.requests == []
+
+
+def test_reservations_and_settlements_are_one_call_in_the_summary(tmp_path):
+    tel, _ = make(tmp_path)
+    tel.ask("p", "t", "f1")
+    tel.ask("p", "t", "f2")
+    s = tg.summarise(tmp_path / "tg")
+    assert (s["calls"], s["unsettled"], s["unknown_usage_calls"]) == (2, 0, 0)
+    assert s["tokens_in"] == 240 and s["tokens_out"] == 60
+
+
+def test_two_processes_racing_for_the_last_allowed_call_cannot_both_send(tmp_path):
+    import threading, time
+
+    class Slow(tg.Telegraph):
+        def _over_budget(self, *a, **kw):                           # widen the window between the check and the reservation
+            out = super()._over_budget(*a, **kw)
+            time.sleep(0.05)
+            return out
+    wire = Wire()
+    cfg = tg.load(table(max_calls=1), base=tmp_path)
+    results = []
+
+    def go(i):
+        t = Slow(cfg, tmp_path / "tg", transport=wire, environ={"TG_KEY": KEY})
+        results.append(t.ask("p", "t", f"question {i}").ok)
+    threads = [threading.Thread(target=go, args=(i,)) for i in range(4)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+    assert results.count(True) == 1 and len(wire.requests) == 1
+
+
+def test_a_ledger_that_cannot_take_a_record_refuses_the_call(tmp_path):
+    (tmp_path / "tg").mkdir()
+    (tmp_path / "tg" / "telegraph.jsonl").mkdir()                   # the file the ledger needs is a directory
+    wire = Wire()
+    tel = tg.Telegraph(tg.load(table(), base=tmp_path), tmp_path / "tg", transport=wire, environ={"TG_KEY": KEY})
+    got = tel.ask("p", "t", "f")
+    assert not got.ok and "cannot be written" in got.reason and wire.requests == []
+
+
+def test_records_from_before_reservations_count_by_their_own_numbers(tmp_path):
+    (tmp_path / "tg").mkdir()
+    old = {"call_id": "old1", "problem": "p", "model": "small", "outcome": "ok", "cached": False,
+           "tokens_in": 100, "tokens_out": 50, "cost_usd": 0.001, "ts": 1.0, "latency_s": 1.0}
+    (tmp_path / "tg" / "telegraph.jsonl").write_text(json.dumps(old) + "\n")
+    tel, wire = make(tmp_path, max_calls=1)
+    got = tel.ask("p", "t", "f")
+    assert not got.ok and "call cap" in got.reason and wire.requests == []
+    tel2, _ = make(tmp_path, max_total_tokens=150, max_calls=5)
+    assert not tel2.ask("p", "t", "f").ok                           # 100 + 50 tokens are counted as they were written
+
+
+def test_an_answer_with_no_usage_counts_its_worst_case_against_a_cost_cap(tmp_path):
+    prices = {"small": [1.0, 3.0], "big": [5.0, 15.0]}
+    no_usage = {"choices": [{"message": {"content": "fine"}, "finish_reason": "stop"}]}
+    w = worst_cost(request_body_of(tmp_path, max_output_tokens=100, prices=prices), prices["small"], 100)
+    tel, wire = make(tmp_path, wire=Wire(lambda b: no_usage), max_cost_usd=w * 1.5, max_output_tokens=100, prices=prices)
+    assert tel.ask("p", "t", "f1").ok
+    assert tg.summarise(tmp_path / "tg")["unknown_usage_calls"] == 1
+    got = tel.ask("p", "t", "f2")                                    # the server billed something; w is the safe amount
+    assert not got.ok and "cost cap" in got.reason and len(wire.requests) == 1
+
+
+def test_a_reservation_written_after_a_torn_line_is_not_lost(tmp_path):
+    def dies(url, headers, body, timeout):
+        raise SystemExit(1)
+    (tmp_path / "tg").mkdir()
+    (tmp_path / "tg" / "telegraph.jsonl").write_text('{"call_id": "half')          # a write cut short, no line break
+    cfg = tg.load(table(max_calls=1), base=tmp_path)
+    tel = tg.Telegraph(cfg, tmp_path / "tg", transport=dies, environ={"TG_KEY": KEY})
+    with pytest.raises(SystemExit):
+        tel.ask("p", "t", "f1")                                      # leaves only a reservation behind
+    tel2, wire2 = make(tmp_path, max_calls=1)
+    got = tel2.ask("p", "t", "f2")
+    assert not got.ok and "call cap" in got.reason and wire2.requests == []
+
+
+def test_an_unreadable_answer_to_a_processed_request_counts_its_worst_case(tmp_path):
+    prices = {"small": [1.0, 3.0], "big": [5.0, 15.0]}
+    w = worst_cost(request_body_of(tmp_path, max_output_tokens=100, prices=prices), prices["small"], 100)
+    tel, wire = make(tmp_path, wire=Wire(lambda b: b"not json at all"), max_cost_usd=w * 1.5, max_output_tokens=100,
+                     prices=prices)
+    assert not tel.ask("p", "t", "f1").ok                            # the provider answered, so it may have billed
+    assert tg.summarise(tmp_path / "tg")["unknown_usage_calls"] == 1
+    got = tel.ask("p", "t", "f2")
+    assert not got.ok and "cost cap" in got.reason and len(wire.requests) == 1

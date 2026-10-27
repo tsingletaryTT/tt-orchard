@@ -158,6 +158,14 @@ def test_check_ping_of_a_transport_error_exits_2_without_a_traceback(tmp_path):
 
 # ------------------------------------------------------------------------------------------------ ask, report, usage
 
+def first_call_id(directory):
+    """The id of the first call in a ledger (the lines before it are budget reservations)."""
+    for line in (Path(directory) / "telegraph.jsonl").read_text().splitlines():
+        row = json.loads(line)
+        if "call_id" in row:
+            return row["call_id"]
+
+
 def files(tmp_path):
     (tmp_path / "task.txt").write_text("write a softmax kernel")
     (tmp_path / "fail.txt").write_text("Deadlock detected")
@@ -196,7 +204,7 @@ def test_report_and_usage_round_trip(tmp_path):
     d, cfg = str(tmp_path / "d"), str(write(tmp_path))
     run(["ask", "--problem", "p", *files(tmp_path), "--dir", d, "--telegraph-config", cfg], tmp_path,
         transport=ok_transport())
-    call_id = json.loads((tmp_path / "d" / "telegraph.jsonl").read_text().splitlines()[0])["call_id"]
+    call_id = first_call_id(tmp_path / "d")
     assert run(["report", call_id, "--helped", "--dir", d, "--telegraph-config", cfg], tmp_path)[0] == 0
     code, text = run(["usage", "--dir", d, "--telegraph-config", cfg], tmp_path)
     assert code == 0 and "calls: 1" in text and "helped: 1" in text and "tokens: 100 in, 20 out" in text
@@ -229,7 +237,7 @@ def test_report_not_helped_is_recorded_as_not_helped(tmp_path):
     d, cfg = str(tmp_path / "d"), str(write(tmp_path))
     run(["ask", "--problem", "p", *files(tmp_path), "--dir", d, "--telegraph-config", cfg], tmp_path,
         transport=ok_transport())
-    call_id = json.loads((tmp_path / "d" / "telegraph.jsonl").read_text().splitlines()[0])["call_id"]
+    call_id = first_call_id(tmp_path / "d")
     assert run(["report", call_id, "--not-helped", "--dir", d, "--telegraph-config", cfg], tmp_path)[0] == 0
     text = run(["usage", "--dir", d, "--telegraph-config", cfg], tmp_path)[1]
     assert "helped: 0, did not help: 1" in text and "problem p: 1 calls, 0 helped" in text
