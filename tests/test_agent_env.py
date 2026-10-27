@@ -204,3 +204,26 @@ def test_bad_tool_calls_get_an_answer_and_raise_nothing(run):
     assert t.call("shell", "[1]").startswith("error:")
     assert t.call("browse", "{}").startswith("error: there is no tool")
     assert t.call("shell", '{"command": ""}').startswith("error:")
+
+
+# ---- read_file answers an argument it does not know (0.9.36) ---------------------------------------------------------
+# The generic read_file used to drop any argument but path and offset. A model that sent `limit`, a count of lines, got
+# a page in characters and no word that its limit was ignored.
+
+def test_the_generic_read_file_names_its_arguments_when_given_a_limit(run):
+    (run / "stages" / "0" / "big.txt").write_text("a" * 500 + "b" * 500)
+    out = tools(run, limit=100).call("read_file", '{"path": "big.txt", "offset": 0, "limit": 20}')
+    assert out.startswith("error:")
+    assert "'limit'" in out and "path" in out and "offset" in out and "characters" in out
+
+
+def test_the_generic_read_file_names_every_unknown_argument(run):
+    (run / "stages" / "0" / "big.txt").write_text("x" * 50)
+    out = tools(run).call("read_file", '{"path": "big.txt", "lines": 5, "limit": 2}')
+    assert out.startswith("error:") and "'limit'" in out and "'lines'" in out
+
+
+def test_the_generic_read_file_still_reads_with_path_and_offset(run):
+    (run / "stages" / "0" / "big.txt").write_text("a" * 500 + "b" * 500)
+    assert tools(run, limit=100).call("read_file", '{"path": "big.txt", "offset": 500}').startswith("b" * 100)
+    assert tools(run).call("read_file", '{"path": "big.txt"}').startswith("a" * 500)
