@@ -2477,3 +2477,11 @@ recommended approval after seeing only the two version files, so the instruction
 - Not known: which file Copilot counts. The error names `.github/copilot-instructions.md`, `AGENTS.md` and similar, and none of those exist here. `CLAUDE.md` is the only large
   instruction-like file, and the failure and the thin reviews fit it. If the next review still fails, the cause is elsewhere (an organisation setting).
 - Open branches that append to `CLAUDE.md` will conflict. Their entries belong at the end of `docs/project-log.md`.
+
+## 2026-10-27 (UTC): a gated model already on disk passes the hub row (issue 119, branch `gated-local-snapshot`, version 0.9.14)
+Prompt (parent session): `bringup stabilityai/stable-audio-3-small-music --dry-run` blocked with `credentials-needed` although the operator had downloaded the model. The hub row looked at the hub only, and the local-snapshot check required `config.json`, which this repo does not have (`model_config.json`, one `model.safetensors`, a component directory).
+- `check_hub` takes the snapshot path. A gated repo passes with a warning when every weight file the hub's file list names is behind a readable link; the warning names the revision found on disk and says when it is not the hub's current one. License and code-file rules still apply. A private repo, a gated repo that is not on disk, and a gated repo with a listed weight missing keep the existing block and message. No token is used.
+- `snapshot_complete`: a config file (`config.json` or `model_config.json`), at least one readable weight, no dangling weight link, and every shard of every weight index (at any depth) present; a malformed index makes the copy incomplete. The run's model input is that snapshot path, so the revision is in the run's record.
+- Real dry run on this machine: the hub row is a warning naming revision 8bdfb53c6b0f; the run still stops later on the base bundle, as expected.
+- Tests first (`tests/test_preflight_gated_local.py`, 17). 20 mutations; 3 survived the first table (the `.bin` pattern, nested index files, the newest-snapshot choice) and each got a test; all red now.
+- Not done: a gated repo whose file list the hub hides falls back to the on-disk checks only; a copy from an older revision is accepted with a note.

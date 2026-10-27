@@ -97,3 +97,36 @@ def test_the_run_passes_the_disk_snapshot_to_the_hub_check(tmp_path):
     out = pf.run_preflight(cfg(tmp_path), "stabilityai/audio", accept_credentials=False, signals=s)
     row = next(c for c in out if c.name == "hub")
     assert row.status == "warn" and "8bdfb53c6b0f" in row.detail
+
+
+def test_a_copy_that_is_not_the_hubs_current_revision_says_so(tmp_path):
+    snap = _audio_snap(tmp_path, rev="1111111111aa")
+    h = _gated_hub(["model.safetensors"], sha="2222222222bb")
+    c = pf.check_hub(h, None, local=True, local_path=snap)
+    assert c.status == "warn" and "1111111111aa" in c.detail and "222222222222"[:10] in c.detail and "not the newest" in c.detail
+
+
+def test_a_copy_at_the_hubs_current_revision_has_no_newest_note(tmp_path):
+    snap = _audio_snap(tmp_path, rev="2222222222bb")
+    h = _gated_hub(["model.safetensors"], sha="2222222222bb")
+    assert "not the newest" not in pf.check_hub(h, None, local=True, local_path=snap).detail
+
+
+def test_a_listed_pytorch_bin_weight_that_is_missing_blocks_a_gated_model(tmp_path):
+    snap = _audio_snap(tmp_path)
+    h = _gated_hub(["model.safetensors", "pytorch_model.bin"])
+    assert pf.check_hub(h, None, local=True, local_path=snap).reason == "credentials-needed"
+    (snap / "pytorch_model.bin").write_text("w")
+    assert pf.check_hub(h, None, local=True, local_path=snap).status == "warn"
+
+
+def test_a_weight_index_in_a_component_directory_with_a_missing_shard_makes_it_not_local(tmp_path):
+    snap = _audio_snap(tmp_path)
+    (snap / "t5" / "model.safetensors.index.json").write_text('{"weight_map": {"a": "part-2.safetensors"}}')
+    assert real(tmp_path).local_snapshot("stabilityai/audio") is None
+
+
+def test_the_newest_complete_snapshot_is_used(tmp_path):
+    old = _audio_snap(tmp_path, rev="aaaa")
+    new = _audio_snap(tmp_path, rev="zzzz")
+    assert real(tmp_path).local_snapshot("stabilityai/audio") == new != old

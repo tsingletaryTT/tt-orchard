@@ -115,6 +115,8 @@ def check_hub(hub: HubInfo | None, error: str | None, local: bool, local_path: P
                          "credentials-needed")
         on_disk = (f"{hub.id} is gated; the harness does not use a token. A complete copy was found on disk at revision "
                    f"{Path(local_path).name[:12]} and is used")
+        if hub.sha and not Path(local_path).name.startswith(hub.sha[:8]):
+            on_disk += f" (the hub's current revision is {hub.sha[:12]}, so the copy is not the newest)"
     if not hub.license and not hub.has_license_file:
         return Check("hub", BLOCK, "the model has no license in its card and no license file; a person "
                      "must read what it allows", "license-needs-review")
