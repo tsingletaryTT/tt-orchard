@@ -177,13 +177,15 @@ def test_a_file_rewritten_to_the_same_size_during_the_read_is_refused(tmp_path, 
 
 
 def test_a_size_change_is_caught_even_when_the_modification_time_is_put_back(tmp_path, monkeypatch):
+    """The bytes read are all that the file held, and the file grows only after the read that found the end. Only the comparison of
+    the size before and after can see that."""
     path = write(tmp_path / "f.json", b"12")
     real_read, state = os.read, {"n": 0}
 
     def read(fd, n):
         data = real_read(fd, n)
         state["n"] += 1
-        if state["n"] == 1:
+        if state["n"] == 2:                                   # the read that returned end of file
             st = os.stat(path)
             with open(path, "ab") as f:
                 f.write(b"3")
