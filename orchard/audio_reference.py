@@ -62,6 +62,76 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+def _sha256_capped(path: Path, label: str) -> str:
+    """The sha256 of an array file, opened without following a link and read in chunks that are counted, so a file over MAX_ARRAY_BYTES is refused
+    before any more of it is hashed, even when it grows after the size check."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as exc:
+        raise ReferenceError(f"{label} cannot be opened (a link, or missing): {exc}") from exc
+    total = 0
+    with os.fdopen(fd, "rb") as f:
+        if os.fstat(f.fileno()).st_size > MAX_ARRAY_BYTES:
+            raise ReferenceError(f"{label} is larger than {MAX_ARRAY_BYTES} bytes")
+        h = hashlib.sha256()
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            total += len(chunk)
+            if total > MAX_ARRAY_BYTES:
+                raise ReferenceError(f"{label} is larger than {MAX_ARRAY_BYTES} bytes")
+            h.update(chunk)
+    return h.hexdigest()
+
+
+MAX_JSON_DEPTH = 32
+MAX_INT_DIGITS = 30
+
+
+def _strict_pairs(pairs):
+    out = {}
+    for key, value in pairs:
+        if key in out:
+            raise ValueError(f"duplicate key {key!r}")
+        out[key] = value
+    return out
+
+
+def _no_constant(name):
+    raise ValueError(f"the non-finite number {name} is not allowed")
+
+
+def _strict_float(text):
+    value = float(text)
+    if not math.isfinite(value):
+        raise ValueError(f"the number {text} is not finite")
+    return value
+
+
+def _strict_int(text):
+    if len(text.lstrip("-")) > MAX_INT_DIGITS:
+        raise ValueError(f"an integer of more than {MAX_INT_DIGITS} digits is not allowed")
+    return int(text)
+
+
+def strict_loads(text: str):
+    """json.loads that refuses a repeated key (the last one would win and hide the first), NaN and infinity, integers of more than MAX_INT_DIGITS
+    digits and nesting deeper than MAX_JSON_DEPTH. Raises ValueError."""
+    try:
+        data = json.loads(text, object_pairs_hook=_strict_pairs, parse_constant=_no_constant, parse_float=_strict_float, parse_int=_strict_int)
+    except RecursionError:
+        raise ValueError("nested too deeply") from None
+    deepest, stack = 0, [(data, 1)]
+    while stack:
+        item, d = stack.pop()
+        children = item.values() if isinstance(item, dict) else item if isinstance(item, list) else None
+        if children is None:
+            continue
+        deepest = max(deepest, d)
+        stack.extend((c, d + 1) for c in children)
+    if deepest > MAX_JSON_DEPTH:
+        raise ValueError(f"nested more than {MAX_JSON_DEPTH} levels deep")
+    return data
+
+
 class Recorder:
     """Writes arrays and the manifest of one run. Nothing is overwritten: a second array with the same kind and name is an error, and an
     existing manifest is never replaced."""
@@ -108,6 +178,8 @@ class Recorder:
         try:
             with os.fdopen(fd, "wb") as f:
                 np.save(f, arr, allow_pickle=False)
+            if os.path.getsize(tmp) > MAX_ARRAY_BYTES:
+                raise ReferenceError(f"{kind}/{name} would be a file larger than {MAX_ARRAY_BYTES} bytes, which the loader refuses")
             os.replace(tmp, self.root / rel)
         finally:
             if os.path.exists(tmp):
@@ -164,7 +236,12 @@ class Run:
             raise ReferenceError(f"{e['file']} is larger than {MAX_ARRAY_BYTES} bytes")
         if hashlib.sha256(data).hexdigest() != e["sha256"]:
             raise ReferenceError(f"{e['file']} does not match its sha256 in the manifest")
-        arr = np.load(io.BytesIO(data), allow_pickle=False)
+        try:
+            arr = np.load(io.BytesIO(data), allow_pickle=False)
+        except Exception as exc:                  # a payload that is not an .npy array raises ValueError, OSError, EOFError or a zip error
+            raise ReferenceError(f"{e['file']} is not a readable array: {type(exc).__name__}: {str(exc)[:120]}") from exc
+        if not isinstance(arr, np.ndarray):
+            raise ReferenceError(f"{e['file']} is not a readable array: it decoded to {type(arr).__name__}, not an ndarray")
         if list(arr.shape) != e["shape"] or str(arr.dtype) != e["dtype"]:
             raise ReferenceError(f"{e['file']} has shape {list(arr.shape)} and dtype {arr.dtype}; the manifest says {e['shape']} and {e['dtype']}")
         return arr
@@ -178,7 +255,7 @@ def load_run(directory, *, verify: bool = True) -> Run:
     try:
         if mpath.is_symlink() or mpath.stat().st_size > MAX_MANIFEST_BYTES:
             raise ReferenceError(f"{mpath} is a link or larger than {MAX_MANIFEST_BYTES} bytes")
-        manifest = json.loads(mpath.read_text(encoding="utf-8"))
+        manifest = strict_loads(mpath.read_text(encoding="utf-8"))
     except OSError as exc:
         raise ReferenceError(f"cannot read {mpath}: {exc}") from exc
     except ValueError as exc:
@@ -211,7 +288,7 @@ def load_run(directory, *, verify: bool = True) -> Run:
         path = root / e["file"]
         if path.is_symlink() or not path.is_file() or path.resolve().parent != arrays_dir:
             raise ReferenceError(f"{e['file']} is missing, a link, or outside {ARRAYS}/")
-        if verify and _sha256(path) != e["sha256"]:
+        if verify and _sha256_capped(path, e["file"]) != e["sha256"]:
             raise ReferenceError(f"{e['file']} does not match its sha256 in the manifest")
         entries[(e["kind"], e["name"])] = e
     return Run(root, manifest, entries)
