@@ -1063,7 +1063,7 @@ def writes_good_kernel_once():
 
 
 def test_main_refuses_an_unknown_op_and_runs_nothing(tmp_path, fake_kenv, env_ready, capsys):
-    code = kp.main(probe_args(tmp_path, op="softmax"), env=fake_kenv, out=io.StringIO(),
+    code = kp.main(probe_args(tmp_path, op="conv2d"), env=fake_kenv, out=io.StringIO(),
                    probe=lambda e, m: True, run_watched_fn=no_run)
     assert code == 2 and env_ready == [] and not (tmp_path / "out").exists()
     assert "unknown op" in capsys.readouterr().err

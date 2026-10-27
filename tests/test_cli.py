@@ -910,7 +910,7 @@ def _fake_probe_main(monkeypatch):
 def test_kernel_probe_refuses_an_unknown_op_and_calls_nothing(monkeypatch, tmp_path, capsys):
     calls = _fake_probe_main(monkeypatch)
     with pytest.raises(SystemExit) as info:
-        cli.main(["kernel-probe", "--op", "softmax"], env={"HOME": str(tmp_path)}, stdout=io.StringIO())
+        cli.main(["kernel-probe", "--op", "conv2d"], env={"HOME": str(tmp_path)}, stdout=io.StringIO())
     assert info.value.code == 2 and calls == []
     assert "invalid choice" in capsys.readouterr().err
 
