@@ -1128,3 +1128,40 @@ def test_a_budget_that_covers_every_folder_listing_is_complete(root, monkeypatch
     monkeypatch.setattr(vs, "MAX_WALK_ENTRIES", 3)
     s = vs.scan(root)
     assert s["complete"] is True and s["turns"] == 1 and s["skipped"]["walk_cut"] == 0
+
+
+# ---- review (sixth round): folders below the depth limit are recorded, and the scan is incomplete ----------------------------
+
+def test_a_log_below_the_depth_limit_marks_the_scan_incomplete_and_says_so(root, monkeypatch):
+    monkeypatch.setattr(vs, "MAX_DEPTH", 2)
+    write_log(root, "a/log/run.jsonl", [turn(1, 5, 1)])
+    write_log(root, "a/b/c/log/run.jsonl", [turn(1, 7, 1)])                  # below the limit
+    s = vs.scan(root)
+    assert (s["turns"], s["prompt_tokens"]) == (1, 5)
+    assert s["complete"] is False and s["skipped"]["depth_cut"] >= 1
+    assert "folders below the depth limit" in vs.skipped_text(s["skipped"])
+
+
+def test_every_omitted_folder_below_the_limit_is_counted(root, monkeypatch):
+    monkeypatch.setattr(vs, "MAX_DEPTH", 1)
+    for name in ("x", "y", "z"):
+        write_log(root, f"top/{name}/log/run.jsonl", [turn()])
+    s = vs.scan(root)
+    assert s["skipped"]["depth_cut"] == 3
+
+
+def test_a_tree_that_stays_within_the_depth_limit_is_complete(root, monkeypatch):
+    monkeypatch.setattr(vs, "MAX_DEPTH", 3)
+    write_log(root, "a/b/log/run.jsonl", [turn()])
+    s = vs.scan(root)
+    assert s["complete"] is True and s["skipped"]["depth_cut"] == 0 and s["turns"] == 1
+
+
+def test_a_folder_exactly_at_the_depth_limit_with_no_subfolders_is_complete(root, monkeypatch):
+    monkeypatch.setattr(vs, "MAX_DEPTH", 2)
+    write_log(root, "a/log/run.jsonl", [turn()])                              # log is at depth 2 and has no subfolders
+    assert vs.scan(root)["complete"] is True
+
+
+def test_the_default_depth_limit_is_eight():
+    assert vs.MAX_DEPTH == 8

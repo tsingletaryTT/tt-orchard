@@ -142,7 +142,7 @@ def cost(prompt_tokens: int, completion_tokens: int, price_in: float, price_out:
 
 def _skipped() -> dict:
     return {"malformed_lines": 0, "no_usage": 0, "helper_turns": 0, "long_lines": 0, "long_unverified": 0, "not_utf8_lines": 0,
-            "unreadable_files": 0, "oversize_files": 0, "files_not_read": 0, "walk_cut": 0, "links": 0}
+            "unreadable_files": 0, "oversize_files": 0, "files_not_read": 0, "walk_cut": 0, "depth_cut": 0, "links": 0}
 
 
 def _count(value) -> int | None:
@@ -503,6 +503,8 @@ def _walk(pin: "_Pin", skipped: dict):
             if is_dir:
                 if depth < MAX_DEPTH:
                     subdirs.append(name)
+                else:
+                    skipped["depth_cut"] += 1                        # logs below the limit are not read: the scan is incomplete
                 continue
             kind = _log_kind(name, in_log)
             if kind is None:
@@ -634,7 +636,8 @@ def _scan_tree(root: Path, pin: _Pin, out: dict, skipped: dict) -> None:
                 wall_known = True
     out["agent_wall_s"] = round(wall, 1) if wall_known else None
     out["request_s"] = round(request_s, 1) if request_known else None
-    out["complete"] = not (skipped["oversize_files"] or skipped["files_not_read"] or skipped["walk_cut"])
+    out["complete"] = not (skipped["oversize_files"] or skipped["files_not_read"] or skipped["walk_cut"]
+                         or skipped["depth_cut"])
 
 
 def priced(scanned: dict, cfg: Config) -> dict:
@@ -650,7 +653,7 @@ def skipped_text(skipped: dict) -> str:
     names = {"malformed_lines": "lines that are not JSON", "no_usage": "turns with no token counts",
              "helper_turns": "turns from an outside helper", "long_lines": "lines over the size cap", "long_unverified": "lines over the size cap that do not start like an agent turn",
              "not_utf8_lines": "lines with bytes that are not UTF-8", "unreadable_files": "files that could not be read",
-             "oversize_files": "files or folders over the read cap", "files_not_read": "files past the file cap", "walk_cut": "directory entries past the walk budget",
+             "oversize_files": "files or folders over the read cap", "files_not_read": "files past the file cap", "walk_cut": "directory entries past the walk budget", "depth_cut": "folders below the depth limit",
              "links": "links that were not followed"}
     parts = [f"{skipped[k]} {names[k]}" for k in names if skipped.get(k)]
     return ("Left out: " + ", ".join(parts) + ".") if parts else ""
