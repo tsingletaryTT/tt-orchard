@@ -404,6 +404,14 @@ def _run(db: Database, dir_fd: int, scope: str, max_output_tokens: int, accept_m
                                "restore a backup with `tt-orchard db restore` and run this again")
     if live in ("link", "other") or (live == "dir" and phase is None):
         raise MigrationRefused(f"{ts.LEDGER} is a {live}; it has to be a ledger file (or absent) before the migration starts")
+    if migrating:                                                               # a resume must go to the scope the start named
+        try:
+            started = safeio.read_json(ts.MARKER_MIGRATING, max_bytes=65536, anchor=dir_fd, expect=dict)
+        except safeio.SafeReadError as exc:
+            raise MigrationRefused(f"{ts.MARKER_MIGRATING} cannot be read ({exc}); a person has to look at the directory") from exc
+        if started.get("scope") != scope:
+            raise MigrationRefused(f"a migration of this directory was started for scope {started.get('scope')}; run it again with "
+                                   f"--scope {started.get('scope')} to finish it (this run is for scope {scope})")
     result: dict = {"status": "migrated", "resumed": resumed, "scope": scope}
     fresh = phase is None and not migrating
     if phase is None:

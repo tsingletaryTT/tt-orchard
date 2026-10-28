@@ -324,6 +324,10 @@ def cut(text: str, limit: int) -> str:
     return text[:head] + marker + text[len(text) - (room - head):]
 
 
+REPLY_SCOPE_PREFIX = "s~"                    # the folder of a non-default scope under replies/
+REDACTION_EXPANSION = len("[redacted]")      # the most one character can become: a one-character secret replaced by "[redacted]"
+
+
 def worst_case_call(cfg: Config) -> tuple[int, float | None]:
     """(tokens, dollars) that one call could have cost at most under `cfg`, never less than a reservation can be. The input is the
     largest request the settings allow: a full-length prompt of characters that JSON escapes to twelve bytes, the request body each
@@ -334,10 +338,13 @@ def worst_case_call(cfg: Config) -> tuple[int, float | None]:
     extra = len(json.dumps(cfg.extra_body))
     biggest = 0
     for api in APIS:
-        probe = Telegraph(dataclasses.replace(cfg, api=api), "/nonexistent", environ={}, hostname="", home="")
+        # The body without `extra_body`: the prompt (already cut after redaction), the fixed text and the model. `extra_body` is added at
+        # its worst: redaction replaces each character of a one-character key (or each one-character host name) with up to ten, so the
+        # extra part is counted at ten times its size.
+        probe = Telegraph(dataclasses.replace(cfg, api=api, extra_body={}), "/nonexistent", environ={}, hostname="", home="")
         for model in cfg.models or ("",):
             body = probe._request(model, prompt, None)[2]
-            biggest = max(biggest, len(json.dumps(body).encode("utf-8")) + 2 * extra + 1024)
+            biggest = max(biggest, len(json.dumps(body).encode("utf-8")) + REDACTION_EXPANSION * extra + 1024)
     worst_in = biggest + REQUEST_FRAMING_TOKENS
     tokens = worst_in + cfg.max_output_tokens
     if not cfg.models or any(m not in cfg.prices for m in cfg.models):
@@ -514,6 +521,13 @@ class Telegraph:
         return self.cfg.enabled and consecutive_failures >= self.cfg.after_failures
 
     # ------------------------------------------------------------------------------------------- the ask
+
+    def _reply_name(self, call_id: str) -> str:
+        """Where a reply file goes. The default scope keeps `replies/<id>.txt`; another scope has its own folder, so a reply with no ledger
+        record can be charged to the scope that made it (`tt-orchard db confirm-restore`)."""
+        if self.scope == DEFAULT_SCOPE:
+            return f"replies/{call_id}.txt"
+        return f"replies/{REPLY_SCOPE_PREFIX}{urllib.parse.quote(self.scope, safe='')}/{call_id}.txt"
 
     def _store(self) -> store_mod.TelegraphStore:
         """The ledger of this scope. It is opened for one operation and closed after it, so no lock is held across a request."""
@@ -738,7 +752,7 @@ class Telegraph:
         tout = usage[1] if usage else len(text) // 3
         price = self.cfg.prices.get(model)
         cost = None if estimated else (round(tin * price[0] / 1e6 + tout * price[1] / 1e6, 9) if price else None)
-        reply_file = f"replies/{base['call_id']}.txt"
+        reply_file = self._reply_name(base["call_id"])
         self._write(self.dir / reply_file, text)
         # The settlement and the cache row are one transaction: the answer is cached only together with its call, so it can be
         # reported.

@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import urllib.parse
 from pathlib import Path
 
 from orchard import db as dbm
@@ -32,23 +33,45 @@ from orchard import telegraph_store as ts
 EXIT_OK, EXIT_PROBLEM = 0, 2
 
 
-def reply_ids(directory) -> list[str]:
-    """The call ids of the reply files (`replies/<call_id>.txt`) in a state directory: regular files only, links never followed."""
-    try:
-        with safeio.pinned_root(Path(directory) / "replies") as pin:
-            names = os.listdir(pin.fd)
-            out = []
-            for name in sorted(names):
-                if not name.endswith(".txt"):
-                    continue
+def reply_ids_by_scope(directory) -> dict[str, list[str]]:
+    """The call ids of the reply files of a state directory, grouped by the scope that made them: `replies/<id>.txt` is the default scope
+    and `replies/s~<quoted scope>/<id>.txt` is another. Regular files only; no link is followed and a huge folder is refused."""
+    out: dict[str, list[str]] = {}
+
+    def collect(fd) -> list[str]:
+        ids = []
+        for name in sorted(mig._listdir(fd)):
+            if name.endswith(".txt"):
                 try:
-                    if stat.S_ISREG(os.stat(name, dir_fd=pin.fd, follow_symlinks=False).st_mode):
-                        out.append(name[:-4])
+                    if stat.S_ISREG(os.stat(name, dir_fd=fd, follow_symlinks=False).st_mode):
+                        ids.append(name[:-4])
                 except OSError:
                     continue
-            return out
+        return ids
+
+    try:
+        with safeio.pinned_root(Path(directory) / "replies") as pin:
+            top = collect(pin.fd)
+            if top:
+                out[ts.DEFAULT_SCOPE] = top
+            for name in sorted(mig._listdir(pin.fd)):
+                if not name.startswith(tg.REPLY_SCOPE_PREFIX):
+                    continue
+                try:
+                    with pin.child([name]) as sub:
+                        ids = collect(sub.fd)
+                except safeio.SafeReadError:
+                    continue
+                if ids:
+                    out[urllib.parse.unquote(name[len(tg.REPLY_SCOPE_PREFIX):])] = ids
     except safeio.SafeReadError:
-        return []
+        return {}
+    return out
+
+
+def reply_ids(directory) -> list[str]:
+    """The default scope's reply ids (see `reply_ids_by_scope`)."""
+    return reply_ids_by_scope(directory).get(ts.DEFAULT_SCOPE, [])
 
 
 def main(args, *, out, environ=None, home=None) -> int:
@@ -198,8 +221,9 @@ def _confirm(directory, scope, cfg, args, say) -> int:
         say(f"the ledger is unconfirmed: {reason or (marker or {}).get('reason')}")
         if not getattr(args, "no_replies", False):
             tokens, cost = tg.worst_case_call(cfg)
-            store = ts.TelegraphStore(db, scope, guard=False)
-            added = store.add_recovered_reservations(reply_ids(directory), tokens, cost)
+            added = 0
+            for reply_scope, ids in sorted(reply_ids_by_scope(directory).items()):       # each reply goes to the scope that made it
+                added += ts.TelegraphStore(db, reply_scope, guard=False).add_recovered_reservations(ids, tokens, cost)
             say(f"{added} reply file(s) had no ledger record; each was added as an unsettled reservation at the worst case "
                 f"({tokens} tokens" + (f", up to ${cost:.4f}" if cost is not None else ", cost unknown") + "), so the counted spend only goes up")
         db.confirm_reconciled(note)

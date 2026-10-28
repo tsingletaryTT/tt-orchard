@@ -101,7 +101,7 @@ def _config(args, environ, home):
     tables_path = Path(explicit) if explicit else bringup_path
     if tables_path is None:
         try:
-            return vs.Config(), telegraph_cmd.resolve_directory(None, tg.Config(), environ, home), None, problem
+            return vs.Config(), telegraph_cmd.resolve_directory(getattr(args, "dir", None), tg.Config(), environ, home), None, problem
         except tg.ConfigError as exc:
             return None, None, None, str(exc)
     try:
@@ -122,7 +122,7 @@ def _config(args, environ, home):
             continue
         break
     try:
-        ledger = telegraph_cmd.resolve_directory(None, tcfg, environ, home)    # the same choice the ask command makes
+        ledger = telegraph_cmd.resolve_directory(getattr(args, "dir", None), tcfg, environ, home)    # the choice the ask command makes
     except tg.ConfigError as exc:
         return None, None, None, str(exc)
     return vcfg, ledger, runs_root, problem

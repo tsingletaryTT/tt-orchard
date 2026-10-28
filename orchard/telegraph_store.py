@@ -308,6 +308,13 @@ class TelegraphStore:
 
 # ------------------------------------------------------------------------------------------------ read only (pages)
 
+def _refuse_if_it_existed(ro) -> None:
+    """A directory that wrote `INITIALIZED` had a ledger. With the database gone, an empty answer would be a wrong zero."""
+    if ro.exists_name(dbm.INIT_NAME) is not None:
+        raise LedgerRefused("the database file is missing although this directory had a ledger before (INITIALIZED is there); "
+                            "restore a backup with `tt-orchard db restore` or look for project.db.corrupt-* files")
+
+
 def read_snapshot(directory, scope: str = DEFAULT_SCOPE) -> Snapshot:
     """The records of a directory's ledger for a page or a report, in one read transaction, without creating, migrating or
     moving anything. A directory with no database and no legacy ledger is an empty history. Raises LedgerUnavailable or
@@ -322,6 +329,7 @@ def read_snapshot(directory, scope: str = DEFAULT_SCOPE) -> Snapshot:
                 raise LedgerRefused("this directory was migrated, but the database file is missing; restore a backup")
             if ro.marker() is not None:
                 raise LedgerRefused("the database file is missing and a recovery is pending")
+            _refuse_if_it_existed(ro)
             return Snapshot([], None, present=False)
         with ro.read() as conn:
             def meta(key):
@@ -380,6 +388,7 @@ def read_export_lines(directory, scope: str = DEFAULT_SCOPE) -> list[str]:
     ro = ReadOnlyDatabase(directory)
     try:
         if not ro.exists:
+            _refuse_if_it_existed(ro)
             return []
         with ro.read() as conn:
             return [raw for (raw,) in conn.execute("SELECT raw_json FROM telegraph_events WHERE scope = ? ORDER BY seq", (scope,))]

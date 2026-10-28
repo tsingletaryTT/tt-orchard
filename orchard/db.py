@@ -211,6 +211,12 @@ def _exists(dir_fd: int, name: str) -> bool:
         raise LedgerUnavailable(f"cannot look at {name}: {exc.strerror}") from exc
 
 
+def ro_uri(path) -> str:
+    """A SQLite URI that opens `path` read-only. The path is percent-encoded (`Path.as_uri`), so a `#`, a `?` or a `%` in a directory name
+    cannot change which file is opened or cut the `mode=ro` off. Every URI connection in this module goes through here."""
+    return Path(os.path.abspath(os.fspath(path))).as_uri() + "?mode=ro"
+
+
 def _lock_file(dir_fd: int, name: str, how: int, timeout_s: float, *, create: bool) -> int:
     """Open a lock file under a directory descriptor and take `how` (a flock) without blocking for longer than `timeout_s`. With
     `create` False a missing lock file gives -1 (a reader never creates one). Returns the descriptor; closing it releases the lock."""
@@ -310,6 +316,14 @@ class Database:
                     self._conn_main = self._open_checked()
                     self._local.conn = self._conn_main
                     self._register(self._conn_main)
+                    if has_history and self.user_version() == 0:
+                        # A zero-byte file, or a fresh valid one, where a ledger used to be. SQLite accepts it as an empty database,
+                        # which would be a confirmed history with no spend in it. It goes through the marked recovery instead.
+                        with self._conns_lock:
+                            self._conns.remove(self._conn_main)
+                        self._conn_main.close()
+                        self._local.conn = None
+                        raise _Corrupt("the database has no schema although this directory had a ledger before")
                 except _Corrupt as exc:
                     self._recover(f"the database was damaged ({exc})", move=True, keep_wal=keep)
                     keep = None
@@ -674,7 +688,7 @@ class Database:
         try:
             fd = os.open(partial, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | _O_CLOEXEC, 0o600, dir_fd=self._dirfd)
             os.close(fd)
-            src = sqlite3.connect(f"file:{backup_path}?mode=ro", uri=True, isolation_level=None, timeout=self._busy / 1000)
+            src = sqlite3.connect(ro_uri(backup_path), uri=True, isolation_level=None, timeout=self._busy / 1000)
             if src.execute("PRAGMA integrity_check").fetchall() != [("ok",)]:
                 raise _Corrupt("the backup fails its integrity check")
             if src.execute("PRAGMA user_version").fetchone()[0] > len(MIGRATIONS):
@@ -909,7 +923,7 @@ class ReadOnlyDatabase:
             raise LedgerUnavailable("there is no database file")
         if self._conn is None:
             try:
-                self._conn = sqlite3.connect(f"file:{os.path.join(self.directory, self.name)}?mode=ro", uri=True,
+                self._conn = sqlite3.connect(ro_uri(os.path.join(self.directory, self.name)), uri=True,
                                              isolation_level=None, timeout=self._busy / 1000)
                 self._conn.execute(f"PRAGMA busy_timeout = {int(self._busy)}")
             except sqlite3.Error as exc:
@@ -975,7 +989,7 @@ def restore_backup(directory, backup_path, name: str = DB_NAME, *, hook=None, bu
     # A backup that is damaged or too new is refused before anything is touched.
     probe = None
     try:
-        probe = sqlite3.connect(f"file:{backup_path}?mode=ro", uri=True, isolation_level=None)
+        probe = sqlite3.connect(ro_uri(backup_path), uri=True, isolation_level=None)
         if probe.execute("PRAGMA integrity_check").fetchall() != [("ok",)]:
             raise LedgerRefused(f"{backup_path} fails its integrity check")
         if probe.execute("PRAGMA user_version").fetchone()[0] > len(MIGRATIONS):
@@ -1010,7 +1024,7 @@ def restore_backup(directory, backup_path, name: str = DB_NAME, *, hook=None, bu
         if _exists(db._dirfd, staged):
             check = None
             try:
-                check = sqlite3.connect(f"file:{os.path.join(directory, staged)}?mode=ro", uri=True, isolation_level=None)
+                check = sqlite3.connect(ro_uri(os.path.join(directory, staged)), uri=True, isolation_level=None)
                 reuse = (check.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
                          and check.execute("SELECT 1 FROM meta WHERE key = 'unreconciled'").fetchone() is not None)
             except sqlite3.Error:

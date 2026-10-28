@@ -46,7 +46,7 @@ def cache_rows(directory, scope: str = ts.DEFAULT_SCOPE) -> list[dict]:
     path = Path(directory) / "project.db"
     if not path.is_file():
         return []
-    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    conn = sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True)
     try:
         cur = conn.execute("SELECT identity_sha256, call_id, reply_file, text FROM telegraph_cache WHERE scope = ?", (scope,))
         return [dict(zip(("identity", "call_id", "reply_file", "text"), row)) for row in cur.fetchall()]
