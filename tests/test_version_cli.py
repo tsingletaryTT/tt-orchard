@@ -602,3 +602,142 @@ def test_migrate_pr_reports_a_failing_git_log_instead_of_printing_a_blank_summar
     fake_git(tmp_path, monkeypatch, "--format=%s")
     code, out, err = run(repo, "migrate-pr", "--from-ref", "old-feature")
     assert code == 1 and err
+
+
+# ---- release is all or nothing: a failure part-way restores every file ---------------------------
+
+def fail_unlink_on(monkeypatch, name, times=1):
+    """os.unlink raises for the file called `name` (the first `times` calls); every other call is real."""
+    real = os.unlink
+    state = {"n": 0}
+
+    def unlink(path, *a, **k):
+        if os.path.basename(str(path)) == name and state["n"] < times:
+            state["n"] += 1
+            raise PermissionError(13, "simulated: read-only")
+        return real(path, *a, **k)
+    monkeypatch.setattr(os, "unlink", unlink)
+
+
+def fail_write_of(monkeypatch, basename, times=1):
+    """C.atomic_write raises for a destination called `basename` (the first `times` calls)."""
+    real = C.atomic_write
+    state = {"n": 0}
+
+    def write(path, text, **k):
+        if Path(path).name == basename and state["n"] < times:
+            state["n"] += 1
+            raise OSError(28, "simulated: no space left on device")
+        return real(path, text, **k)
+    monkeypatch.setattr(C, "atomic_write", write)
+
+
+def assert_untouched_and_rerunnable(repo, before, monkeypatch):
+    assert tree(repo) == before                                   # every byte as it was
+    assert sh(repo, "git", "status", "--porcelain") == ""
+    monkeypatch.undo()
+    code, out, err = run(repo, "release")                         # the same command now finishes
+    assert code == 0, err
+    assert V.read_release(repo / "orchard" / "__init__.py") == "1.1.0" and V.load_fragments(repo / "changes") == []
+
+
+def test_a_deletion_that_fails_on_the_second_fragment_restores_everything(repo, monkeypatch):
+    setup_release(repo)
+    before = tree(repo)
+    fail_unlink_on(monkeypatch, "beta.toml")                      # alpha is deleted first, then beta fails
+    code, out, err = run(repo, "release")
+    assert code == 1 and "beta.toml" in err and "restored" in err
+    assert_untouched_and_rerunnable(repo, before, monkeypatch)
+
+
+def test_a_failed_notes_write_changes_nothing(repo, monkeypatch):
+    setup_release(repo)
+    before = tree(repo)
+    fail_write_of(monkeypatch, "1.1.0.md")
+    code, _, err = run(repo, "release")
+    assert code == 1 and "no space" in err
+    assert_untouched_and_rerunnable(repo, before, monkeypatch)
+
+
+def test_a_failed_release_write_restores_the_notes_and_the_fragments(repo, monkeypatch):
+    setup_release(repo)
+    before = tree(repo)
+    fail_write_of(monkeypatch, "__init__.py")
+    code, _, err = run(repo, "release")
+    assert code == 1 and "no space" in err
+    assert not (repo / "docs" / "releases" / "1.1.0.md").exists()
+    assert_untouched_and_rerunnable(repo, before, monkeypatch)
+
+
+def test_restore_keeps_the_mode_of_a_fragment_it_has_to_put_back(repo, monkeypatch):
+    setup_release(repo)
+    (repo / "changes" / "alpha.toml").chmod(0o640)
+    fail_unlink_on(monkeypatch, "beta.toml")
+    assert run(repo, "release")[0] == 1
+    assert ((repo / "changes" / "alpha.toml").stat().st_mode & 0o7777) == 0o640
+
+
+def test_release_is_written_last_after_the_notes_and_every_deletion(repo, monkeypatch):
+    setup_release(repo)
+    ops = []
+    real_write, real_unlink = C.atomic_write, os.unlink
+
+    def write(path, text, **k):
+        ops.append(("write", Path(path).name))
+        return real_write(path, text, **k)
+
+    def unlink(path, *a, **k):
+        ops.append(("unlink", os.path.basename(str(path))))
+        return real_unlink(path, *a, **k)
+    monkeypatch.setattr(C, "atomic_write", write)
+    monkeypatch.setattr(os, "unlink", unlink)
+    assert run(repo, "release")[0] == 0
+    real_ops = [o for o in ops if o[1] in ("1.1.0.md", "__init__.py", "alpha.toml", "beta.toml", "gamma.toml")]
+    assert real_ops[0] == ("write", "1.1.0.md") and real_ops[-1] == ("write", "__init__.py")
+    assert sorted(o for o in real_ops if o[0] == "unlink") == [("unlink", "alpha.toml"), ("unlink", "beta.toml"), ("unlink", "gamma.toml")]
+
+
+def test_a_failed_restore_is_reported_with_the_way_out(repo, monkeypatch):
+    setup_release(repo)
+    fail_unlink_on(monkeypatch, "beta.toml")
+    real = C.atomic_write
+
+    def write(path, text, **k):
+        if Path(path).name == "alpha.toml":                       # putting alpha back fails too
+            raise OSError(5, "simulated: I/O error")
+        return real(path, text, **k)
+    monkeypatch.setattr(C, "atomic_write", write)
+    code, _, err = run(repo, "release")
+    assert code == 1 and "could not restore" in err and "alpha.toml" in err and "git restore" in err
+
+
+def test_an_interrupt_during_release_also_restores(repo, monkeypatch):
+    setup_release(repo)
+    before = tree(repo)
+    real = os.unlink
+
+    def unlink(path, *a, **k):
+        if os.path.basename(str(path)) == "beta.toml":
+            raise KeyboardInterrupt
+        return real(path, *a, **k)
+    monkeypatch.setattr(os, "unlink", unlink)
+    with pytest.raises(KeyboardInterrupt):
+        run(repo, "release")
+    monkeypatch.undo()
+    assert tree(repo) == before
+
+
+def test_an_error_after_release_was_already_replaced_puts_the_old_text_back(repo, monkeypatch):
+    """The replace can succeed and a later step (the directory fsync) still fail: the write raises after the file changed."""
+    setup_release(repo)
+    before = tree(repo)
+    real = C.atomic_write
+
+    def write(path, text, **k):
+        real(path, text, **k)
+        if Path(path).name == "__init__.py":
+            raise OSError(5, "simulated: fsync of the directory failed")
+    monkeypatch.setattr(C, "atomic_write", write)
+    code, _, err = run(repo, "release")
+    assert code == 1
+    assert_untouched_and_rerunnable(repo, before, monkeypatch)

@@ -10,6 +10,7 @@ See docs/releases.md for the process. This command never tags, commits or pushes
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import datetime
 import os
 import re
@@ -201,6 +202,59 @@ def release_notes(version: str, date: str, frags) -> str:
     return "\n".join(lines)
 
 
+@dataclasses.dataclass
+class ReleaseFailure:
+    reason: str
+    unrestored: list
+
+
+def apply_release(root: Path, init: Path, init_text: str, new_init: str, notes_path: Path, notes: str, ch: Path, frags):
+    """Write the release as one all-or-nothing step. Order: the notes, the deletion of each fragment, and `RELEASE` last.
+    On any failure every file is put back: the notes are removed, the deleted fragments are rewritten with their
+    original text and mode, and `__init__.py` is rewritten with its original text. Returns None on success, or a
+    ReleaseFailure that lists anything that could not be restored (a person then uses `git restore`; the tree was
+    clean when the release began). A KeyboardInterrupt restores too and is then raised again."""
+    snapshot = []
+    for f in frags:
+        path = ch / f.name
+        snapshot.append((path, path.read_text(encoding="utf-8"), stat.S_IMODE(path.stat().st_mode)))
+    wrote_notes = False
+    step = f"writing {notes_path.relative_to(root)}"
+    try:
+        atomic_write(notes_path, notes, replace=False)
+        wrote_notes = True
+        for path, _, _ in snapshot:
+            step = f"deleting {path.relative_to(root)}"
+            os.unlink(path)
+        step = f"writing {init.relative_to(root)}"
+        atomic_write(init, new_init)
+        return None
+    except BaseException as e:
+        unrestored = []
+        for path, text, mode in snapshot:
+            try:
+                if not os.path.lexists(path):
+                    atomic_write(path, text, replace=False)
+                    os.chmod(path, mode)
+            except Exception as r:
+                unrestored.append(f"{path.relative_to(root)} ({r})")
+        try:
+            if os.path.exists(init) and init.read_text(encoding="utf-8") != init_text:
+                atomic_write(init, init_text)
+        except Exception as r:
+            unrestored.append(f"{init.relative_to(root)} ({r})")
+        if wrote_notes:
+            try:
+                os.unlink(notes_path)
+            except FileNotFoundError:
+                pass
+            except Exception as r:
+                unrestored.append(f"{notes_path.relative_to(root)} ({r})")
+        if not isinstance(e, Exception):
+            raise                                              # KeyboardInterrupt and the like, after the restore
+        return ReleaseFailure(f"{step}: {e}", unrestored)
+
+
 def cmd_release(root: Path, args, out, err) -> int:
     init = root / "orchard" / "__init__.py"
     ch = root / "changes"
@@ -240,10 +294,16 @@ def cmd_release(root: Path, args, out, err) -> int:
     for f in frags:
         print(f"{verb} delete changes/{f.name}", file=out)
     if not args.dry_run:
-        atomic_write(notes_path, notes, replace=False)
-        atomic_write(init, new_init)
-        for f in frags:
-            os.unlink(ch / f.name)
+        failure = apply_release(root, init, init_text, new_init, notes_path, notes, ch, frags)
+        if failure is not None:
+            print(f"error: the release failed: {failure.reason}", file=err)
+            if failure.unrestored:
+                print("error: could not restore: " + "; ".join(failure.unrestored), file=err)
+                print("The tree was clean before this command, so `git restore orchard/__init__.py changes` and deleting "
+                      f"docs/releases/{new}.md puts everything back.", file=err)
+            else:
+                print("restored every file: nothing was changed. Fix the cause and run the same command again.", file=err)
+            return 1
         print("done: the files above are changed and nothing is committed", file=out)
     print("", file=out)
     print("Then, run these yourself (this command never tags, commits or pushes). Tag only the commit that main points to", file=out)

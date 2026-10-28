@@ -72,6 +72,23 @@ A release is cut on `main`, with everything you want in it already merged.
 
 `release` prints this sequence with the version filled in.
 
+### What `release` writes, in order, and what a failure leaves
+
+`release` starts only on a clean git tree, so every file it touches can be put back. It writes in this order and
+restores every file if any step fails (the restore also runs on Ctrl-C). A failed release therefore leaves the tree as it
+was, `check` still passes, and the same command can be run again.
+
+| Step | What it does | If it fails | A rerun |
+|---|---|---|---|
+| 1 | Snapshot the text and mode of every fragment and of `orchard/__init__.py` | Nothing is written yet | Run again after fixing the cause |
+| 2 | Write `docs/releases/<version>.md` (never over an existing file) | Nothing else was written; no file changed | Run again |
+| 3 | Delete each fragment, in name order | The notes file is removed and the fragments already deleted are written back with their mode | Run again |
+| 4 | Write `RELEASE` in `orchard/__init__.py` (last, so a version bump never exists without the notes and the deletions) | The notes file is removed, the fragments are written back and `__init__.py` gets its old text | Run again |
+| Restore itself fails | The command lists each file it could not put back and exits 1 | The tree was clean before, so `git restore orchard/__init__.py changes` and deleting `docs/releases/<version>.md` puts everything back | Run again after that |
+| The process is killed (power loss, `kill -9`) | No restore can run | The same recovery as the row above | Run again after that |
+
+A rerun refuses while `docs/releases/<version>.md` exists, which is why a killed run needs the recovery step first.
+
 ## A feature that merges after a release was cut
 
 The release deletes the fragments it used and moves `RELEASE` up. A branch that was started earlier may still carry a
