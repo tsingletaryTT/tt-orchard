@@ -24,6 +24,7 @@ ttlang_env._read_reference, which refuses links, devices and oversized files.
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 
 from orchard import ttlang_env
@@ -105,7 +106,41 @@ def assemble(env, skill_dir) -> tuple[list[dict], list[str]]:
         files.append({"name": name, "source": source, "path": str(path), "sha256": hashlib.sha256(data).hexdigest(),
                       "data": data, "spec_version": skill_ver if source == ttlang_env.SKILL_SOURCE else src_ver,
                       "generated": False})
+    src = Path(env.src_dir)
+    for name in extra_examples(src, {n for n, _, _ in ttlang_env.REFERENCES}):
+        path = src / "examples" / name
+        data, why = ttlang_env._read_reference(path, src)
+        if why:
+            problems.append(why)
+            continue
+        files.append({"name": name, "source": ttlang_env.CHECKOUT_SOURCE, "path": str(path),
+                      "sha256": hashlib.sha256(data).hexdigest(), "data": data, "spec_version": src_ver,
+                      "generated": False})
     return files, problems
+
+
+# The checkout's own example programs that show the patterns the failing kernels need (element-wise work, broadcast and
+# reduce) go in as full files beside the two fixed examples. A name matches when it holds one of these words.
+EXTRA_EXAMPLE_WORDS = ("eltwise", "broadcast", "reduce")
+EXTRA_EXAMPLE_SKIP = ("multidevice",)   # all-reduce across devices is not a single-chip kernel pattern
+EXTRA_EXAMPLE_MAX = 8       # choice: the checkout has five such files at the pin; the cap keeps a new checkout bounded
+
+
+def extra_examples(src: Path, already: set[str]) -> list[str]:
+    """Names of the top-level examples/*.py files in the checkout that match EXTRA_EXAMPLE_WORDS and are not already
+    in the fixed list, sorted, at most EXTRA_EXAMPLE_MAX. A directory is not listed; a link is listed so that reading it
+    reports the refusal instead of skipping it quietly. Nothing is read here."""
+    ex = src / "examples"
+    if os.path.islink(ex) or not ex.is_dir():
+        return []
+    names = []
+    for entry in os.scandir(ex):
+        low = entry.name.lower()
+        if (entry.name.endswith(".py") and entry.name not in already and any(w in low for w in EXTRA_EXAMPLE_WORDS)
+                and not any(w in low for w in EXTRA_EXAMPLE_SKIP)
+                and not entry.is_dir(follow_symlinks=False)):
+            names.append(entry.name)
+    return sorted(names)[:EXTRA_EXAMPLE_MAX]
 
 
 def record(r: dict) -> dict:

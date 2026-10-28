@@ -176,6 +176,35 @@ def test_assembly_never_writes_into_the_checkout_or_the_skill(tmp_path):
     assert before == snapshot()
 
 
+def test_the_checkouts_other_eltwise_broadcast_and_reduce_examples_go_in_as_full_files(tmp_path):
+    f = Fake(tmp_path)
+    ex = f.src / "examples"
+    for name in ("broadcast.py", "general_broadcast.py", "eltwise_pipe.py", "my_reduce_sum.py", "matmul_1d.py", "multidevice_all_reduce.py"):
+        (ex / name).write_text(f"# full text of {name}\n")
+    (ex / "eltwise_dir").mkdir()                       # a directory is not an example file
+    files, problems = tr.assemble(f.env, make_skill(tmp_path, "0.12"))
+    assert problems == []
+    names = [r["name"] for r in files]
+    assert names[:5] == ["guide.md", "examples.md", "TTLangSpecification.md", "eltwise_add.py",
+                         "eltwise_broadcast_reduce.py"]
+    assert names[5:] == ["broadcast.py", "eltwise_pipe.py", "general_broadcast.py", "my_reduce_sum.py"]
+    b = by_name(files)
+    assert b["broadcast.py"]["data"] == b"# full text of broadcast.py\n"
+    assert b["broadcast.py"]["source"] == ttlang_env.CHECKOUT_SOURCE and b["broadcast.py"]["spec_version"] == "0.20"
+    assert b["broadcast.py"]["sha256"] == hashlib.sha256(b["broadcast.py"]["data"]).hexdigest()
+    assert "matmul_1d.py" not in b and "multidevice_all_reduce.py" not in b
+
+
+def test_a_linked_extra_example_is_refused_and_not_followed(tmp_path):
+    f = Fake(tmp_path)
+    secret = tmp_path / "secret.txt"
+    secret.write_text("token=abc\n")
+    (f.src / "examples" / "broadcast.py").symlink_to(secret)
+    files, problems = tr.assemble(f.env, make_skill(tmp_path, "0.20"))
+    assert any("is a link" in p for p in problems)
+    assert all(b"token=abc" not in r["data"] for r in files)
+
+
 # ---- report lines --------------------------------------------------------------------------------------------------
 
 def test_the_report_says_plainly_when_guide_and_spec_versions_differ():

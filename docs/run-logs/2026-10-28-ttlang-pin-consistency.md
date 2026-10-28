@@ -62,11 +62,29 @@ Guards, each removed once and seen red (tests in `tests/test_ttlang_pin.py` and 
 | `examples.md` | tt-lang skill, 37187 bytes, sha256 `ece7b4825264f060...` (0.12) | tt-lang checkout, generated, 10999 bytes, sha256 `4f1232b649f98a11...`, specification 0.20 |
 | `TTLangSpecification.md` | checkout, 92238 bytes, `257b158b7689bc6f...` | same file, specification 0.20 recorded |
 | `eltwise_add.py`, `eltwise_broadcast_reduce.py` | checkout | same files, specification 0.20 recorded |
+| `broadcast.py`, `eltwise_add_3d.py`, `eltwise_pipe.py`, `eltwise_pipe_node3.py`, `general_broadcast.py` | not given | checkout, full files, 6474 + 4993 + 7802 + 7694 + 7922 bytes, specification 0.20 |
 
-The generated guide is shorter than the skill's practical guide and has no CUDA or Triton porting material. The checkout's docs
-are the version the simulator runs, so the coder reads the specification and the two .py kernels for names and signatures, as the
-`kernel-probe` skill already told it to. Whether the generated guide helps or hurts pass rates is not measured here; the running
-ladder used the old guide, so its results and a later probe's are not on the same reference set.
+Sizes of what the coder reads, in bytes:
+
+| | Before | After |
+| --- | --- | --- |
+| `guide.md` | 34958 | 40934 (generated) |
+| `examples.md` | 37187 | 10999 (generated) |
+| `TTLangSpecification.md` | 92238 | 92238 |
+| the two fixed example kernels | 12909 | 12909 |
+| extra example kernels | 0 | 34885 (five files) |
+| total | 177292 | 191965 |
+
+The prose examples changed most. The skill's `examples.md` held 37187 bytes of worked examples, including porting examples from
+CUDA and Triton. The generated `examples.md` is an index of 10999 bytes taken from the checkout's `docs/EXAMPLES.md` and
+`examples/README.md`, and it has no porting examples. To make up for that, the generator now adds the checkout's own example programs
+whose file names hold `eltwise`, `broadcast` or `reduce` (other than the two fixed ones) as full files in `reference/`, because these
+are the patterns the failing kernels need. Files with `multidevice` in the name are left out, since a cross-device all-reduce is not a
+single-chip kernel pattern. At most eight are added; five match at the pin.
+
+The amount and kind of example material is a variable the pass rates could depend on. The coder now gets less prose and more
+runnable kernels. Whether that helps or hurts is not measured here. The running ladder used the old guide and no extra kernels, so its
+results and a later probe's are not on the same reference set. A comparison needs two probes that differ only in this.
 
 ## Probe preflight before (origin/main)
 
