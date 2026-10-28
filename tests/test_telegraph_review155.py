@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 import legacy_telegraph as old
-from dbtools import make_history, reserve
+from dbtools import KILLED, make_history, reserve, run_child
 from ledger_io import ledger_records, seed_ledger
 from orchard import cli
 from orchard import db as dbm
@@ -130,15 +130,7 @@ def test_a_partial_sidecar_from_a_killed_write_is_not_counted_and_the_retry_coun
     d = legacy_directory(tmp_path, asks=1)
     with open(d / "telegraph.jsonl", "ab") as f:
         f.write(b'{"call_id": "half-written-fragment')
-    real = mig.safeio._write_all
-
-    def half(fd, data):
-        real(fd, data[: len(data) // 2])
-        raise Crash("killed during the sidecar write")
-    monkeypatch.setattr(mig.safeio, "_write_all", half)
-    with pytest.raises(Crash):
-        mig.migrate(d, max_output_tokens=NOTE_TOKENS)
-    monkeypatch.setattr(mig.safeio, "_write_all", real)
+    assert run_child("sidecar-kill", d).returncode == KILLED                  # a real kill: no cleanup code runs
     assert not list(d.glob("telegraph.jsonl.torn-*"))                         # nothing half-written has a countable name
     mig.migrate(d, max_output_tokens=NOTE_TOKENS)
     (sidecar,) = list(d.glob("telegraph.jsonl.torn-*"))

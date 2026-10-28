@@ -57,6 +57,18 @@ def main(argv):
                     print("INSIDE", flush=True)
                     time.sleep(120)
             time.sleep(120)
+    elif kind == "sidecar-kill":                                # killed halfway through writing the torn-tail sidecar
+        from orchard import safeio
+
+        real_write = safeio._write_all
+
+        def half_then_die(fd, data):
+            if b"half-written-fragment" not in bytes(data):          # only the sidecar write is cut short (the marker write is whole)
+                return real_write(fd, data)
+            os.write(fd, data[: len(data) // 2])
+            os.kill(os.getpid(), signal.SIGKILL)
+        safeio._write_all = half_then_die
+        mig.migrate(directory)
     elif kind == "probe":                                       # a second process asks for a reservation and says what happened
         with ts.TelegraphStore.open(directory) as store:
             why = store.reserve({"reserve": rest[0], "problem": "p", "model": "small", "tokens": 10, "cost_usd": 0.0},
