@@ -2915,3 +2915,7 @@ Prompt (operator): "make a similar gradio app to the one we use for minimax musi
 - The model name in health follows `--model`. `--max-seconds` is checked against 1 to 120 before a work directory is made, and the command line exits 2 with the reason.
 - A page built while the server was down reads the server's limits on each load: the length range, the start value and the examples are refreshed from health.
 - Tests first; 6 more mutations, all red.
+
+## 2026-10-28 (UTC): fourth review of PR 167 (head 526bf08), two medium findings
+- The examples are a `gr.Dataset` with its own click handler that reads the clicked row, replacing `gr.Examples`, which fixes its list when built and looks a clicked row up by position; a list replaced on page load could have been read at the wrong row. Checked in a browser: clicking an example fills the prompt, length and seed.
+- The page test for the served clip now asserts the file exists and holds a WAV, where a truthy fallback let it pass for a missing file. Mutation (swapping two fields in the handler) red.

@@ -66,7 +66,8 @@ def test_generate_through_the_page_returns_a_clip_and_the_echo(page):
     client, _, _ = page
     path, status, details, server_line = client.predict("a tune", 10, 8, 1.0, 5, api_name="/generate")
     assert "Server ready" in server_line                       # the line at the top is refreshed after each clip
-    assert Path(path if isinstance(path, str) else path["value"]).exists() or path
+    clip = Path(path if isinstance(path, str) else path["value"])
+    assert clip.is_file() and clip.read_bytes()[:4] == b"RIFF"        # the file the page serves exists and is the clip
     assert "Done: 10.0 s of audio, seed 5" in status
     assert "Seed: 5" in details and "Steps: 8" in details
 
@@ -126,3 +127,14 @@ def test_a_page_opened_before_the_server_was_up_takes_the_servers_limits_when_it
         assert all(row[1] <= 5 for row in examples_update["samples"])
     finally:
         server.close()
+
+
+def test_clicking_an_example_uses_that_rows_own_values_even_after_the_list_was_replaced(page):
+    """The handler reads the clicked row, so a list refreshed on page load cannot make it read the wrong row or one past the end."""
+    assert app.use_example(["a prompt", 20, 3]) == ("a prompt", 20, 3)
+    _, demo, _ = page
+    assert not any(type(b).__name__ == "Examples" for b in demo.blocks.values())
+    datasets = [b for b in demo.blocks.values() if isinstance(b, gr.Dataset)]
+    assert len(datasets) == 1
+    fns = [f for f in demo.fns.values() if f.fn is app.use_example]
+    assert len(fns) == 1                                                 # one click handler, and it is the row-reading function

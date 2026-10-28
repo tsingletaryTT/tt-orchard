@@ -46,6 +46,11 @@ def fitting_examples(lim: dict) -> list:
     return [e for e in ac.EXAMPLES if lim["min_seconds"] <= e[1] <= lim["max_seconds"]]
 
 
+def use_example(row):
+    """The clicked example's prompt, length and seed, as they are in the row."""
+    return row[0], row[1], row[2]
+
+
 def refresh_controls(client: ac.AudioClient):
     """What the page's load event sets: the status line, and the length control and the examples taken from the server's current limits. A page that was
     built while the server was down starts from fallback limits; this is what brings it in line when it is opened again."""
@@ -78,11 +83,10 @@ def build_ui(client: ac.AudioClient, poll_s: float = 1.0) -> gr.Blocks:
                 audio = gr.Audio(label="Result", type="filepath", interactive=False)
                 status = gr.Markdown()
                 details = gr.Markdown()
-        examples = fitting_examples(lim)
-        # the component is always made so the load event can fill it; an example the server would refuse is not offered
-        gallery = gr.Examples(examples=[list(e) for e in examples] or [list(ac.EXAMPLES[0])], inputs=[prompt, seconds, seed], label="Examples")
-        if not examples:
-            gallery.dataset.samples = []
+        # A Dataset with its own click handler, not gr.Examples: gr.Examples fixes its list when it is built and looks a clicked row up by position,
+        # so a list replaced on page load would make it read the wrong row. This handler takes the clicked row's own values.
+        gallery = gr.Dataset(components=[prompt, seconds, seed], samples=[list(e) for e in fitting_examples(lim)], label="Examples", type="values")
+        gallery.click(use_example, gallery, [prompt, seconds, seed], api_name=False)
 
         def roll():
             return ac.random_seed()
@@ -110,7 +114,7 @@ def build_ui(client: ac.AudioClient, poll_s: float = 1.0) -> gr.Blocks:
 
         dice.click(roll, None, seed, api_name="random_seed")
         go.click(generate, [prompt, seconds, steps, cfg, seed], [audio, status, details, status_line], api_name="generate", concurrency_limit=1)
-        demo.load(lambda: refresh_controls(client), None, [status_line, seconds, gallery.dataset])
+        demo.load(lambda: refresh_controls(client), None, [status_line, seconds, gallery])
     return demo
 
 
