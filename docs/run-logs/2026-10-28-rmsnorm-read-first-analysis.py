@@ -45,9 +45,14 @@ def calls_and_results(rows):
             if m.get("role") == "tool":
                 results[m["tool_call_id"]] = m["content"]
         for c in (r.get("received") or {}).get("tool_calls") or []:
+            raw = c["function"]["arguments"]
             try:
-                args = json.loads(c["function"]["arguments"] or "{}")
+                # the arguments arrive as a JSON string or as an already decoded object; anything that is
+                # not an object (a list, null, a number) is a malformed call and counts as no arguments
+                args = json.loads(raw or "{}") if isinstance(raw, (str, bytes)) else raw
             except ValueError:
+                args = {}
+            if not isinstance(args, dict):
                 args = {}
             calls.append({"turn": r["turn"], "id": c["id"], "name": c["function"]["name"], "args": args})
     return calls, results
@@ -70,13 +75,14 @@ def classify(a):
         return "deadlock"
     if "not a valid next dataflow step" in first:
         return "pop_invalid_step"
-    if "shape mismatch" in first.lower():
+    if "shape mismatch" in first.lower() or a.get("category") == "shape_mismatch":
         return "shape_mismatch"
     if a.get("category") == "numeric_mismatch":
         return "numeric"
     # wall-clock means the attempt ended on the wall budget with no simulator result. An attempt that ended on the wall
     # budget after its last check answered with some other error is "other" (its `status` column says how it ended).
-    if not first and (a.get("status") in ("wall", "wall_clock", "wall-clock") or "wall" in detail.lower()):
+    # `kernel.py does not exist` (category no_kernel) is a check that never ran the simulator, so it has no result either.
+    if (not first or a.get("category") == "no_kernel") and (a.get("status") in ("wall", "wall_clock", "wall-clock") or "wall" in detail.lower()):
         return "wall_clock"
     return "other"
 
@@ -110,6 +116,10 @@ def analyse(attempt_dir):
         if c["name"] != "shell":
             continue
         out = results.get(c["id"], "")
+        # credit output only when the command names the specification file; five `grep -n` hits numbered 744 to 748 in
+        # another file are not a reading of "Block states"
+        if SPEC not in str(c["args"].get("command", "")):
+            continue
         numbered = {int(n) for n in re.findall(r"(?m)^(?:[\w./-]*TTLangSpecification\.md[:-])?(\d+)[:-]", out)}
         inside = sorted(n for n in numbered if bs_first < n <= bs_last)
         names = ("Must be Written", "Must be Read", "Read-Write", "Read Only while Reading", "No Access while Writing",
@@ -126,11 +136,16 @@ def analyse(attempt_dir):
     first_check = None
     for c in calls:
         out = results.get(c["id"], "")
-        if (c["name"] == "write_file" and "kernel_check.py ran after this write" in out) or \
+        # an automatic check counts only when it produced a result; a check that was killed or crashed did not
+        if (c["name"] == "write_file" and "kernel_check.py ran after this write" in out
+                and re.search(r"\b(PASS|FAIL:)", out)) or \
                 (c["name"] == "shell" and "kernel_check.py" in str(c["args"].get("command", ""))
                  and re.search(r"\b(PASS|FAIL:)", out)):
             first_check = c["turn"]
             break
+    # the transcript records a tool result on the next model turn, so a stop on the wall budget or the turn limit can
+    # leave the last calls without a result. Their reads and checks are then not counted; the count is reported.
+    calls_without_result = sum(1 for c in calls if c["id"] not in results)
     shell_greps_ref = sum(1 for c in calls if c["name"] == "shell" and "reference" in str(c["args"].get("command", ""))
                           and "grep" in str(c["args"].get("command", "")))
     return {
@@ -138,7 +153,7 @@ def analyse(attempt_dir):
         "first_line": a.get("first_line"), "turns": a.get("turns"), "status": a.get("status"),
         "first_check_turn": first_check, "block_states_read": bs_read_file + bs_shell,
         "block_states_read_file": bs_read_file, "block_states_shell": bs_shell, "block_states_grep_hits": bs_grep_touch, "block_states_shell_detail": shell_detail,
-        "read_file_calls": len(reads), "grep_calls_on_reference": shell_greps_ref,
+        "read_file_calls": len(reads), "calls_without_result": calls_without_result, "grep_calls_on_reference": shell_greps_ref,
         "spec_lines_read_file": {s: f"{len(covered[s])}/{spec[s][1] - spec[s][0] + 1}" for s in SECTIONS},
         "decode_tok_s": (a.get("coder_speed") or {}).get("tok_s"), "agent_wall_s": a.get("agent_wall_s"),
     }
