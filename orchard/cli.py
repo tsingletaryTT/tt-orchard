@@ -456,39 +456,53 @@ def _installed(sig) -> list:
     return list(sig.installed_bundles()) if sig.installed_bundles else []
 
 
-def audio_base_refusal(arg: str, model: str, sig) -> str | None:
-    """A reason to refuse `--base <arg>`, or None. An audio model (orchard/audio_facts.py) is compared with its base repository directly,
-    and no bundle serves audio, so `--base` has to name a model id. A name that an installed bundle has, or that `tt model search` lists
-    as a bundle, is refused before anything is installed."""
+def audio_base_decision(arg: str, model: str, sig) -> tuple[str, str | None]:
+    """(state, a reason to refuse `--base <arg>` or None). `state` is "audio", "text" or "unknown" (the Hub could not say, so nothing
+    shows whether the model is audio). An audio model (orchard/audio_facts.py) is compared with its base repository directly and no bundle
+    serves audio, so `--base` has to name a model id. For an audio or unknown model, a name that an installed bundle has, or that
+    `tt model search` lists as a bundle, is refused before anything is installed, and so is a search that fails: a failed search is an
+    unknown, never "no bundle", and the caller must not install anything on the strength of it. The caller passes `pull=False` to
+    resolve_base for any state but "text", so a second search cannot lead to an install either."""
     try:
         hub, _ = sig.hub_info(model)
         local = sig.local_snapshot(model)
     except Exception:
-        return None
-    if preflight.audio_evidence_for(hub, local) is None:
-        return None
-    named = any(b.name == arg for b in _installed(sig))
-    if not named and not any(b.weights_repo == arg for b in _installed(sig)) and sig.search_bundles:
+        hub, local = None, None
+    state = "unknown" if hub is None else ("audio" if preflight.audio_evidence_for(hub, local) is not None else "text")
+    if state == "text":
+        return state, None
+    inst = _installed(sig)
+    if any(b.name == arg for b in inst):
+        named = True
+    elif any(b.weights_repo == arg for b in inst) or not sig.search_bundles:
+        named = False                    # a model id an installed bundle serves, or no search to ask: nothing here can be pulled
+    else:
         try:
-            named = arg in {c.get("name") for c in sig.search_bundles(nearest.family_query(arg)) or [] if isinstance(c, dict)}
+            found = sig.search_bundles(nearest.family_query(arg))
         except Exception:
-            named = False
+            found = None
+        if not isinstance(found, list):
+            return state, (f"the bundle search failed, so it is not known whether --base {arg} names a bundle, and nothing is installed on a "
+                           "guess. Run the same command again, or name the base as a model id")
+        named = arg in {c.get("name") for c in found if isinstance(c, dict)}
     if not named:
-        return None
-    return (f"{model} is an audio model, and --base {arg} names a bundle. No bundle serves an audio model; stage 0 compares the two "
-            "repositories directly. Name the base as a model id instead (the card's base_model, for example "
-            "stabilityai/stable-audio-3-small-music-base)")
+        return state, None
+    what = "an audio model" if state == "audio" else "a model the Hub could not be asked about just now"
+    return state, (f"{model} is {what}, and --base {arg} names a bundle. No bundle serves an audio model; stage 0 compares the two "
+                   "repositories directly. Name the base as a model id instead (the card's base_model, for example "
+                   "stabilityai/stable-audio-3-small-music-base)" + ("" if state == "audio" else ". If the model is not audio, run again once the Hub answers"))
 
 
-def resolve_base(arg: str, sig, puller, out, style, *, dry_run: bool = False) -> tuple[str | None, str | None]:
+def resolve_base(arg: str, sig, puller, out, style, *, dry_run: bool = False, pull: bool = True) -> tuple[str | None, str | None]:
     """(the weights repo to base the run on, an error text). `arg` is an installed bundle, a model id that
     an installed bundle serves, a published bundle (installed here with `tt-model pull`), or any other
-    model id, which the base check then judges."""
+    model id, which the base check then judges. With `pull=False` nothing is searched or installed: an installed bundle's name gives its
+    weights repo and anything else is taken as a model id."""
     inst = _installed(sig)
     for b in inst:
         if b.name == arg:
             return b.weights_repo, None
-    if any(b.weights_repo == arg for b in inst) or dry_run:
+    if any(b.weights_repo == arg for b in inst) or dry_run or not pull:
         return arg, None
     found = sig.search_bundles(nearest.family_query(arg)) if sig.search_bundles else None
     if arg not in {c["name"] for c in found or []}:
@@ -659,7 +673,7 @@ def _ui_preflight(cfg, memo=None):
             sig = dataclasses.replace(sig, research=remembered)
         override = None
         if base:
-            why = audio_base_refusal(base, model, sig)
+            state, why = audio_base_decision(base, model, sig)
             if why:
                 return [preflight.Check("base", preflight.BLOCK, why, "nearest-model-missing", data={"audio": True, "candidates": []})]
             override, why = resolve_base(base, sig, None, io.StringIO(), ui.Style("none", False), dry_run=True)
@@ -917,9 +931,10 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
     sig = signals or preflight.default_signals(cfg, research_options=research_options)
     override = None
     if args.base:
-        if (why := audio_base_refusal(args.base, args.model, sig)):
+        state, why = audio_base_decision(args.base, args.model, sig)
+        if why:
             return _refuse(why)
-        override, why = resolve_base(args.base, sig, puller, out, style, dry_run=args.dry_run)
+        override, why = resolve_base(args.base, sig, puller, out, style, dry_run=args.dry_run, pull=state == "text")
         if why:
             return _refuse(why)
 

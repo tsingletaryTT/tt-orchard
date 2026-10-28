@@ -36,13 +36,22 @@ def audio_payload(model_id=MODEL, *, sha=REV, gated="manual", files=AUDIO_FILES,
             "tags": ["text-to-audio", "stable-audio-3"], "cardData": card, "siblings": sib, **over}
 
 
+def model_config(repo: str, sub="t5gemma-b-b-ul2") -> dict:
+    """The part of a stable-audio-tools model_config.json that stage 0's detector and text-encoder comparison read."""
+    return {"model_type": "diffusion_cond", "sample_rate": 44100,
+            "model": {"conditioning": {"configs": [{"id": "prompt", "type": "t5gemma", "config": {"repo_id": repo, "subfolder": sub}}]}}}
+
+
 def snap(root: Path, repo: str, rev: str, names=("model.safetensors", "model_config.json")) -> Path:
     org, name = repo.split("/")
     d = root / "hub" / f"models--{org}--{name}" / "snapshots" / rev
     d.mkdir(parents=True)
     for n in names:
         (d / n).parent.mkdir(parents=True, exist_ok=True)
-        (d / n).write_text("{}" if n.endswith(".json") else "w")
+        if n == "model_config.json":
+            (d / n).write_text(json.dumps(model_config(repo)))
+        else:
+            (d / n).write_text("{}" if n.endswith(".json") else "w")
     return d
 
 
@@ -467,9 +476,32 @@ def test_the_real_run_passes_the_base_snapshot_to_the_supervisor(conf, tmp_path)
     assert code == 0 and f"base={snaps[BASE]}" in rec.argv and rec.fetched == []
 
 
+class Downloader(Recorder):
+    """A fetcher that leaves a snapshot behind, as `hf download` does."""
+
+    def __init__(self, tmp_path, config=None, names=AUDIO_FILES + ["svd_bases.pt"]):
+        super().__init__()
+        self.tmp_path, self.config, self.names = tmp_path, config, names
+
+    def fetcher(self, model_id, revision, hf_home, *, files, **kw):
+        out = super().fetcher(model_id, revision, hf_home, files=files, **kw)
+        out.mkdir(parents=True, exist_ok=True)
+        for n in self.names:
+            (out / n).parent.mkdir(parents=True, exist_ok=True)
+            text = json.dumps(self.config if self.config is not None else model_config(model_id)) if n == "model_config.json" else "w"
+            (out / n).write_text(text)
+        return out
+
+
+def run_with(conf, args, rec, sig):
+    out = Pipe()
+    code = cli.main(["--config", str(conf), *args], env={}, stdout=out, signals=sig, supervisor_main=rec.supervisor, fetcher=rec.fetcher)
+    return code, out.getvalue(), rec
+
+
 def test_a_public_base_that_is_missing_is_downloaded_at_the_hub_revision(conf, tmp_path):
     local = {MODEL: full_snaps(tmp_path)[MODEL]}
-    code, out, rec = run(conf, ["bringup", MODEL], sig=world(local=local, base_gated=False))
+    code, out, rec = run_with(conf, ["bringup", MODEL], Downloader(tmp_path), world(local=local, base_gated=False))
     assert code == 0 and [f[0] for f in rec.fetched] == [BASE] and rec.fetched[0][1] == BASE_REV
     assert f"base={fetch.snapshot_dir(tmp_path / 'hf', BASE, BASE_REV)}" in rec.argv
 
