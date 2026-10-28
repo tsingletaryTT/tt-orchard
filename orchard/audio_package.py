@@ -41,6 +41,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from orchard import safeio
+from orchard.ledger import LedgerCorrupt, read_entries
 from orchard.card_use import PERF_IN_PROSE
 from orchard.scrub import scrub_package
 from orchard.stages import inside
@@ -57,6 +58,7 @@ AUP_LINK = "https://stability.ai/use-policy"
 LIBRARY_LINK = "https://github.com/Stability-AI/stable-audio-3"
 
 MAX_JSON_BYTES = 8 * 1024 * 1024
+MAX_LEDGER_BYTES = 8 * 1024 * 1024         # a run's whole ledger (a real one is under a megabyte)
 MAX_SECONDS = 120                          # the model's own maximum clip length, and the longest a sweep may record
 MIN_REPEATS = 3                            # docs/benchmark-rules.md: measured runs for the label "benchmark"
 MIN_WARMUP = 1                             # and discarded warm-up runs in the same process
@@ -333,27 +335,57 @@ def read_facts(run_dir, bench_path, *, snapshot_name: str | None = None) -> tupl
     return facts, _file_bytes(result_path, "audio_result.json", MAX_JSON_BYTES), bench_bytes
 
 
-def _ledger_model(run: Path) -> str | None:
-    """The model id of the run's first ledger entry (`run_start`)."""
+def ledger_entries(run) -> list[dict]:
+    """The run's ledger, read whole and verified (orchard/ledger.py takes no lock and writes nothing). A damaged ledger is a refusal."""
+    path = Path(run) / "ledger.jsonl"
     try:
-        first = safeio.read_bytes(run / "ledger.jsonl", max_bytes=MAX_JSON_BYTES).split(b"\n", 1)[0]
-        entry = safeio.parse_json_bytes(first, max_bytes=MAX_JSON_BYTES)
+        # `read_entries` verifies the hash chain but reads the file whole and parses each line with no guard, so a FIFO, a huge file or a deeply nested line
+        # would block it or exhaust memory. safeio reads the file first (regular, capped, never blocks) and parses each line with its guards.
+        data = safeio.read_bytes(path, max_bytes=MAX_LEDGER_BYTES)
+        for line in data.split(b"\n")[:-1]:
+            safeio.parse_json_bytes(line, max_bytes=MAX_LEDGER_BYTES)
+        return read_entries(path)
     except safeio.SafeReadError as exc:
         raise AudioPackageError(f"the run has no readable ledger.jsonl: {getattr(exc, 'reason', exc)}") from None
-    data = entry.get("data") if isinstance(entry, dict) else None
-    model = data.get("model") if isinstance(data, dict) else None
+    except LedgerCorrupt as exc:
+        raise AudioPackageError(f"the run's ledger.jsonl is damaged: {exc}") from None
+    except (OSError, ValueError) as exc:
+        raise AudioPackageError(f"the run has no readable ledger.jsonl ({type(exc).__name__})") from None
+
+
+def _decisions(entries: list[dict]) -> set:
+    return {e["data"].get("decision") for e in entries if isinstance(e, dict) and e.get("event") == "decision" and isinstance(e.get("data"), dict)}
+
+
+def run_start_data(entries: list[dict]) -> dict:
+    first = entries[0] if entries else None
+    data = first.get("data") if isinstance(first, dict) and first.get("event") == "run_start" else None
+    return data if isinstance(data, dict) else {}
+
+
+def require_finished(entries: list[dict]) -> None:
+    """Refuses a run that did not reach 'ready for operator review', or that was aborted (the test `orchard/package_cmd.py` applies). An audio result
+    exists as soon as stage 2 has run, before the supervisor has judged the stage, so its presence says nothing about the run's outcome."""
+    decisions = _decisions(entries)
+    if "ready for operator review" not in decisions or "abort" in decisions:
+        raise AudioPackageError("the run has not finished: its ledger has no 'ready for operator review' decision, or it records an abort. "
+                                "Package a run that reached operator review")
+
+
+def _ledger_model(run: Path) -> str | None:
+    """The model id of the run's `run_start` entry, after checking that the run finished."""
+    entries = ledger_entries(run)
+    require_finished(entries)
+    model = run_start_data(entries).get("model")
     return model if isinstance(model, str) else None
 
 
 def ledger_snapshot(run_dir) -> str | None:
     """The model snapshot path the run recorded at its start (`inputs.model`), or None."""
     try:
-        first = safeio.read_bytes(Path(run_dir) / "ledger.jsonl", max_bytes=MAX_JSON_BYTES).split(b"\n", 1)[0]
-        entry = safeio.parse_json_bytes(first, max_bytes=MAX_JSON_BYTES)
-    except safeio.SafeReadError:
+        inputs = run_start_data(ledger_entries(run_dir)).get("inputs")
+    except AudioPackageError:
         return None
-    data = entry.get("data") if isinstance(entry, dict) else None
-    inputs = data.get("inputs") if isinstance(data, dict) else None
     value = inputs.get("model") if isinstance(inputs, dict) else None
     return value if isinstance(value, str) else None
 
@@ -478,7 +510,7 @@ def render_card(f: Facts, *, namespace: str, license_bytes: bytes) -> str:
              "## Try it", "",
              "```bash", "pip install -r requirements.txt", f"hf download {f.model_id} --revision {f.revision}      # your own Hugging Face account, after accepting the terms",
              "export ORCHARD_TTNN_PYTHON=<python with ttnn>   ORCHARD_AUDIO_SRC=<stable-audio-3 checkout at the commit above>",
-             "./run.sh          # checks the cached revision first; on a shared machine, take a chip lease first; see docs/running.md", "```", "",
+             "./run.sh          # loads only the pinned revision; on a shared machine, take a chip lease first; see docs/running.md", "```", "",
              "The job server listens on http://127.0.0.1:20100 and the page on http://127.0.0.1:7872. Both bind the local machine only. "
              "The job API is `POST /v1/audio/jobs`, `GET /v1/audio/jobs/<id>`, `GET /v1/audio/jobs/<id>/audio`, `DELETE /v1/audio/jobs/<id>` and `GET /v1/health`.", "",
              "`tt-model.yaml` is a draft v5.1 manifest of kind `http-server`. It has not been built into an image or booted.", "",
@@ -518,9 +550,10 @@ def running_doc(f: Facts) -> str:
             f"1. Accept the model's terms on its Hugging Face page and download revision `{f.revision}`: `hf download {MODEL_ID} --revision {f.revision}`.\n"
             "2. Check out the stable-audio-3 library at the commit the card names and set `ORCHARD_AUDIO_SRC` to it. "
             "Set `ORCHARD_TTNN_PYTHON` to a Python that has ttnn.\n"
-            "3. Start the server and the page: `./run.sh`. It first checks that the runtime would load the revision above and stops if it would not. "
-            "The runtime finds the model through the cache's `main` reference, and a download of one revision does not set that reference, so the check "
-            "can print one line (`echo <revision> > <cache>/refs/main`) that points it at the pinned revision. Run that line and start again. "
+            "3. Start the server and the page: `./run.sh`. The runtime finds the model through the Hugging Face cache's `main` reference, and the server starts a "
+            "new process for each clip, so a later download of another revision would change what the next clip loads. `run.sh` therefore builds a cache directory "
+            "that holds only the pinned revision (links to your download; your own cache is not written to), points the runtime and every clip's process at it, and "
+            "stops if the pinned revision is not in your cache. The directory is `$AUDIO_PKG_CACHE`, or under `$XDG_CACHE_HOME` (default `~/.cache`). "
             "On a shared machine, hold a chip lease for the whole run.\n\n"
             "The model is licensed under the " + LICENSE_NAME + " (`LICENSE.md`). Read it before you use or share the model or this package. "
             "This package does not include the model weights.\n")
@@ -537,8 +570,13 @@ REVISION="{f.revision}"
 : "${{ORCHARD_TTNN_PYTHON:?set ORCHARD_TTNN_PYTHON to a Python that has ttnn}}"
 : "${{ORCHARD_AUDIO_SRC:?set ORCHARD_AUDIO_SRC to the stable-audio-3 checkout named in README.md}}"
 echo "{POWERED_BY}"
-# Refuse to start on another revision than the one the card, the evidence and the license copy were made for. This opens no device.
-PYTHONPATH="$ORCHARD_AUDIO_SRC${{PYTHONPATH:+:$PYTHONPATH}}" "$ORCHARD_TTNN_PYTHON" "$HERE/runtime/orchard/skills/audio-chip-templates/check_revision.py" "$REVISION" {MODEL_KEY}
+# The runtime finds the model through the Hugging Face cache's `main` reference, and the server starts a new process for each clip, so a later download of
+# another revision would change what the next clip loads. Build a cache directory that holds only the pinned revision (links to your download) and point the
+# runtime and every clip's process at it. This opens no device and writes nothing in your own cache.
+PRIVATE_CACHE="${{AUDIO_PKG_CACHE:-${{XDG_CACHE_HOME:-$HOME/.cache}}/{PACKAGE_NAME}}}/$REVISION/hub"
+PYTHONPATH="$ORCHARD_AUDIO_SRC${{PYTHONPATH:+:$PYTHONPATH}}" "$ORCHARD_TTNN_PYTHON" "$HERE/runtime/orchard/skills/audio-chip-templates/check_revision.py" \\
+  "$REVISION" {MODEL_KEY} "$PRIVATE_CACHE"
+export HF_HUB_CACHE="$PRIVATE_CACHE"
 exec "$ORCHARD_TTNN_PYTHON" "$HERE/demo/serve_audio.py" --generator chip --src-dir "$ORCHARD_AUDIO_SRC" \\
   --script "$HERE/runtime/orchard/skills/audio-chip-templates/chip_generate.py" --ui "$@"
 """
@@ -900,6 +938,8 @@ def _gate(pkg: Path, hostname, home, validate_manifest) -> list[str]:
         manifest = _text(pkg / "tt-model.yaml") or ""
         if f'REVISION="{facts.revision}"' not in run_sh or "check_revision.py" not in run_sh:
             problems.append("run.sh must carry the evidence's model revision and run its check_revision.py before it starts the server")
+        if 'export HF_HUB_CACHE="$PRIVATE_CACHE"' not in run_sh:
+            problems.append("run.sh must point the runtime at the private cache that holds only the pinned revision (export HF_HUB_CACHE)")
         if f'revision: "{facts.revision}"' not in manifest:
             problems.append("tt-model.yaml must pin the evidence's model revision")
         if f"`{facts.revision}`" not in card:

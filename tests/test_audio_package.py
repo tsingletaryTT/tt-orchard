@@ -91,8 +91,15 @@ class World:
         self.bench = tmp / "bench.json"
         self.bench.write_text(json.dumps(bench_file()), encoding="utf-8")
 
-    def write_ledger(self, model=ap.MODEL_ID):
-        (self.run / "ledger.jsonl").write_text(json.dumps({"event": "run_start", "data": {"model": model, "inputs": {"model": str(self.snap)}}}) + "\n")
+    def write_ledger(self, model=ap.MODEL_ID, decisions=("ready for operator review",)):
+        """A real, chained ledger: a run_start entry and then one decision entry per name in `decisions`."""
+        from orchard.ledger import Ledger
+        for name in ("ledger.jsonl", "ledger.jsonl.lock"):
+            (self.run / name).unlink(missing_ok=True)
+        with Ledger(self.run / "ledger.jsonl") as led:
+            led.append("run_start", model=model, inputs={"model": str(self.snap)})
+            for d in decisions:
+                led.append("decision", decision=d)
 
     def write_result(self, result):
         (self.run / "stages" / "2" / "audio_result.json").write_text(json.dumps(result))
@@ -668,52 +675,104 @@ def test_the_gate_refuses_a_pin_that_differs_from_the_evidence(staged, name, old
     assert any(message in p for p in gate(staged)), gate(staged)
 
 
-def run_check(tmp_path, pin, *, present=True, main=None, model="small-music", with_library=True):
-    """check_revision.py in a child process, with stand-ins for the `stable_audio_3` library and `huggingface_hub` on its path.
-    `present`: the cache holds the pinned snapshot. `main`: the revision the cache's main reference gives (None: there is no main reference)."""
+def run_check(tmp_path, pin, *, present=True, main="same", model="small-music", with_library=True, private=None, break_cache=False):
+    """check_revision.py in a child process, with stand-ins for `stable_audio_3` and `huggingface_hub` and a real cache directory tree.
+    `present`: the user's cache holds the pinned snapshot. `main`: what the user's refs/main holds ("same": the pin; None: no refs/main; or a revision)."""
     lib = tmp_path / "lib"
-    (lib / "stable_audio_3").mkdir(parents=True)
-    (lib / "huggingface_hub").mkdir()
+    (lib / "stable_audio_3").mkdir(parents=True, exist_ok=True)
+    (lib / "huggingface_hub").mkdir(exist_ok=True)
+    user = tmp_path / "user cache" / "models--x--y"
+    if present:
+        (user / "snapshots" / pin).mkdir(parents=True, exist_ok=True)
+        (user / "snapshots" / pin / "model.safetensors").write_text("weights")
+    if main is not None:
+        (user / "refs").mkdir(parents=True, exist_ok=True)
+        (user / "refs" / "main").write_text(pin if main == "same" else main)
     (lib / "stable_audio_3" / "__init__.py").write_text("")
     (lib / "huggingface_hub" / "__init__.py").write_text(
-        "def try_to_load_from_cache(repo_id, filename, revision=None):\n"
-        f"    return '/cache/models--x--y/snapshots/' + revision + '/' + filename if {present!r} and revision == {pin!r} else None\n")
+        "import os\nfrom pathlib import Path\n"
+        "def try_to_load_from_cache(repo_id, filename, revision=None, cache_dir=None):\n"
+        f"    base = Path(cache_dir or {str(tmp_path / 'user cache')!r}) / 'models--x--y'\n"
+        "    if revision is None:\n"
+        "        ref = base / 'refs' / 'main'\n"
+        "        if not ref.exists():\n            return None\n"
+        "        revision = ref.read_text().strip()\n"
+        f"    if cache_dir is not None and {break_cache!r}:\n        revision = 'f' * 40\n"
+        "    f = base / 'snapshots' / revision / filename\n"
+        "    return str(f) if f.exists() else None\n")
     if with_library:
-        resolve = ("raise OSError('no main reference')" if main is None else f"return '/cache/config.json', '/cache/models--x--y/snapshots/{main}/model.safetensors'")
-        (lib / "stable_audio_3" / "model_configs.py").write_text(
-            "class M:\n    repo_id = 'x/y'\n    ckpt_path = 'model.safetensors'\n"
-            f"    def resolve(self):\n        {resolve}\n"
-            "all_models = {'small-music': M()}\n")
+        (lib / "stable_audio_3" / "model_configs.py").write_text("class M:\n    repo_id = 'x/y'\n    ckpt_path = 'model.safetensors'\n"
+                                                                 "all_models = {'small-music': M()}\n")
     script = Path(ap.__file__).parent / "skills" / "audio-chip-templates" / "check_revision.py"
     env = {"PATH": "/usr/bin:/bin", "PYTHONPATH": str(lib)}
-    return subprocess.run([sys.executable, str(script), pin, model], env=env, capture_output=True, text=True, cwd=str(tmp_path))
+    priv = private or (tmp_path / "private cache" / "hub")
+    r = subprocess.run([sys.executable, str(script), pin, model, str(priv)], env=env, capture_output=True, text=True, cwd=str(tmp_path))
+    r.private = priv
+    return r
 
 
-def test_the_revision_check_passes_when_the_runtime_would_load_the_pinned_revision(tmp_path):
-    r = run_check(tmp_path, REV, main=REV)
+def test_the_private_cache_resolves_to_the_pin_and_links_the_users_snapshot(tmp_path):
+    r = run_check(tmp_path, REV)
     assert r.returncode == 0 and REV in r.stdout
+    repo = r.private / "models--x--y"
+    assert (repo / "refs" / "main").read_text() == REV
+    link = repo / "snapshots" / REV
+    assert link.is_symlink() and (link / "model.safetensors").read_text() == "weights"
 
 
-def test_the_revision_check_stops_when_main_points_at_another_revision_and_says_how_to_fix_it(tmp_path):
+def test_the_private_cache_pins_the_revision_when_the_users_main_points_at_another_one(tmp_path):
     r = run_check(tmp_path, REV, main="9" * 40)
-    assert r.returncode == 3 and "Not starting" in r.stderr and "9" * 40 in r.stderr
-    assert f"echo {REV} > /cache/models--x--y/refs/main" in r.stderr
+    assert r.returncode == 0 and (r.private / "models--x--y" / "refs" / "main").read_text() == REV
+    assert (tmp_path / "user cache" / "models--x--y" / "refs" / "main").read_text() == "9" * 40     # the user's own cache is not written
 
 
-def test_the_revision_check_handles_a_cache_that_holds_only_the_pinned_snapshot(tmp_path):
-    """A download of one revision sets no main reference, and the runtime resolves through main, so the runtime would fail: the check says so and how to fix it."""
-    r = run_check(tmp_path, REV, present=True, main=None)
-    assert r.returncode == 4 and "main reference" in r.stderr and f"echo {REV} > /cache/models--x--y/refs/main" in r.stderr
+def test_the_private_cache_works_for_a_cache_that_holds_only_the_pinned_snapshot(tmp_path):
+    """A download of one revision sets no refs/ at all. The private cache does not need the user's."""
+    r = run_check(tmp_path, REV, main=None)
+    assert r.returncode == 0 and not (tmp_path / "user cache" / "models--x--y" / "refs").exists()
+
+
+def test_the_private_cache_is_rebuilt_over_an_earlier_one_for_another_revision(tmp_path):
+    first = run_check(tmp_path, REV)
+    assert first.returncode == 0
+    (first.private / "models--x--y" / "refs" / "main").write_text("0" * 40)
+    again = run_check(tmp_path, REV, private=first.private)
+    assert again.returncode == 0 and (first.private / "models--x--y" / "refs" / "main").read_text() == REV
+
+
+def test_a_stale_link_in_the_private_cache_is_replaced_and_a_real_directory_there_is_refused(tmp_path):
+    first = run_check(tmp_path, REV)
+    link = first.private / "models--x--y" / "snapshots" / REV
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    link.unlink()
+    link.symlink_to(other, target_is_directory=True)
+    again = run_check(tmp_path, REV, private=first.private)
+    assert again.returncode == 0 and (link / "model.safetensors").read_text() == "weights"
+    link.unlink()
+    link.mkdir()                                       # a real directory where the link belongs: the script does not delete it
+    assert run_check(tmp_path, REV, private=first.private).returncode == 2
 
 
 def test_the_revision_check_stops_when_the_pinned_snapshot_is_not_in_the_cache(tmp_path):
     r = run_check(tmp_path, REV, present=False, main="9" * 40)
-    assert r.returncode == 2 and f"hf download x/y --revision {REV}" in r.stderr
+    assert r.returncode == 2 and f"hf download x/y --revision {REV}" in r.stderr and not r.private.exists()
+
+
+def test_the_revision_check_stops_when_the_private_cache_does_not_resolve_to_the_pin(tmp_path):
+    r = run_check(tmp_path, REV, break_cache=True)
+    assert r.returncode == 3 and "Not starting" in r.stderr
 
 
 def test_the_revision_check_stops_when_the_model_or_the_library_is_not_found(tmp_path):
-    assert run_check(tmp_path, REV, main=REV, model="other").returncode == 2
-    assert run_check(tmp_path / "b", REV, main=REV, with_library=False).returncode == 2
+    assert run_check(tmp_path, REV, model="other").returncode == 2
+    assert run_check(tmp_path / "b", REV, with_library=False).returncode == 2
+
+
+def test_the_revision_check_refuses_a_private_cache_directory_it_cannot_write(tmp_path):
+    blocker = tmp_path / "blocker"
+    blocker.write_text("a file where a directory is needed")
+    assert run_check(tmp_path, REV, private=blocker / "hub").returncode == 2
 
 
 # ---- review of PR 193, round 2: whole rows, special files, a sizes value that is not a list -----------------------------------
@@ -773,3 +832,63 @@ def test_an_unexpected_exception_while_reading_the_package_is_a_problem_and_not_
     monkeypatch.setattr(ap, "scrub_package", boom)
     problems = gate(staged)
     assert len(problems) == 1 and problems[0].startswith("the gate could not read the package")
+
+
+# ---- review of PR 193, round 3: a finished run, and a cache that holds only the pin ---------------------------------------------
+
+@pytest.mark.parametrize("decisions", [(), ("abort",), ("ready for operator review", "abort"), ("continue",)])
+def test_a_run_that_did_not_finish_or_was_aborted_is_refused(world, decisions):
+    world.write_ledger(decisions=decisions)
+    with pytest.raises(ap.AudioPackageError, match="has not finished"):
+        world.stage()
+    assert not world.pkg.exists()
+    out = io.StringIO()
+    assert ap.main(args(world), out=out, hostname="some-host") == 2 and "has not finished" in out.getvalue()
+
+
+def test_a_ledger_that_is_not_json_is_a_refusal(world):
+    (world.run / "ledger.jsonl").write_text('{"event": "run_start"}\nnot json\n')
+    with pytest.raises(ap.AudioPackageError, match="no readable ledger.jsonl"):
+        world.stage()
+
+
+def test_a_ledger_whose_hash_chain_is_broken_is_a_refusal(world):
+    (world.run / "ledger.jsonl").write_text('{"event": "run_start", "data": {}, "seq": 1, "prev": "wrong", "stage": null}\n')
+    with pytest.raises(ap.AudioPackageError, match="ledger.jsonl is damaged"):
+        world.stage()
+
+
+def test_a_ledger_with_no_run_start_names_no_model(world):
+    from orchard.ledger import Ledger
+    for name in ("ledger.jsonl", "ledger.jsonl.lock"):
+        (world.run / name).unlink()
+    with Ledger(world.run / "ledger.jsonl") as led:
+        led.append("decision", decision="ready for operator review")
+    with pytest.raises(ap.AudioPackageError, match="ledger names the model None"):
+        world.stage()
+
+
+def test_a_first_ledger_entry_that_is_not_run_start_does_not_name_the_model(world):
+    """A `notice` entry that carries a model field is not the run's start."""
+    from orchard.ledger import Ledger
+    for name in ("ledger.jsonl", "ledger.jsonl.lock"):
+        (world.run / name).unlink()
+    with Ledger(world.run / "ledger.jsonl") as led:
+        led.append("notice", model=ap.MODEL_ID)
+        led.append("decision", decision="ready for operator review")
+    with pytest.raises(ap.AudioPackageError, match="ledger names the model None"):
+        world.stage()
+
+
+def test_run_sh_points_the_runtime_at_a_cache_that_holds_only_the_pinned_revision(staged):
+    run_sh = (staged / "run.sh").read_text()
+    assert 'export HF_HUB_CACHE="$PRIVATE_CACHE"' in run_sh
+    assert run_sh.index("check_revision.py") < run_sh.index("export HF_HUB_CACHE") < run_sh.index("exec ")
+    assert '"$REVISION" small-music "$PRIVATE_CACHE"' in run_sh
+    assert "AUDIO_PKG_CACHE" in run_sh and "XDG_CACHE_HOME" in run_sh
+
+
+def test_the_gate_refuses_a_launcher_that_does_not_export_the_private_cache(staged):
+    f = staged / "run.sh"
+    f.write_text(f.read_text().replace('export HF_HUB_CACHE="$PRIVATE_CACHE"', "true"))
+    assert any("export HF_HUB_CACHE" in p for p in gate(staged))

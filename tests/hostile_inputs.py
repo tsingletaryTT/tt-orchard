@@ -475,7 +475,10 @@ def _audio_run(base: Path, *, ledger: bool = True) -> None:
     import test_audio_package as tap
     (base / "stages" / "2").mkdir(parents=True, exist_ok=True)
     if ledger:
-        (base / "ledger.jsonl").write_text(json.dumps({"event": "run_start", "data": {"model": "stabilityai/stable-audio-3-small-music"}}) + "\n")
+        from orchard.ledger import Ledger
+        with Ledger(base / "ledger.jsonl") as led:
+            led.append("run_start", model="stabilityai/stable-audio-3-small-music")
+            led.append("decision", decision="ready for operator review")
     (base / "stages" / "2" / "audio_result.json").write_text(json.dumps(tap.audio_result()))
     (base / "bench.json").write_text(json.dumps(tap.bench_file()))
 

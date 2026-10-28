@@ -1723,13 +1723,16 @@ tt-orchard audio-package RUN_DIR --namespace ORG --check                        
 For a finished `stabilityai/stable-audio-3-small-music` run. It stages `stages/7/package/stable-audio-3-small-music-blackhole/` with a card
 (`README.md`), a copy of the model's license agreement (`LICENSE.md`), a `NOTICE` file, a draft v5.1 `tt-model.yaml` of kind `http-server`, `run.sh`,
 the chip runtime files (`runtime/`, copied unmodified), the job server, client and Gradio page (`demo/`, copied from the separate demo repository given
-with `--demo-repo`, which is only read), a revision check that `run.sh` runs before it starts the server (it stops when the local cache resolves the model to another revision than the pinned one), a how-to (`docs/running.md`), and the run's evidence (`evidence/`). It ships no weights. The weights are gated, and each
+with `--demo-repo`, which is only read), a how-to (`docs/running.md`), and the run's evidence (`evidence/`). `run.sh` first builds a Hugging Face cache directory that holds only the pinned revision (links to the user's
+download; the user's cache is not written to) and points the runtime and every clip's process at it, because the runtime finds the model through the cache's `main` reference and
+the server starts a new process for each clip. It stops if the pinned revision is not in the user's cache. It ships no weights. The weights are gated, and each
 user downloads them with their own Hugging Face account. It uploads nothing, publishes nothing and starts no process; the commands that would publish the
 package are written as text to `stages/7/AUDIO_PUBLISH_COMMANDS.txt`.
 
 The card is rendered from the run's measured numbers only. Timings come from an `audio_bench.py` sweep file (`--bench`; one warm-up run, then 3 or more
 measured runs per size, one loaded process). The builder recomputes every label and spread from the runs: 3 or more measured runs after a warm-up run is a
-`benchmark`, fewer is a `single sample`, and a file that says otherwise is refused. A run whose benchmark file has no size that earns `benchmark`,
+`benchmark`, fewer is a `single sample`, and a file that says otherwise is refused. A run whose ledger has no `ready for operator review` decision or records an abort
+(an audio result exists as soon as stage 2 has run), whose benchmark file has no size that earns `benchmark`,
 whose chip run has no 40-character model revision and library commit, whose chip run did not agree with the CPU reference, or whose control did not tell the
 fine-tune from the base model, is refused. Agreement rows carry the label `measured (provisional bars)`. The card makes no claim about sound quality.
 
