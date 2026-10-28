@@ -1089,3 +1089,16 @@ def test_package_no_graft_mtp_defaults_off_and_the_flag_turns_it_on(tmp_path, mo
     cli.main(["package", str(tmp_path / "run"), "--namespace", "episod"], stdout=io.StringIO())
     cli.main(["package", str(tmp_path / "run"), "--namespace", "episod", "--no-graft-mtp"], stdout=io.StringIO())
     assert [s["no_graft_mtp"] for s in seen] == [False, True]
+
+
+def test_bringup_passes_the_sampling_setting_to_the_supervisor_only_when_given(conf):
+    code, out, rec = run(conf, ["bringup", "Cloudflare/clef"])
+    assert "--sampling" not in rec.argv
+    for value in ("auto", "needed", "not-needed"):
+        code, out, rec = run(conf, ["bringup", "Cloudflare/clef", "--sampling", value])
+        assert code == 0 and rec.argv[rec.argv.index("--sampling") + 1] == value
+
+
+def test_bringup_refuses_an_unknown_sampling_value(conf):
+    with pytest.raises(SystemExit):
+        run(conf, ["bringup", "Cloudflare/clef", "--sampling", "sometimes"])
