@@ -279,19 +279,38 @@ class Pin:
         return read_json(os.path.join(*names), anchor=self.fd, **kw)
 
 
+def _root_name(path) -> str:
+    """The root path as text without trailing separators. A path that ends in a separator or a dot component makes the kernel follow a final
+    link that O_NOFOLLOW refuses, so separators are stripped (the filesystem root stays `/`) and a final `.` or `..` after another
+    component is refused. Bytes and path-like objects that give bytes are decoded, so a pin's name is always text."""
+    try:
+        raw = os.fspath(path)
+    except TypeError:
+        raise PathRefused("the root directory path is not usable") from None
+    if isinstance(raw, bytes):
+        raw = os.fsdecode(raw)
+    if raw == "" or "\0" in raw:
+        raise PathRefused("the root directory path is empty or holds a null byte")
+    name = raw.rstrip("/") or "/"
+    if "/" in name and name.rsplit("/", 1)[-1] in (".", ".."):
+        raise PathRefused("the root directory path ends in a dot component")
+    return name
+
+
 @contextmanager
 def pinned_root(path) -> Iterator[Pin]:
     """Open the directory `path` without following a link in its last component and hold it for the `with` block.
 
     A link in an earlier component of `path` is followed (a path typed by a person cannot be anchored); the directory
     reached is then the anchor for everything opened through it. Raises SafeReadError when it cannot be opened."""
+    name = _root_name(path)
     try:
-        fd = os.open(os.fspath(path), _DIR_FLAGS)
+        fd = os.open(name, _DIR_FLAGS)
     except OSError as exc:
         raise _os_failure(exc, "the root directory") from None
-    except (ValueError, TypeError):
+    except ValueError:
         raise PathRefused("the root directory path is not usable") from None
-    pin = Pin(fd, os.fspath(path))
+    pin = Pin(fd, name)
     try:
         yield pin
     finally:
@@ -334,6 +353,9 @@ def _open_for_read(path, anchor: int | None) -> int:
         raw = os.fsdecode(raw)
     if "\0" in raw or raw == "":
         raise PathRefused("the path is empty or holds a null byte")
+    if raw.endswith("/") or raw.rsplit("/", 1)[-1] in (".", ".."):
+        # A path that ends in a separator or a dot names a directory, and the kernel follows a final link there that O_NOFOLLOW would refuse.
+        raise PathRefused("the path ends in a separator or a dot")
     if anchor is None:
         try:
             return os.open(raw, _FILE_FLAGS)
@@ -435,12 +457,18 @@ def parse_json_bytes(data: bytes | str, *, max_bytes: int, max_depth: int = MAX_
     count as an int); a mismatch is `WrongType`. Raises only SafeReadError, and no message holds the input."""
     if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes < 0:
         raise ValueError("max_bytes must be a whole number, zero or more")
+    # The size is judged before any copy is made: a str of more characters than the cap has more bytes than the cap, and a buffer is
+    # measured where it is. The byte length of the encoded text is checked again below.
     if isinstance(data, str):
+        if len(data) > max_bytes:
+            raise TooLarge(f"the JSON is larger than {max_bytes} bytes")
         try:
             raw = data.encode("utf-8")
         except UnicodeEncodeError:
             raise NotText("the text holds a character that cannot be encoded as UTF-8") from None
     elif isinstance(data, (bytes, bytearray, memoryview)):
+        if (data.nbytes if isinstance(data, memoryview) else len(data)) > max_bytes:
+            raise TooLarge(f"the JSON is larger than {max_bytes} bytes")
         raw = bytes(data)
     else:
         raise TypeError("data must be bytes or str")

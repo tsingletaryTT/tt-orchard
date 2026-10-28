@@ -44,7 +44,7 @@ types for the top-level value, and `true` does not count as an integer.
 
 **`pinned_root`, `open_beneath`, `anchor`.** A directory opened once and held by descriptor is the anchor. Each component below it is opened with
 `O_DIRECTORY | O_NOFOLLOW` relative to the descriptor before it, so a directory swapped for a link after discovery is refused and a root that was
-renamed after the pin is not followed. Use this whenever you list a directory and then open what you found: list with `scan_beneath`, open with
+renamed after the pin is not followed. A root path is stripped of trailing separators and a trailing `.` or `..` component is refused, because the kernel follows a final link when a path ends in a slash or a dot; bytes and path-like roots are decoded to text. Use this whenever you list a directory and then open what you found: list with `scan_beneath`, open with
 `pin.read_json(entry.parts)`.
 
 **`scan_beneath`.** The walk streams (`os.scandir` on a descriptor) and never holds a whole directory. Links are listed with kind `link` and never entered.

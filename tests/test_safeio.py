@@ -26,6 +26,17 @@ CAP = 1 << 20
 PROFILE = dict(max_examples=60, derandomize=True, deadline=None, suppress_health_check=[HealthCheck.too_slow])
 
 
+# The expected bits per element of every dtype in the safetensors format, written out by hand. The property tests and the oracle use
+# this table, never the module's, so a wrong entry in the module changes what is accepted and the tests see it.
+BITS = {
+    "BOOL": 8, "U8": 8, "I8": 8, "F8_E5M2": 8, "F8_E4M3": 8, "F8_E8M0": 8,
+    "I16": 16, "U16": 16, "F16": 16, "BF16": 16,
+    "I32": 32, "U32": 32, "F32": 32,
+    "I64": 64, "U64": 64, "F64": 64, "C64": 64,
+    "F4": 4, "F6_E2M3": 6, "F6_E3M2": 6,
+}
+
+
 def fd_count() -> int:
     return len(os.listdir("/proc/self/fd"))
 
@@ -387,6 +398,61 @@ def test_expect_checks_the_top_level_type(tmp_path, text, expect, ok):
             safeio.read_json(path, max_bytes=CAP, expect=expect)
 
 
+def test_oversized_text_is_refused_before_it_is_encoded_or_copied(monkeypatch):
+    """A str longer than the cap in characters is longer in bytes; it is refused without building an encoded copy. A bytearray or a
+    memoryview over the cap is refused without being copied to bytes."""
+    class Spy(str):
+        encoded = 0
+
+        def encode(self, *a, **k):
+            Spy.encoded += 1
+            return super().encode(*a, **k)
+
+    with pytest.raises(TooLarge):
+        safeio.parse_json_bytes(Spy("[" + "1," * 50 + "1]"), max_bytes=20)
+    assert Spy.encoded == 0
+    import tracemalloc
+    big = bytearray(20 * 1024 * 1024)
+    tracemalloc.start()
+    try:
+        with pytest.raises(TooLarge):
+            safeio.parse_json_bytes(big, max_bytes=20)
+        with pytest.raises(TooLarge):
+            safeio.parse_json_bytes(memoryview(big), max_bytes=20)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert peak < 1024 * 1024, peak                          # no copy of the 20 MB buffer was made
+    assert safeio.parse_json_bytes(memoryview(b"[1]"), max_bytes=20) == [1]
+    assert safeio.parse_json_bytes("[1, 2]", max_bytes=20) == [1, 2]
+    with pytest.raises(TooLarge):
+        safeio.parse_json_bytes('["\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9"]', max_bytes=12)      # few characters, but more bytes than the cap
+
+
+def test_the_header_length_is_checked_against_the_limit_and_the_file_before_any_buffer_is_read(tmp_path, monkeypatch):
+    raw = struct.pack("<Q", 10 ** 12) + b"{}"
+    p = tmp_path / "m"
+    p.write_bytes(raw)
+    asked = []
+    real = os.pread
+    monkeypatch.setattr(safeio.os, "pread", lambda fd, n, off: (asked.append(n), real(fd, n, off))[1])
+    with pytest.raises(TooLarge):
+        safeio.safetensors_header(p, max_header_bytes=1 << 20)
+    with pytest.raises(BadHeader):
+        safeio.safetensors_header(p, max_header_bytes=10 ** 13)                 # within the limit, but longer than the file
+    assert sum(asked) <= 16
+
+
+def test_a_shape_with_a_huge_product_is_refused_before_the_product_is_built(tmp_path, monkeypatch):
+    hdr = {"a": entry(dtype="U8", shape=[2 ** 62] * 64, offsets=(0, 4))}
+    p = build_safetensors(tmp_path / "m", header=hdr, data=b"\0" * 4)
+    calls = []
+    real = safeio._numel
+    monkeypatch.setattr(safeio, "_numel", lambda shape, what: (calls.append(1), real(shape, what))[1])
+    with pytest.raises(BadHeader):
+        safeio.safetensors_header(p, max_header_bytes=1 << 20)
+
+
 def test_parse_json_bytes_takes_text_and_enforces_the_cap():
     assert safeio.parse_json_bytes('{"a": 1}', max_bytes=100) == {"a": 1}
     with pytest.raises(TooLarge):
@@ -549,6 +615,48 @@ def test_pinned_root_refuses_a_link_and_a_missing_directory(tmp_path):
             pass
 
 
+@pytest.mark.parametrize("spelling", ["{link}/", "{link}//", "{link}/.", "{link}/./", "{link}///."])
+def test_a_trailing_separator_or_dot_does_not_let_a_linked_root_through(tmp_path, spelling):
+    """The kernel follows a final symlink when the path ends in a slash or a dot, so O_NOFOLLOW alone would not refuse it."""
+    (tmp_path / "real").mkdir()
+    (tmp_path / "real" / "sub").mkdir()
+    (tmp_path / "link").symlink_to("real")
+    (tmp_path / "real" / "sublink").symlink_to("sub")
+    before = fd_count()
+    root = spelling.format(link=tmp_path / "link")
+    with pytest.raises(PathRefused), safeio.pinned_root(root):
+        pass
+    with pytest.raises(PathRefused), safeio.pinned_root(spelling.format(link=tmp_path / "real" / "sublink")):
+        pass
+    with safeio.pinned_root(tmp_path / "real") as pin:                       # a linked child, reached through a pin
+        with pytest.raises(PathRefused):
+            pin.child(("sublink",))
+    assert fd_count() == before
+
+
+def test_trailing_separators_on_a_real_directory_are_stripped_and_the_filesystem_root_is_kept(tmp_path):
+    (tmp_path / "d").mkdir()
+    with safeio.pinned_root(f"{tmp_path}/d//") as pin:
+        assert pin.name == f"{tmp_path}/d"
+    with safeio.pinned_root("/") as pin:
+        assert pin.name == "/"
+    with safeio.pinned_root("//") as pin:
+        assert pin.name == "/"
+    with safeio.pinned_root(".") as pin:                                      # the working directory has no link component to refuse
+        assert pin.name == "."
+
+
+@pytest.mark.parametrize("bad", ["link/", "link//", "link/.", "dir/"])
+def test_an_anchored_or_plain_read_path_that_ends_in_a_separator_or_dot_is_refused(tmp_path, bad):
+    (tmp_path / "real").mkdir()
+    (tmp_path / "link").symlink_to("real")
+    (tmp_path / "dir").mkdir()
+    with safeio.pinned_root(tmp_path) as pin, pytest.raises(PathRefused):
+        safeio.read_json(bad, anchor=pin.fd, max_bytes=CAP)
+    with pytest.raises(PathRefused):
+        safeio.read_json(f"{tmp_path}/{bad}", max_bytes=CAP)
+
+
 def test_pinned_root_refuses_a_file_and_bad_paths(tmp_path):
     (tmp_path / "f").write_text("x")
     with pytest.raises(SafeReadError), safeio.pinned_root(tmp_path / "f"):
@@ -582,6 +690,46 @@ def test_a_pin_follows_the_directory_it_opened_when_the_path_is_swapped(tmp_path
         root.rename(tmp_path / "moved")
         root.symlink_to(other)
         assert pin.read_json(("a.json",), max_bytes=CAP) == {"v": 1}
+
+
+class BytesPath:
+    def __init__(self, p):
+        self.p = os.fsencode(p)
+
+    def __fspath__(self):
+        return self.p
+
+
+@pytest.mark.parametrize("make", [os.fsencode, BytesPath, lambda p: pathlib_path(p)])
+def test_a_bytes_or_pathlike_root_works_with_child_pins_and_leaks_nothing(tmp_path, make):
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "f.json").write_text("[1]")
+    before = fd_count()
+    with safeio.pinned_root(make(str(tmp_path))) as pin:
+        assert isinstance(pin.name, str)
+        with pin.child(("sub",)) as sub:
+            assert sub.read_json(("f.json",), max_bytes=CAP) == [1]
+            assert isinstance(sub.name, str)
+    assert fd_count() == before
+
+
+def pathlib_path(p):
+    return Path(p)
+
+
+def test_every_failure_of_the_root_and_child_paths_leaves_no_descriptor(tmp_path):
+    (tmp_path / "real").mkdir()
+    (tmp_path / "link").symlink_to("real")
+    (tmp_path / "f").write_text("x")
+    before = fd_count()
+    for bad in (tmp_path / "link", tmp_path / "none", tmp_path / "f", os.fsencode(tmp_path / "link"), str(tmp_path / "link") + "/"):
+        with pytest.raises(SafeReadError), safeio.pinned_root(bad):
+            pass
+    with safeio.pinned_root(tmp_path) as pin:
+        for parts in (("link",), ("none",), ("f",), ("real", "none"), ("..",)):
+            with pytest.raises(SafeReadError):
+                pin.child(parts)
+    assert fd_count() == before
 
 
 def test_a_child_pin_is_a_pin_on_the_subdirectory(tmp_path):
@@ -1478,14 +1626,24 @@ def test_a_bad_header_limit_is_a_programming_error(tmp_path, bad):
         safeio.safetensors_header(tmp_path / "x", max_header_bytes=bad)
 
 
-def test_the_dtype_table_matches_the_format():
-    assert safeio.DTYPE_BITS["F32"] == 32 and safeio.DTYPE_BITS["BF16"] == 16 and safeio.DTYPE_BITS["F4"] == 4
-    assert all(isinstance(v, int) and v > 0 for v in safeio.DTYPE_BITS.values())
+def test_the_dtype_table_is_exactly_the_hand_written_one():
+    assert safeio.DTYPE_BITS == BITS
+
+
+@pytest.mark.parametrize("dtype", sorted(BITS))
+def test_each_dtype_is_accepted_only_at_its_true_size(tmp_path, dtype):
+    """A tensor of 24 elements occupies exactly 24 * bits / 8 bytes, whatever the module's table says."""
+    good = BITS[dtype] * 24 // 8
+    ok = {"a": entry(dtype=dtype, shape=(24,), offsets=(0, good))}
+    assert safeio.safetensors_header(build_safetensors(tmp_path / "ok", header=ok, data=b"\0" * good), max_header_bytes=1 << 20)
+    for wrong in (good - 1, good + 1, good * 2, good // 2):
+        bad = {"a": entry(dtype=dtype, shape=(24,), offsets=(0, wrong))}
+        with pytest.raises(BadHeader):
+            safeio.safetensors_header(build_safetensors(tmp_path / "bad", header=bad, data=b"\0" * wrong), max_header_bytes=1 << 20)
 
 
 # ----- the property tests: an independent oracle states what an accepted header must satisfy
 
-BITS = safeio.DTYPE_BITS
 
 
 def oracle_ok(header, data_size) -> bool:
