@@ -414,10 +414,9 @@ def status_report(directory, scope: str = DEFAULT_SCOPE) -> dict:
                             "cache_rows": conn.execute("SELECT COUNT(*) FROM telegraph_cache WHERE scope = ?", (scope,)).fetchone()[0],
                             "unconfirmed": meta("unreconciled"), "cutover": meta(cutover_key(scope))})
         try:
-            names = os.listdir(os.path.join(ro.directory, "backups"))
-        except OSError:
-            names = []
-        out["backups"] = sorted(n for n in names if n.startswith("project-") and n.endswith(".db"))
+            out["backups"] = ro.list_backups()
+        except (LedgerUnavailable, LedgerRefused) as exc:
+            out["backups"], out["backups_error"] = None, str(exc)             # unreadable is not the same as none
         return out
     finally:
         ro.close()

@@ -41,6 +41,7 @@ from dataclasses import dataclass, field
 from orchard import safeio
 from orchard import telegraph as tg
 from orchard import telegraph_store as ts
+from orchard import db as dbm
 from orchard.db import Database, LedgerRefused, LedgerUnavailable, private_directory
 
 MAX_LEDGER_BYTES = 16 * 1024 * 1024               # the page refuses a larger ledger too; a larger one needs a person to look
@@ -136,7 +137,10 @@ MAX_DIRECTORY_ENTRIES = 200_000
 
 def _listdir(fd: int) -> list[str]:
     """The names in a directory, refusing a directory of more than MAX_DIRECTORY_ENTRIES (a hostile or runaway directory)."""
-    names = os.listdir(fd)
+    try:
+        names = os.listdir(fd)
+    except OSError as exc:
+        raise MigrationRefused(f"cannot list a folder ({exc.strerror}); a person has to look at it") from exc
     if len(names) > MAX_DIRECTORY_ENTRIES:
         raise MigrationRefused(f"a directory has more than {MAX_DIRECTORY_ENTRIES} entries; a person has to look at it")
     return names
@@ -244,8 +248,12 @@ def _cache_items(dir_fd: int) -> tuple[list, int]:
     """([(identity, entry)], skipped): the entries of `cache/*.json` that hold an answer and a reply file name."""
     try:
         cfd = os.open("cache", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | _O_CLOEXEC, dir_fd=dir_fd)
-    except OSError:
-        return [], 0                                   # no cache directory, or a link: nothing to import
+    except FileNotFoundError:
+        return [], 0                                   # no cache directory: nothing to import
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+            return [], 1                               # a link or a file in its place is not followed; it is counted as skipped
+        raise MigrationRefused(f"cannot open the cache folder ({exc.strerror}); a person has to look at it") from exc
     items, skipped = [], 0
     try:
         for name in sorted(_listdir(cfd)):
@@ -419,8 +427,7 @@ def _run(db: Database, dir_fd: int, scope: str, max_output_tokens: int, accept_m
         if fresh:
             _refuse_malformed(parse_jsonl(_without_fragment(data)), accept_malformed)      # before anything is written
             try:
-                safeio.atomic_write(os.path.join(directory, ts.MARKER_MIGRATING),                # step 2
-                                    _marker_body(scope, hashlib.sha256(data).hexdigest()), mode=0o600)
+                dbm.write_file_in(dir_fd, ts.MARKER_MIGRATING, _marker_body(scope, hashlib.sha256(data).hexdigest()))      # step 2
             except OSError as exc:
                 raise MigrationRefused(f"cannot write {ts.MARKER_MIGRATING}: {exc.strerror}") from exc
         hook("after:2")
@@ -571,7 +578,7 @@ def _step6(db, dir_fd, scope, hook) -> None:
     body = json.dumps({"migrated_at": time.strftime("%Y-%m-%dT%H:%M:%S"), "archive": ts.ARCHIVE if archived else None,
                        "sha256": db.meta_get(f"imported_sha256:{scope}"),
                        "records": int(db.meta_get(f"imported_records:{scope}") or "0"), "scope": scope}, sort_keys=True) + "\n"
-    safeio.atomic_write(os.path.join(db.directory, ts.MARKER_MIGRATED), body, mode=0o600)
+    dbm.write_file_in(dir_fd, ts.MARKER_MIGRATED, body)
     hook("after:6a")
     _set_phase(db, scope, "complete")
     hook("after:6b")

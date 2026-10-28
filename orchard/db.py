@@ -141,6 +141,39 @@ def _fsync_dir_fd(fd: int) -> None:
 
 # ------------------------------------------------------------------------------------------------ I4: the directory
 
+def open_child_dir(parent_fd: int, name: str, *, create: bool = False) -> int:
+    """A directory named `name` directly under the directory `parent_fd`, as a descriptor (the caller closes it). With `create` a missing
+    one is made (mode 0700) first. The open is `O_DIRECTORY | O_NOFOLLOW` relative to the parent, so a link in its place is refused
+    (`UnsafeDirectory`) before anything is created through it, and another user's directory is refused. A missing directory without
+    `create` raises FileNotFoundError: the caller decides whether absence is fine. Everything under a state directory that is made or
+    opened goes through this, one component at a time."""
+    if create:
+        try:
+            os.mkdir(name, 0o700, dir_fd=parent_fd)
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            raise LedgerUnavailable(f"cannot create {name}: {exc.strerror or type(exc).__name__}") from exc
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | _O_CLOEXEC, dir_fd=parent_fd)
+    except FileNotFoundError:
+        raise
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise UnsafeDirectory(f"{name} is a link or not a directory") from exc
+        raise LedgerUnavailable(f"cannot open {name}: {exc.strerror or type(exc).__name__}") from exc
+    try:
+        st = os.fstat(fd)
+        if st.st_uid != os.geteuid():
+            raise UnsafeDirectory(f"{name} belongs to another user")
+        if create and stat.S_IMODE(st.st_mode) & 0o077:
+            os.fchmod(fd, 0o700)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
 def private_directory(directory) -> int:
     """Make `directory` a private state directory and return a descriptor for it (the caller closes it).
 
@@ -217,6 +250,30 @@ def ro_uri(path) -> str:
     return Path(os.path.abspath(os.fspath(path))).as_uri() + "?mode=ro"
 
 
+def write_file_in(dir_fd: int, name: str, body: str, mode: int = 0o600) -> None:
+    """Replace the file `name` directly under the directory `dir_fd` with `body`, whole or not at all: a temporary file made with
+    `O_EXCL | O_NOFOLLOW` beneath the descriptor, written, synced, renamed over `name` (a link at `name` is replaced, never written
+    through), and the directory synced. Used for the markers and `INITIALIZED`, so no path is looked up again after the directory was
+    checked. Raises OSError."""
+    tmp = f".{name}.{os.urandom(6).hex()}.tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | _O_CLOEXEC, mode, dir_fd=dir_fd)
+    try:
+        try:
+            os.fchmod(fd, mode)
+            safeio._write_all(fd, body.encode("utf-8"))
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.rename(tmp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    except BaseException:
+        try:
+            os.unlink(tmp, dir_fd=dir_fd)
+        except OSError:
+            pass
+        raise
+    os.fsync(dir_fd)
+
+
 def _lock_file(dir_fd: int, name: str, how: int, timeout_s: float, *, create: bool) -> int:
     """Open a lock file under a directory descriptor and take `how` (a flock) without blocking for longer than `timeout_s`. With
     `create` False a missing lock file gives -1 (a reader never creates one). Returns the descriptor; closing it releases the lock."""
@@ -251,6 +308,22 @@ def _lock_file(dir_fd: int, name: str, how: int, timeout_s: float, *, create: bo
     except BaseException:
         os.close(fd)
         raise
+
+
+def _list_backups(dir_fd: int) -> list[str]:
+    """Backup file names under a state directory, oldest first. An absent folder is no backups; a link, another user's folder or one that
+    cannot be listed is an error and not an empty answer."""
+    try:
+        fd = open_child_dir(dir_fd, "backups")
+    except FileNotFoundError:
+        return []
+    try:
+        names = os.listdir(fd)
+    except OSError as exc:
+        raise LedgerUnavailable(f"cannot list the backups: {exc.strerror}") from exc
+    finally:
+        os.close(fd)
+    return sorted(n for n in names if n.startswith("project-") and n.endswith(".db"))
 
 
 class Database:
@@ -336,8 +409,7 @@ class Database:
             self._maybe_backup()
             if not _exists(self._dirfd, INIT_NAME):                 # durable evidence that must exist before the first reservation
                 try:
-                    safeio.atomic_write(os.path.join(self.directory, INIT_NAME), json.dumps(
-                        {"initialized": time.strftime("%Y-%m-%dT%H:%M:%S")}) + "\n", mode=0o600)
+                    write_file_in(self._dirfd, INIT_NAME, json.dumps({"initialized": time.strftime("%Y-%m-%dT%H:%M:%S")}) + "\n")
                 except OSError as exc:
                     raise _unavailable(exc, "cannot record that the ledger exists") from exc
         finally:
@@ -592,7 +664,7 @@ class Database:
         body = json.dumps({"reason": reason[:400], "time": time.strftime("%Y-%m-%dT%H:%M:%S"), "moved_to": moved_to,
                            "pid": os.getpid()}, sort_keys=True) + "\n"
         try:
-            safeio.atomic_write(os.path.join(self.directory, MARKER_NAME), body, mode=0o600)     # syncs the file and the directory
+            write_file_in(self._dirfd, MARKER_NAME, body)                     # syncs the file and the directory
         except OSError as exc:
             raise _unavailable(exc, "cannot write the recovery marker") from exc
 
@@ -765,23 +837,17 @@ class Database:
 
     def list_backups(self) -> list[str]:
         """Backup file names, oldest first (the names sort by time)."""
-        try:
-            names = os.listdir(self._backup_dir())
-        except FileNotFoundError:
-            return []
-        except OSError as exc:
-            raise LedgerUnavailable(f"cannot list the backups: {exc.strerror}") from exc
-        return sorted(n for n in names if n.startswith("project-") and n.endswith(".db"))
+        return _list_backups(self._dirfd)
 
     def backup(self) -> str:
         """An online backup (the SQLite backup API) into `backups/`, private, with a name that sorts by time. Returns its path.
         The newest BACKUP_KEEP are kept."""
-        bdir_fd = private_directory(self._backup_dir())
+        bdir_fd = open_child_dir(self._dirfd, "backups", create=True)
         try:
             name = f"project-{time.strftime('%Y%m%dT%H%M%S')}-{time.monotonic_ns()}.db"
             fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | _O_CLOEXEC, 0o600, dir_fd=bdir_fd)
             os.close(fd)
-            target = sqlite3.connect(os.path.join(self._backup_dir(), name), isolation_level=None)
+            target = sqlite3.connect(f"/proc/self/fd/{bdir_fd}/{name}", isolation_level=None)   # this very folder, not a path looked up again
             try:
                 self.conn().backup(target)
             except sqlite3.Error as exc:
@@ -893,6 +959,9 @@ class ReadOnlyDatabase:
         except BaseException:
             self.close()
             raise
+
+    def list_backups(self) -> list[str]:
+        return _list_backups(self._dirfd) if self._dirfd >= 0 else []
 
     def marker(self) -> dict | None:
         if self._dirfd < 0 or not _exists(self._dirfd, MARKER_NAME):

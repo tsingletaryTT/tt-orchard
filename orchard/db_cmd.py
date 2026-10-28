@@ -33,40 +33,87 @@ from orchard import telegraph_store as ts
 EXIT_OK, EXIT_PROBLEM = 0, 2
 
 
-def reply_ids_by_scope(directory) -> dict[str, list[str]]:
-    """The call ids of the reply files of a state directory, grouped by the scope that made them: `replies/<id>.txt` is the default scope
-    and `replies/s~<quoted scope>/<id>.txt` is another. Regular files only; no link is followed and a huge folder is refused."""
+def reply_scan(directory) -> tuple[dict[str, list[str]], list[str]]:
+    """(ids by scope, what could not be scanned). The reply files of a state directory grouped by the scope that made them:
+    `replies/<id>.txt` is the default scope and `replies/s~<quoted scope>/<id>.txt` is another. Absence is not a failure (no `replies` folder
+    means nothing was answered) and a link is skipped on purpose and never followed. Anything else that stops the scan (a folder that
+    cannot be opened or listed, `replies` that is not a folder, too many entries) is named in the second list: the scan is incomplete."""
     out: dict[str, list[str]] = {}
+    failed: list[str] = []
 
-    def collect(fd) -> list[str]:
+    def collect(fd, label) -> list[str]:
         ids = []
-        for name in sorted(mig._listdir(fd)):
-            if name.endswith(".txt"):
-                try:
-                    if stat.S_ISREG(os.stat(name, dir_fd=fd, follow_symlinks=False).st_mode):
-                        ids.append(name[:-4])
-                except OSError:
-                    continue
+        try:
+            names = sorted(mig._listdir(fd))
+        except mig.MigrationRefused as exc:
+            failed.append(f"{label}: {exc}")
+            return ids
+        for name in names:
+            if not name.endswith(".txt"):
+                continue
+            try:
+                if stat.S_ISREG(os.stat(name, dir_fd=fd, follow_symlinks=False).st_mode):
+                    ids.append(name[:-4])
+            except FileNotFoundError:
+                continue                                           # removed while we looked
+            except OSError as exc:
+                failed.append(f"{label}/{name}: {exc.strerror}")
         return ids
 
     try:
-        with safeio.pinned_root(Path(directory) / "replies") as pin:
-            top = collect(pin.fd)
+        root_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return out, failed
+    except OSError as exc:
+        return out, [f"the state directory: {exc.strerror}"]
+    try:
+        try:
+            replies = dbm.open_child_dir(root_fd, "replies")
+        except FileNotFoundError:
+            return out, failed
+        except (dbm.LedgerUnavailable, dbm.LedgerRefused) as exc:
+            return out, [f"replies: {exc}"]
+        try:
+            top = collect(replies, "replies")
             if top:
                 out[ts.DEFAULT_SCOPE] = top
-            for name in sorted(mig._listdir(pin.fd)):
+            try:
+                entries = sorted(mig._listdir(replies))
+            except mig.MigrationRefused as exc:
+                return out, failed + [f"replies: {exc}"]
+            for name in entries:
                 if not name.startswith(tg.REPLY_SCOPE_PREFIX):
                     continue
                 try:
-                    with pin.child([name]) as sub:
-                        ids = collect(sub.fd)
-                except safeio.SafeReadError:
+                    st = os.stat(name, dir_fd=replies, follow_symlinks=False)
+                except OSError as exc:
+                    failed.append(f"replies/{name}: {exc.strerror}")
                     continue
+                if not stat.S_ISDIR(st.st_mode):
+                    continue                                       # a link or a file named like a scope folder: skipped on purpose
+                try:
+                    sub = dbm.open_child_dir(replies, name)
+                except FileNotFoundError:
+                    continue
+                except (dbm.LedgerUnavailable, dbm.LedgerRefused) as exc:
+                    failed.append(f"replies/{name}: {exc}")
+                    continue
+                try:
+                    ids = collect(sub, f"replies/{name}")
+                finally:
+                    os.close(sub)
                 if ids:
                     out[urllib.parse.unquote(name[len(tg.REPLY_SCOPE_PREFIX):])] = ids
-    except safeio.SafeReadError:
-        return {}
-    return out
+        finally:
+            os.close(replies)
+    finally:
+        os.close(root_fd)
+    return out, failed
+
+
+def reply_ids_by_scope(directory) -> dict[str, list[str]]:
+    """The ids found by `reply_scan` (see it for what an incomplete scan means)."""
+    return reply_scan(directory)[0]
 
 
 def reply_ids(directory) -> list[str]:
@@ -221,8 +268,15 @@ def _confirm(directory, scope, cfg, args, say) -> int:
         say(f"the ledger is unconfirmed: {reason or (marker or {}).get('reason')}")
         if not getattr(args, "no_replies", False):
             tokens, cost = tg.worst_case_call(cfg)
+            by_scope, incomplete = reply_scan(directory)
+            if incomplete:                                       # a scan that did not finish must not let the recovery be cleared
+                say("db confirm-restore: the reply files could not be read completely, so the charges would be incomplete:")
+                for why in incomplete[:10]:
+                    say(f"  {why}")
+                say("Fix that and run again, or pass --no-replies to say you checked the replies another way.")
+                return EXIT_PROBLEM
             added = 0
-            for reply_scope, ids in sorted(reply_ids_by_scope(directory).items()):       # each reply goes to the scope that made it
+            for reply_scope, ids in sorted(by_scope.items()):                            # each reply goes to the scope that made it
                 added += ts.TelegraphStore(db, reply_scope, guard=False).add_recovered_reservations(ids, tokens, cost)
             say(f"{added} reply file(s) had no ledger record; each was added as an unsettled reservation at the worst case "
                 f"({tokens} tokens" + (f", up to ${cost:.4f}" if cost is not None else ", cost unknown") + "), so the counted spend only goes up")

@@ -736,7 +736,6 @@ def test_a_backup_dir_that_is_a_link_is_refused(tmp_path):
     outside = tmp_path / "outside"
     outside.mkdir()
     (d / "backups").symlink_to(outside)
-    with dbm.Database(d, backup_interval_s=None) as db:
-        with pytest.raises(dbm.UnsafeDirectory):
-            db.backup()
+    with pytest.raises(dbm.UnsafeDirectory):                          # the open lists the backups, and a link is refused there
+        dbm.Database(d, backup_interval_s=None)
     assert list(outside.iterdir()) == []

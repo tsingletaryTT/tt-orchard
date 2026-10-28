@@ -42,6 +42,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from orchard import db as dbm
 from orchard import telegraph_store as store_mod
 from orchard.db import LedgerRefused, LedgerUnavailable
 from orchard.scrub import HOME_PATH, TOKEN_PATTERNS
@@ -753,7 +754,7 @@ class Telegraph:
         price = self.cfg.prices.get(model)
         cost = None if estimated else (round(tin * price[0] / 1e6 + tout * price[1] / 1e6, 9) if price else None)
         reply_file = self._reply_name(base["call_id"])
-        self._write(self.dir / reply_file, text)
+        self._write_reply(reply_file, text)
         # The settlement and the cache row are one transaction: the answer is cached only together with its call, so it can be
         # reported.
         recorded = self._append(store, {**rec, "outcome": "ok", "tokens_in": tin, "tokens_out": tout, "cost_usd": cost,
@@ -822,18 +823,29 @@ class Telegraph:
         except LEDGER_ERRORS:
             return False
 
-    def _write(self, path: Path, text: str) -> None:
-        """Write a reply file, private. The directory must be a real directory (not a link) and the file is not followed if it
-        is one. A failure is silent: the answer is also in the ledger's cache row."""
+    def _write_reply(self, relative: str, text: str) -> None:
+        """Write a reply file, private, under the state directory. Each folder on the way (`replies`, then a scope's folder) is made and
+        opened beneath the descriptor of the one before it, with links refused, so a link in the state directory cannot send the
+        write elsewhere; the file is created with `O_NOFOLLOW`. A failure is silent: the answer is also in the ledger's cache row."""
+        parts = relative.split("/")
+        fds = []
         try:
-            path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            if path.parent.is_symlink():
-                return
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+            fd = dbm.private_directory(self.dir)
+            fds.append(fd)
+            for part in parts[:-1]:
+                fd = dbm.open_child_dir(fd, part, create=True)
+                fds.append(fd)
+            out = os.open(parts[-1], os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0), 0o600, dir_fd=fd)
             try:
-                os.fchmod(fd, 0o600)
-                os.write(fd, text.encode("utf-8"))
+                os.fchmod(out, 0o600)
+                os.write(out, text.encode("utf-8"))
             finally:
-                os.close(fd)
-        except OSError:
+                os.close(out)
+        except (OSError, LedgerUnavailable, LedgerRefused):
             pass
+        finally:
+            for f in fds:
+                try:
+                    os.close(f)
+                except OSError:
+                    pass
