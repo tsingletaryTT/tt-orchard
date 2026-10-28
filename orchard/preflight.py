@@ -111,6 +111,13 @@ def _missing_weights(hub: HubInfo, snapshot: Path) -> list[str]:
     return [n for n in hub.files if _WEIGHT_NAME.search(n) and not (snapshot / n).exists()]
 
 
+def _missing_listed(hub: HubInfo, snapshot: Path) -> list[str]:
+    """What an audio snapshot needs from the Hub's file list and does not have: every weight file (as `_missing_weights`) and every
+    `config.json` of a component directory (the text encoder's, which stage 0 compares). A link that points nowhere counts as missing."""
+    wanted = [n for n in hub.files if _WEIGHT_NAME.search(n) or (n.endswith("/config.json") and n.count("/") >= 1)]
+    return [n for n in wanted if not (snapshot / n).is_file()]
+
+
 def check_hub(hub: HubInfo | None, error: str | None, local: bool, local_path: Path | None = None) -> Check:
     if hub is None:
         if local:
@@ -548,14 +555,14 @@ def _audio_base(*, model_id: str, base: str, inferred: bool, report, accept_infe
         return None
     gated_note = ""
     if info is not None and (info.private or info.gated):
-        if info.private or snap is None or _missing_weights(info, Path(snap)):
+        if info.private or snap is None or _missing_listed(info, Path(snap)):
             return Check("base", BLOCK, f"the base model {base} is gated or private, and no complete copy is on disk. The harness never uses "
                          "your Hugging Face token, so it cannot fetch it. Download it yourself, then run bringup again",
                          "credentials-needed", data=data)
         gated_note = (f" It is gated; the harness does not use a token, and a complete copy was found on disk at revision "
                       f"{Path(snap).name[:12]}.")
     # A public base whose cached copy lacks a weight file the Hub lists is incomplete: it is downloaded again (a gated one blocked above).
-    missing = _missing_weights(info, Path(snap)) if info is not None and snap is not None else []
+    missing = _missing_listed(info, Path(snap)) if info is not None and snap is not None else []
     if missing:
         snap = None
     data.update(snapshot=snap, needs_fetch=snap is None)
