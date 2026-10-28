@@ -9,6 +9,7 @@ builder as a subprocess. The real stage 8 gate and the real bundle scrub check t
 must give the same RESULTS.md, RISKS.md and file list as before.
 """
 import json
+import pytest
 import re
 import shutil
 import sys
@@ -111,8 +112,9 @@ def test_a_run_without_audio_result_gets_the_same_results_risks_and_files(tmp_pa
     arun = audio_run(other)
     aresults, arisks, _ = built(arun)
     cut = aresults[aresults.index("\n" + HEADING):aresults.index("\n## Stage 0")]
-    assert aresults.replace(cut, "") == results          # the section is the only change to RESULTS.md
-    assert arisks.split("## TODO numbers", 1)[1] == risks.split("## TODO numbers", 1)[1]
+    assert "Audio clip on a chip" in cut and "stages/1/audio_reference.json" in aresults    # the audio run points at its own stage 1 record
+    assert "stages/1/reference.json" not in aresults        # and cites no text-model file it does not have
+    assert "stages/4/result.json" not in arisks            # an audio run skips stage 4, so it owes no stage 4 numbers
 
 
 # ---- the section ----------------------------------------------------------------------------------------
@@ -397,3 +399,19 @@ def test_the_new_text_has_none_of_the_phrases_the_style_rules_forbid(tmp_path):
         for phrase in SWEEP:
             assert phrase not in text, phrase
         assert not re.search(r"(/home/|/mnt/|/tmp/)", text)
+
+
+def test_an_audio_run_needs_no_text_reference_file_and_a_text_run_still_does(tmp_path):
+    arun = audio_run(tmp_path)
+    ref = arun / "stages" / "1" / "reference.json"
+    if ref.exists():
+        ref.unlink()
+    (arun / "stages" / "2" / "result.json").unlink(missing_ok=True)
+    results, _, _ = built(arun)
+    assert "Audio clip on a chip" in results
+    text = tmp_path / "text"
+    text.mkdir()
+    trun = make_run(text)
+    (trun / "stages" / "1" / "reference.json").unlink()
+    with pytest.raises(Exception):
+        built(trun)

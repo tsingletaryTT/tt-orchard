@@ -252,7 +252,9 @@ class Run:
         self.path = stages_mod.run_path(entries, run_dir)
         self.cls = stages_mod.run_class(entries, run_dir)
         self.package_format = stages_mod.package_format(entries)
-        self.specs = {n: stages_mod.spec_for(n, self.path, self.package_format, self.cls) for n in range(9)}
+        # An audio run (the harness's own audio runtime) wrote stage 2's audio_result.json and has the audio stage table.
+        self.audio_run = (run_dir / "stages" / "2" / "audio_result.json").is_file()
+        self.specs = {n: stages_mod.spec_for(n, self.path, self.package_format, self.cls, audio_runtime=self.audio_run) for n in range(9)}
         self.outcome = {}          # stage -> the data of its last stage_end
         self.attempts = {}         # stage -> stage_start entries that were not a skip
         for e in entries:
@@ -263,12 +265,13 @@ class Run:
                 self.attempts[n] = self.attempts.get(n, 0) + 1
         s = run_dir / "stages"
         self.delta = read_json(s / "0" / "delta.json", "stages/0/delta.json", required=True)
-        self.reference = read_json(s / "1" / "reference.json", "stages/1/reference.json", required=True)
+        # An audio run has no reference.json: stage 1 wrote audio_reference.json, which the audio section reads through stage 2's result.
+        self.reference = {} if self.audio_run else read_json(s / "1" / "reference.json", "stages/1/reference.json", required=True)
         self.results = {}
         for n in range(2, 7):
             spec = self.specs[n]
-            if spec.skip or not spec.gate_file:
-                continue
+            if spec.skip or not spec.gate_file or (self.audio_run and n == 2):
+                continue            # an audio run's stage 2 file is the audio result, which the audio section reads
             rel = f"stages/{n}/{spec.gate_file}"
             self.results[n] = read_json(run_dir / rel, rel, required=self.result(n) == "pass")
         # How each swap check served (the drafter and where sampling happened), as the check recorded it.
@@ -784,6 +787,9 @@ def stage_results(run: Run, redact: Redactor) -> dict[int, list[str]]:
     if isinstance(arts, dict) and arts:
         lines += ["", "Reference files: " + ev(list(arts.values())) + "."]
     body[1] = lines + ["", "Evidence: `stages/1/reference.json`."]
+    if run.audio_run:
+        body[1] = ["The CPU reference runs (the model, its base as the control, and one run in the chip's interpreter) are listed in the section "
+                   "Audio clip on a chip.", "", "Evidence: `stages/1/audio_reference.json`."]
 
     for n in (2, 3, 5, 6):
         res = run.results.get(n)
