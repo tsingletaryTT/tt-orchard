@@ -35,6 +35,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import statistics
 from dataclasses import dataclass
 from pathlib import Path
@@ -517,7 +518,9 @@ def running_doc(f: Facts) -> str:
             f"1. Accept the model's terms on its Hugging Face page and download revision `{f.revision}`: `hf download {MODEL_ID} --revision {f.revision}`.\n"
             "2. Check out the stable-audio-3 library at the commit the card names and set `ORCHARD_AUDIO_SRC` to it. "
             "Set `ORCHARD_TTNN_PYTHON` to a Python that has ttnn.\n"
-            "3. Start the server and the page: `./run.sh`. It first checks that the cache resolves the model to the revision above and stops if it does not. "
+            "3. Start the server and the page: `./run.sh`. It first checks that the runtime would load the revision above and stops if it would not. "
+            "The runtime finds the model through the cache's `main` reference, and a download of one revision does not set that reference, so the check "
+            "can print one line (`echo <revision> > <cache>/refs/main`) that points it at the pinned revision. Run that line and start again. "
             "On a shared machine, hold a chip lease for the whole run.\n\n"
             "The model is licensed under the " + LICENSE_NAME + " (`LICENSE.md`). Read it before you use or share the model or this package. "
             "This package does not include the model weights.\n")
@@ -628,7 +631,8 @@ def _bench_label_at(evidence: Path, seconds: float) -> str | None:
         bench = safeio.read_json(evidence, max_bytes=MAX_JSON_BYTES, expect=dict)
     except safeio.SafeReadError:
         return None
-    for s in bench.get("sizes") or []:
+    sizes = bench.get("sizes")
+    for s in sizes if isinstance(sizes, list) else []:
         if isinstance(s, dict) and s.get("seconds") == seconds and isinstance(s.get("runs"), list) and isinstance(s.get("warmup_runs"), int):
             return label_for(len(s["runs"]), s["warmup_runs"])
     return None
@@ -733,12 +737,12 @@ def card_problems(card: str, pkg: Path, *, license_bytes: bytes | None = None, n
     if facts is None:
         problems.append(f"the package's evidence cannot back a card: {why}")
     has_benchmark = False
-    shown = set()
+    shown = []
     for cells in rows:
         if len(cells) != 4:
             problems.append(f"Numbers row {cells!r} needs four cells")
             continue
-        shown.add(tuple(cells))
+        shown.append(tuple(cells))
         name, value, label, evidence = cells
         if label not in LABELS:
             problems.append(f"number {name!r} has label {label!r}; a label is one of {', '.join(LABELS)}")
@@ -766,16 +770,21 @@ def card_problems(card: str, pkg: Path, *, license_bytes: bytes | None = None, n
             problems.append(f"number {name!r} is an agreement number and the card does not say the bars are provisional")
     if facts is not None:
         wanted = {_row_key(r): r for r in number_rows(facts)}
-        have_names = {c[0]: c for c in shown}
-        for key, r in wanted.items():
-            if key not in shown:
-                got = have_names.get(r[0])
-                detail = f"the card has {got[1]} ({got[2]})" if got else "the card has no such row"
-                problems.append(f"the Numbers row {r[0]!r} must be {key[1]} ({key[2]}) as the evidence gives; {detail}")
         names = {r[0] for r in wanted.values()}
+        for key, r in wanted.items():
+            count = shown.count(key)
+            if count == 0:
+                got = [c for c in shown if c[0] == r[0]]
+                detail = f"the card has {got[0][1]} ({got[0][2]})" if got else "the card has no such row"
+                problems.append(f"the Numbers row {r[0]!r} must be {key[1]} ({key[2]}) as the evidence gives; {detail}")
+            elif count > 1:
+                problems.append(f"the Numbers row {r[0]!r} appears {count} times")
         for c in shown:
-            if c[0] not in names:
-                problems.append(f"the Numbers table has a row the evidence does not give: {c[0]!r}")
+            if c not in wanted:
+                if c[0] in names:
+                    problems.append(f"the Numbers table has a second row for {c[0]!r} that the evidence does not give: {c[1]} ({c[2]})")
+                else:
+                    problems.append(f"the Numbers table has a row the evidence does not give: {c[0]!r}")
     if not has_benchmark and re.search(r"benchmark", prose, re.I):
         problems.append("the card uses the word benchmark and has no row that earns the label")
     for hit in PERF_IN_PROSE.finditer(prose):
@@ -814,43 +823,81 @@ def weights_problems(pkg: Path) -> list[str]:
     return problems
 
 
+def unreadable_entries(pkg: Path) -> list[str]:
+    """Entries the gate does not open: a link, a FIFO, a socket or a device (opening one can block or leave the package), and a regular file over the size
+    the package allows. Each is a problem by itself, and when there is one the gate reads nothing else."""
+    out = []
+    for dirpath, dirnames, filenames in os.walk(pkg, followlinks=False):
+        for name in sorted(dirnames + filenames):
+            f = Path(dirpath) / name
+            rel = f.relative_to(pkg).as_posix()
+            mode = os.lstat(f).st_mode
+            if stat.S_ISLNK(mode):
+                out.append(f"{rel}: a symbolic link; the package holds no links")
+            elif not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
+                out.append(f"{rel}: not a regular file (a FIFO, socket or device); the package holds only regular files")
+            elif stat.S_ISREG(mode) and os.lstat(f).st_size > WEIGHT_MAX_BYTES:
+                out.append(f"{rel}: {os.lstat(f).st_size} bytes; no file in the package is over {WEIGHT_MAX_BYTES} bytes, and the weights are not shipped")
+    return out
+
+
+def _text(path: Path) -> str | None:
+    """The text of a small regular file in the package, or None when it is missing, not a regular file, too large or not UTF-8. Never blocks."""
+    try:
+        return safeio.read_bytes(path, max_bytes=2 * 1024 * 1024).decode("utf-8")
+    except (safeio.SafeReadError, UnicodeDecodeError):
+        return None
+
+
 def package_problems(pkg, *, hostname: str | None = None, home: str | None = None, validate_manifest=None) -> list[str]:
     """The gate: everything wrong with the staged package at `pkg`, read from disk. An empty list means the package passes.
+
+    A package with an entry the gate will not open (a link, a FIFO, an oversized file) is refused on that alone, before anything is read. Every read
+    after that is of a small regular file through `safeio`. A shape no check names (a file that is JSON of the wrong type, say) is a problem and not a
+    traceback.
 
     `validate_manifest(path)` is optional: a callable that returns a list of problems with tt-model.yaml (tests pass one; the command passes the
     installed tt_kernel's loader when it is importable)."""
     pkg = Path(pkg)
     if not pkg.is_dir():
         return [f"{pkg} is not a directory"]
+    odd = unreadable_entries(pkg)
+    if odd:
+        return sorted(set(weights_problems(pkg) + odd))
+    try:
+        return _gate(pkg, hostname, home, validate_manifest)
+    except (OSError, TypeError, ValueError, AttributeError, KeyError, UnicodeError) as exc:
+        return [f"the gate could not read the package ({type(exc).__name__})"]
+
+
+def _gate(pkg: Path, hostname, home, validate_manifest) -> list[str]:
     problems = weights_problems(pkg)
     problems += [f"scrub: {hit}" for hit in scrub_package(pkg, hostname=hostname, home=home)]
-    try:
-        card = (pkg / "README.md").read_text(encoding="utf-8")
-    except OSError:
+    card = _text(pkg / "README.md")
+    if card is None:
         return problems + ["the package has no README.md card"]
-    lic = (pkg / "LICENSE.md")
-    notice = (pkg / "NOTICE")
-    lic_bytes = lic.read_bytes() if lic.is_file() else None
-    notice_s = notice.read_text(encoding="utf-8") if notice.is_file() else None
+    lic_text = _text(pkg / "LICENSE.md")
+    lic_bytes = lic_text.encode("utf-8") if lic_text is not None else None
+    notice_s = _text(pkg / "NOTICE")
     problems += card_problems(card, pkg, license_bytes=lic_bytes, notice=notice_s)
-    page = pkg / "demo" / "audio_app.py"
-    if not page.is_file():
+    page = _text(pkg / "demo" / "audio_app.py")
+    if page is None:
         problems.append("the package has no demo/audio_app.py, the page")
-    elif POWERED_BY not in page.read_text(encoding="utf-8"):
+    elif POWERED_BY not in page:
         problems.append(f"the page (demo/audio_app.py) must display {POWERED_BY!r}")
-    docs = [p for p in (pkg / "docs").glob("*.md")] if (pkg / "docs").is_dir() else []
+    docs = sorted((pkg / "docs").glob("*.md")) if (pkg / "docs").is_dir() else []
     if not docs:
         problems.append("the package has no documentation file in docs/")
     for d in docs:
-        if POWERED_BY not in d.read_text(encoding="utf-8"):
+        if POWERED_BY not in (_text(d) or ""):
             problems.append(f"docs/{d.name} must display {POWERED_BY!r}")
     for name in REQUIRED_FILES:
         if not (pkg / name).is_file():
             problems.append(f"the package has no {name}")
     facts, _ = package_facts(pkg)
     if facts is not None:                      # the pin is the same everywhere it is written, and the launcher checks it
-        run_sh = (pkg / "run.sh").read_text(encoding="utf-8") if (pkg / "run.sh").is_file() else ""
-        manifest = (pkg / "tt-model.yaml").read_text(encoding="utf-8") if (pkg / "tt-model.yaml").is_file() else ""
+        run_sh = _text(pkg / "run.sh") or ""
+        manifest = _text(pkg / "tt-model.yaml") or ""
         if f'REVISION="{facts.revision}"' not in run_sh or "check_revision.py" not in run_sh:
             problems.append("run.sh must carry the evidence's model revision and run its check_revision.py before it starts the server")
         if f'revision: "{facts.revision}"' not in manifest:

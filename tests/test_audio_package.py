@@ -668,31 +668,108 @@ def test_the_gate_refuses_a_pin_that_differs_from_the_evidence(staged, name, old
     assert any(message in p for p in gate(staged)), gate(staged)
 
 
-def run_check(tmp_path, pin, *, revision_dir, model="small-music", with_library=True):
-    """check_revision.py in a child process, with a stand-in `stable_audio_3` library on its path."""
-    lib = tmp_path / "lib" / "stable_audio_3"
-    lib.mkdir(parents=True)
-    (lib / "__init__.py").write_text("")
+def run_check(tmp_path, pin, *, present=True, main=None, model="small-music", with_library=True):
+    """check_revision.py in a child process, with stand-ins for the `stable_audio_3` library and `huggingface_hub` on its path.
+    `present`: the cache holds the pinned snapshot. `main`: the revision the cache's main reference gives (None: there is no main reference)."""
+    lib = tmp_path / "lib"
+    (lib / "stable_audio_3").mkdir(parents=True)
+    (lib / "huggingface_hub").mkdir()
+    (lib / "stable_audio_3" / "__init__.py").write_text("")
+    (lib / "huggingface_hub" / "__init__.py").write_text(
+        "def try_to_load_from_cache(repo_id, filename, revision=None):\n"
+        f"    return '/cache/models--x--y/snapshots/' + revision + '/' + filename if {present!r} and revision == {pin!r} else None\n")
     if with_library:
-        (lib / "model_configs.py").write_text(
-            "class M:\n    def resolve(self):\n        from pathlib import Path\n"
-            f"        return Path('/cache/config.json'), Path('/cache/snapshots/{revision_dir}/model.safetensors')\n"
+        resolve = ("raise OSError('no main reference')" if main is None else f"return '/cache/config.json', '/cache/models--x--y/snapshots/{main}/model.safetensors'")
+        (lib / "stable_audio_3" / "model_configs.py").write_text(
+            "class M:\n    repo_id = 'x/y'\n    ckpt_path = 'model.safetensors'\n"
+            f"    def resolve(self):\n        {resolve}\n"
             "all_models = {'small-music': M()}\n")
     script = Path(ap.__file__).parent / "skills" / "audio-chip-templates" / "check_revision.py"
-    env = {"PATH": "/usr/bin:/bin", "PYTHONPATH": str(tmp_path / "lib")}
+    env = {"PATH": "/usr/bin:/bin", "PYTHONPATH": str(lib)}
     return subprocess.run([sys.executable, str(script), pin, model], env=env, capture_output=True, text=True, cwd=str(tmp_path))
 
 
-def test_the_revision_check_passes_on_the_pinned_revision(tmp_path):
-    r = run_check(tmp_path, REV, revision_dir=REV)
+def test_the_revision_check_passes_when_the_runtime_would_load_the_pinned_revision(tmp_path):
+    r = run_check(tmp_path, REV, main=REV)
     assert r.returncode == 0 and REV in r.stdout
 
 
-def test_the_revision_check_stops_on_another_revision(tmp_path):
-    r = run_check(tmp_path, REV, revision_dir="9" * 40)
+def test_the_revision_check_stops_when_main_points_at_another_revision_and_says_how_to_fix_it(tmp_path):
+    r = run_check(tmp_path, REV, main="9" * 40)
     assert r.returncode == 3 and "Not starting" in r.stderr and "9" * 40 in r.stderr
+    assert f"echo {REV} > /cache/models--x--y/refs/main" in r.stderr
+
+
+def test_the_revision_check_handles_a_cache_that_holds_only_the_pinned_snapshot(tmp_path):
+    """A download of one revision sets no main reference, and the runtime resolves through main, so the runtime would fail: the check says so and how to fix it."""
+    r = run_check(tmp_path, REV, present=True, main=None)
+    assert r.returncode == 4 and "main reference" in r.stderr and f"echo {REV} > /cache/models--x--y/refs/main" in r.stderr
+
+
+def test_the_revision_check_stops_when_the_pinned_snapshot_is_not_in_the_cache(tmp_path):
+    r = run_check(tmp_path, REV, present=False, main="9" * 40)
+    assert r.returncode == 2 and f"hf download x/y --revision {REV}" in r.stderr
 
 
 def test_the_revision_check_stops_when_the_model_or_the_library_is_not_found(tmp_path):
-    assert run_check(tmp_path, REV, revision_dir=REV, model="other").returncode == 2
-    assert run_check(tmp_path / "b", REV, revision_dir=REV, with_library=False).returncode == 2
+    assert run_check(tmp_path, REV, main=REV, model="other").returncode == 2
+    assert run_check(tmp_path / "b", REV, main=REV, with_library=False).returncode == 2
+
+
+# ---- review of PR 193, round 2: whole rows, special files, a sizes value that is not a list -----------------------------------
+
+def test_the_gate_refuses_a_second_row_with_the_same_name_and_an_invented_value(staged):
+    row = "| 10 s clip, generate and decode, median of 3 | 0.5 s | benchmark | `evidence/bench-chip.json` |\n"
+    problems = edited(staged, "| boot check of this package on a chip | TODO | TODO | - |\n", "| boot check of this package on a chip | TODO | TODO | - |\n" + row)
+    assert any("a second row for '10 s clip, generate and decode, median of 3' that the evidence does not give: 0.5 s" in p for p in problems), problems
+
+
+def test_the_gate_refuses_a_row_that_appears_twice(staged):
+    row = "| 10 s clip, generate and decode, median of 3 | 1.6 s | benchmark | `evidence/bench-chip.json` |\n"
+    problems = edited(staged, row, row + row)
+    assert any("appears 2 times" in p for p in problems), problems
+
+
+def test_the_gate_does_not_hang_on_a_fifo_in_the_package(staged):
+    import os
+    import signal
+    os.mkfifo(staged / "extra.txt")
+    signal.alarm(10)                                  # a gate that opens the FIFO blocks for ever; the alarm turns that into a failure
+    try:
+        problems = gate(staged)
+    finally:
+        signal.alarm(0)
+    assert any("extra.txt: not a regular file" in p for p in problems), problems
+
+
+def test_the_gate_refuses_a_link_in_the_package_and_reads_nothing_through_it(staged, tmp_path):
+    target = tmp_path / "outside.txt"
+    target.write_text("x")
+    (staged / "link.txt").symlink_to(target)
+    assert any("link.txt: a symbolic link" in p for p in gate(staged))
+
+
+def test_the_gate_names_a_card_that_is_not_text_and_a_directory_in_its_place(staged):
+    (staged / "README.md").write_bytes(b"\xff\xfe")
+    assert any("no README.md card" in p for p in gate(staged))
+    (staged / "README.md").unlink()
+    (staged / "README.md").mkdir()
+    assert any("no README.md card" in p for p in gate(staged))
+
+
+@pytest.mark.parametrize("sizes", [1, "x", None, {"a": 1}, [1], [[]]])
+def test_the_gate_reports_a_benchmark_file_whose_sizes_is_not_a_list_of_objects(staged, sizes):
+    b = json.loads((staged / "evidence" / "bench-chip.json").read_text())
+    b["sizes"] = sizes
+    (staged / "evidence" / "bench-chip.json").write_text(json.dumps(b))
+    problems = gate(staged)                            # no exception, and a problem
+    assert any("the package's evidence cannot back a card" in p for p in problems)
+
+
+@pytest.mark.parametrize("exc", [OSError("x"), TypeError("x"), ValueError("x"), AttributeError("x"), KeyError("x"), UnicodeDecodeError("utf-8", b"", 0, 1, "x")])
+def test_an_unexpected_exception_while_reading_the_package_is_a_problem_and_not_a_traceback(staged, monkeypatch, exc):
+    def boom(*a, **k):
+        raise exc
+    monkeypatch.setattr(ap, "scrub_package", boom)
+    problems = gate(staged)
+    assert len(problems) == 1 and problems[0].startswith("the gate could not read the package")
