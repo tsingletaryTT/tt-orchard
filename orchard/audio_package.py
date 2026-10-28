@@ -41,7 +41,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from orchard import safeio
-from orchard.ledger import LedgerCorrupt, read_entries
+from orchard.ledger import LedgerCorrupt, entries_from_bytes
 from orchard.card_use import PERF_IN_PROSE
 from orchard.scrub import scrub_package
 from orchard.stages import inside
@@ -339,12 +339,12 @@ def ledger_entries(run) -> list[dict]:
     """The run's ledger, read whole and verified (orchard/ledger.py takes no lock and writes nothing). A damaged ledger is a refusal."""
     path = Path(run) / "ledger.jsonl"
     try:
-        # `read_entries` verifies the hash chain but reads the file whole and parses each line with no guard, so a FIFO, a huge file or a deeply nested line
-        # would block it or exhaust memory. safeio reads the file first (regular, capped, never blocks) and parses each line with its guards.
+        # The file is opened once, through safeio (a regular file, capped, never blocks). Each line is parsed with safeio's guards, and the hash chain is
+        # then verified over those same bytes, so the content that was checked is the content that is verified and nothing is opened a second time.
         data = safeio.read_bytes(path, max_bytes=MAX_LEDGER_BYTES)
         for line in data.split(b"\n")[:-1]:
             safeio.parse_json_bytes(line, max_bytes=MAX_LEDGER_BYTES)
-        return read_entries(path)
+        return entries_from_bytes(data)
     except safeio.SafeReadError as exc:
         raise AudioPackageError(f"the run has no readable ledger.jsonl: {getattr(exc, 'reason', exc)}") from None
     except LedgerCorrupt as exc:
@@ -354,7 +354,9 @@ def ledger_entries(run) -> list[dict]:
 
 
 def _decisions(entries: list[dict]) -> set:
-    return {e["data"].get("decision") for e in entries if isinstance(e, dict) and e.get("event") == "decision" and isinstance(e.get("data"), dict)}
+    """The decision texts of the ledger. A decision that is not a string (a list or an object in a hash-valid entry) is not a decision this builder knows."""
+    return {e["data"]["decision"] for e in entries
+            if isinstance(e, dict) and e.get("event") == "decision" and isinstance(e.get("data"), dict) and isinstance(e["data"].get("decision"), str)}
 
 
 def run_start_data(entries: list[dict]) -> dict:

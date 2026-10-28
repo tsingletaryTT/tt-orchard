@@ -892,3 +892,42 @@ def test_the_gate_refuses_a_launcher_that_does_not_export_the_private_cache(stag
     f = staged / "run.sh"
     f.write_text(f.read_text().replace('export HF_HUB_CACHE="$PRIVATE_CACHE"', "true"))
     assert any("export HF_HUB_CACHE" in p for p in gate(staged))
+
+
+# ---- review of PR 193, round 4: the ledger is read once, and a decision that is not text -----------------------------------------
+
+def _ledger_with(world, *decisions):
+    from orchard.ledger import Ledger
+    for name in ("ledger.jsonl", "ledger.jsonl.lock"):
+        (world.run / name).unlink()
+    with Ledger(world.run / "ledger.jsonl") as led:
+        led.append("run_start", model=ap.MODEL_ID, inputs={"model": str(world.snap)})
+        for d in decisions:
+            led.append("decision", decision=d)
+
+
+@pytest.mark.parametrize("odd", [[1], {"a": 1}, 7, None, True])
+def test_a_decision_that_is_not_text_is_a_refusal_and_not_a_type_error(world, odd):
+    _ledger_with(world, odd)
+    with pytest.raises(ap.AudioPackageError, match="has not finished"):
+        world.stage()
+    assert ap.main(args(world), out=io.StringIO(), hostname="some-host") == 2
+
+
+def test_a_decision_that_is_not_text_next_to_the_real_one_does_not_stop_the_run(world):
+    _ledger_with(world, ["a", "list"], "ready for operator review")
+    world.stage()
+
+
+def test_the_ledger_is_opened_once_and_the_chain_is_verified_over_the_bytes_that_were_checked(world, monkeypatch):
+    """A file replaced after the guarded read is not read again: the read below returns the real bytes and then removes the file."""
+    real = ap.safeio.read_bytes
+
+    def read_then_remove(path, **kw):
+        data = real(path, **kw)
+        if Path(path).name == "ledger.jsonl":
+            Path(path).unlink()
+        return data
+    monkeypatch.setattr(ap.safeio, "read_bytes", read_then_remove)
+    entries = ap.ledger_entries(world.run)
+    assert [e["event"] for e in entries] == ["run_start", "decision"]

@@ -10,7 +10,7 @@ Paths are placeholders (`<run>` is the run directory). Nothing was uploaded, pub
 |---|---|
 | The builder, the card renderer and the gate | `orchard/audio_package.py` |
 | The command | `tt-orchard audio-package RUN_DIR --namespace ORG --bench FILE --demo-repo DIR [--snapshot DIR] [--check]` |
-| Tests (188, with fake runs) | `tests/test_audio_package.py` |
+| Tests (194, with fake runs, plus 2 for `entries_from_bytes`) | `tests/test_audio_package.py` |
 | Hostile-input readers (4 registered) | `tests/hostile_inputs.py` |
 
 ## What was staged
@@ -77,9 +77,9 @@ environment-floor rows, each labelled `measured (provisional bars)`.
 - The builder refuses a run with no benchmark-labelled size, a label or spread the runs do not support, no 40-character model revision or library commit, an agreement that failed, a control that did
   not tell the fine-tune from the base model, a snapshot of another revision, and a package directory that already holds weights or anything else.
 
-Mutation table: 100 guards, each removed in turn with the whole test file run. First pass: 5 survived. Four were given a sharper test (the front-matter `license: other` check, the two
+Mutation table: 102 guards, each removed in turn with the whole test file run. First pass: 5 survived. Four were given a sharper test (the front-matter `license: other` check, the two
 number-in-prose checks, which were hidden behind each other, and the provisional-bars check, which the label text satisfied by itself). The fifth, an explicit link refusal for source files,
-was redundant with `safeio` (which refuses links) and was removed. Second pass: all red. After the Copilot review of PR 193 (a revision pin at run time, evidence bound to metrics, hostile shapes, required files, whole rows, special files) 38 more guards were mutated: all red except the two layered shape guards (`_obj` and the backstop in `read_facts`) each survive alone because the other covers them, and are red together.
+was redundant with `safeio` (which refuses links) and was removed. Second pass: all red. After the Copilot review of PR 193 (a revision pin at run time, evidence bound to metrics, hostile shapes, required files, whole rows, special files) 40 more guards were mutated: all red except the two layered shape guards (`_obj` and the backstop in `read_facts`) each survive alone because the other covers them, and are red together.
 
 One bug the tests found: a revision made only of digits would be read by YAML as a number, so the manifest quotes it.
 
@@ -122,6 +122,6 @@ tt-model publish episod/stable-audio-3-small-music-blackhole                    
 
 ## Review follow-ups (PR 193)
 
-- The run must have finished. The builder reads the whole ledger and refuses a run with no `ready for operator review` decision or with an abort (the test `orchard/package_cmd.py` uses). The audio result exists as soon as stage 2 has run, before the supervisor judges the stage. The ledger is read through `safeio` first (a FIFO, a huge file or a deeply nested line cannot block it), then through `orchard/ledger.py` for the hash chain. The pr165c ledger has the decision and no abort.
+- The run must have finished. The builder reads the whole ledger and refuses a run with no `ready for operator review` decision or with an abort (the test `orchard/package_cmd.py` uses). The audio result exists as soon as stage 2 has run, before the supervisor judges the stage. The ledger is read through `safeio` first (a FIFO, a huge file or a deeply nested line cannot block it), and the hash chain is then verified over those same bytes (`entries_from_bytes`, new in `orchard/ledger.py`, which shares its chain check with `read_entries`), so nothing is opened a second time. A decision that is not text is ignored. The pr165c ledger has the decision and no abort.
 - Weights revision at run time: see the `run.sh` row above. The library's `resolve()` has no revision argument, so the pin is enforced by what the runtime can see (a cache with one revision in it).
 - The staged `run.sh` was run up to its last line against the real library and cache on CPU, with a stand-in for the server so that no port, chip or server started: it printed the attribution line, built the private cache, resolved the model to the pinned revision through it, and exported `HF_HUB_CACHE`. It was not run with the real server.

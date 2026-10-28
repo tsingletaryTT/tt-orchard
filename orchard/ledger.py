@@ -77,8 +77,24 @@ def read_entries(path) -> list[dict]:
     tools that must not touch a run (orchard/status.py). A line the writer is still appending
     may be missing from the result; a complete line is never missing.
     """
+    return entries_from_lines(_complete_lines(Path(path)))
+
+
+def entries_from_bytes(data: bytes) -> list[dict]:
+    """The same verification as `read_entries`, over bytes a caller already read (for example through `orchard/safeio.py`, which bounds the read and never
+    blocks). Nothing is opened again, so the content that was checked is the content that is verified. Bytes after the last newline are ignored, as
+    `read_entries` ignores them. Raises LedgerCorrupt on any defect, including bytes that are not UTF-8."""
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise LedgerCorrupt(f"the ledger is not valid UTF-8 ({exc.reason} at byte {exc.start})") from exc
+    return entries_from_lines(text.split("\n")[:-1])
+
+
+def entries_from_lines(lines: list[str]) -> list[dict]:
+    """Verify the hash chain of already-split ledger lines and return their entries. Raises LedgerCorrupt on any defect."""
     entries, prev = [], GENESIS
-    for i, line in enumerate(_complete_lines(Path(path)), start=1):
+    for i, line in enumerate(lines, start=1):
         try:
             entry = json.loads(line)
         except json.JSONDecodeError as exc:
