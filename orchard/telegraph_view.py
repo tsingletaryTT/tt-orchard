@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """What the web page shows about telegraph, the opt-in helper model (orchard/telegraph.py, README 5.9g).
 
-Read only. It reads the configuration the supervisor already loaded and the ledger `telegraph.jsonl`, and it returns plain
-facts for `GET /api/telegraph`. It sends no request to the helper, spends nothing, and never reads a reply file, the cache
+Read only. It reads the configuration the supervisor already loaded and the ledger in the project database (orchard/db.py,
+orchard/telegraph_store.py), and it returns plain facts for `GET /api/telegraph`. The ledger is read in ONE read transaction, so the
+summary, the accounting and the rows describe the same moment. It never creates, recovers or migrates a file. It sends no request to the helper, spends nothing, and never reads a reply file, the cache
 or a prompt. The key is never returned: only whether one is present and whether it comes from a variable or a file. The key
 file is not opened (its size is checked), and neither its path nor the variable's name is returned.
 
@@ -18,6 +19,8 @@ import urllib.parse
 from pathlib import Path
 
 from orchard import telegraph as tg
+from orchard import telegraph_store as ts
+from orchard.db import DB_NAME, LedgerRefused, LedgerUnavailable
 
 RECENT_MAX = 50                      # rows in the table of recent calls
 PROBLEMS_MAX = 50                    # rows in the per-problem table
@@ -55,43 +58,49 @@ def _clean(text, redact, limit=REASON_MAX) -> str:
 
 # ---- the ledger, read once per change ----------------------------------------------------------------------------------
 
-_cache: dict = {}                     # directory -> ((mtime_ns, size), facts)
+_cache: dict = {}                     # directory -> (database change key, facts)
+
+_REFUSED_TEXT = {ts.NotMigrated: "the ledger is still a jsonl file; run `tt-orchard db migrate telegraph` to move it to the database",
+                 ts.LegacyLedgerPresent: "an old writer recreated telegraph.jsonl after the migration; stop it and reconcile",
+                 ts.MigrationIncomplete: "a migration of the ledger did not finish; run `tt-orchard db migrate telegraph` again"}
 
 
 def _ledger_facts(directory: Path) -> dict:
-    """Everything the page needs from the ledger, as plain data. Raises nothing: a ledger that cannot be used gives `error`."""
-    path = Path(directory) / tg.LEDGER
-    try:
-        st = path.stat()
-        key = (st.st_mtime_ns, st.st_size)
-    except FileNotFoundError:                    # only a ledger that does not exist is an empty history
-        return {"error": None, "records": [], "summary": _empty_summary(), "acct": _empty_acct()}
-    except OSError:                              # a permission error, a folder that is a file, ...: the spend is not known
-        return _unreadable("the ledger cannot be read")
+    """Everything the page needs from the ledger, as plain data, from one read transaction. Raises nothing: a ledger that cannot be
+    used gives `error`. A directory with no database and no old ledger is an empty history. `blocked` is the reason reservations
+    are refused (the ledger is unconfirmed after a restore), or None."""
+    directory = Path(directory)
+    key = ts.stat_key(directory)
     cached = _cache.get(str(directory))
-    if cached and cached[0] == key:
+    if key is not None and cached and cached[0] == key:
         return cached[1]
-    if st.st_size > LEDGER_MAX_BYTES:
+    if key is not None and key[0][1] > LEDGER_MAX_BYTES:
         facts = {"error": "the ledger is too large to show (over 16 MB)", "records": [], "summary": _empty_summary(),
-                 "acct": _empty_acct()}
+                 "acct": _empty_acct(), "blocked": None}
     else:
         try:
-            records = tg._read_ledger_strict(directory)         # raises LedgerUnavailable on any failure but a missing file
+            snap = ts.read_snapshot(directory)                       # one transaction: the summary, accounting and rows agree
+            records = snap.records
             _check_records(records)
-            summary = tg.summarise_records(records)                # one read: the summary, the accounting and the rows
-            acct = tg.accounting(records)                          # all describe this one snapshot
+            summary = tg.summarise_records(records)
+            acct = tg.accounting(records)
             torn = sum(1 for r in records if "torn" in r)
             _check_derived(summary, acct)
             _dry_run(records, acct)
-            facts = {"error": None, "records": records, "summary": {**summary, "torn": torn}, "acct": acct}
-        except tg.LedgerUnavailable:
+            facts = {"error": None, "records": records, "summary": {**summary, "torn": torn}, "acct": acct,
+                     "blocked": snap.blocked}
+        except LedgerRefused as exc:                                 # a state a person must fix: the message says which
+            text = next((t for cls, t in _REFUSED_TEXT.items() if isinstance(exc, cls)), "the ledger cannot be read")
+            return _unreadable(text)
+        except LedgerUnavailable:
             return _unreadable("the ledger cannot be read")        # not cached: the next poll tries again
         except Exception:                                           # noqa: BLE001 - a bad record must not break the page
             facts = {"error": "the ledger has a record this page cannot read", "records": [],
-                     "summary": _empty_summary(), "acct": _empty_acct()}
-    if len(_cache) > 16:
-        _cache.clear()
-    _cache[str(directory)] = (key, facts)
+                     "summary": _empty_summary(), "acct": _empty_acct(), "blocked": None}
+    if key is not None:
+        if len(_cache) > 16:
+            _cache.clear()
+        _cache[str(directory)] = (key, facts)
     return facts
 
 
@@ -186,7 +195,7 @@ def _dry_run(records: list[dict], acct: dict) -> None:
 
 
 def _unreadable(message: str) -> dict:
-    return {"error": message, "records": [], "summary": _empty_summary(), "acct": _empty_acct()}
+    return {"error": message, "records": [], "summary": _empty_summary(), "acct": _empty_acct(), "blocked": None}
 
 
 def _empty_acct() -> dict:
@@ -437,6 +446,7 @@ def build(cfg: tg.Config, directory, *, environ, redact=lambda t: t, hostname: s
     """The telegraph page's facts. `directory` holds `telegraph.jsonl`; `ledger_label` is how to name it on screen."""
     facts = _ledger_facts(Path(directory))
     summary, records, error, acct = facts["summary"], facts["records"], facts["error"], facts["acct"]
+    blocked = facts.get("blocked")
     verdict = _verdicts(records)
     caps = _caps(cfg, acct) if cfg.enabled and not error else []     # an unread ledger shows no usage bars at 0 percent
     key = _key_state(cfg, environ) if cfg.enabled else {"state": "n/a", "source": "none", "reason": None}
@@ -445,6 +455,8 @@ def build(cfg: tg.Config, directory, *, environ, redact=lambda t: t, hostname: s
     full = [c for c in caps if c["tone"] == "bad"]
     if not cfg.enabled:
         state, reason = "off", None
+    elif blocked:
+        state, reason = "capped", _clean(blocked, redact, 160)          # reservations are refused until a person confirms the history
     elif refusal is not None or full:
         state = "capped"
         reason = _clean(refusal.get("reason"), redact, 160) if refusal is not None else _cap_reason(full[0], acct)
@@ -489,18 +501,24 @@ def build(cfg: tg.Config, directory, *, environ, redact=lambda t: t, hostname: s
 
 
 def run_spend(run_dir: Path) -> dict | None:
-    """One run's own spend, from `<run>/telegraph.jsonl`. None means the run has no usable ledger path (no file, or a link, which
-    is not followed). A ledger that exists but cannot be read, is damaged or is too large gives {"error": ...}, so the page can
-    say the run's spend is unknown instead of showing nothing."""
-    path = Path(run_dir) / tg.LEDGER
-    try:
-        if path.is_symlink():
-            return None
-        path.lstat()
-    except FileNotFoundError:
+    """One run's own spend, from the ledger in the run directory (`<run>/project.db`, or an old `<run>/telegraph.jsonl`, which is
+    reported as not migrated). None means the run has no usable ledger path (no file, or a link, which is not followed). A ledger
+    that exists but cannot be read, is damaged or is too large gives {"error": ...}, so the page can say the run's spend is unknown
+    instead of showing nothing."""
+    found = False
+    for name in (DB_NAME, tg.LEDGER):
+        path = Path(run_dir) / name
+        try:
+            if path.is_symlink():
+                return None
+            path.lstat()
+            found = True
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return {"error": "the run's ledger cannot be read"}
+    if not found:
         return None
-    except OSError:
-        return {"error": "the run's ledger cannot be read"}
     facts = _ledger_facts(Path(run_dir))
     if facts["error"]:
         return {"error": facts["error"].replace("the ledger", "the run's ledger", 1)}

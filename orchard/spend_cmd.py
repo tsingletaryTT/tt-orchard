@@ -43,7 +43,7 @@ def _real(directory: Path) -> dict:
     no usage. A ledger that cannot be read is unknown spend and is never shown as an empty history (a missing file is empty)."""
     try:
         recs = tg._read_ledger_strict(Path(directory))
-    except tg.LedgerUnavailable as exc:
+    except tg.LEDGER_ERRORS as exc:
         return {"dir": str(directory), "error": f"the telegraph ledger cannot be read ({exc}); the helper spend is unknown"}
     damaged = {"dir": str(directory), "error": "the telegraph ledger has a record that cannot be read; the helper spend is unknown"}
     try:

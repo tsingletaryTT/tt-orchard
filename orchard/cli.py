@@ -257,6 +257,35 @@ def _parser() -> argparse.ArgumentParser:
     tpick.add_argument("--not-helped", dest="not_helped", action="store_true", help="the answer did not help")
     _tele("usage", "show calls, tokens, cost and how often the help worked") \
         .add_argument("--json", action="store_true", help="print the summary as JSON")
+    dp = sub.add_parser("db", parents=[common],
+                        help="the project database (the telegraph ledger lives in it): status, migrate telegraph, export "
+                             "telegraph, backup, restore, confirm-restore")
+    dsub = dp.add_subparsers(dest="action", required=True)
+
+    def _db(name, help_text):
+        sp = dsub.add_parser(name, parents=[common], help=help_text)
+        sp.add_argument("--dir", metavar="DIR", help="the telegraph state directory (default: the config's [telegraph] dir, "
+                                                     "$ORCHARD_TELEGRAPH_DIR, then ~/.cache/tt-orchard/telegraph)")
+        sp.add_argument("--telegraph-config", metavar="FILE", help="a TOML file with the [telegraph] table (default: the bringup config's)")
+        sp.add_argument("--scope", default=None, help="the ledger scope inside the database (default: default)")
+        return sp
+
+    _db("status", "what is in the state directory: database, backups, markers, migration phase")
+    dm = _db("migrate", "import telegraph.jsonl and the cache into the database and cut the old files over")
+    dm.add_argument("what", choices=["telegraph"])
+    dm.add_argument("--dry-run", action="store_true", help="check that an import gives equal totals; change nothing")
+    dm.add_argument("--accept-malformed", type=int, default=None, metavar="N",
+                    help="go on although the ledger has exactly N lines that are not records (they were never counted)")
+    de = _db("export", "write a ledger as jsonl on standard output (the lines the old file held)")
+    de.add_argument("what", choices=["telegraph"])
+    de.add_argument("--from-archive", action="store_true", help="read telegraph.jsonl.archived instead of the database")
+    _db("backup", "take an online backup into backups/")
+    dr = _db("restore", "put a backup in place of the database (the ledger is then unconfirmed)")
+    dr.add_argument("backup", metavar="BACKUP", help="a file from the backups/ directory")
+    dc = _db("confirm-restore", "say the history is accounted for, so calls are allowed again")
+    dc.add_argument("--note", required=True, help="a sentence on how you checked (for example, the provider's usage page)")
+    dc.add_argument("--no-replies", action="store_true",
+                    help="do not charge reply files that have no ledger record at the worst case")
     sp_ = sub.add_parser("spend", parents=[common],
                          help="the real helper spend and the virtual spend of the local models, side by side "
                               "(the virtual figure is never added to the real one)")
@@ -878,6 +907,9 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
     if args.cmd == "telegraph":
         from orchard import telegraph_cmd
         return telegraph_cmd.main(args, out=out, environ=env, home=home)
+    if args.cmd == "db":
+        from orchard import db_cmd
+        return db_cmd.main(args, out=out, environ=env, home=home)
     if args.cmd == "spend":
         from orchard import spend_cmd
         return spend_cmd.main(args, out=out, environ=env, home=home)
