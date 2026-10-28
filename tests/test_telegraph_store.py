@@ -479,6 +479,17 @@ def test_after_a_recovery_every_ask_is_refused_until_a_person_confirms_and_cache
     assert blocked_t.ask("p", "t", "f2").ok
 
 
+def test_charging_reply_files_with_no_record_adds_each_once_and_only_raises_the_counted_spend(tmp_path):
+    d = tmp_path / "state"
+    make_history(d, 2)
+    with ts.TelegraphStore.open(d) as store:
+        before = tg.accounting(store.records())
+        assert store.add_recovered_reservations(["c0", "c1", "new1", "new2"], 1500, 0.5) == 2       # c0 and c1 have records already
+        assert store.add_recovered_reservations(["new1", "new2"], 1500, 0.5) == 0                   # a second pass adds nothing
+        after = tg.accounting(store.records())
+    assert after["calls"] == before["calls"] + 2 and after["tokens"] == before["tokens"] + 3000 and after["cost"] >= before["cost"] + 1.0
+
+
 # =============================================================================================== hostile input: the files the store reads
 
 @pytest.mark.parametrize("damage", ["garbage", "empty-ledger-table-gone", "truncated"])

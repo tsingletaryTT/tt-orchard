@@ -282,6 +282,9 @@ class TelegraphStore:
             n += 1
         return n
 
+    def cache_count_in(self, conn) -> int:
+        return conn.execute("SELECT COUNT(*) FROM telegraph_cache WHERE scope = ?", (self.scope,)).fetchone()[0]
+
     def count_events(self, conn=None) -> int:
         c = conn or self.db.conn()
         return c.execute("SELECT COUNT(*) FROM telegraph_events WHERE scope = ?", (self.scope,)).fetchone()[0]

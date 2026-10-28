@@ -578,7 +578,8 @@ def test_i6_the_totals_stay_right_across_offsets_that_are_and_are_not_multiples_
 # with SIGKILL after every step of the table in the design note, starts a second process, and checks the table's last column. The
 # placeholders that stood here were strict xfails, so these cannot be forgotten.
 
-from dbtools import KILLED, make_history, run_child
+from dbtools import KILLED, run_child
+from dbtools import make_history as product_history
 from orchard import db as product_db
 from orchard import telegraph_migrate as product_migrate
 from orchard import telegraph_store as product_store
@@ -593,7 +594,7 @@ def second_process_asks(directory, call_id="probe"):
 
 def test_I7_recovery_state_is_on_disk_before_a_replacement_database_exists_and_every_opener_honours_it(tmp_path):
     for step in ("recover:1", "recover:2", "recover:3", "recover:4", "recover:5"):
-        d = make_history(tmp_path / step.replace(":", "-"), 3)
+        d = product_history(tmp_path / step.replace(":", "-"), 3)
         (d / "project.db").write_bytes(b"garbage" * 1000)                 # step 1: decide that recovery is needed
         for suffix in ("-wal", "-shm"):
             (d / ("project.db" + suffix)).unlink(missing_ok=True)

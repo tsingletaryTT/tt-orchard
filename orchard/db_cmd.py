@@ -171,11 +171,10 @@ def _confirm(directory, scope, cfg, args, say) -> int:
     if not note:
         say("db confirm-restore: --note is required: say in a sentence how you checked the history (for example, the provider's usage page)")
         return EXIT_PROBLEM
-    st = ts.status_report(directory, scope)
-    if st["migrating_marker"] or (st.get("cutover") not in (None, "complete")):
-        say("db confirm-restore: a migration of this directory did not finish; run `tt-orchard db migrate telegraph` first")
-        return EXIT_PROBLEM
-    with dbm.Database(directory) as db:
+    with dbm.Database(directory) as db:                  # a full open: a damaged file is recovered (and marked) before anything is asked
+        if db.exists_name(ts.MARKER_MIGRATING) is not None or db.meta_get(ts.cutover_key(scope)) not in (None, "complete"):
+            say("db confirm-restore: a migration of this directory did not finish; run `tt-orchard db migrate telegraph` first")
+            return EXIT_PROBLEM
         if not db.integrity_ok():
             say("db confirm-restore: the database fails its integrity check; restore a backup first")
             return EXIT_PROBLEM

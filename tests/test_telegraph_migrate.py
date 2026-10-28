@@ -233,6 +233,27 @@ def test_i3_a_migration_whose_totals_differ_changes_nothing(tmp_path, monkeypatc
     assert sent == 1
 
 
+def test_i3_an_import_that_loses_or_changes_a_record_is_caught_by_the_equality_check_and_rolled_back(tmp_path, monkeypatch):
+    """The check can fail on a real difference, not only when it is told to: the import here drops the last record, then changes one."""
+    d = legacy_directory(tmp_path, asks=3)
+    real = ts.TelegraphStore.import_records
+    for damage in ("drops the last record", "changes a cost"):
+        def broken(self, conn, items, damage=damage):
+            if damage.startswith("drops"):
+                items = items[:-1]
+            else:
+                items = [(dict(r, cost_usd=(r.get("cost_usd") or 0) + 1.0) if "cost_usd" in r and "call_id" in r else r, raw)
+                         if i == 1 else (r, raw) for i, (r, raw) in enumerate(items)]
+                items = [(r, json.dumps(r, sort_keys=True) if i == 1 else raw) for i, (r, raw) in enumerate(items)]
+            return real(self, conn, items)
+        monkeypatch.setattr(ts.TelegraphStore, "import_records", broken)
+        with pytest.raises(mig.MigrationMismatch):
+            mig.migrate(d)
+        assert ledger_records(d) == [] and (d / "telegraph.jsonl").is_file() and not (d / "MIGRATING-TO-SQLITE").exists()
+        monkeypatch.setattr(ts.TelegraphStore, "import_records", real)
+    assert mig.migrate(d)["phase"] == "complete"                                # and the unbroken import goes through
+
+
 def test_i3_migrating_twice_is_refused_and_imports_nothing_twice(tmp_path):
     d = legacy_directory(tmp_path)
     first = mig.migrate(d)

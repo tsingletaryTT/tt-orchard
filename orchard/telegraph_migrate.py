@@ -451,7 +451,7 @@ def _step3(db, store, dir_fd, scope, max_output_tokens, accept_malformed, phase,
                                        "nothing was imported (a second history would double the totals)")
             store.import_records(conn, parsed.items)
         store.import_cache(conn, cache_items)
-        cache_rows = conn.execute("SELECT COUNT(*) FROM telegraph_cache WHERE scope = ?", (scope,)).fetchone()[0]
+        cache_rows = store.cache_count_in(conn)
         result = compare(parsed.items, store.lines_in(conn), store.records_in(conn), sidecars, len(cache_items), cache_rows)
         if not result["equal"]:
             bad = ", ".join(k for k, ok in result["checks"].items() if not ok)
@@ -581,7 +581,7 @@ def _dry_run(directory, *, scope, max_output_tokens, accept_malformed) -> dict:
         with mem.write() as conn:
             store.import_records(conn, items)
             store.import_cache(conn, cache_items)
-            rows = conn.execute("SELECT COUNT(*) FROM telegraph_cache WHERE scope = ?", (scope,)).fetchone()[0]
+            rows = store.cache_count_in(conn)
             checked = compare(items, store.lines_in(conn), store.records_in(conn), names, len(cache_items), rows)
     finally:
         mem.close()
