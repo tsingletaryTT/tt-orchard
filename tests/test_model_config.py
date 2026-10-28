@@ -103,6 +103,53 @@ def test_top_k_above_the_expert_count_is_refused():
     assert mc.dims(dense(num_experts=4, num_experts_per_tok=4, moe_intermediate_size=32)).top_k == 4
 
 
+# ---- Copilot review of PR 190: layouts the counting must not assume -----------------------------------
+
+def test_two_projection_mlp_families_are_counted_with_two_projections():
+    assert mc.dims(dense(model_type="gpt_neox")).mlp_projections == 2
+    assert mc.dims(dense(model_type="llama")).mlp_projections == 3
+    assert mc.dims(dense()).mlp_projections == 3           # a family the table does not list is a gated MLP
+
+
+@pytest.mark.parametrize("n", [10**30, 10**7, mc.MAX_LAYERS + 1])
+def test_a_huge_layer_count_is_refused_before_any_per_layer_tuple_is_built(n):
+    with pytest.raises(mc.ModelConfigError, match="num_hidden_layers"):
+        mc.dims(dense(num_hidden_layers=n))
+
+
+def test_the_layer_bound_leaves_real_models_alone():
+    assert mc.dims(dense(num_hidden_layers=mc.MAX_LAYERS)).layers == mc.MAX_LAYERS
+
+
+def test_mla_head_dim_falls_back_to_the_query_key_width():
+    cfg = dense(hidden_size=7168, num_attention_heads=128, kv_lora_rank=512, q_lora_rank=1536, qk_nope_head_dim=128,
+                qk_rope_head_dim=64, v_head_dim=128)
+    del cfg["head_dim"]
+    assert mc.dims(cfg).head_dim == 192                     # 128 + 64, and 7168 / 128 would give 56
+    assert mc.dims(dict(cfg, head_dim=64)).head_dim == 64   # an explicit head_dim still wins
+
+
+def test_a_mistral_sliding_window_makes_every_layer_a_sliding_layer():
+    d = mc.dims(dense(model_type="mistral", sliding_window=4096))
+    assert d.layer_types == ("sliding_attention", "sliding_attention")
+
+
+def test_qwen2_style_windows_apply_from_max_window_layers_when_enabled():
+    cfg = dense(model_type="qwen2", num_hidden_layers=4, sliding_window=4096, max_window_layers=2)
+    assert mc.dims(dict(cfg, use_sliding_window=False)).layer_types == ("full_attention",) * 4
+    assert mc.dims(dict(cfg, use_sliding_window=True)).layer_types == ("full_attention",) * 2 + ("sliding_attention",) * 2
+
+
+def test_a_window_with_no_known_layout_is_refused_and_not_ignored():
+    with pytest.raises(mc.ModelConfigError, match="sliding_window"):
+        mc.dims(dense(model_type="somenewmodel", sliding_window=4096))
+    assert mc.dims(dense(model_type="somenewmodel", sliding_window=None)).layer_types == ("full_attention",) * 2
+    assert mc.dims(dense(model_type="somenewmodel", sliding_window=0)).layer_types == ("full_attention",) * 2
+    # an explicit layer list settles it
+    listed = mc.dims(dense(model_type="somenewmodel", sliding_window=4096, layer_types=["sliding_attention", "full_attention"]))
+    assert listed.layer_types == ("sliding_attention", "full_attention")
+
+
 def test_not_a_dict_is_refused():
     with pytest.raises(mc.ModelConfigError):
         mc.dims([1, 2])

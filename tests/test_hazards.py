@@ -167,6 +167,21 @@ def test_sliding_window_layers_above_a_supplied_limit():
     assert names(hz.scan_model_hazards(sw, sw, limits={"sliding_window_layers_max": 2})) == {"sliding_window_layers_above_limit"}
 
 
+def test_the_sliding_window_limit_counts_layers_over_the_whole_model_and_says_so():
+    # two runs of three sliding layers: no run exceeds 3, the model has 6; the limit is defined over the whole model
+    sw = cfg(num_hidden_layers=8, layer_types=["sliding_attention"] * 3 + ["full_attention"] + ["sliding_attention"] * 3 + ["full_attention"])
+    assert names(hz.scan_model_hazards(sw, sw, limits={"sliding_window_layers_max": 6})) == set()
+    s = hz.scan_model_hazards(sw, sw, limits={"sliding_window_layers_max": 5})
+    assert names(s) == {"sliding_window_layers_above_limit"} and s.hazards[0].value == 6
+    entry = hz.HAZARD_TABLE[[e.name for e in hz.HAZARD_TABLE].index("sliding_window_layers_above_limit")]
+    assert "whole model" in entry.why and "per group" not in entry.why
+
+
+def test_a_mistral_window_is_seen_by_the_scan_through_the_normalised_layers():
+    mistral = cfg(model_type="mistral", sliding_window=4096)
+    assert names(hz.scan_model_hazards(mistral, mistral, limits={"sliding_window_layers_max": 1})) == {"sliding_window_layers_above_limit"}
+
+
 def test_an_unknown_limit_name_or_a_bad_limit_is_refused():
     for bad in ({"banana": 1}, {"kv_heads_max": 0}, {"kv_heads_max": True}, {"kv_heads_max": float("nan")}, "x"):
         with pytest.raises(hz.HazardInputError, match="limits"):

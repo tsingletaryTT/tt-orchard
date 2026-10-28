@@ -122,9 +122,9 @@ def _linear_params(d: mc.ModelDims) -> int:
             + qkv_width * lin["conv_kernel"] + lin["value_dim"] * d.hidden)
 
 
-def _mlp_params(hidden: int, width: int) -> int:
-    """Gate, up and down projections of a gated MLP."""
-    return 3 * hidden * width
+def _mlp_params(d: mc.ModelDims, width: int) -> int:
+    """Gate, up and down projections of a gated MLP (three matrices), or up and down for the two-projection families."""
+    return d.mlp_projections * d.hidden * width
 
 
 PLAIN_MIXERS = ("full_attention", "sliding_attention", "attention")
@@ -190,14 +190,14 @@ def decode_floor(model_config, dtype_policy, dies, per_die_bandwidth_gb_s, *, bo
         stored += attn
         if d.moe_layers[i]:
             router = d.hidden * d.routed_experts
-            expert = _mlp_params(d.hidden, d.moe_intermediate)
-            shared = _mlp_params(d.hidden, d.shared_intermediate) if d.shared_intermediate else 0
+            expert = _mlp_params(d, d.moe_intermediate)
+            shared = _mlp_params(d, d.shared_intermediate) if d.shared_intermediate else 0
             active["router"] += router
             active["routed_experts"] += d.top_k * expert
             active["shared_experts"] += shared
             stored += router + d.routed_experts * expert + shared
         else:
-            mlp = _mlp_params(d.hidden, d.intermediate)
+            mlp = _mlp_params(d, d.intermediate)
             active["dense_mlp"] += mlp
             stored += mlp
     head = d.hidden * d.vocab

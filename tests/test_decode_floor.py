@@ -149,6 +149,24 @@ def test_bad_model_config_is_refused_with_the_floor_error():
         df.decode_floor({"hidden_size": 5}, policy(), 1, 1.0)
 
 
+def test_a_two_projection_mlp_is_counted_with_two_projections():
+    three = df.decode_floor(DENSE, policy(), 1, 1.0).by_group["dense_mlp"]
+    two = df.decode_floor(dict(DENSE, model_type="gpt_neox"), policy(), 1, 1.0).by_group["dense_mlp"]
+    assert two == pytest.approx(three * 2 / 3)
+    assert two == pytest.approx(2 * 2 * 64 * 128 * 2.0)       # two layers, two matrices each, bf16
+
+
+def test_the_mla_floor_and_the_scan_use_the_same_head_width():
+    from orchard import hazards as hz
+    cfg = dict(DENSE, hidden_size=7168, num_attention_heads=128, intermediate_size=18432, num_key_value_heads=128,
+               kv_lora_rank=512, q_lora_rank=1536, qk_nope_head_dim=128, qk_rope_head_dim=64, v_head_dim=128, vocab_size=129280)
+    del cfg["head_dim"]
+    assert df.decode_floor(cfg, policy(), 1, 1.0).model_summary["hidden_size"] == 7168      # the floor still builds
+    s = hz.scan_model_hazards(cfg, cfg)
+    assert s.facts["tiles"]["head_dim"] == {"value": 192, "tiles": 6.0, "whole": True}
+    assert not any(h.name == "head_dim_not_whole_tiles" for h in s.hazards)
+
+
 # ---- the board table -----------------------------------------------------------------------------
 
 def test_board_table_states_the_figure_and_its_source():

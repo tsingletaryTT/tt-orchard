@@ -24,7 +24,7 @@ key, yet its query projection is twice as wide, so the model type `qwen3_next` i
 
 Inputs for the table below: the Qwen3.8-27B bundle ships bfp8 weights (run logs 2026-10-19 and 2026-10-20). The Qwen3-Coder-Next
 `p300` profile uses bfp4 routed experts (run log 2026-10-06); the dtype of its attention and shared weights is not on record, so the
-table assumes bfp8 for them and also shows all-bfp4 as a reference. Block formats are counted as bfp8 = 1.0625 bytes per weight and
+table assumes bfp8 for them and also shows all-bfp4 as a reference. Layer layouts are taken from the config by model family: MLPs have three projections except for a listed set of two-projection families (GPT-NeoX and similar), a sliding window is applied by family (Mistral, Qwen2 and Qwen3 rules) and a window on an unknown family is refused. Block formats are counted as bfp8 = 1.0625 bytes per weight and
 bfp4 = 0.5625 (16 values share one 8-bit exponent). Both models on one p300 board: 2 dies, 512 GB/s each.
 
 | model | floor tok/s (estimate) | GB per token | measurement | tok/s | share of the estimated floor |
@@ -66,7 +66,7 @@ The table in `orchard/hazards.py` has 19 rows (the five tile rows are one per di
 vocabulary per die above 65,536 (rounded up), vocabulary and the hidden, intermediate, head, expert and shared widths as tile counts,
 a hidden size of 3 tiles, top-k and KV heads above the nearest bundle's, mixers the nearest bundle lacks (linear attention,
 multi-latent attention, sparse attention, hyper-connections), and caller-supplied limits for top-k, KV heads and sliding-window
-layers. No figure for the router kernel's supported width or for KV heads per group is on record, so those limits are inputs and
+layers. No figure for the router kernel's supported width or for KV heads per group is on record (the sliding-window limit counts layers over the whole model, because a config does not say how layers are grouped), so those limits are inputs and
 the scan invents none. A hit that the nearest bundle's own config also has is marked `also_on_nearest`.
 
 I scanned every cached model whose `config.json` is in the local Hugging Face cache, against the Qwen3.8-27B config as the nearest
@@ -80,7 +80,7 @@ have a config the scan could not read dimensions from (11 without `hidden_size`,
 | `vocab_per_die_above_65536` on 2 dies | 18 models (a vocabulary above 131,072 is what the check means on 2 dies). The Qwen3.8-27B family hits it with 124,160 columns per die and is marked as also on the nearest bundle, which runs on 2 chips, so the limit does not bind there |
 | `kv_heads_above_nearest` (nearest has 4) | 17 models, mostly Llama-style models with 8 KV heads and encoders |
 | `vocab_not_whole_tiles` | bert-base-uncased and three sentence-transformers encoders (not language models for this harness) |
-| `head_dim_not_whole_tiles`, `mixer_multi_latent_attention_not_in_nearest`, `mixer_hyper_connections_not_in_nearest` | XingChen-AGI/Xing4.0-29B-A4B |
+| `mixer_multi_latent_attention_not_in_nearest`, `mixer_hyper_connections_not_in_nearest` | XingChen-AGI/Xing4.0-29B-A4B (its first scan also reported `head_dim_not_whole_tiles`, a false hit from the head width defaulting to hidden size over heads; multi-latent attention heads are the query/key width, 192 here, which is 6 whole tiles) |
 
 Qwen3-Coder-Next also hits `vocab_per_die_above_65536` on 2 dies (75,968 columns per die), marked as also on the nearest bundle.
 The scan was repeated with 4 dies. It added no hit that the 2-die scan lacked, and it dropped the vocabulary hit for every model with a

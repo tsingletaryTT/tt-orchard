@@ -12,7 +12,7 @@ stage 2 should run first. Add a row when a bundle reports a new limit, and add t
 `scan_model_hazards(model_config, nearest_bundle_config)` returns the hits as named hazards. A hit never stops a run. It is a
 prediction from the config: it says where to look first when output is wrong.
 
-Limits that are not on record. The width the router kernel supports, the KV-head count and the sliding-window layer count per group
+Limits that are not on record. The width the router kernel supports, the KV-head count and the sliding-window layer count
 have no confirmed figure here. They are inputs (`limits=`), and the scan also compares the router top-k and the KV-head count with
 the nearest bundle's, which needs no figure. A hazard whose dimension the nearest bundle shares (and the nearest bundle is known to
 run) is marked `also_on_nearest`: a hit that the bundle already survives.
@@ -95,7 +95,7 @@ HAZARD_TABLE: tuple[TableEntry, ...] = tuple([
     TableEntry("kv_heads_above_limit", "KV heads at most a supplied limit", "more KV heads than the supplied limit", _SUPPLIED,
                "run one decode attention step at the model's KV-head count against the CPU result"),
     TableEntry("sliding_window_layers_above_limit", "sliding-window layers at most a supplied limit",
-               "more sliding-window layers per group than the supplied limit", _SUPPLIED,
+               "more sliding-window layers than the supplied limit, counted over the whole model (the config does not say how layers are grouped)", _SUPPLIED,
                "run decode past the window length and compare with the CPU result"),
     TableEntry("mixer_linear_attention_not_in_nearest", "mixer implemented by the nearest bundle",
                "the nearest bundle has no linear attention kernels", _NEAREST,

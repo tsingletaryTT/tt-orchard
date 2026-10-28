@@ -20,6 +20,12 @@ MAX_CONFIG_BYTES = 1 << 20          # a config.json is a few kilobytes; a megaby
 # Model types whose full-attention query projection is always twice as wide (an output gate) with no config key saying so.
 # Found by summing the Qwen3-Coder-Next shard headers: q_proj holds 2 x heads x head_dim rows and its config has no attn_output_gate.
 GATED_BY_TYPE = ("qwen3_next",)
+# Model types whose MLP has two projections (up and down) and no gate. Every other type is counted with three (gate, up, down).
+# The list is by model_type because the config has no key for it; a two-projection family that is missing here is overcounted by a third.
+TWO_PROJECTION_MLP_TYPES = ("gpt_neox", "gpt2", "gptj", "gpt_bigcode", "opt", "bloom", "falcon", "bert", "roberta", "phi", "mpt", "codegen")
+# The most layers a config may claim. The largest real models have a few hundred; the bound keeps a hostile number from allocating
+# the per-layer tuples below.
+MAX_LAYERS = 10_000
 
 
 class ModelConfigError(ValueError):
@@ -73,17 +79,18 @@ class ModelDims:
     attn_output_gate: bool = False
     linear: dict = field(default_factory=dict)   # linear_attention shapes: key_heads, value_heads, key_dim, value_dim, conv_kernel
     mla: dict = field(default_factory=dict)      # multi-latent attention shapes, empty when the model has none
+    mlp_projections: int = 3                # matrices per MLP or expert: 3 for a gated MLP, 2 for the families in TWO_PROJECTION_MLP_TYPES
     keys: frozenset = frozenset()           # every key of the flat config, for detecting mixers that have no layer-type name
 
 
-def _num(cfg: dict, key: str, *, default=None, lo: int = 1) -> int:
-    """A whole number at `key` (at least `lo`). A missing key returns `default` when one is given and is an error otherwise."""
+def _num(cfg: dict, key: str, *, default=None, lo: int = 1, hi: int | None = None) -> int:
+    """A whole number at `key` (from `lo` to `hi`). A missing key returns `default` when one is given and is an error otherwise."""
     if key not in cfg or cfg[key] is None:
         if default is not None:
             return default
         raise ModelConfigError(f"model config has no {key}")
     try:
-        return safeio.whole_number(cfg[key], lo=lo, what=key)
+        return safeio.whole_number(cfg[key], lo=lo, hi=hi, what=key)
     except safeio.BadValue as exc:
         raise ModelConfigError(f"model config {exc.reason}") from exc
 
@@ -100,11 +107,13 @@ def dims(config) -> ModelDims:
     """Normalise a config (a flat dict, or a multimodal one with a `text_config`) to ModelDims. Raises ModelConfigError."""
     cfg = text_config(config)
     hidden = _num(cfg, "hidden_size")
-    layers = _num(cfg, "num_hidden_layers")
+    layers = _num(cfg, "num_hidden_layers", hi=MAX_LAYERS)
     heads = _num(cfg, "num_attention_heads")
     vocab = _num(cfg, "vocab_size")
     kv_heads = _num(cfg, "num_key_value_heads", default=heads)
-    head_dim = _num(cfg, "head_dim", default=max(1, hidden // heads))
+    mla = _mla(cfg)
+    # without a head_dim: multi-latent attention heads are as wide as the query/key (nope + rope) parts, other models split the hidden size
+    head_dim = _num(cfg, "head_dim", default=(mla["qk_nope_head_dim"] + mla["qk_rope_head_dim"]) if mla else max(1, hidden // heads))
 
     expert_key = _first(cfg, ("num_experts", "n_routed_experts", "num_local_experts"))
     experts = _num(cfg, expert_key) if expert_key else 0
@@ -141,18 +150,20 @@ def dims(config) -> ModelDims:
         linear = {"key_heads": lk, "value_heads": lv, "key_dim": lk * lkd, "value_dim": lv * lvd,
                   "conv_kernel": _num(cfg, "linear_conv_kernel_dim", default=4)}
 
-    mla: dict = {}
-    if "kv_lora_rank" in cfg and cfg["kv_lora_rank"] is not None:
-        mla = {"kv_lora_rank": _num(cfg, "kv_lora_rank"),
-               "q_lora_rank": _num(cfg, "q_lora_rank", default=0, lo=0) if cfg.get("q_lora_rank") is not None else 0,
-               "qk_nope_head_dim": _num(cfg, "qk_nope_head_dim"), "qk_rope_head_dim": _num(cfg, "qk_rope_head_dim"),
-               "v_head_dim": _num(cfg, "v_head_dim")}
-
     return ModelDims(
         hidden=hidden, intermediate=intermediate, layers=layers, heads=heads, kv_heads=kv_heads, head_dim=head_dim, vocab=vocab,
         tied_embeddings=cfg.get("tie_word_embeddings") is True, layer_types=layer_types, moe_layers=moe_layers,
         routed_experts=experts, top_k=top_k, moe_intermediate=moe_width if experts else 0, shared_intermediate=shared if experts else 0,
-        attn_output_gate=cfg.get("attn_output_gate") is True or cfg.get("model_type") in GATED_BY_TYPE, linear=linear, mla=mla, keys=frozenset(str(k) for k in cfg))
+        attn_output_gate=cfg.get("attn_output_gate") is True or cfg.get("model_type") in GATED_BY_TYPE, linear=linear, mla=mla, mlp_projections=2 if cfg.get("model_type") in TWO_PROJECTION_MLP_TYPES else 3, keys=frozenset(str(k) for k in cfg))
+
+
+def _mla(cfg: dict) -> dict:
+    """Multi-latent attention shapes, or an empty dict for a model without `kv_lora_rank`."""
+    if cfg.get("kv_lora_rank") is None:
+        return {}
+    return {"kv_lora_rank": _num(cfg, "kv_lora_rank"), "q_lora_rank": _num(cfg, "q_lora_rank", default=0, lo=0),
+            "qk_nope_head_dim": _num(cfg, "qk_nope_head_dim"), "qk_rope_head_dim": _num(cfg, "qk_rope_head_dim"),
+            "v_head_dim": _num(cfg, "v_head_dim")}
 
 
 def _layer_types(cfg: dict, layers: int) -> tuple:
@@ -166,7 +177,26 @@ def _layer_types(cfg: dict, layers: int) -> tuple:
     if cfg.get("full_attention_interval") is not None:
         n = _num(cfg, "full_attention_interval")
         return tuple("full_attention" if (i + 1) % n == 0 else "linear_attention" for i in range(layers))
-    return ("full_attention",) * layers
+    return _window_layers(cfg, layers)
+
+
+def _window_layers(cfg: dict, layers: int) -> tuple:
+    """Layer types for a config with no `layer_types` and no `full_attention_interval`: full attention, except where a sliding window
+    applies. A positive `sliding_window` is read by family: Mistral and Mixtral apply it to every layer; the Qwen2 and Qwen3 families
+    apply it from layer `max_window_layers` on when `use_sliding_window` is true. A positive window on any other family is refused,
+    because ignoring it would hide every sliding layer from the hazard scan."""
+    window = cfg.get("sliding_window")
+    if isinstance(window, bool) or not isinstance(window, int) or window <= 0:
+        return ("full_attention",) * layers
+    family = str(cfg.get("model_type", ""))
+    if family in ("mistral", "mixtral"):
+        return ("sliding_attention",) * layers
+    if family.startswith(("qwen2", "qwen3")):
+        if cfg.get("use_sliding_window") is not True:
+            return ("full_attention",) * layers
+        first = _num(cfg, "max_window_layers", default=0, lo=0)
+        return tuple("sliding_attention" if i >= first else "full_attention" for i in range(layers))
+    raise ModelConfigError(f"model config has a sliding_window but no layer_types, and the layout of model_type {family!r} is not known")
 
 
 def _moe_layers(cfg: dict, layers: int) -> tuple:
