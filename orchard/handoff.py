@@ -418,6 +418,10 @@ class Handoff:
             # Never start a second server while one may be up or coming up on the same port.
             if not self.server.confirm_stopped().stopped:
                 self._block("a server is already up or coming up for the coder; not starting another")
+            if (p.server or {}).get("owned") is False or getattr(self.server, "owned", None) is False:
+                # An earlier start was refused. Say "unknown" before this attempt, so a crash or a
+                # timeout during it leaves a record that still lets recovery stop our container.
+                self._record("restore", "serve_starting", server={**self.server.record(), "owned": None})
             try:
                 self.server.start(self.lease)
             except ServerStarting as exc:

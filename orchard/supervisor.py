@@ -1134,8 +1134,10 @@ class Supervisor:
             # a second refusal blocks with the same reason.
             released = {e["data"].get("lease_id") for e in entries if e["event"] == "decision"
                         and e["data"].get("decision") in ("hardware released", "coder left up")}
-            if lease.lease_id not in released:
-                self._release_foreign_lease(lease, lease.lease_id in self._adopted_ids(entries))
+            if (lease.lease_id not in released
+                    and not self._release_foreign_lease(lease, lease.lease_id in self._adopted_ids(entries))):
+                self._block(None, f"the coder container belongs to another process, and this run's lease "
+                                  f"{lease.lease_id} could not be released to try again")
             self._start_coder(canary)
             return
         mine = [c for c in self.adapter.status() if c.bdf in lease.chips]
@@ -1163,11 +1165,12 @@ class Supervisor:
                               ledger=self.ledger, stage=None, wait_budget_s=COLD_BOOT_BUDGET_S,
                               clock=self.clock, sleep=self.sleep)
         self.coder_lease = lease          # known from here on, so a shutdown can release it
-        self.coder.owned = None           # a new attempt: an earlier refusal says nothing about this one
         # Recorded before the start: a crash during the boot leaves the lease and server in the
         # ledger, so the restart can stop that server and re-lease.
+        # The pending record says "unknown" for this attempt. The live value changes only when the
+        # start begins (ServerControl.start), so a failed append here cannot lose an earlier refusal.
         self.ledger.append("decision", None, decision="coder starting", lease=lease.record(),
-                           server=self.coder.record())
+                           server={**self.coder.record(), "owned": None})
         try:
             self.coder.start(lease)
         except ServerNotOwned as exc:

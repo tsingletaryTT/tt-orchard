@@ -2878,3 +2878,9 @@ Prompt (operator): "if a little sqlite DB inside this project helps everything r
 - `_ensure_coder` checks ownership before the dead-coder and unfinished-boot paths: a resume that still holds the lease gives it back without a reset and starts again, and a second refusal blocks. Before, a healthy foreign server could pass readiness and the canary.
 - `LeaseAdapter.release` and `SingleTenantAdapter.release` accept `keep_running` (the single-tenant adapter never resets, so it changes nothing there).
 - Tests first (5 failed); 6 new mutations red.
+
+## 2026-10-28 (UTC): second review of PR 158 (head 7903865), same class
+- The pending "coder starting" record now carries `owned` unknown in the record only. The live value changes when `ServerControl.start` begins, so a failed ledger append before the start cannot lose an earlier refusal.
+- A restore that follows a refused one writes a `serve_starting` step with `owned` unknown before it calls `start`, so a crash or a timeout in that attempt leaves a record that still lets recovery stop our container.
+- A resume that cannot release the lease of a refused start blocks instead of asking for a second lease.
+- Tests first (3 failed); 3 mutations red. Class sweep: every writer of a server record was checked (park note, restore serve, coder starting, container started, not started, serve refused, serve starting, adopted).

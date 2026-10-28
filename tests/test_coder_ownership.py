@@ -8,7 +8,7 @@ stopped, also after a crash and a resume that reads the ledger.
 """
 import pytest
 
-from fakes import LEASE, FakeClock, FakeRun
+from fakes import LEASE, Crash, FakeClock, FakeRun
 from run_fakes import MachineCoder
 from orchard.server import ServerControl, ServerNotOwned, ServerSpec, StopCheck
 from orchard.stages import coder_state
@@ -329,3 +329,72 @@ def foreign_coder(machine):
     """A coder whose serve is refused because another process's container of that name runs."""
     return HybridCoder(machine, serve=(1, "", "tt-model-qwen-coder-default is already running"),
                        docker_ps=(DOCKER_LINE, ""))
+
+
+# ---- the second review of PR 158 --------------------------------------------------------------
+
+
+def test_a_failed_pre_start_append_keeps_the_live_refusal(rig):
+    """The pending record says "unknown"; the live value changes only when the start begins."""
+    from orchard import supervisor
+    from orchard.ledger import Ledger
+
+    class FailingLedger(Ledger):
+        def append(self, event, stage, **data):
+            if data.get("decision") == "coder starting":
+                raise OSError("disk full")
+            return super().append(event, stage, **data)
+
+    rig.run_dir.mkdir(parents=True, exist_ok=True)
+    with FailingLedger(rig.run_dir / "ledger.jsonl") as led:
+        coder = HybridCoder(rig.m)
+        coder.ctl.owned = False
+        sup = supervisor.build(rig.args, led, adapter=rig.adapter_cls(rig.m, owner_pid=100), coder=coder,
+                               versions={"tt_model": "test"}, clock=rig.clock, sleep=rig.sleep,
+                               disk_usage=lambda p: rig.usage(p), home=rig.home, containers=rig.containers)
+        with pytest.raises(OSError):
+            sup._start_coder(None)
+    assert coder.owned is False and stops(coder.run) == []
+
+
+def test_a_retried_restore_records_unknown_ownership_before_it_starts(tmp_path):
+    from fakes import make_handoff
+    from orchard.handoff import progress
+    h, world, ledger = make_handoff(tmp_path)
+    h.park()
+    h.server.owned = False                         # an earlier restore was refused
+    h.server.record = lambda: {"kind": "container", "owned": h.server.owned}
+    seen = []
+
+    def start(lease):
+        seen.append(progress(ledger.read()).server)
+        raise Crash("killed during the serve call")
+
+    h.server.start = start
+    with pytest.raises(Crash):
+        h.restore()
+    assert seen[0]["owned"] is None
+
+
+def test_a_resume_blocks_when_the_foreign_lease_cannot_be_released(rig):
+    from orchard import supervisor
+    from orchard.adapters import AdapterError
+    from orchard.ledger import Ledger
+    rig.run_dir.mkdir(parents=True, exist_ok=True)
+    with Ledger(rig.run_dir / "ledger.jsonl") as led:
+        coder = foreign_coder(rig.m)
+        adapter = rig.adapter_cls(rig.m, owner_pid=100)
+        sup = supervisor.build(rig.args, led, adapter=adapter, coder=coder, versions={"tt_model": "test"},
+                               clock=rig.clock, sleep=rig.sleep, disk_usage=lambda p: rig.usage(p),
+                               home=rig.home, containers=rig.containers)
+        lease = adapter.acquire(2, "orchard:supervisor", "coder")
+        led.append("decision", None, decision="coder not started", lease=lease.record(),
+                   lease_id=lease.lease_id, server={**SPEC_RECORD, "owned": False}, reason="owned elsewhere")
+
+        def refuse(lease, keep_running=False):
+            raise AdapterError("gozer release failed")
+
+        adapter.release = refuse
+        with pytest.raises(supervisor.Blocked):
+            sup._ensure_coder()
+    assert rig.m.n == 1                              # no second lease was requested
