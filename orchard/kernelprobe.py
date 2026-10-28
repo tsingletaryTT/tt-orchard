@@ -67,7 +67,7 @@ import time
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
-from orchard import defaults, hwtool, ttlang_env
+from orchard import defaults, hwtool, ttlang_consistency, ttlang_env, ttlang_reference
 from orchard.agent import DEVICE_VARS, SECRET_NAME, TOOL_SCHEMAS, AgentStep, Tools, agent_env, probe_model
 from orchard.canary import post_json
 from orchard.ledger import Ledger
@@ -1837,7 +1837,7 @@ def _reference_lines(header: dict) -> list[str]:
         lines += ["", f"Worked-kernel library mode: {lib.get('mode')}."]
         if lib.get("note"):
             lines.append(str(lib["note"]))
-    return lines + [""]
+    return lines + [""] + ttlang_reference.report_lines(header)
 
 
 def write_report(probe_dir, attempts: list[dict], header: dict) -> dict:
@@ -2285,8 +2285,18 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
         return refuse("the coder's reference files are not ready: " + "; ".join(problems) + ". The tt-lang skill is "
                       "installed by `tt-warp fastmodels sync`; name another directory with --tt-lang-skill-dir or "
                       f"{ttlang_env.TTLANG_SKILL_ENV}")
-    reference_record = [{"name": f"reference/{r['name']}", "source": r["source"], "path": r["path"],
-                         "sha256": r["sha256"]} for r in references]
+    reference_record = [ttlang_reference.record(r) for r in references]
+    # One tt-lang for the simulator, the coder's reading and (later) the hardware build: every row of the consistency
+    # check that blocks refuses the probe, unless overridden (orchard/ttlang_consistency.py).
+    rows = ttlang_consistency.check(env, skill_dir, tt_metal_dir=ttlang_consistency.tt_metal_dir_from(args),
+                                    references=references)
+    for line in ttlang_consistency.render(rows):
+        say(line)
+    blocked_rows = ttlang_consistency.blocking(rows)
+    if blocked_rows and not getattr(args, "allow_stale_skills", False):
+        return refuse("the tt-lang environment does not match the pin: " + " ".join(
+            f"{r.name}: {r.detail}. Fix: {r.fix}." for r in blocked_rows) + " Pass --allow-stale-skills to run anyway; "
+            "the report then records it")
     # The operator's rule: the probe uses the latest tt-lang checkout and tt-lang skill upstream has. A stale source
     # (or one that could not be compared and has no recent current check) refuses the probe unless overridden.
     fresh = ttlang_env.skills_status(env, skill_dir, preread=ttlang_env.skill_bytes(references))
@@ -2410,6 +2420,7 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
             header["sampling"] = sampling
             header["tt_lang_skill_dir"] = str(skill_dir)
             header["references"] = reference_record
+            header["ttlang_pin"] = ttlang_consistency.pin_record(env)
             header["library"] = {"mode": library_mode, "note": library_note(args.op, library_mode)}
             header["skills"] = skills_record
             header["agent_hw_policy"] = hw_policy.as_dict() | {"enabled": hw_policy.enabled}

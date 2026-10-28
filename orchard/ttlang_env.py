@@ -256,10 +256,10 @@ def ensure(env: KEnv, *, check_only: bool = False, say: Callable = print) -> lis
 # ---- the coder's reference files --------------------------------------------------------------------------------
 #
 # The kernel probe gives the coder these files in its attempt directory, under reference/ (spec section 11, item 28).
-# Two come from the installed tt-lang skill (vendored by tt-warp from tenstorrent/tt-metal, branch
-# agentic-research/fast-models-fast); three come from the tt-lang checkout this module builds the simulator from. The
-# skill's guide and examples document tt-lang specification 0.12; the checkout's specification and examples are the
-# version the simulator runs (0.20 at the pin), so they go in too and the probe's skill says which wins.
+# The specification and the two example kernels come from the tt-lang checkout this module builds the simulator from.
+# guide.md and examples.md come from the installed tt-lang skill (vendored by tt-warp from tenstorrent/tt-metal, branch
+# agentic-research/fast-models-fast) only when it documents the same specification version as the checkout (0.12
+# against 0.20 when this was written); otherwise orchard/ttlang_reference.py generates them from the checkout's docs.
 
 TTLANG_SKILL_ENV = "ORCHARD_TTLANG_SKILL"
 SKILL_SOURCE, CHECKOUT_SOURCE = "tt-lang skill", "tt-lang checkout"
@@ -322,20 +322,13 @@ def _read_reference(path: Path, root: Path | None = None) -> tuple[bytes | None,
 
 
 def read_references(env: KEnv, skill_dir: Path) -> tuple[list[dict], list[str]]:
-    """Read every reference file once. (files, problems): each file is {"name", "source", "path", "sha256", "data"};
-    each problem is a sentence naming a file that is missing, a link, not a regular file or too large. The probe
-    refuses to start while any problem remains, and writes these same bytes into every attempt."""
-    roots = {SKILL_SOURCE: Path(skill_dir), CHECKOUT_SOURCE: Path(env.src_dir)}
-    files, problems = [], []
-    for name, source, rel in REFERENCES:
-        path = roots[source] / rel
-        data, why = _read_reference(path, roots[source])
-        if why:
-            problems.append(why)
-            continue
-        files.append({"name": name, "source": source, "path": str(path),
-                      "sha256": hashlib.sha256(data).hexdigest(), "data": data})
-    return files, problems
+    """Read every reference file once. (files, problems): each file is {"name", "source", "path", "sha256", "data",
+    "spec_version", "generated"}; each problem is a sentence naming a file that is missing, a link, not a regular file or too large. The probe
+    refuses to start while any problem remains, and writes these same bytes into every attempt. The assembly is in
+    orchard/ttlang_reference.py: the skill's guide.md and examples.md are used only when the skill documents the same
+    specification version as the checkout; otherwise they are generated from the checkout's docs."""
+    from orchard import ttlang_reference
+    return ttlang_reference.assemble(env, skill_dir)
 
 
 def skills_status(env: KEnv, skill_dir: Path, *, write_cache: bool = True, preread: dict | None = None) -> list:

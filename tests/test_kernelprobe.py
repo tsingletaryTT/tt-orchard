@@ -20,6 +20,9 @@ import pytest
 
 from fake_model import FakeModel, call, final, turn
 from orchard import kernelprobe as kp, ttlang_env
+from orchard import ttlang_consistency as _consistency, ttlang_pin as _pin
+
+_REAL_CONSISTENCY_CHECK = _consistency.check      # the autouse fixture below replaces it for most tests
 from orchard.agent import NO_CHIP
 
 REPO = Path(__file__).resolve().parent.parent
@@ -79,6 +82,22 @@ def skills_current(monkeypatch):
         return list(state["results"])
     monkeypatch.setattr(ttlang_env, "skills_status", fake)
     return state
+
+
+@pytest.fixture(autouse=True)
+def consistency_ok(monkeypatch):
+    """The tt-lang consistency check (orchard/ttlang_consistency.py) finds no blocking row, so tests with a made-up
+    checkout and simulator reach the code they are about. tests/test_ttlang_pin.py tests the check itself, and
+    test_probe_refuses_* below run it for real."""
+    monkeypatch.setattr(kp.ttlang_consistency, "check", lambda env, skill_dir, **kw: [])
+
+
+@pytest.fixture(autouse=True)
+def consistency_ok(monkeypatch):
+    """The tt-lang consistency check (orchard/ttlang_consistency.py) finds no blocking row, so tests with a made-up
+    checkout and simulator reach the code they are about. tests/test_ttlang_pin.py tests the check itself, and the
+    test_probe_refuses_* tests at the end of this file run it for real."""
+    monkeypatch.setattr(kp.ttlang_consistency, "check", lambda env, skill_dir, **kw: [])
 
 
 FACTS = {"sim_version": "1.1.10+gtest", "source_sha": "a" * 40, "diagnostics_patched": True, "patch_sha256": "b" * 64}
@@ -3777,3 +3796,75 @@ def test_the_probe_read_file_takes_limit_and_names_its_arguments_for_an_unknown_
     assert ok.startswith("line 5\nline 6\nline 7") and "[lines 5 to 7 of 30" in ok
     bad = tools.call("read_file", json.dumps({"path": "notes.txt", "offset": 5, "count": 3}))
     assert bad.startswith("error:") and "'count'" in bad and "path" in bad and "offset" in bad and "limit" in bad
+
+
+# ---- one tt-lang for the simulator, the coder's reading and the hardware build (orchard/ttlang_pin.py) ------------
+
+def _pinned_env(fake_kenv, *, checkout_at=None, sim=None):
+    """fake_kenv with the checkout's commit and the simulator version set to the pin (or to what a test names)."""
+    def run(argv, timeout, env=None):
+        if argv[-1] == "--version":
+            return 0, f"tt-lang-sim {sim or _pin.SIM_VERSION}\n", ""
+        if "rev-parse" in argv:
+            return 0, (checkout_at or _pin.SHA) + "\n", ""
+        return 1, "", "not faked"
+    return ttlang_env.KEnv(src_dir=fake_kenv.src_dir, venv_dir=fake_kenv.venv_dir, scratch_dir=fake_kenv.scratch_dir,
+                           run=run)
+
+
+def _spec(version):
+    return f"## Specification Versions\n\n| *Version* | *Date* |\n| :-- | :-- |\n| {version} | 2026-10-01 |\n"
+
+
+def test_probe_refuses_when_the_checkout_is_not_at_the_pin(tmp_path, fake_kenv, env_ready, monkeypatch, capsys):
+    monkeypatch.setattr(kp.ttlang_consistency, "check", _REAL_CONSISTENCY_CHECK)
+    out, asked = io.StringIO(), []
+    code = kp.main(probe_args(tmp_path), env=_pinned_env(fake_kenv, checkout_at="d" * 40), out=out,
+                   probe=lambda e, m: asked.append(e) or True, run_watched_fn=no_run)
+    assert code == 2 and asked == [] and not (tmp_path / "out").exists()
+    err = capsys.readouterr().err
+    assert "does not match the pin" in err and "checkout" in err and "kernel-env" in err
+    assert "mismatch checkout" in out.getvalue()
+
+
+def test_probe_refuses_when_the_simulator_was_built_from_another_commit(tmp_path, fake_kenv, env_ready, monkeypatch,
+                                                                        capsys):
+    monkeypatch.setattr(kp.ttlang_consistency, "check", _REAL_CONSISTENCY_CHECK)
+    code = kp.main(probe_args(tmp_path), env=_pinned_env(fake_kenv, sim="1.1.10+gabcdef0"), out=io.StringIO(),
+                   probe=lambda e, m: True, run_watched_fn=no_run)
+    assert code == 2 and "simulator" in capsys.readouterr().err
+
+
+def test_allow_stale_skills_overrides_the_consistency_refusal(tmp_path, fake_kenv, env_ready, monkeypatch):
+    monkeypatch.setattr(kp.ttlang_consistency, "check", _REAL_CONSISTENCY_CHECK)
+    with FakeModel(lambda r: final("nothing")) as server:
+        code = kp.main(probe_args(tmp_path, endpoint=server.endpoint, allow_stale_skills=True),
+                       env=_pinned_env(fake_kenv, checkout_at="d" * 40), out=io.StringIO(), probe=lambda e, m: True,
+                       run_watched_fn=no_run)
+    assert code == 0
+
+
+def test_an_older_skill_runs_on_a_guide_built_from_the_checkout_and_the_report_says_so(tmp_path, fake_kenv, env_ready,
+                                                                                    ttlang_skill, monkeypatch):
+    from orchard import ttlang_reference as tr
+    monkeypatch.setattr(kp.ttlang_consistency, "check", _REAL_CONSISTENCY_CHECK)
+    (fake_kenv.src_dir / "docs" / "sphinx" / "specs" / "TTLangSpecification.md").write_text(_spec("0.20"))
+    for rel in tr.GUIDE_DOCS + tr.EXAMPLES_DOCS:
+        p = fake_kenv.src_dir / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(f"# {rel}\n")
+    (ttlang_skill / "TTLangSpecification.md").write_text(_spec("0.12"))
+    out = io.StringIO()
+    with FakeModel(lambda r: final("nothing")) as server:
+        code = kp.main(probe_args(tmp_path, endpoint=server.endpoint), env=_pinned_env(fake_kenv), out=out,
+                       probe=lambda e, m: True, run_watched_fn=no_run)
+    assert code == 0, out.getvalue()
+    data = json.loads((tmp_path / "out" / "kernel-probe-report.json").read_text())
+    refs = {r["name"]: r for r in data["header"]["references"]}
+    assert refs["reference/guide.md"]["generated"] is True and refs["reference/guide.md"]["spec_version"] == "0.20"
+    assert data["header"]["ttlang_pin"]["sha"] == _pin.SHA and data["header"]["ttlang_pin"]["spec_version"] == "0.20"
+    attempt_guide = next((tmp_path / "out").rglob("reference/guide.md"))
+    assert hashlib.sha256(attempt_guide.read_bytes()).hexdigest() == refs["reference/guide.md"]["sha256"]
+    md = (tmp_path / "out" / "kernel-probe-report.md").read_text()
+    assert "## Reference versions" in md and "The guide and the specification both document 0.20" in md
+    assert "mismatch skill" in out.getvalue()
