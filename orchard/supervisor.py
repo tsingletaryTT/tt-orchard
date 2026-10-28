@@ -126,7 +126,7 @@ from urllib.parse import urlparse
 
 from orchard.adapters import AdapterError, Lease
 from orchard.agent import AgentStep, Tools, agent_env, probe_model, spawn_checked
-from orchard import bus, nearest
+from orchard import audio_reference_env, audio_runtime, bus, nearest
 from orchard.audio_facts import serving_of
 from orchard.blocked import block_code, last_pause
 from orchard.blocked import write_bundle as write_blocked_bundle
@@ -137,7 +137,7 @@ from orchard.context import build_messages, facts_from
 from orchard.defaults import (AGENT_CONTINUATION_TURNS, AGENT_WRAPUP_TURNS, CHIPS_PER_BOARD, CMD_TIMEOUT_S,
                               COLD_BOOT_BUDGET_S, CONTROL_POLL_S, FIRST_BOOT_EXPECTED,
                               FIRST_BOOT_PROMPT, PACKAGE_DEFERRED, PACKAGE_FORMATS,
-                              GRAFT_TRIAL_DEADLINE_S, GRAFT_TRIAL_DISK_GB, RUN_CANARY_PROMPT, STOP_TIMEOUT_S, TEST_DISK_GB, FAST_FAIL_S)
+                              GRAFT_TRIAL_DEADLINE_S, GRAFT_TRIAL_DISK_GB, RUN_CANARY_PROMPT, SAMPLING_TRIAL_DEADLINE_S, SAMPLING_TRIAL_DISK_GB, SAMPLING_TRIAL_RUN_DISK_GB, STOP_TIMEOUT_S, TEST_DISK_GB, FAST_FAIL_S)
 from orchard.handoff import (NOTE_KEYS, Blocked, Budgets, Handoff, decide_park, progress, reacquire,
                              recover, wait_stopped)
 from orchard.hwtests import (failed_tests, load_plan, move_aside, pending, read_plan, suspect_caches,
@@ -150,9 +150,10 @@ from orchard.paths import (PATHS_RECORDED, RunPaths, UnknownPlaceholder, absolut
                            recorded_paths)
 from orchard.runner import Denied, check_string
 from orchard import graft_trial as graft
+from orchard import sampling_choice as sampling
 from orchard import kept_coder, kernelprobe, swap_draft
 from orchard.server import ServerControl, ServerError, ServerNotOwned, ServerSpec, StopCheck
-from orchard.stages import (PACKAGE_OPTIONS_SET, GateResult, TierUnavailable, abort_can_resume, attempt_started_ts,
+from orchard.stages import (AUDIO_STAGE_1, AUDIO_STAGE_2, PACKAGE_OPTIONS_SET, GateResult, TierUnavailable, abort_can_resume, attempt_started_ts,
                             budget_cap, check_disk, coder_state, delta_class, delta_facts, delta_path, run_facts, evidence_record,
                             open_stage_dir, package_format, package_options, resolve_endpoint,
                             resolve_skill, run_class, run_path, run_progress, scratch_stage, spec_for, stock_params, tier_for)
@@ -171,6 +172,9 @@ RESTRICTED_HEAD = ("stage 0 found the nearest model's backbone with a restricted
                    "rows); the harness does not serve that, so a person decides whether to go on")
 AUDIO_UNBUILT = ("stage 0 found an audio model; the audio path (its stage 1 and stage 2) is not built yet, and the text stages would "
                  "measure the wrong thing, so a person decides whether to go on")
+AUDIO_ENV_MISSING = ("stage 0 found an audio model that the harness's own audio runtime serves, but the audio path's environment is not on "
+                     "this machine, so a person decides whether to go on: ")
+AUDIO_CHIP_DEADLINE_S = 3600.0         # the audio stage 2 hardware test: two chip runs, a kernel compile on the first, and the model loads
 SKILLS_DIR = Path(__file__).with_name("skills")
 
 
@@ -498,6 +502,7 @@ SWAP_TEMPLATES = ("prepare_swap.py", "serve_and_compare.py", "prompt_suite.json"
 STAGE4_TEMPLATES = (*SWAP_TEMPLATES, "serve_and_compare_container.py")     # into each drafted configs/<N>
 GRAFT_TRIAL_ENV = "ORCHARD_TRIAL_DIR"      # in the environment of the trial's test: the trial directory, so its servers can be found
 GRAFT_TRIAL_TEMPLATE = "graft_trial.py"     # copied into stages/2/graft-trial/ when the trial starts (orchard/graft_trial.py)
+SAMPLING_TRIAL_TEMPLATE = "sampling_trial.py"   # copied into stages/2/sampling-trial/ when the drafter-off trial starts (orchard/sampling_choice.py)
 
 
 class Supervisor:
@@ -511,8 +516,10 @@ class Supervisor:
                  package_added: bool = False, unattended: bool = False, lab=None,
                  four_chip_package: str | None = None, coder_tier: str | None = None,
                  keep_up: bool = False, coder_identity: dict | None = None, graft_trial: bool = True,
-                 resume_aborted: bool = False):
+                 resume_aborted: bool = False, sampling: str = "auto"):
         self.run_dir = Path(run_dir).resolve()
+        # Whether the model's purpose needs sampling: "auto" reads it from stage 0's files, the others are the operator's word (orchard/sampling_choice.py).
+        self.sampling = sampling
         # An abort is terminal unless the operator asks for this (`--resume-aborted`): then an operator's or a signal's abort is
         # followed by a `resume` decision marked `after: abort`, and the run goes on from the ledger (orchard/stages.py, abort_can_resume).
         self.resume_aborted = resume_aborted
@@ -776,7 +783,7 @@ class Supervisor:
         if not p.started:
             self.ledger.append("run_start", None, model=self.model_id, versions=self.versions,
                                inputs=self.inputs, required_chips=list(self.required_chips or ()) or None,
-                               graft_trial=self.graft_trial,
+                               graft_trial=self.graft_trial, sampling=self.sampling,
                                paths=self.paths.record(), package=self.package,
                                coder=self.coder.record(),
                                tiers={k: dict(v) for k, v in self.cfg.tiers.items()},
@@ -833,6 +840,8 @@ class Supervisor:
             if cap:
                 self.ledger.append("decision", p.next_stage, decision="pause", reason=cap)
                 continue
+            if p.next_stage == 1 and self._select_audio_runtime() == "paused":
+                continue
             if p.next_stage == 1 and self._audio_unacknowledged():
                 self.ledger.append("decision", 1, decision="pause", reason=AUDIO_UNBUILT)
                 continue
@@ -846,9 +855,11 @@ class Supervisor:
             # resumed run picks the same skill and gate as the run that crashed.
             entries = self.ledger.read()
             spec = spec_for(p.next_stage, run_path(entries, self.run_dir), package_format(entries),
-                            run_class(entries, self.run_dir), stock=stock_params(entries) is not None)
+                            run_class(entries, self.run_dir), stock=stock_params(entries) is not None,
+                            audio_runtime=audio_runtime.selected(entries) is not None)
             try:
-                self._ensure_coder()
+                if spec.needs_coder or self._coder_in_use():
+                    self._ensure_coder()
                 result = self._run_stage(spec, resuming=p.open_stage == p.next_stage,
                                          escalated=p.next_stage in p.escalated)
             except Blocked as exc:
@@ -884,8 +895,43 @@ class Supervisor:
         facts = run_facts(entries, self.run_dir)
         if not facts or facts.get("modality") != "audio":
             return False
+        if audio_runtime.selected(entries) is not None:
+            return False                  # the harness has a runtime for this model, so the audio path is built for it
         return self.unattended or not any(
             e["event"] == "decision" and e["data"].get("reason") == AUDIO_UNBUILT for e in entries)
+
+    def _select_audio_runtime(self) -> str:
+        """Stage 1 is next. When stage 0 found an audio model and the harness's own runtime implements it (orchard/audio_runtime.py), record that
+        once ("selected"), so a resume keeps the choice. "paused" when the runtime exists and its environment is missing (a pause decision was
+        written). "none" in every other case, and the audio stop applies as before."""
+        entries = self.ledger.read()
+        if audio_runtime.selected(entries) is not None:
+            return "selected"
+        facts = run_facts(entries, self.run_dir)
+        model_dir = self.inputs.get("model")
+        from orchard import audio_plan
+        if (not facts or facts.get("modality") != "audio" or not model_dir or audio_plan.library_name(self.model_id) is None
+                or audio_runtime.runtime_problems(model_dir)):
+            return "none"          # the planners know two repositories; another one with a supported configuration is not selected
+        paths = audio_runtime.audio_paths(self.paths.operator_home)
+        missing = audio_runtime.environment_problems(paths)
+        if missing:
+            self.ledger.append("decision", 1, decision="pause", reason=AUDIO_ENV_MISSING + "; ".join(missing))
+            return "paused"
+        self.ledger.append("decision", 1, decision=audio_runtime.AUDIO_RUNTIME_SELECTED, runtime=audio_runtime.RUNTIME, paths=paths.record(),
+                           scripts=audio_runtime.script_hashes(), model=self.model_id)
+        return "selected"
+
+    def _coder_in_use(self) -> bool:
+        """The ledger holds a coder lease this run has not released: a coder is part of the run even when the next stage does not need it, so
+        it is adopted (or found dead and handled) as before."""
+        entries = self.ledger.read()
+        lease_rec, _, _ = coder_state(entries)
+        if lease_rec is None:
+            return False
+        released = {e["data"].get("lease_id") for e in entries
+                    if e["event"] == "decision" and e["data"].get("decision") in ("hardware released", "coder left up")}
+        return lease_rec["lease_id"] not in released
 
     def _restricted_head_unacknowledged(self) -> bool:
         """Stage 0 filed the model as a restricted head, and the run has not yet paused for it. The harness does not serve
@@ -1285,7 +1331,10 @@ class Supervisor:
             self.ledger.append("stage_start", n, skip=True)
             self.ledger.append("stage_end", n, result="skipped", reason=spec.skip)
             return "skipped"
-        ok, free = check_disk(self.run_dir, spec.disk_gb, usage=self.disk_usage)
+        # A resumed stage 2 whose sampling trial already ran only has results to read. The trial's own tensor cache may have taken the space the entry
+        # requirement asks for, and nothing is converted again, so the requirement is for a stage that still has a cache to make.
+        reads_finished_trial = (resuming and n == 2 and (self.run_dir / "stages" / "2" / sampling.TRIAL_DIR / "test-result.json").is_file())
+        ok, free = (True, None) if reads_finished_trial else check_disk(self.run_dir, spec.disk_gb, usage=self.disk_usage)
         if not ok:
             self._block(n, f"stage {n} needs {spec.disk_gb} GB free on the run directory's disk; "
                            f"{free} GB is free", need_gb=spec.disk_gb, free_gb=free)
@@ -1319,6 +1368,8 @@ class Supervisor:
                 return self._stock_triage_body(spec, stage_dir)
             if spec.number == 8:
                 return self._bundle_body(spec, stage_dir)
+            if spec in (AUDIO_STAGE_1, AUDIO_STAGE_2):
+                return self._audio_body(spec, stage_dir, resumed)
             return self._package_body(spec, stage_dir, resumed)
         if spec.boards == 0:
             out, step = self._step(spec, "run", stage_dir, escalated, resumed)
@@ -1371,8 +1422,11 @@ class Supervisor:
         if gate.ok and spec.number == 2 and spec.draft == "swap_config":
             # The safe configuration passed. A model with a graft candidate is tried once more with the grafted drafter. The trial cannot
             # fail the stage: a failed or slow trial leaves the safe result as it is.
-            if self._graft_trial(spec, stage_dir):
-                gate = self._check_gate(spec, stage_dir)       # the gate also reads the decision file
+            changed = self._graft_trial(spec, stage_dir)
+            # The sampling choice judges the configuration that is now served (the graft when it was chosen), so it runs after the graft trial.
+            changed = self._sampling_choice(spec, stage_dir) or changed
+            if changed:
+                gate = self._check_gate(spec, stage_dir)       # the gate also reads the decision files
         return ("pass", [], gate) if gate.ok else ("fail", list(gate.reasons), gate)
 
     def _wrap_up(self, spec, stage_dir: Path, step: AgentStep, out):
@@ -1460,6 +1514,110 @@ class Supervisor:
         gate = self._check_gate(spec, stage_dir)
         return ("pass", [], gate) if gate.ok else ("fail", list(gate.reasons), gate)
 
+    # ---- the audio runtime path (orchard/audio_runtime.py, orchard/audio_stages.py) ---------------------------------------------
+
+    def _audio_models(self) -> tuple[str | None, str | None]:
+        """The model and its base as stage 0 wrote them (`<repo>@<revision>`)."""
+        try:
+            delta = json.loads((self.run_dir / "stages" / "0" / "delta.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return self.model_id, None
+        return delta.get("model") or self.model_id, delta.get("nearest_model")
+
+    def _audio_env(self) -> dict:
+        """The environment of every child of the audio stages that reads or makes model data: the agent shells' (no token, HOME in the run directory,
+        no chip) plus the Hugging Face cache directory, with the Hub offline."""
+        child_env = agent_env(self.run_dir, extra=self.extra_env)
+        child_env.update({"HF_HOME": self.paths.hf_home, "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"})
+        return child_env
+
+    def _audio_expected(self, model_id, base_id) -> tuple[dict, str | None]:
+        """The identity (revision and configuration hash) of the snapshots this run was started on, for the model and for its base, and the base's
+        id when its snapshot is known (a base without one has no control). Raises AudioStageError when a snapshot cannot be read."""
+        from orchard import audio_plan
+        expected = {}
+        for repo, key in ((model_id, "model"), (base_id, "base")):
+            name, snapshot = audio_plan.library_name(repo), self.inputs.get(key)
+            if name and snapshot and name not in expected:       # a base that is another revision of the model's own repository has the same name; the model's entry stays
+                expected[name] = audio_plan.snapshot_identity(snapshot)
+        base = base_id if (audio_plan.library_name(base_id) in expected and audio_plan.library_name(base_id) != audio_plan.library_name(model_id)) else None
+        return expected, base
+
+    def _audio_body(self, spec, stage_dir: Path, resumed: bool):
+        """Stage 1 (CPU references) and stage 2 (the clip on one chip) of an audio run, as supervisor code. The numeric work runs in the configured
+        reference interpreter (orchard/audio_remote.py), so the supervisor needs only the standard library. Stage 2 uses the one-test hardware phase
+        of stages 2 and 3: a lease (no coder to park when none was booted), one command, the lease back."""
+        from orchard import audio_plan, audio_remote
+        from orchard.audio_plan import AudioStageError
+        n = spec.number
+        if self.lab is not None:
+            return "fail", ["the audio runtime does not run in lab mode"], None
+        paths = audio_runtime.selection_paths(self.ledger.read())
+        if paths is None:
+            return "fail", ["the ledger holds no audio runtime selection with its paths"], None
+        model_id, base_id = self._audio_models()
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            expected, base_id = self._audio_expected(model_id, base_id)
+            if n == 1:
+                if not (resumed and (stage_dir / audio_runtime.REFERENCE_FILE).is_file()):
+                    self._audio_stage_1(stage_dir, paths, model_id, base_id, expected)
+            else:
+                if not (resumed and (stage_dir / "test-result.json").is_file()):
+                    plan = audio_plan.chip_plan(model_id, base_id)
+                    audio_plan.write_chip_config(stage_dir, paths, self.paths.hf_home, plan)
+                    command = audio_plan.chip_test_command(paths, stage_dir.resolve(), audio_runtime.TEMPLATES / "audio_chip_test.py")
+                    try:
+                        check_string(command, self.run_dir)
+                    except Denied as exc:
+                        return "fail", [f"the test command is refused: {exc}"], None
+                    test = {"command": command, "deadline_s": AUDIO_CHIP_DEADLINE_S}
+                    (stage_dir / "hw_test.json").write_text(json.dumps(test) + "\n", encoding="utf-8")
+                    (stage_dir / "handoff.json").write_text(json.dumps({
+                        "goal": "make one Stable Audio 3 clip with the diffusion transformer on one chip", "stage": 2,
+                        "evidence": "stages/2/audio_chip_config.json", "next_action": "the supervisor runs the clip test under its own lease",
+                        "check_on_return": "stages/2/test-result.json"}) + "\n", encoding="utf-8")
+                    self._hardware_phase(spec, stage_dir, test)
+                failed = hardware_test_failure(stage_dir)
+                if failed:
+                    return "fail", [failed["problem"] + "; see stages/2/evidence/hw-test-output.txt and stages/2/log"], None
+                audio_remote.call(paths.reference_python, "finish", {
+                    "stage_dir": str(stage_dir), "run_dir": str(self.run_dir), "ref_stage_dir": str(self.run_dir / "stages" / "1"),
+                    "plan": audio_plan.chip_plan(model_id, base_id),
+                    "roles": {audio_plan.ROLE_CHIP: audio_plan.ROLE_REFERENCE, audio_plan.ROLE_CONTROL_CHIP: audio_plan.ROLE_CONTROL_REFERENCE}},
+                    timeout_s=1800.0, env={"PATH": os.environ.get("PATH", "")})
+        except AudioStageError as exc:
+            return "fail", [str(exc)], None
+        self.ledger.append("evidence", n, what="audio stage record", **evidence_record(self.run_dir, stage_dir / spec.gate_file))
+        gate = self._check_gate(spec, stage_dir)
+        return ("pass", [], gate) if gate.ok else ("fail", list(gate.reasons), gate)
+
+    def _audio_stage_1(self, stage_dir: Path, paths, model_id, base_id, expected: dict) -> None:
+        from orchard import audio_plan, audio_remote
+        plan = audio_plan.reference_plan(model_id, base_id)
+        cache = Path(self.paths.cache_root) / "audio-reference"
+        result = audio_remote.call(paths.reference_python, "references", {
+            "stage_dir": str(stage_dir), "run_dir": str(self.run_dir), "paths": paths.record(), "plan": plan, "expected": expected,
+            "library_commit": audio_reference_env.LIBRARY_COMMIT, "cache_dir": str(cache), "env": self._audio_env(), "timeout_s": 3600.0},
+            timeout_s=4 * 3600.0, env={"PATH": os.environ.get("PATH", "")})
+        rec = result["record"]
+        for note in result.get("notes", []):
+            self.ledger.append("decision", 1, decision="audio reference", note=note)
+        # A reference made fresh goes into the cache, so the next run of the same model, revision and library commit reuses it.
+        for role in (audio_plan.ROLE_REFERENCE, audio_plan.ROLE_CONTROL_REFERENCE):
+            run = rec["runs"].get(role)
+            if run is None or run["from_cache"]:
+                continue
+            dest = cache / run["model"]
+            if not dest.exists():
+                try:
+                    cache.mkdir(parents=True, exist_ok=True)
+                    tmp = cache / f".{run['model']}.tmp-{os.getpid()}"
+                    shutil.copytree(self.run_dir / run["dir"], tmp)
+                    os.replace(tmp, dest)
+                except OSError:
+                    pass                    # the cache saves time and nothing depends on it; a failed copy costs nothing
+
     def _bundle_body(self, spec, stage_dir: Path):
         """Stage 8 as supervisor code: copy build_bundle.py into the stage, write its one-line config,
         run it, and run the gate. The script rebuilds the bundle from scratch each time, so a resume
@@ -1467,10 +1625,13 @@ class Supervisor:
         n = spec.number
         stage_dir.mkdir(parents=True, exist_ok=True)
         script = stage_dir / "build_bundle.py"
-        shutil.copyfile(Path(self.paths.orchard_dir) / "orchard" / "skills" / "operator-bundle-templates"
-                        / "build_bundle.py", script)
+        # An audio run's other stages already use the scripts of the checkout that is running (audio_runtime.TEMPLATES), so its bundle builder is that
+        # checkout's too: a run started under an older checkout can then finish with the audio section. Other runs keep the recorded checkout.
+        orchard_dir = (Path(__file__).resolve().parent.parent if audio_runtime.selected(self.ledger.read()) is not None
+                       else Path(self.paths.orchard_dir))
+        shutil.copyfile(orchard_dir / "orchard" / "skills" / "operator-bundle-templates" / "build_bundle.py", script)
         (stage_dir / "bundle_config.json").write_text(
-            json.dumps({"run_dir": str(self.run_dir), "orchard_dir": str(self.paths.orchard_dir)}, indent=2)
+            json.dumps({"run_dir": str(self.run_dir), "orchard_dir": str(orchard_dir)}, indent=2)
             + "\n", encoding="utf-8")
         (stage_dir / "log").mkdir(exist_ok=True)
         log = stage_dir / "log" / "build_bundle.log"
@@ -1862,7 +2023,8 @@ class Supervisor:
         if boards > spec.boards:
             return self._wide_hardware_phase(spec, stage_dir, test, boards, after_test=after_test, **record)
         chips = self.adapter.status()
-        d = decide_park(self.coder_lease.units, chips, spec.boards)
+        # A run that has not booted a coder (the audio stages need none) has no coder boards to park: a free board is leased, or the lease waits.
+        d = decide_park(self.coder_lease.units if self.coder_lease is not None else (), chips, spec.boards)
         self.ledger.append("decision", n, decision="hardware phase", action=d.action,
                            free_boards=list(d.free_boards), server_boards=list(d.server_boards))
         if d.park_needed:
@@ -1961,7 +2123,7 @@ class Supervisor:
             safe_top1 = json.loads((stage_dir / "result.json").read_text(encoding="utf-8")).get("top1_agreement")
         except (OSError, ValueError, AttributeError):
             safe_top1 = None
-        decision = graft.decide(trial, safe_top1=safe_top1)
+        decision = graft.decide(trial, safe_top1=safe_top1, sampling=graft.sampling_input(stage_dir, self.run_dir))
         if trial is None:
             if record.get("timed_out"):
                 why = "the graft trial timed out and was stopped"
@@ -1973,6 +2135,111 @@ class Supervisor:
         graft.write_decision(stage_dir, decision, candidate=cand)
         self._record_graft_decision(stage_dir, decision)
         return True
+
+    def _sampling_choice(self, spec, stage_dir: Path) -> bool:
+        """Stage 2's sampling choice (orchard/sampling_choice.py, issue 107). Returns True when it wrote a decision file now.
+
+        A fast decoding path can be greedy only: the Qwen3.8 DFlash2 drafter accepts a sampled request and samples only its first token. The rule
+        reads whether the model needs sampling (stage 0's files and the operator's --sampling flag), what the served configuration's sampling probe
+        showed, and the speed of each configuration. Only when sampling is needed, the drafter is on and the probe does not show sampling applied does
+        it need a second measurement: one hardware test, skills/weights-swap-templates/sampling_trial.py, serves the drafter-off variant. The decision
+        is code (sampling.decide). A trial that fails, times out or leaves no result is not a stage failure: the served configuration stays and the
+        decision says so. sampling-decision.json is the marker, and the trial's own test record is a second one, so a kill after the test resumes at
+        the decision without booting again. A stage 2 with no swap check (it was not served by the swap template) makes no decision."""
+        n = spec.number
+        if (stage_dir / sampling.DECISION_FILE).exists():
+            return False
+        current = sampling.served_side(stage_dir)
+        if current is None:
+            return False
+        need = sampling.need(self.run_dir, self.sampling)
+        variant, note, ran = None, None, False
+        if sampling.needs_variant(need, current):
+            skip = None
+            if self.lab is not None:
+                skip = "the sampling trial was skipped: it runs on this box's chips and this run's tests run on a lab"
+            elif self._container_config(stage_dir):
+                skip = ("the sampling trial was skipped: stage 2 was served through a container package, and the trial's scripts build and "
+                        "run a bundle's run.sh, which a container package does not have")
+            else:
+                # The disk is a prerequisite for a trial that still has to run. One that already ran (its test record exists) may itself have
+                # filled the disk with its new tensor cache, and a restart must read its result and not skip it for that.
+                already_ran = (stage_dir / sampling.TRIAL_DIR / "test-result.json").is_file()
+                if not already_ran:
+                    # The new tensor cache is written beside the configured `tt_cache`, which can be on another filesystem than the run
+                    # directory, so the conversion is checked there (the nearest existing parent of that path), and the run directory is
+                    # checked apart for the trial's evidence.
+                    cache_path = self._cache_check_path(stage_dir)
+                    enough, free = check_disk(cache_path, SAMPLING_TRIAL_DISK_GB, usage=self.disk_usage)
+                    if not enough:
+                        where = "the configured tensor cache's disk" if cache_path != self.run_dir else "the run directory's disk"
+                        skip = (f"the sampling trial was skipped: the drafter-off variant converts a second tensor cache and needs "
+                                f"{SAMPLING_TRIAL_DISK_GB:g} GB free on {where}; {free} GB is free")
+                    else:
+                        enough, free = check_disk(self.run_dir, SAMPLING_TRIAL_RUN_DISK_GB, usage=self.disk_usage)
+                        if not enough:
+                            skip = (f"the sampling trial was skipped: its evidence needs {SAMPLING_TRIAL_RUN_DISK_GB:g} GB free on the run "
+                                    f"directory's disk; {free} GB is free")
+            if skip:
+                self.ledger.append("decision", n, decision="sampling trial skipped", reason=skip)
+                note = skip
+            else:
+                variant, note = self._run_sampling_trial(spec, stage_dir, need, current)
+                ran = True
+        decision = sampling.decide(need, current, variant, variant_note=note)
+        sampling.write_decision(stage_dir, decision, trial=variant is not None)
+        path = stage_dir / sampling.DECISION_FILE
+        self.ledger.append("decision", n, decision="sampling decision", choice=decision["choice"], flag=decision["flag"], reason=decision["reason"],
+                           needed=decision["needed"], need_source=decision["need_source"], numbers=decision["numbers"],
+                           decision_file=evidence_record(self.run_dir, path), trial=ran)
+        return True
+
+    def _cache_check_path(self, stage_dir: Path) -> Path:
+        """The path whose filesystem the sampling trial's new tensor cache lands on: the nearest existing parent of the stage's configured `tt_cache`
+        (the cache is made later, so the path itself may not exist). The run directory when the config names none."""
+        try:
+            cfg = json.loads((stage_dir / "swap_config.json").read_text(encoding="utf-8"))
+            cache = Path(str(cfg["tt_cache"]))
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            return self.run_dir
+        if not cache.is_absolute():
+            cache = self.run_dir / cache
+        while not cache.exists() and cache != cache.parent:
+            cache = cache.parent
+        return cache if cache.exists() else self.run_dir
+
+    def _run_sampling_trial(self, spec, stage_dir: Path, need: dict, current: dict):
+        """Run (or, after a kill, read) the drafter-off trial. Returns (the variant's side or None, a note saying why there is none)."""
+        n = spec.number
+        trial_dir = stage_dir / sampling.TRIAL_DIR
+        trial_dir.mkdir(exist_ok=True)
+        marker = trial_dir / "test-result.json"
+        if not marker.is_file():
+            shutil.copy2(Path(self.paths.orchard_dir) / "orchard" / "skills" / "weights-swap-templates" / SAMPLING_TRIAL_TEMPLATE,
+                         trial_dir / SAMPLING_TRIAL_TEMPLATE)
+            (trial_dir / "trial_config.json").write_text(
+                json.dumps({"stage_dir": str(stage_dir), "orchard_dir": str(self.paths.orchard_dir)}, indent=2) + "\n", encoding="utf-8")
+            self.ledger.append("decision", n, decision="sampling trial started", needed=need["needed"], need_source=need["source"],
+                               served_verdict=current.get("verdict"),
+                               note="serving this model with the speculative drafter off and host sampling, beside the configuration stage 2 served")
+            test = {"command": f"python3 stages/{n}/{sampling.TRIAL_DIR}/{SAMPLING_TRIAL_TEMPLATE}",
+                    "deadline_s": SAMPLING_TRIAL_DEADLINE_S}
+            self._hardware_phase(spec, stage_dir, test, record=f"{sampling.TRIAL_DIR}/test-result.json",
+                                 output=f"{sampling.TRIAL_DIR}/evidence/hw-test-output.txt", what="sampling trial test",
+                                 env_extra={GRAFT_TRIAL_ENV: str(trial_dir.resolve())},
+                                 after_test=lambda: self._stop_trial_servers(n, trial_dir, "after the sampling trial test"))
+        try:
+            record = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            record = {}
+        if record.get("returncode") == 0 and not record.get("timed_out"):
+            variant = sampling.variant_side(stage_dir, self.run_dir)
+            if variant is not None:
+                return variant, None
+            return None, f"the sampling trial wrote no {sampling.TRIAL_RESULT}"
+        if record.get("timed_out"):
+            return None, "the sampling trial timed out and was stopped"
+        return None, f"the sampling trial did not finish (exit code {record.get('returncode')})"
 
     def _stop_trial_servers(self, n: int, trial_dir: Path, when: str) -> None:
         """Stop what the graft trial's helpers left running. measure_serving.py and serve_and_compare.py start run.sh in a session of their
@@ -2080,9 +2347,12 @@ class Supervisor:
         """Give back test leases an earlier supervisor of this run took and never released (it died, and nothing
         released them). Only leases this run's ledger records, and only those taken where this supervisor runs: a lab
         run gives back the lab's, a local run this box's. A lease that is already gone is noted as not released."""
-        trial_dir = self.run_dir / "stages" / "2" / graft.TRIAL_DIR
-        if self.lab is None and trial_dir.is_dir():
-            self._stop_trial_servers(2, trial_dir, "when the run started again")
+        # Both trials start servers in sessions of their own, so a SIGKILL of the supervisor (which skips the after-test sweep) can leave either one
+        # holding the chips. Stop them before any lease is given back or the coder is recovered.
+        for name in (graft.TRIAL_DIR, sampling.TRIAL_DIR):
+            trial_dir = self.run_dir / "stages" / "2" / name
+            if self.lab is None and trial_dir.is_dir():
+                self._stop_trial_servers(2, trial_dir, "when the run started again")
         taken, released = {}, set()
         for e in self.ledger.read():
             d = e["data"]
@@ -2590,6 +2860,12 @@ def parse(argv=None):
                    help="skip stage 2's graft trial: with a graft candidate (the model has no mtp.* tensors and the nearest model has "
                         "a head that fits) stage 2 serves the grafted drafter once and keeps it when it is faster; this leaves the "
                         "safe configuration without that extra test (a cold boot adds 4 to 25 minutes). The run records the choice")
+    r.add_argument("--sampling", choices=sampling.OVERRIDES, default=None,
+                   help="whether this model's purpose needs sampling (issue 107). A speculative drafter can ignore sampled requests, so with 'auto' "
+                        "(the default) stage 2 reads the model's own generation_config.json, the model card's recommended settings and its warnings "
+                        "against greedy decoding, and for a model that needs sampling whose served configuration does not show sampling applied it "
+                        "serves a drafter-off variant once and chooses by measurement. 'needed' and 'not-needed' are the operator's word. The run "
+                        "records the choice and a resume keeps it")
     r.add_argument("--resume-aborted", action="store_true",
                    help="go on with a run that an operator or a signal aborted: the ledger records `resume` after the abort and the run starts its coder again and continues from the ledger. Without this flag an aborted run stays aborted and running the command again starts nothing. An abort of any other kind, and a finished run, are left as they are")
     r.add_argument("--unattended", action="store_true",
@@ -2683,6 +2959,14 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
     graft_on = not getattr(args, "no_graft_trial", False)
     if progress.started and (progress.run_start or {}).get("graft_trial") is False:
         graft_on = False                        # a run that opted out of the graft trial stays opted out
+    sampling_mode = getattr(args, "sampling", None)
+    if progress.started:                        # a resumed run keeps the sampling setting it started with
+        recorded_mode = (progress.run_start or {}).get("sampling") or "auto"
+        if sampling_mode is not None and sampling_mode != recorded_mode:
+            raise ValueError(f"this run started with --sampling {recorded_mode}; --sampling {sampling_mode} differs. Leave the option out to resume "
+                             "with the recorded value, or move this run's directory aside and start a new run")
+        sampling_mode = recorded_mode
+    sampling_mode = sampling_mode or "auto"
     home = operator_home() if home is None else home
     paths = run_paths(args, run_dir, recorded_paths(entries) if progress.started else None,
                       home=home, environ=environ)
@@ -2740,6 +3024,7 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
                       credentials_visible=found, required_chips=required,
                       home=home, containers=containers, paths=paths, package=package,
                       package_added=added, unattended=getattr(args, "unattended", False), graft_trial=graft_on,
+                      sampling=sampling_mode,
                       resume_aborted=bool(getattr(args, "resume_aborted", False)),
                       lab=lab if lab_host else None,
                       four_chip_package=getattr(args, "four_chip_package", None), coder_tier=tier,

@@ -28,6 +28,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from orchard import sampling_choice
 from orchard.card_use import PERF_IN_PROSE, UNTESTED_SENTENCE, UseFacts, has_facts
 from orchard.stages import inside
 
@@ -122,6 +123,10 @@ class CardFacts:
     acceptance_measured: bool = False     # the Numbers table has the drafter's acceptance rate (stage 2's graft trial or the sampling probe measured it)
     acceptance_from: str = "graft trial"  # which step measured it, for the sentences: "graft trial", "sampling probe" or "graft trial and sampling probe"
     vocab: tuple[int, int] | None = None  # (this model's vocabulary size, the nearest model's) when the model is a vocabulary trim
+    sampling_decision: dict | None = None   # stage 2's sampling decision (orchard/sampling_choice.py); only the required profile's card states it
+    sampling_first_verdict: str | None = None   # the probe's verdict for the configuration stage 2 first served (the bullet words only what it established)
+    drafter_off_by_sampling: bool = False   # stage 2 chose the drafter-off configuration because the model needs sampling (every profile)
+    sampling_trial_chips: int | None = None  # the chip count the sampling trial ran on (stage 2's), which may differ from this profile's
     sampling: dict | None = None     # what stage 2's sampling probe found (package.sampling_summary): card_sentence, serving; only the required profile
 
 
@@ -275,6 +280,8 @@ def render_card(f: CardFacts) -> str:
     if f.drafter_off and f.vocab:
         lines.append(f"- Speculative decoding is off. The drafter of {f.nearest_model} works on the token ids of {f.nearest_model}, "
                      f"and the vocabulary of {f.model_id} has {_count(f.vocab[0])} entries against {_count(f.vocab[1])}.")
+    elif f.drafter_off and f.drafter_off_by_sampling:
+        lines.append(sampling_bullet(f.model_id, f.sampling_first_verdict))
     elif f.drafter_off:
         lines.append(f"- Speculative decoding is off. The drafter of {f.nearest_model} needs the MTP "
                      f"tensors of the model, and {f.model_id} has none.")
@@ -312,8 +319,12 @@ def render_card(f: CardFacts) -> str:
         lines.append(f"| {n.name} | {_value(n)} | {n.label} | {ev} |")
     if f.reported:
         lines += ["", REPORTED_HEAD, "", *reported_lines(f.reported, f.reported_source)]
-    if f.sampling:
-        lines += ["", SAMPLING_HEAD, "", *sampling_lines(f.sampling)]
+    if f.sampling or f.sampling_decision:
+        lines += ["", SAMPLING_HEAD, ""]
+        if f.sampling:
+            lines += sampling_lines(f.sampling)
+        if f.sampling_decision:
+            lines += (["", ] if f.sampling else []) + [sampling_choice.card_sentence(f.sampling_decision)]
     limits = [f"Tested on {f.chips} chips (mesh {f.mesh}) only; other configurations are not claimed "
               "by this bundle.",
               "Accuracy was compared with the CPU reference on one short fixed prompt only."]
@@ -329,6 +340,16 @@ def render_card(f: CardFacts) -> str:
     elif f.graft and f.graft_decision == "graft":
         limits.append("The stage 2 rows were measured without the graft (the drafter off and sampling on the host). The graft trial "
                       "and the stage 7 rows were measured with it.")
+    if f.drafter_off_by_sampling:
+        # Which checks covered this package: the trial ran on stage 2's chip count, stage 4 checked this profile's, and only a package that stage 7
+        # booted (`verified`) can claim the boot check.
+        if f.sampling_trial_chips in (None, f.chips):
+            seen = f"the sampling trial and stage 4 on {f.chips} chips" if f.sampling_trial_chips == f.chips else f"stage 4 on {f.chips} chips"
+        else:
+            seen = f"the sampling trial, which ran on {f.sampling_trial_chips} chips, and by stage 4 on this package's {f.chips} chips"
+        booted = ("and by the stage 7 boot check of this package" if f.verified else "Stage 7 did not boot this package")
+        limits.append("Stage 2's own check served the configuration with the drafter on. The drafter-off configuration this package serves was "
+                      f"checked by {seen}" + (f", {booted}." if f.verified else f". {booted}."))
     if f.drafter_off:
         limits.append("Speculative decoding is off, so decode speed is that of plain decoding.")
     if f.vocab:
@@ -354,6 +375,13 @@ def render_card(f: CardFacts) -> str:
     return "\n".join(lines)
 
 
+def sampling_bullet(model_id: str, verdict) -> str:
+    """The bullet that says why speculative decoding is off after a sampling choice. It states what the probe established about the first configuration
+    and no more: a verdict that is not `sampled-ignored` does not say the drafter ignored anything."""
+    return (f"- Speculative decoding is off. Stage 2 chose this configuration because {model_id} needs sampling and the configuration it first served, "
+            f"with the speculative drafter on, {sampling_choice.served_clause(verdict)} (see Sampling).")
+
+
 def card_evidence_paths(card: str) -> list[str]:
     """Every file the Numbers table cites for a `measured` number, in order, without repeats, then the file the tool-call
     sentence under Intended use cites, if it does."""
@@ -370,6 +398,11 @@ def card_evidence_paths(card: str) -> list[str]:
     cited = re.search(r"In the runs recorded in `([^`]+)` the tool-use prompts", " ".join(intended.split()))
     if cited and cited.group(1) not in seen:
         seen.append(cited.group(1))
+    # The Sampling section's sentence cites the sampling decision, which the package ships (its warnings point readers to it).
+    sampling_body, _ = _section(card, SAMPLING_HEAD)
+    decision = re.search(r"are in `evidence/(" + re.escape(sampling_choice.DECISION_PATH) + r")`", " ".join(sampling_body.split()))
+    if decision and decision.group(1) not in seen:
+        seen.append(decision.group(1))
     return seen
 
 
@@ -574,10 +607,21 @@ def use_problems(card: str, use: UseFacts | None) -> list[str]:
 def card_problems(card: str, *, license_id: str, run_dir, sidecars=(), base_files=(), reported=(), reported_source="", model_id="",
                   nearest_model="", graft: bool = False, graft_decision: str | None = None, trial_rows=(),
                   use: UseFacts | None = None, vocab: tuple[int, int] | None = None, sampling: dict | None = None,
-                  sampling_expected=(), acceptance_measured: bool = False) -> list[str]:
+                  sampling_expected=(), acceptance_measured: bool = False, sampling_decision: dict | None = None,
+                  drafter_off_by_sampling: bool = False, sampling_first_verdict: str | None = None) -> list[str]:
     problems = use_problems(card, use)
     if acceptance_measured and "acceptance rate" in (card.split("## Not measured", 1)[1].split("\n## ", 1)[0] if "## Not measured" in card else ""):
         problems.append("the Numbers table has the drafter's acceptance rate, so the card must not list it under Not measured")
+    if sampling_decision:
+        body, _ = _section(card, SAMPLING_HEAD)
+        if " ".join(sampling_choice.card_sentence(sampling_decision).split()) not in " ".join(body.split()):
+            problems.append("the card must state stage 2's sampling decision in the Sampling section, unchanged: "
+                            f"{sampling_choice.card_sentence(sampling_decision)}")
+    if drafter_off_by_sampling and not vocab and " ".join(sampling_bullet(model_id, sampling_first_verdict).split()) not in " ".join(card.split()):
+        problems.append("the card must explain why speculative decoding is off in words that follow the probe's verdict for the first configuration "
+                        f"({sampling_first_verdict}): {sampling_bullet(model_id, sampling_first_verdict)}")
+    if drafter_off_by_sampling and "needs the MTP tensors of the model" in " ".join(card.split()):
+        problems.append("the card says the model has no mtp.* tensors; stage 2 chose the drafter-off configuration because the model needs sampling")
     if sampling:
         body, _ = _section(card, SAMPLING_HEAD)
         if not body:
@@ -585,7 +629,7 @@ def card_problems(card: str, *, license_id: str, run_dir, sidecars=(), base_file
         elif " ".join(sampling["card_sentence"].split()) not in " ".join(body.split()):
             problems.append("the sampling section must give the sampling probe's verdict sentence unchanged: "
                             f"{sampling['card_sentence']}")
-    elif SAMPLING_HEAD in card:
+    elif SAMPLING_HEAD in card and not sampling_decision:
         problems.append(f"the card has the section {SAMPLING_HEAD!r}, and the run has no sampling probe record to support it")
     if vocab:
         flat_vocab = " ".join(card.split())

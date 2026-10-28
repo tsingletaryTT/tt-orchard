@@ -39,9 +39,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from orchard import audio_decision, audio_facts
+from orchard import audio_decision, audio_facts, audio_runtime
 from orchard.classes import CLASSES, SIDECAR_CLASSES, class_of_path, path_of
-from orchard import prompt_suite, sampling_probe
+from orchard import prompt_suite, sampling_choice, sampling_probe
 from orchard.graft_trial import DECISION_FILE as GRAFT_DECISION_FILE
 from orchard.graft_trial import chosen as graft_chosen
 from orchard.graft_trial import read_decision as read_graft_decision
@@ -83,6 +83,8 @@ class StageSpec:
     disk: float | None = None           # free disk the stage needs, when it differs from STAGE_DISK_GB
     draft: str | None = None            # a config the supervisor drafts before a fresh prepare step
                                         # ("swap_config": orchard/swap_draft.py)
+    needs_coder: bool = True            # False: the stage never asks the local coder anything, so the supervisor does not boot it for the stage
+                                        # (issue 143). Only the audio runtime's stages say so today.
 
     @property
     def budget_s(self) -> float:
@@ -586,6 +588,7 @@ def gate_weights_swap(stage_dir, run_dir) -> GateResult:
     reasons, seen = _swap_reasons(d), []
     reasons += _suite_reasons_in(Path(stage_dir) / "evidence" / "swap-check.json", run_dir)
     reasons += decision_problems(stage_dir, run_dir)         # the graft trial's decision, when stage 2 made one
+    reasons += sampling_choice.decision_problems(stage_dir, run_dir)       # the sampling choice (issue 107), when stage 2 made one
     reasons += vocab_trim_problems(stage_dir, run_dir)
     _evidence(run_dir, d.get("evidence"), "result.json", reasons, seen)
     return _done(reasons, seen)
@@ -646,6 +649,7 @@ def gate_weights_swap_sidecar(stage_dir, run_dir) -> GateResult:
     reasons, seen = _swap_reasons(d), []
     reasons += _suite_reasons_in(Path(stage_dir) / "evidence" / "swap-check.json", run_dir)
     reasons += decision_problems(stage_dir, run_dir)
+    reasons += sampling_choice.decision_problems(stage_dir, run_dir)
     delta, derr = _load(Path(run_dir) / "stages" / "0", "delta.json")
     if derr:
         reasons.append(f"stage 0's {derr}, so the sidecar parity cannot be tied to the files stage 0 recorded")
@@ -852,6 +856,7 @@ def gate_mesh_swap(stage_dir, run_dir, required=None) -> GateResult:
         if isinstance(report, dict):
             reasons += _suite_reasons(report, run_dir, f"{where}: ")
         reasons += _graft_reasons(stage_dir, run_dir, n, where)
+        reasons += _sampling_reasons(report, run_dir, where)
         if trim is not None:
             cdir = Path(stage_dir) / "configs" / str(n)
             reasons += _trim_reasons(trim, _read_json(cdir / "model-dir-sources.json"),
@@ -884,6 +889,20 @@ def _graft_reasons(stage_dir, run_dir, n: int, where: str) -> list[str]:
     if built and not chose:
         return [f"{where}: configs/{n}/model-dir-sources.json records a grafted head, but stage 2 did not choose the graft"]
     return []
+
+
+def _sampling_reasons(report, run_dir, where: str) -> list[str]:
+    """A configuration was served the way stage 2's sampling decision says (issue 107). When stage 2 chose the drafter-off configuration, the swap
+    check's `serving` record (written by the template from the run script it served with) must say the drafter was off. A decision of keep, or none,
+    asks nothing."""
+    if not sampling_choice.drafter_off_chosen(run_dir):
+        return []
+    serving = report.get("serving") if isinstance(report, dict) else None
+    got = serving.get("drafter") if isinstance(serving, dict) else None
+    if got == "off":
+        return []
+    return [f"{where}: stage 2 chose the drafter-off configuration because the model needs sampling ({sampling_choice.DECISION_FILE}), so "
+            f"swap-check.json serving.drafter must be 'off', got {got!r}"]
 
 
 def _serving_type(cfg) -> str | None:
@@ -1046,7 +1065,7 @@ def gate_package(stage_dir, run_dir) -> GateResult:
     from orchard.package import (GRAFT_FILE, PUBLISH_FILE, PackageError, acceptance_sources, graft_evidence_problems, graft_problems,
                                  graft_trial_numbers, publish_problems, read_reported, sampling_numbers,
                                  sampling_summary, sampling_summary_problems, serving_problems,
-                                 split_model_id, stage_2_serving, stage_2_vocab, weights_wiring_problems)
+                                 served_drafter_state, split_model_id, stage_2_serving, stage_2_vocab, weights_wiring_problems)
     from orchard.card_use import read_use_facts
     from orchard.package_card import card_evidence_paths, card_problems, read_license
     from orchard.scrub import scrub_package
@@ -1070,10 +1089,17 @@ def gate_package(stage_dir, run_dir) -> GateResult:
         reasons.append(f"package.json says the license is {d.get('license')!r}; the model's is "
                        f"{license_id!r}")
     reasons += sampling_summary_problems(run)
-    drafter_off, host_sampling = stage_2_serving(run)
+    drafter_off, host_sampling = served_drafter_state(run)
+    sampling_decision = sampling_choice.read_decision(run / "stages" / "2")
     model_has_mtp = delta_model_has_mtp(delta)
     # A grafted package serves with the drafter and on-device sampling on, whatever stage 2's run.sh says.
     graft_expected = isinstance(d.get("mtp_graft"), dict)
+    # A drafter-off sampling decision conflicts with any graft: a graft keeps the drafter on. The gate does not rely on read_run's check, so it refuses
+    # package-level and per-profile graft metadata itself, and the graft exemption below no longer switches the serving checks off for that decision.
+    off_by_sampling = sampling_choice.drafter_off_chosen(run)
+    if off_by_sampling and graft_expected:
+        reasons.append("package.json records an mtp_graft, but stage 2's sampling decision chose the drafter-off configuration, and a graft keeps the "
+                       "drafter on")
     decision = read_graft_decision(run / "stages" / "2")
     graft_chosen_by_stage_2 = decision is not None and decision["choice"] == "graft"
     trial_decision = decision["choice"] if decision is not None and decision.get("trial") is not None else None
@@ -1115,6 +1141,10 @@ def gate_package(stage_dir, run_dir) -> GateResult:
         reasons += [f"profile {name}: {x}" for x in
                     weights_wiring_problems(run_sh, nearest_model=nearest_repo)]
         has_graft = (out / GRAFT_FILE).exists()
+        grafted = (graft_expected or has_graft) and not off_by_sampling         # the exemption from the serving checks
+        if off_by_sampling and has_graft:
+            reasons.append(f"profile {name}: {GRAFT_FILE} is present, but stage 2's sampling decision chose the drafter-off configuration, and a graft "
+                           "keeps the drafter on")
         if graft_chosen_by_stage_2 and not has_graft:
             reasons.append(f"profile {name}: stage 2's graft trial chose the graft, so the package needs {GRAFT_FILE}")
         if graft_expected or has_graft:
@@ -1124,8 +1154,8 @@ def gate_package(stage_dir, run_dir) -> GateResult:
         reasons += [f"profile {name}: {x}" for x in graft_evidence_problems(out, boot_check)]
         reasons += [f"profile {name}: {x}" for x in
                     serving_problems(run_sh, m.get("env") or {},
-                                     drafter_off=drafter_off and not (graft_expected or has_graft),
-                                     host_sampling=host_sampling and not (graft_expected or has_graft),
+                                     drafter_off=drafter_off and not grafted,
+                                     host_sampling=host_sampling and not grafted,
                                      model_has_mtp=model_has_mtp, graft=has_graft)]
         reasons += [f"profile {name}: scrub: {x}" for x in
                     scrub_package(out, namespace=d.get("namespace"))]
@@ -1137,6 +1167,9 @@ def gate_package(stage_dir, run_dir) -> GateResult:
                                       graft_decision=trial_decision, vocab=stage_2_vocab(run),
                                       trial_rows=trial_rows if p.get("required") else (),
                                       sampling=sampling if p.get("required") else None,
+                                      sampling_decision=sampling_decision if p.get("required") else None,
+                                      drafter_off_by_sampling=bool(sampling_decision and sampling_decision.get("choice") == "drafter-off"),
+                                      sampling_first_verdict=((sampling_decision or {}).get("numbers") or {}).get("served_verdict"),
                                       sampling_expected=sampling_expected if p.get("required") else (),
                                       acceptance_measured=acceptance_measured if p.get("required") else False,
                                       use=read_use_facts(swap.get("new_snapshot") or "/nonexistent", run_sh, run,
@@ -1295,6 +1328,58 @@ SKIP_STOCK_6 = ("stock-runtime path: the qualitative check and benchmark are def
 SKIP_STOCK_7 = "stock-runtime path: no package is built (the pilot writes no package, no push and no publish)"
 
 
+# The audio runtime path (orchard/audio_runtime.py, orchard/audio_stages.py): a run whose model the harness's own Stable Audio 3 runtime serves.
+# Stage 0 is the normal triage. Stage 1 makes the CPU reference runs, stage 2 makes the clip on one chip and compares it with them, stage 8 builds the
+# bundle with the clips. Stages 3 to 7 are skipped with a reason. None of them asks the local coder anything.
+def _audio_verb(verb: str, run_dir, args: dict) -> list[str]:
+    """Run a numeric audio gate in the configured reference interpreter (the supervisor needs only the standard library). A failure to run it is a
+    reason, never a pass."""
+    from orchard import audio_remote, audio_runtime
+    from orchard.audio_plan import AudioStageError
+    paths = audio_runtime.selection_from_run_dir(run_dir)
+    if paths is None:
+        return ["the ledger holds no audio runtime selection, so there is no interpreter to check the stage with"]
+    try:
+        result = audio_remote.call(paths.reference_python, verb, args, timeout_s=1800.0, env={"PATH": os.environ.get("PATH", "")})
+    except AudioStageError as exc:
+        return [str(exc)]
+    return [str(x) for x in result] if isinstance(result, list) else ["the audio gate gave an answer that is not a list"]
+
+
+def gate_audio_reference(stage_dir, run_dir) -> GateResult:
+    reasons = _audio_verb("gate_reference", run_dir, {"stage_dir": str(stage_dir), "run_dir": str(run_dir)})
+    seen = [os.path.relpath(Path(stage_dir) / audio_runtime.REFERENCE_FILE, run_dir)] if not reasons else []
+    return _done(reasons, seen)
+
+
+def gate_audio_chip(stage_dir, run_dir) -> GateResult:
+    ref_stage = Path(run_dir) / "stages" / "1"
+    reasons = _audio_verb("gate_chip", run_dir, {"stage_dir": str(stage_dir), "run_dir": str(run_dir), "ref_stage_dir": str(ref_stage)})
+    seen = [os.path.relpath(Path(stage_dir) / audio_runtime.RESULT_FILE, run_dir)] if not reasons else []
+    return _done(reasons, seen)
+
+
+AUDIO_STAGE_1 = StageSpec(1, "CPU reference for the audio model", "", (), 0, audio_runtime.REFERENCE_FILE, gate_audio_reference,
+                          audio_runtime.REFERENCE_FILE, harness=True, disk=audio_runtime.STAGE_DISK_GB, needs_coder=False)
+AUDIO_STAGE_2 = StageSpec(2, "clip on one chip and agreement with the CPU reference", "", ("tt-device-usage",), 1, audio_runtime.RESULT_FILE,
+                          gate_audio_chip, "test-result.json", harness=True, disk=audio_runtime.STAGE_DISK_GB, needs_coder=False)
+SKIP_AUDIO_3 = ("audio runtime path: stage 2 ran the diffusion transformer on the chip with the library's own code for the rest; there is no "
+                "separate full-model stage")
+SKIP_AUDIO_4 = ("audio runtime path: one chip runs the diffusion transformer; a multichip port and a shrink to fewer chips are not part of "
+                "this path (design step 1 uses one chip)")
+SKIP_AUDIO_5 = ("audio runtime path: no server is built (design step 4); the chip run of stage 2 makes the clip directly")
+SKIP_AUDIO_6 = ("audio runtime path: no quality check or benchmark exists for music; stage 2's sound checks and its agreement with the "
+                "CPU reference are the only evidence, and nobody has listened to the clip")
+SKIP_AUDIO_7 = "audio runtime path: no package is built (design step 4 is not built)"
+AUDIO_TABLE = {1: AUDIO_STAGE_1, 2: AUDIO_STAGE_2,
+               3: dataclasses.replace(STAGES[3], skip=SKIP_AUDIO_3, needs_coder=False),
+               4: dataclasses.replace(STAGES[4], skip=SKIP_AUDIO_4, needs_coder=False),
+               5: dataclasses.replace(STAGES[5], skip=SKIP_AUDIO_5, needs_coder=False),
+               6: dataclasses.replace(STAGES[6], skip=SKIP_AUDIO_6, needs_coder=False),
+               7: dataclasses.replace(STAGES[7], skip=SKIP_AUDIO_7, needs_coder=False),
+               8: dataclasses.replace(STAGES[8], needs_coder=False)}
+
+
 def scratch_stage(number: int, path) -> bool:
     """Whether an agent in this stage may write to <run>/tt-metal-scratch: stages 2 to 4 of the stock-runtime path only."""
     return path == "stock-runtime" and number in (2, 3, 4)
@@ -1399,13 +1484,15 @@ def run_facts(entries: list[dict], run_dir) -> dict | None:
 
 
 def spec_for(number: int, path: str | None, package_format: str | None = None,
-             cls: str | None = None, *, stock: bool = False) -> StageSpec:
+             cls: str | None = None, *, stock: bool = False, audio_runtime: bool = False) -> StageSpec:
     """The stage spec for `number` on `path`. Only the weights-only path changes the table: stage 2
     gets the swap skill and gate, stage 4 runs one test per chip configuration, stages 3, 5 and 6
     are skipped (the supervisor records each as skipped), and when the run was started with
     --package-format v6, stage 7 packages the model. Every other run skips stage 7."""
     if number == 0 and stock:
         return STOCK_STAGE_0
+    if audio_runtime and number in AUDIO_TABLE:
+        return AUDIO_TABLE[number]
     if path == "stock-runtime":
         stock_table = {2: STOCK_STAGE_2, 3: dataclasses.replace(STAGES[3], skip=SKIP_STOCK_3),
                        4: dataclasses.replace(STAGES[4], skip=SKIP_STOCK_4), 5: dataclasses.replace(STAGES[5], skip=SKIP_STOCK_5),
