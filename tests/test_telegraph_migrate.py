@@ -465,6 +465,31 @@ def test_i10_a_ledger_whose_imported_part_was_edited_is_refused_not_guessed(tmp_
     assert (d / "telegraph.jsonl").is_file()                                    # nothing was archived on a guess
 
 
+def test_i10_an_archive_that_already_exists_is_never_overwritten_by_the_rename(tmp_path):
+    d = legacy_directory(tmp_path, asks=2)
+    with pytest.raises(Crash):
+        mig.migrate(d, hook=crash_at("after:3"))
+    shutil.copy(d / "telegraph.jsonl", d / "telegraph.jsonl.archived")          # an archive is already there
+    before = (d / "telegraph.jsonl.archived").read_bytes()
+    with pytest.raises(mig.MigrationRefused, match="old writer got through"):
+        mig.migrate(d)
+    assert (d / "telegraph.jsonl.archived").read_bytes() == before and (d / "telegraph.jsonl").is_file()
+
+
+def test_i10_a_ledger_that_changes_between_the_import_and_the_archive_is_not_archived(tmp_path):
+    d = legacy_directory(tmp_path, asks=2)
+
+    def hook(step):
+        if step == "after:3":                                                   # a writer that ignored the old lock appends now
+            with open(d / "telegraph.jsonl", "a") as f:
+                f.write(json.dumps({"call_id": "sneaked", "outcome": "ok", "tokens_in": 1, "tokens_out": 1}) + "\n")
+    with pytest.raises(mig.MigrationRefused, match="changed after it was imported"):
+        mig.migrate(d, hook=hook)
+    assert (d / "telegraph.jsonl").is_file() and not (d / "telegraph.jsonl.archived").exists()
+    assert mig.migrate(d)["phase"] == "complete"                                # a rerun imports the late record and finishes
+    assert "sneaked" in "\n".join(ledger_lines(d))
+
+
 def test_i10_a_resume_after_the_archive_when_a_regular_file_is_back_refuses_and_leaves_both_files(tmp_path):
     d = legacy_directory(tmp_path, asks=2)
     with pytest.raises(Crash):

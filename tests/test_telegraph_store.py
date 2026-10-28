@@ -240,8 +240,7 @@ def test_i1_every_lookup_names_the_scope(tmp_path):
 
 def test_totals_add_in_ledger_order_so_they_equal_the_jsonl_sums_exactly(tmp_path):
     """Issue 153: floating-point sums depend on the order of the additions. A sum taken in SQL is free to add in another order."""
-    costs = [1e16, 1.0, 1.0, 1.0, -0.0, 0.1, 0.2, 0.3, 1e-9, 7.0, 1e16]
-    costs = [c for c in costs if c >= 0]
+    costs = [1e16, 1.0, 1.0]                                          # 1e16 + 1.0 + 1.0 is 1e16, and 1.0 + 1.0 + 1e16 is not
     records = [{"call_id": f"c{i}", "problem": f"p{i % 3}", "model": "small", "outcome": "ok", "cached": False,
                 "tokens_in": 10, "tokens_out": 5, "cost_usd": c, "usage_known": True, "ts": float(i)} for i, c in enumerate(costs)]
     seed_ledger(tmp_path / "s", records)
@@ -252,7 +251,7 @@ def test_totals_add_in_ledger_order_so_they_equal_the_jsonl_sums_exactly(tmp_pat
     assert got["cost"] == expected                                     # exactly, with no rounding
     assert got == old.accounting(records)
     assert tg.summarise_records(tg._read_ledger_strict(tmp_path / "s")) == old.summarise_records(records)
-    assert sum(sorted(costs)) != expected                              # another order gives another sum: ledger order is the rule
+    assert expected == 1e16 and sum(reversed(costs)) != expected      # another order gives another sum: ledger order is the rule
 
 
 def test_the_accounting_on_a_realistic_backfilled_ledger_is_equal_before_and_after_the_database(tmp_path):
@@ -267,6 +266,14 @@ def test_the_accounting_on_a_realistic_backfilled_ledger_is_equal_before_and_aft
     got = tg._read_ledger_strict(tmp_path / "s")
     assert got == rows
     assert tg.accounting(got) == old.accounting(rows) and tg.summarise_records(got) == old.summarise_records(rows)
+
+
+def test_a_reservation_is_one_transaction_the_check_and_the_insert_together(tmp_path, monkeypatch):
+    with ts.TelegraphStore.open(tmp_path / "state") as store:
+        real, count = store.db.write, []
+        monkeypatch.setattr(store.db, "write", lambda: (count.append(1), real())[1])
+        assert reserve(store, "c1") is None
+        assert len(count) == 1
 
 
 # =============================================================================================== many processes

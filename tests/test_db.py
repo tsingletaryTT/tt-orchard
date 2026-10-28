@@ -422,6 +422,26 @@ def test_i2_an_unreadable_backup_is_skipped_for_the_next_one(tmp_path):
     assert Path(good).exists()
 
 
+def test_i2_a_marker_written_by_another_process_while_this_one_is_open_refuses_the_next_reservation(tmp_path):
+    d = tmp_path / "state"
+    with ts.TelegraphStore.open(d) as store:
+        assert reserve(store, "c1") is None
+        with dbm.Database(d) as other:                                # another process starts a recovery
+            other._write_marker("recovery started elsewhere")
+        why = reserve(store, "c2")
+        assert why and "confirm" in why
+
+
+def test_i2_an_unconfirmed_row_written_by_another_process_while_this_one_is_open_refuses_the_next_reservation(tmp_path):
+    d = tmp_path / "state"
+    with ts.TelegraphStore.open(d) as store:
+        assert reserve(store, "c1") is None
+        with dbm.Database(d) as other:
+            other._write_unreconciled("marked elsewhere")
+        why = reserve(store, "c2")
+        assert why and "confirm" in why
+
+
 # =============================================================================================== I7: recovery state before a replacement
 
 I7_STEPS = ["recover:1", "recover:2", "recover:3", "recover:4", "recover:5"]
