@@ -340,9 +340,14 @@ def _migrate_after_dry_run(directory, scope, cfg, args, say, ask, accept) -> int
         return EXIT_PROBLEM
 
     def still_the_checked_file(step):
-        if step == "after:1" and _ledger_identity(directory) != checked:        # the migration holds telegraph.lock from here on
-            raise mig.MigrationRefused(f"{ts.LEDGER} changed after the checks were made (seen under the lock), so they no longer "
-                                       "describe it; run this again. Nothing was changed")
+        if step != "after:1":
+            return
+        # The migration holds telegraph.lock from here on. It would resume a half-finished migration without asking, so a marker that
+        # appeared after the question is refused here too, as is a ledger file that is not the one the checks described.
+        again = tn.state_of(directory)
+        if _ledger_identity(directory) != checked or again is None or again.kind != tn.UNMIGRATED:
+            raise mig.MigrationRefused(f"{ts.LEDGER} or the directory changed after the checks were made (seen under the lock), so they "
+                                       "no longer describe it; run this again. Nothing was changed")
     return _migrate_once(directory, scope, cfg, args, say, accept, dry_run=False, hook=still_the_checked_file)
 
 

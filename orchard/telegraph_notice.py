@@ -179,7 +179,11 @@ def telegraph_state_notice(config, *, directory=None, environ=None, home=None, f
 
 
 def flags_from_args(args) -> str:
-    """The flags of a command line that choose the directory or the config, as text to add to the commands of a notice."""
+    """The flags of a command line that choose the directory or the config, as text to add to the commands of a notice.
+
+    Every selector the caller passed is carried. A config that was not named is found again by the pasted command in the same way
+    (`$ORCHARD_BRINGUP_CONFIG`, the checkout, the home folder), and `telegraph_state_notice` adds `--dir` whenever the directory it
+    inspected is not the home default, so the commands act on the same ledger whichever config they find."""
     parts = []
     for flag, attr in (("--dir", "dir"), ("--telegraph-config", "telegraph_config"), ("--config", "config")):
         value = getattr(args, attr, None)

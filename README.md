@@ -1936,7 +1936,8 @@ it cannot disturb a migration that is running. The states:
 A directory that needs nothing gives no notice, and so does a machine that never used Telegraph (every state above needs a file that only a
 used ledger leaves). Telegraph switched off still gets the notice when its directory holds an old ledger. The directory is chosen as for
 `tt-orchard telegraph`. The commands act on the ledger the notice is about: in the terminal they carry `--dir` when the directory did not come from the
-home default or the caller passed it (the web page always carries `--dir`), and `--config` and `--telegraph-config` when the caller passed them. The guided command's refusals and
+home default or the caller passed it (the web page always carries `--dir`), and `--config` and `--telegraph-config` when the caller passed them. A config that was not named is found again by the pasted command in the same way, and the
+`--dir` rule above keeps the commands on the same ledger whichever config they find. The guided command's refusals and
 its no-terminal fallback also carry `--scope` and `--accept-malformed`. The web page shows the path redacted and leaves a leading `~`
 outside the quotes so that a shell expands it. The top-bar meter names `db migrate telegraph` only for the unmigrated and half-finished
 states.

@@ -254,3 +254,19 @@ def test_a_change_between_the_last_check_and_the_lock_is_caught_under_the_lock(t
     code, text = guided(d, tmp_path, ask=Asker(True))
     assert code == 2 and "under the lock" in text
     assert (d / "telegraph.jsonl").is_file() and not (d / "telegraph.jsonl.archived").exists()
+
+
+def test_a_marker_written_just_before_the_migration_is_not_resumed_through_the_guided_command(tmp_path, monkeypatch):
+    """The ledger file is the same, so only the directory state tells that a half-finished migration appeared. The migration itself
+    would resume it without asking, so the check under the lock has to refuse."""
+    d = make(tmp_path)
+    real = mig.migrate
+
+    def marker_writer(directory, **kw):
+        if not kw.get("dry_run"):
+            (d / "MIGRATING-TO-SQLITE").write_text(json.dumps({"scope": "default"}))
+        return real(directory, **kw)
+    monkeypatch.setattr(mig, "migrate", marker_writer)
+    code, text = guided(d, tmp_path, ask=Asker(True))
+    assert code == 2 and "under the lock" in text
+    assert (d / "telegraph.jsonl").is_file() and not (d / "telegraph.jsonl.archived").exists() and not (d / "project.db").exists()
