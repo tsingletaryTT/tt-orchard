@@ -1,0 +1,3 @@
+target = "0.9.54"
+summary = "A malformed telegraph.endpoint, key_file or dir is a ConfigError that names the key instead of a bare ValueError"
+pr = 196
