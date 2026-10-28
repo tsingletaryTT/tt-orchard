@@ -110,7 +110,7 @@ def dims(config) -> ModelDims:
     layers = _num(cfg, "num_hidden_layers", hi=MAX_LAYERS)
     heads = _num(cfg, "num_attention_heads")
     vocab = _num(cfg, "vocab_size")
-    kv_heads = _num(cfg, "num_key_value_heads", default=heads)
+    kv_heads = _kv_heads(cfg, heads)
     mla = _mla(cfg)
     # without a head_dim: multi-latent attention heads are as wide as the query/key (nope + rope) parts, other models split the hidden size
     head_dim = _num(cfg, "head_dim", default=(mla["qk_nope_head_dim"] + mla["qk_rope_head_dim"]) if mla else max(1, hidden // heads))
@@ -155,6 +155,18 @@ def dims(config) -> ModelDims:
         tied_embeddings=cfg.get("tie_word_embeddings") is True, layer_types=layer_types, moe_layers=moe_layers,
         routed_experts=experts, top_k=top_k, moe_intermediate=moe_width if experts else 0, shared_intermediate=shared if experts else 0,
         attn_output_gate=cfg.get("attn_output_gate") is True or cfg.get("model_type") in GATED_BY_TYPE, linear=linear, mla=mla, mlp_projections=2 if cfg.get("model_type") in TWO_PROJECTION_MLP_TYPES else 3, keys=frozenset(str(k) for k, v in cfg.items() if v is not None))
+
+
+KV_HEAD_KEYS = ("num_key_value_heads", "num_kv_heads", "n_head_kv", "multi_query_group_num")   # a family's spelling of the KV-head count
+
+
+def _kv_heads(cfg: dict, heads: int) -> int:
+    """The number of key-value heads: the first of KV_HEAD_KEYS the config holds, else 1 when `multi_query` is true (Falcon's legacy
+    layout and GPT-BigCode), else one per query head."""
+    key = _first(cfg, KV_HEAD_KEYS)
+    if key:
+        return _num(cfg, key)
+    return 1 if cfg.get("multi_query") is True else heads
 
 
 def _mla(cfg: dict) -> dict:

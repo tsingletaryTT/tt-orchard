@@ -165,6 +165,18 @@ def test_null_keys_are_not_listed_as_present():
     assert "hc_mult" in d.keys and "kv_lora_rank" not in d.keys and "index_topk" not in d.keys
 
 
+def test_kv_head_count_follows_each_family_spelling_and_multi_query():
+    assert mc.dims(dense(num_key_value_heads=None)).kv_heads == 4                     # no key: one KV head per query head
+    assert mc.dims(dense(num_key_value_heads=None, model_type="falcon", multi_query=True)).kv_heads == 1       # Falcon's legacy multi-query layout
+    assert mc.dims(dense(num_key_value_heads=None, model_type="falcon", multi_query=True, num_kv_heads=2)).kv_heads == 2
+    assert mc.dims(dense(num_key_value_heads=None, model_type="falcon", multi_query=False)).kv_heads == 4
+    assert mc.dims(dense(num_key_value_heads=None, n_head_kv=2)).kv_heads == 2
+    assert mc.dims(dense(num_key_value_heads=None, multi_query_group_num=2)).kv_heads == 2
+    assert mc.dims(dense(num_key_value_heads=3, num_kv_heads=2)).kv_heads == 3       # the standard key wins
+    with pytest.raises(mc.ModelConfigError, match="num_kv_heads"):
+        mc.dims(dense(num_key_value_heads=None, num_kv_heads=0))
+
+
 def test_not_a_dict_is_refused():
     with pytest.raises(mc.ModelConfigError):
         mc.dims([1, 2])

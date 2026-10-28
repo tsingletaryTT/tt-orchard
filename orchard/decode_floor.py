@@ -302,10 +302,10 @@ def main(argv=None) -> int:
         policy = dict(p.split("=", 1) for p in a.policy.split(",") if p)
         cfg = mc.read_model_config(os.path.realpath(a.config))      # a Hugging Face cache snapshot file is a link into blobs/
         if a.board and a.per_die_gb_s is not None:       # an explicit bandwidth wins; the board still supplies the label and the die count
-            f = decode_floor(cfg, policy, a.dies or BOARDS[a.board].dies, a.per_die_gb_s, board=a.board)
+            f = decode_floor(cfg, policy, BOARDS[a.board].dies if a.dies is None else a.dies, a.per_die_gb_s, board=a.board)
         elif a.board:
             f = floor_for_board(cfg, policy, a.board, dies=a.dies)
-        elif a.per_die_gb_s is not None and a.dies:
+        elif a.per_die_gb_s is not None and a.dies is not None:
             f = decode_floor(cfg, policy, a.dies, a.per_die_gb_s)
         else:
             raise FloorInputError("give --board, or both --dies and --per-die-gb-s")

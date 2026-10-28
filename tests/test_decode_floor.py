@@ -247,6 +247,22 @@ def test_command_line_honours_an_explicit_bandwidth_given_with_a_board(capsys):
     assert json.loads(capsys.readouterr().out)["inputs"]["dies"] == 1
 
 
+def test_command_line_refuses_a_zero_die_count_with_or_without_a_bandwidth(capsys):
+    cfg = str(FIX / "qwen3.8-27b.json")
+    for extra in (["--board", "p300", "--per-die-gb-s", "256", "--dies", "0"], ["--board", "p300", "--dies", "0"],
+                  ["--per-die-gb-s", "256", "--dies", "0"]):
+        assert df.main([cfg, "--policy", "default=bfp8", *extra]) == 2, extra
+        assert "dies must be a whole number of at least 1" in capsys.readouterr().out
+
+
+def test_a_falcon_multi_query_model_reads_one_kv_head():
+    mq = {k: v for k, v in DENSE.items() if k != "num_key_value_heads"} | {"model_type": "falcon", "multi_query": True}
+    full = df.decode_floor(DENSE, policy(), 1, 1.0).by_group["attention"]
+    one = df.decode_floor(mq, policy(), 1, 1.0).by_group["attention"]
+    # per layer: k and v shrink from 2 heads to 1 head of width 16: 2 * 64 * 16 fewer weights each, two layers, bf16
+    assert full - one == pytest.approx(2 * (2 * 64 * 16) * 2.0)
+
+
 def test_a_share_exactly_at_the_threshold_gets_no_hint():
     assert df.low_share_hint(0.5, threshold=0.5) is None
     assert df.low_share_hint(0.4999, threshold=0.5) is not None
