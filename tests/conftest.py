@@ -89,3 +89,4 @@ def no_real_gozer_leases(monkeypatch):
         calls.append(list(argv))
         pytest.fail(f"this test reached the real gozer through hwlease: {calls[:3]}", pytrace=False)
     monkeypatch.setattr(hwlease, "run_command", refused)
+    monkeypatch.setattr(hwlease, "_popen", lambda *a, **k: refused(list(a[:1]), 0))

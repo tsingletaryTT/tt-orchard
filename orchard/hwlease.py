@@ -22,13 +22,15 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
 import subprocess
 from typing import NamedTuple
 
-from orchard.commands import run_command
+from orchard.commands import CommandResult, run_command
 
 RELEASE_TIMEOUT_S = 90.0         # choice: a release resets the chips (about 42 s measured); an overrun is left running, not killed
 CLAIM_POLL_S = 2.0               # between claims of the kept ticket (gozer wait itself looks once a second)
+ACQUIRE_TERM_GRACE_S = 5.0       # an interrupted `gozer acquire` gets this long to end after SIGTERM before it is killed
 CLAIM_TIMEOUT_S = 60.0           # the most one `gozer acquire` call may take; gozer answers at once
 CLAIM_MIN_TIMEOUT_S = 5.0        # the least: a claim is given the wait that is left, but never less than this
 RECOVERY_TIMEOUT_S = 15.0        # one read of gozer's history or queue while recovering inside a wait or an exception
@@ -42,8 +44,75 @@ _NAME = re.compile(r"[0-9A-Za-z]+")
 
 
 def _run_gozer(argv, timeout, **kw):
-    """The real command runner, looked up at call time so that the test suite can refuse it (tests/conftest.py)."""
+    """The real command runner, looked up at call time so that the test suite can refuse it (tests/conftest.py). Used for the reads,
+    `cancel` and `release`: a read or a cancel that an interrupt leaves running is harmless, and a release must never be cut short."""
     return run_command(argv, timeout, **kw)
+
+
+def _run_acquire(argv, timeout, **kw):
+    """The runner for `gozer acquire` (a request or a claim): it stops and reaps its child on any interrupt (see run_reaping)."""
+    return run_reaping(argv, timeout, **kw)
+
+
+def _popen(*args, **kw):
+    """subprocess.Popen, looked up at call time so that the test suite can refuse it (tests/conftest.py)."""
+    return subprocess.Popen(*args, **kw)
+
+
+def _signal_group(proc, sig, killpg) -> None:
+    """Signal the child's own process group (it was started in its own session). Never pid 1 or below, never our own group."""
+    pid = getattr(proc, "pid", None)
+    if not isinstance(pid, int) or pid <= 1:
+        return
+    try:
+        if pid == os.getpgrp():
+            return
+        killpg(pid, sig)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+
+
+def _stop_and_reap(proc, killpg) -> None:
+    """SIGTERM, up to ACQUIRE_TERM_GRACE_S for the child to end, then SIGKILL, then wait for it: no acquire is left running (it
+    could still grant a lease after the probe moved on) and no zombie is left behind."""
+    _signal_group(proc, signal.SIGTERM, killpg)
+    try:
+        proc.wait(timeout=ACQUIRE_TERM_GRACE_S)
+        return
+    except Exception:
+        pass
+    _signal_group(proc, signal.SIGKILL, killpg)
+    try:
+        proc.wait(timeout=ACQUIRE_TERM_GRACE_S)
+    except Exception:
+        pass
+
+
+def run_reaping(argv, timeout: float, *, env: dict | None = None, popen=None, killpg=None, **_ignored) -> CommandResult:
+    """Run one command like orchard.commands.run_command, but never leave the child behind. A timeout kills the group and waits
+    for it. Any other exception, a KeyboardInterrupt above all, stops the child (SIGTERM, then SIGKILL after a grace) and waits
+    for it before the exception goes on, so a `gozer acquire` that was interrupted cannot grant a lease after the probe has
+    moved on. Whatever it granted before it ended is in gozer's history, and the caller's reclaim finds it."""
+    argv = tuple(str(a) for a in argv)
+    spawn = popen or _popen
+    kill = killpg or os.killpg
+    try:
+        proc = spawn(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True, env=env)
+    except FileNotFoundError as exc:
+        return CommandResult(argv, 127, "", f"not found: {exc}")
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _signal_group(proc, signal.SIGKILL, kill)
+        try:
+            out, err = proc.communicate()
+        except Exception:
+            out, err = "", ""
+        return CommandResult(argv, None, out, err, timed_out=True, pid=getattr(proc, "pid", None))
+    except BaseException:
+        _stop_and_reap(proc, kill)
+        raise
+    return CommandResult(argv, proc.returncode, out, err, pid=getattr(proc, "pid", None))
 
 
 class ReleaseResult(NamedTuple):
@@ -74,6 +143,7 @@ class GozerLeases:
         import time
         self.who, self.pid = who, os.getpid() if pid is None else pid
         self.run, self.gozer = run if run is not None else _run_gozer, gozer
+        self.run_acquire = run if run is not None else _run_acquire     # an injected runner serves every command
         self.clock, self.sleep = clock or time.monotonic, sleep or time.sleep
         # Releases this process started and has not seen finish (an interrupt, or an overrun that was left running): lease id ->
         # the left-running command's pid. A reclaim waits for gozer to say these are released instead of starting a second one.
@@ -97,7 +167,7 @@ class GozerLeases:
 
     def _answer(self, argv: list[str], timeout: float = CLAIM_TIMEOUT_S) -> LeaseAnswer:
         try:
-            got = self.run(argv, timeout)
+            got = self.run_acquire(argv, timeout)
         except Exception as exc:
             return LeaseAnswer(None, None, str(exc))
         try:
