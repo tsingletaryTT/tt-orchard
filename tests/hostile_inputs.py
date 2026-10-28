@@ -908,6 +908,7 @@ assert all(name in BY_NAME for readers in KNOWN_DEFECTS.values() for name in rea
 UNREGISTERED_MODULES = (
     'adapters/gozer.py',
     'agent.py',
+    'audio_facts.py',
     'audio_reference.py',
     'audio_reference_env.py',
     'bench_control.py',
@@ -921,6 +922,7 @@ UNREGISTERED_MODULES = (
     'handoff.py',
     'hardware_check.py',
     'hwtests.py',
+    'hwtool.py',
     'lab.py',
     'labclient.py',
     'measure_serving.py',
