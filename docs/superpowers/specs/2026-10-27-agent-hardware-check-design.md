@@ -212,3 +212,26 @@ The budget: the reserve for cleanup is 210 s, gozer's 120 s to stop the harness 
 
 A grant that gozer makes after the wait deadline (a claim that was already running) is not thrown away: it is a real lease, so the
 call uses it, and the bounded claim timeout limits how late that can be.
+
+### Round 6: subprocesses and settled values (2026-10-27)
+
+**Sweep of every subprocess the hardware path starts, and whether it is reaped.**
+
+| Command | Started by | If an interrupt lands | Now |
+|---|---|---|---|
+| `gozer acquire` (request) and `gozer acquire --ticket` (claim) | `hwlease.run_reaping` | the child (its own session) would keep running and could grant a lease after the probe moved on | SIGTERM to its group, 5 s grace, SIGKILL, then `wait`; the interrupt goes on and the closure's `reclaim()` finds any grant in history |
+| `gozer cancel`, `gozer history`, `gozer queue` | `hwlease.run_reaping` | harmless but would be left running | reaped the same way |
+| `gozer release` | `orchard.commands.run_command(kill_on_timeout=False)` | a reset must never be cut short | left running on purpose; the lease is tracked in `in_flight` and `reclaim()` waits for history instead of starting a second release |
+| the harness under the lease | `run_watched` (stall watcher) | stopped by its own SIGTERM and SIGKILL rules | unchanged |
+| `gozer run` of `hardware_phase`, `smoke_test`, `cancel_ticket` | the probe's own phase, not the tool | `run_watched`; `subprocess.run` (kills its child on any exception) | unchanged |
+| the sweep of the attempt's strays | `sweep_strays` | signals only; it starts nothing | unchanged |
+
+**Every value the agent or the record shows is read after it is settled.** The budget in an answer is formatted by `_left()`, which
+settles first (the overlong release scenario answered "540 lease seconds left" while 100 remained). `settle` marks the record changed,
+so a settle made while an answer was formatted is written at the end of the call. `HardwareCheck.reconcile()` settles, refreshes the
+unresolved check and persists without a new call; the attempt record and the partial attempt call it right before they are built, so
+a release gozer finished during the coder or the simulator check is in `attempt.json` and the report (chip time, no `UNRESOLVED`).
+
+Pins for the two older mediums (the wait deadline and the cleanup reserve): see round 5 above. The claim timeouts and the deadline
+are in `tests/test_hwlease_recovery.py` (`test_a_claim_is_given_no_more_than_the_wait_that_is_left...`, `test_no_claim_starts_after_the_deadline`);
+the reserve is in `tests/test_agent_hw_recovery.py` (`test_the_harness_deadline_and_both_cleanup_phases_fit_inside_the_lease_cap`).

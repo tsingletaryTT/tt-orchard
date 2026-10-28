@@ -69,7 +69,8 @@ def test_reconcile_settles_refreshes_and_persists_without_a_new_call():
     w = World([incomplete_pass(60.0)])
     durations, saved, health = {}, [], {"text": "lease L1 may still be held"}
     c = hwtool.HardwareCheck(hwtool.HwPolicy(lease_s=1000.0), prepare=w.prepare, run=w.run, clock=w.clock, sleep=w.sleep,
-                             settle=durations.get, on_record=saved.append, health=lambda: health["text"])
+                             settle=durations.get, on_record=saved.append,
+                             health=lambda: health["text"] if w.runs else None)
     c.call({})
     assert c.summary()["unresolved"] and c.summary()["calls"][0]["lease_incomplete"] is True
     durations["L1"], health["text"] = 130.0, None                      # gozer finishes the release afterwards
@@ -93,7 +94,8 @@ def test_reconcile_never_raises_when_the_checks_fail():
 
     def boom(*a):
         raise RuntimeError("gozer unreadable")
-    c = hwtool.HardwareCheck(hwtool.HwPolicy(), prepare=w.prepare, run=w.run, clock=w.clock, sleep=w.sleep, settle=boom, health=boom)
+    c = hwtool.HardwareCheck(hwtool.HwPolicy(), prepare=w.prepare, run=w.run, clock=w.clock, sleep=w.sleep, settle=boom,
+                             health=lambda: boom() if w.runs else None)
     c.call({})
     assert c.reconcile()["calls"][0]["lease_incomplete"] is True
 
@@ -163,3 +165,15 @@ def test_a_partial_attempt_is_reconciled_before_it_is_saved(tmp_path, fake_kenv)
                         leases=rig.leases)
     partial = info.value.partial_attempt["agent_hw"]
     assert partial["calls"][0]["lease_s"] == 130.0 and "unresolved" not in partial
+
+
+def test_a_settle_made_while_the_answer_was_formatted_is_written_once_and_not_again():
+    w = World([incomplete_pass(60.0)])
+    saved = []
+    c = hwtool.HardwareCheck(hwtool.HwPolicy(lease_s=600.0), prepare=w.prepare, run=w.run, clock=w.clock, sleep=w.sleep,
+                             settle=lambda lease: 500.0, on_record=saved.append)
+    c.call({})
+    n = len(saved)
+    c.reconcile()
+    c.reconcile()
+    assert len(saved) == n                                              # nothing changed since: nothing is written again

@@ -175,7 +175,7 @@ def test_the_reaper_never_hides_the_interrupt_even_when_the_reap_itself_fails():
 # ---- the acquisition commands use the reaping runner; the others do not ----------------------------------------------------
 
 
-def test_request_and_claim_use_the_reaping_runner_and_reads_and_release_use_the_plain_one(monkeypatch):
+def test_every_command_but_the_release_uses_the_reaping_runner(monkeypatch):
     plain, reaping = [], []
 
     def run_plain(argv, timeout, **kw):
@@ -185,16 +185,22 @@ def test_request_and_claim_use_the_reaping_runner_and_reads_and_release_use_the_
     def run_reap(argv, timeout, **kw):
         reaping.append(list(argv))
         return CommandResult(tuple(argv), 10, json.dumps({"queued": True, "granted": False, "ticket": "T1"}), "")
+    def run_read(argv, timeout, **kw):
+        reaping.append(list(argv))
+        return CommandResult(tuple(argv), 0, json.dumps({"history": [], "queue": [], "message": "ok"}), "")
+
+    def reap_dispatch(argv, timeout, **kw):
+        return (run_reap if argv[1] == "acquire" else run_read)(argv, timeout, **kw)
     monkeypatch.setattr(hwlease, "_run_gozer", run_plain)
-    monkeypatch.setattr(hwlease, "run_reaping", run_reap)
+    monkeypatch.setattr(hwlease, "run_reaping", reap_dispatch)
     led = hwlease.GozerLeases(who="claude:test", pid=4321)
     led.request("why")
     led.claim("T1", "why")
     led.release("L1")
     led.cancel("T1")
     led.mine()
-    assert [a[1] for a in reaping] == ["acquire", "acquire"]
-    assert [a[1] for a in plain] == ["release", "cancel", "history", "queue"]
+    assert [a[1] for a in reaping] == ["acquire", "acquire", "cancel", "history", "queue"]                   # acquisitions and cancels are reaped
+    assert [a[1] for a in plain] == ["release"]                                         # only the release may be left running
 
 
 def test_an_injected_runner_is_used_for_every_command_so_tests_never_start_a_process():
@@ -228,3 +234,12 @@ def test_an_interrupt_in_the_acquire_is_followed_by_a_reclaim_that_finds_what_it
         led.request("why")
     result = led.reclaim()
     assert [x["lease_id"] for x in result.leases] == ["L1"] and events.count("release") == 1
+
+
+def test_our_own_process_group_is_never_signalled():
+    import os
+    proc = ReapProc(mode="interrupt", dies_on="KILL", pid=os.getpgrp())
+    sent = []
+    with pytest.raises(KeyboardInterrupt):
+        hwlease.run_reaping(["gozer"], 5.0, popen=lambda argv, **k: proc, killpg=lambda pgid, sig: sent.append((pgid, sig)))
+    assert sent == []

@@ -919,7 +919,7 @@ def _partial_attempt(box: dict, kw: dict, exc: BaseException) -> dict | None:
         "status_detail": f"{type(exc).__name__} before the attempt finished; the agent's hardware calls so far are kept",
         "turns": None, "agent_wall_s": None, "passed_sim": False, "category": None, "first_line": "",
         "pcc_min": None, "sets": [], "violations": [], "hw": None, "agent_check_untrusted": False, "swept": [],
-        "sampling": sampling, "coder_speed": kw.get("coder_speed"), "agent_hw": hwcheck.summary(),
+        "sampling": sampling, "coder_speed": kw.get("coder_speed"), "agent_hw": hwcheck.reconcile(),
         "provenance": provenance(kernel_sha256=None, tt_lang=box.get("facts"), coder_model=kw.get("coder_model"),
                                  probe_id=kw.get("probe_id"), simulator_pcc_min=None, sampling=dict(sampling),
                                  skills=kw.get("skills"))}
@@ -1007,7 +1007,7 @@ def _run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_i
         **measures, "violations": check.get("violations") or [], "sets": sets, "hw": None,
         "agent_check_untrusted": agent_check_untrusted(_read_agent_check(adir / "check.json"), check, op),
         "swept": swept, "sampling": dict(sampling), "coder_speed": coder_speed,
-        "agent_hw": hwcheck.summary() if hwcheck is not None else {"enabled": False},
+        "agent_hw": hwcheck.reconcile() if hwcheck is not None else {"enabled": False},
         "provenance": provenance(kernel_sha256=check.get("kernel_sha256"), tt_lang=facts,
                                  coder_model=coder_model, probe_id=probe_id, simulator_pcc_min=measures["pcc_min"],
                                  sampling=dict(sampling), references=copied or None, skills=skills),

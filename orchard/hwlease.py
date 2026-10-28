@@ -142,8 +142,13 @@ class GozerLeases:
     def __init__(self, *, who: str, pid: int | None = None, run=None, gozer: str = "gozer", clock=None, sleep=None):
         import time
         self.who, self.pid = who, os.getpid() if pid is None else pid
-        self.run, self.gozer = run if run is not None else _run_gozer, gozer
-        self.run_acquire = run if run is not None else _run_acquire     # an injected runner serves every command
+        # Every command but `release` runs under the reaping runner, so an interrupt never leaves a gozer child behind (an acquire
+        # could still grant a lease, a cancel or a read could still be running). `release` keeps the leave-running runner: a reset
+        # must not be cut short, and the lease it releases is tracked in `in_flight`. An injected runner serves every command.
+        self.run = run if run is not None else _run_acquire
+        self.run_release = run if run is not None else _run_gozer
+        self.gozer = gozer
+        self.run_acquire = self.run
         self.clock, self.sleep = clock or time.monotonic, sleep or time.sleep
         # Releases this process started and has not seen finish (an interrupt, or an overrun that was left running): lease id ->
         # the left-running command's pid. A reclaim waits for gozer to say these are released instead of starting a second one.
@@ -247,7 +252,7 @@ class GozerLeases:
             return ReleaseResult(False, False, f"not a lease id: {lease_id!r}")
         self.in_flight[lease_id] = None              # an interrupt in the command leaves it here: the child may still run
         try:
-            got = self.run([self.gozer, "release", lease_id, "--json"], RELEASE_TIMEOUT_S, kill_on_timeout=False)
+            got = self.run_release([self.gozer, "release", lease_id, "--json"], RELEASE_TIMEOUT_S, kill_on_timeout=False)
         except Exception as exc:
             self.in_flight.pop(lease_id, None)       # it could not start (or failed to answer): nothing is running
             return ReleaseResult(False, True, str(exc))

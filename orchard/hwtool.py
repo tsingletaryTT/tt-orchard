@@ -101,6 +101,7 @@ class HardwareCheck:
         self.policy, self.prepare, self.run = policy, prepare, run
         self.settle = settle                # (lease_id) -> the seconds gozer says the lease was held, or None
         self._pending = None                # the last answer of `health`, kept for summary()
+        self._dirty = False                 # a settle changed a record that has not been written yet
         self.health = health                # () -> None, or a sentence about a lease or ticket an earlier call left
         self.on_record = on_record          # called with summary() each time a call is recorded; its errors are ignored
         self.clock, self.sleep, self.stamp = clock, sleep, stamp
@@ -136,14 +137,7 @@ class HardwareCheck:
         try:
             return self._call(note[:NOTE_MAX])
         finally:
-            before = self._pending
-            settled = self._settle()
-            self._refresh()                 # what this call left behind, for the record and the next call
-            if (settled or self._pending != before) and self.on_record is not None:
-                try:
-                    self.on_record(self.summary())
-                except Exception:
-                    pass
+            self._reconcile()
             self._lock.release()
 
     def _settle(self) -> bool:
@@ -164,7 +158,28 @@ class HardwareCheck:
                     rec["lease_incomplete"], rec["lease_reconciled"] = False, True
                     rec.pop("lease_upper_bound", None)
                     changed = True
+        if changed:
+            self._dirty = True              # a settle made while an answer was formatted still has to reach the record
         return changed
+
+    def _reconcile(self) -> None:
+        """Settle what can be settled, refresh the unresolved check and write the record when either changed it."""
+        before = self._pending
+        self._settle()
+        self._refresh()                     # what is left behind, for the record and the next call
+        if (self._dirty or self._pending != before) and self.on_record is not None:
+            self._dirty = False
+            try:
+                self.on_record(self.summary())
+            except Exception:
+                pass
+
+    def reconcile(self) -> dict:
+        """Bring the record up to date without a new call, for the end of an attempt: gozer may have finished a release (or a
+        reset) since the last call, so the chip time and the unresolved check are read again, and the result is persisted. Returns
+        summary(). Never raises: _settle and _refresh catch what their callbacks raise, and a failing writer is ignored."""
+        self._reconcile()
+        return self.summary()
 
     def _refresh(self):
         try:
@@ -174,6 +189,7 @@ class HardwareCheck:
         return self._pending
 
     def _left(self) -> str:
+        self._settle()                      # the budget an answer shows is the settled one, never the estimate it replaces
         return (f"budget: {max(self.policy.max_calls - self.counted, 0)} calls left, "
                 f"{max(self.policy.lease_s - self.lease_used, 0):.0f} lease seconds left")
 
