@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from orchard import telegraph as tg
+import legacy_telegraph as tg                 # the jsonl implementation, frozen: the proof compares against it
 from orchard._proofs import telegraph_sqlite as proof
 from test_proof_telegraph_sqlite import KEY, Wire, table, telegraph  # noqa: F401 - shared helpers
 

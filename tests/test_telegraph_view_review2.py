@@ -5,6 +5,7 @@ import json
 
 import pytest
 
+from orchard import telegraph_store as ts
 from orchard import telegraph as tg
 from orchard import telegraph_view as view
 from test_telegraph_view import app_for, setup
@@ -85,8 +86,8 @@ def test_the_summary_comes_from_the_same_records_as_the_accounting_and_the_rows(
 
     def read(directory):
         reads.append(1)
-        return unsettled if len(reads) == 1 else settled          # the call settles after the first read
-    monkeypatch.setattr(tg, "_read_ledger_strict", read)
+        return ts.Snapshot(unsettled if len(reads) == 1 else settled)          # the call settles after the first read
+    monkeypatch.setattr(ts, "read_snapshot", read)
 
     def forbidden(directory):
         raise AssertionError("the summary must not read the ledger again")
@@ -101,8 +102,8 @@ def test_the_summary_comes_from_the_same_records_as_the_accounting_and_the_rows(
 def test_the_snapshot_is_cached_until_the_ledger_changes(root, tmp_path, monkeypatch):
     cfg, d, tel = setup(tmp_path)
     write_records(d, [ok_record("a1", "p", 10, 5)])
-    real, reads = tg._read_ledger_strict, []
-    monkeypatch.setattr(tg, "_read_ledger_strict", lambda directory: (reads.append(1), real(directory))[1])
+    real, reads = ts.read_snapshot, []
+    monkeypatch.setattr(ts, "read_snapshot", lambda directory: (reads.append(1), real(directory))[1])
     app = app_for(root, cfg)
     app.telegraph()
     app.telegraph()

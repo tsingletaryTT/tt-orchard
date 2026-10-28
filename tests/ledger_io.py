@@ -63,6 +63,41 @@ def set_cache_text(directory, text: str, scope: str = ts.DEFAULT_SCOPE) -> None:
         conn.close()
 
 
+def clear_ledger(directory, scope: str = ts.DEFAULT_SCOPE) -> None:
+    """Remove every record of a scope (a test of a page that recovers when a bad ledger is replaced by an empty one)."""
+    if not (Path(directory) / "project.db").is_file():
+        return
+    conn = sqlite3.connect(Path(directory) / "project.db", isolation_level=None)
+    try:
+        conn.execute("DELETE FROM telegraph_events WHERE scope = ?", (scope,))
+    finally:
+        conn.close()
+
+
+def corrupt_stored_record(directory, scope: str = ts.DEFAULT_SCOPE) -> None:
+    """Make the newest stored record text that is not JSON, as a hand edit of the database file could."""
+    conn = sqlite3.connect(Path(directory) / "project.db", isolation_level=None)
+    try:
+        conn.execute("UPDATE telegraph_events SET raw_json = '{not json' WHERE seq = "
+                     "(SELECT MAX(seq) FROM telegraph_events WHERE scope = ?)", (scope,))
+    finally:
+        conn.close()
+
+
+def seed_lines(directory, lines, scope: str = ts.DEFAULT_SCOPE) -> None:
+    """Put raw ledger lines in the ledger of `directory` as they are written, including numbers a JSON writer would refuse (NaN,
+    Infinity, a negative count): a ledger from an older or damaged writer. Each line must parse as a JSON object."""
+    items = []
+    for line in lines:
+        rec = json.loads(line)
+        assert isinstance(rec, dict), line
+        items.append((rec, line))
+    with dbm.Database(directory) as db:
+        store = ts.TelegraphStore(db, scope, guard=False)
+        with db.write() as conn:
+            store.import_records(conn, items)
+
+
 def seed_ledger(directory, records, scope: str = ts.DEFAULT_SCOPE) -> None:
     """Put `records` (dicts, in order) in the ledger of `directory`, the way earlier writers left them. They are imported with the
     raw text `json.dumps(sort_keys=True)` gives, as the old writer wrote them. Creates the database."""
@@ -70,3 +105,9 @@ def seed_ledger(directory, records, scope: str = ts.DEFAULT_SCOPE) -> None:
         store = ts.TelegraphStore(db, scope, guard=False)
         with db.write() as conn:
             store.import_records(conn, [(r, json.dumps(r, sort_keys=True)) for r in records])
+
+
+def replace_ledger(directory, records, scope: str = ts.DEFAULT_SCOPE) -> None:
+    """Make the ledger of a scope hold exactly `records`."""
+    clear_ledger(directory, scope)
+    seed_ledger(directory, records, scope)

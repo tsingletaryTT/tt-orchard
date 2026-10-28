@@ -335,14 +335,28 @@ def read_snapshot(directory, scope: str = DEFAULT_SCOPE) -> Snapshot:
         ro.close()
 
 
-def stat_key(directory) -> tuple | None:
-    """A cheap change key for a directory's ledger (the database and its -wal), or None when there is no database."""
+def fingerprint(directory, scope: str = DEFAULT_SCOPE) -> tuple | None:
+    """(key, size) for a page's cache, or None when there is no database file. `size` is the size of the database file. `key` is a
+    cheap change key: the events table only grows, so the newest `seq`, the count, the `meta` rows (the unconfirmed state and the
+    migration phase) and the names that guard the directory identify the content. `key` is None when the file cannot be read as a
+    database (nothing is cached then)."""
     try:
         ro = ReadOnlyDatabase(directory)
     except (LedgerUnavailable, LedgerRefused):
         return None
     try:
-        return ro.file_stats() if ro.exists else None
+        if not ro.exists:
+            return None
+        size = ro.file_stats()[0][1] if ro.file_stats()[0] else 0
+        try:
+            with ro.read() as conn:
+                seq, count = conn.execute("SELECT COALESCE(MAX(seq), 0), COUNT(*) FROM telegraph_events WHERE scope = ?",
+                                          (scope,)).fetchone()
+                metas = tuple(conn.execute("SELECT key, value FROM meta ORDER BY key").fetchall())
+            names = tuple(ro.exists_name(n) for n in (LEDGER, MARKER_MIGRATING, MARKER_MIGRATED, dbm.MARKER_NAME))
+            return (seq, count, metas, names), size
+        except (LedgerUnavailable, LedgerRefused):
+            return None, size
     finally:
         ro.close()
 

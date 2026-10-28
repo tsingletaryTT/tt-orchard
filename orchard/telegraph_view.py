@@ -70,11 +70,12 @@ def _ledger_facts(directory: Path) -> dict:
     used gives `error`. A directory with no database and no old ledger is an empty history. `blocked` is the reason reservations
     are refused (the ledger is unconfirmed after a restore), or None."""
     directory = Path(directory)
-    key = ts.stat_key(directory)
+    found = ts.fingerprint(directory)
+    key = found[0] if found else None                       # None: no database, or one that cannot be read
     cached = _cache.get(str(directory))
     if key is not None and cached and cached[0] == key:
         return cached[1]
-    if key is not None and key[0][1] > LEDGER_MAX_BYTES:
+    if found is not None and found[1] > LEDGER_MAX_BYTES:
         facts = {"error": "the ledger is too large to show (over 16 MB)", "records": [], "summary": _empty_summary(),
                  "acct": _empty_acct(), "blocked": None}
     else:

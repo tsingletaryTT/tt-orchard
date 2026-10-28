@@ -7,6 +7,7 @@ import json
 
 import pytest
 
+from ledger_io import ledger_records, seed_ledger
 from orchard import telegraph as tg
 from test_telegraph_view import KEY, app_for, fill, reply, setup
 from test_webui import Served
@@ -40,7 +41,7 @@ def no_usage(url, headers, body, timeout):
 def test_a_settled_call_is_one_row_and_its_reserve_line_is_not_a_second(root, tmp_path):
     cfg, d, tel = setup(tmp_path)
     tel.ask("p", "task " * 80, "failed")
-    lines = [json.loads(x) for x in (d / "telegraph.jsonl").read_text().splitlines()]
+    lines = ledger_records(d)
     assert any("reserve" in r for r in lines)                 # the producer really wrote one
     out = app_for(root, cfg).telegraph()
     assert len(out["recent"]) == 1 and out["recent"][0]["outcome"] == "ok"
@@ -72,11 +73,10 @@ def test_an_unsettled_reservation_counts_toward_a_cap_like_the_producer_counts_i
 
 def test_a_torn_record_is_one_call_of_unknown_cost_and_never_a_row(root, tmp_path):
     cfg, d, tel = setup(tmp_path, max_calls=5)
-    d.mkdir(parents=True, exist_ok=True)
-    (d / "telegraph.jsonl").write_bytes(b'{"call_id": "ab12", "problem": "p", "outcome": "ok", "tokens_in": 5')
-    tel.ask("p2", "task " * 80, "failed")                      # the next write quarantines the torn tail and notes it
-    lines = [json.loads(x) for x in (d / "telegraph.jsonl").read_text().splitlines() if x.strip().startswith("{")]
-    assert any("torn" in r for r in lines)
+    # A torn record is a note that an earlier writer left when its last line was cut short (the migration writes it).
+    seed_ledger(d, [{"torn": "telegraph.jsonl.torn-ab12cd34", "tokens": 1500}])
+    tel.ask("p2", "task " * 80, "failed")
+    assert any("torn" in r for r in ledger_records(d))
     out = app_for(root, cfg).telegraph()
     assert out["summary"]["torn"] == 1
     assert out["spend"]["unknown_cost"] == 1 and out["spend"]["calls"] == 2
@@ -161,11 +161,10 @@ def test_a_refused_call_shows_its_reason_and_is_not_counted_as_spend(root, tmp_p
 
 def test_reservation_and_torn_lines_never_leak_strings_that_should_be_redacted(root, tmp_path):
     cfg, d, _ = setup(tmp_path)
-    d.mkdir()
     lines = [{"reserve": "r1", "problem": "/home/someone/proj sk-abcdefghijklmnopqrstuvwx", "model": "quietbox-model",
               "tokens": 100, "cost_usd": None},
              {"torn": "telegraph.jsonl.torn-1", "tokens": 10}]
-    (d / "telegraph.jsonl").write_text("".join(json.dumps(r) + "\n" for r in lines))
+    seed_ledger(d, lines)
     app = app_for(root, cfg)
     app.hostname, app.home = "quietbox", "/home/someone"
     blob = json.dumps(app.telegraph())
@@ -184,7 +183,7 @@ def test_replies_prompts_and_the_cache_are_still_never_returned_with_the_new_rec
 def test_a_ledger_directory_that_cannot_be_read_still_gives_an_answer(root, tmp_path):
     cfg, d, tel = setup(tmp_path)
     d.mkdir()
-    (d / "telegraph.jsonl").mkdir()                           # reading it raises IsADirectoryError
+    (d / "project.db").mkdir()                                # the database file is a directory: a read is refused
     out = app_for(root, cfg).telegraph()
     assert out["summary"]["calls"] == 0 and out["spend"]["calls"] == 0 and out["state"] in ("ok", "problem")
 

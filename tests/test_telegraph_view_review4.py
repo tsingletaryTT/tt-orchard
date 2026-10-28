@@ -7,6 +7,7 @@ import math
 
 import pytest
 
+from ledger_io import seed_lines
 from orchard import telegraph as tg
 from orchard import telegraph_view as view
 from test_telegraph_view import app_for, setup
@@ -131,9 +132,9 @@ def test_every_number_in_a_good_answer_is_finite_and_not_negative(root, tmp_path
 def run_with_ledger(root, tmp_path, content=None, make=None):
     run = write_ledger(root / "org--a", ("stage_start", 0, {}))
     if content is not None:
-        (run / "telegraph.jsonl").write_text(content)
+        seed_lines(run, [l for l in content.splitlines() if l.strip()])
     if make:
-        make(run / "telegraph.jsonl")
+        make(run / "project.db")
     cfg, d, _ = setup(tmp_path)
     return app_for(root, cfg), run
 
@@ -159,9 +160,9 @@ def test_a_run_ledger_that_is_too_large_gives_an_error_state(root, tmp_path):
 def test_a_run_with_no_ledger_or_a_link_still_has_no_spend_line(root, tmp_path):
     app, run = run_with_ledger(root, tmp_path)
     assert app.run_detail("org--a")["telegraph"] is None
-    outside = tmp_path / "outside.jsonl"
+    outside = tmp_path / "outside.db"
     outside.write_text("")
-    (run / "telegraph.jsonl").symlink_to(outside)
+    (run / "project.db").symlink_to(outside)
     assert app.run_detail("org--a")["telegraph"] is None
 
 

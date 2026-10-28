@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from orchard import telegraph as tg
+import legacy_telegraph as tg                 # the jsonl implementation, frozen: the proof compares against it
 from orchard._proofs import telegraph_sqlite as proof
 
 REPO = Path(tg.__file__).resolve().parents[1]
