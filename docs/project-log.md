@@ -2884,3 +2884,49 @@ Prompt (operator): "if a little sqlite DB inside this project helps everything r
 - A restore that follows a refused one writes a `serve_starting` step with `owned` unknown before it calls `start`, so a crash or a timeout in that attempt leaves a record that still lets recovery stop our container.
 - A resume that cannot release the lease of a refused start blocks instead of asking for a second lease.
 - Tests first (3 failed); 3 mutations red. Class sweep: every writer of a server record was checked (park note, restore serve, coder starting, container started, not started, serve refused, serve starting, adopted).
+
+## 2026-10-28 (UTC): Stable Audio 3 demo page (PR 167)
+Prompt (operator): "make a similar gradio app to the one we use for minimax music model and include it", modelled on the MiniMax-Music3 page in the sibling repo (read only).
+- New `orchard/audio_demo/`: `audio_server.py` (standard-library job server: one clip at a time, a queue of two waiting, 429 when full, 503 while the model loads, strict input checks, a pluggable `Generator`), `audio_client.py` (client plus `run_generation`, the page's whole behaviour, with no Gradio import), `audio_app.py` (the Gradio page), `__init__.py` (`stage_demo`, `card_section`). Gradio is the extra `audio-demo` in pyproject; the page's tests skip without it.
+- Binds 127.0.0.1 by default (the sibling page binds 0.0.0.0). Ports 20100 and 7872.
+- The real generator runs `chip_generate.py` (audio runtime work, PR 165) in a child process for each clip, so the model reloads every clip. A resident generator needs `chip_generate.py` split into load and generate (issue 168). A running clip cannot be cancelled; the server says so and discards the clip.
+- No audio package exists on main, so nothing calls `stage_demo` or `card_section` yet (issue 169). The card text is tested against `card_problems` for an open and a non-commercial licence, and the same gates go red when a performance number or a commercial claim is added to it.
+- Screenshots in `docs/audio-demo/` come from `scripts/audio_demo_screenshots.py` against the fake generator (a plain tone; the status line says no chip). Playwright was installed in a scratch environment for this; the repo's screenshot scripts already need it.
+- One real run: server and client with the chip generator on one chip, benchmark prompt, 10 s clip, FLAC length read from the file 10.0 s, server time 11.1 s. The first attempt used a script directory that held another `inspect.py` and failed before the chip was used.
+- Tests first. 33 mutations over the server, client, generator and packaging, all red except two equivalents: the strict-JSON constant check (the range checks refuse NaN anyway; a test for NaN and Infinity stays) and the negative Content-Length check (on this platform a read of a negative length returns at once and the JSON check refuses the empty body; the test stays).
+
+## 2026-10-28 (UTC): first review of PR 167 (head d809c5b), classes: resources that outlive a request, and values the page cannot trust
+- High: shutdown left the chip child running. `Generator.close()` is new; `JobServer.stop()` calls it; `SubprocessChipGenerator.close()` stops and reaps the child, and a request that waits on it also stops it on any error. The request that was running reports that the server is shutting down.
+- Class sweep, resources: run directories and logs are removed after success, failure, a missing clip and a timeout (`--keep-runs` keeps them); a work directory the generator made is removed on close; the page saves clips into one directory per process, keeps the newest 20 and removes the directory at exit; Gradio's own copies are removed by `delete_cache`.
+- Class sweep, replies: an incomplete reply is `ServerDown`; a reply that is not JSON, not an object or a job reply without an id is an error with a message.
+- Class sweep, page values: seed, steps, length and guidance scale are converted in one place; a value that is not a number, not finite, not whole (seed, steps) or out of range gives a message that names the control. A fractional seed was before replaced by a random one without saying so. `run_generation` never raises, and the page's worker always sets a result.
+- Capacity counts the running clip and the waiting ones together, so `--max-waiting 0` still takes one clip and the answer does not depend on when the worker dequeues. A negative value is refused.
+- Tests first; mutations red for each of the 18 guards above (two survived the first pass, a job reply without an id and the finite checks that a catch-all hid; tests added).
+
+## 2026-10-28 (UTC): second review of PR 167 (head ec617fd), no open high finding; classes: values that depend on the server's limits, and what the server and client accept
+- The server refuses a POST that is not `application/json` (415). A page on another site can send other content types without a browser preflight and could queue chip work; a JSON content type needs a preflight, which this server does not answer.
+- A huge whole number for the length or guidance scale gave a dropped connection (math.isfinite overflows on it); only floats are checked for NaN and infinity now, and the range checks refuse the rest. Same on the client, and for every control the page converts.
+- The default length is 10 s or the nearest length the generator accepts, in validation and in health. The page starts at a length the server accepts and offers only the examples whose length it accepts (none: no examples component).
+- The client keeps the status code of an error reply whose body is cut short (a 429 stays busy). Pruning of saved clips touches only files named like this page's clips, so a directory the caller passed in keeps its other files.
+- Tests first; 11 more mutations, all red. Class sweep: every place a number is read (server fields, client check, page conversion) and every place the page or server reads a limit (slider, start value, examples, default, health).
+
+## 2026-10-28 (UTC): third review of PR 167 (head 3200ff6), no open issue; four earlier-missed items fixed
+- A prompt that starts with a dash is passed as `--prompt=<text>`, so the child's argument parser does not read it as an option.
+- The model name in health follows `--model`. `--max-seconds` is checked against 1 to 120 before a work directory is made, and the command line exits 2 with the reason.
+- A page built while the server was down reads the server's limits on each load: the length range, the start value and the examples are refreshed from health.
+- Tests first; 6 more mutations, all red.
+
+## 2026-10-28 (UTC): fourth review of PR 167 (head 526bf08), two medium findings
+- The examples are a `gr.Dataset` with its own click handler that reads the clicked row, replacing `gr.Examples`, which fixes its list when built and looks a clicked row up by position; a list replaced on page load could have been read at the wrong row. Checked in a browser: clicking an example fills the prompt, length and seed.
+- The page test for the served clip now asserts the file exists and holds a WAV, where a truthy fallback let it pass for a missing file. Mutation (swapping two fields in the handler) red.
+
+## 2026-10-28 (UTC): fifth review of PR 167 (head 4c462c0), no open issue; two earlier-missed items fixed
+- A server bound to the loopback address answers only requests whose Host names that address (403 otherwise), against DNS rebinding. A server bound elsewhere does not filter.
+- `--keep-runs` also keeps a work directory the generator made, when the server stops.
+- Tests first; 6 mutations red (one DELETE case added after the first pass left it surviving).
+
+## 2026-10-28 (UTC): sixth review of PR 167 (head 9669f14), no open issue; two unpublished concerns checked
+- The client sends no request through a proxy named in the environment (the server is local), and checks the prompt length against the server's limit before a request. Tests first; both mutations red (the proxy one survived until the opener was built per call, so the test sees the environment at call time).
+
+## 2026-10-28 (UTC): full suite on head 3b90266
+- 13920 passed, 1 failed: the hostile-reader registry test wants every module that parses JSON registered or listed as backlog. The two audio demo modules are on the backlog list (issue 170: they are meant to be copied into a package alone, so they cannot import `safeio`).

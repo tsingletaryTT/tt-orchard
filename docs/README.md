@@ -10,6 +10,7 @@
 | [restricted-head-parity.md](restricted-head-parity.md) | The parity report for a model whose head reads rows of the nearest model's `lm_head` |
 | [analysis/](analysis/) | Analyses of other models and of speed |
 | [design/](design/) | Design notes that were not built |
+| [audio-demo/](audio-demo/README.md) | The Stable Audio 3 demo page and its job server, with screenshots |
 | [superpowers/specs/](superpowers/specs/) | Design specs, one per feature |
 | [superpowers/plans/](superpowers/plans/) | Implementation plans |
 
