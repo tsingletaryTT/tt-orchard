@@ -373,18 +373,29 @@ def test_a_run_dir_outside_the_run_is_refused_by_the_stage_1_gate(tmp_path):
 
 # ---- stage 2 ------------------------------------------------------------------------------------------------------------------
 
-def stage2(tmp_path, *, chip_noise=0.001, control="different"):
+def set_timings(run_path, timings):
+    """Replace the timings in a recorded run's manifest (before the stage reads the run)."""
+    path = Path(run_path) / "manifest.json"
+    m = json.loads(path.read_text())
+    m["timings"] = timings
+    path.write_text(json.dumps(m))
+
+
+def stage2(tmp_path, *, chip_noise=0.001, control="different", repeats=REPEATS, warmup=None, timings=None):
+    """`timings(role, k)` gives the timings written into repeat k of a role's manifest (default: the fixture's constant)."""
     run_dir, ref_dir, rec, _ = stage1(tmp_path)
     s2 = run_dir / "stages" / "2"
     (s2 / "chip").mkdir(parents=True)
     plan = st.chip_plan(MODEL, BASE)
-    st.write_chip_config(s2, PATHS, "/hf", plan, repeats=REPEATS)
+    st.write_chip_config(s2, PATHS, "/hf", plan, repeats=repeats, **({} if warmup is None else {"warmup": warmup}))
     for item in plan:
         ref_role = {"chip": "reference", "control_chip": "control_reference"}[item["role"]]
         src = run_dir / rec["runs"][ref_role]["dir"]
-        for k in range(REPEATS):
+        for k in range(repeats):
             dst = s2 / "chip" / st.repeat_name(item["name"], k)
             twin(src, dst, noise=chip_noise)
+            if timings is not None:
+                set_timings(dst, timings(item["role"], k))
             (dst / "chip.json").write_text(json.dumps({"device": "test chip", "total_s": 12.5, "timings": {}}))
     roles = {"chip": "reference", "control_chip": "control_reference"}
     result = st.finish_chip(s2, run_dir, ref_dir, plan, roles)
@@ -911,3 +922,91 @@ def test_a_cancelled_numeric_verb_takes_its_cpu_runs_down_with_it(tmp_path):
         audio_remote.call(sys.executable, "references", args, timeout_s=1.5, env={"PATH": "/usr/bin:/bin"})
     time.sleep(4.0)                                       # the CPU run would have written its file at 3 s
     assert not marker.exists()
+
+
+# ---- issue 174: the warm-up rule, spread for each timed part, and the label --------------------------------------------------------------
+
+def varied(role, k):
+    """Three repeats with a distinct value for every part; the load is in repeat 0 only, as the single loaded process reports it."""
+    base = {"generate_and_decode_s": [1.8, 1.6, 1.7][k], "chip_transformer_call_s": [0.30, 0.32, 0.31][k], "conditioning_s": [0.04, 0.05, 0.045][k],
+            "chip_passes": 8, "host_loadavg_1m": [6.0, 7.0, 5.0][k]}
+    return {**base, **({"model_load_s": 6.1, "chip_weights_upload_s": 1.2} if k == 0 else {})}
+
+
+def test_the_config_states_the_warmup_and_the_stage_uses_the_rule(tmp_path):
+    cfg = json.loads(st.write_chip_config(tmp_path, PATHS, "/hf", st.chip_plan(MODEL, BASE)).read_text())
+    assert cfg["warmup"] == 1 and cfg["repeats"] == 3
+    cfg = json.loads(st.write_chip_config(tmp_path, PATHS, "/hf", st.chip_plan(MODEL, BASE), warmup=2).read_text())
+    assert cfg["warmup"] == 2
+
+
+def test_the_result_has_min_median_max_for_each_part_and_the_load_once(tmp_path):
+    run_dir, ref_dir, s2, res = stage2(tmp_path, repeats=3, timings=varied)
+    t = res["timing"]["roles"]["chip"]
+    assert t["label"] == "benchmark" and t["repeats"] == 3 and res["timing"]["warmup_runs"] == 1
+    assert t["parts"]["generate_and_decode_s"] == {"n": 3, "min": 1.6, "median": 1.7, "max": 1.8}
+    assert t["parts"]["chip_transformer_call_s"] == {"n": 3, "min": 0.30, "median": 0.31, "max": 0.32}
+    assert t["load"] == {"model_load_s": 6.1, "chip_weights_upload_s": 1.2}
+    assert t["host_loadavg_1m"] == [6.0, 7.0, 5.0]
+    assert "model_load_s" not in t["parts"] and "host_loadavg_1m" not in t["parts"]
+    assert set(res["timing"]["roles"]) == {"chip", "control_chip"}
+    assert st.chip_problems(s2, run_dir, ref_dir) == []
+
+
+def test_fewer_than_three_repeats_are_labelled_a_single_sample(tmp_path):
+    run_dir, ref_dir, s2, res = stage2(tmp_path, repeats=2)
+    assert {r["label"] for r in res["timing"]["roles"].values()} == {"single sample"}
+    assert st.chip_problems(s2, run_dir, ref_dir) == []          # the stage can pass; the bundle refuses to call it a benchmark
+
+
+def test_the_gate_refuses_a_benchmark_label_on_two_repeats(tmp_path):
+    run_dir, ref_dir, s2, res = stage2(tmp_path, repeats=2)
+    res["timing"]["roles"]["chip"]["label"] = "benchmark"
+    (s2 / "audio_result.json").write_text(json.dumps(res))
+    assert any("timing" in p and "label" in p for p in st.chip_problems(s2, run_dir, ref_dir))
+
+
+def test_the_gate_refuses_a_spread_that_is_not_what_the_runs_give(tmp_path):
+    run_dir, ref_dir, s2, res = stage2(tmp_path, repeats=3, timings=varied)
+    res["timing"]["roles"]["chip"]["parts"]["generate_and_decode_s"]["min"] = 0.5
+    (s2 / "audio_result.json").write_text(json.dumps(res))
+    assert any("chip" in p and "spread" in p for p in st.chip_problems(s2, run_dir, ref_dir))
+
+
+def test_the_gate_refuses_a_result_with_no_timing_record_or_a_role_missing_from_it(tmp_path):
+    run_dir, ref_dir, s2, res = stage2(tmp_path, repeats=3, timings=varied)
+    path = s2 / "audio_result.json"
+    a = json.loads(json.dumps(res))
+    del a["timing"]
+    path.write_text(json.dumps(a))
+    assert any("no timing record" in p for p in st.chip_problems(s2, run_dir, ref_dir))
+    b = json.loads(json.dumps(res))
+    del b["timing"]["roles"]["control_chip"]
+    path.write_text(json.dumps(b))
+    assert any("control_chip" in p and "timing" in p for p in st.chip_problems(s2, run_dir, ref_dir))
+
+
+def test_the_gate_refuses_a_warmup_that_is_not_the_one_the_config_asked_for(tmp_path):
+    run_dir, ref_dir, s2, res = stage2(tmp_path, repeats=3, timings=varied)
+    res["timing"]["warmup_runs"] = 0
+    (s2 / "audio_result.json").write_text(json.dumps(res))
+    assert any("warm-up" in p for p in st.chip_problems(s2, run_dir, ref_dir))
+
+
+def test_the_load_is_reported_from_repeat_zero_and_a_repeat_with_a_load_key_is_refused(tmp_path):
+    """The load happened once, in the first repeat's process step. A load figure in a later repeat would be a second load or a copy."""
+    def bad(role, k):
+        return {**varied(role, k), **({"model_load_s": 6.0} if k == 1 else {})}
+    run_dir, ref_dir, s2, res = stage2(tmp_path, repeats=3, timings=bad)
+    assert any("load" in p and "repeat 1" in p for p in st.chip_problems(s2, run_dir, ref_dir))
+
+
+def test_a_part_that_one_repeat_lacks_is_left_out_of_the_spread_and_named(tmp_path):
+    def missing(role, k):
+        t = varied(role, k)
+        if k == 2:
+            del t["conditioning_s"]
+        return t
+    run_dir, ref_dir, s2, res = stage2(tmp_path, repeats=3, timings=missing)
+    t = res["timing"]["roles"]["chip"]
+    assert "conditioning_s" not in t["parts"] and "conditioning_s" in t["incomplete_parts"]

@@ -1191,31 +1191,72 @@ def audio_agreement_row(redact: Redactor, label: str, s) -> str:
 AUDIO_REPEAT_PARTS = (("generate_and_decode_s", "the whole `generate` call and decode"), ("chip_transformer_call_s", "the diffusion transformer's calls"),
                       ("conditioning_s", "the T5Gemma encoder on the host"))
 AUDIO_REPEAT_ROLES = (("chip", "reference", "Fine-tune, 8 steps"), ("control_chip", "control_reference", "Base control, 50 steps, guidance 7"))
+AUDIO_MIN_REPEATS = 3            # fewer measured repeats is a single sample (orchard/resident.py MIN_REPEATS; orchard/stages.py gate_bundle checks the same heading)
+AUDIO_BENCH_HEADING = "### Timing repeats: benchmark"
+AUDIO_SINGLE_HEADING = "### Timing repeats: single sample"
+
+
+def audio_good_values(lst, key: str) -> list:
+    """The finite numbers of timing `key` over a role's repeats (at most 20 entries are read)."""
+    vals = [dig(e, "timings", key) if isinstance(e, dict) else None for e in (lst[:20] if isinstance(lst, list) else [])]
+    return [v for v in vals if is_number(v) and abs(v) <= MAX_NUMBER]
+
+
+def audio_repeat_counts(data: dict) -> dict:
+    """Per role, how many repeats have a measured whole-call time. The builder counts these itself; a label written in the result decides nothing."""
+    reps = dig(data, "repeats")
+    out = {}
+    if isinstance(reps, dict):
+        for role, _ref, _label in AUDIO_REPEAT_ROLES:
+            if isinstance(reps.get(role), list) and reps[role]:
+                out[role] = len(audio_good_values(reps[role], "generate_and_decode_s"))
+    return out
 
 
 def audio_repeat_lines(data: dict) -> list[str]:
-    """The timing repeats of stage 2 as a plain table: per model and part the seconds of each repeat, their median, and the CPU reference's one
-    sample for the whole call. Missing or malformed values print as not recorded; nothing here raises."""
+    """The timing repeats of stage 2 as plain tables. With at least AUDIO_MIN_REPEATS measured repeats for every model that was repeated, the section is
+    a benchmark: per model and part the seconds of each repeat and their min, median and max, with the CPU reference's one sample for the whole call, the
+    load that the single loaded process reported once, and the host load average. With fewer it is headed as a single sample. Missing or malformed values
+    print as not recorded; nothing here raises."""
     import statistics
     reps = dig(data, "repeats")
-    lines = ["", "### Timing repeats", ""]
-    if not isinstance(reps, dict) or not any(isinstance(v, list) and v for v in reps.values()):
-        return lines + [f"The chip run was not repeated, or the repeats are {NOT_RECORDED}."]
-    lines += ["Each model ran several times on the chip with the same settings and seed. The first repeat includes kernel compilation when the kernel cache "
-              "is cold. The CPU column is the reference's single `generate` call, made once in the reference environment (one sample).", "",
-              "| Run | Part | Seconds per repeat | Median | CPU reference, one sample |", "|---|---|---|---|---|"]
+    counts = audio_repeat_counts(data)
+    bench = bool(counts) and min(counts.values()) >= AUDIO_MIN_REPEATS
+    lines = ["", AUDIO_BENCH_HEADING if bench else AUDIO_SINGLE_HEADING, ""]
+    if not counts and not (isinstance(reps, dict) and any(isinstance(v, list) and v for v in reps.values())):
+        return lines + [f"The chip run was not repeated, or the repeats are {NOT_RECORDED}. The timings above are a single sample: one run, with no spread."]
+    warm = dig(data, "timing", "warmup_runs")
+    warm_text = (f"{warm} discarded warm-up run(s) in the same process before the repeats" if isinstance(warm, int) and not isinstance(warm, bool) and warm >= 0
+                 else f"Discarded warm-up runs before the repeats: {NOT_RECORDED}")
+    lines += [("Each model was loaded once on the chip and then generated the same clip several times with the same settings and seed. " if bench else
+               "This is a single sample: fewer than 3 measured repeats for at least one model, so there is no spread to quote. It is not a benchmark. ")
+              + f"{warm_text[0].upper() + warm_text[1:]}. The CPU column is the reference's single `generate` call, made once in the reference "
+              "environment (one sample).", "",
+              "| Run | Part | Seconds per repeat | Min | Median | Max | CPU reference, one sample |", "|---|---|---|---|---|---|---|"]
     for role, ref_role, label in AUDIO_REPEAT_ROLES:
-        lst = reps.get(role)
+        lst = reps.get(role) if isinstance(reps, dict) else None
         if not isinstance(lst, list) or not lst:
             continue
         for key, what in AUDIO_REPEAT_PARTS:
             vals = [dig(e, "timings", key) if isinstance(e, dict) else None for e in lst[:20]]
-            good = [v for v in vals if is_number(v) and abs(v) <= MAX_NUMBER]
+            good = audio_good_values(lst, key)
             cells = ", ".join(num(v) if is_number(v) and abs(v) <= MAX_NUMBER else NOT_RECORDED for v in vals)
-            med = num(statistics.median(good)) if good else NOT_RECORDED
+            lo, med, hi = (num(min(good)), num(statistics.median(good)), num(max(good))) if good else (NOT_RECORDED,) * 3
             cpu = dig(data, "reference_runs", ref_role, "timings", key) if key == "generate_and_decode_s" else None
-            lines.append(f"| {label} | {what} (`{key}`) | {cells} | {med} | "
+            lines.append(f"| {label} | {what} (`{key}`) | {cells} | {lo} | {med} | {hi} | "
                          f"{num(cpu) if is_number(cpu) and abs(cpu) <= MAX_NUMBER else ('n/a' if key != 'generate_and_decode_s' else NOT_RECORDED)} |")
+    lines += ["", "Load, once for the process (the first repeat reports it, because the repeats share the loaded model):", ""]
+    for role, _ref, label in AUDIO_REPEAT_ROLES:
+        lst = reps.get(role) if isinstance(reps, dict) else None
+        if isinstance(lst, list) and lst:
+            lines.append(f"- {label}: model load {num(dig(lst[0], 'timings', 'model_load_s'))} seconds, weights upload to the chip "
+                         f"{num(dig(lst[0], 'timings', 'chip_weights_upload_s'))} seconds.")
+    lines += ["", "Host load average (one minute) when each repeat ended, because the host is shared:", ""]
+    for role, _ref, label in AUDIO_REPEAT_ROLES:
+        lst = reps.get(role) if isinstance(reps, dict) else None
+        if isinstance(lst, list) and lst:
+            vals = [dig(e, "timings", "host_loadavg_1m") if isinstance(e, dict) else None for e in lst[:20]]
+            lines.append(f"- {label}: " + ", ".join(num(v) if is_number(v) and abs(v) <= MAX_NUMBER else NOT_RECORDED for v in vals))
     return lines + [f"", f"Repeats per model: {', '.join(str(len(v)) for v in reps.values() if isinstance(v, list))}."]
 
 

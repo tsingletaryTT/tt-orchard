@@ -450,34 +450,156 @@ def test_the_stage_2_entry_of_an_audio_run_points_at_the_audio_section(tmp_path)
 
 # ---- the timing repeats ---------------------------------------------------------------------------------------------------------------
 
-def repeats(chip=(5.0, 1.6, 1.5), control=(60.0, 30.0, 31.0)):
+BENCH = "### Timing repeats: benchmark"
+SINGLE = "### Timing repeats: single sample"
+
+
+def repeats(chip=(5.0, 1.6, 1.5), control=(60.0, 30.0, 31.0), loads=(6.0, 7.0, 5.0)):
     def lst(vals, call):
-        return [{"timings": {"generate_and_decode_s": v, "chip_transformer_call_s": call * v, "conditioning_s": 0.04}} for v in vals]
+        out = [{"timings": {"generate_and_decode_s": v, "chip_transformer_call_s": call * v, "conditioning_s": 0.04,
+                            "host_loadavg_1m": loads[i % len(loads)]}} for i, v in enumerate(vals)]
+        out[0]["timings"].update({"model_load_s": 6.125, "chip_weights_upload_s": 1.25})     # the single loaded process reports its load in repeat 0
+        return out
     return {"chip": lst(chip, 0.3), "control_chip": lst(control, 0.9)}
 
 
-def test_the_repeat_table_shows_every_repeat_the_median_and_the_one_cpu_sample(tmp_path):
+def test_three_repeats_make_a_benchmark_table_with_min_median_max_and_the_one_cpu_sample(tmp_path):
     results = built(audio_run(tmp_path, audio_result(repeats=repeats())))[0]
-    body = section(block(results), "### Timing repeats")
+    assert BENCH in results and SINGLE not in results
+    body = section(block(results), BENCH)
     row = next(l for l in body.splitlines() if l.startswith("| Fine-tune, 8 steps | the whole `generate` call"))
-    assert "5, 1.6, 1.5" in row and "| 1.6 |" in row and "24.8" in row
+    assert "5, 1.6, 1.5" in row and "| 1.5 | 1.6 | 5 |" in row and "24.8" in row
     base = next(l for l in body.splitlines() if l.startswith("| Base control, 50 steps, guidance 7 | the whole `generate` call"))
-    assert "60, 30, 31" in base and "| 31 |" in base
+    assert "60, 30, 31" in base and "| 30 | 31 | 60 |" in base
     assert "one sample" in body and "Repeats per model: 3, 3" in body
+
+
+def test_the_benchmark_section_states_the_warmup_the_load_once_and_the_host_load(tmp_path):
+    res = audio_result(repeats=repeats(), timing={"warmup_runs": 1, "min_repeats": 3, "roles": {}})
+    body = " ".join(section(block(built(audio_run(tmp_path, res))[0]), BENCH).split())
+    assert "1 discarded warm-up run" in body
+    assert "Load, once for the process" in body and "6.125" in body and "1.25" in body
+    assert "Host load average" in body and "6, 7, 5" in body
+
+
+def test_a_missing_warmup_record_is_not_recorded_not_a_guess(tmp_path):
+    body = " ".join(section(block(built(audio_run(tmp_path, audio_result(repeats=repeats())))[0]), BENCH).split())
+    assert "warm-up runs before the repeats: not recorded" in body
+
+
+def test_two_repeats_are_a_single_sample_and_the_heading_does_not_say_benchmark(tmp_path):
+    results = built(audio_run(tmp_path, audio_result(repeats=repeats(chip=(5.0, 1.6), control=(60.0, 30.0)))))[0]
+    assert SINGLE in results and BENCH not in results
+    body = " ".join(section(block(results), SINGLE).split())
+    assert "single sample" in body and "fewer than 3" in body
+
+
+def test_one_role_with_two_repeats_makes_the_whole_section_a_single_sample(tmp_path):
+    results = built(audio_run(tmp_path, audio_result(repeats=repeats(control=(60.0, 30.0)))))[0]
+    assert SINGLE in results and BENCH not in results
 
 
 def test_without_repeats_the_section_says_so_and_does_not_crash(tmp_path):
     res = audio_result()
     assert "repeats" not in res
-    body = section(block(built(audio_run(tmp_path, res))[0]), "### Timing repeats")
-    assert "was not repeated" in body
+    results = built(audio_run(tmp_path, res))[0]
+    assert "was not repeated" in section(block(results), SINGLE) and BENCH not in results
 
 
 def test_malformed_repeats_print_not_recorded_and_do_not_crash(tmp_path):
     bad = {"chip": [{"timings": {"generate_and_decode_s": "fast"}}, 5, {"timings": {"generate_and_decode_s": 1e30}}, {"timings": {"generate_and_decode_s": 2.0}}],
            "control_chip": "x"}
-    body = section(block(built(audio_run(tmp_path, audio_result(repeats=bad)))[0]), "### Timing repeats")
-    row = next(l for l in body.splitlines() if "the whole `generate` call" in l)
+    results = built(audio_run(tmp_path, audio_result(repeats=bad)))[0]
+    assert BENCH not in results                  # one good value is not three repeats
+    row = next(l for l in section(block(results), SINGLE).splitlines() if "the whole `generate` call" in l)
     assert row.count("not recorded") >= 3 and "| 2 |" in row
     assert "was not repeated" in section(block(built(audio_run(tmp_path / "b", audio_result(repeats=[1, 2])) if (tmp_path / "b").mkdir() is None else None)[0]),
-                                         "### Timing repeats")
+                                         SINGLE)
+
+
+def test_a_repeat_count_in_the_record_that_the_lists_do_not_support_does_not_make_a_benchmark(tmp_path):
+    """The builder counts the measured values itself; a `timing` record that says benchmark changes nothing."""
+    res = audio_result(repeats=repeats(chip=(5.0, 1.6), control=(60.0, 30.0)),
+                       timing={"warmup_runs": 1, "roles": {"chip": {"label": "benchmark", "repeats": 3}}})
+    assert BENCH not in built(audio_run(tmp_path, res))[0]
+
+
+def finish_bundle(run):
+    b = bundle_of(run)
+    shutil.copyfile(run / "ledger.jsonl", b / "ledger.jsonl")
+    Supervisor._copy_package(SimpleNamespace(run_dir=run), b)
+    return gate_bundle(run / "stages" / "8", run)
+
+
+def test_the_bundle_gate_passes_a_benchmark_and_a_single_sample_that_each_say_what_they_are(tmp_path):
+    for sub, reps in (("a", repeats()), ("b", repeats(chip=(5.0, 1.6), control=(60.0, 30.0)))):
+        run = audio_run(tmp_path / sub, audio_result(repeats=reps))
+        built(run)
+        gate = finish_bundle(run)
+        assert gate.ok, gate.reasons
+
+
+def test_the_bundle_gate_refuses_a_benchmark_heading_over_fewer_than_three_repeats(tmp_path):
+    run = audio_run(tmp_path, audio_result(repeats=repeats()))
+    built(run)
+    res = json.loads((run / RESULT).read_text())
+    res["repeats"]["chip"] = res["repeats"]["chip"][:2]               # the repeats the bundle was built from are no longer three
+    (run / RESULT).write_text(json.dumps(res))
+    gate = finish_bundle(run)
+    assert not gate.ok and any("benchmark" in r and "chip" in r and "2" in r for r in gate.reasons), gate.reasons
+
+
+def test_the_bundle_gate_does_not_count_a_true_as_a_measured_time(tmp_path):
+    run = audio_run(tmp_path, audio_result(repeats=repeats()))
+    built(run)
+    res = json.loads((run / RESULT).read_text())
+    res["repeats"]["chip"][2]["timings"]["generate_and_decode_s"] = True
+    (run / RESULT).write_text(json.dumps(res))
+    gate = finish_bundle(run)
+    assert not gate.ok and any("chip has 2" in r for r in gate.reasons), gate.reasons
+
+
+def test_a_warmup_that_is_true_is_not_recorded(tmp_path):
+    body = " ".join(section(block(built(audio_run(tmp_path, audio_result(repeats=repeats(), timing={"warmup_runs": True})))[0]), BENCH).split())
+    assert "warm-up runs before the repeats: not recorded" in body and "True" not in body
+
+
+def test_the_load_comes_from_the_first_repeat_only(tmp_path):
+    reps = repeats()
+    reps["chip"][2]["timings"]["model_load_s"] = 99.0           # a later repeat's figure is not the load
+    body = " ".join(section(block(built(audio_run(tmp_path, audio_result(repeats=reps)))[0]), BENCH).split())
+    assert "model load 6.125 seconds" in body and "99" not in body
+
+
+def test_the_bundle_gate_refuses_a_benchmark_heading_when_the_result_has_no_repeats(tmp_path):
+    run = audio_run(tmp_path, audio_result(repeats=repeats()))
+    built(run)
+    res = json.loads((run / RESULT).read_text())
+    del res["repeats"]
+    (run / RESULT).write_text(json.dumps(res))
+    gate = finish_bundle(run)
+    assert not gate.ok and any("benchmark" in r for r in gate.reasons), gate.reasons
+
+
+def test_the_bundle_gate_refuses_a_benchmark_heading_when_the_result_file_is_unreadable(tmp_path):
+    run = audio_run(tmp_path, audio_result(repeats=repeats()))
+    built(run)
+    (run / RESULT).write_text("[1]")
+    gate = finish_bundle(run)
+    assert not gate.ok and any("benchmark" in r for r in gate.reasons), gate.reasons
+
+
+def test_the_section_text_has_none_of_the_phrases_the_style_sweep_looks_for(tmp_path):
+    results = built(audio_run(tmp_path, audio_result(repeats=repeats(), timing={"warmup_runs": 1, "roles": {}})))[0]
+    single = built(audio_run(tmp_path / "s", audio_result(repeats=repeats(chip=(5.0, 1.6), control=(60.0, 30.0)))))[0]
+    for text in (section(block(results), BENCH), section(block(single), SINGLE)):
+        for phrase in SWEEP:
+            assert phrase not in text, phrase
+
+
+def test_the_headings_the_builder_writes_are_the_ones_the_gate_looks_for():
+    from orchard import resident
+    src = (Path(__file__).resolve().parents[1] / "orchard" / "skills" / "operator-bundle-templates" / "build_bundle.py").read_text()
+    assert f'AUDIO_BENCH_HEADING = "{resident.BENCH_HEADING}"' in src and f'AUDIO_SINGLE_HEADING = "{resident.SINGLE_HEADING}"' in src
+    assert (BENCH, SINGLE) == (resident.BENCH_HEADING, resident.SINGLE_HEADING)
+    assert f"AUDIO_MIN_REPEATS = {resident.MIN_REPEATS} " in src

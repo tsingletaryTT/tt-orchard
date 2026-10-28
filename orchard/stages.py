@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from orchard import audio_decision, audio_facts, audio_runtime
+from orchard import audio_decision, audio_facts, audio_runtime, safeio
 from orchard.classes import CLASSES, SIDECAR_CLASSES, class_of_path, path_of
 from orchard import prompt_suite, sampling_probe
 from orchard.graft_trial import DECISION_FILE as GRAFT_DECISION_FILE
@@ -1000,9 +1000,40 @@ def gate_bundle(stage_dir, run_dir) -> GateResult:
                 reasons.append(f"{rel} changed after build_bundle.py wrote it")
         for rel in sorted(set(recorded) - found - {"stages/8/bundle/ledger.jsonl"}):
             reasons.append(f"{rel} was written by build_bundle.py and is gone")
+    reasons += _bundle_benchmark_reasons(bundle, run_dir)
     for hit in scrub_bundle(bundle):
         reasons.append(f"scrub: {hit}")
     return _done(reasons, seen)
+
+
+def _bundle_benchmark_reasons(bundle: Path, run_dir) -> list[str]:
+    """A bundle whose RESULTS.md heads its audio timings as a benchmark must rest on at least `resident.MIN_REPEATS` measured repeats of each model that
+    stage 2 repeated, counted here from `stages/2/audio_result.json` and not taken from any label. Fewer repeats are a single sample, which the bundle
+    heads differently. A result file that cannot be read gives no support for the heading."""
+    from orchard import resident
+    try:
+        text = (bundle / "RESULTS.md").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    if resident.BENCH_HEADING not in text.splitlines():
+        return []
+    rel = f"stages/2/{audio_runtime.RESULT_FILE}"
+    try:
+        res = safeio.read_json(Path(run_dir) / rel, max_bytes=64 << 20, expect=dict)
+    except (safeio.SafeReadError, OSError):
+        return [f"RESULTS.md heads the audio timings as a benchmark, but {rel} cannot be read to support it"]
+    reps = res.get("repeats")
+    counts = {}
+    if isinstance(reps, dict):
+        for role, lst in reps.items():
+            if isinstance(lst, list) and lst:
+                counts[role] = sum(1 for e in lst if isinstance(e, dict) and isinstance(e.get("timings"), dict)
+                                   and isinstance(e["timings"].get(resident.MAIN_PART), (int, float))
+                                   and not isinstance(e["timings"].get(resident.MAIN_PART), bool))   # safeio.read_json already refuses NaN and Infinity
+    if not counts:
+        return [f"RESULTS.md heads the audio timings as a benchmark, but {rel} lists no repeats"]
+    return [f"RESULTS.md heads the audio timings as a benchmark, but {role} has {n} measured repeat(s) in {rel}; "
+            f"{resident.MIN_REPEATS} are needed" for role, n in sorted(counts.items()) if n < resident.MIN_REPEATS]
 
 
 def _sha256(path: Path) -> str:
