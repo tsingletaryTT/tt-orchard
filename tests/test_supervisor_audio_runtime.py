@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from orchard import audio_runtime, audio_stages as st, blocked, status, supervisor
+from orchard import audio_cli, audio_plan, audio_remote, audio_runtime, audio_stages as st, blocked, status, supervisor
 from orchard.stages import AUDIO_TABLE, GateResult, spec_for
 from orchard.supervisor import EXIT_BLOCKED, EXIT_READY, Control, parse
 from run_fakes import DELTA, FILES, argv, bringup
@@ -37,17 +37,20 @@ def arig(tmp_path, monkeypatch):
         d.mkdir(parents=True)
         (d / "model_config.json").write_text(json.dumps(REAL_CONFIG))
         snaps[key] = d
-    r.args = parse(argv(tmp_path, r.tiers, r.chip_server.endpoint, chips=2) + ["--input", f"model={snaps['model']}", "--input", f"base={snaps['base']}"])
+    a = argv(tmp_path, r.tiers, r.chip_server.endpoint, chips=2)
+    a[a.index("--model") + 1] = "stabilityai/stable-audio-3-small-music"
+    r.args = parse(a + ["--input", f"model={snaps['model']}", "--input", f"base={snaps['base']}"])
     r.calls = {"cpu": [], "chip": []}
     monkeypatch.setattr(supervisor.Supervisor, "_audio_models", lambda self: (MODEL, BASE))
 
-    def cpu(self, argv_, env, timeout_s, log):
+    def cpu(argv_, env, timeout_s, log):
         r.calls["cpu"].append((argv_, env))
         model = argv_[argv_.index("--model") + 1]
         out = Path(argv_[argv_.index("--out") + 1])
         host = argv_[0].endswith(".tenstorrent-venv/bin/python")
         seed = {"small-music": 1, "small-music-base": 2}[model]
-        make_run(out, model, wave=music(seed=seed) + (0.002 if host else 0), seed=seed, commit=supervisor.audio_reference_env.LIBRARY_COMMIT)
+        make_run(out, model, wave=music(seed=seed) + (0.002 if host else 0), seed=seed, commit=supervisor.audio_reference_env.LIBRARY_COMMIT,
+                 config_sha256=audio_plan.snapshot_identity(snaps["model" if model == "small-music" else "base"])["config_sha256"])
         return 0
 
     real_spawn = supervisor.Supervisor._spawn
@@ -60,16 +63,24 @@ def arig(tmp_path, monkeypatch):
         cfg = json.loads(cfg_path.read_text())
         run_dir = cfg_path.parent.parent.parent
         for item in cfg["runs"]:
-            ref = run_dir / "stages" / "1" / "reference" / item["name"]
+            ref = run_dir / "stages" / "1" / "reference" / item["model"]
             dst = cfg_path.parent / "chip" / item["name"]
-            twin(ref, dst, noise=0.001)
+            twin(ref, dst, noise=0.001, commit=supervisor.audio_reference_env.LIBRARY_COMMIT)
             (dst / "chip.json").write_text(json.dumps({"device": "fake chip", "total_s": 9.0, "timings": {}}))
         out_path.write_text("fake chip output\n")
         from orchard.stages import evidence_record
         return {"command": command, "returncode": 0, "timed_out": False, "seconds": 1.0, "chips": list(chips), "output": evidence_record(run_dir, out_path)}
 
-    monkeypatch.setattr(supervisor.Supervisor, "_cpu_run", cpu)
+    monkeypatch.setattr(st, "subprocess_runner", lambda env: cpu)
     monkeypatch.setattr(supervisor.Supervisor, "_spawn", spawn)
+
+    def in_process(python, verb, args, *, timeout_s, env=None):
+        """The numeric verbs run in this process (the real interpreter hop is tested in test_audio_remote.py)."""
+        out = audio_cli.dispatch(verb, args)
+        if "error" in out:
+            raise audio_plan.AudioStageError(out["error"])
+        return out["result"]
+    monkeypatch.setattr(audio_remote, "call", in_process)
 
     def bundle(self, spec, stage_dir):
         (stage_dir / "bundle").mkdir(parents=True, exist_ok=True)
@@ -192,7 +203,7 @@ def test_a_failed_chip_test_fails_the_stage_and_names_the_output(arig, monkeypat
 
 def test_a_failed_cpu_run_fails_stage_1_and_leaves_no_chip_test(arig, monkeypatch):
     make_environment(arig)
-    monkeypatch.setattr(supervisor.Supervisor, "_cpu_run", lambda self, a, e, t, l: 2)
+    monkeypatch.setattr(st, "subprocess_runner", lambda env: (lambda a, e, t, l: 2))
     with pytest.raises(Stop):
         arig.run()
     assert arig.ends(1)[0]["result"] == "fail" and not started(arig, 2) and arig.calls["chip"] == []
@@ -203,7 +214,8 @@ def test_stage_1_fills_the_reference_cache_and_a_second_run_uses_it(arig, tmp_pa
     assert arig.run() == EXIT_READY
     cache = Path(arig.args.run_dir).parent / "cache" / "audio-reference"
     assert (cache / "small-music" / "manifest.json").is_file() and (cache / "small-music-base" / "manifest.json").is_file()
-    assert st.cached_run(cache, "small-music", REV, supervisor.audio_reference_env.LIBRARY_COMMIT) is not None
+    snap = [v.split("=", 1)[1] for v in arig.args.input if v.startswith("model=")][-1]
+    assert st.cached_run(cache, "small-music", audio_plan.snapshot_identity(snap), supervisor.audio_reference_env.LIBRARY_COMMIT) is not None
 
 
 def test_every_audio_stage_spec_needs_no_coder_and_the_text_table_still_does():
@@ -248,11 +260,11 @@ def test_a_coder_booted_for_stage_0_is_adopted_by_the_audio_stages_and_one_that_
 
 def test_a_second_pass_through_stage_1_does_not_select_again(arig, monkeypatch):
     make_environment(arig)
-    good = supervisor.Supervisor._cpu_run
-    monkeypatch.setattr(supervisor.Supervisor, "_cpu_run", lambda self, a, e, t, l: 2)
+    good = st.subprocess_runner
+    monkeypatch.setattr(st, "subprocess_runner", lambda env: (lambda a, e, t, l: 2))
     with pytest.raises(Stop):
         arig.run()
-    monkeypatch.setattr(supervisor.Supervisor, "_cpu_run", good)
+    monkeypatch.setattr(st, "subprocess_runner", good)
     seen = []
 
     def resume():
@@ -290,14 +302,32 @@ def test_a_chip_command_the_runner_refuses_fails_the_stage_before_any_lease(arig
     assert status_ == "fail" and "refused" in reasons[0] and arig.calls["chip"] == []
 
 
-def test_the_cpu_runner_gives_the_child_the_offline_cache_environment_and_no_token(arig, monkeypatch, tmp_path):
+def test_the_audio_children_get_the_offline_cache_environment_and_no_token(arig, monkeypatch, tmp_path):
+    """The environment the numeric verb hands to the CPU runs: offline Hub, the cache directory, no token, no chip."""
     from orchard.ledger import Ledger
-    monkeypatch.undo()                       # the real _cpu_run, not the fake
     monkeypatch.setenv("HF_TOKEN", "hf_secret_value")
     with Ledger(arig.run_dir / "ledger.jsonl") as led:
         sup = build_supervisor(arig, led)
-        log = tmp_path / "env.log"
-        assert sup._cpu_run(["/usr/bin/env"], {"PYTHONPATH": "/lib"}, 30, log) == 0
-    text = log.read_text()
-    assert "HF_HUB_OFFLINE=1" in text and "TRANSFORMERS_OFFLINE=1" in text and f"HF_HOME={sup.paths.hf_home}" in text and "PYTHONPATH=/lib" in text
-    assert "hf_secret_value" not in text
+        env = sup._audio_env()
+    assert env["HF_HUB_OFFLINE"] == "1" and env["TRANSFORMERS_OFFLINE"] == "1" and env["HF_HOME"] == sup.paths.hf_home
+    assert "HF_TOKEN" not in env and "hf_secret_value" not in " ".join(env.values())
+
+
+def test_a_repository_the_planners_do_not_know_is_not_selected_even_with_a_supported_configuration(arig):
+    """The configuration check passes for any audio repository with this network, but the planners know two repositories; selecting another would
+    record a choice that stage 1 cannot carry out, and a retry could never reach the unsupported-audio pause."""
+    make_environment(arig)
+    arig.args.model = "someone/else-audio-model"
+    with pytest.raises(Stop):
+        arig.run()
+    assert decisions(arig, "pause")[-1]["reason"] == supervisor.AUDIO_UNBUILT
+    assert not decisions(arig, audio_runtime.AUDIO_RUNTIME_SELECTED) and not started(arig, 1)
+
+
+def test_a_base_without_a_local_snapshot_has_no_control_and_the_run_still_reaches_the_bundle(arig):
+    make_environment(arig)
+    arig.args.input = [v for v in arig.args.input if not v.startswith("base=")]
+    assert arig.run() == EXIT_READY
+    assert [a[a.index("--model") + 1] for a, _ in arig.calls["cpu"]] == ["small-music", "small-music"]
+    cfg = json.loads(next(arig.run_dir.glob("stages/2/audio_chip_config.json")).read_text())
+    assert {r["model"] for r in cfg["runs"]} == {"small-music"}

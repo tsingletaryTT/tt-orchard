@@ -446,3 +446,38 @@ def test_the_stage_2_entry_of_an_audio_run_points_at_the_audio_section(tmp_path)
     results = built(audio_run(tmp_path))[0]
     stage2 = results.split("## Stage 2:", 1)[1].split("## Stage 3", 1)[0]
     assert "Audio clip on a chip" in stage2 and "No result file" not in stage2
+
+
+# ---- the timing repeats ---------------------------------------------------------------------------------------------------------------
+
+def repeats(chip=(5.0, 1.6, 1.5), control=(60.0, 30.0, 31.0)):
+    def lst(vals, call):
+        return [{"timings": {"generate_and_decode_s": v, "chip_transformer_call_s": call * v, "conditioning_s": 0.04}} for v in vals]
+    return {"chip": lst(chip, 0.3), "control_chip": lst(control, 0.9)}
+
+
+def test_the_repeat_table_shows_every_repeat_the_median_and_the_one_cpu_sample(tmp_path):
+    results = built(audio_run(tmp_path, audio_result(repeats=repeats())))[0]
+    body = section(block(results), "### Timing repeats")
+    row = next(l for l in body.splitlines() if l.startswith("| Fine-tune, 8 steps | the whole `generate` call"))
+    assert "5, 1.6, 1.5" in row and "| 1.6 |" in row and "24.8" in row
+    base = next(l for l in body.splitlines() if l.startswith("| Base control, 50 steps, guidance 7 | the whole `generate` call"))
+    assert "60, 30, 31" in base and "| 31 |" in base
+    assert "one sample" in body and "Repeats per model: 3, 3" in body
+
+
+def test_without_repeats_the_section_says_so_and_does_not_crash(tmp_path):
+    res = audio_result()
+    assert "repeats" not in res
+    body = section(block(built(audio_run(tmp_path, res))[0]), "### Timing repeats")
+    assert "was not repeated" in body
+
+
+def test_malformed_repeats_print_not_recorded_and_do_not_crash(tmp_path):
+    bad = {"chip": [{"timings": {"generate_and_decode_s": "fast"}}, 5, {"timings": {"generate_and_decode_s": 1e30}}, {"timings": {"generate_and_decode_s": 2.0}}],
+           "control_chip": "x"}
+    body = section(block(built(audio_run(tmp_path, audio_result(repeats=bad)))[0]), "### Timing repeats")
+    row = next(l for l in body.splitlines() if "the whole `generate` call" in l)
+    assert row.count("not recorded") >= 3 and "| 2 |" in row
+    assert "was not repeated" in section(block(built(audio_run(tmp_path / "b", audio_result(repeats=[1, 2])) if (tmp_path / "b").mkdir() is None else None)[0]),
+                                         "### Timing repeats")

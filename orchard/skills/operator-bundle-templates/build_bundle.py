@@ -1188,6 +1188,37 @@ def audio_agreement_row(redact: Redactor, label: str, s) -> str:
             f"{num(dig(wav, 'rel_l2'))} | {num(dig(wav, 'log_spectrum_distance'))} | {worst_text} | {failed_text} |")
 
 
+AUDIO_REPEAT_PARTS = (("generate_and_decode_s", "the whole `generate` call and decode"), ("chip_transformer_call_s", "the diffusion transformer's calls"),
+                      ("conditioning_s", "the T5Gemma encoder on the host"))
+AUDIO_REPEAT_ROLES = (("chip", "reference", "Fine-tune, 8 steps"), ("control_chip", "control_reference", "Base control, 50 steps, guidance 7"))
+
+
+def audio_repeat_lines(data: dict) -> list[str]:
+    """The timing repeats of stage 2 as a plain table: per model and part the seconds of each repeat, their median, and the CPU reference's one
+    sample for the whole call. Missing or malformed values print as not recorded; nothing here raises."""
+    import statistics
+    reps = dig(data, "repeats")
+    lines = ["", "### Timing repeats", ""]
+    if not isinstance(reps, dict) or not any(isinstance(v, list) and v for v in reps.values()):
+        return lines + [f"The chip run was not repeated, or the repeats are {NOT_RECORDED}."]
+    lines += ["Each model ran several times on the chip with the same settings and seed. The first repeat includes kernel compilation when the kernel cache "
+              "is cold. The CPU column is the reference's single `generate` call, made once in the reference environment (one sample).", "",
+              "| Run | Part | Seconds per repeat | Median | CPU reference, one sample |", "|---|---|---|---|---|"]
+    for role, ref_role, label in AUDIO_REPEAT_ROLES:
+        lst = reps.get(role)
+        if not isinstance(lst, list) or not lst:
+            continue
+        for key, what in AUDIO_REPEAT_PARTS:
+            vals = [dig(e, "timings", key) if isinstance(e, dict) else None for e in lst[:20]]
+            good = [v for v in vals if is_number(v) and abs(v) <= MAX_NUMBER]
+            cells = ", ".join(num(v) if is_number(v) and abs(v) <= MAX_NUMBER else NOT_RECORDED for v in vals)
+            med = num(statistics.median(good)) if good else NOT_RECORDED
+            cpu = dig(data, "reference_runs", ref_role, "timings", key) if key == "generate_and_decode_s" else None
+            lines.append(f"| {label} | {what} (`{key}`) | {cells} | {med} | "
+                         f"{num(cpu) if is_number(cpu) and abs(cpu) <= MAX_NUMBER else ('n/a' if key != 'generate_and_decode_s' else NOT_RECORDED)} |")
+    return lines + [f"", f"Repeats per model: {', '.join(str(len(v)) for v in reps.values() if isinstance(v, list))}."]
+
+
 def audio_section(run: Run, redact: Redactor) -> list[str]:
     """The "Audio clip on a chip" section of RESULTS.md. No lines for a run without audio_result.json."""
     data = run.audio
@@ -1235,6 +1266,7 @@ def audio_section(run: Run, redact: Redactor) -> list[str]:
         own = dig(ref, "timings", "generate_and_decode_s")
         lines += ["", f"The CPU reference's own `generate` call and decode took {num(own)} seconds when it was made"
                   + (" (this run reused a saved reference)." if ref.get("from_cache") is True else ".")]
+    lines += audio_repeat_lines(data)
     lines += ["", "### Agreement with the CPU reference", "",
               "PCC is the Pearson correlation between two arrays (1 is identical). Relative L2 is the size of the difference "
               "divided by the size of the reference (0 is identical). The log-spectrum distance compares the two waveforms' "

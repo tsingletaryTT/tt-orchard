@@ -111,6 +111,23 @@ def selected(entries: list[dict]) -> dict | None:
     return found
 
 
+def selection_from_run_dir(run_dir) -> AudioPaths | None:
+    """The paths of the run's selection, read from its ledger file (a gate gets only directories). None when the ledger has none or cannot be read."""
+    import json
+    entries = []
+    try:
+        with open(Path(run_dir) / "ledger.jsonl", encoding="utf-8") as f:
+            for line in f:
+                if AUDIO_RUNTIME_SELECTED in line:
+                    try:
+                        entries.append(json.loads(line))
+                    except ValueError:
+                        continue
+    except OSError:
+        return None
+    return selection_paths(entries)
+
+
 def selection_paths(entries: list[dict]) -> AudioPaths | None:
     rec = selected(entries)
     try:

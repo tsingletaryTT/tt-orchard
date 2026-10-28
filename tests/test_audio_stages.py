@@ -16,6 +16,8 @@ from orchard import audio_stages as st
 SR = 44100
 COMMIT = "c" * 40
 REV = "rev-small"
+REPEATS = 2
+EXP = {"revision": REV, "config_sha256": "0" * 64}          # what a run's snapshot gives (make_run records the same config hash)
 
 
 def music(seconds=10.0, seed=0, amp=0.3):
@@ -26,9 +28,9 @@ def music(seconds=10.0, seed=0, amp=0.3):
 
 
 def make_run(path, name="small-music", *, dtype="float32", device="cpu", wave=None, latent=None, layer=None, revision=REV, commit=COMMIT,
-             settings_override=None, seed=1):
+             settings_override=None, seed=1, config_sha256="0" * 64):
     s = {**st.settings_for(name), "dtype": dtype, "device": device, **(settings_override or {})}
-    rec = ar.Recorder(path, model={"name": name, "revision": revision, "config_sha256": "0" * 64, "diffusion_objective": "rf_denoiser",
+    rec = ar.Recorder(path, model={"name": name, "revision": revision, "config_sha256": config_sha256, "diffusion_objective": "rf_denoiser",
                                    "checkpoint_bytes": 1},
                       library={"commit": commit, "name": "stable-audio-3", "source_verified": True}, settings=s, seeds={"torch": 42})
     g = np.random.default_rng(seed)
@@ -49,7 +51,7 @@ def twin(src, dst, *, noise=0.001, scale=1.0, dtype="bfloat16", device="tt", nam
     g = np.random.default_rng(7)
     out = {k: (v if k[0] == "noise" else (v * scale + noise * g.standard_normal(v.shape))) for k, v in arrs.items()}
     return make_run(dst, name or m["model"]["name"], dtype=dtype, device=device, wave=out[("waveform", "audio")], latent=out[("latent", "final")],
-                    layer=out[("layer", "layer_00")], revision=m["model"]["revision"], **kw)
+                    layer=out[("layer", "layer_00")], **{"revision": m["model"]["revision"], "config_sha256": m["model"]["config_sha256"], **kw})
 
 
 # ---- sound checks -------------------------------------------------------------------------------------------------------------
@@ -201,12 +203,12 @@ def test_a_cached_reference_is_used_only_when_everything_it_depends_on_matches(t
     cache = tmp_path / "cache"
     cache.mkdir()
     make_run(cache / "small-music")
-    assert st.cached_run(cache, "small-music", REV, COMMIT) == cache / "small-music"
-    assert st.cached_run(cache, "small-music", "other-rev", COMMIT) is None
+    assert st.cached_run(cache, "small-music", EXP, COMMIT) == cache / "small-music"
+    assert st.cached_run(cache, "small-music", {**EXP, "revision": "other-rev"}, COMMIT) is None
     assert st.cached_run(cache, "small-music", REV, "d" * 40) is None
     assert st.cached_run(cache, "small-music", None, COMMIT) is None
-    assert st.cached_run(cache, "small-music-base", REV, COMMIT) is None
-    assert st.cached_run(None, "small-music", REV, COMMIT) is None
+    assert st.cached_run(cache, "small-music-base", EXP, COMMIT) is None
+    assert st.cached_run(None, "small-music", EXP, COMMIT) is None
 
 
 @pytest.mark.parametrize("kw", [{"dtype": "bfloat16"}, {"device": "tt"}, {"settings_override": {"steps": 9}}, {"settings_override": {"seed": 1}}])
@@ -214,7 +216,7 @@ def test_a_cached_run_made_with_other_settings_is_not_used(tmp_path, kw):
     cache = tmp_path / "cache"
     cache.mkdir()
     make_run(cache / "small-music", **kw)
-    assert st.cached_run(cache, "small-music", REV, COMMIT) is None
+    assert st.cached_run(cache, "small-music", EXP, COMMIT) is None
 
 
 def test_a_cached_run_with_a_changed_array_is_not_used(tmp_path):
@@ -223,7 +225,7 @@ def test_a_cached_run_with_a_changed_array_is_not_used(tmp_path):
     run = make_run(cache / "small-music")
     f = run / "arrays" / "latent__final.npy"
     f.write_bytes(f.read_bytes()[:-4] + b"\x00\x00\x00\x00")
-    assert st.cached_run(cache, "small-music", REV, COMMIT) is None
+    assert st.cached_run(cache, "small-music", EXP, COMMIT) is None
 
 
 def test_a_cache_entry_that_is_a_link_is_not_used(tmp_path):
@@ -231,7 +233,7 @@ def test_a_cache_entry_that_is_a_link_is_not_used(tmp_path):
     cache.mkdir()
     real = make_run(tmp_path / "real")
     (cache / "small-music").symlink_to(real)
-    assert st.cached_run(cache, "small-music", REV, COMMIT) is None
+    assert st.cached_run(cache, "small-music", EXP, COMMIT) is None
 
 
 # ---- stage 1 ------------------------------------------------------------------------------------------------------------------
@@ -260,13 +262,13 @@ class FakeRunner:
         return 0
 
 
-def stage1(tmp_path, runner=None, cache=None, revisions=None, plan=None):
+def stage1(tmp_path, runner=None, cache=None, expected=None, plan=None):
     run_dir = tmp_path / "run"
     stage_dir = run_dir / "stages" / "1"
     stage_dir.mkdir(parents=True)
     runner = runner or FakeRunner()
     plan = plan or st.reference_plan(MODEL, BASE)
-    rec = st.run_references(stage_dir, run_dir, PATHS, plan, runner, revisions=revisions or {"small-music": REV, "small-music-base": REV},
+    rec = st.run_references(stage_dir, run_dir, PATHS, plan, runner, expected=expected or {"small-music": EXP, "small-music-base": EXP},
                             library_commit=COMMIT, cache_dir=cache, script=Path("/skills/make_reference.py"))
     return run_dir, stage_dir, rec, runner
 
@@ -375,12 +377,14 @@ def stage2(tmp_path, *, chip_noise=0.001, control="different"):
     s2 = run_dir / "stages" / "2"
     (s2 / "chip").mkdir(parents=True)
     plan = st.chip_plan(MODEL, BASE)
+    st.write_chip_config(s2, PATHS, "/hf", plan, repeats=REPEATS)
     for item in plan:
         ref_role = {"chip": "reference", "control_chip": "control_reference"}[item["role"]]
         src = run_dir / rec["runs"][ref_role]["dir"]
-        dst = s2 / "chip" / item["name"]
-        twin(src, dst, noise=chip_noise)
-        (dst / "chip.json").write_text(json.dumps({"device": "test chip", "total_s": 12.5, "timings": {}}))
+        for k in range(REPEATS):
+            dst = s2 / "chip" / st.repeat_name(item["name"], k)
+            twin(src, dst, noise=chip_noise)
+            (dst / "chip.json").write_text(json.dumps({"device": "test chip", "total_s": 12.5, "timings": {}}))
     roles = {"chip": "reference", "control_chip": "control_reference"}
     result = st.finish_chip(s2, run_dir, ref_dir, plan, roles)
     return run_dir, ref_dir, s2, result
@@ -481,10 +485,20 @@ def test_the_chip_config_and_command(tmp_path):
     path = st.write_chip_config(tmp_path, PATHS, "/hf", st.chip_plan(MODEL, BASE))
     cfg = json.loads(path.read_text())
     assert cfg["src_dir"] == "/src/lib" and cfg["hf_home"] == "/hf" and cfg["seed"] == 42 and cfg["duration"] == 10.0
-    assert [(r["name"], r["steps"], r["cfg_scale"], r["sampler"]) for r in cfg["runs"]] == [
-        ("small-music", 8, 1.0, "pingpong"), ("small-music-base", 50, 7.0, "euler")]
+    assert [(r["name"], r["model"], r["steps"], r["cfg_scale"], r["sampler"]) for r in cfg["runs"]] == [
+        ("small-music", "small-music", 8, 1.0, "pingpong"), ("small-music-r1", "small-music", 8, 1.0, "pingpong"),
+        ("small-music-r2", "small-music", 8, 1.0, "pingpong"), ("small-music-base", "small-music-base", 50, 7.0, "euler"),
+        ("small-music-base-r1", "small-music-base", 50, 7.0, "euler"), ("small-music-base-r2", "small-music-base", 50, 7.0, "euler")]
+    assert cfg["repeats"] == 3
     cmd = st.chip_test_command(PATHS, tmp_path, Path("/skills/audio_chip_test.py"))
     assert cmd == f"/chip/python /skills/audio_chip_test.py --config {tmp_path}/audio_chip_config.json"
+
+
+def test_the_chip_command_quotes_paths_with_spaces_and_shell_characters(tmp_path):
+    import shlex
+    paths = SimpleNamespace(reference_python="/r", chip_python="/my venv/bin/python", src_dir="/s")
+    cmd = st.chip_test_command(paths, tmp_path / "a b; echo $HOME", Path("/skills dir/audio_chip_test.py"))
+    assert shlex.split(cmd) == ["/my venv/bin/python", "/skills dir/audio_chip_test.py", "--config", f"{tmp_path}/a b; echo $HOME/audio_chip_config.json"]
 
 
 # ---- cases added after the first mutation run ------------------------------------------------------------------------------------
@@ -523,7 +537,7 @@ def test_a_cache_entry_for_another_model_is_not_used(tmp_path):
     cache = tmp_path / "cache"
     cache.mkdir()
     make_run(cache / "small-music", "small-music-base", settings_override=st.settings_for("small-music"))
-    assert st.cached_run(cache, "small-music", REV, COMMIT) is None
+    assert st.cached_run(cache, "small-music", EXP, COMMIT) is None
 
 
 def test_the_chip_plan_has_no_control_when_the_base_is_the_model():
@@ -637,3 +651,188 @@ def test_a_latent_of_another_shape_cannot_show_discrimination(tmp_path):
     d = st.control_discrimination(a, c, b)
     assert d == {"ok": False, "own_rel_l2": None, "other_rel_l2": None}
     assert st.closeness(a, b) is None
+
+
+# ---- identity of the snapshot a run loaded (Copilot review of PR 165) ----------------------------------------------------------------
+
+def test_the_snapshot_identity_is_the_directory_name_and_the_hash_of_the_config_behind_a_link(tmp_path):
+    import hashlib
+    blobs = tmp_path / "blobs"
+    blobs.mkdir()
+    (blobs / "abc").write_text('{"x": 1}')
+    snap = tmp_path / "snapshots" / "rev123"
+    snap.mkdir(parents=True)
+    (snap / "model_config.json").symlink_to(blobs / "abc")
+    assert st.snapshot_identity(snap) == {"revision": "rev123", "config_sha256": hashlib.sha256(b'{"x": 1}').hexdigest()}
+    with pytest.raises(st.AudioStageError):
+        st.snapshot_identity(tmp_path / "nowhere")
+
+
+def run_facts_of(tmp_path, **kw):
+    return st.run_facts(tmp_path, str(make_run(tmp_path / "r", **kw).relative_to(tmp_path)))
+
+
+def test_identity_problems_name_each_difference_and_a_missing_expectation(tmp_path):
+    facts = run_facts_of(tmp_path)
+    assert st.identity_problems(facts, EXP, COMMIT, "x") == []
+    assert any("revision" in p for p in st.identity_problems(facts, {**EXP, "revision": "other"}, COMMIT, "x"))
+    assert any("model_config.json" in p for p in st.identity_problems(facts, {**EXP, "config_sha256": "1" * 64}, COMMIT, "x"))
+    assert any("library commit" in p for p in st.identity_problems(facts, EXP, "d" * 40, "x"))
+    for missing in (None, {}, {"revision": REV}, {"config_sha256": "0" * 64}, "x"):
+        assert any("no expected model revision" in p for p in st.identity_problems(facts, missing, COMMIT, "x")), missing
+
+
+def test_a_fresh_run_of_another_revision_is_refused_by_stage_1(tmp_path):
+    with pytest.raises(st.AudioStageError) as e:
+        stage1(tmp_path, expected={"small-music": {**EXP, "revision": "the-selected-snapshot"}, "small-music-base": EXP})
+    assert "the-selected-snapshot" in str(e.value) and "reference" in str(e.value)
+
+
+def test_a_fresh_run_with_another_model_config_is_refused_by_stage_1(tmp_path):
+    with pytest.raises(st.AudioStageError) as e:
+        stage1(tmp_path, expected={"small-music": {**EXP, "config_sha256": "2" * 64}, "small-music-base": EXP})
+    assert "model_config.json" in str(e.value)
+
+
+def test_stage_1_refuses_a_run_when_no_expectation_exists_for_its_model(tmp_path):
+    with pytest.raises(st.AudioStageError) as e:
+        stage1(tmp_path, expected={"small-music": EXP})
+    assert "no expected model revision" in str(e.value)
+
+
+def test_stage_1_refuses_a_run_made_with_another_library_commit(tmp_path):
+    run_dir = tmp_path / "run"
+    stage_dir = run_dir / "stages" / "1"
+    stage_dir.mkdir(parents=True)
+    with pytest.raises(st.AudioStageError) as e:
+        st.run_references(stage_dir, run_dir, PATHS, st.reference_plan(MODEL, BASE), FakeRunner(), expected={"small-music": EXP, "small-music-base": EXP},
+                          library_commit="e" * 40, script=Path("/skills/make_reference.py"))
+    assert "library commit" in str(e.value)
+
+
+def test_the_cache_is_not_used_for_a_snapshot_with_another_config(tmp_path):
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    make_run(cache / "small-music")
+    assert st.cached_run(cache, "small-music", {**EXP, "config_sha256": "3" * 64}, COMMIT) is None
+    assert st.cached_run(cache, "small-music", {"revision": REV}, COMMIT) is None
+
+
+def test_the_stage_1_gate_refuses_a_run_of_another_revision_and_a_record_without_expectations(tmp_path):
+    run_dir, stage_dir, rec, _ = stage1(tmp_path)
+    path = stage_dir / "audio_reference.json"
+    good = json.loads(path.read_text())
+    bad = json.loads(json.dumps(good))
+    bad["expected"]["small-music"]["revision"] = "another"
+    path.write_text(json.dumps(bad))
+    assert any("it loaded revision" in p for p in st.reference_problems(stage_dir, run_dir))
+    bad = json.loads(json.dumps(good))
+    del bad["expected"]
+    path.write_text(json.dumps(bad))
+    assert any("no expected model revision" in p for p in st.reference_problems(stage_dir, run_dir))
+    bad = json.loads(json.dumps(good))
+    bad["library_commit"] = "f" * 40
+    path.write_text(json.dumps(bad))
+    assert any("library commit" in p for p in st.reference_problems(stage_dir, run_dir))
+
+
+def test_stage_2_refuses_a_chip_run_that_loaded_another_revision(tmp_path):
+    run_dir, ref_dir, rec, _ = stage1(tmp_path)
+    s2 = run_dir / "stages" / "2"
+    (s2 / "chip").mkdir(parents=True)
+    plan = st.chip_plan(MODEL, BASE)
+    for item in plan:
+        ref_role = {"chip": "reference", "control_chip": "control_reference"}[item["role"]]
+        twin(run_dir / rec["runs"][ref_role]["dir"], s2 / "chip" / item["name"], noise=0.001, **({"revision": "wrong"} if item["role"] == "chip" else {}))
+    with pytest.raises(st.AudioStageError) as e:
+        st.finish_chip(s2, run_dir, ref_dir, plan, {"chip": "reference", "control_chip": "control_reference"})
+    assert "wrong" in str(e.value)
+
+
+def test_the_stage_2_gate_refuses_a_chip_run_of_another_revision(tmp_path):
+    run_dir, ref_dir, s2, res = stage2(tmp_path)
+    d = run_dir / res["runs"]["chip"]["dir"]
+    shutil.rmtree(d)
+    make_run(d, dtype="bfloat16", device="tt", revision="wrong", wave=music(seed=1))
+    res["runs"]["chip"]["manifest_sha256"] = st.sha256_file(d / "manifest.json")
+    (s2 / "audio_result.json").write_text(json.dumps(res))
+    assert any("it loaded revision" in p for p in st.chip_problems(s2, run_dir, ref_dir))
+
+
+# ---- the informational comparisons and the repeats are checked too ---------------------------------------------------------------------
+
+def test_the_gate_recomputes_the_host_comparison_and_the_environment_floor(tmp_path):
+    run_dir, ref_dir, s2, res = stage2(tmp_path)
+    path = s2 / "audio_result.json"
+    a = json.loads(json.dumps(res))
+    a["agreement"]["chip_vs_host_same_env"]["latent_final"]["rel_l2"] = 0.0
+    path.write_text(json.dumps(a))
+    assert any(p.startswith("chip_vs_host_same_env") for p in st.chip_problems(s2, run_dir, ref_dir))
+    b = json.loads(json.dumps(res))
+    b["environment_floor"]["waveform"]["pcc"] = 0.5
+    path.write_text(json.dumps(b))
+    assert any(p.startswith("environment_floor") for p in st.chip_problems(s2, run_dir, ref_dir))
+    c = json.loads(json.dumps(res))
+    del c["agreement"]["chip_vs_host_same_env"]
+    path.write_text(json.dumps(c))
+    assert any(p.startswith("chip_vs_host_same_env") for p in st.chip_problems(s2, run_dir, ref_dir))
+
+
+def test_a_failing_informational_comparison_does_not_fail_the_gate_when_it_is_recorded_truthfully(tmp_path):
+    """No pass bar is applied to the host comparison or the floor: a chip run that is far from the host run still passes when it agrees with the reference."""
+    run_dir, ref_dir, s2, res = stage2(tmp_path)
+    assert res["agreement"]["chip_vs_host_same_env"]["ok"] is True           # the fixture's runs are near each other; the gate does not read this value
+    assert st.chip_problems(s2, run_dir, ref_dir) == []
+
+
+def test_the_result_lists_every_repeat_and_the_gate_checks_them(tmp_path):
+    run_dir, ref_dir, s2, res = stage2(tmp_path)
+    assert [len(res["repeats"][r]) for r in ("chip", "control_chip")] == [REPEATS, REPEATS]
+    assert [e["dir"].rsplit("/", 1)[1] for e in res["repeats"]["chip"]] == ["small-music", "small-music-r1"]
+    path = s2 / "audio_result.json"
+    short = json.loads(json.dumps(res))
+    short["repeats"]["chip"] = short["repeats"]["chip"][:1]
+    path.write_text(json.dumps(short))
+    assert any("lists 1 repeats; the config asked for 2" in p for p in st.chip_problems(s2, run_dir, ref_dir))
+    wrong = json.loads(json.dumps(res))
+    wrong["repeats"]["chip"][1]["dir"] = res["repeats"]["chip"][0]["dir"]
+    path.write_text(json.dumps(wrong))
+    assert any("directory is not the expected one" in p for p in st.chip_problems(s2, run_dir, ref_dir))
+    none = json.loads(json.dumps(res))
+    del none["repeats"]
+    path.write_text(json.dumps(none))
+    assert any("no repeats record" in p for p in st.chip_problems(s2, run_dir, ref_dir))
+    path.write_text(json.dumps(res))
+    f = run_dir / res["repeats"]["chip"][1]["dir"] / "arrays" / "latent__final.npy"
+    f.write_bytes(f.read_bytes()[:-4] + b"\x01\x02\x03\x04")
+    assert any(p.startswith("chip repeat 1") for p in st.chip_problems(s2, run_dir, ref_dir))
+
+
+def test_stage_2_names_a_repeat_that_left_no_manifest(tmp_path):
+    run_dir, ref_dir, rec, _ = stage1(tmp_path)
+    s2 = run_dir / "stages" / "2"
+    (s2 / "chip").mkdir(parents=True)
+    plan = st.chip_plan(MODEL, BASE)
+    st.write_chip_config(s2, PATHS, "/hf", plan, repeats=2)
+    for item in plan:
+        ref_role = {"chip": "reference", "control_chip": "control_reference"}[item["role"]]
+        twin(run_dir / rec["runs"][ref_role]["dir"], s2 / "chip" / item["name"], noise=0.001)
+    with pytest.raises(st.AudioStageError) as e:
+        st.finish_chip(s2, run_dir, ref_dir, plan, {"chip": "reference", "control_chip": "control_reference"})
+    assert "repeat 1" in str(e.value) and "no manifest" in str(e.value)
+
+
+def test_stage_2_refuses_a_repeat_that_loaded_another_revision(tmp_path):
+    run_dir, ref_dir, rec, _ = stage1(tmp_path)
+    s2 = run_dir / "stages" / "2"
+    (s2 / "chip").mkdir(parents=True)
+    plan = st.chip_plan(MODEL, BASE)
+    st.write_chip_config(s2, PATHS, "/hf", plan, repeats=2)
+    for item in plan:
+        ref_role = {"chip": "reference", "control_chip": "control_reference"}[item["role"]]
+        for k in range(2):
+            twin(run_dir / rec["runs"][ref_role]["dir"], s2 / "chip" / st.repeat_name(item["name"], k), noise=0.001,
+                 **({"revision": "wrong-repeat"} if (item["role"] == "chip" and k == 1) else {}))
+    with pytest.raises(st.AudioStageError) as e:
+        st.finish_chip(s2, run_dir, ref_dir, plan, {"chip": "reference", "control_chip": "control_reference"})
+    assert "wrong-repeat" in str(e.value) and "repeat 1" in str(e.value)

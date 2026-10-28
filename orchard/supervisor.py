@@ -125,7 +125,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from orchard.adapters import AdapterError, Lease
-from orchard.agent import AgentStep, Tools, _kill_session, agent_env, probe_model, spawn_checked
+from orchard.agent import AgentStep, Tools, agent_env, probe_model, spawn_checked
 from orchard import audio_reference_env, audio_runtime, bus, nearest
 from orchard.audio_facts import serving_of
 from orchard.blocked import block_code, last_pause
@@ -905,8 +905,10 @@ class Supervisor:
             return "selected"
         facts = run_facts(entries, self.run_dir)
         model_dir = self.inputs.get("model")
-        if not facts or facts.get("modality") != "audio" or not model_dir or audio_runtime.runtime_problems(model_dir):
-            return "none"
+        from orchard import audio_plan
+        if (not facts or facts.get("modality") != "audio" or not model_dir or audio_plan.library_name(self.model_id) is None
+                or audio_runtime.runtime_problems(model_dir)):
+            return "none"          # the planners know two repositories; another one with a supported configuration is not selected
         paths = audio_runtime.audio_paths(self.paths.operator_home)
         missing = audio_runtime.environment_problems(paths)
         if missing:
@@ -1512,28 +1514,31 @@ class Supervisor:
             return self.model_id, None
         return delta.get("model") or self.model_id, delta.get("nearest_model")
 
-    def _cpu_run(self, argv: list[str], env_extra: dict, timeout_s: float, log_path: Path) -> int | None:
-        """One CPU command of stage 1, in its own session so a timeout or an interrupt kills everything it started. The environment is the agent
-        shells' (no token, HOME in the run directory, no chip) plus the Hugging Face cache directory; the Hub stays offline."""
+    def _audio_env(self) -> dict:
+        """The environment of every child of the audio stages that reads or makes model data: the agent shells' (no token, HOME in the run directory,
+        no chip) plus the Hugging Face cache directory, with the Hub offline."""
         child_env = agent_env(self.run_dir, extra=self.extra_env)
-        child_env.update({"HF_HOME": self.paths.hf_home, "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", **env_extra})
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(log_path, "wb") as log:
-            proc = subprocess.Popen(argv, cwd=self.run_dir, env=child_env, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
-                                    start_new_session=True)
-            try:
-                return proc.wait(timeout=timeout_s)
-            except subprocess.TimeoutExpired:
-                _kill_session(proc)
-                return None
-            except BaseException:
-                _kill_session(proc)
-                raise
+        child_env.update({"HF_HOME": self.paths.hf_home, "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"})
+        return child_env
+
+    def _audio_expected(self, model_id, base_id) -> tuple[dict, str | None]:
+        """The identity (revision and configuration hash) of the snapshots this run was started on, for the model and for its base, and the base's
+        id when its snapshot is known (a base without one has no control). Raises AudioStageError when a snapshot cannot be read."""
+        from orchard import audio_plan
+        expected = {}
+        for repo, key in ((model_id, "model"), (base_id, "base")):
+            name, snapshot = audio_plan.library_name(repo), self.inputs.get(key)
+            if name and snapshot:
+                expected[name] = audio_plan.snapshot_identity(snapshot)
+        base = base_id if audio_plan.library_name(base_id) in expected else None
+        return expected, base
 
     def _audio_body(self, spec, stage_dir: Path, resumed: bool):
-        """Stage 1 (CPU references) and stage 2 (the clip on one chip) of an audio run, as supervisor code. Stage 2 uses the one-test hardware
-        phase of stages 2 and 3: a lease (no coder to park when none was booted), one command, the lease back."""
-        from orchard import audio_stages         # needs numpy; imported when an audio stage runs, so the supervisor itself needs only the standard library
+        """Stage 1 (CPU references) and stage 2 (the clip on one chip) of an audio run, as supervisor code. The numeric work runs in the configured
+        reference interpreter (orchard/audio_remote.py), so the supervisor needs only the standard library. Stage 2 uses the one-test hardware phase
+        of stages 2 and 3: a lease (no coder to park when none was booted), one command, the lease back."""
+        from orchard import audio_plan, audio_remote
+        from orchard.audio_plan import AudioStageError
         n = spec.number
         if self.lab is not None:
             return "fail", ["the audio runtime does not run in lab mode"], None
@@ -1543,14 +1548,15 @@ class Supervisor:
         model_id, base_id = self._audio_models()
         stage_dir.mkdir(parents=True, exist_ok=True)
         try:
+            expected, base_id = self._audio_expected(model_id, base_id)
             if n == 1:
                 if not (resumed and (stage_dir / audio_runtime.REFERENCE_FILE).is_file()):
-                    self._audio_stage_1(stage_dir, paths, model_id, base_id)
+                    self._audio_stage_1(stage_dir, paths, model_id, base_id, expected)
             else:
                 if not (resumed and (stage_dir / "test-result.json").is_file()):
-                    plan = audio_stages.chip_plan(model_id, base_id)
-                    audio_stages.write_chip_config(stage_dir, paths, self.paths.hf_home, plan)
-                    command = audio_stages.chip_test_command(paths, stage_dir.resolve(), audio_runtime.TEMPLATES / "audio_chip_test.py")
+                    plan = audio_plan.chip_plan(model_id, base_id)
+                    audio_plan.write_chip_config(stage_dir, paths, self.paths.hf_home, plan)
+                    command = audio_plan.chip_test_command(paths, stage_dir.resolve(), audio_runtime.TEMPLATES / "audio_chip_test.py")
                     try:
                         check_string(command, self.run_dir)
                     except Denied as exc:
@@ -1565,29 +1571,30 @@ class Supervisor:
                 failed = hardware_test_failure(stage_dir)
                 if failed:
                     return "fail", [failed["problem"] + "; see stages/2/evidence/hw-test-output.txt and stages/2/log"], None
-                audio_stages.finish_chip(stage_dir, self.run_dir, self.run_dir / "stages" / "1", audio_stages.chip_plan(model_id, base_id),
-                                         {audio_stages.ROLE_CHIP: audio_stages.ROLE_REFERENCE,
-                                          audio_stages.ROLE_CONTROL_CHIP: audio_stages.ROLE_CONTROL_REFERENCE})
-        except audio_stages.AudioStageError as exc:
+                audio_remote.call(paths.reference_python, "finish", {
+                    "stage_dir": str(stage_dir), "run_dir": str(self.run_dir), "ref_stage_dir": str(self.run_dir / "stages" / "1"),
+                    "plan": audio_plan.chip_plan(model_id, base_id),
+                    "roles": {audio_plan.ROLE_CHIP: audio_plan.ROLE_REFERENCE, audio_plan.ROLE_CONTROL_CHIP: audio_plan.ROLE_CONTROL_REFERENCE}},
+                    timeout_s=1800.0, env={"PATH": os.environ.get("PATH", "")})
+        except AudioStageError as exc:
             return "fail", [str(exc)], None
         self.ledger.append("evidence", n, what="audio stage record", **evidence_record(self.run_dir, stage_dir / spec.gate_file))
         gate = self._check_gate(spec, stage_dir)
         return ("pass", [], gate) if gate.ok else ("fail", list(gate.reasons), gate)
 
-    def _audio_stage_1(self, stage_dir: Path, paths, model_id, base_id) -> None:
-        from orchard import audio_stages
-        plan = audio_stages.reference_plan(model_id, base_id)
-        revisions = {}
-        for repo, key in ((model_id, "model"), (base_id, "base")):
-            name, snapshot = audio_stages.library_name(repo), self.inputs.get(key)
-            if name and snapshot:
-                revisions[name] = Path(snapshot).name
+    def _audio_stage_1(self, stage_dir: Path, paths, model_id, base_id, expected: dict) -> None:
+        from orchard import audio_plan, audio_remote
+        plan = audio_plan.reference_plan(model_id, base_id)
         cache = Path(self.paths.cache_root) / "audio-reference"
-        rec = audio_stages.run_references(
-            stage_dir, self.run_dir, paths, plan, self._cpu_run, revisions=revisions, library_commit=audio_reference_env.LIBRARY_COMMIT,
-            cache_dir=cache, say=lambda text: self.ledger.append("decision", 1, decision="audio reference", note=text))
+        result = audio_remote.call(paths.reference_python, "references", {
+            "stage_dir": str(stage_dir), "run_dir": str(self.run_dir), "paths": paths.record(), "plan": plan, "expected": expected,
+            "library_commit": audio_reference_env.LIBRARY_COMMIT, "cache_dir": str(cache), "env": self._audio_env(), "timeout_s": 3600.0},
+            timeout_s=4 * 3600.0, env={"PATH": os.environ.get("PATH", "")})
+        rec = result["record"]
+        for note in result.get("notes", []):
+            self.ledger.append("decision", 1, decision="audio reference", note=note)
         # A reference made fresh goes into the cache, so the next run of the same model, revision and library commit reuses it.
-        for role in (audio_stages.ROLE_REFERENCE, audio_stages.ROLE_CONTROL_REFERENCE):
+        for role in (audio_plan.ROLE_REFERENCE, audio_plan.ROLE_CONTROL_REFERENCE):
             run = rec["runs"].get(role)
             if run is None or run["from_cache"]:
                 continue

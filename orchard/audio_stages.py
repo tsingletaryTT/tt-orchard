@@ -33,19 +33,10 @@ import numpy as np
 from orchard import audio_reference as ar
 from orchard import safeio
 from orchard.audio_runtime import REFERENCE_FILE, RESULT_FILE, STAGE_DISK_GB
-
-SCHEMA = 1
-PROMPT = "A warm acoustic guitar melody with soft percussion, 100 BPM"
-DURATION_S = 10.0
-SEED = 42
-SAMPLE_SIZE = 5292032                  # the library's own default for `generate`
-SAMPLE_RATE = 44100
-
-# Library registry names and the settings each is run with. The fine-tune is the post-trained 8-step model (ping-pong sampler, guidance scale 1);
-# its base is the control and needs the base's own settings (the audio design's section 5).
-LIBRARY_NAMES = {"stabilityai/stable-audio-3-small-music": "small-music", "stabilityai/stable-audio-3-small-music-base": "small-music-base"}
-MODEL_SETTINGS = {"small-music": {"steps": 8, "cfg_scale": 1.0, "sampler": "pingpong"},
-                  "small-music-base": {"steps": 50, "cfg_scale": 7.0, "sampler": "euler"}}
+from orchard.audio_plan import (CONFIG_FILE, DURATION_S, LIBRARY_NAMES, MODEL_SETTINGS, PROMPT, ROLE_CHIP, ROLE_CONTROL_CHIP, ROLE_CONTROL_REFERENCE,
+                                ROLE_HOST, ROLE_REFERENCE, SAMPLE_RATE, SAMPLE_SIZE, SCHEMA, SEED, AudioStageError, agree, chip_plan,
+                                chip_test_command, inside, library_name, load_json, reference_command, reference_plan, settings_for,
+                                repeat_name, snapshot_identity, write_chip_config, write_json)
 
 # Sound checks. Source: the audio design, section 6 (24 clips measured on 2026-10-15).
 DURATION_TOLERANCE = 0.05
@@ -55,24 +46,6 @@ MIN_LOUD_FRACTION = 0.40
 MAX_FULL_SCALE_FRACTION = 0.01
 FULL_SCALE = 0.9999
 
-ROLE_REFERENCE, ROLE_CONTROL_REFERENCE, ROLE_HOST = "reference", "control_reference", "host_same_env"
-ROLE_CHIP, ROLE_CONTROL_CHIP = "chip", "control_chip"
-
-
-class AudioStageError(Exception):
-    """A problem a stage reports as its failure reason."""
-
-
-def library_name(repo) -> str | None:
-    """The library's registry name for a repository id (a revision after `@` is ignored), or None for a model this module does not know."""
-    return LIBRARY_NAMES.get(str(repo or "").split("@", 1)[0])
-
-
-def settings_for(name: str) -> dict:
-    """The recorded settings (audio_reference.MATCH_KEYS) of the run of library model `name`."""
-    s = MODEL_SETTINGS[name]
-    return {"prompt": PROMPT, "duration": DURATION_S, "steps": s["steps"], "cfg_scale": s["cfg_scale"], "sampler": s["sampler"], "seed": SEED,
-            "sample_size": SAMPLE_SIZE}
 
 
 # ---- the sound checks ---------------------------------------------------------------------------------------------------
@@ -209,33 +182,32 @@ def run_facts(run_dir, rel: str) -> dict:
     d = Path(run_dir) / rel
     with ar.load_run(d) as run:
         m = run.manifest
-        return {"dir": rel, "model": m["model"]["name"], "revision": m["model"]["revision"], "library_commit": m["library"]["commit"],
+        return {"dir": rel, "model": m["model"]["name"], "revision": m["model"]["revision"], "config_sha256": m["model"].get("config_sha256"),
+                "library_commit": m["library"]["commit"],
                 "settings": dict(m["settings"]), "timings": dict(m.get("timings", {})),
                 "manifest_sha256": sha256_file(d / "manifest.json")}
 
 
 # ---- the files a stage writes and its gate re-derives ----------------------------------------------------------------------------
 
-def load_json(path, what: str) -> dict:
-    try:
-        return safeio.read_json(path, max_bytes=4 << 20, expect=dict)
-    except (OSError, ValueError, safeio.SafeReadError) as exc:
-        raise AudioStageError(f"{what} cannot be read: {exc}") from exc
+def identity_problems(facts: dict, expected: dict | None, library_commit: str | None, label: str) -> list[str]:
+    """Reasons a recorded run is not a run of the model this stage was started on: another snapshot revision, another `model_config.json`, or another
+    library commit. `expected` is {"revision", "config_sha256"} taken from the run's own snapshot (audio_plan.snapshot_identity); the library
+    registry name alone does not say which snapshot a script loaded. A missing expectation is a reason, not a pass."""
+    if not isinstance(expected, dict) or not expected.get("revision") or not expected.get("config_sha256"):
+        return [f"{label}: no expected model revision and configuration were recorded, so nothing shows which snapshot the run loaded"]
+    out = []
+    if facts.get("revision") != expected["revision"]:
+        out.append(f"{label}: it loaded revision {facts.get('revision')!r}; this run's snapshot is {expected['revision']!r}")
+    if facts.get("config_sha256") != expected["config_sha256"]:
+        out.append(f"{label}: its model_config.json is not this run's snapshot's")
+    if library_commit and facts.get("library_commit") != library_commit:
+        out.append(f"{label}: it ran library commit {facts.get('library_commit')!r}; the pinned commit is {library_commit!r}")
+    return out
 
 
-def inside(run_dir, rel) -> Path | None:
-    """`rel` as a path inside `run_dir`, or None for anything that leaves it: an absolute path, a `..` part, or a link on the way."""
-    if not isinstance(rel, str) or not rel or Path(rel).is_absolute() or ".." in Path(rel).parts:
-        return None
-    p = Path(run_dir)
-    for part in Path(rel).parts:
-        p = p / part
-        if p.is_symlink():
-            return None
-    return p
-
-
-def check_run_dir(run_dir, entry: dict, want_settings: dict | None, label: str, problems: list) -> dict | None:
+def check_run_dir(run_dir, entry: dict, want_settings: dict | None, label: str, problems: list, *, expected: dict | None = None,
+                  library_commit: str | None = None) -> dict | None:
     """Verify one recorded run named by a result entry: it is inside the run directory, its arrays match their hashes, its manifest hash is the
     recorded one, its settings are the expected ones and its waveform passes the sound checks (and the clip is that waveform). Returns the
     sound-check record, or None after adding to `problems`."""
@@ -253,6 +225,7 @@ def check_run_dir(run_dir, entry: dict, want_settings: dict | None, label: str, 
         return None
     if entry.get("manifest_sha256") != facts["manifest_sha256"]:
         problems.append(f"{label}: the manifest is not the one the result recorded")
+    problems += identity_problems(facts, expected, library_commit, label)
     if want_settings is not None:
         got = {k: facts["settings"].get(k) for k in want_settings}
         if got != want_settings:
@@ -264,45 +237,8 @@ def check_run_dir(run_dir, entry: dict, want_settings: dict | None, label: str, 
     return checks
 
 
-def agree(recorded, fresh) -> bool:
-    """A recorded comparison summary equals one computed again now (numbers to 1e-9, everything else exactly)."""
-    if isinstance(recorded, dict) and isinstance(fresh, dict):
-        return recorded.keys() == fresh.keys() and all(agree(recorded[k], fresh[k]) for k in recorded)
-    if isinstance(recorded, (int, float)) and isinstance(fresh, (int, float)) and not isinstance(recorded, bool) and not isinstance(fresh, bool):
-        return math.isclose(recorded, fresh, rel_tol=1e-9, abs_tol=1e-9)
-    if isinstance(recorded, list) and isinstance(fresh, list):
-        return len(recorded) == len(fresh) and all(agree(a, b) for a, b in zip(recorded, fresh))
-    return type(recorded) is type(fresh) and recorded == fresh
-
-
 # ---- stage 1: the CPU references -------------------------------------------------------------------------------------------------
 
-
-
-def reference_plan(model_id, base_id) -> list[dict]:
-    """The runs stage 1 makes: [{role, name (library name), env ('reference' or 'chip' interpreter), dir}]. The control and the same-environment
-    run exist only when the base is a model this module knows."""
-    name = library_name(model_id)
-    if name is None:
-        raise AudioStageError(f"{model_id} is not a model the audio runtime knows ({sorted(LIBRARY_NAMES)})")
-    plan = [{"role": ROLE_REFERENCE, "name": name, "interpreter": "reference", "dir": f"reference/{name}"},
-            {"role": ROLE_HOST, "name": name, "interpreter": "chip", "dir": f"host/{name}"}]
-    base = library_name(base_id)
-    if base is not None and base != name:
-        plan.append({"role": ROLE_CONTROL_REFERENCE, "name": base, "interpreter": "reference", "dir": f"reference/{base}"})
-    return plan
-
-
-def reference_command(item: dict, paths, stage_rel_dir: Path, script: Path) -> tuple[list[str], dict]:
-    """argv and extra environment for one CPU run. The reference interpreter finds the library through its editable install; the chip interpreter
-    through PYTHONPATH. `--expect-src` makes the script refuse a library from anywhere else."""
-    s = settings_for(item["name"])
-    python = paths.reference_python if item["interpreter"] == "reference" else paths.chip_python
-    argv = [python, str(script), "--model", item["name"], "--out", str(stage_rel_dir / item["dir"]), "--prompt", s["prompt"],
-            "--duration", str(s["duration"]), "--steps", str(s["steps"]), "--cfg-scale", str(s["cfg_scale"]), "--seed", str(s["seed"]),
-            "--sampler", s["sampler"], "--sample-size", str(s["sample_size"]), "--expect-src", paths.src_dir]
-    env = {"PYTHONPATH": paths.src_dir} if item["interpreter"] == "chip" else {}
-    return argv, env
 
 
 def reference_problems(stage_dir, run_dir, expect_roles=(ROLE_REFERENCE, ROLE_HOST)) -> list[str]:
@@ -325,7 +261,9 @@ def reference_problems(stage_dir, run_dir, expect_roles=(ROLE_REFERENCE, ROLE_HO
         if name not in MODEL_SETTINGS:
             problems.append(f"{role}: model {name!r} is not one the audio runtime knows")
             continue
-        sound[role] = check_run_dir(run_dir, entry, settings_for(name), role, problems)
+        sound[role] = check_run_dir(run_dir, entry, settings_for(name), role, problems,
+                                    expected=(rec.get("expected") or {}).get(name) if isinstance(rec.get("expected"), dict) else None,
+                                    library_commit=rec.get("library_commit"))
     if ROLE_REFERENCE in runs and ROLE_HOST in runs and not problems:
         a, b = inside(run_dir, runs[ROLE_REFERENCE].get("dir")), inside(run_dir, runs[ROLE_HOST].get("dir"))
         try:
@@ -337,12 +275,13 @@ def reference_problems(stage_dir, run_dir, expect_roles=(ROLE_REFERENCE, ROLE_HO
     return problems
 
 
-def cached_run(cache_dir, name: str, revision: str | None, library_commit: str | None):
+def cached_run(cache_dir, name: str, expected: dict | None, library_commit: str | None):
     """A saved CPU reference of library model `name` that can stand in for a fresh one, or None: the directory loads and its arrays match their
     hashes, its model revision and library commit are the wanted ones and its settings are the stage's settings for that model. A reference is a
     deterministic float32 CPU run, so the same inputs give the same arrays (measured: a repeat run is bit-identical)."""
-    if not cache_dir or not revision or not library_commit:
+    if not cache_dir or not library_commit or not isinstance(expected, dict) or not expected.get("revision") or not expected.get("config_sha256"):
         return None
+    revision = expected["revision"]
     d = Path(cache_dir) / name
     if not d.is_dir() or d.is_symlink():
         return None
@@ -350,6 +289,7 @@ def cached_run(cache_dir, name: str, revision: str | None, library_commit: str |
         with ar.load_run(d) as run:
             m = run.manifest
             ok = (m["model"]["name"] == name and m["model"]["revision"] == revision and m["library"]["commit"] == library_commit
+                  and m["model"].get("config_sha256") == expected["config_sha256"]
                   and {k: m["settings"].get(k) for k in settings_for(name)} == settings_for(name) and m["settings"].get("dtype") == "float32"
                   and m["settings"].get("device") == "cpu")
     except (ar.ReferenceError, OSError, KeyError, TypeError):
@@ -357,11 +297,37 @@ def cached_run(cache_dir, name: str, revision: str | None, library_commit: str |
     return d if ok else None
 
 
-def run_references(stage_dir, run_dir, paths, plan, runner, *, revisions: dict, library_commit: str | None, cache_dir=None,
+def subprocess_runner(base_env: dict):
+    """A runner for `run_references`: each command is a child in its own session with `base_env` plus the command's extra variables, its output in
+    the log file; a timeout kills the whole session. Returns the exit status, None for a timeout."""
+    import os
+    import signal
+    import subprocess
+
+    def run(argv, env_extra, timeout_s, log_path):
+        Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "wb") as log:
+            proc = subprocess.Popen(argv, env={**base_env, **env_extra}, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                                    start_new_session=True)
+            try:
+                return proc.wait(timeout=timeout_s)
+            except subprocess.TimeoutExpired:
+                os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait()
+                return None
+            except BaseException:
+                os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait()
+                raise
+    return run
+
+
+def run_references(stage_dir, run_dir, paths, plan, runner, *, expected: dict, library_commit: str | None, cache_dir=None,
                    script: Path | None = None, timeout_s: float = 3600.0, say=lambda text: None) -> dict:
     """Make every run of `plan` under `stage_dir` and write `audio_reference.json`. `runner(argv, env_extra, timeout_s, log_path)` runs one command
-    and returns its exit status (None for a timeout); `revisions` maps a library name to the snapshot revision wanted. Raises AudioStageError when
-    a run fails. A reference (not the same-environment run) that the cache holds is copied instead of made again."""
+    and returns its exit status (None for a timeout); `expected` maps a library name to the identity of the snapshot the run was started on
+    ({"revision", "config_sha256"}); every run is checked against it and against `library_commit` after it is made or copied, because the registry
+    name alone does not say which snapshot a script loaded. Raises AudioStageError when a run fails or is another model. A reference (not the same-environment run) that the cache holds is copied instead of made again."""
     from orchard import audio_runtime
     script = script or audio_runtime.REFERENCE_SCRIPT
     stage_dir, run_dir = Path(stage_dir), Path(run_dir)
@@ -371,7 +337,7 @@ def run_references(stage_dir, run_dir, paths, plan, runner, *, revisions: dict, 
     for item in plan:
         out = stage_dir / item["dir"]
         out.parent.mkdir(parents=True, exist_ok=True)
-        hit = cached_run(cache_dir, item["name"], revisions.get(item["name"]), library_commit) if item["interpreter"] == "reference" else None
+        hit = cached_run(cache_dir, item["name"], expected.get(item["name"]), library_commit) if item["interpreter"] == "reference" else None
         t0 = time.time()
         if hit is not None:
             shutil.copytree(hit, out, symlinks=False)
@@ -392,9 +358,12 @@ def run_references(stage_dir, run_dir, paths, plan, runner, *, revisions: dict, 
             facts = run_facts(run_dir, str(rel_stage / item["dir"]))
         except (ar.ReferenceError, OSError, KeyError) as exc:
             raise AudioStageError(f"the CPU run for {item['role']} cannot be read back: {exc}") from exc
+        wrong = identity_problems(facts, expected.get(item["name"]), library_commit, item["role"])
+        if wrong:
+            raise AudioStageError("; ".join(wrong))
         runs[item["role"]] = {**facts, "role": item["role"], "interpreter": item["interpreter"], "from_cache": from_cache, "wall_seconds": seconds,
                               "clip": f"{facts['dir']}/clips/audio.flac"}
-    rec = {"schema": SCHEMA, "runs": runs,
+    rec = {"schema": SCHEMA, "runs": runs, "expected": expected, "library_commit": library_commit,
            "environment_floor": compare(Path(run_dir) / runs[ROLE_REFERENCE]["dir"], Path(run_dir) / runs[ROLE_HOST]["dir"]),
            "limits": ["The reference is the library's own float32 CPU run. The same-environment run is the same code in the interpreter that the chip "
                       "run uses; the difference between the two is what a change of CPU environment does to these numbers, before any chip is involved."]}
@@ -402,45 +371,8 @@ def run_references(stage_dir, run_dir, paths, plan, runner, *, revisions: dict, 
     return rec
 
 
-def write_json(path, value) -> None:
-    """Write a JSON file whole or not at all."""
-    path = Path(path)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(value, indent=1, sort_keys=True) + "\n", encoding="utf-8")
-    tmp.replace(path)
-
-
 # ---- stage 2: the clip on a chip ------------------------------------------------------------------------------------------------
 
-CONFIG_FILE = "audio_chip_config.json"
-
-
-def chip_plan(model_id, base_id) -> list[dict]:
-    name = library_name(model_id)
-    if name is None:
-        raise AudioStageError(f"{model_id} is not a model the audio runtime knows")
-    plan = [{"role": ROLE_CHIP, "name": name}]
-    base = library_name(base_id)
-    if base is not None and base != name:
-        plan.append({"role": ROLE_CONTROL_CHIP, "name": base})
-    return plan
-
-
-def write_chip_config(stage_dir, paths, hf_home: str, plan: list[dict]) -> Path:
-    """`audio_chip_config.json`, the input of audio_chip_test.py: shared settings and one entry per run."""
-    runs = [{"name": item["name"], **{k: MODEL_SETTINGS[item["name"]][k] for k in ("steps", "cfg_scale", "sampler")}} for item in plan]
-    for r, item in zip(runs, plan):
-        r["model"] = item["name"]
-    cfg = {"prompt": PROMPT, "duration": DURATION_S, "seed": SEED, "sample_size": SAMPLE_SIZE, "src_dir": paths.src_dir, "hf_home": hf_home,
-           "out_dir": "chip", "runs": runs}
-    path = Path(stage_dir) / CONFIG_FILE
-    write_json(path, cfg)
-    return path
-
-
-def chip_test_command(paths, stage_dir_abs: Path, script: Path) -> str:
-    """The one command the hardware phase runs under the lease."""
-    return f"{paths.chip_python} {script} --config {stage_dir_abs / CONFIG_FILE}"
 
 
 def finish_chip(stage_dir, run_dir, ref_stage_dir, plan: list[dict], reference_roles: dict) -> dict:
@@ -456,6 +388,10 @@ def finish_chip(stage_dir, run_dir, ref_stage_dir, plan: list[dict], reference_r
         if not (d / "manifest.json").is_file():
             raise AudioStageError(f"the chip run for {item['role']} ({item['name']}) left no manifest")
         facts = run_facts(run_dir, str(rel / "chip" / item["name"]))
+        wrong = identity_problems(facts, (ref_rec.get("expected") or {}).get(item["name"]) if isinstance(ref_rec.get("expected"), dict) else None,
+                                  ref_rec.get("library_commit"), item["role"])
+        if wrong:
+            raise AudioStageError("; ".join(wrong))
         try:
             clip = write_clip(d)
         except (ar.ReferenceError, OSError) as exc:
@@ -472,6 +408,27 @@ def finish_chip(stage_dir, run_dir, ref_stage_dir, plan: list[dict], reference_r
         agreement[f"{item['role']}_vs_{ref_role}"] = compare(run_dir / ref_entry["dir"], d, informational=item["role"] == ROLE_CONTROL_CHIP)
     if ROLE_CHIP in runs and ROLE_HOST in ref_rec["runs"]:
         agreement["chip_vs_host_same_env"] = compare(run_dir / ref_rec["runs"][ROLE_HOST]["dir"], stage_dir / "chip" / plan[0]["name"])
+    repeats = {}
+    try:
+        n_repeats = int(load_json(stage_dir / CONFIG_FILE, CONFIG_FILE).get("repeats", 1))
+    except (AudioStageError, TypeError, ValueError):
+        n_repeats = 1
+    for item in plan:
+        repeats[item["role"]] = [runs[item["role"]]]
+        for k in range(1, n_repeats):
+            rel_k = str(rel / "chip" / repeat_name(item["name"], k))
+            if not (run_dir / rel_k / "manifest.json").is_file():
+                raise AudioStageError(f"repeat {k} of the chip run for {item['role']} ({item['name']}) left no manifest")
+            try:
+                write_clip(run_dir / rel_k)
+            except (ar.ReferenceError, OSError) as exc:
+                raise AudioStageError(f"the clip of repeat {k} for {item['role']} cannot be written: {exc}") from exc
+            facts_k = run_facts(run_dir, rel_k)
+            wrong = identity_problems(facts_k, (ref_rec.get("expected") or {}).get(item["name"]) if isinstance(ref_rec.get("expected"), dict) else None,
+                                      ref_rec.get("library_commit"), f"{item['role']} repeat {k}")
+            if wrong:
+                raise AudioStageError("; ".join(wrong))
+            repeats[item["role"]].append({**facts_k, "role": item["role"]})
     control = discrimination = None
     if ROLE_CONTROL_CHIP in runs:
         control = control_difference(stage_dir / "chip" / plan[0]["name"], stage_dir / "chip" / plan[1]["name"])
@@ -479,13 +436,45 @@ def finish_chip(stage_dir, run_dir, ref_stage_dir, plan: list[dict], reference_r
                                                 stage_dir / "chip" / plan[1]["name"])
     result = {"schema": SCHEMA, "runtime": "stable-audio-3-dit-on-chip", "settings": settings_for(plan[0]["name"]), "runs": runs,
               "reference_runs": ref_rec["runs"], "agreement": agreement, "environment_floor": ref_rec.get("environment_floor"),
-              "control_difference": control, "control_discrimination": discrimination,
+              "control_difference": control, "control_discrimination": discrimination, "repeats": repeats,
               "limits": ["Nobody has listened to the clips; no check here says the music is good.",
                          "The agreement bars are provisional choices, not yet set from a measured noise floor.",
                          "Only the diffusion transformer ran on the chip. The T5Gemma encoder, the sampler and the autoencoder decoder ran on the host.",
                          "Agreement is measured on one prompt, one duration and one seed."]}
     write_json(stage_dir / RESULT_FILE, result)
     return result
+
+
+def repeat_problems(stage_dir, run_dir, res: dict, ref: dict, runs: dict) -> list[str]:
+    """The repeats listed in the result are the ones the config asked for, each loads (hashes match), is the expected model and has the recorded
+    manifest, and the first of each list is the run itself."""
+    problems: list[str] = []
+    try:
+        want = int(load_json(Path(stage_dir) / CONFIG_FILE, CONFIG_FILE).get("repeats", 1))
+    except (AudioStageError, TypeError, ValueError):
+        return [f"{CONFIG_FILE} cannot be read, so the repeats cannot be checked"]
+    reps = res.get("repeats")
+    if not isinstance(reps, dict):
+        return [f"{RESULT_FILE} has no repeats record"]
+    for role, run_entry in runs.items():
+        lst = reps.get(role)
+        if not isinstance(lst, list) or len(lst) != want:
+            problems.append(f"{role}: the result lists {len(lst) if isinstance(lst, list) else 'no'} repeats; the config asked for {want}")
+            continue
+        for k, entry in enumerate(lst):
+            if not isinstance(entry, dict):
+                problems.append(f"{role} repeat {k}: not an object")
+                continue
+            name = run_entry.get("model") if isinstance(run_entry, dict) else None
+            if name not in MODEL_SETTINGS:
+                continue
+            if entry.get("dir") != (run_entry.get("dir") if k == 0 else str(Path(run_entry["dir"]).with_name(repeat_name(name, k)))):
+                problems.append(f"{role} repeat {k}: its directory is not the expected one")
+                continue
+            check_run_dir(run_dir, entry, settings_for(name), f"{role} repeat {k}", problems,
+                          expected=(ref.get("expected") or {}).get(name) if isinstance(ref.get("expected"), dict) else None,
+                          library_commit=ref.get("library_commit"))
+    return problems
 
 
 def chip_problems(stage_dir, run_dir, ref_stage_dir) -> list[str]:
@@ -510,7 +499,9 @@ def chip_problems(stage_dir, run_dir, ref_stage_dir) -> list[str]:
         if name not in MODEL_SETTINGS:
             problems.append(f"{role}: model {name!r} is not one the audio runtime knows")
             continue
-        check_run_dir(run_dir, entry, {**settings_for(name)}, role, problems)
+        check_run_dir(run_dir, entry, {**settings_for(name)}, role, problems,
+                      expected=(ref.get("expected") or {}).get(name) if isinstance(ref.get("expected"), dict) else None,
+                      library_commit=ref.get("library_commit"))
     pairs = [(ROLE_CHIP, ROLE_REFERENCE)] + ([(ROLE_CONTROL_CHIP, ROLE_CONTROL_REFERENCE)] if ROLE_CONTROL_CHIP in runs else [])
     for chip_role, ref_role in pairs:
         key = f"{chip_role}_vs_{ref_role}"
@@ -527,6 +518,19 @@ def chip_problems(stage_dir, run_dir, ref_stage_dir) -> list[str]:
             problems.append(f"{key}: the recorded comparison is not what the runs give now")
         if not fresh["ok"] and chip_role == ROLE_CHIP:
             problems.append(f"{key}: the chip run does not agree with its reference: {', '.join(fresh['failed'] or fresh['problems'])}")
+    host = ref_runs.get(ROLE_HOST)
+    if isinstance(host, dict):
+        host_dir, ref_dir = Path(run_dir) / str(host.get("dir")), Path(run_dir) / str(ref_runs.get(ROLE_REFERENCE, {}).get("dir"))
+        for key, recorded, pair in (("chip_vs_host_same_env", agreement.get("chip_vs_host_same_env"), (host_dir, Path(run_dir) / runs[ROLE_CHIP]["dir"])),
+                                    ("environment_floor", res.get("environment_floor"), (ref_dir, host_dir))):
+            try:
+                fresh_i = compare(*pair)           # informational: recomputed and compared with the record, with no pass bar of its own
+            except (ar.ReferenceError, KeyError, OSError) as exc:
+                problems.append(f"{key}: {exc}")
+                continue
+            if not agree(recorded, fresh_i):
+                problems.append(f"{key}: the recorded comparison is not what the runs give now")
+    problems += repeat_problems(stage_dir, run_dir, res, ref, runs)
     if ROLE_CONTROL_CHIP in runs:
         try:
             fresh_d = control_discrimination(Path(run_dir) / ref_runs[ROLE_CONTROL_REFERENCE]["dir"], Path(run_dir) / ref_runs[ROLE_REFERENCE]["dir"],

@@ -1300,17 +1300,30 @@ SKIP_STOCK_7 = "stock-runtime path: no package is built (the pilot writes no pac
 # The audio runtime path (orchard/audio_runtime.py, orchard/audio_stages.py): a run whose model the harness's own Stable Audio 3 runtime serves.
 # Stage 0 is the normal triage. Stage 1 makes the CPU reference runs, stage 2 makes the clip on one chip and compares it with them, stage 8 builds the
 # bundle with the clips. Stages 3 to 7 are skipped with a reason. None of them asks the local coder anything.
+def _audio_verb(verb: str, run_dir, args: dict) -> list[str]:
+    """Run a numeric audio gate in the configured reference interpreter (the supervisor needs only the standard library). A failure to run it is a
+    reason, never a pass."""
+    from orchard import audio_remote, audio_runtime
+    from orchard.audio_plan import AudioStageError
+    paths = audio_runtime.selection_from_run_dir(run_dir)
+    if paths is None:
+        return ["the ledger holds no audio runtime selection, so there is no interpreter to check the stage with"]
+    try:
+        result = audio_remote.call(paths.reference_python, verb, args, timeout_s=1800.0, env={"PATH": os.environ.get("PATH", "")})
+    except AudioStageError as exc:
+        return [str(exc)]
+    return [str(x) for x in result] if isinstance(result, list) else ["the audio gate gave an answer that is not a list"]
+
+
 def gate_audio_reference(stage_dir, run_dir) -> GateResult:
-    from orchard import audio_stages        # numpy and the recorded runs; imported when a gate runs, so the stage table needs only the standard library
-    reasons = audio_stages.reference_problems(stage_dir, run_dir)
+    reasons = _audio_verb("gate_reference", run_dir, {"stage_dir": str(stage_dir), "run_dir": str(run_dir)})
     seen = [os.path.relpath(Path(stage_dir) / audio_runtime.REFERENCE_FILE, run_dir)] if not reasons else []
     return _done(reasons, seen)
 
 
 def gate_audio_chip(stage_dir, run_dir) -> GateResult:
-    from orchard import audio_stages
     ref_stage = Path(run_dir) / "stages" / "1"
-    reasons = audio_stages.chip_problems(stage_dir, run_dir, ref_stage)
+    reasons = _audio_verb("gate_chip", run_dir, {"stage_dir": str(stage_dir), "run_dir": str(run_dir), "ref_stage_dir": str(ref_stage)})
     seen = [os.path.relpath(Path(stage_dir) / audio_runtime.RESULT_FILE, run_dir)] if not reasons else []
     return _done(reasons, seen)
 
