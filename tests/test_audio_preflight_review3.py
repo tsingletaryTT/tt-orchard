@@ -10,7 +10,7 @@ import pytest
 
 from orchard import cli
 from orchard import preflight as pf
-from test_audio_preflight import (AUDIO_FILES, BASE, BASE_REV, MODEL, Downloader, Pipe, Recorder, _panel, audio_base, audio_payload,  # noqa: F401
+from test_audio_preflight import (AUDIO_FILES, BASE, BASE_REV, MODEL, REV, Downloader, Pipe, Recorder, _panel, audio_base, audio_payload,  # noqa: F401
                                   base_hub, conf, full_snaps, model_config, rows, run_with, snap, world)
 from test_delta_triage_template import template_module
 from test_preflight import signals as plain_signals
@@ -227,6 +227,50 @@ def test_a_cached_base_missing_a_listed_component_config_blocks_when_gated(tmp_p
 def test_a_cached_base_with_every_listed_file_is_complete(tmp_path):
     s = snap(tmp_path / "hf", BASE, BASE_REV, names=AUDIO_FILES + ["svd_bases.pt"])
     assert audio_base(base_info=(base_hub(gated=False), None), local={BASE: s}).data["needs_fetch"] is False
+
+
+# ---- the parser itself, called directly ----------------------------------------------------------------------
+
+def test_the_parser_refuses_bytes_over_the_limit_without_parsing_them():
+    from orchard import audio_facts
+    body = b'{"model_type": "x", "model": {}, "pad": "' + b"a" * audio_facts.AUDIO_JSON_MAX + b'"}'
+    assert len(body) > audio_facts.AUDIO_JSON_MAX
+    assert audio_facts.audio_config_problem(body)[0] is None
+
+
+def test_the_parser_refuses_nesting_over_the_limit_inside_the_model_object():
+    from orchard import audio_facts
+    deep = b'{"model_type": "x", "model": {"a": ' + b"[" * 40 + b"]" * 40 + b"}}"
+    ok = b'{"model_type": "x", "model": {"a": ' + b"[" * 20 + b"]" * 20 + b"}}"
+    assert audio_facts.audio_config_problem(deep)[0] is None and audio_facts.audio_config_problem(ok)[0] is not None
+
+
+def test_the_parser_turns_a_recursion_error_into_a_problem():
+    from orchard import audio_facts
+    body = b'{"model_type": "x", "model": {"a": ' + b"[" * 200000 + b"]" * 200000 + b"}}"
+    cfg, why = audio_facts.audio_config_problem(body)
+    assert cfg is None and why
+
+
+@pytest.mark.parametrize("raw", [None, "text", 7, [b"x"]])
+def test_the_parser_refuses_input_that_is_not_bytes(raw):
+    from orchard import audio_facts
+    assert audio_facts.audio_config_problem(raw)[0] is None
+
+
+# ---- a downloaded model is checked on its own, and its components ----------------------------------------------
+
+def test_a_downloaded_model_alone_with_a_bad_config_stops_the_run(conf, tmp_path, capsys):
+    local = {BASE: full_snaps(tmp_path)[BASE]}
+    code, out, rec = run_with(conf, ["bringup", MODEL], Downloader(tmp_path, config={}), world(local=local, model_gated=False))
+    assert code == 2 and rec.argv is None and f"downloaded {MODEL}" in capsys.readouterr().err
+
+
+def test_a_download_that_lacks_the_text_encoder_config_stops_the_run(conf, tmp_path, capsys):
+    local = {MODEL: snap(tmp_path / "hf", MODEL, REV, names=AUDIO_FILES)}
+    names = [n for n in AUDIO_FILES + ["svd_bases.pt"] if n != "t5gemma-b-b-ul2/config.json"]
+    code, out, rec = run_with(conf, ["bringup", MODEL], Downloader(tmp_path, names=names), world(local=local, base_gated=False))
+    assert code == 2 and rec.argv is None and "t5gemma-b-b-ul2/config.json" in capsys.readouterr().err
 
 
 # ---- a failure is never read as absence --------------------------------------------------------------------

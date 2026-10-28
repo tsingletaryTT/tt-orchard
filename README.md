@@ -696,7 +696,7 @@ Both of these must hold:
 - The top level of the file list shows `model_config.json`, no `config.json` and a `.safetensors` file. The Hub's list is checked, and so is
   the top level of the local snapshot when there is one. If the two disagree, the model is not audio.
 
-Anything unclear keeps the old behaviour: an unknown tag, a failed Hub lookup, both config files present. The layout half of the rule is
+A cached snapshot must also hold a `model_config.json` that stage 0's detector accepts (a bounded read: an object under 1 MiB with a string `model_type` and an object `model`) and the text encoder's `config.json`; otherwise it is not complete and the old path applies. Anything unclear keeps the old behaviour: an unknown tag, a failed Hub lookup, both config files present. The layout half of the rule is
 also what stage 0's template uses (`detect_audio`), and a test pins the two copies to the same snapshots.
 
 For an audio model the `base` row needs no installed bundle. Stage 0 compares the two repositories directly, and nothing serves an audio model on
