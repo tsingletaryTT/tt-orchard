@@ -198,6 +198,7 @@ def run_limited(code: str, *, timeout: float = 60, address_space: int = 2 << 30)
 
 
 
+
 # ------------------------------------------------------------------------------------------------------------ the registry
 
 @dataclass(frozen=True)
@@ -937,5 +938,6 @@ UNREGISTERED_MODULES = (
     'suite_control.py',
     'telegraph_cmd.py',
     'ttnn_dump.py',
+    'virtualspend.py',
     'webui.py',
 )
