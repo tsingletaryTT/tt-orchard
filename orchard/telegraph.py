@@ -135,8 +135,9 @@ def _check_endpoint(endpoint: str):
     try:
         parts = urllib.parse.urlsplit(endpoint)
         parts.port                                    # noqa: B018  (read only to validate the port)
-    except ValueError as exc:
-        raise ConfigError(f"{bad}: {exc}") from exc
+    except ValueError:
+        # the parser's own message can quote part of the URL, userinfo included, so it is not repeated
+        raise ConfigError(f"{bad}: the host or port cannot be parsed (a port is a number from 0 to 65535)") from None
     return parts
 
 def _plain_json(value, where: str, depth: int = 0) -> None:
