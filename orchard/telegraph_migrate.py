@@ -43,7 +43,7 @@ from orchard import telegraph as tg
 from orchard import telegraph_store as ts
 from orchard.db import Database, LedgerRefused, LedgerUnavailable, private_directory
 
-MAX_LEDGER_BYTES = 512 * 1024 * 1024
+MAX_LEDGER_BYTES = 16 * 1024 * 1024               # the page refuses a larger ledger too; a larger one needs a person to look
 MAX_CACHE_BYTES = 4 * 1024 * 1024
 MAX_RAW_LINE = 4_000_000                      # the database refuses a longer record; a longer line is reported as malformed
 SIDECAR_PREFIX = f"{ts.LEDGER}.torn-"
@@ -362,9 +362,11 @@ def _run(db: Database, dir_fd: int, scope: str, max_output_tokens: int, accept_m
     if live in ("link", "other") or (live == "dir" and phase is None):
         raise MigrationRefused(f"{ts.LEDGER} is a {live}; it has to be a ledger file (or absent) before the migration starts")
     result: dict = {"status": "migrated", "resumed": resumed, "scope": scope}
+    fresh = phase is None and not migrating
     if phase is None:
         data = _ledger_data(db)
-        if not migrating:
+        if fresh:
+            _refuse_malformed(parse_jsonl(_without_fragment(data)), accept_malformed)      # before anything is written
             try:
                 safeio.atomic_write(os.path.join(directory, ts.MARKER_MIGRATING),                # step 2
                                     _marker_body(scope, hashlib.sha256(data).hexdigest()), mode=0o600)
@@ -372,7 +374,16 @@ def _run(db: Database, dir_fd: int, scope: str, max_output_tokens: int, accept_m
                 raise MigrationRefused(f"cannot write {ts.MARKER_MIGRATING}: {exc.strerror}") from exc
         hook("after:2")
     if phase is None or (phase == "imported" and live == "file"):
-        result.update(_step3(db, store, dir_fd, scope, max_output_tokens, accept_malformed, phase, hook))      # step 3
+        try:
+            result.update(_step3(db, store, dir_fd, scope, max_output_tokens, accept_malformed, phase, hook))      # step 3
+        except MigrationRefused:
+            if fresh:                                                           # a refused start leaves no marker behind
+                try:
+                    os.unlink(ts.MARKER_MIGRATING, dir_fd=dir_fd)
+                    os.fsync(dir_fd)
+                except OSError:
+                    pass
+            raise
         phase = "imported"
         live = db.exists_name(ts.LEDGER)
     if phase == "imported":
@@ -393,11 +404,15 @@ def _run(db: Database, dir_fd: int, scope: str, max_output_tokens: int, accept_m
     return result
 
 
-def _step3(db, store, dir_fd, scope, max_output_tokens, accept_malformed, phase, hook) -> dict:
-    """Recover the old ledger (I9), then import, compare and record the phase in ONE transaction."""
-    recovery = recover_ledger(dir_fd, max_output_tokens)
-    data = _ledger_data(db)
-    parsed = parse_jsonl(data)
+def _without_fragment(data: bytes) -> bytes:
+    """The ledger without a last line that has no line break (recovery moves that fragment to a sidecar before the import)."""
+    return data[:data.rfind(b"\n") + 1] if data and not data.endswith(b"\n") else data
+
+
+def _refuse_malformed(parsed: Parsed, accept_malformed) -> None:
+    """I9: a line that is not a record, and is not the last line without a line break, cannot be recovered. The old reader skipped it
+    silently, so whatever it recorded was never counted. The migration refuses, names the lines, and goes on only when a person passes
+    the count they inspected."""
     if parsed.malformed and accept_malformed != len(parsed.malformed):
         shown = ", ".join(str(n) for n in parsed.malformed[:50])
         raise MalformedLedger(
@@ -405,6 +420,14 @@ def _step3(db, store, dir_fd, scope, max_output_tokens, accept_malformed, phase,
             f"{', ...' if len(parsed.malformed) > 50 else ''}). The old reader skipped them silently, so their spend was never counted. "
             f"Look at them; if you accept that they are dropped, run again with --accept-malformed {len(parsed.malformed)}",
             parsed.malformed)
+
+
+def _step3(db, store, dir_fd, scope, max_output_tokens, accept_malformed, phase, hook) -> dict:
+    """Recover the old ledger (I9), then import, compare and record the phase in ONE transaction."""
+    recovery = recover_ledger(dir_fd, max_output_tokens)
+    data = _ledger_data(db)
+    parsed = parse_jsonl(data)
+    _refuse_malformed(parsed, accept_malformed)
     imported_before = 0
     if phase == "imported":
         want_sha = db.meta_get(f"imported_sha256:{scope}")
@@ -528,6 +551,8 @@ def _dry_run(directory, *, scope, max_output_tokens, accept_malformed) -> dict:
     result: dict = {"status": "dry-run", "scope": scope}
     with safeio.pinned_root(directory) as pin:
         names_here = os.listdir(pin.fd)
+        if ts.MARKER_MIGRATED in names_here:
+            raise AlreadyMigrated(f"{directory} was migrated already")
         try:
             data = safeio.read_bytes(ts.LEDGER, max_bytes=MAX_LEDGER_BYTES, anchor=pin.fd) if ts.LEDGER in names_here else b""
         except safeio.SafeReadError as exc:

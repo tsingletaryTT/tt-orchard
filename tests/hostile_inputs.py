@@ -394,19 +394,21 @@ def _ledger_read_entries(base: Path):
     return ledger.read_entries(base / "input.json")
 
 
-def _telegraph_read_ledger(base: Path):
-    from orchard import telegraph
-    return telegraph.read_ledger(base)
+def _telegraph_store_read_snapshot(base: Path):
+    """The ledger database is the hostile item: a file, link, FIFO, directory or damaged file where `project.db` should be."""
+    from orchard import telegraph_store
+    return telegraph_store.read_snapshot(base)
 
 
-def _telegraph_read_ledger_strict(base: Path):
-    from orchard import telegraph
-    return telegraph._read_ledger_strict(base)
+def _telegraph_migrate_read_archive_lines(base: Path):
+    from orchard import telegraph_migrate
+    return telegraph_migrate.read_archive_lines(base)
 
 
-def _telegraph_summarise(base: Path):
-    from orchard import telegraph
-    return telegraph.summarise(base)
+def _telegraph_migrate_dry_run(base: Path):
+    """The importer's check of an old jsonl ledger; it writes nothing."""
+    from orchard import telegraph_migrate
+    return telegraph_migrate.migrate(base, dry_run=True)
 
 
 def _stages_load(base: Path):
@@ -639,19 +641,25 @@ def _types():
     from orchard.package import PackageError
     from orchard.prompt_suite import SuiteError
     from orchard.research.http import FetchError
-    from orchard.telegraph import LedgerUnavailable
+    from orchard.db import LedgerRefused, LedgerUnavailable
     from orchard.classify_bench import CorpusError
-    return LedgerCorrupt, PackageError, SuiteError, FetchError, LedgerUnavailable, CorpusError
+    from orchard.safeio import SafeReadError
+    from orchard.telegraph_migrate import MigrationRefused
+    return LedgerCorrupt, PackageError, SuiteError, FetchError, LedgerUnavailable, CorpusError, LedgerRefused, SafeReadError, MigrationRefused
 
 
-_LedgerCorrupt, _PackageError, _SuiteError, _FetchError, _LedgerUnavailable, _CorpusError = _types()
+(_LedgerCorrupt, _PackageError, _SuiteError, _FetchError, _LedgerUnavailable, _CorpusError, _LedgerRefused, _SafeReadError,
+ _MigrationRefused) = _types()
 ALL_ITEMS = frozenset(i.name for i in ITEMS)         # a loader that lets every OSError propagate by design
 
 READERS: list[Reader] = [
     Reader("ledger.read_entries", _ledger_read_entries, suffix=b"\n", documented=(_LedgerCorrupt,)),
-    Reader("telegraph.read_ledger", _telegraph_read_ledger, suffix=b"\n", rel="telegraph.jsonl"),
-    Reader("telegraph._read_ledger_strict", _telegraph_read_ledger_strict, suffix=b"\n", rel="telegraph.jsonl", documented=(_LedgerUnavailable,)),
-    Reader("telegraph.summarise", _telegraph_summarise, suffix=b"\n", rel="telegraph.jsonl"),
+    Reader("telegraph_store.read_snapshot", _telegraph_store_read_snapshot, rel="project.db",
+           documented=(_LedgerUnavailable, _LedgerRefused)),
+    Reader("telegraph_migrate.read_archive_lines", _telegraph_migrate_read_archive_lines, suffix=b"\n", rel="telegraph.jsonl.archived",
+           documented=(_SafeReadError,)),
+    Reader("telegraph_migrate.migrate (dry run)", _telegraph_migrate_dry_run, suffix=b"\n", rel="telegraph.jsonl",
+           documented=(_MigrationRefused,)),
     Reader("status.collect (hostile ledger)", _collect, suffix=b"\n", rel="ledger.jsonl", documented=(_LedgerCorrupt,)),
     Reader("status.collect (hostile control file)", _collect, rel="control", setup=_valid_ledger),
     Reader("status.collect (hostile pid file)", _collect, rel="supervisor.pid", setup=_valid_ledger),
@@ -767,8 +775,6 @@ KNOWN_DEFECTS: dict[int, dict[str, list[str]]] = {
         'stages._load': ['nan_in_object', 'lone_surrogate_key'],
         'stages._read_json': ['huge_exponent', 'nan', 'infinity', 'negative_infinity', 'nan_in_object', 'lone_surrogate', 'lone_surrogate_key'],
         'stock_runtime._load_config': ['nan_in_object', 'lone_surrogate_key'],
-        'telegraph._read_ledger_strict': ['nan_in_object', 'lone_surrogate_key'],
-        'telegraph.read_ledger': ['nan_in_object', 'lone_surrogate_key'],
         'toolcall_bench._rows': ['huge_exponent', 'nan', 'infinity', 'negative_infinity', 'nan_in_object', 'lone_surrogate', 'lone_surrogate_key'],
         'verdict._read_json': ['huge_exponent', 'nan', 'infinity', 'negative_infinity', 'nan_in_object', 'lone_surrogate', 'lone_surrogate_key'],
     },
@@ -806,9 +812,6 @@ KNOWN_DEFECTS: dict[int, dict[str, list[str]]] = {
         'supervisor._container_config': ['nest_100000'],
         'supervisor._swap_cache': ['nest_100000'],
         'swap_draft.installed_containers': ['nest_100000'],
-        'telegraph._read_ledger_strict': ['nest_1000_object', 'nest_100000'],
-        'telegraph.read_ledger': ['nest_1000_object', 'nest_100000'],
-        'telegraph.summarise': ['nest_100000'],
         'toolcall_bench._rows': ['nest_1000', 'nest_1000_object', 'nest_100000'],
         'transcripts.load_signature': ['nest_100000'],
         'verdict._read_json': ['nest_1000', 'nest_1000_object', 'nest_100000'],
@@ -840,9 +843,6 @@ KNOWN_DEFECTS: dict[int, dict[str, list[str]]] = {
         'supervisor._container_config': ['big_string_50mb', 'link_to_dev_zero'],
         'supervisor._swap_cache': ['big_string_50mb', 'link_to_dev_zero'],
         'swap_draft.installed_containers': ['big_string_50mb', 'link_to_dev_zero'],
-        'telegraph._read_ledger_strict': ['big_string_50mb', 'link_to_dev_zero'],
-        'telegraph.read_ledger': ['big_string_50mb', 'link_to_dev_zero'],
-        'telegraph.summarise': ['big_string_50mb', 'link_to_dev_zero'],
         'toolcall_bench._rows': ['big_string_50mb', 'link_to_dev_zero'],
         'transcripts.load_signature': ['big_string_50mb', 'link_to_dev_zero'],
     },
@@ -874,9 +874,6 @@ KNOWN_DEFECTS: dict[int, dict[str, list[str]]] = {
         'supervisor._container_config': ['fifo'],
         'supervisor._swap_cache': ['fifo'],
         'swap_draft.installed_containers': ['fifo'],
-        'telegraph._read_ledger_strict': ['fifo'],
-        'telegraph.read_ledger': ['fifo'],
-        'telegraph.summarise': ['fifo'],
         'toolcall_bench._rows': ['fifo'],
         'transcripts.load_signature': ['fifo'],
     },

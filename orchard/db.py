@@ -268,13 +268,18 @@ class Database:
                 reason = (marker or {}).get("reason") or "the database file was missing but backups exist"
                 self._recover(reason, move=False)
             else:
+                keep = self._keep_wal()
                 try:
                     self._conn_main = self._open_checked()
                     self._local.conn = self._conn_main
                     self._register(self._conn_main)
                 except _Corrupt as exc:
-                    self._recover(f"the database was damaged ({exc})", move=True)
+                    self._recover(f"the database was damaged ({exc})", move=True, keep_wal=keep)
+                    keep = None
+                finally:
+                    self._drop_keep(keep)
             self._migrate()
+            self._check_schema()
             if self._marker() is not None and self.unreconciled() is None:
                 self._write_unreconciled("recovery marker present (" + str((self._marker() or {}).get("reason", ""))[:200] + ")")
             self._maybe_backup()
@@ -506,6 +511,17 @@ class Database:
             have = self.user_version()
         self._hook("migrate:done")
 
+    REQUIRED_TABLES = ("meta", "telegraph_events", "telegraph_cache")
+
+    def _check_schema(self) -> None:
+        """A file at the current schema version must hold its tables. A table that is missing is not corruption (the integrity check
+        passes), so nothing is moved aside; the file is refused and a person restores a backup."""
+        have = {r[0] for r in self.conn().execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        missing = [t for t in self.REQUIRED_TABLES if t not in have]
+        if missing:
+            raise LedgerRefused(f"{self.name} is missing {', '.join(missing)} although its schema version is current; restore a "
+                                "backup with `tt-orchard db restore`")
+
     # ------------------------------------------------------------------------------------------------------- meta
 
     def meta_get(self, key: str, conn: sqlite3.Connection | None = None) -> str | None:
@@ -547,10 +563,28 @@ class Database:
         except OSError as exc:
             raise _unavailable(exc, "cannot write the recovery marker") from exc
 
-    def _recover(self, reason: str, *, move: bool) -> None:
+    def _keep_wal(self) -> str | None:
+        """A second name (a hard link) for an existing `-wal` file. SQLite deletes a `-wal` when the connection that failed to open
+        a damaged file closes, and that file can hold commits the damaged main file lacks; the link keeps its content for a person."""
+        if _kind_of_name(self._dirfd, self.name + "-wal") != "file":
+            return None
+        keep = f"{self.name}-wal.keep-{os.getpid()}"
+        try:
+            os.link(self.name + "-wal", keep, src_dir_fd=self._dirfd, dst_dir_fd=self._dirfd, follow_symlinks=False)
+        except OSError:
+            return None
+        return keep
+
+    def _drop_keep(self, keep: str | None) -> None:
+        if keep is not None:
+            with contextlib.suppress(OSError):
+                os.unlink(keep, dir_fd=self._dirfd)
+
+    def _recover(self, reason: str, *, move: bool, keep_wal: str | None = None) -> None:
         """I7. Steps: 2 marker (synced), 3 move the damaged file and its -wal and -shm aside, 4 create the new file (from the newest
         backup that passes its check, else empty) and migrate it, 5 write the `unreconciled` row. A crash after any step is
         safe: the marker stays and refuses every reservation, whatever the file holds."""
+        self._hook("recover:1")                                    # nothing has changed yet
         existing = self._marker()
         if existing is None:
             self._write_marker(reason)
@@ -566,6 +600,12 @@ class Database:
             for suffix in ("",) + _SIBLINGS:                        # the main file first: the group is one unit to a person
                 with contextlib.suppress(FileNotFoundError):
                     os.rename(self.name + suffix, moved + suffix, src_dir_fd=self._dirfd, dst_dir_fd=self._dirfd)
+            if keep_wal is not None:
+                if _exists(self._dirfd, moved + "-wal"):
+                    self._drop_keep(keep_wal)                      # the live -wal was still there and moved with the rest
+                else:                                              # SQLite deleted it: the link is the only copy left
+                    with contextlib.suppress(OSError):
+                        os.rename(keep_wal, moved + "-wal", src_dir_fd=self._dirfd, dst_dir_fd=self._dirfd)
             _fsync_dir_fd(self._dirfd)
             self.moved_aside = moved
             if existing is None:
