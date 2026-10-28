@@ -41,6 +41,8 @@ class SimGozer:
         self.counter = 0
         self.interrupted_release = False
         self.queue_fails = False
+        self.status_fails = False
+        self.history_window = None         # a hard cap on how many events `gozer history` can show, whatever -n says
         self.finish_after = 20.0           # seconds a release that was interrupted takes to finish by itself (None: never)
         self.pending_finish = {}           # lease id -> the fake-clock time its running release finishes
 
@@ -122,7 +124,33 @@ class SimGozer:
             if CLOCK["now"] >= at:
                 self.finish_release(lease, seconds=round(at - self.held.get(lease, at) + 42.0, 1))
                 del self.pending_finish[lease]
-        return res(1, "", "boom") if self.history_fails else res(0, json.dumps({"history": self.history}))
+        if self.history_fails:
+            return res(1, "", "boom")
+        n = int(argv[argv.index("-n") + 1]) if "-n" in argv else len(self.history)
+        n = min(n, self.history_window) if self.history_window is not None else n
+        return res(0, json.dumps({"history": self.history[-n:] if n else []}))
+
+    def _status(self, argv):
+        if self.status_fails:
+            return res(1, "", "boom")
+        chips = []
+        for lease in self.truth_held():
+            for bdf in CHIPS:
+                chips.append({"bdf": bdf, "pid": PID, "who": WHO, "state": "CLAIMED"})
+        if not chips:
+            chips = [{"bdf": bdf, "pid": None, "who": None, "state": "FREE"} for bdf in CHIPS]
+        return res(0, json.dumps({"chips": chips}))
+
+    def truth_held(self):
+        """The leases gozer really holds for us: granted and never released, whatever the probe managed to read."""
+        done = {e["lease_id"] for e in self.history if e.get("event") in ("released", "reaped")}
+        return [e["lease_id"] for e in self.history if e.get("event") == "granted" and e["lease_id"] not in done]
+
+    def truth_tickets(self):
+        return [q["ticket"] for q in self.queue]
+
+    def truth_clean(self):
+        return not self.truth_held() and not self.truth_tickets()
 
     def _queue(self, argv):
         return res(1, "", "boom") if self.queue_fails else res(0, json.dumps({"queue": self.queue}))
@@ -162,6 +190,9 @@ class Rig:
         self.harness_calls.append({"argv": list(argv), "env": kw.get("env")})
         if self.harness is not None:
             return self.harness(argv, kw)
+        return self._watched_ok(argv, kw)
+
+    def _watched_ok(self, argv, kw):
         Path(argv[argv.index("--out") + 1]).write_text(
             json.dumps({"phase": "hw", "sets": [GOOD_HW_SET], "error": None, "device_s": 1.0}))
         return kp.Watched(0, None, False, 3.0)

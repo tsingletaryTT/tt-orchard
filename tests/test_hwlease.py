@@ -27,6 +27,8 @@ class FakeCmd:
         self.queue = []
         self.history_fails = False
         self.queue_fails = False
+        self.status_fails = False
+        self.status_chips = []          # [{"bdf", "pid", "who", "state"}]: what `gozer status --json` shows as held
 
     def say(self, sub, *answers):
         self.answers[sub] = list(answers)
@@ -39,6 +41,8 @@ class FakeCmd:
             return res(1, "", "boom") if self.history_fails else res(0, json.dumps({"history": self.history}))
         if sub == "queue":
             return res(1, "", "boom") if self.queue_fails else res(0, json.dumps({"queue": self.queue}))
+        if sub == "status":
+            return res(1, "", "boom") if self.status_fails else res(0, json.dumps({"chips": self.status_chips}))
         items = self.answers.get(sub)
         if not items:
             return res(0, json.dumps({"message": "ok"}))
