@@ -23,6 +23,9 @@ from pathlib import Path
 from orchard import safeio
 
 RUNTIME = "stable-audio-3-dit-on-chip"
+REFERENCE_FILE = "audio_reference.json"      # stage 1's record
+RESULT_FILE = "audio_result.json"            # stage 2's record
+STAGE_DISK_GB = 3.0                          # free disk the audio stages need: the runs hold about 0.3 GB of arrays and the clips are small
 AUDIO_RUNTIME_SELECTED = "audio runtime selected"
 TEMPLATES = Path(__file__).with_name("skills") / "audio-chip-templates"
 CHIP_DIT = TEMPLATES / "chip_dit.py"

@@ -126,7 +126,7 @@ from urllib.parse import urlparse
 
 from orchard.adapters import AdapterError, Lease
 from orchard.agent import AgentStep, Tools, _kill_session, agent_env, probe_model, spawn_checked
-from orchard import audio_reference_env, audio_runtime, audio_stages, bus, nearest
+from orchard import audio_reference_env, audio_runtime, bus, nearest
 from orchard.audio_facts import serving_of
 from orchard.blocked import block_code, last_pause
 from orchard.blocked import write_bundle as write_blocked_bundle
@@ -1533,6 +1533,7 @@ class Supervisor:
     def _audio_body(self, spec, stage_dir: Path, resumed: bool):
         """Stage 1 (CPU references) and stage 2 (the clip on one chip) of an audio run, as supervisor code. Stage 2 uses the one-test hardware
         phase of stages 2 and 3: a lease (no coder to park when none was booted), one command, the lease back."""
+        from orchard import audio_stages         # needs numpy; imported when an audio stage runs, so the supervisor itself needs only the standard library
         n = spec.number
         if self.lab is not None:
             return "fail", ["the audio runtime does not run in lab mode"], None
@@ -1543,7 +1544,7 @@ class Supervisor:
         stage_dir.mkdir(parents=True, exist_ok=True)
         try:
             if n == 1:
-                if not (resumed and (stage_dir / audio_stages.REFERENCE_FILE).is_file()):
+                if not (resumed and (stage_dir / audio_runtime.REFERENCE_FILE).is_file()):
                     self._audio_stage_1(stage_dir, paths, model_id, base_id)
             else:
                 if not (resumed and (stage_dir / "test-result.json").is_file()):
@@ -1574,6 +1575,7 @@ class Supervisor:
         return ("pass", [], gate) if gate.ok else ("fail", list(gate.reasons), gate)
 
     def _audio_stage_1(self, stage_dir: Path, paths, model_id, base_id) -> None:
+        from orchard import audio_stages
         plan = audio_stages.reference_plan(model_id, base_id)
         revisions = {}
         for repo, key in ((model_id, "model"), (base_id, "base")):

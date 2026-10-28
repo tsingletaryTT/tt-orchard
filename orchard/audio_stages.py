@@ -32,6 +32,7 @@ import numpy as np
 
 from orchard import audio_reference as ar
 from orchard import safeio
+from orchard.audio_runtime import REFERENCE_FILE, RESULT_FILE, STAGE_DISK_GB
 
 SCHEMA = 1
 PROMPT = "A warm acoustic guitar melody with soft percussion, 100 BPM"
@@ -39,7 +40,6 @@ DURATION_S = 10.0
 SEED = 42
 SAMPLE_SIZE = 5292032                  # the library's own default for `generate`
 SAMPLE_RATE = 44100
-STAGE_DISK_GB = 3.0                    # free disk the audio stages need: the runs hold about 0.3 GB of arrays and the clips are small
 
 # Library registry names and the settings each is run with. The fine-tune is the post-trained 8-step model (ping-pong sampler, guidance scale 1);
 # its base is the control and needs the base's own settings (the audio design's section 5).
@@ -277,7 +277,6 @@ def agree(recorded, fresh) -> bool:
 
 # ---- stage 1: the CPU references -------------------------------------------------------------------------------------------------
 
-REFERENCE_FILE = "audio_reference.json"
 
 
 def reference_plan(model_id, base_id) -> list[dict]:
@@ -413,7 +412,6 @@ def write_json(path, value) -> None:
 
 # ---- stage 2: the clip on a chip ------------------------------------------------------------------------------------------------
 
-RESULT_FILE = "audio_result.json"
 CONFIG_FILE = "audio_chip_config.json"
 
 

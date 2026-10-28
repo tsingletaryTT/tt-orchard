@@ -94,7 +94,7 @@ def main(argv=None) -> int:
         mk.run_reference(model, settings, recorder, torch, layers=[])
         # the stack's forward time is the part that ran on the chip; the rest of `generate_and_decode_s` ran on the host
         recorder.timings.update({"model_load_s": round(t_loaded - t_start, 3), "chip_weights_upload_s": chip.timings["upload_weights_s"],
-                                 "chip_stack_forward_s": round(chip.timings["forward_s"], 3), "chip_passes": chip.timings["passes"]})
+                                 "chip_transformer_call_s": round(chip.timings["forward_s"], 3), "chip_passes": chip.timings["passes"]})
         path = recorder.finish()
     finally:
         ttnn.close_device(device)

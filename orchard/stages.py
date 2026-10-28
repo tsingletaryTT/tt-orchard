@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from orchard import audio_decision, audio_facts, audio_stages
+from orchard import audio_decision, audio_facts, audio_runtime
 from orchard.classes import CLASSES, SIDECAR_CLASSES, class_of_path, path_of
 from orchard import prompt_suite, sampling_probe
 from orchard.graft_trial import DECISION_FILE as GRAFT_DECISION_FILE
@@ -1301,22 +1301,24 @@ SKIP_STOCK_7 = "stock-runtime path: no package is built (the pilot writes no pac
 # Stage 0 is the normal triage. Stage 1 makes the CPU reference runs, stage 2 makes the clip on one chip and compares it with them, stage 8 builds the
 # bundle with the clips. Stages 3 to 7 are skipped with a reason. None of them asks the local coder anything.
 def gate_audio_reference(stage_dir, run_dir) -> GateResult:
+    from orchard import audio_stages        # numpy and the recorded runs; imported when a gate runs, so the stage table needs only the standard library
     reasons = audio_stages.reference_problems(stage_dir, run_dir)
-    seen = [os.path.relpath(Path(stage_dir) / audio_stages.REFERENCE_FILE, run_dir)] if not reasons else []
+    seen = [os.path.relpath(Path(stage_dir) / audio_runtime.REFERENCE_FILE, run_dir)] if not reasons else []
     return _done(reasons, seen)
 
 
 def gate_audio_chip(stage_dir, run_dir) -> GateResult:
+    from orchard import audio_stages
     ref_stage = Path(run_dir) / "stages" / "1"
     reasons = audio_stages.chip_problems(stage_dir, run_dir, ref_stage)
-    seen = [os.path.relpath(Path(stage_dir) / audio_stages.RESULT_FILE, run_dir)] if not reasons else []
+    seen = [os.path.relpath(Path(stage_dir) / audio_runtime.RESULT_FILE, run_dir)] if not reasons else []
     return _done(reasons, seen)
 
 
-AUDIO_STAGE_1 = StageSpec(1, "CPU reference for the audio model", "", (), 0, audio_stages.REFERENCE_FILE, gate_audio_reference,
-                          audio_stages.REFERENCE_FILE, harness=True, disk=audio_stages.STAGE_DISK_GB, needs_coder=False)
-AUDIO_STAGE_2 = StageSpec(2, "clip on one chip and agreement with the CPU reference", "", ("tt-device-usage",), 1, audio_stages.RESULT_FILE,
-                          gate_audio_chip, "test-result.json", harness=True, disk=audio_stages.STAGE_DISK_GB, needs_coder=False)
+AUDIO_STAGE_1 = StageSpec(1, "CPU reference for the audio model", "", (), 0, audio_runtime.REFERENCE_FILE, gate_audio_reference,
+                          audio_runtime.REFERENCE_FILE, harness=True, disk=audio_runtime.STAGE_DISK_GB, needs_coder=False)
+AUDIO_STAGE_2 = StageSpec(2, "clip on one chip and agreement with the CPU reference", "", ("tt-device-usage",), 1, audio_runtime.RESULT_FILE,
+                          gate_audio_chip, "test-result.json", harness=True, disk=audio_runtime.STAGE_DISK_GB, needs_coder=False)
 SKIP_AUDIO_3 = ("audio runtime path: stage 2 ran the diffusion transformer on the chip with the library's own code for the rest; there is no "
                 "separate full-model stage")
 SKIP_AUDIO_4 = ("audio runtime path: one chip runs the diffusion transformer; a multichip port and a shrink to fewer chips are not part of "

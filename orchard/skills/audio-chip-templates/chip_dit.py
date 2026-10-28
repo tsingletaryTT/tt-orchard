@@ -228,6 +228,8 @@ class ChipTransformer:
         self.record_enabled = record is not None
         self.dtype = dtype if dtype is not None else ttnn.bfloat16        # weights and the attention tensors
         self.act = act_dtype if act_dtype is not None else ttnn.float32   # the residual stream and the outputs that are added to it
+        # forward_s is the wall time of whole `__call__`s: host preparation (modulation vectors, padding), uploads, the layers on the chip and the
+        # read back. It is not a measure of device execution alone.
         self.timings = {"upload_weights_s": 0.0, "forward_s": 0.0, "passes": 0}
         self.kernel = ttnn.init_device_compute_kernel_config(
             device.arch(), math_fidelity=ttnn.MathFidelity.HiFi4, math_approx_mode=False, fp32_dest_acc_en=True, packer_l1_acc=True)

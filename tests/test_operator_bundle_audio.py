@@ -41,7 +41,7 @@ def run_entry(name, *, clip, timings=None):
 
 
 FULL_TIMINGS = {"generate_and_decode_s": 41.25, "conditioning_s": 2.5, "model_load_s": 8.125, "chip_weights_upload_s": 3.75,
-                "chip_stack_forward_s": 19.5, "chip_passes": 200}
+                "chip_transformer_call_s": 19.5, "chip_passes": 200}
 
 
 def audio_result(**over):
@@ -136,7 +136,7 @@ def test_every_timing_is_printed_with_its_plain_sentence(tmp_path):
     body = block(built(audio_run(tmp_path))[0])
     for key, value in (("generate_and_decode_s", "41.25 seconds"), ("conditioning_s", "2.5 seconds"),
                        ("model_load_s", "8.125 seconds"), ("chip_weights_upload_s", "3.75 seconds"),
-                       ("chip_stack_forward_s", "19.5 seconds"), ("chip_passes", "200 passes"), ("total_seconds", "12.5 seconds")):
+                       ("chip_transformer_call_s", "19.5 seconds"), ("chip_passes", "200 passes"), ("total_seconds", "12.5 seconds")):
         row = next(line for line in body.splitlines() if line.startswith(f"| `{key}` |"))
         assert value in row, row
         assert row.rstrip().endswith("|") and len(row.split("|")[3].strip()) > 10          # the explanation is there
@@ -156,7 +156,7 @@ def test_no_timings_dict_at_all_prints_not_recorded_for_every_key(tmp_path):
     res = audio_result()
     res["runs"]["chip"]["timings"] = None
     body = block(built(audio_run(tmp_path, res))[0])
-    for key in ("generate_and_decode_s", "conditioning_s", "model_load_s", "chip_weights_upload_s", "chip_stack_forward_s",
+    for key in ("generate_and_decode_s", "conditioning_s", "model_load_s", "chip_weights_upload_s", "chip_transformer_call_s",
                 "chip_passes"):
         assert f"| `{key}` | not recorded |" in body
 

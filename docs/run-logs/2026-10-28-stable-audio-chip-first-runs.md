@@ -28,7 +28,7 @@ help. Attempt 3 is the default.
 |---|---|
 | model load on the host | 5.4 |
 | chip weights upload | 1.2 |
-| eight passes of the stack (the first includes kernel compile) | 4.4 |
+| eight calls of the transformer, summed (host preparation, uploads, the layers on the chip and the read back; the first includes kernel compile) | 4.4 |
 | `generate` and decode, whole | 5.7 |
 | CPU reference, same call, reference environment | 24.8 |
 

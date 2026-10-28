@@ -1056,7 +1056,7 @@ AUDIO_TIMINGS = (
     ("conditioning_s", "seconds", "the T5Gemma encoder turning the prompt into conditioning, on the host"),
     ("model_load_s", "seconds", "loading the model's weights on the host"),
     ("chip_weights_upload_s", "seconds", "copying the diffusion transformer's weights to the chip"),
-    ("chip_stack_forward_s", "seconds", "time inside the diffusion transformer's layers on the chip, summed over all passes"),
+    ("chip_transformer_call_s", "seconds", "wall time of the diffusion transformer's calls, summed over all passes: host preparation, uploads, the layers on the chip and the read back"),
     ("chip_passes", "passes", "how many times the diffusion transformer ran on the chip"))
 AUDIO_AGREEMENTS = (("Chip against the CPU reference", ("agreement", "chip_vs_reference")),
                     ("Chip against the same-environment CPU run", ("agreement", "chip_vs_host_same_env")),
