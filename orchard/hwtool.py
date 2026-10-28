@@ -109,6 +109,13 @@ def outer_backstop_s(wait_s: float, call_timeout_s: float) -> float:
     return ACQUIRE_TIMEOUT_S + max(wait_s, 0.0) + WAIT_MARGIN_S + call_timeout_s + RELEASE_GRACE_S
 
 
+def unfinished_charge_s(call_timeout_s: float, elapsed_s: float) -> float:
+    """The chip seconds charged for a lease record that never finished (a wrapper killed with no end stamp, or an interrupted call):
+    an upper bound, the larger of the full call timeout plus the release grace (the longest the lease could have lasted before the
+    group kill) and the seconds the call has been running up to now. Never zero, and never only the partial time."""
+    return max(call_timeout_s + RELEASE_GRACE_S, elapsed_s)
+
+
 def _utc_stamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -574,17 +581,18 @@ class HardwareCheck:
         k = self.counted
         start = self.clock()
         finished = False
+        timeout = min(p.call_timeout_s, p.lease_s - self.lease_used - p.cleanup_s)
         try:
-            timeout = min(p.call_timeout_s, p.lease_s - self.lease_used - p.cleanup_s)
             hw, event, text = self.run(k, timeout, max(p.wait_s, 0.0))
             finished = True
         finally:
             if not finished:                        # an interrupt or an error: the probe's runner has stopped the wrapper's group
                 now = self.clock()
-                held = max(now - start, 0.0)        # an upper bound: the wrapper may have held the board for all of it, or none
+                total = max(now - start, 0.0)
+                held = unfinished_charge_s(timeout, total)     # an upper bound: nobody saw the lease end, so it may have run to the deadline
                 self.lease_used += held
                 self._record(k=k, counted=True, outcome="interrupted", note=note, kernel_sha256=sha,
-                             total_s=round(held, 1), lease_s=round(held, 1), lease_upper_bound=True)
+                             total_s=round(total, 1), lease_s=round(held, 1), lease_upper_bound=True)
                 self._look()                        # the one check; if it finds a chip held the tool is stopped
         charged: list[float] = []                   # the chip time this call was charged, so an interrupt does not charge it twice
         recorded = len(self.records)

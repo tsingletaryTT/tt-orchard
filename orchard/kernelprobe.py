@@ -1193,25 +1193,33 @@ def _abs_executable(path) -> str:
     return os.path.abspath(path) if "/" in path and not os.path.isabs(path) else path
 
 
-def _lease_facts(lease: dict | None, elapsed_s: float) -> dict:
+def _lease_facts(lease: dict | None, elapsed_s: float, call_timeout_s: float) -> dict:
     """What the wrapper's own record says about the lease, as hw-block fields. The chip time (`lease_s`) is the wrapper's seconds
-    from its grant to the end of its release, from its own clock. A wrapper that was killed has no end stamp: the run's seconds
-    after the grant are then an upper bound (`lease_upper_bound`). With no record at all the whole run is the upper bound."""
+    from its grant to the end of its release, from its own clock. A record that never finished (no end stamp: the wrapper was
+    killed, or wrote nothing) is charged as an upper bound (`lease_upper_bound`): the larger of the full call timeout plus the release
+    grace and the seconds the run took up to now (hwtool.unfinished_charge_s), whether or not a grant was recorded. A record that
+    finished and was never granted is zero."""
     num = hwtool._number
-    if not isinstance(lease, dict):
-        return {"lease_s": round(elapsed_s, 1), "lease_upper_bound": True, "waited_s": 0.0}
+    if not isinstance(lease, dict) or not num(lease.get("ended_at")):
+        facts = {"lease_s": round(hwtool.unfinished_charge_s(call_timeout_s, elapsed_s), 1), "lease_upper_bound": True,
+                 "waited_s": 0.0}
+        if isinstance(lease, dict):
+            started, granted = lease.get("started_at"), lease.get("granted_at")
+            facts.update(wrapper_pid=lease.get("pid") if isinstance(lease.get("pid"), int) else None,
+                         lease_id=lease.get("lease_id") if isinstance(lease.get("lease_id"), str) else None)
+            if num(started) and num(granted):
+                facts["waited_s"] = round(max(granted - started, 0.0), 1)
+            facts["release_error"] = "the wrapper ended before it released the lease"
+        return facts
     started, granted, ended = lease.get("started_at"), lease.get("granted_at"), lease.get("ended_at")
     facts: dict = {"wrapper_pid": lease.get("pid") if isinstance(lease.get("pid"), int) else None,
                    "lease_id": lease.get("lease_id") if isinstance(lease.get("lease_id"), str) else None}
-    if not num(granted):                                          # never granted: the time went on waiting
-        waited = (ended - started) if num(ended) and num(started) else elapsed_s
+    if not num(granted):                                          # finished without a grant: the time went on waiting
+        waited = (ended - started) if num(started) else elapsed_s
         return {**facts, "lease_s": 0.0, "waited_s": round(max(waited, 0.0), 1)}
     waited = max(granted - started, 0.0) if num(started) else 0.0
     facts["waited_s"] = round(waited, 1)
-    if num(ended):
-        facts["lease_s"] = round(max(ended - granted, 0.0), 1)
-    else:                                                         # killed before it wrote its end stamp
-        facts.update(lease_s=round(max(elapsed_s - waited, 0.0), 1), lease_upper_bound=True)
+    facts["lease_s"] = round(max(ended - granted, 0.0), 1)
     if lease.get("release_ok") is False:
         facts["release_error"] = str(lease.get("release_text") or "gozer release did not succeed")
     elif lease.get("release_ok") is None:
@@ -1258,7 +1266,7 @@ def _hw_run(adir: Path, vdir: Path, kernel: Path, *, op: str, reason: str, share
     extra = {"swept": swept} if swept else {}
     text = _new_text(log, start)
     lease = hwtool.read_wrapper_record(lease_file) if wrapper is not None else None
-    extra.update(_lease_facts(lease, got.elapsed_s) if wrapper is not None else {})
+    extra.update(_lease_facts(lease, got.elapsed_s, float(wrapper["call_timeout_s"])) if wrapper is not None else {})
     if wrapper is None:
         queued = _queued(got, text, cancel)
     else:

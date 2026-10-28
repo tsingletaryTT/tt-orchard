@@ -149,9 +149,9 @@ def test_an_interrupted_run_counts_the_time_it_held_the_board_as_an_upper_bound(
     with pytest.raises(KeyboardInterrupt):
         c.call({})
     rec = c.summary()["calls"][0]
-    assert rec["outcome"] == "interrupted" and rec["lease_s"] == 30.0 and rec["total_s"] == 30.0
+    assert rec["outcome"] == "interrupted" and rec["lease_s"] == 330.0 and rec["total_s"] == 30.0       # 240 + 90 beats the 30 s seen
     assert rec["lease_upper_bound"] is True
-    assert c.summary()["lease_s_used"] == 30.0
+    assert c.summary()["lease_s_used"] == 330.0
 
 
 def test_the_chip_time_of_an_interrupted_run_counts_toward_the_cap():

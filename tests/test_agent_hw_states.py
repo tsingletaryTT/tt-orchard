@@ -494,7 +494,7 @@ def test_an_interrupt_kills_nothing_here_and_reads_status_once_then_raises(tmp_p
     assert outcome == "raised" and isinstance(exc, KeyboardInterrupt)
     assert gz.subs().count("status") == 1 and gz.released() == ["L1"]               # the wrapper released; the probe only looked
     rec = check.summary()["calls"][0]
-    assert rec["outcome"] == "interrupted" and rec["lease_upper_bound"] is True and rec["lease_s"] == 12.0
+    assert rec["outcome"] == "interrupted" and rec["lease_upper_bound"] is True and rec["lease_s"] == hwtool.unfinished_charge_s(240.0, 12.0)
 
 
 def test_an_interrupt_with_a_chip_still_held_stops_the_tool_and_the_interrupt_still_goes_on(tmp_path, fake_kenv):
