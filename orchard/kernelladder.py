@@ -44,8 +44,7 @@ WALL_FLOOR_S = 300.0
 WALL_CAP_S = 1800.0
 WALL_FACTOR = 4.0
 # Seconds the probe spends on one attempt outside the agent's wall time: the speed check before it, the sweep and the
-# authoritative check after it. Measured as the gap between agent_wall_s and the attempt's elapsed time in the
-# 2026-10-28 run (about a minute); a choice, not a constant of the tool.
+# authoritative check after it. A choice that was not measured; the run log compares it with the attempts' timings.
 ATTEMPT_OVERHEAD_S = 60.0
 
 
@@ -95,8 +94,8 @@ def size_wall_budget(pass_walls_s: list[float], *, factor: float = WALL_FACTOR, 
     probe's default). A rung whose pilot did not pass has no time to scale from, so it keeps the cap: the question there
     is whether more time lets the coder pass, and a shorter budget would answer it before it is asked.
 
-    A pass is judged on the kernel, not on the clock, so a budget that is long enough for the passes cannot lower the
-    pass count; it can only cut the time failing attempts spend. The budget is checked between turns, so an attempt can
+    The unedited check judges the kernel alone, so a budget that is long enough for the passes cannot lower the pass
+    count; it can only cut the time failing attempts spend. The budget is checked between turns, so an attempt can
     overrun it by up to one tool timeout (420 s at most). A rung's failures that end on the budget are counted as
     `wall_clock` in the table, so the reader can see how many a longer budget could have changed."""
     walls = [float(w) for w in pass_walls_s if isinstance(w, (int, float)) and w > 0]

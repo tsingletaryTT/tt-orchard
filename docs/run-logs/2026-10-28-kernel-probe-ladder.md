@@ -50,7 +50,7 @@ Fixed in every rung (the settings the report records):
 
 Wall budget per rung (the rule, `kernelladder.size_wall_budget`): 4 times the wall time of the slowest PASSING pilot
 on that rung, at least 300 s and at most 1800 s. A rung whose pilot did not pass keeps 1800 s, because the question
-there is whether more time lets the coder pass. A pass is judged on the kernel, not on the clock; a budget long enough
+there is whether more time lets the coder pass. The unedited check judges the kernel alone, so a budget long enough
 for the passes cannot lower the pass count and only shortens the time failing attempts spend. The budget is checked
 between turns, so an attempt can overrun it by up to one tool timeout (420 s at most). The table counts attempts that
 end on the budget with no simulator result as `wall_clock`, so a reader can see how many a longer budget could have

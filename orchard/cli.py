@@ -426,7 +426,7 @@ def _parser() -> argparse.ArgumentParser:
                     help="the wall budget of one attempt in seconds (default 1800; checked between turns). With --ladder "
                          "it is the default for every rung; --rung-wall sets a rung's own")
     kp.add_argument("--ladder", action="store_true",
-                    help="run the capability ladder instead of one op: the ops from easy to hard (add, mul, scale_shift, "
+                    help="run the capability ladder in place of a single op: the ops from easy to hard (add, mul, scale_shift, "
                          "add_row, rsqrt, row_sum, center, rmsnorm, linear_scan), each as its own run in <out>/<op>/ "
                          "with the same sampling, then <out>/ladder-report.md with the passes and failure classes per "
                          "rung. Do not give --op")
