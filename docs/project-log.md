@@ -2927,3 +2927,6 @@ Prompt (operator): "make a similar gradio app to the one we use for minimax musi
 
 ## 2026-10-28 (UTC): sixth review of PR 167 (head 9669f14), no open issue; two unpublished concerns checked
 - The client sends no request through a proxy named in the environment (the server is local), and checks the prompt length against the server's limit before a request. Tests first; both mutations red (the proxy one survived until the opener was built per call, so the test sees the environment at call time).
+
+## 2026-10-28 (UTC): full suite on head 3b90266
+- 13920 passed, 1 failed: the hostile-reader registry test wants every module that parses JSON registered or listed as backlog. The two audio demo modules are on the backlog list (issue 170: they are meant to be copied into a package alone, so they cannot import `safeio`).
