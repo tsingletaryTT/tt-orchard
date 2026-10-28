@@ -201,3 +201,17 @@ def test_the_report_command_a_shell_prints_carries_the_directory_so_the_verdict_
     cfg.write_text(TABLE + f'dir = "{ledger}"\n')
     code, text = ask_from(shell_home, cfg, tmp_path, {"ORCHARD_RUN_DIR": str(tmp_path / "run")})
     assert code == 0 and "--dir" in text and str(ledger) in text
+
+
+def test_db_status_reports_an_unreadable_backups_folder_and_exits_with_the_problem_code(tmp_path):
+    """Issue 157: a symlinked backups folder made status_report return backups=None and `db status` raised a TypeError."""
+    d = tmp_path / "state"
+    with ts.TelegraphStore.open(d) as store:
+        reserve(store, "c0")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (d / "backups").symlink_to(elsewhere)
+    code, text = run_cli(["db", "status", "--dir", str(d)], tmp_path)
+    assert code == db_cmd.EXIT_PROBLEM
+    assert "backups: cannot be read:" in text
+    assert "directory:" in text and "schema version:" in text          # the rest of the report is still printed
