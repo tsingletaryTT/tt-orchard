@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from ledger_io import database_bytes, ledger_records, seed_ledger, tree_text
 from orchard import bringup_config, cli, telegraph as tg
 from orchard import telegraph_cmd as cmd
 
@@ -160,8 +161,7 @@ def test_check_ping_of_a_transport_error_exits_2_without_a_traceback(tmp_path):
 
 def first_call_id(directory):
     """The id of the first call in a ledger (the lines before it are budget reservations)."""
-    for line in (Path(directory) / "telegraph.jsonl").read_text().splitlines():
-        row = json.loads(line)
+    for row in ledger_records(directory):
         if "call_id" in row:
             return row["call_id"]
 
@@ -228,9 +228,10 @@ def test_ledger_files_hold_no_credential_after_a_whole_session(tmp_path):
     d, cfg = tmp_path / "d", str(write(tmp_path))
     run(["ask", "--problem", "p", *files(tmp_path), "--dir", str(d), "--telegraph-config", cfg], tmp_path,
         transport=ok_transport(f"the key {KEY} is shown"))
+    assert KEY not in tree_text(d) and KEY.encode() not in database_bytes(d)
     for p in d.rglob("*"):
         if p.is_file():
-            assert KEY not in p.read_text() and stat.S_IMODE(p.stat().st_mode) == 0o600
+            assert stat.S_IMODE(p.stat().st_mode) == 0o600, p
 
 
 def test_report_not_helped_is_recorded_as_not_helped(tmp_path):
@@ -281,7 +282,9 @@ def test_report_that_cannot_write_exits_with_an_error_and_does_not_say_recorded(
     run(["ask", "--problem", "p", *files(tmp_path), "--dir", d, "--telegraph-config", cfg], tmp_path,
         transport=ok_transport())
     call_id = first_call_id(tmp_path / "d")
-    monkeypatch.setattr(tg.Telegraph, "_append", lambda self, rec, **kw: False)
+    def refuse(self, call_id, make):
+        raise tg.LedgerUnavailable("disk I/O error")
+    monkeypatch.setattr(tg.store_mod.TelegraphStore, "report", refuse)
     code, text = run(["report", call_id, "--helped", "--dir", d, "--telegraph-config", cfg], tmp_path)
     assert code == 2 and "recorded" not in text and "could not" in text
 
@@ -317,8 +320,8 @@ def test_a_config_path_with_a_space_is_quoted_in_the_suggested_command(tmp_path)
 def test_a_paid_answer_that_could_not_be_recorded_shows_the_warning_and_no_report_command(tmp_path, monkeypatch):
     real = tg.Telegraph._append
 
-    def fail_settle(self, rec, **kw):
-        return False if rec.get("outcome") == "ok" else real(self, rec, **kw)
+    def fail_settle(self, store, rec, **kw):
+        return False if rec.get("outcome") == "ok" else real(self, store, rec, **kw)
     monkeypatch.setattr(tg.Telegraph, "_append", fail_settle)
     d, cfg = str(tmp_path / "d"), str(write(tmp_path))
     code, text = run(["ask", "--problem", "p", *files(tmp_path), "--dir", d, "--telegraph-config", cfg], tmp_path,
@@ -340,8 +343,7 @@ def test_the_usage_line_names_calls_with_no_known_cost_not_only_missing_prices(t
 
 def test_the_cli_forwards_its_injected_home_to_the_telegraph_command(tmp_path):
     ledger = tmp_path / "fakehome" / ".cache" / "tt-orchard" / "telegraph"
-    ledger.mkdir(parents=True)
-    (ledger / "telegraph.jsonl").write_text(json.dumps({"reserve": "c1", "problem": "p", "tokens": 5, "cost_usd": None}) + "\n")
+    seed_ledger(ledger, [{"reserve": "c1", "problem": "p", "tokens": 5, "cost_usd": None}])
     out = io.StringIO()
     code = cli.main(["telegraph", "usage", "--telegraph-config", str(write(tmp_path))],
                     env={"HOME": str(tmp_path / "fakehome")}, stdout=out)

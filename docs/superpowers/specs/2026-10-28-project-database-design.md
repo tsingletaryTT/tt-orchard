@@ -1,8 +1,9 @@
 # A project database for tt-orchard: what moves, what gets indexed, what stays a file
 
-Status: design note with a proof of the riskiest claim. No production module is changed. The proof is
-`orchard/_proofs/telegraph_sqlite.py` with `tests/test_proof_telegraph_sqlite.py` and
-`tests/test_proof_telegraph_sqlite_invariants.py`; the product does not import it.
+Status: the telegraph part is implemented (section 14 says how, and where the implementation differs from this note). The note was
+written as a design with a proof of the riskiest claim: `orchard/_proofs/telegraph_sqlite.py` with
+`tests/test_proof_telegraph_sqlite.py` and `tests/test_proof_telegraph_sqlite_invariants.py`; the product does not import the proof. The
+speed baseline (section 1, row 3), the virtual spend index and the runs index are not built.
 Date: 2026-10-28. Version of the repository when written: 0.9.37.
 
 The operator's question: "if a little sqlite DB inside this project helps everything run smoothly THEN BY ALL MEANS let's do it."
@@ -25,10 +26,9 @@ when its guard was removed (section 9). A change to the real migration that drop
 
 ### Requirements for the real migration (second review pass)
 
-The second review pass found four more problems that are about order of steps and crash recovery. They are recorded as
-requirements and are not built in the proof. Each has a placeholder in the proof's test file, marked `xfail(strict=True)`:
-it fails today, and when the migration PR writes the real test under the same name the marker has to come off (a strict
-xfail that passes is an error), so the tests cannot be forgotten. Where sections 8 and 10 describe a shorter sequence, the
+The second review pass found four more problems that are about order of steps and crash recovery. They were recorded as
+requirements and were not built in the proof. Each had a placeholder in the proof's test file, marked `xfail(strict=True)`. The migration
+replaced each placeholder with a real test of the same name (see section 14). Where sections 8 and 10 describe a shorter sequence, the
 step orders below take precedence.
 
 Two mediums from the same pass were fixed in the proof: an `OperationalError` from a statement inside a transaction body
@@ -57,8 +57,8 @@ Confirming clears the row, then removes the marker (and syncs the directory); bo
 | 5 | Write the `unreconciled` row (mirror) | marker, database with row | Same |
 | 6 | A person confirms: delete the row, then the marker | no marker | Crash between the two: marker remains, refusal continues, confirm again |
 
-test: to be written with the migration (named: `test_I7_recovery_state_is_on_disk_before_a_replacement_database_exists_and_every_opener_honours_it`). It kills
-the opener after each step, opens again from a second process, and asserts that no reservation is granted before step 6.
+test: written with the migration (`test_I7_recovery_state_is_on_disk_before_a_replacement_database_exists_and_every_opener_honours_it`). It kills
+the opener with SIGKILL after each step, opens again from a second process, and asserts that no reservation is granted before step 6.
 
 **I8. A restore is staged, marked, and installed under exclusion.**
 Failure: the first version copied the backup into place and marked it unconfirmed afterwards. A crash or a concurrent opener
@@ -79,7 +79,7 @@ file, and only then published with one atomic `rename`. The marker file of I7 is
 
 At no step is there a valid live file that is neither marked nor covered by the marker. The old live file and its WAL are kept
 (never deleted) so a person can compare.
-test: to be written with the migration (named: `test_I8_a_staged_restore_is_marked_before_installation_and_a_crash_at_any_step_leaves_reservations_refused`).
+test: written with the migration (`test_I8_a_staged_restore_is_marked_before_installation_and_a_crash_at_any_step_leaves_reservations_refused`).
 
 **I9. The migration recovers sidecars and torn fragments, or refuses.**
 Failure: the migration and its equality check ignore `telegraph.jsonl.torn-*` sidecars with no note and a malformed
@@ -91,9 +91,8 @@ passed to the command). Then import, so every `torn` record is a row in `torn`. 
 number of sidecar files equals the number of `torn` rows, and the accounting totals include them (the check already compares
 `accounted_calls`, which counts torn rows). A malformed line that is not the last line is not recoverable: the migration
 refuses and prints the line numbers, and a person can pass `--accept-malformed N` with the count they inspected.
-test: to be written with the migration (named: `test_I9_orphaned_sidecars_and_malformed_fragments_are_recovered_or_block_the_migration`). The scenario set of the proof
-already contains a torn tail written by the real `Telegraph`; the new test adds an orphan sidecar with no note, a trailing
-fragment, and a malformed middle line.
+test: written with the migration (`test_I9_orphaned_sidecars_and_malformed_fragments_are_recovered_or_block_the_migration`). It builds an orphan sidecar with
+no note, a trailing fragment, and a malformed middle line, with the real old `Telegraph`.
 
 **I10. The cutover is resumable at every step, and no phase lets a writer send into a second history.**
 Failure: the first version did the import in a transaction, then renamed, then made the sentinel and the marker. A crash or a
@@ -119,8 +118,8 @@ cannot append meanwhile.
 The only window the lock does not cover is a crash between steps 4 and 5, when no file of that name exists. The rule above
 closes it from the new-code side (the guard refuses) and from the resume side (step 5 is repeated first). An old process that
 creates the file in that window is detected and is not prevented; the check is the guard of step 4.
-test: to be written with the migration (named: `test_I10_a_crash_at_any_step_of_the_cutover_resumes_and_no_phase_lets_a_writer_send_into_a_second_history`). It kills the command after each
-step, resumes, and runs the real old `Telegraph` against the directory at each crash point.
+test: written with the migration (`test_I10_a_crash_at_any_step_of_the_cutover_resumes_and_no_phase_lets_a_writer_send_into_a_second_history`). It kills the
+command with SIGKILL after each step, runs the real old `Telegraph` and the new one against the directory at each crash point, and resumes.
 
 ## 1. Answer and cost-benefit table
 
@@ -621,3 +620,39 @@ in a 0700 directory, outside the repository, and `.gitignore` is not needed beca
   tests the sentinel, which holds even when that check is missed.
 * The count of review findings by class is my reading of the inline comments; no tool produced them. Counts are 14 of 42 (PR 106),
   about 8 of 23 (PR 111), about 11 of 18 (PR 115).
+
+## 14. Implementation status (the telegraph migration)
+
+Built: `orchard/db.py` (the access layer), `orchard/telegraph_store.py` (the telegraph operations), `orchard/telegraph_migrate.py` (the
+importer and the cutover), `orchard/db_cmd.py` (`tt-orchard db status | migrate telegraph | export telegraph | backup | restore |
+confirm-restore`). `telegraph.py`, `telegraph_cmd.py`, `telegraph_view.py` and `spend_cmd.py` read and write the ledger through the
+store. The code for the jsonl format that is left is the importer and the reader of an archived file for `db export --from-archive`;
+a frozen copy of the old `Telegraph` lives in `tests/legacy_telegraph.py` so the tests can run the real old writer. A repository
+test (`tests/test_no_sql_outside_the_database_layer.py`) fails on SQL, or an import of `sqlite3`, in any other module.
+
+Where the implementation differs from the text above, and why:
+
+* One database per telegraph state directory, `<dir>/project.db`. Section 3 proposed one file in `~/.cache/tt-orchard/db/` with the directory as a scope.
+  The state directory is the one `[telegraph] dir`, `$ORCHARD_TELEGRAPH_DIR` or `--dir` names (issue 133), so the markers, the sentinel,
+  `open.lock`, `db.users`, the backups and the reply files all live beside the ledger they protect, and a per-run ledger keeps travelling
+  with its run directory (the open question in section 13). `scope` is still the first column of every key and every lookup (I1). The
+  `[database] dir` setting and `ORCHARD_DB_DIR` of section 3 are not built. `index.db` and the other tables of section 1 are not built.
+* No `telegraph_calls` projection and no `telegraph_effective` view. The accounting is `telegraph.accounting` run over the records of
+  one scope, read in `seq` order, so every total, every refusal sentence and every floating-point sum is the function the jsonl ledger used,
+  adding in ledger order (issue 153, second point: the sums are not taken in SQL, and a test compares them exactly with the old code's
+  sums). There is no `telegraph_torn` table: a torn note is an event of kind `torn`.
+* Reads for a page are one read transaction (`telegraph_store.read_snapshot`), and the page never creates, recovers or migrates a file.
+  The page's cache key is the newest `seq`, the record count, the `meta` rows and the guard names (file times are not used).
+* A schema version above the program's is rejected twice: before the migration, and again after the write lock is taken (issue 153, first
+  point). A file at the current version that is missing a table is refused and not moved aside (the integrity check cannot see it).
+* Recovery opens the newest backup that passes its own check, staged and marked inside the staging file, as section 8 says; with no usable
+  backup it starts empty and unconfirmed. A `-wal` file is kept under a second name (a hard link) while a possibly damaged file is opened,
+  because SQLite deletes it when the connection that failed to open the file closes.
+* The migration does the malformed-line and totals checks before it writes `MIGRATING-TO-SQLITE`, and removes the marker again when the
+  start is refused, so a refused start leaves no marker. It refuses a ledger larger than 16 MiB (the page refuses that size as well).
+* `confirm-restore` opens the database with its full recovery, refuses when a migration did not finish or the integrity check fails, charges
+  every reply file that has no record at the worst case, then confirms. `--note` is required.
+* Not built: the check that no supervisor has an open run that uses the directory (the note called it a requirement "if cheap"). The old
+  `telegraph.lock` is held for the whole command and the sentinel refuses old writers, which is the protection the note relies on.
+* Not built: the second equality check against the provider's usage page (it cannot be automated); a repository refusal of a state
+  directory inside the checkout.

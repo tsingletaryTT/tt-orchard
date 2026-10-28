@@ -12,15 +12,15 @@ from pathlib import Path
 import pytest
 
 from orchard import cli, spend_cmd
+from ledger_io import seed_ledger, seed_lines
 from test_virtualspend import turn, write_log
 
 BASE = 'runs_root = "runs"\n[coder]\ntarget = "org/coder"\nkind = "bundle"\nprofile = "p300"\nport = 8001\nchips = 2\n'
 
 
 def real_ledger(directory, cost=0.25):
-    directory.mkdir(parents=True, exist_ok=True)
-    (directory / "telegraph.jsonl").write_text(json.dumps(
-        {"call_id": "c1", "outcome": "ok", "tokens_in": 100, "tokens_out": 50, "cost_usd": cost, "model": "m", "problem": "p"}) + "\n")
+    seed_ledger(directory, [
+        {"call_id": "c1", "outcome": "ok", "tokens_in": 100, "tokens_out": 50, "cost_usd": cost, "model": "m", "problem": "p"}])
 
 
 def run(tmp_path, argv, config_text=None):
@@ -148,8 +148,7 @@ def test_an_unreadable_real_ledger_does_not_stop_the_local_figure(tmp_path, prob
 
 def test_a_real_ledger_calls_with_no_price_are_said(tmp_path, probe):
     d = tmp_path / "tg"
-    d.mkdir()
-    (d / "telegraph.jsonl").write_text(json.dumps({"call_id": "c1", "outcome": "ok", "tokens_in": 1, "tokens_out": 1, "model": "m", "problem": "p"}) + "\n")
+    seed_ledger(d, [{"call_id": "c1", "outcome": "ok", "tokens_in": 1, "tokens_out": 1, "model": "m", "problem": "p"}])
     code, text = run(tmp_path, [str(probe), "--dir", str(d)])
     assert "(+ 1 calls with no price)" in text
 
@@ -309,14 +308,13 @@ def test_runs_root_comes_from_the_bringup_config_even_when_the_tables_file_is_a_
 # ---- review (sixth round): a ledger that cannot be read is unknown spend, and unsettled spend is shown apart ----------------
 
 def _write_records(directory, records):
-    directory.mkdir(parents=True, exist_ok=True)
-    (directory / "telegraph.jsonl").write_text("".join(json.dumps(r) + "\n" for r in records))
+    seed_ledger(directory, records)
 
 
 def test_an_unreadable_ledger_is_unknown_helper_spend_not_zero(tmp_path, probe):
     ledger = tmp_path / "tg"
     ledger.mkdir()
-    (ledger / "telegraph.jsonl").mkdir()                                  # a read raises IsADirectoryError
+    (ledger / "project.db").mkdir()                                       # the database file is a directory: a read is refused
     code, text = run(tmp_path, [str(probe), "--dir", str(ledger)])
     real = text[text.index("REAL helper spend"):text.index("LOCAL virtual spend")]
     assert code == 0
@@ -328,7 +326,7 @@ def test_an_unreadable_ledger_is_unknown_helper_spend_not_zero(tmp_path, probe):
 def test_an_unreadable_ledger_is_unknown_in_the_json_too(tmp_path, probe):
     ledger = tmp_path / "tg"
     ledger.mkdir()
-    (ledger / "telegraph.jsonl").mkdir()
+    (ledger / "project.db").mkdir()
     code, text = run(tmp_path, [str(probe), "--json", "--dir", str(ledger)])
     data = json.loads(text)
     assert code == 0 and "cannot be read" in data["real_helper_spend"]["error"]
@@ -589,8 +587,7 @@ def test_a_total_that_is_not_finite_is_unknown_in_the_text_and_the_json(tmp_path
 # ---- review (seventh round): damaged ledger numbers are unknown spend, and estimates are not confirmed charges ---------------
 
 def _write_raw(directory, lines):
-    directory.mkdir(parents=True, exist_ok=True)
-    (directory / "telegraph.jsonl").write_text("".join(l + "\n" for l in lines))
+    seed_lines(directory, lines)
 
 
 @pytest.mark.parametrize("cost", ["NaN", "Infinity", "-Infinity", "-0.5"], ids=["nan", "inf", "-inf", "negative"])

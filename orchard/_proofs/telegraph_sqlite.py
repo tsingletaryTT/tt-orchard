@@ -598,7 +598,7 @@ def _shape(summary: dict, acct: dict) -> dict:
 def compare(directory, db: Ledger, scope: str = DEFAULT_SCOPE) -> dict:
     """The jsonl ledger's totals and the database's totals, and whether they are equal."""
     from orchard import telegraph as tg
-    recs = tg.read_ledger(Path(directory))
+    recs = _read_jsonl(directory)[0]                      # the old jsonl ledger, read as the old code read it
     want = _shape(tg.summarise_records(recs), tg.accounting(recs))
     got = _shape(db.totals(scope), db.accounting(scope))
     return {"equal": want == got, "jsonl": want, "sqlite": got}

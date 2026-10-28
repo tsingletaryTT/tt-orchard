@@ -14,6 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from ledger_io import corrupt_stored_record, seed_ledger
 from orchard import telegraph as tg
 from orchard import telegraph_view as view
 from test_webui import Served, make_app, TOKEN, write_ledger
@@ -345,11 +346,8 @@ def test_a_call_reported_as_not_helping_says_so(root, tmp_path):
 
 def test_the_recent_list_is_bounded(root, tmp_path):
     cfg, d, _ = setup(tmp_path)
-    d.mkdir()
-    with (d / "telegraph.jsonl").open("w") as fh:
-        for i in range(500):
-            fh.write(json.dumps({"call_id": f"c{i:04d}", "problem": "p", "model": "m", "ts": 1.0 + i, "outcome": "ok",
-                                 "tokens_in": 1, "tokens_out": 1, "cost_usd": 0.001, "latency_s": 0.1}) + "\n")
+    seed_ledger(d, [{"call_id": f"c{i:04d}", "problem": "p", "model": "m", "ts": 1.0 + i, "outcome": "ok",
+                     "tokens_in": 1, "tokens_out": 1, "cost_usd": 0.001, "latency_s": 0.1} for i in range(500)])
     out = app_for(root, cfg).telegraph()
     assert len(out["recent"]) == view.RECENT_MAX == 50
     assert out["recent"][0]["call_id"] == "c0499"
@@ -374,16 +372,14 @@ def test_breakdowns_by_model_and_by_problem_are_lists_with_tokens_and_cost(root,
 def test_a_malformed_line_never_breaks_the_page(root, tmp_path):
     cfg, d, tel = setup(tmp_path)
     tel.ask("p", "task " * 80, "failed")
-    with (d / "telegraph.jsonl").open("ab") as fh:
-        fh.write(b"{not json\n\xff\xfe\n[1,2]\n")
+    corrupt_stored_record(d)                                  # a stored record that is not JSON (the file was edited by hand)
     out = app_for(root, cfg).telegraph()
-    assert out["summary"]["calls"] == 1 and out["error"] is None
+    assert out["state"] == "problem" and out["error"] and out["meter"]["text"].endswith("spend unknown")
 
 
 def test_a_record_with_values_of_the_wrong_type_gives_an_error_and_not_a_crash(root, tmp_path):
     cfg, d, tel = setup(tmp_path)
-    d.mkdir(exist_ok=True)
-    (d / "telegraph.jsonl").write_text(json.dumps({"call_id": "x", "outcome": "ok", "tokens_in": "lots", "model": "m"}) + "\n")
+    seed_ledger(d, [{"call_id": "x", "outcome": "ok", "tokens_in": "lots", "model": "m"}])
     out = app_for(root, cfg).telegraph()
     assert out["state"] == "problem" and "ledger" in out["error"]
     assert out["recent"] == []
@@ -392,7 +388,7 @@ def test_a_record_with_values_of_the_wrong_type_gives_an_error_and_not_a_crash(r
 def test_a_huge_ledger_is_not_read(root, tmp_path):
     cfg, d, _ = setup(tmp_path)
     d.mkdir()
-    with (d / "telegraph.jsonl").open("wb") as fh:
+    with (d / "project.db").open("wb") as fh:
         fh.truncate(view.LEDGER_MAX_BYTES + 1)
     out = app_for(root, cfg).telegraph()
     assert out["state"] == "problem" and "too large" in out["error"]
@@ -400,12 +396,11 @@ def test_a_huge_ledger_is_not_read(root, tmp_path):
 
 def test_strings_from_the_ledger_are_redacted(root, tmp_path):
     cfg, d, _ = setup(tmp_path)
-    d.mkdir()
     rec = {"call_id": "c1", "problem": "/home/someone/secret sk-abcdefghijklmnopqrstuvwx", "model": "m", "ts": 1.0,
            "outcome": "error", "reason": "Bearer abcdefghijkl failed at /home/someone/x on quietbox",
            "tokens_in": 1, "tokens_out": 1, "cost_usd": 0.0, "latency_s": 0.1,
            "reply_file": "replies/c1.txt", "prompt_sha256": "ab" * 32}
-    (d / "telegraph.jsonl").write_text(json.dumps(rec) + "\n")
+    seed_ledger(d, [rec])
     app = app_for(root, cfg)
     app.hostname = "quietbox"
     app.home = "/home/someone"
@@ -455,7 +450,7 @@ def test_there_is_no_way_to_post_to_it_and_the_view_makes_no_request(root, tmp_p
         code, _, _ = s.post("/api/telegraph", {})
         assert code in (404, 405)
     assert sent == []
-    assert not (d / "telegraph.jsonl").exists()                # nothing was written either
+    assert not (d / "project.db").exists()                     # nothing was written either
 
 
 # ---- one run's own spend ----------------------------------------------------------------------------------------
@@ -478,9 +473,9 @@ def test_a_run_without_a_ledger_has_no_telegraph_field_value(root, tmp_path):
 
 def test_a_linked_run_ledger_is_not_followed(root, tmp_path):
     run = write_ledger(root / "org--c", ("stage_start", 0, {}))
-    outside = tmp_path / "outside.jsonl"
-    outside.write_text(json.dumps({"call_id": "z", "outcome": "ok", "tokens_in": 1, "tokens_out": 1}) + "\n")
-    (run / "telegraph.jsonl").symlink_to(outside)
+    outside = tmp_path / "outside.db"
+    outside.write_text("")
+    (run / "project.db").symlink_to(outside)
     cfg, d, _ = setup(tmp_path)
     assert app_for(root, cfg).run_detail("org--c")["telegraph"] is None
 

@@ -6,6 +6,7 @@ import math
 
 import pytest
 
+from ledger_io import seed_lines
 from orchard import telegraph_view as view
 from test_telegraph_view import app_for, setup
 from test_telegraph_view_review import ok_record, reserve_record, write_records
@@ -22,8 +23,7 @@ def root(tmp_path):
 # ---- 1. a number that is not finite is a damaged ledger -------------------------------------------------------------------
 
 def write_raw(d, lines):
-    d.mkdir(parents=True, exist_ok=True)
-    (d / "telegraph.jsonl").write_text("".join(lines))
+    seed_lines(d, [l for l in lines if l.strip()])
 
 
 @pytest.mark.parametrize("field", ["cost_usd", "tokens_in", "tokens_out", "latency_s", "ts"])

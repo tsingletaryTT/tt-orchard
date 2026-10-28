@@ -1811,12 +1811,14 @@ max_calls_per_problem = 3                    # one problem (the id passed to ask
 The key is read when a call is made and is never written to a prompt, ledger, cache, reply file or error. A `key_file` inside the
 checkout is refused. Requests hold only the task and the failure, with home paths, host names and token shapes removed, cut to
 `max_prompt_chars`. The same question to the same model is answered from the cache. A stronger model is used only after an answer
-was reported as not helping. Before a request is sent, its worst-case cost is reserved in the ledger under a lock, so two processes cannot spend the same allowance and a process that dies mid-request still counts. A request whose usage is unknown (a timeout, a server error, an answer with no usage) counts at that worst case. If the ledger cannot be written, no outside call is made. Keep the problem id the same across rounds of one problem, so the per-problem caps see the whole spend. On ops where a stronger
+was reported as not helping. Before a request is sent, its worst-case cost is reserved in the ledger in one database transaction (the check and the reservation together), so two processes cannot spend the same allowance and a process that dies mid-request still counts. A request whose usage is unknown (a timeout, a server error, an answer with no usage) counts at that worst case. If the ledger cannot be written, no outside call is made. Keep the problem id the same across rounds of one problem, so the per-problem caps see the whole spend. On ops where a stronger
 model does not help (earlier runs on `linear_scan` spent $0.83 on one model without a fix), these caps stop the spending. A reply's `<think>` block is removed before it is stored, and an answer cut off inside its reasoning is a failed call (its tokens still
 count against the caps and it is not cached); `extra_body` is how to turn thinking off for a model that thinks by default. The reply is advice from another model and is shown marked as untrusted text; nothing runs it.
 
-Every call, refusal and cache hit is one line in `telegraph.jsonl` (model, tokens, seconds, cost when a price is known, outcome).
-`telegraph report` records whether the answer helped, and `telegraph usage` shows what the help cost and how often it worked.
+Every call, refusal and cache hit is one record in the ledger (model, tokens, seconds, cost when a price is known, outcome). The ledger
+and the answer cache are in one SQLite database, `project.db`, in the telegraph state directory (see "The ledger database" below); before
+the database existed the ledger was a `telegraph.jsonl` file. `telegraph report` records whether the answer helped, and `telegraph usage` shows
+what the help cost and how often it worked.
 
 - `tt-orchard telegraph check`: the setting and whether the key is present (never the key). Exit 2 on a problem.
   - `--ping`: also ask the endpoint for its model list, which spends no tokens, and mark each configured model listed or not.
@@ -1826,18 +1828,74 @@ Every call, refusal and cache hit is one line in `telegraph.jsonl` (model, token
   - `--failure-file`: a file saying what went wrong.
 - `tt-orchard telegraph report CALL_ID`: record whether an answer helped, with `--helped` or `--not-helped`.
 - `tt-orchard telegraph usage`: calls, tokens, cost and how often the help worked (`--json` for the raw summary).
-- `--telegraph-config`: read the table from another TOML file (default: the bringup config). `--dir`: where the ledger,
-  cache and reply files live (default `~/.cache/tt-orchard/telegraph`).
+- `--telegraph-config`: read the table from another TOML file (default: the bringup config). `--dir`: the state directory, which holds the
+  database, the reply files and the old cache (default `~/.cache/tt-orchard/telegraph`).
 - `dir` in the `[telegraph]` table sets that folder for the commands and for the web page (a relative path is against the
-  config file's folder). `--dir` on a command still wins.
+  config file's folder). `--dir` on a command still wins. The order is `--dir`, then `dir` in the table, then the environment variable
+  `ORCHARD_TELEGRAPH_DIR` (an absolute path), then the default under the caller's home. A shell that an agent runs has a `HOME` inside the
+  run directory, so it never takes the last choice: the supervisor passes `ORCHARD_TELEGRAPH_DIR` on to agent shells, and an agent shell
+  that has no configured directory stops with a message and does not open a second ledger. All callers therefore share one set of caps.
 - In the web page (`tt-orchard ui`) a spend meter sits in the top bar in every view and both styles (pinned along the bottom edge on screens up to 900 px wide): the dollars spent, the number
   of calls and the cap that is closest to its limit. It is grey when telegraph is off, amber when any cap is at 80 percent or more, and
   red when a cap is used up or the latest call was refused, with the reason. A call with no known price shows as unknown cost, and
   the meter says "spend unknown" when the page cannot read it. Clicking the meter opens the Telegraph view: the settings (the endpoint's
   host only, the models with prices, the caps and how much of each is used, whether the key is present but never the key), the recent
   calls with their outcome and whether they helped, and the totals by model and by problem. The view only reads the ledger
-  (`GET /api/telegraph`). It sends nothing to the helper and spends nothing. A run directory that holds its own `telegraph.jsonl`
-  shows that run's spend under its title.
+  (`GET /api/telegraph`). It sends nothing to the helper and spends nothing, and it reads the whole ledger in one database transaction, so
+  the totals and the list of calls describe the same moment. A run directory that holds its own ledger (`project.db`) shows that run's
+  spend under its title. When the ledger is unconfirmed after a restore (see below) the meter is red and says so.
+
+#### The ledger database
+
+The ledger is the `telegraph_events` table of `project.db`, with one row per record in the order the records were made. The cache of
+answers is the `telegraph_cache` table. Both have the ledger's scope as the first column of their key, so a cached answer is never
+served to another scope (a scope is `default` unless a caller names one). Totals are computed from the records in ledger order, the same
+way the jsonl ledger computed them, so the dollar figures are equal to the last digit. The directory is created with mode 0700 and the
+files in it are 0600; a directory that is a link or belongs to another user is refused. The database must be on a local disk (it uses
+WAL). The reply files stay files in `replies/`.
+
+- `tt-orchard db status`: the directory, the schema version, the number of records, the migration phase, whether the ledger is
+  unconfirmed, and the backups.
+- `tt-orchard db export telegraph`: writes the ledger as jsonl on standard output, one line per record, the lines the old file held.
+  `--from-archive` reads `telegraph.jsonl.archived` instead (see the migration below). `--scope` names a scope other than `default`.
+- `tt-orchard db backup`: an online backup into `backups/` (the newest 14 are kept). A backup is also taken when the newest is older than
+  an hour and the database holds records, and always before a schema migration.
+
+Moving an existing `telegraph.jsonl` into the database is one command, run with the harness stopped:
+
+```
+tt-orchard db migrate telegraph --dir ~/.cache/tt-orchard/telegraph --dry-run     # check; changes nothing
+tt-orchard db migrate telegraph --dir ~/.cache/tt-orchard/telegraph
+```
+
+The dry run reads the ledger and the cache entries, imports them into a throw-away in-memory database and prints the totals and the checks.
+The real run takes the old `telegraph.lock` and holds it to the end, writes `MIGRATING-TO-SQLITE`, recovers the ledger (a cut-off last
+line moves to a `telegraph.jsonl.torn-*` sidecar file, and every sidecar that has no note gets one that counts as a call of the
+configured size), imports every record and `cache/*.json` in one transaction and compares the totals, the per-problem rows, the lines
+and the sidecar count with the file (a difference rolls everything back and changes nothing), renames `telegraph.jsonl` to
+`telegraph.jsonl.archived`, makes a directory named `telegraph.jsonl` that an old writer cannot append to, and writes
+`MIGRATED-TO-SQLITE`. Nothing is deleted. A line that is not a record and is not the last line cannot be recovered; the command prints the
+line numbers and stops, and `--accept-malformed` (with the count) goes on when that count is the number of lines a person inspected (those lines were never counted by the
+old code either). If the command is killed at any step, run it again: it resumes from the recorded phase, and a regular
+`telegraph.jsonl` that an old process recreated next to the archive stops it with a message. A migrated directory refuses a second
+migration, and an old writer that finds the directory refuses to run and sends nothing.
+
+Recovery after a damaged or lost database. A file that fails SQLite's integrity check (or that SQLite calls malformed or not a
+database) is moved aside with its `-wal` and `-shm` files as `project.db.corrupt-*`, and the newest backup that passes its own check
+becomes the new `project.db`. Any other error (a busy file, a full disk, an input or output error) is a retry and moves nothing.
+A restored, replaced or recreated database may lack calls made after its backup, so it is unconfirmed: `RECOVERY-REQUIRED` is written
+first, every reservation is refused, and a `telegraph ask` says so. To recover by hand:
+
+1. `tt-orchard db status` shows the state. Stop the supervisor, the web page and any telegraph command first: a restore refuses while another
+   process has the database open.
+2. `tt-orchard db restore backups/project-....db` puts a chosen backup in place. The old file and its `-wal` are kept as
+   `project.db.replaced-*`. The ledger is then unconfirmed.
+3. Find what is missing. Compare with the archive (`tt-orchard db export telegraph --from-archive`) and with the provider's usage page. Calls
+   that failed or timed out leave no reply file, so only the provider can show them.
+4. `tt-orchard db confirm-restore --note "how I checked"` ends the unconfirmed state. It first opens the database with its full recovery, refuses
+   when the integrity check fails or a migration did not finish, adds a reservation at the worst case for every `replies/<id>.txt` that has no
+   ledger record (`--no-replies` skips that), then clears the row and removes `RECOVERY-REQUIRED`. Only this command lets calls go out again. If it
+   is killed between the two clears, the marker keeps refusing and running it again finishes.
 
 ### 5.9h Virtual spend: what the local models would cost at a hosted price
 
@@ -1849,7 +1907,7 @@ The agent logs hold one object per turn with `usage` (`prompt_tokens`, `completi
 conversation, so the prompt count is large. A hosted provider with prompt caching would bill most of those repeated tokens for much
 less, so the figure is a comparison figure only. The reader counts these sources: `log/*.jsonl` agent logs (a kernel-probe attempt,
 a bring-up stage) and the benchmark proxy's `requests.jsonl`. A turn that names a helper (a `call_id`, or `origin`, `source` or
-`helper` set to telegraph or helper) is left out and counted, and `telegraph.jsonl` is never read. A malformed line, bytes that
+`helper` set to telegraph or helper) is left out and counted, and the helper's ledger is never read. A malformed line, bytes that
 are not UTF-8, a line over 2 MiB (its usage is read from the end of the line when it is there), a turn with no token counts, a link
 and a file over the read caps are counted and shown as "Left out". The reader never raises and never follows links.
 

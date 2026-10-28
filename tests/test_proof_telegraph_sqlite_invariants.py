@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from orchard import telegraph as tg
+import legacy_telegraph as tg                 # the jsonl implementation, frozen: the proof compares against it
 from orchard._proofs import telegraph_sqlite as proof
 from test_proof_telegraph_sqlite import KEY, Wire, table, telegraph  # noqa: F401 - shared helpers
 
@@ -572,28 +572,111 @@ def test_i6_the_totals_stay_right_across_offsets_that_are_and_are_not_multiples_
     db.close()
 
 
-# --- requirements I7 to I10 (Copilot review round 2): to be written with the migration -----------------------------------
-# Each placeholder is a strict xfail: it fails today because nothing implements the requirement. When the migration PR
-# writes the real test under the same name, the marker has to come off, because a passing strict xfail is an error.
+# --- requirements I7 to I10 (Copilot review round 2): written with the migration -------------------------------------------------
+# The proof module above is the evidence for I1 to I6. I7 to I10 are about order of steps and crash recovery, and they are tested on
+# the real code (orchard/db.py, orchard/telegraph_store.py, orchard/telegraph_migrate.py): each test below kills a child process
+# with SIGKILL after every step of the table in the design note, starts a second process, and checks the table's last column. The
+# placeholders that stood here were strict xfails, so these cannot be forgotten.
 
-MIGRATION = pytest.mark.xfail(strict=True, reason="requirement of the design note, to be written with the migration")
-
-
-@MIGRATION
-def test_I7_recovery_state_is_on_disk_before_a_replacement_database_exists_and_every_opener_honours_it():
-    pytest.fail("to be written with the migration: kill at each step of the replacement sequence (design note, I7)")
-
-
-@MIGRATION
-def test_I8_a_staged_restore_is_marked_before_installation_and_a_crash_at_any_step_leaves_reservations_refused():
-    pytest.fail("to be written with the migration: kill at each step of the restore sequence (design note, I8)")
+from dbtools import KILLED, run_child
+from dbtools import make_history as product_history
+from orchard import db as product_db
+from orchard import telegraph_migrate as product_migrate
+from orchard import telegraph_store as product_store
 
 
-@MIGRATION
-def test_I9_orphaned_sidecars_and_malformed_fragments_are_recovered_or_block_the_migration():
-    pytest.fail("to be written with the migration: sidecars and a torn tail counted, or the migration refuses (design note, I9)")
+def second_process_asks(directory, call_id="probe"):
+    """A fresh process opens the directory and asks for one reservation. Returns the line it printed."""
+    done = run_child("probe", directory, "-", call_id)
+    assert done.returncode == 0, done.stderr
+    return done.stdout.strip()
 
 
-@MIGRATION
-def test_I10_a_crash_at_any_step_of_the_cutover_resumes_and_no_phase_lets_a_writer_send_into_a_second_history():
-    pytest.fail("to be written with the migration: kill at each step of the cutover, then resume (design note, I10)")
+def test_I7_recovery_state_is_on_disk_before_a_replacement_database_exists_and_every_opener_honours_it(tmp_path):
+    for step in ("recover:1", "recover:2", "recover:3", "recover:4", "recover:5"):
+        d = product_history(tmp_path / step.replace(":", "-"), 3)
+        (d / "project.db").write_bytes(b"garbage" * 1000)                 # step 1: decide that recovery is needed
+        for suffix in ("-wal", "-shm"):
+            (d / ("project.db" + suffix)).unlink(missing_ok=True)
+        assert run_child("recover", d, step).returncode == KILLED, step
+        marker = d / "RECOVERY-REQUIRED"
+        assert marker.exists() == (step != "recover:1"), step              # from step 2 the marker is the authority
+        if step in ("recover:2", "recover:3"):
+            assert not any(p.name == "project.db" and p.stat().st_size for p in d.iterdir()) or step == "recover:2"
+        answer = second_process_asks(d)                                    # a second process opens and asks: never granted
+        assert answer.startswith("REFUSED") and "confirm" in answer, (step, answer)
+        assert marker.exists()
+        with product_db.Database(d) as db:                                 # step 6: only a person's confirmation clears it
+            assert db.confirm_reconciled("checked") is True
+        assert second_process_asks(d, "after-confirm") == "GRANTED"
+        assert not marker.exists()
+
+
+def test_I8_a_staged_restore_is_marked_before_installation_and_a_crash_at_any_step_leaves_reservations_refused(tmp_path):
+    for step in ("restore:1", "restore:2", "restore:3", "restore:4", "restore:5"):
+        d = tmp_path / step.replace(":", "-")
+        with product_store.TelegraphStore.open(d) as store:
+            from dbtools import reserve
+            reserve(store, "c0")
+            backup = store.db.backup()
+            for i in range(1, 4):
+                reserve(store, f"c{i}")
+        assert run_child("restore", d, step, backup).returncode == KILLED, step
+        answer = second_process_asks(d)
+        if step == "restore:1":
+            assert answer == "GRANTED" and not (d / "RECOVERY-REQUIRED").exists()      # nothing had changed yet
+        else:
+            assert answer.startswith("REFUSED") and (d / "RECOVERY-REQUIRED").exists(), (step, answer)
+        if step in ("restore:3", "restore:4"):
+            staged = [p for p in d.iterdir() if p.name.startswith("project.db.restore-") and not p.name.endswith(".partial")]
+            assert len(staged) == 1                                        # the staged file is complete, and marked before installation
+        product_db.restore_backup(d, backup)                               # the restart finishes the restore
+        with product_db.Database(d) as db:
+            assert db.unreconciled() is not None
+            db.confirm_reconciled("checked")
+        assert second_process_asks(d, "after") == "GRANTED"
+
+
+def test_I9_orphaned_sidecars_and_malformed_fragments_are_recovered_or_block_the_migration(tmp_path):
+    import legacy_telegraph
+    from test_telegraph_migrate import legacy_directory
+    d = legacy_directory(tmp_path, asks=2)
+    with open(d / "telegraph.jsonl", "ab") as f:
+        f.write(b'{"call_id": "trailing fragment')                          # a write cut short, no line break
+    (d / "telegraph.jsonl.torn-orphan0001").write_bytes(b"orphan, with no note in the ledger")
+    text = (d / "telegraph.jsonl").read_bytes().decode().split("\n")
+    text.insert(1, "{a malformed middle line")
+    (d / "telegraph.jsonl").write_bytes("\n".join(text).encode())
+    with pytest.raises(product_migrate.MalformedLedger) as blocked:         # a malformed line that is not the last is not recoverable
+        product_migrate.migrate(d, max_output_tokens=900)
+    assert blocked.value.lines == [2]
+    assert not (d / "MIGRATING-TO-SQLITE").exists() and not list(d.glob("telegraph.jsonl.torn-*0002"))
+    got = product_migrate.migrate(d, max_output_tokens=900, accept_malformed=1)        # a person inspected it and says so
+    assert got["checks"] == {"lines": True, "totals": True, "sidecars": True, "cache": True}
+    notes = sorted(r["torn"] for r in product_store.read_snapshot(d).records if "torn" in r)
+    sidecars = sorted(p.name for p in d.glob("telegraph.jsonl.torn-*"))
+    assert len(sidecars) == 2 and notes == sidecars                          # every sidecar has exactly one torn row
+    acct = legacy_telegraph.accounting(product_store.read_snapshot(d).records)
+    assert acct["calls"] == 2 + 2 and acct["tokens"] >= 2 * 900            # both fragments count as a call of the configured size
+
+
+def test_I10_a_crash_at_any_step_of_the_cutover_resumes_and_no_phase_lets_a_writer_send_into_a_second_history(tmp_path):
+    from test_telegraph_migrate import check_directory_after_a_crash, legacy_directory, STEPS
+    for step in STEPS:
+        root = tmp_path / step.replace(":", "-")
+        d = legacy_directory(root, asks=2, max_calls=3, max_calls_per_problem=9)
+        assert run_child("migrate", d, step).returncode == KILLED, step
+        _old_answer, sent_old, _new_answer, sent_new, _ = check_directory_after_a_crash(d, root, step)   # the real old Telegraph runs here
+        assert sent_old + sent_new <= 1, step                                  # both wrote into the one allowance, never two histories
+        if (d / "telegraph.jsonl").is_file() and (d / "telegraph.jsonl.archived").exists():
+            with pytest.raises(product_migrate.MigrationRefused):              # an old writer got through the one unlocked window
+                product_migrate.migrate(d)
+            continue
+        if step == "after:6c":
+            with pytest.raises(product_migrate.AlreadyMigrated):
+                product_migrate.migrate(d)
+        else:
+            assert product_migrate.migrate(d)["phase"] == "complete"           # a rerun resumes from the recorded phase
+        records = product_store.read_snapshot(d).records
+        assert tg.accounting(records)["calls"] == 2 + sent_old + sent_new
+        assert (d / "telegraph.jsonl").is_dir() and not (d / "MIGRATING-TO-SQLITE").exists()

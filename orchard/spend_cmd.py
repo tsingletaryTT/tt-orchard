@@ -43,7 +43,7 @@ def _real(directory: Path) -> dict:
     no usage. A ledger that cannot be read is unknown spend and is never shown as an empty history (a missing file is empty)."""
     try:
         recs = tg._read_ledger_strict(Path(directory))
-    except tg.LedgerUnavailable as exc:
+    except tg.LEDGER_ERRORS as exc:
         return {"dir": str(directory), "error": f"the telegraph ledger cannot be read ({exc}); the helper spend is unknown"}
     damaged = {"dir": str(directory), "error": "the telegraph ledger has a record that cannot be read; the helper spend is unknown"}
     try:
@@ -100,7 +100,10 @@ def _config(args, environ, home):
     explicit = getattr(args, "telegraph_config", None)
     tables_path = Path(explicit) if explicit else bringup_path
     if tables_path is None:
-        return vs.Config(), telegraph_cmd.default_dir(home), None, problem
+        try:
+            return vs.Config(), telegraph_cmd.resolve_directory(getattr(args, "dir", None), tg.Config(), environ, home), None, problem
+        except tg.ConfigError as exc:
+            return None, None, None, str(exc)
     try:
         vcfg = vs.load_file(tables_path)
     except vs.ConfigError as exc:
@@ -118,7 +121,11 @@ def _config(args, environ, home):
         except Exception:                                            # noqa: BLE001 - a config that does not load has no runs root
             continue
         break
-    return vcfg, (tcfg.dir or telegraph_cmd.default_dir(home)), runs_root, problem
+    try:
+        ledger = telegraph_cmd.resolve_directory(getattr(args, "dir", None), tcfg, environ, home)    # the choice the ask command makes
+    except tg.ConfigError as exc:
+        return None, None, None, str(exc)
+    return vcfg, ledger, runs_root, problem
 
 
 def main(args, *, out, environ=None, home=None) -> int:

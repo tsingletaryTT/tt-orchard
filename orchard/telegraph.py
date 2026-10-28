@@ -11,8 +11,10 @@ It is built to cost little and to be measured:
   * the same question to the same model is answered from a cache with no request;
   * caps on calls, tokens and cost are read from the ledger, so they hold across processes;
   * a request holds only the task, the failure and what the caller adds, redacted and cut to a cap;
-  * every call, refusal and cache hit leaves one line in `telegraph.jsonl`, and the caller reports back whether the
-    answer helped (`report`), so `summarise` shows what the help cost and what it bought.
+  * every call, refusal and cache hit leaves one record in the telegraph ledger (the project database, orchard/db.py and
+    orchard/telegraph_store.py), and the caller reports back whether the answer helped (`report`), so `summarise` shows what
+    the help cost and what it bought. The ledger was a `telegraph.jsonl` file until it moved to SQLite; `tt-orchard db migrate
+    telegraph` imports an old file and `tt-orchard db export telegraph` writes the old lines back.
 
 The key is read when a call is made, from an environment variable or a file outside the checkout. It is never written
 to the ledger, the cache, a reply file or a reason, and it is removed from any text that is sent.
@@ -22,10 +24,8 @@ Nothing here opens a chip or uses a lease.
 """
 from __future__ import annotations
 
-import contextlib
 import dataclasses
 import difflib
-import fcntl
 import hashlib
 import ipaddress
 import json
@@ -42,11 +42,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from orchard import db as dbm
+from orchard import telegraph_store as store_mod
+from orchard.db import LedgerRefused, LedgerUnavailable
 from orchard.scrub import HOME_PATH, TOKEN_PATTERNS
 
 REPO = Path(__file__).resolve().parents[1]
-LEDGER = "telegraph.jsonl"
-LOCK = "telegraph.lock"
+LEDGER = store_mod.LEDGER                # the old jsonl ledger: only the importer and the guards look for it
+DEFAULT_SCOPE = store_mod.DEFAULT_SCOPE
+LEDGER_ERRORS = (LedgerUnavailable, LedgerRefused)     # every way the ledger can be unusable; callers refuse and send nothing
 REQUEST_FRAMING_TOKENS = 32      # added to the request size for the provider's message framing
 KEYS = {"enabled", "endpoint", "models", "api", "key_env", "key_file", "after_failures", "max_calls",
         "max_total_tokens", "max_cost_usd", "prices", "max_output_tokens", "max_prompt_chars", "timeout_s",
@@ -60,10 +64,6 @@ MAX_BODY = 2 * 1024 * 1024
 SYSTEM = ("A harness is bringing a model up on Tenstorrent hardware. A smaller local model has failed at the task below "
           "more than once. Say what is wrong in a few sentences and give the smallest working change or a short "
           "example. Do not ask questions. If the task cannot be done as described, say why.")
-
-
-class LedgerUnavailable(Exception):
-    """The budget ledger or its lock cannot be written."""
 
 
 class ConfigError(ValueError):
@@ -325,6 +325,34 @@ def cut(text: str, limit: int) -> str:
     return text[:head] + marker + text[len(text) - (room - head):]
 
 
+REPLY_SCOPE_PREFIX = "s~"                    # the folder of a non-default scope under replies/
+REDACTION_EXPANSION = len("[redacted]")      # the most one character can become: a one-character secret replaced by "[redacted]"
+
+
+def worst_case_call(cfg: Config) -> tuple[int, float | None]:
+    """(tokens, dollars) that one call could have cost at most under `cfg`, never less than a reservation can be. The input is the
+    largest request the settings allow: a full-length prompt of characters that JSON escapes to twelve bytes, the request body each
+    model and each API shape builds (so the configured `extra_body` is in it), twice the size of `extra_body` again for what redaction
+    can add, and the framing. The output is `max_output_tokens`. The dollars are priced at the dearest configured model, and are None
+    when a model has no price. Used to charge a reply file that has no ledger record."""
+    prompt = "\U0001F600" * max(cfg.max_prompt_chars - len(SYSTEM), 0)
+    extra = len(json.dumps(cfg.extra_body))
+    biggest = 0
+    for api in APIS:
+        # The body without `extra_body`: the prompt (already cut after redaction), the fixed text and the model. `extra_body` is added at
+        # its worst: redaction replaces each character of a one-character key (or each one-character host name) with up to ten, so the
+        # extra part is counted at ten times its size.
+        probe = Telegraph(dataclasses.replace(cfg, api=api, extra_body={}), "/nonexistent", environ={}, hostname="", home="")
+        for model in cfg.models or ("",):
+            body = probe._request(model, prompt, None)[2]
+            biggest = max(biggest, len(json.dumps(body).encode("utf-8")) + REDACTION_EXPANSION * extra + 1024)
+    worst_in = biggest + REQUEST_FRAMING_TOKENS
+    tokens = worst_in + cfg.max_output_tokens
+    if not cfg.models or any(m not in cfg.prices for m in cfg.models):
+        return tokens, None
+    return tokens, max((worst_in * cfg.prices[m][0] + cfg.max_output_tokens * cfg.prices[m][1]) / 1e6 for m in cfg.models)
+
+
 # ---------------------------------------------------------------------------------------------------- the transport
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -373,38 +401,19 @@ class Answer:
                 + self.text)
 
 
-def _read_ledger_strict(directory: Path) -> list[dict]:
-    """The ledger's records. A missing ledger is an empty history; any other read failure raises LedgerUnavailable, so a
-    transient I/O error cannot look like an empty history and let the caps be passed."""
-    path = Path(directory) / LEDGER
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except FileNotFoundError:
-        return []
-    except OSError as exc:
-        raise LedgerUnavailable(type(exc).__name__) from exc
-    return _parse_ledger(text)
+def _read_ledger_strict(directory: Path, scope: str = DEFAULT_SCOPE) -> list[dict]:
+    """The ledger's records from one read transaction. A directory with no database and no old ledger is an empty history; any
+    other failure raises (LedgerUnavailable, or LedgerRefused for a state a person must fix), so a transient error cannot look like
+    an empty history and let the caps be passed."""
+    return store_mod.read_snapshot(directory, scope).records
 
 
-def _read_ledger(directory: Path) -> list[dict]:
+def _read_ledger(directory: Path, scope: str = DEFAULT_SCOPE) -> list[dict]:
     """The same for display: any read failure shows an empty ledger."""
     try:
-        return _read_ledger_strict(directory)
-    except LedgerUnavailable:
+        return _read_ledger_strict(directory, scope)
+    except LEDGER_ERRORS:
         return []
-
-
-def _parse_ledger(text: str) -> list[dict]:
-    lines = text.splitlines()
-    out = []
-    for line in lines:
-        try:
-            item = json.loads(line)
-        except ValueError:
-            continue
-        if isinstance(item, dict):
-            out.append(item)
-    return out
 
 
 read_ledger = _read_ledger            # public names for the web page (orchard/telegraph_view.py)
@@ -491,11 +500,14 @@ def summarise_records(recs: list[dict]) -> dict:
 
 
 class Telegraph:
-    """One configured helper. `directory` holds the ledger, the cache and the reply files (mode 0600)."""
+    """One configured helper. `directory` is the state directory: it holds the database (the ledger and the answer cache) and
+    the reply files (mode 0600). `scope` names the ledger inside the database; the caps count per scope."""
 
     def __init__(self, config: Config, directory, *, transport: Callable | None = None, environ: dict | None = None,
-                 clock: Callable[[], float] = time.time, hostname: str | None = None, home: str | None = None):
+                 clock: Callable[[], float] = time.time, hostname: str | None = None, home: str | None = None,
+                 scope: str = DEFAULT_SCOPE):
         self.cfg = config
+        self.scope = scope
         self.dir = Path(directory)
         self.transport = transport or http_post
         self.environ = os.environ if environ is None else environ
@@ -511,6 +523,17 @@ class Telegraph:
 
     # ------------------------------------------------------------------------------------------- the ask
 
+    def _reply_name(self, call_id: str) -> str:
+        """Where a reply file goes. The default scope keeps `replies/<id>.txt`; another scope has its own folder, so a reply with no ledger
+        record can be charged to the scope that made it (`tt-orchard db confirm-restore`)."""
+        if self.scope == DEFAULT_SCOPE:
+            return f"replies/{call_id}.txt"
+        return f"replies/{REPLY_SCOPE_PREFIX}{urllib.parse.quote(self.scope, safe='')}/{call_id}.txt"
+
+    def _store(self) -> store_mod.TelegraphStore:
+        """The ledger of this scope. It is opened for one operation and closed after it, so no lock is held across a request."""
+        return store_mod.TelegraphStore.open(self.dir, self.scope)
+
     def ask(self, problem: str, task: str, failure: str) -> Answer:
         """Ask for help with `problem` (a short id the caller chooses, used for the ladder and the summary).
         Always returns an Answer; `ok` False carries a reason and the harness goes on without help."""
@@ -523,60 +546,70 @@ class Telegraph:
         prompt = cut(f"Problem: {problem}\n\nTask:\n{clean(task)}\n\nWhat failed:\n{clean(failure)}",
                      self.cfg.max_prompt_chars - len(SYSTEM))
         sha = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+        unusable = lambda exc, **kw: Answer(                                              # noqa: E731
+            False, reason=f"the budget ledger cannot be written or read ({exc}), so no outside call was made", **kw)
         try:
-            recs = _read_ledger_strict(self.dir)
-        except LedgerUnavailable as exc:
-            return Answer(False, reason=f"the budget ledger cannot be written or read ({exc}), so no outside call was made")
+            store = self._store()
+        except LEDGER_ERRORS as exc:
+            return unusable(exc)
+        try:
+            return self._ask(store, problem, prompt, sha, key, key_problem, secrets, unusable)
+        finally:
+            store.close()
+
+    def _ask(self, store, problem: str, prompt: str, sha: str, key, key_problem, secrets, unusable) -> Answer:
+        try:
+            recs = store.records()
+        except LEDGER_ERRORS as exc:
+            return unusable(exc)
         model = self._choose_model(problem, recs)
         url, _headers, body = self._request(model, prompt, key)
-        identity = json.dumps({"url": url, "body": body}, sort_keys=True)        # no credential in the identity
-        cache = self.dir / "cache" / (hashlib.sha256(identity.encode("utf-8")).hexdigest() + ".json")
-        hit = self._cached(cache)
+        identity = hashlib.sha256(json.dumps({"url": url, "body": body}, sort_keys=True).encode("utf-8")).hexdigest()
         base = {"call_id": uuid.uuid4().hex[:12], "problem": problem, "model": model,
                 "prompt_chars": len(prompt), "prompt_sha256": sha}
+        try:
+            hit = self._cached(store.cache_get(identity))
+        except LEDGER_ERRORS as exc:
+            return unusable(exc)
         if hit is not None:
-            recorded = self._append({**base, "ts": self.clock(), "outcome": "ok", "cached": True,
-                                     "origin": hit.get("call_id"), "tokens_in": 0, "tokens_out": 0, "latency_s": 0.0,
-                                     "cost_usd": 0.0, "reply_file": hit["reply_file"]})
+            recorded = self._append(store, {**base, "ts": self.clock(), "outcome": "ok", "cached": True,
+                                            "origin": hit.get("call_id"), "tokens_in": 0, "tokens_out": 0, "latency_s": 0.0,
+                                            "cost_usd": 0.0, "reply_file": hit["reply_file"]})
             return Answer(True, hit["text"], call_id=base["call_id"], model=model, cached=True, cost_usd=0.0,
                           reason="" if recorded else ("the answer came from the cache but the ledger could not record "
                                                       "this use, so it cannot be reported"))
         if key_problem:
-            return self._refuse(base, "no-key", key_problem)
+            return self._refuse(store, base, "no-key", key_problem)
         worst_in = len(json.dumps(body).encode("utf-8")) + REQUEST_FRAMING_TOKENS     # a token is at least one byte
         price = self.cfg.prices.get(model)
         worst = {"tokens": worst_in + self.cfg.max_output_tokens,
                  "cost": (worst_in * price[0] + self.cfg.max_output_tokens * price[1]) / 1e6 if price else None}
         try:
-            with self._ledger_lock():
-                self._quarantine_torn_tail()
-                acct = _accounting(_read_ledger_strict(self.dir))           # fresh: another process may have spent since
-                why = self._over_budget(model, worst, acct, problem)
-                if why:
-                    return self._refuse(base, "budget", why, held=True)
-                if not self._append({"reserve": base["call_id"], "problem": problem, "model": model,
-                                     "tokens": worst["tokens"], "cost_usd": worst["cost"]}, held=True):
-                    raise LedgerUnavailable("the reservation could not be written")
-        except LedgerUnavailable as exc:
-            return Answer(False, reason=f"the budget ledger cannot be written or read ({exc}), so no outside call was made",
-                          call_id=base["call_id"], model=model)
-        return self._send(base, model, prompt, key, secrets, cache)
+            # One transaction: the unconfirmed check, a fresh read of every record (another process may have spent since), the
+            # caps, and the reservation or the refusal.
+            why = store.reserve(
+                {"reserve": base["call_id"], "problem": problem, "model": model, "tokens": worst["tokens"],
+                 "cost_usd": worst["cost"]},
+                lambda records: self._over_budget(model, worst, _accounting(records), problem),
+                lambda reason: {**base, "ts": self.clock(), "outcome": "budget", "reason": reason, "cached": False,
+                                "tokens_in": 0, "tokens_out": 0, "cost_usd": 0.0})
+        except LEDGER_ERRORS as exc:
+            return unusable(exc, call_id=base["call_id"], model=model)
+        if why:
+            return Answer(False, reason=why, call_id=base["call_id"], model=model)
+        return self._send(store, base, model, prompt, key, secrets, identity)
 
     def report(self, call_id: str, helped: bool, note: str = "") -> None:
         """Say whether the answer to `call_id` helped. A helped answer keeps the cheap model for the next question; one
-        that did not help moves the next question to the next model."""
-        recs = {r["call_id"]: r for r in _read_ledger(self.dir) if "call_id" in r}
-        rec = recs.get(call_id)
-        if rec is not None and rec.get("cached"):
-            call_id = rec.get("origin") or ""                    # a cache hit is reported against the call that made the answer
-            rec = recs.get(call_id)
-        if rec is None:
-            raise KeyError(call_id)
+        that did not help moves the next question to the next model. Raises KeyError for an unknown call and LedgerUnavailable
+        when the verdict cannot be written."""
         key, _ = self._key()
-        if not self._append({"report": call_id, "helped": bool(helped), "ts": self.clock(),
-                             "note": redact(note, hostname=self.hostname, home=self.home,
-                                            secrets=self._secrets(key))[:300]}):
-            raise LedgerUnavailable("the verdict could not be written")
+        text = redact(note, hostname=self.hostname, home=self.home, secrets=self._secrets(key))[:300]
+        try:
+            with self._store() as store:
+                store.report(call_id, lambda origin: {"report": origin, "helped": bool(helped), "ts": self.clock(), "note": text})
+        except LedgerRefused as exc:
+            raise LedgerUnavailable(f"the verdict could not be written: {exc}") from exc
 
     # ------------------------------------------------------------------------------------------- parts
 
@@ -684,7 +717,7 @@ class Telegraph:
                 "messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt}]}
         return cfg.endpoint + "/chat/completions", headers, body
 
-    def _send(self, base: dict, model: str, prompt: str, key, secrets, cache: Path) -> Answer:
+    def _send(self, store, base: dict, model: str, prompt: str, key, secrets, identity: str) -> Answer:
         url, headers, body = self._request(model, prompt, key)
         t0 = self.clock()
         text, usage, error = "", None, ""
@@ -710,8 +743,8 @@ class Telegraph:
                 cost = round(tin * price[0] / 1e6 + tout * price[1] / 1e6, 9) if price else None
             else:
                 cost = 0.0 if usage_known else None          # refused before processing: free. Otherwise the cost is unknown
-            self._append({**rec, "outcome": "error", "reason": reason, "tokens_in": tin, "tokens_out": tout,
-                          "cost_usd": cost, "usage_known": usage_known or usage is not None})
+            self._append(store, {**rec, "outcome": "error", "reason": reason, "tokens_in": tin, "tokens_out": tout,
+                                 "cost_usd": cost, "usage_known": usage_known or usage is not None})
             return Answer(False, reason=reason, call_id=base["call_id"], model=model, latency_s=t1 - t0,
                           tokens_in=tin, tokens_out=tout, cost_usd=cost)
         text = clean(text)
@@ -720,13 +753,14 @@ class Telegraph:
         tout = usage[1] if usage else len(text) // 3
         price = self.cfg.prices.get(model)
         cost = None if estimated else (round(tin * price[0] / 1e6 + tout * price[1] / 1e6, 9) if price else None)
-        reply_file = f"replies/{base['call_id']}.txt"
-        self._write(self.dir / reply_file, text)
-        recorded = self._append({**rec, "outcome": "ok", "tokens_in": tin, "tokens_out": tout, "cost_usd": cost,
-                                 "usage_known": not estimated, "reply_file": reply_file,
-                                 **({"usage_estimated": True} if estimated else {})})
-        if recorded:                                    # the cache is published only once the call can be reported
-            self._write(cache, json.dumps({"text": text, "reply_file": reply_file, "call_id": base["call_id"]}))
+        reply_file = self._reply_name(base["call_id"])
+        self._write_reply(reply_file, text)
+        # The settlement and the cache row are one transaction: the answer is cached only together with its call, so it can be
+        # reported.
+        recorded = self._append(store, {**rec, "outcome": "ok", "tokens_in": tin, "tokens_out": tout, "cost_usd": cost,
+                                        "usage_known": not estimated, "reply_file": reply_file,
+                                        **({"usage_estimated": True} if estimated else {})},
+                                cache=(identity, reply_file, text, base["call_id"]))
         return Answer(True, text, call_id=base["call_id"], model=model, tokens_in=tin, tokens_out=tout,
                       latency_s=t1 - t0, cost_usd=cost,
                       reason="" if recorded else ("the answer arrived but the ledger could not record this call, so it is "
@@ -768,118 +802,50 @@ class Telegraph:
             return "", usage, "the answer contains characters that cannot be stored (a lone surrogate)"
         return text, usage, ""
 
-    def _refuse(self, base: dict, outcome: str, reason: str, held: bool = False) -> Answer:
-        self._append({**base, "ts": self.clock(), "outcome": outcome, "reason": reason, "cached": False,
-                      "tokens_in": 0, "tokens_out": 0, "cost_usd": 0.0}, held=held)
+    def _refuse(self, store, base: dict, outcome: str, reason: str) -> Answer:
+        self._append(store, {**base, "ts": self.clock(), "outcome": outcome, "reason": reason, "cached": False,
+                             "tokens_in": 0, "tokens_out": 0, "cost_usd": 0.0})
         return Answer(False, reason=reason, call_id=base["call_id"], model=base["model"])
 
-    def _cached(self, path: Path) -> dict | None:
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return None
-        ok = isinstance(data, dict) and isinstance(data.get("text"), str) and data.get("reply_file")
-        return data if ok and "<think>" not in data["text"] else None
+    @staticmethod
+    def _cached(row: dict | None) -> dict | None:
+        """A cache row as the hit the caller uses, or None when it cannot be used (no reply file, or a reasoning block in it)."""
+        ok = isinstance(row, dict) and isinstance(row.get("text"), str) and row.get("reply_file")
+        return row if ok and "<think>" not in row["text"] else None
 
     # ------------------------------------------------------------------------------------------- files (private)
 
-    @contextlib.contextmanager
-    def _ledger_lock(self):
-        """An exclusive lock on the ledger directory, held while the budget is checked and a reservation is written, so two
-        processes cannot both spend the same allowance. Raises LedgerUnavailable when the directory or the lock cannot be used
-        (a lock that cannot be taken included); the descriptor is always closed."""
+    def _append(self, store, rec: dict, *, cache: tuple | None = None) -> bool:
+        """Record one record (with its cache row, if given) in one transaction. True when it was written."""
         try:
-            self.dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-            fd = os.open(self.dir / LOCK, os.O_WRONLY | os.O_CREAT, 0o600)
-        except OSError as exc:
-            raise LedgerUnavailable(type(exc).__name__) from exc
-        try:
-            try:
-                os.fchmod(fd, 0o600)
-                fcntl.flock(fd, fcntl.LOCK_EX)
-            except OSError as exc:
-                raise LedgerUnavailable(type(exc).__name__) from exc
-            yield
-        finally:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_UN)          # closing the descriptor releases the lock if this fails
-            except OSError:
-                pass
-            os.close(fd)
-
-    def _quarantine_torn_tail(self) -> None:
-        """Called with the lock held. A last line with no line break is a write that was cut short. It moves to a private
-        sidecar file, the ledger is cut back to its last whole line, and a note record counts the fragment as one call of
-        unknown cost until a person reconciles it. Raises LedgerUnavailable when this cannot be done."""
-        path = self.dir / LEDGER
-        try:
-            data = path.read_bytes()
-        except FileNotFoundError:
-            data = b""
-        except OSError as exc:
-            raise LedgerUnavailable(type(exc).__name__) from exc
-        if data and not data.endswith(b"\n"):
-            cut = data.rfind(b"\n") + 1
-            name = f"{LEDGER}.torn-{uuid.uuid4().hex[:8]}"
-            fragment = data[cut:]
-            try:
-                fd = os.open(self.dir / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-                try:
-                    if os.write(fd, fragment) != len(fragment):
-                        raise OSError("short write of the torn tail")
-                    os.fsync(fd)
-                finally:
-                    os.close(fd)
-                os.truncate(path, cut)                   # only after the whole fragment is safe in the sidecar
-            except OSError as exc:
-                try:
-                    (self.dir / name).unlink()           # the ledger is intact, so the partial sidecar must not be counted
-                except OSError:
-                    pass
-                raise LedgerUnavailable(type(exc).__name__) from exc
-        # Every sidecar gets exactly one note. A crash between the cut and the note leaves a sidecar with no note, and the
-        # next call writes it here, so recovery can be replayed.
-        noted = {r.get("torn") for r in _read_ledger_strict(self.dir) if "torn" in r}
-        for sidecar in sorted(self.dir.glob(LEDGER + ".torn-*")):
-            if sidecar.name not in noted:
-                if not self._append({"torn": sidecar.name, "tokens": self.cfg.max_output_tokens}, held=True):
-                    raise LedgerUnavailable("the note for a torn record could not be written")
-
-    def _append(self, rec: dict, *, held: bool = False) -> bool:
-        """Append one record as one write, under the ledger lock (`held` says the caller already holds it, since the lock
-        is not re-entrant). Recovery of a torn tail also runs under this lock, so no record can land between its read and its
-        cut. A last line that was cut short gets a line break first, so it cannot swallow this record. True when written."""
-        if not held:
-            try:
-                with self._ledger_lock():
-                    return self._append(rec, held=True)
-            except LedgerUnavailable:
-                return False
-        try:
-            self.dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-            fd = os.open(self.dir / LEDGER, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o600)
-            try:
-                os.fchmod(fd, 0o600)
-                size = os.fstat(fd).st_size
-                torn = size > 0 and os.pread(fd, 1, size - 1) != b"\n"
-                data = (b"\n" if torn else b"") + (json.dumps(rec, sort_keys=True) + "\n").encode("utf-8")
-                if os.write(fd, data) != len(data):
-                    return False                     # a short write leaves a record nobody can read
-                os.fsync(fd)                         # the record must survive a crash before a request depends on it
-            finally:
-                os.close(fd)
+            store.settle(rec, cache) if cache is not None else store.append(rec)
             return True
-        except OSError:
+        except LEDGER_ERRORS:
             return False
 
-    def _write(self, path: Path, text: str) -> None:
+    def _write_reply(self, relative: str, text: str) -> None:
+        """Write a reply file, private, under the state directory. Each folder on the way (`replies`, then a scope's folder) is made and
+        opened beneath the descriptor of the one before it, with links refused, so a link in the state directory cannot send the
+        write elsewhere; the file is created with `O_NOFOLLOW`. A failure is silent: the answer is also in the ledger's cache row."""
+        parts = relative.split("/")
+        fds = []
         try:
-            path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            fd = dbm.private_directory(self.dir)
+            fds.append(fd)
+            for part in parts[:-1]:
+                fd = dbm.open_child_dir(fd, part, create=True)
+                fds.append(fd)
+            out = os.open(parts[-1], os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0), 0o600, dir_fd=fd)
             try:
-                os.fchmod(fd, 0o600)
-                os.write(fd, text.encode("utf-8"))
+                os.fchmod(out, 0o600)
+                os.write(out, text.encode("utf-8"))
             finally:
-                os.close(fd)
-        except OSError:
+                os.close(out)
+        except (OSError, LedgerUnavailable, LedgerRefused):
             pass
+        finally:
+            for f in fds:
+                try:
+                    os.close(f)
+                except OSError:
+                    pass

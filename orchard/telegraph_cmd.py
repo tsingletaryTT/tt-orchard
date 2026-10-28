@@ -9,6 +9,11 @@ is given, which asks the endpoint for its model list: that request spends no tok
 The `[telegraph]` table is read from `--telegraph-config FILE`, else from the bringup config (`--config`,
 $ORCHARD_BRINGUP_CONFIG, config/bringup.toml). Exit codes: 0 done, 2 a problem with the setup or the arguments, 3 the
 ask got no answer (the reason is printed).
+
+The state directory (it holds the ledger database, the reply files and the cache) is chosen in this order: `--dir`, the
+`[telegraph] dir` of the config, `$ORCHARD_TELEGRAPH_DIR` (an absolute path; the supervisor sets it for agent shells), and only
+then `~/.cache/tt-orchard/telegraph` of the caller's home. An agent shell has a HOME inside the run directory, so it never takes
+the last choice: with no configured directory it stops and says so, and no second ledger is opened whose caps nobody shares.
 """
 from __future__ import annotations
 
@@ -22,10 +27,31 @@ from pathlib import Path
 from orchard import telegraph as tg
 
 EXIT_OK, EXIT_PROBLEM, EXIT_NO_ANSWER = 0, 2, 3
+ENV_DIR = "ORCHARD_TELEGRAPH_DIR"           # set by the supervisor for agent shells (orchard/agent.py)
+AGENT_SHELL_MARK = "ORCHARD_RUN_DIR"        # present in an agent shell's environment (orchard/agent.py)
 
 
 def default_dir(home) -> Path:
     return Path(home) / ".cache" / "tt-orchard" / "telegraph"
+
+
+def resolve_directory(explicit, cfg: tg.Config, environ, home) -> Path:
+    """The ledger directory: the explicit one, the config's, `$ORCHARD_TELEGRAPH_DIR`, then the caller's home. Never the home of an
+    agent shell (issue 133): its HOME is inside the run directory, and a ledger there would not share the operator's caps."""
+    if explicit:
+        return Path(explicit)
+    if cfg.dir:
+        return Path(cfg.dir)
+    from_env = environ.get(ENV_DIR)
+    if from_env:
+        path = Path(from_env)
+        if not path.is_absolute():
+            raise tg.ConfigError(f"{ENV_DIR} must be an absolute path")
+        return path
+    if environ.get(AGENT_SHELL_MARK):
+        raise tg.ConfigError(f"this is an agent shell (HOME is inside the run directory) and no ledger directory is configured: "
+                             f"set [telegraph] dir, ${ENV_DIR}, or pass --dir, so the caps are shared with the operator's ledger")
+    return default_dir(home)
 
 
 def load_config(path, _unused=None) -> tg.Config:
@@ -67,7 +93,11 @@ def main(args, *, out, environ=None, transport=None, getter=None, home=None) -> 
     except (tg.ConfigError, Exception) as exc:                      # a missing config file is the same kind of problem
         say(f"telegraph: {exc}")
         return EXIT_PROBLEM
-    directory = Path(args.dir) if getattr(args, "dir", None) else (cfg.dir or default_dir(home))
+    try:
+        directory = resolve_directory(getattr(args, "dir", None), cfg, environ, home)
+    except tg.ConfigError as exc:
+        say(f"telegraph: {exc}")
+        return EXIT_PROBLEM
     tel = tg.Telegraph(cfg, directory, transport=transport, environ=environ, home=str(home))
     action = args.action
     if action == "check":
@@ -80,8 +110,8 @@ def main(args, *, out, environ=None, transport=None, getter=None, home=None) -> 
         except KeyError:
             say(f"telegraph: no call {args.call_id} in {directory}")
             return EXIT_PROBLEM
-        except tg.LedgerUnavailable:
-            say(f"telegraph: the verdict could not be written to {directory}")
+        except tg.LEDGER_ERRORS as exc:
+            say(f"telegraph: the verdict could not be written to {directory} ({exc})")
             return EXIT_PROBLEM
         say(f"recorded: call {args.call_id} {'helped' if args.helped else 'did not help'}")
         return EXIT_OK
@@ -181,7 +211,11 @@ def _ask(tel: tg.Telegraph, args, say) -> int:
 
 
 def _usage(directory: Path, args, say) -> int:
-    s = tg.summarise(directory)
+    try:
+        s = tg.summarise_records(tg._read_ledger_strict(directory))
+    except tg.LEDGER_ERRORS as exc:                                  # an unreadable ledger is not an empty one
+        say(f"telegraph: the ledger in {directory} cannot be read ({exc}); the spend is unknown")
+        return EXIT_PROBLEM
     if args.json:
         say(json.dumps(s, indent=2, sort_keys=True))
         return EXIT_OK

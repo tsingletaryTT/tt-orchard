@@ -9,3 +9,7 @@ runs/
 generated/
 .claude/worktrees/
 config/local-*
+project.db
+project.db-*
+project.db.*
+RECOVERY-REQUIRED

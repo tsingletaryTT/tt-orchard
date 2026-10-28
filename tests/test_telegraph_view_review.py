@@ -6,6 +6,7 @@ import os
 
 import pytest
 
+from ledger_io import clear_ledger, replace_ledger, seed_ledger
 from orchard import telegraph as tg
 from orchard import telegraph_view as view
 from test_telegraph_view import KEY, app_for, fill, setup
@@ -25,8 +26,7 @@ def ok_record(call_id, problem, tin, tout, model="small", cost=0.001):
 
 
 def write_records(d, records):
-    d.mkdir(parents=True, exist_ok=True)
-    (d / "telegraph.jsonl").write_text("".join(json.dumps(r) + "\n" for r in records))
+    replace_ledger(d, records)
 
 
 # ---- 7. a reply with no usage shows the bound the caps count, and says which number it is ------------------------------------
@@ -160,7 +160,7 @@ def test_a_small_positive_cost_cap_is_not_shown_as_a_zero_cap(root, tmp_path):
 def test_a_ledger_that_is_a_directory_is_a_problem_and_spend_is_unknown(root, tmp_path):
     cfg, d, tel = setup(tmp_path)
     d.mkdir()
-    (d / "telegraph.jsonl").mkdir()
+    (d / "project.db").mkdir()
     out = app_for(root, cfg).telegraph()
     assert out["state"] == "problem" and out["tone"] == "warn" and out["error"]
     assert out["meter"]["text"] == "Helper: ledger unreadable · spend unknown"
@@ -172,11 +172,11 @@ def test_a_ledger_that_is_a_directory_is_a_problem_and_spend_is_unknown(root, tm
 def test_a_ledger_with_no_read_permission_is_a_problem_not_a_green_zero(root, tmp_path):
     cfg, d, tel = setup(tmp_path)
     fill(tel, 1)
-    os.chmod(d / "telegraph.jsonl", 0)
+    os.chmod(d / "project.db", 0)
     try:
         out = app_for(root, cfg).telegraph()
     finally:
-        os.chmod(d / "telegraph.jsonl", 0o600)
+        os.chmod(d / "project.db", 0o600)
     assert out["state"] == "problem" and "spend unknown" in out["meter"]["text"]
 
 
@@ -200,12 +200,11 @@ def test_a_missing_ledger_is_still_an_empty_history(root, tmp_path):
 
 def test_every_error_state_says_spend_unknown_and_recovers_when_reading_works(root, tmp_path):
     cfg, d, tel = setup(tmp_path)
-    d.mkdir()
-    (d / "telegraph.jsonl").write_text(json.dumps({"call_id": "x", "outcome": "ok", "tokens_in": "lots", "model": "m"}) + "\n")
+    seed_ledger(d, [{"call_id": "x", "outcome": "ok", "tokens_in": "lots", "model": "m"}])
     app = app_for(root, cfg)
     out = app.telegraph()
     assert out["state"] == "problem" and out["meter"]["text"].endswith("spend unknown")
-    (d / "telegraph.jsonl").write_text("")
+    clear_ledger(d)
     again = app.telegraph()
     assert again["state"] == "ok" and again["error"] is None
 
@@ -213,7 +212,7 @@ def test_every_error_state_says_spend_unknown_and_recovers_when_reading_works(ro
 def test_an_off_telegraph_with_an_unreadable_ledger_stays_off(root, tmp_path):
     d = tmp_path / "ledger"
     d.mkdir()
-    (d / "telegraph.jsonl").mkdir()
+    (d / "project.db").mkdir()
     cfg = tg.load({"enabled": False, "dir": str(d)}, base=tmp_path)
     out = app_for(root, cfg).telegraph()
     assert out["state"] == "off" and out["meter"]["text"] == "Helper: off"

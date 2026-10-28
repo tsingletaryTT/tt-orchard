@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from ledger_io import seed_ledger
 from orchard import telegraph as tg
 from test_telegraph import table
 
@@ -31,24 +32,14 @@ def test_a_disabled_table_keeps_its_dir_so_past_spend_can_still_be_shown(tmp_pat
     assert tg.load({"enabled": False, "dir": 7}, base=tmp_path).dir is None      # not checked further when off
 
 
-def test_a_ledger_with_bytes_that_are_not_utf8_still_gives_a_summary(tmp_path):
-    d = tmp_path / "tg"
-    d.mkdir()
-    good = json.dumps({"call_id": "a1", "outcome": "ok", "tokens_in": 5, "tokens_out": 2, "cost_usd": 0.5,
-                       "model": "m", "problem": "p"})
-    (d / "telegraph.jsonl").write_bytes(b"\xff\xfe not json\n" + good.encode() + b"\n")
-    assert tg.summarise(d)["calls"] == 1
-
-
 def test_the_command_uses_the_configured_dir_when_dir_is_not_given(tmp_path):
     import io
     from orchard import cli, telegraph_cmd as cmd
     cfg = tmp_path / "tg.toml"
     cfg.write_text('[telegraph]\nenabled = true\nendpoint = "https://llm.example.org/v1"\nmodels = ["a"]\n'
                    'dir = "ledger-here"\n')
-    (tmp_path / "ledger-here").mkdir()
-    (tmp_path / "ledger-here" / "telegraph.jsonl").write_text(
-        json.dumps({"call_id": "c1", "outcome": "ok", "tokens_in": 1, "tokens_out": 1, "model": "a", "problem": "p"}) + "\n")
+    seed_ledger(tmp_path / "ledger-here",
+                [{"call_id": "c1", "outcome": "ok", "tokens_in": 1, "tokens_out": 1, "model": "a", "problem": "p"}])
     out = io.StringIO()
     args = cli._parser().parse_args(["telegraph", "usage", "--telegraph-config", str(cfg)])
     assert cmd.main(args, out=out, environ={}, home=tmp_path / "home") == 0
@@ -58,7 +49,3 @@ def test_the_command_uses_the_configured_dir_when_dir_is_not_given(tmp_path):
     cmd.main(other, out=out, environ={}, home=tmp_path / "home")
     assert "calls: 0" in out.getvalue()                      # --dir still wins
 
-
-def test_read_ledger_is_public_and_skips_lines_that_are_not_objects(tmp_path):
-    (tmp_path / "telegraph.jsonl").write_text('[1]\n"x"\n{"call_id": "z"}\n')
-    assert tg.read_ledger(tmp_path) == [{"call_id": "z"}]
