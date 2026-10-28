@@ -2926,4 +2926,4 @@ Prompt (operator): "make a similar gradio app to the one we use for minimax musi
 - Tests first; 6 mutations red (one DELETE case added after the first pass left it surviving).
 
 ## 2026-10-28 (UTC): sixth review of PR 167 (head 9669f14), no open issue; two unpublished concerns checked
-- The client sends no request through a proxy named in the environment (the server is local), and checks the prompt length against the server's limit before a request. Tests first; both mutations red.
+- The client sends no request through a proxy named in the environment (the server is local), and checks the prompt length against the server's limit before a request. Tests first; both mutations red (the proxy one survived until the opener was built per call, so the test sees the environment at call time).

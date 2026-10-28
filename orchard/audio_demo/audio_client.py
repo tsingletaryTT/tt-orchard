@@ -41,7 +41,9 @@ EXAMPLES = [
 ]
 
 
-_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+def _opener():
+    """An opener with no proxy handler: the server is a local one, and a proxy named in the environment would send the request somewhere else."""
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
 class AudioServerError(Exception):
@@ -100,8 +102,7 @@ class AudioClient:
         data = None if body is None else json.dumps(body).encode()
         req = urllib.request.Request(self.base + path, data=data, method=method, headers={"Content-Type": "application/json"})
         try:
-            # no proxy: the server is a local one, and a proxy named in the environment would send the request somewhere else or refuse it
-            with _OPENER.open(req, timeout=self.timeout) as r:
+            with _opener().open(req, timeout=self.timeout) as r:
                 payload = r.read()
         except urllib.error.HTTPError as e:
             detail = ""
