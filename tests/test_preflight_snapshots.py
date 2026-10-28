@@ -191,6 +191,17 @@ def test_choose_snapshot_returns_none_when_no_revision_has_every_listed_weight_a
     assert pf.choose_snapshot(None, [one, two]) == two          # no Hub answer: the last by name
 
 
+def test_a_revision_missing_only_a_component_config_wins_over_one_missing_a_weight(tmp_path):
+    """Review of PR 191: both lack one listed file, so the ranking alone could not tell them apart and the weight-complete copy could lose to a tie."""
+    files = ["config.json", "model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors", "sub/config.json"]
+    hub = _hub(files, sha="bbbb2222")                           # the Hub's own revision is the one that lacks a weight
+    weights_ok = _snap(tmp_path, rev="aaaa1111")                # both shards, no sub/config.json
+    lacks_weight = _snap(tmp_path, rev="bbbb2222", files=("config.json", "model-00001-of-00002.safetensors", "sub/config.json"))
+    assert pf._missing_listed(hub, weights_ok) == ["sub/config.json"] and pf._missing_listed(hub, lacks_weight) == ["model-00002-of-00002.safetensors"]
+    assert pf.choose_snapshot(hub, [weights_ok, lacks_weight]) == weights_ok
+    assert pf.choose_snapshot(hub, [lacks_weight]) is None
+
+
 def test_with_the_index_present_the_fuller_revision_is_chosen_among_incomplete_ones(tmp_path):
     one = _snap(tmp_path, rev="aaaa1111", files=("config.json", "model-00001-of-00002.safetensors"))
     two = _snap(tmp_path, rev="bbbb2222")

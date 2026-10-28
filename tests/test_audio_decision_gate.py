@@ -577,6 +577,60 @@ def test_a_text_encoder_difference_cannot_be_turned_into_weights_only(audio_case
     refused(stage, "text encoder")
 
 
+def test_a_null_comparison_entry_cannot_hide_an_unsupported_value(audio_case):
+    """Review of PR 191: a null entry in the evidence skipped the value comparison, so a decision could swap in values the allow-list accepts."""
+    stage = audio_case(base_kw={"config": changed_model_config(model__diffusion__diffusion_objective="v")})
+    assert run_ok(stage)["class"] == "full-port"
+    def edit(d):
+        to_weights_only(d)
+        dec = d["audio"]["decision"]
+        dec["differences"][0].update(base="rectified_flow", model="rf_denoiser", category="serving")
+        d["audio"]["config"]["model_differences"]["model.diffusion.diffusion_objective"] = None
+    edit_delta(stage, edit)
+    refused(stage, "not an object with a base and a model")
+
+
+@pytest.mark.parametrize("entry", [None, 3, "x", [], {}, {"base": 1}, {"model": 1}])
+def test_every_listed_comparison_entry_has_to_be_an_object_with_both_values(entry):
+    dec = {"class": "full-port", "path": "full-port", "alternative_path": None, "confidence": "medium", "strict": False, "overrides": [],
+           "differences": [{"key": "model.extra.a", "base": ad.ABSENT, "model": 1, "category": "unknown", "decided_by": "allow-list"}]}
+    audio = {"decision": dec, "config": {"top_level_differences": {}, "model_differences": {"model.extra.a": entry}}}
+    assert any("not an object with a base and a model" in p for p in ad.decision_problems({"class": "full-port", "path": "full-port", "audio": audio}))
+
+
+def test_a_text_encoder_that_still_says_unequal_cannot_be_turned_into_weights_only(audio_case):
+    """Review of PR 191: emptying the `differences` list of a row that says `equal: false` used to leave the row looking clean."""
+    stage = audio_case(model_kw={"text_config": {"architectures": ["x"]}})
+    d = run_ok(stage)
+    row = d["audio"]["text_encoders"][0]
+    assert d["class"] == "full-port" and row["equal"] is False and row["compared"] is True
+    def edit(d):
+        to_weights_only(d)
+        d["audio"]["text_encoders"][0]["differences"] = []
+    edit_delta(stage, edit)
+    refused(stage, "text encoder")
+
+
+@pytest.mark.parametrize("row,clean", [
+    ({"subfolder": "t5", "compared": True, "equal": True, "problems": [], "differences": []}, True),
+    ({"subfolder": "t5", "compared": False, "equal": None, "problems": [], "differences": [], "note": "loads from another repository"}, True),
+    ({"subfolder": "t5", "compared": True, "equal": False, "problems": [], "differences": []}, False),
+    ({"subfolder": "t5", "compared": True, "equal": None, "problems": [], "differences": []}, False),
+    ({"subfolder": "t5", "compared": False, "equal": True, "problems": [], "differences": []}, False),
+    ({"subfolder": "t5", "compared": False, "equal": False, "problems": [], "differences": []}, False),
+    ({"subfolder": "t5", "compared": True, "equal": True, "problems": ["x"], "differences": []}, False),
+    ({"subfolder": "t5", "compared": True, "equal": True, "problems": [], "differences": ["x"]}, False),
+    ({"subfolder": "t5", "compared": True, "equal": True, "differences": []}, False),                    # problems deleted
+    ({"subfolder": "t5", "compared": True, "equal": True, "problems": []}, False),                       # differences deleted
+    ({"subfolder": "t5", "equal": True, "problems": [], "differences": []}, False),                      # compared deleted
+    ({"subfolder": "t5", "compared": 1, "equal": True, "problems": [], "differences": []}, False),
+    ({"subfolder": "t5", "compared": True, "equal": True, "problems": None, "differences": []}, False),
+    (None, False), ([], False), ("x", False),
+])
+def test_a_text_encoder_row_is_clean_only_when_it_shows_nothing_wrong(row, clean):
+    assert ad._encoder_clean(row) is clean
+
+
 def test_a_tensor_present_in_one_model_only_cannot_be_turned_into_weights_only(audio_case):
     t = {**TENSORS, "model.model.extra.weight": ("F32", [2, 2])}
     stage = audio_case(model_kw={"tensors": t})

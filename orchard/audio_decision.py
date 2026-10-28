@@ -282,7 +282,9 @@ def _evidence_problems(audio: dict, by_key: dict, current_template: bool) -> lis
         x = by_key.get(key)
         if x is None:
             out.append(f"the comparison evidence lists the difference {key!r}, and audio.decision does not")
-        elif isinstance(rec, dict) and "base" in x and "model" in x and not (_same(rec.get("base"), x["base"]) and _same(rec.get("model"), x["model"])):
+        elif not isinstance(rec, dict) or "base" not in rec or "model" not in rec:
+            out.append(f"the comparison evidence for {key!r} is not an object with a base and a model value")
+        elif "base" in x and "model" in x and not (_same(rec["base"], x["base"]) and _same(rec["model"], x["model"])):
             out.append(f"audio.decision records other values for {key!r} than the comparison evidence does")
     if not cut:
         out += [f"audio.decision names the difference {key!r}, which the comparison evidence does not list" for key in by_key if key not in listed]
@@ -346,9 +348,20 @@ def _hard_findings(audio: dict, current_template: bool = False) -> list[str]:
         if found:
             out.append("the tensor evidence shows a difference (" + ", ".join(found) + ")")
     encoders = audio.get("text_encoders")
-    if isinstance(encoders, list) and any(not isinstance(r, dict) or r.get("problems") or r.get("differences") for r in encoders):
+    if isinstance(encoders, list) and any(not _encoder_clean(r) for r in encoders):
         out.append("a text encoder differs or could not be compared")
     return out
+
+
+def _encoder_clean(row) -> bool:
+    """One row of `audio.text_encoders` shows no difference and no read problem: both lists are there and empty, and a comparison that was made
+    (`compared` true) says `equal` true. A row the template skipped on purpose (`compared` false, a conditioner that loads from another repository) has
+    no comparison to be equal. A row with a list deleted, a `compared` that is not a boolean, or an `equal` of false is not clean."""
+    if not isinstance(row, dict) or not isinstance(row.get("compared"), bool):
+        return False
+    if not isinstance(row.get("problems"), list) or row["problems"] or not isinstance(row.get("differences"), list) or row["differences"]:
+        return False
+    return row.get("equal") is True if row["compared"] else row.get("equal") is None
 
 
 def _hard_evidence_problems(d: dict, audio: dict, current_template: bool) -> list[str]:
