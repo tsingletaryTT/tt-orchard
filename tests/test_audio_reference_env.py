@@ -44,7 +44,7 @@ class Fake:
             if "torch.version" in code or "torch.cuda" in code:
                 return 0, f"2.7.1+cpu {self.cuda}\n", ""
             if "importlib.metadata" in code:
-                return 0, json.dumps({"torch": "2.7.1+cpu", "transformers": "5.19.0"}), ""
+                return 0, json.dumps({**{n: "1.0" for n in ae.RECORDED}, "torch": "2.7.1+cpu", "transformers": "5.19.0"}), ""
         return 0, "", ""
 
 
@@ -896,3 +896,37 @@ def test_a_source_that_passes_but_has_no_identity_fails_closed(env, monkeypatch)
 def test_a_fresh_clone_gets_its_identity_after_the_fetch_and_is_checked_at_the_end(env):
     results = ae.ensure(env, check_only=False)
     assert statuses(results)["source"] == ae.OK and statuses(results)["source-identity"] == ae.OK
+
+
+def _versions_answer(env, answer):
+    real = env.run
+
+    def run(argv, timeout, e=None):
+        if "importlib.metadata" in str(argv[-1]):
+            return 0, json.dumps(answer), ""
+        return real(argv, timeout, e)
+    env.run = run
+
+
+def test_the_record_is_written_when_every_recorded_package_has_a_version(env):
+    _versions_answer(env, {n: "1.0" for n in ae.RECORDED})
+    results = ae.ensure(env, check_only=False)
+    assert statuses(results)["record"] == ae.OK and (env.venv_dir / ae.RECORD).exists()
+
+
+@pytest.mark.parametrize("change", ["missing_package", "missing_key", "non_text", "extra_only"])
+def test_a_package_the_environment_does_not_have_is_not_recorded_as_installed(env, change):
+    answer = {n: "1.0" for n in ae.RECORDED}
+    if change == "missing_package":
+        answer["soundfile"] = None
+    elif change == "missing_key":
+        del answer["einops"]
+    elif change == "non_text":
+        answer["numpy"] = 3
+    else:
+        answer = {"unrelated": "1.0"}
+    _versions_answer(env, answer)
+    results = ae.ensure(env, check_only=False)
+    rec = [r for r in results if r.name == "record"][0]
+    assert rec.status == ae.FAIL and not (env.venv_dir / ae.RECORD).exists()
+    assert "soundfile" in rec.detail or "einops" in rec.detail or "numpy" in rec.detail or "versions" in rec.detail

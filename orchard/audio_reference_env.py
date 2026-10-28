@@ -274,6 +274,10 @@ def step_record(env: AEnv, check_only: bool, upstream_ok: bool) -> Result:
     versions = installed_versions(env)
     if versions is None:
         return Result("record", FAIL, "could not read the installed versions")
+    # A package the environment does not have is reported as None. Writing that into the record would say the install is complete.
+    absent = [n for n in RECORDED if not isinstance(versions.get(n), str) or not versions[n]]
+    if absent:
+        return Result("record", FAIL, f"not written: no version found for {', '.join(absent)}")
     try:
         write_record(env, {"library_commit": LIBRARY_COMMIT, "library_url": LIBRARY_URL, "torch_pin": TORCH, "requirements": list(REQUIREMENTS),
                            "requirements_sha256": requirements_sha256(), "installed": versions})
