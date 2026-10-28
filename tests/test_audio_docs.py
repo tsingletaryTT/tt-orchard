@@ -35,3 +35,18 @@ def test_the_readme_has_the_audio_row_and_the_block_code():
 
 def test_the_readme_says_nothing_serves_stable_audio_yet():
     assert "There is no runtime for Stable Audio 3 on a Tenstorrent chip" in README
+
+
+def test_the_skill_describes_the_categories_the_strict_flag_and_the_override_hook():
+    for needle in ("audio_config_categories.json", "`serving`", "`structural`", "`unknown`", "audio.decision", "audio_strict", "audio_overrides.json",
+                   "non-empty source", "no stage checks that yet"):
+        assert needle in SKILL, needle
+
+
+def test_the_skill_names_the_same_allow_listed_keys_the_template_has():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("t", ROOT / "orchard" / "skills" / "delta-triage-templates" / "delta_triage.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    for key in ("sample_size", "model.diffusion.diffusion_objective"):
+        assert key in SKILL and any(r.get("key") == key and r["category"] == "serving" for r in mod.AUDIO_CATEGORY_RULES)
