@@ -170,6 +170,10 @@ def telegraph_state_notice(config, *, directory=None, environ=None, home=None, f
         chosen = telegraph_cmd.resolve_directory(directory, cfg, environ, home)
     except tg.ConfigError:
         return None
+    if directory is None and "--dir" not in flags.split() and chosen != telegraph_cmd.default_dir(home):
+        # A command pasted from the notice resolves its own directory (its config, its environment). When this one did not come from
+        # the home default, the commands name it, so they act on the ledger the notice is about.
+        flags = f"{flags} --dir {shlex.quote(str(chosen))}".strip()
     return state_of(chosen, flags=flags)
 
 

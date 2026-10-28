@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import stat
 import sys
 import urllib.parse
@@ -269,6 +270,20 @@ def _terminal_ask(question):
     return input(f"{question} [y/N] ").strip().lower() in ("y", "yes")
 
 
+def _selection_flags(args, directory, scope, accept) -> str:
+    """The options that make a command act on the ledger that was checked: the directory (always, as resolved here), the config
+    selectors the caller passed, the scope, and the count of unreadable lines that was accepted."""
+    parts = [f"--dir {shlex.quote(str(directory))}"]
+    for flag, attr in (("--telegraph-config", "telegraph_config"), ("--config", "config")):
+        if getattr(args, attr, None):
+            parts.append(f"{flag} {shlex.quote(str(getattr(args, attr)))}")
+    if scope != ts.DEFAULT_SCOPE:
+        parts.append(f"--scope {shlex.quote(scope)}")
+    if accept is not None:
+        parts.append(f"--accept-malformed {accept}")
+    return " ".join(parts)
+
+
 def _lock_text(directory) -> str:
     return (f"db migrate: another process holds {ts.LOCK} in {directory} (a tt-orchard process or an old writer is running); "
             "stop it and run this again. Nothing was changed.")
@@ -279,7 +294,8 @@ def _migrate_after_dry_run(directory, scope, cfg, args, say, ask, accept) -> int
     changed: a directory that is not an unmigrated one, a lock held by another process (before the question and again after it),
     a dry run that fails or has any check that is different, an answer that is not a yes, and no terminal to ask at."""
     ask = _terminal_ask if ask is None else ask
-    waiting = tn.state_of(directory)
+    flags = _selection_flags(args, directory, scope, accept)
+    waiting = tn.state_of(directory, flags=tn.flags_from_args(args) or f"--dir {shlex.quote(str(directory))}")
     if waiting is None or waiting.kind != tn.UNMIGRATED:
         say("db migrate: " + (waiting.text() if waiting is not None else
                               f"there is no {ts.LEDGER} in {directory}, so there is nothing to move"))
@@ -296,7 +312,7 @@ def _migrate_after_dry_run(directory, scope, cfg, args, say, ask, accept) -> int
     answer = ask(question)
     if answer is None:
         say("db migrate: --dry-run-first asks for a yes and there is no terminal to ask at. Run "
-            f"`{tn.DRY_RUN}` and then `{tn.MIGRATE}` yourself. Nothing was changed.")
+            f"`{tn.DRY_RUN} {flags}` and then `{tn.MIGRATE} {flags}` yourself. Nothing was changed.")
         return EXIT_PROBLEM
     if not answer:
         say("Not confirmed. Nothing was changed.")

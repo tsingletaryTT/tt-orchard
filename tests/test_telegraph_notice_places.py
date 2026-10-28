@@ -52,8 +52,9 @@ def test_bringup_shows_the_notice_once_before_the_checks_and_changes_nothing(con
     home, d = home_with_old_ledger(tmp_path)
     before = snapshot(d)
     code, out, rec = cli_run(conf, ["bringup", "Cloudflare/clef", "--dry-run"], env={"HOME": str(home)})
-    assert code == 0 and out.count(FIRST) == 1 and out.index(FIRST) < out.index("hub")
-    assert THEN in out and "Nothing is deleted" in out
+    start = "telegraph: Run `tt-orchard db migrate telegraph --dry-run "
+    assert code == 0 and out.count(start) == 1 and out.index(start) < out.index("hub")
+    assert f"--config {conf}`" in out and "Nothing is deleted" in out       # the commands select the config the run used
     assert snapshot(d) == before
 
 
@@ -133,10 +134,11 @@ def test_the_panel_carries_the_notice_with_the_exact_commands_and_the_meter_says
     before = snapshot(d)
     out = app_for(root, panel_cfg(d), environ={"TG_KEY": "k3y-VALUE-0123456789abcdef"}).telegraph()
     m = out["migration"]
-    assert m["kind"] == "unmigrated" and m["commands"] == ["tt-orchard db migrate telegraph --dry-run", "tt-orchard db migrate telegraph"]
-    assert m["summary"].startswith(FIRST) and any("Nothing is deleted" in line for line in m["lines"])
+    assert m["kind"] == "unmigrated"
+    assert m["commands"] == [f"tt-orchard db migrate telegraph --dry-run --dir {d}", f"tt-orchard db migrate telegraph --dir {d}"]
+    assert m["summary"].startswith("Run `tt-orchard db migrate telegraph --dry-run --dir ") and any("Nothing is deleted" in line for line in m["lines"])
     assert "db migrate telegraph" in out["meter"]["text"] and "spend unknown" in out["meter"]["text"]
-    assert FIRST in out["meter"]["title"]
+    assert "Run `tt-orchard db migrate telegraph --dry-run" in out["meter"]["title"]
     assert out["error"].startswith("Run `")                  # the first words of the old message now say what to do
     assert snapshot(d) == before
 
@@ -218,3 +220,44 @@ def test_setup_lists_the_move_as_a_todo_step_with_the_commands_and_runs_nothing_
 def test_setup_has_no_such_step_when_the_directory_needs_nothing(tmp_path):
     m = Machine(tmp_path)
     assert "telegraph ledger" not in {s.name for s in sm.plan(m.env(), sm.Options())}
+
+
+# ------------------------------------------------------------------------------------------------ commands name the ledger they describe
+
+def test_bringup_commands_name_a_directory_that_the_config_chose(conf, tmp_path):
+    chosen = old_ledger(tmp_path / "elsewhere dir")
+    conf.write_text(conf.read_text() + f'[telegraph]\nenabled = true\nendpoint = "https://llm.example.org/v1"\nmodels = ["m"]\nkey_env = "K"\ndir = "{chosen}"\n')
+    home = tmp_path / "home"
+    home.mkdir()
+    code, out, rec = cli_run(conf, ["bringup", "Cloudflare/clef", "--dry-run"], env={"HOME": str(home)})
+    assert f"--dir '{chosen}'" in out.splitlines()[1] and f"--config {conf}" in out.splitlines()[1]
+
+
+def test_the_ui_log_commands_carry_the_selected_config(monkeypatch, tmp_path):
+    home, d = home_with_old_ledger(tmp_path)
+    monkeypatch.setattr("orchard.webui.WebApp", lambda **kw: SimpleNamespace(hostname="h", toplike_close_all=lambda: None))
+    monkeypatch.setattr("orchard.webui.make_server", lambda *a, **k: FakeServer())
+    monkeypatch.setattr(cli, "find_config", lambda *a, **k: Path("/x/bringup.toml"))
+    monkeypatch.setattr(cli.bringup_config, "load", lambda p: SimpleNamespace(runs_root=Path("/x"), telegraph=tg.Config()))
+    out = io.StringIO()
+    cli._ui(SimpleNamespace(host=None, lan=False, port=1, config="/c/my config.toml", toplike=None), {"HOME": str(home)}, home, out)
+    assert "--config '/c/my config.toml'" in out.getvalue()
+
+
+def test_the_panel_commands_name_the_directory_redacted_and_quoted_for_a_shell(root, tmp_path):
+    d = old_ledger(tmp_path / "my ledger")
+    app = app_for(root, panel_cfg(d))
+    app.home = str(tmp_path)
+    app.redact = lambda t: str(t).replace(str(tmp_path), "~")
+    m = app.telegraph()["migration"]
+    assert m["commands"][0] == "tt-orchard db migrate telegraph --dry-run --dir ~/'my ledger'"
+    assert str(tmp_path) not in json.dumps(m)
+
+
+def test_the_meter_does_not_tell_a_lost_database_or_an_old_writer_to_migrate(root, tmp_path):
+    d = tmp_path / "ledger"
+    d.mkdir()
+    (d / "MIGRATED-TO-SQLITE").write_text("{}")
+    out = app_for(root, panel_cfg(d)).telegraph()
+    assert out["migration"]["kind"] == "lost-database" and "db migrate" not in out["meter"]["text"]
+    assert "db status" in out["meter"]["title"]

@@ -194,3 +194,21 @@ def test_the_existing_commands_behave_as_before(tmp_path):
     out = io.StringIO()
     code = db_cmd.main(cli._parser().parse_args(["db", "migrate", "telegraph", "--dir", str(d)]), out=out, environ={}, home=tmp_path)
     assert code == 0 and "migration migrated" in out.getvalue()
+
+
+def test_the_refusal_for_a_half_finished_directory_names_the_directory_that_was_checked(tmp_path, spy):
+    d = make(tmp_path)
+    (d / "MIGRATING-TO-SQLITE").write_text("{}")
+    code, text = guided(d, tmp_path, ask=Asker(True))
+    assert code == 2 and f"tt-orchard db migrate telegraph --dir {d}" in text
+
+
+def test_the_no_terminal_commands_carry_the_directory_scope_and_accepted_count(tmp_path, spy):
+    d = make(tmp_path, extra="not a record\n" + json.dumps({**RECORD, "call_id": "z"}) + "\n")
+    code, text = guided(d, tmp_path, "--accept-malformed", "1", "--scope", "other", "--config", str(tmp_path / "c.toml"))
+    assert code == 2 and "no terminal" in text
+    first = text[text.index("Run `") + 5:].split("`")[0]
+    second = text[text.index("and then `") + 10:].split("`")[0]
+    assert first.startswith("tt-orchard db migrate telegraph --dry-run ") and second.startswith("tt-orchard db migrate telegraph --dir")
+    for tail in (first, second):
+        assert f"--dir {d}" in tail and "--scope other" in tail and "--accept-malformed 1" in tail and "--config" in tail

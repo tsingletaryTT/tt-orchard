@@ -415,7 +415,7 @@ def _meter(state: str, spend: str, calls: int, cap_text: str, reason: str | None
            migration: dict | None = None) -> dict:
     if state == "off":
         text = "Helper: off"
-    elif state == "problem" and error and migration:
+    elif state == "problem" and error and migration and migration.get("kind") in ("unmigrated", "half-finished"):
         text = "Helper: run `tt-orchard db migrate telegraph` · spend unknown"       # the full commands are in the title and the page
     elif state == "problem" and error:
         text = "Helper: ledger unreadable · spend unknown"        # nothing was read, so no amount and no count is shown
