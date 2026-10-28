@@ -177,3 +177,12 @@ def test_a_settle_made_while_the_answer_was_formatted_is_written_once_and_not_ag
     c.reconcile()
     c.reconcile()
     assert len(saved) == n                                              # nothing changed since: nothing is written again
+
+
+def test_reconcile_with_no_call_made_asks_gozer_nothing():
+    """An attempt whose agent never called the tool has nothing to reconcile: no gozer command may run for it."""
+    w = World()
+    asked = []
+    c = hwtool.HardwareCheck(hwtool.HwPolicy(), prepare=w.prepare, run=w.run, clock=w.clock, sleep=w.sleep,
+                             health=lambda: asked.append("health"), settle=lambda lease: asked.append("settle"))
+    assert c.reconcile()["calls"] == [] and asked == []

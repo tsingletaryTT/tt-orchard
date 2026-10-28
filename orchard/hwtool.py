@@ -178,7 +178,8 @@ class HardwareCheck:
         """Bring the record up to date without a new call, for the end of an attempt: gozer may have finished a release (or a
         reset) since the last call, so the chip time and the unresolved check are read again, and the result is persisted. Returns
         summary(). Never raises: _settle and _refresh catch what their callbacks raise, and a failing writer is ignored."""
-        self._reconcile()
+        if self.records:                    # an attempt whose agent never called the tool has nothing to reconcile
+            self._reconcile()
         return self.summary()
 
     def _refresh(self):
