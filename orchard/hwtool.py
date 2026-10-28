@@ -58,6 +58,7 @@ HEARTBEAT_S = 10.0                  # while waiting for a board the wrapper prin
 ACQUIRE_TIMEOUT_S = 60.0            # `gozer acquire` answers at once; one that takes this long is given up
 STATUS_TIMEOUT_S = 30.0
 WAIT_MARGIN_S = 30.0                # `gozer wait` is given its allowance plus this much before the wrapper gives up on the command itself
+CANCEL_TIMEOUT_S = 60.0              # `gozer cancel` answers at once; it runs in the slot the release has in the outer timeout
 RELEASE_GRACE_S = 90.0              # the release resets the chips (about 42 s measured); the outer timeout leaves this much for it
 RESET_FAILED_TEXT = ("NOT marked clean", "not resetting")      # `gozer release` exits 0 even when the reset failed; these say so
 _NAME = re.compile(r"[0-9A-Za-z]+")
@@ -106,7 +107,7 @@ def outer_backstop_s(wait_s: float, call_timeout_s: float) -> float:
     (ACQUIRE_TIMEOUT_S), the wait for a busy board (`wait_s` and its margin), the run after the grant (`call_timeout_s`, which the
     wrapper enforces itself from the grant) and the release (RELEASE_GRACE_S). The wrapper's own deadlines all end before this, so
     the outer timeout never cuts a phase short because an earlier phase used its time."""
-    return ACQUIRE_TIMEOUT_S + max(wait_s, 0.0) + WAIT_MARGIN_S + call_timeout_s + RELEASE_GRACE_S
+    return ACQUIRE_TIMEOUT_S + max(wait_s, 0.0) + WAIT_MARGIN_S + call_timeout_s + RELEASE_GRACE_S      # (a cancel, CANCEL_TIMEOUT_S, fits the release slot)
 
 
 def unfinished_charge_s(call_timeout_s: float, elapsed_s: float) -> float:
@@ -307,7 +308,7 @@ def _wait_for(ticket: str, wait_s: float, *, sh, gozer: str, out) -> dict | None
     thread = threading.Thread(target=beat, daemon=True)
     thread.start()
     try:
-        code, text, _ = sh([gozer, "wait", "--json", "--timeout", f"{seconds}s", ticket], seconds + 30.0)
+        code, text, _ = sh([gozer, "wait", "--json", "--timeout", f"{seconds}s", ticket], seconds + WAIT_MARGIN_S)
     finally:
         done.set()
     data = _json(text)
@@ -321,7 +322,7 @@ def _cancel(ticket: str, sh, gozer: str) -> str | None:
     if not _NAME.fullmatch(ticket or ""):
         return f"not a ticket name: {ticket!r}"
     try:
-        code, text, err = sh([gozer, "cancel", ticket], 60.0)
+        code, text, err = sh([gozer, "cancel", ticket], CANCEL_TIMEOUT_S)
     except BaseException as exc:
         return f"{type(exc).__name__}: {exc}"
     if code in (0, 13):                                        # 13: no such ticket, so it is gone already

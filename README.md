@@ -1546,13 +1546,15 @@ and the device seconds, and the calls and lease seconds left. A whole call took 
 asks for it with `gozer acquire --owner-pid` (its own pid), so gozer reaps the lease if the wrapper dies by any signal. When no
 board is free gozer queues one ticket and the wrapper waits on it once, with `gozer wait`, for at most `--hw-wait-s` seconds; a wait
 that ends without a grant cancels the ticket and the agent is told to go on with the simulator. A grant runs the harness under the
-lease's environment (after checking again that the copy still has its recorded sha256), and the wrapper releases the lease and exits.
+lease's environment (after checking again that the copy still has its recorded sha256) with its own call-timeout clock, started at
+the grant, and the wrapper releases the lease and exits. The probe's outer timeout is the sum of the acquire, the wait, the call
+timeout and the release grace.
 The probe starts the wrapper, waits for it with a hard timeout, kills the wrapper's process group on any exception, and then reads
 `gozer status` once. It never tries to repair anything: if a chip or a queue ticket is still shown under this probe's tag, or the
 status cannot be read, the tool is stopped for the rest of the attempt, the answer says so, and the probe ends with exit 5. A hang
 stops the call (the wrapper's release resets the chip) and turns the tool off for the rest of the attempt. Calls are recorded in
 each `attempt.json` under `agent_hw` and listed in the report with the chip time they cost, taken from the wrapper's own stamps (an
-upper bound when the wrapper was killed). The lease is taken for each call and released after it; there is no mode that holds a
+upper bound, the call timeout plus the release grace or the time so far, when the wrapper was killed or the call was interrupted). The lease is taken for each call and released after it; there is no mode that holds a
 board for a whole attempt. The device seconds are the harness's
 time with the device open, for every input set, not a benchmark of the kernel.
 

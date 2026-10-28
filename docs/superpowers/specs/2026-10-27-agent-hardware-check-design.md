@@ -1,6 +1,6 @@
 # An agent-callable hardware check in the kernel probe (design note, 2026-10-27)
 
-Branch `agent-hw-check`, on `probe-hw-sim-gap` (pull request 112). Version 0.9.43 (the first version was 0.9.13; the lease design changed in round 9).
+Branch `agent-hw-check`, on `probe-hw-sim-gap` (pull request 112). Version 0.9.44 (the first version was 0.9.13; the lease design changed in round 9).
 
 ## Decision
 
@@ -157,13 +157,15 @@ cleanup can leave a real board leased, so the design was cut down to what is nee
 
 1. The probe copies and gates the kernel as before (`prepare`).
 2. The probe starts one short-lived wrapper, `python orchard/hwtool.py run --who TAG --reason R --wait-s N --result PATH --sha256 H
-   --file KERNEL -- python kernel_harness.py ...`, in its own session, under the stall watcher (`run_watched`), with a backstop of
-   the wait plus the call timeout. The command is the shipped harness. The agent supplies nothing.
+   --file KERNEL -- python kernel_harness.py ...`, in its own session, under the stall watcher (`run_watched`), with an outer timeout
+   that is the sum of every phase (`hwtool.outer_backstop_s`: the acquire, the wait and its margin, the call timeout and the release
+   grace). The command is the shipped harness. The agent supplies nothing.
 3. The wrapper holds the lease. It runs `gozer acquire --owner-pid <the wrapper's pid>`. A grant is used at once. A busy board
    gives one ticket, and the wrapper runs `gozer wait --timeout Ns TICKET` once (it prints a new line every 10 s, so the stall
    watcher sees progress). A wait that ends without a grant runs `gozer cancel TICKET` and the wrapper exits with status 10. After a
    grant the wrapper checks the sha256 of the kernel copy again (the agent can write anywhere the operator can, and a wait can last
-   two minutes), runs the harness with `TT_VISIBLE_DEVICES` from the lease, runs `gozer release` in a `finally`, and exits with the
+   two minutes), runs the harness with `TT_VISIBLE_DEVICES` from the lease (the call-timeout clock starts at the grant, and the harness is stopped at
+   that deadline whatever the wait took: exit status 124, outcome `timeout`, a hang for the probe), runs `gozer release` in a `finally`, and exits with the
    harness's status. A SIGTERM or Ctrl-C ends the harness, releases the lease and exits. A second signal during the release is
    ignored, so the reset is not cut short.
 4. If the wrapper dies by any signal, including SIGKILL, its lease has a dead owner and gozer reaps it. `gozer wait` grants a lease
@@ -178,8 +180,21 @@ cleanup can leave a real board leased, so the design was cut down to what is nee
    and no hardware phase.
 
 Chip time is the wrapper's own: seconds from its grant stamp to its end stamp (written after the release), from its own clock. A
-wrapper that was killed has no end stamp, and the probe counts the seconds after its grant as an upper bound (`lease_upper_bound`).
+record that never finished (no end stamp: the wrapper was killed or wrote nothing) and an interrupted call are charged as an upper
+bound (`lease_upper_bound`): the larger of the full call timeout plus the release grace and the seconds the call has been running
+up to now (`hwtool.unfinished_charge_s`), never zero and never the partial time. A record that finished and was never granted is zero.
 Nothing is settled afterwards against gozer's history.
+
+**Timeouts.** The phases each have their own allowance, and the outer timeout is their sum so that none can eat another: acquire
+(60 s), wait (`--hw-wait-s` plus a 30 s margin for `gozer wait`), run (the call timeout, enforced by the wrapper from the grant) and
+release (a 90 s grace; a cancel, 60 s, uses the same slot). A test checks that the outer timeout is at least the longest path
+through the wrapper for several waits and call timeouts. The lease-seconds cap counts chip time only (the wrapper's own stamps), and
+the 210 s cleanup reserve still covers the group's 120 s terminate grace and the 90 s release.
+
+**Records after an interrupt.** A call that finished is written to the record, with its chip time, before the status check, and
+before any interrupt that lands afterwards is handled. An interrupt in the status check stops the tool (fail closed) and the stop is
+written before the interrupt goes on. An interrupt while the record is being made records the call once, charged once. An interrupt
+before the wrapper could start is charged the same upper bound (it cannot be told from one after the grant).
 
 **Three states.**
 

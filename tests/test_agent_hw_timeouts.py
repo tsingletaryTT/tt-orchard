@@ -177,3 +177,30 @@ def test_the_command_line_carries_the_call_timeout_to_the_wrapper(tmp_path):
     assert status == hwtool.WRAP_TIMEOUT and mono.t - cmd.began == 30.0
     assert hwtool.wrapper_cli(["run", "--who", WHO, "--reason", "r", "--wait-s", "5", "--result", str(tmp_path / "r.json"),
                                "--call-timeout-s", "soon", "--", "harness"], install_signals=False) == 2
+
+
+# ---- the sweep: every timeout in the wrapper that is a sum of phases ---------------------------------------------------------------------
+
+
+def test_the_outer_timeout_covers_the_longest_path_through_the_wrapper_for_any_wait_and_call_timeout():
+    """acquire, then the wait and its margin, then the longer of (cancel) and (the run and the release)."""
+    for wait_s in (0.0, 1.0, 33.0, 120.0):
+        for call in (10.0, 240.0):
+            longest = (hwtool.ACQUIRE_TIMEOUT_S + wait_s + hwtool.WAIT_MARGIN_S
+                       + max(hwtool.CANCEL_TIMEOUT_S, call + hwtool.RELEASE_GRACE_S))
+            assert hwtool.outer_backstop_s(wait_s, call) >= longest
+
+
+def test_the_gozer_wait_is_given_its_allowance_plus_the_margin_and_the_cancel_its_own_timeout(tmp_path):
+    seen = []
+
+    class Gz(FakeGozer):
+        def sh(self, argv, timeout):
+            seen.append((argv[1], timeout))
+            return super().sh(argv, timeout)
+    gz = Gz(busy=1, wait="timeout")
+    hwtool.run_wrapper(who=WHO, reason="r", wait_s=7.0, result_path=tmp_path / "r.json", command=["x"], sh=gz.sh,
+                       spawn=HungCmd(Mono()).spawn, now=lambda: 0.0, out=lambda line: None, pid=PID)
+    assert ("wait", 7.0 + hwtool.WAIT_MARGIN_S) in seen and ("cancel", hwtool.CANCEL_TIMEOUT_S) in seen
+    assert ("acquire", hwtool.ACQUIRE_TIMEOUT_S) in seen
+    assert hwtool.CANCEL_TIMEOUT_S <= hwtool.RELEASE_GRACE_S                  # a cancel fits in the slot the release has
