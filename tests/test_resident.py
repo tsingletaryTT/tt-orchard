@@ -105,7 +105,20 @@ def test_the_rules_are_written_down_as_numbers():
 
 @pytest.mark.parametrize("n, label", [(0, "no measurement"), (1, "single sample"), (2, "single sample"), (3, "benchmark"), (5, "benchmark")])
 def test_the_label_follows_the_number_of_measured_repeats(n, label):
-    assert r.label_for(n) == label
+    assert r.label_for(n, 1) == label
+
+
+@pytest.mark.parametrize("warmup", [None, 0, -1, True, 0.5, "1"])
+def test_three_repeats_without_a_stated_warmup_are_unwarmed_not_a_benchmark(warmup):
+    assert r.label_for(3, warmup) == "unwarmed"
+
+
+def test_a_warmup_does_not_rescue_fewer_than_three_repeats():
+    assert r.label_for(2, 5) == "single sample" and r.label_for(0, 5) == "no measurement"
+
+
+def test_more_warmup_than_the_rule_asks_is_still_a_benchmark():
+    assert r.label_for(3, 2) == "benchmark"
 
 
 # ---- the benchmark -------------------------------------------------------------------------------------------------------------------
@@ -125,6 +138,11 @@ def test_each_timed_part_has_its_own_spread():
     res = r.run_benchmark(rt, settings(), warmup=1, repeats=3, loadavg=lambda: (1.0, 1.0, 1.0))
     assert set(res["parts"]) == {"generate_and_decode_s", "chip_transformer_call_s"}
     assert res["parts"]["chip_transformer_call_s"] == {"n": 3, "min": 0.2, "median": 0.3, "max": 0.4}
+
+
+def test_three_repeats_with_no_warmup_are_unwarmed():
+    res = r.run_benchmark(r.FakeRuntime(), settings(), warmup=0, repeats=3, loadavg=NOLOAD)
+    assert res["label"] == "unwarmed" and res["warmup_runs"] == 0
 
 
 def test_fewer_than_three_repeats_is_a_single_sample():

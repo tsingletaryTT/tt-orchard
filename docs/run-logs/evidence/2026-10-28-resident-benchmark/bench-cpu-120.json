@@ -1,0 +1,51 @@
+{
+ "device": "cpu",
+ "model": "small-music",
+ "settings": {
+  "prompt": "A warm acoustic guitar melody with soft percussion, 100 BPM",
+  "steps": 8,
+  "cfg_scale": 1.0,
+  "sampler": "pingpong",
+  "seed": 42,
+  "sample_size": 5292032
+ },
+ "warmup_runs": 0,
+ "repeats": 1,
+ "host_loadavg_1m_at_start": 13.79833984375,
+ "host_loadavg_1m_at_end": 15.99365234375,
+ "load": {
+  "model_load_s": 5.013
+ },
+ "sizes": [
+  {
+   "seconds": 120.0,
+   "label": "single sample",
+   "warmup_runs": 0,
+   "repeats": 1,
+   "parts": {
+    "conditioning_s": {
+     "n": 1,
+     "min": 0.05,
+     "median": 0.05,
+     "max": 0.05
+    },
+    "generate_and_decode_s": {
+     "n": 1,
+     "min": 40.215,
+     "median": 40.215,
+     "max": 40.215
+    }
+   },
+   "runs": [
+    {
+     "timings": {
+      "conditioning_s": 0.05,
+      "generate_and_decode_s": 40.215
+     },
+     "host_loadavg_1m": 15.99365234375,
+     "output_sha256": null
+    }
+   ]
+  }
+ ]
+}

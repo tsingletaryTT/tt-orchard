@@ -1194,6 +1194,8 @@ AUDIO_REPEAT_ROLES = (("chip", "reference", "Fine-tune, 8 steps"), ("control_chi
 AUDIO_MIN_REPEATS = 3            # fewer measured repeats is a single sample (orchard/resident.py MIN_REPEATS; orchard/stages.py gate_bundle checks the same heading)
 AUDIO_BENCH_HEADING = "### Timing repeats: benchmark"
 AUDIO_SINGLE_HEADING = "### Timing repeats: single sample"
+AUDIO_UNWARMED_HEADING = "### Timing repeats: unwarmed"
+AUDIO_MIN_WARMUP = 1             # discarded runs before the repeats (orchard/resident.py WARMUP_RUNS)
 
 
 def audio_good_values(lst, key: str) -> list:
@@ -1221,15 +1223,19 @@ def audio_repeat_lines(data: dict) -> list[str]:
     import statistics
     reps = dig(data, "repeats")
     counts = audio_repeat_counts(data)
-    bench = bool(counts) and min(counts.values()) >= AUDIO_MIN_REPEATS
-    lines = ["", AUDIO_BENCH_HEADING if bench else AUDIO_SINGLE_HEADING, ""]
+    enough = bool(counts) and min(counts.values()) >= AUDIO_MIN_REPEATS
+    warm = dig(data, "timing", "warmup_runs")
+    warmed = isinstance(warm, int) and not isinstance(warm, bool) and warm >= AUDIO_MIN_WARMUP
+    bench = enough and warmed
+    lines = ["", AUDIO_BENCH_HEADING if bench else (AUDIO_UNWARMED_HEADING if enough else AUDIO_SINGLE_HEADING), ""]
     if not counts and not (isinstance(reps, dict) and any(isinstance(v, list) and v for v in reps.values())):
         return lines + [f"The chip run was not repeated, or the repeats are {NOT_RECORDED}. The timings above are a single sample: one run, with no spread."]
-    warm = dig(data, "timing", "warmup_runs")
     warm_text = (f"{warm} discarded warm-up run(s) in the same process before the repeats" if isinstance(warm, int) and not isinstance(warm, bool) and warm >= 0
                  else f"Discarded warm-up runs before the repeats: {NOT_RECORDED}")
     lines += [("Each model was loaded once on the chip and then generated the same clip several times with the same settings and seed. " if bench else
-               "This is a single sample: fewer than 3 measured repeats for at least one model, so there is no spread to quote. It is not a benchmark. ")
+               ("There are at least 3 measured repeats, but the discarded warm-up runs are missing or fewer than the rule asks for, so the first repeat "
+                "carries start-up cost. It is not a benchmark. " if enough else
+                "This is a single sample: fewer than 3 measured repeats for at least one model, so there is no spread to quote. It is not a benchmark. "))
               + f"{warm_text[0].upper() + warm_text[1:]}. The CPU column is the reference's single `generate` call, made once in the reference "
               "environment (one sample).", "",
               "| Run | Part | Seconds per repeat | Min | Median | Max | CPU reference, one sample |", "|---|---|---|---|---|---|---|"]

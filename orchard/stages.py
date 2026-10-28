@@ -1022,6 +1022,9 @@ def _bundle_benchmark_reasons(bundle: Path, run_dir) -> list[str]:
         res = safeio.read_json(Path(run_dir) / rel, max_bytes=64 << 20, expect=dict)
     except (safeio.SafeReadError, OSError):
         return [f"RESULTS.md heads the audio timings as a benchmark, but {rel} cannot be read to support it"]
+    warm = (res.get("timing") or {}).get("warmup_runs") if isinstance(res.get("timing"), dict) else None
+    if not isinstance(warm, int) or isinstance(warm, bool) or warm < resident.WARMUP_RUNS:
+        return [f"RESULTS.md heads the audio timings as a benchmark, but {rel} records {warm!r} warm-up runs; the rule is {resident.WARMUP_RUNS}"]
     reps = res.get("repeats")
     counts = {}
     if isinstance(reps, dict):

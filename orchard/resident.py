@@ -22,7 +22,8 @@ Benchmark rules, written down here and used by the stages and the scripts:
 
     WARMUP_RUNS   one discarded `generate` before the measured ones, for each size, because the first call at a size compiles kernels and fills
                   caches that depend on the size.
-    MIN_REPEATS   three measured runs. Fewer is labelled "single sample" and nothing may call it a benchmark.
+    MIN_REPEATS   three measured runs. Fewer is labelled "single sample" and nothing may call it a benchmark. Three or more with fewer than WARMUP_RUNS
+                  discarded runs (or with no statement of how many) is labelled "unwarmed" and is not a benchmark either.
     spread        min, median and max over the measured runs, for each timed part the runtime names.
     host load     the host's one-minute load average, read next to each measured run, because the host is shared.
     SWEEP_SECONDS the stated sizes of a length sweep; MAX_SECONDS is the longest clip the model makes (its sample size is 120 s at 44.1 kHz).
@@ -42,8 +43,10 @@ SWEEP_SECONDS = (10.0, 30.0, 60.0, 120.0)
 MAX_SECONDS = 120.0
 LABEL_BENCHMARK = "benchmark"
 LABEL_SINGLE = "single sample"
+LABEL_UNWARMED = "unwarmed"
 LABEL_NONE = "no measurement"
 BENCH_HEADING = "### Timing repeats: benchmark"          # the heading the operator bundle gives timings over at least MIN_REPEATS repeats ...
+UNWARMED_HEADING = "### Timing repeats: unwarmed"         # three or more repeats with no warm-up stated
 SINGLE_HEADING = "### Timing repeats: single sample"      # ... and the heading it gives anything less (orchard/skills/operator-bundle-templates/build_bundle.py)
 MAIN_PART = "generate_and_decode_s"          # the part every runtime names: the whole generate call and decode
 
@@ -64,11 +67,16 @@ def spread(values) -> dict:
     return {"n": len(values), "min": min(values), "median": statistics.median(values), "max": max(values)}
 
 
-def label_for(n_measured: int) -> str:
-    """What a set of `n_measured` timed runs may be called."""
-    if n_measured >= MIN_REPEATS:
-        return LABEL_BENCHMARK
-    return LABEL_SINGLE if n_measured >= 1 else LABEL_NONE
+def label_for(n_measured: int, warmup=None) -> str:
+    """What a set of `n_measured` timed runs, made after `warmup` discarded runs, may be called. `warmup` None means it was not stated, which does not
+    meet the rule."""
+    if n_measured < 1:
+        return LABEL_NONE
+    if n_measured < MIN_REPEATS:
+        return LABEL_SINGLE
+    if not isinstance(warmup, int) or isinstance(warmup, bool) or warmup < WARMUP_RUNS:
+        return LABEL_UNWARMED
+    return LABEL_BENCHMARK
 
 
 def repeat_dir(out, k: int) -> Path:
@@ -148,17 +156,18 @@ LOAD_KEYS = ("model_load_s", "chip_weights_upload_s")        # reported once per
 NOT_PARTS = LOAD_KEYS + ("host_loadavg_1m",)                  # timings that are not a per-run part
 
 
-def summarise_runs(timings_list) -> dict:
+def summarise_runs(timings_list, warmup=None) -> dict:
     """The record of a set of measured runs, from each run's timings (a list of dicts of numbers). The label says what the set may be called (fewer
     than MIN_REPEATS runs: "single sample"). `parts` holds min, median and max of every timed part that all the runs report; a part only some runs
     report is named in `incomplete_parts` and left out of `parts`. `load` is the load's timings, read from the first run, where the single loaded process
-    reports them. `host_loadavg_1m` lists each run's load average (None where it was not recorded)."""
+    reports them. `host_loadavg_1m` lists each run's load average (None where it was not recorded). `warmup` is the number of discarded runs that came
+    first (it decides the label, with the count)."""
     runs = [t for t in timings_list if isinstance(t, dict)]
     n = len(runs)
     keys = sorted({k for t in runs for k, v in t.items() if isinstance(k, str) and k not in NOT_PARTS and _is_number(v)})
     complete = [k for k in keys if all(_is_number(t.get(k)) for t in runs)]
     first = runs[0] if runs else {}
-    return {"label": label_for(n), "repeats": n, "parts": {k: spread([t[k] for t in runs]) for k in complete},
+    return {"label": label_for(n, warmup), "repeats": n, "parts": {k: spread([t[k] for t in runs]) for k in complete},
             "incomplete_parts": [k for k in keys if k not in complete],
             "load": {k: first[k] for k in LOAD_KEYS if _is_number(first.get(k))},
             "host_loadavg_1m": [t["host_loadavg_1m"] if _is_number(t.get("host_loadavg_1m")) else None for t in runs]}
@@ -189,7 +198,7 @@ def run_benchmark(runtime, settings: dict, *, warmup: int = WARMUP_RUNS, repeats
         for k, run in enumerate(runs):
             if not _is_number(run["timings"].get(name)):
                 raise ResidentError(f"part {name!r} is missing or not a number in measured run {k}")
-    return {"label": label_for(repeats), "warmup_runs": warmup, "repeats": repeats, "load": dict(load),
+    return {"label": label_for(repeats, warmup), "warmup_runs": warmup, "repeats": repeats, "load": dict(load),
             "parts": {name: spread([run["timings"][name] for run in runs]) for name in names}, "runs": runs}
 
 

@@ -953,6 +953,15 @@ def test_the_result_has_min_median_max_for_each_part_and_the_load_once(tmp_path)
     assert st.chip_problems(s2, run_dir, ref_dir) == []
 
 
+def test_three_repeats_after_no_warmup_are_labelled_unwarmed_and_the_gate_agrees(tmp_path):
+    run_dir, ref_dir, s2, res = stage2(tmp_path, repeats=3, warmup=0, timings=varied)
+    assert {r["label"] for r in res["timing"]["roles"].values()} == {"unwarmed"} and res["timing"]["warmup_runs"] == 0
+    assert st.chip_problems(s2, run_dir, ref_dir) == []
+    res["timing"]["roles"]["chip"]["label"] = "benchmark"
+    (s2 / "audio_result.json").write_text(json.dumps(res))
+    assert any("timing label" in p for p in st.chip_problems(s2, run_dir, ref_dir))
+
+
 def test_fewer_than_three_repeats_are_labelled_a_single_sample(tmp_path):
     run_dir, ref_dir, s2, res = stage2(tmp_path, repeats=2)
     assert {r["label"] for r in res["timing"]["roles"].values()} == {"single sample"}

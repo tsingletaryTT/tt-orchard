@@ -4,10 +4,16 @@
 from orchard import resident as r
 
 
+def test_the_warmup_decides_the_label_with_the_count():
+    runs = [{"a": 1.0}] * 3
+    assert r.summarise_runs(runs, 1)["label"] == "benchmark" and r.summarise_runs(runs, 0)["label"] == "unwarmed"
+    assert r.summarise_runs(runs)["label"] == "unwarmed" and r.summarise_runs(runs[:2], 1)["label"] == "single sample"
+
+
 def test_summarise_runs_gives_the_label_the_spread_the_load_and_the_load_averages():
     runs = [{"generate_and_decode_s": 1.8, "model_load_s": 6.0, "chip_weights_upload_s": 1.2, "host_loadavg_1m": 3.0},
             {"generate_and_decode_s": 1.6, "host_loadavg_1m": 4.0}, {"generate_and_decode_s": 1.7}]
-    rec = r.summarise_runs(runs)
+    rec = r.summarise_runs(runs, 1)
     assert rec["label"] == "benchmark" and rec["repeats"] == 3
     assert rec["parts"] == {"generate_and_decode_s": {"n": 3, "min": 1.6, "median": 1.7, "max": 1.8}}
     assert rec["load"] == {"model_load_s": 6.0, "chip_weights_upload_s": 1.2} and rec["host_loadavg_1m"] == [3.0, 4.0, None]

@@ -40,6 +40,11 @@ def test_sizes_warmup_and_repeats_can_be_stated(tmp_path):
     assert {row["label"] for row in rec["sizes"]} == {"single sample"} and rec["warmup_runs"] == 0 and rec["repeats"] == 1
 
 
+def test_three_repeats_with_no_warmup_are_labelled_unwarmed(tmp_path):
+    run(tmp_path, ["--sizes", "10", "--warmup", "0", "--repeats", "3"])
+    assert json.loads((tmp_path / "bench.json").read_text())["sizes"][0]["label"] == "unwarmed"
+
+
 @pytest.mark.parametrize("sizes", ["10,121", "0", "-3", "x", "nan"])
 def test_a_bad_size_is_refused_before_anything_loads(tmp_path, sizes):
     rt = resident.FakeRuntime()

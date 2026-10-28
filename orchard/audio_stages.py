@@ -469,7 +469,7 @@ def timing_record(repeats: dict, warmup: int) -> dict:
     the single loaded process reported once, and the host load average of each run (orchard/resident.py `summarise_runs`). `warmup_runs` is the number
     of discarded runs that came before the repeats."""
     return {"warmup_runs": warmup, "min_repeats": resident.MIN_REPEATS,
-            "roles": {role: resident.summarise_runs([e.get("timings") for e in lst if isinstance(e, dict)]) for role, lst in repeats.items()}}
+            "roles": {role: resident.summarise_runs([e.get("timings") for e in lst if isinstance(e, dict)], warmup) for role, lst in repeats.items()}}
 
 
 def timing_problems(stage_dir, res: dict, repeats) -> list[str]:
@@ -490,7 +490,7 @@ def timing_problems(stage_dir, res: dict, repeats) -> list[str]:
         for k, e in enumerate(entries):
             if k >= 1 and any(key in e["timings"] for key in resident.LOAD_KEYS):
                 problems.append(f"{role} repeat {k}: it records a load time; the load happened once, in repeat 0")
-        fresh = resident.summarise_runs([e["timings"] for e in entries])
+        fresh = resident.summarise_runs([e["timings"] for e in entries], configured_warmup(stage_dir))
         rec = timing["roles"].get(role)
         if not isinstance(rec, dict):
             problems.append(f"{role}: the timing record has no entry for this role")
