@@ -3066,6 +3066,85 @@ def _audio_difference_reason(d: dict) -> str:
     return f"model_config.json {d['key']} differs: {fmt(d['model'])} vs {fmt(d['base'])} ({d['category']}, decided by {d['decided_by']})"
 
 
+def _audio_tensor_prefix(directory: Path, info: dict, elements: int):
+    """The first `elements` values of one tensor, read through the identity-recording open: the shard is opened once, its header is read again from
+    that descriptor (for the byte range) and the values come from the same descriptor. Raises on any short read, a missing entry or an unreadable
+    file; the caller turns that into a problem."""
+    f, st = _audio_open_regular(directory / info["shard"])
+    with f:
+        raw = f.read(8)
+        if len(raw) != 8:
+            raise ValueError("shorter than 8 bytes")
+        length = struct.unpack("<Q", raw)[0]
+        if length > AUDIO_HEADER_MAX:
+            raise ValueError(f"header length {length} is larger than {AUDIO_HEADER_MAX}")
+        blob = f.read(length)
+        if len(blob) != length:
+            raise ValueError("the header is cut short")
+        entry = audio_loads(blob.decode("utf-8")).get(info["name"])
+        if not isinstance(entry, dict) or not isinstance(entry.get("data_offsets"), list) or len(entry["data_offsets"]) != 2:
+            raise ValueError(f"tensor {info['name']} has no byte range")
+        start, end = entry["data_offsets"]
+        size = ITEMSIZE.get(entry.get("dtype"))
+        if size is None:
+            return None
+        want = min(elements, max((end - start) // size, 0)) * size
+        f.seek(8 + length + start)
+        buf = f.read(want)
+        if len(buf) != want:
+            raise ValueError(f"tensor {info['name']} is cut short ({len(buf)} of {want} bytes)")
+        return decode_values(buf, entry["dtype"])
+
+
+def audio_value_diffs(model_dir: Path, base_dir: Path, mt: dict, bt: dict):
+    """(values, problems). The value sample for the audio branch: the first SAMPLE_ELEMENTS values of up to SAMPLE_TENSORS paired tensors, every
+    file opened through `_audio_open_regular` so the identity check sees it. A read that fails is a problem (the class becomes unknown), never an
+    empty sample that would read as no difference."""
+    names = sorted(set(mt) & set(bt))
+    chosen = names if len(names) <= SAMPLE_TENSORS else [names[i * len(names) // SAMPLE_TENSORS] for i in range(SAMPLE_TENSORS)]
+    samples, skipped, problems = [], [], []
+    for name in chosen:
+        if mt[name]["shape"] != bt[name]["shape"]:
+            skipped.append(f"{name}: shapes differ ({mt[name]['shape']} and {bt[name]['shape']})")
+            continue
+        try:
+            a = _audio_tensor_prefix(model_dir, {**mt[name], "name": name}, SAMPLE_ELEMENTS)
+            c = _audio_tensor_prefix(base_dir, {**bt[name], "name": name}, SAMPLE_ELEMENTS)
+        except (OSError, ValueError, UnicodeError) as exc:
+            problems.append(f"value sample: {name} could not be read: {exc}")
+            continue
+        if a is None or c is None:
+            skipped.append(f"{name}: dtype {mt[name]['dtype']} / {bt[name]['dtype']} is not read")
+            continue
+        rel, cos = relation(a, c)
+        diffs = [abs(x - y) for x, y in zip(a, c)]
+        samples.append({"model_tensor": name, "base_tensor": name, "elements": len(a), "relation": rel,
+                        "cosine": None if cos is None else round(cos, 6),
+                        "mean_abs_diff": sum(diffs) / len(diffs) if diffs else 0.0, "max_abs_diff": max(diffs, default=0.0),
+                        "mean_abs_base": sum(abs(y) for y in c) / len(c) if c else 0.0})
+    summary = {k: sum(1 for x in samples if x["relation"] == k) for k in ("identical", "near", "changed", "unrelated")}
+    return {"samples": samples, "summary": summary, "skipped": skipped,
+            "note": (f"the first {SAMPLE_ELEMENTS} values of up to {SAMPLE_TENSORS} paired tensors; a fine-tune is 'near' "
+                     f"(cosine at least {NEAR_COSINE}), identical weights are 'identical'")}, problems
+
+
+_EMPTY_SIDE = {"path": "", "num_files": 0, "weight_shards": [], "num_weight_shards": 0, "weight_shard_total_bytes": 0,
+               "weight_shard_total_gib": 0.0, "all_files": {}}
+_EMPTY_FILES = {"model": _EMPTY_SIDE, "base": _EMPTY_SIDE, "files_only_in_model": [], "files_only_in_base": [], "shards_only_in_model": [],
+                "shards_only_in_base": [], "common_files": [], "common_files_with_different_size": {}}
+_EMPTY_LICENSE = {"readme_license_field": None, "readme_license_name": None, "license_file": None, "license_file_head": None,
+                  "license_from_file_text": None, "license": None, "source": None}
+
+
+def _audio_guarded(label: str, problems: list, fn, default):
+    """fn(), or `default` plus a problem when the read fails. A read that fails must not crash the stage and must not look like an empty result."""
+    try:
+        return fn()
+    except (OSError, ValueError, UnicodeError) as exc:
+        problems.append(f"{label} could not be read: {exc}")
+        return default
+
+
 def audio_main(cfg: dict) -> int:
     """The stage 0 comparison for a model in the stable-audio-tools layout (see the block comment above)."""
     run_dir = os.path.realpath(cfg["run_dir"])
@@ -3093,8 +3172,11 @@ def audio_main(cfg: dict) -> int:
     base_is_audio = base_problem is None
     if base_problem:
         problems.append(f"the nearest model is not in the stable-audio-tools layout, so the two cannot be compared: {base_problem}")
-    mcfg = None if model_problem else _audio_json(model_dir / AUDIO_CONFIG)[0]
-    bcfg = _audio_json(base_dir / AUDIO_CONFIG)[0] if base_is_audio else None
+    mcfg, merr = (None, None) if model_problem else _audio_json(model_dir / AUDIO_CONFIG)
+    bcfg, berr = _audio_json(base_dir / AUDIO_CONFIG) if base_is_audio else (None, None)
+    # The layout check read both configs; a second read that fails (the file changed in between) is a problem, and the configs are not compared.
+    problems += [f"new model {merr}"] if merr else []
+    problems += [f"nearest model {berr}"] if berr else []
     mt, merrs = ({}, []) if model_problem else audio_tensors(model_dir)
     bt, berrs = audio_tensors(base_dir) if base_is_audio else ({}, [])
     problems += [f"new model {e}" for e in merrs] + [f"nearest model {e}" for e in berrs]
@@ -3125,10 +3207,16 @@ def audio_main(cfg: dict) -> int:
         for row in encoders:
             problems += row["problems"]
             hard += row["differences"]
-    f = compare_files(model_dir, base_dir)
+    f = _audio_guarded("the file listing", problems, lambda: compare_files(model_dir, base_dir), _EMPTY_FILES)
     write_json("files-compare.json", f)
-    values = ({"samples": [], "summary": {}, "skipped": [], "note": "not run: the headers could not be read"} if problems
-              else sample_value_diffs(model_dir, base_dir, {k: k for k in sorted(set(mt) & set(bt))}))
+    ml = _audio_guarded("the new model's card or license file", problems, lambda: license_side(model_dir), _EMPTY_LICENSE)
+    bl = _audio_guarded("the nearest model's card or license file", problems, lambda: license_side(base_dir), _EMPTY_LICENSE)
+    code = _audio_guarded("a code file of the new model", problems, lambda: code_files(model_dir), [])
+    if problems:
+        values = {"samples": [], "summary": {}, "skipped": [], "note": "not run: the headers could not be read"}
+    else:
+        values, sample_problems = audio_value_diffs(model_dir, base_dir, mt, bt)
+        problems += sample_problems
     write_json("value-compare.json", values)
     # The value sample opens the weight files by name again. Checking every file's identity after it, a file replaced at any point since it was first
     # read makes the evidence describe something that is no longer there, and the class unknown.
@@ -3153,10 +3241,8 @@ def audio_main(cfg: dict) -> int:
              "decision": decision, "text_encoders": encoders, "files_only_in_base": f["files_only_in_base"] + f["shards_only_in_base"],
              "files_only_in_model": f["files_only_in_model"] + f["shards_only_in_model"]}
     write_json("audio-compare.json", {**audio, "problems": decision["problems"], "reasons": all_reasons})
-    ml, bl = license_side(model_dir), license_side(base_dir)
     say(f"wrote evidence/audio-compare.json, files-compare.json and value-compare.json ({len(mt)} and {len(bt)} tensors; "
         f"{len(components)} components)")
-    code = code_files(model_dir)
     comp_text = ", ".join(f"{c['prefix']} ({c['role'] or 'no known role'}, {c['tensors']} tensors, {c['parameters']:,} parameters)"
                           for c in components) or "none"
     cd = (config["model_differences"], config["top_level_differences"], config["pointer_differences"], config["training_differences"])
