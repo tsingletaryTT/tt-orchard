@@ -201,7 +201,7 @@ def _follow(base: str, jobs: dict, problems: list, *, t0: float, deadline: float
     pending = set(jobs)
     timed_out = False
     while pending and not timed_out:
-        for jid in [j for j in jobs if j in pending]:          # in the order the jobs were accepted, not sorted by id
+        for jid in [j for j in jobs if j in pending]:          # in the order the jobs were accepted (an id sort would be arbitrary)
             if clock() >= deadline:
                 timed_out = True
                 break

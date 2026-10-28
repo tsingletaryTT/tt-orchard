@@ -373,14 +373,14 @@ def order(url, **kw):
 
 
 def test_jobs_sent_one_after_another_that_start_in_that_order_are_first_in_first_out(make_server):
-    fake, url = make_server(start_delay=0.3, service_s=0.1, max_waiting=3)
+    fake, url = make_server(start_delay=0.3, service_s=0.4, max_waiting=3)
     r = order(url)
     assert r["accepted"] == 3 and r["first_in_first_out"] is True and r["refused"] == {}
     assert len(r["submit_order"]) == 3 and r["start_s_in_submit_order"] == sorted(r["start_s_in_submit_order"])
 
 
 def test_a_last_in_first_out_queue_is_reported_as_not_first_in_first_out(make_server):
-    fake, url = make_server(lifo=True, start_delay=0.3, service_s=0.1, max_waiting=3)
+    fake, url = make_server(lifo=True, start_delay=0.3, service_s=0.4, max_waiting=3)
     r = order(url)
     assert r["accepted"] == 3 and r["first_in_first_out"] is False
 
@@ -481,7 +481,7 @@ def test_levels_default_to_one_two_and_four():
 # ---- the whole probe and the file ------------------------------------------------------------------------------------------------------
 
 def test_the_probe_runs_each_level_waits_for_idle_between_them_and_writes_the_file(make_server, tmp_path):
-    fake, url = make_server(service_s=0.1, max_waiting=2)
+    fake, url = make_server(service_s=0.4, max_waiting=2)
     out = tmp_path / "probe.json"
     rec = qp.run_probe(url, SETTINGS, levels=(1, 2, 4), poll_s=0.02, timeout_s=10.0, out=out)
     assert [lv["concurrency"] for lv in rec["levels"]] == [1, 2, 4]
