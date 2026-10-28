@@ -410,6 +410,15 @@ def _parser() -> argparse.ArgumentParser:
     kp.add_argument("--library", choices=("all", "others", "none"), default="all",
                     help="the worked kernels put into each attempt's reference/: all (default), others (leave out the "
                          "kernel for the op under test, so a pass is not a copy) or none; the report records the mode")
+    kp.add_argument("--staged", action="store_true",
+                    help="build the kernel in stages, each ending at a simulator check against a reference for that step "
+                         "(copy, one arithmetic step, the reduction, the broadcast back, the whole op); the verified "
+                         "prefix is the next stage's starting file. For ops with a stage table (center, rmsnorm); needs "
+                         "--no-agent-hw and --phase sim")
+    kp.add_argument("--stage-turns", dest="stage_turns", type=int, metavar="N",
+                    help="with --staged: the turns each stage may use (default: the stage table's, 15)")
+    kp.add_argument("--stage-wall-s", dest="stage_wall_s", type=float, metavar="S",
+                    help="with --staged: the seconds each stage may use (default: the stage table's, 420)")
     kp.add_argument("--hw-checks", dest="hw_checks", type=int, metavar="N",
                     help="how many times each attempt may call the `hardware_check` tool, which runs its current kernel.py "
                          "on one leased chip (default 6; 0 turns the tool off). A call takes about 45 s with the lease "

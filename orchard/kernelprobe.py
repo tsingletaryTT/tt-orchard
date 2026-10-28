@@ -512,7 +512,7 @@ FILE_RULE_REMEDY = "write kernel.py with write_file as a plain file of at most 2
 
 
 def authoritative_check(adir: Path, *, op: str, env, run_watched=run_watched, tt_lang: dict | None = None,
-                        vdir: Path | None = None) -> dict:
+                        vdir: Path | None = None, templates: Path | None = None) -> dict:
     """Run the SHIPPED check on a copy of the agent's kernel.py and return its result (check.json's fields plus
     `kernel_sha256`, the sha256 of the copied bytes).
 
@@ -520,7 +520,11 @@ def authoritative_check(adir: Path, *, op: str, env, run_watched=run_watched, tt
     (CLEAN_DIR), `check-authoritative.json` and `authoritative-output.txt`. Nothing is read back from the attempt
     directory except kernel.py, and that only when copy_kernel accepts it; otherwise no check runs. Every input the
     check would read from check_config.json is passed on the command line. A run the stall watcher killed is
-    `timeout`, whatever file it left."""
+    `timeout`, whatever file it left.
+
+    `templates` is the directory the check, the harness, references.py and ops/<op>.json come from (default TEMPLATES).
+    The staged probe passes a directory whose spec and references describe one stage."""
+    tdir = Path(templates) if templates is not None else TEMPLATES
     vdir = Path(vdir) if vdir is not None else _verdict_dir_of(adir)
     _real_dir(vdir.parent)
     _fresh_dir(vdir)
@@ -534,8 +538,8 @@ def authoritative_check(adir: Path, *, op: str, env, run_watched=run_watched, tt
                 "kernel_sha256": None}
     out = vdir / "check-authoritative.json"
     facts = tt_lang if tt_lang is not None else tt_lang_facts(env)
-    argv = [sys.executable, str(TEMPLATES / "kernel_check.py"), "--attempt-dir", str(clean),
-            "--spec", str(TEMPLATES / "ops" / f"{op}.json"), "--sim", str(env.sim),
+    argv = [sys.executable, str(tdir / "kernel_check.py"), "--attempt-dir", str(clean),
+            "--spec", str(tdir / "ops" / f"{op}.json"), "--sim", str(env.sim),
             "--timeout-s", str(BUDGET["sim_timeout_s"]), "--tt-lang-json", json.dumps(facts),
             "--out", str(out)]
     got = run_watched(argv, cwd=clean, env=child_env(vdir, adir, hardware=False), log_path=vdir / "authoritative-output.txt",
@@ -2242,6 +2246,13 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
 
     if args.op not in OPS:
         return refuse(f"unknown op {args.op!r}; the ops are {', '.join(OPS)}")
+    staged = bool(getattr(args, "staged", False))
+    if staged:
+        from orchard import kernelstaged
+        if args.op not in kernelstaged.STAGES:
+            return refuse(f"--staged: no stage table for op {args.op!r}; the staged ops are {', '.join(kernelstaged.STAGES)}")
+        if getattr(args, "phase", "sim") != "sim":
+            return refuse("--staged runs the simulator only: use --phase sim")
     attempts = int(getattr(args, "attempts", 5) or 0)
     if attempts < 1:
         return refuse("--attempts must be at least 1")
@@ -2250,6 +2261,8 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
         hw_policy = hw_policy_from_args(args)
     except _Refused as exc:
         return refuse(str(exc))
+    if staged and hw_policy.enabled:
+        return refuse("--staged gives the coder no hardware tool: pass --no-agent-hw")
     shared = getattr(args, "shared_python", None) or default_shared_python()
     env = env or default_env(args)
     results = ttlang_env.ensure(env, check_only=True, say=say)
@@ -2310,6 +2323,11 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
                     f"{attempts} attempts per temperature ({temps}): {attempts * n_temps} in total")
         say(f"kernel probe {probe_id}: op {args.op}, {how_many}, coder {model} at {safe_url(endpoint)}")
         records: list[dict] = []
+        attempt_fn, attempt_extra = run_attempt, {}
+        if staged:                                          # staged construction (orchard/kernelstaged.py, issue 176)
+            attempt_fn = kernelstaged.run_attempt
+            attempt_extra = {"stage_turns": getattr(args, "stage_turns", None),
+                             "stage_wall_s": getattr(args, "stage_wall_s", None)}
         hw, stopped, blocked, code = None, None, None, EXIT_OK
         state: dict = {}
         hw_started = False
@@ -2331,12 +2349,12 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
                         if speed.get("state") == "slow" and not allow_slow:
                             stopped, code = f"coder slow before attempt {n}: {speed.get('message')}", EXIT_SLOW
                             break
-                    record = run_attempt(op=args.op, n=n, probe_dir=probe_dir, env=env, endpoint=endpoint,
+                    record = attempt_fn(op=args.op, n=n, probe_dir=probe_dir, env=env, endpoint=endpoint,
                                          model=model, coder_model=model, probe_id=probe_id, http=http,
                                          run_watched=run_watched_fn, tt_lang=facts, temperature=temperature,
                                          top_p=plan["top_p"], seed=attempt_seed(base, n, temperature),
                                          references=references, skills=skills_record, coder_speed=speed,
-                                         hw_policy=hw_policy, shared_python=shared)
+                                         hw_policy=hw_policy, shared_python=shared, **attempt_extra)
                     records.append(record)
                     say(_attempt_line(record))
                     # The tool stops itself when the check after a call finds a chip still held (or cannot tell): end the run,
@@ -2391,6 +2409,8 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
             header["agent_hw_policy"] = hw_policy.as_dict() | {"enabled": hw_policy.enabled}
             write_report(probe_dir, records, header)
             say(f"report: {probe_dir / 'kernel-probe-report.md'}")
+            if staged:
+                say(f"staged report: {kernelstaged.write_staged_report(probe_dir, records, args.op)}")
             if stopped:
                 say(f"stopped: {stopped}" + (" (pass --allow-slow-coder to run anyway)" if code == EXIT_SLOW else ""))
         except Exception as exc:                            # never let the last step lose the records
