@@ -531,8 +531,9 @@ def _audio_base(*, model_id: str, base: str, inferred: bool, report, accept_infe
                      "research inferred", "inferred-base-unconfirmed", data=data)
     try:
         snap = local_snapshot(base)
-    except Exception:
-        snap = None
+    except Exception as exc:                  # an unreadable cache is not an empty one: nothing is downloaded on that guess
+        return Check("base", BLOCK, f"cannot read the local cache for the base model {base}: {type(exc).__name__}: {exc}",
+                     "model-unavailable", data=data)
     info, err = None, "no hub lookup was made"
     if base_hub_info is not None:
         try:
@@ -865,12 +866,15 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
         hub, err = s.hub_info(model_id)
     except Exception as exc:
         hub, err = None, f"{type(exc).__name__}: {exc}"
+    cache_err = None
     try:
         local_path = s.local_snapshot(model_id)
-    except Exception:
-        local_path = None
+    except Exception as exc:                  # a cache that cannot be read is not an empty cache: the hub row says so
+        local_path, cache_err = None, f"{type(exc).__name__}: {exc}"
     local = local_path is not None
     out.append(check_hub(hub, err, local, local_path))
+    if cache_err:
+        out[-1].detail += f". The local cache could not be read ({cache_err}), so the model is treated as not downloaded"
     # Does the model count as audio? Evidence is the Hub's tags plus the layout of its file list and of the local snapshot's top level.
     # Without a hub answer there is no tag evidence, and the old path applies.
     audio = audio_evidence_for(hub, local_path)
@@ -915,11 +919,16 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
     if base_check.data and base_check.data.get("needs_fetch") and isinstance(base_check.data.get("base_gb"), (int, float)):
         base_gb = float(base_check.data["base_gb"])       # the audio base row already asked the hub
     elif base_check.data and base_check.data.get("needs_fetch"):
+        # A failed lookup is not a size of zero: the base row says the disk row cannot count it (the command refuses the run later if
+        # the Hub still cannot be asked).
         try:
-            base_hub, _ = s.hub_info(base_check.data["base"])
-            base_gb = base_hub.total_bytes / 1e9 if base_hub else 0.0
-        except Exception:
-            base_gb = 0.0
+            base_hub, why = s.hub_info(base_check.data["base"])
+        except Exception as exc:
+            base_hub, why = None, f"{type(exc).__name__}: {exc}"
+        if base_hub is not None:
+            base_gb = base_hub.total_bytes / 1e9
+        else:
+            base_check.detail += f". The hub could not be asked how large the base is ({why}), so the disk row does not count its download"
 
     say("checking this machine: disk, tiers, ports and chips")
 

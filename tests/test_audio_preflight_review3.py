@@ -227,3 +227,32 @@ def test_a_cached_base_missing_a_listed_component_config_blocks_when_gated(tmp_p
 def test_a_cached_base_with_every_listed_file_is_complete(tmp_path):
     s = snap(tmp_path / "hf", BASE, BASE_REV, names=AUDIO_FILES + ["svd_bases.pt"])
     assert audio_base(base_info=(base_hub(gated=False), None), local={BASE: s}).data["needs_fetch"] is False
+
+
+# ---- a failure is never read as absence --------------------------------------------------------------------
+
+def test_a_cache_read_that_fails_for_the_audio_base_is_a_block_and_not_a_download():
+    def boom(m):
+        raise PermissionError("cache unreadable")
+    c = pf.check_base(model_id=MODEL, hub=pf.parse_hub(audio_payload()), base_override=None, installed=[], local_snapshot=boom, search=None,
+                      audio="x", base_hub_info=lambda m: (base_hub(gated=False), None))
+    assert (c.status, c.reason) == ("block", "model-unavailable") and "cache" in c.detail
+
+
+def test_a_base_size_the_hub_would_not_give_is_said_on_the_base_row(tmp_path):
+    from orchard.nearest import Installed
+    from test_preflight import CLEF_PAYLOAD, cfg as pf_cfg
+    payload = dict(CLEF_PAYLOAD, cardData={"license": "x", "base_model": "o/base"})
+
+    def hub_info(m):
+        return (pf.parse_hub(payload), None) if m == "Cloudflare/clef" else (None, "HTTP 503")
+    s = plain_signals(hub_info=hub_info, installed_bundles=lambda: [Installed("b/b", "o/base", "6", 1)])
+    by = {c.name: c for c in pf.run_preflight(pf_cfg(tmp_path), "Cloudflare/clef", accept_credentials=True, signals=s)}
+    assert "HTTP 503" in by["base"].detail and "disk" in by["base"].detail
+
+
+def test_a_model_cache_read_that_fails_is_said_on_the_hub_row(tmp_path):
+    def boom(m):
+        raise PermissionError("cache unreadable")
+    by = rows(tmp_path, world(local_snapshot=boom))
+    assert "cache" in by["hub"].detail and "unreadable" in by["hub"].detail
