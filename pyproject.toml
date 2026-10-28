@@ -5,11 +5,6 @@ description = "Supervisor that brings new models up on a Tenstorrent Quietbox wi
 requires-python = ">=3.12"
 license = "Apache-2.0"
 
-# The supervisor and its tests need only the standard library. The audio demo page (orchard/audio_demo/audio_app.py) needs Gradio, so Gradio is an
-# extra: `pip install "tt-orchard[audio-demo]"`. The page's tests are skipped where Gradio is not installed.
-[project.optional-dependencies]
-audio-demo = ["gradio>=6.20,<7"]
-
 # The only place the version is written is the RELEASE literal in orchard/__init__.py. setuptools reads it
 # from the source text (attr is resolved statically), so building does not import the package.
 [tool.setuptools.dynamic]
