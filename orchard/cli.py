@@ -24,6 +24,7 @@
                             [--temperature T | --temperatures T1,T2] [--top-p P] [--seed N]
                             [--src-dir D] [--venv-dir D] [--shared-python P] [--tt-lang-skill-dir D]
                             [--allow-stale-skills] [--allow-slow-coder]
+                            [--hw-checks N | --no-agent-hw] [--hw-lease-s S] [--hw-call-timeout-s S] [--hw-wait-s S]
 
 It is a thin layer over `python3 -m orchard.supervisor`. `bringup` reads config/bringup.toml, checks what
 can be checked without a lease (orchard/preflight.py), fetches the model snapshot when it is not local
@@ -375,6 +376,20 @@ def _parser() -> argparse.ArgumentParser:
     kp.add_argument("--library", choices=("all", "others", "none"), default="all",
                     help="the worked kernels put into each attempt's reference/: all (default), others (leave out the "
                          "kernel for the op under test, so a pass is not a copy) or none; the report records the mode")
+    kp.add_argument("--hw-checks", dest="hw_checks", type=int, metavar="N",
+                    help="how many times each attempt may call the `hardware_check` tool, which runs its current kernel.py "
+                         "on one leased chip (default 6; 0 turns the tool off). A call takes about 45 s with the lease "
+                         "and the chip reset")
+    kp.add_argument("--no-agent-hw", dest="no_agent_hw", action="store_true",
+                    help="offer the agent no hardware tool: the same as --hw-checks 0, for measuring the coder alone")
+    kp.add_argument("--hw-lease-s", dest="hw_lease_s", type=float, metavar="S",
+                    help="chip seconds one attempt's hardware checks may use in all (default 600; 120 s of it are reserved for the stop and the reset)")
+    kp.add_argument("--hw-call-timeout-s", dest="hw_call_timeout_s", type=float, metavar="S",
+                    help="the longest one hardware check may run before the probe stops it (default 240; the stall "
+                         "watcher usually stops a hang sooner)")
+    kp.add_argument("--hw-wait-s", dest="hw_wait_s", type=float, metavar="S",
+                    help="how long a hardware check waits for a busy board before it tells the agent to use the "
+                         "simulator (default 120)")
     kp.add_argument("--allow-stale-skills", action="store_true",
                     help="run even when the tt-lang checkout or the tt-lang skill is not the latest upstream has, or "
                          "could not be compared; the report records it with the shas")
