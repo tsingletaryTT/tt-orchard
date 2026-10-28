@@ -591,7 +591,7 @@ def test_the_tt_lang_block_says_plainly_that_moving_the_pin_is_the_fix():
     to upstream main (named by sha), the two constants, and the command."""
     text = sf.ttlang_update("/src/tt-lang", None, MAIN)
     assert text.startswith("The fix is to move the pin")
-    for needle in ("TTLANG_PIN", "TTLANG_DIAGNOSTICS_SHA256", "orchard/defaults.py", "`tt-orchard kernel-env`", MAIN,
+    for needle in ("TTLANG_PIN", "DIAGNOSTICS_SHA256", "orchard/ttlang_pin.py", "`tt-orchard kernel-env`", MAIN,
                    "/src/tt-lang", "--allow-stale-skills"):
         assert needle in text, needle
 

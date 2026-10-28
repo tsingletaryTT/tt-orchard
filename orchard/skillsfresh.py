@@ -496,7 +496,7 @@ def ttlang_update(root: str, branch: str | None, remote: str | None = None) -> s
     """How to move to tt-lang's latest main. The checkout is pinned in code (orchard/ttlang_pin.py), so the fix is a
     code change and a rebuild; the override runs on the pinned version."""
     target = f"upstream main {remote}" if remote else "upstream main"
-    return (f"The fix is to move the pin: in orchard/ttlang_pin.py set SHA to {target} and set "
+    return (f"The fix is to move the pin: in orchard/ttlang_pin.py (TTLANG_PIN in orchard/defaults.py is its alias) set SHA to {target} and set "
             "DIAGNOSTICS_SHA256 to the sha256 of python/ttl/diagnostics.py at that commit (review the file if it "
             f"changed), move {root} aside, then run `tt-orchard kernel-env`. To run on the pinned version until then, "
             f"pass {OVERRIDE}")
