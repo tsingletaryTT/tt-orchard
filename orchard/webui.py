@@ -67,6 +67,8 @@ from urllib.parse import parse_qs, urlsplit
 from orchard import __version__, bringup_config, caches, lexicon, machine_checks, narrate, run_view, settings, status, ui, verdict
 from orchard import telegraph as _telegraph
 from orchard import telegraph_view
+from orchard import virtualspend as _virtualspend
+from orchard import virtualspend_view
 from orchard.preflight import _lab_status
 from orchard.ledger import LedgerCorrupt, read_entries
 from orchard.scrub import HOME_PATH, TOKEN_PATTERNS
@@ -365,6 +367,7 @@ class WebApp:
         self.runs_root = Path(runs_root)
         self.config_path = Path(config_path)
         self.cfg = cfg
+        self._spender = None
         self.token = token or secrets.token_urlsafe(24)
         self._gozer_fn = gozer_status or status._gozer_status
         self.clock = clock
@@ -472,6 +475,14 @@ class WebApp:
         label = self.redact(str(directory))
         return telegraph_view.build(cfg, directory, environ=self.environ, redact=self.redact, hostname=self.hostname,
                                     now=self.clock(), ledger_label=label)
+
+    def virtual_spend(self, run=None) -> dict:
+        """The virtual local spend (orchard/virtualspend_view.py): the token use of the local models in the run folders, priced
+        at the reference models. `run` is the name of a listed row; it is never used to build a path. Read only."""
+        if self._spender is None:
+            vcfg = getattr(self.cfg, "virtual_spend", None) or _virtualspend.Config()
+            self._spender = virtualspend_view.Spender(self.runs_root, vcfg, redact=self.redact, clock=self.clock)
+        return self._spender.build(run)
 
     def _lab_group(self) -> dict:
         """The lab's chips from its `gozer status` (over ssh), asked at most every LAB_TTL_S seconds."""
@@ -1170,6 +1181,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, app.machine())
         if segs == ["api", "telegraph"]:
             return self._json(200, app.telegraph())
+        if segs == ["api", "virtual-spend"]:
+            return self._json(200, app.virtual_spend(q.get("run")))
         if segs == ["api", "health"]:
             return self._json(200, app.health())
         if segs == ["api", "toplike"]:

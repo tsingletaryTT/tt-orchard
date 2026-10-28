@@ -1059,7 +1059,7 @@ does not change.
 **Audio models.** A model in the stable-audio-tools layout (`model_config.json`, one combined `model.safetensors`, no `config.json`) is read by an
 audio branch of the stage 0 template. Stage 0 records three facts in its ledger entry: `form` (`adapter` or `full`), `serving` (`thin-bundle`,
 `container` or `none`, from the installed bundles and container packages) and `modality` (`text` or `audio`); a ledger without them means a text run on
-a thin bundle. The class follows the same rules as above (`weights-only`, `full-port` or `unknown`). An audio run stops before stage 1 with the block code
+a thin bundle. The class is `weights-only`, `full-port` or `unknown`: each difference in `model_config.json` is sorted by an allow-list table into serving settings (the longest audio asked for, the default sampler), structural keys or unknown keys, and only serving differences leave the path `weights-only` (with a hazard that names the keys and both values, because no stage yet checks that the serving configuration carries the model's own settings). `audio_strict` in `triage_config.json` keeps the stricter rule, and `audio.decision` in `delta.json` records the evidence for each difference and any override from a later inference step. An audio run stops before stage 1 with the block code
 `audio-path-unbuilt`, because the audio stages are not built (plan [docs/superpowers/plans/2026-10-28-audio-bringup.md](docs/superpowers/plans/2026-10-28-audio-bringup.md)).
 `stabilityai/stable-audio-3-small-music` is the first target. There is no runtime for Stable Audio 3 on a Tenstorrent chip (no bundle, container package or
 tt-metal pipeline), so even a `weights-only` result leaves nothing to serve it with; the facts note is
@@ -1797,6 +1797,49 @@ Every call, refusal and cache hit is one line in `telegraph.jsonl` (model, token
   calls with their outcome and whether they helped, and the totals by model and by problem. The view only reads the ledger
   (`GET /api/telegraph`). It sends nothing to the helper and spends nothing. A run directory that holds its own `telegraph.jsonl`
   shows that run's spend under its title.
+
+### 5.9h Virtual spend: what the local models would cost at a hosted price
+
+The outside helper (5.9g) has a real bill. The local models have none, so their work is hard to compare with it. `tt-orchard spend`
+prices the local token use at a reference hosted model's rates so the two can be read side by side. The local figure is virtual:
+nobody was charged, and it is never added to the real spend.
+
+The agent logs hold one object per turn with `usage` (`prompt_tokens`, `completion_tokens`). Every turn re-sends the whole
+conversation, so the prompt count is large. A hosted provider with prompt caching would bill most of those repeated tokens for much
+less, so the figure is a comparison figure only. The reader counts these sources: `log/*.jsonl` agent logs (a kernel-probe attempt,
+a bring-up stage) and the benchmark proxy's `requests.jsonl`. A turn that names a helper (a `call_id`, or `origin`, `source` or
+`helper` set to telegraph or helper) is left out and counted, and `telegraph.jsonl` is never read. A malformed line, bytes that
+are not UTF-8, a line over 2 MiB (its usage is read from the end of the line when it is there), a turn with no token counts, a link
+and a file over the read caps are counted and shown as "Left out". The reader never raises and never follows links.
+
+- `tt-orchard spend [DIR ...]`: the real helper spend (from the telegraph ledger) and the virtual local spend (turns, tokens, agent
+  time from a kernel-probe `attempt.json`, and the dollars at each reference price) on separate lines. With no DIR it reads every
+  run under `runs_root` of the bringup config. Reads only. Chip lease time is not recorded in these logs, so it is not shown.
+  - `--json`: the same figures as JSON, in two keys (`real_helper_spend` and `local_virtual_spend`) with no combined total.
+  - `--dir`: the telegraph ledger folder (default: `dir` in `[telegraph]`, else `~/.cache/tt-orchard/telegraph`).
+  - `--telegraph-config`: read the tables from another TOML file (default: the bringup config).
+- The `[virtual_spend]` table of the bringup config sets the prices. With no table the defaults apply. Keys: `reference` (the name
+  in labels, default `claude-haiku-5-5`), `price_in` and `price_out` (dollars per million tokens, default 0.10 and 0.50), and
+  `extra`, a list of further references, each with `name`, `price_in` and `price_out` (for example `claude-sonnet-5-5` at 2.0
+  and 10.0). A misspelled key, a negative or non-finite price and a repeated name are refused.
+
+  ```toml
+  [virtual_spend]
+  reference = "claude-haiku-5-5"
+  price_in = 0.10
+  price_out = 0.50
+  [[virtual_spend.extra]]
+  name = "claude-sonnet-5-5"
+  price_in = 2.0
+  price_out = 10.0
+  ```
+- In the web page a second figure sits beside the helper's spend meter, for example `Local ≈ $0.38 (virtual, at claude-haiku-5-5)`.
+  It has a dashed outline and no state colour: amber and red on the helper meter mean real money only. It shows for the selected
+  run, or for every listed log when no run is selected, and only when local logs with token counts exist. The Telegraph view has a
+  "Local (virtual)" table with a row for each run and each kernel-probe output under `<runs>/kprobe`: turns, tokens, agent time and
+  the cost at each reference. `GET /api/virtual-spend` (with `?run=NAME`) serves both, reads only, and returns no path.
+- Checked against the kernel-probe round `rms5` (5 attempts, no kernel passed): 137 turns, 3,373,905 prompt and 78,468 completion
+  tokens, which is $0.3766 at `claude-haiku-5-5` and $7.53 at `claude-sonnet-5-5`.
 
 ## 6. Lessons that will bite you
 

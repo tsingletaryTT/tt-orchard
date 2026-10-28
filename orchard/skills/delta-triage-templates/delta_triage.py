@@ -2809,6 +2809,185 @@ def _int_or_none(cfg, key):
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
+# ---- the audio class decision (branch audio-class-inference) ---------------------------------------------------------------------------
+#
+# A difference between the two model_config.json files is sorted into one of three categories by the allow-list table below (the same table is in
+# audio_config_categories.json next to this script; a test fails when the two differ):
+#     serving     a setting that only chooses how the model is run (the longest audio asked for, the default sampler). The weights and the network
+#                 are the same, so such a difference alone leaves the path weights-only.
+#     structural  a key that shapes the network, the audio format or the conditioning. It makes the path a full port.
+#     unknown     every key the table does not list, and a listed key whose values fall outside what the rule allows. It makes the path a full port.
+# `decide_audio` turns the categories, the tensor evidence and the readability of the files into one decision object: class, path, the path the other
+# mode would choose, a confidence, and for each difference its key, both values, its category, who decided the category and, for an allow-list rule,
+# the source the rule rests on. The strict mode (`"audio_strict": true` in triage_config.json) keeps the earlier rule: any difference is a full port.
+#
+# THE HOOK. A later step that knows more (a reading of the library's code, a model) may write `audio_overrides.json` beside this script:
+#     {"categories": [{"key": "<a differing key>", "category": "serving|structural|unknown", "source": "<where the decision comes from>"}],
+#      "path": {"path": "weights-only|full-port", "source": "<where the decision comes from>"}}
+# Every override needs a non-empty source and is recorded in decision["overrides"] (and the difference it changed says decided_by "override").
+# A category override must name a key that differs. A path override to full-port is always accepted. A path override to weights-only is refused,
+# and the class becomes unknown, when a tensor or text-encoder difference exists or any evidence could not be read: those are facts about the files
+# that no later reading of the code can explain away. An unreadable or malformed override file also gives class unknown; it never relaxes anything.
+
+AUDIO_CATEGORY_RULES = [
+    {"key": "sample_size", "category": "serving", "values": "positive-int",
+     "why": "the longest audio the model is asked for; generate() takes its own sample_size argument and the network has no length parameter",
+     "source": "stable-audio-3 77e0398: stable_audio_3/model.py generate(sample_size=5292032), _adapt_sample_size"},
+    {"key": "model.diffusion.diffusion_objective", "category": "serving", "values": ["rectified_flow", "rf_denoiser"],
+     "why": "between these two values the network treats the objective identically; the value only picks the default sampler (pingpong for rf_denoiser, euler for rectified_flow). Any other value (v) is not covered",
+     "source": "stable-audio-3 77e0398: models/dit.py lines 452-456, 575-580 and 610-613 (one branch for both values), inference/sampling.py line 434 (default sampler)"},
+    {"key": "model.sampler_type", "category": "serving", "values": "text",
+     "why": "named by the operator as a sampler setting; no cached config uses this key",
+     "source": "operator decision 2026-10-28; not seen in a real config"},
+    {"key": "model.diffusion.sampler_type", "category": "serving", "values": "text",
+     "why": "named by the operator as a sampler setting; no cached config uses this key",
+     "source": "operator decision 2026-10-28; not seen in a real config"},
+    {"key": "model.default_steps", "category": "serving", "values": "positive-int",
+     "why": "a default step count is a run-time choice; no cached config uses this key",
+     "source": "operator decision 2026-10-28; not seen in a real config"},
+    {"key": "model.default_cfg_scale", "category": "serving", "values": "number",
+     "why": "a default guidance scale is a run-time choice; no cached config uses this key",
+     "source": "operator decision 2026-10-28; not seen in a real config"},
+    {"key": "sample_rate", "category": "structural", "why": "the audio format the autoencoder produces"},
+    {"key": "audio_channels", "category": "structural", "why": "the number of audio channels the autoencoder produces"},
+    {"key": "model_type", "category": "structural", "why": "which pipeline class the library builds"},
+    {"key": "model.io_channels", "category": "structural", "why": "the latent width the network reads and writes"},
+    {"prefix": "model.diffusion.config.", "category": "structural", "why": "the diffusion transformer's shape"},
+    {"prefix": "model.pretransform.", "category": "structural", "why": "the autoencoder's shape"},
+    {"prefix": "model.conditioning.", "category": "structural", "why": "the text and number conditioners"},
+]
+AUDIO_CATEGORIES = ("serving", "structural", "unknown")
+AUDIO_OVERRIDES = "audio_overrides.json"
+AUDIO_PATHS = ("weights-only", "full-port")
+AUDIO_SOURCE_MAX = 300                    # characters of an override's source that are kept
+
+
+def _audio_value_ok(constraint, base, model) -> bool:
+    """Whether both values satisfy a rule's `values` constraint: a list of allowed values, `positive-int`, `number` (finite, not a bool) or `text`."""
+    def one(v) -> bool:
+        if isinstance(constraint, list):
+            return isinstance(v, str) and v in constraint
+        if v == ABSENT or isinstance(v, bool):
+            return False
+        if constraint == "positive-int":
+            return isinstance(v, int) and v > 0
+        if constraint == "number":
+            return isinstance(v, (int, float)) and math.isfinite(v)
+        if constraint == "text":
+            return isinstance(v, str) and bool(v.strip())
+        return False
+    return one(base) and one(model)
+
+
+def audio_category(key: str, base, model, rules=None):
+    """(category, rule or None) for one differing key: an exact `key` rule first, then the first matching `prefix` rule, else `unknown`. A serving rule
+    applies only when both values satisfy its constraint; otherwise the difference is `unknown`. A rule is returned for any key it matched."""
+    rules = AUDIO_CATEGORY_RULES if rules is None else rules
+    rule = next((r for r in rules if r.get("key") == key), None) or next((r for r in rules if r.get("prefix") and key.startswith(r["prefix"])), None)
+    if rule is None:
+        return "unknown", None
+    if rule["category"] == "serving" and not _audio_value_ok(rule.get("values"), base, model):
+        return "unknown", rule
+    return rule["category"], rule
+
+
+def load_audio_overrides(path: Path) -> tuple[dict, list[str]]:
+    """({"categories": {key: {"category", "source"}}, "path": None or {"path", "source"}}, problems) from audio_overrides.json. A missing file is
+    fine. Anything malformed is a problem and nothing from the file is used."""
+    empty = {"categories": {}, "path": None}
+    if not path.exists():
+        return empty, []
+    data, err = _audio_json(path)
+    if err:
+        return empty, [f"{AUDIO_OVERRIDES}: {err}"]
+
+    def bad(msg):
+        return empty, [f"{AUDIO_OVERRIDES}: {msg}"]
+
+    def source_of(entry):
+        src = entry.get("source")
+        return src.strip()[:AUDIO_SOURCE_MAX] if isinstance(src, str) and src.strip() else None
+    if set(data) - {"categories", "path"}:
+        return bad(f"unknown keys {sorted(set(data) - {'categories', 'path'})}")
+    cats = {}
+    entries = data.get("categories", [])
+    if not isinstance(entries, list):
+        return bad("categories must be a list")
+    for e in entries:
+        if (not isinstance(e, dict) or not isinstance(e.get("key"), str) or e.get("category") not in AUDIO_CATEGORIES or source_of(e) is None):
+            return bad("each category override needs a key, a category (serving, structural or unknown) and a non-empty source")
+        if e["key"] in cats:
+            return bad(f"the key {e['key']} is overridden twice")
+        cats[e["key"]] = {"category": e["category"], "source": source_of(e)}
+    pth = data.get("path")
+    if pth is not None and (not isinstance(pth, dict) or pth.get("path") not in AUDIO_PATHS or source_of(pth) is None):
+        return bad("a path override needs a path (weights-only or full-port) and a non-empty source")
+    return {"categories": cats, "path": None if pth is None else {"path": pth["path"], "source": source_of(pth)}}, []
+
+
+def audio_differences(config: dict) -> list[dict]:
+    """One record per differing key of the top level and the model section: key, both values, category, decided_by and, for a rule that has one,
+    the source."""
+    out = []
+    for key, v in {**config["top_level_differences"], **config["model_differences"]}.items():
+        category, rule = audio_category(key, v["base"], v["model"])
+        rec = {"key": key, "base": v["base"], "model": v["model"], "category": category, "decided_by": "allow-list"}
+        if rule is not None:
+            rec["why"] = rule["why"]
+            if rule.get("source"):
+                rec["source"] = rule["source"]
+        out.append(rec)
+    return out
+
+
+def decide_audio(diffs: list[dict], hard: list[str], problems: list[str], strict: bool, overrides: dict) -> dict:
+    """The decision object (see the block comment above). `diffs` come from audio_differences, `hard` are the tensor and text-encoder
+    differences (strings), `problems` are things that could not be read or compared. The result is a new dict; `diffs` is changed in place when
+    a category override applies."""
+    problems = list(problems)
+    applied = []
+    for d in diffs:
+        o = overrides["categories"].get(d["key"])
+        if o is not None:
+            applied.append({"kind": "category", "key": d["key"], "category": o["category"], "from": d["category"], "source": o["source"]})
+            d["category"], d["decided_by"], d["source"] = o["category"], "override", o["source"]
+    for key in overrides["categories"]:
+        if not any(d["key"] == key for d in diffs):
+            problems.append(f"{AUDIO_OVERRIDES}: the key {key} is overridden but does not differ between the two models")
+    nonserving = [d for d in diffs if d["category"] != "serving"]
+    clean = not hard                  # unreadable evidence (problems) is handled below and always gives class unknown
+    relaxed_wo, strict_wo = clean and not nonserving, clean and not diffs
+    chosen = "weights-only" if (strict_wo if strict else relaxed_wo) else "full-port"
+    other = "weights-only" if (relaxed_wo if strict else strict_wo) else "full-port"
+    path, alternative = chosen, (other if other != chosen else None)
+    po = overrides["path"]
+    if po is not None and not problems:
+        if po["path"] == "weights-only" and hard:
+            problems.append(f"{AUDIO_OVERRIDES}: the path override to weights-only is refused because tensor or text-encoder differences exist "
+                            "(a later reading of the code cannot explain those away)")
+        else:
+            applied.append({"kind": "path", "path": po["path"], "from": chosen, "source": po["source"]})
+            path, alternative = po["path"], (chosen if chosen != po["path"] else other if other != po["path"] else None)
+    elif po is not None:
+        problems.append(f"{AUDIO_OVERRIDES}: the path override was not applied because other evidence could not be read or compared")
+    if problems:
+        cls, path, alternative, confidence = "unknown", "full-port", None, "low"
+    else:
+        cls = "weights-only" if path == "weights-only" else "full-port"
+        if path == "weights-only":
+            confidence = "high" if not diffs else "medium"
+        else:
+            confidence = "high" if hard or any(d["category"] == "structural" for d in diffs) else "medium"
+        if applied and confidence == "high":
+            confidence = "medium"
+    return {"class": cls, "path": path, "alternative_path": alternative, "confidence": confidence, "strict": strict, "differences": diffs,
+            "overrides": applied, "problems": problems}
+
+
+def _audio_difference_reason(d: dict) -> str:
+    return f"model_config.json {d['key']} differs: {fmt(d['model'])} vs {fmt(d['base'])} ({d['category']}, decided by {d['decided_by']})"
+
+
 def audio_main(cfg: dict) -> int:
     """The stage 0 comparison for a model in the stable-audio-tools layout (see the block comment above)."""
     run_dir = os.path.realpath(cfg["run_dir"])
@@ -2821,8 +3000,13 @@ def audio_main(cfg: dict) -> int:
         return os.path.relpath(EVIDENCE / name, run_dir)
 
     say(f"comparing {model_id} with {nearest_id} (audio layout: model_config.json and combined safetensors)")
-    reasons: list[str] = []          # differences that make this a full port
+    hard: list[str] = []             # tensor and text-encoder differences: a full port whatever the config says
     problems: list[str] = []         # things that could not be read or compared: the class is unknown
+    strict_flag = cfg.get("audio_strict", False)
+    if not isinstance(strict_flag, bool):
+        problems.append("triage_config.json audio_strict must be true or false")
+        strict_flag = False
+    overrides, override_problems = load_audio_overrides(HERE_DIR / AUDIO_OVERRIDES)
     base_is_audio = detect_audio(base_dir)
     if not base_is_audio:
         problems.append("the nearest model is not in the stable-audio-tools layout (it needs a readable model_config.json, no config.json "
@@ -2842,27 +3026,32 @@ def audio_main(cfg: dict) -> int:
     config = {"top_level_differences": {}, "model_differences": {}, "pointer_differences": {}, "training_differences": {}}
     tensors = compare_audio_tensors(mt, bt)
     encoders: list[dict] = []
+    diffs: list[dict] = []
     if not problems:
         config = compare_audio_configs(mcfg, bcfg)
-        for k, v in {**config["top_level_differences"], **config["model_differences"]}.items():
-            reasons.append(f"model_config.json {k} differs: {fmt(v['model'])} vs {fmt(v['base'])}")
+        diffs = audio_differences(config)
         for k in ("only_in_model", "only_in_base"):
             if tensors[k]:
                 who = "the new model" if k == "only_in_model" else "the nearest model"
-                reasons.append(f"{len(tensors[k])} tensors exist only in {who}: {short(tensors[k], 5)}")
+                hard.append(f"{len(tensors[k])} tensors exist only in {who}: {short(tensors[k], 5)}")
         for x in tensors["shape_differences"]:
-            reasons.append(f"tensor {x['name']} has shape {x['model']} in the new model and {x['base']} in the nearest model")
+            hard.append(f"tensor {x['name']} has shape {x['model']} in the new model and {x['base']} in the nearest model")
         for x in tensors["dtype_differences"]:
             if not x["tolerated"]:
-                reasons.append(f"tensor {x['name']} has dtype {x['model']} in the new model and {x['base']} in the nearest model")
+                hard.append(f"tensor {x['name']} has dtype {x['model']} in the new model and {x['base']} in the nearest model")
         encoders, encoder_problems = audio_text_encoders(mcfg, bcfg, model_dir, base_dir, model_repo, base_repo)
         problems += encoder_problems
         for row in encoders:
             problems += row["problems"]
-            reasons += row["differences"]
-    cls = "unknown" if problems else "full-port" if reasons else "weights-only"
-    path = "weights-only" if cls == "weights-only" else "full-port"
-    all_reasons = problems + reasons
+            hard += row["differences"]
+    decision = decide_audio(diffs, hard, problems + override_problems, strict_flag, overrides)
+    cls, path = decision["class"], decision["path"]
+    if cls == "weights-only":
+        all_reasons = []
+    else:
+        listed = [d for d in diffs if strict_flag or d["category"] != "serving"]
+        all_reasons = (decision["problems"] + hard + [_audio_difference_reason(d) for d in listed]
+                       + [f"the path was overridden to full-port: {o['source']}" for o in decision["overrides"] if o["kind"] == "path" and o["path"] == "full-port"])
     f = compare_files(model_dir, base_dir)
     write_json("files-compare.json", f)
     values = ({"samples": [], "summary": {}, "skipped": [], "note": "not run: the headers could not be read"} if problems
@@ -2877,9 +3066,9 @@ def audio_main(cfg: dict) -> int:
                          "only_in_model": tensors["only_in_model"][:AUDIO_MAX_LISTED], "only_in_base": tensors["only_in_base"][:AUDIO_MAX_LISTED],
                          "shape_differences": tensors["shape_differences"][:AUDIO_MAX_LISTED],
                          "dtype_differences": tensors["dtype_differences"][:AUDIO_MAX_LISTED]},
-             "text_encoders": encoders, "files_only_in_base": f["files_only_in_base"] + f["shards_only_in_base"],
+             "decision": decision, "text_encoders": encoders, "files_only_in_base": f["files_only_in_base"] + f["shards_only_in_base"],
              "files_only_in_model": f["files_only_in_model"] + f["shards_only_in_model"]}
-    write_json("audio-compare.json", {**audio, "problems": problems, "reasons": reasons})
+    write_json("audio-compare.json", {**audio, "problems": decision["problems"], "reasons": all_reasons})
     ml, bl = license_side(model_dir), license_side(base_dir)
     say(f"wrote evidence/audio-compare.json, files-compare.json and value-compare.json ({len(mt)} and {len(bt)} tensors; "
         f"{len(components)} components)")
@@ -2897,8 +3086,9 @@ def audio_main(cfg: dict) -> int:
         "draft": "written by delta_triage.py from the evidence files; the agent reviews each finding and adds hazards it can justify",
         "differences": [
             {"area": "config", "evidence": [ev("audio-compare.json")],
-             "finding": (f"model_config.json: {len(cd[0])} differences in the model section, {len(cd[1])} in the top-level keys "
-                         f"(sample rate, channels, sample size, model type), {len(cd[2])} pointers to another repository (ignored) and "
+             "finding": (f"model_config.json: {sum(d['category'] == 'serving' for d in diffs)} serving, "
+                         f"{sum(d['category'] == 'structural' for d in diffs)} structural and {sum(d['category'] == 'unknown' for d in diffs)} unknown "
+                         f"differences in the model section and the top-level keys, {len(cd[2])} pointers to another repository (ignored) and "
                          f"{len(cd[3])} in the training section (listed, ignored).")},
             {"area": "architecture", "evidence": [ev("audio-compare.json")],
              "finding": f"The new model's components: {comp_text}."},
@@ -2926,6 +3116,21 @@ def audio_main(cfg: dict) -> int:
                            "redistributed under its own terms.")},
         ],
     }
+    served = [d for d in diffs if d["category"] == "serving"]
+    if served and path == "weights-only":      # the strict rule never leaves a pair with differences weights-only
+        listing = "; ".join(f"{d['key']} is {fmt(d['model'])} in the new model and {fmt(d['base'])} in the nearest model" for d in served)
+        delta["hazards"].append({"area": "other", "evidence": [ev("audio-compare.json")],
+                                 "finding": (f"The new model's config differs from the nearest model's in {len(served)} serving or sampler settings only: {listing}. The weights "
+                                             "have the same layout, so the path is weights-only. The serving configuration has to carry the model's own values for "
+                                             "these keys (the nearest model's runtime would otherwise run it with the nearest model's), and no stage checks that "
+                                             "yet, as with the generation_config hazard. Run the model with its own sampler, steps and guidance scale, which its card "
+                                             "states.")})
+    if decision["overrides"]:
+        delta["hazards"].append({"area": "other", "evidence": [ev("audio-compare.json")],
+                                 "finding": ("This decision uses overrides: " + "; ".join(
+                                     (f"key {o['key']} moved from {o['from']} to {o['category']}" if o["kind"] == "category"
+                                      else f"the path moved from {o['from']} to {o['path']}") + f" (source: {o['source']})" for o in decision["overrides"])
+                                     + ". Read the sources before relying on the class.")})
     if values["summary"].get("identical") and values["summary"]["identical"] == sum(values["summary"].values()):
         delta["hazards"].append({"area": "other", "evidence": [ev("value-compare.json")],
                                  "finding": ("Every sampled tensor is identical to the nearest model's. The new model may be a copy of it, "
