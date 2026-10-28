@@ -1888,7 +1888,7 @@ type, once, near the top of its output (see "The notice" below). `--dir` can be 
 `tt-orchard db migrate telegraph --dry-run-first` does both steps with one confirmation. It runs the dry run and prints the checks. It stops
 there, with nothing changed, when any check is different, when the ledger cannot be checked, when the directory is not an unmigrated one
 (already moved, half moved, or no `telegraph.jsonl`), or when another process holds `telegraph.lock`. When every check is equal it asks
-once, `[y/N]`, at a terminal. A no, no terminal, or a lock taken while the question was open also stops it with nothing changed. A yes runs the
+once, `[y/N]`, at a terminal. A no, no terminal, a lock taken while the question was open, or a `telegraph.jsonl` that was appended to, replaced, removed or joined by a migration marker while the question was open (the checks no longer describe it) also stops it with nothing changed. A yes runs the
 real migration described below. `--accept-malformed N` is passed to both steps. `--dry-run` and `--dry-run-first` cannot be combined. The
 existing commands are unchanged.
 
@@ -1907,8 +1907,8 @@ it cannot disturb a migration that is running. The states:
 
 A directory that needs nothing gives no notice, and so does a machine that never used Telegraph (every state above needs a file that only a
 used ledger leaves). Telegraph switched off still gets the notice when its directory holds an old ledger. The directory is chosen as for
-`tt-orchard telegraph`. The commands act on the ledger the notice is about: they carry `--dir` when the directory did not come from the
-home default or the caller passed it, and `--config` and `--telegraph-config` when the caller passed them. The guided command's refusals and
+`tt-orchard telegraph`. The commands act on the ledger the notice is about: in the terminal they carry `--dir` when the directory did not come from the
+home default or the caller passed it (the web page always carries `--dir`), and `--config` and `--telegraph-config` when the caller passed them. The guided command's refusals and
 its no-terminal fallback also carry `--scope` and `--accept-malformed`. The web page shows the path redacted and leaves a leading `~`
 outside the quotes so that a shell expands it. The top-bar meter names `db migrate telegraph` only for the unmigrated and half-finished
 states.

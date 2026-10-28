@@ -284,6 +284,15 @@ def _selection_flags(args, directory, scope, accept) -> str:
     return " ".join(parts)
 
 
+def _ledger_identity(directory):
+    """What identifies the ledger file the dry run read: (device, inode, size, modification time), or None when it is not a plain file."""
+    try:
+        st = os.lstat(os.path.join(os.fspath(directory), ts.LEDGER))
+    except OSError:
+        return None
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns) if stat.S_ISREG(st.st_mode) else None
+
+
 def _lock_text(directory) -> str:
     return (f"db migrate: another process holds {ts.LOCK} in {directory} (a tt-orchard process or an old writer is running); "
             "stop it and run this again. Nothing was changed.")
@@ -303,6 +312,7 @@ def _migrate_after_dry_run(directory, scope, cfg, args, say, ask, accept) -> int
     if mig.lock_is_held(directory):
         say(_lock_text(directory))
         return EXIT_PROBLEM
+    checked = _ledger_identity(directory)
     code = _migrate_once(directory, scope, cfg, args, say, accept, dry_run=True)
     if code != EXIT_OK:                                       # a refusal, an unreadable ledger or a check that is different
         say("The migration was not started. Nothing was changed.")
@@ -319,6 +329,12 @@ def _migrate_after_dry_run(directory, scope, cfg, args, say, ask, accept) -> int
         return EXIT_PROBLEM
     if mig.lock_is_held(directory):                           # a process started while the question was open
         say(_lock_text(directory))
+        return EXIT_PROBLEM
+    if checked is None or _ledger_identity(directory) != checked or (waiting := tn.state_of(directory)) is None or waiting.kind != tn.UNMIGRATED:
+        # The file the checks described is not the file that is there now (it was appended to, replaced or removed while the question
+        # was open). The checks no longer describe what would be moved, so nothing runs; a new dry run is needed.
+        say(f"db migrate: {ts.LEDGER} in {directory} changed while the question was open, so the checks above no longer describe it. "
+            "Run this again. Nothing was changed.")
         return EXIT_PROBLEM
     return _migrate_once(directory, scope, cfg, args, say, accept, dry_run=False)
 

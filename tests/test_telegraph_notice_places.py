@@ -251,6 +251,15 @@ def test_the_panel_commands_name_the_directory_redacted_and_quoted_for_a_shell(r
     app.redact = lambda t: str(t).replace(str(tmp_path), "~")
     m = app.telegraph()["migration"]
     assert m["commands"][0] == "tt-orchard db migrate telegraph --dry-run --dir ~/'my ledger'"
+
+
+def test_the_panel_commands_name_the_directory_even_when_it_is_the_home_default(root, tmp_path):
+    d = old_ledger(tmp_path / "home" / ".cache" / "tt-orchard" / "telegraph")
+    app = app_for(root, tg.Config())                       # telegraph off, so the directory is the home default
+    app.home = str(tmp_path / "home")
+    app.redact = lambda t: str(t).replace(str(tmp_path / "home"), "~")
+    m = app.telegraph()["migration"]
+    assert m["commands"][0] == "tt-orchard db migrate telegraph --dry-run --dir ~/.cache/tt-orchard/telegraph"
     assert str(tmp_path) not in json.dumps(m)
 
 

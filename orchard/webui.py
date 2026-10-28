@@ -478,16 +478,15 @@ class WebApp:
             directory, problem = telegraph_view.default_dir(self.home), str(exc)
         label = self.redact(str(directory))
         import shlex
-        from orchard import telegraph_cmd, telegraph_notice
+        from orchard import telegraph_notice
         waiting = migration = None
         if not problem:
-            # File names only: nothing is opened or written. The commands name the directory when it is not the home default, so a
-            # command pasted from the page acts on the ledger the page is about. The path is shown redacted, and a leading `~` stays
+            # File names only: nothing is opened or written. The commands always name the directory, so a command
+            # pasted from the page acts on the ledger the page is about. The path is shown redacted, and a leading `~` stays
             # outside the quotes so that a shell expands it.
             shown = label
-            pin = ""
-            if Path(directory) != telegraph_cmd.default_dir(self.home):
-                pin = "--dir " + ("~/" + shlex.quote(shown[2:]) if shown.startswith("~/") else shlex.quote(shown))
+            pin = "--dir " + ("~/" + shlex.quote(shown[2:]) if shown.startswith("~/") else shlex.quote(shown))      # always: the
+            # reader's shell may resolve another directory, since the page does not know which config or variables it has
             waiting = telegraph_notice.state_of(directory, flags=pin)
         if waiting is not None:                                                   # every string on the page is redacted
             migration = {**waiting.as_dict(), "directory": label, "summary": self.redact(waiting.summary),

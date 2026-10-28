@@ -212,3 +212,30 @@ def test_the_no_terminal_commands_carry_the_directory_scope_and_accepted_count(t
     assert first.startswith("tt-orchard db migrate telegraph --dry-run ") and second.startswith("tt-orchard db migrate telegraph --dir")
     for tail in (first, second):
         assert f"--dir {d}" in tail and "--scope other" in tail and "--accept-malformed 1" in tail and "--config" in tail
+
+
+@pytest.mark.parametrize("change", ["appended", "removed", "replaced"])
+def test_a_ledger_that_changes_while_the_question_is_open_is_not_migrated(tmp_path, spy, change):
+    d = make(tmp_path)
+
+    def alter():
+        ledger = d / "telegraph.jsonl"
+        if change == "appended":
+            with open(ledger, "a") as f:
+                f.write(json.dumps({**RECORD, "call_id": "late"}) + "\n")
+        elif change == "removed":
+            ledger.unlink()
+        else:
+            ledger.rename(d / "moved-away")
+            ledger.write_text(ledger.parent.joinpath("moved-away").read_text())
+    ask = Asker(True, during=alter)
+    code, text = guided(d, tmp_path, ask=ask)
+    assert code == 2 and spy == [True] and "changed while the question was open" in text
+    assert not (d / "project.db").exists() and not (d / "telegraph.jsonl.archived").exists()
+
+
+def test_a_migration_marker_that_appears_while_the_question_is_open_stops_it(tmp_path, spy):
+    d = make(tmp_path)
+    ask = Asker(True, during=lambda: (d / "MIGRATING-TO-SQLITE").write_text("{}"))
+    code, text = guided(d, tmp_path, ask=ask)
+    assert code == 2 and spy == [True] and "changed while the question was open" in text
