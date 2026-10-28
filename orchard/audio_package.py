@@ -563,16 +563,16 @@ def running_doc(f: Facts) -> str:
             "This package does not include the model weights.\n")
 
 
-HOST_REQUIREMENTS = ("numpy", "soundfile", "einops", "einops-exts", "safetensors", "tqdm", "huggingface-hub>=1.7.1", "transformers>=5.8.0", "torch", "torchaudio")
+HOST_REQUIREMENTS = ("numpy", "soundfile", "einops", "einops-exts", "safetensors", "tqdm", "huggingface-hub>=1.7.1", "transformers>=5.8.0", "torch==2.7.1", "torchaudio==2.7.1")
 
 
 def requirements_text(gradio: str) -> str:
     """requirements.txt: what the host Python needs besides ttnn, taken from the model library's own dependency list (its pyproject.toml at the pinned
-    commit) and the demo's Gradio pin. torch and torchaudio are left unpinned: the library pins torch 2.7.1, and the Python that has ttnn already carries a
-    torch that the runtime was run with."""
+    commit) and the demo's Gradio pin. torch and torchaudio carry the library's own pins (2.7.1), so an environment with another torch gets a pip
+    conflict and not a silent replacement of the torch that came with ttnn."""
     return ("# What the host process needs besides ttnn. Install it into the Python that has ttnn (ORCHARD_TTNN_PYTHON).\n"
             "# The model library's dependencies, from its pyproject.toml at the commit the card names. The library pins torch 2.7.1 and torchaudio 2.7.1;\n"
-            "# the lines for them are unpinned so that a torch already installed with ttnn is kept.\n"
+            "# If the Python that has ttnn carries another torch, pip reports a conflict. Do not force it; use an environment that has the pair.\n"
             + "\n".join(HOST_REQUIREMENTS) + "\n# The page (demo/audio_app.py):\n" + gradio + "\n")
 
 
@@ -1009,7 +1009,7 @@ def _gate(pkg: Path, hostname, home, validate_manifest) -> list[str]:
     names = {re.split(r"[<>=!~ ;\[]", ln.strip(), maxsplit=1)[0].lower().replace("_", "-") for ln in reqs.splitlines() if ln.strip() and not ln.startswith("#")}
     for dep in HOST_REQUIREMENTS:
         if re.split(r"[<>=!~ ;\[]", dep, maxsplit=1)[0] not in names:
-            problems.append(f"requirements.txt must name {dep.split('>')[0]}, which the chip runtime or the model library imports")
+            problems.append(f"requirements.txt must name {re.split(r'[<>=]', dep, maxsplit=1)[0]}, which the chip runtime or the model library imports")
     if "gradio" not in names:
         problems.append("requirements.txt must name gradio, which the page imports")
     problems += record_problems(pkg)

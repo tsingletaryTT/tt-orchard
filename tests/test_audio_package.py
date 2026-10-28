@@ -7,6 +7,7 @@ repository. No model, chip, network or Hugging Face cache is used, and nothing i
 """
 import io
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -927,6 +928,11 @@ def test_the_gate_refuses_a_license_or_evidence_file_changed_after_staging(stage
     assert any(f"{name} changed after it was staged" in p for p in gate(staged))
 
 
+def test_torch_and_torchaudio_are_pinned_as_the_library_pins_them(staged):
+    lines = (staged / "requirements.txt").read_text().splitlines()
+    assert "torch==2.7.1" in lines and "torchaudio==2.7.1" in lines and "torch" not in lines and "torchaudio" not in lines
+
+
 def test_the_gate_refuses_a_missing_or_malformed_record(staged):
     (staged / ap.RECORD_FILE).write_text('{"files": 3}')
     assert any("has no file list" in p for p in gate(staged))
@@ -938,7 +944,7 @@ def test_the_gate_refuses_a_missing_or_malformed_record(staged):
 
 @pytest.mark.parametrize("dep", list(ap.HOST_REQUIREMENTS) + ["gradio"])
 def test_the_gate_names_a_missing_host_requirement(staged, dep):
-    name = dep.split(">")[0]
+    name = re.split(r"[<>=]", dep, maxsplit=1)[0]
     f = staged / "requirements.txt"
     f.write_text("\n".join(ln for ln in f.read_text().splitlines() if not ln.startswith(name)) + "\n")
     assert any(f"requirements.txt must name {name}" in p for p in gate(staged)), name
