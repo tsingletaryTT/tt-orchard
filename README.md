@@ -823,6 +823,7 @@ python3 -m orchard.supervisor run --model MODEL --run-dir RUN_DIR --tiers TIERS
 | `--package-models-root` | no | Where tt-model installs bundles. Stage 7 looks here for other chip counts of the nearest model. Default `{{TT_MODEL_ROOT}}`, which is `<operator home>/.cache/tt-model/models` |
 | `--unattended` | no | Never wait for an operator. When the run would pause, it names the reason (`needs-new-model-code`, `retry-budget-spent`, `stage-failed`, `agent-stuck`, `disk-full`, `hardware-unhealthy`, `coder-unusable`, `package-missing`, `blocked` or `unclassified`), writes `BLOCKED.md` and `blocked.json` in the run directory, releases the hardware and exits 5. Running the same command again retries from the ledger. A pause the operator asked for with `control pause` still waits. `tt-orchard bringup` always passes it |
 | `--no-graft-trial` | no | Skip stage 2's graft trial (section 5.5c). The run records the choice, and a resume keeps it. `tt-orchard bringup` takes the same flag |
+| `--sampling` | no | `auto` (default), `needed` or `not-needed`: whether the model's purpose needs sampling (section 5.5d). With `auto`, stage 2 reads the model's files; with a drafter that ignores sampling and a model that needs it, stage 2 serves a drafter-off variant once and chooses by measurement. The run records the setting and a resume keeps it (a different value on a resume is refused). `tt-orchard bringup` takes the same flag |
 | `--resume-aborted` | no | Carry on with a run that an operator or a signal aborted. An abort is terminal otherwise: running the command again returns exit 4 and starts nothing. The ledger records `resume` with `after: abort`, then the run starts its coder again and continues from the ledger. A finished run and an abort of any other kind are left as they are. `tt-orchard bringup` takes the same flag, and the web page's `Resume run` passes it |
 | `--gozer` | no | The gozer executable. Default `gozer` from `PATH` |
 | `--tt-model-root` | no | Where tt-model installs bundles (`{{TT_MODEL_ROOT}}`). Default `<operator home>/.cache/tt-model/models`. Recorded and kept like `--cache-root` |
@@ -1252,6 +1253,33 @@ entry. Stage 4's configurations, stage 7's package, the card and the stage 8 bun
 The extra test adds a warm boot of the safe configuration (2 to 4 minutes), a cold boot of the variant (4 to 25 minutes measured for the
 Qwen3.8 bundle) and a warm boot of the variant, plus 12 timed requests each. `--no-graft-trial` (on `tt-orchard bringup` and on
 `supervisor run`) leaves it out. The variant converts a second tensor cache, so the trial is skipped, with the reason recorded, when the run directory's disk has less than 40 GB free. It is also skipped on a lab run, whose tests do not run on this box's chips. The trial also records the drafter's acceptance rate for each configuration (accepted over drafted tokens), read from the `[dflash2-serve]` session lines the server writes to its log while the timed prompts run. It is shown on the card and in the stage 8 bundle and does not enter the choice. A configuration with the drafter off, or a server that writes no such line, has no number and the card and bundle say it was not measured.
+
+### 5.5d The sampling choice (issue 107)
+
+A fast decoding path can be greedy only. The Qwen3.8 DFlash2 bundle with its drafter on accepts a request with temperature above 0 and
+samples only its first token (60 tokens/s on 2 chips). With the drafter off and host sampling it samples correctly (18 tokens/s). Which is
+right depends on what the model is for, so stage 2 decides from files and a measurement. The design is
+`docs/superpowers/specs/2026-10-27-sampling-choice-design.md`.
+
+Whether sampling is needed comes from, in order: `--sampling needed` or `--sampling not-needed`; a warning against greedy decoding in the
+model card (stage 0 records the quoted line); the model's own `generation_config.json` setting `do_sample`, a temperature above 0, a top-p
+below 1 or a top-k above 0 (the nearest model's copy that staging adds does not count); the card's recommended settings. With none of
+these, sampling is not needed and the record says no evidence was found.
+
+When sampling is needed, the served configuration has the drafter on and its sampling probe does not show sampling applied, stage 2
+runs one more hardware test (`sampling_trial.py`, in `stages/2/sampling-trial/`, with its own tensor cache). It serves the drafter-off
+variant and runs the stage 2 check on it, probe included. The variant is chosen when it applies sampling and decodes at least
+10 tokens/s (`SAMPLING_MIN_TOKS_PER_S`, a choice taken from one measurement). When no configuration both applies sampling and clears the
+floor, the operator's rule applies: a configuration that cannot do what the model is for has no value, however fast it is. The configuration
+that applies sampling is chosen even when it is slow and even when a faster one ignores sampling, and the decision is flagged
+`sampling-applied-below-floor`. Only when neither applies sampling (or applying is not shown for either) does the faster measured one win, with the
+flag `no-variant-serves-purpose`. The probe's `sampled-matches-greedy` verdict is suspected, not confirmed, and is treated like `sampled-ignored`
+for the choice; only `sampled-ignored` is worded as ignored sampling. The decision file, the card and the stage 8 bundle say all of this in plain
+sentences. A failed trial is not a stage failure.
+
+The graft trial comes first. A grafted drafter is chosen for a model that needs sampling only when its own probe shows sampling applied.
+The sampling decision then judges the configuration that is served. The decision is `stages/2/sampling-decision.json` and a
+`sampling decision` ledger entry; stage 4's configurations and stage 7's package follow it, and the stage 2 gate recomputes it from the files.
 
 ### 5.6 The credentials preflight
 

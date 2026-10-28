@@ -22,6 +22,7 @@ import math
 import os
 from pathlib import Path
 
+from orchard import sampling_choice
 from orchard.defaults import GRAFT_MIN_SPEEDUP, GRAFT_TOP1_MARGIN, SWAP_TOP1_MIN
 
 DECISION_FILE = "graft-decision.json"        # in stages/2/
@@ -64,11 +65,23 @@ def _text(v, limit: int = 300) -> str:
     return " ".join(str(v).split())[:limit]
 
 
-def decide(trial, *, safe_top1) -> dict:
+def sampling_input(stage_dir, run_dir) -> dict:
+    """{needed, verdict} for `decide`: whether the model needs sampling (stage 0's files and the run's `--sampling` flag) and the sampling
+    probe's verdict for the grafted variant, read from the variant's own swap check (None when the trial left none). The graft keeps the
+    speculative drafter on, and a drafter-on configuration can ignore sampling (issue 107), so the graft's own probe decides whether it may
+    be chosen."""
+    side = sampling_choice.side_from_report(_read_json(Path(stage_dir) / TRIAL_DIR / "variant" / "evidence" / "swap-check.json"))
+    return {"needed": sampling_choice.need(run_dir, sampling_choice.read_override(run_dir))["needed"],
+            "verdict": side["verdict"] if side else None}
+
+
+def decide(trial, *, safe_top1, sampling=None) -> dict:
     """{"choice": "graft" | "safe", "reason", "numbers", "thresholds"} from the trial's result and the safe run's top-1 agreement.
 
     The graft is chosen when the variant served, was coherent, agreed with the CPU reference at least as well as stage 2's bar, lost no more
-    than the margin against the safe run, and decoded at least GRAFT_MIN_SPEEDUP times faster. The first failing check is the reason."""
+    than the margin against the safe run, and decoded at least GRAFT_MIN_SPEEDUP times faster. When `sampling` ({needed, verdict}) says the
+    model needs sampling, the variant's sampling probe must also show sampling applied: a graft keeps the drafter on, and a drafter that
+    ignores sampling serves a model that needs it badly however fast it is. The first failing check is the reason."""
     safe = trial.get("safe") if isinstance(trial, dict) else None
     var = trial.get("variant") if isinstance(trial, dict) else None
     safe = safe if isinstance(safe, dict) else {}
@@ -88,6 +101,9 @@ def decide(trial, *, safe_top1) -> dict:
                # model whatever the drafter proposes, and the speed ratio already shows what acceptance cost or gained).
                "safe_drafter_accept_rate": accept_rate(safe.get("drafter")),
                "variant_drafter_accept_rate": accept_rate(var.get("drafter"))}
+    if sampling is not None:
+        numbers["sampling_needed"] = sampling.get("needed") is True
+        numbers["variant_sampling_verdict"] = sampling.get("verdict")
     reason = None
     if not var:
         reason = "the graft trial wrote no result for the grafted variant"
@@ -111,6 +127,9 @@ def decide(trial, *, safe_top1) -> dict:
     elif speedup < GRAFT_MIN_SPEEDUP:
         reason = (f"the grafted variant decodes only {speedup:.2f} times as fast as the safe configuration ({var_speed:g} against "
                   f"{safe_speed:g} tokens/s); the graft is kept at {GRAFT_MIN_SPEEDUP:g} times or more")
+    elif sampling is not None and sampling.get("needed") is True and sampling.get("verdict") not in sampling_choice.APPLIED:
+        reason = (f"the model needs sampling, and the grafted variant's sampling probe verdict is {sampling.get('verdict')}, so it does not show "
+                  "sampling applied; a grafted drafter that ignores sampling is not chosen for a model that needs it")
     if reason is None:
         reason = (f"the grafted variant decodes {speedup:.1f} times as fast as the safe configuration ({var_speed:g} against {safe_speed:g} "
                   f"tokens/s) with top-1 agreement {top1}" + (f" (safe configuration {safe_top1})" if _number(safe_top1) else ""))
@@ -176,7 +195,7 @@ def decision_problems(stage_dir, run_dir) -> list[str]:
         return [f"{DECISION_FILE} chose the graft, but the trial's {TRIAL_DIR}/{TRIAL_RESULT} is missing or unreadable"]
     result = _read_json(sd / "result.json")
     safe_top1 = result.get("top1_agreement") if isinstance(result, dict) else None
-    again = decide(trial, safe_top1=safe_top1)
+    again = decide(trial, safe_top1=safe_top1, sampling=sampling_input(sd, run_dir))
     if again["choice"] != "graft":
         return [f"{DECISION_FILE} chose the graft, but the trial's numbers do not support it: {again['reason']}"]
     return []

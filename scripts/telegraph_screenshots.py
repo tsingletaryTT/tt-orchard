@@ -16,14 +16,21 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
-from site_screenshots import CHROME, REDACT, credential_hits  # noqa: E402
 
-from playwright.sync_api import expect, sync_playwright  # noqa: E402
+USAGE = "usage: telegraph_screenshots.py URL OUTPUT_DIR [OUTPUT_DIR ...]   (at least one output directory is required)"
 
 SHOTS = [("operator-telegraph.png", "operator"), ("playful-telegraph.png", "playful")]
 
 
-def main(url: str, *out_dirs: str) -> int:
+def main(*argv: str) -> int:
+    # Check the arguments first, before playwright is imported or a browser starts: a call with no output directory used to run the whole
+    # session and write no picture (issue 131).
+    if len(argv) < 2:
+        print(USAGE, file=sys.stderr)
+        return 2
+    url, out_dirs = argv[0], argv[1:]
+    from site_screenshots import CHROME, REDACT, credential_hits
+    from playwright.sync_api import expect, sync_playwright
     dirs = [Path(d) for d in out_dirs]
     for d in dirs:
         d.mkdir(parents=True, exist_ok=True)
