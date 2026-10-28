@@ -1875,7 +1875,7 @@ configured size), imports every record and `cache/*.json` in one transaction and
 and the sidecar count with the file (a difference rolls everything back and changes nothing), renames `telegraph.jsonl` to
 `telegraph.jsonl.archived`, makes a directory named `telegraph.jsonl` that an old writer cannot append to, and writes
 `MIGRATED-TO-SQLITE`. Nothing is deleted. A line that is not a record and is not the last line cannot be recovered; the command prints the
-line numbers and stops, and `--accept-malformed N` goes on when N is the count a person inspected (those lines were never counted by the
+line numbers and stops, and `--accept-malformed` (with the count) goes on when that count is the number of lines a person inspected (those lines were never counted by the
 old code either). If the command is killed at any step, run it again: it resumes from the recorded phase, and a regular
 `telegraph.jsonl` that an old process recreated next to the archive stops it with a message. A migrated directory refuses a second
 migration, and an old writer that finds the directory refuses to run and sends nothing.
