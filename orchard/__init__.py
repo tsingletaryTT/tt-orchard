@@ -5,7 +5,7 @@
 # The last released version. This literal is the only place the number is written: setuptools reads it
 # (pyproject.toml, `attr = "orchard.RELEASE"`) without importing the package, and scripts/version.py
 # release rewrites it. Pull requests never edit it; they add changes/<slug>.toml instead.
-RELEASE = "0.9.37"
+RELEASE = "0.9.39"
 
 
 def __getattr__(name):
