@@ -103,12 +103,14 @@ def parse_hub(payload: dict) -> HubInfo:
     )
 
 
-_WEIGHT_NAME = re.compile(r"\.safetensors$|(^|/)pytorch_model[^/]*\.bin$")
+# A weight file, or a weight index (`model.safetensors.index.json`, `pytorch_model.bin.index.json`, also in a component directory). The index
+# tells a reader which shard holds which tensor, so a snapshot without a listed index cannot be loaded even when every shard is there.
+_WEIGHT_NAME = re.compile(r"\.safetensors$|(^|/)pytorch_model[^/]*\.bin$|\.(safetensors|bin)\.index\.json$")
 
 
 def _missing_weights(hub: HubInfo, snapshot: Path) -> list[str]:
-    """Weight files the repo's own file list names that are not behind a readable link in `snapshot`."""
-    return [n for n in hub.files if _WEIGHT_NAME.search(n) and not (snapshot / n).exists()]
+    """Weight files and weight indexes the repo's own file list names that are not behind a readable link in `snapshot`."""
+    return [n for n in hub.files if _WEIGHT_NAME.search(n) and not (snapshot / n).is_file()]
 
 
 def _missing_listed(hub: HubInfo, snapshot: Path) -> list[str]:
@@ -563,11 +565,8 @@ def _audio_base(*, model_id: str, base: str, inferred: bool, report, accept_infe
         return Check("base", BLOCK, f"the card names no base model; research infers {base} ({_selection_basis(report)}). An inferred base is "
                      "not downloaded or used without a confirmation: pass --base <model id> to use it, or --accept-inferred-base to take what "
                      "research inferred", "inferred-base-unconfirmed", data=data)
-    try:
-        snap = local_snapshot(base)
-    except Exception as exc:                  # an unreadable cache is not an empty one: nothing is downloaded on that guess
-        return Check("base", BLOCK, f"cannot read the local cache for the base model {base}: {type(exc).__name__}: {exc}",
-                     "model-unavailable", data=data)
+    # The Hub is asked first: the real `local_snapshot` measures the cached revisions against the Hub's answer for this model, and picks the
+    # complete one over a partial one that sorts later (issue 141).
     info, err = None, "no hub lookup was made"
     if base_hub_info is not None:
         try:
@@ -578,6 +577,11 @@ def _audio_base(*, model_id: str, base: str, inferred: bool, report, accept_infe
                 err = "the hub's answer could not be read"
         except Exception as exc:
             err = f"{type(exc).__name__}: {exc}"
+    try:
+        snap = local_snapshot(base)
+    except Exception as exc:                  # an unreadable cache is not an empty one: nothing is downloaded on that guess
+        return Check("base", BLOCK, f"cannot read the local cache for the base model {base}: {type(exc).__name__}: {exc}",
+                     "model-unavailable", data=data)
     if info is None and snap is None:
         return Check("base", BLOCK, f"cannot look up the base model {base} on the hub: {err}", "model-unavailable", data=data)
     from orchard import audio_facts
@@ -841,14 +845,58 @@ def snapshot_complete(snap: Path) -> bool:
     weights = list(snap.rglob("*.safetensors")) + list(snap.glob("pytorch_model*.bin"))
     if any(not w.exists() for w in weights):
         return False
-    for idx in list(snap.rglob("*.index.json")):
+    return not any(_index_problem(idx) for idx in snap.rglob("*.index.json"))
+
+
+INDEX_MAX_BYTES = 32 << 20           # a weight index larger than this is not read (the largest real ones are a few hundred KB)
+
+
+def _index_problem(idx: Path) -> str | None:
+    """Why a weight index file does not vouch for its shards, or None when it does. The index must be strict JSON (safeio.read_json: no
+    repeated key, no NaN or 1e999, bounded size) with a `weight_map` that is a non-empty object, every value a non-empty text naming a path
+    inside the snapshot (no `..`, not absolute), and every named shard a regular file behind a readable link. An empty map, a null or
+    empty name and a name that is a directory all fail, because each would otherwise pass as 'no shard is missing'."""
+    from orchard import safeio
+    try:
+        # A snapshot holds each file as a link into the cache's blobs directory, so the link is resolved before the bounded read.
+        data = safeio.read_json(idx.resolve(), max_bytes=INDEX_MAX_BYTES, expect=dict)
+    except (OSError, ValueError, RuntimeError, safeio.SafeReadError) as exc:
+        return f"{idx.name} cannot be read: {type(exc).__name__}"
+    wmap = data.get("weight_map")
+    if not isinstance(wmap, dict) or not wmap:
+        return f"{idx.name} has no weight_map of tensors"
+    seen: set[str] = set()
+    for name in wmap.values():
+        if not isinstance(name, str) or not name.strip():
+            return f"{idx.name} names a shard that is not text"
+        if name in seen:                       # a real index repeats each shard name once per tensor
+            continue
+        seen.add(name)
+        parts = Path(name).parts
+        if Path(name).is_absolute() or ".." in parts or "\\" in name or "\x00" in name:
+            return f"{idx.name} names a shard outside the snapshot"
+        if not (idx.parent / name).is_file():
+            return f"{idx.name} names {name}, which is not a file here"
+    return None
+
+
+def choose_snapshot(hub: HubInfo | None, candidates) -> Path | None:
+    """The best of several complete local snapshots of one repository. With the Hub's answer: the revision with the fewest Hub-listed files
+    missing (weights, weight indexes and component configs, `_missing_listed`), then the Hub's own revision (an exact match of the directory
+    name with the Hub's sha), then the most recently modified, then the name. A partial copy that sorts later by name cannot win over a
+    complete one. Without the Hub's answer there is nothing to measure against and the last by name is used. None for no candidates."""
+    found = sorted(Path(c) for c in candidates)
+    if not found:
+        return None
+    if hub is None:
+        return found[-1]
+
+    def mtime(d: Path) -> float:
         try:
-            names = set(json.loads(idx.read_text())["weight_map"].values())
-        except (OSError, ValueError, KeyError, AttributeError, TypeError):
-            return False
-        if any(not (idx.parent / n).exists() for n in names if isinstance(n, str)):
-            return False
-    return True
+            return d.stat().st_mtime
+        except OSError:
+            return 0.0
+    return min(found, key=lambda d: (len(_missing_listed(hub, d)), 0 if hub.sha and d.name == hub.sha else 1, -mtime(d), d.name))
 
 
 def audio_evidence_for(hub: HubInfo | None, local_path) -> str | None:
@@ -1089,6 +1137,7 @@ def _nearest_existing(path: Path) -> Path:
 
 def default_signals(cfg, research_options=None) -> Signals:
     from orchard import supervisor, tiers
+    known_hubs: dict[str, HubInfo] = {}          # model id -> the Hub's last good answer for it, filled by hub_info
 
     def hub_info(model_id: str):
         # No Authorization header: the harness never sends the operator's token.
@@ -1099,7 +1148,9 @@ def default_signals(cfg, research_options=None) -> Signals:
                 data = json.load(resp)
                 if not isinstance(data, dict):
                     return None, "the hub's answer is not a JSON object"
-                return parse_hub(data), None
+                info = parse_hub(data)
+                known_hubs[model_id] = info          # local_snapshot measures its candidates against this, with no second request
+                return info, None
         except urllib.error.HTTPError as exc:
             return None, f"HTTP {exc.code}"
         except (OSError, ValueError) as exc:
@@ -1113,7 +1164,9 @@ def default_signals(cfg, research_options=None) -> Signals:
         # local skipped the download. A snapshot is local when it has a config file (config.json, or model_config.json for
         # repos laid out that way) and `snapshot_complete` finds its weights behind readable links.
         found = [d for d in found if snapshot_complete(d)]
-        return found[-1] if found else None
+        # With the Hub's answer for this model already in hand (the preflight asks the hub first), the revision that has the files the Hub
+        # lists wins over one that merely sorts later. Without it the last by name is used, as before. No request is made here.
+        return choose_snapshot(known_hubs.get(model_id), found)
 
     def gozer_status() -> str:
         try:
