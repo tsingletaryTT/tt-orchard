@@ -154,6 +154,30 @@ projector and `mtp.*` tensors may differ. Otherwise the path is `full-port`, and
 lists each reason. A tokenizer difference does not change the path, because the runtime loads the
 new model's tokenizer.
 
+## Audio models
+
+A model in the stable-audio-tools layout has no `config.json`. It has `model_config.json`, one top-level `model.safetensors` that holds several
+components under name prefixes, and sometimes a text-encoder directory. The template detects that layout and runs an audio branch. It writes
+`evidence/audio-compare.json`, `files-compare.json` and `value-compare.json`, and `delta.json` gets a `facts` record and an `audio` record.
+
+- `facts.form` is `full` here (an `adapter` repository has no `model_config.json` and is not read by this branch). `facts.modality` is `audio` (`text` for a model in the usual layout, which writes no `facts`). The
+  supervisor adds `facts.serving` (`thin-bundle`, `container` or `none`) to the ledger from the installed bundles; you do not write it.
+- A `repo_id` difference in the config is a pointer and does not count. The `training` section is listed and does not count. Every other difference
+  in `model_config.json` is sorted into a category by an allow-list table (`audio_config_categories.json`, copied into the script): `serving` (the
+  longest audio asked for, the default sampler: `sample_size`, `model.diffusion.diffusion_objective` between `rectified_flow` and `rf_denoiser`, and a
+  few default-sampler keys), `structural` (the network, the audio format, the conditioning) or `unknown` (any key not listed). When only `serving`
+  differences exist and the tensors and the text encoder match, the class and the path stay `weights-only`, and a hazard names the keys and both values:
+  the serving configuration has to carry the model's own settings, and no stage checks that yet. A `structural` or `unknown` difference, a tensor with
+  another shape, a tensor in only one model, or a text-encoder difference makes the class `full-port`. A header or config that cannot be read makes it
+  `unknown`. `audio.decision` in `delta.json` records the class, the path, the path the strict rule would choose, a confidence, and for each
+  difference its key, both values, its category, who decided it (`allow-list`) and the source the rule rests on.
+- `"audio_strict": true` in `triage_config.json` keeps the earlier rule: any difference is a full port. Use it to compare.
+- Later steps may override a category or the path by writing `audio_overrides.json` beside the script (a category override names a differing key; every
+  override needs a non-empty source). The override is recorded in `audio.decision.overrides`. A path override to `weights-only` is refused when a tensor
+  or text-encoder difference exists. Do not write this file yourself unless the operator asked and gave the source.
+- Do not edit the script and do not change `class`, `path` or `facts`. Keep the hazard that says no stage listens to the output. A run whose
+  modality is `audio` stops after this stage: the audio stages are not built, so a person decides.
+
 ## Resume notes
 
 Write progress notes to `RESUME.md` in your stage directory as you go. If the run restarts, the

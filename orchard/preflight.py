@@ -91,20 +91,43 @@ def parse_hub(payload: dict) -> HubInfo:
     )
 
 
-def check_hub(hub: HubInfo | None, error: str | None, local: bool) -> Check:
+_WEIGHT_NAME = re.compile(r"\.safetensors$|(^|/)pytorch_model[^/]*\.bin$")
+
+
+def _missing_weights(hub: HubInfo, snapshot: Path) -> list[str]:
+    """Weight files the repo's own file list names that are not behind a readable link in `snapshot`."""
+    return [n for n in hub.files if _WEIGHT_NAME.search(n) and not (snapshot / n).exists()]
+
+
+def check_hub(hub: HubInfo | None, error: str | None, local: bool, local_path: Path | None = None) -> Check:
     if hub is None:
         if local:
             return Check("hub", WARN, f"the hub could not be reached ({error}); using the local snapshot")
         return Check("hub", BLOCK, f"cannot look the model up on the hub: {error}", "model-unavailable")
+    on_disk = None
     if hub.private or hub.gated:
-        return Check("hub", BLOCK, "the model is gated or private. The harness never uses your Hugging Face "
-                     "token, so it cannot fetch it. Download it yourself, then run bringup again",
-                     "credentials-needed")
+        # The harness never uses a token. A complete copy the operator already downloaded is enough: every weight file the repo
+        # lists has to be behind a readable link, and the revision found on disk is named.
+        # A private repo stays a block: the issue covers gated models, and a private one is not something the hub row can vouch for.
+        if hub.private or local_path is None or _missing_weights(hub, Path(local_path)):
+            return Check("hub", BLOCK, "the model is gated or private. The harness never uses your Hugging Face "
+                         "token, so it cannot fetch it. Download it yourself, then run bringup again",
+                         "credentials-needed")
+        on_disk = (f"{hub.id} is gated; the harness does not use a token. A complete copy was found on disk at revision "
+                   f"{Path(local_path).name[:12]} and is used")
+        if hub.sha and not Path(local_path).name.startswith(hub.sha[:8]):
+            on_disk += f" (the hub's current revision is {hub.sha[:12]}, so the copy is not the newest)"
     if not hub.license and not hub.has_license_file:
         return Check("hub", BLOCK, "the model has no license in its card and no license file; a person "
                      "must read what it allows", "license-needs-review")
     detail = (f"{hub.id} at {hub.sha[:8]}, license {hub.license or 'in the license file'}, "
               f"{hub.total_bytes / 1e9:.1f} GB")
+    if on_disk:
+        detail = on_disk + ". " + detail
+        if hub.code_files:
+            detail += (f". The repo ships code ({', '.join(hub.code_files)}); it is recorded, and the harness "
+                       "does not run it outside the agent sandbox")
+        return Check("hub", WARN, detail, data=hub)
     if hub.code_files:
         return Check("hub", WARN, detail + f". The repo ships code ({', '.join(hub.code_files)}); it is "
                      "fetched and recorded, and the harness does not run it outside the agent sandbox",
@@ -633,6 +656,28 @@ def has_weights(snapshot: Path) -> bool:
             or any(w.exists() for w in snapshot.glob("pytorch_model*.bin")))
 
 
+_CONFIG_FILES = ("config.json", "model_config.json")
+
+
+def snapshot_complete(snap: Path) -> bool:
+    """A snapshot directory the harness can use: a config file, at least one readable weight file, no weight link that points
+    nowhere, and every shard a weight index lists. Repos with other layouts (a single model.safetensors, component
+    directories) pass the same way."""
+    if not any((snap / c).is_file() for c in _CONFIG_FILES) or not has_weights(snap):
+        return False
+    weights = list(snap.rglob("*.safetensors")) + list(snap.glob("pytorch_model*.bin"))
+    if any(not w.exists() for w in weights):
+        return False
+    for idx in list(snap.rglob("*.index.json")):
+        try:
+            names = set(json.loads(idx.read_text())["weight_map"].values())
+        except (OSError, ValueError, KeyError, AttributeError, TypeError):
+            return False
+        if any(not (idx.parent / n).exists() for n in names if isinstance(n, str)):
+            return False
+    return True
+
+
 def hf_home_for(cfg) -> Path:
     from orchard.supervisor import operator_home
     if cfg.hf_home:
@@ -669,10 +714,11 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
     except Exception as exc:
         hub, err = None, f"{type(exc).__name__}: {exc}"
     try:
-        local = s.local_snapshot(model_id) is not None
+        local_path = s.local_snapshot(model_id)
     except Exception:
-        local = False
-    out.append(check_hub(hub, err, local))
+        local_path = None
+    local = local_path is not None
+    out.append(check_hub(hub, err, local, local_path))
 
     def base() -> Check:
         if stock_recorded and getattr(cfg, "mode", "local") != "lab":
@@ -847,13 +893,12 @@ def default_signals(cfg, research_options=None) -> Signals:
     def local_snapshot(model_id: str):
         org, name = model_id.split("/", 1)
         snaps = hf_home_for(cfg) / "hub" / f"models--{org}--{name}" / "snapshots"
-        found = sorted(snaps.glob("*/config.json")) if snaps.is_dir() else []
+        found = sorted(d for d in snaps.iterdir() if d.is_dir()) if snaps.is_dir() else []
         # A config alone is not a model. An old manifest-only fetch leaves config.json and README.md, and counting that as
-        # local skipped the download. A weight file counts when its link resolves (`exists()` follows it). The kinds are the
-        # ones the stage templates read: *.safetensors at any depth (some repos keep a component in a subfolder) and the
-        # top-level pytorch_model*.bin that stage 0's backbone rule names. Other files, such as training_args.bin, do not.
-        found = [c for c in found if has_weights(c.parent)]
-        return found[-1].parent if found else None
+        # local skipped the download. A snapshot is local when it has a config file (config.json, or model_config.json for
+        # repos laid out that way) and `snapshot_complete` finds its weights behind readable links.
+        found = [d for d in found if snapshot_complete(d)]
+        return found[-1] if found else None
 
     def gozer_status() -> str:
         try:

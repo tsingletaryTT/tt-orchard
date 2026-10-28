@@ -126,7 +126,8 @@ from urllib.parse import urlparse
 
 from orchard.adapters import AdapterError, Lease
 from orchard.agent import AgentStep, Tools, agent_env, probe_model, spawn_checked
-from orchard import bus
+from orchard import bus, nearest
+from orchard.audio_facts import serving_of
 from orchard.blocked import block_code, last_pause
 from orchard.blocked import write_bundle as write_blocked_bundle
 from orchard.canary import CanaryError, compare, post_json
@@ -152,7 +153,7 @@ from orchard import graft_trial as graft
 from orchard import kept_coder, kernelprobe, swap_draft
 from orchard.server import ServerControl, ServerError, ServerSpec, StopCheck
 from orchard.stages import (PACKAGE_OPTIONS_SET, GateResult, TierUnavailable, abort_can_resume, attempt_started_ts,
-                            budget_cap, check_disk, coder_state, delta_class, delta_path, evidence_record,
+                            budget_cap, check_disk, coder_state, delta_class, delta_facts, delta_path, run_facts, evidence_record,
                             open_stage_dir, package_format, package_options, resolve_endpoint,
                             resolve_skill, run_class, run_path, run_progress, scratch_stage, spec_for, stock_params, tier_for)
 from orchard.tiers import TierConfigError, load
@@ -168,6 +169,8 @@ FULL_PORT = ("stage 0 found a full port (new model code is needed); plan 4 runs 
              "bring-ups, so the operator decides whether to go on")
 RESTRICTED_HEAD = ("stage 0 found the nearest model's backbone with a restricted head (its lm_head is replaced by sidecar "
                    "rows); the harness does not serve that, so a person decides whether to go on")
+AUDIO_UNBUILT = ("stage 0 found an audio model; the audio path (its stage 1 and stage 2) is not built yet, and the text stages would "
+                 "measure the wrong thing, so a person decides whether to go on")
 SKILLS_DIR = Path(__file__).with_name("skills")
 
 
@@ -826,6 +829,9 @@ class Supervisor:
             if cap:
                 self.ledger.append("decision", p.next_stage, decision="pause", reason=cap)
                 continue
+            if p.next_stage == 1 and self._audio_unacknowledged():
+                self.ledger.append("decision", 1, decision="pause", reason=AUDIO_UNBUILT)
+                continue
             if p.next_stage == 1 and self._restricted_head_unacknowledged():
                 self.ledger.append("decision", 1, decision="pause", reason=RESTRICTED_HEAD)
                 continue
@@ -866,6 +872,16 @@ class Supervisor:
         # counts as the same acknowledgement, so one resume is enough.
         return self.unattended or not any(
             e["event"] == "decision" and e["data"].get("reason") in (FULL_PORT, RESTRICTED_HEAD) for e in entries)
+
+    def _audio_unacknowledged(self) -> bool:
+        """Stage 0 recorded modality audio, and the run has not yet paused for it. The audio stages are not built (plan
+        docs/superpowers/plans/2026-10-28-audio-bringup.md), so the run stops before stage 1. Unattended, it always blocks."""
+        entries = self.ledger.read()
+        facts = run_facts(entries, self.run_dir)
+        if not facts or facts.get("modality") != "audio":
+            return False
+        return self.unattended or not any(
+            e["event"] == "decision" and e["data"].get("reason") == AUDIO_UNBUILT for e in entries)
 
     def _restricted_head_unacknowledged(self) -> bool:
         """Stage 0 filed the model as a restricted head, and the run has not yet paused for it. The harness does not serve
@@ -1466,6 +1482,21 @@ class Supervisor:
         log = stage_dir / "log" / f"{step.phase}-continuation-{entry['seq']:05d}.jsonl"
         return step.continue_with(text, max_turns=AGENT_CONTINUATION_TURNS, log_path=log)
 
+    def _stage_0_facts(self) -> dict:
+        """`{"facts": {...}}` for stage 0's passing end, or {} when delta.json holds none (a text model: the default applies).
+        The template decides form and modality from the files; `serving` is a property of this machine, so it comes from the
+        installed bundles and container packages (orchard/audio_facts.py)."""
+        facts, delta = delta_facts(self.run_dir), None
+        if facts is None:
+            return {}
+        try:
+            delta = json.loads((self.run_dir / "stages" / "0" / "delta.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        installed = nearest.read_all_installed(self.paths.tt_model_root, self.paths.operator_home)
+        return {"facts": {"form": facts.get("form"), "serving": serving_of(delta.get("nearest_model"), installed),
+                          "modality": facts.get("modality")}}
+
     def _end_stage(self, spec, stage_dir: Path, status: str, reasons: list, gate, escalated: bool) -> str:
         n = spec.number
         if status == "pass":
@@ -1475,7 +1506,7 @@ class Supervisor:
                 self._record_numbers(stage_dir)
             # Stage 0's pass records the path it chose. Later stages read it from here
             # (orchard/stages.py, run_path), so an edit to delta.json cannot change the run's path.
-            extra = ({"path": delta_path(self.run_dir), "class": delta_class(self.run_dir)}
+            extra = ({"path": delta_path(self.run_dir), "class": delta_class(self.run_dir), **self._stage_0_facts()}
                      if n == 0 else {})
             self.ledger.append("stage_end", n, result="pass", evidence=ev, **extra)
             return "pass"
