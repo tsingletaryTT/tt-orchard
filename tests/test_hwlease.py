@@ -182,7 +182,7 @@ def test_a_zero_wait_claims_once_and_cancels():
     cmd = FakeCmd()
     cmd.say("acquire", res(10, QUEUED))
     led = leases(cmd)
-    assert led.wait("T1", "why", 0.0) == (None, None) and cmd.subs() == ["acquire", "cancel", "history", "queue"]
+    assert led.wait("T1", "why", 0.0) == (None, None) and cmd.subs() == ["acquire", "cancel", "history", "queue", "status"]
 
 
 def test_the_last_sleep_never_overruns_the_deadline():

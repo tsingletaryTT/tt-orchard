@@ -181,7 +181,7 @@ def test_a_short_wait_gives_its_claims_the_floor_and_its_recovery_reads_the_reco
 def test_no_claim_is_started_after_the_wait_is_over(tmp_path, fake_kenv):
     rig = busy_rig(tmp_path, fake_kenv, busy_calls=10**6, policy=hwtool.HwPolicy(wait_s=4.0))
     rig.call()
-    assert len([c for c in rig.sim.calls if c["argv"][1] == "acquire" and "--ticket" in c["argv"]]) == 3
+    assert len([c for c in rig.sim.calls if c["argv"][1] == "acquire" and "--ticket" in c["argv"]]) == 2          # claims at 0 and 2 s; the 4 s deadline starts no more
 
 
 # ---- 5. the cleanup reserve, where it is checked ------------------------------------------------------------------------------

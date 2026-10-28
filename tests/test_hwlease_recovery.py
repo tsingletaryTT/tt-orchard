@@ -205,7 +205,7 @@ def test_no_claim_starts_after_the_deadline():
     cmd.say("acquire", res(10, QUEUED))
     led = leases(cmd)
     led.wait("T1", "why", 4.0)
-    assert len(claim_timeouts(cmd)) == 3                     # at 0, 2 and 4 s; none at 6 s
+    assert len(claim_timeouts(cmd)) == 2                     # at 0 and 2 s; none at 4 s (the deadline) or later, the check is before every claim
 
 
 def test_a_zero_wait_still_makes_the_immediate_check():

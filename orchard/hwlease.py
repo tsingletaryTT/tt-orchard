@@ -35,6 +35,7 @@ CLAIM_TIMEOUT_S = 60.0           # the most one `gozer acquire` call may take; g
 CLAIM_MIN_TIMEOUT_S = 5.0        # the least: a claim is given the wait that is left, but never less than this
 RECOVERY_TIMEOUT_S = 15.0        # one read of gozer's history or queue while recovering inside a wait or an exception
 HISTORY_EVENTS = 200
+HISTORY_WIDE_EVENTS = 5000       # one wider read, made only when status shows chips of ours that the window has no lease for
 
 # `gozer release` exits 0 even when its reset failed. These phrases in its message say so (orchard/adapters/gozer.py).
 RELEASE_RESET_FAILED_TEXT = ("NOT marked clean", "not resetting")
@@ -72,20 +73,43 @@ def _signal_group(proc, sig, killpg) -> None:
         pass
 
 
-def _stop_and_reap(proc, killpg) -> None:
+def _stop_and_reap(proc, killpg) -> BaseException | None:
     """SIGTERM, up to ACQUIRE_TERM_GRACE_S for the child to end, then SIGKILL, then wait for it: no acquire is left running (it
-    could still grant a lease after the probe moved on) and no zombie is left behind."""
-    _signal_group(proc, signal.SIGTERM, killpg)
-    try:
-        proc.wait(timeout=ACQUIRE_TERM_GRACE_S)
-        return
-    except Exception:
-        pass
-    _signal_group(proc, signal.SIGKILL, killpg)
-    try:
-        proc.wait(timeout=ACQUIRE_TERM_GRACE_S)
-    except Exception:
-        pass
+    could still grant a lease after the probe moved on) and no zombie is left behind.
+
+    Every step runs inside its own guard, so a second KeyboardInterrupt (or any error) in one step does not skip the next: the
+    SIGTERM, the first wait, the SIGKILL and the last wait each still happen. The last wait is tried twice. Returns the first
+    exception a step raised (a wait that merely timed out is not one), or None; the caller attaches it to the exception it is
+    re-raising."""
+    secondary: list[BaseException] = []
+
+    def step(fn) -> bool:
+        try:
+            fn()
+            return True
+        except subprocess.TimeoutExpired:
+            return False                                     # the child is still running: the normal reason to go on
+        except BaseException as exc:                         # a further interrupt or error: note it, go on to the next step
+            secondary.append(exc)
+            return False
+
+    step(lambda: _signal_group(proc, signal.SIGTERM, killpg))
+    if step(lambda: proc.wait(timeout=ACQUIRE_TERM_GRACE_S)):
+        return secondary[0] if secondary else None
+    step(lambda: _signal_group(proc, signal.SIGKILL, killpg))
+    for _ in range(2):
+        if step(lambda: proc.wait(timeout=ACQUIRE_TERM_GRACE_S)):
+            break
+    return secondary[0] if secondary else None
+
+
+def _attach_secondary(first: BaseException, secondary: BaseException | None) -> None:
+    """Record on the exception that is about to be re-raised that a further one landed during the cleanup."""
+    if secondary is not None and getattr(first, "secondary_interrupt", None) is None:
+        try:
+            first.secondary_interrupt = secondary
+        except Exception:
+            pass
 
 
 def run_reaping(argv, timeout: float, *, env: dict | None = None, popen=None, killpg=None, **_ignored) -> CommandResult:
@@ -103,14 +127,17 @@ def run_reaping(argv, timeout: float, *, env: dict | None = None, popen=None, ki
     try:
         out, err = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
-        _signal_group(proc, signal.SIGKILL, kill)
         try:
+            _signal_group(proc, signal.SIGKILL, kill)
             out, err = proc.communicate()
         except Exception:
             out, err = "", ""
+        except BaseException as exc:                         # an interrupt while the timed-out child is being killed
+            _attach_secondary(exc, _stop_and_reap(proc, kill))
+            raise
         return CommandResult(argv, None, out, err, timed_out=True, pid=getattr(proc, "pid", None))
-    except BaseException:
-        _stop_and_reap(proc, kill)
+    except BaseException as first:
+        _attach_secondary(first, _stop_and_reap(proc, kill))
         raise
     return CommandResult(argv, proc.returncode, out, err, pid=getattr(proc, "pid", None))
 
@@ -124,12 +151,14 @@ class ReleaseResult(NamedTuple):
 class Mine(NamedTuple):
     leases: list    # [{"lease_id", "chips", "env", "granted_at"}] granted to this pid and not released
     tickets: list   # [ticket, ...] queued by this pid
-    readable: bool  # False when history or the queue could not be read
+    readable: bool  # False when history, the queue or status could not be read
+    unidentified: list = []  # chips status shows held by this pid that no lease found in history accounts for (nothing to release by id)
 
 
 class Reclaimed(NamedTuple):
     left: str | None        # what gozer still shows for this pid afterwards (see unresolved), else None
     leases: list            # the leases that were found, each {"lease_id", "chips", "env", "granted_at"}
+    secondary: BaseException | None = None  # the first further interrupt or error that landed inside the cleanup (the cleanup went on)
 
 
 class LeaseAnswer(NamedTuple):
@@ -199,7 +228,13 @@ class GozerLeases:
         that finds the ticket gone, is checked against gozer's own record before the answer is None: a lease granted to this
         pid while the probe was not looking is returned, not lost."""
         end = self.clock() + max(wait_s, 0.0)
+        first = True
         while True:
+            # The deadline is checked before every claim, a late wake-up from the sleep included. Only the first claim is made
+            # without a check: that is the immediate claim a zero wait still gets.
+            if not first and self.clock() >= end:
+                break
+            first = False
             # A claim is given the wait that is left (never less than the floor), so a short wait is not stretched to a minute
             # by one slow call. The first claim is made even for a zero wait: that is the immediate check.
             left = end - self.clock()
@@ -271,34 +306,59 @@ class GozerLeases:
             return ReleaseResult(True, False, "")
         return ReleaseResult(False, True, text or f"gozer release exited {got.returncode}")
 
-    def reclaim(self, on_found=None) -> Reclaimed:
-        """Give back everything gozer shows for this pid: cancel its tickets, release its leases. For an exception path.
-        `on_found(lease)` is called for each lease before it is released, so the caller can record the grant (and start its
-        chip-time clock) first. A lease whose release this process started and has not seen finish is not released again: the
-        reclaim waits up to RELEASE_TIMEOUT_S for gozer's history to show it released, then leaves it, shown as unresolved.
-        Returns what was found and what gozer still shows. Never raises Exception."""
-        found = Mine([], [], False)
-        try:
-            found = self.mine(RECOVERY_TIMEOUT_S)
-            for ticket in found.tickets:
-                self.cancel(ticket)
-            for lease in found.leases:
-                if on_found is not None:
-                    try:
-                        on_found(lease)
-                    except Exception:
-                        pass
-                if lease["lease_id"] in self.in_flight:
-                    self._await_release(lease["lease_id"])
-                else:
-                    self.release(lease["lease_id"])
-        except Exception:
-            pass
-        try:
-            left = self.unresolved()
-        except Exception:
+    def reclaim(self, on_found=None, known_tickets=(), known_leases=()) -> Reclaimed:
+        """Give back everything gozer shows for this pid, and everything the caller knows it asked for: cancel its tickets,
+        release its leases. For an exception path. `on_found(lease)` is called for each lease gozer shows, before it is released,
+        so the caller can record the grant (and start its chip-time clock) first. A lease whose release this process started and
+        has not seen finish is not released again: the reclaim waits up to RELEASE_TIMEOUT_S for gozer's history to show it
+        released, then leaves it, shown as unresolved.
+
+        `known_tickets` and `known_leases` are ids the caller holds in hand. They are cancelled and released even when gozer could
+        not be read, so a failed read never leaves a known id alone.
+
+        Every step runs in its own guard: a further KeyboardInterrupt or error inside the cleanup is recorded (the first one is
+        `secondary` on the result), and the next step still runs. The mine() read and the cancel are tried a second time after an
+        interrupt; a release interrupted in its command is not repeated (it may still be running, so it is tracked in `in_flight`).
+        What is left is decided by a final, fresh read of history, the queue and status. Never raises."""
+        secondary: list[BaseException] = []
+
+        def guarded(fn, tries: int = 1):
+            """(value, ok): fn() is retried after an interrupt or error, up to `tries` times; the first one is kept."""
+            for _ in range(tries):
+                try:
+                    return fn(), True
+                except BaseException as exc:
+                    if not secondary:
+                        secondary.append(exc)
+            return None, False
+
+        found, ok = guarded(lambda: self.mine(RECOVERY_TIMEOUT_S), tries=2)
+        if not ok:
+            found = Mine([], [], False)
+        # A known id is acted on when gozer shows it, and also when gozer could not be read (a failed read must not leave it alone).
+        # When every read worked and does not show it, it is already gone, and no second cancel or release is sent for it.
+        tickets = list(dict.fromkeys([*found.tickets, *([str(t) for t in known_tickets] if not found.readable else [])]))
+        for ticket in tickets:
+            # a cancel that is refused or interrupted is tried once more
+            guarded(lambda: self.cancel(ticket) and self.cancel(ticket), tries=2)
+        shown = {x["lease_id"] for x in found.leases}
+        for lease in found.leases:
+            if on_found is not None:
+                guarded(lambda: on_found(lease))
+            self._give_back(lease["lease_id"], guarded)
+        for lease_id in dict.fromkeys(str(x) for x in known_leases):
+            if lease_id not in shown and not found.readable:
+                self._give_back(lease_id, guarded)
+        left, ok = guarded(self.unresolved, tries=2)                  # the final read is a new read, never the first one
+        if not ok:
             left = "cannot confirm that nothing is held (gozer could not be read)"
-        return Reclaimed(left, found.leases)
+        return Reclaimed(left, found.leases, secondary[0] if secondary else None)
+
+    def _give_back(self, lease_id: str, guarded) -> None:
+        if lease_id in self.in_flight:
+            guarded(lambda: self._await_release(lease_id))
+        else:
+            guarded(lambda: self.release(lease_id))
 
     def _await_release(self, lease_id: str) -> bool:
         """Wait (up to RELEASE_TIMEOUT_S) for gozer's history to show `lease_id` released: the release that is still running
@@ -317,34 +377,53 @@ class GozerLeases:
 
     # ---- what gozer shows ------------------------------------------------------------------------------------------
 
+    def _granted(self, events: list[dict]) -> list[dict]:
+        """The leases `events` show granted to this pid (pid and who match) and never released or reaped."""
+        out = []
+        ended = {e.get("lease_id") for e in events if e.get("event") in ("released", "reaped")}
+        for e in events:
+            if (e.get("event") == "granted" and e.get("pid") == self.pid and e.get("who") == self.who
+                    and isinstance(e.get("lease_id"), str) and e["lease_id"] not in ended):
+                chips = [c for c in e.get("chips") or [] if isinstance(c, str)]
+                out.append({"lease_id": e["lease_id"], "chips": chips,
+                            "env": {"TT_VISIBLE_DEVICES": ",".join(chips)} if chips else {},
+                            "granted_at": e.get("ts")})
+        return out
+
     def mine(self, timeout: float = 60.0) -> Mine:
-        """What gozer shows for this pid. A read that fails does not discard the other: the leases from a readable history and
-        the tickets from a readable queue are kept, and `readable` says whether both could be read."""
+        """What gozer shows for this pid, read fresh. Current ownership comes from `gozer status` (the chips held by this pid and
+        who): history shows only its last events, so a grant older than the window would be missed there. History supplies the lease
+        ids. Chips that status shows held by us and that no lease from history accounts for trigger one wider history read; if
+        they are still not accounted for they are `unidentified`, and the caller fails closed. A read that fails does not discard
+        the others, and `readable` is False when any of the three could not be read."""
         events = self._records("history", [self.gozer, "history", "--json", "-n", str(HISTORY_EVENTS)], "history", timeout)
         queue = self._records("queue", [self.gozer, "queue", "--json"], "queue", timeout)
-        leases, tickets = [], []
-        if events is not None:
-            ended = {e.get("lease_id") for e in events if e.get("event") in ("released", "reaped")}
-            for e in events:
-                if (e.get("event") == "granted" and e.get("pid") == self.pid and e.get("who") == self.who
-                        and isinstance(e.get("lease_id"), str) and e["lease_id"] not in ended):
-                    chips = [c for c in e.get("chips") or [] if isinstance(c, str)]
-                    leases.append({"lease_id": e["lease_id"], "chips": chips,
-                                   "env": {"TT_VISIBLE_DEVICES": ",".join(chips)} if chips else {},
-                                   "granted_at": e.get("ts")})
+        status = self._records("status", [self.gozer, "status", "--json"], "chips", timeout)
+        leases = self._granted(events) if events is not None else []
+        held = [str(c.get("bdf")) for c in status or [] if c.get("pid") == self.pid and c.get("who") == self.who]
+        if held and not set(held) <= {c for x in leases for c in x["chips"]}:
+            wide = self._records("history", [self.gozer, "history", "--json", "-n", str(HISTORY_WIDE_EVENTS)], "history", timeout)
+            if wide is not None:
+                leases = self._granted(wide)
+        covered = {c for x in leases for c in x["chips"]}
+        unidentified = [bdf for bdf in held if bdf not in covered]
+        tickets = []
         if queue is not None:
             tickets = [str(q["ticket"]) for q in queue if q.get("pid") == self.pid and q.get("who") == self.who
                        and isinstance(q.get("ticket"), (str, int))]
-        return Mine(leases, tickets, events is not None and queue is not None)
+        return Mine(leases, tickets, events is not None and queue is not None and status is not None, unidentified)
 
     def unresolved(self) -> str | None:
-        """None when gozer shows no lease granted to this pid and no ticket queued by it; else one sentence naming them (or
-        saying gozer could not be read)."""
+        """None when gozer shows no lease granted to this pid, no ticket queued by it and no chip held by it; else one sentence
+        naming them (or saying gozer could not be read). Always a fresh read."""
         found = self.mine()
         notes = [f"lease {x['lease_id']} may still be held" for x in found.leases]
         notes += [f"ticket {t} is still queued" for t in found.tickets]
+        if found.unidentified:
+            notes.append(f"chips {', '.join(found.unidentified)} are held by this pid but no lease id was found for them in "
+                         "gozer history, so they cannot be released from here")
         if not found.readable:
-            notes.append("cannot confirm that nothing else is held (gozer history or queue is not readable)")
+            notes.append("cannot confirm that nothing else is held (gozer history, queue or status is not readable)")
         return "; ".join(notes) + "; look with `gozer status`" if notes else None
 
     def duration(self, lease_id: str) -> float | None:

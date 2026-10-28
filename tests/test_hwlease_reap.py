@@ -199,7 +199,7 @@ def test_every_command_but_the_release_uses_the_reaping_runner(monkeypatch):
     led.release("L1")
     led.cancel("T1")
     led.mine()
-    assert [a[1] for a in reaping] == ["acquire", "acquire", "cancel", "history", "queue"]                   # acquisitions and cancels are reaped
+    assert [a[1] for a in reaping] == ["acquire", "acquire", "cancel", "history", "queue", "status"]                   # acquisitions and cancels are reaped
     assert [a[1] for a in plain] == ["release"]                                         # only the release may be left running
 
 

@@ -166,11 +166,12 @@ def test_a_second_interrupt_at_each_reclaim_step_is_recorded_and_the_other_steps
     cmd.status_chips = [held_chip("0000:01:00.0")]
     original = cmd.run
     trigger = {"read": ("history", 1), "cancel": ("cancel", 1), "release": ("release", 1), "final-read": ("queue", 2)}[step]
-    counts, hit = {}, []
+    counts, hit, attempted = {}, [], []                              # attempted: every command started, the interrupted one too
 
     def run(argv, timeout, env=None, kill_on_timeout=True):
         sub = argv[1]
         counts[sub] = counts.get(sub, 0) + 1
+        attempted.append(sub)
         if sub == trigger[0] and counts[sub] == trigger[1] and not hit:
             hit.append(sub)
             raise KeyboardInterrupt
@@ -179,7 +180,7 @@ def test_a_second_interrupt_at_each_reclaim_step_is_recorded_and_the_other_steps
     led = leases(cmd)
     result = led.reclaim()                                          # a second interrupt does not escape the cleanup
     assert hit and isinstance(result.secondary, KeyboardInterrupt)
-    subs = cmd.subs()
+    subs = attempted
     assert "cancel" in subs and "release" in subs
     assert subs[-1] in ("history", "queue", "status")                  # and a final read was still made after the interrupted step
 

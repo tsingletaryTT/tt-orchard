@@ -1406,8 +1406,8 @@ def make_hardware_check(adir: Path, *, op: str, n, shared_python, policy: hwtool
                 return hw, None, ""
             grant, cancel_error = answer.grant, None
             if grant is None:
-                ctx["queued"] = True
-                grant, cancel_error = leases.wait(answer.ticket, reason, wait_s)
+                ctx["queued"], ctx["ticket"] = True, answer.ticket
+                grant,cancel_error = leases.wait(answer.ticket, reason, wait_s)
             if grant is None:
                 return ({"passed": False, "started": False, "category": "queued", "pcc_min": None, "sets": [],
                          "violations": [], "first_line": f"the board stayed busy for {clock() - began:.0f} s",
@@ -1419,8 +1419,14 @@ def make_hardware_check(adir: Path, *, op: str, n, shared_python, policy: hwtool
                 hw, event, text = under_lease(k, grant, timeout_s)
             finally:
                 released = leases.release(grant["lease_id"])
-        except BaseException:
-            leases.reclaim(on_found=found)              # records a recovered grant before it is released
+                if released.ok:
+                    ctx["released_ok"] = True       # gozer confirmed it: an exception after this does not release it again
+        except BaseException as first:
+            # Gives back what gozer shows for this pid and the ids held in hand (a ticket and a lease in ctx), even when gozer
+            # cannot be read. A further interrupt inside the cleanup does not stop it: it is attached to `first`, and `first` goes on.
+            cleaned = leases.reclaim(on_found=found, known_tickets=[t for t in [ctx.get("ticket")] if t],
+                                     known_leases=[x for x in [ctx.get("lease_id")] if x and not ctx.get("released_ok")])
+            hwlease._attach_secondary(first, cleaned.secondary)
             raise
         hw["waited_s"] = round(held - began, 1)
         hw["elapsed_s"] = round(clock() - held, 1)
