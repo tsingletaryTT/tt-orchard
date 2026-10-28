@@ -95,3 +95,27 @@ def test_the_status_hint_says_a_person_decides():
     facts = {"state": "paused", "pause": {"kind": "audio_unbuilt"}, "control_pending": False, "disk": {"run_dir_free_gb": 500}, "pauses_at_stage": 1, "quiet_s": 0}
     hint = next(h for name, test, h in status.HINT_RULES if test(facts))
     assert "needs a decision" in hint
+
+
+RELAXED_DECISION = {"class": "weights-only", "path": "weights-only", "alternative_path": "full-port", "confidence": "medium", "strict": False,
+                    "overrides": [], "problems": [],
+                    "differences": [{"key": "sample_size", "base": 5324800, "model": 5292032, "category": "serving", "decided_by": "allow-list"}]}
+RELAXED_FILES = {(0, "run"): {**FILES[(0, "run")], "delta.json": {**DELTA, "class": "weights-only", "facts": {"form": "full", "modality": "audio"},
+                                                                  "audio": {"decision": RELAXED_DECISION}}}}
+
+
+def test_a_relaxed_weights_only_audio_class_still_stops_before_stage_1(rig):
+    rig.args.unattended = True
+    rig.script = lambda r: bringup(r, overrides=RELAXED_FILES)
+    assert rig.run() == EXIT_BLOCKED
+    assert decisions(rig, "blocked")[-1]["code"] == "audio-path-unbuilt"
+    assert not started(rig, 1) and rig.ends(0)[0]["path"] == "weights-only" and rig.ends(0)[0]["class"] == "weights-only"
+
+
+def test_the_stop_does_not_depend_on_the_path_the_decision_chose(rig):
+    full = {**RELAXED_FILES[(0, "run")]["delta.json"], "class": "full-port", "path": "full-port"}
+    full["audio"] = {"decision": {**RELAXED_DECISION, "class": "full-port", "path": "full-port", "alternative_path": "weights-only"}}
+    rig.args.unattended = True
+    rig.script = lambda r: bringup(r, overrides={(0, "run"): {**FILES[(0, "run")], "delta.json": full}})
+    assert rig.run() == EXIT_BLOCKED
+    assert not started(rig, 1)
