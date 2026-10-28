@@ -195,6 +195,7 @@ def run_limited(code: str, *, timeout: float = 60, address_space: int = 2 << 30)
 
 
 
+
 # ------------------------------------------------------------------------------------------------------------ the registry
 
 @dataclass(frozen=True)
@@ -332,7 +333,7 @@ def child_main(reader_name: str, group: str, registry: dict | None = None) -> No
             else:
                 arg = big_string() if item.kind == "big" else item.content
             out[item.name] = _verdict(reader, item, arg)
-        except BaseException as exc:                           # building the item failed: say so and do not pass
+        except BaseException as exc:                           # building the item failed: say so instead of passing
             out[item.name] = {"ok": False, "why": f"the harness could not build the item: {type(exc).__name__}", "peak_mb": 0}
         finally:
             restore_permissions(base)
@@ -904,6 +905,8 @@ assert all(name in BY_NAME for readers in KNOWN_DEFECTS.values() for name in rea
 UNREGISTERED_MODULES = (
     'adapters/gozer.py',
     'agent.py',
+    'audio_reference.py',
+    'audio_reference_env.py',
     'bench_control.py',
     'bench_proxy.py',
     'caches.py',
