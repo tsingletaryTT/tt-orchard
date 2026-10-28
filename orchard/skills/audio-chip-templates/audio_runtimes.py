@@ -120,7 +120,8 @@ class LibraryRuntime:
         """A subclass adds its own timings to the recorder."""
 
     def generate(self, settings: dict, out_dir=None, extra_timings=None) -> dict:
-        """One generation. With no `out_dir` the run is recorded into a directory that is removed and no clip is written (a warm-up)."""
+        """One generation. With no `out_dir` the run is recorded into a directory that is removed and no clip is written (a warm-up); the output digest
+        is returned either way."""
         if self.closed:
             raise resident.ResidentError("the runtime is closed")
         if self.model is None:
@@ -145,7 +146,9 @@ class LibraryRuntime:
                                      library={**mk.library_commit(), "source_verified": False}, settings=run_settings,
                                      seeds={"torch": settings["seed"], "numpy": None})
             self._before_generate(self.record_layers, recorder)
-            mk.run_reference(self.model, run_settings, recorder, torch, layers=None if self.device_label == "cpu" else [])
+            # The library's hooks record each layer's output on the CPU; the chip records its own. `record_layers=False` leaves the layers unhooked.
+            hooks = None if (self.device_label == "cpu" and self.record_layers) else []
+            mk.run_reference(self.model, run_settings, recorder, torch, layers=hooks)
             self._after_generate(recorder)
             recorder.timings.update({k: v for k, v in (extra_timings or {}).items()})
             load = resident.host_loadavg_1m()
@@ -153,25 +156,33 @@ class LibraryRuntime:
                 recorder.timings["host_loadavg_1m"] = load
             timings = {k: v for k, v in recorder.timings.items() if k not in (extra_timings or {}) and k != "host_loadavg_1m"}
             recorder.finish()
-            sha = None
+            wave = self._read_waveform(out)
+            sha = None if wave is None else hashlib.sha256(wave.tobytes()).hexdigest()     # every call returns the digest, kept or not
             if temp is None:
-                sha = self._write_clip(out, run_settings, recorder, t_call)
+                self._write_clip(out, wave, run_settings, recorder, t_call)
             return {"timings": timings, "output_sha256": sha, "dir": str(out) if temp is None else None}
         finally:
             if temp is not None:
                 shutil.rmtree(temp, ignore_errors=True)
 
-    def _write_clip(self, out: Path, run_settings: dict, recorder, t_call: float) -> str | None:
-        """The clip from the recorded waveform and `chip.json`; the hash of the waveform array's bytes. A failure to write the clip is printed and
-        the run stays valid."""
-        sha = None
+    @staticmethod
+    def _read_waveform(out: Path):
+        """The recorded waveform as a contiguous array, read back from the run directory; None (with a message) when it cannot be read."""
         try:
             import numpy as np
-            import soundfile
             from orchard.audio_reference import load_run
             with load_run(out) as run:
-                wave = np.ascontiguousarray(np.asarray(run.array("waveform", "audio")))
-            sha = hashlib.sha256(wave.tobytes()).hexdigest()
+                return np.ascontiguousarray(np.asarray(run.array("waveform", "audio")))
+        except Exception as exc:                                  # noqa: BLE001
+            print(f"waveform not read: {exc!r}", file=sys.stderr)
+            return None
+
+    def _write_clip(self, out: Path, wave, run_settings: dict, recorder, t_call: float) -> None:
+        """The clip from the waveform and `chip.json`. A failure to write the clip is printed and the run stays valid."""
+        try:
+            import soundfile
+            if wave is None:
+                raise ValueError("no waveform")
             clips = out / "clips"
             clips.mkdir(exist_ok=True)
             soundfile.write(str(clips / "audio.flac"), wave.T, 44100)
@@ -180,7 +191,6 @@ class LibraryRuntime:
         (out / "chip.json").write_text(json.dumps({"timings": recorder.timings, "settings": run_settings, "device": self.device_description(),
                                                    "total_s": round(time.time() - self.t_start, 3), "run_s": round(time.time() - t_call, 3)},
                                                   indent=1), encoding="utf-8")
-        return sha
 
     def device_description(self) -> str:
         return "cpu, float32"

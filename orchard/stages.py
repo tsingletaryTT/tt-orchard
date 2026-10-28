@@ -1026,13 +1026,14 @@ def _bundle_benchmark_reasons(bundle: Path, run_dir) -> list[str]:
     if not isinstance(warm, int) or isinstance(warm, bool) or warm < resident.WARMUP_RUNS:
         return [f"RESULTS.md heads the audio timings as a benchmark, but {rel} records {warm!r} warm-up runs; the rule is {resident.WARMUP_RUNS}"]
     reps = res.get("repeats")
+    runs = res.get("runs")
     counts = {}
-    if isinstance(reps, dict):
-        for role, lst in reps.items():
-            if isinstance(lst, list) and lst:
-                counts[role] = sum(1 for e in lst if isinstance(e, dict) and isinstance(e.get("timings"), dict)
-                                   and isinstance(e["timings"].get(resident.MAIN_PART), (int, float))
-                                   and not isinstance(e["timings"].get(resident.MAIN_PART), bool))   # safeio.read_json already refuses NaN and Infinity
+    # Every model the result recorded a run for must have its repeats; a role with a missing, empty or malformed list counts zero.
+    for role in sorted({*(reps if isinstance(reps, dict) else ()), *(runs if isinstance(runs, dict) else ())}, key=str):
+        lst = reps.get(role) if isinstance(reps, dict) else None
+        counts[role] = sum(1 for e in lst if isinstance(e, dict) and isinstance(e.get("timings"), dict)
+                           and isinstance(e["timings"].get(resident.MAIN_PART), (int, float))
+                           and not isinstance(e["timings"].get(resident.MAIN_PART), bool)) if isinstance(lst, list) else 0   # safeio.read_json already refuses NaN and Infinity
     if not counts:
         return [f"RESULTS.md heads the audio timings as a benchmark, but {rel} lists no repeats"]
     return [f"RESULTS.md heads the audio timings as a benchmark, but {role} has {n} measured repeat(s) in {rel}; "

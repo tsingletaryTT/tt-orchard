@@ -1205,13 +1205,17 @@ def audio_good_values(lst, key: str) -> list:
 
 
 def audio_repeat_counts(data: dict) -> dict:
-    """Per role, how many repeats have a measured whole-call time. The builder counts these itself; a label written in the result decides nothing."""
+    """Per role, how many repeats have a measured whole-call time. The builder counts these itself; a label written in the result decides nothing.
+    A role the result recorded a run for (or lists repeats for) counts zero when its repeat list is missing, empty or not a list."""
     reps = dig(data, "repeats")
+    runs = dig(data, "runs")
     out = {}
-    if isinstance(reps, dict):
-        for role, _ref, _label in AUDIO_REPEAT_ROLES:
-            if isinstance(reps.get(role), list) and reps[role]:
-                out[role] = len(audio_good_values(reps[role], "generate_and_decode_s"))
+    for role, _ref, _label in AUDIO_REPEAT_ROLES:
+        listed = isinstance(reps, dict) and role in reps
+        recorded = isinstance(runs, dict) and role in runs
+        if listed or recorded:
+            lst = reps.get(role) if isinstance(reps, dict) else None
+            out[role] = len(audio_good_values(lst, "generate_and_decode_s")) if isinstance(lst, list) else 0
     return out
 
 
@@ -1228,7 +1232,7 @@ def audio_repeat_lines(data: dict) -> list[str]:
     warmed = isinstance(warm, int) and not isinstance(warm, bool) and warm >= AUDIO_MIN_WARMUP
     bench = enough and warmed
     lines = ["", AUDIO_BENCH_HEADING if bench else (AUDIO_UNWARMED_HEADING if enough else AUDIO_SINGLE_HEADING), ""]
-    if not counts and not (isinstance(reps, dict) and any(isinstance(v, list) and v for v in reps.values())):
+    if not any(counts.values()) and not (isinstance(reps, dict) and any(isinstance(v, list) and v for v in reps.values())):
         return lines + [f"The chip run was not repeated, or the repeats are {NOT_RECORDED}. The timings above are a single sample: one run, with no spread."]
     warm_text = (f"{warm} discarded warm-up run(s) in the same process before the repeats" if isinstance(warm, int) and not isinstance(warm, bool) and warm >= 0
                  else f"Discarded warm-up runs before the repeats: {NOT_RECORDED}")

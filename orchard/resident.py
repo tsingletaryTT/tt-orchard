@@ -100,13 +100,13 @@ class FakeRuntime:
 
     `times` is the `generate_and_decode_s` of each call in order (the last repeats); `parts` maps another part name to such a list; `drop_part_on_call`
     (1-based) leaves `generate_and_decode_s` out of that call's timings; `drift` mixes the call number into the output, to show a runtime that does
-    not keep its promise."""
+    not keep its promise; `no_digest` returns no output hash, as a runtime that does not compute one would."""
     SETTING_KEYS = ("prompt", "duration", "steps", "cfg_scale", "sampler", "seed", "sample_size")
 
-    def __init__(self, *, times=None, parts=None, drop_part_on_call=None, drift=False):
+    def __init__(self, *, times=None, parts=None, drop_part_on_call=None, drift=False, no_digest=False):
         self.times = list(times) if times else [1.0]
         self.parts = {k: list(v) for k, v in (parts or {}).items()}
-        self.drop_part_on_call, self.drift = drop_part_on_call, drift
+        self.drop_part_on_call, self.drift, self.no_digest = drop_part_on_call, drift, no_digest
         self.loads = self.generate_calls = 0
         self.closed = False
         self.load_timings = {"model_load_s": 6.0, "chip_weights_upload_s": 1.2}
@@ -140,15 +140,18 @@ class FakeRuntime:
         key = {k: settings[k] for k in self.SETTING_KEYS}
         if self.drift:
             key["call"] = i
-        return {"timings": timings, "output_sha256": hashlib.sha256(json.dumps(key, sort_keys=True).encode()).hexdigest()}
+        return {"timings": timings, "output_sha256": None if self.no_digest else hashlib.sha256(json.dumps(key, sort_keys=True).encode()).hexdigest()}
 
     def close(self) -> None:
         self.closed = True
 
 
 def same_output(runtime, settings: dict, calls: int = 3) -> dict:
-    """Call `generate` `calls` times with the same settings on one loaded runtime and say whether the output hashes agree."""
-    shas = [runtime.generate(settings)["output_sha256"] for _ in range(calls)]
+    """Call `generate` `calls` times with the same settings on one loaded runtime and say whether the output hashes agree. A call that returns no hash
+    is refused: missing hashes would all look alike."""
+    shas = [runtime.generate(settings).get("output_sha256") for _ in range(calls)]
+    if not all(isinstance(s, str) and s for s in shas):
+        raise ResidentError("the runtime returned no output hash, so the outputs cannot be compared")
     return {"calls": calls, "sha256": shas, "same": len(set(shas)) == 1}
 
 

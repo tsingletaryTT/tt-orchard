@@ -562,6 +562,48 @@ def test_the_bundle_gate_refuses_a_benchmark_heading_over_fewer_than_three_repea
     assert not gate.ok and any("benchmark" in r and "chip" in r and "2" in r for r in gate.reasons), gate.reasons
 
 
+def test_a_control_with_no_repeats_makes_the_section_a_single_sample(tmp_path):
+    for sub, reps in (("empty", {"control_chip": []}), ("missing", {}), ("string", {"control_chip": "x"}), ("none", {"control_chip": None})):
+        full = repeats()
+        full.pop("control_chip")
+        full.update(reps)
+        results = built(audio_run(tmp_path / sub, audio_result(repeats=full)))[0]
+        assert BENCH not in results and SINGLE in results, sub
+
+
+def test_the_bundle_gate_counts_a_control_with_no_repeats_as_zero(tmp_path):
+    for sub, change in (("empty", lambda r: r["repeats"].__setitem__("control_chip", [])), ("missing", lambda r: r["repeats"].pop("control_chip")),
+                        ("string", lambda r: r["repeats"].__setitem__("control_chip", "x")), ("none", lambda r: r["repeats"].__setitem__("control_chip", None))):
+        run = audio_run(tmp_path / sub, audio_result(repeats=repeats()))
+        built(run)
+        res = json.loads((run / RESULT).read_text())
+        change(res)
+        (run / RESULT).write_text(json.dumps(res))
+        gate = finish_bundle(run)
+        assert not gate.ok and any("control_chip has 0" in r for r in gate.reasons), (sub, gate.reasons)
+
+
+def test_repeats_listed_for_a_role_the_result_has_no_run_for_still_count(tmp_path):
+    res = audio_result(repeats=repeats(control=(60.0, 30.0)))
+    del res["runs"]["control_chip"]
+    run = audio_run(tmp_path / "b", res)
+    assert BENCH not in built(run)[0]
+    run2 = audio_run(tmp_path / "g", audio_result(repeats=repeats()))
+    built(run2)
+    data = json.loads((run2 / RESULT).read_text())
+    del data["runs"]["control_chip"]
+    data["repeats"]["control_chip"] = data["repeats"]["control_chip"][:2]
+    (run2 / RESULT).write_text(json.dumps(data))
+    assert any("control_chip has 2" in r for r in finish_bundle(run2).reasons)
+
+
+def test_a_run_with_only_the_fine_tune_needs_only_the_fine_tunes_repeats(tmp_path):
+    res = audio_result(repeats={"chip": repeats()["chip"]})
+    del res["runs"]["control_chip"]
+    run = audio_run(tmp_path, res)
+    assert BENCH in built(run)[0] and finish_bundle(run).ok
+
+
 def test_the_bundle_gate_does_not_count_a_true_as_a_measured_time(tmp_path):
     run = audio_run(tmp_path, audio_result(repeats=repeats()))
     built(run)

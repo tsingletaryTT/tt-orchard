@@ -24,6 +24,7 @@ class FakeJobs:
     def __init__(self, service_s=0.15, max_waiting=2, workers=1, state="ok", reply="normal", never_finish=False, lifo=False, start_delay=0.0):
         self.service_s, self.max_waiting, self.state, self.reply, self.never_finish = service_s, max_waiting, state, reply, never_finish
         self.lifo, self.start_delay = lifo, start_delay
+        self.stall = {}                                       # request kind -> seconds the handler sleeps before it answers ("get", "post", "health")
         self.lock = threading.Lock()
         self.queue: deque = deque()
         self.jobs: dict = {}
@@ -95,6 +96,7 @@ def serve(fake):
             self.wfile.write(data)
 
         def do_GET(self):
+            time.sleep(fake.stall.get("health" if self.path == "/v1/health" else "get", 0))
             if fake.reply == "nan":
                 return self.send(200, None, raw=b'{"status": NaN}')
             if fake.reply == "array":
@@ -109,6 +111,7 @@ def serve(fake):
             return self.send(200, fake.view(job)) if job else self.send(404, {"detail": "no such job"})
 
         def do_POST(self):
+            time.sleep(fake.stall.get("post", 0))
             if self.path != "/v1/audio/jobs" or self.headers.get("Content-Type") != "application/json":
                 return self.send(415, {"detail": "send the job as application/json"})
             code, payload = fake.submit(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
@@ -119,6 +122,7 @@ def serve(fake):
             self.send(code, payload)
 
         def do_DELETE(self):
+            time.sleep(fake.stall.get("delete", 0))
             job = fake.jobs.get(self.path.rsplit("/", 1)[-1])
             if not job:
                 return self.send(404, {"detail": "no such job"})
@@ -167,7 +171,7 @@ def test_two_requests_at_once_queue_one_and_run_one_at_a_time_in_order(make_serv
     fake, url = make_server(service_s=0.25)
     r = level(url, 2)
     assert r["accepted"] == 2 and r["rejected"] == {} and r["max_queue_position"] in (1, 2)   # a job not yet taken by the worker still counts in the queue
-    assert r["ran_one_at_a_time"] is True and r["first_in_first_out"] is True
+    assert r["ran_one_at_a_time"] is True and "first_in_first_out" not in r
     waits = sorted(j["wait_s"] for j in r["jobs"])
     assert waits[0] < 0.2 and waits[1] >= 0.2                      # the second waited about one service time
     assert {j["final_status"] for j in r["jobs"]} == {"done"} and r["makespan_s"] >= 0.45
@@ -241,10 +245,98 @@ def test_an_id_that_could_climb_out_of_the_path_is_not_followed(make_server):
     assert r["accepted"] == 0 and r["rejected"] == {"202 unusable": 1} and r["problems"]
 
 
-def test_a_last_in_first_out_queue_is_reported_as_not_first_in_first_out(make_server):
+def test_requests_sent_at_once_are_not_judged_for_order(make_server):
+    """Their order of arrival is not known, and the positions seen after a job starts cannot give one."""
     fake, url = make_server(lifo=True, start_delay=0.3, service_s=0.1, max_waiting=3)
     r = level(url, 3)
+    assert r["accepted"] == 3 and "first_in_first_out" not in r
+
+
+def order(url, **kw):
+    return qp.probe_order(url, SETTINGS, poll_s=0.02, timeout_s=kw.pop("timeout_s", 10.0), **kw)
+
+
+def test_jobs_sent_one_after_another_that_start_in_that_order_are_first_in_first_out(make_server):
+    fake, url = make_server(start_delay=0.3, service_s=0.1, max_waiting=3)
+    r = order(url)
+    assert r["accepted"] == 3 and r["first_in_first_out"] is True and r["refused"] == {}
+    assert len(r["submit_order"]) == 3 and r["start_s_in_submit_order"] == sorted(r["start_s_in_submit_order"])
+
+
+def test_a_last_in_first_out_queue_is_reported_as_not_first_in_first_out(make_server):
+    fake, url = make_server(lifo=True, start_delay=0.3, service_s=0.1, max_waiting=3)
+    r = order(url)
     assert r["accepted"] == 3 and r["first_in_first_out"] is False
+
+
+def test_the_order_is_unknown_when_the_jobs_do_not_run_to_the_end(make_server):
+    fake, url = make_server(never_finish=True, service_s=0.0, max_waiting=3)
+    r = order(url, timeout_s=0.5)
+    assert r["first_in_first_out"] is None and r["timed_out"] is True
+
+
+def test_the_order_is_unknown_when_only_some_of_the_jobs_ended(make_server):
+    fake, url = make_server(service_s=0.3, max_waiting=3)
+    r = order(url, timeout_s=0.75)                    # jobs end at about 0.3, 0.6 and 0.9 s
+    assert r["timed_out"] is True and r["first_in_first_out"] is None
+
+
+def test_a_stalled_submission_in_the_order_test_is_bounded_by_its_deadline(make_server):
+    fake, url = make_server()
+    fake.stall["post"] = 8.0
+    t0 = time.monotonic()
+    r = order(url, timeout_s=0.8)
+    assert time.monotonic() - t0 < 4.0 and r["accepted"] == 0 and r["refused"] == {"no reply": 3}
+
+
+def test_the_order_is_unknown_with_one_job(make_server):
+    fake, url = make_server()
+    assert order(url, n=1)["first_in_first_out"] is None
+
+
+def test_the_order_test_records_a_refused_job_by_its_code(make_server):
+    fake, url = make_server(max_waiting=0, service_s=0.4)
+    r = order(url)
+    assert r["accepted"] == 1 and r["refused"] == {"429": 2}
+
+
+# ---- deadlines ----------------------------------------------------------------------------------------------------------------------------
+
+def test_a_server_that_stalls_every_status_request_cannot_hold_the_level_past_its_deadline(make_server):
+    fake, url = make_server()
+    fake.stall["get"] = 8.0
+    t0 = time.monotonic()
+    r = level(url, 4, timeout_s=0.8)
+    assert time.monotonic() - t0 < 4.0, "the level waited on stalled requests past its deadline"
+    assert r["timed_out"] is True or all(j["final_status"] == "unknown" for j in r["jobs"])
+
+
+def test_a_server_that_stalls_the_submission_does_not_hold_the_level_past_its_deadline(make_server):
+    fake, url = make_server()
+    fake.stall["post"] = 8.0
+    t0 = time.monotonic()
+    r = level(url, 2, timeout_s=0.8)
+    assert time.monotonic() - t0 < 4.0 and r["accepted"] == 0 and r["rejected"] == {"no reply": 2}
+
+
+def test_waiting_for_idle_is_bounded_by_its_timeout_even_when_the_health_check_stalls(make_server):
+    fake, url = make_server()
+    fake.stall["health"] = 8.0
+    t0 = time.monotonic()
+    with pytest.raises(qp.ProbeError):
+        qp.wait_idle(url, 0.8, 0.02)
+    assert time.monotonic() - t0 < 4.0
+
+
+def test_the_cleanup_of_queued_jobs_has_its_own_small_timeout_and_budget(make_server, monkeypatch):
+    fake, url = make_server(never_finish=True, service_s=0.0, max_waiting=6)
+    fake.stall["delete"] = 8.0
+    monkeypatch.setattr(qp, "CLEANUP_TIMEOUT_S", 0.5)
+    monkeypatch.setattr(qp, "CLEANUP_BUDGET_S", 0.6)
+    t0 = time.monotonic()
+    r = level(url, 6, timeout_s=0.4)                  # one job runs, five wait; five stalled DELETEs of 0.5 s each would take 2.5 s
+    assert r["timed_out"] is True
+    assert time.monotonic() - t0 < 2.0, "the clean-up went past its budget"
 
 
 # ---- refusals ---------------------------------------------------------------------------------------------------------------------------
@@ -280,6 +372,7 @@ def test_the_probe_runs_each_level_waits_for_idle_between_them_and_writes_the_fi
     assert [lv["concurrency"] for lv in rec["levels"]] == [1, 2, 4]
     assert rec["health_before"]["queue_max"] == 2 and rec["health_after"]["queue_depth"] == 0
     assert rec["poll_s"] == 0.02 and "resolution" in rec["limits"][0]
+    assert rec["order"]["first_in_first_out"] is True and rec["order"]["accepted"] == 3
     assert json.loads(out.read_text())["levels"][2]["rejected"] == {"429": 1}
     assert rec["levels"][1]["accepted"] == 2                    # the earlier level did not leave the server busy for the next
 

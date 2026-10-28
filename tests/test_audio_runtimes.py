@@ -149,9 +149,31 @@ def test_a_run_with_no_directory_leaves_nothing_behind_and_writes_no_clip(tmp_pa
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     rt = loaded_runtime(tmp_path)
     res = rt.generate(settings())
-    assert res["dir"] is None and res["output_sha256"] is None
+    assert res["dir"] is None
     assert [p for p in tmp_path.iterdir() if p.name.startswith("audio-runtime-")] == []
     assert len(rt.calls) == 1
+    kept = rt.generate(settings(), tmp_path / "kept")
+    assert res["output_sha256"] == kept["output_sha256"] and res["output_sha256"] is not None
+
+
+def test_same_output_works_on_the_real_runtime_class_without_a_directory(tmp_path):
+    rt = loaded_runtime(tmp_path)
+    out = resident.same_output(rt, settings(), calls=3)
+    assert out["same"] is True and len(set(out["sha256"])) == 1
+
+
+def test_the_cpu_runtime_hooks_the_layers_only_when_asked_and_the_chip_never(tmp_path):
+    seen = []
+    for device, record_layers, want in (("cpu", True, None), ("cpu", False, []), ("tt", True, []), ("tt", False, [])):
+        rt = loaded_runtime(tmp_path / f"{device}{record_layers}")
+        rt.device_label, rt.record_layers = device, record_layers
+        run_reference = rt.mk.run_reference
+        rt.mk.run_reference = lambda *a, layers="unset", _f=run_reference, **k: (seen.append(layers), _f(*a, **k))[1]
+        if device == "tt":
+            rt._before_generate = lambda *a: None                       # the chip's own recording needs a chip
+            rt._after_generate = lambda *a: None
+        rt.generate(settings())
+        assert seen[-1] == want, (device, record_layers, seen[-1])
 
 
 def test_extra_timings_go_into_the_record_and_not_into_the_returned_timings(tmp_path):

@@ -76,6 +76,13 @@ def test_same_output_notices_a_runtime_whose_later_calls_differ():
     assert r.same_output(rt, settings(), calls=3)["same"] is False
 
 
+def test_same_output_refuses_a_runtime_that_returns_no_output_hash():
+    rt = r.FakeRuntime(no_digest=True)
+    rt.load()
+    with pytest.raises(r.ResidentError, match="no output hash"):
+        r.same_output(rt, settings(), calls=3)
+
+
 def test_same_output_says_the_calls_agree_for_a_runtime_with_no_drift():
     rt = r.FakeRuntime()
     rt.load()

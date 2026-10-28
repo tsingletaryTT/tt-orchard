@@ -107,21 +107,22 @@ The probe (`orchard/queue_probe.py`) ran against the job server of the separate 
 `chip_generate.py` as its generator, so each clip is a new chip process that loads the model again. The server runs one job at a time. Requests are sent at the same instant from threads;
 jobs are polled every 0.25 s.
 
-| Requests at once | Accepted | Refused | Largest queue position seen | One at a time | First in, first out | Service time of each job (s) | Wait of each job (s) | Whole level (s) | Host load average, start to end |
-|---|---|---|---|---|---|---|---|---|---|
-| 1 | 1 | none | 0 | not judged (1 job) | not judged | 14.9 | 0.02 | 14.9 | 22.1 to 18.8 |
-| 2 | 2 | none | 1 | yes | yes | 17.1, 15.2 | 0.2, 17.4 | 32.5 | 18.8 to 17.3 |
-| 4 | 3 | one, HTTP 429 | 2 | yes | yes | 14.5, 14.7, 14.0 | 0.03, 14.7, 29.3 | 43.3 | 17.3 to 16.7 |
+| Requests at once | Accepted | Refused | Largest queue position seen | One at a time | Service time of each job (s) | Wait of each job (s) | Whole level (s) | Host load average, start to end |
+|---|---|---|---|---|---|---|---|---|
+| 1 | 1 | none | 0 | not judged (1 job) | 14.9 | 0.02 | 14.9 | 22.1 to 18.8 |
+| 2 | 2 | none | 1 | yes | 17.1, 15.2 | 0.2, 17.4 | 32.5 | 18.8 to 17.3 |
+| 4 | 3 | one, HTTP 429 | 2 | yes | 14.5, 14.7, 14.0 | 0.03, 14.7, 29.3 | 43.3 | 17.3 to 16.7 |
 
 The server accepts one running job and two waiting ones, and refuses the next request at once with 429, as its documentation says. A waiting job waited about one service time for each job ahead of it.
 The service time of about 14.5 s is a 10 s clip made by a process that loads the model. Inside a chip process the load, the upload and the generation add up to about 9 to 10 s in the runs above; the rest (starting the process, importing, opening and closing the device, writing the clip) was not timed.
 A server that keeps the model loaded would not pay the load again, and this probe is the measurement to repeat once the server does (issue 168).
 
 An earlier probe of the same server ran while the chip had not been reset after another agent's work (the firmware failed to start). Every job ended in an error after about 70 s. The queue behaved the same way
-(one at a time, first in first out, one 429 at 4 requests), and the server stayed up. The file is kept as `queue-probe-failed-device.json`; its timings are not chip timings.
+(one at a time, one 429 at 4 requests), and the server stayed up. The file is kept as `queue-probe-failed-device.json`; its timings are not chip timings.
 
 ## What could not be determined
 
+- Whether the server starts jobs in the order they arrive. The first version of the probe inferred an order from queue positions seen after a job had started, which cannot show it (review of PR 187). The probe now has a separate order test that sends jobs one after another, and that test has not been run on hardware.
 - Why the earlier single 120 s run took 16.5 s. It was a one-shot process on a busier host. The warm-up table shows run 1 costs 0.1 to 0.4 s more in the transformer, which does not explain 6 s.
 - How much of the transformer-call time is device time. The part includes host preparation, uploads and the read back.
 - Whether one warm-up run is enough for another model or a cold kernel cache. It was enough here, with a warm cache.

@@ -12,9 +12,16 @@ The API it needs (the job server of the Stable Audio 3 demo is one implementatio
 For each concurrency level N (default 1, 2 and 4) the probe sends N job requests at the same instant from N threads, then polls every accepted job until
 all have ended, and records for each request the HTTP status and when the reply came; for each job the queue positions seen, the time it waited, the
 server's own service time and its final status. The level summary says how many were accepted and how many refused (by status code), the largest queue
-position seen, whether the jobs ran one at a time (their service intervals, from the server's own `total_s`, do not overlap by more than two polls),
-whether the queue was first in, first out, and how long the whole level took. A job that is still queued at the timeout is cancelled so the server is left
-clean. Between levels the probe waits until the server reports itself idle.
+position seen, whether the jobs ran one at a time (their service intervals, from the server's own `total_s`, do not overlap by more than two polls), and how long
+the whole level took. A job that is still queued at the timeout is cancelled so the server is left clean. Between levels the probe waits until the server reports
+itself idle.
+
+Order. Requests sent at the same instant have no known order of arrival, and the queue positions seen after a job has started cannot give one. So the order test
+is separate: it sends three jobs one after another (each reply comes before the next request, so the order of arrival is known) and says whether they started in that
+order. It says "unknown" when fewer than two of them ran to the end.
+
+Deadlines. Every request is bounded by the time that is left for its level (and by 30 s), the polling loop checks the deadline between jobs, and the clean-up
+of queued jobs has its own small budget, so a stalled server cannot hold the probe much past `--timeout-s`.
 
 Limits, written into every result: times are seen by polling, so they have a resolution of about the poll interval; the service time is the server's own
 number; one clip length and one seed are used; the host is shared and its one-minute load average is recorded at the start and end of each level.
@@ -47,6 +54,10 @@ FORBIDDEN_PORTS = frozenset({8000, 8100, 8101, 8102, 8103, 8780})
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 MAX_REPLY_BYTES = 1 << 20
 TERMINAL = frozenset({"done", "error", "cancelled"})
+REQUEST_TIMEOUT_S = 30.0                  # no single request waits longer than this
+CLEANUP_TIMEOUT_S = 5.0                   # one DELETE of a queued job at the end of a level
+CLEANUP_BUDGET_S = 20.0                   # all the DELETEs of a level together
+ORDER_JOBS = 3                            # jobs in the order test
 ID_PATTERN = re.compile(r"[0-9A-Za-z_-]{1,64}")
 UNREADABLE_LIMIT = 5                      # consecutive unreadable polls of one job before it is called unknown
 SETTING_KEYS = ("prompt", "duration", "steps", "cfg_scale", "seed")
@@ -142,50 +153,28 @@ def _num(v):
     return v if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) else None
 
 
-def probe_level(base: str, n: int, settings: dict, *, poll_s: float = 0.25, timeout_s: float = 600.0, clock=time.monotonic, sleep=time.sleep) -> dict:
-    """Send `n` job requests at once and follow the accepted jobs to the end (or to `timeout_s`). Returns the record described in the module text."""
-    base = check_url(base)
-    t0 = clock()
-    load_start = resident.host_loadavg_1m()
-    barrier = threading.Barrier(n)
-    requests: list = [None] * n
-    problems: list[str] = []
-    lock = threading.Lock()
+def _bound(deadline: float, clock, cap: float = REQUEST_TIMEOUT_S) -> float:
+    """The timeout of one request: at most `cap`, and at most the time left until `deadline` (never below 50 ms)."""
+    return max(0.05, min(cap, deadline - clock()))
 
-    def post(i: int) -> None:
-        barrier.wait()
-        sent = clock() - t0
-        code, obj, problem = request("POST", base + "/v1/audio/jobs", settings)
-        job_id = obj.get("id") if code == 202 and obj else None
-        if code == 202 and not (isinstance(job_id, str) and ID_PATTERN.fullmatch(job_id)):
-            problem = problem or "POST: the 202 reply has no usable id"
-            job_id = None
-        requests[i] = {"index": i, "sent_at_s": round(sent, 4), "replied_at_s": round(clock() - t0, 4), "http_status": code, "job_id": job_id}
-        if problem:
-            with lock:
-                problems.append(problem)
-    threads = [threading.Thread(target=post, args=(i,)) for i in range(n)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-    rejected: dict[str, int] = {}
-    for r in requests:
-        if r["job_id"] is None:
-            key = "no reply" if r["http_status"] is None else (str(r["http_status"]) if r["http_status"] != 202 else "202 unusable")
-            rejected[key] = rejected.get(key, 0) + 1
-    jobs = {r["job_id"]: {"id": r["job_id"], "accepted_at_s": r["replied_at_s"], "positions": [], "first_position": None, "first_running_s": None,
-                          "done_s": None, "final_status": None, "server_total_s": None, "audio_s": None, "error": "", "unreadable": 0}
-            for r in requests if r["job_id"] is not None}
-    timed_out = False
+
+def _new_job(job_id: str, accepted_at: float) -> dict:
+    return {"id": job_id, "accepted_at_s": accepted_at, "positions": [], "first_position": None, "first_running_s": None, "done_s": None,
+            "final_status": None, "server_total_s": None, "audio_s": None, "error": "", "unreadable": 0}
+
+
+def _follow(base: str, jobs: dict, problems: list, *, t0: float, deadline: float, poll_s: float, clock, sleep) -> bool:
+    """Poll the jobs until each has ended, was called unknown, or `deadline` passes; then cancel what is still queued. Returns True when the deadline
+    passed first. The deadline is checked between jobs, and every request is bounded by it."""
     pending = set(jobs)
-    while pending:
-        if clock() - t0 > timeout_s:
-            timed_out = True
-            break
+    timed_out = False
+    while pending and not timed_out:
         for jid in sorted(pending):
+            if clock() >= deadline:
+                timed_out = True
+                break
             job = jobs[jid]
-            code, obj, problem = request("GET", f"{base}/v1/audio/jobs/{jid}")
+            code, obj, problem = request("GET", f"{base}/v1/audio/jobs/{jid}", timeout=_bound(deadline, clock))
             now = round(clock() - t0, 4)
             status = obj.get("status") if obj else None
             if problem or code != 200 or not isinstance(status, str):
@@ -214,45 +203,122 @@ def probe_level(base: str, n: int, settings: dict, *, poll_s: float = 0.25, time
                 err = obj.get("error")
                 job["error"] = err[:200] if isinstance(err, str) else ""
                 pending.discard(jid)
-        if pending:
+        if pending and not timed_out:
             sleep(poll_s)
-    for jid in sorted(pending):                       # at the timeout: drop what is still queued, so the server is left clean
+    cleanup_end = clock() + CLEANUP_BUDGET_S
+    for jid in sorted(pending):                       # at the deadline: drop what is still queued, so the server is left clean
         job = jobs[jid]
         if job["final_status"] == "queued":
-            code, obj, _problem = request("DELETE", f"{base}/v1/audio/jobs/{jid}")
+            code, obj, _problem = request("DELETE", f"{base}/v1/audio/jobs/{jid}", timeout=_bound(cleanup_end, clock, CLEANUP_TIMEOUT_S))
             if code == 200 and obj and isinstance(obj.get("status"), str):
                 job["final_status"] = obj["status"]
         elif job["final_status"] is None:
             job["final_status"] = "timeout"
-    rows = list(jobs.values())
+    return timed_out
+
+
+def _derive(rows: list, poll_s: float) -> None:
+    """Add each job's start, wait and end-to-end time. The start is the end of the job minus the server's own service time when both are known, and the
+    first time the job was seen running otherwise."""
     for job in rows:
         start = (job["done_s"] - job["server_total_s"]) if job["done_s"] is not None and job["server_total_s"] is not None else job["first_running_s"]
         job["start_s"] = None if start is None else round(start, 4)
         job["wait_s"] = None if start is None else round(max(0.0, start - job["accepted_at_s"]), 4)
         job["end_to_end_s"] = None if job["done_s"] is None else round(job["done_s"] - job["accepted_at_s"], 4)
         del job["unreadable"]
+
+
+def probe_level(base: str, n: int, settings: dict, *, poll_s: float = 0.25, timeout_s: float = 600.0, clock=time.monotonic, sleep=time.sleep) -> dict:
+    """Send `n` job requests at once and follow the accepted jobs to the end (or to `timeout_s`). Returns the record described in the module text."""
+    base = check_url(base)
+    t0 = clock()
+    deadline = t0 + timeout_s
+    load_start = resident.host_loadavg_1m()
+    barrier = threading.Barrier(n)
+    requests: list = [None] * n
+    problems: list[str] = []
+    lock = threading.Lock()
+
+    def post(i: int) -> None:
+        barrier.wait()
+        sent = clock() - t0
+        code, obj, problem = request("POST", base + "/v1/audio/jobs", settings, timeout=_bound(deadline, clock))
+        job_id = obj.get("id") if code == 202 and obj else None
+        if code == 202 and not (isinstance(job_id, str) and ID_PATTERN.fullmatch(job_id)):
+            problem = problem or "POST: the 202 reply has no usable id"
+            job_id = None
+        requests[i] = {"index": i, "sent_at_s": round(sent, 4), "replied_at_s": round(clock() - t0, 4), "http_status": code, "job_id": job_id}
+        if problem:
+            with lock:
+                problems.append(problem)
+    threads = [threading.Thread(target=post, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    rejected: dict[str, int] = {}
+    for r in requests:
+        if r["job_id"] is None:
+            key = "no reply" if r["http_status"] is None else (str(r["http_status"]) if r["http_status"] != 202 else "202 unusable")
+            rejected[key] = rejected.get(key, 0) + 1
+    jobs = {r["job_id"]: _new_job(r["job_id"], r["replied_at_s"]) for r in requests if r["job_id"] is not None}
+    timed_out = _follow(base, jobs, problems, t0=t0, deadline=deadline, poll_s=poll_s, clock=clock, sleep=sleep)
+    rows = list(jobs.values())
+    _derive(rows, poll_s)
     ended = [j for j in rows if j["start_s"] is not None and j["done_s"] is not None]
     ended.sort(key=lambda j: j["start_s"])
     one_at_a_time = None
     if len(ended) >= 2:
         one_at_a_time = all(b["start_s"] >= a["done_s"] - 2 * poll_s for a, b in zip(ended, ended[1:]))
-    fifo = None
-    if len(ended) >= 2 and all(j["first_position"] is not None for j in ended):
-        firsts = [j["first_position"] for j in ended]
-        fifo = all(x <= y for x, y in zip(firsts, firsts[1:]))
     positions = [p for j in rows for p in j["positions"]]
     done_times = [j["done_s"] for j in rows if j["done_s"] is not None]
     return {"concurrency": n, "requests": requests, "accepted": len(jobs), "rejected": rejected, "jobs": rows,
-            "max_queue_position": max(positions) if positions else 0, "ran_one_at_a_time": one_at_a_time, "first_in_first_out": fifo,
+            "max_queue_position": max(positions) if positions else 0, "ran_one_at_a_time": one_at_a_time,
             "makespan_s": round(max(done_times) - min(r["sent_at_s"] for r in requests), 4) if done_times else None,
             "timed_out": timed_out, "problems": problems, "host_loadavg_1m_at_start": load_start, "host_loadavg_1m_at_end": resident.host_loadavg_1m()}
+
+
+def probe_order(base: str, settings: dict, *, n: int = ORDER_JOBS, poll_s: float = 0.25, timeout_s: float = 600.0, clock=time.monotonic, sleep=time.sleep) -> dict:
+    """Send `n` jobs one after another (each reply before the next request, so the order of arrival is known) and say whether they started in that order.
+    `first_in_first_out` is None when fewer than two of the accepted jobs ran to the end."""
+    base = check_url(base)
+    t0 = clock()
+    deadline = t0 + timeout_s
+    problems: list[str] = []
+    jobs: dict = {}
+    submit_order: list = []
+    refused: dict[str, int] = {}
+    for _ in range(n):
+        code, obj, problem = request("POST", base + "/v1/audio/jobs", settings, timeout=_bound(deadline, clock))
+        job_id = obj.get("id") if code == 202 and obj else None
+        if code == 202 and not (isinstance(job_id, str) and ID_PATTERN.fullmatch(job_id)):
+            problem, job_id = problem or "POST: the 202 reply has no usable id", None
+        if problem:
+            problems.append(problem)
+        if job_id is None:
+            key = "no reply" if code is None else (str(code) if code != 202 else "202 unusable")
+            refused[key] = refused.get(key, 0) + 1
+            continue
+        jobs[job_id] = _new_job(job_id, round(clock() - t0, 4))
+        submit_order.append(job_id)
+    timed_out = _follow(base, jobs, problems, t0=t0, deadline=deadline, poll_s=poll_s, clock=clock, sleep=sleep)
+    rows = list(jobs.values())
+    _derive(rows, poll_s)
+    ended = [jobs[j] for j in submit_order if jobs[j]["start_s"] is not None and jobs[j]["done_s"] is not None]
+    fifo = None
+    if len(ended) >= 2 and len(ended) == len(submit_order):
+        starts = [j["start_s"] for j in ended]
+        fifo = all(a <= b for a, b in zip(starts, starts[1:]))
+    return {"jobs_sent": n, "accepted": len(jobs), "refused": refused, "submit_order": submit_order, "first_in_first_out": fifo,
+            "start_s_in_submit_order": [jobs[j]["start_s"] for j in submit_order], "timed_out": timed_out, "problems": problems}
 
 
 def wait_idle(base: str, timeout_s: float, poll_s: float, clock=time.monotonic, sleep=time.sleep) -> dict:
     """The server's health once it says it is idle (not busy, nothing queued); a ProbeError when it does not within `timeout_s`."""
     t0 = clock()
+    deadline = t0 + timeout_s
     while True:
-        code, obj, _problem = request("GET", base + "/v1/health")
+        code, obj, _problem = request("GET", base + "/v1/health", timeout=_bound(deadline, clock))
         if code == 200 and obj and obj.get("busy") is False and obj.get("queue_depth") == 0:
             return obj
         if clock() - t0 > timeout_s:
@@ -269,7 +335,7 @@ def run_probe(url: str, settings: dict, *, levels=DEFAULT_LEVELS, poll_s: float 
         raise ProbeError("poll_s must be above 0 and at most 10, and timeout_s above 0")
     if out is not None and Path(out).exists():
         raise ProbeError(f"{out} exists; a result is never overwritten")
-    code, health, problem = request("GET", base + "/v1/health")
+    code, health, problem = request("GET", base + "/v1/health", timeout=min(REQUEST_TIMEOUT_S, timeout_s))
     if code != 200 or not health:
         raise ProbeError(f"the health check did not answer ({problem or code})")
     if health.get("status") != "ok":
@@ -279,8 +345,10 @@ def run_probe(url: str, settings: dict, *, levels=DEFAULT_LEVELS, poll_s: float 
     for n in levels:
         rec_levels.append(probe_level(base, n, settings, poll_s=poll_s, timeout_s=timeout_s))
         wait_idle(base, timeout_s, poll_s)
-    _code, after, _problem = request("GET", base + "/v1/health")
-    record = {"settings": settings, "poll_s": poll_s, "timeout_s": timeout_s, "health_before": health, "health_after": after, "levels": rec_levels,
+    order = probe_order(base, settings, poll_s=poll_s, timeout_s=timeout_s)
+    wait_idle(base, timeout_s, poll_s)
+    _code, after, _problem = request("GET", base + "/v1/health", timeout=min(REQUEST_TIMEOUT_S, timeout_s))
+    record = {"settings": settings, "poll_s": poll_s, "timeout_s": timeout_s, "health_before": health, "health_after": after, "levels": rec_levels, "order": order,
               "limits": [f"Times are seen by polling every {poll_s:g} s, so they have a resolution of about that.",
                          "The service time of a job is the server's own total_s. Whether jobs ran one at a time is judged from those service intervals.",
                          "One clip length, one prompt and one seed are used at every level.",
@@ -316,8 +384,10 @@ def main(argv=None) -> int:
     for lv in record["levels"]:
         waits = [j["wait_s"] for j in lv["jobs"] if j["wait_s"] is not None]
         print(f"concurrency {lv['concurrency']}: accepted {lv['accepted']}, refused {lv['rejected'] or 'none'}, max queue position {lv['max_queue_position']}, "
-              f"one at a time {lv['ran_one_at_a_time']}, first in first out {lv['first_in_first_out']}, longest wait {max(waits) if waits else 'n/a'} s, "
+              f"one at a time {lv['ran_one_at_a_time']}, longest wait {max(waits) if waits else 'n/a'} s, "
               f"whole level {lv['makespan_s']} s")
+    order = record["order"]
+    print(f"order test: {order['accepted']} of {order['jobs_sent']} jobs accepted one after another, first in first out {order['first_in_first_out']}")
     return 0
 
 
