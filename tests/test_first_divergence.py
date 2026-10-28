@@ -548,7 +548,7 @@ def test_an_operation_missing_from_a_block_that_stays_within_tolerance_makes_the
     assert fd.main([str(r), str(cand), "--rel-l2", "0.01"], out=io.StringIO()) == 3
 
 
-def test_an_error_that_enters_after_the_stack_is_a_divergence_and_exits_1(tmp_path):
+def test_an_array_outside_the_stack_that_leaves_its_tolerance_is_a_divergence_and_exits_1(tmp_path):
     import io
     r, _, _ = build(tmp_path)
     ref = ar.load_run(r)
@@ -558,6 +558,22 @@ def test_an_error_that_enters_after_the_stack_is_a_divergence_and_exits_1(tmp_pa
     assert rep["located"] is False and rep["diverged"] is True and rep["other_arrays_leaving"] == ["latent/final"]
     out = io.StringIO()
     assert fd.main([str(r), str(cand), "--rel-l2", "0.01"], out=out) == 1
-    assert "enters after the stack" in out.getvalue() and "latent/final" in out.getvalue()
+    assert "outside the searched stack" in out.getvalue() and "latent/final" in out.getvalue()
+    assert "enters after" not in out.getvalue() and "does not say where the error enters" in out.getvalue()
     clean = fd.find_first_divergence(ref, ref, tolerance=fd.Tolerance(rel_l2=0.01))
     assert clean["diverged"] is False and clean["other_arrays_leaving"] == []
+
+
+# ---- review round 3: recordings only the candidate holds ------------------------------------------------------------------
+
+def test_a_recording_only_the_candidate_holds_makes_the_report_incomplete(tmp_path):
+    import io
+    r, c, _ = build(tmp_path)
+    ref, cand = ar.load_run(r), ar.load_run(c)
+    extra = [(k, cand.array(*k)) for k in cand.entries] + [(("latent", "extra"), np.ones((1, 2, 2))), (("layer", "layer_00.rotary"), np.ones((1, 2, 2)))]
+    wider = _write(tmp_path / "wider", extra, dtype="bfloat16")
+    rep = fd.find_first_divergence(ref, ar.load_run(wider), tolerance=fd.Tolerance(rel_l2=0.01))
+    assert rep["complete"] is False
+    assert any("latent/extra is in the candidate and not in the reference" in p for p in rep["problems"])
+    assert any("layer/layer_00.rotary is in the candidate and not in the reference" in p for p in rep["problems"])
+    assert fd.main([str(r), str(wider), "--rel-l2", "0.01"], out=io.StringIO()) == 3

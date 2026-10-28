@@ -414,6 +414,9 @@ def find_first_divergence(ref, cand, *, stack: Stack | None = None, tolerance: T
             problems_out.append(f"{key[0]}/{key[1]} is in the reference and not in the candidate")
             continue
         other.append(judge.entry(*key))
+    for key in cand.entries:                  # a recording only the candidate holds has nothing to be compared with: the report is incomplete
+        if key not in ref.entries and not (key[0] == stack.kind and stack.block_number(key[1]) is not None):
+            problems_out.append(f"{key[0]}/{key[1]} is in the candidate and not in the reference")
     other_leaving = [f"{t['kind']}/{t['name']}" for t in other if t["leaves"]]
     return {
         "located": first_block is not None,
@@ -473,8 +476,8 @@ def summarise(rep: dict) -> list[str]:
     if not rep["located"]:
         lines.append(f"All {s['blocks']} blocks of kind {s['kind']} stay within their tolerance.")
         if rep["other_arrays_leaving"]:
-            lines.append("The error enters after the stack: " + str(len(rep["other_arrays_leaving"])) + " other arrays leave their tolerance, among them "
-                         + ", ".join(rep["other_arrays_leaving"][:4]) + ".")
+            lines.append("The divergence is outside the searched stack: " + str(len(rep["other_arrays_leaving"])) + " other arrays leave their tolerance, among them "
+                         + ", ".join(rep["other_arrays_leaving"][:4]) + ". These include inputs and later stages, so this does not say where the error enters.")
     else:
         b = rep["first_block"]
         lines.append(f"The first block that leaves its tolerance is {b['name']}.")

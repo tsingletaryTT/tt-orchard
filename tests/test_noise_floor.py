@@ -446,3 +446,26 @@ def test_the_headroom_is_labelled_as_a_relative_l2_estimate_everywhere_it_is_giv
     assert "assumes independent errors" in text and "PCC and slope bars may reject less" in text
     assert "passes unseen" not in text and not any("passes unseen" in r for r in res["reasons"])
     assert any("assumes independent errors" in r for r in res["reasons"])
+
+
+# ---- review round 3: noise draws of the candidate and of the controls -------------------------------------------------
+
+def test_a_recorded_bad_run_with_different_noise_draws_is_refused_not_counted_as_a_detection(world):
+    base = dict(world.base)
+    ref = write(world.tmp / "rn", base)
+    rep = write(world.tmp / "rn2", base)
+    env = write(world.tmp / "rn3", variant(base, {"layer": 0.01, "latent": 0.05, "conditioning": 0.02, "step_latent": 0.04}, 1))
+    good = write(world.tmp / "rn4", variant(base, {"layer": 0.02, "latent": 0.08, "conditioning": 0.02, "step_latent": 0.06}, 1), dtype="bfloat16")
+    other = dict(variant(base, {"layer": 0.02, "latent": 0.08, "conditioning": 0.02, "step_latent": 0.06}, 1))
+    other[("noise", "initial")] = other[("noise", "initial")] + 1.0          # everything else is as good as the good run
+    bad = write(world.tmp / "rn5", other, dtype="bfloat16")
+    with pytest.raises(nf.NoiseFloorError, match="noise/initial differs"):
+        nf.analyse([ref, rep], [env], good, margin=3.0, bad_runs=[bad], damage=nf.Damage((("layer", "layer_02"),), "bf16"), work_dir=world.tmp / "rnw")
+
+
+def test_a_control_that_fails_only_on_a_noise_array_is_not_detected(world):
+    bars = nf.derive_bars(nf.measure_floor([world.ref, world.repeat], [world.env_b]), margin=3.0)
+    good_eval = nf.evaluate(world.ref, world.good, bars)
+    ev = {"ok": False, "failing": ["noise/initial"], "results": []}
+    c = nf._control("x", ev, good_eval, "recorded", None)
+    assert c["detected"] is False and c["newly_failing"] == []

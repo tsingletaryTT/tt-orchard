@@ -182,7 +182,7 @@ def evaluate(ref, cand, bars: dict, *, group: str = "kind", cross_precision: boo
     an array only one run holds is a problem: nothing is passed because it was not measured. Settings must match except dtype when
     `cross_precision` is true."""
     keys = tuple(k for k in ar.MATCH_KEYS if not (cross_precision and k == "dtype"))
-    diff = ar.settings_problems(ref, cand, keys) + fd.identity_problems(ref, cand, "candidate")
+    diff = ar.settings_problems(ref, cand, keys) + fd.identity_problems(ref, cand, "candidate") + fd.noise_problems([ref, cand], "candidate")
     if diff:
         raise NoiseFloorError("the runs are not comparable: " + "; ".join(diff))
     results, problems = [], []
@@ -351,7 +351,7 @@ def analyse(reference_env, chip_env, good, *, margin: float = DEFAULT_MARGIN, gr
 def _control(label: str, ev: dict, good_eval: dict, kind: str, damaged) -> dict:
     """A control is detected only when it fails on an array that the good run passes. A control that fails where the good run fails already tells
     nothing: the bars reject everything there. A synthetic control must also fail on each array that was damaged."""
-    new = [f for f in ev["failing"] if f not in good_eval["failing"]]
+    new = [f for f in ev["failing"] if f not in good_eval["failing"] and not f.startswith("noise/")]
     if damaged is not None:
         detected = all(f"{k}/{n}" in new for k, n in damaged)
     else:
