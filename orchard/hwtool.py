@@ -1,34 +1,45 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
-"""The `hardware_check` tool of a kernel-probe attempt: the policy around one chip run.
+"""The `hardware_check` tool of a kernel-probe attempt: the policy around one chip run, and the small process that holds the lease.
 
-The agent's shell cannot run gozer (the command runner refuses it and the shell has a no-chip device mask), so the probe
-gives the agent a tool. This module holds what makes the tool safe to leave on. It does not run anything itself: the probe
-passes two functions, `prepare` and `run`, which do the work with the probe's own lease, copy of the kernel, static gate
-and stall watcher (orchard/kernelprobe.py, `make_hardware_check`).
+The agent's shell cannot run gozer (the command runner refuses it and the shell has a no-chip device mask), so the probe gives the
+agent a tool. This module holds what makes the tool safe to leave on. The probe passes two functions, `prepare` and `run`, which do
+the work with the probe's own copy of the kernel, static gate and stall watcher (orchard/kernelprobe.py, `make_hardware_check`).
 
-Rules, each tested in tests/test_agent_hw.py:
+The lease is never held by the probe's process. Each call starts a short-lived wrapper (`python hwtool.py run ...`, below) in its own
+session. The wrapper takes the lease with `gozer acquire --owner-pid <the wrapper's pid>`, waits on one queue ticket with `gozer
+wait` when the board is busy, runs the shipped harness under the lease, releases it, and exits. If the wrapper dies by any signal,
+gozer sees a dead owner and reaps the lease. The probe only starts the wrapper, waits for it with a hard timeout, kills its process
+group on any exception, and then reads `gozer status` once. The probe repairs nothing: if that read shows a chip of ours still held, or
+cannot be read, the tool stops (state `stopped`) and the probe ends with exit 5.
+
+Three states: `idle` (no call is running), `running` (a call is running; a second call is answered at once) and `stopped` (the
+check after a call found something held, or could not tell; every later call is refused, and so is every later attempt).
+
+Rules, each tested in tests/test_agent_hw.py and tests/test_agent_hw_states.py:
 - The tool takes at most a short `note`. Any other argument is an error and nothing runs.
-- At most `max_calls` calls per attempt (a call that waits for a busy board counts, so the agent cannot poll for ever;
-  a call refused before it reached the lease does not) and at most `lease_s` seconds of chip time in all. `cleanup_s`
-  (gozer's term grace, which the stop and the chip reset can use in full) is reserved: a run is stopped at
-  `call_timeout_s` or at the seconds left minus `cleanup_s`, whichever is less, and a call needs `min_call_s` seconds of
-  run time left after that reserve. So the worst call (the run until its deadline, then the cleanup) fits the cap.
-- One call at a time. A second call while one runs is answered at once.
-- A busy board is waited for on one queue ticket, for at most `wait_s` seconds: the lease is requested with `gozer acquire
-  --owner-pid`, and when gozer queues the request the probe claims that same ticket every few seconds, so the call keeps its
-  place in the queue and never asks again in a loop. When the wait runs out the ticket is cancelled and the agent is told the board
-  is busy and to go on with the simulator (orchard/hwlease.py).
-- What a call leaves behind is read from gozer, not remembered (`health`): while a lease or ticket of this probe is still shown, no
-  new call starts. The chip time of a call whose release was not seen is replaced by gozer's own duration for the lease (`settle`).
+- At most `max_calls` calls per attempt (a call that waits for a busy board counts, so the agent cannot poll for ever; a call
+  refused before it reached the wrapper does not) and at most `lease_s` seconds of chip time in all. `cleanup_s` (gozer's term grace,
+  which the stop and the chip reset can use in full) is reserved: a run is stopped at `call_timeout_s` or at the seconds left minus
+  `cleanup_s`, whichever is less, and a call needs `min_call_s` seconds of run time left after that reserve.
+- A busy board is waited for on one ticket for at most `wait_s` seconds; then the wrapper cancels the ticket and the agent is told
+  the board is busy.
+- Chip time is the wrapper's own: the seconds from its grant to the end of its release, taken from its own clock. A wrapper that
+  was killed leaves no end stamp, and the probe then counts the whole run as an upper bound.
 - After a hang, hardware checks are off for the rest of the attempt.
 - Every call is recorded, and the probe writes the record into attempt.json and the report.
 
-The choices (6 calls, 600 lease seconds, 240 s per call, 120 s of waiting, 210 s of cleanup reserve, 60 s minimum) are not
-measured against a population of attempts. A whole call took about 47 s when measured (the device was open for about
-0.5 s; the rest is the lease and the reset that its release makes) (docs/superpowers/specs/2026-10-27-agent-hardware-check-design.md)."""
+The choices (6 calls, 600 lease seconds, 240 s per call, 120 s of waiting, 210 s of cleanup reserve, 60 s minimum) are not measured
+against a population of attempts. A whole call took about 47 s when measured (the device was open for about 0.5 s; the rest is the
+lease and the reset that its release makes) (docs/superpowers/specs/2026-10-27-agent-hardware-check-design.md)."""
 from __future__ import annotations
 
+import json
+import os
+import re
+import signal
+import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -39,12 +50,21 @@ TAIL_LINES = 15                     # lines of the run's output shown after a fa
 TAIL_CHARS = 1200
 VIOLATIONS_SHOWN = 5
 
+# ---- the wrapper's constants -------------------------------------------------------------------------------------------------------
+WRAP_BUSY = 10                      # the wrapper's exit status when the board stayed busy for the whole wait (the ticket was cancelled)
+WRAP_NO_LEASE = 12                  # gozer would not give a lease, or gave one with no device list: the harness was not run
+HEARTBEAT_S = 10.0                  # while waiting for a board the wrapper prints a new line this often, so the stall watcher sees progress
+ACQUIRE_TIMEOUT_S = 60.0            # `gozer acquire` answers at once; one that takes this long is given up
+STATUS_TIMEOUT_S = 30.0
+RESET_FAILED_TEXT = ("NOT marked clean", "not resetting")      # `gozer release` exits 0 even when the reset failed; these say so
+_NAME = re.compile(r"[0-9A-Za-z]+")
+
 
 @dataclass(frozen=True)
 class HwPolicy:
     """The limits of one attempt's hardware checks. `max_calls` 0 turns the tool off."""
     max_calls: int = 6
-    lease_s: float = 600.0          # chip seconds in all: the seconds the probe's gozer runs took, reset included
+    lease_s: float = 600.0          # chip seconds in all: the seconds the wrapper held a lease, its release and reset included
     call_timeout_s: float = 240.0   # a run's backstop; the stall watcher usually stops a hang sooner
     wait_s: float = 120.0           # how long one call waits for a busy board
     min_call_s: float = 60.0        # seconds of run time that must be left, after the cleanup reserve, for a call to start
@@ -86,23 +106,327 @@ def _number(v) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool) and v == v and abs(v) != float("inf")
 
 
+# =====================================================================================================================================
+# The probe's one look at gozer after a call
+# =====================================================================================================================================
+
+
+def _sh(argv, timeout):
+    """(returncode, stdout, stderr) of one command. A timeout gives (None, "", reason). Looked up at call time so that the test suite
+    can refuse it (tests/conftest.py): a real gozer command would take a lease or read the live board."""
+    try:
+        got = subprocess.run(list(argv), capture_output=True, text=True, timeout=timeout)
+        return got.returncode, got.stdout, got.stderr
+    except subprocess.TimeoutExpired:
+        return None, "", f"timed out after {timeout:.0f} s"
+    except OSError as exc:
+        return 127, "", str(exc)
+
+
+def held_by_us(who: str, pids=(), *, gozer: str = "gozer", sh=None) -> str | None:
+    """One `gozer status --json`. None when no chip is held under `who` (the tag this probe gave every wrapper) or by one of
+    `pids` (the wrappers it started). Otherwise one sentence: the chips that are held, or that gozer could not be read. A read that
+    fails counts as held: the check fails closed. Nothing is repaired here."""
+    sh = sh or _sh
+    try:
+        code, out, err = sh([gozer, "status", "--json"], STATUS_TIMEOUT_S)
+        data = json.loads(out) if code == 0 else None
+    except Exception as exc:                                    # a runner that raises is a read that failed
+        return f"cannot confirm that no chip is held: `gozer status` could not be read ({type(exc).__name__}: {exc})"
+    chips = data.get("chips") if isinstance(data, dict) else None
+    if not isinstance(chips, list):
+        return ("cannot confirm that no chip is held: `gozer status` could not be read "
+                f"({(err or out or f'exit {code}').strip()[:120]})")
+    pids = {p for p in pids if isinstance(p, int)}
+
+    def ours(row) -> bool:
+        return isinstance(row, dict) and (row.get("who") == who or (row.get("pid") is not None and row.get("pid") in pids))
+    held = sorted(str(c.get("bdf")) for c in chips if ours(c))
+    queue = data.get("queue") if isinstance(data.get("queue"), list) else []
+    tickets = sorted(str(q.get("ticket")) for q in queue if ours(q))          # a ticket left in the queue would be granted to nobody
+    if not held and not tickets:
+        return None
+    parts = ([f"chip{'s' if len(held) != 1 else ''} {', '.join(held)} held"] if held else []) + (
+        [f"ticket{'s' if len(tickets) != 1 else ''} {', '.join(tickets)} still queued"] if tickets else [])
+    return (f"gozer still shows {' and '.join(parts)} by this probe's hardware call (who {who}); look with `gozer status` and use "
+            "the gozer-gatekeeper skill")
+
+
+# =====================================================================================================================================
+# The wrapper: the only process that holds a lease
+# =====================================================================================================================================
+
+
+class _Stop(BaseException):
+    """SIGTERM reached the wrapper. A BaseException so that no `except Exception` in the wrapper swallows it."""
+
+
+def _json(text) -> dict:
+    try:
+        data = json.loads(text)
+    except (TypeError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_atomic(path, data: dict) -> None:
+    """Write the wrapper's record where the probe reads it. An error is ignored: the record is for the probe, and the wrapper's work
+    (the release above all) goes on without it."""
+    try:
+        tmp = f"{path}.tmp"
+        with open(tmp, "w") as f:
+            json.dump(data, f)
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def _sha256_of(path) -> str | None:
+    """The sha256 of a regular file (not a symlink), or None when it cannot be read as one."""
+    import hashlib
+    try:
+        if os.path.islink(path) or not os.path.isfile(path):
+            return None
+        with open(path, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    except OSError:
+        return None
+
+
+def run_wrapper(*, who: str, reason: str, wait_s: float, result_path, command: list[str], gozer: str = "gozer",
+                sh=None, spawn=None, now=time.time, out=None, pid: int | None = None,
+                expect_sha256: str | None = None, kernel_file: str | None = None) -> int:
+    """Take one chip, run `command` under the lease, release it, exit. Returns the exit status.
+
+    The lease is requested with `gozer acquire --owner-pid <this process>`, so a wrapper that dies by any signal leaves a lease whose
+    owner is dead, and gozer reaps it. A busy board gives a ticket; `gozer wait --timeout` is the one wait (it grants a detached lease,
+    which gozer reaps by its own grace window if nothing holds the chips), and a wait that ends without a grant cancels the ticket.
+    The release is in a `finally`, so a SIGTERM (it becomes `_Stop`) or a KeyboardInterrupt in the run still releases. The record
+    in `result_path` is written after the grant and again at the end: it carries this process's own stamps, `granted_at` and
+    `ended_at`, which are the chip time of the call."""
+    sh = sh or _sh
+    spawn = spawn or subprocess.Popen
+    out = out or (lambda line: print(line, flush=True))
+    pid = os.getpid() if pid is None else pid
+    rec = {"pid": pid, "who": who, "started_at": now(), "granted_at": None, "ended_at": None, "lease_id": None, "chips": [],
+           "outcome": None, "ticket": None, "cancel_error": None, "release_ok": None, "release_text": "", "returncode": None,
+           "detached": None, "phase": "starting"}
+    _write_atomic(result_path, rec)
+    lease_id, ticket, status = None, None, 0
+    try:
+        code, text, err = sh([gozer, "acquire", "--json", "--chips", "1", "--exact", "1", "--who", who, "--reason", reason,
+                              "--owner-pid", str(pid)], ACQUIRE_TIMEOUT_S)
+        data = _json(text)
+        grant = None
+        if code == 0 and data.get("granted") is True and isinstance(data.get("lease_id"), str) and _NAME.fullmatch(data["lease_id"]):
+            grant, rec["detached"] = data, False
+        elif code == 10 and isinstance(data.get("ticket"), str) and _NAME.fullmatch(data["ticket"]):
+            ticket = rec["ticket"] = data["ticket"]
+            grant = _wait_for(ticket, wait_s, sh=sh, gozer=gozer, out=out)
+            if grant is not None:
+                ticket, rec["detached"] = None, True               # the ticket is spent: nothing left to cancel
+            else:
+                rec.update(outcome="busy")
+                status = WRAP_BUSY
+        else:
+            rec.update(outcome="no_lease", release_text=((text or "") + (err or "")).strip()[:300] or f"gozer acquire exited {code}")
+            status = WRAP_NO_LEASE
+        if grant is not None:
+            lease_id = rec["lease_id"] = grant["lease_id"]
+            rec["chips"] = [c for c in grant.get("chips") or [] if isinstance(c, str)]
+            rec["granted_at"], rec["phase"] = now(), "held"
+            _write_atomic(result_path, rec)
+            env = grant.get("env") if isinstance(grant.get("env"), dict) else {}
+            devices = env.get("TT_VISIBLE_DEVICES") if isinstance(env.get("TT_VISIBLE_DEVICES"), str) else ",".join(rec["chips"])
+            if not devices:
+                rec.update(outcome="no_lease", release_text="gozer granted the lease with no device list, so the command was not run")
+                status = WRAP_NO_LEASE
+            elif expect_sha256 and _sha256_of(kernel_file) != expect_sha256:
+                # The wait can last two minutes and the agent can write anywhere the operator can: the copy that was gated is
+                # checked again, after the wait and before it runs.
+                rec.update(outcome="changed", release_text="the kernel copy changed while the call waited for the board, so it was not run")
+                status = WRAP_NO_LEASE
+            else:
+                status = _run_under_lease(command, devices, rec, spawn)
+    except _Stop:
+        rec["outcome"], status = "interrupted", 143
+    except KeyboardInterrupt:
+        rec["outcome"], status = "interrupted", 130
+    finally:
+        # Every exit goes through here: give back what was taken. A second signal in this block is ignored (the first one is
+        # what stopped the run), so the release is not cut short by the stop that is already in progress.
+        previous = _ignore_term()
+        try:
+            if ticket is not None:
+                rec["cancel_error"] = _cancel(ticket, sh, gozer)
+            if lease_id is not None:
+                _release(lease_id, rec, sh, gozer)
+            rec["ended_at"], rec["phase"] = now(), "done"
+            if rec["outcome"] is None:
+                rec["outcome"] = "ran"
+            _write_atomic(result_path, rec)
+        finally:
+            _restore_term(previous)
+    if ticket is not None or rec["outcome"] == "busy":
+        out(f"queued: ticket {rec['ticket']} was cancelled" if rec["cancel_error"] is None
+            else f"queued: ticket {rec['ticket']} could not be cancelled: {rec['cancel_error']}")
+    return status
+
+
+def _wait_for(ticket: str, wait_s: float, *, sh, gozer: str, out) -> dict | None:
+    """`gozer wait --timeout <wait_s>s TICKET`: the grant (a dict with lease_id, chips, env), or None when it ended without one. While
+    it blocks, a new line is printed every HEARTBEAT_S, so a stall watcher on the wrapper's output sees progress."""
+    seconds = max(int(wait_s + 0.999), 1)
+    done = threading.Event()
+    began = time.monotonic()
+    beats = [0]
+
+    def beat():
+        while not done.wait(HEARTBEAT_S):
+            beats[0] += 1                                  # a counter in the line: no two lines are alike, so the watcher sees no repeat
+            out(f"waiting for the board: check {beats[0]}, {time.monotonic() - began:.0f} s of {seconds} s")
+    thread = threading.Thread(target=beat, daemon=True)
+    thread.start()
+    try:
+        code, text, _ = sh([gozer, "wait", "--json", "--timeout", f"{seconds}s", ticket], seconds + 30.0)
+    finally:
+        done.set()
+    data = _json(text)
+    if code == 0 and data.get("granted") is True and isinstance(data.get("lease_id"), str) and _NAME.fullmatch(data["lease_id"]):
+        return data
+    return None
+
+
+def _cancel(ticket: str, sh, gozer: str) -> str | None:
+    """None when the ticket is gone (cancelled, or already consumed), else the reason it is not."""
+    if not _NAME.fullmatch(ticket or ""):
+        return f"not a ticket name: {ticket!r}"
+    try:
+        code, text, err = sh([gozer, "cancel", ticket], 60.0)
+    except BaseException as exc:
+        return f"{type(exc).__name__}: {exc}"
+    if code in (0, 13):                                        # 13: no such ticket, so it is gone already
+        return None
+    return ((text or "") + (err or "")).strip()[:300] or f"gozer cancel exited {code}"
+
+
+def _release(lease_id: str, rec: dict, sh, gozer: str) -> None:
+    """`gozer release LEASE --json` (it resets the chips), with no timeout of its own: a reset must not be cut short, and the probe's
+    hard timeout on the whole wrapper is the bound."""
+    try:
+        code, text, err = sh([gozer, "release", lease_id, "--json"], None)
+    except BaseException as exc:
+        rec.update(release_ok=False, release_text=f"{type(exc).__name__}: {exc}")
+        return
+    message = str(_json(text).get("message", "")) or (text or "").strip()
+    if code == 0 and not any(t in message for t in RESET_FAILED_TEXT):
+        rec["release_ok"] = True
+    elif code == 13:                                           # no such lease: nothing is left to release
+        rec["release_ok"] = True
+    elif code == 0:
+        rec.update(release_ok=False, release_text=f"the lease was released but its chip reset did not succeed: {message[:300]}")
+    else:
+        rec.update(release_ok=False, release_text=((text or "") + (err or "")).strip()[:300] or f"gozer release exited {code}")
+
+
+def _run_under_lease(command, devices: str, rec: dict, spawn) -> int:
+    """Run `command` with the lease's devices. The command is in the wrapper's own process group, so the probe's group kill reaches
+    it. On a stop (`_Stop` or KeyboardInterrupt) it is asked to end and then killed, and the stop goes on."""
+    env = dict(os.environ)
+    env["TT_VISIBLE_DEVICES"] = devices
+    proc = spawn(list(command), env=env)
+    try:
+        code = proc.wait()
+    except BaseException:
+        previous = _ignore_term()                              # the command is being stopped: do not be stopped again meanwhile
+        try:
+            proc.terminate()
+            try:
+                proc.wait(timeout=20)
+            except Exception:
+                proc.kill()
+                proc.wait()
+        finally:
+            _restore_term(previous)
+        raise
+    rec["returncode"] = code
+    return code if code >= 0 else 128 - code
+
+
+def _ignore_term():
+    try:
+        return signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    except (ValueError, OSError):                              # not the main thread (a test)
+        return None
+
+
+def _restore_term(previous) -> None:
+    if previous is not None:
+        try:
+            signal.signal(signal.SIGTERM, previous)
+        except (ValueError, OSError):
+            pass
+
+
+def wrapper_cli(argv: list[str], *, install_signals: bool = True, **inject) -> int:
+    """`python hwtool.py run --who W --reason R --wait-s N --result PATH -- COMMAND...`. `inject` (sh, spawn, now, out, pid, gozer)
+    goes to run_wrapper: the tests run the real wrapper in process with a fake gozer and a fake command."""
+    if not argv or argv[0] != "run" or "--" not in argv:
+        print("usage: hwtool.py run --who WHO --reason REASON --wait-s N --result PATH [--sha256 H --file PATH] -- COMMAND...", file=sys.stderr)
+        return 2
+    cut = argv.index("--")
+    opts, command = argv[1:cut], argv[cut + 1:]
+    values = dict(zip(opts[::2], opts[1::2]))
+    try:
+        who, reason, result = values["--who"], values["--reason"], values["--result"]
+        wait_s = float(values["--wait-s"])
+    except (KeyError, ValueError):
+        print("hwtool.py run: --who, --reason, --wait-s and --result are all required", file=sys.stderr)
+        return 2
+    if not command:
+        return 2
+
+    def stop(signum, frame):
+        raise _Stop()
+    if install_signals:
+        signal.signal(signal.SIGTERM, stop)
+    return run_wrapper(who=who, reason=reason, wait_s=wait_s, result_path=result, command=command,
+                       expect_sha256=values.get("--sha256"), kernel_file=values.get("--file"), **inject)
+
+
+def read_wrapper_record(path) -> dict | None:
+    """The wrapper's record, or None when it is missing or not readable."""
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+# =====================================================================================================================================
+# The tool
+# =====================================================================================================================================
+
+
 class HardwareCheck:
     """One attempt's hardware tool.
 
     prepare(k) -> (blocked, sha256): `blocked` is None when kernel.py was copied and passed the static gate, else the hw
     block that says why it cannot run (no chip is used).
-    run(k, timeout_s) -> (hw, event, text): one gozer run of the prepared copy. `event` is None, "queued" (the board was
-    busy; the probe's call cancelled the ticket and `hw["queued"]` says which) or "hang" (the stall watcher or the
-    backstop stopped it). `hw` carries `elapsed_s`, the whole gozer run including the lease and the reset, and may carry
-    `device_s`, `numbers` and the judging fields; `text` is the run's output."""
+    run(k, timeout_s, wait_s) -> (hw, event, text): one wrapper run of the prepared copy. `event` is None, "queued" (the board
+    was busy for the whole wait; the wrapper cancelled the ticket and `hw["queued"]` says which) or "hang" (the stall watcher or the
+    backstop stopped it). `hw` carries `lease_s` (the wrapper's own seconds from grant to the end of the release, or an upper
+    bound when it has no end stamp), `waited_s`, `lease_id`, `wrapper_pid`, `release_error`, and may carry `device_s`, `numbers`
+    and the judging fields; `text` is the run's output.
+    check(pids) -> None or a sentence: the one look at gozer after a call (held_by_us). A sentence stops the tool."""
 
     def __init__(self, policy: HwPolicy, *, prepare, run, clock=time.monotonic, sleep=time.sleep,
-                 stamp=_utc_stamp, on_record=None, health=None, settle=None):
+                 stamp=_utc_stamp, on_record=None, check=None):
         self.policy, self.prepare, self.run = policy, prepare, run
-        self.settle = settle                # (lease_id) -> the seconds gozer says the lease was held, or None
-        self._pending = None                # the last answer of `health`, kept for summary()
-        self._dirty = False                 # a settle changed a record that has not been written yet
-        self.health = health                # () -> None, or a sentence about a lease or ticket an earlier call left
+        self.check = check                  # (set of wrapper pids) -> None, or a sentence about a chip that is still held
+        self.stopped: str | None = None     # the sentence of the check that stopped the tool; None while it is not stopped
+        self.pids: set[int] = set()         # the wrappers this attempt started
         self.on_record = on_record          # called with summary() each time a call is recorded; its errors are ignored
         self.clock, self.sleep, self.stamp = clock, sleep, stamp
         self._lock = threading.Lock()
@@ -115,13 +439,20 @@ class HardwareCheck:
     def schema(self) -> dict:
         return schema(self.policy)
 
+    @property
+    def state(self) -> str:
+        """`stopped`, `running` (a call is in progress) or `idle`."""
+        if self.stopped:
+            return "stopped"
+        return "running" if self._lock.locked() else "idle"
+
     # ---- what the probe writes into attempt.json ----------------------------------------------------------------
 
     def summary(self) -> dict:
         out = {"enabled": self.policy.enabled, "policy": self.policy.as_dict(), "calls": [dict(r) for r in self.records],
                "calls_counted": self.counted, "bad_calls": self.bad_calls, "lease_s_used": round(self.lease_used, 1)}
-        if self._pending:
-            out["unresolved"] = self._pending
+        if self.stopped:
+            out["stopped"] = self.stopped
         return out
 
     # ---- the call -----------------------------------------------------------------------------------------------
@@ -137,60 +468,9 @@ class HardwareCheck:
         try:
             return self._call(note[:NOTE_MAX])
         finally:
-            self._reconcile()
             self._lock.release()
 
-    def _settle(self) -> bool:
-        """Replace the estimated chip time of a call whose lease was not seen released (an interrupt, an overrunning
-        release) by the duration gozer records for the lease, as soon as gozer has one. True when a record changed."""
-        changed = False
-        if self.settle is None:
-            return False
-        for rec in self.records:
-            if rec.get("lease_incomplete") and rec.get("lease_id"):
-                try:
-                    seconds = self.settle(rec["lease_id"])
-                except Exception:
-                    seconds = None
-                if _number(seconds):
-                    self.lease_used += max(seconds - rec["lease_s"], 0.0)
-                    rec["lease_s"] = round(float(seconds), 1)
-                    rec["lease_incomplete"], rec["lease_reconciled"] = False, True
-                    rec.pop("lease_upper_bound", None)
-                    changed = True
-        if changed:
-            self._dirty = True              # a settle made while an answer was formatted still has to reach the record
-        return changed
-
-    def _reconcile(self) -> None:
-        """Settle what can be settled, refresh the unresolved check and write the record when either changed it."""
-        before = self._pending
-        self._settle()
-        self._refresh()                     # what is left behind, for the record and the next call
-        if (self._dirty or self._pending != before) and self.on_record is not None:
-            self._dirty = False
-            try:
-                self.on_record(self.summary())
-            except Exception:
-                pass
-
-    def reconcile(self) -> dict:
-        """Bring the record up to date without a new call, for the end of an attempt: gozer may have finished a release (or a
-        reset) since the last call, so the chip time and the unresolved check are read again, and the result is persisted. Returns
-        summary(). Never raises: _settle and _refresh catch what their callbacks raise, and a failing writer is ignored."""
-        if self.records:                    # an attempt whose agent never called the tool has nothing to reconcile
-            self._reconcile()
-        return self.summary()
-
-    def _refresh(self):
-        try:
-            self._pending = self.health() if self.health is not None else None
-        except Exception:
-            self._pending = "the lease check failed"
-        return self._pending
-
     def _left(self) -> str:
-        self._settle()                      # the budget an answer shows is the settled one, never the estimate it replaces
         return (f"budget: {max(self.policy.max_calls - self.counted, 0)} calls left, "
                 f"{max(self.policy.lease_s - self.lease_used, 0):.0f} lease seconds left")
 
@@ -198,23 +478,42 @@ class HardwareCheck:
         rec = {"at": self.stamp(), "k": None, "counted": False, "outcome": None, "category": None, "passed": False,
                "total_s": 0.0, "device_s": None, "lease_s": 0.0, "waited_s": 0.0, "queued_polls": 0,
                "cancelled": None, "timed_out": False, "note": "", "first_line": "", "pcc_min": None,
-               "kernel_sha256": None, "lease_id": None, "lease_incomplete": False}
+               "kernel_sha256": None, "lease_id": None}
         rec.update(fields)
         self.records.append(rec)
+        self._persist()
+        return rec
+
+    def _persist(self) -> None:
         if self.on_record is not None:
             try:
                 self.on_record(self.summary())
             except Exception:
                 pass                                # keeping the record on disk must never end the call
-        return rec
 
     def _refuse(self, note: str, why: str) -> str:
         self._record(outcome="refused", note=note, first_line=why)
         return f"hardware_check refused: {why}"
 
+    def _look(self) -> str:
+        """The one check after a call that reached the wrapper. Fails closed: a check that raises is a sentence too. Returns the
+        text to add to the answer ('' when nothing is held)."""
+        try:
+            sentence = self.check(set(self.pids)) if self.check is not None else None
+        except Exception as exc:
+            sentence = f"cannot confirm that no chip is held (the check raised {type(exc).__name__})"
+        if not sentence:
+            return ""
+        self.stopped = sentence
+        self._persist()
+        return (f"\nSTOPPED: {sentence}. No further hardware call will be run in this attempt, and the probe will end the run. "
+                "Use the simulator (the check after each write); do not try to clear the lease yourself.")
+
     def _call(self, note: str) -> str:
         p = self.policy
-        self._settle()                              # an earlier call's overlong release may have finished since
+        if self.stopped:
+            return self._refuse(note, f"the tool is stopped: {self.stopped}. No further hardware call is run. Use the simulator "
+                                      "(the check after each write).")
         if self.hung:
             return self._refuse(note, "an earlier hardware run of this attempt hung, so hardware checks are off for the "
                                       "rest of it. Use the simulator (the check after each write).")
@@ -227,79 +526,65 @@ class HardwareCheck:
                                       f"{p.lease_s:.0f}; {p.cleanup_s:.0f} are reserved for the cleanup (the stop and the "
                                       f"chip reset) and a call needs at least {p.min_call_s:.0f} to run. Use the "
                                       "simulator (the check after each write).")
-        pending = self._refresh()
-        if pending:
-            return self._refuse(note, f"an earlier call left something unresolved ({pending}). No new hardware call starts "
-                                      "until gozer shows it is gone. Use the simulator (the check after each write).")
         blocked, sha = self.prepare(self.counted + 1)
         if blocked is not None:
             return self._blocked(note, blocked, sha)
         self.counted += 1
         k = self.counted
         start = self.clock()
-        phase = {"wait_began": start, "run_began": None}   # the call waits for a lease from its start; a grant starts the run
-        ctx: dict = {}                              # the run closure puts the lease id here the moment it is granted
         finished = False
-
-        def on_grant():
-            phase["wait_began"], phase["run_began"] = None, self.clock()
         try:
             timeout = min(p.call_timeout_s, p.lease_s - self.lease_used - p.cleanup_s)
-            hw, event, text = self.run(k, timeout, max(p.wait_s, 0.0), on_grant, ctx)
+            hw, event, text = self.run(k, timeout, max(p.wait_s, 0.0))
             finished = True
         finally:
-            if not finished:                        # an interrupt or an error: keep what is known
+            if not finished:                        # an interrupt or an error: the probe's runner has stopped the wrapper's group
                 now = self.clock()
-                # A run that was in progress may have held the board until now: count that time, as an upper bound
-                # (the run may have stopped earlier, and the lease release may still be going on; the duration gozer
-                # reports for the lease replaces it when it is known, see _settle). Time spent waiting for the lease is
-                # the wait.
-                run_began = phase["run_began"]
-                held = max(now - run_began, 0.0) if run_began is not None else 0.0
-                waited_so_far = max((run_began if run_began is not None else now) - start, 0.0)
+                held = max(now - start, 0.0)        # an upper bound: the wrapper may have held the board for all of it, or none
                 self.lease_used += held
                 self._record(k=k, counted=True, outcome="interrupted", note=note, kernel_sha256=sha,
-                             total_s=round(now - start, 1), queued_polls=1 if ctx.get("queued") else 0,
-                             lease_s=round(held, 1), waited_s=round(waited_so_far, 1), lease_id=ctx.get("lease_id"),
-                             lease_incomplete=bool(ctx.get("lease_id")),
-                             lease_upper_bound=True if run_began is not None else None)
+                             total_s=round(held, 1), lease_s=round(held, 1), lease_upper_bound=True)
+                self._look()                        # the one check; if it finds a chip held the tool is stopped
+        stopped_text = self._look()
         total = round(self.clock() - start, 1)
-        polls = 1 if (ctx.get("queued") or event == "queued") else 0
+        pid = hw.get("wrapper_pid")
+        if isinstance(pid, int):
+            self.pids.add(pid)
+        polls = 1 if event == "queued" else 0
         if event == "queued":
             q = hw.get("queued") if isinstance(hw.get("queued"), dict) else {}
             cancelled = bool(q.get("ticket")) and q.get("cancel_error") is None
             self._record(k=k, counted=True, outcome="busy", category="queued", note=note, kernel_sha256=sha,
                          total_s=total, waited_s=total, queued_polls=polls, cancelled=cancelled,
                          first_line=str(hw.get("first_line") or ""))
-            return self._busy_text(k, total, polls, cancelled, hw)
-        cancelled = None
+            return self._busy_text(k, total, polls, cancelled, hw) + stopped_text
         waited = float(hw["waited_s"]) if _number(hw.get("waited_s")) else 0.0
-        elapsed = float(hw["elapsed_s"]) if _number(hw.get("elapsed_s")) else total - waited
+        elapsed = float(hw["lease_s"]) if _number(hw.get("lease_s")) else max(total - waited, 0.0)
         self.lease_used += elapsed
         device = hw.get("device_s") if _number(hw.get("device_s")) else None
         release_error = str(hw["release_error"]) if hw.get("release_error") else None
         lease_id = hw.get("lease_id") if isinstance(hw.get("lease_id"), str) else None
-        incomplete = bool(lease_id and hw.get("lease_incomplete"))
+        upper = True if hw.get("lease_upper_bound") else None
         if event == "hang":
             self.hung = True
             self._record(k=k, counted=True, outcome="hang", category="hang", note=note, kernel_sha256=sha, total_s=total,
-                         lease_s=round(elapsed, 1), waited_s=round(waited, 1), queued_polls=polls,
-                         cancelled=cancelled, timed_out=True, release_error=release_error, lease_id=lease_id,
-                         lease_incomplete=incomplete, first_line=str(hw.get("first_line") or ""))
+                         lease_s=round(elapsed, 1), waited_s=round(waited, 1), queued_polls=polls, timed_out=True,
+                         release_error=release_error, lease_id=lease_id, lease_upper_bound=upper,
+                         first_line=str(hw.get("first_line") or ""))
             return (f"hardware_check {k} of {p.max_calls}: HANG: the run was stopped ({hw.get('first_line')}) after "
-                    f"{elapsed:.1f} s. The probe then released the lease with `gozer release`, which resets the chip. Look with `gozer status` if in doubt (a lease marked stale is cleared "
+                    f"{elapsed:.1f} s. The wrapper released the lease with `gozer release`, which resets the chip. Look with `gozer status` if in doubt (a lease marked stale is cleared "
                     "with `gozer reconcile`, the gozer-gatekeeper skill says how), and never reset a chip by hand. "
                     "Hardware checks are off for the rest of this attempt; the simulator still works."
-                    f"{self._release_note(release_error)}\n{self._left()}")
+                    f"{self._release_note(release_error)}\n{self._left()}" + stopped_text)
         passed = hw.get("passed") is True
         category = None if passed else hw.get("category")
         self._record(k=k, counted=True, outcome="pass" if passed else str(category), category=category, passed=passed,
                      note=note, kernel_sha256=sha, total_s=total, device_s=device, lease_s=round(elapsed, 1),
-                     waited_s=round(waited, 1), queued_polls=polls, cancelled=cancelled, lease_id=lease_id,
-                     lease_incomplete=incomplete, release_error=release_error, first_line=str(hw.get("first_line") or ""),
+                     waited_s=round(waited, 1), queued_polls=polls, lease_id=lease_id, lease_upper_bound=upper,
+                     release_error=release_error, first_line=str(hw.get("first_line") or ""),
                      pcc_min=hw.get("pcc_min") if _number(hw.get("pcc_min")) else None)
         return self._result_text(k, hw, text, total, waited, device, passed) + (
-            "\n" + self._release_note(release_error).strip() if release_error else "")
+            "\n" + self._release_note(release_error).strip() if release_error else "") + stopped_text
 
     # ---- the answers --------------------------------------------------------------------------------------------
 
@@ -323,7 +608,7 @@ class HardwareCheck:
 
     def _busy_text(self, k, total, polls, cancelled, hw) -> str:
         q = hw.get("queued") if isinstance(hw.get("queued"), dict) else {}
-        tail = ("The queue tickets were cancelled." if cancelled else
+        tail = ("The queue ticket was cancelled." if cancelled else
                 f"A ticket could not be cancelled ({q.get('cancel_error') or 'no ticket in gozer output'}; ticket "
                 f"{q.get('ticket')}): look with `gozer status`.")
         return (f"hardware_check {k} of {self.policy.max_calls}: BUSY: the board was busy for {total:.0f} s "
@@ -361,3 +646,7 @@ class HardwareCheck:
         lines.append(f"time: {total:.1f} s in all ({dev}; the rest is the lease and the chip reset){wait}")
         lines.append(self._left())
         return "\n".join(lines)
+
+
+if __name__ == "__main__":
+    raise SystemExit(wrapper_cli(sys.argv[1:]))

@@ -3,10 +3,10 @@
 """The `hardware_check` tool of a kernel-probe attempt (orchard/hwtool.py and its wiring in orchard/kernelprobe.py).
 
 The agent cannot run gozer, so the probe offers a tool that runs the agent's current kernel.py on one leased chip
-and gives back a short text. The probe owns the lease, the copy of the kernel, the static gate, the stall watcher and
+and gives back a short text. A short-lived wrapper holds the lease; the probe owns the copy of the kernel, the static gate, the stall watcher and
 the judgement. The tool takes at most a short note: no command and no path.
 
-Every test uses a fake `run_watched`, a fake gozer (hwlease.LeaseLedger over a fake command runner) and a fake clock. No test runs gozer or opens a chip."""
+Every test uses a fake `run_watched`, a fake gozer (tests/hwfakes.py FakeGozer) under the real wrapper (orchard/hwtool.py) and a fake clock. No test runs gozer or opens a chip."""
 from __future__ import annotations
 
 import argparse
@@ -21,6 +21,7 @@ import pytest
 
 from fake_model import FakeModel, call, final, turn
 from orchard import hwtool, kernelprobe as kp
+from hwfakes import FakeGozer, wrapped
 from test_kernelprobe import (FACTS, GOOD_HW_SET, KERNELS, canned, env_ready, fake_kenv, hw_writer,  # noqa: F401
                               probe_args, skills_current, ttlang_skill, _row_attempt, _report_md)
 
@@ -54,12 +55,12 @@ class World:
         self.prepares.append(k)
         return self.blocked, "ab" * 32
 
-    def run(self, k, timeout_s, wait_s=0.0, on_grant=None, ctx=None):
+    def run(self, k, timeout_s, wait_s=0.0):
         self.runs.append((k, timeout_s))
         self.run_args.append({"wait_s": wait_s})
         item = self.answers.pop(0) if self.answers else (good_hw(), None, "")
-        if callable(item):                   # a script: item(world, on_grant, ctx) -> (hw, event, text)
-            return item(self, on_grant, ctx)
+        if callable(item):                   # a script: item(world) -> (hw, event, text)
+            return item(self)
         hw, event, text = item
         self.now += hw.get("elapsed_s", 0.0) if event != "queued" else 0.5
         return hw, event, text
@@ -373,44 +374,37 @@ def attempt_dir(tmp_path, env, kernel="add_good.py"):
 CLOCK = {"now": 0.0}
 
 
-def fake_leases(cmd=None, grant=True):
-    """A GozerLeases over a fake command runner: by default every `acquire` is granted at once, so a test of the tool sees
-    the harness run directly. No test of the tool may reach the real gozer."""
-    from orchard import hwlease
-    from test_hwlease import FakeCmd, GRANT, res
-    cmd = cmd or FakeCmd()
-    if grant:
-        cmd.say("acquire", res(0, GRANT))
-    led = hwlease.GozerLeases(who="claude:test", pid=4321, run=cmd.run, clock=lambda: CLOCK["now"],
-                              sleep=lambda s: CLOCK.__setitem__("now", CLOCK["now"] + s))
-    led.cmd = cmd
-    return led
+WHO = "claude:test"
 
 
-def make_check(adir, tmp_path, run_watched, *, leases=None, **policy):
-    """A hardware check with a fake clock in CLOCK: sleeping moves it, and so does a fake run that advances it."""
+def fake_gozer(**kw):
+    """A FakeGozer (tests/hwfakes.py): by default every acquire is granted at once. No test may reach the real gozer."""
+    return FakeGozer(**kw)
+
+
+def make_check(adir, tmp_path, run_watched, *, gozer=None, **policy):
+    """A hardware check with a fake clock in CLOCK: sleeping moves it, and so does a fake run that advances it. `run_watched` plays the
+    harness; the real wrapper (orchard/hwtool.py) runs in process around it against `gozer` (hwfakes.wrapped)."""
     CLOCK["now"] = 0.0
 
     def sleep(s):
         CLOCK["now"] += s
-    return kp.make_hardware_check(adir, op="add", n=1, shared_python="/shared/python",
-                                  policy=hwtool.HwPolicy(**policy), run_watched=run_watched,
-                                  leases=leases or fake_leases(), clock=lambda: CLOCK["now"], sleep=sleep)
-
-
-def cmd_of(leases):
-    return leases.cmd
+    gozer = gozer or fake_gozer()
+    check = kp.make_hardware_check(adir, op="add", n=1, shared_python="/shared/python", policy=hwtool.HwPolicy(**policy),
+                                   run_watched=wrapped(run_watched, gozer, lambda: CLOCK["now"]), who=WHO, status=gozer.sh,
+                                   clock=lambda: CLOCK["now"], sleep=sleep)
+    check.gozer = gozer
+    return check
 
 
 def test_the_tool_runs_the_shipped_hardware_phase_on_a_copy_of_the_current_kernel_under_one_chip_lease(tmp_path, fake_kenv):
     adir = attempt_dir(tmp_path, fake_kenv)
     calls = []
-    c_leases = fake_leases()
-    c = make_check(adir, tmp_path, hw_writer([GOOD_HW_SET], calls), leases=c_leases)
+    c = make_check(adir, tmp_path, hw_writer([GOOD_HW_SET], calls))
     text = c.call({})
     argv = calls[0]
     assert argv[0] == "/shared/python"                       # the harness runs directly, under the lease's environment
-    acquire = next(c["argv"] for c in cmd_of(c_leases).calls if c["argv"][1] == "acquire")
+    acquire = c.gozer.acquires()[0]
     assert acquire[acquire.index("--chips") + 1] == "1" and acquire[acquire.index("--exact") + 1] == "1"
     assert acquire[acquire.index("--who") + 1] == "claude:test" and "--owner-pid" in acquire
     assert Path(argv[argv.index("--spec") + 1]) == kp.TEMPLATES / "ops" / "add.json"
@@ -460,7 +454,7 @@ def test_the_tool_runs_in_the_hardware_environment_of_the_probe_with_the_stall_w
         Path(argv[argv.index("--out") + 1]).write_text(json.dumps({"phase": "hw", "sets": [GOOD_HW_SET], "error": None}))
         return kp.Watched(0, None, False, 1.0)
     make_check(adir, tmp_path, fake, call_timeout_s=200.0).call({})
-    assert seen["backstop_s"] == 200.0 and seen["term_grace_s"] == kp.GOZER_TERM_GRACE_S
+    assert seen["backstop_s"] == 120.0 + 200.0 and seen["term_grace_s"] == kp.GOZER_TERM_GRACE_S
     assert seen["watcher"].quiet_s == kp.HW_QUIET_S and seen["watcher"].repeat_lines == kp.HW_REPEAT_LINES
     assert seen["env"]["ORCHARD_RUN_DIR"] == str(adir.resolve())
     assert "TT_METAL_VISIBLE_DEVICES" not in seen["env"] and "HF_TOKEN" not in seen["env"]
@@ -683,10 +677,11 @@ def scripted_hw_agent(kernel_text):
     return script
 
 
-def run_attempt(tmp_path, env, server, run_watched, **kw):
+def run_attempt(tmp_path, env, server, run_watched, gozer=None, **kw):
+    gozer = gozer or fake_gozer()
     args = dict(op="add", n=1, probe_dir=tmp_path / "probe", env=env, endpoint=server.endpoint, model="fake",
                 coder_model="fake-coder", probe_id="t", max_turns=10, wall_s=120, tt_lang=FACTS,
-                run_watched=run_watched, leases=fake_leases())
+                run_watched=wrapped(run_watched, gozer, lambda: CLOCK["now"]), hw_status=gozer.sh)
     args.update(kw)
     return kp.run_attempt(**args)
 

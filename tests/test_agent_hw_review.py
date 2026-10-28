@@ -41,7 +41,7 @@ def test_the_attempts_background_processes_are_swept_before_the_copy_and_before_
         Path(argv[argv.index("--out") + 1]).write_text(json.dumps({"phase": "hw", "sets": [GOOD_HW_SET], "error": None}))
         return kp.Watched(0, None, False, 1.0)
     make_check(adir, tmp_path, fake).call({})
-    assert events == ["sweep", "copy", "sweep", "sweep", "run", "sweep"], events      # prepare, before the request, under the lease, after the run
+    assert events == ["sweep", "copy", "sweep", "run", "sweep"], events      # prepare, before the wrapper starts, after the run
 
 
 def test_a_process_that_rewrites_the_kernel_during_the_sweep_cannot_get_its_edit_run_unchecked(tmp_path, fake_kenv, monkeypatch):

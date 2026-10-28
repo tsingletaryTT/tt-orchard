@@ -80,13 +80,13 @@ def no_real_bus_reads(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def no_real_gozer_leases(monkeypatch):
-    """No test may reach the real gozer through the agent hardware tool's lease code (orchard/hwlease.py): a real `gozer acquire`
-    takes a lease and the release resets the chips. A test passes a fake command runner (tests/test_hwlease.py FakeCmd)."""
-    from orchard import hwlease
+    """No test may reach the real gozer through the agent hardware tool (orchard/hwtool.py): a real `gozer acquire` takes a lease and
+    the release resets the chips, and `gozer status` reads the live board. The wrapper and the status check look their command
+    runner up at call time; a test passes a fake one (tests/test_agent_hw_states.py)."""
+    from orchard import hwtool
     calls = []
 
     def refused(argv, timeout, **kw):
         calls.append(list(argv))
-        pytest.fail(f"this test reached the real gozer through hwlease: {calls[:3]}", pytrace=False)
-    monkeypatch.setattr(hwlease, "run_command", refused)
-    monkeypatch.setattr(hwlease, "_popen", lambda *a, **k: refused(list(a[:1]), 0))
+        pytest.fail(f"this test reached the real gozer through hwtool: {calls[:3]}", pytrace=False)
+    monkeypatch.setattr(hwtool, "_sh", refused)
