@@ -18,6 +18,7 @@ from pathlib import Path
 
 from orchard import telegraph as tg
 from orchard import telegraph_cmd
+from orchard import telegraph_notice
 from orchard import telegraph_view
 from orchard import virtualspend as vs
 from orchard import virtualspend_view as vsview
@@ -177,12 +178,18 @@ def main(args, *, out, environ=None, home=None) -> int:
     except ValueError:
         all_local["virtual"] = [{**c, "cost_usd": None} for c in all_local["virtual"]]      # unknown, never a made-up number
     real = _real(Path(ledger_dir))
+    waiting = telegraph_notice.state_of(ledger_dir, flags=telegraph_notice.flags_from_args(args))      # file names only; nothing is opened
+    if waiting is not None:
+        real["migration"] = waiting.as_dict()
     if args.json:
         say(json.dumps({"real_helper_spend": real,
                         "local_virtual_spend": {"label": vs.LABEL, "note": NOTE, "directories": rows, "listing_cut_short": listing_cut,
                                                 "all_directories": {k: all_local[k] for k in ("turns", "prompt_tokens", "completion_tokens", "virtual")}}},
                        indent=2, sort_keys=True, allow_nan=False))
         return EXIT_OK
+    if waiting is not None:                                          # first, so the command is the first thing read
+        say("telegraph: " + waiting.text())
+        say()
     say("REAL helper spend (what the outside helper charged; telegraph ledger)")
     if "error" in real:
         say(f"  {real['error']}")

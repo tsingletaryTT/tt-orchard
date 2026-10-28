@@ -385,6 +385,22 @@ def check_hardware(env: Env) -> Step:
     return Step("hardware", OK, detail)
 
 
+def check_telegraph_ledger(env: Env) -> Step | None:
+    """A step for a Telegraph state directory that still holds the old jsonl ledger (or a half-finished or lost move), or None when
+    the directory needs nothing (a person who never used Telegraph gets no step). Setup only looks at file names and never migrates:
+    the move is a decision of the person, so the step has no action and lists the commands."""
+    from orchard import cli, telegraph_cmd, telegraph_notice
+    cfg = None
+    try:
+        cfg = telegraph_cmd.load_config(cli.find_config(None, env.environ, env.checkout, env.home))
+    except Exception:                                      # noqa: BLE001 - no config yet, or one that does not load: the home default
+        pass
+    notice = telegraph_notice.telegraph_state_notice(cfg, environ=env.environ, home=env.home)
+    if notice is None:
+        return None
+    return Step("telegraph ledger", TODO, " ".join((notice.summary, *notice.lines)))
+
+
 def plan(env: Env, opts: Options) -> list[Step]:
     GOZER_TEXT.clear()
     steps = [check_python(env), check_gozer(env, opts), check_hardware(env), check_tt_model(env), check_docker(env),
@@ -393,6 +409,9 @@ def plan(env: Env, opts: Options) -> list[Step]:
              check_coder_package(env, opts)]
     steps.append(check_config(env, opts, machine_kind(GOZER_TEXT.get("status", ""))))
     steps.append(check_link(env))
+    moving = check_telegraph_ledger(env)
+    if moving is not None:
+        steps.append(moving)
     return steps
 
 
@@ -481,7 +500,7 @@ def main(argv=None, *, env: Env | None = None, ask=None, say=print, stdout=None)
         return 1
     if todo:
         say(f"{len(todo)} step(s) not done: " + ", ".join(s.name for s in todo)
-            + ("" if args.check else ". Run again with --yes to do them without asking"))
+            + ("" if args.check or not any(s.actions for s in todo) else ". Run again with --yes to do them without asking"))
         return 1
     say("ready. Try: tt-orchard bringup <org/name> --dry-run   (then, with the coder package's weights downloaded, "
         "python3 -m orchard.rolefit to check the agent model on this machine)")

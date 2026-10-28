@@ -450,14 +450,25 @@ function renderTelegraph() {
       costCapSentence(t, true)));
   }
   if (t.spend.unsettled) banner.append(h("span", {}, ` ${plural(t.spend.unsettled, "reservation")} ${t.spend.unsettled === 1 ? "has" : "have"} no recorded result and counts at its worst case.`));
-  if (t.error) banner.append(h("span", {}, ` ${t.error}.`));
+  if (t.error && !t.migration) banner.append(h("span", {}, ` ${t.error}.`));
   if (t.key.state === "missing") banner.append(h("span", {}, ` The key is missing: ${t.key.reason}.`));
+
+  // An old, half-moved or lost ledger: say what to type, exactly (server: orchard/telegraph_notice.py). The commands are text,
+  // never run by the page.
+  const mig = $("tg-migration");
+  mig.hidden = !t.migration;
+  clear(mig);
+  if (t.migration) {
+    mig.append(h("strong", {}, t.migration.summary));
+    for (const line of t.migration.lines) mig.append(h("p", { class: "small" }, line));
+    for (const c of t.migration.commands) mig.append(h("p", {}, h("code", {}, c)));
+  }
 
   const s = t.summary;
   const num = (k, v, note) => h("div", { class: "tg-num" }, h("span", { class: "k" }, k), h("span", { class: "v" }, v), note ? h("span", { class: "muted small" }, note) : null);
   if (t.error) {
     // Nothing could be read, so no number is shown: a row of zeros would look like a spend of nothing.
-    clear($("tg-numbers")).append(num("Spend", "unknown", t.error), num("Calls counted", "unknown", "the ledger was not read"));
+    clear($("tg-numbers")).append(num("Spend", "unknown", t.migration ? "the ledger has to be moved first" : t.error), num("Calls counted", "unknown", "the ledger was not read"));
   } else clear($("tg-numbers")).append(
     num("Spend", spendText(t.spend), t.spend.unknown_cost ? `${plural(t.spend.unknown_cost, "call")} with no known cost` : "known costs; reservations at their worst case"),
     num("Calls counted", String(t.spend.calls), `${s.calls} sent and recorded · ${s.ok} answered`),

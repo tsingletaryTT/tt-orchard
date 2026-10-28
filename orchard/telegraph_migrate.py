@@ -353,6 +353,30 @@ def _take_old_lock(dir_fd: int, timeout_s: float = 30.0) -> int:
         raise
 
 
+def lock_is_held(directory) -> bool:
+    """True when another process holds `telegraph.lock` (the lock the old writers take and the migration takes). It only looks: an
+    absent lock file is not created, a link is not followed, and a lock that was free is released again at once."""
+    try:
+        with safeio.pinned_root(directory) as pin:
+            try:
+                fd = os.open(ts.LOCK, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | _O_CLOEXEC, dir_fd=pin.fd)
+            except FileNotFoundError:
+                return False
+            except OSError:
+                return True                                                   # it cannot be looked at, so it is not known to be free
+            try:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                except (BlockingIOError, PermissionError):
+                    return True
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                return False
+            finally:
+                os.close(fd)
+    except safeio.SafeReadError:
+        return True
+
+
 def migrate(directory, *, scope: str = ts.DEFAULT_SCOPE, max_output_tokens: int = 1500, accept_malformed: int | None = None,
             dry_run: bool = False, hook=None) -> dict:
     """Migrate (or resume migrating) a telegraph directory. Returns a dict of what was done and the totals before and after.

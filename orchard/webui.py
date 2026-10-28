@@ -477,8 +477,14 @@ class WebApp:
         except _telegraph.ConfigError as exc:
             directory, problem = telegraph_view.default_dir(self.home), str(exc)
         label = self.redact(str(directory))
+        from orchard import telegraph_notice
+        waiting = None if problem else telegraph_notice.state_of(directory)      # file names only: nothing is opened or written
+        migration = None
+        if waiting is not None:                                                   # the path is redacted like the rest of the page
+            migration = {**waiting.as_dict(), "directory": label, "summary": self.redact(waiting.summary),
+                         "lines": [self.redact(line) for line in waiting.lines]}
         return telegraph_view.build(cfg, directory, environ=self.environ, redact=self.redact, hostname=self.hostname,
-                                    now=self.clock(), ledger_label=label, problem=problem)
+                                    now=self.clock(), ledger_label=label, problem=problem, migration=migration)
 
     def virtual_spend(self, run=None) -> dict:
         """The virtual local spend (orchard/virtualspend_view.py): the token use of the local models in the run folders, priced
