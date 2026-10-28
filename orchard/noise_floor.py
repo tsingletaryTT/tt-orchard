@@ -17,7 +17,8 @@ Steps, in `analyse`:
   3. `evaluate` the good run (a real candidate run, for example the chip's) against the reference with those bars.
   4. The known-bad controls: the good run with some arrays damaged (`make_damaged_run`: rounded to bfloat16, or given an error of a stated relative
      size), and any real bad run the caller has. Each must fail the bars. The good run must pass.
-  5. `detectable`: for each group, how much extra relative error the bars would let through unseen.
+  5. `detectable`: for each group, the extra relative L2 error that stays under the relative L2 bar (an estimate that assumes independent errors;
+     the PCC and slope bars can reject a smaller error).
 The bars are usable when the good run passes and every control fails. The result holds the floor, the margin, the bars, the controls and the reasons
 for any refusal; `bars_or_fallback` hands back the measured bars, or the provisional ones only when the caller asks for the fallback, with a label
 that says why.
@@ -104,9 +105,13 @@ def measure_floor(reference_env, chip_env, *, group: str = "kind") -> dict:
         raise NoiseFloorError("a floor needs at least two runs")
     base = runs[0]
     for r in runs[1:]:
-        diff = ar.settings_problems(base, r)
+        diff = ar.settings_problems(base, r) + fd.identity_problems(base, r, "floor runs")
         if diff:
             raise NoiseFloorError("the floor runs are not the same setup: " + "; ".join(diff))
+    # The noise draws are checked before the shared arrays are taken: a run that lacks a noise array would otherwise drop out of that check.
+    noise = fd.noise_problems(runs, "floor runs")
+    if noise:
+        raise NoiseFloorError("the floor runs did not use the same noise draws, so their differences say nothing about the environment: " + "; ".join(noise))
     shared = set(base.entries)
     for r in runs[1:]:
         shared &= set(r.entries)
@@ -123,10 +128,7 @@ def measure_floor(reference_env, chip_env, *, group: str = "kind") -> dict:
                 (within if env_of[i] == env_of[j] else between).append(p)
         floor = _worst(every)
         if kind == "noise":
-            if floor["rel_l2"] > 1e-6:
-                raise NoiseFloorError(f"the noise array {label} differs between floor runs (relative L2 {floor['rel_l2']:.3g}): "
-                                      "they did not use the same noise draws, so their differences say nothing about the environment")
-            continue
+            continue                                    # checked to be equal before this loop; a noise array has no floor
         arrays[label] = {"kind": kind, "name": name, "within_environment": _worst(within), "between_environments": _worst(between), "floor": floor}
         by_group.setdefault(group_of(kind, name, group), []).append((name, floor))
     if not arrays:
@@ -180,7 +182,7 @@ def evaluate(ref, cand, bars: dict, *, group: str = "kind", cross_precision: boo
     an array only one run holds is a problem: nothing is passed because it was not measured. Settings must match except dtype when
     `cross_precision` is true."""
     keys = tuple(k for k in ar.MATCH_KEYS if not (cross_precision and k == "dtype"))
-    diff = ar.settings_problems(ref, cand, keys)
+    diff = ar.settings_problems(ref, cand, keys) + fd.identity_problems(ref, cand, "candidate")
     if diff:
         raise NoiseFloorError("the runs are not comparable: " + "; ".join(diff))
     results, problems = [], []
@@ -204,8 +206,10 @@ def evaluate(ref, cand, bars: dict, *, group: str = "kind", cross_precision: boo
 
 
 def detectable(good_eval: dict, bars: dict) -> dict:
-    """Per group, the smallest extra relative L2 error (as a fraction of the array's norm) that moves an array of the good run past its bar, taking
-    an independent error to add in quadrature to what the good run already has. 0 means the good run is at or past its bar already."""
+    """Per group, the smallest extra relative L2 error (as a fraction of the array's norm) that moves an array of the good run past its relative L2
+    bar, taking an independent error to add in quadrature to what the good run already has. This is an estimate from the relative L2 bar alone: the
+    PCC and slope bars can reject a smaller error (an error orthogonal to the signal shows in PCC first), so an error below this number is not
+    guaranteed to pass. 0 means the good run is at or past its bar already."""
     out = {}
     for r in good_eval["results"]:
         if not r.get("comparable") or r["bars"] is None or r["kind"] == "noise":
@@ -213,7 +217,8 @@ def detectable(good_eval: dict, bars: dict) -> dict:
         q = math.sqrt(max(r["bars"]["rel_l2"] ** 2 - r["rel_l2"] ** 2, 0.0))
         cur = out.get(r["group"])
         if cur is None or q < cur["min_relative_error"]:
-            out[r["group"]] = {"min_relative_error": q, "array": f"{r['kind']}/{r['name']}", "bar_rel_l2": r["bars"]["rel_l2"], "good_rel_l2": r["rel_l2"]}
+            out[r["group"]] = {"min_relative_error": q, "array": f"{r['kind']}/{r['name']}", "bar_rel_l2": r["bars"]["rel_l2"], "good_rel_l2": r["rel_l2"],
+                        "basis": "relative L2 bar only, independent errors added in quadrature; the PCC and slope bars may reject a smaller error"}
     return out
 
 
@@ -318,6 +323,11 @@ def analyse(reference_env, chip_env, good, *, margin: float = DEFAULT_MARGIN, gr
         if own_dir and not keep_work:
             shutil.rmtree(base, ignore_errors=True)
     det = detectable(good_eval, bars)
+    if floor["problems"]:
+        reasons.append("the floor is incomplete (" + "; ".join(floor["problems"][:4]) + "): an array without a floor of its own is judged by another array's bar")
+    unmeasured = [f"{r['kind']}/{r['name']}" for r in good_eval["results"] if r["kind"] != "noise" and f"{r['kind']}/{r['name']}" not in floor["arrays"]]
+    if unmeasured:
+        reasons.append(f"{len(unmeasured)} arrays of the good run have no floor of their own ({', '.join(unmeasured[:4])}), so no measured bar covers them")
     if not good_eval["ok"]:
         reasons.append("the good run fails the bars it was meant to pass (" + ", ".join(good_eval["failing"][:6]) + "): a larger margin or a bar "
                        "that includes the chip's own arithmetic is needed")
@@ -329,7 +339,8 @@ def analyse(reference_env, chip_env, good, *, margin: float = DEFAULT_MARGIN, gr
             groups = {group_of(k, n, group) for k, n in damage.arrays}
             seen = ", ".join(f"{g}: {det[g]['min_relative_error']:.4f}" for g in sorted(groups) if g in det)
             reasons.append(f"{c['label']} is not detected: no damaged array fails where the good run passes. "
-                           f"Extra relative error below about {seen or 'n/a'} passes unseen")
+                           f"Extra relative error below about {seen or 'n/a'} stays under the relative L2 bar (an estimate that assumes independent errors; "
+                           "the PCC and slope bars may reject less)")
         else:
             reasons.append(f"{c['label']} passes the bars (or fails only where the good run fails too), so they cannot reject it")
     return {"schema": 1, "margin": margin, "group": group, "slope_rule": slope_rule, "floor": floor, "bars": {g: {**b.__dict__} for g, b in bars.items()},
@@ -398,7 +409,8 @@ def summarise(res: dict) -> list[str]:
         lines.append(f"Control ({c['label']}): " + ("fails the bars where the good run passes, as it should" if c["detected"]
                                                       else "is not told apart from the good run by these bars"))
     for gname, d in res["detectable"].items():
-        lines.append(f"  {gname}: extra relative error below {d['min_relative_error']:.4f} passes unseen (checked on {d['array']})")
+        lines.append(f"  {gname}: extra relative error below {d['min_relative_error']:.4f} stays under the relative L2 bar (checked on {d['array']}; "
+                     "an estimate that assumes independent errors, and the PCC and slope bars may reject less)")
     lines.append("Result: the bars are usable." if res["usable"] else "Result: the bars are unusable.")
     for r in res["reasons"]:
         lines.append("  Reason: " + r)

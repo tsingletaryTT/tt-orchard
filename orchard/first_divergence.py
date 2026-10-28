@@ -262,6 +262,48 @@ class _Judge:
         return self.entry(kind, name)["leaves"]
 
 
+LIBRARY_IDENTITY_KEYS = ("name", "commit")
+
+
+def identity_problems(a, b, label: str) -> list[str]:
+    """Reasons two recorded runs are not runs of the same model and reference code: any difference in the manifest's `model` entry (the checkpoint
+    revision, its configuration hash and size) or in the library's name and commit. Fields that describe the environment, such as the library's
+    path hash, may differ. Objects without a manifest (`MemoryRun`) are not checked."""
+    ma, mb = getattr(a, "manifest", None), getattr(b, "manifest", None)
+    if not isinstance(ma, dict) or not isinstance(mb, dict):
+        return []
+    out = []
+    model_a, model_b = ma.get("model") or {}, mb.get("model") or {}
+    for k in sorted(set(model_a) | set(model_b)):
+        if model_a.get(k) != model_b.get(k):
+            out.append(f"{label}: model.{k} differs: {str(model_a.get(k))[:60]!r} and {str(model_b.get(k))[:60]!r}")
+    lib_a, lib_b = ma.get("library") or {}, mb.get("library") or {}
+    for k in LIBRARY_IDENTITY_KEYS:
+        if lib_a.get(k) != lib_b.get(k):
+            out.append(f"{label}: library.{k} differs: {str(lib_a.get(k))[:60]!r} and {str(lib_b.get(k))[:60]!r}")
+    return out
+
+
+def noise_problems(runs, label: str) -> list[str]:
+    """Reasons the noise draws of `runs` cannot be taken as the same: a noise array that some of the runs lack, or that differs between them
+    (relative L2 above 1e-6). Equal seed settings do not show that the draws were equal, and different draws would put their downstream difference
+    into a floor."""
+    out = []
+    names = sorted({n for r in runs for (k, n) in r.entries if k == "noise"})
+    for n in names:
+        holders = [r for r in runs if ("noise", n) in r.entries]
+        if len(holders) != len(runs):
+            out.append(f"{label}: noise/{n} is not in every run")
+            continue
+        base = holders[0].array("noise", n)
+        for other in holders[1:]:
+            m = ar.metrics(base, other.array("noise", n))
+            if not m.get("comparable") or m["rel_l2"] > 1e-6:
+                out.append(f"{label}: noise/{n} differs between runs, so they did not use the same noise draws")
+                break
+    return out
+
+
 def _settings_problems(a, b, label, *, cross_precision: bool) -> list[str]:
     sa, sb = getattr(a, "settings", None), getattr(b, "settings", None)
     if sa is None or sb is None:
@@ -281,12 +323,14 @@ def find_first_divergence(ref, cand, *, stack: Stack | None = None, tolerance: T
     report gives the relative error, the share of the squared error and the share of the reference energy of those rows. `cross_precision` leaves dtype out of the check of `ref` against `cand`, since a chip run differs in
     dtype from a float32 reference. Raises `DivergenceError` when the runs do not belong together."""
     stack, tol = stack or Stack(), tolerance or Tolerance()
-    problems = _settings_problems(ref, cand, "candidate", cross_precision=cross_precision)
+    problems = _settings_problems(ref, cand, "candidate", cross_precision=cross_precision) + identity_problems(ref, cand, "candidate")
     if floor is not None:
         if not (isinstance(floor, (tuple, list)) and len(floor) == 2):
             raise DivergenceError("floor must be a pair of runs")
         problems += _settings_problems(floor[0], floor[1], "floor pair", cross_precision=False)
         problems += _settings_problems(ref, floor[0], "floor run", cross_precision=True)
+        problems += identity_problems(floor[0], floor[1], "floor pair") + identity_problems(ref, floor[0], "floor run")
+        problems += noise_problems([ref, floor[0], floor[1]], "floor runs")
     if problems:
         raise DivergenceError("the runs are not comparable: " + "; ".join(problems))
     for gname, span in (row_groups or {}).items():
@@ -339,6 +383,9 @@ def find_first_divergence(ref, cand, *, stack: Stack | None = None, tolerance: T
             if missing:
                 raise DivergenceError(f"ops_order names {missing}, which the reference does not hold")
             op_names = wanted
+        for n in op_names:
+            if (stack.kind, n) not in cand.entries:
+                problems_out.append(f"{stack.kind}/{n} is in the reference and not in the candidate, so the search over operations skips it")
         op_names = [n for n in op_names if (stack.kind, n) in cand.entries]
         if not op_names:
             notes.append(f"no operations recorded for {blocks[chosen]} in both runs, so the search stops at the block")
@@ -487,7 +534,8 @@ def main(argv=None, out=None) -> int:
     p.add_argument("--rows", action="append", default=[], metavar="NAME=START:STOP", help="a named row range of a block's layout, for example memory=0:64 (repeatable)")
     p.add_argument("--bisect-only", action="store_true", help="read only the blocks the bisect needs (no table; cannot see errors that come back inside)")
     p.add_argument("--strict-dtype", action="store_true", help="require the dtype setting to match too")
-    p.add_argument("--json", action="store_true", help="print the full JSON report and no summary")
+    p.add_argument("--json", action="store_true", help="print the full JSON report and no summary. Exit status: 0 all within tolerance and complete, "
+                   "1 a divergence is located, 2 refused, 3 nothing located but a block or operation is missing from one run")
     p.add_argument("--out", help="also write the JSON report to this new file (an existing file is refused)")
     args = p.parse_args(argv)
     if bool(args.floor_ref) != bool(args.floor_other):
@@ -526,7 +574,9 @@ def main(argv=None, out=None) -> int:
     else:
         for line in summarise(rep):
             print(line, file=out)
-    return 1 if rep["located"] else 0
+    if rep["located"]:
+        return 1
+    return 0 if rep["complete"] else 3
 
 
 if __name__ == "__main__":

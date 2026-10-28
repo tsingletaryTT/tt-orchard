@@ -21,8 +21,8 @@ OPS = ("attn", "cross", "ff")
 ROWS, CH, MEM = 40, 16, 6          # the first MEM rows are "memory" rows with a large norm
 
 
-def _write(path, arrays, dtype="float32"):
-    rec = ar.Recorder(path, model=MODEL, library=LIB, settings={**SETTINGS, "dtype": dtype}, seeds={"torch": 42})
+def _write(path, arrays, dtype="float32", model=None, library=None):
+    rec = ar.Recorder(path, model=model or MODEL, library=library or LIB, settings={**SETTINGS, "dtype": dtype}, seeds={"torch": 42})
     for (kind, name), arr in arrays:
         rec.record(kind, name, arr)
     rec.finish()
@@ -449,3 +449,74 @@ def test_the_summary_lists_only_the_other_arrays_that_leave_and_counts_the_rest(
     assert "Other arrays: 1 compared, 1 leave their tolerance." in text
     rep2 = fd.find_first_divergence(ref, cand, tolerance=fd.Tolerance(rel_l2=10.0))
     assert "Other arrays: 1 compared, 0 leave their tolerance." in "\n".join(fd.summarise(rep2))
+
+
+# ---- review round 1: identity, noise draws, missing operations, exit status ---------------------------------------------
+
+def _copy(tmp_path, name, run_, **kw):
+    return ar.load_run(_write(tmp_path / name, [(k, run_.array(*k)) for k in run_.entries], **kw))
+
+
+def test_floor_runs_of_another_model_revision_or_library_commit_are_refused(tmp_path):
+    ref, cand, env_b = run(tmp_path)
+    for name, kw, key in (("rev", dict(model={**MODEL, "revision": "c" * 40}), "model.revision"),
+                          ("commit", dict(library={**LIB, "commit": "d" * 40}), "library.commit")):
+        other = _copy(tmp_path, name, env_b, **kw)
+        with pytest.raises(fd.DivergenceError, match=re.escape(key)):
+            fd.find_first_divergence(ref, cand, floor=(ref, other))
+        with pytest.raises(fd.DivergenceError, match=re.escape(key)):
+            fd.find_first_divergence(ref, cand, floor=(other, env_b))
+
+
+def test_a_candidate_of_another_model_revision_is_refused(tmp_path):
+    ref, cand, _ = run(tmp_path)
+    other = _copy(tmp_path, "oc", cand, dtype="bfloat16", model={**MODEL, "revision": "e" * 40})
+    with pytest.raises(fd.DivergenceError, match="model.revision"):
+        fd.find_first_divergence(ref, other)
+
+
+def test_environment_fields_of_the_library_may_differ(tmp_path):
+    ref, cand, env_b = run(tmp_path)
+    other = _copy(tmp_path, "env", env_b, library={**LIB, "path_hash": "abc", "source_verified": False})
+    rep = fd.find_first_divergence(ref, cand, floor=(ref, other), tolerance=fd.Tolerance(rel_l2=0.01))
+    assert rep["environment_floor"] == "recorded"
+
+
+def test_floor_runs_with_different_noise_draws_are_refused(tmp_path):
+    ref, cand, env_b = run(tmp_path)
+    arrays = [(k, env_b.array(*k)) for k in env_b.entries] + [(("noise", "initial"), np.ones((1, 3, 3)))]
+    ref2 = ar.load_run(_write(tmp_path / "ref2", [(k, ref.array(*k)) for k in ref.entries] + [(("noise", "initial"), np.zeros((1, 3, 3)))]))
+    env2 = ar.load_run(_write(tmp_path / "env2", arrays))
+    with pytest.raises(fd.DivergenceError, match="noise"):
+        fd.find_first_divergence(ref2, cand, floor=(ref2, env2))
+
+
+def test_a_noise_recording_that_one_floor_run_lacks_is_refused(tmp_path):
+    ref, cand, env_b = run(tmp_path)
+    noise = [(("noise", "initial"), np.zeros((1, 3, 3)))]
+    ref2 = ar.load_run(_write(tmp_path / "ref3", [(k, ref.array(*k)) for k in ref.entries] + noise))
+    with pytest.raises(fd.DivergenceError, match="noise/initial is not in every run"):
+        fd.find_first_divergence(ref2, cand, floor=(ref2, env_b))
+
+
+def test_an_operation_the_candidate_never_recorded_is_listed_and_the_report_is_incomplete(tmp_path):
+    ref, _, _ = run(tmp_path, plant=(3, "ff"))
+    arrays = [((k, n), ref.array(k, n)) for (k, n) in ref.entries if n != "layer_03.cross"]
+    cand_arrays = []
+    for (k, n), a in arrays:
+        cand_arrays.append(((k, n), a + (0.05 * np.abs(a).mean() if n in ("layer_03.ff", "layer_03") else 0)))
+    cand = ar.load_run(_write(tmp_path / "noop", cand_arrays, dtype="bfloat16"))
+    rep = fd.find_first_divergence(ref, cand, tolerance=fd.Tolerance(rel_l2=0.001))
+    assert rep["first_op"]["name"] == "layer_03.ff"
+    assert rep["complete"] is False and any("layer_03.cross" in p and "not in the candidate" in p for p in rep["problems"])
+
+
+def test_the_command_line_exits_3_when_nothing_is_located_but_a_block_is_missing(tmp_path):
+    import io
+    r, _, _ = build(tmp_path)
+    ref = ar.load_run(r)
+    arrays = [((k, n), ref.array(k, n)) for (k, n) in ref.entries if n != "layer_03" and not n.startswith("layer_03.")]
+    short = _write(tmp_path / "short", arrays, dtype="bfloat16")
+    out = io.StringIO()
+    assert fd.main([str(r), str(short), "--rel-l2", "0.01"], out=out) == 3
+    assert "layer_03" in out.getvalue()

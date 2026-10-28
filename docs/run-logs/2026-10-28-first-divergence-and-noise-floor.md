@@ -81,8 +81,8 @@ Findings in the order they appeared:
    option sets the slope bar equal to the relative L2 bar (a pure scale error of size s moves the relative L2 error by about s, so a scale error is
    still held to the error budget). The default rule stays `floor`, so the choice is visible in the result.
 2. **A single layer rounded to bfloat16 is not detected.** Rounding layer 19 to bfloat16 adds a relative error of about 0.2 percent. The layer
-   bar is 0.108 (set by the final projection, which has a floor of 0.036), and extra error below 0.092 passes unseen. With bars grouped by kind and
-   family the layer outputs get their own bar of 0.0189 and extra error below 0.0082 passes unseen. Either way bfloat16 rounding of one layer is
+   bar is 0.108 (set by the final projection, which has a floor of 0.036), and extra error below 0.092 stays under the relative L2 bar (see the note
+   below on what that number means). With bars grouped by family the layer outputs get their own bar of 0.0189 and extra error below 0.0082 stays under it. Either way bfloat16 rounding of one layer is
    below what these bars can see, and the result reports the bars as unusable for that control.
 3. **Damage of the size the bfloat16 residual stream caused is detected.** The bad chip run (a real run, so no synthetic assumption) fails the
    bars at margin 3 (final latent and the last denoised step). A synthetic control of relative size 0.15 on layer 19 fails with kind-level bars,
@@ -100,9 +100,11 @@ Findings in the order they appeared:
 | kind, margin 2, relative error 0.15 | passes | detected | detected | yes |
 | kind, slope rule floor, any damage | fails on 20 layers | not detected | detected | no |
 
-The smallest extra relative error each bar lets through unseen (margin 3, kind): conditioning 0.052, latent 0.218, layer 0.092,
-step latent 0.192, waveform 0.343. The latent number matters most for the audio result: a chip run whose final latent is within 0.258 of the
-reference passes, and a run 0.218 worse than the good one would still pass.
+The smallest extra relative L2 error that moves an array past its relative L2 bar (margin 3, kind): conditioning 0.052, latent 0.218, layer
+0.092, step latent 0.192, waveform 0.343. This is an estimate from the relative L2 bar alone, and it assumes the extra error is independent of
+the error the good run already has, so the two add in quadrature. The PCC and slope bars can reject a smaller error (an error orthogonal to the
+signal shows in PCC first), so an error below these numbers is not guaranteed to pass. The numbers say how much room the relative L2 bar leaves,
+and the control checks the rest. The result, the summary and the JSON carry the same label.
 
 ## What this means for the audio run
 

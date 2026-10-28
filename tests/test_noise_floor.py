@@ -39,8 +39,8 @@ def base_arrays():
     return out
 
 
-def write(path, arrays, dtype="float32", **settings):
-    rec = ar.Recorder(path, model=MODEL, library=LIB, settings={**SETTINGS, "dtype": dtype, **settings}, seeds={"torch": 42})
+def write(path, arrays, dtype="float32", model=None, library=None, **settings):
+    rec = ar.Recorder(path, model=model or MODEL, library=library or LIB, settings={**SETTINGS, "dtype": dtype, **settings}, seeds={"torch": 42})
     for (kind, name), a in arrays.items():
         rec.record(kind, name, a)
     rec.finish()
@@ -397,3 +397,52 @@ def test_the_module_and_its_printed_text_avoid_the_phrases_the_project_does_not_
 def test_the_module_reads_runs_only_through_audio_reference_and_has_no_json_parser():
     src = Path(nf.__file__).read_text()
     assert not re.search(r"\bjson\.loads?\(", src) and "audio_reference" in src
+
+
+# ---- review round 1: identity, missing noise, incomplete floors, what the headroom number means ------------------------
+
+def test_floor_runs_of_another_model_revision_or_library_commit_are_refused(world):
+    for name, kw, key in (("rev", dict(model={**MODEL, "revision": "c" * 40}), "model.revision"),
+                          ("commit", dict(library={**LIB, "commit": "d" * 40}), "library.commit")):
+        other = write(world.tmp / name, world.base, **kw)
+        with pytest.raises(nf.NoiseFloorError, match=re.escape(key)):
+            nf.measure_floor([world.ref], [other])
+
+
+def test_environment_fields_of_the_library_may_differ_between_floor_runs(world):
+    other = write(world.tmp / "env", variant(world.base, {"layer": 0.01}, 1), library={**LIB, "path_hash": "abc", "source_verified": False})
+    assert nf.measure_floor([world.ref], [other])["arrays"]
+
+
+def test_a_candidate_of_another_model_revision_is_refused_by_the_evaluation(world):
+    other = write(world.tmp / "oc", variant(world.base, {"layer": 0.02}, 1), dtype="bfloat16", model={**MODEL, "revision": "e" * 40})
+    with pytest.raises(nf.NoiseFloorError, match="model.revision"):
+        nf.evaluate(world.ref, other, nf.derive_bars(nf.measure_floor([world.ref, world.repeat], [world.env_b]), margin=3.0))
+
+
+def test_a_floor_run_without_the_noise_recording_is_refused_not_left_out(world):
+    arrays = {k: v for k, v in world.base.items() if k[0] != "noise"}
+    no_noise = write(world.tmp / "nn", variant(arrays, {"layer": 0.01}, 1))
+    with pytest.raises(nf.NoiseFloorError, match=r"noise/initial is not in every run"):
+        nf.measure_floor([world.ref], [no_noise])
+
+
+def test_an_incomplete_floor_makes_the_bars_unusable_even_when_everything_else_passes(world):
+    arrays = {k: v for k, v in world.base.items() if k != ("layer", "layer_02")}
+    env_short = write(world.tmp / "es", variant(arrays, {"layer": 0.01, "latent": 0.05, "conditioning": 0.02, "step_latent": 0.04}, 1))
+    res = nf.analyse([world.ref, world.repeat], [env_short], world.good, margin=3.0,
+                     damage=nf.Damage(arrays=(("layer", "layer_03"),), mode="relative", size=0.5), work_dir=world.tmp / "inc")
+    assert res["floor"]["problems"] and res["good"]["ok"] is True
+    assert res["usable"] is False
+    assert any("floor is incomplete" in r and "layer_02" in r for r in res["reasons"])
+    assert any("no floor of their own" in r and "layer_02" in r for r in res["reasons"])
+
+
+def test_the_headroom_is_labelled_as_a_relative_l2_estimate_everywhere_it_is_given(world):
+    res = nf.analyse([world.ref, world.repeat], [world.env_b], world.good, margin=3.0,
+                     damage=nf.Damage(arrays=(("layer", "layer_02"),), mode="bf16"), work_dir=world.tmp / "lab")
+    assert all("PCC and slope" in d["basis"] and "relative L2" in d["basis"] for d in res["detectable"].values())
+    text = "\n".join(nf.summarise(res))
+    assert "assumes independent errors" in text and "PCC and slope bars may reject less" in text
+    assert "passes unseen" not in text and not any("passes unseen" in r for r in res["reasons"])
+    assert any("assumes independent errors" in r for r in res["reasons"])
