@@ -645,3 +645,34 @@ def test_the_report_does_not_write_through_a_link_planted_at_the_old_temporary_n
     assert victim.read_text() == "keep me"
     assert "Kernel probe ladder report" in (tmp_path / "ladder-report.md").read_text()
     assert sorted(p.name for p in tmp_path.iterdir() if p.name.endswith(".tmp") and not p.is_symlink()) == []
+
+
+def test_a_rung_report_that_is_a_fifo_a_link_too_large_or_not_an_object_is_not_read(tmp_path, monkeypatch):
+    import signal
+    d = tmp_path / "add"
+    d.mkdir()
+    report = d / "kernel-probe-report.json"
+
+    def alarm(*a):
+        raise AssertionError("load_rung blocked")
+    old = signal.signal(signal.SIGALRM, alarm)
+    signal.alarm(10)
+    try:
+        os.mkfifo(report)
+        assert kl.load_rung(tmp_path, "add") == (None, [])                   # a FIFO: no wait for a writer
+        report.unlink()
+        real = tmp_path / "real.json"
+        real.write_text(json.dumps({"header": {}, "attempts": []}))
+        report.symlink_to(real)
+        assert kl.load_rung(tmp_path, "add") == (None, [])                   # a link is not followed
+        report.unlink()
+        report.write_text(json.dumps({"header": {}, "attempts": [], "pad": "x" * 200}))
+        monkeypatch.setattr(kl, "READ_LIMIT_BYTES", 100)
+        assert kl.load_rung(tmp_path, "add") == (None, [])                   # too large
+        monkeypatch.setattr(kl, "READ_LIMIT_BYTES", 10_000)
+        assert kl.load_rung(tmp_path, "add")[0] == {}                        # the same file, within the limit
+        report.write_text("[1, 2]")
+        assert kl.load_rung(tmp_path, "add") == (None, [])                   # not an object
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old)

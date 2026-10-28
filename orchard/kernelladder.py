@@ -40,6 +40,7 @@ FAILURE_CLASSES = ("deadlock", "dataflow_step", "shape_mismatch", "numeric", "tt
                    "forbidden_code", "no_kernel", "sim_gap", "wall_clock", "other")
 
 REPORT_NAME = "ladder-report"
+READ_LIMIT_BYTES = 64 * 1024 * 1024      # the most a rung report may be: the probe's own limit for a record
 
 # Sizing a rung's wall budget. See size_wall_budget.
 WALL_FLOOR_S = 300.0
@@ -276,9 +277,15 @@ def ladder_lines(rows: list[dict], *, skipped: list[str], stopped: str | None, s
 def load_rung(out_dir: Path, op: str) -> tuple[dict | None, list[dict]]:
     """The header and attempt records a rung's probe run wrote (`<out>/<op>/kernel-probe-report.json`), or (None, [])."""
     path = Path(out_dir) / op / "kernel-probe-report.json"
+    from orchard import kernelprobe as kp
+    raw = kp._read_regular(path, READ_LIMIT_BYTES)       # a regular file only: no link, no FIFO wait, a size limit
+    if raw is None or len(raw) > READ_LIMIT_BYTES:
+        return None, []
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        data = json.loads(raw.decode("utf-8", errors="replace"))
+    except ValueError:
+        return None, []
+    if not isinstance(data, dict):
         return None, []
     attempts = [a for a in data.get("attempts", []) if isinstance(a, dict) and a.get("op") == op]
     return (data.get("header") if isinstance(data.get("header"), dict) else {}), attempts
