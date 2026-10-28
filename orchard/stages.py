@@ -41,7 +41,7 @@ from typing import Callable
 
 from orchard import audio_decision, audio_facts, audio_runtime
 from orchard.classes import CLASSES, SIDECAR_CLASSES, class_of_path, path_of
-from orchard import prompt_suite, sampling_probe
+from orchard import prompt_suite, sampling_choice, sampling_probe
 from orchard.graft_trial import DECISION_FILE as GRAFT_DECISION_FILE
 from orchard.graft_trial import chosen as graft_chosen
 from orchard.graft_trial import read_decision as read_graft_decision
@@ -597,6 +597,7 @@ def gate_weights_swap(stage_dir, run_dir) -> GateResult:
     reasons, seen = _swap_reasons(d), []
     reasons += _suite_reasons_in(Path(stage_dir) / "evidence" / "swap-check.json", run_dir)
     reasons += decision_problems(stage_dir, run_dir)         # the graft trial's decision, when stage 2 made one
+    reasons += sampling_choice.decision_problems(stage_dir, run_dir)       # the sampling choice (issue 107), when stage 2 made one
     reasons += vocab_trim_problems(stage_dir, run_dir)
     _evidence(run_dir, d.get("evidence"), "result.json", reasons, seen)
     return _done(reasons, seen)
@@ -657,6 +658,7 @@ def gate_weights_swap_sidecar(stage_dir, run_dir) -> GateResult:
     reasons, seen = _swap_reasons(d), []
     reasons += _suite_reasons_in(Path(stage_dir) / "evidence" / "swap-check.json", run_dir)
     reasons += decision_problems(stage_dir, run_dir)
+    reasons += sampling_choice.decision_problems(stage_dir, run_dir)
     delta, derr = _load(Path(run_dir) / "stages" / "0", "delta.json")
     if derr:
         reasons.append(f"stage 0's {derr}, so the sidecar parity cannot be tied to the files stage 0 recorded")
@@ -863,6 +865,7 @@ def gate_mesh_swap(stage_dir, run_dir, required=None) -> GateResult:
         if isinstance(report, dict):
             reasons += _suite_reasons(report, run_dir, f"{where}: ")
         reasons += _graft_reasons(stage_dir, run_dir, n, where)
+        reasons += _sampling_reasons(report, run_dir, where)
         if trim is not None:
             cdir = Path(stage_dir) / "configs" / str(n)
             reasons += _trim_reasons(trim, _read_json(cdir / "model-dir-sources.json"),
@@ -895,6 +898,20 @@ def _graft_reasons(stage_dir, run_dir, n: int, where: str) -> list[str]:
     if built and not chose:
         return [f"{where}: configs/{n}/model-dir-sources.json records a grafted head, but stage 2 did not choose the graft"]
     return []
+
+
+def _sampling_reasons(report, run_dir, where: str) -> list[str]:
+    """A configuration was served the way stage 2's sampling decision says (issue 107). When stage 2 chose the drafter-off configuration, the swap
+    check's `serving` record (written by the template from the run script it served with) must say the drafter was off. A decision of keep, or none,
+    asks nothing."""
+    if not sampling_choice.drafter_off_chosen(run_dir):
+        return []
+    serving = report.get("serving") if isinstance(report, dict) else None
+    got = serving.get("drafter") if isinstance(serving, dict) else None
+    if got == "off":
+        return []
+    return [f"{where}: stage 2 chose the drafter-off configuration because the model needs sampling ({sampling_choice.DECISION_FILE}), so "
+            f"swap-check.json serving.drafter must be 'off', got {got!r}"]
 
 
 def _serving_type(cfg) -> str | None:
@@ -1057,7 +1074,7 @@ def gate_package(stage_dir, run_dir) -> GateResult:
     from orchard.package import (GRAFT_FILE, PUBLISH_FILE, PackageError, acceptance_sources, graft_evidence_problems, graft_problems,
                                  graft_trial_numbers, publish_problems, read_reported, sampling_numbers,
                                  sampling_summary, sampling_summary_problems, serving_problems,
-                                 split_model_id, stage_2_serving, stage_2_vocab, weights_wiring_problems)
+                                 served_drafter_state, split_model_id, stage_2_serving, stage_2_vocab, weights_wiring_problems)
     from orchard.card_use import read_use_facts
     from orchard.package_card import card_evidence_paths, card_problems, read_license
     from orchard.scrub import scrub_package
@@ -1081,10 +1098,17 @@ def gate_package(stage_dir, run_dir) -> GateResult:
         reasons.append(f"package.json says the license is {d.get('license')!r}; the model's is "
                        f"{license_id!r}")
     reasons += sampling_summary_problems(run)
-    drafter_off, host_sampling = stage_2_serving(run)
+    drafter_off, host_sampling = served_drafter_state(run)
+    sampling_decision = sampling_choice.read_decision(run / "stages" / "2")
     model_has_mtp = delta_model_has_mtp(delta)
     # A grafted package serves with the drafter and on-device sampling on, whatever stage 2's run.sh says.
     graft_expected = isinstance(d.get("mtp_graft"), dict)
+    # A drafter-off sampling decision conflicts with any graft: a graft keeps the drafter on. The gate does not rely on read_run's check, so it refuses
+    # package-level and per-profile graft metadata itself, and the graft exemption below no longer switches the serving checks off for that decision.
+    off_by_sampling = sampling_choice.drafter_off_chosen(run)
+    if off_by_sampling and graft_expected:
+        reasons.append("package.json records an mtp_graft, but stage 2's sampling decision chose the drafter-off configuration, and a graft keeps the "
+                       "drafter on")
     decision = read_graft_decision(run / "stages" / "2")
     graft_chosen_by_stage_2 = decision is not None and decision["choice"] == "graft"
     trial_decision = decision["choice"] if decision is not None and decision.get("trial") is not None else None
@@ -1126,6 +1150,10 @@ def gate_package(stage_dir, run_dir) -> GateResult:
         reasons += [f"profile {name}: {x}" for x in
                     weights_wiring_problems(run_sh, nearest_model=nearest_repo)]
         has_graft = (out / GRAFT_FILE).exists()
+        grafted = (graft_expected or has_graft) and not off_by_sampling         # the exemption from the serving checks
+        if off_by_sampling and has_graft:
+            reasons.append(f"profile {name}: {GRAFT_FILE} is present, but stage 2's sampling decision chose the drafter-off configuration, and a graft "
+                           "keeps the drafter on")
         if graft_chosen_by_stage_2 and not has_graft:
             reasons.append(f"profile {name}: stage 2's graft trial chose the graft, so the package needs {GRAFT_FILE}")
         if graft_expected or has_graft:
@@ -1135,8 +1163,8 @@ def gate_package(stage_dir, run_dir) -> GateResult:
         reasons += [f"profile {name}: {x}" for x in graft_evidence_problems(out, boot_check)]
         reasons += [f"profile {name}: {x}" for x in
                     serving_problems(run_sh, m.get("env") or {},
-                                     drafter_off=drafter_off and not (graft_expected or has_graft),
-                                     host_sampling=host_sampling and not (graft_expected or has_graft),
+                                     drafter_off=drafter_off and not grafted,
+                                     host_sampling=host_sampling and not grafted,
                                      model_has_mtp=model_has_mtp, graft=has_graft)]
         reasons += [f"profile {name}: scrub: {x}" for x in
                     scrub_package(out, namespace=d.get("namespace"))]
@@ -1148,6 +1176,9 @@ def gate_package(stage_dir, run_dir) -> GateResult:
                                       graft_decision=trial_decision, vocab=stage_2_vocab(run),
                                       trial_rows=trial_rows if p.get("required") else (),
                                       sampling=sampling if p.get("required") else None,
+                                      sampling_decision=sampling_decision if p.get("required") else None,
+                                      drafter_off_by_sampling=bool(sampling_decision and sampling_decision.get("choice") == "drafter-off"),
+                                      sampling_first_verdict=((sampling_decision or {}).get("numbers") or {}).get("served_verdict"),
                                       sampling_expected=sampling_expected if p.get("required") else (),
                                       acceptance_measured=acceptance_measured if p.get("required") else False,
                                       use=read_use_facts(swap.get("new_snapshot") or "/nonexistent", run_sh, run,

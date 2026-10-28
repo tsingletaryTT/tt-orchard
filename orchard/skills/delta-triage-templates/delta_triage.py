@@ -1770,6 +1770,42 @@ def card_hints_of(snapshot: Path) -> dict:
     return card_sampling_hints(readme.read_text(encoding="utf-8", errors="replace")) if readme.is_file() else {}
 
 
+GREEDY_WARNING_MAX = 3              # lines kept
+GREEDY_QUOTE_CHARS = 300
+# `greedy` as its own word. A preceding hyphen, letter or `non ` means another word ("non-greedy", "nongreedy", "semi-greedy"), and a card that
+# warns against non-greedy decoding recommends greedy decoding, so it is not a warning against it.
+_GREEDY_PATTERNS = tuple(re.compile(p, re.IGNORECASE) for p in (
+    # An imperative that starts a sentence: "Do not use greedy decoding", "Avoid greedy decoding". "We do not use greedy decoding" (a statement about
+    # the authors' own evaluation) does not start a sentence with the verb, so it is left out.
+    r"(?:^|[.!?:]\s+)(?:please\s+)?(?:do\s*not|don't|never|avoid)\b[^.\n]{0,40}?(?<![\w-])(?<!non\s)greedy\b",
+    r"(?<![\w-])(?<!non\s)greedy\b[^.\n]{0,40}?\b(?:is|are)\s+(?:not\s+(?:recommended|advised)|discouraged)\b",
+    r"\b(?:not\s+recommend(?:ed)?|discourage[sd]?|(?:advise|advised)\s+against)\b[^.\n]{0,30}?(?<![\w-])(?<!non\s)greedy\b",
+    r"(?<![\w-])(?<!non\s)greedy\b[^.\n]{0,60}?\b(?:can|may|might|will|often)\b[^.\n]{0,40}?\b(?:lead|cause|result)\b[^.\n]{0,40}?\b(?:repetition|loop|degrad)",
+))
+
+
+def card_greedy_warnings(text: str) -> list[dict]:
+    """[{line, quote}] for the lines of a model card that warn against greedy decoding (issue 107): an imperative such as "Do not use greedy decoding",
+    "greedy decoding is not recommended", or "greedy decoding can lead to endless repetitions". The first MAX lines, quoted. A card that only says it
+    used greedy decoding, or tells the reader to set temperature 0, is not a warning. The card is prose, so this is a reader of patterns."""
+    out = []
+    for number, line in enumerate(text[:CARD_READ_CHARS].splitlines(), start=1):
+        plain = re.sub(r"[*_>`]", "", line).strip()
+        # A warning is often a list item: "- **Do not use greedy decoding**." or "1. Avoid greedy decoding". The marker (and a task-list box) is
+        # not part of the sentence, so the imperative pattern, which wants the verb at the start of a sentence, would miss it.
+        plain = re.sub(r"^(?:(?:[-+]|\d+[.)])\s+(?:\[[ xX]\]\s+)?)+", "", plain)
+        if "greedy" in plain.lower() and any(p.search(plain) for p in _GREEDY_PATTERNS):
+            out.append({"line": number, "quote": plain[:GREEDY_QUOTE_CHARS]})
+            if len(out) == GREEDY_WARNING_MAX:
+                break
+    return out
+
+
+def card_warnings_of(snapshot: Path) -> list[dict]:
+    readme = snapshot / "README.md"
+    return card_greedy_warnings(readme.read_text(encoding="utf-8", errors="replace")) if readme.is_file() else []
+
+
 def compare_genconfig_license(model_dir: Path, base_dir: Path) -> dict:
     mg, merr = read_json(model_dir / "generation_config.json")
     bg, berr = read_json(base_dir / "generation_config.json")
@@ -1793,6 +1829,7 @@ def compare_genconfig_license(model_dir: Path, base_dir: Path) -> dict:
             "model_tokenizer_eos_token": tok_name,
             "model_tokenizer_eos_token_id": tokenizer_token_id(tok_data, tok_name),
             "card_sampling_hints": card_hints_of(model_dir),
+            "card_warns_greedy": card_warnings_of(model_dir),
             "generation_config_diffs": diffs, "generation_config_equal": not diffs,
             "generation_config_equal_except_bookkeeping": all(k in BOOKKEEPING for k in diffs),
             "model_license": ml, "base_license": bl, "license_changed": changed}

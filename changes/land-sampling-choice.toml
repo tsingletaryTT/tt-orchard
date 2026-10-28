@@ -1,0 +1,3 @@
+target = "0.9.52"
+summary = "Land the sampling choice and trial (issue 107) that PR 114 merged into an already-merged branch"
+pr = 192

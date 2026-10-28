@@ -499,6 +499,11 @@ def _verdict_read_json(base: Path):
     return verdict._read_json(base, "input.json")
 
 
+def _sampling_choice_read_json(base: Path):
+    from orchard import sampling_choice
+    return sampling_choice._read_json(base / "input.json")
+
+
 def _kept_coder_read(base: Path):
     from orchard import kept_coder
     return kept_coder.read(base)
@@ -698,6 +703,7 @@ READERS: list[Reader] = [
     Reader("opinventory.load_verified", _opinventory_load_verified),
     Reader("opvariants.load_data", _opvariants_load_data, documented=(ValueError,), os_error_ok=ALL_ITEMS),
     Reader("verdict._read_json", _verdict_read_json),
+    Reader("sampling_choice._read_json", _sampling_choice_read_json),
     Reader("kept_coder.read", _kept_coder_read, rel="coder/kept.json"),
     Reader("speedwatch.Baselines._read", _speedwatch_baselines),
     Reader("run_view._read", _run_view_read),
