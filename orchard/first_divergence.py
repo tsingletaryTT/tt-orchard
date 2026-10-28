@@ -404,8 +404,12 @@ def find_first_divergence(ref, cand, *, stack: Stack | None = None, tolerance: T
             else:
                 first_op = judge.entry(stack.kind, op_names[idx])
 
+    recorded_blocks = set(in_ref) | set(extra)
+
     def in_stack(kind, name):
-        return kind == stack.kind and stack.block_number(name.split(stack.op_sep, 1)[0]) is not None
+        # An operation belongs to the stack only when the block it is tied to was recorded (and so compared) in a run; an operation of a block
+        # nobody recorded falls through to the checks of the other arrays and is reported as missing or compared there.
+        return kind == stack.kind and name.split(stack.op_sep, 1)[0] in recorded_blocks
     other = []
     for key in ref.entries:
         if in_stack(*key):

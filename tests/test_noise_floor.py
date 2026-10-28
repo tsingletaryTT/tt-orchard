@@ -199,7 +199,8 @@ def test_damage_the_bars_cannot_see_makes_them_unusable_and_says_how_large_it_wo
     assert any("not detected" in r for r in res["reasons"])
     d = res["detectable"]["layer"]
     # the layer bar is 3 x 0.01 = 0.03; the good run is at 0.02; extra error adds in quadrature: sqrt(0.03^2 - 0.02^2)
-    assert d["min_relative_error"] == pytest.approx(math.sqrt(0.03 ** 2 - 0.02 ** 2), rel=1e-3)
+    expected = min(math.sqrt(0.03 ** 2 - 0.02 ** 2) / r["norm_ratio"] for r in res["good"]["results"] if r["kind"] == "layer")
+    assert d["min_relative_error"] == pytest.approx(expected, rel=1e-3)
 
 
 def test_bars_the_good_run_itself_fails_are_unusable(world):
@@ -469,3 +470,26 @@ def test_a_control_that_fails_only_on_a_noise_array_is_not_detected(world):
     ev = {"ok": False, "failing": ["noise/initial"], "results": []}
     c = nf._control("x", ev, good_eval, "recorded", None)
     assert c["detected"] is False and c["newly_failing"] == []
+
+
+# ---- review round 4: one normalization for the headroom ----------------------------------------------------------------
+
+def test_the_headroom_is_in_the_units_of_damage_size_for_a_scaled_candidate():
+    """good = 0.8 * ref against a relative L2 bar of 0.5: the good run is 0.2 off. Orthogonal damage of size s (relative to the good array)
+    adds an error of 0.8 s, so the bar is reached at 0.8 s = sqrt(0.5^2 - 0.2^2), s = 0.573, and not at 0.458."""
+    rng = np.random.default_rng(0)
+    ref = rng.normal(size=(1, 50, 20))
+    ev = {"ok": True, "problems": [], "failing": [], "results": [{"kind": "layer", "name": "layer_00", "group": "layer", "ok": True, "reasons": [],
+          "comparable": True, "pcc": 1.0, "slope": 0.8, "rel_l2": 0.2, "norm_ratio": 0.8,
+          "bars": {"pcc": 0.0, "rel_l2": 0.5, "slope_tol": 1.0}}]}
+    assert nf.detectable(ev, {})["layer"]["min_relative_error"] == pytest.approx(math.sqrt(0.5 ** 2 - 0.2 ** 2) / 0.8)
+    # and evaluate() reports the ratio from the arrays themselves
+    r = write  # noqa: F841  (the ratio is measured in evaluate; see the next test)
+
+
+def test_evaluate_reports_the_norm_ratio_of_candidate_to_reference(world):
+    scaled = write(world.tmp / "sc", {k: v * 0.8 for k, v in world.base.items() if k[0] != "noise"} | {("noise", "initial"): world.base[("noise", "initial")]}, dtype="bfloat16")
+    bars = nf.derive_bars(nf.measure_floor([world.ref, world.repeat], [world.env_b]), margin=3.0)
+    res = nf.evaluate(world.ref, scaled, bars)
+    ratio = next(r["norm_ratio"] for r in res["results"] if r["name"] == "layer_00")
+    assert ratio == pytest.approx(0.8, rel=1e-6)

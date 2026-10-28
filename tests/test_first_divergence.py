@@ -487,8 +487,9 @@ def test_floor_runs_with_different_noise_draws_are_refused(tmp_path):
     arrays = [(k, env_b.array(*k)) for k in env_b.entries] + [(("noise", "initial"), np.ones((1, 3, 3)))]
     ref2 = ar.load_run(_write(tmp_path / "ref2", [(k, ref.array(*k)) for k in ref.entries] + [(("noise", "initial"), np.zeros((1, 3, 3)))]))
     env2 = ar.load_run(_write(tmp_path / "env2", arrays))
-    with pytest.raises(fd.DivergenceError, match="noise"):
-        fd.find_first_divergence(ref2, cand, floor=(ref2, env2))
+    cand2 = ar.load_run(_write(tmp_path / "cand2", [(k, cand.array(*k)) for k in cand.entries] + [(("noise", "initial"), np.zeros((1, 3, 3)))], dtype="bfloat16"))
+    with pytest.raises(fd.DivergenceError, match="floor runs: noise/initial differs"):     # the candidate's draws match: only the floor pair differs
+        fd.find_first_divergence(ref2, cand2, floor=(ref2, env2))
 
 
 def test_a_noise_recording_that_one_floor_run_lacks_is_refused(tmp_path):
@@ -577,3 +578,17 @@ def test_a_recording_only_the_candidate_holds_makes_the_report_incomplete(tmp_pa
     assert any("latent/extra is in the candidate and not in the reference" in p for p in rep["problems"])
     assert any("layer/layer_00.rotary is in the candidate and not in the reference" in p for p in rep["problems"])
     assert fd.main([str(r), str(wider), "--rel-l2", "0.01"], out=io.StringIO()) == 3
+
+
+# ---- review round 4: operations of a block nobody recorded ----------------------------------------------------------------
+
+def test_an_operation_of_a_block_whose_output_was_never_recorded_is_still_checked(tmp_path):
+    import io
+    mk = lambda name, extra, dtype="float32": ar.load_run(_write(tmp_path / name, [(("layer", "layer_00"), np.ones((1, 4, 4))), *extra], dtype=dtype))
+    op = (("layer", "layer_01.attn"), np.ones((1, 4, 4)))
+    ref, cand = mk("r", [op]), mk("c", [], "bfloat16")
+    rep = fd.find_first_divergence(ref, cand, tolerance=fd.Tolerance(rel_l2=0.01))
+    assert rep["complete"] is False and any("layer_01.attn" in p and "not in the candidate" in p for p in rep["problems"])
+    cand2 = mk("c2", [op], "bfloat16")                     # recorded on both sides: it is compared, not skipped
+    rep2 = fd.find_first_divergence(ref, cand2, tolerance=fd.Tolerance(rel_l2=0.01))
+    assert rep2["complete"] is True and any(t["name"] == "layer_01.attn" for t in rep2["tensors"])

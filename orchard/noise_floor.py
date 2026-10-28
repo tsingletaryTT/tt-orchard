@@ -197,7 +197,10 @@ def evaluate(ref, cand, bars: dict, *, group: str = "kind", cross_precision: boo
             ok, why = False, [f"no measured bar for group {g}"]
         else:
             ok, why = ar.verdict(m, bars[g])
+        rn = float(np.linalg.norm(ref.array(kind, name).astype(np.float64)))
+        cn = float(np.linalg.norm(cand.array(kind, name).astype(np.float64)))
         results.append({"kind": kind, "name": name, "group": g, "ok": ok, "reasons": why, **{k: m.get(k) for k in ("comparable", "pcc", "rel_l2", "slope")},
+                        "norm_ratio": (cn / rn) if rn > 0 else None,
                         "bars": bars[g].__dict__ if g in bars else None})
     if not results:
         problems.append("the runs share no array")
@@ -206,7 +209,7 @@ def evaluate(ref, cand, bars: dict, *, group: str = "kind", cross_precision: boo
 
 
 def detectable(good_eval: dict, bars: dict) -> dict:
-    """Per group, the smallest extra relative L2 error (as a fraction of the array's norm) that moves an array of the good run past its relative L2
+    """Per group, the smallest extra relative L2 error (as a fraction of the norm of the good run's array, the same normalization as `Damage.size`) that moves an array of the good run past its relative L2
     bar, taking an independent error to add in quadrature to what the good run already has. This is an estimate from the relative L2 bar alone: the
     PCC and slope bars can reject a smaller error (an error orthogonal to the signal shows in PCC first), so an error below this number is not
     guaranteed to pass. 0 means the good run is at or past its bar already."""
@@ -215,6 +218,12 @@ def detectable(good_eval: dict, bars: dict) -> dict:
         if not r.get("comparable") or r["bars"] is None or r["kind"] == "noise":
             continue
         q = math.sqrt(max(r["bars"]["rel_l2"] ** 2 - r["rel_l2"] ** 2, 0.0))
+        # `rel_l2` is relative to the reference norm; `Damage.size` is relative to the norm of the array that is damaged (the good run's). One
+        # normalization is used for the reported size: the damage size, so q is divided by ||good|| / ||reference||.
+        ratio = r.get("norm_ratio")
+        if not ratio or ratio <= 0:
+            continue
+        q = q / ratio
         cur = out.get(r["group"])
         if cur is None or q < cur["min_relative_error"]:
             out[r["group"]] = {"min_relative_error": q, "array": f"{r['kind']}/{r['name']}", "bar_rel_l2": r["bars"]["rel_l2"], "good_rel_l2": r["rel_l2"],
