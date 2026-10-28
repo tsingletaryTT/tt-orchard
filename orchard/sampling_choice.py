@@ -21,7 +21,7 @@ import math
 import os
 from pathlib import Path
 
-from orchard import defaults, sampling_probe
+from orchard import defaults, safeio, sampling_probe
 
 DECISION_FILE = "sampling-decision.json"      # in stages/2/
 DECISION_PATH = "stages/2/" + DECISION_FILE   # run-relative; the package ships a scrubbed copy at evidence/<this>
@@ -45,10 +45,15 @@ def _number(v) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
 
 
+MAX_JSON_BYTES = 4 << 20       # the largest file of this module's kind (a swap check or a trial result) is far smaller
+
+
 def _read_json(path):
+    """A JSON file of the run, read through orchard/safeio.py (no link at the last component, a size cap, a regular file only, strict JSON).
+    None when it is missing, unreadable, too large or not JSON; the callers treat all of those as "no evidence"."""
     try:
-        return json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        return safeio.read_json(path, max_bytes=MAX_JSON_BYTES)
+    except safeio.SafeReadError:
         return None
 
 
