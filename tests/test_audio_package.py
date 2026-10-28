@@ -920,6 +920,44 @@ def test_the_gate_refuses_a_launcher_that_does_not_export_the_private_cache(stag
 
 # ---- review of PR 193, round 4: the ledger is read once, and a decision that is not text -----------------------------------------
 
+@pytest.mark.parametrize("name", ["evidence/audio_result.json", "evidence/bench-chip.json", "LICENSE.md", "NOTICE"])
+def test_the_gate_refuses_a_license_or_evidence_file_changed_after_staging(staged, name):
+    f = staged / name
+    f.write_text(f.read_text() + " ")
+    assert any(f"{name} changed after it was staged" in p for p in gate(staged))
+
+
+def test_the_gate_refuses_a_missing_or_malformed_record(staged):
+    (staged / ap.RECORD_FILE).write_text('{"files": 3}')
+    assert any("has no file list" in p for p in gate(staged))
+    (staged / ap.RECORD_FILE).write_text('{"files": []}')
+    assert any("has no file list" in p for p in gate(staged))
+    (staged / ap.RECORD_FILE).write_text('{"files": [{"path": "x", "sha256": "y"}]}')
+    assert any("does not list LICENSE.md" in p for p in gate(staged))
+
+
+@pytest.mark.parametrize("dep", list(ap.HOST_REQUIREMENTS) + ["gradio"])
+def test_the_gate_names_a_missing_host_requirement(staged, dep):
+    name = dep.split(">")[0]
+    f = staged / "requirements.txt"
+    f.write_text("\n".join(ln for ln in f.read_text().splitlines() if not ln.startswith(name)) + "\n")
+    assert any(f"requirements.txt must name {name}" in p for p in gate(staged)), name
+
+
+def test_a_failed_write_of_the_publish_commands_is_reported_and_exits_1(world, monkeypatch):
+    def refuse(*a, **k):
+        raise OSError("disk full")
+    monkeypatch.setattr(ap.safeio, "atomic_write", refuse)
+    out = io.StringIO()
+    # staging writes through the same function, so stage first with the real one and then fail only the commands file
+    monkeypatch.undo()
+    world.stage()
+    real = ap.safeio.atomic_write
+    monkeypatch.setattr(ap.safeio, "atomic_write", lambda path, *a, **k: refuse() if Path(path).name == "AUDIO_PUBLISH_COMMANDS.txt" else real(path, *a, **k))
+    assert ap.main(args(world, check=True), out=out, hostname="some-host") == 1
+    assert "could not write stages/7/AUDIO_PUBLISH_COMMANDS.txt" in out.getvalue()
+
+
 def _ledger_with(world, *decisions):
     from orchard.ledger import Ledger
     for name in ("ledger.jsonl", "ledger.jsonl.lock"):

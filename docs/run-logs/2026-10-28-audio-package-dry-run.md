@@ -10,7 +10,7 @@ Paths are placeholders (`<run>` is the run directory). Nothing was uploaded, pub
 |---|---|
 | The builder, the card renderer and the gate | `orchard/audio_package.py` |
 | The command | `tt-orchard audio-package RUN_DIR --namespace ORG --bench FILE --demo-repo DIR [--snapshot DIR] [--check]` |
-| Tests (196, with fake runs, plus 2 for `entries_from_bytes`) | `tests/test_audio_package.py` |
+| Tests (213, with fake runs, plus 2 for `entries_from_bytes`) | `tests/test_audio_package.py` |
 | Hostile-input readers (4 registered) | `tests/hostile_inputs.py` |
 
 ## What was staged
@@ -125,3 +125,4 @@ tt-model publish episod/stable-audio-3-small-music-blackhole                    
 - The run must have finished. The builder reads the whole ledger and refuses a run with no `ready for operator review` decision or with an abort (the test `orchard/package_cmd.py` uses). The audio result exists as soon as stage 2 has run, before the supervisor judges the stage. The ledger is read through `safeio` first (a FIFO, a huge file or a deeply nested line cannot block it), and the hash chain is then verified over those same bytes (`entries_from_bytes`, new in `orchard/ledger.py`, which shares its chain check with `read_entries`), so nothing is opened a second time. A decision that is not text is ignored. The pr165c ledger has the decision and no abort.
 - Weights revision at run time: see the `run.sh` row above. The library's `resolve()` has no revision argument, so the pin is enforced by what the runtime can see (a cache with one revision in it).
 - The staged `run.sh` was run up to its last line against the real library and cache on CPU, with a stand-in for the server so that no port, chip or server started: it printed the attribution line, built the private cache, resolved the model to the pinned revision through it, and exported `HF_HUB_CACHE`. It was not run with the real server.
+- The gate compares `LICENSE.md`, `NOTICE` and the two evidence files with the sha256 in `package-record.json` (the card, page and launcher are checked for what they say, since an operator may edit a card). `requirements.txt` lists the model library's dependencies (torch and torchaudio unpinned so the torch that ships with ttnn is kept) and the page's Gradio pin.

@@ -511,8 +511,9 @@ def render_card(f: Facts, *, namespace: str, license_bytes: bytes) -> str:
              f"- The model library is [stable-audio-3]({LIBRARY_LINK}) at commit `{f.library_commit}`, the commit the run used.",
              f"- Settings of the run: {a.get('steps')} steps, guidance scale {a.get('cfg_scale')}, the {a.get('sampler')} sampler, seed {a.get('seed')}.", "",
              "## Try it", "",
-             "```bash", "pip install -r requirements.txt", f"hf download {f.model_id} --revision {f.revision}      # your own Hugging Face account, after accepting the terms",
-             "export ORCHARD_TTNN_PYTHON=<python with ttnn>   ORCHARD_AUDIO_SRC=<stable-audio-3 checkout at the commit above>",
+             "```bash", "export ORCHARD_TTNN_PYTHON=<python with ttnn>   ORCHARD_AUDIO_SRC=<stable-audio-3 checkout at the commit above>",
+             "$ORCHARD_TTNN_PYTHON -m pip install -r requirements.txt   # into the Python that has ttnn",
+             f"hf download {f.model_id} --revision {f.revision}      # your own Hugging Face account, after accepting the terms",
              "./run.sh          # loads only the pinned revision; on a shared machine, take a chip lease first; see docs/running.md", "```", "",
              "The job server listens on http://127.0.0.1:20100 and the page on http://127.0.0.1:7872. Both bind the local machine only. "
              "The job API is `POST /v1/audio/jobs`, `GET /v1/audio/jobs/<id>`, `GET /v1/audio/jobs/<id>/audio`, `DELETE /v1/audio/jobs/<id>` and `GET /v1/health`.", "",
@@ -552,7 +553,7 @@ def running_doc(f: Facts) -> str:
     return (f"# Running {PACKAGE_NAME}\n\n**{POWERED_BY}**\n\n"
             f"1. Accept the model's terms on its Hugging Face page and download revision `{f.revision}`: `hf download {MODEL_ID} --revision {f.revision}`.\n"
             "2. Check out the stable-audio-3 library at the commit the card names and set `ORCHARD_AUDIO_SRC` to it. "
-            "Set `ORCHARD_TTNN_PYTHON` to a Python that has ttnn.\n"
+            "Set `ORCHARD_TTNN_PYTHON` to a Python that has ttnn, and install `requirements.txt` into it (`$ORCHARD_TTNN_PYTHON -m pip install -r requirements.txt`).\n"
             "3. Start the server and the page: `./run.sh`. The runtime finds the model through the Hugging Face cache's `main` reference, and the server starts a "
             "new process for each clip, so a later download of another revision would change what the next clip loads. `run.sh` therefore builds a cache directory "
             "that holds only the pinned revision (links to your download; your own cache is not written to), points the runtime and every clip's process at it, and "
@@ -560,6 +561,19 @@ def running_doc(f: Facts) -> str:
             "On a shared machine, hold a chip lease for the whole run.\n\n"
             "The model is licensed under the " + LICENSE_NAME + " (`LICENSE.md`). Read it before you use or share the model or this package. "
             "This package does not include the model weights.\n")
+
+
+HOST_REQUIREMENTS = ("numpy", "soundfile", "einops", "einops-exts", "safetensors", "tqdm", "huggingface-hub>=1.7.1", "transformers>=5.8.0", "torch", "torchaudio")
+
+
+def requirements_text(gradio: str) -> str:
+    """requirements.txt: what the host Python needs besides ttnn, taken from the model library's own dependency list (its pyproject.toml at the pinned
+    commit) and the demo's Gradio pin. torch and torchaudio are left unpinned: the library pins torch 2.7.1, and the Python that has ttnn already carries a
+    torch that the runtime was run with."""
+    return ("# What the host process needs besides ttnn. Install it into the Python that has ttnn (ORCHARD_TTNN_PYTHON).\n"
+            "# The model library's dependencies, from its pyproject.toml at the commit the card names. The library pins torch 2.7.1 and torchaudio 2.7.1;\n"
+            "# the lines for them are unpinned so that a torch already installed with ttnn is kept.\n"
+            + "\n".join(HOST_REQUIREMENTS) + "\n# The page (demo/audio_app.py):\n" + gradio + "\n")
 
 
 def run_script(f: Facts) -> str:
@@ -941,6 +955,32 @@ def package_problems(pkg, *, hostname: str | None = None, home: str | None = Non
         return [f"the gate could not read the package ({type(exc).__name__})"]
 
 
+RECORDED = ("LICENSE.md", "NOTICE", RESULT_EVIDENCE, BENCH_EVIDENCE)
+
+
+def record_problems(pkg: Path) -> list[str]:
+    """The license files and the two evidence files are compared with the sha256 the builder recorded in package-record.json. A change after staging
+    (an evidence number edited to match an edited card, a license text trimmed) is a problem. The card, the page and the launcher are not compared:
+    the gate checks what they say, and an operator may edit a card by hand."""
+    text = _text(pkg / RECORD_FILE)
+    try:
+        record = safeio.parse_json_bytes(text.encode("utf-8"), max_bytes=MAX_JSON_BYTES) if text is not None else None
+        rows = record["files"] if isinstance(record, dict) else None
+        recorded = {r["path"]: r["sha256"] for r in rows} if isinstance(rows, list) else None
+    except (safeio.SafeReadError, KeyError, TypeError):
+        recorded = None
+    if not recorded:
+        return [f"{RECORD_FILE} is missing or has no file list, so the license and evidence files cannot be compared with what was staged"]
+    out = []
+    for name in RECORDED:
+        data = _text(pkg / name)
+        if name not in recorded:
+            out.append(f"{RECORD_FILE} does not list {name}")
+        elif data is not None and sha256_bytes(data.encode("utf-8")) != recorded[name]:
+            out.append(f"{name} changed after it was staged: its sha256 is not the one in {RECORD_FILE}")
+    return out
+
+
 def _gate(pkg: Path, hostname, home, validate_manifest) -> list[str]:
     problems = weights_problems(pkg)
     problems += [f"scrub: {hit}" for hit in scrub_files(pkg, hostname=hostname, home=home)]
@@ -965,6 +1005,14 @@ def _gate(pkg: Path, hostname, home, validate_manifest) -> list[str]:
     for name in REQUIRED_FILES:
         if not (pkg / name).is_file():
             problems.append(f"the package has no {name}")
+    reqs = _text(pkg / "requirements.txt") or ""
+    names = {re.split(r"[<>=!~ ;\[]", ln.strip(), maxsplit=1)[0].lower().replace("_", "-") for ln in reqs.splitlines() if ln.strip() and not ln.startswith("#")}
+    for dep in HOST_REQUIREMENTS:
+        if re.split(r"[<>=!~ ;\[]", dep, maxsplit=1)[0] not in names:
+            problems.append(f"requirements.txt must name {dep.split('>')[0]}, which the chip runtime or the model library imports")
+    if "gradio" not in names:
+        problems.append("requirements.txt must name gradio, which the page imports")
+    problems += record_problems(pkg)
     facts, _ = package_facts(pkg)
     if facts is not None:                      # the pin is the same everywhere it is written, and the launcher checks it
         run_sh = _text(pkg / "run.sh") or ""
@@ -1056,7 +1104,7 @@ def stage_package(run_dir, *, bench_path, demo_repo, snapshot, namespace: str, r
     files.append(_write(pkg, "NOTICE", notice_text(license_bytes)))
     files.append(_write(pkg, "tt-model.yaml", manifest_text(facts, namespace)))
     files.append(_write(pkg, "run.sh", run_script(facts), mode=0o755))
-    files.append(_write(pkg, "requirements.txt", f"{requirement}\nnumpy\nsoundfile\ntorch\n"))
+    files.append(_write(pkg, "requirements.txt", requirements_text(requirement)))
     files.append(_write(pkg, "docs/running.md", running_doc(facts)))
 
     for dest, data in runtime.items():
@@ -1108,8 +1156,9 @@ def main(args, *, out=None, hostname=None) -> int:
     text = publish_commands(PACKAGE_NAME, args.namespace)
     try:
         safeio.atomic_write(run / "stages" / "7" / "AUDIO_PUBLISH_COMMANDS.txt", text, mode=0o644)
-    except OSError:
-        pass
+    except OSError as exc:
+        say(f"could not write stages/7/AUDIO_PUBLISH_COMMANDS.txt ({type(exc).__name__}); the package was staged and is not affected")
+        return 1
     if problems:
         say("the package does not pass the gate:")
         for p in problems:
