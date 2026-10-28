@@ -65,7 +65,7 @@ def test_a_link_in_the_cache_is_replaced_and_its_target_is_left_alone(tmp_path):
     assert supervisor.save_reference(fresh, cache, "small-music")
     assert not (cache / "small-music").is_symlink() and st.cached_run(cache, "small-music", identity(), COMMIT) is not None
     assert (elsewhere / "manifest.json").is_file()
-    assert sorted(p.name for p in cache.iterdir()) == ["small-music"]            # the moved-aside link was removed, not left behind
+    assert sorted(p.name for p in cache.iterdir()) == ["small-music"]            # the moved-aside link was removed
 
 
 def test_the_other_models_entry_is_not_touched(tmp_path):

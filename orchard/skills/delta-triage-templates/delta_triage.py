@@ -2751,7 +2751,7 @@ _MISSING = object()
 
 
 def _audio_segment(prefix: str, key: str) -> str:
-    """The path of `key` under `prefix`. A plain key (no dot, bracket, quote or backslash, not empty) is joined with a dot, as `model.diffusion.type`. Any other
+    """The path of `key` under `prefix`. A plain key (no dot, bracket, quote or backslash, and non-empty) is joined with a dot, as `model.diffusion.type`. Any other
     key is one quoted component, `["model.sampler_type"]`, so a key that holds a dot cannot pass for a nested path: the top-level key `model.sampler_type`
     and the setting `sampler_type` inside `model` are different paths. List positions are `[0]`, so no two different paths give the same text."""
     plain = bool(key) and not any(c in key for c in '.[]"\\')
@@ -2987,7 +2987,7 @@ def load_audio_overrides(path: Path) -> tuple[dict, list[str]]:
     """({"categories": {key: {"category", "source"}}, "path": None or {"path", "source"}}, problems) from audio_overrides.json. A missing file is
     fine. Anything malformed is a problem and nothing from the file is used."""
     empty = {"categories": {}, "path": None}
-    if not os.path.lexists(path):          # lexists, not exists: a link that points nowhere is a file that is there and cannot be read
+    if not os.path.lexists(path):          # lexists: a link that points nowhere is a file that is there and cannot be read
         return empty, []
     data, err = _audio_json(path)
     if err:

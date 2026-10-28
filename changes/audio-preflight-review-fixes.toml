@@ -1,0 +1,4 @@
+target = "0.9.52"
+summary = "Audio preflight and class decision review fixes: runtime row, snapshot indexes and revision choice, exact repository ids, decision gate checks, reference cache replacement"
+pr = 189
+kind = "fix"

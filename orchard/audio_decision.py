@@ -12,7 +12,7 @@ What it requires:
 - the fields: class, path, alternative_path, confidence, strict, differences, overrides, and the class and path equal to delta.json's;
 - `strict` equal to the stage's `triage_config.json` `audio_strict` (when the caller gives it);
 - each difference: a key listed once, both values, a category (serving, structural or unknown), `decided_by` (`allow-list` or `override`), and a non-empty
-  `source` when an override decided it. An `allow-list` category has to be the one the allow-list table gives for that key and those values (the table is
+  `source` when an override decided it. An `allow-list` category has to be what the allow-list table gives for that key and those values (the table is
   audio_config_categories.json next to the template; `category_rules`); an `override` category has to be recorded in `overrides`;
 - each override: a kind (category or path), a non-empty source and the fields its kind needs. A category override names a difference that says it was decided
   by an override, with the same category and source, and its `from` is what the allow-list gave. At most one path override; its path is the decision's path;
@@ -143,7 +143,7 @@ def decision_problems(delta, *, current_template: bool = False, expected_strict:
         out.append("audio.decision strict must be true or false")
     elif expected_strict is not None and d["strict"] != expected_strict:
         out.append(f"audio.decision strict is {d['strict']} but the triage configuration's audio_strict is {expected_strict}, so the decision was made under "
-                   "another rule than the one configured")
+                   "a different rule from the configured one")
     if not isinstance(d["differences"], list):
         out.append("audio.decision differences must be a list")
     if not isinstance(d["overrides"], list):

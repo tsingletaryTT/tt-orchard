@@ -144,7 +144,7 @@ def _int(text):
 
 
 def _float(text):
-    """A float that fits. `1e999` is valid JSON text that Python reads as infinity, and `parse_constant` never sees it (it handles the words
+    """A float that fits. `1e999` is valid JSON text that Python parses to infinity, and `parse_constant` never sees it (it handles the words
     NaN and Infinity only), so the value is checked here."""
     value = float(text)
     if not math.isfinite(value):

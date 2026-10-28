@@ -194,7 +194,7 @@ def test_the_run_uses_the_chosen_revision_for_the_hub_row(tmp_path, monkeypatch)
     complete, partial = _two_revisions(tmp_path)
     s, hub = _signals_with_hub(tmp_path, monkeypatch, sha="ffff0000")
     hub.gated = True
-    # the gated hub row names the revision it found on disk: the complete one, not the partial one that sorts later
+    # the gated hub row names the revision it found on disk: the complete one, and the partial one that sorts later is not named
     c = pf.check_hub(hub, None, local=True, local_path=s.local_snapshot("org/model"))
     assert c.status == "warn" and complete.name in c.detail and partial.name not in c.detail
 

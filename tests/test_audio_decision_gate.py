@@ -10,7 +10,7 @@ delta.json that the shipped template wrote (so the stamp and the evidence are th
   3. each difference's category has to be what the allow-list gives for its key and values, or be recorded as an override;
   4. a path override has to be a single one, go to the decision's path, and carry its source;
   5. weights-only is refused when the comparison evidence holds a tensor or text-encoder difference or a read problem, even with an override;
-  6. (template) a dangling audio_overrides.json link is an unreadable file, not an absent one;
+  6. (template) a dangling audio_overrides.json link counts as an unreadable file;
   7. (template) a config key that holds a dot cannot pass for a nested key."""
 from __future__ import annotations
 
