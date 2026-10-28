@@ -13,6 +13,7 @@ import argparse
 import datetime
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -34,7 +35,19 @@ def atomic_write(path: Path, text: str, *, replace: bool = True) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
     try:
+        # mkstemp makes the file 0600, and os.replace would carry that over to the destination. An existing
+        # file keeps its permission bits (and its owner and group where this process may set them); a new file is 0644.
+        try:
+            old = os.stat(path)
+        except OSError:
+            old = None
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            os.fchmod(fh.fileno(), 0o644 if old is None else stat.S_IMODE(old.st_mode))
+            if old is not None:
+                try:
+                    os.fchown(fh.fileno(), old.st_uid, old.st_gid)
+                except OSError:
+                    pass                                   # not permitted for another owner; the mode is kept
             fh.write(text)
             fh.flush()
             os.fsync(fh.fileno())

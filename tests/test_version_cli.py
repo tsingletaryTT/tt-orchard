@@ -461,3 +461,46 @@ def test_release_prints_merge_first_then_verify_then_tag_in_that_order(repo):
     assert at == sorted(at), dict(zip(steps, at))
     assert "5. python3 scripts/version.py tag-check 1.1.0" in out and "6. git tag -a v1.1.0" in out
     assert "never tag the branch commit" in out.lower() or "do not tag the branch commit" in out.lower()
+
+
+# ---- atomic writes keep the destination's mode and owner ------------------------------------------
+
+@pytest.mark.parametrize("mode", [0o755, 0o640, 0o644, 0o600])
+def test_atomic_write_keeps_the_mode_of_an_existing_file(tmp_path, mode):
+    dest = tmp_path / "f.txt"
+    dest.write_text("old")
+    dest.chmod(mode)
+    C.atomic_write(dest, "new")
+    assert dest.read_text() == "new" and (dest.stat().st_mode & 0o7777) == mode
+
+
+def test_atomic_write_gives_a_new_file_mode_0644_not_the_temp_files_0600(tmp_path):
+    for replace in (True, False):
+        dest = tmp_path / f"new-{replace}.txt"
+        C.atomic_write(dest, "x", replace=replace)
+        assert (dest.stat().st_mode & 0o7777) == 0o644
+
+
+def test_atomic_write_asks_for_the_destination_owner_and_ignores_a_refusal(tmp_path, monkeypatch):
+    dest = tmp_path / "f.txt"
+    dest.write_text("old")
+    st = dest.stat()
+    calls = []
+
+    def fake_fchown(fd, uid, gid):
+        calls.append((uid, gid))
+        raise PermissionError(1, "not permitted")
+    monkeypatch.setattr(os, "fchown", fake_fchown)
+    C.atomic_write(dest, "new")                                # a refusal must not fail the write
+    assert calls == [(st.st_uid, st.st_gid)] and dest.read_text() == "new"
+
+
+def test_release_keeps_the_mode_of_init_py_and_gives_the_notes_0644(repo):
+    setup_release(repo)
+    init = repo / "orchard" / "__init__.py"
+    init.chmod(0o755)
+    sh(repo, "git", "update-index", "--chmod=+x", "orchard/__init__.py")
+    sh(repo, *GIT, "commit", "-q", "-m", "mode")
+    assert run(repo, "release")[0] == 0
+    assert (init.stat().st_mode & 0o7777) == 0o755
+    assert ((repo / "docs" / "releases" / "1.1.0.md").stat().st_mode & 0o7777) == 0o644
