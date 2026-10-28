@@ -192,13 +192,14 @@ def evaluate(ref, cand, bars: dict, *, group: str = "kind", cross_precision: boo
             problems.append(f"{kind}/{name} is only in the {'reference' if key in ref.entries else 'candidate'}")
             continue
         g = "noise" if kind == "noise" else group_of(kind, name, group)
-        m = ar.metrics(ref.array(kind, name), cand.array(kind, name))
+        ra, ca = ref.array(kind, name), cand.array(kind, name)          # each file is read once and the arrays are reused below
+        m = ar.metrics(ra, ca)
         if g not in bars:
             ok, why = False, [f"no measured bar for group {g}"]
         else:
             ok, why = ar.verdict(m, bars[g])
-        rn = float(np.linalg.norm(ref.array(kind, name).astype(np.float64)))
-        cn = float(np.linalg.norm(cand.array(kind, name).astype(np.float64)))
+        rn = float(np.linalg.norm(ra.astype(np.float64)))
+        cn = float(np.linalg.norm(ca.astype(np.float64)))
         results.append({"kind": kind, "name": name, "group": g, "ok": ok, "reasons": why, **{k: m.get(k) for k in ("comparable", "pcc", "rel_l2", "slope")},
                         "norm_ratio": (cn / rn) if rn > 0 else None,
                         "bars": bars[g].__dict__ if g in bars else None})

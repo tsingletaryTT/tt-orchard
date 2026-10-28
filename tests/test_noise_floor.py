@@ -493,3 +493,19 @@ def test_evaluate_reports_the_norm_ratio_of_candidate_to_reference(world):
     res = nf.evaluate(world.ref, scaled, bars)
     ratio = next(r["norm_ratio"] for r in res["results"] if r["name"] == "layer_00")
     assert ratio == pytest.approx(0.8, rel=1e-6)
+
+
+def test_evaluate_reads_each_array_file_once(world):
+    class Counting:
+        def __init__(self, run):
+            self.run, self.calls = run, []
+            self.entries, self.settings, self.manifest = run.entries, run.settings, run.manifest
+
+        def array(self, kind, name):
+            self.calls.append((kind, name))
+            return self.run.array(kind, name)
+    bars = nf.derive_bars(nf.measure_floor([world.ref, world.repeat], [world.env_b]), margin=3.0)
+    ref, cand = Counting(world.ref), Counting(world.good)
+    nf.evaluate(ref, cand, bars)
+    # noise arrays are read once more by the draw check; every other array exactly once
+    assert all(ref.calls.count(k) == 1 for k in ref.calls if k[0] != "noise") and all(cand.calls.count(k) == 1 for k in cand.calls if k[0] != "noise")
