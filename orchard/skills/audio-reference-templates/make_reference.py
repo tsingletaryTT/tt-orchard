@@ -26,6 +26,8 @@ import argparse
 import hashlib
 import math
 import os
+import re
+import stat
 import sys
 import time
 from contextlib import contextmanager
@@ -75,12 +77,25 @@ def resolve_attr(obj, path):
     return obj
 
 
-def sha256_file(path: Path) -> str:
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
+def file_facts(path, *, hash_it: bool = True) -> dict:
+    """{"sha256", "bytes"} of a regular file, from one open descriptor: the size is the size of the file that was opened and the hash covers exactly
+    those bytes. Links are followed (a Hugging Face snapshot is made of links into blobs/). `hash_it=False` skips the hash (a 2 GB checkpoint)."""
+    try:
+        fd = os.open(os.path.realpath(path), os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NONBLOCK", 0))
+    except OSError as exc:
+        raise SystemExit(f"cannot read {path}: {exc}") from exc
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode):
+        os.close(fd)
+        raise SystemExit(f"{path} is not a regular file")
+    with os.fdopen(fd, "rb") as f:
+        digest = None
+        if hash_it:
+            h = hashlib.sha256()
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+            digest = h.hexdigest()
+    return {"sha256": digest, "bytes": st.st_size}
 
 
 @contextmanager
@@ -180,16 +195,53 @@ def load_model(name: str, device: str = "cpu"):
     return StableAudioModel.from_pretrained(name, device=device, model_half=False), Path(config_path), Path(ckpt_path)
 
 
+REF_NAME = re.compile(r"refs/[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*")
+
+
+def _read_ref(git_fd: int, name: str):
+    """The text of a loose ref, found by opening each directory of its name relative to the previous one without following a link. None when any step
+    is missing, is a link, or is not what it should be."""
+    from orchard import pinned_files as pf
+    parts = name.split("/")
+    if not REF_NAME.fullmatch(name) or any(p in (".", "..") for p in parts):
+        return None
+    opened = []
+    try:
+        d = git_fd
+        for part in parts[:-1]:
+            d = pf.open_dir(part, dir_fd=d, follow=False)
+            opened.append(d)
+        return pf.read_regular(d, parts[-1], 1024).decode("ascii", "replace").strip()
+    except pf.PinnedError:
+        return None
+    finally:
+        for fd in opened:
+            os.close(fd)
+
+
 def library_commit() -> dict:
-    """The library's name and, when it is a checkout, its commit (read from the .git directory, no subprocess)."""
+    """The library's name and, when it is a checkout, its commit. HEAD and a loose ref are read through descriptors (the `.git` directory opened without
+    following a link, every directory of the ref's name opened relative to the one before), the ref's name must be a plain `refs/...` path, and the answer
+    must be 40 hex digits; anything else is "unknown". No subprocess runs."""
     import stable_audio_3
+    from orchard import pinned_files as pf
     root = Path(stable_audio_3.__file__).resolve().parents[1]
     commit = None
-    head = root / ".git" / "HEAD"
     try:
-        text = head.read_text().strip()
-        commit = (root / ".git" / text.split(" ", 1)[1]).read_text().strip() if text.startswith("ref:") else text
-    except (OSError, IndexError):
+        # `root` was resolved above, so it holds no link. A link found here means the path was swapped after the resolve.
+        rfd = pf.open_dir(root, follow=False)
+        try:
+            gfd = pf.open_dir(".git", dir_fd=rfd, follow=False)
+            try:
+                head = pf.read_regular(gfd, "HEAD", 1024).decode("ascii", "replace").strip()
+                m = re.fullmatch(r"ref: (\S+)", head)
+                text = _read_ref(gfd, m.group(1)) if m else head
+                commit = text if text and re.fullmatch(r"[0-9a-f]{40}", text) else None
+            finally:
+                os.close(gfd)
+        finally:
+            os.close(rfd)
+    except pf.PinnedError:
         pass
     return {"name": "stable-audio-3", "commit": commit or "unknown", "path_hash": hashlib.sha256(str(root).encode()).hexdigest()[:12]}
 
@@ -255,8 +307,9 @@ def main(argv=None) -> int:
     settings = {"prompt": args.prompt, "duration": args.duration, "steps": args.steps, "cfg_scale": args.cfg_scale, "sampler": sampler,
                 "seed": args.seed, "dtype": "float32", "sample_size": args.sample_size, "device": "cpu"}
     revision = ckpt_path.parent.name       # the snapshot directory; resolving the checkpoint link would give `blobs`
-    recorder = Recorder(args.out, model={"name": args.model, "revision": revision, "config_sha256": sha256_file(config_path),
-                                         "diffusion_objective": str(model.model.diffusion_objective), "checkpoint_bytes": ckpt_path.stat().st_size},
+    recorder = Recorder(args.out, model={"name": args.model, "revision": revision, "config_sha256": file_facts(config_path)["sha256"],
+                                         "diffusion_objective": str(model.model.diffusion_objective),
+                                         "checkpoint_bytes": file_facts(ckpt_path, hash_it=False)["bytes"]},
                         library={**library_commit(), "source_verified": bool(args.expect_src)}, settings=settings, seeds={"torch": args.seed, "numpy": None})
     run_reference(model, settings, recorder, torch)
     path = recorder.finish()

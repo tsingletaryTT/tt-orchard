@@ -11,6 +11,8 @@ from __future__ import annotations
 import copy
 import json
 import struct
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -895,3 +897,563 @@ def test_a_header_that_is_not_an_object_is_unknown_and_does_not_crash(audio_case
     (model_snapshot(stage) / "model.safetensors").write_bytes(struct.pack("<Q", len(blob)) + blob)
     d = run_ok(stage)
     assert d["class"] == "unknown" and "not a JSON object" in reasons(d)
+
+
+# ---- round five: an audio candidate with an unreadable config stays audio; one descriptor per file ------------------
+
+UNREADABLE_CONFIGS = ["not json", "[]", '{"model_type": "x", "model": {"a": 1, "a": 2}}', '{"model_type": "x"}', '{"model": {}}', "",
+                      '{"model_type": "x", "model": {"a": NaN}}']
+
+
+@pytest.mark.parametrize("text", UNREADABLE_CONFIGS)
+def test_a_model_config_that_is_present_but_unreadable_is_still_an_audio_run_with_class_unknown(audio_case, text):
+    stage = audio_case()
+    (model_snapshot(stage) / "model_config.json").write_text(text)
+    d = run_ok(stage)
+    assert d["class"] == "unknown" and d["path"] == "full-port" and d["facts"] == {"form": "full", "modality": "audio"}
+    assert "new model" in reasons(d) and "model_config.json" in reasons(d)
+    assert gate(stage).ok, gate(stage).reasons
+
+
+def test_an_oversized_model_config_is_still_an_audio_run_with_class_unknown(audio_case):
+    stage = audio_case()
+    (model_snapshot(stage) / "model_config.json").write_text(json.dumps({**CONFIG, "pad": "x" * (2 << 20)}))
+    d = run_ok(stage)
+    assert d["class"] == "unknown" and d["facts"]["modality"] == "audio"
+
+
+def test_a_model_config_that_is_a_directory_or_a_dangling_link_is_still_audio(audio_case, tmp_path):
+    import shutil
+    stage = audio_case()
+    cfg = model_snapshot(stage) / "model_config.json"
+    cfg.unlink()
+    cfg.mkdir()
+    assert run_ok(stage)["facts"]["modality"] == "audio"
+    shutil.rmtree(cfg)
+    cfg.symlink_to(tmp_path / "nowhere.json")
+    d = run_ok(stage)
+    assert d["class"] == "unknown" and d["facts"]["modality"] == "audio"
+
+
+def test_a_snapshot_with_a_model_config_and_no_weights_is_audio_with_class_unknown(audio_case):
+    stage = audio_case()
+    (model_snapshot(stage) / "model.safetensors").unlink()
+    d = run_ok(stage)
+    assert d["class"] == "unknown" and d["facts"]["modality"] == "audio"
+
+
+def test_an_unreadable_nearest_model_config_is_unknown_and_names_the_nearest_model(audio_case):
+    stage = audio_case()
+    cfg = json.loads((stage / "triage_config.json").read_text())
+    (Path(cfg["nearest_snapshot"]) / "model_config.json").write_text("not json")
+    d = run_ok(stage)
+    assert d["class"] == "unknown" and "nearest model" in reasons(d) and d["facts"]["modality"] == "audio"
+
+
+def test_a_snapshot_with_a_config_json_is_never_an_audio_candidate(tmp_path):
+    snap = make_audio(tmp_path, MODEL_REV, repo=MODEL_ID, extra={"config.json": "{}"})
+    (snap / "model_config.json").write_text("not json")
+    assert template_module().looks_like_audio(snap) is False
+
+
+@pytest.mark.parametrize("make,expected", [("none", False), ("file", True), ("dir", True)])
+def test_looks_like_audio_needs_a_model_config_entry_and_no_config_json(tmp_path, make, expected):
+    snap = tmp_path / "s"
+    snap.mkdir()
+    if make == "file":
+        (snap / "model_config.json").write_text("not json")
+    elif make == "dir":
+        (snap / "model_config.json").mkdir()
+    assert template_module().looks_like_audio(snap) is expected
+
+
+def test_the_unknown_audio_result_stops_the_supervisor_run_because_it_records_the_facts(audio_case):
+    stage = audio_case()
+    (model_snapshot(stage) / "model_config.json").write_text("not json")
+    run_ok(stage)
+    d = json.loads((stage / "delta.json").read_text())
+    from orchard.stages import delta_facts
+    assert delta_facts(stage.parent.parent) == {"form": "full", "modality": "audio"} and d["class"] == "unknown"
+
+
+# ---- one descriptor per file: header and size from the same open ---------------------------------------------
+
+def test_a_header_and_its_size_come_from_one_open_file(tmp_path, monkeypatch):
+    snap = make_audio(tmp_path, MODEL_REV, repo=MODEL_ID)
+    mod = template_module()
+    real_stat = Path.stat
+
+    def stat_guard(self, *a, **k):
+        if self.name.endswith((".safetensors", ".json")):
+            raise AssertionError(f"{self.name} was looked at by name")
+        return real_stat(self, *a, **k)
+    monkeypatch.setattr(Path, "stat", stat_guard)
+    assert mod.audio_header(snap / "model.safetensors")
+    assert mod._audio_json(snap / "model_config.json")[1] is None
+
+
+def test_a_config_is_read_with_one_open_and_no_second_look_at_the_name(tmp_path, monkeypatch):
+    snap = make_audio(tmp_path, MODEL_REV, repo=MODEL_ID)
+    mod = template_module()
+    monkeypatch.setattr(Path, "read_text", lambda *a, **k: (_ for _ in ()).throw(AssertionError("read_text by name")))
+    assert mod._audio_json(snap / "model_config.json")[1] is None
+
+
+def test_a_fifo_is_not_a_regular_file_and_is_not_opened_for_reading(tmp_path):
+    import os
+    snap = make_audio(tmp_path, MODEL_REV, repo=MODEL_ID)
+    (snap / "model_config.json").unlink()
+    os.mkfifo(snap / "model_config.json")
+    data, err = template_module()._audio_json(snap / "model_config.json")
+    assert data is None and "not a regular file" in err
+
+
+def test_a_file_that_changes_after_it_was_read_is_reported(tmp_path):
+    snap = make_audio(tmp_path, MODEL_REV, repo=MODEL_ID)
+    mod = template_module()
+    mod.audio_identity_reset()
+    mod.audio_tensors(snap)
+    mod._audio_json(snap / "model_config.json")
+    assert mod.audio_identity_problems() == []
+    write_safetensors(snap / "model.safetensors", TENSORS, 9.0)          # same size, new inode and time
+    problems = mod.audio_identity_problems()
+    assert problems and "model.safetensors" in problems[0] and "changed while" in problems[0]
+
+
+def test_a_file_that_was_removed_after_it_was_read_is_reported(tmp_path):
+    snap = make_audio(tmp_path, MODEL_REV, repo=MODEL_ID)
+    mod = template_module()
+    mod.audio_identity_reset()
+    mod._audio_json(snap / "model_config.json")
+    (snap / "model_config.json").unlink()
+    assert "model_config.json" in mod.audio_identity_problems()[0]
+
+
+def test_a_new_model_with_a_bad_layout_is_reported_once_whatever_its_weights_look_like(audio_case):
+    """The layout problem is the finding. The weights of a directory already refused as a layout are not read, so they add no second reason."""
+    stage = audio_case()
+    snap = model_snapshot(stage)
+    (snap / "model_config.json").write_text("{}")
+    write_header_only(snap / "model.safetensors", {})
+    d = run_ok(stage)
+    text = reasons(d)
+    assert d["class"] == "unknown" and "not a usable stable-audio-tools layout" in text and "holds no tensors" not in text
+    (snap / "model.safetensors").write_bytes(b"\xff" * 16)
+    text = reasons(run_ok(stage))
+    assert "not a usable stable-audio-tools layout" in text and "new model model.safetensors" not in text
+
+
+def test_a_new_model_with_a_bad_layout_and_no_weights_file_is_reported_once(audio_case):
+    stage = audio_case()
+    snap = model_snapshot(stage)
+    (snap / "model_config.json").write_text("{}")
+    (snap / "model.safetensors").unlink()
+    text = reasons(run_ok(stage))
+    assert "not a usable stable-audio-tools layout" in text and "holds no tensors" not in text
+
+
+def test_a_dangling_config_json_link_keeps_a_snapshot_out_of_the_audio_branch(tmp_path):
+    """A top-level config.json that exists as a name (here a dangling link) marks a text model; looks_like_audio must not use a following check."""
+    snap = make_audio(tmp_path, MODEL_REV, repo=MODEL_ID)
+    (snap / "config.json").symlink_to(tmp_path / "nowhere")
+    assert template_module().looks_like_audio(snap) is False
+
+
+# ---- the identity check and the descriptor's own size, each seen to matter ---------------------------------
+
+def _lying_fstat(monkeypatch, mod, extra):
+    """os.fstat as the template sees it, reporting `extra` more bytes than the file has (a file that grew after the open)."""
+    import os
+    from types import SimpleNamespace
+    real = os.fstat
+
+    def fake(fd):
+        r = real(fd)
+        return SimpleNamespace(st_mode=r.st_mode, st_size=r.st_size + extra, st_dev=r.st_dev, st_ino=r.st_ino, st_mtime_ns=r.st_mtime_ns)
+    monkeypatch.setattr(mod.os, "fstat", fake)
+
+
+def test_resetting_the_identity_record_forgets_earlier_files(tmp_path):
+    snap = make_audio(tmp_path, MODEL_REV, repo=MODEL_ID)
+    mod = template_module()
+    mod._audio_json(snap / "model_config.json")
+    assert mod.AUDIO_IDENTITY
+    mod.audio_identity_reset()
+    assert mod.AUDIO_IDENTITY == {}
+
+
+def test_a_weight_file_replaced_during_the_value_sample_makes_the_real_run_unknown(audio_case, tmp_path):
+    """End to end: the stage script runs, and the weight file is swapped (same bytes, new inode) while the value sample reads it."""
+    stage = audio_case()
+    model = model_snapshot(stage) / "model.safetensors"
+    driver = tmp_path / "driver.py"
+    driver.write_text(
+        "import importlib.util, os, sys\n"
+        f"spec = importlib.util.spec_from_file_location('dt', {str(stage / 'delta_triage.py')!r})\n"
+        "mod = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(mod)\n"
+        "orig = mod.audio_value_diffs\n"
+        "def patched(*a, **k):\n"
+        "    out = orig(*a, **k)\n"
+        f"    p = {str(model)!r}\n"
+        "    data = open(p, 'rb').read()\n"
+        "    open(p + '.new', 'wb').write(data)\n"
+        "    os.replace(p + '.new', p)\n"
+        "    return out\n"
+        "mod.audio_value_diffs = patched\n"
+        "sys.exit(mod.main())\n")
+    r = subprocess.run([sys.executable, str(driver)], capture_output=True, text=True, timeout=300)
+    assert r.returncode == 0, r.stdout + r.stderr
+    d = json.loads((stage / "delta.json").read_text())
+    assert d["class"] == "unknown" and "model.safetensors changed while stage 0 was reading it" in reasons(d)
+
+
+def test_a_config_that_grows_past_the_cap_after_it_was_opened_is_refused(tmp_path, monkeypatch):
+    mod = template_module()
+    path = tmp_path / "model_config.json"
+    path.write_text('{"a": "' + "x" * (mod.AUDIO_JSON_MAX + 10) + '"}')
+    _lying_fstat(monkeypatch, mod, -(mod.AUDIO_JSON_MAX + 100))          # the size taken at the open said it fits
+    data, err = mod._audio_json(path)
+    assert data is None and "larger than" in err
+
+
+def test_the_data_section_size_is_the_size_of_the_opened_file(tmp_path, monkeypatch):
+    mod = template_module()
+    snap = make_audio(tmp_path, MODEL_REV, repo=MODEL_ID)
+    assert mod.audio_header(snap / "model.safetensors")
+    _lying_fstat(monkeypatch, mod, 16)
+    with pytest.raises(ValueError, match="no tensor claims"):
+        mod.audio_header(snap / "model.safetensors")
+
+
+# ---- review of PR 142: the first identity of a file is kept across later opens -------------------------
+
+def _replace_same_bytes(path):
+    import os
+    data = path.read_bytes()
+    tmp = path.with_name(path.name + ".new")
+    tmp.write_bytes(data)
+    os.replace(tmp, path)
+
+
+def test_a_config_replaced_between_two_opens_is_reported_even_when_the_second_open_is_the_last(tmp_path):
+    snap = make_audio(tmp_path, MODEL_REV, repo=MODEL_ID)
+    mod = template_module()
+    mod.audio_identity_reset()
+    assert mod._audio_json(snap / "model_config.json")[1] is None
+    _replace_same_bytes(snap / "model_config.json")            # same bytes, new inode
+    mod._audio_json(snap / "model_config.json")
+    problems = mod.audio_identity_problems()
+    assert problems and "model_config.json changed while stage 0 was reading it" in problems[0]
+
+
+def test_a_config_with_new_content_at_the_second_open_is_refused_by_hash(tmp_path):
+    import os
+    snap = make_audio(tmp_path, MODEL_REV, repo=MODEL_ID)
+    mod = template_module()
+    mod.audio_identity_reset()
+    path = snap / "model_config.json"
+    first = path.read_bytes()
+    assert mod._audio_json(path)[1] is None
+    st = os.stat(path)
+    i = first.index(b'"') + 1
+    path.write_bytes(first[:i] + (b"Z" if first[i:i + 1] != b"Z" else b"Y") + first[i + 1:])        # one byte changed in place: same size
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))          # even with the old time and size kept in step, the hash differs
+    data, err = mod._audio_json(path)
+    assert data is None and "changed between" in err
+
+
+def test_a_config_that_is_the_same_file_at_both_opens_is_fine(tmp_path):
+    snap = make_audio(tmp_path, MODEL_REV, repo=MODEL_ID)
+    mod = template_module()
+    mod.audio_identity_reset()
+    assert mod._audio_json(snap / "model_config.json")[1] is None
+    assert mod._audio_json(snap / "model_config.json")[1] is None
+    assert mod.audio_identity_problems() == []
+
+
+def test_a_config_replaced_after_the_layout_check_makes_the_real_run_unknown(audio_case, tmp_path):
+    """End to end: audio_main reads the config twice (layout check, then comparison). The swap happens between them."""
+    stage = audio_case()
+    cfgpath = model_snapshot(stage) / "model_config.json"
+    driver = tmp_path / "driver2.py"
+    driver.write_text(
+        "import importlib.util, os, sys\n"
+        f"spec = importlib.util.spec_from_file_location('dt', {str(stage / 'delta_triage.py')!r})\n"
+        "mod = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(mod)\n"
+        "orig = mod.audio_layout_problem\n"
+        "state = []\n"
+        "def patched(snapshot):\n"
+        "    out = orig(snapshot)\n"
+        f"    if str(snapshot) == {str(model_snapshot(stage))!r} and not state:\n"
+        "        state.append(1)\n"
+        f"        p = {str(cfgpath)!r}\n"
+        "        data = open(p, 'rb').read()\n"
+        "        open(p + '.new', 'wb').write(data)\n"
+        "        os.replace(p + '.new', p)\n"
+        "    return out\n"
+        "mod.audio_layout_problem = patched\n"
+        "sys.exit(mod.main())\n")
+    r = subprocess.run([sys.executable, str(driver)], capture_output=True, text=True, timeout=300)
+    assert r.returncode == 0, r.stdout + r.stderr
+    d = json.loads((stage / "delta.json").read_text())
+    assert d["class"] == "unknown" and "model_config.json changed while stage 0 was reading it" in reasons(d)
+
+
+def test_resetting_forgets_the_first_hashes_and_the_noted_mismatches(tmp_path):
+    snap = make_audio(tmp_path, MODEL_REV, repo=MODEL_ID)
+    mod = template_module()
+    mod.audio_identity_reset()
+    mod._audio_json(snap / "model_config.json")
+    _replace_same_bytes(snap / "model_config.json")
+    mod._audio_json(snap / "model_config.json")
+    assert mod.AUDIO_JSON_SHA and mod.AUDIO_REOPENED_DIFFERENT
+    mod.audio_identity_reset()
+    assert mod.AUDIO_JSON_SHA == {} and mod.AUDIO_REOPENED_DIFFERENT == set() and mod.audio_identity_problems() == []
+
+
+def test_the_hash_covers_the_whole_file_and_a_later_read_still_compares_with_the_first(tmp_path):
+    import os
+    snap = make_audio(tmp_path, MODEL_REV, repo=MODEL_ID)
+    mod = template_module()
+    mod.audio_identity_reset()
+    path = snap / "model_config.json"
+    first = path.read_bytes()
+    assert mod._audio_json(path)[1] is None
+    st = os.stat(path)
+    i = first.rindex(b'"') - 1                          # the last character of the last string, far from the start
+    path.write_bytes(first[:i] + (b"Z" if first[i:i + 1] != b"Z" else b"Y") + first[i + 1:])
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
+    assert "changed between" in mod._audio_json(path)[1]
+    assert "changed between" in mod._audio_json(path)[1]          # a third read is still compared with the first, not with the second
+
+
+def test_a_file_swapped_in_for_one_open_and_swapped_back_is_still_reported(tmp_path):
+    import os
+    snap = make_audio(tmp_path, MODEL_REV, repo=MODEL_ID)
+    mod = template_module()
+    mod.audio_identity_reset()
+    path = snap / "model_config.json"
+    assert mod._audio_json(path)[1] is None
+    original = path.with_name("original-config")
+    os.rename(path, original)
+    path.write_bytes(original.read_bytes())               # a different file with the same bytes
+    mod._audio_json(path)
+    path.unlink()
+    os.rename(original, path)                             # the first file is back: the final stat alone would find nothing
+    problems = mod.audio_identity_problems()
+    assert problems and "different file at a later open" in problems[0]
+
+
+# ---- review of PR 142, round three: the sampler's files, config read errors, and reads that failed quietly -------
+
+def _run_with_hook(stage, tmp_path, name, hook_source, target):
+    """Run the stage script in a subprocess with `target` (a function of the loaded script) wrapped by `hook_source`, which defines
+    `before(*a, **k)` and `after(*a, **k)` run around the original call."""
+    driver = tmp_path / f"driver_{name}.py"
+    driver.write_text(
+        "import importlib.util, os, sys\n"
+        f"spec = importlib.util.spec_from_file_location('dt', {str(stage / 'delta_triage.py')!r})\n"
+        "mod = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(mod)\n"
+        + hook_source +
+        f"orig = mod.{target}\n"
+        "state = []\n"
+        "def wrapped(*a, **k):\n"
+        "    before(*a, **k)\n"
+        "    try:\n"
+        "        return orig(*a, **k)\n"
+        "    finally:\n"
+        "        after(*a, **k)\n"
+        f"mod.{target} = wrapped\n"
+        "sys.exit(mod.main())\n")
+    r = subprocess.run([sys.executable, str(driver)], capture_output=True, text=True, timeout=300)
+    assert r.returncode == 0, r.stdout + r.stderr
+    return json.loads((stage / "delta.json").read_text())
+
+
+def test_a_weight_file_swapped_for_the_sampler_and_put_back_still_makes_the_run_unknown(audio_case, tmp_path):
+    stage = audio_case()
+    model = model_snapshot(stage) / "model.safetensors"
+    hook = (f"P = {str(model)!r}\n"
+            "def before(*a, **k):\n"
+            "    os.rename(P, P + '.orig')\n"
+            "    open(P, 'wb').write(open(P + '.orig', 'rb').read())\n"
+            "def after(*a, **k):\n"
+            "    os.unlink(P)\n"
+            "    os.rename(P + '.orig', P)\n")
+    d = _run_with_hook(stage, tmp_path, "swap", hook, "audio_value_diffs")
+    assert d["class"] == "unknown" and "model.safetensors" in reasons(d) and "different file at a later open" in reasons(d)
+
+
+def test_a_weight_file_cut_short_before_the_sampler_reads_it_is_a_problem_not_a_missing_difference(audio_case, tmp_path):
+    stage = audio_case()
+    model = model_snapshot(stage) / "model.safetensors"
+    hook = (f"P = {str(model)!r}\n"
+            "def before(*a, **k):\n"
+            "    data = open(P, 'rb').read()\n"
+            "    open(P, 'wb').write(data[:len(data) // 2])\n"
+            "def after(*a, **k):\n"
+            "    pass\n")
+    d = _run_with_hook(stage, tmp_path, "cut", hook, "audio_value_diffs")
+    assert d["class"] == "unknown" and "value sample" in reasons(d)
+    assert (stage / "evidence" / "value-compare.json").exists()
+
+
+def test_the_sampler_reports_an_unreadable_file_as_a_problem(tmp_path):
+    mod = template_module()
+    a = make_audio(tmp_path / "a", MODEL_REV, repo=MODEL_ID)
+    b = make_audio(tmp_path / "b", BASE_REV, repo=BASE_ID, seed=1.0)
+    mt, _ = mod.audio_tensors(a)
+    bt, _ = mod.audio_tensors(b)
+    values, problems = mod.audio_value_diffs(a, b, mt, bt)
+    assert problems == [] and values["samples"]
+    (a / "model.safetensors").unlink()
+    values, problems = mod.audio_value_diffs(a, b, mt, bt)
+    assert problems and "value sample" in problems[0] and values["samples"] == []
+
+
+def test_the_sampler_opens_every_file_through_the_identity_helper(tmp_path):
+    mod = template_module()
+    a = make_audio(tmp_path / "a", MODEL_REV, repo=MODEL_ID)
+    b = make_audio(tmp_path / "b", BASE_REV, repo=BASE_ID, seed=1.0)
+    mt, _ = mod.audio_tensors(a)
+    bt, _ = mod.audio_tensors(b)
+    mod.audio_identity_reset()
+    mod.audio_value_diffs(a, b, mt, bt)
+    assert str(a / "model.safetensors") in mod.AUDIO_IDENTITY and str(b / "model.safetensors") in mod.AUDIO_IDENTITY
+
+
+def test_a_config_that_changes_after_the_layout_check_is_a_problem_and_the_run_is_unknown(audio_case, tmp_path):
+    stage = audio_case()
+    cfg = model_snapshot(stage) / "model_config.json"
+    hook = (f"P = {str(cfg)!r}\n"
+            "def before(*a, **k):\n"
+            "    pass\n"
+            "def after(snapshot):\n"
+            f"    if str(snapshot) == {str(model_snapshot(stage))!r} and not state:\n"
+            "        state.append(1)\n"
+            "        raw = open(P, 'rb').read()\n"
+            "        i = raw.index(b'\"') + 1\n"
+            "        open(P, 'wb').write(raw[:i] + (b'Z' if raw[i:i+1] != b'Z' else b'Y') + raw[i+1:])\n")
+    d = _run_with_hook(stage, tmp_path, "cfg", hook, "audio_layout_problem")
+    assert d["class"] == "unknown" and "model_config.json" in reasons(d) and "Traceback" not in reasons(d)
+
+
+def test_the_nearest_models_config_changing_after_the_layout_check_is_a_problem_too(audio_case, tmp_path):
+    stage = audio_case()
+    cfgstage = json.loads((stage / "triage_config.json").read_text())
+    cfg = Path(cfgstage["nearest_snapshot"]) / "model_config.json"
+    hook = (f"P = {str(cfg)!r}\n"
+            "def before(*a, **k):\n"
+            "    pass\n"
+            "def after(snapshot):\n"
+            f"    if str(snapshot) == {cfgstage['nearest_snapshot']!r} and not state:\n"
+            "        state.append(1)\n"
+            "        raw = open(P, 'rb').read()\n"
+            "        i = raw.index(b'\"') + 1\n"
+            "        open(P, 'wb').write(raw[:i] + (b'Z' if raw[i:i+1] != b'Z' else b'Y') + raw[i+1:])\n")
+    d = _run_with_hook(stage, tmp_path, "cfgb", hook, "audio_layout_problem")
+    assert d["class"] == "unknown" and "model_config.json" in reasons(d)
+
+
+@pytest.mark.skipif(__import__("os").geteuid() == 0, reason="root reads files whatever their mode")
+def test_a_model_card_that_cannot_be_read_makes_the_run_unknown_and_does_not_crash_the_stage(audio_case):
+    stage = audio_case()
+    readme = model_snapshot(stage) / "README.md"
+    readme.chmod(0)
+    try:
+        d = run_ok(stage)
+    finally:
+        readme.chmod(0o644)
+    assert d["class"] == "unknown" and "README.md" in reasons(d)
+
+
+@pytest.mark.skipif(__import__("os").geteuid() == 0, reason="root reads files whatever their mode")
+def test_a_code_file_that_cannot_be_read_makes_the_run_unknown_and_does_not_crash_the_stage(audio_case):
+    stage = audio_case()
+    code = model_snapshot(stage) / "custom.py"
+    code.write_text("x = 1\n")
+    code.chmod(0)
+    try:
+        d = run_ok(stage)
+    finally:
+        code.chmod(0o644)
+    assert d["class"] == "unknown" and "custom.py" in reasons(d)
+
+
+def test_a_file_listing_that_fails_makes_the_run_unknown_and_does_not_crash_the_stage(audio_case, tmp_path):
+    stage = audio_case()
+    hook = ("def before(*a, **k):\n"
+            "    raise OSError('listing failed')\n"
+            "def after(*a, **k):\n"
+            "    pass\n")
+    d = _run_with_hook(stage, tmp_path, "files", hook, "compare_files")
+    assert d["class"] == "unknown" and "file listing" in reasons(d)
+
+
+def _prefix_file(tmp_path, header_bytes, data=b"\0" * 16, claimed=None):
+    path = tmp_path / "x.safetensors"
+    n = len(header_bytes) if claimed is None else claimed
+    path.write_bytes(struct.pack("<Q", n) + header_bytes + data)
+    return tmp_path
+
+
+@pytest.mark.parametrize("raw,match", [(b"abc", "shorter than 8 bytes")])
+def test_the_sampler_refuses_a_file_shorter_than_its_length_field(tmp_path, raw, match):
+    (tmp_path / "x.safetensors").write_bytes(raw)
+    with pytest.raises(ValueError, match=match):
+        template_module()._audio_tensor_prefix(tmp_path, {"shard": "x.safetensors", "name": "w"}, 4)
+
+
+def test_the_sampler_refuses_a_header_longer_than_the_file(tmp_path):
+    _prefix_file(tmp_path, b'{"w": {}}', data=b"", claimed=500)
+    with pytest.raises(ValueError, match="cut short"):
+        template_module()._audio_tensor_prefix(tmp_path, {"shard": "x.safetensors", "name": "w"}, 4)
+
+
+def test_the_sampler_refuses_an_oversized_header_length(tmp_path):
+    mod = template_module()
+    _prefix_file(tmp_path, b"{}", claimed=mod.AUDIO_HEADER_MAX + 1)
+    with pytest.raises(ValueError, match="larger than"):
+        mod._audio_tensor_prefix(tmp_path, {"shard": "x.safetensors", "name": "w"}, 4)
+
+
+@pytest.mark.parametrize("header", [b"{}", b'{"w": 3}', b'{"w": {"dtype": "F32", "shape": [1]}}',
+                                    b'{"w": {"dtype": "F32", "shape": [1], "data_offsets": [0]}}'])
+def test_the_sampler_refuses_a_tensor_without_a_byte_range(tmp_path, header):
+    _prefix_file(tmp_path, header)
+    with pytest.raises(ValueError, match="no byte range"):
+        template_module()._audio_tensor_prefix(tmp_path, {"shard": "x.safetensors", "name": "w"}, 4)
+
+
+def test_the_sampler_reads_values_from_the_start_of_the_data_section(tmp_path):
+    header = json.dumps({"w": {"dtype": "F32", "shape": [2], "data_offsets": [4, 12]}}).encode()
+    data = struct.pack("<3f", 9.0, 1.5, 2.5)
+    _prefix_file(tmp_path, header, data=data)
+    assert list(template_module()._audio_tensor_prefix(tmp_path, {"shard": "x.safetensors", "name": "w"}, 8)) == [1.5, 2.5]
+
+
+@pytest.mark.skipif(__import__("os").geteuid() == 0, reason="root reads files whatever their mode")
+def test_the_nearest_models_card_that_cannot_be_read_makes_the_run_unknown(audio_case):
+    stage = audio_case()
+    readme = Path(json.loads((stage / "triage_config.json").read_text())["nearest_snapshot"]) / "README.md"
+    readme.chmod(0)
+    try:
+        d = run_ok(stage)
+    finally:
+        readme.chmod(0o644)
+    assert d["class"] == "unknown" and "README.md" in reasons(d)
+
+
+def test_the_value_sample_does_not_run_when_the_headers_already_failed(audio_case, tmp_path):
+    stage = audio_case()
+    cfg = json.loads((stage / "triage_config.json").read_text())
+    (Path(cfg["nearest_snapshot"]) / "model_config.json").write_text("{}")             # the nearest model is not an audio layout
+    hook = ("def before(*a, **k):\n"
+            "    raise RuntimeError('the sampler ran although a header had failed')\n"
+            "def after(*a, **k):\n"
+            "    pass\n")
+    d = _run_with_hook(stage, tmp_path, "nosample", hook, "audio_value_diffs")
+    assert d["class"] == "unknown"
