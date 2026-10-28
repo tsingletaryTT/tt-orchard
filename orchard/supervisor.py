@@ -2183,6 +2183,7 @@ class Supervisor:
             if skip:
                 self.ledger.append("decision", n, decision="sampling trial skipped", reason=skip)
                 note = skip
+                self._set_stale_trial_outputs_aside(stage_dir)
             else:
                 variant, note = self._run_sampling_trial(spec, stage_dir, need, current)
                 ran = True
@@ -2193,6 +2194,24 @@ class Supervisor:
                            needed=decision["needed"], need_source=decision["need_source"], numbers=decision["numbers"],
                            decision_file=evidence_record(self.run_dir, path), trial=ran)
         return True
+
+    @staticmethod
+    def _set_stale_trial_outputs_aside(stage_dir: Path) -> None:
+        """A skipped decision says no variant was served. A trial killed after its script wrote `trial-result.json` and before the supervisor wrote
+        `test-result.json` leaves outputs that the stage 2 gate would read as a variant and then refuse the decision for (issue 194). Move them into
+        `sampling-trial/stale/`, which no reader looks at, so the evidence is kept. A trial whose test record exists is not touched."""
+        trial_dir = stage_dir / sampling.TRIAL_DIR
+        if (trial_dir / "test-result.json").exists():
+            return
+        leftovers = [trial_dir / sampling.TRIAL_RESULT, trial_dir / "variant"]
+        leftovers = [x for x in leftovers if x.exists()]
+        if not leftovers:
+            return
+        stale = trial_dir / "stale"
+        shutil.rmtree(stale, ignore_errors=True)
+        stale.mkdir()
+        for x in leftovers:
+            os.replace(x, stale / x.name)
 
     def _cache_check_path(self, stage_dir: Path) -> Path:
         """The path whose filesystem the sampling trial's new tensor cache lands on: the nearest existing ancestor of `<tt_cache>-nodraft`, the sibling

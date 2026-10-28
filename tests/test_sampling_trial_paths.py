@@ -108,7 +108,7 @@ def test_a_cache_path_with_no_final_name_falls_back_to_the_run_directory(tmp_pat
     asked = []
     rig.usage = lambda path: asked.append(Path(path)) or U(0, 0, 10 ** 15)
     assert rig.run() == EXIT_READY
-    assert rig.run_dir in asked
+    assert rig.run_dir in asked and rig.run_dir.parent not in asked and Path("/") not in asked     # no sibling of the run directory is asked about
 
 
 def test_the_path_asked_is_the_nearest_existing_ancestor_of_the_sibling_not_the_original_cache(tmp_path, rig, spy):
