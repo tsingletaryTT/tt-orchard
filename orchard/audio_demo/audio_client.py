@@ -28,6 +28,7 @@ MAX_SECONDS = 120           # the model's own limit (sample_size 5,292,032 at 44
 MAX_STEPS = 100
 MIN_CFG, MAX_CFG = 1.0, 20.0
 KEEP_CLIPS = 20            # clips the page keeps on the local disk; older ones are deleted
+MAX_PROMPT_CHARS = 2000     # the server's own limit
 EARLY_END_SHARE = 0.95      # a clip shorter than this share of the length asked for is reported as ended early
 
 BENCHMARK_PROMPT = "A warm acoustic guitar melody with soft percussion, 100 BPM"
@@ -38,6 +39,9 @@ EXAMPLES = [
     ("Upbeat synth pop with a driving bassline and bright arpeggios, 120 BPM", 10, 21),
     ("Slow cinematic strings with a soft piano, spacious and warm", 20, 3),
 ]
+
+
+_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
 class AudioServerError(Exception):
@@ -74,6 +78,8 @@ def check_settings(prompt, seconds, seed, steps, cfg_scale) -> None:
     """Raise ValueError, in plain words, for input the server would refuse."""
     if not isinstance(prompt, str) or not prompt.strip():
         raise ValueError("The prompt must not be empty.")
+    if len(prompt) > MAX_PROMPT_CHARS:
+        raise ValueError(f"The prompt must be at most {MAX_PROMPT_CHARS} characters; this one has {len(prompt)}.")
     if isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or _not_finite(seconds) or not MIN_SECONDS <= seconds <= MAX_SECONDS:
         raise ValueError(f"The length must be between {MIN_SECONDS} and {MAX_SECONDS} seconds, got {seconds!r}.")
     if seed is not None and (isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed <= 2**32 - 1):
@@ -94,7 +100,8 @@ class AudioClient:
         data = None if body is None else json.dumps(body).encode()
         req = urllib.request.Request(self.base + path, data=data, method=method, headers={"Content-Type": "application/json"})
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as r:
+            # no proxy: the server is a local one, and a proxy named in the environment would send the request somewhere else or refuse it
+            with _OPENER.open(req, timeout=self.timeout) as r:
                 payload = r.read()
         except urllib.error.HTTPError as e:
             detail = ""

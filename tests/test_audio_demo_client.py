@@ -308,3 +308,18 @@ def test_examples_include_the_benchmark_prompt_and_all_fit_the_limits():
     assert "A warm acoustic guitar melody with soft percussion, 100 BPM" in prompts
     for prompt, seconds, seed in cl.EXAMPLES:
         assert prompt.strip() and cl.MIN_SECONDS <= seconds <= cl.MAX_SECONDS and isinstance(seed, int) and seed >= 0
+
+
+def test_a_prompt_longer_than_the_servers_limit_is_refused_before_a_request():
+    with pytest.raises(ValueError, match="at most 2000"):
+        cl.AudioClient("http://127.0.0.1:1").submit("x" * 2001, 10)
+    assert cl.MAX_PROMPT_CHARS == srv.MAX_PROMPT_CHARS
+
+
+def test_requests_do_not_go_through_a_proxy_named_in_the_environment(server, monkeypatch):
+    s, c = server()
+    monkeypatch.setenv("http_proxy", "http://127.0.0.1:9")            # nothing listens there
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9")
+    monkeypatch.delenv("no_proxy", raising=False)
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    assert c.health()["status"] == "ok"
