@@ -163,3 +163,32 @@ is mixed into the table of the new coder.
   line in the Telegraph decisions file (trigger, what was tried locally at least twice, why it is worth it), the failing kernel and
   the simulator error sent only where the policy allows, Haiku before Sonnet, at most 6 calls, and the report says whether the reply
   changed anything.
+
+## New coder: pilot results and the batch settings (written 2026-10-28 after the new-coder pilot, before the first batch attempt)
+
+New coder pilot (`--ladder --rungs add,...,center --attempts 1 --seed 2026110000`, commit 115a6c8, single client, decode 106 to 107 tok/s
+measured by the probe before each attempt; the old coder measured 36 to 38 tok/s):
+
+| Rung | Op | Pilot result | Turns | Agent wall (s) | Budget by the rule (s) |
+|---|---|---|---|---|---|
+| 1 | add | passed | 13 | 172 | 689 |
+| 2 | mul | passed | 12 | 157 | 628 |
+| 3 | scale_shift | passed | 33 | 654 | 1800 (capped) |
+| 4 | add_row | passed | 19 | 475 | 1800 (4 x 475 = 1901, capped) |
+| 5 | rsqrt | passed | 13 | 134 | 536 |
+| 6 | row_sum | failed, `Cannot perform copy (as destination): not a valid next dataflow step` | 24 | 563 | 1800 (no pass) |
+| 7 | center | passed | 28 | 651 | 1800 (capped) |
+
+Batch (three processes against the one coder, all `--attempts 10 --temperature 0.7 --phase sim --library none --no-agent-hw`, commit 115a6c8):
+
+- A: `--ladder --rungs center --seed 2026110100 --rung-wall center=1800`.
+- B: `--ladder --rungs row_sum,rsqrt,add_row,scale_shift,mul,add --seed 2026110100 --max-hours 5.5` with `--rung-wall
+  row_sum=1800,rsqrt=536,add_row=1800,scale_shift=1800,mul=628,add=689` and `--rung-expect-s
+  row_sum=563,rsqrt=134,add_row=475,scale_shift=654,mul=157,add=172`. The rungs run in that order (nearest to `center` first) and B
+  stops by its own projection rule when the rest would pass 5.5 hours; the table says which rungs did not run.
+- C (operator's addition): `--ladder --rungs rmsnorm --seed 2026110200 --rung-wall rmsnorm=1800`, as pre-registered above.
+- Projection at pilot walls (10 x (wall + 60 s)): center 1.9 h; row_sum 1.7, rsqrt 0.5, add_row 1.5, scale_shift 2.0, mul 0.6, add 0.6 h.
+  The whole ladder (rungs 1 to 7) is 8.9 hours at one process, so rungs 8 and 9 and a single process would not fit; three
+  processes in parallel are the plan, and a rung that does not fit in B's 5.5 hours is left out and named.
+- Three clients slow each other (the old measurement: 77% of single-client speed for two, 60% for three). A pass time in the batch
+  is therefore not comparable with a pilot wall.
