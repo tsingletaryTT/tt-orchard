@@ -1,0 +1,3 @@
+target = "0.9.43"
+summary = "Agent hardware check: the coder can run its kernel on one chip through a short-lived wrapper that holds the lease, with a bounded wait and a status check after every call."
+pr = 116

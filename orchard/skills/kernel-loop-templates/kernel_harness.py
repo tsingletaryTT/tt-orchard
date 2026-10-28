@@ -15,6 +15,7 @@ import argparse
 import importlib.util
 import json
 import sys
+import time
 import traceback
 from pathlib import Path
 
@@ -139,6 +140,7 @@ def main(argv=None) -> int:
             stage = "setup"                             # a device that will not open is not the kernel's fault
             progress("open_device")
             device = ttnn.open_device(device_id=0)
+            opened = time.monotonic()
             try:
                 for seed in spec["seeds"]:
                     for tail in ([False, True] if spec.get("heavy_tail") else [False]):
@@ -160,6 +162,9 @@ def main(argv=None) -> int:
                                                "max_abs_err": float(err), "finite": bool(torch.isfinite(got).all()),
                                                **metrics(got, expected, torch)})
             finally:
+                # Seconds from opening the device to just before closing it: the inputs, the reference output, the
+                # kernel's compile and run, and the read-back for every input set. Not a benchmark of the kernel.
+                result["device_s"] = round(time.monotonic() - opened, 3)
                 ttnn.close_device(device)
     except BaseException as exc:                          # the diagnostic text must reach the check, so record it and print it
         traceback.print_exc()

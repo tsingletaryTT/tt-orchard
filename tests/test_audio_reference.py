@@ -429,7 +429,7 @@ def test_a_margin_below_one_is_refused():
 
 def test_two_models_with_different_waveforms_pass_the_control(tmp_path):
     make_run(tmp_path, "ft")
-    make_run(tmp_path, "base", arrays={("waveform", "audio"): np.random.default_rng(9).normal(size=(2, 4096))}, settings={"steps": 50, "sampler": "euler", "cfg_scale": 7.0})
+    make_run(tmp_path, "base", arrays={("waveform", "audio"): np.random.default_rng(9).normal(size=(2, 4096))})
     report = compare_control(load_run(tmp_path / "ft"), load_run(tmp_path / "base"))
     assert report["ok"] and report["rel_l2"] > 0.05
 
@@ -892,7 +892,7 @@ def test_a_missing_array_file_is_a_reference_error_at_read(tmp_path):
     root = make_run(tmp_path)
     run = load_run(root)
     (root / "arrays" / "layer__0.npy").unlink()
-    with pytest.raises(ReferenceError, match="cannot be opened"):
+    with pytest.raises(ReferenceError, match="is missing"):
         run.array("layer", "0")
 
 
@@ -953,7 +953,7 @@ def test_the_cli_reports_an_undecodable_array_and_does_not_raise(tmp_path):
 
 def test_the_control_command_reports_an_undecodable_waveform(tmp_path):
     make_run(tmp_path, "ft")
-    root = make_run(tmp_path, "base", settings={"steps": 50})
+    root = make_run(tmp_path, "base")
     replace_payload(root, "waveform", "audio", b"garbage")
     code, text = run_cli("control", str(tmp_path / "ft"), str(root))
     assert code == 2 and text.startswith("refused:")
@@ -972,24 +972,6 @@ def test_the_verify_command_refuses_an_oversized_array_without_reading_it_to_the
     monkeypatch.setattr(ar, "MAX_ARRAY_BYTES", 100)
     code, text = run_cli("verify", str(root))
     assert code == 2 and "larger than 100 bytes" in text
-
-
-def test_hashing_stops_at_the_cap_even_when_the_size_changes_after_the_size_check(tmp_path, monkeypatch):
-    root = make_run(tmp_path, arrays={("layer", "0"): np.arange(4.0)})
-    size = (root / "arrays" / "layer__0.npy").stat().st_size
-    monkeypatch.setattr(ar, "MAX_ARRAY_BYTES", size)
-    real_fstat = ar.os.fstat
-
-    class Faked:
-        def __init__(self, st):
-            self.st_size = 1                      # claims to be tiny, as a file that grows after the check would
-    monkeypatch.setattr(ar.os, "fstat", lambda fd: Faked(real_fstat(fd)))
-    # the file is exactly at the cap, so it still loads; one byte more must not
-    load_run(root)
-    with open(root / "arrays" / "layer__0.npy", "ab") as f:
-        f.write(b"\0")
-    with pytest.raises(ReferenceError, match="larger"):
-        load_run(root)
 
 
 def test_a_symlinked_array_is_refused_by_the_hashing_pass_too(tmp_path):
@@ -1040,28 +1022,6 @@ def test_a_manifest_artifact_list_with_a_repeated_key_in_an_entry_is_refused(tmp
 
 # ---- boundaries the first mutation table found unguarded (reference) ------------------------------------------
 
-def test_the_capped_hash_refuses_a_link_and_a_missing_file_on_its_own(tmp_path):
-    target = tmp_path / "t.npy"
-    target.write_bytes(b"abc")
-    link = tmp_path / "l.npy"
-    link.symlink_to(target)
-    with pytest.raises(ReferenceError, match="cannot be opened"):
-        ar._sha256_capped(link, "l.npy")
-    with pytest.raises(ReferenceError, match="cannot be opened"):
-        ar._sha256_capped(tmp_path / "missing.npy", "missing.npy")
-    assert ar._sha256_capped(target, "t.npy") == ar._sha256(target)
-
-
-def test_the_capped_hash_accepts_a_file_exactly_at_the_cap(tmp_path, monkeypatch):
-    f = tmp_path / "f.npy"
-    f.write_bytes(b"x" * 50)
-    monkeypatch.setattr(ar, "MAX_ARRAY_BYTES", 50)
-    assert ar._sha256_capped(f, "f") == ar._sha256(f)
-    monkeypatch.setattr(ar, "MAX_ARRAY_BYTES", 49)
-    with pytest.raises(ReferenceError, match="larger than 49"):
-        ar._sha256_capped(f, "f")
-
-
 def test_the_recorder_accepts_a_file_exactly_at_the_cap_and_refuses_one_byte_more(tmp_path, monkeypatch):
     rec = Recorder(tmp_path / "r", model=MODEL, library=LIB, settings=SETTINGS)
     rec.record("layer", "probe", np.zeros(4))
@@ -1101,3 +1061,377 @@ def test_manifest_nesting_is_limited_whether_the_containers_are_lists_or_objects
         else:
             with pytest.raises(ReferenceError, match="not JSON"):
                 load_run(root)
+
+
+# ---- round five: reads anchored to descriptors, a manifest that is never replaced, a control with matched settings ------
+
+def test_a_symlinked_arrays_directory_is_refused(tmp_path):
+    root = make_run(tmp_path)
+    real = tmp_path / "real-arrays"
+    (root / "arrays").rename(real)
+    (root / "arrays").symlink_to(real)
+    with pytest.raises(ReferenceError, match="link"):
+        load_run(root)
+
+
+def test_a_missing_arrays_directory_is_refused(tmp_path):
+    import shutil
+    root = make_run(tmp_path)
+    shutil.rmtree(root / "arrays")
+    with pytest.raises(ReferenceError, match="missing"):
+        load_run(root)
+
+
+def test_reads_stay_in_the_directory_that_was_opened_even_if_arrays_is_replaced_afterwards(tmp_path):
+    root = make_run(tmp_path)
+    run = load_run(root)
+    evil = tmp_path / "evil-arrays"
+    evil.mkdir()
+    np.save(evil / "layer__0.npy", np.zeros((1, 20, 16), dtype=np.float32))
+    (root / "arrays").rename(tmp_path / "moved-arrays")
+    (root / "arrays").symlink_to(evil)
+    assert run.array("layer", "0").any()                 # the original, not the zeros the link now leads to
+
+
+def test_reads_stay_in_the_run_directory_that_was_opened_even_if_it_is_replaced_afterwards(tmp_path):
+    root = make_run(tmp_path)
+    run = load_run(root)
+    root.rename(tmp_path / "moved-run")
+    make_run(tmp_path, "run", arrays={("layer", "0"): np.zeros(3)})
+    assert run.array("layer", "0").shape == (1, 20, 16)
+
+
+def test_a_run_can_be_closed_and_then_refuses_reads(tmp_path):
+    run = load_run(make_run(tmp_path))
+    run.array("layer", "0")
+    run.close()
+    run.close()                                             # closing twice is fine
+    with pytest.raises(ReferenceError, match="closed"):
+        run.array("layer", "0")
+
+
+def test_a_run_works_as_a_context_manager(tmp_path):
+    with load_run(make_run(tmp_path)) as run:
+        assert run.array("layer", "0").shape == (1, 20, 16)
+    with pytest.raises(ReferenceError, match="closed"):
+        run.array("layer", "0")
+
+
+def test_a_run_directory_reached_through_a_link_is_read_as_given(tmp_path):
+    root = make_run(tmp_path)
+    link = tmp_path / "link-to-run"
+    link.symlink_to(root)
+    assert load_run(link).array("layer", "0").shape == (1, 20, 16)
+
+
+def test_finishing_twice_never_replaces_the_manifest(tmp_path):
+    rec = Recorder(tmp_path / "r", model=MODEL, library=LIB, settings=SETTINGS)
+    rec.record("layer", "0", np.arange(3.0))
+    rec.finish()
+    before = (tmp_path / "r" / "manifest.json").read_bytes()
+    rec.record("layer", "1", np.arange(3.0)) if False else None
+    with pytest.raises(ReferenceError, match="already exists"):
+        rec.finish()
+    assert (tmp_path / "r" / "manifest.json").read_bytes() == before
+    assert not list((tmp_path / "r").glob("*.tmp")) and not [p for p in (tmp_path / "r").iterdir() if p.name.endswith(".tmp")]
+
+
+def test_a_manifest_that_appears_after_the_recorder_was_made_is_not_replaced(tmp_path):
+    rec = Recorder(tmp_path / "r", model=MODEL, library=LIB, settings=SETTINGS)
+    rec.record("layer", "0", np.arange(3.0))
+    (tmp_path / "r" / "manifest.json").write_text("someone else's")
+    with pytest.raises(ReferenceError, match="already exists"):
+        rec.finish()
+    assert (tmp_path / "r" / "manifest.json").read_text() == "someone else's"
+
+
+def test_a_manifest_that_is_a_dangling_link_is_not_followed_or_replaced(tmp_path):
+    rec = Recorder(tmp_path / "r", model=MODEL, library=LIB, settings=SETTINGS)
+    (tmp_path / "r" / "manifest.json").symlink_to(tmp_path / "target")
+    with pytest.raises(ReferenceError):
+        rec.finish()
+    assert not (tmp_path / "target").exists()
+
+
+def test_an_array_file_that_appears_before_it_is_published_is_not_replaced(tmp_path):
+    rec = Recorder(tmp_path / "r", model=MODEL, library=LIB, settings=SETTINGS)
+    (tmp_path / "r" / "arrays" / "layer__0.npy").write_bytes(b"someone else's")
+    with pytest.raises(ReferenceError, match="already exists"):
+        rec.record("layer", "0", np.arange(3.0))
+    assert (tmp_path / "r" / "arrays" / "layer__0.npy").read_bytes() == b"someone else's"
+    assert not [p for p in (tmp_path / "r" / "arrays").iterdir() if p.name.endswith(".tmp")]
+
+
+def test_an_array_name_that_is_a_dangling_link_is_not_written_through(tmp_path):
+    rec = Recorder(tmp_path / "r", model=MODEL, library=LIB, settings=SETTINGS)
+    (tmp_path / "r" / "arrays" / "layer__0.npy").symlink_to(tmp_path / "target.npy")
+    with pytest.raises(ReferenceError):
+        rec.record("layer", "0", np.arange(3.0))
+    assert not (tmp_path / "target.npy").exists()
+
+
+def test_the_recorder_writes_into_the_directory_it_created_even_if_the_path_is_replaced(tmp_path):
+    rec = Recorder(tmp_path / "r", model=MODEL, library=LIB, settings=SETTINGS)
+    (tmp_path / "r").rename(tmp_path / "moved")
+    evil = tmp_path / "evil"
+    (evil / "arrays").mkdir(parents=True)
+    (tmp_path / "r").symlink_to(evil)
+    rec.record("layer", "0", np.arange(3.0))
+    rec.finish()
+    assert (tmp_path / "moved" / "manifest.json").is_file() and not list(evil.rglob("*.npy")) and not (evil / "manifest.json").exists()
+
+
+def test_the_recorded_sha256_is_the_hash_of_the_published_file(tmp_path):
+    import hashlib
+    root = make_run(tmp_path)
+    for e in json.loads((root / "manifest.json").read_text())["artifacts"]:
+        assert e["sha256"] == hashlib.sha256((root / e["file"]).read_bytes()).hexdigest()
+
+
+# ---- the control needs matched settings --------------------------------------------------------------------
+
+def test_the_control_needs_every_match_setting_equal_by_default(tmp_path):
+    make_run(tmp_path, "ft")
+    make_run(tmp_path, "base", arrays={("waveform", "audio"): np.random.default_rng(9).normal(size=(2, 4096))},
+             settings={"steps": 50, "sampler": "euler", "cfg_scale": 7.0})
+    report = compare_control(load_run(tmp_path / "ft"), load_run(tmp_path / "base"))
+    assert report["ok"] is False and report["comparable"] is False and report["matched"] is False
+    assert any("steps" in p for p in report["problems"]) and any("matched" in p for p in report["problems"])
+
+
+def test_a_matched_control_with_different_weights_passes(tmp_path):
+    make_run(tmp_path, "ft")
+    make_run(tmp_path, "base", arrays={("waveform", "audio"): np.random.default_rng(9).normal(size=(2, 4096))})
+    report = compare_control(load_run(tmp_path / "ft"), load_run(tmp_path / "base"))
+    assert report["ok"] and report["matched"] is True and report["rel_l2"] > 0.05
+
+
+def test_a_matched_control_with_equal_waveforms_means_the_same_weights_may_have_run_twice(tmp_path):
+    make_run(tmp_path, "ft")
+    make_run(tmp_path, "base")
+    report = compare_control(load_run(tmp_path / "ft"), load_run(tmp_path / "base"))
+    assert report["ok"] is False and report["matched"] is True and "same weights" in report["problems"][0]
+
+
+def test_an_unmatched_control_is_available_on_request_and_says_what_it_cannot_show(tmp_path):
+    make_run(tmp_path, "ft")
+    make_run(tmp_path, "base", arrays={("waveform", "audio"): np.random.default_rng(9).normal(size=(2, 4096))}, settings={"steps": 50})
+    report = compare_control(load_run(tmp_path / "ft"), load_run(tmp_path / "base"), require_matched=False)
+    assert report["ok"] is True and report["matched"] is False and "cannot show" in report["note"]
+
+
+def test_an_unmatched_control_still_needs_the_same_prompt_duration_and_seed(tmp_path):
+    make_run(tmp_path, "ft")
+    make_run(tmp_path, "base", settings={"seed": 1})
+    report = compare_control(load_run(tmp_path / "ft"), load_run(tmp_path / "base"), require_matched=False)
+    assert report["ok"] is False and "seed" in report["problems"][0]
+
+
+def test_the_control_command_defaults_to_matched_and_has_an_unmatched_flag(tmp_path):
+    make_run(tmp_path, "ft")
+    make_run(tmp_path, "base", arrays={("waveform", "audio"): np.random.default_rng(9).normal(size=(2, 4096))}, settings={"steps": 50})
+    code, text = run_cli("control", str(tmp_path / "ft"), str(tmp_path / "base"))
+    assert code == 1 and "matched" in text
+    code, text = run_cli("control", str(tmp_path / "ft"), str(tmp_path / "base"), "--unmatched")
+    assert code == 0 and "cannot show" in text
+
+
+# ---- descriptor anchoring: the recorder's setup, temporary files and cleanup ---------------------------
+
+def _open_fds():
+    import os
+    return {int(n) for n in os.listdir("/proc/self/fd")}
+
+
+def test_finishing_twice_leaves_the_working_directory_alone_and_says_so(tmp_path, monkeypatch):
+    """A recorder whose descriptors are closed must refuse, not fall back to the working directory."""
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    rec = Recorder(tmp_path / "r", model=MODEL, library=LIB, settings=SETTINGS)
+    rec.record("layer", "0", np.arange(3.0))
+    rec.finish()
+    monkeypatch.chdir(cwd)
+    with pytest.raises(ReferenceError, match="already exists"):
+        rec.finish()
+    assert list(cwd.iterdir()) == []
+
+
+def test_recording_after_finish_is_refused_with_its_own_message(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    rec = Recorder(tmp_path / "r", model=MODEL, library=LIB, settings=SETTINGS)
+    rec.finish()
+    with pytest.raises(ReferenceError, match="recorder is finished"):
+        rec.record("layer", "0", np.arange(3.0))
+    assert not [p for p in tmp_path.iterdir() if p.name != "r"]
+
+
+def test_finishing_closes_both_descriptors(tmp_path):
+    rec = Recorder(tmp_path / "r", model=MODEL, library=LIB, settings=SETTINGS)
+    fds = (rec._root_fd, rec._arrays_fd)
+    assert all(fd in _open_fds() for fd in fds)
+    rec.finish()
+    import os
+    for fd in fds:
+        with pytest.raises(OSError):
+            os.fstat(fd)
+    assert rec._root_fd is None and rec._arrays_fd is None
+
+
+def test_a_run_directory_swapped_for_a_link_after_it_was_opened_does_not_redirect_the_recorder(tmp_path, monkeypatch):
+    """The recorder opens the run directory once. Replacing the path with a link to another directory afterwards changes nothing."""
+    import os
+    other = tmp_path / "other"
+    other.mkdir()
+    real_open = ar.pf.open_dir
+    calls = []
+
+    def swapping(path, **kw):
+        fd = real_open(path, **kw)
+        if not calls:
+            calls.append(1)
+            os.rename(tmp_path / "r", tmp_path / "moved")
+            os.symlink(other, tmp_path / "r")
+        return fd
+    monkeypatch.setattr(ar.pf, "open_dir", swapping)
+    rec = Recorder(tmp_path / "r", model=MODEL, library=LIB, settings=SETTINGS)
+    rec.record("layer", "0", np.arange(3.0))
+    rec.finish()
+    assert (tmp_path / "moved" / "arrays" / "layer__0.npy").is_file() and (tmp_path / "moved" / "manifest.json").is_file()
+    assert list(other.iterdir()) == []
+
+
+def test_a_run_directory_that_is_a_link_when_it_is_opened_is_refused(tmp_path, monkeypatch):
+    """The directory was just created, so the only way it is a link is a swap between the mkdir and the open."""
+    import os
+    other = tmp_path / "other"
+    other.mkdir()
+    real_mkdir = ar.Path.mkdir
+
+    def mkdir_then_swap(self, *a, **kw):
+        real_mkdir(self, *a, **kw)
+        if self.name == "r":
+            os.rmdir(self)
+            os.symlink(other, self)
+    monkeypatch.setattr(ar.Path, "mkdir", mkdir_then_swap)
+    with pytest.raises(ReferenceError, match="cannot set up.*is a link"):
+        Recorder(tmp_path / "r", model=MODEL, library=LIB, settings=SETTINGS)
+    assert list(other.iterdir()) == []
+
+
+def test_an_arrays_directory_that_is_a_link_when_it_is_opened_is_refused_and_the_recorder_closes_its_descriptors(tmp_path, monkeypatch):
+    import os
+    other = tmp_path / "other"
+    other.mkdir()
+    real_mkdir = os.mkdir
+    before = _open_fds()
+
+    def mkdir_then_swap(path, *a, **kw):
+        real_mkdir(path, *a, **kw)
+        if path == "arrays":
+            os.rmdir(path, dir_fd=kw["dir_fd"])
+            os.symlink(other, path, dir_fd=kw["dir_fd"])
+    monkeypatch.setattr(ar.os, "mkdir", mkdir_then_swap)
+    with pytest.raises(ReferenceError, match="cannot set up.*arrays is a link"):
+        Recorder(tmp_path / "r", model=MODEL, library=LIB, settings=SETTINGS)
+    assert _open_fds() <= before
+
+
+def test_a_temporary_array_name_that_is_already_a_link_is_not_followed(tmp_path):
+    rec = Recorder(tmp_path / "r", model=MODEL, library=LIB, settings=SETTINGS)
+    target = tmp_path / "victim"
+    target.write_bytes(b"keep me")
+    (tmp_path / "r" / "arrays" / ".layer__0.npy.tmp").symlink_to(target)
+    with pytest.raises(ReferenceError, match="already exists"):
+        rec.record("layer", "0", np.arange(3.0))
+    assert target.read_bytes() == b"keep me"
+
+
+def test_a_temporary_manifest_name_that_is_already_a_link_is_not_followed(tmp_path):
+    rec = Recorder(tmp_path / "r", model=MODEL, library=LIB, settings=SETTINGS)
+    target = tmp_path / "victim"
+    target.write_bytes(b"keep me")
+    (tmp_path / "r" / ".manifest.json.tmp").symlink_to(target)
+    with pytest.raises(ReferenceError, match="already exists"):
+        rec.finish()
+    assert target.read_bytes() == b"keep me"
+
+
+def test_a_failed_finish_removes_its_temporary_manifest(tmp_path):
+    rec = Recorder(tmp_path / "r", model=MODEL, library=LIB, settings=SETTINGS)
+    (tmp_path / "r" / "manifest.json").write_text("someone else's")
+    with pytest.raises(ReferenceError):
+        rec.finish()
+    assert sorted(p.name for p in (tmp_path / "r").iterdir()) == ["arrays", "manifest.json"]
+
+
+def test_every_array_and_the_manifest_is_flushed_to_disk(tmp_path, monkeypatch):
+    import os
+    synced = []
+    real = os.fsync
+    monkeypatch.setattr(ar.os, "fsync", lambda fd: (synced.append(fd), real(fd))[1])
+    rec = Recorder(tmp_path / "r", model=MODEL, library=LIB, settings=SETTINGS)
+    rec.record("layer", "0", np.arange(3.0))
+    n_array = len(synced)
+    rec.finish()
+    assert n_array >= 1 and len(synced) > n_array
+
+
+def test_a_failed_load_closes_the_descriptors_it_opened(tmp_path):
+    root = make_run(tmp_path)
+    m = json.loads((root / "manifest.json").read_text())
+    m["artifacts"][0]["sha256"] = "0" * 64
+    (root / "manifest.json").write_text(json.dumps(m))
+    before = _open_fds()
+    with pytest.raises(ReferenceError, match="sha256"):
+        load_run(root)
+    assert _open_fds() <= before
+
+
+# ---- review of PR 142 -----------------------------------------------------------------------------
+
+def test_a_recorder_closed_before_finish_publishes_nothing_anywhere(tmp_path, monkeypatch):
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    rec = Recorder(tmp_path / "r", model=MODEL, library=LIB, settings=SETTINGS)
+    rec.close()
+    monkeypatch.chdir(cwd)
+    with pytest.raises(ReferenceError, match="closed"):
+        rec.finish()
+    assert list(cwd.iterdir()) == [] and not (tmp_path / "r" / "manifest.json").exists()
+
+
+def test_a_run_loaded_without_verification_still_refuses_missing_linked_and_non_regular_arrays(tmp_path):
+    import os
+    root = make_run(tmp_path)
+    arr = root / "arrays" / "layer__0.npy"
+    saved = arr.read_bytes()
+    arr.unlink()
+    with pytest.raises(ReferenceError, match="layer__0.npy"):
+        load_run(root, verify=False)
+    other = tmp_path / "elsewhere.npy"
+    other.write_bytes(saved)
+    arr.symlink_to(other)
+    with pytest.raises(ReferenceError, match="is a link"):
+        load_run(root, verify=False)
+    arr.unlink()
+    os.mkfifo(arr)
+    with pytest.raises(ReferenceError, match="not a regular file"):
+        load_run(root, verify=False)
+    arr.unlink()
+    arr.mkdir()
+    with pytest.raises(ReferenceError, match="not a regular file"):
+        load_run(root, verify=False)
+    arr.rmdir()
+    arr.write_bytes(saved)
+    assert load_run(root, verify=False).array("layer", "0").shape == (1, 20, 16)
+
+
+def test_loading_without_verification_does_not_hash_the_arrays(tmp_path, monkeypatch):
+    root = make_run(tmp_path)
+    calls = []
+    real = ar.pf.sha256_regular
+    monkeypatch.setattr(ar.pf, "sha256_regular", lambda *a, **k: (calls.append(1), real(*a, **k))[1])
+    load_run(root, verify=False)
+    assert calls == []
+    load_run(root)
+    assert calls

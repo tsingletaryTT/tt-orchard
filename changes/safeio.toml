@@ -1,0 +1,3 @@
+target = "0.9.44"
+summary = "safeio: one reviewed module for reading hostile files, a hostile-input registry, and the defects it found."
+pr = 148

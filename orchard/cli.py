@@ -24,6 +24,7 @@
                             [--temperature T | --temperatures T1,T2] [--top-p P] [--seed N]
                             [--src-dir D] [--venv-dir D] [--shared-python P] [--tt-lang-skill-dir D]
                             [--allow-stale-skills] [--allow-slow-coder]
+                            [--hw-checks N | --no-agent-hw] [--hw-lease-s S] [--hw-call-timeout-s S] [--hw-wait-s S]
 
 It is a thin layer over `python3 -m orchard.supervisor`. `bringup` reads config/bringup.toml, checks what
 can be checked without a lease (orchard/preflight.py), fetches the model snapshot when it is not local
@@ -375,6 +376,20 @@ def _parser() -> argparse.ArgumentParser:
     kp.add_argument("--library", choices=("all", "others", "none"), default="all",
                     help="the worked kernels put into each attempt's reference/: all (default), others (leave out the "
                          "kernel for the op under test, so a pass is not a copy) or none; the report records the mode")
+    kp.add_argument("--hw-checks", dest="hw_checks", type=int, metavar="N",
+                    help="how many times each attempt may call the `hardware_check` tool, which runs its current kernel.py "
+                         "on one leased chip (default 6; 0 turns the tool off). A call takes about 45 s with the lease "
+                         "and the chip reset")
+    kp.add_argument("--no-agent-hw", dest="no_agent_hw", action="store_true",
+                    help="offer the agent no hardware tool: the same as --hw-checks 0, for measuring the coder alone")
+    kp.add_argument("--hw-lease-s", dest="hw_lease_s", type=float, metavar="S",
+                    help="chip seconds one attempt's hardware checks may use in all (default 600; 120 s of it are reserved for the stop and the reset)")
+    kp.add_argument("--hw-call-timeout-s", dest="hw_call_timeout_s", type=float, metavar="S",
+                    help="the longest one hardware check may run before the probe stops it (default 240; the stall "
+                         "watcher usually stops a hang sooner)")
+    kp.add_argument("--hw-wait-s", dest="hw_wait_s", type=float, metavar="S",
+                    help="how long a hardware check waits for a busy board before it tells the agent to use the "
+                         "simulator (default 120)")
     kp.add_argument("--allow-stale-skills", action="store_true",
                     help="run even when the tt-lang checkout or the tt-lang skill is not the latest upstream has, or "
                          "could not be compared; the report records it with the shas")
@@ -464,15 +479,63 @@ def _installed(sig) -> list:
     return list(sig.installed_bundles()) if sig.installed_bundles else []
 
 
-def resolve_base(arg: str, sig, puller, out, style, *, dry_run: bool = False) -> tuple[str | None, str | None]:
+def _downloaded_audio_problem(snapshot: Path) -> str | None:
+    """After a download for an audio run: why the snapshot is not one stage 0's audio branch accepts (its config, its text encoder's
+    config), or None. The preflight judged the model audio from the Hub's lists; this checks the files that arrived."""
+    why = preflight.snapshot_audio_problem(snapshot)
+    if why:
+        return why
+    missing = preflight.missing_audio_components(Path(snapshot))
+    return f"missing {', '.join(missing[:3])}" if missing else None
+
+
+def audio_base_decision(arg: str, model: str, sig) -> tuple[str, str | None]:
+    """(state, a reason to refuse `--base <arg>` or None). `state` is "audio", "text" or "unknown" (the Hub could not say, so nothing
+    shows whether the model is audio). An audio model (orchard/audio_facts.py) is compared with its base repository directly and no bundle
+    serves audio, so `--base` has to name a model id. For an audio or unknown model, a name that an installed bundle has, or that
+    `tt model search` lists as a bundle, is refused before anything is installed, and so is a search that fails: a failed search is an
+    unknown, never "no bundle", and the caller must not install anything on the strength of it. The caller passes `pull=False` to
+    resolve_base for any state but "text", so a second search cannot lead to an install either."""
+    try:
+        hub, _ = sig.hub_info(model)
+        local = sig.local_snapshot(model)
+    except Exception:
+        hub, local = None, None
+    state = "unknown" if hub is None else ("audio" if preflight.audio_evidence_for(hub, local) is not None else "text")
+    if state == "text":
+        return state, None
+    inst = _installed(sig)
+    if any(b.name == arg for b in inst):
+        named = True
+    elif any(b.weights_repo == arg for b in inst) or not sig.search_bundles:
+        named = False                    # a model id an installed bundle serves, or no search to ask: nothing here can be pulled
+    else:
+        try:
+            found = sig.search_bundles(nearest.family_query(arg))
+        except Exception:
+            found = None
+        if not isinstance(found, list):
+            return state, (f"the bundle search failed, so it is not known whether --base {arg} names a bundle, and nothing is installed on a "
+                           "guess. Run the same command again, or name the base as a model id")
+        named = arg in {c.get("name") for c in found if isinstance(c, dict)}
+    if not named:
+        return state, None
+    what = "an audio model" if state == "audio" else "a model the Hub could not be asked about just now"
+    return state, (f"{model} is {what}, and --base {arg} names a bundle. No bundle serves an audio model; stage 0 compares the two "
+                   "repositories directly. Name the base as a model id instead (the card's base_model, for example "
+                   "stabilityai/stable-audio-3-small-music-base)" + ("" if state == "audio" else ". If the model is not audio, run again once the Hub answers"))
+
+
+def resolve_base(arg: str, sig, puller, out, style, *, dry_run: bool = False, pull: bool = True) -> tuple[str | None, str | None]:
     """(the weights repo to base the run on, an error text). `arg` is an installed bundle, a model id that
     an installed bundle serves, a published bundle (installed here with `tt-model pull`), or any other
-    model id, which the base check then judges."""
+    model id, which the base check then judges. With `pull=False` nothing is searched or installed: an installed bundle's name gives its
+    weights repo and anything else is taken as a model id."""
     inst = _installed(sig)
     for b in inst:
         if b.name == arg:
             return b.weights_repo, None
-    if any(b.weights_repo == arg for b in inst) or dry_run:
+    if any(b.weights_repo == arg for b in inst) or dry_run or not pull:
         return arg, None
     found = sig.search_bundles(nearest.family_query(arg)) if sig.search_bundles else None
     if arg not in {c["name"] for c in found or []}:
@@ -533,6 +596,8 @@ def pick_base(candidates: list[dict], model: str, base: str, *, out, ask=input, 
 
 
 def _base_help(check, model: str, out) -> None:
+    if (check.data or {}).get("audio"):
+        return              # the bundle help does not apply: an audio model needs no bundle, and its row says what it needs
     cands = (check.data or {}).get("candidates") or []
     print("╔══ How to choose a base", file=out)
     if cands:
@@ -641,6 +706,9 @@ def _ui_preflight(cfg, memo=None):
             sig = dataclasses.replace(sig, research=remembered)
         override = None
         if base:
+            state, why = audio_base_decision(base, model, sig)
+            if why:
+                return [preflight.Check("base", preflight.BLOCK, why, "nearest-model-missing", data={"audio": True, "candidates": []})]
             override, why = resolve_base(base, sig, None, io.StringIO(), ui.Style("none", False), dry_run=True)
             if why:
                 return [preflight.Check("base", preflight.BLOCK, why, "nearest-model-missing")]
@@ -899,7 +967,10 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
     sig = signals or preflight.default_signals(cfg, research_options=research_options)
     override = None
     if args.base:
-        override, why = resolve_base(args.base, sig, puller, out, style, dry_run=args.dry_run)
+        state, why = audio_base_decision(args.base, args.model, sig)
+        if why:
+            return _refuse(why)
+        override, why = resolve_base(args.base, sig, puller, out, style, dry_run=args.dry_run, pull=state == "text")
         if why:
             return _refuse(why)
 
@@ -1008,14 +1079,18 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
                 snapshot = Path(fetcher(args.model, hub.sha, hf_home, files=hub.files))
         except fetch.FetchError as exc:
             return _refuse(str(exc))
+        if base_data.get("audio") and (why := _downloaded_audio_problem(snapshot)):
+            return _refuse(f"the downloaded {args.model} is not an audio snapshot that stage 0 accepts: {why}")
     if base_hub is not None:
         print(f"{style.icon('🌱')}fetching the base model {base_data['base']} at {base_hub.sha[:8]} "
               f"({base_hub.total_bytes / 1e9:.1f} GB) into {hf_home}", file=out)
         try:
             with _download_meter(base_data["base"], base_hub, hf_home, out, style, args.quiet):
-                fetcher(base_data["base"], base_hub.sha, hf_home, files=base_hub.files)
+                got = fetcher(base_data["base"], base_hub.sha, hf_home, files=base_hub.files)
         except fetch.FetchError as exc:
             return _refuse(str(exc))
+        if base_data.get("audio") and (why := _downloaded_audio_problem(Path(got))):
+            return _refuse(f"the downloaded base {base_data['base']} is not an audio snapshot that stage 0 accepts: {why}")
     narrator = None
     if not args.quiet:
         # An existing run shows its last few entries first, so a resume says where it left off.

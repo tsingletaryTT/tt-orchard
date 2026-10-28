@@ -1,0 +1,3 @@
+target = "0.9.42"
+summary = "Audio preflight: a Stable Audio style model passes the base check with a warning, and a gated cached copy is used."
+pr = 147

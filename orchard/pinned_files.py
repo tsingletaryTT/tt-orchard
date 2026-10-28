@@ -76,6 +76,11 @@ def _open_regular(dir_fd: int, name: str) -> int:
     return fd
 
 
+def check_regular(dir_fd: int, name: str) -> None:
+    """Refuse `name` unless it is a regular file in the directory that is not a link. Nothing is read."""
+    os.close(_open_regular(dir_fd, name))
+
+
 def read_regular(dir_fd: int, name: str, limit: int) -> bytes:
     """The bytes of a regular file `name` in the directory, at most `limit`. A file over the limit, including one that grows while it is read,
     is refused."""

@@ -48,6 +48,7 @@ OTHER_TOOL_FLAGS = {
     "--version": "tt-model --version",
     "--catalog": "tt model search / tt-model search (the research catalog row)",
     "--cross-precision": "python -m orchard.audio_reference check",
+    "--unmatched": "python -m orchard.audio_reference control",
     "--expect-src": "make_reference.py (the audio reference script)",
     "--prompt": "make_reference.py (the audio reference script)",
     "--duration": "make_reference.py (the audio reference script)",
