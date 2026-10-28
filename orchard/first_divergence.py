@@ -323,7 +323,8 @@ def find_first_divergence(ref, cand, *, stack: Stack | None = None, tolerance: T
     report gives the relative error, the share of the squared error and the share of the reference energy of those rows. `cross_precision` leaves dtype out of the check of `ref` against `cand`, since a chip run differs in
     dtype from a float32 reference. Raises `DivergenceError` when the runs do not belong together."""
     stack, tol = stack or Stack(), tolerance or Tolerance()
-    problems = _settings_problems(ref, cand, "candidate", cross_precision=cross_precision) + identity_problems(ref, cand, "candidate")
+    problems = (_settings_problems(ref, cand, "candidate", cross_precision=cross_precision) + identity_problems(ref, cand, "candidate")
+                + noise_problems([ref, cand], "candidate"))
     if floor is not None:
         if not (isinstance(floor, (tuple, list)) and len(floor) == 2):
             raise DivergenceError("floor must be a pair of runs")
@@ -355,6 +356,11 @@ def find_first_divergence(ref, cand, *, stack: Stack | None = None, tolerance: T
     if not blocks:
         raise DivergenceError("the candidate holds none of the reference's blocks")
 
+    for b in blocks:                          # an operation recorded for a block of the reference and missing from the candidate, in any block
+        for (k, n) in ref.entries:
+            if k == stack.kind and n.startswith(b + stack.op_sep) and (k, n) not in cand.entries:
+                problems_out.append(f"{k}/{n} is in the reference and not in the candidate, so the search over operations skips it")
+
     def block_leaves(i):
         return judge.leaves(stack.kind, blocks[i])
     bisect_idx, block_probes = first_leaving(len(blocks), block_leaves)
@@ -383,9 +389,6 @@ def find_first_divergence(ref, cand, *, stack: Stack | None = None, tolerance: T
             if missing:
                 raise DivergenceError(f"ops_order names {missing}, which the reference does not hold")
             op_names = wanted
-        for n in op_names:
-            if (stack.kind, n) not in cand.entries:
-                problems_out.append(f"{stack.kind}/{n} is in the reference and not in the candidate, so the search over operations skips it")
         op_names = [n for n in op_names if (stack.kind, n) in cand.entries]
         if not op_names:
             notes.append(f"no operations recorded for {blocks[chosen]} in both runs, so the search stops at the block")
@@ -411,8 +414,11 @@ def find_first_divergence(ref, cand, *, stack: Stack | None = None, tolerance: T
             problems_out.append(f"{key[0]}/{key[1]} is in the reference and not in the candidate")
             continue
         other.append(judge.entry(*key))
+    other_leaving = [f"{t['kind']}/{t['name']}" for t in other if t["leaves"]]
     return {
         "located": first_block is not None,
+        "other_arrays_leaving": other_leaving,
+        "diverged": first_block is not None or bool(other_leaving),
         "complete": not problems_out,
         "stack": {"kind": stack.kind, "block_re": stack.block_re, "blocks": len(blocks)},
         "tolerance": {"rel_l2": tol.rel_l2, "margin": tol.margin, "fallback_rel_l2": tol.fallback_rel_l2, "min_pcc": tol.min_pcc},
@@ -466,6 +472,9 @@ def summarise(rep: dict) -> list[str]:
     s = rep["stack"]
     if not rep["located"]:
         lines.append(f"All {s['blocks']} blocks of kind {s['kind']} stay within their tolerance.")
+        if rep["other_arrays_leaving"]:
+            lines.append("The error enters after the stack: " + str(len(rep["other_arrays_leaving"])) + " other arrays leave their tolerance, among them "
+                         + ", ".join(rep["other_arrays_leaving"][:4]) + ".")
     else:
         b = rep["first_block"]
         lines.append(f"The first block that leaves its tolerance is {b['name']}.")
@@ -535,7 +544,7 @@ def main(argv=None, out=None) -> int:
     p.add_argument("--bisect-only", action="store_true", help="read only the blocks the bisect needs (no table; cannot see errors that come back inside)")
     p.add_argument("--strict-dtype", action="store_true", help="require the dtype setting to match too")
     p.add_argument("--json", action="store_true", help="print the full JSON report and no summary. Exit status: 0 all within tolerance and complete, "
-                   "1 a divergence is located, 2 refused, 3 nothing located but a block or operation is missing from one run")
+                   "1 a block or another array leaves its tolerance, 2 refused, 3 nothing located but a block or operation is missing from one run")
     p.add_argument("--out", help="also write the JSON report to this new file (an existing file is refused)")
     args = p.parse_args(argv)
     if bool(args.floor_ref) != bool(args.floor_other):
@@ -574,7 +583,7 @@ def main(argv=None, out=None) -> int:
     else:
         for line in summarise(rep):
             print(line, file=out)
-    if rep["located"]:
+    if rep["diverged"]:
         return 1
     return 0 if rep["complete"] else 3
 

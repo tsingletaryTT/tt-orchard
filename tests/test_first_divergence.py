@@ -520,3 +520,44 @@ def test_the_command_line_exits_3_when_nothing_is_located_but_a_block_is_missing
     out = io.StringIO()
     assert fd.main([str(r), str(short), "--rel-l2", "0.01"], out=out) == 3
     assert "layer_03" in out.getvalue()
+
+
+# ---- review round 2: candidate noise, operations missing anywhere, errors after the stack ------------------------------
+
+def test_a_candidate_with_different_noise_draws_is_refused_before_any_attribution(tmp_path):
+    ref, cand, _ = run(tmp_path, plant=(3, "attn"))
+    noise = ("noise", "initial")
+    ref2 = ar.load_run(_write(tmp_path / "rn", [(k, ref.array(*k)) for k in ref.entries] + [(noise, np.zeros((1, 3, 3)))]))
+    cand2 = ar.load_run(_write(tmp_path / "cn", [(k, cand.array(*k)) for k in cand.entries] + [(noise, np.ones((1, 3, 3)))], dtype="bfloat16"))
+    with pytest.raises(fd.DivergenceError, match="noise/initial differs"):
+        fd.find_first_divergence(ref2, cand2, tolerance=fd.Tolerance(rel_l2=0.01))
+    cand3 = ar.load_run(_write(tmp_path / "cn3", [(k, cand.array(*k)) for k in cand.entries], dtype="bfloat16"))
+    with pytest.raises(fd.DivergenceError, match="noise/initial is not in every run"):
+        fd.find_first_divergence(ref2, cand3, tolerance=fd.Tolerance(rel_l2=0.01))
+
+
+def test_an_operation_missing_from_a_block_that_stays_within_tolerance_makes_the_report_incomplete(tmp_path):
+    import io
+    r, _, _ = build(tmp_path)
+    ref = ar.load_run(r)
+    arrays = [((k, n), ref.array(k, n)) for (k, n) in ref.entries if n != "layer_00.attn"]
+    cand = _write(tmp_path / "noattn", arrays, dtype="bfloat16")
+    rep = fd.find_first_divergence(ref, ar.load_run(cand), tolerance=fd.Tolerance(rel_l2=0.01))
+    assert rep["located"] is False and rep["complete"] is False
+    assert any("layer_00.attn" in p for p in rep["problems"])
+    assert fd.main([str(r), str(cand), "--rel-l2", "0.01"], out=io.StringIO()) == 3
+
+
+def test_an_error_that_enters_after_the_stack_is_a_divergence_and_exits_1(tmp_path):
+    import io
+    r, _, _ = build(tmp_path)
+    ref = ar.load_run(r)
+    arrays = [((k, n), ref.array(k, n) * (1.5 if (k, n) == ("latent", "final") else 1.0)) for (k, n) in ref.entries]
+    cand = _write(tmp_path / "late", arrays, dtype="bfloat16")
+    rep = fd.find_first_divergence(ref, ar.load_run(cand), tolerance=fd.Tolerance(rel_l2=0.01))
+    assert rep["located"] is False and rep["diverged"] is True and rep["other_arrays_leaving"] == ["latent/final"]
+    out = io.StringIO()
+    assert fd.main([str(r), str(cand), "--rel-l2", "0.01"], out=out) == 1
+    assert "enters after the stack" in out.getvalue() and "latent/final" in out.getvalue()
+    clean = fd.find_first_divergence(ref, ref, tolerance=fd.Tolerance(rel_l2=0.01))
+    assert clean["diverged"] is False and clean["other_arrays_leaving"] == []
