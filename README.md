@@ -92,7 +92,7 @@ scripts/setup.sh              # asks before each step that changes the machine
 scripts/setup.sh --yes        # does every step without asking
 ```
 
-Options: `--coder {coder-next,27b}` (default `coder-next`), `--yes`, `--check`, `--start-ollama` (starts
+Options: `--coder {coder-next,coder-next-v1,27b}` (default `coder-next`), `--yes`, `--check`, `--start-ollama` (starts
 `ollama serve` in the background when it is down), `--runs-root`, `--venv-dir` and `--gozer-dir`.
 
 What it covers: Python 3.12 or newer; tt-gozer 0.3.2 or newer with `acquire --owner-pid` and `reset`
@@ -104,21 +104,27 @@ package; and the config files `config/tiers.toml` and `config/bringup.toml`, wri
 
 ### Why Coder-Next is the default on a QuietBox 2
 
-`raahemnabeel/qwen3-coder-next-blackhole` on one board (the `p300` profile) is the suggested agent model.
-It leaves the other board free for the bring-up's hardware tests, so most stages need no park and restore of
-the coder. The earlier choice, Qwen3.8-27B on all four chips, holds both boards, so every hardware stage
-parks it.
+`raahemnabeel/qwen3-coder-next` on one board (the `p300` profile) is the suggested agent model. It is the
+Qwen3-Coder-Next checkpoint with a fused decode step, and it has been the default since 2026-10-28. It leaves
+the other board free for the bring-up's hardware tests, so most stages need no park and restore of the coder.
+The earlier choice, Qwen3.8-27B on all four chips, holds both boards, so every hardware stage parks it.
 
-Evidence, from [the role-fit run](docs/run-logs/2026-10-06-rolefit-qwen3-coder-next.md): 50 of 50 replayed
-agent turns were well formed, none of the 35 replays of the 27B's failure turns repeated a failure, and decode
-ran at 41.8 tok/s at an 8K prompt and 38.4 at 32K. The first full Clef bring-up used it and reached
-`ready for operator review` (see the log in docs/project-log.md).
+Evidence, from [the fused-decode run](docs/run-logs/2026-10-28-coder-fused-decode.md): it passed the same
+role-fit test as the earlier package (50 of 50 replayed agent turns well formed, none of the 35 replays of the
+27B's failure turns repeated a failure). The kernel probe's decode-speed check measured a median of
+79 tok/s (28 samples, 43 to 108) on it, against 38.5 to 38.6 tok/s recorded for the earlier package. The new numbers vary with how busy the host is, and
+the run log gives the samples and the conditions. The earlier package ran the first full Clef bring-up to
+`ready for operator review` (see the log in docs/project-log.md). The new bundle has not yet run a whole
+bring-up.
 
-Limits: these are single measurements. The package was built from a tt-metal tree that was dirty and not
-pushed, so it cannot be rebuilt from public sources. The `p300` profile uses bfp4 routed experts, and whether
-that affects tool-call reliability over many runs is not measured. Check it on your own machine with
-`python3 -m orchard.rolefit` (section 5.3b) before relying on it. To use the 27B instead, run
-`scripts/setup.sh --coder 27b`; the config templates are `config/*.qb2-27b.toml`.
+Limits: the new bundle's numbers come from one session on a shared host, and the earlier package's numbers come
+from recorded reports and were not taken in the same hour. The `p300` profile uses bfp4 routed experts, and whether that
+affects tool-call reliability over many runs is not measured. Check it on your own machine with
+`python3 -m orchard.rolefit` (section 5.3b) before relying on it.
+
+The fallback is the earlier package, `raahemnabeel/qwen3-coder-next-blackhole`: run
+`scripts/setup.sh --coder coder-next-v1`. Its config templates are `config/*.qb2-coder-next-v1.toml`. To use
+the 27B instead, run `scripts/setup.sh --coder 27b`; its templates are `config/*.qb2-27b.toml`.
 
 ## 1. Status
 
@@ -1124,7 +1130,7 @@ replays up to 50 recorded agent turns from earlier runs' logs against the candid
 own tool definitions. A reply passes when it is a well-formed tool call or non-empty text and was not cut off.
 The bar is 95 percent. It also replays every recorded turn that failed live (cut off, or empty with no tool
 call) several times at a higher temperature, and any repeat fails the test. It checks the "7 times 6" canary
-and records prefill and decode speed at 8K and 32K prompt tokens. The endpoint must be on this machine.
+and records prefill and decode speed at 8K and 32K prompt tokens. That speed comes from the difference of two timed requests, which is noisy on a busy host (six runs on one server gave decode from 19 to 391 tok/s), so treat it as a rough check and use a streamed measurement for a speed you will quote. The endpoint must be on this machine.
 
 ```bash
 python3 -m orchard.rolefit --endpoint http://127.0.0.1:8001/v1 --model <MODEL> --logs <RUNS_DIR> --out result.json

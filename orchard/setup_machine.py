@@ -50,9 +50,15 @@ TORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
 COMMANDS_NEVER_RUN = ("reset", "publish", "push", "reconcile", "acquire", "release")   # asserted in the tests
 
 CODERS = {
-    "coder-next": {"package": "raahemnabeel/qwen3-coder-next-blackhole",
-                   "note": "Qwen3-Coder-Next on one board (the p300 profile); the other board stays free",
+    # The default since 2026-10-28 (issue 180): the fused-decode bundle. Same weights, same p300 profile.
+    "coder-next": {"package": "raahemnabeel/qwen3-coder-next",
+                   "note": "Qwen3-Coder-Next, fused-decode bundle, on one board (the p300 profile); the other board "
+                           "stays free",
                    "weights_gb": 160},
+    # The documented fallback: the package the default replaced. Choose it with --coder coder-next-v1.
+    "coder-next-v1": {"package": "raahemnabeel/qwen3-coder-next-blackhole",
+                      "note": "the fallback: the earlier Qwen3-Coder-Next package on one board (the p300 profile)",
+                      "weights_gb": 160},
     "27b": {"package": "mando2222/qwen3.8-27b-dflash2-p300x2-q4kv",
             "note": "Qwen3.8-27B on all four chips, the earlier arrangement", "weights_gb": 60},
 }
