@@ -232,8 +232,8 @@ def ladder_lines(rows: list[dict], *, skipped: list[str], stopped: str | None, s
     if stopped:
         lines += [f"The ladder stopped: {stopped}", ""]
     lines += ["## Settings", ""]
-    for key in ("coder_model", "temperatures", "seed_base", "seed_base_from", "attempts_per_rung", "library", "phase",
-                "max_turns", "sim_version", "source_sha"):
+    for key in ("coder_model", "temperatures", "sampling", "seed_base", "seed_base_from", "attempts_per_rung", "library",
+                "phase", "max_turns", "sim_version", "source_sha"):
         if settings.get(key) is not None:
             lines.append(f"- {key.replace('_', ' ')}: {settings[key]}")
     if settings.get("mixed"):
@@ -402,6 +402,14 @@ def run(args, main, *, default_wall_s: float, say=print, clock=time.monotonic) -
             sub.rungs = sub.rung_wall = sub.rung_expect_s = sub.max_hours = None      # the ladder's own options
             sub.report_only = False
             say(f"ladder rung {i + 1} of {len(rungs)}: {op} (wall budget {wall_of(op):.0f} s)")
+            # The rung's directory is locked from before its run to the end of the ladder, so no other probe can replace
+            # its report in between. The run is told, and neither takes the lock again nor releases it.
+            try:
+                held.append(kp.acquire_lock(out_dir / op))
+            except kp._Refused as exc:
+                stopped, code = f"rung {op}: {exc}", 2
+                break
+            sub.dir_locked = True
             before = (load_rung(out_dir, op)[0] or {}).get("probe_id")
             code = main(sub)
             # The rung is this run's only when its report carries a new probe id. A refused run (2) wrote none, and a
@@ -409,12 +417,6 @@ def run(args, main, *, default_wall_s: float, say=print, clock=time.monotonic) -
             after = (load_rung(out_dir, op)[0] or {}).get("probe_id")
             if code != 2 and after is not None and after != before:
                 ran.add(op)
-                try:                             # keep the finished rung's report from being replaced by another probe
-                    held.append(kp.acquire_lock(out_dir / op))
-                except kp._Refused as exc:
-                    stopped = f"rung {op}: {exc}"
-                    code = code or 2
-                    break
             if code != 0:
                 stopped = f"rung {op} ended with exit code {code}"
                 break

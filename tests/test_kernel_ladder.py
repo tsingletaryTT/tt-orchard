@@ -566,3 +566,44 @@ def test_rungs_with_the_same_sampling_are_not_flagged(tmp_path):
     write_rung(tmp_path, "mul", [attempt(True, temp=0.7)])
     data = kl.write_ladder_report(tmp_path, ["add", "mul"])
     assert data["settings"]["mixed"] == [] and data["settings"]["temperatures"] == [0.7]
+
+
+# ---- review round 4 (Copilot, PR 177) ---------------------------------------------------------------------------
+
+def test_a_rungs_directory_is_locked_before_its_run_starts_and_the_run_is_told_so(tmp_path):
+    """No gap between the end of a rung's run and the ladder taking its lock: the ladder holds it from before the run."""
+    from orchard import kernelprobe as kp
+    seen = []
+
+    def main(sub):
+        try:
+            kp.acquire_lock(tmp_path / sub.op)
+            seen.append((sub.op, "free", getattr(sub, "dir_locked", None)))
+        except kp._Refused:
+            seen.append((sub.op, "held", getattr(sub, "dir_locked", None)))
+        write_rung(Path(sub.out).parent, sub.op, [attempt(True)])
+        return 0
+    kl.run(Args(out=str(tmp_path), rungs="add,mul"), main, default_wall_s=1800.0, say=lambda l: None)
+    assert seen == [("add", "held", True), ("mul", "held", True)]
+
+
+def test_a_rung_whose_directory_another_probe_holds_stops_the_ladder_with_a_refusal(tmp_path, capsys):
+    from orchard import kernelprobe as kp
+    other = kp.acquire_lock(tmp_path / "mul")
+    try:
+        calls = []
+        code = kl.run(Args(out=str(tmp_path), rungs="add,mul,rsqrt"), fake_main(calls), default_wall_s=1800.0,
+                      say=lambda l: None)
+    finally:
+        kp.release_lock(other)
+    assert code == 2 and [c["op"] for c in calls] == ["add"]
+    data = json.loads((tmp_path / "ladder-report.json").read_text())
+    assert "mul" in data["stopped"] and "another probe is using" in data["stopped"]
+    assert [r["op"] for r in data["rungs"]] == ["add"] and data["not_run"] == ["mul", "rsqrt"]
+
+
+def test_the_markdown_settings_show_the_sampling_every_rung_shared(tmp_path):
+    write_rung(tmp_path, "add", [attempt(True, temp=0.7)], top_p=0.9)
+    write_rung(tmp_path, "mul", [attempt(True, temp=0.7)], top_p=0.9)
+    kl.write_ladder_report(tmp_path, ["add", "mul"])
+    assert "- sampling: temperatures 0.7, top-p 0.9" in (tmp_path / "ladder-report.md").read_text()

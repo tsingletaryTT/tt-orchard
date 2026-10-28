@@ -3867,3 +3867,17 @@ def test_the_ladders_derived_seed_base_is_recorded_with_its_origin_in_every_rung
     assert {h["seed_base_from"] for h in heads} == {"the ladder's id"}
     data = json.loads((tmp_path / "out" / "ladder-report.json").read_text())
     assert data["settings"]["seed_base"] == heads[0]["seed_base"] and data["settings"]["seed_base_from"] == "the ladder's id"
+
+
+def test_a_rung_run_told_its_directory_is_already_locked_does_not_lock_it_again_and_leaves_it_locked(
+        tmp_path, fake_kenv, env_ready, monkeypatch):
+    monkeypatch.setattr(kp, "run_attempt", lambda *, op, n, **kw: canned(op, n))
+    held = kp.acquire_lock(tmp_path / "out")
+    try:
+        code = kp.main(probe_args(tmp_path, dir_locked=True), env=fake_kenv, out=io.StringIO(),
+                       probe=lambda e, m: True, run_watched_fn=no_run)
+        assert code == 0 and (tmp_path / "out" / "kernel-probe-report.json").is_file()
+        with pytest.raises(kp._Refused):                          # still the ladder's lock, not released by the run
+            kp.acquire_lock(tmp_path / "out")
+    finally:
+        kp.release_lock(held)

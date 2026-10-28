@@ -2322,8 +2322,12 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
     # Absolute, because the check runs with its own directory as the working directory: a relative path on its command
     # line would point into that directory, and the check would write no result.
     probe_dir = Path(os.path.abspath(getattr(args, "out", None) or "kernel-probe"))
+    lock = None
     try:
-        lock = acquire_lock(probe_dir)
+        # A ladder locks each rung's directory before the run and keeps the lock to its end (`dir_locked`); then the run
+        # neither takes the lock again nor releases it.
+        if not getattr(args, "dir_locked", False):
+            lock = acquire_lock(probe_dir)
     except _Refused as exc:
         return refuse(str(exc))
     try:
@@ -2432,4 +2436,5 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
             return EXIT_ERROR
         return code
     finally:
-        release_lock(lock)
+        if lock is not None:
+            release_lock(lock)
