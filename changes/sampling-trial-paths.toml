@@ -1,0 +1,3 @@
+target = "0.9.53"
+summary = "Sampling trial: relative paths resolve against the run directory, the disk check reads the -nodraft destination, stale outputs are set aside"
+pr = 195

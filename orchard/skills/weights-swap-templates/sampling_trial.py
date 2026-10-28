@@ -37,7 +37,21 @@ RESULT = "trial-result.json"
 TAIL_LINES = 12
 SHIPPED = ("prepare_swap.py", "serve_and_compare.py")
 SUITE_FILE = "prompt_suite.json"
-CACHE_SUFFIX = "-nodraft"
+CACHE_SUFFIX = "-nodraft"          # orchard/sampling_choice.py names the same suffix when the supervisor checks free space; a test keeps them equal
+# The stage config's fields that name a path. The stage's own scripts run in the stage directory, but the helpers here run in `sampling-trial/variant`,
+# so a relative value is resolved against the run directory (the run directory is where a path written into a run's config is relative to) first.
+PATH_FIELDS = ("bundle_dir", "base_snapshot", "new_snapshot", "hf_home", "tt_cache", "suite_control")
+
+
+def resolve_paths(cfg: dict, run_dir: Path) -> dict:
+    """A copy of `cfg` whose path fields that are non-empty text are absolute, a relative one taken against `run_dir`. Any other value is left as it
+    is, for prepare_swap.py to refuse in its own words."""
+    out = dict(cfg)
+    for key in PATH_FIELDS:
+        value = out.get(key)
+        if isinstance(value, str) and value:
+            out[key] = str(Path(value) if Path(value).is_absolute() else run_dir / value)
+    return out
 
 
 def shipped(cfg: dict) -> tuple[str, ...]:
@@ -121,6 +135,7 @@ def main() -> int:
         if not path.exists():
             fail(f"{path} does not exist")
     run_dir = Path(cfg["run_dir"]).resolve()
+    cfg = resolve_paths(cfg, run_dir)              # before the cache suffix is added and before the variant is built (issue 125)
     steps: list = []
     cache = Path(cfg["tt_cache"])
     cache = cache.with_name(cache.name + CACHE_SUFFIX)
