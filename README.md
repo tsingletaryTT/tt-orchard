@@ -584,9 +584,12 @@ the research setting are under **Options**, and the line says what they are now.
 ![New bring-up: the model field, the closed Options line, Run checks as the main button](docs/ui/operator-new-bringup.png)
 
 The Telegraph view (section 5.9g) shows what the outside helper has cost: spend against each cap, every call, and the totals by model
-and by problem. This one reads the ledger of 40 real helper calls made while comparing outside models on failing kernels ($1.21 in all).
-The meter is amber because one problem has used 5 of the 6 calls the configuration allows it. The configuration is a placeholder with an
-example host and a dummy key variable. The page only reads the ledger, so nothing was sent or spent for the picture.
+and by problem. Under the caps, a "Local (virtual)" block prices the tokens the local models used in the run folders at a hosted model's
+list rate, and the top bar shows the two figures side by side ("Helper" is real money, "Local" is virtual and is never added to it).
+This one reads the ledger of 40 real helper calls ($1.21 in all) and 19,720 local agent turns across 21 run and probe directories
+(about $14.10 at the Haiku 5.5 list rate; six runs are marked "not fully read", so their figures are low). The meter is amber because one
+problem has used 5 of the 6 calls the configuration allows it. The configuration is a placeholder with an example host and a dummy key
+variable. The page only reads the ledger and the logs, so nothing was sent or spent for the picture.
 
 ![Operator style, the Telegraph view: spend and caps, recent calls, totals by model and by problem](docs/ui/operator-telegraph.png)
 
