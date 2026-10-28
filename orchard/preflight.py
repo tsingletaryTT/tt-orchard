@@ -539,6 +539,8 @@ def _audio_base(*, model_id: str, base: str, inferred: bool, report, accept_infe
     if info is None and snap is None:
         return Check("base", BLOCK, f"cannot look up the base model {base} on the hub: {err}", "model-unavailable", data=data)
     from orchard import audio_facts
+    if snap is not None and snapshot_audio_problem(snap):
+        return None                       # the cached config is not one stage 0 reads as audio: the old path applies
     # The Hub's list (when the Hub answered) and the snapshot's top level (when one exists) must each show the layout; a source that is
     # present but empty fails. With no Hub answer the snapshot alone decides, since the model itself was already judged audio.
     lists = [n for n in (info.files if info else None, snapshot_root_names(snap) if snap else None) if n is not None]
@@ -741,6 +743,18 @@ def has_weights(snapshot: Path) -> bool:
 _CONFIG_FILES = ("config.json", "model_config.json")
 
 
+def snapshot_audio_problem(snap) -> str | None:
+    """Why a snapshot directory is not an audio snapshot stage 0 would accept, or None when it is. The cached `model_config.json` is read
+    with a bounded read (orchard/audio_facts.py) and must be what `detect_audio` in the stage 0 template requires."""
+    from orchard import audio_facts
+    try:
+        with open(Path(snap) / "model_config.json", "rb") as f:
+            raw = f.read(audio_facts.AUDIO_JSON_MAX + 1)
+    except OSError as exc:
+        return f"model_config.json could not be read: {type(exc).__name__}"
+    return audio_facts.audio_config_problem(raw)[1]
+
+
 def snapshot_root_names(snap) -> list[str]:
     """The names at the top level of a snapshot directory that lead to a readable file or directory (a broken link does not count), for
     the audio rule (orchard/audio_facts.py). An unreadable directory gives an empty list, which holds no evidence."""
@@ -750,12 +764,38 @@ def snapshot_root_names(snap) -> list[str]:
         return []
 
 
+def _repo_of_snapshot(snap: Path) -> str | None:
+    """`org/name` from a hub cache path (`.../models--org--name/snapshots/<rev>`), or None for any other directory."""
+    parts = snap.parent.parent.name.split("--", 2) if snap.parent.name == "snapshots" else []
+    return f"{parts[1]}/{parts[2]}" if len(parts) == 3 and parts[0] == "models" else None
+
+
+def missing_audio_components(snap: Path) -> list[str]:
+    """Component config files an audio snapshot needs and does not have: the `config.json` of each text-encoder directory its
+    `model_config.json` loads from in the model's own organisation (stage 0 compares them). Empty when the config cannot be read (the
+    caller reports that through snapshot_audio_problem)."""
+    from orchard import audio_facts
+    try:
+        with open(snap / "model_config.json", "rb") as f:
+            cfg = audio_facts.audio_config_problem(f.read(audio_facts.AUDIO_JSON_MAX + 1))[0]
+    except OSError:
+        return []
+    own = _repo_of_snapshot(snap)
+    if cfg is None or own is None:
+        return []
+    return [f"{sub}/config.json" for sub in audio_facts.component_subfolders(cfg, own) if not (snap / sub / "config.json").is_file()]
+
+
 def snapshot_complete(snap: Path) -> bool:
     """A snapshot directory the harness can use: a config file, at least one readable weight file, no weight link that points
     nowhere, and every shard a weight index lists. Repos with other layouts (a single model.safetensors, component
     directories) pass the same way."""
     if not any((snap / c).is_file() for c in _CONFIG_FILES) or not has_weights(snap):
         return False
+    if (snap / "model_config.json").is_file() and not (snap / "config.json").is_file():
+        # The stable-audio-tools layout: the config must be one stage 0's detector accepts, and the text encoder's config must be there.
+        if snapshot_audio_problem(snap) or missing_audio_components(snap):
+            return False
     weights = list(snap.rglob("*.safetensors")) + list(snap.glob("pytorch_model*.bin"))
     if any(not w.exists() for w in weights):
         return False
@@ -776,6 +816,8 @@ def audio_evidence_for(hub: HubInfo | None, local_path) -> str | None:
         return None
     try:
         from orchard import audio_facts
+        if local_path and snapshot_audio_problem(local_path):
+            return None                   # the cached config is not one stage 0 reads as audio: the old path applies
         return audio_facts.audio_evidence(hub.pipeline_tag, hub.tags, hub.files, snapshot_root_names(local_path) if local_path else None)
     except Exception:
         return None

@@ -15,6 +15,10 @@ bundle, which is what every run before this module was.
 """
 from __future__ import annotations
 
+import json
+import os
+from pathlib import PurePosixPath
+
 FORMS = ("adapter", "full")
 SERVINGS = ("thin-bundle", "container", "none")
 MODALITIES = ("text", "audio")
@@ -105,3 +109,92 @@ def audio_evidence(pipeline_tag, tags, hub_files=None, *other_lists) -> str | No
     else:
         how = f"tag {next(t for t in _strings(tags) if t in AUDIO_PIPELINE_TAGS)}"
     return f"{how}; {AUDIO_CONFIG} and no {TEXT_CONFIG} at the repository root"
+
+
+# ---- the cached config (what stage 0's detector requires) ---------------------------------------------------
+#
+# `detect_audio` in the stage 0 template accepts a snapshot only when `model_config.json` is a JSON object of at most 1 MiB, with no repeated
+# key, no NaN or infinity, no integer of more than 30 digits and no nesting deeper than 32, a string `model_type` and an object `model`. The
+# preflight reads the cached config with the same limits (a bounded read), so a snapshot the preflight calls audio is one stage 0 calls audio
+# (tests/test_audio_preflight_review3.py runs both on the same files). The template keeps its own copy of these limits.
+
+AUDIO_JSON_MAX = 1 << 20
+AUDIO_MAX_DEPTH = 32
+AUDIO_MAX_INT_DIGITS = 30
+
+
+def _pairs(pairs):
+    out = {}
+    for key, value in pairs:
+        if key in out:
+            raise ValueError(f"duplicate key {key!r}")
+        out[key] = value
+    return out
+
+
+def _no_constant(name):
+    raise ValueError(f"{name} is not allowed")
+
+
+def _int(text):
+    if len(text.lstrip("-")) > AUDIO_MAX_INT_DIGITS:
+        raise ValueError("an integer has too many digits")
+    return int(text)
+
+
+def _depth(data) -> int:
+    deepest, stack = 0, [(data, 1)]
+    while stack:
+        item, d = stack.pop()
+        kids = list(item.values()) if isinstance(item, dict) else item if isinstance(item, list) else None
+        if kids is None:
+            continue
+        deepest = max(deepest, d)
+        if deepest > AUDIO_MAX_DEPTH:
+            return deepest
+        stack.extend((k, d + 1) for k in kids)
+    return deepest
+
+
+def audio_config_problem(raw) -> tuple[dict | None, str | None]:
+    """(the parsed config, None) or (None, why not) for the bytes of a `model_config.json`. `raw` longer than AUDIO_JSON_MAX is refused
+    without parsing. The config must be an object with a string `model_type` and an object `model`."""
+    if not isinstance(raw, (bytes, bytearray)):
+        return None, "model_config.json could not be read"
+    if len(raw) > AUDIO_JSON_MAX:
+        return None, f"model_config.json is larger than {AUDIO_JSON_MAX} bytes"
+    try:
+        cfg = json.loads(raw.decode("utf-8"), object_pairs_hook=_pairs, parse_constant=_no_constant, parse_int=_int)
+    except (ValueError, RecursionError) as exc:             # UnicodeDecodeError is a ValueError
+        return None, f"model_config.json is not readable JSON: {exc}"
+    if not isinstance(cfg, dict):
+        return None, "model_config.json is not a JSON object"
+    if _depth(cfg) > AUDIO_MAX_DEPTH:
+        return None, f"model_config.json is nested more than {AUDIO_MAX_DEPTH} levels deep"
+    if not isinstance(cfg.get("model_type"), str) or not isinstance(cfg.get("model"), dict):
+        return None, "model_config.json has no string model_type and object model"
+    return cfg, None
+
+
+def component_subfolders(cfg, own_repo: str) -> list[str]:
+    """Directories (relative, with no `..`) that the config's conditioners load from in the model's own organisation. Stage 0 compares a
+    text encoder's `config.json` and tensors when its `repo_id` names one of the two repositories; a snapshot is complete only when those
+    directories' configs are present. A `repo_id` in another organisation is loaded from elsewhere and is not required here."""
+    org = own_repo.split("/", 1)[0] if isinstance(own_repo, str) and "/" in own_repo else None
+    out = []
+    try:
+        confs = cfg["model"]["conditioning"]["configs"]
+    except (KeyError, TypeError):
+        return out
+    for c in confs if isinstance(confs, list) else []:
+        inner = c.get("config") if isinstance(c, dict) else None
+        if not isinstance(inner, dict):
+            continue
+        sub, repo = inner.get("subfolder"), inner.get("repo_id")
+        if not (isinstance(sub, str) and sub and isinstance(repo, str) and org and repo.split("/", 1)[0] == org):
+            continue
+        parts = PurePosixPath(sub).parts
+        if os.path.isabs(sub) or ".." in parts or "\\" in sub:
+            continue
+        out.append(sub)
+    return out

@@ -92,12 +92,13 @@ def test_the_panel_blocks_on_a_failed_search_for_an_audio_model(conf, tmp_path, 
 
 def cfg_dir(tmp_path, text, name="c"):
     d = tmp_path / name
-    d.mkdir()
+    d.mkdir(parents=True)
     (d / "model_config.json").write_text(text)
     (d / "model.safetensors").write_text("w")
     return d
 
 
+HUB_DIR = "hub/models--stabilityai--stable-audio-3-small-music/snapshots/rev"
 BAD_CONFIGS = {
     "empty-object": "{}", "model-not-object": '{"model_type": "x", "model": 3}', "no-model-type": '{"model": {}}',
     "type-not-string": '{"model_type": 7, "model": {}}', "not-json": "{nope", "list": "[]", "empty-file": "",
@@ -161,7 +162,7 @@ def test_a_cached_snapshot_with_a_bad_config_is_not_complete(tmp_path):
 
 
 def test_a_cached_snapshot_needs_its_text_encoder_config(tmp_path):
-    d = cfg_dir(tmp_path, json.dumps(model_config(MODEL)), name="models--stabilityai--stable-audio-3-small-music")
+    d = cfg_dir(tmp_path, json.dumps(model_config(MODEL)), name=HUB_DIR)
     sub = d / "t5gemma-b-b-ul2"
     sub.mkdir()
     (sub / "model.safetensors").write_text("w")
@@ -171,13 +172,13 @@ def test_a_cached_snapshot_needs_its_text_encoder_config(tmp_path):
 
 
 def test_a_text_encoder_that_loads_from_another_organisation_is_not_required_locally(tmp_path):
-    d = cfg_dir(tmp_path, json.dumps(model_config("google/t5gemma-b-b-ul2")), name="models--stabilityai--stable-audio-3-small-music")
+    d = cfg_dir(tmp_path, json.dumps(model_config("google/t5gemma-b-b-ul2")), name=HUB_DIR)
     assert pf.snapshot_complete(d) is True
 
 
 @pytest.mark.parametrize("sub", ["../escape", "/abs", 7, ""])
 def test_a_hostile_subfolder_is_never_required_or_followed(tmp_path, sub):
-    d = cfg_dir(tmp_path, json.dumps(model_config(MODEL, sub)), name="models--stabilityai--stable-audio-3-small-music")
+    d = cfg_dir(tmp_path, json.dumps(model_config(MODEL, sub)), name=HUB_DIR)
     assert pf.snapshot_complete(d) is True
 
 

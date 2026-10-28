@@ -456,6 +456,16 @@ def _installed(sig) -> list:
     return list(sig.installed_bundles()) if sig.installed_bundles else []
 
 
+def _downloaded_audio_problem(snapshot: Path) -> str | None:
+    """After a download for an audio run: why the snapshot is not one stage 0's audio branch accepts (its config, its text encoder's
+    config), or None. The preflight judged the model audio from the Hub's lists; this checks the files that arrived."""
+    why = preflight.snapshot_audio_problem(snapshot)
+    if why:
+        return why
+    missing = preflight.missing_audio_components(Path(snapshot))
+    return f"missing {', '.join(missing[:3])}" if missing else None
+
+
 def audio_base_decision(arg: str, model: str, sig) -> tuple[str, str | None]:
     """(state, a reason to refuse `--base <arg>` or None). `state` is "audio", "text" or "unknown" (the Hub could not say, so nothing
     shows whether the model is audio). An audio model (orchard/audio_facts.py) is compared with its base repository directly and no bundle
@@ -1043,14 +1053,18 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
                 snapshot = Path(fetcher(args.model, hub.sha, hf_home, files=hub.files))
         except fetch.FetchError as exc:
             return _refuse(str(exc))
+        if base_data.get("audio") and (why := _downloaded_audio_problem(snapshot)):
+            return _refuse(f"the downloaded {args.model} is not an audio snapshot that stage 0 accepts: {why}")
     if base_hub is not None:
         print(f"{style.icon('🌱')}fetching the base model {base_data['base']} at {base_hub.sha[:8]} "
               f"({base_hub.total_bytes / 1e9:.1f} GB) into {hf_home}", file=out)
         try:
             with _download_meter(base_data["base"], base_hub, hf_home, out, style, args.quiet):
-                fetcher(base_data["base"], base_hub.sha, hf_home, files=base_hub.files)
+                got = fetcher(base_data["base"], base_hub.sha, hf_home, files=base_hub.files)
         except fetch.FetchError as exc:
             return _refuse(str(exc))
+        if base_data.get("audio") and (why := _downloaded_audio_problem(Path(got))):
+            return _refuse(f"the downloaded base {base_data['base']} is not an audio snapshot that stage 0 accepts: {why}")
     narrator = None
     if not args.quiet:
         # An existing run shows its last few entries first, so a resume says where it left off.
