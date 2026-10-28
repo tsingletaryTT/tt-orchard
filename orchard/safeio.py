@@ -397,7 +397,7 @@ def _parse_float(text: str):
 
 def _make_parse_int(max_digits: int) -> Callable[[str], int]:
     def parse_int(text: str) -> int:
-        if len(text) > max_digits:
+        if len(text.lstrip("-")) > max_digits:       # the limit counts digits; the sign is not one
             raise _Refuse("an integer has too many digits")
         return int(text)
     return parse_int
