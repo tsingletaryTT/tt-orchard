@@ -75,3 +75,49 @@ pass rate of 0% from one of 20% (0.8 to the tenth power is 0.11), so a rung with
 and a rung with 9 or 10 passes is "at or near full".
 
 Not measured here: hardware passes, other temperatures, other coders, other skill texts, other libraries, longer budgets.
+
+## Pilot results and the batch plan (written 2026-10-28, after the pilots and before the first batch attempt)
+
+Pilot: one attempt per rung, `--ladder --attempts 1 --temperature 0.7 --seed 2026110000 --phase sim --library none --no-agent-hw`,
+coder Qwen3-Coder-Next as above, default 1800 s wall budget, rungs in ladder order on a coder that served only this probe.
+The pilot ran from commit cfe7b5d. Its rsqrt attempt used the earlier rsqrt inputs (a sigmoid of a normal draw, with no heavy-tail
+set; the batch uses the positive inputs from the review fix, see the PR). The pilot was stopped by hand during rung 8
+(`rmsnorm`, exit 4, no attempt counted), so `rmsnorm` and `linear_scan` have no pilot attempt.
+
+| Rung | Op | Pilot result | Turns | Agent wall (s) | Budget by the rule (s) |
+|---|---|---|---|---|---|
+| 1 | add | passed | 4 | 206 | 824 |
+| 2 | mul | passed | 21 | 361 | 1444 |
+| 3 | scale_shift | passed | 29 | 749 | 1800 (4 x 749 = 2996, capped) |
+| 4 | add_row | passed | 21 | 1391 | 1800 (capped) |
+| 5 | rsqrt | passed | 12 | 281 | 1123 |
+| 6 | row_sum | passed | 15 | 570 | 1800 (4 x 570 = 2280, capped) |
+| 7 | center | failed, `Deadlock detected: all generators blocked` | 29 | 1914 | 1800 (no pass to scale from) |
+| 8 | rmsnorm | not piloted | | | 1800 |
+| 9 | linear_scan | not piloted | | | 1800 |
+
+Projection for the whole ladder at 10 attempts per rung: sum of 10 x (pilot wall + 60 s) for rungs 1 to 7 is about 18 hours
+(add 0.7, mul 1.2, scale_shift 2.3, add_row 4.0, rsqrt 0.9, row_sum 1.8, center 5.5), and rungs 8 and 9 add about 5.3 hours each
+at the wall budget. That is far above 6 hours, so the pre-registered rule for a ladder that does not fit applies: start at the first
+rung whose pilot failed (`center`, rung 7) and take the rungs nearest to it.
+
+Batch plan (a deviation from one process at a time, decided here and not before the pilot, with its reason):
+
+- `center` alone takes about 5.5 hours at its budget (a failing attempt runs to the wall budget, and the 1914 s of the pilot shows the
+  overrun of a tool call after the budget), so a strictly sequential batch fits one rung in 6 hours.
+- Two probe processes therefore run against the one coder at the same time. Process A: `--ladder --rungs center`. Process B:
+  `--ladder --rungs row_sum,rsqrt,mul,add --max-hours 5.5` with `--rung-expect-s row_sum=570,rsqrt=281,mul=361,add=206`: the rungs
+  below `center`, nearest first, that fit beside it. Both use `--attempts 10 --temperature 0.7 --seed 2026110100 --phase sim
+  --library none --no-agent-hw` and the budgets above through `--rung-wall` (row_sum 1800, rsqrt 1123, mul 1444, add 824, center
+  1800), so attempt k of every rung sends seed 2026110100 + k.
+- `scale_shift` and `add_row` are not in the batch (they would add 2.3 and 4.0 hours); they keep their one pilot attempt, and the
+  table says so. `rmsnorm` and `linear_scan` are not in the batch for the same reason; the earlier runs (0 of 29 and 0 of 3, with
+  other skill text) are the only data on them.
+- Two clients at once slow the coder. The 2026-10-17 measurement in `orchard/defaults.py` is 77% of single-client speed each. Slower
+  decoding means fewer turns inside the wall budget, so every rung in the batch is measured under that condition (and under single-client
+  speed after the other process ends); the pilot was measured at single-client speed. Each attempt's record has the decode speed measured
+  just before it, and the report lists it. A comparison of a pilot wall time with a batch pass time mixes the two conditions.
+- Stop rules. Process B stops after the rung it is on when process A has ended, and any rung it did not finish is reported with
+  the attempts it has. If the coder is reported slow (3 samples below half its best speed) the probe stops by its own rule and that is
+  reported. No attempt is repeated or dropped. Neither process is restarted with different settings during the batch.
+- The batch runs from an export of the branch head at the time of the run; the head is named in the results.
