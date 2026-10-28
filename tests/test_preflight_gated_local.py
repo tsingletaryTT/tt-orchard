@@ -12,7 +12,7 @@ def _gated_hub(files, **over):
 def _audio_snap(tmp_path, rev="8bdfb53c6b0f"):
     snap = tmp_path / "hf" / "hub" / "models--stabilityai--audio" / "snapshots" / rev
     (snap / "t5").mkdir(parents=True)
-    (snap / "model_config.json").write_text("{}")
+    (snap / "model_config.json").write_text('{"model_type": "diffusion_cond", "model": {}}')      # what stage 0's detector accepts
     (snap / "model.safetensors").write_text("w")
     (snap / "t5" / "model.safetensors").write_text("w")
     return snap
