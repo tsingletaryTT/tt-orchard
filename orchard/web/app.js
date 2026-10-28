@@ -117,6 +117,8 @@ async function api(path, opts) {
     init.headers["X-Orchard-Token"] = S.meta ? S.meta.token : "";
     init.body = JSON.stringify(opts.body);
   }
+  const quiet = !!(opts && opts.quiet);  // a side request (the virtual figure): its failure does not mark the page offline
+  if (opts && opts.signal) init.signal = opts.signal;
   let timer = null;
   if (opts && opts.timeout) {            // an optional limit: the request is aborted and counts as a failure
     const ctl = new AbortController();
@@ -128,11 +130,13 @@ async function api(path, opts) {
     resp = await fetch(path, init);
   } catch (err) {
     if (timer) clearTimeout(timer);
-    setConn("offline");
+    if (!quiet) setConn("offline");
     throw new Error("The UI server cannot be reached. Is `tt-orchard ui` still running?");
   }
-  S.lastOk = Date.now();
-  setConn("live");
+  if (!quiet) {
+    S.lastOk = Date.now();
+    setConn("live");
+  }
   const isJson = (resp.headers.get("Content-Type") || "").includes("application/json");
   const data = isJson ? await resp.json() : await resp.text();      // the limit covers the body too
   if (timer) clearTimeout(timer);
@@ -220,6 +224,86 @@ function renderMachineChip(m, all, free) {
   chip.textContent = free === all.length ? `${free} of ${all.length} chips free`
     : `${free} of ${all.length} chips free · coder ${m.coder.up ? "up" : "down"}`;
   chip.dataset.tone = free === all.length ? "good" : stale ? "bad" : "warn";
+}
+
+// ---- virtual spend: the local models' token use at a hosted model's price (orchard/virtualspend_view.py) ----------------
+// A comparison figure, never money and never added to the helper spend. It has its own request and its own failure handling.
+// It is shown only when local logs with token counts exist for the selected run (or for the listed runs when none is
+// selected); it is hidden by its own timer STALE_MS after the last answer, so an old amount never stays on screen even when a
+// request never completes. It does not touch the
+// helper meter's state or colour.
+const VS_TIMEOUT_MS = 8000;            // a request that has not answered by then is aborted
+const VS_BACKOFF_START_MS = 2000;      // after a failure the next request waits this long, then twice as long, up to the cap
+const VS_BACKOFF_MAX_MS = 30000;
+
+// One request at a time. A request is aborted at VS_TIMEOUT_MS. A failure (a timeout, an error answer) delays the next request,
+// longer after each one. A forced poll (a different run was selected) aborts the older request and asks at once; the answer or
+// failure of an aborted request is ignored. Side requests never mark the page offline (`quiet`).
+async function pollVirtual({ force = false } = {}) {
+  if (S.vsInflight) { if (!force) return; S.vsInflight.abort(); }
+  if (!force && Date.now() < (S.vsNextAt || 0)) return;
+  const ctl = new AbortController();
+  S.vsInflight = ctl;
+  const timer = setTimeout(() => ctl.abort(), VS_TIMEOUT_MS);
+  const asked = S.selected;
+  try {
+    const answer = await api("/api/virtual-spend" + (asked ? `?run=${encodeURIComponent(asked)}` : ""), { signal: ctl.signal, quiet: true });
+    if (S.vsInflight !== ctl || S.selected !== asked) return;      // cancelled, or an answer about the run selected a moment ago
+    S.vsBackoff = 0;
+    S.vsNextAt = 0;
+    S.virtual = answer;
+    renderLocalMeter(S.virtual);
+    renderLocalTable();
+  } catch (err) {
+    if (S.vsInflight !== ctl) return;                              // cancelled by a newer poll: not a failure
+    S.vsBackoff = Math.min(VS_BACKOFF_MAX_MS, (S.vsBackoff || VS_BACKOFF_START_MS / 2) * 2);
+    S.vsNextAt = Date.now() + S.vsBackoff;
+    // The figure expires on its own timer (renderLocalMeter), whether a request fails or never answers.
+  } finally {
+    clearTimeout(timer);
+    if (S.vsInflight === ctl) S.vsInflight = null;
+  }
+}
+
+function renderLocalMeter(v) {
+  const el = $("local-meter");
+  const meter = v && v.meter;
+  clearTimeout(S.vsTimer);                     // each answer renews the expiry; no later response has to arrive for it to fire
+  el.hidden = !meter;
+  if (!meter) { $("local-text").textContent = ""; return; }
+  S.vsTimer = setTimeout(() => renderLocalMeter(null), STALE_MS);
+  $("local-text").textContent = meter.text;
+  el.title = meter.title;
+}
+
+function renderLocalTable() {
+  const v = S.virtual;
+  if (!v || !changed($("tg-local"), [v.rows, v.references, v.not_scanned, v.discovery_truncated, v.more_rows, v.scope, v.not_fully_read, v.scan_failures, v.runs_folder_unreadable, v.error])) return;
+  $("tg-local-note").textContent = v.label + ". The prompt count is large because every turn re-sends the whole conversation; " +
+    "a hosted provider with prompt caching would bill most of it for much less." +
+    (v.not_scanned ? ` ${plural(v.not_scanned, "run")} not scanned (the scan reads the first listed folders; select a run to scan it).` : "") +
+    (v.more_rows ? ` ${plural(v.more_rows, "more run")} not shown in this table` +
+      (v.scope === "all" ? "; their tokens are in the meter's total." : " (the meter shows the selected run only).") : "") +
+    (v.discovery_truncated ? " The folder listing was cut short, so some folders are not listed at all." : "") +
+    (v.not_fully_read ? ` ${plural(v.not_fully_read, "run")} not fully read (marked in the table), so their figures are low.` : "") +
+    (v.scan_failures ? ` ${plural(v.scan_failures, "run")} could not be read.` : "") +
+    (v.runs_folder_unreadable ? " The runs folder cannot be read." : "") +
+    (v.error ? ` ${v.error}.` : "");
+  const head = clear($("tg-local-head"));
+  const hr = h("tr", {});
+  for (const [t, cls] of [["Run or probe directory", null], ["Turns", "num"], ["Prompt tokens", "num"], ["Completion tokens", "num"], ["Agent time", "num"]]) {
+    hr.append(h("th", { scope: "col", class: cls }, t));
+  }
+  for (const r of v.references) hr.append(h("th", { scope: "col", class: "num" }, `Virtual $ at ${r.name}`));
+  head.append(hr);
+  const body = clear($("tg-local-body"));
+  for (const r of v.rows) {
+    const cells = [[r.complete ? r.name : `${r.name} (not fully read)`, "wrap", r.left_out || null], [String(r.turns), "num"], [String(r.prompt_tokens), "num"], [String(r.completion_tokens), "num"],
+      [r.agent_wall_s ? `${(r.agent_wall_s / 3600).toFixed(2)} h` : "not recorded", "num"]];
+    for (const c of r.virtual) cells.push([usd(c.cost_usd), "num"]);
+    body.append(tgRow(cells));
+  }
+  $("tg-local-empty").hidden = v.rows.length > 0 || v.runs_folder_unreadable;
 }
 
 // ---- telegraph: the spend meter in the top bar (always on screen) and the Telegraph view ----------------------------
@@ -580,6 +664,7 @@ function renderRuns() {
 }
 
 async function refreshRuns() {
+  pollVirtual();                         // the local models' virtual figure: its own request, kept apart from the real spend
   try {
     const [runs, machine, launches] = await Promise.all([api("/api/runs"), api("/api/machine"), api("/api/launches")]);
     S.runs = runs.runs;
@@ -604,6 +689,8 @@ function select(name, { push = true } = {}) {
   if (S.selected === name) return;
   S.selected = name;
   S.detail = null;
+  renderLocalMeter(null);                      // the figure of the run just left must not stay beside the new one
+  pollVirtual({ force: true });
   S.ledgerAfter = 0; S.ledgerRows = []; S.file = null;
   if (push) history.replaceState(null, "", `#run/${encodeURIComponent(name)}`);
   renderRuns();
@@ -1351,6 +1438,7 @@ function wire() {
   $("view-settings-btn").addEventListener("click", () => setView("settings"));
   $("view-telegraph-btn").addEventListener("click", () => setView("telegraph"));
   $("spend-meter").addEventListener("click", () => setView("telegraph"));
+  $("local-meter").addEventListener("click", () => setView("telegraph"));
   $("settings-form").addEventListener("submit", saveSettings);
   $("checks-run").addEventListener("click", startChecks);
   $("caches-run").addEventListener("click", loadCaches);

@@ -17,8 +17,8 @@ def test_the_spend_meter_is_a_button_in_the_top_bar_before_the_machine_chip():
     meter = by_id(t, "spend-meter")
     assert meter.tag == "button" and meter.attrs.get("type") == "button" and "spend-meter" in meter.classes
     right = meter.parent
-    assert "topbar-right" in right.classes and right.kids[0] is meter
-    assert by_id(t, "machine-chip") in right.kids
+    assert "meters" in right.classes and right.parent.attrs.get("class") == "topbar-right" and right.kids[0] is meter
+    assert by_id(t, "machine-chip") in right.parent.kids and right.parent.kids[0] is right
     assert not meter.inside(by_id(t, "run-view")), "the meter is outside every view, so no view can hide it"
     text = by_id(t, "spend-text")
     assert text.inside(meter) and text.attrs.get("class") == "spend-text"
@@ -171,8 +171,8 @@ def test_the_operator_meter_pairs_on_the_dark_top_bar_are_aa():
 
 def test_up_to_900_px_the_meter_is_pinned_to_the_bottom_edge_with_a_solid_background_in_both_styles():
     css = CSS()
-    media = re.search(r"@media \(max-width: 900px\) \{\n  \.spend-meter \{([^}]*)\}", css)
-    assert media and "position: fixed" in media.group(1) and "bottom: 8px" in media.group(1)
+    media = re.search(r"@media \(max-width: 900px\) \{\n[^\n]*\n  \.meters \{([^}]*)\}", css)
+    assert media and "position: fixed" in media.group(1) and "bottom: 8px" in media.group(1), "both figures are pinned together"
     assert re.search(r"@media \(max-width: 900px\) \{[^}]*\n  html\[data-mode=\"operator\"\] \.spend-meter \{ background: #092221; \}", css)
     assert re.search(r"body \.rail \{ padding-bottom: 6\.5rem; \}", css), "room under the pinned meter"
     # the operator tone rules come first in the file order of specificity: warn and bad keep their own backgrounds
