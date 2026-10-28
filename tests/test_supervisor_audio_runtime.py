@@ -82,6 +82,8 @@ def arig(tmp_path, monkeypatch):
         return out["result"]
     monkeypatch.setattr(audio_remote, "call", in_process)
 
+    r.real_bundle_body = supervisor.Supervisor._bundle_body
+
     def bundle(self, spec, stage_dir):
         (stage_dir / "bundle").mkdir(parents=True, exist_ok=True)
         (stage_dir / "bundle" / "RESULTS.md").write_text("fake bundle\n")
@@ -331,3 +333,25 @@ def test_a_base_without_a_local_snapshot_has_no_control_and_the_run_still_reache
     assert [a[a.index("--model") + 1] for a, _ in arig.calls["cpu"]] == ["small-music", "small-music"]
     cfg = json.loads(next(arig.run_dir.glob("stages/2/audio_chip_config.json")).read_text())
     assert {r["model"] for r in cfg["runs"]} == {"small-music"}
+
+
+def test_an_audio_runs_bundle_builder_is_the_running_checkouts_and_a_text_runs_is_the_recorded_one(arig, tmp_path):
+    import dataclasses
+    from orchard.ledger import Ledger
+    from orchard.stages import STAGES
+    recorded = tmp_path / "recorded-checkout"
+    builder = recorded / "orchard" / "skills" / "operator-bundle-templates"
+    builder.mkdir(parents=True)
+    (builder / "build_bundle.py").write_text("raise SystemExit(3)  # the recorded checkout's builder\n")
+    spec = STAGES[8]
+    with Ledger(arig.run_dir / "ledger.jsonl") as led:
+        sup = build_supervisor(arig, led)
+        sup.paths = dataclasses.replace(sup.paths, orchard_dir=str(recorded))
+        stage_dir = arig.run_dir / "stages" / "8"
+        arig.real_bundle_body(sup, spec, stage_dir)
+        assert "the recorded checkout's builder" in (stage_dir / "build_bundle.py").read_text()          # a text run keeps the recorded checkout
+        selected_ledger(arig, led)
+        arig.real_bundle_body(sup, spec, stage_dir)
+        running = Path(supervisor.__file__).resolve().parent
+        assert (stage_dir / "build_bundle.py").read_bytes() == (running / "skills" / "operator-bundle-templates" / "build_bundle.py").read_bytes()
+        assert json.loads((stage_dir / "bundle_config.json").read_text())["orchard_dir"] == str(running.parent)

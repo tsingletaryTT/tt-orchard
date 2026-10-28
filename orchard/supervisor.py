@@ -1615,10 +1615,13 @@ class Supervisor:
         n = spec.number
         stage_dir.mkdir(parents=True, exist_ok=True)
         script = stage_dir / "build_bundle.py"
-        shutil.copyfile(Path(self.paths.orchard_dir) / "orchard" / "skills" / "operator-bundle-templates"
-                        / "build_bundle.py", script)
+        # An audio run's other stages already use the scripts of the checkout that is running (audio_runtime.TEMPLATES), so its bundle builder is that
+        # checkout's too: a run started under an older checkout can then finish with the audio section. Other runs keep the recorded checkout.
+        orchard_dir = (Path(__file__).resolve().parent.parent if audio_runtime.selected(self.ledger.read()) is not None
+                       else Path(self.paths.orchard_dir))
+        shutil.copyfile(orchard_dir / "orchard" / "skills" / "operator-bundle-templates" / "build_bundle.py", script)
         (stage_dir / "bundle_config.json").write_text(
-            json.dumps({"run_dir": str(self.run_dir), "orchard_dir": str(self.paths.orchard_dir)}, indent=2)
+            json.dumps({"run_dir": str(self.run_dir), "orchard_dir": str(orchard_dir)}, indent=2)
             + "\n", encoding="utf-8")
         (stage_dir / "log").mkdir(exist_ok=True)
         log = stage_dir / "log" / "build_bundle.log"
