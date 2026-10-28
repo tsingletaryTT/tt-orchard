@@ -10,12 +10,12 @@ Paths are placeholders (`<run>` is the run directory). Nothing was uploaded, pub
 |---|---|
 | The builder, the card renderer and the gate | `orchard/audio_package.py` |
 | The command | `tt-orchard audio-package RUN_DIR --namespace ORG --bench FILE --demo-repo DIR [--snapshot DIR] [--check]` |
-| Tests (105, with fake runs) | `tests/test_audio_package.py` |
+| Tests (154, with fake runs) | `tests/test_audio_package.py` |
 | Hostile-input readers (4 registered) | `tests/hostile_inputs.py` |
 
 ## What was staged
 
-`<run>/stages/7/package/stable-audio-3-small-music-blackhole/` (20 files, 532 KB, no weights). `package-record.json` has the sha256 of every file.
+`<run>/stages/7/package/stable-audio-3-small-music-blackhole/` (21 files, no weights). `package-record.json` has the sha256 of every file.
 
 | File | What it is |
 |---|---|
@@ -23,8 +23,8 @@ Paths are placeholders (`<run>` is the run directory). Nothing was uploaded, pub
 | `LICENSE.md` | The Stability AI Community License Agreement, byte for byte from the pinned snapshot (revision `8bdfb53c`). |
 | `NOTICE` | The attribution sentence from the agreement, with the agreement's own characters (a copyright sign followed by two spaces), then one line saying what the package does not change. |
 | `tt-model.yaml` | A draft v5.1 container manifest, kind `http-server`. It loads in the installed tt-model's loader. It names a tt-metal checkout it cannot supply, so it has not been built. |
-| `run.sh` | A launcher that starts the job server and the page without tt-model. |
-| `runtime/` | `chip_generate.py`, `chip_dit.py`, `make_reference.py`, `audio_reference.py`, `pinned_files.py`, copied unmodified into the directory layout they expect, plus a one-line `orchard/__init__.py`. |
+| `run.sh` | A launcher that starts the job server and the page without tt-model. It first runs `check_revision.py`, which asks the model library which checkpoint the cache resolves and stops when its revision is not the pinned one. It opens no device. Run against the real library in the reference environment it printed the pinned revision for the pin and refused (exit 3) for another. |
+| `runtime/` | `chip_generate.py`, `chip_dit.py`, `make_reference.py`, `audio_reference.py`, `pinned_files.py` and `check_revision.py`, copied unmodified into the directory layout they expect, plus a one-line `orchard/__init__.py`. |
 | `demo/` | `serve_audio.py` (the `POST /v1/audio/jobs` server), `audio_client.py`, `audio_app.py` (the Gradio page) and `requirements.txt`, copied from the separate demo repository, which was only read. |
 | `docs/running.md` | How to start it. |
 | `evidence/` | `audio_result.json` (the run's stage 2 result) and `bench-chip.json` (the sweep the timings come from). |
@@ -47,7 +47,7 @@ the manifest is for a later build. The catalog reads a built package, so listing
 ## The benchmark source
 
 The run's own stage 2 repeats (3 per model) were made before the warm-up rule: the first repeat includes kernel compilation and none has a warm-up. Under
-`docs/benchmark-rules.md` (PR 187, not merged when this was written) that is "unwarmed repeats", and the builder refuses to call it a benchmark. The card's timings
+`docs/benchmark-rules.md` (PR 187, which was still open when this was written) that is "unwarmed repeats", and the builder refuses to call it a benchmark. The card's timings
 come from the sweep file `bench-chip-small-music.json` of PR 187's evidence (one loaded process, one warm-up and 3 measured runs at 10, 30, 60 and 120 s, so the
 maximum length is recorded). The builder checked that it is the same model and the same prompt, steps, guidance scale, sampler, seed and sample size as the run. It is not the
 same run: the sweep does not record the library commit or the model revision, so the card says the timings are from one process that loaded the model once.
@@ -67,15 +67,18 @@ environment-floor rows, each labelled `measured (provisional bars)`.
 - A copy of the agreement is present and is the Stability AI Community License Agreement; `NOTICE` contains the attribution sentence exactly as the agreement writes it. The
   builder reads the sentence from the agreement, so the copyright sign and the two spaces after it are kept.
 - Refused wording: open or commercial license claims, quality claims, "official", "endorsed" and logo images.
+- The pin: the model revision is the same in `run.sh`, `tt-model.yaml`, the card and the evidence, and `run.sh` runs the revision check.
+- The Numbers table is compared row by row with the rows the package's own evidence files give. A value from another field, a label the runs do not earn, an extra row and a missing row are each refused. Evidence must be a JSON file in `evidence/`.
+- Every file the builder copies or generates is required.
 - No weights file by suffix, no file over 20 MB, no home path, host name or token (`orchard/scrub.py`).
 - Numbers: only in the Numbers table; each row labelled `benchmark`, `single sample`, `unwarmed repeats`, `measured (provisional bars)` or `TODO`; a `benchmark` row only when the evidence's runs earn it
   (recomputed); each value is a number in its evidence file, rounded to the digits shown.
 - The builder refuses a run with no benchmark-labelled size, a label or spread the runs do not support, no 40-character model revision or library commit, an agreement that failed, a control that did
   not tell the fine-tune from the base model, a snapshot of another revision, and a package directory that already holds weights or anything else.
 
-Mutation table: 62 guards, each removed in turn with the whole test file run. First pass: 5 survived. Four were given a sharper test (the front-matter `license: other` check, the two
+Mutation table: 73 guards, each removed in turn with the whole test file run. First pass: 5 survived. Four were given a sharper test (the front-matter `license: other` check, the two
 number-in-prose checks, which were hidden behind each other, and the provisional-bars check, which the label text satisfied by itself). The fifth, an explicit link refusal for source files,
-was redundant with `safeio` (which refuses links) and was removed. Second pass: all red.
+was redundant with `safeio` (which refuses links) and was removed. Second pass: all red. After the Copilot review of PR 193 (a revision pin at run time, evidence bound to metrics, hostile shapes, required files) 11 more guards were mutated: 9 red, and the two layered shape guards (`_obj` and the backstop in `read_facts`) each survive alone because the other covers them, and are red together.
 
 One bug the tests found: a revision made only of digits would be read by YAML as a number, so the manifest quotes it.
 

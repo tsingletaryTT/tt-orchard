@@ -1723,7 +1723,7 @@ tt-orchard audio-package RUN_DIR --namespace ORG --check                        
 For a finished `stabilityai/stable-audio-3-small-music` run. It stages `stages/7/package/stable-audio-3-small-music-blackhole/` with a card
 (`README.md`), a copy of the model's license agreement (`LICENSE.md`), a `NOTICE` file, a draft v5.1 `tt-model.yaml` of kind `http-server`, `run.sh`,
 the chip runtime files (`runtime/`, copied unmodified), the job server, client and Gradio page (`demo/`, copied from the separate demo repository given
-with `--demo-repo`, which is only read), a how-to (`docs/running.md`), and the run's evidence (`evidence/`). It ships no weights. The weights are gated, and each
+with `--demo-repo`, which is only read), a revision check that `run.sh` runs before it starts the server (it stops when the local cache resolves the model to another revision than the pinned one), a how-to (`docs/running.md`), and the run's evidence (`evidence/`). It ships no weights. The weights are gated, and each
 user downloads them with their own Hugging Face account. It uploads nothing, publishes nothing and starts no process; the commands that would publish the
 package are written as text to `stages/7/AUDIO_PUBLISH_COMMANDS.txt`.
 

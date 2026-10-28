@@ -33,10 +33,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import os
 import re
-import shutil
 import statistics
 from dataclasses import dataclass
 from pathlib import Path
@@ -82,12 +80,19 @@ DEMO_ANCHOR = 'PAGE_NOTE = ("Describe the music'
 DEMO_PATCHED = f'PAGE_NOTE = ("{POWERED_BY}. Describe the music'
 DEMO_FILES = (("demo/audio_client.py", "audio_client.py"), ("demo/audio_app.py", "audio_app.py"), ("serve/serve_audio.py", "serve_audio.py"))
 RUNTIME_FILES = (("skills/audio-chip-templates/chip_generate.py", "orchard/skills/audio-chip-templates/chip_generate.py"),
+                 ("skills/audio-chip-templates/check_revision.py", "orchard/skills/audio-chip-templates/check_revision.py"),
                  ("skills/audio-chip-templates/chip_dit.py", "orchard/skills/audio-chip-templates/chip_dit.py"),
                  ("skills/audio-reference-templates/make_reference.py", "orchard/skills/audio-reference-templates/make_reference.py"),
                  ("audio_reference.py", "orchard/audio_reference.py"),
                  ("pinned_files.py", "orchard/pinned_files.py"))
+CHECK_FILE = "runtime/orchard/skills/audio-chip-templates/check_revision.py"
+REQUIRED_FILES = (("README.md", "LICENSE.md", "NOTICE", "tt-model.yaml", "run.sh", "requirements.txt", "docs/running.md", "demo/requirements.txt",
+                   "runtime/orchard/__init__.py", CHECK_FILE, "evidence/audio_result.json", "evidence/bench-chip.json", "package-record.json")
+                  + tuple(f"demo/{name}" for _, name in DEMO_FILES) + tuple(f"runtime/{dest}" for _, dest in RUNTIME_FILES))
 RUNTIME_INIT = '"""A stand-in package so the copied chip runtime files import `orchard.audio_reference` from this directory."""\n'
 RECORD_FILE = "package-record.json"
+BENCH_EVIDENCE = "evidence/bench-chip.json"
+RESULT_EVIDENCE = "evidence/audio_result.json"
 NUMBERS_HEAD = "## Numbers"
 NOT_MEASURED_HEAD = "## Not measured"
 
@@ -139,7 +144,7 @@ def sha256_bytes(data: bytes) -> str:
 def _num(x, what: str):
     try:
         return safeio.finite_number(x, lo=0, what=what)
-    except safeio.SafeReadError as exc:
+    except safeio.SafeReadError:
         raise AudioPackageError(f"{what} is not a finite number of 0 or more") from None
 
 
@@ -221,9 +226,12 @@ def bench_sizes(bench: dict, settings: dict) -> tuple[tuple[SizeRow, ...], dict]
         if not 0 < seconds <= MAX_SECONDS:
             raise AudioPackageError(f"{what} has a size of {seconds:g} s; a size is above 0 and at most {MAX_SECONDS} s")
         runs = entry.get("runs")
-        if not isinstance(runs, list):
-            raise AudioPackageError(f"{what}: the {seconds:g} s size has no runs")
-        warmup = safeio.whole_number(entry.get("warmup_runs"), lo=0, hi=1000, what="warmup_runs")
+        if not isinstance(runs, list) or not runs:
+            raise AudioPackageError(f"{what}: the {seconds:g} s size has no measured runs")
+        try:
+            warmup = safeio.whole_number(entry.get("warmup_runs"), lo=0, hi=1000, what="warmup_runs")
+        except safeio.SafeReadError:
+            raise AudioPackageError(f"{what}: warmup_runs at {seconds:g} s is not a whole number from 0 to 1000") from None
         label = label_for(len(runs), warmup)
         if entry.get("label") != label:
             raise AudioPackageError(f"{what}: the {seconds:g} s size is labelled {entry.get('label')!r} and its {len(runs)} runs after "
@@ -253,21 +261,27 @@ def bench_sizes(bench: dict, settings: dict) -> tuple[tuple[SizeRow, ...], dict]
 # ---- the run -------------------------------------------------------------------------------------------------------
 
 def _agreement(block: dict, what: str) -> dict:
-    lat = _get(block, "latent_final", what=what)
-    wav = _get(block, "waveform", what=what)
+    lat = _obj(_get(block, "latent_final", what=what), f"{what}.latent_final")
+    wav = _obj(_get(block, "waveform", what=what), f"{what}.waveform")
     return {"latent_pcc": _num(lat.get("pcc"), "latent pcc"), "latent_rel_l2": _num(lat.get("rel_l2"), "latent rel_l2"),
             "wave_pcc": _num(wav.get("pcc"), "waveform pcc"), "wave_rel_l2": _num(wav.get("rel_l2"), "waveform rel_l2"),
             "log_spectrum": _num(wav.get("log_spectrum_distance"), "log-spectrum distance")}
 
 
-def read_facts(run_dir, bench_path, *, snapshot_name: str | None = None) -> tuple[Facts, bytes, bytes]:
-    """(facts, the bytes of the audio result, the bytes of the benchmark file). Refuses a run that cannot back a package:
-    no identity pin, the chip run not matching its CPU reference, a control that did not tell the fine-tune from the base model,
-    or no size of the benchmark file that earns the label 'benchmark'."""
-    run = Path(run_dir)
-    result_path = run / "stages" / "2" / "audio_result.json"
-    result = read_json_file(result_path, "stages/2/audio_result.json")
-    chip = _get(result, "runs", "chip", what="the audio result")
+def _obj(x, what: str) -> dict:
+    """`x` when it is a JSON object, else an AudioPackageError that names `what`."""
+    if not isinstance(x, dict):
+        raise AudioPackageError(f"{what} is not a JSON object")
+    return x
+
+
+def facts_from_evidence(result, bench, *, snapshot_name: str | None = None) -> Facts:
+    """The facts a card is rendered from, read from the two evidence files (the audio result and the benchmark sweep), both already parsed.
+    The builder calls it on the run's files and the gate calls it again on the copies in the package, so evidence that cannot back a package
+    is refused at both. Refuses: no identity pin, the chip run not matching its CPU reference, a control that did not tell the fine-tune
+    from the base model, a benchmark file with no size that earns the label 'benchmark'."""
+    result = _obj(result, "the audio result")
+    chip = _obj(_get(result, "runs", "chip", what="the audio result"), "runs.chip of the audio result")
     if chip.get("model") != MODEL_KEY:
         raise AudioPackageError(f"the audio result is for model {chip.get('model')!r}; this builder packages {MODEL_KEY!r}")
     revision = chip.get("revision")
@@ -278,36 +292,43 @@ def read_facts(run_dir, bench_path, *, snapshot_name: str | None = None) -> tupl
         raise AudioPackageError("the run has no identity pin: the chip run records no 40-character library commit")
     if snapshot_name is not None and snapshot_name != revision:
         raise AudioPackageError(f"the license snapshot is revision {snapshot_name} and the run served revision {revision}")
-    settings = chip.get("settings")
-    if not isinstance(settings, dict):
-        raise AudioPackageError("the chip run records no settings")
-    agreement = _get(result, "agreement", "chip_vs_reference", what="the audio result")
+    settings = _obj(chip.get("settings"), "the chip run's settings")
+    agreement = _obj(_get(result, "agreement", "chip_vs_reference", what="the audio result"), "agreement.chip_vs_reference")
     if agreement.get("ok") is not True or agreement.get("comparable") is not True:
         raise AudioPackageError("the chip run did not agree with the CPU reference within the bars (or the two were not comparable); nothing to package")
-    disc = result.get("control_discrimination")
-    diff = result.get("control_difference")
+    disc, diff = result.get("control_discrimination"), result.get("control_difference")
     if not (isinstance(disc, dict) and disc.get("ok") is True and isinstance(diff, dict) and diff.get("ok") is True):
         raise AudioPackageError("the run's control did not show that the chip served the fine-tune and not the base model; nothing to package")
-    floor = _get(result, "environment_floor", what="the audio result")
+    floor = _obj(_get(result, "environment_floor", what="the audio result"), "environment_floor")
     bars = agreement.get("bars")
     if not isinstance(bars, str) or "provisional" not in bars:
         raise AudioPackageError("the agreement record does not say its bars are provisional; this builder labels agreement by that statement")
+    sizes, load = bench_sizes(_obj(bench, "the benchmark file"), settings)
+    if not any(s.label == LABEL_BENCHMARK for s in sizes):
+        raise AudioPackageError(f"no size of the benchmark file is a benchmark (it needs {MIN_REPEATS} or more measured runs after {MIN_WARMUP} or more "
+                                "warm-up run(s) in one process); the card would have no number it may call one")
+    return Facts(MODEL_ID, revision, library, {k: settings[k] for k in sorted(settings)}, str(chip.get("device", "")), _agreement(agreement, "chip_vs_reference"),
+                 _agreement(floor, "environment_floor"), bars, sizes, load, BENCH_EVIDENCE, RESULT_EVIDENCE)
+
+
+def read_facts(run_dir, bench_path, *, snapshot_name: str | None = None) -> tuple[Facts, bytes, bytes]:
+    """(facts, the bytes of the audio result, the bytes of the benchmark file) for the run at `run_dir`. Refuses a run that cannot back a package
+    (see `facts_from_evidence`), a run whose ledger names another model, and any file of an unexpected shape."""
+    run = Path(run_dir)
+    result_path = run / "stages" / "2" / "audio_result.json"
+    result = read_json_file(result_path, "stages/2/audio_result.json")
     bench_bytes = _file_bytes(bench_path, "the benchmark file", MAX_JSON_BYTES)
     try:
         bench = safeio.parse_json_bytes(bench_bytes, max_bytes=MAX_JSON_BYTES)
     except safeio.SafeReadError as exc:
         raise AudioPackageError(f"the benchmark file is not valid JSON: {getattr(exc, 'reason', exc)}") from None
-    if not isinstance(bench, dict):
-        raise AudioPackageError("the benchmark file is not a JSON object")
-    sizes, load = bench_sizes(bench, settings)
-    if not any(s.label == LABEL_BENCHMARK for s in sizes):
-        raise AudioPackageError(f"no size of the benchmark file is a benchmark (it needs {MIN_REPEATS} or more measured runs after {MIN_WARMUP} or more "
-                                "warm-up run(s) in one process); the card would have no number it may call one")
+    try:
+        facts = facts_from_evidence(result, bench, snapshot_name=snapshot_name)
+    except (KeyError, TypeError, ValueError, AttributeError, safeio.SafeReadError) as exc:      # a shape no check above named
+        raise AudioPackageError(f"the audio result or the benchmark file has an unexpected shape ({type(exc).__name__})") from None
     model_id = _ledger_model(run)
     if model_id != MODEL_ID:
         raise AudioPackageError(f"the run's ledger names the model {model_id!r}; this builder packages {MODEL_ID}")
-    facts = Facts(model_id, revision, library, {k: settings[k] for k in sorted(settings)}, str(chip.get("device", "")), _agreement(agreement, "chip_vs_reference"),
-                  _agreement(floor, "environment_floor"), bars, sizes, load, "evidence/bench-chip.json", "evidence/audio_result.json")
     return facts, _file_bytes(result_path, "audio_result.json", MAX_JSON_BYTES), bench_bytes
 
 
@@ -389,7 +410,8 @@ def notice_text(license_bytes: bytes) -> str:
 # ---- the card ------------------------------------------------------------------------------------------------------
 
 def _fmt(x) -> str:
-    return f"{x:g}" if isinstance(x, (int, float)) else str(x)
+    """A timing as the card shows it: at most 4 decimals (the files hold 3, and the median of an even number of runs can have a fourth)."""
+    return f"{round(x, 4):g}" if isinstance(x, (int, float)) else str(x)
 
 
 def number_rows(f: Facts) -> list[tuple[str, str, str, tuple[str, ...]]]:
@@ -453,9 +475,9 @@ def render_card(f: Facts, *, namespace: str, license_bytes: bytes) -> str:
              f"- The model library is [stable-audio-3]({LIBRARY_LINK}) at commit `{f.library_commit}`, the commit the run used.",
              f"- Settings of the run: {a.get('steps')} steps, guidance scale {a.get('cfg_scale')}, the {a.get('sampler')} sampler, seed {a.get('seed')}.", "",
              "## Try it", "",
-             "```bash", "pip install -r requirements.txt", f"hf download {f.model_id}      # your own Hugging Face account, after accepting the terms",
+             "```bash", "pip install -r requirements.txt", f"hf download {f.model_id} --revision {f.revision}      # your own Hugging Face account, after accepting the terms",
              "export ORCHARD_TTNN_PYTHON=<python with ttnn>   ORCHARD_AUDIO_SRC=<stable-audio-3 checkout at the commit above>",
-             "./run.sh          # on a shared machine, take a chip lease first; see docs/running.md", "```", "",
+             "./run.sh          # checks the cached revision first; on a shared machine, take a chip lease first; see docs/running.md", "```", "",
              "The job server listens on http://127.0.0.1:20100 and the page on http://127.0.0.1:7872. Both bind the local machine only. "
              "The job API is `POST /v1/audio/jobs`, `GET /v1/audio/jobs/<id>`, `GET /v1/audio/jobs/<id>/audio`, `DELETE /v1/audio/jobs/<id>` and `GET /v1/health`.", "",
              "`tt-model.yaml` is a draft v5.1 manifest of kind `http-server`. It has not been built into an image or booted.", "",
@@ -490,26 +512,30 @@ def render_card(f: Facts, *, namespace: str, license_bytes: bytes) -> str:
     return "\n".join(lines)
 
 
-def running_doc() -> str:
+def running_doc(f: Facts) -> str:
     return (f"# Running {PACKAGE_NAME}\n\n**{POWERED_BY}**\n\n"
-            "1. Accept the model's terms on its Hugging Face page and download it: `hf download " + MODEL_ID + "`.\n"
+            f"1. Accept the model's terms on its Hugging Face page and download revision `{f.revision}`: `hf download {MODEL_ID} --revision {f.revision}`.\n"
             "2. Check out the stable-audio-3 library at the commit the card names and set `ORCHARD_AUDIO_SRC` to it. "
             "Set `ORCHARD_TTNN_PYTHON` to a Python that has ttnn.\n"
-            "3. Start the server and the page: `./run.sh`. On a shared machine, hold a chip lease for the whole run.\n\n"
+            "3. Start the server and the page: `./run.sh`. It first checks that the cache resolves the model to the revision above and stops if it does not. "
+            "On a shared machine, hold a chip lease for the whole run.\n\n"
             "The model is licensed under the " + LICENSE_NAME + " (`LICENSE.md`). Read it before you use or share the model or this package. "
             "This package does not include the model weights.\n")
 
 
-def run_script() -> str:
+def run_script(f: Facts) -> str:
     return f"""#!/usr/bin/env bash
 # Starts the job server and the Gradio page for {MODEL_ID} on one Blackhole chip.
 # Powered by Stability AI. The model is licensed under the {LICENSE_NAME} (LICENSE.md). This package does not include the weights:
-# download them first with your own Hugging Face account (hf download {MODEL_ID}).
+# download them first with your own Hugging Face account (hf download {MODEL_ID} --revision {f.revision}).
 set -euo pipefail
 HERE="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
+REVISION="{f.revision}"
 : "${{ORCHARD_TTNN_PYTHON:?set ORCHARD_TTNN_PYTHON to a Python that has ttnn}}"
 : "${{ORCHARD_AUDIO_SRC:?set ORCHARD_AUDIO_SRC to the stable-audio-3 checkout named in README.md}}"
 echo "{POWERED_BY}"
+# Refuse to start on another revision than the one the card, the evidence and the license copy were made for. This opens no device.
+PYTHONPATH="$ORCHARD_AUDIO_SRC${{PYTHONPATH:+:$PYTHONPATH}}" "$ORCHARD_TTNN_PYTHON" "$HERE/runtime/orchard/skills/audio-chip-templates/check_revision.py" "$REVISION" {MODEL_KEY}
 exec "$ORCHARD_TTNN_PYTHON" "$HERE/demo/serve_audio.py" --generator chip --src-dir "$ORCHARD_AUDIO_SRC" \\
   --script "$HERE/runtime/orchard/skills/audio-chip-templates/chip_generate.py" --ui "$@"
 """
@@ -608,30 +634,23 @@ def _bench_label_at(evidence: Path, seconds: float) -> str | None:
     return None
 
 
-def _numbers_in(value):
-    """Every number in a parsed JSON value."""
-    if isinstance(value, bool):
-        return
-    if isinstance(value, (int, float)):
-        yield value
-    elif isinstance(value, dict):
-        for v in value.values():
-            yield from _numbers_in(v)
-    elif isinstance(value, list):
-        for v in value:
-            yield from _numbers_in(v)
+EVIDENCE_PATH = re.compile(r"evidence/[A-Za-z0-9_.-]+\.json")
 
 
-def _in_evidence(path: Path, shown: str) -> bool:
-    """True when the evidence file holds the number the card shows: the shown value is some recorded number rounded to the shown decimals.
-    A card rounds (0.1384541 is shown as 0.1385), so a text search for the shown digits would refuse a correct row."""
-    decimals = len(shown.split(".", 1)[1]) if "." in shown else 0
-    want = float(shown)
+def package_facts(pkg: Path) -> tuple[Facts | None, str | None]:
+    """(the facts the package's own evidence files give, None) or (None, why the evidence cannot back a package). Read again from the files in the
+    package, so a card is checked against the evidence that ships with it and not against anything the builder remembered."""
     try:
-        data = safeio.read_json(path, max_bytes=MAX_JSON_BYTES)
-    except safeio.SafeReadError:
-        return shown in path.read_text(encoding="utf-8", errors="replace")
-    return any(round(x, decimals) == want for x in _numbers_in(data) if isinstance(x, (int, float)) and math.isfinite(x))
+        result = read_json_file(pkg / RESULT_EVIDENCE, RESULT_EVIDENCE)
+        bench = read_json_file(pkg / BENCH_EVIDENCE, BENCH_EVIDENCE)
+        return facts_from_evidence(result, bench), None
+    except (AudioPackageError, KeyError, TypeError, ValueError, AttributeError, safeio.SafeReadError) as exc:
+        return None, str(exc) if isinstance(exc, AudioPackageError) else f"unexpected shape ({type(exc).__name__})"
+
+
+def _row_key(row) -> tuple:
+    name, value, label, evidence = row
+    return (name, value, label, ", ".join(f"`{p}`" for p in evidence) if evidence else "-")
 
 
 def license_problems(card: str, license_bytes: bytes | None, notice: str | None) -> list[str]:
@@ -703,16 +722,23 @@ def license_problems(card: str, license_bytes: bytes | None, notice: str | None)
 
 
 def card_problems(card: str, pkg: Path, *, license_bytes: bytes | None = None, notice: str | None = None) -> list[str]:
-    """Everything wrong with the card: the license elements, then the numbers and the claims."""
+    """Everything wrong with the card: the license elements, then the numbers and the claims. The Numbers table is compared, row by row, with the rows
+    the package's own evidence files give (`number_rows` on `package_facts`): a value taken from another field, a label the runs do not earn, an extra
+    row and a missing row are each refused."""
     problems = license_problems(card, license_bytes, notice)
     rows, prose = _table(card)
     if not rows:
         problems.append("the card has no Numbers table")
+    facts, why = package_facts(pkg)
+    if facts is None:
+        problems.append(f"the package's evidence cannot back a card: {why}")
     has_benchmark = False
+    shown = set()
     for cells in rows:
         if len(cells) != 4:
             problems.append(f"Numbers row {cells!r} needs four cells")
             continue
+        shown.add(tuple(cells))
         name, value, label, evidence = cells
         if label not in LABELS:
             problems.append(f"number {name!r} has label {label!r}; a label is one of {', '.join(LABELS)}")
@@ -725,27 +751,31 @@ def card_problems(card: str, pkg: Path, *, license_bytes: bytes | None = None, n
         if not paths:
             problems.append(f"number {name!r} is labelled {label} and names no evidence")
             continue
-        found = [inside(pkg, p) for p in paths]
-        for p, f in zip(paths, found):
-            if f is None:
-                problems.append(f"number {name!r}: evidence {p} is not a file inside the package")
-        shown = value.split(" ", 1)[0]
-        try:
-            float(shown)
-        except ValueError:
-            problems.append(f"number {name!r} is labelled {label} and has no numeric value")
-            continue
-        if found and found[0] is not None and not _in_evidence(found[0], shown):
-            problems.append(f"number {name!r}: the value {shown} is not in {paths[0]}")
+        for p in paths:
+            if not EVIDENCE_PATH.fullmatch(p) or inside(pkg, p) is None:
+                problems.append(f"number {name!r}: evidence {p} must be a JSON file in evidence/ inside the package")
         if label == LABEL_BENCHMARK:
             has_benchmark = True
             m = re.match(r"([0-9.]+) s clip", name)
-            earned = _bench_label_at(found[0], float(m.group(1))) if m and found and found[0] is not None else None
+            found = inside(pkg, paths[0]) if EVIDENCE_PATH.fullmatch(paths[0]) else None
+            earned = _bench_label_at(found, float(m.group(1))) if m and found is not None else None
             if earned != LABEL_BENCHMARK:
                 problems.append(f"number {name!r} is labelled benchmark and its runs earn {earned!r}: a benchmark has {MIN_REPEATS} or more measured runs "
                                 f"after {MIN_WARMUP} or more warm-up run(s)")
         elif label == LABEL_AGREEMENT and "provisional" not in prose.lower():
             problems.append(f"number {name!r} is an agreement number and the card does not say the bars are provisional")
+    if facts is not None:
+        wanted = {_row_key(r): r for r in number_rows(facts)}
+        have_names = {c[0]: c for c in shown}
+        for key, r in wanted.items():
+            if key not in shown:
+                got = have_names.get(r[0])
+                detail = f"the card has {got[1]} ({got[2]})" if got else "the card has no such row"
+                problems.append(f"the Numbers row {r[0]!r} must be {key[1]} ({key[2]}) as the evidence gives; {detail}")
+        names = {r[0] for r in wanted.values()}
+        for c in shown:
+            if c[0] not in names:
+                problems.append(f"the Numbers table has a row the evidence does not give: {c[0]!r}")
     if not has_benchmark and re.search(r"benchmark", prose, re.I):
         problems.append("the card uses the word benchmark and has no row that earns the label")
     for hit in PERF_IN_PROSE.finditer(prose):
@@ -814,10 +844,19 @@ def package_problems(pkg, *, hostname: str | None = None, home: str | None = Non
     for d in docs:
         if POWERED_BY not in d.read_text(encoding="utf-8"):
             problems.append(f"docs/{d.name} must display {POWERED_BY!r}")
-    for name in ("tt-model.yaml", "run.sh", "requirements.txt", "runtime/orchard/skills/audio-chip-templates/chip_generate.py", "demo/serve_audio.py",
-                 "evidence/audio_result.json", "evidence/bench-chip.json", RECORD_FILE):
+    for name in REQUIRED_FILES:
         if not (pkg / name).is_file():
             problems.append(f"the package has no {name}")
+    facts, _ = package_facts(pkg)
+    if facts is not None:                      # the pin is the same everywhere it is written, and the launcher checks it
+        run_sh = (pkg / "run.sh").read_text(encoding="utf-8") if (pkg / "run.sh").is_file() else ""
+        manifest = (pkg / "tt-model.yaml").read_text(encoding="utf-8") if (pkg / "tt-model.yaml").is_file() else ""
+        if f'REVISION="{facts.revision}"' not in run_sh or "check_revision.py" not in run_sh:
+            problems.append("run.sh must carry the evidence's model revision and run its check_revision.py before it starts the server")
+        if f'revision: "{facts.revision}"' not in manifest:
+            problems.append("tt-model.yaml must pin the evidence's model revision")
+        if f"`{facts.revision}`" not in card:
+            problems.append("the card must name the evidence's model revision")
     if validate_manifest is not None and (pkg / "tt-model.yaml").is_file():
         problems += [f"tt-model.yaml: {p}" for p in validate_manifest(pkg / "tt-model.yaml")]
     return problems
@@ -896,9 +935,10 @@ def stage_package(run_dir, *, bench_path, demo_repo, snapshot, namespace: str, r
     files.append(_write(pkg, "LICENSE.md", license_bytes))
     files.append(_write(pkg, "NOTICE", notice_text(license_bytes)))
     files.append(_write(pkg, "tt-model.yaml", manifest_text(facts, namespace)))
-    files.append(_write(pkg, "run.sh", run_script(), mode=0o755))
+    files.append(_write(pkg, "run.sh", run_script(facts), mode=0o755))
     files.append(_write(pkg, "requirements.txt", f"{requirement}\nnumpy\nsoundfile\ntorch\n"))
-    files.append(_write(pkg, "docs/running.md", running_doc()))
+    files.append(_write(pkg, "docs/running.md", running_doc(facts)))
+
     for dest, data in runtime.items():
         files.append(_write(pkg, "runtime/" + dest, data))
     files.append(_write(pkg, "runtime/orchard/__init__.py", RUNTIME_INIT))

@@ -479,7 +479,41 @@ def test_the_gate_refuses_a_benchmark_label_on_numbers_whose_runs_do_not_earn_it
 
 def test_the_gate_refuses_a_value_that_is_not_in_the_evidence(staged):
     problems = edited(staged, "| 1.6 s | benchmark |", "| 0.9 s | benchmark |")
-    assert any("the value 0.9 is not in evidence/bench-chip.json" in p for p in problems)
+    assert any("must be 1.6 s (benchmark) as the evidence gives; the card has 0.9 s" in p for p in problems)
+
+
+def test_the_gate_refuses_a_value_taken_from_another_field_of_the_evidence(staged):
+    """0.04 s is in the evidence (the conditioning time), so a search for the value in the file would pass it."""
+    problems = edited(staged, "| 10 s clip, generate and decode, median of 3 | 1.6 s |", "| 10 s clip, generate and decode, median of 3 | 0.04 s |")
+    assert any("must be 1.6 s" in p for p in problems)
+
+
+def test_the_gate_refuses_an_extra_row_and_a_missing_row(staged):
+    problems = edited(staged, "| boot check of this package on a chip | TODO | TODO | - |\n", "| 5 s clip, generate and decode, median of 3 | 1 s | benchmark | `evidence/bench-chip.json` |\n")
+    assert any("a row the evidence does not give: '5 s clip" in p for p in problems)
+    assert any("'boot check of this package on a chip' must be TODO" in p for p in problems)
+
+
+def test_a_median_of_four_runs_is_shown_with_its_own_digits_and_passes(world):
+    world.write_bench(bench_file([size(10.0, [1.5, 1.6, 1.7, 1.8]), size(120.0, [10.5, 10.6, 10.8])]))
+    world.stage()
+    assert "| 10 s clip, generate and decode, median of 4 | 1.65 s | benchmark |" in card_of(world.pkg)
+    assert gate(world.pkg) == []
+
+
+@pytest.mark.parametrize("evidence", ["README.md", "evidence/other.txt", "../README.md"])
+def test_the_gate_refuses_evidence_that_is_not_a_json_file_in_evidence(staged, evidence):
+    problems = edited(staged, "| 1.6 s | benchmark | `evidence/bench-chip.json` |", f"| 1.6 s | benchmark | `{evidence}` |")
+    assert any("must be a JSON file in evidence/" in p for p in problems)
+
+
+def test_the_gate_refuses_a_package_whose_evidence_cannot_back_a_card(staged):
+    result = json.loads((staged / "evidence" / "audio_result.json").read_text())
+    result["agreement"]["chip_vs_reference"]["ok"] = False
+    (staged / "evidence" / "audio_result.json").write_text(json.dumps(result))
+    assert any("the package's evidence cannot back a card" in p for p in gate(staged))
+    (staged / "evidence" / "audio_result.json").write_text("[1]")
+    assert any("the package's evidence cannot back a card" in p for p in gate(staged))
 
 
 def test_the_gate_refuses_an_unknown_label_and_a_row_with_no_evidence(staged):
@@ -563,3 +597,102 @@ def test_a_hostile_result_file_is_an_audio_package_error(tmp_path):
     (tmp_path / "y.json").write_text('{"a": NaN}')
     with pytest.raises(ap.AudioPackageError):
         ap.read_json_file(tmp_path / "y.json", "a test file")
+
+
+# ---- review of PR 193: the revision pin, hostile shapes and the required files ------------------------------------------------
+
+@pytest.mark.parametrize("bench_change,message", [
+    (lambda b: b["sizes"][0].update(runs=[], repeats=0), "no measured runs"),
+    (lambda b: b["sizes"][0].update(warmup_runs=-1), "warmup_runs"),
+    (lambda b: b["sizes"][0].update(warmup_runs=1.5), "warmup_runs"),
+    (lambda b: b["sizes"][0].update(warmup_runs="x"), "warmup_runs"),
+    (lambda b: b["sizes"][0].update(runs=["x", "x", "x"]), "has no generate_and_decode_s"),
+    (lambda b: b["sizes"][0].update(parts=[]), "is missing"),
+])
+def test_a_benchmark_of_an_unexpected_shape_is_a_refusal_and_the_command_exits_2(world, bench_change, message):
+    b = bench_file()
+    bench_change(b)
+    world.write_bench(b)
+    with pytest.raises(ap.AudioPackageError, match=message):
+        world.stage()
+    out = io.StringIO()
+    assert ap.main(args(world), out=out, hostname="some-host") == 2
+    assert out.getvalue().startswith("refused:")
+
+
+@pytest.mark.parametrize("change", [
+    lambda r: r["agreement"]["chip_vs_reference"].update(latent_final=[]),
+    lambda r: r["agreement"]["chip_vs_reference"].update(waveform=None),
+    lambda r: r.update(environment_floor=[1]),
+    lambda r: r["runs"].update(chip=[1]),
+    lambda r: r["runs"]["chip"].update(settings="x"),
+])
+def test_an_audio_result_of_an_unexpected_shape_is_a_refusal_and_the_command_exits_2(world, change):
+    result = audio_result()
+    change(result)
+    world.write_result(result)
+    out = io.StringIO()
+    assert ap.main(args(world), out=out, hostname="some-host") == 2
+
+
+@pytest.mark.parametrize("name", list(ap.REQUIRED_FILES))
+def test_the_gate_names_every_required_file_when_it_is_missing(staged, name):
+    (staged / name).unlink()
+    assert any(f"no {name}" in p for p in gate(staged)), name
+
+
+def test_the_required_files_include_every_copied_runtime_and_demo_file_and_the_generated_ones():
+    for _, dest in ap.RUNTIME_FILES:
+        assert f"runtime/{dest}" in ap.REQUIRED_FILES
+    for _, name in ap.DEMO_FILES:
+        assert f"demo/{name}" in ap.REQUIRED_FILES
+    for generated in ("runtime/orchard/__init__.py", "requirements.txt", "docs/running.md", "demo/requirements.txt"):
+        assert generated in ap.REQUIRED_FILES
+
+
+def test_the_pin_is_in_the_launcher_the_manifest_the_card_and_the_docs(staged):
+    run_sh, manifest = (staged / "run.sh").read_text(), (staged / "tt-model.yaml").read_text()
+    assert f'REVISION="{REV}"' in run_sh and "check_revision.py" in run_sh and f'revision: "{REV}"' in manifest
+    assert f"--revision {REV}" in card_of(staged) and f"--revision {REV}" in (staged / "docs" / "running.md").read_text()
+
+
+@pytest.mark.parametrize("name,old,new,message", [
+    ("run.sh", f'REVISION="{REV}"', 'REVISION="main"', "run.sh must carry"),
+    ("run.sh", "check_revision.py", "other.py", "run.sh must carry"),
+    ("tt-model.yaml", f'revision: "{REV}"', 'revision: "main"', "tt-model.yaml must pin"),
+    ("README.md", f"`{REV}`", "`main`", "the card must name the evidence's model revision"),
+])
+def test_the_gate_refuses_a_pin_that_differs_from_the_evidence(staged, name, old, new, message):
+    f = staged / name
+    f.write_text(f.read_text().replace(old, new))
+    assert any(message in p for p in gate(staged)), gate(staged)
+
+
+def run_check(tmp_path, pin, *, revision_dir, model="small-music", with_library=True):
+    """check_revision.py in a child process, with a stand-in `stable_audio_3` library on its path."""
+    lib = tmp_path / "lib" / "stable_audio_3"
+    lib.mkdir(parents=True)
+    (lib / "__init__.py").write_text("")
+    if with_library:
+        (lib / "model_configs.py").write_text(
+            "class M:\n    def resolve(self):\n        from pathlib import Path\n"
+            f"        return Path('/cache/config.json'), Path('/cache/snapshots/{revision_dir}/model.safetensors')\n"
+            "all_models = {'small-music': M()}\n")
+    script = Path(ap.__file__).parent / "skills" / "audio-chip-templates" / "check_revision.py"
+    env = {"PATH": "/usr/bin:/bin", "PYTHONPATH": str(tmp_path / "lib")}
+    return subprocess.run([sys.executable, str(script), pin, model], env=env, capture_output=True, text=True, cwd=str(tmp_path))
+
+
+def test_the_revision_check_passes_on_the_pinned_revision(tmp_path):
+    r = run_check(tmp_path, REV, revision_dir=REV)
+    assert r.returncode == 0 and REV in r.stdout
+
+
+def test_the_revision_check_stops_on_another_revision(tmp_path):
+    r = run_check(tmp_path, REV, revision_dir="9" * 40)
+    assert r.returncode == 3 and "Not starting" in r.stderr and "9" * 40 in r.stderr
+
+
+def test_the_revision_check_stops_when_the_model_or_the_library_is_not_found(tmp_path):
+    assert run_check(tmp_path, REV, revision_dir=REV, model="other").returncode == 2
+    assert run_check(tmp_path / "b", REV, revision_dir=REV, with_library=False).returncode == 2
