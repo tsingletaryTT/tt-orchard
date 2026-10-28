@@ -2919,3 +2919,8 @@ Prompt (operator): "make a similar gradio app to the one we use for minimax musi
 ## 2026-10-28 (UTC): fourth review of PR 167 (head 526bf08), two medium findings
 - The examples are a `gr.Dataset` with its own click handler that reads the clicked row, replacing `gr.Examples`, which fixes its list when built and looks a clicked row up by position; a list replaced on page load could have been read at the wrong row. Checked in a browser: clicking an example fills the prompt, length and seed.
 - The page test for the served clip now asserts the file exists and holds a WAV, where a truthy fallback let it pass for a missing file. Mutation (swapping two fields in the handler) red.
+
+## 2026-10-28 (UTC): fifth review of PR 167 (head 4c462c0), no open issue; two earlier-missed items fixed
+- A server bound to the loopback address answers only requests whose Host names that address (403 otherwise), against DNS rebinding. A server bound elsewhere does not filter.
+- `--keep-runs` also keeps a work directory the generator made, when the server stops.
+- Tests first; 6 mutations red (one DELETE case added after the first pass left it surviving).

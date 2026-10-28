@@ -226,7 +226,7 @@ class SubprocessChipGenerator(Generator):
             proc = self._proc
         if proc is not None:
             self._stop(proc)                       # the request that waits on it sees "stopped" and cleans up its own files
-        if self.own_work:
+        if self.own_work and not self.keep_runs:          # --keep-runs asks for the run directories to be left for inspection
             shutil.rmtree(self.work, ignore_errors=True)
 
     def generate(self, req: JobRequest, on_stage: Callable[[str], None]) -> Clip:
@@ -478,9 +478,35 @@ def _strict_json(raw: bytes):
     return json.loads(raw.decode("utf-8"), parse_constant=refuse)       # NaN and Infinity are refused
 
 
+LOOPBACK_NAMES = ("127.0.0.1", "localhost", "::1")
+
+
+def host_allowed(host_header: Optional[str], bound_host: str) -> bool:
+    """DNS rebinding guard. A server bound to the loopback address only answers requests whose Host names the loopback address, so a web page on
+    another site (whose own name resolves to 127.0.0.1) cannot talk to it through the browser. A server bound to another address is open to
+    whatever names reach it; the operator chose that."""
+    if bound_host not in LOOPBACK_NAMES:
+        return True
+    if not host_header:
+        return False
+    name = host_header.strip()
+    if name.startswith("["):                                  # [::1]:port
+        name = name[1:].split("]", 1)[0]
+    elif name.count(":") == 1:                                # name:port
+        name = name.split(":", 1)[0]
+    return name.lower() in LOOPBACK_NAMES
+
+
 def make_http_server(js: JobServer, host: str, port: int) -> ThreadingHTTPServer:
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
+
+        def _host_ok(self) -> bool:
+            if host_allowed(self.headers.get("Host"), host):
+                return True
+            self.close_connection = True
+            self._err(403, "this server answers requests for its own loopback address only")
+            return False
 
         def log_message(self, fmt, *args):         # the default writes every request to stderr
             pass
@@ -497,6 +523,8 @@ def make_http_server(js: JobServer, host: str, port: int) -> ThreadingHTTPServer
             self._send(code, {"detail": detail})
 
         def do_GET(self):
+            if not self._host_ok():
+                return
             if self.path == "/v1/health":
                 return self._send(200, js.health())
             m = re.fullmatch(r"/v1/audio/jobs/([0-9a-f]{32})(/audio)?", self.path)
@@ -511,6 +539,8 @@ def make_http_server(js: JobServer, host: str, port: int) -> ThreadingHTTPServer
             self._send(200, clip.audio, "audio/flac" if clip.audio_format == "flac" else "audio/wav")
 
         def do_POST(self):
+            if not self._host_ok():
+                return
             if self.path != "/v1/audio/jobs":
                 return self._err(404, "no such endpoint")
             ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
@@ -540,6 +570,8 @@ def make_http_server(js: JobServer, host: str, port: int) -> ThreadingHTTPServer
             self._send(202, {"id": job.id, "status": "queued"})
 
         def do_DELETE(self):
+            if not self._host_ok():
+                return
             m = re.fullmatch(r"/v1/audio/jobs/([0-9a-f]{32})", self.path)
             result = js.cancel(m.group(1)) if m else None
             if result is None:

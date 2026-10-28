@@ -400,3 +400,36 @@ def test_fake_generator_makes_a_playable_clip_and_says_it_is_fake():
 def test_the_command_line_refuses_a_length_limit_the_model_does_not_have(capsys):
     assert srv.main(["--generator", "chip", "--max-seconds", "240"]) == 2
     assert "max_seconds" in capsys.readouterr().err
+
+
+def raw_request(port, method, path, host, body=b"", ctype="application/json"):
+    import http.client
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.putrequest(method, path, skip_host=True)
+    conn.putheader("Host", host)
+    conn.putheader("Content-Type", ctype)
+    conn.putheader("Content-Length", str(len(body)))
+    conn.endheaders(body)
+    status = conn.getresponse().status
+    conn.close()
+    return status
+
+
+def test_a_loopback_server_refuses_a_request_for_another_host_name(live):
+    """DNS rebinding: a page on another site can point its own name at 127.0.0.1 and make the browser send requests with that name in Host."""
+    s = live()
+    port = s.http.server_address[1]
+    for host in ("evil.example", "evil.example:80", f"evil.example:{port}", "127.0.0.1.evil.example", ""):
+        assert raw_request(port, "GET", "/v1/health", host) == 403, host
+        assert raw_request(port, "POST", "/v1/audio/jobs", host, json.dumps(JOB).encode()) == 403, host
+        assert raw_request(port, "DELETE", "/v1/audio/jobs/" + "0" * 32, host) == 403, host
+    for host in (f"127.0.0.1:{port}", f"localhost:{port}", "localhost", f"[::1]:{port}"):
+        assert raw_request(port, "GET", "/v1/health", host) == 200, host
+    assert len(s.js.jobs) == 0
+
+
+def test_a_server_bound_to_another_address_does_not_filter_host_names():
+    assert srv.host_allowed("anything.example:20100", bound_host="0.0.0.0")
+    assert not srv.host_allowed("anything.example:20100", bound_host="127.0.0.1")
+    assert srv.host_allowed("127.0.0.1:20100", bound_host="127.0.0.1")
+    assert not srv.host_allowed(None, bound_host="127.0.0.1")

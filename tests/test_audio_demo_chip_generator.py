@@ -4,6 +4,7 @@
 script that takes the same arguments, writes the same files (clips/audio.flac, chip.json) and exits with the code the test asks for."""
 import json
 import os
+import shutil
 import struct
 import sys
 import tempfile
@@ -209,6 +210,11 @@ def test_close_removes_a_work_directory_the_generator_made(tmp_path):
     assert work.is_dir()
     g.close()
     assert not work.exists()
+    kept = srv.SubprocessChipGenerator(sys.executable, "s", "d", keep_runs=True)
+    (kept.work / "run-abc").mkdir()
+    kept.close()
+    assert (kept.work / "run-abc").is_dir()                  # --keep-runs: the run directories outlive the server for inspection
+    shutil.rmtree(kept.work)
     explicit = tmp_path / "mine"
     explicit.mkdir()
     g2 = srv.SubprocessChipGenerator(sys.executable, "s", "d", work_dir=str(explicit))
