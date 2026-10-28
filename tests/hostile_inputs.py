@@ -906,8 +906,6 @@ UNREGISTERED_MODULES = (
     '_proofs/telegraph_sqlite.py',
     'adapters/gozer.py',
     'agent.py',
-    'audio_demo/audio_client.py',
-    'audio_demo/audio_server.py',
     'audio_facts.py',
     'audio_reference.py',
     'audio_reference_env.py',

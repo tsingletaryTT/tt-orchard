@@ -2930,3 +2930,9 @@ Prompt (operator): "make a similar gradio app to the one we use for minimax musi
 
 ## 2026-10-28 (UTC): full suite on head 3b90266
 - 13920 passed, 1 failed: the hostile-reader registry test wants every module that parses JSON registered or listed as backlog. The two audio demo modules are on the backlog list (issue 170: they are meant to be copied into a package alone, so they cannot import `safeio`).
+
+## 2026-10-28 (UTC): the audio demo moved to its own repository
+- Operator instruction: the Stable Audio 3 demo page does not need to be part of tt-orchard. The job server, client, Gradio page, their tests, the screenshots script and the screenshots (added in PR 167) are removed from this repository, with the `audio-demo` extra and the two backlog lines in `tests/hostile_inputs.py`.
+- The code now lives in a separate repository, `tt-stable-audio-3-small-music`, with the same tests plus a few new ones (a boolean seed, steps and guidance scale are refused by the client). It is not published yet. The chip runtime script (PR 165) stays here; the new repository takes it from `--script` or `AUDIO_CHIP_GENERATE`.
+- Issues 168, 169 and 170 concern that code and now refer to the new repository.
+- `changes/audio-demo-page.toml` stays. It is the highest target in `changes/` (0.9.48), so deleting it would lower the version `main` reports.
