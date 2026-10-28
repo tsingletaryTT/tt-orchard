@@ -355,3 +355,16 @@ def test_an_audio_runs_bundle_builder_is_the_running_checkouts_and_a_text_runs_i
         running = Path(supervisor.__file__).resolve().parent
         assert (stage_dir / "build_bundle.py").read_bytes() == (running / "skills" / "operator-bundle-templates" / "build_bundle.py").read_bytes()
         assert json.loads((stage_dir / "bundle_config.json").read_text())["orchard_dir"] == str(running.parent)
+
+
+def test_a_base_that_is_another_revision_of_the_models_own_repository_does_not_replace_the_models_expectation(arig):
+    from orchard.ledger import Ledger
+    base_snapshot = [v.split("=", 1)[1] for v in arig.args.input if v.startswith("base=")][-1]
+    with Ledger(arig.run_dir / "ledger.jsonl") as led:
+        sup = build_supervisor(arig, led)
+        model_snapshot = sup.inputs["model"]
+        sup.inputs["base"] = str(Path(base_snapshot).parent / "another-revision")
+        (Path(sup.inputs["base"])).mkdir()
+        (Path(sup.inputs["base"]) / "model_config.json").write_text(json.dumps({**REAL_CONFIG, "x": 1}))
+        expected, base = sup._audio_expected("stabilityai/stable-audio-3-small-music@" + REV, "stabilityai/stable-audio-3-small-music@another-revision")
+    assert expected == {"small-music": audio_plan.snapshot_identity(model_snapshot)} and base is None

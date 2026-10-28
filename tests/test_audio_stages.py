@@ -4,6 +4,7 @@
 synthetic recorded run (orchard/audio_reference.py); no model, chip or interpreter other than this one is used."""
 import json
 import shutil
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -836,3 +837,77 @@ def test_stage_2_refuses_a_repeat_that_loaded_another_revision(tmp_path):
     with pytest.raises(st.AudioStageError) as e:
         st.finish_chip(s2, run_dir, ref_dir, plan, {"chip": "reference", "control_chip": "control_reference"})
     assert "wrong-repeat" in str(e.value) and "repeat 1" in str(e.value)
+
+
+# ---- copies in the record, clip paths, a missing control, cancellation (Copilot review of PR 165, third round) ------------------------------
+
+def test_the_gate_refuses_edited_timings_and_other_copies_that_differ_from_the_manifest(tmp_path):
+    run_dir, ref_dir, s2, res = stage2(tmp_path)
+    path = s2 / "audio_result.json"
+    for key, value in (("timings", {"generate_and_decode_s": 0.001}), ("model", "small-music-base"), ("revision", "other"), ("config_sha256", "9" * 64),
+                       ("library_commit", "9" * 40), ("settings", {**res["runs"]["chip"]["settings"], "steps": 1})):
+        edited = json.loads(json.dumps(res))
+        edited["runs"]["chip"][key] = value
+        path.write_text(json.dumps(edited))
+        assert any(f"its recorded {key} is not what its manifest says" in p for p in st.chip_problems(s2, run_dir, ref_dir)), key
+
+
+def test_the_gate_refuses_edited_repeat_timings(tmp_path):
+    run_dir, ref_dir, s2, res = stage2(tmp_path)
+    edited = json.loads(json.dumps(res))
+    edited["repeats"]["chip"][1]["timings"] = {"generate_and_decode_s": 0.001}
+    (s2 / "audio_result.json").write_text(json.dumps(edited))
+    assert any("chip repeat 1: its recorded timings" in p for p in st.chip_problems(s2, run_dir, ref_dir))
+
+
+def test_the_stage_1_gate_refuses_edited_timings(tmp_path):
+    run_dir, stage_dir, rec, _ = stage1(tmp_path)
+    data = json.loads((stage_dir / "audio_reference.json").read_text())
+    data["runs"]["reference"]["timings"] = {"generate_and_decode_s": 0.001}
+    (stage_dir / "audio_reference.json").write_text(json.dumps(data))
+    assert any("its recorded timings" in p for p in st.reference_problems(stage_dir, run_dir))
+
+
+def test_the_gate_refuses_a_clip_path_that_points_at_another_models_clip(tmp_path):
+    run_dir, ref_dir, s2, res = stage2(tmp_path)
+    res["runs"]["chip"]["clip"] = res["runs"]["control_chip"]["clip"]
+    (s2 / "audio_result.json").write_text(json.dumps(res))
+    assert any("its clip path is" in p for p in st.chip_problems(s2, run_dir, ref_dir))
+
+
+def test_the_gate_requires_the_control_run_when_stage_1_made_a_control_reference(tmp_path):
+    run_dir, ref_dir, s2, res = stage2(tmp_path)
+    del res["runs"]["control_chip"]
+    (s2 / "audio_result.json").write_text(json.dumps(res))
+    assert any("needs a control_chip run" in p for p in st.chip_problems(s2, run_dir, ref_dir))
+
+
+def test_a_run_without_a_control_reference_needs_no_control_chip_run(tmp_path):
+    run_dir, ref_dir, rec, _ = stage1(tmp_path, plan=[p for p in st.reference_plan(MODEL, BASE) if p["role"] != "control_reference"])
+    s2 = run_dir / "stages" / "2"
+    (s2 / "chip").mkdir(parents=True)
+    plan = st.chip_plan(MODEL, None)
+    st.write_chip_config(s2, PATHS, "/hf", plan, repeats=1)
+    twin(run_dir / rec["runs"]["reference"]["dir"], s2 / "chip" / "small-music", noise=0.001)
+    st.finish_chip(s2, run_dir, ref_dir, plan, {"chip": "reference"})
+    assert st.chip_problems(s2, run_dir, ref_dir) == []
+
+
+def test_a_cancelled_numeric_verb_takes_its_cpu_runs_down_with_it(tmp_path):
+    """The CPU runs live in sessions of their own. The verb is sent SIGTERM first; its cleanup kills those sessions, so nothing outlives it."""
+    import time
+    from orchard import audio_remote, audio_runtime
+    marker = tmp_path / "cpu-run-survived"
+    fake = tmp_path / "fake_python"
+    fake.write_text(f"#!/bin/sh\nsleep 3\ntouch {marker}\n")
+    fake.chmod(0o755)
+    run_dir = tmp_path / "run"
+    stage_dir = run_dir / "stages" / "1"
+    stage_dir.mkdir(parents=True)
+    paths = audio_runtime.AudioPaths(str(fake), str(fake), "/src")
+    args = {"stage_dir": str(stage_dir), "run_dir": str(run_dir), "paths": paths.record(), "plan": st.reference_plan(MODEL, None),
+            "expected": {"small-music": EXP}, "library_commit": COMMIT, "cache_dir": None, "env": {"PATH": "/usr/bin:/bin"}, "timeout_s": 60.0}
+    with pytest.raises(st.AudioStageError):
+        audio_remote.call(sys.executable, "references", args, timeout_s=1.5, env={"PATH": "/usr/bin:/bin"})
+    time.sleep(4.0)                                       # the CPU run would have written its file at 3 s
+    assert not marker.exists()

@@ -47,7 +47,18 @@ def call(python: str, verb: str, args: dict, *, timeout_s: float, env: dict | No
     return answer["result"]
 
 
-def _kill(proc) -> None:
+def _kill(proc, grace_s: float = 10.0) -> None:
+    """Stop the verb and everything it started. SIGTERM first, to the verb's session: the verb turns it into an exception whose cleanup kills the CPU
+    runs it started in sessions of their own, which a SIGKILL of this session alone would not reach. SIGKILL after the grace period."""
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        proc.communicate(timeout=grace_s)
+        return
+    except subprocess.TimeoutExpired:
+        pass
     try:
         os.killpg(proc.pid, signal.SIGKILL)
     except ProcessLookupError:

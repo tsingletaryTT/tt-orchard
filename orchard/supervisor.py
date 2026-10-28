@@ -1528,9 +1528,9 @@ class Supervisor:
         expected = {}
         for repo, key in ((model_id, "model"), (base_id, "base")):
             name, snapshot = audio_plan.library_name(repo), self.inputs.get(key)
-            if name and snapshot:
+            if name and snapshot and name not in expected:       # a base that is another revision of the model's own repository has the same name; the model's entry stays
                 expected[name] = audio_plan.snapshot_identity(snapshot)
-        base = base_id if audio_plan.library_name(base_id) in expected else None
+        base = base_id if (audio_plan.library_name(base_id) in expected and audio_plan.library_name(base_id) != audio_plan.library_name(model_id)) else None
         return expected, base
 
     def _audio_body(self, spec, stage_dir: Path, resumed: bool):

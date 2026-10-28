@@ -39,7 +39,17 @@ def dispatch(verb: str, args: dict) -> dict:
         return {"error": f"bad request for {verb}: {type(exc).__name__}: {exc}"}
 
 
+class Cancelled(BaseException):
+    """The supervisor cancelled the verb (SIGTERM). A BaseException, so the cleanup in `except BaseException` blocks runs and nothing is caught by accident."""
+
+
+def _on_term(signum, frame):
+    raise Cancelled()
+
+
 def main() -> int:
+    import signal
+    signal.signal(signal.SIGTERM, _on_term)
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     try:
         request = json.loads(sys.stdin.read())

@@ -226,10 +226,15 @@ def check_run_dir(run_dir, entry: dict, want_settings: dict | None, label: str, 
     if entry.get("manifest_sha256") != facts["manifest_sha256"]:
         problems.append(f"{label}: the manifest is not the one the result recorded")
     problems += identity_problems(facts, expected, library_commit, label)
+    for key in ("model", "revision", "config_sha256", "library_commit", "settings", "timings"):     # copies in the record must be the manifest's
+        if entry.get(key) != facts[key]:
+            problems.append(f"{label}: its recorded {key} is not what its manifest says")
+    if entry.get("clip") != f"{rel}/clips/audio.flac":
+        problems.append(f"{label}: its clip path is {entry.get('clip')!r}; the expected path is {rel}/clips/audio.flac")
     if want_settings is not None:
         got = {k: facts["settings"].get(k) for k in want_settings}
         if got != want_settings:
-            problems.append(f"{label}: its settings are {got}, not the expected {want_settings}")
+            problems.append(f"{label}: its settings are {got}; the expected settings are {want_settings}")
     checks = sound_checks(wave, SAMPLE_RATE, float(facts["settings"].get("duration", 0)))
     if not checks["ok"]:
         problems.append(f"{label}: the clip fails the sound checks: {'; '.join(checks['reasons'])}")
@@ -305,6 +310,9 @@ def subprocess_runner(base_env: dict):
     import subprocess
 
     def run(argv, env_extra, timeout_s, log_path):
+        # The child runs in its own session so that a timeout here can kill everything it started. When this process is itself cancelled (the verb is
+        # sent SIGTERM by orchard/audio_remote.py, which orchard/audio_cli.py turns into an exception), the `except BaseException` below kills that
+        # session before the exception goes on, so no CPU run outlives its verb.
         Path(log_path).parent.mkdir(parents=True, exist_ok=True)
         with open(log_path, "wb") as log:
             proc = subprocess.Popen(argv, env={**base_env, **env_extra}, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
@@ -428,7 +436,7 @@ def finish_chip(stage_dir, run_dir, ref_stage_dir, plan: list[dict], reference_r
                                       ref_rec.get("library_commit"), f"{item['role']} repeat {k}")
             if wrong:
                 raise AudioStageError("; ".join(wrong))
-            repeats[item["role"]].append({**facts_k, "role": item["role"]})
+            repeats[item["role"]].append({**facts_k, "role": item["role"], "clip": f"{facts_k['dir']}/clips/audio.flac"})
     control = discrimination = None
     if ROLE_CONTROL_CHIP in runs:
         control = control_difference(stage_dir / "chip" / plan[0]["name"], stage_dir / "chip" / plan[1]["name"])
@@ -492,6 +500,8 @@ def chip_problems(stage_dir, run_dir, ref_stage_dir) -> list[str]:
         return [f"{RESULT_FILE} needs runs, reference_runs and agreement"]
     if ROLE_CHIP not in runs:
         return [f"{RESULT_FILE} has no chip run"]
+    if ROLE_CONTROL_REFERENCE in ref_runs and ROLE_CONTROL_CHIP not in runs:
+        problems.append(f"stage 1 made a control reference, so {RESULT_FILE} needs a {ROLE_CONTROL_CHIP} run, and has none")
     if not agree(res.get("reference_runs"), ref_runs):
         problems.append("the result's reference_runs are not stage 1's")
     for role, entry in runs.items():
