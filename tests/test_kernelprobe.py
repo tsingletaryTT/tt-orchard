@@ -531,7 +531,8 @@ def test_write_report_counts_attempts_to_first_pass_per_op(tmp_path):
 
 def test_the_category_list_includes_forbidden_code_and_hang():
     assert {"no_kernel", "import_error", "tt_lang_error", "shape_mismatch", "numeric_mismatch", "timeout",
-            "compile_error", "hang", "hw_numeric_mismatch", "harness_error", "forbidden_code", "queued"} == set(kp.CATEGORIES)
+            "compile_error", "hang", "hw_numeric_mismatch", "harness_error", "forbidden_code", "queued",
+            "sim_gap"} == set(kp.CATEGORIES)
 
 
 # ---- the probe-owned verdict directory (fix round 1) ------------------------------------------------------------
@@ -1380,6 +1381,8 @@ def test_importing_the_cli_does_not_import_the_kernel_probe():
 def test_after_a_kernel_hang_the_report_counts_only_attempts_that_ran_on_hardware(tmp_path, fake_kenv, env_ready):
     def kernel_run_hangs(argv, **kw):
         if "--out" in argv:
+            with open(kw["log_path"], "a") as f:
+                f.write("PROGRESS import\nPROGRESS open_device\nPROGRESS set seed0\nPROGRESS run seed0\n")
             return kp.Watched(-9, "stalled: no output and no CPU use for 60 s", True, 70.0)
         with open(kw["log_path"], "a") as f:
             f.write("PASSED!\n")
@@ -3762,3 +3765,15 @@ def test_main_refuses_an_unknown_library_mode_and_starts_nothing(tmp_path, fake_
     code = kp.main(probe_args(tmp_path, library="some"), env=fake_kenv, out=io.StringIO(), probe=lambda e, m: True,
                    run_watched_fn=no_run)
     assert code == 2 and not (tmp_path / "out").exists() and "unknown --library" in capsys.readouterr().err
+
+
+# ---- the probe's read_file answers an argument it does not know (0.9.36) -------------------------------------------
+
+def test_the_probe_read_file_takes_limit_and_names_its_arguments_for_an_unknown_one(tmp_path):
+    tools, adir = _probe_tools(tmp_path, "pass\n")
+    assert isinstance(tools, kp.ProbeTools)       # the probe's agent gets the line-based reader (attempt_tools)
+    (adir / "notes.txt").write_text("".join(f"line {i}\n" for i in range(1, 31)))
+    ok = tools.call("read_file", json.dumps({"path": "notes.txt", "offset": 5, "limit": 3}))
+    assert ok.startswith("line 5\nline 6\nline 7") and "[lines 5 to 7 of 30" in ok
+    bad = tools.call("read_file", json.dumps({"path": "notes.txt", "offset": 5, "count": 3}))
+    assert bad.startswith("error:") and "'count'" in bad and "path" in bad and "offset" in bad and "limit" in bad

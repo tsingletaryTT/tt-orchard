@@ -65,6 +65,10 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from orchard import __version__, bringup_config, caches, lexicon, machine_checks, narrate, run_view, settings, status, ui, verdict
+from orchard import telegraph as _telegraph
+from orchard import telegraph_view
+from orchard import virtualspend as _virtualspend
+from orchard import virtualspend_view
 from orchard.preflight import _lab_status
 from orchard.ledger import LedgerCorrupt, read_entries
 from orchard.scrub import HOME_PATH, TOKEN_PATTERNS
@@ -359,10 +363,11 @@ class WebApp:
                  spawn=spawn_detached, preflight=None, collect_kwargs=None, port_open=port_open,
                  pid_running=pid_running, hostname=None, home=None, sse_poll_s=1.0, toplike=None, lan=False,
                  chips=read_chips, settings_dir=None, cpu_models=ollama_models, is_installed=None,
-                 preflight_for=None, lab_status=_lab_status, checks=None):
+                 preflight_for=None, lab_status=_lab_status, checks=None, environ=None):
         self.runs_root = Path(runs_root)
         self.config_path = Path(config_path)
         self.cfg = cfg
+        self._spender = None
         self.token = token or secrets.token_urlsafe(24)
         self._gozer_fn = gozer_status or status._gozer_status
         self.clock = clock
@@ -393,6 +398,7 @@ class WebApp:
         self.settings_dir = Path(settings_dir) if settings_dir else CHECKOUT / "config"
         self.cpu_models = cpu_models
         self.is_installed = is_installed or TtModelList()
+        self.environ = os.environ if environ is None else environ     # only to see whether the helper's key variable is set
 
     # ---- shared signals ----
     def _gozer(self) -> str:
@@ -460,6 +466,27 @@ class WebApp:
             **({"lab": self._lab_group()} if getattr(self.cfg, "mode", "local") == "lab"
                and getattr(self.cfg, "lab", None) is not None else {}),
         }
+
+    def telegraph(self) -> dict:
+        """The spend meter and the Telegraph view: the configured helper, its caps and the ledger. Read only: nothing here
+        sends a request to the helper or writes a file (orchard/telegraph_view.py)."""
+        cfg = getattr(self.cfg, "telegraph", None) or _telegraph.Config()
+        from orchard import telegraph_cmd
+        try:
+            directory, problem = telegraph_cmd.resolve_directory(None, cfg, self.environ, self.home), None   # as `telegraph ask` does
+        except _telegraph.ConfigError as exc:
+            directory, problem = telegraph_view.default_dir(self.home), str(exc)
+        label = self.redact(str(directory))
+        return telegraph_view.build(cfg, directory, environ=self.environ, redact=self.redact, hostname=self.hostname,
+                                    now=self.clock(), ledger_label=label, problem=problem)
+
+    def virtual_spend(self, run=None) -> dict:
+        """The virtual local spend (orchard/virtualspend_view.py): the token use of the local models in the run folders, priced
+        at the reference models. `run` is the name of a listed row; it is never used to build a path. Read only."""
+        if self._spender is None:
+            vcfg = getattr(self.cfg, "virtual_spend", None) or _virtualspend.Config()
+            self._spender = virtualspend_view.Spender(self.runs_root, vcfg, redact=self.redact, clock=self.clock)
+        return self._spender.build(run)
 
     def _lab_group(self) -> dict:
         """The lab's chips from its `gozer status` (over ssh), asked at most every LAB_TTL_S seconds."""
@@ -600,6 +627,7 @@ class WebApp:
                         for i in verdict.build(f["results"], self._peers(run), verdict.reference_check(run))]
         f["timeline"] = run_view.timeline(entries, now)
         f["compare"] = self._compare(run, f["model"])
+        f["telegraph"] = telegraph_view.run_spend(run)       # the run's own helper spend, when it has a telegraph ledger
         f["block"] = None
         if f["state"] == "blocked" and f["blocked"]:
             stage = None
@@ -1155,6 +1183,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, app.meta())
         if segs == ["api", "machine"]:
             return self._json(200, app.machine())
+        if segs == ["api", "telegraph"]:
+            return self._json(200, app.telegraph())
+        if segs == ["api", "virtual-spend"]:
+            return self._json(200, app.virtual_spend(q.get("run")))
         if segs == ["api", "health"]:
             return self._json(200, app.health())
         if segs == ["api", "toplike"]:

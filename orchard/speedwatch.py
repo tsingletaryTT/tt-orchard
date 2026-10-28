@@ -20,13 +20,13 @@ from __future__ import annotations
 import http.client
 import json
 import math
-import os
 import re
 import time
 import urllib.request
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from orchard import safeio
 from orchard.canary import CanaryError, post_json
 from orchard.defaults import (SPEED_BASELINE_FILE, SPEED_MAX_TOKENS, SPEED_MIN_TOKENS, SPEED_PROMPT,
                               SPEED_SLOW_CONSECUTIVE, SPEED_SLOW_RATIO, SPEED_TIMEOUT_S)
@@ -153,6 +153,9 @@ def judge(samples: list[float], baseline: float | None, *, ratio: float = SLOW_R
     return Verdict("ok", now, baseline, r, f"{now:.1f} tok/s, {r:.0%} of the best seen ({baseline:.1f} tok/s).")
 
 
+MAX_BASELINE_BYTES = 1 << 20            # one small entry per model and endpoint; a larger file is not one
+
+
 class Baselines:
     """The best decode speed seen per model and endpoint, in a small JSON file. It only goes up: a slow sample never
     lowers it, so a server that has gone slow is still compared with its healthy speed."""
@@ -166,19 +169,15 @@ class Baselines:
 
     def _read(self) -> dict:
         try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return {}
-        if not isinstance(data, dict):
-            return {}
+            data = safeio.read_json(self.path, max_bytes=MAX_BASELINE_BYTES, expect=dict)
+        except safeio.SafeReadError:
+            return {}                          # missing, hostile (a FIFO, a link, a huge or deeply nested file, NaN) or not an object
         return {k: v for k, v in data.items() if isinstance(v, dict) and isinstance(v.get("tok_s"), (int, float))
                 and not isinstance(v["tok_s"], bool) and v["tok_s"] > 0}
 
     def _write(self, data: dict) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_name(f"{self.path.name}.{os.getpid()}.tmp")
-        tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        os.replace(tmp, self.path)
+        safeio.atomic_write(self.path, json.dumps(data, indent=2, sort_keys=True) + "\n", mode=0o644)
 
     def get(self, endpoint: str, model: str) -> float | None:
         entry = self._read().get(self.key(endpoint, model))

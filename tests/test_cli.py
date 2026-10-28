@@ -385,10 +385,16 @@ def test_every_preflight_line_stays_inside_80_columns_without_a_right_border(con
 
 # ---- version and the shim -----------------------------------------------------------------------
 
-def test_the_version_matches_pyproject():
-    pyproject = tomllib.loads((REPO / "pyproject.toml").read_text())["project"]["version"]
+def test_pyproject_takes_its_version_from_the_one_release_literal():
+    """The version is written once, as RELEASE in orchard/__init__.py. pyproject.toml must not carry its own copy
+    and must read that literal (the old rule was that two version fields match; there is now only one)."""
     import orchard
-    assert orchard.__version__ == pyproject
+    from orchard import version
+    data = tomllib.loads((REPO / "pyproject.toml").read_text())
+    assert "version" not in data["project"] and "version" in data["project"]["dynamic"]
+    assert data["tool"]["setuptools"]["dynamic"]["version"] == {"attr": "orchard.RELEASE"}
+    assert version.read_release(REPO / "orchard" / "__init__.py") == orchard.RELEASE
+    assert "__version__ =" not in (REPO / "orchard" / "__init__.py").read_text().replace("globals()", "")
 
 
 def test_the_version_flag_prints_it(capsys):

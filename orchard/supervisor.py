@@ -126,7 +126,8 @@ from urllib.parse import urlparse
 
 from orchard.adapters import AdapterError, Lease
 from orchard.agent import AgentStep, Tools, agent_env, probe_model, spawn_checked
-from orchard import bus
+from orchard import audio_reference_env, audio_runtime, bus, nearest
+from orchard.audio_facts import serving_of
 from orchard.blocked import block_code, last_pause
 from orchard.blocked import write_bundle as write_blocked_bundle
 from orchard.canary import CanaryError, compare, post_json
@@ -151,9 +152,9 @@ from orchard.runner import Denied, check_string
 from orchard import graft_trial as graft
 from orchard import sampling_choice as sampling
 from orchard import kept_coder, kernelprobe, swap_draft
-from orchard.server import ServerControl, ServerError, ServerSpec, StopCheck
-from orchard.stages import (PACKAGE_OPTIONS_SET, GateResult, TierUnavailable, abort_can_resume, attempt_started_ts,
-                            budget_cap, check_disk, coder_state, delta_class, delta_path, evidence_record,
+from orchard.server import ServerControl, ServerError, ServerNotOwned, ServerSpec, StopCheck
+from orchard.stages import (AUDIO_STAGE_1, AUDIO_STAGE_2, PACKAGE_OPTIONS_SET, GateResult, TierUnavailable, abort_can_resume, attempt_started_ts,
+                            budget_cap, check_disk, coder_state, delta_class, delta_facts, delta_path, run_facts, evidence_record,
                             open_stage_dir, package_format, package_options, resolve_endpoint,
                             resolve_skill, run_class, run_path, run_progress, scratch_stage, spec_for, stock_params, tier_for)
 from orchard.tiers import TierConfigError, load
@@ -169,6 +170,11 @@ FULL_PORT = ("stage 0 found a full port (new model code is needed); plan 4 runs 
              "bring-ups, so the operator decides whether to go on")
 RESTRICTED_HEAD = ("stage 0 found the nearest model's backbone with a restricted head (its lm_head is replaced by sidecar "
                    "rows); the harness does not serve that, so a person decides whether to go on")
+AUDIO_UNBUILT = ("stage 0 found an audio model; the audio path (its stage 1 and stage 2) is not built yet, and the text stages would "
+                 "measure the wrong thing, so a person decides whether to go on")
+AUDIO_ENV_MISSING = ("stage 0 found an audio model that the harness's own audio runtime serves, but the audio path's environment is not on "
+                     "this machine, so a person decides whether to go on: ")
+AUDIO_CHIP_DEADLINE_S = 3600.0         # the audio stage 2 hardware test: two chip runs, a kernel compile on the first, and the model loads
 SKILLS_DIR = Path(__file__).with_name("skills")
 
 
@@ -737,6 +743,10 @@ class Supervisor:
                 ok = False             # a container still uses these chips: its lease stays, the coder's is still released
                 continue
             try:
+                if is_coder and getattr(self.coder, "owned", None) is False:
+                    # Another process owns the container: no stop, and no reset of its chips.
+                    self.adapter.release(lease, keep_running=True)
+                    continue
                 if is_coder and not self.coder.confirm_stopped().stopped:
                     self.coder.stop()
                 if is_coder:
@@ -830,6 +840,11 @@ class Supervisor:
             if cap:
                 self.ledger.append("decision", p.next_stage, decision="pause", reason=cap)
                 continue
+            if p.next_stage == 1 and self._select_audio_runtime() == "paused":
+                continue
+            if p.next_stage == 1 and self._audio_unacknowledged():
+                self.ledger.append("decision", 1, decision="pause", reason=AUDIO_UNBUILT)
+                continue
             if p.next_stage == 1 and self._restricted_head_unacknowledged():
                 self.ledger.append("decision", 1, decision="pause", reason=RESTRICTED_HEAD)
                 continue
@@ -840,9 +855,11 @@ class Supervisor:
             # resumed run picks the same skill and gate as the run that crashed.
             entries = self.ledger.read()
             spec = spec_for(p.next_stage, run_path(entries, self.run_dir), package_format(entries),
-                            run_class(entries, self.run_dir), stock=stock_params(entries) is not None)
+                            run_class(entries, self.run_dir), stock=stock_params(entries) is not None,
+                            audio_runtime=audio_runtime.selected(entries) is not None)
             try:
-                self._ensure_coder()
+                if spec.needs_coder or self._coder_in_use():
+                    self._ensure_coder()
                 result = self._run_stage(spec, resuming=p.open_stage == p.next_stage,
                                          escalated=p.next_stage in p.escalated)
             except Blocked as exc:
@@ -870,6 +887,51 @@ class Supervisor:
         # counts as the same acknowledgement, so one resume is enough.
         return self.unattended or not any(
             e["event"] == "decision" and e["data"].get("reason") in (FULL_PORT, RESTRICTED_HEAD) for e in entries)
+
+    def _audio_unacknowledged(self) -> bool:
+        """Stage 0 recorded modality audio, and the run has not yet paused for it. The audio stages are not built (plan
+        docs/superpowers/plans/2026-10-28-audio-bringup.md), so the run stops before stage 1. Unattended, it always blocks."""
+        entries = self.ledger.read()
+        facts = run_facts(entries, self.run_dir)
+        if not facts or facts.get("modality") != "audio":
+            return False
+        if audio_runtime.selected(entries) is not None:
+            return False                  # the harness has a runtime for this model, so the audio path is built for it
+        return self.unattended or not any(
+            e["event"] == "decision" and e["data"].get("reason") == AUDIO_UNBUILT for e in entries)
+
+    def _select_audio_runtime(self) -> str:
+        """Stage 1 is next. When stage 0 found an audio model and the harness's own runtime implements it (orchard/audio_runtime.py), record that
+        once ("selected"), so a resume keeps the choice. "paused" when the runtime exists and its environment is missing (a pause decision was
+        written). "none" in every other case, and the audio stop applies as before."""
+        entries = self.ledger.read()
+        if audio_runtime.selected(entries) is not None:
+            return "selected"
+        facts = run_facts(entries, self.run_dir)
+        model_dir = self.inputs.get("model")
+        from orchard import audio_plan
+        if (not facts or facts.get("modality") != "audio" or not model_dir or audio_plan.library_name(self.model_id) is None
+                or audio_runtime.runtime_problems(model_dir)):
+            return "none"          # the planners know two repositories; another one with a supported configuration is not selected
+        paths = audio_runtime.audio_paths(self.paths.operator_home)
+        missing = audio_runtime.environment_problems(paths)
+        if missing:
+            self.ledger.append("decision", 1, decision="pause", reason=AUDIO_ENV_MISSING + "; ".join(missing))
+            return "paused"
+        self.ledger.append("decision", 1, decision=audio_runtime.AUDIO_RUNTIME_SELECTED, runtime=audio_runtime.RUNTIME, paths=paths.record(),
+                           scripts=audio_runtime.script_hashes(), model=self.model_id)
+        return "selected"
+
+    def _coder_in_use(self) -> bool:
+        """The ledger holds a coder lease this run has not released: a coder is part of the run even when the next stage does not need it, so
+        it is adopted (or found dead and handled) as before."""
+        entries = self.ledger.read()
+        lease_rec, _, _ = coder_state(entries)
+        if lease_rec is None:
+            return False
+        released = {e["data"].get("lease_id") for e in entries
+                    if e["event"] == "decision" and e["data"].get("decision") in ("hardware released", "coder left up")}
+        return lease_rec["lease_id"] not in released
 
     def _restricted_head_unacknowledged(self) -> bool:
         """Stage 0 filed the model as a restricted head, and the run has not yet paused for it. The harness does not serve
@@ -925,6 +987,8 @@ class Supervisor:
         adopted = lease.lease_id in self._adopted_ids(entries)
         if server_rec:
             self.coder.adopt(server_rec)
+        if getattr(self.coder, "owned", None) is False:
+            return self._release_foreign_lease(lease, adopted)
         try:
             if not self.coder.confirm_stopped().stopped:
                 self.ledger.append("decision", None, decision="stopping the coder",
@@ -945,6 +1009,22 @@ class Supervisor:
         except (AdapterError, ServerError, OSError) as exc:
             self.ledger.append("notice", None, what="releasing the hardware failed", error=str(exc))
             return False
+
+    def _release_foreign_lease(self, lease: Lease, adopted: bool) -> bool:
+        """The coder's container belongs to another process (the start was refused). Nothing is
+        stopped. The lease goes back without a reset, because that container may use these chips."""
+        self.ledger.append("notice", None, what="the coder container belongs to another process; it was "
+                           "not stopped and the lease was released without a reset", lease_id=lease.lease_id)
+        try:
+            self.adapter.release(lease, keep_running=True)
+        except (AdapterError, OSError) as exc:
+            self.ledger.append("notice", None, what="releasing the hardware failed", error=str(exc))
+            return False
+        self.ledger.append("decision", None, decision="hardware released", lease_id=lease.lease_id,
+                           reset=False)
+        if adopted:
+            kept_coder.forget(self.paths.cache_root, lease.lease_id)
+        return True
 
     # ---- a coder kept up between lab runs (orchard/kept_coder.py) ------------------------------
 
@@ -1094,6 +1174,18 @@ class Supervisor:
         if server_rec:
             self.coder.adopt(server_rec)
         lease = Lease.from_record(lease_rec)
+        if getattr(self.coder, "owned", None) is False:
+            # The last start was refused: the container of that name is another process's, even if
+            # it answers. Give back any lease this run still holds (no reset) and try to start again;
+            # a second refusal blocks with the same reason.
+            released = {e["data"].get("lease_id") for e in entries if e["event"] == "decision"
+                        and e["data"].get("decision") in ("hardware released", "coder left up")}
+            if (lease.lease_id not in released
+                    and not self._release_foreign_lease(lease, lease.lease_id in self._adopted_ids(entries))):
+                self._block(None, f"the coder container belongs to another process, and this run's lease "
+                                  f"{lease.lease_id} could not be released to try again")
+            self._start_coder(canary)
+            return
         mine = [c for c in self.adapter.status() if c.bdf in lease.chips]
         if lease.lease_id in self._adopted_ids(entries):
             # A kept coder's lease is owned by its container's processes, not by this supervisor.
@@ -1121,17 +1213,25 @@ class Supervisor:
         self.coder_lease = lease          # known from here on, so a shutdown can release it
         # Recorded before the start: a crash during the boot leaves the lease and server in the
         # ledger, so the restart can stop that server and re-lease.
+        # The pending record says "unknown" for this attempt. The live value changes only when the
+        # start begins (ServerControl.start), so a failed append here cannot lose an earlier refusal.
         self.ledger.append("decision", None, decision="coder starting", lease=lease.record(),
-                           server=self.coder.record())
+                           server={**self.coder.record(), "owned": None})
         try:
             self.coder.start(lease)
+        except ServerNotOwned as exc:
+            # Another process owns the container of this name. Record that, so no later stop (this
+            # run's cleanup, a resume) touches it, and block with the usual coder reason.
+            self.ledger.append("decision", None, decision="coder not started", lease_id=lease.lease_id,
+                               server=self.coder.record(), reason=str(exc))
+            self._block(None, f"the coder did not start and answer; nothing is retried: {exc}")
         except (ServerError, OSError) as exc:
             self._block_if_off_bus(None, f"the coder did not start and answer; nothing is retried: {exc}", lease.chips)
             self._block(None, f"the coder did not start and answer; nothing is retried: {exc}")
         # The boot takes up to 45 minutes and is the likeliest time for a kill. This entry gives
         # the kill test a kill point while the container runs and has not answered.
         self.ledger.append("decision", None, decision="coder container started",
-                           lease_id=lease.lease_id)
+                           lease_id=lease.lease_id, server=self.coder.record())
         self._finish_boot(lease, baseline)
 
     def _finish_boot(self, lease: Lease, baseline: dict | None) -> None:
@@ -1173,6 +1273,11 @@ class Supervisor:
         the coder, let the lease tool reap the orphan, take a new lease and start again."""
         self.ledger.append("decision", None, decision="relaunch the coder under this supervisor's lease",
                            old_lease_id=old.lease_id)
+        if getattr(self.coder, "owned", None) is False:
+            # The old start was refused: that container is another process's. Leave it, and start
+            # again; a second refusal blocks with the same reason.
+            self._start_coder(canary)
+            return
         if not self.coder.confirm_stopped().stopped:
             self.ledger.append("decision", None, decision="stopping the coder", result=self.coder.stop())
         check = wait_stopped(self.coder, self.adapter, old, quiet_wait_s=self.budgets.quiet_wait_s,
@@ -1263,6 +1368,8 @@ class Supervisor:
                 return self._stock_triage_body(spec, stage_dir)
             if spec.number == 8:
                 return self._bundle_body(spec, stage_dir)
+            if spec in (AUDIO_STAGE_1, AUDIO_STAGE_2):
+                return self._audio_body(spec, stage_dir, resumed)
             return self._package_body(spec, stage_dir, resumed)
         if spec.boards == 0:
             out, step = self._step(spec, "run", stage_dir, escalated, resumed)
@@ -1407,6 +1514,110 @@ class Supervisor:
         gate = self._check_gate(spec, stage_dir)
         return ("pass", [], gate) if gate.ok else ("fail", list(gate.reasons), gate)
 
+    # ---- the audio runtime path (orchard/audio_runtime.py, orchard/audio_stages.py) ---------------------------------------------
+
+    def _audio_models(self) -> tuple[str | None, str | None]:
+        """The model and its base as stage 0 wrote them (`<repo>@<revision>`)."""
+        try:
+            delta = json.loads((self.run_dir / "stages" / "0" / "delta.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return self.model_id, None
+        return delta.get("model") or self.model_id, delta.get("nearest_model")
+
+    def _audio_env(self) -> dict:
+        """The environment of every child of the audio stages that reads or makes model data: the agent shells' (no token, HOME in the run directory,
+        no chip) plus the Hugging Face cache directory, with the Hub offline."""
+        child_env = agent_env(self.run_dir, extra=self.extra_env)
+        child_env.update({"HF_HOME": self.paths.hf_home, "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"})
+        return child_env
+
+    def _audio_expected(self, model_id, base_id) -> tuple[dict, str | None]:
+        """The identity (revision and configuration hash) of the snapshots this run was started on, for the model and for its base, and the base's
+        id when its snapshot is known (a base without one has no control). Raises AudioStageError when a snapshot cannot be read."""
+        from orchard import audio_plan
+        expected = {}
+        for repo, key in ((model_id, "model"), (base_id, "base")):
+            name, snapshot = audio_plan.library_name(repo), self.inputs.get(key)
+            if name and snapshot and name not in expected:       # a base that is another revision of the model's own repository has the same name; the model's entry stays
+                expected[name] = audio_plan.snapshot_identity(snapshot)
+        base = base_id if (audio_plan.library_name(base_id) in expected and audio_plan.library_name(base_id) != audio_plan.library_name(model_id)) else None
+        return expected, base
+
+    def _audio_body(self, spec, stage_dir: Path, resumed: bool):
+        """Stage 1 (CPU references) and stage 2 (the clip on one chip) of an audio run, as supervisor code. The numeric work runs in the configured
+        reference interpreter (orchard/audio_remote.py), so the supervisor needs only the standard library. Stage 2 uses the one-test hardware phase
+        of stages 2 and 3: a lease (no coder to park when none was booted), one command, the lease back."""
+        from orchard import audio_plan, audio_remote
+        from orchard.audio_plan import AudioStageError
+        n = spec.number
+        if self.lab is not None:
+            return "fail", ["the audio runtime does not run in lab mode"], None
+        paths = audio_runtime.selection_paths(self.ledger.read())
+        if paths is None:
+            return "fail", ["the ledger holds no audio runtime selection with its paths"], None
+        model_id, base_id = self._audio_models()
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            expected, base_id = self._audio_expected(model_id, base_id)
+            if n == 1:
+                if not (resumed and (stage_dir / audio_runtime.REFERENCE_FILE).is_file()):
+                    self._audio_stage_1(stage_dir, paths, model_id, base_id, expected)
+            else:
+                if not (resumed and (stage_dir / "test-result.json").is_file()):
+                    plan = audio_plan.chip_plan(model_id, base_id)
+                    audio_plan.write_chip_config(stage_dir, paths, self.paths.hf_home, plan)
+                    command = audio_plan.chip_test_command(paths, stage_dir.resolve(), audio_runtime.TEMPLATES / "audio_chip_test.py")
+                    try:
+                        check_string(command, self.run_dir)
+                    except Denied as exc:
+                        return "fail", [f"the test command is refused: {exc}"], None
+                    test = {"command": command, "deadline_s": AUDIO_CHIP_DEADLINE_S}
+                    (stage_dir / "hw_test.json").write_text(json.dumps(test) + "\n", encoding="utf-8")
+                    (stage_dir / "handoff.json").write_text(json.dumps({
+                        "goal": "make one Stable Audio 3 clip with the diffusion transformer on one chip", "stage": 2,
+                        "evidence": "stages/2/audio_chip_config.json", "next_action": "the supervisor runs the clip test under its own lease",
+                        "check_on_return": "stages/2/test-result.json"}) + "\n", encoding="utf-8")
+                    self._hardware_phase(spec, stage_dir, test)
+                failed = hardware_test_failure(stage_dir)
+                if failed:
+                    return "fail", [failed["problem"] + "; see stages/2/evidence/hw-test-output.txt and stages/2/log"], None
+                audio_remote.call(paths.reference_python, "finish", {
+                    "stage_dir": str(stage_dir), "run_dir": str(self.run_dir), "ref_stage_dir": str(self.run_dir / "stages" / "1"),
+                    "plan": audio_plan.chip_plan(model_id, base_id),
+                    "roles": {audio_plan.ROLE_CHIP: audio_plan.ROLE_REFERENCE, audio_plan.ROLE_CONTROL_CHIP: audio_plan.ROLE_CONTROL_REFERENCE}},
+                    timeout_s=1800.0, env={"PATH": os.environ.get("PATH", "")})
+        except AudioStageError as exc:
+            return "fail", [str(exc)], None
+        self.ledger.append("evidence", n, what="audio stage record", **evidence_record(self.run_dir, stage_dir / spec.gate_file))
+        gate = self._check_gate(spec, stage_dir)
+        return ("pass", [], gate) if gate.ok else ("fail", list(gate.reasons), gate)
+
+    def _audio_stage_1(self, stage_dir: Path, paths, model_id, base_id, expected: dict) -> None:
+        from orchard import audio_plan, audio_remote
+        plan = audio_plan.reference_plan(model_id, base_id)
+        cache = Path(self.paths.cache_root) / "audio-reference"
+        result = audio_remote.call(paths.reference_python, "references", {
+            "stage_dir": str(stage_dir), "run_dir": str(self.run_dir), "paths": paths.record(), "plan": plan, "expected": expected,
+            "library_commit": audio_reference_env.LIBRARY_COMMIT, "cache_dir": str(cache), "env": self._audio_env(), "timeout_s": 3600.0},
+            timeout_s=4 * 3600.0, env={"PATH": os.environ.get("PATH", "")})
+        rec = result["record"]
+        for note in result.get("notes", []):
+            self.ledger.append("decision", 1, decision="audio reference", note=note)
+        # A reference made fresh goes into the cache, so the next run of the same model, revision and library commit reuses it.
+        for role in (audio_plan.ROLE_REFERENCE, audio_plan.ROLE_CONTROL_REFERENCE):
+            run = rec["runs"].get(role)
+            if run is None or run["from_cache"]:
+                continue
+            dest = cache / run["model"]
+            if not dest.exists():
+                try:
+                    cache.mkdir(parents=True, exist_ok=True)
+                    tmp = cache / f".{run['model']}.tmp-{os.getpid()}"
+                    shutil.copytree(self.run_dir / run["dir"], tmp)
+                    os.replace(tmp, dest)
+                except OSError:
+                    pass                    # the cache saves time and nothing depends on it; a failed copy costs nothing
+
     def _bundle_body(self, spec, stage_dir: Path):
         """Stage 8 as supervisor code: copy build_bundle.py into the stage, write its one-line config,
         run it, and run the gate. The script rebuilds the bundle from scratch each time, so a resume
@@ -1414,10 +1625,13 @@ class Supervisor:
         n = spec.number
         stage_dir.mkdir(parents=True, exist_ok=True)
         script = stage_dir / "build_bundle.py"
-        shutil.copyfile(Path(self.paths.orchard_dir) / "orchard" / "skills" / "operator-bundle-templates"
-                        / "build_bundle.py", script)
+        # An audio run's other stages already use the scripts of the checkout that is running (audio_runtime.TEMPLATES), so its bundle builder is that
+        # checkout's too: a run started under an older checkout can then finish with the audio section. Other runs keep the recorded checkout.
+        orchard_dir = (Path(__file__).resolve().parent.parent if audio_runtime.selected(self.ledger.read()) is not None
+                       else Path(self.paths.orchard_dir))
+        shutil.copyfile(orchard_dir / "orchard" / "skills" / "operator-bundle-templates" / "build_bundle.py", script)
         (stage_dir / "bundle_config.json").write_text(
-            json.dumps({"run_dir": str(self.run_dir), "orchard_dir": str(self.paths.orchard_dir)}, indent=2)
+            json.dumps({"run_dir": str(self.run_dir), "orchard_dir": str(orchard_dir)}, indent=2)
             + "\n", encoding="utf-8")
         (stage_dir / "log").mkdir(exist_ok=True)
         log = stage_dir / "log" / "build_bundle.log"
@@ -1476,6 +1690,21 @@ class Supervisor:
         log = stage_dir / "log" / f"{step.phase}-continuation-{entry['seq']:05d}.jsonl"
         return step.continue_with(text, max_turns=AGENT_CONTINUATION_TURNS, log_path=log)
 
+    def _stage_0_facts(self) -> dict:
+        """`{"facts": {...}}` for stage 0's passing end, or {} when delta.json holds none (a text model: the default applies).
+        The template decides form and modality from the files; `serving` is a property of this machine, so it comes from the
+        installed bundles and container packages (orchard/audio_facts.py)."""
+        facts, delta = delta_facts(self.run_dir), None
+        if facts is None:
+            return {}
+        try:
+            delta = json.loads((self.run_dir / "stages" / "0" / "delta.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        installed = nearest.read_all_installed(self.paths.tt_model_root, self.paths.operator_home)
+        return {"facts": {"form": facts.get("form"), "serving": serving_of(delta.get("nearest_model"), installed),
+                          "modality": facts.get("modality")}}
+
     def _end_stage(self, spec, stage_dir: Path, status: str, reasons: list, gate, escalated: bool) -> str:
         n = spec.number
         if status == "pass":
@@ -1485,7 +1714,7 @@ class Supervisor:
                 self._record_numbers(stage_dir)
             # Stage 0's pass records the path it chose. Later stages read it from here
             # (orchard/stages.py, run_path), so an edit to delta.json cannot change the run's path.
-            extra = ({"path": delta_path(self.run_dir), "class": delta_class(self.run_dir)}
+            extra = ({"path": delta_path(self.run_dir), "class": delta_class(self.run_dir), **self._stage_0_facts()}
                      if n == 0 else {})
             self.ledger.append("stage_end", n, result="pass", evidence=ev, **extra)
             return "pass"
@@ -1794,7 +2023,8 @@ class Supervisor:
         if boards > spec.boards:
             return self._wide_hardware_phase(spec, stage_dir, test, boards, after_test=after_test, **record)
         chips = self.adapter.status()
-        d = decide_park(self.coder_lease.units, chips, spec.boards)
+        # A run that has not booted a coder (the audio stages need none) has no coder boards to park: a free board is leased, or the lease waits.
+        d = decide_park(self.coder_lease.units if self.coder_lease is not None else (), chips, spec.boards)
         self.ledger.append("decision", n, decision="hardware phase", action=d.action,
                            free_boards=list(d.free_boards), server_boards=list(d.server_boards))
         if d.park_needed:

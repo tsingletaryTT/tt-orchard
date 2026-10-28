@@ -9,10 +9,11 @@ reference_python = "@REFERENCE_PYTHON@"
 [env]
 HF_HUB_OFFLINE = "1"
 
-# Qwen3-Coder-Next on one board: the recommended agent model for a QuietBox 2 (see config/tiers.qb2-coder-next.toml).
+# Qwen3-Coder-Next (fused-decode bundle) on one board: the recommended agent model for a QuietBox 2
+# (see config/tiers.qb2-coder-next.toml). The earlier package is the fallback: config/bringup.qb2-coder-next-v1.toml.
 # The other board stays free for hardware stages.
 [coder]
-target = "raahemnabeel/qwen3-coder-next-blackhole"
+target = "raahemnabeel/qwen3-coder-next"
 kind = "container"
 profile = "p300"
 port = 8001

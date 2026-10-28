@@ -75,6 +75,7 @@ from orchard.watchdog import Event, RetryGuard, command_shape
 
 # ---- environment --------------------------------------------------------------------------------
 
+TELEGRAPH_DIR_VAR = "ORCHARD_TELEGRAPH_DIR"     # the ledger directory agent shells use (orchard/telegraph_cmd.py)
 ENV_ALLOW = ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "USER", "LOGNAME", "TERM")
 # The device mask for agent shells: a PCI address that matches no chip on this box, set in both
 # TT_VISIBLE_DEVICES and TT_METAL_VISIBLE_DEVICES. Checked on hardware 2026-10-02: a device open
@@ -90,6 +91,12 @@ def agent_env(run_dir, *, extra: dict | None = None, source=None) -> dict:
     """The whole environment of an agent's shell. Nothing is inherited outside ENV_ALLOW."""
     source = os.environ if source is None else source
     env = {k: source[k] for k in ENV_ALLOW if k in source}
+    # The telegraph ledger directory belongs to the operator and is shared by every shell: HOME below is inside the run directory, so a shell that
+    # resolved `~` would open a second ledger with its own caps (issue 133). The supervisor's value is passed on when it is an
+    # absolute path; `tt-orchard telegraph` refuses to guess a directory in an agent shell that has none.
+    tele = source.get(TELEGRAPH_DIR_VAR)
+    if isinstance(tele, str) and tele.startswith("/") and "\0" not in tele:
+        env[TELEGRAPH_DIR_VAR] = tele
     home = Path(run_dir).resolve() / "home"
     home.mkdir(parents=True, exist_ok=True)
     env.update({
@@ -219,10 +226,24 @@ class Tools:
         if name == "shell":
             return self.shell(args.get("command"))
         if name == "read_file":
+            unknown = self.unknown_read_args(args, ("path", "offset"),
+                                             "read_file takes path and offset (offset counts characters)")
+            if unknown:
+                return unknown
             return self.read_file(args.get("path"), args.get("offset", 0))
         if name == "write_file":
             return self.write_file(args.get("path"), args.get("content"))
         return f"error: there is no tool named {name!r}; the tools are shell, read_file and write_file"
+
+    @staticmethod
+    def unknown_read_args(args: dict, accepted: tuple, accepts: str):
+        """An error text when `args` holds a name `accepted` lacks, else None. read_file used to drop such an argument
+        without a word, so a model that sent `limit` (a count of lines) to a reader in characters was never told."""
+        unknown = sorted(k for k in args if k not in accepted)
+        if not unknown:
+            return None
+        names = ", ".join(repr(k) for k in unknown)
+        return f"error: {accepts}; it has no argument named {names}"
 
     def shell(self, command) -> str:
         if not isinstance(command, str) or not command.strip():

@@ -681,6 +681,13 @@ UNBLOCK = {
         "The harness stops here on purpose: how those rows are read (marker tokens, a different attention mask) is in the model's own "
         "code (`code_files`), not in its weights, and the nearest runtime may not support it. Read that code, then decide whether to "
         "port it by hand or choose another model."],
+    "audio-path-unbuilt": [
+        "The model is audio (stage 0 recorded modality audio in stages/0/delta.json, `facts`). The stages that serve and check audio "
+        "are not built yet, and the text stages would measure text, so the run stops before stage 1.",
+        "Read stages/0/delta.json (`class`, `audio`) for what stage 0 found. Whether the base has a runtime on this machine is in the "
+        "`serving` fact of stage 0's ledger entry; `none` means no installed bundle or container package serves it, and a runtime has to be "
+        "built first (docs/superpowers/plans/2026-10-28-audio-bringup.md, slice C). `tt-orchard bringup <MODEL>` blocks again until the audio "
+        "stages exist."],
     "blocked": [
         "The supervisor needed something it could not get. The reason is quoted above.",
         "`tt-orchard status <MODEL>` shows the full state. Fix what the reason names, then run `tt-orchard "

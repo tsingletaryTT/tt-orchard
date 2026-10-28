@@ -1,14 +1,18 @@
 # QuietBox 2 (two p300c boards, four chips): the recommended arrangement. Used by scripts/setup.sh.
 #
-# The agent model is Qwen3-Coder-Next on ONE board (the `p300` profile of
-# raahemnabeel/qwen3-coder-next-blackhole). The other board stays free for hardware stages, so only stage 4's
-# 4-chip test needs the coder parked. `large` names the same model on its own port. It is never started, and a
-# step that names it is served by `small` (same model).
+# The agent model is Qwen3-Coder-Next on ONE board (the `p300` profile of the fused-decode bundle
+# raahemnabeel/qwen3-coder-next). The fallback is the earlier package, raahemnabeel/qwen3-coder-next-blackhole:
+# run `scripts/setup.sh --coder coder-next-v1` (config/*.qb2-coder-next-v1.toml). Setup never overwrites an existing
+# config/bringup.toml, so a machine that has one switches by editing `target` under [coder] there.
+# The other board stays free for hardware stages, so only stage 4's 4-chip test needs the coder parked.
+# `large` names the same model on its own port. It is never started, and a step that names it is served by
+# `small` (same model).
 #
-# Why this is the recommendation: it passed the role-fit test (python3 -m orchard.rolefit; 50 of 50 recorded
-# turns well formed, and none of 35 replays of the Qwen3.8-27B's failure turns repeated its failure) and it ran
-# a whole bring-up (Cloudflare/clef) to the operator bundle. Measured limits: one run; the package was built
-# from an unpushed tt-metal tree; the p300 profile uses bfp4 routed experts. See README, "Recommended setup".
+# Why this is the recommendation: both packages passed the role-fit test (python3 -m orchard.rolefit; 50 of 50
+# recorded turns well formed, and none of 35 replays of the Qwen3.8-27B's failure turns repeated its failure).
+# The fused-decode bundle decoded about twice as fast on the p300 profile (median, docs/run-logs/2026-10-28-coder-fused-decode.md);
+# the earlier package ran a whole bring-up (Cloudflare/clef) to the operator bundle. Measured limits: the p300
+# profile uses bfp4 routed experts, and the new bundle has not yet run a whole bring-up. See README, "Recommended setup".
 # Check it on your own machine with the role-fit test before trusting it.
 #
 # cpu: qwen3-coder:30b under ollama, the stand-in while the coder is parked for the 4-chip test.

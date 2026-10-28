@@ -22,6 +22,8 @@ import os
 import time
 from pathlib import Path
 
+from orchard import safeio
+
 KEPT_WHO = "orchard:coder-kept"          # the adopted lease's owner name in `gozer status`
 IDENTITY_KEYS = ("target", "kind", "port", "profile", "image_id", "model", "chips")
 
@@ -30,21 +32,23 @@ def path(cache_root) -> Path:
     return Path(cache_root) / "coder" / "kept.json"
 
 
+MAX_RECORD_BYTES = 1 << 20            # the record is a few hundred bytes; a larger file is not one
+
+
 def read(cache_root) -> dict | None:
-    """The kept coder's record, or None when there is none (or it cannot be read)."""
+    """The kept coder's record, or None when there is none or it cannot be used: a missing file, a link, a FIFO or other file that is
+    not regular, one over MAX_RECORD_BYTES, or one that is not a JSON object (orchard/safeio.py names each case and never raises
+    anything else, so a hostile file at this path cannot block or crash the run)."""
     try:
-        rec = json.loads(path(cache_root).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        return safeio.read_json(path(cache_root), max_bytes=MAX_RECORD_BYTES, expect=dict)
+    except safeio.SafeReadError:
         return None
-    return rec if isinstance(rec, dict) else None
 
 
 def write(cache_root, rec: dict) -> None:
     p = path(cache_root)
     p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(".tmp")
-    tmp.write_text(json.dumps(rec, indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp, p)
+    safeio.atomic_write(p, json.dumps(rec, indent=2) + "\n", mode=0o644)
 
 
 def forget(cache_root, lease_id: str | None = None) -> None:

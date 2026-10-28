@@ -1,0 +1,218 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+"""Fixes for the first Copilot review of PR 111 (API side). Each test was written, and seen to fail, before its fix."""
+import json
+import os
+
+import pytest
+
+from ledger_io import clear_ledger, replace_ledger, seed_ledger
+from orchard import telegraph as tg
+from orchard import telegraph_view as view
+from test_telegraph_view import KEY, app_for, fill, setup
+from test_telegraph_view_ledger import crash_after_reserve, no_usage
+
+
+@pytest.fixture
+def root(tmp_path):
+    r = tmp_path / "orchard-runs"
+    r.mkdir()
+    return r
+
+
+def ok_record(call_id, problem, tin, tout, model="small", cost=0.001):
+    return {"call_id": call_id, "problem": problem, "model": model, "ts": 1.0, "outcome": "ok", "cached": False,
+            "tokens_in": tin, "tokens_out": tout, "cost_usd": cost, "latency_s": 0.1, "usage_known": True}
+
+
+def write_records(d, records):
+    replace_ledger(d, records)
+
+
+# ---- 7. a reply with no usage shows the bound the caps count, and says which number it is ------------------------------------
+
+def test_a_reply_with_no_usage_shows_its_reserved_bound_as_the_worst_case(root, tmp_path):
+    cfg, d, _ = setup(tmp_path)
+    settled = {**ok_record("c3", "p", 10, 5, cost=0.0001), "usage_known": False}
+    write_records(d, [reserve_record("c3", "p", "small", 2000, 0.02), settled])
+    out = app_for(root, cfg).telegraph()
+    (row,) = out["recent"]
+    assert row["cost_usd"] == pytest.approx(0.02) and row["cost_basis"] == "worst case"
+    assert row["cost_usd"] == pytest.approx(out["spend"]["cost_usd"])           # the row and the meter agree
+    assert "worst case" in row["reason"]
+
+
+def test_a_reply_with_no_usage_and_no_reservation_is_labelled_an_estimate(root, tmp_path):
+    cfg, d, _ = setup(tmp_path)
+    write_records(d, [{**ok_record("c3", "p", 10, 5, cost=0.0001), "usage_known": False}])     # a ledger from before reservations
+    out = app_for(root, cfg).telegraph()
+    (row,) = out["recent"]
+    assert row["cost_usd"] == pytest.approx(0.0001) and row["cost_basis"] == "estimate"
+    assert "estimate" in row["reason"] and "worst case" not in row["reason"]
+    assert out["spend"]["cost_usd"] == pytest.approx(0.0001)                      # what the caps count for such a record
+
+
+def test_the_cost_basis_of_other_rows(root, tmp_path):
+    cfg, d, _ = setup(tmp_path)
+    write_records(d, [ok_record("a1", "p", 10, 5), reserve_record("b2", "q", "small", 100, 0.01)])
+    rows = {r["call_id"]: r for r in app_for(root, cfg).telegraph()["recent"]}
+    assert rows["a1"]["cost_basis"] == "recorded" and rows["b2"]["cost_basis"] == "worst case"
+
+
+# ---- 4. model totals use the caps' accounting --------------------------------------------------------------------------
+
+def reserve_record(call_id, problem, model, tokens, cost):
+    return {"reserve": call_id, "problem": problem, "model": model, "tokens": tokens, "cost_usd": cost}
+
+
+def test_a_model_with_only_an_unsettled_reservation_is_in_the_table(root, tmp_path):
+    cfg, d, _ = setup(tmp_path)
+    write_records(d, [ok_record("a1", "p", 100, 50, cost=0.0015), reserve_record("b2", "p", "big", 900, 0.05)])
+    rows = {m["model"]: m for m in app_for(root, cfg).telegraph()["by_model"]}
+    assert rows["big"]["calls"] == 1 and rows["big"]["tokens"] == 900 and rows["big"]["cost_usd"] == pytest.approx(0.05)
+    assert rows["small"]["calls"] == 1 and rows["small"]["tokens"] == 150
+
+
+def test_a_reply_with_no_usage_counts_at_its_reservation_in_the_model_table(root, tmp_path):
+    cfg, d, _ = setup(tmp_path)
+    settled = {**ok_record("c3", "p", 10, 5, cost=0.0001), "usage_known": False}
+    write_records(d, [reserve_record("c3", "p", "small", 2000, 0.02), settled])
+    (row,) = app_for(root, cfg).telegraph()["by_model"]
+    assert row["tokens"] == 2000 and row["cost_usd"] == pytest.approx(0.02)     # the reserved bound, as the caps count it
+
+
+def test_the_model_table_adds_up_to_what_the_meter_counts(root, tmp_path):
+    cfg, d, _ = setup(tmp_path)
+    write_records(d, [
+        ok_record("a1", "p", 100, 50, cost=0.0015),
+        reserve_record("b2", "p", "big", 900, 0.05),
+        {**ok_record("c3", "q", 10, 5, model="big", cost=None), "usage_known": True},
+        {**ok_record("d4", "q", 10, 5, cost=0.0001), "usage_known": False}, reserve_record("d4", "q", "small", 2000, 0.02),
+        {"torn": "telegraph.jsonl.torn-1", "tokens": 7},
+    ])
+    out = app_for(root, cfg).telegraph()
+    rows = out["by_model"]
+    assert sum(m["calls"] for m in rows) == out["spend"]["calls"]
+    assert sum(m["tokens"] for m in rows) == out["spend"]["tokens"]
+    assert sum(m["cost_usd"] for m in rows) == pytest.approx(out["spend"]["cost_usd"])
+    assert sum(m["cost_unknown_calls"] for m in rows) == out["spend"]["unknown_cost"]
+    assert any("torn" in m["model"] for m in rows)
+
+
+# ---- 3. problems beyond the table's limit still count for the state ----------------------------------------------------
+
+def sixty_problems(tmp_path, hot_tokens=850):
+    cfg, d, _ = setup(tmp_path, max_calls=1000, max_total_tokens=10 ** 9, max_calls_per_problem=9, max_tokens_per_problem=1000)
+    records = [ok_record(f"c{i:02d}{j}", f"p{i:02d}", 5, 5) for i in range(59) for j in range(2)]
+    records.append(ok_record("hot1", "zzz", hot_tokens - 50, 50))
+    write_records(d, records)
+    return cfg
+
+
+def test_a_problem_at_eighty_percent_of_its_cap_turns_the_meter_amber_among_sixty_problems(root, tmp_path):
+    out = app_for(root, sixty_problems(tmp_path)).telegraph()
+    assert out["state"] == "near" and out["tone"] == "warn"
+    assert "problem zzz at 85% of its cap" in out["meter"]["text"]
+
+
+def test_the_table_shows_the_flagged_problems_first_and_says_how_many_are_not_shown(root, tmp_path):
+    out = app_for(root, sixty_problems(tmp_path)).telegraph()
+    assert len(out["problems"]) == view.PROBLEMS_MAX == 50
+    assert out["problems"][0]["name"] == "zzz" and out["problems"][0]["near"] is True
+    assert out["problems_hidden"] == 10
+    small = app_for(root, sixty_problems(tmp_path / "again")).telegraph()
+    assert small["problems_hidden"] == 10
+
+
+def test_a_problem_at_its_cap_among_sixty_makes_no_difference_to_a_green_ledger_below_eighty(root, tmp_path):
+    out = app_for(root, sixty_problems(tmp_path, hot_tokens=700)).telegraph()
+    assert out["state"] == "ok" and out["problems_hidden"] == 10
+
+
+def test_few_problems_hide_none(root, tmp_path):
+    cfg, d, tel = setup(tmp_path)
+    fill(tel, 2)
+    assert app_for(root, cfg).telegraph()["problems_hidden"] == 0
+
+
+# ---- 1. a small positive cost is never shown as zero -------------------------------------------------------------------
+
+def test_a_positive_cost_below_a_hundredth_of_a_cent_is_never_shown_as_zero(root, tmp_path):
+    cfg, d, tel = setup(tmp_path, prices={"small": [0.01, 0.01], "big": [0.01, 0.01]})
+    tel.ask("p", "task " * 80, "failed")                         # about $0.000015
+    out = app_for(root, cfg).telegraph()
+    assert 0 < out["spend"]["cost_usd"] < 0.0001
+    assert out["meter"]["text"].startswith("Helper: <$0.0001 · 1 call")
+    assert "$0.0000" not in json.dumps(out)
+
+
+def test_a_small_positive_cost_cap_is_not_shown_as_a_zero_cap(root, tmp_path):
+    cfg, d, tel = setup(tmp_path, prices={"small": [0.01, 0.01], "big": [0.01, 0.01]})
+    import dataclasses
+    tel.ask("p", "task " * 80, "failed")
+    capped = dataclasses.replace(cfg, max_cost_usd=0.00003)                  # the call cost half of this cap
+    out = app_for(root, capped).telegraph()
+    assert "cost <$0.0001 of <$0.0001" in out["meter"]["text"] and "$0.0000" not in json.dumps(out)
+
+
+# ---- 2. an unreadable ledger is not an empty one ---------------------------------------------------------------------
+
+def test_a_ledger_that_is_a_directory_is_a_problem_and_spend_is_unknown(root, tmp_path):
+    cfg, d, tel = setup(tmp_path)
+    d.mkdir()
+    (d / "project.db").mkdir()
+    out = app_for(root, cfg).telegraph()
+    assert out["state"] == "problem" and out["tone"] == "warn" and out["error"]
+    assert out["meter"]["text"] == "Helper: ledger unreadable · spend unknown"
+    assert "$0.00" not in out["meter"]["text"] and "0 calls" not in out["meter"]["text"]
+    assert out["caps"] == []                                    # no bars at 0 percent for a ledger that was not read
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can read a file with no permissions")
+def test_a_ledger_with_no_read_permission_is_a_problem_not_a_green_zero(root, tmp_path):
+    cfg, d, tel = setup(tmp_path)
+    fill(tel, 1)
+    os.chmod(d / "project.db", 0)
+    try:
+        out = app_for(root, cfg).telegraph()
+    finally:
+        os.chmod(d / "project.db", 0o600)
+    assert out["state"] == "problem" and "spend unknown" in out["meter"]["text"]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can enter a directory with no permissions")
+def test_a_ledger_folder_that_cannot_be_entered_is_a_problem(root, tmp_path):
+    cfg, d, tel = setup(tmp_path)
+    fill(tel, 1)
+    os.chmod(d, 0)
+    try:
+        out = app_for(root, cfg).telegraph()
+    finally:
+        os.chmod(d, 0o700)
+    assert out["state"] == "problem" and "spend unknown" in out["meter"]["text"]
+
+
+def test_a_missing_ledger_is_still_an_empty_history(root, tmp_path):
+    cfg, d, _ = setup(tmp_path)
+    out = app_for(root, cfg).telegraph()
+    assert out["state"] == "ok" and out["error"] is None and out["meter"]["text"].startswith("Helper: $0.00 · 0 calls")
+
+
+def test_every_error_state_says_spend_unknown_and_recovers_when_reading_works(root, tmp_path):
+    cfg, d, tel = setup(tmp_path)
+    seed_ledger(d, [{"call_id": "x", "outcome": "ok", "tokens_in": "lots", "model": "m"}])
+    app = app_for(root, cfg)
+    out = app.telegraph()
+    assert out["state"] == "problem" and out["meter"]["text"].endswith("spend unknown")
+    clear_ledger(d)
+    again = app.telegraph()
+    assert again["state"] == "ok" and again["error"] is None
+
+
+def test_an_off_telegraph_with_an_unreadable_ledger_stays_off(root, tmp_path):
+    d = tmp_path / "ledger"
+    d.mkdir()
+    (d / "project.db").mkdir()
+    cfg = tg.load({"enabled": False, "dir": str(d)}, base=tmp_path)
+    out = app_for(root, cfg).telegraph()
+    assert out["state"] == "off" and out["meter"]["text"] == "Helper: off"

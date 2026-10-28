@@ -1,0 +1,4 @@
+target = "0.9.50"
+summary = "The fused-decode Qwen3-Coder-Next bundle becomes the default coder, with the earlier package as the coder-next-v1 fallback; the role-fit speed part no longer reports noise."
+pr = 185
+kind = "feature"

@@ -1,0 +1,3 @@
+target = "0.9.48"
+summary = "Stable Audio 3 demo: a local job server, a client and a Gradio page, with the files and card text an audio package carries."
+pr = 167
