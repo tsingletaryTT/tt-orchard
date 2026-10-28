@@ -121,3 +121,45 @@ Batch plan (a deviation from one process at a time, decided here and not before 
   the attempts it has. If the coder is reported slow (3 samples below half its best speed) the probe stops by its own rule and that is
   reported. No attempt is repeated or dropped. Neither process is restarted with different settings during the batch.
 - The batch runs from an export of the branch head at the time of the run; the head is named in the results.
+
+## Old coder, stopped at about 50 minutes, partial (not in the results table)
+
+Everything above this line was measured on the earlier package `raahemnabeel/qwen3-coder-next-blackhole` (p300 profile, board 1).
+At about 20:49Z the operator decided to move the ladder to the new default coder (PR 185), so both batch processes were stopped
+with SIGTERM after about 52 minutes (started 19:56Z). What they had, at 29 to 38 tok/s with two clients (the pilot was measured at
+one client):
+
+| Rung | Attempt (seed 2026110100 + k) | Result | Turns | Agent wall (s) |
+|---|---|---|---|---|
+| center | 1 | failed, `IndexError: row slice 2:4 is outside the tensor, which has 2 tile(s) along it` | 15 | 917 |
+| center | 2 | failed, `Tensor shape (32, 32) does not match Block shape (1, 8)` (shape mismatch) | 20 | 871 |
+| center | 3 | passed in the simulator | 13 | 532 |
+| center | 4 | interrupted by the stop, not counted | | |
+| row_sum | 1 | failed, numeric (PCC 0.365 on seed 0, bar 0.999) | 16 | 2124 |
+| row_sum | 2 | interrupted by the stop, not counted | | |
+
+This is 3 finished attempts on `center` and 1 on `row_sum`: too few to say anything about a rate. The earlier pilot is above. Neither
+is mixed into the table of the new coder.
+
+## New coder: what changed and the plan (written 2026-10-28 before the first attempt on the new coder)
+
+- Coder change: from `raahemnabeel/qwen3-coder-next-blackhole` to `raahemnabeel/qwen3-coder-next` (fused decode), profile `p300` on one
+  board (chips 0 and 1) under a new gozer lease, port 8011, started with `tt-model serve --profile p300 --port 8011 --device-id 0,1
+  --local-only --detach`. The old container was stopped and its lease released first. Decode speed is recorded by the probe before
+  each attempt; the coder's speed with the first measurement is in the results.
+- Code: the branch head after merging PR 185 (main at that time), exported for the run.
+- Unchanged: the ladder, the ops, the bars, the settings of the first pre-registration (temperature 0.7, `--phase sim --library none
+  --no-agent-hw`, 40 turns, seed base 2026110100 for the batch and 2026110000 for the pilot), and the budget rule.
+- Re-pilot: faster decoding changes the turns that fit inside the wall budget, so each rung of the plan is piloted once on the new
+  coder (seed base 2026110000, one attempt per rung, 1800 s), and the budgets of the rule are recomputed from those walls.
+- Batch: process A runs `center`; process B runs the rungs below it nearest first (row_sum, rsqrt, add_row, scale_shift, mul, add) for as
+  many as its projection allows (5.5 hours at the pilot walls); the same stop rules as above. Which rungs B takes is written in the
+  next section before the first batch attempt.
+- Rung 8 (`rmsnorm`), added by the operator: a third process against the same coder, `--ladder --rungs rmsnorm --attempts 10
+  --temperature 0.7 --seed 2026110200 --phase sim --library none --no-agent-hw`, wall budget 1800 s. `--library none` because the
+  default would put the verified library `rmsnorm` in `reference/`, and the coder could pass by copying it. It has no pilot. Its
+  result is reported apart from the ladder table. Three clients at once slow each other; each attempt's decode speed is recorded.
+  If none of the 10 pass and the failures repeat one class, the operator authorized helper calls to Telegraph for this problem: first a
+  line in the Telegraph decisions file (trigger, what was tried locally at least twice, why it is worth it), the failing kernel and
+  the simulator error sent only where the policy allows, Haiku before Sonnet, at most 6 calls, and the report says whether the reply
+  changed anything.
