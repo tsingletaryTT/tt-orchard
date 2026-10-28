@@ -1,3 +1,4 @@
 target = "0.9.51"
 summary = "Telegraph screenshot script requires an output directory (issue 131); issues 121, 122 and 128 closed as fixed by PR 127"
 kind = "fix"
+pr = 188
