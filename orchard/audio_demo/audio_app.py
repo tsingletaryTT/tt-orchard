@@ -46,6 +46,15 @@ def fitting_examples(lim: dict) -> list:
     return [e for e in ac.EXAMPLES if lim["min_seconds"] <= e[1] <= lim["max_seconds"]]
 
 
+def refresh_controls(client: ac.AudioClient):
+    """What the page's load event sets: the status line, and the length control and the examples taken from the server's current limits. A page that was
+    built while the server was down starts from fallback limits; this is what brings it in line when it is opened again."""
+    lim = limits_from(client)
+    start = min(max(10, lim["min_seconds"]), lim["max_seconds"])
+    return (ac.server_status(client), {"minimum": lim["min_seconds"], "maximum": lim["max_seconds"], "value": start, "__type__": "update"},
+            {"samples": [list(e) for e in fitting_examples(lim)], "__type__": "update"})
+
+
 def build_ui(client: ac.AudioClient, poll_s: float = 1.0) -> gr.Blocks:
     lim = limits_from(client)
     # Gradio keeps its own copy of each served clip; delete_cache removes copies older than a day, checked hourly
@@ -70,8 +79,10 @@ def build_ui(client: ac.AudioClient, poll_s: float = 1.0) -> gr.Blocks:
                 status = gr.Markdown()
                 details = gr.Markdown()
         examples = fitting_examples(lim)
-        if examples:                                      # an example the server would refuse is not offered; with none left there is no component
-            gr.Examples(examples=[list(e) for e in examples], inputs=[prompt, seconds, seed], label="Examples")
+        # the component is always made so the load event can fill it; an example the server would refuse is not offered
+        gallery = gr.Examples(examples=[list(e) for e in examples] or [list(ac.EXAMPLES[0])], inputs=[prompt, seconds, seed], label="Examples")
+        if not examples:
+            gallery.dataset.samples = []
 
         def roll():
             return ac.random_seed()
@@ -99,7 +110,7 @@ def build_ui(client: ac.AudioClient, poll_s: float = 1.0) -> gr.Blocks:
 
         dice.click(roll, None, seed, api_name="random_seed")
         go.click(generate, [prompt, seconds, steps, cfg, seed], [audio, status, details, status_line], api_name="generate", concurrency_limit=1)
-        demo.load(lambda: ac.server_status(client), None, status_line)
+        demo.load(lambda: refresh_controls(client), None, [status_line, seconds, gallery.dataset])
     return demo
 
 

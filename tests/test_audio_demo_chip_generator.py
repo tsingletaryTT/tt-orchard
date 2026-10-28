@@ -6,6 +6,7 @@ import json
 import os
 import struct
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -77,7 +78,8 @@ def test_the_child_gets_the_request_and_the_library_on_its_path(gen):
     clip = g.generate(REQ, stages.append)
     seen = json.loads((tmp / "args.json").read_text())
     argv = seen["argv"]
-    for pair in (["--model", "small-music"], ["--prompt", REQ.prompt], ["--duration", "10.0"], ["--steps", "8"], ["--cfg-scale", "1.0"], ["--seed", "42"]):
+    assert f"--prompt={REQ.prompt}" in argv                    # one token, so a prompt that starts with a dash is not read as an option
+    for pair in (["--model", "small-music"], ["--duration", "10.0"], ["--steps", "8"], ["--cfg-scale", "1.0"], ["--seed", "42"]):
         i = argv.index(pair[0])
         assert argv[i + 1] == pair[1]
     assert "--no-layers" in argv
@@ -212,3 +214,25 @@ def test_close_removes_a_work_directory_the_generator_made(tmp_path):
     g2 = srv.SubprocessChipGenerator(sys.executable, "s", "d", work_dir=str(explicit))
     g2.close()
     assert explicit.is_dir()                              # a directory the caller named is the caller's
+
+
+@pytest.mark.parametrize("prompt", ["--help", "-ambient pads", "--steps 99"])
+def test_a_prompt_that_starts_with_a_dash_reaches_the_child_as_its_prompt(gen, prompt):
+    g, tmp = gen
+    g.generate(srv.JobRequest(prompt, 10, 8, 1.0, 1), lambda s: None)       # the stand-in's argparse fails on a prompt it reads as an option
+    seen = json.loads((tmp / "args.json").read_text())["argv"]
+    assert f"--prompt={prompt}" in seen and "8" == seen[seen.index("--steps") + 1]
+
+
+def test_the_model_name_follows_the_model_chosen(tmp_path):
+    g = srv.SubprocessChipGenerator("p", "s", "d", model="small-music-base", work_dir=str(tmp_path))
+    assert "small-music-base" in g.model_name and "Blackhole" in g.model_name
+    assert "small-music-base" not in srv.SubprocessChipGenerator("p", "s", "d", work_dir=str(tmp_path)).model_name
+
+
+@pytest.mark.parametrize("bad", [0, -5, 121, 240])
+def test_a_length_limit_outside_what_the_model_and_client_accept_is_refused_before_anything_is_made(bad):
+    before = set(Path(tempfile.gettempdir()).glob("audio-demo-*"))
+    with pytest.raises(ValueError, match="max_seconds"):
+        srv.SubprocessChipGenerator("p", "s", "d", max_seconds=bad)
+    assert set(Path(tempfile.gettempdir()).glob("audio-demo-*")) == before          # no work directory was left behind

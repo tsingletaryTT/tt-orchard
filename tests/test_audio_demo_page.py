@@ -106,3 +106,23 @@ def test_the_page_fits_its_controls_and_examples_to_a_server_with_a_short_limit(
         assert app.fitting_examples({"min_seconds": 100, "max_seconds": 120}) == []        # none fit: the page omits the examples
     finally:
         server.close()
+
+
+def test_a_page_opened_before_the_server_was_up_takes_the_servers_limits_when_it_reloads():
+    """The page is built while the server is down (fallback limits); when it reloads against the server it takes the length range and examples from health."""
+    class Short(Scripted):
+        max_seconds = 5
+    server = Live(Short())
+    try:
+        server.wait_ready()
+        client = cl.AudioClient(server.base, timeout=5)
+        down = app.build_ui(cl.AudioClient("http://127.0.0.1:1", timeout=1))
+        down_length = next(b for b in down.blocks.values() if getattr(b, "label", None) == "Length (seconds)")
+        assert down_length.maximum == 120                       # the fallback
+        refreshed = app.refresh_controls(client)
+        status, length_update, examples_update = refreshed
+        assert "Server ready" in status
+        assert length_update["maximum"] == 5 and length_update["value"] <= 5
+        assert all(row[1] <= 5 for row in examples_update["samples"])
+    finally:
+        server.close()

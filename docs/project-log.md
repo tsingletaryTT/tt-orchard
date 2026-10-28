@@ -2909,3 +2909,9 @@ Prompt (operator): "make a similar gradio app to the one we use for minimax musi
 - The default length is 10 s or the nearest length the generator accepts, in validation and in health. The page starts at a length the server accepts and offers only the examples whose length it accepts (none: no examples component).
 - The client keeps the status code of an error reply whose body is cut short (a 429 stays busy). Pruning of saved clips touches only files named like this page's clips, so a directory the caller passed in keeps its other files.
 - Tests first; 11 more mutations, all red. Class sweep: every place a number is read (server fields, client check, page conversion) and every place the page or server reads a limit (slider, start value, examples, default, health).
+
+## 2026-10-28 (UTC): third review of PR 167 (head 3200ff6), no open issue; four earlier-missed items fixed
+- A prompt that starts with a dash is passed as `--prompt=<text>`, so the child's argument parser does not read it as an option.
+- The model name in health follows `--model`. `--max-seconds` is checked against 1 to 120 before a work directory is made, and the command line exits 2 with the reason.
+- A page built while the server was down reads the server's limits on each load: the length range, the start value and the examples are refreshed from health.
+- Tests first; 6 more mutations, all red.

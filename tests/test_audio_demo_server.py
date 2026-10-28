@@ -395,3 +395,8 @@ def test_fake_generator_makes_a_playable_clip_and_says_it_is_fake():
         assert abs(w.getnframes() / w.getframerate() - 3.0) < 0.01
     assert clip.audio_format == "wav" and abs(clip.audio_s - 3.0) < 0.01
     assert "fake" in g.model_name and g.device_name == "no chip"
+
+
+def test_the_command_line_refuses_a_length_limit_the_model_does_not_have(capsys):
+    assert srv.main(["--generator", "chip", "--max-seconds", "240"]) == 2
+    assert "max_seconds" in capsys.readouterr().err

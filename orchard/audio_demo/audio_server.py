@@ -181,11 +181,13 @@ class SubprocessChipGenerator(Generator):
     keeps them for debugging). `close` stops a child that is still running and removes a work directory this object made. The child is also stopped
     if anything goes wrong while waiting for it.
     """
-    model_name = "stable-audio-3 small-music, diffusion transformer on one Blackhole chip"
     device_name = "one Blackhole chip"
 
     def __init__(self, chip_python: str, script: str, src_dir: str, model: str = "small-music", work_dir: Optional[str] = None,
                  timeout_s: float = 900.0, max_seconds: int = MAX_SECONDS, keep_runs: bool = False):
+        if isinstance(max_seconds, bool) or not isinstance(max_seconds, int) or not MIN_SECONDS <= max_seconds <= MAX_SECONDS:
+            raise ValueError(f"max_seconds must be a whole number from {MIN_SECONDS} to {MAX_SECONDS} (the model's own limit), got {max_seconds!r}")
+        self.model_name = f"stable-audio-3 {model}, diffusion transformer on one Blackhole chip"
         self.chip_python, self.script, self.src_dir, self.model = chip_python, script, src_dir, model
         self.own_work = work_dir is None
         self.work = Path(work_dir) if work_dir else Path(tempfile.mkdtemp(prefix="audio-demo-"))
@@ -207,7 +209,7 @@ class SubprocessChipGenerator(Generator):
 
     def command(self, req: JobRequest, run_dir: Path) -> list[str]:
         # --no-layers: the per-layer read backs are for the harness's agreement check and cost time
-        return [self.chip_python, self.script, "--model", self.model, "--out", str(run_dir), "--prompt", req.prompt,
+        return [self.chip_python, self.script, "--model", self.model, "--out", str(run_dir), f"--prompt={req.prompt}",      # one token: a prompt that starts with a dash is not read as an option
                 "--duration", repr(float(req.seconds)), "--steps", str(req.steps), "--cfg-scale", repr(float(req.cfg_scale)),
                 "--seed", str(req.seed), "--no-layers"]
 
@@ -594,7 +596,12 @@ def build_generator(args) -> Generator:
 
 def main(argv=None) -> int:
     args = parse_args(argv)
-    js = JobServer(build_generator(args), max_waiting=args.max_waiting)
+    try:
+        generator = build_generator(args)
+    except ValueError as e:
+        print(f"audio_server: {e}", file=sys.stderr)
+        return 2
+    js = JobServer(generator, max_waiting=args.max_waiting)
     http = make_http_server(js, args.host, args.port)
     threading.Thread(target=http.serve_forever, daemon=True).start()
     js.start()
