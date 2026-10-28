@@ -21,7 +21,7 @@ on it, nothing recorded the specification version of each reference file in the 
 
 ## What changed
 
-- `orchard/ttlang_pin.py` is the one record: the tt-lang commit, the simulator's source commit and version, the diagnostics
+- `orchard/ttlang_pin.py` holds the single record: the tt-lang commit, the simulator's source commit and version, the diagnostics
   patch hash, and the tt-metal ref for the hardware build. The ref is `None` ("to be pinned with issue 95"), because no tt-lang
   commit is known to build on a tt-metal newer than the host's v0.80.0. `defaults.TTLANG_*` are aliases of it. The module holds
   constants and reads no file, so it needs no hostile-input reader. The specification version is not stored: it is read from
@@ -47,7 +47,7 @@ Guards, each removed once and seen red (tests in `tests/test_ttlang_pin.py` and 
 
 | Removed | Tests that went red |
 | --- | --- |
-| the version comparison that chooses a generated guide | 7 (a generated guide, the report, the probe's report, the one-line command) |
+| the version comparison that chooses a generated guide | 7 (a generated guide, the report, the probe report, the command) |
 | the probe's refusal on a blocking row | 2 (checkout off the pin, simulator off the pin) |
 | the checkout-versus-pin comparison | 3 |
 | the reference-version comparison | 1 |
