@@ -2312,7 +2312,9 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
                       "no server: start the coder with `tt-orchard bringup`, or pass --endpoint and --model for a "
                       "server that runs")
 
-    probe_dir = Path(getattr(args, "out", None) or "kernel-probe")
+    # Absolute, because the check runs with its own directory as the working directory: a relative path on its command
+    # line would point into that directory, and the check would write no result.
+    probe_dir = Path(os.path.abspath(getattr(args, "out", None) or "kernel-probe"))
     try:
         lock = acquire_lock(probe_dir)
     except _Refused as exc:

@@ -1472,8 +1472,27 @@ tt-orchard kernel-probe --op rmsnorm --attempts 5 --phase hw      # coder from t
 
 The kernel probe measures whether the local coder can write a working tt-lang kernel for one op. Each attempt is a
 fresh conversation in `<out>/<op>/attempt-<n>/`. The agent writes `kernel.py` and may run the kernel check as often as
-it likes. The ops are `add` (a calibration op whose working kernel is upstream's example), `silu_mul`, `rmsnorm` and
-`linear_scan`.
+it likes. The ops are `add` (a calibration op whose working kernel is upstream's example), `silu_mul`, `rmsnorm`,
+`linear_scan`, `center`, `softmax`, `tile_scan` and the ladder ops `mul`, `scale_shift`, `add_row`, `rsqrt` and `row_sum`.
+
+The capability ladder (issue 175) asks for the ops from easy to hard to find where the coder's simulator passes stop:
+
+```bash
+tt-orchard kernel-probe --ladder --attempts 10 --temperature 0.7 --seed 2026110100 --phase sim --library none --no-agent-hw
+tt-orchard kernel-probe --ladder --report-only --out kernel-probe     # rewrite ladder-report.md from the rung directories
+```
+
+The rungs are `add`, `mul`, `scale_shift`, `add_row`, `rsqrt`, `row_sum`, `center`, `rmsnorm` and `linear_scan`
+(`--rungs a,b` runs some of them). Each rung is an ordinary probe run in `<out>/<op>/` with the same sampling rules (attempt k
+sends the same seed in every rung). After the last rung, `<out>/ladder-report.md` and `.json` hold one row per rung: attempts,
+simulator passes, counts of failure classes (`deadlock`, `dataflow_step`, `shape_mismatch`, `numeric`, `tt_lang_error`,
+`import_error`, `forbidden_code`, `no_kernel`, `wall_clock`, `other`), the median wall time of a pass, the wall budget and the
+seeds, with the settings above the table and the first rung where passes fall to zero. `--wall-s` sets the per-attempt wall
+budget (default 1800 s). The rule for sizing a rung's budget, so that an easy rung does not use 1800 s per attempt, is
+`size_wall_budget` in `orchard/kernelladder.py`: 4 times the slowest passing pilot attempt, at least 300 s and at most 1800 s;
+`--rung-wall op=S,...` sets it per rung. `--max-hours H` with `--rung-expect-s op=S,...` stops the ladder after a rung when the
+elapsed time plus the projection for the rungs left is above H hours. A new experiment names a rung and a pass count from this
+table in its pre-registration.
 
 - It starts no model server. The coder must already answer at its endpoint; starting it is `tt-orchard bringup`'s
   job. For a flag you leave out it uses the tier stage 2 runs on, from the tier config that `bringup.toml`

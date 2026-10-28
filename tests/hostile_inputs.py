@@ -921,6 +921,7 @@ UNREGISTERED_MODULES = (
     'hardware_check.py',
     'hwtests.py',
     'hwtool.py',
+    'kernelladder.py',
     'lab.py',
     'labclient.py',
     'measure_serving.py',
