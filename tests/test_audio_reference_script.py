@@ -319,13 +319,6 @@ def test_resolve_attr_follows_numeric_parts_as_indexes():
     assert mr.resolve_attr(Box(), ("items", "1")) == 20
 
 
-def test_sha256_file(tmp_path):
-    import hashlib
-    p = tmp_path / "f"
-    p.write_bytes(b"abc")
-    assert mr.sha256_file(p) == hashlib.sha256(b"abc").hexdigest()
-
-
 # ---- review of PR 123: cleanup when conditioning fails, the sentinel seed, the snapshot revision ---------
 
 class RaisingConditioner:
@@ -507,3 +500,196 @@ def test_expect_src_given_through_a_link_is_compared_by_where_it_leads(tmp_path,
     monkeypatch.setattr(sys, "path", [str(src)] + sys.path)
     monkeypatch.delitem(sys.modules, "stable_audio_3", raising=False)
     mr.check_library_source(link)
+
+
+# ---- round five: files read through descriptors ------------------------------------------------------------------
+
+def checkout(tmp_path, head, refs=None):
+    import types
+    root = tmp_path / "stable-audio-3"
+    (root / ".git").mkdir(parents=True)
+    (root / ".git" / "HEAD").write_text(head)
+    for rel, text in (refs or {}).items():
+        p = root / ".git" / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text)
+    pkg = root / "stable_audio_3"
+    pkg.mkdir()
+    mod = types.ModuleType("stable_audio_3")
+    mod.__file__ = str(pkg / "__init__.py")
+    return root, mod
+
+
+def commit_of(monkeypatch, mod):
+    monkeypatch.setitem(sys.modules, "stable_audio_3", mod)
+    return mr.library_commit()["commit"]
+
+
+def test_a_symbolic_head_is_followed_to_a_loose_ref_inside_the_git_directory(tmp_path, monkeypatch):
+    root, mod = checkout(tmp_path, "ref: refs/heads/main\n", {"refs/heads/main": "a" * 40 + "\n"})
+    assert commit_of(monkeypatch, mod) == "a" * 40
+
+
+def test_a_detached_head_is_its_commit(tmp_path, monkeypatch):
+    root, mod = checkout(tmp_path, "b" * 40 + "\n")
+    assert commit_of(monkeypatch, mod) == "b" * 40
+
+
+@pytest.mark.parametrize("head", ["ref: ../../etc/passwd\n", "ref: refs/../../x\n", "ref: /etc/passwd\n", "ref: refs/heads/../../x\n", "ref: refs/heads/a b\n",
+                                  "ref: heads/main\n", "zzzz\n", "", "ref: refs/heads/\n", "ref: refs//heads/x\n", "ref: refs/heads/main extra\n", "A" * 40 + "\n"])
+def test_a_head_that_is_not_a_commit_or_a_plain_ref_name_gives_unknown(tmp_path, monkeypatch, head):
+    root, mod = checkout(tmp_path, head, {"refs/heads/main": "a" * 40 + "\n"})
+    outside = tmp_path / "x"
+    outside.write_text("c" * 40)
+    assert commit_of(monkeypatch, mod) == "unknown"
+
+
+def test_a_ref_file_that_is_not_a_commit_gives_unknown(tmp_path, monkeypatch):
+    root, mod = checkout(tmp_path, "ref: refs/heads/main\n", {"refs/heads/main": "not a commit\n"})
+    assert commit_of(monkeypatch, mod) == "unknown"
+
+
+def test_a_missing_ref_file_gives_unknown(tmp_path, monkeypatch):
+    root, mod = checkout(tmp_path, "ref: refs/heads/main\n")
+    assert commit_of(monkeypatch, mod) == "unknown"
+
+
+def test_a_git_directory_that_is_a_link_is_not_read(tmp_path, monkeypatch):
+    root, mod = checkout(tmp_path, "b" * 40 + "\n")
+    real = tmp_path / "real-git"
+    (root / ".git").rename(real)
+    (root / ".git").symlink_to(real)
+    assert commit_of(monkeypatch, mod) == "unknown"
+
+
+def test_a_head_file_or_ref_file_that_is_a_link_is_not_read(tmp_path, monkeypatch):
+    root, mod = checkout(tmp_path, "ref: refs/heads/main\n", {"refs/heads/main": "a" * 40 + "\n"})
+    other = tmp_path / "other"
+    other.write_text("d" * 40 + "\n")
+    ref = root / ".git" / "refs" / "heads" / "main"
+    ref.unlink()
+    ref.symlink_to(other)
+    assert commit_of(monkeypatch, mod) == "unknown"
+    head = root / ".git" / "HEAD"
+    head.unlink()
+    head.symlink_to(other)
+    assert commit_of(monkeypatch, mod) == "unknown"
+
+
+def test_a_ref_directory_that_is_a_link_is_not_followed(tmp_path, monkeypatch):
+    root, mod = checkout(tmp_path, "ref: refs/heads/main\n", {"refs/heads/main": "a" * 40 + "\n"})
+    heads = root / ".git" / "refs" / "heads"
+    moved = tmp_path / "moved-heads"
+    heads.rename(moved)
+    heads.symlink_to(moved)
+    assert commit_of(monkeypatch, mod) == "unknown"
+
+
+def test_an_oversized_head_gives_unknown(tmp_path, monkeypatch):
+    root, mod = checkout(tmp_path, "ref: refs/heads/" + "a" * 5000 + "\n")
+    assert commit_of(monkeypatch, mod) == "unknown"
+
+
+def test_the_library_commit_comes_with_the_name_and_a_path_hash(tmp_path, monkeypatch):
+    root, mod = checkout(tmp_path, "b" * 40 + "\n")
+    monkeypatch.setitem(sys.modules, "stable_audio_3", mod)
+    info = mr.library_commit()
+    assert info["name"] == "stable-audio-3" and len(info["path_hash"]) == 12
+
+
+def test_file_facts_reads_the_size_and_the_hash_from_one_open_file(tmp_path, monkeypatch):
+    import hashlib
+    f = tmp_path / "f.bin"
+    f.write_bytes(b"abcdef")
+    real_stat = Path.stat
+
+    def guard(self, *a, **k):
+        if self.name == "f.bin":
+            raise AssertionError("f.bin was looked at by name")
+        return real_stat(self, *a, **k)
+    monkeypatch.setattr(Path, "stat", guard)
+    assert mr.file_facts(f) == {"sha256": hashlib.sha256(b"abcdef").hexdigest(), "bytes": 6}
+    assert mr.file_facts(f, hash_it=False) == {"sha256": None, "bytes": 6}
+
+
+def test_file_facts_follows_a_cache_link_but_refuses_a_directory_and_a_missing_file(tmp_path):
+    blob = tmp_path / "blob"
+    blob.write_bytes(b"xyz")
+    link = tmp_path / "snap-link"
+    link.symlink_to(blob)
+    assert mr.file_facts(link)["bytes"] == 3
+    with pytest.raises(SystemExit, match="not a regular file"):
+        mr.file_facts(tmp_path)
+    with pytest.raises(SystemExit, match="cannot read"):
+        mr.file_facts(tmp_path / "missing")
+
+
+# ---- descriptor anchoring: what each guard in the commit reader stops -------------------------------------
+
+def _fds():
+    return {int(n) for n in os.listdir("/proc/self/fd")}
+
+
+def test_a_ref_name_that_climbs_out_of_refs_is_not_followed_even_when_it_would_find_a_commit(tmp_path, monkeypatch):
+    root, mod = checkout(tmp_path, "ref: refs/heads/../../commit\n", {"refs/heads/keep": "a" * 40 + "\n", "commit": "c" * 40 + "\n"})
+    assert commit_of(monkeypatch, mod) == "unknown"
+    (root / ".git" / "HEAD").write_text("ref: refs/../commit\n")
+    assert commit_of(monkeypatch, mod) == "unknown"
+    (root / ".git" / "HEAD").write_text("ref: refs/./heads/keep\n")
+    assert commit_of(monkeypatch, mod) == "unknown"
+
+
+@pytest.mark.parametrize("head,ref", [("ref: heads/main\n", "heads/main"), ("ref: refs/heads/a b\n", "refs/heads/a b"),
+                                      ("ref: refs/heads/a:b\n", "refs/heads/a:b"), ("ref: refs/heads/a~b\n", "refs/heads/a~b")])
+def test_a_ref_name_outside_the_plain_pattern_is_not_read_even_when_the_file_exists(tmp_path, monkeypatch, head, ref):
+    root, mod = checkout(tmp_path, head, {ref: "c" * 40 + "\n"})
+    assert commit_of(monkeypatch, mod) == "unknown"
+
+
+def test_a_missing_loose_ref_is_none_and_not_an_error(tmp_path):
+    from orchard import pinned_files as pf
+    (tmp_path / "refs" / "heads").mkdir(parents=True)
+    fd = pf.open_dir(tmp_path)
+    try:
+        assert mr._read_ref(fd, "refs/heads/nope") is None
+        assert mr._read_ref(fd, "refs/nodir/x") is None
+    finally:
+        os.close(fd)
+
+
+def test_reading_a_commit_closes_every_descriptor_it_opened(tmp_path, monkeypatch):
+    root, mod = checkout(tmp_path, "ref: refs/heads/feature/x\n", {"refs/heads/feature/x": "a" * 40 + "\n"})
+    monkeypatch.setitem(sys.modules, "stable_audio_3", mod)
+    before = _fds()
+    assert mr.library_commit()["commit"] == "a" * 40
+    assert _fds() <= before
+    (root / ".git" / "refs" / "heads" / "feature" / "x").unlink()
+    assert mr.library_commit()["commit"] == "unknown"
+    assert _fds() <= before
+
+
+def test_a_head_file_over_the_size_cap_is_refused_even_when_the_rest_is_blank(tmp_path, monkeypatch):
+    root, mod = checkout(tmp_path, "b" * 40 + "\n" + " " * 3000)
+    assert commit_of(monkeypatch, mod) == "unknown"
+
+
+def test_a_checkout_directory_that_is_a_link_at_the_open_is_not_read(tmp_path, monkeypatch):
+    """The path is resolved first, so a link at the open means it was swapped in between. Simulated by not resolving."""
+    root, mod = checkout(tmp_path, "b" * 40 + "\n")
+    linked = tmp_path / "linked"
+    linked.symlink_to(root)
+    mod.__file__ = str(linked / "stable_audio_3" / "__init__.py")
+    monkeypatch.setattr(mr.Path, "resolve", lambda self, *a, **k: self)
+    assert commit_of(monkeypatch, mod) == "unknown"
+
+
+def test_file_facts_refuses_a_fifo_without_waiting_for_a_writer(tmp_path):
+    import signal
+    fifo = tmp_path / "pipe"
+    os.mkfifo(fifo)
+    signal.alarm(20)                      # a regression would block in open(); the alarm ends the test run instead of hanging it
+    try:
+        with pytest.raises(SystemExit, match="not a regular file"):
+            mr.file_facts(fifo)
+    finally:
+        signal.alarm(0)

@@ -86,6 +86,7 @@ import math
 import os
 import random
 import re
+import stat
 import struct
 import sys
 from html.parser import HTMLParser
@@ -2546,27 +2547,103 @@ def audio_loads(text: str):
     return data
 
 
+AUDIO_IDENTITY: dict = {}                 # path -> (device, inode, size, mtime_ns) of the FIRST open of every file the audio branch read
+AUDIO_JSON_SHA: dict = {}                 # path -> sha256 of the bytes of the first read of each JSON file
+AUDIO_REOPENED_DIFFERENT: set = set()     # paths whose later open did not match the first one
+
+
+def audio_identity_reset() -> None:
+    AUDIO_IDENTITY.clear()
+    AUDIO_JSON_SHA.clear()
+    AUDIO_REOPENED_DIFFERENT.clear()
+
+
+def _audio_open_regular(path: Path):
+    """(file object, stat) of a regular file, opened once. Links are followed (a Hugging Face snapshot is made of links into blobs/), the path is
+    resolved a single time, and the type is checked on the open descriptor, never by name; a FIFO is not opened for reading (O_NONBLOCK), so it
+    cannot hang the script. The identity of what was opened is recorded, so audio_identity_problems can say if a file was replaced afterwards."""
+    real = os.path.realpath(path)
+    fd = os.open(real, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0))
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode):
+        os.close(fd)
+        raise OSError(f"{path.name} is not a regular file")
+    ident = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+    # The first identity is kept. A later open of the same path (the layout check opens a config and the comparison opens it again) is compared with
+    # it and never replaces it, so a file swapped between two opens cannot become the new baseline.
+    if AUDIO_IDENTITY.setdefault(str(path), ident) != ident:
+        AUDIO_REOPENED_DIFFERENT.add(str(path))
+    return os.fdopen(fd, "rb"), st
+
+
+def audio_identity_problems() -> list[str]:
+    """One message for every file read earlier that has since been replaced, resized, touched or removed: the evidence would then describe a
+    file that is no longer there."""
+    out = []
+    for name, ident in sorted(AUDIO_IDENTITY.items()):
+        if name in AUDIO_REOPENED_DIFFERENT:
+            out.append(f"{Path(name).name} changed while stage 0 was reading it (it was a different file at a later open)")
+            continue
+        try:
+            st = os.stat(os.path.realpath(name))
+        except OSError:
+            out.append(f"{Path(name).name} changed while stage 0 was reading it (it is gone)")
+            continue
+        if (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns) != ident:
+            out.append(f"{Path(name).name} changed while stage 0 was reading it (replaced, resized or touched)")
+    return out
+
+
 def _audio_json(path: Path):
-    """(object, error): a JSON file of at most AUDIO_JSON_MAX bytes. A missing, oversized, unreadable or non-object file is an error, and so is
-    one with a repeated key, a non-finite or huge number, or deep nesting (audio_loads)."""
+    """(object, error): a JSON file of at most AUDIO_JSON_MAX bytes, read through one open descriptor. A missing, oversized, unreadable, non-regular or
+    non-object file is an error, and so is one with a repeated key, a non-finite or huge number, or deep nesting (audio_loads)."""
     try:
-        if path.stat().st_size > AUDIO_JSON_MAX:
+        f, st = _audio_open_regular(path)
+        with f:
+            if st.st_size > AUDIO_JSON_MAX:
+                return None, f"{path.name} is larger than {AUDIO_JSON_MAX} bytes"
+            raw = f.read(AUDIO_JSON_MAX + 1)
+        if len(raw) > AUDIO_JSON_MAX:
             return None, f"{path.name} is larger than {AUDIO_JSON_MAX} bytes"
-        data = audio_loads(path.read_text(encoding="utf-8"))
+        digest = hashlib.sha256(raw).hexdigest()
+        if AUDIO_JSON_SHA.setdefault(str(path), digest) != digest:
+            return None, f"{path.name} changed between two reads (its content is not the same)"
+        data = audio_loads(raw.decode("utf-8"))
     except (OSError, ValueError) as exc:
         return None, f"{path.name} is not readable JSON: {exc}"
     return (data, None) if isinstance(data, dict) else (None, f"{path.name} is not a JSON object")
 
 
+def looks_like_audio(snapshot: Path) -> bool:
+    """A snapshot that claims the stable-audio-tools layout: no top-level config.json and a `model_config.json` entry (a file, a directory or a link,
+    readable or not). It is routed to the audio branch even when the config cannot be read, so such a run is recorded as audio with class unknown and
+    stops there, and is never handed to the text path (whose result carries no audio facts and so would not stop before stage 1)."""
+    if os.path.lexists(snapshot / "config.json"):
+        return False
+    return os.path.lexists(snapshot / AUDIO_CONFIG)
+
+
+def audio_layout_problem(snapshot: Path) -> str | None:
+    """Why `snapshot` is not a usable stable-audio-tools layout, or None when it is: a top-level config.json (a text model), a model_config.json that
+    cannot be read or lacks a string `model_type` or a `model` object, or no top-level safetensors file."""
+    if os.path.lexists(snapshot / "config.json"):
+        return "it has a top-level config.json, so it is a text model"
+    cfg, err = _audio_json(snapshot / AUDIO_CONFIG)
+    if err:
+        return err
+    if not isinstance(cfg.get("model_type"), str) or not isinstance(cfg.get("model"), dict):
+        return f"{AUDIO_CONFIG} has no string model_type and model object"
+    try:
+        has_weights = any(p.name.endswith(".safetensors") for p in snapshot.iterdir() if p.is_file())
+    except OSError as exc:
+        return f"the directory cannot be listed: {exc}"
+    return None if has_weights else "it has no top-level safetensors file"
+
+
 def detect_audio(snapshot: Path) -> bool:
     """True for a snapshot in the stable-audio-tools layout: a readable `model_config.json` with a string `model_type` and a `model`
     object, no top-level config.json, and at least one top-level safetensors file."""
-    if (snapshot / "config.json").exists():
-        return False
-    cfg, err = _audio_json(snapshot / AUDIO_CONFIG)
-    if err or not isinstance(cfg.get("model_type"), str) or not isinstance(cfg.get("model"), dict):
-        return False
-    return any(p.is_file() and p.name.endswith(".safetensors") for p in snapshot.iterdir())
+    return audio_layout_problem(snapshot) is None
 
 
 ENTRY_KEYS = {"dtype", "shape", "data_offsets"}
@@ -2579,7 +2656,8 @@ def audio_header(path: Path) -> dict:
     not two whole numbers with 0 <= start <= end <= the data section. For a dtype this script knows, the range must be exactly the shape product
     times the element size. The non-empty ranges must tile the data section: no overlap (two tensors cannot share bytes), no gap (bytes no
     tensor claims could hide data) and no bytes left over after the last one."""
-    with open(path, "rb") as f:
+    f, st = _audio_open_regular(path)
+    with f:
         raw = f.read(8)
         if len(raw) != 8:
             raise ValueError("shorter than 8 bytes")
@@ -2592,7 +2670,7 @@ def audio_header(path: Path) -> dict:
     header = audio_loads(blob.decode("utf-8"))
     if not isinstance(header, dict):
         raise ValueError("header is not a JSON object")
-    data_size = path.stat().st_size - 8 - length
+    data_size = st.st_size - 8 - length          # the size of the file that was opened, not a second look at the name
     meta = header.get("__metadata__", {})
     if not isinstance(meta, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in meta.items()):
         raise ValueError("__metadata__ is not an object of text values")
@@ -2988,6 +3066,85 @@ def _audio_difference_reason(d: dict) -> str:
     return f"model_config.json {d['key']} differs: {fmt(d['model'])} vs {fmt(d['base'])} ({d['category']}, decided by {d['decided_by']})"
 
 
+def _audio_tensor_prefix(directory: Path, info: dict, elements: int):
+    """The first `elements` values of one tensor, read through the identity-recording open: the shard is opened once, its header is read again from
+    that descriptor (for the byte range) and the values come from the same descriptor. Raises on any short read, a missing entry or an unreadable
+    file; the caller turns that into a problem."""
+    f, st = _audio_open_regular(directory / info["shard"])
+    with f:
+        raw = f.read(8)
+        if len(raw) != 8:
+            raise ValueError("shorter than 8 bytes")
+        length = struct.unpack("<Q", raw)[0]
+        if length > AUDIO_HEADER_MAX:
+            raise ValueError(f"header length {length} is larger than {AUDIO_HEADER_MAX}")
+        blob = f.read(length)
+        if len(blob) != length:
+            raise ValueError("the header is cut short")
+        entry = audio_loads(blob.decode("utf-8")).get(info["name"])
+        if not isinstance(entry, dict) or not isinstance(entry.get("data_offsets"), list) or len(entry["data_offsets"]) != 2:
+            raise ValueError(f"tensor {info['name']} has no byte range")
+        start, end = entry["data_offsets"]
+        size = ITEMSIZE.get(entry.get("dtype"))
+        if size is None:
+            return None
+        want = min(elements, max((end - start) // size, 0)) * size
+        f.seek(8 + length + start)
+        buf = f.read(want)
+        if len(buf) != want:
+            raise ValueError(f"tensor {info['name']} is cut short ({len(buf)} of {want} bytes)")
+        return decode_values(buf, entry["dtype"])
+
+
+def audio_value_diffs(model_dir: Path, base_dir: Path, mt: dict, bt: dict):
+    """(values, problems). The value sample for the audio branch: the first SAMPLE_ELEMENTS values of up to SAMPLE_TENSORS paired tensors, every
+    file opened through `_audio_open_regular` so the identity check sees it. A read that fails is a problem (the class becomes unknown), never an
+    empty sample that would read as no difference."""
+    names = sorted(set(mt) & set(bt))
+    chosen = names if len(names) <= SAMPLE_TENSORS else [names[i * len(names) // SAMPLE_TENSORS] for i in range(SAMPLE_TENSORS)]
+    samples, skipped, problems = [], [], []
+    for name in chosen:
+        if mt[name]["shape"] != bt[name]["shape"]:
+            skipped.append(f"{name}: shapes differ ({mt[name]['shape']} and {bt[name]['shape']})")
+            continue
+        try:
+            a = _audio_tensor_prefix(model_dir, {**mt[name], "name": name}, SAMPLE_ELEMENTS)
+            c = _audio_tensor_prefix(base_dir, {**bt[name], "name": name}, SAMPLE_ELEMENTS)
+        except (OSError, ValueError, UnicodeError) as exc:
+            problems.append(f"value sample: {name} could not be read: {exc}")
+            continue
+        if a is None or c is None:
+            skipped.append(f"{name}: dtype {mt[name]['dtype']} / {bt[name]['dtype']} is not read")
+            continue
+        rel, cos = relation(a, c)
+        diffs = [abs(x - y) for x, y in zip(a, c)]
+        samples.append({"model_tensor": name, "base_tensor": name, "elements": len(a), "relation": rel,
+                        "cosine": None if cos is None else round(cos, 6),
+                        "mean_abs_diff": sum(diffs) / len(diffs) if diffs else 0.0, "max_abs_diff": max(diffs, default=0.0),
+                        "mean_abs_base": sum(abs(y) for y in c) / len(c) if c else 0.0})
+    summary = {k: sum(1 for x in samples if x["relation"] == k) for k in ("identical", "near", "changed", "unrelated")}
+    return {"samples": samples, "summary": summary, "skipped": skipped,
+            "note": (f"the first {SAMPLE_ELEMENTS} values of up to {SAMPLE_TENSORS} paired tensors; a fine-tune is 'near' "
+                     f"(cosine at least {NEAR_COSINE}), identical weights are 'identical'")}, problems
+
+
+_EMPTY_SIDE = {"path": "", "num_files": 0, "weight_shards": [], "num_weight_shards": 0, "weight_shard_total_bytes": 0,
+               "weight_shard_total_gib": 0.0, "all_files": {}}
+_EMPTY_FILES = {"model": _EMPTY_SIDE, "base": _EMPTY_SIDE, "files_only_in_model": [], "files_only_in_base": [], "shards_only_in_model": [],
+                "shards_only_in_base": [], "common_files": [], "common_files_with_different_size": {}}
+_EMPTY_LICENSE = {"readme_license_field": None, "readme_license_name": None, "license_file": None, "license_file_head": None,
+                  "license_from_file_text": None, "license": None, "source": None}
+
+
+def _audio_guarded(label: str, problems: list, fn, default):
+    """fn(), or `default` plus a problem when the read fails. A read that fails must not crash the stage and must not look like an empty result."""
+    try:
+        return fn()
+    except (OSError, ValueError, UnicodeError) as exc:
+        problems.append(f"{label} could not be read: {exc}")
+        return default
+
+
 def audio_main(cfg: dict) -> int:
     """The stage 0 comparison for a model in the stable-audio-tools layout (see the block comment above)."""
     run_dir = os.path.realpath(cfg["run_dir"])
@@ -3007,19 +3164,25 @@ def audio_main(cfg: dict) -> int:
         problems.append("triage_config.json audio_strict must be true or false")
         strict_flag = False
     overrides, override_problems = load_audio_overrides(HERE_DIR / AUDIO_OVERRIDES)
-    base_is_audio = detect_audio(base_dir)
-    if not base_is_audio:
-        problems.append("the nearest model is not in the stable-audio-tools layout (it needs a readable model_config.json, no config.json "
-                        "and a top-level safetensors file), so the two cannot be compared")
-    # detect_audio read both configs successfully, so these reads cannot fail here
-    mcfg = _audio_json(model_dir / AUDIO_CONFIG)[0]
-    bcfg = _audio_json(base_dir / AUDIO_CONFIG)[0] if base_is_audio else None
-    mt, merrs = audio_tensors(model_dir)
+    audio_identity_reset()
+    model_problem = audio_layout_problem(model_dir)
+    if model_problem:
+        problems.append(f"the new model is not a usable stable-audio-tools layout: {model_problem}")
+    base_problem = audio_layout_problem(base_dir)
+    base_is_audio = base_problem is None
+    if base_problem:
+        problems.append(f"the nearest model is not in the stable-audio-tools layout, so the two cannot be compared: {base_problem}")
+    mcfg, merr = (None, None) if model_problem else _audio_json(model_dir / AUDIO_CONFIG)
+    bcfg, berr = _audio_json(base_dir / AUDIO_CONFIG) if base_is_audio else (None, None)
+    # The layout check read both configs; a second read that fails (the file changed in between) is a problem, and the configs are not compared.
+    problems += [f"new model {merr}"] if merr else []
+    problems += [f"nearest model {berr}"] if berr else []
+    mt, merrs = ({}, []) if model_problem else audio_tensors(model_dir)
     bt, berrs = audio_tensors(base_dir) if base_is_audio else ({}, [])
     problems += [f"new model {e}" for e in merrs] + [f"nearest model {e}" for e in berrs]
     # A header with no tensor entry reads without an error. Two empty maps would otherwise look equal, and one empty map would look like a
     # full port; neither says anything about the model, so the class is unknown.
-    if not merrs and not mt:
+    if not model_problem and not merrs and not mt:
         problems.append("the new model holds no tensors: its safetensors header is empty")
     if base_is_audio and not berrs and not bt:
         problems.append("the nearest model holds no tensors: its safetensors header is empty")
@@ -3044,6 +3207,20 @@ def audio_main(cfg: dict) -> int:
         for row in encoders:
             problems += row["problems"]
             hard += row["differences"]
+    f = _audio_guarded("the file listing", problems, lambda: compare_files(model_dir, base_dir), _EMPTY_FILES)
+    write_json("files-compare.json", f)
+    ml = _audio_guarded("the new model's card or license file", problems, lambda: license_side(model_dir), _EMPTY_LICENSE)
+    bl = _audio_guarded("the nearest model's card or license file", problems, lambda: license_side(base_dir), _EMPTY_LICENSE)
+    code = _audio_guarded("a code file of the new model", problems, lambda: code_files(model_dir), [])
+    if problems:
+        values = {"samples": [], "summary": {}, "skipped": [], "note": "not run: the headers could not be read"}
+    else:
+        values, sample_problems = audio_value_diffs(model_dir, base_dir, mt, bt)
+        problems += sample_problems
+    write_json("value-compare.json", values)
+    # The value sample opens the weight files by name again. Checking every file's identity after it, a file replaced at any point since it was first
+    # read makes the evidence describe something that is no longer there, and the class unknown.
+    problems += audio_identity_problems()
     decision = decide_audio(diffs, hard, problems + override_problems, strict_flag, overrides)
     cls, path = decision["class"], decision["path"]
     if cls == "weights-only":
@@ -3052,11 +3229,6 @@ def audio_main(cfg: dict) -> int:
         listed = [d for d in diffs if strict_flag or d["category"] != "serving"]
         all_reasons = (decision["problems"] + hard + [_audio_difference_reason(d) for d in listed]
                        + [f"the path was overridden to full-port: {o['source']}" for o in decision["overrides"] if o["kind"] == "path" and o["path"] == "full-port"])
-    f = compare_files(model_dir, base_dir)
-    write_json("files-compare.json", f)
-    values = ({"samples": [], "summary": {}, "skipped": [], "note": "not run: the headers could not be read"} if problems
-              else sample_value_diffs(model_dir, base_dir, {k: k for k in sorted(set(mt) & set(bt))}))
-    write_json("value-compare.json", values)
     components = audio_components(mt)
     audio = {"model_type": mcfg.get("model_type") if mcfg else None, "sample_rate": _int_or_none(mcfg, "sample_rate"),
              "audio_channels": _int_or_none(mcfg, "audio_channels"), "sample_size": _int_or_none(mcfg, "sample_size"),
@@ -3069,10 +3241,8 @@ def audio_main(cfg: dict) -> int:
              "decision": decision, "text_encoders": encoders, "files_only_in_base": f["files_only_in_base"] + f["shards_only_in_base"],
              "files_only_in_model": f["files_only_in_model"] + f["shards_only_in_model"]}
     write_json("audio-compare.json", {**audio, "problems": decision["problems"], "reasons": all_reasons})
-    ml, bl = license_side(model_dir), license_side(base_dir)
     say(f"wrote evidence/audio-compare.json, files-compare.json and value-compare.json ({len(mt)} and {len(bt)} tensors; "
         f"{len(components)} components)")
-    code = code_files(model_dir)
     comp_text = ", ".join(f"{c['prefix']} ({c['role'] or 'no known role'}, {c['tensors']} tensors, {c['parameters']:,} parameters)"
                           for c in components) or "none"
     cd = (config["model_differences"], config["top_level_differences"], config["pointer_differences"], config["training_differences"])
@@ -3163,7 +3333,7 @@ def main() -> int:
     cfg = load_config()
     run_dir = os.path.realpath(cfg["run_dir"])
     model_dir, base_dir = Path(cfg["model_snapshot"]), Path(cfg["nearest_snapshot"])
-    if detect_audio(model_dir):
+    if looks_like_audio(model_dir):
         return audio_main(cfg)
     model_id = with_revision(cfg["model_id"].strip(), cfg["model_snapshot"])
     nearest_id = with_revision(cfg["nearest_model_id"].strip(), cfg["nearest_snapshot"])
