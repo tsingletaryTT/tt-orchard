@@ -517,11 +517,45 @@ def _stock_check(report, stock, model_id: str = "", hub=None, local_snapshot=lam
     return None
 
 
+def _audio_runtime_note(model_id: str, local_snapshot: Callable, audio_paths) -> tuple[bool, str]:
+    """(serves, sentence) for the run's path after stage 0, answered the way the supervisor will answer it (`_select_audio_runtime`): the
+    planners must know the repository, the model's local snapshot must exist, and `audio_runtime.runtime_problems` must find nothing. When
+    the runtime serves the model, the sentence names the interpreters and the library checkout it needs and says which of them are missing
+    (`audio_runtime.environment_problems`). When it does not, the sentence is the stop after stage 0. Never raises."""
+    from orchard import audio_plan, audio_runtime
+    stop = ("The run will stop after stage 0 as blocked with audio-path-unbuilt; the run's BLOCKED.md says what unblocks it (the text for "
+            "that code is in orchard/narrate.py)")
+    if audio_plan.library_name(model_id) is None:
+        return False, stop + f" ({model_id} is not a repository the audio runtime's planners know)."
+    try:
+        snap = local_snapshot(model_id)
+    except Exception:                      # the model row already reports an unreadable cache
+        snap = None
+    if snap is None:
+        return False, ("Once its snapshot is downloaded the run goes on with the harness's audio runtime (stages 1, 2 and 8) if the runtime "
+                       "implements the model, and otherwise stops after stage 0 as blocked with audio-path-unbuilt; BLOCKED.md says what "
+                       "unblocks it. Which of the two applies is decided after its snapshot is downloaded.")
+    try:
+        problems = audio_runtime.runtime_problems(snap)
+    except Exception as exc:               # a hostile snapshot is a reason, never a crash
+        problems = [f"{type(exc).__name__}: {exc}"]
+    if problems:
+        return False, stop + f". The audio runtime does not implement this model: {'; '.join(problems[:3])}."
+    text = ("The run goes on with the harness's audio runtime (stages 1, 2 and 8): the diffusion transformer runs on one chip and the "
+            "rest on the CPU")
+    if audio_paths is None:
+        return True, text + "."
+    missing = audio_runtime.environment_problems(audio_paths)
+    text += (f". It needs the reference interpreter {audio_paths.reference_python}, the Tenstorrent interpreter {audio_paths.chip_python} "
+             f"and the library checkout {audio_paths.src_dir}")
+    return True, text + (f". Missing now: {'; '.join(missing)}." if missing else "; all three are present.")
+
+
 def _audio_base(*, model_id: str, base: str, inferred: bool, report, accept_inferred: bool, audio: str, local_snapshot: Callable,
-                base_hub_info: Callable | None) -> Check | None:
+                base_hub_info: Callable | None, audio_paths=None) -> Check | None:
     """The base row for an audio model (see orchard/audio_facts.py for what counts as audio). No installed bundle is needed: stage 0's
-    audio branch compares the two repositories' files directly, and nothing serves an audio model on a chip yet, so the run stops after
-    stage 0 (`audio-path-unbuilt`). The row is a warning that says so. The base snapshot is still needed, and the harness never uses a
+    audio branch compares the two repositories' files directly. When the harness's own audio runtime serves the model the run goes on to
+    stages 1, 2 and 8; otherwise it stops after stage 0 (`audio-path-unbuilt`). `_audio_runtime_note` says which. The base snapshot is still needed, and the harness never uses a
     token: a gated or private base counts only when a complete copy is already on disk (the rule the hub row applies to the model).
     Returns None when the base is not in the audio layout, which sends the run down the old path (a bundle is required)."""
     data = {"base": base, "snapshot": None, "bundle": None, "needs_fetch": False, "candidates": [], "report": report, "audio": True}
@@ -575,16 +609,16 @@ def _audio_base(*, model_id: str, base: str, inferred: bool, report, accept_infe
         why = f"the cached copy is incomplete (missing {', '.join(missing[:3])}), so " if missing else ""
         where = f"{why}its snapshot will be downloaded ({info.total_bytes / 1e9:.1f} GB)"
     which = f"research inferred it ({_selection_basis(report)}) and the operator accepted it" if inferred else "the model's base"
+    _, runtime_note = _audio_runtime_note(model_id, local_snapshot, audio_paths)
     return Check("base", WARN, f"base {base} ({which}). {model_id} is an audio model ({audio}). No installed bundle is needed: stage 0 compares "
-                 "the two repositories directly, and no bundle, container package or tt-metal model serves an audio model on a chip yet. The "
-                 "run will stop after stage 0 as blocked with audio-path-unbuilt; the run's BLOCKED.md says what unblocks it (the text for "
-                 f"that code is in orchard/narrate.py). The base snapshot is still read by stage 0: {where}.{gated_note}", data=data)
+                 "the two repositories directly, and no bundle, container package or tt-metal model serves an audio model on a chip. "
+                 f"{runtime_note} The base snapshot is still read by stage 0: {where}.{gated_note}", data=data)
 
 
 def check_base(*, model_id: str, hub: HubInfo | None, base_override: str | None, local_snapshot: Callable,
                installed: list, search: Callable | None, report: dict | None = None,
                accept_inferred: bool = False, stock: Callable | None = None, audio: str | None = None,
-               base_hub_info: Callable | None = None) -> Check:
+               base_hub_info: Callable | None = None, audio_paths=None) -> Check:
     """The model this run is compared with and served through. It needs an installed bundle (stages 2 and
     4 serve the new weights with it) and a snapshot on disk (stage 0 compares tensors and configs). A missing
     snapshot is downloaded by the command. A missing bundle is a block that lists what `tt model search`
@@ -608,7 +642,7 @@ def check_base(*, model_id: str, hub: HubInfo | None, base_override: str | None,
                      data={"base": None, "snapshot": None, "needs_fetch": False, "candidates": [], "report": report})
     if audio:
         found = _audio_base(model_id=model_id, base=base, inferred=inferred, report=report, accept_inferred=accept_inferred, audio=audio,
-                            local_snapshot=local_snapshot, base_hub_info=base_hub_info)
+                            local_snapshot=local_snapshot, base_hub_info=base_hub_info, audio_paths=audio_paths)
         if found is not None:
             return found
     serving = [b for b in installed if b.weights_repo == base]
@@ -840,6 +874,17 @@ def hf_home_for(cfg) -> Path:
     return Path(cfg.operator_home or operator_home()) / ".cache" / "huggingface"
 
 
+def _audio_paths_for(cfg):
+    """Where the audio runtime's interpreters and library checkout are for this run (the same call the supervisor makes). None when the
+    configuration gives no home to look in."""
+    from orchard import audio_runtime
+    from orchard.supervisor import operator_home
+    try:
+        return audio_runtime.audio_paths(cfg.operator_home or operator_home())
+    except Exception:
+        return None
+
+
 def cache_root_for(cfg) -> Path:
     return Path(cfg.cache_root) if cfg.cache_root else Path(cfg.runs_root) / "cache"
 
@@ -904,7 +949,7 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
                            accept_inferred=accept_inferred_base,
                            # the parameters directory is in this box's tt-metal tree; a lab runs its tests on another box
                            stock=None if getattr(cfg, "mode", "local") == "lab" else s.stock_params,
-                           audio=audio, base_hub_info=s.hub_info)
+                           audio=audio, base_hub_info=s.hub_info, audio_paths=_audio_paths_for(cfg))
         if failed:
             from orchard.research.types import clean
             found.detail += f" (research failed: {clean(failed)})"
