@@ -183,15 +183,23 @@ def test_a_stop_while_waiting_for_the_board_cancels_the_ticket(tmp_path):
 def test_the_cleanup_ignores_a_second_sigterm_so_the_release_is_not_cut_short(tmp_path):
     gz = FakeGozer()
     original, seen = gz.sh, []
+    known = lambda signum, frame: None                                       # a known disposition, not one an earlier test left
+    signal.signal(signal.SIGTERM, known)
+    try:
+        _ignored_during_release(tmp_path, gz, original, seen, known)
+    finally:
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+
+
+def _ignored_during_release(tmp_path, gz, original, seen, known):
 
     def sh(argv, timeout):
         if argv[1] == "release":
             seen.append(signal.getsignal(signal.SIGTERM))
         return original(argv, timeout)
     gz.sh = sh
-    before = signal.getsignal(signal.SIGTERM)
     wrap(tmp_path, gz, Cmd(0))
-    assert seen == [signal.SIG_IGN] and signal.getsignal(signal.SIGTERM) == before
+    assert seen == [signal.SIG_IGN] and signal.getsignal(signal.SIGTERM) == known       # ignored during the release, restored after
 
 
 def test_a_release_that_resets_nothing_or_is_refused_is_said_in_the_record(tmp_path):
@@ -605,3 +613,56 @@ def test_a_check_that_raises_stops_the_tool(tmp_path, fake_kenv):
 def _calm_world():
     """Each test starts with the one-shot Ctrl-C of `inner_interrupt` not yet used."""
     _ONCE["done"] = False
+
+
+# ---- the survivors of the first mutation table of round 9 -------------------------------------------------------------------------------
+
+
+def test_an_interrupt_that_finds_a_chip_held_writes_the_stop_to_the_calls_file(tmp_path, fake_kenv):
+    adir = attempt_dir(tmp_path, fake_kenv)
+    check = make_check(adir, tmp_path, inner_interrupt, gozer=fake_gozer(release="refused"))
+    with pytest.raises(KeyboardInterrupt):
+        check.call({})
+    saved = json.loads(kp.hwcheck_calls_path(adir.parent.parent, "add", 1).read_text())
+    assert saved["stopped"] and saved["calls"][0]["outcome"] == "interrupted"
+
+
+def test_the_check_after_a_call_is_given_the_pid_of_that_calls_own_wrapper():
+    got = []
+    check = hwtool.HardwareCheck(hwtool.HwPolicy(), prepare=lambda k: (None, "ab" * 32),
+                                 run=lambda k, t, w: ({"passed": True, "lease_s": 1.0, "wrapper_pid": 777}, None, ""),
+                                 check=lambda pids: got.append(set(pids)))
+    check.call({})
+    check.call({})
+    assert got == [{777}, {777}]
+
+
+def test_a_busy_call_whose_ticket_could_not_be_cancelled_says_stopped_in_its_answer(tmp_path, fake_kenv):
+    check, gz = build("busy-timeout-cancel-fails", tmp_path, fake_kenv)
+    text = check.call({})
+    assert "BUSY" in text and "STOPPED" in text and check.state == "stopped"
+
+
+def test_the_default_tag_names_the_probe_process_and_the_wrapper_gets_the_wait(tmp_path, fake_kenv):
+    adir = attempt_dir(tmp_path, fake_kenv)
+    seen = []
+
+    def run_watched(argv, **kw):
+        seen.append(list(argv))
+        return kp.Watched(0, None, False, 1.0)
+    gz = fake_gozer()
+    check = kp.make_hardware_check(adir, op="add", n=1, shared_python="/shared/python", policy=hwtool.HwPolicy(wait_s=33.0),
+                                   run_watched=run_watched, status=gz.sh)
+    check.call({})
+    argv = seen[0]
+    assert argv[argv.index("--who") + 1] == f"{kp.GOZER_WHO}:{os.getpid()}"
+    assert argv[argv.index("--wait-s") + 1] == "33.0"
+    assert argv[argv.index("--sha256") + 1] and Path(argv[argv.index("--file") + 1]).name == "kernel.py"
+    assert argv[argv.index("--result") + 1].endswith("hw-lease.json")
+
+
+def test_the_killed_wrappers_record_says_it_never_released_and_how_long_it_waited(tmp_path, fake_kenv):
+    check, _ = build("wrapper-killed", tmp_path, fake_kenv)
+    check.call({})
+    rec = check.summary()["calls"][0]
+    assert "before it released" in rec["release_error"] and rec["waited_s"] == 1.0

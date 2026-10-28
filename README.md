@@ -1542,16 +1542,18 @@ gate and the sha256 check on the copy, and runs the shipped harness through `goz
 the way the probe's own hardware phase does. The tool takes at most a short `note`; the agent supplies no command and no
 path, and the probe judges the result. The answer gives PASS or FAIL, the first error, the numbers, the seconds in all
 and the device seconds, and the calls and lease seconds left. A whole call took about 47 s when measured (the device was open for about
-0.5 s; the rest is the lease and the reset the release makes), so the simulator stays the cheap path. The probe asks for the lease with `gozer acquire --owner-pid` (its own pid), so gozer reaps the
-lease if the probe dies. When no board is free gozer queues one ticket; the probe claims that same ticket every 2 s for at most
-`--hw-wait-s` seconds, so the call keeps its place in the queue. A grant runs the harness under the lease's environment and the probe
-releases it, on every path. The probe remembers nothing about leases: it reads back from gozer what is still held for its pid. A lease
-or ticket that an earlier call (of this attempt or an earlier one) could not give back, such as a refused or overrunning release or a
-cancel that failed, blocks the next hardware call, and stops the probe after the attempt, until gozer shows it gone. When the wait runs
-out the ticket is cancelled and the agent is told to go on with the simulator. A hang
-stops the call (the lease release resets the chip) and turns the tool off for the rest of the attempt. Calls are recorded in
-each `attempt.json` under `agent_hw` and listed in the report with the chip time they cost. The lease is taken for each
-call and released after it; there is no mode that holds a board for a whole attempt. The device seconds are the harness's
+0.5 s; the rest is the lease and the reset the release makes), so the simulator stays the cheap path. The lease is held by a short-lived wrapper process (`orchard/hwtool.py run`), not by the probe. The wrapper
+asks for it with `gozer acquire --owner-pid` (its own pid), so gozer reaps the lease if the wrapper dies by any signal. When no
+board is free gozer queues one ticket and the wrapper waits on it once, with `gozer wait`, for at most `--hw-wait-s` seconds; a wait
+that ends without a grant cancels the ticket and the agent is told to go on with the simulator. A grant runs the harness under the
+lease's environment (after checking again that the copy still has its recorded sha256), and the wrapper releases the lease and exits.
+The probe starts the wrapper, waits for it with a hard timeout, kills the wrapper's process group on any exception, and then reads
+`gozer status` once. It never tries to repair anything: if a chip or a queue ticket is still shown under this probe's tag, or the
+status cannot be read, the tool is stopped for the rest of the attempt, the answer says so, and the probe ends with exit 5. A hang
+stops the call (the wrapper's release resets the chip) and turns the tool off for the rest of the attempt. Calls are recorded in
+each `attempt.json` under `agent_hw` and listed in the report with the chip time they cost, taken from the wrapper's own stamps (an
+upper bound when the wrapper was killed). The lease is taken for each call and released after it; there is no mode that holds a
+board for a whole attempt. The device seconds are the harness's
 time with the device open, for every input set, not a benchmark of the kernel.
 
 ### 5.9d The latest skills

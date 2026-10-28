@@ -545,11 +545,11 @@ class HardwareCheck:
                 self._record(k=k, counted=True, outcome="interrupted", note=note, kernel_sha256=sha,
                              total_s=round(held, 1), lease_s=round(held, 1), lease_upper_bound=True)
                 self._look()                        # the one check; if it finds a chip held the tool is stopped
-        stopped_text = self._look()
-        total = round(self.clock() - start, 1)
         pid = hw.get("wrapper_pid")
         if isinstance(pid, int):
-            self.pids.add(pid)
+            self.pids.add(pid)                      # before the check: the check also matches chips held by this call's own wrapper
+        stopped_text = self._look()
+        total = round(self.clock() - start, 1)
         polls = 1 if event == "queued" else 0
         if event == "queued":
             q = hw.get("queued") if isinstance(hw.get("queued"), dict) else {}

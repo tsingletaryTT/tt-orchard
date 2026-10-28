@@ -78,7 +78,7 @@ Advice:
   inputs and reads the result back. The guide's advice to add a main block does not apply here.
 Hardware: the tool `hardware_check` (an optional `note`; no command, no path) runs your current kernel.py on a chip and answers PASS or FAIL
 with the numbers, the seconds and the calls left. A whole call takes about 47 seconds (the kernel runs in well under a second; the rest is the lease and the chip reset); each
-attempt has a few calls, and a busy board is reported after two minutes. Use it for a kernel the simulator cannot run (`FAIL: sim_gap`), a numeric
+attempt has a few calls, and a busy board is reported after two minutes, and a `STOPPED` answer means no hardware call will run again in this attempt. Use it for a kernel the simulator cannot run (`FAIL: sim_gap`), a numeric
 check at hardware precision once the simulator passes, or a performance question (it reports device seconds); the simulator is much cheaper for everything else.
 Rules the check enforces. It reads `kernel.py` before running it and answers `FAIL: forbidden_code: ...` with every
 rule broken, its line, and what to do instead:
