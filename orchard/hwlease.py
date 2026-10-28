@@ -9,11 +9,14 @@ few seconds (verified against the real gozer: a claim that is not yet possible a
 keeps its queue place and no second ticket is made; a possible claim is granted with `owner_pid` P). The harness then runs under
 the lease's environment and the lease is released in one `finally`.
 
-Nothing is remembered in this process. What the probe holds is read back from gozer: `mine()` is the unreleased leases that
-`gozer history` shows granted to this pid, and the queue tickets that `gozer queue` shows with this pid. That makes the answer the
-same for every attempt of a probe (there is one pid), for a probe that was interrupted and started again (the old pid's lease is
-gozer's to reap), and for a grant whose output was lost (it is found by its pid). The history window is the last
-HISTORY_EVENTS events; a lease older than that would not be seen.
+Nothing is remembered in this process. What the probe holds is read back from gozer, fresh each time: `mine()` is the unreleased
+leases that `gozer history` shows granted to this pid, the queue tickets that `gozer queue` shows with this pid, and the chips that
+`gozer status` shows held by this pid. That makes the answer the same for every attempt of a probe (there is one pid), for a probe
+that was interrupted and started again (the old pid's lease is gozer's to reap), and for a grant whose output was lost (it is found
+by its pid). History shows only its last HISTORY_EVENTS events, so current ownership comes from status: chips held by this pid that
+no lease in history accounts for trigger one wider history read, and if they are still unaccounted for they are `unidentified` and
+the probe refuses new calls (it cannot release them by id). The ids the caller holds in hand are cancelled and released too when a
+read fails. Each cleanup step runs in its own guard, so a second interrupt does not skip the next step.
 
 The design note (docs/superpowers/specs/2026-10-27-agent-hardware-check-design.md) compares this with the in-memory ledger it
 replaced and lists every path from the ticket to the final release with the test of each. Nothing here opens a chip."""

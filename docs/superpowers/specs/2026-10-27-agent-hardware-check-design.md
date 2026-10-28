@@ -242,7 +242,7 @@ The round 8 findings were narrower cases of two classes: an interrupt that lands
 gozer's state. Instead of one more patch for each, this section writes the whole cleanup path down with one invariant, and
 `tests/test_hwlease_state_machine.py` runs every state and event pair against a fake gozer that keeps its own ground truth.
 
-**Invariant.** After a call's cleanup, either gozer's own record (the fake's ground truth, not what the probe read) shows nothing of
+**Invariant.** After a call's cleanup, either gozer's own record (the fake's ground truth, which can differ from what the probe read) shows nothing of
 ours, or the probe reports UNRESOLVED and every new call is refused. There is no third outcome. The test checks this after each
 scenario, and for the UNRESOLVED outcome it also makes a new call and checks that it is refused.
 
