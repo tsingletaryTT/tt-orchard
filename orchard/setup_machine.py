@@ -260,7 +260,7 @@ def check_ollama(env: Env, opts: Options) -> Step:
         acts = [Action("spawn", (["ollama", "serve"], str(log)))] if opts.start_ollama else []
         return Step("ollama", WARN if not acts else TODO, "the ollama server is not answering. Start it with "
                     "`ollama serve`, or run this with --start-ollama" + (" (it will start it)" if acts else ""), acts)
-    if OLLAMA_MODEL not in out:
+    if OLLAMA_MODEL not in out.split():           # a whole name: `qwen3-coder:30b-a3b` is another model
         return Step("ollama", TODO, f"{OLLAMA_MODEL} is not pulled (about 18 GB)",
                     [Action("run", (["ollama", "pull", OLLAMA_MODEL],))])
     return Step("ollama", OK, f"ollama serves {OLLAMA_MODEL}")
@@ -301,7 +301,9 @@ def check_coder_package(env: Env, opts: Options) -> Step:
     if not env.which("tt-model"):
         return Step("coder package", WARN, f"cannot check {pkg} without tt-model")
     rc, out, err = env.run(["tt-model", "list"], 60)
-    line = next((l for l in out.splitlines() if pkg in l), None)
+    # Match the whole package id: the default's id is a prefix of the fallback's, so a substring match would
+    # call the default installed when only the fallback is.
+    line = next((l for l in out.splitlines() if pkg in l.split()), None)
     free = env.free_gb(env.home)
     disk = (f" The weights are about {c['weights_gb']} GB and only {free:.0f} GB is free on the home disk."
             if free < c["weights_gb"] + 40 else "")

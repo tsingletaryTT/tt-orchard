@@ -292,6 +292,12 @@ def test_a_missing_ollama_is_a_failure_with_its_download_page(tmp_path):
     assert s.status == sm.FAIL and "ollama.com" in s.detail
 
 
+def test_a_longer_ollama_tag_does_not_count_as_the_cpu_model_being_pulled(tmp_path):
+    m = Machine(tmp_path, ollama_list="qwen3-coder:30b-a3b-q4_K_M  18 GB\n")
+    s = steps_by_name(m)["ollama"]
+    assert s.status == sm.TODO and s.actions[0].args[0] == ["ollama", "pull", "qwen3-coder:30b"]
+
+
 def test_an_ollama_server_that_is_down_is_a_warning_unless_asked_to_start_it(tmp_path):
     m = Machine(tmp_path)
     m.answers[("ollama", "list")] = (1, "", "could not connect")
@@ -357,6 +363,20 @@ def test_the_recommended_coder_package_is_pulled_when_it_is_missing(tmp_path):
     s = steps_by_name(m)["coder package"]
     assert s.status == sm.TODO and s.actions[0].args[0] == ["tt-model", "pull", "raahemnabeel/qwen3-coder-next"]
     assert "160 GB" in s.detail
+
+
+def test_the_fallback_package_alone_does_not_count_as_the_default_being_installed(tmp_path):
+    # The default's id is a prefix of the fallback's id. Only the fallback is installed here, so the default
+    # must still be pulled; a substring match would call it installed and write a config for a missing package.
+    fallback_only = "  ✓ raahemnabeel/qwen3-coder-next-blackhole  container  blackhole  image bd0ca927a46b  8.6 GB  profile p300x2\n"
+    s = steps_by_name(Machine(tmp_path, listing=fallback_only))["coder package"]
+    assert s.status == sm.TODO and s.actions[0].args[0] == ["tt-model", "pull", "raahemnabeel/qwen3-coder-next"]
+
+
+def test_the_default_package_alone_does_not_count_as_the_fallback_being_installed(tmp_path):
+    s = steps_by_name(Machine(tmp_path, listing=LIST_NEXT), coder="coder-next-v1")["coder package"]
+    assert s.status == sm.TODO
+    assert s.actions[0].args[0] == ["tt-model", "pull", "raahemnabeel/qwen3-coder-next-blackhole"]
 
 
 def test_an_installed_servable_package_is_ok(tmp_path):

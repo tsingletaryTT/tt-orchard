@@ -126,6 +126,13 @@ The fallback is the earlier package, `raahemnabeel/qwen3-coder-next-blackhole`: 
 `scripts/setup.sh --coder coder-next-v1`. Its config templates are `config/*.qb2-coder-next-v1.toml`. To use
 the 27B instead, run `scripts/setup.sh --coder 27b`; its templates are `config/*.qb2-27b.toml`.
 
+Setup never overwrites a config file that exists. A machine that already has `config/bringup.toml` keeps its
+`[coder] target`, so after the default changed it still runs the package it had. To switch it, install the other
+package (`tt-model pull <package>`; `scripts/setup.sh --coder <name>` does that and reports what it left alone) and
+edit `target` under `[coder]` in `config/bringup.toml` to `raahemnabeel/qwen3-coder-next` (the default) or
+`raahemnabeel/qwen3-coder-next-blackhole` (the fallback). `config/tiers.toml` needs no edit: both packages answer
+to `Qwen/Qwen3-Coder-Next`. Stop the old coder first; the two packages use different container names.
+
 ## 1. Status
 
 tt-orchard is early. It has brought up eight models, all on one machine: a Tenstorrent QuietBox 2 with two p300c boards (four

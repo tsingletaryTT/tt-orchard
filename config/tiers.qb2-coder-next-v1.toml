@@ -1,7 +1,9 @@
 # QuietBox 2 (two p300c boards, four chips): the recommended arrangement. Used by scripts/setup.sh.
 #
 # THE FALLBACK (choose it with `scripts/setup.sh --coder coder-next-v1`): the earlier Qwen3-Coder-Next package.
-# The default is the fused-decode bundle (config/*.qb2-coder-next.toml), which decodes about 2.8 times faster.
+# The default is the fused-decode bundle (config/*.qb2-coder-next.toml), which decoded about twice as fast in the
+# 2026-10-28 run. On a machine that already has config/bringup.toml, setup keeps it: edit `target` under [coder]
+# there to raahemnabeel/qwen3-coder-next-blackhole to use this fallback. config/tiers.toml needs no edit.
 #
 # The agent model is Qwen3-Coder-Next on ONE board (the `p300` profile of
 # raahemnabeel/qwen3-coder-next-blackhole). The other board stays free for hardware stages, so only stage 4's
