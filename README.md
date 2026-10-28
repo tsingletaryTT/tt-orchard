@@ -1492,7 +1492,8 @@ budget (default 1800 s). The rule for sizing a rung's budget, so that an easy ru
 `size_wall_budget` in `orchard/kernelladder.py`: 4 times the slowest passing pilot attempt, at least 300 s and at most 1800 s;
 `--rung-wall op=S,...` sets it per rung. `--max-hours H` with `--rung-expect-s op=S,...` stops the ladder after a rung when the
 elapsed time plus the projection for the rungs left is above H hours. A new experiment names a rung and a pass count from this
-table in its pre-registration.
+table in its pre-registration. The ladder flags are `--ladder`, `--rungs`, `--rung-wall`, `--rung-expect-s`, `--max-hours`,
+`--report-only` and `--wall-s`.
 
 - It starts no model server. The coder must already answer at its endpoint; starting it is `tt-orchard bringup`'s
   job. For a flag you leave out it uses the tier stage 2 runs on, from the tier config that `bringup.toml`
