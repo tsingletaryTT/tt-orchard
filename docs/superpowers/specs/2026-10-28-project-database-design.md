@@ -23,6 +23,105 @@ when its guard was removed (section 9). A change to the real migration that drop
 | I5 | Only confirmed corruption moves a database aside: a failed `integrity_check`, or SQLite's own "malformed" or "not a database" error. Busy, locked, disk-full, I/O, read-only and cannot-open errors raise a retryable `LedgerUnavailable`, leave the file and its siblings untouched, and make telegraph refuse the call. A moved-aside file starts unconfirmed (I2). | `test_i5_a_lock_or_io_error_is_retryable_and_leaves_the_file_untouched` (6 messages at 3 places), `test_i5_confirmed_corruption_moves_the_file_aside_and_starts_unconfirmed` (3 messages at 2 places), `test_i5_an_integrity_check_that_fails_moves_the_file_aside`, `test_i5_a_write_that_finds_the_database_locked_raises_a_retryable_error_and_changes_nothing` |
 | I6 | An offset index reuses a stored total only after validating the bytes it consumed: the tail chunk on every poll, every chunk on a full check; a half-written last line is not consumed. The residual (a same-size edit far behind the offset is seen only by a full check) is stated and tested. | `test_i6_an_appended_log_is_read_from_its_offset_and_the_total_is_kept`, `test_i6_a_half_written_last_line_is_not_consumed_until_it_is_whole`, `test_i6_a_truncate_and_regrow_that_keeps_the_start_is_detected`, `test_i6_a_same_size_edit_in_the_last_chunk_is_detected_by_an_ordinary_poll`, `test_i6_a_same_size_edit_in_an_early_chunk_is_missed_by_an_ordinary_poll_and_caught_by_a_full_check`, `test_i6_a_smaller_file_restarts_from_zero`, `test_i6_a_new_file_under_the_same_name_restarts_from_zero_even_when_it_is_larger` |
 
+### Requirements for the real migration (second review pass)
+
+The second review pass found four more problems that are about order of steps and crash recovery. They are recorded as
+requirements and are not built in the proof. Each has a placeholder in the proof's test file, marked `xfail(strict=True)`:
+it fails today, and when the migration PR writes the real test under the same name the marker has to come off (a strict
+xfail that passes is an error), so the tests cannot be forgotten. Where sections 8 and 10 describe a shorter sequence, the
+step orders below take precedence.
+
+Two mediums from the same pass were fixed in the proof: an `OperationalError` from a statement inside a transaction body
+(disk full, I/O, read-only) is now translated to `LedgerUnavailable` after the rollback (I5), and the offset index
+validates the whole last chunk when the offset is an exact multiple of the chunk size (I6). Tests:
+`test_i5_an_error_inside_the_transaction_body_is_retryable_and_leaves_no_open_transaction`,
+`test_i6_an_edit_in_the_last_chunk_is_detected_when_the_offset_is_an_exact_multiple_of_the_chunk`; each was seen red with its
+guard removed.
+
+**I7. Recovery state is on disk before a replacement database exists.**
+Failure: the first version marked a moved-aside or recreated database unconfirmed after the replacement had been created and
+migrated. A crash in between leaves a valid, empty file that the next open accepts, and another opener can reserve in the
+gap, so spend made available again.
+Rule: a durable marker file `RECOVERY-REQUIRED` (JSON: reason, time, the name the old file moved to) is the authority. It is
+written, with `fsync` of the file and of the directory, before anything is moved or created. Every open takes an exclusive
+`flock` on `open.lock` in the state directory for the whole open sequence, reads the marker first, and refuses every
+reservation while the marker exists, whatever the database holds. The `unreconciled` row in the database is a mirror.
+Confirming clears the row, then removes the marker (and syncs the directory); both steps are safe to repeat.
+
+| Step | Action | On disk afterwards | Restart after a crash here |
+|---|---|---|---|
+| 1 | Take `open.lock`; decide recovery is needed (failed check, or file missing beside backups) | nothing changed | Repeat from 1 |
+| 2 | Write `RECOVERY-REQUIRED`, `fsync` file and directory | marker | Marker found: refuse all reservations, go on to 3 |
+| 3 | Rename the damaged file and its `-wal` and `-shm` to `.corrupt-*` | marker, no database | Marker found, no file: go on to 4 |
+| 4 | Create the new file, migrate it | marker, valid empty database | Marker found: refuse; the empty database is never accepted on its own |
+| 5 | Write the `unreconciled` row (mirror) | marker, database with row | Same |
+| 6 | A person confirms: delete the row, then the marker | no marker | Crash between the two: marker remains, refusal continues, confirm again |
+
+test: to be written with the migration (named: `test_I7_recovery_state_is_on_disk_before_a_replacement_database_exists_and_every_opener_honours_it`). It kills
+the opener after each step, opens again from a second process, and asserts that no reservation is granted before step 6.
+
+**I8. A restore is staged, marked, and installed under exclusion.**
+Failure: the first version copied the backup into place and marked it unconfirmed afterwards. A crash or a concurrent opener
+between the two sees a valid file with no mark, and allowance spent after the backup is silently available.
+Rule: a restore needs no other process to have the database open. Every opener holds a shared `flock` on `db.users` while its
+connection is open; restore takes it exclusively without waiting and refuses ("close the other processes") if it cannot.
+The backup is copied to a private staging file in the same directory, checked, and marked unconfirmed inside the staging
+file, and only then published with one atomic `rename`. The marker file of I7 is written before anything else.
+
+| Step | Action | On disk afterwards | Restart after a crash here |
+|---|---|---|---|
+| 1 | Take `db.users` exclusively (no waiting) | nothing changed | Repeat |
+| 2 | Write `RECOVERY-REQUIRED` (reason: restore), `fsync` | marker | Refuse all reservations; go on |
+| 3 | Copy the backup to `project.db.restore-<id>` (0600), `fsync`; run `integrity_check` on it; insert the `unreconciled` row into it | marker, complete staged file | Staged file complete: reuse it. Partial: delete it and copy again |
+| 4 | Move `-wal`, `-shm`, then the live file, to `.replaced-*` as one group | marker, staged file, no live file | No live file: create nothing; go on to 5 |
+| 5 | `rename` the staged file to `project.db`, `fsync` the directory | marker, restored file with the row | Restored file with row and marker: refuse until confirmed |
+| 6 | Release `db.users` | | |
+
+At no step is there a valid live file that is neither marked nor covered by the marker. The old live file and its WAL are kept
+(never deleted) so a person can compare.
+test: to be written with the migration (named: `test_I8_a_staged_restore_is_marked_before_installation_and_a_crash_at_any_step_leaves_reservations_refused`).
+
+**I9. The migration recovers sidecars and torn fragments, or refuses.**
+Failure: the migration and its equality check ignore `telegraph.jsonl.torn-*` sidecars with no note and a malformed
+trailing fragment, so the cutover can succeed while dropping their conservative charges (the old code counts each as one call
+of unknown cost before it applies caps).
+Rule: under the old lock, before the import, run the old recovery: a last line with no line break is moved to a sidecar
+(synced) and the file cut back; every sidecar without a `torn` note gets one (tokens = the configured `max_output_tokens`,
+passed to the command). Then import, so every `torn` record is a row in `torn`. The equality check adds two comparisons: the
+number of sidecar files equals the number of `torn` rows, and the accounting totals include them (the check already compares
+`accounted_calls`, which counts torn rows). A malformed line that is not the last line is not recoverable: the migration
+refuses and prints the line numbers, and a person can pass `--accept-malformed N` with the count they inspected.
+test: to be written with the migration (named: `test_I9_orphaned_sidecars_and_malformed_fragments_are_recovered_or_block_the_migration`). The scenario set of the proof
+already contains a torn tail written by the real `Telegraph`; the new test adds an orphan sidecar with no note, a trailing
+fragment, and a malformed middle line.
+
+**I10. The cutover is resumable at every step, and no phase lets a writer send into a second history.**
+Failure: the first version did the import in a transaction, then renamed, then made the sentinel and the marker. A crash or a
+`mkdir` failure after the rename leaves `telegraph.jsonl` absent and the lock released, so an old writer recreates an empty
+file, while the database already says `migrated` and a retry refuses before repairing anything. The external marker was also
+written last, so new code could not tell the half-finished state.
+Rule: the order is below. The external marker `MIGRATING-TO-SQLITE` is written first. The database records the phase in
+`meta` (`cutover:<scope>` = `imported`, then `archived`, then `sentinel`, then `complete`). New code refuses to reserve for a
+scope whose phase is not `complete`, and refuses a directory that has either marker and a live `telegraph.jsonl` file. A
+rerun of the command resumes from the recorded phase; it never refuses because an earlier phase finished. The old lock is held from step 1 to step 7, so an old writer
+cannot append meanwhile.
+
+| Step | Action | On disk afterwards | Restart after a crash here |
+|---|---|---|---|
+| 1 | Take the old `telegraph.lock` | nothing changed | Repeat |
+| 2 | Write `MIGRATING-TO-SQLITE` (scope, sha256 of the ledger), `fsync` file and directory | marker; old ledger live | Resume at 3. Old code can still write the ledger (it has not seen a change); step 3 imports anything it added |
+| 3 | Recover sidecars and fragments (I9); one transaction: import every record, compare totals, set phase `imported` and `imported_bytes` with the sha256 of that prefix | database has the history; phase `imported` | If the ledger grew since (an old writer ran after the crash): verify the stored prefix digest, import the suffix, compare again, then go on. If the prefix digest differs: refuse, a person decides |
+| 4 | `rename` `telegraph.jsonl` to `telegraph.jsonl.archived`, `fsync` the directory; phase `archived` | no `telegraph.jsonl` | Resume at 5. Until it is done a regular file named `telegraph.jsonl` appearing here means an old writer got through: new code refuses (guard), and the person reconciles the late records |
+| 5 | Make the directory `telegraph.jsonl` with its README; phase `sentinel` | sentinel in place | Resume at 6 |
+| 6 | Write `MIGRATED-TO-SQLITE`, `fsync`; phase `complete`; remove `MIGRATING-TO-SQLITE` | complete | Crash before the remove: both markers; resume removes `MIGRATING-TO-SQLITE` |
+| 7 | Release the old lock | | |
+
+The only window the lock does not cover is a crash between steps 4 and 5, when no file of that name exists. The rule above
+closes it from the new-code side (the guard refuses) and from the resume side (step 5 is repeated first). An old process that
+creates the file in that window is detected and is not prevented; the check is the guard of step 4.
+test: to be written with the migration (named: `test_I10_a_crash_at_any_step_of_the_cutover_resumes_and_no_phase_lets_a_writer_send_into_a_second_history`). It kills the command after each
+step, resumes, and runs the real old `Telegraph` against the directory at each crash point.
+
 ## 1. Answer and cost-benefit table
 
 A SQLite file helps in three places and does not help in the others. The strongest case is the telegraph budget ledger. It
@@ -353,7 +452,7 @@ Keeping the old `telegraph.jsonl` as a read-only archive after the migration cos
 `orchard/_proofs/telegraph_sqlite.py` implements the reserve, settle, torn and import operations on SQLite with the
 accounting rules of `Telegraph._accounting` and `_over_budget`, and, after the review of PR 132, the scope key, the
 unconfirmed state, the migration cutover, the directory checks, the corruption rule and an offset index. It is not used by
-the product. 125 tests (71 in `tests/test_proof_telegraph_sqlite.py`, 54 in `tests/test_proof_telegraph_sqlite_invariants.py`)
+the product. 137 tests (71 in `tests/test_proof_telegraph_sqlite.py`, 66 in `tests/test_proof_telegraph_sqlite_invariants.py`, of which 4 are strict xfail placeholders for I7 to I10)
 pass in about 5 seconds, repeated six times without a failure after the retry described in section 7. Results:
 
 * Same totals. Ten scenarios taken from `tests/test_telegraph.py` run through the real `Telegraph` (two plain calls; a timeout

@@ -518,3 +518,82 @@ def test_i4_a_locked_answer_to_the_wal_switch_is_retried_until_the_timeout(tmp_p
     with proof.Ledger(tmp_path / "db" / "project.db") as db:
         assert db.count_rows() == 0
     assert state["left"] == 0
+
+
+# --- review round 2: two medium findings, fixed in the proof ---------------------------------------------------------
+
+@pytest.mark.parametrize("message", ["database or disk is full", "disk I/O error", "attempt to write a readonly database"])
+@pytest.mark.parametrize("statement", ["INSERT INTO calls", "INSERT OR REPLACE INTO cache"])
+def test_i5_an_error_inside_the_transaction_body_is_retryable_and_leaves_no_open_transaction(tmp_path, message, statement):
+    path = tmp_path / "db" / "project.db"
+    with proof.Ledger(path) as db:
+        real = db._conn
+        db._conn = Flaky(real, statement, sqlite3.OperationalError(message))     # BEGIN succeeds, the statement after it fails
+        if statement.startswith("INSERT INTO calls"):
+            with pytest.raises(proof.LedgerUnavailable):
+                db.reserve("c1", "p", "small", 10, 0.0, LIM)
+        else:
+            real.execute("INSERT INTO calls (scope, call_id, has_reserve, reserved_tokens) VALUES ('default', 'c1', 1, 10)")
+            with pytest.raises(proof.LedgerUnavailable):
+                db.settle("c1", problem="p", model="small", outcome="ok", tokens_in=1, tokens_out=1, cost_usd=0.0,
+                          usage_known=True, cache=("id", "replies/c1.txt"))
+        db._conn = real
+        assert not real.in_transaction                                            # the failed write was rolled back
+        assert db.cache_get("default", "id") is None
+        assert db.reserve("c2", "p", "small", 10, 0.0, LIM) is None               # and the next writer is not blocked
+        assert db.rows()[0]["settled"] == 0                                       # the settle did not half-apply
+
+
+def test_i6_an_edit_in_the_last_chunk_is_detected_when_the_offset_is_an_exact_multiple_of_the_chunk(tmp_path):
+    log = tmp_path / "agent.jsonl"
+    log.write_bytes(b'{"n":1}\n' * 8)                                 # 8 lines of 8 bytes: the offset is 64, one whole chunk
+    db, ix = index(tmp_path)
+    assert ix.update(log)["total"] == 8
+    raw = bytearray(log.read_bytes())
+    raw[-3:-2] = b"5"                                                 # the last line becomes {"n":5}, same size, inside the chunk
+    log.write_bytes(bytes(raw))
+    got = ix.update(log)
+    assert got["rescanned"] and got["total"] == 12
+    db.close()
+
+
+def test_i6_the_totals_stay_right_across_offsets_that_are_and_are_not_multiples_of_the_chunk(tmp_path):
+    log = tmp_path / "agent.jsonl"
+    db, ix = index(tmp_path)
+    expected = 0
+    with open(log, "wb") as f:
+        for step in range(40):                                        # lines of 8 and 9 bytes, so offsets cross chunk edges
+            body = (b'{"n":%d}\n' % (step % 10)) if step % 3 else (b'{"n": %d}\n' % (step % 10))
+            f.write(body)
+            f.flush()
+            expected += step % 10
+            got = ix.update(log, full=(step % 4 == 0))
+            assert got["total"] == expected and not got["rescanned"], step
+    db.close()
+
+
+# --- requirements I7 to I10 (Copilot review round 2): to be written with the migration -----------------------------------
+# Each placeholder is a strict xfail: it fails today because nothing implements the requirement. When the migration PR
+# writes the real test under the same name, the marker has to come off, because a passing strict xfail is an error.
+
+MIGRATION = pytest.mark.xfail(strict=True, reason="requirement of the design note, to be written with the migration")
+
+
+@MIGRATION
+def test_I7_recovery_state_is_on_disk_before_a_replacement_database_exists_and_every_opener_honours_it():
+    pytest.fail("to be written with the migration: kill at each step of the replacement sequence (design note, I7)")
+
+
+@MIGRATION
+def test_I8_a_staged_restore_is_marked_before_installation_and_a_crash_at_any_step_leaves_reservations_refused():
+    pytest.fail("to be written with the migration: kill at each step of the restore sequence (design note, I8)")
+
+
+@MIGRATION
+def test_I9_orphaned_sidecars_and_malformed_fragments_are_recovered_or_block_the_migration():
+    pytest.fail("to be written with the migration: sidecars and a torn tail counted, or the migration refuses (design note, I9)")
+
+
+@MIGRATION
+def test_I10_a_crash_at_any_step_of_the_cutover_resumes_and_no_phase_lets_a_writer_send_into_a_second_history():
+    pytest.fail("to be written with the migration: kill at each step of the cutover, then resume (design note, I10)")

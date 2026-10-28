@@ -334,9 +334,13 @@ class Ledger:
             raise LedgerUnavailable(f"{type(exc).__name__}: {exc}") from exc
         try:
             yield
-        except BaseException:
+        except BaseException as exc:
             with contextlib.suppress(sqlite3.Error):
                 self._conn.execute("ROLLBACK")
+            # A disk-full, I/O or read-only error from a statement inside the body is retryable as well (I5). Corruption
+            # keeps its own type so that it can be told apart.
+            if isinstance(exc, sqlite3.OperationalError) and not _is_corruption(exc):
+                raise LedgerUnavailable(f"{type(exc).__name__}: {exc}") from exc
             raise
         try:
             self._conn.execute("COMMIT")
@@ -691,6 +695,11 @@ class LogIndex:
     def __init__(self, db: Ledger, chunk: int = 1 << 20):
         self.db, self.chunk = db, chunk
 
+    def _tail_start(self, offset: int) -> int:
+        """Where the tail chunk starts. The tail is never empty once something was consumed: when `offset` is an exact
+        multiple of the chunk size, the tail is the whole last chunk, so an ordinary poll still validates it."""
+        return ((offset - 1) // self.chunk) * self.chunk if offset > 0 else 0
+
     @staticmethod
     def _digest(data: bytes) -> str:
         return hashlib.sha256(data).hexdigest()[:32]
@@ -708,7 +717,7 @@ class LogIndex:
             if row is not None:
                 dev, inode, offset, total, tail_digest, digests_json = row
                 digests = json.loads(digests_json)
-                tail_start = (offset // C) * C
+                tail_start = self._tail_start(offset)
                 ok = (dev, inode) == (st.st_dev, st.st_ino) and st.st_size >= offset
                 if ok:
                     tail = os.pread(fd, offset - tail_start, tail_start)
@@ -724,7 +733,7 @@ class LogIndex:
                 if not ok:
                     rescanned = True
                     offset, total, digests, tail = 0, 0, [], b""
-            tail_start = (offset // C) * C
+            tail_start = self._tail_start(offset)
             new = os.pread(fd, max(st.st_size - offset, 0), offset)
             read += len(new)
             end = new.rfind(b"\n") + 1                            # a half-written last line is left for the next poll
@@ -734,8 +743,9 @@ class LogIndex:
                 except (ValueError, KeyError, TypeError):
                     pass
             offset += end
-            body = tail + new[:end]
-            complete = len(body) // C
+            body = tail + new[:end]                               # the bytes from tail_start to the new offset
+            new_tail_start = self._tail_start(offset)
+            complete = (new_tail_start - tail_start) // C         # whole chunks that now lie before the new tail
             digests = digests + [self._digest(body[k * C:(k + 1) * C]) for k in range(complete)]
             tail_digest = self._digest(body[complete * C:])
             with self.db._write():
