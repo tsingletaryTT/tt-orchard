@@ -103,12 +103,14 @@ def parse_hub(payload: dict) -> HubInfo:
     )
 
 
-_WEIGHT_NAME = re.compile(r"\.safetensors$|(^|/)pytorch_model[^/]*\.bin$")
+# A weight file, or a weight index (`model.safetensors.index.json`, `pytorch_model.bin.index.json`, also in a component directory). The index
+# tells a reader which shard holds which tensor, so a snapshot without a listed index cannot be loaded even when every shard is there.
+_WEIGHT_NAME = re.compile(r"\.safetensors$|(^|/)pytorch_model[^/]*\.bin$|\.(safetensors|bin)\.index\.json$")
 
 
 def _missing_weights(hub: HubInfo, snapshot: Path) -> list[str]:
-    """Weight files the repo's own file list names that are not behind a readable link in `snapshot`."""
-    return [n for n in hub.files if _WEIGHT_NAME.search(n) and not (snapshot / n).exists()]
+    """Weight files and weight indexes the repo's own file list names that are not behind a readable link in `snapshot`."""
+    return [n for n in hub.files if _WEIGHT_NAME.search(n) and not (snapshot / n).is_file()]
 
 
 def _missing_listed(hub: HubInfo, snapshot: Path) -> list[str]:
@@ -449,17 +451,27 @@ def _confirm_inferred(base: str, serving, report) -> Check:
                        "candidates": first + rest, "report": report})
 
 
+CONFIG_MAX_BYTES = 8 << 20           # a config.json larger than this is not read
+
+
+def _config_json(path: Path) -> dict | None:
+    """A snapshot's or a parameters directory's config.json as an object, or None when it cannot be used: missing, too large, not strict JSON
+    (a repeated key, NaN, Infinity or an overflowing float such as 1e999) or not an object. The file may be a link into the cache's blobs."""
+    from orchard import safeio
+    try:
+        return safeio.read_json(Path(path).resolve(), max_bytes=CONFIG_MAX_BYTES, expect=dict)
+    except (OSError, ValueError, RuntimeError, safeio.SafeReadError):
+        return None
+
+
 def _stock_compatible(found, model_id: str, hub, local_snapshot) -> bool:
     """Whether the model can be the one tt-transformers' parameters in `found` describe, as far as this check can tell. The local
     snapshot's config.json is compared on the decisive keys (orchard/stock_runtime.py); without one, the hub's architecture is compared with
     the parameters'. When neither is known the row is kept, and stage 0 measures. Research also records rows for the model's bases and
     ancestors, and the first of those must not stand in for the model."""
     from orchard import stock_runtime
-    try:
-        pcfg = json.loads((Path(found) / "config.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return True
-    if not isinstance(pcfg, dict):
+    pcfg = _config_json(Path(found) / "config.json")
+    if pcfg is None:
         return True
     snap = None
     try:
@@ -467,11 +479,8 @@ def _stock_compatible(found, model_id: str, hub, local_snapshot) -> bool:
     except Exception:
         pass
     if snap is not None:
-        try:
-            mcfg = json.loads((Path(snap) / "config.json").read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            mcfg = None
-        if isinstance(mcfg, dict):
+        mcfg = _config_json(Path(snap) / "config.json")
+        if mcfg is not None:
             return not stock_runtime.compare_configs(mcfg, pcfg)
     archs = getattr(hub, "architectures", None) or []
     return not archs or archs[0] == stock_runtime.effective(pcfg, "architectures")
@@ -517,11 +526,45 @@ def _stock_check(report, stock, model_id: str = "", hub=None, local_snapshot=lam
     return None
 
 
+def _audio_runtime_note(model_id: str, local_snapshot: Callable, audio_paths) -> tuple[bool, str]:
+    """(serves, sentence) for the run's path after stage 0, answered the way the supervisor will answer it (`_select_audio_runtime`): the
+    planners must know the repository, the model's local snapshot must exist, and `audio_runtime.runtime_problems` must find nothing. When
+    the runtime serves the model, the sentence names the interpreters and the library checkout it needs and says which of them are missing
+    (`audio_runtime.environment_problems`). When it does not, the sentence is the stop after stage 0. Never raises."""
+    from orchard import audio_plan, audio_runtime
+    stop = ("The run will stop after stage 0 as blocked with audio-path-unbuilt; the run's BLOCKED.md says what unblocks it (the text for "
+            "that code is in orchard/narrate.py)")
+    if audio_plan.library_name(model_id) is None:
+        return False, stop + f" ({model_id} is not a repository the audio runtime's planners know)."
+    try:
+        snap = local_snapshot(model_id)
+    except Exception:                      # the model row already reports an unreadable cache
+        snap = None
+    if snap is None:
+        return False, ("Once its snapshot is downloaded the run goes on with the harness's audio runtime (stages 1, 2 and 8) if the runtime "
+                       "implements the model, and otherwise stops after stage 0 as blocked with audio-path-unbuilt; BLOCKED.md says what "
+                       "unblocks it. Which of the two applies is decided after its snapshot is downloaded.")
+    try:
+        problems = audio_runtime.runtime_problems(snap)
+    except Exception as exc:               # a hostile snapshot is a reason, never a crash
+        problems = [f"{type(exc).__name__}: {exc}"]
+    if problems:
+        return False, stop + f". The audio runtime does not implement this model: {'; '.join(problems[:3])}."
+    text = ("The run goes on with the harness's audio runtime (stages 1, 2 and 8): the diffusion transformer runs on one chip and the "
+            "rest on the CPU")
+    if audio_paths is None:
+        return True, text + "."
+    missing = audio_runtime.environment_problems(audio_paths)
+    text += (f". It needs the reference interpreter {audio_paths.reference_python}, the Tenstorrent interpreter {audio_paths.chip_python} "
+             f"and the library checkout {audio_paths.src_dir}")
+    return True, text + (f". Missing now: {'; '.join(missing)}." if missing else "; all three are present.")
+
+
 def _audio_base(*, model_id: str, base: str, inferred: bool, report, accept_inferred: bool, audio: str, local_snapshot: Callable,
-                base_hub_info: Callable | None) -> Check | None:
+                base_hub_info: Callable | None, audio_paths=None) -> Check | None:
     """The base row for an audio model (see orchard/audio_facts.py for what counts as audio). No installed bundle is needed: stage 0's
-    audio branch compares the two repositories' files directly, and nothing serves an audio model on a chip yet, so the run stops after
-    stage 0 (`audio-path-unbuilt`). The row is a warning that says so. The base snapshot is still needed, and the harness never uses a
+    audio branch compares the two repositories' files directly. When the harness's own audio runtime serves the model the run goes on to
+    stages 1, 2 and 8; otherwise it stops after stage 0 (`audio-path-unbuilt`). `_audio_runtime_note` says which. The base snapshot is still needed, and the harness never uses a
     token: a gated or private base counts only when a complete copy is already on disk (the rule the hub row applies to the model).
     Returns None when the base is not in the audio layout, which sends the run down the old path (a bundle is required)."""
     data = {"base": base, "snapshot": None, "bundle": None, "needs_fetch": False, "candidates": [], "report": report, "audio": True}
@@ -529,11 +572,8 @@ def _audio_base(*, model_id: str, base: str, inferred: bool, report, accept_infe
         return Check("base", BLOCK, f"the card names no base model; research infers {base} ({_selection_basis(report)}). An inferred base is "
                      "not downloaded or used without a confirmation: pass --base <model id> to use it, or --accept-inferred-base to take what "
                      "research inferred", "inferred-base-unconfirmed", data=data)
-    try:
-        snap = local_snapshot(base)
-    except Exception as exc:                  # an unreadable cache is not an empty one: nothing is downloaded on that guess
-        return Check("base", BLOCK, f"cannot read the local cache for the base model {base}: {type(exc).__name__}: {exc}",
-                     "model-unavailable", data=data)
+    # The Hub is asked first: the real `local_snapshot` measures the cached revisions against the Hub's answer for this model, and picks the
+    # complete one over a partial one that sorts later (issue 141).
     info, err = None, "no hub lookup was made"
     if base_hub_info is not None:
         try:
@@ -544,6 +584,11 @@ def _audio_base(*, model_id: str, base: str, inferred: bool, report, accept_infe
                 err = "the hub's answer could not be read"
         except Exception as exc:
             err = f"{type(exc).__name__}: {exc}"
+    try:
+        snap = local_snapshot(base)
+    except Exception as exc:                  # an unreadable cache is not an empty one: nothing is downloaded on that guess
+        return Check("base", BLOCK, f"cannot read the local cache for the base model {base}: {type(exc).__name__}: {exc}",
+                     "model-unavailable", data=data)
     if info is None and snap is None:
         return Check("base", BLOCK, f"cannot look up the base model {base} on the hub: {err}", "model-unavailable", data=data)
     from orchard import audio_facts
@@ -575,16 +620,16 @@ def _audio_base(*, model_id: str, base: str, inferred: bool, report, accept_infe
         why = f"the cached copy is incomplete (missing {', '.join(missing[:3])}), so " if missing else ""
         where = f"{why}its snapshot will be downloaded ({info.total_bytes / 1e9:.1f} GB)"
     which = f"research inferred it ({_selection_basis(report)}) and the operator accepted it" if inferred else "the model's base"
+    _, runtime_note = _audio_runtime_note(model_id, local_snapshot, audio_paths)
     return Check("base", WARN, f"base {base} ({which}). {model_id} is an audio model ({audio}). No installed bundle is needed: stage 0 compares "
-                 "the two repositories directly, and no bundle, container package or tt-metal model serves an audio model on a chip yet. The "
-                 "run will stop after stage 0 as blocked with audio-path-unbuilt; the run's BLOCKED.md says what unblocks it (the text for "
-                 f"that code is in orchard/narrate.py). The base snapshot is still read by stage 0: {where}.{gated_note}", data=data)
+                 "the two repositories directly, and no bundle, container package or tt-metal model serves an audio model on a chip. "
+                 f"{runtime_note} The base snapshot is still read by stage 0: {where}.{gated_note}", data=data)
 
 
 def check_base(*, model_id: str, hub: HubInfo | None, base_override: str | None, local_snapshot: Callable,
                installed: list, search: Callable | None, report: dict | None = None,
                accept_inferred: bool = False, stock: Callable | None = None, audio: str | None = None,
-               base_hub_info: Callable | None = None) -> Check:
+               base_hub_info: Callable | None = None, audio_paths=None) -> Check:
     """The model this run is compared with and served through. It needs an installed bundle (stages 2 and
     4 serve the new weights with it) and a snapshot on disk (stage 0 compares tensors and configs). A missing
     snapshot is downloaded by the command. A missing bundle is a block that lists what `tt model search`
@@ -608,7 +653,7 @@ def check_base(*, model_id: str, hub: HubInfo | None, base_override: str | None,
                      data={"base": None, "snapshot": None, "needs_fetch": False, "candidates": [], "report": report})
     if audio:
         found = _audio_base(model_id=model_id, base=base, inferred=inferred, report=report, accept_inferred=accept_inferred, audio=audio,
-                            local_snapshot=local_snapshot, base_hub_info=base_hub_info)
+                            local_snapshot=local_snapshot, base_hub_info=base_hub_info, audio_paths=audio_paths)
         if found is not None:
             return found
     serving = [b for b in installed if b.weights_repo == base]
@@ -791,7 +836,11 @@ def missing_audio_components(snap: Path) -> list[str]:
     own = _repo_of_snapshot(snap)
     if cfg is None or own is None:
         return []
-    return [f"{sub}/config.json" for sub in audio_facts.component_subfolders(cfg, own) if not (snap / sub / "config.json").is_file()]
+    # Stage 0 compares a text encoder when the config's repo_id is either repository of the pair. For a model of the planned pair (the two
+    # repositories orchard/audio_plan.py knows) the other one is the partner; any other model has only its own id. Ids match exactly.
+    from orchard import audio_plan
+    partners = tuple(audio_plan.LIBRARY_NAMES) if own in audio_plan.LIBRARY_NAMES else ()
+    return [f"{sub}/config.json" for sub in audio_facts.component_subfolders(cfg, own, partners) if not (snap / sub / "config.json").is_file()]
 
 
 def snapshot_complete(snap: Path) -> bool:
@@ -807,14 +856,64 @@ def snapshot_complete(snap: Path) -> bool:
     weights = list(snap.rglob("*.safetensors")) + list(snap.glob("pytorch_model*.bin"))
     if any(not w.exists() for w in weights):
         return False
-    for idx in list(snap.rglob("*.index.json")):
+    return not any(_index_problem(idx) for idx in snap.rglob("*.index.json"))
+
+
+INDEX_MAX_BYTES = 32 << 20           # a weight index larger than this is not read (the largest real ones are a few hundred KB)
+
+
+def _index_problem(idx: Path) -> str | None:
+    """Why a weight index file does not vouch for its shards, or None when it does. The index must be strict JSON (safeio.read_json: no
+    repeated key, no NaN or 1e999, bounded size) with a `weight_map` that is a non-empty object, every value a non-empty text naming a path
+    inside the snapshot (no `..`, not absolute), and every named shard a regular file behind a readable link. An empty map, a null or
+    empty name and a name that is a directory all fail, because each would otherwise pass as 'no shard is missing'."""
+    from orchard import safeio
+    try:
+        # A snapshot holds each file as a link into the cache's blobs directory, so the link is resolved before the bounded read.
+        data = safeio.read_json(idx.resolve(), max_bytes=INDEX_MAX_BYTES, expect=dict)
+    except (OSError, ValueError, RuntimeError, safeio.SafeReadError) as exc:
+        return f"{idx.name} cannot be read: {type(exc).__name__}"
+    wmap = data.get("weight_map")
+    if not isinstance(wmap, dict) or not wmap:
+        return f"{idx.name} has no weight_map of tensors"
+    seen: set[str] = set()
+    for name in wmap.values():
+        if not isinstance(name, str) or not name.strip():
+            return f"{idx.name} names a shard that is not text"
+        if name in seen:                       # a real index repeats each shard name once per tensor
+            continue
+        seen.add(name)
+        parts = Path(name).parts
+        if Path(name).is_absolute() or ".." in parts or "\\" in name or "\x00" in name:
+            return f"{idx.name} names a shard outside the snapshot"
+        if not (idx.parent / name).is_file():
+            return f"{idx.name} names {name}, which is not a file here"
+    return None
+
+
+def choose_snapshot(hub: HubInfo | None, candidates) -> Path | None:
+    """The best of several complete local snapshots of one repository. With the Hub's answer, a revision that lacks a weight file or weight index the Hub
+    lists is not a local copy of the model and is dropped first. Among the rest: the revision with the fewest other Hub-listed files missing (component
+    configs, `_missing_listed`), then the Hub's own revision (an exact match of the directory name with the Hub's sha), then the most recently
+    modified, then the name. A partial copy that sorts later by name cannot win over a complete one, and a copy that lacks only a component config
+    still wins over one that lacks a weight. When none remains the answer is None: the model is then fetched (a public one) or refused for lack of
+    a token (a gated one), and a missing index is not skipped by calling an incomplete copy local. Without the Hub's answer there is nothing to
+    measure against and the last by name is used. None for no candidates."""
+    found = sorted(Path(c) for c in candidates)
+    if not found:
+        return None
+    if hub is None:
+        return found[-1]
+    found = [d for d in found if not _missing_weights(hub, d)]
+    if not found:
+        return None
+
+    def mtime(d: Path) -> float:
         try:
-            names = set(json.loads(idx.read_text())["weight_map"].values())
-        except (OSError, ValueError, KeyError, AttributeError, TypeError):
-            return False
-        if any(not (idx.parent / n).exists() for n in names if isinstance(n, str)):
-            return False
-    return True
+            return d.stat().st_mtime
+        except OSError:
+            return 0.0
+    return min(found, key=lambda d: (len(_missing_listed(hub, d)), 0 if hub.sha and d.name == hub.sha else 1, -mtime(d), d.name))
 
 
 def audio_evidence_for(hub: HubInfo | None, local_path) -> str | None:
@@ -838,6 +937,17 @@ def hf_home_for(cfg) -> Path:
     if os.environ.get("HF_HOME"):
         return Path(os.environ["HF_HOME"])
     return Path(cfg.operator_home or operator_home()) / ".cache" / "huggingface"
+
+
+def _audio_paths_for(cfg):
+    """Where the audio runtime's interpreters and library checkout are for this run (the same call the supervisor makes). None when the
+    configuration gives no home to look in."""
+    from orchard import audio_runtime
+    from orchard.supervisor import operator_home
+    try:
+        return audio_runtime.audio_paths(cfg.operator_home or operator_home())
+    except Exception:
+        return None
 
 
 def cache_root_for(cfg) -> Path:
@@ -904,7 +1014,7 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
                            accept_inferred=accept_inferred_base,
                            # the parameters directory is in this box's tt-metal tree; a lab runs its tests on another box
                            stock=None if getattr(cfg, "mode", "local") == "lab" else s.stock_params,
-                           audio=audio, base_hub_info=s.hub_info)
+                           audio=audio, base_hub_info=s.hub_info, audio_paths=_audio_paths_for(cfg))
         if failed:
             from orchard.research.types import clean
             found.detail += f" (research failed: {clean(failed)})"
@@ -1044,6 +1154,7 @@ def _nearest_existing(path: Path) -> Path:
 
 def default_signals(cfg, research_options=None) -> Signals:
     from orchard import supervisor, tiers
+    known_hubs: dict[str, HubInfo] = {}          # model id -> the Hub's last good answer for it, filled by hub_info
 
     def hub_info(model_id: str):
         # No Authorization header: the harness never sends the operator's token.
@@ -1054,7 +1165,9 @@ def default_signals(cfg, research_options=None) -> Signals:
                 data = json.load(resp)
                 if not isinstance(data, dict):
                     return None, "the hub's answer is not a JSON object"
-                return parse_hub(data), None
+                info = parse_hub(data)
+                known_hubs[model_id] = info          # local_snapshot measures its candidates against this, with no second request
+                return info, None
         except urllib.error.HTTPError as exc:
             return None, f"HTTP {exc.code}"
         except (OSError, ValueError) as exc:
@@ -1068,7 +1181,9 @@ def default_signals(cfg, research_options=None) -> Signals:
         # local skipped the download. A snapshot is local when it has a config file (config.json, or model_config.json for
         # repos laid out that way) and `snapshot_complete` finds its weights behind readable links.
         found = [d for d in found if snapshot_complete(d)]
-        return found[-1] if found else None
+        # With the Hub's answer for this model already in hand (the preflight asks the hub first), the revision that has the files the Hub
+        # lists wins over one that merely sorts later. Without it the last by name is used, as before. No request is made here.
+        return choose_snapshot(known_hubs.get(model_id), found)
 
     def gozer_status() -> str:
         try:

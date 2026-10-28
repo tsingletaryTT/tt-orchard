@@ -669,8 +669,26 @@ def _types():
 from orchard.model_config import ModelConfigError as _ModelConfigError  # noqa: E402
 ALL_ITEMS = frozenset(i.name for i in ITEMS)         # a loader that lets every OSError propagate by design
 
+def _preflight_config_json(base: Path):
+    from orchard import preflight
+    return preflight._config_json(base / "input.json")
+
+
+def _preflight_index_problem(base: Path):
+    from orchard import preflight
+    return preflight._index_problem(base / "input.json")
+
+
+def _audio_decision_load_category_rules(base: Path):
+    from orchard import audio_decision
+    return audio_decision.load_category_rules(base / "input.json")
+
+
 READERS: list[Reader] = [
-    Reader("ledger.read_entries", _ledger_read_entries, suffix=b"\n", documented=(_LedgerCorrupt,)),
+    Reader("preflight._config_json", _preflight_config_json),
+    Reader("preflight._index_problem", _preflight_index_problem),
+    Reader("audio_decision.load_category_rules", _audio_decision_load_category_rules, documented=(_SafeReadError,)),
+    Reader("ledger.read_entries",_ledger_read_entries, suffix=b"\n", documented=(_LedgerCorrupt,)),
     Reader("telegraph_store.read_snapshot", _telegraph_store_read_snapshot, rel="project.db",
            documented=(_LedgerUnavailable, _LedgerRefused)),
     Reader("telegraph_migrate.read_archive_lines", _telegraph_migrate_read_archive_lines, suffix=b"\n", rel="telegraph.jsonl.archived",
@@ -952,7 +970,6 @@ UNREGISTERED_MODULES = (
     'opverify.py',
     'package_card.py',
     'package_cmd.py',
-    'preflight.py',
     'reported_cmd.py',
     'research/ports.py',
     'rolefit.py',
