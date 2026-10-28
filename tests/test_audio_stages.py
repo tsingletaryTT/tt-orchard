@@ -580,3 +580,60 @@ def test_the_gate_refuses_an_edited_control_difference_a_missing_chip_run_and_a_
     del ref["runs"]["control_reference"]
     (ref_dir / "audio_reference.json").write_text(json.dumps(ref))
     assert any("stage 1 made no control_reference" in p for p in st.chip_problems(s2, run_dir, ref_dir))
+
+
+# ---- the base control is judged by discrimination, and its agreement is informational ------------------------------------------------
+
+def test_the_control_agreement_is_recorded_as_informational_and_does_not_decide(tmp_path):
+    run_dir, ref_dir, s2, res = stage2(tmp_path)
+    key = "control_chip_vs_control_reference"
+    assert res["agreement"][key]["bars"].startswith("informational")
+    assert res["control_discrimination"]["ok"] is True and res["control_discrimination"]["own_rel_l2"] < res["control_discrimination"]["other_rel_l2"]
+
+
+def test_a_control_run_that_misses_the_provisional_bars_but_is_nearer_its_own_reference_still_passes(tmp_path):
+    run_dir, ref_dir, s2, res = stage2(tmp_path)
+    d = s2 / "chip" / "small-music-base"
+    ref = run_dir / res["reference_runs"]["control_reference"]["dir"]
+    shutil.rmtree(d)
+    with ar.load_run(ref) as r:                    # the latent well outside the provisional bars, still nearer its own reference than the fine-tune's
+        lat, lay, wave = (np.asarray(r.array(*k)) for k in (("latent", "final"), ("layer", "layer_00"), ("waveform", "audio")))
+    make_run(d, "small-music-base", dtype="bfloat16", device="tt", wave=wave, latent=lat + 0.45 * np.random.default_rng(3).standard_normal(lat.shape),
+             layer=lay, revision=REV)
+    (d / "chip.json").write_text(json.dumps({"device": "test chip", "total_s": 12.5}))
+    res = st.finish_chip(s2, run_dir, ref_dir, st.chip_plan(MODEL, BASE), {"chip": "reference", "control_chip": "control_reference"})
+    assert res["agreement"]["control_chip_vs_control_reference"]["ok"] is False
+    assert st.chip_problems(s2, run_dir, ref_dir) == []
+
+
+def test_a_control_nearer_the_fine_tunes_reference_than_its_own_is_refused(tmp_path):
+    run_dir, ref_dir, s2, res = stage2(tmp_path)
+    d = s2 / "chip" / "small-music-base"
+    fine_ref = run_dir / res["reference_runs"]["reference"]["dir"]
+    shutil.rmtree(d)
+    twin(fine_ref, d, noise=0.01, name="small-music-base")       # the base's run made from the fine-tune's arrays
+    (d / "chip.json").write_text(json.dumps({"device": "test chip", "total_s": 12.5}))
+    res = st.finish_chip(s2, run_dir, ref_dir, st.chip_plan(MODEL, BASE), {"chip": "reference", "control_chip": "control_reference"})
+    assert res["control_discrimination"]["ok"] is False
+    assert any("nearer to the base's own reference" in p or "not nearer" in p for p in st.chip_problems(s2, run_dir, ref_dir))
+
+
+def test_the_gate_refuses_an_edited_discrimination_record(tmp_path):
+    run_dir, ref_dir, s2, res = stage2(tmp_path)
+    res["control_discrimination"]["other_rel_l2"] = 99.0
+    (s2 / "audio_result.json").write_text(json.dumps(res))
+    assert any("recorded discrimination" in p for p in st.chip_problems(s2, run_dir, ref_dir))
+
+
+def test_the_fine_tune_pair_is_still_held_to_the_bars(tmp_path):
+    run_dir, ref_dir, s2, _ = stage2(tmp_path, chip_noise=0.8)
+    assert any(p.startswith("chip_vs_reference") and "does not agree" in p for p in st.chip_problems(s2, run_dir, ref_dir))
+
+
+def test_a_latent_of_another_shape_cannot_show_discrimination(tmp_path):
+    a = make_run(tmp_path / "a", "small-music-base")
+    b = make_run(tmp_path / "b", "small-music-base", latent=np.zeros((1, 4, 9)))
+    c = make_run(tmp_path / "c", "small-music-base")
+    d = st.control_discrimination(a, c, b)
+    assert d == {"ok": False, "own_rel_l2": None, "other_rel_l2": None}
+    assert st.closeness(a, b) is None

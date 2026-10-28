@@ -161,11 +161,14 @@ def waveform_distance(ref_run, cand_run) -> float | None:
     return ar.log_spectrum_distance(ref_run.array("waveform", "audio"), cand_run.array("waveform", "audio"))
 
 
-def compare(ref_dir, cand_dir) -> dict:
+def compare(ref_dir, cand_dir, *, informational: bool = False) -> dict:
     """`summarise(compare_runs(...))` of two run directories, float32 reference against the candidate with the dtype setting left out of the
-    match, and the waveform's log-spectrum distance added."""
+    match, and the waveform's log-spectrum distance added. `informational` says the numbers are reported and no bar decides anything (the base
+    control: fifty guided steps compound the same per-pass error the fine-tune's eight steps show)."""
     with ar.load_run(ref_dir) as ref, ar.load_run(cand_dir) as cand:
         out = summarise(ar.compare_runs(ref, cand, cross_precision=True))
+        if informational:
+            out["bars"] = "informational: the provisional bars are shown as met or failed, and the control's verdict rests on the discrimination check"
         if out["comparable"] and out["waveform"] is not None:
             out["waveform"]["log_spectrum_distance"] = waveform_distance(ref, cand)
     return out
@@ -176,6 +179,20 @@ def control_difference(fine_dir, base_dir) -> dict:
     with ar.load_run(fine_dir) as ft, ar.load_run(base_dir) as base:
         r = ar.compare_control(ft, base, require_matched=False)
     return {"ok": bool(r.get("ok")), "rel_l2": r.get("rel_l2"), "pcc": r.get("pcc"), "problems": list(r.get("problems", []))}
+
+
+def closeness(ref_dir, cand_dir) -> float | None:
+    """The relative L2 error of the candidate's final latent against the reference's."""
+    with ar.load_run(ref_dir) as ref, ar.load_run(cand_dir) as cand:
+        m = ar.metrics(np.asarray(ref.array("latent", "final")), np.asarray(cand.array("latent", "final")))
+    return m.get("rel_l2") if m.get("comparable") else None
+
+
+def control_discrimination(base_ref_dir, fine_ref_dir, chip_base_dir) -> dict:
+    """The base's chip run must be nearer to the base's own CPU reference than to the fine-tune's. A path that served the wrong weights would
+    be nearer to the other one. Both are relative L2 errors of the final latent."""
+    own, other = closeness(base_ref_dir, chip_base_dir), closeness(fine_ref_dir, chip_base_dir)
+    return {"ok": own is not None and other is not None and own < other, "own_rel_l2": own, "other_rel_l2": other}
 
 
 def sha256_file(path) -> str:
@@ -454,15 +471,17 @@ def finish_chip(stage_dir, run_dir, ref_stage_dir, plan: list[dict], reference_r
                               "total_seconds": chip_json.get("total_s")}
         ref_role = reference_roles[item["role"]]
         ref_entry = ref_rec["runs"][ref_role]
-        agreement[f"{item['role']}_vs_{ref_role}"] = compare(run_dir / ref_entry["dir"], d)
+        agreement[f"{item['role']}_vs_{ref_role}"] = compare(run_dir / ref_entry["dir"], d, informational=item["role"] == ROLE_CONTROL_CHIP)
     if ROLE_CHIP in runs and ROLE_HOST in ref_rec["runs"]:
         agreement["chip_vs_host_same_env"] = compare(run_dir / ref_rec["runs"][ROLE_HOST]["dir"], stage_dir / "chip" / plan[0]["name"])
-    control = None
+    control = discrimination = None
     if ROLE_CONTROL_CHIP in runs:
         control = control_difference(stage_dir / "chip" / plan[0]["name"], stage_dir / "chip" / plan[1]["name"])
+        discrimination = control_discrimination(run_dir / ref_rec["runs"][ROLE_CONTROL_REFERENCE]["dir"], run_dir / ref_rec["runs"][ROLE_REFERENCE]["dir"],
+                                                stage_dir / "chip" / plan[1]["name"])
     result = {"schema": SCHEMA, "runtime": "stable-audio-3-dit-on-chip", "settings": settings_for(plan[0]["name"]), "runs": runs,
               "reference_runs": ref_rec["runs"], "agreement": agreement, "environment_floor": ref_rec.get("environment_floor"),
-              "control_difference": control,
+              "control_difference": control, "control_discrimination": discrimination,
               "limits": ["Nobody has listened to the clips; no check here says the music is good.",
                          "The agreement bars are provisional choices, not yet set from a measured noise floor.",
                          "Only the diffusion transformer ran on the chip. The T5Gemma encoder, the sampler and the autoencoder decoder ran on the host.",
@@ -502,15 +521,26 @@ def chip_problems(stage_dir, run_dir, ref_stage_dir) -> list[str]:
             continue
         rec = agreement.get(key)
         try:
-            fresh = compare(Path(run_dir) / ref_runs[ref_role]["dir"], Path(run_dir) / runs[chip_role]["dir"])
+            fresh = compare(Path(run_dir) / ref_runs[ref_role]["dir"], Path(run_dir) / runs[chip_role]["dir"], informational=chip_role == ROLE_CONTROL_CHIP)
         except (ar.ReferenceError, KeyError) as exc:
             problems.append(f"{key}: {exc}")
             continue
         if not agree(rec, fresh):
             problems.append(f"{key}: the recorded comparison is not what the runs give now")
-        if not fresh["ok"]:
+        if not fresh["ok"] and chip_role == ROLE_CHIP:
             problems.append(f"{key}: the chip run does not agree with its reference: {', '.join(fresh['failed'] or fresh['problems'])}")
     if ROLE_CONTROL_CHIP in runs:
+        try:
+            fresh_d = control_discrimination(Path(run_dir) / ref_runs[ROLE_CONTROL_REFERENCE]["dir"], Path(run_dir) / ref_runs[ROLE_REFERENCE]["dir"],
+                                             Path(run_dir) / runs[ROLE_CONTROL_CHIP]["dir"])
+        except (ar.ReferenceError, KeyError) as exc:
+            problems.append(f"control discrimination: {exc}")
+        else:
+            if not agree(res.get("control_discrimination"), fresh_d):
+                problems.append("control: the recorded discrimination is not what the runs give now")
+            if not fresh_d["ok"]:
+                problems.append("control: the base's chip run is not nearer to the base's own reference than to the fine-tune's, so the chip path may not be using "
+                                "the model's own weights")
         try:
             fresh_c = control_difference(Path(run_dir) / runs[ROLE_CHIP]["dir"], Path(run_dir) / runs[ROLE_CONTROL_CHIP]["dir"])
         except (ar.ReferenceError, KeyError) as exc:
