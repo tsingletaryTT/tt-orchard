@@ -234,3 +234,48 @@ def test_a_claim_that_times_out_with_the_deadline_nearly_spent_still_recovers_a_
 
 def test_the_constants_are_ordered_so_a_claim_floor_fits_inside_the_claim_timeout():
     assert 0 < hwlease.CLAIM_MIN_TIMEOUT_S <= hwlease.CLAIM_TIMEOUT_S and hwlease.RECOVERY_TIMEOUT_S <= hwlease.CLAIM_TIMEOUT_S
+
+
+# ---- details the mutation table asked for ---------------------------------------------------------------------------------
+
+
+def test_a_release_that_could_not_start_is_not_in_flight_so_a_reclaim_may_release_again():
+    cmd = FakeCmd()
+    cmd.history = [granted_event("L1")]
+    cmd.say("release", OSError("no gozer"), res(0, json.dumps({"message": "ok"})))
+    led = leases(cmd)
+    assert led.release("L1").held is True and "L1" not in led.in_flight
+    led.reclaim()
+    assert [c["argv"][2] for c in cmd.calls if c["argv"][1] == "release"] == ["L1", "L1"]
+
+
+def test_an_overrunning_release_keeps_the_pid_of_the_command_that_was_left_running():
+    cmd = FakeCmd()
+    cmd.say("release", res(None, timed_out=True, left_running=True, pid=999))
+    led = leases(cmd)
+    led.release("L1")
+    assert led.in_flight["L1"] == 999
+
+
+def test_a_reaped_lease_counts_as_finished_for_the_wait():
+    cmd = FakeCmd()
+    cmd.history = [granted_event("L1"), {"event": "reaped", "lease_id": "L1"}]
+    led = leases(cmd)
+    led.in_flight["L1"] = None
+    assert led._await_release("L1") is True and "L1" not in led.in_flight and led.time.sleeps == []
+
+
+def test_another_leases_release_does_not_end_the_wait_for_this_one():
+    cmd = FakeCmd()
+    cmd.history = [granted_event("L1"), {"event": "released", "lease_id": "L2", "duration_s": 5.0}]
+    led = leases(cmd)
+    led.in_flight["L1"] = None
+    assert led._await_release("L1") is False and "L1" in led.in_flight
+
+
+def test_the_reads_of_a_reclaim_use_the_recovery_timeout():
+    cmd = FakeCmd()
+    cmd.history = [granted_event("L1")]
+    leases(cmd).reclaim()
+    reads = [c["timeout"] for c in cmd.calls if c["argv"][1] in ("history", "queue")][:2]
+    assert reads == [hwlease.RECOVERY_TIMEOUT_S, hwlease.RECOVERY_TIMEOUT_S]

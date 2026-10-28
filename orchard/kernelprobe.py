@@ -1384,11 +1384,26 @@ def make_hardware_check(adir: Path, *, op: str, n, shared_python, policy: hwtool
             return {**blocked, "elapsed_s": 0.0}, None, ""
         reason = f"kernel-probe {op} attempt {n} agent check {k}"
         began = clock()
+
+        def found(lease):
+            """A lease that gozer granted and the probe did not see: note it and start its clock before it is released."""
+            ctx["lease_id"] = ctx.get("lease_id") or lease["lease_id"]
+            if not ctx.get("granted"):
+                ctx["granted"] = True
+                on_grant()
         try:
             answer = leases.request(reason)
             if answer.error:
-                leases.reclaim()                        # gozer may have granted it before its answer was lost
-                return not_run("harness_error", f"gozer could not give a lease: {answer.error}"), None, ""
+                # gozer may have granted the lease before its answer was lost: give back whatever it shows for this pid, and
+                # charge the held time like any lease (its id is kept, and gozer's duration settles the estimate).
+                reclaimed = leases.reclaim(on_found=lambda lease: ctx.setdefault("lease_id", lease["lease_id"]))
+                hw = not_run("harness_error", f"gozer could not give a lease: {answer.error}")
+                if reclaimed.leases:
+                    hw.update(lease_id=reclaimed.leases[0]["lease_id"], lease_incomplete=True,
+                              elapsed_s=round(clock() - began, 1))
+                if reclaimed.left:
+                    hw["release_error"] = f"something was left unresolved: {reclaimed.left}"
+                return hw, None, ""
             grant, cancel_error = answer.grant, None
             if grant is None:
                 ctx["queued"] = True
@@ -1397,7 +1412,7 @@ def make_hardware_check(adir: Path, *, op: str, n, shared_python, policy: hwtool
                 return ({"passed": False, "started": False, "category": "queued", "pcc_min": None, "sets": [],
                          "violations": [], "first_line": f"the board stayed busy for {clock() - began:.0f} s",
                          "queued": {"ticket": answer.ticket, "cancel_error": cancel_error}, "elapsed_s": 0.0}, "queued", "")
-            ctx["lease_id"] = grant["lease_id"]
+            ctx["lease_id"], ctx["granted"] = grant["lease_id"], True
             held = clock()
             try:
                 on_grant()
@@ -1405,7 +1420,7 @@ def make_hardware_check(adir: Path, *, op: str, n, shared_python, policy: hwtool
             finally:
                 released = leases.release(grant["lease_id"])
         except BaseException:
-            leases.reclaim()
+            leases.reclaim(on_found=found)              # records a recovered grant before it is released
             raise
         hw["waited_s"] = round(held - began, 1)
         hw["elapsed_s"] = round(clock() - held, 1)

@@ -367,11 +367,11 @@ def test_reclaim_says_what_it_could_not_give_back_and_never_raises():
     cmd = FakeCmd()
     cmd.history = [granted_event("L1")]
     cmd.say("release", OSError("no gozer"))
-    assert "L1" in leases(cmd).reclaim()
+    assert "L1" in leases(cmd).reclaim().left
 
 
 def test_reclaim_with_nothing_held_is_quiet():
-    assert leases(FakeCmd()).reclaim() is None
+    assert leases(FakeCmd()).reclaim().left is None
 
 
 def test_a_queue_entry_of_this_pid_but_another_who_is_not_ours():
@@ -386,7 +386,7 @@ def test_reclaim_never_raises_even_when_gozer_cannot_be_read_at_all():
     def boom():
         raise RuntimeError("history exploded")
     led.mine = boom
-    assert "cannot confirm" in led.reclaim()
+    assert "cannot confirm" in led.reclaim().left
 
 
 # ---- a claim that fails for a moment must not end the wait or leak the ticket (seen on the real gozer: 2026-10-27) ----------

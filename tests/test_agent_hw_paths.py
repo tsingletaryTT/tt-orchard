@@ -40,6 +40,9 @@ class SimGozer:
         self.held = {}                     # lease id -> seconds the lease has been held (fake clock stamp)
         self.counter = 0
         self.interrupted_release = False
+        self.queue_fails = False
+        self.finish_after = 20.0           # seconds a release that was interrupted takes to finish by itself (None: never)
+        self.pending_finish = {}           # lease id -> the fake-clock time its running release finishes
 
     # the command runner
     def run(self, argv, timeout, env=None, kill_on_timeout=True):
@@ -92,6 +95,12 @@ class SimGozer:
         if mode == "interrupt_once" and not self.interrupted_release:
             self.interrupted_release = True
             raise KeyboardInterrupt
+        if mode == "interrupt_running" and not self.interrupted_release:
+            # Ctrl-C lands while gozer's release (a separate session) is still running: it finishes by itself later.
+            self.interrupted_release = True
+            if self.finish_after is not None:
+                self.pending_finish[lease] = CLOCK["now"] + self.finish_after
+            raise KeyboardInterrupt
         if mode == "refused":
             return res(15, "", "device still open")
         if mode == "overrun":
@@ -109,10 +118,14 @@ class SimGozer:
                              round(CLOCK["now"] - self.held.get(lease, CLOCK["now"]) + 42.0, 1)})
 
     def _history(self, argv):
+        for lease, at in list(self.pending_finish.items()):
+            if CLOCK["now"] >= at:
+                self.finish_release(lease, seconds=round(at - self.held.get(lease, at) + 42.0, 1))
+                del self.pending_finish[lease]
         return res(1, "", "boom") if self.history_fails else res(0, json.dumps({"history": self.history}))
 
     def _queue(self, argv):
-        return res(0, json.dumps({"queue": self.queue}))
+        return res(1, "", "boom") if self.queue_fails else res(0, json.dumps({"queue": self.queue}))
 
     # reading back
     def released(self):
@@ -430,28 +443,27 @@ def test_p13_a_release_that_overruns_is_left_running_and_its_time_is_settled_fro
 # P14 --------------------------------------------------------------------------------------------------------------
 
 
-def test_p14_an_interrupt_during_the_release_reclaims_what_gozer_still_shows(rig):
-    rig.sim.release_mode = "interrupt_once"
+def test_p14_an_interrupt_during_a_release_that_is_still_running_waits_for_it_and_does_not_release_again(rig):
+    rig.sim.release_mode = "interrupt_running"
     with pytest.raises(KeyboardInterrupt):
         rig.call()
-    assert rig.sim.released() == ["L1", "L1"]                                  # the interrupted release, then the reclaim
-    assert rig.leases.unresolved() is None
+    assert rig.sim.released() == ["L1"]                                        # one release: the interrupted one, never a second
+    assert rig.leases.unresolved() is None and "L1" not in rig.leases.in_flight
+    rec = rig.check.summary()["calls"][0]
+    assert rec["outcome"] == "interrupted" and rec["lease_id"] == "L1" and rec["lease_incomplete"] is False
+    assert rec["lease_s"] >= 42.0                                              # gozer's duration replaced the estimate
 
 
-def test_p14b_a_reclaim_that_cannot_release_leaves_the_lease_shown_by_gozer_and_blocking(rig):
-    rig.sim.release_mode = "interrupt_once"
-    original = rig.sim._release
-
-    def refuse_after(argv):
-        if rig.sim.interrupted_release:
-            return res(15, "", "device still open")
-        return original(argv)
-    rig.sim._release = refuse_after
+def test_p14b_a_release_that_never_finishes_is_waited_for_then_left_unresolved_and_blocks_the_next_call(rig):
+    rig.sim.release_mode = "interrupt_running"
+    rig.sim.finish_after = None
     with pytest.raises(KeyboardInterrupt):
         rig.call()
+    assert rig.sim.released() == ["L1"] and CLOCK["now"] >= hwlease.RELEASE_TIMEOUT_S - hwlease.CLAIM_POLL_S
     rig.sim.release_mode = "ok"
-    rig.sim._release = original
-    assert rig.call().startswith("hardware_check refused") and "lease L1" in rig.call()
+    second = rig.call()
+    assert second.startswith("hardware_check refused") and "lease L1" in second
+    assert rig.sim.released() == ["L1"]
 
 
 # P15 --------------------------------------------------------------------------------------------------------------

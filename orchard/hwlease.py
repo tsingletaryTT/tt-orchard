@@ -29,7 +29,9 @@ from orchard.commands import run_command
 
 RELEASE_TIMEOUT_S = 90.0         # choice: a release resets the chips (about 42 s measured); an overrun is left running, not killed
 CLAIM_POLL_S = 2.0               # between claims of the kept ticket (gozer wait itself looks once a second)
-CLAIM_TIMEOUT_S = 60.0           # one `gozer acquire` call; gozer answers at once
+CLAIM_TIMEOUT_S = 60.0           # the most one `gozer acquire` call may take; gozer answers at once
+CLAIM_MIN_TIMEOUT_S = 5.0        # the least: a claim is given the wait that is left, but never less than this
+RECOVERY_TIMEOUT_S = 15.0        # one read of gozer's history or queue while recovering inside a wait or an exception
 HISTORY_EVENTS = 200
 
 # `gozer release` exits 0 even when its reset failed. These phrases in its message say so (orchard/adapters/gozer.py).
@@ -56,6 +58,11 @@ class Mine(NamedTuple):
     readable: bool  # False when history or the queue could not be read
 
 
+class Reclaimed(NamedTuple):
+    left: str | None        # what gozer still shows for this pid afterwards (see unresolved), else None
+    leases: list            # the leases that were found, each {"lease_id", "chips", "env", "granted_at"}
+
+
 class LeaseAnswer(NamedTuple):
     grant: dict | None      # {"lease_id", "chips", "env"} when granted
     ticket: str | None      # when queued
@@ -68,6 +75,9 @@ class GozerLeases:
         self.who, self.pid = who, os.getpid() if pid is None else pid
         self.run, self.gozer = run if run is not None else _run_gozer, gozer
         self.clock, self.sleep = clock or time.monotonic, sleep or time.sleep
+        # Releases this process started and has not seen finish (an interrupt, or an overrun that was left running): lease id ->
+        # the left-running command's pid. A reclaim waits for gozer to say these are released instead of starting a second one.
+        self.in_flight: dict[str, int | None] = {}
 
     # ---- asking ---------------------------------------------------------------------------------------------------
 
@@ -79,15 +89,15 @@ class GozerLeases:
         """The first `gozer acquire --owner-pid <pid>`: a grant, a queue ticket, or the reason gozer said no."""
         return self._answer(self._argv(reason))
 
-    def claim(self, ticket: str, reason: str) -> LeaseAnswer:
+    def claim(self, ticket: str, reason: str, timeout: float = CLAIM_TIMEOUT_S) -> LeaseAnswer:
         """Claim the kept ticket. Exit 10 with the same ticket means not yet; a grant means the lease is ours."""
         if not _NAME.fullmatch(ticket or ""):
             return LeaseAnswer(None, None, f"not a ticket name: {ticket!r}")
-        return self._answer(self._argv(reason, "--ticket", ticket))
+        return self._answer(self._argv(reason, "--ticket", ticket), timeout)
 
-    def _answer(self, argv: list[str]) -> LeaseAnswer:
+    def _answer(self, argv: list[str], timeout: float = CLAIM_TIMEOUT_S) -> LeaseAnswer:
         try:
-            got = self.run(argv, CLAIM_TIMEOUT_S)
+            got = self.run(argv, timeout)
         except Exception as exc:
             return LeaseAnswer(None, None, str(exc))
         try:
@@ -115,14 +125,17 @@ class GozerLeases:
         pid while the probe was not looking is returned, not lost."""
         end = self.clock() + max(wait_s, 0.0)
         while True:
-            answer = self.claim(ticket, reason)
+            # A claim is given the wait that is left (never less than the floor), so a short wait is not stretched to a minute
+            # by one slow call. The first claim is made even for a zero wait: that is the immediate check.
+            left = end - self.clock()
+            answer = self.claim(ticket, reason, timeout=min(CLAIM_TIMEOUT_S, max(left, CLAIM_MIN_TIMEOUT_S)))
             if answer.grant is not None:
                 return answer.grant, None
             if answer.ticket is None:
                 # Not a ticket and not a grant: gozer erred for a moment (seen on the real gozer while another lease's reset was
-                # starting) or the ticket is gone. A lease granted to this pid whose answer was lost is taken; otherwise the wait
-                # goes on while the queue still shows the ticket (or cannot be read) and ends, with the ticket cancelled, when
-                # the queue shows it gone.
+                # starting), the claim timed out, or the ticket is gone. A lease granted to this pid whose answer was lost is
+                # taken; otherwise the wait goes on while the queue still shows the ticket (or cannot be read) and ends, with the
+                # ticket cancelled, when the queue shows it gone.
                 found = self._found_lease()
                 if found is not None:
                     return found, None
@@ -136,11 +149,11 @@ class GozerLeases:
         return found, (error if found is None else None)
 
     def _ticket_queued(self, ticket: str) -> bool | None:
-        queue = self._records("queue", [self.gozer, "queue", "--json"], "queue")
+        queue = self._records("queue", [self.gozer, "queue", "--json"], "queue", RECOVERY_TIMEOUT_S)
         return None if queue is None else any(str(q.get("ticket")) == ticket for q in queue)
 
     def _found_lease(self) -> dict | None:
-        found = self.mine()
+        found = self.mine(RECOVERY_TIMEOUT_S)
         return found.leases[0] if found.leases else None
 
     # ---- giving back ----------------------------------------------------------------------------------------------
@@ -162,13 +175,17 @@ class GozerLeases:
         What is still held afterwards is read back from gozer by mine(), not remembered here."""
         if not _NAME.fullmatch(lease_id or ""):
             return ReleaseResult(False, False, f"not a lease id: {lease_id!r}")
+        self.in_flight[lease_id] = None              # an interrupt in the command leaves it here: the child may still run
         try:
             got = self.run([self.gozer, "release", lease_id, "--json"], RELEASE_TIMEOUT_S, kill_on_timeout=False)
         except Exception as exc:
+            self.in_flight.pop(lease_id, None)       # it could not start (or failed to answer): nothing is running
             return ReleaseResult(False, True, str(exc))
         if got.timed_out:
+            self.in_flight[lease_id] = got.pid
             return ReleaseResult(False, True, f"gozer release {lease_id} is still running after {RELEASE_TIMEOUT_S:.0f} s "
                                               "and was left running")
+        self.in_flight.pop(lease_id, None)
         text = ((got.stdout or "") + (got.stderr or "")).strip()
         if got.returncode == 0:
             message = _message(got.stdout) or text
@@ -179,50 +196,80 @@ class GozerLeases:
             return ReleaseResult(True, False, "")
         return ReleaseResult(False, True, text or f"gozer release exited {got.returncode}")
 
-    def reclaim(self) -> str | None:
+    def reclaim(self, on_found=None) -> Reclaimed:
         """Give back everything gozer shows for this pid: cancel its tickets, release its leases. For an exception path.
-        Returns what could not be given back (see unresolved), else None. Never raises Exception."""
+        `on_found(lease)` is called for each lease before it is released, so the caller can record the grant (and start its
+        chip-time clock) first. A lease whose release this process started and has not seen finish is not released again: the
+        reclaim waits up to RELEASE_TIMEOUT_S for gozer's history to show it released, then leaves it, shown as unresolved.
+        Returns what was found and what gozer still shows. Never raises Exception."""
+        found = Mine([], [], False)
         try:
-            found = self.mine()
+            found = self.mine(RECOVERY_TIMEOUT_S)
             for ticket in found.tickets:
                 self.cancel(ticket)
             for lease in found.leases:
-                self.release(lease["lease_id"])
+                if on_found is not None:
+                    try:
+                        on_found(lease)
+                    except Exception:
+                        pass
+                if lease["lease_id"] in self.in_flight:
+                    self._await_release(lease["lease_id"])
+                else:
+                    self.release(lease["lease_id"])
         except Exception:
             pass
         try:
-            return self.unresolved()
+            left = self.unresolved()
         except Exception:
-            return "cannot confirm that nothing is held (gozer could not be read)"
+            left = "cannot confirm that nothing is held (gozer could not be read)"
+        return Reclaimed(left, found.leases)
+
+    def _await_release(self, lease_id: str) -> bool:
+        """Wait (up to RELEASE_TIMEOUT_S) for gozer's history to show `lease_id` released: the release that is still running
+        finishes by itself. True when it did."""
+        end = self.clock() + RELEASE_TIMEOUT_S
+        while True:
+            events = self._records("history", [self.gozer, "history", "--json", "-n", str(HISTORY_EVENTS)], "history",
+                                   RECOVERY_TIMEOUT_S)
+            if events is not None and any(e.get("lease_id") == lease_id and e.get("event") in ("released", "reaped")
+                                          for e in events):
+                self.in_flight.pop(lease_id, None)
+                return True
+            if self.clock() >= end:
+                return False
+            self.sleep(min(CLAIM_POLL_S, max(end - self.clock(), 0.0)))
 
     # ---- what gozer shows ------------------------------------------------------------------------------------------
 
-    def mine(self) -> Mine:
-        events = self._records("history", [self.gozer, "history", "--json", "-n", str(HISTORY_EVENTS)], "history")
-        queue = self._records("queue", [self.gozer, "queue", "--json"], "queue")
-        if events is None or queue is None:
-            return Mine([], [], False)
-        ended = {e.get("lease_id") for e in events if e.get("event") in ("released", "reaped")}
-        leases = []
-        for e in events:
-            if (e.get("event") == "granted" and e.get("pid") == self.pid and e.get("who") == self.who
-                    and isinstance(e.get("lease_id"), str) and e["lease_id"] not in ended):
-                chips = [c for c in e.get("chips") or [] if isinstance(c, str)]
-                leases.append({"lease_id": e["lease_id"], "chips": chips,
-                               "env": {"TT_VISIBLE_DEVICES": ",".join(chips)} if chips else {},
-                               "granted_at": e.get("ts")})
-        tickets = [str(q["ticket"]) for q in queue if q.get("pid") == self.pid and q.get("who") == self.who
-                   and isinstance(q.get("ticket"), (str, int))]
-        return Mine(leases, tickets, True)
+    def mine(self, timeout: float = 60.0) -> Mine:
+        """What gozer shows for this pid. A read that fails does not discard the other: the leases from a readable history and
+        the tickets from a readable queue are kept, and `readable` says whether both could be read."""
+        events = self._records("history", [self.gozer, "history", "--json", "-n", str(HISTORY_EVENTS)], "history", timeout)
+        queue = self._records("queue", [self.gozer, "queue", "--json"], "queue", timeout)
+        leases, tickets = [], []
+        if events is not None:
+            ended = {e.get("lease_id") for e in events if e.get("event") in ("released", "reaped")}
+            for e in events:
+                if (e.get("event") == "granted" and e.get("pid") == self.pid and e.get("who") == self.who
+                        and isinstance(e.get("lease_id"), str) and e["lease_id"] not in ended):
+                    chips = [c for c in e.get("chips") or [] if isinstance(c, str)]
+                    leases.append({"lease_id": e["lease_id"], "chips": chips,
+                                   "env": {"TT_VISIBLE_DEVICES": ",".join(chips)} if chips else {},
+                                   "granted_at": e.get("ts")})
+        if queue is not None:
+            tickets = [str(q["ticket"]) for q in queue if q.get("pid") == self.pid and q.get("who") == self.who
+                       and isinstance(q.get("ticket"), (str, int))]
+        return Mine(leases, tickets, events is not None and queue is not None)
 
     def unresolved(self) -> str | None:
         """None when gozer shows no lease granted to this pid and no ticket queued by it; else one sentence naming them (or
         saying gozer could not be read)."""
         found = self.mine()
-        if not found.readable:
-            return "cannot confirm that nothing is held (gozer history or queue is not readable)"
         notes = [f"lease {x['lease_id']} may still be held" for x in found.leases]
         notes += [f"ticket {t} is still queued" for t in found.tickets]
+        if not found.readable:
+            notes.append("cannot confirm that nothing else is held (gozer history or queue is not readable)")
         return "; ".join(notes) + "; look with `gozer status`" if notes else None
 
     def duration(self, lease_id: str) -> float | None:
@@ -234,9 +281,9 @@ class GozerLeases:
                 return float(d) if isinstance(d, (int, float)) and not isinstance(d, bool) and d >= 0 else None
         return None
 
-    def _records(self, key: str, argv: list[str], field: str) -> list[dict] | None:
+    def _records(self, key: str, argv: list[str], field: str, timeout: float = 60.0) -> list[dict] | None:
         try:
-            got = self.run(argv, 60)
+            got = self.run(argv, timeout)
             data = json.loads(got.stdout) if got.returncode == 0 else None
         except Exception:
             return None

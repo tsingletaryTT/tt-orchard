@@ -199,3 +199,16 @@ and leases by pid), `tests/test_hwlease.py` (the gozer side) or `tests/test_agen
 
 The budget: the reserve for cleanup is 210 s, gozer's 120 s to stop the harness plus 90 s for the separate release and reset
 (`test_the_cleanup_reserve_covers_...`), so a call's worst case, its run deadline plus both phases, fits the lease cap.
+
+### Round 5 additions (2026-10-27)
+
+| Id | Path | What happens |
+|---|---|---|
+| R1 | `gozer history` fails, `gozer queue` works (or the reverse) | `mine()` keeps what the readable one returned (leases from history, tickets from the queue) and sets `readable` False; `reclaim()` gives back what is known and `unresolved()` names it and says what it cannot confirm, so new work is still refused |
+| R2 | an `acquire` granted the lease but its reply was lost (the first request, or a claim) | `reclaim(on_found=...)` calls the callback before it releases: the grant is noted and the chip-time clock starts, the lease id goes into the call record as incomplete, the held time is estimated from the request and replaced by gozer's `duration_s`, and the budget counts it before the next call; what could not be given back is told to the agent |
+| R3 | an interrupt lands while `gozer release` (a separate session) is still running, or a release overran | `release()` marks the lease in flight before the command runs and keeps it so if the command is interrupted or left running; `reclaim()` does not start a second release: it waits up to 90 s for history to show the lease released, then leaves it unresolved (the next call is refused) |
+| R4 | a short wait | a claim gets the wait that is left (never under 5 s, never over 60 s); no claim starts after the deadline; the first claim is made even for a zero wait; reads made while recovering use a 15 s timeout, so recovery does not stretch the wait |
+| R5 | the cleanup reserve | checked in `HardwareCheck._call`: a call is admitted only when `lease_s - used - cleanup_s >= min_call_s`, and the harness backstop handed to `run_watched` is `min(call_timeout_s, lease_s - used - cleanup_s)`; the stop (term grace 120 s) and the separate release (90 s) are what the 210 s reserve is for. `test_the_harness_deadline_and_both_cleanup_phases_fit_inside_the_lease_cap` pins it on the real wiring |
+
+A grant that gozer makes after the wait deadline (a claim that was already running) is not thrown away: it is a real lease, so the
+call uses it, and the bounded claim timeout limits how late that can be.
