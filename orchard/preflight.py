@@ -451,17 +451,27 @@ def _confirm_inferred(base: str, serving, report) -> Check:
                        "candidates": first + rest, "report": report})
 
 
+CONFIG_MAX_BYTES = 8 << 20           # a config.json larger than this is not read
+
+
+def _config_json(path: Path) -> dict | None:
+    """A snapshot's or a parameters directory's config.json as an object, or None when it cannot be used: missing, too large, not strict JSON
+    (a repeated key, NaN, Infinity or an overflowing float such as 1e999) or not an object. The file may be a link into the cache's blobs."""
+    from orchard import safeio
+    try:
+        return safeio.read_json(Path(path).resolve(), max_bytes=CONFIG_MAX_BYTES, expect=dict)
+    except (OSError, ValueError, RuntimeError, safeio.SafeReadError):
+        return None
+
+
 def _stock_compatible(found, model_id: str, hub, local_snapshot) -> bool:
     """Whether the model can be the one tt-transformers' parameters in `found` describe, as far as this check can tell. The local
     snapshot's config.json is compared on the decisive keys (orchard/stock_runtime.py); without one, the hub's architecture is compared with
     the parameters'. When neither is known the row is kept, and stage 0 measures. Research also records rows for the model's bases and
     ancestors, and the first of those must not stand in for the model."""
     from orchard import stock_runtime
-    try:
-        pcfg = json.loads((Path(found) / "config.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return True
-    if not isinstance(pcfg, dict):
+    pcfg = _config_json(Path(found) / "config.json")
+    if pcfg is None:
         return True
     snap = None
     try:
@@ -469,11 +479,8 @@ def _stock_compatible(found, model_id: str, hub, local_snapshot) -> bool:
     except Exception:
         pass
     if snap is not None:
-        try:
-            mcfg = json.loads((Path(snap) / "config.json").read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            mcfg = None
-        if isinstance(mcfg, dict):
+        mcfg = _config_json(Path(snap) / "config.json")
+        if mcfg is not None:
             return not stock_runtime.compare_configs(mcfg, pcfg)
     archs = getattr(hub, "architectures", None) or []
     return not archs or archs[0] == stock_runtime.effective(pcfg, "architectures")
@@ -829,7 +836,11 @@ def missing_audio_components(snap: Path) -> list[str]:
     own = _repo_of_snapshot(snap)
     if cfg is None or own is None:
         return []
-    return [f"{sub}/config.json" for sub in audio_facts.component_subfolders(cfg, own) if not (snap / sub / "config.json").is_file()]
+    # Stage 0 compares a text encoder when the config's repo_id is either repository of the pair. For a model of the planned pair (the two
+    # repositories orchard/audio_plan.py knows) the other one is the partner; any other model has only its own id. Ids match exactly.
+    from orchard import audio_plan
+    partners = tuple(audio_plan.LIBRARY_NAMES) if own in audio_plan.LIBRARY_NAMES else ()
+    return [f"{sub}/config.json" for sub in audio_facts.component_subfolders(cfg, own, partners) if not (snap / sub / "config.json").is_file()]
 
 
 def snapshot_complete(snap: Path) -> bool:
