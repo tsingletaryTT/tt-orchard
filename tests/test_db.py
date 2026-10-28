@@ -332,6 +332,25 @@ def test_one_read_transaction_sees_one_snapshot(tmp_path):
             assert conn.execute("SELECT COUNT(*) FROM telegraph_events").fetchone()[0] == 3
 
 
+def test_threads_of_one_process_each_get_their_own_connection_and_all_writes_land(tmp_path):
+    with ts.TelegraphStore.open(tmp_path / "state") as store:
+        errors = []
+
+        def work(n):
+            try:
+                for i in range(20):
+                    assert reserve(store, f"t{n}-{i}") is None
+            except Exception as exc:                                  # noqa: BLE001
+                errors.append(exc)
+        threads = [threading.Thread(target=work, args=(n,)) for n in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(60)
+        assert errors == [] and len(store.records()) == 80
+        assert len(store.db._conns) >= 4                              # one connection per thread
+
+
 # =============================================================================================== I2: the unconfirmed state
 
 def test_i2_a_first_ever_open_is_not_unconfirmed(tmp_path):

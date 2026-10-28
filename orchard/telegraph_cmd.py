@@ -13,7 +13,7 @@ ask got no answer (the reason is printed).
 The state directory (it holds the ledger database, the reply files and the cache) is chosen in this order: `--dir`, the
 `[telegraph] dir` of the config, `$ORCHARD_TELEGRAPH_DIR` (an absolute path; the supervisor sets it for agent shells), and only
 then `~/.cache/tt-orchard/telegraph` of the caller's home. An agent shell has a HOME inside the run directory, so it never takes
-the last choice: with no configured directory it stops and says so, instead of opening a second ledger whose caps nobody shares.
+the last choice: with no configured directory it stops and says so, and no second ledger is opened whose caps nobody shares.
 """
 from __future__ import annotations
 

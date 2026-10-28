@@ -6,7 +6,7 @@ project database, and cut the old files over so no old writer can start a second
 This module and its parser are the only code left that reads the jsonl format: the importer, and the reader of an archived file
 for `tt-orchard db export telegraph --from-archive`.
 
-The order of steps is the one in the design note (docs/superpowers/specs/2026-10-28-project-database-design.md, I3 and I7 to I10).
+The order of steps follows the design note (docs/superpowers/specs/2026-10-28-project-database-design.md, I3 and I7 to I10).
 The old lock is held from step 1 to step 7, so an old writer cannot append meanwhile.
 
   1  take the old `telegraph.lock`                                   nothing changed
@@ -85,7 +85,7 @@ class Parsed:
 def parse_jsonl(data: bytes) -> Parsed:
     """The records of a jsonl ledger exactly as the old reader saw them: the text is decoded with replacement, split with
     `splitlines`, and a line that is JSON and an object is a record. A blank line is neither a record nor malformed; any other
-    line is `malformed` (and the old reader dropped it silently, which is why the migration refuses unless a person accepts)."""
+    line is `malformed` (and the old reader dropped it silently; the migration therefore refuses unless a person accepts)."""
     out = Parsed()
     for number, line in enumerate(data.decode("utf-8", errors="replace").splitlines(), 1):
         if not line.strip():
@@ -127,13 +127,24 @@ def _ledger_data(db: Database) -> bytes:
     if kind is None:
         return b""
     if kind != "file":
-        raise MigrationRefused(f"{ts.LEDGER} is a {kind}, not a ledger file")
+        raise MigrationRefused(f"{ts.LEDGER} is a {kind} and cannot be a ledger file")
     return _read_ledger_bytes(db._dirfd)
+
+
+MAX_DIRECTORY_ENTRIES = 200_000
+
+
+def _listdir(fd: int) -> list[str]:
+    """The names in a directory, refusing a directory of more than MAX_DIRECTORY_ENTRIES (a hostile or runaway directory)."""
+    names = os.listdir(fd)
+    if len(names) > MAX_DIRECTORY_ENTRIES:
+        raise MigrationRefused(f"a directory has more than {MAX_DIRECTORY_ENTRIES} entries; a person has to look at it")
+    return names
 
 
 def _sidecars(dir_fd: int) -> list[str]:
     names = []
-    for name in sorted(os.listdir(dir_fd)):
+    for name in sorted(_listdir(dir_fd)):
         if name.startswith(SIDECAR_PREFIX):
             try:
                 st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
@@ -142,6 +153,13 @@ def _sidecars(dir_fd: int) -> list[str]:
             if stat.S_ISREG(st.st_mode):
                 names.append(name)
     return names
+
+
+def _same_content(dir_fd: int, name: str, expected: bytes) -> bool:
+    try:
+        return safeio.read_bytes(name, max_bytes=len(expected) + 1, anchor=dir_fd) == expected
+    except safeio.SafeReadError:
+        return False
 
 
 def recover_ledger(dir_fd: int, max_output_tokens: int) -> dict:
@@ -165,14 +183,20 @@ def recover_ledger(dir_fd: int, max_output_tokens: int) -> dict:
             data = _read_ledger_bytes(dir_fd)
             if data and not data.endswith(b"\n"):
                 cut = data.rfind(b"\n") + 1
-                name = f"{SIDECAR_PREFIX}{uuid.uuid4().hex[:8]}"
-                sfd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | _O_CLOEXEC, 0o600, dir_fd=dir_fd)
-                try:
-                    safeio._write_all(sfd, data[cut:])
-                    os.fsync(sfd)
-                finally:
-                    os.close(sfd)
-                os.fsync(dir_fd)
+                fragment = data[cut:]
+                # A crash between writing the sidecar and cutting the ledger leaves a complete sidecar with no note. A rerun reuses
+                # it, so one fragment is never counted twice.
+                noted_now = {rec.get("torn") for rec, _raw in parse_jsonl(data[:cut]).items if "torn" in rec}
+                name = next((n for n in _sidecars(dir_fd) if n not in noted_now and _same_content(dir_fd, n, fragment)), None)
+                if name is None:
+                    name = f"{SIDECAR_PREFIX}{uuid.uuid4().hex[:8]}"
+                    sfd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | _O_CLOEXEC, 0o600, dir_fd=dir_fd)
+                    try:
+                        safeio._write_all(sfd, fragment)
+                        os.fsync(sfd)
+                    finally:
+                        os.close(sfd)
+                    os.fsync(dir_fd)
                 os.ftruncate(fd, cut)                  # only after the whole fragment is safe in the sidecar
                 os.fsync(fd)
                 data = data[:cut]
@@ -205,7 +229,7 @@ def _cache_items(dir_fd: int) -> tuple[list, int]:
         return [], 0                                   # no cache directory, or a link: nothing to import
     items, skipped = [], 0
     try:
-        for name in sorted(os.listdir(cfd)):
+        for name in sorted(_listdir(cfd)):
             if not CACHE_NAME.match(name):
                 skipped += 1
                 continue
@@ -433,8 +457,8 @@ def _step3(db, store, dir_fd, scope, max_output_tokens, accept_malformed, phase,
         want_sha = db.meta_get(f"imported_sha256:{scope}")
         n = int(db.meta_get(f"imported_bytes:{scope}") or "0")
         if len(data) < n or hashlib.sha256(data[:n]).hexdigest() != want_sha:
-            raise MigrationRefused("the ledger's imported part changed since it was imported (an old writer edited it, not only "
-                                   "appended); a person has to decide what is true. Nothing was changed")
+            raise MigrationRefused("the ledger's imported part changed since it was imported (something edited it or removed lines, beyond adding "
+                                   "new ones); a person has to decide what is true. Nothing was changed")
         imported_before = n
     cache_items, cache_skipped = _cache_items(dir_fd)
     sidecars = _sidecars(dir_fd)
@@ -550,7 +574,7 @@ def _dry_run(directory, *, scope, max_output_tokens, accept_malformed) -> dict:
     no recovery. A fragment and a sidecar with no note are counted as the real run would count them."""
     result: dict = {"status": "dry-run", "scope": scope}
     with safeio.pinned_root(directory) as pin:
-        names_here = os.listdir(pin.fd)
+        names_here = _listdir(pin.fd)
         if ts.MARKER_MIGRATED in names_here:
             raise AlreadyMigrated(f"{directory} was migrated already")
         try:

@@ -324,7 +324,7 @@ class Database:
             fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | _O_CLOEXEC, 0o600, dir_fd=self._dirfd)
         except OSError as exc:
             if exc.errno in (errno.ELOOP, errno.EISDIR):
-                raise UnsafeDirectory(f"{name} is a link or a directory, not the database file") from exc
+                raise UnsafeDirectory(f"{name} is a link or a directory and cannot be the database file") from exc
             raise LedgerUnavailable(f"cannot open {name}: {exc.strerror or type(exc).__name__}") from exc
         try:
             st = os.fstat(fd)
@@ -953,7 +953,7 @@ def restore_backup(directory, backup_path, name: str = DB_NAME, *, hook=None, bu
     finally:
         if probe is not None:
             probe.close()
-    db = Database.__new__(Database)                                # the staging helpers need the directory state, not a connection
+    db = Database.__new__(Database)                                # the staging helpers need the directory state and no connection
     db.name, db._busy, db._hook = name, busy_timeout_ms, hook
     db.directory = directory
     db._memory, db._closed, db.moved_aside = False, False, None

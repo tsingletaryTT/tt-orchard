@@ -91,7 +91,7 @@ def agent_env(run_dir, *, extra: dict | None = None, source=None) -> dict:
     """The whole environment of an agent's shell. Nothing is inherited outside ENV_ALLOW."""
     source = os.environ if source is None else source
     env = {k: source[k] for k in ENV_ALLOW if k in source}
-    # The telegraph ledger directory is the operator's, not the shell's: HOME below is inside the run directory, so a shell that
+    # The telegraph ledger directory belongs to the operator and is shared by every shell: HOME below is inside the run directory, so a shell that
     # resolved `~` would open a second ledger with its own caps (issue 133). The supervisor's value is passed on when it is an
     # absolute path; `tt-orchard telegraph` refuses to guess a directory in an agent shell that has none.
     tele = source.get(TELEGRAPH_DIR_VAR)

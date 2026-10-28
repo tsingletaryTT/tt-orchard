@@ -249,6 +249,8 @@ def test_totals_add_in_ledger_order_so_they_equal_the_jsonl_sums_exactly(tmp_pat
         expected += c
     got = tg.accounting(tg._read_ledger_strict(tmp_path / "s"))
     assert got["cost"] == expected                                     # exactly, with no rounding
+    with ts.TelegraphStore.open(tmp_path / "s") as store:               # the reservation path reads the records its own way
+        assert tg.accounting(store.records())["cost"] == expected
     assert got == old.accounting(records)
     assert tg.summarise_records(tg._read_ledger_strict(tmp_path / "s")) == old.summarise_records(records)
     assert expected == 1e16 and sum(reversed(costs)) != expected      # another order gives another sum: ledger order is the rule

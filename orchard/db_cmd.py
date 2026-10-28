@@ -7,7 +7,7 @@
   migrate telegraph          import telegraph.jsonl and cache/*.json into the database and cut the old files over
                              (--dry-run checks the import and writes nothing; --accept-malformed N accepts N unreadable lines)
   export telegraph           write the ledger as jsonl on standard output, the lines the old file held
-                             (--from-archive reads telegraph.jsonl.archived instead of the database)
+                             (--from-archive reads the archive telegraph.jsonl.archived and leaves the database alone)
   backup                     an online backup into backups/
   restore BACKUP             put a backup in place of the database; the ledger is then unconfirmed
   confirm-restore --note T   a person says the history is accounted for; this is the only thing that lets calls go out again

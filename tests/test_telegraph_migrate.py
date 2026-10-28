@@ -372,6 +372,42 @@ def test_i9_recovery_after_a_crash_between_the_cut_and_the_note_still_counts_the
     assert len([r for r in ledger_records(d) if "torn" in r]) == 1
 
 
+def test_i9_a_crash_between_writing_the_sidecar_and_cutting_the_ledger_reuses_the_sidecar(tmp_path, monkeypatch):
+    d = legacy_directory(tmp_path, asks=1)
+    with open(d / "telegraph.jsonl", "ab") as f:
+        f.write(b'{"call_id": "half')
+    real = os.ftruncate
+
+    def die(*a, **k):
+        raise Crash("before the cut")
+    monkeypatch.setattr(mig.os, "ftruncate", die)
+    with pytest.raises(Crash):
+        mig.migrate(d, max_output_tokens=NOTE_TOKENS)
+    monkeypatch.setattr(mig.os, "ftruncate", real)
+    assert len(list(d.glob("telegraph.jsonl.torn-*"))) == 1
+    mig.migrate(d, max_output_tokens=NOTE_TOKENS)
+    assert len(list(d.glob("telegraph.jsonl.torn-*"))) == 1 and len([r for r in ledger_records(d) if "torn" in r]) == 1
+
+
+def test_a_record_with_a_lone_surrogate_in_its_id_is_imported_and_exported_intact(tmp_path):
+    d = tmp_path / "tg"
+    d.mkdir()
+    line = '{"call_id": "a\\ud800b", "outcome": "ok", "tokens_in": 1, "tokens_out": 1, "problem": "p"}'
+    (d / "telegraph.jsonl").write_text(line + "\n")
+    assert mig.migrate(d)["phase"] == "complete"
+    assert ledger_lines(d) == [line]
+
+
+def test_a_directory_with_too_many_entries_is_refused(tmp_path, monkeypatch):
+    d = tmp_path / "tg"
+    d.mkdir()
+    for i in range(5):
+        (d / f"x{i}").write_text("")
+    monkeypatch.setattr(mig, "MAX_DIRECTORY_ENTRIES", 3)
+    with pytest.raises(mig.MigrationRefused, match="entries"):
+        mig.migrate(d)
+
+
 # =============================================================================================== I10: a crash at any step, then a restart
 
 STEPS = ["after:1", "after:2", "inside:3", "after:3", "inside:4", "after:4", "inside:5", "after:5", "after:6a", "after:6b", "after:6c"]

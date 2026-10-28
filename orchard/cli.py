@@ -278,7 +278,7 @@ def _parser() -> argparse.ArgumentParser:
                     help="go on although the ledger has exactly N lines that are not records (they were never counted)")
     de = _db("export", "write a ledger as jsonl on standard output (the lines the old file held)")
     de.add_argument("what", choices=["telegraph"])
-    de.add_argument("--from-archive", action="store_true", help="read telegraph.jsonl.archived instead of the database")
+    de.add_argument("--from-archive", action="store_true", help="read the archived ledger telegraph.jsonl.archived (the database is not read)")
     _db("backup", "take an online backup into backups/")
     dr = _db("restore", "put a backup in place of the database (the ledger is then unconfirmed)")
     dr.add_argument("backup", metavar="BACKUP", help="a file from the backups/ directory")

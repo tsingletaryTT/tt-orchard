@@ -76,7 +76,10 @@ def kind_of(rec: dict) -> str:
 
 def _key_of(rec: dict, kind: str):
     value = rec.get({"reserve": "reserve", "torn": "torn", "report": "report"}.get(kind, "call_id"))
-    return value if isinstance(value, str) else (None if value is None else str(value))
+    if value is None:
+        return None
+    text = value if isinstance(value, str) else str(value)
+    return text.encode("utf-8", "replace").decode("utf-8")          # a lone surrogate cannot be bound to SQLite; the raw record keeps it
 
 
 def _ts_of(rec: dict):
