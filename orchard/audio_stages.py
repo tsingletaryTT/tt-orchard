@@ -302,6 +302,23 @@ def cached_run(cache_dir, name: str, expected: dict | None, library_commit: str 
     return d if ok else None
 
 
+def copy_cached_run(cache_dir, name: str, expected: dict | None, library_commit: str | None, out):
+    """Validate the cache entry `name` (`cached_run`) and copy it to `out`, holding the entry's shared lock for both, so that a run replacing a stale entry
+    (orchard/supervisor.py `save_reference`, which holds the exclusive lock) cannot change the directory between the check and the copy. Returns the entry's
+    directory, or None when there is no valid entry or the copy failed; a partial copy is removed, and the caller then makes the reference fresh."""
+    from orchard import cache_lock
+    with cache_lock.entry_lock(cache_dir, name, exclusive=False):
+        hit = cached_run(cache_dir, name, expected, library_commit)
+        if hit is None:
+            return None
+        try:
+            shutil.copytree(hit, out, symlinks=False)
+        except (OSError, shutil.Error):
+            shutil.rmtree(out, ignore_errors=True)
+            return None
+        return hit
+
+
 def subprocess_runner(base_env: dict):
     """A runner for `run_references`: each command is a child in its own session with `base_env` plus the command's extra variables, its output in
     the log file; a timeout kills the whole session. Returns the exit status, None for a timeout."""
@@ -345,10 +362,10 @@ def run_references(stage_dir, run_dir, paths, plan, runner, *, expected: dict, l
     for item in plan:
         out = stage_dir / item["dir"]
         out.parent.mkdir(parents=True, exist_ok=True)
-        hit = cached_run(cache_dir, item["name"], expected.get(item["name"]), library_commit) if item["interpreter"] == "reference" else None
         t0 = time.time()
+        hit = (copy_cached_run(cache_dir, item["name"], expected.get(item["name"]), library_commit, out)
+               if item["interpreter"] == "reference" else None)
         if hit is not None:
-            shutil.copytree(hit, out, symlinks=False)
             say(f"{item['role']}: copied the cached reference {item['name']}")
             from_cache = True
         else:

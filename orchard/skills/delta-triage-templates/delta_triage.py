@@ -2818,6 +2818,9 @@ def compare_audio_tensors(mt: dict, bt: dict) -> dict:
             shape.append({"name": name, "model": m["shape"], "base": b["shape"]})
         elif m["dtype"] != b["dtype"]:
             dtype.append({"name": name, "model": m["dtype"], "base": b["dtype"], "tolerated": _dtype_difference_tolerated(m, b)})
+    # The record lists at most AUDIO_MAX_LISTED of them. A difference that is not tolerated goes first (the sort is stable), so a record cut at the limit
+    # still shows one when there is one, and the gate (orchard/audio_decision.py) can tell from the list alone.
+    dtype.sort(key=lambda x: x["tolerated"])
     return {"model_tensors": len(mt), "base_tensors": len(bt), "common": len(set(mt) & set(bt)), "only_in_model": only_m,
             "only_in_base": only_b, "shape_differences": shape, "dtype_differences": dtype}
 

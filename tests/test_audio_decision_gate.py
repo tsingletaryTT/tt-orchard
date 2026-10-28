@@ -71,7 +71,58 @@ def test_an_audio_record_from_an_older_template_with_no_decision_has_nothing_to_
     assert ad.decision_problems({"audio": {}}, current_template=False) == []
     assert ad.decision_problems({"facts": {"modality": "audio"}}) == []
     assert ad.decision_problems({"audio": {}}, current_template=True)
-    assert ad.decision_problems({"facts": {"modality": "audio"}}, current_template=True)
+    assert ad.decision_problems({}, current_template=True, audio_evidence=True)       # the stage's own files say it was an audio comparison
+    assert ad.decision_problems({"facts": {"modality": "audio"}}, current_template=True) == []       # the agent can delete this field with the record
+
+
+def test_deleting_the_audio_record_and_the_facts_does_not_hide_an_audio_comparison(audio_case):
+    """The evidence file the audio branch wrote is still in the stage directory."""
+    stage = audio_case(base_kw={"config": changed_model_config(model__diffusion__config__depth=24)})
+    assert run_ok(stage)["class"] == "full-port"
+    edit_delta(stage, lambda d: (d.pop("audio"), d.pop("facts"), d.update(path="weights-only", **{"class": "weights-only"})))
+    refused(stage, "no audio.decision")
+
+
+def test_the_audio_layout_of_the_configured_snapshot_shows_an_audio_comparison_without_the_evidence_file(audio_case):
+    stage = audio_case(base_kw={"config": changed_model_config(model__diffusion__config__depth=24)})
+    d = run_ok(stage)
+    (stage / "evidence" / "audio-compare.json").unlink()
+    d.pop("audio"), d.pop("facts")
+    shipped = tm().THIS_SHA256
+    assert ad.stage_problems(d, stage, shipped)
+    assert any("no audio.decision" in p for p in ad.stage_problems(d, stage, shipped))
+
+
+def test_the_audio_evidence_file_shows_an_audio_comparison_whatever_the_configured_snapshot_looks_like(tmp_path):
+    stage = tmp_path / "stage"
+    (stage / "evidence").mkdir(parents=True)
+    (stage / "evidence" / "audio-compare.json").write_text("{}")
+    snap = tmp_path / "snap"
+    snap.mkdir()
+    (snap / "config.json").write_text("{}")
+    (stage / "triage_config.json").write_text(json.dumps({"model_snapshot": str(snap)}))
+    assert any("no audio.decision" in p for p in ad.stage_problems({"template_sha256": "x" * 64}, stage, "x" * 64))
+
+
+def test_a_snapshot_with_both_config_files_is_a_text_model_and_shows_no_audio_comparison(tmp_path):
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    snap = tmp_path / "snap"
+    snap.mkdir()
+    (snap / "config.json").write_text("{}")
+    (snap / "model_config.json").write_text("{}")
+    (stage / "triage_config.json").write_text(json.dumps({"model_snapshot": str(snap)}))
+    assert ad.stage_problems({"template_sha256": "x" * 64}, stage, "x" * 64) == []
+
+
+def test_a_text_comparison_of_the_current_template_is_not_mistaken_for_audio(tmp_path):
+    stage = tmp_path / "stage"
+    (stage / "evidence").mkdir(parents=True)
+    snap = tmp_path / "snap"
+    snap.mkdir()
+    (snap / "config.json").write_text("{}")
+    (stage / "triage_config.json").write_text(json.dumps({"model_snapshot": str(snap)}))
+    assert ad.stage_problems({"template_sha256": "x" * 64, "class": "full-port"}, stage, "x" * 64) == []
 
 
 @pytest.mark.parametrize("delta", [{}, {"facts": {"modality": "text"}}, {"facts": 3}, {"class": "full-port"}])
@@ -287,6 +338,42 @@ def test_a_full_port_decision_with_a_weights_only_override_record_is_refused(aud
     refused(stage, "moves the path to weights-only")
 
 
+def test_a_path_override_cannot_claim_an_origin_the_evidence_contradicts(audio_case):
+    """Review of PR 191: the pre-override path is recomputed from strictness, the recorded categories and the hard evidence, and `from` has to match."""
+    stage = structural_pair_with_override(audio_case, "weights-only")          # structural difference: the rule gave full-port
+    run_ok(stage)
+    edit_delta(stage, lambda d: d["audio"]["decision"]["overrides"][0].update(**{"from": "weights-only"}))
+    refused(stage, "before the override")
+
+
+def test_a_full_port_override_over_serving_differences_has_to_come_from_weights_only(audio_case):
+    stage = serving_pair(audio_case)
+    write_overrides(stage, {"path": {"path": "full-port", "source": "reason"}})
+    assert run_ok(stage)["class"] == "full-port" and gate(stage).ok
+    edit_delta(stage, lambda d: d["audio"]["decision"]["overrides"][0].update(**{"from": "full-port"}))
+    refused(stage, "before the override")
+
+
+def test_hard_evidence_makes_the_path_before_a_full_port_override_full_port_as_well(audio_case):
+    """A tensor difference beside serving-only config differences: the rule gave full-port, so the override's `from` is full-port."""
+    cfg = changed_model_config(sample_size=5324800)
+    t = {**TENSORS, "model.model.layers.0.attn.weight": ("F32", [9, 8])}
+    stage = audio_case(model_kw={"tensors": t}, base_kw={"config": cfg})
+    write_overrides(stage, {"path": {"path": "full-port", "source": "reason"}})
+    d = run_ok(stage)
+    assert decision(d)["overrides"][0]["from"] == "full-port" and gate(stage).ok, gate(stage).reasons
+    edit_delta(stage, lambda d: d["audio"]["decision"]["overrides"][0].update(**{"from": "weights-only"}))
+    refused(stage, "before the override")
+
+
+def test_the_strict_rule_changes_where_a_path_override_comes_from(audio_case):
+    stage = serving_pair(audio_case)
+    strict(stage)
+    write_overrides(stage, {"path": {"path": "weights-only", "source": "reason"}})
+    d = run_ok(stage)
+    assert d["path"] == "weights-only" and decision(d)["overrides"][0]["from"] == "full-port" and gate(stage).ok, gate(stage).reasons
+
+
 def test_a_path_override_with_an_unknown_path_is_refused(audio_case):
     stage = structural_pair_with_override(audio_case, "weights-only")
     run_ok(stage)
@@ -339,6 +426,35 @@ def test_a_tensor_with_another_integer_dtype_cannot_be_turned_into_weights_only(
     assert run_ok(stage)["class"] == "full-port"
     edit_delta(stage, to_weights_only)
     refused(stage, "dtype_differences")
+
+
+def test_a_cut_dtype_list_still_shows_an_incompatible_dtype_because_the_template_lists_it_first():
+    """Review of PR 191: 51 tolerated differences in name order used to push a later incompatible one out of the 50 the record lists."""
+    t = tm()
+    mt = {f"a{i:03d}": {"dtype": "F32", "shape": [2]} for i in range(60)}
+    bt = {name: {"dtype": "BF16", "shape": [2]} for name in mt}
+    mt["z999"], bt["z999"] = {"dtype": "F32", "shape": [2]}, {"dtype": "I64", "shape": [2]}
+    listed = t.compare_audio_tensors(mt, bt)["dtype_differences"][:t.AUDIO_MAX_LISTED]
+    assert len(listed) == t.AUDIO_MAX_LISTED and listed[0]["name"] == "z999" and listed[0]["tolerated"] is False
+    tensors = {"model_tensors": 61, "base_tensors": 61, "common": 61, "only_in_model": [], "only_in_base": [], "shape_differences": [],
+               "dtype_differences": listed}
+    assert "dtype_differences" in ad._tensor_findings(tensors)
+
+
+def test_zero_tensors_on_every_side_is_not_a_comparison(audio_case):
+    stage = serving_pair(audio_case)
+    run_ok(stage)
+    def edit(d):
+        d["audio"]["tensors"].update(model_tensors=0, base_tensors=0, common=0)
+    edit_delta(stage, edit)
+    refused(stage, "tensor counts")
+
+
+@pytest.mark.parametrize("counts", [(0, 0, 0), (-1, -1, -1), (5, 5, 4), (5, 4, 5), (True, True, True), (5.0, 5.0, 5.0), (None, None, None)])
+def test_tensor_counts_have_to_be_equal_and_positive_whole_numbers(counts):
+    tensors = {"model_tensors": counts[0], "base_tensors": counts[1], "common": counts[2], "only_in_model": [], "only_in_base": [],
+               "shape_differences": [], "dtype_differences": []}
+    assert "tensor counts" in ad._tensor_findings(tensors)
 
 
 def test_a_tolerated_float_dtype_difference_keeps_a_weights_only_decision_acceptable(audio_case):
@@ -533,6 +649,40 @@ def test_the_gates_allow_list_gives_the_templates_category(key, base, model):
     rules = ad.category_rules()
     assert rules is not None
     assert ad.allow_list_category(key, base, model, rules) == tm().audio_category(key, base, model)[0]
+
+
+@pytest.mark.parametrize("big", [10 ** 400, -(10 ** 400), 10 ** 30, 1e308, 1e-320])
+def test_an_integer_too_large_for_a_float_is_a_number_and_never_a_crash(big):
+    """Review of PR 191: math.isfinite raised OverflowError on a JSON integer of 400 digits, which the gate loads without the template's digit limit."""
+    rules = ad.category_rules()
+    assert ad.allow_list_category("model.default_cfg_scale", big, 1.0, rules) == "serving"
+    if isinstance(big, int) and big > 0:
+        assert ad.allow_list_category("sample_size", big, 5, rules) == "serving"
+
+
+@pytest.mark.parametrize("value", [10 ** 400, -(10 ** 400), 1e308, [], {}, None, True, "x" * 100000, float("nan")])
+@pytest.mark.parametrize("field", ["base", "model"])
+def test_a_hostile_value_in_a_difference_never_raises(value, field):
+    diff = {"key": "model.default_cfg_scale", "base": 7.0, "model": 1.0, "category": "serving", "decided_by": "allow-list"}
+    diff[field] = value
+    dec = {"class": "weights-only", "path": "weights-only", "alternative_path": "full-port", "confidence": "medium", "strict": False,
+           "differences": [diff], "overrides": [], "problems": []}
+    audio = {"decision": dec, "config": {"top_level_differences": {}, "model_differences": {"model.default_cfg_scale": {"base": diff["base"], "model": diff["model"]}}},
+             "tensors": {"model_tensors": 1, "base_tensors": 1, "common": 1, "only_in_model": [], "only_in_base": [], "shape_differences": [], "dtype_differences": []},
+             "text_encoders": []}
+    problems = ad.decision_problems({"class": "weights-only", "path": "weights-only", "audio": audio}, current_template=True)
+    assert isinstance(problems, list)
+
+
+def test_a_decision_with_the_huge_integer_in_the_delta_file_returns_gate_feedback(audio_case):
+    stage = audio_case(base_kw={"config": changed_model_config(model__default_cfg_scale=7.0)})
+    stage_cfg = changed_model_config(model__default_cfg_scale=1.0)
+    run_ok(stage)
+    def edit(d):
+        d["audio"]["decision"]["differences"][0]["model"] = 10 ** 400
+    edit_delta(stage, edit)
+    r = gate(stage)                                  # must return a result, not raise
+    assert not r.ok
 
 
 def test_the_gates_table_is_the_templates_table():

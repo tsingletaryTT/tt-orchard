@@ -397,6 +397,7 @@ def save_reference(src: Path, cache: Path, name: str) -> bool:
     (issue 179). The replacement is safe: the new copy is made completely beside the entry first, the old entry is moved aside, the new one is
     renamed into place, and only then is the old one deleted. When the rename fails the old entry is put back. Returns whether the cache now holds
     the new copy; a failure costs a repeat of a CPU run and nothing else."""
+    from orchard import cache_lock
     dest = cache / name
     tmp, old = cache / f".{name}.tmp-{os.getpid()}", cache / f".{name}.old-{os.getpid()}"
     moved = False
@@ -404,16 +405,19 @@ def save_reference(src: Path, cache: Path, name: str) -> bool:
         cache.mkdir(parents=True, exist_ok=True)
         _discard(tmp)
         _discard(old)
-        shutil.copytree(src, tmp, symlinks=False)
-        if os.path.lexists(dest):
-            os.rename(dest, old)
-            moved = True
-        try:
-            os.rename(tmp, dest)
-        except OSError:
-            if moved:
-                os.rename(old, dest)
-            raise
+        shutil.copytree(src, tmp, symlinks=False)                  # complete beside the entry, before anything is moved
+        # The exclusive lock covers the two renames. A run that validates and copies the entry holds the shared lock (audio_stages.copy_cached_run), so it
+        # sees the old entry or the new one and never the gap between the renames.
+        with cache_lock.entry_lock(cache, name, exclusive=True):
+            if os.path.lexists(dest):
+                os.rename(dest, old)
+                moved = True
+            try:
+                os.rename(tmp, dest)
+            except OSError:
+                if moved:
+                    os.rename(old, dest)
+                raise
         _discard(old)
         return True
     except OSError:
