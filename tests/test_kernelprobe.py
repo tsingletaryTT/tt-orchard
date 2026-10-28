@@ -3777,3 +3777,66 @@ def test_the_probe_read_file_takes_limit_and_names_its_arguments_for_an_unknown_
     assert ok.startswith("line 5\nline 6\nline 7") and "[lines 5 to 7 of 30" in ok
     bad = tools.call("read_file", json.dumps({"path": "notes.txt", "offset": 5, "count": 3}))
     assert bad.startswith("error:") and "'count'" in bad and "path" in bad and "offset" in bad and "limit" in bad
+
+
+# ---- the capability ladder and --wall-s (issue 175) -------------------------------------------------------------
+
+def test_wall_s_reaches_every_attempt_and_the_report_header(tmp_path, fake_kenv, env_ready, monkeypatch):
+    walls = []
+
+    def run_attempt(*, op, n, wall_s, **kw):
+        walls.append(wall_s)
+        return canned(op, n)
+    monkeypatch.setattr(kp, "run_attempt", run_attempt)
+    code = kp.main(probe_args(tmp_path, attempts=2, wall_s=420.0), env=fake_kenv, out=io.StringIO(),
+                   probe=lambda e, m: True, run_watched_fn=no_run)
+    assert code == 0 and walls == [420.0, 420.0]
+    header = json.loads((tmp_path / "out" / "kernel-probe-report.json").read_text())["header"]
+    assert header["budget"]["wall_s"] == 420.0 and header["budget"]["max_turns"] == 40
+    assert "wall budget (420 s)" in header["budget_note"]
+
+
+def test_without_wall_s_the_default_budget_is_used(tmp_path, fake_kenv, env_ready, monkeypatch):
+    walls = []
+    monkeypatch.setattr(kp, "run_attempt", lambda *, op, n, wall_s, **kw: walls.append(wall_s) or canned(op, n))
+    kp.main(probe_args(tmp_path), env=fake_kenv, out=io.StringIO(), probe=lambda e, m: True, run_watched_fn=no_run)
+    assert walls == [kp.BUDGET["wall_s"]]
+
+
+@pytest.mark.parametrize("bad", [0, -5, float("nan"), 7201, "soon"])
+def test_main_refuses_a_bad_wall_s_before_anything_runs(tmp_path, fake_kenv, env_ready, capsys, bad):
+    code = kp.main(probe_args(tmp_path, wall_s=bad), env=fake_kenv, out=io.StringIO(),
+                   probe=lambda e, m: True, run_watched_fn=no_run)
+    assert code == 2 and env_ready == [] and not (tmp_path / "out").exists()
+    assert "--wall-s" in capsys.readouterr().err
+
+
+def test_main_with_the_ladder_runs_each_rung_in_its_own_directory_with_one_sampling(tmp_path, fake_kenv, env_ready,
+                                                                                  monkeypatch):
+    seen = []
+
+    def run_attempt(*, op, n, probe_dir, wall_s, temperature, seed, **kw):
+        seen.append((op, n, Path(probe_dir), wall_s, temperature, seed))
+        return canned(op, n, passed=op == "add")
+    monkeypatch.setattr(kp, "run_attempt", run_attempt)
+    out = io.StringIO()
+    code = kp.main(probe_args(tmp_path, op=None, ladder=True, rungs="add,mul", attempts=2, temperature="0.7", seed="500",
+                              rung_wall="add=300"), env=fake_kenv, out=out, probe=lambda e, m: True,
+                   run_watched_fn=no_run)
+    assert code == 0
+    assert [(s[0], s[1], s[3], s[4], s[5]) for s in seen] == [("add", 1, 300.0, 0.7, 501), ("add", 2, 300.0, 0.7, 502),
+                                                              ("mul", 1, kp.BUDGET["wall_s"], 0.7, 501),
+                                                              ("mul", 2, kp.BUDGET["wall_s"], 0.7, 502)]
+    assert [s[2] for s in seen][0] == tmp_path / "out" / "add" and [s[2] for s in seen][2] == tmp_path / "out" / "mul"
+    data = json.loads((tmp_path / "out" / "ladder-report.json").read_text())
+    assert [(r["op"], r["passed"], r["attempts"]) for r in data["rungs"]] == [("add", 2, 2), ("mul", 0, 2)]
+    assert data["first_zero_rung"] == "mul"
+    assert "ladder rung 1 of 2: add" in out.getvalue()
+
+
+def test_main_without_an_op_or_the_ladder_refuses(tmp_path, fake_kenv, env_ready, capsys):
+    code = kp.main(probe_args(tmp_path, op=None), env=fake_kenv, out=io.StringIO(), probe=lambda e, m: True,
+                   run_watched_fn=no_run)
+    assert code == 2 and "--ladder" in capsys.readouterr().err
+
+

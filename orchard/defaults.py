@@ -281,7 +281,12 @@ TTLANG_NEGATIVE_EXAMPLES = (
 
 # The ops the kernel probe can ask for (orchard/kernelprobe.py re-exports this as OPS). It lives here so the CLI can
 # offer the choices without importing the probe and the agent machinery behind it.
-KERNEL_PROBE_OPS = ("add", "silu_mul", "rmsnorm", "linear_scan", "center", "softmax", "tile_scan")
+KERNEL_PROBE_OPS = ("add", "silu_mul", "rmsnorm", "linear_scan", "center", "softmax", "tile_scan",
+                    "mul", "scale_shift", "add_row", "rsqrt", "row_sum")
+# The capability ladder (`kernel-probe --ladder`, orchard/kernelladder.py), easiest rung first. Each rung is one op:
+# elementwise on two tensors (add, mul), with two scalars (scale_shift), with a row repeated down the rows (add_row),
+# a unary function (rsqrt), a row reduction (row_sum), a reduction broadcast back (center), then rmsnorm and linear_scan.
+KERNEL_PROBE_LADDER = ("add", "mul", "scale_shift", "add_row", "rsqrt", "row_sum", "center", "rmsnorm", "linear_scan")
 
 # ---- decode speed watch (orchard/speedwatch.py) ------------------------------------------------------------------
 # Measured 2026-10-17 on this Quietbox 2, Qwen3-Coder-Next on one board: one 400-token greedy answer 38.7 tok/s idle;

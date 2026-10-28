@@ -8,6 +8,32 @@ def add(x):
     return x["a"] + x["b"]
 
 
+def mul(x):
+    return x["a"] * x["b"]
+
+
+def scale_shift(x):
+    return x["x"] * 2.5 + 0.5
+
+
+def add_row(x):
+    # r has 32 rows (one tile row) and is repeated down the rows of x: out[i, j] = x[i, j] + r[i mod 32, j].
+    h, r = x["x"], x["r"]
+    return h + r.repeat(h.shape[0] // r.shape[0], 1)
+
+
+def rsqrt(x):
+    return torch.rsqrt(x["x"])
+
+
+def row_sum(x):
+    # The sum of each row goes into column 0 of a (rows, 32) output; the other 31 columns are 0.
+    h = x["x"]
+    out = torch.zeros(h.shape[0], 32, dtype=h.dtype)
+    out[:, 0] = h.sum(-1)
+    return out
+
+
 def silu_mul(x):
     return torch.nn.functional.silu(x["gate"]) * x["up"]
 
@@ -50,5 +76,6 @@ def tile_scan(x):
     return out.reshape(rows, cols)
 
 
-REFERENCES = {"add": add, "silu_mul": silu_mul, "rmsnorm": rmsnorm, "linear_scan": linear_scan, "center": center,
+REFERENCES = {"add": add, "mul": mul, "scale_shift": scale_shift, "add_row": add_row, "rsqrt": rsqrt,
+              "row_sum": row_sum, "silu_mul": silu_mul, "rmsnorm": rmsnorm, "linear_scan": linear_scan, "center": center,
               "softmax": softmax, "tile_scan": tile_scan}

@@ -20,7 +20,7 @@
     tt-orchard inventory TARGET [--python P] [--ttnn-python P] [--against F] [--layers N] [--seq N] [--class C] [--out DIR]
     tt-orchard inventory verify-candidates --inventory FILE|DIR [--out DIR] [--image IMG] [--max-ops N] [--timeout S] [--record]
     tt-orchard coder-speed [--endpoint URL --model NAME | --tiers] [--samples N] [--watch SECONDS] [--json]
-    tt-orchard kernel-probe --op NAME [--attempts N] [--phase sim|hw] [--out DIR] [--endpoint URL] [--model NAME]
+    tt-orchard kernel-probe (--op NAME | --ladder [--rungs A,B] [--rung-wall OP=S] [--max-hours H]) [--wall-s S] [--attempts N] [--phase sim|hw] [--out DIR] [--endpoint URL] [--model NAME]
                             [--temperature T | --temperatures T1,T2] [--top-p P] [--seed N]
                             [--src-dir D] [--venv-dir D] [--shared-python P] [--tt-lang-skill-dir D]
                             [--allow-stale-skills] [--allow-slow-coder]
@@ -370,7 +370,7 @@ def _parser() -> argparse.ArgumentParser:
     kp = sub.add_parser("kernel-probe", parents=[common],
                         help="ask the running coder to write a tt-lang kernel for one op, N times, and check each "
                              "on the simulator (and with --phase hw, on one leased chip). Starts no server")
-    kp.add_argument("--op", required=True, choices=KERNEL_PROBE_OPS, help="the op to write a kernel for")
+    kp.add_argument("--op", choices=KERNEL_PROBE_OPS, help="the op to write a kernel for (required without --ladder)")
     kp.add_argument("--attempts", type=int, default=5,
                     help="attempts per temperature, each a fresh conversation (default 5)")
     kp.add_argument("--temperature", metavar="T",
@@ -422,6 +422,27 @@ def _parser() -> argparse.ArgumentParser:
     kp.add_argument("--allow-stale-skills", action="store_true",
                     help="run even when the tt-lang checkout or the tt-lang skill is not the latest upstream has, or "
                          "could not be compared; the report records it with the shas")
+    kp.add_argument("--wall-s", dest="wall_s", type=float, metavar="S",
+                    help="the wall budget of one attempt in seconds (default 1800; checked between turns). With --ladder "
+                         "it is the default for every rung; --rung-wall sets a rung's own")
+    kp.add_argument("--ladder", action="store_true",
+                    help="run the capability ladder instead of one op: the ops from easy to hard (add, mul, scale_shift, "
+                         "add_row, rsqrt, row_sum, center, rmsnorm, linear_scan), each as its own run in <out>/<op>/ "
+                         "with the same sampling, then <out>/ladder-report.md with the passes and failure classes per "
+                         "rung. Do not give --op")
+    kp.add_argument("--rungs", metavar="OP1,OP2,...", help="with --ladder: only these rungs (default: all of them)")
+    kp.add_argument("--rung-wall", dest="rung_wall", metavar="OP=S,...",
+                    help="with --ladder: the wall budget of named rungs in seconds (see size_wall_budget in "
+                         "orchard/kernelladder.py: 4 times the slowest passing pilot, from 300 to 1800)")
+    kp.add_argument("--rung-expect-s", dest="rung_expect_s", metavar="OP=S,...",
+                    help="with --ladder: the seconds one attempt of a rung is expected to take, for the projection "
+                         "that --max-hours checks (default: the rung's wall budget)")
+    kp.add_argument("--max-hours", dest="max_hours", type=float, metavar="H",
+                    help="with --ladder: stop after a rung when the elapsed time plus the projection for the rungs left "
+                         "is above H hours; the report says so")
+    kp.add_argument("--report-only", dest="report_only", action="store_true",
+                    help="with --ladder: write <out>/ladder-report.md from the rung directories already there and run "
+                         "nothing")
     return p
 
 
