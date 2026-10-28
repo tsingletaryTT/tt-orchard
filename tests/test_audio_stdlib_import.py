@@ -19,7 +19,8 @@ def test_the_supervisor_and_the_stage_table_import_without_numpy():
     assert r.returncode == 0 and r.stdout.strip() == "ok", r.stderr[-400:]
 
 
-def test_the_audio_gates_import_the_numeric_module_when_they_run():
-    r = run("import sys; import orchard.stages as s; assert 'orchard.audio_stages' not in sys.modules; "
-            "s.gate_audio_reference('/nonexistent/stage', '/nonexistent/run'); assert 'orchard.audio_stages' in sys.modules; print('ok')")
+def test_the_audio_gates_never_import_the_numeric_module_in_the_supervisor_process():
+    """The gates run in the configured reference interpreter (orchard/audio_remote.py); with no selection in the ledger they fail without importing it."""
+    r = run("import sys; import orchard.stages as s; res = s.gate_audio_reference('/nonexistent/stage', '/nonexistent/run'); "
+            "assert not res.ok; assert 'orchard.audio_stages' not in sys.modules and 'numpy' not in sys.modules; print('ok')")
     assert r.returncode == 0 and r.stdout.strip() == "ok", r.stderr[-400:]
