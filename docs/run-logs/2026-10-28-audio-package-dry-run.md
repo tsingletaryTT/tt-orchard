@@ -10,7 +10,7 @@ Paths are placeholders (`<run>` is the run directory). Nothing was uploaded, pub
 |---|---|
 | The builder, the card renderer and the gate | `orchard/audio_package.py` |
 | The command | `tt-orchard audio-package RUN_DIR --namespace ORG --bench FILE --demo-repo DIR [--snapshot DIR] [--check]` |
-| Tests (213, with fake runs, plus 2 for `entries_from_bytes`) | `tests/test_audio_package.py` |
+| Tests (224, with fake runs, plus 2 for `entries_from_bytes`) | `tests/test_audio_package.py` |
 | Hostile-input readers (4 registered) | `tests/hostile_inputs.py` |
 
 ## What was staged
@@ -126,3 +126,14 @@ tt-model publish episod/stable-audio-3-small-music-blackhole                    
 - Weights revision at run time: see the `run.sh` row above. The library's `resolve()` has no revision argument, so the pin is enforced by what the runtime can see (a cache with one revision in it).
 - The staged `run.sh` was run up to its last line against the real library and cache on CPU, with a stand-in for the server so that no port, chip or server started: it printed the attribution line, built the private cache, resolved the model to the pinned revision through it, and exported `HF_HUB_CACHE`. It was not run with the real server.
 - The gate compares `LICENSE.md`, `NOTICE` and the two evidence files with the sha256 in `package-record.json` (the card, page and launcher are checked for what they say, since an operator may edit a card). `requirements.txt` lists the model library's dependencies (torch and torchaudio pinned as the library pins them, so a different torch gives a pip conflict and not a silent replacement) and the page's Gradio pin.
+
+## What the gate re-verifies and what it takes from the record
+
+Re-verified from the files in the package, every time the gate runs (`package_facts` reads `evidence/audio_result.json` and `evidence/bench-chip.json` again): the model name, the 40-character model revision and library commit, the settings, that the chip run agreed with the CPU reference and the two were comparable, that the control showed the fine-tune and not the base model, that the agreement bars say they are provisional, every benchmark label (recomputed from the counts of measured runs and warm-up runs), every min, median and max (recomputed from the runs), the size limit of 120 s, and that the benchmark settings equal the run's settings. The card's Numbers table is then compared, tuple by tuple, with the rows these files give. The revision is also compared with the card, `run.sh`, `tt-model.yaml` and `package-record.json`, and the library commit with `package-record.json`.
+
+Taken from the record and not re-verified by the gate (checked once, when the package was staged): that the run's ledger reached `ready for operator review` and has no abort (the ledger is not in the package); that the license snapshot revision equals the served revision; that the benchmark sweep is for the same model and settings as the run (the gate does re-compare settings, but not the revision, which the sweep does not record); that `evidence/` is a faithful copy of the run's files. For that last point the gate compares the sha256 of the evidence, `LICENSE.md`, `NOTICE` and `LICENSE-runtime` with `package-record.json`. The record is a file in the package, so this catches an edit after staging and does not authenticate the record. The device string is copied into no card number and is not checked. Closed this round as one-line checks: the record's revision and library commit must equal the evidence's.
+
+## Runtime license and cache path (settled from the last review's themes)
+
+- `LICENSE-runtime` holds a notice and then tt-orchard's own `LICENSE` (the Apache License 2.0, matching the SPDX headers of the copied files). The notice says the Stability AI Community License covers only the model, that the stable-audio-3 library (MIT License) is not bundled and is fetched at the pinned commit, and names the Gemma Terms of Use. The gate requires each of those and the Apache text.
+- A relative cache path is made absolute in `run.sh` (before it is used or exported) and in `check_revision.py`; a test runs the script with a relative path and with spaces in it.

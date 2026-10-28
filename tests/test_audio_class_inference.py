@@ -405,11 +405,13 @@ def test_the_gate_refuses_a_weights_only_decision_whose_override_does_not_explai
     assert not gate(stage).ok and "weights-only" in gate_reasons(stage)
 
 
-def test_a_delta_with_no_decision_still_passes_the_gate(audio_case):
+def test_a_delta_from_the_current_template_with_no_decision_is_refused_by_the_gate(audio_case):
+    """Issue 146: the earlier rule let a delta with no decision pass. Only a record that an older template wrote (a different stamp, and no decision
+    yet) has nothing to check; tests/test_audio_decision_gate.py covers that case on `decision_problems`."""
     stage = audio_case()
     run_ok(stage)
     edit_delta(stage, lambda d: d["audio"].pop("decision"))
-    assert gate(stage).ok
+    assert not gate(stage).ok and "no audio.decision" in gate_reasons(stage)
 
 
 def test_the_decision_check_is_importable_and_accepts_the_template_s_decision(audio_case):

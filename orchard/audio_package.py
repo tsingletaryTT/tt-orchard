@@ -89,8 +89,18 @@ RUNTIME_FILES = (("skills/audio-chip-templates/chip_generate.py", "orchard/skill
                  ("skills/audio-reference-templates/make_reference.py", "orchard/skills/audio-reference-templates/make_reference.py"),
                  ("audio_reference.py", "orchard/audio_reference.py"),
                  ("pinned_files.py", "orchard/pinned_files.py"))
+RUNTIME_LICENSE = "LICENSE-runtime"
+LIBRARY_LICENSE_NAME = "MIT"
+RUNTIME_NOTICE = (
+    "LICENSE OF THE RUNTIME CODE IN THIS PACKAGE\n\n"
+    "The runtime code in this package (runtime/, demo/, run.sh) is Tenstorrent's and is licensed under the Apache License, Version 2.0, whose text follows.\n"
+    "The Stability AI Community License (LICENSE.md) covers only the Stability AI model, and this package does not include the model weights.\n"
+    f"The stable-audio-3 library is not bundled in this package. It is fetched by the user at the commit named in README.md and is licensed under the "
+    f"{LIBRARY_LICENSE_NAME} License by its authors; read the license that comes with it.\n"
+    "The text encoder inside the model download is provided under the Gemma Terms of Use (" + GEMMA_LINK + ").\n\n"
+    "----------------------------------------------------------------------\n\n")
 CHECK_FILE = "runtime/orchard/skills/audio-chip-templates/check_revision.py"
-REQUIRED_FILES = (("README.md", "LICENSE.md", "NOTICE", "tt-model.yaml", "run.sh", "requirements.txt", "docs/running.md", "demo/requirements.txt",
+REQUIRED_FILES = (("README.md", "LICENSE.md", "NOTICE", "LICENSE-runtime", "tt-model.yaml", "run.sh", "requirements.txt", "docs/running.md", "demo/requirements.txt",
                    "runtime/orchard/__init__.py", CHECK_FILE, "evidence/audio_result.json", "evidence/bench-chip.json", "package-record.json")
                   + tuple(f"demo/{name}" for _, name in DEMO_FILES) + tuple(f"runtime/{dest}" for _, dest in RUNTIME_FILES))
 RUNTIME_INIT = '"""A stand-in package so the copied chip runtime files import `orchard.audio_reference` from this directory."""\n'
@@ -543,7 +553,8 @@ def render_card(f: Facts, *, namespace: str, license_bytes: bytes) -> str:
               "## Provenance", "",
               f"- Model: {f.model_id}, revision `{f.revision}`. Weights are not part of this package.",
               "- License files: `LICENSE.md` and `NOTICE` are copied from the model's own repository at that revision.",
-              "- Chip runtime: `runtime/`, copied unmodified from tt-orchard.",
+              "- Chip runtime: `runtime/`, copied unmodified from tt-orchard. The runtime code is licensed under the Apache License 2.0 (`LICENSE-runtime`). "
+              "The stable-audio-3 library is not bundled; you fetch it at the commit above, under the license it ships with.",
               "- Job server and page: `demo/`, copied from the Tenstorrent demo repository for this model. One edit was made to the page's text, to add the "
               f"line \"{POWERED_BY}\"; `{RECORD_FILE}` has the hashes before and after.", ""]
     return "\n".join(lines)
@@ -591,6 +602,7 @@ echo "{POWERED_BY}"
 # another revision would change what the next clip loads. Build a cache directory that holds only the pinned revision (links to your download) and point the
 # runtime and every clip's process at it. This opens no device and writes nothing in your own cache.
 PRIVATE_CACHE="${{AUDIO_PKG_CACHE:-${{XDG_CACHE_HOME:-$HOME/.cache}}/{PACKAGE_NAME}}}/$REVISION/hub"
+case "$PRIVATE_CACHE" in /*) ;; *) PRIVATE_CACHE="$PWD/$PRIVATE_CACHE" ;; esac   # a relative path is made absolute before any use: the clips' processes run elsewhere
 PYTHONPATH="$ORCHARD_AUDIO_SRC${{PYTHONPATH:+:$PYTHONPATH}}" "$ORCHARD_TTNN_PYTHON" "$HERE/runtime/orchard/skills/audio-chip-templates/check_revision.py" \\
   "$REVISION" {MODEL_KEY} "$PRIVATE_CACHE"
 export HF_HUB_CACHE="$PRIVATE_CACHE"
@@ -955,7 +967,7 @@ def package_problems(pkg, *, hostname: str | None = None, home: str | None = Non
         return [f"the gate could not read the package ({type(exc).__name__})"]
 
 
-RECORDED = ("LICENSE.md", "NOTICE", RESULT_EVIDENCE, BENCH_EVIDENCE)
+RECORDED = ("LICENSE.md", "NOTICE", RUNTIME_LICENSE, RESULT_EVIDENCE, BENCH_EVIDENCE)
 
 
 def record_problems(pkg: Path) -> list[str]:
@@ -1007,6 +1019,12 @@ def _gate(pkg: Path, hostname, home, validate_manifest) -> list[str]:
             problems.append(f"the package has no {name}")
     reqs = _text(pkg / "requirements.txt") or ""
     names = {re.split(r"[<>=!~ ;\[]", ln.strip(), maxsplit=1)[0].lower().replace("_", "-") for ln in reqs.splitlines() if ln.strip() and not ln.startswith("#")}
+    rt = _text(pkg / RUNTIME_LICENSE) or ""
+    for needle, what in (("Apache License", "the Apache License text"), ("Version 2.0", "the Apache License text"),
+                         (f"{LIBRARY_LICENSE_NAME} License", "the library's license name"), ("not bundled", "that the stable-audio-3 library is not bundled"),
+                         ("covers only the Stability AI model", "that the Stability AI license covers only the model")):
+        if needle not in rt:
+            problems.append(f"{RUNTIME_LICENSE} must carry {what}")
     for dep in HOST_REQUIREMENTS:
         if re.split(r"[<>=!~ ;\[]", dep, maxsplit=1)[0] not in names:
             problems.append(f"requirements.txt must name {re.split(r'[<>=]', dep, maxsplit=1)[0]}, which the chip runtime or the model library imports")
@@ -1019,10 +1037,15 @@ def _gate(pkg: Path, hostname, home, validate_manifest) -> list[str]:
         manifest = _text(pkg / "tt-model.yaml") or ""
         if f'REVISION="{facts.revision}"' not in run_sh or "check_revision.py" not in run_sh:
             problems.append("run.sh must carry the evidence's model revision and run its check_revision.py before it starts the server")
+        if 'case "$PRIVATE_CACHE" in /*)' not in run_sh:
+            problems.append("run.sh must make the private cache path absolute before it uses it")
         if 'export HF_HUB_CACHE="$PRIVATE_CACHE"' not in run_sh:
             problems.append("run.sh must point the runtime at the private cache that holds only the pinned revision (export HF_HUB_CACHE)")
         if f'revision: "{facts.revision}"' not in manifest:
             problems.append("tt-model.yaml must pin the evidence's model revision")
+        rec = _text(pkg / RECORD_FILE) or ""
+        if f'"revision": "{facts.revision}"' not in rec or f'"library_commit": "{facts.library_commit}"' not in rec:
+            problems.append(f"{RECORD_FILE} must name the evidence's model revision and library commit")
         if f"`{facts.revision}`" not in card:
             problems.append("the card must name the evidence's model revision")
     if validate_manifest is not None and (pkg / "tt-model.yaml").is_file():
@@ -1093,6 +1116,9 @@ def stage_package(run_dir, *, bench_path, demo_repo, snapshot, namespace: str, r
     sources = {rel: _copy_source(demo, rel, "the demo repository's") for rel, _ in DEMO_FILES}
     runtime = {dest: _copy_source(root, rel, "the tt-orchard") for rel, dest in RUNTIME_FILES}
     requirement = gradio_requirement(demo)
+    runtime_license = _copy_source(root.parent, "LICENSE", "the tt-orchard").decode("utf-8")
+    if "Apache License" not in runtime_license:
+        raise AudioPackageError("tt-orchard's LICENSE is not the Apache License text this package's runtime notice describes")
     page_src = sources["demo/audio_app.py"].decode("utf-8")
     if page_src.count(DEMO_ANCHOR) != 1:
         raise AudioPackageError("the demo page's text no longer has the line this builder edits to add the attribution; update the builder")
@@ -1102,6 +1128,7 @@ def stage_package(run_dir, *, bench_path, demo_repo, snapshot, namespace: str, r
     pkg.mkdir(parents=True, exist_ok=True)
     files.append(_write(pkg, "LICENSE.md", license_bytes))
     files.append(_write(pkg, "NOTICE", notice_text(license_bytes)))
+    files.append(_write(pkg, RUNTIME_LICENSE, RUNTIME_NOTICE + runtime_license))
     files.append(_write(pkg, "tt-model.yaml", manifest_text(facts, namespace)))
     files.append(_write(pkg, "run.sh", run_script(facts), mode=0o755))
     files.append(_write(pkg, "requirements.txt", requirements_text(requirement)))

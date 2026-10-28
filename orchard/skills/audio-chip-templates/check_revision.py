@@ -44,7 +44,7 @@ def main(argv) -> int:
     if len(argv) != 4:
         print("usage: check_revision.py REVISION MODEL_NAME PRIVATE_HUB_DIR", file=sys.stderr)
         return 2
-    pin, name, private = argv[1], argv[2], Path(argv[3])
+    pin, name, private = argv[1], argv[2], Path(os.path.abspath(argv[3]))       # absolute before use: the clips' processes run in other directories
     os.environ["HF_HUB_OFFLINE"] = "1"
     try:
         from huggingface_hub import try_to_load_from_cache

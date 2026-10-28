@@ -928,6 +928,43 @@ def test_the_gate_refuses_a_license_or_evidence_file_changed_after_staging(stage
     assert any(f"{name} changed after it was staged" in p for p in gate(staged))
 
 
+def test_the_runtime_license_is_the_repos_own_license_with_the_notice(staged):
+    text = (staged / "LICENSE-runtime").read_text()
+    repo_license = (Path(ap.__file__).parent.parent / "LICENSE").read_text()
+    assert text.endswith(repo_license) and text.startswith("LICENSE OF THE RUNTIME CODE")
+    for needle in ("covers only the Stability AI model", "not bundled", "MIT License", "Gemma Terms of Use"):
+        assert needle in text
+    assert "Apache License" in repo_license
+
+
+@pytest.mark.parametrize("needle", ["Apache License", "Version 2.0", "MIT License", "not bundled", "covers only the Stability AI model"])
+def test_the_gate_refuses_a_runtime_license_that_lacks_an_element(staged, needle):
+    f = staged / "LICENSE-runtime"
+    f.write_text(f.read_text().replace(needle, "x"))
+    assert any("LICENSE-runtime must carry" in p for p in gate(staged))
+
+
+def test_the_gate_names_a_missing_runtime_license_and_a_record_that_disagrees_with_the_evidence(staged):
+    rec = staged / ap.RECORD_FILE
+    rec.write_text(rec.read_text().replace(f'"revision": "{REV}"', '"revision": "' + "1" * 40 + '"'))
+    assert any("must name the evidence's model revision and library commit" in p for p in gate(staged))
+
+
+def test_a_relative_private_cache_path_is_made_absolute_by_the_script_and_the_launcher(tmp_path, staged):
+    run_sh = (staged / "run.sh").read_text()
+    assert 'case "$PRIVATE_CACHE" in /*)' in run_sh and run_sh.index('case "$PRIVATE_CACHE"') < run_sh.index("check_revision.py")
+    r = run_check(tmp_path, REV, private=Path("rel cache/hub"))
+    assert r.returncode == 0
+    assert str(tmp_path / "rel cache" / "hub") in r.stdout                                 # printed absolute
+    assert (tmp_path / "rel cache" / "hub" / "models--x--y" / "refs" / "main").read_text() == REV
+
+
+def test_the_gate_refuses_a_launcher_that_leaves_the_cache_path_relative(staged):
+    f = staged / "run.sh"
+    f.write_text(f.read_text().replace('case "$PRIVATE_CACHE" in /*)', 'case "$PRIVATE_CACHE" in x)'))
+    assert any("must make the private cache path absolute" in p for p in gate(staged))
+
+
 def test_torch_and_torchaudio_are_pinned_as_the_library_pins_them(staged):
     lines = (staged / "requirements.txt").read_text().splitlines()
     assert "torch==2.7.1" in lines and "torchaudio==2.7.1" in lines and "torch" not in lines and "torchaudio" not in lines
