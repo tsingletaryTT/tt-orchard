@@ -18,6 +18,9 @@ and runs `python3 stages/8/build_bundle.py` from the run directory. The script t
                                      the tensor cache each test used (weights-only path)
     stages/7/package.json, stages/7/PUBLISH_COMMANDS.txt, stages/7/verify/evidence/verify.json,
     stages/7/package/<name>/         when stage 7 staged a package
+    stages/2/audio_result.json       only for an audio run: adds bundle/audio/ (the FLAC clips, none over
+                                     20 MB), the "Audio clip on a chip" section of RESULTS.md and the
+                                     "Audio run" section of RISKS.md. Other runs get the same bundle as before.
 
 It writes:
 
@@ -249,7 +252,9 @@ class Run:
         self.path = stages_mod.run_path(entries, run_dir)
         self.cls = stages_mod.run_class(entries, run_dir)
         self.package_format = stages_mod.package_format(entries)
-        self.specs = {n: stages_mod.spec_for(n, self.path, self.package_format, self.cls) for n in range(9)}
+        # An audio run (the harness's own audio runtime) wrote stage 2's audio_result.json and has the audio stage table.
+        self.audio_run = (run_dir / "stages" / "2" / "audio_result.json").is_file()
+        self.specs = {n: stages_mod.spec_for(n, self.path, self.package_format, self.cls, audio_runtime=self.audio_run) for n in range(9)}
         self.outcome = {}          # stage -> the data of its last stage_end
         self.attempts = {}         # stage -> stage_start entries that were not a skip
         for e in entries:
@@ -260,12 +265,13 @@ class Run:
                 self.attempts[n] = self.attempts.get(n, 0) + 1
         s = run_dir / "stages"
         self.delta = read_json(s / "0" / "delta.json", "stages/0/delta.json", required=True)
-        self.reference = read_json(s / "1" / "reference.json", "stages/1/reference.json", required=True)
+        # An audio run has no reference.json: stage 1 wrote audio_reference.json, which the audio section reads through stage 2's result.
+        self.reference = {} if self.audio_run else read_json(s / "1" / "reference.json", "stages/1/reference.json", required=True)
         self.results = {}
         for n in range(2, 7):
             spec = self.specs[n]
-            if spec.skip or not spec.gate_file:
-                continue
+            if spec.skip or not spec.gate_file or (self.audio_run and n == 2):
+                continue            # an audio run's stage 2 file is the audio result, which the audio section reads
             rel = f"stages/{n}/{spec.gate_file}"
             self.results[n] = read_json(run_dir / rel, rel, required=self.result(n) == "pass")
         # How each swap check served (the drafter and where sampling happened), as the check recorded it.
@@ -314,6 +320,8 @@ class Run:
                               "write it before stage 8 can build the bundle") from None
             if not self.publish.strip():
                 raise Missing("stages/7/PUBLISH_COMMANDS.txt is empty")
+        self.audio = load_audio(run_dir)    # stage 2's audio_result.json: None for a run without one (see "audio runs")
+        self.audio_clips: list[dict] = []   # set by build() once the clips are copied
         self.cards = {}             # profile name -> (run-relative card path, text)
         for p in self.profiles():
             rel = f"{p.get('dir')}/README.md"
@@ -779,6 +787,11 @@ def stage_results(run: Run, redact: Redactor) -> dict[int, list[str]]:
     if isinstance(arts, dict) and arts:
         lines += ["", "Reference files: " + ev(list(arts.values())) + "."]
     body[1] = lines + ["", "Evidence: `stages/1/reference.json`."]
+    if run.audio_run:
+        body[2] = ["The clip, its comparisons with the CPU runs and the control are in the section Audio clip on a chip.", "",
+                   "Evidence: `stages/2/audio_result.json`."]
+        body[1] = ["The CPU reference runs (the model, its base as the control, and one run in the chip's interpreter) are listed in the section "
+                   "Audio clip on a chip.", "", "Evidence: `stages/1/audio_reference.json`."]
 
     for n in (2, 3, 5, 6):
         res = run.results.get(n)
@@ -1019,6 +1032,329 @@ def inventory_section(run: Run, redact: Redactor) -> list[str]:
     return lines
 
 
+# ---- audio runs (stage 2's audio_result.json) -----------------------------------------------------------
+# A run whose model the harness's own audio runtime serves has `stages/2/audio_result.json`. Only then does the bundle get
+# `audio/` (the clips), the "Audio clip on a chip" section of RESULTS.md and the "Audio run" section of RISKS.md. A run without
+# that file gets the same bundle as before. The file comes from another stage and is untrusted: every field is checked for its
+# type, a missing or wrongly typed field prints "not recorded", and nothing here raises on its content.
+
+AUDIO_RESULT = "stages/2/audio_result.json"
+AUDIO_HEADING = "Audio clip on a chip"
+AUDIO_MAX_JSON_BYTES = 4 << 20       # a larger audio_result.json is not read
+MAX_CLIP_BYTES = 20_000_000          # 20 MB; a larger clip is not copied and the results say so
+MAX_NUMBER = 1e15                    # a recorded number beyond this is treated as not recorded
+NOT_RECORDED = "not recorded"
+# (role, where the clip's path is recorded, key there, file name in bundle/audio/, label)
+AUDIO_CLIPS = (("chip", "runs", "chip", "chip.flac", "the fine-tune's clip from the chip run"),
+               ("reference", "reference_runs", "reference", "reference.flac", "the fine-tune's clip from the CPU reference"),
+               ("control_chip", "runs", "control_chip", "control-chip.flac", "the base model's clip from the chip run"),
+               ("control_reference", "reference_runs", "control_reference", "control-reference.flac",
+                "the base model's clip from the CPU reference"))
+# Each timing key of the chip run, with what it measures. A key the file does not hold prints "not recorded".
+AUDIO_TIMINGS = (
+    ("generate_and_decode_s", "seconds", "the sampler's loop and the autoencoder's decode, end to end"),
+    ("conditioning_s", "seconds", "the T5Gemma encoder turning the prompt into conditioning, on the host"),
+    ("model_load_s", "seconds", "loading the model's weights on the host"),
+    ("chip_weights_upload_s", "seconds", "copying the diffusion transformer's weights to the chip"),
+    ("chip_transformer_call_s", "seconds", "wall time of the diffusion transformer's calls, summed over all passes: host preparation, uploads, the layers on the chip and the read back"),
+    ("chip_passes", "passes", "how many times the diffusion transformer ran on the chip"))
+AUDIO_AGREEMENTS = (("Chip against the CPU reference", ("agreement", "chip_vs_reference")),
+                    ("Chip against the same-environment CPU run", ("agreement", "chip_vs_host_same_env")),
+                    ("Environment floor: the same-environment CPU run against the reference", ("environment_floor",)))
+AUDIO_TABLE_HEAD = ["| Comparison | Verdict | Final-latent PCC | Final-latent relative L2 | Waveform PCC | Waveform relative L2 | "
+                    "Log-spectrum distance | Worst layer | Failed arrays |", "|---|---|---|---|---|---|---|---|---|"]
+SAFE_KEY = re.compile(r"[A-Za-z0-9_.-]{1,60}")
+
+
+def dig(obj, *keys):
+    """`obj[k1][k2]...` when every step is a dict that holds the key, else None."""
+    for k in keys:
+        if not isinstance(obj, dict):
+            return None
+        obj = obj.get(k)
+    return obj
+
+
+def num(value, digits: int = 4) -> str:
+    """A recorded number as text; anything that is not a finite number of sane size is "not recorded"."""
+    if not is_number(value) or value != value or abs(value) > MAX_NUMBER:
+        return NOT_RECORDED
+    return f"{value:.{digits}g}" if isinstance(value, float) else str(value)
+
+
+def txt(redact: Redactor, value, limit: int = 300) -> str:
+    """A recorded string as one line for a table cell, shortened and redacted; a non-string is "not recorded"."""
+    if not isinstance(value, str) or not value.strip():
+        return NOT_RECORDED
+    line = one_line(value)
+    if len(line) > limit:
+        line = line[:limit] + "..."
+    return reported_cell(redact, line)
+
+
+def load_audio(run_dir: Path):
+    """None when the run has no audio_result.json. Otherwise a dict: the file's content when it is a readable JSON object
+    of a sane size, and {"_unreadable": <reason>} when it is not."""
+    path = run_dir / AUDIO_RESULT
+    if not (path.exists() or path.is_symlink()):
+        return None
+    try:
+        if path.is_symlink() or not path.is_file():
+            return {"_unreadable": "it is not a regular file"}
+        if path.stat().st_size > AUDIO_MAX_JSON_BYTES:
+            return {"_unreadable": f"it is larger than {AUDIO_MAX_JSON_BYTES >> 20} MB"}
+    except OSError:
+        return {"_unreadable": "it cannot be read"}
+    data = read_json(path, AUDIO_RESULT, required=False)
+    return data if data is not None else {"_unreadable": "it is not a readable JSON object"}
+
+
+def audio_summary_state(summary) -> str:
+    """'ok', 'failed' or 'unknown' for one agreement summary."""
+    if not isinstance(summary, dict):
+        return "unknown"
+    if summary.get("ok") is False or summary.get("comparable") is False:
+        return "failed"
+    return "ok" if summary.get("ok") is True else "unknown"
+
+
+def copy_audio(run: Run, bundle: Path) -> list[dict]:
+    """bundle/audio/: the clips the result names, under fixed file names. A clip that is not a regular .flac file inside the
+    run directory, or is over MAX_CLIP_BYTES, is not copied; the record says why. Returns one record per clip the file names:
+    {"role", "name", "label", "copied", "reason", "bytes"}."""
+    out = []
+    data = run.audio
+    if not data or "_unreadable" in data:
+        return out
+    root = os.path.realpath(run.dir)
+    for role, where, key, name, label in AUDIO_CLIPS:
+        entry = dig(data, where, key)
+        if not isinstance(entry, dict) or "clip" not in entry:
+            continue
+        rec = {"role": role, "name": name, "label": label, "copied": False, "reason": None, "bytes": None}
+        out.append(rec)
+        rel = entry.get("clip")
+        if not isinstance(rel, str) or not rel or os.path.isabs(rel) or "\0" in rel:
+            rec["reason"] = "its recorded path is not a path inside the run directory"
+            continue
+        src = Path(os.path.join(root, rel))
+        real = os.path.realpath(src)
+        if os.path.commonpath([root, real]) != root or src.is_symlink() or not src.is_file():
+            rec["reason"] = "its recorded path is not a regular file inside the run directory"
+            continue
+        if src.suffix.lower() != ".flac":
+            rec["reason"] = "it is not a .flac file"
+            continue
+        size = src.stat().st_size
+        rec["bytes"] = size
+        if size > MAX_CLIP_BYTES:
+            rec["reason"] = f"it is {size} bytes, over the {MAX_CLIP_BYTES // 1_000_000} MB limit"
+            continue
+        dest = bundle / "audio" / name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src, dest)
+        rec["copied"] = True
+    return out
+
+
+def audio_clip_line(rec: dict) -> str:
+    if rec["copied"]:
+        return f"- [{rec['label']}](audio/{rec['name']}) (`audio/{rec['name']}`, {rec['bytes']} bytes)"
+    return f"- {rec['label']}: not copied into this bundle, because {rec['reason']}."
+
+
+def audio_agreement_row(redact: Redactor, label: str, s) -> str:
+    if not isinstance(s, dict):
+        return f"| {label} | {NOT_RECORDED} |" + f" {NOT_RECORDED} |" * 7
+    state = audio_summary_state(s)
+    if state == "ok":
+        verdict = "within the bars"
+    elif state == "unknown":
+        verdict = NOT_RECORDED
+    else:
+        verdict = "not comparable" if s.get("comparable") is False and s.get("ok") is not False else "outside the bars"
+    lat, wav, worst = dig(s, "latent_final"), dig(s, "waveform"), dig(s, "worst_layer")
+    if isinstance(worst, dict) and isinstance(worst.get("name"), str):
+        worst_text = f"{txt(redact, worst['name'], 80)} (relative L2 {num(worst.get('rel_l2'))}, PCC {num(worst.get('pcc'))})"
+    else:
+        worst_text = NOT_RECORDED
+    failed = s.get("failed")
+    if isinstance(failed, list):
+        names = [txt(redact, f, 80) for f in failed[:20] if isinstance(f, str)]
+        failed_text = (", ".join(names) + (f" and {len(failed) - 20} more" if len(failed) > 20 else "")) if names else "none"
+    else:
+        failed_text = NOT_RECORDED
+    return (f"| {label} | {verdict} | {num(dig(lat, 'pcc'))} | {num(dig(lat, 'rel_l2'))} | {num(dig(wav, 'pcc'))} | "
+            f"{num(dig(wav, 'rel_l2'))} | {num(dig(wav, 'log_spectrum_distance'))} | {worst_text} | {failed_text} |")
+
+
+AUDIO_REPEAT_PARTS = (("generate_and_decode_s", "the whole `generate` call and decode"), ("chip_transformer_call_s", "the diffusion transformer's calls"),
+                      ("conditioning_s", "the T5Gemma encoder on the host"))
+AUDIO_REPEAT_ROLES = (("chip", "reference", "Fine-tune, 8 steps"), ("control_chip", "control_reference", "Base control, 50 steps, guidance 7"))
+
+
+def audio_repeat_lines(data: dict) -> list[str]:
+    """The timing repeats of stage 2 as a plain table: per model and part the seconds of each repeat, their median, and the CPU reference's one
+    sample for the whole call. Missing or malformed values print as not recorded; nothing here raises."""
+    import statistics
+    reps = dig(data, "repeats")
+    lines = ["", "### Timing repeats", ""]
+    if not isinstance(reps, dict) or not any(isinstance(v, list) and v for v in reps.values()):
+        return lines + [f"The chip run was not repeated, or the repeats are {NOT_RECORDED}."]
+    lines += ["Each model ran several times on the chip with the same settings and seed. The first repeat includes kernel compilation when the kernel cache "
+              "is cold. The CPU column is the reference's single `generate` call, made once in the reference environment (one sample).", "",
+              "| Run | Part | Seconds per repeat | Median | CPU reference, one sample |", "|---|---|---|---|---|"]
+    for role, ref_role, label in AUDIO_REPEAT_ROLES:
+        lst = reps.get(role)
+        if not isinstance(lst, list) or not lst:
+            continue
+        for key, what in AUDIO_REPEAT_PARTS:
+            vals = [dig(e, "timings", key) if isinstance(e, dict) else None for e in lst[:20]]
+            good = [v for v in vals if is_number(v) and abs(v) <= MAX_NUMBER]
+            cells = ", ".join(num(v) if is_number(v) and abs(v) <= MAX_NUMBER else NOT_RECORDED for v in vals)
+            med = num(statistics.median(good)) if good else NOT_RECORDED
+            cpu = dig(data, "reference_runs", ref_role, "timings", key) if key == "generate_and_decode_s" else None
+            lines.append(f"| {label} | {what} (`{key}`) | {cells} | {med} | "
+                         f"{num(cpu) if is_number(cpu) and abs(cpu) <= MAX_NUMBER else ('n/a' if key != 'generate_and_decode_s' else NOT_RECORDED)} |")
+    return lines + [f"", f"Repeats per model: {', '.join(str(len(v)) for v in reps.values() if isinstance(v, list))}."]
+
+
+def audio_section(run: Run, redact: Redactor) -> list[str]:
+    """The "Audio clip on a chip" section of RESULTS.md. No lines for a run without audio_result.json."""
+    data = run.audio
+    if data is None:
+        return []
+    head = ["", f"## {AUDIO_HEADING}", ""]
+    if "_unreadable" in data:
+        return head + [f"`{AUDIO_RESULT}` is present but {data['_unreadable']}. No audio number or clip is in this bundle."]
+    chip = dig(data, "runs", "chip")
+    st = dig(data, "settings")
+    cell = lambda v: txt(redact, v) if isinstance(v, str) else num(v)    # noqa: E731
+    lines = head + [
+        f"From `{AUDIO_RESULT}`. Nobody has listened to the clips. The numbers below compare the chip run's arrays with the "
+        "CPU reference's arrays and say nothing about how the audio sounds.", "",
+        "What ran where: the diffusion transformer ran on one chip. The T5Gemma text encoder, the sampler and the "
+        "autoencoder decoder ran on the host CPU.", "",
+        "| Fact | Value |", "|---|---|",
+        f"| Model | {txt(redact, dig(chip, 'model'))} |",
+        f"| Revision | {txt(redact, dig(chip, 'revision'))} |",
+        f"| Runtime library commit | {txt(redact, dig(chip, 'library_commit'))} |",
+        f"| Device | {txt(redact, dig(chip, 'device'))} |",
+        f"| Prompt | {cell(dig(st, 'prompt'))} |",
+        f"| Duration (seconds) | {cell(dig(st, 'duration'))} |",
+        f"| Steps | {cell(dig(st, 'steps'))} |",
+        f"| Guidance scale | {cell(dig(st, 'cfg_scale'))} |",
+        f"| Sampler | {cell(dig(st, 'sampler'))} |",
+        f"| Seed | {cell(dig(st, 'seed'))} |",
+        f"| Sample size | {cell(dig(st, 'sample_size'))} |", "",
+        "### Wall time of the chip run", "",
+        "| Part | Value | What it measures |", "|---|---|---|"]
+    timings = dig(chip, "timings")
+    for key, unit, what in AUDIO_TIMINGS:
+        value = num(dig(timings, key))
+        lines.append(f"| `{key}` | {value if value == NOT_RECORDED else f'{value} {unit}'} | {what} |")
+    total = num(dig(chip, "total_seconds"))
+    lines.append(f"| `total_seconds` | {total if total == NOT_RECORDED else f'{total} seconds'} | the whole chip run, as the "
+                 "chip test measured it |")
+    known = {t[0] for t in AUDIO_TIMINGS}
+    extra = sorted(k for k, v in (timings.items() if isinstance(timings, dict) else ())
+                   if isinstance(k, str) and SAFE_KEY.fullmatch(k) and is_number(v) and k not in known)
+    for k in extra[:20]:
+        lines.append(f"| `{k}` | {num(timings[k])} | another number the chip test recorded |")
+    ref = dig(data, "reference_runs", "reference")
+    if isinstance(ref, dict):
+        own = dig(ref, "timings", "generate_and_decode_s")
+        lines += ["", f"The CPU reference's own `generate` call and decode took {num(own)} seconds when it was made"
+                  + (" (this run reused a saved reference)." if ref.get("from_cache") is True else ".")]
+    lines += audio_repeat_lines(data)
+    lines += ["", "### Agreement with the CPU reference", "",
+              "PCC is the Pearson correlation between two arrays (1 is identical). Relative L2 is the size of the difference "
+              "divided by the size of the reference (0 is identical). The log-spectrum distance compares the two waveforms' "
+              "spectra on a log scale (0 is identical). The worst layer is the diffusion transformer layer whose output "
+              "differs most.", "", *AUDIO_TABLE_HEAD]
+    summaries = [(label, dig(data, *path)) for label, path in AUDIO_AGREEMENTS]
+    for label, s in summaries:
+        lines.append(audio_agreement_row(redact, label, s))
+    lines += ["", "The pass bars are provisional. Nobody has set them from a measured noise floor. The environment "
+              "floor is the amount two CPU environments already differ: the same-environment CPU run uses the same code and "
+              "weights as the reference and differs only in the Python environment. A chip number close to that floor "
+              "means the chip run differs from the reference about as much as a second CPU environment does."]
+    for label, s in summaries:
+        probs = s.get("problems") if isinstance(s, dict) else None
+        shown = [p for p in probs[:10] if isinstance(p, str)] if isinstance(probs, list) else []
+        if shown:
+            lines += ["", f"Problems recorded for \"{label}\":", ""] + [f"- {txt(redact, p)}" for p in shown]
+    lines += ["", "### Control: the base model", ""]
+    control = dig(data, "runs", "control_chip")
+    cdiff = dig(data, "control_difference")
+    if not isinstance(control, dict):
+        lines.append("The control did not run, so the run has no check that the chip served the fine-tune's weights.")
+    else:
+        lines += ["The control runs the base model on the chip with its own settings (fifty guided steps). It catches a chip run that "
+                  "served the wrong weights. Two checks decide: the base model's clip has to differ from the fine-tune's clip, and "
+                  "the base model's chip latent has to be nearer to the base model's own CPU reference than to the fine-tune's. "
+                  "The provisional bars are shown for information and decide nothing for the control, because fifty guided steps "
+                  "compound the per-pass error that the fine-tune's eight steps show.", "", *AUDIO_TABLE_HEAD,
+                  audio_agreement_row(redact, "Base model on the chip against the base model's CPU reference",
+                                      dig(data, "agreement", "control_chip_vs_control_reference")), ""]
+        disc = dig(data, "control_discrimination")
+        if isinstance(disc, dict) and disc.get("ok") in (True, False):
+            lines += [f"Final-latent relative L2 error of the base model's chip run: {num(disc.get('own_rel_l2'))} against the base "
+                      f"model's own reference and {num(disc.get('other_rel_l2'))} against the fine-tune's reference. "
+                      + ("It is nearer its own." if disc["ok"] else "It is not nearer its own, so the chip may have served the wrong weights."), ""]
+        else:
+            lines += [f"Whether the base model's chip run is nearer its own reference than the fine-tune's: {NOT_RECORDED}.", ""]
+        if isinstance(cdiff, dict) and cdiff.get("ok") in (True, False):
+            lines.append(f"The base model's clip {'differs from' if cdiff['ok'] else 'does not differ from'} the fine-tune's "
+                         f"clip (relative L2 {num(cdiff.get('rel_l2'))}, PCC {num(cdiff.get('pcc'))}). "
+                         + ("That is the expected result." if cdiff["ok"] else
+                            "The chip may have served the same weights for both runs."))
+        else:
+            lines.append(f"Whether the base model's clip differs from the fine-tune's: {NOT_RECORDED}.")
+    lines += ["", "### Clips", "", "The clips are in `audio/` in this bundle. Nobody has listened to them.", ""]
+    lines += [audio_clip_line(rec) for rec in run.audio_clips] or [f"- No clip is recorded in `{AUDIO_RESULT}`."]
+    limits = data.get("limits")
+    items = [x for x in limits if isinstance(x, str) and x.strip()] if isinstance(limits, list) else []
+    lines += ["", "### Limits recorded by stage 2", ""]
+    lines += [f"- {redact(one_line(x))}" for x in items[:20]] or [f"- {NOT_RECORDED}"]
+    lines += ["", f"Evidence: `{AUDIO_RESULT}`."]
+    return lines
+
+
+def audio_risks(run: Run, redact: Redactor) -> list[str]:
+    """The "Audio run" section of RISKS.md: a failed chip agreement first, then the fixed limits. No lines without audio."""
+    data = run.audio
+    if data is None:
+        return []
+    lines = ["## Audio run", ""]
+    if "_unreadable" in data:
+        return lines + [f"- `{AUDIO_RESULT}` is present but {data['_unreadable']}, so this bundle shows no audio result. "
+                        f"Evidence: `{AUDIO_RESULT}`.", ""]
+    chip_agree = dig(data, "agreement", "chip_vs_reference")
+    state = audio_summary_state(chip_agree)
+    if state == "failed":
+        failed = chip_agree.get("failed") if isinstance(chip_agree.get("failed"), list) else []
+        names = ", ".join(txt(redact, f, 80) for f in failed[:10] if isinstance(f, str))
+        lines.append("- The chip run's agreement with the CPU reference failed" + (f" (failed arrays: {names})" if names else "")
+                     + f". Treat the clip as unverified. Evidence: `{AUDIO_RESULT}`.")
+    elif state == "unknown":
+        lines.append(f"- The chip run's agreement with the CPU reference is {NOT_RECORDED}. Evidence: `{AUDIO_RESULT}`.")
+    lines += ["- Audio quality is not judged: nobody has listened to the clips.",
+              "- Bars are provisional: nobody has set the agreement bars from a measured noise floor.",
+              "- Only the diffusion transformer ran on the chip. The T5Gemma encoder, the sampler and the autoencoder decoder "
+              "ran on the host.",
+              "- One prompt, one duration, one seed: the agreement is measured on a single case."]
+    if not isinstance(dig(data, "runs", "control_chip"), dict):
+        lines.append("- The control did not run, so the run has no check that the chip served the fine-tune's weights.")
+    elif dig(data, "control_difference", "ok") is not True or dig(data, "control_discrimination", "ok") is not True:
+        lines.append("- The base model's clip does not differ from the fine-tune's, or its chip run is not nearer its own reference than "
+                     "the fine-tune's, or the file does not say. The chip may have served the wrong weights.")
+    for rec in run.audio_clips:
+        if not rec["copied"]:
+            lines.append(f"- {rec['label'][0].upper() + rec['label'][1:]} is not in this bundle, because {rec['reason']}.")
+    return lines + [""]
+
+
 def render_results(run: Run, redact: Redactor, n_todo: int, n_hazards: int, skipped_files: list) -> str:
     repo, rev = run.model()
     lic, nc = run.license()
@@ -1042,6 +1378,7 @@ def render_results(run: Run, redact: Redactor, n_todo: int, n_hazards: int, skip
     lines += graft_section(run, redact)
     lines += sampling_section(run, redact)
     lines += reported_section(run, redact)
+    lines += audio_section(run, redact)
     body = stage_results(run, redact)
     for n in range(9):
         spec = run.specs[n]
@@ -1312,8 +1649,9 @@ def thin_evidence(run: Run, redact: Redactor) -> list[str]:
 def render_risks(run: Run, redact: Redactor, todo: list[str], hazards) -> str:
     repo, _ = run.model()
     lines = [f"# Risks: {repo}", "",
-             "Every item names its evidence, relative to the run directory.", "",
-             "## TODO numbers", ""]
+             "Every item names its evidence, relative to the run directory.", ""]
+    lines += audio_risks(run, redact)
+    lines += ["## TODO numbers", ""]
     lines += [f"- {t}" for t in todo] or ["- None found in the run's files."]
     lines += ["", "## Stage 0 hazards", "",
               "Each hazard stage 0 found, and whether the run's files show that a later stage "
@@ -1499,6 +1837,7 @@ def build(cfg: dict) -> int:
     todo = todo_items(run, redact)
     hazards = hazard_entries(run, redact)
     skipped = copy_packages(run, bundle)
+    run.audio_clips = copy_audio(run, bundle)
     (bundle / "RESULTS.md").write_text(render_results(run, redact, len(todo), len(hazards), skipped),
                                        encoding="utf-8")
     (bundle / "RISKS.md").write_text(render_risks(run, redact, todo, hazards), encoding="utf-8")
@@ -1519,11 +1858,16 @@ def build(cfg: dict) -> int:
         print(f"wrote {f['path']}")
     for s in skipped:
         print(f"left out {s['path']}: {s['reason']}")
+    for rec in run.audio_clips:
+        if not rec["copied"]:
+            print(f"left out audio/{rec['name']}: {rec['reason']}")
 
     home = run.paths.get("operator_home") if isinstance(run.paths.get("operator_home"), str) else None
     hits = scrub.scrub_bundle(bundle, home=home)
     record = {"files": files, "skipped": skipped, "scrub": hits, "redacted_texts": redact.count,
               "path": run.path, "package_format": run.package_format}
+    if run.audio is not None:                       # only an audio run adds a key, so other records stay as they were
+        record["audio_clips"] = [{k: rec[k] for k in ("name", "copied", "reason")} for rec in run.audio_clips]
     (stage8 / "evidence").mkdir(parents=True, exist_ok=True)
     (stage8 / "evidence" / "bundle-build.json").write_text(json.dumps(record, indent=2) + "\n",
                                                            encoding="utf-8")

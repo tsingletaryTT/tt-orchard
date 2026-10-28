@@ -31,6 +31,7 @@ import argparse
 import json
 import sys
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
@@ -45,6 +46,7 @@ FAILURE_TEMPERATURE = 0.7       # choice: the loop decodes greedily, so a repeat
                                 # say "the same". A higher temperature asks whether the failure is a habit.
 MAX_PROMPT_CHARS = 60_000       # choice: replays of very long prompts take minutes each
 MAX_FAILURE_TURNS = 20
+MIN_REPLY_FRACTION = 0.9        # choice: a throughput reply must fill 90 percent of its token budget to be timed
 REQUEST_TIMEOUT_S = 900.0
 CANARY_PROMPT = "What is 7 times 6? Reply with only the number."
 TOOL_NAMES = {t["function"]["name"]: t["function"]["parameters"].get("required", []) for t in TOOL_SCHEMAS}
@@ -211,7 +213,12 @@ def throughput(endpoint, model, *, sizes=(8192, 32768), out_tokens: int = 256, h
         text = "The quick brown fox jumps over the lazy dog. " * (size * 4 // 45 + 1)
 
         def timed(max_tokens):
-            body = {"model": model, "messages": [{"role": "user", "content": text + "\nSay hello."}],
+            # Each request opens with its own line. A server with prefix caching (the fused-decode coder has
+            # it on) would otherwise answer the second request from the first one's cache, and the
+            # difference of the two times would understate the prefill and overstate the decode speed.
+            body = {"model": model, "messages": [{"role": "user",
+                                                  "content": f"Request {uuid.uuid4()}.\n{text}\nNow write a long, detailed "
+                                                             "explanation of the text above, at least 400 words."}],
                     "temperature": 0, "max_tokens": max_tokens, "stream": False}
             if chat_template_kwargs:
                 body["chat_template_kwargs"] = chat_template_kwargs
@@ -226,7 +233,18 @@ def throughput(endpoint, model, *, sizes=(8192, 32768), out_tokens: int = 256, h
             continue
         n = u_full.get("completion_tokens") or 0
         dt = t_full - t_pre
-        decode[key] = round((n - 1) / dt, 2) if n > 1 and dt > 0 else None
+        if n < out_tokens * MIN_REPLY_FRACTION:
+            # The difference of the two times is the decode time only when the reply fills the budget. A short
+            # reply leaves a difference of mostly noise (18.8 tok/s measured on a coder that decodes at 107).
+            decode[key] = None
+            errors[key] = f"the reply was {n} of {out_tokens} tokens, too short to time the decode"
+        elif dt <= 0:
+            decode[key] = None
+            errors[key] = (f"the request for {out_tokens} tokens finished no later than the request for one "
+                           f"({t_full:.1f} s and {t_pre:.1f} s), so the decode time cannot be taken from the difference; "
+                           "run the test again")
+        else:
+            decode[key] = round((n - 1) / dt, 2) if n > 1 else None
         pt = u_pre.get("prompt_tokens") or 0
         prefill[key] = round(pt / t_pre, 1) if pt and t_pre > 0 else None
     return {"decode_tok_s": decode, "prefill_tok_s": prefill, "out_tokens": out_tokens, "errors": errors,

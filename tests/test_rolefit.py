@@ -221,6 +221,60 @@ def test_a_throughput_request_asks_for_a_fixed_output_length_and_a_prompt_of_the
     assert len(seen[0]["messages"][0]["content"]) >= 8192 * 3           # roughly 4 characters a token
 
 
+def test_a_reply_much_shorter_than_asked_gives_no_decode_number():
+    # A model that answers "Hello!" in 3 tokens leaves (n - 1) / (full time - prefill time) as noise: 18.8 tok/s
+    # on the fused-decode coder, whose real speed is about 107. No number is better than that number.
+    clock = iter([0, 1, 1, 1.5])
+
+    def post(url, body, timeout):
+        return {"choices": [{"message": {"content": "Hello!"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 8000, "completion_tokens": 3}}
+    out = rolefit.throughput("http://x", "m", sizes=(8192,), out_tokens=256, http=post, clock=lambda: next(clock))
+    assert out["decode_tok_s"] == {"8192": None}
+    assert "3 of 256" in out["errors"]["8192"]
+    assert out["prefill_tok_s"]["8192"] == 8000.0          # the prefill number does not depend on the reply
+
+
+def test_a_full_reply_that_came_back_faster_than_the_prefill_request_is_said_not_hidden():
+    # The one-token request took 5 s (a slow first prefill) and the full one 3 s: the difference is negative.
+    clock = iter([0, 5, 5, 8])
+
+    def post(url, body, timeout):
+        return {"choices": [{"message": {"content": "x"}, "finish_reason": "length"}],
+                "usage": {"prompt_tokens": 8000, "completion_tokens": 256}}
+    out = rolefit.throughput("http://x", "m", sizes=(8192,), out_tokens=256, http=post, clock=lambda: next(clock))
+    assert out["decode_tok_s"] == {"8192": None}
+    assert "no later than" in out["errors"]["8192"]
+
+
+def test_the_throughput_prompt_asks_for_a_long_reply():
+    seen = []
+
+    def post(url, body, timeout):
+        seen.append(body["messages"][0]["content"])
+        return {"choices": [{"message": {"content": "x"}, "finish_reason": "length"}],
+                "usage": {"prompt_tokens": 8192, "completion_tokens": 64}}
+    rolefit.throughput("http://x", "m", sizes=(8192,), out_tokens=64, http=post, clock=iter([0, 1, 1, 4]).__next__)
+    assert seen[0].rstrip().endswith("at least 400 words.")
+
+
+def test_no_two_throughput_requests_share_a_prompt_prefix():
+    # A server with prefix caching answers the second request from the first one's cache, which would make
+    # (full time - prefill time) too small and the decode speed too high. Each request starts with its own line.
+    seen = []
+
+    def post(url, body, timeout):
+        seen.append(body["messages"][0]["content"])
+        return {"choices": [{"message": {"content": "x"}, "finish_reason": "length"}],
+                "usage": {"prompt_tokens": 8192, "completion_tokens": 64}}
+    for _ in range(2):          # two whole runs, as when the test is repeated against the same server
+        rolefit.throughput("http://x", "m", sizes=(8192, 32768), out_tokens=64, http=post,
+                           clock=iter(range(0, 100, 2)).__next__)
+    assert len(seen) == 8
+    assert len({text[:60] for text in seen}) == 8, "the first 60 characters repeat between requests"
+    assert all(len(text) >= 8192 * 3 for text in seen)
+
+
 def test_a_failed_throughput_request_leaves_a_null_number():
     def post(url, body, timeout):
         raise OSError("refused")

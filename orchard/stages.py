@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from orchard import audio_decision, audio_facts
+from orchard import audio_decision, audio_facts, audio_runtime
 from orchard.classes import CLASSES, SIDECAR_CLASSES, class_of_path, path_of
 from orchard import prompt_suite, sampling_probe
 from orchard.graft_trial import DECISION_FILE as GRAFT_DECISION_FILE
@@ -83,6 +83,8 @@ class StageSpec:
     disk: float | None = None           # free disk the stage needs, when it differs from STAGE_DISK_GB
     draft: str | None = None            # a config the supervisor drafts before a fresh prepare step
                                         # ("swap_config": orchard/swap_draft.py)
+    needs_coder: bool = True            # False: the stage never asks the local coder anything, so the supervisor does not boot it for the stage
+                                        # (issue 143). Only the audio runtime's stages say so today.
 
     @property
     def budget_s(self) -> float:
@@ -1295,6 +1297,58 @@ SKIP_STOCK_6 = ("stock-runtime path: the qualitative check and benchmark are def
 SKIP_STOCK_7 = "stock-runtime path: no package is built (the pilot writes no package, no push and no publish)"
 
 
+# The audio runtime path (orchard/audio_runtime.py, orchard/audio_stages.py): a run whose model the harness's own Stable Audio 3 runtime serves.
+# Stage 0 is the normal triage. Stage 1 makes the CPU reference runs, stage 2 makes the clip on one chip and compares it with them, stage 8 builds the
+# bundle with the clips. Stages 3 to 7 are skipped with a reason. None of them asks the local coder anything.
+def _audio_verb(verb: str, run_dir, args: dict) -> list[str]:
+    """Run a numeric audio gate in the configured reference interpreter (the supervisor needs only the standard library). A failure to run it is a
+    reason, never a pass."""
+    from orchard import audio_remote, audio_runtime
+    from orchard.audio_plan import AudioStageError
+    paths = audio_runtime.selection_from_run_dir(run_dir)
+    if paths is None:
+        return ["the ledger holds no audio runtime selection, so there is no interpreter to check the stage with"]
+    try:
+        result = audio_remote.call(paths.reference_python, verb, args, timeout_s=1800.0, env={"PATH": os.environ.get("PATH", "")})
+    except AudioStageError as exc:
+        return [str(exc)]
+    return [str(x) for x in result] if isinstance(result, list) else ["the audio gate gave an answer that is not a list"]
+
+
+def gate_audio_reference(stage_dir, run_dir) -> GateResult:
+    reasons = _audio_verb("gate_reference", run_dir, {"stage_dir": str(stage_dir), "run_dir": str(run_dir)})
+    seen = [os.path.relpath(Path(stage_dir) / audio_runtime.REFERENCE_FILE, run_dir)] if not reasons else []
+    return _done(reasons, seen)
+
+
+def gate_audio_chip(stage_dir, run_dir) -> GateResult:
+    ref_stage = Path(run_dir) / "stages" / "1"
+    reasons = _audio_verb("gate_chip", run_dir, {"stage_dir": str(stage_dir), "run_dir": str(run_dir), "ref_stage_dir": str(ref_stage)})
+    seen = [os.path.relpath(Path(stage_dir) / audio_runtime.RESULT_FILE, run_dir)] if not reasons else []
+    return _done(reasons, seen)
+
+
+AUDIO_STAGE_1 = StageSpec(1, "CPU reference for the audio model", "", (), 0, audio_runtime.REFERENCE_FILE, gate_audio_reference,
+                          audio_runtime.REFERENCE_FILE, harness=True, disk=audio_runtime.STAGE_DISK_GB, needs_coder=False)
+AUDIO_STAGE_2 = StageSpec(2, "clip on one chip and agreement with the CPU reference", "", ("tt-device-usage",), 1, audio_runtime.RESULT_FILE,
+                          gate_audio_chip, "test-result.json", harness=True, disk=audio_runtime.STAGE_DISK_GB, needs_coder=False)
+SKIP_AUDIO_3 = ("audio runtime path: stage 2 ran the diffusion transformer on the chip with the library's own code for the rest; there is no "
+                "separate full-model stage")
+SKIP_AUDIO_4 = ("audio runtime path: one chip runs the diffusion transformer; a multichip port and a shrink to fewer chips are not part of "
+                "this path (design step 1 uses one chip)")
+SKIP_AUDIO_5 = ("audio runtime path: no server is built (design step 4); the chip run of stage 2 makes the clip directly")
+SKIP_AUDIO_6 = ("audio runtime path: no quality check or benchmark exists for music; stage 2's sound checks and its agreement with the "
+                "CPU reference are the only evidence, and nobody has listened to the clip")
+SKIP_AUDIO_7 = "audio runtime path: no package is built (design step 4 is not built)"
+AUDIO_TABLE = {1: AUDIO_STAGE_1, 2: AUDIO_STAGE_2,
+               3: dataclasses.replace(STAGES[3], skip=SKIP_AUDIO_3, needs_coder=False),
+               4: dataclasses.replace(STAGES[4], skip=SKIP_AUDIO_4, needs_coder=False),
+               5: dataclasses.replace(STAGES[5], skip=SKIP_AUDIO_5, needs_coder=False),
+               6: dataclasses.replace(STAGES[6], skip=SKIP_AUDIO_6, needs_coder=False),
+               7: dataclasses.replace(STAGES[7], skip=SKIP_AUDIO_7, needs_coder=False),
+               8: dataclasses.replace(STAGES[8], needs_coder=False)}
+
+
 def scratch_stage(number: int, path) -> bool:
     """Whether an agent in this stage may write to <run>/tt-metal-scratch: stages 2 to 4 of the stock-runtime path only."""
     return path == "stock-runtime" and number in (2, 3, 4)
@@ -1399,13 +1453,15 @@ def run_facts(entries: list[dict], run_dir) -> dict | None:
 
 
 def spec_for(number: int, path: str | None, package_format: str | None = None,
-             cls: str | None = None, *, stock: bool = False) -> StageSpec:
+             cls: str | None = None, *, stock: bool = False, audio_runtime: bool = False) -> StageSpec:
     """The stage spec for `number` on `path`. Only the weights-only path changes the table: stage 2
     gets the swap skill and gate, stage 4 runs one test per chip configuration, stages 3, 5 and 6
     are skipped (the supervisor records each as skipped), and when the run was started with
     --package-format v6, stage 7 packages the model. Every other run skips stage 7."""
     if number == 0 and stock:
         return STOCK_STAGE_0
+    if audio_runtime and number in AUDIO_TABLE:
+        return AUDIO_TABLE[number]
     if path == "stock-runtime":
         stock_table = {2: STOCK_STAGE_2, 3: dataclasses.replace(STAGES[3], skip=SKIP_STOCK_3),
                        4: dataclasses.replace(STAGES[4], skip=SKIP_STOCK_4), 5: dataclasses.replace(STAGES[5], skip=SKIP_STOCK_5),

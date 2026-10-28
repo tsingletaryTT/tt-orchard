@@ -40,9 +40,9 @@ def installed(*targets):
 
 def test_the_layouts_are_the_presets_setup_ships():
     found = {p["name"]: p for p in settings.presets(CONFIG)}
-    assert set(found) == {"coder-next", "27b"}
+    assert set(found) == {"coder-next", "coder-next-v1", "27b"}
     cn, big = found["coder-next"], found["27b"]
-    assert cn["coder"]["target"] == "raahemnabeel/qwen3-coder-next-blackhole" and cn["coder"]["chips"] == 2
+    assert cn["coder"]["target"] == "raahemnabeel/qwen3-coder-next" and cn["coder"]["chips"] == 2
     assert cn["chip_model"] == "Qwen/Qwen3-Coder-Next"
     assert big["coder"]["target"] == "mando2222/qwen3.8-27b-dflash2-p300x2-q4kv" and big["coder"]["chips"] == 4
     assert big["chip_model"] == "Qwen/Qwen3.8-27B"
@@ -52,7 +52,7 @@ def test_the_layouts_are_the_presets_setup_ships():
 def test_the_current_settings_name_the_layout_and_each_roles_model(tmp_path):
     cfg = write_config(tmp_path, "coder-next")
     cur = settings.current(cfg, CONFIG, cpu_models=ollama("qwen3-coder:30b", "llama3.2:3b"),
-                           is_installed=installed("raahemnabeel/qwen3-coder-next-blackhole"))
+                           is_installed=installed("raahemnabeel/qwen3-coder-next"))
     assert cur["layout"] == "coder-next"
     roles = {r["role"]: r for r in cur["roles"]}
     assert roles["grafter"]["model"] == "Qwen/Qwen3-Coder-Next" and roles["grafter"]["tier"] == "small"
@@ -126,7 +126,7 @@ def test_a_config_the_loaders_refuse_is_never_written(tmp_path, monkeypatch):
 
 def test_an_unknown_current_coder_shows_as_custom(tmp_path):
     cfg = write_config(tmp_path, "coder-next")
-    cfg.write_text(cfg.read_text().replace("raahemnabeel/qwen3-coder-next-blackhole", "someone/other-coder"))
+    cfg.write_text(cfg.read_text().replace("raahemnabeel/qwen3-coder-next", "someone/other-coder"))
     cur = settings.current(cfg, CONFIG, cpu_models=ollama(), is_installed=lambda t: False)
     assert cur["layout"] is None and cur["coder"]["target"] == "someone/other-coder"
 

@@ -50,9 +50,15 @@ TORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
 COMMANDS_NEVER_RUN = ("reset", "publish", "push", "reconcile", "acquire", "release")   # asserted in the tests
 
 CODERS = {
-    "coder-next": {"package": "raahemnabeel/qwen3-coder-next-blackhole",
-                   "note": "Qwen3-Coder-Next on one board (the p300 profile); the other board stays free",
+    # The default since 2026-10-28 (issue 180): the fused-decode bundle. Same weights, same p300 profile.
+    "coder-next": {"package": "raahemnabeel/qwen3-coder-next",
+                   "note": "Qwen3-Coder-Next, fused-decode bundle, on one board (the p300 profile); the other board "
+                           "stays free",
                    "weights_gb": 160},
+    # The documented fallback: the package the default replaced. Choose it with --coder coder-next-v1.
+    "coder-next-v1": {"package": "raahemnabeel/qwen3-coder-next-blackhole",
+                      "note": "the fallback: the earlier Qwen3-Coder-Next package on one board (the p300 profile)",
+                      "weights_gb": 160},
     "27b": {"package": "mando2222/qwen3.8-27b-dflash2-p300x2-q4kv",
             "note": "Qwen3.8-27B on all four chips, the earlier arrangement", "weights_gb": 60},
 }
@@ -254,7 +260,7 @@ def check_ollama(env: Env, opts: Options) -> Step:
         acts = [Action("spawn", (["ollama", "serve"], str(log)))] if opts.start_ollama else []
         return Step("ollama", WARN if not acts else TODO, "the ollama server is not answering. Start it with "
                     "`ollama serve`, or run this with --start-ollama" + (" (it will start it)" if acts else ""), acts)
-    if OLLAMA_MODEL not in out:
+    if OLLAMA_MODEL not in out.split():           # a whole name: `qwen3-coder:30b-a3b` is another model
         return Step("ollama", TODO, f"{OLLAMA_MODEL} is not pulled (about 18 GB)",
                     [Action("run", (["ollama", "pull", OLLAMA_MODEL],))])
     return Step("ollama", OK, f"ollama serves {OLLAMA_MODEL}")
@@ -295,7 +301,9 @@ def check_coder_package(env: Env, opts: Options) -> Step:
     if not env.which("tt-model"):
         return Step("coder package", WARN, f"cannot check {pkg} without tt-model")
     rc, out, err = env.run(["tt-model", "list"], 60)
-    line = next((l for l in out.splitlines() if pkg in l), None)
+    # Match the whole package id: the default's id is a prefix of the fallback's, so a substring match would
+    # call the default installed when only the fallback is.
+    line = next((l for l in out.splitlines() if pkg in l.split()), None)
     free = env.free_gb(env.home)
     disk = (f" The weights are about {c['weights_gb']} GB and only {free:.0f} GB is free on the home disk."
             if free < c["weights_gb"] + 40 else "")
