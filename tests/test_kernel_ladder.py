@@ -183,12 +183,12 @@ _PROBE_IDS = __import__("itertools").count(1)
 
 
 def write_rung(out: Path, op: str, recs: list[dict], *, wall=1800.0, library="none", model="coder-x", sim="1.1.10",
-               seed_base=77):
+               seed_base=77, top_p=None, max_turns=40):
     d = out / op
     d.mkdir(parents=True, exist_ok=True)
     header = {"probe_id": f"p-{op}-{next(_PROBE_IDS)}", "coder_model": model,
-              "budget": {"wall_s": wall, "max_turns": 40},
-              "sampling": {"temperatures": [0.7], "seed_base": seed_base, "seed_base_from": "--seed"},
+              "budget": {"wall_s": wall, "max_turns": max_turns},
+              "sampling": {"temperatures": [0.7], "top_p": top_p, "seed_base": seed_base, "seed_base_from": "--seed"},
               "library": {"mode": library}, "tt_lang": {"sim_version": sim, "source_sha": "a" * 40}}
     for r in recs:
         r["op"] = op
@@ -545,3 +545,24 @@ def test_the_ladder_refuses_an_option_that_was_given_empty_or_out_of_range(tmp_p
     calls = []
     code = kl.run(Args(out=str(tmp_path), **kw), fake_main(calls), default_wall_s=1800.0, say=lambda l: None)
     assert code == 2 and calls == [] and words in capsys.readouterr().err
+
+
+def test_rungs_run_at_different_temperatures_top_p_or_turn_limits_are_flagged_and_each_shown(tmp_path):
+    write_rung(tmp_path, "add", [attempt(True, temp=0.7)], top_p=None, max_turns=40)
+    write_rung(tmp_path, "mul", [attempt(True, temp=0.0)], top_p=0.9, max_turns=20)
+    data = kl.write_ladder_report(tmp_path, ["add", "mul"])
+    rows = {r["op"]: r for r in data["rungs"]}
+    assert rows["add"]["top_p"] is None and rows["mul"]["top_p"] == 0.9
+    assert rows["add"]["temperatures"] == [0.7] and rows["mul"]["temperatures"] == [0.0]
+    assert sorted(data["settings"]["mixed"]) == ["max_turns", "sampling"]
+    assert data["settings"]["temperatures"] is None                      # no single value to show
+    text = (tmp_path / "ladder-report.md").read_text()
+    assert "The rungs differ in" in text and "sampling" in text and "turn limit" in text
+    assert "add: " in text and "temperatures 0.7, top-p none" in text and "temperatures 0, top-p 0.9" in text
+
+
+def test_rungs_with_the_same_sampling_are_not_flagged(tmp_path):
+    write_rung(tmp_path, "add", [attempt(True, temp=0.7)])
+    write_rung(tmp_path, "mul", [attempt(True, temp=0.7)])
+    data = kl.write_ladder_report(tmp_path, ["add", "mul"])
+    assert data["settings"]["mixed"] == [] and data["settings"]["temperatures"] == [0.7]

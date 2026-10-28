@@ -180,6 +180,7 @@ def rung_row(op: str, attempts: list[dict], header: dict | None = None) -> dict:
             "sim_version": (header.get("tt_lang") or {}).get("sim_version"),
             "source_sha": (header.get("tt_lang") or {}).get("source_sha"),
             "seed_base": (header.get("sampling") or {}).get("seed_base"),
+            "top_p": (header.get("sampling") or {}).get("top_p"),
             "stopped": header.get("stopped")}
 
 
@@ -199,7 +200,15 @@ def _agreed(values: list):
 
 
 MIXED_KEYS = (("coder_model", "coder model"), ("sim_version", "simulator version"), ("source_sha", "tt-lang source sha"),
-              ("seed_base", "seed base"), ("library", "library mode"))
+              ("seed_base", "seed base"), ("library", "library mode"), ("sampling", "sampling"),
+              ("max_turns", "turn limit"))
+
+
+def sampling_text(row: dict) -> str:
+    """One rung's sampling in words, for comparing rungs: its temperatures and its top-p."""
+    temps = ", ".join(f"{t:g}" for t in row.get("temperatures") or [])
+    top_p = row.get("top_p")
+    return f"temperatures {temps or 'none'}, top-p {'none' if top_p is None else f'{top_p:g}'}"
 
 
 def _classes_cell(classes: dict) -> str:
@@ -232,7 +241,7 @@ def ladder_lines(rows: list[dict], *, skipped: list[str], stopped: str | None, s
         lines += ["", "The rungs differ in " + ", ".join(names[k] for k in settings["mixed"]) + ", so their counts are not "
                   "directly comparable. Each rung's own values:", ""]
         lines += [f"- {r['op']}: model {r['coder_model']}, simulator {r['sim_version']}, seed base {r['seed_base']}, "
-                  f"library {r['library']}" for r in rows]
+                  f"library {r['library']}, {sampling_text(r)}, turn limit {r['max_turns']}" for r in rows]
     lines += ["", "## Passes and failure classes per rung", "",
               "| Rung | Op | Attempts | Passed | Failure classes | Median wall of a pass (s) | Wall budget (s) | Seeds |",
               "|---|---|---|---|---|---|---|---|"]
@@ -295,13 +304,15 @@ def write_ladder_report(out_dir, rungs: list[str], *, stopped: str | None = None
     sampling = first.get("sampling") if isinstance(first.get("sampling"), dict) else {}
     # Each rung keeps its own model, simulator and seed base in its row. The settings show the value the rungs share,
     # or every distinct value when they differ (a `--report-only` over directories from different runs), and say so.
+    for r in rows:
+        r["sampling"] = sampling_text(r)
     settings = {key: _agreed([r[key] for r in rows]) for key, _ in MIXED_KEYS}
     settings["mixed"] = [key for key, _ in MIXED_KEYS if isinstance(settings[key], list)]
     bases = settings["seed_base"]
-    settings.update({"temperatures": sampling.get("temperatures"),
+    settings.update({"temperatures": rows[0]["temperatures"] if rows and "sampling" not in settings["mixed"] else None,
                      "seed_base_from": sampling.get("seed_base_from") if isinstance(bases, int) else None,
                      "attempts_per_rung": sorted({r["attempts"] for r in rows}),
-                     "phase": "sim", "max_turns": sorted({r["max_turns"] for r in rows if r["max_turns"]})})
+                     "phase": "sim"})
     data = {"rungs": rows, "not_run": skipped, "first_zero_rung": first_zero_rung(rows), "stopped": stopped,
             "settings": settings, "ladder": list(LADDER)}
     out_dir.mkdir(parents=True, exist_ok=True)
