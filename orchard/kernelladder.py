@@ -206,7 +206,7 @@ def ladder_lines(rows: list[dict], *, skipped: list[str], stopped: str | None, s
     if stopped:
         lines += [f"The ladder stopped: {stopped}", ""]
     lines += ["## Settings", ""]
-    for key in ("coder_model", "temperatures", "seed_base", "attempts_per_rung", "library", "phase", "max_turns",
+    for key in ("coder_model", "temperatures", "seed_base", "seed_base_from", "attempts_per_rung", "library", "phase", "max_turns",
                 "sim_version", "tt_lang_source_sha"):
         if settings.get(key) is not None:
             lines.append(f"- {key.replace('_', ' ')}: {settings[key]}")
@@ -249,12 +249,19 @@ def load_rung(out_dir: Path, op: str) -> tuple[dict | None, list[dict]]:
     return (data.get("header") if isinstance(data.get("header"), dict) else {}), attempts
 
 
-def write_ladder_report(out_dir, rungs: list[str], *, stopped: str | None = None) -> dict:
+def write_ladder_report(out_dir, rungs: list[str], *, stopped: str | None = None, ran=None) -> dict:
     """Read the rung directories under `out_dir` and write `ladder-report.md` and `ladder-report.json` there.
-    Returns the data written. A rung with no report is listed as not run."""
+    Returns the data written. A rung with no report is listed as not run.
+
+    `ran` is the set of rungs the current invocation ran and that wrote a report. A rung outside it is listed as not
+    run even when an earlier invocation left a report in its directory, so a stopped ladder does not mix in old
+    results. None (`--report-only`) reads every rung's report."""
     out_dir = Path(out_dir)
     rows, skipped, headers = [], [], {}
     for op in rungs:
+        if ran is not None and op not in ran:
+            skipped.append(op)
+            continue
         header, attempts = load_rung(out_dir, op)
         if header is None or not attempts:
             skipped.append(op)
@@ -263,8 +270,12 @@ def write_ladder_report(out_dir, rungs: list[str], *, stopped: str | None = None
         rows.append(rung_row(op, attempts, header))
     first = next(iter(headers.values()), {})
     sampling = first.get("sampling") if isinstance(first.get("sampling"), dict) else {}
+    bases = sorted({(h.get("sampling") or {}).get("seed_base") for h in headers.values()
+                    if isinstance((h.get("sampling") or {}).get("seed_base"), int)})
     settings = {"coder_model": first.get("coder_model"), "temperatures": sampling.get("temperatures"),
-                "seed_base": sampling.get("seed_base"), "attempts_per_rung": sorted({r["attempts"] for r in rows}),
+                "seed_base": (bases[0] if len(bases) == 1 else bases) if bases else None,
+                "seed_base_from": sampling.get("seed_base_from") if len(bases) == 1 else None,
+                "attempts_per_rung": sorted({r["attempts"] for r in rows}),
                 "library": sorted({r["library"] for r in rows if r["library"]}),
                 "phase": "sim", "max_turns": sorted({r["max_turns"] for r in rows if r["max_turns"]}),
                 "sim_version": (first.get("tt_lang") or {}).get("sim_version"),
@@ -308,6 +319,8 @@ def run(args, main, *, default_wall_s: float, say=print, clock=time.monotonic) -
                 raise LadderRefused(f"--{flag.replace('_', '-')} names {', '.join(extra)}, which --rungs does not run")
         if getattr(args, "op", None):
             raise LadderRefused("--ladder runs rungs; name them with --rungs and do not give --op")
+        if getattr(args, "phase", "sim") != "sim":
+            raise LadderRefused("--ladder measures the simulator only; --phase hw is not supported with it")
         default_wall = getattr(args, "wall_s", None)
         default_wall = float(default_wall) if default_wall is not None else float(default_wall_s)
     except LadderRefused as exc:
@@ -321,29 +334,50 @@ def run(args, main, *, default_wall_s: float, say=print, clock=time.monotonic) -
     def wall_of(op: str) -> float:
         return walls.get(op, default_wall)
 
-    started = clock()
-    stopped, code = None, 0
-    if getattr(args, "report_only", False):
-        data = write_ladder_report(out_dir, rungs)
-        say(f"ladder report: {out_dir / (REPORT_NAME + '.md')}")
-        return 0
-    for i, op in enumerate(rungs):
-        sub = copy.copy(args)
-        sub.op, sub.out, sub.wall_s, sub.ladder = op, str(out_dir / op), wall_of(op), False
-        say(f"ladder rung {i + 1} of {len(rungs)}: {op} (wall budget {wall_of(op):.0f} s)")
-        code = main(sub)
-        if code != 0:
-            stopped = f"rung {op} ended with exit code {code}"
-            break
-        left = [{"attempts": per_rung, "expected_s": expects.get(r, wall_of(r))} for r in rungs[i + 1:]]
-        if max_h is not None and left:
-            total_h = (clock() - started + projected_s(left)) / 3600.0
-            if total_h > max_h:
-                stopped = (f"after rung {op} the projection is {total_h:.1f} hours, above --max-hours {max_h:g}; "
-                           f"not run: {', '.join(rungs[i + 1:])}")
+    from orchard import kernelprobe as kp
+    try:
+        lock = kp.acquire_lock(out_dir)          # held from here to the report: a second ladder cannot mix its rungs in
+    except kp._Refused as exc:
+        import sys
+        print(f"refused: {exc}", file=sys.stderr)
+        return 2
+    try:
+        started = clock()
+        stopped, code = None, 0
+        if getattr(args, "report_only", False):
+            write_ladder_report(out_dir, rungs)
+            say(f"ladder report: {out_dir / (REPORT_NAME + '.md')}")
+            return 0
+        # One seed base for every rung, so attempt k sends the same seed in each. Without --seed the base comes from
+        # one id for the whole ladder, and the rungs' headers say so.
+        seed, seed_from = getattr(args, "seed", None), None
+        if seed is None:
+            seed, seed_from = str(kp.seed_base_from_probe_id(kp.new_probe_id())), "the ladder's id"
+        ran = set()
+        for i, op in enumerate(rungs):
+            sub = copy.copy(args)
+            sub.op, sub.out, sub.wall_s, sub.ladder = op, str(out_dir / op), wall_of(op), False
+            sub.seed, sub.seed_from = seed, seed_from
+            sub.rungs = sub.rung_wall = sub.rung_expect_s = sub.max_hours = None      # the ladder's own options
+            sub.report_only = False
+            say(f"ladder rung {i + 1} of {len(rungs)}: {op} (wall budget {wall_of(op):.0f} s)")
+            code = main(sub)
+            if code != 2:                        # a refused run wrote no report; any other code wrote one
+                ran.add(op)
+            if code != 0:
+                stopped = f"rung {op} ended with exit code {code}"
                 break
-    data = write_ladder_report(out_dir, rungs, stopped=stopped)
-    say(f"ladder report: {out_dir / (REPORT_NAME + '.md')}")
-    if stopped:
-        say(f"ladder stopped: {stopped}")
-    return code
+            left = [{"attempts": per_rung, "expected_s": expects.get(r, wall_of(r))} for r in rungs[i + 1:]]
+            if max_h is not None and left:
+                total_h = (clock() - started + projected_s(left)) / 3600.0
+                if total_h > max_h:
+                    stopped = (f"after rung {op} the projection is {total_h:.1f} hours, above --max-hours {max_h:g}; "
+                               f"not run: {', '.join(rungs[i + 1:])}")
+                    break
+        write_ladder_report(out_dir, rungs, stopped=stopped, ran=ran)
+        say(f"ladder report: {out_dir / (REPORT_NAME + '.md')}")
+        if stopped:
+            say(f"ladder stopped: {stopped}")
+        return code
+    finally:
+        kp.release_lock(lock)

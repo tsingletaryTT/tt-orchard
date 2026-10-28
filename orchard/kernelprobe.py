@@ -2249,6 +2249,11 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
             args, lambda sub: main(sub, env=env, out=out, http=http, probe=probe, run_watched_fn=run_watched_fn,
                                    tier_config=tier_config, speed_check=speed_check),
             default_wall_s=BUDGET["wall_s"], say=say)
+    ladder_only = [flag for flag, name in (("--rungs", "rungs"), ("--rung-wall", "rung_wall"),
+                                          ("--rung-expect-s", "rung_expect_s"), ("--max-hours", "max_hours"),
+                                          ("--report-only", "report_only")) if getattr(args, name, None)]
+    if ladder_only:
+        return refuse(f"{', '.join(ladder_only)} only {'applies' if len(ladder_only) == 1 else 'apply'} with --ladder")
     if getattr(args, "op", None) not in OPS:
         return refuse(f"unknown op {getattr(args, 'op', None)!r}; the ops are {', '.join(OPS)} "
                       "(or give --ladder to run the capability ladder)")
@@ -2323,7 +2328,7 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
         probe_id = new_probe_id()
         base = plan["seed"] if plan["seed"] is not None else seed_base_from_probe_id(probe_id)
         sampling = {"temperatures": plan["temperatures"], "top_p": plan["top_p"], "seed_base": base,
-                    "seed_base_from": "--seed" if plan["seed"] is not None else "probe id",
+                    "seed_base_from": getattr(args, "seed_from", None) or ("--seed" if plan["seed"] is not None else "probe id"),
                     "attempts_per_temperature": attempts}
         facts = tt_lang_facts(env)
         temps = ", ".join(f"{t:g}" for t in plan["temperatures"])

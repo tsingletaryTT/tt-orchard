@@ -251,15 +251,25 @@ class Args:
         self.rung_expect_s = None
         self.max_hours = None
         self.report_only = False
+        self.phase = "sim"
         self.__dict__.update(kw)
 
 
-def fake_main(calls, code_for=None, *, passes=True):
+def fake_main(calls, code_for=None, *, passes=True, extra=(), write_for=None):
+    """A stand-in for kernelprobe.main: it records the arguments of the call and writes the rung's report, as a probe
+    run does (unless `write_for` names the rungs that write one: a refused run writes nothing)."""
     def main(sub):
         calls.append({"op": sub.op, "out": sub.out, "wall_s": sub.wall_s, "ladder": sub.ladder, "seed": sub.seed,
-                      "attempts": sub.attempts, "temperature": sub.temperature})
-        write_rung(Path(sub.out).parent, sub.op, [attempt(passes, category=None if passes else "numeric_mismatch", first="" if passes else "p",
-                                                         n=i, seed=100 + i) for i in (1, 2)], wall=sub.wall_s)
+                      "attempts": sub.attempts, "temperature": sub.temperature,
+                      **{k: getattr(sub, k, None) for k in extra}})
+        if write_for is None or sub.op in write_for:
+            parent = Path(sub.out).parent
+            if (parent / sub.op).exists():
+                import shutil
+                shutil.rmtree(parent / sub.op)                       # a real run replaces the rung's report
+            write_rung(parent, sub.op, [attempt(passes, category=None if passes else "numeric_mismatch",
+                                                first="" if passes else "p", n=i, seed=100 + i) for i in (1, 2)],
+                       wall=sub.wall_s)
         return (code_for or {}).get(sub.op, 0)
     return main
 
@@ -343,3 +353,116 @@ def test_report_only_writes_the_table_from_the_rung_directories_and_runs_nothing
     code = kl.run(Args(out=str(tmp_path), report_only=True, rungs="add"), fake_main(calls), default_wall_s=1800.0,
                   say=lambda l: None)
     assert code == 0 and calls == [] and "| 1 | add | 1 | 1 |" in (tmp_path / "ladder-report.md").read_text()
+
+
+# ---- review round 1 (Copilot, PR 177) ---------------------------------------------------------------------------
+
+def test_the_rsqrt_inputs_differ_between_the_plain_and_the_heavy_tailed_set_and_stay_positive():
+    """The sigmoid generator skipped the heavy-tail step, so rsqrt's six sets were three distinct inputs with no outliers."""
+    script = """
+import json, sys
+sys.path.insert(0, sys.argv[1])
+import torch
+import kernel_harness as h
+spec = json.load(open(sys.argv[1] + "/ops/rsqrt.json"))
+assert spec["heavy_tail"] is True
+for seed in spec["seeds"]:
+    plain = h.make_inputs(spec, seed, False, torch)["x"].float()
+    tail = h.make_inputs(spec, seed, True, torch)["x"].float()
+    assert not torch.equal(plain, tail), seed
+    assert bool((plain > 0).all()) and bool((tail > 0).all()), seed
+    assert float(tail.max()) > 2 * float(plain.max()), (seed, float(tail.max()), float(plain.max()))
+# linear_scan's a stays a sigmoid in (0, 1), with no outliers, as before
+ls = json.load(open(sys.argv[1] + "/ops/linear_scan.json"))
+a = h.make_inputs(ls, 0, True, torch)["a"].float()
+assert float(a.max()) < 1.0 and float(a.min()) > 0.0
+print("RSQRT INPUTS OK")
+"""
+    py = VENV / "bin" / "python"
+    if not py.exists():
+        pytest.skip("SKIPPED: no ttlang venv with torch")
+    done = subprocess.run([str(py), "-c", script, str(TEMPLATES)], capture_output=True, text=True, timeout=120)
+    assert done.returncode == 0 and "RSQRT INPUTS OK" in done.stdout, done.stdout + done.stderr
+
+
+def test_a_second_ladder_on_the_same_out_directory_is_refused_while_the_first_runs(tmp_path, capsys):
+    from orchard import kernelprobe as kp
+    lock = kp.acquire_lock(tmp_path)
+    try:
+        calls = []
+        for extra in ({}, {"report_only": True}):
+            code = kl.run(Args(out=str(tmp_path), rungs="add", **extra), fake_main(calls), default_wall_s=1800.0,
+                          say=lambda l: None)
+            assert code == 2 and calls == []
+            assert "another probe is using" in capsys.readouterr().err
+    finally:
+        kp.release_lock(lock)
+    assert kl.run(Args(out=str(tmp_path), rungs="add"), fake_main([]), default_wall_s=1800.0, say=lambda l: None) == 0
+
+
+def test_the_ladder_holds_its_lock_while_the_rungs_run(tmp_path):
+    from orchard import kernelprobe as kp
+    seen = []
+
+    def main(sub):
+        try:
+            kp.acquire_lock(tmp_path)
+            seen.append("free")
+        except kp._Refused:
+            seen.append("held")
+        return 0
+    kl.run(Args(out=str(tmp_path), rungs="add,mul"), main, default_wall_s=1800.0, say=lambda l: None)
+    assert seen == ["held", "held"]
+
+
+def test_without_a_seed_every_rung_gets_the_same_derived_base_and_the_header_says_where_it_came_from(tmp_path):
+    calls = []
+    kl.run(Args(out=str(tmp_path), rungs="add,mul,rsqrt", seed=None), fake_main(calls, extra=("seed_from",)),
+           default_wall_s=1800.0, say=lambda l: None)
+    seeds = {c["seed"] for c in calls}
+    assert len(seeds) == 1 and None not in seeds and int(next(iter(seeds))) >= 0
+    assert {c["seed_from"] for c in calls} == {"the ladder's id"}
+
+
+def test_a_given_seed_is_passed_unchanged_and_not_relabelled(tmp_path):
+    calls = []
+    kl.run(Args(out=str(tmp_path), rungs="add,mul", seed="55"), fake_main(calls, extra=("seed_from",)),
+           default_wall_s=1800.0, say=lambda l: None)
+    assert {c["seed"] for c in calls} == {"55"} and {c["seed_from"] for c in calls} == {None}
+
+
+def test_a_stopped_ladder_leaves_out_the_stale_reports_of_rungs_it_did_not_run(tmp_path):
+    write_rung(tmp_path, "mul", [attempt(category="numeric_mismatch", first="old failure")])      # an earlier run's report
+    write_rung(tmp_path, "rsqrt", [attempt(True)])
+    calls = []
+    code = kl.run(Args(out=str(tmp_path), rungs="add,mul,rsqrt"), fake_main(calls, {"add": 3}), default_wall_s=1800.0,
+                  say=lambda l: None)
+    assert code == 3 and [c["op"] for c in calls] == ["add"]
+    data = json.loads((tmp_path / "ladder-report.json").read_text())
+    assert [r["op"] for r in data["rungs"]] == ["add"]
+    assert data["not_run"] == ["mul", "rsqrt"] and data["first_zero_rung"] is None
+
+
+def test_a_rung_refused_before_it_wrote_a_report_does_not_contribute_its_old_one(tmp_path):
+    write_rung(tmp_path, "mul", [attempt(category="numeric_mismatch", first="old failure")])
+    calls = []
+    kl.run(Args(out=str(tmp_path), rungs="add,mul"), fake_main(calls, {"mul": 2}, write_for={"add"}),
+           default_wall_s=1800.0, say=lambda l: None)
+    data = json.loads((tmp_path / "ladder-report.json").read_text())
+    assert [r["op"] for r in data["rungs"]] == ["add"] and data["not_run"] == ["mul"]
+    assert data["first_zero_rung"] is None
+
+
+def test_report_only_still_reads_every_existing_rung_report(tmp_path):
+    write_rung(tmp_path, "mul", [attempt(category="numeric_mismatch", first="p")])
+    write_rung(tmp_path, "add", [attempt(True)])
+    kl.run(Args(out=str(tmp_path), report_only=True), fake_main([]), default_wall_s=1800.0, say=lambda l: None)
+    data = json.loads((tmp_path / "ladder-report.json").read_text())
+    assert [r["op"] for r in data["rungs"]] == ["add", "mul"] and data["first_zero_rung"] == "mul"
+
+
+def test_the_ladder_refuses_the_hardware_phase(tmp_path, capsys):
+    calls = []
+    code = kl.run(Args(out=str(tmp_path), rungs="add", phase="hw"), fake_main(calls), default_wall_s=1800.0,
+                  say=lambda l: None)
+    assert code == 2 and calls == [] and "simulator" in capsys.readouterr().err

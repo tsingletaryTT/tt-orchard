@@ -3840,3 +3840,29 @@ def test_main_without_an_op_or_the_ladder_refuses(tmp_path, fake_kenv, env_ready
     assert code == 2 and "--ladder" in capsys.readouterr().err
 
 
+
+
+@pytest.mark.parametrize("flag, value", [("rungs", "add"), ("rung_wall", "add=300"), ("rung_expect_s", "add=60"),
+                                         ("max_hours", 6.0), ("report_only", True)])
+def test_main_refuses_a_ladder_only_option_without_the_ladder_and_starts_nothing(tmp_path, fake_kenv, env_ready, capsys,
+                                                                               monkeypatch, flag, value):
+    started = []
+    monkeypatch.setattr(kp, "run_attempt", lambda **kw: started.append(kw) or canned(kw["op"], kw["n"]))
+    code = kp.main(probe_args(tmp_path, **{flag: value}), env=fake_kenv, out=io.StringIO(), probe=lambda e, m: True,
+                   run_watched_fn=no_run)
+    assert code == 2 and started == [] and env_ready == [] and not (tmp_path / "out").exists()
+    err = capsys.readouterr().err
+    assert "--" + flag.replace("_", "-") in err and "only applies with --ladder" in err
+
+
+def test_the_ladders_derived_seed_base_is_recorded_with_its_origin_in_every_rung_header(tmp_path, fake_kenv, env_ready,
+                                                                                      monkeypatch):
+    monkeypatch.setattr(kp, "run_attempt", lambda *, op, n, **kw: canned(op, n))
+    kp.main(probe_args(tmp_path, op=None, ladder=True, rungs="add,mul", attempts=1, temperature="0.7", seed=None),
+            env=fake_kenv, out=io.StringIO(), probe=lambda e, m: True, run_watched_fn=no_run)
+    heads = [json.loads((tmp_path / "out" / r / "kernel-probe-report.json").read_text())["header"]["sampling"]
+             for r in ("add", "mul")]
+    assert heads[0]["seed_base"] == heads[1]["seed_base"] and isinstance(heads[0]["seed_base"], int)
+    assert {h["seed_base_from"] for h in heads} == {"the ladder's id"}
+    data = json.loads((tmp_path / "out" / "ladder-report.json").read_text())
+    assert data["settings"]["seed_base"] == heads[0]["seed_base"] and data["settings"]["seed_base_from"] == "the ladder's id"
