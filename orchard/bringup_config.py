@@ -305,7 +305,8 @@ def run_dir(cfg: BringupConfig, model_id: str) -> Path:
 
 def supervisor_argv(cfg: BringupConfig, model_id: str, run_dir: Path | None = None, *,
                     inputs: dict[str, str] | None = None, accept_credentials: bool = False,
-                    graft_trial: bool = True, resume_aborted: bool = False) -> list[str]:
+                    graft_trial: bool = True, resume_aborted: bool = False,
+                    sampling: str | None = None) -> list[str]:
     """The arguments after `python3 -m orchard.supervisor`. Optional flags appear only when the config
     sets them, so the supervisor's own defaults stay the defaults. `--accept-credentials-visible` is added
     only when the caller says the operator asked for it on the command line; the config cannot add it."""
@@ -349,6 +350,8 @@ def supervisor_argv(cfg: BringupConfig, model_id: str, run_dir: Path | None = No
     argv.append("--unattended")        # a bring-up started here never waits for a person
     if not graft_trial:
         argv.append("--no-graft-trial")
+    if sampling is not None:
+        argv += ["--sampling", sampling]       # only when named: a resume then keeps the value the run recorded
     if resume_aborted:
         argv.append("--resume-aborted")      # only when the operator asked: an abort is terminal otherwise
     if accept_credentials:

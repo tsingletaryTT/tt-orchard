@@ -137,7 +137,7 @@ from orchard.context import build_messages, facts_from
 from orchard.defaults import (AGENT_CONTINUATION_TURNS, AGENT_WRAPUP_TURNS, CHIPS_PER_BOARD, CMD_TIMEOUT_S,
                               COLD_BOOT_BUDGET_S, CONTROL_POLL_S, FIRST_BOOT_EXPECTED,
                               FIRST_BOOT_PROMPT, PACKAGE_DEFERRED, PACKAGE_FORMATS,
-                              GRAFT_TRIAL_DEADLINE_S, GRAFT_TRIAL_DISK_GB, RUN_CANARY_PROMPT, STOP_TIMEOUT_S, TEST_DISK_GB, FAST_FAIL_S)
+                              GRAFT_TRIAL_DEADLINE_S, GRAFT_TRIAL_DISK_GB, RUN_CANARY_PROMPT, SAMPLING_TRIAL_DEADLINE_S, SAMPLING_TRIAL_DISK_GB, SAMPLING_TRIAL_RUN_DISK_GB, STOP_TIMEOUT_S, TEST_DISK_GB, FAST_FAIL_S)
 from orchard.handoff import (NOTE_KEYS, Blocked, Budgets, Handoff, decide_park, progress, reacquire,
                              recover, wait_stopped)
 from orchard.hwtests import (failed_tests, load_plan, move_aside, pending, read_plan, suspect_caches,
@@ -150,6 +150,7 @@ from orchard.paths import (PATHS_RECORDED, RunPaths, UnknownPlaceholder, absolut
                            recorded_paths)
 from orchard.runner import Denied, check_string
 from orchard import graft_trial as graft
+from orchard import sampling_choice as sampling
 from orchard import kept_coder, kernelprobe, swap_draft
 from orchard.server import ServerControl, ServerError, ServerNotOwned, ServerSpec, StopCheck
 from orchard.stages import (AUDIO_STAGE_1, AUDIO_STAGE_2, PACKAGE_OPTIONS_SET, GateResult, TierUnavailable, abort_can_resume, attempt_started_ts,
@@ -501,6 +502,7 @@ SWAP_TEMPLATES = ("prepare_swap.py", "serve_and_compare.py", "prompt_suite.json"
 STAGE4_TEMPLATES = (*SWAP_TEMPLATES, "serve_and_compare_container.py")     # into each drafted configs/<N>
 GRAFT_TRIAL_ENV = "ORCHARD_TRIAL_DIR"      # in the environment of the trial's test: the trial directory, so its servers can be found
 GRAFT_TRIAL_TEMPLATE = "graft_trial.py"     # copied into stages/2/graft-trial/ when the trial starts (orchard/graft_trial.py)
+SAMPLING_TRIAL_TEMPLATE = "sampling_trial.py"   # copied into stages/2/sampling-trial/ when the drafter-off trial starts (orchard/sampling_choice.py)
 
 
 class Supervisor:
@@ -514,8 +516,10 @@ class Supervisor:
                  package_added: bool = False, unattended: bool = False, lab=None,
                  four_chip_package: str | None = None, coder_tier: str | None = None,
                  keep_up: bool = False, coder_identity: dict | None = None, graft_trial: bool = True,
-                 resume_aborted: bool = False):
+                 resume_aborted: bool = False, sampling: str = "auto"):
         self.run_dir = Path(run_dir).resolve()
+        # Whether the model's purpose needs sampling: "auto" reads it from stage 0's files, the others are the operator's word (orchard/sampling_choice.py).
+        self.sampling = sampling
         # An abort is terminal unless the operator asks for this (`--resume-aborted`): then an operator's or a signal's abort is
         # followed by a `resume` decision marked `after: abort`, and the run goes on from the ledger (orchard/stages.py, abort_can_resume).
         self.resume_aborted = resume_aborted
@@ -779,7 +783,7 @@ class Supervisor:
         if not p.started:
             self.ledger.append("run_start", None, model=self.model_id, versions=self.versions,
                                inputs=self.inputs, required_chips=list(self.required_chips or ()) or None,
-                               graft_trial=self.graft_trial,
+                               graft_trial=self.graft_trial, sampling=self.sampling,
                                paths=self.paths.record(), package=self.package,
                                coder=self.coder.record(),
                                tiers={k: dict(v) for k, v in self.cfg.tiers.items()},
@@ -1327,7 +1331,10 @@ class Supervisor:
             self.ledger.append("stage_start", n, skip=True)
             self.ledger.append("stage_end", n, result="skipped", reason=spec.skip)
             return "skipped"
-        ok, free = check_disk(self.run_dir, spec.disk_gb, usage=self.disk_usage)
+        # A resumed stage 2 whose sampling trial already ran only has results to read. The trial's own tensor cache may have taken the space the entry
+        # requirement asks for, and nothing is converted again, so the requirement is for a stage that still has a cache to make.
+        reads_finished_trial = (resuming and n == 2 and (self.run_dir / "stages" / "2" / sampling.TRIAL_DIR / "test-result.json").is_file())
+        ok, free = (True, None) if reads_finished_trial else check_disk(self.run_dir, spec.disk_gb, usage=self.disk_usage)
         if not ok:
             self._block(n, f"stage {n} needs {spec.disk_gb} GB free on the run directory's disk; "
                            f"{free} GB is free", need_gb=spec.disk_gb, free_gb=free)
@@ -1415,8 +1422,11 @@ class Supervisor:
         if gate.ok and spec.number == 2 and spec.draft == "swap_config":
             # The safe configuration passed. A model with a graft candidate is tried once more with the grafted drafter. The trial cannot
             # fail the stage: a failed or slow trial leaves the safe result as it is.
-            if self._graft_trial(spec, stage_dir):
-                gate = self._check_gate(spec, stage_dir)       # the gate also reads the decision file
+            changed = self._graft_trial(spec, stage_dir)
+            # The sampling choice judges the configuration that is now served (the graft when it was chosen), so it runs after the graft trial.
+            changed = self._sampling_choice(spec, stage_dir) or changed
+            if changed:
+                gate = self._check_gate(spec, stage_dir)       # the gate also reads the decision files
         return ("pass", [], gate) if gate.ok else ("fail", list(gate.reasons), gate)
 
     def _wrap_up(self, spec, stage_dir: Path, step: AgentStep, out):
@@ -2113,7 +2123,7 @@ class Supervisor:
             safe_top1 = json.loads((stage_dir / "result.json").read_text(encoding="utf-8")).get("top1_agreement")
         except (OSError, ValueError, AttributeError):
             safe_top1 = None
-        decision = graft.decide(trial, safe_top1=safe_top1)
+        decision = graft.decide(trial, safe_top1=safe_top1, sampling=graft.sampling_input(stage_dir, self.run_dir))
         if trial is None:
             if record.get("timed_out"):
                 why = "the graft trial timed out and was stopped"
@@ -2125,6 +2135,111 @@ class Supervisor:
         graft.write_decision(stage_dir, decision, candidate=cand)
         self._record_graft_decision(stage_dir, decision)
         return True
+
+    def _sampling_choice(self, spec, stage_dir: Path) -> bool:
+        """Stage 2's sampling choice (orchard/sampling_choice.py, issue 107). Returns True when it wrote a decision file now.
+
+        A fast decoding path can be greedy only: the Qwen3.8 DFlash2 drafter accepts a sampled request and samples only its first token. The rule
+        reads whether the model needs sampling (stage 0's files and the operator's --sampling flag), what the served configuration's sampling probe
+        showed, and the speed of each configuration. Only when sampling is needed, the drafter is on and the probe does not show sampling applied does
+        it need a second measurement: one hardware test, skills/weights-swap-templates/sampling_trial.py, serves the drafter-off variant. The decision
+        is code (sampling.decide). A trial that fails, times out or leaves no result is not a stage failure: the served configuration stays and the
+        decision says so. sampling-decision.json is the marker, and the trial's own test record is a second one, so a kill after the test resumes at
+        the decision without booting again. A stage 2 with no swap check (it was not served by the swap template) makes no decision."""
+        n = spec.number
+        if (stage_dir / sampling.DECISION_FILE).exists():
+            return False
+        current = sampling.served_side(stage_dir)
+        if current is None:
+            return False
+        need = sampling.need(self.run_dir, self.sampling)
+        variant, note, ran = None, None, False
+        if sampling.needs_variant(need, current):
+            skip = None
+            if self.lab is not None:
+                skip = "the sampling trial was skipped: it runs on this box's chips and this run's tests run on a lab"
+            elif self._container_config(stage_dir):
+                skip = ("the sampling trial was skipped: stage 2 was served through a container package, and the trial's scripts build and "
+                        "run a bundle's run.sh, which a container package does not have")
+            else:
+                # The disk is a prerequisite for a trial that still has to run. One that already ran (its test record exists) may itself have
+                # filled the disk with its new tensor cache, and a restart must read its result and not skip it for that.
+                already_ran = (stage_dir / sampling.TRIAL_DIR / "test-result.json").is_file()
+                if not already_ran:
+                    # The new tensor cache is written beside the configured `tt_cache`, which can be on another filesystem than the run
+                    # directory, so the conversion is checked there (the nearest existing parent of that path), and the run directory is
+                    # checked apart for the trial's evidence.
+                    cache_path = self._cache_check_path(stage_dir)
+                    enough, free = check_disk(cache_path, SAMPLING_TRIAL_DISK_GB, usage=self.disk_usage)
+                    if not enough:
+                        where = "the configured tensor cache's disk" if cache_path != self.run_dir else "the run directory's disk"
+                        skip = (f"the sampling trial was skipped: the drafter-off variant converts a second tensor cache and needs "
+                                f"{SAMPLING_TRIAL_DISK_GB:g} GB free on {where}; {free} GB is free")
+                    else:
+                        enough, free = check_disk(self.run_dir, SAMPLING_TRIAL_RUN_DISK_GB, usage=self.disk_usage)
+                        if not enough:
+                            skip = (f"the sampling trial was skipped: its evidence needs {SAMPLING_TRIAL_RUN_DISK_GB:g} GB free on the run "
+                                    f"directory's disk; {free} GB is free")
+            if skip:
+                self.ledger.append("decision", n, decision="sampling trial skipped", reason=skip)
+                note = skip
+            else:
+                variant, note = self._run_sampling_trial(spec, stage_dir, need, current)
+                ran = True
+        decision = sampling.decide(need, current, variant, variant_note=note)
+        sampling.write_decision(stage_dir, decision, trial=variant is not None)
+        path = stage_dir / sampling.DECISION_FILE
+        self.ledger.append("decision", n, decision="sampling decision", choice=decision["choice"], flag=decision["flag"], reason=decision["reason"],
+                           needed=decision["needed"], need_source=decision["need_source"], numbers=decision["numbers"],
+                           decision_file=evidence_record(self.run_dir, path), trial=ran)
+        return True
+
+    def _cache_check_path(self, stage_dir: Path) -> Path:
+        """The path whose filesystem the sampling trial's new tensor cache lands on: the nearest existing parent of the stage's configured `tt_cache`
+        (the cache is made later, so the path itself may not exist). The run directory when the config names none."""
+        try:
+            cfg = json.loads((stage_dir / "swap_config.json").read_text(encoding="utf-8"))
+            cache = Path(str(cfg["tt_cache"]))
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            return self.run_dir
+        if not cache.is_absolute():
+            cache = self.run_dir / cache
+        while not cache.exists() and cache != cache.parent:
+            cache = cache.parent
+        return cache if cache.exists() else self.run_dir
+
+    def _run_sampling_trial(self, spec, stage_dir: Path, need: dict, current: dict):
+        """Run (or, after a kill, read) the drafter-off trial. Returns (the variant's side or None, a note saying why there is none)."""
+        n = spec.number
+        trial_dir = stage_dir / sampling.TRIAL_DIR
+        trial_dir.mkdir(exist_ok=True)
+        marker = trial_dir / "test-result.json"
+        if not marker.is_file():
+            shutil.copy2(Path(self.paths.orchard_dir) / "orchard" / "skills" / "weights-swap-templates" / SAMPLING_TRIAL_TEMPLATE,
+                         trial_dir / SAMPLING_TRIAL_TEMPLATE)
+            (trial_dir / "trial_config.json").write_text(
+                json.dumps({"stage_dir": str(stage_dir), "orchard_dir": str(self.paths.orchard_dir)}, indent=2) + "\n", encoding="utf-8")
+            self.ledger.append("decision", n, decision="sampling trial started", needed=need["needed"], need_source=need["source"],
+                               served_verdict=current.get("verdict"),
+                               note="serving this model with the speculative drafter off and host sampling, beside the configuration stage 2 served")
+            test = {"command": f"python3 stages/{n}/{sampling.TRIAL_DIR}/{SAMPLING_TRIAL_TEMPLATE}",
+                    "deadline_s": SAMPLING_TRIAL_DEADLINE_S}
+            self._hardware_phase(spec, stage_dir, test, record=f"{sampling.TRIAL_DIR}/test-result.json",
+                                 output=f"{sampling.TRIAL_DIR}/evidence/hw-test-output.txt", what="sampling trial test",
+                                 env_extra={GRAFT_TRIAL_ENV: str(trial_dir.resolve())},
+                                 after_test=lambda: self._stop_trial_servers(n, trial_dir, "after the sampling trial test"))
+        try:
+            record = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            record = {}
+        if record.get("returncode") == 0 and not record.get("timed_out"):
+            variant = sampling.variant_side(stage_dir, self.run_dir)
+            if variant is not None:
+                return variant, None
+            return None, f"the sampling trial wrote no {sampling.TRIAL_RESULT}"
+        if record.get("timed_out"):
+            return None, "the sampling trial timed out and was stopped"
+        return None, f"the sampling trial did not finish (exit code {record.get('returncode')})"
 
     def _stop_trial_servers(self, n: int, trial_dir: Path, when: str) -> None:
         """Stop what the graft trial's helpers left running. measure_serving.py and serve_and_compare.py start run.sh in a session of their
@@ -2232,9 +2347,12 @@ class Supervisor:
         """Give back test leases an earlier supervisor of this run took and never released (it died, and nothing
         released them). Only leases this run's ledger records, and only those taken where this supervisor runs: a lab
         run gives back the lab's, a local run this box's. A lease that is already gone is noted as not released."""
-        trial_dir = self.run_dir / "stages" / "2" / graft.TRIAL_DIR
-        if self.lab is None and trial_dir.is_dir():
-            self._stop_trial_servers(2, trial_dir, "when the run started again")
+        # Both trials start servers in sessions of their own, so a SIGKILL of the supervisor (which skips the after-test sweep) can leave either one
+        # holding the chips. Stop them before any lease is given back or the coder is recovered.
+        for name in (graft.TRIAL_DIR, sampling.TRIAL_DIR):
+            trial_dir = self.run_dir / "stages" / "2" / name
+            if self.lab is None and trial_dir.is_dir():
+                self._stop_trial_servers(2, trial_dir, "when the run started again")
         taken, released = {}, set()
         for e in self.ledger.read():
             d = e["data"]
@@ -2742,6 +2860,12 @@ def parse(argv=None):
                    help="skip stage 2's graft trial: with a graft candidate (the model has no mtp.* tensors and the nearest model has "
                         "a head that fits) stage 2 serves the grafted drafter once and keeps it when it is faster; this leaves the "
                         "safe configuration without that extra test (a cold boot adds 4 to 25 minutes). The run records the choice")
+    r.add_argument("--sampling", choices=sampling.OVERRIDES, default=None,
+                   help="whether this model's purpose needs sampling (issue 107). A speculative drafter can ignore sampled requests, so with 'auto' "
+                        "(the default) stage 2 reads the model's own generation_config.json, the model card's recommended settings and its warnings "
+                        "against greedy decoding, and for a model that needs sampling whose served configuration does not show sampling applied it "
+                        "serves a drafter-off variant once and chooses by measurement. 'needed' and 'not-needed' are the operator's word. The run "
+                        "records the choice and a resume keeps it")
     r.add_argument("--resume-aborted", action="store_true",
                    help="go on with a run that an operator or a signal aborted: the ledger records `resume` after the abort and the run starts its coder again and continues from the ledger. Without this flag an aborted run stays aborted and running the command again starts nothing. An abort of any other kind, and a finished run, are left as they are")
     r.add_argument("--unattended", action="store_true",
@@ -2835,6 +2959,14 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
     graft_on = not getattr(args, "no_graft_trial", False)
     if progress.started and (progress.run_start or {}).get("graft_trial") is False:
         graft_on = False                        # a run that opted out of the graft trial stays opted out
+    sampling_mode = getattr(args, "sampling", None)
+    if progress.started:                        # a resumed run keeps the sampling setting it started with
+        recorded_mode = (progress.run_start or {}).get("sampling") or "auto"
+        if sampling_mode is not None and sampling_mode != recorded_mode:
+            raise ValueError(f"this run started with --sampling {recorded_mode}; --sampling {sampling_mode} differs. Leave the option out to resume "
+                             "with the recorded value, or move this run's directory aside and start a new run")
+        sampling_mode = recorded_mode
+    sampling_mode = sampling_mode or "auto"
     home = operator_home() if home is None else home
     paths = run_paths(args, run_dir, recorded_paths(entries) if progress.started else None,
                       home=home, environ=environ)
@@ -2892,6 +3024,7 @@ def build(args, ledger, *, adapter=None, coder=None, versions=None, http=post_js
                       credentials_visible=found, required_chips=required,
                       home=home, containers=containers, paths=paths, package=package,
                       package_added=added, unattended=getattr(args, "unattended", False), graft_trial=graft_on,
+                      sampling=sampling_mode,
                       resume_aborted=bool(getattr(args, "resume_aborted", False)),
                       lab=lab if lab_host else None,
                       four_chip_package=getattr(args, "four_chip_package", None), coder_tier=tier,
