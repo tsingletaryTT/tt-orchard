@@ -16,6 +16,7 @@ bundle, which is what every run before this module was.
 from __future__ import annotations
 
 import json
+import math
 import os
 from pathlib import PurePosixPath
 
@@ -114,7 +115,7 @@ def audio_evidence(pipeline_tag, tags, hub_files=None, *other_lists) -> str | No
 # ---- the cached config (what stage 0's detector requires) ---------------------------------------------------
 #
 # `detect_audio` in the stage 0 template accepts a snapshot only when `model_config.json` is a JSON object of at most 1 MiB, with no repeated
-# key, no NaN or infinity, no integer of more than 30 digits and no nesting deeper than 32, a string `model_type` and an object `model`. The
+# key, no NaN or infinity (nor a float that overflows to it, such as 1e999), no integer of more than 30 digits and no nesting deeper than 32, a string `model_type` and an object `model`. The
 # preflight reads the cached config with the same limits (a bounded read), so a snapshot the preflight calls audio is one stage 0 calls audio
 # (tests/test_audio_preflight_review3.py runs both on the same files). The template keeps its own copy of these limits.
 
@@ -142,6 +143,15 @@ def _int(text):
     return int(text)
 
 
+def _float(text):
+    """A float that fits. `1e999` is valid JSON text that Python parses to infinity, and `parse_constant` never sees it (it handles the words
+    NaN and Infinity only), so the value is checked here."""
+    value = float(text)
+    if not math.isfinite(value):
+        raise ValueError(f"the number {text} is not finite")
+    return value
+
+
 def _depth(data) -> int:
     deepest, stack = 0, [(data, 1)]
     while stack:
@@ -164,7 +174,8 @@ def audio_config_problem(raw) -> tuple[dict | None, str | None]:
     if len(raw) > AUDIO_JSON_MAX:
         return None, f"model_config.json is larger than {AUDIO_JSON_MAX} bytes"
     try:
-        cfg = json.loads(raw.decode("utf-8"), object_pairs_hook=_pairs, parse_constant=_no_constant, parse_int=_int)
+        cfg = json.loads(raw.decode("utf-8"), object_pairs_hook=_pairs, parse_constant=_no_constant, parse_int=_int,
+                         parse_float=_float)
     except (ValueError, RecursionError) as exc:             # UnicodeDecodeError is a ValueError
         return None, f"model_config.json is not readable JSON: {exc}"
     if not isinstance(cfg, dict):
@@ -176,11 +187,23 @@ def audio_config_problem(raw) -> tuple[dict | None, str | None]:
     return cfg, None
 
 
-def component_subfolders(cfg, own_repo: str) -> list[str]:
-    """Directories (relative, with no `..`) that the config's conditioners load from in the model's own organisation. Stage 0 compares a
-    text encoder's `config.json` and tensors when its `repo_id` names one of the two repositories; a snapshot is complete only when those
-    directories' configs are present. A `repo_id` in another organisation is loaded from elsewhere and is not required here."""
-    org = own_repo.split("/", 1)[0] if isinstance(own_repo, str) and "/" in own_repo else None
+def same_repository(a, b) -> bool:
+    """True when two repository ids are the same text: `owner/name` with a non-empty owner and name, equal in case, owner and name. There is no
+    prefix, substring, case-folded or revision match (`org/name@rev` is a different text and is not the repository id). The stage 0 template
+    compares ids the same way (`repo in (model_repo, base_repo)`)."""
+    if not (isinstance(a, str) and isinstance(b, str)) or a != b:
+        return False
+    owner, _, name = a.partition("/")
+    return bool(owner) and bool(name) and "/" not in name
+
+
+def component_subfolders(cfg, own_repo: str, partners=()) -> list[str]:
+    """Directories (relative, with no `..`) that the config's conditioners load from in one of the two repositories. Stage 0 compares a text
+    encoder's `config.json` and tensors when its `repo_id` names one of the two repositories (the template tests `repo_id in (model_repo,
+    base_repo)`); a snapshot is complete only when those directories' configs are present. `repo_id` has to equal `own_repo` or one of
+    `partners` exactly (`same_repository`: case, owner and name, no prefix or substring). A `repo_id` that is anything else is loaded from
+    elsewhere and is not required here."""
+    repos = [r for r in (own_repo, *partners) if same_repository(r, r)]
     out = []
     try:
         confs = cfg["model"]["conditioning"]["configs"]
@@ -191,7 +214,7 @@ def component_subfolders(cfg, own_repo: str) -> list[str]:
         if not isinstance(inner, dict):
             continue
         sub, repo = inner.get("subfolder"), inner.get("repo_id")
-        if not (isinstance(sub, str) and sub and isinstance(repo, str) and org and repo.split("/", 1)[0] == org):
+        if not (isinstance(sub, str) and sub and any(same_repository(repo, r) for r in repos)):
             continue
         parts = PurePosixPath(sub).parts
         if os.path.isabs(sub) or ".." in parts or "\\" in sub:

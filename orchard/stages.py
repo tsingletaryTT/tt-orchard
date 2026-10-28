@@ -174,21 +174,30 @@ def gate_delta(stage_dir, run_dir) -> GateResult:
     if err:
         return GateResult(False, (err,))
     reasons, seen = [], []
-    _delta_reasons(d, run_dir, reasons, seen)
+    _delta_reasons(d, run_dir, reasons, seen, Path(stage_dir))
     reasons += _template_reasons(Path(stage_dir), "delta_triage.py")
     reasons += _stamp_reasons(d, "delta_triage.py", "delta.json")
     return _done(reasons, seen)
 
 
-def _delta_reasons(d: dict, run_dir, reasons: list, seen: list) -> None:
-    """The checks of delta.json that do not depend on who wrote it (shared by the agent stage and the stock-runtime stage)."""
+def _delta_reasons(d: dict, run_dir, reasons: list, seen: list, stage_dir: Path | None = None) -> None:
+    """The checks of delta.json that do not depend on who wrote it (shared by the agent stage and the stock-runtime stage). `stage_dir` is the
+    stage of a template-written delta.json: the audio decision is then held to the current template's stamp and the stage's triage configuration
+    (orchard/audio_decision.py). The stock-runtime stage has no template and passes none."""
     for key in ("model", "nearest_model"):
         if not _text(d.get(key)):
             reasons.append(f"delta.json needs {key}")
     if d.get("path") not in PATHS:
         reasons.append(f"delta.json path must be one of {PATHS}")
     reasons += _class_reasons(d)
-    reasons += audio_decision.decision_problems(d)
+    if stage_dir is None:
+        reasons += audio_decision.decision_problems(d)
+    else:
+        try:
+            shipped = _sha256(SHIPPED_TEMPLATES["delta_triage.py"])
+        except OSError:
+            shipped = None
+        reasons += audio_decision.stage_problems(d, stage_dir, shipped)
     diffs = d.get("differences")
     if not isinstance(diffs, list) or not diffs:
         reasons.append("delta.json differences must be a non-empty list")

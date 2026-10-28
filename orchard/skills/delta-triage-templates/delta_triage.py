@@ -2787,12 +2787,23 @@ def audio_components(tensors: dict) -> list[dict]:
 _MISSING = object()
 
 
+def _audio_segment(prefix: str, key: str) -> str:
+    """The path of `key` under `prefix`. A plain key (no dot, bracket, quote or backslash, and non-empty) is joined with a dot, as `model.diffusion.type`. Any other
+    key is one quoted component, `["model.sampler_type"]`, so a key that holds a dot cannot pass for a nested path: the top-level key `model.sampler_type`
+    and the setting `sampler_type` inside `model` are different paths. List positions are `[0]`, so no two different paths give the same text."""
+    plain = bool(key) and not any(c in key for c in '.[]"\\')
+    if plain:
+        return f"{prefix}.{key}" if prefix else key
+    return f"{prefix}[{json.dumps(key)}]"
+
+
 def _audio_flatten(obj, prefix: str = "") -> dict:
-    """{dotted path: value}, with an empty dict or list kept as a leaf of its own, so a key whose value is `{}` or `[]` is still a key."""
+    """{path: value}, with an empty dict or list kept as a leaf of its own, so a key whose value is `{}` or `[]` is still a key. See `_audio_segment` for
+    the form of a path."""
     out = {}
     if isinstance(obj, dict) and obj:
         for k, v in obj.items():
-            out.update(_audio_flatten(v, f"{prefix}.{k}" if prefix else str(k)))
+            out.update(_audio_flatten(v, _audio_segment(prefix, str(k))))
     elif isinstance(obj, list) and obj:
         for i, v in enumerate(obj):
             out.update(_audio_flatten(v, f"{prefix}[{i}]"))
@@ -2824,8 +2835,11 @@ def compare_audio_configs(mcfg: dict, bcfg: dict) -> dict:
     def rest(c):
         return {k: v for k, v in c.items() if k not in ("model", "training")}
     top = audio_field_diffs(rest(mcfg), rest(bcfg))
-    model = {f"model.{k}": v for k, v in audio_field_diffs(mcfg.get("model"), bcfg.get("model")).items()}
-    training = {f"training.{k}": v for k, v in audio_field_diffs(mcfg.get("training", {}), bcfg.get("training", {})).items()}
+    def under(section: str, diffs: dict) -> dict:
+        """The differences of a section with the section's name in front. A quoted component (`["a.b"]`) follows the name with no dot."""
+        return {section + ("" if k.startswith("[") else ".") + k: v for k, v in diffs.items()}
+    model = under("model", audio_field_diffs(mcfg.get("model"), bcfg.get("model")))
+    training = under("training", audio_field_diffs(mcfg.get("training", {}), bcfg.get("training", {})))
     pointers = {k: v for k, v in model.items() if k.rsplit(".", 1)[-1] in AUDIO_POINTER_KEYS}
     return {"top_level_differences": top,
             "model_differences": {k: v for k, v in model.items() if k not in pointers},
@@ -2840,7 +2854,12 @@ def compare_audio_tensors(mt: dict, bt: dict) -> dict:
         if m["shape"] != b["shape"]:
             shape.append({"name": name, "model": m["shape"], "base": b["shape"]})
         elif m["dtype"] != b["dtype"]:
-            dtype.append({"name": name, "model": m["dtype"], "base": b["dtype"], "tolerated": _dtype_difference_tolerated(m, b)})
+            # `elements` is what the tolerance rule measured, so the gate can recompute `tolerated` from the two dtypes and the size
+            dtype.append({"name": name, "model": m["dtype"], "base": b["dtype"], "elements": _numel(b["shape"]),
+                          "tolerated": _dtype_difference_tolerated(m, b)})
+    # The record lists at most AUDIO_MAX_LISTED of them. A difference that is not tolerated goes first (the sort is stable), so a record cut at the limit
+    # still shows one when there is one, and the gate (orchard/audio_decision.py) can tell from the list alone.
+    dtype.sort(key=lambda x: x["tolerated"])
     return {"model_tensors": len(mt), "base_tensors": len(bt), "common": len(set(mt) & set(bt)), "only_in_model": only_m,
             "only_in_base": only_b, "shape_differences": shape, "dtype_differences": dtype}
 
@@ -3010,7 +3029,7 @@ def load_audio_overrides(path: Path) -> tuple[dict, list[str]]:
     """({"categories": {key: {"category", "source"}}, "path": None or {"path", "source"}}, problems) from audio_overrides.json. A missing file is
     fine. Anything malformed is a problem and nothing from the file is used."""
     empty = {"categories": {}, "path": None}
-    if not path.exists():
+    if not os.path.lexists(path):          # lexists: a link that points nowhere is a file that is there and cannot be read
         return empty, []
     data, err = _audio_json(path)
     if err:
@@ -3274,7 +3293,11 @@ def audio_main(cfg: dict) -> int:
              "tensors": {"model_tensors": tensors["model_tensors"], "base_tensors": tensors["base_tensors"], "common": tensors["common"],
                          "only_in_model": tensors["only_in_model"][:AUDIO_MAX_LISTED], "only_in_base": tensors["only_in_base"][:AUDIO_MAX_LISTED],
                          "shape_differences": tensors["shape_differences"][:AUDIO_MAX_LISTED],
-                         "dtype_differences": tensors["dtype_differences"][:AUDIO_MAX_LISTED]},
+                         "dtype_differences": tensors["dtype_differences"][:AUDIO_MAX_LISTED],
+                         # The lists above are cut; these counts are not, so the gate can tell that a cut list held everything it shows
+                         "shape_difference_count": len(tensors["shape_differences"]),
+                         "dtype_difference_count": len(tensors["dtype_differences"]),
+                         "intolerable_dtype_count": sum(1 for x in tensors["dtype_differences"] if not x["tolerated"])},
              "decision": decision, "text_encoders": encoders, "files_only_in_base": f["files_only_in_base"] + f["shards_only_in_base"],
              "files_only_in_model": f["files_only_in_model"] + f["shards_only_in_model"]}
     write_json("audio-compare.json", {**audio, "problems": decision["problems"], "reasons": all_reasons})
