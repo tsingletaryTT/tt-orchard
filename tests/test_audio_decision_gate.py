@@ -279,6 +279,14 @@ def test_two_path_overrides_are_refused(audio_case):
     refused(stage, "one path override")
 
 
+def test_a_full_port_decision_with_a_weights_only_override_record_is_refused(audio_case):
+    """An override that says weights-only cannot sit under a decision that went the other way: the record does not explain the decision."""
+    stage = structural_pair_with_override(audio_case, "full-port")
+    assert run_ok(stage)["class"] == "full-port"
+    edit_delta(stage, lambda d: d["audio"]["decision"]["overrides"][0].update(path="weights-only"))
+    refused(stage, "moves the path to weights-only")
+
+
 def test_a_path_override_with_an_unknown_path_is_refused(audio_case):
     stage = structural_pair_with_override(audio_case, "weights-only")
     run_ok(stage)
@@ -311,6 +319,46 @@ def test_a_different_tensor_shape_cannot_be_turned_into_weights_only_by_editing_
     assert run_ok(stage)["class"] == "full-port"
     edit_delta(stage, to_weights_only)
     refused(stage, "tensor")
+
+
+def test_a_tensor_that_has_another_shape_cannot_be_turned_into_weights_only(audio_case):
+    """The shape of a tensor both models have: the added-tensor cases above leave this list empty."""
+    t = {**TENSORS, "model.model.layers.0.attn.weight": ("F32", [8, 9])}
+    del t["model.model.layers.0.attn.weight"]
+    t["model.model.layers.0.attn.weight"] = ("F32", [9, 8])
+    stage = audio_case(model_kw={"tensors": t})
+    d = run_ok(stage)
+    assert d["class"] == "full-port" and d["audio"]["tensors"]["shape_differences"] and not d["audio"]["tensors"]["only_in_model"]
+    edit_delta(stage, to_weights_only)
+    refused(stage, "shape_differences")
+
+
+def test_a_tensor_with_another_integer_dtype_cannot_be_turned_into_weights_only(audio_case):
+    t = {**TENSORS, "model.model.layers.0.attn.weight": ("I64", [8, 8])}
+    stage = audio_case(model_kw={"tensors": t})
+    assert run_ok(stage)["class"] == "full-port"
+    edit_delta(stage, to_weights_only)
+    refused(stage, "dtype_differences")
+
+
+def test_a_tolerated_float_dtype_difference_keeps_a_weights_only_decision_acceptable(audio_case):
+    """The template tolerates a small-float dtype difference (bfloat16 against float32) and the gate does the same."""
+    t = {**TENSORS, "model.model.layers.0.attn.weight": ("BF16", [8, 8])}
+    stage = audio_case(model_kw={"tensors": t})
+    d = run_ok(stage)
+    assert d["class"] == "weights-only" and d["audio"]["tensors"]["dtype_differences"][0]["tolerated"] is True
+    assert gate(stage).ok, gate(stage).reasons
+
+
+def test_a_tensor_record_whose_lists_were_emptied_but_whose_counts_still_differ_is_refused(audio_case):
+    stage = audio_case(model_kw={"tensors": {**TENSORS, "model.model.extra.weight": ("F32", [2, 2])}})
+    run_ok(stage)
+    def edit(d):
+        to_weights_only(d)
+        for k in ("only_in_model", "only_in_base", "shape_differences", "dtype_differences"):
+            d["audio"]["tensors"][k] = []
+    edit_delta(stage, edit)
+    refused(stage, "tensor counts")
 
 
 def test_a_forged_weights_only_path_override_does_not_explain_a_tensor_difference(audio_case):
@@ -431,6 +479,14 @@ def test_the_nested_setting_and_the_top_level_key_of_the_same_text_are_both_kept
     assert d["class"] == "full-port"
     config = d["audio"]["config"]
     assert len({**config["top_level_differences"], **config["model_differences"]}) == 2           # neither record replaced the other
+
+
+def test_a_dotted_key_inside_the_model_section_is_one_quoted_component_after_the_section_name(audio_case):
+    base, model = changed_model_config(), changed_model_config()
+    base["model"]["diffusion.sampler_type"], model["model"]["diffusion.sampler_type"] = "euler", "pingpong"
+    d = run_ok(audio_case(model_kw={"config": model}, base_kw={"config": base}))
+    [diff] = decision(d)["differences"]
+    assert diff["key"] == 'model["diffusion.sampler_type"]' and diff["category"] == "unknown" and d["class"] == "full-port"
 
 
 def test_the_nested_setting_alone_is_still_a_serving_difference(audio_case):
