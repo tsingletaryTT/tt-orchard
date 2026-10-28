@@ -24,6 +24,8 @@ class FakeJobs:
     def __init__(self, service_s=0.15, max_waiting=2, workers=1, state="ok", reply="normal", never_finish=False, lifo=False, start_delay=0.0):
         self.service_s, self.max_waiting, self.state, self.reply, self.never_finish = service_s, max_waiting, state, reply, never_finish
         self.lifo, self.start_delay = lifo, start_delay
+        self.ids: list = []                                   # ids to hand out in this order (default: random)
+        self.drip = 0.0                                       # seconds between the bytes of a dripped reply (0: none)
         self.stall = {}                                       # request kind -> seconds the handler sleeps before it answers ("get", "post", "health")
         self.lock = threading.Lock()
         self.queue: deque = deque()
@@ -62,7 +64,7 @@ class FakeJobs:
                 return 503, {"detail": "the model is loading"}
             if len(self.queue) + self.running >= self.max_waiting + 1:
                 return 429, {"detail": "the queue is full"}
-            job = {"id": uuid.uuid4().hex, "status": "queued", "settings": body}
+            job = {"id": self.ids.pop(0) if self.ids else uuid.uuid4().hex, "status": "queued", "settings": body}
             self.jobs[job["id"]] = job
             self.queue.append(job)
             return 202, {"id": job["id"], "status": "queued"}
@@ -95,7 +97,22 @@ def serve(fake):
             self.end_headers()
             self.wfile.write(data)
 
+        def drip(self, raw):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            try:
+                for i in range(len(raw)):
+                    self.wfile.write(raw[i:i + 1])
+                    self.wfile.flush()
+                    time.sleep(fake.drip)
+            except OSError:
+                pass
+
         def do_GET(self):
+            if fake.drip:
+                return self.drip(b'{"status": "ok", "busy": false, "queue_depth": 0, "pad": "' + b"x" * 400 + b'"}')
             time.sleep(fake.stall.get("health" if self.path == "/v1/health" else "get", 0))
             if fake.reply == "nan":
                 return self.send(200, None, raw=b'{"status": NaN}')
@@ -233,6 +250,105 @@ def test_a_reply_over_the_size_cap_is_named_as_too_large(make_server):
     assert any("larger than" in p for p in r["problems"]), r["problems"]
 
 
+def test_a_reply_that_drips_one_byte_at_a_time_is_cut_at_the_absolute_limit(make_server):
+    fake, url = make_server()
+    fake.drip = 0.2                                      # 400+ bytes would take 80+ s, and no single read ever waits long
+    t0 = time.monotonic()
+    code, obj, problem = qp.request("GET", url + "/v1/health", timeout=0.8)
+    assert time.monotonic() - t0 < 3.0 and obj is None and problem and "0.8" in problem
+
+
+def test_a_level_is_not_held_by_a_dripping_reply(make_server):
+    fake, url = make_server()
+    fake.drip = 0.2
+    t0 = time.monotonic()
+    r = level(url, 1, timeout_s=0.8)
+    assert time.monotonic() - t0 < 4.0
+    assert all(j["done_s"] is None for j in r["jobs"])
+
+
+@pytest.mark.parametrize("bad", [0, -1, float("nan"), float("inf"), True, "3", None])
+def test_a_request_with_a_time_limit_that_is_not_a_positive_finite_number_is_refused(bad):
+    code, obj, problem = qp.request("GET", "http://127.0.0.1:1/x", timeout=bad)
+    assert code is None and obj is None and "time limit" in problem
+
+
+@pytest.mark.parametrize("poll, timeout", [(float("nan"), 5.0), (0.1, float("nan")), (0.1, float("inf")), (float("inf"), 5.0), (0.1, True), (0, 5.0), (0.1, 0)])
+def test_nan_inf_and_other_bad_times_are_refused_everywhere(make_server, poll, timeout):
+    fake, url = make_server()
+    with pytest.raises(qp.ProbeError):
+        qp.run_probe(url, SETTINGS, levels=(1,), poll_s=poll, timeout_s=timeout)
+    with pytest.raises(qp.ProbeError):
+        qp.probe_level(url, 1, SETTINGS, poll_s=poll, timeout_s=timeout)
+    with pytest.raises(qp.ProbeError):
+        qp.probe_order(url, SETTINGS, poll_s=poll, timeout_s=timeout)
+    with pytest.raises(qp.ProbeError):
+        qp.wait_idle(url, timeout, poll)
+    assert fake.posts == []
+
+
+def test_the_command_line_refuses_a_nan_timeout(make_server, tmp_path, capsys):
+    fake, url = make_server()
+    code = qp.main(["--url", url, "--out", str(tmp_path / "p.json"), "--timeout-s", "nan", "--prompt", "p", "--steps", "8", "--cfg-scale", "1.0", "--seed", "1"])
+    assert code == 2 and not (tmp_path / "p.json").exists() and fake.posts == []
+
+
+def test_jobs_that_were_never_observed_are_cancelled_at_the_deadline(make_server):
+    """Every status request stalls, so no job is ever seen; the accepted ones that are still queued are dropped anyway."""
+    fake, url = make_server(never_finish=True, service_s=0.0, max_waiting=4)
+    fake.stall["get"] = 8.0
+    r = level(url, 4, timeout_s=0.6)
+    assert r["accepted"] >= 3 and r["timed_out"] is True
+    queued_when_cancelled = len(fake.deleted)
+    assert queued_when_cancelled >= r["accepted"] - 1, (fake.deleted, r["accepted"])
+    assert {j["final_status"] for j in r["jobs"]} <= {"cancelled", "running", "timeout"}
+
+
+def test_an_order_cannot_be_read_from_jobs_that_end_in_the_same_poll_round(make_server):
+    """Quick jobs that all end before the first poll get start estimates that follow the polling order. Ids that sort the other way round must not turn
+    into a first-in-first-out or a last-in-first-out answer."""
+    fake, url = make_server(service_s=0.01, max_waiting=3, start_delay=0.2)
+    fake.ids = ["z" * 32, "m" * 32, "a" * 32]
+    r = qp.probe_order(url, SETTINGS, poll_s=0.5, timeout_s=10.0)
+    assert r["accepted"] == 3 and r["first_in_first_out"] is None
+
+
+def test_jobs_are_polled_in_the_order_they_were_accepted(make_server):
+    fake, url = make_server(service_s=0.05, max_waiting=3, start_delay=0.3)
+    fake.ids = ["z" * 32, "m" * 32, "a" * 32]
+    seen = []
+    real = qp.request
+
+    def spy(method, url_, *a, **k):
+        if method == "GET" and "/v1/audio/jobs/" in url_:
+            seen.append(url_.rsplit("/", 1)[-1][0])
+        return real(method, url_, *a, **k)
+    qp.request = spy
+    try:
+        qp.probe_order(url, SETTINGS, poll_s=0.02, timeout_s=10.0)
+    finally:
+        qp.request = real
+    assert seen[:3] == ["z", "m", "a"]
+
+
+def test_a_hung_running_job_is_reported_and_the_probe_still_writes_its_results(make_server, tmp_path):
+    fake, url = make_server(never_finish=True, service_s=0.0, max_waiting=2)
+    out = tmp_path / "p.json"
+    # the server is idle at the start, so the first level runs; the job it starts never ends, so the server stays busy
+    rec = qp.run_probe(url, SETTINGS, levels=(1, 2), poll_s=0.02, timeout_s=0.6, out=out)
+    assert len(rec["levels"]) == 1 and rec["order"] is None
+    assert any("still busy after the level of 1" in n for n in rec["notes"])
+    assert json.loads(out.read_text())["notes"] == rec["notes"]
+
+
+def test_a_server_that_is_busy_at_the_start_is_refused_not_probed(make_server):
+    fake, url = make_server(never_finish=True, service_s=0.0)
+    fake.submit(SETTINGS)
+    time.sleep(0.1)
+    with pytest.raises(qp.ProbeError, match="idle"):
+        qp.run_probe(url, SETTINGS, levels=(1,), poll_s=0.02, timeout_s=0.5)
+
+
 def test_a_job_whose_status_cannot_be_read_is_called_unknown_after_a_few_tries_and_does_not_wait_for_the_timeout(make_server):
     fake, url = make_server(reply="garbage")
     r = level(url, 1, timeout_s=30.0)
@@ -323,9 +439,8 @@ def test_waiting_for_idle_is_bounded_by_its_timeout_even_when_the_health_check_s
     fake, url = make_server()
     fake.stall["health"] = 8.0
     t0 = time.monotonic()
-    with pytest.raises(qp.ProbeError):
-        qp.wait_idle(url, 0.8, 0.02)
-    assert time.monotonic() - t0 < 4.0
+    health, idle = qp.wait_idle(url, 0.8, 0.02)
+    assert time.monotonic() - t0 < 4.0 and idle is False and health is None
 
 
 def test_the_cleanup_of_queued_jobs_has_its_own_small_timeout_and_budget(make_server, monkeypatch):

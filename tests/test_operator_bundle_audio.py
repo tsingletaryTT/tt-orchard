@@ -525,7 +525,7 @@ def test_malformed_repeats_print_not_recorded_and_do_not_crash(tmp_path):
     results = built(audio_run(tmp_path, audio_result(repeats=bad)))[0]
     assert BENCH not in results                  # one good value is not three repeats
     row = next(l for l in section(block(results), SINGLE).splitlines() if "the whole `generate` call" in l)
-    assert row.count("not recorded") >= 3 and "| 2 |" in row
+    assert row.count("not recorded") >= 6 and "| 2 |" not in row          # three missing values, then no min, median or max over the one that is left
     assert "was not repeated" in section(block(built(audio_run(tmp_path / "b", audio_result(repeats=[1, 2])) if (tmp_path / "b").mkdir() is None else None)[0]),
                                          SINGLE)
 
@@ -560,6 +560,17 @@ def test_the_bundle_gate_refuses_a_benchmark_heading_over_fewer_than_three_repea
     (run / RESULT).write_text(json.dumps(res))
     gate = finish_bundle(run)
     assert not gate.ok and any("benchmark" in r and "chip" in r and "2" in r for r in gate.reasons), gate.reasons
+
+
+def test_a_part_that_one_repeat_lacks_shows_no_spread_and_says_not_recorded(tmp_path):
+    reps = repeats()
+    del reps["chip"][1]["timings"]["conditioning_s"]
+    body = section(block(built(audio_run(tmp_path, audio_result(repeats=reps)))[0]), BENCH)
+    row = next(l for l in body.splitlines() if l.startswith("| Fine-tune, 8 steps | the T5Gemma encoder"))
+    cells = [c.strip() for c in row.strip("|").split("|")]
+    assert cells[3:6] == ["not recorded"] * 3 and "not recorded" in cells[2]
+    full = next(l for l in body.splitlines() if l.startswith("| Fine-tune, 8 steps | the whole `generate` call"))
+    assert "| 1.5 | 1.6 | 5 |" in full                                       # a complete part keeps its spread
 
 
 def test_a_control_with_no_repeats_makes_the_section_a_single_sample(tmp_path):

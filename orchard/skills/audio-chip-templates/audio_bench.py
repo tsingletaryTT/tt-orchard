@@ -39,9 +39,17 @@ def parse(argv=None):
     p.add_argument("--sizes", default=None, help="clip lengths in seconds, comma separated (default 10,30,60,120)")
     p.add_argument("--warmup", type=int, default=None, help="discarded runs before the repeats at each size (default: the rule in orchard/resident.py)")
     p.add_argument("--repeats", type=int, default=None, help="measured runs at each size (default: the rule in orchard/resident.py)")
-    p.add_argument("--threads", type=int, default=0, help="torch CPU threads (0: the default)")
+    p.add_argument("--threads", type=int, default=0, help="torch CPU threads, on the CPU runtime and for the host work of the chip runtime (0: the default)")
     p.add_argument("--device-id", type=int, default=0)
     return p.parse_args(argv)
+
+
+def load_runtimes():
+    spec = importlib.util.spec_from_file_location("audio_runtimes", HERE / "audio_runtimes.py")
+    rts = importlib.util.module_from_spec(spec)
+    sys.modules["audio_runtimes"] = rts
+    spec.loader.exec_module(rts)
+    return rts
 
 
 def main(argv=None, runtime_factory=None) -> int:
@@ -63,15 +71,12 @@ def main(argv=None, runtime_factory=None) -> int:
         if not (s > 0 and s <= resident.MAX_SECONDS):
             raise SystemExit(f"a size must be above 0 and at most {resident.MAX_SECONDS:g} seconds, got {s:g}")
     if runtime_factory is None:
-        spec = importlib.util.spec_from_file_location("audio_runtimes", HERE / "audio_runtimes.py")
-        rts = importlib.util.module_from_spec(spec)
-        sys.modules["audio_runtimes"] = rts
-        spec.loader.exec_module(rts)
+        rts = load_runtimes()
         problems = rts.settings_problems(settings)
         if problems:
             raise SystemExit("; ".join(problems))
         if args.device == "chip":
-            runtime = rts.ChipRuntime(args.model, device_id=args.device_id, record_layers=False)
+            runtime = rts.ChipRuntime(args.model, device_id=args.device_id, threads=args.threads, record_layers=False)
         else:
             runtime = rts.LibraryRuntime(args.model, threads=args.threads, record_layers=False)
     else:

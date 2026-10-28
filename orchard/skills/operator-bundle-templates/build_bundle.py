@@ -1251,7 +1251,8 @@ def audio_repeat_lines(data: dict) -> list[str]:
             vals = [dig(e, "timings", key) if isinstance(e, dict) else None for e in lst[:20]]
             good = audio_good_values(lst, key)
             cells = ", ".join(num(v) if is_number(v) and abs(v) <= MAX_NUMBER else NOT_RECORDED for v in vals)
-            lo, med, hi = (num(min(good)), num(statistics.median(good)), num(max(good))) if good else (NOT_RECORDED,) * 3
+            # a part that any listed repeat lacks has no spread: it is shown as not recorded, as the stage 2 record marks it incomplete
+            lo, med, hi = (num(min(good)), num(statistics.median(good)), num(max(good))) if good and len(good) == len(vals) else (NOT_RECORDED,) * 3
             cpu = dig(data, "reference_runs", ref_role, "timings", key) if key == "generate_and_decode_s" else None
             lines.append(f"| {label} | {what} (`{key}`) | {cells} | {lo} | {med} | {hi} | "
                          f"{num(cpu) if is_number(cpu) and abs(cpu) <= MAX_NUMBER else ('n/a' if key != 'generate_and_decode_s' else NOT_RECORDED)} |")

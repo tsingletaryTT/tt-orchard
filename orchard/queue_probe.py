@@ -35,15 +35,15 @@ fails any of that is recorded as a problem and does not stop the probe.
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import math
 import re
+import socket
 import sys
 import threading
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 from pathlib import Path
 
 from orchard import resident, safeio
@@ -112,41 +112,73 @@ def check_settings(s) -> dict:
     return dict(s)
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, *a, **k):
-        return None
-
-
-def _opener():
-    """An opener that uses no proxy from the environment and follows no redirect (the server is local and answers directly)."""
-    return urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
-
-
 def request(method: str, url: str, body: dict | None = None, timeout: float = 30.0):
-    """(http status or None, JSON object or None, problem or None). A reply over MAX_REPLY_BYTES, a reply that is invalid or non-strict JSON, and a reply that is no object give a
-    problem and no object; a connection that fails gives no status."""
+    """(http status or None, JSON object or None, problem or None). The whole request, from connecting to the last byte of the reply, has one absolute
+    limit of `timeout` seconds: a timer shuts the socket at the limit, and the body is read in chunks that check the clock, so a server that sends one byte
+    at a time cannot hold the probe past it. No proxy and no redirect is used (http.client has neither). A reply over MAX_REPLY_BYTES, a reply that is
+    invalid or non-strict JSON, and a reply that is no object give a problem and no object; a connection that fails gives no status."""
+    where = f"{method} {urllib.parse.urlsplit(url).path or '/'}"
+    if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or not math.isfinite(timeout) or timeout <= 0:
+        return None, None, f"{where}: the time limit is not a positive number"
+    parts = urllib.parse.urlsplit(url)
     data = None if body is None else json.dumps(body).encode()
-    req = urllib.request.Request(url, data=data, method=method, headers={"Content-Type": "application/json"} if data is not None else {})
+    conn = http.client.HTTPConnection(parts.hostname, parts.port, timeout=timeout)
+    t_end = time.monotonic() + timeout
+
+    held: dict = {"sock": None}                    # the socket is kept here: a reply that closes the connection makes http.client forget it
+
+    def stop() -> None:
+        sock = held["sock"]
+        try:
+            if sock is not None:
+                sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+    timer = threading.Timer(timeout, stop)
+    timer.daemon = True
+    timer.start()
+    code = None
     try:
-        resp = _opener().open(req, timeout=timeout)
+        conn.connect()
+        held["sock"] = conn.sock
+        if time.monotonic() >= t_end:
+            return None, None, f"{where}: no complete reply within {timeout:g} s"
+        conn.request(method, parts.path or "/", body=data, headers={"Content-Type": "application/json"} if data is not None else {})
+        resp = conn.getresponse()
         code = resp.status
-    except urllib.error.HTTPError as exc:
-        resp, code = exc, exc.code
-    except (urllib.error.URLError, OSError, ValueError) as exc:
-        return None, None, f"{method} {url.split('://', 1)[-1].split('/', 1)[-1] or '/'}: no reply ({type(exc).__name__})"
-    try:
-        raw = resp.read(MAX_REPLY_BYTES + 1)
-    except OSError as exc:
-        return code, None, f"{method}: the reply could not be read ({type(exc).__name__})"
+        chunks, size = [], 0
+        while size <= MAX_REPLY_BYTES:
+            if time.monotonic() >= t_end:
+                return code, None, f"{where}: the reply did not finish within {timeout:g} s"
+            chunk = resp.read(min(65536, MAX_REPLY_BYTES + 1 - size))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+        raw = b"".join(chunks)
+    except (OSError, http.client.HTTPException, ValueError) as exc:
+        if time.monotonic() >= t_end:
+            return code, None, f"{where}: no complete reply within {timeout:g} s"
+        return code, None, f"{where}: no reply ({type(exc).__name__})"
     finally:
-        resp.close()
+        timer.cancel()
+        conn.close()
     if len(raw) > MAX_REPLY_BYTES:
-        return code, None, f"{method}: the reply is larger than {MAX_REPLY_BYTES} bytes"
+        return code, None, f"{where}: the reply is larger than {MAX_REPLY_BYTES} bytes"
     try:
         obj = safeio.parse_json_bytes(raw, max_bytes=MAX_REPLY_BYTES, expect=dict)
     except safeio.SafeReadError as exc:
-        return code, None, f"{method}: the reply is not a usable JSON object ({type(exc).__name__})"
+        return code, None, f"{where}: the reply is not a usable JSON object ({type(exc).__name__})"
     return code, obj, None
+
+
+def check_times(poll_s, timeout_s) -> None:
+    """poll_s above 0 and at most 10, timeout_s above 0, both finite numbers (a NaN would make every deadline comparison false)."""
+    for name, v in (("poll_s", poll_s), ("timeout_s", timeout_s)):
+        if not isinstance(v, (int, float)) or isinstance(v, bool) or not math.isfinite(v):
+            raise ProbeError(f"{name} must be a finite number")
+    if not 0 < poll_s <= 10 or timeout_s <= 0:
+        raise ProbeError("poll_s must be above 0 and at most 10, and timeout_s above 0")
 
 
 def _num(v):
@@ -169,7 +201,7 @@ def _follow(base: str, jobs: dict, problems: list, *, t0: float, deadline: float
     pending = set(jobs)
     timed_out = False
     while pending and not timed_out:
-        for jid in sorted(pending):
+        for jid in [j for j in jobs if j in pending]:          # in the order the jobs were accepted, not sorted by id
             if clock() >= deadline:
                 timed_out = True
                 break
@@ -206,12 +238,14 @@ def _follow(base: str, jobs: dict, problems: list, *, t0: float, deadline: float
         if pending and not timed_out:
             sleep(poll_s)
     cleanup_end = clock() + CLEANUP_BUDGET_S
-    for jid in sorted(pending):                       # at the deadline: drop what is still queued, so the server is left clean
+    for jid in [j for j in jobs if j in pending]:     # at the deadline: drop what is still queued, so the server is left clean
         job = jobs[jid]
-        if job["final_status"] == "queued":
+        if job["final_status"] in ("queued", None):          # a job never observed may still be queued, so it is cancelled too
             code, obj, _problem = request("DELETE", f"{base}/v1/audio/jobs/{jid}", timeout=_bound(cleanup_end, clock, CLEANUP_TIMEOUT_S))
             if code == 200 and obj and isinstance(obj.get("status"), str):
                 job["final_status"] = obj["status"]
+            elif job["final_status"] is None:
+                job["final_status"] = "timeout"
         elif job["final_status"] is None:
             job["final_status"] = "timeout"
     return timed_out
@@ -231,6 +265,7 @@ def _derive(rows: list, poll_s: float) -> None:
 def probe_level(base: str, n: int, settings: dict, *, poll_s: float = 0.25, timeout_s: float = 600.0, clock=time.monotonic, sleep=time.sleep) -> dict:
     """Send `n` job requests at once and follow the accepted jobs to the end (or to `timeout_s`). Returns the record described in the module text."""
     base = check_url(base)
+    check_times(poll_s, timeout_s)
     t0 = clock()
     deadline = t0 + timeout_s
     load_start = resident.host_loadavg_1m()
@@ -282,6 +317,7 @@ def probe_order(base: str, settings: dict, *, n: int = ORDER_JOBS, poll_s: float
     """Send `n` jobs one after another (each reply before the next request, so the order of arrival is known) and say whether they started in that order.
     `first_in_first_out` is None when fewer than two of the accepted jobs ran to the end."""
     base = check_url(base)
+    check_times(poll_s, timeout_s)
     t0 = clock()
     deadline = t0 + timeout_s
     problems: list[str] = []
@@ -308,21 +344,25 @@ def probe_order(base: str, settings: dict, *, n: int = ORDER_JOBS, poll_s: float
     fifo = None
     if len(ended) >= 2 and len(ended) == len(submit_order):
         starts = [j["start_s"] for j in ended]
-        fifo = all(a <= b for a, b in zip(starts, starts[1:]))
+        # Jobs that end within two polls of each other get start estimates that follow the order they were polled in; no order can be read from those.
+        if all(abs(b - a) >= 2 * poll_s for a, b in zip(starts, starts[1:])):
+            fifo = all(a <= b for a, b in zip(starts, starts[1:]))
     return {"jobs_sent": n, "accepted": len(jobs), "refused": refused, "submit_order": submit_order, "first_in_first_out": fifo,
             "start_s_in_submit_order": [jobs[j]["start_s"] for j in submit_order], "timed_out": timed_out, "problems": problems}
 
 
-def wait_idle(base: str, timeout_s: float, poll_s: float, clock=time.monotonic, sleep=time.sleep) -> dict:
-    """The server's health once it says it is idle (not busy, nothing queued); a ProbeError when it does not within `timeout_s`."""
+def wait_idle(base: str, timeout_s: float, poll_s: float, clock=time.monotonic, sleep=time.sleep):
+    """(the server's last health answer or None, idle). `idle` is True once the server says it is not busy and has nothing queued, and False when it
+    does not within `timeout_s` (a job that hangs while running keeps it busy). It never raises for a busy server; the caller reports it."""
+    check_times(poll_s, timeout_s)
     t0 = clock()
     deadline = t0 + timeout_s
     while True:
         code, obj, _problem = request("GET", base + "/v1/health", timeout=_bound(deadline, clock))
         if code == 200 and obj and obj.get("busy") is False and obj.get("queue_depth") == 0:
-            return obj
+            return obj, True
         if clock() - t0 > timeout_s:
-            raise ProbeError("the server did not become idle in time, so the next level would start on a busy server")
+            return (obj if code == 200 else None), False
         sleep(poll_s)
 
 
@@ -331,8 +371,7 @@ def run_probe(url: str, settings: dict, *, levels=DEFAULT_LEVELS, poll_s: float 
     base = check_url(url)
     levels = check_levels(levels)
     settings = check_settings(settings)
-    if not isinstance(poll_s, (int, float)) or isinstance(poll_s, bool) or not 0 < poll_s <= 10 or not isinstance(timeout_s, (int, float)) or timeout_s <= 0:
-        raise ProbeError("poll_s must be above 0 and at most 10, and timeout_s above 0")
+    check_times(poll_s, timeout_s)
     if out is not None and Path(out).exists():
         raise ProbeError(f"{out} exists; a result is never overwritten")
     code, health, problem = request("GET", base + "/v1/health", timeout=min(REQUEST_TIMEOUT_S, timeout_s))
@@ -340,15 +379,24 @@ def run_probe(url: str, settings: dict, *, levels=DEFAULT_LEVELS, poll_s: float 
         raise ProbeError(f"the health check did not answer ({problem or code})")
     if health.get("status") != "ok":
         raise ProbeError(f"the health check says the server is {health.get('status')!r}, which is not ready")
-    wait_idle(base, timeout_s, poll_s)
-    rec_levels = []
+    _h, idle = wait_idle(base, timeout_s, poll_s)
+    if not idle:
+        raise ProbeError("the server did not become idle in time, so a level would start on a busy server")
+    rec_levels, notes = [], []
+    order = None
     for n in levels:
         rec_levels.append(probe_level(base, n, settings, poll_s=poll_s, timeout_s=timeout_s))
-        wait_idle(base, timeout_s, poll_s)
-    order = probe_order(base, settings, poll_s=poll_s, timeout_s=timeout_s)
-    wait_idle(base, timeout_s, poll_s)
+        _h, idle = wait_idle(base, timeout_s, poll_s)
+        if not idle:                                   # a hung running job: say so, and do not start the next level on a busy server
+            notes.append(f"The server was still busy after the level of {n}, so the later levels and the order test were not run.")
+            break
+    else:
+        order = probe_order(base, settings, poll_s=poll_s, timeout_s=timeout_s)
+        _h, idle = wait_idle(base, timeout_s, poll_s)
+        if not idle:
+            notes.append("The server was still busy after the order test.")
     _code, after, _problem = request("GET", base + "/v1/health", timeout=min(REQUEST_TIMEOUT_S, timeout_s))
-    record = {"settings": settings, "poll_s": poll_s, "timeout_s": timeout_s, "health_before": health, "health_after": after, "levels": rec_levels, "order": order,
+    record = {"settings": settings, "poll_s": poll_s, "timeout_s": timeout_s, "health_before": health, "health_after": after, "levels": rec_levels, "order": order, "notes": notes,
               "limits": [f"Times are seen by polling every {poll_s:g} s, so they have a resolution of about that.",
                          "The service time of a job is the server's own total_s. Whether jobs ran one at a time is judged from those service intervals.",
                          "One clip length, one prompt and one seed are used at every level.",
@@ -387,7 +435,10 @@ def main(argv=None) -> int:
               f"one at a time {lv['ran_one_at_a_time']}, longest wait {max(waits) if waits else 'n/a'} s, "
               f"whole level {lv['makespan_s']} s")
     order = record["order"]
-    print(f"order test: {order['accepted']} of {order['jobs_sent']} jobs accepted one after another, first in first out {order['first_in_first_out']}")
+    if order is not None:
+        print(f"order test: {order['accepted']} of {order['jobs_sent']} jobs accepted one after another, first in first out {order['first_in_first_out']}")
+    for note in record["notes"]:
+        print(note)
     return 0
 
 

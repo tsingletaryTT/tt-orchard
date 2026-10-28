@@ -45,6 +45,36 @@ def test_three_repeats_with_no_warmup_are_labelled_unwarmed(tmp_path):
     assert json.loads((tmp_path / "bench.json").read_text())["sizes"][0]["label"] == "unwarmed"
 
 
+class RecordingRuntimes:
+    """Stands in for audio_runtimes.py: records how each runtime class is built."""
+    built = []
+
+    @staticmethod
+    def settings_problems(s):
+        return []
+
+    class _Base(resident.FakeRuntime):
+        def __init__(self, model, **kw):
+            super().__init__()
+            RecordingRuntimes.built.append((type(self).__name__, model, kw))
+
+    class ChipRuntime(_Base):
+        pass
+
+    class LibraryRuntime(_Base):
+        pass
+
+
+@pytest.mark.parametrize("device, name", [("chip", "ChipRuntime"), ("cpu", "LibraryRuntime")])
+def test_threads_reach_both_runtimes(tmp_path, monkeypatch, device, name):
+    RecordingRuntimes.built = []
+    monkeypatch.setattr(ab, "load_runtimes", lambda: RecordingRuntimes)
+    code = ab.main(["--device", device, "--model", "m", "--out", str(tmp_path / "b.json"), "--prompt", "p", "--steps", "8", "--cfg-scale", "1.0", "--seed", "1",
+                    "--sizes", "10", "--threads", "5"])
+    assert code == 0 and RecordingRuntimes.built[0][0] == name and RecordingRuntimes.built[0][2]["threads"] == 5
+    assert RecordingRuntimes.built[0][2]["record_layers"] is False
+
+
 @pytest.mark.parametrize("sizes", ["10,121", "0", "-3", "x", "nan"])
 def test_a_bad_size_is_refused_before_anything_loads(tmp_path, sizes):
     rt = resident.FakeRuntime()
