@@ -44,6 +44,8 @@ CURL_COULD_NOT_CONNECT = 7     # curl's exit code when nothing accepts the conne
 # `tt-model stop` says so when docker had to SIGKILL and it reset the mesh itself, from a
 # throwaway container (`tt-model stop --help`). Its clean output has no such word.
 MESH_RESET_TEXT = re.compile(r"\breset", re.IGNORECASE)
+# `tt-model serve` refuses with "<container> is already running" when that container exists.
+ALREADY_RUNNING = re.compile(r"already running", re.IGNORECASE)
 
 
 class ServerError(Exception):
@@ -52,6 +54,11 @@ class ServerError(Exception):
 
 class ServerStarting(ServerError):
     """The start timed out, and the stop checks show something coming up. Start nothing else."""
+
+
+class ServerNotOwned(ServerError):
+    """The start was refused because a container of the same name already runs. Another process
+    owns it, so this run must not stop it."""
 
 
 class NotReady(ServerError):
@@ -154,6 +161,10 @@ class ServerControl:
         # What adopt() found out about a "process" server: "unknown" (we started it, or it is not
         # a process server), "match", "unverified" (the record has no start time) or "gone".
         self.adopted_identity = "unknown"
+        # Who owns the container: True once our `tt-model serve` exited 0, False once it was refused
+        # because the container already ran, None before either (and for records written before
+        # this field existed). stop() does nothing when it is False.
+        self.owned: bool | None = None
 
     # ---- ledger form --------------------------------------------------------------------------
 
@@ -161,7 +172,8 @@ class ServerControl:
         return {"kind": self.spec.kind, "target": self.spec.target, "port": self.spec.port,
                 "pid": self.pid, "pgid": self.pgid,
                 "start_time": self.start_time, "boot_id": self.boot_id,
-                "dev_indices": None if self.dev_indices is None else list(self.dev_indices)}
+                "dev_indices": None if self.dev_indices is None else list(self.dev_indices),
+                "owned": self.owned}
 
     def adopt(self, record: dict) -> str | None:
         """Take over a server a previous supervisor started, from its ledger record.
@@ -179,6 +191,8 @@ class ServerControl:
         devs = record.get("dev_indices")
         self.dev_indices = None if devs is None else tuple(int(i) for i in devs)
         self.adopted_identity = "unknown"
+        # A refusal this process saw is newer than any ledger record, so it is kept.
+        self.owned = False if self.owned is False else record.get("owned")
         if self.spec.kind != "process" or self.pid is None:
             return None
         if self.start_time is None:
@@ -207,6 +221,7 @@ class ServerControl:
 
     def start(self, lease: Lease | None) -> None:
         s = self.spec
+        self.owned = None             # a new attempt: nothing is known about who owns the container yet
         if s.kind == "container":
             if lease is None:
                 raise ServerError("a container server needs a lease")
@@ -228,6 +243,13 @@ class ServerControl:
                 raise ServerError(f"tt-model serve still running after {self.start_timeout} s and "
                                   "nothing came up")
             if res.returncode != 0:
+                text = (res.stderr.strip() or res.stdout.strip())[:500]
+                if ALREADY_RUNNING.search(res.stderr + res.stdout):
+                    # A container of this name belongs to someone else: leave it alone.
+                    self.owned = False
+                    raise ServerNotOwned(
+                        f"{s.container_name} already runs and another process owns it; this run did "
+                        f"not start it and will not stop it ({text})")
                 raise ServerError(f"tt-model serve exited {res.returncode}: "
                                   f"{(res.stderr.strip() or res.stdout.strip())[:500]}")
         else:
@@ -240,9 +262,13 @@ class ServerControl:
             ident = self.identity(self.pid)
             self.boot_id, self.start_time = ident if ident else (None, None)
         self.dev_indices = tuple(lease.dev_indices) if lease is not None else ()
+        self.owned = True
 
     def stop(self) -> dict:
         s = self.spec
+        if self.owned is False:
+            # The start was refused because someone else's container runs. No stop call is made.
+            return {"how": "not stopped: another process owns the container", "skipped": True}
         if s.kind == "process":
             return self._signal_group()
         argv = [self.tt_model, "stop", s.target] + (["--profile", s.profile]

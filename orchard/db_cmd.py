@@ -195,6 +195,10 @@ def _status(directory, scope, say) -> int:
         say(f"telegraph.jsonl: {st['legacy_ledger']}")
     markers = [n for n, here in (("MIGRATING-TO-SQLITE", st["migrating_marker"]), ("MIGRATED-TO-SQLITE", st["migrated_marker"])) if here]
     say(f"archived ledger: {'yes' if st['archived_ledger'] else 'no'}" + (f"; markers: {', '.join(markers)}" if markers else ""))
+    if st["backups"] is None:
+        # The folder is unreadable or a link. That is a recovery problem, so it is said and the exit code shows it.
+        say(f"backups: cannot be read: {st.get('backups_error') or 'unknown reason'}")
+        return EXIT_PROBLEM
     say(f"backups: {len(st['backups'])}" + (f" (newest {st['backups'][-1]})" if st["backups"] else ""))
     return EXIT_OK
 

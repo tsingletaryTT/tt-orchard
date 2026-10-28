@@ -151,7 +151,7 @@ from orchard.paths import (PATHS_RECORDED, RunPaths, UnknownPlaceholder, absolut
 from orchard.runner import Denied, check_string
 from orchard import graft_trial as graft
 from orchard import kept_coder, kernelprobe, swap_draft
-from orchard.server import ServerControl, ServerError, ServerSpec, StopCheck
+from orchard.server import ServerControl, ServerError, ServerNotOwned, ServerSpec, StopCheck
 from orchard.stages import (PACKAGE_OPTIONS_SET, GateResult, TierUnavailable, abort_can_resume, attempt_started_ts,
                             budget_cap, check_disk, coder_state, delta_class, delta_facts, delta_path, run_facts, evidence_record,
                             open_stage_dir, package_format, package_options, resolve_endpoint,
@@ -736,6 +736,10 @@ class Supervisor:
                 ok = False             # a container still uses these chips: its lease stays, the coder's is still released
                 continue
             try:
+                if is_coder and getattr(self.coder, "owned", None) is False:
+                    # Another process owns the container: no stop, and no reset of its chips.
+                    self.adapter.release(lease, keep_running=True)
+                    continue
                 if is_coder and not self.coder.confirm_stopped().stopped:
                     self.coder.stop()
                 if is_coder:
@@ -937,6 +941,8 @@ class Supervisor:
         adopted = lease.lease_id in self._adopted_ids(entries)
         if server_rec:
             self.coder.adopt(server_rec)
+        if getattr(self.coder, "owned", None) is False:
+            return self._release_foreign_lease(lease, adopted)
         try:
             if not self.coder.confirm_stopped().stopped:
                 self.ledger.append("decision", None, decision="stopping the coder",
@@ -957,6 +963,22 @@ class Supervisor:
         except (AdapterError, ServerError, OSError) as exc:
             self.ledger.append("notice", None, what="releasing the hardware failed", error=str(exc))
             return False
+
+    def _release_foreign_lease(self, lease: Lease, adopted: bool) -> bool:
+        """The coder's container belongs to another process (the start was refused). Nothing is
+        stopped. The lease goes back without a reset, because that container may use these chips."""
+        self.ledger.append("notice", None, what="the coder container belongs to another process; it was "
+                           "not stopped and the lease was released without a reset", lease_id=lease.lease_id)
+        try:
+            self.adapter.release(lease, keep_running=True)
+        except (AdapterError, OSError) as exc:
+            self.ledger.append("notice", None, what="releasing the hardware failed", error=str(exc))
+            return False
+        self.ledger.append("decision", None, decision="hardware released", lease_id=lease.lease_id,
+                           reset=False)
+        if adopted:
+            kept_coder.forget(self.paths.cache_root, lease.lease_id)
+        return True
 
     # ---- a coder kept up between lab runs (orchard/kept_coder.py) ------------------------------
 
@@ -1106,6 +1128,18 @@ class Supervisor:
         if server_rec:
             self.coder.adopt(server_rec)
         lease = Lease.from_record(lease_rec)
+        if getattr(self.coder, "owned", None) is False:
+            # The last start was refused: the container of that name is another process's, even if
+            # it answers. Give back any lease this run still holds (no reset) and try to start again;
+            # a second refusal blocks with the same reason.
+            released = {e["data"].get("lease_id") for e in entries if e["event"] == "decision"
+                        and e["data"].get("decision") in ("hardware released", "coder left up")}
+            if (lease.lease_id not in released
+                    and not self._release_foreign_lease(lease, lease.lease_id in self._adopted_ids(entries))):
+                self._block(None, f"the coder container belongs to another process, and this run's lease "
+                                  f"{lease.lease_id} could not be released to try again")
+            self._start_coder(canary)
+            return
         mine = [c for c in self.adapter.status() if c.bdf in lease.chips]
         if lease.lease_id in self._adopted_ids(entries):
             # A kept coder's lease is owned by its container's processes, not by this supervisor.
@@ -1133,17 +1167,25 @@ class Supervisor:
         self.coder_lease = lease          # known from here on, so a shutdown can release it
         # Recorded before the start: a crash during the boot leaves the lease and server in the
         # ledger, so the restart can stop that server and re-lease.
+        # The pending record says "unknown" for this attempt. The live value changes only when the
+        # start begins (ServerControl.start), so a failed append here cannot lose an earlier refusal.
         self.ledger.append("decision", None, decision="coder starting", lease=lease.record(),
-                           server=self.coder.record())
+                           server={**self.coder.record(), "owned": None})
         try:
             self.coder.start(lease)
+        except ServerNotOwned as exc:
+            # Another process owns the container of this name. Record that, so no later stop (this
+            # run's cleanup, a resume) touches it, and block with the usual coder reason.
+            self.ledger.append("decision", None, decision="coder not started", lease_id=lease.lease_id,
+                               server=self.coder.record(), reason=str(exc))
+            self._block(None, f"the coder did not start and answer; nothing is retried: {exc}")
         except (ServerError, OSError) as exc:
             self._block_if_off_bus(None, f"the coder did not start and answer; nothing is retried: {exc}", lease.chips)
             self._block(None, f"the coder did not start and answer; nothing is retried: {exc}")
         # The boot takes up to 45 minutes and is the likeliest time for a kill. This entry gives
         # the kill test a kill point while the container runs and has not answered.
         self.ledger.append("decision", None, decision="coder container started",
-                           lease_id=lease.lease_id)
+                           lease_id=lease.lease_id, server=self.coder.record())
         self._finish_boot(lease, baseline)
 
     def _finish_boot(self, lease: Lease, baseline: dict | None) -> None:
@@ -1185,6 +1227,11 @@ class Supervisor:
         the coder, let the lease tool reap the orphan, take a new lease and start again."""
         self.ledger.append("decision", None, decision="relaunch the coder under this supervisor's lease",
                            old_lease_id=old.lease_id)
+        if getattr(self.coder, "owned", None) is False:
+            # The old start was refused: that container is another process's. Leave it, and start
+            # again; a second refusal blocks with the same reason.
+            self._start_coder(canary)
+            return
         if not self.coder.confirm_stopped().stopped:
             self.ledger.append("decision", None, decision="stopping the coder", result=self.coder.stop())
         check = wait_stopped(self.coder, self.adapter, old, quiet_wait_s=self.budgets.quiet_wait_s,

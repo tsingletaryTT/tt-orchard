@@ -141,7 +141,8 @@ class SingleTenantAdapter:
     def cancel(self, ticket: str) -> None:
         return None
 
-    def release(self, lease: Lease) -> None:
+    def release(self, lease: Lease, *, keep_running: bool = False) -> None:
+        # No reset happens here either way, so keep_running changes nothing.
         self.leases.pop(lease.lease_id, None)
 
     def reset(self, lease: Lease) -> None:
