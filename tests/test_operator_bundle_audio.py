@@ -53,13 +53,15 @@ def audio_result(**over):
                  "control_chip": run_entry("small-base", clip="stages/2/chip/small-base/clips/audio.flac")},
         "reference_runs": {
             "reference": {**run_entry("small-music", clip="stages/1/runs/reference/clips/audio.flac"), "from_cache": True,
-                          "wall_seconds": 301.5, "interpreter": "venv/bin/python"},
+                          "wall_seconds": 0.01, "interpreter": "venv/bin/python",
+                          "timings": {"generate_and_decode_s": 24.8}},
             "host_same_env": {**run_entry("small-music", clip="stages/1/runs/host/clips/audio.flac"), "wall_seconds": 280.0},
             "control_reference": {**run_entry("small-base", clip="stages/1/runs/control/clips/audio.flac"), "wall_seconds": 270.0}},
         "agreement": {"chip_vs_reference": summary(), "control_chip_vs_control_reference": summary(rel=0.05),
                       "chip_vs_host_same_env": summary(rel=0.0411)},
         "environment_floor": summary(pcc=0.9999, rel=0.0098),
         "control_difference": {"ok": True, "rel_l2": 0.83, "pcc": 0.31, "problems": []},
+        "control_discrimination": {"ok": True, "own_rel_l2": 0.3, "other_rel_l2": 1.9},
         "limits": ["Nobody has listened to the clips; no check here says the music is good.",
                    "The agreement bars are provisional choices, not yet set from a measured noise floor."]}
     res.update(over)
@@ -415,3 +417,32 @@ def test_an_audio_run_needs_no_text_reference_file_and_a_text_run_still_does(tmp
     (trun / "stages" / "1" / "reference.json").unlink()
     with pytest.raises(Exception):
         built(trun)
+
+
+def test_the_reference_time_is_the_references_own_and_not_the_time_to_copy_a_cached_one(tmp_path):
+    flat = " ".join(block(built(audio_run(tmp_path))[0]).split())
+    assert "took 24.8 seconds when it was made (this run reused a saved reference)" in flat and "0.01" not in flat
+
+
+def test_the_control_discrimination_numbers_are_printed_and_a_failure_is_said_in_results_and_risks(tmp_path):
+    flat = " ".join(section(block(built(audio_run(tmp_path))[0]), "### Control: the base model").split())
+    assert "0.3 against the base model's own reference and 1.9 against the fine-tune's reference. It is nearer its own." in flat
+    res = audio_result(control_discrimination={"ok": False, "own_rel_l2": 1.5, "other_rel_l2": 0.2})
+    results, risks, _ = built(audio_run(tmp_path / "bad", res)) if (tmp_path / "bad").mkdir() is None else None
+    assert "not nearer its own" in " ".join(block(results).split())
+    assert "wrong weights" in section(risks, "## Audio run")
+
+
+def test_a_missing_discrimination_record_is_not_recorded_and_raises_the_risk(tmp_path):
+    res = audio_result()
+    del res["control_discrimination"]
+    (tmp_path / "m").mkdir()
+    results, risks, _ = built(audio_run(tmp_path / "m", res))
+    assert "nearer its own reference than the fine-tune's: not recorded" in " ".join(block(results).split())
+    assert "wrong weights" in section(risks, "## Audio run")
+
+
+def test_the_stage_2_entry_of_an_audio_run_points_at_the_audio_section(tmp_path):
+    results = built(audio_run(tmp_path))[0]
+    stage2 = results.split("## Stage 2:", 1)[1].split("## Stage 3", 1)[0]
+    assert "Audio clip on a chip" in stage2 and "No result file" not in stage2

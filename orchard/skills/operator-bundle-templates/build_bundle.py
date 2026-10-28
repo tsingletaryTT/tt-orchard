@@ -788,6 +788,8 @@ def stage_results(run: Run, redact: Redactor) -> dict[int, list[str]]:
         lines += ["", "Reference files: " + ev(list(arts.values())) + "."]
     body[1] = lines + ["", "Evidence: `stages/1/reference.json`."]
     if run.audio_run:
+        body[2] = ["The clip, its comparisons with the CPU runs and the control are in the section Audio clip on a chip.", "",
+                   "Evidence: `stages/2/audio_result.json`."]
         body[1] = ["The CPU reference runs (the model, its base as the control, and one run in the chip's interpreter) are listed in the section "
                    "Audio clip on a chip.", "", "Evidence: `stages/1/audio_reference.json`."]
 
@@ -1230,8 +1232,9 @@ def audio_section(run: Run, redact: Redactor) -> list[str]:
         lines.append(f"| `{k}` | {num(timings[k])} | another number the chip test recorded |")
     ref = dig(data, "reference_runs", "reference")
     if isinstance(ref, dict):
-        lines += ["", f"The CPU reference took {num(ref.get('wall_seconds'))} seconds of wall time"
-                  + (" when it was made (this run reused a cached result)." if ref.get("from_cache") is True else ".")]
+        own = dig(ref, "timings", "generate_and_decode_s")
+        lines += ["", f"The CPU reference's own `generate` call and decode took {num(own)} seconds when it was made"
+                  + (" (this run reused a saved reference)." if ref.get("from_cache") is True else ".")]
     lines += ["", "### Agreement with the CPU reference", "",
               "PCC is the Pearson correlation between two arrays (1 is identical). Relative L2 is the size of the difference "
               "divided by the size of the reference (0 is identical). The log-spectrum distance compares the two waveforms' "
@@ -1255,11 +1258,20 @@ def audio_section(run: Run, redact: Redactor) -> list[str]:
     if not isinstance(control, dict):
         lines.append("The control did not run, so the run has no check that the chip served the fine-tune's weights.")
     else:
-        lines += ["The control runs the base model on the chip with the same settings. It catches a chip run that served the "
-                  "wrong weights: the base model's clip has to agree with the base model's own CPU reference and has to differ "
-                  "from the fine-tune's clip.", "", *AUDIO_TABLE_HEAD,
+        lines += ["The control runs the base model on the chip with its own settings (fifty guided steps). It catches a chip run that "
+                  "served the wrong weights. Two checks decide: the base model's clip has to differ from the fine-tune's clip, and "
+                  "the base model's chip latent has to be nearer to the base model's own CPU reference than to the fine-tune's. "
+                  "The provisional bars are shown for information and decide nothing for the control, because fifty guided steps "
+                  "compound the per-pass error that the fine-tune's eight steps show.", "", *AUDIO_TABLE_HEAD,
                   audio_agreement_row(redact, "Base model on the chip against the base model's CPU reference",
                                       dig(data, "agreement", "control_chip_vs_control_reference")), ""]
+        disc = dig(data, "control_discrimination")
+        if isinstance(disc, dict) and disc.get("ok") in (True, False):
+            lines += [f"Final-latent relative L2 error of the base model's chip run: {num(disc.get('own_rel_l2'))} against the base "
+                      f"model's own reference and {num(disc.get('other_rel_l2'))} against the fine-tune's reference. "
+                      + ("It is nearer its own." if disc["ok"] else "It is not nearer its own, so the chip may have served the wrong weights."), ""]
+        else:
+            lines += [f"Whether the base model's chip run is nearer its own reference than the fine-tune's: {NOT_RECORDED}.", ""]
         if isinstance(cdiff, dict) and cdiff.get("ok") in (True, False):
             lines.append(f"The base model's clip {'differs from' if cdiff['ok'] else 'does not differ from'} the fine-tune's "
                          f"clip (relative L2 {num(cdiff.get('rel_l2'))}, PCC {num(cdiff.get('pcc'))}). "
@@ -1302,9 +1314,9 @@ def audio_risks(run: Run, redact: Redactor) -> list[str]:
               "- One prompt, one duration, one seed: the agreement is measured on a single case."]
     if not isinstance(dig(data, "runs", "control_chip"), dict):
         lines.append("- The control did not run, so the run has no check that the chip served the fine-tune's weights.")
-    elif dig(data, "control_difference", "ok") is not True:
-        lines.append("- The base model's clip does not differ from the fine-tune's, or the file does not say whether it does. "
-                     "The chip may have served the same weights for both runs.")
+    elif dig(data, "control_difference", "ok") is not True or dig(data, "control_discrimination", "ok") is not True:
+        lines.append("- The base model's clip does not differ from the fine-tune's, or its chip run is not nearer its own reference than "
+                     "the fine-tune's, or the file does not say. The chip may have served the wrong weights.")
     for rec in run.audio_clips:
         if not rec["copied"]:
             lines.append(f"- {rec['label'][0].upper() + rec['label'][1:]} is not in this bundle, because {rec['reason']}.")
