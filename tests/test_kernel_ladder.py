@@ -632,3 +632,16 @@ def test_the_report_replaces_a_link_at_its_path_and_never_writes_through_it(tmp_
     assert not (tmp_path / "ladder-report.md").is_symlink() and "Kernel probe ladder report" in (
         tmp_path / "ladder-report.md").read_text()
     assert json.loads((tmp_path / "ladder-report.json").read_text())["rungs"][0]["op"] == "add"
+
+
+def test_the_report_does_not_write_through_a_link_planted_at_the_old_temporary_name(tmp_path):
+    """The temporary file is created exclusively with an unpredictable name, so a link planted at a guessable name is not followed."""
+    victim = tmp_path / "victim.txt"
+    victim.write_text("keep me")
+    for name in ("ladder-report.md", "ladder-report.json"):
+        (tmp_path / f".{name}.{os.getpid()}.tmp").symlink_to(victim)
+    write_rung(tmp_path, "add", [attempt(True)])
+    kl.write_ladder_report(tmp_path, ["add"])
+    assert victim.read_text() == "keep me"
+    assert "Kernel probe ladder report" in (tmp_path / "ladder-report.md").read_text()
+    assert sorted(p.name for p in tmp_path.iterdir() if p.name.endswith(".tmp") and not p.is_symlink()) == []

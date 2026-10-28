@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import os
 import statistics
+import tempfile
 import time
 from pathlib import Path
 
@@ -286,9 +287,18 @@ def load_rung(out_dir: Path, op: str) -> tuple[dict | None, list[dict]]:
 def _write_replacing(path: Path, text: str) -> None:
     """Write `text` to `path` by writing a new file beside it and renaming it over `path`. A link at `path` is replaced,
     and the file it points to is not touched."""
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
+    fd, name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")      # O_EXCL, a random name
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.chmod(name, 0o644)
+        os.replace(name, path)
+    except BaseException:
+        try:
+            os.unlink(name)
+        except OSError:
+            pass
+        raise
 
 
 def write_ladder_report(out_dir, rungs: list[str], *, stopped: str | None = None, ran=None) -> dict:
