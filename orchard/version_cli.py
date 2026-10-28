@@ -99,8 +99,31 @@ def next_patch(version: str) -> str:
     return V.fmt((a, b, c + 1))
 
 
+GIT_TIMEOUT = 60          # seconds; a git that hangs is a failure, never an answer
+
+
 def git(root: Path, *args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True)
+    """Run git in `root`. Never raises: no git, a timeout or any other OS error comes back as a CompletedProcess with a
+    non-zero returncode (127 for no git, 124 for a timeout, 126 otherwise) and the reason in stderr, so a caller that
+    checks the returncode treats it as a failure. A caller must check the returncode before it reads stdout:
+    empty output from a failed command means "unknown", not "nothing to report"."""
+    argv = ["git", "-C", str(root), *args]
+    try:
+        return subprocess.run(argv, capture_output=True, text=True, timeout=GIT_TIMEOUT)
+    except FileNotFoundError:
+        return subprocess.CompletedProcess(argv, 127, "", "git was not found on PATH")
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(argv, 124, "", f"git {args[0]} timed out after {GIT_TIMEOUT} s")
+    except OSError as e:
+        return subprocess.CompletedProcess(argv, 126, "", f"git could not be run ({e.strerror or e.__class__.__name__})")
+
+
+def tree_state(root: Path) -> tuple[bool | None, str]:
+    """(True, "") for a clean tree, (False, "") for a dirty one, (None, reason) when git could not say."""
+    st = git(root, "status", "--porcelain")
+    if st.returncode != 0:
+        return None, f"git status failed ({st.returncode}): {st.stderr.strip() or 'no message'}"
+    return (not st.stdout.strip()), ""
 
 
 # ---- commands ------------------------------------------------------------------------------------
@@ -198,11 +221,11 @@ def cmd_release(root: Path, args, out, err) -> int:
         print(f"error: {notes_path.relative_to(root)} exists; refusing to overwrite it", file=err)
         return 1
     if not args.dry_run:
-        st = git(root, "status", "--porcelain")
-        if st.returncode != 0:
-            print(f"error: {root} is not a usable git work tree ({st.stderr.strip()}); a release needs one", file=err)
+        clean, why = tree_state(root)
+        if clean is None:
+            print(f"error: cannot tell whether the git tree is clean: {why}; a release needs a usable git work tree", file=err)
             return 1
-        if st.stdout.strip():
+        if not clean:
             print("error: the git tree is dirty; commit or stash first (--dry-run works on a dirty tree)", file=err)
             return 1
     date = datetime.date.today().isoformat()
@@ -249,16 +272,26 @@ def cmd_tag_check(root: Path, args, out, err) -> int:
         return 1
     sha = head.stdout.strip()
     problems: list[str] = []
-    branch = git(root, "branch", "--show-current").stdout.strip()
+    br = git(root, "branch", "--show-current")
+    if br.returncode != 0:
+        problems.append(f"cannot read the current branch: {br.stderr.strip() or 'git failed'}")
+    branch = br.stdout.strip()
     origin = git(root, "rev-parse", "--verify", "-q", "refs/remotes/origin/main")
+    if origin.returncode not in (0, 1):                       # 1 is "no such ref"; anything else is a failure
+        problems.append(f"cannot look up origin/main: {origin.stderr.strip() or 'git failed'}")
     origin_sha = origin.stdout.strip() if origin.returncode == 0 else None
-    if branch != "main" and sha != origin_sha:
+    if br.returncode != 0:
+        pass                                                  # already reported; the branch is unknown
+    elif branch != "main" and sha != origin_sha:
         problems.append(f"HEAD is not on main ({'branch ' + branch if branch else 'detached'}, {sha[:12]}): "
                         "merge the release pull request, then git checkout main && git merge --ff-only origin/main")
     elif origin_sha is not None and sha != origin_sha:
         problems.append(f"HEAD {sha[:12]} is not origin/main {origin_sha[:12]}: git fetch origin and fast-forward main "
                         "(the commit to tag is the one origin/main points to after the merge)")
-    if git(root, "status", "--porcelain").stdout.strip():
+    clean, why = tree_state(root)
+    if clean is None:
+        problems.append(f"cannot tell whether the tree is clean: {why}")
+    elif not clean:
         problems.append("the git tree is dirty")
     rel = V.read_release(root / "orchard" / "__init__.py")
     if rel != version:
@@ -267,8 +300,11 @@ def cmd_tag_check(root: Path, args, out, err) -> int:
     if left:
         problems.append(f"{len(left)} fragment(s) remain in changes/ ({', '.join(f.name for f in left[:5])}): "
                         "the release pull request must delete them")
-    if git(root, "rev-parse", "-q", "--verify", f"refs/tags/v{version}").returncode == 0:
+    tag = git(root, "rev-parse", "-q", "--verify", f"refs/tags/v{version}")
+    if tag.returncode == 0:
         problems.append(f"the tag v{version} exists already")
+    elif tag.returncode != 1:                                 # 1 is "no such tag"; anything else is a failure
+        problems.append(f"cannot look up the tag v{version}: {tag.stderr.strip() or 'git failed'}")
     for p in problems:
         print(f"problem: {p}", file=err)
     if problems:
@@ -299,7 +335,11 @@ def cmd_migrate_pr(root: Path, args, out, err) -> int:
     if not m or V.parse(m.group(1)) is None:
         print(f"error: {ref!r} has no `__version__ = \"X.Y.Z\"` line with a valid version", file=err)
         return 1
-    subject = git(root, "log", "-1", "--format=%s", ref).stdout.strip()
+    log = git(root, "log", "-1", "--format=%s", ref)
+    if log.returncode != 0:
+        print(f"error: cannot read the last commit subject at {ref!r}: {log.stderr.strip() or 'git failed'}", file=err)
+        return 1
+    subject = log.stdout.strip()
     subject = re.sub(r"\s*\((?:version|v)\s*[0-9.]+\)\s*$", "", subject)[: V.MAX_SUMMARY_CHARS] or "TODO: describe this change."
     slug = slug_from_ref(ref)
     print(f"# {ref} bumps the old way. Run `python3 scripts/version.py new {slug} --target {m.group(1)}` "

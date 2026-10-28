@@ -504,3 +504,101 @@ def test_release_keeps_the_mode_of_init_py_and_gives_the_notes_0644(repo):
     assert run(repo, "release")[0] == 0
     assert (init.stat().st_mode & 0o7777) == 0o755
     assert ((repo / "docs" / "releases" / "1.1.0.md").stat().st_mode & 0o7777) == 0o644
+
+
+# ---- a git that fails is never read as a clean tree or a free tag ---------------------------------
+
+import shutil
+
+
+def fake_git(tmp_path, monkeypatch, fail_on: str, how: str = "fail"):
+    """Put a `git` first on PATH that runs the real git except for the subcommand `fail_on`, which exits 128 ("fail")
+    or sleeps ("hang")."""
+    real = shutil.which("git")
+    d = tmp_path / "fakebin"
+    d.mkdir()
+    body = "exit 128" if how == "fail" else "sleep 30"
+    script = d / "git"
+    script.write_text(f'#!/bin/sh\nfor a in "$@"; do\n  if [ "$a" = "{fail_on}" ]; then echo "fatal: simulated failure" >&2; {body}; fi\ndone\nexec {real} "$@"\n')
+    script.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{d}:{os.environ['PATH']}")
+
+
+def test_release_refuses_when_git_status_fails(repo, tmp_path, monkeypatch):
+    setup_release(repo)
+    before = tree(repo)
+    fake_git(tmp_path, monkeypatch, "status")
+    code, _, err = run(repo, "release")
+    assert code == 1 and "git" in err and tree(repo) == before
+
+
+def test_tag_check_refuses_when_git_status_fails_even_with_empty_output(repo, tmp_path, monkeypatch):
+    released_repo(repo)
+    fake_git(tmp_path, monkeypatch, "status")
+    code, out, err = run(repo, "tag-check", "1.1.0")
+    assert code == 1 and "tag-check ok" not in out and "status" in err
+
+
+def test_release_and_tag_check_refuse_when_git_hangs(repo, tmp_path, monkeypatch):
+    released_repo(repo)
+    fake_git(tmp_path, monkeypatch, "status", "hang")
+    monkeypatch.setattr(C, "GIT_TIMEOUT", 0.5)
+    code, out, err = run(repo, "tag-check", "1.1.0")
+    assert code == 1 and "tag-check ok" not in out and "timed out" in err
+    # release (not dry-run) on a repo with fragments
+    repo2 = repo.parent / "repo2"
+    shutil.copytree(repo, repo2)
+    add_frag(repo2, "more", "1.2.0")
+    sh(repo2, "git", "add", "-A")
+    sh(repo2, *GIT, "commit", "-q", "-m", "more")
+    before = tree(repo2)
+    code, _, err = run(repo2, "release")
+    assert code == 1 and "timed out" in err and tree(repo2) == before
+
+
+def test_release_and_tag_check_refuse_when_there_is_no_git_at_all(repo, tmp_path, monkeypatch):
+    released_repo(repo)
+    empty = tmp_path / "nogit"
+    empty.mkdir()
+    monkeypatch.setenv("PATH", str(empty))
+    code, out, err = run(repo, "tag-check", "1.1.0")
+    assert code == 1 and "tag-check ok" not in out and "not found on PATH" in err
+    add_frag(repo, "more", "1.2.0")
+    before = tree(repo)
+    code, _, err = run(repo, "release")
+    assert code == 1 and "git" in err and tree(repo) == before
+
+
+def test_tag_check_does_not_read_a_failed_tag_lookup_as_a_free_tag(repo, tmp_path, monkeypatch):
+    released_repo(repo)
+    fake_git(tmp_path, monkeypatch, "refs/tags/v1.1.0")
+    code, out, err = run(repo, "tag-check", "1.1.0")
+    assert code == 1 and "tag-check ok" not in out
+
+
+def test_tag_check_does_not_read_a_failed_origin_lookup_as_no_origin(repo, tmp_path, monkeypatch):
+    released_repo(repo)
+    fake_git(tmp_path, monkeypatch, "refs/remotes/origin/main")
+    code, out, _ = run(repo, "tag-check", "1.1.0")
+    assert code == 1 and "tag-check ok" not in out
+
+
+def test_tag_check_does_not_pass_when_the_branch_lookup_fails(repo, tmp_path, monkeypatch):
+    released_repo(repo)
+    fake_git(tmp_path, monkeypatch, "--show-current")
+    code, out, _ = run(repo, "tag-check", "1.1.0")
+    assert code == 1 and "tag-check ok" not in out
+
+
+def test_tag_check_refuses_a_directory_that_is_not_a_repository_inside_another_directory(tmp_path):
+    (tmp_path / "orchard").mkdir()
+    (tmp_path / "orchard" / "__init__.py").write_text('RELEASE = "1.0.0"\n')
+    code, out, err = run(tmp_path, "tag-check", "1.0.0")
+    assert code == 1 and "tag-check ok" not in out and err
+
+
+def test_migrate_pr_reports_a_failing_git_log_instead_of_printing_a_blank_summary(repo, tmp_path, monkeypatch):
+    old_style_branch(repo)
+    fake_git(tmp_path, monkeypatch, "--format=%s")
+    code, out, err = run(repo, "migrate-pr", "--from-ref", "old-feature")
+    assert code == 1 and err
