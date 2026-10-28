@@ -235,3 +235,63 @@ a release gozer finished during the coder or the simulator check is in `attempt.
 Pins for the two older mediums (the wait deadline and the cleanup reserve): see round 5 above. The claim timeouts and the deadline
 are in `tests/test_hwlease_recovery.py` (`test_a_claim_is_given_no_more_than_the_wait_that_is_left...`, `test_no_claim_starts_after_the_deadline`);
 the reserve is in `tests/test_agent_hw_recovery.py` (`test_the_harness_deadline_and_both_cleanup_phases_fit_inside_the_lease_cap`).
+
+### Round 8: the cleanup as a state machine (2026-10-27)
+
+The round 8 findings were narrower cases of two classes: an interrupt that lands during the cleanup, and a stale or partial read of
+gozer's state. Instead of one more patch for each, this section writes the whole cleanup path down with one invariant, and
+`tests/test_hwlease_state_machine.py` runs every state and event pair against a fake gozer that keeps its own ground truth.
+
+**Invariant.** After a call's cleanup, either gozer's own record (the fake's ground truth, not what the probe read) shows nothing of
+ours, or the probe reports UNRESOLVED and every new call is refused. There is no third outcome. The test checks this after each
+scenario, and for the UNRESOLVED outcome it also makes a new call and checks that it is refused.
+
+**States.** N: no lease and no ticket. T: a ticket is held. L: a lease is held and the harness runs. R: releasing (the `gozer release`
+command is running). F: a release is in flight (interrupted or overran; it may still be running). U: unresolved.
+
+**One cleanup procedure for every exception path (`GozerLeases.reclaim`).**
+1. Read history, the queue and `gozer status`, fresh. A read that fails does not discard the other two. If status shows chips held
+   by this pid and the 200-event history window has no lease for them, one wider read (5000 events) is made. Chips still without a
+   lease id are `unidentified`.
+2. Cancel every ticket the queue shows. A ticket the caller holds in hand is cancelled too when a read failed. A cancel that fails
+   or is interrupted is tried once more.
+3. Release every lease history shows, and every lease the caller holds in hand when a read failed. The grant callback runs first. A
+   lease whose release is already in flight is waited for (up to 90 s) and is never released twice.
+4. Read again, fresh, and decide. A lease, a ticket or unidentified chips of ours, or a read that fails, give U.
+
+Every step runs in its own guard. A second KeyboardInterrupt or error inside a step is recorded (`Reclaimed.secondary`), and the next
+step still runs. `run_reaping` does the same for the child process: the SIGTERM, the first wait, the SIGKILL and the last wait are
+each guarded, the last wait is tried twice, and the second exception is attached to the first as `secondary_interrupt`. The first
+exception is the one that is re-raised.
+
+| State | grant | interrupt | second interrupt in the cleanup | timeout | read failure | release done |
+|---|---|---|---|---|---|---|
+| N (request running) | the reply is lost: step 1 finds the lease by pid (history, or status plus the wider read) and releases it | the acquire child is stopped and reaped, then the cleanup runs | the child is still signalled and waited for; the cleanup still runs | the child is killed and reaped, then the cleanup | history unreadable: status still shows chips held by our pid, so they are unidentified and the state is U; nothing held means N | not applicable |
+| T (ticket held) | a claim granted with its reply lost: found by pid and released | the known ticket is cancelled, even when the queue cannot be read | the cancel is retried and the final read still runs | the wait ends and the ticket is cancelled once | the known ticket is still cancelled; the final read fails, so U | not applicable |
+| L (lease held) | not applicable | the lease is released by its known id, even when history cannot be read | the release still runs; U if gozer still shows the lease | the harness is stopped, then the release | the known lease is released; the final read decides | the lease is gone: N |
+| R (release running) | not applicable | the lease becomes F | the cleanup does not start a second release; it waits for the first | the release overran: F | the wait cannot confirm: U | gozer writes `released`: N |
+| F (release in flight) | not applicable | the cleanup waits for history to show it released | the wait goes on | after 90 s: U | the wait cannot confirm: U | N, and gozer's duration settles the call's chip time |
+| U (unresolved) | not applicable | not applicable | not applicable | not applicable | the next call is refused, naming what is held or that gozer cannot be read | the next call's check sees nothing held and the call may start |
+
+**The window of history.** `gozer history` shows only its last events, so an unreleased grant can fall outside it. Current ownership
+is read from `gozer status` (chips whose `pid` and `who` are ours). History supplies lease ids and timing. Held chips with no lease id
+even in the wider read are U, and the message says they cannot be released from here.
+
+**The wait deadline.** It is checked before every claim, including the claim after a failed claim and the claim after a late
+wake-up. Only the first claim is made without the check, so a zero wait still makes its immediate claim. One consequence is that a
+4 s wait claims at 0 s and 2 s and no longer at 4 s.
+
+**Known ids.** A lease or ticket the caller holds in hand is acted on when gozer shows it, and also when a read failed. When all
+three reads worked and do not show it, it is already gone and no second cancel or release is sent. The probe also records that its
+own release was confirmed, so an exception after a confirmed release does not release the lease again.
+
+**Where the cleanup reserve is checked.** In `HardwareCheck._call` (orchard/hwtool.py): a call starts only when
+`lease_s - used - cleanup_s >= min_call_s`, and its run deadline is `min(call_timeout, lease_s - used - cleanup_s)`. `cleanup_s` is
+210 s: 120 s of terminate grace plus the 90 s release.
+
+**Table test.** `tests/test_hwlease_state_machine.py` has one scenario for each cell above (N, T, L and R against grant, interrupt,
+second interrupt, timeout, read failure and release done, plus the history window and a hard window cap). Each runs against
+`SimGozer`, which keeps ground truth (`truth_held`, `truth_tickets`) apart from what a read returns, and each ends with the
+invariant. The first run of the table found one real case: with the history window capped, chips of ours were held and no lease id
+could be found, and a refused release left them held while a later call still ran. The status read and the `unidentified` list
+close it.
