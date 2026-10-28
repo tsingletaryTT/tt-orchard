@@ -129,7 +129,7 @@ def _check_endpoint(endpoint: str):
     and spaces are refused too: urlsplit drops tabs and newlines silently, so the URL that is called would differ from the
     URL that was written."""
     # userinfo is hidden: a password pasted into the endpoint must not be echoed into a log
-    bad = f"telegraph.endpoint is not a valid URL ({_shown(re.sub(r'//[^/]*@', '//***@', endpoint, count=1))})"
+    bad = f"telegraph.endpoint is not a valid URL ({_shown(re.sub(r'//.*@', '//***@', endpoint, count=1))})"
     if any(c.isspace() or not c.isprintable() for c in endpoint):
         raise ConfigError(bad + ": it holds a space or control character")
     try:

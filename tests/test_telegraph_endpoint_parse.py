@@ -71,7 +71,7 @@ def test_the_shown_value_hides_a_password_in_the_url(tmp_path):
 
 
 @pytest.mark.parametrize("endpoint", ["https://bob:hunter2@host：443/v1", "https://bob:hunter2@host:abc/v1",
-                                      "https://bob:hunter2@host:99999/v1", "https://bob:hunter2@[" + "a" * 5000])
+                                      "https://bob:hunter2@host:99999/v1", "https://bob:hunter2/x@[::1", "https://bob:hunter2/x@host:abc/v1","https://bob:hunter2@[" + "a" * 5000])
 def test_no_parser_message_leaks_a_password_or_the_whole_value(endpoint, tmp_path):
     with pytest.raises(tg.ConfigError) as info:
         tg.load({"enabled": True, "endpoint": endpoint, "models": ["m"]}, base=tmp_path)
