@@ -96,7 +96,7 @@ set; the batch uses the positive inputs from the review fix, see the PR). The pi
 | 8 | rmsnorm | not piloted | | | 1800 |
 | 9 | linear_scan | not piloted | | | 1800 |
 
-Projection for the whole ladder at 10 attempts per rung: sum of 10 x (pilot wall + 60 s) for rungs 1 to 7 is about 18 hours
+Projection for the whole ladder at 10 attempts per rung: sum of 10 x (pilot wall + 60 s) for rungs 1 to 7 is about 16 hours
 (add 0.7, mul 1.2, scale_shift 2.3, add_row 4.0, rsqrt 0.9, row_sum 1.8, center 5.5), and rungs 8 and 9 add about 5.3 hours each
 at the wall budget. That is far above 6 hours, so the pre-registered rule for a ladder that does not fit applies: start at the first
 rung whose pilot failed (`center`, rung 7) and take the rungs nearest to it.
