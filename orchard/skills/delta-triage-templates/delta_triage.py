@@ -2817,7 +2817,9 @@ def compare_audio_tensors(mt: dict, bt: dict) -> dict:
         if m["shape"] != b["shape"]:
             shape.append({"name": name, "model": m["shape"], "base": b["shape"]})
         elif m["dtype"] != b["dtype"]:
-            dtype.append({"name": name, "model": m["dtype"], "base": b["dtype"], "tolerated": _dtype_difference_tolerated(m, b)})
+            # `elements` is what the tolerance rule measured, so the gate can recompute `tolerated` from the two dtypes and the size
+            dtype.append({"name": name, "model": m["dtype"], "base": b["dtype"], "elements": _numel(b["shape"]),
+                          "tolerated": _dtype_difference_tolerated(m, b)})
     # The record lists at most AUDIO_MAX_LISTED of them. A difference that is not tolerated goes first (the sort is stable), so a record cut at the limit
     # still shows one when there is one, and the gate (orchard/audio_decision.py) can tell from the list alone.
     dtype.sort(key=lambda x: x["tolerated"])
@@ -3254,7 +3256,11 @@ def audio_main(cfg: dict) -> int:
              "tensors": {"model_tensors": tensors["model_tensors"], "base_tensors": tensors["base_tensors"], "common": tensors["common"],
                          "only_in_model": tensors["only_in_model"][:AUDIO_MAX_LISTED], "only_in_base": tensors["only_in_base"][:AUDIO_MAX_LISTED],
                          "shape_differences": tensors["shape_differences"][:AUDIO_MAX_LISTED],
-                         "dtype_differences": tensors["dtype_differences"][:AUDIO_MAX_LISTED]},
+                         "dtype_differences": tensors["dtype_differences"][:AUDIO_MAX_LISTED],
+                         # The lists above are cut; these counts are not, so the gate can tell that a cut list held everything it shows
+                         "shape_difference_count": len(tensors["shape_differences"]),
+                         "dtype_difference_count": len(tensors["dtype_differences"]),
+                         "intolerable_dtype_count": sum(1 for x in tensors["dtype_differences"] if not x["tolerated"])},
              "decision": decision, "text_encoders": encoders, "files_only_in_base": f["files_only_in_base"] + f["shards_only_in_base"],
              "files_only_in_model": f["files_only_in_model"] + f["shards_only_in_model"]}
     write_json("audio-compare.json", {**audio, "problems": decision["problems"], "reasons": all_reasons})

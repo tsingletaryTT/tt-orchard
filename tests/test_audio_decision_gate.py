@@ -457,6 +457,89 @@ def test_tensor_counts_have_to_be_equal_and_positive_whole_numbers(counts):
     assert "tensor counts" in ad._tensor_findings(tensors)
 
 
+def test_a_forged_tolerated_flag_does_not_make_an_integer_dtype_difference_acceptable(audio_case):
+    """Review of PR 191: `tolerated` is recomputed from the recorded dtypes and size, never trusted."""
+    t = {**TENSORS, "model.model.layers.0.attn.weight": ("I64", [8, 8])}
+    stage = audio_case(model_kw={"tensors": t})
+    assert run_ok(stage)["class"] == "full-port"
+    def edit(d):
+        to_weights_only(d)
+        tensors = d["audio"]["tensors"]
+        tensors["dtype_differences"][0]["tolerated"] = True
+        tensors["intolerable_dtype_count"] = 0
+    edit_delta(stage, edit)
+    refused(stage, "dtype_differences")
+
+
+def test_a_dtype_difference_without_its_size_cannot_be_recomputed_and_is_refused(audio_case):
+    t = {**TENSORS, "model.model.layers.0.attn.weight": ("BF16", [8, 8])}
+    stage = audio_case(model_kw={"tensors": t})
+    run_ok(stage)
+    edit_delta(stage, lambda d: d["audio"]["tensors"]["dtype_differences"][0].pop("elements"))
+    refused(stage, "dtype_differences")
+
+
+@pytest.mark.parametrize("m,b,n", [("F32", "BF16", 8), ("BF16", "F16", 1_048_576), ("F32", "BF16", 1_048_577), ("F32", "I64", 8), ("I64", "F32", 8),
+                                   ("F32", "F8_E4M3", 8), ("F64", "F32", 8), ("F16", "BF16", 0)])
+def test_the_gates_tolerance_is_the_templates(m, b, n):
+    rec = {"model": m, "base": b, "elements": n}
+    assert ad.dtype_tolerated(rec) == tm()._dtype_difference_tolerated({"dtype": m, "shape": [n]}, {"dtype": b, "shape": [n]})
+
+
+def test_the_gates_tolerance_constants_are_the_templates():
+    assert set(ad.FLOAT_DTYPES) == set(tm().ITEMSIZE) and ad.DTYPE_TOLERANCE_ELEMENTS == tm().DTYPE_TOLERANCE_ELEMENTS
+
+
+@pytest.mark.parametrize("x", [None, 3, "x", [], {"model": "F32", "base": "BF16"}, {"model": "F32", "base": "BF16", "elements": -1},
+                               {"model": "F32", "base": "BF16", "elements": True}, {"model": "F32", "base": "BF16", "elements": 2.0},
+                               {"model": "F32", "base": "BF16", "elements": 10 ** 400}])
+def test_a_dtype_record_that_cannot_be_recomputed_is_not_tolerated(x):
+    assert ad.dtype_tolerated(x) is False
+
+
+def test_the_decision_problems_list_has_to_be_there_for_the_current_template(audio_case):
+    """Review of PR 191: deleting `problems` used to read as an empty list, hiding a file that could not be read."""
+    stage = serving_pair(audio_case)
+    run_ok(stage)
+    edit_delta(stage, lambda d: d["audio"]["decision"].pop("problems"))
+    refused(stage, "no problems list")
+
+
+def test_a_decision_without_a_problems_list_is_fine_for_an_older_record():
+    dec = {"class": "weights-only", "path": "weights-only", "alternative_path": "full-port", "confidence": "medium", "strict": False,
+           "differences": [], "overrides": []}
+    assert ad.decision_problems({"class": "weights-only", "path": "weights-only", "audio": {"decision": dec}}) == []
+    assert any("problems list" in p for p in ad.decision_problems({"class": "weights-only", "path": "weights-only", "audio": {"decision": dec,
+                                                                                                                    "tensors": {}, "text_encoders": []}}, current_template=True))
+
+
+@pytest.mark.parametrize("edit,needle", [
+    (lambda t: t.update(dtype_differences=[], dtype_difference_count=1), "tensor counts"),                      # the list was emptied, the count was not
+    (lambda t: t.update(shape_differences=[], shape_difference_count=1), "tensor counts"),
+    (lambda t: t.update(intolerable_dtype_count=1, dtype_difference_count=1), "tensor counts"),
+    (lambda t: t.pop("dtype_difference_count"), "tensor counts"),
+    (lambda t: t.pop("shape_difference_count"), "tensor counts"),
+    (lambda t: t.pop("intolerable_dtype_count"), "tensor counts"),
+    (lambda t: [t.pop(k) for k in ("shape_difference_count", "dtype_difference_count", "intolerable_dtype_count")], "tensor counts"),      # all three gone
+    (lambda t: t.update(dtype_difference_count="0"), "tensor counts"),
+    (lambda t: t.update(dtype_difference_count=-1), "tensor counts"),
+    (lambda t: t.update(only_in_model=["x"]), "only_in_model"),
+])
+def test_the_uncut_counts_beside_the_lists_are_checked(audio_case, edit, needle):
+    stage = serving_pair(audio_case)
+    run_ok(stage)
+    edit_delta(stage, lambda d: edit(d["audio"]["tensors"]))
+    refused(stage, needle)
+
+
+def test_the_template_records_the_uncut_counts_and_the_sizes(audio_case):
+    t = {**TENSORS, "model.model.layers.0.attn.weight": ("BF16", [8, 8]), "model.model.layers.0.ff.weight": ("I64", [16, 8])}
+    d = run_ok(audio_case(model_kw={"tensors": t}))
+    rec = d["audio"]["tensors"]
+    assert rec["dtype_difference_count"] == 2 and rec["intolerable_dtype_count"] == 1 and rec["shape_difference_count"] == 0
+    assert [x["elements"] for x in rec["dtype_differences"]] == [128, 64] and [x["tolerated"] for x in rec["dtype_differences"]] == [False, True]
+
+
 def test_a_tolerated_float_dtype_difference_keeps_a_weights_only_decision_acceptable(audio_case):
     """The template tolerates a small-float dtype difference (bfloat16 against float32) and the gate does the same."""
     t = {**TENSORS, "model.model.layers.0.attn.weight": ("BF16", [8, 8])}

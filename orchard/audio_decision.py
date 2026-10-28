@@ -189,7 +189,7 @@ def decision_problems(delta, *, current_template: bool = False, expected_strict:
             if given != x["category"]:
                 out.append(f"audio.decision records {x['key']} as {x['category']} (decided by the allow-list), but the allow-list gives {given} for "
                            f"{x['key']} with the recorded values; only an override can move a category")
-    out += _override_problems(d, by_key, rules, _chosen_path(d, by_key, audio))
+    out += _override_problems(d, by_key, rules, _chosen_path(d, by_key, audio, current_template))
     out += _evidence_problems(audio, by_key, current_template)
     path_override = next((o for o in d["overrides"] if isinstance(o, dict) and o.get("kind") == "path"), None)
     if d["class"] == "unknown" and (d["path"] != "full-port" or d["confidence"] != "low"):
@@ -289,30 +289,60 @@ def _evidence_problems(audio: dict, by_key: dict, current_template: bool) -> lis
     return out
 
 
-def _tensor_findings(tensors: dict) -> list[str]:
+FLOAT_DTYPES = ("BF16", "F16", "F32")        # the template's ITEMSIZE: the dtypes a tolerated difference can be between (a test pins both to the template)
+DTYPE_TOLERANCE_ELEMENTS = 1_048_576         # the template's size limit for a tolerated dtype difference
+
+
+def _whole(v) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool) and v >= 0
+
+
+def dtype_tolerated(x) -> bool:
+    """The template's `_dtype_difference_tolerated`, recomputed from what the record keeps: a float-to-float difference (BF16, F16 or F32 on both sides) on a
+    tensor of at most DTYPE_TOLERANCE_ELEMENTS elements. (The two shapes are equal for any recorded dtype difference.)"""
+    return (isinstance(x, dict) and x.get("model") in FLOAT_DTYPES and x.get("base") in FLOAT_DTYPES
+            and _whole(x.get("elements")) and x["elements"] <= DTYPE_TOLERANCE_ELEMENTS)
+
+
+def _cut_list_matches(listed, count) -> bool:
+    """A list the template cut at AUDIO_MAX_LISTED holds all `count` entries, or exactly AUDIO_MAX_LISTED of a larger number."""
+    return isinstance(listed, list) and _whole(count) and len(listed) == min(count, AUDIO_MAX_LISTED)
+
+
+def _tensor_findings(tensors: dict, current_template: bool = False) -> list[str]:
     """The ways `audio.tensors` shows a tensor-level difference or no comparison at all. The lists are cut at AUDIO_MAX_LISTED by the template, which puts a
-    dtype difference it does not tolerate before the tolerated ones, so a cut list still shows one when there is one. The counts are not cut, and must be
-    equal and positive: zero tensors on every side means nothing was compared."""
+    dtype difference it does not tolerate before the tolerated ones and also records the uncut counts, so a cut list shows one when there is one and cannot
+    be emptied unnoticed. A dtype difference counts as tolerated only when its recorded dtypes and size say so (`dtype_tolerated`), whatever its `tolerated`
+    flag says. The tensor counts must be equal and positive: zero tensors on every side means nothing was compared. The uncut counts are required when
+    `current_template` and checked whenever they are there."""
     found = []
     for name in ("only_in_model", "only_in_base", "shape_differences"):
         if not isinstance(tensors.get(name), list) or tensors[name]:
             found.append(name)
     dtypes = tensors.get("dtype_differences")
-    if not isinstance(dtypes, list) or any(not isinstance(x, dict) or x.get("tolerated") is not True for x in dtypes):
+    if not isinstance(dtypes, list) or any(x.get("tolerated") is not True or not dtype_tolerated(x) if isinstance(x, dict) else True for x in dtypes):
         found.append("dtype_differences")
     counts = [tensors.get(k) for k in ("model_tensors", "base_tensors", "common")]
-    if not all(isinstance(c, int) and not isinstance(c, bool) for c in counts) or not counts[0] == counts[1] == counts[2] or counts[0] <= 0:
+    counts_ok = all(_whole(c) for c in counts) and counts[0] == counts[1] == counts[2] and counts[0] > 0
+    extra = ("shape_difference_count", "dtype_difference_count", "intolerable_dtype_count")
+    cut_ok = True
+    if any(k in tensors for k in extra) or current_template:
+        cut_ok = (all(_whole(tensors.get(k)) for k in extra)
+                  and _cut_list_matches(tensors.get("shape_differences"), tensors.get("shape_difference_count"))
+                  and _cut_list_matches(dtypes, tensors.get("dtype_difference_count"))
+                  and tensors.get("intolerable_dtype_count") == 0 and tensors["dtype_difference_count"] >= tensors["intolerable_dtype_count"])
+    if not counts_ok or not cut_ok:
         found.append("tensor counts")
     return found
 
 
-def _hard_findings(audio: dict) -> list[str]:
+def _hard_findings(audio: dict, current_template: bool = False) -> list[str]:
     """What the comparison evidence in `audio` shows that no override can explain away: a tensor-level difference, or a text encoder that differs or could not
     be compared. An evidence record that is missing gives no finding here (`_hard_evidence_problems` reports a missing record for a current template)."""
     out = []
     tensors = audio.get("tensors")
     if isinstance(tensors, dict):
-        found = _tensor_findings(tensors)
+        found = _tensor_findings(tensors, current_template)
         if found:
             out.append("the tensor evidence shows a difference (" + ", ".join(found) + ")")
     encoders = audio.get("text_encoders")
@@ -325,21 +355,23 @@ def _hard_evidence_problems(d: dict, audio: dict, current_template: bool) -> lis
     """A weights-only decision needs a comparison with no tensor-level difference, no text-encoder difference and no read problem. No override explains
     these away: they are facts about the files. Each evidence record has to be present when the current template wrote the delta."""
     out = []
-    problems = d.get("problems", [])
-    if not isinstance(problems, list) or problems:
+    if "problems" not in d:
+        if current_template:        # the template always writes the list; deleting it would hide a file that could not be read
+            out.append("audio.decision has no problems list, so a weights-only class cannot show that every file was read and compared")
+    elif not isinstance(d["problems"], list) or d["problems"]:
         out.append("audio.decision class weights-only, but the decision lists problems (evidence that could not be read or compared)")
     if current_template and not isinstance(audio.get("tensors"), dict):
         out.append("audio.tensors (the tensor comparison) is missing, so a weights-only class has no tensor evidence")
     if current_template and not isinstance(audio.get("text_encoders"), list):
         out.append("audio.text_encoders (the text-encoder comparison) is missing, so a weights-only class has no text-encoder evidence")
-    out += [f"audio.decision class weights-only, but {x}; no override explains it" for x in _hard_findings(audio)]
+    out += [f"audio.decision class weights-only, but {x}; no override explains it" for x in _hard_findings(audio, current_template)]
     return out
 
 
-def _chosen_path(d: dict, by_key: dict, audio: dict) -> str:
+def _chosen_path(d: dict, by_key: dict, audio: dict, current_template: bool = False) -> str:
     """The path the template's own rule gives before a path override: weights-only when the evidence holds no hard difference and the differences are all
     serving (none at all when strict), else full-port."""
-    clean = not _hard_findings(audio)
+    clean = not _hard_findings(audio, current_template)
     nothing_else = (not by_key) if d["strict"] else all(x["category"] == "serving" for x in by_key.values())
     return "weights-only" if clean and nothing_else else "full-port"
 

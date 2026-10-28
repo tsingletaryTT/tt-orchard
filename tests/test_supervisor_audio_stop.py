@@ -104,7 +104,7 @@ RELAXED_DECISION = {"class": "weights-only", "path": "weights-only", "alternativ
 # strict flag is compared with. A delta that carries the current template's stamp and an audio record has to have them.
 RELAXED_EVIDENCE = {"config": {"top_level_differences": {"sample_size": {"base": 5324800, "model": 5292032}}, "model_differences": {}},
                     "tensors": {"model_tensors": 5, "base_tensors": 5, "common": 5, "only_in_model": [], "only_in_base": [], "shape_differences": [],
-                                "dtype_differences": []},
+                                "dtype_differences": [], "shape_difference_count": 0, "dtype_difference_count": 0, "intolerable_dtype_count": 0},
                     "text_encoders": []}
 RELAXED_FILES = {(0, "run"): {**FILES[(0, "run")], "triage_config.json": {"audio_strict": False},
                               "delta.json": {**DELTA, "class": "weights-only", "facts": {"form": "full", "modality": "audio"},
@@ -123,6 +123,8 @@ def test_the_stop_does_not_depend_on_the_path_the_decision_chose(rig):
     full = {**RELAXED_FILES[(0, "run")]["delta.json"], "class": "full-port", "path": "full-port"}
     full["audio"] = {"decision": {**RELAXED_DECISION, "class": "full-port", "path": "full-port", "alternative_path": "weights-only"}, **RELAXED_EVIDENCE}
     rig.args.unattended = True
-    rig.script = lambda r: bringup(r, overrides={(0, "run"): {**FILES[(0, "run")], "delta.json": full}})
+    # the stage files of RELAXED_FILES, with the triage configuration the gate reads: without it the gate refuses stage 0 and the stop is never reached
+    rig.script = lambda r: bringup(r, overrides={(0, "run"): {**RELAXED_FILES[(0, "run")], "delta.json": full}})
     assert rig.run() == EXIT_BLOCKED
+    assert decisions(rig, "blocked")[-1]["code"] == "audio-path-unbuilt"
     assert not started(rig, 1)

@@ -181,13 +181,27 @@ def test_with_no_hub_answer_the_last_complete_revision_by_name_is_used_as_before
     assert real(tmp_path).local_snapshot("org/model").name == "mmmm5555"
 
 
-def test_choose_snapshot_prefers_fewest_missing_files_when_none_is_complete(tmp_path):
+def test_choose_snapshot_returns_none_when_no_revision_has_every_listed_weight_and_index(tmp_path):
+    """Review of PR 191: the least incomplete revision used to be returned, and the missing index was then never fetched for a public model."""
     one, two = _snap(tmp_path, rev="aaaa1111", files=("config.json", "model-00001-of-00002.safetensors")), \
         _snap(tmp_path, rev="bbbb2222", files=("config.json", "model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"))
-    hub = _hub(FILES)
-    assert pf.choose_snapshot(hub, [one, two]) == two
+    hub = _hub(FILES)                                           # lists the index too, which neither revision has
+    assert pf.choose_snapshot(hub, [one, two]) is None
     assert pf.choose_snapshot(hub, []) is None
     assert pf.choose_snapshot(None, [one, two]) == two          # no Hub answer: the last by name
+
+
+def test_with_the_index_present_the_fuller_revision_is_chosen_among_incomplete_ones(tmp_path):
+    one = _snap(tmp_path, rev="aaaa1111", files=("config.json", "model-00001-of-00002.safetensors"))
+    two = _snap(tmp_path, rev="bbbb2222")
+    _index(two, {"a": "model-00001-of-00002.safetensors", "b": "model-00002-of-00002.safetensors"})
+    assert pf.choose_snapshot(_hub(FILES), [one, two]) == two
+
+
+def test_a_public_model_whose_cached_revisions_all_lack_the_listed_index_is_not_local_so_it_is_fetched(tmp_path, monkeypatch):
+    _snap(tmp_path, rev="aaaa1111")                              # every shard, no index
+    s, hub = _signals_with_hub(tmp_path, monkeypatch, sha="ffff0000")
+    assert s.local_snapshot("org/model") is None
 
 
 def test_the_run_uses_the_chosen_revision_for_the_hub_row(tmp_path, monkeypatch):

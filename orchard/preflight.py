@@ -895,7 +895,8 @@ def choose_snapshot(hub: HubInfo | None, candidates) -> Path | None:
     """The best of several complete local snapshots of one repository. With the Hub's answer: the revision with the fewest Hub-listed files
     missing (weights, weight indexes and component configs, `_missing_listed`), then the Hub's own revision (an exact match of the directory
     name with the Hub's sha), then the most recently modified, then the name. A partial copy that sorts later by name cannot win over a
-    complete one. Without the Hub's answer there is nothing to measure against and the last by name is used. None for no candidates."""
+    complete one. When even the best revision lacks a weight file or weight index the Hub lists, the answer is None: no revision is a local copy of the
+    model. Without the Hub's answer there is nothing to measure against and the last by name is used. None for no candidates."""
     found = sorted(Path(c) for c in candidates)
     if not found:
         return None
@@ -907,7 +908,10 @@ def choose_snapshot(hub: HubInfo | None, candidates) -> Path | None:
             return d.stat().st_mtime
         except OSError:
             return 0.0
-    return min(found, key=lambda d: (len(_missing_listed(hub, d)), 0 if hub.sha and d.name == hub.sha else 1, -mtime(d), d.name))
+    best = min(found, key=lambda d: (len(_missing_listed(hub, d)), 0 if hub.sha and d.name == hub.sha else 1, -mtime(d), d.name))
+    # No revision has every weight file and weight index the Hub lists: none of them is a local copy. The model is then fetched (a public one) or
+    # refused for lack of a token (a gated one), and the file that is missing is not skipped by calling an incomplete copy local.
+    return None if _missing_weights(hub, best) else best
 
 
 def audio_evidence_for(hub: HubInfo | None, local_path) -> str | None:
