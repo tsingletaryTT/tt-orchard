@@ -133,3 +133,21 @@ does not block. Paths are shown as placeholders here; the command prints the rea
 - The check that compiles the smoke kernel after a tree change (issue 95, "Needs") is not built here, because it needs a leased chip.
 - Moving the pin is one file to edit, followed by `tt-orchard kernel-env` (clones and builds at the new commit) and
   `tt-orchard ttlang-consistency`.
+
+## Review round 1 (Copilot, PR 198, three medium findings, fixed by class)
+
+The class: a pin, a version or an override is read in one place and decided in another, and the report loses what was decided.
+
+- The environment gate (`ttlang_env.ensure(check_only=True)`) refused an off-pin checkout or simulator before the consistency check
+  ran, so `--allow-stale-skills` could not reach it. A result that only says "not the pinned tt-lang" now carries `pin_mismatch`. A check
+  reports the steps after it and does not stop, and the probe accepts only those results under the override. A missing venv, torch,
+  wheel or diagnostics patch still refuses, and a real build still stops at a checkout at another commit.
+- The report now stores every consistency row and whether the override let a mismatch through (`header.ttlang_consistency`), and
+  `skills.stale_allowed` is true whenever the override accepted a stale source, an off-pin environment result or a blocking row. The
+  `skills.stale` list names each one with its detail. The "Reference versions" section prints the rows.
+- A reference file whose specification version cannot be read (a skill with no versions table) gave an "ok" references row. It now
+  gives "unknown", and orchard's own worked-kernel library files are left out of that comparison.
+
+Each guard was removed once and a test went red: the override in the gate (2 tests), the check going on past a mismatch (2), the
+`pin_mismatch` flag on the clone step (3), the consistency rows in the allowed list (1), the unknown branch (1), the rows in the
+header (3), the library exclusion (2).

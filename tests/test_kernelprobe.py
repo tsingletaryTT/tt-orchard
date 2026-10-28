@@ -3868,3 +3868,107 @@ def test_an_older_skill_runs_on_a_guide_built_from_the_checkout_and_the_report_s
     md = (tmp_path / "out" / "kernel-probe-report.md").read_text()
     assert "## Reference versions" in md and "The guide and the specification both document 0.20" in md
     assert "mismatch skill" in out.getvalue()
+
+
+# ---- Copilot review of PR 198: the override reaches the environment gate, and the report records it ---------------
+
+def _ensure_ready_env(fake_kenv, tmp_path, monkeypatch, *, checkout_at=None, sim=None, venv_python=True):
+    """A KEnv for the REAL ttlang_env.ensure: every step's command is faked, so a made-up checkout and venv pass each
+    step. `checkout_at` and `sim` choose the commit and wheel version the fake commands report."""
+    src, venv = fake_kenv.src_dir, fake_kenv.venv_dir
+    diag = src / "python" / "ttl" / "diagnostics.py"
+    diag.parent.mkdir(parents=True)
+    diag.write_text("# diagnostics\n")
+    monkeypatch.setattr(ttlang_env.defaults, "TTLANG_DIAGNOSTICS_SHA256", hashlib.sha256(diag.read_bytes()).hexdigest())
+    lib = tmp_path / "purelib"
+    (lib / "ttl" / "ttl").mkdir(parents=True, exist_ok=True)
+    (lib / "ttl" / "ttl" / "diagnostics.py").write_bytes(diag.read_bytes())
+    if venv_python:
+        (venv / "bin" / "python").write_text("#!/bin/sh\n")
+
+    def run(argv, timeout, env=None):
+        text = " ".join(str(a) for a in argv)
+        if argv[-1] == "--version":
+            return 0, f"tt-lang-sim {sim or _pin.SIM_VERSION}\n", ""
+        if "rev-parse" in argv:
+            return 0, (checkout_at or _pin.SHA) + "\n", ""
+        if "sysconfig" in text:
+            return 0, f"{lib}\n", ""
+        if "import torch" in text:
+            return 0, "", ""
+        if str(argv[0]).endswith("tt-lang-sim"):             # the negative examples: fail with upstream's own text
+            return 1, " ".join(n for _, needles in ttlang_env.defaults.TTLANG_NEGATIVE_EXAMPLES for n in needles), ""
+        return 1, "", "not faked"
+    return ttlang_env.KEnv(src_dir=src, venv_dir=venv, scratch_dir=tmp_path / "scratch", run=run)
+
+
+def _run_probe(tmp_path, env, **args):
+    out = io.StringIO()
+    with FakeModel(lambda r: final("nothing")) as server:
+        code = kp.main(probe_args(tmp_path, endpoint=server.endpoint, **args), env=env, out=out,
+                       probe=lambda e, m: True, run_watched_fn=no_run)
+    return code, out.getvalue()
+
+
+def test_the_environment_gate_refuses_an_off_pin_checkout_without_the_override(tmp_path, fake_kenv, monkeypatch, capsys):
+    env = _ensure_ready_env(fake_kenv, tmp_path, monkeypatch, checkout_at="d" * 40)
+    code, _ = _run_probe(tmp_path, env)
+    assert code == 2 and "not ready" in capsys.readouterr().err
+
+
+def test_allow_stale_skills_lets_an_off_pin_checkout_through_the_real_environment_gate(tmp_path, fake_kenv, monkeypatch):
+    monkeypatch.setattr(kp.ttlang_consistency, "check", _REAL_CONSISTENCY_CHECK)
+    env = _ensure_ready_env(fake_kenv, tmp_path, monkeypatch, checkout_at="d" * 40)
+    code, text = _run_probe(tmp_path, env, allow_stale_skills=True)
+    assert code == 0, text
+    data = json.loads((tmp_path / "out" / "kernel-probe-report.json").read_text())
+    assert data["header"]["skills"]["stale_allowed"] is True
+    assert any(x.startswith("clone") for x in data["header"]["skills"]["stale"])
+    cons = data["header"]["ttlang_consistency"]
+    assert cons["overridden"] is True
+    assert {r["name"]: r["status"] for r in cons["rows"]}["checkout"] == "mismatch"
+    md = (tmp_path / "out" / "kernel-probe-report.md").read_text()
+    assert "Consistency rows" in md and "let a mismatch through" in md and "Stale skills allowed" in md
+    for a in data["attempts"]:
+        assert a["provenance"]["skills"]["stale_allowed"] is True
+
+
+def test_allow_stale_skills_lets_a_simulator_off_the_pin_through_too(tmp_path, fake_kenv, monkeypatch):
+    monkeypatch.setattr(kp.ttlang_consistency, "check", _REAL_CONSISTENCY_CHECK)
+    env = _ensure_ready_env(fake_kenv, tmp_path, monkeypatch, sim="1.1.10+gabcdef0")
+    code, _ = _run_probe(tmp_path, env, allow_stale_skills=True)
+    assert code == 0
+    data = json.loads((tmp_path / "out" / "kernel-probe-report.json").read_text())
+    assert any(x.startswith("tt-lang-sim") for x in data["header"]["skills"]["stale"])
+
+
+def test_the_override_never_accepts_a_missing_or_broken_component(tmp_path, fake_kenv, monkeypatch, capsys):
+    env = _ensure_ready_env(fake_kenv, tmp_path, monkeypatch, checkout_at="d" * 40, venv_python=False)
+    code, _ = _run_probe(tmp_path, env, allow_stale_skills=True)          # no venv python: a missing component
+    assert code == 2 and "not ready" in capsys.readouterr().err and not (tmp_path / "out").exists()
+
+
+def test_a_clean_run_records_no_override_but_still_records_the_rows(tmp_path, fake_kenv, monkeypatch):
+    monkeypatch.setattr(kp.ttlang_consistency, "check", _REAL_CONSISTENCY_CHECK)
+    env = _ensure_ready_env(fake_kenv, tmp_path, monkeypatch)
+    code, text = _run_probe(tmp_path, env)
+    assert code == 0, text
+    data = json.loads((tmp_path / "out" / "kernel-probe-report.json").read_text())
+    assert data["header"]["skills"]["stale_allowed"] is False and data["header"]["skills"]["stale"] == []
+    assert data["header"]["ttlang_consistency"]["overridden"] is False
+    assert [r["name"] for r in data["header"]["ttlang_consistency"]["rows"]][:2] == ["checkout", "simulator"]
+
+
+def test_a_consistency_row_that_blocks_and_is_allowed_is_recorded_as_allowed(tmp_path, fake_kenv, env_ready,
+                                                                           monkeypatch):
+    """A hardware-tree mismatch (once a tt-metal ref is pinned) passes the environment gate; only the override lets it
+    through, and the report must say so."""
+    row = _consistency.Row("hardware tree", _consistency.MISMATCH, "the tree is at v0.81.0, the pin wants v0.80.0",
+                           "check out the pinned ref", blocks=True)
+    monkeypatch.setattr(kp.ttlang_consistency, "check", lambda env, skill_dir, **kw: [row])
+    code, text = _run_probe(tmp_path, fake_kenv, allow_stale_skills=True)
+    assert code == 0
+    data = json.loads((tmp_path / "out" / "kernel-probe-report.json").read_text())
+    assert data["header"]["skills"]["stale_allowed"] is True
+    assert any("hardware tree" in x for x in data["header"]["skills"]["stale"])
+    assert data["header"]["ttlang_consistency"]["overridden"] is True

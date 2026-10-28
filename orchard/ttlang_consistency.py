@@ -86,12 +86,18 @@ def _references_row(env, skill_dir, references) -> Row:
     if not want:
         return Row("references", UNKNOWN, "the checkout's specification version cannot be read, so the reference files "
                    "cannot be compared with it")
-    off = [f"{r['name']} documents {r['spec_version']}" for r in references
+    # The worked-kernel library (library_*.py) is orchard's own and has no specification version.
+    own = [r for r in references if not str(r.get("name", "")).startswith("library_")]
+    unread = [r["name"] for r in own if not r.get("spec_version")]
+    off = [f"{r['name']} documents {r['spec_version']}" for r in own
            if r.get("spec_version") and r["spec_version"] != want]
     if off:
         return Row("references", MISMATCH, f"the checkout documents specification {want} but " + ", ".join(off),
                    "build the reference files from the checkout (the probe does this when the skill is older)",
                    blocks=True)
+    if unread:
+        return Row("references", UNKNOWN, f"the checkout documents specification {want}, but the version of "
+                   f"{', '.join(unread)} cannot be read, so they cannot be compared with it")
     return Row("references", OK, f"every reference file documents specification {want}")
 
 

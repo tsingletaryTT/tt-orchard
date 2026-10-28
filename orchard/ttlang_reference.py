@@ -178,6 +178,15 @@ def report_lines(header: dict) -> list[str]:
     else:
         lines += ["", "The specification version of the guide or of the specification could not be read, so whether "
                       "they agree is unknown."]
+    cons = header.get("ttlang_consistency")
+    if isinstance(cons, dict) and isinstance(cons.get("rows"), list):
+        lines += ["", "Consistency rows the probe evaluated before it started:"]
+        for r in cons["rows"]:
+            if isinstance(r, dict):
+                lines.append(f"- {r.get('name')}: {r.get('status')}. {r.get('detail')}")
+        if cons.get("overridden"):
+            lines.append("--allow-stale-skills let a mismatch through: the coder ran on an environment that does not "
+                         "match the pin.")
     pin = header.get("ttlang_pin")
     if isinstance(pin, dict):
         lines += ["", f"tt-lang pin: {pin.get('sha')} (simulator {pin.get('sim_version')}, specification "

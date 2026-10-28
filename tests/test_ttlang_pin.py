@@ -320,3 +320,43 @@ def test_the_command_exits_2_on_a_blocking_row_and_0_otherwise(tmp_path, capsys)
     f.head = "e" * 40
     assert tc.main(args, env=f.env) == 2
     assert "mismatch" in capsys.readouterr().out
+
+
+# ---- Copilot review of PR 198 ----------------------------------------------------------------------------------------
+
+def test_an_unreadable_skill_version_gives_an_unknown_references_row_never_ok(tmp_path):
+    f = Fake(tmp_path)
+    skill = make_skill(tmp_path, "0.12")
+    (skill / "TTLangSpecification.md").write_text("# no versions table\n")
+    refs, problems = tr.assemble(f.env, skill)
+    assert problems == []
+    refs = refs + [{"name": "library_add.py", "source": "orchard library", "spec_version": None}]
+    r = rows_by_name(check(f, skill, references=refs))["references"]
+    assert r.status == tc.UNKNOWN and not r.blocks and "guide.md" in r.detail and "library_add.py" not in r.detail
+
+
+def test_the_worked_kernel_library_does_not_make_the_references_row_unknown(tmp_path):
+    f = Fake(tmp_path)
+    skill = make_skill(tmp_path, "0.20")
+    refs, _ = tr.assemble(f.env, skill)
+    refs = refs + [{"name": "library_add.py", "source": "orchard library", "spec_version": None}]
+    assert rows_by_name(check(f, skill, references=refs))["references"].status == tc.OK
+
+
+def test_a_check_goes_on_past_a_pin_mismatch_and_a_real_build_stops_at_it(tmp_path):
+    f = Fake(tmp_path, head="d" * 40)
+    ran = ttlang_env.ensure(f.env, check_only=True, say=lambda s: None)
+    assert ran[0].name == "clone" and ran[0].status == ttlang_env.FAIL and ran[0].pin_mismatch
+    assert len(ran) > 1                                # the steps after the mismatch were still reported
+    built = ttlang_env.ensure(f.env, check_only=False, say=lambda s: None)
+    assert [r.name for r in built] == ["clone"]        # a build never goes on from a checkout at another commit
+
+
+def test_only_a_pin_mismatch_is_marked_overridable(tmp_path):
+    f = Fake(tmp_path)
+    assert ttlang_env.step_clone(f.env, True).pin_mismatch is False                       # at the pin
+    (tmp_path / "b").mkdir()
+    off = Fake(tmp_path / "b", head="d" * 40)
+    assert ttlang_env.step_clone(off.env, True).pin_mismatch is True
+    gone = ttlang_env.KEnv(src_dir=tmp_path / "nowhere", venv_dir=tmp_path / "v", scratch_dir=tmp_path / "s", run=f.run)
+    assert ttlang_env.step_wheel(gone, True).pin_mismatch is False                        # no wheel at all

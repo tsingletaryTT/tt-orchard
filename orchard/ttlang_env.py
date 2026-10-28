@@ -44,6 +44,10 @@ class Result:
     name: str
     status: str
     detail: str
+    # True for a FAIL or TODO that only says "this is not the pinned tt-lang" (the checkout is at another commit, the
+    # wheel was built from another one). The probe's --allow-stale-skills may accept it. A missing or broken
+    # component is never a pin mismatch.
+    pin_mismatch: bool = False
 
 
 def real_run(argv, timeout, env=None):
@@ -122,7 +126,7 @@ def step_clone(env: KEnv, check_only: bool) -> Result:
         return Result("clone", OK, f"{env.src_dir} at {pin[:9]}")
     if have is not None:
         return Result("clone", FAIL, f"{env.src_dir} is at {have[:9]} and the pin is {pin[:9]}; it is not reset. "
-                                     "Move it aside or pass another --src-dir")
+                                     "Move it aside or pass another --src-dir", pin_mismatch=True)
     # A fetch of one commit, because main moves and the pin must not.
     fetch = [["git", "-C", src, "fetch", "--quiet", "--depth", "1", "origin", pin],
              ["git", "-C", src, "checkout", "--quiet", "FETCH_HEAD"]]
@@ -182,7 +186,7 @@ def step_wheel(env: KEnv, check_only: bool) -> Result:
     if have == want:
         return Result("tt-lang-sim", OK, f"{have} (built from {defaults.TTLANG_PIN[:9]})")
     if check_only:
-        return Result("tt-lang-sim", TODO, f"have {have or 'none'}, want {want}")
+        return Result("tt-lang-sim", TODO, f"have {have or 'none'}, want {want}", pin_mismatch=have is not None)
     wheels = env.scratch_dir / "wheels"
     wheels.mkdir(parents=True, exist_ok=True)
     build_env = dict(env.environ if env.environ is not None else os.environ, TTLANG_VERSION_OVERRIDE=want)
@@ -242,9 +246,11 @@ def ensure(env: KEnv, *, check_only: bool = False, say: Callable = print) -> lis
         r = step(env, check_only)
         results.append(r)
         say(f"{r.status:5s} {r.name}: {r.detail}")
-        if r.status == FAIL:
+        # A real build stops at the first failure. A check goes on past a pin mismatch, so the steps after it are
+        # still reported and the probe can tell a mismatch it may override from a component that is missing or broken.
+        if r.status == FAIL and not (check_only and r.pin_mismatch):
             return results
-    if any(r.status == TODO for r in results):
+    if any(r.status == TODO and not r.pin_mismatch for r in results):
         r = Result("verify", TODO, "skipped until the steps above are done")
     else:
         r = verify(env)
