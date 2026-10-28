@@ -1,3 +1,3 @@
 target = "0.9.54"
-summary = "A malformed telegraph.endpoint, key_file or dir is a ConfigError that names the key instead of a bare ValueError"
+summary = "A malformed telegraph.endpoint, key_file or dir is a ConfigError that names the key; a bare ValueError no longer escapes"
 pr = 196

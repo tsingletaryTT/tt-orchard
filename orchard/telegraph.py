@@ -126,8 +126,8 @@ def _shown(value: object, limit: int = 80) -> str:
 def _check_endpoint(endpoint: str):
     """Split the endpoint, or raise ConfigError naming telegraph.endpoint. urlsplit raises a bare ValueError for a bad
     bracketed host, and the port property raises one for a port that is not a number from 0 to 65535. Control characters
-    and spaces are refused too: urlsplit drops tabs and newlines silently, so the URL that would be called is not the one
-    that was written."""
+    and spaces are refused too: urlsplit drops tabs and newlines silently, so the URL that is called would differ from the
+    URL that was written."""
     # userinfo is hidden: a password pasted into the endpoint must not be echoed into a log
     bad = f"telegraph.endpoint is not a valid URL ({_shown(re.sub(r'//[^/]*@', '//***@', endpoint, count=1))})"
     if any(c.isspace() or not c.isprintable() for c in endpoint):
