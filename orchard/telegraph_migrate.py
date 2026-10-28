@@ -155,6 +155,14 @@ def _sidecars(dir_fd: int) -> list[str]:
     return names
 
 
+def db_exists(dir_fd: int, name: str) -> bool:
+    try:
+        os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        return True
+    except FileNotFoundError:
+        return False
+
+
 def _same_content(dir_fd: int, name: str, expected: bytes) -> bool:
     try:
         return safeio.read_bytes(name, max_bytes=len(expected) + 1, anchor=dir_fd) == expected
@@ -184,18 +192,29 @@ def recover_ledger(dir_fd: int, max_output_tokens: int) -> dict:
             if data and not data.endswith(b"\n"):
                 cut = data.rfind(b"\n") + 1
                 fragment = data[cut:]
-                # A crash between writing the sidecar and cutting the ledger leaves a complete sidecar with no note. A rerun reuses
-                # it, so one fragment is never counted twice.
-                noted_now = {rec.get("torn") for rec, _raw in parse_jsonl(data[:cut]).items if "torn" in rec}
-                name = next((n for n in _sidecars(dir_fd) if n not in noted_now and _same_content(dir_fd, n, fragment)), None)
-                if name is None:
-                    name = f"{SIDECAR_PREFIX}{uuid.uuid4().hex[:8]}"
-                    sfd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | _O_CLOEXEC, 0o600, dir_fd=dir_fd)
+                # The sidecar's name comes from the digest of the whole ledger it was cut from. A crash between publishing the sidecar
+                # and cutting the ledger leaves a complete sidecar of this very ledger, and a rerun finds the same name and reuses it. An
+                # older orphan sidecar has another name, so identical bytes in it are never taken for this tail.
+                name = f"{SIDECAR_PREFIX}{hashlib.sha256(data).hexdigest()[:12]}"
+                if db_exists(dir_fd, name):
+                    if not _same_content(dir_fd, name, fragment):
+                        raise MigrationRefused(f"{name} exists with other content than the tail of {ts.LEDGER}; a person has to look at it")
+                else:
+                    tmp = f".torn-tmp-{uuid.uuid4().hex[:12]}"        # not a countable name until it is whole and synced
+                    sfd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | _O_CLOEXEC, 0o600, dir_fd=dir_fd)
                     try:
-                        safeio._write_all(sfd, fragment)
-                        os.fsync(sfd)
-                    finally:
-                        os.close(sfd)
+                        try:
+                            safeio._write_all(sfd, fragment)
+                            os.fsync(sfd)
+                        finally:
+                            os.close(sfd)
+                        os.rename(tmp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+                    except BaseException:
+                        try:
+                            os.unlink(tmp, dir_fd=dir_fd)
+                        except OSError:
+                            pass
+                        raise
                     os.fsync(dir_fd)
                 os.ftruncate(fd, cut)                  # only after the whole fragment is safe in the sidecar
                 os.fsync(fd)

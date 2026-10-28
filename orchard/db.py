@@ -55,6 +55,7 @@ MIN_SQLITE = (3, 37, 0)                  # STRICT tables
 BACKUP_KEEP = 14
 BACKUP_INTERVAL_S = 3600
 MARKER_NAME = "RECOVERY-REQUIRED"
+INIT_NAME = "INITIALIZED"             # written at the first open: proof that a ledger existed, whatever happens to the database
 MARKER_MAX_BYTES = 64 * 1024
 _O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
 _SIBLINGS = ("-wal", "-shm", "-journal")
@@ -210,6 +211,42 @@ def _exists(dir_fd: int, name: str) -> bool:
         raise LedgerUnavailable(f"cannot look at {name}: {exc.strerror}") from exc
 
 
+def _lock_file(dir_fd: int, name: str, how: int, timeout_s: float, *, create: bool) -> int:
+    """Open a lock file under a directory descriptor and take `how` (a flock) without blocking for longer than `timeout_s`. With
+    `create` False a missing lock file gives -1 (a reader never creates one). Returns the descriptor; closing it releases the lock."""
+    flags = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK | _O_CLOEXEC | (os.O_CREAT if create else 0)
+    try:
+        fd = os.open(name, flags, 0o600, dir_fd=dir_fd)
+    except FileNotFoundError:
+        if not create:
+            return -1
+        raise LedgerUnavailable(f"cannot open {name}: the directory is gone") from None
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.EISDIR):
+            raise UnsafeDirectory(f"{name} is a link or a directory") from exc
+        raise LedgerUnavailable(f"cannot open {name}: {exc.strerror or type(exc).__name__}") from exc
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid():
+            raise UnsafeDirectory(f"{name} is not a regular file of this user")
+        if create:
+            os.fchmod(fd, 0o600)
+        deadline = time.monotonic() + timeout_s
+        while True:
+            try:
+                fcntl.flock(fd, how | fcntl.LOCK_NB)
+                return fd
+            except (BlockingIOError, PermissionError):
+                if time.monotonic() >= deadline:
+                    raise LedgerUnavailable(f"{name} is held by another process") from None
+                time.sleep(0.01)
+            except OSError as exc:
+                raise LedgerUnavailable(f"cannot lock {name}: {exc.strerror}") from exc
+    except BaseException:
+        os.close(fd)
+        raise
+
+
 class Database:
     """One SQLite file in a state directory. Opening it runs the whole sequence: private directory, `open.lock`, the marker, the
     file checks, pragmas, the integrity check, recovery when needed, and migrations. One connection is made per thread.
@@ -263,9 +300,9 @@ class Database:
             exists = _exists(self._dirfd, self.name)
             for suffix in _SIBLINGS:
                 _check_sibling(self._dirfd, self.name + suffix)
-            has_backups = bool(self.list_backups())
-            if not exists and (marker is not None or has_backups):
-                reason = (marker or {}).get("reason") or "the database file was missing but backups exist"
+            has_history = bool(self.list_backups()) or _exists(self._dirfd, INIT_NAME)
+            if not exists and (marker is not None or has_history):
+                reason = (marker or {}).get("reason") or "the database file was missing but this directory had a ledger before (backups or INITIALIZED)"
                 self._recover(reason, move=False)
             else:
                 keep = self._keep_wal()
@@ -283,6 +320,12 @@ class Database:
             if self._marker() is not None and self.unreconciled() is None:
                 self._write_unreconciled("recovery marker present (" + str((self._marker() or {}).get("reason", ""))[:200] + ")")
             self._maybe_backup()
+            if not _exists(self._dirfd, INIT_NAME):                 # durable evidence that must exist before the first reservation
+                try:
+                    safeio.atomic_write(os.path.join(self.directory, INIT_NAME), json.dumps(
+                        {"initialized": time.strftime("%Y-%m-%dT%H:%M:%S")}) + "\n", mode=0o600)
+                except OSError as exc:
+                    raise _unavailable(exc, "cannot record that the ledger exists") from exc
         finally:
             fcntl.flock(self._open_lock, fcntl.LOCK_UN)
             os.close(self._open_lock)
@@ -290,31 +333,7 @@ class Database:
 
     def _flock(self, name: str, how: int, timeout_s: float | None = None) -> int:
         """Open a lock file under the directory descriptor and take `how` without blocking forever: it waits for the busy timeout."""
-        try:
-            fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | _O_CLOEXEC, 0o600, dir_fd=self._dirfd)
-        except OSError as exc:
-            if exc.errno in (errno.ELOOP, errno.EISDIR):
-                raise UnsafeDirectory(f"{name} is a link or a directory") from exc
-            raise LedgerUnavailable(f"cannot open {name}: {exc.strerror or type(exc).__name__}") from exc
-        try:
-            st = os.fstat(fd)
-            if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid():
-                raise UnsafeDirectory(f"{name} is not a regular file of this user")
-            os.fchmod(fd, 0o600)
-            deadline = time.monotonic() + (self._busy / 1000 if timeout_s is None else timeout_s)
-            while True:
-                try:
-                    fcntl.flock(fd, how | fcntl.LOCK_NB)
-                    return fd
-                except (BlockingIOError, PermissionError):
-                    if time.monotonic() >= deadline:
-                        raise LedgerUnavailable(f"{name} is held by another process") from None
-                    time.sleep(0.01)
-                except OSError as exc:
-                    raise LedgerUnavailable(f"cannot lock {name}: {exc.strerror}") from exc
-        except BaseException:
-            os.close(fd)
-            raise
+        return _lock_file(self._dirfd, name, how, self._busy / 1000 if timeout_s is None else timeout_s, create=True)
 
     def _open_checked(self, name: str | None = None) -> sqlite3.Connection:
         """Open (and create) the file without following a link, check it on its descriptor, set the pragmas, run the integrity
@@ -825,6 +844,7 @@ class ReadOnlyDatabase:
         self.name = name
         self._busy = busy_timeout_ms
         self._conn: sqlite3.Connection | None = None
+        self._users = -1
         try:
             self._dirfd = os.open(self.directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | _O_CLOEXEC)
         except FileNotFoundError:
@@ -848,6 +868,14 @@ class ReadOnlyDatabase:
             for suffix in _SIBLINGS:
                 _check_sibling(self._dirfd, name + suffix)
             self.exists = True
+            # Coordinate with a recovery or restore: wait for open.lock, then hold db.users shared until this reader closes, so a
+            # restore cannot move the files under an open snapshot. A reader creates no lock file.
+            gate = _lock_file(self._dirfd, "open.lock", fcntl.LOCK_EX, busy_timeout_ms / 1000, create=False)
+            try:
+                self._users = _lock_file(self._dirfd, "db.users", fcntl.LOCK_SH, busy_timeout_ms / 1000, create=False)
+            finally:
+                if gate >= 0:
+                    os.close(gate)
         except BaseException:
             self.close()
             raise
@@ -906,6 +934,10 @@ class ReadOnlyDatabase:
             with contextlib.suppress(sqlite3.Error):
                 self._conn.close()
             self._conn = None
+        if getattr(self, "_users", -1) >= 0:                       # released after SQLite is closed
+            with contextlib.suppress(OSError):
+                os.close(self._users)
+            self._users = -1
         if getattr(self, "_dirfd", -1) >= 0:
             with contextlib.suppress(OSError):
                 os.close(self._dirfd)

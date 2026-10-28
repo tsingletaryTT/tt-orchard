@@ -52,6 +52,10 @@ class MigrationIncomplete(LedgerRefused):
     """A migration of this directory started and did not finish. Run `tt-orchard db migrate telegraph --dir <directory>` again."""
 
 
+def _any_cutover(conn) -> bool:
+    return conn.execute("SELECT 1 FROM meta WHERE key LIKE 'cutover:%' LIMIT 1").fetchone() is not None
+
+
 def cutover_key(scope: str) -> str:
     return f"cutover:{scope}"
 
@@ -103,7 +107,8 @@ class Snapshot:
     present: bool = True                   # False: there is no database yet (an empty history)
 
 
-def _guard_state(exists_name: Callable[[str], str | None], meta_get: Callable[[str], str | None], scope: str) -> None:
+def _guard_state(exists_name: Callable[[str], str | None], meta_get: Callable[[str], str | None], scope: str,
+                 any_cutover: Callable[[], bool]) -> None:
     """Raise unless the directory is in a state where the ledger can be used (I3, I10). `exists_name` looks at a name in the
     directory without following links; `meta_get` reads the database's `meta`."""
     phase = meta_get(cutover_key(scope))
@@ -115,8 +120,9 @@ def _guard_state(exists_name: Callable[[str], str | None], meta_get: Callable[[s
             raise LegacyLedgerPresent(f"this directory was (or is being) migrated to the database, but a live {LEDGER} is there "
                                       "again: an old writer is running. Stop it, then reconcile before any call")
         raise NotMigrated(f"this directory still holds a jsonl ledger ({LEDGER}); run `tt-orchard db migrate telegraph` first")
-    if migrating or (phase is not None and phase != "complete") or (migrated and phase is None):
-        if migrated and phase is None:
+    lost = migrated and phase is None and not any_cutover()      # the marker is for the directory: another scope may have migrated
+    if migrating or (phase is not None and phase != "complete") or lost:
+        if lost:
             raise LedgerRefused("this directory was migrated, but the database does not record it (the database file was lost or "
                                 "replaced); restore a backup with `tt-orchard db restore` before any call")
         raise MigrationIncomplete("a migration of this ledger started and did not finish; run `tt-orchard db migrate telegraph` "
@@ -147,7 +153,7 @@ class TelegraphStore:
 
     def _guard(self, conn) -> None:
         if self._guard_on and not self.db._memory:
-            _guard_state(self.db.exists_name, lambda k: self.db.meta_get(k, conn), self.scope)
+            _guard_state(self.db.exists_name, lambda k: self.db.meta_get(k, conn), self.scope, lambda: _any_cutover(conn))
 
     # ------------------------------------------------------------------------------------------------------ reads
 
@@ -321,7 +327,7 @@ def read_snapshot(directory, scope: str = DEFAULT_SCOPE) -> Snapshot:
             def meta(key):
                 row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
                 return row[0] if row else None
-            _guard_state(ro.exists_name, meta, scope)
+            _guard_state(ro.exists_name, meta, scope, lambda: _any_cutover(conn))
             records = []
             for (raw,) in conn.execute("SELECT raw_json FROM telegraph_events WHERE scope = ? ORDER BY seq", (scope,)):
                 try:
@@ -360,7 +366,8 @@ def fingerprint(directory, scope: str = DEFAULT_SCOPE) -> tuple | None:
                                           (scope,)).fetchone()
                 metas = tuple(conn.execute("SELECT key, value FROM meta ORDER BY key").fetchall())
             names = tuple(ro.exists_name(n) for n in (LEDGER, MARKER_MIGRATING, MARKER_MIGRATED, dbm.MARKER_NAME))
-            return (seq, count, metas, names), size
+            # The files themselves: a record changed in place keeps the count and the newest seq, but not the file or its WAL.
+            return (seq, count, metas, names, ro.file_stats()), size
         except (LedgerUnavailable, LedgerRefused):
             return None, size
     finally:

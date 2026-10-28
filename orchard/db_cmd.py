@@ -58,10 +58,23 @@ def main(args, *, out, environ=None, home=None) -> int:
     def say(text=""):
         print(text, file=out)
 
+    from orchard import cli
+    named = bool(getattr(args, "telegraph_config", None) or getattr(args, "config", None) or environ.get(cli.CONFIG_ENV))
+    cfg, config_problem = tg.Config(), None
     try:
-        cfg = telegraph_cmd.load_config(telegraph_cmd._config_path(args, environ, home))
-    except Exception:                                         # noqa: BLE001 - these commands work without a telegraph config
-        cfg = tg.Config()
+        config_path = telegraph_cmd._config_path(args, environ, home)
+    except Exception as exc:                                  # noqa: BLE001 - no config is found
+        config_path, config_problem = None, (str(exc) if named else None)
+    if config_path is not None:
+        try:
+            cfg = telegraph_cmd.load_config(config_path)
+        except Exception as exc:                              # noqa: BLE001 - a config that exists and does not load
+            config_problem = str(exc)
+    names_directory = bool(getattr(args, "dir", None) or environ.get(telegraph_cmd.ENV_DIR))
+    if config_problem and not names_directory:
+        # The config would have chosen the directory. A default under the caller's home could be another ledger, so stop.
+        say(f"db: the telegraph config cannot be used ({config_problem}); fix it or pass --dir")
+        return EXIT_PROBLEM
     try:
         directory = telegraph_cmd.resolve_directory(getattr(args, "dir", None), cfg, environ, home)
     except tg.ConfigError as exc:
@@ -87,7 +100,7 @@ def main(args, *, out, environ=None, home=None) -> int:
             return EXIT_OK
         if action == "confirm-restore":
             return _confirm(directory, scope, cfg, args, say)
-    except (dbm.LedgerUnavailable, dbm.LedgerRefused) as exc:
+    except (dbm.LedgerUnavailable, dbm.LedgerRefused, safeio.SafeReadError) as exc:
         say(f"db: {exc}")
         return EXIT_PROBLEM
     say(f"db: unknown action {action!r}")
@@ -130,7 +143,7 @@ def _migrate(directory, scope, cfg, args, say) -> int:
     except mig.AlreadyMigrated as exc:
         say(f"db migrate: {exc}; nothing to do")
         return EXIT_PROBLEM
-    except (mig.MigrationRefused, dbm.LedgerUnavailable, dbm.LedgerRefused) as exc:
+    except (mig.MigrationRefused, dbm.LedgerUnavailable, dbm.LedgerRefused, safeio.SafeReadError) as exc:
         say(f"db migrate: {exc}")
         return EXIT_PROBLEM
     totals = result.get("totals", {})

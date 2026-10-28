@@ -325,10 +325,20 @@ def cut(text: str, limit: int) -> str:
 
 
 def worst_case_call(cfg: Config) -> tuple[int, float | None]:
-    """(tokens, dollars) that one call could have cost at most under `cfg`: the largest request the prompt cap allows (a character
-    is up to four bytes, plus the framing and the fixed body) as input, `max_output_tokens` as output, priced at the dearest
-    configured model. The dollars are None when a model has no price. Used to charge a reply file that has no ledger record."""
-    worst_in = cfg.max_prompt_chars * 4 + len(SYSTEM) * 4 + REQUEST_FRAMING_TOKENS + 4096
+    """(tokens, dollars) that one call could have cost at most under `cfg`, never less than a reservation can be. The input is the
+    largest request the settings allow: a full-length prompt of characters that JSON escapes to twelve bytes, the request body each
+    model and each API shape builds (so the configured `extra_body` is in it), twice the size of `extra_body` again for what redaction
+    can add, and the framing. The output is `max_output_tokens`. The dollars are priced at the dearest configured model, and are None
+    when a model has no price. Used to charge a reply file that has no ledger record."""
+    prompt = "\U0001F600" * max(cfg.max_prompt_chars - len(SYSTEM), 0)
+    extra = len(json.dumps(cfg.extra_body))
+    biggest = 0
+    for api in APIS:
+        probe = Telegraph(dataclasses.replace(cfg, api=api), "/nonexistent", environ={}, hostname="", home="")
+        for model in cfg.models or ("",):
+            body = probe._request(model, prompt, None)[2]
+            biggest = max(biggest, len(json.dumps(body).encode("utf-8")) + 2 * extra + 1024)
+    worst_in = biggest + REQUEST_FRAMING_TOKENS
     tokens = worst_in + cfg.max_output_tokens
     if not cfg.models or any(m not in cfg.prices for m in cfg.models):
         return tokens, None

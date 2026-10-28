@@ -443,9 +443,9 @@ def _spend_text(cost: float, unknown: int) -> str:
 
 
 def build(cfg: tg.Config, directory, *, environ, redact=lambda t: t, hostname: str = "", now: float = 0.0,
-          ledger_label: str = "") -> dict:
+          ledger_label: str = "", problem: str | None = None) -> dict:
     """The telegraph page's facts. `directory` holds `telegraph.jsonl`; `ledger_label` is how to name it on screen."""
-    facts = _ledger_facts(Path(directory))
+    facts = _unreadable("the ledger directory cannot be chosen") if problem else _ledger_facts(Path(directory))
     summary, records, error, acct = facts["summary"], facts["records"], facts["error"], facts["acct"]
     blocked = facts.get("blocked")
     verdict = _verdicts(records)

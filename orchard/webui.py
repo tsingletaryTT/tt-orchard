@@ -471,10 +471,14 @@ class WebApp:
         """The spend meter and the Telegraph view: the configured helper, its caps and the ledger. Read only: nothing here
         sends a request to the helper or writes a file (orchard/telegraph_view.py)."""
         cfg = getattr(self.cfg, "telegraph", None) or _telegraph.Config()
-        directory = cfg.dir or telegraph_view.default_dir(self.home)
+        from orchard import telegraph_cmd
+        try:
+            directory, problem = telegraph_cmd.resolve_directory(None, cfg, self.environ, self.home), None   # as `telegraph ask` does
+        except _telegraph.ConfigError as exc:
+            directory, problem = telegraph_view.default_dir(self.home), str(exc)
         label = self.redact(str(directory))
         return telegraph_view.build(cfg, directory, environ=self.environ, redact=self.redact, hostname=self.hostname,
-                                    now=self.clock(), ledger_label=label)
+                                    now=self.clock(), ledger_label=label, problem=problem)
 
     def virtual_spend(self, run=None) -> dict:
         """The virtual local spend (orchard/virtualspend_view.py): the token use of the local models in the run folders, priced
