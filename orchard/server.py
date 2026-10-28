@@ -191,7 +191,8 @@ class ServerControl:
         devs = record.get("dev_indices")
         self.dev_indices = None if devs is None else tuple(int(i) for i in devs)
         self.adopted_identity = "unknown"
-        self.owned = record.get("owned")
+        # A refusal this process saw is newer than any ledger record, so it is kept.
+        self.owned = False if self.owned is False else record.get("owned")
         if self.spec.kind != "process" or self.pid is None:
             return None
         if self.start_time is None:
@@ -220,6 +221,7 @@ class ServerControl:
 
     def start(self, lease: Lease | None) -> None:
         s = self.spec
+        self.owned = None             # a new attempt: nothing is known about who owns the container yet
         if s.kind == "container":
             if lease is None:
                 raise ServerError("a container server needs a lease")

@@ -2870,3 +2870,11 @@ Prompt (operator): "if a little sqlite DB inside this project helps everything r
 - Decision, container name: not changed. `tt-model serve` has no option for a container name; it names the container `tt-model-<package>-<profile>`. A name with the run or port would need tt-model to support it.
 - Issue 157: `db status` printed `len(None)` when the backups folder was a link or unreadable. It now prints "backups: cannot be read: <reason>" and returns the problem exit code. The test makes the backups folder a symlink.
 - Tests first; the new tests failed before the change. Mutations (all red): skip removed in `stop`, refusal detection, `adopt` ignoring the field, `coder_state` ignoring the new entries, the foreign branch in `_release_all`, in `_release_from_memory` and in `_relaunch_coder`, the server record in "coder container started", the no-reset release, and the problem exit code of `db status`.
+
+## 2026-10-28 (UTC): first review of PR 158 (head d4f7a0e), one class: ownership state that goes stale
+- The class: the `owned` value lives in three places (the live control object, the ledger record, the next attempt), and each review comment was one of them going out of step.
+- A refusal seen in this process now survives `adopt` of an older ledger record. Each new start attempt sets `owned` to unknown first, in `ServerControl.start` and in the supervisor before the "coder starting" record, so a retry never carries an old refusal into its record.
+- A refused start in `Handoff.restore` now writes a `serve_refused` restore step with the server record, so recovery after a restart reads owned False.
+- `_ensure_coder` checks ownership before the dead-coder and unfinished-boot paths: a resume that still holds the lease gives it back without a reset and starts again, and a second refusal blocks. Before, a healthy foreign server could pass readiness and the canary.
+- `LeaseAdapter.release` and `SingleTenantAdapter.release` accept `keep_running` (the single-tenant adapter never resets, so it changes nothing there).
+- Tests first (5 failed); 6 new mutations red.

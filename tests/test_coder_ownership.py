@@ -96,18 +96,6 @@ def test_coder_state_reads_ownership_from_the_not_started_entry():
 # ---- the supervisor, end to end ---------------------------------------------------------------
 
 
-class ForeignCoder:
-    """A real ServerControl whose serve is refused, with the container still shown by docker."""
-
-    def __init__(self, machine):
-        self.m = machine
-        self.ctl, self.run = server((1, "", "tt-model-qwen-coder-default is already running"),
-                                    docker_ps=(DOCKER_LINE, ""))
-
-    def __getattr__(self, name):
-        return getattr(self.ctl, name)
-
-
 @pytest.fixture
 def rig(tmp_path):
     r = Rig(tmp_path)
@@ -119,7 +107,7 @@ def test_the_blocked_run_leaves_the_other_processes_container_alone(rig):
     made = []
 
     def factory(machine):
-        made.append(ForeignCoder(machine))
+        made.append(foreign_coder(machine))
         return made[0]
 
     rig.coder_cls = factory
@@ -155,6 +143,10 @@ class HybridCoder(MachineCoder):
     @property
     def owned(self):
         return self.ctl.owned
+
+    @owned.setter
+    def owned(self, value):
+        self.ctl.owned = value
 
     def start(self, lease):
         self.ctl.start(lease)
@@ -226,7 +218,7 @@ def test_a_resume_after_a_refused_start_never_stops_the_other_container(rig):
 def test_the_ledger_free_release_does_not_stop_or_reset_a_container_that_is_not_ours(rig):
     from orchard import supervisor
     from orchard.ledger import Ledger
-    rig.coder_cls = lambda machine: ForeignCoder(machine)
+    rig.coder_cls = foreign_coder
     rig.run_dir.mkdir(parents=True, exist_ok=True)
     with Ledger(rig.run_dir / "ledger.jsonl") as led:
         sup = supervisor.build(rig.args, led, adapter=rig.adapter_cls(rig.m, owner_pid=100),
@@ -238,3 +230,102 @@ def test_the_ledger_free_release_does_not_stop_or_reset_a_container_that_is_not_
             sup.coder.start(sup.coder_lease)
         assert sup._release_from_memory() is True
     assert stops(sup.coder.run) == [] and rig.m.leases == {} and rig.m.resets == []
+
+
+# ---- the first review of PR 158 ---------------------------------------------------------------
+
+
+def test_a_live_refusal_is_not_overwritten_by_an_older_ledger_record():
+    ctl, run = server((1, "", "tt-model-qwen-coder-default is already running"), docker_ps=(DOCKER_LINE, ""))
+    with pytest.raises(ServerNotOwned):
+        ctl.start(LEASE)
+    ctl.adopt({"kind": "container", "target": SPEC.target, "port": 8000, "owned": None})
+    ctl.stop()
+    assert ctl.owned is False and stops(run) == []
+
+
+def test_a_new_start_attempt_forgets_an_earlier_refusal():
+    ctl, run = server((0, "", ""))
+    ctl.owned = False                       # an earlier attempt was refused
+    ctl.start(LEASE)
+    assert ctl.owned is True
+
+
+def test_a_failed_retry_does_not_keep_an_earlier_refusal():
+    ctl, run = server((1, "", "no such package"))
+    ctl.owned = False
+    with pytest.raises(Exception, match="no such package"):
+        ctl.start(LEASE)
+    assert ctl.owned is None
+
+
+def test_the_pre_start_record_of_a_retry_does_not_carry_the_old_refusal(rig):
+    from orchard import supervisor
+    from orchard.ledger import Ledger
+    rig.run_dir.mkdir(parents=True, exist_ok=True)
+    with Ledger(rig.run_dir / "ledger.jsonl") as led:
+        coder = HybridCoder(rig.m)
+        coder.ctl.owned = False
+        sup = supervisor.build(rig.args, led, adapter=rig.adapter_cls(rig.m, owner_pid=100), coder=coder,
+                               versions={"tt_model": "test"}, clock=rig.clock, sleep=rig.sleep,
+                               disk_usage=lambda p: rig.usage(p), home=rig.home, containers=rig.containers)
+        sup._start_coder(None)
+        starting = [e["data"] for e in led.read() if e["data"].get("decision") == "coder starting"]
+    assert starting[0]["server"]["owned"] is None
+
+
+def test_the_single_tenant_adapter_accepts_keep_running():
+    from orchard.adapters.single_tenant import SingleTenantAdapter
+    import inspect
+    assert "keep_running" in inspect.signature(SingleTenantAdapter.release).parameters
+
+
+def test_a_resume_that_still_holds_the_lease_does_not_adopt_the_other_processes_server(rig):
+    """An attended run keeps its lease after a refused start. A resume must not pass the other
+    container off as this run's coder because it answers."""
+    from orchard import supervisor
+    from orchard.ledger import Ledger
+    rig.run_dir.mkdir(parents=True, exist_ok=True)
+    rig.m.coder_running, rig.m.coder_chips = True, ()        # the other process's server answers
+    with Ledger(rig.run_dir / "ledger.jsonl") as led:
+        coder = HybridCoder(rig.m, serve=(1, "", "tt-model-qwen-coder-default is already running"),
+                            docker_ps=(DOCKER_LINE, ""))
+        adapter = rig.adapter_cls(rig.m, owner_pid=100)
+        sup = supervisor.build(rig.args, led, adapter=adapter, coder=coder, versions={"tt_model": "test"},
+                               clock=rig.clock, sleep=rig.sleep, disk_usage=lambda p: rig.usage(p),
+                               home=rig.home, containers=rig.containers)
+        lease = adapter.acquire(2, "orchard:supervisor", "coder")
+        led.append("decision", None, decision="coder starting", lease=lease.record(),
+                   server={**SPEC_RECORD, "owned": None})
+        led.append("decision", None, decision="coder not started", lease_id=lease.lease_id,
+                   server={**SPEC_RECORD, "owned": False}, reason="owned elsewhere")
+        with pytest.raises(supervisor.Blocked):
+            sup._ensure_coder()
+    assert rig.m.asked == [] and stops(coder.run) == []
+
+
+def test_a_refused_restore_is_recorded_so_recovery_respects_it(tmp_path):
+    from fakes import make_handoff
+    from orchard.handoff import progress
+    h, world, ledger = make_handoff(tmp_path)
+    h.park()
+
+    def refused(lease):
+        h.server.owned = False
+        raise ServerNotOwned("the container belongs to someone else")
+
+    world.coder_running = False
+    h.server.start = refused
+    h.server.record = lambda: {"kind": "container", "owned": h.server.owned}
+    with pytest.raises(Exception, match="another|belongs|failed"):
+        h.restore()
+    assert progress(ledger.read()).server["owned"] is False
+
+
+SPEC_RECORD = {"kind": "container", "target": SPEC.target, "port": 8000}
+
+
+def foreign_coder(machine):
+    """A coder whose serve is refused because another process's container of that name runs."""
+    return HybridCoder(machine, serve=(1, "", "tt-model-qwen-coder-default is already running"),
+                       docker_ps=(DOCKER_LINE, ""))

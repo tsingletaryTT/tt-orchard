@@ -47,7 +47,7 @@ from orchard.canary import CanaryError, CanaryResult, compare
 from orchard.defaults import (COLD_BOOT_BUDGET_S, IDLE_RELEASE_S, MESH_RESET_EXTRA_S, POLL_S,
                               QUEUE_POLL_S, QUIET_WAIT_S)
 from orchard.ledger import file_evidence
-from orchard.server import NotReady, ServerError, ServerStarting
+from orchard.server import NotReady, ServerError, ServerNotOwned, ServerStarting
 
 PARK_STEPS = ("note", "canary_before", "standin_started", "standin", "stop_sent", "stopped",
               "reset")
@@ -423,6 +423,10 @@ class Handoff:
             except ServerStarting as exc:
                 self._block(f"the coder start timed out while it was coming up; nothing else is "
                             f"started: {exc}", may_be_running=True)
+            except ServerNotOwned as exc:
+                # Recorded, so a restart's recovery never stops the container another process owns.
+                self._record("restore", "serve_refused", server=self.server.record())
+                self._block(f"starting the coder failed; nothing is retried: {exc}")
             except ServerError as exc:
                 self._block(f"starting the coder failed; nothing is retried: {exc}")
             self._record("restore", "serve", server=self.server.record())

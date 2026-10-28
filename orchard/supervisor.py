@@ -1128,6 +1128,16 @@ class Supervisor:
         if server_rec:
             self.coder.adopt(server_rec)
         lease = Lease.from_record(lease_rec)
+        if getattr(self.coder, "owned", None) is False:
+            # The last start was refused: the container of that name is another process's, even if
+            # it answers. Give back any lease this run still holds (no reset) and try to start again;
+            # a second refusal blocks with the same reason.
+            released = {e["data"].get("lease_id") for e in entries if e["event"] == "decision"
+                        and e["data"].get("decision") in ("hardware released", "coder left up")}
+            if lease.lease_id not in released:
+                self._release_foreign_lease(lease, lease.lease_id in self._adopted_ids(entries))
+            self._start_coder(canary)
+            return
         mine = [c for c in self.adapter.status() if c.bdf in lease.chips]
         if lease.lease_id in self._adopted_ids(entries):
             # A kept coder's lease is owned by its container's processes, not by this supervisor.
@@ -1153,6 +1163,7 @@ class Supervisor:
                               ledger=self.ledger, stage=None, wait_budget_s=COLD_BOOT_BUDGET_S,
                               clock=self.clock, sleep=self.sleep)
         self.coder_lease = lease          # known from here on, so a shutdown can release it
+        self.coder.owned = None           # a new attempt: an earlier refusal says nothing about this one
         # Recorded before the start: a crash during the boot leaves the lease and server in the
         # ledger, so the restart can stop that server and re-lease.
         self.ledger.append("decision", None, decision="coder starting", lease=lease.record(),
