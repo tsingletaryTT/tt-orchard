@@ -35,6 +35,7 @@ import hashlib
 import json
 import os
 import re
+import socket
 import stat
 import statistics
 from dataclasses import dataclass
@@ -43,7 +44,7 @@ from pathlib import Path
 from orchard import safeio
 from orchard.ledger import LedgerCorrupt, entries_from_bytes
 from orchard.card_use import PERF_IN_PROSE
-from orchard.scrub import scrub_package
+from orchard.scrub import BINARY_SUFFIXES, FORBIDDEN_DIRS, FORBIDDEN_SUFFIXES, scrub_text
 from orchard.stages import inside
 
 MODEL_ID = "stabilityai/stable-audio-3-small-music"
@@ -863,6 +864,36 @@ def weights_problems(pkg: Path) -> list[str]:
     return problems
 
 
+def scrub_files(pkg: Path, *, hostname: str | None = None, home: str | None = None) -> list[str]:
+    """`orchard/scrub.py`'s search for a host name, a token and a home path, and its refusal of a cache or a weights file, with every read made through
+    `safeio` (a regular file, capped, never blocks). `scrub_package` reads each file with `read_text`, which blocks on a FIFO swapped in after the gate's
+    check of the directory; here that file is a problem and the gate goes on. Each hit is 'relative/path: what was found'."""
+    hostname = socket.gethostname() if hostname is None else hostname
+    home = os.path.expanduser("~") if home is None else home
+    hits = []
+    for dirpath, dirnames, filenames in os.walk(pkg, followlinks=False):
+        here = Path(dirpath)
+        for d in sorted(dirnames):
+            if d in FORBIDDEN_DIRS:
+                hits.append(f"{(here / d).relative_to(pkg).as_posix()}: {FORBIDDEN_DIRS[d]}")
+        dirnames[:] = [d for d in dirnames if d not in FORBIDDEN_DIRS]
+        for name in sorted(filenames):
+            f = here / name
+            rel = f.relative_to(pkg).as_posix()
+            suffix = f.suffix.lower()
+            if suffix in FORBIDDEN_SUFFIXES:
+                hits.append(f"{rel}: {FORBIDDEN_SUFFIXES[suffix]}")
+                continue
+            if suffix in BINARY_SUFFIXES:
+                continue
+            text = _text(f)
+            if text is None:
+                hits.append(f"{rel}: could not be read as a small UTF-8 text file")
+                continue
+            hits += [f"{rel}: {what}" for what in scrub_text(text, hostname=hostname, home=home)]
+    return sorted(hits)
+
+
 def unreadable_entries(pkg: Path) -> list[str]:
     """Entries the gate does not open: a link, a FIFO, a socket or a device (opening one can block or leave the package), and a regular file over the size
     the package allows. Each is a problem by itself, and when there is one the gate reads nothing else."""
@@ -912,7 +943,7 @@ def package_problems(pkg, *, hostname: str | None = None, home: str | None = Non
 
 def _gate(pkg: Path, hostname, home, validate_manifest) -> list[str]:
     problems = weights_problems(pkg)
-    problems += [f"scrub: {hit}" for hit in scrub_package(pkg, hostname=hostname, home=home)]
+    problems += [f"scrub: {hit}" for hit in scrub_files(pkg, hostname=hostname, home=home)]
     card = _text(pkg / "README.md")
     if card is None:
         return problems + ["the package has no README.md card"]

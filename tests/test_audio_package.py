@@ -801,6 +801,30 @@ def test_the_gate_does_not_hang_on_a_fifo_in_the_package(staged):
     assert any("extra.txt: not a regular file" in p for p in problems), problems
 
 
+def test_a_file_swapped_for_a_fifo_after_the_directory_check_does_not_hang_the_scrub(staged, monkeypatch):
+    """The directory check passes (it is patched to see nothing), and then a FIFO is where a text file was: the scrub's read must not block."""
+    import os
+    import signal
+    (staged / "docs" / "extra.md").unlink(missing_ok=True)
+    os.mkfifo(staged / "extra.txt")
+    monkeypatch.setattr(ap, "unreadable_entries", lambda pkg: [])
+    signal.alarm(10)
+    try:
+        problems = gate(staged)
+    finally:
+        signal.alarm(0)
+    assert any("extra.txt: could not be read as a small UTF-8 text file" in p for p in problems), problems
+
+
+def test_the_scrub_finds_a_token_a_cache_directory_and_a_weights_suffix_in_a_package(staged):
+    (staged / ".cache").mkdir()
+    (staged / "docs" / "running.md").write_text("Powered by Stability AI\n" + "hf_" + "a" * 34 + "\n")
+    hits = ap.scrub_files(staged, hostname="some-host", home="/home/someone")
+    assert ".cache: a runtime cache" in hits and any("a Hugging Face token" in h for h in hits)
+    (staged / "x.bin").write_bytes(b"\xff\xfe")
+    assert "x.bin: a weights or cache file" in ap.scrub_files(staged, hostname="some-host", home="/home/someone")
+
+
 def test_the_gate_refuses_a_link_in_the_package_and_reads_nothing_through_it(staged, tmp_path):
     target = tmp_path / "outside.txt"
     target.write_text("x")
@@ -829,7 +853,7 @@ def test_the_gate_reports_a_benchmark_file_whose_sizes_is_not_a_list_of_objects(
 def test_an_unexpected_exception_while_reading_the_package_is_a_problem_and_not_a_traceback(staged, monkeypatch, exc):
     def boom(*a, **k):
         raise exc
-    monkeypatch.setattr(ap, "scrub_package", boom)
+    monkeypatch.setattr(ap, "scrub_files", boom)
     problems = gate(staged)
     assert len(problems) == 1 and problems[0].startswith("the gate could not read the package")
 

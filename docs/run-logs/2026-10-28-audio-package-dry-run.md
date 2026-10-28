@@ -10,7 +10,7 @@ Paths are placeholders (`<run>` is the run directory). Nothing was uploaded, pub
 |---|---|
 | The builder, the card renderer and the gate | `orchard/audio_package.py` |
 | The command | `tt-orchard audio-package RUN_DIR --namespace ORG --bench FILE --demo-repo DIR [--snapshot DIR] [--check]` |
-| Tests (194, with fake runs, plus 2 for `entries_from_bytes`) | `tests/test_audio_package.py` |
+| Tests (196, with fake runs, plus 2 for `entries_from_bytes`) | `tests/test_audio_package.py` |
 | Hostile-input readers (4 registered) | `tests/hostile_inputs.py` |
 
 ## What was staged
@@ -70,16 +70,16 @@ environment-floor rows, each labelled `measured (provisional bars)`.
 - The pin: the model revision is the same in `run.sh`, `tt-model.yaml`, the card and the evidence, and `run.sh` runs the revision check.
 - The Numbers table is compared row by row with the rows the package's own evidence files give. A value from another field, a label the runs do not earn, an extra row and a missing row are each refused. Evidence must be a JSON file in `evidence/`.
 - Every file the builder copies or generates is required.
-- The gate opens nothing it should not: a link, a FIFO, a socket, a device or a file over 20 MB is refused before anything is read, and every later read is of a small regular file through `safeio`. A shape no check names is a problem and not a traceback.
+- The gate opens nothing it should not: a link, a FIFO, a socket, a device or a file over 20 MB is refused before anything is read, and every later read is of a small regular file through `safeio`, including the scrub for host names, tokens and home paths (`scrub_files`). A shape no check names is a problem and not a traceback.
 - No weights file by suffix, no file over 20 MB, no home path, host name or token (`orchard/scrub.py`).
 - Numbers: only in the Numbers table; each row labelled `benchmark`, `single sample`, `unwarmed repeats`, `measured (provisional bars)` or `TODO`; a `benchmark` row only when the evidence's runs earn it
   (recomputed); each value is a number in its evidence file, rounded to the digits shown.
 - The builder refuses a run with no benchmark-labelled size, a label or spread the runs do not support, no 40-character model revision or library commit, an agreement that failed, a control that did
   not tell the fine-tune from the base model, a snapshot of another revision, and a package directory that already holds weights or anything else.
 
-Mutation table: 102 guards, each removed in turn with the whole test file run. First pass: 5 survived. Four were given a sharper test (the front-matter `license: other` check, the two
+Mutation table: 105 guards, each removed in turn with the whole test file run. First pass: 5 survived. Four were given a sharper test (the front-matter `license: other` check, the two
 number-in-prose checks, which were hidden behind each other, and the provisional-bars check, which the label text satisfied by itself). The fifth, an explicit link refusal for source files,
-was redundant with `safeio` (which refuses links) and was removed. Second pass: all red. After the Copilot review of PR 193 (a revision pin at run time, evidence bound to metrics, hostile shapes, required files, whole rows, special files) 40 more guards were mutated: all red except the two layered shape guards (`_obj` and the backstop in `read_facts`) each survive alone because the other covers them, and are red together.
+was redundant with `safeio` (which refuses links) and was removed. Second pass: all red. After the Copilot review of PR 193 (a revision pin at run time, evidence bound to metrics, hostile shapes, required files, whole rows, special files) 43 more guards were mutated: all red except the two layered shape guards (`_obj` and the backstop in `read_facts`) each survive alone because the other covers them, and are red together.
 
 One bug the tests found: a revision made only of digits would be read by YAML as a number, so the manifest quotes it.
 
