@@ -1,0 +1,3 @@
+target = "0.9.51"
+summary = "Add the decode-floor estimate, the speculative-decoding break-even calculator and the model-dimension hazard scan as pure modules"
+pr = 190
