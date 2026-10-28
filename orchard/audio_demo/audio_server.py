@@ -33,6 +33,7 @@ import math
 import os
 import random
 import re
+import shutil
 import signal
 import struct
 import subprocess
@@ -107,6 +108,10 @@ class Generator:
     def generate(self, req: JobRequest, on_stage: Callable[[str], None]) -> Clip:
         raise NotImplementedError
 
+    def close(self) -> None:
+        """Called once when the server stops. A generator that owns a child process or files ends and removes them here, so nothing outlives the
+        process that holds the lease."""
+
 
 # ---- audio file helpers ------------------------------------------------------------------------------------
 
@@ -166,16 +171,25 @@ class SubprocessChipGenerator(Generator):
 
     The caller holds the lease (run the server under `gozer run --chips 1 --`); the child inherits the environment, so it sees the leased chip.
     Each clip loads the model again (about the load time `chip_generate.py` records as `model_load_s`). That cost is part of every clip made this way.
+
+    Disk and processes: each request's run directory and log are removed when the request ends, whether it succeeded, failed or timed out (`keep_runs`
+    keeps them for debugging). `close` stops a child that is still running and removes a work directory this object made. The child is also stopped
+    if anything goes wrong while waiting for it.
     """
     model_name = "stable-audio-3 small-music, diffusion transformer on one Blackhole chip"
     device_name = "one Blackhole chip"
 
     def __init__(self, chip_python: str, script: str, src_dir: str, model: str = "small-music", work_dir: Optional[str] = None,
-                 timeout_s: float = 900.0, max_seconds: int = MAX_SECONDS):
+                 timeout_s: float = 900.0, max_seconds: int = MAX_SECONDS, keep_runs: bool = False):
         self.chip_python, self.script, self.src_dir, self.model = chip_python, script, src_dir, model
+        self.own_work = work_dir is None
         self.work = Path(work_dir) if work_dir else Path(tempfile.mkdtemp(prefix="audio-demo-"))
         self.timeout_s = timeout_s
         self.max_seconds = max_seconds
+        self.keep_runs = keep_runs
+        self._lock = threading.Lock()
+        self._proc: Optional[subprocess.Popen] = None
+        self._closed = False
 
     def load(self) -> None:
         """Check what the child needs. The model itself is loaded by the child for each clip."""
@@ -192,21 +206,53 @@ class SubprocessChipGenerator(Generator):
                 "--duration", repr(float(req.seconds)), "--steps", str(req.steps), "--cfg-scale", repr(float(req.cfg_scale)),
                 "--seed", str(req.seed), "--no-layers"]
 
+    @staticmethod
+    def _stop(proc: subprocess.Popen) -> None:
+        """Kill a child that is still running and reap it."""
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()
+
+    def close(self) -> None:
+        with self._lock:
+            self._closed = True
+            proc = self._proc
+        if proc is not None:
+            self._stop(proc)                       # the request that waits on it sees "stopped" and cleans up its own files
+        if self.own_work:
+            shutil.rmtree(self.work, ignore_errors=True)
+
     def generate(self, req: JobRequest, on_stage: Callable[[str], None]) -> Clip:
         run_dir = self.work / f"run-{uuid.uuid4().hex[:12]}"
+        log = run_dir.with_suffix(".log")
+        try:
+            return self._run(req, run_dir, log, on_stage)
+        finally:
+            if not self.keep_runs:
+                shutil.rmtree(run_dir, ignore_errors=True)
+                log.unlink(missing_ok=True)
+
+    def _run(self, req: JobRequest, run_dir: Path, log: Path, on_stage: Callable[[str], None]) -> Clip:
         env = dict(os.environ)
         env["PYTHONPATH"] = self.src_dir + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
         on_stage("loading the model and sampling on the chip")
-        log = run_dir.with_suffix(".log")
         self.work.mkdir(parents=True, exist_ok=True)
         with open(log, "wb") as out:
-            proc = subprocess.Popen(self.command(req, run_dir), stdout=out, stderr=subprocess.STDOUT, env=env, stdin=subprocess.DEVNULL)
+            with self._lock:
+                if self._closed:
+                    raise RuntimeError("the generator was stopped")
+                proc = self._proc = subprocess.Popen(self.command(req, run_dir), stdout=out, stderr=subprocess.STDOUT, env=env, stdin=subprocess.DEVNULL)
             try:
                 rc = proc.wait(timeout=self.timeout_s)
             except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait()
+                self._stop(proc)
                 raise RuntimeError(f"the chip run did not finish in {self.timeout_s:.0f} s and was stopped; the chip may need a reset") from None
+            finally:
+                self._stop(proc)                   # a no-op for a child that has ended; stops one if anything else went wrong while waiting
+                with self._lock:
+                    self._proc = None
+        if self._closed:
+            raise RuntimeError("the chip run was stopped because the server is shutting down")
         if rc != 0:
             tail = log.read_text(errors="replace").strip().splitlines()[-3:]
             raise RuntimeError(f"the chip run exited with code {rc}: " + " | ".join(tail))
@@ -242,9 +288,11 @@ class Job:
 class JobServer:
     """Holds the generator, the queue and the jobs. One worker thread makes the clips, one at a time.
 
-    A job fits while fewer than `max_waiting` jobs are queued: in all, one running job and up to `max_waiting` waiting ones. Finished jobs are kept for `keep` entries, newest last.
+    In all, one running job and up to `max_waiting` waiting ones fit; with `max_waiting` 0 an idle server takes one clip and refuses the next until it ends. Finished jobs are kept for `keep` entries, newest last.
     """
     def __init__(self, generator: Generator, max_waiting: int = 2, keep: int = 16):
+        if max_waiting < 0 or keep < 1:
+            raise ValueError("max_waiting must be 0 or more and keep at least 1")
         self.gen = generator
         self.max_waiting = max_waiting
         self.keep = keep
@@ -266,9 +314,11 @@ class JobServer:
         t.start()
 
     def stop(self) -> None:
+        """Stop the worker and close the generator (which ends a clip that is running)."""
         with self.lock:
             self.stopping = True
             self.wake.notify_all()
+        self.gen.close()
 
     def _run(self) -> None:
         try:
@@ -361,7 +411,9 @@ class JobServer:
                 raise NotReady("the model is still loading; try again in a minute")
             if self.state == "error":
                 raise NotReady(f"the model did not load: {self.load_error}")
-            if len(self.queue) >= self.max_waiting:
+            # the running clip and the waiting ones together: a job just queued and not yet picked up by the worker counts, so the answer does not
+            # depend on the worker's timing, and with no waiting slots an idle server still takes one clip
+            if len(self.queue) + (1 if self.running is not None else 0) >= self.max_waiting + 1:
                 raise QueueFull("the queue is full: a clip is being made and others are waiting")
             job = Job(req)
             self.jobs[job.id] = job
@@ -493,6 +545,13 @@ def default_script(here: Path) -> Path:
     return beside if beside.exists() else here.parent / "skills" / "audio-chip-templates" / "chip_generate.py"
 
 
+def nonnegative(text: str) -> int:
+    n = int(text)
+    if n < 0:
+        raise argparse.ArgumentTypeError("must be 0 or more")
+    return n
+
+
 def parse_args(argv=None):
     here = Path(__file__).resolve().parent
     env = os.environ.get
@@ -503,13 +562,14 @@ def parse_args(argv=None):
     ap.add_argument("--ui", action="store_true", help="run the Gradio page in this process after the model is ready")
     ap.add_argument("--ui-host", default=env("AUDIO_UI_HOST", "127.0.0.1"))
     ap.add_argument("--ui-port", type=int, default=int(env("AUDIO_UI_PORT", str(DEFAULT_UI_PORT))))
-    ap.add_argument("--max-waiting", type=int, default=2, help="jobs that may wait while one is running")
+    ap.add_argument("--max-waiting", type=nonnegative, default=2, help="jobs that may wait while one is running (0 or more)")
     ap.add_argument("--max-seconds", type=int, default=MAX_SECONDS, help="longest clip the chip generator accepts (the model's limit is 120)")
     ap.add_argument("--model", default=env("AUDIO_MODEL", "small-music"))
     ap.add_argument("--chip-python", default=env("ORCHARD_TTNN_PYTHON", sys.executable), help="the interpreter that has ttnn")
     ap.add_argument("--src-dir", default=env("ORCHARD_AUDIO_SRC", ""), help="the stable-audio-3 library checkout")
     ap.add_argument("--script", default=env("AUDIO_CHIP_GENERATE", str(default_script(here))), help="the harness's chip_generate.py")
-    ap.add_argument("--work-dir", default=env("AUDIO_WORK_DIR"), help="where each clip's run directory goes (default: a new temporary directory)")
+    ap.add_argument("--work-dir", default=env("AUDIO_WORK_DIR"), help="where each clip's run directory goes (default: a new temporary directory, removed on exit)")
+    ap.add_argument("--keep-runs", action="store_true", help="keep each clip's run directory and log (for debugging; they are removed by default)")
     ap.add_argument("--fake-delay", type=float, default=2.0, help="seconds the fake generator pretends to work")
     return ap.parse_args(argv)
 
@@ -518,7 +578,7 @@ def build_generator(args) -> Generator:
     if args.generator == "fake":
         return FakeGenerator(delay_s=args.fake_delay)
     return SubprocessChipGenerator(args.chip_python, args.script, args.src_dir, model=args.model, work_dir=args.work_dir,
-                                   max_seconds=args.max_seconds)
+                                   max_seconds=args.max_seconds, keep_runs=args.keep_runs)
 
 
 def main(argv=None) -> int:

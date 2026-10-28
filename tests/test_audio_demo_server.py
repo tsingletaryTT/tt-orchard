@@ -39,6 +39,10 @@ class Scripted(srv.Generator):
         self.gate, self.fail, self.load_gate, self.load_error = gate, fail, load_gate, load_error
         self.calls = []
         self.loads = 0
+        self.closed = 0
+
+    def close(self):
+        self.closed += 1
 
     def load(self):
         self.loads += 1
@@ -169,6 +173,41 @@ def test_a_body_that_is_not_json_or_too_large_is_refused(live):
     assert s.call("POST", "/v1/audio/jobs", raw_body=b"{not json")[0] == 400
     assert s.call("POST", "/v1/audio/jobs", raw_body=b"[1]")[0] == 400
     assert s.call("POST", "/v1/audio/jobs", raw_body=b"{" + b" " * (srv.MAX_BODY_BYTES + 10) + b"}")[0] == 413
+
+
+def test_zero_waiting_slots_still_allow_one_running_clip(live):
+    gate = threading.Event()
+    s = live(Scripted(gate=gate), max_waiting=0)
+    first = s.call("POST", "/v1/audio/jobs", JOB)
+    assert first[0] == 202                                   # idle: the one clip is accepted
+    second = s.call("POST", "/v1/audio/jobs", JOB)
+    assert second[0] == 429                                  # busy, and nothing may wait
+    gate.set()
+    s.wait_state(first[1]["id"], {"done"})
+    assert s.call("POST", "/v1/audio/jobs", JOB)[0] == 202   # idle again
+
+
+def test_a_job_that_has_not_been_picked_up_yet_counts_against_the_capacity(live):
+    """With one waiting slot, two quick posts are accepted whether or not the worker has dequeued the first; a third is refused."""
+    gate = threading.Event()
+    s = live(Scripted(gate=gate), max_waiting=1)
+    codes = [s.call("POST", "/v1/audio/jobs", JOB)[0] for _ in range(3)]
+    gate.set()
+    assert codes == [202, 202, 429]
+
+
+def test_negative_waiting_slots_are_refused():
+    with pytest.raises(ValueError):
+        srv.JobServer(Scripted(), max_waiting=-1)
+    with pytest.raises(SystemExit):
+        srv.parse_args(["--generator", "fake", "--max-waiting", "-1"])
+
+
+def test_stop_closes_the_generator(live):
+    gen = Scripted()
+    s = live(gen)
+    s.js.stop()
+    assert gen.closed == 1
 
 
 def test_a_negative_content_length_is_refused_and_does_not_hang_the_server(live):

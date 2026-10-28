@@ -138,6 +138,88 @@ def test_run_generation_blank_seed_is_chosen_and_shown(server, tmp_path):
     assert again.ok and isinstance(again.seed, int)
 
 
+@pytest.mark.parametrize("field,value", [
+    ("seed", "abc"), ("seed", float("inf")), ("seed", float("nan")), ("seed", 1.5), ("seed", -1), ("seed", 2**70),
+    ("steps", "abc"), ("steps", float("inf")), ("steps", 2.5), ("steps", 0),
+    ("cfg_scale", "abc"), ("cfg_scale", float("inf")), ("cfg_scale", float("nan")),
+    ("seconds", "abc"), ("seconds", float("inf")), ("seconds", float("nan")), ("seconds", None)])
+def test_run_generation_turns_bad_control_values_into_a_status_and_never_raises(field, value, tmp_path):
+    """The page gets whatever its boxes hold. A value that cannot be converted or is not finite is a message, and nothing is sent."""
+    args = {"seconds": 10, "steps": 8, "cfg_scale": 1.0, "seed": 1, field: value}
+    out = cl.run_generation(cl.AudioClient("http://127.0.0.1:1"), "x", args["seconds"], args["steps"], args["cfg_scale"], args["seed"], out_dir=tmp_path)
+    assert not out.ok and out.audio_path is None
+    assert "not reachable" not in out.status, "the value should have been refused before a request was made"
+    assert "unexpected" not in out.status.lower() and "must be" in out.status    # a message about the control, not a crash caught at the last step
+
+
+def test_run_generation_never_raises_for_an_unexpected_failure(tmp_path):
+    class Broken(cl.AudioClient):
+        def generate(self, *a, **k):
+            raise KeyError("id")
+    out = cl.run_generation(Broken("http://127.0.0.1:1"), "x", 10, 8, 1.0, 1, out_dir=tmp_path)
+    assert not out.ok and "unexpected" in out.status.lower() and "KeyError" in out.status
+
+
+def raw_server(reply: bytes):
+    """A server that answers every request with `reply` as it is and closes the connection."""
+    import socketserver
+
+    class H(socketserver.BaseRequestHandler):
+        def handle(self):
+            self.request.recv(65536)
+            self.request.sendall(reply)
+    srv_ = socketserver.ThreadingTCPServer(("127.0.0.1", 0), H)
+    srv_.daemon_threads = True
+    threading.Thread(target=srv_.serve_forever, daemon=True).start()
+    return srv_
+
+
+def test_a_reply_cut_short_is_server_down_and_a_reply_that_is_not_json_is_an_error():
+    cut = raw_server(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 500\r\n\r\n{\"status\": ")
+    junk = raw_server(b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 6\r\n\r\n<html>")
+    wrong = raw_server(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n[]")
+    try:
+        with pytest.raises(cl.ServerDown):
+            cl.AudioClient(f"http://127.0.0.1:{cut.server_address[1]}", timeout=3).health()
+        with pytest.raises(cl.AudioServerError, match="not a JSON"):
+            cl.AudioClient(f"http://127.0.0.1:{junk.server_address[1]}", timeout=3).health()
+        with pytest.raises(cl.AudioServerError, match="unexpected"):
+            cl.AudioClient(f"http://127.0.0.1:{wrong.server_address[1]}", timeout=3).health()
+        # through run_generation, each is a status
+        for bad in (cut, junk, wrong):
+            out = cl.run_generation(cl.AudioClient(f"http://127.0.0.1:{bad.server_address[1]}", timeout=3), "x", 10, 8, 1.0, 1)
+            assert not out.ok and out.status
+    finally:
+        for x in (cut, junk, wrong):
+            x.shutdown()
+            x.server_close()
+
+
+def test_a_job_reply_without_an_id_is_an_error():
+    no_id = raw_server(b"HTTP/1.1 202 Accepted\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}")
+    try:
+        with pytest.raises(cl.AudioServerError, match="no job id"):
+            cl.AudioClient(f"http://127.0.0.1:{no_id.server_address[1]}", timeout=3).submit("x", 10)
+    finally:
+        no_id.shutdown()
+        no_id.server_close()
+
+
+def test_saved_clips_are_kept_to_a_bounded_number(server, tmp_path):
+    """Each clip the page saves is a file on the local disk. Only the newest `keep` stay."""
+    s, c = server()
+    paths = [cl.run_generation(c, "x", 1, 8, 1.0, i, poll_s=0.01, out_dir=tmp_path, keep=3).audio_path for i in range(6)]
+    left = sorted(p.name for p in tmp_path.iterdir())
+    assert len(left) == 3 and all(Path(p).name in left for p in paths[-3:])
+
+
+def test_without_an_output_directory_the_clips_share_one_managed_directory(server):
+    s, c = server()
+    a = cl.run_generation(c, "x", 1, 8, 1.0, 1, poll_s=0.01)
+    b = cl.run_generation(c, "x", 1, 8, 1.0, 2, poll_s=0.01)
+    assert Path(a.audio_path).parent == Path(b.audio_path).parent          # not a new temporary directory for every request
+
+
 def test_run_generation_says_when_the_clip_ended_early(server, tmp_path):
     s, c = server(ShortClip())
     out = cl.run_generation(c, "x", 10, 8, 1.0, 1, poll_s=0.01, out_dir=tmp_path)

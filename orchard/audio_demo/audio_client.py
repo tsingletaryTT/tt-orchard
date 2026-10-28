@@ -8,9 +8,12 @@ with a plain message for a busy, unreachable or still loading server, bad input,
 """
 from __future__ import annotations
 
+import atexit
+import http.client
 import json
 import math
 import random
+import shutil
 import tempfile
 import time
 import urllib.error
@@ -23,6 +26,7 @@ MIN_SECONDS = 1
 MAX_SECONDS = 120           # the model's own limit (sample_size 5,292,032 at 44,100 Hz). Only 10 s clips have been checked on the chip.
 MAX_STEPS = 100
 MIN_CFG, MAX_CFG = 1.0, 20.0
+KEEP_CLIPS = 20            # clips the page keeps on the local disk; older ones are deleted
 EARLY_END_SHARE = 0.95      # a clip shorter than this share of the length asked for is reported as ended early
 
 BENCHMARK_PROMPT = "A warm acoustic guitar melody with soft percussion, 100 BPM"
@@ -97,9 +101,18 @@ class AudioClient:
             if e.code == 503:
                 raise ServerNotReady(f"The audio server is not ready: {detail or 'the model is loading'}.") from None
             raise AudioServerError(f"The audio server answered {e.code}: {detail or e.reason}") from None
-        except (urllib.error.URLError, OSError) as e:
-            raise ServerDown(f"The audio server at {self.base} is not reachable ({getattr(e, 'reason', e)}).") from None
-        return payload if raw else json.loads(payload)
+        except (urllib.error.URLError, OSError, http.client.HTTPException) as e:
+            # an HTTPException is a reply that stopped halfway or broke the protocol (IncompleteRead, BadStatusLine): the server is not usable
+            raise ServerDown(f"The audio server at {self.base} is not reachable ({getattr(e, 'reason', None) or type(e).__name__}).") from None
+        if raw:
+            return payload
+        try:
+            body = json.loads(payload)
+        except ValueError:
+            raise AudioServerError(f"The audio server at {self.base} sent a reply that is not a JSON document.") from None
+        if not isinstance(body, dict):
+            raise AudioServerError(f"The audio server at {self.base} sent an unexpected reply (a JSON {type(body).__name__}, not an object).")
+        return body
 
     def health(self) -> dict:
         return self._call("GET", "/v1/health")
@@ -112,7 +125,10 @@ class AudioClient:
         for key, value in (("seed", seed), ("steps", steps), ("cfg_scale", cfg_scale)):
             if value is not None:
                 body[key] = value
-        return self._call("POST", "/v1/audio/jobs", body)["id"]
+        job_id = self._call("POST", "/v1/audio/jobs", body).get("id")
+        if not isinstance(job_id, str):
+            raise AudioServerError("The audio server accepted the job but sent an unexpected reply: no job id.")
+        return job_id
 
     def status(self, job_id: str) -> dict:
         return self._call("GET", f"/v1/audio/jobs/{job_id}")
@@ -157,12 +173,47 @@ def random_seed() -> int:
     return random.randint(0, 2**31 - 1)
 
 
-def _whole_or_none(v) -> Optional[int]:
-    """A Gradio Number box gives None, "" or a float; a whole number comes back as an int and anything else as None."""
+def _whole_or_none(v, name: str) -> Optional[int]:
+    """A Gradio Number box gives None, "" or a float. Blank is None (the caller chooses a default). Anything else must be a finite whole number,
+    or the person is told which control is wrong."""
     if v is None or v == "":
         return None
-    f = float(v)
-    return int(f) if f == int(f) else None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        raise ValueError(f"The {name} must be a whole number, got {v!r}.") from None
+    if not math.isfinite(f) or f != int(f):
+        raise ValueError(f"The {name} must be a whole number, got {v!r}.")
+    return int(f)
+
+
+def _finite(v, name: str) -> float:
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        raise ValueError(f"The {name} must be a number, got {v!r}.") from None
+    if not math.isfinite(f):
+        raise ValueError(f"The {name} must be a finite number, got {v!r}.")
+    return f
+
+
+_CLIP_DIR: Optional[Path] = None
+
+
+def clip_dir() -> Path:
+    """One directory for all the clips this process saves, made on first use and removed at exit."""
+    global _CLIP_DIR
+    if _CLIP_DIR is None or not _CLIP_DIR.is_dir():
+        _CLIP_DIR = Path(tempfile.mkdtemp(prefix="audio-clips-"))
+        atexit.register(shutil.rmtree, _CLIP_DIR, True)
+    return _CLIP_DIR
+
+
+def prune_clips(folder: Path, keep: int) -> None:
+    """Delete all but the newest `keep` files in `folder`. The page hands each clip to Gradio, which serves its own copy, so an old one is safe to drop."""
+    files = sorted((p for p in folder.iterdir() if p.is_file()), key=lambda p: p.stat().st_mtime)
+    for old in files[:-keep] if keep > 0 else files:
+        old.unlink(missing_ok=True)
 
 
 @dataclass
@@ -191,18 +242,25 @@ def server_status(client: AudioClient) -> str:
 
 
 def run_generation(client: AudioClient, prompt, seconds, steps, cfg_scale, seed, on_progress=None, poll_s: float = 1.0,
-                   out_dir: Optional[Path] = None) -> Outcome:
-    """Make one clip for the page. Never raises for a problem the user can read about: the Outcome's status says what happened."""
-    seed_i = _whole_or_none(seed)
-    if seed_i is None or seed_i < 0:
-        seed_i = random_seed()                          # a seed is always shown, so a clip can be asked for again
-    steps_i = _whole_or_none(steps)
+                   out_dir: Optional[Path] = None, keep: int = KEEP_CLIPS) -> Outcome:
+    """Make one clip for the page. Never raises: whatever goes wrong, the Outcome's status says what happened in words the page can show."""
     try:
-        sec = float(seconds)
+        return _run_generation(client, prompt, seconds, steps, cfg_scale, seed, on_progress, poll_s, out_dir, keep)
+    except Exception as e:                      # the page's worker must always get an Outcome; an unexpected failure is reported, not hidden
+        return Outcome(False, f"Something unexpected went wrong ({type(e).__name__}: {e}).")
+
+
+def _run_generation(client, prompt, seconds, steps, cfg_scale, seed, on_progress, poll_s, out_dir, keep) -> Outcome:
+    try:
+        seed_i = _whole_or_none(seed, "seed")
+        steps_i = _whole_or_none(steps, "number of steps")
+        sec = _finite(seconds, "length")
         sec = int(sec) if sec == int(sec) else sec
-    except (TypeError, ValueError):
-        return Outcome(False, f"The length must be a number of seconds, got {seconds!r}.", seed=seed_i)
-    cfg = None if cfg_scale in (None, "") else float(cfg_scale)
+        cfg = None if cfg_scale in (None, "") else _finite(cfg_scale, "guidance scale")
+    except ValueError as e:
+        return Outcome(False, str(e))
+    if seed_i is None:
+        seed_i = random_seed()                          # a seed is always shown, so a clip can be asked for again
     try:
         result = client.generate(prompt, sec, seed=seed_i, steps=steps_i, cfg_scale=cfg, poll_s=poll_s, on_progress=on_progress)
     except ValueError as e:
@@ -213,10 +271,11 @@ def run_generation(client: AudioClient, prompt, seconds, steps, cfg_scale, seed,
         return Outcome(False, str(e), seed=seed_i)
     except AudioServerError as e:
         return Outcome(False, f"The server could not make the clip. {e}", seed=seed_i)
-    folder = Path(out_dir) if out_dir else Path(tempfile.mkdtemp(prefix="audio-"))
+    folder = Path(out_dir) if out_dir else clip_dir()
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"clip-seed{seed_i}-{result.job_id[:8]}.{result.audio_format}"
     path.write_bytes(result.audio)
+    prune_clips(folder, keep)
     s, used = result.stats, result.settings
     audio_s = float(s.get("audio_s") or sec)
     status = f"Done: {audio_s:.1f} s of audio, seed {seed_i}."

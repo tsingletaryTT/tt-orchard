@@ -50,6 +50,7 @@ shows the player, the settings the server used, the server's time and its stage 
 - The chip generator runs `chip_generate.py` once per clip, so the model is loaded again for each clip. Each clip's stage times show what that cost.
   Keeping the model resident needs `chip_generate.py` to split loading from sampling (issue linked from the pull request).
 - Only 10 second clips have been checked on the chip. The page allows lengths up to the model's own limit, and `--max-seconds` lowers the limit.
+- Each request's run directory and log are removed when it ends (`--keep-runs` keeps them), the page keeps its newest 20 clips, and stopping the server stops a chip run that is still going.
 - A clip that is already running cannot be stopped (stopping a process that holds the chip could leave it needing a reset). Cancelling it discards the
   clip when it ends.
 - The pictures below were taken against `--generator fake`, so the clip is a plain tone and the status line says "no chip". They show the page.

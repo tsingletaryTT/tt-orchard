@@ -43,7 +43,8 @@ def limits_from(client: ac.AudioClient) -> dict:
 
 def build_ui(client: ac.AudioClient, poll_s: float = 1.0) -> gr.Blocks:
     lim = limits_from(client)
-    with gr.Blocks(title="Stable Audio 3 small music on Tenstorrent") as demo:
+    # Gradio keeps its own copy of each served clip; delete_cache removes copies older than a day, checked hourly
+    with gr.Blocks(title="Stable Audio 3 small music on Tenstorrent", delete_cache=(3600, 86400)) as demo:
         gr.Markdown("# Stable Audio 3 small music on Tenstorrent Blackhole\n" + PAGE_NOTE)
         status_line = gr.Markdown(ac.server_status(client))
         with gr.Row():
@@ -76,7 +77,10 @@ def build_ui(client: ac.AudioClient, poll_s: float = 1.0) -> gr.Blocks:
                 seen["line"] = f"Waiting: place {position} in the queue." if state == "queued" else f"Making the clip: {stage or state}."
 
             def work() -> None:
-                box["out"] = ac.run_generation(client, prompt_, seconds_, steps_, cfg_, seed_, on_progress=on_progress, poll_s=poll_s)
+                try:
+                    box["out"] = ac.run_generation(client, prompt_, seconds_, steps_, cfg_, seed_, on_progress=on_progress, poll_s=poll_s)
+                except BaseException as e:                  # run_generation does not raise; this keeps the page from a KeyError if that ever changes
+                    box["out"] = ac.Outcome(False, f"Something unexpected went wrong ({type(e).__name__}: {e}).")
             worker = threading.Thread(target=work, daemon=True)
             worker.start()
             while worker.is_alive():
