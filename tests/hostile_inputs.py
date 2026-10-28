@@ -464,6 +464,42 @@ def _package_graft_record(base: Path):
     return package._stage_2_graft_record(base)
 
 
+def _audio_package_read_json_file(base: Path):
+    from orchard import audio_package
+    return audio_package.read_json_file(base / "input.json", "a test file")
+
+
+def _audio_run(base: Path, *, ledger: bool = True) -> None:
+    """A valid audio run in `base` (ledger and result), so the hostile item is the only thing wrong."""
+    import json
+    import test_audio_package as tap
+    (base / "stages" / "2").mkdir(parents=True, exist_ok=True)
+    if ledger:
+        (base / "ledger.jsonl").write_text(json.dumps({"event": "run_start", "data": {"model": "stabilityai/stable-audio-3-small-music"}}) + "\n")
+    (base / "stages" / "2" / "audio_result.json").write_text(json.dumps(tap.audio_result()))
+    (base / "bench.json").write_text(json.dumps(tap.bench_file()))
+
+
+def _audio_package_read_facts_result(base: Path):
+    from orchard import audio_package
+    (base / "stages" / "2").mkdir(parents=True, exist_ok=True)
+    (base / "ledger.jsonl").write_text("{}\n")
+    (base / "bench.json").write_text("{}")
+    return audio_package.read_facts(base, base / "bench.json")
+
+
+def _audio_package_read_facts_bench(base: Path):
+    from orchard import audio_package
+    _audio_run(base)
+    return audio_package.read_facts(base, base / "input.json")
+
+
+def _audio_package_read_facts_ledger(base: Path):
+    from orchard import audio_package
+    _audio_run(base, ledger=False)
+    return audio_package.read_facts(base, base / "bench.json")
+
+
 def _bench_rerun_read_samples(base: Path):
     from orchard import bench_rerun
     return bench_rerun.read_samples(base, "phase")
@@ -650,6 +686,7 @@ def _types():
 
 (_LedgerCorrupt, _PackageError, _SuiteError, _FetchError, _LedgerUnavailable, _CorpusError, _LedgerRefused, _SafeReadError,
  _MigrationRefused) = _types()
+from orchard.audio_package import AudioPackageError as _AudioPackageError  # noqa: E402
 ALL_ITEMS = frozenset(i.name for i in ITEMS)         # a loader that lets every OSError propagate by design
 
 READERS: list[Reader] = [
@@ -671,6 +708,12 @@ READERS: list[Reader] = [
     Reader("stages.gate_delta", _stages_gate_delta, rel="stage/delta.json"),
     Reader("package.read_reported", _package_read_reported, rel="reported-results.json", documented=(_PackageError,)),
     Reader("package._json", _package_json, documented=(_PackageError,)),
+    Reader("audio_package.read_json_file", _audio_package_read_json_file, documented=(_AudioPackageError,)),
+    Reader("audio_package.read_facts (hostile result)", _audio_package_read_facts_result, rel="stages/2/audio_result.json",
+           documented=(_AudioPackageError,)),
+    Reader("audio_package.read_facts (hostile benchmark file)", _audio_package_read_facts_bench, rel="input.json", documented=(_AudioPackageError,)),
+    Reader("audio_package.read_facts (hostile ledger)", _audio_package_read_facts_ledger, rel="ledger.jsonl", suffix=b"\n",
+           documented=(_AudioPackageError,)),
     Reader("package.stage_2_vocab", _package_stage_2_vocab, rel="stages/2/model-dir-sources.json"),
     Reader("package._stage_2_graft_record", _package_graft_record, rel="stages/2/model-dir-sources.json"),
     Reader("bench_rerun.read_samples", _bench_rerun_read_samples, suffix=b"\n", rel="phase/results/run/samples_task.jsonl", documented=(ValueError,)),

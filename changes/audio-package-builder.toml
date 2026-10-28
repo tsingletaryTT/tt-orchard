@@ -1,0 +1,3 @@
+target = "0.9.51"
+summary = "Audio package builder: stage a local, weights-free Stable Audio 3 small-music package from a finished run, render its card from measured numbers, and gate the card and package against the Stability AI Community License."
+pr = 190

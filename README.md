@@ -1713,6 +1713,42 @@ are provisional until the reference's own bfloat16 noise floor has been measured
 The `control` command requires the two runs to share the prompt, duration, steps, guidance scale, sampler, seed, dtype and sample size, so a difference in the
 waveform comes from the weights. `--unmatched` allows runs that differ in those settings; the report then says `matched: false` and carries a note.
 
+### 5.9fb The audio package builder (stage a Stable Audio 3 small-music package, locally)
+
+```
+tt-orchard audio-package RUN_DIR --namespace ORG --bench FILE --demo-repo DIR [--snapshot DIR]   # stage the package and run the gate
+tt-orchard audio-package RUN_DIR --namespace ORG --check                                          # run the gate on the package already staged
+```
+
+For a finished `stabilityai/stable-audio-3-small-music` run. It stages `stages/7/package/stable-audio-3-small-music-blackhole/` with a card
+(`README.md`), a copy of the model's license agreement (`LICENSE.md`), a `NOTICE` file, a draft v5.1 `tt-model.yaml` of kind `http-server`, `run.sh`,
+the chip runtime files (`runtime/`, copied unmodified), the job server, client and Gradio page (`demo/`, copied from the separate demo repository given
+with `--demo-repo`, which is only read), a how-to (`docs/running.md`), and the run's evidence (`evidence/`). It ships no weights. The weights are gated, and each
+user downloads them with their own Hugging Face account. It uploads nothing, publishes nothing and starts no process; the commands that would publish the
+package are written as text to `stages/7/AUDIO_PUBLISH_COMMANDS.txt`.
+
+The card is rendered from the run's measured numbers only. Timings come from an `audio_bench.py` sweep file (`--bench`; one warm-up run, then 3 or more
+measured runs per size, one loaded process). The builder recomputes every label and spread from the runs: 3 or more measured runs after a warm-up run is a
+`benchmark`, fewer is a `single sample`, and a file that says otherwise is refused. A run whose benchmark file has no size that earns `benchmark`,
+whose chip run has no 40-character model revision and library commit, whose chip run did not agree with the CPU reference, or whose control did not tell the
+fine-tune from the base model, is refused. Agreement rows carry the label `measured (provisional bars)`. The card makes no claim about sound quality.
+
+The gate (`package_problems`) reads the directory as it is on disk and refuses a card or package that:
+
+- lacks any license element: the license named and linked, research and non-commercial use permitted, the registration and USD $1,000,000 revenue terms quoted
+  as the agreement writes them (looked up in the package's own `LICENSE.md`), "Powered by Stability AI" on the card, the page and each document, the weights stated as
+  not included and gated, the Gemma Terms of Use named with its link, the runtime code stated as Tenstorrent's, and the reader told to read the license;
+- has a `NOTICE` that does not contain the attribution sentence exactly as the agreement writes it, or no copy of the agreement;
+- claims an open or commercial license (front matter other than `license: other`, or wording such as "commercial use is permitted" or "open-source model");
+- claims anything about sound quality, uses a name or mark in a way the license does not allow ("official", "endorsed", a logo image), or puts a number
+  outside the Numbers table;
+- holds a weights file (by suffix or by size), a home path, a host name or a token;
+- labels a row `benchmark` when its runs do not earn it, or shows a value that is not in its evidence file.
+
+What the gate does not decide: whether prose is true, whether naming the model identifies it or crosses the license's trademark clause, and whether Tenstorrent may
+publish under a Community License at all. Those are the operator's questions (see the run log). Details of one dry run:
+[docs/run-logs/2026-10-28-audio-package-dry-run.md](docs/run-logs/2026-10-28-audio-package-dry-run.md).
+
 ### 5.9f The demo environment
 
 ```bash

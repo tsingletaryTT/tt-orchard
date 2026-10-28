@@ -17,6 +17,7 @@
     tt-orchard kernel-env [--check] [--src-dir DIR] [--venv-dir DIR] [--tt-lang-skill-dir DIR] [--allow-stale-skills]
     tt-orchard demo-env [--check] [--dry-run] [--venv-dir DIR] [--tt-metal-dir DIR]
     tt-orchard audio-reference-env [--check] [--dry-run] [--venv-dir DIR] [--src-dir DIR]
+    tt-orchard audio-package RUN_DIR --namespace ORG --bench FILE --demo-repo DIR [--snapshot DIR] [--check]
     tt-orchard inventory TARGET [--python P] [--ttnn-python P] [--against F] [--layers N] [--seq N] [--class C] [--out DIR]
     tt-orchard inventory verify-candidates --inventory FILE|DIR [--out DIR] [--image IMG] [--max-ops N] [--timeout S] [--record]
     tt-orchard coder-speed [--endpoint URL --model NAME | --tiers] [--samples N] [--watch SECONDS] [--json]
@@ -325,6 +326,15 @@ def _parser() -> argparse.ArgumentParser:
     ar.add_argument("--dry-run", action="store_true", help="say what the build would do and change nothing")
     ar.add_argument("--venv-dir", help="where the venv lives (default ~/orchard-venvs/stable-audio, or $ORCHARD_AUDIO_VENV)")
     ar.add_argument("--src-dir", help="where the pinned stable-audio-3 checkout lives (default ~/orchard-src/stable-audio-3, or $ORCHARD_AUDIO_SRC)")
+    ap = sub.add_parser("audio-package", parents=[common],
+                        help="stage a local, weights-free package from a finished Stable Audio 3 small-music run, render its card from the run's "
+                             "numbers and check the card against the model's license. Uploads and publishes nothing")
+    ap.add_argument("run_dir", help="the run directory (holds ledger.jsonl and stages/2/audio_result.json)")
+    ap.add_argument("--namespace", required=True, help="the Hugging Face user or organisation the package would be published under (used in text only)")
+    ap.add_argument("--bench", help="the audio_bench.py sweep file the card's timings come from (one warm-up, 3 or more measured runs)")
+    ap.add_argument("--demo-repo", help="the separate demo repository checkout whose server, client and page are copied into the package (read only)")
+    ap.add_argument("--snapshot", help="the pinned model snapshot that holds LICENSE.md and NOTICE (default: the path the run recorded)")
+    ap.add_argument("--check", action="store_true", help="stage nothing; run the gate on the package already staged in the run")
     inv = sub.add_parser("inventory", parents=[common],
                          help="list the ops a model's reference code uses and which ones ttnn has; "
                               "`inventory refresh-ttnn` records ttnn's op names (takes a one-chip lease); "
@@ -925,6 +935,9 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
     if args.cmd == "audio-reference-env":
         from orchard import audio_reference_env
         return audio_reference_env.main(args, env=audio_reference_env.env_from_args(args, environ=env, home=home), out=out)
+    if args.cmd == "audio-package":
+        from orchard import audio_package
+        return audio_package.main(args, out=out)
     if args.cmd == "demo-env":
         from orchard import demo_env
         return demo_env.main(args, env=demo_env.env_from_args(args, environ=env, home=home), out=out)
