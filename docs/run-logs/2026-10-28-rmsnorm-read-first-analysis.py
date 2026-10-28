@@ -14,7 +14,8 @@ Definitions (fixed before the run):
                   runs after a write of kernel.py, or a shell call of kernel_check.py)
   block_states_read  count of read_file calls on the specification whose returned lines cover the
                   whole "Block states" section, plus shell calls whose output prints the section's
-                  body (a numbered grep line inside it, or its table text)
+                  body (at least 5 of its numbered lines, or at least 3 of its six state names). A grep that prints 1 to 4
+                  lines of the section is counted apart, as block_states_grep_hits.
   read_file_calls count of read_file calls on any file
 """
 import json
@@ -69,11 +70,13 @@ def classify(a):
         return "deadlock"
     if "not a valid next dataflow step" in first:
         return "pop_invalid_step"
-    if "Shape mismatch" in first:
+    if "shape mismatch" in first.lower():
         return "shape_mismatch"
     if a.get("category") == "numeric_mismatch":
         return "numeric"
-    if a.get("status") in ("wall", "wall_clock") or "wall" in detail.lower():
+    # wall-clock means the attempt ended on the wall budget with no simulator result. An attempt that ended on the wall
+    # budget after its last check answered with some other error is "other" (its `status` column says how it ended).
+    if not first and (a.get("status") in ("wall", "wall_clock", "wall-clock") or "wall" in detail.lower()):
         return "wall_clock"
     return "other"
 
@@ -101,13 +104,25 @@ def analyse(attempt_dir):
         if lo <= bs_first and hi >= bs_last:
             bs_read_file += 1
     bs_shell = 0
+    bs_grep_touch = 0
+    shell_detail = []
     for c in calls:
         if c["name"] != "shell":
             continue
         out = results.get(c["id"], "")
         numbered = {int(n) for n in re.findall(r"(?m)^(?:[\w./-]*TTLangSpecification\.md[:-])?(\d+)[:-]", out)}
-        if any(bs_first < n <= bs_last for n in numbered) or "Must be Written" in out or "Read Only while Reading" in out:
-            bs_shell += 1
+        inside = sorted(n for n in numbered if bs_first < n <= bs_last)
+        names = ("Must be Written", "Must be Read", "Read-Write", "Read Only while Reading", "No Access while Writing",
+                 "Out of Scope")
+        shown = [w for w in names if w in out]
+        if inside or shown:
+            bs_grep_touch += 1
+            # a grep that prints one or two lines of the section is a hit, not a reading of it; a shell call prints the
+            # section when it shows at least 5 of its numbered lines or at least 3 of its six state names (sed -n, cat)
+            if len(inside) >= 5 or len(shown) >= 3:
+                bs_shell += 1
+            shell_detail.append({"turn": c["turn"], "command": str(c["args"].get("command", ""))[:140],
+                                 "numbered_lines_inside": inside, "state_names_shown": len(shown)})
     first_check = None
     for c in calls:
         out = results.get(c["id"], "")
@@ -122,7 +137,7 @@ def analyse(attempt_dir):
         "attempt": a["attempt"], "passed_sim": bool(a.get("passed_sim")), "failure_class": classify(a),
         "first_line": a.get("first_line"), "turns": a.get("turns"), "status": a.get("status"),
         "first_check_turn": first_check, "block_states_read": bs_read_file + bs_shell,
-        "block_states_read_file": bs_read_file, "block_states_shell": bs_shell,
+        "block_states_read_file": bs_read_file, "block_states_shell": bs_shell, "block_states_grep_hits": bs_grep_touch, "block_states_shell_detail": shell_detail,
         "read_file_calls": len(reads), "grep_calls_on_reference": shell_greps_ref,
         "spec_lines_read_file": {s: f"{len(covered[s])}/{spec[s][1] - spec[s][0] + 1}" for s in SECTIONS},
         "decode_tok_s": (a.get("coder_speed") or {}).get("tok_s"), "agent_wall_s": a.get("agent_wall_s"),
