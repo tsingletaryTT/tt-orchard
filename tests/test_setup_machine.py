@@ -30,7 +30,7 @@ board 0000046131924055  (p300c)
   chip 3  0000:04:00.0  FREE
 """
 ONE_BOARD = "grain: board   (1 boards, 2 chips)\nboard 1  (p150)\n  chip 0  0000:01:00.0  FREE\n  chip 1  0000:02:00.0  FREE\n"
-LIST_NEXT = "  ✓ raahemnabeel/qwen3-coder-next-blackhole           container  blackhole  image bd0ca927a46b  8.6 GB  profile p300x2\n"
+LIST_NEXT = "  ✓ raahemnabeel/qwen3-coder-next           container  blackhole  image bd0ca927a46b  8.6 GB  profile p300x2\n"
 LIST_27B = "  ✓ mando2222/qwen3.8-27b-dflash2-p300x2-q4kv  container  blackhole  image 5020  8.6 GB  profile batch8-dflash2\n"
 ACQUIRE_HELP = "usage: gozer acquire [--owner-pid OWNER_PID] [--exact EXACT]"
 
@@ -292,6 +292,12 @@ def test_a_missing_ollama_is_a_failure_with_its_download_page(tmp_path):
     assert s.status == sm.FAIL and "ollama.com" in s.detail
 
 
+def test_a_longer_ollama_tag_does_not_count_as_the_cpu_model_being_pulled(tmp_path):
+    m = Machine(tmp_path, ollama_list="qwen3-coder:30b-a3b-q4_K_M  18 GB\n")
+    s = steps_by_name(m)["ollama"]
+    assert s.status == sm.TODO and s.actions[0].args[0] == ["ollama", "pull", "qwen3-coder:30b"]
+
+
 def test_an_ollama_server_that_is_down_is_a_warning_unless_asked_to_start_it(tmp_path):
     m = Machine(tmp_path)
     m.answers[("ollama", "list")] = (1, "", "could not connect")
@@ -355,8 +361,22 @@ def test_the_venv_location_can_be_chosen(tmp_path):
 def test_the_recommended_coder_package_is_pulled_when_it_is_missing(tmp_path):
     m = Machine(tmp_path, listing=LIST_27B)
     s = steps_by_name(m)["coder package"]
-    assert s.status == sm.TODO and s.actions[0].args[0] == ["tt-model", "pull", "raahemnabeel/qwen3-coder-next-blackhole"]
+    assert s.status == sm.TODO and s.actions[0].args[0] == ["tt-model", "pull", "raahemnabeel/qwen3-coder-next"]
     assert "160 GB" in s.detail
+
+
+def test_the_fallback_package_alone_does_not_count_as_the_default_being_installed(tmp_path):
+    # The default's id is a prefix of the fallback's id. Only the fallback is installed here, so the default
+    # must still be pulled; a substring match would call it installed and write a config for a missing package.
+    fallback_only = "  ✓ raahemnabeel/qwen3-coder-next-blackhole  container  blackhole  image bd0ca927a46b  8.6 GB  profile p300x2\n"
+    s = steps_by_name(Machine(tmp_path, listing=fallback_only))["coder package"]
+    assert s.status == sm.TODO and s.actions[0].args[0] == ["tt-model", "pull", "raahemnabeel/qwen3-coder-next"]
+
+
+def test_the_default_package_alone_does_not_count_as_the_fallback_being_installed(tmp_path):
+    s = steps_by_name(Machine(tmp_path, listing=LIST_NEXT), coder="coder-next-v1")["coder package"]
+    assert s.status == sm.TODO
+    assert s.actions[0].args[0] == ["tt-model", "pull", "raahemnabeel/qwen3-coder-next-blackhole"]
 
 
 def test_an_installed_servable_package_is_ok(tmp_path):
@@ -387,7 +407,7 @@ def test_a_quietbox_gets_coder_next_configuration_by_default(tmp_path):
     s = steps_by_name(m)["config"]
     assert s.status == sm.TODO and [Path(a.args[0]).name for a in s.actions] == ["bringup.toml", "tiers.toml"]
     bring = s.actions[0].args[1]
-    assert 'target = "raahemnabeel/qwen3-coder-next-blackhole"' in bring and "port = 8001" in bring
+    assert 'target = "raahemnabeel/qwen3-coder-next"' in bring and "port = 8001" in bring
     assert f'runs_root = "{m.home}/orchard-runs"' in bring
     assert f'reference_python = "{m.home}/.local/share/tt-orchard/venvs/reference/bin/python"' in bring
     assert "@" not in bring.replace("@gmail", "")                    # no placeholder left
@@ -535,7 +555,7 @@ def test_the_report_has_one_line_per_step_and_plain_text_when_piped(tmp_path):
 
 
 def test_the_default_coder_is_the_recommendation():
-    assert sm.CODERS["coder-next"]["package"].endswith("qwen3-coder-next-blackhole")
+    assert sm.CODERS["coder-next"]["package"].endswith("qwen3-coder-next")
     p = subprocess.run([sys.executable, "-m", "orchard.setup_machine", "--help"], cwd=REPO, capture_output=True, text=True)
     assert "default: coder-next" in " ".join(p.stdout.split())
 
@@ -579,7 +599,7 @@ def test_cpu_torch_comes_from_the_pytorch_cpu_index(tmp_path):
 def test_without_the_coder_option_the_recommendation_is_set_up(tmp_path):
     code, out = run_main(Machine(tmp_path, listing=LIST_27B), "--check")
     assert out.splitlines()[0].startswith("tt-orchard setup (coder-next:") or "coder-next:" in out.splitlines()[0]
-    assert "raahemnabeel/qwen3-coder-next-blackhole" in out
+    assert "raahemnabeel/qwen3-coder-next" in out
     code, out = run_main(Machine(tmp_path / "b", listing=LIST_NEXT), "--check", "--coder", "27b")
     assert "27b:" in out.splitlines()[0] and "mando2222" in out
 
