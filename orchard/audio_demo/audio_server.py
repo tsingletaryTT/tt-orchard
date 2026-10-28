@@ -217,7 +217,8 @@ class SubprocessChipGenerator(Generator):
         stages = {}
         try:
             timings = json.loads((run_dir / "chip.json").read_text()).get("timings", {})
-            stages = {k: float(v) for k, v in timings.items() if isinstance(v, (int, float)) and not isinstance(v, bool)}
+            # only the entries that are times (named *_s); a count such as the number of transformer passes is not a time
+            stages = {k: float(v) for k, v in timings.items() if k.endswith("_s") and isinstance(v, (int, float)) and not isinstance(v, bool)}
         except (OSError, ValueError):
             pass                                  # the clip is good without its timings
         return Clip(data, "flac", flac_seconds(data), stages)

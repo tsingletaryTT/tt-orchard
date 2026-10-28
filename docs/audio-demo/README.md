@@ -36,6 +36,15 @@ shows the player, the settings the server used, the server's time and its stage 
 - the clip ended before the length asked for;
 - the input is refused (the client checks it before any request is made, and the server checks it again).
 
+## What was checked
+
+- Every guard in the server, the client and the page logic has a test that was seen to fail with the guard removed (tests/test_audio_demo_*.py). The
+  page's own tests need Gradio and are skipped where it is not installed.
+- On 2026-10-28, one run on one Blackhole chip under a gozer lease: the job server with the real chip generator and the client, with the benchmark
+  prompt, 10 seconds, 8 steps, guidance scale 1 and seed 42. The clip came back as a FLAC file of 10.0 seconds. The server took 11.1 seconds for it,
+  which includes starting the child process and loading the model (5.1 seconds of that, as the child reported it). One clip, one run. Nobody has listened
+  to it, and the page itself was not run against the real chip.
+
 ## Limits
 
 - The chip generator runs `chip_generate.py` once per clip, so the model is loaded again for each clip. Each clip's stage times show what that cost.

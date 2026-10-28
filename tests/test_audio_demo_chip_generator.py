@@ -41,7 +41,7 @@ if mode == "hang":
 out = Path(a.out); (out / "clips").mkdir(parents=True)
 if mode != "noclip":
     (out / "clips" / "audio.flac").write_bytes(Path(os.environ["STAND_IN_FLAC"]).read_bytes())
-(out / "chip.json").write_text(json.dumps({"timings": {"model_load_s": 5.4, "generate_and_decode_s": 5.7, "note": "x", "ok": True}}))
+(out / "chip.json").write_text(json.dumps({"timings": {"model_load_s": 5.4, "generate_and_decode_s": 5.7, "note": "x", "ok": True, "chip_passes": 8, "ok_s": True}}))
 '''
 
 
@@ -83,7 +83,7 @@ def test_the_child_gets_the_request_and_the_library_on_its_path(gen):
     assert "--no-layers" in argv
     assert seen["pythonpath"].split(":")[0] == str(tmp / "src")
     assert clip.audio_format == "flac" and clip.audio_s == pytest.approx(10.0, abs=1e-3)
-    assert clip.stages == {"model_load_s": 5.4, "generate_and_decode_s": 5.7}            # only the numbers; a bool and a string are left out
+    assert clip.stages == {"model_load_s": 5.4, "generate_and_decode_s": 5.7}            # only times: a count (chip_passes), a bool, a bool named *_s and a string are left out
     assert stages and "chip" in stages[0]
 
 
