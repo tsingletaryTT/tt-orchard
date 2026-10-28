@@ -1,0 +1,3 @@
+target = "0.9.40"
+summary = "Telegraph screenshots with the virtual local spend beside the helper spend."
+pr = 150

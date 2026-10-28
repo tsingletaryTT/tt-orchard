@@ -584,9 +584,12 @@ the research setting are under **Options**, and the line says what they are now.
 ![New bring-up: the model field, the closed Options line, Run checks as the main button](docs/ui/operator-new-bringup.png)
 
 The Telegraph view (section 5.9g) shows what the outside helper has cost: spend against each cap, every call, and the totals by model
-and by problem. This one reads the ledger of 40 real helper calls made while comparing outside models on failing kernels ($1.21 in all).
-The meter is amber because one problem has used 5 of the 6 calls the configuration allows it. The configuration is a placeholder with an
-example host and a dummy key variable. The page only reads the ledger, so nothing was sent or spent for the picture.
+and by problem. Under the caps, a "Local (virtual)" block prices the tokens the local models used in the run folders at a hosted model's
+list rate, and the top bar shows the two figures side by side ("Helper" is real money, "Local" is virtual and is never added to it).
+This one reads the ledger of 40 real helper calls ($1.21 in all) and 19,720 local agent turns across 21 run and probe directories
+(about $14.10 at the Haiku 5.5 list rate; six runs are marked "not fully read", so their figures are low). The meter is amber because one
+problem has used 5 of the 6 calls the configuration allows it. The configuration is a placeholder with an example host and a dummy key
+variable. The page only reads the ledger and the logs, so nothing was sent or spent for the picture.
 
 ![Operator style, the Telegraph view: spend and caps, recent calls, totals by model and by problem](docs/ui/operator-telegraph.png)
 
@@ -1650,6 +1653,7 @@ tt-orchard audio-reference-env --check     # check it; no device, no token
 python3 -m orchard.audio_reference check REFERENCE_RUN CANDIDATE_RUN    # PCC, relative L2 error and slope per saved array
 python3 -m orchard.audio_reference check REFERENCE_RUN BF16_RUN --cross-precision   # let the dtype setting differ (the noise floor)
 python3 -m orchard.audio_reference control FINE_TUNE_RUN BASE_RUN       # the base model's waveform must differ
+python3 -m orchard.audio_reference control FINE_TUNE_RUN BASE_RUN --unmatched   # allow runs whose settings differ (the report says so)
 ```
 
 This is step 0 of the Stable Audio runtime design (`docs/superpowers/specs/2026-10-28-stable-audio-runtime-design.md`). The environment is a venv with
@@ -1659,6 +1663,8 @@ removed, so the model files must already be in the local cache. It saves the enc
 network pass, every step's latent and denoised estimate, the final latent and the waveform, each as a float32 `.npy` file with its sha256 in `manifest.json`.
 `python3 -m orchard.audio_reference check` compares two such directories and needs all three numbers: PCC alone passes an output that is scaled. The bars in it
 are provisional until the reference's own bfloat16 noise floor has been measured (`bars_from_floor`).
+The `control` command requires the two runs to share the prompt, duration, steps, guidance scale, sampler, seed, dtype and sample size, so a difference in the
+waveform comes from the weights. `--unmatched` allows runs that differ in those settings; the report then says `matched: false` and carries a note.
 
 ### 5.9f The demo environment
 
@@ -1799,6 +1805,49 @@ Every call, refusal and cache hit is one line in `telegraph.jsonl` (model, token
   (`GET /api/telegraph`). It sends nothing to the helper and spends nothing. A run directory that holds its own `telegraph.jsonl`
   shows that run's spend under its title.
 
+### 5.9h Virtual spend: what the local models would cost at a hosted price
+
+The outside helper (5.9g) has a real bill. The local models have none, so their work is hard to compare with it. `tt-orchard spend`
+prices the local token use at a reference hosted model's rates so the two can be read side by side. The local figure is virtual:
+nobody was charged, and it is never added to the real spend.
+
+The agent logs hold one object per turn with `usage` (`prompt_tokens`, `completion_tokens`). Every turn re-sends the whole
+conversation, so the prompt count is large. A hosted provider with prompt caching would bill most of those repeated tokens for much
+less, so the figure is a comparison figure only. The reader counts these sources: `log/*.jsonl` agent logs (a kernel-probe attempt,
+a bring-up stage) and the benchmark proxy's `requests.jsonl`. A turn that names a helper (a `call_id`, or `origin`, `source` or
+`helper` set to telegraph or helper) is left out and counted, and `telegraph.jsonl` is never read. A malformed line, bytes that
+are not UTF-8, a line over 2 MiB (its usage is read from the end of the line when it is there), a turn with no token counts, a link
+and a file over the read caps are counted and shown as "Left out". The reader never raises and never follows links.
+
+- `tt-orchard spend [DIR ...]`: the real helper spend (from the telegraph ledger) and the virtual local spend (turns, tokens, agent
+  time from a kernel-probe `attempt.json`, and the dollars at each reference price) on separate lines. With no DIR it reads every
+  run under `runs_root` of the bringup config. Reads only. Chip lease time is not recorded in these logs, so it is not shown.
+  - `--json`: the same figures as JSON, in two keys (`real_helper_spend` and `local_virtual_spend`) with no combined total.
+  - `--dir`: the telegraph ledger folder (default: `dir` in `[telegraph]`, else `~/.cache/tt-orchard/telegraph`).
+  - `--telegraph-config`: read the tables from another TOML file (default: the bringup config).
+- The `[virtual_spend]` table of the bringup config sets the prices. With no table the defaults apply. Keys: `reference` (the name
+  in labels, default `claude-haiku-5-5`), `price_in` and `price_out` (dollars per million tokens, default 0.10 and 0.50), and
+  `extra`, a list of further references, each with `name`, `price_in` and `price_out` (for example `claude-sonnet-5-5` at 2.0
+  and 10.0). A misspelled key, a negative or non-finite price and a repeated name are refused.
+
+  ```toml
+  [virtual_spend]
+  reference = "claude-haiku-5-5"
+  price_in = 0.10
+  price_out = 0.50
+  [[virtual_spend.extra]]
+  name = "claude-sonnet-5-5"
+  price_in = 2.0
+  price_out = 10.0
+  ```
+- In the web page a second figure sits beside the helper's spend meter, for example `Local ≈ $0.38 (virtual, at claude-haiku-5-5)`.
+  It has a dashed outline and no state colour: amber and red on the helper meter mean real money only. It shows for the selected
+  run, or for every listed log when no run is selected, and only when local logs with token counts exist. The Telegraph view has a
+  "Local (virtual)" table with a row for each run and each kernel-probe output under `<runs>/kprobe`: turns, tokens, agent time and
+  the cost at each reference. `GET /api/virtual-spend` (with `?run=NAME`) serves both, reads only, and returns no path.
+- Checked against the kernel-probe round `rms5` (5 attempts, no kernel passed): 137 turns, 3,373,905 prompt and 78,468 completion
+  tokens, which is $0.3766 at `claude-haiku-5-5` and $7.53 at `claude-sonnet-5-5`.
+
 ## 6. Lessons that will bite you
 
 Each of these happened on the development machine. Details are in the
@@ -1860,6 +1909,7 @@ Each of these happened on the development machine. Details are in the
 | [`docs/run-logs/2026-10-hemmingway-1.md`](docs/run-logs/2026-10-hemmingway-1.md) | The log of the first real run |
 | [`docs/analysis/qwen3-5-122b-analysis.md`](docs/analysis/qwen3-5-122b-analysis.md) | Analysis: Using Qwen3.5-122B-A10B with tt-orchard |
 | [`docs/analysis/qwen3-5-122b-comparison.html`](docs/analysis/qwen3-5-122b-comparison.html) | Visual comparison: 27B vs 122B model requirements |
+| [`docs/releases.md`](docs/releases.md), [`changes/`](changes/) | How the version number is computed from change fragments, and how a release is cut |
 | [`CLAUDE.md`](CLAUDE.md) | The decisions and standing rules |
 | [`docs/project-log.md`](docs/project-log.md) | The dated project log: what was done, found and left open |
 
@@ -1875,6 +1925,22 @@ Keep skills short and concrete. Give the agent tested scripts to copy and a smal
 fill in. A skill longer than 40,000 characters is cut (`SKILL_CHARS`). A running supervisor keeps
 the code and skills it loaded at start; to load a change into a paused run, use `kill -9` and
 restart (see [5.4](#54-recover-after-a-crash)).
+
+### Versions and releases
+
+A pull request does not edit a version field. It adds one file, `changes/<branch-slug>.toml`, that names the
+version the feature claims and says in one sentence what it does:
+
+```bash
+python3 scripts/version.py new my-feature      # writes changes/my-feature.toml; edit its summary
+python3 scripts/version.py check
+```
+
+The version that `tt-orchard --version` and the web page report is the highest target in `changes/`, or `RELEASE`
+(the last released version, one line in `orchard/__init__.py`) when there is none. Two features may claim the same
+number. A release is cut with `python3 scripts/version.py release`, which writes the release notes and prints the
+tag commands for a person to run. See [`docs/releases.md`](docs/releases.md) for the steps and for moving an open
+pull request to fragments.
 
 ### Run the tests
 
