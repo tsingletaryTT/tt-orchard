@@ -454,7 +454,7 @@ def test_the_tool_runs_in_the_hardware_environment_of_the_probe_with_the_stall_w
         Path(argv[argv.index("--out") + 1]).write_text(json.dumps({"phase": "hw", "sets": [GOOD_HW_SET], "error": None}))
         return kp.Watched(0, None, False, 1.0)
     make_check(adir, tmp_path, fake, call_timeout_s=200.0).call({})
-    assert seen["backstop_s"] == 120.0 + 200.0 and seen["term_grace_s"] == kp.GOZER_TERM_GRACE_S
+    assert seen["backstop_s"] == hwtool.outer_backstop_s(120.0, 200.0) and seen["term_grace_s"] == kp.GOZER_TERM_GRACE_S
     assert seen["watcher"].quiet_s == kp.HW_QUIET_S and seen["watcher"].repeat_lines == kp.HW_REPEAT_LINES
     assert seen["env"]["ORCHARD_RUN_DIR"] == str(adir.resolve())
     assert "TT_METAL_VISIBLE_DEVICES" not in seen["env"] and "HF_TOKEN" not in seen["env"]

@@ -1246,7 +1246,8 @@ def _hw_run(adir: Path, vdir: Path, kernel: Path, *, op: str, reason: str, share
         # hwtool.py is stdlib only, so it runs as a script from any directory with the child's small environment.
         argv = [sys.executable, str(Path(hwtool.__file__).resolve()), "run", "--who", wrapper["who"], "--reason", reason,
                 "--wait-s", repr(float(wrapper["wait_s"])), "--result", str(lease_file),
-                "--sha256", str(wrapper["sha256"]), "--file", str(kernel), "--",
+                "--sha256", str(wrapper["sha256"]), "--file", str(kernel),
+                "--call-timeout-s", repr(float(wrapper["call_timeout_s"])), "--",
                 _abs_executable(shared_python), *harness]
     try:
         got = run_watched(argv, cwd=Path(kernel).parent, env=env, log_path=log,
@@ -1274,6 +1275,11 @@ def _hw_run(adir: Path, vdir: Path, kernel: Path, *, op: str, reason: str, share
         return ({"passed": False, "started": False, "category": "harness_error", "pcc_min": None, "sets": [], "violations": [],
                  "first_line": why, "watch": _watch_facts(got),
                  "elapsed_s": round(got.elapsed_s, 1), **extra}, None, text)
+    if wrapper is not None and lease and lease.get("outcome") == "timeout" and not got.killed:
+        # The wrapper stopped the harness at the call timeout, counted from the grant: a hang, like a watcher stop.
+        return ({"passed": False, "started": kernel_reached(text), "category": "hang", "pcc_min": None, "sets": [], "violations": [],
+                 "first_line": f"call timeout: the harness was still running {wrapper['call_timeout_s']:.0f} s after the grant and was stopped",
+                 "elapsed_s": round(got.elapsed_s, 1), "watch": _watch_facts(got), **extra}, "hang", text)
     if got.killed:
         # The first line is the watcher's own reason ("backstop: ..." or "stalled: ..." or "repeating: ..."), so a
         # watcher stop is not read as a device hang without saying which rule stopped it.
@@ -1412,7 +1418,8 @@ def make_hardware_check(adir: Path, *, op: str, n, shared_python, policy: hwtool
             return {**blocked, "elapsed_s": 0.0}, None, ""
         hw, event, text = _hw_run(adir, state["vdir"], state["kernel"], op=op, reason=f"kernel-probe {op} attempt {n} agent check {k}",
                                   shared_python=shared_python, run_watched=run_watched, cancel=None,
-                                  backstop_s=wait_s + timeout_s, wrapper={"who": who, "wait_s": wait_s, "sha256": state["sha"]})
+                                  backstop_s=hwtool.outer_backstop_s(wait_s, timeout_s),
+                                  wrapper={"who": who, "wait_s": wait_s, "sha256": state["sha"], "call_timeout_s": timeout_s})
         return (*judged(hw, event), text)
     return hwtool.HardwareCheck(policy, prepare=prepare, run=run, clock=clock, sleep=sleep,
                                 on_record=lambda summary: (_real_dir(probe_dir / HWCHECK_DIR),

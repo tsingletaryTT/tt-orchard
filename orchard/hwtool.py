@@ -53,9 +53,12 @@ VIOLATIONS_SHOWN = 5
 # ---- the wrapper's constants -------------------------------------------------------------------------------------------------------
 WRAP_BUSY = 10                      # the wrapper's exit status when the board stayed busy for the whole wait (the ticket was cancelled)
 WRAP_NO_LEASE = 12                  # gozer would not give a lease, or gave one with no device list: the harness was not run
+WRAP_TIMEOUT = 124                  # the harness was still running at the call timeout (counted from the grant) and was stopped
 HEARTBEAT_S = 10.0                  # while waiting for a board the wrapper prints a new line this often, so the stall watcher sees progress
 ACQUIRE_TIMEOUT_S = 60.0            # `gozer acquire` answers at once; one that takes this long is given up
 STATUS_TIMEOUT_S = 30.0
+WAIT_MARGIN_S = 30.0                # `gozer wait` is given its allowance plus this much before the wrapper gives up on the command itself
+RELEASE_GRACE_S = 90.0              # the release resets the chips (about 42 s measured); the outer timeout leaves this much for it
 RESET_FAILED_TEXT = ("NOT marked clean", "not resetting")      # `gozer release` exits 0 even when the reset failed; these say so
 _NAME = re.compile(r"[0-9A-Za-z]+")
 
@@ -96,6 +99,14 @@ def schema(policy: HwPolicy) -> dict:
                        "properties": {"note": {"type": "string", "description":
                                                f"optional, at most {NOTE_MAX} characters, kept in the record"}},
                        "required": [], "additionalProperties": False}}}
+
+
+def outer_backstop_s(wait_s: float, call_timeout_s: float) -> float:
+    """The probe's hard timeout on the whole wrapper: the sum of every phase it can be in, each with its own allowance. The acquire
+    (ACQUIRE_TIMEOUT_S), the wait for a busy board (`wait_s` and its margin), the run after the grant (`call_timeout_s`, which the
+    wrapper enforces itself from the grant) and the release (RELEASE_GRACE_S). The wrapper's own deadlines all end before this, so
+    the outer timeout never cuts a phase short because an earlier phase used its time."""
+    return ACQUIRE_TIMEOUT_S + max(wait_s, 0.0) + WAIT_MARGIN_S + call_timeout_s + RELEASE_GRACE_S
 
 
 def _utc_stamp() -> str:
@@ -195,7 +206,8 @@ def _sha256_of(path) -> str | None:
 
 def run_wrapper(*, who: str, reason: str, wait_s: float, result_path, command: list[str], gozer: str = "gozer",
                 sh=None, spawn=None, now=time.time, out=None, pid: int | None = None,
-                expect_sha256: str | None = None, kernel_file: str | None = None) -> int:
+                expect_sha256: str | None = None, kernel_file: str | None = None,
+                call_timeout_s: float | None = None, mono=time.monotonic) -> int:
     """Take one chip, run `command` under the lease, release it, exit. Returns the exit status.
 
     The lease is requested with `gozer acquire --owner-pid <this process>`, so a wrapper that dies by any signal leaves a lease whose
@@ -247,7 +259,7 @@ def run_wrapper(*, who: str, reason: str, wait_s: float, result_path, command: l
                 rec.update(outcome="changed", release_text="the kernel copy changed while the call waited for the board, so it was not run")
                 status = WRAP_NO_LEASE
             else:
-                status = _run_under_lease(command, devices, rec, spawn)
+                status = _run_under_lease(command, devices, rec, spawn, call_timeout_s, mono)
     except _Stop:
         rec["outcome"], status = "interrupted", 143
     except KeyboardInterrupt:
@@ -329,25 +341,43 @@ def _release(lease_id: str, rec: dict, sh, gozer: str) -> None:
         rec.update(release_ok=False, release_text=((text or "") + (err or "")).strip()[:300] or f"gozer release exited {code}")
 
 
-def _run_under_lease(command, devices: str, rec: dict, spawn) -> int:
+def _stop_command(proc) -> None:
+    """Ask the command to end, then kill it, with a second SIGTERM ignored meanwhile (the command is already being stopped)."""
+    previous = _ignore_term()
+    try:
+        proc.terminate()
+        try:
+            proc.wait(timeout=20)
+        except Exception:
+            proc.kill()
+            proc.wait()
+    finally:
+        _restore_term(previous)
+
+
+def _run_under_lease(command, devices: str, rec: dict, spawn, call_timeout_s: float | None = None, mono=time.monotonic) -> int:
     """Run `command` with the lease's devices. The command is in the wrapper's own process group, so the probe's group kill reaches
-    it. On a stop (`_Stop` or KeyboardInterrupt) it is asked to end and then killed, and the stop goes on."""
+    it. The call-timeout clock starts here, at the grant: the command is stopped at that deadline whatever the wait for the board took,
+    and the stop is recorded as outcome `timeout` (exit status WRAP_TIMEOUT). The deadline is checked before every wait, so a late
+    wake-up cannot extend it. On a stop (`_Stop` or KeyboardInterrupt) the command is asked to end and then killed, and the stop goes on."""
     env = dict(os.environ)
     env["TT_VISIBLE_DEVICES"] = devices
     proc = spawn(list(command), env=env)
+    deadline = None if call_timeout_s is None else mono() + call_timeout_s
     try:
-        code = proc.wait()
-    except BaseException:
-        previous = _ignore_term()                              # the command is being stopped: do not be stopped again meanwhile
-        try:
-            proc.terminate()
+        while True:
+            left = None if deadline is None else deadline - mono()
+            if left is not None and left <= 0:
+                _stop_command(proc)
+                rec["outcome"] = "timeout"
+                return WRAP_TIMEOUT
             try:
-                proc.wait(timeout=20)
-            except Exception:
-                proc.kill()
-                proc.wait()
-        finally:
-            _restore_term(previous)
+                code = proc.wait(timeout=left)
+                break
+            except subprocess.TimeoutExpired:
+                continue
+    except BaseException:
+        _stop_command(proc)
         raise
     rec["returncode"] = code
     return code if code >= 0 else 128 - code
@@ -372,7 +402,7 @@ def wrapper_cli(argv: list[str], *, install_signals: bool = True, **inject) -> i
     """`python hwtool.py run --who W --reason R --wait-s N --result PATH -- COMMAND...`. `inject` (sh, spawn, now, out, pid, gozer)
     goes to run_wrapper: the tests run the real wrapper in process with a fake gozer and a fake command."""
     if not argv or argv[0] != "run" or "--" not in argv:
-        print("usage: hwtool.py run --who WHO --reason REASON --wait-s N --result PATH [--sha256 H --file PATH] -- COMMAND...", file=sys.stderr)
+        print("usage: hwtool.py run --who WHO --reason REASON --wait-s N --result PATH [--sha256 H --file PATH --call-timeout-s N] -- COMMAND...", file=sys.stderr)
         return 2
     cut = argv.index("--")
     opts, command = argv[1:cut], argv[cut + 1:]
@@ -390,8 +420,13 @@ def wrapper_cli(argv: list[str], *, install_signals: bool = True, **inject) -> i
         raise _Stop()
     if install_signals:
         signal.signal(signal.SIGTERM, stop)
+    try:
+        call_timeout = float(values["--call-timeout-s"]) if "--call-timeout-s" in values else None
+    except ValueError:
+        print("hwtool.py run: --call-timeout-s must be a number", file=sys.stderr)
+        return 2
     return run_wrapper(who=who, reason=reason, wait_s=wait_s, result_path=result, command=command,
-                       expect_sha256=values.get("--sha256"), kernel_file=values.get("--file"), **inject)
+                       expect_sha256=values.get("--sha256"), kernel_file=values.get("--file"), call_timeout_s=call_timeout, **inject)
 
 
 def read_wrapper_record(path) -> dict | None:
