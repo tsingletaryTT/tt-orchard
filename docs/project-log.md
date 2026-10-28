@@ -2644,3 +2644,11 @@ Prompt (operator decision): relax the audio class rule for sampler-only differen
 - Result on the real pair: class weights-only, path weights-only, alternative path full-port, confidence medium, two serving differences and a hazard that says the sampler settings need a check. Nothing in this change ran on a chip.
 - Tests: 142 in `tests/test_audio_class_inference.py`; a mutation for each guard with no survivors after fixes.
 - Stacked on PR 142's area of `delta_triage.py`: the two branches both edit the audio branch of the template, so the second to merge needs a conflict resolution there.
+
+## 2026-10-28 (UTC): review fixes for PR 145 (branch `version-fragments`)
+Copilot's review of head 3d33c81 had three open points.
+- Tagging: `release` printed `git tag` for a branch commit, but a merge or squash gives `main` a different commit. It now prints the sequence merge, `git fetch origin`, check out and fast-forward main, `git log -1`, `scripts/version.py tag-check <version>`, then the tag and `gh release create --verify-tag`. `tag-check` changes nothing and exits 1 unless HEAD is `main` (the commit `origin/main` points to when that ref exists; a detached HEAD must equal it), the tree is clean, `RELEASE` equals the version, no fragment remains and the tag does not exist; on success it prints the commit and the exact tag command. A malformed version exits 2. `docs/releases.md` has the same steps.
+- Read errors: an I/O error, a vanished file or any other exception while reading one fragment now skips that fragment and records the reason. Tests: a fragment that vanishes between listing and reading, one unreadable by mode, `os.read` failing, five exception types raised by the reader, and a directory that cannot be listed.
+- Network: the two pip tests made a network request (pip fetches setuptools). They now skip unless `ORCHARD_TEST_NETWORK=1`. An offline build is not possible on this machine: its setuptools (70.2) rejects `license = "Apache-2.0"`. The check was run by hand again before the change (editable and plain installs report `RELEASE`).
+- Mutations for the new guards: 13 more, all red after two tests were tightened (a malformed version must exit 2; the printed step order is pinned).
+- Merged main again: it was at 0.9.39, so `RELEASE` is 0.9.39 and this pull request's fragment targets 0.9.40.

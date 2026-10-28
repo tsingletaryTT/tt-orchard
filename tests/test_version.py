@@ -293,6 +293,11 @@ def _pip_works(py: str) -> bool:
 
 @pytest.mark.parametrize("editable", [True, False], ids=["editable", "plain"])
 def test_pip_metadata_reports_the_release_literal(tmp_path, editable):
+    # pip must fetch the build backend (setuptools new enough for `license = "Apache-2.0"`) from an index, and the default
+    # suite makes no network request, so this test runs only when the operator opts in. The installed setuptools of the
+    # test interpreter is too old to build this project offline (checked: it rejects the license string).
+    if os.environ.get("ORCHARD_TEST_NETWORK") != "1":
+        pytest.skip("opt-in: this test makes a network request (pip fetches setuptools); set ORCHARD_TEST_NETWORK=1 to run it")
     if not _pip_works(sys.executable):
         pytest.skip("no usable pip for this interpreter")
     venv = tmp_path / "venv"
@@ -331,3 +336,66 @@ def test_read_release_refuses_a_missing_or_invalid_literal(tmp_path):
         p.write_text(text)
         with pytest.raises(ValueError):
             V.read_release(p)
+
+
+# ---- a read error on one fragment never aborts version detection ---------------------------------
+
+def test_a_fragment_that_vanishes_between_listing_and_reading_is_skipped(ch, monkeypatch):
+    frag(ch, "gone", "9.0.5")
+    frag(ch, "good", "9.0.1")
+    real = V._read_bytes
+
+    def vanishing(path):
+        if path.endswith("gone.toml"):
+            os.unlink(path)
+        return real(path)
+    monkeypatch.setattr(V, "_read_bytes", vanishing)
+    assert V.current(ch, release="9.0.0") == "9.0.1"
+    assert any(name == "gone.toml" for name, _ in V.SKIPPED)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can read a file whose mode is 000")
+def test_a_fragment_unreadable_by_mode_is_skipped(ch):
+    p = frag(ch, "locked", "9.0.5")
+    frag(ch, "good", "9.0.1")
+    p.chmod(0)
+    try:
+        assert V.current(ch, release="9.0.0") == "9.0.1"
+        assert any(name == "locked.toml" for name, _ in V.SKIPPED)
+    finally:
+        p.chmod(0o644)
+
+
+def test_an_os_error_while_reading_is_skipped(ch, monkeypatch):
+    frag(ch, "bad", "9.0.5")
+    frag(ch, "good", "9.0.1")
+    real = os.read
+
+    def failing(fd, n):
+        raise OSError(5, "Input/output error")
+    monkeypatch.setattr(os, "read", failing)
+    assert V.current(ch, release="9.0.0") == "9.0.0"           # both reads fail: nothing aborts
+    monkeypatch.setattr(os, "read", real)
+    assert V.current(ch, release="9.0.0") == "9.0.5"
+
+
+@pytest.mark.parametrize("exc", [RuntimeError("boom"), OSError(5, "io"), UnicodeError("bad"), KeyError("k"), MemoryError()])
+def test_any_exception_while_reading_one_fragment_is_skipped_and_the_others_still_count(ch, monkeypatch, exc):
+    frag(ch, "bad", "9.0.5")
+    frag(ch, "good", "9.0.1")
+    real = V._read_bytes
+
+    def raising(path):
+        if path.endswith("bad.toml"):
+            raise exc
+        return real(path)
+    monkeypatch.setattr(V, "_read_bytes", raising)
+    assert V.current(ch, release="9.0.0") == "9.0.1"
+    assert any(name == "bad.toml" for name, _ in V.SKIPPED)
+    assert V.problems(ch, release="9.0.0")
+
+
+def test_a_directory_that_cannot_be_listed_does_not_abort(ch, monkeypatch):
+    ch.mkdir()
+    monkeypatch.setattr(os, "scandir", lambda p: (_ for _ in ()).throw(PermissionError(13, "denied")))
+    assert V.current(ch, release="9.0.0") == "9.0.0" and V.SKIPPED

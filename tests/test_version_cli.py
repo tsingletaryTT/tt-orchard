@@ -361,3 +361,103 @@ def test_atomic_write_that_fails_leaves_the_old_file_and_no_temp_file(tmp_path, 
     with pytest.raises(OSError):
         C.atomic_write(tmp_path / "f.txt", "new")
     assert (tmp_path / "f.txt").read_text() == "old" and [p.name for p in tmp_path.iterdir()] == ["f.txt"]
+
+
+# ---- tag-check and the tagging sequence that `release` prints -------------------------------------
+
+def released_repo(repo):
+    """A repository on main where `release` has run and its result is committed (the state after the release PR merged)."""
+    setup_release(repo)
+    assert run(repo, "release")[0] == 0
+    sh(repo, "git", "add", "-A")
+    sh(repo, *GIT, "commit", "-q", "-m", "Release 1.1.0")
+    return sh(repo, "git", "rev-parse", "HEAD").strip()
+
+
+def test_tag_check_passes_on_the_merged_release_commit_and_prints_the_exact_tag_command(repo):
+    sha = released_repo(repo)
+    code, out, err = run(repo, "tag-check", "1.1.0")
+    assert code == 0, err
+    assert sha in out and f"git tag -a v1.1.0 -m 'Release 1.1.0' {sha}" in out and "git push origin v1.1.0" in out
+    assert sh(repo, "git", "tag", "--list") == ""                  # it only checks
+
+
+def test_tag_check_accepts_a_leading_v(repo):
+    released_repo(repo)
+    assert run(repo, "tag-check", "v1.1.0")[0] == 0
+
+
+@pytest.mark.parametrize("bad", ["1.1", "01.1.0", "x", "1.1.0-rc1"])
+def test_tag_check_refuses_a_malformed_version(repo, bad):
+    released_repo(repo)
+    code, _, err = run(repo, "tag-check", bad)
+    assert code == 2 and err
+
+
+def test_tag_check_refuses_a_version_that_is_not_release(repo):
+    released_repo(repo)
+    code, _, err = run(repo, "tag-check", "1.0.5")
+    assert code == 1 and "RELEASE" in err
+
+
+def test_tag_check_refuses_while_a_fragment_remains(repo):
+    released_repo(repo)
+    add_frag(repo, "late", "1.1.1")
+    sh(repo, "git", "add", "-A")
+    sh(repo, *GIT, "commit", "-q", "-m", "late")
+    code, _, err = run(repo, "tag-check", "1.1.0")
+    assert code == 1 and "fragment" in err and "late" in err
+
+
+def test_tag_check_refuses_a_dirty_tree(repo):
+    released_repo(repo)
+    (repo / "scratch.txt").write_text("x")
+    code, _, err = run(repo, "tag-check", "1.1.0")
+    assert code == 1 and "dirty" in err
+
+
+def test_tag_check_refuses_when_the_tag_exists(repo):
+    released_repo(repo)
+    sh(repo, *GIT, "tag", "-a", "v1.1.0", "-m", "x")
+    code, _, err = run(repo, "tag-check", "1.1.0")
+    assert code == 1 and "exists" in err
+
+
+def test_tag_check_refuses_a_branch_that_is_not_main(repo):
+    released_repo(repo)
+    sh(repo, "git", "checkout", "-q", "-b", "release-branch")
+    code, _, err = run(repo, "tag-check", "1.1.0")
+    assert code == 1 and "main" in err
+
+
+def test_tag_check_accepts_a_detached_head_that_is_origin_main_and_refuses_one_that_is_not(repo):
+    sha = released_repo(repo)
+    sh(repo, "git", "update-ref", "refs/remotes/origin/main", sha)
+    sh(repo, "git", "checkout", "-q", "--detach", sha)
+    assert run(repo, "tag-check", "1.1.0")[0] == 0
+    sh(repo, "git", "checkout", "-q", "--detach", "HEAD~1")
+    assert run(repo, "tag-check", "1.1.0")[0] == 1
+
+
+def test_tag_check_refuses_when_origin_main_is_a_different_commit(repo):
+    """On main, but origin/main points elsewhere (a squash or merge made a different commit): the branch commit is not what main points to."""
+    sha = released_repo(repo)
+    sh(repo, "git", "update-ref", "refs/remotes/origin/main", "HEAD~1")
+    code, _, err = run(repo, "tag-check", "1.1.0")
+    assert code == 1 and "origin/main" in err
+
+
+def test_tag_check_refuses_outside_a_git_repository(tmp_path):
+    (tmp_path / "orchard").mkdir()
+    (tmp_path / "orchard" / "__init__.py").write_text('RELEASE = "1.0.0"\n')
+    assert run(tmp_path, "tag-check", "1.0.0")[0] == 1
+
+
+def test_release_prints_merge_first_then_verify_then_tag_in_that_order(repo):
+    setup_release(repo)
+    _, out, _ = run(repo, "release", "--dry-run")
+    steps = ["merge", "git fetch origin", "git checkout main", "git log -1", "tag-check 1.1.0", "git tag -a v1.1.0", "git push origin v1.1.0", "gh release create v1.1.0"]
+    at = [out.index(s, out.index("Then, ")) for s in steps]
+    assert at == sorted(at), dict(zip(steps, at))
+    assert "5. python3 scripts/version.py tag-check 1.1.0" in out and "6. git tag -a v1.1.0" in out
+    assert "never tag the branch commit" in out.lower() or "do not tag the branch commit" in out.lower()

@@ -141,8 +141,10 @@ def _parse_fragment(path: Path) -> Fragment:
     except ValueError as e:                                   # includes UnicodeDecodeError and TOMLDecodeError
         why = str(e)
         return bad(why if why.startswith(("is ", "cannot")) else f"is not valid UTF-8 TOML ({why})")
-    except (RecursionError, MemoryError):
-        return bad("is too deeply nested to read")
+    except OSError as e:                                      # a read that fails after the open (I/O error, file went away)
+        return bad(f"cannot be read ({e.strerror or e.__class__.__name__})")
+    except Exception as e:                                    # nothing a fragment holds may abort version detection
+        return bad(f"cannot be read ({e.__class__.__name__})")
     unknown = sorted(set(doc) - FIELDS)
     if unknown:
         return bad(f"has unknown key(s): {', '.join(unknown)}")

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """The command behind ``scripts/version.py`` and ``python3 -m orchard.version``.
 
-Commands: ``show``, ``check``, ``new``, ``release [--dry-run]`` and ``migrate-pr --from-ref REF``.
+Commands: ``show``, ``check``, ``new``, ``release [--dry-run]``, ``tag-check VERSION`` and ``migrate-pr --from-ref REF``.
 See docs/releases.md for the process. This command never tags, commits or pushes: ``release`` prints the
 ``git tag`` and ``gh release create`` commands for a person to run. Every file it writes goes through
 ``atomic_write`` (a temporary file in the same directory, fsync, ``os.replace``).
@@ -210,11 +210,60 @@ def cmd_release(root: Path, args, out, err) -> int:
             os.unlink(ch / f.name)
         print("done: the files above are changed and nothing is committed", file=out)
     print("", file=out)
-    print("Then, from a branch that is merged to main, run these yourself (this command never does):", file=out)
-    print(f"  git add -A && git commit -m 'Release {new}'", file=out)
-    print(f"  git tag -a v{new} -m 'Release {new}'", file=out)
-    print(f"  git push origin main v{new}", file=out)
-    print(f"  gh release create v{new} --title 'v{new}' --notes-file docs/releases/{new}.md", file=out)
+    print("Then, run these yourself (this command never tags, commits or pushes). Tag only the commit that main points to", file=out)
+    print("after the release pull request is merged. Do not tag the branch commit: a merge or squash gives main a different commit.", file=out)
+    print(f"  1. On a branch: git add -A && git commit -m 'Release {new}', push it, open a pull request, and merge it.", file=out)
+    print("  2. git fetch origin", file=out)
+    print("  3. git checkout main && git merge --ff-only origin/main", file=out)
+    print("  4. git log -1        (it must be the merge commit of the release pull request)", file=out)
+    print(f"  5. python3 scripts/version.py tag-check {new}   (verifies main, a clean tree, RELEASE, no fragments and no existing tag)", file=out)
+    print(f"  6. git tag -a v{new} -m 'Release {new}' <the commit that tag-check printed>", file=out)
+    print(f"  7. git push origin v{new}", file=out)
+    print(f"  8. gh release create v{new} --title 'v{new}' --notes-file docs/releases/{new}.md --verify-tag", file=out)
+    return 0
+
+
+def cmd_tag_check(root: Path, args, out, err) -> int:
+    """Verify that the current checkout is the commit to tag for a release. Changes nothing."""
+    raw = args.version[1:] if args.version.startswith("v") else args.version
+    if V.parse(raw) is None:
+        print(f"error: {args.version!r} is not MAJOR.MINOR.PATCH (a leading v is allowed)", file=err)
+        return 2
+    version = raw
+    head = git(root, "rev-parse", "HEAD")
+    if head.returncode != 0:
+        print(f"error: {root} is not a git work tree with a commit ({head.stderr.strip()})", file=err)
+        return 1
+    sha = head.stdout.strip()
+    problems: list[str] = []
+    branch = git(root, "branch", "--show-current").stdout.strip()
+    origin = git(root, "rev-parse", "--verify", "-q", "refs/remotes/origin/main")
+    origin_sha = origin.stdout.strip() if origin.returncode == 0 else None
+    if branch != "main" and sha != origin_sha:
+        problems.append(f"HEAD is not on main ({'branch ' + branch if branch else 'detached'}, {sha[:12]}): "
+                        "merge the release pull request, then git checkout main && git merge --ff-only origin/main")
+    elif origin_sha is not None and sha != origin_sha:
+        problems.append(f"HEAD {sha[:12]} is not origin/main {origin_sha[:12]}: git fetch origin and fast-forward main "
+                        "(the commit to tag is the one origin/main points to after the merge)")
+    if git(root, "status", "--porcelain").stdout.strip():
+        problems.append("the git tree is dirty")
+    rel = V.read_release(root / "orchard" / "__init__.py")
+    if rel != version:
+        problems.append(f"RELEASE in orchard/__init__.py is {rel}, not {version}")
+    left = V.load_fragments(root / "changes")
+    if left:
+        problems.append(f"{len(left)} fragment(s) remain in changes/ ({', '.join(f.name for f in left[:5])}): "
+                        "the release pull request must delete them")
+    if git(root, "rev-parse", "-q", "--verify", f"refs/tags/v{version}").returncode == 0:
+        problems.append(f"the tag v{version} exists already")
+    for p in problems:
+        print(f"problem: {p}", file=err)
+    if problems:
+        print("tag-check failed: do not tag this checkout", file=out)
+        return 1
+    print(f"tag-check ok: {sha} is main, the tree is clean, RELEASE is {version}, no fragment remains, v{version} is free", file=out)
+    print(f"  git tag -a v{version} -m 'Release {version}' {sha}", file=out)
+    print(f"  git push origin v{version}", file=out)
     return 0
 
 
@@ -261,6 +310,8 @@ def build_parser() -> argparse.ArgumentParser:
     n.add_argument("--kind", choices=V.KINDS)
     r = sub.add_parser("release", help="cut a release: set RELEASE, write docs/releases/<version>.md, consume the fragments")
     r.add_argument("--dry-run", action="store_true", help="print what would be written and change nothing")
+    t = sub.add_parser("tag-check", help="verify that this checkout is the merged release commit, then print the tag commands")
+    t.add_argument("version", help="the version about to be tagged (X.Y.Z, a leading v is allowed)")
     m = sub.add_parser("migrate-pr", help="print the fragment for a branch that still bumps the version the old way")
     m.add_argument("--from-ref", required=True, help="branch or ref to read orchard/__init__.py from")
     m.add_argument("--pr", type=int, help="pull request number to put in the fragment")
@@ -273,7 +324,7 @@ def main(argv=None, root: Path | None = None, out=None, err=None) -> int:
     err = sys.stderr if err is None else err
     args = build_parser().parse_args(argv)
     root = repo_root() if root is None else Path(root)
-    handler = {"show": cmd_show, "check": cmd_check, "new": cmd_new, "release": cmd_release, "migrate-pr": cmd_migrate_pr}[args.cmd]
+    handler = {"show": cmd_show, "check": cmd_check, "new": cmd_new, "release": cmd_release, "migrate-pr": cmd_migrate_pr, "tag-check": cmd_tag_check}[args.cmd]
     try:
         return handler(root, args, out, err)
     except (OSError, ValueError) as e:

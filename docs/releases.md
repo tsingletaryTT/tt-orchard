@@ -59,11 +59,18 @@ A release is cut on `main`, with everything you want in it already merged.
    summary grouped by kind, with the pull request number) and deletes the fragments it used. It does not tag,
    commit or push.
 5. Read `docs/releases/<version>.md` and edit the wording if you want to.
-6. Make a branch, commit the changes, open a pull request, and merge it. Commit message: `Release X.Y.Z`.
-7. After the merge, on `main`: `git tag -a vX.Y.Z -m "Release X.Y.Z"` and `git push origin vX.Y.Z`.
-8. `gh release create vX.Y.Z --title "vX.Y.Z" --notes-file docs/releases/X.Y.Z.md`.
+6. Make a branch, commit the changes (message `Release X.Y.Z`), push it, open a pull request, and merge it. Do not tag the
+   branch commit. A merge commit or a squash gives `main` a different commit, and the tag must name the commit that `main`
+   points to.
+7. After the merge: `git fetch origin`, then `git checkout main && git merge --ff-only origin/main`.
+8. Run `git log -1`. It must be the merge commit of the release pull request.
+9. Run `python3 scripts/version.py tag-check X.Y.Z`. It changes nothing and exits non-zero unless HEAD is `main` (and is
+   the commit `origin/main` points to), the tree is clean, `RELEASE` equals `X.Y.Z`, no fragment remains in `changes/`,
+   and the tag `vX.Y.Z` does not exist yet. On success it prints the commit and the exact tag command.
+10. Tag that commit: `git tag -a vX.Y.Z -m "Release X.Y.Z" <commit>`, then `git push origin vX.Y.Z`.
+11. `gh release create vX.Y.Z --title "vX.Y.Z" --notes-file docs/releases/X.Y.Z.md --verify-tag`.
 
-`release` prints the tag and `gh release create` commands with the version filled in.
+`release` prints this sequence with the version filled in.
 
 ## A feature that merges after a release was cut
 
