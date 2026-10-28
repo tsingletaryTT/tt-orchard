@@ -71,12 +71,14 @@ def test_the_shown_value_hides_a_password_in_the_url(tmp_path):
 
 
 @pytest.mark.parametrize("endpoint", ["https://bob:hunter2@host：443/v1", "https://bob:hunter2@host:abc/v1",
-                                      "https://bob:hunter2@host:99999/v1", "https://bob:hunter2/x@[::1", "https://bob:hunter2/x@host:abc/v1","https://bob:hunter2@[" + "a" * 5000])
+                                      "https://bob:hunter2@host:99999/v1", "https://bob:hunter2/x@[::1", "https://bob:hunter2/x@host:abc/v1",
+                                      "https:/\t/bob:hunter2@host", "https:/\n/bob:hunter2@host", "https://bob:hunter2\n@host",
+                                      "https://bob:hunter2\x00@host", "https://bob:hunter2@[" + "a" * 5000])
 def test_no_parser_message_leaks_a_password_or_the_whole_value(endpoint, tmp_path):
     with pytest.raises(tg.ConfigError) as info:
         tg.load({"enabled": True, "endpoint": endpoint, "models": ["m"]}, base=tmp_path)
     assert "hunter2" not in str(info.value) and len(str(info.value)) < 400
-    assert info.value.__cause__ is None and info.value.__suppress_context__
+    assert info.value.__cause__ is None and (info.value.__suppress_context__ or info.value.__context__ is None)
 
 
 def test_the_shown_value_is_bounded_in_length(tmp_path):
