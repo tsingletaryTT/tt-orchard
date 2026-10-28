@@ -115,7 +115,7 @@ def audio_evidence(pipeline_tag, tags, hub_files=None, *other_lists) -> str | No
 # ---- the cached config (what stage 0's detector requires) ---------------------------------------------------
 #
 # `detect_audio` in the stage 0 template accepts a snapshot only when `model_config.json` is a JSON object of at most 1 MiB, with no repeated
-# key, no NaN or infinity, no integer of more than 30 digits and no nesting deeper than 32, a string `model_type` and an object `model`. The
+# key, no NaN or infinity (nor a float that overflows to it, such as 1e999), no integer of more than 30 digits and no nesting deeper than 32, a string `model_type` and an object `model`. The
 # preflight reads the cached config with the same limits (a bounded read), so a snapshot the preflight calls audio is one stage 0 calls audio
 # (tests/test_audio_preflight_review3.py runs both on the same files). The template keeps its own copy of these limits.
 
