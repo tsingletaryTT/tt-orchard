@@ -26,7 +26,7 @@ from orchard import defaults, safeio, sampling_probe
 DECISION_FILE = "sampling-decision.json"      # in stages/2/
 DECISION_PATH = "stages/2/" + DECISION_FILE   # run-relative; the package ships a scrubbed copy at evidence/<this>
 TRIAL_DIR = "sampling-trial"                  # in stages/2/
-CACHE_SUFFIX = "-nodraf"                     # the trial's tensor cache is `<tt_cache>-nodraft`; the template names the same suffix (a test keeps them equal)
+CACHE_SUFFIX = "-nodraft"                     # the trial's tensor cache is `<tt_cache>-nodraft`; the template names the same suffix (a test keeps them equal)
 TRIAL_RESULT = "trial-result.json"            # in TRIAL_DIR, written by the template script
 GRAFT_TRIAL_DIR = "graft-trial"               # the grafted variant's own swap check, read for its sampling verdict
 OVERRIDES = ("auto", "needed", "not-needed")
