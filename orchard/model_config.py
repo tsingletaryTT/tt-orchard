@@ -80,7 +80,7 @@ class ModelDims:
     linear: dict = field(default_factory=dict)   # linear_attention shapes: key_heads, value_heads, key_dim, value_dim, conv_kernel
     mla: dict = field(default_factory=dict)      # multi-latent attention shapes, empty when the model has none
     mlp_projections: int = 3                # matrices per MLP or expert: 3 for a gated MLP, 2 for the families in TWO_PROJECTION_MLP_TYPES
-    keys: frozenset = frozenset()           # every key of the flat config, for detecting mixers that have no layer-type name
+    keys: frozenset = frozenset()           # every key of the flat config whose value is not null, for detecting mixers that have no layer-type name
 
 
 def _num(cfg: dict, key: str, *, default=None, lo: int = 1, hi: int | None = None) -> int:
@@ -154,7 +154,7 @@ def dims(config) -> ModelDims:
         hidden=hidden, intermediate=intermediate, layers=layers, heads=heads, kv_heads=kv_heads, head_dim=head_dim, vocab=vocab,
         tied_embeddings=cfg.get("tie_word_embeddings") is True, layer_types=layer_types, moe_layers=moe_layers,
         routed_experts=experts, top_k=top_k, moe_intermediate=moe_width if experts else 0, shared_intermediate=shared if experts else 0,
-        attn_output_gate=cfg.get("attn_output_gate") is True or cfg.get("model_type") in GATED_BY_TYPE, linear=linear, mla=mla, mlp_projections=2 if cfg.get("model_type") in TWO_PROJECTION_MLP_TYPES else 3, keys=frozenset(str(k) for k in cfg))
+        attn_output_gate=cfg.get("attn_output_gate") is True or cfg.get("model_type") in GATED_BY_TYPE, linear=linear, mla=mla, mlp_projections=2 if cfg.get("model_type") in TWO_PROJECTION_MLP_TYPES else 3, keys=frozenset(str(k) for k, v in cfg.items() if v is not None))
 
 
 def _mla(cfg: dict) -> dict:
@@ -204,7 +204,8 @@ def _moe_layers(cfg: dict, layers: int) -> tuple:
     or not on the `decoder_sparse_step` stride."""
     first_dense = _num(cfg, "first_k_dense_replace", default=0, lo=0) if cfg.get("first_k_dense_replace") is not None else 0
     step = _num(cfg, "decoder_sparse_step", default=1)
-    only = cfg.get("mlp_only_layers") or []
-    if not isinstance(only, list) or not all(isinstance(i, int) and not isinstance(i, bool) and i >= 0 for i in only):
+    listed = cfg.get("mlp_only_layers") or []
+    if not isinstance(listed, list) or not all(isinstance(i, int) and not isinstance(i, bool) and i >= 0 for i in listed):
         raise ModelConfigError("model config mlp_only_layers must be a list of layer indexes")
+    only = set(listed)                       # one pass over the list; a membership test per layer on a list is quadratic
     return tuple(i >= first_dense and i not in only and (i + 1) % step == 0 for i in range(layers))

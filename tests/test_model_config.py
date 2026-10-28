@@ -150,6 +150,21 @@ def test_a_window_with_no_known_layout_is_refused_and_not_ignored():
     assert listed.layer_types == ("sliding_attention", "full_attention")
 
 
+def test_a_huge_mlp_only_layers_list_is_normalised_in_linear_time():
+    import time
+    cfg = dense(num_hidden_layers=mc.MAX_LAYERS, num_experts=8, num_experts_per_tok=2, moe_intermediate_size=32,
+                mlp_only_layers=[mc.MAX_LAYERS - 1] * 200_000)
+    start = time.monotonic()
+    d = mc.dims(cfg)
+    assert time.monotonic() - start < 2.0                      # a per-layer scan of the list takes billions of comparisons
+    assert d.moe_layers[-1] is False and d.moe_layers[0] is True
+
+
+def test_null_keys_are_not_listed_as_present():
+    d = mc.dims(dense(kv_lora_rank=None, index_topk=None, hc_mult=3))
+    assert "hc_mult" in d.keys and "kv_lora_rank" not in d.keys and "index_topk" not in d.keys
+
+
 def test_not_a_dict_is_refused():
     with pytest.raises(mc.ModelConfigError):
         mc.dims([1, 2])

@@ -155,7 +155,7 @@ def _dims(config, what: str) -> mc.ModelDims:
 def _mixers(d: mc.ModelDims) -> list[str]:
     """The mixer kinds a model uses, sorted. Full and sliding-window attention are both `attention`."""
     kinds = {"attention" if t in ("full_attention", "sliding_attention", "attention") else t for t in d.layer_types}
-    if "kv_lora_rank" in d.keys:
+    if d.mla:
         kinds.add("multi_latent_attention")
     if d.keys & {"index_topk", "index_n_heads", "index_head_dim"}:
         kinds.add("sparse_attention")

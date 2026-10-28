@@ -167,6 +167,25 @@ def test_the_mla_floor_and_the_scan_use_the_same_head_width():
     assert not any(h.name == "head_dim_not_whole_tiles" for h in s.hazards)
 
 
+@pytest.mark.parametrize("bad", [{"default": ["bf16"]}, {"default": {"a": 1}}, {"default": None}, {"default": 2}, {"default": "bf16", "attention": ["bfp8"]}])
+def test_a_dtype_that_is_not_a_string_is_refused_with_the_floor_error(bad):
+    with pytest.raises(df.FloorInputError):
+        df.decode_floor(DENSE, bad, 1, 1.0)
+
+
+def test_the_record_holds_every_normalised_dimension_the_count_used():
+    a = df.decode_floor(DENSE, policy(), 1, 1.0).as_dict()["inputs"]["model"]
+    b = df.decode_floor(dict(DENSE, intermediate_size=256), policy(), 1, 1.0).as_dict()["inputs"]["model"]
+    assert a != b                                                   # a width that changes the bytes changes the record
+    for key in ("hidden_size", "intermediate_size", "num_hidden_layers", "num_attention_heads", "num_key_value_heads", "head_dim",
+                "vocab_size", "tied_embeddings", "mlp_projections", "layer_types", "moe_layers", "routed_experts", "experts_per_token",
+                "moe_intermediate_size", "shared_intermediate_size", "attn_output_gate", "linear_attention", "multi_latent_attention"):
+        assert key in a, key
+    moe = df.decode_floor(MOE, policy(), 1, 1.0).as_dict()["inputs"]["model"]
+    assert moe["moe_layers"] == [False, True, True] and moe["layer_types"] == {"full_attention": 3}
+    json.dumps(moe, allow_nan=False)
+
+
 # ---- the board table -----------------------------------------------------------------------------
 
 def test_board_table_states_the_figure_and_its_source():
@@ -217,6 +236,15 @@ def test_low_share_hint_lists_causes_in_the_stated_order_and_only_below_the_thre
     assert all(p >= 0 for p in positions) and positions == sorted(positions)
     with pytest.raises(df.FloorInputError):
         df.low_share_hint(0.1, threshold=0)
+
+
+def test_command_line_honours_an_explicit_bandwidth_given_with_a_board(capsys):
+    cfg = str(FIX / "qwen3.8-27b.json")
+    assert df.main([cfg, "--board", "p300", "--per-die-gb-s", "256", "--policy", "default=bfp8"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["inputs"]["per_die_bandwidth_gb_s"] == 256.0 and out["inputs"]["dies"] == 2 and out["inputs"]["board"] == "p300"
+    assert df.main([cfg, "--board", "p300", "--per-die-gb-s", "256", "--dies", "1", "--policy", "default=bfp8"]) == 0
+    assert json.loads(capsys.readouterr().out)["inputs"]["dies"] == 1
 
 
 def test_a_share_exactly_at_the_threshold_gets_no_hint():

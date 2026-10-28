@@ -86,7 +86,7 @@ def _check_policy(policy) -> dict:
     for k, v in policy.items():
         if k != "default" and k not in GROUPS:
             raise FloorInputError(f"dtype policy names an unknown group {k!r} (groups: default, {', '.join(GROUPS)})")
-        if v not in DTYPE_BYTES:
+        if not isinstance(v, str) or v not in DTYPE_BYTES:
             raise FloorInputError(f"dtype policy gives {k!r} an unknown dtype {v!r} (known: {', '.join(DTYPE_BYTES)})")
     missing = [g for g in GROUPS if g not in policy]
     if missing and "default" not in policy:
@@ -207,9 +207,17 @@ def decode_floor(model_config, dtype_policy, dies, per_die_bandwidth_gb_s, *, bo
     by_group = {g: p * width(g) for g, p in active.items() if p}
     total = sum(by_group.values())
     floor_ms = total / (dies * bw * 1e9) * 1000.0
-    summary = {"hidden_size": d.hidden, "layers": d.layers, "vocab_size": d.vocab, "routed_experts": d.routed_experts,
-               "experts_per_token": d.top_k, "linear_attention_layers": d.layer_types.count("linear_attention"),
-               "moe_layers": sum(d.moe_layers)}
+    # every normalised number and layout the count used, so a saved estimate can be redone without the config
+    kinds: dict[str, int] = {}
+    for t in d.layer_types:
+        kinds[t] = kinds.get(t, 0) + 1
+    summary = {"hidden_size": d.hidden, "intermediate_size": d.intermediate, "num_hidden_layers": d.layers,
+               "num_attention_heads": d.heads, "num_key_value_heads": d.kv_heads, "head_dim": d.head_dim, "vocab_size": d.vocab,
+               "tied_embeddings": d.tied_embeddings, "mlp_projections": d.mlp_projections, "attn_output_gate": d.attn_output_gate,
+               "layer_types": kinds, "moe_layers": list(d.moe_layers), "routed_experts": d.routed_experts,
+               "experts_per_token": d.top_k, "moe_intermediate_size": d.moe_intermediate,
+               "shared_intermediate_size": d.shared_intermediate, "linear_attention": dict(d.linear),
+               "multi_latent_attention": dict(d.mla)}
     return DecodeFloor(bytes_per_token=total, by_group=by_group, active_params=sum(active.values()), stored_params=stored,
                        floor_ms=floor_ms, floor_tok_s=1000.0 / floor_ms, dies=dies, per_die_bandwidth_gb_s=bw, dtype_policy=policy,
                        board=board, model_summary=summary)
@@ -293,7 +301,9 @@ def main(argv=None) -> int:
     try:
         policy = dict(p.split("=", 1) for p in a.policy.split(",") if p)
         cfg = mc.read_model_config(os.path.realpath(a.config))      # a Hugging Face cache snapshot file is a link into blobs/
-        if a.board:
+        if a.board and a.per_die_gb_s is not None:       # an explicit bandwidth wins; the board still supplies the label and the die count
+            f = decode_floor(cfg, policy, a.dies or BOARDS[a.board].dies, a.per_die_gb_s, board=a.board)
+        elif a.board:
             f = floor_for_board(cfg, policy, a.board, dies=a.dies)
         elif a.per_die_gb_s is not None and a.dies:
             f = decode_floor(cfg, policy, a.dies, a.per_die_gb_s)

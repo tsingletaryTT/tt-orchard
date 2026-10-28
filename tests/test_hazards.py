@@ -206,6 +206,14 @@ def test_mla_sparse_attention_and_hyper_connections_are_detected_from_config_key
     assert names(hz.scan_model_hazards(hyper, CLEAN)) == {"mixer_hyper_connections_not_in_nearest"}
 
 
+def test_a_null_mixer_key_does_not_count_as_that_mixer():
+    """A nearest config with `kv_lora_rank: null` has no multi-latent attention and must not hide the hazard for a model that has it."""
+    mla = cfg(kv_lora_rank=64, q_lora_rank=64, qk_nope_head_dim=32, qk_rope_head_dim=32, v_head_dim=32)
+    null_nearest = cfg(kv_lora_rank=None, index_topk=None, hc_mult=None)
+    assert names(hz.scan_model_hazards(mla, null_nearest)) == {"mixer_multi_latent_attention_not_in_nearest"}
+    assert hz.scan_model_hazards(null_nearest, null_nearest).facts["mixers"] == ["attention"]
+
+
 def test_each_mixer_hazard_names_its_detection_rule_and_a_check():
     mla = cfg(kv_lora_rank=64, q_lora_rank=64, qk_nope_head_dim=32, qk_rope_head_dim=32, v_head_dim=32)
     (h,) = hz.scan_model_hazards(mla, CLEAN).hazards
