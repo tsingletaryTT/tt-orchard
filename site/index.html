@@ -457,7 +457,7 @@
   const CAP = {
     running: "A run in progress, taken while a real validation run was in stage 2: the coder model is parked while a test uses its boards. The page says what is happening now and what, if anything, to do next, and sets each result against what it should be.",
     finished: "A finished run: each stage with its wall time. Stages 3, 5 and 6 are skipped by design on a weights-only model.",
-    telegraph: "The Telegraph view, reading the ledger of 40 real helper calls made while testing which outside model fixes a failing kernel fastest ($1.21 in all). The page only reads the ledger and spends nothing. The meter is amber because one problem has used 5 of the 6 calls the configuration allows it. The configuration shown is a placeholder: an example host and a dummy key variable.",
+    telegraph: "The Telegraph view. The top bar and the Local (virtual) block put the two figures side by side: the real helper spend ($1.21 over 40 real helper calls made while testing which outside model fixes a failing kernel fastest) and the virtual spend of the local models (about $14.10 for 19,720 local agent turns, priced at a hosted model's list rate and never added to the real figure; six runs are only partly read, so it is low). The page only reads the ledger and the logs and spends nothing. The meter is amber because one problem has used 5 of the 6 calls the configuration allows it. The configuration shown is a placeholder: an example host and a dummy key variable.",
     blocked: "A blocked run: the reason, what was tried, and a verdict line that sets the numbers against what they should be. This one found a reference check that failed while the agent's file said it passed.",
   };
   const shot = { k: "running", m: "operator" };
