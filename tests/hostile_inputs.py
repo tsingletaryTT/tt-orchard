@@ -559,6 +559,17 @@ def _stock_runtime_load_config(base: Path):
     return stock_runtime._load_config(base / "input.json")
 
 
+def _model_config_read(base: Path):
+    from orchard import model_config
+    return model_config.read_model_config(base / "input.json")
+
+
+def _model_config_dims(base: Path):
+    """The whole path stage 0 would take: read the file, then normalise it. Both steps raise ModelConfigError and nothing else."""
+    from orchard import model_config
+    return model_config.dims(model_config.read_model_config(base / "input.json")).__dict__
+
+
 def _swap_draft_installed_containers(base: Path):
     from orchard import swap_draft
     return swap_draft.installed_containers(base)
@@ -650,6 +661,7 @@ def _types():
 
 (_LedgerCorrupt, _PackageError, _SuiteError, _FetchError, _LedgerUnavailable, _CorpusError, _LedgerRefused, _SafeReadError,
  _MigrationRefused) = _types()
+from orchard.model_config import ModelConfigError as _ModelConfigError  # noqa: E402
 ALL_ITEMS = frozenset(i.name for i in ITEMS)         # a loader that lets every OSError propagate by design
 
 READERS: list[Reader] = [
@@ -692,6 +704,8 @@ READERS: list[Reader] = [
     Reader("skillsfresh.Cache", _skillsfresh_cache),
     Reader("toolcall_bench._rows", _toolcall_bench_rows, suffix=b"\n", documented=(ValueError,), os_error_ok=ALL_ITEMS),
     Reader("stock_runtime._load_config", _stock_runtime_load_config),
+    Reader("model_config.read_model_config", _model_config_read, documented=(_ModelConfigError,)),
+    Reader("model_config.dims (read then normalise)", _model_config_dims, documented=(_ModelConfigError,)),
     Reader("swap_draft.installed_containers", _swap_draft_installed_containers, rel=".cache/tt-model/installed.json"),
     Reader("nearest.read_containers", _nearest_read_containers, rel=".cache/tt-model/installed.json"),
     Reader("classify_bench.load_corpus", _classify_bench_load_corpus, documented=(_CorpusError,)),
