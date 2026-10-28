@@ -2195,15 +2195,24 @@ class Supervisor:
         return True
 
     def _cache_check_path(self, stage_dir: Path) -> Path:
-        """The path whose filesystem the sampling trial's new tensor cache lands on: the nearest existing parent of the stage's configured `tt_cache`
-        (the cache is made later, so the path itself may not exist). The run directory when the config names none."""
+        """The path whose filesystem the sampling trial's new tensor cache lands on: the nearest existing ancestor of `<tt_cache>-nodraft`, the sibling
+        the trial writes (issue 126). The sibling is made beside the configured path, so when that path is a link or a mount point the sibling is on
+        the filesystem of the link's parent, not of its target. A relative `tt_cache` is taken against the run directory, before the suffix is added.
+        The run directory when the config names none."""
         try:
             cfg = json.loads((stage_dir / "swap_config.json").read_text(encoding="utf-8"))
-            cache = Path(str(cfg["tt_cache"]))
+            value = cfg["tt_cache"]
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
             return self.run_dir
+        if not isinstance(value, str) or not value:
+            return self.run_dir
+        cache = Path(value)
         if not cache.is_absolute():
             cache = self.run_dir / cache
+        try:
+            cache = cache.with_name(cache.name + sampling.CACHE_SUFFIX)
+        except ValueError:                                  # a path with no final name ("" or "/"): nothing to add the suffix to
+            return self.run_dir
         while not cache.exists() and cache != cache.parent:
             cache = cache.parent
         return cache if cache.exists() else self.run_dir
