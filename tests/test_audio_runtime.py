@@ -107,3 +107,14 @@ def test_the_paths_come_back_from_the_record_and_a_bad_record_gives_none():
     assert rt.selection_paths([entry(rt.AUDIO_RUNTIME_SELECTED, paths={"reference_python": "/r"})]) is None
     assert rt.selection_paths([entry(rt.AUDIO_RUNTIME_SELECTED)]) is None
     assert rt.selection_paths([]) is None
+
+
+def test_a_config_that_is_a_link_into_a_blobs_directory_is_read(tmp_path):
+    """A Hugging Face snapshot stores each file as a link into the cache's blobs directory."""
+    blobs = tmp_path / "blobs"
+    blobs.mkdir()
+    (blobs / "abc").write_text(json.dumps(REAL_CONFIG))
+    snap = tmp_path / "snapshots" / "rev"
+    snap.mkdir(parents=True)
+    (snap / "model_config.json").symlink_to(blobs / "abc")
+    assert rt.runtime_problems(snap) == []

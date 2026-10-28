@@ -235,6 +235,7 @@ class ChipTransformer:
         self._load(original)
         self.timings["upload_weights_s"] = round(time.time() - t0, 3)
         self._consts = {}
+        self._pending = {}                         # layer outputs of the first pass, by name, one entry per batch element
         self.probe = None                          # a dict: when set, `_layer` stores the stream after each section (a diagnostic; costs one read back each)
 
     # -- weights -------------------------------------------------------------------------------------------------------------------------
@@ -419,6 +420,11 @@ class ChipTransformer:
                 out.append(self._one(x[b], context[b], global_cond[b], None if local_add_cond is None else local_add_cond[b],
                                      None if padding_mask is None else padding_mask[b]))
         self.timings["forward_s"] += time.time() - t0
+        if self.record_enabled:
+            # one array per layer holding every batch element, as the reference's hook records it (guidance runs the batch as [conditioned, unconditioned])
+            for name, parts in self._pending.items():
+                self.record(name, torch.cat(parts, dim=0))
+            self._pending = {}
         self.timings["passes"] += 1
         self.record_enabled = False                                        # the first pass only is recorded, as the reference does
         return torch.stack(out).to(x.dtype)
@@ -449,7 +455,7 @@ class ChipTransformer:
         for i in range(self.depth):
             h = self._layer(i, h, ctx_t, c, mods[i], local_t)
             if self.record_enabled:
-                self.record(f"layer_{i:02d}", ttnn.to_torch(h).reshape(n, -1)[:c["n_real"]].float().unsqueeze(0))
+                self._pending.setdefault(f"layer_{i:02d}", []).append(ttnn.to_torch(h).reshape(n, -1)[:c["n_real"]].float().unsqueeze(0))
         y = self._lin(h, self.w_out, out=self.act)
         y = ttnn.to_torch(y).reshape(n, -1).float()
         return y[self.num_memory:self.num_memory + t_len]

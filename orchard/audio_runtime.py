@@ -47,7 +47,8 @@ def chip_dit():
 def runtime_problems(model_dir) -> list[str]:
     """Why the runtime cannot serve the model in `model_dir` (a snapshot directory), or [] when it can. A config that cannot be read is
     a reason, never a crash."""
-    path = Path(model_dir) / "model_config.json"
+    # A Hugging Face snapshot holds each file as a link into the cache's blobs directory, so the link is resolved here before the bounded read.
+    path = (Path(model_dir) / "model_config.json").resolve()
     try:
         config = safeio.read_json(path, max_bytes=CONFIG_MAX_BYTES, expect=dict)
     except (OSError, ValueError, safeio.SafeReadError) as exc:

@@ -193,3 +193,42 @@ def test_rms_matches_torch_rms_norm():
 
 def test_padded_length_rounds_up_to_tiles():
     assert [cd.padded_length(n) for n in (1, 32, 33, 238, 257)] == [32, 32, 64, 256, 288]
+
+
+# --- recording of a batched (guided) pass ---------------------------------------------------------------------------------------------
+
+class _Stub(cd.ChipTransformer):
+    """The module's call path without a chip: `_one` returns a fixed output and leaves one layer record per call, as the chip version does."""
+
+    def __init__(self, record):
+        self.torch, self.ttnn, self.record, self.record_enabled = torch, None, record, True
+        self.timings = {"upload_weights_s": 0.0, "forward_s": 0.0, "passes": 0}
+        self._pending = {}
+        self.calls = 0
+
+    def _one(self, x, ctx, gcond, local, pmask):
+        self.calls += 1
+        if self.record_enabled:
+            self._pending.setdefault("layer_00", []).append(torch.full((1, 3, 4), float(self.calls)))
+        return torch.zeros(x.shape[0], 2)
+
+
+def test_a_batched_first_pass_records_one_array_with_every_batch_element_and_later_passes_record_nothing():
+    got = []
+    m = _Stub(lambda name, t: got.append((name, t.clone())))
+    x = torch.zeros(2, 5, 2)
+    ctx = torch.zeros(2, 4, 2)
+    out = m(x, context=ctx, global_cond=torch.zeros(2, 2), local_add_cond=None, padding_mask=None)
+    assert out.shape == (2, 5, 2) and len(got) == 1 and got[0][0] == "layer_00"
+    assert got[0][1].shape == (2, 3, 4) and got[0][1][0, 0, 0] == 1 and got[0][1][1, 0, 0] == 2
+    m(x, context=ctx, global_cond=torch.zeros(2, 2))
+    assert len(got) == 1, "only the first pass is recorded"
+
+
+def test_the_module_refuses_inputs_the_text_to_music_path_does_not_use():
+    m = _Stub(None)
+    for kw in ({"prepend_embeds": torch.zeros(1)}, {"modular_local_cond": {"a": 1}}, {"exit_layer_ix": 3}, {"return_info": True}):
+        with pytest.raises(NotImplementedError):
+            m(torch.zeros(1, 2, 2), context=torch.zeros(1, 2, 2), global_cond=torch.zeros(1, 2), **kw)
+    with pytest.raises(NotImplementedError):
+        m(torch.zeros(1, 2, 2), context=None, global_cond=torch.zeros(1, 2))
