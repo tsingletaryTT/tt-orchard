@@ -1,3 +1,3 @@
 target = "0.9.50"
 summary = "Audio runtime: a load-once, generate-many contract, a warm-up rule with spread for each timed part, a bundle gate that refuses a benchmark label on fewer than 3 repeats, a length sweep and a queue probe."
-pr = 178
+pr = 187
