@@ -210,11 +210,48 @@ def test_stop_closes_the_generator(live):
     assert gen.closed == 1
 
 
+def test_a_request_that_is_not_marked_as_json_is_refused(live):
+    """A web page on another site can send a text/plain POST without a preflight; requiring JSON makes the browser ask first, and this server says no."""
+    s = live()
+    for ctype in ("text/plain", "application/x-www-form-urlencoded", "multipart/form-data; boundary=x", ""):
+        req = urllib.request.Request(s.base + "/v1/audio/jobs", data=json.dumps(JOB).encode(), method="POST", headers={"Content-Type": ctype} if ctype else {})
+        with pytest.raises(urllib.error.HTTPError) as e:
+            urllib.request.urlopen(req, timeout=5)
+        assert e.value.code == 415, ctype
+    assert s.js.queue is not None and len(s.js.jobs) == 0
+    ok = urllib.request.Request(s.base + "/v1/audio/jobs", data=json.dumps(JOB).encode(), method="POST",
+                                headers={"Content-Type": "application/json; charset=utf-8"})
+    assert urllib.request.urlopen(ok, timeout=5).status == 202
+
+
+@pytest.mark.parametrize("field", ["duration", "cfg_scale"])
+def test_a_huge_whole_number_is_a_400_not_a_dropped_connection(live, field):
+    s = live()
+    raw = b'{"prompt": "x", "' + field.encode() + b'": 1' + b"0" * 400 + b"}"
+    code, err = s.call("POST", "/v1/audio/jobs", raw_body=raw)
+    assert code == 400 and err["detail"]
+
+
+def test_the_default_length_fits_the_generators_limits_and_health_says_so(live):
+    class Short(Scripted):
+        max_seconds = 5
+    s = live(Short())
+    assert s.call("GET", "/v1/health")[1]["defaults"]["duration"] == 5
+    code, body = s.call("POST", "/v1/audio/jobs", {"prompt": "x"})
+    assert code == 202 and s.wait_state(body["id"], {"done"})["settings"]["duration"] == 5
+
+    class Long(Scripted):
+        max_seconds = 120
+    s2 = live(Long())
+    assert s2.call("GET", "/v1/health")[1]["defaults"]["duration"] == 10
+
+
 def test_a_negative_content_length_is_refused_and_does_not_hang_the_server(live):
     import http.client
     s = live()
     conn = http.client.HTTPConnection("127.0.0.1", s.http.server_address[1], timeout=5)
     conn.putrequest("POST", "/v1/audio/jobs")
+    conn.putheader("Content-Type", "application/json")
     conn.putheader("Content-Length", "-5")
     conn.endheaders()
     assert conn.getresponse().status == 400                  # a read of -5 bytes would wait for the client to close the connection

@@ -195,6 +195,42 @@ def test_a_reply_cut_short_is_server_down_and_a_reply_that_is_not_json_is_an_err
             x.server_close()
 
 
+def test_an_error_reply_with_a_cut_short_body_keeps_its_meaning():
+    """A 429 whose body stops halfway is still a busy server, and a 500 with a cut body is an error, not an exception from the HTTP library."""
+    busy = raw_server(b"HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nContent-Length: 500\r\n\r\n{\"detail\": ")
+    broken = raw_server(b"HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: 500\r\n\r\n{")
+    try:
+        with pytest.raises(cl.ServerBusy):
+            cl.AudioClient(f"http://127.0.0.1:{busy.server_address[1]}", timeout=3).health()
+        with pytest.raises(cl.AudioServerError, match="500"):
+            cl.AudioClient(f"http://127.0.0.1:{broken.server_address[1]}", timeout=3).health()
+    finally:
+        for x in (busy, broken):
+            x.shutdown()
+            x.server_close()
+
+
+@pytest.mark.parametrize("field", ["seconds", "cfg_scale", "seed", "steps"])
+def test_a_huge_whole_number_is_a_message_on_the_client_too(field, tmp_path):
+    args = {"seconds": 10, "steps": 8, "cfg_scale": 1.0, "seed": 1, field: 10**400}
+    out = cl.run_generation(cl.AudioClient("http://127.0.0.1:1"), "x", args["seconds"], args["steps"], args["cfg_scale"], args["seed"], out_dir=tmp_path)
+    assert not out.ok and "must be" in out.status and "unexpected" not in out.status.lower()
+    with pytest.raises(ValueError):
+        cl.check_settings("x", args["seconds"], args["seed"], args["steps"], args["cfg_scale"])
+
+
+def test_pruning_touches_only_the_clips_this_page_made(server, tmp_path):
+    (tmp_path / "settings.json").write_text("{}")
+    (tmp_path / "recording.wav").write_bytes(b"x")
+    (tmp_path / "clip-notes.txt").write_text("mine")
+    s, c = server()
+    for i in range(5):
+        cl.run_generation(c, "x", 1, 8, 1.0, i, poll_s=0.01, out_dir=tmp_path, keep=2)
+    names = {p.name for p in tmp_path.iterdir()}
+    assert {"settings.json", "recording.wav", "clip-notes.txt"} <= names
+    assert len([n for n in names if n.startswith("clip-seed")]) == 2
+
+
 def test_a_job_reply_without_an_id_is_an_error():
     no_id = raw_server(b"HTTP/1.1 202 Accepted\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}")
     try:

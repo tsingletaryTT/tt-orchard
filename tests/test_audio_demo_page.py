@@ -88,3 +88,21 @@ def test_the_page_module_is_the_only_one_that_imports_gradio():
     for name in ("audio_client.py", "audio_server.py"):
         text = (HERE.parent / "orchard" / "audio_demo" / name).read_text()
         assert "import gradio" not in text and "from gradio" not in text
+
+
+def test_the_page_fits_its_controls_and_examples_to_a_server_with_a_short_limit():
+    """With --max-seconds 5 the starting length is 5 and no example asks for a length the server would refuse."""
+    class Short(Scripted):
+        max_seconds = 5
+    server = Live(Short())
+    try:
+        server.wait_ready()
+        demo = app.build_ui(cl.AudioClient(server.base, timeout=5), poll_s=0.01)
+        length = next(b for b in demo.blocks.values() if getattr(b, "label", None) == "Length (seconds)")
+        assert length.maximum == 5 and length.value <= 5
+        for ex in (b for b in demo.blocks.values() if isinstance(b, gr.Dataset)):
+            assert all(row[1] <= 5 for row in ex.samples)
+        assert app.fitting_examples({"min_seconds": 1, "max_seconds": 5}) == [e for e in cl.EXAMPLES if e[1] <= 5]
+        assert app.fitting_examples({"min_seconds": 100, "max_seconds": 120}) == []        # none fit: the page omits the examples
+    finally:
+        server.close()

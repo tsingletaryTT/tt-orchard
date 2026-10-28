@@ -13,6 +13,7 @@ import http.client
 import json
 import math
 import random
+import re
 import shutil
 import tempfile
 import time
@@ -64,17 +65,22 @@ class Result:
     stats: dict
 
 
+def _not_finite(v) -> bool:
+    """True for NaN and infinity. A huge whole number is finite; the range checks refuse it (math.isfinite would overflow on it)."""
+    return isinstance(v, float) and not math.isfinite(v)
+
+
 def check_settings(prompt, seconds, seed, steps, cfg_scale) -> None:
     """Raise ValueError, in plain words, for input the server would refuse."""
     if not isinstance(prompt, str) or not prompt.strip():
         raise ValueError("The prompt must not be empty.")
-    if isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or not math.isfinite(seconds) or not MIN_SECONDS <= seconds <= MAX_SECONDS:
+    if isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or _not_finite(seconds) or not MIN_SECONDS <= seconds <= MAX_SECONDS:
         raise ValueError(f"The length must be between {MIN_SECONDS} and {MAX_SECONDS} seconds, got {seconds!r}.")
     if seed is not None and (isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed <= 2**32 - 1):
         raise ValueError(f"The seed must be a whole number of 0 or more, got {seed!r}.")
     if steps is not None and (isinstance(steps, bool) or not isinstance(steps, int) or not 1 <= steps <= MAX_STEPS):
         raise ValueError(f"Steps must be a whole number from 1 to {MAX_STEPS}, got {steps!r}.")
-    if cfg_scale is not None and (isinstance(cfg_scale, bool) or not isinstance(cfg_scale, (int, float)) or not math.isfinite(cfg_scale)
+    if cfg_scale is not None and (isinstance(cfg_scale, bool) or not isinstance(cfg_scale, (int, float)) or _not_finite(cfg_scale)
                                   or not MIN_CFG <= cfg_scale <= MAX_CFG):
         raise ValueError(f"The guidance scale must be between {MIN_CFG:g} and {MAX_CFG:g}, got {cfg_scale!r}.")
 
@@ -94,8 +100,8 @@ class AudioClient:
             detail = ""
             try:
                 detail = json.loads(e.read().decode()).get("detail", "")
-            except (ValueError, OSError, AttributeError):
-                pass
+            except (ValueError, OSError, AttributeError, http.client.HTTPException):
+                pass                                    # a body that is missing, cut short or not JSON: the status code still says what happened
             if e.code == 429:
                 raise ServerBusy(f"The audio server is busy: {detail or 'its queue is full'}. Try again in a minute.") from None
             if e.code == 503:
@@ -180,7 +186,7 @@ def _whole_or_none(v, name: str) -> Optional[int]:
         return None
     try:
         f = float(v)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         raise ValueError(f"The {name} must be a whole number, got {v!r}.") from None
     if not math.isfinite(f) or f != int(f):
         raise ValueError(f"The {name} must be a whole number, got {v!r}.")
@@ -190,13 +196,14 @@ def _whole_or_none(v, name: str) -> Optional[int]:
 def _finite(v, name: str) -> float:
     try:
         f = float(v)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         raise ValueError(f"The {name} must be a number, got {v!r}.") from None
     if not math.isfinite(f):
         raise ValueError(f"The {name} must be a finite number, got {v!r}.")
     return f
 
 
+CLIP_NAME = re.compile(r"clip-seed\d+-[0-9a-f]{8}\.(?:flac|wav)")
 _CLIP_DIR: Optional[Path] = None
 
 
@@ -211,7 +218,8 @@ def clip_dir() -> Path:
 
 def prune_clips(folder: Path, keep: int) -> None:
     """Delete all but the newest `keep` files in `folder`. The page hands each clip to Gradio, which serves its own copy, so an old one is safe to drop."""
-    files = sorted((p for p in folder.iterdir() if p.is_file()), key=lambda p: p.stat().st_mtime)
+    # only files this page named (clip-seed<seed>-<job>.<format>): a directory the caller passed in may hold other things
+    files = sorted((p for p in folder.iterdir() if p.is_file() and CLIP_NAME.fullmatch(p.name)), key=lambda p: p.stat().st_mtime)
     for old in files[:-keep] if keep > 0 else files:
         old.unlink(missing_ok=True)
 

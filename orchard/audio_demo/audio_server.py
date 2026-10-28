@@ -99,6 +99,11 @@ class Generator:
     min_seconds = MIN_SECONDS
     max_seconds = MAX_SECONDS
     max_steps = MAX_STEPS
+    @property
+    def default_seconds(self) -> float:
+        """The length used when a request gives none: 10 seconds, or the nearest length the generator accepts."""
+        return min(max(DEFAULT_SECONDS, self.min_seconds), self.max_seconds)
+
     default_steps = 8             # the settings the model's authors use for small music: 8 steps, guidance scale 1.0
     default_cfg_scale = 1.0
 
@@ -381,7 +386,8 @@ class JobServer:
 
         def number(key, default):
             v = body.get(key, default)
-            if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+            # only a float can be NaN or infinite; a huge whole number is finite and the range checks below refuse it (math.isfinite would overflow on it)
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or (isinstance(v, float) and not math.isfinite(v)):
                 raise ValueError(f"{key} must be a number")
             return v
 
@@ -391,7 +397,7 @@ class JobServer:
                 raise ValueError(f"{key} must be a whole number")
             return v
 
-        seconds = number("duration", DEFAULT_SECONDS)
+        seconds = number("duration", self.gen.default_seconds)
         if not self.gen.min_seconds <= seconds <= self.gen.max_seconds:
             raise ValueError(f"duration must be between {self.gen.min_seconds} and {self.gen.max_seconds} seconds")
         steps = whole("steps", self.gen.default_steps)
@@ -456,7 +462,7 @@ class JobServer:
                  "queue_depth": len(self.queue), "queue_max": self.max_waiting, "busy": self.running is not None,
                  "limits": {"min_seconds": self.gen.min_seconds, "max_seconds": self.gen.max_seconds, "max_steps": self.gen.max_steps,
                             "min_cfg_scale": MIN_CFG, "max_cfg_scale": MAX_CFG},
-                 "defaults": {"duration": DEFAULT_SECONDS, "steps": self.gen.default_steps, "cfg_scale": self.gen.default_cfg_scale}}
+                 "defaults": {"duration": self.gen.default_seconds, "steps": self.gen.default_steps, "cfg_scale": self.gen.default_cfg_scale}}
             if self.state == "error":
                 h["error"] = self.load_error
             return h
@@ -505,6 +511,11 @@ def make_http_server(js: JobServer, host: str, port: int) -> ThreadingHTTPServer
         def do_POST(self):
             if self.path != "/v1/audio/jobs":
                 return self._err(404, "no such endpoint")
+            ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+            if ctype != "application/json":
+                # a page on another site can send other content types without the browser asking first; refusing them stops that page queueing work
+                self.close_connection = True
+                return self._err(415, "send the job as application/json")
             try:
                 length = int(self.headers.get("Content-Length") or 0)
             except ValueError:

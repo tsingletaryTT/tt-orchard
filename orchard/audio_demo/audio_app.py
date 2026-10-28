@@ -41,6 +41,11 @@ def limits_from(client: ac.AudioClient) -> dict:
     return {k: got[k] if isinstance(got.get(k), (int, float)) and not isinstance(got.get(k), bool) else v for k, v in own.items()}
 
 
+def fitting_examples(lim: dict) -> list:
+    """The examples whose length the server accepts."""
+    return [e for e in ac.EXAMPLES if lim["min_seconds"] <= e[1] <= lim["max_seconds"]]
+
+
 def build_ui(client: ac.AudioClient, poll_s: float = 1.0) -> gr.Blocks:
     lim = limits_from(client)
     # Gradio keeps its own copy of each served clip; delete_cache removes copies older than a day, checked hourly
@@ -51,7 +56,8 @@ def build_ui(client: ac.AudioClient, poll_s: float = 1.0) -> gr.Blocks:
             with gr.Column(scale=1):
                 prompt = gr.Textbox(label="Prompt", lines=3, value=ac.BENCHMARK_PROMPT, placeholder="genre, instruments, mood, tempo",
                                     info="Describe the music: instruments, mood and tempo work best.")
-                seconds = gr.Slider(lim["min_seconds"], lim["max_seconds"], value=10, step=1, label="Length (seconds)")
+                seconds = gr.Slider(lim["min_seconds"], lim["max_seconds"], value=min(max(10, lim["min_seconds"]), lim["max_seconds"]), step=1,
+                                    label="Length (seconds)")
                 steps = gr.Slider(1, min(int(lim["max_steps"]), 50), value=8, step=1, label="Steps",
                                   info="8 steps with guidance scale 1 is the setting the model's authors use for small music.")
                 cfg = gr.Slider(lim["min_cfg_scale"], min(lim["max_cfg_scale"], 10.0), value=1.0, step=0.5, label="Guidance scale (cfg)")
@@ -63,7 +69,9 @@ def build_ui(client: ac.AudioClient, poll_s: float = 1.0) -> gr.Blocks:
                 audio = gr.Audio(label="Result", type="filepath", interactive=False)
                 status = gr.Markdown()
                 details = gr.Markdown()
-        gr.Examples(examples=[list(e) for e in ac.EXAMPLES], inputs=[prompt, seconds, seed], label="Examples")
+        examples = fitting_examples(lim)
+        if examples:                                      # an example the server would refuse is not offered; with none left there is no component
+            gr.Examples(examples=[list(e) for e in examples], inputs=[prompt, seconds, seed], label="Examples")
 
         def roll():
             return ac.random_seed()
