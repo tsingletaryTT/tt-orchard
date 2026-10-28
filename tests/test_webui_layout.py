@@ -130,7 +130,7 @@ def test_the_top_bar_order_is_chip_clock_style_then_the_primary_action():
     assert "topbar-right" in right.classes
     kids = [k for k in right.kids]
     ids_or_classes = [k.attrs.get("id") or sorted(k.classes)[0] for k in kids]
-    assert ids_or_classes == ["spend-meter", "machine-chip", "clock", "mode-switch", "new-run-btn"]
+    assert ids_or_classes == ["meters", "machine-chip", "clock", "mode-switch", "new-run-btn"]
 
 
 def test_the_style_switch_has_its_own_rules_in_both_styles():
