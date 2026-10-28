@@ -539,7 +539,9 @@ def _audio_base(*, model_id: str, base: str, inferred: bool, report, accept_infe
     if info is None and snap is None:
         return Check("base", BLOCK, f"cannot look up the base model {base} on the hub: {err}", "model-unavailable", data=data)
     from orchard import audio_facts
-    lists = [n for n in (info.files if info else [], snapshot_root_names(snap) if snap else []) if n]
+    # The Hub's list (when the Hub answered) and the snapshot's top level (when one exists) must each show the layout; a source that is
+    # present but empty fails. With no Hub answer the snapshot alone decides, since the model itself was already judged audio.
+    lists = [n for n in (info.files if info else None, snapshot_root_names(snap) if snap else None) if n is not None]
     if not lists or not all(audio_facts.audio_layout(n) for n in lists):
         return None
     gated_note = ""
@@ -550,13 +552,18 @@ def _audio_base(*, model_id: str, base: str, inferred: bool, report, accept_infe
                          "credentials-needed", data=data)
         gated_note = (f" It is gated; the harness does not use a token, and a complete copy was found on disk at revision "
                       f"{Path(snap).name[:12]}.")
+    # A public base whose cached copy lacks a weight file the Hub lists is incomplete: it is downloaded again (a gated one blocked above).
+    missing = _missing_weights(info, Path(snap)) if info is not None and snap is not None else []
+    if missing:
+        snap = None
     data.update(snapshot=snap, needs_fetch=snap is None)
     if info is not None:
         data["base_gb"] = info.total_bytes / 1e9
     if snap is not None:
         where = "its snapshot is local" + ("" if info is not None else f" (the hub could not be reached for it: {err})")
     else:
-        where = f"its snapshot will be downloaded ({info.total_bytes / 1e9:.1f} GB)"
+        why = f"the cached copy is incomplete (missing {', '.join(missing[:3])}), so " if missing else ""
+        where = f"{why}its snapshot will be downloaded ({info.total_bytes / 1e9:.1f} GB)"
     which = f"research inferred it ({_selection_basis(report)}) and the operator accepted it" if inferred else "the model's base"
     return Check("base", WARN, f"base {base} ({which}). {model_id} is an audio model ({audio}). No installed bundle is needed: stage 0 compares "
                  "the two repositories directly, and no bundle, container package or tt-metal model serves an audio model on a chip yet. The "
@@ -769,7 +776,7 @@ def audio_evidence_for(hub: HubInfo | None, local_path) -> str | None:
         return None
     try:
         from orchard import audio_facts
-        return audio_facts.audio_evidence(hub.pipeline_tag, hub.tags, hub.files, snapshot_root_names(local_path) if local_path else [])
+        return audio_facts.audio_evidence(hub.pipeline_tag, hub.tags, hub.files, snapshot_root_names(local_path) if local_path else None)
     except Exception:
         return None
 

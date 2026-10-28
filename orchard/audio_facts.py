@@ -60,7 +60,7 @@ def serving_of(base_repo, installed) -> str:
 #   1. Tag evidence: the Hub's `pipeline_tag` is `text-to-audio` or `audio-to-audio`. When the Hub gives no usable pipeline tag (absent, or
 #      not a string), a tag with one of those names decides instead. A pipeline tag that is present and says anything else (for example
 #      `text-to-speech`, which is out of scope) decides alone: the model is not audio for this rule.
-#   2. Layout evidence: every file list available (the Hub's, and the local snapshot's top level) shows `model_config.json`, no `config.json`
+#   2. Layout evidence: the Hub's file list must be present and non-empty, and it and the local snapshot's top level (when a snapshot exists) each show `model_config.json`, no `config.json`
 #      and at least one `.safetensors` file at the top level. If two lists disagree, the model is not audio.
 # Limits. Anything unclear is "not audio", which keeps the old behaviour (the base row asks for an installed bundle): unknown tags, a file list
 # that cannot be read, both config files present, a hub lookup that failed. The rule says nothing about whether the files are valid:
@@ -90,13 +90,15 @@ def audio_tag(pipeline_tag, tags) -> bool:
     return any(t in AUDIO_PIPELINE_TAGS for t in _strings(tags))
 
 
-def audio_evidence(pipeline_tag, tags, *name_lists) -> str | None:
-    """A sentence saying why the model counts as audio, or None. Each of `name_lists` is a list of file names from one source (the Hub's
-    file list, a local snapshot's top level); an empty one holds no evidence and is skipped, a non-empty one must show the layout."""
+def audio_evidence(pipeline_tag, tags, hub_files=None, *other_lists) -> str | None:
+    """A sentence saying why the model counts as audio, or None. `hub_files` is the Hub's file list and is required: an empty, missing or
+    malformed list gives no layout evidence, and a local snapshot alone is not enough. Each of `other_lists` (a local snapshot's top
+    level) is either None (that source is absent and is skipped) or a list that must show the layout too; a present but empty list fails."""
     if not audio_tag(pipeline_tag, tags):
         return None
-    lists = [n for n in name_lists if isinstance(n, list) and n]
-    if not lists or not all(audio_layout(n) for n in lists):
+    if not isinstance(hub_files, list) or not hub_files or not audio_layout(hub_files):
+        return None
+    if not all(isinstance(n, list) and audio_layout(n) for n in other_lists if n is not None):
         return None
     if isinstance(pipeline_tag, str) and pipeline_tag:
         how = f"pipeline tag {pipeline_tag}"

@@ -100,7 +100,11 @@ def test_evidence_needs_a_tag_and_a_layout_and_every_source_must_agree():
     assert audio_facts.audio_evidence("text-to-audio", [], ok)
     assert audio_facts.audio_evidence("text-to-audio", [], ok, ok)
     assert not audio_facts.audio_evidence("text-to-audio", [], ok, ["config.json", "model.safetensors"])   # the hub and the disk disagree
-    assert audio_facts.audio_evidence("text-to-audio", [], ok, [])                                        # an empty list holds no evidence
+    assert not audio_facts.audio_evidence("text-to-audio", [], ok, [])                                    # a source that is present but empty fails
+    assert audio_facts.audio_evidence("text-to-audio", [], ok, None)                                      # an absent source is skipped
+    assert not audio_facts.audio_evidence("text-to-audio", [], [], ok)                                    # a local snapshot alone is not enough
+    assert not audio_facts.audio_evidence("text-to-audio", [], None, ok)
+    assert not audio_facts.audio_evidence("text-to-audio", [], "model_config.json", ok)                   # a malformed Hub list
     assert not audio_facts.audio_evidence("text-generation", [], ok)
     assert not audio_facts.audio_evidence("text-to-audio", [])
     assert not audio_facts.audio_evidence("text-to-audio", [], [], [])
@@ -198,7 +202,7 @@ def test_the_row_points_to_the_unblock_text():
 
 
 def test_a_local_base_snapshot_is_handed_on_and_nothing_is_downloaded(tmp_path):
-    s = snap(tmp_path / "hf", BASE, BASE_REV)
+    s = snap(tmp_path / "hf", BASE, BASE_REV, names=AUDIO_FILES + ["svd_bases.pt"])
     c = audio_base(base_info=(base_hub(gated=False), None), local={BASE: s})
     assert c.status == "warn" and c.data["snapshot"] == s and c.data["needs_fetch"] is False and "local" in c.detail
 
@@ -280,6 +284,47 @@ def test_a_base_whose_hub_list_says_audio_but_whose_snapshot_says_text_leaves_th
     s = snap(tmp_path / "hf", BASE, BASE_REV, names=AUDIO_FILES + ["config.json"])
     c = audio_base(base_info=(base_hub(gated=False), None), local={BASE: s})
     assert c.status == "block" and c.reason == "nearest-model-missing"
+
+
+def test_a_public_base_cached_without_a_listed_component_weight_is_fetched(tmp_path):
+    s = snap(tmp_path / "hf", BASE, BASE_REV)         # no t5gemma weights, which the Hub lists
+    c = audio_base(base_info=(base_hub(gated=False), None), local={BASE: s})
+    assert c.status == "warn" and c.data["needs_fetch"] is True and c.data["snapshot"] is None
+    assert "incomplete" in c.detail and "t5gemma-b-b-ul2/model.safetensors" in c.detail and c.data["base_gb"] == pytest.approx(6.0)
+
+
+def test_a_complete_public_cached_base_is_not_fetched(tmp_path):
+    s = snap(tmp_path / "hf", BASE, BASE_REV, names=AUDIO_FILES + ["svd_bases.pt"])
+    c = audio_base(base_info=(base_hub(gated=False), None), local={BASE: s})
+    assert c.data["needs_fetch"] is False and c.data["snapshot"] == s
+
+
+@pytest.mark.parametrize("files", [[], None, "model_config.json"])
+def test_a_base_with_no_usable_hub_file_list_is_not_audio_even_with_an_audio_snapshot(tmp_path, files):
+    s = snap(tmp_path / "hf", BASE, BASE_REV)
+    for gated in (False, "manual"):
+        info = pf.parse_hub(audio_payload(BASE, gated=gated, siblings=files))
+        c = audio_base(base_info=(info, None), local={BASE: s})
+        assert c.status == "block" and c.reason == "nearest-model-missing", (gated, files)
+
+
+@pytest.mark.parametrize("files", [[], None, "model_config.json"])
+def test_a_model_with_no_usable_hub_file_list_is_not_audio_even_with_an_audio_snapshot(tmp_path, files):
+    snaps = full_snaps(tmp_path)
+    base = dict(hub_info=None)
+    def hub_info(m):
+        if m == MODEL:
+            return pf.parse_hub(audio_payload(siblings=files)), None
+        return pf.parse_hub(audio_payload(BASE, sha=BASE_REV, gated=False)), None
+    by = rows(tmp_path, world(local=snaps, hub_info=hub_info))
+    assert not (by["base"].data or {}).get("audio")
+
+
+def test_an_empty_local_snapshot_listing_is_not_evidence(tmp_path, monkeypatch):
+    monkeypatch.setattr(pf, "snapshot_root_names", lambda p: [])
+    hub = pf.parse_hub(audio_payload())
+    assert pf.audio_evidence_for(hub, tmp_path) is None
+    assert pf.audio_evidence_for(hub, None)
 
 
 def test_an_inferred_base_waits_for_the_operator():
