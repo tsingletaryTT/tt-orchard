@@ -537,6 +537,12 @@ class HardwareCheck:
             sentence = self.check(set(self.pids)) if self.check is not None else None
         except Exception as exc:
             sentence = f"cannot confirm that no chip is held (the check raised {type(exc).__name__})"
+        except BaseException:
+            # An interrupt in the one look at gozer: it is not known whether a chip is held, so the tool stops, and the stop is
+            # written before the interrupt goes on.
+            self.stopped = "the check after the call was interrupted, so it is not known whether a chip is still held"
+            self._persist()
+            raise
         if not sentence:
             return ""
         self.stopped = sentence
@@ -580,22 +586,45 @@ class HardwareCheck:
                 self._record(k=k, counted=True, outcome="interrupted", note=note, kernel_sha256=sha,
                              total_s=round(held, 1), lease_s=round(held, 1), lease_upper_bound=True)
                 self._look()                        # the one check; if it finds a chip held the tool is stopped
+        charged: list[float] = []                   # the chip time this call was charged, so an interrupt does not charge it twice
+        recorded = len(self.records)
+        try:
+            return self._finish(k, note, sha, start, hw, event, text, charged)
+        except BaseException:
+            # An interrupt that lands after the wrapper has exited (in the record, or in the status check). The finished call is
+            # written to the record, with its chip time, before the interrupt goes on.
+            if len(self.records) == recorded:
+                held = charged[0] if charged else (float(hw["lease_s"]) if _number(hw.get("lease_s")) else max(self.clock() - start, 0.0))
+                if not charged:
+                    self.lease_used += held
+                self._record(k=k, counted=True, outcome="interrupted", note=note, kernel_sha256=sha,
+                             total_s=round(self.clock() - start, 1), lease_s=round(held, 1),
+                             lease_id=hw.get("lease_id") if isinstance(hw.get("lease_id"), str) else None,
+                             lease_upper_bound=True if hw.get("lease_upper_bound") else None)
+            if not self.stopped:
+                self._look()
+            raise
+
+    def _finish(self, k, note, sha, start, hw, event, text, charged) -> str:
+        """The part of a call after the wrapper has exited: the record first, then the one look at gozer."""
+        p = self.policy
         pid = hw.get("wrapper_pid")
         if isinstance(pid, int):
             self.pids.add(pid)                      # before the check: the check also matches chips held by this call's own wrapper
-        stopped_text = self._look()
         total = round(self.clock() - start, 1)
         polls = 1 if event == "queued" else 0
         if event == "queued":
             q = hw.get("queued") if isinstance(hw.get("queued"), dict) else {}
             cancelled = bool(q.get("ticket")) and q.get("cancel_error") is None
+            charged.append(0.0)
             self._record(k=k, counted=True, outcome="busy", category="queued", note=note, kernel_sha256=sha,
                          total_s=total, waited_s=total, queued_polls=polls, cancelled=cancelled,
                          first_line=str(hw.get("first_line") or ""))
-            return self._busy_text(k, total, polls, cancelled, hw) + stopped_text
+            return self._busy_text(k, total, polls, cancelled, hw) + self._look()
         waited = float(hw["waited_s"]) if _number(hw.get("waited_s")) else 0.0
         elapsed = float(hw["lease_s"]) if _number(hw.get("lease_s")) else max(total - waited, 0.0)
         self.lease_used += elapsed
+        charged.append(elapsed)
         device = hw.get("device_s") if _number(hw.get("device_s")) else None
         release_error = str(hw["release_error"]) if hw.get("release_error") else None
         lease_id = hw.get("lease_id") if isinstance(hw.get("lease_id"), str) else None
@@ -610,7 +639,7 @@ class HardwareCheck:
                     f"{elapsed:.1f} s. The wrapper released the lease with `gozer release`, which resets the chip. Look with `gozer status` if in doubt (a lease marked stale is cleared "
                     "with `gozer reconcile`, the gozer-gatekeeper skill says how), and never reset a chip by hand. "
                     "Hardware checks are off for the rest of this attempt; the simulator still works."
-                    f"{self._release_note(release_error)}\n{self._left()}" + stopped_text)
+                    f"{self._release_note(release_error)}\n{self._left()}" + self._look())
         passed = hw.get("passed") is True
         category = None if passed else hw.get("category")
         self._record(k=k, counted=True, outcome="pass" if passed else str(category), category=category, passed=passed,
@@ -618,8 +647,9 @@ class HardwareCheck:
                      waited_s=round(waited, 1), queued_polls=polls, lease_id=lease_id, lease_upper_bound=upper,
                      release_error=release_error, first_line=str(hw.get("first_line") or ""),
                      pcc_min=hw.get("pcc_min") if _number(hw.get("pcc_min")) else None)
-        return self._result_text(k, hw, text, total, waited, device, passed) + (
-            "\n" + self._release_note(release_error).strip() if release_error else "") + stopped_text
+        answer = self._result_text(k, hw, text, total, waited, device, passed) + (
+            "\n" + self._release_note(release_error).strip() if release_error else "")
+        return answer + self._look()
 
     # ---- the answers --------------------------------------------------------------------------------------------
 
