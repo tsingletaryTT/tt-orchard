@@ -1124,3 +1124,123 @@ def test_the_data_section_size_is_the_size_of_the_opened_file(tmp_path, monkeypa
     _lying_fstat(monkeypatch, mod, 16)
     with pytest.raises(ValueError, match="no tensor claims"):
         mod.audio_header(snap / "model.safetensors")
+
+
+# ---- review of PR 142: the first identity of a file is kept across later opens -------------------------
+
+def _replace_same_bytes(path):
+    import os
+    data = path.read_bytes()
+    tmp = path.with_name(path.name + ".new")
+    tmp.write_bytes(data)
+    os.replace(tmp, path)
+
+
+def test_a_config_replaced_between_two_opens_is_reported_even_when_the_second_open_is_the_last(tmp_path):
+    snap = make_audio(tmp_path, MODEL_REV, repo=MODEL_ID)
+    mod = template_module()
+    mod.audio_identity_reset()
+    assert mod._audio_json(snap / "model_config.json")[1] is None
+    _replace_same_bytes(snap / "model_config.json")            # same bytes, new inode
+    mod._audio_json(snap / "model_config.json")
+    problems = mod.audio_identity_problems()
+    assert problems and "model_config.json changed while stage 0 was reading it" in problems[0]
+
+
+def test_a_config_with_new_content_at_the_second_open_is_refused_by_hash(tmp_path):
+    import os
+    snap = make_audio(tmp_path, MODEL_REV, repo=MODEL_ID)
+    mod = template_module()
+    mod.audio_identity_reset()
+    path = snap / "model_config.json"
+    first = path.read_bytes()
+    assert mod._audio_json(path)[1] is None
+    st = os.stat(path)
+    i = first.index(b'"') + 1
+    path.write_bytes(first[:i] + (b"Z" if first[i:i + 1] != b"Z" else b"Y") + first[i + 1:])        # one byte changed in place: same size
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))          # even with the old time and size kept in step, the hash differs
+    data, err = mod._audio_json(path)
+    assert data is None and "changed between" in err
+
+
+def test_a_config_that_is_the_same_file_at_both_opens_is_fine(tmp_path):
+    snap = make_audio(tmp_path, MODEL_REV, repo=MODEL_ID)
+    mod = template_module()
+    mod.audio_identity_reset()
+    assert mod._audio_json(snap / "model_config.json")[1] is None
+    assert mod._audio_json(snap / "model_config.json")[1] is None
+    assert mod.audio_identity_problems() == []
+
+
+def test_a_config_replaced_after_the_layout_check_makes_the_real_run_unknown(audio_case, tmp_path):
+    """End to end: audio_main reads the config twice (layout check, then comparison). The swap happens between them."""
+    stage = audio_case()
+    cfgpath = model_snapshot(stage) / "model_config.json"
+    driver = tmp_path / "driver2.py"
+    driver.write_text(
+        "import importlib.util, os, sys\n"
+        f"spec = importlib.util.spec_from_file_location('dt', {str(stage / 'delta_triage.py')!r})\n"
+        "mod = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(mod)\n"
+        "orig = mod.audio_layout_problem\n"
+        "state = []\n"
+        "def patched(snapshot):\n"
+        "    out = orig(snapshot)\n"
+        f"    if str(snapshot) == {str(model_snapshot(stage))!r} and not state:\n"
+        "        state.append(1)\n"
+        f"        p = {str(cfgpath)!r}\n"
+        "        data = open(p, 'rb').read()\n"
+        "        open(p + '.new', 'wb').write(data)\n"
+        "        os.replace(p + '.new', p)\n"
+        "    return out\n"
+        "mod.audio_layout_problem = patched\n"
+        "sys.exit(mod.main())\n")
+    r = subprocess.run([sys.executable, str(driver)], capture_output=True, text=True, timeout=300)
+    assert r.returncode == 0, r.stdout + r.stderr
+    d = json.loads((stage / "delta.json").read_text())
+    assert d["class"] == "unknown" and "model_config.json changed while stage 0 was reading it" in reasons(d)
+
+
+def test_resetting_forgets_the_first_hashes_and_the_noted_mismatches(tmp_path):
+    snap = make_audio(tmp_path, MODEL_REV, repo=MODEL_ID)
+    mod = template_module()
+    mod.audio_identity_reset()
+    mod._audio_json(snap / "model_config.json")
+    _replace_same_bytes(snap / "model_config.json")
+    mod._audio_json(snap / "model_config.json")
+    assert mod.AUDIO_JSON_SHA and mod.AUDIO_REOPENED_DIFFERENT
+    mod.audio_identity_reset()
+    assert mod.AUDIO_JSON_SHA == {} and mod.AUDIO_REOPENED_DIFFERENT == set() and mod.audio_identity_problems() == []
+
+
+def test_the_hash_covers_the_whole_file_and_a_later_read_still_compares_with_the_first(tmp_path):
+    import os
+    snap = make_audio(tmp_path, MODEL_REV, repo=MODEL_ID)
+    mod = template_module()
+    mod.audio_identity_reset()
+    path = snap / "model_config.json"
+    first = path.read_bytes()
+    assert mod._audio_json(path)[1] is None
+    st = os.stat(path)
+    i = first.rindex(b'"') - 1                          # the last character of the last string, far from the start
+    path.write_bytes(first[:i] + (b"Z" if first[i:i + 1] != b"Z" else b"Y") + first[i + 1:])
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
+    assert "changed between" in mod._audio_json(path)[1]
+    assert "changed between" in mod._audio_json(path)[1]          # a third read is still compared with the first, not with the second
+
+
+def test_a_file_swapped_in_for_one_open_and_swapped_back_is_still_reported(tmp_path):
+    import os
+    snap = make_audio(tmp_path, MODEL_REV, repo=MODEL_ID)
+    mod = template_module()
+    mod.audio_identity_reset()
+    path = snap / "model_config.json"
+    assert mod._audio_json(path)[1] is None
+    original = path.with_name("original-config")
+    os.rename(path, original)
+    path.write_bytes(original.read_bytes())               # a different file with the same bytes
+    mod._audio_json(path)
+    path.unlink()
+    os.rename(original, path)                             # the first file is back: the final stat alone would find nothing
+    problems = mod.audio_identity_problems()
+    assert problems and "different file at a later open" in problems[0]

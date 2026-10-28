@@ -2547,11 +2547,15 @@ def audio_loads(text: str):
     return data
 
 
-AUDIO_IDENTITY: dict = {}                 # path -> (device, inode, size, mtime_ns) of every file the audio branch read
+AUDIO_IDENTITY: dict = {}                 # path -> (device, inode, size, mtime_ns) of the FIRST open of every file the audio branch read
+AUDIO_JSON_SHA: dict = {}                 # path -> sha256 of the bytes of the first read of each JSON file
+AUDIO_REOPENED_DIFFERENT: set = set()     # paths whose later open did not match the first one
 
 
 def audio_identity_reset() -> None:
     AUDIO_IDENTITY.clear()
+    AUDIO_JSON_SHA.clear()
+    AUDIO_REOPENED_DIFFERENT.clear()
 
 
 def _audio_open_regular(path: Path):
@@ -2564,7 +2568,11 @@ def _audio_open_regular(path: Path):
     if not stat.S_ISREG(st.st_mode):
         os.close(fd)
         raise OSError(f"{path.name} is not a regular file")
-    AUDIO_IDENTITY[str(path)] = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+    ident = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+    # The first identity is kept. A later open of the same path (the layout check opens a config and the comparison opens it again) is compared with
+    # it and never replaces it, so a file swapped between two opens cannot become the new baseline.
+    if AUDIO_IDENTITY.setdefault(str(path), ident) != ident:
+        AUDIO_REOPENED_DIFFERENT.add(str(path))
     return os.fdopen(fd, "rb"), st
 
 
@@ -2573,6 +2581,9 @@ def audio_identity_problems() -> list[str]:
     file that is no longer there."""
     out = []
     for name, ident in sorted(AUDIO_IDENTITY.items()):
+        if name in AUDIO_REOPENED_DIFFERENT:
+            out.append(f"{Path(name).name} changed while stage 0 was reading it (it was a different file at a later open)")
+            continue
         try:
             st = os.stat(os.path.realpath(name))
         except OSError:
@@ -2594,6 +2605,9 @@ def _audio_json(path: Path):
             raw = f.read(AUDIO_JSON_MAX + 1)
         if len(raw) > AUDIO_JSON_MAX:
             return None, f"{path.name} is larger than {AUDIO_JSON_MAX} bytes"
+        digest = hashlib.sha256(raw).hexdigest()
+        if AUDIO_JSON_SHA.setdefault(str(path), digest) != digest:
+            return None, f"{path.name} changed between two reads (its content is not the same)"
         data = audio_loads(raw.decode("utf-8"))
     except (OSError, ValueError) as exc:
         return None, f"{path.name} is not readable JSON: {exc}"
