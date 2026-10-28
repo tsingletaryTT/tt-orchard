@@ -239,3 +239,18 @@ def test_a_migration_marker_that_appears_while_the_question_is_open_stops_it(tmp
     ask = Asker(True, during=lambda: (d / "MIGRATING-TO-SQLITE").write_text("{}"))
     code, text = guided(d, tmp_path, ask=ask)
     assert code == 2 and spy == [True] and "changed while the question was open" in text
+
+
+def test_a_change_between_the_last_check_and_the_lock_is_caught_under_the_lock(tmp_path, monkeypatch):
+    d = make(tmp_path)
+    real = mig.migrate
+
+    def late_writer(directory, **kw):
+        if not kw.get("dry_run"):                                  # after the question, before the migration takes its lock
+            with open(d / "telegraph.jsonl", "a") as f:
+                f.write(json.dumps({**RECORD, "call_id": "late"}) + "\n")
+        return real(directory, **kw)
+    monkeypatch.setattr(mig, "migrate", late_writer)
+    code, text = guided(d, tmp_path, ask=Asker(True))
+    assert code == 2 and "under the lock" in text
+    assert (d / "telegraph.jsonl").is_file() and not (d / "telegraph.jsonl.archived").exists()

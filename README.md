@@ -1888,7 +1888,7 @@ type, once, near the top of its output (see "The notice" below). `--dir` can be 
 `tt-orchard db migrate telegraph --dry-run-first` does both steps with one confirmation. It runs the dry run and prints the checks. It stops
 there, with nothing changed, when any check is different, when the ledger cannot be checked, when the directory is not an unmigrated one
 (already moved, half moved, or no `telegraph.jsonl`), or when another process holds `telegraph.lock`. When every check is equal it asks
-once, `[y/N]`, at a terminal. A no, no terminal, a lock taken while the question was open, or a `telegraph.jsonl` that was appended to, replaced, removed or joined by a migration marker while the question was open (the checks no longer describe it) also stops it with nothing changed. A yes runs the
+once, `[y/N]`, at a terminal. A no, no terminal, a lock taken while the question was open, or a `telegraph.jsonl` that was appended to, replaced, removed or joined by a migration marker while the question was open (the checks no longer describe it) also stops it with nothing changed. The file is compared once more under `telegraph.lock`, after the migration takes it. A yes runs the
 real migration described below. `--accept-malformed N` is passed to both steps. `--dry-run` and `--dry-run-first` cannot be combined. The
 existing commands are unchanged.
 

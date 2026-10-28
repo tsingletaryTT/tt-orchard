@@ -237,9 +237,11 @@ def _migrate(directory, scope, cfg, args, say, ask=None) -> int:
     return _migrate_once(directory, scope, cfg, args, say, accept, dry_run=bool(getattr(args, "dry_run", False)))
 
 
-def _migrate_once(directory, scope, cfg, args, say, accept, *, dry_run) -> int:
+def _migrate_once(directory, scope, cfg, args, say, accept, *, dry_run, hook=None) -> int:
     try:
-        result = mig.migrate(directory, scope=scope, max_output_tokens=cfg.max_output_tokens, accept_malformed=accept, dry_run=dry_run)
+        extra = {"hook": hook} if hook is not None else {}
+        result = mig.migrate(directory, scope=scope, max_output_tokens=cfg.max_output_tokens, accept_malformed=accept, dry_run=dry_run,
+                             **extra)
     except mig.MalformedLedger as exc:
         say(f"db migrate: {exc}")
         return EXIT_PROBLEM
@@ -336,7 +338,12 @@ def _migrate_after_dry_run(directory, scope, cfg, args, say, ask, accept) -> int
         say(f"db migrate: {ts.LEDGER} in {directory} changed while the question was open, so the checks above no longer describe it. "
             "Run this again. Nothing was changed.")
         return EXIT_PROBLEM
-    return _migrate_once(directory, scope, cfg, args, say, accept, dry_run=False)
+
+    def still_the_checked_file(step):
+        if step == "after:1" and _ledger_identity(directory) != checked:        # the migration holds telegraph.lock from here on
+            raise mig.MigrationRefused(f"{ts.LEDGER} changed after the checks were made (seen under the lock), so they no longer "
+                                       "describe it; run this again. Nothing was changed")
+    return _migrate_once(directory, scope, cfg, args, say, accept, dry_run=False, hook=still_the_checked_file)
 
 
 def _export(directory, scope, args, out, say) -> int:

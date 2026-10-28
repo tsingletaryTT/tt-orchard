@@ -53,7 +53,7 @@ def test_a_half_finished_migration_says_to_run_the_command_again(tmp_path):
     (d / "MIGRATING-TO-SQLITE").write_text("{}")
     n = tn.telegraph_state_notice(CFG_ON, directory=d, environ={}, home=tmp_path)
     assert n.kind == "half-finished" and n.summary.startswith("Run `tt-orchard db migrate telegraph` again")
-    assert n.commands == ("tt-orchard db migrate telegraph",) and "Nothing is deleted" in n.text()
+    assert n.commands == ("tt-orchard db migrate telegraph",) and "Nothing is deleted" in n.text() and "--scope" in n.text()
 
 
 def test_a_lost_database_points_at_status_and_restore(tmp_path):

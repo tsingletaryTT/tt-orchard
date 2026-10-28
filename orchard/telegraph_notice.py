@@ -123,7 +123,8 @@ def _notice(kind: str, where: str, flags: str) -> Notice:
             f"Run `{run}` again to finish moving the Telegraph ledger: an earlier run stopped part way.",
             (f"Directory: {where}",
              "Telegraph calls are refused until it finishes, and nothing is sent.",
-             "The command resumes where it stopped. Stop any running tt-orchard process first.",
+             "The command resumes where it stopped. Stop any running tt-orchard process first. If the earlier run used a scope "
+             "other than default, add `--scope <that scope>`; the command names it when it is missing.",
              "Nothing is deleted: the old file is kept as telegraph.jsonl.archived, and a backup of the new database is taken at the end."),
             (run,))
     if kind == LOST_DATABASE:
