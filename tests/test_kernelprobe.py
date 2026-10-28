@@ -3843,7 +3843,8 @@ def test_main_without_an_op_or_the_ladder_refuses(tmp_path, fake_kenv, env_ready
 
 
 @pytest.mark.parametrize("flag, value", [("rungs", "add"), ("rung_wall", "add=300"), ("rung_expect_s", "add=60"),
-                                         ("max_hours", 6.0), ("report_only", True)])
+                                         ("max_hours", 6.0), ("report_only", True), ("rungs", ""), ("rung_wall", ""),
+                                         ("rung_expect_s", ""), ("max_hours", 0), ("max_hours", 0.0)])
 def test_main_refuses_a_ladder_only_option_without_the_ladder_and_starts_nothing(tmp_path, fake_kenv, env_ready, capsys,
                                                                                monkeypatch, flag, value):
     started = []

@@ -179,12 +179,17 @@ def test_parse_seconds_map():
 
 # ---- the table ----------------------------------------------------------------------------------------------------
 
-def write_rung(out: Path, op: str, recs: list[dict], *, wall=1800.0, library="none"):
+_PROBE_IDS = __import__("itertools").count(1)
+
+
+def write_rung(out: Path, op: str, recs: list[dict], *, wall=1800.0, library="none", model="coder-x", sim="1.1.10",
+               seed_base=77):
     d = out / op
-    d.mkdir(parents=True)
-    header = {"probe_id": f"p-{op}", "coder_model": "coder-x", "budget": {"wall_s": wall, "max_turns": 40},
-              "sampling": {"temperatures": [0.7], "seed_base": 77, "seed_base_from": "--seed"},
-              "library": {"mode": library}, "tt_lang": {"sim_version": "1.1.10", "source_sha": "a" * 40}}
+    d.mkdir(parents=True, exist_ok=True)
+    header = {"probe_id": f"p-{op}-{next(_PROBE_IDS)}", "coder_model": model,
+              "budget": {"wall_s": wall, "max_turns": 40},
+              "sampling": {"temperatures": [0.7], "seed_base": seed_base, "seed_base_from": "--seed"},
+              "library": {"mode": library}, "tt_lang": {"sim_version": sim, "source_sha": "a" * 40}}
     for r in recs:
         r["op"] = op
     (d / "kernel-probe-report.json").write_text(json.dumps({"header": header, "attempts": recs}))
@@ -210,7 +215,7 @@ def test_the_report_has_a_row_per_rung_with_passes_classes_and_settings(tmp_path
     assert "The first rung where passes fall to zero: `rmsnorm` (rung 8 of 9)." in text
     assert "Rungs not run: mul, scale_shift, add_row, rsqrt, row_sum, linear_scan." in text
     assert "- coder model: coder-x" in text and "- seed base: 77" in text and "- temperatures: [0.7]" in text
-    assert "- library: ['none']" in text and "- sim version: 1.1.10" in text
+    assert "- library: none" in text and "- sim version: 1.1.10" in text
     assert "rmsnorm 1" in text and "wall_clock" in text                # the wall-clock note names the rung
 
 
@@ -264,9 +269,6 @@ def fake_main(calls, code_for=None, *, passes=True, extra=(), write_for=None):
                       **{k: getattr(sub, k, None) for k in extra}})
         if write_for is None or sub.op in write_for:
             parent = Path(sub.out).parent
-            if (parent / sub.op).exists():
-                import shutil
-                shutil.rmtree(parent / sub.op)                       # a real run replaces the rung's report
             write_rung(parent, sub.op, [attempt(passes, category=None if passes else "numeric_mismatch",
                                                 first="" if passes else "p", n=i, seed=100 + i) for i in (1, 2)],
                        wall=sub.wall_s)
@@ -466,3 +468,80 @@ def test_the_ladder_refuses_the_hardware_phase(tmp_path, capsys):
     code = kl.run(Args(out=str(tmp_path), rungs="add", phase="hw"), fake_main(calls), default_wall_s=1800.0,
                   say=lambda l: None)
     assert code == 2 and calls == [] and "simulator" in capsys.readouterr().err
+
+
+# ---- review round 2 (Copilot, PR 177) ---------------------------------------------------------------------------
+
+def test_report_only_over_rungs_from_different_models_or_simulators_says_so_and_keeps_each_rungs_own(tmp_path):
+    write_rung(tmp_path, "add", [attempt(True)], model="coder-a", sim="1.1.10")
+    write_rung(tmp_path, "mul", [attempt(True)], model="coder-b", sim="1.1.11", seed_base=99)
+    kl.run(Args(out=str(tmp_path), report_only=True, rungs="add,mul"), fake_main([]), default_wall_s=1800.0,
+           say=lambda l: None)
+    data = json.loads((tmp_path / "ladder-report.json").read_text())
+    assert {r["op"]: (r["coder_model"], r["sim_version"], r["seed_base"]) for r in data["rungs"]} == {
+        "add": ("coder-a", "1.1.10", 77), "mul": ("coder-b", "1.1.11", 99)}
+    assert data["settings"]["coder_model"] == ["coder-a", "coder-b"] and data["settings"]["seed_base"] == [77, 99]
+    assert sorted(data["settings"]["mixed"]) == ["coder_model", "seed_base", "sim_version"]
+    text = (tmp_path / "ladder-report.md").read_text()
+    assert "The rungs differ in" in text and "coder model" in text and "not directly comparable" in text
+    assert "coder-a" in text and "coder-b" in text
+
+
+def test_a_ladder_from_one_model_and_simulator_has_no_mixed_note(tmp_path):
+    write_rung(tmp_path, "add", [attempt(True)])
+    write_rung(tmp_path, "mul", [attempt(True)])
+    data = kl.write_ladder_report(tmp_path, ["add", "mul"])
+    assert data["settings"]["mixed"] == [] and data["settings"]["coder_model"] == "coder-x"
+    assert "The rungs differ in" not in (tmp_path / "ladder-report.md").read_text()
+
+
+def test_a_rung_that_failed_to_write_its_report_does_not_borrow_the_old_one(tmp_path):
+    """Exit code 3 also means the report could not be written; an older report in the directory is then not this run's."""
+    write_rung(tmp_path, "add", [attempt(True)])                           # an earlier run's report
+    calls = []
+    code = kl.run(Args(out=str(tmp_path), rungs="add"), fake_main(calls, {"add": 3}, write_for=set()),
+                  default_wall_s=1800.0, say=lambda l: None)
+    assert code == 3
+    data = json.loads((tmp_path / "ladder-report.json").read_text())
+    assert data["rungs"] == [] and data["not_run"] == ["add"]
+
+
+def test_a_rung_that_wrote_a_new_report_and_returned_3_is_counted(tmp_path):
+    write_rung(tmp_path, "add", [attempt(True)])
+    kl.run(Args(out=str(tmp_path), rungs="add"), fake_main([], {"add": 3}), default_wall_s=1800.0, say=lambda l: None)
+    data = json.loads((tmp_path / "ladder-report.json").read_text())
+    assert [r["op"] for r in data["rungs"]] == ["add"]
+
+
+def test_a_finished_rungs_directory_stays_locked_until_the_ladder_ends(tmp_path):
+    """A separate single-op probe on <out>/add must not replace the rung's report while the ladder runs the next rung."""
+    from orchard import kernelprobe as kp
+    seen = {}
+
+    def main(sub):
+        if sub.op == "mul":
+            try:
+                kp.acquire_lock(tmp_path / "add")
+                seen["add"] = "free"
+            except kp._Refused:
+                seen["add"] = "held"
+        write_rung(Path(sub.out).parent, sub.op, [attempt(True)])
+        return 0
+    kl.run(Args(out=str(tmp_path), rungs="add,mul"), main, default_wall_s=1800.0, say=lambda l: None)
+    assert seen == {"add": "held"}
+    lock = kp.acquire_lock(tmp_path / "add")                                # released at the end
+    kp.release_lock(lock)
+
+
+@pytest.mark.parametrize("kw, words", [
+    ({"rungs": ""}, "is empty"),
+    ({"rung_wall": ""}, "is empty"),
+    ({"rung_expect_s": ""}, "is empty"),
+    ({"wall_s": 0}, "--wall-s"),
+    ({"wall_s": -5.0}, "--wall-s"),
+    ({"wall_s": 9000.0}, "--wall-s"),
+])
+def test_the_ladder_refuses_an_option_that_was_given_empty_or_out_of_range(tmp_path, capsys, kw, words):
+    calls = []
+    code = kl.run(Args(out=str(tmp_path), **kw), fake_main(calls), default_wall_s=1800.0, say=lambda l: None)
+    assert code == 2 and calls == [] and words in capsys.readouterr().err

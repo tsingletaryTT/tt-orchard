@@ -114,9 +114,11 @@ def projected_s(plan: list[dict]) -> float:
 
 def parse_rungs(text: str | None) -> list[str]:
     """The rungs to run, from `--rungs a,b,c` (any order the operator gives, each a rung of the ladder, none twice).
-    No text means the whole ladder."""
-    if text is None or not str(text).strip():
+    No option (None) means the whole ladder; an option given empty is refused."""
+    if text is None:
         return list(LADDER)
+    if not str(text).strip():
+        raise LadderRefused("--rungs is empty; name rungs or leave the option out")
     names = [t.strip() for t in str(text).split(",")]
     for n in names:
         if n not in LADDER:
@@ -129,8 +131,10 @@ def parse_rungs(text: str | None) -> list[str]:
 def parse_seconds_map(text: str | None, flag: str) -> dict[str, float]:
     """`op=seconds,op=seconds` for --rung-wall and --rung-expect-s. Each op must be a rung, each value above 0."""
     out: dict[str, float] = {}
-    if text is None or not str(text).strip():
+    if text is None:
         return out
+    if not str(text).strip():
+        raise LadderRefused(f"{flag} is empty; give rung=seconds or leave the option out")
     for part in str(text).split(","):
         name, sep, value = part.partition("=")
         name = name.strip()
@@ -172,6 +176,10 @@ def rung_row(op: str, attempts: list[dict], header: dict | None = None) -> dict:
             "temperatures": sorted({float((a.get("sampling") or {}).get("temperature") or 0.0) for a in attempts}),
             "wall_budget_s": budget.get("wall_s"), "max_turns": budget.get("max_turns"),
             "library": (header.get("library") or {}).get("mode"), "probe_id": header.get("probe_id"),
+            "coder_model": header.get("coder_model"),
+            "sim_version": (header.get("tt_lang") or {}).get("sim_version"),
+            "source_sha": (header.get("tt_lang") or {}).get("source_sha"),
+            "seed_base": (header.get("sampling") or {}).get("seed_base"),
             "stopped": header.get("stopped")}
 
 
@@ -182,6 +190,16 @@ def first_zero_rung(rows: list[dict]) -> str | None:
         if r["attempts"] and r["passed"] == 0:
             return r["op"]
     return None
+
+
+def _agreed(values: list):
+    """The one value the rungs share, or the sorted list of the distinct values when they differ (None when none has one)."""
+    distinct = sorted({v for v in values if v is not None}, key=str)
+    return distinct[0] if len(distinct) == 1 else (distinct or None)
+
+
+MIXED_KEYS = (("coder_model", "coder model"), ("sim_version", "simulator version"), ("source_sha", "tt-lang source sha"),
+              ("seed_base", "seed base"), ("library", "library mode"))
 
 
 def _classes_cell(classes: dict) -> str:
@@ -205,10 +223,16 @@ def ladder_lines(rows: list[dict], *, skipped: list[str], stopped: str | None, s
     if stopped:
         lines += [f"The ladder stopped: {stopped}", ""]
     lines += ["## Settings", ""]
-    for key in ("coder_model", "temperatures", "seed_base", "seed_base_from", "attempts_per_rung", "library", "phase", "max_turns",
-                "sim_version", "tt_lang_source_sha"):
+    for key in ("coder_model", "temperatures", "seed_base", "seed_base_from", "attempts_per_rung", "library", "phase",
+                "max_turns", "sim_version", "source_sha"):
         if settings.get(key) is not None:
             lines.append(f"- {key.replace('_', ' ')}: {settings[key]}")
+    if settings.get("mixed"):
+        names = dict(MIXED_KEYS)
+        lines += ["", "The rungs differ in " + ", ".join(names[k] for k in settings["mixed"]) + ", so their counts are not "
+                  "directly comparable. Each rung's own values:", ""]
+        lines += [f"- {r['op']}: model {r['coder_model']}, simulator {r['sim_version']}, seed base {r['seed_base']}, "
+                  f"library {r['library']}" for r in rows]
     lines += ["", "## Passes and failure classes per rung", "",
               "| Rung | Op | Attempts | Passed | Failure classes | Median wall of a pass (s) | Wall budget (s) | Seeds |",
               "|---|---|---|---|---|---|---|---|"]
@@ -269,16 +293,15 @@ def write_ladder_report(out_dir, rungs: list[str], *, stopped: str | None = None
         rows.append(rung_row(op, attempts, header))
     first = next(iter(headers.values()), {})
     sampling = first.get("sampling") if isinstance(first.get("sampling"), dict) else {}
-    bases = sorted({(h.get("sampling") or {}).get("seed_base") for h in headers.values()
-                    if isinstance((h.get("sampling") or {}).get("seed_base"), int)})
-    settings = {"coder_model": first.get("coder_model"), "temperatures": sampling.get("temperatures"),
-                "seed_base": (bases[0] if len(bases) == 1 else bases) if bases else None,
-                "seed_base_from": sampling.get("seed_base_from") if len(bases) == 1 else None,
-                "attempts_per_rung": sorted({r["attempts"] for r in rows}),
-                "library": sorted({r["library"] for r in rows if r["library"]}),
-                "phase": "sim", "max_turns": sorted({r["max_turns"] for r in rows if r["max_turns"]}),
-                "sim_version": (first.get("tt_lang") or {}).get("sim_version"),
-                "tt_lang_source_sha": (first.get("tt_lang") or {}).get("source_sha")}
+    # Each rung keeps its own model, simulator and seed base in its row. The settings show the value the rungs share,
+    # or every distinct value when they differ (a `--report-only` over directories from different runs), and say so.
+    settings = {key: _agreed([r[key] for r in rows]) for key, _ in MIXED_KEYS}
+    settings["mixed"] = [key for key, _ in MIXED_KEYS if isinstance(settings[key], list)]
+    bases = settings["seed_base"]
+    settings.update({"temperatures": sampling.get("temperatures"),
+                     "seed_base_from": sampling.get("seed_base_from") if isinstance(bases, int) else None,
+                     "attempts_per_rung": sorted({r["attempts"] for r in rows}),
+                     "phase": "sim", "max_turns": sorted({r["max_turns"] for r in rows if r["max_turns"]})})
     data = {"rungs": rows, "not_run": skipped, "first_zero_rung": first_zero_rung(rows), "stopped": stopped,
             "settings": settings, "ladder": list(LADDER)}
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -321,7 +344,15 @@ def run(args, main, *, default_wall_s: float, say=print, clock=time.monotonic) -
         if getattr(args, "phase", "sim") != "sim":
             raise LadderRefused("--ladder measures the simulator only; --phase hw is not supported with it")
         default_wall = getattr(args, "wall_s", None)
-        default_wall = float(default_wall) if default_wall is not None else float(default_wall_s)
+        if default_wall is not None:
+            try:
+                default_wall = float(default_wall)
+            except (TypeError, ValueError):
+                raise LadderRefused(f"--wall-s: {default_wall!r} is not a number") from None
+            if not (0 < default_wall <= 7200):                                  # NaN fails this too
+                raise LadderRefused(f"--wall-s {default_wall:g} is not above 0 and at most 7200 seconds")
+        else:
+            default_wall = float(default_wall_s)
     except LadderRefused as exc:
         import sys
         print(f"refused: {exc}", file=sys.stderr)
@@ -342,7 +373,7 @@ def run(args, main, *, default_wall_s: float, say=print, clock=time.monotonic) -
         return 2
     try:
         started = clock()
-        stopped, code = None, 0
+        stopped, code, held = None, 0, []
         if getattr(args, "report_only", False):
             write_ladder_report(out_dir, rungs)
             say(f"ladder report: {out_dir / (REPORT_NAME + '.md')}")
@@ -360,9 +391,19 @@ def run(args, main, *, default_wall_s: float, say=print, clock=time.monotonic) -
             sub.rungs = sub.rung_wall = sub.rung_expect_s = sub.max_hours = None      # the ladder's own options
             sub.report_only = False
             say(f"ladder rung {i + 1} of {len(rungs)}: {op} (wall budget {wall_of(op):.0f} s)")
+            before = (load_rung(out_dir, op)[0] or {}).get("probe_id")
             code = main(sub)
-            if code != 2:                        # a refused run wrote no report; any other code wrote one
+            # The rung is this run's only when its report carries a new probe id. A refused run (2) wrote none, and a
+            # run that failed to write its report (3) leaves an older one in place.
+            after = (load_rung(out_dir, op)[0] or {}).get("probe_id")
+            if code != 2 and after is not None and after != before:
                 ran.add(op)
+                try:                             # keep the finished rung's report from being replaced by another probe
+                    held.append(kp.acquire_lock(out_dir / op))
+                except kp._Refused as exc:
+                    stopped = f"rung {op}: {exc}"
+                    code = code or 2
+                    break
             if code != 0:
                 stopped = f"rung {op} ended with exit code {code}"
                 break
@@ -379,4 +420,6 @@ def run(args, main, *, default_wall_s: float, say=print, clock=time.monotonic) -
             say(f"ladder stopped: {stopped}")
         return code
     finally:
+        for h in held:
+            kp.release_lock(h)
         kp.release_lock(lock)
