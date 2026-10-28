@@ -353,8 +353,20 @@ def _ensure(env: AEnv, check_only: bool, say) -> list[Result]:
         say(f"{r.status:5s} {r.name}: {r.detail}")
         return r
 
+    # The identity of an existing checkout is taken BEFORE the source step looks at it, so a directory replaced while it is being validated is
+    # not the one that was checked: the identity after the step must be the one before it. A checkout this call creates has no identity yet; it is
+    # taken once the fetch is done.
+    pre_id = source_identity(env)
     src = add(step_source(env, check_only))
-    src_id = source_identity(env) if src.status == OK else None
+    src_id = None
+    if src.status == OK:
+        src_id = source_identity(env)
+        if src_id is None:
+            add(Result("source-identity", FAIL, f"{env.src_dir} passed the source step but has no identity to compare later (a missing directory or .git)"))
+            return results
+        if pre_id is not None and pre_id != src_id:
+            add(Result("source-identity", FAIL, f"{env.src_dir} or its .git was replaced while the source step was validating it; nothing was installed"))
+            return results
     if src.status == FAIL or add(step_venv(env, check_only)).status == FAIL:
         return results
     py = str(env.py)

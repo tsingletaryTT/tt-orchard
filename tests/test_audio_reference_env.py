@@ -848,3 +848,51 @@ def test_the_source_identity_is_missing_when_either_directory_is_missing(env):
     (env.src_dir / ".git").mkdir()
     ident = ae.source_identity(env)
     assert ident is not None and len(ident) == 4 and ident[1] != 0 and ident[3] != 0 and ident[1] != ident[3]
+
+
+# ---- review of PR 142: the identity is captured before the checkout is validated ----------------------------
+
+def _swap_source(env, tmp_path):
+    env.src_dir.rename(tmp_path / "moved-away")
+    (env.src_dir / ".git").mkdir(parents=True)
+
+
+def test_a_checkout_replaced_while_the_source_step_validates_it_stops_before_any_install(env, tmp_path):
+    (env.src_dir / ".git").mkdir(parents=True)
+    real = env.run
+
+    def run(argv, timeout, e=None):
+        out = real(argv, timeout, e)
+        if "status" in argv:
+            _swap_source(env, tmp_path)                 # after the status answered clean, before the validation returned
+        return out
+    env.run = run
+    results = ae.ensure(env, check_only=False)
+    assert statuses(results)["source-identity"] == ae.FAIL
+    assert not any(a[:3] == ["uv", "pip", "install"] for a, _ in real.calls) and not (env.venv_dir / ae.RECORD).exists()
+
+
+def test_a_checkout_replaced_between_the_commit_check_and_the_status_check_is_seen(env, tmp_path):
+    (env.src_dir / ".git").mkdir(parents=True)
+    real = env.run
+
+    def run(argv, timeout, e=None):
+        out = real(argv, timeout, e)
+        if "rev-parse" in argv:
+            _swap_source(env, tmp_path)
+        return out
+    env.run = run
+    assert statuses(ae.ensure(env, check_only=False))["source-identity"] == ae.FAIL
+
+
+def test_a_source_that_passes_but_has_no_identity_fails_closed(env, monkeypatch):
+    monkeypatch.setattr(ae, "source_identity", lambda e: None)
+    (env.src_dir / ".git").mkdir(parents=True)
+    results = ae.ensure(env, check_only=False)
+    assert statuses(results)["source-identity"] == ae.FAIL and "no identity" in [r for r in results if r.name == "source-identity"][0].detail
+    assert not any(a[:3] == ["uv", "pip", "install"] for a, _ in env.run.calls)
+
+
+def test_a_fresh_clone_gets_its_identity_after_the_fetch_and_is_checked_at_the_end(env):
+    results = ae.ensure(env, check_only=False)
+    assert statuses(results)["source"] == ae.OK and statuses(results)["source-identity"] == ae.OK
