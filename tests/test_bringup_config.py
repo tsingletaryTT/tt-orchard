@@ -403,3 +403,13 @@ def test_resume_aborted_is_added_only_when_the_caller_asks(tmp_path):
     argv = bc.supervisor_argv(cfg, "Cloudflare/clef", resume_aborted=True)
     assert "--resume-aborted" in argv and supervisor.parse(argv).resume_aborted is True
     assert supervisor.parse(bc.supervisor_argv(cfg, "Cloudflare/clef")).resume_aborted is False
+
+
+def test_the_sampling_setting_is_passed_only_when_the_caller_names_one(tmp_path):
+    """`--sampling` (issue 107): left out, the supervisor's own default and the run's recorded value apply."""
+    cfg = load(tmp_path, FULL)
+    assert "--sampling" not in bc.supervisor_argv(cfg, "Cloudflare/clef")
+    for value in ("auto", "needed", "not-needed"):
+        argv = bc.supervisor_argv(cfg, "Cloudflare/clef", sampling=value)
+        assert argv[argv.index("--sampling") + 1] == value and supervisor.parse(argv).sampling == value
+    assert supervisor.parse(bc.supervisor_argv(cfg, "Cloudflare/clef")).sampling is None

@@ -499,6 +499,11 @@ def _verdict_read_json(base: Path):
     return verdict._read_json(base, "input.json")
 
 
+def _sampling_choice_read_json(base: Path):
+    from orchard import sampling_choice
+    return sampling_choice._read_json(base / "input.json")
+
+
 def _kept_coder_read(base: Path):
     from orchard import kept_coder
     return kept_coder.read(base)
@@ -557,6 +562,17 @@ def _toolcall_bench_rows(base: Path):
 def _stock_runtime_load_config(base: Path):
     from orchard import stock_runtime
     return stock_runtime._load_config(base / "input.json")
+
+
+def _model_config_read(base: Path):
+    from orchard import model_config
+    return model_config.read_model_config(base / "input.json")
+
+
+def _model_config_dims(base: Path):
+    """The whole path stage 0 would take: read the file, then normalise it. Both steps raise ModelConfigError and nothing else."""
+    from orchard import model_config
+    return model_config.dims(model_config.read_model_config(base / "input.json")).__dict__
 
 
 def _swap_draft_installed_containers(base: Path):
@@ -650,10 +666,29 @@ def _types():
 
 (_LedgerCorrupt, _PackageError, _SuiteError, _FetchError, _LedgerUnavailable, _CorpusError, _LedgerRefused, _SafeReadError,
  _MigrationRefused) = _types()
+from orchard.model_config import ModelConfigError as _ModelConfigError  # noqa: E402
 ALL_ITEMS = frozenset(i.name for i in ITEMS)         # a loader that lets every OSError propagate by design
 
+def _preflight_config_json(base: Path):
+    from orchard import preflight
+    return preflight._config_json(base / "input.json")
+
+
+def _preflight_index_problem(base: Path):
+    from orchard import preflight
+    return preflight._index_problem(base / "input.json")
+
+
+def _audio_decision_load_category_rules(base: Path):
+    from orchard import audio_decision
+    return audio_decision.load_category_rules(base / "input.json")
+
+
 READERS: list[Reader] = [
-    Reader("ledger.read_entries", _ledger_read_entries, suffix=b"\n", documented=(_LedgerCorrupt,)),
+    Reader("preflight._config_json", _preflight_config_json),
+    Reader("preflight._index_problem", _preflight_index_problem),
+    Reader("audio_decision.load_category_rules", _audio_decision_load_category_rules, documented=(_SafeReadError,)),
+    Reader("ledger.read_entries",_ledger_read_entries, suffix=b"\n", documented=(_LedgerCorrupt,)),
     Reader("telegraph_store.read_snapshot", _telegraph_store_read_snapshot, rel="project.db",
            documented=(_LedgerUnavailable, _LedgerRefused)),
     Reader("telegraph_migrate.read_archive_lines", _telegraph_migrate_read_archive_lines, suffix=b"\n", rel="telegraph.jsonl.archived",
@@ -680,6 +715,7 @@ READERS: list[Reader] = [
     Reader("opinventory.load_verified", _opinventory_load_verified),
     Reader("opvariants.load_data", _opvariants_load_data, documented=(ValueError,), os_error_ok=ALL_ITEMS),
     Reader("verdict._read_json", _verdict_read_json),
+    Reader("sampling_choice._read_json", _sampling_choice_read_json),
     Reader("kept_coder.read", _kept_coder_read, rel="coder/kept.json"),
     Reader("speedwatch.Baselines._read", _speedwatch_baselines),
     Reader("run_view._read", _run_view_read),
@@ -692,6 +728,8 @@ READERS: list[Reader] = [
     Reader("skillsfresh.Cache", _skillsfresh_cache),
     Reader("toolcall_bench._rows", _toolcall_bench_rows, suffix=b"\n", documented=(ValueError,), os_error_ok=ALL_ITEMS),
     Reader("stock_runtime._load_config", _stock_runtime_load_config),
+    Reader("model_config.read_model_config", _model_config_read, documented=(_ModelConfigError,)),
+    Reader("model_config.dims (read then normalise)", _model_config_dims, documented=(_ModelConfigError,)),
     Reader("swap_draft.installed_containers", _swap_draft_installed_containers, rel=".cache/tt-model/installed.json"),
     Reader("nearest.read_containers", _nearest_read_containers, rel=".cache/tt-model/installed.json"),
     Reader("classify_bench.load_corpus", _classify_bench_load_corpus, documented=(_CorpusError,)),
@@ -932,7 +970,6 @@ UNREGISTERED_MODULES = (
     'opverify.py',
     'package_card.py',
     'package_cmd.py',
-    'preflight.py',
     'reported_cmd.py',
     'research/ports.py',
     'rolefit.py',
