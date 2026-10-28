@@ -234,6 +234,8 @@ def open_beneath(root_fd: int, parts: Sequence[str], *, file_flags: int | None =
         return result
     except OSError as exc:
         raise _os_failure(exc, "a path part") from None
+    except ValueError:                      # UnicodeEncodeError: a lone surrogate cannot be passed to the operating system
+        raise PathRefused("a path part cannot be encoded for the operating system") from None
     finally:
         # A directory opened on the way is closed unless it is the descriptor being returned.
         if owned and cur != result:
@@ -337,6 +339,8 @@ def _open_for_read(path, anchor: int | None) -> int:
             return os.open(raw, _FILE_FLAGS)
         except OSError as exc:
             raise _os_failure(exc) from None
+        except ValueError:                  # UnicodeEncodeError: a lone surrogate cannot be passed to the operating system
+            raise PathRefused("the path cannot be encoded for the operating system") from None
     if raw.startswith("/"):
         raise PathRefused("a path given with an anchor must be relative")
     return open_beneath(anchor, raw.split("/"), file_flags=_FILE_FLAGS)
