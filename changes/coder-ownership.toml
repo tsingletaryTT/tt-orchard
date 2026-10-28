@@ -1,0 +1,3 @@
+target = "0.9.47"
+summary = "The supervisor stops only a coder container it started, and db status reports an unreadable backups folder."
+pr = 158
