@@ -94,7 +94,7 @@ two-process lock test.
   reading a mutation table.
 - Plain English in anything a person reads: state the finding, no "X, not Y" framing, no aphoristic closers, no metaphors. Sweep for
   `, not `, `rather than`, `instead of`, `reads as`, `honest`, `the one`, `which is why`, `This is what`.
-- Branch is `main`. Use a worktree for parallel work. Bump the version in `pyproject.toml` and `orchard/__init__.py` with each change.
+- Branch is `main`. Use a worktree for parallel work. Versions (2026-10-28): never edit a version field. Each branch adds `changes/<slug>.toml` with `python3 scripts/version.py new <slug>` (its own target, summary and PR number). The highest target in `changes/` is the version main reports; `RELEASE` in `orchard/__init__.py` is the last release. Cut a release with `scripts/version.py release` (see `docs/releases.md`). Run `scripts/version.py check` before you push.
   Never merge without the operator's instruction. Never publish to Hugging Face without an explicit go-ahead.
 - Hardware: take a lease through gozer (`gozer run`, or one `gozer acquire` and `gozer wait`, never a loop of `gozer run`). Never run
   `tt-smi -r` by hand. Do not touch ports 8000 or 8100 to 8103. Importing ttnn or ttml opens the device.

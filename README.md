@@ -217,6 +217,14 @@ The suite has 7,177 passing tests and 3 skipped tests (measured with `python3 -m
 no network. The three skipped tests are opt-in: one replays local agent transcripts (`ORCHARD_REPLAY=1`), one asks the real Hugging Face hub and GitHub
 (`ORCHARD_LIVE_RESEARCH=1`), and the browser tests of the web page run only where the `playwright` package and Chrome are present (issue 31).
 
+### Development notes
+
+Code that reads a file or a record that something else wrote (a model's output, an earlier run, a download) uses `orchard/safeio.py`, which holds the
+guards for the failures that reviews keep finding: a link swapped in after a check, a read with no size limit, NaN, repeated keys, deep nesting, a safetensors
+header that does not add up, an atomic write that can be raced. [docs/safe-reading.md](docs/safe-reading.md) says when to use each function and what it does not cover,
+and gives a checklist for reviewing a new reader. `tests/hostile_inputs.py` holds a corpus of hostile inputs and a registry of the readers tested
+against it. `hypothesis` drives the property tests in `tests/test_safeio.py`, with a fixed seed so that a failure reproduces.
+
 ## 2. What you need
 
 Everything below was checked on the development machine only. Items marked
@@ -235,7 +243,7 @@ Everything below was checked on the development machine only. Items marked
 | Software | What it is for |
 |---|---|
 | Linux | The only operating system used |
-| Python 3.12 or newer and pytest | Runs tt-orchard and its tests. tt-orchard has no runtime pip dependencies. `tests/test_lm_eval_code_tasks.py` also needs PyYAML (`pip install pyyaml`) |
+| Python 3.12 or newer, pytest and hypothesis | Runs tt-orchard and its tests. tt-orchard has no runtime pip dependencies; pytest and hypothesis are for the tests only (`pip install pytest hypothesis`; the `dev` extra in `pyproject.toml` lists the same two). `tests/test_lm_eval_code_tasks.py` also needs PyYAML (`pip install pyyaml`) |
 | [tt-gozer](https://github.com/tsingletaryTT/tt-gozer) with the `reset` command (version 0.3.2 or newer) | Chip leases. The supervisor holds every board under a gozer lease |
 | `tt-model` ([tt-model-manager](https://github.com/tenstorrent/tt-model-manager)) | Serves the models the agents use and the models under test |
 | `tt-smi`, the Tenstorrent kernel driver and firmware | Device access. The supervisor reads `tt-smi -s` once at the start of a run to record firmware versions |
@@ -290,6 +298,7 @@ To set up by hand:
 ```bash
 git clone https://github.com/tsingletaryTT/tt-orchard.git tt-orchard
 cd tt-orchard
+python3 -m pip install pytest hypothesis    # the test tools (the `dev` extra in pyproject.toml lists the same two)
 python3 -m pytest -q
 ```
 
@@ -584,9 +593,12 @@ the research setting are under **Options**, and the line says what they are now.
 ![New bring-up: the model field, the closed Options line, Run checks as the main button](docs/ui/operator-new-bringup.png)
 
 The Telegraph view (section 5.9g) shows what the outside helper has cost: spend against each cap, every call, and the totals by model
-and by problem. This one reads the ledger of 40 real helper calls made while comparing outside models on failing kernels ($1.21 in all).
-The meter is amber because one problem has used 5 of the 6 calls the configuration allows it. The configuration is a placeholder with an
-example host and a dummy key variable. The page only reads the ledger, so nothing was sent or spent for the picture.
+and by problem. Under the caps, a "Local (virtual)" block prices the tokens the local models used in the run folders at a hosted model's
+list rate, and the top bar shows the two figures side by side ("Helper" is real money, "Local" is virtual and is never added to it).
+This one reads the ledger of 40 real helper calls ($1.21 in all) and 19,720 local agent turns across 21 run and probe directories
+(about $14.10 at the Haiku 5.5 list rate; six runs are marked "not fully read", so their figures are low). The meter is amber because one
+problem has used 5 of the 6 calls the configuration allows it. The configuration is a placeholder with an example host and a dummy key
+variable. The page only reads the ledger and the logs, so nothing was sent or spent for the picture.
 
 ![Operator style, the Telegraph view: spend and caps, recent calls, totals by model and by problem](docs/ui/operator-telegraph.png)
 
@@ -658,7 +670,7 @@ its reason; a `warn` is information.
 | cpu | the CPU tier's server (ollama) does not answer, or does not list the tier's model. Stage 4's 4-chip test parks the coder behind it, so a run without it would stop hours in | `coder-unusable` |
 | gozer | gozer gives no usable status. Stale leases and chips in use are warnings, and nothing is cleared | `hardware-unhealthy` |
 | bus | a chip the configuration needs is not on the PCIe bus, is not awake (`power_state` other than D0, for example D3cold, the state both chips of one board fell into on 2026-10-22), has no readable serial (gozer refuses every lease while one cannot be read), has no driver or no `/dev/tenstorrent/N` node, finds `/dev/tenstorrent` itself missing or unlistable, or is listed by gozer but missing from the bus. The configuration needs the coder's chips plus a test board, or the whole box when the coder holds four chips (a lab run needs only the coder's chips here). Extra device nodes, a power state the kernel does not report, a gozer that lists fewer chips than the bus shows and a board listing fewer chips than another are warnings. The row reads files only (sysfs and `/dev/tenstorrent`): no lease, no device open, no reset. A board that has left the bus needs a power cycle or reboot. After the run starts, a failed test, coder boot or benchmark phase gets the same check on the chips it holds (section 5.5a) | `hardware-unhealthy` |
-| base | no installed tt-model bundle serves the model this one is based on (the card's `base_model`, or the model named with `--base`). It then runs `tt model search` for the model's family and lists what it finds. When research found code for the base in tt-metal or tt-transformers, the message names that code first and says whether it ships a vLLM generator and whether its README names a Blackhole board. Code is not a bundle, so a bundle still has to be built or installed. At a terminal it asks which bundle to base the run on and installs the pick with `tt-model pull`. In a script it stops and prints the `--base` commands. A base snapshot that is not on disk is downloaded. A card with no `base_model` is a warning. If an installed v6 bundle has the model's architecture, it becomes an inferred base. An inferred base blocks until the operator confirms it: the bundle picked at a terminal or in the new-run dialog, `--base <bundle>`, or `--accept-inferred-base` (then it is a warning and its snapshot is downloaded). See "How the base model is found" | `nearest-model-missing`, `inferred-base-unconfirmed` |
+| base | no installed tt-model bundle serves the model this one is based on (the card's `base_model`, or the model named with `--base`). It then runs `tt model search` for the model's family and lists what it finds. When research found code for the base in tt-metal or tt-transformers, the message names that code first and says whether it ships a vLLM generator and whether its README names a Blackhole board. Code is not a bundle, so a bundle still has to be built or installed. At a terminal it asks which bundle to base the run on and installs the pick with `tt-model pull`. In a script it stops and prints the `--base` commands. A base snapshot that is not on disk is downloaded. An audio model needs no bundle (see "Audio models in the preflight" below). A card with no `base_model` is a warning. If an installed v6 bundle has the model's architecture, it becomes an inferred base. An inferred base blocks until the operator confirms it: the bundle picked at a terminal or in the new-run dialog, `--base <bundle>`, or `--accept-inferred-base` (then it is a warning and its snapshot is downloaded). See "How the base model is found" | `nearest-model-missing`, `inferred-base-unconfirmed` |
 | sfpi | the box's SFPI compiler (`dpkg-query -W sfpi`) is older than the version the chosen bundle pins in its ttnn wheel (`ttnn/tt_metal/sfpi-version`). Kernel compiles then fail with `'vLut8si' is not a member of 'sfpi'` (7.67.0 against a pin of 7.73.0, 2026-10-13). tt-orchard does not install system packages; the row names the release to install. A version it cannot read is a warning | `hardware-unhealthy` |
 | reference | `reference_python` is set and cannot import torch, transformers, tokenizers and safetensors. Not set is a warning: the stage 1 agent then looks for an interpreter itself | `config-invalid` |
 | demo-env | a stock-runtime run (or any run with `demo_python` set) when `demo_python` fails `tt-orchard demo-env --check`: numpy 2 or newer, `cv2` or `datasets` that do not import, no `ttnn` or `ttml` distribution, a missing interpreter, or a venv directory the command refuses. The detail names each failed rule and the exact `tt-orchard demo-env --venv-dir ... --tt-metal-dir ...` command. A venv built for another tag of the host tree than the tree is at, a missing record, no `demo_python` at all, or a `demo_python` that is not `<venv>/bin/python` is a warning. Nothing is imported on a chip. A lab run has no row | `config-invalid` |
@@ -685,6 +697,28 @@ resuming starts the bar a little low, because a partly downloaded file left by t
 with a suggestion. The file is found from `--config`, then `$ORCHARD_BRINGUP_CONFIG`, then
 `<checkout>/config/bringup.toml`, then `~/.config/tt-orchard/bringup.toml`. The tier config stays in
 `tiers.toml`, because the tier loader refuses tables it does not know.
+
+#### Audio models in the preflight
+
+The preflight decides that a model is audio from evidence, before anything is downloaded (the rule is written in `orchard/audio_facts.py`).
+Both of these must hold:
+
+- The Hub's `pipeline_tag` is `text-to-audio` or `audio-to-audio`. When the Hub gives no pipeline tag, a tag with one of those names counts.
+  A pipeline tag that says anything else (for example `text-to-speech`) decides alone, and the model is not audio for this rule.
+- The top level of the file list shows `model_config.json`, no `config.json` and a `.safetensors` file. The Hub's list is checked, and so is
+  the top level of the local snapshot when there is one. If the two disagree, the model is not audio.
+
+A cached snapshot must also hold a `model_config.json` that stage 0's detector accepts (a bounded read: an object under 1 MiB with a string `model_type` and an object `model`) and the text encoder's `config.json`; otherwise it is not complete and the old path applies. Anything unclear keeps the old behaviour: an unknown tag, a failed Hub lookup, both config files present. The layout half of the rule is
+also what stage 0's template uses (`detect_audio`), and a test pins the two copies to the same snapshots.
+
+For an audio model the `base` row needs no installed bundle. Stage 0 compares the two repositories directly, and nothing serves an audio model on
+a chip yet, so the row is a warning that names the base, says the run will stop after stage 0 as `audio-path-unbuilt`, and points to the run's
+`BLOCKED.md`. The base is the card's `base_model` or `--base <model id>`; a base that research inferred still waits for `--accept-inferred-base`.
+The base snapshot is still needed. It is used from the cache when it is complete there, downloaded when the Hub lets it be downloaded without a
+token, and the `disk` row counts it. A gated or private base blocks with `credentials-needed` unless a complete copy is already on disk, which
+is the rule the `hub` row applies to the model. `--base` with the name of a bundle is refused for an audio model before anything is installed.
+The row's block codes are the existing ones: `credentials-needed`, `model-unavailable` (the base cannot be looked up and is not on disk) and
+`inferred-base-unconfirmed`.
 
 #### How the base model is found
 
@@ -1061,7 +1095,7 @@ audio branch of the stage 0 template. Stage 0 records three facts in its ledger 
 `container` or `none`, from the installed bundles and container packages) and `modality` (`text` or `audio`); a ledger without them means a text run on
 a thin bundle. The class is `weights-only`, `full-port` or `unknown`: each difference in `model_config.json` is sorted by an allow-list table into serving settings (the longest audio asked for, the default sampler), structural keys or unknown keys, and only serving differences leave the path `weights-only` (with a hazard that names the keys and both values, because no stage yet checks that the serving configuration carries the model's own settings). `audio_strict` in `triage_config.json` keeps the stricter rule, and `audio.decision` in `delta.json` records the evidence for each difference and any override from a later inference step. An audio run stops before stage 1 with the block code
 `audio-path-unbuilt`, because the audio stages are not built (plan [docs/superpowers/plans/2026-10-28-audio-bringup.md](docs/superpowers/plans/2026-10-28-audio-bringup.md)).
-`stabilityai/stable-audio-3-small-music` is the first target. There is no runtime for Stable Audio 3 on a Tenstorrent chip (no bundle, container package or
+A run for an audio model starts the coder before stage 0 as every run does, although the run stops after stage 0 (issue 143). `stabilityai/stable-audio-3-small-music` is the first target. There is no runtime for Stable Audio 3 on a Tenstorrent chip (no bundle, container package or
 tt-metal pipeline), so even a `weights-only` result leaves nothing to serve it with; the facts note is
 [docs/run-logs/2026-10-28-stable-audio-3-facts.md](docs/run-logs/2026-10-28-stable-audio-3-facts.md).
 
@@ -1532,6 +1566,31 @@ Flags:
   could not be compared. The report records it, with each source's local and upstream shas.
 - `--allow-slow-coder`: run even when the coder is decoding far below its best speed. The report records each
   measurement.
+- `--hw-checks` (N), `--no-agent-hw`, `--hw-lease-s` (S), `--hw-call-timeout-s` (S), `--hw-wait-s` (S): the limits of the agent's
+  `hardware_check` tool (next paragraph). Defaults: 6 calls, 600 lease seconds (120 of them reserved for the stop and the chip reset), 240 s per call, 120 s of waiting for a
+  busy board. `--hw-checks 0` and `--no-agent-hw` offer no tool, which measures the coder alone.
+
+Every attempt can call a tool, `hardware_check`, that runs its current `kernel.py` on one chip. The agent's shell cannot
+run gozer, so the probe does it: each call copies the file into a probe-owned directory (`DIR/.hwcheck/`), runs the static
+gate and the sha256 check on the copy, and runs the shipped harness through `gozer run --chips 1` under the stall watcher,
+the way the probe's own hardware phase does. The tool takes at most a short `note`; the agent supplies no command and no
+path, and the probe judges the result. The answer gives PASS or FAIL, the first error, the numbers, the seconds in all
+and the device seconds, and the calls and lease seconds left. A whole call took about 47 s when measured (the device was open for about
+0.5 s; the rest is the lease and the reset the release makes), so the simulator stays the cheap path. The lease is held by a short-lived wrapper process (`orchard/hwtool.py run`), not by the probe. The wrapper
+asks for it with `gozer acquire --owner-pid` (its own pid), so gozer reaps the lease if the wrapper dies by any signal. When no
+board is free gozer queues one ticket and the wrapper waits on it once, with `gozer wait`, for at most `--hw-wait-s` seconds; a wait
+that ends without a grant cancels the ticket and the agent is told to go on with the simulator. A grant runs the harness under the
+lease's environment (after checking again that the copy still has its recorded sha256) with its own call-timeout clock, started at
+the grant, and the wrapper releases the lease and exits. The probe's outer timeout is the sum of the acquire, the wait, the call
+timeout and the release grace.
+The probe starts the wrapper, waits for it with a hard timeout, kills the wrapper's process group on any exception, and then reads
+`gozer status` once. It never tries to repair anything: if a chip or a queue ticket is still shown under this probe's tag, or the
+status cannot be read, the tool is stopped for the rest of the attempt, the answer says so, and the probe ends with exit 5. A hang
+stops the call (the wrapper's release resets the chip) and turns the tool off for the rest of the attempt. Calls are recorded in
+each `attempt.json` under `agent_hw` and listed in the report with the chip time they cost, taken from the wrapper's own stamps (an
+upper bound, the call timeout plus the release grace or the time so far, when the wrapper was killed or the call was interrupted). The lease is taken for each call and released after it; there is no mode that holds a
+board for a whole attempt. The device seconds are the harness's
+time with the device open, for every input set, not a benchmark of the kernel.
 
 ### 5.9d The latest skills
 
@@ -1628,6 +1687,7 @@ tt-orchard audio-reference-env --check     # check it; no device, no token
 python3 -m orchard.audio_reference check REFERENCE_RUN CANDIDATE_RUN    # PCC, relative L2 error and slope per saved array
 python3 -m orchard.audio_reference check REFERENCE_RUN BF16_RUN --cross-precision   # let the dtype setting differ (the noise floor)
 python3 -m orchard.audio_reference control FINE_TUNE_RUN BASE_RUN       # the base model's waveform must differ
+python3 -m orchard.audio_reference control FINE_TUNE_RUN BASE_RUN --unmatched   # allow runs whose settings differ (the report says so)
 ```
 
 This is step 0 of the Stable Audio runtime design (`docs/superpowers/specs/2026-10-28-stable-audio-runtime-design.md`). The environment is a venv with
@@ -1637,6 +1697,8 @@ removed, so the model files must already be in the local cache. It saves the enc
 network pass, every step's latent and denoised estimate, the final latent and the waveform, each as a float32 `.npy` file with its sha256 in `manifest.json`.
 `python3 -m orchard.audio_reference check` compares two such directories and needs all three numbers: PCC alone passes an output that is scaled. The bars in it
 are provisional until the reference's own bfloat16 noise floor has been measured (`bars_from_floor`).
+The `control` command requires the two runs to share the prompt, duration, steps, guidance scale, sampler, seed, dtype and sample size, so a difference in the
+waveform comes from the weights. `--unmatched` allows runs that differ in those settings; the report then says `matched: false` and carries a note.
 
 ### 5.9f The demo environment
 
@@ -1777,6 +1839,49 @@ Every call, refusal and cache hit is one line in `telegraph.jsonl` (model, token
   (`GET /api/telegraph`). It sends nothing to the helper and spends nothing. A run directory that holds its own `telegraph.jsonl`
   shows that run's spend under its title.
 
+### 5.9h Virtual spend: what the local models would cost at a hosted price
+
+The outside helper (5.9g) has a real bill. The local models have none, so their work is hard to compare with it. `tt-orchard spend`
+prices the local token use at a reference hosted model's rates so the two can be read side by side. The local figure is virtual:
+nobody was charged, and it is never added to the real spend.
+
+The agent logs hold one object per turn with `usage` (`prompt_tokens`, `completion_tokens`). Every turn re-sends the whole
+conversation, so the prompt count is large. A hosted provider with prompt caching would bill most of those repeated tokens for much
+less, so the figure is a comparison figure only. The reader counts these sources: `log/*.jsonl` agent logs (a kernel-probe attempt,
+a bring-up stage) and the benchmark proxy's `requests.jsonl`. A turn that names a helper (a `call_id`, or `origin`, `source` or
+`helper` set to telegraph or helper) is left out and counted, and `telegraph.jsonl` is never read. A malformed line, bytes that
+are not UTF-8, a line over 2 MiB (its usage is read from the end of the line when it is there), a turn with no token counts, a link
+and a file over the read caps are counted and shown as "Left out". The reader never raises and never follows links.
+
+- `tt-orchard spend [DIR ...]`: the real helper spend (from the telegraph ledger) and the virtual local spend (turns, tokens, agent
+  time from a kernel-probe `attempt.json`, and the dollars at each reference price) on separate lines. With no DIR it reads every
+  run under `runs_root` of the bringup config. Reads only. Chip lease time is not recorded in these logs, so it is not shown.
+  - `--json`: the same figures as JSON, in two keys (`real_helper_spend` and `local_virtual_spend`) with no combined total.
+  - `--dir`: the telegraph ledger folder (default: `dir` in `[telegraph]`, else `~/.cache/tt-orchard/telegraph`).
+  - `--telegraph-config`: read the tables from another TOML file (default: the bringup config).
+- The `[virtual_spend]` table of the bringup config sets the prices. With no table the defaults apply. Keys: `reference` (the name
+  in labels, default `claude-haiku-5-5`), `price_in` and `price_out` (dollars per million tokens, default 0.10 and 0.50), and
+  `extra`, a list of further references, each with `name`, `price_in` and `price_out` (for example `claude-sonnet-5-5` at 2.0
+  and 10.0). A misspelled key, a negative or non-finite price and a repeated name are refused.
+
+  ```toml
+  [virtual_spend]
+  reference = "claude-haiku-5-5"
+  price_in = 0.10
+  price_out = 0.50
+  [[virtual_spend.extra]]
+  name = "claude-sonnet-5-5"
+  price_in = 2.0
+  price_out = 10.0
+  ```
+- In the web page a second figure sits beside the helper's spend meter, for example `Local ≈ $0.38 (virtual, at claude-haiku-5-5)`.
+  It has a dashed outline and no state colour: amber and red on the helper meter mean real money only. It shows for the selected
+  run, or for every listed log when no run is selected, and only when local logs with token counts exist. The Telegraph view has a
+  "Local (virtual)" table with a row for each run and each kernel-probe output under `<runs>/kprobe`: turns, tokens, agent time and
+  the cost at each reference. `GET /api/virtual-spend` (with `?run=NAME`) serves both, reads only, and returns no path.
+- Checked against the kernel-probe round `rms5` (5 attempts, no kernel passed): 137 turns, 3,373,905 prompt and 78,468 completion
+  tokens, which is $0.3766 at `claude-haiku-5-5` and $7.53 at `claude-sonnet-5-5`.
+
 ## 6. Lessons that will bite you
 
 Each of these happened on the development machine. Details are in the
@@ -1838,6 +1943,7 @@ Each of these happened on the development machine. Details are in the
 | [`docs/run-logs/2026-10-hemmingway-1.md`](docs/run-logs/2026-10-hemmingway-1.md) | The log of the first real run |
 | [`docs/analysis/qwen3-5-122b-analysis.md`](docs/analysis/qwen3-5-122b-analysis.md) | Analysis: Using Qwen3.5-122B-A10B with tt-orchard |
 | [`docs/analysis/qwen3-5-122b-comparison.html`](docs/analysis/qwen3-5-122b-comparison.html) | Visual comparison: 27B vs 122B model requirements |
+| [`docs/releases.md`](docs/releases.md), [`changes/`](changes/) | How the version number is computed from change fragments, and how a release is cut |
 | [`CLAUDE.md`](CLAUDE.md) | The decisions and standing rules |
 | [`docs/project-log.md`](docs/project-log.md) | The dated project log: what was done, found and left open |
 
@@ -1853,6 +1959,22 @@ Keep skills short and concrete. Give the agent tested scripts to copy and a smal
 fill in. A skill longer than 40,000 characters is cut (`SKILL_CHARS`). A running supervisor keeps
 the code and skills it loaded at start; to load a change into a paused run, use `kill -9` and
 restart (see [5.4](#54-recover-after-a-crash)).
+
+### Versions and releases
+
+A pull request does not edit a version field. It adds one file, `changes/<branch-slug>.toml`, that names the
+version the feature claims and says in one sentence what it does:
+
+```bash
+python3 scripts/version.py new my-feature      # writes changes/my-feature.toml; edit its summary
+python3 scripts/version.py check
+```
+
+The version that `tt-orchard --version` and the web page report is the highest target in `changes/`, or `RELEASE`
+(the last released version, one line in `orchard/__init__.py`) when there is none. Two features may claim the same
+number. A release is cut with `python3 scripts/version.py release`, which writes the release notes and prints the
+tag commands for a person to run. See [`docs/releases.md`](docs/releases.md) for the steps and for moving an open
+pull request to fragments.
 
 ### Run the tests
 

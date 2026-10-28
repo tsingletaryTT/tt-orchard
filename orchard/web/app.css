@@ -50,7 +50,8 @@
 }
 
 * { box-sizing: border-box; }
-html, body { height: 100%; }
+html { height: 100%; }
+body { min-height: 100%; }           /* not a fixed height: a page taller than the window must not end the sticky top bar's container */
 body { margin: 0; color: var(--ink); font: 14.5px/1.55 var(--font); background-color: var(--field);
   background-image: radial-gradient(var(--field-2) 1.3px, transparent 1.5px), radial-gradient(var(--field-2) 1px, transparent 1.2px);
   background-size: 22px 22px, 34px 34px; background-position: 0 0, 11px 17px; }
@@ -133,11 +134,24 @@ code, .mono { font-family: var(--mono); font-size: .88em; }
 .spend-meter:hover { filter: brightness(1.06); }
 /* Up to 900 px the top bar scrolls away with the page, so the meter is pinned along the bottom edge instead. The page gets
    room at the end of the rail so the last lines are not hidden under it. */
+.meters { display: contents; }                      /* in the top bar the two figures sit side by side as before */
 @media (max-width: 900px) {
-  .spend-meter { position: fixed; left: 8px; right: 8px; bottom: 8px; z-index: 40; max-width: none; justify-content: flex-start;
-    box-shadow: 0 2px 10px rgba(0, 0, 0, .35); }
+  /* both figures are pinned together along the bottom edge, one above the other, so neither can scroll away or hide the other */
+  .meters { position: fixed; left: 8px; right: 8px; bottom: 8px; z-index: 40; display: flex; flex-direction: column; gap: 6px; }
+  .spend-meter { max-width: none; justify-content: flex-start; box-shadow: 0 2px 10px rgba(0, 0, 0, .35); }
+  body { padding-bottom: 9rem; }                    /* room under the pinned figures for the end of every view */
   body .rail { padding-bottom: 6.5rem; }          /* the rail is the last block here; body has a fixed height, so the room is made inside the sheet */
 }
+
+/* the local meter: the virtual spend of the local models, beside the real helper meter. It is a comparison figure and never money,
+   so it has no tone: a dashed outline, the muted ink and no dot, and it never takes the helper meter's amber or red. */
+.local-meter { display: inline-flex; align-items: center; font: 600 .82rem/1.2 var(--pixel); color: var(--muted); background: var(--paper);
+  border: 2px dashed var(--muted); border-radius: 4px; padding: 5px 8px; cursor: pointer; max-width: 46ch; }
+.local-meter[hidden] { display: none; }
+.local-meter .local-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.local-meter:hover { filter: brightness(1.06); }
+@media (max-width: 900px) { .local-meter { max-width: 100%; justify-content: flex-start; box-shadow: 0 2px 10px rgba(0, 0, 0, .35); }
+  .local-meter .local-text { white-space: normal; } }
 
 /* the page style: a setting of the whole page, so it is a small labelled pair and not another tab */
 .style-switch { display: inline-flex; align-items: center; gap: 0; }
@@ -568,11 +582,13 @@ html[data-mode="operator"] .machine-chip { font: 600 .82rem/1 var(--font); backg
 /* the spend meter sits on the dark top bar in both colour schemes, so its colours are fixed pairs (checked at 4.5:1 in tests) */
 html[data-mode="operator"] .spend-meter { font: 600 .82rem/1 var(--font); background: transparent; color: #e4f1f0; border: 1px solid #3f6664; box-shadow: none; }
 html[data-mode="operator"] .spend-meter::before { box-shadow: none; }
+html[data-mode="operator"] .local-meter { font: 600 .82rem/1.2 var(--font); background: transparent; color: #cfe3e1; border: 1px dashed #6f8f8c; }
 html[data-mode="operator"] .spend-meter[data-tone="dim"] { color: #a9c4c2; }
 html[data-mode="operator"] .spend-meter[data-tone="warn"] { background: #f2c14e; color: #2b1f00; border-color: #f2c14e; }
 html[data-mode="operator"] .spend-meter[data-tone="bad"] { background: #b3290a; color: #ffffff; border-color: #ff9e8a; }
 @media (max-width: 900px) {      /* pinned over the page, so it needs a solid background; the tone rules above still win */
   html[data-mode="operator"] .spend-meter { background: #092221; }
+  html[data-mode="operator"] .local-meter { background: #092221; }
 }
 html[data-mode="operator"] .style-label { color: #a9c4c2; }
 html[data-mode="operator"] .style-btn { color: #e4f1f0; border-color: #3f6664; }
