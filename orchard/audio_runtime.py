@@ -109,9 +109,7 @@ def selected(entries: list[dict]) -> dict | None:
 
 def selection_paths(entries: list[dict]) -> AudioPaths | None:
     rec = selected(entries)
-    if not rec or not isinstance(rec.get("paths"), dict):
-        return None
     try:
-        return AudioPaths.from_record(rec["paths"])
+        return AudioPaths.from_record(rec["paths"])        # a missing record or paths, or a paths value that is not an object, raises below
     except (KeyError, TypeError):
         return None

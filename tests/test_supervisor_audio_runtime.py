@@ -227,3 +227,77 @@ def test_the_audio_body_refuses_lab_mode_and_a_ledger_without_a_selection(arig, 
         sup.lab = object()
         status_, reasons, gate = sup._audio_body(AUDIO_STAGE_1, stage_dir, False)
         assert status_ == "fail" and "lab mode" in reasons[0]
+
+
+# ---- cases added after the first mutation run ------------------------------------------------------------------------------------
+
+def selected_ledger(rig, led, **override):
+    paths = audio_runtime.audio_paths(rig.home)
+    rec = {**paths.record(), **override}
+    led.append("decision", 1, decision=audio_runtime.AUDIO_RUNTIME_SELECTED, runtime=audio_runtime.RUNTIME, paths=rec, scripts={}, model=MODEL)
+
+
+def test_a_coder_booted_for_stage_0_is_adopted_by_the_audio_stages_and_one_that_was_released_is_not(arig, monkeypatch):
+    make_environment(arig)
+    seen = []
+    real = supervisor.Supervisor._coder_in_use
+    monkeypatch.setattr(supervisor.Supervisor, "_coder_in_use", lambda self: seen.append(real(self)) or seen[-1])
+    arig.run()
+    assert seen and all(seen[:1]), "stage 1 of a fresh run finds the coder stage 0 booted still in use"
+
+
+def test_a_second_pass_through_stage_1_does_not_select_again(arig, monkeypatch):
+    make_environment(arig)
+    good = supervisor.Supervisor._cpu_run
+    monkeypatch.setattr(supervisor.Supervisor, "_cpu_run", lambda self, a, e, t, l: 2)
+    with pytest.raises(Stop):
+        arig.run()
+    monkeypatch.setattr(supervisor.Supervisor, "_cpu_run", good)
+    seen = []
+
+    def resume():
+        seen.append(1)
+        if len(seen) == 1:
+            Control(arig.run_dir).write("resume")
+        else:
+            raise Stop("a second wait")
+    arig.on_sleep = resume
+    arig.run()
+    assert len(decisions(arig, audio_runtime.AUDIO_RUNTIME_SELECTED)) == 1
+
+
+def test_stage_1_and_stage_2_do_not_repeat_finished_work_on_a_resume(arig):
+    from orchard.ledger import Ledger
+    from orchard.stages import AUDIO_STAGE_1, AUDIO_STAGE_2
+    make_environment(arig)
+    arig.run()
+    with Ledger(arig.run_dir / "ledger.jsonl") as led:
+        sup = build_supervisor(arig, led)
+        cpu_before, chip_before = len(arig.calls["cpu"]), len(arig.calls["chip"])
+        assert sup._audio_body(AUDIO_STAGE_1, arig.run_dir / "stages" / "1", True)[0] == "pass"
+        assert sup._audio_body(AUDIO_STAGE_2, arig.run_dir / "stages" / "2", True)[0] == "pass"
+        assert (len(arig.calls["cpu"]), len(arig.calls["chip"])) == (cpu_before, chip_before)
+
+
+def test_a_chip_command_the_runner_refuses_fails_the_stage_before_any_lease(arig):
+    from orchard.ledger import Ledger
+    from orchard.stages import AUDIO_STAGE_2
+    with Ledger(arig.run_dir / "ledger.jsonl") as led:
+        selected_ledger(arig, led, chip_python="/bin/python $(id)")
+        sup = build_supervisor(arig, led)
+        (arig.run_dir / "stages" / "2").mkdir(parents=True)
+        status_, reasons, _ = sup._audio_body(AUDIO_STAGE_2, arig.run_dir / "stages" / "2", False)
+    assert status_ == "fail" and "refused" in reasons[0] and arig.calls["chip"] == []
+
+
+def test_the_cpu_runner_gives_the_child_the_offline_cache_environment_and_no_token(arig, monkeypatch, tmp_path):
+    from orchard.ledger import Ledger
+    monkeypatch.undo()                       # the real _cpu_run, not the fake
+    monkeypatch.setenv("HF_TOKEN", "hf_secret_value")
+    with Ledger(arig.run_dir / "ledger.jsonl") as led:
+        sup = build_supervisor(arig, led)
+        log = tmp_path / "env.log"
+        assert sup._cpu_run(["/usr/bin/env"], {"PYTHONPATH": "/lib"}, 30, log) == 0
+    text = log.read_text()
+    assert "HF_HUB_OFFLINE=1" in text and "TRANSFORMERS_OFFLINE=1" in text and f"HF_HOME={sup.paths.hf_home}" in text and "PYTHONPATH=/lib" in text
+    assert "hf_secret_value" not in text

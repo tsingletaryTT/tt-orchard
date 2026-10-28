@@ -485,3 +485,98 @@ def test_the_chip_config_and_command(tmp_path):
         ("small-music", 8, 1.0, "pingpong"), ("small-music-base", 50, 7.0, "euler")]
     cmd = st.chip_test_command(PATHS, tmp_path, Path("/skills/audio_chip_test.py"))
     assert cmd == f"/chip/python /skills/audio_chip_test.py --config {tmp_path}/audio_chip_config.json"
+
+
+# ---- cases added after the first mutation run ------------------------------------------------------------------------------------
+
+def test_a_quiet_clip_fails_the_level_check():
+    quiet = (0.001 * np.sin(2 * np.pi * 440 * np.arange(441000) / SR) * np.ones((2, 1))).astype(np.float32)      # about -63 dBFS
+    r = st.sound_checks(quiet, SR, 10.0)
+    assert not r["ok"] and any("windows" in x for x in r["reasons"])
+
+
+def test_a_clip_of_another_length_is_refused(tmp_path):
+    import soundfile
+    run = make_run(tmp_path / "r")
+    with ar.load_run(run) as r:
+        wave = np.asarray(r.array("waveform", "audio"))
+    (run / "clips").mkdir()
+    soundfile.write(str(run / "clips" / "audio.flac"), wave[:, :SR].T, SR)
+    assert "samples" in st.clip_matches_waveform(run, wave)[0]
+
+
+def test_an_existing_clip_is_kept(tmp_path):
+    run = make_run(tmp_path / "r")
+    (run / "clips").mkdir()
+    (run / "clips" / "audio.flac").write_bytes(b"placeholder")
+    st.write_clip(run)
+    assert (run / "clips" / "audio.flac").read_bytes() == b"placeholder"
+
+
+def test_the_summary_lists_the_failing_arrays(tmp_path):
+    ref = make_run(tmp_path / "ref")
+    s = st.compare(ref, twin(ref, tmp_path / "cand", noise=0.0, scale=1.6))
+    assert "latent/final" in s["failed"]
+
+
+def test_a_cache_entry_for_another_model_is_not_used(tmp_path):
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    make_run(cache / "small-music", "small-music-base", settings_override=st.settings_for("small-music"))
+    assert st.cached_run(cache, "small-music", REV, COMMIT) is None
+
+
+def test_the_chip_plan_has_no_control_when_the_base_is_the_model():
+    assert [p["role"] for p in st.chip_plan(MODEL, MODEL)] == ["chip"]
+
+
+def test_write_json_leaves_no_temporary_file(tmp_path):
+    st.write_json(tmp_path / "a.json", {"x": 1})
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["a.json"]
+
+
+def test_the_stage_1_gate_names_a_model_it_does_not_know_a_changed_manifest_hash_and_wrong_settings(tmp_path):
+    run_dir, stage_dir, rec, _ = stage1(tmp_path)
+    path = stage_dir / "audio_reference.json"
+    good = json.loads(path.read_text())
+    bad = json.loads(path.read_text())
+    bad["runs"]["reference"]["model"] = "unknown-model"
+    path.write_text(json.dumps(bad))
+    assert any("not one the audio runtime knows" in p for p in st.reference_problems(stage_dir, run_dir))
+    bad = json.loads(json.dumps(good))
+    bad["runs"]["reference"]["manifest_sha256"] = "0" * 64
+    path.write_text(json.dumps(bad))
+    assert any("manifest is not the one" in p for p in st.reference_problems(stage_dir, run_dir))
+    path.write_text(json.dumps(good))
+    d = run_dir / good["runs"]["control_reference"]["dir"]
+    shutil.rmtree(d)
+    make_run(d, "small-music-base", settings_override={"steps": 9})
+    good["runs"]["control_reference"]["manifest_sha256"] = st.sha256_file(d / "manifest.json")
+    path.write_text(json.dumps(good))
+    assert any("its settings are" in p for p in st.reference_problems(stage_dir, run_dir))
+
+
+def test_the_stage_1_gate_refuses_a_clip_that_is_not_the_waveform(tmp_path):
+    import soundfile
+    run_dir, stage_dir, rec, _ = stage1(tmp_path)
+    clip = run_dir / rec["runs"]["reference"]["clip"]
+    soundfile.write(str(clip), music(seed=50).T, SR)
+    assert any("clip" in p for p in st.reference_problems(stage_dir, run_dir))
+
+
+def test_the_gate_refuses_an_edited_control_difference_a_missing_chip_run_and_a_missing_control_reference(tmp_path):
+    run_dir, ref_dir, s2, res = stage2(tmp_path)
+    path = s2 / "audio_result.json"
+    edited = json.loads(json.dumps(res))
+    edited["control_difference"]["rel_l2"] = 0.0
+    path.write_text(json.dumps(edited))
+    assert any("recorded difference" in p for p in st.chip_problems(s2, run_dir, ref_dir))
+    nochip = json.loads(json.dumps(res))
+    del nochip["runs"]["chip"]
+    path.write_text(json.dumps(nochip))
+    assert st.chip_problems(s2, run_dir, ref_dir) == ["audio_result.json has no chip run"]
+    path.write_text(json.dumps(res))
+    ref = json.loads((ref_dir / "audio_reference.json").read_text())
+    del ref["runs"]["control_reference"]
+    (ref_dir / "audio_reference.json").write_text(json.dumps(ref))
+    assert any("stage 1 made no control_reference" in p for p in st.chip_problems(s2, run_dir, ref_dir))

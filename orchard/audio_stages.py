@@ -488,9 +488,6 @@ def chip_problems(stage_dir, run_dir, ref_stage_dir) -> list[str]:
         return [f"{RESULT_FILE} has no chip run"]
     if not agree(res.get("reference_runs"), ref_runs):
         problems.append("the result's reference_runs are not stage 1's")
-    chip_name = runs[ROLE_CHIP].get("model")
-    if chip_name not in MODEL_SETTINGS:
-        return problems + [f"chip: model {chip_name!r} is not one the audio runtime knows"]
     for role, entry in runs.items():
         name = entry.get("model") if isinstance(entry, dict) else None
         if name not in MODEL_SETTINGS:
