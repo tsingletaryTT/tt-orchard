@@ -130,6 +130,7 @@ def attempt(passed=False, category=None, first="", status="done", detail="", wal
     (attempt(category="numeric_mismatch", first="pcc 0.9, bar 0.999", status="wall"), "numeric"),
     (attempt(category="tt_lang_error", first="TypeError: unsupported operand", status="wall"), "tt_lang_error"),
     (attempt(category="timeout", first="the simulator timed out"), "other"),
+    (attempt(category="sim_gap", first="FAIL: sim_gap: the simulator lacks ttl.raw_element_read"), "sim_gap"),
 ])
 def test_failure_class(rec, expected):
     assert kl.failure_class(rec) == expected
@@ -607,3 +608,27 @@ def test_the_markdown_settings_show_the_sampling_every_rung_shared(tmp_path):
     write_rung(tmp_path, "mul", [attempt(True, temp=0.7)], top_p=0.9)
     kl.write_ladder_report(tmp_path, ["add", "mul"])
     assert "- sampling: temperatures 0.7, top-p 0.9" in (tmp_path / "ladder-report.md").read_text()
+
+
+# ---- review round 5 (Copilot, PR 177) ---------------------------------------------------------------------------
+
+def test_a_simulator_gap_is_its_own_class_and_the_report_says_it_is_not_a_capability_limit(tmp_path):
+    write_rung(tmp_path, "add", [attempt(category="sim_gap", first="FAIL: sim_gap: raw_element_read", n=1),
+                                 attempt(True, n=2)])
+    data = kl.write_ladder_report(tmp_path, ["add"])
+    assert data["rungs"][0]["classes"] == {"sim_gap": 1}
+    text = (tmp_path / "ladder-report.md").read_text()
+    assert "`sim_gap`" in text and "does not show what the coder cannot write" in text
+
+
+def test_the_report_replaces_a_link_at_its_path_and_never_writes_through_it(tmp_path):
+    victim = tmp_path / "victim.txt"
+    victim.write_text("keep me")
+    (tmp_path / "ladder-report.md").symlink_to(victim)
+    (tmp_path / "ladder-report.json").symlink_to(victim)
+    write_rung(tmp_path, "add", [attempt(True)])
+    kl.write_ladder_report(tmp_path, ["add"])
+    assert victim.read_text() == "keep me"
+    assert not (tmp_path / "ladder-report.md").is_symlink() and "Kernel probe ladder report" in (
+        tmp_path / "ladder-report.md").read_text()
+    assert json.loads((tmp_path / "ladder-report.json").read_text())["rungs"][0]["op"] == "add"

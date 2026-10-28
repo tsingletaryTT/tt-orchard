@@ -22,6 +22,7 @@ It imports nothing from kernelprobe at load time (kernelprobe imports it), so it
 from __future__ import annotations
 
 import json
+import os
 import statistics
 import time
 from pathlib import Path
@@ -35,7 +36,7 @@ LADDER = defaults.KERNEL_PROBE_LADDER
 # (any other error the simulator or tt-lang reports, a type error on a host tensor for example), `import_error`,
 # `forbidden_code` and `no_kernel`; "other" keeps what none of these names.
 FAILURE_CLASSES = ("deadlock", "dataflow_step", "shape_mismatch", "numeric", "tt_lang_error", "import_error",
-                   "forbidden_code", "no_kernel", "wall_clock", "other")
+                   "forbidden_code", "no_kernel", "sim_gap", "wall_clock", "other")
 
 REPORT_NAME = "ladder-report"
 
@@ -79,7 +80,7 @@ def failure_class(a: dict) -> str | None:
     on_wall = a.get("status") in ("wall", "wall_clock", "wall-clock") or "wall" in detail.lower()
     if (not first or category == "no_kernel") and on_wall:
         return "wall_clock"
-    if category in ("tt_lang_error", "import_error", "forbidden_code", "no_kernel"):
+    if category in ("tt_lang_error", "import_error", "forbidden_code", "no_kernel", "sim_gap"):
         return category
     return "other"
 
@@ -266,7 +267,8 @@ def ladder_lines(rows: list[dict], *, skipped: list[str], stopped: str | None, s
                   + ". A longer budget could have changed those.", ""]
     lines += ["Failure classes (from the first line of the unedited check): `deadlock`, `dataflow_step` (any \"not a "
               "valid next dataflow step\"), `shape_mismatch`, `numeric`, `tt_lang_error` (any other error tt-lang or "
-              "the simulator reports), `import_error`, `forbidden_code`, `no_kernel`, `wall_clock`, `other`.", ""]
+              "the simulator reports), `import_error`, `forbidden_code`, `no_kernel`, `sim_gap` (the pinned simulator lacks a function the specification documents, so the "
+              "result does not show what the coder cannot write), `wall_clock`, `other`.", ""]
     return lines
 
 
@@ -279,6 +281,14 @@ def load_rung(out_dir: Path, op: str) -> tuple[dict | None, list[dict]]:
         return None, []
     attempts = [a for a in data.get("attempts", []) if isinstance(a, dict) and a.get("op") == op]
     return (data.get("header") if isinstance(data.get("header"), dict) else {}), attempts
+
+
+def _write_replacing(path: Path, text: str) -> None:
+    """Write `text` to `path` by writing a new file beside it and renaming it over `path`. A link at `path` is replaced,
+    and the file it points to is not touched."""
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def write_ladder_report(out_dir, rungs: list[str], *, stopped: str | None = None, ran=None) -> dict:
@@ -316,9 +326,9 @@ def write_ladder_report(out_dir, rungs: list[str], *, stopped: str | None = None
     data = {"rungs": rows, "not_run": skipped, "first_zero_rung": first_zero_rung(rows), "stopped": stopped,
             "settings": settings, "ladder": list(LADDER)}
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / f"{REPORT_NAME}.json").write_text(json.dumps(data, indent=2, default=str) + "\n", encoding="utf-8")
-    (out_dir / f"{REPORT_NAME}.md").write_text(
-        "\n".join(ladder_lines(rows, skipped=skipped, stopped=stopped, settings=settings)) + "\n", encoding="utf-8")
+    _write_replacing(out_dir / f"{REPORT_NAME}.json", json.dumps(data, indent=2, default=str) + "\n")
+    _write_replacing(out_dir / f"{REPORT_NAME}.md",
+                     "\n".join(ladder_lines(rows, skipped=skipped, stopped=stopped, settings=settings)) + "\n")
     return data
 
 
