@@ -1,0 +1,3 @@
+target = "0.9.45"
+summary = "Project database design note, with a SQLite telegraph ledger proof and requirements I1 to I10 for the migration."
+pr = 132
