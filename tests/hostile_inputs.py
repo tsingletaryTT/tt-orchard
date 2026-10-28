@@ -69,6 +69,8 @@ BYTES_CORPUS: dict[str, bytes] = {
     "negative_count": b'{"count": -3}',
     "string_count": b'{"count": "5"}',
     "bool_count": b'{"count": true}',
+    "negative_long_integer": b"-" + b"1" * 100,
+    "unhashable_dtype": b'{"a": {"dtype": [], "shape": [], "data_offsets": []}}',
 }
 
 
@@ -885,7 +887,7 @@ KNOWN_DEFECTS: dict[int, dict[str, list[str]]] = {
         'status.collect (hostile ledger)': ['directory'],
     },
     140: {          # valid JSON that is not an object raises AttributeError
-        'opinventory.load_dump': ['empty_array', 'null', 'empty_string', 'string_x', 'zero', 'minus_one', 'huge_exponent', 'nan', 'infinity', 'negative_infinity', 'true', 'nest_1000', 'lone_surrogate', 'big_string_50mb'],
+        'opinventory.load_dump': ['negative_long_integer', 'empty_array', 'null', 'empty_string', 'string_x', 'zero', 'minus_one', 'huge_exponent', 'nan', 'infinity', 'negative_infinity', 'true', 'nest_1000', 'lone_surrogate', 'big_string_50mb'],
     },
 }
 

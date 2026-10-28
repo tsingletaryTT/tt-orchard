@@ -587,8 +587,9 @@ def scan_beneath(pin: Pin, visit: Callable[[ScanEntry], None] | None = None, *, 
                     kind = "file"
                 else:
                     kind = "other"
-            except OSError:
+            except OSError as exc:
                 kind = "other"
+                result.unreadable.append((parts + (name,), _errname(exc)))     # its type is unknown, so the scan is incomplete
             item = ScanEntry(parts + (name,), kind)
             if visit is not None:
                 visit(item)

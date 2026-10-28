@@ -53,7 +53,8 @@ def test_the_module_imports_only_the_standard_library():
 
 VALID = {"empty_array": [], "empty_object": {}, "null": None, "empty_string": "", "string_x": "x", "zero": 0, "minus_one": -1,
          "true": True, "negative_zero_count": {"count": -0.0}, "float_count": {"count": 5.0}, "negative_count": {"count": -3},
-         "string_count": {"count": "5"}, "bool_count": {"count": True}}
+         "string_count": {"count": "5"}, "bool_count": {"count": True},
+         "negative_long_integer": -int("1" * 100), "unhashable_dtype": {"a": {"dtype": [], "shape": [], "data_offsets": []}}}
 
 # What the reader must refuse and why. The values that are valid JSON (a wrong type, a negative count) are not here: telling
 # those apart is the caller's job, with `expect`, `whole_number` and `finite_number`.
@@ -321,6 +322,23 @@ def test_an_unusable_path_is_refused(bad):
         safeio.read_json(bad, max_bytes=CAP)
 
 
+@pytest.mark.parametrize("bad", ["\ud800", "dir/\ud800.json", "a\ud800b"])
+def test_a_path_that_cannot_be_encoded_is_refused_not_raised(tmp_path, bad):
+    """A lone surrogate cannot be encoded for the operating system; os.open raises UnicodeEncodeError, which must not leave the function."""
+    before = fd_count()
+    with pytest.raises(PathRefused):
+        safeio.read_json(bad, max_bytes=CAP)
+    (tmp_path / "dir").mkdir()
+    with safeio.pinned_root(tmp_path) as pin:
+        with pytest.raises(PathRefused):
+            safeio.read_json(bad, anchor=pin.fd, max_bytes=CAP)
+        with pytest.raises(PathRefused):
+            safeio.open_beneath(pin.fd, ("dir", bad), file_flags=os.O_RDONLY)
+        with pytest.raises(PathRefused):
+            safeio.open_beneath(pin.fd, (bad,))
+    assert fd_count() == before
+
+
 def test_a_path_that_is_not_a_path_is_refused():
     with pytest.raises(PathRefused):
         safeio.read_json(12, max_bytes=CAP)
@@ -339,6 +357,15 @@ def test_a_repeated_key_in_a_nested_object_is_refused(tmp_path):
     with pytest.raises(NotJson):
         safeio.read_json(write(tmp_path / "f.json", b'{"a": [{"b": 1, "b": 2}]}'), max_bytes=CAP)
     assert safeio.read_json(write(tmp_path / "g.json", b'{"a": {"b": 1}, "b": {"b": 2}}'), max_bytes=CAP)["b"] == {"b": 2}
+
+
+def test_the_minus_sign_is_not_a_digit(tmp_path):
+    assert safeio.read_json(write(tmp_path / "a.json", b"-" + b"1" * 100), max_bytes=CAP) == -int("1" * 100)
+    with pytest.raises(NotJson):
+        safeio.read_json(write(tmp_path / "b.json", b"-" + b"1" * 101), max_bytes=CAP)
+    assert safeio.parse_json_bytes(b"-1", max_bytes=CAP, max_int_digits=1) == -1
+    with pytest.raises(NotJson):
+        safeio.parse_json_bytes(b"-12", max_bytes=CAP, max_int_digits=1)
 
 
 def test_integer_length_is_bounded(tmp_path):
@@ -723,6 +750,47 @@ def test_a_directory_swapped_for_a_link_after_it_was_listed_is_not_entered(tmp_p
     assert ("victim", "secret.json") not in seen
     assert [p for p, _ in res.unreadable] == [("victim",)] and res.incomplete
     assert res.entries == []                                # with a callback nothing is collected
+
+
+def test_an_entry_whose_type_cannot_be_read_is_reported_and_the_scan_is_incomplete(tmp_path, monkeypatch):
+    tree(tmp_path, files=["a", "b"])
+    real = os.scandir
+
+    class Entry:
+        def __init__(self, e):
+            self.e, self.name = e, e.name
+
+        def is_symlink(self):
+            return self.e.is_symlink()
+
+        def is_dir(self, follow_symlinks=True):
+            if self.name == "a":
+                raise PermissionError(errno.EACCES, "injected")
+            return self.e.is_dir(follow_symlinks=follow_symlinks)
+
+        def is_file(self, follow_symlinks=True):
+            return self.e.is_file(follow_symlinks=follow_symlinks)
+
+    class Listing:
+        def __init__(self, it):
+            self.it = it
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            return Entry(next(self.it))
+
+        def close(self):
+            self.it.close()
+
+    monkeypatch.setattr(safeio.os, "scandir", lambda fd: Listing(real(fd)))
+    with safeio.pinned_root(tmp_path) as pin:
+        res = safeio.scan_beneath(pin)
+    assert res.unreadable == [(("a",), "EACCES")] and res.incomplete
+    assert {e.parts for e in res.entries} == {("a",), ("b",)}
+    with pytest.raises(IncompleteScan):
+        res.require_complete()
 
 
 def test_a_second_scan_on_the_same_pin_sees_everything_again(tmp_path):
@@ -1229,6 +1297,8 @@ BAD_HEADERS = {
     "entry_extra_key": ({"a": entry(x=1)}, 4),
     "unknown_dtype": ({"a": entry(dtype="F33")}, 4),
     "dtype_not_text": ({"a": entry(dtype=7)}, 4),
+    "dtype_unhashable": ({"a": entry(dtype=[])}, 4),
+    "dtype_object": ({"a": entry(dtype={})}, 4),
     "shape_not_list": ({"a": {"dtype": "F32", "shape": 1, "data_offsets": [0, 4]}}, 4),
     "negative_dims_with_a_positive_product": ({"a": entry(shape=(-1, -1))}, 4),
     "float_dim": ({"a": entry(shape=(1.0,))}, 4),
@@ -1430,7 +1500,7 @@ def oracle_ok(header, data_size) -> bool:
     for name, v in header.items():
         if name == "__metadata__":
             continue
-        if not isinstance(v, dict) or set(v) != {"dtype", "shape", "data_offsets"} or v["dtype"] not in BITS:
+        if not isinstance(v, dict) or set(v) != {"dtype", "shape", "data_offsets"} or not isinstance(v["dtype"], str) or v["dtype"] not in BITS:
             return False
         shape, off = v["shape"], v["data_offsets"]
         if not isinstance(shape, list) or any(type(d) is not int or d < 0 for d in shape) or len(shape) > 64:
