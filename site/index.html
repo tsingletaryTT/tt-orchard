@@ -155,7 +155,7 @@
   <span class="brand">tt-orchard</span>
   <div class="links">
     <a href="#watch">Watch a run</a><a href="#sorting">Sorting</a><a href="#screens">The page</a><a href="#time">Time</a>
-    <a href="#bench">Measured</a><a href="#stops">Stops</a><a href="#published">Published</a><a href="#install">Install</a>
+    <a href="#bench">Measured</a><a href="#stops">Stops</a><a href="#published">Published</a><a href="#overnight">Overnight</a><a href="#install">Install</a>
     <a class="gh" href="https://github.com/tsingletaryTT/tt-orchard">GitHub</a>
   </div>
 </nav>
@@ -266,6 +266,21 @@
       <tr><td><a href="https://huggingface.co/episod/openthai2.0-qwen3.8-27b-p300"><span class="m">episod/openthai2.0-qwen3.8-27b-p300</span></a></td><td>Qwen3.8-27B</td><td>Pulled and booted from the Hub; 2-chip and 1-chip</td></tr>
     </tbody>
   </table>
+</section>
+
+<section class="section edge" id="overnight">
+  <div class="label">Models that needed new code, brought up overnight</div>
+  <h2>Three new-code bring-ups, 28 to 29 October</h2>
+  <p class="sub">These were driven by hand with the harness's tools. The unattended stages were not used. Each was checked against a CPU reference on a single prompt or a small set. Nobody listened to the audio clips. Speeds are medians on a shared host.</p>
+  <table>
+    <thead><tr><th>Model</th><th>Stage reached</th><th>Speed</th><th>What stopped it</th></tr></thead>
+    <tbody>
+      <tr><td><span class="m">openbmb/MiniCPM3-4B</span></td><td>Whole model on one chip, multi-latent attention on the existing flash op; 16 of 16 teacher-forced tokens match the CPU</td><td>33.7 tok/s in bfloat16 (54 percent of the DRAM floor); 39.9 with an 8-bit MLP</td><td>The two-chip path has no batched prefill. The supervisor and full-port stages were not used.</td></tr>
+      <tr><td><span class="m">Stable Audio 3</span> (small-music, small-sfx, medium)</td><td>Autoencoder decoder and, for medium, the diffusion transformer on the chip; full clips with both parts on the chip</td><td>10 s clip in 0.82 s (small-music, CPU 3.9 to 8.0 s); 3.8 s (medium, CPU 38.0 s, one sample)</td><td>The text encoder is still on the host, the supervisor's stage gate was not run on these models, and nobody listened to the clips.</td></tr>
+      <tr><td><span class="m">ibm-granite/granite-4.0-h-1b</span> (Mamba-2 hybrid)</td><td>Whole model on one chip at the bf16 floor of agreement; the local coder wrote a state-update kernel that runs in the model</td><td>22.6 tok/s with stock ops; 16.7 and 18.0 with the coder's kernels</td><td>The coder's kernels are slower than stock ops. Its readout kernels pass the simulator and none compiles on the chip (<code>reduce_sum</code> differs between the pinned simulator and the chip's tt-lang).</td></tr>
+    </tbody>
+  </table>
+  <p class="sub" style="margin-top:1rem">Run logs: <a href="https://github.com/tsingletaryTT/tt-orchard/blob/main/docs/run-logs/2026-10-29-overnight-minicpm3-4b.md">MiniCPM3-4B</a>, <a href="https://github.com/tsingletaryTT/tt-orchard/blob/main/docs/run-logs/2026-10-29-overnight-stable-audio-decoder.md">Stable Audio 3 decoder</a>, and the Granite run log in PR 215.</p>
 </section>
 
 <section class="section edge" id="direction">
