@@ -109,5 +109,6 @@ with the reference in the same way, and the differences are recorded here:
 
 1. The blocker of the earlier run is gone: a simulator-passing coder readout kernel runs inside the model on the chip with the pair.
 2. The kernel path is still not worth using for this model. Issue 205 can record that the compile mismatch is resolved for this pair and
-   that the next question is dispatch cost: a fused kernel needs fewer, larger launches than the composed ops, and this port adds five
+   that the next question is dispatch cost: a fused kernel needs fewer, larger launches than the composed ops, and this port adds four
    `ttnn.repeat` copies before each kernel call. A compact-input readout (as the compact state update did) or a traced decode would test that.
+   (Correction on 2026-10-29: the code has four repeats and one clone; see `2026-10-29-granite-repeat-trace.md`.)

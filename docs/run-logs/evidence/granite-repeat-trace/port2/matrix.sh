@@ -14,7 +14,7 @@ bash $HERE/session2.sh $OUT \
 # the earlier dynamic port (granite_tt.py, composed), same venv and session, for continuity with the 2026-10-28 and 10-29 logs
 source $HOME/orchard-runs/ttlang-pair/venv-light/bin/activate
 eval "$(tt-lang-setup-external-tt-metal --tt-metal-dir $HOME/tt-metal)"
-export PYTHONPATH=$PYTHONPATH:${ST_DIR:-/tmp/claude-1000/st}
+export PYTHONPATH=$PYTHONPATH:${ST_DIR:-<safetensors-only-dir>}
 cd $HERE/../port
 timeout 300 python bench_decode.py composed --out $OUT/dynamic-composed.json > $OUT/dynamic-composed.log 2>&1
 echo "dynamic-composed rc=$? $(date -Is) load $(cat /proc/loadavg)" | tee -a $OUT/conditions.txt

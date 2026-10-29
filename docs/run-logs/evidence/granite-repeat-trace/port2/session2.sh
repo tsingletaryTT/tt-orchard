@@ -5,7 +5,7 @@ PAIR=$HOME/orchard-runs/ttlang-pair
 OUT=$1; shift; mkdir -p $OUT
 source $PAIR/venv-light/bin/activate
 eval "$(tt-lang-setup-external-tt-metal --tt-metal-dir $HOME/tt-metal)"
-export PYTHONPATH=$PYTHONPATH:${ST_DIR:-/tmp/claude-1000/st}     # safetensors only
+export PYTHONPATH=$PYTHONPATH:${ST_DIR:-<safetensors-only-dir>}     # safetensors only
 cd $HERE
 echo "session start $(date -Is) load $(cat /proc/loadavg)" | tee -a $OUT/conditions.txt
 for spec in "$@"; do

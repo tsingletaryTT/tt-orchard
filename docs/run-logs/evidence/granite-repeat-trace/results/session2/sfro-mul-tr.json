@@ -1,0 +1,57 @@
+{
+ "name": "sfro-mul-tr",
+ "ssd": "state_full_ro",
+ "expand": "mul",
+ "trace": true,
+ "pad": false,
+ "trace_capture_s": 0.6024742126464844,
+ "prompts": [
+  {
+   "prompt_index": 0,
+   "rel_l2_mean": 0.007466019596904516,
+   "rel_l2_max": 0.008797701448202133,
+   "top1": 1.0,
+   "top5": 1.0,
+   "free_run_prefix": 3,
+   "free_run_len": 3
+  },
+  {
+   "prompt_index": 1,
+   "rel_l2_mean": 0.01598552241921425,
+   "rel_l2_max": 0.08267001062631607,
+   "top1": 1.0,
+   "top5": 0.9916666666666667,
+   "free_run_prefix": 24,
+   "free_run_len": 24
+  },
+  {
+   "prompt_index": 2,
+   "rel_l2_mean": 0.006681170780211687,
+   "rel_l2_max": 0.017994660884141922,
+   "top1": 0.875,
+   "top5": 0.9666666666666667,
+   "free_run_prefix": 8,
+   "free_run_len": 24
+  },
+  {
+   "prompt_index": 3,
+   "rel_l2_mean": 0.017232077196240425,
+   "rel_l2_max": 0.06892293691635132,
+   "top1": 0.9583333134651184,
+   "top5": 0.9499999999999998,
+   "free_run_prefix": 11,
+   "free_run_len": 24
+  }
+ ],
+ "tok_s_runs": [
+  37.65831250755802,
+  39.42583590385009,
+  39.19913714877671,
+  33.19558359192336,
+  39.13850327829151
+ ],
+ "mean": 37.72347448607994,
+ "min": 33.19558359192336,
+ "max": 39.42583590385009,
+ "share_of_floor": 0.2153166351945202
+}
