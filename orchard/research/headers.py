@@ -47,7 +47,7 @@ def shard_header(fetch, repo: str, name: str) -> dict:
     if len(blob) != n:
         raise ValueError(f"header is cut short ({len(blob)} of {n} bytes)")
     try:
-        header = safeio.parse_json_bytes(blob, max_bytes=max(len(blob), 1))
+        header = safeio.parse_json_bytes(blob.decode("utf-8"), max_bytes=max(len(blob), 1))     # a UnicodeDecodeError is a ValueError, as before
     except safeio.SafeReadError as exc:
         raise ValueError(f"header is not strict JSON: {exc.reason}") from None
     if not isinstance(header, dict):

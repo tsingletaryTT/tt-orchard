@@ -452,7 +452,7 @@ def _json(path: Path, what: str) -> dict:
     try:
         data = safeio.read_json(path, max_bytes=MAX_RECORD_BYTES)
     except safeio.SafeReadError as exc:
-        raise PackageError(f"{what} ({path}) is missing or not usable JSON: {exc.reason}") from None
+        raise PackageError(f"{what} ({path}) is missing or not JSON: {exc.reason}") from None
     if not isinstance(data, dict):
         raise PackageError(f"{what} ({path}) is not a JSON object")
     return data
