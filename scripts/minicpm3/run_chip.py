@@ -33,6 +33,7 @@ def main():
     ap.add_argument("--out", help="new directory for the recorded chip run")
     ap.add_argument("--steps", type=int, default=32)
     ap.add_argument("--repeats", type=int, default=3)
+    ap.add_argument("--fidelity", default="default", choices=["default", "hifi4"])
     ap.add_argument("--layers", type=int, default=0, help="debug: truncate the stack (0 = all)")
     a = ap.parse_args()
     tok = AutoTokenizer.from_pretrained(a.model_dir)
@@ -41,7 +42,7 @@ def main():
     dev = ttnn.open_device(device_id=0)
     try:
         t0 = time.time()
-        m = ChipMiniCPM3(dev, a.model_dir, a.weights, attn=a.attn, max_len=256)
+        m = ChipMiniCPM3(dev, a.model_dir, a.weights, attn=a.attn, max_len=256, fidelity=a.fidelity)
         print(f"model loaded on chip in {time.time() - t0:.1f}s", flush=True)
         if a.mode == "agree":
             agree(a, m, ids, n)

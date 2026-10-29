@@ -11,7 +11,7 @@ on it):
 chip adds its own matmul accumulation order on top.
 
 Arrays: kind `layer`: `embed`-free names `layer_NN` (block output) and `layer_NN.attn` (stream after attention) for the prefill, every position.
-Kind `other`: `q_NN` and `core_NN` (query and attention output before o_proj, prefill), `dec0_layer_NN` (decode step 0 stream), `prefill_logits`
+Kind `other`: `dec0_layer_NN` (decode step 0 stream), `prefill_logits`
 (last position), `dec_logits_K` (K-th decode step), `final_norm`, `tokens` (the greedy path).
 """
 import argparse
@@ -73,10 +73,6 @@ def main():
             if step["k"] == -1:
                 if name.startswith("layer_") and "." not in name or name.endswith(".attn"):
                     rec.record("layer", name, t[0].float().numpy())
-                elif name.endswith(".q"):
-                    rec.record("other", "q_" + name[6:8], t[0].float().numpy())
-                elif name.endswith(".attn_core"):
-                    rec.record("other", "core_" + name[6:8], t[0].float().numpy())
                 elif name == "final_norm":
                     rec.record("other", "final_norm", t[0].float().numpy())
             elif step["k"] == 0 and name.startswith("layer_") and "." not in name:

@@ -36,7 +36,7 @@ def _rot_matrix():
 
 
 class ChipMiniCPM3:
-    def __init__(self, dev, model_dir, weights_file, *, attn="mla", max_len=256, wdtype=None, log=print):
+    def __init__(self, dev, model_dir, weights_file, *, attn="mla", max_len=256, wdtype=None, fidelity="default", log=print):
         import json
         self.dev = dev
         self.attn = attn
@@ -48,6 +48,15 @@ class ChipMiniCPM3:
         self.max_len = max_len
         self.wdtype = wdtype or ttnn.bfloat16
         self.log = log
+        # `fidelity="hifi4"`: highest math fidelity and 32-bit accumulation in every matmul (the default config accumulates in 16 bits)
+        self.ckc = None
+        if fidelity == "hifi4":
+            self.ckc = ttnn.init_device_compute_kernel_config(dev.arch(), math_fidelity=ttnn.MathFidelity.HiFi4, math_approx_mode=False,
+                                                              fp32_dest_acc_en=True, packer_l1_acc=True)
+        # One kv head and batch 1 would spread the op over all 110 cores of a Blackhole chip, and the op refuses more than 64 cores per head
+        # (TT_FATAL: tree reduction max 6 rounds). An 8 by 8 grid is accepted and matches torch (PCC 0.99995 at the model's shapes).
+        self.sdpa_pc = ttnn.SDPAProgramConfig(compute_with_storage_grid_size=ttnn.CoreCoord(8, 8), q_chunk_size=32, k_chunk_size=128,
+                                              exp_approx_mode=False)
         self.rs = c["scale_depth"] / math.sqrt(self.L)
         from ref_model import rope_tables
         self.cos, self.sin = rope_tables(c, max_len)
@@ -120,6 +129,9 @@ class ChipMiniCPM3:
     def _up(self, t, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT):
         return ttnn.from_torch(t, device=self.dev, dtype=dtype, layout=layout)
 
+    def _lin(self, x, w, **kw):
+        return ttnn.linear(x, w, compute_kernel_config=self.ckc, **kw) if self.ckc is not None else ttnn.linear(x, w, **kw)
+
     def _rope(self, x, cos, sin):
         """x [.., 32]; cos, sin [1,1,1,32] on the chip."""
         return ttnn.add(ttnn.multiply(x, cos), ttnn.multiply(ttnn.matmul(x, self.R), sin))
@@ -143,9 +155,9 @@ class ChipMiniCPM3:
             tap("embed", self._host(x)[0, 0, 0])
         for i, d in enumerate(self.layers):
             h = ttnn.rms_norm(x, epsilon=self.eps, weight=d["in_norm"])
-            qa = ttnn.rms_norm(ttnn.linear(h, d["qa"]), epsilon=self.eps, weight=d["qa_norm"])
-            qb = ttnn.linear(qa, d["qb"])                               # [1,1,1,H*96]
-            kva = ttnn.linear(h, d["kva"])                              # [1,1,1,288]
+            qa = ttnn.rms_norm(self._lin(h, d["qa"]), epsilon=self.eps, weight=d["qa_norm"])
+            qb = self._lin(qa, d["qb"])                               # [1,1,1,H*96]
+            kva = self._lin(h, d["kva"])                              # [1,1,1,288]
             ckv = ttnn.slice(kva, [0, 0, 0, 0], [1, 1, 1, self.kvr])
             kpe = ttnn.slice(kva, [0, 0, 0, self.kvr], [1, 1, 1, self.kvr + self.dr])
             ckv = ttnn.rms_norm(ckv, epsilon=self.eps, weight=d["kv_norm"])
@@ -153,16 +165,16 @@ class ChipMiniCPM3:
                 ao = self._host_core(i, d, qb, ckv, kpe, pos)
             else:
                 ao = self._mla_core(i, d, qb, ckv, kpe, cos, sin, cur)
-            x = ttnn.add(x, ttnn.linear(ao, d["o"]))
+            x = ttnn.add(x, self._lin(ao, d["o"]))
             if tap:
                 tap(f"layer_{i:02d}.attn", self._host(x)[0, 0, 0])
             h = ttnn.rms_norm(x, epsilon=self.eps, weight=d["post_norm"])
-            m = ttnn.multiply(ttnn.linear(h, d["gate"], activation="silu"), ttnn.linear(h, d["up"]))
-            x = ttnn.add(x, ttnn.linear(m, d["down"]))
+            m = ttnn.multiply(self._lin(h, d["gate"], activation="silu"), self._lin(h, d["up"]))
+            x = ttnn.add(x, self._lin(m, d["down"]))
             if tap:
                 tap(f"layer_{i:02d}", self._host(x)[0, 0, 0])
         x = ttnn.rms_norm(x, epsilon=self.eps, weight=self.final_norm)
-        logits = ttnn.linear(x, self.lm_head)
+        logits = self._lin(x, self.lm_head)
         return self._host(logits)[0, 0, 0, : self.vocab]
 
     # ---- attention cores -----------------------------------------------------------------------------
@@ -181,7 +193,8 @@ class ChipMiniCPM3:
         new = ttnn.concat([ckv, kpe], dim=-1)                            # [1,1,1,288]
         ttnn.update_cache(self.kvpe[i], new, self._pos)
         o = ttnn.transformer.flash_multi_latent_attention_decode(
-            q_full, self.kvpe[i], head_dim_v=self.kvr, cur_pos_tensor=cur, scale=(self.dn + self.dr) ** -0.5)   # [1,1,H,256]
+            q_full, self.kvpe[i], head_dim_v=self.kvr, cur_pos_tensor=cur, scale=(self.dn + self.dr) ** -0.5,
+            program_config=self.sdpa_pc)                                  # [1,1,H,256]
         o = ttnn.transpose(o, 1, 2)                                      # [1,H,1,256]
         o = ttnn.matmul(o, d["wuv"])                                     # [1,H,1,64]
         o = ttnn.reshape(o, (1, 1, 1, H * self.dv))
