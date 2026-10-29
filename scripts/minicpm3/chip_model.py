@@ -54,6 +54,10 @@ class ChipMiniCPM3:
         # `fidelity="hifi4"`: highest math fidelity and 32-bit accumulation in every matmul (the default config accumulates in 16 bits)
         self.rms_ckc = ttnn.init_device_compute_kernel_config(dev.arch(), math_fidelity=ttnn.MathFidelity.HiFi4, math_approx_mode=False,
                                                               fp32_dest_acc_en=True, packer_l1_acc=True)
+        # Per-head matmuls (40 batches of one row) with the default program config take 85 to 127 us each; one batch per core with an explicit
+        # config takes 10 to 17 us (scripts/minicpm3/exp_bmm.py). HiFi2 keeps the default's accuracy.
+        self.bmm_ckc = ttnn.init_device_compute_kernel_config(dev.arch(), math_fidelity=ttnn.MathFidelity.HiFi2, math_approx_mode=False,
+                                                              fp32_dest_acc_en=False, packer_l1_acc=False)
         self.ckc = None
         if fidelity == "hifi4":
             self.ckc = ttnn.init_device_compute_kernel_config(dev.arch(), math_fidelity=ttnn.MathFidelity.HiFi4, math_approx_mode=False,
@@ -154,6 +158,12 @@ class ChipMiniCPM3:
         # it was 3.7 percent off; with 32-bit accumulation it is 0.08 percent (scripts/minicpm3/exp_mlp14.py).
         return ttnn.rms_norm(x, epsilon=self.eps, weight=w, compute_kernel_config=self.rms_ckc)
 
+    def _bmm(self, a, w, k, n):
+        """a [1,H,1,k] times w [1,H,k,n], one head per core."""
+        pc = ttnn.MatmulMultiCoreReuseProgramConfig(compute_with_storage_grid_size=(8, 5), in0_block_w=k // 32, out_subblock_h=1,
+                                                    out_subblock_w=1, per_core_M=1, per_core_N=n // 32)
+        return ttnn.matmul(a, w, program_config=pc, compute_kernel_config=self.bmm_ckc)
+
     def _lin(self, x, w, **kw):
         return ttnn.linear(x, w, compute_kernel_config=self.ckc, **kw) if self.ckc is not None else ttnn.linear(x, w, **kw)
 
@@ -250,7 +260,8 @@ class ChipMiniCPM3:
         x = self._rms(x, self.final_norm)
         if "lm" in self.skip:
             return x
-        return self._lin(x, self.lm_head)
+        # row-major output: a tile layout read back is 32 rows (4.7 MB, about 8 ms); one row is 147 KB
+        return ttnn.to_layout(self._lin(x, self.lm_head), ttnn.ROW_MAJOR_LAYOUT)
 
     # ---- trace ----------------------------------------------------------------------------------------
     def enable_trace(self):
@@ -287,7 +298,7 @@ class ChipMiniCPM3:
         kpe = self._rope(kpe, cos, sin)
         # absorb the key up-projection into the query: [1,H,1,64] x [1,H,64,256] -> [1,H,1,256]
         qn = ttnn.transpose(q_nope, 1, 2)
-        q_lat = ttnn.matmul(qn, d["wuk"])
+        q_lat = self._bmm(qn, d["wuk"], self.dn, self.kvr)
         q_lat = ttnn.transpose(q_lat, 1, 2)                              # [1,1,H,256]
         q_full = ttnn.concat([q_lat, q_pe], dim=-1)                      # [1,1,H,288]
         new = ttnn.concat([ckv, kpe], dim=-1)                            # [1,1,1,288]
@@ -296,7 +307,7 @@ class ChipMiniCPM3:
             q_full, self.kvpe[i], head_dim_v=self.kvr, cur_pos_tensor=cur, scale=(self.dn + self.dr) ** -0.5,
             program_config=self.sdpa_pc)                                  # [1,1,H,256]
         o = ttnn.transpose(o, 1, 2)                                      # [1,H,1,256]
-        o = ttnn.matmul(o, d["wuv"])                                     # [1,H,1,64]
+        o = self._bmm(o, d["wuv"], self.kvr, self.dv)                    # [1,H,1,64]
         o = ttnn.reshape(o, (1, 1, 1, H * self.dv))
         return o
 
@@ -307,21 +318,34 @@ class ChipMiniCPM3:
         qa = self._rms(self._lin(h, d["qa"]), d["qa_norm"])
         qb = self._lin(qa, d["qb"])                                       # [1,1,1,H*96]
         q = ttnn.reshape(qb, (1, 1, H, self.dn + self.dr))
-        qr = ttnn.add(ttnn.multiply(q, self._cosF), ttnn.multiply(ttnn.matmul(q, self.Rf), self._sinF))
+        qr = q if "qrope" in self.skip else ttnn.add(ttnn.multiply(q, self._cosF), ttnn.multiply(ttnn.matmul(q, self.Rf), self._sinF))
         qh = ttnn.transpose(qr, 1, 2)                                     # [1,H,1,96]
-        ql = ttnn.matmul(qh, d["wbig"])                                   # [1,H,1,288]: latent query and rotated rope query
-        q_full = ttnn.transpose(ql, 1, 2)                                 # [1,1,H,288]
-        ckv = self._rms(self._lin(h, d["ckv_w"]), d["kv_norm"])           # [1,1,1,256]
-        k64 = self._lin(h, d["kpe_w"])                                    # [1,1,1,64]: kpe, rotate_half(kpe)
-        krot = ttnn.matmul(ttnn.multiply(k64, self._cs64), self.IdI)      # kpe * cos + rotate_half(kpe) * sin
-        new = ttnn.concat([ckv, krot], dim=-1)                            # [1,1,1,288]
-        if self.upd == "paged":
-            ttnn.experimental.paged_update_cache(self.kvpe[i], ttnn.to_memory_config(new, self.new_mc), update_idxs_tensor=cur)
+        if "bmm" in self.skip:
+            ql = ttnn.concat([qh, qh, qh], dim=-1)
         else:
-            self._write_cache(i, new, cur, inp)
-        o = ttnn.transformer.flash_multi_latent_attention_decode(
-            q_full, self.kvpe[i], head_dim_v=self.kvr, cur_pos_tensor=cur, scale=(self.dn + self.dr) ** -0.5, program_config=self.sdpa_pc)
-        o = ttnn.matmul(ttnn.transpose(o, 1, 2), d["wuv"])                # [1,H,1,64]
+            ql = self._bmm(qh, d["wbig"], self.dn + self.dr, self.kvr + self.dr)   # [1,H,1,288]: latent query and rotated rope query
+        q_full = ttnn.transpose(ql, 1, 2)                                 # [1,1,H,288]
+        if "kpath" in self.skip:
+            new = ttnn.slice(q_full, [0, 0, 0, 0], [1, 1, 1, self.kvr + self.dr])
+        else:
+            ckv = self._rms(self._lin(h, d["ckv_w"]), d["kv_norm"])       # [1,1,1,256]
+            k64 = self._lin(h, d["kpe_w"])                                # [1,1,1,64]: kpe, rotate_half(kpe)
+            krot = ttnn.matmul(ttnn.multiply(k64, self._cs64), self.IdI)  # kpe * cos + rotate_half(kpe) * sin
+            new = ttnn.concat([ckv, krot], dim=-1)                        # [1,1,1,288]
+        if "cache" not in self.skip:
+            if self.upd == "paged":
+                ttnn.experimental.paged_update_cache(self.kvpe[i], ttnn.to_memory_config(new, self.new_mc), update_idxs_tensor=cur)
+            else:
+                self._write_cache(i, new, cur, inp)
+        if "flash" in self.skip:
+            o = ttnn.slice(q_full, [0, 0, 0, 0], [1, 1, H, self.kvr])
+        else:
+            o = ttnn.transformer.flash_multi_latent_attention_decode(
+                q_full, self.kvpe[i], head_dim_v=self.kvr, cur_pos_tensor=cur, scale=(self.dn + self.dr) ** -0.5, program_config=self.sdpa_pc)
+        if "bmm" in self.skip:
+            o = ttnn.slice(ttnn.transpose(o, 1, 2), [0, 0, 0, 0], [1, H, 1, self.dv])
+        else:
+            o = self._bmm(ttnn.transpose(o, 1, 2), d["wuv"], self.kvr, self.dv)   # [1,H,1,64]
         return ttnn.reshape(o, (1, 1, 1, H * self.dv))
 
     def _write_cache(self, i, new, cur, inp):

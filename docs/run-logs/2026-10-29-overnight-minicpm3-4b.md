@@ -95,3 +95,38 @@ Next: a timing breakdown (attention, MLP, head) and a DRAM-bandwidth probe of th
 
 Probes done for the trace path: `paged_update_cache` works with a height-sharded input and an index tensor; one-hot row write with broadcast multiply and `assign`
 works; the rope table by position through `ttnn.embedding` works; trace capture and replay with `copy_host_to_device_tensor` works.
+
+## Update 3 (about 21:00 Pacific): 22.5 tok/s traced; where the time went
+
+Timing method. A traced step is replayed with the input tensors updated by `copy_host_to_device_tensor`; the script (`time_trace.py`) times the input copy, the trace
+execution and the logits read back separately, and a `skip` set leaves out parts of the step so each part's cost can be read from the difference. Sub-sections of
+the attention were measured the same way. The device is shared, so single numbers move by a few percent.
+
+| part (62 layers, bfloat16, one chip) | ms per token |
+|---|---|
+| whole step as first written (opt 1, default matmul config) | 51 to 56 execute, plus 8 to 9 for the logits read back |
+| MLP (gate, up, down, norm, add) | 21.6 |
+| LM head | 1.6 |
+| attention and the rest | 32 |
+| of that: the two per-head matmuls (`q_nope @ W_UK` with the rope part, and `o @ W_UV`) | 12.6 |
+| of that: key path (projection, norm, rope, concat) | 4.6 |
+| of that: flash MLA op | 1.1 |
+| of that: cache write | 0.3 |
+
+Three changes took the step from about 54 ms execute plus 9 read to about 43 plus 1:
+1. The per-head matmuls (40 batches of a single row against a different weight each) ran 85 and 127 microseconds each under the default program config. An explicit
+   `MatmulMultiCoreReuseProgramConfig` with one batch per core on an 8 by 5 grid runs them in 16.5 and 9.6 microseconds, with the same error (HiFi2; the same config
+   with LoFi is 4 times less accurate: relative L2 0.026 against 0.006). `exp_bmm.py` has the sweep. This saved about 11 ms.
+2. The logits come back in row-major layout (147 KB) and not tile layout (32 rows, 4.7 MB): the read back fell from 8 to 9 ms to under 1 ms.
+3. Opt 2 of the attention (rotary on the whole 96-wide query with cos 1 and sin 0 on the no-position part, the key up-projection and the rope pass-through in one
+   batched matmul with a 288-wide result, the key's rotate-half folded into its projection, and a cache write through `paged_update_cache` with the position
+   in a device tensor) cuts about 10 ops per layer. Alone it did not change the time (the cost was in the two batched matmuls); it is what the trace needs.
+
+Result (bfloat16 weights, default matmul config, traced step, host argmax, one token per replay): 22.4, 22.7, 22.6 tok/s over 48 steps after a warm-up run, which is 36 percent of the 62.8 tok/s floor.
+Agreement is the same as before the speed changes (first-divergence against float32: layer 0 0.8 percent, layer 61 5.9 percent, last-position prefill logits PCC 0.999,
+decode logits PCC 0.998, 16 of 16 teacher-forced tokens). The generated text is the same sentence as the float32 reference.
+
+DRAM bandwidth probe (`exp_matmul.py`, one weight per call, 20 calls per trace): the interleaved bfloat16 matmuls reach 400 GB/s for gate and up (2560 by 6400) and
+for the LM head, but only 253 GB/s for down (6400 by 2560) and 198 GB/s for `o_proj`. DRAM-sharded weights with a sharded input reach 479 and 374 GB/s on those two
+(down 130 to 68 microseconds, `o_proj` 66 to 35). bfloat8_b weights are not faster at HiFi2 (the matmul is not bandwidth bound there). The DRAM-sharded LM head failed
+with a dataflow-buffer error at 8 cores. Not applied yet.
