@@ -50,6 +50,7 @@ def parse(argv=None):
     p.add_argument("--sample-size", type=int, default=5292032)
     p.add_argument("--device-id", type=int, default=0, help="the chip as the process sees it (a lease sets TT_VISIBLE_DEVICES, so 0)")
     p.add_argument("--weights-dtype", choices=("bfloat16", "float32"), default="bfloat16", help="the dtype of the weights and the attention tensors")
+    p.add_argument("--chip-decoder", action="store_true", help="also run the autoencoder decoder's transformer on the chip (chip_decoder.py)")
     p.add_argument("--no-layers", action="store_true", help="do not record per-layer outputs of the first pass (each costs a read back)")
     return p.parse_args(argv)
 
@@ -91,10 +92,23 @@ def main(argv=None) -> int:
                                         dtype=getattr(ttnn, args.weights_dtype))
         original = chip_dit.install(dit, chip)
         del original
+        chip_dec = None
+        if args.chip_decoder:
+            chip_decoder = load_sibling(HERE / "chip_decoder.py", "chip_decoder_runtime")
+            dec_problems = chip_decoder.config_problems(json.loads(Path(config_path).read_text(encoding="utf-8")))
+            if dec_problems:
+                raise SystemExit("the chip decoder does not implement this model's configuration:\n  " + "\n  ".join(dec_problems))
+            autoencoder = model.model.pretransform.model
+            chip_dec = chip_decoder.ChipDecoder(ttnn, torch, device, autoencoder.decoder, dtype=getattr(ttnn, args.weights_dtype))
+            chip_decoder.install(autoencoder, chip_dec)
+            settings["decoder"] = "tt"
         mk.run_reference(model, settings, recorder, torch, layers=[])
         # the stack's forward time is the part that ran on the chip; the rest of `generate_and_decode_s` ran on the host
         recorder.timings.update({"model_load_s": round(t_loaded - t_start, 3), "chip_weights_upload_s": chip.timings["upload_weights_s"],
                                  "chip_transformer_call_s": round(chip.timings["forward_s"], 3), "chip_passes": chip.timings["passes"]})
+        if chip_dec is not None:
+            recorder.timings.update({"chip_decoder_upload_s": chip_dec.timings["upload_weights_s"], "chip_decoder_call_s": round(chip_dec.timings["forward_s"], 3),
+                                     "chip_decoder_layers_s": round(chip_dec.timings["layers_s"], 3)})
         path = recorder.finish()
     finally:
         ttnn.close_device(device)
