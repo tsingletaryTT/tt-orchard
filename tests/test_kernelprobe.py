@@ -3995,3 +3995,67 @@ def test_a_consistency_row_that_blocks_and_is_allowed_is_recorded_as_allowed(tmp
     assert data["header"]["skills"]["stale_allowed"] is True
     assert any("hardware tree" in x for x in data["header"]["skills"]["stale"])
     assert data["header"]["ttlang_consistency"]["overridden"] is True
+
+
+# ---- --reference-source and --attempt-wall-s (the pinned-reference A/B) ------------------------------------------------
+
+def test_probe_reference_source_skill_runs_on_the_skills_guide_and_records_the_choice(tmp_path, fake_kenv, env_ready,
+                                                                                    ttlang_skill, monkeypatch):
+    monkeypatch.setattr(kp.ttlang_consistency, "check", _REAL_CONSISTENCY_CHECK)
+    (fake_kenv.src_dir / "docs" / "sphinx" / "specs" / "TTLangSpecification.md").write_text(_spec("0.20"))
+    (ttlang_skill / "TTLangSpecification.md").write_text(_spec("0.12"))
+    with FakeModel(lambda r: final("nothing")) as server:
+        code = kp.main(probe_args(tmp_path, endpoint=server.endpoint, reference_source="skill"),
+                       env=_pinned_env(fake_kenv), out=io.StringIO(), probe=lambda e, m: True, run_watched_fn=no_run)
+    assert code == 0
+    data = json.loads((tmp_path / "out" / "kernel-probe-report.json").read_text())
+    refs = {r["name"]: r for r in data["header"]["references"]}
+    assert refs["reference/guide.md"]["source"] == "tt-lang skill" and refs["reference/guide.md"]["generated"] is False
+    assert data["header"]["reference_source"] == "skill"
+    md = (tmp_path / "out" / "kernel-probe-report.md").read_text()
+    assert "The guide documents specification 0.12 and the specification documents 0.20" in md
+
+
+def test_probe_default_reference_source_is_the_checkout_and_is_recorded(tmp_path, fake_kenv, env_ready):
+    with FakeModel(lambda r: final("nothing")) as server:
+        kp.main(probe_args(tmp_path, endpoint=server.endpoint), env=fake_kenv, out=io.StringIO(),
+                probe=lambda e, m: True, run_watched_fn=no_run)
+    data = json.loads((tmp_path / "out" / "kernel-probe-report.json").read_text())
+    assert data["header"]["reference_source"] == "checkout"
+
+
+def test_probe_refuses_an_unknown_reference_source(tmp_path, fake_kenv, env_ready, capsys):
+    code = kp.main(probe_args(tmp_path, reference_source="elsewhere"), env=fake_kenv, out=io.StringIO(),
+                   probe=lambda e, m: True, run_watched_fn=no_run)
+    assert code == 2 and "--reference-source" in capsys.readouterr().err
+
+
+def test_attempt_wall_s_sets_each_attempts_wall_budget(tmp_path, fake_kenv, env_ready, monkeypatch):
+    seen = []
+    real = kp.run_attempt
+    monkeypatch.setattr(kp, "run_attempt", lambda **kw: seen.append(kw.get("wall_s")) or real(**kw))
+    with FakeModel(lambda r: final("nothing")) as server:
+        kp.main(probe_args(tmp_path, endpoint=server.endpoint, attempts=2, attempt_wall_s=900.0), env=fake_kenv,
+                out=io.StringIO(), probe=lambda e, m: True, run_watched_fn=no_run)
+    assert seen == [900.0, 900.0]
+    seen.clear()
+    with FakeModel(lambda r: final("nothing")) as server:
+        kp.main(probe_args(tmp_path / "b", endpoint=server.endpoint), env=fake_kenv, out=io.StringIO(),
+                probe=lambda e, m: True, run_watched_fn=no_run)
+    assert seen == [None]                                    # unset: run_attempt keeps its own default budget
+
+
+@pytest.mark.parametrize("bad", [0, -5, float("inf"), float("nan")])
+def test_attempt_wall_s_must_be_a_finite_number_above_zero(tmp_path, fake_kenv, env_ready, capsys, bad):
+    code = kp.main(probe_args(tmp_path, attempt_wall_s=bad), env=fake_kenv, out=io.StringIO(),
+                   probe=lambda e, m: True, run_watched_fn=no_run)
+    assert code == 2 and "--attempt-wall-s" in capsys.readouterr().err
+
+
+def test_the_command_line_has_both_flags_with_the_documented_defaults():
+    from orchard import cli
+    a = cli._parser().parse_args(["kernel-probe", "--op", "add"])
+    assert a.reference_source == "checkout" and a.attempt_wall_s is None
+    b = cli._parser().parse_args(["kernel-probe", "--op", "add", "--reference-source", "skill",
+                                       "--attempt-wall-s", "900"])
+    assert b.reference_source == "skill" and b.attempt_wall_s == 900.0

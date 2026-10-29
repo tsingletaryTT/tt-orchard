@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import pytest
 from pathlib import Path
 
 from orchard import defaults, ttlang_consistency as tc, ttlang_env, ttlang_pin, ttlang_reference as tr
@@ -935,3 +936,37 @@ def test_the_head_and_tree_reads_get_the_safe_environment_and_not_the_operators_
         assert env["GIT_NO_REPLACE_OBJECTS"] == "1" and env["GIT_CONFIG_NOSYSTEM"] == "1"
         cfg = {env[f"GIT_CONFIG_KEY_{i}"]: env[f"GIT_CONFIG_VALUE_{i}"] for i in range(int(env["GIT_CONFIG_COUNT"]))}
         assert cfg["core.useReplaceRefs"] == "false" and cfg["core.fsmonitor"] == "false"
+
+
+# ---- --reference-source: the pre-PR-198 reference set, for an A/B -------------------------------------------------------
+
+def test_reference_source_skill_gives_the_old_set_skill_guide_and_examples_and_no_extra_kernels(tmp_path):
+    f = Fake(tmp_path)
+    (f.src / "examples" / "broadcast.py").write_text("# an extra kernel\n")
+    skill = make_skill(tmp_path, "0.12")
+    files, problems = tr.assemble(f.env, skill, reference_source="skill")
+    assert problems == []
+    b = by_name(files)
+    assert [r["name"] for r in files] == ["guide.md", "examples.md", "TTLangSpecification.md", "eltwise_add.py",
+                                          "eltwise_broadcast_reduce.py"]
+    assert b["guide.md"]["data"] == b"# skill guide\n" and b["guide.md"]["source"] == ttlang_env.SKILL_SOURCE
+    assert b["guide.md"]["generated"] is False and b["guide.md"]["spec_version"] == "0.12"
+    assert b["TTLangSpecification.md"]["spec_version"] == "0.20"
+    new, _ = tr.assemble(f.env, skill)                                  # the default is unchanged
+    assert by_name(new)["guide.md"]["generated"] is True and "broadcast.py" in by_name(new)
+
+
+def test_an_unknown_reference_source_is_refused(tmp_path):
+    f = Fake(tmp_path)
+    with pytest.raises(ValueError):
+        tr.assemble(f.env, make_skill(tmp_path), reference_source="elsewhere")
+
+
+def test_a_skill_source_that_documents_another_version_does_not_block_when_the_operator_chose_it(tmp_path):
+    f = Fake(tmp_path)
+    skill = make_skill(tmp_path, "0.12")
+    refs, _ = tr.assemble(f.env, skill, reference_source="skill")
+    blocked = rows_by_name(tc.check(f.env, skill, references=refs))["references"]
+    assert blocked.status == tc.MISMATCH and blocked.blocks
+    chosen = rows_by_name(tc.check(f.env, skill, references=refs, reference_source="skill"))["references"]
+    assert chosen.status == tc.MISMATCH and not chosen.blocks and "--reference-source skill" in chosen.detail
