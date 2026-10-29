@@ -7,6 +7,7 @@
 """
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -26,8 +27,8 @@ from transformers import AutoTokenizer  # noqa: E402
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("mode", choices=["agree", "bench"])
-    ap.add_argument("--model-dir", default="/home/ttuser/.cache/orchard-overnight2/minicpm3")
-    ap.add_argument("--weights", default="/home/ttuser/.cache/orchard-overnight2/minicpm3.safetensors")
+    ap.add_argument("--model-dir", default=os.environ.get("MINICPM3_DIR"), required="MINICPM3_DIR" not in os.environ, help="model directory with config.json and the tokenizer (or set MINICPM3_DIR)")
+    ap.add_argument("--weights", default=os.environ.get("MINICPM3_WEIGHTS"), required="MINICPM3_WEIGHTS" not in os.environ, help="the weights as one safetensors file (or set MINICPM3_WEIGHTS)")
     ap.add_argument("--attn", default="mla", choices=["mla", "host"])
     ap.add_argument("--ref", help="a recorded reference run directory (float32) for the token path")
     ap.add_argument("--out", help="new directory for the recorded chip run")
@@ -41,6 +42,8 @@ def main():
     ap.add_argument("--prompt-file", help="the prompt text the reference run used")
     ap.add_argument("--max-len", type=int, default=256)
     ap.add_argument("--shard", action="store_true", help="DRAM-sharded weights for the MLP and o_proj")
+    ap.add_argument("--mlp-dtype", default="bf16", choices=["bf16", "bfp8", "bfp4"])
+    ap.add_argument("--mlp-fidelity", default="hifi2", choices=["hifi2", "lofi", "hifi4"])
     ap.add_argument("--layers", type=int, default=0, help="debug: truncate the stack (0 = all)")
     a = ap.parse_args()
     if a.prompt_file:
@@ -52,7 +55,7 @@ def main():
     dev = ttnn.open_device(device_id=0, trace_region_size=256 * 1024 * 1024)
     try:
         t0 = time.time()
-        m = ChipMiniCPM3(dev, a.model_dir, a.weights, attn=a.attn, max_len=a.max_len, fidelity=a.fidelity, upd=a.upd, opt=a.opt, shard=a.shard)
+        m = ChipMiniCPM3(dev, a.model_dir, a.weights, attn=a.attn, max_len=a.max_len, fidelity=a.fidelity, upd=a.upd, opt=a.opt, shard=a.shard, mlp_dtype=a.mlp_dtype, mlp_fidelity=a.mlp_fidelity)
         m.skip = set(x for x in a.skip.split(",") if x)
         print(f"model loaded on chip in {time.time() - t0:.1f}s", flush=True)
         if a.mode == "agree":
@@ -104,19 +107,26 @@ def agree(a, m, ids, n):
 
 
 def bench(a, m, ids, n, tok):
-    results = []
+    """Free-running greedy decode: 1 warm-up run, then `repeats` measured runs of `steps` tokens each on the loaded model (the contract in
+    docs/benchmark-rules.md). Writes a record with spread, label, host load and the share of the DRAM-bandwidth floor."""
+    import os
+    from orchard import decode_floor as df, resident
+    from orchard import model_config as mc
+    results, timings = [], []
     step = m.run
     if a.trace:
         t0 = time.time()
         m.enable_trace()
         print(f"trace captured in {time.time() - t0:.1f}s", flush=True)
         step = lambda t, p, tap=None: m.traced_step(t, p)  # noqa: E731
-    for r in range(a.repeats + 1):            # repeat 0 is a warm-up and is reported apart
+    for r in range(a.repeats + resident.WARMUP_RUNS):
         if not a.trace:
             m.reset()          # a trace is bound to its cache buffers; stale rows past the position are masked by the op
         logits = None
+        t_pre = time.time()
         for p, t in enumerate(ids):
             logits = step(t, p)
+        prefill_s = time.time() - t_pre
         nxt = int(logits.argmax().item())
         out = []
         t0 = time.time()
@@ -125,8 +135,23 @@ def bench(a, m, ids, n, tok):
             lg = step(nxt, n + k)
             nxt = int(lg.argmax().item())
         dt = time.time() - t0
-        results.append({"repeat": r, "warmup": r == 0, "steps": a.steps, "seconds": dt, "tok_s": a.steps / dt})
-        print(json.dumps(results[-1]), flush=True)
+        rec = {"repeat": r, "warmup": r < resident.WARMUP_RUNS, "steps": a.steps, "decode_s": dt, "decode_tok_s": a.steps / dt,
+               "prefill_tokens": n, "prefill_s": prefill_s, "host_loadavg_1m": os.getloadavg()[0]}
+        results.append(rec)
+        print(json.dumps(rec), flush=True)
+        if not rec["warmup"]:
+            timings.append({k: v for k, v in rec.items() if isinstance(v, (int, float)) and not isinstance(v, bool) and k not in ("repeat",)})
+    summary = resident.summarise_runs(timings, warmup=resident.WARMUP_RUNS)
+    cfg = mc.read_model_config(a.model_dir + "/config.json")
+    floor = df.floor_for_board(cfg, {"default": "bf16"}, "p300", dies=1)
+    med = summary["parts"]["decode_tok_s"]["median"]
+    record = {"label": summary["label"], "model": "openbmb/MiniCPM3-4B", "config": {"attn": a.attn, "opt": a.opt, "shard": a.shard, "trace": a.trace, "upd": a.upd,
+              "fidelity": a.fidelity, "weights": "bfloat16 (MLP " + a.mlp_dtype + ", " + a.mlp_fidelity + ")", "chips": 1, "prompt_tokens": n, "steps": a.steps},
+              "runs": results, "summary": summary, "floor": floor.as_dict(), "share_of_floor_median": df.share_of_floor(med, floor),
+              "share_text": df.share_text(med, floor), "text": tok.decode(out)}
+    print(record["share_text"], flush=True)
+    if a.out:
+        Path(a.out).write_text(json.dumps(record, indent=1) + "\n")
     print(tok.decode(out))
 
 

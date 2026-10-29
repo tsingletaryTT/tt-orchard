@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Split a traced decode step into input copy, trace execution and logits read back."""
+import os
 import sys
 import time
 from pathlib import Path
@@ -13,7 +14,7 @@ from chip_model import ChipMiniCPM3  # noqa: E402
 opt, upd = int(sys.argv[1]), sys.argv[2]
 dev = ttnn.open_device(device_id=0, trace_region_size=256 * 1024 * 1024)
 try:
-    m = ChipMiniCPM3(dev, "/home/ttuser/.cache/orchard-overnight2/minicpm3", "/home/ttuser/.cache/orchard-overnight2/minicpm3.safetensors",
+    m = ChipMiniCPM3(dev, os.environ["MINICPM3_DIR"], os.environ["MINICPM3_WEIGHTS"],
                      attn="mla", max_len=256, upd=upd, opt=opt, shard=len(sys.argv) > 4 and sys.argv[4] == 'shard')
     variants = (sys.argv[3] if len(sys.argv) > 3 else "").split(";")      # skip sets separated by ;  (an empty one is the full step)
     for var in variants:

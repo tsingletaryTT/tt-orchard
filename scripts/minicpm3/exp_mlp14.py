@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """Where does the 8 percent error on the first token at layer 14 come from? Runs the MLP of one layer on the chip for the reference input row, in variants,
 and compares each stage with torch float32 on the same input."""
+import os
 import sys
 
 import numpy as np
@@ -15,8 +16,8 @@ from orchard import audio_reference as ar  # noqa: E402
 
 LAYER = int(sys.argv[1]) if len(sys.argv) > 1 else 14
 ROW = int(sys.argv[2]) if len(sys.argv) > 2 else 0
-REF = "/home/ttuser/.cache/orchard-overnight2/ref2/float32"
-W = "/home/ttuser/.cache/orchard-overnight2/minicpm3.safetensors"
+REF = os.environ["MINICPM3_REF"]          # a recorded float32 reference run directory
+W = os.environ["MINICPM3_WEIGHTS"]
 run = ar.load_run(REF)
 x_attn = torch.tensor(run.array("layer", f"layer_{LAYER:02d}.attn"))[ROW]       # stream after attention (float32)
 x_out = torch.tensor(run.array("layer", f"layer_{LAYER:02d}"))[ROW]

@@ -36,7 +36,7 @@ def _rot_matrix():
 
 
 class ChipMiniCPM3:
-    def __init__(self, dev, model_dir, weights_file, *, attn="mla", max_len=256, wdtype=None, fidelity="default", upd="int", n_layers=0, opt=1, shard=False, log=print):
+    def __init__(self, dev, model_dir, weights_file, *, attn="mla", max_len=256, wdtype=None, fidelity="default", upd="int", n_layers=0, opt=1, shard=False, mlp_dtype="bf16", mlp_fidelity="hifi2", log=print):
         import json
         self.dev = dev
         self.attn = attn
@@ -46,6 +46,8 @@ class ChipMiniCPM3:
             opt, shard = 2, True
         self.opt = opt           # 1: first composition; 2: fewer ops (rope folded into the absorbed matmul, split key projection)
         self.shard = shard or self.fuse
+        self.mlp_dtype = {"bf16": ttnn.bfloat16, "bfp8": ttnn.bfloat8_b, "bfp4": ttnn.bfloat4_b}[mlp_dtype]
+        self.mlp_fidelity = mlp_fidelity
         self.skip = set()        # timing experiments only: parts of the step to leave out ("mlp", "lm")
         self.upd = upd           # cache write: "int" (update_cache at a Python position), "paged" or "onehot" (position from a device tensor)
         self.cfg = c = json.load(open(f"{model_dir}/config.json"))
@@ -91,6 +93,9 @@ class ChipMiniCPM3:
             self.pc_o = mk(hk, hk)
             self.sh_ckc = ttnn.init_device_compute_kernel_config(dev.arch(), math_fidelity=ttnn.MathFidelity.HiFi2, math_approx_mode=True,
                                                                  fp32_dest_acc_en=False, packer_l1_acc=True)
+            fid = {"hifi2": ttnn.MathFidelity.HiFi2, "lofi": ttnn.MathFidelity.LoFi, "hifi4": ttnn.MathFidelity.HiFi4}[self.mlp_fidelity]
+            self.mlp_ckc = ttnn.init_device_compute_kernel_config(dev.arch(), math_fidelity=fid, math_approx_mode=True, fp32_dest_acc_en=False,
+                                                                  packer_l1_acc=True)
         if self.fuse:
             nc = 40
             bw = self.hid // nc // 32
@@ -111,7 +116,7 @@ class ChipMiniCPM3:
         return ttnn.from_torch(t.contiguous().bfloat16(), device=self.dev, dtype=dtype or self.wdtype, layout=ttnn.TILE_LAYOUT,
                                memory_config=ttnn.DRAM_MEMORY_CONFIG)
 
-    def _sw(self, name, scale=1.0):
+    def _sw(self, name, scale=1.0, dtype=None):
         """A weight [out, in] as [in, out] bfloat16 sharded across the DRAM banks (width sharded), as the DRAM-sharded matmul wants."""
         t = self.f.get_tensor(name).float() * scale
         t = t.t().contiguous()
@@ -121,7 +126,7 @@ class ChipMiniCPM3:
         grid = ttnn.CoreRangeSet({ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(banks - 1, 0))})
         mc = ttnn.MemoryConfig(ttnn.TensorMemoryLayout.WIDTH_SHARDED, ttnn.BufferType.DRAM,
                                ttnn.ShardSpec(grid, (k, padded // banks), ttnn.ShardOrientation.ROW_MAJOR))
-        return ttnn.from_torch(torch.nn.functional.pad(t, (0, padded - n)).bfloat16(), device=self.dev, dtype=self.wdtype,
+        return ttnn.from_torch(torch.nn.functional.pad(t, (0, padded - n)).bfloat16(), device=self.dev, dtype=dtype or self.wdtype,
                                layout=ttnn.TILE_LAYOUT, memory_config=mc)
 
     def _norm_w(self, name, scale=1.0):
@@ -153,9 +158,9 @@ class ChipMiniCPM3:
             }
             if self.shard:
                 d["o"] = self._sw(a + "o_proj.weight", scale=self.rs)
-                d["gate"] = self._sw(p + "mlp.gate_proj.weight")
-                d["up"] = self._sw(p + "mlp.up_proj.weight")
-                d["down"] = self._sw(p + "mlp.down_proj.weight", scale=self.rs)
+                d["gate"] = self._sw(p + "mlp.gate_proj.weight", dtype=self.mlp_dtype)
+                d["up"] = self._sw(p + "mlp.up_proj.weight", dtype=self.mlp_dtype)
+                d["down"] = self._sw(p + "mlp.down_proj.weight", scale=self.rs, dtype=self.mlp_dtype)
             else:
                 d["o"] = self._w(a + "o_proj.weight", scale=self.rs)
                 d["gate"] = self._w(p + "mlp.gate_proj.weight")
@@ -320,10 +325,10 @@ class ChipMiniCPM3:
             h = self._rms(x, d["post_norm"])
             if self.shard:
                 hs = ttnn.to_memory_config(h, self.mc_d)
-                gg = ttnn.linear(hs, d["gate"], program_config=self.pc_gate, memory_config=self.mc_f, compute_kernel_config=self.sh_ckc)
-                uu = ttnn.linear(hs, d["up"], program_config=self.pc_up, memory_config=self.mc_f, compute_kernel_config=self.sh_ckc)
+                gg = ttnn.linear(hs, d["gate"], program_config=self.pc_gate, memory_config=self.mc_f, compute_kernel_config=self.mlp_ckc)
+                uu = ttnn.linear(hs, d["up"], program_config=self.pc_up, memory_config=self.mc_f, compute_kernel_config=self.mlp_ckc)
                 dn = ttnn.linear(ttnn.multiply(gg, uu), d["down"], program_config=self.pc_down, memory_config=self.mc_d,
-                                 compute_kernel_config=self.sh_ckc)
+                                 compute_kernel_config=self.mlp_ckc)
                 x = ttnn.add(x, ttnn.to_memory_config(dn, ttnn.DRAM_MEMORY_CONFIG))
             else:
                 m = ttnn.multiply(self._lin(h, d["gate"], activation="silu"), self._lin(h, d["up"]))
@@ -366,10 +371,10 @@ class ChipMiniCPM3:
             if "mlp" in self.skip:
                 continue
             hs = self._srms(x, d["post_norm"])
-            gg = ttnn.linear(hs, d["gate"], program_config=self.pc_gate, memory_config=self.mc_f, compute_kernel_config=self.sh_ckc)
-            uu = ttnn.linear(hs, d["up"], program_config=self.pc_up, memory_config=self.mc_f, compute_kernel_config=self.sh_ckc)
+            gg = ttnn.linear(hs, d["gate"], program_config=self.pc_gate, memory_config=self.mc_f, compute_kernel_config=self.mlp_ckc)
+            uu = ttnn.linear(hs, d["up"], program_config=self.pc_up, memory_config=self.mc_f, compute_kernel_config=self.mlp_ckc)
             x = ttnn.add(x, ttnn.linear(ttnn.multiply(gg, uu), d["down"], program_config=self.pc_down, memory_config=self.mc_d,
-                                        compute_kernel_config=self.sh_ckc))
+                                        compute_kernel_config=self.mlp_ckc))
             if tap:
                 tap(f"layer_{i:02d}", self._host(x)[0, 0, 0])
         x = self._srms(x, self.final_norm)

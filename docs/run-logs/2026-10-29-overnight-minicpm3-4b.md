@@ -152,3 +152,36 @@ The long prompt is 3.2 KB of one of this repository's own documents plus an inst
 
 Decode speed from the same traced step: 22.4 to 23.1 tok/s over 48 steps after a 40-token prompt, and 24.2 to 24.6 tok/s after the 922-token prompt (3 measured repeats each, one warm-up each;
 the host was loaded by other work, load average about 15, which shows in the spread). The device time of the step is 38.5 ms (26 tok/s), so about 5 ms per token is host work around the trace.
+
+## Update 5 (about 21:35 Pacific): 33.7 tok/s in bfloat16, 40.1 with 8-bit MLP weights; a record per the benchmark rules
+
+Opt 3 of the port (`--opt 3`) keeps the residual stream width-sharded in L1 across 40 cores for the whole step. Two measured per-op facts drive it
+(`exp_srms.py`, `exp_layer_ops.py`): `rms_norm` on the interleaved 2560-wide row takes 42 microseconds, and on the sharded row 6.5 microseconds with the same
+accuracy (relative L2 0.0036 on a row with channels at 1,000, with 32-bit accumulation); and the three thin projections that start the attention (2560 to 768, 256
+and 64) take 37, 33 and 32 microseconds each under the default program config but one fused 2560-to-1088 projection takes 23 under a 1D multicast config.
+Opt 3 uses the sharded norm everywhere (the MLP chain then needs no conversion at all), one fused projection (query input, key latent, key rope part and its rotate-half
+form), and 32-bit (float32) logits. The last change matters for agreement: with bfloat16 logits (steps of 0.125 between 16 and 32) two of 16 teacher-forced steps flipped at
+margins of 0.395 and 0.225; with float32 logits there are no flips.
+
+Result, benchmark record `docs/run-logs/evidence/2026-10-29-minicpm3/bench_opt3_bf16.json` (written by `run_chip.py bench` with `orchard.resident.summarise_runs` and
+`orchard.decode_floor`; one chip of a p300 board, traced step, 1 warm-up run and 3 measured runs of 64 tokens after a 40-token prompt, host load average 8.7):
+decode 33.65, 33.65, 33.57 tok/s (min 33.57, median 33.65, max 33.65); label "benchmark"; 54 percent of the 62.8 tok/s floor (15.9 ms per token at 512 GB/s for 8.1 GB);
+prefill by decode steps 1.19 s for 40 tokens. Device time of the step is 29.3 ms; the host adds under 1 ms.
+
+Variants of the MLP weights and math fidelity (everything else equal; first-divergence against the float32 reference on the same 40-token prompt and 16 teacher-forced steps):
+
+| MLP weights, matmul fidelity | decode tok/s (3 repeats, median) | layer 30 error | layer 61 error (CPU floor 0.0196) | prefill logits PCC | decode step 0 logits PCC, relative L2 | token flips |
+|---|---|---|---|---|---|---|
+| bfloat16, HiFi2 (default) | 33.7 | 0.0052 | 0.0556 | 0.9992 | 0.9978, 0.050 | 0 of 16 |
+| bfloat8_b, HiFi2 | 34.1 | 0.0084 | 0.0694 | 0.9987 | 0.9985, 0.045 | 0 of 16 |
+| bfloat8_b, LoFi | 40.1 | 0.0424 | 0.0853 | 0.9981 | 0.9966, 0.062 | 0 of 16 |
+| bfloat16, LoFi | 33.7 | 0.0458 | 0.1011 | 0.9973 | 0.9948, 0.077 | 0 of 16 |
+
+bfloat8_b weights alone add nothing at HiFi2; LoFi on top of them reaches 40.1 tok/s (64 percent of the bfloat16 floor, and a higher share of the floor for 8-bit weights,
+which is 9.4 ms per token for these weights) at a visibly larger error (layer 30 at 4 percent against 0.5 percent). LoFi with bfloat16 weights costs the error and gives no speed.
+The default stays bfloat16 with HiFi2. The 8-bit LoFi variant is a choice for the operator and has not been checked on text quality beyond the 16 tokens.
+
+Noise-floor tool (`python -m orchard.noise_floor`): it refuses the CPU-only floor as unusable for the chip ("the good run fails the bars it was meant to pass";
+the damage control on the last layer is not detected). Its floor holds two CPU runs and no chip arithmetic, which the tool states. The reading used instead is
+first-divergence against the float32 reference with the CPU floor printed beside every number, plus the known-bad control (the run with the default `rms_norm`, which the
+probe located at layer 14 with a 5 percent stated tolerance), plus teacher-forced token and logits agreement.
