@@ -3,56 +3,57 @@
  "model": "openbmb/MiniCPM3-4B",
  "config": {
   "attn": "mla",
-  "opt": 3,
+  "opt": 1,
   "shard": false,
   "trace": true,
-  "upd": "paged",
+  "upd": "int",
   "fidelity": "default",
   "weights": "bfloat16 (MLP bfp8, lofi)",
-  "chips": 1,
+  "chips": 2,
   "prompt_tokens": 40,
-  "steps": 64
+  "steps": 64,
+  "batched_prefill": false
  },
  "runs": [
   {
    "repeat": 0,
    "warmup": true,
    "steps": 64,
-   "decode_s": 1.5949957370758057,
-   "decode_tok_s": 40.12549909213849,
+   "decode_s": 1.4279117584228516,
+   "decode_tok_s": 44.820696813008176,
    "prefill_tokens": 40,
-   "prefill_s": 0.9996705055236816,
-   "host_loadavg_1m": 12.3916015625
+   "prefill_s": 0.9060282707214355,
+   "host_loadavg_1m": 6.279296875
   },
   {
    "repeat": 1,
    "warmup": false,
    "steps": 64,
-   "decode_s": 1.5944015979766846,
-   "decode_tok_s": 40.14045149052585,
+   "decode_s": 1.4569497108459473,
+   "decode_tok_s": 43.927391263793,
    "prefill_tokens": 40,
-   "prefill_s": 0.9947049617767334,
-   "host_loadavg_1m": 12.6005859375
+   "prefill_s": 0.8989033699035645,
+   "host_loadavg_1m": 6.41748046875
   },
   {
    "repeat": 2,
    "warmup": false,
    "steps": 64,
-   "decode_s": 1.5980238914489746,
-   "decode_tok_s": 40.04946380493057,
+   "decode_s": 1.4520704746246338,
+   "decode_tok_s": 44.074995751528014,
    "prefill_tokens": 40,
-   "prefill_s": 0.9964349269866943,
-   "host_loadavg_1m": 12.6005859375
+   "prefill_s": 0.9028985500335693,
+   "host_loadavg_1m": 6.41748046875
   },
   {
    "repeat": 3,
    "warmup": false,
    "steps": 64,
-   "decode_s": 1.597334623336792,
-   "decode_tok_s": 40.06674560544215,
+   "decode_s": 1.437978744506836,
+   "decode_tok_s": 44.50691656221192,
    "prefill_tokens": 40,
-   "prefill_s": 0.9958939552307129,
-   "host_loadavg_1m": 12.712890625
+   "prefill_s": 0.8967931270599365,
+   "host_loadavg_1m": 6.54443359375
   }
  ],
  "summary": {
@@ -61,21 +62,21 @@
   "parts": {
    "decode_s": {
     "n": 3,
-    "min": 1.5944015979766846,
-    "median": 1.597334623336792,
-    "max": 1.5980238914489746
+    "min": 1.437978744506836,
+    "median": 1.4520704746246338,
+    "max": 1.4569497108459473
    },
    "decode_tok_s": {
     "n": 3,
-    "min": 40.04946380493057,
-    "median": 40.06674560544215,
-    "max": 40.14045149052585
+    "min": 43.927391263793,
+    "median": 44.074995751528014,
+    "max": 44.50691656221192
    },
    "prefill_s": {
     "n": 3,
-    "min": 0.9947049617767334,
-    "median": 0.9958939552307129,
-    "max": 0.9964349269866943
+    "min": 0.8967931270599365,
+    "median": 0.8989033699035645,
+    "max": 0.9028985500335693
    },
    "prefill_tokens": {
     "n": 3,
@@ -93,28 +94,29 @@
   "incomplete_parts": [],
   "load": {},
   "host_loadavg_1m": [
-   12.6005859375,
-   12.6005859375,
-   12.712890625
+   6.41748046875,
+   6.41748046875,
+   6.54443359375
   ]
  },
  "floor": {
   "label": "estimate",
-  "bytes_per_token": 8146984960.0,
-  "floor_ms": 15.912079999999998,
-  "floor_tok_s": 62.84533511646498,
+  "bytes_per_token": 5290024960.0,
+  "floor_ms": 5.166040000000001,
+  "floor_tok_s": 193.57186549078207,
   "bytes_by_group": {
    "attention": 1676083200.0,
-   "dense_mlp": 6094848000.0,
+   "dense_mlp": 3237888000.0,
    "lm_head": 376053760.0
   },
   "active_params": 4073492480,
   "stored_params": 4261519360,
   "inputs": {
-   "dies": 1,
+   "dies": 2,
    "per_die_bandwidth_gb_s": 512.0,
    "dtype_policy": {
-    "default": "bf16"
+    "default": "bf16",
+    "dense_mlp": "bfp8"
    },
    "board": "p300",
    "model": {
@@ -211,7 +213,7 @@
   },
   "assumptions": "batch of one, one token per pass (no speculative decoding); weights spread evenly over the dies so their bandwidth adds; datasheet peak bandwidth; the KV cache, recurrent state, norms, biases, rotary tables and the embedding lookup are not counted; the dtype policy is whatever the caller gives and is not read from the bundle."
  },
- "share_of_floor_median": 0.6375452614134439,
- "share_text": "40.1 tok/s is 64% of an estimated floor of 62.8 tok/s (15.9 ms per token, 8.1 GB read per token over 1 die at 512 GB/s each).",
- "text": "On a stormy night, a lighthouse keeper's life is one of vigilance and purpose. As the tempest rages outside, the keeper tends to the lamp, ensuring it is burning brightly to guide ships to safety. The logbook, a testament to countless nights like this, lies"
+ "share_of_floor_median": 0.22769319105222383,
+ "share_text": "44.1 tok/s is 23% of an estimated floor of 193.6 tok/s (5.2 ms per token, 5.3 GB read per token over 2 dies at 512 GB/s each).",
+ "text": "On a stormy night, a lighthouse keeper's life is one of vigilance and purpose. As the tempest rages outside, the keeper tends to the lamp, ensuring it is burning brightly to guide ships to safety. The logbook, a testament to countless such nights, lies open"
 }

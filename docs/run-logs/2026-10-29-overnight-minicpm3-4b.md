@@ -260,3 +260,29 @@ Checked against the recorded float32 reference (`prefill_check.py`): the last pr
 The first call compiles the kernels (13 to 18 s); the benchmark records treat it as the warm-up run. Benchmark records `bench_opt3_bf16_prefill.json` (40-token prompt) and
 `bench_opt3_bf16_prefill_long.json` (922-token prompt): decode 33.85, 33.76, 33.83 tok/s and 32.26, 32.31, 32.27 tok/s (one chip, opt 3, bfloat16, 1 warm-up and 3 measured runs of 64 tokens,
 host load about 7.7), which is 54 and 51 percent of the 62.8 tok/s floor. The chat server uses the batched prefill on one chip. The two-chip model still prefills one token per step.
+
+## Update 9 (about 23:20 Pacific): the stage-b host-attention run, a final benchmark set, and hazard row
+
+Stage b (the rest of the port on the chip with the attention core on the host): `run_chip.py agree --attn host --opt 1` runs the projections, norms, the output projection and the MLP on the chip and
+the multi-latent attention core in torch on the host (query, latent and rope part read back from the chip every layer, attention output sent back). Result: 16 of 16 teacher-forced tokens, layer 61 error 0.0548,
+last-position prefill logits PCC 0.9993, decode step 0 logits PCC 0.9989 and relative L2 0.036. The chip attention (opt 3) has layer 61 error 0.0556 and decode step 0 relative L2 0.050. So the chip's
+attention composition adds a little error over the host attention (about 0.036 to 0.050 in the logits), and the rest of the port carries almost all of the 5.5 percent block error. The host mode was run
+after the chip attention worked (the method asks for it first; it was not needed to find the flash op's limit).
+
+Final benchmark records (`docs/run-logs/evidence/2026-10-29-minicpm3/bench_*.json`, written by `run_chip.py bench`; 1 warm-up run and 3 measured runs of 64 tokens after a 40-token prompt;
+label "benchmark"; the share uses the floor of the weights each run reads, 512 GB/s per chip; host load average 6 to 10 during the runs):
+
+| config | chips | decode tok/s min, median, max | share of floor | prefill, 40 tokens |
+|---|---|---|---|---|
+| bfloat16, HiFi2 (default) | 1 | 33.61, 33.66, 33.81 | 53.6 percent of 62.8 | 0.088 s batched |
+| bfloat16, same, 922-token prompt | 1 | 32.26, 32.27, 32.31 | 51.3 percent | 0.37 s batched |
+| MLP bfloat8_b, HiFi2 | 1 | 34.22, 34.23, 34.29 | 35.4 percent of 96.8 | 0.088 s |
+| MLP bfloat8_b, LoFi | 1 | 39.84, 39.85, 39.89 | 41.2 percent of 96.8 | 0.088 s |
+| bfloat16, HiFi2 | 2 | 39.12, 39.24, 39.31 | 31.2 percent of 125.7 | 1.02 s (one token per step) |
+| MLP bfloat8_b, LoFi | 2 | 43.93, 44.07, 44.51 | 22.8 percent of 193.6 | 0.90 s (one token per step) |
+
+The records written before the floor policy was fixed in `run_chip.py` (the first 8-bit runs) were replaced by these. Quality numbers for the 8-bit LoFi variant are in updates 5 and 6
+(perplexity 8.047 against 8.057, layer 30 error 4 percent, logits PCC 0.9966 to 0.9981); the two-chip 8-bit variant was not run through the agreement and perplexity checks.
+
+Harness change from this port: `orchard.hazards` has a row `mla_flash_decode_needs_core_grid` for multi-latent attention (the flash MLA decode op needs an explicit core grid at one latent head and
+batch 1; issue 213). It is detected from `kv_lora_rank`, needs no nearest bundle, and has a test plus a mutation check (removing the detection turns four tests red).
