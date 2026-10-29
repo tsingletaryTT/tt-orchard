@@ -21,6 +21,7 @@
     tt-orchard demo-env [--check] [--dry-run] [--venv-dir DIR] [--tt-metal-dir DIR]
     tt-orchard audio-reference-env [--check] [--dry-run] [--venv-dir DIR] [--src-dir DIR]
     tt-orchard audio-package RUN_DIR --namespace ORG --bench FILE --demo-repo DIR [--snapshot DIR] [--out DIR] [--result FILE] [--check]
+    tt-orchard verify-package REPO_ID [--scratch DIR] [--staged DIR] [--revision SHA] [--plan] [--check]
     tt-orchard inventory TARGET [--python P] [--ttnn-python P] [--against F] [--layers N] [--seq N] [--class C] [--out DIR]
     tt-orchard inventory verify-candidates --inventory FILE|DIR [--out DIR] [--image IMG] [--max-ops N] [--timeout S] [--record]
     tt-orchard coder-speed [--endpoint URL --model NAME | --tiers] [--samples N] [--watch SECONDS] [--json]
@@ -385,6 +386,15 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--probe", help="a decoder probe summary (JSON) to copy into evidence/decode-probe.json, with the home directory replaced by <home>")
     ap.add_argument("--agreement-report", help="the full agreement report (JSON) to copy into evidence/audio-agreement-report.json")
     ap.add_argument("--listening-note", help="the operator's dated listening note (one line with YYYY-MM-DD) printed on the card; it is not a measured quality metric")
+    vp = sub.add_parser("verify-package", parents=[common],
+                        help="pull a published package from the Hub into a scratch directory, run its checks and print the boot command as "
+                             "text. Opens no device and publishes nothing")
+    vp.add_argument("repo_id", help="the Hub repository (ORG/NAME). A private one is pulled with HF_TOKEN from the environment")
+    vp.add_argument("--scratch", help="pull into this new or empty directory (default: a new temporary directory, left in place)")
+    vp.add_argument("--staged", help="a local staged package directory: the pulled files and hashes must equal it")
+    vp.add_argument("--revision", help="pull this commit or branch instead of the default branch")
+    vp.add_argument("--plan", action="store_true", help="read the repository's file list and sizes and print them; pull nothing")
+    vp.add_argument("--check", action="store_true", help="exit 1 when a check fails (without it the exit status is 0 after the report prints)")
     inv = sub.add_parser("inventory", parents=[common],
                          help="list the ops a model's reference code uses and which ones ttnn has; "
                               "`inventory refresh-ttnn` records ttnn's op names (takes a one-chip lease); "
@@ -1054,6 +1064,9 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
     if args.cmd == "audio-package":
         from orchard import audio_package
         return audio_package.main(args, out=out)
+    if args.cmd == "verify-package":
+        from orchard import verify_package
+        return verify_package.main(args, out=out)
     if args.cmd == "demo-env":
         from orchard import demo_env
         return demo_env.main(args, env=demo_env.env_from_args(args, environ=env, home=home), out=out)
