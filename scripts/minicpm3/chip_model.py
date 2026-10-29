@@ -36,14 +36,15 @@ def _rot_matrix():
 
 
 class ChipMiniCPM3:
-    def __init__(self, dev, model_dir, weights_file, *, attn="mla", max_len=256, wdtype=None, fidelity="default", upd="int", log=print):
+    def __init__(self, dev, model_dir, weights_file, *, attn="mla", max_len=256, wdtype=None, fidelity="default", upd="int", n_layers=0, opt=1, log=print):
         import json
         self.dev = dev
         self.attn = attn
+        self.opt = opt           # 1: first composition; 2: fewer ops (rope folded into the absorbed matmul, split key projection)
         self.skip = set()        # timing experiments only: parts of the step to leave out ("mlp", "lm")
         self.upd = upd           # cache write: "int" (update_cache at a Python position), "paged" or "onehot" (position from a device tensor)
         self.cfg = c = json.load(open(f"{model_dir}/config.json"))
-        self.L, self.H = c["num_hidden_layers"], c["num_attention_heads"]
+        self.L, self.H = n_layers or c["num_hidden_layers"], c["num_attention_heads"]
         self.hid, self.kvr, self.dn, self.dr = c["hidden_size"], c["kv_lora_rank"], c["qk_nope_head_dim"], c["qk_rope_head_dim"]
         self.dv = 64
         self.eps = c["rms_norm_eps"]
@@ -61,7 +62,7 @@ class ChipMiniCPM3:
         # (TT_FATAL: tree reduction max 6 rounds). An 8 by 8 grid is accepted and matches torch (PCC 0.99995 at the model's shapes).
         self.sdpa_pc = ttnn.SDPAProgramConfig(compute_with_storage_grid_size=ttnn.CoreCoord(8, 8), q_chunk_size=32, k_chunk_size=128,
                                               exp_approx_mode=False)
-        self.rs = c["scale_depth"] / math.sqrt(self.L)
+        self.rs = c["scale_depth"] / math.sqrt(c["num_hidden_layers"])
         from ref_model import rope_tables
         self.cos, self.sin = rope_tables(c, max_len)
         self.f = safe_open(weights_file, "pt")
@@ -107,8 +108,23 @@ class ChipMiniCPM3:
                 "up": self._w(p + "mlp.up_proj.weight"),
                 "down": self._w(p + "mlp.down_proj.weight", scale=self.rs),
             }
+            if self.opt == 2:
+                kva_w = self.f.get_tensor(a + "kv_a_proj_with_mqa.weight").float()           # [288, 2560]
+                R = _rot_matrix()
+                d["ckv_w"] = ttnn.from_torch(kva_w[: self.kvr].t().contiguous().bfloat16(), device=dev, dtype=self.wdtype, layout=ttnn.TILE_LAYOUT)
+                wk = kva_w[self.kvr:].t()                                                      # [2560, 32]
+                d["kpe_w"] = ttnn.from_torch(torch.cat([wk, wk @ R], dim=1).contiguous().bfloat16(), device=dev, dtype=self.wdtype,
+                                             layout=ttnn.TILE_LAYOUT)                            # [2560, 64]: kpe and rotate_half(kpe)
+                kvb2 = self.f.get_tensor(a + "kv_b_proj.weight").float().view(self.H, self.dn + self.dv, self.kvr)
+                wbig = torch.zeros(self.H, self.dn + self.dr, self.kvr + self.dr)
+                wbig[:, : self.dn, : self.kvr] = kvb2[:, : self.dn]
+                wbig[:, self.dn:, self.kvr:] = torch.eye(self.dr)
+                d["wbig"] = ttnn.from_torch(wbig.bfloat16().unsqueeze(0), device=dev, dtype=self.wdtype, layout=ttnn.TILE_LAYOUT)
             kvb = self.f.get_tensor(a + "kv_b_proj.weight").float().view(self.H, self.dn + self.dv, self.kvr)
-            if self.attn == "mla":
+            if self.attn == "mla" and self.opt == 2:
+                d["wuv"] = ttnn.from_torch(kvb[:, self.dn:].transpose(1, 2).contiguous().bfloat16().unsqueeze(0), device=dev,
+                                           dtype=self.wdtype, layout=ttnn.TILE_LAYOUT)
+            elif self.attn == "mla":
                 # W_UK_h [dn, kvr] used as q_nope_h @ W_UK_h; W_UV_h [dv, kvr] used as o_lat @ W_UV_h^T
                 d["wuk"] = ttnn.from_torch(kvb[:, : self.dn].contiguous().bfloat16().unsqueeze(0), device=dev, dtype=self.wdtype,
                                            layout=ttnn.TILE_LAYOUT)
@@ -169,6 +185,19 @@ class ChipMiniCPM3:
         if getattr(self, "cos_tab", None) is None:
             mk = lambda t: ttnn.from_torch(t.bfloat16(), device=self.dev, dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT)  # noqa: E731
             self.cos_tab, self.sin_tab = mk(self.cos), mk(self.sin)
+            if self.opt == 2:
+                n = self.cos.shape[0]
+                self.cosF = mk(torch.cat([torch.ones(n, self.dn), self.cos], dim=1))             # [T, 96]: 1 on the no-position part
+                self.sinF = mk(torch.cat([torch.zeros(n, self.dn), self.sin], dim=1))            # [T, 96]: 0 on the no-position part
+                self.cs64 = mk(torch.cat([self.cos, self.sin], dim=1))                           # [T, 64]
+                Rf = torch.zeros(self.dn + self.dr, self.dn + self.dr)
+                Rf[self.dn:, self.dn:] = _rot_matrix()
+                self.Rf = ttnn.from_torch(Rf.bfloat16(), device=self.dev, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT)
+                self.IdI = ttnn.from_torch(torch.cat([torch.eye(32), torch.eye(32)], dim=0).bfloat16(), device=self.dev, dtype=ttnn.bfloat16,
+                                           layout=ttnn.TILE_LAYOUT)
+                self.new_mc = ttnn.create_sharded_memory_config(shape=(32, self.kvr + self.dr), core_grid=ttnn.CoreGrid(y=1, x=1),
+                                                                strategy=ttnn.ShardStrategy.HEIGHT, orientation=ttnn.ShardOrientation.ROW_MAJOR,
+                                                                use_height_and_width_as_shard_shape=True)
 
     def step(self, tok: int, pos: int, tap=None):
         """Run one token at position `pos` without a trace; returns logits [vocab] (float32 torch). `tap(name, torch_tensor)` receives the stream
@@ -188,20 +217,26 @@ class ChipMiniCPM3:
         cos = ttnn.reshape(ttnn.embedding(inp["pos_u"], self.cos_tab, layout=ttnn.TILE_LAYOUT), (1, 1, 1, 32))
         sin = ttnn.reshape(ttnn.embedding(inp["pos_u"], self.sin_tab, layout=ttnn.TILE_LAYOUT), (1, 1, 1, 32))
         cur = inp["cur"]
+        if self.opt == 2:
+            emb = lambda tab, w: ttnn.reshape(ttnn.embedding(inp["pos_u"], tab, layout=ttnn.TILE_LAYOUT), (1, 1, 1, w))  # noqa: E731
+            self._cosF, self._sinF, self._cs64 = emb(self.cosF, 96), emb(self.sinF, 96), emb(self.cs64, 64)
         if tap:
             tap("embed", self._host(x)[0, 0, 0])
         for i, d in enumerate(self.layers):
             h = self._rms(x, d["in_norm"])
-            qa = self._rms(self._lin(h, d["qa"]), d["qa_norm"])
-            qb = self._lin(qa, d["qb"])                               # [1,1,1,H*96]
-            kva = self._lin(h, d["kva"])                              # [1,1,1,288]
-            ckv = ttnn.slice(kva, [0, 0, 0, 0], [1, 1, 1, self.kvr])
-            kpe = ttnn.slice(kva, [0, 0, 0, self.kvr], [1, 1, 1, self.kvr + self.dr])
-            ckv = self._rms(ckv, d["kv_norm"])
-            if self.attn == "host":
-                ao = self._host_core(i, d, qb, ckv, kpe, self._pos)
+            if self.opt == 2:
+                ao = self._attn_v2(i, d, h, cur, inp)
             else:
-                ao = self._mla_core(i, d, qb, ckv, kpe, cos, sin, cur, inp)
+                qa = self._rms(self._lin(h, d["qa"]), d["qa_norm"])
+                qb = self._lin(qa, d["qb"])                               # [1,1,1,H*96]
+                kva = self._lin(h, d["kva"])                              # [1,1,1,288]
+                ckv = ttnn.slice(kva, [0, 0, 0, 0], [1, 1, 1, self.kvr])
+                kpe = ttnn.slice(kva, [0, 0, 0, self.kvr], [1, 1, 1, self.kvr + self.dr])
+                ckv = self._rms(ckv, d["kv_norm"])
+                if self.attn == "host":
+                    ao = self._host_core(i, d, qb, ckv, kpe, self._pos)
+                else:
+                    ao = self._mla_core(i, d, qb, ckv, kpe, cos, sin, cur, inp)
             x = ttnn.add(x, self._lin(ao, d["o"]))
             if tap:
                 tap(f"layer_{i:02d}.attn", self._host(x)[0, 0, 0])
@@ -264,6 +299,30 @@ class ChipMiniCPM3:
         o = ttnn.matmul(o, d["wuv"])                                     # [1,H,1,64]
         o = ttnn.reshape(o, (1, 1, 1, H * self.dv))
         return o
+
+    def _attn_v2(self, i, d, h, cur, inp):
+        """The attention with fewer ops: rotary on the whole 96-wide query (the no-position part has cos 1 and sin 0), the key up-projection and the
+        pass-through of the rotated part in one batched matmul with a 288-wide result, and the key's rotate-half folded into its projection."""
+        H = self.H
+        qa = self._rms(self._lin(h, d["qa"]), d["qa_norm"])
+        qb = self._lin(qa, d["qb"])                                       # [1,1,1,H*96]
+        q = ttnn.reshape(qb, (1, 1, H, self.dn + self.dr))
+        qr = ttnn.add(ttnn.multiply(q, self._cosF), ttnn.multiply(ttnn.matmul(q, self.Rf), self._sinF))
+        qh = ttnn.transpose(qr, 1, 2)                                     # [1,H,1,96]
+        ql = ttnn.matmul(qh, d["wbig"])                                   # [1,H,1,288]: latent query and rotated rope query
+        q_full = ttnn.transpose(ql, 1, 2)                                 # [1,1,H,288]
+        ckv = self._rms(self._lin(h, d["ckv_w"]), d["kv_norm"])           # [1,1,1,256]
+        k64 = self._lin(h, d["kpe_w"])                                    # [1,1,1,64]: kpe, rotate_half(kpe)
+        krot = ttnn.matmul(ttnn.multiply(k64, self._cs64), self.IdI)      # kpe * cos + rotate_half(kpe) * sin
+        new = ttnn.concat([ckv, krot], dim=-1)                            # [1,1,1,288]
+        if self.upd == "paged":
+            ttnn.experimental.paged_update_cache(self.kvpe[i], ttnn.to_memory_config(new, self.new_mc), update_idxs_tensor=cur)
+        else:
+            self._write_cache(i, new, cur, inp)
+        o = ttnn.transformer.flash_multi_latent_attention_decode(
+            q_full, self.kvpe[i], head_dim_v=self.kvr, cur_pos_tensor=cur, scale=(self.dn + self.dr) ** -0.5, program_config=self.sdpa_pc)
+        o = ttnn.matmul(ttnn.transpose(o, 1, 2), d["wuv"])                # [1,H,1,64]
+        return ttnn.reshape(o, (1, 1, 1, H * self.dv))
 
     def _write_cache(self, i, new, cur, inp):
         if self.upd == "int":

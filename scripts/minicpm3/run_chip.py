@@ -37,6 +37,7 @@ def main():
     ap.add_argument("--upd", default="int", choices=["int", "paged", "onehot"], help="cache write; a trace needs onehot or paged")
     ap.add_argument("--trace", action="store_true", help="bench: capture and replay the step as a trace")
     ap.add_argument("--skip", default="", help="timing only: comma list of mlp, lm")
+    ap.add_argument("--opt", type=int, default=1, choices=[1, 2], help="attention composition: 1 first version, 2 fewer ops")
     ap.add_argument("--layers", type=int, default=0, help="debug: truncate the stack (0 = all)")
     a = ap.parse_args()
     tok = AutoTokenizer.from_pretrained(a.model_dir)
@@ -45,7 +46,7 @@ def main():
     dev = ttnn.open_device(device_id=0, trace_region_size=256 * 1024 * 1024)
     try:
         t0 = time.time()
-        m = ChipMiniCPM3(dev, a.model_dir, a.weights, attn=a.attn, max_len=256, fidelity=a.fidelity, upd=a.upd)
+        m = ChipMiniCPM3(dev, a.model_dir, a.weights, attn=a.attn, max_len=256, fidelity=a.fidelity, upd=a.upd, opt=a.opt)
         m.skip = set(x for x in a.skip.split(",") if x)
         print(f"model loaded on chip in {time.time() - t0:.1f}s", flush=True)
         if a.mode == "agree":
