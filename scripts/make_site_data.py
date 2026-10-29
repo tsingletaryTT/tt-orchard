@@ -5,8 +5,7 @@
 
     python3 scripts/make_site_data.py --run ~/orchard-runs/proprietarylegal--qwen3.8-27b-cjk-trim --out site/assets/data
 
-Writes replay.json (the run's narration, line by line, with seconds since the start), stages.json (each stage's wall time), catalog.json (what stage 0 says
-about 29 catalog models), and bench.json (the bytkim benchmark). Every line passes a scrub: a home path, the host name and the user name are replaced, and the script
+Writes replay.json (the run's narration, line by line, with seconds since the start), stages.json (each stage's wall time), and bench.json (the bytkim benchmark). Every line passes a scrub: a home path, the host name and the user name are replaced, and the script
 stops if one is left.
 """
 import argparse
@@ -129,12 +128,6 @@ def bench() -> dict:
     return out
 
 
-def catalog() -> list[dict]:
-    path = Path(__file__).resolve().parent / "data" / "catalog-replay.json"
-    data = json.loads(path.read_text(encoding="utf-8"))
-    return data
-
-
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--run", required=True, type=Path)
@@ -144,7 +137,6 @@ def main() -> int:
     rp = cut_at_ready(replay(a.run))
     (a.out / "replay.json").write_text(json.dumps({"run": a.run.name.replace("proprietarylegal--", ""), "lines": rp}, indent=1), encoding="utf-8")
     (a.out / "stages.json").write_text(json.dumps(stages(a.run), indent=1), encoding="utf-8")
-    (a.out / "catalog.json").write_text(json.dumps(catalog(), indent=1), encoding="utf-8")
     (a.out / "bench.json").write_text(json.dumps(bench(), indent=1), encoding="utf-8")
     for f in a.out.glob("*.json"):
         text = f.read_text(encoding="utf-8")

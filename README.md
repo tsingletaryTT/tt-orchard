@@ -40,31 +40,42 @@ Bring up a model for a QuietBox 2, on a QuietBox 2, with only the compute the Qu
   says why, and releases the hardware.
 - **A person publishes.** The harness never publishes, pushes or uploads anything.
 
-### What it has done
+### How the tool got here
 
-Every run below happened on one QuietBox 2 (four Blackhole chips, two p300c boards). The log in `docs/project-log.md` has the
-details and the limits of each one. The evidence for each row is in `docs/run-logs/` or in the log.
+Every run below happened on one QuietBox 2 (four Blackhole chips, two p300c boards). The models are in the order of what each one
+taught the tool. The first ones needed large pieces of new harness work for each stop. The later ones needed small changes, and the
+last weights-only run was a supervised unattended run. The stories, with what stopped each model and what it cost to get
+past, are on the [project site](https://tsingletaryTT.github.io/tt-orchard/#stories). The numbers, settings and limits are in the
+run logs linked here and in `docs/project-log.md`. The community models in the catalog that stage 0 was tried on are not listed:
+stage 0 sorts a model by its headers into the classes above, and the project log has the table.
 
-| Model | What it is | Class | How far it got |
-|---|---|---|---|
-| `Altworld/Hemmingway-1` | Qwen3.8-27B fine-tune | `weights-only` | Attended run to `ready for operator review`; 2-chip and 1-chip packages published and the 2-chip one pulled and booted from the Hub |
-| `iapp/openthai2.0-qwen3.8-27b` | Qwen3.8-27B fine-tune | `weights-only` | Packages published, 2-chip one pulled and booted from the Hub |
-| `Cloudflare/clef` | Qwen3.8-27B post-train with a separate task head | `weights+sidecar` | One command to `ready for operator review` in about 3 hours of ledger time; `episod/clef-p300` is public (31 of 32 tokens equal to the CPU reference; pulled and booted from the Hub on 2026-10-26 with 2 chips, ready after 2,540 s) |
-| `ThakiCloud/RAG-Gate-27B` | Qwen3.8-27B fine-tune (a retrieval gate) | `weights-only` | Ready for review, then packaged by hand and measured against a labelled set (0.930 on 200 items); `episod/rag-gate-27b-p300` is public and was pulled and booted from the Hub (reply 42, ready in 2,841 s) |
-| `bytkim/Qwen3.8-27B-pi` | Qwen3.8-27B fine-tune | `weights-only` | First unattended run with the preflight and retry setup (six launches of one command, each stop explained); benchmarked at full size against its base; `episod/qwen3.8-27b-pi-p300` is public |
-| `BAAI/AREX-2` | Qwen3.8-27B fine-tune with no `mtp.*` tensors and no generation config | `weights-only` | Passed after the harness learned to copy the nearest model's generation config. `episod/arex-2-p300` is public with the drafter off and sampling on the host; it was pulled and booted from the Hub. A by-hand graft of the nearest model's `mtp.*` head later kept the drafter on with the same agreement (issue 14); the supervisor's automatic graft trial has not run on hardware |
-| `ProprietaryLegal/Qwen3.8-27B-CJK-Trim` | The nearest model with 66,533 vocabulary rows removed | `vocab-trim` | Supervised unattended run to `ready for operator review` in 2,804 s of ledger time (2 chips 30 of 32 tokens, 4 chips 30 of 32); packaged and boot-checked; not published |
-| `huihui-ai/Huihui-Qwen3-Coder-30B-A3B-Instruct-abliterated` | Weights-only fine-tune of a model whose only installed package is a container package | `weights-only` | The first container run is not valid evidence: the package downloads its own hard-coded repository from the Hub and serves that base model, ignoring the model directory, so its 32 of 32 tokens describe the base. The harness now runs the container with the Hub switched off and fails such a test (issue 60 stays open; no catalog container has yet been shown to serve swapped weights except the Qwen3.8-27B ones) |
+| # | Model | What it needed | How far it got | Log |
+|---|---|---|---|---|
+| 1 | `Altworld/Hemmingway-1` (Qwen3.8-27B fine-tune) | The supervisor's working form: a known-answer first-boot check, retries for cut-off and empty replies, thinking off for agents, tested swap templates, two watchdog detectors, one test per chip count | `ready for operator review` after about 13 hours from the third launch; 1, 2 and 4 chips agree with the CPU on 31, 30 and 29 of 32 tokens; 2-chip and 1-chip packages published | [run log](docs/run-logs/2026-10-hemmingway-1.md), [second model](docs/run-logs/2026-10-openthai-run1.md) |
+| 2 | `Cloudflare/clef` (post-train with a separate task head) | A class for sidecar models; a runner that refuses `pip install` into the shared environment; drafter and sampling settings for a model with no `mtp.*` tensors | Ready after 11,092 s of ledger time and two blocks; `episod/clef-p300` is public and was pulled and booted from the Hub | [project log](docs/project-log.md) |
+| 3 | `ThakiCloud/RAG-Gate-27B` (retrieval gate) | Base-model research, then preflight rows for the CPU stand-in and the SFPI compiler, automatic retries, cache pruning | Gate accuracy 0.930 on 200 items; 25 of 25 labels equal to the CPU; `episod/rag-gate-27b-p300` is public | [project log](docs/project-log.md) |
+| 4 | `bytkim/Qwen3.8-27B-pi` | A snapshot check that counts a model as local only if its weights are there; a fast retry after a failed multi-board start; benchmark tooling | First unattended run (six launches of one command); benchmarked at full size against its base; `episod/qwen3.8-27b-pi-p300` is public | [benchmark](docs/run-logs/2026-10-20-bytkim-pi-benchmark-full.md), [packaging](docs/run-logs/2026-10-19-bytkim-pi-packaging.md) |
+| 5 | `BAAI/AREX-2` (no `mtp.*` tensors, no generation config) | Copying the nearest model's generation config; grafting its `mtp.*` head, chosen by a measured trial | By hand, the graft decodes 2.95 times as fast (50.05 against 16.95 tok/s) with the same agreement; the supervisor's automatic trial has not run on hardware | [graft log](docs/run-logs/2026-10-26-arex-2-graft-acceptance.md) |
+| 6 | `ProprietaryLegal/Qwen3.8-27B-CJK-Trim` (66,533 vocabulary rows removed) | A `vocab-trim` class: stage 0 checks every kept row byte for byte against the nearest model | Supervised run to `ready for operator review` in 2,804 s of ledger time; benchmarked against its base | [benchmark](docs/run-logs/2026-10-27-cjk-trim-benchmark.md) |
+| 7 | `Qwen3-Coder-Next` fused package (the coder) | No supervisor change; a role-fit test and a corrected throughput check | Decode median 79.3 tok/s over 28 samples, against 38.5 recorded for the earlier package | [run log](docs/run-logs/2026-10-28-coder-fused-decode.md) |
+| 8 | `stabilityai/stable-audio-3-small-music`, `small-sfx`, `medium` | An audio path: chip transformer, audio stages, a resident runtime with benchmark rules, a decoder on the chip | 10 s clip in 0.82 s with `small-music` (CPU 3.9 to 8.0 s); 3.8 s with `medium` (CPU 38.0 s); nobody listened to the clips | [chip runs](docs/run-logs/2026-10-28-stable-audio-chip-first-runs.md), [decoder](docs/run-logs/2026-10-29-overnight-stable-audio-decoder.md) |
+| 9 | `ibm-granite/granite-4.0-h-1b` (Mamba-2 hybrid) | Kernels written by the local coder, a pinned tt-lang pair, a traced decode step | 37.5 tok/s composed and 39.3 with the coder's kernels once traced; slower than composed before that | [port](docs/run-logs/2026-10-28-granite-mamba2-real-port.md), [traced](docs/run-logs/2026-10-29-granite-repeat-trace.md) |
+| 10 | `openbmb/MiniCPM3-4B` (multi-latent attention) | A port script set on an existing attention op, no new kernel; two small harness changes | 33.7 tok/s in bfloat16 on one chip; 16 of 16 teacher-forced tokens match the CPU | [run log](docs/run-logs/2026-10-29-overnight-minicpm3-4b.md) |
+| 11 | `Qwen/Qwen3.5-35B-A3B` | A 35-line loader patch for the Coder-Next bundle's code, chosen by `fusion-candidates` | 126.8 tok/s median on two dies, 29.6 percent of the estimated floor; first 8 tokens equal to the CPU | [run log](docs/run-logs/2026-10-29-fusion-port.md) |
 
-Not brought up, and why: `perplexity-ai/pplx-decider-v1.2` is a `restricted-head` model, so the run stops after stage 0 and a
-person can ask for the parity report (14 of 14 answers agree); `nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB` stopped at the
-preflight (no installed bundle serves its base); `Plurato123/OctLLM` needs CUDA decoders. No model that needs new model code
-has gone through the harness's `full-port` stages (3, 5 and 6) unattended. Issue 61 tracks a first pilot. Three models that need new code
-were brought up by hand on 2026-10-28 and 2026-10-29; they are listed in the next section.
+Models 8 to 11 were driven by hand with the harness's tools. The supervisor's stages were not used on them. Packages for some
+of them are in progress and are not described here until their numbers are in the repository.
 
-Those runs were not all hands-off. The early ones blocked, and each cause was a bug in tt-orchard, fixed before the same
-command was run again. The later ones needed a person for disk space and for a restart after a power event, and each of those
-is now a preflight check or a block message. The harness has never run end to end with nobody touching the machine.
+Stopped on purpose: `perplexity-ai/pplx-decider-v1.2` is a `restricted-head` model, so the run stops after stage 0 and a
+person can ask for the parity report (14 of 14 answers agree on the chips). `nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB` stopped at the
+preflight (no installed bundle serves its base). `Plurato123/OctLLM` needs CUDA decoders. A container-package run of
+`huihui-ai/Huihui-Qwen3-Coder-30B-A3B-Instruct-abliterated` is not valid evidence: the package downloads its own hard-coded repository from the
+Hub and serves that base model, so the harness now runs such a container with the Hub switched off and fails the test (issue 60 stays open).
+No model that needs new model code has gone through the harness's `full-port` stages (3, 5 and 6) unattended. Issue 61 tracks a first pilot.
+
+The early runs were not hands-off. They blocked, and each cause was a bug in tt-orchard, fixed before the same command was run again.
+The later ones needed a person for disk space and for a restart after a power event, and each of those is now a preflight check or a
+block message. The harness has never run end to end with nobody touching the machine.
 
 ### Since 2026-10-27
 
@@ -90,6 +101,7 @@ Short list of what landed on `main`. Each item links to its run log, which holds
   compiler disagree on `reduce_sum`. [Run log](docs/run-logs/2026-10-28-granite-mamba2-real-port.md).
 - **A recipe package for Qwen3.5-35B-A3B on one p300 board.** `orchard/qwen35_package.py` stages a package that reproduces the measured setup (126.8 tok/s, 29.6 percent of the estimated floor): the Coder-Next bundle's image, a 41-line loader patch mounted at run time, a script that fetches the text weights at a pinned revision, and a card with the measured numbers and limits. Cold first boot 727 s. Staged locally and boot-checked; not uploaded. [Run log](docs/run-logs/2026-10-29-qwen35-package.md).
 - **Fusion port candidates.** `tt-orchard fusion-candidates MODEL_CONFIG BUNDLE_DIR` reads a fused decode bundle's Python code (read only, never run), lists its fused ops (router, MoE decode, mixers, layer boundary, sampler) with the model dimensions each depends on, and marks each one as applies as is, applies with a changed constant, or needs new code (a gap, never attempted). For Qwen3.5-35B-A3B against the Qwen3-Coder-Next bundle on two dies: 4 as is, 2 with a changed constant, 1 needs new code. No chip was used; the hardware port was not run. [Run log](docs/run-logs/2026-10-29-fusion-port.md).
+- **Fusion port candidates.** `tt-orchard fusion-candidates MODEL_CONFIG BUNDLE_DIR` reads a fused decode bundle's Python code (read only, never run), lists its fused ops (router, MoE decode, mixers, layer boundary, sampler) with the model dimensions each depends on, and marks each one as applies as is, applies with a changed constant, or needs new code (a gap, never attempted). For Qwen3.5-35B-A3B against the Qwen3-Coder-Next bundle on two dies: 4 as is, 2 with a changed constant, 1 needs new code. The hardware port was then run: the full 40-layer model served on two dies on the bundle's code with a 35-line loader patch, 126.8 tok/s median (29.6 percent of the estimated floor), and neither changed constant was worth keeping (both within 0.1 percent of baseline). [Run log](docs/run-logs/2026-10-29-fusion-port.md).
 - **A tt-lang pair verified on the chip.** The pinned simulator and the compiler wheel `tt-lang-light 1.1.10.dev20261026` (from the Tenstorrent S3
   index) agree on the chip for 17 of 20 kernels, including every reduction kernel that failed on 1.1.6. One form does not compile: `-(-x // g)`
   after a thread's `grid_size`; `(x + g - 1) // g` does. The pair is pinned in `orchard/ttlang_pin.py` and section 5.9a shows how to make its venv.
@@ -180,10 +192,11 @@ to `Qwen/Qwen3-Coder-Next`. Stop the old coder first; the two packages use diffe
 
 ## 1. Status
 
-tt-orchard is early. It has brought up eight models, all on one machine: a Tenstorrent QuietBox 2 with two p300c boards (four
-Blackhole chips). Seven are Qwen3.8-27B-family models and one is a Qwen3-Coder-30B-A3B fine-tune; the table under
-[What it has done](#what-it-has-done) lists them. Nothing has been run on any other machine, and no model that needs new model code
-has been run.
+tt-orchard is early. It has brought up eight models through the harness, all on one machine: a Tenstorrent QuietBox 2 with two p300c
+boards (four Blackhole chips). Seven are Qwen3.8-27B-family models and one is a Qwen3-Coder-30B-A3B fine-tune. Four more, which need new
+code, were brought up by hand with the harness's tools. The table under [How the tool got here](#how-the-tool-got-here) lists them in
+the order of what each one taught. Nothing has been run on any other machine, and no model that needs new model code has gone through
+the supervisor's full-port stages.
 
 What is shown, and by what:
 
