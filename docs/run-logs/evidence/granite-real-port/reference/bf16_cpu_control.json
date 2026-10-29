@@ -1,0 +1,34 @@
+[
+ {
+  "prompt_index": 0,
+  "free_run_match_prefix": 3,
+  "free_run_len": 3,
+  "teacher_forced_rel_l2_mean": 0.004740937612950802,
+  "teacher_forced_rel_l2_max": 0.005379738286137581,
+  "top1_agree": 1.0
+ },
+ {
+  "prompt_index": 1,
+  "free_run_match_prefix": 24,
+  "free_run_len": 24,
+  "teacher_forced_rel_l2_mean": 0.01211125310510397,
+  "teacher_forced_rel_l2_max": 0.0643521249294281,
+  "top1_agree": 1.0
+ },
+ {
+  "prompt_index": 2,
+  "free_run_match_prefix": 8,
+  "free_run_len": 24,
+  "teacher_forced_rel_l2_mean": 0.004253352526575327,
+  "teacher_forced_rel_l2_max": 0.007494094781577587,
+  "top1_agree": 0.875
+ },
+ {
+  "prompt_index": 3,
+  "free_run_match_prefix": 24,
+  "free_run_len": 24,
+  "teacher_forced_rel_l2_mean": 0.011117835529148579,
+  "teacher_forced_rel_l2_max": 0.034675195813179016,
+  "top1_agree": 1.0
+ }
+]

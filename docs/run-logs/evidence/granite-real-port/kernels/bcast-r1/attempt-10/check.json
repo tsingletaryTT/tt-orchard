@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "op": "ssd_state_update_bcast",
+  "phase": "sim",
+  "passed": false,
+  "category": "no_kernel",
+  "first_line": "kernel.py does not exist",
+  "sets": [],
+  "pcc_bar": 0.999,
+  "bars": {
+    "pcc": 0.999,
+    "rel_l2": 0.01,
+    "slope": [
+      0.98,
+      1.02
+    ],
+    "max_abs_atol": 0.01,
+    "max_abs_rtol": 0.01
+  },
+  "violations": [],
+  "provisional": true,
+  "elapsed_s": 0.0,
+  "tt_lang": {
+    "sim_version": "1.1.10+gfec38c6",
+    "source_sha": "fec38c6de4b6f24ce4cb359f04aecc8d4577d6f0",
+    "diagnostics_patched": true,
+    "patch_sha256": "e3964f222cc5dc253157f97645a914f8751ab613f0fa82eb334e97046da8f84f"
+  },
+  "sha256": {
+    "kernel.py": null,
+    "kernel_harness.py": "64f100a7ca16627f3c65c2dc0941709cda9de5d8b099939d257728540b56aab0",
+    "references.py": "d7e6192f05e62de81936c0185b3af873fc968cbe66ed6507a9dffd889d564aa6",
+    "kernel_check.py": "899d4c7d4070cda1a9b312d72c6c6dc43396d952ba4006f00cfb6db7dac95188",
+    "spec": "6c7658b117237ba67f52c76570f75da2a66823b439a7313db3358fe233bb1f95"
+  }
+}
