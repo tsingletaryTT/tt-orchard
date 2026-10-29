@@ -192,3 +192,58 @@ Batch (three processes against the one coder, all `--attempts 10 --temperature 0
   processes in parallel are the plan, and a rung that does not fit in B's 5.5 hours is left out and named.
 - Three clients slow each other (the old measurement: 77% of single-client speed for two, 60% for three). A pass time in the batch
   is therefore not comparable with a pilot wall.
+
+## Results on the new coder (stopped on the operator's instruction; partial)
+
+Coder: `raahemnabeel/qwen3-coder-next` (fused decode), profile `p300`, one board, started about 20:50Z on 2026-10-28; branch head 115a6c8 for the
+runs. Attempts at temperature 0.7, `--phase sim --library none --no-agent-hw`, 40 turns, seeds 2026110100 + k (pilot 2026110000 + k).
+The batch was stopped by the operator at about 00:20Z on 2026-10-29, after about 3 hours; no rung reached 10 attempts. The ladder
+table below combines the single-client pilot and the three-client batch, which are different load conditions (see below).
+
+| Rung | Op | Pilot (1 attempt, one client) | Batch attempts | Batch passed | Batch failure classes | Wall budget (s) |
+|---|---|---|---|---|---|---|
+| 1 | add | passed, 172 s | not run | | | |
+| 2 | mul | passed, 157 s | not run | | | |
+| 3 | scale_shift | passed, 654 s | not run | | | |
+| 4 | add_row | passed, 475 s | not run | | | |
+| 5 | rsqrt | passed, 134 s | not run | | | |
+| 6 | row_sum | failed (`not a valid next dataflow step`), 563 s | 9 | 6 | numeric 1, shape_mismatch 1, dataflow_step 1 | 1800 |
+| 7 | center | passed, 651 s | 6 | 1 | numeric 2, tt_lang_error 1, dataflow_step 1, deadlock 1 | 1800 |
+| 8 | rmsnorm | not piloted | 3 (see below) | 0 | shape_mismatch 1, dataflow_step 1, tt_lang_error 1 | 1800 |
+| 9 | linear_scan | not piloted, not run | | | | |
+
+Counts only, and none is a rate: 6 of 9 and 1 of 6 cannot be told apart from 4 of 9 or 3 of 6 with confidence, and the attempts that
+did not finish (the stopped ones) are not counted. Pass walls on the new coder in the batch: row_sum 227 to 1198 s; center 1882 s (the one pass).
+Attempts that ended on the wall budget carry its overrun (up to 2124 s on the old coder; center attempt 6 passed at 1882 s on a 1800 s budget).
+
+Where passes stop. On this evidence no rung has zero passes. `center` has the lowest pass count (1 of 6) among the rungs with a batch;
+`row_sum` (6 of 9) passed more often than `center`, so the ladder is not monotone in this order: `row_sum`, which was placed below
+`center`, failed its own pilot and failed 3 of 9 batch attempts. The first rung in ladder order with a failure in the pilot is `row_sum`.
+The rungs `add` to `rsqrt` have one pass in one attempt each and no batch; whether their pass count is near 10 of 10 is not known.
+
+Rung 8 (`rmsnorm`, run separately at the operator's request, `--library none`, seed 2026110200 for attempt 1 and 2026110201 + k for
+the restart, 1800 s): 3 finished attempts, 0 passed. It was stopped twice on the operator's instruction ("stop rmsnorm"), and the second
+process, which I had started, was stopped again; no further rmsnorm run was made. Partial records: attempt 1 `shape_mismatch` (`Tensor
+shape (32, 32) does not match Block shape (1, 8)`, 32 turns, 1830 s), then `dataflow_step` (676 s, 28 turns) and `tt_lang_error`
+(1816 s, 25 turns). Telegraph was not used (the condition was 10 failed attempts with a repeated class; there were 3).
+
+Failure classes seen, by name: deadlock, `not a valid next dataflow step`, a numeric PCC miss, shape mismatch, and a type or index error
+(`IndexError: row slice ... is outside the tensor`).
+
+Load and decode speed. The probe measured 106 to 107 tok/s before each pilot attempt (one client). With three clients the first
+attempt of each process measured 48.7 to 56.5 tok/s ("busy"). Every later attempt measured 8.5 to 12.4 tok/s before it started, with 2 or
+3 requests running. I did not find why the speed fell from about 49 to about 12; the coder's log shows prefill chunks of 8K to 9K tokens
+and a prefix state with all 16 slots used, and nothing that names a fault. The probe called every one of these samples "busy", not "slow",
+because it compares with the load. So the batch attempts ran at about a quarter of the pilot's decode speed, and their pass counts and
+wall times must not be compared with the pilot's. That is the largest limit of this table.
+
+## What could not be determined
+
+- Pass counts of rungs 1 to 5 over 10 attempts (not run). Their pilots passed once each on the new coder and once each on the old.
+- Whether `row_sum` or `center` is the first rung with a pass count near zero: neither is, on 9 and 6 attempts.
+- The effect of the coder change (old versus new) on the same rungs: the old-coder batch had 3 attempts on `center` (1 pass) and 1 on
+  `row_sum` (0), which is too little, and the load differs.
+- Whether the slowdown from about 49 to about 12 tok/s came from the concurrent clients, from long contexts, or from the server; the pilot
+  at one client did not show it.
+- Whether the server honours the seed (not verified), and whether `linear_scan` or `rmsnorm` has a pass at 10 attempts.
+- The per-attempt hardware result (this ran in the simulator only).
