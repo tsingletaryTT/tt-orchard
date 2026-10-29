@@ -13,7 +13,7 @@ import math
 import shlex
 from pathlib import Path
 
-from orchard import safeio
+from orchard import resident, safeio
 from orchard.audio_runtime import REFERENCE_FILE, RESULT_FILE, STAGE_DISK_GB
 
 SCHEMA = 1
@@ -144,17 +144,19 @@ def repeat_name(name: str, k: int) -> str:
     return name if k == 0 else f"{name}-r{k}"
 
 
-REPEATS = 3          # runs of each model on the chip; the first compiles kernels, so a timing needs more than one
+REPEATS = resident.MIN_REPEATS          # measured runs of each model on the chip: fewer than this is a single sample (orchard/resident.py)
+WARMUP = resident.WARMUP_RUNS           # discarded runs before them, in the same process, because the first call compiles kernels
 
 
-def write_chip_config(stage_dir, paths, hf_home: str, plan: list[dict], repeats: int = REPEATS) -> Path:
-    """`audio_chip_config.json`, the input of audio_chip_test.py: shared settings and one entry per run. Each model runs `repeats` times (the same
-    settings and seed, so the runs agree with one another and only their timings differ)."""
+def write_chip_config(stage_dir, paths, hf_home: str, plan: list[dict], repeats: int = REPEATS, warmup: int = WARMUP) -> Path:
+    """`audio_chip_config.json`, the input of audio_chip_test.py: shared settings and one entry per run. Each model runs `repeats` times after `warmup`
+    discarded runs, all in one process per model (audio_chip_test.py), with the same settings and seed, so the runs agree with one another and only
+    their timings differ."""
     runs = [{"name": repeat_name(item["name"], k), "model": item["name"],
              **{key: MODEL_SETTINGS[item["name"]][key] for key in ("steps", "cfg_scale", "sampler")}}
             for item in plan for k in range(repeats)]
     cfg = {"prompt": PROMPT, "duration": DURATION_S, "seed": SEED, "sample_size": SAMPLE_SIZE, "src_dir": paths.src_dir, "hf_home": hf_home,
-           "out_dir": "chip", "repeats": repeats, "runs": runs}
+           "out_dir": "chip", "repeats": repeats, "warmup": warmup, "runs": runs}
     path = Path(stage_dir) / CONFIG_FILE
     write_json(path, cfg)
     return path

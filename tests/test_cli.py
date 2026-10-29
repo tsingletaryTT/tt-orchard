@@ -1091,6 +1091,19 @@ def test_package_no_graft_mtp_defaults_off_and_the_flag_turns_it_on(tmp_path, mo
     assert [s["no_graft_mtp"] for s in seen] == [False, True]
 
 
+def test_kernel_probe_takes_the_ladder_options_without_an_op(monkeypatch, tmp_path):
+    calls = _fake_probe_main(monkeypatch)
+    code = cli.main(["kernel-probe", "--ladder", "--rungs", "add,mul", "--rung-wall", "add=300", "--rung-expect-s",
+                     "add=60", "--max-hours", "6", "--wall-s", "900", "--report-only", "--endpoint",
+                     "http://127.0.0.1:9/v1", "--model", "m"], env={"HOME": str(tmp_path)}, stdout=io.StringIO())
+    args, _ = calls[0]
+    assert code == 0 and args.ladder and args.op is None and args.rungs == "add,mul" and args.rung_wall == "add=300"
+    assert args.rung_expect_s == "add=60" and args.max_hours == 6.0 and args.wall_s == 900.0 and args.report_only
+    cli.main(["kernel-probe", "--op", "add", "--endpoint", "http://127.0.0.1:9/v1", "--model", "m"],
+             env={"HOME": str(tmp_path)}, stdout=io.StringIO())
+    plain, _ = calls[1]
+    assert plain.ladder is False and plain.wall_s is None and plain.report_only is False
+
 def test_bringup_passes_the_sampling_setting_to_the_supervisor_only_when_given(conf):
     code, out, rec = run(conf, ["bringup", "Cloudflare/clef"])
     assert "--sampling" not in rec.argv

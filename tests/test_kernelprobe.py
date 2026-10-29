@@ -87,14 +87,6 @@ def skills_current(monkeypatch):
 @pytest.fixture(autouse=True)
 def consistency_ok(monkeypatch):
     """The tt-lang consistency check (orchard/ttlang_consistency.py) finds no blocking row, so tests with a made-up
-    checkout and simulator reach the code they are about. tests/test_ttlang_pin.py tests the check itself, and
-    test_probe_refuses_* below run it for real."""
-    monkeypatch.setattr(kp.ttlang_consistency, "check", lambda env, skill_dir, **kw: [])
-
-
-@pytest.fixture(autouse=True)
-def consistency_ok(monkeypatch):
-    """The tt-lang consistency check (orchard/ttlang_consistency.py) finds no blocking row, so tests with a made-up
     checkout and simulator reach the code they are about. tests/test_ttlang_pin.py tests the check itself, and the
     test_probe_refuses_* tests at the end of this file run it for real."""
     monkeypatch.setattr(kp.ttlang_consistency, "check", lambda env, skill_dir, **kw: [])
@@ -3995,3 +3987,107 @@ def test_a_consistency_row_that_blocks_and_is_allowed_is_recorded_as_allowed(tmp
     assert data["header"]["skills"]["stale_allowed"] is True
     assert any("hardware tree" in x for x in data["header"]["skills"]["stale"])
     assert data["header"]["ttlang_consistency"]["overridden"] is True
+
+
+# ---- the capability ladder and --wall-s (issue 175) -------------------------------------------------------------
+
+def test_wall_s_reaches_every_attempt_and_the_report_header(tmp_path, fake_kenv, env_ready, monkeypatch):
+    walls = []
+
+    def run_attempt(*, op, n, wall_s, **kw):
+        walls.append(wall_s)
+        return canned(op, n)
+    monkeypatch.setattr(kp, "run_attempt", run_attempt)
+    code = kp.main(probe_args(tmp_path, attempts=2, wall_s=420.0), env=fake_kenv, out=io.StringIO(),
+                   probe=lambda e, m: True, run_watched_fn=no_run)
+    assert code == 0 and walls == [420.0, 420.0]
+    header = json.loads((tmp_path / "out" / "kernel-probe-report.json").read_text())["header"]
+    assert header["budget"]["wall_s"] == 420.0 and header["budget"]["max_turns"] == 40
+    assert "wall budget (420 s)" in header["budget_note"]
+
+
+def test_without_wall_s_the_default_budget_is_used(tmp_path, fake_kenv, env_ready, monkeypatch):
+    walls = []
+    monkeypatch.setattr(kp, "run_attempt", lambda *, op, n, wall_s, **kw: walls.append(wall_s) or canned(op, n))
+    kp.main(probe_args(tmp_path), env=fake_kenv, out=io.StringIO(), probe=lambda e, m: True, run_watched_fn=no_run)
+    assert walls == [kp.BUDGET["wall_s"]]
+
+
+@pytest.mark.parametrize("bad", [0, -5, float("nan"), 7201, "soon"])
+def test_main_refuses_a_bad_wall_s_before_anything_runs(tmp_path, fake_kenv, env_ready, capsys, bad):
+    code = kp.main(probe_args(tmp_path, wall_s=bad), env=fake_kenv, out=io.StringIO(),
+                   probe=lambda e, m: True, run_watched_fn=no_run)
+    assert code == 2 and env_ready == [] and not (tmp_path / "out").exists()
+    assert "--wall-s" in capsys.readouterr().err
+
+
+def test_main_with_the_ladder_runs_each_rung_in_its_own_directory_with_one_sampling(tmp_path, fake_kenv, env_ready,
+                                                                                  monkeypatch):
+    seen = []
+
+    def run_attempt(*, op, n, probe_dir, wall_s, temperature, seed, **kw):
+        seen.append((op, n, Path(probe_dir), wall_s, temperature, seed))
+        return canned(op, n, passed=op == "add")
+    monkeypatch.setattr(kp, "run_attempt", run_attempt)
+    out = io.StringIO()
+    code = kp.main(probe_args(tmp_path, op=None, ladder=True, rungs="add,mul", attempts=2, temperature="0.7", seed="500",
+                              rung_wall="add=300"), env=fake_kenv, out=out, probe=lambda e, m: True,
+                   run_watched_fn=no_run)
+    assert code == 0
+    assert [(s[0], s[1], s[3], s[4], s[5]) for s in seen] == [("add", 1, 300.0, 0.7, 501), ("add", 2, 300.0, 0.7, 502),
+                                                              ("mul", 1, kp.BUDGET["wall_s"], 0.7, 501),
+                                                              ("mul", 2, kp.BUDGET["wall_s"], 0.7, 502)]
+    assert [s[2] for s in seen][0] == tmp_path / "out" / "add" and [s[2] for s in seen][2] == tmp_path / "out" / "mul"
+    data = json.loads((tmp_path / "out" / "ladder-report.json").read_text())
+    assert [(r["op"], r["passed"], r["attempts"]) for r in data["rungs"]] == [("add", 2, 2), ("mul", 0, 2)]
+    assert data["first_zero_rung"] == "mul"
+    assert "ladder rung 1 of 2: add" in out.getvalue()
+
+
+def test_main_without_an_op_or_the_ladder_refuses(tmp_path, fake_kenv, env_ready, capsys):
+    code = kp.main(probe_args(tmp_path, op=None), env=fake_kenv, out=io.StringIO(), probe=lambda e, m: True,
+                   run_watched_fn=no_run)
+    assert code == 2 and "--ladder" in capsys.readouterr().err
+
+
+
+
+@pytest.mark.parametrize("flag, value", [("rungs", "add"), ("rung_wall", "add=300"), ("rung_expect_s", "add=60"),
+                                         ("max_hours", 6.0), ("report_only", True), ("rungs", ""), ("rung_wall", ""),
+                                         ("rung_expect_s", ""), ("max_hours", 0), ("max_hours", 0.0)])
+def test_main_refuses_a_ladder_only_option_without_the_ladder_and_starts_nothing(tmp_path, fake_kenv, env_ready, capsys,
+                                                                               monkeypatch, flag, value):
+    started = []
+    monkeypatch.setattr(kp, "run_attempt", lambda **kw: started.append(kw) or canned(kw["op"], kw["n"]))
+    code = kp.main(probe_args(tmp_path, **{flag: value}), env=fake_kenv, out=io.StringIO(), probe=lambda e, m: True,
+                   run_watched_fn=no_run)
+    assert code == 2 and started == [] and env_ready == [] and not (tmp_path / "out").exists()
+    err = capsys.readouterr().err
+    assert "--" + flag.replace("_", "-") in err and "only applies with --ladder" in err
+
+
+def test_the_ladders_derived_seed_base_is_recorded_with_its_origin_in_every_rung_header(tmp_path, fake_kenv, env_ready,
+                                                                                      monkeypatch):
+    monkeypatch.setattr(kp, "run_attempt", lambda *, op, n, **kw: canned(op, n))
+    kp.main(probe_args(tmp_path, op=None, ladder=True, rungs="add,mul", attempts=1, temperature="0.7", seed=None),
+            env=fake_kenv, out=io.StringIO(), probe=lambda e, m: True, run_watched_fn=no_run)
+    heads = [json.loads((tmp_path / "out" / r / "kernel-probe-report.json").read_text())["header"]["sampling"]
+             for r in ("add", "mul")]
+    assert heads[0]["seed_base"] == heads[1]["seed_base"] and isinstance(heads[0]["seed_base"], int)
+    assert {h["seed_base_from"] for h in heads} == {"the ladder's id"}
+    data = json.loads((tmp_path / "out" / "ladder-report.json").read_text())
+    assert data["settings"]["seed_base"] == heads[0]["seed_base"] and data["settings"]["seed_base_from"] == "the ladder's id"
+
+
+def test_a_rung_run_told_its_directory_is_already_locked_does_not_lock_it_again_and_leaves_it_locked(
+        tmp_path, fake_kenv, env_ready, monkeypatch):
+    monkeypatch.setattr(kp, "run_attempt", lambda *, op, n, **kw: canned(op, n))
+    held = kp.acquire_lock(tmp_path / "out")
+    try:
+        code = kp.main(probe_args(tmp_path, dir_locked=True), env=fake_kenv, out=io.StringIO(),
+                       probe=lambda e, m: True, run_watched_fn=no_run)
+        assert code == 0 and (tmp_path / "out" / "kernel-probe-report.json").is_file()
+        with pytest.raises(kp._Refused):                          # still the ladder's lock, not released by the run
+            kp.acquire_lock(tmp_path / "out")
+    finally:
+        kp.release_lock(held)

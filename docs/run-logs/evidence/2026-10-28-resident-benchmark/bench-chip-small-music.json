@@ -1,0 +1,278 @@
+{
+ "device": "chip",
+ "model": "small-music",
+ "settings": {
+  "prompt": "A warm acoustic guitar melody with soft percussion, 100 BPM",
+  "steps": 8,
+  "cfg_scale": 1.0,
+  "sampler": "pingpong",
+  "seed": 42,
+  "sample_size": 5292032
+ },
+ "warmup_runs": 1,
+ "repeats": 3,
+ "host_loadavg_1m_at_start": 5.4970703125,
+ "host_loadavg_1m_at_end": 12.58935546875,
+ "load": {
+  "model_load_s": 5.697,
+  "chip_weights_upload_s": 1.184
+ },
+ "sizes": [
+  {
+   "seconds": 10.0,
+   "label": "benchmark",
+   "warmup_runs": 1,
+   "repeats": 3,
+   "parts": {
+    "chip_passes": {
+     "n": 3,
+     "min": 8,
+     "median": 8,
+     "max": 8
+    },
+    "chip_transformer_call_s": {
+     "n": 3,
+     "min": 0.279,
+     "median": 0.281,
+     "max": 0.286
+    },
+    "conditioning_s": {
+     "n": 3,
+     "min": 0.038,
+     "median": 0.038,
+     "max": 0.048
+    },
+    "generate_and_decode_s": {
+     "n": 3,
+     "min": 1.563,
+     "median": 1.702,
+     "max": 1.742
+    }
+   },
+   "runs": [
+    {
+     "timings": {
+      "conditioning_s": 0.038,
+      "generate_and_decode_s": 1.742,
+      "chip_transformer_call_s": 0.281,
+      "chip_passes": 8
+     },
+     "host_loadavg_1m": 6.169921875,
+     "output_sha256": null
+    },
+    {
+     "timings": {
+      "conditioning_s": 0.048,
+      "generate_and_decode_s": 1.702,
+      "chip_transformer_call_s": 0.286,
+      "chip_passes": 8
+     },
+     "host_loadavg_1m": 6.169921875,
+     "output_sha256": null
+    },
+    {
+     "timings": {
+      "conditioning_s": 0.038,
+      "generate_and_decode_s": 1.563,
+      "chip_transformer_call_s": 0.279,
+      "chip_passes": 8
+     },
+     "host_loadavg_1m": 6.169921875,
+     "output_sha256": null
+    }
+   ]
+  },
+  {
+   "seconds": 30.0,
+   "label": "benchmark",
+   "warmup_runs": 1,
+   "repeats": 3,
+   "parts": {
+    "chip_passes": {
+     "n": 3,
+     "min": 8,
+     "median": 8,
+     "max": 8
+    },
+    "chip_transformer_call_s": {
+     "n": 3,
+     "min": 0.38,
+     "median": 0.383,
+     "max": 0.383
+    },
+    "conditioning_s": {
+     "n": 3,
+     "min": 0.038,
+     "median": 0.038,
+     "max": 0.039
+    },
+    "generate_and_decode_s": {
+     "n": 3,
+     "min": 3.033,
+     "median": 3.139,
+     "max": 3.167
+    }
+   },
+   "runs": [
+    {
+     "timings": {
+      "conditioning_s": 0.039,
+      "generate_and_decode_s": 3.033,
+      "chip_transformer_call_s": 0.383,
+      "chip_passes": 8
+     },
+     "host_loadavg_1m": 7.013671875,
+     "output_sha256": null
+    },
+    {
+     "timings": {
+      "conditioning_s": 0.038,
+      "generate_and_decode_s": 3.167,
+      "chip_transformer_call_s": 0.38,
+      "chip_passes": 8
+     },
+     "host_loadavg_1m": 8.1337890625,
+     "output_sha256": null
+    },
+    {
+     "timings": {
+      "conditioning_s": 0.038,
+      "generate_and_decode_s": 3.139,
+      "chip_transformer_call_s": 0.383,
+      "chip_passes": 8
+     },
+     "host_loadavg_1m": 8.1337890625,
+     "output_sha256": null
+    }
+   ]
+  },
+  {
+   "seconds": 60.0,
+   "label": "benchmark",
+   "warmup_runs": 1,
+   "repeats": 3,
+   "parts": {
+    "chip_passes": {
+     "n": 3,
+     "min": 8,
+     "median": 8,
+     "max": 8
+    },
+    "chip_transformer_call_s": {
+     "n": 3,
+     "min": 0.533,
+     "median": 0.534,
+     "max": 0.535
+    },
+    "conditioning_s": {
+     "n": 3,
+     "min": 0.039,
+     "median": 0.039,
+     "max": 0.041
+    },
+    "generate_and_decode_s": {
+     "n": 3,
+     "min": 6.157,
+     "median": 6.169,
+     "max": 6.201
+    }
+   },
+   "runs": [
+    {
+     "timings": {
+      "conditioning_s": 0.039,
+      "generate_and_decode_s": 6.169,
+      "chip_transformer_call_s": 0.534,
+      "chip_passes": 8
+     },
+     "host_loadavg_1m": 11.45068359375,
+     "output_sha256": null
+    },
+    {
+     "timings": {
+      "conditioning_s": 0.041,
+      "generate_and_decode_s": 6.157,
+      "chip_transformer_call_s": 0.535,
+      "chip_passes": 8
+     },
+     "host_loadavg_1m": 11.01953125,
+     "output_sha256": null
+    },
+    {
+     "timings": {
+      "conditioning_s": 0.039,
+      "generate_and_decode_s": 6.201,
+      "chip_transformer_call_s": 0.533,
+      "chip_passes": 8
+     },
+     "host_loadavg_1m": 11.25830078125,
+     "output_sha256": null
+    }
+   ]
+  },
+  {
+   "seconds": 120.0,
+   "label": "benchmark",
+   "warmup_runs": 1,
+   "repeats": 3,
+   "parts": {
+    "chip_passes": {
+     "n": 3,
+     "min": 8,
+     "median": 8,
+     "max": 8
+    },
+    "chip_transformer_call_s": {
+     "n": 3,
+     "min": 0.81,
+     "median": 0.812,
+     "max": 0.813
+    },
+    "conditioning_s": {
+     "n": 3,
+     "min": 0.04,
+     "median": 0.041,
+     "max": 0.063
+    },
+    "generate_and_decode_s": {
+     "n": 3,
+     "min": 10.511,
+     "median": 10.513,
+     "max": 10.847
+    }
+   },
+   "runs": [
+    {
+     "timings": {
+      "conditioning_s": 0.04,
+      "generate_and_decode_s": 10.513,
+      "chip_transformer_call_s": 0.81,
+      "chip_passes": 8
+     },
+     "host_loadavg_1m": 12.11572265625,
+     "output_sha256": null
+    },
+    {
+     "timings": {
+      "conditioning_s": 0.063,
+      "generate_and_decode_s": 10.847,
+      "chip_transformer_call_s": 0.813,
+      "chip_passes": 8
+     },
+     "host_loadavg_1m": 12.02392578125,
+     "output_sha256": null
+    },
+    {
+     "timings": {
+      "conditioning_s": 0.041,
+      "generate_and_decode_s": 10.511,
+      "chip_transformer_call_s": 0.812,
+      "chip_passes": 8
+     },
+     "host_loadavg_1m": 12.58935546875,
+     "output_sha256": null
+    }
+   ]
+  }
+ ]
+}

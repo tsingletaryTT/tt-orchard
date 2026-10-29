@@ -43,10 +43,13 @@ def make_inputs(spec: dict, seed: int, heavy_tail: bool, torch) -> dict:
     for name, shape in spec["inputs"].items():
         kind = spec.get("gen", {}).get(name, "normal")
         x = torch.randn(shape, generator=g)
-        if kind == "sigmoid":
+        if kind == "sigmoid":                             # values in (0, 1), no outliers (linear_scan's decay a)
             x = torch.sigmoid(x)
-        elif heavy_tail:                                  # a norm on unit-normal inputs is easy: add outliers
-            x = torch.where(torch.rand(shape, generator=g) < 0.01, x * 20.0, x)
+        else:
+            if kind == "positive":                            # values above 0 with a long right side (rsqrt)
+                x = torch.exp(x)
+            if heavy_tail:                                    # a norm on unit-normal inputs is easy: add outliers
+                x = torch.where(torch.rand(shape, generator=g) < 0.01, x * 20.0, x)
         ins[name] = x.to(torch.bfloat16)
     return ins
 
