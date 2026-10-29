@@ -185,3 +185,31 @@ Noise-floor tool (`python -m orchard.noise_floor`): it refuses the CPU-only floo
 the damage control on the last layer is not detected). Its floor holds two CPU runs and no chip arithmetic, which the tool states. The reading used instead is
 first-divergence against the float32 reference with the CPU floor printed beside every number, plus the known-bad control (the run with the default `rms_norm`, which the
 probe located at layer 14 with a 5 percent stated tolerance), plus teacher-forced token and logits agreement.
+
+## Update 6 (about 22:25 Pacific): both chips of the board, text quality and perplexity
+
+Correction to update 5. The benchmark records of the 8-bit MLP variants carry the bfloat16 floor (62.8 tok/s) because the record is written with one fixed policy. For bfloat8_b MLP weights
+the floor is 96.8 tok/s (5.3 GB per token), so 40.1 tok/s is 41 percent of it. The bfloat16 result stays at 54 percent. The record of a variant is a tok/s measurement; read its share from this log.
+
+Two chips (`chip_model_tp.py`, `run_chip.py --tp 2`): a 1 by 2 mesh of the board's chips with fabric 1D. The residual stream, the fused 2560-to-1088 input projection and the latent KV cache
+(one head) are replicated. Query heads are split 20 and 20 (`qb`, the per-head matmuls and the flash MLA op); `o_proj` is row-parallel; gate and up are column-parallel and down is
+row-parallel, with the intermediate width padded from 3,200 to 3,328 per chip so each of the 8 DRAM banks holds whole tiles (the DRAM-sharded matmuls run on 8 cores and reach 430 GB/s on these shapes);
+the LM head is split over the vocabulary. Two all-reduces per layer, 19 to 20 microseconds each for one row (`exp_tp.py`, correct to 0.25 percent). It ran correctly on the first attempt:
+16 of 16 teacher-forced tokens, layer 61 error 0.058 (single chip 0.056), decode logits PCC 0.9985 (record `bench_tp2_bf16.json` in the evidence folder):
+decode 37.96, 38.05, 37.98 tok/s after a warm-up run (single chip: 33.65), prefill 40 tokens in 1.05 s. That is 13 percent faster for twice the chips, and 30 percent of the two-die floor
+(125.7 tok/s). The attention side is a fixed cost per layer that two chips do not shrink (about 240 microseconds of small operations per layer against about 160 for the MLP), so the gain is small.
+The two-chip path shares the host with other work; the load average during the runs was 15.
+
+Text quality (`qual_check.py`, free-running greedy decode of 64 tokens, single chip opt 3 against the CPU float32 reference, six prompts: seasons, a Python function, a train word problem, a
+French translation, a two-sentence summary, a market at dawn): four of six texts are identical token for token over 64 tokens. The other two leave the reference at token 19 (seasons) and
+token 26 (Fibonacci) and stay on topic and fluent (both texts are in `qual_chip_opt3.json` and `qual_reference_float32.json`). Teacher-forced perplexity on the first 767 tokens of the
+WikiText-2 test split (raw), same window for all runs (`ppl_check.py`; the chip runs the window one token per step through the decode path and reads the logits after each step):
+
+| run | perplexity | mean absolute difference of per-token log probability against the float32 reference | largest difference |
+|---|---|---|---|
+| CPU float32 reference | 8.057 | | |
+| chip, one chip, bfloat16 (opt 3) | 8.007 | 0.051 | 1.25 |
+| chip, one chip, bfloat8_b MLP weights, LoFi | 8.047 | 0.078 | 1.81 |
+| chip, two chips, bfloat16 | 8.090 | 0.047 | 0.77 |
+
+All three chip runs are within 0.6 percent of the reference perplexity (one window, one text; not a benchmark of model quality).

@@ -44,6 +44,7 @@ def main():
     ap.add_argument("--shard", action="store_true", help="DRAM-sharded weights for the MLP and o_proj")
     ap.add_argument("--mlp-dtype", default="bf16", choices=["bf16", "bfp8", "bfp4"])
     ap.add_argument("--mlp-fidelity", default="hifi2", choices=["hifi2", "lofi", "hifi4"])
+    ap.add_argument("--tp", type=int, default=1, choices=[1, 2], help="2: both chips of the board, tensor parallel (chip_model_tp.py)")
     ap.add_argument("--layers", type=int, default=0, help="debug: truncate the stack (0 = all)")
     a = ap.parse_args()
     if a.prompt_file:
@@ -52,10 +53,19 @@ def main():
     tok = AutoTokenizer.from_pretrained(a.model_dir)
     ids = prompt_ids(tok)[0].tolist()
     n = len(ids)
-    dev = ttnn.open_device(device_id=0, trace_region_size=256 * 1024 * 1024)
+    if a.tp == 2:
+        ttnn.set_fabric_config(ttnn.FabricConfig.FABRIC_1D)
+        dev = ttnn.open_mesh_device(ttnn.MeshShape(1, 2), trace_region_size=256 * 1024 * 1024)
+    else:
+        dev = ttnn.open_device(device_id=0, trace_region_size=256 * 1024 * 1024)
     try:
         t0 = time.time()
-        m = ChipMiniCPM3(dev, a.model_dir, a.weights, attn=a.attn, max_len=a.max_len, fidelity=a.fidelity, upd=a.upd, opt=a.opt, shard=a.shard, mlp_dtype=a.mlp_dtype, mlp_fidelity=a.mlp_fidelity)
+        if a.tp == 2:
+            from chip_model_tp import ChipMiniCPM3TP
+            m = ChipMiniCPM3TP(dev, a.model_dir, a.weights, max_len=a.max_len, mlp_dtype=a.mlp_dtype, mlp_fidelity=a.mlp_fidelity)
+        else:
+            m = ChipMiniCPM3(dev, a.model_dir, a.weights, attn=a.attn, max_len=a.max_len, fidelity=a.fidelity, upd=a.upd, opt=a.opt, shard=a.shard,
+                             mlp_dtype=a.mlp_dtype, mlp_fidelity=a.mlp_fidelity)
         m.skip = set(x for x in a.skip.split(",") if x)
         print(f"model loaded on chip in {time.time() - t0:.1f}s", flush=True)
         if a.mode == "agree":
@@ -63,7 +73,11 @@ def main():
         else:
             bench(a, m, ids, n, tok)
     finally:
-        ttnn.close_device(dev)
+        if a.tp == 2:
+            ttnn.close_mesh_device(dev)
+            ttnn.set_fabric_config(ttnn.FabricConfig.DISABLED)
+        else:
+            ttnn.close_device(dev)
 
 
 def agree(a, m, ids, n):
@@ -146,7 +160,7 @@ def bench(a, m, ids, n, tok):
     floor = df.floor_for_board(cfg, {"default": "bf16"}, "p300", dies=1)
     med = summary["parts"]["decode_tok_s"]["median"]
     record = {"label": summary["label"], "model": "openbmb/MiniCPM3-4B", "config": {"attn": a.attn, "opt": a.opt, "shard": a.shard, "trace": a.trace, "upd": a.upd,
-              "fidelity": a.fidelity, "weights": "bfloat16 (MLP " + a.mlp_dtype + ", " + a.mlp_fidelity + ")", "chips": 1, "prompt_tokens": n, "steps": a.steps},
+              "fidelity": a.fidelity, "weights": "bfloat16 (MLP " + a.mlp_dtype + ", " + a.mlp_fidelity + ")", "chips": a.tp, "prompt_tokens": n, "steps": a.steps},
               "runs": results, "summary": summary, "floor": floor.as_dict(), "share_of_floor_median": df.share_of_floor(med, floor),
               "share_text": df.share_text(med, floor), "text": tok.decode(out)}
     print(record["share_text"], flush=True)
