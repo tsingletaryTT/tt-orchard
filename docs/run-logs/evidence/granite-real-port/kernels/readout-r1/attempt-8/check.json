@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "op": "ssd_readout",
+  "phase": "sim",
+  "passed": false,
+  "category": "tt_lang_error",
+  "first_line": "error: ValueError: copy() from a DFB block to a tensor requires a block acquired from wait(), not reserve()",
+  "sets": [],
+  "pcc_bar": 0.999,
+  "bars": {
+    "pcc": 0.999,
+    "rel_l2": 0.01,
+    "slope": [
+      0.98,
+      1.02
+    ],
+    "max_abs_atol": 0.01,
+    "max_abs_rtol": 0.01
+  },
+  "violations": [],
+  "provisional": true,
+  "elapsed_s": 0.94,
+  "tt_lang": {
+    "sim_version": "1.1.10+gfec38c6",
+    "source_sha": "fec38c6de4b6f24ce4cb359f04aecc8d4577d6f0",
+    "diagnostics_patched": true,
+    "patch_sha256": "e3964f222cc5dc253157f97645a914f8751ab613f0fa82eb334e97046da8f84f"
+  },
+  "sha256": {
+    "kernel.py": "3fcbc72f8924d77bbfe04c7b70fddfa0bc82c061499c092fe8dd6dfce775cdc9",
+    "kernel_harness.py": "64f100a7ca16627f3c65c2dc0941709cda9de5d8b099939d257728540b56aab0",
+    "references.py": "ba6180121c4ebfe5cfb18ac14d5d81ba0aea51691afb3f7f43a10645f6282743",
+    "kernel_check.py": "899d4c7d4070cda1a9b312d72c6c6dc43396d952ba4006f00cfb6db7dac95188",
+    "spec": "6451105fbd43b00c30515ba1e2f5c93f73ca5c6b0ab8ace866292543b57a9e82"
+  }
+}
