@@ -63,7 +63,7 @@ def read_containers(operator_home) -> list[Installed]:
     manifest, outside the models root that read_installed scans (issue 60). An entry that is not a container, or whose manifest
     cannot be read, is skipped."""
     try:
-        data = safeio.read_json(Path(operator_home).expanduser() / ".cache" / "tt-model" / "installed.json", max_bytes=MAX_INSTALLED_BYTES)
+        data = safeio.read_json(safeio.resolved(Path(operator_home).expanduser() / ".cache" / "tt-model" / "installed.json"), max_bytes=MAX_INSTALLED_BYTES)
     except safeio.SafeReadError:
         return []
     out = []
@@ -71,7 +71,7 @@ def read_containers(operator_home) -> list[Installed]:
         if not isinstance(e, dict) or not e.get("container") or not e.get("manifest"):
             continue
         try:
-            m = safeio.read_json(e["manifest"], max_bytes=MAX_INSTALLED_BYTES)
+            m = safeio.read_json(safeio.resolved(e["manifest"]), max_bytes=MAX_INSTALLED_BYTES)
             out.append(Installed(str(name), str(m["weights"]["repo_id"]), str(m.get("schema_version", "")),
                                  int(m.get("device_count") or 0)))
         except (safeio.SafeReadError, KeyError, TypeError, ValueError):

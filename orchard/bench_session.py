@@ -282,7 +282,7 @@ def stop_suspects(phases: list[dict]) -> dict:
 def load_items(path) -> dict:
     """The `--items` file: {phase: [document ids]}, each list non-empty, ids non-negative integers. Raises ValueError with the reason."""
     try:
-        data = safeio.read_json(path, max_bytes=MAX_ITEMS_BYTES)
+        data = safeio.read_json(safeio.resolved(path), max_bytes=MAX_ITEMS_BYTES)
     except safeio.SafeReadError as exc:
         raise ValueError(f"cannot read {path}: {exc.reason}") from exc
     if not isinstance(data, dict) or not data:

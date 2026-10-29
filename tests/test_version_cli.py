@@ -776,3 +776,23 @@ def test_a_notes_file_that_someone_else_created_is_not_removed_by_the_rollback(r
     code, _, err = run(repo, "release")
     assert code == 1
     assert theirs["path"].read_text(encoding="utf-8") == "someone else's notes\n"
+
+
+def test_a_write_that_fails_before_the_link_does_not_remove_notes_another_invocation_made(repo, monkeypatch):
+    """A second invocation creates the notes file while this one is writing its temporary file; this one then fails before os.link. The
+    rollback must not delete the other invocation's file."""
+    setup_release(repo)
+    real = C.atomic_write
+    theirs = {}
+
+    def write(path, text, **k):
+        if Path(path).parent.name == "releases":
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            Path(path).write_text("another invocation's notes\n", encoding="utf-8")
+            theirs["path"] = Path(path)
+            monkeypatch.setattr(os, "fsync", lambda fd: (_ for _ in ()).throw(OSError(5, "simulated: fsync of the temporary file failed")))
+        return real(path, text, **k)
+    monkeypatch.setattr(C, "atomic_write", write)
+    code, _, err = run(repo, "release")
+    assert code == 1
+    assert theirs["path"].read_text(encoding="utf-8") == "another invocation's notes\n"

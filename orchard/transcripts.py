@@ -122,7 +122,7 @@ def write_signature(events, path) -> int:
 
 def load_signature(path) -> list[Event]:
     try:
-        rows = safeio.read_jsonl(path, max_bytes=MAX_SIGNATURE_BYTES, expect=dict)
+        rows = safeio.read_jsonl(safeio.resolved(path), max_bytes=MAX_SIGNATURE_BYTES, expect=dict)
     except safeio.SafeReadError as exc:
         raise ValueError(f"cannot read the signature {Path(path).name}: {exc.reason}") from exc
     return [Event(**row) for row in rows]

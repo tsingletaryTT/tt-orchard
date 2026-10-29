@@ -62,7 +62,7 @@ def slug(model_id: str) -> str:
 
 def load_corpus(path) -> list[dict]:
     try:
-        data = safeio.read_json(path, max_bytes=MAX_CORPUS_BYTES)
+        data = safeio.read_json(safeio.resolved(path), max_bytes=MAX_CORPUS_BYTES)
     except safeio.SafeReadError as exc:
         raise CorpusError(f"cannot read {path}: {exc.reason}") from exc
     if not isinstance(data, list) or not data:

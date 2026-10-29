@@ -206,7 +206,7 @@ def installed_containers(operator_home) -> list[dict]:
     """tt-model's container packages (installed.json), each with the repo and chip count its manifest names."""
     path = Path(operator_home) / ".cache" / "tt-model" / "installed.json"
     try:
-        data = safeio.read_json(path, max_bytes=MAX_INSTALLED_BYTES)
+        data = safeio.read_json(safeio.resolved(path), max_bytes=MAX_INSTALLED_BYTES)
     except safeio.SafeReadError:
         return []
     out = []
@@ -214,7 +214,7 @@ def installed_containers(operator_home) -> list[dict]:
         if not isinstance(e, dict) or not e.get("container") or not e.get("image"):
             continue
         try:
-            m = safeio.read_json(e["manifest"], max_bytes=MAX_INSTALLED_BYTES)
+            m = safeio.read_json(safeio.resolved(e["manifest"]), max_bytes=MAX_INSTALLED_BYTES)
             out.append({"name": str(name), "repo": str(m["weights"]["repo_id"]),
                         "chips": int(m.get("device_count") or 0), "profile": e.get("profile")})
         except (safeio.SafeReadError, ValueError, KeyError, TypeError):

@@ -49,7 +49,7 @@ _CAMEL = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
 @lru_cache(maxsize=1)
 def load_data(path=DATA_FILE) -> dict:
     try:
-        return safeio.read_json(path, max_bytes=MAX_DATA_BYTES)
+        return safeio.read_json(safeio.resolved(path), max_bytes=MAX_DATA_BYTES)
     except safeio.SafeReadError as exc:
         raise ValueError(f"{path}: {exc.reason}") from exc
 

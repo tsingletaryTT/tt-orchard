@@ -218,7 +218,7 @@ def stage_2_vocab(run_dir) -> tuple[int, int] | None:
     `vocab` record, written by prepare_swap.py; issue 56), else None. Anything that is not whole numbers with the model's smaller and
     `trimmed` true is no record."""
     try:
-        rec = safeio.read_json(Path(run_dir) / "stages/2/model-dir-sources.json", max_bytes=MAX_RECORD_BYTES)
+        rec = safeio.read_json(safeio.resolved(Path(run_dir) / "stages/2/model-dir-sources.json"), max_bytes=MAX_RECORD_BYTES)
         v = rec["vocab"]
         m, b = v["model"], v["base"]
     except (safeio.SafeReadError, ValueError, KeyError, TypeError):
@@ -231,7 +231,7 @@ def stage_2_vocab(run_dir) -> tuple[int, int] | None:
 def _stage_2_grafted(run: Path) -> bool:
     """Did stage 2's swap graft the nearest model's mtp.* tensors? (model-dir-sources.json's mtp_graft record)"""
     try:
-        rec = safeio.read_json(run / "stages/2/model-dir-sources.json", max_bytes=MAX_RECORD_BYTES)
+        rec = safeio.read_json(safeio.resolved(run / "stages/2/model-dir-sources.json"), max_bytes=MAX_RECORD_BYTES)
     except safeio.SafeReadError:
         return False
     return isinstance(rec, dict) and isinstance(rec.get("mtp_graft"), dict)
@@ -240,7 +240,7 @@ def _stage_2_grafted(run: Path) -> bool:
 def _package_grafted(run: Path) -> bool:
     """Did stage 7 stage a grafted package? (package.json's mtp_graft record; finish and the gate read it)"""
     try:
-        rec = safeio.read_json(run / "stages/7/package.json", max_bytes=MAX_RECORD_BYTES)
+        rec = safeio.read_json(safeio.resolved(run / "stages/7/package.json"), max_bytes=MAX_RECORD_BYTES)
     except safeio.SafeReadError:
         return False
     return isinstance(rec, dict) and isinstance(rec.get("mtp_graft"), dict)
@@ -248,7 +248,7 @@ def _package_grafted(run: Path) -> bool:
 
 def _stage_2_graft_record(run: Path) -> dict | None:
     try:
-        rec = safeio.read_json(run / "stages/2/model-dir-sources.json", max_bytes=MAX_RECORD_BYTES)
+        rec = safeio.read_json(safeio.resolved(run / "stages/2/model-dir-sources.json"), max_bytes=MAX_RECORD_BYTES)
     except safeio.SafeReadError:
         return None
     rec = rec.get("mtp_graft") if isinstance(rec, dict) else None
@@ -450,7 +450,7 @@ def weights_wiring_problems(text: str, *, nearest_model: str) -> list[str]:
 
 def _json(path: Path, what: str) -> dict:
     try:
-        data = safeio.read_json(path, max_bytes=MAX_RECORD_BYTES)
+        data = safeio.read_json(safeio.resolved(path), max_bytes=MAX_RECORD_BYTES)
     except safeio.SafeReadError as exc:
         raise PackageError(f"{what} ({path}) is missing or not JSON: {exc.reason}") from None
     if not isinstance(data, dict):

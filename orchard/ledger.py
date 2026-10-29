@@ -66,10 +66,10 @@ def _complete_lines(path: Path) -> list[str]:
     are a write in progress or cut off by a crash; they are not part of the chain and are ignored
     here. Only a writer's `_recover` sets them aside.
 
-    The file is read through `safeio.read_bytes`: a FIFO does not block, a link or a device is refused, and a file over
+    The file is read through `safeio.read_prefix`: a FIFO does not block, a link or a device is refused, and a file over
     MAX_LEDGER_BYTES is never read. Every refusal is a LedgerCorrupt (issues 137, 138, 139). A missing file is an empty ledger."""
     try:
-        data = safeio.read_bytes(path, max_bytes=MAX_LEDGER_BYTES)
+        data = safeio.read_prefix(path, max_bytes=MAX_LEDGER_BYTES)     # a live supervisor appends while this reads: only the prefix is taken
     except safeio.SafeReadError as exc:
         if not os.path.lexists(path):
             return []

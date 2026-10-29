@@ -70,7 +70,7 @@ def _read_json(run: Path, rel: str):
     try:
         if not path.resolve().is_relative_to(run.resolve()):
             return None
-        return safeio.read_json(path, max_bytes=MAX_FILE_BYTES)       # NaN, Infinity, a repeated key and deep nesting are refused
+        return safeio.read_json(path.resolve(), max_bytes=MAX_FILE_BYTES)       # NaN, Infinity, a repeated key and deep nesting are refused
     except (safeio.SafeReadError, OSError, RuntimeError):             # RuntimeError: a link loop in resolve()
         return None
 

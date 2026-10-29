@@ -101,7 +101,7 @@ def load_suite(path=None) -> dict:
     """The suite from `path` (the committed file by default). Raises SuiteError with every problem."""
     path = Path(path) if path else SUITE_FILE
     try:
-        data = safeio.read_json(path, max_bytes=MAX_SUITE_BYTES)
+        data = safeio.read_json(safeio.resolved(path), max_bytes=MAX_SUITE_BYTES)
     except safeio.SafeReadError as exc:
         raise SuiteError(f"cannot read the prompt suite {path}: {exc.reason}") from exc
     problems = check_suite(data)

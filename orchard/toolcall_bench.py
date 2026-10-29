@@ -44,7 +44,7 @@ def _rows(path) -> list[dict]:
     """The JSON values on the lines of `path` ("\n" only: str.splitlines() would also cut a record at a U+2028 left raw inside a JSON
     string). A file that cannot be read, is too large or holds a bad line is a ValueError (issues 135 to 139)."""
     try:
-        return safeio.read_jsonl(path, max_bytes=MAX_ROWS_BYTES)
+        return safeio.read_jsonl(safeio.resolved(path), max_bytes=MAX_ROWS_BYTES)
     except safeio.SafeReadError as exc:
         raise ValueError(f"cannot read {Path(path).name}: {exc.reason}") from exc
 

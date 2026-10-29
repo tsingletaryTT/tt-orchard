@@ -897,6 +897,7 @@ UNREGISTERED_MODULES = (
     '_proofs/telegraph_sqlite.py',
     'adapters/gozer.py',
     'agent.py',
+    'audio_bars.py',
     'audio_cli.py',
     'audio_facts.py',
     'audio_reference.py',
@@ -905,6 +906,7 @@ UNREGISTERED_MODULES = (
     'audio_runtime.py',
     'bench_control.py',
     'bench_proxy.py',
+    'boards_seen.py',
     'caches.py',
     'canary.py',
     'cli.py',
@@ -933,6 +935,7 @@ UNREGISTERED_MODULES = (
     'telegraph.py',
     'telegraph_cmd.py',
     'ttnn_dump.py',
+    'verify_package.py',
     'virtualspend.py',
     'webui.py',
 )

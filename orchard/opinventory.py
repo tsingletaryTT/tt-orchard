@@ -63,7 +63,7 @@ def _read(path):
     """The parsed JSON file at `path`. A file that is missing, is not a regular file, is over MAX_DATA_BYTES or is not strict JSON is a
     ValueError, the documented error of the loaders below (issues 135 to 139)."""
     try:
-        return safeio.read_json(path, max_bytes=MAX_DATA_BYTES)
+        return safeio.read_json(safeio.resolved(path), max_bytes=MAX_DATA_BYTES)
     except safeio.SafeReadError as exc:
         raise ValueError(f"{path}: {exc.reason}") from exc
 
@@ -99,7 +99,7 @@ def load_dump(version, data_dir=DATA_DIR):
     if not p.is_file():
         return None
     try:
-        d = safeio.read_json(p, max_bytes=MAX_DATA_BYTES, expect=dict)
+        d = safeio.read_json(safeio.resolved(p), max_bytes=MAX_DATA_BYTES, expect=dict)
     except safeio.SafeReadError:
         return None
     return d if d.get("ttnn_version") == version and isinstance(d.get("names"), list) else None
@@ -109,7 +109,7 @@ def load_verified(path=None) -> dict:
     """{aten op or `pattern:<kind>`: entry} from verified_mappings.json, or {} when there is none or it is unusable."""
     p = Path(path) if path else DATA_DIR / "verified_mappings.json"
     try:
-        d = safeio.read_json(p, max_bytes=MAX_DATA_BYTES)
+        d = safeio.read_json(safeio.resolved(p), max_bytes=MAX_DATA_BYTES)
     except safeio.SafeReadError:
         return {}
     ents = d.get("entries") if isinstance(d, dict) else None
