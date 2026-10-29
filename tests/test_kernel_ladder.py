@@ -184,13 +184,15 @@ _PROBE_IDS = __import__("itertools").count(1)
 
 
 def write_rung(out: Path, op: str, recs: list[dict], *, wall=1800.0, library="none", model="coder-x", sim="1.1.10",
-               seed_base=77, top_p=None, max_turns=40):
+               seed_base=77, top_p=None, max_turns=40, stopped=None):
     d = out / op
     d.mkdir(parents=True, exist_ok=True)
     header = {"probe_id": f"p-{op}-{next(_PROBE_IDS)}", "coder_model": model,
               "budget": {"wall_s": wall, "max_turns": max_turns},
               "sampling": {"temperatures": [0.7], "top_p": top_p, "seed_base": seed_base, "seed_base_from": "--seed"},
               "library": {"mode": library}, "tt_lang": {"sim_version": sim, "source_sha": "a" * 40}}
+    if stopped:
+        header["stopped"] = stopped
     for r in recs:
         r["op"] = op
     (d / "kernel-probe-report.json").write_text(json.dumps({"header": header, "attempts": recs}))
@@ -747,3 +749,24 @@ def test_sigterm_during_the_ladder_writes_the_report_returns_4_and_restores_the_
     assert code == 4 and signal.getsignal(signal.SIGTERM) == before
     data = json.loads((tmp_path / "ladder-report.json").read_text())
     assert "interrupted" in data["stopped"] and [r["op"] for r in data["rungs"]] == ["add"]
+
+
+def test_a_rung_that_was_stopped_is_not_the_first_zero_rung(tmp_path):
+    """An interrupted rung has fewer attempts than planned, so its zero is not evidence that passes stop there."""
+    write_rung(tmp_path, "add", [attempt(True)])
+    write_rung(tmp_path, "mul", [attempt(category="numeric_mismatch", first="p")], stopped="interrupted during attempt 2")
+    write_rung(tmp_path, "rsqrt", [attempt(category="numeric_mismatch", first="p")])
+    data = kl.write_ladder_report(tmp_path, ["add", "mul", "rsqrt"])
+    assert data["first_zero_rung"] == "rsqrt"
+    text = (tmp_path / "ladder-report.md").read_text()
+    assert "mul" in text and "stopped early" in text
+
+
+def test_report_aggregation_survives_nested_metadata_of_the_wrong_type(tmp_path):
+    d = tmp_path / "add"
+    d.mkdir()
+    header = {"probe_id": "p", "budget": "x", "sampling": "y", "library": 3, "tt_lang": [1]}
+    rec = {"op": "add", "attempt": 1, "passed_sim": True, "sampling": "z", "agent_wall_s": "slow"}
+    (d / "kernel-probe-report.json").write_text(json.dumps({"header": header, "attempts": [rec]}))
+    data = kl.write_ladder_report(tmp_path, ["add"])
+    assert data["rungs"][0]["passed"] == 1

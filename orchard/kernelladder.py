@@ -160,6 +160,16 @@ def parse_seconds_map(text: str | None, flag: str) -> dict[str, float]:
 
 # ---- the table -------------------------------------------------------------------------------------------------
 
+def _num(value) -> float:
+    """`value` as a float, or 0.0 when it is not a number."""
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0.0
+
+
+def _d(value) -> dict:
+    """`value` when it is a dict, else an empty one: a report written by something else may hold any type."""
+    return value if isinstance(value, dict) else {}
+
+
 def rung_row(op: str, attempts: list[dict], header: dict | None = None) -> dict:
     """One rung's numbers from its attempt records: counts only. `walls_s` are the agent wall times of the passes."""
     header = header or {}
@@ -172,28 +182,29 @@ def rung_row(op: str, attempts: list[dict], header: dict | None = None) -> dict:
     pass_walls = [a["agent_wall_s"] for a in attempts if a.get("passed_sim") is True
                   and isinstance(a.get("agent_wall_s"), (int, float))]
     all_walls = [a["agent_wall_s"] for a in attempts if isinstance(a.get("agent_wall_s"), (int, float))]
-    seeds = [((a.get("sampling") or {}).get("seed")) for a in sorted(attempts, key=lambda a: a.get("attempt", 0))]
-    budget = header.get("budget") if isinstance(header.get("budget"), dict) else {}
+    seeds = [(_d(a.get("sampling")).get("seed")) for a in sorted(attempts, key=lambda a: a.get("attempt", 0))]
+    budget = _d(header.get("budget"))
     return {"op": op, "attempts": len(attempts), "passed": passes,
             "classes": {c: n for c, n in classes.items() if n},
             "pass_walls_s": pass_walls, "median_pass_wall_s": statistics.median(pass_walls) if pass_walls else None,
             "total_wall_s": round(sum(all_walls), 1), "seeds": seeds,
-            "temperatures": sorted({float((a.get("sampling") or {}).get("temperature") or 0.0) for a in attempts}),
+            "temperatures": sorted({float(_d(a.get("sampling")).get("temperature") or 0.0) for a in attempts}),
             "wall_budget_s": budget.get("wall_s"), "max_turns": budget.get("max_turns"),
-            "library": (header.get("library") or {}).get("mode"), "probe_id": header.get("probe_id"),
+            "library": _d(header.get("library")).get("mode"), "probe_id": header.get("probe_id"),
             "coder_model": header.get("coder_model"),
-            "sim_version": (header.get("tt_lang") or {}).get("sim_version"),
-            "source_sha": (header.get("tt_lang") or {}).get("source_sha"),
-            "seed_base": (header.get("sampling") or {}).get("seed_base"),
-            "top_p": (header.get("sampling") or {}).get("top_p"),
+            "sim_version": _d(header.get("tt_lang")).get("sim_version"),
+            "source_sha": _d(header.get("tt_lang")).get("source_sha"),
+            "seed_base": _d(header.get("sampling")).get("seed_base"),
+            "top_p": _d(header.get("sampling")).get("top_p"),
             "stopped": header.get("stopped")}
 
 
 def first_zero_rung(rows: list[dict]) -> str | None:
-    """The first rung, in ladder order, that ran at least one attempt and passed none; None when every rung that ran
-    has a pass (or none ran). Rungs not run are skipped, and the report says which they were."""
+    """The first rung, in ladder order, that ran at least one attempt, passed none and was not stopped early; None when
+    there is none. A rung whose run was stopped has fewer attempts than planned, so its zero is not evidence. Rungs not
+    run are skipped, and the report says which they were."""
     for r in sorted(rows, key=lambda r: LADDER.index(r["op"]) if r["op"] in LADDER else len(LADDER)):
-        if r["attempts"] and r["passed"] == 0:
+        if r["attempts"] and r["passed"] == 0 and not r.get("stopped"):
             return r["op"]
     return None
 
@@ -264,6 +275,10 @@ def ladder_lines(rows: list[dict], *, skipped: list[str], stopped: str | None, s
                   f"(rung {LADDER.index(zero) + 1} of {len(LADDER)}).", ""]
     elif rows:
         lines += ["No rung that ran had zero passes.", ""]
+    stopped_rungs = [r for r in rows if r.get("stopped")]
+    if stopped_rungs:
+        lines += ["Rungs stopped early, whose counts are partial and are not used for the first zero rung: "
+                  + ", ".join(f"{r['op']} ({r['stopped']})" for r in stopped_rungs) + ".", ""]
     walled = [r for r in rows if r["classes"].get("wall_clock")]
     if walled:
         lines += ["Attempts that ended on the wall budget with no simulator result are counted as `wall_clock`: "
