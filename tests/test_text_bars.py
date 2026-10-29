@@ -192,3 +192,16 @@ def test_the_stated_limits_are_present():
 def test_a_reference_perplexity_of_zero_is_refused_not_divided_by():
     r = tb.perplexity_report({"tokens": 5, "perplexity": 0}, {"tokens": 5, "perplexity": 0})
     assert not r["ok"] and "reference" in r["reasons"][0]
+
+
+def test_an_optional_array_the_chip_run_does_not_record_is_not_compared(tmp_path):
+    """final_norm is optional (the MiniCPM3 chip script does not record it); a missing prefill or decode logits array is still a failure."""
+    ref_arrays, ref, floors, _ = runs(tmp_path)
+    chip_arrays = {k: v for k, v in perturb(ref_arrays, 0.03, seed=3).items() if k[1] != "final_norm"}
+    chip = load(write_run(tmp_path / "nofn", chip_arrays, dtype="bfloat16"))
+    rep = tb.chip_report(ref, floors, chip)
+    assert rep["ok"], rep["reasons"]
+    assert "final_norm" not in [e["name"] for e in rep["other"]]
+    chip_arrays = {k: v for k, v in chip_arrays.items() if k[1] != tr.PREFILL_LOGITS}
+    chip2 = load(write_run(tmp_path / "nopre", chip_arrays, dtype="bfloat16"))
+    assert not tb.chip_report(ref, floors, chip2)["ok"]

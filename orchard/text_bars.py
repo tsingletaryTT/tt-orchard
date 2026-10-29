@@ -131,7 +131,9 @@ def chip_report(ref, floors: dict, chip) -> dict:
     ops = sorted(n for n in _entries(ref, "layer") if "." in n)
     block_entries = [_entry(ref, floors, chip, "layer", n) for n in blocks]
     op_entries = [_entry(ref, floors, chip, "layer", n) for n in ops if ("layer", n) in chip.entries]
-    other_names = [n for n in sorted(_entries(ref, "other")) if n == tr.PREFILL_LOGITS or n.startswith("dec_logits_") or n == "final_norm"]
+    # final_norm is optional: it is compared when both runs hold it. The logits arrays are required of the chip run.
+    other_names = [n for n in sorted(_entries(ref, "other")) if n == tr.PREFILL_LOGITS or n.startswith("dec_logits_")
+                   or (n == "final_norm" and ("other", n) in chip.entries)]
     other_entries = [_entry(ref, floors, chip, "other", n) for n in other_names]
     first_block = next((e for e in block_entries if e["leaves"]), None)
     first_op = None

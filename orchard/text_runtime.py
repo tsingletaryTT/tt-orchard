@@ -119,7 +119,7 @@ class TextRuntime:
     scripts_dir: Path = REPO
     shipped_files: tuple[str, ...] = ()     # names under scripts_dir that a package carries
     variants: tuple[Variant, ...] = ()
-    context_limit = 0               # tokens the runtime was measured to
+    context_limit = 0               # the context length the package states: the server's default cache length
     limits: tuple[str, ...] = ()
     min_layers = 1
 
@@ -186,7 +186,7 @@ class MiniCPM3(TextRuntime):
     variants = (Variant("bf16", ("--opt", "3", "--upd", "paged"), "all weights bfloat16, HiFi2 for the MLP"),
                 Variant("mlp8", ("--opt", "3", "--upd", "paged", "--mlp-dtype", "bfp8", "--mlp-fidelity", "lofi"),
                         "MLP weights 8-bit block floating point with LoFi, everything else bfloat16"))
-    context_limit = 922            # the longest prompt measured (docs/run-logs/2026-10-29-overnight-minicpm3-4b.md); the model's own limit is 32768
+    context_limit = 2048           # the server's default cache length (serve.py --max-len); the model's own limit is 32768
     limits = ("One chip only on this route. The two-chip tensor-parallel version (chip_model_tp.py) is in the scripts and was not run by the stages.",
               "Decoding is greedy only; the server ignores temperature and top_p.",
               "Prefill of the server's prompt is one token per step; a batched prefill exists in the single-chip model and is used by the benchmark.")
@@ -391,7 +391,7 @@ def adapter_problems(rtm: TextRuntime, ctx: TextContext | None = None) -> list[s
         out.append(f"variant names must be unique lowercase words, got {names}")
     out += [f"shipped file {f} is not in {rtm.scripts_dir}" for f in rtm.shipped_files if not (rtm.scripts_dir / f).is_file()]
     if rtm.context_limit <= 0:
-        out.append("context_limit must be the number of tokens the runtime was measured to")
+        out.append("context_limit must be the context length the package states")
     if ctx is not None:
         v = rtm.default_variant()
         cmds = {"reference": rtm.reference_argv(ctx), "ppl_reference": rtm.ppl_reference_argv(ctx, "out.json"), "agree": rtm.agree_argv(ctx, v, "out"),
