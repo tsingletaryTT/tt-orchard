@@ -547,6 +547,7 @@ def make_repo(root: Path):
     (venv / "bin" / "tt-lang-sim").write_text(textwrap.dedent(f"""\
         #!/bin/sh
         echo "$PWD $1" >> {marker}
+        echo "$HOME $PATH" >> {marker}.env
         python3 "$1"
         echo "{needles}"
         exit 1
@@ -648,3 +649,29 @@ def test_a_checkout_directory_that_cannot_be_searched_is_handled_wherever_it_is_
     finally:
         os.chmod(f.src, 0o755)
         os.chmod(tree, 0o755)
+
+
+def test_relative_venv_checkout_scratch_and_path_still_verify_from_the_temporary_directory(tmp_path, monkeypatch):
+    """The programs run in a directory made for the call, so nothing handed to them may be relative to the caller's."""
+    env, sha, marker = make_repo(tmp_path)
+    monkeypatch.setattr(ttlang_pin, "SHA", sha)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "bin").mkdir()
+    rel = ttlang_env.KEnv(src_dir=Path("tt-lang"), venv_dir=Path("venv"), scratch_dir=Path("scratch"),
+                          environ={"PATH": "bin" + os.pathsep + os.environ["PATH"]})
+    assert not rel.sim.is_absolute()
+    got = ttlang_env.verify(rel)
+    assert got.status == ttlang_env.OK, got.detail
+    assert len(marker.read_text().splitlines()) == len(defaults.TTLANG_NEGATIVE_EXAMPLES)
+    for line in Path(str(marker) + ".env").read_text().splitlines():
+        home, path = line.split(" ", 1)
+        assert os.path.isabs(home) and home.startswith(str(tmp_path))
+        assert all(os.path.isabs(p) for p in path.split(os.pathsep) if p)
+        assert path.split(os.pathsep)[0] == str(tmp_path / "bin")
+
+
+def test_minimal_environment_paths_do_not_depend_on_the_callers_directory(tmp_path):
+    env = ttlang_env.KEnv(src_dir=Path("s"), venv_dir=Path("v"), scratch_dir=Path("scratch"), environ={"PATH": "bin:/usr/bin"})
+    out = ttlang_env.minimal_env(env)
+    assert all(os.path.isabs(out[k]) for k in ("HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "HF_TOKEN_PATH"))
+    assert all(os.path.isabs(p) for p in out["PATH"].split(os.pathsep))

@@ -238,7 +238,11 @@ def minimal_env(env: KEnv) -> dict:
     """An allow-listed environment for running code from the checkout. HOME is a directory that is not created."""
     source = env.environ if env.environ is not None else os.environ
     out = {k: source[k] for k in VERIFY_ENV_ALLOW if k in source}
-    home = str(Path(env.scratch_dir) / "verify-home")
+    # The programs run in another working directory, so every path they are handed must not depend on this one: a
+    # relative PATH entry is made absolute here, and HOME is absolute below.
+    if "PATH" in out:
+        out["PATH"] = os.pathsep.join(os.path.abspath(p) if p else p for p in out["PATH"].split(os.pathsep))
+    home = os.path.abspath(Path(env.scratch_dir) / "verify-home")
     out.update({"HOME": home, "XDG_CONFIG_HOME": home + "/.config", "XDG_CACHE_HOME": home + "/.cache",
                 "HF_TOKEN_PATH": home + "/no-hf-token", "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0",
                 "TT_VISIBLE_DEVICES": NO_CHIP, "TT_METAL_VISIBLE_DEVICES": NO_CHIP})
@@ -294,8 +298,12 @@ def verify(env: KEnv, *, allow_pin_mismatch: bool = False) -> Result:
             target = Path(work) / p
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(text)
+        # The working directory is `work`, so the simulator and the program are named by absolute paths: a relative
+        # --venv-dir would otherwise be looked up under `work`.
+        sim = os.path.abspath(env.sim)
+        run_env = minimal_env(env)
         for rel, needles in defaults.TTLANG_NEGATIVE_EXAMPLES:
-            rc, out, err = env.run([str(env.sim), str(Path(work) / "examples" / rel)], 300, minimal_env(env), work)
+            rc, out, err = env.run([sim, os.path.abspath(Path(work) / "examples" / rel)], 300, run_env, work)
             text = f"{out}\n{err}"
             if rc == 0:
                 return Result("verify", FAIL, f"{rel} exited 0 but it must fail")

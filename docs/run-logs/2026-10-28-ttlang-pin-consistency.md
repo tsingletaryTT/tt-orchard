@@ -201,3 +201,8 @@ Tests include a real git repository with a stand-in simulator that records its w
 that a program modified to write a file never ran, and that the checkout is clean afterwards. Each guard was removed once and a test went
 red: the modified-file block (4 tests), running the working tree's version (1), the working directory (1), removing the directory (1),
 the no-fallback rule (1), the unanswered-git rule (1), the `examples/` guard (1), the head-commit guard (1), the tree guard (1).
+
+## Review round 4 (Copilot, PR 198, head b12c7f9)
+
+- The comment on the verification fake in `tests/test_kernelprobe.py` was stale. At b12c7f9 the fake answers `git show`, `ls-tree` and `status`, and the three tests it named (two override-success tests and the clean-run report test) pass when run alone and in the full suite on that head.
+- A relative `--venv-dir` (or `ORCHARD_TTLANG_VENV`) gave a relative simulator path, and the programs now run in a temporary working directory, so the executable was looked up under that directory and `verify` failed although the version check had passed. The class: every path that crosses into the temporary-directory run. The simulator and the program are named by absolute paths, a relative `PATH` entry is made absolute, and `HOME`, the config and cache directories and the token path are absolute. A test runs `verify` from a relative checkout, venv, scratch and `PATH`. Each guard was removed once and a test went red (the simulator path, the `PATH` entries, `HOME`, the program path).
