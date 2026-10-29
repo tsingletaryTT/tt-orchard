@@ -85,21 +85,7 @@
     .chipnote { margin-top: .6rem; font-size: .8rem; color: var(--muted); min-height: 2.4em; }
     .note { margin-top: 1rem; font-size: .82rem; color: var(--muted2); }
 
-    /* catalog grid */
-    .legend { display: flex; flex-wrap: wrap; gap: .5rem; margin-bottom: 1.2rem; }
-    .legend button { all: unset; cursor: pointer; font: .78rem var(--mono); padding: .25rem .7rem; border-radius: 999px; border: 1px solid var(--border-hi); color: var(--text); }
-    .legend button:focus-visible, .tabs button:focus-visible, .tile:focus-visible, .cmd button:focus-visible { outline: 2px solid var(--teal); outline-offset: 2px; }
-    .legend button[aria-pressed="true"] { background: var(--teal); color: #05222a; border-color: var(--teal); }
-    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(11.5rem, 1fr)); gap: .6rem; }
-    .tile { all: unset; cursor: pointer; display: block; box-sizing: border-box; border: 1px solid var(--border); border-left-width: 4px; border-radius: 8px; padding: .55rem .7rem; background: var(--bg1); }
-    .tile:hover, .tile:focus-visible { background: var(--bg2); border-color: var(--teal); }
-    .tile .id { font: .78rem var(--mono); color: var(--text); word-break: break-all; } .tile .c { font: .7rem var(--mono); margin-top: .15rem; }
-    .tile.weights-only { border-left-color: var(--green); } .tile.weights-only .c { color: var(--green); }
-    .tile.full-port { border-left-color: var(--orange); } .tile.full-port .c { color: var(--orange); }
-    .tile.unknown { border-left-color: var(--pink); } .tile.unknown .c { color: var(--pink); }
-    .tile.dim { opacity: .18; }
-    #why { margin-top: 1rem; min-height: 3.2em; font: .85rem var(--mono); color: var(--muted); border: 1px dashed var(--border-hi); border-radius: 8px; padding: .7rem 1rem; }
-    #why b { color: var(--text); }
+    .tabs button:focus-visible, .cmd button:focus-visible { outline: 2px solid var(--teal); outline-offset: 2px; }
 
     /* shots */
     .tabs { display: flex; gap: .5rem; flex-wrap: wrap; margin-bottom: 1rem; }
@@ -126,6 +112,31 @@
     .seg:nth-child(odd) { background: var(--teal); } .seg:nth-child(even) { background: #3fb5aa; } .seg.skip { background: transparent; }
     .tl-legend { display: grid; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); gap: .4rem 1.5rem; max-width: 60rem; margin-top: 1rem; font: .8rem var(--mono); color: var(--muted); }
     .tl-legend b { color: var(--text); font-weight: 500; }
+
+
+    /* progression and stories */
+    .prog { display: grid; grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr)); gap: .5rem; margin: 0 0 2.2rem; max-width: 70rem; }
+    .prog a { display: block; border: 1px solid var(--border); border-left: 3px solid var(--teal-dim); border-radius: 8px; padding: .5rem .7rem; background: var(--bg1); color: var(--text); }
+    .prog a:hover, .prog a:focus-visible { background: var(--bg2); border-color: var(--teal); text-decoration: none; }
+    .prog i { font: normal .7rem var(--mono); color: var(--teal-dim); margin-right: .4rem; }
+    .prog b { font: 600 .82rem var(--mono); }
+    .prog span { display: block; font-size: .78rem; color: var(--muted); margin-top: .15rem; }
+    .stories { display: grid; gap: 1.2rem; max-width: 62rem; }
+    .story { background: var(--bg1); border: 1px solid var(--border); border-radius: 10px; padding: 1.1rem 1.3rem; scroll-margin-top: 4.5rem; }
+    .shead { display: flex; flex-wrap: wrap; align-items: baseline; gap: .6rem; }
+    .shead .num { font: 600 .8rem var(--mono); color: #05222a; background: var(--teal); border-radius: 999px; min-width: 1.6rem; text-align: center; padding: .05rem .4rem; }
+    .shead h3 { font-size: 1.05rem; font-weight: 500; overflow-wrap: anywhere; }
+    .shead .m { font-family: var(--mono); font-size: .95rem; }
+    .shead .tag { margin-left: auto; font: .72rem var(--mono); color: var(--yellow); border: 1px solid var(--border-hi); border-radius: 999px; padding: .1rem .6rem; }
+    .story .what { color: var(--muted); font-size: .9rem; margin: .4rem 0 .9rem; }
+    .story .rows { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 22rem), 1fr)); gap: .9rem 1.4rem; }
+    .story .rows b { display: block; font: .7rem var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--teal-dim); margin-bottom: .25rem; }
+    .story .rows p { font-size: .88rem; color: #c6d5da; }
+    .story .logs { margin-top: .9rem; font: .78rem var(--mono); color: var(--muted2); }
+    .now { display: grid; grid-template-columns: repeat(auto-fit, minmax(19rem, 1fr)); gap: 1rem; max-width: 62rem; }
+    .now ul { margin-left: 1.1rem; font-size: .88rem; color: #c6d5da; }
+    .now li { margin-bottom: .4rem; }
+    h3.edges { font: .72rem var(--mono); letter-spacing: .1em; text-transform: uppercase; color: var(--teal-dim); margin: 2rem 0 .6rem; }
 
     /* stops */
     .stops { display: grid; grid-template-columns: repeat(auto-fit, minmax(19rem, 1fr)); gap: 1rem; }
@@ -155,7 +166,7 @@
   <span class="brand">tt-orchard</span>
   <div class="links">
     <a href="#watch">Watch a run</a><a href="#sorting">Sorting</a><a href="#screens">The page</a><a href="#time">Time</a>
-    <a href="#bench">Measured</a><a href="#stops">Stops</a><a href="#published">Published</a><a href="#overnight">Overnight</a><a href="#install">Install</a>
+    <a href="#bench">Measured</a><a href="#stories">Stories</a><a href="#stops">Stops</a><a href="#direction">Now</a><a href="#install">Install</a>
     <a class="gh" href="https://github.com/tsingletaryTT/tt-orchard">GitHub</a>
   </div>
 </nav>
@@ -194,16 +205,8 @@
 
 <section class="section edge" id="sorting">
   <div class="label">Stage 0 reads the model before it touches a chip</div>
-  <h2>Twenty-nine catalog models, sorted from their headers</h2>
-  <p class="sub">Stage 0 compares a model's config and weight headers with the nearest model that already runs. It downloads no weights. Here it is run on 29 models from the tt-model-manager catalog, against Qwen3.8-27B. Every one of these already runs on Tenstorrent chips as a hand-built package, so <code>full-port</code> here means only that the model differs from Qwen3.8-27B in more than its weights. Select a tile to see the first reason stage 0 gave.</p>
-  <div class="legend" id="legend" role="group" aria-label="Filter by class">
-    <button type="button" data-f="all" aria-pressed="true">all 29</button>
-    <button type="button" data-f="weights-only" aria-pressed="false">weights-only</button>
-    <button type="button" data-f="full-port" aria-pressed="false">full-port</button>
-    <button type="button" data-f="unknown" aria-pressed="false">unknown</button>
-  </div>
-  <div class="grid" id="grid"></div>
-  <div id="why" aria-live="polite">Select a model.</div>
+  <h2>Every model is sorted from its headers</h2>
+  <p class="sub">Stage 0 compares a model's config and weight headers with the nearest model that already runs, downloads no weights, and names a class: <code>weights-only</code>, <code>weights+sidecar</code>, <code>vocab-trim</code>, <code>restricted-head</code>, <code>stock-runtime</code>, <code>full-port</code> or <code>unknown</code>. Audio models take a separate path. The README lists the classes, and the stories below show what several of them led to.</p>
 </section>
 
 <section class="section edge" id="screens">
@@ -239,10 +242,140 @@
   <div class="callout"><b>Read the GSM8K bar with care.</b> The GSM8K lead is mostly a measuring artefact: the harness's stop string cuts thinking models off, and the base was cut off more often. On the answered items both models score about 0.97. The other five are within noise or a small lead. The log says this in full.</div>
 </section>
 
+<section class="section edge" id="stories">
+  <div class="label">What we brought up, in the order of what each model taught the tool</div>
+  <h2>From a harness built around one model to a 35-line patch</h2>
+  <p class="sub">The first models each needed a large piece of new harness work to get past a stop. The later ones needed small changes, because the earlier work was already there. Each story gives what stopped the model, what was built or changed, the measured result with its limits, and what the next model got because of it. Pull request sizes are added lines including tests. Every figure comes from the run log linked under each story.</p>
+  <nav class="prog" aria-label="The progression, from large changes to small ones"><a href="#m-hemmingway"><i>1</i><b>Hemmingway-1</b><span>the supervisor</span></a><a href="#m-clef"><i>2</i><b>Clef</b><span>a class</span></a><a href="#m-rag-gate"><i>3</i><b>RAG-Gate</b><span>environment checks</span></a><a href="#m-pi"><i>4</i><b>bytkim pi</b><span>a preflight bug</span></a><a href="#m-arex"><i>5</i><b>AREX-2</b><span>a measured trial</span></a><a href="#m-cjk"><i>6</i><b>CJK-Trim</b><span>a small class</span></a><a href="#m-coder"><i>7</i><b>Coder-Next</b><span>no supervisor change</span></a><a href="#m-audio"><i>8</i><b>Stable Audio 3</b><span>a new pipeline</span></a><a href="#m-granite"><i>9</i><b>Granite-4.0-H</b><span>coder-written kernels</span></a><a href="#m-minicpm"><i>10</i><b>MiniCPM3-4B</b><span>no new kernel</span></a><a href="#m-qwen35"><i>11</i><b>Qwen3.5-35B</b><span>a 35-line patch</span></a></nav>
+  <div class="stories">
+    <article class="story" id="m-hemmingway">
+      <div class="shead"><span class="num">1</span><h3><span class="m">Altworld/Hemmingway-1</span></h3><span class="tag">the supervisor itself</span></div>
+      <p class="what">A creative-writing fine-tune of Qwen3.8-27B, weights only. 2 to 4 October.</p>
+      <div class="rows">
+        <div><b>What stopped it</b><p>Run 1 and run 2 stopped at the coder: the reply was empty because the reasoning used the whole token budget, and two 4-chip packages answered with noise. Agent steps then failed on cut-off and empty replies and looped in thinking mode. Stage 2 had no recipe for swapping weights into an installed package, and the agent spent 60 turns reading source and wrote no test.</p></div>
+        <div><b>What we built or changed</b><p>A known-answer check on the coder at first boot (7 times 6 must give 42). A retry for cut-off and empty replies, and thinking off for agent turns. A weights-swap skill, then tested template scripts for stages 2 and 4 that the agent configures with a small JSON file. Two watchdog detectors: no file written in 20 turns, and the same calls three turns in a row. Stage 4 runs one test per chip count, and stage 7 packages the result. The 4-chip noise was a stale tensor cache, found by moving it aside. The test suite grew from 1,141 to 1,600 tests during the run. The first hand prototype had served the base model, and the run log corrects that.</p></div>
+        <div><b>Result</b><p>Ready for operator review about 13 hours after the third launch. The harness's own stage 2 test agreed with the CPU on 30 of 32 tokens, with the server ready in 728 s on a cold cache. 1, 2 and 4 chips agreed on 31, 30 and 29 of 32. The 2-chip package passed its boot check (ready in 2,034 s cold). 2-chip and 1-chip packages are published, and the 2-chip one was pulled and booted from the Hub.</p></div>
+        <div><b>What the next model got</b><p>The next model, iapp/openthai2.0-qwen3.8-27b, still stopped twice at stage 0 because stages 0 and 1 had no template. After they got one, stages 0 to 7 needed no intervention. The three that remained were at stage 8, which had no template either.</p></div>
+      </div>
+      <p class="logs"><a href="https://github.com/tsingletaryTT/tt-orchard/blob/main/docs/run-logs/2026-10-hemmingway-1.md">Hemmingway-1 log</a> · <a href="https://github.com/tsingletaryTT/tt-orchard/blob/main/docs/run-logs/2026-10-openthai-run1.md">OpenThai run</a></p>
+    </article>
+    <article class="story" id="m-clef">
+      <div class="shead"><span class="num">2</span><h3><span class="m">Cloudflare/clef</span></h3><span class="tag">a new class</span></div>
+      <p class="what">A Qwen3.8-27B post-train with a separate task head (a sidecar of 122 tensors). 6 to 7 October.</p>
+      <div class="rows">
+        <div><b>What stopped it</b><p>Stage 1 wrote files at paths the tool read as nested, then ran <code>pip install --upgrade</code> into the machine's shared Python environment. Stage 2 failed three times: two prepare scripts used one directory, the nearest bundle's speculative drafter needs <code>mtp.*</code> tensors that Clef does not have, and with the drafter off the bundle asked for on-device sampling that a 1x2 mesh refuses.</p></div>
+        <div><b>What we built or changed</b><p>A path that starts with <code>stages/</code> is run-relative. The runner refuses <code>pip</code> installs outside the run directory, and stage 1 gets its own reference interpreter. Separate model directories for the two scripts, and a test that runs both in one directory. For a model with no <code>mtp.*</code> tensors the drafter and device sampling are switched off, and stage 0 records the counts. Testing a fix by hand in a scratch stage directory under its own lease was faster than another supervised attempt.</p></div>
+        <div><b>Result</b><p>Ready after 11,092 s of ledger time, with two blocks on the way. 31 of 32 tokens at 1 and 2 chips, 30 of 32 at 4 chips, and sidecar parity of 15 of 16 answers. The 4-chip test parked and restored the real coder. After the run, stage 7 learned the no-<code>mtp.*</code> case. <a href="https://huggingface.co/episod/clef-p300">episod/clef-p300</a> is public, and was pulled and booted from the Hub in 2,540 s.</p></div>
+        <div><b>What the next model got</b><p>A model without <code>mtp.*</code> tensors now takes the drafter-off path with no help, and the package ships the evidence its card cites.</p></div>
+      </div>
+      <p class="logs"><a href="https://github.com/tsingletaryTT/tt-orchard/blob/main/docs/project-log.md">Project log, 6 to 7 October</a></p>
+    </article>
+    <article class="story" id="m-rag-gate">
+      <div class="shead"><span class="num">3</span><h3><span class="m">ThakiCloud/RAG-Gate-27B</span></h3><span class="tag">environment faults</span></div>
+      <p class="what">A Qwen3.8-27B fine-tune that decides whether to answer or retrieve. 13 to 14 October.</p>
+      <div class="rows">
+        <div><b>What stopped it</b><p>The first run with base-model research chose the bundle and the class on its own. Then the box stopped it three times: the CPU stand-in (ollama) was down when the coder was parked, disk was 0.4 GB short, and the 4-chip test timed out twice at fabric start. All four chips reset under one lease cleared it. A day later a system downgrade of the SFPI compiler made host boots of the bundle fail.</p></div>
+        <div><b>What we built or changed</b><p>A preflight row for the CPU stand-in and one for the SFPI version, <code>--auto-retries</code> for blocks that clear on their own, <code>--prune-caches</code> for disk, and a reset of leased chips before a multi-board test. These were written as precautions from three observations and had not yet changed a real run's outcome when they merged. Stage 7 also failed on this machine's shared blob store layout and was fixed.</p></div>
+        <div><b>Result</b><p>Stage 2 took 27 minutes 29 s, 31 of 32 tokens. A labelled gate set gave 0.930 on 200 items, and 25 of 25 labels equal the CPU's. <a href="https://huggingface.co/episod/rag-gate-27b-p300">episod/rag-gate-27b-p300</a> is public and was pulled and booted from the Hub.</p></div>
+        <div><b>What the next model got</b><p>Each of these stops became a check that fires before anything starts, with a message that says what to do.</p></div>
+      </div>
+      <p class="logs"><a href="https://github.com/tsingletaryTT/tt-orchard/blob/main/docs/project-log.md">Project log, 13 to 14 October</a></p>
+    </article>
+    <article class="story" id="m-pi">
+      <div class="shead"><span class="num">4</span><h3><span class="m">bytkim/Qwen3.8-27B-pi</span></h3><span class="tag">a bug in the preflight</span></div>
+      <p class="what">A Qwen3.8-27B fine-tune. 18 to 21 October.</p>
+      <div class="rows">
+        <div><b>What stopped it</b><p>It ended ready after six launches of the same command. The new CPU row stopped the first one before anything started. A cache entry that held only <code>config.json</code> and the README counted as a local copy, so 59 GB of weights were never fetched, stage 0 compared an empty model and called it a full port, and stage 1 failed four times. Disk was short twice. The 4-chip test hit the fabric timeout again; the cause is still not isolated.</p></div>
+        <div><b>What we built or changed</b><p>A snapshot is local only when a weight file exists behind its link. A retry that has to fetch weights sets the old run directory aside. A multi-board test that fails within 180 s is reset and run once more; that retry did not fire in the final attempt, so it has not run on real hardware. Benchmark tooling followed: a base control built from the model's own <code>run.sh</code>, and stop-string handling.</p></div>
+        <div><b>Result</b><p>Stage 2 agreed on 32 of 32 tokens (ready in 682 s). 2 chips 1.0 and 4 chips 0.969. Benchmarked against its base at full size on the same chips in 9.8 hours (see "Measured" above). <a href="https://huggingface.co/episod/qwen3.8-27b-pi-p300">episod/qwen3.8-27b-pi-p300</a> is public and was pulled and booted from the Hub.</p></div>
+        <div><b>What the next model got</b><p>The same benchmark code later measured CJK-Trim against its base. The benchmark now flags replies that are cut off inside the reasoning, because the GSM8K stop string cut thinking models off.</p></div>
+      </div>
+      <p class="logs"><a href="https://github.com/tsingletaryTT/tt-orchard/blob/main/docs/run-logs/2026-10-19-bytkim-pi-packaging.md">Packaging</a> · <a href="https://github.com/tsingletaryTT/tt-orchard/blob/main/docs/run-logs/2026-10-20-bytkim-pi-benchmark-full.md">Full benchmark</a></p>
+    </article>
+    <article class="story" id="m-arex">
+      <div class="shead"><span class="num">5</span><h3><span class="m">BAAI/AREX-2</span></h3><span class="tag">a measured trial</span></div>
+      <p class="what">A Qwen3.8-27B fine-tune with no <code>mtp.*</code> tensors and no generation config. 21 to 26 October.</p>
+      <div class="rows">
+        <div><b>What stopped it</b><p>No generation config stopped stage 2 until the harness learned to copy the nearest model's. With no <code>mtp.*</code> tensors the drafter had to stay off, which left decode at about 17 to 20 tok/s.</p></div>
+        <div><b>What we built or changed</b><p>By hand, the nearest model's 15 <code>mtp.*</code> tensors were added as one more shard. Then the harness got the mechanism: stage 0 records a graft candidate, stages 2, 4 and 7 check shapes, dtype and a hash, and stage 2 serves the graft once beside the safe configuration and keeps it only if agreement stays within 0.05 and decode is at least 1.25 times as fast. The two pull requests were 2,172 and 3,131 added lines including tests. The thresholds come from one observation.</p></div>
+        <div><b>Result</b><p>Graft against no graft on the same four prompts: 50.05 against 16.95 tok/s (2.95 times), 31 of 32 tokens, and 0.943 against 0.947 on the first 300 GSM8K items. Drafter acceptance was 0.479 on those prompts and 0.644 on tool-calling items. <a href="https://huggingface.co/episod/arex-2-p300">episod/arex-2-p300</a> is public with the drafter off, and was pulled and booted from the Hub. The supervisor's automatic trial has not run on hardware.</p></div>
+        <div><b>What the next model got</b><p>The sampling probe built next found that the drafter applies sampling only to the first token (a sampled reply equalled the greedy reply). Stage 2 now chooses drafter on or off by measurement and by what the model is for.</p></div>
+      </div>
+      <p class="logs"><a href="https://github.com/tsingletaryTT/tt-orchard/blob/main/docs/run-logs/2026-10-26-arex-2-graft-acceptance.md">Graft and acceptance</a> · <a href="https://github.com/tsingletaryTT/tt-orchard/blob/main/docs/run-logs/2026-10-27-greedy-only-sampling.md">Sampling probe</a></p>
+    </article>
+    <article class="story" id="m-cjk">
+      <div class="shead"><span class="num">6</span><h3><span class="m">ProprietaryLegal/Qwen3.8-27B-CJK-Trim</span></h3><span class="tag">a small class</span></div>
+      <p class="what">The nearest model with 66,533 vocabulary rows removed. 24 to 27 October.</p>
+      <div class="rows">
+        <div><b>What stopped it</b><p>Stage 0 called it a full port because the embedding and output matrices are smaller (181,760 rows against 248,320), and the unattended run blocked after stage 1. By hand, three boots showed the rest: the base config's vocabulary size fails at load, the model's own size then fails in the drafter's warm-up (it embeds ids of the base vocabulary), and with the drafter off and host sampling the server was ready in 190 s with 30 of 32 tokens equal to the CPU.</p></div>
+        <div><b>What we built or changed</b><p>A <code>vocab-trim</code> class. Stage 0 hashes every row of the two matrices and checks that each is, byte for byte, a row of the nearest model (181,760 of 181,760 found, 8 s). The swap script writes the model's vocabulary size and switches the drafter off. The pull request was 1,558 added lines, most of them tests. The operator's request was "I want vocab size models to port easily."</p></div>
+        <div><b>Result</b><p>A supervised unattended run reached ready in 2,804 s of ledger time (the replay at the top of this page). Against its base: English and code tokenize identically, CJK text costs 3.8 to 4.6 times the tokens, and in 40 CJK prompts the trim wrote the asked script 0 times (base 32). GSM8K 95 against 94 of 100.</p></div>
+        <div><b>What the next model got</b><p>A vocabulary trim now takes the weights-only path: stage 0 verifies the rows, and the swap scripts set the vocabulary size and switch the drafter off.</p></div>
+      </div>
+      <p class="logs"><a href="https://github.com/tsingletaryTT/tt-orchard/blob/main/docs/run-logs/2026-10-27-cjk-trim-benchmark.md">Benchmark</a></p>
+    </article>
+    <article class="story" id="m-coder">
+      <div class="shead"><span class="num">7</span><h3><span class="m">Qwen3-Coder-Next, fused decode package</span></h3><span class="tag">no change to the supervisor</span></div>
+      <p class="what">The agent model that writes and runs the tests. 28 October.</p>
+      <div class="rows">
+        <div><b>What stopped it</b><p>No block. The question was whether a package with a rebuilt decode step could replace the earlier one.</p></div>
+        <div><b>What we built or changed</b><p>Nothing in the supervisor. The two packages differ in container name and image, and a test pins that stopping one ignores a running container of the other. The role-fit test passed (50 of 50 turns, 0 of 35 failure replays repeated). The throughput check had three faults, now fixed with tests: a prefix cache answering the second request, a prompt that invited a 3-token reply, and a negative time difference hidden as an empty value. The pull request was 700 added lines.</p></div>
+        <div><b>Result</b><p>Decode median 79.3 tok/s over 28 samples (range 42.7 to 107.6), against 38.5 recorded for the earlier package, which was not measured in the same hour. First-token time on long prompts was 20 to 35 percent longer. Four users at once: 171 to 181 tok/s in total. The earlier package stays as the documented fallback.</p></div>
+        <div><b>What the next model got</b><p>It became the default coder for later runs, and the earlier package stays as the fallback.</p></div>
+      </div>
+      <p class="logs"><a href="https://github.com/tsingletaryTT/tt-orchard/blob/main/docs/run-logs/2026-10-28-coder-fused-decode.md">Run log</a></p>
+    </article>
+    <article class="story" id="m-audio">
+      <div class="shead"><span class="num">8</span><h3><span class="m">Stable Audio 3: small-music, small-sfx, medium</span></h3><span class="tag">a new pipeline</span></div>
+      <p class="what">A text-to-audio model: text encoder, diffusion transformer, autoencoder decoder. 28 to 29 October.</p>
+      <div class="rows">
+        <div><b>What stopped it</b><p>The harness assumed a language model behind an installed bundle. An earlier music model (MiniMax-Music3) had been run by hand: its container hung loading cached tensors over about 32 MiB, and a patched mount got it past that. For Stable Audio the first chip run failed the bars with a bfloat16 residual stream (final latent relative error 0.26).</p></div>
+        <div><b>What we built or changed</b><p>A chip transformer module, with the residual stream and the outputs added to it in float32 and matrix inputs in bfloat16 (error 0.138, waveform PCC 0.981). An audio stage table: stage 1 makes CPU references, stage 2 runs the chip test under a lease and compares, and stages 3 to 7 are skipped with reasons. A resident runtime with benchmark rules (one discarded run, at least three measured). The first-divergence and noise-floor tools. Then the decoder on the chip, where differential attention has to stay in float32 (a bfloat16 version lost the difference). The pull requests were 4,733 and 1,648 added lines.</p></div>
+        <div><b>Result</b><p>All three checkpoints make full clips with both parts on the chip. A 10 s clip takes 0.82 s with small-music (CPU 3.9 to 8.0 s) and 3.8 s with medium (CPU 38.0 s, one sample). The text encoder is still on the host, the supervisor's stage gate has not been run on these models, and nobody listened to the clips. An earlier small-music package is in a private Hub repository; the rebuild for the decoder on the chip is staged locally and not uploaded.</p></div>
+        <div><b>What the next model got</b><p>small-sfx and medium needed a second decoder block layout (medium uses sliding windows) and an entry in the planner, and no new stage.</p></div>
+      </div>
+      <p class="logs"><a href="https://github.com/tsingletaryTT/tt-orchard/blob/main/docs/run-logs/2026-10-28-stable-audio-chip-first-runs.md">First chip runs</a> · <a href="https://github.com/tsingletaryTT/tt-orchard/blob/main/docs/run-logs/2026-10-29-overnight-stable-audio-decoder.md">Decoder on the chip</a> · <a href="https://github.com/tsingletaryTT/tt-orchard/blob/main/docs/run-logs/2026-10-28-resident-runtime-benchmark.md">Resident runtime</a></p>
+    </article>
+    <article class="story" id="m-granite">
+      <div class="shead"><span class="num">9</span><h3><span class="m">ibm-granite/granite-4.0-h-1b</span></h3><span class="tag">kernels written by the local coder</span></div>
+      <p class="what">A 1.5B Mamba-2 hybrid: 36 Mamba-2 layers and 4 attention layers. 28 to 29 October.</p>
+      <div class="rows">
+        <div><b>What stopped it</b><p>No ttnn op does the Mamba-2 state update, so <code>bringup</code> stops at <code>nearest-model-missing</code> and the port was driven by hand. The local coder wrote the state-update and readout kernels with the outside helper switched off. A pass on the simulator did not say a kernel runs on the chip, in two ways. The readout kernels passed the simulator 4 of 10 times and compiled 0 of 7 times on tt-lang 1.1.6, because the pinned simulator and that compiler disagree on <code>reduce_sum</code>.</p></div>
+        <div><b>What we built or changed</b><p>Small harness changes: the config reader and hazard scan accept dense Granite hybrids (208 lines), new probe ops for the state update and readout, and the probe's hardware phase stopped leasing the coder's board. Then a pinned tt-lang pair: the pinned simulator with the compiler wheel <code>1.1.10.dev20261026</code> agree on the chip for 17 of 20 kernels, including every reduction that failed before. The 3 that fail use <code>-(-x // g)</code> after a thread's <code>grid_size</code>. One pin record and a managed venv followed. The model step then lost its <code>ttnn.repeat</code> copies and the decode step was traced.</p></div>
+        <div><b>Result</b><p>The model runs on one chip within the bf16 floor of agreement. Untraced, composed ops ran at 22.6 tok/s and the coder's kernels were slower (16.7 and 18.0; 8.45 with both kernels against 26.9 composed in one session). Traced, in a clean session: composed 37.5 tok/s, state and readout kernels 39.3 (4.8 percent higher), compact state and readout kernels 38.8, state kernel alone 37.3. Composed decode takes 26.7 ms per token against a floor of 5.7 ms.</p></div>
+        <div><b>What the next model got</b><p>The probe ladder, staged construction and pinned references were built to measure the coder's kernels. On the ladder the coder passed <code>row_sum</code> 6 of 9 and <code>center</code> 1 of 6, and <code>rmsnorm</code> 0 of 3 before the operator stopped it.</p></div>
+      </div>
+      <p class="logs"><a href="https://github.com/tsingletaryTT/tt-orchard/blob/main/docs/run-logs/2026-10-28-granite-mamba2-real-port.md">Port</a> · <a href="https://github.com/tsingletaryTT/tt-orchard/blob/main/docs/run-logs/2026-10-29-ttlang-pair-chip-check.md">Pair chip check</a> · <a href="https://github.com/tsingletaryTT/tt-orchard/blob/main/docs/run-logs/2026-10-29-granite-repeat-trace.md">Traced decode</a></p>
+    </article>
+    <article class="story" id="m-minicpm">
+      <div class="shead"><span class="num">10</span><h3><span class="m">openbmb/MiniCPM3-4B</span></h3><span class="tag">existing op, no new kernel</span></div>
+      <p class="what">A 4B model with multi-latent attention and a dense MLP. One night, 28 to 29 October.</p>
+      <div class="rows">
+        <div><b>What stopped it</b><p>The existing flash multi-latent attention op failed at one key-value head and batch 1: all 110 cores landed on one head and the reduction allows 64. A first-divergence run then located an error at layer 14: <code>ttnn.rms_norm</code> with its default compute config was 3.7 percent off on a row of norm 223. The two-chip path has no batched prefill.</p></div>
+        <div><b>What we built or changed</b><p>An explicit 8 by 8 program config for the op, so no new kernel was needed. <code>rms_norm</code> with 32-bit accumulation (0.08 percent off). Two small harness changes: the config reader derives <code>v_head_dim</code> for this model, and the hazard table has a row for multi-latent attention decode. The port is a set of scripts and does not use the supervisor's stages. The whole model first ran about 20 minutes after the start. Decode went from 18.8 to about 34 tok/s by timing each op alone inside a trace and replacing the slow ones.</p></div>
+        <div><b>Result</b><p>33.7 tok/s in bfloat16 on one chip (54 percent of the 62.8 tok/s DRAM floor), 39.9 with an 8-bit MLP, 39.2 on two chips. 16 of 16 teacher-forced tokens match the CPU, and perplexity on 767 WikiText-2 tokens is 8.007 against 8.057 in float32. The supervisor was not used. Findings went to issues 213 and 214.</p></div>
+        <div><b>What the next model got</b><p>This used the decode floor, hazard scan and first-divergence tools that had been written the day before, and the harness needed two small edits.</p></div>
+      </div>
+      <p class="logs"><a href="https://github.com/tsingletaryTT/tt-orchard/blob/main/docs/run-logs/2026-10-29-overnight-minicpm3-4b.md">Run log</a></p>
+    </article>
+    <article class="story" id="m-qwen35">
+      <div class="shead"><span class="num">11</span><h3><span class="m">Qwen/Qwen3.5-35B-A3B</span></h3><span class="tag">a 35-line patch</span></div>
+      <p class="what">A 35B mixture-of-experts model with the same layer types as Qwen3-Coder-Next. 29 October.</p>
+      <div class="rows">
+        <div><b>What stopped it</b><p>No block. The question was which ops of the Coder-Next fused bundle apply to this model. <code>tt-orchard fusion-candidates</code> reads the bundle's code without running it. Four ops apply as they are, two apply with a changed constant (router top-k and the sampler scan grid), and one needs new code (the layer boundary, which runs only on four dies). The bundle's loader did not know this checkpoint layout.</p></div>
+        <div><b>What we built or changed</b><p>A 35-line patch for the loader (a prefix, split projections and fused experts), applied to a copy bind-mounted over the bundle's code. The image and the coder were not changed. Weights came by range reads of only the needed tensors: 69.3 GB in about 40 minutes, where <code>hf download</code> ran at 4 to 6 MB/s. No kernel was written.</p></div>
+        <div><b>Result</b><p>The full 40-layer model served on two dies: 126.8 tok/s median over 5 runs, 29.6 percent of the estimated floor (428 tok/s). The first 8 tokens match the CPU, then a near tie flips (the routed experts are 4-bit). Both changed constants moved decode by 0.1 percent or less, so neither was kept. One prompt, on a shared host. Not published.</p></div>
+        <div><b>What the next model got</b><p>The classification named the op that needs new code before the first boot, and the two changed constants were tested and dropped.</p></div>
+      </div>
+      <p class="logs"><a href="https://github.com/tsingletaryTT/tt-orchard/blob/main/docs/run-logs/2026-10-29-fusion-port.md">Fusion port</a></p>
+    </article>
+  </div>
+</section>
+
 <section class="section edge" id="stops">
   <div class="label">When it cannot go on, it stops and says why</div>
   <h2>Real stops from real runs</h2>
-  <p class="sub">An unattended run ends in <code>blocked</code>, releases the chips and writes what it tried. The text in each box is quoted from a real run on this machine.</p>
+  <p class="sub">An unattended run ends in <code>blocked</code>, releases the chips and writes what it tried. The text in each box is quoted from a real run on this machine. Some models stopped on purpose: Nemotron-3.5-Bolt-74B at the preflight (no installed bundle serves its base), and pplx-decider-v1.2 with <code>needs-new-model-code</code>, because its readout head and non-causal attention are described in the card and the code and are absent from the config. A parity run by hand later measured 14 of 14 answers equal to the CPU on the chips.</p>
   <div class="stops">
     <div class="stop"><div class="code">disk-full</div><pre>hf_home: needs 202 GB, 116 GB free</pre><p>From a preflight, before anything downloaded. The block now also lists the largest models and caches on the short disk.</p></div>
     <div class="stop"><div class="code">agent-stuck</div><pre>watchdog: 3 identical responses in a row (18830 input, 186 output tokens)</pre><p>The agent wrote the same file three times and the watchdog stopped it. The cause was a missing 2-chip package; stage 4 now reports that before any agent runs.</p></div>
@@ -251,43 +384,33 @@
   </div>
   </section>
 
-<section class="section edge" id="published">
-  <div class="label">What came out</div>
-  <h2>Packages made from runs, public on Hugging Face</h2>
-  <p class="sub">Each one was staged by the harness and booted on chips before upload. The package gate checks every card against the files the package ships. All six were also pulled from the Hub on a clean install and booted.</p>
-  <table>
-    <thead><tr><th>Package</th><th>Base</th><th>What was checked</th></tr></thead>
-    <tbody>
-      <tr><td><a href="https://huggingface.co/episod/clef-p300"><span class="m">episod/clef-p300</span></a></td><td>Qwen3.8-27B + task head</td><td>31 of 32 tokens equal to the CPU; head agrees on 15 of 16 questions; pulled and booted from the Hub</td></tr>
-      <tr><td><a href="https://huggingface.co/episod/rag-gate-27b-p300"><span class="m">episod/rag-gate-27b-p300</span></a></td><td>Qwen3.8-27B</td><td>Gate accuracy 0.930 on 200 items; pulled and booted from the Hub</td></tr>
-      <tr><td><a href="https://huggingface.co/episod/qwen3.8-27b-pi-p300"><span class="m">episod/qwen3.8-27b-pi-p300</span></a></td><td>Qwen3.8-27B</td><td>Full benchmark against its base (above); pulled and booted from the Hub</td></tr>
-      <tr><td><a href="https://huggingface.co/episod/arex-2-p300"><span class="m">episod/arex-2-p300</span></a></td><td>Qwen3.8-27B, no drafter head</td><td>Pulled and booted from the Hub; a by-hand graft kept the drafter on</td></tr>
-      <tr><td><a href="https://huggingface.co/episod/hemmingway-1-p300"><span class="m">episod/hemmingway-1-p300</span></a></td><td>Qwen3.8-27B</td><td>Pulled and booted from the Hub; 2-chip and 1-chip</td></tr>
-      <tr><td><a href="https://huggingface.co/episod/openthai2.0-qwen3.8-27b-p300"><span class="m">episod/openthai2.0-qwen3.8-27b-p300</span></a></td><td>Qwen3.8-27B</td><td>Pulled and booted from the Hub; 2-chip and 1-chip</td></tr>
-    </tbody>
-  </table>
-</section>
-
-<section class="section edge" id="overnight">
-  <div class="label">Models that needed new code, brought up overnight</div>
-  <h2>Three new-code bring-ups, 28 to 29 October</h2>
-  <p class="sub">These were driven by hand with the harness's tools. The unattended stages were not used. Each was checked against a CPU reference on a single prompt or a small set. Nobody listened to the audio clips. Speeds are medians on a shared host.</p>
-  <table>
-    <thead><tr><th>Model</th><th>Stage reached</th><th>Speed</th><th>What stopped it</th></tr></thead>
-    <tbody>
-      <tr><td><span class="m">openbmb/MiniCPM3-4B</span></td><td>Whole model on one chip, multi-latent attention on the existing flash op; 16 of 16 teacher-forced tokens match the CPU</td><td>33.7 tok/s in bfloat16 (54 percent of the DRAM floor); 39.9 with an 8-bit MLP</td><td>The two-chip path has no batched prefill. The supervisor and full-port stages were not used.</td></tr>
-      <tr><td><span class="m">Stable Audio 3</span> (small-music, small-sfx, medium)</td><td>Autoencoder decoder and, for medium, the diffusion transformer on the chip; full clips with both parts on the chip</td><td>10 s clip in 0.82 s (small-music, CPU 3.9 to 8.0 s); 3.8 s (medium, CPU 38.0 s, one sample)</td><td>The text encoder is still on the host, the supervisor's stage gate was not run on these models, and nobody listened to the clips.</td></tr>
-      <tr><td><span class="m">ibm-granite/granite-4.0-h-1b</span> (Mamba-2 hybrid)</td><td>Whole model on one chip at the bf16 floor of agreement; the local coder wrote a state-update kernel that runs in the model</td><td>22.6 tok/s with stock ops; 16.7 and 18.0 with the coder's kernels</td><td>The coder's kernels are slower than stock ops. Its readout kernels pass the simulator and none compiled on tt-lang 1.1.6 (<code>reduce_sum</code> differs from the pinned simulator); the newer pair compiles them, and the readout kernel is slower than composed ops in the model.</td></tr>
-    </tbody>
-  </table>
-  <p class="sub" style="margin-top:1rem">Run logs: <a href="https://github.com/tsingletaryTT/tt-orchard/blob/main/docs/run-logs/2026-10-29-overnight-minicpm3-4b.md">MiniCPM3-4B</a>, <a href="https://github.com/tsingletaryTT/tt-orchard/blob/main/docs/run-logs/2026-10-29-overnight-stable-audio-decoder.md">Stable Audio 3 decoder</a>, and <a href="https://github.com/tsingletaryTT/tt-orchard/blob/main/docs/run-logs/2026-10-28-granite-mamba2-real-port.md">Granite-4.0-H-1B</a>.</p>
-  <p class="sub">The pinned tt-lang simulator and the S3 compiler wheel <code>tt-lang-light 1.1.10.dev20261026</code> agree on the chip for 17 of 20 kernels, and reductions compile. One <code>grid_size</code> arithmetic form, <code>-(-x // g)</code>, does not. In the Granite model the coder's readout kernel is slower than composed ops: 26.9 tok/s composed, 13.9 with the state kernel, 8.45 with both (same session, untraced decode). See the <a href="https://github.com/tsingletaryTT/tt-orchard/blob/main/docs/run-logs/2026-10-29-ttlang-pair-chip-check.md">chip check</a>.</p>
-</section>
-
 <section class="section edge" id="direction">
-  <div class="label">Where this is going</div>
-  <h2>Bring-ups with nobody at the keyboard</h2>
-  <p class="sub">The aim is a run that goes from a model id to a reviewed bundle with nobody touching the machine. Today an unattended run already does the checking itself, stops with a stated reason when it cannot go on, releases the chips and writes down what it tried. Each stop above shows what that looks like.</p>
+  <div class="label">Where the tool is now</div>
+  <h2>What is automatic, what still needs a person</h2>
+  <p class="sub">The aim is a run that goes from a model id to a reviewed bundle with nobody touching the machine. The harness has never done that end to end. This is where each part stands.</p>
+  <div class="now">
+    <div class="card"><h3>Automatic</h3><ul>
+      <li>The preflight: disk, chip bus, SFPI compiler, the CPU stand-in, credentials, the base model, and whether the tools are current.</li>
+      <li>Stage 0 sorts the model. For a weights-only fine-tune, a sidecar model or a vocabulary trim the run goes through stages 0, 1, 2, 4 and 8 with no new code. Stages 3, 5 and 6 are skipped by design, and stage 7 packages when asked.</li>
+      <li>Serving checks at 1, 2 and 4 chips, with a park and restore of the coder when a test needs its board.</li>
+      <li>Retries for stops that clear on their own, and a stop with a stated reason for the rest.</li>
+      <li>A review bundle and, on request, a package with its card, checked against its files.</li>
+    </ul></div>
+    <div class="card"><h3>Needs a person or new code</h3><ul>
+      <li>Publishing. The harness never uploads anything.</li>
+      <li>Any model whose class is <code>full-port</code> or <code>unknown</code>. The run stops and says what it found. No such model has gone through stages 3, 5 and 6 unattended.</li>
+      <li>New code is written by hand with the tools: the op inventory, the kernel probe and its ladder, the decode floor, the hazard scan, the first-divergence probe, the measured noise floor, <code>fusion-candidates</code>, and the pinned tt-lang pair. <code>tt-orchard updates</code> reports when the coder, tt-lang or tt-metal have newer versions.</li>
+      <li>Disk space, and a restart after a power event, though each now has a preflight row or a block message.</li>
+    </ul></div>
+  </div>
+  <h3 class="edges">Open edges</h3>
+  <ul class="limits">
+    <li>The coder's kernels for Granite are 3 to 5 percent faster than composed ops only after the <code>ttnn.repeat</code> copies were removed and decode was traced. Before that they were slower. The readout kernels depend on the tt-lang version, and the coder passes the simulator on easy ops and fails <code>rmsnorm</code>.</li>
+    <li>MiniCPM3-4B and Granite-4.0-H-1B were driven by hand and did not go through the supervisor. MiniCPM3 has no batched prefill on two chips.</li>
+    <li>Stable Audio 3 has its text encoder on the host, and nobody listened to the clips. Agreement is measured against a CPU reference on a single prompt or a small set.</li>
+    <li>The automatic graft trial has not run on hardware. The 4-chip fabric timeout seen in three runs was cleared by a reset each time, and its cause was never isolated.</li>
+    <li>Speeds are medians on a shared host. Packages for Granite, MiniCPM3 and Qwen3.5-35B-A3B are in progress and have no numbers here.</li>
+  </ul>
   <p class="sub" style="margin-top:1rem">Each claim and its evidence are in <a href="https://github.com/tsingletaryTT/tt-orchard/blob/main/docs/proofs.md">docs/proofs.md</a>.</p>
 </section>
 
@@ -447,26 +570,6 @@
       p.innerHTML = `<b>${s.n} ${s.name}</b><br>${s.result === "skipped" ? "skipped by design" : fmt(s.seconds) + " (" + Math.round((s.seconds / sum) * 100) + "%)"}`;
       leg.append(p);
     });
-  });
-
-  // ---------- catalog ----------
-  get("catalog.json").then((rows) => {
-    const grid = $("#grid"), why = $("#why");
-    rows.forEach((r) => {
-      const b = document.createElement("button"); b.type = "button"; b.className = "tile " + r.class; b.dataset.c = r.class;
-      b.innerHTML = `<div class="id"></div><div class="c">${r.class}</div>`; b.firstChild.textContent = r.id;
-      b.addEventListener("click", () => { why.innerHTML = ""; const s = document.createElement("span"); s.innerHTML = "<b></b> → "; s.firstChild.textContent = r.id; why.append(s, document.createTextNode(r.class + (r.why ? ": " + r.why : "") + ". " + "")); });
-      grid.append(b);
-    });
-    document.querySelectorAll("#legend button").forEach((btn) => btn.addEventListener("click", () => {
-      document.querySelectorAll("#legend button").forEach((x) => x.setAttribute("aria-pressed", String(x === btn)));
-      grid.querySelectorAll(".tile").forEach((t) => t.classList.toggle("dim", btn.dataset.f !== "all" && t.dataset.c !== btn.dataset.f));
-    }));
-    const n = (c) => rows.filter((r) => r.class === c).length;
-    $("#legend [data-f=weights-only]").textContent = `weights-only ${n("weights-only")}`;
-    $("#legend [data-f=full-port]").textContent = `full-port ${n("full-port")}`;
-    $("#legend [data-f=unknown]").textContent = `unknown ${n("unknown")}`;
-    $("#legend [data-f=all]").textContent = `all ${rows.length}`;
   });
 
   // ---------- screenshots ----------
