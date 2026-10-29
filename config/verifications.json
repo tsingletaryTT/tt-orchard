@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "records": [
+    {
+      "versions": {"tt-lang": "fec38c6de4b6f24ce4cb359f04aecc8d4577d6f0", "tt-lang-wheel": "1.1.10.dev20261026", "tt-metal": "v0.80.0"},
+      "date": "2026-10-29",
+      "result": "pass",
+      "evidence": "docs/run-logs/2026-10-29-ttlang-pair-chip-check.md"
+    }
+  ]
+}

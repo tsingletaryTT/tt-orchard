@@ -88,6 +88,7 @@ Short list of what landed on `main`. Each item links to its run log, which holds
   (22.6 tok/s with the Mamba-2 state update from stock ops). The coder's state-update kernel runs on the chip and in the model, but is slower
   (16.7 and 18.0 tok/s). Its readout kernels pass the simulator and none compiled on tt-lang 1.1.6, because the pinned simulator and that
   compiler disagree on `reduce_sum`. [Run log](docs/run-logs/2026-10-28-granite-mamba2-real-port.md).
+- **Fusion port candidates.** `tt-orchard fusion-candidates MODEL_CONFIG BUNDLE_DIR` reads a fused decode bundle's Python code (read only, never run), lists its fused ops (router, MoE decode, mixers, layer boundary, sampler) with the model dimensions each depends on, and marks each one as applies as is, applies with a changed constant, or needs new code (a gap, never attempted). For Qwen3.5-35B-A3B against the Qwen3-Coder-Next bundle on two dies: 4 as is, 2 with a changed constant, 1 needs new code. No chip was used; the hardware port was not run. [Run log](docs/run-logs/2026-10-29-fusion-port.md).
 - **A tt-lang pair verified on the chip.** The pinned simulator and the compiler wheel `tt-lang-light 1.1.10.dev20261026` (from the Tenstorrent S3
   index) agree on the chip for 17 of 20 kernels, including every reduction kernel that failed on 1.1.6. One form does not compile: `-(-x // g)`
   after a thread's `grid_size`; `(x + g - 1) // g` does. The pair is pinned in `orchard/ttlang_pin.py` and section 5.9a shows how to make its venv.
@@ -1864,7 +1865,16 @@ waveform comes from the weights. `--unmatched` allows runs that differ in those 
 ```
 tt-orchard audio-package RUN_DIR --namespace ORG --bench FILE --demo-repo DIR [--snapshot DIR]   # stage the package and run the gate
 tt-orchard audio-package RUN_DIR --namespace ORG --check                                          # run the gate on the package already staged
+tt-orchard audio-package RUN_DIR --namespace ORG --bench FILE --demo-repo DIR --out DIR --result FILE \
+    --probe FILE --agreement-report FILE --listening-note "YYYY-MM-DD: ..."                         # stage a rebuild into a new directory
+python -m orchard.audio_result_derive RUN_DIR CHIP_RUN_DIR OUT_JSON                                 # make the --result file for a later chip run
 ```
+
+Rebuild for the decoder on the chip (2026-10-29, [run log](docs/run-logs/2026-10-29-audio-package-rebuild.md)): `--out` stages into a new directory and
+writes the commands text beside it. `--result` reads an audio result in place of the run's `stages/2/audio_result.json`; `audio_result_derive` makes
+that file from a later chip run and the run's own result without editing either. `--probe` and `--agreement-report` copy two optional JSON files into
+`evidence/`, and `--listening-note` prints the operator's dated listening judgment on the card. The packaged generate command runs the decoder's
+transformer on the chip by default; `AUDIO_HOST_DECODER=1` or `--host-decoder` keeps the decoder on the host.
 
 For a finished `stabilityai/stable-audio-3-small-music` run. It stages `stages/7/package/stable-audio-3-small-music-blackhole/` with a card
 (`README.md`), a copy of the model's license agreement (`LICENSE.md`), a `NOTICE` file, a draft v5.1 `tt-model.yaml` of kind `http-server`, `run.sh`,
@@ -2191,6 +2201,42 @@ and a file over the read caps are counted and shown as "Left out". The reader ne
   the cost at each reference. `GET /api/virtual-spend` (with `?run=NAME`) serves both, reads only, and returns no path.
 - Checked against the kernel-probe round `rms5` (5 attempts, no kernel passed): 137 turns, 3,373,905 prompt and 78,468 completion
   tokens, which is $0.3766 at `claude-haiku-5-5` and $7.53 at `claude-sonnet-5-5`.
+
+### Keeping tt-orchard's tools current
+
+`tt-orchard updates [--json] [--offline] [--refresh]` reports whether orchard is running on old tools. It is read only: it
+installs, upgrades, pulls and restarts nothing, takes no lease and opens no chip. Each upgrade appears as text for a person to run.
+
+For each tracked item the table shows what is installed or pinned here, the newest known upstream, the age of each, and a status:
+`current`, `behind`, `newer-candidate` or `unknown (why)`. A failed or offline call gives an `unknown` row. Answers are cached for
+6 hours (`--refresh` ignores the cache, `--offline` makes no network call and shows the last cache). The network calls go to Hugging
+Face (with `HF_TOKEN` from the environment, sent to that host only), GitHub, public PyPI and the Tenstorrent S3 index, each with a
+timeout and a shared 60-second budget.
+
+| Item | Installed | Upstream |
+| --- | --- | --- |
+| Coder bundle (`raahemnabeel/qwen3-coder-next` and the fallback) | revision in `~/.cache/tt-model/installed.json` | latest Hugging Face commit |
+| Coder candidates | the configured packages | repos by the same authors, and search hits, whose id contains a name in `family` (default `qwen3-coder`, `qwen3.5-coder`, `coder-next`) and that are not configured |
+| tt-lang | the pin in `orchard/ttlang_pin.py` | newest tag, newest S3 dev wheel, public PyPI |
+| tt-metal | `git describe` of the host tree | latest release |
+| tt-model-manager, tt-cli, tt-gozer | `--version` | latest release, else newest tag |
+| Skills checkout | `orchard.skillsfresh` | upstream main |
+
+To follow a different coder family, set `family` (and `coder_packages` or `authors` if needed) in `config/updates.toml`. `--updates-config FILE` reads a different file.
+
+Some items must move together. The rule table is `RULES` in `orchard/updates.py`; a row that is behind names the other members
+and cites the rule.
+
+| Rule | Members | Meaning |
+| --- | --- | --- |
+| R1 | tt-lang, tt-metal | A tt-lang commit builds against one tt-metal ref. A new tt-metal tag needs a tt-lang commit that builds on it (find it with `find-compatible-ttlang.sh` in the tt-lang repository). The verified pair is recorded in `orchard/ttlang_pin.py`. |
+| R2 | tt-metal, tt-model-manager, coder | Bundles carry a tt-metal build; host ttnn and the bundle must agree on the release. |
+| R3 | tt-model-manager, tt-cli | Upgrade together and rerun `tt doctor`. |
+
+The "ready to farm" line says `verified` only when `config/verifications.json` (or `$ORCHARD_VERIFICATIONS`) holds a passing record
+whose versions equal the new combination. Otherwise it says `unverified` and points at the smoke and probe kernel run. The file is
+written by a person or a verification run after a real run, never by `updates`. Preflight prints one informational line when the
+cache shows something behind or a candidate; it reads the cache only and never blocks.
 
 ## 6. Lessons that will bite you
 

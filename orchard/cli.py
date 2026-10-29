@@ -16,10 +16,11 @@
     tt-orchard reported accept RUN_DIR (--all | --rows NAME,NAME | --row NAME) [--replace]
     tt-orchard ttlang-consistency [--src-dir DIR] [--venv-dir DIR] [--tt-lang-skill-dir DIR] [--tt-metal-dir DIR] [--build-info-file FILE]
     tt-orchard kernel-env --pair [--check] [--apply] [--pair-venv-dir DIR] [--tt-metal-dir DIR]
+    tt-orchard updates [--json] [--offline] [--refresh] [--tt-metal-dir DIR] [--updates-config FILE]
     tt-orchard kernel-env [--check] [--src-dir DIR] [--venv-dir DIR] [--tt-lang-skill-dir DIR] [--allow-stale-skills]
     tt-orchard demo-env [--check] [--dry-run] [--venv-dir DIR] [--tt-metal-dir DIR]
     tt-orchard audio-reference-env [--check] [--dry-run] [--venv-dir DIR] [--src-dir DIR]
-    tt-orchard audio-package RUN_DIR --namespace ORG --bench FILE --demo-repo DIR [--snapshot DIR] [--check]
+    tt-orchard audio-package RUN_DIR --namespace ORG --bench FILE --demo-repo DIR [--snapshot DIR] [--out DIR] [--result FILE] [--check]
     tt-orchard inventory TARGET [--python P] [--ttnn-python P] [--against F] [--layers N] [--seq N] [--class C] [--out DIR]
     tt-orchard inventory verify-candidates --inventory FILE|DIR [--out DIR] [--image IMG] [--max-ops N] [--timeout S] [--record]
     tt-orchard coder-speed [--endpoint URL --model NAME | --tiers] [--samples N] [--watch SECONDS] [--json]
@@ -174,6 +175,9 @@ def _parser() -> argparse.ArgumentParser:
                                                        "run there (`lab setup --help`)")
     lab.add_argument("action", choices=["setup"])
     lab.add_argument("rest", nargs=argparse.REMAINDER, help="options for the action")
+    fc = sub.add_parser("fusion-candidates", parents=[common],
+                        help="list a fused bundle's decode ops and say which a new model could reuse (read only; `fusion-candidates --help`)")
+    fc.add_argument("rest", nargs=argparse.REMAINDER, help="MODEL_CONFIG BUNDLE_DIR [--bundle-config FILE] [--dies N] [--json]")
     sc = sub.add_parser("suite-control", parents=[common],
                         help="build the prompt suite's control from the nearest model (`suite-control prepare --help`)")
     sc.add_argument("action", choices=["prepare", "run"])
@@ -306,6 +310,15 @@ def _parser() -> argparse.ArgumentParser:
     sp_.add_argument("--json", action="store_true", help="print the figures as JSON")
     sp_.add_argument("--dir", metavar="DIR", help="the telegraph ledger directory (default: the config's, else ~/.cache/tt-orchard/telegraph)")
     sp_.add_argument("--telegraph-config", metavar="FILE", help="a TOML file with the [telegraph] and [virtual_spend] tables (default: the bringup config's)")
+    up_ = sub.add_parser("updates", parents=[common],
+                         help="is each tool, the coder bundle and the tt-lang pin the newest upstream has? read only; "
+                              "prints upgrade commands as text and runs none")
+    up_.add_argument("--json", action="store_true", help="print the rows as JSON")
+    up_.add_argument("--offline", action="store_true", help="make no network call; show the last cached result")
+    up_.add_argument("--refresh", action="store_true", help="ignore the cache (default: reuse a result under 6 hours old)")
+    up_.add_argument("--tt-metal-dir", help="the host tt-metal tree, read only (default ~/tt-metal, or $ORCHARD_TT_METAL_DIR)")
+    up_.add_argument("--updates-config", metavar="FILE", help="TOML with family, coder_packages, authors, repos, cache_hours "
+                                                              "(default config/updates.toml when it exists)")
     k = sub.add_parser("kernel-env", parents=[common],
                        help="build or check the tt-lang simulator environment that kernel-probe uses")
     k.add_argument("--check", action="store_true",
@@ -366,7 +379,12 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--bench", help="the audio_bench.py sweep file the card's timings come from (one warm-up, 3 or more measured runs)")
     ap.add_argument("--demo-repo", help="the separate demo repository checkout whose server, client and page are copied into the package (read only)")
     ap.add_argument("--snapshot", help="the pinned model snapshot that holds LICENSE.md and NOTICE (default: the path the run recorded)")
-    ap.add_argument("--check", action="store_true", help="stage nothing; run the gate on the package already staged in the run")
+    ap.add_argument("--check", action="store_true", help="stage nothing; run the gate on the package already staged in the run (or in --out)")
+    ap.add_argument("--out", help="stage into this new package directory instead of the run's stages/7/package/<name>; the commands text goes beside it")
+    ap.add_argument("--result", help="an audio result file to use instead of the run's stages/2/audio_result.json (made with python -m orchard.audio_result_derive)")
+    ap.add_argument("--probe", help="a decoder probe summary (JSON) to copy into evidence/decode-probe.json, with the home directory replaced by <home>")
+    ap.add_argument("--agreement-report", help="the full agreement report (JSON) to copy into evidence/audio-agreement-report.json")
+    ap.add_argument("--listening-note", help="the operator's dated listening note (one line with YYYY-MM-DD) printed on the card; it is not a measured quality metric")
     inv = sub.add_parser("inventory", parents=[common],
                          help="list the ops a model's reference code uses and which ones ttnn has; "
                               "`inventory refresh-ttnn` records ttnn's op names (takes a one-chip lease); "
@@ -1008,12 +1026,22 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
     if args.cmd == "reported":
         from orchard import reported_cmd
         return reported_cmd.main(args, out=out)
+    if args.cmd == "fusion-candidates":
+        from orchard import fusion_port
+        return fusion_port.main(args.rest, out=out)
     if args.cmd == "suite-control":
         from orchard import suite_control
         return suite_control.main([args.action, *args.rest], out=out)
     if args.cmd == "ttlang-consistency":
         from orchard import ttlang_consistency
         return ttlang_consistency.main(args, out=out)
+    if args.cmd == "updates":
+        from orchard import updates
+        try:       # the skills checkout comes from the bringup config; without one the skills row says so
+            args.skills_dirs = bringup_config.load(find_config(getattr(args, "config", None), env, CHECKOUT, home)).skills_dirs
+        except Exception:
+            args.skills_dirs = None
+        return updates.main(args, out=out)
     if args.cmd == "kernel-env":
         if getattr(args, "pair", False):
             from orchard import ttlang_pair

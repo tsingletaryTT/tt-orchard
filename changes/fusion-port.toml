@@ -1,0 +1,3 @@
+target = "0.9.63"
+summary = "tt-orchard fusion-candidates: list a fused bundle's decode ops and mark each as applies as is, changed constant or needs new code (issue 184, phase 1)"
+pr = 235
