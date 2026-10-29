@@ -1591,6 +1591,13 @@ Flags:
   the probe id and the report records it. A seed makes the request the same on a rerun; whether the server honours
   it is not verified, and no kernel is promised to come out the same.
 - `--phase`: `sim` (default) for the simulator only; `hw` to add the smoke test and the one-chip runs.
+- `--staged`: build the kernel in stages (`orchard/kernelstaged.py`, issue 176). For `center`: copy, scale by 1/256, row mean, the
+  whole op. For `rmsnorm`: copy, square, row sum of squares, scale the rows, the whole op. Each stage is a separate agent
+  conversation that ends at a simulator check against a reference for that step; the bytes that passed are the next stage's
+  `kernel.py`; a stage that fails its check or spends its turns or time ends the attempt, and the record names the stage
+  (`staged` in `attempt.json`, `kernel-probe-staged-report.md`). The last stage is judged by the unmodified op check. Needs
+  `--no-agent-hw` and `--phase sim`. A stage table is data: add an entry to `kernelstaged.STAGES` for another op.
+  `--stage-turns` and `--stage-wall-s` replace every stage's budget (default: the whole-kernel probe's 40 turns and 1800 s divided evenly over the op's stages).
 - `--out`: output directory (default `./kernel-probe`).
 - `--endpoint`: the coder's OpenAI-compatible URL, ending in `/v1` (default: from the tier config).
 - `--model`: the model id the coder serves (default: from the tier config).

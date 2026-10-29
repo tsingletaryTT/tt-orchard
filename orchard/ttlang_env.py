@@ -28,6 +28,7 @@ import os
 import shutil
 import stat
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -44,12 +45,16 @@ class Result:
     name: str
     status: str
     detail: str
+    # True for a FAIL or TODO that only says "this is not the pinned tt-lang" (the checkout is at another commit, the
+    # wheel was built from another one). The probe's --allow-stale-skills may accept it. A missing or broken
+    # component is never a pin mismatch.
+    pin_mismatch: bool = False
 
 
-def real_run(argv, timeout, env=None):
-    """(returncode, stdout, stderr). A timeout answers 124 and a missing program 127."""
+def real_run(argv, timeout, env=None, cwd=None):
+    """(returncode, stdout, stderr). A timeout answers 124 and a missing program 127. `cwd` is the working directory."""
     try:
-        done = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=env)
+        done = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=env, cwd=cwd)
     except subprocess.TimeoutExpired:
         return 124, "", f"timed out after {timeout} s"
     except (OSError, subprocess.SubprocessError) as exc:
@@ -62,7 +67,7 @@ class KEnv:
     src_dir: Path
     venv_dir: Path
     scratch_dir: Path
-    run: Callable = real_run          # (argv, timeout, env=None) -> (returncode, stdout, stderr)
+    run: Callable = real_run          # (argv, timeout, env=None, cwd=None) -> (returncode, stdout, stderr)
     environ: dict | None = None
 
     @property
@@ -88,9 +93,13 @@ def sha256_file(path: Path) -> str:
 
 
 def head_sha(env: KEnv) -> str | None:
-    if not (env.src_dir / ".git").exists():
+    try:
+        if not (env.src_dir / ".git").exists():
+            return None
+    except OSError:                      # a directory that cannot be searched has no readable checkout
         return None
-    rc, out, _ = env.run(["git", "-C", str(env.src_dir), "rev-parse", "HEAD"], 30)
+    from orchard import ttlang_reference
+    rc, out, _ = env.run(["git", "-C", str(env.src_dir), "rev-parse", "HEAD"], 30, ttlang_reference.git_env(env))
     return out.strip() if rc == 0 and out.strip() else None
 
 
@@ -122,7 +131,7 @@ def step_clone(env: KEnv, check_only: bool) -> Result:
         return Result("clone", OK, f"{env.src_dir} at {pin[:9]}")
     if have is not None:
         return Result("clone", FAIL, f"{env.src_dir} is at {have[:9]} and the pin is {pin[:9]}; it is not reset. "
-                                     "Move it aside or pass another --src-dir")
+                                     "Move it aside or pass another --src-dir", pin_mismatch=True)
     # A fetch of one commit, because main moves and the pin must not.
     fetch = [["git", "-C", src, "fetch", "--quiet", "--depth", "1", "origin", pin],
              ["git", "-C", src, "checkout", "--quiet", "FETCH_HEAD"]]
@@ -182,7 +191,7 @@ def step_wheel(env: KEnv, check_only: bool) -> Result:
     if have == want:
         return Result("tt-lang-sim", OK, f"{have} (built from {defaults.TTLANG_PIN[:9]})")
     if check_only:
-        return Result("tt-lang-sim", TODO, f"have {have or 'none'}, want {want}")
+        return Result("tt-lang-sim", TODO, f"have {have or 'none'}, want {want}", pin_mismatch=have is not None)
     wheels = env.scratch_dir / "wheels"
     wheels.mkdir(parents=True, exist_ok=True)
     build_env = dict(env.environ if env.environ is not None else os.environ, TTLANG_VERSION_OVERRIDE=want)
@@ -220,34 +229,120 @@ def step_diagnostics(env: KEnv, check_only: bool) -> Result:
     return Result("diagnostics", OK, f"copied to {target} (local patch of the tt-lang-sim wheel)")
 
 
-def verify(env: KEnv) -> Result:
-    """Run the negative examples and require upstream's own diagnostic text. See the module docstring."""
-    for rel, needles in defaults.TTLANG_NEGATIVE_EXAMPLES:
-        rc, out, err = env.run([str(env.sim), str(env.src_dir / "examples" / rel)], 300)
-        text = f"{out}\n{err}"
-        if rc == 0:
-            return Result("verify", FAIL, f"{rel} exited 0 but it must fail")
-        if FALLBACK_TEXT in text:
-            return Result("verify", FAIL, f"{rel} ended in {FALLBACK_TEXT}: the diagnostics file is still missing")
-        missing = [n for n in needles if n not in text]
-        if missing:
-            return Result("verify", FAIL, f"{rel} did not print {missing[0]!r}")
+# The environment the checkout's example programs run in: what an agent shell gets (orchard/agent.py, ENV_ALLOW), and
+# nothing else. No token, no credential file path and no device. A test holds this equal to agent.ENV_ALLOW.
+VERIFY_ENV_ALLOW = ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "USER", "LOGNAME", "TERM")
+NO_CHIP = "0000:ff:00.0"                # matches no chip (orchard/agent.py, NO_CHIP)
+
+
+def minimal_env(env: KEnv) -> dict:
+    """An allow-listed environment for running code from the checkout. HOME is a directory that is not created."""
+    source = env.environ if env.environ is not None else os.environ
+    out = {k: source[k] for k in VERIFY_ENV_ALLOW if k in source}
+    # The programs run in another working directory, so every path they are handed must not depend on this one: a
+    # relative PATH entry is made absolute here, and HOME is absolute below.
+    if "PATH" in out:
+        out["PATH"] = os.pathsep.join(os.path.abspath(p) if p else p for p in out["PATH"].split(os.pathsep))
+    home = os.path.abspath(Path(env.scratch_dir) / "verify-home")
+    out.update({"HOME": home, "XDG_CONFIG_HOME": home + "/.config", "XDG_CACHE_HOME": home + "/.cache",
+                "HF_TOKEN_PATH": home + "/no-hf-token", "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0",
+                "TT_VISIBLE_DEVICES": NO_CHIP, "TT_METAL_VISIBLE_DEVICES": NO_CHIP})
+    return out
+
+
+# Programs verify() runs, and the files they need beside them: under examples/ in the checkout (the header is read by
+# compiler_only_external_call.py). Only these are ever executed from the checkout.
+VERIFY_SUPPORT_FILES = ("compiler_only_add.hpp",)
+
+
+def _blob(env: KEnv, rev: str, path: str) -> tuple[str | None, str]:
+    """(text, why): the file as commit `rev` has it, read with `git cat-file blob`, which applies no filter and no
+    textconv."""
+    from orchard import ttlang_reference
+    rc, out, err = env.run(ttlang_reference.git_argv(env, "cat-file", "blob", f"{rev}:{path}"), 60,
+                           ttlang_reference.git_env(env))
+    return (out, "") if rc == 0 else (None, (err.strip().splitlines() or ["no answer"])[-1][:200])
+
+
+def verify(env: KEnv, *, allow_pin_mismatch: bool = False) -> Result:
+    """Run the negative examples and require upstream's own diagnostic text. See the module docstring.
+
+    The examples are code from the checkout, so before any of them runs:
+      1. the programs and the files they need must be tracked at the pinned commit, and the working tree's copy of each
+         must be the same bytes (compared in Python; no git call that could run the checkout's filters). One that is
+         modified or untracked blocks verify, with or without the operator's override;
+      2. the programs are copied from the pinned commit (`git cat-file blob <pin>:path`) into a directory made for this
+         call, and the copies run, never the working tree's version. With `allow_pin_mismatch` and no pinned commit in the
+         checkout, the checkout's HEAD is used instead;
+      3. they run in that directory, in minimal_env, and the directory is removed afterwards."""
+    from orchard import ttlang_reference
+    needed = [f"examples/{rel}" for rel, _ in defaults.TTLANG_NEGATIVE_EXAMPLES]
+    needed += [f"examples/{name}" for name in VERIFY_SUPPORT_FILES]
+    rev, tracked, dirty = ttlang_reference._state(env, allow_pin_mismatch)
+    if dirty is None:
+        return Result("verify", FAIL, f"git could not say whether the files verify runs are as the pinned commit has "
+                                      f"them in {env.src_dir}, so none of them is run")
+    bad = [f"{p} ({dirty[p]})" for p in needed if dirty.get(p) in ("modified", "untracked", "unreadable", "unchecked")]
+    bad += [f"{p} (not in the commit)" for p in needed if p not in tracked]
+    # a link or an unreadable or oversized walk anywhere on the way to the programs: nothing is run
+    bad += [f"{p} ({v})" for p, v in sorted(dirty.items()) if v in ("link", "too many") or
+            (v == "unreadable" and p.split(":")[0] in ("examples", "docs"))]
+    if bad:
+        return Result("verify", FAIL, f"{', '.join(bad)} in {env.src_dir} is not as the pinned commit has it; nothing "
+                                      "from it is run. Restore the file or move the checkout aside")
+    work = tempfile.mkdtemp(prefix="orchard-verify-")
+    try:
+        texts = {p: _blob(env, rev, p) for p in needed}
+        if any(t is None for t, _ in texts.values()):
+            first = next(f"{p}: {why}" for p, (t, why) in texts.items() if t is None)
+            return Result("verify", FAIL, f"the files verify runs could not be read from the pinned commit in "
+                                          f"{env.src_dir} ({first})")
+        for p, (text, _) in texts.items():
+            target = Path(work) / p
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text)
+        # The working directory is `work`, so the simulator and the program are named by absolute paths: a relative
+        # --venv-dir would otherwise be looked up under `work`.
+        sim = os.path.abspath(env.sim)
+        run_env = minimal_env(env)
+        for rel, needles in defaults.TTLANG_NEGATIVE_EXAMPLES:
+            rc, out, err = env.run([sim, os.path.abspath(Path(work) / "examples" / rel)], 300, run_env, work)
+            text = f"{out}\n{err}"
+            if rc == 0:
+                return Result("verify", FAIL, f"{rel} exited 0 but it must fail")
+            if FALLBACK_TEXT in text:
+                return Result("verify", FAIL, f"{rel} ended in {FALLBACK_TEXT}: the diagnostics file is still missing")
+            missing = [n for n in needles if n not in text]
+            if missing:
+                return Result("verify", FAIL, f"{rel} did not print {missing[0]!r}")
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
     return Result("verify", OK, f"{len(defaults.TTLANG_NEGATIVE_EXAMPLES)} negative examples print their diagnostics")
 
 
-def ensure(env: KEnv, *, check_only: bool = False, say: Callable = print) -> list[Result]:
-    """Run the steps in order and stop at the first failure. With check_only nothing changes the machine."""
+def ensure(env: KEnv, *, check_only: bool = False, say: Callable = print,
+           allow_pin_mismatch: bool = False) -> list[Result]:
+    """Run the steps in order and stop at the first failure. With check_only nothing changes the machine.
+
+    `allow_pin_mismatch` is the operator's --allow-stale-skills. Without it a checkout at another commit stops the run,
+    and verify (which executes example programs from the checkout) never runs while any result is off the pin. With it a
+    check goes on past a mismatch, so the later steps are reported, and verify runs in an allow-listed environment."""
     results: list[Result] = []
     for step in (step_clone, step_venv, step_torch, step_wheel, step_diagnostics):
         r = step(env, check_only)
         results.append(r)
         say(f"{r.status:5s} {r.name}: {r.detail}")
-        if r.status == FAIL:
+        # A real build stops at the first failure. A check goes on past a pin mismatch, so the steps after it are
+        # still reported and the probe can tell a mismatch it may override from a component that is missing or broken.
+        if r.status == FAIL and not (check_only and allow_pin_mismatch and r.pin_mismatch):
             return results
-    if any(r.status == TODO for r in results):
+    if any(r.status == TODO and not r.pin_mismatch for r in results):
         r = Result("verify", TODO, "skipped until the steps above are done")
+    elif any(r.pin_mismatch for r in results) and not allow_pin_mismatch:
+        r = Result("verify", TODO, "skipped: nothing from a checkout that is not at the pin is run without "
+                                   "--allow-stale-skills")
     else:
-        r = verify(env)
+        r = verify(env, allow_pin_mismatch=allow_pin_mismatch)
     results.append(r)
     say(f"{r.status:5s} {r.name}: {r.detail}")
     return results
@@ -256,10 +351,10 @@ def ensure(env: KEnv, *, check_only: bool = False, say: Callable = print) -> lis
 # ---- the coder's reference files --------------------------------------------------------------------------------
 #
 # The kernel probe gives the coder these files in its attempt directory, under reference/ (spec section 11, item 28).
-# Two come from the installed tt-lang skill (vendored by tt-warp from tenstorrent/tt-metal, branch
-# agentic-research/fast-models-fast); three come from the tt-lang checkout this module builds the simulator from. The
-# skill's guide and examples document tt-lang specification 0.12; the checkout's specification and examples are the
-# version the simulator runs (0.20 at the pin), so they go in too and the probe's skill says which wins.
+# The specification and the two example kernels come from the tt-lang checkout this module builds the simulator from.
+# guide.md and examples.md come from the installed tt-lang skill (vendored by tt-warp from tenstorrent/tt-metal, branch
+# agentic-research/fast-models-fast) only when it documents the same specification version as the checkout (0.12
+# against 0.20 when this was written); otherwise orchard/ttlang_reference.py generates them from the checkout's docs.
 
 TTLANG_SKILL_ENV = "ORCHARD_TTLANG_SKILL"
 SKILL_SOURCE, CHECKOUT_SOURCE = "tt-lang skill", "tt-lang checkout"
@@ -322,20 +417,13 @@ def _read_reference(path: Path, root: Path | None = None) -> tuple[bytes | None,
 
 
 def read_references(env: KEnv, skill_dir: Path) -> tuple[list[dict], list[str]]:
-    """Read every reference file once. (files, problems): each file is {"name", "source", "path", "sha256", "data"};
-    each problem is a sentence naming a file that is missing, a link, not a regular file or too large. The probe
-    refuses to start while any problem remains, and writes these same bytes into every attempt."""
-    roots = {SKILL_SOURCE: Path(skill_dir), CHECKOUT_SOURCE: Path(env.src_dir)}
-    files, problems = [], []
-    for name, source, rel in REFERENCES:
-        path = roots[source] / rel
-        data, why = _read_reference(path, roots[source])
-        if why:
-            problems.append(why)
-            continue
-        files.append({"name": name, "source": source, "path": str(path),
-                      "sha256": hashlib.sha256(data).hexdigest(), "data": data})
-    return files, problems
+    """Read every reference file once. (files, problems): each file is {"name", "source", "path", "sha256", "data",
+    "spec_version", "generated"}; each problem is a sentence naming a file that is missing, a link, not a regular file or too large. The probe
+    refuses to start while any problem remains, and writes these same bytes into every attempt. The assembly is in
+    orchard/ttlang_reference.py: the skill's guide.md and examples.md are used only when the skill documents the same
+    specification version as the checkout; otherwise they are generated from the checkout's docs."""
+    from orchard import ttlang_reference
+    return ttlang_reference.assemble(env, skill_dir)
 
 
 def skills_status(env: KEnv, skill_dir: Path, *, write_cache: bool = True, preread: dict | None = None) -> list:
