@@ -43,6 +43,7 @@ from pathlib import Path
 from typing import Callable
 
 from orchard import db as dbm
+from orchard import telegraph_notice as notice_mod
 from orchard import telegraph_store as store_mod
 from orchard.db import LedgerRefused, LedgerUnavailable
 from orchard.scrub import HOME_PATH, TOKEN_PATTERNS
@@ -569,6 +570,11 @@ class Telegraph:
 
     def _store(self) -> store_mod.TelegraphStore:
         """The ledger of this scope. It is opened for one operation and closed after it, so no lock is held across a request."""
+        # A directory that still holds the old jsonl ledger (or a half-finished move) is not opened: opening it would create
+        # `project.db` and its helper files in a directory that is not ready for them. The refusal says what to type.
+        waiting = notice_mod.state_of(self.dir)
+        if waiting is not None and waiting.blocks_opening:
+            raise (store_mod.NotMigrated if waiting.kind == notice_mod.UNMIGRATED else store_mod.MigrationIncomplete)(waiting.summary)
         return store_mod.TelegraphStore.open(self.dir, self.scope)
 
     def ask(self, problem: str, task: str, failure: str) -> Answer:
@@ -583,8 +589,10 @@ class Telegraph:
         prompt = cut(f"Problem: {problem}\n\nTask:\n{clean(task)}\n\nWhat failed:\n{clean(failure)}",
                      self.cfg.max_prompt_chars - len(SYSTEM))
         sha = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
-        unusable = lambda exc, **kw: Answer(                                              # noqa: E731
-            False, reason=f"the budget ledger cannot be written or read ({exc}), so no outside call was made", **kw)
+        def unusable(exc, **kw):
+            if isinstance(exc, (store_mod.NotMigrated, store_mod.MigrationIncomplete)):
+                return Answer(False, reason=f"{exc} No outside call was made.", **kw)       # the message starts with what to do
+            return Answer(False, reason=f"the budget ledger cannot be written or read ({exc}), so no outside call was made", **kw)
         try:
             store = self._store()
         except LEDGER_ERRORS as exc:
