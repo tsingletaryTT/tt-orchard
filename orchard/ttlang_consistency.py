@@ -23,12 +23,11 @@ and `tt_metal_tag`).
 """
 from __future__ import annotations
 
-import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from orchard import ttlang_env, ttlang_pin, ttlang_reference
+from orchard import safeio, ttlang_env, ttlang_pin, ttlang_reference
 
 OK, MISMATCH, TODO, UNKNOWN = "ok", "mismatch", "todo", "unknown"
 checkout_spec_version = ttlang_reference.checkout_spec_version
@@ -212,8 +211,8 @@ def load_build_info(path) -> dict:
     """The record `scripts/ttlang_build_info.py` wrote (tt_lang_commit, tt_metal_commit, optionally version and
     tt_metal_tag). ValueError for a file that is missing, not JSON or not an object."""
     try:
-        data = json.loads(Path(path).read_text())
-    except (OSError, ValueError) as exc:
+        data = safeio.read_json(path, max_bytes=64 * 1024)
+    except (safeio.SafeReadError, ValueError) as exc:
         raise ValueError(f"{path} cannot be read as JSON: {exc}") from exc
     if not isinstance(data, dict):
         raise ValueError(f"{path} holds {type(data).__name__}, not a JSON object")

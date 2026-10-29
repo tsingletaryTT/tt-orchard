@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from orchard import ttlang_pin
+from orchard import safeio, ttlang_pin
 
 EXPORTS_FILE = "orchard-pair-exports.sh"
 # The only variables the exports file may set. Anything else the setup tool prints is dropped.
@@ -197,7 +197,7 @@ def verify(venv: Path, *, run: Callable) -> list[Row]:
     rows = [Row("venv", "ok", f"{venv}")]
     rc, out, err = run([str(py), "-I", "-c", _META], 60)
     try:
-        seen = json.loads(out) if rc == 0 else {}
+        seen = safeio.parse_json_bytes(out, max_bytes=4096) if rc == 0 else {}
     except ValueError:
         seen = {}
     want = {"tt-lang-light": ttlang_pin.WHEEL_VERSION, "tt-lang": ttlang_pin.WHEEL_VERSION + "+light"}
