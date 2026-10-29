@@ -43,6 +43,7 @@ try:
     t0 = time.time()
     m = GraniteChip(dev, a.model_dir, max_len=a.max_len, ssd=a.ssd, kernel_dir=a.kernel_dir, trace=not a.no_trace, ssd_precision=a.ssd_precision)
     res["load_s"] = round(time.time() - t0, 1)
+    res["ssd_precision"] = "fp32" if m.f32 else "bf16"       # what the constructed model uses (kernel modes force bf16)
     if a.cmd == "bench":
         prompt = [48, 25, 3639, 374, 220, 1114, 3115, 220, 1419, 5380, 32, 25]
         runs = []

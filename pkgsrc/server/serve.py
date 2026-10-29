@@ -107,7 +107,7 @@ def generate(engine, tokenizer, ids, max_tokens, stop_ids, stop_strings=(), temp
             shown = text[:cut]
             finish, matched = "stop", True
             break
-        safe = text[: len(text) - hold] if hold else text
+        safe = text[: max(len(text) - hold, 0)] if hold else text
         if safe.endswith("�"):
             safe = safe.rstrip("�")                            # an incomplete UTF-8 character: wait for the next token
         if len(safe) > len(shown):
@@ -192,11 +192,13 @@ class Handler(BaseHTTPRequestHandler):
         cid, created, timings = f"chatcmpl-{int(time.time() * 1000)}", int(time.time()), {}
         args = dict(max_tokens=r["max_tokens"], stop_ids=STATE["stop_ids"], stop_strings=r["stop"], temperature=r["temperature"],
                     top_p=r["top_p"], seed=r["seed"], timings=timings)
+        self._started = False                                 # set once response headers have gone out
         with LOCK:
             try:
                 if r["stream"]:
                     self._stream(cid, created, ids, args)
                 else:
+                    self._started = False
                     pieces, finish = [], "length"
                     for piece, fin in generate(STATE["engine"], STATE["tok"], ids, **args):
                         pieces.append(piece)
@@ -207,24 +209,27 @@ class Handler(BaseHTTPRequestHandler):
                                                "total_tokens": len(ids) + timings["completion_tokens"]},
                                      "timings": {k: (round(v, 4) if isinstance(v, float) else v) for k, v in timings.items()}})
             except RequestError as exc:
-                if not r["stream"]:
+                if not self._started:
                     self._json(400, {"error": {"message": str(exc)}})
             except Exception as exc:  # noqa: BLE001  a failure on the chip must reach the client and the log
                 sys.stderr.write(f"serve: generation failed: {type(exc).__name__}: {exc}\n")
-                if not r["stream"]:
+                if not self._started:
                     self._json(500, {"error": {"message": f"generation failed: {type(exc).__name__}"}})
 
     def _stream(self, cid, created, ids, args):
         chunk = lambda delta, fin=None: ("data: " + json.dumps({"id": cid, "object": "chat.completion.chunk", "created": created, "model": MODEL_ID,  # noqa: E731
                                                                  "choices": [{"index": 0, "delta": delta, "finish_reason": fin}]}) + "\n\n").encode()
+        if len(ids) >= STATE["engine"].max_len:             # refuse before any header is sent, so the client gets a JSON 400
+            raise RequestError(f"the prompt is {len(ids)} tokens and the context limit is {STATE['engine'].max_len}")
         gen = generate(STATE["engine"], STATE["tok"], ids, **args)
-        first = next(gen)                                   # a prompt that is too long raises here, before any header is sent
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.end_headers()
+        self._started = True
         self.wfile.write(chunk({"role": "assistant"}))
+        self.wfile.flush()
         finish = "length"
-        for piece, fin in [first, *gen]:
+        for piece, fin in gen:                              # lazily: each piece is written and flushed as it is produced
             if piece:
                 self.wfile.write(chunk({"content": piece}))
                 self.wfile.flush()
@@ -262,6 +267,12 @@ def stop_token_ids(model_dir, tokenizer):
     return {eos} if isinstance(eos, int) else set(eos)
 
 
+def ready_event(model, a, load_s):
+    """The ready line. It reports what the constructed model does (`model.f32`), not what was requested."""
+    return {"event": "ready", "model": MODEL_ID, "host": a.host, "port": a.port, "context": model.L, "ssd": a.ssd,
+            "traced": not a.no_trace, "ssd_precision": "fp32" if model.f32 else "bf16", "load_s": round(load_s, 1), "pid": os.getpid()}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model-dir", default=os.environ.get("GRANITE_MODEL_DIR"),
@@ -294,8 +305,7 @@ def main():
                             trace=not a.no_trace, ssd_precision=a.ssd_precision)
         STATE["engine"] = ChipEngine(model)
         srv = ThreadingHTTPServer((a.host, a.port), Handler)
-        print(json.dumps({"event": "ready", "model": MODEL_ID, "host": a.host, "port": a.port, "context": model.L, "ssd": a.ssd,
-                          "traced": not a.no_trace, "ssd_precision": a.ssd_precision, "load_s": round(time.time() - t0, 1), "pid": os.getpid()}), flush=True)
+        print(json.dumps(ready_event(model, a, time.time() - t0)), flush=True)
         srv.serve_forever()
     finally:
         if model is not None:

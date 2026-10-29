@@ -100,7 +100,8 @@ def render_card(s: dict, license_text: str) -> str:
              "The model weights are not in this repository. This is a community package and not a release of IBM or Tenstorrent.", "",
              "A ttnn port of Granite-4.0-H-1B (a 1.5B-parameter hybrid of 36 Mamba-2 layers and 4 attention layers, 40 layers in all), with an OpenAI-compatible "
              "chat server. Weights are bf16 on one chip. The decode step is captured as a ttnn trace and replayed for each token. "
-             "Prompts are processed one token per step (a loop of decode steps). Sampling on the host is available, and greedy decoding is what was measured.", "",
+             "Prompts are processed one token per step (a loop of decode steps). Sampling on the host is available, and greedy decoding is what was measured. "
+             "The Mamba-2 state, the step size and the decay are kept in float32 on the chip by default (`--ssd-precision bf16` keeps them in bf16).", "",
              "## Weights are not included", "",
              f"Download them yourself: [{MODEL_ID}](https://huggingface.co/{MODEL_ID}) is Apache-2.0 and is not gated. `run.sh` fetches the pinned revision "
              f"`{REVISION}` into your Hugging Face cache on the first start (about 3 GB).", "",
@@ -145,7 +146,7 @@ def render_card(s: dict, license_text: str) -> str:
              "## Not tested", "",
              *[f"- {x}" for x in s["not_tested"]], "",
              "## Optional kernel modes", "",
-             kern["text"], "",
+             "The kernel modes run with a bf16 state whatever `--ssd-precision` says.", kern["text"], "",
              "## License", "",
              "The model is licensed under the Apache License 2.0 by IBM (the model repository's metadata says `license: apache-2.0`; it ships no separate license file). "
              "The code in this package is Tenstorrent's, also under the Apache License 2.0. `LICENSE` is the Apache License 2.0 text and `NOTICE` names the parties.", "",
@@ -406,6 +407,8 @@ def _manifest_problems(pkg: Path) -> list[str]:
         m = yaml.safe_load(text)
     except yaml.YAMLError:
         return ["tt-model.yaml is not valid YAML"]
+    if not isinstance(m, dict):
+        return [f"tt-model.yaml: the document root must be a mapping, not {type(m).__name__}"]
     out = []
     expect = {"schema": "5.1", "kind": "http-server", "arch": "blackhole", "name": PACKAGE_NAME, "repo": f"{NAMESPACE}/{PACKAGE_NAME}"}
     for k, v in expect.items():
@@ -425,8 +428,9 @@ def _manifest_problems(pkg: Path) -> list[str]:
     if not rt.get("ready_line"):
         out.append("tt-model.yaml: runtime.ready_line is missing")
     serve = (ap._text(pkg / "server" / "serve.py") or "")
-    if rt.get("ready_line") and rt["ready_line"].strip("'") not in serve.replace("\\", "").replace("'", '"') and '"event": "ready"' not in serve.replace("\\", ""):
-        out.append("tt-model.yaml: the ready line is not printed by server/serve.py")
+    marker = str(rt.get("ready_line") or "")
+    if marker and marker not in serve:             # the server's ready event is built from a dict literal with this exact text, json.dumps prints it unchanged
+        out.append("tt-model.yaml: the ready line marker is not in server/serve.py, so the server never prints it")
     for extra in (m.get("source") or {}).get("extra_code", []):
         for p in extra.get("paths", []):
             if not (pkg / p).is_dir():

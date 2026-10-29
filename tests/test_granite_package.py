@@ -79,3 +79,66 @@ def test_link_is_refused(staged):
 def test_stage_copies_the_kernels_unchanged(staged):
     for src, dst in gp.KERNEL_FILES:
         assert (staged / dst).read_bytes() == (gp.ROOT / src).read_bytes()
+
+
+# ---- review fixes (PR 244) ------------------------------------------------------------------------------------------------
+@pytest.mark.parametrize("root", ["", "- a\n- b\n", "just a string\n", "42\n"])
+def test_manifest_whose_root_is_not_a_mapping_is_a_named_problem(staged, root):
+    (staged / "tt-model.yaml").write_text(root)
+    out = problems(staged)
+    assert any("tt-model.yaml" in x and "mapping" in x for x in out), out
+
+
+def test_manifest_ready_line_the_server_never_prints_fails_the_gate(staged):
+    p = staged / "tt-model.yaml"
+    p.write_text(p.read_text().replace("""ready_line: '"event": "ready"'""", "ready_line: NEVER_READY"))
+    assert "NEVER_READY" in p.read_text()
+    assert any("ready line" in x for x in problems(staged))
+
+
+def test_the_good_manifest_ready_line_passes(staged):
+    assert not any("ready line" in x for x in problems(staged))
+
+
+def test_boot_script_does_not_hang_or_leave_the_server_when_it_never_becomes_ready(tmp_path):
+    """boot.sh must stop the process it launched even when the ready line never appears (the pid in the ready line does not exist then)."""
+    import subprocess
+    import time
+    pkg, out, venv = tmp_path / "pkg", tmp_path / "out", tmp_path / "venv"
+    (pkg / "tools").mkdir(parents=True)
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin" / "activate").write_text("")
+    (pkg / "run.sh").write_text("echo $$ > %s/server.pid\nexec sleep 300\n" % tmp_path)
+    t0 = time.time()
+    r = subprocess.run(["bash", str(gp.ROOT / "docs/run-logs/evidence/granite-package/scripts/boot.sh"), str(pkg), str(out)],
+                       env={**__import__("os").environ, "TT_METAL_HOME": "/nonexistent", "GRANITE_VENV": str(venv), "READY_TRIES": "2", "READY_SLEEP": "1"}, capture_output=True, text=True, timeout=60)
+    pid = int((tmp_path / "server.pid").read_text())
+    time.sleep(0.5)
+    alive = Path(f"/proc/{pid}").exists() and "sleep" in (Path(f"/proc/{pid}/cmdline").read_bytes().decode(errors="ignore") if Path(f"/proc/{pid}/cmdline").exists() else "")
+    assert not alive, "the launched server is still running"
+    assert time.time() - t0 < 40 and "did not become ready" in r.stdout
+
+
+def test_the_ready_line_and_the_card_report_the_effective_precision():
+    import importlib.util
+    import sys
+    import types
+    from unittest import mock
+    sys.modules.setdefault("ttnn", mock.MagicMock())
+    root = gp.ROOT
+    s1 = importlib.util.spec_from_file_location("granite_chip_t", root / "pkgsrc" / "runtime" / "granite_chip.py")
+    chip = importlib.util.module_from_spec(s1)
+    s1.loader.exec_module(chip)
+    s2 = importlib.util.spec_from_file_location("granite_serve_t", root / "pkgsrc" / "server" / "serve.py")
+    srv = importlib.util.module_from_spec(s2)
+    s2.loader.exec_module(srv)
+    eff = chip.GraniteChip.effective_precision
+    assert eff("composed", "fp32") == "fp32" and eff("composed", "bf16") == "bf16"
+    assert eff("state_full_ro", "fp32") == "bf16" and eff("bcast", "fp32") == "bf16"      # the kernel modes run in bf16 whatever was asked
+    fake = types.SimpleNamespace(f32=False, L=2048)
+    ev = srv.ready_event(fake, types.SimpleNamespace(host="127.0.0.1", port=1, ssd="state_full_ro", ssd_precision="fp32", no_trace=False), 1.0)
+    assert ev["ssd_precision"] == "bf16"                              # the constructed model's precision, not the requested one
+    card = gp.render_card(SUMMARY, "")
+    assert "kept in float32" in card and eff("composed", "fp32") == "fp32"
+    assert "run with a bf16 state whatever `--ssd-precision` says" in card and eff("state_full_ro", "fp32") == "bf16"
+    assert 'res["ssd_precision"] = "fp32" if m.f32 else "bf16"' in (root / "pkgsrc" / "tools" / "evaluate.py").read_text()

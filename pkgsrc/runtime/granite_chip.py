@@ -53,8 +53,7 @@ class GraniteChip:
             raise ValueError("max_len must be a multiple of 32 (the tile size)")
         if ssd_precision not in ("fp32", "bf16"):
             raise ValueError("ssd_precision must be fp32 or bf16")
-        if ssd != "composed":
-            ssd_precision = "bf16"                                      # the kernel modes run in bf16 (see the card)
+        ssd_precision = self.effective_precision(ssd, ssd_precision)
         self.dev, self.L, self.ssd, self.use_trace, self.tid, self.out = dev, max_len, ssd, trace, None, None
         self.f32 = ssd_precision == "fp32"                               # dt, decay and the state in float32
         model_dir = Path(model_dir)
@@ -94,6 +93,11 @@ class GraniteChip:
         self.pos = 0
         if trace:
             self.enable_trace()
+
+    @staticmethod
+    def effective_precision(ssd, requested):
+        """The kernel modes run with a bf16 state whatever was requested; the composed path honours the request."""
+        return requested if ssd == "composed" else "bf16"
 
     # ---- weights ------------------------------------------------------------------------------------------------------------
     def up(self, t, layout=TILE):

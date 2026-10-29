@@ -171,3 +171,62 @@ def test_http_round_trip_with_a_fake_engine():
         assert json.load(urllib.request.urlopen(base + "/v1/models"))["data"][0]["id"] == serve.MODEL_ID
     finally:
         srv.shutdown()
+
+
+# ---- review fixes (PR 244) ------------------------------------------------------------------------------------------------
+def test_stop_string_as_long_as_the_whole_output_leaks_nothing():
+    text, finish, _ = run([0, 1, 2, 3, 4, 5, 6], stop_strings=["abcdef"])
+    assert (text, finish) == ("", "stop")
+
+
+def test_stop_string_longer_than_the_output_so_far_never_slices_backwards():
+    eng = FakeEngine([0, 1, EOS])
+    pieces = [p for p, _ in serve.generate(eng, FakeTok(), [1], 10, {EOS}, ["abcdefghij"])]
+    assert "".join(pieces) == "ab"                                  # held back, then released at the end because the stop string never formed
+
+
+class _Srv:
+    """A server on a free port with a fake engine; `ids_for` maps the request text to prompt ids."""
+    def __init__(self, engine, long_ids=False):
+        class T(FakeTok):
+            def encode(self, text, add_special_tokens=False):
+                return type("E", (), {"ids": [1] * (100 if "LONG" in text else 3)})()
+        tpl = serve.make_template(ROOT / "tests" / "fixtures" / "granite_tiny_template.jinja")
+        serve.STATE.update(tok=T(), template=tpl, stop_ids={EOS}, engine=engine)
+        self.srv = ThreadingHTTPServer(("127.0.0.1", 0), serve.Handler)
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        self.base = f"http://127.0.0.1:{self.srv.server_address[1]}"
+
+    def post(self, body):
+        rq = urllib.request.Request(self.base + "/v1/chat/completions", json.dumps(body).encode(), {"Content-Type": "application/json"})
+        return urllib.request.urlopen(rq)
+
+
+def test_oversized_prompt_with_stream_true_gets_a_json_400():
+    import urllib.error
+    s = _Srv(FakeEngine([0, 1, EOS], max_len=64))
+    try:
+        with pytest.raises(urllib.error.HTTPError) as e:
+            s.post({"messages": [{"role": "user", "content": "LONG"}], "stream": True})
+        assert e.value.code == 400 and "context" in json.loads(e.value.read())["error"]["message"]
+    finally:
+        s.srv.shutdown()
+
+
+def test_streamed_response_arrives_piece_by_piece_not_after_the_whole_generation():
+    import time
+
+    class Slow(FakeEngine):
+        def step(self, tok):
+            time.sleep(0.4)
+            return super().step(tok)
+    s = _Srv(Slow([0, 1, 2, 3, 4, EOS]))
+    try:
+        t0, first = time.time(), None
+        for line in s.post({"messages": [{"role": "user", "content": "hi"}], "stream": True, "max_tokens": 8}):
+            if line.startswith(b"data: {") and json.loads(line[6:])["choices"][0]["delta"].get("content") and first is None:
+                first = time.time() - t0
+        total = time.time() - t0
+        assert first is not None and first < 0.3 and total > 1.4, (first, total)
+    finally:
+        s.srv.shutdown()
