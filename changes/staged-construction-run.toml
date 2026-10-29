@@ -1,0 +1,4 @@
+target = "0.9.55"
+summary = "Run log for issue 176: the staged W/S experiment was not run; the Telegraph capability check for rmsnorm (5 of 5, $0.961) is recorded"
+kind = "docs"
+pr = 200
