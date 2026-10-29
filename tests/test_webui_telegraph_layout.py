@@ -30,7 +30,7 @@ def test_the_meter_opens_the_telegraph_view_and_there_is_a_tab_for_it():
     assert re.search(r'\$\("view-telegraph-btn"\)\.addEventListener\("click",\s*\(\)\s*=>\s*setView\("telegraph"\)\)', js)
     t = page()
     assert by_id(t, "view-telegraph-btn").parent is by_id(t, "view-orchard-btn").parent
-    assert 'location.hash === "#telegraph"' in js and '"#telegraph"' in fn_body(js, "function setView")
+    assert 'hash === "#telegraph"' in js and '"#telegraph"' in fn_body(js, "function setView")
     assert '$("telegraph-view").hidden = view !== "telegraph"' in fn_body(js, "function setView")
 
 
