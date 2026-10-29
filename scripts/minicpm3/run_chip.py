@@ -38,15 +38,21 @@ def main():
     ap.add_argument("--trace", action="store_true", help="bench: capture and replay the step as a trace")
     ap.add_argument("--skip", default="", help="timing only: comma list of mlp, lm")
     ap.add_argument("--opt", type=int, default=1, choices=[1, 2], help="attention composition: 1 first version, 2 fewer ops")
+    ap.add_argument("--prompt-file", help="the prompt text the reference run used")
+    ap.add_argument("--max-len", type=int, default=256)
+    ap.add_argument("--shard", action="store_true", help="DRAM-sharded weights for the MLP and o_proj")
     ap.add_argument("--layers", type=int, default=0, help="debug: truncate the stack (0 = all)")
     a = ap.parse_args()
+    if a.prompt_file:
+        import make_reference
+        make_reference.PROMPT = open(a.prompt_file, encoding="utf-8").read().strip()
     tok = AutoTokenizer.from_pretrained(a.model_dir)
     ids = prompt_ids(tok)[0].tolist()
     n = len(ids)
     dev = ttnn.open_device(device_id=0, trace_region_size=256 * 1024 * 1024)
     try:
         t0 = time.time()
-        m = ChipMiniCPM3(dev, a.model_dir, a.weights, attn=a.attn, max_len=256, fidelity=a.fidelity, upd=a.upd, opt=a.opt)
+        m = ChipMiniCPM3(dev, a.model_dir, a.weights, attn=a.attn, max_len=a.max_len, fidelity=a.fidelity, upd=a.upd, opt=a.opt, shard=a.shard)
         m.skip = set(x for x in a.skip.split(",") if x)
         print(f"model loaded on chip in {time.time() - t0:.1f}s", flush=True)
         if a.mode == "agree":

@@ -14,7 +14,7 @@ opt, upd = int(sys.argv[1]), sys.argv[2]
 dev = ttnn.open_device(device_id=0, trace_region_size=256 * 1024 * 1024)
 try:
     m = ChipMiniCPM3(dev, "/home/ttuser/.cache/orchard-overnight2/minicpm3", "/home/ttuser/.cache/orchard-overnight2/minicpm3.safetensors",
-                     attn="mla", max_len=256, upd=upd, opt=opt)
+                     attn="mla", max_len=256, upd=upd, opt=opt, shard=len(sys.argv) > 4 and sys.argv[4] == 'shard')
     variants = (sys.argv[3] if len(sys.argv) > 3 else "").split(";")      # skip sets separated by ;  (an empty one is the full step)
     for var in variants:
         m.skip = set(x for x in var.split(",") if x)

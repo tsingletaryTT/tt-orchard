@@ -36,10 +36,11 @@ def _rot_matrix():
 
 
 class ChipMiniCPM3:
-    def __init__(self, dev, model_dir, weights_file, *, attn="mla", max_len=256, wdtype=None, fidelity="default", upd="int", n_layers=0, opt=1, log=print):
+    def __init__(self, dev, model_dir, weights_file, *, attn="mla", max_len=256, wdtype=None, fidelity="default", upd="int", n_layers=0, opt=1, shard=False, log=print):
         import json
         self.dev = dev
         self.attn = attn
+        self.shard = shard       # DRAM-sharded weights and a sharded chain for the MLP and o_proj (measured 283 against 350 us per MLP layer)
         self.opt = opt           # 1: first composition; 2: fewer ops (rope folded into the absorbed matmul, split key projection)
         self.skip = set()        # timing experiments only: parts of the step to leave out ("mlp", "lm")
         self.upd = upd           # cache write: "int" (update_cache at a Python position), "paged" or "onehot" (position from a device tensor)
@@ -70,6 +71,21 @@ class ChipMiniCPM3:
         from ref_model import rope_tables
         self.cos, self.sin = rope_tables(c, max_len)
         self.f = safe_open(weights_file, "pt")
+        if self.shard:
+            nc = 40                                    # 5 by 8 cores: divides the tile counts of 2560, 6400 (and 3840 is not used)
+            wmc = lambda k: ttnn.create_sharded_memory_config(  # noqa: E731
+                shape=(32, k // nc), core_grid=ttnn.CoreGrid(y=5, x=8), strategy=ttnn.ShardStrategy.WIDTH,
+                orientation=ttnn.ShardOrientation.ROW_MAJOR, use_height_and_width_as_shard_shape=True)
+            self.mc_d, self.mc_f = wmc(self.hid), wmc(c["intermediate_size"])
+            mk = lambda kt, nt, act=None: ttnn.MatmulMultiCoreReuseMultiCastDRAMShardedProgramConfig(  # noqa: E731
+                in0_block_w=kt // nc, per_core_M=1, per_core_N=nt // nc, fused_activation=act)
+            hk, fk = self.hid // 32, c["intermediate_size"] // 32
+            self.pc_gate = mk(hk, fk, ttnn.UnaryOpType.SILU)
+            self.pc_up = mk(hk, fk)
+            self.pc_down = mk(fk, hk)
+            self.pc_o = mk(hk, hk)
+            self.sh_ckc = ttnn.init_device_compute_kernel_config(dev.arch(), math_fidelity=ttnn.MathFidelity.HiFi2, math_approx_mode=True,
+                                                                 fp32_dest_acc_en=False, packer_l1_acc=True)
         self._load(log)
         self.reset()
 
@@ -80,6 +96,19 @@ class ChipMiniCPM3:
             t = t.t()
         return ttnn.from_torch(t.contiguous().bfloat16(), device=self.dev, dtype=dtype or self.wdtype, layout=ttnn.TILE_LAYOUT,
                                memory_config=ttnn.DRAM_MEMORY_CONFIG)
+
+    def _sw(self, name, scale=1.0):
+        """A weight [out, in] as [in, out] bfloat16 sharded across the DRAM banks (width sharded), as the DRAM-sharded matmul wants."""
+        t = self.f.get_tensor(name).float() * scale
+        t = t.t().contiguous()
+        k, n = t.shape
+        banks = self.dev.dram_grid_size().x
+        padded = math.ceil(n / (32 * banks)) * 32 * banks
+        grid = ttnn.CoreRangeSet({ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(banks - 1, 0))})
+        mc = ttnn.MemoryConfig(ttnn.TensorMemoryLayout.WIDTH_SHARDED, ttnn.BufferType.DRAM,
+                               ttnn.ShardSpec(grid, (k, padded // banks), ttnn.ShardOrientation.ROW_MAJOR))
+        return ttnn.from_torch(torch.nn.functional.pad(t, (0, padded - n)).bfloat16(), device=self.dev, dtype=self.wdtype,
+                               layout=ttnn.TILE_LAYOUT, memory_config=mc)
 
     def _norm_w(self, name, scale=1.0):
         t = self.f.get_tensor(name).float() * scale
@@ -107,11 +136,17 @@ class ChipMiniCPM3:
                 "qb": self._w(a + "q_b_proj.weight"),
                 "kva": self._w(a + "kv_a_proj_with_mqa.weight"),
                 "kv_norm": self._norm_w(a + "kv_a_layernorm.weight"),
-                "o": self._w(a + "o_proj.weight", scale=self.rs),
-                "gate": self._w(p + "mlp.gate_proj.weight"),
-                "up": self._w(p + "mlp.up_proj.weight"),
-                "down": self._w(p + "mlp.down_proj.weight", scale=self.rs),
             }
+            if self.shard:
+                d["o"] = self._sw(a + "o_proj.weight", scale=self.rs)
+                d["gate"] = self._sw(p + "mlp.gate_proj.weight")
+                d["up"] = self._sw(p + "mlp.up_proj.weight")
+                d["down"] = self._sw(p + "mlp.down_proj.weight", scale=self.rs)
+            else:
+                d["o"] = self._w(a + "o_proj.weight", scale=self.rs)
+                d["gate"] = self._w(p + "mlp.gate_proj.weight")
+                d["up"] = self._w(p + "mlp.up_proj.weight")
+                d["down"] = self._w(p + "mlp.down_proj.weight", scale=self.rs)
             if self.opt == 2:
                 kva_w = self.f.get_tensor(a + "kv_a_proj_with_mqa.weight").float()           # [288, 2560]
                 R = _rot_matrix()
@@ -247,14 +282,27 @@ class ChipMiniCPM3:
                     ao = self._host_core(i, d, qb, ckv, kpe, self._pos)
                 else:
                     ao = self._mla_core(i, d, qb, ckv, kpe, cos, sin, cur, inp)
-            x = ttnn.add(x, self._lin(ao, d["o"]))
+            if self.shard:
+                o = ttnn.linear(ttnn.to_memory_config(ao, self.mc_d), d["o"], program_config=self.pc_o, memory_config=self.mc_d,
+                                compute_kernel_config=self.sh_ckc)
+                x = ttnn.add(x, ttnn.to_memory_config(o, ttnn.DRAM_MEMORY_CONFIG))
+            else:
+                x = ttnn.add(x, self._lin(ao, d["o"]))
             if tap:
                 tap(f"layer_{i:02d}.attn", self._host(x)[0, 0, 0])
             if "mlp" in self.skip:
                 continue
             h = self._rms(x, d["post_norm"])
-            m = ttnn.multiply(self._lin(h, d["gate"], activation="silu"), self._lin(h, d["up"]))
-            x = ttnn.add(x, self._lin(m, d["down"]))
+            if self.shard:
+                hs = ttnn.to_memory_config(h, self.mc_d)
+                gg = ttnn.linear(hs, d["gate"], program_config=self.pc_gate, memory_config=self.mc_f, compute_kernel_config=self.sh_ckc)
+                uu = ttnn.linear(hs, d["up"], program_config=self.pc_up, memory_config=self.mc_f, compute_kernel_config=self.sh_ckc)
+                dn = ttnn.linear(ttnn.multiply(gg, uu), d["down"], program_config=self.pc_down, memory_config=self.mc_d,
+                                 compute_kernel_config=self.sh_ckc)
+                x = ttnn.add(x, ttnn.to_memory_config(dn, ttnn.DRAM_MEMORY_CONFIG))
+            else:
+                m = ttnn.multiply(self._lin(h, d["gate"], activation="silu"), self._lin(h, d["up"]))
+                x = ttnn.add(x, self._lin(m, d["down"]))
             if tap:
                 tap(f"layer_{i:02d}", self._host(x)[0, 0, 0])
         x = self._rms(x, self.final_norm)

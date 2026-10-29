@@ -52,7 +52,11 @@ def main():
     ap.add_argument("--weights", required=True)
     ap.add_argument("--out-dir", required=True, help="a new directory; fp32, bf16 and native runs go under it")
     ap.add_argument("--decode", type=int, default=16)
+    ap.add_argument("--prompt-file", help="use this text (read as UTF-8) in place of the built-in prompt")
     a = ap.parse_args()
+    global PROMPT
+    if a.prompt_file:
+        PROMPT = open(a.prompt_file, encoding="utf-8").read().strip()
     from pathlib import Path
     out = Path(a.out_dir)
     weights = Path(a.weights)
