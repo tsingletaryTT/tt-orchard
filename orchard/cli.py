@@ -416,9 +416,9 @@ def _parser() -> argparse.ArgumentParser:
                          "prefix is the next stage's starting file. For ops with a stage table (center, rmsnorm); needs "
                          "--no-agent-hw and --phase sim")
     kp.add_argument("--stage-turns", dest="stage_turns", type=int, metavar="N",
-                    help="with --staged: the turns each stage may use (default: the stage table's, 15)")
+                    help="with --staged: the turns each stage may use (default: 40 divided by the op's stages)")
     kp.add_argument("--stage-wall-s", dest="stage_wall_s", type=float, metavar="S",
-                    help="with --staged: the seconds each stage may use (default: the stage table's, 420)")
+                    help="with --staged: the seconds each stage may use (default: 1800 divided by the op's stages)")
     kp.add_argument("--hw-checks", dest="hw_checks", type=int, metavar="N",
                     help="how many times each attempt may call the `hardware_check` tool, which runs its current kernel.py "
                          "on one leased chip (default 6; 0 turns the tool off). A call takes about 45 s with the lease "

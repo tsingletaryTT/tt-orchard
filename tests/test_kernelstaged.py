@@ -96,6 +96,13 @@ def test_the_last_stage_is_the_real_op_and_no_instruction_holds_a_worked_solutio
         assert "ttl." not in s.instruction and "def " not in s.instruction and "```" not in s.instruction
 
 
+@pytest.mark.parametrize("op", sorted(ks.STAGES))
+def test_the_stages_of_an_op_share_the_whole_kernel_budget_and_never_exceed_it(op):
+    stages = ks.STAGES[op]
+    assert sum(s.max_turns for s in stages) <= kp.BUDGET["max_turns"] and sum(s.max_turns for s in stages) > kp.BUDGET["max_turns"] - len(stages)
+    assert sum(s.wall_s for s in stages) == pytest.approx(kp.BUDGET["wall_s"])
+
+
 def test_a_stage_spec_changes_the_reference_the_inputs_and_the_output_and_nothing_else_in_the_bars():
     real = kp.load_spec("rmsnorm")
     stage = ks.STAGES["rmsnorm"][2]

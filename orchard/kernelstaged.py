@@ -42,8 +42,8 @@ from orchard.watchdog import RetryGuard
 
 STAGED_NOTE = Path(__file__).resolve().parent / "skills" / "kernel-probe-staged.md"
 STAGED_DIR = ".staged"              # DIR/.staged/<op>-<n>-s<k>/: the files stage k's check runs against (outside the agent's reach)
-DEFAULT_STAGE_TURNS = 15            # choice: a stage is one small change; the whole-kernel arm has 40 turns for everything
-DEFAULT_STAGE_WALL_S = 420.0        # choice: five stages of this length are about the whole-kernel arm's 1800 s
+WHOLE_KERNEL_TURNS = kp.BUDGET["max_turns"]      # the whole-kernel probe's budget for one attempt: 40 turns
+WHOLE_KERNEL_WALL_S = kp.BUDGET["wall_s"]        # and 1800 s. The stages of an op share these, so both arms get the same totals.
 
 
 @dataclass(frozen=True)
@@ -53,15 +53,24 @@ class Stage:
     reference: str | None            # key in staged_references.STAGE_REFERENCES; None: the op's own reference (last stage)
     inputs: tuple | None = None      # names of the op's inputs this stage takes, in order; None: all of them
     output: tuple | None = None      # the output shape of this stage; None: the op's
-    max_turns: int = DEFAULT_STAGE_TURNS
-    wall_s: float = DEFAULT_STAGE_WALL_S
+    max_turns: int = 8               # set by _share_budget: the attempt's turns divided over the op's stages
+    wall_s: float = 360.0            # likewise for the wall clock
 
 
 _COPY = Stage(
     "copy", "Make kernel.py copy x to out unchanged: read x through a dataflow buffer and write it to out through another. "
             "This stage only moves data; the check compares out with x.", "stage_copy", inputs=("x",))
 
-STAGES: dict[str, tuple[Stage, ...]] = {
+def _share_budget(stages: tuple) -> tuple:
+    """The stages with the whole-kernel attempt's turns and wall clock divided evenly over them (turns rounded down), so a
+    staged attempt cannot use more turns or time than a whole-kernel one. A stage that finishes early does not pass its
+    unused budget on."""
+    n = len(stages)
+    return tuple(Stage(**{**s.__dict__, "max_turns": WHOLE_KERNEL_TURNS // n, "wall_s": WHOLE_KERNEL_WALL_S / n})
+                 for s in stages)
+
+
+_TABLE: dict[str, tuple[Stage, ...]] = {
     "center": (
         _COPY,
         Stage("scale", "Multiply every element by 1/256 on the way through, so out = x / 256. Same output shape as before.",
@@ -86,6 +95,7 @@ STAGES: dict[str, tuple[Stage, ...]] = {
                          "the shape of x (see kernel_spec.json), so the operation now takes x, w and out.", None),
     ),
 }
+STAGES: dict[str, tuple[Stage, ...]] = {op: _share_budget(stages) for op, stages in _TABLE.items()}
 
 
 # ---- the files a stage runs against ----------------------------------------------------------------------------------

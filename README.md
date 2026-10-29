@@ -1597,7 +1597,7 @@ Flags:
   `kernel.py`; a stage that fails its check or spends its turns or time ends the attempt, and the record names the stage
   (`staged` in `attempt.json`, `kernel-probe-staged-report.md`). The last stage is judged by the unmodified op check. Needs
   `--no-agent-hw` and `--phase sim`. A stage table is data: add an entry to `kernelstaged.STAGES` for another op.
-  `--stage-turns` (default 15) and `--stage-wall-s` (default 420) replace every stage's budget.
+  `--stage-turns` and `--stage-wall-s` replace every stage's budget (default: the whole-kernel probe's 40 turns and 1800 s divided evenly over the op's stages).
 - `--out`: output directory (default `./kernel-probe`).
 - `--endpoint`: the coder's OpenAI-compatible URL, ending in `/v1` (default: from the tier config).
 - `--model`: the model id the coder serves (default: from the tier config).
