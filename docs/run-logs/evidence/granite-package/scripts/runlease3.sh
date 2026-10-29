@@ -10,6 +10,7 @@ cat $LOG
 LEASE=$(grep -oE "lease [0-9a-f]{6}" $LOG | head -1 | cut -d' ' -f2)
 [ -z "$LEASE" ] && { echo NO LEASE; exit 3; }
 export $(grep -oE "TT_VISIBLE_DEVICES=[^ ]+" $LOG | head -1)
+export GOZER_LEASE=$LEASE
 echo "LEASED $LEASE $(date -Is)"
 bash "$1" "$2"
 gozer release $LEASE
