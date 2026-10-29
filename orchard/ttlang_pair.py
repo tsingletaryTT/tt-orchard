@@ -88,7 +88,7 @@ def build_plan(venv: Path, tt_metal_dir: Path, download_dir: Path) -> list[Step]
     sums = [x for name, sha in ttlang_pin.WHEEL_SHA256.items() for x in (sha, name)]
     wheels = [str(dl / name) for name in ttlang_pin.WHEEL_SHA256]
     setup = str(venv / "bin" / "tt-lang-setup-external-tt-metal")
-    download = ["python3", "-m", "pip", "download", "--no-deps", "--only-binary=:all:", "--extra-index-url",
+    download = ["python3", "-m", "pip", "download", "--no-deps", "--only-binary=:all:", "--find-links",
                 ttlang_pin.WHEEL_INDEX, "-d", str(dl), *pins]
     return [
         Step("download", shlex.join(download), download),

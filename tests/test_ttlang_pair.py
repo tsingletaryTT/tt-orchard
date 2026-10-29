@@ -66,6 +66,14 @@ def test_plan_is_built_from_the_pin_constants(tmp_path):
     assert [s.name for s in steps] == ["download", "hashes", "venv", "install", "exports"]
 
 
+def test_download_reads_the_index_as_a_page_of_links(tmp_path):
+    """The S3 index is one HTML page of wheel links, not a package index with a page per project (pip found no version
+    through --extra-index-url when this was tried for real)."""
+    download = tp.build_plan(tmp_path / "v", Path("/m/tt-metal"), tmp_path / "dl")[0].argv
+    assert download[download.index("--find-links") + 1] == ttlang_pin.WHEEL_INDEX
+    assert "--extra-index-url" not in download
+
+
 def test_plan_names_the_safetensors_note(tmp_path):
     assert "safetensors" in tp.NOTES and "PYTHONPATH" in tp.NOTES
 
