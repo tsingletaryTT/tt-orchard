@@ -382,6 +382,60 @@ class ChipMiniCPM3:
             return x
         return ttnn.to_layout(self._lin(ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG), self.lm_head, dtype=ttnn.float32), ttnn.ROW_MAJOR_LAYOUT)
 
+    # ---- batched prefill ------------------------------------------------------------------------------
+    def _prefill_weights(self):
+        """Interleaved copies of the weights that are stored DRAM-sharded for decode (o_proj and the MLP): a prefill matmul has many rows and uses the ordinary matmul."""
+        if getattr(self, "pf_w", None) is not None:
+            return
+        self.pf_w = []
+        for i in range(self.L):
+            p = f"model.layers.{i}."
+            self.pf_w.append({"o": self._w(p + "self_attn.o_proj.weight", scale=self.rs), "gate": self._w(p + "mlp.gate_proj.weight"),
+                              "up": self._w(p + "mlp.up_proj.weight"), "down": self._w(p + "mlp.down_proj.weight", scale=self.rs)})
+
+    def prefill(self, ids):
+        """Process the whole prompt at once (all rows through each op, causal flash MLA over the prompt), fill the KV cache rows 0 to len-1, and return the logits of
+        the last prompt token. Needs opt 2 or 3. The decode trace can run from position len(ids) afterwards: it uses the same cache buffers."""
+        self._prefill_weights()
+        self._tables()
+        S = len(ids)
+        Sp = -(-S // 128) * 128
+        assert Sp <= self.max_len, "prompt longer than the cache"
+        dev = self.dev
+        toks = ttnn.from_torch(torch.tensor([ids + [0] * (Sp - S)], dtype=torch.int32), device=dev, dtype=ttnn.uint32, layout=ttnn.ROW_MAJOR_LAYOUT)
+        x = ttnn.reshape(ttnn.embedding(toks, self.emb, layout=ttnn.TILE_LAYOUT), (1, 1, Sp, self.hid))
+        up = lambda t: ttnn.from_torch(t.bfloat16(), device=dev, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT)  # noqa: E731
+        cos, sin = self.cos[:Sp], self.sin[:Sp]
+        cosF = up(torch.cat([torch.ones(Sp, self.dn), cos], dim=1).reshape(1, 1, Sp, 96))
+        sinF = up(torch.cat([torch.zeros(Sp, self.dn), sin], dim=1).reshape(1, 1, Sp, 96))
+        cs64 = up(torch.cat([cos, sin], dim=1).reshape(1, 1, Sp, 64))
+        H, qa_n, kvr, dr = self.H, self.qa_n, self.kvr, self.dr
+        for i, d in enumerate(self.layers):
+            w = self.pf_w[i]
+            h = self._rms(x, d["in_norm"])
+            qkv = ttnn.linear(h, d["qkv"])                                               # [1,1,Sp,1088]
+            qa = self._rms(ttnn.slice(qkv, [0, 0, 0, 0], [1, 1, Sp, qa_n]), d["qa_norm"])
+            ckv = self._rms(ttnn.slice(qkv, [0, 0, 0, qa_n], [1, 1, Sp, qa_n + kvr]), d["kv_norm"])
+            k64 = ttnn.slice(qkv, [0, 0, 0, qa_n + kvr], [1, 1, Sp, qa_n + kvr + 2 * dr])
+            qb = ttnn.linear(qa, d["qb"])                                                # [1,1,Sp,H*96]
+            q = ttnn.transpose(ttnn.reshape(qb, (1, Sp, H, self.dn + self.dr)), 1, 2)    # [1,H,Sp,96]
+            qr = ttnn.add(ttnn.multiply(q, cosF), ttnn.multiply(ttnn.matmul(q, self.Rf), sinF))
+            ql = ttnn.matmul(qr, d["wbig"])                                              # [1,H,Sp,288]
+            krot = ttnn.matmul(ttnn.multiply(k64, cs64), self.IdI)                       # [1,1,Sp,32]
+            new = ttnn.concat([ckv, krot], dim=-1)                                       # [1,1,Sp,288]
+            ttnn.fill_cache(self.kvpe[i], new, 0)
+            o = ttnn.transformer.flash_mla_prefill(ql, new, kvr, is_causal=True, scale=(self.dn + self.dr) ** -0.5)   # [1,H,Sp,256]
+            o = ttnn.matmul(o, d["wuv"])                                                 # [1,H,Sp,64]
+            o = ttnn.reshape(ttnn.transpose(o, 1, 2), (1, 1, Sp, H * self.dv))
+            x = ttnn.add(x, ttnn.linear(o, w["o"]))
+            h = self._rms(x, d["post_norm"])
+            m = ttnn.multiply(ttnn.linear(h, w["gate"], activation="silu"), ttnn.linear(h, w["up"]))
+            x = ttnn.add(x, ttnn.linear(m, w["down"]))
+        last = ttnn.slice(x, [0, 0, S - 1, 0], [1, 1, S, self.hid])
+        last = self._rms(last, self.final_norm)
+        logits = ttnn.to_layout(self._lin(last, self.lm_head, dtype=ttnn.float32), ttnn.ROW_MAJOR_LAYOUT)
+        return self._host(logits)[0, 0, 0, : self.vocab]
+
     # ---- trace ----------------------------------------------------------------------------------------
     def enable_trace(self):
         """Compile once, capture the step as a trace on persistent input tensors. Later calls to `traced_step` copy the new token and position into

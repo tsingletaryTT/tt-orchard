@@ -241,3 +241,22 @@ The orchard preflight on this model (`bringup openbmb/MiniCPM3-4B --dry-run`, re
 disk ok, `base` warn (the model card names no base model, so stage 0 has nothing to compare it with), `port` BLOCK only because another agent's coder holds port 8011. Nothing in the preflight
 or in `orchard.hazards` knows about the two things the port had to handle (the flash MLA grid limit and the norm accumulation). `orchard.hazards.scan_model_hazards` reports one hazard for
 this config: the vocabulary 73,448 is not a whole number of tiles (it matters for the LM head and the sampler; the port pads to 73,472 and slices before the argmax).
+
+## Update 8 (about 23:15 Pacific): batched prefill
+
+The prompt used to go through the decode step one token at a time (30 ms per token). `ChipMiniCPM3.prefill(ids)` now processes the whole prompt at once with the existing ops on many rows: the same fused
+projection and per-head matmuls, `ttnn.fill_cache` to write the 288-wide latent rows, and `ttnn.transformer.flash_mla_prefill` (the DeepSeek prefill op, causal, one key head, value width 256) for the
+attention. The prompt is padded to a multiple of 128 tokens (the pad rows sit after the real ones, so the causal attention ignores them, and decode overwrites them before it ever reads them). The weights
+that are stored DRAM-sharded for decode (`o_proj`, gate, up, down) get ordinary interleaved copies for prefill, loaded on the first call (about 6 GB more on the chip).
+
+Checked against the recorded float32 reference (`prefill_check.py`): the last prompt token's logits PCC 0.9991 (40-token prompt) and 0.9969 (922-token prompt), the same as the one-token-per-step prefill
+(0.9991 and 0.9968); the next-token choice matches; 16 teacher-forced decode steps from the filled cache have 0 flips and logits PCC 0.998 to 0.999. Speed:
+
+| prompt tokens | prefill by decode steps | batched prefill (second and later calls) |
+|---|---|---|
+| 40 | 1.19 s | 0.088 s (460 tok/s) |
+| 922 | about 28 s | 0.37 s (2,490 tok/s) |
+
+The first call compiles the kernels (13 to 18 s); the benchmark records treat it as the warm-up run. Benchmark records `bench_opt3_bf16_prefill.json` (40-token prompt) and
+`bench_opt3_bf16_prefill_long.json` (922-token prompt): decode 33.85, 33.76, 33.83 tok/s and 32.26, 32.31, 32.27 tok/s (one chip, opt 3, bfloat16, 1 warm-up and 3 measured runs of 64 tokens,
+host load about 7.7), which is 54 and 51 percent of the 62.8 tok/s floor. The chat server uses the batched prefill on one chip. The two-chip model still prefills one token per step.

@@ -45,6 +45,7 @@ def main():
     ap.add_argument("--mlp-dtype", default="bf16", choices=["bf16", "bfp8", "bfp4"])
     ap.add_argument("--mlp-fidelity", default="hifi2", choices=["hifi2", "lofi", "hifi4"])
     ap.add_argument("--tp", type=int, default=1, choices=[1, 2], help="2: both chips of the board, tensor parallel (chip_model_tp.py)")
+    ap.add_argument("--batched-prefill", action="store_true", help="bench: process the prompt with m.prefill (all rows at once) instead of one decode step per token")
     ap.add_argument("--layers", type=int, default=0, help="debug: truncate the stack (0 = all)")
     a = ap.parse_args()
     if a.prompt_file:
@@ -138,8 +139,11 @@ def bench(a, m, ids, n, tok):
             m.reset()          # a trace is bound to its cache buffers; stale rows past the position are masked by the op
         logits = None
         t_pre = time.time()
-        for p, t in enumerate(ids):
-            logits = step(t, p)
+        if a.batched_prefill:
+            logits = m.prefill(ids)
+        else:
+            for p, t in enumerate(ids):
+                logits = step(t, p)
         prefill_s = time.time() - t_pre
         nxt = int(logits.argmax().item())
         out = []
@@ -160,7 +164,7 @@ def bench(a, m, ids, n, tok):
     floor = df.floor_for_board(cfg, {"default": "bf16"}, "p300", dies=1)
     med = summary["parts"]["decode_tok_s"]["median"]
     record = {"label": summary["label"], "model": "openbmb/MiniCPM3-4B", "config": {"attn": a.attn, "opt": a.opt, "shard": a.shard, "trace": a.trace, "upd": a.upd,
-              "fidelity": a.fidelity, "weights": "bfloat16 (MLP " + a.mlp_dtype + ", " + a.mlp_fidelity + ")", "chips": a.tp, "prompt_tokens": n, "steps": a.steps},
+              "fidelity": a.fidelity, "weights": "bfloat16 (MLP " + a.mlp_dtype + ", " + a.mlp_fidelity + ")", "chips": a.tp, "prompt_tokens": n, "steps": a.steps, "batched_prefill": a.batched_prefill},
               "runs": results, "summary": summary, "floor": floor.as_dict(), "share_of_floor_median": df.share_of_floor(med, floor),
               "share_text": df.share_text(med, floor), "text": tok.decode(out)}
     print(record["share_text"], flush=True)

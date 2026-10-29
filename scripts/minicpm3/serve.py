@@ -35,9 +35,12 @@ def generate(messages, max_tokens):
     room = STATE["max_len"] - len(ids) - 1
     if room < 1:
         raise ValueError(f"the prompt is {len(ids)} tokens; the server's context is {STATE['max_len']}")
-    logits = None
-    for p, t in enumerate(ids):
-        logits = m.traced_step(t, p)
+    if hasattr(m, "prefill"):
+        logits = m.prefill(ids)                       # all prompt rows at once (single-chip model)
+    else:
+        logits = None
+        for p, t in enumerate(ids):                   # the two-chip model prefills one token per step
+            logits = m.traced_step(t, p)
     out, shown = [], ""
     for k in range(min(max_tokens, room)):
         nxt = int(logits.argmax())
