@@ -1011,7 +1011,8 @@ def run_pinned(tmp_path, pin_env, resolved, *, args=("--model", "small-music", "
 
 
 def test_the_pinned_generator_runs_chip_generate_with_the_same_arguments_when_the_revision_is_the_pin(tmp_path):
-    r = run_pinned(tmp_path, REV, REV)
+    # The same arguments, plus `--chip-decoder` (the packaged command's default since the decoder-on-chip rebuild; see test_audio_package_rebuild.py).
+    r = run_pinned(tmp_path, REV, REV, args=("--model", "small-music", "--out", "x", "--host-decoder"))
     assert r.returncode == 0 and "GENERATED ['--model', 'small-music', '--out', 'x']" in r.stdout
 
 

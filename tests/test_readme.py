@@ -40,6 +40,7 @@ OTHER_TOOL_FLAGS = {
     "--delete": "rsync (named as something the command runner does not stop)",
     "--force": "gozer (the README says never to pass it)",
     "--help": "gozer reset --help",
+    "--host-decoder": "pinned_generate.py in a staged audio package (section 5.9fb)",
     "--mode": "tt-toplike (each Machine view button starts it with one)",
     "--rotate": "tt-toplike (its kiosk rotation, one of the Machine views)",
     "--backend": "tt-toplike (the page always runs its sysfs backend)",
