@@ -34,15 +34,19 @@ def main():
     ap.add_argument("--steps", type=int, default=32)
     ap.add_argument("--repeats", type=int, default=3)
     ap.add_argument("--fidelity", default="default", choices=["default", "hifi4"])
+    ap.add_argument("--upd", default="int", choices=["int", "paged", "onehot"], help="cache write; a trace needs onehot or paged")
+    ap.add_argument("--trace", action="store_true", help="bench: capture and replay the step as a trace")
+    ap.add_argument("--skip", default="", help="timing only: comma list of mlp, lm")
     ap.add_argument("--layers", type=int, default=0, help="debug: truncate the stack (0 = all)")
     a = ap.parse_args()
     tok = AutoTokenizer.from_pretrained(a.model_dir)
     ids = prompt_ids(tok)[0].tolist()
     n = len(ids)
-    dev = ttnn.open_device(device_id=0)
+    dev = ttnn.open_device(device_id=0, trace_region_size=256 * 1024 * 1024)
     try:
         t0 = time.time()
-        m = ChipMiniCPM3(dev, a.model_dir, a.weights, attn=a.attn, max_len=256, fidelity=a.fidelity)
+        m = ChipMiniCPM3(dev, a.model_dir, a.weights, attn=a.attn, max_len=256, fidelity=a.fidelity, upd=a.upd)
+        m.skip = set(x for x in a.skip.split(",") if x)
         print(f"model loaded on chip in {time.time() - t0:.1f}s", flush=True)
         if a.mode == "agree":
             agree(a, m, ids, n)
@@ -94,17 +98,24 @@ def agree(a, m, ids, n):
 
 def bench(a, m, ids, n, tok):
     results = []
+    step = m.run
+    if a.trace:
+        t0 = time.time()
+        m.enable_trace()
+        print(f"trace captured in {time.time() - t0:.1f}s", flush=True)
+        step = lambda t, p, tap=None: m.traced_step(t, p)  # noqa: E731
     for r in range(a.repeats + 1):            # repeat 0 is a warm-up and is reported apart
-        m.reset()
+        if not a.trace:
+            m.reset()          # a trace is bound to its cache buffers; stale rows past the position are masked by the op
         logits = None
         for p, t in enumerate(ids):
-            logits = m.run(t, p)
+            logits = step(t, p)
         nxt = int(logits.argmax().item())
         out = []
         t0 = time.time()
         for k in range(a.steps):
             out.append(nxt)
-            lg = m.run(nxt, n + k)
+            lg = step(nxt, n + k)
             nxt = int(lg.argmax().item())
         dt = time.time() - t0
         results.append({"repeat": r, "warmup": r == 0, "steps": a.steps, "seconds": dt, "tok_s": a.steps / dt})
