@@ -108,7 +108,7 @@ def render_card(s: dict, license_text: str) -> str:
              "Needs a Tenstorrent Blackhole chip, a tt-metal build with `ttnn` (tested with tt-metal v0.80.0), and Python 3.12.", "",
              "```bash", "python -m venv venv && . venv/bin/activate", "pip install -r requirements.txt",
              "export TT_METAL_HOME=<your tt-metal checkout>     # run.sh adds its ttnn to PYTHONPATH when `import ttnn` does not work yet",
-             "./run.sh                                          # on a shared machine, take a chip lease first", "```", "",
+             "bash run.sh                                       # on a shared machine, take a chip lease first", "```", "",
              f"The server listens on http://127.0.0.1:{PORT} (set `PORT`). It binds the local machine only and has no sign-in. "
              "It holds the chip while it runs, and one request runs at a time.", "",
              "## API", "",
@@ -170,13 +170,24 @@ Licensed under the Apache License, Version 2.0; you may not use this package exc
 law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 """
 
-REQUIREMENTS = """# Python packages for the server and the runtime. ttnn comes from your tt-metal build (see README.md), not from this file.
+REQUIREMENTS = """# Python packages for the server and the runtime. ttnn itself comes from your tt-metal build (see README.md); the lines under
+# "ttnn's own dependencies" are the ones tt-metal's pyproject.toml lists, which `import ttnn` needs in this environment.
 numpy
 torch
 safetensors
 tokenizers
 jinja2
 huggingface_hub
+# ttnn's own dependencies
+loguru
+networkx
+graphviz
+pyyaml
+click
+pandas
+seaborn
+ml_dtypes
+pydantic
 """
 
 RUN_SH = f"""#!/usr/bin/env bash
@@ -198,7 +209,7 @@ exec python server/serve.py --port "${{PORT:-{PORT}}}" "$@"
 
 def manifest_text() -> str:
     return f"""# DRAFT. NOT BUILT. A v5.1 container manifest of kind `http-server` for server/serve.py. It cannot be built from this directory alone:
-# `source.tt_metal` must be a tt-metal checkout and `source.extra_code` must name this directory. `run.sh` runs the package without tt-model.
+# `source.tt_metal` must be a tt-metal checkout and `source.extra_code` must name this directory. `bash run.sh` runs the package without tt-model.
 schema: "5.1"
 repo: {NAMESPACE}/{PACKAGE_NAME}
 name: {PACKAGE_NAME}
