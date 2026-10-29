@@ -49,6 +49,28 @@ def load(exp: Path):
     return rows
 
 
+def median(values):
+    """The median of sorted numbers: the mean of the two middle values for an even count; "-" for none (missing values are
+    excluded by the caller, never counted as 0)."""
+    n = len(values)
+    if n == 0:
+        return "-"
+    return values[n // 2] if n % 2 else (values[n // 2 - 1] + values[n // 2]) / 2
+
+
+REGISTERED_ATTEMPTS = 10          # attempts per arm per op in the pre-registration
+
+
+def verdict(w_recs, s_recs, w_passed, s_passed, reached_final):
+    """(criterion 1, criterion 2, overall) or None when either arm has fewer than the registered attempts: an incomplete
+    experiment has no verdict."""
+    if len(w_recs) < REGISTERED_ATTEMPTS or len(s_recs) < REGISTERED_ATTEMPTS:
+        return None
+    c1 = s_passed >= 1 and s_passed - w_passed >= 3
+    c2 = reached_final >= 5 and w_passed == 0
+    return c1, c2, c1 or c2
+
+
 def counts(items):
     out = {}
     for x in items:
@@ -71,11 +93,10 @@ def main(exp_dir):
             recs = [r for (a, o, k), r in sorted(rows.items(), key=lambda kv: kv[0][2]) if a == arm and o == op and r]
             passed = sum(1 for r in recs if r["passed_sim"])
             fails = [failure_class(r.get("category"), r.get("first_line")) for r in recs if not r["passed_sim"]]
-            turns = sorted(r["turns"] or 0 for r in recs)
-            walls = sorted(r["agent_wall_s"] or 0 for r in recs)
-            med = lambda v: v[len(v) // 2] if v else "-"
+            turns = sorted(r["turns"] for r in recs if isinstance(r.get("turns"), (int, float)))
+            walls = sorted(r["agent_wall_s"] for r in recs if isinstance(r.get("agent_wall_s"), (int, float)))
             print(f"| {op} | {arm} | {len(recs)} | {passed} | {fmt(counts(fails))} | {fmt(counts(r['status'] for r in recs))} "
-                  f"| {med(turns)} | {med(walls)} |")
+                  f"| {median(turns)} | {median(walls)} |")
             summary[(op, arm)] = {"recs": recs, "passed": passed, "fails": fails}
     print("\n## Arm S: the stage each attempt reached\n")
     for op in OPS:
@@ -96,10 +117,10 @@ def main(exp_dir):
     for op in OPS:
         w, s = summary[(op, "W")], summary[(op, "S")]
         reached_final = sum(1 for r in s["recs"] if r["staged"]["reached"] == STAGE_COUNT[op])
-        c1 = s["passed"] >= 1 and s["passed"] - w["passed"] >= 3
-        c2 = reached_final >= 5 and w["passed"] == 0
+        v = verdict(w["recs"], s["recs"], w["passed"], s["passed"], reached_final)
+        c1, c2, overall = ("incomplete", "incomplete", "incomplete") if v is None else v
         print(f"| {op} | {w['passed']} of {len(w['recs'])} | {s['passed']} of {len(s['recs'])} | {s['passed'] - w['passed']} "
-              f"| {reached_final} of {len(s['recs'])} | {counts(w['fails']).get('shape_mismatch', 0)} | {c1} | {c2} | {c1 or c2} |")
+              f"| {reached_final} of {len(s['recs'])} | {counts(w['fails']).get('shape_mismatch', 0)} | {c1} | {c2} | {overall} |")
     print("\n## Per attempt\n")
     print("| op | arm | k | seed | result | stage reached | failed at | turns | wall s | decode tok/s before | status |")
     print("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")

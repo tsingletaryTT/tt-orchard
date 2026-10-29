@@ -2,6 +2,14 @@
 
 Issue 176. Code: pull request 199 (`kernel-probe --staged`, `orchard/kernelstaged.py`).
 
+## Result
+
+Claude Sonnet 5.5 through the Telegraph helper passed `rmsnorm` 5 of 5 in one shot and `center` 5 of 5 in the loop with simulator
+feedback (all on the first turn). It passed `linear_scan` 0 of 5: three attempts ended with kernels that use
+`ttl.raw_element_read` or `ttl.raw_element_write`, which the simulator lacks, so only a chip could judge them, and two attempts got
+an empty answer at the 8000-token output cap. No passing kernel is a near-copy of a library kernel or a checkout example. The two
+checks cost $4.69 in all ($0.961 and $3.726). The staged W/S experiment was not run.
+
 ## Outcome and status
 
 Arms W and S were NOT run: superseded by the operator's decision to attempt a real model instead. The pre-registration below
@@ -131,15 +139,17 @@ own system text, so the request is not byte-for-byte the coder's. The 5 requests
 Total: 5 of 5 passed, 5 calls, $0.961 (0.961 = sum of the column). Failure classes: none.
 
 Similarity of the five passing kernels to the orchard library kernels and to the checkout's examples
-(`2026-10-28-staged-construction-similarity.py`: comments and blank lines removed, difflib ratio over lines, flag at 0.80):
+(`2026-10-28-staged-construction-similarity.py`: the `ttl.operation` function of each file is compared, with comments and blank
+lines removed and its name replaced by `OPERATION`, so host-side test code in an example cannot dilute a copy; difflib ratio over
+lines; flag at 0.80; scores regenerated with this method):
 
 | attempt | best library match | best checkout-example match | flag |
 | --- | --- | --- | --- |
-| 1 | 0.23 (rmsnorm.py) | 0.18 | ok |
-| 2 | 0.20 (rmsnorm.py) | 0.15 | ok |
-| 3 | 0.28 (rmsnorm.py) | 0.21 | ok |
-| 4 | 0.33 (rmsnorm.py) | 0.22 | ok |
-| 5 | 0.33 (rmsnorm.py) | 0.22 | ok |
+| 1 | 0.18 (center.py) | 0.20 | ok |
+| 2 | 0.15 (rmsnorm.py) | 0.17 | ok |
+| 3 | 0.24 (rmsnorm.py) | 0.23 | ok |
+| 4 | 0.28 (rmsnorm.py) | 0.25 | ok |
+| 5 | 0.28 (rmsnorm.py) | 0.25 | ok |
 
 Not determined: whether the same prompt in an agent loop with check feedback (the next entry) changes this; whether the
 local coder would pass with the specification text pasted whole into its prompt (it reads files in parts).
@@ -183,21 +193,25 @@ write, at most 6 turns per attempt (the config's cap of 6 calls per problem, not
 `--library none`, the shipped check as the verdict. The harness used an exported copy of the PR 199 code at commit 3f028f4 (its
 check and write tool are the whole-kernel probe's).
 
-| target | attempts | passed | failure classes | turns used (per attempt) |
-| --- | --- | --- | --- | --- |
-| center | 5 | 5 | none | 1, 1, 1, 1, 1 |
-| linear_scan | 5 | 0 | sim_gap 3, no_kernel 2 | 6, 6, 0, 0, 6 |
+| target | attempts | passed | failure classes | helper calls sent per attempt | kernels written per attempt |
+| --- | --- | --- | --- | --- | --- |
+| center | 5 | 5 | none | 1, 1, 1, 1, 1 | 1, 1, 1, 1, 1 |
+| linear_scan | 5 | 0 | sim_gap 3, no_kernel 2 | 6, 6, 1, 1, 6 | 6, 6, 0, 0, 6 |
+
+A turn is one helper call. For attempts 3 and 4 of `linear_scan` one call was sent and billed, and it returned an empty answer, so no
+kernel was written. The harness run at the time recorded those two attempts as 0 turns, because it left the loop before it counted
+a failed answer. The seventh call of the other three attempts was refused by the helper's cap of 6 calls per problem and sent nothing.
 
 Each `center` attempt passed on its first kernel (the in-loop check printed PASS) and the unedited check agreed.
 
 `linear_scan`, per attempt:
 
-| attempt | turns | how it ended | final check |
+| attempt | calls sent | how it ended | final check |
 | --- | --- | --- | --- |
 | 1 | 6 | call cap 6 of 6 reached | sim_gap: the simulator has no `ttl.raw_element_read` |
 | 2 | 6 | call cap 6 of 6 reached | sim_gap: the simulator has no `ttl.raw_element_write` |
-| 3 | 0 | first answer empty: finish_reason `length` after 8000 output tokens | no_kernel |
-| 4 | 0 | first answer empty: finish_reason `length` after 8000 output tokens | no_kernel |
+| 3 | 1 | first answer empty: finish_reason `length` after 8000 output tokens | no_kernel |
+| 4 | 1 | first answer empty: finish_reason `length` after 8000 output tokens | no_kernel |
 | 5 | 6 | call cap 6 of 6 reached | sim_gap: the simulator has no `ttl.raw_element_read` |
 
 A `sim_gap` verdict means the kernel uses a documented function the simulator lacks, so it can be judged only on hardware; the
@@ -213,23 +227,29 @@ Cost (from the helper's per-call usage and prices of $2 per million tokens in an
 | linear_scan, the two empty answers (8000 output tokens each, 49303 in) | 2 | 0.357 |
 | total of this check | 25 | 3.726 |
 
-The harness's own running total showed $3.369 because the two empty answers carry no cost in the helper's record. The figure above
+The harness run at the time counted only answered calls, so its running total showed $3.369 and it did not add the two empty
+answers (they carry no cost in the helper's record, and its spend check could have let a run pass its limit unseen). The figure above
 adds their token counts at the stated prices (49,303 x $2 per million + 8,000 x $10 per million = $0.1786 each). With the first
 check ($0.961) the two capability checks cost $4.69, under the $6 limit. A request is about 49,000 tokens in at turn 1 and grows to
-about 56,000 by turn 6.
+about 56,000 by turn 6. The harness script in this branch was corrected after the run: it prices every request that was sent (a failed
+answer with token counts from those counts), stops the run when a sent request has unknown cost, refuses a request the helper would
+cut at its prompt limit, puts a run id in every problem id and records whether an answer was cached, resolves its output directory,
+forwards the whole tool response as feedback, sweeps stray processes before each verdict and on exit, and writes its summary only
+after the last attempt. `tests/test_staged_run_log_scripts.py` runs it against a fake helper. The results above are from the earlier
+version of the script; the corrected costs come from the recorded token counts.
 
 Similarity of the five passing `center` kernels to the orchard library kernels and the checkout's examples
 (`2026-10-28-staged-construction-similarity.py`, flag at 0.80):
 
 | attempt | best library match | best checkout-example match | flag |
 | --- | --- | --- | --- |
-| 1 | 0.34 (center.py) | 0.18 | ok |
-| 2 | 0.35 (center.py) | 0.18 | ok |
-| 3 | 0.24 (center.py) | 0.18 | ok |
-| 4 | 0.34 (center.py) | 0.18 | ok |
-| 5 | 0.34 (center.py) | 0.18 | ok |
+| 1 | 0.29 (center.py) | 0.23 | ok |
+| 2 | 0.29 (center.py) | 0.23 | ok |
+| 3 | 0.18 (center.py) | 0.23 | ok |
+| 4 | 0.29 (center.py) | 0.23 | ok |
+| 5 | 0.29 (center.py) | 0.23 | ok |
 
-No kernel was flagged as a near-copy. The score is a line-level ratio, so a copy with renamed identifiers would score low.
+No kernel was flagged as a near-copy. The score is a line-level ratio, so a copy with renamed identifiers would score low. The script refuses a comparison directory with no .py file and an empty kernel, and a test checks that it flags a copy of an upstream example operation.
 
 Deviations: `reference/guide.md` and `reference/examples.md` were left out of the prompt (cost); the helper's system text and
 temperature 0 differ from the coder's; the helper has no tools, so the harness wrote the kernel and ran the check on its behalf.
