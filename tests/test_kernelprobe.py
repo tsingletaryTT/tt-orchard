@@ -2729,6 +2729,13 @@ def test_reading_the_reference_files_is_not_forbidden_code(tmp_path):
     assert gate.kernel_source_violations(kernel) == []
 
 
+def test_the_skill_states_the_grid_size_arithmetic_limit_of_the_compiler():
+    """PR 223 on the chip: `-(-x // g)` after a thread's `ttl.grid_size` fails to compile, `(x + g - 1) // g` compiles."""
+    flat = " ".join(kp.SKILL.read_text().split())
+    for needle in ("`ttl.grid_size(dims=2)`", "`-(-x // g)`", "`(x + g - 1) // g`", "UnaryMinusOp"):
+        assert needle in flat, needle
+
+
 def test_the_skill_names_every_reference_file_and_what_to_read_for_each_kind_of_op():
     flat = " ".join(kp.SKILL.read_text().split())
     for name in REF_NAMES:
