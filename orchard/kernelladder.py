@@ -288,7 +288,9 @@ def load_rung(out_dir: Path, op: str) -> tuple[dict | None, list[dict]]:
         return None, []
     if not isinstance(data, dict):
         return None, []
-    attempts = [a for a in data.get("attempts", []) if isinstance(a, dict) and a.get("op") == op]
+    if not isinstance(data.get("attempts"), list):
+        return None, []
+    attempts = [a for a in data["attempts"] if isinstance(a, dict) and a.get("op") == op]
     return (data.get("header") if isinstance(data.get("header"), dict) else {}), attempts
 
 

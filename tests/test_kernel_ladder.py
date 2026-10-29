@@ -692,3 +692,15 @@ def test_report_only_refuses_while_a_probe_holds_one_of_the_selected_rungs_and_l
     assert kl.run(Args(out=str(tmp_path), report_only=True, rungs="add,mul"), fake_main([]), default_wall_s=1800.0,
                   say=lambda l: None) == 0
     kp.release_lock(kp.acquire_lock(tmp_path / "add"))                      # all locks released afterwards
+
+
+@pytest.mark.parametrize("text", ["null", "[]", '{"attempts": null}', '{"attempts": 3}', '{"attempts": {"a": 1}}',
+                                  '{"header": 5, "attempts": [1, "x"]}'])
+def test_a_rung_report_with_the_wrong_shape_is_unreadable_and_no_crash(tmp_path, text):
+    d = tmp_path / "add"
+    d.mkdir()
+    (d / "kernel-probe-report.json").write_text(text)
+    header, attempts = kl.load_rung(tmp_path, "add")
+    assert attempts == [] and header in (None, {})
+    data = kl.write_ladder_report(tmp_path, ["add"])
+    assert data["not_run"] == ["add"]
