@@ -3223,3 +3223,10 @@ Prompt (operator): "pick a model that would require a new kernel and try to brin
 - The route-k constant only affects the unfused router path, so a change leaves one-row decode identical (expected, noted for issue 15).
 - Phase 2 (hardware) not run: 71.9 GB checkpoint against 81 GB free disk, and a bring-up of the new model on the bundle's code is needed first. Filed as issue 234. No chip was leased or touched.
 - Default taken: dies = 2 (one p300 board); "kernel-side" checks are a conservative table in the module.
+
+## 2026-10-29: audio package rebuilt for the decoder on the chip (issue 161, PR 237)
+- Prompt: "rebuild from current main" for the Stable Audio 3 small-music package. The private Hub repository carried the diffusion transformer on the chip and the decoder on the host. Staged locally only; no upload, no Hub change, no chip.
+- The builder now copies `chip_decoder.py`, `audio_runtimes.py` and `orchard/resident.py` (a test finds every file a shipped runtime file imports). The packaged generate command adds `--chip-decoder` by default; `--host-decoder` or `AUDIO_HOST_DECODER=1` is the documented fallback. The card has decoder rows, CPU float32 single-sample rows, the operator's dated listening note and its limits.
+- New flags: `--result` (a result file in place of stage 2's), `--out`, `--probe`, `--agreement-report`, `--listening-note`. New module `orchard/audio_result_derive.py` writes the result file for a later chip run without editing run files. The run's own result is the PR 165 file.
+- Mutation table: 27 guards each turned a test red. The gate's check that a derived result's card says so was green in the first table and got its own test; the `repeats.chip` drop was found stale by reading the derived file and got a test and a mutation.
+- Left open: boot check on a chip (commands in the staging directory), the Hub upload (operator), the control with the decoder on the chip, agreement at lengths above 10 s. Details in `docs/run-logs/2026-10-29-audio-package-rebuild.md`.
