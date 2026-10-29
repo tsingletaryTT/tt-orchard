@@ -19,7 +19,9 @@ order:
     references, so passing it is passing the whole-kernel probe's check.
   * The verified prefix is kept. When stage k passes, the exact bytes the authoritative check read become stage k+1's
     starting `kernel.py`. The coder edits that file; it does not start again.
-  * A stage that fails its check, or spends its turns or its wall clock, ends the attempt. The record names the stage.
+  * A stage whose check fails ends the attempt, and the record names the stage. A stage that spends its turns or wall clock is judged
+    by its check like any other: a kernel that passes is kept and the next stage starts, as the whole-kernel probe counts a pass
+    whatever its status. The status of each stage is in the record.
   * Every attempt records the stage it reached (`staged.reached`, counting from 1: the last stage that was started), the
     stages it passed, the failed stage's name, and each stage's category, turns and time. The attempt's seed is sent with
     every stage's requests.
@@ -195,7 +197,6 @@ def run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_id
     records: list[dict] = []
     last_outcome, last_check, last_detail = None, {}, ""
     verified: bytes | None = None
-    started = time.monotonic()
     swept_all: list = []
     try:
         for index, stage in enumerate(stages, start=1):
@@ -212,6 +213,7 @@ def run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_id
             wall = stage_wall_s if stage_wall_s is not None else stage.wall_s
             control = kp.ProbeControl(wall_s=wall)
             dog = watchdog if watchdog is not None else kp.build_watchdog(control, ledger)
+            dog.stage = index           # the ladder's rungs are counted per stage: a nudge used in stage 1 is not stage 2's
             step = AgentStep(agent=kp.AGENT, endpoint=endpoint, model=model, tools=kp.attempt_tools(adir), ledger=ledger,
                              stage=index, phase="probe", feed=dog.feed, control=control, run_dir=adir,
                              evidence_dir=adir / "evidence", log_path=adir / "log" / f"probe-{index:05d}.jsonl",
@@ -238,7 +240,7 @@ def run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_id
             verified = kp._read_regular(clean, kp.MAX_KERNEL_BYTES)
     finally:
         ledger.close()
-    agent_wall_s = round(time.monotonic() - started, 2)
+    agent_wall_s = round(sum(r["agent_wall_s"] for r in records), 2)      # the agents' time only, as in the whole-kernel probe
     passed_n = sum(1 for r in records if r["passed"])
     failed = next((r for r in records if not r["passed"]), None)
     check = last_check
@@ -260,7 +262,7 @@ def run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_id
         # The agent's own check.json is judged against the shipped hashes of the whole op's files, so it can be compared
         # only on the last stage. An earlier stage's file never counts as untrusted here.
         "agent_check_untrusted": (kp.agent_check_untrusted(kp._read_agent_check(adir / "check.json"), check, op)
-                                  if passed else False),
+                                  if len(records) == len(stages) else False),
         "swept": swept_all, "sampling": dict(sampling), "coder_speed": coder_speed,
         "agent_hw": {"enabled": False}, "staged": staged,
         "provenance": kp.provenance(kernel_sha256=check.get("kernel_sha256"), tt_lang=facts, coder_model=coder_model,

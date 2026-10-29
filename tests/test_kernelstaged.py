@@ -378,6 +378,53 @@ def test_the_cli_accepts_staged_and_the_stage_budgets():
     assert a.staged is True and a.stage_turns == 9 and a.stage_wall_s == 300.0
 
 
+# ---- review findings (PR 199) ------------------------------------------------------------------------------------
+
+def test_the_watchdog_is_told_each_stage_so_its_rung_counts_are_per_stage(tmp_path, fake_kenv):
+    seen = []
+
+    class Dog:
+        stage = None
+
+        def feed(self, ev):
+            seen.append(self.stage)
+            return []
+    with FakeModel(writes_one_kernel_per_stage) as server:
+        run_staged(tmp_path, fake_kenv, server, op="center", watchdog=Dog())
+    assert sorted(set(seen)) == [1, 2, 3, 4]
+
+
+def test_the_attempts_agent_time_is_the_sum_of_the_stages_agent_times(tmp_path, fake_kenv):
+    with FakeModel(writes_one_kernel_per_stage) as server:
+        attempt = run_staged(tmp_path, fake_kenv, server, op="center")
+    assert attempt["agent_wall_s"] == pytest.approx(sum(s["agent_wall_s"] for s in attempt["staged"]["stages"]), abs=0.02)
+
+
+def test_an_edited_agent_check_is_untrusted_when_the_final_stage_fails(tmp_path, fake_kenv):
+    def script(request):
+        k, t = stage_number(request), turn(request)
+        if t == 0:
+            return call("write_file", path="kernel.py", content=f"# {k}\n")
+        if t == 1 and k == 4:
+            return call("write_file", path="check.json", content=json.dumps(
+                {"passed": True, "category": None, "sha256": {"kernel_check.py": "0" * 64}}))
+        return final("done")
+    with FakeModel(script) as server:
+        attempt = run_staged(tmp_path, fake_kenv, server, op="center", results={"center": failing()})
+    assert attempt["staged"]["failed_stage"] == "center" and attempt["agent_check_untrusted"] is True
+
+
+def test_a_stage_that_spends_its_turns_but_passes_its_check_is_kept_and_the_next_stage_starts(tmp_path, fake_kenv):
+    def writes_then_loops(request):
+        k, t = stage_number(request), turn(request)
+        if t == 0:
+            return call("write_file", path="kernel.py", content=f"# {k}\n")
+        return call("read_file", path="kernel_spec.json", call_id=f"c{t}")
+    with FakeModel(writes_then_loops) as server:
+        attempt = run_staged(tmp_path, fake_kenv, server, op="center", stage_turns=3)
+    assert attempt["passed_sim"] is True and attempt["staged"]["stages_passed"] == 4
+
+
 # ---- the real simulator ------------------------------------------------------------------------------------------
 
 STAGED_FIXTURES = Path(__file__).parent / "fixtures" / "kernel-loop" / "staged"
