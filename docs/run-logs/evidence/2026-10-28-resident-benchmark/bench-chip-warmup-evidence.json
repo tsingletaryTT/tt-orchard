@@ -1,0 +1,170 @@
+{
+ "device": "chip",
+ "model": "small-music",
+ "settings": {
+  "prompt": "A warm acoustic guitar melody with soft percussion, 100 BPM",
+  "steps": 8,
+  "cfg_scale": 1.0,
+  "sampler": "pingpong",
+  "seed": 42,
+  "sample_size": 5292032
+ },
+ "warmup_runs": 0,
+ "repeats": 4,
+ "host_loadavg_1m_at_start": 7.74609375,
+ "host_loadavg_1m_at_end": 9.27294921875,
+ "load": {
+  "model_load_s": 5.841,
+  "chip_weights_upload_s": 1.26
+ },
+ "sizes": [
+  {
+   "seconds": 10.0,
+   "label": "unwarmed",
+   "warmup_runs": 0,
+   "repeats": 4,
+   "parts": {
+    "chip_passes": {
+     "n": 4,
+     "min": 8,
+     "median": 8.0,
+     "max": 8
+    },
+    "chip_transformer_call_s": {
+     "n": 4,
+     "min": 0.295,
+     "median": 0.304,
+     "max": 0.709
+    },
+    "conditioning_s": {
+     "n": 4,
+     "min": 0.04,
+     "median": 0.0455,
+     "max": 0.064
+    },
+    "generate_and_decode_s": {
+     "n": 4,
+     "min": 1.775,
+     "median": 1.8405,
+     "max": 2.252
+    }
+   },
+   "runs": [
+    {
+     "timings": {
+      "conditioning_s": 0.064,
+      "generate_and_decode_s": 2.252,
+      "chip_transformer_call_s": 0.709,
+      "chip_passes": 8
+     },
+     "host_loadavg_1m": 7.6376953125,
+     "output_sha256": null
+    },
+    {
+     "timings": {
+      "conditioning_s": 0.044,
+      "generate_and_decode_s": 1.853,
+      "chip_transformer_call_s": 0.295,
+      "chip_passes": 8
+     },
+     "host_loadavg_1m": 8.1474609375,
+     "output_sha256": null
+    },
+    {
+     "timings": {
+      "conditioning_s": 0.04,
+      "generate_and_decode_s": 1.775,
+      "chip_transformer_call_s": 0.3,
+      "chip_passes": 8
+     },
+     "host_loadavg_1m": 8.1474609375,
+     "output_sha256": null
+    },
+    {
+     "timings": {
+      "conditioning_s": 0.047,
+      "generate_and_decode_s": 1.828,
+      "chip_transformer_call_s": 0.308,
+      "chip_passes": 8
+     },
+     "host_loadavg_1m": 8.1474609375,
+     "output_sha256": null
+    }
+   ]
+  },
+  {
+   "seconds": 120.0,
+   "label": "unwarmed",
+   "warmup_runs": 0,
+   "repeats": 4,
+   "parts": {
+    "chip_passes": {
+     "n": 4,
+     "min": 8,
+     "median": 8.0,
+     "max": 8
+    },
+    "chip_transformer_call_s": {
+     "n": 4,
+     "min": 0.807,
+     "median": 0.8154999999999999,
+     "max": 0.938
+    },
+    "conditioning_s": {
+     "n": 4,
+     "min": 0.039,
+     "median": 0.041,
+     "max": 0.041
+    },
+    "generate_and_decode_s": {
+     "n": 4,
+     "min": 10.678,
+     "median": 11.34,
+     "max": 11.576
+    }
+   },
+   "runs": [
+    {
+     "timings": {
+      "conditioning_s": 0.041,
+      "generate_and_decode_s": 11.576,
+      "chip_transformer_call_s": 0.938,
+      "chip_passes": 8
+     },
+     "host_loadavg_1m": 8.39794921875,
+     "output_sha256": null
+    },
+    {
+     "timings": {
+      "conditioning_s": 0.041,
+      "generate_and_decode_s": 11.566,
+      "chip_transformer_call_s": 0.813,
+      "chip_passes": 8
+     },
+     "host_loadavg_1m": 8.5224609375,
+     "output_sha256": null
+    },
+    {
+     "timings": {
+      "conditioning_s": 0.039,
+      "generate_and_decode_s": 11.114,
+      "chip_transformer_call_s": 0.807,
+      "chip_passes": 8
+     },
+     "host_loadavg_1m": 9.3525390625,
+     "output_sha256": null
+    },
+    {
+     "timings": {
+      "conditioning_s": 0.041,
+      "generate_and_decode_s": 10.678,
+      "chip_transformer_call_s": 0.818,
+      "chip_passes": 8
+     },
+     "host_loadavg_1m": 9.27294921875,
+     "output_sha256": null
+    }
+   ]
+  }
+ ]
+}

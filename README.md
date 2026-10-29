@@ -1768,6 +1768,45 @@ are provisional until the reference's own bfloat16 noise floor has been measured
 The `control` command requires the two runs to share the prompt, duration, steps, guidance scale, sampler, seed, dtype and sample size, so a difference in the
 waveform comes from the weights. `--unmatched` allows runs that differ in those settings; the report then says `matched: false` and carries a note.
 
+### 5.9fb The audio package builder (stage a Stable Audio 3 small-music package, locally)
+
+```
+tt-orchard audio-package RUN_DIR --namespace ORG --bench FILE --demo-repo DIR [--snapshot DIR]   # stage the package and run the gate
+tt-orchard audio-package RUN_DIR --namespace ORG --check                                          # run the gate on the package already staged
+```
+
+For a finished `stabilityai/stable-audio-3-small-music` run. It stages `stages/7/package/stable-audio-3-small-music-blackhole/` with a card
+(`README.md`), a copy of the model's license agreement (`LICENSE.md`), a `NOTICE` file, a draft v5.1 `tt-model.yaml` of kind `http-server`, `run.sh`,
+the chip runtime files (`runtime/`, copied unmodified), the job server, client and Gradio page (`demo/`, copied from the separate demo repository given
+with `--demo-repo`, which is only read), a how-to (`docs/running.md`), and the run's evidence (`evidence/`). `run.sh` first builds a Hugging Face cache directory that holds only the pinned revision (links to the user's
+download; the user's cache is not written to) and points the runtime and every clip's process at it, because the runtime finds the model through the cache's `main` reference and
+the server starts a new process for each clip. It stops if the pinned revision is not in the user's cache. It ships no weights. The weights are gated, and each
+user downloads them with their own Hugging Face account. It uploads nothing, publishes nothing and starts no process; the commands that would publish the
+package are written as text to `stages/7/AUDIO_PUBLISH_COMMANDS.txt`.
+
+The card is rendered from the run's measured numbers only. Timings come from an `audio_bench.py` sweep file (`--bench`; one warm-up run, then 3 or more
+measured runs per size, one loaded process). The builder recomputes every label and spread from the runs: 3 or more measured runs after a warm-up run is a
+`benchmark`, fewer is a `single sample`, and a file that says otherwise is refused. A run whose ledger has no `ready for operator review` decision or records an abort
+(an audio result exists as soon as stage 2 has run), whose benchmark file has no size that earns `benchmark`,
+whose chip run has no 40-character model revision and library commit, whose chip run did not agree with the CPU reference, or whose control did not tell the
+fine-tune from the base model, is refused. Agreement rows carry the label `measured (provisional bars)`. The card makes no claim about sound quality.
+
+The gate (`package_problems`) reads the directory as it is on disk and refuses a card or package that:
+
+- lacks any license element: the license named and linked, research and non-commercial use permitted, the registration and USD $1,000,000 revenue terms quoted
+  as the agreement writes them (looked up in the package's own `LICENSE.md`), "Powered by Stability AI" on the card, the page and each document, the weights stated as
+  not included and gated, the Gemma Terms of Use named with its link, the runtime code stated as Tenstorrent's, and the reader told to read the license;
+- has a `NOTICE` that does not contain the attribution sentence exactly as the agreement writes it, or no copy of the agreement;
+- claims an open or commercial license (front matter other than `license: other`, or wording such as "commercial use is permitted" or "open-source model");
+- claims anything about sound quality, uses a name or mark in a way the license does not allow ("official", "endorsed", a logo image), or puts a number
+  outside the Numbers table;
+- holds a weights file (by suffix or by size), a home path, a host name or a token;
+- labels a row `benchmark` when its runs do not earn it, or shows a value that is not in its evidence file.
+
+What the gate does not decide: whether prose is true, whether naming the model identifies it or crosses the license's trademark clause, and whether Tenstorrent may
+publish under a Community License at all. Those are the operator's questions (see the run log). Details of one dry run:
+[docs/run-logs/2026-10-28-audio-package-dry-run.md](docs/run-logs/2026-10-28-audio-package-dry-run.md).
+
 ### 5.9f The demo environment
 
 ```bash
@@ -1935,6 +1974,60 @@ Moving an existing `telegraph.jsonl` into the database is one command, run with 
 tt-orchard db migrate telegraph --dir ~/.cache/tt-orchard/telegraph --dry-run     # check; changes nothing
 tt-orchard db migrate telegraph --dir ~/.cache/tt-orchard/telegraph
 ```
+
+After an update with an old `telegraph.jsonl` in place, you do not have to find this section. Each place that needs the ledger says what to
+type, once, near the top of its output (see "The notice" below). `--dir` can be left out when the directory comes from the config's
+`[telegraph] dir` or `$ORCHARD_TELEGRAPH_DIR`, or is the home default.
+
+`tt-orchard db migrate telegraph --dry-run-first` does both steps with one confirmation. It runs the dry run and prints the checks. It stops
+there, with nothing changed, when any check is different, when the ledger cannot be checked, when the directory is not an unmigrated one
+(already moved, half moved, or no `telegraph.jsonl`), or when another process holds `telegraph.lock`. When every check is equal it asks
+once, `[y/N]`, at a terminal. A no, no terminal, a lock taken while the question was open, or any migration input (`telegraph.jsonl`, a `telegraph.jsonl.torn-*` sidecar, an entry of `cache/`) or the directory state that changed while the question was open (including a new migration marker) (the checks no longer describe it) also stops it with nothing changed. The file is compared once more under `telegraph.lock`, after the migration takes it. A yes runs the
+real migration described below. `--accept-malformed N` is passed to both steps. `--dry-run` and `--dry-run-first` cannot be combined. The
+existing commands are unchanged.
+
+#### The notice
+
+`orchard/telegraph_notice.py` looks at the state directory and returns a short message with the exact next commands, or nothing. It checks
+only what each file name is (`lstat`): it opens no database, creates no file and follows no link, so it is safe on a page that refreshes and
+it cannot disturb a migration that is running. The states:
+
+| State | What the directory holds | What the message says |
+| --- | --- | --- |
+| unmigrated | `telegraph.jsonl` is a live file and no migration marker | run `tt-orchard db migrate telegraph --dry-run`, then `tt-orchard db migrate telegraph`; nothing is deleted (the file is kept as `telegraph.jsonl.archived`) and a backup is taken |
+| half-finished | `MIGRATING-TO-SQLITE` | run `tt-orchard db migrate telegraph` again; it resumes |
+| lost database | `MIGRATED-TO-SQLITE` or `INITIALIZED` and no `project.db` | `tt-orchard db status`, then `tt-orchard db restore` and `confirm-restore` |
+| old writer | `MIGRATED-TO-SQLITE` and a `telegraph.jsonl` file again | stop the old process, then `tt-orchard db status`; do not migrate again |
+
+A directory that needs nothing gives no notice, and so does a machine that never used Telegraph (every state above needs a file that only a
+used ledger leaves). Telegraph switched off still gets the notice when its directory holds an old ledger. The directory is chosen as for
+`tt-orchard telegraph`. The commands act on the ledger the notice is about: in the terminal they carry `--dir` when the directory did not come from the
+home default or the caller passed it (the web page always carries `--dir`), and `--config` and `--telegraph-config` when the caller passed them. A config that was not named is found again by the pasted command in the same way, and the
+`--dir` rule above keeps the commands on the same ledger whichever config they find. The guided command's refusals and
+its no-terminal fallback also carry `--scope` and, on `db migrate` commands only, `--accept-malformed`. The web page also names the config it
+was started with (the path only, redacted and shell-quoted, never its contents), because recovery counts a torn record at that config's
+`max_output_tokens`. It shows the paths redacted and leaves a leading `~` outside the quotes so that a shell expands it. The top-bar meter says
+the ledger needs moving only for the unmigrated and half-finished states; for the other two its title carries the restore or reconcile steps.
+A table test (`tests/test_telegraph_notice_table.py`) checks every command of every state on every surface. Each option that changes what the
+command does is carried (`--dir`, `--config`, `--telegraph-config`, `--scope`, and `--accept-malformed` on `db migrate` only). A moved ledger is
+never told to migrate, and a half-finished migration is never told to start with a dry run.
+
+Where it is shown:
+
+- `tt-orchard bringup`, once before the preflight page (a dry run too). It warns and never stops a run; a helper question during the run is
+  refused until the ledger is moved.
+- `tt-orchard ui`, in the startup log after the address, and in the Telegraph panel as a banner with the commands. The top-bar meter says
+  `Helper: ledger needs moving · spend unknown` for the first two states (the title and the banner carry the commands). `GET /api/telegraph` carries a `migration` object (`kind`, `summary`, `lines`,
+  `commands`), or `null`, with the directory path redacted like the rest of the page.
+- `tt-orchard spend`, first in the text output. With `--json` the same object is `real_helper_spend.migration`; the two top-level keys are
+  unchanged.
+- `tt-orchard telegraph ask`, `report` and `usage`. Each refuses before it opens the ledger, so it creates no `project.db` in a directory that
+  is not ready. `ask` sends nothing and spends nothing. The first line says what to do: `telegraph: Run` the dry run, then the real command,
+  `: the Telegraph ledger is still the old telegraph.jsonl file.` `Telegraph.ask` itself refuses too, so the supervisor and agent shells send
+  nothing either; its reason starts with the same sentence. Before this change `ask` also created `project.db` and helper files in the
+  unmigrated directory before it refused.
+- `scripts/setup.sh` (`tt-orchard setup`), as a `telegraph ledger` step with status `todo` and no action: setup never migrates for you. Setup
+  then exits 1 until the move is done.
 
 The dry run reads the ledger and the cache entries, imports them into a throw-away in-memory database and prints the totals and the checks.
 The real run takes the old `telegraph.lock` and holds it to the end, writes `MIGRATING-TO-SQLITE`, recovers the ledger (a cut-off last

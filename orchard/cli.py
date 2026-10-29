@@ -18,6 +18,7 @@
     tt-orchard kernel-env [--check] [--src-dir DIR] [--venv-dir DIR] [--tt-lang-skill-dir DIR] [--allow-stale-skills]
     tt-orchard demo-env [--check] [--dry-run] [--venv-dir DIR] [--tt-metal-dir DIR]
     tt-orchard audio-reference-env [--check] [--dry-run] [--venv-dir DIR] [--src-dir DIR]
+    tt-orchard audio-package RUN_DIR --namespace ORG --bench FILE --demo-repo DIR [--snapshot DIR] [--check]
     tt-orchard inventory TARGET [--python P] [--ttnn-python P] [--against F] [--layers N] [--seq N] [--class C] [--out DIR]
     tt-orchard inventory verify-candidates --inventory FILE|DIR [--out DIR] [--image IMG] [--max-ops N] [--timeout S] [--record]
     tt-orchard coder-speed [--endpoint URL --model NAME | --tiers] [--samples N] [--watch SECONDS] [--json]
@@ -280,6 +281,9 @@ def _parser() -> argparse.ArgumentParser:
     dm = _db("migrate", "import telegraph.jsonl and the cache into the database and cut the old files over")
     dm.add_argument("what", choices=["telegraph"])
     dm.add_argument("--dry-run", action="store_true", help="check that an import gives equal totals; change nothing")
+    dm.add_argument("--dry-run-first", action="store_true",
+                    help="run the dry run, show the checks and, when every check is equal and you confirm once, run the real "
+                         "migration (never without a yes, never while another process holds telegraph.lock)")
     dm.add_argument("--accept-malformed", type=int, default=None, metavar="N",
                     help="go on although the ledger has exactly N lines that are not records (they were never counted)")
     de = _db("export", "write a ledger as jsonl on standard output (the lines the old file held)")
@@ -340,6 +344,15 @@ def _parser() -> argparse.ArgumentParser:
     ar.add_argument("--dry-run", action="store_true", help="say what the build would do and change nothing")
     ar.add_argument("--venv-dir", help="where the venv lives (default ~/orchard-venvs/stable-audio, or $ORCHARD_AUDIO_VENV)")
     ar.add_argument("--src-dir", help="where the pinned stable-audio-3 checkout lives (default ~/orchard-src/stable-audio-3, or $ORCHARD_AUDIO_SRC)")
+    ap = sub.add_parser("audio-package", parents=[common],
+                        help="stage a local, weights-free package from a finished Stable Audio 3 small-music run, render its card from the run's "
+                             "numbers and check the card against the model's license. Uploads and publishes nothing")
+    ap.add_argument("run_dir", help="the run directory (holds ledger.jsonl and stages/2/audio_result.json)")
+    ap.add_argument("--namespace", required=True, help="the Hugging Face user or organisation the package would be published under (used in text only)")
+    ap.add_argument("--bench", help="the audio_bench.py sweep file the card's timings come from (one warm-up, 3 or more measured runs)")
+    ap.add_argument("--demo-repo", help="the separate demo repository checkout whose server, client and page are copied into the package (read only)")
+    ap.add_argument("--snapshot", help="the pinned model snapshot that holds LICENSE.md and NOTICE (default: the path the run recorded)")
+    ap.add_argument("--check", action="store_true", help="stage nothing; run the gate on the package already staged in the run")
     inv = sub.add_parser("inventory", parents=[common],
                          help="list the ops a model's reference code uses and which ones ttnn has; "
                               "`inventory refresh-ttnn` records ttnn's op names (takes a one-chip lease); "
@@ -824,6 +837,20 @@ def _lan_addresses() -> list[str]:
     return found
 
 
+def _print_telegraph_notice(cfg, env, home, out, style=None, args=None) -> None:
+    """Print the Telegraph state notice (orchard/telegraph_notice.py) when the state directory needs a person to act, and nothing
+    when it does not. It only looks at file names: nothing is opened or changed."""
+    from orchard import telegraph_notice
+    notice = telegraph_notice.telegraph_state_notice(getattr(cfg, "telegraph", None), environ=env, home=home,
+                                                     flags=telegraph_notice.flags_from_args(args) if args is not None else "")
+    if notice is None:
+        return
+    icon = style.icon("📋") if style is not None else ""
+    print(f"{icon}telegraph: {notice.summary}", file=out)
+    for line in notice.lines:
+        print(f"  {line}", file=out)
+
+
 def _ui(args, env, home, out) -> int:
     from orchard import tiers, webui
     host = _ui_host(args)
@@ -844,6 +871,7 @@ def _ui(args, env, home, out) -> int:
         return _refuse(f"cannot listen on {host}:{args.port}: {exc}")
     shown = f"[{host}]" if ":" in host else host
     print(f"tt-orchard ui {__version__}: http://{shown}:{args.port}/  (runs in {cfg.runs_root})", file=out)
+    _print_telegraph_notice(cfg, env, home, out, None, args)
     if args.lan:
         for addr in [app.hostname, *_lan_addresses()]:
             print(f"on the network: http://{addr}:{args.port}/", file=out)
@@ -973,6 +1001,9 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
     if args.cmd == "audio-reference-env":
         from orchard import audio_reference_env
         return audio_reference_env.main(args, env=audio_reference_env.env_from_args(args, environ=env, home=home), out=out)
+    if args.cmd == "audio-package":
+        from orchard import audio_package
+        return audio_package.main(args, out=out)
     if args.cmd == "demo-env":
         from orchard import demo_env
         return demo_env.main(args, env=demo_env.env_from_args(args, environ=env, home=home), out=out)
@@ -1035,6 +1066,7 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
     resuming = (run_dir / "ledger.jsonl").exists()
     print(f"{style.icon('🧭')}mode: " + (f"lab ({cfg.lab.host}): hardware tests run there; the coder stays here"
                                          if cfg.mode == "lab" else "local: everything runs on this box"), file=out)
+    _print_telegraph_notice(cfg, env, home, out, style, args)         # once, before the checks; it warns and never blocks the run
     from orchard.research import Options
     from orchard.research import types as research_types
     def status(text: str) -> None:

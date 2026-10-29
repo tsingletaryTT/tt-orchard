@@ -25,6 +25,7 @@ import tomllib
 from pathlib import Path
 
 from orchard import telegraph as tg
+from orchard import telegraph_notice as tn
 
 EXIT_OK, EXIT_PROBLEM, EXIT_NO_ANSWER = 0, 2, 3
 ENV_DIR = "ORCHARD_TELEGRAPH_DIR"           # set by the supervisor for agent shells (orchard/agent.py)
@@ -100,11 +101,17 @@ def main(args, *, out, environ=None, transport=None, getter=None, home=None) -> 
         return EXIT_PROBLEM
     tel = tg.Telegraph(cfg, directory, transport=transport, environ=environ, home=str(home))
     action = args.action
+    flags = tn.flags_from_args(args)                       # the commands of a notice act on the directory this command used
     if action == "check":
         return _check(cfg, tel, args, say, getter)
     if action == "usage":
-        return _usage(directory, args, say)
+        return _usage(directory, args, say, flags)
     if action == "report":
+        waiting = tn.state_of(directory, flags=flags)
+        if waiting is not None and waiting.blocks_opening:        # before the ledger is opened: opening creates files here
+            say("telegraph: " + waiting.text())
+            say("The verdict was not written.")
+            return EXIT_PROBLEM
         try:
             tel.report(args.call_id, helped=bool(args.helped))
         except KeyError:
@@ -115,7 +122,7 @@ def main(args, *, out, environ=None, transport=None, getter=None, home=None) -> 
             return EXIT_PROBLEM
         say(f"recorded: call {args.call_id} {'helped' if args.helped else 'did not help'}")
         return EXIT_OK
-    return _ask(tel, args, say)
+    return _ask(tel, args, say, flags)
 
 
 def _check(cfg: tg.Config, tel: tg.Telegraph, args, say, getter) -> int:
@@ -188,12 +195,17 @@ def _report_command(tel: tg.Telegraph, args, call_id: str) -> str:
     return " ".join(parts)
 
 
-def _ask(tel: tg.Telegraph, args, say) -> int:
+def _ask(tel: tg.Telegraph, args, say, flags: str = "") -> int:
     try:
         task, failure = _read(args.task_file, "task"), _read(args.failure_file, "failure")
     except OSError as exc:
         say(f"telegraph: {exc}")
         return EXIT_PROBLEM
+    waiting = tn.state_of(tel.dir, flags=flags) if tel.cfg.enabled else None     # a disabled telegraph says so below, and nothing else
+    if waiting is not None and waiting.blocks_opening:
+        say("telegraph: " + waiting.text())
+        say("No outside call was made and nothing was spent.")
+        return EXIT_NO_ANSWER
     got = tel.ask(args.problem, task, failure)
     if not got.ok:
         say(f"no answer: {got.reason}")
@@ -210,10 +222,15 @@ def _ask(tel: tg.Telegraph, args, say) -> int:
     return EXIT_OK
 
 
-def _usage(directory: Path, args, say) -> int:
+def _usage(directory: Path, args, say, flags: str = "") -> int:
     try:
         s = tg.summarise_records(tg._read_ledger_strict(directory))
     except tg.LEDGER_ERRORS as exc:                                  # an unreadable ledger is not an empty one
+        waiting = tn.state_of(directory, flags=flags)
+        if waiting is not None:                                      # the first line says what to do
+            say("telegraph: " + waiting.text())
+            say("The spend is unknown until then.")
+            return EXIT_PROBLEM
         say(f"telegraph: the ledger in {directory} cannot be read ({exc}); the spend is unknown")
         return EXIT_PROBLEM
     if args.json:

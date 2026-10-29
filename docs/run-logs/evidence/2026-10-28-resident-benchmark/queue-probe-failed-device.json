@@ -1,0 +1,267 @@
+{
+ "settings": {
+  "prompt": "A warm acoustic guitar melody with soft percussion, 100 BPM",
+  "duration": 10.0,
+  "steps": 8,
+  "cfg_scale": 1.0,
+  "seed": 42
+ },
+ "poll_s": 0.25,
+ "timeout_s": 900.0,
+ "health_before": {
+  "status": "ok",
+  "model": "stable-audio-3 small-music, diffusion transformer on one Blackhole chip",
+  "device_name": "one Blackhole chip",
+  "queue_depth": 0,
+  "queue_max": 2,
+  "busy": false,
+  "limits": {
+   "min_seconds": 1,
+   "max_seconds": 120,
+   "max_steps": 100,
+   "min_cfg_scale": 1.0,
+   "max_cfg_scale": 20.0
+  },
+  "defaults": {
+   "duration": 10,
+   "steps": 8,
+   "cfg_scale": 1.0
+  }
+ },
+ "health_after": {
+  "status": "ok",
+  "model": "stable-audio-3 small-music, diffusion transformer on one Blackhole chip",
+  "device_name": "one Blackhole chip",
+  "queue_depth": 0,
+  "queue_max": 2,
+  "busy": false,
+  "limits": {
+   "min_seconds": 1,
+   "max_seconds": 120,
+   "max_steps": 100,
+   "min_cfg_scale": 1.0,
+   "max_cfg_scale": 20.0
+  },
+  "defaults": {
+   "duration": 10,
+   "steps": 8,
+   "cfg_scale": 1.0
+  }
+ },
+ "levels": [
+  {
+   "concurrency": 1,
+   "requests": [
+    {
+     "index": 0,
+     "sent_at_s": 0.0005,
+     "replied_at_s": 0.0017,
+     "http_status": 202,
+     "job_id": "bd1fcd001f3c414e9c982948e52539bc"
+    }
+   ],
+   "accepted": 1,
+   "rejected": {},
+   "jobs": [
+    {
+     "id": "bd1fcd001f3c414e9c982948e52539bc",
+     "accepted_at_s": 0.0017,
+     "positions": [
+      0
+     ],
+     "first_position": 0,
+     "first_running_s": 0.0029,
+     "done_s": 73.7329,
+     "final_status": "error",
+     "server_total_s": null,
+     "audio_s": null,
+     "error": "RuntimeError: the chip run exited with code 1: 2026-10-28 13:19:13.296 | info     |             UMD | Closing devices in cluster completed. (cluster.cpp:1490) | 2026-10-28 13:19:13.296 | info     |   ",
+     "start_s": 0.0029,
+     "wait_s": 0.0012,
+     "end_to_end_s": 73.7312
+    }
+   ],
+   "max_queue_position": 0,
+   "ran_one_at_a_time": null,
+   "first_in_first_out": null,
+   "makespan_s": 73.7324,
+   "timed_out": false,
+   "problems": [],
+   "host_loadavg_1m_at_start": 8.07666015625,
+   "host_loadavg_1m_at_end": 8.93603515625
+  },
+  {
+   "concurrency": 2,
+   "requests": [
+    {
+     "index": 0,
+     "sent_at_s": 0.0003,
+     "replied_at_s": 0.0016,
+     "http_status": 202,
+     "job_id": "0acaf06f5c964af181527320b59998ae"
+    },
+    {
+     "index": 1,
+     "sent_at_s": 0.0002,
+     "replied_at_s": 0.0012,
+     "http_status": 202,
+     "job_id": "916ee090788c4b61980cec5552306305"
+    }
+   ],
+   "accepted": 2,
+   "rejected": {},
+   "jobs": [
+    {
+     "id": "0acaf06f5c964af181527320b59998ae",
+     "accepted_at_s": 0.0016,
+     "positions": [
+      1,
+      0
+     ],
+     "first_position": 1,
+     "first_running_s": 69.0017,
+     "done_s": 137.9046,
+     "final_status": "error",
+     "server_total_s": null,
+     "audio_s": null,
+     "error": "RuntimeError: the chip run exited with code 1: 2026-10-28 13:21:31.213 | info     |             UMD | Closing devices in cluster completed. (cluster.cpp:1490) | 2026-10-28 13:21:31.213 | info     |   ",
+     "start_s": 69.0017,
+     "wait_s": 69.0001,
+     "end_to_end_s": 137.903
+    },
+    {
+     "id": "916ee090788c4b61980cec5552306305",
+     "accepted_at_s": 0.0012,
+     "positions": [
+      0
+     ],
+     "first_position": 0,
+     "first_running_s": 0.0027,
+     "done_s": 69.0025,
+     "final_status": "error",
+     "server_total_s": null,
+     "audio_s": null,
+     "error": "RuntimeError: the chip run exited with code 1: 2026-10-28 13:20:22.204 | info     |             UMD | Closing devices in cluster completed. (cluster.cpp:1490) | 2026-10-28 13:20:22.204 | info     |   ",
+     "start_s": 0.0027,
+     "wait_s": 0.0015,
+     "end_to_end_s": 69.0013
+    }
+   ],
+   "max_queue_position": 1,
+   "ran_one_at_a_time": true,
+   "first_in_first_out": true,
+   "makespan_s": 137.9044,
+   "timed_out": false,
+   "problems": [],
+   "host_loadavg_1m_at_start": 8.93603515625,
+   "host_loadavg_1m_at_end": 8.14208984375
+  },
+  {
+   "concurrency": 4,
+   "requests": [
+    {
+     "index": 0,
+     "sent_at_s": 0.0003,
+     "replied_at_s": 0.0019,
+     "http_status": 202,
+     "job_id": "7676e9b40f424646af8137cc95429a90"
+    },
+    {
+     "index": 1,
+     "sent_at_s": 0.0007,
+     "replied_at_s": 0.0025,
+     "http_status": 429,
+     "job_id": null
+    },
+    {
+     "index": 2,
+     "sent_at_s": 0.0008,
+     "replied_at_s": 0.0019,
+     "http_status": 202,
+     "job_id": "b5dbd286a36c4937ac8aa6fbf95ad330"
+    },
+    {
+     "index": 3,
+     "sent_at_s": 0.0002,
+     "replied_at_s": 0.0017,
+     "http_status": 202,
+     "job_id": "128b9feb1f5d4d0a9d1a1ac5953e9e3a"
+    }
+   ],
+   "accepted": 3,
+   "rejected": {
+    "429": 1
+   },
+   "jobs": [
+    {
+     "id": "7676e9b40f424646af8137cc95429a90",
+     "accepted_at_s": 0.0019,
+     "positions": [
+      1,
+      0
+     ],
+     "first_position": 1,
+     "first_running_s": 71.2176,
+     "done_s": 140.7413,
+     "final_status": "error",
+     "server_total_s": null,
+     "audio_s": null,
+     "error": "RuntimeError: the chip run exited with code 1: 2026-10-28 13:23:52.032 | info     |             UMD | Closing devices in cluster completed. (cluster.cpp:1490) | 2026-10-28 13:23:52.032 | info     |   ",
+     "start_s": 71.2176,
+     "wait_s": 71.2157,
+     "end_to_end_s": 140.7394
+    },
+    {
+     "id": "b5dbd286a36c4937ac8aa6fbf95ad330",
+     "accepted_at_s": 0.0019,
+     "positions": [
+      2,
+      1,
+      0
+     ],
+     "first_position": 2,
+     "first_running_s": 140.7419,
+     "done_s": 209.3418,
+     "final_status": "error",
+     "server_total_s": null,
+     "audio_s": null,
+     "error": "RuntimeError: the chip run exited with code 1: 2026-10-28 13:25:00.541 | info     |             UMD | Closing devices in cluster completed. (cluster.cpp:1490) | 2026-10-28 13:25:00.541 | info     |   ",
+     "start_s": 140.7419,
+     "wait_s": 140.74,
+     "end_to_end_s": 209.3399
+    },
+    {
+     "id": "128b9feb1f5d4d0a9d1a1ac5953e9e3a",
+     "accepted_at_s": 0.0017,
+     "positions": [
+      0
+     ],
+     "first_position": 0,
+     "first_running_s": 0.0036,
+     "done_s": 71.217,
+     "final_status": "error",
+     "server_total_s": null,
+     "audio_s": null,
+     "error": "RuntimeError: the chip run exited with code 1: 2026-10-28 13:22:42.523 | info     |             UMD | Closing devices in cluster completed. (cluster.cpp:1490) | 2026-10-28 13:22:42.523 | info     |   ",
+     "start_s": 0.0036,
+     "wait_s": 0.0019,
+     "end_to_end_s": 71.2153
+    }
+   ],
+   "max_queue_position": 2,
+   "ran_one_at_a_time": true,
+   "first_in_first_out": true,
+   "makespan_s": 209.3416,
+   "timed_out": false,
+   "problems": [],
+   "host_loadavg_1m_at_start": 8.14208984375,
+   "host_loadavg_1m_at_end": 6.4375
+  }
+ ],
+ "limits": [
+  "Times are seen by polling every 0.25 s, so they have a resolution of about that.",
+  "The service time of a job is the server's own total_s. Whether jobs ran one at a time is judged from those service intervals.",
+  "One clip length, one prompt and one seed are used at every level.",
+  "The host is shared; its one-minute load average is recorded at the start and end of each level."
+ ]
+}

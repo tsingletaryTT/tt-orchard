@@ -41,6 +41,33 @@ def comparable_from(entries):
     return [(e["event"], e["stage"], e["data"]) for e in entries]
 
 
+def test_entries_from_bytes_verifies_the_same_chain_as_read_entries(tmp_path):
+    from orchard.ledger import entries_from_bytes, read_entries
+    path = tmp_path / "ledger.jsonl"
+    with Ledger(path) as led:
+        run_script(led, SCRIPT)
+    data = path.read_bytes()
+    assert entries_from_bytes(data) == read_entries(path)
+    assert entries_from_bytes(data + b'{"half a line') == read_entries(path)       # bytes after the last newline are ignored
+    assert entries_from_bytes(b"") == []
+
+
+def test_entries_from_bytes_refuses_a_broken_chain_and_bytes_that_are_not_utf8(tmp_path):
+    from orchard.ledger import entries_from_bytes
+    path = tmp_path / "ledger.jsonl"
+    with Ledger(path) as led:
+        run_script(led, SCRIPT)
+    lines = path.read_bytes().split(b"\n")
+    with pytest.raises(LedgerCorrupt, match="expected sequence 2"):                  # a line removed from the middle
+        entries_from_bytes(b"\n".join([lines[0], lines[2], *lines[3:]]))
+    changed = lines[1].replace(b'"stage":0', b'"stage":5')
+    assert changed != lines[1]
+    with pytest.raises(LedgerCorrupt, match="hash chain broken"):                    # a line changed: the next line's hash no longer matches
+        entries_from_bytes(b"\n".join([lines[0], changed, *lines[2:]]))
+    with pytest.raises(LedgerCorrupt, match="not valid UTF-8"):
+        entries_from_bytes(b"\xff\xfe\n")
+
+
 def test_missing_file_is_an_empty_ledger(tmp_path):
     with Ledger(tmp_path / "new" / "ledger.jsonl") as led:
         assert led.read() == []
