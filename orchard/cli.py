@@ -173,6 +173,9 @@ def _parser() -> argparse.ArgumentParser:
                                                        "run there (`lab setup --help`)")
     lab.add_argument("action", choices=["setup"])
     lab.add_argument("rest", nargs=argparse.REMAINDER, help="options for the action")
+    fc = sub.add_parser("fusion-candidates", parents=[common],
+                        help="list a fused bundle's decode ops and say which a new model could reuse (read only; `fusion-candidates --help`)")
+    fc.add_argument("rest", nargs=argparse.REMAINDER, help="MODEL_CONFIG BUNDLE_DIR [--bundle-config FILE] [--dies N] [--json]")
     sc = sub.add_parser("suite-control", parents=[common],
                         help="build the prompt suite's control from the nearest model (`suite-control prepare --help`)")
     sc.add_argument("action", choices=["prepare", "run"])
@@ -995,6 +998,9 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
     if args.cmd == "reported":
         from orchard import reported_cmd
         return reported_cmd.main(args, out=out)
+    if args.cmd == "fusion-candidates":
+        from orchard import fusion_port
+        return fusion_port.main(args.rest, out=out)
     if args.cmd == "suite-control":
         from orchard import suite_control
         return suite_control.main([args.action, *args.rest], out=out)
