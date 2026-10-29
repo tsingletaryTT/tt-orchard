@@ -1,0 +1,6 @@
+{"op": "ssd_state_update_bcast", "description": "out = decay * s + dtx * b, where decay and dtx hold one value per row of s and b holds one value per column of s. decay and dtx are [64, 32] and only their column 0 is read (the value of row r is decay[r, 0] and dtx[r, 0]); b is [32, 128] and only its row 0 is read (the value of column j is b[0, j]). The other entries are not meant to be used. This is the Mamba-2 state update with the per-head scalars and B kept in their compact form",
+ "inputs": {"s": [64, 128], "decay": [64, 32], "dtx": [64, 32], "b": [32, 128]}, "output": [64, 128], "gen": {"decay": "sigmoid"},
+ "dtype": "bfloat16", "reference": "ssd_state_update_bcast", "pcc_bar_sim": 0.999, "pcc_bar_hw": 0.99,
+ "rel_l2_bar_sim": 1e-2, "rel_l2_bar_hw": 5e-2, "slope_band_sim": [0.98, 1.02], "slope_band_hw": [0.95, 1.05],
+ "max_abs_atol_sim": 1e-2, "max_abs_rtol_sim": 1e-2, "max_abs_atol_hw": 1e-1, "max_abs_rtol_hw": 5e-2, "seeds": [0, 1, 2], "heavy_tail": true,
+ "provisional": true}
