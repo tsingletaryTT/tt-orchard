@@ -1223,6 +1223,7 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
         stock_dir = recorded_stock
     inputs = {"model": str(snapshot), **({"base": str(base_snapshot)} if base_snapshot else {}),
               **({"stock_params": stock_dir} if stock_dir else {}),
+              **({"text_runtime": base_data["text_runtime"]} if isinstance(base_data.get("text_runtime"), str) else {}),
               **({"base_candidates": str(candidates_path)} if candidates_path else {})}
     argv_run = bringup_config.supervisor_argv(cfg, args.model, run_dir, inputs=inputs,
                                               accept_credentials=not args.refuse_credentials_visible,

@@ -156,3 +156,37 @@ def test_native_model_is_built_from_the_weights_file(tmp_path, monkeypatch):
 def test_make_reference_has_no_sibling_directory_path():
     src = (SCRIPTS / "make_reference.py").read_text()
     assert '"_w"' not in src and "'_w'" not in src
+
+
+# ---- the recorder and the weight conversion used by the text route ---------------------------------------------------------------------
+
+def test_make_reference_records_text_settings_through_the_shared_recorder(tmp_path, monkeypatch):
+    make_reference = load_script(monkeypatch, "make_reference", {})
+    cfg = tmp_path / "config.json"
+    cfg.write_text("{}")
+    (tmp_path / "w").write_bytes(b"abc")
+    make_reference.PROMPT = "hello"
+    rec = make_reference.make_recorder(tmp_path / "run", "plain", "bfloat16", 7, 4, str(cfg), tmp_path / "w")
+    rec.finish()
+    from orchard import audio_reference as ar
+    run = ar.load_run(tmp_path / "run")
+    assert (run.settings["prompt"], run.settings["duration"], run.settings["steps"], run.settings["dtype"], run.settings["sampler"]) == ("hello", 7, 4, "bfloat16", "greedy")
+    assert run.manifest["model"]["name"] == "openbmb/MiniCPM3-4B"
+
+
+def test_convert_weights_writes_safetensors_from_the_pickle_and_refuses_to_overwrite(tmp_path, monkeypatch):
+    pytest.importorskip("safetensors")
+    d = tmp_path / "m"
+    d.mkdir()
+    torch.save({"model.embed.weight": torch.arange(6.0).reshape(2, 3)}, d / "pytorch_model.bin")
+    convert = load_script(monkeypatch, "convert_weights", {})
+    out = tmp_path / "cache" / "w.safetensors"
+    monkeypatch.setattr(sys, "argv", ["convert_weights.py", "--model-dir", str(d), "--out", str(out)])
+    convert.main()
+    from safetensors.torch import load_file
+    assert torch.equal(load_file(str(out))["model.embed.weight"], torch.arange(6.0).reshape(2, 3)) and not list(out.parent.glob("*.tmp"))
+    with pytest.raises(SystemExit, match="never overwritten"):
+        convert.main()
+    monkeypatch.setattr(sys, "argv", ["convert_weights.py", "--model-dir", str(tmp_path), "--out", str(tmp_path / "x.safetensors")])
+    with pytest.raises(SystemExit, match="is not a file"):
+        convert.main()

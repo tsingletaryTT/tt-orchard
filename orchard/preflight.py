@@ -626,6 +626,20 @@ def _audio_base(*, model_id: str, base: str, inferred: bool, report, accept_infe
                  f"{runtime_note} The base snapshot is still read by stage 0: {where}.{gated_note}", data=data)
 
 
+def _text_runtime_check(model_id: str, base_override: str | None) -> Check | None:
+    """The base row for a text model the harness's own text runtime serves (orchard/text_runtime.py): no installed bundle, no research and no base model is
+    needed, because the runtime's scripts in this checkout are the port. The run goes on to stages 0 to 2, 6 and 8 without the coder. A model with another
+    base named by --base is not a text-runtime run: the operator chose a swap. Returns None for any other model."""
+    from orchard import text_runtime
+    rtm = text_runtime.runtime_for_model(model_id)
+    if rtm is None or base_override:
+        return None
+    return Check("base", WARN, f"no installed bundle serves {model_id}, and none is needed: the harness's {rtm.name} text runtime (the scripts in {rtm.scripts_dir.name}) "
+                 "serves it on one chip. The run goes on with stages 0 to 2, 6 and 8 as supervisor code and does not boot the local coder. Stage 2 compares the chip "
+                 "with a CPU reference under a stated rule, and stage 6 measures decode speed with repeats", data={
+                     "base": None, "snapshot": None, "bundle": None, "needs_fetch": False, "candidates": [], "report": None, "text_runtime": rtm.name})
+
+
 def check_base(*, model_id: str, hub: HubInfo | None, base_override: str | None, local_snapshot: Callable,
                installed: list, search: Callable | None, report: dict | None = None,
                accept_inferred: bool = False, stock: Callable | None = None, audio: str | None = None,
@@ -640,6 +654,8 @@ def check_base(*, model_id: str, hub: HubInfo | None, base_override: str | None,
     text from audio_facts.audio_evidence when the model counts as audio; the base row then needs no bundle (_audio_base),
     and `base_hub_info(base)` returns the base's `(HubInfo | None, error)`."""
     from orchard import nearest
+    if (found := _text_runtime_check(model_id, base_override)) is not None:
+        return found
     base = base_override or (hub.base_models[0] if hub and hub.base_models else None)
     inferred = False
     if not base and report and report.get("selected"):
@@ -991,6 +1007,8 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
     audio = audio_evidence_for(hub, local_path)
 
     def base() -> Check:
+        if getattr(cfg, "mode", "local") != "lab" and (found_text := _text_runtime_check(model_id, base_override)) is not None:
+            return found_text                  # a text runtime serves it: no research and no bundle search
         if stock_recorded and getattr(cfg, "mode", "local") != "lab":
             # A resumed stock-runtime run (orchard/stock_runtime.py): the route was chosen when the run started and is in its run_start
             # entry. The research, the bundle search and a base download are not needed again, and an offline or failing research must

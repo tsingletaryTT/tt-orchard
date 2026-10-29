@@ -15,7 +15,6 @@ Kind `other`: `dec0_layer_NN` (decode step 0 stream), `prefill_logits`
 (last position), `dec_logits_K` (K-th decode step), `final_norm`, `tokens` (the greedy path).
 """
 import argparse
-import hashlib
 import json
 import sys
 
@@ -26,7 +25,6 @@ from transformers import AutoTokenizer
 sys.path.insert(0, __file__.rsplit("/", 1)[0])
 sys.path.insert(0, __file__.rsplit("/", 3)[0])
 from ref_model import RefModel  # noqa: E402
-from orchard import audio_reference as ar  # noqa: E402
 
 PROMPT = ("Write a short paragraph about how a lighthouse keeper spends a stormy night, mentioning the lamp, the logbook, "
           "and a ship in trouble.")
@@ -38,12 +36,11 @@ def prompt_ids(tok):
 
 
 def make_recorder(out, kind_name, dtype, n_prompt, n_dec, cfg_path, weights):
-    cfg_sha = hashlib.sha256(open(cfg_path, "rb").read()).hexdigest()
-    model = {"name": "openbmb/MiniCPM3-4B", "revision": "local-snapshot", "config_sha256": cfg_sha, "weights_bytes": str(weights.stat().st_size) if hasattr(weights, "stat") else "0"}
-    lib = {"name": "minicpm3-reference", "commit": "n/a"}
-    settings = {"prompt": PROMPT, "duration": n_prompt, "steps": n_dec, "cfg_scale": 0.0, "sampler": "greedy", "seed": 0, "dtype": dtype,
-                "sample_size": 0}
-    return ar.Recorder(out, model=model, library=lib, settings=settings)
+    """The recorder for one run; the settings mapping is orchard/text_reference.py's."""
+    from orchard import text_reference as tr
+    size = weights.stat().st_size if hasattr(weights, "stat") else 0
+    return tr.make_recorder(out, model_id="openbmb/MiniCPM3-4B", config_path=cfg_path, weights_bytes=size, runtime="minicpm3-reference", prompt=PROMPT,
+                            prompt_tokens=n_prompt, decode_tokens=n_dec, dtype=dtype)
 
 
 def main():
