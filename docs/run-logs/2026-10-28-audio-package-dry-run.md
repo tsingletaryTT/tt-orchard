@@ -10,7 +10,7 @@ Paths are placeholders (`<run>` is the run directory). Nothing was uploaded, pub
 |---|---|
 | The builder, the card renderer and the gate | `orchard/audio_package.py` |
 | The command | `tt-orchard audio-package RUN_DIR --namespace ORG --bench FILE --demo-repo DIR [--snapshot DIR] [--check]` |
-| Tests (224, with fake runs, plus 2 for `entries_from_bytes`) | `tests/test_audio_package.py` |
+| Tests (227, with fake runs, plus 2 for `entries_from_bytes`) | `tests/test_audio_package.py` |
 | Hostile-input readers (4 registered) | `tests/hostile_inputs.py` |
 
 ## What was staged

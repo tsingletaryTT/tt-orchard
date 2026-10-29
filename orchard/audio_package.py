@@ -1080,6 +1080,22 @@ def _copy_source(root: Path, rel: str, what: str) -> bytes:
     return _file_bytes(root / rel, f"{what} {rel}")           # safeio refuses a link, so a link is never copied
 
 
+def repo_license_text(checkout: Path) -> str:
+    """tt-orchard's own license text: the `LICENSE` beside the package in a source checkout, else the license file in the installed distribution's metadata
+    (a non-editable install has no checkout). Refuses when neither is found."""
+    if (checkout / "LICENSE").is_file():
+        return _copy_source(checkout, "LICENSE", "the tt-orchard").decode("utf-8")
+    try:
+        from importlib import metadata
+        dist = metadata.distribution("tt-orchard")
+        for f in dist.files or []:
+            if f.name.upper().startswith("LICENSE"):
+                return _file_bytes(Path(str(dist.locate_file(f))), "the installed tt-orchard license").decode("utf-8")
+    except (metadata.PackageNotFoundError, UnicodeDecodeError, AudioPackageError):
+        pass
+    raise AudioPackageError("tt-orchard's LICENSE was not found beside the package or in the installed distribution's metadata")
+
+
 def gradio_requirement(demo_repo: Path) -> str:
     """The Gradio pin the demo repository states in package/audio_package.py (read as text, never run)."""
     text = _file_text(demo_repo / "package" / "audio_package.py", "the demo repository's package/audio_package.py")
@@ -1116,7 +1132,7 @@ def stage_package(run_dir, *, bench_path, demo_repo, snapshot, namespace: str, r
     sources = {rel: _copy_source(demo, rel, "the demo repository's") for rel, _ in DEMO_FILES}
     runtime = {dest: _copy_source(root, rel, "the tt-orchard") for rel, dest in RUNTIME_FILES}
     requirement = gradio_requirement(demo)
-    runtime_license = _copy_source(root.parent, "LICENSE", "the tt-orchard").decode("utf-8")
+    runtime_license = repo_license_text(root.parent)
     if "Apache License" not in runtime_license:
         raise AudioPackageError("tt-orchard's LICENSE is not the Apache License text this package's runtime notice describes")
     page_src = sources["demo/audio_app.py"].decode("utf-8")

@@ -7,6 +7,7 @@ repository. No model, chip, network or Hugging Face cache is used, and nothing i
 """
 import io
 import json
+import os
 import re
 import subprocess
 import sys
@@ -676,7 +677,7 @@ def test_the_gate_refuses_a_pin_that_differs_from_the_evidence(staged, name, old
     assert any(message in p for p in gate(staged)), gate(staged)
 
 
-def run_check(tmp_path, pin, *, present=True, main="same", model="small-music", with_library=True, private=None, break_cache=False):
+def run_check(tmp_path, pin, *, present=True, main="same", model="small-music", with_library=True, private=None, break_cache=False, relative_user=False):
     """check_revision.py in a child process, with stand-ins for `stable_audio_3` and `huggingface_hub` and a real cache directory tree.
     `present`: the user's cache holds the pinned snapshot. `main`: what the user's refs/main holds ("same": the pin; None: no refs/main; or a revision)."""
     lib = tmp_path / "lib"
@@ -691,7 +692,7 @@ def run_check(tmp_path, pin, *, present=True, main="same", model="small-music", 
         (user / "refs" / "main").write_text(pin if main == "same" else main)
     (lib / "stable_audio_3" / "__init__.py").write_text("")
     (lib / "huggingface_hub" / "__init__.py").write_text(
-        "import os\nfrom pathlib import Path\n"
+        f"import os\nfrom pathlib import Path\nREL = {relative_user!r}\n"
         "def try_to_load_from_cache(repo_id, filename, revision=None, cache_dir=None):\n"
         f"    base = Path(cache_dir or {str(tmp_path / 'user cache')!r}) / 'models--x--y'\n"
         "    if revision is None:\n"
@@ -700,6 +701,7 @@ def run_check(tmp_path, pin, *, present=True, main="same", model="small-music", 
         "        revision = ref.read_text().strip()\n"
         f"    if cache_dir is not None and {break_cache!r}:\n        revision = 'f' * 40\n"
         "    f = base / 'snapshots' / revision / filename\n"
+        "    if cache_dir is None and REL:\n        return os.path.relpath(str(f)) if f.exists() else None\n"
         "    return str(f) if f.exists() else None\n")
     if with_library:
         (lib / "stable_audio_3" / "model_configs.py").write_text("class M:\n    repo_id = 'x/y'\n    ckpt_path = 'model.safetensors'\n"
@@ -957,6 +959,37 @@ def test_a_relative_private_cache_path_is_made_absolute_by_the_script_and_the_la
     assert r.returncode == 0
     assert str(tmp_path / "rel cache" / "hub") in r.stdout                                 # printed absolute
     assert (tmp_path / "rel cache" / "hub" / "models--x--y" / "refs" / "main").read_text() == REV
+
+
+def test_a_relative_snapshot_path_from_the_users_cache_gives_a_working_absolute_link(tmp_path):
+    r = run_check(tmp_path, REV, relative_user=True)
+    assert r.returncode == 0, r.stderr
+    link = r.private / "models--x--y" / "snapshots" / REV
+    assert os.path.isabs(os.readlink(link)) and (link / "model.safetensors").read_text() == "weights"
+
+
+def test_the_runtime_license_comes_from_the_installed_metadata_when_there_is_no_checkout(tmp_path, monkeypatch):
+    import importlib.metadata as md
+    (tmp_path / "site").mkdir()
+    (tmp_path / "site" / "LICENSE").write_text("Apache License\nVersion 2.0\n")
+
+    class Dist:
+        files = [md.PackagePath("tt_orchard-1.dist-info/licenses/LICENSE"), md.PackagePath("x.py")]
+
+        def locate_file(self, f):
+            return tmp_path / "site" / "LICENSE"
+    monkeypatch.setattr(md, "distribution", lambda name: Dist())
+    assert "Apache License" in ap.repo_license_text(tmp_path / "no checkout here")
+
+
+def test_a_missing_runtime_license_is_a_refusal(tmp_path, monkeypatch):
+    import importlib.metadata as md
+
+    def none(name):
+        raise md.PackageNotFoundError(name)
+    monkeypatch.setattr(md, "distribution", none)
+    with pytest.raises(ap.AudioPackageError, match="LICENSE was not found"):
+        ap.repo_license_text(tmp_path)
 
 
 def test_the_gate_refuses_a_launcher_that_leaves_the_cache_path_relative(staged):

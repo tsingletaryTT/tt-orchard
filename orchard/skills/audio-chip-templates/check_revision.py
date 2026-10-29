@@ -59,7 +59,7 @@ def main(argv) -> int:
               f"hf download {entry.repo_id} --revision {pin}", file=sys.stderr)
         return 2
     depth = len(Path(entry.ckpt_path).parts)                      # <repo cache>/snapshots/<revision>/<file parts>
-    snapshot = Path(pinned).parents[depth - 1]
+    snapshot = Path(os.path.abspath(pinned)).parents[depth - 1]     # absolute: a link made from a relative target would point inside the private cache
     repo_dir_name = snapshot.parents[1].name
     try:
         build_private_cache(private, repo_dir_name, pin, snapshot)
