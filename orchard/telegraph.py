@@ -117,6 +117,33 @@ def _dir(value: str, base: Path) -> Path:
     path = Path(value).expanduser()
     return path if path.is_absolute() else Path(base) / path
 
+
+def _shown(value: object, limit: int = 80) -> str:
+    """A value for an error message: repr, cut to `limit` characters so a huge value cannot flood the output."""
+    text = repr(value)
+    return text if len(text) <= limit else text[:limit] + "..."
+
+
+def _check_endpoint(endpoint: str):
+    """Split the endpoint, or raise ConfigError naming telegraph.endpoint. urlsplit raises a bare ValueError for a bad
+    bracketed host, and the port property raises one for a port that is not a number from 0 to 65535. Control characters
+    and spaces are refused too: urlsplit drops tabs and newlines silently, so the URL that is called would differ from the
+    URL that was written."""
+    # userinfo is hidden: a password pasted into the endpoint must not be echoed into a log
+    # Everything up to the last "@" is hidden, whatever it holds (slashes, tabs, newlines), because the parser has not run yet
+    # and cannot be trusted to say where the userinfo ends.
+    shown = "***@" + endpoint.rsplit("@", 1)[1] if "@" in endpoint else endpoint
+    bad = f"telegraph.endpoint is not a valid URL ({_shown(shown)})"
+    if any(c.isspace() or not c.isprintable() for c in endpoint):
+        raise ConfigError(bad + ": it holds a space or control character")
+    try:
+        parts = urllib.parse.urlsplit(endpoint)
+        parts.port                                    # noqa: B018  (read only to validate the port)
+    except ValueError:
+        # the parser's own message can quote part of the URL, userinfo included, so it is not repeated
+        raise ConfigError(f"{bad}: the host or port cannot be parsed (a port is a number from 0 to 65535)") from None
+    return parts
+
 def _plain_json(value, where: str, depth: int = 0) -> None:
     """Raise ConfigError unless `value` is plain JSON data: strings, finite numbers, booleans, null, lists, and tables with string
     keys. TOML dates and times, other objects, and a table nested too deeply are refused by name."""
@@ -171,7 +198,10 @@ def load(table: dict | None, *, base: Path) -> Config:
     if not enabled:
         # Off: nothing else is checked, but a usable `dir` is kept so the web page can still show what was spent before.
         off_dir = table.get("dir")
-        return Config(dir=_dir(off_dir, base) if isinstance(off_dir, str) and off_dir else None)
+        try:
+            return Config(dir=_dir(off_dir, base) if isinstance(off_dir, str) and off_dir else None)
+        except (RuntimeError, ValueError):            # a "~user" that does not exist: off means nothing else is checked
+            return Config()
     for key in table:
         if key not in KEYS:
             near = difflib.get_close_matches(key, sorted(KEYS), n=1)
@@ -179,7 +209,7 @@ def load(table: dict | None, *, base: Path) -> Config:
     endpoint = table.get("endpoint")
     if not isinstance(endpoint, str) or not endpoint:
         raise ConfigError("telegraph.endpoint is required (the base URL, for example https://host/v1)")
-    parts = urllib.parse.urlsplit(endpoint)
+    parts = _check_endpoint(endpoint)
     if parts.username or parts.password:
         raise ConfigError("telegraph.endpoint has credentials in the endpoint; use key_env or key_file")
     if parts.scheme == "https":
@@ -206,7 +236,10 @@ def load(table: dict | None, *, base: Path) -> Config:
         raise ConfigError("telegraph: set only one of key_env and key_file")
     if key_file:
         key_file = Path(key_file)
-        key_file = (key_file if key_file.is_absolute() else Path(base) / key_file).resolve()
+        try:
+            key_file = (key_file if key_file.is_absolute() else Path(base) / key_file).resolve()
+        except (OSError, RuntimeError, ValueError) as exc:       # a NUL character, or a symlink loop
+            raise ConfigError(f"telegraph.key_file cannot be resolved ({_shown(str(table.get('key_file')))}): {exc}") from exc
         if key_file == REPO or REPO in key_file.parents:
             raise ConfigError("telegraph.key_file is inside the checkout; keep the key outside any repository")
     prices = {}
@@ -249,8 +282,12 @@ def load(table: dict | None, *, base: Path) -> Config:
     directory = table.get("dir")
     if "dir" in table and (not isinstance(directory, str) or not directory):
         raise ConfigError("telegraph.dir must be a directory path")
+    try:
+        directory = _dir(directory, base) if directory else None
+    except (RuntimeError, ValueError) as exc:                    # "~user" with no such user, or a NUL character
+        raise ConfigError(f"telegraph.dir cannot be used ({_shown(table.get('dir'))}): {exc}") from exc
     return Config(
-        dir=_dir(directory, base) if directory else None,
+        dir=directory,
         enabled=True, endpoint=endpoint.rstrip("/"), models=tuple(models), api=api, key_env=key_env or None,
         key_file=key_file or None, after_failures=_int(table, "after_failures", 2, 1),
         max_calls=_int(table, "max_calls", 5, 0), max_total_tokens=_int(table, "max_total_tokens", 40000, 0),

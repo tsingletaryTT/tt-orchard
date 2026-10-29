@@ -380,6 +380,52 @@ def visible_credentials(home) -> list[Path]:
     return found
 
 
+def _discard(path: Path) -> None:
+    """Remove a file, a link or a directory tree, quietly (a link is removed, never followed)."""
+    try:
+        if path.is_symlink() or path.is_file():
+            path.unlink()
+        elif path.exists():
+            shutil.rmtree(path, ignore_errors=True)
+    except OSError:
+        pass
+
+
+def save_reference(src: Path, cache: Path, name: str) -> bool:
+    """Put the CPU reference made in `src` into the reference cache as `cache/name`, replacing an entry that is already there. The caller runs
+    this only for a reference that was made fresh, and a fresh one is made only when the cache had no entry that `audio_stages.cached_run` accepts
+    for the run's identity (model revision, configuration, library commit, settings), so an entry found here is stale and must not block the save
+    (issue 179). The replacement is safe: the new copy is made completely beside the entry first, the old entry is moved aside, the new one is
+    renamed into place, and only then is the old one deleted. When the rename fails the old entry is put back. Returns whether the cache now holds
+    the new copy; a failure costs a repeat of a CPU run and nothing else."""
+    from orchard import cache_lock
+    dest = cache / name
+    tmp, old = cache / f".{name}.tmp-{os.getpid()}", cache / f".{name}.old-{os.getpid()}"
+    moved = False
+    try:
+        cache.mkdir(parents=True, exist_ok=True)
+        _discard(tmp)
+        _discard(old)
+        shutil.copytree(src, tmp, symlinks=False)                  # complete beside the entry, before anything is moved
+        # The exclusive lock covers the two renames. A run that validates and copies the entry holds the shared lock (audio_stages.copy_cached_run), so it
+        # sees the old entry or the new one and never the gap between the renames.
+        with cache_lock.entry_lock(cache, name, exclusive=True):
+            if os.path.lexists(dest):
+                os.rename(dest, old)
+                moved = True
+            try:
+                os.rename(tmp, dest)
+            except OSError:
+                if moved:
+                    os.rename(old, dest)
+                raise
+        _discard(old)
+        return True
+    except OSError:
+        _discard(tmp)
+        return False
+
+
 def operator_home() -> Path:
     """The home OpenSSH uses: the passwd entry's, which ignores HOME."""
     return Path(pwd.getpwuid(os.getuid()).pw_dir)
@@ -1608,15 +1654,7 @@ class Supervisor:
             run = rec["runs"].get(role)
             if run is None or run["from_cache"]:
                 continue
-            dest = cache / run["model"]
-            if not dest.exists():
-                try:
-                    cache.mkdir(parents=True, exist_ok=True)
-                    tmp = cache / f".{run['model']}.tmp-{os.getpid()}"
-                    shutil.copytree(self.run_dir / run["dir"], tmp)
-                    os.replace(tmp, dest)
-                except OSError:
-                    pass                    # the cache saves time and nothing depends on it; a failed copy costs nothing
+            save_reference(self.run_dir / run["dir"], cache, run["model"])
 
     def _bundle_body(self, spec, stage_dir: Path):
         """Stage 8 as supervisor code: copy build_bundle.py into the stage, write its one-line config,
