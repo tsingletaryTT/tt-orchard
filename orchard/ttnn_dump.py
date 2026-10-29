@@ -18,7 +18,7 @@ import os
 import subprocess
 from pathlib import Path
 
-from orchard import opinventory
+from orchard import hwtool, opinventory
 from orchard.kernelprobe import _TICKET, GOZER_TERM_GRACE_S, cancel_ticket
 from orchard.stallwatch import _kill_group
 
@@ -72,7 +72,7 @@ def dump_command(python, who: str = "claude:orchard-inventory", simulator=None) 
     if simulator:
         return ["env", f"TT_METAL_SIMULATOR={simulator}"] + [f"{k}={v}" for k, v in SIMULATOR_ENV.items()] + \
             [str(python), "-c", SCRIPT]
-    return ["gozer", "run", "--chips", "1", "--exact", "1", "--who", who,
+    return ["gozer", "run", "--chips", "1", "--exact", hwtool.probe_chip(), "--who", who,
             "--reason", "dump ttnn op names for tt-orchard inventory", "--", str(python), "-c", SCRIPT]
 
 
