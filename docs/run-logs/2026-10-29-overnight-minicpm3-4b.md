@@ -5,7 +5,7 @@ My class: an open-weights text model whose blocker is the attention side. This l
 
 ## Choice (first hour)
 
-Model: `openbmb/MiniCPM3-4B`. Licence Apache-2.0, not gated, 62 layers, hidden 2560, 40 heads, about 4B parameters (8 GB in bfloat16).
+Model: `openbmb/MiniCPM3-4B`. Licence Apache-2.0, open download with no gate, 62 layers, hidden 2560, 40 heads, about 4B parameters (8 GB in bfloat16).
 
 Why this one:
 
@@ -23,8 +23,8 @@ Why this one:
   need a shim, and if it does the log says so). A plain-torch reference written from the same file is the fallback.
 
 What tt-metal already has: `models/demos/deepseek_v3/tt/mla/mla1d.py` (2681 lines, written for a multi-chip DeepSeek-V3 mesh with its own weight
-loader, not reusable as is). Its structure (q_a, q_b, kv_a, kv_b, a separate rope part) is the same as MiniCPM3's and guides the port; the port
-here uses a plain ttnn composition with the key and value built per head from the latent.
+loader, so it cannot be reused as it stands). Its structure (q_a, q_b, kv_a, kv_b, a separate rope part) is the same as MiniCPM3's and guides the port; the port
+uses the absorbed form with the existing flash MLA op (the op the DeepSeek code calls), which keeps the cache at 288 values per token.
 
 Plan: (a) CPU reference arrays; (b) the whole model on one chip with MLA on the host; (c) MLA as ttnn ops; (d) agreement, then benchmark.
 Fallbacks are recorded here with the reason.
@@ -48,7 +48,7 @@ So no new kernel is needed: the missing piece was the composition around the exi
 The port (`chip_model.py`): bfloat16 weights, one token per step (the prompt goes through the decode step one token at a time), scalings folded into weights
 (`scale_emb` into the embedding, `scale_depth/sqrt(62)` into `o_proj` and `down_proj`, `1/10` into the final norm). Attention in the absorbed form: the query is
 projected, its 64-wide no-position part is multiplied by the per-head key up-projection (`kv_b_proj` rows) to 256-wide latent queries, the rope part gets rotary
-embedding (rotate-half as a 32 by 32 matmul), the cache holds 288 values per token for the one shared head, the existing flash MLA op attends over it, and the
+embedding (rotate-half as a 32 by 32 matmul), the cache holds 288 values per token for the single shared head, the existing flash MLA op attends over it, and the
 per-head value up-projection is applied to its output before `o_proj`. The stage-b host-fallback mode exists in the code (`attn="host"`) and was not run, because the
 chip op passed.
 
@@ -71,7 +71,7 @@ Cause of the layer 14 error (`scripts/minicpm3/exp_mlp14.py`, one MLP on the chi
 already wrong: `ttnn.rms_norm` with its default compute config is 3.7 percent off on that row (torch on the same bfloat16 input is the comparison). The gate, up and
 product errors (3.9, 3.8 and 6.0 percent) follow from it. With a compute config that has `fp32_dest_acc_en=True` the norm is 0.08 percent off (HiFi4 and approximate
 mode make no difference; LoFi is 2.0 percent off). The matmul fidelity setting I tried first (HiFi4 with 32-bit accumulation on every linear) did not change the
-layer 14 error, which is why the first-divergence probe's operation-level search mattered. The fix is `self._rms` in `chip_model.py`. Layers other than 14 were not
+layer 14 error. The operation-level search of the first-divergence probe is what located the cause. The fix is `self._rms` in `chip_model.py`. Layers other than 14 were not
 visibly harmed because only the first token of a prompt carries channels that large.
 
 Agreement after the fix (chip with default matmul config, bfloat16 weights, against the float32 reference; floor pair is bfloat16 plain torch and bfloat16 transformers-native):
@@ -90,7 +90,7 @@ The chip is 2.8 to 6 times the CPU floor at the blocks above, as expected: the f
 (default `rms_norm`, same weights) is the known-bad control: the probe located layer 14 in it, with a 5 percent stated tolerance.
 
 Speed: HiFi4 on every linear costs speed (16.5 against 18.8 tok/s) and does not help agreement, so it is off. Trace capture with a one-hot cache write
-(position from a device tensor) gives 18.5 tok/s, the same as no trace: the time is on the device (about 54 ms per token against a 15.9 ms floor), not in dispatch.
+(position from a device tensor) gives 18.5 tok/s, the same as no trace: the time is on the device (about 54 ms per token against a 15.9 ms floor) and dispatch is not the cost.
 Next: a timing breakdown (attention, MLP, head) and a DRAM-bandwidth probe of the decode matmuls (`exp_matmul.py`).
 
 Probes done for the trace path: `paged_update_cache` works with a height-sharded input and an index tensor; one-hot row write with broadcast multiply and `assign`
@@ -234,7 +234,7 @@ The chip model sizes the cache to the longest context asked for (a multiple of 1
 A chat server (`serve.py`, standard library only, 127.0.0.1, port 8210 by default, refuses the ports that belong to other work). `GET /v1/models`, `POST /v1/chat/completions` with
 `messages`, `max_tokens` and `stream` (server-sent events); greedy decoding only; one request at a time. Smoke test on one chip: 99 tokens (19 in the prompt, 80 generated) answered in
 2.96 s end to end; the streamed reply arrived as pieces; a malformed body got a 400. The first version failed on the tokenizer's return type (`apply_chat_template` returns a batch
-object in transformers 5, not a tensor); the failure was returned as an empty reply, so the handler now turns any exception into a logged 500. The server holds the chips while it runs, so it was
+object in transformers 5 and no longer a tensor); the failure was returned as an empty reply, so the handler now turns any exception into a logged 500. The server holds the chips while it runs, so it was
 stopped (by its pid) and the lease released after the test.
 
 The orchard preflight on this model (`bringup openbmb/MiniCPM3-4B --dry-run`, read only): hub ok (Apache-2.0, 8.2 GB, ships code that the harness would fetch and not run outside the agent sandbox),
