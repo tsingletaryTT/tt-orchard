@@ -1,118 +1,114 @@
 {
+ "ablations": {
+  "grid_median": 126.84,
+  "rk_median": 126.78
+ },
  "bench": {
+  "max": 127.07,
   "median": 126.83,
   "min": 126.81,
-  "max": 127.07,
   "runs": 5,
-  "warmup": 1,
-  "tokens": 128
- },
- "floor": {
-  "floor_tok_s": 428.0,
-  "floor_ms": 2.336,
-  "mb_per_token": 2392.4,
-  "policy": "bfp8 attention and shared experts, bfp4 routed experts and head, bf16 router"
- },
- "ttft_ms": 109,
- "warm_start_s": [
-  267,
-  308
- ],
- "cold_start_s": 727,
- "load": "8.5 to 8.7",
- "quality": {
-  "rows": [
-   {
-    "prompt": "The history of the printing press began ",
-    "tokens": 32,
-    "leading_agree": 8,
-    "same_position_share": 0.781,
-    "first_diff": {
-     "index": 8,
-     "ref_token": 34319,
-     "device_token": 7633,
-     "device_token_in_ref_top5": true,
-     "ref_gap_nats": 0.125
-    }
-   },
-   {
-    "prompt": "def fibonacci(n):\n    \"\"\"Return the n-th",
-    "tokens": 32,
-    "leading_agree": 5,
-    "same_position_share": 0.344,
-    "first_diff": {
-     "index": 5,
-     "ref_token": 15,
-     "device_token": 16,
-     "device_token_in_ref_top5": true,
-     "ref_gap_nats": 0.375
-    }
-   },
-   {
-    "prompt": "Question: What is 17 multiplied by 23? A",
-    "tokens": 32,
-    "leading_agree": 10,
-    "same_position_share": 0.312,
-    "first_diff": {
-     "index": 10,
-     "ref_token": 220,
-     "device_token": 279,
-     "device_token_in_ref_top5": true,
-     "ref_gap_nats": 0.375
-    }
-   },
-   {
-    "prompt": "La capital de Francia es Par\u00eds, y la cap",
-    "tokens": 32,
-    "leading_agree": 3,
-    "same_position_share": 0.094,
-    "first_diff": {
-     "index": 3,
-     "ref_token": 8482,
-     "device_token": 2434,
-     "device_token_in_ref_top5": true,
-     "ref_gap_nats": 0.438
-    }
-   },
-   {
-    "prompt": "Photosynthesis is the process by which p",
-    "tokens": 32,
-    "leading_agree": 17,
-    "same_position_share": 0.531,
-    "first_diff": {
-     "index": 17,
-     "ref_token": 1330,
-     "device_token": 279,
-     "device_token_in_ref_top5": true,
-     "ref_gap_nats": 0.125
-    }
-   },
-   {
-    "prompt": "Q: Name three primary colors.\nA:",
-    "tokens": 32,
-    "leading_agree": 0,
-    "same_position_share": 0.0,
-    "first_diff": {
-     "index": 0,
-     "ref_token": 271,
-     "device_token": 3605,
-     "device_token_in_ref_top5": true,
-     "ref_gap_nats": 0.375
-    }
-   }
-  ]
+  "tokens": 128,
+  "warmup": 1
  },
  "chat": {
   "default": "Thinking Process:\n\n1.  **Analyze the Request:**\n    *   Target: Tenstorrent Blackhole card.\n    *   Constraint: One sentence.\n    *   Goal: Define/Describe what...",
   "finish": "length",
   "thinking_off": "Red, blue, and yellow."
  },
- "long_prompt": {
-  "tokens": 3817,
-  "text": " PELICAN."
+ "cold_start_s": 728,
+ "floor": {
+  "floor_ms": 2.336,
+  "floor_tok_s": 428.0,
+  "mb_per_token": 2392.4
  },
- "ablations": {
-  "grid_median": 126.84,
-  "rk_median": 126.78
- }
+ "load": "8.5 to 8.7",
+ "long_prompt": {
+  "text": " PELICAN.",
+  "tokens": 3817
+ },
+ "quality": {
+  "rows": [
+   {
+    "first_diff": {
+     "device_token": 7633,
+     "device_token_in_ref_top5": true,
+     "index": 8,
+     "ref_gap_nats": 0.125,
+     "ref_token": 34319
+    },
+    "leading_agree": 8,
+    "prompt": "The history of the printing press began ",
+    "same_position_share": 0.781,
+    "tokens": 32
+   },
+   {
+    "first_diff": {
+     "device_token": 16,
+     "device_token_in_ref_top5": true,
+     "index": 5,
+     "ref_gap_nats": 0.375,
+     "ref_token": 15
+    },
+    "leading_agree": 5,
+    "prompt": "def fibonacci(n):\n    \"\"\"Return the n-th",
+    "same_position_share": 0.344,
+    "tokens": 32
+   },
+   {
+    "first_diff": {
+     "device_token": 279,
+     "device_token_in_ref_top5": true,
+     "index": 10,
+     "ref_gap_nats": 0.375,
+     "ref_token": 220
+    },
+    "leading_agree": 10,
+    "prompt": "Question: What is 17 multiplied by 23? A",
+    "same_position_share": 0.312,
+    "tokens": 32
+   },
+   {
+    "first_diff": {
+     "device_token": 2434,
+     "device_token_in_ref_top5": true,
+     "index": 3,
+     "ref_gap_nats": 0.438,
+     "ref_token": 8482
+    },
+    "leading_agree": 3,
+    "prompt": "La capital de Francia es Par\u00eds, y la cap",
+    "same_position_share": 0.094,
+    "tokens": 32
+   },
+   {
+    "first_diff": {
+     "device_token": 279,
+     "device_token_in_ref_top5": true,
+     "index": 17,
+     "ref_gap_nats": 0.125,
+     "ref_token": 1330
+    },
+    "leading_agree": 17,
+    "prompt": "Photosynthesis is the process by which p",
+    "same_position_share": 0.531,
+    "tokens": 32
+   },
+   {
+    "first_diff": {
+     "device_token": 3605,
+     "device_token_in_ref_top5": true,
+     "index": 0,
+     "ref_gap_nats": 0.375,
+     "ref_token": 271
+    },
+    "leading_agree": 0,
+    "prompt": "Q: Name three primary colors.\nA:",
+    "same_position_share": 0.0,
+    "tokens": 32
+   }
+  ]
+ },
+ "ttft_ms": 109,
+ "warm_start_s": 309
 }

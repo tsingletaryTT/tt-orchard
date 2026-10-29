@@ -10,7 +10,7 @@ Read first: `orchard/audio_package.py` (stage, card, gate and record pattern), t
 `fix/card-weights-wording` (2026-10-29, `src/tt_kernel/build.py` and its test) changes where the weights pin is worded on a generated card.
 It does not change the manifest schema. Other open branches (`feat/serve-n-chips`, `feat/cohost-kind`, `feat/deploy`) do not touch the fields used here.
 
-Package shape: a recipe package, not a built v5.1 container package and not a v6 thin package.
+Package shape: a recipe package. It is neither a built v5.1 container package nor a v6 thin package.
 - A v5.1 package is built by `tt-model package --container`, which needs a tt-metal tree and copies an allowlist of model code into a new
   image. This package changes one file of another author's published bundle and has no tt-metal tree of its own to build from.
 - A v6 thin package pins stock `ttnn` and ships model code as `extra_code/`. The fused ops live in the Coder-Next image (a tt-metal fork build),
@@ -88,3 +88,28 @@ Publish command, as text only (nothing was uploaded; the operator has not approv
 - The 126.83 tok/s median here and the 126.78 in the fusion-port log are two measurements of the same setup; the card uses the package run for the baseline and the earlier run for the
   two ablations (126.84 and 126.78).
 - Not tested: more than one sequence, contexts above 3,817 tokens, tool calls, sampling above temperature 0, vision, four dies, a bfp8 or bfloat16 expert policy.
+
+## Review round (PR 246, Copilot): defects fixed
+
+| # | Defect | Fix | Test |
+| --- | --- | --- | --- |
+| 1 | `run.sh` mounted host devices 0 and 1 whatever the lease granted | Devices come from the inherited `TT_VISIBLE_DEVICES` (a lease exports PCI addresses; each is mapped to its `/dev/tenstorrent/N` node through sysfs, the way `orchard/bus.py` does). `DEVICES` must equal the leased set or the launcher exits 2. With no `TT_VISIBLE_DEVICES` and no `DEVICES` it refuses; with only `DEVICES` it uses them (no lease to check against). Exactly two dies. | 8 launcher tests with a stub `docker`, a fake sysfs and fake device nodes |
+| 2 | `max()` of an empty list when every prompt matched fully | The card says all tokens matched and counts the fully matched prompts | all-agree evidence stages and passes the gate |
+| 3 | The gate read and hashed files it had already rejected | Links, credential files, weights files and oversized files are found by `stat` only and the gate returns at once | the gate returns exactly one problem when a record-breaking edit is also present |
+| 4 | The gate did not compare the card with the evidence | Every card number is recomputed from the raw files in `evidence/` (bench logs, boot lines, both quality files, the model config through `decode_floor`); `facts.json` must equal them and the card must equal `render_card(facts)` | cold start 900 in the card, in `facts.json` and in `boot.txt` each fail; TTFT, warm start, quality rows and median each fail when edited |
+| 5 | `compare.py` accepted unequal inputs; `leading_agree` with no difference | It raises on unequal prompt counts, different prompts and unequal or empty token lists; no difference gives the full length | 5 tests |
+| 6 | `run.sh` only warned about an image-id mismatch | It exits 2 unless the image resolves to the recorded id; another tag with the same id is accepted | 3 tests |
+| 7 | `PATCHED_SHA` was checked only when the patched loader was created | It is checked on every launch | edited leftover loader is refused |
+
+The pinned hashes moved to `pins.env`, which `run.sh` reads and the gate compares with the module's constants. Tests: 44 in `tests/test_qwen35_package.py`. Each new guard was removed in turn and a test went red
+(device mapping, lease check, image id, patched-loader check, loader-original check, card-against-evidence, facts check, early return, size and weights check, all-agree branch, pins check).
+
+Boot check of the fixed launcher, from the restaged package, on chips 2 and 3 (ticket 56b6, a lease held through `--owner-pid` on a process that lived for the whole session, released at once):
+- With `DEVICES="0 1"` while the lease named chips 2 and 3, the launcher exited 2 with "DEVICES (0 1) is not the leased set (2 3)" before any container started.
+- From the lease alone it mounted `/dev/tenstorrent/2` and `/dev/tenstorrent/3` (read back with `docker inspect`), passed the image-id, loader and patch checks, served, and answered a completion.
+- This check used a 4-layer slice of the checkpoint fetched with `fetch_weights.py --layers 4` (8.8 GB, a few-GB directory for launcher checks that is not a usable model; its answer was gibberish by construction),
+  held on a separate disk. Reason: the root disk had 150 GB free and then 139 GB, and the rule for this task keeps 150 GB free, so the 69 GB full download could not be made. The scratch directory was deleted.
+- Not re-measured: the warm start. The 309 s figure is from the earlier boot check and may have overlapped another agent's session. Re-measuring needs the full weights on the fast disk, which the free-space rule did not allow.
+  The card now says the warm start was measured once, may have overlapped another job, and was not re-measured. The slice boot took 471 s on the slow disk and is not a timing for the package.
+- The cold start (728 s), decode speed (126.83 tok/s median), quality and chat results are unchanged from the first boot check, which ran before the review fixes; they are not re-run. The launcher changes
+  (device resolution, checks) do not change the container command that produced them, apart from which host device nodes are mounted.

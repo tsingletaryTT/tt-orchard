@@ -13,7 +13,8 @@ The config edits (all other keys are unchanged): `architectures` becomes ["Qwen3
 `mtp_num_hidden_layers` becomes 0, and `rope_parameters.mrope_section` / `mrope_interleaved` are removed (with them the vLLM plugin
 expects a rotary delta from prefill that the bundle's generator does not return; text-only decoding does not use them).
 
-Usage: fetch_weights.py OUTDIR [--revision SHA]   (set HF_TOKEN only if your network needs it; the model is not gated)
+Usage: fetch_weights.py OUTDIR [--revision SHA] [--layers N]
+`--layers N` keeps only the first N decoder layers (and edits the config to match): a few-GB directory for checking the launcher. It is not a usable model.   (set HF_TOKEN only if your network needs it; the model is not gated)
 """
 import argparse, concurrent.futures as cf, hashlib, json, os, re, shutil, struct, sys
 
@@ -27,6 +28,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("outdir")
     ap.add_argument("--revision", default=REVISION)
+    ap.add_argument("--layers", type=int, default=None, help="keep only the first N decoder layers (launcher check only)")
     a = ap.parse_args()
     from huggingface_hub import HfFileSystem, hf_hub_download
     os.makedirs(a.outdir, exist_ok=True)
@@ -39,6 +41,9 @@ def main():
     want = {}
     for k, sh in idx.items():
         if k.startswith("mtp.") or k.startswith("model.visual."):
+            continue
+        m = re.match(r"model\.language_model\.layers\.(\d+)\.", k)
+        if a.layers is not None and m and int(m.group(1)) >= a.layers:
             continue
         want.setdefault(sh, []).append(k)
     tensors = []
@@ -83,6 +88,9 @@ def main():
     c["architectures"] = ["Qwen3NextForCausalLM"]
     t = c["text_config"]
     t["mtp_num_hidden_layers"] = 0
+    if a.layers is not None:
+        t["num_hidden_layers"] = a.layers
+        t["layer_types"] = t["layer_types"][:a.layers]
     rp = t.get("rope_parameters", {})
     rp.pop("mrope_section", None)
     rp.pop("mrope_interleaved", None)

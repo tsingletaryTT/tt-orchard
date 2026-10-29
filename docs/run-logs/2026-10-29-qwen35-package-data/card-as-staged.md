@@ -40,8 +40,8 @@ One p300 board (chips 2 and 3 of a four-chip machine), two dies, mesh P300, prec
 | Time to first token for a short prompt | 109 ms | benchmark |
 | Estimated floor on decode speed | 428 tok/s (2.336 ms, 2392 MB read per token) | estimate |
 | Share of the estimated floor | 29.6 percent | estimate |
-| Start, kernel and tensor caches warm | 267 to 308 seconds | single sample per run, four runs |
-| Start, empty caches | 727 seconds from container start to the first answer on a first boot with empty kernel and tensor caches | single sample |
+| Start, kernel and tensor caches warm | 309 seconds on the boot check; 267 to 272 seconds in the earlier fusion-port runs (the kernel cache was seeded from the coder's) | single sample (one boot) |
+| Start, empty caches | 728 seconds from container start to the first answer on a first boot with empty kernel and tensor caches | single sample |
 
 The floor is `orchard/decode_floor.py` with these inputs: 2 dies at 512 GB/s each (datasheet peak), bfp8 attention and shared experts, bfp4 routed experts and head, bf16 router.
 Its assumptions: batch of one, one token per pass (no speculative decoding); weights spread evenly over the dies so their bandwidth adds; datasheet peak bandwidth; the KV cache, recurrent state, norms, biases, rotary tables and the embedding lookup are not counted; the dtype policy is whatever the caller gives and is not read from the bundle. A share of 100 percent cannot be reached.
@@ -60,10 +60,9 @@ The reference is the same checkpoint in bfloat16 on the CPU (Hugging Face transf
 | 'Photosynthesis is the process by which p' | 17 of 32 | 0.531 | token 17: device token inside the reference top 5, reference gap 0.125 nats |
 | 'Q: Name three primary colors.\nA:' | 0 of 32 | 0.0 | token 0: device token inside the reference top 5, reference gap 0.375 nats |
 
-In every prompt the first difference is a position where the device's token is inside the reference's top 5 (largest gap 0.438 nats). The
-device runs bfp4 routed experts, so a near tie between two words can flip. After a flip the two free-running texts diverge, so the leading-token counts
-are short even though each device text is fluent and answers the prompt. The counts are what was measured; no claim is made that a longer prefix would agree.
-The earlier 16-token check in `2026-10-29-fusion-port.md` (a different prompt) matched for 8 tokens, then flipped a tie of 0.125 nats and matched again from token 11.
+In every prompt that differs, the first difference is a position where the device's token is inside the reference's top 5 (largest gap 0.438 nats). The device runs bfp4 routed experts, so a near tie between two words can flip. After a flip the two free-running texts diverge, so the
+leading-token counts are short even when the device text is fluent. 0 of 6 prompts matched in full. The counts are what was measured; no claim is made
+that a longer prefix would agree. The earlier 16-token check in `2026-10-29-fusion-port.md` (a different prompt) matched for 8 tokens, then flipped a tie of 0.125 nats and matched again from token 11.
 
 A short chat request through `/v1/chat/completions` answered: 'Thinking Process:\n\n1.  **Analyze the Request:**\n    *   Target: Tenstorrent Blackhole card.\n    *   Constraint: One sentence.\n    *   Goal: Define/Describe what...' (finish reason length).
 With thinking off, a request for the primary colors answered: 'Red, blue, and yellow.'.
@@ -86,7 +85,8 @@ A scan grid wider than 10 columns fails with a `TT_FATAL` (the merge core sits a
 - One sequence at a time (`--max-num-seqs 1`) and a 4096-token context. The longest prompt tested was 3817 tokens.
   Longer contexts, concurrent requests, tool calling and sampling at a temperature above zero were not tested.
 - The numbers come from one machine and one day, with other jobs on the host (one-minute load average 8.5 to 8.7).
-- Cold compile: 727 seconds from container start to the first answer on a first boot with empty kernel and tensor caches.
+- Cold compile: 728 seconds from container start to the first answer on a first boot with empty kernel and tensor caches.
+- The warm start was measured once. The board's lease ended during that boot check, so another job may have used the board at the same time; the figure was not re-measured.
 - The patch was made for one image (id above). `run.sh` refuses a loader whose sha256 differs.
 - The quality check covers 6 prompts of 32 tokens. It is not an evaluation benchmark. No accuracy benchmark was run.
 - The default chat template starts a thinking section; a 96-token reply can end inside it (finish reason `length`). Pass `chat_template_kwargs {"enable_thinking": false}` to skip it.

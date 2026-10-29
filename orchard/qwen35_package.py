@@ -24,7 +24,8 @@ import stat
 from pathlib import Path
 
 from orchard.audio_package import scrub_files
-from orchard.decode_floor import ASSUMPTIONS as FLOOR_ASSUMPTIONS
+from orchard.decode_floor import ASSUMPTIONS as FLOOR_ASSUMPTIONS, floor_for_board
+from orchard import model_config as mc
 
 PACKAGE_NAME = "qwen3.5-35b-a3b-blackhole-p300"
 MODEL_ID = "Qwen/Qwen3.5-35B-A3B"
@@ -33,7 +34,7 @@ IMAGE_TAG = "tt-model/qwen3-coder-next:0c170421ca1b"
 IMAGE_ID = "sha256:0c170421ca1b5b95f17ebf28d0c8256ccb8c5d320957bc8c4e72e7a07c43acfb"
 LICENSE_SHA256 = None            # set by the staged copy's record; the gate compares the file with the record and with the first line below
 LICENSE_FIRST = "Apache License"
-SOURCE_FILES = ("fetch_weights.py", "run.sh", "weights_qwen35_moe.patch", "LICENSE", "prompts.json",
+SOURCE_FILES = ("fetch_weights.py", "run.sh", "pins.env", "weights_qwen35_moe.patch", "LICENSE", "prompts.json",
                 "check/ref_cpu.py", "check/device_quality.py", "check/compare.py", "check/bench.py", "check/prompt.txt")
 EXECUTABLE = ("run.sh", "fetch_weights.py")
 WEIGHT_SUFFIXES = (".safetensors", ".bin", ".pt", ".pth", ".ckpt", ".gguf", ".tensorbin")
@@ -42,6 +43,15 @@ REVISION_RE = re.compile(r"\b[0-9a-f]{40}\b")
 BANNED_FILES = (".tt_ai_key",)
 BANNED_WORDS = ("litellm", ".tt_ai_key")
 # phrases the card has to carry: each is a limit or a statement the reader needs
+LOADER_PATH = "/opt/tt-metal/models/autoports/qwen_qwen3_coder_next/tt/weights.py"
+ORIG_SHA = "a8be9a77d9190b6d13fa64a57bde649b6b7885b0711da6b2825cf65e924c8245"
+PATCHED_SHA = "1b94978020b09501cdc404d55041f143b67258dbb609c485e1ac68bae54e8a7b"
+POLICY = {"attention": "bfp8", "dense_mlp": "bfp8", "router": "bf16", "routed_experts": "bfp4", "shared_experts": "bfp8", "lm_head": "bfp4"}
+POLICY_TEXT = "bfp8 attention and shared experts, bfp4 routed experts and head, bf16 router"
+EARLIER_WARM = "267 to 272 seconds in the earlier fusion-port runs (the kernel cache was seeded from the coder's)"
+# every file the evidence directory must hold; the facts are derived from these and nothing else
+EVIDENCE_FILES = ("bench_package.log", "bench_40layer_grid105.log", "bench_40layer_rk72.log", "boot.txt", "cpu_reference.json",
+                  "device_quality.json", "config.json")
 REQUIRED_PHRASES = ("Apache License", "two dies", "vision", "not tested", "revision", "estimate")
 
 
@@ -62,8 +72,16 @@ def render_card(facts: dict) -> str:
     b, fl, q = facts["bench"], facts["floor"], facts["quality"]
     ab = facts["ablations"]
     cold = facts.get("cold_start_s")
-    max_gap = max((r['first_diff']['ref_gap_nats'] or 0) for r in q['rows'] if 'first_diff' in r)
-    assert all(r['first_diff']['device_token_in_ref_top5'] for r in q['rows'] if 'first_diff' in r), 'a first difference outside the reference top 5 needs its own wording'
+    diffs = [r['first_diff'] for r in q['rows'] if 'first_diff' in r]
+    if not diffs:
+        agree_text = "All tokens of every prompt matched the reference."
+    elif all(d['device_token_in_ref_top5'] for d in diffs):
+        gaps = [d['ref_gap_nats'] for d in diffs if d['ref_gap_nats'] is not None]
+        agree_text = (f"In every prompt that differs, the first difference is a position where the device's token is inside the reference's top 5 "
+                      f"(largest gap {max(gaps) if gaps else 0} nats).")
+    else:
+        agree_text = "In at least one prompt the device's token at the first difference is outside the reference's top 5; see the table."
+    n_same = sum(1 for r in q['rows'] if 'first_diff' not in r)
     cold_text = (f"{cold} seconds from container start to the first answer on a first boot with empty kernel and tensor caches"
                  if cold else "not measured")
     rows = "\n".join(
@@ -114,10 +132,10 @@ One p300 board (chips 2 and 3 of a four-chip machine), two dies, mesh P300, prec
 | Time to first token for a short prompt | {facts['ttft_ms']} ms | benchmark |
 | Estimated floor on decode speed | {_f(fl['floor_tok_s'], 0)} tok/s ({fl['floor_ms']} ms, {_f(fl['mb_per_token'], 0)} MB read per token) | estimate |
 | Share of the estimated floor | {_f(100 * b['median'] / fl['floor_tok_s'], 1)} percent | estimate |
-| Start, kernel and tensor caches warm | {facts['warm_start_s'][0]} to {facts['warm_start_s'][1]} seconds | single sample per run, four runs |
+| Start, kernel and tensor caches warm | {facts['warm_start_s']} seconds on the boot check; {EARLIER_WARM} | single sample (one boot) |
 | Start, empty caches | {cold_text} | single sample |
 
-The floor is `orchard/decode_floor.py` with these inputs: 2 dies at 512 GB/s each (datasheet peak), {fl['policy']}.
+The floor is `orchard/decode_floor.py` with these inputs: 2 dies at 512 GB/s each (datasheet peak), {POLICY_TEXT}.
 Its assumptions: {FLOOR_ASSUMPTIONS} A share of 100 percent cannot be reached.
 
 ## Agreement with the Hugging Face reference
@@ -129,10 +147,9 @@ The reference is the same checkpoint in bfloat16 on the CPU (Hugging Face transf
 | --- | --- | --- | --- |
 {rows}
 
-In every prompt the first difference is a position where the device's token is inside the reference's top 5 (largest gap {max_gap} nats). The
-device runs bfp4 routed experts, so a near tie between two words can flip. After a flip the two free-running texts diverge, so the leading-token counts
-are short even though each device text is fluent and answers the prompt. The counts are what was measured; no claim is made that a longer prefix would agree.
-The earlier 16-token check in `2026-10-29-fusion-port.md` (a different prompt) matched for 8 tokens, then flipped a tie of 0.125 nats and matched again from token 11.
+{agree_text} The device runs bfp4 routed experts, so a near tie between two words can flip. After a flip the two free-running texts diverge, so the
+leading-token counts are short even when the device text is fluent. {n_same} of {len(q['rows'])} prompts matched in full. The counts are what was measured; no claim is made
+that a longer prefix would agree. The earlier 16-token check in `2026-10-29-fusion-port.md` (a different prompt) matched for 8 tokens, then flipped a tie of 0.125 nats and matched again from token 11.
 
 A short chat request through `/v1/chat/completions` answered: {facts['chat']['default']!r} (finish reason {facts['chat']['finish']}).
 With thinking off, a request for the primary colors answered: {facts['chat']['thinking_off']!r}.
@@ -156,6 +173,7 @@ A scan grid wider than 10 columns fails with a `TT_FATAL` (the merge core sits a
   Longer contexts, concurrent requests, tool calling and sampling at a temperature above zero were not tested.
 - The numbers come from one machine and one day, with other jobs on the host (one-minute load average {facts['load']}).
 - Cold compile: {cold_text}.
+- The warm start was measured once. The board's lease ended during that boot check, so another job may have used the board at the same time; the figure was not re-measured.
 - The patch was made for one image (id above). `run.sh` refuses a loader whose sha256 differs.
 - The quality check covers {len(q['rows'])} prompts of {q['rows'][0]['tokens']} tokens. It is not an evaluation benchmark. No accuracy benchmark was run.
 - The default chat template starts a thinking section; a 96-token reply can end inside it (finish reason `length`). Pass `chat_template_kwargs {{"enable_thinking": false}}` to skip it.
@@ -169,6 +187,65 @@ The weights are {MODEL_ID}, released under the Apache License 2.0 by the Qwen te
 `raahemnabeel/qwen3-coder-next`, whose loader file carries an Apache-2.0 header. This package's own files are Apache-2.0. See `NOTICE`.
 The weights revision pinned here is `{REVISION}`.
 """
+
+
+def _bench_line(path: Path) -> dict:
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.startswith("BENCH "):
+            d = json.loads(line[6:])
+            if not d.get("runs"):
+                raise PackageError(f"{path.name} has no measured runs")
+            return d
+    raise PackageError(f"{path.name} has no BENCH line")
+
+
+def _compare_module(base: Path):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("qwen35_compare", base / "check" / "compare.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def facts_from_evidence(evidence, compare_dir) -> dict:
+    """Every measured number on the card, recomputed from the raw files in `evidence`. `compare_dir` holds `check/compare.py`.
+    Raises PackageError when a file is missing or cannot be read."""
+    ev = Path(evidence)
+    for n in EVIDENCE_FILES:
+        if not (ev / n).is_file():
+            raise PackageError(f"evidence/{n} is missing")
+    try:
+        b = _bench_line(ev / "bench_package.log")
+        runs = b["runs"]
+        boots = {}
+        for line in (ev / "boot.txt").read_text(encoding="utf-8").splitlines():
+            m = re.match(r"BOOT (cold|warm) api_up_s=(\d+) first_answer_s=(\d+)$", line.strip())
+            if m:
+                boots[m.group(1)] = int(m.group(3))
+        if set(boots) != {"cold", "warm"}:
+            raise PackageError("evidence/boot.txt needs one cold and one warm BOOT line")
+        ref = json.loads((ev / "cpu_reference.json").read_text(encoding="utf-8"))
+        dev = json.loads((ev / "device_quality.json").read_text(encoding="utf-8"))
+        rows = _compare_module(Path(compare_dir)).compare_rows(ref, dev["completions"])
+        cfg = mc.read_model_config(ev / "config.json")
+        floor = floor_for_board(cfg, POLICY, "p300")
+        ttft = sorted(r["ttft_s"] for r in runs)
+        chat = dev["chat"]
+        return {
+            "bench": {"median": b["median"], "min": b["min"], "max": b["max"], "runs": len(runs), "warmup": 1, "tokens": runs[0]["tokens"]},
+            "floor": {"floor_tok_s": round(floor.floor_tok_s, 1), "floor_ms": round(floor.floor_ms, 3), "mb_per_token": round(floor.bytes_per_token / 1e6, 1)},
+            "ttft_ms": round(1000 * ttft[len(ttft) // 2]), "warm_start_s": boots["warm"], "cold_start_s": boots["cold"],
+            "load": "%.1f to %.1f" % (min(r["load1"] for r in runs), max(r["load1"] for r in runs)),
+            "quality": {"rows": rows},
+            "chat": {"default": chat["default"]["text"][:160] + "...", "finish": chat["default"]["finish"], "thinking_off": chat["thinking_off"]["text"]},
+            "long_prompt": {"tokens": dev["long_prompt"]["prompt_tokens"], "text": dev["long_prompt"]["text"].split("\n")[0]},
+            "ablations": {"grid_median": _bench_line(ev / "bench_40layer_grid105.log")["median"],
+                          "rk_median": _bench_line(ev / "bench_40layer_rk72.log")["median"]},
+        }
+    except (KeyError, ValueError, TypeError, OSError, mc.ModelConfigError) as exc:
+        if isinstance(exc, PackageError):
+            raise
+        raise PackageError(f"the evidence could not be used: {type(exc).__name__}: {exc}") from exc
 
 
 def notice_text() -> str:
@@ -248,11 +325,13 @@ def publish_text(namespace: str = "NAMESPACE") -> str:
         ""])
 
 
-def stage_package(src, facts: dict, evidence, out) -> dict:
-    """Write the package to the new directory `out` (it must not exist) and return its record."""
+def stage_package(src, evidence, out) -> dict:
+    """Write the package to the new directory `out` (it must not exist) and return its record. The card is rendered from facts recomputed
+    from the raw files in `evidence`; those files and the facts are copied into the package."""
     src, evidence, out = Path(src), Path(evidence), Path(out)
     if out.exists():
         raise PackageError("the output directory already exists; stage into a new one")
+    facts = facts_from_evidence(evidence, src)
     files: dict[str, bytes | str] = {}
     for rel in SOURCE_FILES:
         files[rel] = (src / rel).read_bytes()
@@ -261,9 +340,9 @@ def stage_package(src, facts: dict, evidence, out) -> dict:
     files["tt-model.yaml"] = manifest_text()
     files["docs/running.md"] = running_doc()
     files["publish-commands.txt"] = publish_text()
-    for p in sorted(evidence.glob("*")):
-        if p.is_file():
-            files[f"evidence/{p.name}"] = p.read_bytes()
+    for n in EVIDENCE_FILES:
+        files[f"evidence/{n}"] = (evidence / n).read_bytes()
+    files["evidence/facts.json"] = json.dumps(facts, indent=1, sort_keys=True)
     record = {"package": PACKAGE_NAME, "revision": REVISION, "image_id": IMAGE_ID, "files": {}}
     for rel, data in files.items():
         path = out / rel
@@ -277,40 +356,50 @@ def stage_package(src, facts: dict, evidence, out) -> dict:
     return record
 
 
-def _numbers_in(text: str) -> set:
-    return set(re.findall(r"\d+(?:\.\d+)?", text))
+def _pins(path: Path) -> dict:
+    out = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.strip() and not line.startswith("#") and "=" in line:
+            k, v = line.split("=", 1)
+            out[k.strip()] = v.strip()
+    return out
 
 
 def package_problems(pkg, *, hostname: str | None = None, home: str | None = None) -> list[str]:
     """One sentence per problem found in the directory `pkg`; empty when it passes."""
     pkg = Path(pkg)
-    problems: list[str] = []
     if not pkg.is_dir():
         return ["the package directory does not exist"]
-    problems += [f"scrub: {h}" for h in scrub_files(pkg, hostname=hostname, home=home)]
-    all_files = [p for p in pkg.rglob("*") if p.is_file() or p.is_symlink()]
-    for p in all_files:
+    # Stage 1: facts about the files that need no reading. A link, a weights file, a credential file or an oversized file is reported
+    # and the gate returns at once, so nothing below reads, hashes or parses what was rejected.
+    early: list[str] = []
+    for p in sorted(pkg.rglob("*")):
         rel = p.relative_to(pkg).as_posix()
         if p.is_symlink():
-            problems.append(f"{rel} is a link")
-            continue
-        if p.suffix.lower() in WEIGHT_SUFFIXES or p.stat().st_size > MAX_FILE_BYTES:
-            problems.append(f"{rel} looks like weights or is larger than {MAX_FILE_BYTES} bytes")
-        if p.name in BANNED_FILES:
-            problems.append(f"{rel} is a credential file")
+            early.append(f"{rel} is a link")
+        elif p.is_file():
+            if p.name in BANNED_FILES:
+                early.append(f"{rel} is a credential file")
+            if p.suffix.lower() in WEIGHT_SUFFIXES or p.stat().st_size > MAX_FILE_BYTES:
+                early.append(f"{rel} looks like weights or is larger than {MAX_FILE_BYTES} bytes")
+    if early:
+        return early
+    problems: list[str] = [f"scrub: {h}" for h in scrub_files(pkg, hostname=hostname, home=home)]
+    all_files = [p for p in pkg.rglob("*") if p.is_file()]
+    for p in all_files:
+        rel = p.relative_to(pkg).as_posix()
         try:
             text = p.read_text(encoding="utf-8").lower()
         except (UnicodeDecodeError, OSError):
             continue
         for w in BANNED_WORDS:
-            if w in text and not rel.startswith("evidence/ledger"):
+            if w in text:
                 problems.append(f"{rel} mentions {w!r}")
-    need = ["README.md", "NOTICE", "LICENSE", "run.sh", "fetch_weights.py", "weights_qwen35_moe.patch", "tt-model.yaml", "package-record.json"]
-    for n in need:
-        if not (pkg / n).is_file():
-            problems.append(f"{n} is missing")
-    if problems and any("is missing" in x for x in problems):
-        return problems
+    need = ["README.md", "NOTICE", "LICENSE", "run.sh", "pins.env", "fetch_weights.py", "weights_qwen35_moe.patch", "tt-model.yaml",
+            "package-record.json", "check/compare.py"] + [f"evidence/{n}" for n in EVIDENCE_FILES] + ["evidence/facts.json"]
+    missing = [n for n in need if not (pkg / n).is_file()]
+    if missing:
+        return problems + [f"{n} is missing" for n in missing]
     lic = (pkg / "LICENSE").read_text(encoding="utf-8")
     if LICENSE_FIRST not in lic[:200] or "Version 2.0" not in lic[:300]:
         problems.append("LICENSE is not the Apache License 2.0 text")
@@ -320,28 +409,31 @@ def package_problems(pkg, *, hostname: str | None = None, home: str | None = Non
     for ph in REQUIRED_PHRASES:
         if ph not in card:
             problems.append(f"the card lacks the phrase {ph!r}")
-    revs = {n: set(REVISION_RE.findall((pkg / n).read_text(encoding="utf-8"))) for n in ("README.md", "tt-model.yaml", "fetch_weights.py", "NOTICE")}
-    for n, r in revs.items():
-        if r != {REVISION}:
-            problems.append(f"{n} does not pin exactly the revision {REVISION} (found {sorted(r)})")
-    if IMAGE_ID.split(":")[1] not in (pkg / "run.sh").read_text(encoding="utf-8"):
-        problems.append("run.sh does not name the image id the numbers were measured on")
-    # the numbers in the card's tables must be in the evidence the package carries
-    ev = "".join(p.read_text(encoding="utf-8", errors="replace") for p in (pkg / "evidence").glob("*") if p.is_file()) if (pkg / "evidence").is_dir() else ""
-    facts_file = pkg / "evidence" / "facts.json"
-    if not facts_file.is_file():
-        problems.append("evidence/facts.json is missing")
-    else:
-        facts = json.loads(facts_file.read_text(encoding="utf-8"))
-        want = [facts["bench"]["median"], facts["bench"]["min"], facts["bench"]["max"], facts["ablations"]["grid_median"], facts["ablations"]["rk_median"]]
-        for v in want:
-            if f"{v:.2f}" not in card:
-                problems.append(f"the card does not show the measured value {v:.2f}")
-        share = f"{100 * facts['bench']['median'] / facts['floor']['floor_tok_s']:.1f} percent"
-        if share not in card:
-            problems.append(f"the card does not show the share of the floor, {share}")
-        if "Start, empty caches | not measured" in card and facts.get("cold_start_s"):
-            problems.append("the card says the cold start was not measured but the facts have it")
+    for n in ("README.md", "tt-model.yaml", "fetch_weights.py", "NOTICE"):
+        found = set(REVISION_RE.findall((pkg / n).read_text(encoding="utf-8")))
+        if found != {REVISION}:
+            problems.append(f"{n} does not pin exactly the revision {REVISION} (found {sorted(found)})")
+    pins = _pins(pkg / "pins.env")
+    for k, v in (("IMAGE_ID", IMAGE_ID), ("LOADER", LOADER_PATH), ("ORIG_SHA", ORIG_SHA), ("PATCHED_SHA", PATCHED_SHA)):
+        if pins.get(k) != v:
+            problems.append(f"pins.env {k} is {pins.get(k)!r}, expected {v!r}")
+    run = (pkg / "run.sh").read_text(encoding="utf-8")
+    if "pins.env" not in run or "PATCHED_SHA" not in run:
+        problems.append("run.sh does not read pins.env and check PATCHED_SHA")
+    # The card must equal a rendering of facts recomputed from the raw evidence, and facts.json must equal those facts. A number edited in
+    # the card, in facts.json or in a raw file fails here.
+    try:
+        facts = facts_from_evidence(pkg / "evidence", pkg)
+    except PackageError as exc:
+        problems.append(str(exc))
+        facts = None
+    if facts is not None:
+        stored = json.loads((pkg / "evidence" / "facts.json").read_text(encoding="utf-8"))
+        if stored != json.loads(json.dumps(facts)):
+            diff = sorted(k for k in set(stored) | set(facts) if stored.get(k) != facts.get(k))
+            problems.append(f"evidence/facts.json differs from the facts recomputed from the raw evidence in: {', '.join(diff)}")
+        if card != render_card(facts):
+            problems.append("README.md is not the card rendered from the evidence (a measured value or sentence was edited)")
     rec = json.loads((pkg / "package-record.json").read_text(encoding="utf-8"))
     for rel, sha in rec.get("files", {}).items():
         f = pkg / rel
