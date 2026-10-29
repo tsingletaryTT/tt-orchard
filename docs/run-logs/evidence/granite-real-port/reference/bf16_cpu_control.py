@@ -23,7 +23,9 @@ for pi, p in enumerate(rep["prompts"]):
     gen = out.sequences[0, n:].tolist()
     match = next((i for i, (a, b) in enumerate(zip(gen, seq[n:])) if a != b), len(seq) - n)
     lg = torch.stack([s[0] for s in out.scores]).float()
-    ref_lg = torch.from_numpy(ref[f"p{pi}.hf_logits"])[: lg.shape[0]]
+    # The teacher-forced pass runs over the full fp32 sequence, so the reference logits are kept whole. Slicing them to the length of the
+    # bf16 free-run generation (which can stop early at an end-of-sequence token) would give a shape mismatch against `tf`.
+    ref_lg = torch.from_numpy(ref[f"p{pi}.hf_logits"])
     # teacher-forced logits for the same positions
     with torch.no_grad():
         tf = hf(torch.tensor([seq[:-1]])).logits[0, n - 1:].float()

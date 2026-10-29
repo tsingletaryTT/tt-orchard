@@ -1,0 +1,57 @@
+{
+ "name": "sf-repeat-tr",
+ "ssd": "state_full",
+ "expand": "repeat",
+ "trace": true,
+ "pad": false,
+ "trace_capture_s": 1.0521936416625977,
+ "prompts": [
+  {
+   "prompt_index": 0,
+   "rel_l2_mean": 0.004536881577223539,
+   "rel_l2_max": 0.00642173970118165,
+   "top1": 1.0,
+   "top5": 1.0,
+   "free_run_prefix": 3,
+   "free_run_len": 3
+  },
+  {
+   "prompt_index": 1,
+   "rel_l2_mean": 0.017763933166861534,
+   "rel_l2_max": 0.07355910539627075,
+   "top1": 1.0,
+   "top5": 0.9833333333333334,
+   "free_run_prefix": 24,
+   "free_run_len": 24
+  },
+  {
+   "prompt_index": 2,
+   "rel_l2_mean": 0.00835344847291708,
+   "rel_l2_max": 0.028228236362338066,
+   "top1": 0.9166666865348816,
+   "top5": 0.975,
+   "free_run_prefix": 8,
+   "free_run_len": 24
+  },
+  {
+   "prompt_index": 3,
+   "rel_l2_mean": 0.017165105789899826,
+   "rel_l2_max": 0.0954538881778717,
+   "top1": 0.9583333134651184,
+   "top5": 0.9416666666666665,
+   "free_run_prefix": 15,
+   "free_run_len": 24
+  }
+ ],
+ "tok_s_runs": [
+  18.920462088867342,
+  17.98339489018816,
+  18.109930298121323,
+  16.096135201189806,
+  17.68952098241107
+ ],
+ "mean": 17.759888692155542,
+ "min": 16.096135201189806,
+ "max": 18.920462088867342,
+ "share_of_floor": 0.10136922769495173
+}

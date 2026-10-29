@@ -3224,6 +3224,13 @@ Prompt (operator): "pick a model that would require a new kernel and try to brin
 - Phase 2 (hardware) not run: 71.9 GB checkpoint against 81 GB free disk, and a bring-up of the new model on the bundle's code is needed first. Filed as issue 234. No chip was leased or touched.
 - Default taken: dies = 2 (one p300 board); "kernel-side" checks are a conservative table in the module.
 
+## 2026-10-29 (UTC): Granite repeat copies and traced decode (branch `granite-repeat`, PR 238)
+- Prompt (coordinator, from the operator): "let's figure out the ttnn.repeat copies": remove them, trace the decode step for composed and kernel modes, measure the four modes in one session, say whether a kernel mode beats composed.
+- The earlier log's "five repeats" was four repeats, one clone and a slice. The per-token values cannot be built at load time; the expansion became a broadcast multiply by a resident ones tensor, and the compact bcast kernel needs no padding op.
+- New static-shape step (`granite_tt2.py`): persistent state, a fixed 128-position K/V cache written by one-hot multiply-add, in-place `ttnn.copy`, per-step host writes of four small tensors, trace capture and replay. The tt-lang kernels run inside the trace. Kernel files unchanged; all the new code is glue.
+- Clean session (load 8 to 12), traced: composed 37.5 tok/s, state + readout kernels 39.3 (4.8% above), compact + readout kernel 38.8, state kernel alone 37.3, compact alone 36.4; with `ttnn.repeat` kept: 33.1 and 35.3. Untraced, kernel modes are slower (7.7 to 13.9 against 21.6). Agreement is unchanged by tracing and stays at the composed spread.
+- Incident: a detached development lease was reaped after 932 s and four runs ran while another agent held the chips; those results were deleted. Later sessions used an owner-pid lease or finished inside the grace window. Details in the run log.
+- Also: issue 225 (the bf16 control keeps the full reference logits) and issue 227 (agreement wording in the readout log) fixed. The state-r1 tally half of issue 225 is untouched.
 ## 2026-10-29: audio package rebuilt for the decoder on the chip (issue 161, PR 237)
 - Prompt: "rebuild from current main" for the Stable Audio 3 small-music package. The private Hub repository carried the diffusion transformer on the chip and the decoder on the host. Staged locally only; no upload, no Hub change, no chip.
 - The builder now copies `chip_decoder.py`, `audio_runtimes.py` and `orchard/resident.py` (a test finds every file a shipped runtime file imports). The packaged generate command adds `--chip-decoder` by default; `--host-decoder` or `AUDIO_HOST_DECODER=1` is the documented fallback. The card has decoder rows, CPU float32 single-sample rows, the operator's dated listening note and its limits.
