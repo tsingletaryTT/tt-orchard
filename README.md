@@ -1614,6 +1614,9 @@ Flags:
   could not be compared. The report records it, with each source's local and upstream shas.
 - `--allow-slow-coder`: run even when the coder is decoding far below its best speed. The report records each
   measurement.
+- `--reference-source` (`checkout` or `skill`): `checkout` (default) is the pinned reference set. `skill` is the set as it was before the
+  pin (the installed skill's guide.md and examples.md, no extra example kernels), for measuring whether the pinned set helps. The report records the choice.
+- `--attempt-wall-s` (S): the wall-clock budget of each attempt, checked between turns (default 1800).
 - `--hw-checks` (N), `--no-agent-hw`, `--hw-lease-s` (S), `--hw-call-timeout-s` (S), `--hw-wait-s` (S): the limits of the agent's
   `hardware_check` tool (next paragraph). Defaults: 6 calls, 600 lease seconds (120 of them reserved for the stop and the chip reset), 240 s per call, 120 s of waiting for a
   busy board. `--hw-checks 0` and `--no-agent-hw` offer no tool, which measures the coder alone.
