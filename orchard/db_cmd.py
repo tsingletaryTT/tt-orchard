@@ -323,7 +323,7 @@ def _migrate_after_dry_run(directory, scope, cfg, args, say, ask, accept) -> int
         if step != "after:1":
             return
         # The migration holds telegraph.lock from here on. It would resume a half-finished migration without asking, so a marker that
-        # appeared after the question is refused here too, as is a ledger file that is not the one the checks described.
+        # appeared after the question is refused here too, as is a ledger file that differs from the file the checks described.
         again = tn.state_of(directory)
         if mig.input_fingerprint(directory) != checked or again is None or again.kind != tn.UNMIGRATED:
             raise mig.MigrationRefused(f"{ts.LEDGER} or the directory changed after the checks were made (seen under the lock), so they "
