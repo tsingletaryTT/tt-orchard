@@ -732,3 +732,18 @@ def test_an_interrupt_while_the_projection_is_checked_still_writes_the_report(tm
     code = kl.run(Args(out=str(tmp_path), rungs="add,mul", max_hours=1.0), fake_main([]), default_wall_s=300.0,
                   say=lambda l: None, clock=clock)
     assert code == 4 and (tmp_path / "ladder-report.md").is_file()
+
+
+def test_sigterm_during_the_ladder_writes_the_report_returns_4_and_restores_the_handler(tmp_path):
+    import signal
+    before = signal.getsignal(signal.SIGTERM)
+    inner = fake_main([])
+
+    def main(sub):
+        if sub.op == "mul":
+            os.kill(os.getpid(), signal.SIGTERM)             # arrives while the ladder, not a rung's own handler, is in charge
+        return inner(sub)
+    code = kl.run(Args(out=str(tmp_path), rungs="add,mul,rsqrt"), main, default_wall_s=1800.0, say=lambda l: None)
+    assert code == 4 and signal.getsignal(signal.SIGTERM) == before
+    data = json.loads((tmp_path / "ladder-report.json").read_text())
+    assert "interrupted" in data["stopped"] and [r["op"] for r in data["rungs"]] == ["add"]

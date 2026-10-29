@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import statistics
 import sys
 import tempfile
@@ -432,6 +433,10 @@ def run(args, main, *, default_wall_s: float, say=print, clock=time.monotonic) -
             seed, seed_from = str(kp.seed_base_from_probe_id(kp.new_probe_id())), "the ladder's id"
         ran = set()
         try:
+            previous = signal.signal(signal.SIGTERM, kp._raise_interrupt)      # SIGTERM stops the ladder like Ctrl-C
+        except ValueError:                                                     # not the main thread
+            previous = None
+        try:
             for i, op in enumerate(rungs):
                 sub = copy.copy(args)
                 sub.op, sub.out, sub.wall_s, sub.ladder = op, str(out_dir / op), wall_of(op), False
@@ -466,6 +471,9 @@ def run(args, main, *, default_wall_s: float, say=print, clock=time.monotonic) -
                         break
         except KeyboardInterrupt:                # Ctrl-C or SIGTERM between two rungs: the report still gets written
             stopped, code = "interrupted", 4
+        finally:
+            if previous is not None:
+                signal.signal(signal.SIGTERM, previous)
         write_ladder_report(out_dir, rungs, stopped=stopped, ran=ran)
         say(f"ladder report: {out_dir / (REPORT_NAME + '.md')}")
         if stopped:
