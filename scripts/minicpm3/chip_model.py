@@ -41,7 +41,11 @@ class ChipMiniCPM3:
         self.dev = dev
         self.attn = attn
         self.shard = shard       # DRAM-sharded weights and a sharded chain for the MLP and o_proj (measured 283 against 350 us per MLP layer)
+        self.fuse = opt == 3     # opt 3: opt 2 plus a sharded residual stream with sharded norms and one fused projection for the query and key inputs
+        if self.fuse:
+            opt, shard = 2, True
         self.opt = opt           # 1: first composition; 2: fewer ops (rope folded into the absorbed matmul, split key projection)
+        self.shard = shard or self.fuse
         self.skip = set()        # timing experiments only: parts of the step to leave out ("mlp", "lm")
         self.upd = upd           # cache write: "int" (update_cache at a Python position), "paged" or "onehot" (position from a device tensor)
         self.cfg = c = json.load(open(f"{model_dir}/config.json"))
@@ -67,6 +71,7 @@ class ChipMiniCPM3:
         # (TT_FATAL: tree reduction max 6 rounds). An 8 by 8 grid is accepted and matches torch (PCC 0.99995 at the model's shapes).
         self.sdpa_pc = ttnn.SDPAProgramConfig(compute_with_storage_grid_size=ttnn.CoreCoord(8, 8), q_chunk_size=32, k_chunk_size=128,
                                               exp_approx_mode=False)
+        self.qa_n = c["q_lora_rank"]
         self.rs = c["scale_depth"] / math.sqrt(c["num_hidden_layers"])
         from ref_model import rope_tables
         self.cos, self.sin = rope_tables(c, max_len)
@@ -86,6 +91,15 @@ class ChipMiniCPM3:
             self.pc_o = mk(hk, hk)
             self.sh_ckc = ttnn.init_device_compute_kernel_config(dev.arch(), math_fidelity=ttnn.MathFidelity.HiFi2, math_approx_mode=True,
                                                                  fp32_dest_acc_en=False, packer_l1_acc=True)
+        if self.fuse:
+            nc = 40
+            bw = self.hid // nc // 32
+            self.pc_norm = ttnn.LayerNormShardedMultiCoreProgramConfig(compute_with_storage_grid_size=[8, 5], subblock_w=min(4, bw), block_h=1,
+                                                                       block_w=bw, inplace=False)
+            n_tiles = (self.qa_n + self.kvr + 2 * self.dr) // 32
+            self.pc_qkv = ttnn.MatmulMultiCoreReuseMultiCast1DProgramConfig(
+                compute_with_storage_grid_size=(8, 4), in0_block_w=4, out_subblock_h=1, out_subblock_w=1, per_core_M=1,
+                per_core_N=-(-n_tiles // 32), fuse_batch=True, fused_activation=None, mcast_in0=True)
         self._load(log)
         self.reset()
 
@@ -171,6 +185,15 @@ class ChipMiniCPM3:
                                            dtype=self.wdtype, layout=ttnn.TILE_LAYOUT)
             else:
                 d["kvb_host"] = kvb.bfloat16()
+            if self.fuse:
+                kva_w = self.f.get_tensor(a + "kv_a_proj_with_mqa.weight").float()
+                qa_w = self.f.get_tensor(a + "q_a_proj.weight").float()
+                R = _rot_matrix()
+                wk = kva_w[self.kvr:].t()
+                fused = torch.cat([qa_w.t(), kva_w[: self.kvr].t(), wk, wk @ R], dim=1)[:, : self.qa_n + self.kvr + 2 * self.dr]
+                d["qkv"] = ttnn.from_torch(fused.contiguous().bfloat16(), device=dev, dtype=self.wdtype, layout=ttnn.TILE_LAYOUT)
+                for k in ("qa", "kva", "ckv_w", "kpe_w"):
+                    ttnn.deallocate(d.pop(k))
             self.layers.append(d)
             if i % 10 == 0:
                 log(f"loaded layer {i}")
@@ -256,6 +279,8 @@ class ChipMiniCPM3:
 
     def _forward(self, inp, tap=None):
         """The step on device tensors only (so it can be captured as a trace); `inp` holds the device inputs of `_host_inputs`."""
+        if self.fuse:
+            return self._forward3(inp, tap)
         ids = inp["tok"]
         x = ttnn.embedding(ids, self.emb, layout=ttnn.TILE_LAYOUT)          # [1,1,hid]
         x = ttnn.reshape(x, (1, 1, 1, self.hid))
@@ -309,7 +334,48 @@ class ChipMiniCPM3:
         if "lm" in self.skip:
             return x
         # row-major output: a tile layout read back is 32 rows (4.7 MB, about 8 ms); one row is 147 KB
-        return ttnn.to_layout(self._lin(x, self.lm_head), ttnn.ROW_MAJOR_LAYOUT)
+        return ttnn.to_layout(self._lin(x, self.lm_head, dtype=ttnn.float32), ttnn.ROW_MAJOR_LAYOUT)   # float32 logits: bf16 has 0.125 steps at 16 to 32
+
+    def _srms(self, x, w):
+        """rms_norm on the width-sharded residual stream (6.5 microseconds against 42 interleaved, same accuracy)."""
+        return ttnn.rms_norm(x, epsilon=self.eps, weight=w, program_config=self.pc_norm, memory_config=self.mc_d, compute_kernel_config=self.rms_ckc)
+
+    def _forward3(self, inp, tap=None):
+        """Opt 3: the residual stream stays width-sharded in L1 over 40 cores; norms, the output projection and the MLP run sharded."""
+        cur = inp["cur"]
+        self._cosF, self._sinF, self._cs64 = (
+            ttnn.reshape(ttnn.embedding(inp["pos_u"], tab, layout=ttnn.TILE_LAYOUT), (1, 1, 1, w))
+            for tab, w in ((self.cosF, 96), (self.sinF, 96), (self.cs64, 64)))
+        x = ttnn.reshape(ttnn.embedding(inp["tok"], self.emb, layout=ttnn.TILE_LAYOUT), (1, 1, 1, self.hid))
+        x = ttnn.to_memory_config(x, self.mc_d)
+        if tap:
+            tap("embed", self._host(x)[0, 0, 0])
+        qa_n, kvr, dr = self.qa_n, self.kvr, self.dr
+        for i, d in enumerate(self.layers):
+            hs = self._srms(x, d["in_norm"])
+            qkv = ttnn.linear(ttnn.to_memory_config(hs, ttnn.DRAM_MEMORY_CONFIG), d["qkv"], program_config=self.pc_qkv)
+            qa = ttnn.slice(qkv, [0, 0, 0, 0], [1, 1, 1, qa_n])
+            ckv = ttnn.slice(qkv, [0, 0, 0, qa_n], [1, 1, 1, qa_n + kvr])
+            k64 = ttnn.slice(qkv, [0, 0, 0, qa_n + kvr], [1, 1, 1, qa_n + kvr + 2 * dr])
+            ao = self._attn_core(i, d, self._rms(qa, d["qa_norm"]), self._rms(ckv, d["kv_norm"]), k64, cur, inp)
+            o = ttnn.linear(ttnn.to_memory_config(ao, self.mc_d), d["o"], program_config=self.pc_o, memory_config=self.mc_d,
+                            compute_kernel_config=self.sh_ckc)
+            x = ttnn.add(x, o)
+            if tap:
+                tap(f"layer_{i:02d}.attn", self._host(x)[0, 0, 0])
+            if "mlp" in self.skip:
+                continue
+            hs = self._srms(x, d["post_norm"])
+            gg = ttnn.linear(hs, d["gate"], program_config=self.pc_gate, memory_config=self.mc_f, compute_kernel_config=self.sh_ckc)
+            uu = ttnn.linear(hs, d["up"], program_config=self.pc_up, memory_config=self.mc_f, compute_kernel_config=self.sh_ckc)
+            x = ttnn.add(x, ttnn.linear(ttnn.multiply(gg, uu), d["down"], program_config=self.pc_down, memory_config=self.mc_d,
+                                        compute_kernel_config=self.sh_ckc))
+            if tap:
+                tap(f"layer_{i:02d}", self._host(x)[0, 0, 0])
+        x = self._srms(x, self.final_norm)
+        if "lm" in self.skip:
+            return x
+        return ttnn.to_layout(self._lin(ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG), self.lm_head, dtype=ttnn.float32), ttnn.ROW_MAJOR_LAYOUT)
 
     # ---- trace ----------------------------------------------------------------------------------------
     def enable_trace(self):
@@ -362,8 +428,13 @@ class ChipMiniCPM3:
     def _attn_v2(self, i, d, h, cur, inp):
         """The attention with fewer ops: rotary on the whole 96-wide query (the no-position part has cos 1 and sin 0), the key up-projection and the
         pass-through of the rotated part in one batched matmul with a 288-wide result, and the key's rotate-half folded into its projection."""
-        H = self.H
         qa = self._rms(self._lin(h, d["qa"]), d["qa_norm"])
+        ckv = self._rms(self._lin(h, d["ckv_w"]), d["kv_norm"])           # [1,1,1,256]
+        k64 = self._lin(h, d["kpe_w"])                                    # [1,1,1,64]: kpe, rotate_half(kpe)
+        return self._attn_core(i, d, qa, ckv, k64, cur, inp)
+
+    def _attn_core(self, i, d, qa, ckv, k64, cur, inp):
+        H = self.H
         qb = self._lin(qa, d["qb"])                                       # [1,1,1,H*96]
         q = ttnn.reshape(qb, (1, 1, H, self.dn + self.dr))
         qr = q if "qrope" in self.skip else ttnn.add(ttnn.multiply(q, self._cosF), ttnn.multiply(ttnn.matmul(q, self.Rf), self._sinF))
@@ -376,8 +447,6 @@ class ChipMiniCPM3:
         if "kpath" in self.skip:
             new = ttnn.slice(q_full, [0, 0, 0, 0], [1, 1, 1, self.kvr + self.dr])
         else:
-            ckv = self._rms(self._lin(h, d["ckv_w"]), d["kv_norm"])       # [1,1,1,256]
-            k64 = self._lin(h, d["kpe_w"])                                # [1,1,1,64]: kpe, rotate_half(kpe)
             krot = ttnn.matmul(ttnn.multiply(k64, self._cs64), self.IdI)  # kpe * cos + rotate_half(kpe) * sin
             new = ttnn.concat([ckv, krot], dim=-1)                        # [1,1,1,288]
         if "cache" not in self.skip:

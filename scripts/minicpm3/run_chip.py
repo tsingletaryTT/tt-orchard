@@ -37,7 +37,7 @@ def main():
     ap.add_argument("--upd", default="int", choices=["int", "paged", "onehot"], help="cache write; a trace needs onehot or paged")
     ap.add_argument("--trace", action="store_true", help="bench: capture and replay the step as a trace")
     ap.add_argument("--skip", default="", help="timing only: comma list of mlp, lm")
-    ap.add_argument("--opt", type=int, default=1, choices=[1, 2], help="attention composition: 1 first version, 2 fewer ops")
+    ap.add_argument("--opt", type=int, default=1, choices=[1, 2, 3], help="attention composition: 1 first version, 2 fewer ops, 3 also a sharded residual stream and a fused projection")
     ap.add_argument("--prompt-file", help="the prompt text the reference run used")
     ap.add_argument("--max-len", type=int, default=256)
     ap.add_argument("--shard", action="store_true", help="DRAM-sharded weights for the MLP and o_proj")
