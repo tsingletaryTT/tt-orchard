@@ -1,0 +1,3 @@
+target = "0.9.62"
+summary = "Pin the tt-lang hardware pair (tt-metal 0e9d200, light wheel 1.1.10.dev20261026), add the build_info row to the consistency check, forward reference_source (issue 226)"
+pr = 228

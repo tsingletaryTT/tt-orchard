@@ -39,7 +39,7 @@ DIAGNOSTICS_SHA256 = "e3964f222cc5dc253157f97645a914f8751ab613f0fa82eb334e97046d
 # (docs/run-logs/2026-10-29-ttlang-pair-chip-check.md; the matrix that chose it is 2026-10-29-ttlang-compat-matrix.md).
 # `ttl.build_info()` in a venv made from the wheel below printed these two commits. TT_METAL_REF is the tt-metal commit
 # the compiler was built against (tag v0.79.0-dev20260917). It runs on the host tt-metal v0.80.0 runtime, so it is not the
-# host tree's commit: the "hardware tree" consistency row compares build_info, not the host tree, with it.
+# host tree's commit: the "hardware tree" consistency row compares the venv's build_info with it and only names the host tree.
 TT_METAL_REF: str | None = "0e9d200db976120c129ab0deb13aa3f6d972b723"
 TT_METAL_TAG = "v0.79.0-dev20260917"
 TT_METAL_NOTE = f"tt-metal {TT_METAL_TAG} ({TT_METAL_REF[:7]}), the compiler's build tree; the host runtime is newer"

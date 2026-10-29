@@ -45,6 +45,7 @@ OTHER_TOOL_FLAGS = {
     "--backend": "tt-toplike (the page always runs its sysfs backend)",
     "--owner-pid": "gozer acquire",
     "--tt-metal-dir": "tt-lang-setup-external-tt-metal (section 5.9a); tt-orchard ttlang-consistency has its own",
+    "--extra-index-url": "uv pip install (section 5.9a)",
     "--out": "tt-model package-thin",
     "--version": "tt-model --version",
     "--catalog": "tt model search / tt-model search (the research catalog row)",
