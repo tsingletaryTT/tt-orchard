@@ -14,7 +14,7 @@ lacks. Example (the pair exports come from `tt-orchard kernel-env --pair`, see `
 The real keys of `ttl.build_info()` (read from docs/run-logs/evidence/ttlang-pair/results/pair-chip.jsonl) are `version`,
 `ttlang` (the tt-lang commit), `tt_metal_tag` and `tt_metal` (the tt-metal commit). They are renamed to the keys the
 consistency check reads: `tt_lang_commit`, `tt_metal_commit`, `version`, `tt_metal_tag`. A key the call did not give is
-written as null, and the check then says "unknown" for the row instead of guessing.
+written as null, and the check then says "unknown" for the row.
 """
 from __future__ import annotations
 
